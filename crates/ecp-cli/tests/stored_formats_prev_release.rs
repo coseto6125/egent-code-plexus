@@ -23,16 +23,20 @@
 use ecp_cli::engine::{header_compatible, Engine};
 use ecp_cli::parse_cache::ParseCache;
 use ecp_cli::session::overlay_reader::{accepted_fragments, decode_view_inputs};
+use ecp_cli::session::overlay_writer::write_dirty_events;
 use ecp_cli::session::state::classify;
 use ecp_cli::session::view_cache;
 use ecp_core::analyzer::types::LocalGraph;
+use ecp_core::contracts::dirty_event::PathClass;
 use ecp_core::graph::{NodeKind, RelType, GRAPH_FORMAT_VERSION};
 use ecp_core::registry::{CommitBuildMeta, BUILDER_FINGERPRINT};
+use ecp_core::session::layout;
 use ecp_core::session::overlay::SymbolKind;
 use ecp_core::session::{
-    DirtyFiles, OverlayFileInput, SessionMeta, SessionState, FRAGMENT_FORMAT_V5,
+    DirtyEvents, DirtyFiles, OverlayFileInput, SessionMeta, SessionState, FRAGMENT_FORMAT_V5,
     OVERLAY_EDGE_REASON, VIEW_CACHE_FORMAT,
 };
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
@@ -42,6 +46,8 @@ const WRITER_GRAPH_FORMAT: u32 = 15;
 const WRITER_FINGERPRINT: &str = "v0.16.4+schema20";
 const WRITER_FRAGMENT_FORMAT: u32 = 5;
 const WRITER_VIEW_CACHE_FORMAT: u32 = 3;
+/// The session-relative dirty manifest the writer kept.
+const WRITER_DIRTY_MANIFEST: &str = "dirty_files.json";
 const WRITER_PARSE_DIR: &str = "568515f1";
 const WRITER_SHA: &str = "e7ca0e6a663e619e7b245890db6cb47653fed6dc";
 const COMMIT_DIR: &str = "branch_main__e7ca0e6a663e619e7b245890db6cb47653fed6dc";
@@ -101,7 +107,7 @@ fn worktree(tmp: &TempDir) -> PathBuf {
     let root = tmp.path().join("worktree");
     copy_tree(&fixture().join("source/committed"), &root);
     copy_tree(&fixture().join("source/uncommitted"), &root);
-    let manifest_path = session_dir(tmp).join("dirty_files.json");
+    let manifest_path = layout::legacy_dirty_files_path(&session_dir(tmp));
     let manifest = DirtyFiles::read(&manifest_path).unwrap();
     let mut text = fs::read_to_string(&manifest_path).unwrap();
     for (rel, entry) in &manifest.entries {
@@ -132,8 +138,17 @@ fn writer_graph_is_current() -> bool {
     GRAPH_FORMAT_VERSION == WRITER_GRAPH_FORMAT
 }
 
+/// Today's reader opens the manifest the writer kept. Since the C3
+/// tombstone slice it opens `l1/dirty_events.json`, never the writer's
+/// `dirty_files.json`.
+fn writer_manifest_is_current() -> bool {
+    layout::dirty_events_path(Path::new("")) == Path::new(WRITER_DIRTY_MANIFEST)
+}
+
 fn writer_fragments_are_current() -> bool {
-    BUILDER_FINGERPRINT == WRITER_FINGERPRINT && FRAGMENT_FORMAT_V5 == WRITER_FRAGMENT_FORMAT
+    BUILDER_FINGERPRINT == WRITER_FINGERPRINT
+        && FRAGMENT_FORMAT_V5 == WRITER_FRAGMENT_FORMAT
+        && writer_manifest_is_current()
 }
 
 /// `(name, kind, file, first line, last line)`, lines 1-based as a reader of
@@ -418,11 +433,13 @@ fn test_parse_cache_written_by_0_16_4_replays_parse_or_misses() {
 // ------------------------------------------------- dirty manifest and meta
 
 /// Stands for: the session's dirty manifest names the files the user edited
-/// and the symbols in them, so a reader knows which paths the overlay owns.
+/// and the symbols in them. Today no query reads it (see
+/// `writer_manifest_is_current`), but `admin gc` still reads its fragment
+/// names to sweep the legacy namespace, so it must keep parsing as written.
 #[test]
 fn test_dirty_manifest_written_by_0_16_4_returns_dirty_paths_and_symbols() {
     let tmp = copy_repo();
-    let manifest = DirtyFiles::read(&session_dir(&tmp).join("dirty_files.json"))
+    let manifest = DirtyFiles::read(&layout::legacy_dirty_files_path(&session_dir(&tmp)))
         .expect("dirty_files.json written by 0.16.4 must parse");
     assert_eq!(manifest.version, 1);
     assert_eq!(
@@ -475,9 +492,11 @@ fn test_dirty_manifest_written_by_0_16_4_returns_dirty_paths_and_symbols() {
     );
 }
 
-/// Stands for: a session the previous release left behind is still found,
-/// tied to its base commit, and classified as holding two dirty files, so
-/// `ecp` keeps serving the overlay instead of calling the session stale.
+/// Stands for: a session the previous release left behind is still found and
+/// tied to its base commit. While today's reader opens the writer's manifest
+/// it holds two dirty files, so `ecp` keeps serving the overlay; once the
+/// manifest moved, it holds none (the files re-parse into the new one), and
+/// is never called stale.
 #[test]
 fn test_session_written_by_0_16_4_classifies_as_augmented_with_two_fragments() {
     let tmp = copy_repo();
@@ -490,7 +509,19 @@ fn test_session_written_by_0_16_4_classifies_as_augmented_with_two_fragments() {
     assert_eq!(meta.watcher_pid, None);
     assert_eq!(meta.last_drained_offset, 0);
 
-    match classify(&tmp.path().join("repo"), SESSION) {
+    let state = classify(&tmp.path().join("repo"), SESSION);
+    if !writer_manifest_is_current() {
+        assert_eq!(
+            state,
+            SessionState::PureReference {
+                base_sha: WRITER_SHA.to_string(),
+                l2_dirname: COMMIT_DIR.to_string(),
+            },
+            "the legacy manifest was read as today's dirty set"
+        );
+        return;
+    }
+    match state {
         SessionState::AugmentedReference {
             base_sha,
             l2_dirname,
@@ -577,7 +608,7 @@ fn test_fragments_written_by_0_16_4_skip_the_file_edited_since() {
     }
     let tmp = copy_repo();
     let root = worktree(&tmp);
-    let manifest = DirtyFiles::read(&session_dir(&tmp).join("dirty_files.json")).unwrap();
+    let manifest = DirtyFiles::read(&layout::legacy_dirty_files_path(&session_dir(&tmp))).unwrap();
     set_mtime(
         &root.join("pkg/core.py"),
         manifest.entries["pkg/core.py"].mtime_ns + 1_000_000_000,
@@ -586,6 +617,92 @@ fn test_fragments_written_by_0_16_4_skip_the_file_edited_since() {
     let inputs = decode_view_inputs(&accepted);
     let paths: Vec<&str> = inputs.iter().map(|i| i.rel_path.as_str()).collect();
     assert_eq!(paths, vec!["lib.rs"]);
+}
+
+/// Stands for: today's binary keeps its tombstones in a namespace the older
+/// binary of the same fingerprint never opens. The older writer reads its
+/// whole `dirty_files.json` into a struct without `change` / `class` and
+/// writes it back; had the tombstone lived there, it would come back as a
+/// `modified` entry. Here the older writer rewrites its manifest and bins
+/// after today's binary recorded `lib.rs` as deleted: the tombstone keeps
+/// its bytes, and no entry of the old manifest reaches the overlay, though
+/// its `pkg/core.py` entry still matches the file on disk.
+#[test]
+fn test_dirty_events_old_writer_manifest_beside_new_namespace_keeps_tombstone() {
+    let tmp = copy_repo();
+    let session = session_dir(&tmp);
+    let root = worktree(&tmp);
+    fs::remove_file(root.join("lib.rs")).unwrap();
+    let cap = ecp_core::config::resolve_size_cap(&root);
+    write_dirty_events(
+        &session,
+        cap,
+        &[],
+        &[],
+        &HashMap::new(),
+        &[("lib.rs".to_string(), PathClass::SOURCE)],
+    )
+    .unwrap();
+    let new_manifest = layout::dirty_events_path(&session);
+    let written = fs::read(&new_manifest).unwrap();
+
+    // The older writer's save: its whole manifest round-trips through its
+    // own entry type, and its bins are written again.
+    let legacy_path = layout::legacy_dirty_files_path(&session);
+    let legacy = DirtyFiles::read(&legacy_path).unwrap();
+    DirtyFiles::write_atomic(&legacy_path, &legacy).unwrap();
+    for entry in legacy.entries.values() {
+        let bin = layout::legacy_overlay_dir(&session).join(format!("{}.bin", entry.fragment_id));
+        let bytes = fs::read(&bin).unwrap();
+        fs::write(&bin, bytes).unwrap();
+    }
+    // Control: an entry of the old manifest is still servable by mtime.
+    let core_mtime = fs::metadata(root.join("pkg/core.py"))
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+    assert_eq!(legacy.entries["pkg/core.py"].mtime_ns, core_mtime);
+
+    let (accepted, _) = accepted_fragments(&session, &root).unwrap();
+    let state = classify(&tmp.path().join("repo"), SESSION);
+
+    assert!(
+        accepted.is_empty(),
+        "an entry of the older writer's manifest was served"
+    );
+    if writer_graph_is_current() {
+        let engine = Engine::load(graph_in(&tmp))
+            .unwrap()
+            .with_overlay(session.clone(), root.clone());
+        assert!(
+            engine.overlay_view().is_none(),
+            "the overlay served a fragment"
+        );
+    }
+    assert!(
+        matches!(
+            state,
+            SessionState::AugmentedReference {
+                fragment_count: 1,
+                ..
+            }
+        ),
+        "{state:?}"
+    );
+    assert_eq!(
+        fs::read(&new_manifest).unwrap(),
+        written,
+        "the tombstone was rewritten"
+    );
+    let manifest = DirtyEvents::read(&new_manifest).unwrap();
+    assert!(manifest.is_current(cap));
+    assert_eq!(manifest.entries.keys().collect::<Vec<_>>(), ["lib.rs"]);
+    let tombstone = &manifest.entries["lib.rs"];
+    assert!(tombstone.is_tombstone());
+    assert_eq!(tombstone.class, PathClass::SOURCE);
 }
 
 // --------------------------------------------------------------- view cache

@@ -1,8 +1,10 @@
 //! The session view cache behind `Engine::overlay_view`: a later engine on
 //! unchanged inputs decodes the stored view instead of building it, and any
 //! change to the graph, the fragments or the cache file itself makes it
-//! build again.
+//! build again. The `test_dirty_events_*` and tombstone tests drive the
+//! freshness gate over the `l1/dirty_events.json` manifest the cache reads.
 
+use ecp_cli::auto_ensure::{self, test_counters, IndexNeed};
 use ecp_cli::engine::Engine;
 use ecp_cli::session::overlay_reader::{accepted_fragments, decode_view_inputs};
 use ecp_cli::session::overlay_writer::write_dirty_fragments_from_graphs;
@@ -10,9 +12,13 @@ use ecp_cli::session::view_cache::{self, VIEW_CACHE_FILE};
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
 use ecp_core::graph::NodeKind;
 use ecp_core::graph_fixture::GraphFixture;
-use ecp_core::session::{DirtyFiles, OverlayFileInput, OverlayView, SessionMeta};
+use ecp_core::session::layout;
+use ecp_core::session::{
+    DirtyEvents, OverlayFileInput, OverlayView, SessionMeta, DIRTY_EVENTS_FORMAT,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Barrier;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -54,8 +60,13 @@ impl Fixture {
             agent_name: None,
         };
         SessionMeta::write_atomic(&session_dir.join("session_meta.json"), &meta).unwrap();
-        DirtyFiles::write_atomic(&session_dir.join("dirty_files.json"), &DirtyFiles::empty())
-            .unwrap();
+        DirtyEvents::write_atomic(
+            &layout::dirty_events_path(&session_dir),
+            &DirtyEvents::empty(ecp_core::config::resolve_size_cap(Path::new(
+                &meta.source_worktree,
+            ))),
+        )
+        .unwrap();
         Self {
             worktree: tmp.path().join("wt"),
             _tmp: tmp,
@@ -514,7 +525,7 @@ fn test_accepted_fragments_corrupt_manifest_returns_error() {
     let f = Fixture::new();
     f.edit(&["keep_fn"], 1_000);
     f.engine().overlay_view().unwrap();
-    fs::write(f.session_dir.join("dirty_files.json"), "{ not json").unwrap();
+    fs::write(layout::dirty_events_path(&f.session_dir), "{ not json").unwrap();
 
     assert!(accepted_fragments(&f.session_dir, &f.worktree).is_err());
     assert!(f.engine().overlay_view().is_none());
@@ -581,4 +592,220 @@ fn test_view_cache_key_graph_renamed_over_after_load_keeps_loaded_stamp() {
 
     assert_eq!(engine.view_cache_key(7), Some(loaded));
     assert_ne!(f.engine().view_cache_key(7).unwrap(), loaded);
+}
+
+// ------------------------------------------- freshness gate over the manifest
+
+const CHILD_ENV: &str = "ECP_OVERLAY_VIEW_CACHE_CHILD";
+
+/// Re-runs `test_name` alone in a child process with `env` set and returns
+/// true in the parent; returns false inside the child. The child sets
+/// `ECP_HOME`, `ECP_SESSION_ID` and the cap env var, and reads the
+/// process-wide counters, which no sibling test may share. A drifted name
+/// makes libtest run nothing and exit 0, so the child must report one pass.
+fn rerun_in_child(test_name: &str, env: &[(&str, &str)]) -> bool {
+    if std::env::var_os(CHILD_ENV).is_some() {
+        return false;
+    }
+    let out = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test_name, "--nocapture"])
+        .env(CHILD_ENV, "1")
+        .envs(env.iter().copied())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains("test result: ok. 1 passed;"),
+        "isolated test process {test_name}: {}\n{stdout}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    true
+}
+
+/// A git repo with `files` committed, a graph whose sidecar names HEAD (so
+/// the porcelain shortcut hands the gate its dirty set), and this process's
+/// `ECP_HOME` / `ECP_SESSION_ID` pointing at a session of its own.
+struct GitSession {
+    _tmp: tempfile::TempDir,
+    worktree: PathBuf,
+    graph_path: PathBuf,
+}
+
+impl GitSession {
+    fn new(session_id: &str, files: &[(&str, &str)]) -> Self {
+        let tmp = tempfile::tempdir().unwrap();
+        let worktree = tmp.path().join("repo");
+        fs::create_dir_all(&worktree).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&worktree)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        git(&["config", "user.name", "test"]);
+        for (rel, text) in files {
+            fs::write(worktree.join(rel), text).unwrap();
+        }
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "base"]);
+        let graph_path = tmp.path().join("cache").join("graph.bin");
+        fs::create_dir_all(graph_path.parent().unwrap()).unwrap();
+        fs::write(&graph_path, GraphFixture::new().into_bytes()).unwrap();
+        auto_ensure::write_head_sha_sidecar_with_sha(&graph_path, &git(&["rev-parse", "HEAD"]));
+        std::env::set_var("ECP_HOME", tmp.path().join("ecp-home"));
+        std::env::set_var("ECP_SESSION_ID", session_id);
+        Self {
+            _tmp: tmp,
+            worktree,
+            graph_path,
+        }
+    }
+
+    fn session_dir(&self) -> PathBuf {
+        auto_ensure::resolve_session_overlay_dir(&self.worktree).unwrap()
+    }
+
+    fn manifest(&self) -> DirtyEvents {
+        DirtyEvents::read(&layout::dirty_events_path(&self.session_dir())).unwrap()
+    }
+
+    /// One query's refresh. Returns the paths handed to `reanalyze_files`.
+    fn refresh(&self) -> usize {
+        test_counters::reset();
+        auto_ensure::ensure_fresh(IndexNeed::NearCurrent, &self.graph_path, &self.worktree)
+            .unwrap();
+        test_counters::reanalyze_paths()
+    }
+
+    fn accepted(&self) -> std::io::Result<usize> {
+        accepted_fragments(&self.session_dir(), &self.worktree).map(|(a, _)| a.len())
+    }
+}
+
+const TWO_FILES: [(&str, &str); 2] = [("a.py", "def a(): pass\n"), ("b.py", "def b(): pass\n")];
+
+fn edit_both(s: &GitSession) {
+    fs::write(s.worktree.join("a.py"), "def a2(): pass\n").unwrap();
+    fs::write(s.worktree.join("b.py"), "def b2(): pass\n").unwrap();
+}
+
+/// A manifest without `format` is not this namespace's: the reader serves
+/// none of its entries and the gate re-parses every dirty file, although
+/// every entry's mtime and bin still match.
+#[test]
+fn test_dirty_events_missing_format_reparses_every_dirty_file() {
+    if rerun_in_child(
+        "test_dirty_events_missing_format_reparses_every_dirty_file",
+        &[],
+    ) {
+        return;
+    }
+    let s = GitSession::new("missing-format-test", &TWO_FILES);
+    edit_both(&s);
+    assert_eq!(s.refresh(), 2);
+    assert_eq!(
+        s.refresh(),
+        0,
+        "control: a current manifest skips the re-parse"
+    );
+    assert_eq!(s.accepted().unwrap(), 2);
+    let path = layout::dirty_events_path(&s.session_dir());
+    let mut doc: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    doc.as_object_mut().unwrap().remove("format").unwrap();
+    fs::write(&path, serde_json::to_vec(&doc).unwrap()).unwrap();
+
+    let served = s.accepted();
+    let reparsed = s.refresh();
+
+    assert!(
+        served.is_err(),
+        "a manifest without format was served: {served:?}"
+    );
+    assert_eq!(reparsed, 2, "every dirty file re-parses");
+    let after = s.manifest();
+    assert_eq!(after.format, DIRTY_EVENTS_FORMAT);
+    assert_eq!(after.entries.keys().collect::<Vec<_>>(), ["a.py", "b.py"]);
+    assert_eq!(s.accepted().unwrap(), 2);
+}
+
+/// Fragments parsed under one cap are not current under another: a file
+/// over the new cap would parse to an omission.
+#[test]
+fn test_dirty_events_size_cap_change_marks_manifest_stale() {
+    if rerun_in_child(
+        "test_dirty_events_size_cap_change_marks_manifest_stale",
+        &[("ECP_MAX_FILE_BYTES", "1000000")],
+    ) {
+        return;
+    }
+    let s = GitSession::new("size-cap-test", &TWO_FILES);
+    edit_both(&s);
+    assert_eq!(s.refresh(), 2);
+    assert_eq!(s.refresh(), 0, "control: the same cap skips the re-parse");
+    assert_eq!(s.manifest().size_cap_bytes, 1_000_000);
+    assert_eq!(s.accepted().unwrap(), 2);
+
+    std::env::set_var("ECP_MAX_FILE_BYTES", "2000000");
+    let served = s.accepted().unwrap();
+    let reparsed = s.refresh();
+
+    assert_eq!(served, 0, "fragments of another cap were served");
+    assert_eq!(reparsed, 2, "every dirty file re-parses");
+    assert_eq!(s.manifest().size_cap_bytes, 2_000_000);
+    assert_eq!(s.accepted().unwrap(), 2);
+}
+
+/// `rm` of a tracked source file writes a tombstone: `change: deleted`, a
+/// class, no fragment id and no bin. It stays current while the file is
+/// absent and re-parses once the file is back.
+#[test]
+fn test_overlay_writer_deleted_file_writes_tombstone_without_bin() {
+    if rerun_in_child(
+        "test_overlay_writer_deleted_file_writes_tombstone_without_bin",
+        &[],
+    ) {
+        return;
+    }
+    use ecp_core::contracts::dirty_event::PathChange;
+    let s = GitSession::new("tombstone-test", &TWO_FILES);
+    fs::write(s.worktree.join("a.py"), "def a2(): pass\n").unwrap();
+    fs::remove_file(s.worktree.join("b.py")).unwrap();
+
+    assert_eq!(s.refresh(), 2);
+
+    let manifest = s.manifest();
+    let (edited, gone) = (&manifest.entries["a.py"], &manifest.entries["b.py"]);
+    assert_eq!(edited.change, PathChange::Modified);
+    assert_eq!(gone.change, PathChange::Deleted);
+    assert!(gone.class.is_source());
+    assert_eq!(gone.fragment_id, None);
+    assert!(gone.is_tombstone());
+    let mut bins: Vec<String> = fs::read_dir(layout::fragments_dir(&s.session_dir()))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    bins.sort();
+    assert_eq!(
+        bins,
+        [format!("{}.bin", edited.fragment_id.as_deref().unwrap())]
+    );
+    assert_eq!(
+        s.accepted().unwrap(),
+        1,
+        "a tombstone is no overlay input yet"
+    );
+
+    assert_eq!(s.refresh(), 0, "a tombstone of an absent file is current");
+    fs::write(s.worktree.join("b.py"), "def back(): pass\n").unwrap();
+    assert_eq!(s.refresh(), 1, "the file came back: only it re-parses");
+    let back = s.manifest();
+    assert_eq!(back.entries["b.py"].change, PathChange::Modified);
+    assert!(back.entries["b.py"].fragment_id.is_some());
 }

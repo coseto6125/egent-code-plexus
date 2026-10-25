@@ -12,7 +12,7 @@ static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Atomic write: tmp → fsync → rename. Temp path is per-writer unique
 /// (`<path>.<pid>.<counter>.tmp`) so two concurrent writers — common in
 /// the multi-agent setup where pre-tool-use hook, MCP background indexer,
-/// and CLI all race to refresh the same `dirty_files.json` / metadata
+/// and CLI all race to refresh the same `l1/dirty_events.json` / metadata
 /// JSON — cannot truncate the same tmp inode and produce a final file
 /// with one writer's prefix glued onto another's tail (the corruption
 /// shape that broke search_batch tests with "trailing characters at line

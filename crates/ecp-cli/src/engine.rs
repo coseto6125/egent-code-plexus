@@ -89,7 +89,7 @@ pub struct Engine {
 
 /// Discriminated view over the L2 graph plus an optional L1 overlay.
 /// `L2Only` is the PureReference fast-path: callers can guarantee no
-/// `graph_overlay/` access (spec invariant F5). `L2WithOverlay` signals
+/// `l1/` overlay access (spec invariant F5). `L2WithOverlay` signals
 /// that the session has dirty fragments; the overlay merge implementation
 /// itself is deferred to P2 of the index-layout follow-up tracker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

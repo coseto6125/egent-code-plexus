@@ -1,5 +1,6 @@
 //! L1 overlay reader: materialises the on-disk fragment set
-//! (`dirty_files.json` + `graph_overlay/<id>.bin` files) for the query side.
+//! (`l1/dirty_events.json` + `l1/fragments/<id>.bin` files) for the query
+//! side. The legacy namespace an older binary writes is never read.
 //!
 //! `accepted_fragments` + `decode_view_inputs` build the per-file
 //! `OverlayFileInput`s (symbols + imports + calls + export flags and
@@ -7,12 +8,14 @@
 //! validates the entries and hashes them into the view cache's input key;
 //! only a cache miss pays for the second.
 //!
-//! Fragment bins with `parse_failed = true` are skipped. Only the current
+//! Fragment bins with `parse_failed = true` are skipped, and so are
+//! tombstones: the view reads them in a later slice. Only the current
 //! fragment format is read; older entries are re-parsed by the freshness gate.
 
 use ecp_core::analyzer::types::{RawExportAlias, RawImport};
 use ecp_core::graph::NodeKind;
-use ecp_core::session::{DirtyFiles, OverlayFileInput, OverlaySymbol, FRAGMENT_FORMAT_V5};
+use ecp_core::session::layout;
+use ecp_core::session::{DirtyEvents, OverlayFileInput, OverlaySymbol, FRAGMENT_FORMAT_V5};
 use rkyv::rancor::Error as RkyvError;
 use std::fs;
 use std::io;
@@ -41,11 +44,12 @@ pub(crate) fn valid_v5_fragment(bytes: &[u8]) -> bool {
 /// share of the view cache key. Entry validation guards the staleness holes
 /// the manifest has by construction:
 ///
-/// - **another builder** — a manifest without the running binary's
-///   `BUILDER_FINGERPRINT` holds parse output of other rules (a v2 bin has
-///   no export aliases at all). Treating its files as clean (skip) is the
-///   conservative choice: the next `ensure_fresh` re-parses every dirty
-///   file into a fresh manifest.
+/// - **another format, builder or cap** — a manifest that fails
+///   `DirtyEvents::is_current` under the worktree's size cap holds parse
+///   output of other rules (a v2 bin has no export aliases at all; a file
+///   over another cap parsed to an omission). Treating its files as clean
+///   (skip) is the conservative choice: the next `ensure_fresh` re-parses
+///   every dirty file into a fresh manifest.
 /// - **mtime mismatch** — `commit_fragment_results` only ever inserts
 ///   entries, so a file edited and then REVERTED keeps its (now stale)
 ///   manifest entry. Serving that fragment would beat fresh base data with
@@ -60,18 +64,20 @@ pub fn accepted_fragments(
     worktree_root: &Path,
 ) -> io::Result<(Vec<AcceptedFragment>, u64)> {
     let mut hasher = Xxh3::new();
-    let manifest = session_dir.join("dirty_files.json");
+    let manifest = layout::dirty_events_path(session_dir);
     if !manifest.exists() {
         return Ok((Vec::new(), hasher.digest()));
     }
-    let df = DirtyFiles::read(&manifest)?;
-    if !df.from_current_builder() {
+    let df = DirtyEvents::read(&manifest)?;
+    if !df.is_current(ecp_core::config::resolve_size_cap(worktree_root)) {
         return Ok((Vec::new(), hasher.digest()));
     }
-    let overlay_dir = session_dir.join("graph_overlay");
     let mut out = Vec::new();
 
     for (rel_path, entry) in &df.entries {
+        let Some(fragment_id) = entry.fragment_id.as_deref() else {
+            continue; // a tombstone: no bin
+        };
         if entry.parse_failed || entry.format != FRAGMENT_FORMAT_V5 {
             continue;
         }
@@ -79,8 +85,7 @@ pub fn accepted_fragments(
         if on_disk_mtime_ns != Some(entry.mtime_ns) {
             continue; // reverted, deleted, or touched since the fragment write
         }
-        let bin_path = overlay_dir.join(format!("{}.bin", entry.fragment_id));
-        let Ok(bytes) = fs::read(&bin_path) else {
+        let Ok(bytes) = fs::read(layout::fragment_path(session_dir, fragment_id)) else {
             continue;
         };
         if !valid_v5_fragment(&bytes) {

@@ -2,7 +2,7 @@
 
 use ecp_core::peer::concern::{classify, ConcernResult, ImpactCache};
 use ecp_core::peer::inbox::{append_entry, ConcernKindSer, InboxEntry};
-use ecp_core::session::overlay::{DirtyEntry, SymbolRef};
+use ecp_core::session::overlay::{DirtyEventEntry, SymbolRef};
 use std::io;
 use std::path::Path;
 
@@ -14,7 +14,7 @@ pub fn dispatch_peer_dirty_event(
     peer_name: Option<&str>,
     ts: &str,
     peer_file: &str,
-    peer_entry: &DirtyEntry,
+    peer_entry: &DirtyEventEntry,
     my_dirty_files: &[String],
     my_dirty_symbols: &[SymbolRef],
     impact_cache: &ImpactCache,

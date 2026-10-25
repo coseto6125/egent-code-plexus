@@ -1,5 +1,6 @@
 //! L1 fragment writer: re-parses a dirty source file, archives the per-file
-//! graph fragment via rkyv, updates `dirty_files.json` + `session_meta.overlay_version`.
+//! graph fragment via rkyv into `l1/fragments/`, updates `l1/dirty_events.json`
+//! (tombstones included) + `session_meta.overlay_version`.
 //!
 //! Atomic semantics: each fragment is written to `<id>.tmp` → fsync → rename,
 //! so a reader merging fragments can never see partial state. The manifest
@@ -21,13 +22,16 @@
 use ecp_core::analyzer::types::{
     LocalGraph, RawEventTopic, RawExportAlias, RawImport, RawSchemaField, RawTxScope,
 };
+use ecp_core::contracts::dirty_event::{PathChange, PathClass};
 use ecp_core::contracts::routing::SizeCap;
 use ecp_core::graph::NodeKind;
 use ecp_core::registry::{atomic_write_json, replace_file, FileLock};
+use ecp_core::session::layout;
 use ecp_core::session::overlay::{SymbolKind, SymbolRef};
-use ecp_core::session::{DirtyEntry, DirtyFiles, SessionMeta};
+use ecp_core::session::{DirtyEventEntry, DirtyEvents, SessionMeta};
 use rayon::prelude::*;
 use rkyv::{Archive, Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -112,7 +116,7 @@ pub struct FragmentSymbolV3 {
 
 /// v5 fragment bin payload: the whole dirty file's fresh parse, including
 /// file-level imports and export aliases for query-time Tier-2
-/// (import-scoped) resolution. `DirtyEntry.format == FRAGMENT_FORMAT_V5`
+/// (import-scoped) resolution. `DirtyEventEntry.format == FRAGMENT_FORMAT_V5`
 /// marks bins of this shape — readers MUST dispatch on the manifest marker,
 /// not guess the encoding.
 #[derive(Archive, Serialize, Deserialize, Debug, Clone)]
@@ -213,6 +217,43 @@ pub struct FragmentOutcome {
     pub parse_failed: bool,
 }
 
+/// The C3 change and class the freshness gate saw for one dirty path, as
+/// the manifest stores them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirtyPathEvent {
+    pub change: PathChange,
+    pub class: PathClass,
+}
+
+impl DirtyPathEvent {
+    /// What a writer records for a parsed file it has no event for (the
+    /// `FragmentInput` route, tests): the file exists and is source.
+    pub const PARSED_SOURCE: Self = Self {
+        change: PathChange::Modified,
+        class: PathClass::SOURCE,
+    };
+
+    /// The event of a file that exists and was parsed. The manifest stores
+    /// confirmed changes only: an `unmerged` path that exists is `modified`
+    /// (C3 `DirtyEvent::confirm`), and so is a `deleted` path that came back
+    /// before the stat.
+    fn parsed(self) -> Self {
+        let change = match self.change {
+            PathChange::Unmerged | PathChange::Deleted => PathChange::Modified,
+            change => change,
+        };
+        Self { change, ..self }
+    }
+}
+
+/// The cap of the worktree this session overlays. An unreadable meta fails
+/// the commit later; until then the env or built-in cap stands.
+fn session_size_cap(session_dir: &Path) -> SizeCap {
+    SessionMeta::read(&session_dir.join("session_meta.json"))
+        .map(|sm| ecp_core::config::resolve_size_cap(Path::new(&sm.source_worktree)))
+        .unwrap_or_else(|_| ecp_core::config::env_size_cap(None))
+}
+
 /// Write or update a dirty-file fragment for the given session.
 ///
 /// Pre-conditions: `session_dir` exists and contains a valid
@@ -251,15 +292,11 @@ pub fn write_dirty_fragments_batch(
         return Ok(Vec::new());
     }
 
-    let overlay_dir = session_dir.join("graph_overlay");
+    let overlay_dir = layout::fragments_dir(session_dir);
     fs::create_dir_all(&overlay_dir)?;
     let batch_seq = WRITE_BATCH_SEQ.fetch_add(1, Ordering::Relaxed);
-    // The cap of the worktree this session overlays, resolved once per batch.
-    // An unreadable meta fails the commit below; until then the env or
-    // built-in cap stands.
-    let size_cap = SessionMeta::read(&session_dir.join("session_meta.json"))
-        .map(|sm| ecp_core::config::resolve_size_cap(Path::new(&sm.source_worktree)))
-        .unwrap_or_else(|_| ecp_core::config::env_size_cap(None));
+    // Resolved once per batch: the parse and the manifest header share it.
+    let size_cap = session_size_cap(session_dir);
 
     // Parallelise fragment writes: hashing and parsing (CPU) + atomic file write (IO).
     // Coalesces the per-file IO while keeping the final manifest commit atomic.
@@ -271,7 +308,7 @@ pub fn write_dirty_fragments_batch(
         })
         .collect();
 
-    commit_fragment_results(session_dir, &overlay_dir, results)
+    commit_fragment_results(session_dir, size_cap, results, &[])
 }
 
 /// Write fragments from already-parsed `LocalGraph`s — the incremental path's
@@ -281,10 +318,40 @@ pub fn write_dirty_fragments_batch(
 /// re-parse route hashes), so `fragment_id` stays byte-identical; `mtimes` is
 /// the paired modification time per graph (stat is cheap, the graph doesn't
 /// carry it). Graphs and `mtimes` MUST be equal length and aligned by index.
+///
+/// Records every graph as [`DirtyPathEvent::PARSED_SOURCE`] under the cap of
+/// the session's worktree; [`write_dirty_events`] is the form that carries
+/// the gate's events and tombstones.
 pub fn write_dirty_fragments_from_graphs(
     session_dir: &Path,
     graphs: &[LocalGraph],
     mtimes: &[u64],
+) -> io::Result<Vec<FragmentOutcome>> {
+    write_dirty_events(
+        session_dir,
+        session_size_cap(session_dir),
+        graphs,
+        mtimes,
+        &HashMap::new(),
+        &[],
+    )
+}
+
+/// The incremental path's writer: one fragment per parsed graph, recorded
+/// with the event `events` holds for its path (else
+/// [`DirtyPathEvent::PARSED_SOURCE`]), and one tombstone per
+/// `(path, class)` in `tombstones` (a dirty source path absent at the
+/// pre-parse stat). `size_cap` is the cap the graphs were parsed under; the
+/// manifest records it, and a later cap re-parses every entry.
+///
+/// Returns one outcome per graph; tombstones have none.
+pub fn write_dirty_events(
+    session_dir: &Path,
+    size_cap: SizeCap,
+    graphs: &[LocalGraph],
+    mtimes: &[u64],
+    events: &HashMap<String, DirtyPathEvent>,
+    tombstones: &[(String, PathClass)],
 ) -> io::Result<Vec<FragmentOutcome>> {
     if graphs.len() != mtimes.len() {
         return Err(io::Error::new(
@@ -296,11 +363,11 @@ pub fn write_dirty_fragments_from_graphs(
             ),
         ));
     }
-    if graphs.is_empty() {
+    if graphs.is_empty() && tombstones.is_empty() {
         return Ok(Vec::new());
     }
 
-    let overlay_dir = session_dir.join("graph_overlay");
+    let overlay_dir = layout::fragments_dir(session_dir);
     fs::create_dir_all(&overlay_dir)?;
     let batch_seq = WRITE_BATCH_SEQ.fetch_add(1, Ordering::Relaxed);
 
@@ -309,11 +376,11 @@ pub fn write_dirty_fragments_from_graphs(
         .zip(mtimes.par_iter())
         .enumerate()
         .map(|(idx, (graph, &mtime_ns))| {
-            write_fragment_from_graph(&overlay_dir, batch_seq, idx as u64, graph, mtime_ns)
+            write_fragment_from_graph(&overlay_dir, batch_seq, idx as u64, graph, mtime_ns, events)
         })
         .collect();
 
-    commit_fragment_results(session_dir, &overlay_dir, results)
+    commit_fragment_results(session_dir, size_cap, results, tombstones)
 }
 
 /// The lock a writer holds while it publishes fragment bins and commits the
@@ -329,7 +396,7 @@ pub fn overlay_lock_path(session_dir: &Path) -> PathBuf {
 /// the archive was written, the fsynced tmp that becomes `<fragment_id>.bin`.
 struct StagedFragment {
     rel_path: String,
-    entry: DirtyEntry,
+    entry: DirtyEventEntry,
     outcome: FragmentOutcome,
     tmp: Option<PathBuf>,
 }
@@ -351,44 +418,48 @@ fn stage_archive(
 }
 
 /// Shared tail for both write paths: collect per-file results, publish their
-/// bins, then commit the manifest + `overlay_version` bump in one atomic
-/// write each (coalesces N read-modify-write cycles down to 2).
+/// bins, then commit the manifest (fragments and tombstones) + the
+/// `overlay_version` bump in one atomic write each (coalesces N
+/// read-modify-write cycles down to 2).
 fn commit_fragment_results(
     session_dir: &Path,
-    overlay_dir: &Path,
+    size_cap: SizeCap,
     results: Vec<io::Result<StagedFragment>>,
+    tombstones: &[(String, PathClass)],
 ) -> io::Result<Vec<FragmentOutcome>> {
     let staged = results.into_iter().collect::<io::Result<Vec<_>>>()?;
     let mut outcomes = Vec::with_capacity(staged.len());
     {
         let _publish = FileLock::acquire_exclusive(&overlay_lock_path(session_dir))?;
         for fragment in &staged {
-            if let Some(tmp) = &fragment.tmp {
-                let bin = overlay_dir.join(format!("{}.bin", fragment.entry.fragment_id));
-                replace_file(tmp, &bin)?;
+            if let (Some(tmp), Some(id)) = (&fragment.tmp, &fragment.entry.fragment_id) {
+                replace_file(tmp, &layout::fragment_path(session_dir, id))?;
             }
         }
-        let manifest_path = session_dir.join("dirty_files.json");
-        let mut df = if manifest_path.exists() {
-            DirtyFiles::read(&manifest_path)?
-        } else {
-            DirtyFiles::empty()
-        };
-        // Another binary's entries parse by other rules. The freshness gate
-        // re-parses every dirty file of such a manifest, so none is kept.
-        if !df.from_current_builder() {
-            df = DirtyFiles::empty();
-        }
+        let manifest_path = layout::dirty_events_path(session_dir);
+        // A manifest of another format, builder or cap, or one that does not
+        // parse, holds entries the freshness gate re-parses whole: none is
+        // kept. Replacing it (instead of failing the write) is what lets
+        // that re-parse land.
+        let mut manifest = DirtyEvents::read(&manifest_path)
+            .ok()
+            .filter(|m| m.is_current(size_cap))
+            .unwrap_or_else(|| DirtyEvents::empty(size_cap));
         for fragment in staged {
-            df.entries.insert(fragment.rel_path, fragment.entry);
+            manifest.entries.insert(fragment.rel_path, fragment.entry);
             outcomes.push(fragment.outcome);
         }
-        atomic_write_json(&manifest_path, &df)?;
+        for (rel_path, class) in tombstones {
+            manifest
+                .entries
+                .insert(rel_path.clone(), DirtyEventEntry::tombstone(*class));
+        }
+        DirtyEvents::write_atomic(&manifest_path, &manifest)?;
     }
 
     let sm_path = session_dir.join("session_meta.json");
     let mut sm = SessionMeta::read(&sm_path)?;
-    sm.overlay_version += outcomes.len() as u32;
+    sm.overlay_version += (outcomes.len() + tombstones.len()) as u32;
     sm.last_touched = chrono::Utc::now().to_rfc3339();
     atomic_write_json(&sm_path, &sm)?;
 
@@ -428,11 +499,13 @@ fn write_fragment_file(
     };
     let parse_failed = tmp.is_none();
 
-    let entry = DirtyEntry {
+    let event = DirtyPathEvent::PARSED_SOURCE;
+    let entry = DirtyEventEntry {
+        change: event.change,
+        class: event.class,
         mtime_ns: input.mtime_ns,
-        content_hash: content_hash.clone(),
-        fragment_id: fragment_id.clone(),
-        tantivy_delta_segment: None,
+        fragment_id: Some(fragment_id.clone()),
+        content_hash: Some(content_hash),
         parse_failed,
         dirty_symbols,
         format: ecp_core::session::overlay::FRAGMENT_FORMAT_V5,
@@ -479,6 +552,7 @@ fn write_fragment_from_graph(
     input_idx: u64,
     graph: &LocalGraph,
     mtime_ns: u64,
+    events: &HashMap<String, DirtyPathEvent>,
 ) -> io::Result<StagedFragment> {
     let content_hash = format!("{:016x}", u64::from_le_bytes(graph.content_hash));
     let fragment_id = content_hash.clone();
@@ -500,11 +574,15 @@ fn write_fragment_from_graph(
     // a Windows PathBuf would leak backslashes here and silently kill every
     // overlay↔base match.
     let rel_path = graph.file_path.to_string_lossy().replace('\\', "/");
-    let entry = DirtyEntry {
+    let event = events
+        .get(&rel_path)
+        .map_or(DirtyPathEvent::PARSED_SOURCE, |event| event.parsed());
+    let entry = DirtyEventEntry {
+        change: event.change,
+        class: event.class,
         mtime_ns,
-        content_hash: content_hash.clone(),
-        fragment_id: fragment_id.clone(),
-        tantivy_delta_segment: None,
+        fragment_id: Some(fragment_id.clone()),
+        content_hash: Some(content_hash),
         parse_failed,
         dirty_symbols: symbols_from_graph(graph, &rel_path),
         format: ecp_core::session::overlay::FRAGMENT_FORMAT_V5,
@@ -592,35 +670,37 @@ impl OverlayWriter {
         let rel = relativise(&self.session_dir, path);
         let (dirty_symbols, parse_failed) = extract_symbols(path, &rel);
 
-        let manifest_path = self.session_dir.join("dirty_files.json");
-        let mut df = if manifest_path.exists() {
-            DirtyFiles::read(&manifest_path)?
-        } else {
-            DirtyFiles::empty()
-        };
+        let manifest_path = layout::dirty_events_path(&self.session_dir);
+        let size_cap = session_size_cap(&self.session_dir);
+        let mut manifest = DirtyEvents::read(&manifest_path)
+            .ok()
+            .filter(|m| m.is_current(size_cap))
+            .unwrap_or_else(|| DirtyEvents::empty(size_cap));
 
-        df.entries.insert(
+        let event = DirtyPathEvent::PARSED_SOURCE;
+        manifest.entries.insert(
             rel.clone(),
-            DirtyEntry {
+            DirtyEventEntry {
+                change: event.change,
+                class: event.class,
                 mtime_ns: 0,
-                content_hash: content_hash.to_string(),
-                fragment_id: fragment_id.to_string(),
-                tantivy_delta_segment: None,
+                fragment_id: Some(fragment_id.to_string()),
+                content_hash: Some(content_hash.to_string()),
                 parse_failed,
                 dirty_symbols,
                 format: ecp_core::session::overlay::FRAGMENT_FORMAT_V5,
             },
         );
-        atomic_write_json(&manifest_path, &df)
+        DirtyEvents::write_atomic(&manifest_path, &manifest)
     }
 
-    /// Read the current `dirty_files.json` for this session.
-    pub fn read_dirty(&self) -> io::Result<DirtyFiles> {
-        let manifest_path = self.session_dir.join("dirty_files.json");
+    /// Read the current `l1/dirty_events.json` for this session.
+    pub fn read_dirty(&self) -> io::Result<DirtyEvents> {
+        let manifest_path = layout::dirty_events_path(&self.session_dir);
         if manifest_path.exists() {
-            DirtyFiles::read(&manifest_path)
+            DirtyEvents::read(&manifest_path)
         } else {
-            Ok(DirtyFiles::empty())
+            Ok(DirtyEvents::empty(session_size_cap(&self.session_dir)))
         }
     }
 }
@@ -653,7 +733,7 @@ const MAX_SYMBOLS_PER_ENTRY: usize = 400;
 ///
 /// Load-bearing for `ecp peers`: `peer::concern::classify` reads
 /// `dirty_symbols` and nothing else, so an entry written without them is
-/// invisible to HARD and SOFT alike — both routes into `dirty_files.json`
+/// invisible to HARD and SOFT alike — both routes into `l1/dirty_events.json`
 /// have to fill it.
 ///
 /// This is the file's declaration list, NOT a change set: the file is

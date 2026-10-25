@@ -1,4 +1,5 @@
 pub mod import_scope;
+pub mod layout;
 pub mod merged;
 pub mod meta;
 pub mod overlay;
@@ -7,8 +8,8 @@ pub mod view;
 pub use merged::{MergedEdge, MergedGraph, MergedNode, OVERLAY_EDGE_REASON};
 pub use meta::SessionMeta;
 pub use overlay::{
-    DirtyEntry, DirtyFiles, FRAGMENT_FORMAT_V2, FRAGMENT_FORMAT_V3, FRAGMENT_FORMAT_V4,
-    FRAGMENT_FORMAT_V5,
+    DirtyEntry, DirtyEventEntry, DirtyEvents, DirtyFiles, DIRTY_EVENTS_FORMAT, FRAGMENT_FORMAT_V2,
+    FRAGMENT_FORMAT_V3, FRAGMENT_FORMAT_V4, FRAGMENT_FORMAT_V5,
 };
 pub use state::{SessionState, StaleReason};
 pub use view::{

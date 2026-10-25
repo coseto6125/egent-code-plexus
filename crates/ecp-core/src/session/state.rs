@@ -1,7 +1,7 @@
 //! Derived view of session liveness, classifying each `<repo>/sessions/<sid>/`
 //! as PureReference (clean, can short-circuit overlay merge), Augmented (has
 //! dirty fragments), or Stale (cannot serve queries). Not persisted to disk —
-//! always re-derived from session_meta + dirty_files + commits/.
+//! always re-derived from session_meta + `l1/dirty_events.json` + commits/.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionState {
@@ -22,6 +22,7 @@ pub enum SessionState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StaleReason {
     MetaUnreadable,
+    /// `l1/dirty_events.json` exists and does not parse.
     DirtyFilesCorrupt,
     L2Missing,
     Orphan,

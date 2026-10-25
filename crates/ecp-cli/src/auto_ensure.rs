@@ -12,8 +12,10 @@
 //!   then L1 overlay fragment write under `<repo>/sessions/<sid>/`.
 //! - Ready → noop.
 
+use crate::session::overlay_writer::DirtyPathEvent;
 use ecp_core::contracts::dirty_event::{
-    ClassifiedPath, DirtyEvent, DirtySet, NotRepoRelative, RepoPath, SkipReason, SkippedEntry,
+    ClassifiedPath, DirtyEvent, DirtySet, NotRepoRelative, PathClass, RepoPath, SkipReason,
+    SkippedEntry,
 };
 use ecp_core::contracts::routing::FileRouter;
 use ecp_core::session::SessionMeta;
@@ -752,7 +754,7 @@ pub(crate) fn ensure_fresh_with_rebuild(
                     .map(|(_, half)| half.path.as_str().to_owned())
                     .collect();
                 // Freshness gate (FU-2026-06-10-f92cecba3daa): each fragment
-                // records its source file's mtime_ns in `dirty_files.json`, so
+                // records its source file's mtime_ns in `l1/dirty_events.json`, so
                 // a dirty file whose mtime still matches was already parsed
                 // into a current fragment by an earlier query of this session —
                 // re-parsing it rewrites identical state. Filtering those out
@@ -780,14 +782,45 @@ pub(crate) fn ensure_fresh_with_rebuild(
                 // sees as stale — the gate only errs toward re-parsing.
                 // The gate already statted every file it compared against the
                 // manifest; only files it never statted (no manifest entry,
-                // v1 bin, parse_failed) are statted here.
+                // v1 bin, parse_failed, absent) are statted here. A file
+                // absent at this stat gets a tombstone, not a fragment.
                 let mut pre_parse_mtimes = gate.pre_mtimes;
+                let mut absent = Vec::new();
                 for rel in &gate.rel_paths {
                     if !pre_parse_mtimes.contains_key(rel) {
-                        let ns = mtime_ns_of(&worktree_root.join(rel)).unwrap_or(0);
-                        pre_parse_mtimes.insert(rel.clone(), ns);
+                        match mtime_ns_of(&worktree_root.join(rel)) {
+                            Some(ns) => {
+                                pre_parse_mtimes.insert(rel.clone(), ns);
+                            }
+                            None => absent.push(rel.clone()),
+                        }
                     }
                 }
+                // The C3 change and class of each source half, for the
+                // manifest rows. Built only on this miss path: the gate-skip
+                // path above never needs it.
+                let events: HashMap<String, DirtyPathEvent> = dirty
+                    .events()
+                    .iter()
+                    .flat_map(|event| event.halves())
+                    .filter(|(_, half)| half.class.is_source())
+                    .map(|(change, half)| {
+                        (
+                            half.path.as_str().to_owned(),
+                            DirtyPathEvent {
+                                change,
+                                class: half.class,
+                            },
+                        )
+                    })
+                    .collect();
+                let tombstones: Vec<(String, PathClass)> = absent
+                    .into_iter()
+                    .map(|rel| {
+                        let class = events.get(&rel).map_or(PathClass::SOURCE, |e| e.class);
+                        (rel, class)
+                    })
+                    .collect();
                 // Parse the dirty set ONCE here; the resulting `LocalGraph`s are
                 // handed straight to the overlay writer, which no longer
                 // re-parses them. This removes the second full tree-sitter pass
@@ -807,6 +840,8 @@ pub(crate) fn ensure_fresh_with_rebuild(
                     worktree_root,
                     &fresh_graphs,
                     &pre_parse_mtimes,
+                    &events,
+                    &tombstones,
                     gate.session_meta,
                 )
                 .map_err(|e| format!("L1 overlay refresh: {e}"))?;
@@ -1285,19 +1320,23 @@ struct L1FreshnessGate {
 /// L1 freshness gate: drop dirty files whose overlay fragment is provably
 /// current, keep the rest for re-parse.
 ///
-/// A fragment is current when its `dirty_files.json` entry is a v5 bin that
-/// parsed cleanly, is on disk, AND records exactly the file's present
-/// mtime_ns, in a manifest the running binary's parser wrote. Any doubt (no
-/// session dir / meta / manifest, HEAD drifted since the fragments were
-/// based, another builder fingerprint, older bin, parse_failed, missing bin,
-/// stat error) keeps the file in the re-parse set — the gate may only ever
-/// skip work it can prove redundant.
+/// A fragment is current when its `l1/dirty_events.json` entry is a v5 bin
+/// that parsed cleanly, is on disk, AND records exactly the file's present
+/// mtime_ns, in a manifest of this `DIRTY_EVENTS_FORMAT`, this builder and
+/// the worktree's present size cap. A tombstone is current while its path
+/// is absent. Any doubt (no session dir / meta / manifest, a manifest that
+/// does not parse, HEAD drifted since the fragments were based, another
+/// format, builder fingerprint or cap, older bin, parse_failed, missing bin,
+/// stat error, a tombstone whose path exists again) keeps the file in the
+/// re-parse set — the gate may only ever skip work it can prove redundant.
+/// The legacy `dirty_files.json` an older binary writes is never read: a
+/// session holding only it re-parses every dirty file.
 ///
 /// The HEAD-drift check matters: promotion (rebasing fragments onto the new
 /// base SHA) runs inside the full overlay path, so a drifted session must
 /// fall through to it rather than short-circuit here.
 fn retain_stale_fragments(worktree_root: &Path, rel_paths: Vec<String>) -> L1FreshnessGate {
-    use ecp_core::session::{DirtyFiles, FRAGMENT_FORMAT_V5};
+    use ecp_core::session::{layout, DirtyEvents, FRAGMENT_FORMAT_V5};
 
     let pass = |rel_paths, session_meta| L1FreshnessGate {
         rel_paths,
@@ -1316,21 +1355,31 @@ fn retain_stale_fragments(worktree_root: &Path, rel_paths: Vec<String>) -> L1Fre
     if meta.base_sha != head {
         return pass(rel_paths, Some(meta));
     }
-    let Ok(manifest) = DirtyFiles::read(&session_dir.join("dirty_files.json")) else {
+    let Ok(manifest) = DirtyEvents::read(&layout::dirty_events_path(&session_dir)) else {
         return pass(rel_paths, Some(meta));
     };
     // Fragments another binary parsed hold other parse rules
-    // (FU-2026-10-05-36d0314fefe4): every dirty file is re-parsed.
-    if !manifest.from_current_builder() {
+    // (FU-2026-10-05-36d0314fefe4), and fragments parsed under another cap
+    // hold other omissions: every dirty file is re-parsed.
+    if !manifest.is_current(ecp_core::config::resolve_size_cap(worktree_root)) {
         return pass(rel_paths, Some(meta));
     }
-    let overlay_dir = session_dir.join("graph_overlay");
     let mut pre_mtimes = HashMap::new();
     let retained = rel_paths
         .into_iter()
         .filter(|rel| {
             let Some(entry) = manifest.entries.get(rel) else {
                 return true;
+            };
+            let Some(fragment_id) = entry.fragment_id.as_deref() else {
+                // A tombstone stays current while its file is absent.
+                return match mtime_ns_of(&worktree_root.join(rel)) {
+                    Some(ns) => {
+                        pre_mtimes.insert(rel.clone(), ns);
+                        true
+                    }
+                    None => false,
+                };
             };
             if entry.format != FRAGMENT_FORMAT_V5 || entry.parse_failed {
                 return true;
@@ -1342,7 +1391,7 @@ fn retain_stale_fragments(worktree_root: &Path, rel_paths: Vec<String>) -> L1Fre
             match mtime_ns_of(&worktree_root.join(rel)) {
                 Some(ns)
                     if ns == entry.mtime_ns
-                        && fs::read(overlay_dir.join(format!("{}.bin", entry.fragment_id)))
+                        && fs::read(layout::fragment_path(&session_dir, fragment_id))
                             .ok()
                             .is_some_and(|bytes| {
                                 crate::session::overlay_reader::valid_v5_fragment(&bytes)
@@ -1369,6 +1418,8 @@ fn apply_l1_overlay_updates(
     worktree_root: &Path,
     fresh_graphs: &[ecp_core::analyzer::types::LocalGraph],
     pre_parse_mtimes: &HashMap<String, u64>,
+    events: &HashMap<String, DirtyPathEvent>,
+    tombstones: &[(String, PathClass)],
     gate_meta: Option<SessionMeta>,
 ) -> io::Result<()> {
     use crate::session::{overlay_writer, promotion};
@@ -1423,10 +1474,15 @@ fn apply_l1_overlay_updates(
         })
         .collect();
 
-    let (n_written, n_failed) = match overlay_writer::write_dirty_fragments_from_graphs(
+    // The cap `reanalyze_files` parsed under: the same root resolves it.
+    let size_cap = ecp_core::config::resolve_size_cap(worktree_root);
+    let (n_written, n_failed) = match overlay_writer::write_dirty_events(
         &session_dir,
+        size_cap,
         fresh_graphs,
         &mtimes,
+        events,
+        tombstones,
     ) {
         Ok(outs) => {
             let n_failed = outs.iter().filter(|o| o.parse_failed).count();
@@ -1645,13 +1701,14 @@ mod fingerprint_drift_tests {
     use super::*;
     use tempfile::tempdir;
 
-    fn gate_with_fragment(
-        fragment: &[u8],
+    /// A committed `app.py` holding `source`, `ECP_HOME` / `ECP_SESSION_ID`
+    /// set, and a session meta based at HEAD. Returns the temp dir, the
+    /// worktree, the session dir and `app.py`'s mtime.
+    fn session_fixture(
         session_id: &str,
-        format: u32,
         source: &str,
-    ) -> (tempfile::TempDir, L1FreshnessGate) {
-        use ecp_core::session::{DirtyEntry, DirtyFiles, SessionMeta};
+    ) -> (tempfile::TempDir, PathBuf, PathBuf, u64) {
+        use ecp_core::session::SessionMeta;
 
         let tmp = tempdir().unwrap();
         let worktree = tmp.path().join("repo");
@@ -1675,7 +1732,7 @@ mod fingerprint_drift_tests {
         std::env::set_var("ECP_HOME", &home);
         std::env::set_var("ECP_SESSION_ID", session_id);
         let session_dir = resolve_session_overlay_dir(&worktree).unwrap();
-        fs::create_dir_all(session_dir.join("graph_overlay")).unwrap();
+        fs::create_dir_all(&session_dir).unwrap();
         let mtime = mtime_ns_of(&worktree.join("app.py")).unwrap();
         let meta = SessionMeta {
             version: 1,
@@ -1691,24 +1748,178 @@ mod fingerprint_drift_tests {
             agent_name: None,
         };
         SessionMeta::write_atomic(&session_dir.join("session_meta.json"), &meta).unwrap();
-        let mut dirty = DirtyFiles::empty();
-        dirty.entries.insert(
-            "app.py".into(),
-            DirtyEntry {
-                mtime_ns: mtime,
-                content_hash: "fixture".into(),
-                fragment_id: "fixture".into(),
-                tantivy_delta_segment: None,
-                parse_failed: false,
-                dirty_symbols: vec![],
-                format,
-            },
-        );
-        DirtyFiles::write_atomic(&session_dir.join("dirty_files.json"), &dirty).unwrap();
-        fs::write(session_dir.join("graph_overlay/fixture.bin"), fragment).unwrap();
+        (tmp, worktree, session_dir, mtime)
+    }
 
+    /// A current-namespace entry for a file of mtime `mtime_ns` whose bin
+    /// is `<fragment_id>.bin`.
+    fn event_entry(
+        mtime_ns: u64,
+        fragment_id: &str,
+        format: u32,
+    ) -> ecp_core::session::DirtyEventEntry {
+        ecp_core::session::DirtyEventEntry {
+            change: ecp_core::contracts::dirty_event::PathChange::Modified,
+            class: PathClass::SOURCE,
+            mtime_ns,
+            fragment_id: Some(fragment_id.into()),
+            content_hash: Some(fragment_id.into()),
+            parse_failed: false,
+            dirty_symbols: vec![],
+            format,
+        }
+    }
+
+    /// Writes `entries` as the session's `l1/dirty_events.json` under the
+    /// worktree's cap, each with the bin `fragment`.
+    fn write_events(
+        session_dir: &Path,
+        worktree: &Path,
+        entries: &[(&str, ecp_core::session::DirtyEventEntry)],
+        fragment: &[u8],
+    ) {
+        use ecp_core::session::{layout, DirtyEvents};
+        let mut dirty = DirtyEvents::empty(ecp_core::config::resolve_size_cap(worktree));
+        for (rel, entry) in entries {
+            if let Some(id) = &entry.fragment_id {
+                let bin = layout::fragment_path(session_dir, id);
+                fs::create_dir_all(bin.parent().unwrap()).unwrap();
+                fs::write(bin, fragment).unwrap();
+            }
+            dirty.entries.insert((*rel).into(), entry.clone());
+        }
+        DirtyEvents::write_atomic(&layout::dirty_events_path(session_dir), &dirty).unwrap();
+    }
+
+    fn gate_with_fragment(
+        fragment: &[u8],
+        session_id: &str,
+        format: u32,
+        source: &str,
+    ) -> (tempfile::TempDir, L1FreshnessGate) {
+        let (tmp, worktree, session_dir, mtime) = session_fixture(session_id, source);
+        write_events(
+            &session_dir,
+            &worktree,
+            &[("app.py", event_entry(mtime, "fixture", format))],
+            fragment,
+        );
         let gate = retain_stale_fragments(&worktree, vec!["app.py".into()]);
         (tmp, gate)
+    }
+
+    fn valid_v5_fragment_bytes() -> Vec<u8> {
+        let fragment = crate::session::overlay_writer::FragmentFile {
+            symbols: vec![],
+            imports: vec![],
+            export_aliases: vec![],
+        };
+        rkyv::to_bytes::<rkyv::rancor::Error>(&fragment)
+            .unwrap()
+            .into_vec()
+    }
+
+    /// A session an older binary left: `dirty_files.json` and
+    /// `graph_overlay/` of the running builder, current V5 bins and the
+    /// files' own mtimes. Today's gate never reads that namespace, so every
+    /// path re-parses; the same entries in `l1/` skip the re-parse.
+    #[test]
+    fn test_retain_stale_fragments_old_namespace_only_reparses() {
+        if rerun_in_child(
+            "ECP_AUTO_ENSURE_OLD_NAMESPACE_CHILD",
+            "auto_ensure::fingerprint_drift_tests::test_retain_stale_fragments_old_namespace_only_reparses",
+        ) {
+            return;
+        }
+        use ecp_core::session::{layout, DirtyEntry, DirtyFiles, FRAGMENT_FORMAT_V5};
+        let bytes = valid_v5_fragment_bytes();
+        assert!(crate::session::overlay_reader::valid_v5_fragment(&bytes));
+        let (_tmp, worktree, session_dir, app_mtime) =
+            session_fixture("old-namespace-test", "def app(): pass\n");
+        fs::write(worktree.join("other.py"), "def other(): pass\n").unwrap();
+        let other_mtime = mtime_ns_of(&worktree.join("other.py")).unwrap();
+        let paths = [("app.py", app_mtime), ("other.py", other_mtime)];
+
+        let mut legacy = DirtyFiles::empty();
+        fs::create_dir_all(layout::legacy_overlay_dir(&session_dir)).unwrap();
+        for (rel, mtime_ns) in paths {
+            legacy.entries.insert(
+                rel.into(),
+                DirtyEntry {
+                    mtime_ns,
+                    content_hash: rel.into(),
+                    fragment_id: rel.into(),
+                    tantivy_delta_segment: None,
+                    parse_failed: false,
+                    dirty_symbols: vec![],
+                    format: FRAGMENT_FORMAT_V5,
+                },
+            );
+            fs::write(
+                layout::legacy_overlay_dir(&session_dir).join(format!("{rel}.bin")),
+                &bytes,
+            )
+            .unwrap();
+        }
+        assert!(legacy.from_current_builder());
+        DirtyFiles::write_atomic(&layout::legacy_dirty_files_path(&session_dir), &legacy).unwrap();
+        let rel_paths = || {
+            paths
+                .iter()
+                .map(|(rel, _)| rel.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            retain_stale_fragments(&worktree, rel_paths()).rel_paths,
+            ["app.py", "other.py"],
+            "the gate served the legacy namespace"
+        );
+
+        write_events(
+            &session_dir,
+            &worktree,
+            &paths.map(|(rel, mtime)| (rel, event_entry(mtime, rel, FRAGMENT_FORMAT_V5))),
+            &bytes,
+        );
+        assert!(
+            retain_stale_fragments(&worktree, rel_paths())
+                .rel_paths
+                .is_empty(),
+            "control: the same entries in l1/ are current"
+        );
+    }
+
+    /// A tombstone is current while its path is absent and stale once the
+    /// path exists again.
+    #[test]
+    fn test_retain_stale_fragments_tombstone_current_while_path_absent() {
+        if rerun_in_child(
+            "ECP_AUTO_ENSURE_TOMBSTONE_GATE_CHILD",
+            "auto_ensure::fingerprint_drift_tests::test_retain_stale_fragments_tombstone_current_while_path_absent",
+        ) {
+            return;
+        }
+        let (_tmp, worktree, session_dir, _) =
+            session_fixture("tombstone-gate-test", "def app(): pass\n");
+        fs::remove_file(worktree.join("app.py")).unwrap();
+        write_events(
+            &session_dir,
+            &worktree,
+            &[(
+                "app.py",
+                ecp_core::session::DirtyEventEntry::tombstone(PathClass::SOURCE),
+            )],
+            &[],
+        );
+
+        let absent = retain_stale_fragments(&worktree, vec!["app.py".into()]);
+        fs::write(worktree.join("app.py"), "def back(): pass\n").unwrap();
+        let back = retain_stale_fragments(&worktree, vec!["app.py".into()]);
+
+        assert!(absent.rel_paths.is_empty(), "{:?}", absent.rel_paths);
+        assert_eq!(back.rel_paths, ["app.py"]);
+        assert!(back.pre_mtimes.contains_key("app.py"));
     }
 
     #[test]
@@ -1722,12 +1933,7 @@ mod fingerprint_drift_tests {
             return;
         }
 
-        let fragment = crate::session::overlay_writer::FragmentFile {
-            symbols: vec![],
-            imports: vec![],
-            export_aliases: vec![],
-        };
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&fragment).unwrap();
+        let bytes = valid_v5_fragment_bytes();
         let (tmp, gate) = gate_with_fragment(
             &bytes,
             "v5-refresh-test",
@@ -1740,11 +1946,11 @@ mod fingerprint_drift_tests {
         );
         let worktree = tmp.path().join("repo");
         let session_dir = resolve_session_overlay_dir(&worktree).unwrap();
-        let path = session_dir.join("dirty_files.json");
-        let mut dirty = ecp_core::session::DirtyFiles::read(&path).unwrap();
-        dirty.builder_fingerprint = Some("v0.16.2+schema19".into());
+        let path = ecp_core::session::layout::dirty_events_path(&session_dir);
+        let mut dirty = ecp_core::session::DirtyEvents::read(&path).unwrap();
+        dirty.builder_fingerprint = "v0.16.2+schema19".into();
         assert!(!dirty.from_current_builder());
-        ecp_core::session::DirtyFiles::write_atomic(&path, &dirty).unwrap();
+        ecp_core::session::DirtyEvents::write_atomic(&path, &dirty).unwrap();
         assert_eq!(
             retain_stale_fragments(&worktree, vec!["app.py".into()]).rel_paths,
             ["app.py"],
@@ -1801,15 +2007,17 @@ mod fingerprint_drift_tests {
         let worktree = tmp.path().join("repo");
         let session_dir = resolve_session_overlay_dir(&worktree).unwrap();
         let gate = if std::env::var(CHILD_ENV).as_deref() == Ok("released") {
+            // The released binary's session holds the legacy namespace only.
+            use ecp_core::session::layout;
             let mut old =
                 ecp_core::session::DirtyFiles::read(&fixture.join("dirty_files.json")).unwrap();
-            let path = session_dir.join("dirty_files.json");
             old.entries.get_mut("app.py").unwrap().mtime_ns =
                 mtime_ns_of(&worktree.join("app.py")).unwrap();
             let fragment_id = &old.entries["app.py"].fragment_id;
+            fs::create_dir_all(layout::legacy_overlay_dir(&session_dir)).unwrap();
             fs::copy(
                 fixture.join(format!("graph_overlay/{fragment_id}.bin")),
-                session_dir.join(format!("graph_overlay/{fragment_id}.bin")),
+                layout::legacy_overlay_dir(&session_dir).join(format!("{fragment_id}.bin")),
             )
             .unwrap();
             assert!(!old.from_current_builder());
@@ -1817,7 +2025,12 @@ mod fingerprint_drift_tests {
                 old.entries["app.py"].mtime_ns,
                 mtime_ns_of(&worktree.join("app.py")).unwrap()
             );
-            ecp_core::session::DirtyFiles::write_atomic(&path, &old).unwrap();
+            fs::remove_file(layout::dirty_events_path(&session_dir)).unwrap();
+            ecp_core::session::DirtyFiles::write_atomic(
+                &layout::legacy_dirty_files_path(&session_dir),
+                &old,
+            )
+            .unwrap();
             let gate = retain_stale_fragments(&worktree, vec!["app.py".into()]);
             assert_eq!(gate.rel_paths, ["app.py"]);
             gate
@@ -1832,9 +2045,19 @@ mod fingerprint_drift_tests {
             "app.py".into(),
             mtime_ns_of(&worktree.join("app.py")).unwrap(),
         )]);
-        apply_l1_overlay_updates(&worktree, &[local], &mtimes, gate.session_meta).unwrap();
-        let manifest =
-            ecp_core::session::DirtyFiles::read(&session_dir.join("dirty_files.json")).unwrap();
+        apply_l1_overlay_updates(
+            &worktree,
+            &[local],
+            &mtimes,
+            &HashMap::new(),
+            &[],
+            gate.session_meta,
+        )
+        .unwrap();
+        let manifest = ecp_core::session::DirtyEvents::read(
+            &ecp_core::session::layout::dirty_events_path(&session_dir),
+        )
+        .unwrap();
         assert_eq!(manifest.entries["app.py"].format, FRAGMENT_FORMAT_V5);
         assert!(manifest.from_current_builder());
         assert!(retain_stale_fragments(&worktree, vec!["app.py".into()])
@@ -2191,8 +2414,10 @@ mod fingerprint_drift_tests {
         ensure_fresh(IndexNeed::NearCurrent, &graph_path, &pkg).unwrap();
         assert_eq!(test_counters::reanalyze_paths(), 1);
         let session_dir = resolve_session_overlay_dir(&worktree).unwrap();
-        let manifest =
-            ecp_core::session::DirtyFiles::read(&session_dir.join("dirty_files.json")).unwrap();
+        let manifest = ecp_core::session::DirtyEvents::read(
+            &ecp_core::session::layout::dirty_events_path(&session_dir),
+        )
+        .unwrap();
         let keys: Vec<&str> = manifest.entries.keys().map(String::as_str).collect();
         assert_eq!(keys, ["pkg/a.py"]);
     }

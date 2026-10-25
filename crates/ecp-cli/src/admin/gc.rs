@@ -9,7 +9,7 @@ use crate::commit_lookup::{
 };
 use crate::git::safe_exec;
 use ecp_core::registry::{CommitBuildMeta, CommitDirName, FileLock};
-use ecp_core::session::{DirtyFiles, SessionMeta};
+use ecp_core::session::{layout, DirtyEvents, DirtyFiles, SessionMeta};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::fs;
 use std::io;
@@ -524,11 +524,18 @@ fn graph_format_version(graph: &Path) -> Option<u32> {
 /// in and has not yet committed the manifest naming it.
 const ORPHAN_FRAGMENT_IDLE_SECS: u64 = 3600;
 
-/// Removes the fragment bins of each session that its `dirty_files.json`
-/// no longer names: bins are content-addressed, so every save of a dirty
-/// file writes a new one, and a manifest another builder wrote is replaced
-/// whole. Leftover `.tmp` writes go too. A session whose manifest cannot be
-/// read keeps its bins, and so does one whose writer holds its overlay lock.
+/// Removes the fragment bins of each session that its manifest no longer
+/// names: bins are content-addressed, so every save of a dirty file writes a
+/// new one, and a manifest another builder wrote is replaced whole. Leftover
+/// `.tmp` writes go too. Both namespaces are swept, each against its own
+/// manifest: `l1/fragments/` against `l1/dirty_events.json`, the legacy
+/// `graph_overlay/` against the legacy `dirty_files.json` an older binary
+/// writes. A namespace whose manifest cannot be read keeps its bins, and a
+/// session whose writer holds its overlay lock keeps everything.
+///
+/// The legacy namespace is retired whole (manifest and bins) once nothing
+/// has written it for [`SESSION_IDLE_HOURS`]: today's binary never writes
+/// it, so only an older binary still running in the session keeps it alive.
 pub fn sweep_stale_fragments(repo_root: &Path, dry_run: bool) -> io::Result<SweepStats> {
     let mut stats = SweepStats::default();
     let Ok(sessions) = fs::read_dir(repo_root.join("sessions")) else {
@@ -541,8 +548,10 @@ pub fn sweep_stale_fragments(repo_root: &Path, dry_run: bool) -> io::Result<Swee
             continue;
         }
         let dir = session.path();
-        let overlay = dir.join("graph_overlay");
-        if !overlay.is_dir() {
+        let fragments = layout::fragments_dir(&dir);
+        let legacy = layout::legacy_overlay_dir(&dir);
+        let legacy_manifest = layout::legacy_dirty_files_path(&dir);
+        if !fragments.is_dir() && !legacy.is_dir() && !legacy_manifest.is_file() {
             continue;
         }
         // A real GC retires idle sessions before this sweep. A dry run must
@@ -558,45 +567,121 @@ pub fn sweep_stale_fragments(repo_root: &Path, dry_run: bool) -> io::Result<Swee
         ) else {
             continue;
         };
-        let Ok(bins) = fs::read_dir(&overlay) else {
+        let referenced = manifest_names(DirtyEvents::read(&layout::dirty_events_path(&dir)), |m| {
+            m.entries
+                .into_values()
+                .filter_map(|entry| entry.fragment_id)
+                .collect()
+        });
+        sweep_orphan_bins(&fragments, referenced, now, dry_run, &mut stats);
+
+        if legacy_namespace_idle(&legacy_manifest, &legacy, now) {
+            retire_legacy_namespace(&legacy_manifest, &legacy, dry_run, &mut stats);
             continue;
-        };
-        let referenced: FxHashSet<String> = match DirtyFiles::read(&dir.join("dirty_files.json")) {
-            Ok(manifest) => manifest
-                .entries
+        }
+        let referenced = manifest_names(DirtyFiles::read(&legacy_manifest), |m| {
+            m.entries
                 .into_values()
                 .map(|entry| entry.fragment_id)
-                .collect(),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => FxHashSet::default(),
-            Err(_) => continue,
-        };
-        for bin in bins.flatten() {
-            let file_name = bin.file_name().to_string_lossy().to_string();
-            let orphan = match file_name.strip_suffix(".bin") {
-                Some(fragment_id) => !referenced.contains(fragment_id),
-                None => file_name.ends_with(".tmp"),
-            };
-            let Ok(meta) = bin.metadata() else {
-                continue;
-            };
-            if !orphan
-                || !meta.is_file()
-                || !idle_for(meta.modified().ok(), now, ORPHAN_FRAGMENT_IDLE_SECS)
-            {
-                continue;
-            }
-            stats.marked += 1;
-            let path = bin.path();
-            stats.dispose(&path, dry_run, || match fs::remove_file(&path) {
-                Ok(()) => true,
-                Err(e) => {
-                    eprintln!("gc: remove {}: {e}", path.display());
-                    false
-                }
-            });
-        }
+                .collect()
+        });
+        sweep_orphan_bins(&legacy, referenced, now, dry_run, &mut stats);
     }
     Ok(stats)
+}
+
+/// The bin names a manifest read yields: none for an absent manifest, and
+/// `None` (keep every bin) for one that cannot be read.
+fn manifest_names<M>(
+    read: io::Result<M>,
+    names: impl FnOnce(M) -> FxHashSet<String>,
+) -> Option<FxHashSet<String>> {
+    match read {
+        Ok(manifest) => Some(names(manifest)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Some(FxHashSet::default()),
+        Err(_) => None,
+    }
+}
+
+/// Removes each settled `.bin` in `bins_dir` that `referenced` does not
+/// name, and each settled `.tmp`. `referenced == None` keeps every bin.
+fn sweep_orphan_bins(
+    bins_dir: &Path,
+    referenced: Option<FxHashSet<String>>,
+    now: SystemTime,
+    dry_run: bool,
+    stats: &mut SweepStats,
+) {
+    let Some(referenced) = referenced else {
+        return;
+    };
+    let Ok(bins) = fs::read_dir(bins_dir) else {
+        return;
+    };
+    for bin in bins.flatten() {
+        let file_name = bin.file_name().to_string_lossy().to_string();
+        let orphan = match file_name.strip_suffix(".bin") {
+            Some(fragment_id) => !referenced.contains(fragment_id),
+            None => file_name.ends_with(".tmp"),
+        };
+        let Ok(meta) = bin.metadata() else {
+            continue;
+        };
+        if !orphan
+            || !meta.is_file()
+            || !idle_for(meta.modified().ok(), now, ORPHAN_FRAGMENT_IDLE_SECS)
+        {
+            continue;
+        }
+        stats.marked += 1;
+        let path = bin.path();
+        stats.dispose(&path, dry_run, || match fs::remove_file(&path) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("gc: remove {}: {e}", path.display());
+                false
+            }
+        });
+    }
+}
+
+/// Whether the legacy namespace exists and its last write (the newer of the
+/// manifest's and the bins directory's mtime) lies [`SESSION_IDLE_HOURS`]
+/// back. An unknown time is not idle.
+fn legacy_namespace_idle(manifest: &Path, bins_dir: &Path, now: SystemTime) -> bool {
+    let mtime = |path: &Path| fs::metadata(path).and_then(|m| m.modified()).ok();
+    let (manifest_mtime, dir_mtime) = (mtime(manifest), mtime(bins_dir));
+    if manifest_mtime.is_none() && dir_mtime.is_none() {
+        return false;
+    }
+    idle_for(
+        manifest_mtime.max(dir_mtime),
+        now,
+        SESSION_IDLE_HOURS as u64 * 3600,
+    )
+}
+
+/// Removes the legacy manifest and bins directory, each counted once.
+fn retire_legacy_namespace(
+    manifest: &Path,
+    bins_dir: &Path,
+    dry_run: bool,
+    stats: &mut SweepStats,
+) {
+    if manifest.is_file() {
+        stats.marked += 1;
+        stats.dispose(manifest, dry_run, || match fs::remove_file(manifest) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("gc: remove {}: {e}", manifest.display());
+                false
+            }
+        });
+    }
+    if bins_dir.is_dir() {
+        stats.marked += 1;
+        stats.dispose(bins_dir, dry_run, || retire_and_remove(bins_dir));
+    }
 }
 
 /// Renames `dir` out of readers' view, then deletes it in this process.
@@ -984,6 +1069,115 @@ mod tests {
         assert!(!stale.exists(), "settled orphan tmp deleted");
         assert!(fresh.exists(), "fresh tmp (live writer) preserved");
         assert!(keep.exists(), "non-tmp registry untouched");
+    }
+
+    /// A session dir with no meta (never idle) under `<tmp>/sessions/sid`.
+    fn session_dir(tmp: &Path) -> PathBuf {
+        let dir = tmp.join("sessions").join("sid");
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Today's gc must read `l1/dirty_events.json`: an older gc swept only
+    /// `graph_overlay/` against `dirty_files.json`, and would have judged a
+    /// bin only the new manifest names an orphan. The settled orphan beside
+    /// it is the control that the sweep ran on `l1/fragments/`.
+    #[test]
+    fn test_sweep_stale_fragments_bin_named_only_by_new_namespace_survives() {
+        use ecp_core::contracts::dirty_event::PathClass;
+        use ecp_core::session::DirtyEventEntry;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = session_dir(tmp.path());
+        let mut manifest = DirtyEvents::empty(ecp_core::contracts::routing::SizeCap::BUILT_IN);
+        let mut named = DirtyEventEntry::tombstone(PathClass::SOURCE);
+        named.change = ecp_core::contracts::dirty_event::PathChange::Modified;
+        named.fragment_id = Some("named".into());
+        manifest.entries.insert("a.rs".into(), named);
+        manifest.entries.insert(
+            "gone.rs".into(),
+            DirtyEventEntry::tombstone(PathClass::SOURCE),
+        );
+        DirtyEvents::write_atomic(&layout::dirty_events_path(&dir), &manifest).unwrap();
+        fs::create_dir_all(layout::fragments_dir(&dir)).unwrap();
+        let (kept, orphan) = (
+            layout::fragment_path(&dir, "named"),
+            layout::fragment_path(&dir, "orphan"),
+        );
+        for bin in [&kept, &orphan] {
+            fs::write(bin, b"bin").unwrap();
+            backdate(bin, 2 * ORPHAN_FRAGMENT_IDLE_SECS);
+        }
+        // The legacy manifest an older binary keeps writing names nothing.
+        DirtyFiles::write_atomic(&layout::legacy_dirty_files_path(&dir), &DirtyFiles::empty())
+            .unwrap();
+
+        let stats = sweep_stale_fragments(tmp.path(), false).unwrap();
+
+        assert!(kept.exists(), "a bin the new manifest names was swept");
+        assert!(
+            !orphan.exists(),
+            "control: the settled orphan in l1/fragments/ was kept"
+        );
+        assert_eq!(stats.removed, 1);
+        assert!(
+            layout::legacy_dirty_files_path(&dir).exists(),
+            "a live legacy namespace was retired"
+        );
+    }
+
+    /// No binary has written the legacy namespace for a day: its manifest
+    /// and bins go whole, the new namespace beside it stays.
+    #[test]
+    fn test_sweep_stale_fragments_idle_legacy_namespace_removed_whole() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = session_dir(tmp.path());
+        let legacy_bins = layout::legacy_overlay_dir(&dir);
+        fs::create_dir_all(&legacy_bins).unwrap();
+        let mut legacy = DirtyFiles::empty();
+        legacy.entries.insert(
+            "a.rs".into(),
+            ecp_core::session::DirtyEntry {
+                mtime_ns: 1,
+                content_hash: "named".into(),
+                fragment_id: "named".into(),
+                tantivy_delta_segment: None,
+                parse_failed: false,
+                dirty_symbols: vec![],
+                format: ecp_core::session::FRAGMENT_FORMAT_V5,
+            },
+        );
+        let legacy_manifest = layout::legacy_dirty_files_path(&dir);
+        DirtyFiles::write_atomic(&legacy_manifest, &legacy).unwrap();
+        fs::write(legacy_bins.join("named.bin"), b"bin").unwrap();
+        let idle = 2 * SESSION_IDLE_HOURS as u64 * 3600;
+        backdate(&legacy_bins.join("named.bin"), idle);
+        backdate(&legacy_bins, idle);
+        backdate(&legacy_manifest, idle);
+        let manifest = DirtyEvents::empty(ecp_core::contracts::routing::SizeCap::BUILT_IN);
+        DirtyEvents::write_atomic(&layout::dirty_events_path(&dir), &manifest).unwrap();
+
+        let dry = sweep_stale_fragments(tmp.path(), true).unwrap();
+        assert!(
+            legacy_manifest.exists() && legacy_bins.exists(),
+            "a dry run deleted"
+        );
+        let stats = sweep_stale_fragments(tmp.path(), false).unwrap();
+
+        assert_eq!(
+            dry.would_remove,
+            [legacy_manifest.clone(), legacy_bins.clone()]
+        );
+        assert_eq!(stats.removed, 2);
+        assert!(!legacy_manifest.exists());
+        assert!(!legacy_bins.exists());
+        assert!(layout::dirty_events_path(&dir).exists());
+        let leftovers: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("graph_overlay"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 
     #[test]
