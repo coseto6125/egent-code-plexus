@@ -1080,6 +1080,17 @@ route_identity c no route producer for this language
 route_identity cpp no route producer for this language
 route_identity dart no route producer: Dart annotations are stored without their arguments, so no route path is detected
 route_identity swift no route producer for this language
+route_prefix c no route producer for this language
+route_prefix cpp no route producer for this language
+route_prefix csharp [Route("api/[controller]")] class prefix is not composed yet
+route_prefix dart no route producer for this language
+route_prefix javascript Express app.use mount is cross-file and needs a builder.rs join
+route_prefix kotlin shares the Spring decorator path with Java; no Kotlin fixture yet
+route_prefix php Laravel groups are covered by php_laravel_route_groups.rs
+route_prefix python FastAPI prefix needs the builder.rs decorator-pass dedupe
+route_prefix ruby Rails scopes are covered by ruby_rails_routes.rs
+route_prefix rust no group-prefix composition yet
+route_prefix swift no route producer for this language
 send_literal c pre-existing gap
 send_literal cpp pre-existing gap
 send_literal csharp pre-existing gap
