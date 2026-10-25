@@ -239,10 +239,11 @@ fn controller_prefixes(verb: tree_sitter::Node, source: &[u8]) -> Option<Vec<Str
 }
 
 /// A NestJS route path under one `@Controller` prefix. An empty prefix
-/// leaves the method path as written; any other goes through the one
-/// prefix rule, C1 `join_route_path`.
+/// leaves a method path as written; any other prefix, or an empty method
+/// path (`@Get()`), goes through the one prefix rule, C1 `join_route_path`,
+/// so `@Controller() @Get()` is `/`.
 fn nestjs_route_path(prefix: &str, path: &str) -> String {
-    match prefix.trim().is_empty() {
+    match prefix.trim().is_empty() && !path.trim().is_empty() {
         true => path.to_string(),
         false => ecp_core::contracts::identity::join_route_path(prefix, path),
     }
@@ -326,6 +327,9 @@ struct TypeScriptCaptureIndices {
     /// string literal is a route, gated by `has_nestjs` import presence).
     nestjs_decorator_verb: Option<u32>,
     nestjs_decorator_path: Option<u32>,
+    /// The argument list of a route decorator: `@Get()` has an empty one,
+    /// which names the controller prefix itself.
+    nestjs_decorator_args: Option<u32>,
     /// Arg-position arrow / function-expression callbacks — emits `<anonymous>`
     /// Function nodes so attach_to_enclosing can host inner calls.
     function_anonymous: Option<u32>,
@@ -375,6 +379,7 @@ impl TypeScriptProvider {
             nestjs_method: query.capture_index_for_name("nestjs.method.name"),
             nestjs_decorator_verb: query.capture_index_for_name("nestjs.decorator.verb"),
             nestjs_decorator_path: query.capture_index_for_name("nestjs.decorator.path"),
+            nestjs_decorator_args: query.capture_index_for_name("nestjs.decorator.args"),
             blind_eval: query.capture_index_for_name("blind.eval"),
             blind_function_ctor: query.capture_index_for_name("blind.function_ctor"),
             blind_dynamic_import: query.capture_index_for_name("blind.dynamic_import"),
@@ -465,6 +470,7 @@ impl LanguageProvider for TypeScriptProvider {
             let mut nestjs_method_node: Option<tree_sitter::Node> = None;
             let mut nestjs_decorator_verb_node: Option<tree_sitter::Node> = None;
             let mut nestjs_decorator_path_node: Option<tree_sitter::Node> = None;
+            let mut nestjs_decorator_args_node: Option<tree_sitter::Node> = None;
 
             for cap in m.captures() {
                 let cap_idx = Some(cap.index);
@@ -534,6 +540,8 @@ impl LanguageProvider for TypeScriptProvider {
                     nestjs_decorator_verb_node = Some(cap.node);
                 } else if cap_idx == idx.nestjs_decorator_path {
                     nestjs_decorator_path_node = Some(cap.node);
+                } else if cap_idx == idx.nestjs_decorator_args {
+                    nestjs_decorator_args_node = Some(cap.node);
                 } else if cap_idx == idx.blind_eval {
                     push_blind_spot(
                         &mut blind_spots,
@@ -788,13 +796,18 @@ impl LanguageProvider for TypeScriptProvider {
             // `has_nestjs` import flag is known (a few lines later in this
             // function — we can't gate here because import processing
             // happens in the same match loop).
-            if let (Some(verb_node), Some(path_node)) =
-                (nestjs_decorator_verb_node, nestjs_decorator_path_node)
-            {
-                if let (Some(prefixes), Ok(verb_str), Ok(path_str)) = (
+            // `@Get()` names no path: its route is the controller prefix.
+            let path_text = match (nestjs_decorator_path_node, nestjs_decorator_args_node) {
+                (Some(path_node), _) => {
+                    std::str::from_utf8(&source[path_node.start_byte()..path_node.end_byte()]).ok()
+                }
+                (None, Some(args)) if args.named_child_count() == 0 => Some(""),
+                _ => None,
+            };
+            if let (Some(verb_node), Some(path_str)) = (nestjs_decorator_verb_node, path_text) {
+                if let (Some(prefixes), Ok(verb_str)) = (
                     controller_prefixes(verb_node, source),
                     std::str::from_utf8(&source[verb_node.start_byte()..verb_node.end_byte()]),
-                    std::str::from_utf8(&source[path_node.start_byte()..path_node.end_byte()]),
                 ) {
                     let prefixes = match prefixes.is_empty() {
                         true => vec![String::new()],

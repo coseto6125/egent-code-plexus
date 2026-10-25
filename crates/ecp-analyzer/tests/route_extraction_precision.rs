@@ -966,12 +966,13 @@ fn php_facade_get_emits_zero_routes() {
 
 // ─── TypeScript — NestJS decorator routes ────────────────────────────
 
+/// Stands for: bare-path NestJS decorators (`@Get('list')`, no leading
+/// `/`) emit routes under the `@nestjs/*` gate, each under its controller's
+/// prefix (P8b, C1 `join_route_path`). Without the lax helper and the gate
+/// (parity-r3 PR #152) all 89 corpus-side NestJS decorator routes surfaced
+/// as ref_over. Before P8b the route kept the method path alone (`/list`).
 #[test]
-fn ts_nestjs_decorator_routes_emit_with_bare_paths() {
-    // `@Get('users')` / `@Post('users/:id')` shapes — bare-path NestJS
-    // convention. Without the lax helper + `@nestjs/*` gate added in
-    // parity-r3 PR #152, all 89 corpus-side NestJS decorator routes
-    // surfaced as ref_over.
+fn ts_nestjs_decorator_bare_paths_emit_under_controller_prefix() {
     let src = r#"
         import { Controller, Get, Post, Delete } from '@nestjs/common';
 
@@ -989,7 +990,11 @@ fn ts_nestjs_decorator_routes_emit_with_bare_paths() {
     "#;
     assert_routes(
         &ts_routes(src),
-        &[("GET", "/list"), ("POST", "/create"), ("DELETE", "/:id")],
+        &[
+            ("GET", "/users/list"),
+            ("POST", "/users/create"),
+            ("DELETE", "/users/:id"),
+        ],
     );
 }
 

@@ -1,10 +1,10 @@
 //! Slice R4b: the CLI prints an owner through the display owner and the shared
 //! resolver keeps lexically scoped nodes as candidates (design A §4.5, §4.4).
 //!
-//! No language opts in yet, so a real build writes an empty lexical-parent
-//! table and the display owner of every node equals its stored owner. The
-//! scoped-node tests plant a row through the table API, as
-//! `lexical_parent_table.rs` does.
+//! Only Rust scopes a kind (R6), and the samples nest no fn, so a real build
+//! of them writes an empty lexical-parent table and the display owner of
+//! every node equals its stored owner. The scoped-node tests plant a row
+//! through the table API, as `lexical_parent_table.rs` does.
 
 use ecp_analyzer::java::JavaProvider;
 use ecp_analyzer::python::PythonProvider;
@@ -75,7 +75,7 @@ fn access(bytes: &[u8]) -> &ArchivedZeroCopyGraph {
 #[test]
 fn test_display_owner_m1_m2_unchanged_on_sample_repo() {
     let graph = build(&SAMPLES);
-    assert!(graph.lexical_parents.is_empty(), "no language opts in yet");
+    assert!(graph.lexical_parents.is_empty(), "the samples nest no fn");
     let bytes = archive(&graph);
     let archived = access(&bytes);
     let merged = MergedGraph::new(archived, None);
@@ -159,7 +159,11 @@ fn helper_graph(nested_only: bool) -> (rkyv::util::AlignedVec, u32, u32) {
 
 /// Stands for: a bare name shared by a top-level function and one nested in a
 /// function stays ambiguous through the shared resolver, so `impact` and
-/// `inspect` list both and never pick one silently.
+/// `inspect` list both and never pick one silently. A root and a display
+/// owner each select one (C1 "Bare name": "`::helper` and `outer.helper`
+/// each give `Unique`"; C1 request table: `::load` matches "a `load` with
+/// no owner and no lexical parent"). Before R6 the root read the stored
+/// owner only, so `::helper` listed both.
 #[test]
 fn test_resolve_target_bare_name_with_scoped_node_stays_ambiguous() {
     let (bytes, top, nested) = helper_graph(false);
@@ -172,14 +176,15 @@ fn test_resolve_target_bare_name_with_scoped_node_stays_ambiguous() {
     );
     assert!(!archived.is_lexically_scoped(top), "setup: top is not");
 
-    for text in ["helper", "::helper"] {
-        let request = target_request(text, None, None).unwrap();
+    let resolve = |text: &str| resolve_target(&merged, &target_request(text, None, None).unwrap());
+    assert!(
+        matches!(resolve("helper"), TargetResolution::Ambiguous(a) if a.total() == 2),
+        "helper lists both declarations"
+    );
+    for (text, want) in [("::helper", top), ("outer.helper", nested)] {
         assert!(
-            matches!(
-                resolve_target(&merged, &request),
-                TargetResolution::Ambiguous(_)
-            ),
-            "{text} lists both declarations"
+            matches!(resolve(text), TargetResolution::Unique(c) if c.node == want),
+            "{text} selects node {want}"
         );
     }
 }

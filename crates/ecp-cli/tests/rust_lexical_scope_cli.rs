@@ -236,12 +236,10 @@ fn test_impact_overlay_comment_edit_nested_helper_same_callers_as_index() {
 }
 
 /// Stands for: a nested fn in a dirty file is named by its display owner,
-/// as in the index. Blocked: `MergedGraph::display_owner` and the target
-/// qualifier read a virtual node's stored owner only, and the overlay view
-/// keeps no lexical parent per virtual node (`session/merged.rs`
-/// `display_owner`; `session/view.rs` `OverlayView`).
+/// as in the index: the overlay view keeps each virtual node's lexical
+/// parent, and the target qualifier walks it. Before the fix `outer.helper`
+/// selected nothing on a dirty file.
 #[test]
-#[ignore = "needs a lexical parent per overlay virtual node"]
 fn test_impact_overlay_outer_dot_helper_selects_nested() {
     let repo = Repo::indexed(&[("src/lib.rs", LIB)]);
     repo.write("src/lib.rs", &format!("{LIB}// comment-only edit\n"));
@@ -254,6 +252,40 @@ fn test_impact_overlay_outer_dot_helper_selects_nested() {
         blast(&repo.impact("::helper", &[])),
         (1, vec![caller("top_caller", 5)])
     );
+}
+
+/// Stands for: `inspect` and the `impact` start row print the same
+/// `ownerClass` for each `helper` from a dirty copy as from the index:
+/// `outer` for the nested one (its lexical parent, stored owner empty),
+/// none for the file-level one. Before the fix the dirty copy printed
+/// `null` for the nested `helper` in both commands.
+#[test]
+fn test_inspect_overlay_nested_helper_owner_class_matches_index() {
+    let repo = Repo::indexed(&[("src/lib.rs", LIB)]);
+    let owners = || {
+        ["helper@10", "helper@1"].map(|target| {
+            let out = repo.ecp(&["inspect", target, "--repo", ".", "--format", "json"]);
+            assert!(out.status.success(), "inspect {target}: {}", stderr(&out));
+            let inspected = json_of(&out)["symbol"]["ownerClass"].clone();
+            let out = repo.impact(target, &[]);
+            assert!(out.status.success(), "impact {target}: {}", stderr(&out));
+            let start = json_of(&out)["impact"]
+                .as_array()
+                .and_then(|rows| rows.iter().find(|r| r["depth"] == 0).cloned())
+                .unwrap_or_else(|| panic!("impact {target}: no start row"));
+            (inspected, start["ownerClass"].clone())
+        })
+    };
+    let indexed = owners();
+    let outer = Value::from("outer");
+    assert_eq!(
+        indexed,
+        [(outer.clone(), outer), (Value::Null, Value::Null)]
+    );
+
+    repo.write("src/lib.rs", &format!("{LIB}// comment-only edit\n"));
+
+    assert_eq!(owners(), indexed);
 }
 
 /// Stands for: a session that a previous binary wrote (nested fn stored with

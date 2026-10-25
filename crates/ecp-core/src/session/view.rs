@@ -344,6 +344,12 @@ pub struct OverlayView {
     /// whose [`owner_key`] is its name, in source order. Types with none have
     /// no entry.
     type_ctors: FxHashMap<u32, Vec<u32>>,
+    /// Scoped virtual idx → its lexical parent's virtual idx, from the fresh
+    /// parse by the index's one derivation ([`lexical_parents`]). The
+    /// graph's table has no row for a virtual node, so the merged display
+    /// owner reads these. Empty when no dirty file's language scopes a kind
+    /// ([`lexical_scope_kinds`]).
+    lexical_parents: FxHashMap<u32, u32>,
     /// Base declarations of a dirty (not removed) path that the pairing left
     /// unpaired although the parse still names their anchor, grouped by
     /// (path, kind, owner, name) in graph order. Their nodes are suppressed,
@@ -644,6 +650,7 @@ impl OverlayView {
         let mut out_adj: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
         let mut in_adj: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
         let gaps: RefCell<Vec<CallGap>> = RefCell::new(Vec::new());
+        let lexical_parents: FxHashMap<u32, u32>;
         {
             let mut callables = OverlayNames::new(ResolveTarget::Callable);
             let mut values = OverlayNames::new(ResolveTarget::Value);
@@ -711,6 +718,7 @@ impl OverlayView {
                 &replaced,
                 &later_overloads,
             );
+            lexical_parents = facts.dirty_lexical_parents.clone();
 
             // The index's `emit_overload_references`, in the same order.
             let mut firsts: Vec<u32> = later_overloads.keys().copied().collect();
@@ -1514,6 +1522,7 @@ impl OverlayView {
             out_adj,
             in_adj,
             type_ctors,
+            lexical_parents,
             hidden,
             gaps,
         })
@@ -1624,6 +1633,19 @@ impl OverlayView {
     pub fn constructors_of(&self, idx: u32) -> &[u32] {
         self.type_ctors.get(&idx).map(Vec::as_slice).unwrap_or(&[])
     }
+
+    /// The lexical parent of the virtual `idx`, a virtual index of the same
+    /// file: the callable that declares it in the fresh parse. `None` for an
+    /// unscoped virtual node and for every base index.
+    pub fn lexical_parent(&self, idx: u32) -> Option<u32> {
+        self.lexical_parents.get(&idx).copied()
+    }
+
+    /// How many virtual nodes have a lexical parent: the most steps a walk
+    /// up the virtual parents can take without a cycle.
+    pub fn lexical_parent_count(&self) -> usize {
+        self.lexical_parents.len()
+    }
 }
 
 /// Layout version of [`OverlayView::to_cache_bytes`]. Bump it whenever the
@@ -1639,7 +1661,9 @@ impl OverlayView {
 /// 11 (P-flags): a dirty C# method carries its own flags; a 10 view read
 /// guessed ones and recorded a gap the 11 view does not.
 /// 12 (ctor-span): a virtual node carries its columns; an 11 view has none.
-pub const VIEW_CACHE_FORMAT: u32 = 12;
+/// 13 (R6 fix): the view stores each scoped virtual node's lexical parent; a
+/// 12 view has none.
+pub const VIEW_CACHE_FORMAT: u32 = 13;
 
 /// Every reason [`OverlayView::build`] puts on a [`ViewEdge`]. A cached view
 /// stores each reason as its index here; a view with an unlisted reason is
@@ -1678,6 +1702,7 @@ struct CachedView {
     dirty_base: Vec<u32>,
     edges: Vec<CachedEdge>,
     type_ctors: Vec<(u32, Vec<u32>)>,
+    lexical_parents: Vec<(u32, u32)>,
     hidden: Vec<HiddenDecl>,
     gaps: Vec<CallGap>,
 }
@@ -1740,6 +1765,10 @@ impl CachedView {
                 .type_ctors
                 .iter()
                 .all(|(ty, ctors)| virt(*ty) && ctors.iter().copied().all(virt))
+            && self
+                .lexical_parents
+                .iter()
+                .all(|&(node, parent)| virt(node) && virt(parent))
     }
 
     fn to_bytes(&self) -> Vec<u8> {
@@ -1807,6 +1836,12 @@ impl OverlayView {
                 self.type_ctors
                     .iter()
                     .map(|(&ty, ctors)| (ty, ctors.clone()))
+                    .collect(),
+            ),
+            lexical_parents: sorted(
+                self.lexical_parents
+                    .iter()
+                    .map(|(&node, &parent)| (node, parent))
                     .collect(),
             ),
             hidden: self.hidden.clone(),
@@ -1878,6 +1913,7 @@ impl OverlayView {
             out_adj,
             in_adj,
             type_ctors: cached.type_ctors.into_iter().collect(),
+            lexical_parents: cached.lexical_parents.into_iter().collect(),
             hidden: cached.hidden,
             gaps: cached.gaps,
         })
@@ -7866,5 +7902,98 @@ mod tests {
         let mut empty: Vec<CallGap> = Vec::new();
         dedup_gaps(&mut empty);
         assert!(empty.is_empty());
+    }
+
+    /// A dirty Rust file: `outer` on lines 1-5 nests `helper` on line 2. The
+    /// base holds the same two, nested by span as the index parses them.
+    fn nested_rust_view_parts() -> (Vec<u8>, OverlayFileInput) {
+        let mut fx = GraphFixture::new();
+        let outer = fx.func("src/a.rs", "outer");
+        let helper = fx.func("src/a.rs", "helper");
+        fx.span(outer, (0, 0, 4, 0));
+        fx.span(helper, (1, 0, 1, 0));
+        let at = |name: &str, start_line: u32, end_line: u32| OverlaySymbol {
+            start_line,
+            end_line,
+            ..sym(name, &[])
+        };
+        let file = OverlayFileInput {
+            export_aliases: Vec::new(),
+            rel_path: "src/a.rs".to_string(),
+            symbols: vec![at("outer", 1, 5), at("helper", 2, 2)],
+            imports: vec![],
+        };
+        (fx.into_bytes(), file)
+    }
+
+    /// Stands for: the view keeps each scoped virtual node's lexical parent
+    /// from the fresh parse, and the session view cache stores it, so a
+    /// cache hit answers the display owner a fresh build answers.
+    #[test]
+    fn test_from_cache_bytes_rust_nested_fn_round_trip_keeps_lexical_parent() {
+        let (bytes, file) = nested_rust_view_parts();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let view = OverlayView::build(graph, &[file]).unwrap();
+        let (outer, helper) = (view.base_len(), view.base_len() + 1);
+        assert_eq!(view.lexical_parent(helper), Some(outer));
+        assert_eq!(view.lexical_parent(outer), None);
+        assert_eq!(view.lexical_parent(0), None, "a base index has no view row");
+        assert_eq!(view.lexical_parent_count(), 1);
+
+        let decoded =
+            OverlayView::from_cache_bytes(&view.to_cache_bytes(), graph.nodes.len()).unwrap();
+
+        assert_eq!(decoded, view);
+        assert_eq!(decoded.lexical_parent(helper), Some(outer));
+    }
+
+    /// Stands for: a cached row whose node or parent lies outside virtual
+    /// space is refused, as every other cached index is.
+    #[test]
+    fn test_from_cache_bytes_lexical_parent_outside_virtual_space_returns_none() {
+        let (bytes, file) = nested_rust_view_parts();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let view = OverlayView::build(graph, &[file]).unwrap();
+        type Mutation = (&'static str, fn(&mut CachedView));
+        let cases: [Mutation; 3] = [
+            ("node in base space", |c| {
+                c.lexical_parents[0].0 = c.base_len - 1
+            }),
+            ("parent in base space", |c| {
+                c.lexical_parents[0].1 = c.base_len - 1
+            }),
+            ("parent past merged space", |c| {
+                c.lexical_parents[0].1 = c.base_len + c.nodes.len() as u32
+            }),
+        ];
+        assert_eq!(view.to_cached().unwrap().lexical_parents.len(), 1);
+        for (what, mutate) in cases {
+            let mut cached = view.to_cached().unwrap();
+            mutate(&mut cached);
+            assert!(
+                OverlayView::from_cache_bytes(&cached.to_bytes(), graph.nodes.len()).is_none(),
+                "{what}"
+            );
+        }
+    }
+
+    /// Stands for: virtual rows that form a cycle (only a corrupt cache
+    /// could hold them) end the display-owner walk with no owner instead of
+    /// a loop.
+    #[test]
+    fn test_display_owner_cyclic_virtual_rows_returns_none() {
+        let (bytes, file) = nested_rust_view_parts();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let mut cached = OverlayView::build(graph, &[file])
+            .unwrap()
+            .to_cached()
+            .unwrap();
+        let (outer, helper) = (cached.base_len, cached.base_len + 1);
+        cached.lexical_parents = vec![(outer, helper), (helper, outer)];
+        let view = OverlayView::from_cached(cached, graph.nodes.len()).unwrap();
+        let merged = crate::session::merged::MergedGraph::new(graph, Some(&view));
+
+        assert_eq!(merged.display_owner(helper), None);
+        assert_eq!(merged.display_owner(outer), None);
     }
 }

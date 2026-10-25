@@ -130,19 +130,60 @@ impl<'a> MergedGraph<'a> {
         }
     }
 
-    /// The owner text a reader prints for merged-space `idx` (design A 4.5):
-    /// [`ArchivedZeroCopyGraph::display_owner`] for a base node, the stored
-    /// owner for a virtual node (the overlay carries no lexical parents).
+    /// The owner text a reader prints for merged-space `idx` (design A 4.5),
+    /// by [`ArchivedZeroCopyGraph::display_owner`]'s rule on either side of
+    /// the merge: the first stored owner up the lexical-parent chain, then
+    /// each parent's name, joined by `::`. A base node reads the graph's
+    /// table, a virtual node the overlay's ([`OverlayView::lexical_parent`]),
+    /// so a nested fn of a dirty file prints the path the index prints.
+    /// `None` for an out-of-range index and for rows that form a cycle.
     /// Matching reads [`MergedNode::owner_class`] instead.
     #[inline]
     pub fn display_owner(&self, idx: u32) -> Option<std::borrow::Cow<'a, str>> {
         if idx < self.base_len() {
-            self.graph.display_owner(idx)
-        } else {
-            self.node(idx)?
-                .owner_class(self)
-                .map(std::borrow::Cow::Borrowed)
+            return self.graph.display_owner(idx);
         }
+        let mut segments: Vec<&'a str> = Vec::new();
+        let mut current = idx;
+        let head = loop {
+            if let Some(owner) = self.node(current)?.owner_class(self) {
+                break Some(owner);
+            }
+            let Some(parent) = self.lexical_parent(current) else {
+                break None;
+            };
+            // Each row is one step, so more steps than rows is a cycle.
+            if segments.len() >= self.lexical_parent_count() {
+                return None;
+            }
+            segments.push(self.node(parent)?.name(self));
+            current = parent;
+        };
+        segments.extend(head);
+        segments.reverse();
+        match segments.as_slice() {
+            [] => None,
+            [only] => Some(std::borrow::Cow::Borrowed(*only)),
+            _ => Some(std::borrow::Cow::Owned(segments.join("::"))),
+        }
+    }
+
+    /// The lexical parent of merged-space `idx`: the graph's table for a
+    /// base node, the overlay's fresh parse for a virtual one. A parent lies
+    /// in its child's file, so a visible base node's parent is visible too.
+    #[inline]
+    pub fn lexical_parent(&self, idx: u32) -> Option<u32> {
+        match idx < self.base_len() {
+            true => self.graph.lexical_parent(idx),
+            false => self.view.and_then(|v| v.lexical_parent(idx)),
+        }
+    }
+
+    /// The lexical-parent rows of both sides of the merge: the most steps a
+    /// walk up [`Self::lexical_parent`] takes before it must be a cycle.
+    #[inline]
+    pub fn lexical_parent_count(&self) -> usize {
+        self.graph.lexical_parents.len() + self.view.map_or(0, OverlayView::lexical_parent_count)
     }
 
     /// Scan visibility of a BASE index: false when the view suppressed it
@@ -489,6 +530,11 @@ mod tests {
         assert_eq!(merged.node_count(), graph.nodes.len() as u32);
     }
 
+    /// Stands for: a dirty file rebuilds its lexical closure references and
+    /// keeps every other reason, both ends redirected to the virtual twins.
+    /// The file is Rust, which scopes a closure under its callable (R6): the
+    /// base spans nest as the index's parse nests them, so the base closure
+    /// has the scoped anchor the fresh parse gives and pairs with it.
     #[test]
     fn test_merge_closure_references_rebuilds_only_lexical_reason() {
         const CLOSURE_REFERENCE_REASON: &str = "closure:lexical_reference";
@@ -496,6 +542,9 @@ mod tests {
         let parent = fx.func("src/dirty.rs", "keep_fn");
         let closure = fx.func("src/dirty.rs", "<anonymous:1:2>");
         let old_closure = fx.func("src/dirty.rs", "<anonymous:9:2>");
+        // The dirty parse below: `keep_fn` on lines 1-3, the closure on 2.
+        fx.span(parent, (0, 0, 2, 0));
+        fx.span(closure, (1, 0, 1, 0));
         fx.edge_with(
             parent,
             closure,
@@ -746,5 +795,142 @@ mod tests {
         let deleted = OverlayView::build(graph, &[reader_input("Lib/Reader.cs", false)]).unwrap();
         let merged = MergedGraph::new(graph, Some(&deleted));
         assert!(merged.partial_parts(1).is_empty());
+    }
+
+    /// One declaration of a dirty file; lines are 1-based, columns 0-based.
+    fn decl(
+        name: &str,
+        kind: NodeKind,
+        owner: Option<&str>,
+        (start_line, end_line): (u32, u32),
+        (start_column, end_column): (u32, u32),
+    ) -> OverlaySymbol {
+        OverlaySymbol {
+            is_exported: false,
+            name: name.to_string(),
+            kind,
+            owner_class: owner.map(str::to_string),
+            start_line,
+            end_line,
+            start_column,
+            end_column,
+            calls: Vec::new(),
+            heritage: Vec::new(),
+            variant_refs: Vec::new(),
+            return_type: None,
+            generic_arity: 0,
+            flags: None,
+        }
+    }
+
+    fn source_file(rel_path: &str, symbols: Vec<OverlaySymbol>) -> OverlayFileInput {
+        OverlayFileInput {
+            export_aliases: Vec::new(),
+            rel_path: rel_path.to_string(),
+            symbols,
+            imports: vec![],
+        }
+    }
+
+    /// The merged index of the virtual node `name` of `path`.
+    fn virt(view: &OverlayView, path: &str, name: &str) -> u32 {
+        let at = view
+            .virtual_nodes()
+            .iter()
+            .position(|n| &*n.rel_path == path && n.name == name)
+            .unwrap_or_else(|| panic!("setup: {path} re-parses `{name}`"));
+        view.base_len() + at as u32
+    }
+
+    /// Stands for: a nested fn of a dirty Rust file prints the display
+    /// owner the index prints (`outer`, `A::new`, `A::new::pad`), read from
+    /// the overlay's own lexical parents. Two dirty files each keep their
+    /// own `helper`'s parent; a nested fn the edit adds prints its parent
+    /// too; one the edit deletes is gone. Before the fix every virtual node
+    /// printed its stored owner, empty for a scoped node.
+    #[test]
+    fn test_display_owner_dirty_rust_nested_fns_print_parent_chain() {
+        let mut fx = GraphFixture::new();
+        let outer = fx.func("src/a.rs", "outer");
+        let helper = fx.func("src/a.rs", "helper");
+        let gone = fx.func("src/a.rs", "gone");
+        fx.span(outer, (0, 0, 4, 0));
+        fx.span(helper, (1, 0, 1, 0));
+        fx.span(gone, (2, 0, 2, 0));
+        fx.func("src/b.rs", "run");
+        let bytes = fx.into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let f = NodeKind::Function;
+        let a = source_file(
+            "src/a.rs",
+            vec![
+                decl("outer", f, None, (1, 5), (0, 0)),
+                decl("helper", f, None, (2, 2), (0, 0)),
+                decl("added", f, None, (4, 4), (0, 0)),
+            ],
+        );
+        let b = source_file(
+            "src/b.rs",
+            vec![
+                decl("run", f, None, (1, 5), (0, 0)),
+                decl("helper", f, None, (2, 2), (0, 0)),
+                decl("new", NodeKind::Method, Some("A"), (6, 10), (0, 1)),
+                decl("pad", f, None, (7, 9), (4, 5)),
+                decl("deep", f, None, (8, 8), (8, 20)),
+            ],
+        );
+        let view = OverlayView::build(graph, &[a, b]).unwrap();
+        let merged = MergedGraph::new(graph, Some(&view));
+        let owner = |path: &str, name: &str| {
+            merged
+                .display_owner(virt(&view, path, name))
+                .map(std::borrow::Cow::into_owned)
+        };
+
+        assert_eq!(owner("src/a.rs", "helper").as_deref(), Some("outer"));
+        assert_eq!(owner("src/a.rs", "added").as_deref(), Some("outer"));
+        assert_eq!(owner("src/b.rs", "helper").as_deref(), Some("run"));
+        assert_eq!(owner("src/b.rs", "new").as_deref(), Some("A"));
+        assert_eq!(owner("src/b.rs", "pad").as_deref(), Some("A::new"));
+        assert_eq!(owner("src/b.rs", "deep").as_deref(), Some("A::new::pad"));
+        assert_eq!(owner("src/a.rs", "outer"), None);
+        assert_eq!(owner("src/b.rs", "run"), None);
+        assert_eq!(
+            merged.lexical_parent(virt(&view, "src/a.rs", "helper")),
+            Some(virt(&view, "src/a.rs", "outer"))
+        );
+        assert_eq!(
+            view.redirect(helper),
+            Some(virt(&view, "src/a.rs", "helper"))
+        );
+        assert_eq!(view.redirect(gone), None, "the deleted nested fn is gone");
+        assert!(view.virtual_nodes().iter().all(|n| n.name != "gone"));
+        assert_eq!(merged.display_owner(merged.node_count()), None);
+    }
+
+    /// Stands for: a dirty file whose language scopes no kind adds no
+    /// lexical-parent row, and its nodes print their stored owner, as before
+    /// the overlay kept rows.
+    #[test]
+    fn test_display_owner_dirty_unscoped_language_prints_stored_owner() {
+        let mut fx = GraphFixture::new();
+        fx.func("app/m.py", "outer");
+        let bytes = fx.into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let f = NodeKind::Function;
+        let file = source_file(
+            "app/m.py",
+            vec![
+                decl("outer", f, None, (1, 3), (0, 0)),
+                decl("helper", f, Some("outer"), (2, 2), (4, 0)),
+            ],
+        );
+        let view = OverlayView::build(graph, &[file]).unwrap();
+        let merged = MergedGraph::new(graph, Some(&view));
+        let helper = virt(&view, "app/m.py", "helper");
+
+        assert_eq!(view.lexical_parent_count(), 0);
+        assert_eq!(merged.lexical_parent(helper), None);
+        assert_eq!(merged.display_owner(helper).as_deref(), Some("outer"));
     }
 }

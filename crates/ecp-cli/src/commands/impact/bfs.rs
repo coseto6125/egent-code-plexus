@@ -470,7 +470,9 @@ pub(super) fn run_bfs<'g>(
             }
             uid = vn.uid;
             name = vn.name.clone();
-            owner_class = vn.owner_class.clone();
+            owner_class = merged
+                .display_owner(curr_idx as u32)
+                .map(std::borrow::Cow::into_owned);
             kind_str = node_kind_to_str(&vn.kind);
             file_path = vn.rel_path.to_string();
             line = vn.start_line;

@@ -107,3 +107,35 @@ fn test_route_nestjs_router_prefix_empty_method_path_is_the_prefix() {
         ["GET /users"]
     );
 }
+
+/// Stands for: `@Get()` under a controller with no path is the root route,
+/// `/`, by C1 `join_route_path` (`("", "")` gives `/`), not a dropped route.
+#[test]
+fn test_route_nestjs_router_prefix_absent_and_empty_method_path_is_root() {
+    assert_eq!(
+        routes_of("@Controller()", "  @Get()\n  list() {}"),
+        ["GET /"]
+    );
+}
+
+/// Stands for: `@Get()` beside `@Get(':id')` gives each its own route once:
+/// the argument-list capture keeps only an empty list, so a decorator with
+/// a path gives one route, not two.
+#[test]
+fn test_route_nestjs_router_prefix_empty_and_literal_method_paths_one_route_each() {
+    assert_eq!(
+        routes_of(
+            "@Controller('users')",
+            "  @Get()\n  list() {}\n  @Get(':id')\n  one() {}"
+        ),
+        ["GET /users", "GET /users/:id"]
+    );
+}
+
+/// Stands for: a decorator whose argument is no string literal names no
+/// path the parser can read, so it gives no route, as before `@Get()` was
+/// read.
+#[test]
+fn test_route_nestjs_router_prefix_non_literal_method_path_emits_nothing() {
+    assert!(routes_of("@Controller('users')", "  @Get(PATH)\n  list() {}").is_empty());
+}

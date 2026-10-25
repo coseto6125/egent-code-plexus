@@ -85,12 +85,19 @@ const RAILS_ROUTES: &str =
 const RAILS_CONTROLLER: &str = "class UsersController < ApplicationController\n  def index\n    render json: User.all\n  end\nend\n";
 const ASPNET_CONTROLLER: &str = "using Microsoft.AspNetCore.Mvc;\n[ApiController]\npublic class UsersController : ControllerBase {\n  [HttpGet(\"/api/users\")]\n  public IActionResult List() { return Ok(); }\n}\n";
 
+/// `(label, files, expected framework name)`.
+type FrameworkCase = (
+    &'static str,
+    Vec<(&'static str, &'static str)>,
+    &'static str,
+);
+
 /// Stands for: before the fix `frameworks.detected` was `[]` for these four
 /// repos, so an agent concluded that ecp cannot see their routes. Each repo
 /// must list its own framework and count the route evidence.
 #[test]
 fn test_summary_frameworks_detected_laravel_gin_rails_aspnet() {
-    let cases: [(&str, Vec<(&str, &str)>, &str); 4] = [
+    let cases: [FrameworkCase; 4] = [
         (
             "Laravel",
             vec![

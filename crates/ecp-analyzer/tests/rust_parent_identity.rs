@@ -89,8 +89,8 @@ fn test_assign_file_rust_swapped_impls_fmt_keeps_anchor() {
         assert_eq!(b.anchor, a.anchor, "the `fmt` of {t} keeps its anchor");
         assert_eq!(b.uniqueness, Uniqueness::Unique, "{t}: before");
         assert_eq!(a.uniqueness, Uniqueness::Unique, "{t}: after");
-        // Today the nested `pad` carries the lexical path, trait included, as
-        // its owner; R6 moves it to a scoped uid over the `fmt` anchor.
+        // The nested `pad` is scoped (R6): its uid hashes the `fmt` anchor,
+        // which the swap keeps.
         assert_eq!(
             stored_uid(before_ids[pad_before[t]].slot),
             stored_uid(after_ids[pad_after[t]].slot),
@@ -153,7 +153,13 @@ fn test_pair_by_anchor_ordinal_only_pairs_nothing() {
     assert_eq!(base_f.len(), 3);
 }
 
-/// One function holds two blocks, and each block declares `h`.
+/// Stands for: one function holds two blocks, and each block declares `h`.
+/// Both `h` are scoped under `outer` (R6), so they share an anchor and are
+/// marked ambiguous, and the second stays a node of its own (`Later`), never
+/// a tombstoned `Duplicate`; neither pairs. The index's numbering
+/// (`file_identities` over the parse) equals the hand-built scoped rows.
+/// Before R6 both `h` stored the owner `outer`, and the second was a
+/// `Duplicate`.
 #[test]
 fn test_assign_file_sibling_blocks_same_name_marked_ambiguous() {
     let local = parse(
@@ -165,17 +171,26 @@ fn test_assign_file_sibling_blocks_same_name_marked_ambiguous() {
     assert_eq!(hs.len(), 2, "the parser emits both `h`");
     let (h1, h2) = (hs[0], hs[1]);
 
-    // Today: both `h` carry the owner `outer`, so they share an anchor and
-    // are marked ambiguous. The second is a `Duplicate`, which the index
-    // tombstones; R6 flips that once Rust scopes nested functions.
-    let today = identities(&local);
+    let indexed = identities(&local);
     let shared = |position| Uniqueness::Shared { position, count: 2 };
-    assert_eq!(today[h1].uniqueness, shared(0));
-    assert_eq!(today[h2].uniqueness, shared(1));
-    assert!(matches!(today[h2].slot, UidSlot::Duplicate { .. }));
+    assert_eq!(indexed[h1].uniqueness, shared(0));
+    assert_eq!(indexed[h2].uniqueness, shared(1));
+    assert!(
+        matches!(indexed[h2].slot, UidSlot::Later { ordinal: 1, .. }),
+        "the second `h` stays a node: {:?}",
+        indexed[h2].slot
+    );
+    assert_eq!(
+        (
+            local.nodes[h1].owner_class.as_deref(),
+            local.nodes[h2].owner_class.as_deref()
+        ),
+        (None, None),
+        "a scoped `h` stores no owner (C1 invariant I1)"
+    );
 
-    // The R6 input shape: the parser's spans give each `h` the parent
-    // `outer`, and a scoped row has no owner (C1 invariant I1).
+    // The scoped input shape by hand: the parser's spans give each `h` the
+    // parent `outer`, and a scoped row has no owner.
     let spans: Vec<(NodeKind, (u32, u32, u32, u32))> =
         local.nodes.iter().map(|n| (n.kind, n.span)).collect();
     let parents = lexical_parents(&spans, &[NodeKind::Function]);
@@ -209,6 +224,10 @@ fn test_assign_file_sibling_blocks_same_name_marked_ambiguous() {
         scoped[h2].slot
     );
     assert_ne!(scoped[h1].slot.uid(), scoped[h2].slot.uid());
+    assert_eq!(
+        indexed, scoped,
+        "the index numbers the file as the scoped rows do"
+    );
     let anchors: Vec<u64> = scoped.iter().map(|id| id.anchor).collect();
     let pairs = pair_by_anchor(&anchors, &anchors);
     assert_eq!(

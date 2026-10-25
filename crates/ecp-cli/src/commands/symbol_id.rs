@@ -5,7 +5,7 @@
 use crate::commands::format::{kind_to_str, node_kind_to_str};
 use ecp_core::contracts::identity::normalize_file_needle;
 use ecp_core::graph::ArchivedZeroCopyGraph;
-use ecp_core::session::OverlayView;
+use ecp_core::session::{MergedGraph, OverlayView};
 
 /// Resolve the owner class name for a node by reading `Node.owner_class`
 /// directly (added in T1-4 / PR #285). O(1) field read.
@@ -91,15 +91,18 @@ pub fn same_name_def_count(
 /// Every merged-space index whose symbol matches `name`, paired with
 /// [`same_name_def_count`].
 ///
-/// `name` takes the bare symbol or the `Owner.Method` FQN form. `kind_needle`
+/// `name` takes the bare symbol or the `Owner.Method` FQN form. The owner
+/// compares with the display owner ([`MergedGraph::display_owner`], the text
+/// `inspect` prints and the read context's target resolver matches), so
+/// `outer.helper` names a Rust fn nested in `outer`, whose stored owner is
+/// empty, in the index and in a dirty file alike. `kind_needle`
 /// matches the node kind case-insensitively; `file_needle` is a substring of
 /// the file path. When a substring leaves several matches, a path equal to the
 /// needle wins, then paths ending with `/needle` (see `narrow_to_path_suffix`),
 /// so `cmd/main.go` can pick itself over `tools/cmd/main.go`.
 ///
-/// `ecp path` resolves its endpoints here until it moves to
-/// [`crate::read_context::resolve_target`] (plan slice F5b), which `ecp
-/// impact` uses.
+/// No command resolves its target here any more: `ecp path`, `ecp impact`
+/// and `ecp inspect` use [`crate::read_context::resolve_target`].
 pub fn resolve_candidates(
     graph: &ArchivedZeroCopyGraph,
     view: Option<&OverlayView>,
@@ -114,6 +117,7 @@ pub fn resolve_candidates(
     let file_needle = file_needle.map(normalize_file_needle);
     let file_needle = file_needle.as_deref();
 
+    let merged = MergedGraph::new(graph, view);
     let mut matches: Vec<(usize, &str)> = Vec::new();
     // Ascending like the full scan, so the candidate list keeps node order.
     for idx in graph.name_candidates(bare_name) {
@@ -131,10 +135,12 @@ pub fn resolve_candidates(
             continue;
         }
         // Working-tree truth: a dirty-file symbol deleted/renamed on disk
-        // (suppressed by the overlay view) is not a valid impact target.
-        if view.is_some_and(|v| v.redirect(idx as u32).is_none()) {
+        // (suppressed by the overlay view) is not a valid impact target. A
+        // replaced base node enters the merged space as its virtual twin
+        // (on-disk spans; masked stale adjacency handled by run_bfs).
+        let Some(at) = view.map_or(Some(idx as u32), |v| v.redirect(idx as u32)) else {
             continue;
-        }
+        };
         if let Some(ref kn) = kind_needle {
             let node_kind = kind_to_str(&node.kind).to_ascii_lowercase();
             if &node_kind != kn {
@@ -149,31 +155,20 @@ pub fn resolve_candidates(
                 continue;
             }
         }
-        if let Some(owner) = owner_filter {
-            let file = graph.files[node.file_idx.to_native() as usize]
-                .path
-                .resolve(&graph.string_pool);
-            if !owner_matches(resolve_owner_class(graph, idx), owner, file) {
-                continue;
-            }
-        }
-        // A replaced base node enters the merged space as its virtual twin
-        // (on-disk spans; masked stale adjacency handled by run_bfs).
         let file = graph.files[node.file_idx.to_native() as usize]
             .path
             .resolve(&graph.string_pool);
-        matches.push((
-            match view {
-                Some(v) => v.redirect(idx as u32).expect("suppressed filtered above") as usize,
-                None => idx,
-            },
-            file,
-        ));
+        if let Some(owner) = owner_filter {
+            if !owner_matches(merged.display_owner(at).as_deref(), owner, file) {
+                continue;
+            }
+        }
+        matches.push((at as usize, file));
     }
     // Symbols that only exist in the working tree (new functions in dirty
     // files) — base-replacing twins are excluded: they arrived via redirect.
     if let Some(v) = view {
-        for (i, vn) in v.virtual_nodes().iter().enumerate() {
+        for (at, vn) in (v.base_len()..).zip(v.virtual_nodes()) {
             if vn.replaced_base.is_some() || vn.later_overload || vn.name != bare_name {
                 continue;
             }
@@ -188,11 +183,11 @@ pub fn resolve_candidates(
                 }
             }
             if let Some(owner) = owner_filter {
-                if !owner_matches(vn.owner_class.as_deref(), owner, &vn.rel_path) {
+                if !owner_matches(merged.display_owner(at).as_deref(), owner, &vn.rel_path) {
                     continue;
                 }
             }
-            matches.push((v.base_len() as usize + i, &*vn.rel_path));
+            matches.push((at as usize, &*vn.rel_path));
         }
     }
     if let Some(needle) = file_needle {
@@ -236,45 +231,125 @@ mod tests {
     use ecp_core::graph_fixture::GraphFixture;
     use ecp_core::session::{OverlayFileInput, OverlaySymbol};
 
-    #[test]
-    fn test_resolve_candidates_rust_nested_module_short_owner_matches_base_and_overlay() {
+    /// `source` parsed as `src/lib.rs` and built as the index builds it.
+    fn rust_graph_bytes(source: &str) -> rkyv::util::AlignedVec {
         use ecp_analyzer::resolution::builder::GraphBuilder;
+        let mut builder = GraphBuilder::new();
+        builder.add_graph(parse_rust(source));
+        rkyv::to_bytes::<rkyv::rancor::Error>(&builder.build()).unwrap()
+    }
+
+    fn parse_rust(source: &str) -> ecp_core::analyzer::types::LocalGraph {
         use ecp_analyzer::rust::parser::RustProvider;
         use ecp_core::analyzer::provider::LanguageProvider;
-        use std::path::Path;
+        RustProvider::new()
+            .unwrap()
+            .parse_file(std::path::Path::new("src/lib.rs"), source.as_bytes())
+            .unwrap()
+    }
 
-        let provider = RustProvider::new().unwrap();
-        let parse = |source: &str| {
-            provider
-                .parse_file(Path::new("src/lib.rs"), source.as_bytes())
-                .unwrap()
-        };
-        let mut builder = GraphBuilder::new();
-        builder.add_graph(parse("mod a { pub mod b { pub fn f() {} } }"));
-        let graph = builder.build();
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&graph).unwrap();
+    /// The read context's answer for `text`, as a candidate count: 1 for a
+    /// unique target, the total for an ambiguity, 0 for none.
+    fn resolve_target_count(merged: &MergedGraph<'_>, text: &str) -> usize {
+        use ecp_core::contracts::identity::TargetResolution;
+        let request = crate::read_context::target_request(text, None, None).unwrap();
+        match crate::read_context::resolve_target(merged, &request) {
+            TargetResolution::Unique(_) => 1,
+            TargetResolution::Ambiguous(a) => a.total(),
+            TargetResolution::NotFound { .. } => 0,
+        }
+    }
+
+    /// Stands for: a fn in a nested module is named by its innermost module
+    /// (R6 stores the owner `b`, not `a::b`), in the index and in a dirty
+    /// copy, and the owner filter agrees with the read context's resolver
+    /// on every form. C1 "Qualifier match": the request segments equal a
+    /// segment-bounded suffix of the qualified path, here `[b]`, so `a::b.f`
+    /// names nothing. Before R6 the stored owner was `a::b` and both forms
+    /// matched.
+    #[test]
+    fn test_resolve_candidates_rust_nested_module_short_owner_matches_base_and_overlay() {
+        let bytes = rust_graph_bytes("mod a { pub mod b { pub fn f() {} } }");
         let archived = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
-        let full = resolve_candidates(archived, None, "a::b.f", None, None).0;
-        assert_eq!(full.len(), 1);
-        assert_eq!(
-            resolve_candidates(archived, None, "b.f", None, None).0,
-            full
-        );
-        assert!(resolve_candidates(archived, None, "other::b.f", None, None)
-            .0
-            .is_empty());
+        let count = |view: Option<&OverlayView>, text: &str| {
+            resolve_candidates(archived, view, text, None, None).0.len()
+        };
+        assert_eq!(count(None, "b.f"), 1);
+        let merged = MergedGraph::new(archived, None);
+        for text in ["f", "b.f", "a::b.f", "other::b.f"] {
+            assert_eq!(
+                count(None, text),
+                resolve_target_count(&merged, text),
+                "{text}"
+            );
+        }
 
         let dirty: OverlayFileInput =
-            parse("\nmod a { pub mod b { pub fn f() {} pub fn added() {} } }").into();
+            parse_rust("\nmod a { pub mod b { pub fn f() {} pub fn added() {} } }").into();
         let view = OverlayView::build(archived, &[dirty]).unwrap();
+        let merged = MergedGraph::new(archived, Some(&view));
         for name in ["f", "added"] {
-            let full =
-                resolve_candidates(archived, Some(&view), &format!("a::b.{name}"), None, None).0;
-            assert_eq!(full.len(), 1);
-            assert_eq!(
-                resolve_candidates(archived, Some(&view), &format!("b.{name}"), None, None).0,
-                full
+            assert_eq!(count(Some(&view), &format!("b.{name}")), 1, "{name}");
+            for text in [format!("b.{name}"), format!("a::b.{name}")] {
+                assert_eq!(
+                    count(Some(&view), &text),
+                    resolve_target_count(&merged, &text),
+                    "{text}"
+                );
+            }
+        }
+    }
+
+    /// Stands for: the owner filter reads the display owner, so `outer.helper`
+    /// names the Rust fn nested in `outer` (stored owner empty, I1) and not
+    /// the file-level `helper`, in the index, in a dirty copy, and for a
+    /// nested fn the edit adds. Before the fix it read the stored owner and
+    /// matched nothing.
+    #[test]
+    fn test_resolve_candidates_rust_nested_fn_display_owner_selects_nested() {
+        let source = "fn outer() {\n    fn helper() {}\n    helper();\n}\nfn helper() {}\n";
+        let bytes = rust_graph_bytes(source);
+        let archived = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        let line_of =
+            |merged: &MergedGraph<'_>, idx: usize| merged.node(idx as u32).map(|n| n.start_line());
+        let base = MergedGraph::new(archived, None);
+        let nested = resolve_candidates(archived, None, "outer.helper", None, None).0;
+        assert_eq!(nested.len(), 1, "{nested:?}");
+        assert_eq!(line_of(&base, nested[0]), Some(2));
+        assert_eq!(
+            resolve_candidates(archived, None, "helper", None, None)
+                .0
+                .len(),
+            2
+        );
+        // A blank qualifier names no owner, so it selects neither `helper`.
+        for text in ["other.helper", " .helper", "\t.helper"] {
+            assert!(
+                resolve_candidates(archived, None, text, None, None)
+                    .0
+                    .is_empty(),
+                "{text:?}"
             );
+        }
+
+        let edited = format!(
+            "\n{}",
+            source.replace(
+                "fn helper() {}\n    helper();",
+                "fn helper() {}\n    fn added() {}\n    helper();"
+            )
+        );
+        let view = OverlayView::build(archived, &[parse_rust(&edited).into()]).unwrap();
+        let merged = MergedGraph::new(archived, Some(&view));
+        for (name, line) in [("helper", 3), ("added", 4)] {
+            let found =
+                resolve_candidates(archived, Some(&view), &format!("outer.{name}"), None, None).0;
+            assert_eq!(found.len(), 1, "outer.{name}: {found:?}");
+            assert!(
+                found[0] as u32 >= view.base_len(),
+                "outer.{name} is a virtual node"
+            );
+            assert_eq!(line_of(&merged, found[0]), Some(line), "outer.{name}");
         }
     }
 

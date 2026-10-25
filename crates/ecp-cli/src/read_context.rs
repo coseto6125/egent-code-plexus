@@ -269,8 +269,9 @@ fn facts<'a>(
 /// The segments of `idx`'s display owner ([`MergedGraph::display_owner`]),
 /// outermost first: the first stored owner up the lexical-parent chain, then
 /// each parent's name. A nested Rust `helper` in `fn outer` gives `outer`,
-/// so `outer.helper` selects it. Built from pool-borrowed parts because the
-/// joined display text is an owned string.
+/// so `outer.helper` selects it, in a dirty file too: a virtual node walks
+/// the overlay's rows ([`MergedGraph::lexical_parent`]). Built from
+/// pool-borrowed parts because the joined display text is an owned string.
 fn display_path<'a>(
     merged: &MergedGraph<'a>,
     idx: u32,
@@ -278,12 +279,13 @@ fn display_path<'a>(
 ) -> Vec<PathSegment<'a>> {
     let mut parents: Vec<&'a str> = Vec::new();
     let (mut current, mut current_node) = (idx, node);
+    let rows = merged.lexical_parent_count();
     let head = loop {
         if let Some(owner) = current_node.owner_class(merged) {
             break PathSegment::from_owner(owner);
         }
         // Each row is one step, so more steps than rows is a corrupt cycle.
-        let parent = (current < merged.base_len() && parents.len() < merged.lexical_parents.len())
+        let parent = (parents.len() < rows)
             .then(|| merged.lexical_parent(current))
             .flatten()
             .and_then(|p| Some((p, merged.node(p)?)));

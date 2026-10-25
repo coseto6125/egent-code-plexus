@@ -112,7 +112,7 @@ fn go_group_prefix(call: tree_sitter::Node<'_>, source: &[u8]) -> Option<String>
                 let rhs = single(node.child_by_field_name("right"));
                 if let (Some(lhs), Some(rhs)) = (lhs, rhs) {
                     let is_receiver = lhs.utf8_text(source).ok() == Some(name);
-                    let is_later = found.map_or(true, |f| f.start_byte() < rhs.start_byte());
+                    let is_later = found.is_none_or(|f| f.start_byte() < rhs.start_byte());
                     if is_receiver && is_later {
                         found = Some(rhs);
                     }
