@@ -51,7 +51,7 @@ pub enum Scope {
 /// Constructor are class members (`HasMethod` / `HasProperty`). Method is in:
 /// Ruby and PHP emit a top-level `def` as a Method with no owner, and a
 /// Method with a class owner finds no Namespace or Module container.
-pub fn is_definable(kind: NodeKind) -> bool {
+fn is_definable(kind: NodeKind) -> bool {
     matches!(
         kind,
         NodeKind::Function

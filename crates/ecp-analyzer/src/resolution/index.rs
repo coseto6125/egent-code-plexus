@@ -915,15 +915,14 @@ impl SymbolTable {
     /// reach; `id` itself when it is unscoped. A scoped caller (a Rust
     /// nested `fn` or closure) has no owner, so the name tiers read this
     /// declaration's owner, as for a call written there.
-    pub fn lexical_root(&self, mut id: u32) -> u32 {
-        // Each row is one step, so more steps than rows is a cycle.
-        for _ in 0..=self.lexical_parents.len() {
-            match self.lexical_parents.get(&id) {
-                Some(&parent) => id = parent,
-                None => break,
-            }
-        }
-        id
+    ///
+    /// A cycle, which only a corrupt table holds, has no root: `id` stands
+    /// for itself ([`ecp_core::analyzer::lexical::lexical_chain_end`]).
+    pub fn lexical_root(&self, id: u32) -> u32 {
+        ecp_core::analyzer::lexical::lexical_chain_end(id, self.lexical_parents.len(), |id| {
+            self.lexical_parents.get(&id).copied()
+        })
+        .unwrap_or(id)
     }
 
     /// Whether some declaration named `name` that `caller` admits is a

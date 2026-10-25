@@ -298,6 +298,77 @@ pub fn stored_uid(slot: UidSlot) -> u64 {
     }
 }
 
+/// The node a walk up a lexical-parent table ends at: from `start`, follow
+/// `parent` until it returns `None`. Each row of a table is one step, so a
+/// walk of more than `rows` steps is a cycle, which only a corrupt table
+/// holds: the walk stops and returns `None`. Every reader of a parent chain
+/// walks it here, so all of them stop at the same step and read a cycle
+/// the same way.
+pub fn lexical_chain_end<T: Copy>(
+    start: T,
+    rows: usize,
+    mut parent: impl FnMut(T) -> Option<T>,
+) -> Option<T> {
+    let mut current = start;
+    for _ in 0..=rows {
+        match parent(current) {
+            Some(next) => current = next,
+            None => return Some(current),
+        }
+    }
+    None
+}
+
+/// The parts of `start`'s display owner (design A §4.5): the first stored
+/// owner up its lexical-parent chain, and the names of the parents the walk
+/// passes on the way, innermost first. `node(id)` gives the stored owner
+/// (`None` for no owner) and the name of `id`; `parent(id)` its lexical
+/// parent; `rows` the size of the parent table ([`lexical_chain_end`]).
+///
+/// `None` for a cycle and when `node` knows no `start` or no parent the walk
+/// reaches: a display reader then prints no owner rather than a cut path.
+pub fn display_chain<'s, T: Copy>(
+    start: T,
+    rows: usize,
+    node: impl Fn(T) -> Option<(Option<&'s str>, &'s str)>,
+    parent: impl Fn(T) -> Option<T>,
+) -> Option<(Option<&'s str>, Vec<&'s str>)> {
+    let mut parents: Vec<&'s str> = Vec::new();
+    let mut head = None;
+    let mut known = true;
+    let mut at_start = true;
+    lexical_chain_end(start, rows, |current| {
+        let Some((owner, name)) = node(current) else {
+            known = false;
+            return None;
+        };
+        if !std::mem::take(&mut at_start) {
+            parents.push(name);
+        }
+        if let Some(owner) = owner {
+            head = Some(owner);
+            return None;
+        }
+        parent(current)
+    })?;
+    known.then_some((head, parents))
+}
+
+/// The display owner text of a [`display_chain`]: the stored owner, then
+/// each parent's name outermost first, joined by `::`. A nested `helper` in
+/// `impl A { fn new }` gives `A::new`. `None` when the chain holds neither.
+pub fn display_owner_text<'s>(
+    (head, mut segments): (Option<&'s str>, Vec<&'s str>),
+) -> Option<std::borrow::Cow<'s, str>> {
+    segments.extend(head);
+    segments.reverse();
+    match segments.as_slice() {
+        [] => None,
+        [only] => Some(std::borrow::Cow::Borrowed(*only)),
+        _ => Some(std::borrow::Cow::Owned(segments.join("::"))),
+    }
+}
+
 /// [`stored_uid`] of each declaration of the file at `path`, in slice order.
 pub fn file_uids<'a, T>(
     path: &str,
@@ -494,6 +565,81 @@ impl LexicalFunctions {
 mod tests {
     use super::*;
     use crate::contracts::identity::{DeclKey, Uniqueness};
+
+    /// Node `i` of `rows`: (stored owner, name, lexical parent).
+    type ChainRow = (Option<&'static str>, &'static str, Option<usize>);
+
+    fn chain(
+        rows: &'static [ChainRow],
+        start: usize,
+    ) -> Option<(Option<&'static str>, Vec<&'static str>)> {
+        display_chain(
+            start,
+            rows.len(),
+            |i| rows.get(i).map(|&(owner, name, _)| (owner, name)),
+            |i| rows.get(i).and_then(|row| row.2),
+        )
+    }
+
+    #[test]
+    fn test_display_chain_chain_of_three_names_parents_up_to_owner() {
+        // 0 inner -> 1 pad -> 2 new, which `A` owns.
+        const ROWS: &[ChainRow] = &[
+            (None, "inner", Some(1)),
+            (None, "pad", Some(2)),
+            (Some("A"), "new", None),
+        ];
+        let parts = chain(ROWS, 0);
+        assert_eq!(parts, Some((Some("A"), vec!["pad", "new"])));
+        assert_eq!(
+            display_owner_text(parts.unwrap()).as_deref(),
+            Some("A::new::pad")
+        );
+        assert_eq!(lexical_chain_end(0, ROWS.len(), |i| ROWS[i].2), Some(2));
+    }
+
+    #[test]
+    fn test_display_chain_cycle_returns_none() {
+        const ROWS: &[ChainRow] = &[(None, "a", Some(1)), (None, "b", Some(0))];
+        assert_eq!(chain(ROWS, 0), None);
+        assert_eq!(lexical_chain_end(0, ROWS.len(), |i| ROWS[i].2), None);
+    }
+
+    #[test]
+    fn test_display_chain_self_parent_returns_none() {
+        const ROWS: &[ChainRow] = &[(None, "a", Some(0))];
+        assert_eq!(chain(ROWS, 0), None);
+        assert_eq!(lexical_chain_end(0, ROWS.len(), |i| ROWS[i].2), None);
+    }
+
+    #[test]
+    fn test_display_chain_no_parent_reads_own_owner_or_none() {
+        const ROWS: &[ChainRow] = &[(Some("K"), "m", None), (None, "f", None)];
+        assert_eq!(chain(ROWS, 0), Some((Some("K"), Vec::new())));
+        assert_eq!(
+            display_owner_text(chain(ROWS, 0).unwrap()).as_deref(),
+            Some("K")
+        );
+        assert_eq!(chain(ROWS, 1), Some((None, Vec::new())));
+        assert_eq!(display_owner_text(chain(ROWS, 1).unwrap()), None);
+        assert_eq!(lexical_chain_end(1, ROWS.len(), |i| ROWS[i].2), Some(1));
+    }
+
+    #[test]
+    fn test_display_chain_unowned_parent_is_the_owner_text() {
+        const ROWS: &[ChainRow] = &[(None, "helper", Some(1)), (None, "outer", None)];
+        assert_eq!(
+            display_owner_text(chain(ROWS, 0).unwrap()).as_deref(),
+            Some("outer")
+        );
+    }
+
+    #[test]
+    fn test_display_chain_unknown_start_or_parent_returns_none() {
+        const ROWS: &[ChainRow] = &[(None, "a", Some(7))];
+        assert_eq!(chain(ROWS, 3), None);
+        assert_eq!(chain(ROWS, 0), None);
+    }
 
     fn index(path: &str, symbols: &[(NodeKind, &str, bool, Span)]) -> LexicalFunctions {
         LexicalFunctions::new(Path::new(path), symbols.iter().copied(), 10)

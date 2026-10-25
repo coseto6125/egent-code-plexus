@@ -38,13 +38,17 @@ impl<'a> LanguageFiles<'a> {
     fn build(
         graph: &'a ArchivedZeroCopyGraph,
         dirty: &'a [OverlayFileInput],
+        removed: &FxHashSet<&str>,
         language: Language,
     ) -> Self {
         let mut files = Self::default();
+        // A removed path is gone from the worktree. When a dirty file has the
+        // same path, the dirty entry below adds it back.
         let base = graph
             .files
             .iter()
-            .map(|f| f.path.resolve(&graph.string_pool));
+            .map(|f| f.path.resolve(&graph.string_pool))
+            .filter(|path| !removed.contains(path));
         for path in base.chain(dirty.iter().map(|f| f.rel_path.as_str())) {
             // A dirty file usually exists in the base too; a second entry
             // would make its stem ambiguous.
@@ -122,6 +126,7 @@ pub struct ImportScope<'a> {
     graph: &'a ArchivedZeroCopyGraph,
     dirty: &'a [OverlayFileInput],
     dirty_base: &'a FxHashSet<u32>,
+    removed: &'a FxHashSet<&'a str>,
     languages: RefCell<FxHashMap<u8, LanguageFiles<'a>>>,
     modules: RefCell<ModuleCache<'a>>,
 }
@@ -131,16 +136,21 @@ type ModuleCache<'a> = FxHashMap<u8, FxHashMap<Box<str>, FxHashMap<Box<str>, Mod
 
 impl<'a> ImportScope<'a> {
     /// The scope over `graph` with the `dirty` files' fresh parses;
-    /// `dirty_base` holds the base node ids those parses replace.
+    /// `dirty_base` holds the base node ids those parses replace, and
+    /// `removed` the base paths gone from the worktree
+    /// ([`super::OverlayView::build_with_removed`]). Discovery finds no
+    /// removed path unless a dirty file has it.
     pub fn new(
         graph: &'a ArchivedZeroCopyGraph,
         dirty: &'a [OverlayFileInput],
         dirty_base: &'a FxHashSet<u32>,
+        removed: &'a FxHashSet<&'a str>,
     ) -> Self {
         Self {
             graph,
             dirty,
             dirty_base,
+            removed,
             languages: RefCell::default(),
             modules: RefCell::default(),
         }
@@ -150,11 +160,17 @@ impl<'a> ImportScope<'a> {
         self.dirty
     }
 
+    /// Whether the base path `path` is gone from the worktree. A dirty file
+    /// of the same path exists; the caller asks the dirty set first.
+    pub(crate) fn is_removed(&self, path: &str) -> bool {
+        self.removed.contains(path)
+    }
+
     fn with_files<R>(&self, language: Language, f: impl FnOnce(&LanguageFiles<'a>) -> R) -> R {
         let mut languages = self.languages.borrow_mut();
-        let files = languages
-            .entry(language as u8)
-            .or_insert_with(|| LanguageFiles::build(self.graph, self.dirty, language));
+        let files = languages.entry(language as u8).or_insert_with(|| {
+            LanguageFiles::build(self.graph, self.dirty, self.removed, language)
+        });
         f(files)
     }
 
@@ -435,7 +451,8 @@ mod tests {
         let bytes = fixture.into_bytes();
         let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
         let dirty_base = FxHashSet::default();
-        let scope = ImportScope::new(graph, &[], &dirty_base);
+        let removed = FxHashSet::default();
+        let scope = ImportScope::new(graph, &[], &dirty_base, &removed);
         let cold = std::time::Instant::now();
         assert_eq!(
             scope.files_in_directory(Language::Go, "pkg/1"),

@@ -144,29 +144,16 @@ impl<'a> MergedGraph<'a> {
         if idx < self.base_len() {
             return self.graph.display_owner(idx);
         }
-        let mut segments: Vec<&'a str> = Vec::new();
-        let mut current = idx;
-        let head = loop {
-            if let Some(owner) = self.node(current)?.owner_class(self) {
-                break Some(owner);
-            }
-            let Some(parent) = self.lexical_parent(current) else {
-                break None;
-            };
-            // Each row is one step, so more steps than rows is a cycle.
-            if segments.len() >= self.lexical_parent_count() {
-                return None;
-            }
-            segments.push(self.node(parent)?.name(self));
-            current = parent;
-        };
-        segments.extend(head);
-        segments.reverse();
-        match segments.as_slice() {
-            [] => None,
-            [only] => Some(std::borrow::Cow::Borrowed(*only)),
-            _ => Some(std::borrow::Cow::Owned(segments.join("::"))),
-        }
+        let chain = crate::analyzer::lexical::display_chain(
+            idx,
+            self.lexical_parent_count(),
+            |current| {
+                let node = self.node(current)?;
+                Some((node.owner_class(self), node.name(self)))
+            },
+            |current| self.lexical_parent(current),
+        )?;
+        crate::analyzer::lexical::display_owner_text(chain)
     }
 
     /// The lexical parent of merged-space `idx`: the graph's table for a

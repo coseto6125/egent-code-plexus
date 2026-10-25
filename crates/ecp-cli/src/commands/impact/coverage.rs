@@ -48,21 +48,57 @@ fn archived_is_test(graph: &ecp_core::graph::ArchivedZeroCopyGraph, node_idx: us
     }
 }
 
+/// uid → merged index of the overlay's nodes, the first node of a uid
+/// winning. Empty without an overlay.
+fn virtual_uid_index(view: Option<&OverlayView>) -> rustc_hash::FxHashMap<u64, u32> {
+    let mut index = rustc_hash::FxHashMap::default();
+    if let Some(view) = view {
+        for (idx, node) in (view.base_len()..).zip(view.virtual_nodes()) {
+            index.entry(node.uid).or_insert(idx);
+        }
+    }
+    index
+}
+
+/// Whether the caller with `uid` is a test by its `FunctionMeta` flags. A
+/// working-tree node (`virtual_idx`) reads the flags its fragment paired
+/// ([`OverlayView::function_meta`]), as the cypher executor does: a reindex
+/// stores those, never its base twin's, and a new node has no base twin.
+fn is_test_caller(
+    graph: &ecp_core::graph::ArchivedZeroCopyGraph,
+    view: Option<&OverlayView>,
+    uid_idx: &rustc_hash::FxHashMap<u64, u32>,
+    virtual_idx: &rustc_hash::FxHashMap<u64, u32>,
+    uid: u64,
+) -> bool {
+    use ecp_core::graph::FunctionMeta;
+    match (view, virtual_idx.get(&uid)) {
+        (Some(view), Some(&idx)) => view
+            .function_meta(idx)
+            .is_some_and(|meta| meta.flags & FunctionMeta::FLAG_TEST != 0),
+        _ => uid_idx
+            .get(&uid)
+            .is_some_and(|&idx| archived_is_test(graph, idx as usize)),
+    }
+}
+
 /// Classify a single symbol given its upstream callers (BFS result).
 ///
 /// `bfs_results` is the slice returned by `run_bfs`; depth-0 entry is the
 /// symbol itself. Only depth > 0 entries (actual callers) are examined.
 ///
 /// `uid_idx` is the pre-built `uid → node_idx` table from
-/// [`ecp_core::graph_query::build_uid_index`]. Building it once per
-/// coverage analysis and passing it here avoids an O(N) linear scan over
-/// all graph nodes for every BFS caller entry (T1-6 fast-path).
+/// [`ecp_core::graph_query::build_uid_index`], and `virtual_idx` the same
+/// table over the overlay's nodes. Building them once per coverage
+/// analysis and passing them here avoids an O(N) linear scan over all
+/// graph nodes for every BFS caller entry (T1-6 fast-path).
 fn classify_symbol(
     graph: &ecp_core::graph::ArchivedZeroCopyGraph,
     view: Option<&OverlayView>,
     symbol_idx: usize,
     bfs_results: &[Value],
     uid_idx: &rustc_hash::FxHashMap<u64, u32>,
+    virtual_idx: &rustc_hash::FxHashMap<u64, u32>,
 ) -> SymbolCoverage {
     let meta = merged_node_meta(graph, view, symbol_idx);
     let uid = meta.uid.to_string();
@@ -81,14 +117,9 @@ fn classify_symbol(
         // O(1) uid → node_idx via pre-built FxHashMap (T1-6 fast-path).
         // BFS JSON stores uid as a decimal string; parse back to u64 for lookup.
         let caller_uid = entry["uid"].as_str().unwrap_or("");
-        let caller_idx = caller_uid
+        let is_test = caller_uid
             .parse::<u64>()
-            .ok()
-            .and_then(|u| uid_idx.get(&u).map(|&i| i as usize));
-
-        let is_test = caller_idx
-            .map(|idx| archived_is_test(graph, idx))
-            .unwrap_or(false);
+            .is_ok_and(|uid| is_test_caller(graph, view, uid_idx, virtual_idx, uid));
 
         if is_test {
             let caller_name = entry["name"].as_str().unwrap_or(caller_uid).to_string();
@@ -167,6 +198,7 @@ pub(super) fn coverage_analyses(
     // indices to call archived_is_test; without this table each caller
     // entry would do an O(N) linear scan. (T1-6 fast-path)
     let uid_idx = ecp_core::graph_query::build_uid_index(graph);
+    let virtual_idx = virtual_uid_index(view);
     bfs_by_symbol
         .iter()
         .map(|(idx, bfs)| {
@@ -181,7 +213,7 @@ pub(super) fn coverage_analyses(
                 include_tests,
                 rel_filter,
             );
-            classify_symbol(graph, view, *idx, &coverage_bfs, &uid_idx)
+            classify_symbol(graph, view, *idx, &coverage_bfs, &uid_idx, &virtual_idx)
         })
         .collect()
 }
@@ -233,4 +265,97 @@ pub(super) fn build_coverage_json(analyses: Vec<SymbolCoverage>) -> Value {
         "covered_symbols": covered,
         "orphan_symbols": orphans,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ecp_core::graph::{ArchivedZeroCopyGraph, FunctionMeta, NodeKind};
+    use ecp_core::graph_fixture::GraphFixture;
+    use ecp_core::session::view::{OverlayFileInput, OverlaySymbol};
+
+    const DIRTY: &str = "src/dirty.rs";
+
+    fn function(name: &str, lines: (u32, u32), flags: u16) -> OverlaySymbol {
+        OverlaySymbol {
+            is_exported: false,
+            name: name.to_string(),
+            kind: NodeKind::Function,
+            owner_class: None,
+            start_line: lines.0,
+            end_line: lines.1,
+            start_column: 0,
+            end_column: 0,
+            calls: vec!["target".to_string()],
+            heritage: Vec::new(),
+            variant_refs: Vec::new(),
+            return_type: None,
+            generic_arity: 0,
+            flags: Some(flags),
+        }
+    }
+
+    fn caller(uid: u64, name: &str) -> Value {
+        json!({ "uid": uid.to_string(), "name": name, "depth": 1 })
+    }
+
+    /// Base nodes: 0 `target` (src/lib.rs) · 1 `checks` (dirty), archived
+    /// with no test flag · 2 `was_test` (dirty), archived as a test. The
+    /// dirty file now marks `checks` a test, adds the test `fresh` (no base
+    /// twin), and unmarks `was_test`. Each caller reads its fragment's
+    /// flags, as a reindex stores them; without the overlay each reads the
+    /// archived ones.
+    #[test]
+    fn test_classify_symbol_dirty_callers_read_fragment_test_flags() {
+        let mut fx = GraphFixture::new();
+        let target = fx.func("src/lib.rs", "target");
+        let checks = fx.func(DIRTY, "checks");
+        let was_test = fx.func(DIRTY, "was_test");
+        fx.function_meta(checks, 0, &[]);
+        fx.function_meta(was_test, FunctionMeta::FLAG_TEST, &[]);
+        let bytes = fx.into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        let input = OverlayFileInput {
+            rel_path: DIRTY.to_string(),
+            symbols: vec![
+                function("checks", (1, 3), FunctionMeta::FLAG_TEST),
+                function("fresh", (5, 7), FunctionMeta::FLAG_TEST),
+                function("was_test", (9, 11), 0),
+            ],
+            imports: Vec::new(),
+            export_aliases: Vec::new(),
+        };
+        let view = OverlayView::build(graph, std::slice::from_ref(&input)).expect("a dirty file");
+        let base_len = view.base_len();
+        let uid_of = |offset: u32| view.node(base_len + offset).expect("virtual node").uid;
+        let callers = [
+            caller(uid_of(0), "checks"),
+            caller(uid_of(1), "fresh"),
+            caller(uid_of(2), "was_test"),
+        ];
+        assert_eq!(uid_of(0), graph.nodes[checks as usize].uid.to_native());
+        let uid_idx = ecp_core::graph_query::build_uid_index(graph);
+
+        let overlay = classify_symbol(
+            graph,
+            Some(&view),
+            target as usize,
+            &callers,
+            &uid_idx,
+            &virtual_uid_index(Some(&view)),
+        );
+        assert_eq!(overlay.test_callers, ["checks", "fresh"]);
+        assert_eq!(overlay.prod_caller_count, 1);
+
+        let base = classify_symbol(
+            graph,
+            None,
+            target as usize,
+            &[callers[0].clone(), callers[2].clone()],
+            &uid_idx,
+            &virtual_uid_index(None),
+        );
+        assert_eq!(base.test_callers, ["was_test"]);
+        assert_eq!(base.prod_caller_count, 1);
+    }
 }

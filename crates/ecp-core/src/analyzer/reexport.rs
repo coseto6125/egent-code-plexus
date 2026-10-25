@@ -1,6 +1,6 @@
 //! The import tier's module rules, shared by the index-time resolver
 //! (ecp-analyzer `resolution/resolver.rs`) and the query-time overlay
-//! (`session/view.rs`), so the two cannot drift: which declaration an ES
+//! (`session/view/resolution.rs`), so the two cannot drift: which declaration an ES
 //! module import binds (export eligibility and export aliases), the one-hop
 //! re-export through a Python package or a TS / JS barrel, the Python
 //! submodule from-import, the ES-module privacy rule of the global tier,

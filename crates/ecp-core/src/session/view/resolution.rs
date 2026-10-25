@@ -3,7 +3,53 @@
 //! The view owns assembly, the cache and incremental replay; this module owns
 //! how a dirty file's references bind.
 
-use super::*;
+use super::{
+    base_function_meta, construction_target, emit_closure_references, fragment_emits, reason_index,
+    span_of, CallGap, DirtyNamesake, OverlayFileInput, OverlaySymbol, ViewEdge, ViewNode,
+    CONF_IMPORT_SCOPED, CONF_MODULE_TREE, CONF_QUALIFIER_SCOPED, CS_STRICTEST_FLAGS,
+    GAP_CS_ACCESS_DIRTY_TARGET, GAP_CS_EXTENSION_DIRTY_DECLARATION, GAP_CS_PARTIAL_BARE_CALL,
+};
+use crate::analyzer::csharp_access::{self, CallAccess};
+use crate::analyzer::csharp_extension::{self, ReceiverSite};
+use crate::analyzer::heritage::{enclosing_class_heritage, holds_heritage, HeritageNode};
+use crate::analyzer::import_binding::{
+    extension_retry, fqn_imported_name, fqn_language, fqn_type_path, import_binding,
+    import_member_fallback, owner_path_agrees, retry_name, DeclaredType, MemberOwner,
+};
+use crate::analyzer::ladder::{self, split_qualifier, CallPick, FieldRead, ResolveFacts};
+use crate::analyzer::lexical::{
+    lexical_chain_end, lexical_scope_kinds, twin_enclosing, LexicalFunctions,
+};
+use crate::analyzer::outcome::{NoEdge, Resolution, Tier};
+use crate::analyzer::path_aliases::PathAliases;
+use crate::analyzer::reexport::{
+    self, export_filter_applies, is_ecmascript, ExportAliasTable, Fact, FileImports, ImportRef,
+    ModuleFacts, PyModule, ResolveTarget,
+};
+use crate::analyzer::rust_paths::{
+    is_rust_source, is_rust_target_root, rust_expand_path_head, rust_module_dir,
+    rust_module_path_base, rust_path_prefix_agrees_with_import, rust_type_path_prefix,
+};
+use crate::analyzer::same_file_pick::{
+    is_free, member_call_admits, prefer_owned, rust_impl_members, type_receiver_is_closed,
+    ImplMember, ImplNode, PickFacts, PickScope,
+};
+use crate::analyzer::type_ladder::{
+    self, TypeCandidates, TypeFacts, TypeMember as LadderMember, MAX_HERITAGE_DEPTH,
+};
+use crate::analyzer::types::{
+    owner_key, CallArguments, CallSite, NameRef, RawImport, Span, VariantRef,
+    FUNCTION_REFERENCE_REASON, NEAREST_COPY_CONFIDENCE, NEAREST_COPY_REASON, VALUE_READ_REASON,
+    VARIANT_PATTERN_REASON, VARIANT_USE_REASON,
+};
+use crate::contracts::identity::lexical_parents;
+use crate::file_category::{pick_global, FileMeta, GlobalPick, Language};
+use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
+use crate::session::import_scope::{ImportScope, Module};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::borrow::Cow;
+use std::cell::{OnceCell, RefCell};
+use std::rc::Rc;
 
 /// Overlay symbols of one kind family (`kind`), by name: the Tier-3
 /// overlay-wide candidates of [`resolve_callee`], and the names each dirty
@@ -153,7 +199,7 @@ struct OverlayFacts<'a> {
     base_namespaces: OnceCell<FxHashMap<u32, Vec<&'a str>>>,
     /// Virtual type → its declared supertypes resolved as the index's
     /// supertypes pre-pass does (`(bases, first_unresolved)`), set once by
-    /// [`OverlayView::build`] before any call resolves.
+    /// [`resolve_edges`] before any call resolves.
     dirty_supertypes: OnceCell<FxHashMap<u32, Supertypes>>,
     /// Rust self-type key → the trait keys of the dirty Rust files' archived
     /// `impl Trait for Type` blocks: the files' old content, whose bases the
@@ -189,6 +235,7 @@ impl<'a> OverlayFacts<'a> {
         files: &'a [OverlayFileInput],
         nodes: &'a [ViewNode],
         dirty_base: &'a FxHashSet<u32>,
+        removed: &'a FxHashSet<&'a str>,
         replaced: &'a FxHashMap<u32, u32>,
         later_overloads: &'a FxHashMap<u32, Vec<u32>>,
     ) -> Self {
@@ -272,13 +319,17 @@ impl<'a> OverlayFacts<'a> {
         let mut dirty_impl_traits: FxHashMap<&'a str, Vec<&'a str>> = FxHashMap::default();
         for &idx in dirty_base {
             let block = &graph.nodes[idx as usize];
+            // The kind test first: it is cheap, and few dirty nodes are `Impl`.
+            if NodeKind::from(&block.kind) != NodeKind::Impl {
+                continue;
+            }
             let rust_file = graph
                 .files
                 .get(block.file_idx.to_native() as usize)
                 .is_some_and(|f| {
                     Language::from_normalized_path(f.path.resolve(pool)) == Language::Rust
                 });
-            if NodeKind::from(&block.kind) != NodeKind::Impl || !rust_file {
+            if !rust_file {
                 continue;
             }
             let (Some(ty), Some(implemented)) = (
@@ -291,7 +342,7 @@ impl<'a> OverlayFacts<'a> {
         }
         Self {
             graph,
-            scope: ImportScope::new(graph, files, dirty_base),
+            scope: ImportScope::new(graph, files, dirty_base, removed),
             nodes,
             dirty_base,
             dirty: files
@@ -339,15 +390,13 @@ impl<'a> OverlayFacts<'a> {
 
     /// The outermost unscoped declaration the dirty parse's lexical
     /// parents reach from the virtual `idx`; `idx` itself when it is
-    /// unscoped. The index's `SymbolTable::lexical_root`.
-    fn lexical_root(&self, mut idx: u32) -> u32 {
-        for _ in 0..=self.dirty_lexical_parents.len() {
-            match self.dirty_lexical_parents.get(&idx) {
-                Some(&parent) => idx = parent,
-                None => break,
-            }
-        }
-        idx
+    /// unscoped. The index's `SymbolTable::lexical_root`, cycle rule
+    /// included.
+    fn lexical_root(&self, idx: u32) -> u32 {
+        lexical_chain_end(idx, self.dirty_lexical_parents.len(), |idx| {
+            self.dirty_lexical_parents.get(&idx).copied()
+        })
+        .unwrap_or(idx)
     }
 
     fn base_len(&self) -> u32 {
@@ -481,10 +530,14 @@ impl<'a> OverlayFacts<'a> {
         hit
     }
 
-    /// The stored spelling of `file`, a dirty or an indexed path.
+    /// The stored spelling of `file`, a dirty or an indexed path. `None` for
+    /// an indexed path the worktree removed.
     fn stored_path(&self, file: &str) -> Option<&'a str> {
         if let Some((&path, _)) = self.dirty.get_key_value(file) {
             return Some(path);
+        }
+        if self.scope.is_removed(file) {
+            return None;
         }
         let graph = self.graph;
         let file_idx = graph.file_idx_of(file)?;
@@ -617,7 +670,8 @@ impl<'a> OverlayFacts<'a> {
 
     /// The index's `SymbolTable::files_by_stem`. The index leaves out a file
     /// that declares nothing, which the base graph does not record per file:
-    /// such a file here can make a stem ambiguous, never add a target.
+    /// such a file here can make a stem ambiguous, never add a target. A
+    /// removed path is no file.
     fn files_by_stem(&self, stem: &str) -> &[&'a str] {
         let stems = self.stems.get_or_init(|| {
             let graph = self.graph;
@@ -625,7 +679,7 @@ impl<'a> OverlayFacts<'a> {
                 .files
                 .iter()
                 .map(|f| f.path.resolve(&graph.string_pool))
-                .filter(|path| !self.dirty.contains_key(path));
+                .filter(|path| !self.dirty.contains_key(path) && !self.scope.is_removed(path));
             let fresh = self
                 .scope
                 .dirty()
@@ -664,7 +718,7 @@ impl<'a> OverlayFacts<'a> {
         (callee, qualifier, member): (&str, &str, &str),
         target: ResolveTarget,
         qualifiers: &OverlayNames<'_>,
-        call: Option<CallScope<'_>>,
+        call: Option<CallPick<'_>>,
         heritage: &[String],
     ) -> Option<(u32, f32)> {
         let caller_type = call
@@ -705,7 +759,7 @@ impl<'a> OverlayFacts<'a> {
         (callee, qualifier, member): (&str, &str, &str),
         target: ResolveTarget,
         qualifiers: &OverlayNames<'_>,
-        call: Option<CallScope<'_>>,
+        call: Option<CallPick<'_>>,
         heritage: &[String],
     ) -> Option<(u32, f32)> {
         if qualifier == CallSite::SUPER_RECEIVER && caller.language == Language::Python {
@@ -1594,7 +1648,7 @@ impl<'a> OverlayFacts<'a> {
             return None;
         };
         let typed = match language {
-            // The call closure in `build` binds a submodule receiver
+            // The call closure in `resolve_edges` binds a submodule receiver
             // first and types only a site it left open, as the index does.
             Language::Python => reexport::python_imported_type(
                 self,
@@ -2490,12 +2544,12 @@ fn resolve_overlay_name_ref(
 /// Mirror of index-time Pass-2 `Calls` resolution, narrowed to the inputs
 /// available at query time, over the kind family of `names`. Returns the
 /// merged-space target index.
-/// Rust `::` calls use the cached module-path branch in `build` first.
+/// Rust `::` calls use the cached module-path branch in `resolve_edges` first.
 /// Method eligibility is a post-filter, like index-time `lookup_call_in_file`:
 /// removing free functions before uniqueness checks would invent a winner.
 ///
 /// A Python from-imported submodule and a Go package selector are settled
-/// by the call closure in `build` before this runs, as the index's
+/// by the call closure in `resolve_edges` before this runs, as the index's
 /// `Resolver::resolve_call` settles them.
 /// Tier 1 — same file: the dirty file was FULLY re-parsed, so its own
 /// callable set is authoritative. The first match ([`reexport::pick_call`]),
@@ -2521,7 +2575,7 @@ fn resolve_overlay_name_ref(
 /// ([`OverlayFacts::qualified_callee`]) → 0.85, else the receiver-typing
 /// ladder ([`OverlayFacts::receiver_ladder`]), else no edge; it never
 /// reaches Tier 3. A Rust path the qualifier tier leaves unresolved goes on
-/// to the module tree and then the ladder in `build` (Tier 3.5).
+/// to the module tree and then the ladder in `resolve_edges` (Tier 3.5).
 /// Tier 2.75 — heritage: a bare name in a class with declared bases takes
 /// the member in the first base's file that declares it → 0.8. Then, in a
 /// fully qualified language, the wildcard imports bind.
@@ -2565,15 +2619,9 @@ fn resolve_callee<'s>(
     } else {
         names.target
     };
-    let ladder_call = call.map(CallScope::ladder);
-    if let Resolution::Bound(hit) = ladder::same_file(
-        facts,
-        importer,
-        callee,
-        call_target,
-        ladder_call,
-        scope.heritage,
-    ) {
+    if let Resolution::Bound(hit) =
+        ladder::same_file(facts, importer, callee, call_target, call, scope.heritage)
+    {
         return accepts(hit.id).then_some((hit.id, hit.confidence));
     }
 
@@ -2783,7 +2831,7 @@ fn resolve_callee<'s>(
         );
         // A Rust module path (`crate::x::parse`) never binds a method here,
         // though the index's qualifier tier would. Its module tree and
-        // receiver ladder run in `build`.
+        // receiver ladder run in `resolve_edges`.
         if caller.language == Language::Rust && callee.contains("::") {
             return hit.filter(|&(idx, _)| rust_path_binds(graph, nodes, idx, qualifier));
         }
@@ -2840,13 +2888,8 @@ fn resolve_callee<'s>(
     // Tier 2.75: the caller's bases, in declared order, each as an implicit
     // qualifier; the first base whose file holds the member decides. A bare
     // call that reaches no member skips it.
-    if let (Resolution::Bound(hit), _) = ladder::heritage(
-        facts,
-        scope.heritage,
-        callee,
-        names.target,
-        ladder_call,
-        |base| {
+    if let (Resolution::Bound(hit), _) =
+        ladder::heritage(facts, scope.heritage, callee, names.target, call, |base| {
             facts.qualifier_file(
                 file_ord,
                 imports,
@@ -2855,8 +2898,8 @@ fn resolve_callee<'s>(
                 names.target,
                 qualifiers,
             )
-        },
-    ) {
+        })
+    {
         return accepts(hit.id).then_some((hit.id, hit.confidence));
     }
 
@@ -2953,7 +2996,7 @@ fn global_tier(
     replaced: &FxHashMap<u32, u32>,
     dirty_base: &FxHashSet<u32>,
     facts: &OverlayFacts<'_>,
-    (call, rust_method): (Option<CallScope<'_>>, bool),
+    (call, rust_method): (Option<CallPick<'_>>, bool),
     base_candidates: &OnceCell<Vec<u32>>,
 ) -> Option<(u32, f32)> {
     let importer = facts.scope.dirty()[file_ord].rel_path.as_str();
@@ -2978,9 +3021,12 @@ fn global_tier(
         names.target
     };
     let base_len = graph.nodes.len() as u32;
-    let mut base_meta = |idx: u32| {
+    // The ladder reads the candidates lazily, so the meta table sits in a
+    // cell: a `Fn` stream fills it as the pick advances.
+    let base_metas = RefCell::new(base_metas);
+    let base_meta = |idx: u32| {
         let file_idx = graph.nodes[idx as usize].file_idx.to_native() as usize;
-        *base_metas.entry(file_idx).or_insert_with(|| {
+        *base_metas.borrow_mut().entry(file_idx).or_insert_with(|| {
             graph
                 .files
                 .get(file_idx)
@@ -2993,15 +3039,19 @@ fn global_tier(
     let admits = |&(idx, _): &(u32, FileMeta)| !free_only || !is_method_node(graph, nodes, idx);
     let overlay_candidates: &[(u32, FileMeta)] =
         names.anywhere.get(callee).map(Vec::as_slice).unwrap_or(&[]);
+    let clean: &[u32] =
+        base_candidates.get_or_init(|| clean_base(graph, names.target, dirty_base, callee));
     // Read up to three times by the ladder (the pick, the nearest copy, the
-    // count), and only on a memo miss.
-    let candidates: Vec<(u32, FileMeta)> = base_candidates
-        .get_or_init(|| clean_base(graph, names.target, dirty_base, callee))
-        .iter()
-        .map(|&idx| (idx, base_meta(idx)))
-        .chain(overlay_candidates.iter().copied())
-        .filter(admits)
-        .collect();
+    // count), and only on a memo miss. The pick stops at the second
+    // admitted candidate, so a common name meets few of its base metas.
+    let (base_meta, admits) = (&base_meta, &admits);
+    let candidates = move || {
+        clean
+            .iter()
+            .map(move |&idx| (idx, base_meta(idx)))
+            .chain(overlay_candidates.iter().copied())
+            .filter(admits)
+    };
     let hidden = |target: u32| {
         let decl_file = match target.checked_sub(base_len) {
             Some(offset) => Some(&*nodes[offset as usize].rel_path),
@@ -3024,7 +3074,7 @@ fn global_tier(
         caller,
         call_target,
         call.is_some(),
-        || candidates.iter().copied(),
+        candidates,
         hidden,
     )
     .edge();
@@ -3033,42 +3083,13 @@ fn global_tier(
     hit
 }
 
-/// What a call site adds to a name lookup, as the index's `CallScope`
-/// (`Resolver::resolve_call`). Its presence also admits the nearest-copy
-/// rule of Tier 3.
-#[derive(Clone, Copy)]
-struct CallScope<'c> {
-    /// The [`owner_key`] of the type the calling member belongs to.
-    owner: Option<&'c str>,
-    /// The calling declaration (virtual idx): a Rust `self.m()` binds its
-    /// own `impl` block first ([`prefer_owned`]).
-    caller: Option<u32>,
-    /// The site is an untyped member call ([`CallSite::UntypedMember`]): no
-    /// tier narrows it by the caller's type or bases.
-    untyped: bool,
-    /// The site is a bare `f()` that never reaches a member
-    /// ([`CallSite::reaches_free_only`]), kept through a retry under another name.
-    free_only: bool,
-}
-
-impl<'c> CallScope<'c> {
-    /// What the shared name tiers read of this call site.
-    fn ladder(self) -> CallPick<'c> {
-        CallPick {
-            owner: self.owner,
-            caller: self.caller,
-            untyped: self.untyped,
-            free_only: self.free_only,
-        }
-    }
-}
-
 /// What a lookup carries besides the name, as the index's
 /// `resolve_symbol_with_import_binding` arguments.
 #[derive(Clone, Copy, Default)]
 struct Scope<'c> {
-    /// The call site, `None` for a plain symbol lookup.
-    call: Option<CallScope<'c>>,
+    /// The call site, `None` for a plain symbol lookup. Its presence also
+    /// admits the nearest-copy rule of Tier 3. `caller` is a virtual idx.
+    call: Option<CallPick<'c>>,
     /// The declared bases of the caller's enclosing class
     /// ([`enclosing_class_heritage`]), probed by the heritage tier.
     heritage: &'c [String],
@@ -3084,10 +3105,12 @@ struct Scope<'c> {
 /// bind external calls such as `std::fs::read` to unrelated project
 /// functions.
 /// File-layout evidence shared by all qualified lookups in one overlay build.
-/// Dirty declarations replace archived declarations, including deletion.
+/// Dirty declarations replace archived declarations, including deletion. A
+/// base path the worktree removed is no file.
 pub(super) struct RustModules<'a> {
     graph: &'a ArchivedZeroCopyGraph,
     dirty: FxHashMap<&'a str, &'a OverlayFileInput>,
+    removed: &'a FxHashSet<&'a str>,
     roots: Vec<&'a str>,
     /// The `graph.bin` workspace facts, read on the first [`Self::crate_head`]:
     /// reading them deserializes and validates the whole table.
@@ -3095,7 +3118,11 @@ pub(super) struct RustModules<'a> {
 }
 
 impl<'a> RustModules<'a> {
-    pub(super) fn new(graph: &'a ArchivedZeroCopyGraph, dirty: &'a [OverlayFileInput]) -> Self {
+    pub(super) fn new(
+        graph: &'a ArchivedZeroCopyGraph,
+        dirty: &'a [OverlayFileInput],
+        removed: &'a FxHashSet<&'a str>,
+    ) -> Self {
         let dirty: FxHashMap<_, _> = dirty
             .iter()
             .map(|file| (file.rel_path.as_str(), file))
@@ -3105,6 +3132,7 @@ impl<'a> RustModules<'a> {
             .files
             .iter()
             .map(|f| f.path.resolve(&graph.string_pool))
+            .filter(|path| !removed.contains(path))
             .chain(dirty.keys().copied())
         {
             let directory = file.rsplit_once('/').map_or("", |(dir, _)| dir);
@@ -3130,6 +3158,7 @@ impl<'a> RustModules<'a> {
         Self {
             graph,
             dirty,
+            removed,
             roots,
             crates: OnceCell::new(),
         }
@@ -3163,6 +3192,9 @@ impl<'a> RustModules<'a> {
         let requested = requested.as_ref();
         if let Some((&name, _)) = self.dirty.get_key_value(requested) {
             return Some(name);
+        }
+        if self.removed.contains(requested) {
+            return None;
         }
         let name =
             |file: &'a crate::graph::ArchivedFile| file.path.resolve(&self.graph.string_pool);
@@ -4119,8 +4151,9 @@ fn path_matches_segment(rel_path: &str, segment: &str) -> bool {
 pub(super) type MemberTwins = FxHashMap<u32, (usize, Vec<(u32, Span)>)>;
 
 /// The overlay's edges for every dirty file: `Calls`, lexical closure
-/// `References`, name refs, enum-variant refs and field reads. Returns the
-/// lexical parent of each scoped virtual node.
+/// `References`, name refs, enum-variant refs and field reads. `removed`
+/// holds the base paths gone from the worktree: no module lookup finds one.
+/// Returns the lexical parent of each scoped virtual node.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_edges(
     graph: &ArchivedZeroCopyGraph,
@@ -4129,6 +4162,7 @@ pub(super) fn resolve_edges(
     nodes: &[ViewNode],
     replaced: &FxHashMap<u32, u32>,
     dirty_base: &FxHashSet<u32>,
+    removed: &FxHashSet<&str>,
     type_ctors: &FxHashMap<u32, Vec<u32>>,
     later_overloads: &FxHashMap<u32, Vec<u32>>,
     member_twins: &MemberTwins,
@@ -4195,7 +4229,15 @@ pub(super) fn resolve_edges(
         in_adj.entry(edge.target).or_default().push(ei);
     };
 
-    let facts = OverlayFacts::new(graph, files, nodes, dirty_base, replaced, later_overloads);
+    let facts = OverlayFacts::new(
+        graph,
+        files,
+        nodes,
+        dirty_base,
+        removed,
+        replaced,
+        later_overloads,
+    );
     let lexical_parents: FxHashMap<u32, u32> = facts.dirty_lexical_parents.clone();
 
     // The index's `emit_overload_references`, in the same order.
@@ -4224,7 +4266,7 @@ pub(super) fn resolve_edges(
                         .any(|c| c.contains("::"))
                 })
         })
-        .then(|| RustModules::new(graph, files));
+        .then(|| RustModules::new(graph, files, removed));
     // The index's supertypes pre-pass, over the dirty files, before
     // any call resolves: the receiver ladder and the same-file pick
     // walk these bases.
@@ -4489,7 +4531,7 @@ pub(super) fn resolve_edges(
                         // An untyped receiver is no `this`: no tier reaches
                         // the member through the caller's bases.
                         let scope = Scope {
-                            call: Some(CallScope {
+                            call: Some(CallPick {
                                 owner,
                                 caller: Some(source),
                                 untyped,

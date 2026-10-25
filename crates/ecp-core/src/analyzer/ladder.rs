@@ -1,6 +1,6 @@
 //! The name tiers of the call-resolution ladder that the index
 //! (`Resolver::resolve_symbol_with_import_binding`) and the session overlay
-//! (`resolve_callee` in `session/view.rs`) both run: Tier 1 (the caller's
+//! (`resolve_callee` in `session/view/resolution.rs`) both run: Tier 1 (the caller's
 //! file), Tier 2.75 (the caller's bases) and Tier 3 (one name across the
 //! project). The rules that pick live here once (B §2.2, row B5); each side
 //! answers the questions through its own [`ResolveFacts`].
@@ -45,8 +45,9 @@ pub trait ResolveFacts: TypeFacts {
     fn enum_variant_of(&self, type_id: u32, type_name: &str, variant: &str) -> Option<u32>;
 }
 
-/// What a call site adds to a name lookup: the index's and the overlay's
-/// `CallScope`.
+/// What a call site adds to a name lookup. The index's
+/// `Resolver::resolve_call` and the overlay's edge pass both build one per
+/// call site; `None` in its place is a plain symbol lookup.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CallPick<'c> {
     /// The owner key of the type the calling member belongs to.

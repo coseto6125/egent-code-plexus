@@ -189,8 +189,10 @@ pub(super) fn replay(
         reason,
     };
 
-    // First declarations per path, built once for a path with a variant.
+    // First declarations per path, built once for a path with a variant
+    // from the path's inputs, which are grouped once on the first variant.
     let mut declarations: FxHashMap<&str, Declarations<'_>> = FxHashMap::default();
+    let mut inputs_by_path: Option<FxHashMap<&str, Vec<FileOrd>>> = None;
     for (ord, file) in files.iter().enumerate() {
         let path = file.rel_path.as_str();
         let ord = FileOrd(ord as u32);
@@ -221,9 +223,20 @@ pub(super) fn replay(
         if !file.symbols.iter().any(|s| s.kind == NodeKind::EnumVariant) {
             continue;
         }
-        let table = declarations
-            .entry(path)
-            .or_insert_with(|| Declarations::of(files, path, &raw_map, nodes));
+        let table = declarations.entry(path).or_insert_with(|| {
+            let by_path = inputs_by_path.get_or_insert_with(|| {
+                let mut by_path: FxHashMap<&str, Vec<FileOrd>> = FxHashMap::default();
+                for (ord, file) in files.iter().enumerate() {
+                    by_path
+                        .entry(file.rel_path.as_str())
+                        .or_default()
+                        .push(FileOrd(ord as u32));
+                }
+                by_path
+            });
+            let ords = by_path.get(path).map(Vec::as_slice).unwrap_or_default();
+            Declarations::of(files, ords, &raw_map, nodes)
+        });
         containment::enum_variant_defines(
             &file.symbols,
             row,
@@ -297,10 +310,10 @@ fn replay_records<'a>(
             nodes.push(record_view_node(node, &rel_path));
             idx
         };
-        let owner_of = move |raw: RawIdx| {
+        let node_of = move |raw: RawIdx| {
             file.symbols
                 .get(raw.index())
-                .and_then(|s| s.owner_class.as_deref())
+                .map(|s| (s.owner_class.as_deref(), s.name.as_str()))
         };
 
         for field in &records.schema_fields {
@@ -347,10 +360,19 @@ fn replay_records<'a>(
             ));
         }
 
+        // The index's `path_literal_nodes` derives the same table from the
+        // same rows; a file with no literal pays nothing.
+        let parents = match records.path_literals.is_empty() {
+            true => Vec::new(),
+            false => record_nodes::raw_lexical_parents(
+                path,
+                file.symbols.iter().map(|s| (s.kind, HeritageNode::span(s))),
+            ),
+        };
         for literal in &records.path_literals {
             let endpoint = literal.endpoint.as_ref();
             let to = add(record_nodes::path_literal_node(
-                path, literal, endpoint, owner_of,
+                path, literal, endpoint, &parents, node_of,
             ));
             if let Some(from) = source(endpoint) {
                 let reason = sink_reason(&literal.sink_reason);
@@ -590,18 +612,16 @@ struct Declarations<'a> {
 }
 
 impl<'a> Declarations<'a> {
+    /// The table of the inputs `ords` of one path, in input order.
     fn of(
         files: &'a [OverlayFileInput],
-        path: &str,
+        ords: &[FileOrd],
         raw_map: &RawIndexMap,
         nodes: &[ViewNode],
     ) -> Self {
         let mut first = FxHashMap::default();
-        for (ord, file) in files.iter().enumerate() {
-            if file.rel_path != path {
-                continue;
-            }
-            let ord = FileOrd(ord as u32);
+        for &ord in ords {
+            let file = &files[ord.0 as usize];
             for (raw, symbol) in file.symbols.iter().enumerate() {
                 if !matches!(symbol.kind, NodeKind::Enum | NodeKind::EnumVariant) {
                     continue;
@@ -1009,6 +1029,53 @@ mod tests {
         assert_eq!(pairs, [(base, base + 1), (base + 2, base + 3)]);
     }
 
+    /// Two inputs of one path share its first declarations: the second
+    /// input repeats the enum, and its variant pairs with the first input's
+    /// enum, never with the same-name enum of another path. The inputs of
+    /// each path are grouped once, before the first variant.
+    #[test]
+    fn test_replay_two_inputs_of_one_path_variant_pairs_enum_of_same_path() {
+        let bytes = clean_base();
+        let graph = access(&bytes);
+        let files = [
+            input(
+                "src/a.rs",
+                vec![
+                    sym(NodeKind::Enum, None, "Color", (1, 3)),
+                    sym(NodeKind::EnumVariant, Some("Color"), "Red", (2, 2)),
+                ],
+            ),
+            input(
+                "src/b.rs",
+                vec![
+                    sym(NodeKind::Enum, None, "Color", (1, 3)),
+                    sym(NodeKind::EnumVariant, Some("Color"), "Blue", (2, 2)),
+                ],
+            ),
+            // A second input of `src/a.rs` that repeats the enum: its first
+            // declaration is the first input's.
+            input(
+                "src/a.rs",
+                vec![
+                    sym(NodeKind::Enum, None, "Color", (4, 6)),
+                    sym(NodeKind::EnumVariant, Some("Color"), "Green", (5, 5)),
+                ],
+            ),
+        ];
+        let view = OverlayView::build(graph, &files).unwrap();
+        let base = view.base_len();
+        let mut pairs: Vec<(u32, u32)> = defines(graph, &view)
+            .into_iter()
+            .filter(|(_, _, reason)| reason == ENUM_VARIANT_DEFINES_REASON)
+            .map(|(s, t, _)| (s, t))
+            .collect();
+        pairs.sort_unstable();
+        assert_eq!(
+            pairs,
+            [(base, base + 1), (base, base + 5), (base + 2, base + 3)]
+        );
+    }
+
     /// A dirty function's meta is the one its fragment paired, slot for
     /// slot; a function without one, and a base node, have none.
     #[test]
@@ -1282,7 +1349,8 @@ mod tests {
     }
 
     /// A literal inside a nested function of a new file binds the nested
-    /// function, which has no owner, so the uid has no owner segment.
+    /// function. It has no owner, so the uid's owner segment is its lexical
+    /// parent's name, as the index derives it (`path_literal_nodes`).
     #[test]
     fn test_replay_literal_in_nested_function_sources_nested_function() {
         let bytes = clean_base();
@@ -1299,7 +1367,12 @@ mod tests {
         let virt = only(virtual_of(&view, NodeKind::PathLiteral));
         assert_eq!(
             view.node(virt).unwrap().uid,
-            crate::uid::compute(NodeKind::PathLiteral, "src/nest.ts", None, "./cfg.json")
+            crate::uid::compute(
+                NodeKind::PathLiteral,
+                "src/nest.ts",
+                Some("outer"),
+                "./cfg.json"
+            )
         );
         assert_eq!(
             rel_edges(graph, &view, RelType::UsesPathLiteral),

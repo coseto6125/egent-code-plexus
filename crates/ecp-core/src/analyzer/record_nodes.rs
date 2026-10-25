@@ -10,10 +10,13 @@
 //! to its own node ids. The name-paired heuristic edges (`MirrorsField`,
 //! `EventTopicMirror`) stay index-time and are not here.
 
+use crate::analyzer::lexical::{display_chain, display_owner_text, lexical_scope_kinds};
 use crate::analyzer::types::{
     PubSub, RawEventTopic, RawPathLiteral, RawSchemaField, RawSqlRef, RawTxScope, Span,
 };
+use crate::contracts::identity::lexical_parents;
 use crate::contracts::raw_records::{RawEndpoint, RawIdx};
+use crate::file_category::Language;
 use crate::graph::{NodeKind, RelType};
 use crate::uid;
 use rustc_hash::FxHashMap;
@@ -65,37 +68,71 @@ pub struct RecordNode<'a> {
     pub span: Span,
 }
 
+/// The lexical parent of each raw node of the file at `path`, from each
+/// node's kind and 0-based span, in raw order: the table
+/// [`path_literal_node`] reads. Empty for a language that scopes no kind
+/// ([`lexical_scope_kinds`]), whose nodes have no parent.
+pub fn raw_lexical_parents(
+    path: &str,
+    rows: impl Iterator<Item = (NodeKind, Span)>,
+) -> Vec<Option<u32>> {
+    let scoped = lexical_scope_kinds(Language::from_path(path));
+    if scoped.is_empty() {
+        return Vec::new();
+    }
+    let decls: Vec<(NodeKind, Span)> = rows.collect();
+    lexical_parents(&decls, scoped)
+}
+
 /// The `PathLiteral` node of `literal` in the file at `path`. `endpoint` is
-/// the literal's endpoint, and `owner_of(raw)` the owner class of the file's
-/// raw node `raw` (`None` for no owner or an index past the file).
+/// the literal's endpoint, `parents` the file's [`raw_lexical_parents`], and
+/// `node_of(raw)` the owner class and name of the file's raw node `raw`
+/// (`None` past the file).
 ///
-/// The owner is the bound node's own owner, so two identical literals in
-/// same-name methods of two types get distinct uids. A literal with no bound
-/// node (a class-body field initializer binds the file) keeps the class its
-/// walker found, or two classes of one file holding the same literal would
-/// share a uid. Two identical literals under one owner share a uid: the
-/// index keeps both nodes.
+/// The node stores the bound node's own owner. The uid hashes the bound
+/// node's display owner ([`display_chain`]): its owner, else the names of
+/// its lexical parents up to the first owner. So two identical literals in
+/// same-name methods of two types get distinct uids, and so do two in
+/// same-name nested functions of two parents, which have no owner. A literal
+/// with no bound node (a class-body field initializer binds the file) keeps
+/// the class its walker found, or two classes of one file holding the same
+/// literal would share a uid. Two identical literals under one display owner
+/// share a uid: the index keeps both nodes.
 pub fn path_literal_node<'a>(
     path: &str,
     literal: &'a RawPathLiteral,
     endpoint: Option<&RawEndpoint>,
-    owner_of: impl FnOnce(RawIdx) -> Option<&'a str>,
+    parents: &[Option<u32>],
+    node_of: impl Fn(RawIdx) -> Option<(Option<&'a str>, &'a str)>,
 ) -> RecordNode<'a> {
-    let owner = match endpoint {
-        Some(RawEndpoint::Node(idx)) => owner_of(*idx),
-        _ => literal.enclosing_owner.as_deref(),
-    }
-    .unwrap_or("");
+    let node = |raw: u32| {
+        node_of(RawIdx(raw)).map(|(owner, name)| (owner.filter(|o| !o.is_empty()), name))
+    };
+    let (owner, uid_owner) = match endpoint {
+        Some(RawEndpoint::Node(idx)) => {
+            let chain = display_chain(idx.0, parents.len(), &node, |raw| {
+                parents.get(raw as usize).copied().flatten()
+            });
+            (
+                node(idx.0).and_then(|(owner, _)| owner),
+                chain.and_then(display_owner_text),
+            )
+        }
+        _ => {
+            let owner = literal.enclosing_owner.as_deref();
+            (owner, owner.map(Cow::Borrowed))
+        }
+    };
     RecordNode {
         kind: NodeKind::PathLiteral,
         uid: uid::compute(
             NodeKind::PathLiteral,
             path,
-            (!owner.is_empty()).then_some(owner),
+            uid_owner.as_deref().filter(|owner| !owner.is_empty()),
             &literal.value,
         ),
         name: Cow::Borrowed(&literal.value),
-        owner,
+        owner: owner.unwrap_or(""),
         span: literal.span,
     }
 }
@@ -244,7 +281,8 @@ mod tests {
             "src/a.rs",
             &lit,
             Some(&RawEndpoint::Node(RawIdx(1))),
-            |raw| (raw == RawIdx(1)).then_some("Bound"),
+            &[],
+            |raw| (raw == RawIdx(1)).then_some((Some("Bound"), "load")),
         );
         assert_eq!(node.owner, "Bound");
         assert_eq!(
@@ -257,7 +295,7 @@ mod tests {
     #[test]
     fn test_path_literal_node_file_endpoint_keeps_walker_owner() {
         let lit = literal("cfg.json", Some("Walker"));
-        let node = path_literal_node("src/a.rs", &lit, Some(&RawEndpoint::File), |_| {
+        let node = path_literal_node("src/a.rs", &lit, Some(&RawEndpoint::File), &[], |_| {
             unreachable!("a file endpoint reads no node")
         });
         assert_eq!(node.owner, "Walker");
@@ -273,13 +311,96 @@ mod tests {
             "src/a.rs",
             &bound,
             Some(&RawEndpoint::Node(RawIdx(0))),
-            |_| None,
+            &[None],
+            |_| Some((None, "load")),
         );
         assert_eq!((node.owner, node.uid), ("", unowned));
         let top = literal("cfg.json", None);
         assert_eq!(
-            path_literal_node("src/a.rs", &top, None, |_| None).uid,
+            path_literal_node("src/a.rs", &top, None, &[], |_| None).uid,
             unowned
+        );
+    }
+
+    /// Raw nodes: 0 `first` · 1 its nested `inner` · 2 `second` · 3 its
+    /// nested `inner` · 4 `inner` nested in 5 `m` of `A`.
+    const NESTED: [(Option<&str>, &str); 6] = [
+        (None, "first"),
+        (None, "inner"),
+        (None, "second"),
+        (None, "inner"),
+        (None, "inner"),
+        (Some("A"), "m"),
+    ];
+    const NESTED_PARENTS: [Option<u32>; 6] = [None, Some(0), None, Some(2), Some(5), None];
+
+    /// The node of a `cfg.json` literal bound to [`NESTED`] node `raw`.
+    fn nested_literal(lit: &RawPathLiteral, raw: u32) -> RecordNode<'_> {
+        path_literal_node(
+            "src/a.py",
+            lit,
+            Some(&RawEndpoint::Node(RawIdx(raw))),
+            &NESTED_PARENTS,
+            |raw| NESTED.get(raw.index()).copied(),
+        )
+    }
+
+    /// Two identical literals in same-name nested functions of two parents:
+    /// the nested functions have no owner, and the uids still differ by
+    /// the parent's name. The node stores the bound node's own owner.
+    #[test]
+    fn test_path_literal_node_nested_functions_of_two_parents_distinct_uids() {
+        let lit = literal("cfg.json", None);
+        let (first, second) = (nested_literal(&lit, 1), nested_literal(&lit, 3));
+        assert_ne!(first.uid, second.uid);
+        assert_eq!(
+            first.uid,
+            uid::compute(NodeKind::PathLiteral, "src/a.py", Some("first"), "cfg.json")
+        );
+        assert_eq!(
+            second.uid,
+            uid::compute(
+                NodeKind::PathLiteral,
+                "src/a.py",
+                Some("second"),
+                "cfg.json"
+            )
+        );
+        assert_eq!((first.owner, second.owner), ("", ""));
+        assert_eq!(
+            nested_literal(&lit, 4).uid,
+            uid::compute(NodeKind::PathLiteral, "src/a.py", Some("A::m"), "cfg.json")
+        );
+    }
+
+    /// A literal of a top-level function and one of a nested function keep
+    /// apart; a file-level literal keeps the owner-less uid.
+    #[test]
+    fn test_path_literal_node_file_level_beside_nested_distinct_uids() {
+        let unowned = uid::compute(NodeKind::PathLiteral, "src/a.py", None, "cfg.json");
+        let top = literal("cfg.json", None);
+        let file_level = path_literal_node(
+            "src/a.py",
+            &top,
+            Some(&RawEndpoint::File),
+            &NESTED_PARENTS,
+            |raw| NESTED.get(raw.index()).copied(),
+        );
+        assert_eq!(file_level.uid, unowned);
+        assert_eq!(nested_literal(&top, 0).uid, unowned);
+        assert_ne!(nested_literal(&top, 1).uid, unowned);
+    }
+
+    #[test]
+    fn test_raw_lexical_parents_unscoped_language_is_empty_scoped_finds_parent() {
+        let rows = [
+            (NodeKind::Function, (0, 0, 4, 0)),
+            (NodeKind::Function, (1, 4, 2, 0)),
+        ];
+        assert!(raw_lexical_parents("src/A.java", rows.into_iter()).is_empty());
+        assert_eq!(
+            raw_lexical_parents("src/a.py", rows.into_iter()),
+            [None, Some(0)]
         );
     }
 

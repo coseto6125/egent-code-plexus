@@ -116,9 +116,14 @@ fn check(case: Case<'_>) {
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&base).unwrap();
     let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
     let inputs: Vec<OverlayFileInput> = case.dirty.iter().map(|file| parse(file).into()).collect();
+    // As `OverlayView::build_with_removed` does: a removed file's base nodes
+    // are dirty too, and its path goes to the scope's removed set.
+    let removed: FxHashSet<&str> = case.removed.iter().copied().collect();
     let dirty_files: FxHashSet<u32> = inputs
         .iter()
-        .filter_map(|input| graph.file_idx_of(&input.rel_path))
+        .map(|input| input.rel_path.as_str())
+        .chain(case.removed.iter().copied())
+        .filter_map(|path| graph.file_idx_of(path))
         .collect();
     let dirty_base: FxHashSet<u32> = graph
         .nodes
@@ -127,7 +132,7 @@ fn check(case: Case<'_>) {
         .filter(|(_, node)| dirty_files.contains(&node.file_idx.to_native()))
         .map(|(idx, _)| idx as u32)
         .collect();
-    let scope = ImportScope::new(graph, &inputs, &dirty_base);
+    let scope = ImportScope::new(graph, &inputs, &dirty_base, &removed);
 
     let both = |importer: &str, specifier: &str| {
         let index =
@@ -236,8 +241,6 @@ fn test_ladder_module_discovery_python_dirty_added_module_same_both_sides() {
 }
 
 #[test]
-#[ignore = "overlay divergence: ImportScope indexes every base file, a removed one included, \
-            so a deleted module stays discoverable until the next full index"]
 fn test_ladder_module_discovery_python_dirty_removed_module_same_both_sides() {
     let provider = PythonProvider::new().unwrap();
     check(Case {
@@ -249,7 +252,55 @@ fn test_ladder_module_discovery_python_dirty_removed_module_same_both_sides() {
         ],
         dirty: &[],
         removed: &["pkg/gone.py"],
-        rows: &[("main.py", "pkg/gone", Found::Missing)],
+        rows: &[
+            ("main.py", "pkg/gone", Found::Missing),
+            ("pkg/__init__.py", ".gone", Found::Missing),
+            ("main.py", "pkg", unique("pkg/__init__.py")),
+        ],
+        parsed_importer: None,
+    });
+}
+
+/// A removed `__init__.py`: the package no longer resolves, its other
+/// modules still do.
+#[test]
+fn test_ladder_module_discovery_python_removed_package_init_same_both_sides() {
+    let provider = PythonProvider::new().unwrap();
+    check(Case {
+        provider: &provider,
+        language: Language::Python,
+        base: &[
+            ("pkg/__init__.py", "def init():\n    pass\n"),
+            ("pkg/util.py", "def helper():\n    pass\n"),
+        ],
+        dirty: &[],
+        removed: &["pkg/__init__.py"],
+        rows: &[
+            ("main.py", "pkg", Found::Missing),
+            ("main.py", "pkg/util", unique("pkg/util.py")),
+        ],
+        parsed_importer: None,
+    });
+}
+
+/// A removed path that a dirty file has again (a tombstone beside a fresh
+/// fragment): the dirty file exists, so it resolves.
+#[test]
+fn test_ladder_module_discovery_python_removed_path_readded_by_dirty_file_same_both_sides() {
+    let provider = PythonProvider::new().unwrap();
+    check(Case {
+        provider: &provider,
+        language: Language::Python,
+        base: &[
+            ("pkg/__init__.py", "def init():\n    pass\n"),
+            ("pkg/gone.py", "def gone():\n    pass\n"),
+        ],
+        dirty: &[("pkg/gone.py", "def back():\n    pass\n")],
+        removed: &["pkg/gone.py"],
+        rows: &[
+            ("main.py", "pkg/gone", unique("pkg/gone.py")),
+            ("pkg/__init__.py", ".gone", unique("pkg/gone.py")),
+        ],
         parsed_importer: None,
     });
 }

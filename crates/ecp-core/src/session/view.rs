@@ -32,7 +32,7 @@
 //!   builder-made ones included, and so every base edge into or out of it
 //!   drops.
 //! - **overlay edges** — `Calls` edges re-resolved from each dirty symbol's
-//!   [`CallSite`]s, mirroring index-time Pass-2 tier semantics (same-file
+//!   [`CallSite`](crate::analyzer::types::CallSite)s, mirroring index-time Pass-2 tier semantics (same-file
 //!   with the caller's own member first → import-scoped → unique-global with
 //!   `AmbiguousGlobal` suppression unless every candidate is a copy of one
 //!   declaration in duplicated source trees, then the constructor fallback
@@ -118,7 +118,7 @@
 //!   previous ambiguity) keep their index-time resolution — clean files are
 //!   never re-resolved at query time.
 //! - TS / JS imports run the index's named-import tier through the shared
-//!   rules ([`reexport`]): candidate probing with the path aliases the index
+//!   rules ([`reexport`](crate::analyzer::reexport)): candidate probing with the path aliases the index
 //!   resolved with (`graph.bin` keeps them), ES-module export eligibility,
 //!   export aliases and the one-hop barrel re-export, over the archived
 //!   import / export facts of clean files. An edit to `tsconfig.json` itself
@@ -151,56 +151,29 @@
 //!   when that layout cannot establish the target, and a crate rooted at a
 //!   custom `[lib] path` gets no `crate::` / `self::` / `super::` chain.
 
-use super::import_scope::{ImportScope, Module};
 use super::incremental::{self, ReplayInputs};
 use crate::analyzer::containment::{ENUM_VARIANT_DEFINES_REASON, SCOPE_DEFINES_REASON};
-use crate::analyzer::csharp_access::{self, CallAccess};
-use crate::analyzer::csharp_extension::{self, ReceiverSite};
-use crate::analyzer::heritage::{enclosing_class_heritage, holds_heritage, HeritageNode};
-use crate::analyzer::import_binding::{
-    extension_retry, fqn_imported_name, fqn_language, fqn_type_path, import_binding,
-    import_member_fallback, owner_path_agrees, retry_name, DeclaredType, MemberOwner,
-};
-use crate::analyzer::ladder::{self, split_qualifier, CallPick, FieldRead, ResolveFacts};
+use crate::analyzer::csharp_extension;
+use crate::analyzer::heritage::HeritageNode;
 use crate::analyzer::lexical::{
-    enclosing_types, file_identities, later_is_arity_twin, lexical_scope_kinds, splits_by_arity,
-    twin_enclosing, LexicalFunctions,
+    enclosing_types, file_identities, later_is_arity_twin, splits_by_arity,
 };
-use crate::analyzer::outcome::{NoEdge, Resolution, Tier};
-use crate::analyzer::path_aliases::PathAliases;
+use crate::analyzer::outcome::Tier;
 use crate::analyzer::record_nodes::{
     EVENT_TOPIC_PUBLISHES_REASON, EVENT_TOPIC_SUBSCRIBES_REASON, PATH_LITERAL_SINK_REASONS,
     SCHEMA_FIELD_HAS_PROPERTY_REASON, TX_SCOPE_REASON,
 };
-use crate::analyzer::reexport::{
-    self, export_filter_applies, is_ecmascript, ExportAliasTable, Fact, FileImports, ImportRef,
-    ModuleFacts, PyModule, ResolveTarget,
-};
-use crate::analyzer::rust_paths::{
-    is_rust_source, is_rust_target_root, rust_expand_path_head, rust_module_dir,
-    rust_module_path_base, rust_path_prefix_agrees_with_import, rust_type_path_prefix,
-};
-use crate::analyzer::same_file_pick::{
-    is_free, member_call_admits, prefer_owned, rust_impl_members, type_receiver_is_closed,
-    ImplMember, ImplNode, PickFacts, PickScope,
-};
-use crate::analyzer::type_ladder::{
-    self, TypeCandidates, TypeFacts, TypeMember as LadderMember, MAX_HERITAGE_DEPTH,
-};
 use crate::analyzer::types::{
-    innermost_enclosing, owner_key, CallArguments, CallSite, LocalGraph, NameRef, RawEventTopic,
-    RawExportAlias, RawImport, RawPathLiteral, RawSchemaField, RawSqlRef, RawTxScope, Span,
-    VariantRef, CLOSURE_REFERENCE_REASON, FUNCTION_REFERENCE_REASON, NEAREST_COPY_CONFIDENCE,
-    NEAREST_COPY_REASON, OVERLOAD_SET_REASON, VALUE_READ_REASON, VARIANT_PATTERN_REASON,
-    VARIANT_USE_REASON,
+    innermost_enclosing, owner_key, LocalGraph, RawEventTopic, RawExportAlias, RawImport,
+    RawPathLiteral, RawSchemaField, RawSqlRef, RawTxScope, Span, CLOSURE_REFERENCE_REASON,
+    FUNCTION_REFERENCE_REASON, NEAREST_COPY_REASON, OVERLOAD_SET_REASON, VALUE_READ_REASON,
+    VARIANT_PATTERN_REASON, VARIANT_USE_REASON,
 };
-use crate::contracts::identity::{lexical_parents, pair_by_anchor, DeclIdentity, UidSlot};
-use crate::file_category::{pick_global, FileMeta, GlobalPick, Language};
+use crate::contracts::identity::{pair_by_anchor, DeclIdentity, UidSlot};
+use crate::file_category::Language;
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::borrow::Cow;
-use std::cell::{OnceCell, RefCell};
-use std::rc::Rc;
+use std::cell::RefCell;
 use std::sync::Arc;
 
 mod resolution;
@@ -218,7 +191,8 @@ pub struct OverlaySymbol {
     pub start_column: u32,
     pub end_column: u32,
     /// `RawNode.calls` of this symbol: callee short names, some encoded as a
-    /// [`CallSite`] (read them through [`CallSite::parse`]).
+    /// [`CallSite`](crate::analyzer::types::CallSite) (read them through
+    /// [`CallSite::parse`](crate::analyzer::types::CallSite::parse)).
     pub calls: Vec<String>,
     /// `RawNode.is_exported`: in an ES module, only an exported declaration
     /// is another file's import target.
@@ -470,10 +444,11 @@ pub struct OverlayView {
     /// no entry.
     type_ctors: FxHashMap<u32, Vec<u32>>,
     /// Scoped virtual idx → its lexical parent's virtual idx, from the fresh
-    /// parse by the index's one derivation ([`lexical_parents`]). The
+    /// parse by the index's one derivation
+    /// ([`lexical_parents`](crate::contracts::identity::lexical_parents)). The
     /// graph's table has no row for a virtual node, so the merged display
     /// owner reads these. Empty when no dirty file's language scopes a kind
-    /// ([`lexical_scope_kinds`]).
+    /// ([`lexical_scope_kinds`](crate::analyzer::lexical::lexical_scope_kinds)).
     lexical_parents: FxHashMap<u32, u32>,
     /// Base declarations of a dirty (not removed) path that the pairing left
     /// unpaired although the parse still names their anchor, grouped by
@@ -529,7 +504,7 @@ pub const GAP_CS_EXTENSION_STALE_EDGE: &str = "cs-extension-stale-edge";
 const CS_STRICTEST_FLAGS: u16 = crate::graph::FunctionMeta::FLAG_STATIC | (2 << 6);
 
 /// [`CallGap::reason`] of a dirty C# caller: the C# access rule judged a
-/// method of a dirty file ([`csharp_access`]), and its verdict rests on
+/// method of a dirty file ([`csharp_access`](crate::analyzer::csharp_access)), and its verdict rests on
 /// flags the overlay cannot read. A dirty file's input carries no flags of
 /// its own: a method that replaced a base declaration is judged by that
 /// declaration's flags, which the edit may have changed, and an overload,
@@ -825,6 +800,7 @@ impl OverlayView {
             &nodes,
             &replaced,
             &dirty_base,
+            &removed_paths,
             &type_ctors,
             &later_overloads,
             &member_twins,
@@ -1052,7 +1028,9 @@ impl OverlayView {
 /// `Defines` with two reasons, the `File` nodes they mask, and each virtual
 /// function's meta; a 13 view has none of them. F7a-2 extends 14 unreleased:
 /// the view stores the replayed record nodes and edges, the base record
-/// nodes they pair or suppress, and whether the records replayed.
+/// nodes they pair or suppress, and whether the records replayed. Fix wave
+/// B extends it again: a dirty file binds no call into a removed module,
+/// and a replayed literal of a nested function hashes its lexical parents.
 pub const VIEW_CACHE_FORMAT: u32 = 14;
 
 /// The base edge kinds the record replay rebuilds, so masks at a re-parsed
@@ -1811,7 +1789,9 @@ mod tests {
         relative_module_rank, RustModules,
     };
     use super::*;
-    use crate::analyzer::types::RawImport;
+    use crate::analyzer::ladder::split_qualifier;
+    use crate::analyzer::path_aliases::PathAliases;
+    use crate::analyzer::types::{CallSite, RawImport, NEAREST_COPY_CONFIDENCE};
     use crate::graph_fixture::GraphFixture;
     use rkyv::rancor::Error as RkyvError;
 
@@ -2044,7 +2024,8 @@ mod tests {
         }
         let bytes = fixture.into_bytes();
         let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
-        let modules = RustModules::new(graph, &[]);
+        let removed = FxHashSet::default();
+        let modules = RustModules::new(graph, &[], &removed);
         for path in paths {
             assert_eq!(modules.file(std::path::Path::new(path)), Some(path));
         }
@@ -2089,7 +2070,8 @@ mod tests {
     fn test_rust_modules_resolve_empty_chain_crate_head_resolves() {
         let bytes = crate_b_graph_bytes();
         let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
-        let modules = RustModules::new(graph, &[]);
+        let removed = FxHashSet::default();
+        let modules = RustModules::new(graph, &[], &removed);
         assert_eq!(modules.resolve(&[], "b::util"), Some("b/src/util.rs"));
         assert_eq!(modules.resolve(&[], "b"), Some("b/src/lib.rs"));
         for anchored in [
@@ -2109,7 +2091,8 @@ mod tests {
     fn test_rust_modules_crate_table_loaded_on_first_crate_head() {
         let bytes = crate_b_graph_bytes();
         let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
-        let modules = RustModules::new(graph, &[]);
+        let removed = FxHashSet::default();
+        let modules = RustModules::new(graph, &[], &removed);
         assert!(
             modules.crates.get().is_none(),
             "building the view reads no table"
@@ -2135,7 +2118,8 @@ mod tests {
         fixture.file("src/bin/util.rs");
         let bytes = fixture.into_bytes();
         let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
-        let modules = RustModules::new(graph, &[]);
+        let removed = FxHashSet::default();
+        let modules = RustModules::new(graph, &[], &removed);
         assert_eq!(
             modules.file(std::path::Path::new("src\\bin\\util.rs")),
             Some("src/bin/util.rs")

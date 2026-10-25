@@ -1,12 +1,12 @@
 //! The outcome of one resolution rule, and the confidence of each tier.
 //!
-//! The index (`resolver.rs`) and the overlay (`view.rs`) run the same tier
+//! The index (`resolver.rs`) and the overlay (`session/view/resolution.rs`) run the same tier
 //! ladder. Each of them held its own copy of the tier confidences and tested
 //! "did the ladder end, and may the call-level fallbacks still run" by hand.
 //! This module holds both facts once (B §3.1, §3.2). Both call entries
 //! (`Resolver::resolve_call` and the overlay's call closure) carry one
-//! [`Resolution`] through their call-level fallbacks; the tiers inside the
-//! ladders adopt it in later slices.
+//! [`Resolution`] through their call-level fallbacks, and the tiers inside
+//! the ladders return it too.
 
 use super::type_ladder::TypeMember;
 use super::types::NEAREST_COPY_CONFIDENCE;

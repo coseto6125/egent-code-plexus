@@ -262,7 +262,7 @@ fn facts<'a>(
         end_line: node.end_line(),
         columns: node.columns(),
         name: node.name(merged),
-        qualifier: display_path(merged, idx, node),
+        qualifier: display_path(merged, idx),
     }
 }
 
@@ -272,29 +272,24 @@ fn facts<'a>(
 /// so `outer.helper` selects it, in a dirty file too: a virtual node walks
 /// the overlay's rows ([`MergedGraph::lexical_parent`]). Built from
 /// pool-borrowed parts because the joined display text is an owned string.
-fn display_path<'a>(
-    merged: &MergedGraph<'a>,
-    idx: u32,
-    node: MergedNode<'a>,
-) -> Vec<PathSegment<'a>> {
-    let mut parents: Vec<&'a str> = Vec::new();
-    let (mut current, mut current_node) = (idx, node);
-    let rows = merged.lexical_parent_count();
-    let head = loop {
-        if let Some(owner) = current_node.owner_class(merged) {
-            break PathSegment::from_owner(owner);
-        }
-        // Each row is one step, so more steps than rows is a corrupt cycle.
-        let parent = (parents.len() < rows)
-            .then(|| merged.lexical_parent(current))
-            .flatten()
-            .and_then(|p| Some((p, merged.node(p)?)));
-        let Some((parent, parent_node)) = parent else {
-            break Vec::new();
-        };
-        parents.push(parent_node.name(merged));
-        (current, current_node) = (parent, parent_node);
+/// Rows that form a cycle give no path, as the display owner prints none
+/// ([`ecp_core::analyzer::lexical::display_chain`]).
+fn display_path<'a>(merged: &MergedGraph<'a>, idx: u32) -> Vec<PathSegment<'a>> {
+    let Some((owner, parents)) = ecp_core::analyzer::lexical::display_chain(
+        idx,
+        merged.lexical_parent_count(),
+        |current| {
+            let node = merged.node(current)?;
+            Some((node.owner_class(merged), node.name(merged)))
+        },
+        |current| merged.lexical_parent(current),
+    ) else {
+        return Vec::new();
     };
+    let head = owner.map_or_else(Vec::new, PathSegment::from_owner);
+    if parents.is_empty() {
+        return head;
+    }
     head.into_iter()
         .chain(parents.into_iter().rev().map(|name| PathSegment {
             name,
@@ -545,7 +540,8 @@ mod tests {
     }
 
     /// Stands for: a corrupt table whose rows form a cycle ends the walk
-    /// instead of looping, and the candidate keeps a finite path.
+    /// instead of looping, and the candidate gets no path, as its display
+    /// owner prints none.
     #[test]
     fn test_display_path_cyclic_rows_terminates() {
         let mut fx = GraphFixture::new();
@@ -559,7 +555,8 @@ mod tests {
         let bytes = fx.into_bytes();
         let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
         let merged = MergedGraph::new(graph, None);
-        let path = display_path(&merged, a, merged.node(a).unwrap());
-        assert!(path.len() <= 2, "{path:?}");
+        let path = display_path(&merged, a);
+        assert!(path.is_empty(), "{path:?}");
+        assert_eq!(merged.display_owner(a), None);
     }
 }

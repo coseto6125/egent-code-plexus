@@ -1,4 +1,4 @@
-//! FU-2026-10-05-e838f64395a2: the overlay's import tier (`session/view.rs`)
+//! FU-2026-10-05-e838f64395a2: the overlay's import tier (`session/view/resolution.rs`)
 //! pins a Java import's member owner from the import path exactly as the
 //! index does (`SymbolTable::lookup_member_in_file`). Each fixture asserts
 //! the full reindex and the merged overlay give the same Calls targets.

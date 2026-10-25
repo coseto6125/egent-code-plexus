@@ -1608,33 +1608,24 @@ impl ArchivedZeroCopyGraph {
     ///
     /// A nested `helper` in `impl A { fn new }` prints `A::new`. `None`
     /// also for an index past `nodes` and for rows that form a cycle, which
-    /// only a corrupt table holds.
+    /// only a corrupt table holds ([`crate::analyzer::lexical::display_chain`]).
     pub fn display_owner(&self, node_idx: u32) -> Option<std::borrow::Cow<'_, str>> {
+        use crate::analyzer::lexical::{display_chain, display_owner_text};
         let pool = &self.string_pool;
-        let mut segments: Vec<&str> = Vec::new();
-        let mut current = node_idx;
-        let head = loop {
-            let owner = self.nodes.get(current as usize)?.owner_class.resolve(pool);
-            if !owner.is_empty() {
-                break Some(owner);
-            }
-            let Some(parent) = self.lexical_parent(current) else {
-                break None;
-            };
-            // Each row is one step, so more steps than rows is a cycle.
-            if segments.len() >= self.lexical_parents.len() {
-                return None;
-            }
-            segments.push(self.nodes.get(parent as usize)?.name.resolve(pool));
-            current = parent;
-        };
-        segments.extend(head);
-        segments.reverse();
-        match segments.as_slice() {
-            [] => None,
-            [only] => Some(std::borrow::Cow::Borrowed(*only)),
-            _ => Some(std::borrow::Cow::Owned(segments.join("::"))),
-        }
+        let chain = display_chain(
+            node_idx,
+            self.lexical_parents.len(),
+            |idx| {
+                let node = self.nodes.get(idx as usize)?;
+                let owner = node.owner_class.resolve(pool);
+                Some((
+                    (!owner.is_empty()).then_some(owner),
+                    node.name.resolve(pool),
+                ))
+            },
+            |idx| self.lexical_parent(idx),
+        )?;
+        display_owner_text(chain)
     }
 
     pub fn is_es_module_file(&self, file_idx: u32) -> bool {

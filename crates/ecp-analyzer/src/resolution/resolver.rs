@@ -709,11 +709,11 @@ impl<'a> Resolver<'a> {
                 (raw_imports, bind && bind_import),
                 target,
                 heritage,
-                Some(CallScope {
+                Some(CallPick {
                     owner: caller_owner,
-                    untyped_receiver: !bind_import,
-                    free_only,
                     caller,
+                    untyped: !bind_import,
+                    free_only,
                 }),
                 &mut None,
             )
@@ -1676,6 +1676,10 @@ impl<'a> Resolver<'a> {
         )
     }
 
+    /// `call` is the call site ([`Self::resolve_call`]), `None` for a plain
+    /// symbol lookup. Its presence also admits
+    /// [`ResolutionTier::NearestCopy`], whose confidence Pass 2 maps to the
+    /// call edge's reason; a retry under another name keeps it.
     #[allow(clippy::too_many_arguments)]
     fn resolve_symbol_with_import_binding(
         &self,
@@ -1685,7 +1689,7 @@ impl<'a> Resolver<'a> {
         (raw_imports, bind_import): (&[RawImport], bool),
         target: ResolveTarget,
         caller_heritage: &[String],
-        call: Option<CallScope<'_>>,
+        call: Option<CallPick<'_>>,
         barrel: &mut Option<Arc<str>>,
     ) -> Vec<(NodeId, f32)> {
         let mut results = Vec::new();
@@ -1700,13 +1704,12 @@ impl<'a> Resolver<'a> {
         // that reaches no member ([`CallSite::reaches_free_only`]) weighs no method of
         // the file, so a free function of the name still wins.
         let free_only = call.is_some_and(|scope| scope.free_only);
-        let ladder_call = call.map(CallScope::ladder);
         if let Resolution::Bound(hit) = ladder::same_file(
             self.symbol_table,
             &source_file_str,
             symbol_name,
             target,
-            ladder_call,
+            call,
             caller_heritage,
         ) {
             results.push((hit.id, hit.confidence));
@@ -1727,7 +1730,7 @@ impl<'a> Resolver<'a> {
         // (codex ruling P-d). Only a member the type declares in any part,
         // or inherits through the bases any part lists, binds.
         if let Some((node_id, tier, decision)) = call
-            .filter(|scope| !scope.untyped_receiver && !scope.free_only)
+            .filter(|scope| !scope.untyped && !scope.free_only)
             .and_then(|scope| {
                 self.partial_type_member(
                     &source_file_str,
@@ -2053,7 +2056,7 @@ impl<'a> Resolver<'a> {
             caller_heritage,
             symbol_name,
             target,
-            ladder_call,
+            call,
             |base| {
                 self.resolve_qualifier_file(
                     source_file,
@@ -2361,38 +2364,6 @@ fn for_each_specifier_candidate<F>(
         },
         visit,
     );
-}
-
-/// What a call site adds to a name lookup ([`Resolver::resolve_call`]).
-/// Its presence also admits [`ResolutionTier::NearestCopy`], whose
-/// confidence Pass 2 maps to the call edge's reason.
-#[derive(Clone, Copy)]
-struct CallScope<'c> {
-    /// The type the calling member belongs to.
-    owner: Option<&'c str>,
-    /// `o.m()` on a receiver the parser could not type: the member is not
-    /// reached through the caller's bases, so they do not narrow the pick
-    /// (`super(E, self).m()` starts after `E`).
-    untyped_receiver: bool,
-    /// A bare `f()` that never reaches a member ([`CallSite::reaches_free_only`]):
-    /// the same-file and Global tiers weigh no `Method`, and the heritage
-    /// tier does not run. A retry under another name keeps the flag.
-    free_only: bool,
-    /// The calling declaration: a Rust `self.m()` in an `impl` block the
-    /// parser gave no owner reaches that block's own `m`.
-    caller: Option<NodeId>,
-}
-
-impl<'c> CallScope<'c> {
-    /// What the shared name tiers read of this call site.
-    fn ladder(self) -> CallPick<'c> {
-        CallPick {
-            owner: self.owner,
-            caller: self.caller,
-            untyped: self.untyped_receiver,
-            free_only: self.free_only,
-        }
-    }
 }
 
 /// Outcome of the receiver-typing ladder for one qualified callee.

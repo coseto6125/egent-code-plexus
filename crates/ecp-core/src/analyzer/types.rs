@@ -346,7 +346,7 @@ impl<'a> CallSite<'a> {
     /// `self.`, Rust `self.` / `Self::`, and C declares no members. A same-named
     /// method of an unrelated class (a Laravel test's private `config()` for the
     /// global helper `config()`, the caller's own or its base's `config`) must
-    /// not bind it at any tier (the resolver's `CallScope::free_only`). Java,
+    /// not bind it at any tier (`ladder::CallPick::free_only`). Java,
     /// Kotlin, C#, Swift, Dart, Scala, C++ and Ruby call a member of the
     /// enclosing type with no receiver. JavaScript, TypeScript and Go also require
     /// an explicit receiver. Their parsers encode retained member fallbacks as a

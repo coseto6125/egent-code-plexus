@@ -46,14 +46,22 @@ pub fn emit_edges(
         let path_str = lg.file_path.to_string_lossy().replace('\\', "/");
         let file_idx = lg_idx as u32;
         let file = FileOrd(file_idx);
+        let parents =
+            record_nodes::raw_lexical_parents(&path_str, lg.nodes.iter().map(|n| (n.kind, n.span)));
 
         for raw in literals.iter() {
             let endpoint = raw.endpoint_in(&lg.nodes);
-            let node = record_nodes::path_literal_node(&path_str, raw, endpoint.as_ref(), |idx| {
-                lg.nodes
-                    .get(idx.index())
-                    .and_then(|n| n.owner_class.as_deref())
-            });
+            let node = record_nodes::path_literal_node(
+                &path_str,
+                raw,
+                endpoint.as_ref(),
+                &parents,
+                |idx| {
+                    lg.nodes
+                        .get(idx.index())
+                        .map(|n| (n.owner_class.as_deref(), n.name.as_str()))
+                },
+            );
             let name_ref = string_pool.add(&node.name);
             let owner_ref = string_pool.add(node.owner);
 
