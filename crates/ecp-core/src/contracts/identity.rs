@@ -1,8 +1,9 @@
 //! C1 identity: declaration identity, lexical parent, the target request
 //! syntax, the typed target result, and the route and handler keys.
 //!
-//! Design note: `docs/specs/contracts/C1-identity.md`. No production code
-//! calls these types yet; each consuming slice adopts them.
+//! Design note: `docs/specs/contracts/C1-identity.md`. `assign_file` numbers
+//! every file-level uid site (slice R2, through `analyzer::lexical`); the
+//! target and route types wait for their consuming slices.
 
 use std::borrow::Cow;
 use std::collections::hash_map::Entry;

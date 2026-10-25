@@ -90,7 +90,10 @@ use std::path::Path;
 /// instead of line 1, past YAML anchors, tags, comments and directives.
 /// schema25: a non-UTF-8 path that would route is a `path-not-utf8` omission
 /// instead of vanishing; the walk applies the size cap to a symlink's target.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema25");
+/// schema26: every uid site numbers a file through `assign_file`; a dirty
+/// file's same-uid redefinition becomes the full build's tombstone, and
+/// incremental mode numbers a later overload like the full build.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema26");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {
