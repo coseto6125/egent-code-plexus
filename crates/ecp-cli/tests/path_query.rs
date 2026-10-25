@@ -616,6 +616,12 @@ fn path_test_file_endpoint_is_found_from_either_end() {
 #[test]
 fn path_partial_type_non_representative_part_reaches_base_class() {
     let tmp = tempfile::tempdir().unwrap();
+    // The project file is the evidence that the parts compile together.
+    write(
+        tmp.path(),
+        "Lib/Lib.csproj",
+        "<Project Sdk=\"Microsoft.NET.Sdk\"></Project>\n",
+    );
     write(
         tmp.path(),
         "Lib/TextReader.cs",

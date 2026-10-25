@@ -4166,12 +4166,12 @@ impl<'a> OverlayFacts<'a> {
     }
 
     /// The index's `Resolver::csharp_extension` for a dirty C# caller, the
-    /// edge only: the overlay records no BlindSpot. A dirty file's input
-    /// carries no `FunctionMeta` flags, so the overlay cannot tell whether
-    /// its methods are extension declarations. When a dirty C# file declares
-    /// a method named `member`, no edge binds and the result is
-    /// `Err(DirtyNamesake)`: the caller records a [`CallGap`], so the
-    /// payload says the overlay fell back.
+    /// edge only: the overlay records no BlindSpot. The overlay reads only
+    /// the clean files' extension declarations. When a dirty C# file declares
+    /// a method named `member` that is an extension, or whose flags the
+    /// fragment lacks, no edge binds and the result is `Err(DirtyNamesake)`:
+    /// the caller records a [`CallGap`], so the payload says the overlay fell
+    /// back.
     fn csharp_extension_edge(
         &self,
         source: &str,
@@ -4187,6 +4187,8 @@ impl<'a> OverlayFacts<'a> {
                     && self.node_file(id).is_some_and(|file| {
                         Language::from_normalized_path(file) == Language::CSharp
                     })
+                    && (!self.csharp_flags_known(id)
+                        || self.csharp_method_flags(id) & csharp_extension::EXTENSION_FLAG != 0)
             })
         });
         if dirty_namesake {

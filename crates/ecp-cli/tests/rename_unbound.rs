@@ -517,12 +517,14 @@ fn test_rename_unbound_param_shadowing_leave_unbound_keeps_parameter() {
 
 /// Stands for: a constructor is spelled like its type, so renaming the type
 /// renames the constructor and does not refuse as an unbound namesake.
+/// `--kind class` selects the type: the bare name also names the
+/// constructor (FU-2026-10-26-009dac5d0bd4).
 #[test]
 fn test_rename_type_constructor_follows_type() {
     let src = "class Foo\n{\n    public Foo()\n    {\n    }\n}\n";
     let repo = Repo::indexed(&[("Foo.cs", src)]);
 
-    let out = repo.ecp(&["rename", "Foo", "Bar"]);
+    let out = repo.ecp(&["rename", "Foo", "Bar", "--kind", "class"]);
 
     assert!(out.status.success(), "{} {}", stderr(&out), stdout(&out));
     assert_eq!(
