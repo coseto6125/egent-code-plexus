@@ -53,6 +53,54 @@ pub fn extract(content: &str, lang: Lang) -> ResponseShape {
     }
 }
 
+/// The shape of the handlers whose bodies lie at `spans` (`(start_row,
+/// start_col, end_row, end_col)`, rows from 0, columns in bytes), keys
+/// merged. A span that is empty, ends before it starts, or lies outside
+/// `content` has no text to read and adds no key: a handler with no body
+/// span is an unknown shape, never the shape of the whole file.
+pub fn extract_in_spans(
+    content: &str,
+    spans: &[(u32, u32, u32, u32)],
+    lang: Lang,
+) -> ResponseShape {
+    let (mut response_keys, mut error_keys) = (Vec::new(), Vec::new());
+    for span in spans {
+        let Some(text) = text_in_span(content, *span) else {
+            continue;
+        };
+        let shape = extract(text, lang);
+        response_keys.extend(shape.response_keys);
+        error_keys.extend(shape.error_keys);
+    }
+    dedupe_sort(&mut response_keys);
+    dedupe_sort(&mut error_keys);
+    ResponseShape {
+        response_keys,
+        error_keys,
+    }
+}
+
+fn text_in_span(content: &str, span: (u32, u32, u32, u32)) -> Option<&str> {
+    let (start_row, start_col, end_row, end_col) = span;
+    if (end_row, end_col) <= (start_row, start_col) {
+        return None;
+    }
+    let start = line_start(content, start_row)? + start_col as usize;
+    let end = line_start(content, end_row)? + end_col as usize;
+    content.get(start..end.min(content.len()))
+}
+
+/// The byte offset where line `row` (from 0) starts; `None` past the last line.
+fn line_start(content: &str, row: u32) -> Option<usize> {
+    match row {
+        0 => Some(0),
+        _ => content
+            .match_indices('\n')
+            .nth(row as usize - 1)
+            .map(|(i, _)| i + 1),
+    }
+}
+
 fn dedupe_sort(v: &mut Vec<String>) {
     let set: HashSet<String> = v.drain(..).collect();
     *v = set.into_iter().collect();

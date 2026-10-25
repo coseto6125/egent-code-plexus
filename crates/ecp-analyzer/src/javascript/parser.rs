@@ -104,6 +104,27 @@ fn check_object_freeze_enum(node: &tree_sitter::Node) -> Option<bool> {
     Some(scalar_pairs >= 2)
 }
 
+/// `method` of the record that names the variable a route call is made on
+/// (`router` in `router.get("/x", h)`, `app` in `app.use("/api", router)`),
+/// at the span of that call, with the variable in `path`. It is not an
+/// endpoint; the builder reads it to compose Express mounts onto the routes
+/// of the mounted router.
+pub const ROUTE_RECEIVER: &str = "ROUTE_RECEIVER";
+
+/// The identifier a route call is made on; `None` for any other receiver
+/// (`this.router`, `express.Router()`, a call result).
+fn route_receiver(call: tree_sitter::Node, source: &[u8]) -> Option<String> {
+    let object = call
+        .child_by_field_name("function")?
+        .child_by_field_name("object")?;
+    if object.kind() != "identifier" {
+        return None;
+    }
+    std::str::from_utf8(&source[object.start_byte()..object.end_byte()])
+        .ok()
+        .map(str::to_string)
+}
+
 thread_local! {
     static PARSER: std::cell::RefCell<tree_sitter::Parser> = std::cell::RefCell::new({
         let mut parser = tree_sitter::Parser::new();
@@ -181,6 +202,7 @@ impl LanguageProvider for JavaScriptProvider {
             std::collections::HashSet::new();
         let mut imports: Vec<RawImport> = Vec::new();
         let mut routes: Vec<RawRoute> = Vec::new();
+        let mut receivers: Vec<((u32, u32, u32, u32), String)> = Vec::new();
 
         let idx_heritage = self.query.capture_index_for_name("heritage");
         let idx_export = self.query.capture_index_for_name("export");
@@ -638,6 +660,17 @@ impl LanguageProvider for JavaScriptProvider {
                             &["arrow_function", "function_expression", "function"],
                             &["identifier", "member_expression"],
                         );
+                        if let Some(receiver) = route_receiver(root, source) {
+                            receivers.push((
+                                (
+                                    start.row as u32,
+                                    start.column as u32,
+                                    end.row as u32,
+                                    end.column as u32,
+                                ),
+                                receiver,
+                            ));
+                        }
                         routes.push(RawRoute {
                             method: method_str.to_string(),
                             path: path_str.to_string(),
@@ -719,6 +752,19 @@ impl LanguageProvider for JavaScriptProvider {
             }
             None => false,
         });
+        // The receivers go in after the filter: their `path` is a variable
+        // name, which the path-shape filter above would drop.
+        for (span, receiver) in receivers {
+            if routes.iter().any(|route| route.span == span) {
+                routes.push(RawRoute {
+                    method: ROUTE_RECEIVER.to_string(),
+                    path: receiver,
+                    handler: None,
+                    span,
+                    scope: None,
+                });
+            }
+        }
 
         // Resolve framework-ref enclosing functions via span containment.
         // Module-level captures use the MODULE_LEVEL_SOURCE sentinel (consistent

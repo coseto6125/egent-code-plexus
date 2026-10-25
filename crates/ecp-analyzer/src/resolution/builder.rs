@@ -352,10 +352,13 @@ impl GraphBuilder {
             actions: controller_actions,
             laravel,
             blind_spots: mut route_blind_spots,
+            handler_spans,
         } = pass1_5_extract_routes(
             &self.local_graphs,
             &files,
             &raw_map,
+            &symbol_table,
+            &self.path_aliases,
             &mut string_pool,
             &mut nodes,
         );
@@ -372,6 +375,7 @@ impl GraphBuilder {
             &self.local_graphs,
             self.repo_root.as_deref(),
             &emitted_routes,
+            &handler_spans,
             &nodes,
             &mut string_pool,
         );
@@ -1593,6 +1597,193 @@ struct ExtractedRoutes {
     laravel: LaravelRoutes,
     /// Route files whose routes lost Laravel include scopes to the cap.
     blind_spots: Vec<BlindSpotRecord>,
+    /// Route node → the spans of the handler nodes that serve it. Pass 1.6
+    /// reads the response shape of each span, never of the whole file. A
+    /// route with no bound handler has no entry.
+    handler_spans: FxHashMap<u32, Vec<Span>>,
+}
+
+/// The routers an Express `app.use("/api", router)` mounts, as far as the
+/// build shows them. A parser that reads Express mounts writes, next to each
+/// route call, a [`crate::javascript::parser::ROUTE_RECEIVER`] record (at the
+/// call's span, the receiver variable in `path`); the `use` record itself
+/// names the mounted binding as its handler. A binding resolves to the router
+/// variable of the same file, or, through an import of the mounting file that
+/// the resolver resolves, to the router of the imported file. A mount that
+/// does not resolve is not recorded: its routes keep their own path.
+#[derive(Default)]
+struct RouteMounts {
+    /// File and call span → the variable the call is made on.
+    receiver_at: FxHashMap<(u32, Span), String>,
+    /// A router (file, variable) → the mounts that attach it: the mounting
+    /// router and the mount path.
+    mounted_on: FxHashMap<(u32, String), Vec<((u32, String), String)>>,
+}
+
+/// The most prefixes one router takes from its mounts: a cap against a
+/// router mounted from a cycle of routers.
+const MAX_MOUNT_PREFIXES: usize = 16;
+
+impl RouteMounts {
+    fn build(
+        local_graphs: &[LocalGraph],
+        files: &[File],
+        symbol_table: &SymbolTable,
+        path_aliases: &PathAliases,
+    ) -> Self {
+        let mut mounts = Self::default();
+        let mut routers: Vec<Vec<&str>> = vec![Vec::new(); local_graphs.len()];
+        let mut any_mount = false;
+        for (file_idx, graph) in local_graphs.iter().enumerate() {
+            for record in &graph.routes {
+                if record.method == crate::javascript::parser::ROUTE_RECEIVER {
+                    mounts
+                        .receiver_at
+                        .insert((file_idx as u32, record.span), record.path.clone());
+                    if !routers[file_idx].contains(&record.path.as_str()) {
+                        routers[file_idx].push(&record.path);
+                    }
+                } else if is_mount(record) {
+                    any_mount = true;
+                }
+            }
+        }
+        if !any_mount || mounts.receiver_at.is_empty() {
+            return mounts;
+        }
+        let resolver = Resolver::new(symbol_table).with_path_aliases(path_aliases.clone());
+        let file_of_path = file_indices(local_graphs);
+        for (file_idx, graph) in local_graphs.iter().enumerate() {
+            // A mount in a file Pass 1.5 skips (a test mounting the app under
+            // test) is no part of the application.
+            if matches!(
+                files[file_idx].category,
+                FileCategory::Test | FileCategory::Reference
+            ) {
+                continue;
+            }
+            let path = graph.file_path.to_string_lossy().replace('\\', "/");
+            for record in graph.routes.iter().filter(|r| is_mount(r)) {
+                let Some(binding) = record.handler_name() else {
+                    continue;
+                };
+                let target = if routers[file_idx].contains(&binding) {
+                    Some((file_idx as u32, binding.to_string()))
+                } else {
+                    graph
+                        .imports
+                        .iter()
+                        .find(|import| {
+                            import.alias.as_deref().unwrap_or(&import.imported_name) == binding
+                        })
+                        .and_then(|import| {
+                            let module = resolver.ecmascript_module(&path, import)?;
+                            let target_file = *file_of_path.get(&*module)?;
+                            let candidates = &routers[target_file as usize];
+                            let router =
+                                match candidates.iter().find(|c| **c == import.imported_name) {
+                                    Some(named) => named,
+                                    None if candidates.len() == 1 => &candidates[0],
+                                    None => return None,
+                                };
+                            Some((target_file, router.to_string()))
+                        })
+                };
+                let Some(target) = target else {
+                    continue;
+                };
+                let receiver = mounts
+                    .receiver_at
+                    .get(&(file_idx as u32, record.span))
+                    .cloned()
+                    .unwrap_or_default();
+                mounts
+                    .mounted_on
+                    .entry(target)
+                    .or_default()
+                    .push(((file_idx as u32, receiver), record.path.clone()));
+            }
+        }
+        mounts
+    }
+
+    /// The paths a route registered at `span` of `file` answers on: its own
+    /// path once for each mount of its router, composed outermost mount
+    /// first by the one prefix rule. Its own path alone when the router is
+    /// mounted nowhere the build shows.
+    fn paths(&self, file: u32, span: Span, path: &str) -> Vec<String> {
+        let Some(receiver) = self.receiver_at.get(&(file, span)) else {
+            return vec![path.to_string()];
+        };
+        let mut paths: Vec<String> = Vec::new();
+        for prefix in self.prefixes_of(&(file, receiver.clone()), &mut Vec::new()) {
+            let composed = match prefix.trim().is_empty() {
+                true => path.to_string(),
+                false => crate::route_detector::join_route_segments([prefix.as_str(), path]),
+            };
+            if !paths.contains(&composed) {
+                paths.push(composed);
+            }
+        }
+        paths
+    }
+
+    /// The mount prefixes of a router, one per chain of mounts that reaches
+    /// it; the empty prefix for a router no mount attaches.
+    fn prefixes_of(&self, router: &(u32, String), chain: &mut Vec<(u32, String)>) -> Vec<String> {
+        let Some(mounts) = self.mounted_on.get(router) else {
+            return vec![String::new()];
+        };
+        chain.push(router.clone());
+        let mut prefixes: Vec<String> = Vec::new();
+        for (parent, mount_path) in mounts {
+            if chain.contains(parent) {
+                continue;
+            }
+            for outer in self.prefixes_of(parent, chain) {
+                let prefix = crate::route_detector::join_route_segments([
+                    outer.as_str(),
+                    mount_path.as_str(),
+                ]);
+                if !prefixes.contains(&prefix) && prefixes.len() < MAX_MOUNT_PREFIXES {
+                    prefixes.push(prefix);
+                }
+            }
+        }
+        chain.pop();
+        if prefixes.is_empty() {
+            prefixes.push(String::new());
+        }
+        prefixes
+    }
+}
+
+/// An Express `use("/path", binding)` record: not an endpoint, a mount.
+fn is_mount(record: &RawRoute) -> bool {
+    record.method == "use"
+}
+
+/// Whether `recorded`, the routes that parser records declare as
+/// `(handler, verb, path)`, carries `decorator` under a router prefix: the
+/// same handler serves the same verb at a longer path that ends in the
+/// decorator's path. The record then stands for the endpoint, and the
+/// decorator route is dropped so that one handler is one Route node.
+fn composed_by_record(
+    recorded: &[(usize, String, String)],
+    handler: usize,
+    decorator: &crate::route_detector::DetectedRoute,
+) -> bool {
+    let tail = match decorator.path.as_str() {
+        "/" => "/",
+        path => path.trim_start_matches('/'),
+    };
+    recorded.iter().any(|(bound, verb, path)| {
+        *bound == handler
+            && verb.eq_ignore_ascii_case(&decorator.method)
+            && path.len() > decorator.path.len()
+            && path.starts_with('/')
+            && path.ends_with(tail)
+    })
 }
 
 /// What one producer saw serve a route, before the producers of the
@@ -1738,6 +1929,8 @@ fn pass1_5_extract_routes(
     local_graphs: &[LocalGraph],
     files: &[File],
     raw_map: &RawIndexMap,
+    symbol_table: &SymbolTable,
+    path_aliases: &PathAliases,
     string_pool: &mut StringPool,
     nodes: &mut Vec<Node>,
 ) -> ExtractedRoutes {
@@ -1750,6 +1943,8 @@ fn pass1_5_extract_routes(
     // 'routes/admin.php'))` prefixes every route of `admin.php`), so the
     // per-file view alone cannot name a Laravel route's path or handler.
     let laravel = LaravelRoutes::build(local_graphs, raw_map);
+    let mounts = RouteMounts::build(local_graphs, files, symbol_table, path_aliases);
+    let mut handler_spans: FxHashMap<u32, Vec<Span>> = FxHashMap::default();
     for (file_idx, local_graph) in local_graphs.iter().enumerate() {
         let file_idx = file_idx as u32;
         let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
@@ -1769,6 +1964,24 @@ fn pass1_5_extract_routes(
         }
         let mut of_key: FxHashMap<u64, u32> = FxHashMap::default();
         let mut facts: Vec<(u32, HandlerFact)> = Vec::new();
+        // Only a decorated node can be dropped for a record, so a file with
+        // no decorator skips the scan.
+        let decorated = local_graph.nodes.iter().any(|n| !n.decorators.is_empty());
+        let recorded: Vec<(usize, String, String)> = local_graph
+            .routes
+            .iter()
+            .filter(|_| decorated)
+            .filter(|r| {
+                r.method != RawRoute::INCLUDE && r.method != RawRoute::CONTROLLER_MIDDLEWARE
+            })
+            .filter_map(|r| {
+                let detected = crate::route_detector::detect_from_call(r)?;
+                let Some(RawEndpoint::Node(raw)) = r.bind(&local_graph.nodes) else {
+                    return None;
+                };
+                Some((raw.index(), detected.method, detected.path))
+            })
+            .collect();
 
         for (raw_idx, raw_node) in local_graph.nodes.iter().enumerate() {
             let Some(handler_idx) = raw_map.node(FileOrd(file_idx), RawIdx(raw_idx as u32)) else {
@@ -1778,6 +1991,9 @@ fn pass1_5_extract_routes(
             for detected in
                 crate::route_detector::node_decorator_routes(raw_node, &local_graph.nodes)
             {
+                if composed_by_record(&recorded, raw_idx, &detected) {
+                    continue;
+                }
                 let Ok(key) = RouteKey::new(&path_str, &detected.method, &detected.path) else {
                     continue;
                 };
@@ -1817,13 +2033,17 @@ fn pass1_5_extract_routes(
                 Some(scope) => {
                     laravel.promote(file_idx, scope, &detected.path, raw_route.handler_name())
                 }
-                None => vec![crate::php::laravel_routes::PromotedRoute {
-                    path: detected.path.clone(),
-                    middleware: Vec::new(),
-                    excluded: Vec::new(),
-                    namespace: None,
-                    action: None,
-                }],
+                None => mounts
+                    .paths(file_idx, raw_route.span, &detected.path)
+                    .into_iter()
+                    .map(|path| crate::php::laravel_routes::PromotedRoute {
+                        path,
+                        middleware: Vec::new(),
+                        excluded: Vec::new(),
+                        namespace: None,
+                        action: None,
+                    })
+                    .collect(),
             };
             // Two including groups can give one route the same path. Laravel's
             // `RouteCollection` keeps the route registered last for a method
@@ -1919,6 +2139,15 @@ fn pass1_5_extract_routes(
                 }
             }
         }
+        for (route, fact) in &facts {
+            if let HandlerFact::Bound(handler, _) = fact {
+                let span = nodes[*handler as usize].span;
+                let spans = handler_spans.entry(*route).or_default();
+                if !spans.contains(&span) {
+                    spans.push(span);
+                }
+            }
+        }
         emit_route_handlers(
             facts,
             &path_str,
@@ -1953,6 +2182,7 @@ fn pass1_5_extract_routes(
         actions,
         laravel,
         blind_spots,
+        handler_spans,
     }
 }
 
@@ -2158,9 +2388,12 @@ fn pass1_95_controller_actions(
 /// absolute path so we can re-read the source). Test harnesses that
 /// don't set a repo root simply opt out of fetch-shape data.
 ///
-/// 1.6a — for each Route node, run `response_shapes::extract` on
-///        its handler file and stash a `RouteShape` if it produced
-///        any keys (sparse — empty payloads do not appear).
+/// 1.6a — for each Route node, run `response_shapes::extract_in_spans`
+///        on the spans of the handlers that serve it (never on the whole
+///        file: a file of several handlers would give every route the
+///        union of their keys) and stash a `RouteShape` if it produced
+///        any keys (sparse — empty payloads and routes with no bound
+///        handler do not appear).
 /// 1.6b — build a path→route_idx map, then for every non-handler
 ///        file in `local_graphs` scan for `fetch(url) /
 ///        axios.get(url)` literals and emit `RelType::Fetches`
@@ -2180,6 +2413,7 @@ fn pass1_6_fetch_shapes(
     local_graphs: &[LocalGraph],
     repo_root: Option<&std::path::Path>,
     emitted_routes: &[EmittedRoute],
+    handler_spans: &FxHashMap<u32, Vec<Span>>,
     nodes: &[Node],
     string_pool: &mut StringPool,
 ) -> (Vec<RouteShape>, Vec<(FileOrd, Edge)>) {
@@ -2214,7 +2448,10 @@ fn pass1_6_fetch_shapes(
             let Some(content) = read_content(*file_idx, &mut content_cache, local_graphs) else {
                 continue;
             };
-            let shape = response_shapes::extract(&content, lang);
+            let Some(spans) = handler_spans.get(route_idx) else {
+                continue;
+            };
+            let shape = response_shapes::extract_in_spans(&content, spans, lang);
             if shape.response_keys.is_empty() && shape.error_keys.is_empty() {
                 continue;
             }
@@ -5696,7 +5933,10 @@ mod tests {
         .unwrap();
 
         let mut builder = GraphBuilder::new().with_repo_root(tmp.path().to_path_buf());
-        builder.add_graph(route_local_graph(route_file, "get", "/users", "getUsers"));
+        let mut route_graph = route_local_graph(route_file, "get", "/users", "getUsers");
+        // The shape reads the handler's own span, which covers the function.
+        route_graph.nodes[0].span = (0, 0, 0, 55);
+        builder.add_graph(route_graph);
         let graph = builder.build();
 
         assert_eq!(
