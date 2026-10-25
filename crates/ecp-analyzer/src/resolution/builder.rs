@@ -1106,7 +1106,6 @@ fn followed_by_reexport(local_graph: &LocalGraph, import: &RawImport) -> bool {
             .any(|alias| &*alias.local == import.local_name())
 }
 
-/// Forward-slash path → file index, as Pass 1 numbers the files.
 /// First global node index of file `file_idx`. `file_idx` always comes from
 /// enumerating the `local_graphs` the map was built from, so the `end()`
 /// fallback is unreachable.
@@ -1154,6 +1153,7 @@ fn record_lexical_parents(
     table
 }
 
+/// Forward-slash path → file index, as Pass 1 numbers the files.
 fn file_indices(local_graphs: &[LocalGraph]) -> FxHashMap<String, u32> {
     local_graphs
         .iter()
@@ -1654,7 +1654,6 @@ fn route_node(
 fn emit_route_handlers(
     facts: Vec<(u32, HandlerFact)>,
     path_str: &str,
-    is_test: bool,
     nodes: &[Node],
     string_pool: &mut StringPool,
     edges: &mut Vec<Edge>,
@@ -1721,7 +1720,8 @@ fn emit_route_handlers(
                 end_row: span.2,
                 end_col: span.3,
                 hint: string_pool.add(&hint),
-                is_test,
+                // Pass 1.5 skips test files, so no route sits in one.
+                is_test: false,
             });
         }
     }
@@ -1921,7 +1921,6 @@ fn pass1_5_extract_routes(
         emit_route_handlers(
             facts,
             &path_str,
-            matches!(category, FileCategory::Test),
             nodes,
             string_pool,
             &mut route_edges,
@@ -2872,6 +2871,9 @@ fn pass1_9_supertypes(
             // method; the cache keeps that to one resolve per name per file.
             let mut bases_cache: FxHashMap<&str, Box<[(u32, f32)]>> = FxHashMap::default();
             let mut subject_cache: FxHashMap<&str, Option<u32>> = FxHashMap::default();
+            // The same repeat writes one row per method; one row per
+            // `(subject, base)` is all `build_declared_bases` keeps.
+            let mut pushed: FxHashSet<(u32, &str)> = FxHashSet::default();
             let mut out = Vec::new();
             for (offset, raw) in lg.nodes.iter().enumerate() {
                 if raw.heritage.is_empty() {
@@ -2879,8 +2881,14 @@ fn pass1_9_supertypes(
                 }
                 let node_id = start + offset as u32;
                 let subject = if raw.kind.is_type() {
-                    // A UID-collision tombstone holds the id but no name.
-                    symbol_table.file_of(node_id).map(|_| node_id)
+                    match raw.partial_scope() {
+                        // A same-file part of a C# `partial` type is a uid
+                        // twin of the first part: its bases are the
+                        // survivor's, as `c_sharp::partial` folds them.
+                        Some(_) => raw_map.node(FileOrd(file_idx as u32), RawIdx(offset as u32)),
+                        // A UID-collision tombstone holds the id but no name.
+                        None => symbol_table.file_of(node_id).map(|_| node_id),
+                    }
                 } else {
                     let type_name = match raw.kind {
                         NodeKind::Impl => Some(raw.name.as_str()),
@@ -2901,6 +2909,9 @@ fn pass1_9_supertypes(
                     continue;
                 };
                 for base in &raw.heritage {
+                    if !pushed.insert((subject, base.as_str())) {
+                        continue;
+                    }
                     let candidates = bases_cache.entry(base.as_str()).or_insert_with(|| {
                         resolve_base(&resolver, symbol_table, lg, language, base).into_boxed_slice()
                     });
@@ -3278,6 +3289,11 @@ fn pass2_emit_node_edges(
                     }
                     match site {
                         CallSite::Plain(callee) => match callee.rsplit_once('.') {
+                            // `string.M()` names the keyword type: a static
+                            // access, which no extension method reaches.
+                            Some((receiver, _)) if csharp_extension::is_keyword_type(receiver) => {
+                                targets
+                            }
                             Some((receiver, member)) => {
                                 extension(ReceiverSite::Named(receiver), member, arguments, 1.0)
                             }
@@ -3307,7 +3323,28 @@ fn pass2_emit_node_edges(
             let &[inner] = inner.as_slice() else {
                 return None;
             };
-            match resolver.resolve_chained_member_outcome(&local_graph.file_path, inner, member) {
+            let outcome =
+                resolver.resolve_chained_member_outcome(&local_graph.file_path, inner, member);
+            // A C# chained member obeys the access rule of a plain call: a
+            // private first overload hands the call to the one reachable
+            // overload, and a member C# refuses leaves the type's lookup
+            // empty, so the extension retry runs as for any miss.
+            let outcome = match outcome {
+                type_ladder::ChainOutcome::Bound((id, confidence))
+                    if language == Language::CSharp =>
+                {
+                    match resolver.csharp_admitted_chain_member(
+                        &local_graph.file_path,
+                        caller_owner,
+                        id,
+                    ) {
+                        Some(id) => type_ladder::ChainOutcome::Bound((id, confidence)),
+                        None => type_ladder::ChainOutcome::Conclusive,
+                    }
+                }
+                outcome => outcome,
+            };
+            match outcome {
                 type_ladder::ChainOutcome::Unknown => None,
                 type_ladder::ChainOutcome::Bound(target) => Some(vec![target]),
                 type_ladder::ChainOutcome::Conclusive => {
@@ -3333,16 +3370,6 @@ fn pass2_emit_node_edges(
                 }
             }
         });
-        for hint in extension_misses.take() {
-            let file_path = local_graph.file_path.to_string_lossy().replace('\\', "/");
-            blind_spots.push(BlindSpot {
-                kind: csharp_extension::BS_KIND_UNRESOLVED.into(),
-                is_test: ecp_core::file_category::is_test_path(&file_path),
-                file_path: file_path.into(),
-                span: raw_node.span,
-                hint,
-            });
-        }
         for (target_id, confidence) in targets {
             if target_id == current_node_idx {
                 continue; // self-recursion edges are Louvain / process noise
@@ -3358,6 +3385,27 @@ fn pass2_emit_node_edges(
             if let Some((flags, dispatch_type)) = meta {
                 pending_call_metas.push((edge_pre_sort_idx, *flags, dispatch_type.clone()));
             }
+        }
+    }
+    // One record per (caller, hint): the record carries the caller's span,
+    // so five `json.ToAsync()` misses in one method say one thing.
+    let mut misses: Vec<String> = Vec::new();
+    for hint in extension_misses.into_inner() {
+        if !misses.contains(&hint) {
+            misses.push(hint);
+        }
+    }
+    if !misses.is_empty() {
+        let file_path = local_graph.file_path.to_string_lossy().replace('\\', "/");
+        let is_test = ecp_core::file_category::is_test_path(&file_path);
+        for hint in misses {
+            blind_spots.push(BlindSpot {
+                kind: csharp_extension::BS_KIND_UNRESOLVED.into(),
+                is_test,
+                file_path: file_path.clone().into(),
+                span: raw_node.span,
+                hint,
+            });
         }
     }
 
@@ -3711,6 +3759,9 @@ fn pass2_resolve_edges(
 
     let dump_enabled = resolver_dump_path.is_some();
     let path_aliases = path_aliases.clone();
+    // Every Pass-2 resolver reads one C# extension list per failing member
+    // call: build each name's list once, not per call.
+    let csharp_extensions = symbol_table.csharp_extension_decl_map();
 
     // When dumping is enabled we run the serial path so a single resolver
     // owns the decision stream. When disabled (the production case) we
@@ -3719,7 +3770,8 @@ fn pass2_resolve_edges(
     let mut resolver_for_dump = if dump_enabled {
         let mut r = Resolver::new(symbol_table)
             .with_path_aliases(path_aliases.clone())
-            .with_reexports(reexports);
+            .with_reexports(reexports)
+            .with_csharp_extensions(&csharp_extensions);
         if let Some((mt, root)) = mod_tree_ctx {
             r = r.with_mod_tree(mt, root.to_path_buf());
         }
@@ -3828,7 +3880,8 @@ fn pass2_resolve_edges(
             .map(|(graph_idx, local_graph)| {
                 let mut resolver = Resolver::new(symbol_table_ref)
                     .with_path_aliases(path_aliases.clone())
-                    .with_reexports(reexports);
+                    .with_reexports(reexports)
+                    .with_csharp_extensions(&csharp_extensions);
                 if let Some((mt, root)) = mod_tree_ctx {
                     resolver = resolver.with_mod_tree(mt, root.to_path_buf());
                 }

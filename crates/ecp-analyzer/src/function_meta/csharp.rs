@@ -108,8 +108,16 @@ fn extract_one(
         }
     }
 
-    // Merge query-captured decorators.
+    // Merge query-captured decorators. The parser's internal markers ride in
+    // the same list (`post_process::decorates_edges` skips the same three);
+    // none is an attribute the source wrote.
     for d in &raw.decorators {
+        if d == "__override__"
+            || RawNode::is_generic_arity_marker(d)
+            || RawNode::is_partial_marker(d)
+        {
+            continue;
+        }
         let name = csharp_attribute_name(d);
         if !name.is_empty() && !decorators.contains(&name) {
             decorators.push(name);

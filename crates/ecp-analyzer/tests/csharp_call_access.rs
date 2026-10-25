@@ -230,3 +230,125 @@ fn test_resolve_call_private_first_two_public_overloads_outside_type_emits_no_ed
     ));
     assert_eq!(target_lines(&graph, "Use", "WriteTo"), Vec::<u32>::new());
 }
+
+/// The graph of one file `Lib/App.cs` holding `source`.
+fn one_file(source: &str) -> ZeroCopyGraph {
+    let provider = CSharpProvider::new().expect("CSharpProvider::new");
+    build(parse_all(&provider, &[("Lib/App.cs", source)]))
+}
+
+/// Stands for (B3): a chained member call obeys the access rule a plain
+/// call obeys. `R` declares a private `Read()` (row 4) before a public
+/// `Read(int)` (row 5); `User.Use` calls `Maker.Make().Read(1)` from outside
+/// `R`, so it binds the public overload. Before the fix the chain bound the
+/// first, private declaration.
+#[test]
+fn test_resolve_chain_private_first_overload_outside_type_binds_public_overload() {
+    let graph = one_file(
+        "namespace Lib
+{
+    public class R
+    {
+        private void Read() {}
+        public void Read(int x) {}
+    }
+    public class Maker
+    {
+        public static R Make() { return new R(); }
+    }
+    public class User
+    {
+        public void Use() { Maker.Make().Read(1); }
+    }
+}
+",
+    );
+    assert_eq!(target_lines(&graph, "Use", "Read"), [5]);
+    assert_eq!(target_lines(&graph, "Use", "Make"), [9]);
+}
+
+/// Stands for (B3): a chained call to a private member of another type, with
+/// no reachable overload, binds nothing. Before the fix it bound the private
+/// `Read` (row 4).
+#[test]
+fn test_resolve_chain_private_only_member_outside_type_emits_no_edge() {
+    let graph = one_file(
+        "namespace Lib
+{
+    public class R
+    {
+        private void Read() {}
+    }
+    public class Maker
+    {
+        public static R Make() { return new R(); }
+    }
+    public class User
+    {
+        public void Use() { Maker.Make().Read(); }
+    }
+}
+",
+    );
+    assert_eq!(target_lines(&graph, "Use", "Read"), Vec::<u32>::new());
+}
+
+/// Stands for (F6, "Color Color", C# spec 12.8.7.2): a property named as its
+/// type is the value and the type at once. `Svc.Logger` of type `Logger`:
+/// `Logger.Create()` binds the static `Create` (row 4) and `Logger.Log()`
+/// the instance `Log` (row 5). Before the fix the site was an instance call,
+/// and the access rule refused the static `Create`.
+#[test]
+fn test_resolve_call_color_color_property_binds_static_and_instance_member() {
+    let graph = one_file(
+        "namespace Lib
+{
+    public class Logger
+    {
+        public static Logger Create() { return null; }
+        public void Log() {}
+    }
+    public class Svc
+    {
+        public Logger Logger { get; }
+        public void Run()
+        {
+            Logger.Create();
+            Logger.Log();
+        }
+    }
+}
+",
+    );
+    assert_eq!(target_lines(&graph, "Run", "Create"), [4]);
+    assert_eq!(target_lines(&graph, "Run", "Log"), [5]);
+}
+
+/// Stands for (F6): a value whose type has another name stays an instance
+/// call. `Logger log` is no `Logger` spelling, so `log.Create()` binds no
+/// static `Create`; `log.Log()` binds the instance `Log`. Passes before the
+/// fix as well: it guards the shape beside the rule.
+#[test]
+fn test_resolve_call_differently_named_value_static_member_emits_no_edge() {
+    let graph = one_file(
+        "namespace Lib
+{
+    public class Logger
+    {
+        public static Logger Create() { return null; }
+        public void Log() {}
+    }
+    public class Svc
+    {
+        public void Run(Logger log)
+        {
+            log.Create();
+            log.Log();
+        }
+    }
+}
+",
+    );
+    assert_eq!(target_lines(&graph, "Run", "Create"), Vec::<u32>::new());
+    assert_eq!(target_lines(&graph, "Run", "Log"), [5]);
+}

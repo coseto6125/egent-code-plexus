@@ -432,6 +432,29 @@ fn test_overrides_csharp_partial_heritage_on_one_part_binds_from_other_part() {
     assert!(overrides_support::override_blind_spots(&graph).is_empty());
 }
 
+/// Stands for: the bases a same-file part lists are the type's too. The
+/// second `partial class A : Base` of one file is a uid twin of the first,
+/// so it has no node of its own; the override in the first part still
+/// reaches `Base.Run`. Before the fix Pass 1.9 skipped the twin as a
+/// tombstone: `A` had no supertype and `Run` no edge.
+#[test]
+fn test_overrides_csharp_same_file_partial_twin_base_list_binds() {
+    let graph = overrides_support::graph_of_projects(
+        &csharp(),
+        &[(
+            "Lib/A.cs",
+            "namespace Lib\n{\n    public abstract class Base\n    {\n        public abstract void Run();\n    }\n    public partial class A\n    {\n        public override void Run() {}\n    }\n    public partial class A : Base\n    {\n    }\n}\n",
+        )],
+        &["Lib"],
+    );
+    assert_eq!(
+        override_ends(&graph),
+        [(end_key("Lib/A.cs", "Run", 8), end_key("Lib/A.cs", "Run", 4))]
+    );
+    overrides_support::assert_evidence(&overrides_support::overrides(&graph)[0], Evidence::Exact);
+    assert!(overrides_support::override_blind_spots(&graph).is_empty());
+}
+
 /// Stands for: parts in two projects are two types (an unknown or another
 /// compilation is never a shared one). The base stays ambiguous, as before
 /// the fix. Guards the project field of the merge key; passes before the

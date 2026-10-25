@@ -63,7 +63,8 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use crate::resolution::heuristics::ResolutionTier;
 use crate::resolution::index::{
-    crate_root_prefix, FileMeta, GlobalPick, Language, PickScope, ResolveTarget, SymbolTable,
+    crate_root_prefix, CsharpExtensionDecls, FileMeta, GlobalPick, Language, PickScope,
+    ResolveTarget, SymbolTable,
 };
 use crate::rust::module_tree::RustWorkspaceModTree;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -376,6 +377,10 @@ pub struct Resolver<'a> {
     /// `None` follows no re-export: the import tier then binds only a
     /// member the imported module declares itself.
     reexports: Option<&'a ReexportIndex<'a>>,
+    /// The C# extension declarations by name, built once per Pass 2
+    /// ([`SymbolTable::csharp_extension_decl_map`]). `None` reads them from
+    /// the table per call.
+    csharp_extensions: Option<&'a CsharpExtensionDecls<'a>>,
 }
 
 impl<'a> Resolver<'a> {
@@ -389,7 +394,16 @@ impl<'a> Resolver<'a> {
             mod_tree: None,
             workspace_root: None,
             reexports: None,
+            csharp_extensions: None,
         }
+    }
+
+    /// Read the C# extension declarations from `decls`, the table's
+    /// [`SymbolTable::csharp_extension_decl_map`], instead of rebuilding a
+    /// name's list per failing call.
+    pub(crate) fn with_csharp_extensions(mut self, decls: &'a CsharpExtensionDecls<'a>) -> Self {
+        self.csharp_extensions = Some(decls);
+        self
     }
 
     /// Let the import tier follow Python package and TS / JS re-exports one
@@ -1084,6 +1098,34 @@ impl<'a> Resolver<'a> {
         type_ladder::ChainOutcome::Bound((id, tier.confidence().min(inner_confidence)))
     }
 
+    /// The method a C# chained member call (`Make().Read(1)`) from a caller
+    /// declared by `caller_owner` (an `owner_key`) in `source_file` binds in
+    /// place of `target`, the member [`Self::resolve_chained_member_outcome`]
+    /// bound: the access rule a plain call applies ([`Self::resolve_call`],
+    /// codex ruling P-ext2 C). The receiver is the value the inner call
+    /// returns, so the access is an instance call. `None` when C# admits no
+    /// overload, or more than one.
+    pub(crate) fn csharp_admitted_chain_member(
+        &self,
+        source_file: &Path,
+        caller_owner: Option<&str>,
+        target: NodeId,
+    ) -> Option<NodeId> {
+        let caller_file = normalize_source_path(source_file);
+        let access = CallAccess {
+            instance: true,
+            caller_file: &caller_file,
+            caller_owner,
+        };
+        csharp_access::admitted_overload(
+            self.symbol_table,
+            target,
+            self.symbol_table.later_overloads(target),
+            |id| self.symbol_table.csharp_method_flags(id),
+            access,
+        )
+    }
+
     /// Whether a bare `m()` that the constructor fallback would read as a
     /// construction of a type `m` may instead be a member call whose
     /// receiver the parser dropped. The C++, Swift and Ruby parsers now
@@ -1608,7 +1650,14 @@ impl<'a> Resolver<'a> {
         caller_owner: Option<&str>,
     ) -> csharp_extension::Verdict {
         let st = self.symbol_table;
-        let decls = st.csharp_extension_decls(member);
+        let built;
+        let decls = match self.csharp_extensions {
+            Some(map) => map.get(member).map_or(&[][..], Vec::as_slice),
+            None => {
+                built = st.csharp_extension_decls(member);
+                built.as_slice()
+            }
+        };
         if decls.is_empty() {
             return csharp_extension::Verdict::NotExtension;
         }
@@ -1653,7 +1702,7 @@ impl<'a> Resolver<'a> {
             .collect();
         csharp_extension::resolve(
             st,
-            &decls,
+            decls,
             csharp_extension::Receiver {
                 name,
                 types: &types,

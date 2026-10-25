@@ -11,7 +11,7 @@
 //! type (`object o; o.M()`) binds no ordinary target the rule could judge
 //! (codex ruling P-recv Q3); only an extension method, which it admits.
 
-use crate::analyzer::csharp_extension::EXTENSION_FLAG;
+use crate::analyzer::csharp_extension::{is_keyword_type, EXTENSION_FLAG};
 use crate::analyzer::same_file_pick::PickFacts;
 use crate::analyzer::types::CallSite;
 use crate::graph::{FunctionMeta, NodeKind};
@@ -38,10 +38,14 @@ impl<'a> CallAccess<'a> {
     /// The access of `site`, called from `caller_owner` in `caller_file`.
     /// A typed member site (`Type.member`) and an untyped member call go
     /// through an instance; a `Name.M()` whose receiver may be a type does
-    /// not.
+    /// not, nor does a keyword type's member (`string.Join`), which the
+    /// parser writes only for the keyword itself: it never types a value by
+    /// a keyword.
     pub fn of(site: CallSite<'_>, caller_file: &'a str, caller_owner: Option<&'a str>) -> Self {
         let instance = match site.fallback() {
-            CallSite::Plain(name) => name.contains('.'),
+            CallSite::Plain(name) => name
+                .rsplit_once('.')
+                .is_some_and(|(receiver, _)| !is_keyword_type(receiver)),
             CallSite::UntypedMember(_) => true,
             _ => false,
         };

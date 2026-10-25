@@ -679,7 +679,7 @@ impl LanguageProvider for CSharpProvider {
                         };
                         // The parts of one `partial` type merge by this
                         // scope (`c_sharp::partial`).
-                        if k.is_type() && is_partial(root, source) {
+                        if super::partial::is_partial_kind(k) && is_partial(root, source) {
                             decorators
                                 .push(RawNode::partial_marker(&declaring_scope(root, source)));
                         }

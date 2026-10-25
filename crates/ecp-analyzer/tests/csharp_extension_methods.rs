@@ -374,8 +374,12 @@ fn test_resolve_call_two_applicable_extensions_give_blind_spot_and_no_edge() {
     let misses = extension_misses(&graph);
     assert_eq!(misses.len(), 1, "{misses:?}");
     assert_eq!(misses[0].0, "App.cs");
+    // The receiver and the member the record names; the wording states
+    // what the index found, never that `Widget` lacks `Spin`.
     assert!(
-        misses[0].1.contains("`Widget` has no member `Spin`"),
+        misses[0]
+            .1
+            .contains("the index found no member `Spin` on `Widget`"),
         "{misses:?}"
     );
     assert!(
@@ -402,8 +406,12 @@ fn test_resolve_call_failed_extension_lookup_records_blind_spot() {
     let misses = extension_misses(&graph);
     assert_eq!(misses.len(), 1, "{misses:?}");
     assert_eq!(misses[0].0, "App.cs");
+    // The receiver and the member the record names; the wording states
+    // what the index found, never that `Widget` lacks `Spin`.
     assert!(
-        misses[0].1.contains("`Widget` has no member `Spin`"),
+        misses[0]
+            .1
+            .contains("the index found no member `Spin` on `Widget`"),
         "{misses:?}"
     );
     assert!(
@@ -492,4 +500,81 @@ fn test_resolve_chain_returned_receiver_binds_extension() {
         spins,
         vec![edge("Lib/WidgetExt.cs", "Spin", 5, 0.85, "call")]
     );
+}
+
+/// Stands for (F3): `string.M()` names the keyword type, a static access
+/// that no extension method reaches. With project extensions
+/// `IsNullOrEmpty(this string)` and `Format(this string, params object[])`
+/// in scope, `string.IsNullOrEmpty("x")` and `string.Format("{0}", w)` bind
+/// no extension and record no gap. Before the fix the retry ran on the
+/// `string` receiver: a false `cs-extension-unresolved` record for the
+/// first call and a false extension edge for the second.
+#[test]
+fn test_resolve_call_keyword_type_receiver_no_extension_retry() {
+    let ext = ext_class(
+        "Lib",
+        "StringExt",
+        "        public static bool IsNullOrEmpty(this string s) { return false; }\n        public static string Format(this string f, params object[] a) { return f; }\n",
+    );
+    let app = caller("using Lib;").replace(
+        "return w.Spin();",
+        "string.IsNullOrEmpty(\"x\");\n            string.Format(\"{0}\", w);\n            return 0;",
+    );
+    let graph = graph_of(&[WIDGET, ("Lib/StringExt.cs", &ext), ("App.cs", &app)]);
+    assert_eq!(run_calls(&graph), vec![]);
+    assert_eq!(extension_misses(&graph), vec![]);
+}
+
+/// Stands for (F5): one record per caller and gap. Five `w.Spin()` calls
+/// in one method that no extension in scope accepts give one
+/// `cs-extension-unresolved` record, not five identical ones.
+#[test]
+fn test_resolve_call_repeated_extension_miss_in_one_caller_one_blind_spot() {
+    let gadget_ext = ext_class(
+        "Lib",
+        "GadgetExt",
+        "        public static int Spin(this Gadget g) { return 2; }\n",
+    );
+    let app = caller("using Lib;").replace(
+        "return w.Spin();",
+        "w.Spin(); w.Spin(); w.Spin(); w.Spin();\n            return w.Spin();",
+    );
+    let graph = graph_of(&[
+        WIDGET,
+        GADGET,
+        ("Lib/GadgetExt.cs", &gadget_ext),
+        ("App.cs", &app),
+    ]);
+    assert_eq!(run_calls(&graph), vec![]);
+    let misses = extension_misses(&graph);
+    assert_eq!(misses.len(), 1, "{misses:?}");
+    assert!(misses[0].1.contains("`Spin` on `Widget`"), "{misses:?}");
+}
+
+/// Stands for (F7): the record states what the index found, never that the
+/// type lacks the member. `MyCtl : ControllerBase` derives from a library
+/// type that may declare `Ok`, so "`MyCtl` has no member `Ok`" would be a
+/// claim the index cannot make. Before the fix the hint said exactly that.
+#[test]
+fn test_resolve_call_open_hierarchy_extension_miss_hint_states_index_finding() {
+    let ext = ext_class(
+        "Lib",
+        "FooExt",
+        "        public static int Ok(this Foo f) { return 1; }\n",
+    );
+    let ctl = "using Lib;\nnamespace App\n{\n    public class MyCtl : ControllerBase\n    {\n        public void A() { this.Ok(); }\n    }\n}\n";
+    let graph = graph_of(&[
+        ("Foo.cs", "public class Foo\n{\n}\n"),
+        ("Lib/FooExt.cs", &ext),
+        ("App/MyCtl.cs", ctl),
+    ]);
+    let misses = extension_misses(&graph);
+    assert_eq!(misses.len(), 1, "{misses:?}");
+    assert!(
+        misses[0]
+            .1
+            .contains("the index found no member `Ok` on `MyCtl`"),
+        "{misses:?}"
+    );
+    assert!(!misses[0].1.contains("has no member"), "{misses:?}");
 }

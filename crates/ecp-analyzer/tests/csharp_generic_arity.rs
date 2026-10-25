@@ -319,3 +319,64 @@ fn test_build_csharp_same_arity_class_duplicates_members_tombstoned() {
         named(&[(4, "a"), (8, "")])
     );
 }
+
+/// The `FunctionMeta.decorators` names (what `ecp inspect` and cypher
+/// `f.decorators` print) of the function or method named `name`.
+fn meta_decorators(graph: &ZeroCopyGraph, name: &str) -> Vec<String> {
+    let pool = graph.string_pool.as_slice();
+    let idx = graph
+        .nodes
+        .iter()
+        .position(|n| {
+            matches!(n.kind, NodeKind::Function | NodeKind::Method) && n.name.resolve(pool) == name
+        })
+        .unwrap_or_else(|| panic!("no function {name}"));
+    graph
+        .function_meta(idx as u32)
+        .unwrap_or_else(|| panic!("no FunctionMeta for {name}"))
+        .decorators
+        .iter()
+        .map(|d| d.resolve(pool).to_string())
+        .collect()
+}
+
+/// Stands for: a decorator list shows the attributes the source wrote, and
+/// none of the parser's internal markers. A generic delegate carries the
+/// arity marker and an `override` method the override sentinel; before the
+/// fix `FunctionMeta.decorators` listed `__generic_arity__:2` and
+/// `__override__` beside `Obsolete`.
+#[test]
+fn test_function_meta_csharp_internal_markers_not_decorators() {
+    let graph = csharp_graph(
+        "namespace N
+{
+    [Obsolete] public delegate TResult Conv<T, TResult>(T a);
+    public class B { public virtual void M() {} }
+    public class D : B { [Obsolete] public override void M() {} }
+}
+",
+    );
+    assert_eq!(meta_decorators(&graph, "Conv"), ["Obsolete"]);
+    let pool = graph.string_pool.as_slice();
+    let overriding: Vec<Vec<String>> = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| n.kind == NodeKind::Method && n.name.resolve(pool) == "M")
+        .filter_map(|(i, _)| graph.function_meta(i as u32))
+        .map(|m| {
+            m.decorators
+                .iter()
+                .map(|d| d.resolve(pool).to_string())
+                .collect()
+        })
+        .collect();
+    assert!(
+        overriding.contains(&vec!["Obsolete".to_string()]),
+        "the override keeps its attribute alone: {overriding:?}"
+    );
+    assert!(
+        overriding.iter().flatten().all(|d| !d.starts_with("__")),
+        "no internal marker: {overriding:?}"
+    );
+}

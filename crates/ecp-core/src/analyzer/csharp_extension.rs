@@ -278,7 +278,8 @@ pub fn resolve<F: TypeFacts + ?Sized>(
 }
 
 /// The BlindSpot hint of an unresolved retry: the receiver type, the
-/// member and the reason.
+/// member and the reason. It states what the index found, never that the
+/// type lacks the member: a type with a library base may inherit it.
 pub fn blind_spot_hint(receiver: &str, member: &str, why: Unresolved) -> String {
     let reason = match why {
         Unresolved::OutOfScope => format!(
@@ -297,7 +298,10 @@ pub fn blind_spot_hint(receiver: &str, member: &str, why: Unresolved) -> String 
              (argument types and C# betterness are not modeled)"
         ),
     };
-    format!("`{receiver}` has no member `{member}`; extension lookup unresolved: {reason}")
+    format!(
+        "the index found no member `{member}` on `{receiver}`; \
+         extension lookup unresolved: {reason}"
+    )
 }
 
 /// Whether `decl` accepts `arguments`, the arguments after the receiver.
@@ -427,6 +431,34 @@ fn this_type_key(raw: &str) -> Option<&str> {
     let head = ty.split('<').next().unwrap_or(ty).trim();
     let key = head.rsplit(['.', ':']).next().unwrap_or(head).trim();
     (!key.is_empty() && key.chars().all(|c| c.is_alphanumeric() || c == '_')).then_some(key)
+}
+
+/// Whether `name` is a C# predefined type keyword (`string`, `int`,
+/// `object`, `void`, ...). `string.M()` names the type, never a value: no
+/// extension method binds there, and the call is a static access.
+pub fn is_keyword_type(name: &str) -> bool {
+    matches!(
+        name,
+        "bool"
+            | "byte"
+            | "sbyte"
+            | "char"
+            | "decimal"
+            | "double"
+            | "float"
+            | "int"
+            | "uint"
+            | "nint"
+            | "nuint"
+            | "long"
+            | "ulong"
+            | "short"
+            | "ushort"
+            | "object"
+            | "string"
+            | "dynamic"
+            | "void"
+    )
 }
 
 /// A C# keyword type as its `System` type's name (`bool` → `Boolean`).
@@ -580,6 +612,32 @@ mod tests {
         assert!(hint.contains("`bool`"), "{hint}");
         assert!(hint.contains("`ToAsync`"), "{hint}");
         assert!(hint.contains("2 extension declarations"), "{hint}");
+    }
+
+    /// Contract (F7): the hint states the index's finding, never that the
+    /// receiver type lacks the member, which a library base may declare.
+    #[test]
+    fn test_blind_spot_hint_open_receiver_states_index_finding() {
+        let hint = blind_spot_hint("MyCtl", "Ok", Unresolved::Inapplicable);
+        assert!(
+            hint.starts_with("the index found no member `Ok` on `MyCtl`;"),
+            "{hint}"
+        );
+        assert!(!hint.contains("has no member"), "{hint}");
+    }
+
+    /// Every C# predefined type keyword, and no `System` name or user type.
+    #[test]
+    fn test_is_keyword_type_keywords_only() {
+        for keyword in [
+            "bool", "byte", "sbyte", "char", "decimal", "double", "float", "int", "uint", "nint",
+            "nuint", "long", "ulong", "short", "ushort", "object", "string", "dynamic", "void",
+        ] {
+            assert!(is_keyword_type(keyword), "{keyword}");
+        }
+        for other in ["String", "Int32", "Logger", "", " string", "var"] {
+            assert!(!is_keyword_type(other), "{other:?}");
+        }
     }
 
     fn shaped(params: &'static [&'static str], flags: u16) -> ExtensionDecl<'static> {

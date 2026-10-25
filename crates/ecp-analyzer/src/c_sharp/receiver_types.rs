@@ -42,10 +42,11 @@ use tree_sitter::Node;
 #[derive(Debug, Default)]
 struct LocalTypes {
     scopes: Vec<(PosRange, HashMap<String, String>)>,
-    /// Every field and property: the range of the type declaration that
-    /// declares it, its name, and its type when that is a plain type name
-    /// (`""` otherwise).
-    members: Vec<(PosRange, String, String)>,
+    /// Every field and property by name: the range of the type declaration
+    /// that declares it, and its type when that is a plain type name (`""`
+    /// otherwise). Keyed by name, so a lookup reads only the same-name
+    /// members.
+    members: HashMap<String, Vec<(PosRange, String)>>,
 }
 
 impl LocalTypes {
@@ -54,10 +55,11 @@ impl LocalTypes {
     /// a type that is no plain type name, `None` for no such member.
     fn member_type(&self, pos: Pos, name: &str) -> Option<&str> {
         self.members
+            .get(name)?
             .iter()
-            .filter(|((start, end), member, _)| member == name && *start <= pos && pos <= *end)
-            .min_by_key(|(range, _, _)| range_width(*range))
-            .map(|(_, _, ty)| ty.as_str())
+            .filter(|((start, end), _)| *start <= pos && pos <= *end)
+            .min_by_key(|(range, _)| range_width(*range))
+            .map(|(_, ty)| ty.as_str())
     }
 
     fn lookup(&self, pos: Pos, var: &str) -> Option<&str> {
@@ -83,7 +85,7 @@ impl LocalTypes {
 /// a type declares.
 fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
     let mut scopes: Vec<(PosRange, HashMap<String, String>)> = Vec::new();
-    let mut members: Vec<(PosRange, String, String)> = Vec::new();
+    let mut members: HashMap<String, Vec<(PosRange, String)>> = HashMap::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         match n.kind() {
@@ -118,7 +120,11 @@ fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
 /// Record the fields or the property `decl` declares, under the range of
 /// the type declaration that holds it, each with its type when that is a
 /// plain type name: `""` for a generic, nullable, array or keyword type.
-fn collect_members(decl: Node<'_>, source: &[u8], out: &mut Vec<(PosRange, String, String)>) {
+fn collect_members(
+    decl: Node<'_>,
+    source: &[u8],
+    out: &mut HashMap<String, Vec<(PosRange, String)>>,
+) {
     let Some(owner) = std::iter::successors(decl.parent(), |n| n.parent()).find(|n| {
         matches!(
             n.kind(),
@@ -142,7 +148,9 @@ fn collect_members(decl: Node<'_>, source: &[u8], out: &mut Vec<(PosRange, Strin
             .filter(|name| name.kind() == "identifier")
             .and_then(|name| name.utf8_text(source).ok())
         {
-            out.push((scope, name.to_string(), ty.to_string()));
+            out.entry(name.to_string())
+                .or_default()
+                .push((scope, ty.to_string()));
         }
     };
     if decl.kind() == "property_declaration" {
@@ -369,9 +377,10 @@ enum Receiver<'a> {
     Typed(Cow<'a, str>),
     /// `this` or `base` with no type to name: the bare member.
     Implicit,
-    /// A name that may be a type (`StringAssert`), or the last segment of a
-    /// dotted name that may be a type path (`Outer.Inner`, `Box<int>`): the
-    /// resolver binds it only as a project type.
+    /// A name that may be a type (`StringAssert`), the last segment of a
+    /// dotted name that may be a type path (`Outer.Inner`, `Box<int>`), or a
+    /// value named as its type (`Logger Logger`): the resolver binds it only
+    /// as a project type.
     MaybeType(&'a str),
     /// A call whose return type the resolver may read (`Foo.Create().M()`).
     Call,
@@ -409,9 +418,17 @@ fn classify_receiver<'a>(
             .map_or(Receiver::Implicit, |ty| Receiver::Typed(Cow::Owned(ty))),
         "identifier" => {
             let name = text(receiver).ok()?;
-            match locals.lookup(pos, name) {
+            let value = match locals.lookup(pos, name) {
                 Some(ty) => typed(ty),
                 None => member(name).unwrap_or(Receiver::MaybeType(name)),
+            };
+            match value {
+                // "Color Color" (C# spec 12.8.7.2): a local, parameter, field
+                // or property whose type has its own spelling is the value
+                // and the type at once, so `Logger.Create()` reaches a static
+                // member as well as an instance one.
+                Receiver::Typed(ty) if ty == name => Receiver::MaybeType(name),
+                value => value,
             }
         }
         // `this._writer.Dispose()`: a member of the caller's own type.

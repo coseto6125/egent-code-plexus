@@ -21,7 +21,7 @@ use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::contracts::raw_records::RawIndexMap;
-use ecp_core::graph::{ArchivedZeroCopyGraph, RelType, ZeroCopyGraph};
+use ecp_core::graph::{ArchivedZeroCopyGraph, NodeKind, RelType, ZeroCopyGraph};
 use ecp_core::session::{MergedGraph, OverlayFileInput, OverlayView};
 use overrides_support::{edge_ends, graph_of_projects};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -294,6 +294,58 @@ fn test_partial_groups_merge_key_mismatch_no_part_of_edge() {
             part_of_files_any_order(&files, projects),
             [],
             "{shape}: two types, no part relation"
+        );
+    }
+}
+
+/// The kind of the node every `PartOf` edge of `graph` ends at, sorted.
+fn part_of_target_kinds(graph: &ZeroCopyGraph) -> Vec<NodeKind> {
+    let mut kinds: Vec<NodeKind> = graph
+        .edges
+        .iter()
+        .filter(|e| e.rel_type == RelType::PartOf)
+        .map(|e| graph.nodes[e.target as usize].kind)
+        .collect();
+    kinds.sort_by_key(|&kind| kind as u8);
+    kinds
+}
+
+/// Stands for: the parts of a `partial` attribute class are one type. The
+/// part that lists `System.Attribute` is filed as an `Annotation`, the other
+/// as a `Class`; they merge as one class, and the attribute part stands for
+/// the type even when the other part declares a base list and its file stem
+/// names the type. Before the fix the attribute part carried no partial
+/// marker (`NodeKind::is_type` leaves `Annotation` out), so no `PartOf` edge
+/// existed.
+#[test]
+fn test_partial_groups_attribute_class_parts_part_of_attribute_part() {
+    let attribute = part("MarkAttribute : System.Attribute", "public int A;");
+    let plain = part("MarkAttribute", "public int B;");
+    let with_interface = part(
+        "MarkAttribute : System.IDisposable",
+        "public void Dispose() {}",
+    );
+    for (shape, other_path, other) in [
+        ("no base list", "Lib/Mark.More.cs", plain.as_str()),
+        (
+            "stem part with an interface",
+            "Lib/MarkAttribute.cs",
+            with_interface.as_str(),
+        ),
+    ] {
+        let files = [
+            ("Lib/Mark.Attr.cs", attribute.as_str()),
+            (other_path, other),
+        ];
+        assert_eq!(
+            part_of_files_any_order(&files, &["Lib"]),
+            [pair(other_path, "Lib/Mark.Attr.cs")],
+            "{shape}: one PartOf edge to the attribute part"
+        );
+        assert_eq!(
+            part_of_target_kinds(&graph_of_projects(&csharp(), &files, &["Lib"])),
+            [NodeKind::Annotation],
+            "{shape}: the type's node carries the attribute kind"
         );
     }
 }

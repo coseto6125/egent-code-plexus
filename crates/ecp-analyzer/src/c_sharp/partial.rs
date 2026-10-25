@@ -12,6 +12,9 @@
 //! types, [`RawNode::partial_marker`]), the name, the generic arity and the
 //! kind. Each carries `partial`; C# rejects a `partial` and a non-`partial`
 //! declaration of one type, so a declaration without the marker joins none.
+//! An attribute class ([`NodeKind::Annotation`], a class whose base list
+//! names an `*Attribute`) compares as a class: the part that lists the base
+//! is the one the parser reclassifies, and the parts are still one class.
 //!
 //! The project is the evidence that two files compile together. A file whose
 //! project is unknown ([`CsharpProjects::project_of`]) merges with nothing:
@@ -21,6 +24,7 @@
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
 use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
 use ecp_core::file_category::Language;
+use ecp_core::graph::NodeKind;
 use rustc_hash::FxHashMap;
 
 /// The `reason` of every `PartOf` edge.
@@ -121,6 +125,7 @@ pub fn partial_groups(
             };
             let part = Part {
                 slot,
+                is_attribute: node.kind == NodeKind::Annotation,
                 has_base_list: !node.heritage.is_empty(),
                 stem_names_type: file_stem(&path) == node.name,
                 path: path.clone(),
@@ -132,13 +137,14 @@ pub fn partial_groups(
                     scope,
                     node.name.as_str(),
                     node.generic_arity(),
-                    node.kind as u8,
+                    merge_kind(node.kind) as u8,
                 ))
                 .or_default();
             // A same-file twin is the survivor's node: the node declares a
             // base list when either declaration does, and starts at the first.
             match group.iter_mut().find(|seen| seen.slot == slot) {
                 Some(seen) => {
+                    seen.is_attribute |= part.is_attribute;
                     seen.has_base_list |= part.has_base_list;
                     seen.position = seen.position.min(part.position);
                 }
@@ -171,6 +177,7 @@ pub fn partial_groups(
 /// One part of a `partial` type: its node and what picks the representative.
 struct Part {
     slot: u32,
+    is_attribute: bool,
     has_base_list: bool,
     stem_names_type: bool,
     /// Repo-relative, `/`-separated.
@@ -180,12 +187,14 @@ struct Part {
 }
 
 impl Part {
-    /// The representative is the part of lowest rank: the part that
+    /// The representative is the part of lowest rank: the attribute part
+    /// (so the type's node carries the attribute kind), else the part that
     /// declares a base list, else the part whose file stem is the type
     /// name, else the first normalized path; within one path, the first
     /// declaration. Each tier breaks its ties by the tiers after it.
-    fn rank(&self) -> (bool, bool, &str, (u32, u32)) {
+    fn rank(&self) -> (bool, bool, bool, &str, (u32, u32)) {
         (
+            !self.is_attribute,
             !self.has_base_list,
             !self.stem_names_type,
             &self.path,
@@ -201,9 +210,24 @@ fn file_stem(path: &str) -> &str {
     name.rsplit_once('.').map_or(name, |(stem, _)| stem)
 }
 
+/// Whether a C# declaration of `kind` is a type that may be `partial`:
+/// [`NodeKind::is_type`], plus the attribute class the parser files as
+/// [`NodeKind::Annotation`], which `is_type` leaves out.
+pub(crate) fn is_partial_kind(kind: NodeKind) -> bool {
+    kind.is_type() || kind == NodeKind::Annotation
+}
+
+/// The kind a part merges by: an attribute class merges as the class it is.
+fn merge_kind(kind: NodeKind) -> NodeKind {
+    match kind {
+        NodeKind::Annotation => NodeKind::Class,
+        kind => kind,
+    }
+}
+
 /// The declaring scope of a `partial` type node; `None` for any other node.
 fn partial_scope(node: &RawNode) -> Option<&str> {
-    if node.kind.is_type() && !node.name.is_empty() {
+    if is_partial_kind(node.kind) && !node.name.is_empty() {
         node.partial_scope()
     } else {
         None
@@ -268,6 +292,7 @@ mod tests {
     fn part(slot: u32, has_base_list: bool, stem_names_type: bool, path: &str) -> Part {
         Part {
             slot,
+            is_attribute: false,
             has_base_list,
             stem_names_type,
             path: path.to_string(),
@@ -286,6 +311,26 @@ mod tests {
         assert!(stem.rank() < early.rank());
         let late = part(0, false, false, "b/Reader.More.cs");
         assert!(early.rank() < late.rank(), "the path decides, not the slot");
+    }
+
+    /// The attribute part outranks a part with a base list and a stem match,
+    /// so the type's node carries the attribute kind.
+    #[test]
+    fn test_rank_attribute_part_outranks_base_list_and_stem() {
+        let attribute = Part {
+            is_attribute: true,
+            ..part(5, true, false, "z/Mark.Attr.cs")
+        };
+        let stem = part(0, true, true, "a/MarkAttribute.cs");
+        assert!(attribute.rank() < stem.rank());
+    }
+
+    #[test]
+    fn test_merge_kind_annotation_merges_as_class() {
+        assert_eq!(merge_kind(NodeKind::Annotation), NodeKind::Class);
+        assert_eq!(merge_kind(NodeKind::Struct), NodeKind::Struct);
+        assert!(is_partial_kind(NodeKind::Annotation));
+        assert!(!is_partial_kind(NodeKind::Function));
     }
 
     #[test]

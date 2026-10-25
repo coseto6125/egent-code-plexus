@@ -130,6 +130,10 @@ fn path_dirs(path: &str) -> Vec<&str> {
     parts
 }
 
+/// [`SymbolTable::csharp_extension_decls`] by member name
+/// ([`SymbolTable::csharp_extension_decl_map`]).
+pub(crate) type CsharpExtensionDecls<'a> = FxHashMap<&'a str, Vec<ExtensionDecl<'a>>>;
+
 /// A C# extension method as [`SymbolTable::note_csharp_extension`] records
 /// it.
 #[derive(Debug)]
@@ -719,6 +723,15 @@ impl SymbolTable {
                     namespace,
                 })
             })
+            .collect()
+    }
+
+    /// [`Self::csharp_extension_decls`] of every recorded name, built once
+    /// for Pass 2, which reads one name per failing C# member call.
+    pub(crate) fn csharp_extension_decl_map(&self) -> CsharpExtensionDecls<'_> {
+        self.csharp_extensions
+            .keys()
+            .map(|name| (&**name, self.csharp_extension_decls(name)))
             .collect()
     }
 
