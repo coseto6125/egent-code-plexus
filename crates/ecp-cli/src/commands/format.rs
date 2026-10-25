@@ -45,6 +45,7 @@ pub fn rel_type_to_str(rel: RelType) -> &'static str {
         RelType::ReadsField => "reads_field",
         RelType::CompensatedBy => "compensated_by",
         RelType::QueriesTable => "queries_table",
+        RelType::PartOf => "part_of",
     }
 }
 

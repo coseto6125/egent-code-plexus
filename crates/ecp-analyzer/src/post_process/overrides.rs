@@ -1187,7 +1187,7 @@ fn metas_by_node(lg: &LocalGraph) -> Vec<Option<&RawFunctionMeta>> {
 }
 
 /// The declarations of each method name per owner type. The parts of a C#
-/// `partial` type are one owner, keyed by its first part
+/// `partial` type are one owner, keyed by its representative part
 /// (`SymbolTable::partial_type`); each declaration keeps its own slot, so
 /// an edge targets the method in the part that declares it.
 fn build_method_index<'a>(

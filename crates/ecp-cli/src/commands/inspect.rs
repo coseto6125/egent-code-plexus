@@ -1,7 +1,9 @@
 use crate::commands::format::{node_kind_to_str, rel_type_to_str};
 use crate::engine::Engine;
 use crate::output::{emit_with_caveat, OutputFormat};
-use crate::read_context::{ambiguity_candidates, named_declarations, shell_word, target_request};
+use crate::read_context::{
+    ambiguity_candidates, named_declarations, one_type_of_parts, shell_word, target_request,
+};
 use clap::Args;
 use ecp_core::contracts::identity::{resolve_target, select, Ambiguity, TargetResolution};
 use ecp_core::file_category::is_test_path;
@@ -468,6 +470,9 @@ fn build_inspect_block(
 /// The overlay rebuilds no membership edges: a dirty type lists its committed
 /// members that still exist (at their working-tree lines), and a type the
 /// overlay added lists none.
+///
+/// A C# `partial` type lists the members of every part
+/// ([`MergedGraph::partial_parts`]), whichever part `idx` is, each once.
 fn collect_contained_members(
     merged: &MergedGraph<'_>,
     idx: u32,
@@ -479,7 +484,12 @@ fn collect_contained_members(
     let mut methods = Vec::new();
     let mut properties = Vec::new();
     let mut variants = Vec::new();
-    for edge in merged.out_edges(idx) {
+    let mut parts = merged.partial_parts(idx);
+    if parts.is_empty() {
+        parts.push(idx);
+    }
+    let mut seen = rustc_hash::FxHashSet::default();
+    for edge in parts.iter().flat_map(|&part| merged.out_edges(part)) {
         let target_node = node_at(merged, edge.target);
         // Defines edges can target many kinds; only EnumVariant belongs in the
         // contained-variants bucket. Other Defines targets (File→Function etc.)
@@ -490,6 +500,9 @@ fn collect_contained_members(
             RelType::Defines if target_node.kind() == NodeKind::EnumVariant => &mut variants,
             _ => continue,
         };
+        if !seen.insert(edge.target) {
+            continue;
+        }
         bucket.push(serde_json::json!({
             "name": target_node.name(merged),
             "kind": node_kind_to_str(&target_node.kind()),
@@ -530,6 +543,10 @@ fn collect_decorators(graph: &ArchivedZeroCopyGraph, node_idx: u32) -> Vec<Strin
 /// "upstream callers" misleads an LLM consumer that asked "who depends on
 /// this function". `edge_keeps` is the same closure applied to `incoming`
 /// so the two channels expose the same filtered view of the in-edges.
+///
+/// A C# `partial` type reads the in-edges of every part
+/// ([`MergedGraph::partial_parts`]), and a part is never its own caller, so
+/// either part lists the same callers.
 fn bfs_upstream_1hop<F>(
     merged: &MergedGraph<'_>,
     idx: u32,
@@ -539,12 +556,18 @@ fn bfs_upstream_1hop<F>(
 where
     F: Fn(&str, &str, &str) -> bool,
 {
-    let mut visited = HashSet::new();
-    visited.insert(idx);
+    let mut parts = merged.partial_parts(idx);
+    if parts.is_empty() {
+        parts.push(idx);
+    }
+    let mut visited: HashSet<u32> = parts.iter().copied().collect();
 
     // A Class / Struct is also called through its constructors (see the
     // `incoming` loop in `build_inspect_block`); a caller reaching both counts once.
-    let read_from = std::iter::once((idx, false)).chain(constructors.iter().map(|&c| (c, true)));
+    let read_from = parts
+        .iter()
+        .map(|&part| (part, false))
+        .chain(constructors.iter().map(|&c| (c, true)));
 
     let mut queue = VecDeque::new();
     for (read_idx, is_ctor) in read_from {
@@ -651,7 +674,7 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
         }
     }
 
-    let node_idx = match resolve_target(&request, &named) {
+    let node_idx = match one_type_of_parts(&merged, resolve_target(&request, &named)) {
         TargetResolution::Unique(c) => c.node,
         TargetResolution::Ambiguous(a) => {
             let result = ambiguous_result(&a, name, omitted_kinds);
@@ -1323,5 +1346,48 @@ mod tests {
         let msg = with_neighbor_kind_hint(e, Some("banana")).to_string();
         assert!(!msg.contains("--neighbor-kind"), "{msg}");
         assert!(msg.contains("banana"), "{msg}");
+    }
+
+    /// nodes: 0 Reader (Reader.cs, the representative) · 1 Reader
+    /// (Reader.Async.cs) · 2 Read · 3 ReadAsync · 4 TextReader
+    /// edges: 1 →PartOf→ 0, TextReader →Extends→ 0, HasMethod 0→Read,
+    /// 1→ReadAsync, and a second HasMethod 0→ReadAsync, so one member has
+    /// two membership edges.
+    fn partial_type_graph() -> ZeroCopyGraph {
+        let mut fx = GraphFixture::new();
+        let main = fx.node(NodeKind::Class, "Lib/Reader.cs", "Reader");
+        let async_part = fx.node(NodeKind::Class, "Lib/Reader.Async.cs", "Reader");
+        let read = fx.method("Lib/Reader.cs", "Reader", "Read");
+        let read_async = fx.method("Lib/Reader.Async.cs", "Reader", "ReadAsync");
+        let text_reader = fx.node(NodeKind::Class, "Lib/TextReader.cs", "TextReader");
+        fx.edge(async_part, main, RelType::PartOf);
+        fx.edge(text_reader, main, RelType::Extends);
+        fx.edge(main, read, RelType::HasMethod);
+        fx.edge(async_part, read_async, RelType::HasMethod);
+        fx.edge(main, read_async, RelType::HasMethod);
+        fx.build()
+    }
+
+    /// Stands for: inspecting either part of a C# partial type lists the
+    /// members of every part, each once, and the same direct callers: the
+    /// subclass, never the other part. Before the fix each part listed only
+    /// its own members, so the representative that `Extends` reaches hid
+    /// the async part's methods, and the async part listed no caller.
+    #[test]
+    fn test_collect_contained_members_partial_type_lists_every_part_once() {
+        let bytes = archive(&partial_type_graph());
+        let merged = MergedGraph::new(access(&bytes), None);
+        for part in [0, 1] {
+            let inspected = block(&merged, part);
+            let mut methods: Vec<&str> = inspected["contained_methods"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["name"].as_str().unwrap())
+                .collect();
+            methods.sort_unstable();
+            assert_eq!(methods, ["Read", "ReadAsync"], "part {part}");
+            assert_eq!(upstream_names(&inspected), ["TextReader"], "part {part}");
+        }
     }
 }

@@ -1,4 +1,4 @@
-use crate::c_sharp::partial::{partial_groups, CsharpProjects};
+use crate::c_sharp::partial::{partial_groups, CsharpProjects, PART_OF_REASON};
 use crate::fetch_shape::{
     consumer_keys, fetch_urls, format_reason, normalize_route_path, response_shapes,
 };
@@ -491,6 +491,7 @@ impl GraphBuilder {
             &mut edges,
         );
         emit_overload_references(&symbol_table, &mut string_pool, &mut edges);
+        emit_partial_parts(&symbol_table, &mut string_pool, &mut edges);
 
         if prof {
             eprintln!(
@@ -2714,6 +2715,27 @@ fn emit_overload_references(
     }
 }
 
+/// One `PartOf` edge from every other part of a C# `partial` type to its
+/// representative part (`c_sharp::partial`), the grouping that Pass 1.9,
+/// Pass 2 and the `Overrides` method index read.
+fn emit_partial_parts(
+    symbol_table: &SymbolTable,
+    string_pool: &mut StringPool,
+    edges: &mut Vec<Edge>,
+) {
+    let reason = string_pool.add(PART_OF_REASON);
+    for parts in symbol_table.partial_types() {
+        let (&representative, others) = parts.split_first().expect("a partial type has parts");
+        edges.extend(others.iter().map(|&part| Edge {
+            source: part,
+            target: representative,
+            rel_type: RelType::PartOf,
+            confidence: 1.0,
+            reason,
+        }));
+    }
+}
+
 fn emit_closure_references(
     local_graphs: &[LocalGraph],
     raw_map: &RawIndexMap,
@@ -2909,7 +2931,7 @@ fn pass1_9_supertypes(
 /// declaring file, so candidates in two files stay ambiguous.
 ///
 /// The parts of a C# `partial` type are one type, and a base names it by
-/// its first part ([`SymbolTable::partial_type`]), whichever part a tier
+/// its representative part ([`SymbolTable::partial_type`]), whichever part a tier
 /// found. The global tier refuses the parts as several same-named types;
 /// a bare name whose every global candidate is a part of one type binds it
 /// with the global tier's confidence ([`SymbolTable::partial_global_type`]),

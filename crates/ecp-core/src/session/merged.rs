@@ -233,6 +233,29 @@ impl<'a> MergedGraph<'a> {
         }
     }
 
+    /// Every part of the C# `partial` type that merged-space `idx` is a part
+    /// of: the representative first, then the other parts ascending. Empty
+    /// when `idx` is no part of a type declared in two parts or more, or when
+    /// an edit deleted the representative. Reads the [`RelType::PartOf`]
+    /// edges, so the overlay keeps the grouping of the last index.
+    pub fn partial_parts(&self, idx: u32) -> Vec<u32> {
+        let representative = self
+            .out_edges(idx)
+            .find(|edge| edge.rel_type() == RelType::PartOf)
+            .map_or(idx, |edge| edge.target);
+        let mut others: Vec<u32> = self
+            .in_edges(representative)
+            .filter(|edge| edge.rel_type() == RelType::PartOf)
+            .map(|edge| edge.source)
+            .collect();
+        if others.is_empty() {
+            return Vec::new();
+        }
+        others.sort_unstable();
+        others.dedup();
+        std::iter::once(representative).chain(others).collect()
+    }
+
     /// Every edge in the graph, merged — for the "does any edge match" scans
     /// that have no endpoint to anchor on.
     #[inline]
@@ -638,5 +661,80 @@ mod tests {
             };
             assert_eq!(edge.reason(graph), expected);
         }
+    }
+
+    /// nodes: 0 Reader (Lib/Reader.cs, the representative) · 1 Reader
+    /// (Lib/Reader.Async.cs) · 2 Writer (Lib/Writer.cs), no part.
+    /// edges: 1 →PartOf→ 0.
+    fn partial_bytes() -> Vec<u8> {
+        let mut fx = GraphFixture::new();
+        let main = fx.node(NodeKind::Class, "Lib/Reader.cs", "Reader");
+        let async_part = fx.node(NodeKind::Class, "Lib/Reader.Async.cs", "Reader");
+        fx.node(NodeKind::Class, "Lib/Writer.cs", "Writer");
+        fx.edge(async_part, main, RelType::PartOf);
+        fx.into_bytes()
+    }
+
+    /// `rel_path` re-parsed with one class `Reader`, or with nothing.
+    fn reader_input(rel_path: &str, keeps_reader: bool) -> OverlayFileInput {
+        OverlayFileInput {
+            export_aliases: Vec::new(),
+            rel_path: rel_path.to_string(),
+            symbols: keeps_reader
+                .then(|| OverlaySymbol {
+                    is_exported: true,
+                    name: "Reader".to_string(),
+                    kind: NodeKind::Class,
+                    owner_class: None,
+                    start_line: 1,
+                    end_line: 2,
+                    start_column: 0,
+                    end_column: 0,
+                    calls: Vec::new(),
+                    heritage: Vec::new(),
+                    variant_refs: Vec::new(),
+                    return_type: None,
+                    generic_arity: 0,
+                })
+                .into_iter()
+                .collect(),
+            imports: vec![],
+        }
+    }
+
+    /// Stands for: either part gives the one group, the representative
+    /// first; a node that is no part gives none (`ArchivedZeroCopyGraph`
+    /// and `MergedGraph` agree without a view).
+    #[test]
+    fn test_partial_parts_either_part_returns_group_representative_first() {
+        let bytes = partial_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let merged = MergedGraph::new(graph, None);
+        for part in [0, 1] {
+            assert_eq!(merged.partial_parts(part), [0, 1], "part {part}");
+            assert_eq!(graph.partial_parts(part), [0, 1], "part {part}");
+        }
+        assert!(merged.partial_parts(2).is_empty());
+        assert!(graph.partial_parts(2).is_empty());
+    }
+
+    /// Stands for: the overlay keeps the stored grouping. A dirty part that
+    /// still declares the type stays a part, as its virtual node; an edit
+    /// that deletes the representative leaves no group, so the other part
+    /// reads as a type of its own, as before the part relation.
+    #[test]
+    fn test_partial_parts_overlay_keeps_dirty_part_drops_deleted_representative() {
+        let bytes = partial_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+
+        let kept = OverlayView::build(graph, &[reader_input("Lib/Reader.Async.cs", true)]).unwrap();
+        let merged = MergedGraph::new(graph, Some(&kept));
+        let virt = kept.base_len();
+        assert_eq!(merged.partial_parts(0), [0, virt]);
+        assert_eq!(merged.partial_parts(virt), [0, virt]);
+
+        let deleted = OverlayView::build(graph, &[reader_input("Lib/Reader.cs", false)]).unwrap();
+        let merged = MergedGraph::new(graph, Some(&deleted));
+        assert!(merged.partial_parts(1).is_empty());
     }
 }

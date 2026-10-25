@@ -3445,6 +3445,50 @@ impl<'a> OverlayFacts<'a> {
         Some((kept, first_unresolved))
     }
 
+    /// The index's `SymbolTable::partial_parts` for base or virtual `id`:
+    /// the parts of its C# `partial` type, the representative first, read
+    /// from the archived `PartOf` edges ([`ArchivedZeroCopyGraph::partial_parts`])
+    /// with a part the edit replaced read as its virtual node. The overlay
+    /// has no project identity, so it keeps the last index's grouping: a
+    /// part an edit added stays a type of its own. Empty when `id` is no
+    /// part, or when the edit deleted the representative or every other part.
+    fn partial_group(&self, id: u32) -> Vec<u32> {
+        // Only a C# type has parts; the test spares every other candidate
+        // the edge scan.
+        let csharp = self
+            .node_file(id)
+            .is_some_and(|file| Language::from_normalized_path(file) == Language::CSharp);
+        if !csharp {
+            return Vec::new();
+        }
+        let base = match id.checked_sub(self.base_len()) {
+            Some(offset) => self
+                .nodes
+                .get(offset as usize)
+                .and_then(|n| n.replaced_base),
+            None => Some(id),
+        };
+        let Some(base) = base else {
+            return Vec::new();
+        };
+        let current = |part: u32| match self.replaced.get(&part) {
+            Some(&virt) => Some(virt),
+            None => (!self.dirty_base.contains(&part)).then_some(part),
+        };
+        let parts = self.graph.partial_parts(base);
+        let Some(representative) = parts.first().and_then(|&rep| current(rep)) else {
+            return Vec::new();
+        };
+        let others: Vec<u32> = parts[1..]
+            .iter()
+            .filter_map(|&part| current(part))
+            .collect();
+        if others.is_empty() {
+            return Vec::new();
+        }
+        std::iter::once(representative).chain(others).collect()
+    }
+
     /// Whether the base `base` of the clean type `ty` names one of `traits`,
     /// the dirty files' archived trait impls for `ty`, and no clean file's
     /// `impl` block implements it for `ty`.
@@ -4324,6 +4368,14 @@ impl TypeFacts for OverlayFacts<'_> {
 
     fn nearest_copy(&self, caller_file: &str, candidates: &[u32]) -> Option<u32> {
         self.nearest_of_copies(caller_file, candidates)
+    }
+
+    fn partial_parts(&self, ty: u32) -> Cow<'_, [u32]> {
+        Cow::Owned(self.partial_group(ty))
+    }
+
+    fn partial_type(&self, ty: u32) -> u32 {
+        self.partial_group(ty).first().copied().unwrap_or(ty)
     }
 
     /// A dirty function's from its fresh parse; a clean one's from the

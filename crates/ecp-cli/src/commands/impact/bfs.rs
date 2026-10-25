@@ -1,7 +1,8 @@
 use super::Direction;
 use crate::commands::format::{kind_to_str, node_kind_to_str, rel_type_to_str};
 use ecp_core::file_category::is_test_path;
-use ecp_core::graph::ArchivedFileCategory;
+use ecp_core::file_category::Language;
+use ecp_core::graph::{ArchivedFileCategory, NodeKind, RelType};
 use ecp_core::session::{MergedEdge, MergedGraph, OverlayView};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::{json, Value};
@@ -300,11 +301,21 @@ pub(crate) fn shortest_path<'g>(
 /// constructor when it has one, else on the type, so the instantiators are
 /// the callers of both. Empty for any other start and for a downstream-only
 /// walk.
+///
+/// The constructors of every part of a C# `partial` type count: a part may
+/// declare a constructor in another file than the start.
 fn constructor_seeds(merged: &MergedGraph<'_>, start_idx: u32, direction: &Direction) -> Vec<u32> {
     if *direction == Direction::Down {
         return Vec::new();
     }
-    merged.constructors_of(start_idx)
+    let parts = merged.partial_parts(start_idx);
+    if parts.is_empty() {
+        return merged.constructors_of(start_idx);
+    }
+    parts
+        .into_iter()
+        .flat_map(|part| merged.constructors_of(part))
+        .collect()
 }
 
 /// Core BFS over the merged graph (base CSR + optional overlay view) from
@@ -379,13 +390,14 @@ pub(super) fn run_bfs<'g>(
 
     while let Some((curr_idx, curr_depth, via, via_heuristic)) = queue.pop_front() {
         // ── node emission (merged space: < base_len = base, else virtual) ──
-        let (uid, name, owner_class, kind_str, file_path, line, is_test): (
+        let (uid, name, owner_class, kind_str, file_path, line, is_test, is_type): (
             u64,
             String,
             Option<String>,
             &'static str,
             String,
             u32,
+            bool,
             bool,
         );
         if curr_idx < base_len {
@@ -408,6 +420,7 @@ pub(super) fn run_bfs<'g>(
                 .display_owner(curr_idx as u32)
                 .map(std::borrow::Cow::into_owned);
             kind_str = kind_to_str(&curr_node.kind);
+            is_type = NodeKind::from(&curr_node.kind).is_type();
             file_path = graph.files[file_idx]
                 .path
                 .resolve(&graph.string_pool)
@@ -428,6 +441,7 @@ pub(super) fn run_bfs<'g>(
             name = vn.name.clone();
             owner_class = vn.owner_class.clone();
             kind_str = node_kind_to_str(&vn.kind);
+            is_type = vn.kind.is_type();
             file_path = vn.rel_path.to_string();
             line = vn.start_line;
         }
@@ -460,6 +474,24 @@ pub(super) fn run_bfs<'g>(
             break;
         }
 
+        // The parts of a C# partial type are one type: every other part
+        // joins the walk at this depth, in any direction and under any
+        // relation filter, so a walk from any part reaches the same nodes.
+        // Only a C# type can have parts; the kind and path test spares every
+        // other node the edge scan.
+        if is_type && Language::from_normalized_path(&file_path) == Language::CSharp {
+            for part in merged.partial_parts(curr_idx as u32) {
+                if visited.insert(part as usize) {
+                    queue.push_front((
+                        part as usize,
+                        curr_depth,
+                        Some((rel_type_to_str(RelType::PartOf), 1.0)),
+                        via_heuristic,
+                    ));
+                }
+            }
+        }
+
         if curr_depth >= max_depth {
             continue;
         }
@@ -476,8 +508,9 @@ pub(super) fn run_bfs<'g>(
             // Structural containment edges (Defines, HasMethod, HasProperty,
             // Imports) describe where a symbol lives, not who calls it.
             // Exclude from BFS so File→Function Defines does not register
-            // as a caller.
-            if rel.is_scope_containment() {
+            // as a caller. A `PartOf` edge joins the parts of one type at
+            // one depth above, not as a step.
+            if rel.is_scope_containment() || rel == RelType::PartOf {
                 return;
             }
             let is_heur = rel.is_heuristic();
@@ -529,4 +562,97 @@ pub(super) fn run_bfs<'g>(
         hidden_heuristic_edges,
         hidden_test_callers,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ecp_core::graph::ArchivedZeroCopyGraph;
+    use ecp_core::graph_fixture::GraphFixture;
+
+    /// nodes: 0 Reader (Reader.cs, the representative) · 1 Reader
+    /// (Reader.Async.cs) · 2 TextReader · 3 Read · 4 ReadAsync · 5 caller
+    /// edges: 1 →PartOf→ 0, TextReader →Extends→ 0, HasMethod 0→Read and
+    /// 1→ReadAsync, caller →Calls→ ReadAsync.
+    fn partial_graph() -> Vec<u8> {
+        let mut fx = GraphFixture::new();
+        let main = fx.node(NodeKind::Class, "Lib/Reader.cs", "Reader");
+        let async_part = fx.node(NodeKind::Class, "Lib/Reader.Async.cs", "Reader");
+        let text_reader = fx.node(NodeKind::Class, "Lib/TextReader.cs", "TextReader");
+        let read = fx.method("Lib/Reader.cs", "Reader", "Read");
+        let read_async = fx.method("Lib/Reader.Async.cs", "Reader", "ReadAsync");
+        let caller = fx.func("Lib/Use.cs", "caller");
+        fx.edge(async_part, main, RelType::PartOf);
+        fx.edge(text_reader, main, RelType::Extends);
+        fx.edge(main, read, RelType::HasMethod);
+        fx.edge(async_part, read_async, RelType::HasMethod);
+        fx.edge(caller, read_async, RelType::Calls);
+        fx.into_bytes()
+    }
+
+    /// `(name, file, depth)` of every node an upstream walk from `start`
+    /// reaches, sorted.
+    fn upstream(graph: &ArchivedZeroCopyGraph, start: usize) -> Vec<(String, String, u64)> {
+        let (det, _, _, _, _) = run_bfs(
+            graph,
+            None,
+            start,
+            &Direction::Up,
+            3,
+            0.0,
+            true,
+            &None,
+            false,
+            None,
+        );
+        let mut out: Vec<(String, String, u64)> = det
+            .iter()
+            .map(|e| {
+                (
+                    e["name"].as_str().unwrap().to_string(),
+                    e["filePath"].as_str().unwrap().to_string(),
+                    e["depth"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Stands for: a walk that starts at any part of a C# partial type
+    /// reaches the same nodes at the same depths: both parts at depth 0 and
+    /// the subclass at depth 1. Before the fix a walk from the async part
+    /// reached the representative as a depth-1 `PartOf` caller and the
+    /// subclass not at all within the parts' own depth.
+    #[test]
+    fn test_run_bfs_partial_type_any_part_walks_same_type() {
+        let bytes = partial_graph();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        let expected = vec![
+            ("Reader".to_string(), "Lib/Reader.Async.cs".to_string(), 0),
+            ("Reader".to_string(), "Lib/Reader.cs".to_string(), 0),
+            ("TextReader".to_string(), "Lib/TextReader.cs".to_string(), 1),
+        ];
+        assert_eq!(upstream(graph, 0), expected);
+        assert_eq!(upstream(graph, 1), expected);
+    }
+
+    /// Stands for: a node that is no part of a partial type walks as
+    /// before; a method's caller is one step away and no type joins.
+    #[test]
+    fn test_run_bfs_non_partial_start_unchanged() {
+        let bytes = partial_graph();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        assert_eq!(
+            upstream(graph, 4),
+            [
+                (
+                    "ReadAsync".to_string(),
+                    "Lib/Reader.Async.cs".to_string(),
+                    0
+                ),
+                ("caller".to_string(), "Lib/Use.cs".to_string(), 1),
+            ]
+        );
+    }
 }

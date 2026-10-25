@@ -51,7 +51,7 @@ Containment / definition:
 `Defines`, `HasMethod`, `HasProperty`
 
 Type hierarchy:
-`Extends`, `Implements`, `Overrides`
+`Extends`, `Implements`, `Overrides`, `PartOf`
 
 Dispatch:
 `Calls`, `Accesses`, `References`
@@ -75,6 +75,7 @@ Run `ecp schema reltypes` for each edge's LLM-utility category and heuristic fla
 - **EnumVariant** — `MATCH (e:Enum {name:'Status'})-[:Defines]->(v:EnumVariant) RETURN v.name`. `v.owner_class` carries the enum name.
 - **Annotation** + **Decorates** — `MATCH (c:Class)-[:Decorates]->(a:Annotation {name:'Injectable'}) RETURN c`. Resolves to the annotation class on hit; otherwise targets a synthetic Annotation node deduped per name (its `file_idx` is `SYNTHETIC_FILE_IDX`; consumers indexing `graph.files[...]` must guard via `Node::has_owning_file()`). `m.decorators` cypher property gives the raw string list.
 - **TransactionScope** + **OpensTxScope** — `MATCH (f:Function)-[:OpensTxScope]->(s:TransactionScope) RETURN f.name`. `s.name` carries the framework label (`tx_scope:{fn_name}#{spring-transactional|django-atomic|dotnet-transactional|symfony-transactional}`).
+- **PartOf** — a C# `partial` type part → its representative part: `MATCH (t:Class {name:'JsonReader'})<-[:PartOf]-(p) RETURN p.filePath`. `Extends` ends at the representative.
 - **Implements** — class→interface targets distinguished from class→class via target's NodeKind (Interface / Trait → Implements; else Extends).
 - **Fetches** — in-graph client→handler: `MATCH (f:Function)-[:Fetches]->(r:Route) RETURN r.name`. Cross-repo misses NOT emitted (use `ecp contracts` for that).
 - **File→Defines** — top-level containment: `MATCH (f:File)-[:Defines]->(s) WHERE f.filePath ENDS WITH 'lib.rs' RETURN s.name`. Does NOT duplicate `HasMethod` / `HasProperty` from Class members.

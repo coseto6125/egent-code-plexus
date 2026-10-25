@@ -109,6 +109,7 @@ impl std::str::FromStr for RelType {
             "READSFIELD" | "READS_FIELD" => Ok(RelType::ReadsField),
             "COMPENSATEDBY" | "COMPENSATED_BY" => Ok(RelType::CompensatedBy),
             "QUERIESTABLE" | "QUERIES_TABLE" => Ok(RelType::QueriesTable),
+            "PARTOF" | "PART_OF" => Ok(RelType::PartOf),
             _ => Err(()),
         }
     }
@@ -117,7 +118,7 @@ impl std::str::FromStr for RelType {
 impl RelType {
     /// rkyv discriminants are append-only (see `NodeKind::ALL`). Length of
     /// the `#[repr(u8)]` variant space.
-    pub const VARIANT_COUNT: usize = 23;
+    pub const VARIANT_COUNT: usize = 24;
 
     /// Every variant in `#[repr(u8)]` order. The schema guard test pins
     /// `ALL[i] as u8 == i` plus the variant name for all i, so a reorder /
@@ -147,6 +148,7 @@ impl RelType {
         Self::ReadsField,
         Self::CompensatedBy,
         Self::QueriesTable,
+        Self::PartOf,
     ];
 
     pub const fn is_heuristic(self) -> bool {
@@ -195,6 +197,7 @@ impl RelType {
             Self::ReadsField => "ReadsField",
             Self::CompensatedBy => "CompensatedBy",
             Self::QueriesTable => "QueriesTable",
+            Self::PartOf => "PartOf",
         }
     }
 }
@@ -659,6 +662,21 @@ pub enum RelType {
     /// silently misses breaking callers. Appended at the END for rkyv
     /// discriminant stability.
     QueriesTable,
+    /// A part of a C# `partial` type → the representative part of that
+    /// type. Every other part has one such edge; the representative has
+    /// none. `Extends` / `Implements` edges that name the type end at the
+    /// representative. The representative is the part that declares a base
+    /// list, else the part whose file stem is the type name, else the first
+    /// part by normalized path (`ecp_analyzer::c_sharp::partial`).
+    ///
+    /// LLM-utility (A) Graph completeness: a subclass's `Extends` edge
+    /// reaches one part only. Without this edge, an agent that follows it
+    /// misses the members that the other parts declare. `ecp inspect` lists
+    /// the members of all parts, and `ecp impact` from any part walks the
+    /// same type. (C) Edge semantics: `Extends` means a base type, so it
+    /// cannot express "the same type, declared in another file".
+    /// Appended at the END for rkyv discriminant stability.
+    PartOf,
 }
 
 impl ArchivedRelType {
@@ -1481,6 +1499,39 @@ impl ArchivedZeroCopyGraph {
         aliases
     }
 
+    /// Every part of the C# `partial` type that the node `idx` is a part
+    /// of: the representative first, then the other parts ascending. Empty
+    /// when `idx` is no part of a type declared in two parts or more. Reads
+    /// the [`RelType::PartOf`] edges: each other part has one, to the
+    /// representative.
+    pub fn partial_parts(&self, idx: u32) -> Vec<u32> {
+        fn span(offsets: &[rkyv::Archived<u32>], node: u32) -> std::ops::Range<usize> {
+            let at = node as usize;
+            match (offsets.get(at), offsets.get(at + 1)) {
+                (Some(start), Some(end)) => start.to_native() as usize..end.to_native() as usize,
+                _ => 0..0,
+            }
+        }
+        let part_of = |edge: &ArchivedEdge| RelType::from(&edge.rel_type) == RelType::PartOf;
+        let representative = self.edges[span(self.out_offsets.as_slice(), idx)]
+            .iter()
+            .find(|&edge| part_of(edge))
+            .map_or(idx, |edge| edge.target.to_native());
+        let mut others: Vec<u32> = self.in_edge_idx
+            [span(self.in_offsets.as_slice(), representative)]
+        .iter()
+        .map(|edge_idx| &self.edges[edge_idx.to_native() as usize])
+        .filter(|&edge| part_of(edge))
+        .map(|edge| edge.source.to_native())
+        .collect();
+        if others.is_empty() {
+            return Vec::new();
+        }
+        others.sort_unstable();
+        others.dedup();
+        std::iter::once(representative).chain(others).collect()
+    }
+
     /// `(bases, first_unresolved)` of the type node `type_idx`: the bases in
     /// declared order as node indices, and the number of resolved bases
     /// declared before the first unresolved one (`Some(0)` when the first
@@ -1910,6 +1961,15 @@ mod tests {
         let archived = rkyv::access::<ArchivedRelType, Error>(&bytes).expect("access");
         let back: RelType = RelType::from(archived);
         assert_eq!(back, RelType::QueriesTable);
+    }
+
+    #[test]
+    fn test_part_of_reltype_roundtrips_last_discriminant() {
+        use rkyv::rancor::Error;
+        let bytes = rkyv::to_bytes::<Error>(&RelType::PartOf).expect("serialize");
+        let archived = rkyv::access::<ArchivedRelType, Error>(&bytes).expect("access");
+        assert_eq!(RelType::from(archived), RelType::PartOf);
+        assert_eq!(RelType::PartOf as usize, RelType::VARIANT_COUNT - 1);
     }
 
     #[test]

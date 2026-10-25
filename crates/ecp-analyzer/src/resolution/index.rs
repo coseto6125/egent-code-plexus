@@ -262,12 +262,13 @@ pub struct SymbolTable {
     /// and delegates have none. Sparse: empty outside C#.
     declaring_scopes: FxHashMap<u32, (u32, u32, u32, u32)>,
 
-    /// Part → the first part (lowest id) of its C# `partial` type, for
-    /// every part of a type declared in two parts or more (see
+    /// Part → the representative part of its C# `partial` type, for every
+    /// part of a type declared in two parts or more (see
     /// [`SymbolTable::note_partial_type`]). Sparse: most ids have none.
     partial_first: FxHashMap<u32, u32>,
 
-    /// First part → every part of its type, ascending.
+    /// Representative part → every part of its type, the representative
+    /// first.
     partial_parts: FxHashMap<u32, Box<[u32]>>,
 
     /// Declared supertypes per type id. Filled once by the builder's
@@ -1087,9 +1088,9 @@ impl SymbolTable {
         ecp_core::analyzer::lexical::twin_enclosing(candidates, reader).unwrap_or(id)
     }
 
-    /// Record the nodes `parts`, ascending, as the parts of one C#
-    /// `partial` type (`c_sharp::partial::partial_groups`). Call it after
-    /// Pass 1 and before the supertypes pre-pass, which reads it.
+    /// Record the nodes `parts`, the representative first, as the parts of
+    /// one C# `partial` type (`c_sharp::partial::partial_groups`). Call it
+    /// after Pass 1 and before the supertypes pre-pass, which reads it.
     pub fn note_partial_type(&mut self, parts: Vec<u32>) {
         let Some(&first) = parts.first() else {
             return;
@@ -1100,19 +1101,32 @@ impl SymbolTable {
         self.partial_parts.insert(first, parts.into_boxed_slice());
     }
 
-    /// The node that stands for `id`'s type: the first part of a C#
-    /// `partial` type, else `id` itself. A base that names the type binds
+    /// The node that stands for `id`'s type: the representative part of a
+    /// C# `partial` type, else `id` itself. A base that names the type binds
     /// this node, and the type's declared bases and methods are keyed by it.
     pub fn partial_type(&self, id: u32) -> u32 {
         self.partial_first.get(&id).copied().unwrap_or(id)
     }
 
-    /// Every part of `id`'s C# `partial` type, ascending, `id` included;
-    /// empty when `id` is no part of a type declared in two parts or more.
+    /// Every part of `id`'s C# `partial` type, the representative first,
+    /// `id` included; empty when `id` is no part of a type declared in two
+    /// parts or more.
     pub fn partial_parts(&self, id: u32) -> &[u32] {
         self.partial_parts
             .get(&self.partial_type(id))
             .map_or(&[][..], |parts| &parts[..])
+    }
+
+    /// Every C# `partial` type of two parts or more: its parts, the
+    /// representative first, ordered by the representative.
+    pub fn partial_types(&self) -> impl Iterator<Item = &[u32]> {
+        let mut types: Vec<&[u32]> = self
+            .partial_parts
+            .values()
+            .map(|parts| &parts[..])
+            .collect();
+        types.sort_unstable_by_key(|parts| parts[0]);
+        types.into_iter()
     }
 
     /// The one C# `partial` type of generic arity `arity` that the bare
@@ -1782,7 +1796,7 @@ impl SymbolTable {
     /// its first position.
     ///
     /// The parts of a C# `partial` type ([`Self::note_partial_type`]) are
-    /// one type: the rows of every part accumulate under the first part, in
+    /// one type: the rows of every part accumulate under the representative, in
     /// row order, and each part then reads the whole list.
     pub fn build_declared_bases(&mut self, declared: Vec<(u32, DeclaredBase)>) {
         let mut pairs: Vec<(u32, Option<u32>)> = Vec::with_capacity(declared.len());
@@ -2062,8 +2076,12 @@ impl TypeFacts for SymbolTable {
         SymbolTable::return_type_of(self, callee)
     }
 
-    fn partial_parts(&self, ty: u32) -> &[u32] {
-        SymbolTable::partial_parts(self, ty)
+    fn partial_parts(&self, ty: u32) -> Cow<'_, [u32]> {
+        Cow::Borrowed(SymbolTable::partial_parts(self, ty))
+    }
+
+    fn partial_type(&self, ty: u32) -> u32 {
+        SymbolTable::partial_type(self, ty)
     }
 }
 

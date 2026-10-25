@@ -305,7 +305,7 @@ struct ReltypesReport {
     reltypes: Vec<RelTypeView>,
 }
 
-/// 22 RelType variants. Order matches the `#[repr(u8)]` discriminant in
+/// 24 RelType variants. Order matches the `#[repr(u8)]` discriminant in
 /// `ecp_core::graph::RelType` — kept aligned so the JSON output's index
 /// matches the rkyv ordinal.
 const RELTYPES: &[RelTypeEntry] = &[
@@ -329,8 +329,10 @@ const RELTYPES: &[RelTypeEntry] = &[
     RelTypeEntry { rel: RelType::Overrides, name: "Overrides", utility: "A", note: "Method → nearest applicable declaration of its name along its type's declared bases; an overload or a static is skipped (override marker with a matching signature: Exact; name match: Heuristic). Gaps and undecided signatures are override-* BlindSpots. Distinct from class-level Extends." },
     RelTypeEntry { rel: RelType::Decorates, name: "Decorates", utility: "A", note: "Decorator/attribute → decorated symbol (Python @decorator, Java/Kotlin @annotation, C# attribute, Rust attribute macro). 10-language emission." },
     RelTypeEntry { rel: RelType::UsesPathLiteral, name: "UsesPathLiteral", utility: "A", note: "Function/Method/Const → PathLiteral; File for a module-top or class-field site. Drives `ecp impact --literal <value>` to find every read/write site touching a filesystem path or config key. 14-language emission." },
+    RelTypeEntry { rel: RelType::ReadsField, name: "ReadsField", utility: "A", note: "Function/Method → field (Property) it reads, reason field_read; or a module-level Const/Variable it names bare, reason value_read. ecp impact <field> lists every reader." },
     RelTypeEntry { rel: RelType::CompensatedBy, name: "CompensatedBy", utility: "C", note: "Heuristic Saga compensation: compensator → operation it rolls back. reason encodes evidence (saga:calls-back 0.8 / saga:name-only 0.6). Shown by default in heuristic_callers; --no-heuristic suppresses." },
     RelTypeEntry { rel: RelType::QueriesTable, name: "QueriesTable", utility: "A", note: "Function/Method/Const → database table (Class node) via raw SQL string literal; File for a module-top site. reason encodes 'read' (SELECT) or 'write' (INSERT/UPDATE/DELETE). ecp impact <table> --upstream surfaces every raw-SQL caller for schema-migration blast radius." },
+    RelTypeEntry { rel: RelType::PartOf, name: "PartOf", utility: "A", note: "C# partial type: each other part → the representative part. Extends/Implements end at the representative. ecp inspect lists the members of all parts; ecp impact from any part walks the same type." },
 ];
 
 fn reltype_views() -> Vec<RelTypeView> {
@@ -569,17 +571,21 @@ mod tests {
 
     #[test]
     fn reltypes_inventory_count_matches_repr_u8_enum() {
-        // RelType currently has 22 variants (post-merge: `Decorates` from
-        // #365 + `UsesPathLiteral` from #367 + `CompensatedBy` from FU-008 +
-        // `QueriesTable` for code→table SQL edges).
-        // If a new variant lands, bump this number AND append the entry to
-        // RELTYPES. RelType has no VARIANT_COUNT constant like NodeKind does —
-        // manual sync.
+        // RelType currently has 24 variants (post-merge: `Decorates` from
+        // #365 + `UsesPathLiteral` from #367 + `ReadsField` + `CompensatedBy`
+        // from FU-008 + `QueriesTable` for code→table SQL edges + `PartOf`
+        // for C# partial type parts).
+        // If a new variant lands, append the entry to RELTYPES. Each entry
+        // sits at its variant's discriminant, so the JSON index is the rkyv
+        // ordinal (`ReadsField` was missing and shifted the last two).
         assert_eq!(
             RELTYPES.len(),
-            22,
+            RelType::VARIANT_COUNT,
             "reltypes inventory drifted from RelType enum"
         );
+        for (i, r) in RELTYPES.iter().enumerate() {
+            assert_eq!(r.rel as usize, i, "RELTYPES `{}` out of order", r.name);
+        }
     }
 
     #[test]

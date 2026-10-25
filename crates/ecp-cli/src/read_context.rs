@@ -268,8 +268,49 @@ fn facts<'a>(
 }
 
 /// The one name-to-node lookup of a graph command.
+///
+/// When every candidate is a part of one C# `partial` type, the answer is
+/// the representative part ([`MergedGraph::partial_parts`]): the parts are
+/// one type, so `--kind class` selects it.
 pub fn resolve_target(merged: &MergedGraph<'_>, request: &TargetRequest) -> TargetResolution {
-    identity::resolve_target(request, &named_declarations(merged, request.name()))
+    one_type_of_parts(
+        merged,
+        identity::resolve_target(request, &named_declarations(merged, request.name())),
+    )
+}
+
+/// `resolution`, with an ambiguity whose candidates are all the parts of
+/// one C# `partial` type read as that type's representative part.
+pub fn one_type_of_parts(
+    merged: &MergedGraph<'_>,
+    resolution: TargetResolution,
+) -> TargetResolution {
+    match resolution {
+        TargetResolution::Ambiguous(ambiguity) => match one_partial_type(merged, &ambiguity) {
+            Some(representative) => TargetResolution::Unique(representative),
+            None => TargetResolution::Ambiguous(ambiguity),
+        },
+        resolved => resolved,
+    }
+}
+
+/// The representative of the one C# `partial` type whose parts are all of
+/// `ambiguity`'s candidates; `None` when a candidate is no part of it, or
+/// when the representative is no candidate.
+fn one_partial_type(merged: &MergedGraph<'_>, ambiguity: &Ambiguity) -> Option<Candidate> {
+    let candidates = ambiguity.candidates();
+    let parts = merged.partial_parts(candidates.first()?.node);
+    let &representative = parts.first()?;
+    candidates
+        .iter()
+        .all(|c| parts.contains(&c.node))
+        .then(|| {
+            candidates
+                .iter()
+                .find(|c| c.node == representative)
+                .cloned()
+        })
+        .flatten()
 }
 
 /// The candidates of an ambiguity as a payload reads them. `target` is the
@@ -349,4 +390,72 @@ fn load(path: &Path, warm_attach: bool) -> Result<Engine, ReadContextError> {
         warm_attach,
         error,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ecp_core::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
+    use ecp_core::graph_fixture::GraphFixture;
+
+    /// nodes: 0 Reader (Reader.cs, the representative) · 1 Reader
+    /// (Reader.Async.cs) · 2 Reader constructor (Reader.cs) · 3 Writer
+    /// (Writer.cs) · 4 Writer (Writer.Async.cs), two types with no part
+    /// relation. edges: 1 →PartOf→ 0.
+    fn graph_bytes() -> Vec<u8> {
+        let mut fx = GraphFixture::new();
+        let main = fx.node(NodeKind::Class, "Lib/Reader.cs", "Reader");
+        let async_part = fx.node(NodeKind::Class, "Lib/Reader.Async.cs", "Reader");
+        fx.node_owned(NodeKind::Constructor, "Lib/Reader.cs", "Reader", "Reader");
+        fx.node(NodeKind::Class, "Lib/Writer.cs", "Writer");
+        fx.node(NodeKind::Class, "Lib/Writer.Async.cs", "Writer");
+        fx.edge(async_part, main, RelType::PartOf);
+        fx.into_bytes()
+    }
+
+    fn resolve(
+        merged: &MergedGraph<'_>,
+        name: &str,
+        kind: Option<&str>,
+        file: Option<&str>,
+    ) -> TargetResolution {
+        resolve_target(merged, &target_request(name, kind, file).unwrap())
+    }
+
+    /// Stands for: the parts of one C# partial type are one target. `--kind
+    /// class` selects the representative; `--file` still selects one part;
+    /// a constructor beside the parts keeps the bare name ambiguous; two
+    /// same-named types with no part relation stay ambiguous. Before the fix
+    /// `--kind class` listed both parts as an ambiguity.
+    #[test]
+    fn test_resolve_target_partial_parts_resolve_to_representative() {
+        let bytes = graph_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        let merged = MergedGraph::new(graph, None);
+        let node = |resolution: TargetResolution| match resolution {
+            TargetResolution::Unique(c) => Some(c.node),
+            _ => None,
+        };
+        assert_eq!(
+            node(resolve(&merged, "Reader", Some("class"), None)),
+            Some(0)
+        );
+        assert_eq!(
+            node(resolve(
+                &merged,
+                "Reader",
+                Some("class"),
+                Some("Reader.Async.cs")
+            )),
+            Some(1)
+        );
+        assert!(matches!(
+            resolve(&merged, "Reader", None, None),
+            TargetResolution::Ambiguous(a) if a.total() == 3
+        ));
+        assert!(matches!(
+            resolve(&merged, "Writer", Some("class"), None),
+            TargetResolution::Ambiguous(a) if a.total() == 2
+        ));
+    }
 }

@@ -23,7 +23,9 @@ ecp cypher "MATCH (a)-[r]->(b) RETURN a,b" [--repo <PATH>]
 Category labels expand in MATCH and WHERE: `:Callable` (Function|Method|Constructor), `:Type` (Class|Interface|Struct|Enum|Typedef|Trait), `:Data` (Property|Variable|Const|EnumVariant|SchemaField). Prefer `:Callable` over bare `:Function` — the latter skips methods.
 
 ## RelTypes
-`Calls`, `Extends`, `Imports`, `Implements`, `HasMethod`, `HasProperty`, `Accesses`, `ReadsField`, `HandlesRoute`, `References`, `Defines`, `Fetches`, `MirrorsField`, `Publishes`, `Subscribes`, `EventTopicMirror`, `OpensTxScope`, `Overrides`, `UsesPathLiteral`.
+`Calls`, `Extends`, `Imports`, `Implements`, `HasMethod`, `HasProperty`, `Accesses`, `ReadsField`, `HandlesRoute`, `References`, `Defines`, `Fetches`, `MirrorsField`, `Publishes`, `Subscribes`, `EventTopicMirror`, `OpensTxScope`, `Overrides`, `UsesPathLiteral`, `PartOf`.
+
+A C# `partial` type has one node per part. Every other part has a `PartOf` edge to the representative part. `Extends` and `Implements` end at the representative. `ecp inspect` on any part lists the members of every part.
 
 ## Common patterns
 

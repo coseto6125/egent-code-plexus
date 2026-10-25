@@ -23,6 +23,9 @@ use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
 use ecp_core::file_category::Language;
 use rustc_hash::FxHashMap;
 
+/// The `reason` of every `PartOf` edge.
+pub const PART_OF_REASON: &str = "csharp_partial_part";
+
 /// The C# projects of the repo, as the index's `.csproj` scan found them.
 /// Empty by default: then every file's project is unknown.
 #[derive(Debug, Clone, Default)]
@@ -85,23 +88,28 @@ impl CsharpProjects {
     }
 }
 
-/// The node ids of every C# `partial` type declared in two parts or more,
-/// each group ascending, the groups ordered by their first part. Two parts
-/// in one file share a node already (a uid twin binds its survivor), so a
-/// group lists each node once.
+/// The node ids of every C# `partial` type declared in two parts or more:
+/// the representative part first ([`Part::rank`]), then the other parts
+/// ascending; the groups ordered by their representative. Two parts in one
+/// file share a node already (a uid twin binds its survivor), so a group
+/// lists each node once.
+///
+/// The representative depends on the parts' declarations only, never on
+/// the file enumeration or the node-id order.
 pub fn partial_groups(
     local_graphs: &[LocalGraph],
     raw_map: &RawIndexMap,
     projects: &CsharpProjects,
 ) -> Vec<Vec<u32>> {
     type Key<'a> = (&'a str, &'a str, &'a str, u32, u8);
-    let mut parts: FxHashMap<Key<'_>, Vec<u32>> = FxHashMap::default();
+    let mut parts: FxHashMap<Key<'_>, Vec<Part>> = FxHashMap::default();
     for (file_idx, lg) in local_graphs.iter().enumerate() {
         let path = lg.file_path.to_string_lossy();
         if Language::from_path(&path) != Language::CSharp {
             continue;
         }
-        let Some(project) = projects.project_of(&path.replace('\\', "/")) else {
+        let path = path.replace('\\', "/");
+        let Some(project) = projects.project_of(&path) else {
             continue;
         };
         for (raw_idx, node) in lg.nodes.iter().enumerate() {
@@ -111,7 +119,14 @@ pub fn partial_groups(
             let Some(slot) = raw_map.node(FileOrd(file_idx as u32), RawIdx(raw_idx as u32)) else {
                 continue;
             };
-            parts
+            let part = Part {
+                slot,
+                has_base_list: !node.heritage.is_empty(),
+                stem_names_type: file_stem(&path) == node.name,
+                path: path.clone(),
+                position: (node.span.0, node.span.1),
+            };
+            let group = parts
                 .entry((
                     project,
                     scope,
@@ -119,20 +134,71 @@ pub fn partial_groups(
                     node.generic_arity(),
                     node.kind as u8,
                 ))
-                .or_default()
-                .push(slot);
+                .or_default();
+            // A same-file twin is the survivor's node: the node declares a
+            // base list when either declaration does, and starts at the first.
+            match group.iter_mut().find(|seen| seen.slot == slot) {
+                Some(seen) => {
+                    seen.has_base_list |= part.has_base_list;
+                    seen.position = seen.position.min(part.position);
+                }
+                None => group.push(part),
+            }
         }
     }
     let mut groups: Vec<Vec<u32>> = parts
         .into_values()
-        .filter_map(|mut ids| {
-            ids.sort_unstable();
-            ids.dedup();
-            (ids.len() >= 2).then_some(ids)
+        .filter(|group| group.len() >= 2)
+        .map(|group| {
+            let representative = group
+                .iter()
+                .min_by(|a, b| a.rank().cmp(&b.rank()))
+                .expect("a group holds two parts")
+                .slot;
+            let mut others: Vec<u32> = group
+                .iter()
+                .map(|part| part.slot)
+                .filter(|&slot| slot != representative)
+                .collect();
+            others.sort_unstable();
+            std::iter::once(representative).chain(others).collect()
         })
         .collect();
     groups.sort_unstable_by_key(|ids| ids[0]);
     groups
+}
+
+/// One part of a `partial` type: its node and what picks the representative.
+struct Part {
+    slot: u32,
+    has_base_list: bool,
+    stem_names_type: bool,
+    /// Repo-relative, `/`-separated.
+    path: String,
+    /// The 0-based start row and column of the declaration.
+    position: (u32, u32),
+}
+
+impl Part {
+    /// The representative is the part of lowest rank: the part that
+    /// declares a base list, else the part whose file stem is the type
+    /// name, else the first normalized path; within one path, the first
+    /// declaration. Each tier breaks its ties by the tiers after it.
+    fn rank(&self) -> (bool, bool, &str, (u32, u32)) {
+        (
+            !self.has_base_list,
+            !self.stem_names_type,
+            &self.path,
+            self.position,
+        )
+    }
+}
+
+/// The file name of `path` without its last extension:
+/// `Src/JsonReader.Async.cs` → `JsonReader.Async`.
+fn file_stem(path: &str) -> &str {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    name.rsplit_once('.').map_or(name, |(stem, _)| stem)
 }
 
 /// The declaring scope of a `partial` type node; `None` for any other node.
@@ -189,6 +255,37 @@ mod tests {
         let projects = projects(&[("src", true), ("src/Old", false)], 4);
         assert_eq!(projects.project_of("src/Old/A.cs"), None);
         assert_eq!(projects.project_of("src/New/A.cs"), Some("src"));
+    }
+
+    #[test]
+    fn test_file_stem_drops_last_extension_only() {
+        assert_eq!(file_stem("Src/JsonReader.Async.cs"), "JsonReader.Async");
+        assert_eq!(file_stem("JsonReader.cs"), "JsonReader");
+        assert_eq!(file_stem("Src/NoExtension"), "NoExtension");
+        assert_eq!(file_stem(""), "");
+    }
+
+    fn part(slot: u32, has_base_list: bool, stem_names_type: bool, path: &str) -> Part {
+        Part {
+            slot,
+            has_base_list,
+            stem_names_type,
+            path: path.to_string(),
+            position: (0, 0),
+        }
+    }
+
+    /// The lowest rank is the representative: a base list beats a stem
+    /// match, a stem match beats an earlier path, and the slot never counts.
+    #[test]
+    fn test_rank_tiers_order_base_list_then_stem_then_path() {
+        let base = part(9, true, false, "z/Reader.io.cs");
+        let stem = part(1, false, true, "z/Reader.cs");
+        let early = part(0, false, false, "a/Reader.Async.cs");
+        assert!(base.rank() < stem.rank());
+        assert!(stem.rank() < early.rank());
+        let late = part(0, false, false, "b/Reader.More.cs");
+        assert!(early.rank() < late.rank(), "the path decides, not the slot");
     }
 
     #[test]
