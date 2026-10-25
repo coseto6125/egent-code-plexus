@@ -1,6 +1,8 @@
 # owner: lane R (area 1 shared resolution ladder)
 edge full-only x1 Imports File src/main.ts:1 main.ts #495254aad69cfab1 -> Function src/b.ts:1 dup #b7c35a9ff476a14a conf=0.95
+edge full-only x1 UsesPathLiteral File src/main.ts:1 main.ts #495254aad69cfab1 -> PathLiteral src/main.ts:1 ./b #de21fa9fb4641aa6 conf=1.0
 edge overlay-only x1 Imports File src/main.ts:1 main.ts #495254aad69cfab1 -> Function src/a.ts:1 dup #e269460324445d9f conf=0.95
+edge overlay-only x1 UsesPathLiteral File src/main.ts:1 main.ts #495254aad69cfab1 -> PathLiteral src/main.ts:1 ./a #373097126f447969 conf=1.0
 identity full-only x1 PathLiteral src/main.ts:1 ./b #de21fa9fb4641aa6
 identity overlay-only x1 PathLiteral src/main.ts:1 ./a #373097126f447969
 parent full-only x1 PathLiteral src/main.ts:1 ./b #de21fa9fb4641aa6 owner=- <- none
