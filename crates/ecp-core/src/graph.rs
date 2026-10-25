@@ -33,7 +33,9 @@ pub const GRAPH_MAGIC: [u8; 8] = *b"ECP-RS\0\0";
 ///     the position of the first unresolved one), so the overlay resolves an
 ///     aliased specifier and walks heritage like a full reindex.
 /// v15: `route_middleware` (each Route's middleware, outermost group first).
-pub const GRAPH_FORMAT_VERSION: u32 = 15;
+/// v16: `workspace` (the C2 Cargo crate table: each member's root, entry
+///     files and crate names), so the overlay resolves `other_crate::f()`.
+pub const GRAPH_FORMAT_VERSION: u32 = 16;
 
 impl std::str::FromStr for NodeKind {
     type Err = ();
