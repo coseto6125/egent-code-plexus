@@ -1774,28 +1774,28 @@ fn pass1_5_extract_routes(
                 continue;
             };
 
-            for dec in &raw_node.decorators {
-                for detected in crate::route_detector::detect_all_from_decorator(dec) {
-                    let Ok(key) = RouteKey::new(&path_str, &detected.method, &detected.path) else {
-                        continue;
-                    };
-                    let (route_idx, new) = route_node(
-                        &key,
+            for detected in
+                crate::route_detector::node_decorator_routes(raw_node, &local_graph.nodes)
+            {
+                let Ok(key) = RouteKey::new(&path_str, &detected.method, &detected.path) else {
+                    continue;
+                };
+                let (route_idx, new) = route_node(
+                    &key,
+                    file_idx,
+                    raw_node.span,
+                    &mut of_key,
+                    string_pool,
+                    nodes,
+                );
+                facts.push((route_idx, HandlerFact::Bound(handler_idx, "decorator")));
+                if new {
+                    emitted_routes.push((
+                        route_idx,
                         file_idx,
-                        raw_node.span,
-                        &mut of_key,
-                        string_pool,
-                        nodes,
-                    );
-                    facts.push((route_idx, HandlerFact::Bound(handler_idx, "decorator")));
-                    if new {
-                        emitted_routes.push((
-                            route_idx,
-                            file_idx,
-                            key.verb().to_string(),
-                            key.path().to_string(),
-                        ));
-                    }
+                        key.verb().to_string(),
+                        key.path().to_string(),
+                    ));
                 }
             }
         }
@@ -2427,17 +2427,20 @@ fn pass1_7_entry_points(
         let file_idx = file_idx as u32;
         let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
         // Pass 1.5 emits no Route node for a Test or Reference file, so
-        // its routes mark no entry point either.
-        let routes: &[RawRoute] = match files[file_idx as usize].category {
-            FileCategory::Test | FileCategory::Reference => &[],
-            _ => &local_graph.routes,
-        };
+        // its routes, recorded or decorator-declared, mark no entry point.
+        let routes_count = !matches!(
+            files[file_idx as usize].category,
+            FileCategory::Test | FileCategory::Reference
+        );
         let entries = crate::entry_points::score_entry_points(
-            routes,
+            &local_graph.routes,
             &local_graph.framework_refs,
             &local_graph.nodes,
         );
-        for ep in entries {
+        for ep in entries
+            .into_iter()
+            .filter(|ep| routes_count || ep.kind != crate::entry_points::EntryKind::HttpRoute)
+        {
             let handler_idx = match outermost_named_slot(
                 &local_graph.nodes,
                 &ep.uid,
@@ -2644,6 +2647,7 @@ fn pass1_8_function_metas(
                             .collect();
                         symbol_table.note_csharp_extension(
                             node_idx,
+                            &local_graph.file_path.to_string_lossy().replace('\\', "/"),
                             &raw_node.name,
                             this_type,
                             rfm.flags,

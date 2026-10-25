@@ -140,16 +140,14 @@ pub fn score_entry_points(
     // (mirroring builder Pass 1.5's loop, but only to extract the
     // handler name) so the scorer doesn't miss decorator-style routes.
     for node in nodes {
-        for dec in &node.decorators {
-            if let Some(detected) = crate::route_detector::detect_from_decorator(dec) {
-                let reason = format!("route:{} {}", detected.method, detected.path);
-                acc.push(EntryPoint {
-                    uid: node.name.clone(),
-                    kind: EntryKind::HttpRoute,
-                    score: 1.0,
-                    reason,
-                });
-            }
+        for detected in crate::route_detector::node_decorator_routes(node, nodes) {
+            let reason = format!("route:{} {}", detected.method, detected.path);
+            acc.push(EntryPoint {
+                uid: node.name.clone(),
+                kind: EntryKind::HttpRoute,
+                score: 1.0,
+                reason,
+            });
         }
     }
 

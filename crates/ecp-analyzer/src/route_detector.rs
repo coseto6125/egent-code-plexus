@@ -1,6 +1,7 @@
-use crate::framework_helpers::strip_python_string_quotes;
-use ecp_core::analyzer::types::RawRoute;
+use crate::framework_helpers::{span_area, span_contains, strip_python_string_quotes};
+use ecp_core::analyzer::types::{RawNode, RawRoute};
 use ecp_core::contracts::raw_records::{RawEndpoint, Unbound};
+use ecp_core::graph::NodeKind;
 
 const HTTP_METHODS: &[&str] = &[
     "get", "post", "put", "delete", "patch", "options", "head", "connect", "trace",
@@ -173,14 +174,10 @@ fn verbs_in_method_value(value: &str) -> Vec<&'static str> {
     verbs
 }
 
-/// The HTTP verbs a decorator names, in source order. A verb-named decorator
-/// (`@GetMapping`, `[HttpPost]`, `@router.delete`) reads it from the name token
-/// only: the path and keyword arguments may contain verb substrings
-/// (`@PostMapping("/get-token")`). A generic route decorator (`@RequestMapping`,
-/// Flask `@app.route`, Symfony `#[Route]`) reads it from its `method` /
-/// `methods` argument, outside string literals; without one it names no verb,
-/// so a class-level `@RequestMapping("/api")` yields none.
-fn decorator_verbs(decorator: &str) -> Vec<&'static str> {
+/// A decorator's name, lowercased, without its qualifier (`GetMapping` in
+/// `@org.springframework.GetMapping("/x")`), and the decorator text after its
+/// sigil.
+fn decorator_name(decorator: &str) -> (String, &str) {
     let trimmed = decorator
         .trim()
         .trim_start_matches(['#', '@', '['])
@@ -193,6 +190,60 @@ fn decorator_verbs(decorator: &str) -> Vec<&'static str> {
         .next()
         .unwrap_or("")
         .to_lowercase();
+    (name, trimmed)
+}
+
+/// The routes the decorators of `node` declare; `nodes` is its file. A
+/// Spring mapping (`@GetMapping`, `@RequestMapping`) on a method routes only
+/// when its class carries `@Controller` or `@RestController`: a mapping on
+/// a plain class or a Feign client interface serves no request. Pass 1.5 and
+/// the entry-point scorer both read this.
+pub fn node_decorator_routes(node: &RawNode, nodes: &[RawNode]) -> Vec<DetectedRoute> {
+    let mut spring_served = None;
+    node.decorators
+        .iter()
+        .filter(|decorator| {
+            !decorator_name(decorator).0.ends_with("mapping")
+                || *spring_served.get_or_insert_with(|| in_spring_controller(node, nodes))
+        })
+        .flat_map(|decorator| detect_all_from_decorator(decorator))
+        .collect()
+}
+
+/// Whether the innermost class around `node` named like its owner carries
+/// `@Controller` or `@RestController`. A node with no owner, or whose class
+/// is not in `nodes`, counts as served: nothing proves otherwise.
+fn in_spring_controller(node: &RawNode, nodes: &[RawNode]) -> bool {
+    let Some(owner) = node.owner_class.as_deref() else {
+        return true;
+    };
+    let class = nodes
+        .iter()
+        .filter(|n| {
+            matches!(n.kind, NodeKind::Class | NodeKind::Interface)
+                && n.name == owner
+                && span_contains(n.span, node.span)
+        })
+        .min_by_key(|n| span_area(n.span));
+    class.is_none_or(|class| {
+        class.decorators.iter().any(|d| {
+            matches!(
+                decorator_name(d).0.as_str(),
+                "controller" | "restcontroller"
+            )
+        })
+    })
+}
+
+/// The HTTP verbs a decorator names, in source order. A verb-named decorator
+/// (`@GetMapping`, `[HttpPost]`, `@router.delete`) reads it from the name token
+/// only: the path and keyword arguments may contain verb substrings
+/// (`@PostMapping("/get-token")`). A generic route decorator (`@RequestMapping`,
+/// Flask `@app.route`, Symfony `#[Route]`) reads it from its `method` /
+/// `methods` argument, outside string literals; without one it names no verb,
+/// so a class-level `@RequestMapping("/api")` yields none.
+fn decorator_verbs(decorator: &str) -> Vec<&'static str> {
+    let (name, trimmed) = decorator_name(decorator);
     if matches!(name.as_str(), "requestmapping" | "route" | "api_route") {
         return method_argument(trimmed)
             .map(verbs_in_method_value)

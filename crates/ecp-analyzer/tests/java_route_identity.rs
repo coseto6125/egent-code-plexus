@@ -139,3 +139,35 @@ fn test_route_java_spring_one_node_per_route_binds_annotated_method() {
     assert_eq!(create[0].0, "create");
     assert_eq!(handler_spot_kinds(&g), Vec::<String>::new());
 }
+
+/// A Spring mapping routes only on a `@Controller` / `@RestController`
+/// class: the plain class and the Feign client interface serve no request
+/// (fixture `crates/ecp-cli/tests/fixtures/spring_controller.java`, class
+/// `NotAController`). On HEAD each mapping became a Route node.
+#[test]
+fn test_route_java_spring_mapping_outside_controller_no_route() {
+    let src = r#"package com.example;
+
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class UserController {
+    @GetMapping("/users")
+    public String list() { return "all"; }
+}
+
+class NotAController {
+    @GetMapping("/x")
+    public String notARoute() { return "x"; }
+}
+
+@FeignClient(name = "users")
+interface UserClient {
+    @GetMapping("/remote")
+    String fetch();
+}
+"#;
+    let g = build("src/main/java/com/example/UserController.java", src);
+    assert_eq!(route_names(&g), vec!["GET /users"]);
+}

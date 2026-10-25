@@ -126,3 +126,31 @@ class UserController {
     );
     assert_eq!(handler_spot_kinds(&g), Vec::<String>::new());
 }
+
+/// A Spring mapping on a class without `@Controller` / `@RestController`
+/// serves no request. On HEAD it became a Route node.
+#[test]
+fn test_route_kotlin_spring_mapping_outside_controller_no_route() {
+    let src = r#"package demo
+
+import org.springframework.web.bind.annotation.GetMapping
+import org.springframework.web.bind.annotation.RestController
+
+@RestController
+class UserController {
+    @GetMapping("/users")
+    fun list(): String {
+        return "all"
+    }
+}
+
+class NotAController {
+    @GetMapping("/x")
+    fun notARoute(): String {
+        return "x"
+    }
+}
+"#;
+    let g = build("src/main/kotlin/demo/UserController.kt", src);
+    assert_eq!(route_names(&g), vec!["GET /users"]);
+}

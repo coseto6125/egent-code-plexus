@@ -520,3 +520,27 @@ fn test_build_route_in_test_file_no_entrypoint() {
         assert_eq!(entries_at(path), 0, "{path}: no entry point");
     }
 }
+
+/// A decorator-declared route of a test file marks no entry point either:
+/// the scorer reads the decorator itself, not a `RawRoute`, so on HEAD a
+/// `@app.get` handler in `tests/` still became a `route@` marker.
+#[test]
+fn test_build_decorator_route_in_test_file_no_entrypoint() {
+    let entries_at = |path: &str| {
+        let mut builder = GraphBuilder::new();
+        builder.add_graph(mk_local_graph(
+            path,
+            vec![mk_raw_node(
+                "read_items",
+                NodeKind::Function,
+                vec!["@app.get(\"/items\")".into()],
+            )],
+            vec![],
+            vec![],
+        ));
+        entry_point_node_indices(&builder.build()).len()
+    };
+    assert_eq!(entries_at("app/main.py"), 1, "control: production route");
+    assert_eq!(entries_at("tests/test_main.py"), 0);
+    assert_eq!(entries_at("integration/hello-world/e2e/users.spec.ts"), 0);
+}
