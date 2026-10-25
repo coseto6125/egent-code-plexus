@@ -118,7 +118,9 @@ use crate::analyzer::import_binding::{
     extension_retry, fqn_imported_name, fqn_language, fqn_type_path, import_binding,
     import_member_fallback, owner_path_agrees, retry_name, DeclaredType, MemberOwner,
 };
-use crate::analyzer::lexical::{file_identities, lexical_scope_kinds, LexicalFunctions};
+use crate::analyzer::lexical::{
+    file_identities, lexical_scope_kinds, splits_by_arity, LexicalFunctions,
+};
 use crate::analyzer::outcome::{NoEdge, Resolution, Tier};
 use crate::analyzer::path_aliases::PathAliases;
 use crate::analyzer::reexport::{
@@ -179,6 +181,11 @@ pub struct OverlaySymbol {
     /// as written; `None` when it declares none or the input does not carry
     /// it (a pre-V5 fragment). Types the receiver of a chained call on it.
     pub return_type: Option<String>,
+    /// [`RawNode::generic_arity`](crate::analyzer::types::RawNode::generic_arity):
+    /// the declared generic arity of a C# type, 0 for every other node. The
+    /// identity numbering reads it ([`file_identities`]), so a dirty C#
+    /// `Conv<T>` beside `Conv` takes the full build's uid.
+    pub generic_arity: u32,
 }
 
 impl HeritageNode for OverlaySymbol {
@@ -233,6 +240,7 @@ impl From<LocalGraph> for OverlayFileInput {
                     )
                     .then(|| return_types.get(&n.span).cloned())
                     .flatten(),
+                    generic_arity: n.generic_arity(),
                     name: n.name,
                     kind: n.kind,
                     owner_class: n.owner_class,
@@ -266,8 +274,10 @@ pub struct ViewNode {
     /// traversal reads the base CSR IN-edges of `base_idx` (clean callers)
     /// in addition to [`OverlayView::overlay_in`].
     pub replaced_base: Option<u32>,
-    /// A later overload ([`crate::uid::keeps_overloads`]): the index keeps
-    /// it as a node under its own uid but never binds it by name.
+    /// A later overload ([`crate::uid::keeps_overloads`]), or a later C#
+    /// type of another generic arity
+    /// ([`crate::analyzer::lexical::splits_by_arity`]): the index keeps it as
+    /// a node under its own uid but never binds it by name.
     pub later_overload: bool,
 }
 
@@ -446,6 +456,7 @@ impl OverlayView {
                     sym.owner_class.as_deref(),
                     sym.name.as_str(),
                     HeritageNode::span(sym),
+                    sym.generic_arity,
                 )
             });
             let (pairs, unpaired) = pair_with_base(
@@ -458,9 +469,14 @@ impl OverlayView {
                 &identities,
             );
             unpaired_base.extend(unpaired);
+            let language = Language::from_path(&file.rel_path);
             for ((sym, identity), replaced_base) in file.symbols.iter().zip(identities).zip(pairs) {
                 let virt = base_len + nodes.len() as u32;
                 let later_overload = match identity.slot {
+                    // A C# type of another generic arity: like an overload,
+                    // the index binds it by id only, never by name, but it
+                    // joins no overload set (`register_arity_sibling`).
+                    UidSlot::Later { .. } if splits_by_arity(language, sym.kind) => true,
                     UidSlot::Later { first, .. } => {
                         later_overloads
                             .entry(file_start + first)
@@ -1545,6 +1561,8 @@ fn pair_with_base(
         return (out, Vec::new());
     }
     let pool = &graph.string_pool;
+    // The stored graph keeps no generic arity. Only the anchors are read
+    // here, and the arity enters no anchor, so 0 changes none of them.
     let base_anchors: Vec<u64> = file_identities(path, base, |&i| {
         let node = &graph.nodes[i as usize];
         (
@@ -1557,6 +1575,7 @@ fn pair_with_base(
                 node.span.2.to_native(),
                 node.span.3.to_native(),
             ),
+            0,
         )
     })
     .into_iter()
@@ -5683,6 +5702,7 @@ mod tests {
             heritage: Vec::new(),
             variant_refs: Vec::new(),
             return_type: None,
+            generic_arity: 0,
         }
     }
 
@@ -6284,6 +6304,7 @@ mod tests {
             heritage: Vec::new(),
             variant_refs: Vec::new(),
             return_type: None,
+            generic_arity: 0,
         };
         let multi = OverlayFileInput {
             export_aliases: Vec::new(),
@@ -6380,6 +6401,7 @@ mod tests {
             heritage: Vec::new(),
             variant_refs: Vec::new(),
             return_type: None,
+            generic_arity: 0,
         };
         let outer = OverlayFileInput {
             export_aliases: Vec::new(),

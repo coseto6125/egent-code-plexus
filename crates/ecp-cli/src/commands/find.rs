@@ -2169,6 +2169,7 @@ mod tests {
                     heritage: Vec::new(),
                     variant_refs: Vec::new(),
                     return_type: None,
+                    generic_arity: 0,
                 }],
                 imports: vec![],
             };

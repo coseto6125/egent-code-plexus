@@ -445,6 +445,34 @@ pub struct RawNode {
     pub content_hash: u64,
 }
 
+/// The [`RawNode::decorators`] entry prefix that records a type's declared
+/// generic arity (`Conv<T>` is 1). Only the C# parser writes it, and only
+/// for an arity above 0. It rides in `decorators`, beside the
+/// `__override__` marker, so the parse cache and every `RawNode` builder
+/// keep their shape; `post_process::decorates_edges` skips it.
+const GENERIC_ARITY_MARKER: &str = "__generic_arity__:";
+
+impl RawNode {
+    /// The [`RawNode::decorators`] entry for a declared generic arity.
+    pub fn generic_arity_marker(arity: u32) -> String {
+        format!("{GENERIC_ARITY_MARKER}{arity}")
+    }
+
+    /// Whether a decorator entry is a [`RawNode::generic_arity_marker`].
+    pub fn is_generic_arity_marker(decorator: &str) -> bool {
+        decorator.starts_with(GENERIC_ARITY_MARKER)
+    }
+
+    /// The declared generic arity the parser recorded: 0 when the node
+    /// carries no marker.
+    pub fn generic_arity(&self) -> u32 {
+        self.decorators
+            .iter()
+            .find_map(|d| d.strip_prefix(GENERIC_ARITY_MARKER)?.parse().ok())
+            .unwrap_or(0)
+    }
+}
+
 #[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[rkyv(derive(Debug))]
 pub enum BindingKind {

@@ -69,6 +69,22 @@ const CSHARP_FRAMEWORKS: &[FrameworkPatternSpec] = &[
 /// Whether `node`'s subtree contains a C# `invocation_expression`. Gates
 /// emission of `<anonymous>` callback nodes so empty closures (e.g.
 /// `list.Select(x => x.Name)`) stay out of the graph.
+/// The number of type parameters a class, struct, interface or record
+/// declaration lists (`class Conv<T, U>` is 2); 0 for any other node.
+fn generic_arity(decl: tree_sitter::Node<'_>) -> u32 {
+    let mut cursor = decl.walk();
+    let Some(list) = decl
+        .children(&mut cursor)
+        .find(|child| child.kind() == "type_parameter_list")
+    else {
+        return 0;
+    };
+    let mut cursor = list.walk();
+    list.named_children(&mut cursor)
+        .filter(|param| param.kind() == "type_parameter")
+        .count() as u32
+}
+
 fn body_has_call(node: tree_sitter::Node) -> bool {
     subtree_contains_kind(node, "invocation_expression")
 }
@@ -577,8 +593,15 @@ impl LanguageProvider for CSharpProvider {
                             name_str.to_string()
                         };
                         let i = nodes.len();
+                        // `Conv<T>` beside `Conv` is a type of its own; the
+                        // identity numbering reads the arity off this marker.
+                        let arity = if k.is_type() { generic_arity(root) } else { 0 };
+                        let decorators = match arity {
+                            0 => vec![],
+                            arity => vec![RawNode::generic_arity_marker(arity)],
+                        };
                         nodes.push(RawNode {
-                            decorators: vec![],
+                            decorators,
                             is_exported,
                             heritage: Vec::new(),
                             type_annotation: type_annotation.clone(),

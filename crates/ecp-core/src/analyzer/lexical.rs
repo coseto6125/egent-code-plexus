@@ -24,9 +24,10 @@ pub fn lexical_scope_kinds(_language: Language) -> &'static [NodeKind] {
     &[]
 }
 
-/// One declaration as [`file_identities`] reads it: kind, owner, name and
-/// 0-based span.
-pub type DeclFields<'a> = (NodeKind, Option<&'a str>, &'a str, Span);
+/// One declaration as [`file_identities`] reads it: kind, owner, name,
+/// 0-based span and declared generic arity ([`RawNode::generic_arity`]).
+/// The arity counts only where [`splits_by_arity`] holds.
+pub type DeclFields<'a> = (NodeKind, Option<&'a str>, &'a str, Span, u32);
 
 /// The [`DeclFields`] of a parsed node.
 pub fn raw_decl(node: &RawNode) -> DeclFields<'_> {
@@ -35,12 +36,25 @@ pub fn raw_decl(node: &RawNode) -> DeclFields<'_> {
         node.owner_class.as_deref(),
         node.name.as_str(),
         node.span,
+        match node.kind.is_type() {
+            true => node.generic_arity(),
+            false => 0,
+        },
     )
 }
 
+/// Whether two same-named `kind` declarations of one `language` file are
+/// two types when their generic arity differs: C# `Conv` and `Conv<T>`.
+/// Restricted to C# types by codex ruling P-a; every other language keeps
+/// the duplicate rule.
+pub fn splits_by_arity(language: Language, kind: NodeKind) -> bool {
+    language == Language::CSharp && kind.is_type()
+}
+
 /// The identity of each declaration of the file at `path`, in slice order:
-/// [`assign_file`] over the language's lexical parents and, in a Rust file,
-/// each impl member's [`Discriminator::ImplTrait`]. The full build,
+/// [`assign_file`] over the language's lexical parents, in a Rust file each
+/// impl member's [`Discriminator::ImplTrait`], and, where
+/// [`splits_by_arity`] holds, each type's generic arity. The full build,
 /// incremental mode and the overlay view (its dirty parse and its base
 /// nodes) all number a file through this one function, so a later overload
 /// or a same-uid redefinition gets the same uid, and a declaration the same
@@ -62,7 +76,7 @@ pub fn file_identities<'a, T>(
     let decls: Vec<FileDecl<'a>> = rows
         .iter()
         .enumerate()
-        .map(|(i, &Row((kind, owner, name, _)))| FileDecl {
+        .map(|(i, &Row((kind, owner, name, _, arity)))| FileDecl {
             kind,
             owner,
             name,
@@ -71,6 +85,7 @@ pub fn file_identities<'a, T>(
                 .as_ref()
                 .and_then(|t| t[i])
                 .map(Discriminator::ImplTrait),
+            arity: splits_by_arity(language, kind).then_some(arity),
         })
         .collect();
     // `canonical_path` removes every `\`, the one spelling `check_path`
@@ -303,7 +318,7 @@ mod tests {
     }
 
     fn uids(path: &str, decls: &[(NodeKind, Option<&str>, &str)]) -> Vec<u64> {
-        file_uids(path, decls, |d| (d.0, d.1, d.2, (0, 0, 0, 0)))
+        file_uids(path, decls, |d| (d.0, d.1, d.2, (0, 0, 0, 0), 0))
     }
 
     #[test]
@@ -378,10 +393,10 @@ mod tests {
     /// A { fn fmt }` on lines 4-6. A trait `""` is an inherent `impl`.
     fn two_impls(first: &'static str, second: &'static str) -> [DeclFields<'static>; 4] {
         [
-            (NodeKind::Impl, Some(first), "A", (1, 0, 3, 1)),
-            (NodeKind::Method, Some("A"), "fmt", (2, 4, 2, 40)),
-            (NodeKind::Impl, Some(second), "A", (4, 0, 6, 1)),
-            (NodeKind::Method, Some("A"), "fmt", (5, 4, 5, 40)),
+            (NodeKind::Impl, Some(first), "A", (1, 0, 3, 1), 0),
+            (NodeKind::Method, Some("A"), "fmt", (2, 4, 2, 40), 0),
+            (NodeKind::Impl, Some(second), "A", (4, 0, 6, 1), 0),
+            (NodeKind::Method, Some("A"), "fmt", (5, 4, 5, 40), 0),
         ]
     }
 
@@ -447,8 +462,8 @@ mod tests {
     #[test]
     fn test_file_identities_rust_member_outside_impl_span_no_discriminator() {
         let rows = [
-            (NodeKind::Impl, Some("Display"), "A", (1, 0, 3, 1)),
-            (NodeKind::Method, Some("A"), "fmt", (8, 4, 8, 40)),
+            (NodeKind::Impl, Some("Display"), "A", (1, 0, 3, 1), 0),
+            (NodeKind::Method, Some("A"), "fmt", (8, 4, 8, 40), 0),
         ];
         let ids = identities("src/a.rs", &rows);
         assert_eq!(ids[1].anchor, fmt_anchor("src/a.rs", None));
@@ -459,6 +474,63 @@ mod tests {
         let ids = identities("A.swift", &two_impls("Display", "Debug"));
         assert_eq!(ids[1].anchor, ids[3].anchor);
         assert_eq!(ids[1].anchor, ids[1].slot.uid());
+    }
+
+    /// `Conv` of arity `first` on line 1, then `Conv` of arity `second` on
+    /// line 2, both of `kind`.
+    fn two_types(kind: NodeKind, first: u32, second: u32) -> [DeclFields<'static>; 2] {
+        [
+            (kind, None, "Conv", (1, 0, 1, 40), first),
+            (kind, None, "Conv", (2, 0, 2, 40), second),
+        ]
+    }
+
+    /// Stands for: a C# type of another generic arity takes overload uid 1
+    /// in either declaration order and keeps its name, so every path that
+    /// numbers the file through `file_uids` stores it (codex ruling P-a).
+    #[test]
+    fn test_file_uids_csharp_types_of_two_arities_both_orders_later_uid() {
+        let base = uid::compute(NodeKind::Class, "N/Conv.cs", None, "Conv");
+        for (first, second) in [(0, 1), (1, 0)] {
+            let rows = two_types(NodeKind::Class, first, second);
+            assert_eq!(
+                file_uids("N/Conv.cs", &rows, |d| *d),
+                [base, uid::overload(base, 1)],
+                "arity {first} then {second}"
+            );
+        }
+        let rows = two_types(NodeKind::Interface, 1, 2);
+        let iface = uid::compute(NodeKind::Interface, "N/Conv.cs", None, "Conv");
+        assert_eq!(
+            file_uids("N/Conv.cs", &rows, |d| *d),
+            [iface, uid::overload(iface, 1)]
+        );
+    }
+
+    /// Stands for: two C# types of one name and one arity are still a uid
+    /// collision, tombstoned as before.
+    #[test]
+    fn test_file_uids_csharp_types_of_one_arity_tombstone() {
+        let base = uid::compute(NodeKind::Class, "N/Conv.cs", None, "Conv");
+        let rows = two_types(NodeKind::Class, 1, 1);
+        assert_eq!(file_uids("N/Conv.cs", &rows, |d| *d), [base, !base]);
+    }
+
+    /// Stands for: the arity rule is C#'s alone. Two same-named types in a
+    /// Java or C++ file stay a duplicate even when an arity is supplied, and
+    /// a C# method takes no arity.
+    #[test]
+    fn test_file_identities_non_csharp_types_of_two_arities_duplicate() {
+        for path in ["N/Conv.java", "n/conv.hpp", "n/conv.ts"] {
+            let ids = identities(path, &two_types(NodeKind::Class, 0, 1));
+            assert!(
+                matches!(ids[1].slot, UidSlot::Duplicate { first: 0, .. }),
+                "{path}: {:?}",
+                ids[1].slot
+            );
+        }
+        assert!(!splits_by_arity(Language::CSharp, NodeKind::Method));
+        assert!(splits_by_arity(Language::CSharp, NodeKind::Struct));
     }
 
     #[test]

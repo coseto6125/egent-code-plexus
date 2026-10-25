@@ -210,6 +210,7 @@ pub fn decode_view_inputs(accepted: &[AcceptedFragment]) -> Vec<OverlayFileInput
                             .map(|v| v.as_str().to_owned())
                             .collect(),
                         return_type: s.return_type.as_ref().map(|ty| ty.as_str().to_owned()),
+                        generic_arity: s.generic_arity.to_native(),
                     })
                     .collect(),
                 imports,

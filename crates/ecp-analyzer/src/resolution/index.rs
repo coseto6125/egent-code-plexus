@@ -227,6 +227,18 @@ pub struct SymbolTable {
     /// [`SymbolTable::register_overload`]). Sparse: most ids have none.
     overloads: FxHashMap<u32, Vec<u32>>,
 
+    /// First declaration → the later C# types of its uid whose generic arity
+    /// differs (`Conv<T>` after `Conv`), in source order (see
+    /// [`SymbolTable::register_arity_sibling`]). Sparse: most ids have none.
+    arity_siblings: FxHashMap<u32, Vec<u32>>,
+
+    /// The inverse of `arity_siblings`: later type → its first declaration.
+    arity_first: FxHashMap<u32, u32>,
+
+    /// C# type id → its declared generic arity, only where above 0 (see
+    /// [`SymbolTable::note_type_arity`]). Every other id declares none.
+    type_arities: FxHashMap<u32, u32>,
+
     /// Declared supertypes per type id. Filled once by the builder's
     /// supertypes pre-pass, after Pass 1 and before Pass 2. Types with no
     /// declared heritage have no entry.
@@ -855,6 +867,58 @@ impl SymbolTable {
             .map(|first| (first, self.later_overloads(first)))
     }
 
+    /// Record the declared generic arity of the C# type `node_id`. An arity of
+    /// 0 records nothing: it is every id's default.
+    pub fn note_type_arity(&mut self, node_id: u32, arity: u32) {
+        if arity > 0 {
+            self.type_arities.insert(node_id, arity);
+        }
+    }
+
+    fn type_arity(&self, node_id: u32) -> u32 {
+        self.type_arities.get(&node_id).copied().unwrap_or(0)
+    }
+
+    /// Register the next id as a later C# type of `first`'s uid whose generic
+    /// arity differs (`Conv<T>` after `Conv`,
+    /// `ecp_core::analyzer::lexical::splits_by_arity`): a declaration of its
+    /// own in `file_path`, with `first`'s kind and owner, but in no name
+    /// table and no overload set. A name lookup still returns `first`, as
+    /// before the split, and [`Self::with_arity`] reaches the later type
+    /// from it. Returns the id.
+    pub fn register_arity_sibling(
+        &mut self,
+        first: u32,
+        file_path: &str,
+        file_meta: FileMeta,
+        arity: u32,
+    ) -> u32 {
+        let id = self.node_kinds.len() as u32;
+        self.node_kinds.push(self.node_kinds[first as usize]);
+        self.node_file_meta.push(file_meta);
+        self.node_owner.push(self.node_owner[first as usize]);
+        self.id_to_file.insert(id, file_path.to_string());
+        self.arity_siblings.entry(first).or_default().push(id);
+        self.arity_first.insert(id, first);
+        self.note_type_arity(id, arity);
+        id
+    }
+
+    /// The type a spelling with `arity` type arguments names, from the id a
+    /// name lookup of its bare name returned. When `id` is the first of
+    /// same-named C# types of different arity, the one of `arity`, or
+    /// `None` when none has it. Otherwise `id` itself when the spelling has
+    /// no type arguments (the rule before arities) or `id` declares
+    /// `arity`, and `None` when it declares another.
+    pub fn with_arity(&self, id: u32, arity: u32) -> Option<u32> {
+        match self.arity_siblings.get(&id) {
+            Some(siblings) => std::iter::once(id)
+                .chain(siblings.iter().copied())
+                .find(|&member| self.type_arity(member) == arity),
+            None => (arity == 0 || self.type_arity(id) == arity).then_some(id),
+        }
+    }
+
     /// The first declaration in `file_path` named `node_name` with `kind` and
     /// `owner`: the id its later overloads hang off.
     pub fn first_declaration(
@@ -1441,10 +1505,14 @@ impl SymbolTable {
         self.file_scoped.contains_key(file_path)
     }
 
-    /// The name `node_id` is registered under in its file. The index keeps no
+    /// The name `node_id` is registered under in its file, or, for a type
+    /// [`Self::register_arity_sibling`] filed, its first's. The index keeps no
     /// id → name map; this scans the names of one file. The receiver-typing
     /// ladder calls it only for the declared supertypes it walks.
     pub fn name_in_file(&self, node_id: u32) -> Option<&str> {
+        // A later type of another arity is in no name table; it shares its
+        // first's name.
+        let node_id = self.arity_first.get(&node_id).copied().unwrap_or(node_id);
         let file = self.id_to_file.get(&node_id)?;
         self.file_scoped
             .get(file)?

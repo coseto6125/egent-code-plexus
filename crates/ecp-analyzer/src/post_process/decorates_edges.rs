@@ -28,7 +28,7 @@
 use crate::framework_helpers::normalize_decorator;
 use crate::resolution::index::ResolveTarget;
 use crate::resolution::resolver::Resolver;
-use ecp_core::analyzer::types::LocalGraph;
+use ecp_core::analyzer::types::{LocalGraph, RawNode};
 use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
 use ecp_core::graph::{Edge, Node, NodeKind, RelType};
 use ecp_core::pool::StringPool;
@@ -89,8 +89,9 @@ pub fn emit_edges(
 
             for raw_dec in &raw_node.decorators {
                 // Skip the override sentinel injected by the Kotlin/C#/C++ parsers —
-                // that's consumed by the Overrides post-process, not here.
-                if raw_dec == "__override__" {
+                // that's consumed by the Overrides post-process, not here —
+                // and the C# generic-arity marker, which identity reads.
+                if raw_dec == "__override__" || RawNode::is_generic_arity_marker(raw_dec) {
                     continue;
                 }
 

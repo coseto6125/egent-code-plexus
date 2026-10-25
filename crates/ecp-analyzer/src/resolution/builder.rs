@@ -9,7 +9,7 @@ use crate::resolution::index::{DeclaredBase, FileMeta, Language, ResolveTarget, 
 use crate::resolution::resolver::{ReexportIndex, Resolver};
 use crate::rust::module_tree::RustWorkspaceModTree;
 use ecp_core::analyzer::lexical::{
-    file_identities, file_uids, lexical_scope_kinds, raw_decl, LexicalFunctions,
+    file_identities, file_uids, lexical_scope_kinds, raw_decl, splits_by_arity, LexicalFunctions,
 };
 use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::reexport::{export_filter_applies, is_ecmascript, ImportRef};
@@ -1209,6 +1209,35 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
             // The file's own numbering (`assign_file`), shared with incremental
             // mode and the overlay view.
             let uid_u64 = identity.slot.uid();
+            let arity_splits = splits_by_arity(file_meta.language, raw_node.kind);
+            // A C# type of another generic arity than the earlier ones of its
+            // uid (`Conv<T>` after `Conv`): a node of its own under the
+            // overload uid, with its name and owner, filed beside its first
+            // instead of in a name table, so a lookup of the bare name still
+            // returns the first, as before the split (codex ruling P-a).
+            if let (UidSlot::Later { first, .. }, true) = (identity.slot, arity_splits) {
+                let first_idx = repeats.get(&first).copied().unwrap_or(graph_start + first);
+                symbol_table.register_arity_sibling(
+                    first_idx,
+                    &path_str,
+                    file_meta,
+                    raw_node.generic_arity(),
+                );
+                uid_seen.insert(uid_u64, current_node_idx);
+                let first_node: &Node = &nodes[first_idx as usize];
+                nodes.push(Node {
+                    uid: uid_u64,
+                    name: first_node.name,
+                    file_idx,
+                    kind: raw_node.kind,
+                    span: raw_node.span,
+                    community_id: 0,
+                    owner_class: first_node.owner_class,
+                    content_hash: raw_node.content_hash,
+                });
+                current_node_idx += 1;
+                continue;
+            }
             let earlier = match identity.slot {
                 UidSlot::First(uid) => {
                     let earlier = uid_seen.get(&uid).copied();
@@ -1377,6 +1406,9 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
                 raw_node.kind,
                 raw_node.owner_class.as_deref(),
             );
+            if arity_splits {
+                symbol_table.note_type_arity(current_node_idx, raw_node.generic_arity());
+            }
             if raw_node.is_exported {
                 symbol_table.note_export(&path_str, file_meta.language, current_node_idx);
             }
@@ -2518,8 +2550,8 @@ fn lexical_functions(graph: &LocalGraph, start_index: u32) -> LexicalFunctions {
 /// resolver's confidence (none = the base resolved to no project type), for
 /// [`SymbolTable::build_declared_bases`].
 ///
-/// Each base goes through the same `resolve_symbol(.., ResolveTarget::Type)`
-/// call Pass 2 makes for `Extends` / `Implements`, with the same path aliases
+/// Each base goes through the same [`resolve_base`] call Pass 2 makes for
+/// `Extends` / `Implements`, with the same path aliases
 /// and module tree, so a resolved supertype here is exactly a heritage edge
 /// Pass 2 emits. The resolver has no dump enabled, so the decision dump is
 /// unchanged.
@@ -2557,7 +2589,8 @@ fn pass1_9_supertypes(
             let resolve_type = |name: &str| {
                 resolver.resolve_symbol(&lg.file_path, name, &lg.imports, ResolveTarget::Type)
             };
-            let is_rust = Language::from_path(&lg.file_path.to_string_lossy()) == Language::Rust;
+            let language = Language::from_path(&lg.file_path.to_string_lossy());
+            let is_rust = language == Language::Rust;
             // One `impl Trait for O` block repeats its heritage on every
             // method; the cache keeps that to one resolve per name per file.
             let mut bases_cache: FxHashMap<&str, Box<[(u32, f32)]>> = FxHashMap::default();
@@ -2591,9 +2624,9 @@ fn pass1_9_supertypes(
                     continue;
                 };
                 for base in &raw.heritage {
-                    let candidates = bases_cache
-                        .entry(base.as_str())
-                        .or_insert_with(|| resolve_type(base).into_boxed_slice());
+                    let candidates = bases_cache.entry(base.as_str()).or_insert_with(|| {
+                        resolve_base(&resolver, symbol_table, lg, language, base).into_boxed_slice()
+                    });
                     out.push((
                         subject,
                         DeclaredBase {
@@ -2607,6 +2640,77 @@ fn pass1_9_supertypes(
         })
         .collect();
     per_graph.into_iter().flatten().collect()
+}
+
+/// The types the declared base `spelling` of a type in `local_graph` names,
+/// with resolver confidence: what Pass 1.9 records and Pass 2 emits as
+/// `Extends` / `Implements`. Outside C# it is the resolver's answer as is.
+///
+/// A C# spelling names a type by its bare name and its type-argument count
+/// ([`csharp_base_arity`]): `Conv` is `Conv` of arity 0, `Conv<Version>` is
+/// `Conv` of arity 1. The bare name resolves through the ordinary tiers, and
+/// each candidate becomes the type of that arity
+/// ([`SymbolTable::with_arity`]). The arity keeps one candidate at most per
+/// declaring file, so candidates in two files stay ambiguous.
+fn resolve_base(
+    resolver: &Resolver<'_>,
+    symbol_table: &SymbolTable,
+    local_graph: &LocalGraph,
+    language: Language,
+    spelling: &str,
+) -> Vec<(u32, f32)> {
+    let resolve = |name: &str| {
+        resolver.resolve_symbol(
+            &local_graph.file_path,
+            name,
+            &local_graph.imports,
+            ResolveTarget::Type,
+        )
+    };
+    if language != Language::CSharp {
+        return resolve(spelling);
+    }
+    let (name, arity) = csharp_base_arity(spelling);
+    let mut targets = resolve(name);
+    targets.retain_mut(|(id, _)| match symbol_table.with_arity(*id, arity) {
+        Some(typed) => {
+            *id = typed;
+            true
+        }
+        None => false,
+    });
+    targets
+}
+
+/// A C# base spelling as the bare type it names and the number of type
+/// arguments of its last segment: `Conv<int, string>` is (`Conv`, 2),
+/// `N.Conv<List<int>>` is (`N.Conv`, 1), `Conv` is (`Conv`, 0). A spelling
+/// whose argument list belongs to an outer segment (`Outer<int>.Inner`) or
+/// does not close stays whole, with arity 0.
+fn csharp_base_arity(spelling: &str) -> (&str, u32) {
+    let whole = (spelling, 0);
+    let Some(open) = spelling.find('<') else {
+        return whole;
+    };
+    let Some(args) = spelling
+        .trim_end()
+        .strip_suffix('>')
+        .and_then(|s| s.get(open + 1..))
+    else {
+        return whole;
+    };
+    let mut depth = 0u32;
+    let mut arity = 1;
+    for c in args.chars() {
+        match c {
+            '<' | '(' | '[' => depth += 1,
+            '>' | ')' | ']' if depth == 0 => return whole,
+            '>' | ')' | ']' => depth -= 1,
+            ',' if depth == 0 => arity += 1,
+            _ => {}
+        }
+    }
+    (spelling[..open].trim_end(), arity)
 }
 
 /// The `reason` of a resolved `Calls` edge, by the tier that resolved it.
@@ -2772,13 +2876,9 @@ fn pass2_emit_node_edges(
     lexical_lookup: &LexicalFunctions,
     pending_call_metas: &mut Vec<(usize, u8, String)>,
 ) {
+    let language = Language::from_path(&local_graph.file_path.to_string_lossy());
     for base in &raw_node.heritage {
-        let targets = resolver.resolve_symbol(
-            &local_graph.file_path,
-            base,
-            &local_graph.imports,
-            ResolveTarget::Type,
-        );
+        let targets = resolve_base(resolver, symbol_table, local_graph, language, base);
         for (target_id, confidence) in targets {
             // Kind-based dispatch: Interface/Trait targets → Implements,
             // concrete class targets → Extends. The resolved target's NodeKind
@@ -2801,7 +2901,6 @@ fn pass2_emit_node_edges(
 
     let call_heritage =
         ecp_core::analyzer::heritage::enclosing_class_heritage(raw_node, &local_graph.nodes);
-    let language = Language::from_path(&local_graph.file_path.to_string_lossy());
     for (call_idx, raw_callee) in raw_node.calls.iter().enumerate() {
         let lookup_key = CallMetaKey::new(raw_node.span, call_idx as u32);
         let meta = indirect_lookup.get(&lookup_key);

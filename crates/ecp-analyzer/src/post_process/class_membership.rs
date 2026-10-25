@@ -83,21 +83,22 @@ pub fn emit_edges(
             // bridge correctly now that structs no longer emit as Class.
             // An enum's methods and cases have separate semantics, but a
             // `Const` inside it is a type member just like a class constant.
-            // Retain the kind so only constants use enum owners.
-            let mut owners: Vec<(&str, NodeKind, Span)> = Vec::new();
+            // Retain the kind so only constants use enum owners, and the
+            // generic arity so C# `Conv<T>` owns its own members, not `Conv`.
+            let mut owners: Vec<Owner<'_>> = Vec::new();
             let mut classes_by_name: FxHashMap<&str, Vec<Span>> = FxHashMap::default();
             for n in raws {
                 if matches!(
                     n.kind,
                     NodeKind::Class | NodeKind::Struct | NodeKind::Trait | NodeKind::Interface
                 ) {
-                    owners.push((n.name.as_str(), n.kind, n.span));
+                    owners.push((n.name.as_str(), n.kind, n.span, n.generic_arity()));
                     classes_by_name
                         .entry(n.name.as_str())
                         .or_default()
                         .push(n.span);
                 } else if n.kind == NodeKind::Enum {
-                    owners.push((n.name.as_str(), n.kind, n.span));
+                    owners.push((n.name.as_str(), n.kind, n.span, 0));
                 }
             }
             if owners.is_empty() {
@@ -136,6 +137,10 @@ pub fn emit_edges(
     }
     emitted
 }
+
+/// A type that can own members: name, kind, span and declared generic arity
+/// (`RawNode::generic_arity`).
+type Owner<'a> = (&'a str, NodeKind, Span, u32);
 
 /// Raw index → node id of each later overload in the file
 /// ([`ecp_core::uid::keeps_overloads`]). A name lookup returns the first
@@ -204,7 +209,7 @@ fn member_node(
 /// (Property) edge from `c` to the member.
 fn emit_pass1_span(
     raws: &[RawNode],
-    owners: &[(&str, NodeKind, Span)],
+    owners: &[Owner<'_>],
     path_str: &str,
     symbol_table: &SymbolTable,
     later: &FxHashMap<usize, u32>,
@@ -225,13 +230,13 @@ fn emit_pass1_span(
 
         // Innermost enclosing class via smallest-area span. Scans the
         // pre-collected classes slice (K entries) instead of all raws.
-        let Some((class_name, _, _)) = owners
+        let Some((class_name, _, _, arity)) = owners
             .iter()
-            .filter(|(_, kind, span)| {
+            .filter(|(_, kind, span, _)| {
                 (member.kind == NodeKind::Const || *kind != NodeKind::Enum)
                     && span_contains(*span, member.span)
             })
-            .min_by_key(|(_, _, span)| span_area(*span))
+            .min_by_key(|(_, _, span, _)| span_area(*span))
             .copied()
         else {
             continue;
@@ -243,14 +248,19 @@ fn emit_pass1_span(
             && (member.owner_class.as_deref() != Some(class_name)
                 || owners
                     .iter()
-                    .filter(|(name, _, _)| *name == class_name)
+                    .filter(|(name, _, _, _)| *name == class_name)
                     .count()
                     != 1)
         {
             continue;
         }
 
-        let Some(class_idx) = symbol_table.lookup_in_file(path_str, class_name) else {
+        // The name lookup returns the first of same-named C# types of
+        // different arity; the owner is the one of its own arity.
+        let Some(class_idx) = symbol_table
+            .lookup_in_file(path_str, class_name)
+            .map(|first| symbol_table.with_arity(first, arity).unwrap_or(first))
+        else {
             continue;
         };
         let Some(member_idx) = member_node(i, member, path_str, symbol_table, later, class_idx)

@@ -103,6 +103,7 @@ fn test_execute_aggregate_over_overlay_counts_virtual_and_base_edges() {
                     heritage: Vec::new(),
                     variant_refs: Vec::new(),
                     return_type: None,
+                    generic_arity: 0,
                 },
                 OverlaySymbol {
                     is_exported: false,
@@ -117,6 +118,7 @@ fn test_execute_aggregate_over_overlay_counts_virtual_and_base_edges() {
                     heritage: Vec::new(),
                     variant_refs: Vec::new(),
                     return_type: None,
+                    generic_arity: 0,
                 },
             ],
             imports: vec![],

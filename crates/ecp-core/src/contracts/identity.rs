@@ -320,10 +320,14 @@ pub enum UidSlot {
     First(u64),
     /// A later declaration with an equal base uid, kept as its own node:
     /// `uid::overload(base, ordinal)`, `ordinal` 1-based among the later
-    /// ones. Applies to kinds that keep overloads and to scoped nodes.
+    /// ones. Applies to kinds that keep overloads, to scoped nodes, and to a
+    /// type whose [`FileDecl::arity`] no earlier declaration of the base uid
+    /// has (C# `Conv<T>` after `Conv`).
     Later { first: u32, ordinal: u32, uid: u64 },
     /// A later declaration of another kind with an equal base uid. The index
-    /// tombstones it today; `uid` is the base uid it repeats.
+    /// tombstones it today; `uid` is the base uid it repeats. `first` is the
+    /// first declaration of the base uid, or, for a declaration with an
+    /// arity, the first one of the same arity: the twin that survives it.
     Duplicate { first: u32, uid: u64 },
 }
 
@@ -355,6 +359,14 @@ pub struct FileDecl<'a> {
     /// Index of the lexical parent in the same slice, from [`lexical_parents`].
     pub parent: Option<u32>,
     pub discriminator: Option<Discriminator<'a>>,
+    /// The declared generic arity of a type whose language keeps two
+    /// same-named types of different arity apart (C# `Conv` and `Conv<T>`,
+    /// see `analyzer::lexical::splits_by_arity`); `None` everywhere else.
+    /// A later unscoped declaration of an equal base uid whose arity no
+    /// earlier one has is a [`UidSlot::Later`]; an equal arity is still a
+    /// [`UidSlot::Duplicate`]. The arity enters neither the base uid nor
+    /// the anchor, so both declarations share one anchor.
+    pub arity: Option<u32>,
 }
 
 /// The identity of one declaration of a file.
@@ -438,8 +450,19 @@ pub fn assign_file(path: &str, decls: &[FileDecl<'_>]) -> Result<Vec<DeclIdentit
             }
             Entry::Occupied(mut slot) => {
                 let (first, later) = slot.get_mut();
-                match uid::keeps_overloads(d.kind) || d.parent.is_some() {
-                    true => {
+                // The earlier declaration this one repeats. An overload or a
+                // scoped node repeats none. A declaration with an arity
+                // repeats the first one of its arity, and makes a type of
+                // its own when no earlier one has that arity.
+                let twin = match (uid::keeps_overloads(d.kind) || d.parent.is_some(), d.arity) {
+                    (true, _) => None,
+                    (false, Some(_)) => {
+                        (0..j).find(|&k| base_uids[k] == base && decls[k].arity == d.arity)
+                    }
+                    (false, None) => Some(*first as usize),
+                };
+                match twin {
+                    None => {
                         *later += 1;
                         UidSlot::Later {
                             first: *first,
@@ -447,8 +470,8 @@ pub fn assign_file(path: &str, decls: &[FileDecl<'_>]) -> Result<Vec<DeclIdentit
                             uid: uid::overload(base, *later),
                         }
                     }
-                    false => UidSlot::Duplicate {
-                        first: *first,
+                    Some(twin) => UidSlot::Duplicate {
+                        first: twin as u32,
                         uid: base,
                     },
                 }
@@ -1380,6 +1403,7 @@ mod tests {
             name,
             parent: None,
             discriminator: None,
+            arity: None,
         }
     }
 
@@ -1622,6 +1646,84 @@ mod tests {
             Uniqueness::Shared {
                 position: 2,
                 count: 3
+            }
+        );
+    }
+
+    /// `class Conv` and `class Conv<T>` in one file, in either order, with a
+    /// third declaration that repeats the first one's arity.
+    fn arity_file(arities: [u32; 3]) -> Vec<DeclIdentity> {
+        let mut decls = vec![decl(NodeKind::Class, None, "Conv"); 3];
+        for (d, arity) in decls.iter_mut().zip(arities) {
+            d.arity = Some(arity);
+        }
+        assign_file("N/Conv.cs", &decls).unwrap()
+    }
+
+    /// Stands for: a later type whose generic arity no earlier one has keeps
+    /// a node of its own under overload uid 1, in either declaration order,
+    /// while a repeat of an arity is still the tombstoned duplicate of the
+    /// one with that arity (codex ruling P-a, restricted shape (i)).
+    #[test]
+    fn test_assign_file_type_of_new_arity_later_same_arity_duplicate() {
+        let base = uid::compute(NodeKind::Class, "N/Conv.cs", None, "Conv");
+        for arities in [[0, 1, 0], [1, 0, 1]] {
+            let ids = arity_file(arities);
+            assert_eq!(ids[0].slot, UidSlot::First(base), "{arities:?}");
+            assert_eq!(
+                ids[1].slot,
+                UidSlot::Later {
+                    first: 0,
+                    ordinal: 1,
+                    uid: uid::overload(base, 1)
+                },
+                "{arities:?}: the other arity is a type of its own"
+            );
+            assert_eq!(
+                ids[2].slot,
+                UidSlot::Duplicate {
+                    first: 0,
+                    uid: base
+                },
+                "{arities:?}: a repeated arity tombstones against its twin"
+            );
+            assert!(
+                ids.iter().all(|id| id.anchor == base),
+                "{arities:?}: the arity enters no anchor"
+            );
+        }
+    }
+
+    /// Stands for: the twin of a repeated arity is the declaration of that
+    /// arity, not the base uid's first declaration.
+    #[test]
+    fn test_assign_file_repeat_of_later_arity_duplicates_later_twin() {
+        let ids = arity_file([0, 1, 1]);
+        let base = uid::compute(NodeKind::Class, "N/Conv.cs", None, "Conv");
+        assert_eq!(
+            ids[2].slot,
+            UidSlot::Duplicate {
+                first: 1,
+                uid: base
+            }
+        );
+    }
+
+    /// Stands for: a declaration with no arity (every language but C#)
+    /// keeps today's rule, a same-uid type is a duplicate.
+    #[test]
+    fn test_assign_file_type_without_arity_duplicate() {
+        let decls = [
+            decl(NodeKind::Class, None, "Conv"),
+            decl(NodeKind::Class, None, "Conv"),
+        ];
+        let ids = assign_file("Conv.java", &decls).unwrap();
+        let base = uid::compute(NodeKind::Class, "Conv.java", None, "Conv");
+        assert_eq!(
+            ids[1].slot,
+            UidSlot::Duplicate {
+                first: 0,
+                uid: base
             }
         );
     }

@@ -333,6 +333,51 @@ four_path_cases! {
     );
 }
 
+/// `class Conv` and `class Conv<T> : Conv` in one C# file, each with a
+/// `Can` method, in source order and with the generic one first.
+const CSHARP_CONV: [&str; 2] = [
+    "namespace N {\n class Conv {\n  bool Can(int t) { return true; }\n }\n class Conv<T> : Conv {\n  bool Can(int t) { return false; }\n }\n}\n",
+    "namespace N {\n class Conv<T> : Conv {\n  bool Can(int t) { return false; }\n }\n class Conv {\n  bool Can(int t) { return true; }\n }\n}\n",
+];
+
+/// Stands for: a C# type of another generic arity (`Conv<T>` beside
+/// `Conv`) is no tombstone on any path that numbers the file. The second
+/// class in source order takes overload uid 1 of the pair's base uid on the
+/// full build, the overlay view, the overlay reader over the written
+/// fragment, and incremental mode, in either declaration order (codex
+/// ruling P-a). Before the fix every path tombstoned it alike.
+#[test]
+fn test_uid_assign_csharp_types_of_two_arities_four_paths_equal_uids() {
+    for source in CSHARP_CONV {
+        assert_four_paths_equal(Case {
+            provider: Box::new(CSharpProvider::new().unwrap()),
+            path: "N/Conv.cs",
+            source,
+            overload_sets: 1,
+            redefinitions: Some(0),
+        });
+        let dirty = parse(&CSharpProvider::new().unwrap(), "N/Conv.cs", source);
+        let bytes = archive(&full_build(dirty.clone()));
+        let uids = stored_uids(access(&bytes), &dirty);
+        let classes: Vec<usize> = (0..dirty.nodes.len())
+            .filter(|&i| dirty.nodes[i].kind == NodeKind::Class)
+            .collect();
+        assert_eq!(classes.len(), 2, "{source}");
+        let first = &dirty.nodes[classes[0]];
+        let base = ecp_core::uid::compute(
+            NodeKind::Class,
+            "N/Conv.cs",
+            first.owner_class.as_deref(),
+            "Conv",
+        );
+        assert_eq!(
+            [uids[classes[0]], uids[classes[1]]],
+            [base, ecp_core::uid::overload(base, 1)],
+            "{source}"
+        );
+    }
+}
+
 /// A Unix file named `.\K.java` is stored `./K.java`, and one named
 /// `.\.\K.java` is stored `././K.java`: the builder only turns `\` into
 /// `/`. Every path hashes that stored name, and none panics on the doubled

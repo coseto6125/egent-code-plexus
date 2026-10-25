@@ -99,6 +99,10 @@ pub struct FragmentSymbol {
     pub heritage: Vec<String>,
     pub variant_refs: Vec<String>,
     pub return_type: Option<String>,
+    /// `RawNode::generic_arity`: a C# type's declared generic arity, 0 for
+    /// every other node. The overlay numbers a dirty `Conv<T>` beside `Conv`
+    /// from it, as the full build does.
+    pub generic_arity: u32,
 }
 
 /// The symbol shape of the v2 and v3 fragment bins (`FragmentSymbol` before
@@ -197,6 +201,7 @@ pub fn fragment_file_from_local_graph(graph: &LocalGraph) -> FragmentFile {
                 )
                 .then(|| return_types.get(&n.span).cloned())
                 .flatten(),
+                generic_arity: n.generic_arity(),
             })
             .collect(),
         imports: graph.imports.clone(),
