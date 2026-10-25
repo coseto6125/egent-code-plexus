@@ -196,7 +196,7 @@ line      := 1-based decimal start line
 | Python/JS/TS owner on every unowned kind | `stamp_owner_fn_by_span` (`framework_helpers.rs:421`), called at `framework_helpers.rs:737` and `python/parser.rs:1483` | uid, display | Functions: `lexical_parents` link. Non-callables keep the string (design A §5.2) |
 | Go `:=` Variable owner | `go/parser.rs` (owner set at `:625`) | uid | unchanged in this program (design A slice F) |
 | lexical tier input | `LexicalFunctions::new` takes `(kind, name, has_owner, span)` (`ecp-core/src/analyzer/lexical.rs:19-54`); builder `:2281`, overlay `view.rs:559` | both call ladders | `(kind, span)` into `lexical_parents`, plus a parent link per function |
-| Rust global candidate filter | `rust_free_global_candidate` in `lookup_global` (`resolution/index.rs:1059-1081`) and `nearest_global_copy` (`:1209`) | global tier | "scoped nodes are not global candidates" (design A I5), read from the parent link |
+| Rust global candidate filter | `rust_free_global_candidate` in `lookup_global` (`resolution/index.rs:1059-1081`) and the shared nearest-copy walk `nearest_copy` (`ecp-core/src/analyzer/ladder.rs`) | global tier | "scoped nodes are not global candidates" (design A I5), read from the parent link |
 
 ### Target request and ambiguity
 

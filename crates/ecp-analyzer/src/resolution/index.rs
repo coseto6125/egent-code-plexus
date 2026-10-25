@@ -2,6 +2,7 @@ use ecp_core::analyzer::csharp_extension::ExtensionDecl;
 use ecp_core::analyzer::import_binding::{
     fqn_language, owner_path_agrees, DeclaredType, MemberOwner,
 };
+use ecp_core::analyzer::ladder::{self, ResolveFacts};
 use ecp_core::analyzer::reexport::{is_es_module, pick_call, ExportAliasTable};
 use ecp_core::analyzer::same_file_pick::{self, ImplMember as PickImplMember, PickFacts};
 use ecp_core::analyzer::type_ladder::{declared_namespace, return_type_key, TypeFacts};
@@ -1232,11 +1233,8 @@ impl SymbolTable {
         target: ResolveTarget,
         free_only: bool,
     ) -> Option<u32> {
-        let ids = self.file_scoped.get(file_path)?.get(node_name)?;
         pick_call(
-            ids.iter()
-                .filter(|&&id| !self.is_lexically_scoped(id))
-                .map(|&id| (id, self.node_kinds[id as usize]))
+            self.call_decls(file_path, node_name)
                 .filter(|&(_, kind)| !free_only || kind != NodeKind::Method),
             target,
         )
@@ -1246,15 +1244,7 @@ impl SymbolTable {
     /// kinds: what the shared import rules read
     /// ([`ecp_core::analyzer::reexport::ModuleFacts::decls_in_file`]).
     pub(crate) fn decls_in_file(&self, file_path: &str, node_name: &str) -> Vec<(u32, NodeKind)> {
-        self.file_scoped
-            .get(file_path)
-            .and_then(|names| names.get(node_name))
-            .map_or_else(Vec::new, |ids| {
-                ids.iter()
-                    .filter(|&&id| !self.is_lexically_scoped(id))
-                    .map(|&id| (id, self.node_kinds[id as usize]))
-                    .collect()
-            })
+        self.call_decls(file_path, node_name).collect()
     }
 
     /// Record that `node_id`, declared in `file_path`, is exported. A TS / JS
@@ -1389,9 +1379,8 @@ impl SymbolTable {
         )
     }
 
-    /// Tier-3 global lookup: kind-filtered same-name candidates through the
-    /// shared barrier filter, [`pick_global`]. `free_only` is a bare `f()`
-    /// that never reaches a member ([`global_field`]).
+    /// Tier-3 global lookup: the shared verdict ([`ladder::global_pick`])
+    /// over [`Self::global_field_candidates`].
     pub fn lookup_global(
         &self,
         node_name: &str,
@@ -1399,22 +1388,31 @@ impl SymbolTable {
         caller: FileMeta,
         free_only: bool,
     ) -> GlobalPick {
-        let Some(raw) = self.global_scoped.get(node_name) else {
-            return GlobalPick::NoMatch;
-        };
-        let field = global_field(target, free_only);
-        let pick = pick_global(
+        ladder::global_pick(
+            self,
             caller,
-            raw.iter()
-                .filter(|&&id| field(self.node_kinds[id as usize]) && !self.is_lexically_scoped(id))
-                .map(|&id| (id, self.node_file_meta[id as usize])),
-        );
-        match pick {
-            GlobalPick::Unique(id) if !target.kind_predicate()(self.node_kinds[id as usize]) => {
-                GlobalPick::NoMatch
-            }
-            other => other,
-        }
+            target,
+            self.global_field_candidates(node_name, target, free_only),
+        )
+    }
+
+    /// Every declaration named `node_name` in the field a Tier-3 lookup of
+    /// `target` weighs ([`global_field`]; `free_only` is a bare `f()` that
+    /// never reaches a member), with its file's meta, scoped ones included:
+    /// the shared ladder drops those (I5).
+    pub(crate) fn global_field_candidates(
+        &self,
+        node_name: &str,
+        target: ResolveTarget,
+        free_only: bool,
+    ) -> impl Iterator<Item = (u32, FileMeta)> + '_ {
+        let field = global_field(target, free_only);
+        self.global_scoped
+            .get(node_name)
+            .map_or(&[][..], Vec::as_slice)
+            .iter()
+            .filter(move |&&id| field(self.node_kinds[id as usize]))
+            .map(move |&id| (id, self.node_file_meta[id as usize]))
     }
 
     /// Every candidate [`lookup_global`] weighs, as a set: kind-filtered, then
@@ -1528,39 +1526,6 @@ impl SymbolTable {
             }
         }
         best.filter(|_| !tie).map(|(_, id)| id)
-    }
-
-    /// [`Self::nearest_copy`] over the set [`Self::lookup_global`] found
-    /// ambiguous: the same kind filter and [`FileMeta::admits`] barrier. The
-    /// walk stops at the first candidate that is not a copy, so a common
-    /// name with many unrelated declarations costs two comparisons.
-    pub(crate) fn nearest_global_copy(
-        &self,
-        caller_file: &str,
-        caller: FileMeta,
-        node_name: &str,
-        target: ResolveTarget,
-        free_only: bool,
-    ) -> Option<u32> {
-        let field = global_field(target, free_only);
-        let mut copies: Vec<u32> = Vec::new();
-        for &id in self.global_scoped.get(node_name)? {
-            if !field(self.node_kinds[id as usize])
-                || !caller.admits(self.node_file_meta[id as usize])
-                || self.is_lexically_scoped(id)
-            {
-                continue;
-            }
-            if copies
-                .first()
-                .is_some_and(|&first| !self.is_copy(first, id))
-            {
-                return None;
-            }
-            copies.push(id);
-        }
-        self.nearest_copy(caller_file, &copies)
-            .filter(|&id| target.kind_predicate()(self.node_kinds[id as usize]))
     }
 
     /// Whether `b` repeats declaration `a` in another tree: the same kind
@@ -2049,6 +2014,22 @@ impl TypeFacts for SymbolTable {
 
     fn partial_type(&self, ty: u32) -> u32 {
         SymbolTable::partial_type(self, ty)
+    }
+}
+
+impl ResolveFacts for SymbolTable {
+    fn call_decls(&self, file: &str, name: &str) -> impl Iterator<Item = (u32, NodeKind)> + Clone {
+        self.file_scoped
+            .get(file)
+            .and_then(|names| names.get(name))
+            .map_or(&[][..], Vec::as_slice)
+            .iter()
+            .filter(move |&&id| !self.is_lexically_scoped(id))
+            .map(move |&id| (id, self.node_kinds[id as usize]))
+    }
+
+    fn first_decl_in_file(&self, file: &str, name: &str, target: ResolveTarget) -> Option<u32> {
+        self.lookup_in_file_with_kind(file, name, target)
     }
 }
 
@@ -2897,18 +2878,23 @@ mod tests {
             ),
         ];
         let caller = FileMeta::from_path("core/pkg/app.py");
+        let nearest = |st: &SymbolTable| {
+            ladder::nearest_copy(
+                st,
+                "core/pkg/app.py",
+                caller,
+                st.global_field_candidates("helper", CALL, false),
+            )
+        };
         let control = st_owned(&copies);
         assert_eq!(
-            control.nearest_global_copy("core/pkg/app.py", caller, "helper", CALL, false),
+            nearest(&control),
             Some(0),
             "control: the copy in the caller's tree"
         );
         let mut st = st_owned(&copies);
         st.note_lexical_parent(0, 1);
-        assert_eq!(
-            st.nearest_global_copy("core/pkg/app.py", caller, "helper", CALL, false),
-            None
-        );
+        assert_eq!(nearest(&st), None);
         assert_eq!(
             st.lookup_global("helper", CALL, caller, false),
             GlobalPick::Unique(1)

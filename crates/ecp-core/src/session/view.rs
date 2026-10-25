@@ -121,6 +121,7 @@ use crate::analyzer::import_binding::{
     extension_retry, fqn_imported_name, fqn_language, fqn_type_path, import_binding,
     import_member_fallback, owner_path_agrees, retry_name, DeclaredType, MemberOwner,
 };
+use crate::analyzer::ladder::{self, CallPick, ResolveFacts};
 use crate::analyzer::lexical::{
     enclosing_types, file_identities, later_is_arity_twin, lexical_scope_kinds, splits_by_arity,
     twin_enclosing, LexicalFunctions,
@@ -2933,34 +2934,6 @@ impl<'a> OverlayFacts<'a> {
                 .same_namespaces(Language::from_normalized_path(a_file), a_file, b_file)
     }
 
-    /// The index's `SymbolTable::nearest_global_copy` over the Tier-3
-    /// `candidates` that `caller` admits: when all of them are copies of the
-    /// first ([`Self::is_copy`]), the copy whose file shares the deepest
-    /// directory with `caller_file`, fewer directory steps breaking an equal
-    /// depth. `None` for a tie, for fewer than two copies, or at the first
-    /// candidate that is no copy, so a common name costs two comparisons.
-    fn nearest_copy(
-        &self,
-        caller: FileMeta,
-        caller_file: &str,
-        candidates: impl Iterator<Item = (u32, FileMeta)>,
-    ) -> Option<u32> {
-        let mut copies: Vec<u32> = Vec::new();
-        for (idx, meta) in candidates {
-            if !caller.admits(meta) {
-                continue;
-            }
-            if copies
-                .first()
-                .is_some_and(|&first| !self.is_copy(first, idx))
-            {
-                return None;
-            }
-            copies.push(idx);
-        }
-        self.nearest_of_copies(caller_file, &copies)
-    }
-
     /// The index's `SymbolTable::nearest_copy`: among `copies`, copies of
     /// one declaration, the one whose file shares the deepest directory with
     /// `caller_file`, fewer directory steps breaking an equal depth. `None`
@@ -4725,6 +4698,16 @@ impl TypeFacts for OverlayFacts<'_> {
     }
 }
 
+impl ResolveFacts for OverlayFacts<'_> {
+    fn call_decls(&self, file: &str, name: &str) -> impl Iterator<Item = (u32, NodeKind)> + Clone {
+        ModuleFacts::decls_in_file(self, file, name).into_iter()
+    }
+
+    fn first_decl_in_file(&self, file: &str, name: &str, target: ResolveTarget) -> Option<u32> {
+        self.first_in_file(file, name, target, None)
+    }
+}
+
 /// The owner keys of the namespaces and modules among `symbols`, one dirty
 /// file, that name no type the file declares: the index's
 /// `SymbolTable::build_owner_kinds` for that file.
@@ -4887,7 +4870,7 @@ fn resolve_overlay_name_ref(
 /// remaining → suppressed, matching `DecisionTier::AmbiguousGlobal` (an
 /// invented edge is worse than a missing one), unless `call` is given and
 /// every candidate is a copy of one declaration: then the copy nearest the
-/// caller binds ([`OverlayFacts::nearest_copy`]) at
+/// caller binds ([`ladder::nearest_copy`]) at
 /// [`NEAREST_COPY_CONFIDENCE`]. A TS / JS import naming the ES module of a
 /// private pick hides it ([`reexport::import_hides`]). Unique → 0.7.
 #[allow(clippy::too_many_arguments)]
@@ -4919,10 +4902,8 @@ fn resolve_callee<'s>(
     // Read from the call site, never from `site`: a retry under the short
     // name (`ImportBinding::Retry`) is no receiverless call.
     let free_only = call.is_some_and(|call| call.free_only);
-    // I5: a scoped node is no global candidate.
-    let admits = |&(idx, _): &(u32, FileMeta)| {
-        !facts.is_lexically_scoped(idx) && (!free_only || !is_method(idx))
-    };
+    // I5 (a scoped node is no global candidate) is the ladder's filter.
+    let admits = |&(idx, _): &(u32, FileMeta)| !free_only || !is_method(idx);
     // Tier 1: same-file, the index's `lookup_call_in_file`. At a call site
     // the pick narrows by owner (`prefer_owned`); when the file holds
     // several unrelated owners of the name it binds nothing and the later
@@ -4932,42 +4913,16 @@ fn resolve_callee<'s>(
     } else {
         names.target
     };
-    let decls = facts.decls_in_file(importer, callee);
-    // A bare call that reaches no member weighs no method of the file, so a
-    // free function of the name still wins.
-    let same_file = decls
-        .iter()
-        .copied()
-        .filter(|&(_, kind)| !free_only || kind != NodeKind::Method);
-    if let Some(pick) = reexport::pick_call(same_file, call_target) {
-        let hit = match call {
-            Some(call) if free_only => crate::analyzer::same_file_pick::prefer_free(
-                facts,
-                importer,
-                callee,
-                call.owner,
-                call_target,
-            ),
-            Some(call) => prefer_owned(
-                facts,
-                importer,
-                pick,
-                callee,
-                call.owner,
-                scope.heritage,
-                call_target,
-                PickScope {
-                    caller: call.caller,
-                    typed_receiver: false,
-                    untyped_receiver: call.untyped,
-                    qualifier_is_type: false,
-                },
-            ),
-            None => Some(pick),
-        };
-        if let Some(idx) = hit.filter(|&idx| !free_only || !is_method(idx)) {
-            return accepts(idx).then_some((idx, CONF_SAME_FILE));
-        }
+    let ladder_call = call.map(CallScope::ladder);
+    if let Resolution::Bound(hit) = ladder::same_file(
+        facts,
+        importer,
+        callee,
+        call_target,
+        ladder_call,
+        scope.heritage,
+    ) {
+        return accepts(hit.id).then_some((hit.id, hit.confidence));
     }
 
     // The index's Tier 1 across the files of a C# partial type: a bare call
@@ -5250,38 +5205,24 @@ fn resolve_callee<'s>(
     // Tier 2.75: the caller's bases, in declared order, each as an implicit
     // qualifier; the first base whose file holds the member decides. A bare
     // call that reaches no member skips it.
-    let heritage: &[String] = if free_only { &[] } else { scope.heritage };
-    for base in heritage {
-        let Some(file) = facts.qualifier_file(
-            file_ord,
-            imports,
-            caller,
-            (None, base.as_str(), callee),
-            names.target,
-            qualifiers,
-        ) else {
-            continue;
-        };
-        let hit = facts
-            .first_in_file(file, callee, names.target, None)
-            .and_then(|pick| {
-                prefer_owned(
-                    facts,
-                    file,
-                    pick,
-                    callee,
-                    Some(base.as_str()),
-                    &[],
-                    names.target,
-                    PickScope {
-                        typed_receiver: true,
-                        ..PickScope::default()
-                    },
-                )
-            });
-        if let Some(idx) = hit {
-            return accepts(idx).then_some((idx, CONF_HERITAGE));
-        }
+    if let (Resolution::Bound(hit), _) = ladder::heritage(
+        facts,
+        scope.heritage,
+        callee,
+        names.target,
+        ladder_call,
+        |base| {
+            facts.qualifier_file(
+                file_ord,
+                imports,
+                caller,
+                (None, base, callee),
+                names.target,
+                qualifiers,
+            )
+        },
+    ) {
+        return accepts(hit.id).then_some((hit.id, hit.confidence));
     }
 
     if wildcard_open {
@@ -5328,38 +5269,20 @@ fn resolve_callee<'s>(
                 })
         })
     };
-    let hit = (|| {
-        let pick = pick_global(
-            caller,
-            base()
-                .iter()
-                .map(|&idx| (idx, base_meta(idx)))
-                .chain(overlay_candidates.iter().copied())
-                .filter(admits),
-        );
-        let (target, confidence) = match pick {
-            GlobalPick::Unique(target) => (target, CONF_GLOBAL_UNIQUE),
-            // The index's `DecisionTier::NearestCopy`, for call sites only.
-            GlobalPick::Ambiguous if call.is_some() => (
-                facts.nearest_copy(
-                    caller,
-                    importer,
-                    base()
-                        .iter()
-                        .map(|&idx| (idx, base_meta(idx)))
-                        .chain(overlay_candidates.iter().copied())
-                        .filter(admits),
-                )?,
-                NEAREST_COPY_CONFIDENCE,
-            ),
-            GlobalPick::Ambiguous | GlobalPick::NoMatch => return None,
-        };
-        debug_assert!(!replaced.contains_key(&target));
+    // Read up to three times by the ladder (the pick, the nearest copy, the
+    // count), and only on a memo miss.
+    let candidates: Vec<(u32, FileMeta)> = base()
+        .iter()
+        .map(|&idx| (idx, base_meta(idx)))
+        .chain(overlay_candidates.iter().copied())
+        .filter(admits)
+        .collect();
+    let hidden = |target: u32| {
         let decl_file = match target.checked_sub(base_len) {
             Some(offset) => Some(&*nodes[offset as usize].rel_path),
             None => base_path(target),
         };
-        if decl_file.is_some_and(|file| {
+        decl_file.is_some_and(|file| {
             reexport::import_hides(
                 facts,
                 importer,
@@ -5367,11 +5290,20 @@ fn resolve_callee<'s>(
                 imports.iter().map(ImportRef::from),
                 file,
             )
-        }) {
-            return None;
-        }
-        accepts(target).then_some((target, confidence))
-    })();
+        })
+    };
+    // The index's `DecisionTier::NearestCopy` binds for call sites only.
+    let hit = ladder::global(
+        facts,
+        importer,
+        caller,
+        call_target,
+        call.is_some(),
+        || candidates.iter().copied(),
+        hidden,
+    )
+    .edge();
+    debug_assert!(hit.is_none_or(|(target, _)| !replaced.contains_key(&target)));
     facts.global.borrow_mut().insert(key, hit);
     hit
 }
@@ -5392,6 +5324,18 @@ struct CallScope<'c> {
     /// The site is a bare `f()` that never reaches a member
     /// ([`CallSite::reaches_free_only`]), kept through a retry under another name.
     free_only: bool,
+}
+
+impl<'c> CallScope<'c> {
+    /// What the shared name tiers read of this call site.
+    fn ladder(self) -> CallPick<'c> {
+        CallPick {
+            owner: self.owner,
+            caller: self.caller,
+            untyped: self.untyped,
+            free_only: self.free_only,
+        }
+    }
 }
 
 /// What a lookup carries besides the name, as the index's

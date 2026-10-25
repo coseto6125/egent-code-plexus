@@ -43,6 +43,7 @@ use ecp_core::analyzer::import_binding::{
     extension_retry, fqn_extension, fqn_imported_name, fqn_language, fqn_type_path, import_binding,
     import_family, import_member_fallback, may_suppress, module_head, retry_name,
 };
+use ecp_core::analyzer::ladder::{self, CallPick};
 use ecp_core::analyzer::outcome::{NoEdge, Resolution, Tier};
 use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::reexport::{
@@ -1814,49 +1815,24 @@ impl<'a> Resolver<'a> {
         // that reaches no member ([`CallSite::reaches_free_only`]) weighs no method of
         // the file, so a free function of the name still wins.
         let free_only = call.is_some_and(|scope| scope.free_only);
-        let same_file_pick =
-            self.symbol_table
-                .lookup_call_in_file(&source_file_str, symbol_name, target, free_only);
-        if let Some(node_id) = same_file_pick
-            .and_then(|pick| match call {
-                Some(scope) if free_only => ecp_core::analyzer::same_file_pick::prefer_free(
-                    self.symbol_table,
-                    &source_file_str,
-                    symbol_name,
-                    scope.owner,
-                    target,
-                ),
-                Some(scope) => self.symbol_table.prefer_owned(
-                    &source_file_str,
-                    pick,
-                    symbol_name,
-                    scope.owner,
-                    if scope.untyped_receiver {
-                        &[]
-                    } else {
-                        caller_heritage
-                    },
-                    target,
-                    PickScope {
-                        caller: scope.caller,
-                        typed_receiver: false,
-                        untyped_receiver: scope.untyped_receiver,
-                        qualifier_is_type: false,
-                    },
-                ),
-                None => Some(pick),
-            })
-            .filter(|&id| !free_only || self.symbol_table.node_kind(id) != NodeKind::Method)
-        {
-            results.push((node_id, ResolutionTier::SameFile.base_confidence()));
+        let ladder_call = call.map(CallScope::ladder);
+        if let Resolution::Bound(hit) = ladder::same_file(
+            self.symbol_table,
+            &source_file_str,
+            symbol_name,
+            target,
+            ladder_call,
+            caller_heritage,
+        ) {
+            results.push((hit.id, hit.confidence));
             self.record(
                 &source_file_str,
                 symbol_name,
                 None,
                 DecisionTier::SameFile,
-                Some(node_id),
+                Some(hit.id),
                 0,
-                Some(ResolutionTier::SameFile.base_confidence()),
+                Some(hit.confidence),
             );
             return results; // Highest precedence, return early
         }
@@ -2187,52 +2163,34 @@ impl<'a> Resolver<'a> {
         // An untyped receiver is no `this`: the caller's bases do not own
         // the member it reaches. Neither do they own what a bare call that
         // reaches no member names.
-        if !caller_heritage.is_empty()
-            && !free_only
-            && !call.is_some_and(|scope| scope.untyped_receiver)
-        {
-            for base in caller_heritage {
-                if let Some(qf) = self.resolve_qualifier_file(
+        if let (Resolution::Bound(hit), Some(base)) = ladder::heritage(
+            self.symbol_table,
+            caller_heritage,
+            symbol_name,
+            target,
+            ladder_call,
+            |base| {
+                self.resolve_qualifier_file(
                     source_file,
                     base,
                     symbol_name,
                     target,
                     raw_imports,
                     None,
-                ) {
-                    if let Some(node_id) = self
-                        .symbol_table
-                        .lookup_in_file_with_kind(&qf, symbol_name, target)
-                        .and_then(|pick| {
-                            self.symbol_table.prefer_owned(
-                                &qf,
-                                pick,
-                                symbol_name,
-                                Some(base.as_str()),
-                                &[],
-                                target,
-                                PickScope {
-                                    typed_receiver: true,
-                                    ..PickScope::default()
-                                },
-                            )
-                        })
-                    {
-                        let conf = ResolutionTier::HeritageScoped.base_confidence();
-                        results.push((node_id, conf));
-                        self.record(
-                            &source_file_str,
-                            symbol_name,
-                            Some(base.as_str()),
-                            DecisionTier::HeritageScoped,
-                            Some(node_id),
-                            0,
-                            Some(conf),
-                        );
-                        return results;
-                    }
-                }
-            }
+                )
+            },
+        ) {
+            results.push((hit.id, hit.confidence));
+            self.record(
+                &source_file_str,
+                symbol_name,
+                Some(base),
+                DecisionTier::HeritageScoped,
+                Some(hit.id),
+                0,
+                Some(hit.confidence),
+            );
+            return results;
         }
 
         if wildcard_open {
@@ -2280,50 +2238,37 @@ impl<'a> Resolver<'a> {
                 )
             })
         };
-        let (tier, target_id, confidence, alt_count) =
-            match self
-                .symbol_table
-                .lookup_global(symbol_name, target, caller_meta, free_only)
-            {
-                GlobalPick::Unique(node_id) if hidden(node_id) => {
-                    (DecisionTier::Unresolved, None, None, raw_count)
-                }
-                GlobalPick::Unique(node_id) => {
-                    let conf = ResolutionTier::Global.base_confidence();
-                    results.push((node_id, conf));
-                    (
-                        DecisionTier::Global,
-                        Some(node_id),
-                        Some(conf),
-                        raw_count.saturating_sub(1),
-                    )
-                }
-                GlobalPick::Ambiguous => match call
-                    .and_then(|_| {
-                        self.symbol_table.nearest_global_copy(
-                            &source_file_str,
-                            caller_meta,
-                            symbol_name,
-                            target,
-                            free_only,
-                        )
-                    })
-                    .filter(|&node_id| !hidden(node_id))
-                {
-                    Some(node_id) => {
-                        let conf = ResolutionTier::NearestCopy.base_confidence();
-                        results.push((node_id, conf));
-                        (
-                            DecisionTier::NearestCopy,
-                            Some(node_id),
-                            Some(conf),
-                            raw_count.saturating_sub(1),
-                        )
-                    }
-                    None => (DecisionTier::AmbiguousGlobal, None, None, raw_count),
-                },
-                GlobalPick::NoMatch => (DecisionTier::Unresolved, None, None, raw_count),
-            };
+        let resolution = ladder::global(
+            self.symbol_table,
+            &source_file_str,
+            caller_meta,
+            target,
+            call.is_some(),
+            || {
+                self.symbol_table
+                    .global_field_candidates(symbol_name, target, free_only)
+            },
+            hidden,
+        );
+        let (tier, target_id, confidence, alt_count) = match resolution {
+            Resolution::Bound(hit) => {
+                results.push((hit.id, hit.confidence));
+                let tier = match hit.tier {
+                    Some(Tier::NearestCopy) => DecisionTier::NearestCopy,
+                    _ => DecisionTier::Global,
+                };
+                (
+                    tier,
+                    Some(hit.id),
+                    Some(hit.confidence),
+                    raw_count.saturating_sub(1),
+                )
+            }
+            Resolution::NoEdge(NoEdge::Ambiguous(_)) => {
+                (DecisionTier::AmbiguousGlobal, None, None, raw_count)
+            }
+            _ => (DecisionTier::Unresolved, None, None, raw_count),
+        };
         self.record(
             &source_file_str,
             symbol_name,
@@ -2529,6 +2474,18 @@ struct CallScope<'c> {
     /// The calling declaration: a Rust `self.m()` in an `impl` block the
     /// parser gave no owner reaches that block's own `m`.
     caller: Option<NodeId>,
+}
+
+impl<'c> CallScope<'c> {
+    /// What the shared name tiers read of this call site.
+    fn ladder(self) -> CallPick<'c> {
+        CallPick {
+            owner: self.owner,
+            caller: self.caller,
+            untyped: self.untyped_receiver,
+            free_only: self.free_only,
+        }
+    }
 }
 
 /// Outcome of the receiver-typing ladder for one qualified callee.
