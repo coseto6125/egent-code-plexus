@@ -348,10 +348,12 @@ const PRE_LEXICAL_TABLE_GRAPH_FORMAT: u32 = 16;
 /// `lexical_parent_table.rs`).
 #[test]
 fn test_prev_release_graph_refused_and_rebuilt_lexical_table_present() {
-    assert!(
-        GRAPH_FORMAT_VERSION > PRE_LEXICAL_TABLE_GRAPH_FORMAT,
-        "the lexical-parent table changes the graph layout; GRAPH_FORMAT_VERSION {GRAPH_FORMAT_VERSION} must move past {PRE_LEXICAL_TABLE_GRAPH_FORMAT}"
-    );
+    const {
+        assert!(
+            GRAPH_FORMAT_VERSION > PRE_LEXICAL_TABLE_GRAPH_FORMAT,
+            "the lexical-parent table changes the graph layout; GRAPH_FORMAT_VERSION must move past it"
+        )
+    };
     let tmp = copy_repo();
     let writer_graph = graph_in(&tmp);
     assert!(

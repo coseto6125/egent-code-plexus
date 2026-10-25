@@ -85,7 +85,7 @@ pub fn emit_edges(
 
         // The node of one pairing key is named by its earliest spelling in
         // the file (smallest span), so two spellings in one file name one node.
-        let mut first_spelling: FxHashMap<&str, ((u32, u32, u32, u32), &str)> =
+        let mut first_spelling: FxHashMap<&str, (ecp_core::analyzer::types::Span, &str)> =
             FxHashMap::default();
         for raw_et in event_topics.iter() {
             if let Some(literal) = raw_et.topic_literal.as_deref() {

@@ -733,6 +733,7 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
 // Verification payload
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn emit_verification_payload(
     repo_root: &Path,
     old: &str,
