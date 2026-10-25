@@ -19,7 +19,7 @@ use crate::route_detector::{clean_route_path_lax, join_route_path};
 use ecp_core::analyzer::types::{
     LocalGraph, RawImport, RawRoute, RawRouteScope, RouteInclude, Span,
 };
-use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
+use ecp_core::contracts::raw_records::{FileOrd, RawEndpoint, RawIdx, RawIndexMap, Unbound};
 use ecp_core::contracts::routing::{FileRouter, Language};
 use ecp_core::graph::NodeKind;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -258,7 +258,9 @@ impl SiteScope {
 pub(super) struct RouteSite {
     pub path: String,
     pub scope: RawRouteScope,
-    pub handler: Option<String>,
+    /// The controller action the route names, or an anonymous handler for
+    /// a closure written in place.
+    pub handler: Option<RawEndpoint>,
 }
 
 /// The names of the file, for resolving the class names a route names.
@@ -329,7 +331,7 @@ pub(super) fn route_site(
     Some(RouteSite {
         path: site.route_path(raw_path)?,
         handler: nth_argument(call, 1)
-            .and_then(|action| route_action(action, controller.as_deref(), source, names)),
+            .and_then(|action| route_handler(action, controller.as_deref(), source, names)),
         scope: site.scope,
     })
 }
@@ -426,7 +428,7 @@ pub(super) fn route_set_sites(
             return Vec::new();
         };
         let handler = nth_argument(call, path_arg + 1)
-            .and_then(|action| route_action(action, controller.as_deref(), source, names));
+            .and_then(|action| route_handler(action, controller.as_deref(), source, names));
         let mut out: Vec<(String, RouteSite)> = Vec::new();
         for method in methods {
             let method = method.to_ascii_uppercase();
@@ -634,7 +636,7 @@ fn resource_sites(
             let route = RouteSite {
                 path: join_route_path(segments),
                 scope: site.scope.clone(),
-                handler: Some(format!("{class}@{}", action.action)),
+                handler: RawRoute::named_handler(Some(&format!("{class}@{}", action.action))),
             };
             (action.method.to_string(), route)
         })
@@ -706,6 +708,23 @@ fn singular(segment: &str) -> String {
         0
     };
     format!("{head}{}", &word[..word.len() - cut])
+}
+
+/// The handler of a route registration's action argument: a closure or
+/// arrow function written in place is anonymous; any other argument names
+/// the controller action [`route_action`] reads.
+fn route_handler(
+    action: Node,
+    controller: Option<&str>,
+    source: &[u8],
+    names: FileNames,
+) -> Option<RawEndpoint> {
+    match action.kind() {
+        "anonymous_function" | "arrow_function" => {
+            Some(RawEndpoint::Unresolved(Unbound::Anonymous))
+        }
+        _ => RawRoute::named_handler(route_action(action, controller, source, names).as_deref()),
+    }
 }
 
 /// The `Class@method` the action argument `action` names. A class name
@@ -847,7 +866,7 @@ fn push_include(
         path: join_prefix(site.prefixes.iter().map(String::as_str)),
         // As written; [`resolve_include_controllers`] qualifies it once the
         // file's imports are known.
-        handler: site.controller,
+        handler: RawRoute::named_handler(site.controller.as_deref()),
         span: node_span(&node),
         scope: Some(Box::new(scope)),
     });
@@ -1280,7 +1299,7 @@ impl LaravelRoutes {
         let has_includes = routes().any(|route| route.method == RawRoute::INCLUDE);
         let has_actions = routes().any(|route| {
             route.scope.is_some()
-                && route.handler.is_some()
+                && route.handler_name().is_some()
                 && route.method != RawRoute::INCLUDE
                 && route.method != RawRoute::CONTROLLER_MIDDLEWARE
         });
@@ -1400,7 +1419,7 @@ fn include_scopes(
                 middleware: scope.middleware.clone(),
                 excluded: scope.excluded_middleware.clone(),
                 namespace: scope.namespace.clone(),
-                controller: record.handler.clone(),
+                controller: record.handler_name().map(str::to_string),
             };
             includes.push((from, target, include));
         }
@@ -2183,8 +2202,8 @@ const UNREAD_STATIC_ENTRY: &str = "a static `middleware()` entry only the runtim
 /// file's imports and namespace.
 pub(super) fn resolve_include_controllers(records: &mut [RawRoute], names: FileNames) {
     for record in records {
-        if let Some(class) = record.handler.as_mut() {
-            *class = names.resolve(class);
+        if let Some(class) = record.handler_name().map(|class| names.resolve(class)) {
+            record.handler = RawRoute::named_handler(Some(&class));
         }
     }
 }

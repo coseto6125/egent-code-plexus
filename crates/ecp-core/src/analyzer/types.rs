@@ -1,4 +1,6 @@
-use crate::contracts::raw_records::{bind_name, EndpointRule, RawEndpoint, RecordKind};
+use crate::contracts::raw_records::{
+    bind_enclosing, bind_name, EndpointRule, RawEndpoint, RawIdx, RecordKind, Unbound,
+};
 use crate::file_category::Language;
 use crate::graph::NodeKind;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -561,7 +563,12 @@ pub struct RawImport {
 pub struct RawRoute {
     pub method: String,
     pub path: String,
-    pub handler: Option<String>,
+    /// What serves the route (C4 `RecordKind::Route`). A producer writes
+    /// `Unresolved(Named)` for a handler the source names and
+    /// `Unresolved(Anonymous)` for a function written at the registration;
+    /// [`Self::bind`] turns either into `Node` when one node of the file is
+    /// that handler. `None`: the producer saw no handler.
+    pub handler: Option<RawEndpoint>,
     pub span: (u32, u32, u32, u32),
     /// What the enclosing route groups apply (Laravel `Route::group`,
     /// `->group(...)`), and, for a [`RawRoute::INCLUDE`] record, the route
@@ -569,12 +576,24 @@ pub struct RawRoute {
     pub scope: Option<Box<RawRouteScope>>,
 }
 
+/// The kinds a route handler binds to: code, or an invokable class.
+const ROUTE_HANDLER: &[NodeKind] = &[
+    NodeKind::Function,
+    NodeKind::Method,
+    NodeKind::Constructor,
+    NodeKind::Class,
+];
+
+/// The kinds whose body holds statements, so a site inside one is a call,
+/// never a decorator.
+const CALLABLE_KINDS: &[NodeKind] = &[NodeKind::Function, NodeKind::Method, NodeKind::Constructor];
+
 impl RawRoute {
     /// `method` of a route-file include record, such as
     /// `Route::prefix('admin')->group(base_path('routes/admin.php'))`. It is
     /// not an endpoint: `path` holds the group prefix (empty for none), and
     /// the builder applies the record's prefix, middleware and namespace to
-    /// every route of the included file. `handler` holds the group's
+    /// every route of the included file. `handler` names the group's
     /// controller (`Route::controller(C::class)->group(...)`), whose method a
     /// bare action string in the included file names.
     pub const INCLUDE: &'static str = "INCLUDE";
@@ -591,6 +610,111 @@ impl RawRoute {
     /// and traits (fully qualified name after a space).
     /// `scope.only` / `scope.except` hold the method filter.
     pub const CONTROLLER_MIDDLEWARE: &'static str = "CONTROLLER_MIDDLEWARE";
+
+    /// A handler the source names: `None` for an empty or whitespace-only
+    /// name, as for no name.
+    pub fn named_handler(name: Option<&str>) -> Option<RawEndpoint> {
+        name.and_then(RawEndpoint::named)
+    }
+
+    /// The handler's name as the source writes it, while no node binds it.
+    pub fn handler_name(&self) -> Option<&str> {
+        match &self.handler {
+            Some(RawEndpoint::Unresolved(Unbound::Named(name))) => Some(name.as_str()),
+            _ => None,
+        }
+    }
+
+    /// The handler once the file's node list is final.
+    ///
+    /// | `handler` | Result |
+    /// |---|---|
+    /// | `Named`, record without a group scope | the node [`bind_name`] binds from the site; else the declaration a decorator at the site decorates, when it has that name; else `Named` |
+    /// | `Named`, record with a group scope | `Named`: a Laravel action binds across files, after heritage |
+    /// | `Anonymous` | the one outermost `<anonymous:` closure node inside the site; else `Anonymous` |
+    /// | `Node`, `File`, `None` | unchanged |
+    ///
+    /// An include or controller-middleware record is never bound. Binding
+    /// twice gives the same endpoint.
+    pub fn bind(&self, nodes: &[RawNode]) -> Option<RawEndpoint> {
+        if self.method == Self::INCLUDE || self.method == Self::CONTROLLER_MIDDLEWARE {
+            return self.handler.clone();
+        }
+        match &self.handler {
+            Some(RawEndpoint::Unresolved(Unbound::Named(name))) if self.scope.is_none() => {
+                Some(bind_route_handler(nodes, self.span, name.as_str()))
+            }
+            Some(RawEndpoint::Unresolved(Unbound::Anonymous)) => {
+                Some(route_closure(nodes, self.span).map_or(
+                    RawEndpoint::Unresolved(Unbound::Anonymous),
+                    RawEndpoint::Node,
+                ))
+            }
+            other => other.clone(),
+        }
+    }
+}
+
+/// A handler named at `site`.
+///
+/// Outside every callable, the site can be a decorator: the declaration
+/// that starts first after it is the one it decorates (`@Get(':id')
+/// find()`, `@app.get("/x") def find()`), and binds when it has the name.
+/// A class member or a same-name declaration elsewhere in the file never
+/// takes its place. Otherwise the handler is the one node [`bind_name`]
+/// binds; two visible candidates bind neither.
+fn bind_route_handler(nodes: &[RawNode], site: Span, name: &str) -> RawEndpoint {
+    if bind_enclosing(nodes, site, CALLABLE_KINDS).is_none() {
+        let next = nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| (n.span.0, n.span.1) >= (site.2, site.3))
+            .min_by_key(|(i, n)| {
+                let (r1, c1, r2, c2) = n.span;
+                ((r1, c1), std::cmp::Reverse((r2, c2)), *i)
+            });
+        if let Some((i, n)) = next {
+            if n.name == name && ROUTE_HANDLER.contains(&n.kind) {
+                if let Some(idx) = RawIdx::checked(i, nodes.len()) {
+                    return RawEndpoint::Node(idx);
+                }
+            }
+        }
+    }
+    bind_name(nodes, site, name, ROUTE_HANDLER)
+        .endpoint()
+        .clone()
+}
+
+/// The closure node a function written inside `site` became: the one
+/// outermost `<anonymous:` `Function` node the site contains. Two sibling
+/// closures bind neither.
+fn route_closure(nodes: &[RawNode], site: Span) -> Option<RawIdx> {
+    let closures: Vec<usize> = nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| {
+            n.kind == NodeKind::Function
+                && n.name.starts_with("<anonymous:")
+                && span_contains(site, n.span)
+        })
+        .map(|(i, _)| i)
+        .collect();
+    let outermost: Vec<usize> = closures
+        .iter()
+        .copied()
+        .filter(|&i| {
+            !closures.iter().any(|&o| {
+                o != i
+                    && nodes[o].span != nodes[i].span
+                    && span_contains(nodes[o].span, nodes[i].span)
+            })
+        })
+        .collect();
+    match outermost.as_slice() {
+        [only] => RawIdx::checked(*only, nodes.len()),
+        _ => None,
+    }
 }
 
 /// The group scope of one [`RawRoute`], as far as its own file shows it.
@@ -1256,11 +1380,15 @@ pub struct LocalGraph {
 
 impl LocalGraph {
     /// C4 `ParsePhase::BindRecords`: write the endpoint of every path
-    /// literal, SQL reference, schema field and event topic from its site.
+    /// literal, SQL reference, schema field and event topic from its site,
+    /// and the handler of every route ([`RawRoute::bind`]).
     /// Runs once the provider has returned, when the node list is final;
     /// nodes stay untouched.
     pub fn bind_records(&mut self) {
         let nodes = &self.nodes;
+        for r in &mut self.routes {
+            r.handler = r.bind(nodes);
+        }
         for r in self.path_literals.iter_mut().flat_map(|b| b.iter_mut()) {
             r.endpoint = r.bind(nodes);
         }
@@ -1651,6 +1779,126 @@ mod tests {
         let mut empty = LocalGraph::default();
         empty.bind_records();
         assert!(empty.path_literals.is_none() && empty.schema_fields.is_none());
+    }
+
+    fn route(handler: Option<RawEndpoint>, span: Span) -> RawRoute {
+        RawRoute {
+            method: "GET".into(),
+            path: "/x".into(),
+            handler,
+            span,
+            scope: None,
+        }
+    }
+
+    fn named(name: &str) -> Option<RawEndpoint> {
+        RawRoute::named_handler(Some(name))
+    }
+
+    const ANONYMOUS: Option<RawEndpoint> = Some(RawEndpoint::Unresolved(Unbound::Anonymous));
+
+    /// `app.get('/x', list)` inside `setup`: the file declares a class
+    /// member `list` before the top-level `list`. JS binds the bare name to
+    /// the top-level declaration, never to the member a name lookup finds
+    /// first.
+    #[test]
+    fn test_raw_route_bind_class_member_before_top_level_binds_top_level() {
+        let nodes = [
+            bind_node("Admin", NodeKind::Class, (0, 0, 4, 1)),
+            bind_node("list", NodeKind::Method, (1, 2, 3, 3)),
+            bind_node("list", NodeKind::Function, (6, 0, 8, 1)),
+            bind_node("setup", NodeKind::Function, (10, 0, 12, 1)),
+        ];
+        assert_eq!(
+            route(named("list"), (11, 2, 11, 30)).bind(&nodes),
+            Some(RawEndpoint::Node(RawIdx(2)))
+        );
+    }
+
+    /// `@Get('/x')` in a class body decorates the method that follows it,
+    /// although a top-level `find` is visible from the decorator.
+    #[test]
+    fn test_raw_route_bind_decorator_site_binds_decorated_member() {
+        let nodes = [
+            bind_node("Users", NodeKind::Class, (0, 0, 6, 1)),
+            bind_node("find", NodeKind::Method, (3, 2, 5, 3)),
+            bind_node("find", NodeKind::Function, (8, 0, 9, 1)),
+        ];
+        assert_eq!(
+            route(named("find"), (2, 3, 2, 6)).bind(&nodes),
+            Some(RawEndpoint::Node(RawIdx(1)))
+        );
+    }
+
+    /// A decorator whose next declaration has another name binds by
+    /// visibility; two visible top-level `h` (a redefinition) bind neither,
+    /// and the name stays for the unresolved report.
+    #[test]
+    fn test_raw_route_bind_two_visible_same_name_stays_named() {
+        let nodes = [
+            bind_node("h", NodeKind::Function, (0, 0, 1, 0)),
+            bind_node("h", NodeKind::Function, (2, 0, 3, 0)),
+            bind_node("setup", NodeKind::Function, (5, 0, 7, 0)),
+        ];
+        let r = route(named("h"), (6, 2, 6, 20));
+        assert_eq!(r.bind(&nodes), named("h"));
+        assert_eq!(r.handler_name(), Some("h"));
+        assert_eq!(
+            route(named("gone"), (4, 0, 4, 9)).bind(&nodes),
+            named("gone")
+        );
+    }
+
+    /// An inline function binds the one outermost closure node inside the
+    /// registration; none, or two sibling closures, keep it anonymous.
+    #[test]
+    fn test_raw_route_bind_anonymous_binds_outermost_closure_only() {
+        let nodes = [
+            bind_node("main", NodeKind::Function, (0, 0, 20, 1)),
+            bind_node("<anonymous:3:18>", NodeKind::Function, (2, 18, 4, 3)),
+            bind_node("<anonymous:4:3>", NodeKind::Function, (3, 2, 3, 20)),
+            bind_node("<anonymous:9:10>", NodeKind::Function, (8, 10, 8, 20)),
+            bind_node("<anonymous:9:30>", NodeKind::Function, (8, 30, 8, 40)),
+        ];
+        assert_eq!(
+            route(ANONYMOUS, (2, 2, 4, 4)).bind(&nodes),
+            Some(RawEndpoint::Node(RawIdx(1)))
+        );
+        assert_eq!(route(ANONYMOUS, (6, 2, 6, 30)).bind(&nodes), ANONYMOUS);
+        assert_eq!(route(ANONYMOUS, (8, 2, 8, 42)).bind(&nodes), ANONYMOUS);
+    }
+
+    /// A Laravel action, an include record's controller, an absent handler
+    /// and a blank name never bind in the file.
+    #[test]
+    fn test_raw_route_bind_scoped_include_absent_and_blank_unchanged() {
+        let nodes = [bind_node("index", NodeKind::Function, (0, 0, 2, 0))];
+        let mut scoped = route(named("index"), (4, 0, 4, 30));
+        scoped.scope = Some(Box::default());
+        assert_eq!(scoped.bind(&nodes), named("index"));
+        let mut include = route(named("index"), (4, 0, 4, 30));
+        include.method = RawRoute::INCLUDE.into();
+        assert_eq!(include.bind(&nodes), named("index"));
+        assert_eq!(route(None, (4, 0, 4, 30)).bind(&nodes), None);
+        assert_eq!(RawRoute::named_handler(Some(" \t")), None);
+        assert_eq!(RawRoute::named_handler(None), None);
+    }
+
+    /// `bind_records` writes route handlers too, and a second run keeps them.
+    #[test]
+    fn test_bind_records_route_handler_twice_same_endpoint() {
+        let mut graph = LocalGraph {
+            nodes: vec![
+                bind_node("list", NodeKind::Function, (0, 0, 2, 0)),
+                bind_node("setup", NodeKind::Function, (4, 0, 6, 0)),
+            ],
+            routes: vec![route(named("list"), (5, 2, 5, 30))],
+            ..LocalGraph::default()
+        };
+        graph.bind_records();
+        assert_eq!(graph.routes[0].handler, Some(RawEndpoint::Node(RawIdx(0))));
+        graph.bind_records();
+        assert_eq!(graph.routes[0].handler, Some(RawEndpoint::Node(RawIdx(0))));
     }
 
     #[test]

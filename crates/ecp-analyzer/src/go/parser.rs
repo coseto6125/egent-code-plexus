@@ -868,10 +868,18 @@ impl LanguageProvider for GoProvider {
                     let start = span_node.start_position();
                     let end = span_node.end_position();
 
+                    // gin and echo run the last argument as the handler;
+                    // the ones before it are middleware.
+                    let handler = crate::route_detector::last_argument_handler(
+                        span_node.child_by_field_name("arguments"),
+                        source,
+                        &["func_literal"],
+                        &["identifier", "selector_expression"],
+                    );
                     routes.push(ecp_core::analyzer::types::RawRoute {
                         method: method_str,
                         path: path_str,
-                        handler: None,
+                        handler,
                         span: (
                             start.row as u32,
                             start.column as u32,

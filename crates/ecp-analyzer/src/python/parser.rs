@@ -1271,8 +1271,11 @@ impl LanguageProvider for PythonProvider {
                             // as `None`; builder-side symbol-table lookup
                             // takes over there if/when the parser captures
                             // the handler arg.
-                            let decorator_handler =
-                                route_call_node.and_then(|n| resolve_decorator_handler(n, source));
+                            let decorator_handler = RawRoute::named_handler(
+                                route_call_node
+                                    .and_then(|n| resolve_decorator_handler(n, source))
+                                    .as_deref(),
+                            );
                             for method in methods_to_emit {
                                 routes.push(RawRoute {
                                     method,

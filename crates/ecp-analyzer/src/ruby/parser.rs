@@ -639,10 +639,17 @@ impl LanguageProvider for RubyProvider {
                 ) {
                     let start = r_root.start_position();
                     let end = r_root.end_position();
+                    // Sinatra `get "/x" do ... end` and Roda `r.get "x" do`
+                    // serve the route with the block written in place.
+                    let handler = r_root.child_by_field_name("block").map(|_| {
+                        ecp_core::contracts::raw_records::RawEndpoint::Unresolved(
+                            ecp_core::contracts::raw_records::Unbound::Anonymous,
+                        )
+                    });
                     routes.push(RawRoute {
                         method: method_str.to_string(),
                         path: path_str.to_string(),
-                        handler: None,
+                        handler,
                         span: (
                             start.row as u32,
                             start.column as u32,

@@ -630,10 +630,18 @@ impl LanguageProvider for JavaScriptProvider {
                     ) {
                         let start = root.start_position();
                         let end = root.end_position();
+                        // The last argument is the handler Express runs;
+                        // the ones before it are middleware.
+                        let handler = crate::route_detector::last_argument_handler(
+                            root.child_by_field_name("arguments"),
+                            source,
+                            &["arrow_function", "function_expression", "function"],
+                            &["identifier", "member_expression"],
+                        );
                         routes.push(RawRoute {
                             method: method_str.to_string(),
                             path: path_str.to_string(),
-                            handler: None,
+                            handler,
                             span: (
                                 start.row as u32,
                                 start.column as u32,

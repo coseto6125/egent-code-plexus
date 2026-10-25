@@ -192,6 +192,30 @@ fn body_has_call(node: tree_sitter::Node) -> bool {
     false
 }
 
+/// The name of the method a route decorator decorates, from the decorator's
+/// verb identifier (`Get` in `@Get(':id') find() {}`). The grammar puts a
+/// member's decorators before it in the class body; the method is the first
+/// following sibling that is not another decorator.
+fn decorated_method_name(verb: tree_sitter::Node, source: &[u8]) -> Option<String> {
+    let decorator = verb
+        .parent()?
+        .parent()
+        .filter(|d| d.kind() == "decorator")?;
+    let mut next = decorator.next_named_sibling();
+    while let Some(n) = next.filter(|n| n.kind() == "decorator" || n.is_extra()) {
+        next = n.next_named_sibling();
+    }
+    let member = next
+        .filter(|n| n.kind() == "method_definition")
+        .or_else(|| {
+            decorator
+                .parent()
+                .filter(|p| p.kind() == "method_definition")
+        })?;
+    let name = member.child_by_field_name("name")?.utf8_text(source).ok()?;
+    Some(name.to_string())
+}
+
 pub struct TypeScriptProvider {
     query: Query,
     indices: TypeScriptCaptureIndices,
@@ -236,10 +260,6 @@ struct TypeScriptCaptureIndices {
     route_method: Option<u32>,
     route_path: Option<u32>,
     route_call: Option<u32>,
-    /// Named handler argument of `app.METHOD(path, handler)` — used by the
-    /// builder to materialize a `HandlesRoute` edge from the handler back
-    /// to the Route node. Absent for inline arrow / anonymous handlers.
-    route_handler: Option<u32>,
     // Framework captures.
     express_handler: Option<u32>,
     nestjs_class: Option<u32>,
@@ -294,7 +314,6 @@ impl TypeScriptProvider {
             route_method: query.capture_index_for_name("route.method"),
             route_path: query.capture_index_for_name("route.path"),
             route_call: query.capture_index_for_name("route.call"),
-            route_handler: query.capture_index_for_name("route.handler"),
             express_handler: query.capture_index_for_name("express.route.handler"),
             nestjs_class: query.capture_index_for_name("nestjs.controller.class"),
             nestjs_method: query.capture_index_for_name("nestjs.method.name"),
@@ -355,8 +374,9 @@ impl LanguageProvider for TypeScriptProvider {
         type NestJsHandler = (String, String, (u32, u32, u32, u32));
         let mut pending_nestjs_handlers: Vec<NestJsHandler> = Vec::new();
         // NestJS decorator-routes pending `has_nestjs` import gate.
-        // (HTTP_METHOD, raw_path_with_quotes_stripped_by_capture, decorator_span)
-        type NestJsDecoratorRoute = (String, String, (u32, u32, u32, u32));
+        // (HTTP_METHOD, raw_path_with_quotes_stripped_by_capture, decorator_span,
+        // decorated method name)
+        type NestJsDecoratorRoute = (String, String, (u32, u32, u32, u32), Option<String>);
         let mut pending_nestjs_decorator_routes: Vec<NestJsDecoratorRoute> = Vec::new();
         let mut blind_spots: Vec<BlindSpot> = Vec::new();
         let file_category =
@@ -383,7 +403,6 @@ impl LanguageProvider for TypeScriptProvider {
 
             let mut route_method = None;
             let mut route_path = None;
-            let mut route_handler_node: Option<tree_sitter::Node> = None;
             let mut is_route = false;
 
             let mut nestjs_class_node: Option<tree_sitter::Node> = None;
@@ -444,8 +463,6 @@ impl LanguageProvider for TypeScriptProvider {
                 } else if cap_idx == idx.route_call {
                     is_route = true;
                     root_span_node = Some(cap.node);
-                } else if cap_idx == idx.route_handler {
-                    route_handler_node = Some(cap.node);
                 } else if cap_idx == idx.express_handler {
                     if let Ok(handler_name) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
@@ -688,15 +705,18 @@ impl LanguageProvider for TypeScriptProvider {
                         std::str::from_utf8(&source[r_method.start_byte()..r_method.end_byte()]),
                         std::str::from_utf8(&source[r_path.start_byte()..r_path.end_byte()]),
                     ) {
-                        let handler_name = route_handler_node.and_then(|n| {
-                            std::str::from_utf8(&source[n.start_byte()..n.end_byte()])
-                                .ok()
-                                .map(|s| s.to_string())
-                        });
+                        // The last argument is the handler Express runs;
+                        // the ones before it are middleware.
+                        let handler = crate::route_detector::last_argument_handler(
+                            root.child_by_field_name("arguments"),
+                            source,
+                            &["arrow_function", "function_expression", "function"],
+                            &["identifier", "member_expression"],
+                        );
                         routes.push(RawRoute {
                             method: method_str.to_string(),
                             path: path_str.to_string(),
-                            handler: handler_name,
+                            handler,
                             span: node_span(&root),
                             scope: None,
                         });
@@ -723,6 +743,7 @@ impl LanguageProvider for TypeScriptProvider {
                         verb_str.to_uppercase(),
                         path_str.to_string(),
                         node_span(&verb_node),
+                        decorated_method_name(verb_node, source),
                     ));
                 }
             }
@@ -822,12 +843,12 @@ impl LanguageProvider for TypeScriptProvider {
         // lax path helper because NestJS conventionally elides the leading
         // `/` (the framework prepends the controller prefix at runtime).
         if has_nestjs {
-            for (verb, raw_path, span) in pending_nestjs_decorator_routes {
+            for (verb, raw_path, span, method) in pending_nestjs_decorator_routes {
                 if let Some(cleaned) = crate::route_detector::clean_route_path_lax(&raw_path) {
                     routes.push(RawRoute {
                         method: verb,
                         path: cleaned,
-                        handler: None,
+                        handler: RawRoute::named_handler(method.as_deref()),
                         span,
                         scope: None,
                     });

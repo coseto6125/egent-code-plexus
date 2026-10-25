@@ -21,8 +21,8 @@ use ecp_core::analyzer::types::{
 pub use ecp_core::analyzer::types::{
     FUNCTION_REFERENCE_REASON, VALUE_READ_REASON, VARIANT_PATTERN_REASON, VARIANT_USE_REASON,
 };
-use ecp_core::contracts::identity::{lexical_parents, UidSlot};
-use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
+use ecp_core::contracts::identity::{lexical_parents, RouteKey, UidSlot};
+use ecp_core::contracts::raw_records::{FileOrd, RawEndpoint, RawIdx, RawIndexMap, Unbound};
 use ecp_core::contracts::routing::{FileRouter, Language as RouteLanguage};
 use ecp_core::file_category::determine_category;
 use ecp_core::graph::{
@@ -344,7 +344,6 @@ impl GraphBuilder {
         } = pass1_5_extract_routes(
             &self.local_graphs,
             &files,
-            &symbol_table,
             &raw_map,
             &mut string_pool,
             &mut nodes,
@@ -1554,11 +1553,148 @@ struct ExtractedRoutes {
     blind_spots: Vec<BlindSpotRecord>,
 }
 
+/// What one producer saw serve a route, before the producers of the
+/// route's file meet on its node.
+enum HandlerFact {
+    /// A node of the graph by global index, with the edge reason.
+    Bound(u32, &'static str),
+    /// A name that no node of the file binds.
+    Unresolved(String),
+    /// A function written at the registration with no node of its own.
+    Inline,
+    /// A Laravel action: Pass 1.95 binds it, or records why it binds none.
+    Action,
+    /// The producer saw no handler.
+    Absent,
+}
+
+/// The Route node of `key` in its file: the node that an earlier producer
+/// of the file made for the same key (C1 `RouteKey::uid`), else a new one
+/// at `span`. `true` when new.
+fn route_node(
+    key: &RouteKey,
+    file_idx: u32,
+    span: Span,
+    of_key: &mut FxHashMap<u64, u32>,
+    string_pool: &mut StringPool,
+    nodes: &mut Vec<Node>,
+) -> (u32, bool) {
+    let uid = key.uid();
+    if let Some(&idx) = of_key.get(&uid) {
+        return (idx, false);
+    }
+    let idx = nodes.len() as u32;
+    nodes.push(Node {
+        uid,
+        name: string_pool.add(&key.name()),
+        file_idx,
+        kind: NodeKind::Route,
+        span,
+        community_id: 0,
+        owner_class: StrRef::default(),
+        content_hash: 0,
+    });
+    of_key.insert(uid, idx);
+    (idx, true)
+}
+
+/// The `HandlesRoute` edges and BlindSpots of the routes of one file, from
+/// every producer's [`HandlerFact`]s, in the order the routes appeared.
+///
+/// A bound node gives one edge, however many producers bound it. A name
+/// that binds nothing gives a
+/// [`crate::route_detector::BS_KIND_ROUTE_UNBOUND_HANDLER`] BlindSpot,
+/// unless a producer bound a node of that name to the route. A route whose
+/// producers saw no handler at all gives a
+/// [`crate::route_detector::BS_KIND_ROUTE_HANDLER_ABSENT`] BlindSpot. An
+/// inline function with no node gives neither: `ecp routes` reads a route
+/// with no edge and no such BlindSpot as inline.
+fn emit_route_handlers(
+    facts: Vec<(u32, HandlerFact)>,
+    path_str: &str,
+    is_test: bool,
+    nodes: &[Node],
+    string_pool: &mut StringPool,
+    edges: &mut Vec<Edge>,
+    blind_spots: &mut Vec<BlindSpotRecord>,
+) {
+    let mut order: Vec<u32> = Vec::new();
+    let mut of_route: FxHashMap<u32, Vec<HandlerFact>> = FxHashMap::default();
+    for (route, fact) in facts {
+        of_route
+            .entry(route)
+            .or_insert_with(|| {
+                order.push(route);
+                Vec::new()
+            })
+            .push(fact);
+    }
+    for route in order {
+        let facts = &of_route[&route];
+        let mut bound: Vec<u32> = Vec::new();
+        for fact in facts {
+            if let HandlerFact::Bound(source, reason) = fact {
+                if bound.contains(source) {
+                    continue;
+                }
+                bound.push(*source);
+                edges.push(Edge {
+                    source: *source,
+                    target: route,
+                    rel_type: RelType::HandlesRoute,
+                    confidence: 1.0,
+                    reason: string_pool.add(reason),
+                });
+            }
+        }
+        let route_node = &nodes[route as usize];
+        let route_name = string_pool.resolve(&route_node.name).to_string();
+        let bound_names: Vec<String> = bound
+            .iter()
+            .map(|&idx| string_pool.resolve(&nodes[idx as usize].name).to_string())
+            .collect();
+        let mut hints: Vec<(&str, String)> = Vec::new();
+        for fact in facts {
+            if let HandlerFact::Unresolved(name) = fact {
+                let hint = crate::route_detector::unbound_handler_hint(&route_name, name);
+                if !bound_names.contains(name) && !hints.iter().any(|(_, h)| *h == hint) {
+                    hints.push((crate::route_detector::BS_KIND_ROUTE_UNBOUND_HANDLER, hint));
+                }
+            }
+        }
+        let only_absent = facts.iter().all(|f| matches!(f, HandlerFact::Absent));
+        if only_absent {
+            hints.push((
+                crate::route_detector::BS_KIND_ROUTE_HANDLER_ABSENT,
+                crate::route_detector::absent_handler_hint(&route_name),
+            ));
+        }
+        let span = route_node.span;
+        for (kind, hint) in hints {
+            blind_spots.push(BlindSpotRecord {
+                kind: string_pool.add(kind),
+                file_path: string_pool.add(path_str),
+                start_row: span.0,
+                start_col: span.1,
+                end_row: span.2,
+                end_col: span.3,
+                hint: string_pool.add(&hint),
+                is_test,
+            });
+        }
+    }
+}
+
 /// Pass 1.5: Extract Routes.
+///
+/// Two producers make routes: a route decorator on a node (`@Get('/x')`,
+/// `[HttpGet("/x")]`) and a registration record ([`RawRoute`]). Both key a
+/// route by C1 [`RouteKey`] (file, verb, full path), so the producers that
+/// describe one endpoint make one Route node. A record's handler is its
+/// bound endpoint ([`RawRoute::bind`]), never the first node of that name.
 fn pass1_5_extract_routes(
     local_graphs: &[LocalGraph],
     files: &[File],
-    symbol_table: &SymbolTable,
     raw_map: &RawIndexMap,
     string_pool: &mut StringPool,
     nodes: &mut Vec<Node>,
@@ -1567,6 +1703,7 @@ fn pass1_5_extract_routes(
     let mut emitted_routes: Vec<EmittedRoute> = Vec::new();
     let mut route_middleware: Vec<RouteMiddleware> = Vec::new();
     let mut actions: Vec<PendingAction> = Vec::new();
+    let mut handler_blind_spots: Vec<BlindSpotRecord> = Vec::new();
     // Route groups reach across files (a provider's `->group(base_path(
     // 'routes/admin.php'))` prefixes every route of `admin.php`), so the
     // per-file view alone cannot name a Laravel route's path or handler.
@@ -1584,13 +1721,12 @@ fn pass1_5_extract_routes(
         // would pollute the production-route surface. Reads the
         // category already computed in Pass 1 (line 229) — avoids
         // re-running `determine_category` (~36 string scans per file).
-        let is_non_production = matches!(
-            files[file_idx as usize].category,
-            FileCategory::Test | FileCategory::Reference
-        );
-        if is_non_production {
+        let category = files[file_idx as usize].category;
+        if matches!(category, FileCategory::Test | FileCategory::Reference) {
             continue;
         }
+        let mut of_key: FxHashMap<u64, u32> = FxHashMap::default();
+        let mut facts: Vec<(u32, HandlerFact)> = Vec::new();
 
         for (raw_idx, raw_node) in local_graph.nodes.iter().enumerate() {
             let Some(handler_idx) = raw_map.node(FileOrd(file_idx), RawIdx(raw_idx as u32)) else {
@@ -1599,34 +1735,26 @@ fn pass1_5_extract_routes(
 
             for dec in &raw_node.decorators {
                 for detected in crate::route_detector::detect_all_from_decorator(dec) {
-                    let route_name = format!("{} {}", detected.method, detected.path);
-
-                    let route_idx = nodes.len() as u32;
-                    nodes.push(Node {
-                        uid: ecp_core::uid::compute(NodeKind::Route, &path_str, None, &route_name),
-                        name: string_pool.add(&route_name),
+                    let Ok(key) = RouteKey::new(&path_str, &detected.method, &detected.path) else {
+                        continue;
+                    };
+                    let (route_idx, new) = route_node(
+                        &key,
                         file_idx,
-                        kind: ecp_core::graph::NodeKind::Route,
-                        span: raw_node.span,
-                        community_id: 0,
-                        owner_class: StrRef::default(),
-                        content_hash: 0,
-                    });
-
-                    route_edges.push(Edge {
-                        source: handler_idx,
-                        target: route_idx,
-                        rel_type: RelType::HandlesRoute,
-                        confidence: 1.0,
-                        reason: string_pool.add("decorator"),
-                    });
-
-                    emitted_routes.push((
-                        route_idx,
-                        file_idx,
-                        detected.method.clone(),
-                        detected.path.clone(),
-                    ));
+                        raw_node.span,
+                        &mut of_key,
+                        string_pool,
+                        nodes,
+                    );
+                    facts.push((route_idx, HandlerFact::Bound(handler_idx, "decorator")));
+                    if new {
+                        emitted_routes.push((
+                            route_idx,
+                            file_idx,
+                            key.verb().to_string(),
+                            key.path().to_string(),
+                        ));
+                    }
                 }
             }
         }
@@ -1640,19 +1768,19 @@ fn pass1_5_extract_routes(
             let Some(detected) = crate::route_detector::detect_from_call(raw_route) else {
                 continue;
             };
+            // A graph built without the parse entries (a provider called
+            // directly) carries unbound handlers; binding again is a no-op.
+            let handler = raw_route.bind(&local_graph.nodes);
             let promoted = match raw_route.scope.as_deref() {
-                Some(scope) => laravel.promote(
-                    file_idx,
-                    scope,
-                    &detected.path,
-                    raw_route.handler.as_deref(),
-                ),
+                Some(scope) => {
+                    laravel.promote(file_idx, scope, &detected.path, raw_route.handler_name())
+                }
                 None => vec![crate::php::laravel_routes::PromotedRoute {
                     path: detected.path.clone(),
                     middleware: Vec::new(),
                     excluded: Vec::new(),
                     namespace: None,
-                    action: raw_route.handler.clone(),
+                    action: None,
                 }],
             };
             // Two including groups can give one route the same path. Laravel's
@@ -1668,49 +1796,64 @@ fn pass1_5_extract_routes(
                 if !last {
                     continue;
                 }
-                let route_name = format!("{} {}", detected.method, route.path);
-
-                let route_idx = nodes.len() as u32;
-                nodes.push(Node {
-                    uid: ecp_core::uid::compute(NodeKind::Route, &path_str, None, &route_name),
-                    name: string_pool.add(&route_name),
+                let Ok(key) = RouteKey::new(&path_str, &detected.method, &route.path) else {
+                    continue;
+                };
+                let (route_idx, new) = route_node(
+                    &key,
                     file_idx,
-                    kind: ecp_core::graph::NodeKind::Route,
-                    span: raw_route.span,
-                    community_id: 0,
-                    owner_class: StrRef::default(),
-                    content_hash: 0,
-                });
+                    raw_route.span,
+                    &mut of_key,
+                    string_pool,
+                    nodes,
+                );
+                let route_name = key.name();
+                // Laravel keeps the registration of a method and URI that
+                // comes last, so a second grouped registration replaces the
+                // first one's action, middleware and site. Other routers run
+                // every registration, so their handlers add up.
+                if !new && raw_route.scope.is_some() {
+                    actions.retain(|a| a.route != route_idx);
+                    route_middleware.retain(|m| m.node_idx != route_idx);
+                    facts.retain(|(r, _)| *r != route_idx);
+                    nodes[route_idx as usize].span = raw_route.span;
+                }
 
-                // Resolve the imperative-route handler, if the parser captured
-                // a named handler (e.g. `app.get("/x", loginHandler)`). The
-                // handler must be a function/method registered in the same
-                // file; inline arrow functions are not captured. A route with
-                // a group scope names a controller action (`Ctrl@method`) in
-                // any file instead, bound once heritage is resolved.
-                match (route.action.as_deref(), raw_route.scope.is_some()) {
-                    (None, _) => {}
-                    (Some(action), true) => actions.push(PendingAction {
-                        route: route_idx,
-                        route_name: route_name.clone(),
-                        action: action.to_string(),
-                        namespace: route.namespace.clone(),
-                        middleware: route.middleware.clone(),
-                        excluded: route.excluded.clone(),
-                    }),
-                    (Some(handler_name), false) => {
-                        if let Some(handler) = symbol_table.lookup_in_file(&path_str, handler_name)
-                        {
-                            route_edges.push(Edge {
-                                source: handler,
-                                target: route_idx,
-                                rel_type: RelType::HandlesRoute,
-                                confidence: 1.0,
-                                reason: string_pool.add("call-arg"),
-                            });
+                // A route with a group scope names a controller action
+                // (`Ctrl@method`) in any file, bound once heritage is
+                // resolved. Any other handler is the record's endpoint.
+                let fact = match (route.action.as_deref(), &handler) {
+                    (Some(action), _) => {
+                        actions.push(PendingAction {
+                            route: route_idx,
+                            route_name: route_name.clone(),
+                            action: action.to_string(),
+                            namespace: route.namespace.clone(),
+                            middleware: route.middleware.clone(),
+                            excluded: route.excluded.clone(),
+                        });
+                        HandlerFact::Action
+                    }
+                    (None, Some(RawEndpoint::Node(raw))) => {
+                        let declared = local_graph.nodes.get(raw.index());
+                        match (declared, raw_map.node(FileOrd(file_idx), *raw)) {
+                            (Some(node), Some(global)) if is_anonymous_closure(node) => {
+                                HandlerFact::Bound(global, "inline-closure")
+                            }
+                            (_, Some(global)) => HandlerFact::Bound(global, "call-arg"),
+                            (Some(node), None) => HandlerFact::Unresolved(node.name.clone()),
+                            (None, None) => HandlerFact::Absent,
                         }
                     }
-                }
+                    (None, Some(RawEndpoint::Unresolved(Unbound::Named(name)))) => {
+                        HandlerFact::Unresolved(name.as_str().to_string())
+                    }
+                    (None, Some(RawEndpoint::Unresolved(Unbound::Anonymous))) => {
+                        HandlerFact::Inline
+                    }
+                    (None, Some(RawEndpoint::File) | None) => HandlerFact::Absent,
+                };
+                facts.push((route_idx, fact));
 
                 if !route.middleware.is_empty() {
                     route_middleware.push(RouteMiddleware {
@@ -1723,11 +1866,27 @@ fn pass1_5_extract_routes(
                     });
                 }
 
-                emitted_routes.push((route_idx, file_idx, detected.method.clone(), route.path));
+                if new {
+                    emitted_routes.push((
+                        route_idx,
+                        file_idx,
+                        key.verb().to_string(),
+                        key.path().to_string(),
+                    ));
+                }
             }
         }
+        emit_route_handlers(
+            facts,
+            &path_str,
+            matches!(category, FileCategory::Test),
+            nodes,
+            string_pool,
+            &mut route_edges,
+            &mut handler_blind_spots,
+        );
     }
-    let blind_spots: Vec<BlindSpotRecord> = laravel
+    let mut blind_spots: Vec<BlindSpotRecord> = laravel
         .capped_includes()
         .iter()
         .map(|capped| {
@@ -1744,6 +1903,7 @@ fn pass1_5_extract_routes(
             }
         })
         .collect();
+    blind_spots.append(&mut handler_blind_spots);
     ExtractedRoutes {
         edges: route_edges,
         emitted: emitted_routes,
@@ -4941,7 +5101,7 @@ mod tests {
                     routes: vec![RawRoute {
                         method: "GET".into(),
                         path: "/users".into(),
-                        handler: Some("other_fn".into()),
+                        handler: RawRoute::named_handler(Some("other_fn")),
                         span: (20, 0, 20, 30),
                         scope: None,
                     }],
@@ -5139,7 +5299,7 @@ mod tests {
             routes: vec![ecp_core::analyzer::types::RawRoute {
                 method: method.into(),
                 path: route_path.into(),
-                handler: Some(handler.into()),
+                handler: ecp_core::analyzer::types::RawRoute::named_handler(Some(handler)),
                 span: (0, 0, 0, 0),
                 scope: None,
             }],

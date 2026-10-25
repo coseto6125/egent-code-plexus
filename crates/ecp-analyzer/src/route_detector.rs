@@ -1,5 +1,6 @@
 use crate::framework_helpers::strip_python_string_quotes;
 use ecp_core::analyzer::types::RawRoute;
+use ecp_core::contracts::raw_records::{RawEndpoint, Unbound};
 
 const HTTP_METHODS: &[&str] = &[
     "get", "post", "put", "delete", "patch", "options", "head", "connect", "trace",
@@ -370,9 +371,89 @@ pub fn join_route_path<'a>(segments: impl IntoIterator<Item = &'a str>) -> Strin
     path
 }
 
+/// BlindSpot kind of a route whose registration names a handler that binds
+/// no declaration of its file: a Rails `posts#index`, an imported Express
+/// handler, two same-name candidates. Its hint is [`unbound_handler_hint`].
+pub const BS_KIND_ROUTE_UNBOUND_HANDLER: &str = "route-unbound-handler";
+
+/// BlindSpot kind of a route whose registration shows no handler that the
+/// parser reads: a gRPC `rpc`, a handler that a call builds. Its hint is
+/// [`absent_handler_hint`].
+pub const BS_KIND_ROUTE_HANDLER_ABSENT: &str = "route-handler-absent";
+
+const UNBOUND_HANDLER_HEAD: &str = " names handler `";
+const UNBOUND_HANDLER_TAIL: &str = "`, which binds no declaration of this file";
+const ABSENT_HANDLER_TAIL: &str = ": the registration shows no handler the parser reads";
+
+/// The hint of a [`BS_KIND_ROUTE_UNBOUND_HANDLER`] BlindSpot. It starts
+/// with the Route node's name, because one registration can register
+/// several routes at one site.
+pub fn unbound_handler_hint(route_name: &str, handler: &str) -> String {
+    format!("{route_name}{UNBOUND_HANDLER_HEAD}{handler}{UNBOUND_HANDLER_TAIL}")
+}
+
+/// The handler name in an [`unbound_handler_hint`] of `route_name`; `None`
+/// for a hint of another route.
+pub fn unbound_handler<'h>(hint: &'h str, route_name: &str) -> Option<&'h str> {
+    hint.strip_prefix(route_name)?
+        .strip_prefix(UNBOUND_HANDLER_HEAD)?
+        .strip_suffix(UNBOUND_HANDLER_TAIL)
+}
+
+/// The hint of a [`BS_KIND_ROUTE_HANDLER_ABSENT`] BlindSpot.
+pub fn absent_handler_hint(route_name: &str) -> String {
+    format!("{route_name}{ABSENT_HANDLER_TAIL}")
+}
+
+/// Whether `hint` is the [`absent_handler_hint`] of `route_name`.
+pub fn is_absent_handler_hint(hint: &str, route_name: &str) -> bool {
+    hint.strip_prefix(route_name) == Some(ABSENT_HANDLER_TAIL)
+}
+
+/// The handler that a registration call passes as its last argument
+/// (Express, gin and their kin run the last one): a function written in
+/// place is anonymous, an argument of a kind in `name_kinds` names the
+/// handler by its text, and anything else (the path alone, a call that
+/// builds the handler) is no handler. Comments are skipped.
+pub fn last_argument_handler(
+    args: Option<tree_sitter::Node>,
+    source: &[u8],
+    function_kinds: &[&str],
+    name_kinds: &[&str],
+) -> Option<RawEndpoint> {
+    let args = args?;
+    let mut cursor = args.walk();
+    let last = args
+        .named_children(&mut cursor)
+        .filter(|n| !n.is_extra())
+        .last()?;
+    match last.kind() {
+        kind if function_kinds.contains(&kind) => Some(RawEndpoint::Unresolved(Unbound::Anonymous)),
+        kind if name_kinds.contains(&kind) => RawRoute::named_handler(last.utf8_text(source).ok()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_unbound_handler_hint_round_trip_returns_name_for_own_route_only() {
+        let hint = unbound_handler_hint("GET /users", "posts#index");
+        assert_eq!(unbound_handler(&hint, "GET /users"), Some("posts#index"));
+        assert_eq!(unbound_handler(&hint, "POST /users"), None);
+        assert_eq!(unbound_handler(&hint, "GET /user"), None);
+        assert_eq!(unbound_handler("", "GET /users"), None);
+    }
+
+    #[test]
+    fn test_is_absent_handler_hint_own_route_true_other_false() {
+        let hint = absent_handler_hint("GRPC /pkg.Svc/M");
+        assert!(is_absent_handler_hint(&hint, "GRPC /pkg.Svc/M"));
+        assert!(!is_absent_handler_hint(&hint, "GRPC /pkg.Svc"));
+        assert!(!is_absent_handler_hint("", "GRPC /pkg.Svc/M"));
+    }
 
     fn raw(method: &str, path: &str) -> RawRoute {
         RawRoute {
