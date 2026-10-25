@@ -165,3 +165,31 @@ fn test_bind_site_java_two_same_name_methods_each_gets_own_edge() {
         vec![("load", 7)]
     );
 }
+
+const TWO_FIELDS_SRC: &str = r#"class A {
+    private String p = "conf/app.json";
+}
+
+class B {
+    private String p = "conf/app.json";
+}
+"#;
+
+/// Two class-body literals with one value bind `File`; each keeps the class
+/// its walker found as the PathLiteral owner, so the two nodes keep distinct
+/// uids (a shared uid collapses them in every uid index).
+#[test]
+fn test_bind_site_java_same_literal_in_two_class_fields_keeps_owner_and_uid() {
+    let g = build(parse(TWO_FIELDS_SRC));
+    let pool = g.string_pool.as_slice();
+    let mut lits: Vec<(String, u64)> = g
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::PathLiteral && n.name.resolve(pool) == "conf/app.json")
+        .map(|n| (n.owner_class.resolve(pool).to_string(), n.uid))
+        .collect();
+    lits.sort();
+    let owners: Vec<&str> = lits.iter().map(|(o, _)| o.as_str()).collect();
+    assert_eq!(owners, vec!["A", "B"], "{lits:?}");
+    assert_ne!(lits[0].1, lits[1].1, "{lits:?}");
+}

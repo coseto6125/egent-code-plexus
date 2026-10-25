@@ -1,6 +1,6 @@
 # C4: raw records
 
-Status: contract, phase 1. Types: `crates/ecp-core/src/contracts/raw_records.rs`. No code calls them yet.
+Status: contract, phase 1. Types: `crates/ecp-core/src/contracts/raw_records.rs`. Landed: slice P5 (`RawIndexMap` replaces the per-pass prefix sums) and slice P6 (`PathLiteral`, `SqlRef`, `SchemaField` and `EventTopic` records carry a bound `endpoint`; a module-top site binds `File`). The section "Today" records the state before those slices.
 
 Plan row (`docs/specs/2026-10-25-architecture-direction.md`, "Contracts before code"): the parser phases (collect captures, finalize nodes, bind raw records), the raw index to global node mapping, the endpoint of a raw record (node, file or unresolved), and the evidence classes exact, ambiguous, heuristic and unresolved. Consumers: areas 2, 4, 5 (the records the overlay replays), 7, 8, 10.
 

@@ -306,9 +306,9 @@ const RELTYPES: &[RelTypeEntry] = &[
     RelTypeEntry { rel: RelType::OpensTxScope, name: "OpensTxScope", utility: "A", note: "Opener Function/Method → its TransactionScope node. Query as (f)-[:OpensTxScope]->(s:TransactionScope); same forward convention as Publishes/Subscribes." },
     RelTypeEntry { rel: RelType::Overrides, name: "Overrides", utility: "A", note: "Method-level override (Java @Override, Kotlin override fun, C# override, C++ virtual-match). Distinct from class-level Extends." },
     RelTypeEntry { rel: RelType::Decorates, name: "Decorates", utility: "A", note: "Decorator/attribute → decorated symbol (Python @decorator, Java/Kotlin @annotation, C# attribute, Rust attribute macro). 10-language emission." },
-    RelTypeEntry { rel: RelType::UsesPathLiteral, name: "UsesPathLiteral", utility: "A", note: "Function/Method → PathLiteral. Drives `ecp impact --literal <value>` to find every read/write site touching a filesystem path or config key. 14-language emission." },
+    RelTypeEntry { rel: RelType::UsesPathLiteral, name: "UsesPathLiteral", utility: "A", note: "Function/Method/Const → PathLiteral; File for a module-top or class-field site. Drives `ecp impact --literal <value>` to find every read/write site touching a filesystem path or config key. 14-language emission." },
     RelTypeEntry { rel: RelType::CompensatedBy, name: "CompensatedBy", utility: "C", note: "Heuristic Saga compensation: compensator → operation it rolls back. reason encodes evidence (saga:calls-back 0.8 / saga:name-only 0.6). Shown by default in heuristic_callers; --no-heuristic suppresses." },
-    RelTypeEntry { rel: RelType::QueriesTable, name: "QueriesTable", utility: "A", note: "Function/Method → database table (Class node) via raw SQL string literal. reason encodes 'read' (SELECT) or 'write' (INSERT/UPDATE/DELETE). ecp impact <table> --upstream surfaces every raw-SQL caller for schema-migration blast radius." },
+    RelTypeEntry { rel: RelType::QueriesTable, name: "QueriesTable", utility: "A", note: "Function/Method/Const → database table (Class node) via raw SQL string literal; File for a module-top site. reason encodes 'read' (SELECT) or 'write' (INSERT/UPDATE/DELETE). ecp impact <table> --upstream surfaces every raw-SQL caller for schema-migration blast radius." },
 ];
 
 fn reltype_views() -> Vec<RelTypeView> {

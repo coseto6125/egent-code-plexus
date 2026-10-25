@@ -78,7 +78,7 @@ pub fn emit_edges(
                 continue;
             };
 
-            let Some(fn_global_id) = raw_map.slot(FileOrd(file_idx), RawIdx(raw.node_idx())) else {
+            let Some(fn_global_id) = raw_map.node(FileOrd(file_idx), RawIdx(raw.node_idx())) else {
                 continue;
             };
             let framework_str = raw.framework().as_str();

@@ -1684,7 +1684,7 @@ impl ControllerIndex {
                 }
                 .to_ascii_lowercase();
                 let slot = index.types.len();
-                let Some(node_idx) = raw_map.slot(file, RawIdx(local_idx as u32)) else {
+                let Some(node_idx) = raw_map.node(file, RawIdx(local_idx as u32)) else {
                     continue;
                 };
                 index.by_node.insert(node_idx, slot);
@@ -1728,7 +1728,7 @@ impl ControllerIndex {
                     owner.has_constructor = true;
                     continue;
                 }
-                let Some(method_idx) = raw_map.slot(file, RawIdx(local_idx as u32)) else {
+                let Some(method_idx) = raw_map.node(file, RawIdx(local_idx as u32)) else {
                     continue;
                 };
                 owner

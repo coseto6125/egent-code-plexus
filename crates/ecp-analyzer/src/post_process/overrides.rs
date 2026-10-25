@@ -164,7 +164,7 @@ pub fn emit_edges(
                 // Candidate's own node index is the graph-local base plus
                 // raw-node index. Looking it up by name is ambiguous for
                 // overloads and same-name methods in sibling classes.
-                let Some(candidate_idx) = raw_map.slot(file, RawIdx(candidate_raw_idx as u32))
+                let Some(candidate_idx) = raw_map.node(file, RawIdx(candidate_raw_idx as u32))
                 else {
                     continue;
                 };
@@ -214,7 +214,7 @@ fn build_ancestor_method_index(local_graphs: &[LocalGraph], raw_map: &RawIndexMa
             let Some(class_name) = innermost_class(node.span, &classes) else {
                 continue;
             };
-            let Some(slot) = raw_map.slot(file, RawIdx(raw_idx as u32)) else {
+            let Some(slot) = raw_map.node(file, RawIdx(raw_idx as u32)) else {
                 continue;
             };
             out.entry((class_name.to_string(), node.name.clone()))

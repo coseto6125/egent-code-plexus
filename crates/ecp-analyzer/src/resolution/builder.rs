@@ -757,7 +757,8 @@ impl GraphBuilder {
         );
 
         // PathLiteral promotion — emits `PathLiteral` Nodes + `UsesPathLiteral`
-        // edges (enclosing fn → PathLiteral). Same idx-contiguity contract as
+        // edges (bound endpoint → PathLiteral; a File endpoint waits in
+        // `file_edges` for the File-node loop). Same idx-contiguity contract as
         // schema_field_mirrors / event_topic_mirrors above: appends Nodes
         // before the File-node loop runs.
         crate::post_process::path_literal_nodes::emit_edges(
@@ -1486,9 +1487,10 @@ fn pass1_5_extract_routes(
             continue;
         }
 
-        let file_start = file_base(raw_map, file_idx);
         for (raw_idx, raw_node) in local_graph.nodes.iter().enumerate() {
-            let handler_idx = file_start + raw_idx as u32;
+            let Some(handler_idx) = raw_map.node(FileOrd(file_idx), RawIdx(raw_idx as u32)) else {
+                continue;
+            };
 
             for dec in &raw_node.decorators {
                 for detected in crate::route_detector::detect_all_from_decorator(dec) {

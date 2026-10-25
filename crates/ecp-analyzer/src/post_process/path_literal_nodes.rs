@@ -51,12 +51,15 @@ pub fn emit_edges(
             let endpoint = raw.endpoint_in(&lg.nodes);
             // The owner is the bound node's own owner, so two identical
             // literals in same-name methods of two types get distinct UIDs.
+            // A literal with no bound node (a class-body field initializer
+            // binds File) keeps the class its walker found, or two classes
+            // of one file holding the same literal would share a uid.
             let owner_name = match &endpoint {
                 Some(RawEndpoint::Node(idx)) => lg
                     .nodes
                     .get(idx.index())
                     .and_then(|n| n.owner_class.as_deref()),
-                _ => None,
+                _ => raw.enclosing_owner.as_deref(),
             }
             .unwrap_or("");
 

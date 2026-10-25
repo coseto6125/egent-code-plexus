@@ -83,7 +83,7 @@ pub fn emit_edges(
                 continue;
             }
 
-            let Some(source_idx) = raw_map.slot(file, RawIdx(raw_idx as u32)) else {
+            let Some(source_idx) = raw_map.node(file, RawIdx(raw_idx as u32)) else {
                 continue;
             };
 
