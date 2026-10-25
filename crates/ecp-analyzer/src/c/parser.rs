@@ -817,6 +817,7 @@ impl LanguageProvider for CProvider {
             nodes,
             imports,
             documents: vec![],
+            route_receivers: None,
             framework_refs: vec![],
             fanout_refs: vec![],
             blind_spots,

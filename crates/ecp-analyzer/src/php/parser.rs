@@ -1123,6 +1123,7 @@ impl LanguageProvider for PhpProvider {
             nodes,
             imports,
             documents: vec![],
+            route_receivers: None,
             framework_refs,
             fanout_refs,
             blind_spots,

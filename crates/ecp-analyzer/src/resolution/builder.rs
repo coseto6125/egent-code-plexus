@@ -1681,9 +1681,9 @@ impl HandlerIdentity<'_> {
 }
 
 /// The routers an Express `app.use("/api", router)` mounts, as far as the
-/// build shows them. A parser that reads Express mounts writes, next to each
-/// route call, a [`crate::javascript::parser::ROUTE_RECEIVER`] record (at the
-/// call's span, the receiver variable in `path`); the `use` record itself
+/// build shows them. A parser that reads Express mounts writes, for each
+/// route call, a `LocalGraph::route_receivers` entry (the call's span and its
+/// receiver variable); the `use` record itself
 /// names the mounted binding as its handler. A binding resolves to the router
 /// variable of the same file, or, through an import of the mounting file that
 /// the resolver resolves, to the router of the imported file. A mount that
@@ -1715,18 +1715,15 @@ impl RouteMounts {
         let mut routers: Vec<Vec<&str>> = vec![Vec::new(); local_graphs.len()];
         let mut any_mount = false;
         for (file_idx, graph) in local_graphs.iter().enumerate() {
-            for record in &graph.routes {
-                if record.method == crate::javascript::parser::ROUTE_RECEIVER {
-                    mounts
-                        .receiver_at
-                        .insert((file_idx as u32, record.span), record.path.clone());
-                    if !routers[file_idx].contains(&record.path.as_str()) {
-                        routers[file_idx].push(&record.path);
-                    }
-                } else if is_mount(record) {
-                    any_mount = true;
+            for record in graph.route_receivers.iter().flatten() {
+                mounts
+                    .receiver_at
+                    .insert((file_idx as u32, record.span), record.receiver.clone());
+                if !routers[file_idx].contains(&record.receiver.as_str()) {
+                    routers[file_idx].push(&record.receiver);
                 }
             }
+            any_mount |= graph.routes.iter().any(is_mount);
         }
         if !any_mount || mounts.receiver_at.is_empty() {
             return mounts;
@@ -4485,6 +4482,7 @@ mod tests {
                 binding_kind: None,
             }],
             routes: vec![],
+            route_receivers: None,
             framework_refs: vec![],
             fanout_refs: vec![],
             blind_spots: vec![],
@@ -4516,6 +4514,7 @@ mod tests {
             documents: vec![],
             imports: vec![],
             routes: vec![],
+            route_receivers: None,
             framework_refs: vec![],
             fanout_refs: vec![],
             blind_spots: vec![],
@@ -5156,6 +5155,7 @@ mod tests {
             documents: vec![],
             imports: vec![],
             routes: vec![],
+            route_receivers: None,
             framework_refs: vec![],
             fanout_refs: vec![RawFanoutRef {
                 source_name: "dispatch".into(),
@@ -5252,6 +5252,7 @@ mod tests {
             documents: vec![],
             imports: vec![],
             routes: vec![],
+            route_receivers: None,
             framework_refs: vec![],
             fanout_refs: vec![RawFanoutRef {
                 source_name: "dispatch".into(),
@@ -5327,6 +5328,7 @@ mod tests {
             imports: vec![],
             routes: vec![],
             fanout_refs: vec![],
+            route_receivers: None,
             framework_refs: vec![RawFrameworkRef {
                 source_name: "handler".into(),
                 target_name: "get_db".into(),
@@ -5384,6 +5386,7 @@ mod tests {
             documents: vec![],
             imports: vec![],
             routes: vec![],
+            route_receivers: None,
             framework_refs: vec![],
             fanout_refs: vec![],
             blind_spots: vec![],
@@ -5525,6 +5528,7 @@ mod tests {
             documents: vec![],
             imports: vec![],
             routes: vec![],
+            route_receivers: None,
             framework_refs: vec![],
             fanout_refs: vec![],
             blind_spots: vec![
@@ -5650,6 +5654,7 @@ mod tests {
                     documents: vec![],
                     imports: vec![],
                     routes: vec![],
+                    route_receivers: None,
                     framework_refs: vec![RawFrameworkRef {
                         source_name: "Foo".into(),
                         target_name: "other_fn".into(),
@@ -5730,6 +5735,7 @@ mod tests {
                         span: (20, 0, 20, 30),
                         scope: None,
                     }],
+                    route_receivers: None,
                     framework_refs: vec![],
                     fanout_refs: vec![],
                     blind_spots: vec![],
@@ -5763,6 +5769,7 @@ mod tests {
                     documents: vec![],
                     imports: vec![],
                     routes: vec![],
+                    route_receivers: None,
                     framework_refs: vec![],
                     fanout_refs: vec![],
                     blind_spots: vec![],
@@ -5928,6 +5935,7 @@ mod tests {
                 span: (0, 0, 0, 0),
                 scope: None,
             }],
+            route_receivers: None,
             framework_refs: vec![],
             fanout_refs: vec![],
             blind_spots: vec![],
@@ -5962,6 +5970,7 @@ mod tests {
             documents: vec![],
             imports: vec![],
             routes: vec![],
+            route_receivers: None,
             framework_refs: vec![],
             fanout_refs: vec![],
             blind_spots: vec![],

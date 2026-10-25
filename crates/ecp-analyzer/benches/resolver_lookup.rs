@@ -51,6 +51,7 @@ fn build_test_graph(n: usize) -> (Vec<u8>, Vec<u64>) {
         documents: vec![],
         imports: vec![],
         routes: vec![],
+        route_receivers: None,
         framework_refs: vec![],
         fanout_refs: vec![],
         blind_spots: vec![],

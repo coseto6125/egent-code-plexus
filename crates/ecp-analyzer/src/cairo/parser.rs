@@ -159,6 +159,7 @@ impl LanguageProvider for CairoProvider {
             nodes,
             imports,
             documents: vec![],
+            route_receivers: None,
             framework_refs: vec![],
             fanout_refs: vec![],
             blind_spots: vec![],

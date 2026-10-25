@@ -60,6 +60,7 @@ fn lg(path: &str, nodes: Vec<RawNode>, imports: Vec<RawImport>) -> LocalGraph {
         documents: vec![],
         imports,
         routes: vec![],
+        route_receivers: None,
         framework_refs: vec![],
         fanout_refs: vec![],
         blind_spots: vec![],

@@ -510,6 +510,7 @@ mod tests {
             documents: Vec::new(),
             imports: Vec::new(),
             routes: Vec::new(),
+            route_receivers: None,
             framework_refs: Vec::new(),
             fanout_refs: Vec::new(),
             blind_spots: Vec::new(),

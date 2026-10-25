@@ -1406,6 +1406,16 @@ pub struct RawExportAlias {
     pub local: Box<str>,
 }
 
+/// The variable a route call is made on: `router` in `router.get("/x", h)`,
+/// `app` in `app.use("/api", router)`, at the span of that call. The builder
+/// reads it to compose router mounts onto the routes of the mounted router.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+pub struct RawRouteReceiver {
+    pub span: (u32, u32, u32, u32),
+    pub receiver: String,
+}
+
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 #[rkyv(derive(Debug))]
 pub struct LocalGraph {
@@ -1416,6 +1426,10 @@ pub struct LocalGraph {
     pub documents: Vec<RawDocumentBlock>,
     pub imports: Vec<RawImport>,
     pub routes: Vec<RawRoute>,
+    /// The variable each route call is made on, for the parsers that read
+    /// router mounts (Express). Kept apart from `routes`: it is no endpoint.
+    /// `None` for the files with no such call.
+    pub route_receivers: Option<Box<[RawRouteReceiver]>>,
     pub framework_refs: Vec<RawFrameworkRef>,
     pub fanout_refs: Vec<RawFanoutRef>,
     pub blind_spots: Vec<BlindSpot>,
@@ -1498,6 +1512,7 @@ impl LocalGraph {
             documents: Vec::new(),
             imports: Vec::new(),
             routes: Vec::new(),
+            route_receivers: None,
             framework_refs: Vec::new(),
             fanout_refs: Vec::new(),
             blind_spots: vec![BlindSpot {
@@ -1528,6 +1543,7 @@ impl Default for LocalGraph {
             documents: Vec::new(),
             imports: Vec::new(),
             routes: Vec::new(),
+            route_receivers: None,
             framework_refs: Vec::new(),
             fanout_refs: Vec::new(),
             blind_spots: Vec::new(),

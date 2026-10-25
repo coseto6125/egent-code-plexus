@@ -141,6 +141,7 @@ fn graph_with_handlers(handlers: &[(&str, &str, (u32, u32, u32, u32))]) -> Local
                 scope: None,
             })
             .collect(),
+        route_receivers: None,
         framework_refs: vec![],
         fanout_refs: vec![],
         blind_spots: vec![],

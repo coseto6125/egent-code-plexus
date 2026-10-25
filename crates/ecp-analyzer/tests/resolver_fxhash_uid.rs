@@ -50,6 +50,7 @@ fn local_graph(file_path: &str, nodes: Vec<RawNode>) -> LocalGraph {
         documents: vec![],
         imports: vec![],
         routes: vec![],
+        route_receivers: None,
         framework_refs: vec![],
         fanout_refs: vec![],
         blind_spots: vec![],

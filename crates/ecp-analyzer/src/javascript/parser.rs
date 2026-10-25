@@ -10,7 +10,7 @@ use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{
-    BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode, RawRoute,
+    BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode, RawRoute, RawRouteReceiver,
 };
 use ecp_core::graph::NodeKind;
 use std::path::Path;
@@ -103,13 +103,6 @@ fn check_object_freeze_enum(node: &tree_sitter::Node) -> Option<bool> {
 
     Some(scalar_pairs >= 2)
 }
-
-/// `method` of the record that names the variable a route call is made on
-/// (`router` in `router.get("/x", h)`, `app` in `app.use("/api", router)`),
-/// at the span of that call, with the variable in `path`. It is not an
-/// endpoint; the builder reads it to compose Express mounts onto the routes
-/// of the mounted router.
-pub const ROUTE_RECEIVER: &str = "ROUTE_RECEIVER";
 
 /// The identifier a route call is made on; `None` for any other receiver
 /// (`this.router`, `express.Router()`, a call result).
@@ -752,19 +745,12 @@ impl LanguageProvider for JavaScriptProvider {
             }
             None => false,
         });
-        // The receivers go in after the filter: their `path` is a variable
-        // name, which the path-shape filter above would drop.
-        for (span, receiver) in receivers {
-            if routes.iter().any(|route| route.span == span) {
-                routes.push(RawRoute {
-                    method: ROUTE_RECEIVER.to_string(),
-                    path: receiver,
-                    handler: None,
-                    span,
-                    scope: None,
-                });
-            }
-        }
+        // Only the receivers of the calls the path-shape filter above kept.
+        let route_receivers: Box<[RawRouteReceiver]> = receivers
+            .into_iter()
+            .filter(|(span, _)| routes.iter().any(|route| route.span == *span))
+            .map(|(span, receiver)| RawRouteReceiver { span, receiver })
+            .collect();
 
         // Resolve framework-ref enclosing functions via span containment.
         // Module-level captures use the MODULE_LEVEL_SOURCE sentinel (consistent
@@ -847,6 +833,7 @@ impl LanguageProvider for JavaScriptProvider {
             nodes,
             imports,
             documents: vec![],
+            route_receivers: (!route_receivers.is_empty()).then_some(route_receivers),
             framework_refs,
             fanout_refs: vec![],
             blind_spots,

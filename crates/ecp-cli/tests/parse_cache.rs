@@ -18,6 +18,7 @@ fn graph(file: &str, hash: [u8; 8]) -> LocalGraph {
         documents: vec![],
         imports: vec![],
         routes: vec![],
+        route_receivers: None,
         framework_refs: vec![],
         fanout_refs: vec![],
         blind_spots: vec![],

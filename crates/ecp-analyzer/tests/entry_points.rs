@@ -49,6 +49,7 @@ fn mk_local_graph(
         documents: vec![],
         imports: vec![],
         routes,
+        route_receivers: None,
         framework_refs,
         fanout_refs: vec![],
         blind_spots: vec![],

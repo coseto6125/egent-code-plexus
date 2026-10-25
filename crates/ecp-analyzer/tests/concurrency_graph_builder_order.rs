@@ -116,6 +116,7 @@ fn make_fixture_files() -> Vec<LocalGraph> {
             documents: vec![],
             imports: vec![],
             routes: vec![],
+            route_receivers: None,
             framework_refs: vec![RawFrameworkRef {
                 source_name: format!("Cls{i}"),
                 target_name: format!("fn_{i}"),

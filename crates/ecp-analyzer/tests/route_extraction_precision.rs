@@ -650,6 +650,47 @@ router.delete('/items/:id', deleteItem);
     );
 }
 
+/// Stands for: the variable a route call is made on is a side record for the
+/// mount composer, never an endpoint in `routes`. Only calls that survive the
+/// path-shape filter keep their receiver.
+#[test]
+fn test_js_parse_file_router_calls_record_receivers_apart_from_routes() {
+    let src = r#"
+const express = require('express');
+const router = express.Router();
+const cache = new Map();
+
+router.get('/items', listItems);
+cache.get('k');
+"#;
+    let graph = JavaScriptProvider::new()
+        .unwrap()
+        .parse_file("test.js".as_ref(), src.as_bytes())
+        .unwrap();
+    assert_routes(&graph.routes, &[("GET", "/items")]);
+    let receivers: Vec<&str> = graph
+        .route_receivers
+        .iter()
+        .flatten()
+        .map(|r| r.receiver.as_str())
+        .collect();
+    assert_eq!(receivers, ["router"]);
+    assert_eq!(
+        graph.route_receivers.as_deref().unwrap()[0].span,
+        graph.routes[0].span
+    );
+}
+
+/// Stands for: a file with no route call archives no receiver table.
+#[test]
+fn test_js_parse_file_no_route_calls_has_no_receiver_table() {
+    let graph = JavaScriptProvider::new()
+        .unwrap()
+        .parse_file("test.js".as_ref(), b"const x = 1;\n")
+        .unwrap();
+    assert!(graph.route_receivers.is_none());
+}
+
 // ─── JavaScript — Map/headers NEGATIVE fixture ───────────────────────
 
 #[test]

@@ -1167,6 +1167,7 @@ impl LanguageProvider for GoProvider {
             nodes,
             imports,
             documents: vec![],
+            route_receivers: None,
             framework_refs,
             fanout_refs: vec![],
             blind_spots,
