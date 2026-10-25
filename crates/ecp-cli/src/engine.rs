@@ -249,9 +249,9 @@ impl Engine {
 
     /// The query-time overlay merge view, built once per process on first
     /// use, or decoded from the session's view cache when an earlier process
-    /// built it from the same graph, binary and fragments. `None` when no
-    /// session overlay is attached, the working tree is clean, or every
-    /// fragment failed validation — callers then traverse the base graph
+    /// built it from the same graph, binary, fragments and tombstones. `None`
+    /// when no session overlay is attached, the working tree is clean, or
+    /// every entry failed validation — callers then traverse the base graph
     /// exactly as before (zero added cost).
     pub fn overlay_view(&self) -> Option<&OverlayView> {
         self.overlay_view
@@ -264,19 +264,18 @@ impl Engine {
                 let size_cap = self
                     .overlay_size_cap
                     .unwrap_or_else(|| ecp_core::config::resolve_size_cap(root));
-                let (accepted, inputs_hash) =
-                    crate::session::overlay_reader::accepted_fragments_under(dir, root, size_cap)
-                        .ok()?;
-                if accepted.is_empty() {
+                let inputs =
+                    crate::session::overlay_reader::view_inputs_under(dir, root, size_cap).ok()?;
+                if inputs.is_empty() {
                     return None;
                 }
-                let key = self.view_cache_key(inputs_hash);
+                let key = self.view_cache_key(inputs.hash);
                 let nodes = graph.nodes.len();
                 if let Some(view) = key.and_then(|key| view_cache::read(dir, key, nodes)) {
                     return Some(view);
                 }
-                let inputs = crate::session::overlay_reader::decode_view_inputs(&accepted);
-                let view = OverlayView::build(graph, &inputs)?;
+                let files = crate::session::overlay_reader::decode_view_inputs(&inputs.fragments);
+                let view = OverlayView::build_with_removed(graph, &files, &inputs.tombstones)?;
                 if let Some(key) = key {
                     view_cache::write(dir, key, &view);
                 }
@@ -286,7 +285,7 @@ impl Engine {
     }
 
     /// The key `overlay_view` stores and looks up its view under, for the
-    /// inputs hash `accepted_fragments` returns. `None` when the mapped
+    /// inputs hash `view_inputs` returns. `None` when the mapped
     /// file's stamp is unknown; the view is then built without the cache.
     pub fn view_cache_key(&self, inputs_hash: u64) -> Option<u64> {
         let (path, len, mtime) = self.graph_stamp.as_ref()?;

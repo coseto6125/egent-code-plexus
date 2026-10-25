@@ -5,9 +5,9 @@
 //! O(graph) data. The base `ArchivedZeroCopyGraph` stays an immutable mmap;
 //! the view is a small in-memory delta whose own allocation is O(dirty
 //! symbols). Building it scans `graph.files` and `graph.nodes` once each,
-//! and a query whose session cache holds a view of the same graph and
-//! fragments decodes that ([`OverlayView::from_cache_bytes`]) instead; two
-//! lazy helpers cost more, and only when their call shapes occur
+//! and a query whose session cache holds a view of the same graph,
+//! fragments and tombstones decodes that ([`OverlayView::from_cache_bytes`])
+//! instead; two lazy helpers cost more, and only when their call shapes occur
 //! ([`OverlayView::build`] has the full cost):
 //!
 //! - **virtual nodes** — every symbol in a dirty file, addressed by virtual
@@ -19,11 +19,15 @@
 //!   from the on-disk version; base IN-edges from clean files stay valid).
 //! - **suppressed** — base nodes of dirty files NOT re-emitted by the fresh
 //!   parse: deleted or renamed. Traversal must neither expand into nor
-//!   report them — this is what kills phantom callers after a rename. Only
-//!   kinds a fragment can carry are suppressed; nodes the graph builder
-//!   makes (File, Route, EntryPoint, Process, PathLiteral, detector nodes)
-//!   stay visible as indexed, and their edges into dirty symbols redirect
-//!   or drop like any other base edge.
+//!   report them — this is what kills phantom callers after a rename. In a
+//!   re-parsed file only kinds a fragment can carry are suppressed; nodes
+//!   the graph builder makes (File, Route, EntryPoint, Process, PathLiteral,
+//!   detector nodes) stay visible as indexed, and their edges into dirty
+//!   symbols redirect or drop like any other base edge. A removed file
+//!   (deleted, or the old half of a rename: a whole-file tombstone in the
+//!   manifest) has no parse at all: every base node of it is suppressed,
+//!   builder-made ones included, and so every base edge into or out of it
+//!   drops.
 //! - **overlay edges** — `Calls` edges re-resolved from each dirty symbol's
 //!   [`CallSite`]s, mirroring index-time Pass-2 tier semantics (same-file
 //!   with the caller's own member first → import-scoped → unique-global with
@@ -63,8 +67,14 @@
 //! - `References` edges other than lexical closure, overload-set,
 //!   enum-variant, and function-reference edges are not re-resolved: a dirty file keeps the
 //!   base ones of its surviving symbols (stale) and gains none for new code.
-//! - Builder-made nodes of a dirty file and their edges are as indexed; a
-//!   brand-new symbol gets no containment edge (`File -Defines->`, …).
+//! - Builder-made nodes of a re-parsed dirty file and their edges are as
+//!   indexed; a brand-new symbol gets no containment edge (`File -Defines->`,
+//!   …).
+//! - A removed path still counts as a file for the passes over
+//!   `graph.files` (import-candidate probes, module and crate-root
+//!   discovery), and its archived import rows still serve a re-export hop.
+//!   Its declarations are gone, so a probe that lands in it binds nothing
+//!   there.
 //! - Clean files calling a name that only NOW resolves (new symbol breaks a
 //!   previous ambiguity) keep their index-time resolution — clean files are
 //!   never re-resolved at query time.
@@ -287,12 +297,15 @@ pub struct OverlayView {
     nodes: Vec<ViewNode>,
     /// base idx → virtual idx for surviving (uid-matched) symbols.
     replaced: FxHashMap<u32, u32>,
-    /// base idxs of dirty-file symbols NOT re-emitted (deleted/renamed).
+    /// base idxs of dirty-file symbols NOT re-emitted (deleted/renamed),
+    /// and every base idx of a removed file.
     suppressed: FxHashSet<u32>,
-    /// every base idx of a dirty file whose kind [`fragment_emits`]
+    /// every base idx of a re-parsed dirty file whose kind
+    /// [`fragment_emits`], and every base idx of a removed file
     /// (replaced ∪ suppressed): base edges sourced here are masked in
-    /// favour of overlay adjacency. Builder-made nodes (File, Route, …)
-    /// stay outside it, visible and slightly stale.
+    /// favour of overlay adjacency, and no resolution tier binds them.
+    /// Builder-made nodes (File, Route, …) of a re-parsed file stay outside
+    /// it, visible and slightly stale.
     dirty_base: FxHashSet<u32>,
     /// Flat overlay-edge store; adjacency maps hold indices into it so
     /// consumers (cypher edge vars) can address an overlay edge by a stable
@@ -328,35 +341,65 @@ impl OverlayView {
     /// module's archived import rows per re-export hop, and looks
     /// declarations up through the name index.
     pub fn build(graph: &ArchivedZeroCopyGraph, files: &[OverlayFileInput]) -> Option<Self> {
-        if files.is_empty() {
+        Self::build_with_removed(graph, files, &[])
+    }
+
+    /// [`Self::build`] for a session that also removed files. `removed`
+    /// holds repo-relative paths, normalized as `File.path`, that are gone
+    /// from the worktree: a deleted file, or the old half of a rename (the
+    /// manifest's whole-file tombstones). Every base node of such a path is
+    /// suppressed, builder-made ones included, so no traversal reports it or
+    /// follows an edge into or out of it. A path that also has an entry in
+    /// `files` exists on disk, and its parse wins. `None` when both lists
+    /// are empty. Without a removed path the cost is [`Self::build`]'s: the
+    /// empty sets allocate nothing.
+    pub fn build_with_removed(
+        graph: &ArchivedZeroCopyGraph,
+        files: &[OverlayFileInput],
+        removed: &[String],
+    ) -> Option<Self> {
+        if files.is_empty() && removed.is_empty() {
             return None;
         }
         let base_len = graph.nodes.len() as u32;
 
-        // ── dirty file_idx set ────────────────────────────────────────────
+        // ── dirty and removed file_idx sets ───────────────────────────────
         let rel_paths: FxHashSet<&str> = files.iter().map(|f| f.rel_path.as_str()).collect();
-        let dirty_file_idx: FxHashSet<u32> = graph
-            .files
+        let removed_paths: FxHashSet<&str> = removed
             .iter()
-            .enumerate()
-            .filter(|(_, f)| rel_paths.contains(f.path.resolve(&graph.string_pool)))
-            .map(|(i, _)| i as u32)
+            .map(String::as_str)
+            .filter(|path| !rel_paths.contains(path))
             .collect();
+        let mut dirty_file_idx: FxHashSet<u32> = FxHashSet::default();
+        let mut removed_file_idx: FxHashSet<u32> = FxHashSet::default();
+        for (i, f) in graph.files.iter().enumerate() {
+            let path = f.path.resolve(&graph.string_pool);
+            if rel_paths.contains(path) {
+                dirty_file_idx.insert(i as u32);
+            } else if removed_paths.contains(path) {
+                removed_file_idx.insert(i as u32);
+            }
+        }
 
         // ── base nodes living in dirty files ──────────────────────────────
         // Single O(N) scan, collecting only matches. uid → base idx lets the
         // virtual-node pass detect survivors exactly (uid embeds kind, path,
         // owner_class and name — Fragment v2 carries owner_class so methods
         // match too, see overlay_writer). Only kinds a fragment can re-emit
-        // are collected: mask ⊆ rebuild applies to nodes too.
+        // are collected: mask ⊆ rebuild applies to nodes too. A removed
+        // file has no parse to re-emit anything, so all of its nodes are
+        // collected; the uid holds the path, so no virtual node replaces one.
         let mut dirty_base_by_uid: FxHashMap<u64, u32> = FxHashMap::default();
         let mut dirty_base: FxHashSet<u32> = FxHashSet::default();
-        if !dirty_file_idx.is_empty() {
+        if !dirty_file_idx.is_empty() || !removed_file_idx.is_empty() {
             for (i, node) in graph.nodes.iter().enumerate() {
-                if dirty_file_idx.contains(&node.file_idx.to_native())
-                    && fragment_emits(NodeKind::from(&node.kind))
-                {
-                    dirty_base_by_uid.insert(node.uid.to_native(), i as u32);
+                let file_idx = node.file_idx.to_native();
+                if dirty_file_idx.contains(&file_idx) {
+                    if fragment_emits(NodeKind::from(&node.kind)) {
+                        dirty_base_by_uid.insert(node.uid.to_native(), i as u32);
+                        dirty_base.insert(i as u32);
+                    }
+                } else if removed_file_idx.contains(&file_idx) {
                     dirty_base.insert(i as u32);
                 }
             }
@@ -1124,10 +1167,10 @@ impl OverlayView {
     }
 
     /// True when a base edge of type `rel` SOURCED at `base_idx` must be
-    /// ignored: the owning file was re-parsed AND the overlay rebuilds this
-    /// rel (`overlay_out` carries its truth). Masking a rel the overlay
-    /// can't rebuild would silently drop deterministic edges — keep
-    /// mask ⊆ rebuild as fragment capabilities grow.
+    /// ignored: the owning file was re-parsed or removed AND the overlay
+    /// rebuilds this rel (`overlay_out` carries its truth). Masking a rel
+    /// the overlay can't rebuild would silently drop deterministic edges —
+    /// keep mask ⊆ rebuild as fragment capabilities grow.
     pub fn masks_base_edge(&self, base_idx: u32, rel: RelType) -> bool {
         matches!(rel, RelType::Calls | RelType::ReadsField) && self.dirty_base.contains(&base_idx)
     }
@@ -1193,7 +1236,8 @@ impl OverlayView {
 
 /// Layout version of [`OverlayView::to_cache_bytes`]. Bump it whenever the
 /// cached layout changes shape; cache keys include it.
-pub const VIEW_CACHE_FORMAT: u32 = 4;
+/// 5 (F2b): a removed file's base nodes are suppressed; a 4 view kept them.
+pub const VIEW_CACHE_FORMAT: u32 = 5;
 
 /// Every reason [`OverlayView::build`] puts on a [`ViewEdge`]. A cached view
 /// stores each reason as its index here; a view with an unlisted reason is
@@ -5667,6 +5711,81 @@ mod tests {
         // clean nodes keep their base edges.
         assert!(!view.masks_base_edge(2, RelType::Calls));
         assert_eq!(view.redirect(2), Some(2));
+    }
+
+    /// Stands for: a removed file leaves nothing of itself in the view, the
+    /// nodes the graph builder made included, and no base edge into or out
+    /// of it survives the merge. A clean file keeps its own nodes. The view
+    /// also survives the cache round trip, so a cached view hides them too.
+    #[test]
+    fn test_build_with_removed_deleted_file_suppresses_every_base_node_and_edge() {
+        let mut fx = GraphFixture::new();
+        let file = fx.node(NodeKind::File, "src/gone.rs", "gone.rs");
+        let route = fx.node(NodeKind::Route, "src/gone.rs", "GET /gone");
+        let literal = fx.node(NodeKind::PathLiteral, "src/gone.rs", "./kept");
+        let gone = fx.func("src/gone.rs", "gone_fn");
+        let kept = fx.func("src/kept.rs", "kept_fn");
+        let kept_file = fx.node(NodeKind::File, "src/kept.rs", "kept.rs");
+        fx.edge(kept, gone, RelType::Calls);
+        fx.edge(gone, kept, RelType::Calls);
+        fx.edge(file, gone, RelType::Defines);
+        fx.edge(kept_file, kept, RelType::Defines);
+        let bytes = fx.into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+
+        let view = OverlayView::build_with_removed(graph, &[], &["src/gone.rs".to_string()])
+            .expect("a removed path alone builds a view");
+
+        for (what, idx) in [
+            ("File", file),
+            ("Route", route),
+            ("PathLiteral", literal),
+            ("Function", gone),
+        ] {
+            assert_eq!(view.redirect(idx), None, "{what} of the removed file");
+        }
+        assert_eq!(view.redirect(kept), Some(kept));
+        assert_eq!(view.redirect(kept_file), Some(kept_file));
+        assert!(view.virtual_nodes().is_empty());
+        let merged = crate::session::merged::MergedGraph::new(graph, Some(&view));
+        let edges: Vec<(u32, u32)> = merged.all_edges().map(|e| (e.source, e.target)).collect();
+        assert_eq!(edges, vec![(kept_file, kept)]);
+        assert_eq!(
+            OverlayView::from_cache_bytes(&view.to_cache_bytes(), graph.nodes.len()).as_ref(),
+            Some(&view)
+        );
+    }
+
+    /// Stands for: a removed path that also has a fresh parse exists on
+    /// disk, so its parse decides: a surviving symbol redirects to its
+    /// virtual twin instead of vanishing.
+    #[test]
+    fn test_build_with_removed_path_with_parse_keeps_parse() {
+        let bytes = base_graph_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+
+        let view =
+            OverlayView::build_with_removed(graph, &[dirty_input()], &["src/dirty.rs".to_string()])
+                .unwrap();
+
+        assert_eq!(view.redirect(0), Some(view.base_len()), "keep_fn survives");
+        assert_eq!(view.redirect(1), None, "gone_fn is not re-emitted");
+        assert_eq!(view, OverlayView::build(graph, &[dirty_input()]).unwrap());
+    }
+
+    /// Stands for: a removed path the graph never indexed (an untracked file
+    /// added and deleted again), an empty path and a whitespace-only one
+    /// hide no base node; no input at all builds no view.
+    #[test]
+    fn test_build_with_removed_unknown_paths_hide_nothing() {
+        let bytes = base_graph_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let removed = ["src/never.rs".to_string(), String::new(), " ".to_string()];
+
+        let view = OverlayView::build_with_removed(graph, &[], &removed).unwrap();
+
+        assert!((0..view.base_len()).all(|idx| view.redirect(idx) == Some(idx)));
+        assert!(OverlayView::build_with_removed(graph, &[], &[]).is_none());
     }
 
     #[test]

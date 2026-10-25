@@ -22,7 +22,6 @@ use std::collections::BTreeSet;
 use strict_parity::{check, diff, snapshot, Edit, Scenario};
 
 const LANE_F_DELETED: &str = "lane F (area 5 deleted-file read path)";
-const LANE_F_RENAMED: &str = "lane F (area 5 renamed-file read path)";
 const LANE_F_SHADOW: &str = "lane F (area 5 shadow cascade)";
 const LANE_F_INCREMENTAL: &str = "lane F (incremental overlay: builder edges of dirty files)";
 const LANE_F_CLEAN_CALLERS: &str = "lane F (incremental overlay: clean callers re-resolved)";
@@ -63,7 +62,7 @@ fn test_check_ts_deleted_file_matches_baseline() {
 fn test_check_ts_renamed_file_matches_baseline() {
     check(&Scenario {
         name: "ts_renamed",
-        owner: LANE_F_RENAMED,
+        owner: LANE_F_INCREMENTAL,
         files: &[
             ("src/lib.ts", TS_LIB),
             ("src/main.ts", TS_MAIN),

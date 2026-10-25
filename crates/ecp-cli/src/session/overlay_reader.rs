@@ -2,15 +2,16 @@
 //! (`l1/dirty_events.json` + `l1/fragments/<id>.bin` files) for the query
 //! side. The legacy namespace an older binary writes is never read.
 //!
-//! `accepted_fragments` + `decode_view_inputs` build the per-file
+//! `view_inputs` + `decode_view_inputs` build the per-file
 //! `OverlayFileInput`s (symbols + imports + calls + export flags and
-//! aliases) for the query-time `OverlayView` edge merge. The first pass
-//! validates the entries and hashes them into the view cache's input key;
-//! only a cache miss pays for the second.
+//! aliases) and the removed paths for the query-time `OverlayView` edge
+//! merge. The first pass validates the entries and hashes them into the
+//! view cache's input key; only a cache miss pays for the second.
 //!
-//! Fragment bins with `parse_failed = true` are skipped, and so are
-//! tombstones: the view reads them in a later slice. Only the current
-//! fragment format is read; older entries are re-parsed by the freshness gate.
+//! Fragment bins with `parse_failed = true` are skipped. A tombstone (a
+//! deleted file, the old half of a rename) is a removed path while the file
+//! is still absent. Only the current fragment format is read; older entries
+//! are re-parsed by the freshness gate.
 
 use ecp_core::analyzer::types::{RawExportAlias, RawImport};
 use ecp_core::contracts::routing::SizeCap;
@@ -25,7 +26,7 @@ use xxhash_rust::xxh3::Xxh3;
 
 use super::overlay_writer::ArchivedFragmentFile;
 
-/// A manifest entry `accepted_fragments` let through: its rel_path and the
+/// A manifest entry `view_inputs` let through: its rel_path and the
 /// fragment bytes that passed archive validation.
 pub struct AcceptedFragment {
     rel_path: String,
@@ -40,63 +41,103 @@ pub(crate) fn valid_v5_fragment(bytes: &[u8]) -> bool {
     rkyv::access::<ArchivedFragmentFile, RkyvError>(bytes).is_ok()
 }
 
+/// One manifest read's share of `OverlayView`: the fragments the
+/// acceptance rules let through, the tombstoned paths still absent from the
+/// worktree, and `hash`, an xxh3 over both in manifest order (the inputs'
+/// share of the view cache key).
+pub struct ViewInputs {
+    pub fragments: Vec<AcceptedFragment>,
+    /// Repo-relative paths of deleted files and of the old halves of
+    /// renames: `OverlayView::build_with_removed`'s `removed`.
+    pub tombstones: Vec<String>,
+    pub hash: u64,
+}
+
+impl ViewInputs {
+    /// True on a clean tree: query paths then stay on their original branch.
+    pub fn is_empty(&self) -> bool {
+        self.fragments.is_empty() && self.tombstones.is_empty()
+    }
+}
+
+/// [`view_inputs`]'s fragments and hash. The hash covers the tombstones too.
+pub fn accepted_fragments(
+    session_dir: &Path,
+    worktree_root: &Path,
+) -> io::Result<(Vec<AcceptedFragment>, u64)> {
+    view_inputs(session_dir, worktree_root).map(|inputs| (inputs.fragments, inputs.hash))
+}
+
 /// The dirty-file entries that may feed `OverlayView`, plus an xxh3 over
-/// each one's rel_path and fragment bytes in manifest order: the inputs'
-/// share of the view cache key. Entry validation guards the staleness holes
-/// the manifest has by construction:
+/// each one's rel_path and fragment bytes (an empty part for a tombstone) in
+/// manifest order. Entry validation guards the staleness holes the manifest
+/// has by construction:
 ///
 /// - **another format, builder or cap** — a manifest that fails
 ///   `DirtyEvents::is_current` under the worktree's size cap holds parse
 ///   output of other rules (a v2 bin has no export aliases at all; a file
 ///   over another cap parsed to an omission). Treating its files as clean
 ///   (skip) is the conservative choice: the next `ensure_fresh` re-parses
-///   every dirty file into a fresh manifest.
+///   every dirty file into a fresh manifest. Its tombstones are skipped too.
 /// - **mtime mismatch** — `commit_fragment_results` only ever inserts
 ///   entries, so a file edited and then REVERTED keeps its (now stale)
 ///   manifest entry. Serving that fragment would beat fresh base data with
 ///   stale overlay data; the on-disk mtime is the cheap tell (the entry's
 ///   `mtime_ns` was stat'ed at fragment-write time from the same path).
+/// - **a tombstoned file is back** — the tombstone stays in the manifest
+///   when its file comes back, so it counts only while the path is absent,
+///   by the freshness gate's own stat rule (`mtime_ns_of` gives `None`).
 ///
-/// Returns an empty Vec on a clean tree — query paths then stay on their
-/// original branch. The same pass computes the list and the hash, so the
-/// key covers exactly the entries the acceptance rules let through.
-pub fn accepted_fragments(
-    session_dir: &Path,
-    worktree_root: &Path,
-) -> io::Result<(Vec<AcceptedFragment>, u64)> {
-    accepted_fragments_under(
+/// Returns empty lists on a clean tree. The same pass computes the lists
+/// and the hash, so the key covers exactly the entries the acceptance rules
+/// let through.
+pub fn view_inputs(session_dir: &Path, worktree_root: &Path) -> io::Result<ViewInputs> {
+    view_inputs_under(
         session_dir,
         worktree_root,
         ecp_core::config::resolve_size_cap(worktree_root),
     )
 }
 
-/// `accepted_fragments` under a cap the caller resolved once for the query.
-pub fn accepted_fragments_under(
+/// `view_inputs` under a cap the caller resolved once for the query.
+pub fn view_inputs_under(
     session_dir: &Path,
     worktree_root: &Path,
     size_cap: SizeCap,
-) -> io::Result<(Vec<AcceptedFragment>, u64)> {
+) -> io::Result<ViewInputs> {
     let mut hasher = Xxh3::new();
+    let mut fragments = Vec::new();
+    let mut tombstones = Vec::new();
     let manifest = layout::dirty_events_path(session_dir);
-    if !manifest.exists() {
-        return Ok((Vec::new(), hasher.digest()));
-    }
-    let df = DirtyEvents::read(&manifest)?;
-    if !df.is_current(size_cap) {
-        return Ok((Vec::new(), hasher.digest()));
-    }
-    let mut out = Vec::new();
+    let manifest = if manifest.exists() {
+        Some(DirtyEvents::read(&manifest)?)
+    } else {
+        None
+    };
+    let entries = manifest
+        .iter()
+        .filter(|events| events.is_current(size_cap))
+        .flat_map(|events| &events.entries);
 
-    for (rel_path, entry) in &df.entries {
+    for (rel_path, entry) in entries {
+        let on_disk_mtime_ns = || crate::auto_ensure::mtime_ns_of(&worktree_root.join(rel_path));
+        if entry.is_tombstone() {
+            if on_disk_mtime_ns().is_none() {
+                // An accepted fragment's bytes pass archive validation and
+                // are never empty, so the empty part marks a tombstone.
+                super::view_cache::hash_part(&mut hasher, rel_path.as_bytes());
+                super::view_cache::hash_part(&mut hasher, &[]);
+                tombstones.push(rel_path.clone());
+            }
+            continue;
+        }
         let Some(fragment_id) = entry.fragment_id.as_deref() else {
-            continue; // a tombstone: no bin
+            continue; // no bin, and no deletion either
         };
         if entry.parse_failed || entry.format != FRAGMENT_FORMAT_V5 {
             continue;
         }
-        let on_disk_mtime_ns = crate::auto_ensure::mtime_ns_of(&worktree_root.join(rel_path));
-        if on_disk_mtime_ns != Some(entry.mtime_ns) {
+        if on_disk_mtime_ns() != Some(entry.mtime_ns) {
             continue; // reverted, deleted, or touched since the fragment write
         }
         let Ok(bytes) = fs::read(layout::fragment_path(session_dir, fragment_id)) else {
@@ -107,12 +148,16 @@ pub fn accepted_fragments_under(
         }
         super::view_cache::hash_part(&mut hasher, rel_path.as_bytes());
         super::view_cache::hash_part(&mut hasher, &bytes);
-        out.push(AcceptedFragment {
+        fragments.push(AcceptedFragment {
             rel_path: rel_path.clone(),
             bytes,
         });
     }
-    Ok((out, hasher.digest()))
+    Ok(ViewInputs {
+        fragments,
+        tombstones,
+        hash: hasher.digest(),
+    })
 }
 
 /// The `OverlayView` inputs of `accepted`, one per fragment whose imports

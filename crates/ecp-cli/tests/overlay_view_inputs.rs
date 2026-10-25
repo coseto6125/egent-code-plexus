@@ -7,9 +7,9 @@
 mod parity;
 
 use ecp_analyzer::typescript::TypeScriptProvider;
-use ecp_cli::session::overlay_reader::{accepted_fragments, decode_view_inputs};
+use ecp_cli::session::overlay_reader::{accepted_fragments, decode_view_inputs, view_inputs};
 use ecp_cli::session::overlay_writer::{
-    write_dirty_fragments_from_graphs, FragmentFileV3, FragmentSymbolV3,
+    write_dirty_events, write_dirty_fragments_from_graphs, FragmentFileV3, FragmentSymbolV3,
 };
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{LocalGraph, NameRef, NameRefKind, RawImport, RawNode, VariantRef};
@@ -20,6 +20,7 @@ use ecp_core::session::{
     FRAGMENT_FORMAT_V3, FRAGMENT_FORMAT_V4,
 };
 use parity::{callees, calls_after_edit, Parity};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -657,4 +658,89 @@ fn test_build_dirty_impl_removed_keeps_python_namesake_heritage_like_reindex() {
         "the reindex must bind the Python `A.m`, or the fixture proves nothing: {reindex:#?}"
     );
     assert_eq!(overlay, reindex);
+}
+
+/// Record `rel` as deleted, as the freshness gate does for a dirty source
+/// path absent at its stat.
+fn write_tombstone(session_dir: &Path, rel: &str) {
+    write_dirty_events(
+        session_dir,
+        ecp_core::config::resolve_size_cap(Path::new("/work/x")),
+        &[],
+        &[],
+        &HashMap::new(),
+        &[(rel.to_string(), PathClass::SOURCE)],
+    )
+    .unwrap();
+}
+
+/// Stands for: a tombstone is a removed path for the view while its file is
+/// absent, beside the fragments of the other dirty files. Once the file is
+/// back, the tombstone is no input and the base answers for it until the
+/// gate re-parses it; the hash follows, so no cached view of the deletion
+/// is served.
+#[test]
+fn test_view_inputs_tombstone_read_as_removed_path_while_file_absent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let worktree = tmp.path().join("wt");
+    let session_dir = make_session_dir(tmp.path(), "tomb-sid");
+    let mtime = write_worktree_file(&worktree, "src/dirty.rs");
+    let graph = graph_for("src/dirty.rs", vec![rn("free_fn", None, &[])], vec![]);
+    write_dirty_fragments_from_graphs(&session_dir, &[graph], &[mtime]).unwrap();
+    write_tombstone(&session_dir, "src/gone.rs");
+
+    let absent = view_inputs(&session_dir, &worktree).unwrap();
+    write_worktree_file(&worktree, "src/gone.rs");
+    let back = view_inputs(&session_dir, &worktree).unwrap();
+
+    assert_eq!(absent.tombstones, ["src/gone.rs"]);
+    assert_eq!(
+        decode_view_inputs(&absent.fragments)[0].rel_path,
+        "src/dirty.rs"
+    );
+    assert!(back.tombstones.is_empty(), "{:?}", back.tombstones);
+    assert_eq!(back.fragments.len(), 1);
+    assert_ne!(absent.hash, back.hash);
+    assert_eq!(
+        accepted_fragments(&session_dir, &worktree).unwrap().1,
+        back.hash,
+        "`accepted_fragments` hands out the same key share"
+    );
+}
+
+/// Stands for: a session whose only change is an `rm` still has a view to
+/// build: the inputs are not empty, though no fragment exists.
+#[test]
+fn test_view_inputs_tombstone_alone_is_not_empty() {
+    let tmp = tempfile::tempdir().unwrap();
+    let worktree = tmp.path().join("wt");
+    let session_dir = make_session_dir(tmp.path(), "tomb-only-sid");
+    let clean = view_inputs(&session_dir, &worktree).unwrap();
+    write_tombstone(&session_dir, "src/gone.rs");
+
+    let removed = view_inputs(&session_dir, &worktree).unwrap();
+
+    assert!(clean.is_empty());
+    assert!(!removed.is_empty());
+    assert!(removed.fragments.is_empty());
+    assert_eq!(removed.tombstones, ["src/gone.rs"]);
+    assert_ne!(removed.hash, clean.hash);
+}
+
+/// Stands for: a tombstone in a manifest of another size cap is parse
+/// output of other rules, like its fragments: none of it is served.
+#[test]
+fn test_view_inputs_tombstone_under_other_cap_is_skipped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let worktree = tmp.path().join("wt");
+    let session_dir = make_session_dir(tmp.path(), "tomb-cap-sid");
+    write_tombstone(&session_dir, "src/gone.rs");
+    let manifest = layout::dirty_events_path(&session_dir);
+    let mut events = DirtyEvents::read(&manifest).unwrap();
+    events.size_cap_bytes += 1;
+    DirtyEvents::write_atomic(&manifest, &events).unwrap();
+
+    let inputs = view_inputs(&session_dir, &worktree).unwrap();
+
+    assert!(inputs.is_empty(), "{:?}", inputs.tombstones);
 }

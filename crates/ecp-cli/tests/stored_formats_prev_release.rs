@@ -34,6 +34,7 @@ use ecp_core::contracts::dirty_event::PathClass;
 use ecp_core::graph::{NodeKind, RelType, GRAPH_FORMAT_VERSION};
 use ecp_core::registry::{CommitBuildMeta, BUILDER_FINGERPRINT};
 use ecp_core::session::layout;
+use ecp_core::session::merged::MergedGraph;
 use ecp_core::session::overlay::SymbolKind;
 use ecp_core::session::{
     DirtyEvents, DirtyFiles, OverlayFileInput, SessionMeta, SessionState, FRAGMENT_FORMAT_V5,
@@ -642,8 +643,9 @@ fn test_fragments_written_by_0_16_4_skip_the_file_edited_since() {
 /// writes it back; had the tombstone lived there, it would come back as a
 /// `modified` entry. Here the older writer rewrites its manifest and bins
 /// after today's binary recorded `lib.rs` as deleted: the tombstone keeps
-/// its bytes, and no entry of the old manifest reaches the overlay, though
-/// its `pkg/core.py` entry still matches the file on disk.
+/// its bytes, no entry of the old manifest reaches the overlay, though its
+/// `pkg/core.py` entry still matches the file on disk, and a query hides
+/// the deleted file's symbols.
 #[test]
 fn test_dirty_events_old_writer_manifest_beside_new_namespace_keeps_tombstone() {
     let tmp = copy_repo();
@@ -699,13 +701,34 @@ fn test_dirty_events_old_writer_manifest_beside_new_namespace_keeps_tombstone() 
         Engine::load(&graph_path)
             .unwrap()
             .with_overlay(session.clone(), root.clone(), None);
+    let view = engine
+        .overlay_view()
+        .expect("the tombstone makes a view of its own");
     assert!(
-        engine.overlay_view().is_none(),
+        view.virtual_nodes().is_empty(),
         "the overlay served a fragment"
     );
-    // Not asserted yet: that a query hides the deleted `lib.rs` symbols. The
-    // view reads tombstones from slice F2b on (C3 test table), and that slice
-    // adds the merged-answer assertion here.
+    // The merged answer every query reads: the deleted `lib.rs` declared
+    // `helper` and `run`, and none of its nodes is visible.
+    let graph = engine.graph().unwrap();
+    let merged = MergedGraph::new(graph, Some(view));
+    let lib_nodes: Vec<(String, bool)> = (0..graph.nodes.len() as u32)
+        .filter_map(|idx| {
+            let node = merged.node(idx)?;
+            (node.file_path(&merged) == Some("lib.rs"))
+                .then(|| (node.name(&merged).to_string(), merged.base_visible(idx)))
+        })
+        .collect();
+    for name in ["helper", "run"] {
+        assert!(
+            lib_nodes.iter().any(|(n, _)| n == name),
+            "setup: the graph holds {name}: {lib_nodes:?}"
+        );
+    }
+    assert!(
+        lib_nodes.iter().all(|(_, visible)| !visible),
+        "a node of the deleted lib.rs is still served: {lib_nodes:?}"
+    );
     assert!(
         matches!(
             state,

@@ -1,6 +1,6 @@
 # C3: dirty event
 
-Status: phase-1 contract. Types: `crates/ecp-core/src/contracts/dirty_event.rs`. Landed in the C3 behaviour slice (`96b877e8`, `91f65ef0`): the freshness gate and the build-clean check call `DirtySet::from_porcelain_z`. The area-5 tombstone slice has not landed.
+Status: phase-1 contract. Types: `crates/ecp-core/src/contracts/dirty_event.rs`. Landed in the C3 behaviour slice (`96b877e8`, `91f65ef0`): the freshness gate and the build-clean check call `DirtySet::from_porcelain_z`. The area-5 tombstone slice landed in F2a (the manifest) and F2b (the view reads tombstones).
 
 Plan row (`docs/specs/2026-10-25-architecture-direction.md`, "Contracts before code"): one record per changed path: added, modified, deleted, renamed (both halves); class source, resolution config or other. Only "other" skips the per-path syscalls. Consumers: areas 1, 4, 5, 6. Area 5 owns the dirty-event flow.
 
@@ -118,9 +118,9 @@ Landed in the C3 behaviour slice: the rows marked "landed". The other rows descr
 | Pre-parse mtime | One stat per path the gate did not stat (`:784-790`). | Manifest `mtime_ns` (`apply_l1_overlay_updates`, `:1360`). |
 | Parse | `reanalyze_files` (`reanalyze.rs:141-206`): one `git ls-files` per call for the shadow cascade (`:148`, `tracked_files` `:263`). Landed in P1: the provider filter is `provider_names_for_paths` (`:174-177`). Two stats per path, `exists` and `is_file` (`:193`). | `apply_l1_overlay_updates` (`auto_ensure.rs:806`). |
 | Dirty manifest | `DirtyFiles` (`ecp-core/src/session/overlay.rs:9`), `DirtyEntry` (`:22`). `commit_fragment_results` inserts entries and never removes one (`ecp-cli/src/session/overlay_writer.rs:356`, `:383`). `append_dirty` (`overlay_writer.rs:586`) has test callers only. | `retain_stale_fragments`; `accepted_fragments` (`session/overlay_reader.rs:58-97`). |
-| Deleted file in the view | No record. `accepted_fragments` skips an entry whose file is missing or whose mtime differs (`overlay_reader.rs:76-80`). The base nodes of the file stay visible. | `Engine::overlay_view` (`ecp-cli/src/engine.rs:244`). |
-| Dirty file in the view | `OverlayView::build` (`ecp-core/src/session/view.rs:327`) takes the dirty file set from its inputs (`:333-340`). It collects base nodes only of the kinds `fragment_emits` names (`:1406`). Builder-made nodes stay visible (`:66`). | Every overlay reader. |
-| View cache key | `view_cache::key` (`ecp-cli/src/session/view_cache.rs:35-48`). `inputs_hash` hashes each accepted fragment's path and bytes (`overlay_reader.rs:89-90`). | `engine.rs:255`. |
+| Deleted file in the view | No record. `accepted_fragments` skips an entry whose file is missing or whose mtime differs (`overlay_reader.rs:76-80`). The base nodes of the file stay visible. Landed in F2b: `view_inputs` (`overlay_reader.rs`) lists a tombstone while its file is absent, and `OverlayView::build_with_removed` suppresses every base node of the path. | `Engine::overlay_view` (`ecp-cli/src/engine.rs:244`). |
+| Dirty file in the view | `OverlayView::build` (`ecp-core/src/session/view.rs:327`) takes the dirty file set from its inputs (`:333-340`). It collects base nodes only of the kinds `fragment_emits` names (`:1406`). Builder-made nodes stay visible (`:66`). Landed in F2b: a removed path joins the dirty set and loses every base node, builder-made nodes included. | Every overlay reader. |
+| View cache key | `view_cache::key` (`ecp-cli/src/session/view_cache.rs:35-48`). `inputs_hash` hashes each accepted fragment's path and bytes (`overlay_reader.rs:89-90`). Landed in F2b: it also hashes each tombstone path, and `VIEW_CACHE_FORMAT` is 5. | `engine.rs:255`. |
 | Skipped count (landed in F1 and F6) | `unreadable_changes` counts the skipped entries except `Directory` (`read_context.rs:154-162`). | `Engine::caveat()` and `unreadable_changes_caveat()` (`engine.rs:149`, `:177`) reach every graph command through the payload `result` field. |
 
 ### What an "other" path cost before the C3 slice
@@ -179,6 +179,8 @@ Must stop:
 - Keeping the builder-made nodes of a tombstoned file (`view.rs:66`, `fragment_emits` `:1406`). A tombstone removes every node of the file.
 - Serving base nodes for a missing file (`overlay_reader.rs:76-80`).
 
+Status: all three met in F2b (`OverlayView::build_with_removed`, `overlay_reader::view_inputs`).
+
 ### Area 4: resolve an import in the caller's workspace scope
 
 Reads: each half with `is_resolution_config()`, of any change kind, deletions included. For each one it calls C2 `invalidated_by(path)`.
@@ -232,7 +234,7 @@ Lane 0a's dirty-event fixtures (added, modified, deleted, renamed, unmerged, unt
 
 ### Manifest isolation (the area-5 tombstone slice)
 
-Status: landed in F2a (`fc1f663c`). The types are `DirtyEvents` and `DirtyEventEntry` (`ecp-core/src/session/overlay.rs`); the paths come from `ecp-core/src/session/layout.rs`. The header also carries `size_cap_bytes` (C5 "Cache validity"). gc removes the old namespace once its newest file is older than the session idle limit. The view reads tombstones in F2b.
+Status: landed in F2a (`fc1f663c`). The types are `DirtyEvents` and `DirtyEventEntry` (`ecp-core/src/session/overlay.rs`); the paths come from `ecp-core/src/session/layout.rs`. The header also carries `size_cap_bytes` (C5 "Cache validity"). gc removes the old namespace once its newest file is older than the session idle limit. Since F2b the view reads tombstones.
 
 A new field in today's `dirty_files.json` is not safe while an older binary of the same fingerprint can write the file. The older writer reads the whole manifest into its own `DirtyEntry`, which has no catch-all field (`ecp-core/src/session/overlay.rs:22-41`). It then writes the whole manifest back (`ecp-cli/src/session/overlay_writer.rs:371-387`). The unknown `change` and `class` fields are gone, and a new reader applies their defaults: a tombstone reads as `modified`, an "other" path reads as source. A format check that skips non-V5 entries (`overlay_reader.rs:75-77`) protects only the reader, not the data.
 
@@ -254,10 +256,10 @@ Tests of that slice, written before the run with their pass criterion:
 
 | Test | File | Pass criterion |
 |---|---|---|
-| `test_dirty_events_old_writer_manifest_beside_new_namespace_keeps_tombstone` | `crates/ecp-cli/tests/stored_formats_prev_release.rs` | A session holds the 0.16.4 `dirty_files.json` and `graph_overlay/` of the existing fixture (`:50`, `tests/fixtures/stored-by-0.16.4`), rewritten after the new binary wrote a `lib.rs` tombstone to `l1/`. The old manifest's `lib.rs` entry is never served. Deferred to F2b (the view does not read tombstones yet): `ecp find` of a `lib.rs` symbol answers `found: false`. |
+| `test_dirty_events_old_writer_manifest_beside_new_namespace_keeps_tombstone` | `crates/ecp-cli/tests/stored_formats_prev_release.rs` | A session holds the 0.16.4 `dirty_files.json` and `graph_overlay/` of the existing fixture (`:50`, `tests/fixtures/stored-by-0.16.4`), rewritten after the new binary wrote a `lib.rs` tombstone to `l1/`. The old manifest's `lib.rs` entry is never served. Landed in F2b: the tombstone alone makes a view, and no `lib.rs` node is visible in the merged graph a query reads. |
 | `test_dirty_events_missing_format_reparses_every_dirty_file` | `crates/ecp-cli/tests/overlay_view_cache.rs` | `REANALYZE_CALL_COUNT` covers every dirty file; no entry of that manifest is served. |
 | `test_sweep_stale_fragments_bin_named_only_by_new_namespace_survives` | `crates/ecp-cli/src/admin/gc.rs` tests | The bin is still on disk after the sweep. |
-| `test_overlay_view_tombstone_changes_view_cache_key` (deferred to F2b: the view does not read tombstones yet) | `crates/ecp-cli/tests/overlay_view_cache.rs` | Two views, before and after `rm`, have different keys. |
+| `test_overlay_view_tombstone_changes_view_cache_key` (landed in F2b) | `crates/ecp-cli/tests/overlay_view_cache.rs` | Two views, before and after `rm`, have different keys. |
 
 ## The C3 behaviour slice
 

@@ -5,12 +5,13 @@
 //! Both sides run the production code. The full index and the base index
 //! come from `run_analyzer_for_paths`, the analyzer step of `admin index`.
 //! The overlay side re-parses the dirty set with `reanalyze_files` (shadow
-//! cascade included), writes the fragments with `write_dirty_fragments_from_
-//! graphs`, reads them back through `accepted_fragments` and
+//! cascade included), writes the fragments and tombstones with
+//! `write_dirty_events`, reads them back through `view_inputs` and
 //! `decode_view_inputs`, and builds `OverlayView`. The dirty set is the
 //! edited paths, as `git status --porcelain` lists them: a deleted path and
-//! both paths of a rename are dirty, and `reanalyze_files` skips the ones
-//! missing on disk exactly as a query does. Fragment mtimes are the on-disk
+//! both paths of a rename are dirty, `reanalyze_files` skips the ones
+//! missing on disk exactly as a query does, and each of those gets a
+//! tombstone, as the freshness gate writes one. Fragment mtimes are the on-disk
 //! ones, so this harness tests the view; the zero-mtime shadow fragment of
 //! the CLI path has its own fixture (`shadow_zero_mtime.rs`).
 //!
@@ -22,7 +23,7 @@
 //! | `identity` | node uid, kind, name, file, start line |
 //! | `edge` | rel, source and target identity, exact confidence |
 //! | `parent` | node identity, owner class, each incoming `Defines` / `HasMethod` / `HasProperty` source |
-//! | `input` | a re-parsed file whose fragment the reader dropped |
+//! | `input` | a re-parsed file whose fragment, or a missing path whose tombstone, the reader dropped |
 //!
 //! An edge stores no line of its own, so the endpoints' start lines stand in.
 //! The overlay's `Calls` reason is the uncommitted-edit marker, so reasons
@@ -38,14 +39,15 @@ use crate::common::{commit_all, run_git};
 use ecp_cli::commands::admin::index::run_analyzer_for_paths;
 use ecp_cli::git::DiffScope;
 use ecp_cli::reanalyze::reanalyze_files;
-use ecp_cli::session::overlay_reader::{accepted_fragments, decode_view_inputs};
-use ecp_cli::session::overlay_writer::write_dirty_fragments_from_graphs;
+use ecp_cli::session::overlay_reader::{decode_view_inputs, view_inputs};
+use ecp_cli::session::overlay_writer::write_dirty_events;
+use ecp_core::contracts::dirty_event::PathClass;
 use ecp_core::contracts::routing::SizeCap;
 use ecp_core::graph::{ArchivedZeroCopyGraph, NodeKind, RelType, ZeroCopyGraph};
 use ecp_core::session::merged::MergedGraph;
 use ecp_core::session::{layout, DirtyEvents, OverlayView, SessionMeta};
 use rustc_hash::FxHashMap;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -311,25 +313,44 @@ pub fn observe(scenario: &Scenario<'_>) -> BTreeSet<String> {
         }
     }
 
-    let graphs = reanalyze_files(
-        repo.path(),
-        &DiffScope::Unstaged,
-        &dirty_paths(scenario.edits),
-    );
+    let dirty = dirty_paths(scenario.edits);
+    let graphs = reanalyze_files(repo.path(), &DiffScope::Unstaged, &dirty);
     let mtimes: Vec<u64> = graphs
         .iter()
         .map(|g| mtime_ns(&repo.path().join(&g.file_path)))
         .collect();
+    // The freshness gate's rule: a dirty path absent at the stat gets a
+    // tombstone, not a fragment.
+    let tombstones: Vec<(String, PathClass)> = dirty
+        .into_iter()
+        .filter(|path| !repo.path().join(path).exists())
+        .map(|path| (path, PathClass::SOURCE))
+        .collect();
     let session_root = tempfile::tempdir().unwrap();
     let session = new_session_dir(session_root.path(), repo.path());
-    write_dirty_fragments_from_graphs(&session, &graphs, &mtimes).expect("fragment write");
-    let (accepted, _) = accepted_fragments(&session, repo.path()).expect("fragment read");
-    let inputs = decode_view_inputs(&accepted);
+    write_dirty_events(
+        &session,
+        ecp_core::config::resolve_size_cap(repo.path()),
+        &graphs,
+        &mtimes,
+        &HashMap::new(),
+        &tombstones,
+    )
+    .expect("fragment write");
+    let read = view_inputs(&session, repo.path()).expect("fragment read");
+    let inputs = decode_view_inputs(&read.fragments);
 
     let mut lines = BTreeSet::new();
-    let read_back: BTreeSet<&str> = inputs.iter().map(|i| i.rel_path.as_str()).collect();
-    for graph in &graphs {
-        let path = graph.file_path.to_string_lossy().replace('\\', "/");
+    let read_back: BTreeSet<&str> = inputs
+        .iter()
+        .map(|i| i.rel_path.as_str())
+        .chain(read.tombstones.iter().map(String::as_str))
+        .collect();
+    let written = graphs
+        .iter()
+        .map(|graph| graph.file_path.to_string_lossy().replace('\\', "/"))
+        .chain(tombstones.iter().map(|(path, _)| path.clone()));
+    for path in written {
         if !read_back.contains(path.as_str()) {
             lines.insert(format!("input dropped {path}"));
         }
@@ -337,7 +358,7 @@ pub fn observe(scenario: &Scenario<'_>) -> BTreeSet<String> {
 
     let full = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&full_bytes).unwrap();
     let base = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&base_bytes).unwrap();
-    let view = OverlayView::build(base, &inputs);
+    let view = OverlayView::build_with_removed(base, &inputs, &read.tombstones);
     if let Some(view) = &view {
         assert_eq!(
             OverlayView::from_cache_bytes(&view.to_cache_bytes(), base.nodes.len()).as_ref(),

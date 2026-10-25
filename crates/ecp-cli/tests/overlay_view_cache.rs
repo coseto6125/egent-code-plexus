@@ -2,20 +2,25 @@
 //! unchanged inputs decodes the stored view instead of building it, and any
 //! change to the graph, the fragments or the cache file itself makes it
 //! build again. The `test_dirty_events_*` and tombstone tests drive the
-//! freshness gate over the `l1/dirty_events.json` manifest the cache reads.
+//! freshness gate over the `l1/dirty_events.json` manifest the cache reads,
+//! and the `test_overlay_view_*_file_*` tests run the real binary over a
+//! deleted or renamed file.
 
 use ecp_cli::auto_ensure::{self, test_counters, IndexNeed};
 use ecp_cli::engine::Engine;
-use ecp_cli::session::overlay_reader::{accepted_fragments, decode_view_inputs};
-use ecp_cli::session::overlay_writer::write_dirty_fragments_from_graphs;
+use ecp_cli::session::overlay_reader::{accepted_fragments, decode_view_inputs, view_inputs};
+use ecp_cli::session::overlay_writer::{write_dirty_events, write_dirty_fragments_from_graphs};
 use ecp_cli::session::view_cache::{self, VIEW_CACHE_FILE};
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
+use ecp_core::contracts::dirty_event::PathClass;
 use ecp_core::graph::NodeKind;
 use ecp_core::graph_fixture::GraphFixture;
 use ecp_core::session::layout;
 use ecp_core::session::{
     DirtyEvents, OverlayFileInput, OverlayView, SessionMeta, DIRTY_EVENTS_FORMAT,
 };
+use serde_json::Value;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -23,6 +28,7 @@ use std::sync::Barrier;
 use std::time::{Duration, UNIX_EPOCH};
 
 const DIRTY: &str = "src/dirty.rs";
+const CLEAN: &str = "src/clean.rs";
 
 struct Fixture {
     _tmp: tempfile::TempDir,
@@ -39,7 +45,7 @@ impl Fixture {
         let mut fx = GraphFixture::new();
         fx.func(DIRTY, "keep_fn");
         fx.func(DIRTY, "gone_fn");
-        fx.func("src/clean.rs", "callee");
+        fx.func(CLEAN, "callee");
         let graph_path = tmp.path().join("graph.bin");
         fs::write(&graph_path, fx.into_bytes()).unwrap();
 
@@ -119,9 +125,34 @@ impl Fixture {
         decode_view_inputs(&accepted)
     }
 
-    /// The view `OverlayView::build` makes from the current inputs.
+    /// Record `rel` as deleted, as the freshness gate does for a dirty
+    /// source path absent at its stat, and remove it from the worktree.
+    fn remove(&self, rel: &str) {
+        let path = self.worktree.join(rel);
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+        write_dirty_events(
+            &self.session_dir,
+            ecp_core::config::resolve_size_cap(&self.worktree),
+            &[],
+            &[],
+            &HashMap::new(),
+            &[(rel.to_string(), PathClass::SOURCE)],
+        )
+        .unwrap();
+    }
+
+    /// The view `OverlayView::build_with_removed` makes from the current
+    /// inputs.
     fn fresh(&self, engine: &Engine) -> OverlayView {
-        OverlayView::build(engine.graph().unwrap(), &self.inputs()).unwrap()
+        let inputs = view_inputs(&self.session_dir, &self.worktree).unwrap();
+        OverlayView::build_with_removed(
+            engine.graph().unwrap(),
+            &decode_view_inputs(&inputs.fragments),
+            &inputs.tombstones,
+        )
+        .unwrap()
     }
 
     /// The key `Engine::overlay_view` stores the current inputs under.
@@ -534,6 +565,64 @@ fn test_view_cache_concurrent_writes_and_reads_never_return_wrong_view() {
     assert!(tmp_files(&f.session_dir).is_empty());
 }
 
+/// The base index of the node named `name`.
+fn base_idx(engine: &Engine, name: &str) -> u32 {
+    let graph = engine.graph().unwrap();
+    graph
+        .nodes
+        .iter()
+        .position(|n| n.name.resolve(&graph.string_pool) == name)
+        .unwrap_or_else(|| panic!("no base node {name}")) as u32
+}
+
+/// Stands for: a view built before an `rm` is never served after it. The
+/// session already holds a cached view of another dirty file, and the `rm`
+/// leaves that fragment as it was, so only the tombstone can move the key.
+/// Failed before F2b: the key hashed fragments alone, and the cached view,
+/// which still serves the deleted file's `callee`, came back.
+#[test]
+fn test_overlay_view_tombstone_changes_view_cache_key() {
+    let f = Fixture::new();
+    f.edit(&["keep_fn"], 1_000);
+    let first = f.engine();
+    first.overlay_view().expect("a view of the edit");
+    let before = f.key(&first);
+    assert!(f.cached(&first).is_some(), "control: the view was cached");
+
+    f.remove(CLEAN);
+    let second = f.engine();
+    let after = f.key(&second);
+    let view = second.overlay_view().expect("a view after the rm");
+
+    assert_ne!(after, before);
+    assert_eq!(
+        view.redirect(base_idx(&second, "callee")),
+        None,
+        "the deleted file's symbol is still served"
+    );
+    assert_eq!(names(view), ["keep_fn"], "the other dirty file stays");
+    assert_eq!(view, &f.fresh(&second));
+    assert_eq!(f.cached(&second).as_ref(), Some(view));
+}
+
+/// Stands for: an `rm` and nothing else still makes a view: the deleted
+/// file's nodes are hidden although the session holds no fragment.
+#[test]
+fn test_overlay_view_tombstone_alone_hides_deleted_file() {
+    let f = Fixture::new();
+    f.remove(CLEAN);
+    let engine = f.engine();
+
+    let view = engine
+        .overlay_view()
+        .expect("a tombstone alone makes a view");
+
+    assert_eq!(view.redirect(base_idx(&engine, "callee")), None);
+    let keep = base_idx(&engine, "keep_fn");
+    assert_eq!(view.redirect(keep), Some(keep), "a clean file stays");
+    assert!(view.virtual_nodes().is_empty());
+}
+
 #[test]
 fn test_accepted_fragments_fragment_change_changes_hash() {
     let f = Fixture::new();
@@ -833,11 +922,7 @@ fn test_overlay_writer_deleted_file_writes_tombstone_without_bin() {
         bins,
         [format!("{}.bin", edited.fragment_id.as_deref().unwrap())]
     );
-    assert_eq!(
-        s.accepted().unwrap(),
-        1,
-        "a tombstone is no overlay input yet"
-    );
+    assert_eq!(s.accepted().unwrap(), 1, "a tombstone has no fragment");
 
     assert_eq!(s.refresh(), 0, "a tombstone of an absent file is current");
     fs::write(s.worktree.join("b.py"), "def back(): pass\n").unwrap();
@@ -845,4 +930,179 @@ fn test_overlay_writer_deleted_file_writes_tombstone_without_bin() {
     let back = s.manifest();
     assert_eq!(back.entries["b.py"].change, PathChange::Modified);
     assert!(back.entries["b.py"].fragment_id.is_some());
+}
+
+// ------------------------------------- deleted and renamed files, real binary
+
+const KEPT_PY: &str = "def target_kept():\n    return 1\n";
+const GONE_PY: &str =
+    "from kept import target_kept\n\n\ndef helper_gone():\n    return target_kept()\n";
+const MAIN_PY: &str =
+    "from gone import helper_gone\n\n\ndef caller_main():\n    return helper_gone()\n";
+
+/// An indexed git repo holding `kept.py`, `gone.py` (calls `kept.py`) and
+/// `main.py` (calls `gone.py`), with its own cache root.
+struct IndexedRepo {
+    _tmp: tempfile::TempDir,
+    repo: PathBuf,
+    home: PathBuf,
+    session_id: &'static str,
+}
+
+impl IndexedRepo {
+    fn new(session_id: &'static str) -> Self {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        for (rel, text) in [
+            ("kept.py", KEPT_PY),
+            ("gone.py", GONE_PY),
+            ("main.py", MAIN_PY),
+        ] {
+            fs::write(repo.join(rel), text).unwrap();
+        }
+        let fixture = Self {
+            _tmp: tmp,
+            repo,
+            home,
+            session_id,
+        };
+        fixture.git(&["init", "-q", "-b", "main"]);
+        fixture.git(&["config", "user.email", "test@example.invalid"]);
+        fixture.git(&["config", "user.name", "test"]);
+        fixture.git(&["add", "-A"]);
+        fixture.git(&["commit", "-qm", "base"]);
+        let index = fixture
+            .ecp_command()
+            .args(["admin", "index", "--repo", fixture.repo.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            index.status.success(),
+            "admin index: {}",
+            String::from_utf8_lossy(&index.stderr)
+        );
+        fixture
+    }
+
+    fn git(&self, args: &[&str]) {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(&self.repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+    }
+
+    /// `ecp` with the cache root and the session pinned to the fixture, as
+    /// an agent host runs it.
+    fn ecp_command(&self) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ecp"));
+        command
+            .current_dir(&self.repo)
+            .env("HOME", &self.home)
+            .env_remove("ECP_HOME")
+            .env_remove("CLAUDE_CODE_SESSION_ID")
+            .env("ECP_SESSION_ID", self.session_id)
+            .env("ECP_SKIP_BG_REBUILD", "1");
+        command
+    }
+
+    fn json(&self, args: &[&str]) -> Value {
+        let out = self
+            .ecp_command()
+            .args(args)
+            .args(["--format", "json"])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "ecp {args:?}: {}\n{stdout}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let start = stdout
+            .find('{')
+            .unwrap_or_else(|| panic!("no JSON in stdout: {stdout}"));
+        serde_json::from_str(&stdout[start..]).unwrap()
+    }
+
+    /// `(name, filePath)` of every impact row past the target.
+    fn impact_rows(&self, target: &str, direction: &str) -> Vec<(String, String)> {
+        let value = self.json(&[
+            "impact",
+            "--target",
+            target,
+            "--direction",
+            direction,
+            "--repo",
+            ".",
+        ]);
+        value["impact"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no impact rows: {value}"))
+            .iter()
+            .filter(|row| row["depth"].as_u64() != Some(0))
+            .map(|row| {
+                (
+                    row["name"].as_str().unwrap_or_default().to_string(),
+                    row["filePath"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect()
+    }
+}
+
+/// Stands for: after `rm` of a clean tracked file, no query answers from the
+/// base graph's copy of it. Before F2b the tombstone was written and never
+/// read, so `find` still answered `found: true` from `gone.py`, and impact
+/// still listed `helper_gone` as a caller of `target_kept` and a callee of
+/// `caller_main`.
+#[test]
+fn test_overlay_view_deleted_file_find_found_false() {
+    let fx = IndexedRepo::new("f2b-deleted-file");
+    let has_gone = |rows: &[(String, String)]| {
+        rows.iter()
+            .any(|(name, path)| name == "helper_gone" || path.ends_with("gone.py"))
+    };
+    assert_eq!(fx.json(&["find", "helper_gone"])["found"], true, "setup");
+    assert!(
+        has_gone(&fx.impact_rows("target_kept", "upstream")),
+        "setup: the index must hold the gone.py -> kept.py call"
+    );
+
+    fs::remove_file(fx.repo.join("gone.py")).unwrap();
+    let found = fx.json(&["find", "helper_gone"]);
+    let callers = fx.impact_rows("target_kept", "upstream");
+    let callees = fx.impact_rows("caller_main", "downstream");
+
+    assert_eq!(found["found"], false, "{found}");
+    assert!(!has_gone(&callers), "callers of target_kept: {callers:?}");
+    assert!(!has_gone(&callees), "callees of caller_main: {callees:?}");
+}
+
+/// Stands for: after `git mv`, the old path's nodes are gone from the view
+/// and the new path's parse answers. Before F2b `find --all` listed
+/// `helper_gone` twice, once from the base graph's `gone.py`.
+#[test]
+fn test_overlay_view_renamed_file_old_half_suppressed() {
+    let fx = IndexedRepo::new("f2b-renamed-file");
+    fx.git(&["mv", "gone.py", "moved.py"]);
+
+    let found = fx.json(&["find", "helper_gone", "--all"]);
+    let callers = fx.impact_rows("target_kept", "upstream");
+
+    let files: Vec<&str> = found["matches"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no matches: {found}"))
+        .iter()
+        .map(|m| m["file"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(files, ["moved.py"], "{found}");
+    assert!(
+        callers.iter().all(|(_, path)| !path.ends_with("gone.py")),
+        "callers of target_kept: {callers:?}"
+    );
 }
