@@ -114,6 +114,7 @@
 //!   custom `[lib] path` gets no `crate::` / `self::` / `super::` chain.
 
 use super::import_scope::{ImportScope, Module};
+use crate::analyzer::csharp_access::{self, CallAccess};
 use crate::analyzer::csharp_extension::{self, ReceiverSite};
 use crate::analyzer::heritage::{enclosing_class_heritage, holds_heritage, HeritageNode};
 use crate::analyzer::import_binding::{
@@ -142,10 +143,10 @@ use crate::analyzer::type_ladder::{
     self, TypeCandidates, TypeFacts, TypeMember as LadderMember, MAX_HERITAGE_DEPTH,
 };
 use crate::analyzer::types::{
-    innermost_enclosing, owner_key, CallSite, LocalGraph, NameRef, RawExportAlias, RawImport, Span,
-    VariantRef, CLOSURE_REFERENCE_REASON, FUNCTION_REFERENCE_REASON, NEAREST_COPY_CONFIDENCE,
-    NEAREST_COPY_REASON, OVERLOAD_SET_REASON, VALUE_READ_REASON, VARIANT_PATTERN_REASON,
-    VARIANT_USE_REASON,
+    innermost_enclosing, owner_key, CallArguments, CallSite, LocalGraph, NameRef, RawExportAlias,
+    RawImport, Span, VariantRef, CLOSURE_REFERENCE_REASON, FUNCTION_REFERENCE_REASON,
+    NEAREST_COPY_CONFIDENCE, NEAREST_COPY_REASON, OVERLOAD_SET_REASON, VALUE_READ_REASON,
+    VARIANT_PATTERN_REASON, VARIANT_USE_REASON,
 };
 use crate::contracts::identity::{lexical_parents, pair_by_anchor, DeclIdentity, UidSlot};
 use crate::file_category::{pick_global, FileMeta, GlobalPick, Language};
@@ -337,6 +338,9 @@ pub struct OverlayView {
     /// so every edge into them is gone from the merged graph. A deleted
     /// declaration is not in it: its anchor is absent from the parse.
     hidden: Vec<HiddenDecl>,
+    /// The calls the overlay could not resolve as a full build would, in
+    /// discovery order, each once.
+    gaps: Vec<CallGap>,
 }
 
 /// A group of base declarations the overlay could not pair by identity: the
@@ -352,6 +356,44 @@ pub struct HiddenDecl {
     /// How many base declarations the group hides; at least 1.
     pub count: u32,
 }
+
+/// [`CallGap::reason`] of a dirty C# caller: a dirty C# file declares a
+/// method named like the call's member, and the overlay cannot read its
+/// `FunctionMeta` flags, so the extension retry binds nothing.
+pub const GAP_CS_EXTENSION_DIRTY_DECLARATION: &str = "cs-extension-dirty-declaration";
+
+/// [`CallGap::reason`] of a clean C# caller: its indexed call edge reaches a
+/// C# extension method named like a method a dirty C# file declares. The
+/// overlay does not re-resolve a clean caller, so the edge may be stale.
+pub const GAP_CS_EXTENSION_STALE_EDGE: &str = "cs-extension-stale-edge";
+
+/// [`CallGap::reason`] of a dirty C# caller: the C# access rule refused a
+/// method of a dirty file by the flags of the base declaration it replaced
+/// ([`csharp_access`]). A dirty file's input carries no flags of its own,
+/// and the edit may have changed the method's modifiers.
+pub const GAP_CS_ACCESS_DIRTY_TARGET: &str = "cs-access-dirty-target";
+
+/// A call the overlay could not resolve as a full build would (codex ruling
+/// P-ext2 B and C). See [`OverlayView::call_gaps`].
+#[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct CallGap {
+    /// The caller's repo-relative file.
+    pub path: String,
+    /// The caller's 1-based start line.
+    pub line: u32,
+    /// The caller's name.
+    pub caller: String,
+    /// The member the call names.
+    pub member: String,
+    /// [`GAP_CS_EXTENSION_DIRTY_DECLARATION`],
+    /// [`GAP_CS_EXTENSION_STALE_EDGE`] or [`GAP_CS_ACCESS_DIRTY_TARGET`].
+    pub reason: String,
+}
+
+/// A dirty C# file declares a method named like the call's member
+/// ([`GAP_CS_EXTENSION_DIRTY_DECLARATION`]).
+#[derive(Debug, Clone, Copy)]
+struct DirtyNamesake;
 
 impl OverlayView {
     /// Build the view. Returns `None` when `files` is empty — the clean-tree
@@ -568,6 +610,7 @@ impl OverlayView {
         let mut edges: Vec<ViewEdge> = Vec::new();
         let mut out_adj: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
         let mut in_adj: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
+        let gaps: RefCell<Vec<CallGap>> = RefCell::new(Vec::new());
         {
             let mut callables = OverlayNames::new(ResolveTarget::Callable);
             let mut values = OverlayNames::new(ResolveTarget::Value);
@@ -733,6 +776,19 @@ impl OverlayView {
                         &[]
                     };
                     let owner = sym.owner_class.as_deref().and_then(owner_key);
+                    let note_gap = |member: &str, reason: &str| {
+                        let gap = CallGap {
+                            path: file.rel_path.clone(),
+                            line: sym.start_line,
+                            caller: sym.name.clone(),
+                            member: member.to_owned(),
+                            reason: reason.to_owned(),
+                        };
+                        let mut gaps = gaps.borrow_mut();
+                        if !gaps.contains(&gap) {
+                            gaps.push(gap);
+                        }
+                    };
                     for raw_callee in &sym.calls {
                         // The index's Pass 2 order in a JS / TS file: a bare
                         // call binds the innermost named function in scope
@@ -745,8 +801,9 @@ impl OverlayView {
                         // The two chain callbacks run sequentially and share
                         // the same file-metadata cache.
                         let chain_metas = std::cell::RefCell::new(&mut base_metas);
-                        let hit = CallSite::parse(raw_callee).resolve_chain(
-                            |parsed| 'hit: {
+                        let hit = CallSite::resolve_chain(
+                            raw_callee,
+                            |parsed, arguments| 'hit: {
                                 let mut base_metas = chain_metas.borrow_mut();
                                 if let Some(targets) = lexical.targets(span_of(sym), parsed.name())
                                 {
@@ -960,6 +1017,29 @@ impl OverlayView {
                                     };
                                     resolution = Resolution::from_ladder(hit);
                                 }
+                                if caller.language == Language::CSharp {
+                                    // The index's C# access rule (codex ruling
+                                    // P-ext2 C), after the ladder.
+                                    let access = CallAccess::of(site, &file.rel_path, owner);
+                                    resolution = resolution.admit(|idx| {
+                                        let admits = csharp_access::call_admits(
+                                            &facts,
+                                            idx,
+                                            facts.csharp_method_flags(idx),
+                                            access,
+                                        );
+                                        // A dirty target's flags are its base
+                                        // declaration's: the edit may have
+                                        // changed them.
+                                        if !admits && idx >= base_len {
+                                            note_gap(
+                                                facts.name_of(idx),
+                                                GAP_CS_ACCESS_DIRTY_TARGET,
+                                            );
+                                        }
+                                        admits
+                                    });
+                                }
                                 if resolution.call_fallbacks_allowed()
                                     && type_member.is_some()
                                     && caller.language == Language::Kotlin
@@ -989,14 +1069,23 @@ impl OverlayView {
                                         CallSite::Plain(callee) => callee.rsplit_once('.'),
                                         _ => None,
                                     } {
-                                        resolution =
-                                            Resolution::from_ladder(facts.csharp_extension_edge(
+                                        let hit = facts
+                                            .csharp_extension_edge(
                                                 &file.rel_path,
                                                 ReceiverSite::Named(receiver),
                                                 member,
+                                                arguments,
                                                 &file.imports,
                                                 owner,
-                                            ));
+                                            )
+                                            .unwrap_or_else(|DirtyNamesake| {
+                                                note_gap(
+                                                    member,
+                                                    GAP_CS_EXTENSION_DIRTY_DECLARATION,
+                                                );
+                                                None
+                                            });
+                                        resolution = Resolution::from_ladder(hit);
                                     }
                                 }
                                 if untyped {
@@ -1050,7 +1139,7 @@ impl OverlayView {
                                 }
                                 resolution.edge()
                             },
-                            |inner, member| {
+                            |inner, member, arguments| {
                                 if chain_failed {
                                     return Some(None);
                                 }
@@ -1071,9 +1160,17 @@ impl OverlayView {
                                                 &file.rel_path,
                                                 ReceiverSite::Returned(inner.0),
                                                 member,
+                                                arguments,
                                                 &file.imports,
                                                 owner,
                                             )
+                                            .unwrap_or_else(|DirtyNamesake| {
+                                                note_gap(
+                                                    member,
+                                                    GAP_CS_EXTENSION_DIRTY_DECLARATION,
+                                                );
+                                                None
+                                            })
                                             .map(|(id, confidence)| (id, confidence.min(inner.1)));
                                         chain_failed = target.is_none();
                                         Some(target)
@@ -1262,6 +1359,13 @@ impl OverlayView {
             }
         }
 
+        let mut gaps = gaps.into_inner();
+        for gap in stale_extension_gaps(graph, files, &dirty_base, &suppressed) {
+            if !gaps.contains(&gap) {
+                gaps.push(gap);
+            }
+        }
+
         // The index's tombstone (`pass1_register_nodes`): the slot stays,
         // with the bit-inverse uid and no name or owner.
         for offset in tombstones {
@@ -1282,6 +1386,7 @@ impl OverlayView {
             in_adj,
             type_ctors,
             hidden,
+            gaps,
         })
     }
 
@@ -1294,6 +1399,13 @@ impl OverlayView {
     /// name). Empty for a normal deletion, a removed path and a tombstone.
     pub fn hidden_declarations(&self) -> &[HiddenDecl] {
         &self.hidden
+    }
+
+    /// The calls whose overlay edge may differ from a full build's, with
+    /// the reason ([`CallGap`]). Empty when every call resolved as the
+    /// index would.
+    pub fn call_gaps(&self) -> &[CallGap] {
+        &self.gaps
     }
 
     /// All virtual nodes; index `i` here is merged index `base_len + i`.
@@ -1431,6 +1543,7 @@ struct CachedView {
     edges: Vec<CachedEdge>,
     type_ctors: Vec<(u32, Vec<u32>)>,
     hidden: Vec<HiddenDecl>,
+    gaps: Vec<CallGap>,
 }
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -1557,6 +1670,7 @@ impl OverlayView {
                     .collect(),
             ),
             hidden: self.hidden.clone(),
+            gaps: self.gaps.clone(),
         })
     }
 
@@ -1623,6 +1737,7 @@ impl OverlayView {
             in_adj,
             type_ctors: cached.type_ctors.into_iter().collect(),
             hidden: cached.hidden,
+            gaps: cached.gaps,
         })
     }
 }
@@ -1697,6 +1812,82 @@ fn pair_with_base(
         .map(|(&idx, _)| idx)
         .collect();
     (out, unpaired)
+}
+
+/// [`GAP_CS_EXTENSION_STALE_EDGE`] gaps: each indexed `Calls` edge from a
+/// clean caller into a base C# extension method named like a method a dirty
+/// C# file declares. A dirty file may add an instance member of that name,
+/// or change or drop the extension, and the overlay does not re-resolve the
+/// clean caller. Cost: one name-index probe per dirty C# method name, plus
+/// the in-edges of the extension methods it finds.
+fn stale_extension_gaps(
+    graph: &ArchivedZeroCopyGraph,
+    files: &[OverlayFileInput],
+    dirty_base: &FxHashSet<u32>,
+    suppressed: &FxHashSet<u32>,
+) -> Vec<CallGap> {
+    let pool = &graph.string_pool;
+    let mut names: Vec<&str> = files
+        .iter()
+        .filter(|file| Language::from_normalized_path(&file.rel_path) == Language::CSharp)
+        .flat_map(|file| &file.symbols)
+        .filter(|symbol| symbol.kind == NodeKind::Method)
+        .map(|symbol| symbol.name.as_str())
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    let mut gaps: Vec<CallGap> = Vec::new();
+    for name in names {
+        for decl in graph.nodes_by_name(name) {
+            let extension = graph.nodes[decl as usize].name.resolve(pool) == name
+                && base_function_meta(graph, decl).is_some_and(|meta| {
+                    meta.flags.to_native() & csharp_extension::EXTENSION_FLAG != 0
+                });
+            if !extension {
+                continue;
+            }
+            let start = graph.in_offsets[decl as usize].to_native() as usize;
+            let end = graph.in_offsets[decl as usize + 1].to_native() as usize;
+            for &edge_idx in &graph.in_edge_idx[start..end] {
+                let edge = &graph.edges[edge_idx.to_native() as usize];
+                let source = edge.source.to_native();
+                // A dirty caller is re-resolved, and a removed one is gone.
+                if RelType::from(&edge.rel_type) != RelType::Calls
+                    || dirty_base.contains(&source)
+                    || suppressed.contains(&source)
+                {
+                    continue;
+                }
+                let caller = &graph.nodes[source as usize];
+                let Some(path) = graph.files.get(caller.file_idx.to_native() as usize) else {
+                    continue;
+                };
+                let gap = CallGap {
+                    path: path.path.resolve(pool).to_owned(),
+                    line: caller.start_line(),
+                    caller: caller.name.resolve(pool).to_owned(),
+                    member: name.to_owned(),
+                    reason: GAP_CS_EXTENSION_STALE_EDGE.to_owned(),
+                };
+                if !gaps.contains(&gap) {
+                    gaps.push(gap);
+                }
+            }
+        }
+    }
+    gaps
+}
+
+/// The archived `FunctionMeta` of the base node `id`.
+fn base_function_meta(
+    graph: &ArchivedZeroCopyGraph,
+    id: u32,
+) -> Option<&crate::graph::ArchivedFunctionMeta> {
+    let metas = &graph.function_metas;
+    let at = metas
+        .binary_search_by_key(&id, |meta| meta.node_idx.to_native())
+        .ok()?;
+    Some(&metas[at])
 }
 
 /// [`OverlayView::hidden_declarations`] for the base nodes `idxs`, which
@@ -3685,17 +3876,19 @@ impl<'a> OverlayFacts<'a> {
     /// The index's `Resolver::csharp_extension` for a dirty C# caller, the
     /// edge only: the overlay records no BlindSpot. A dirty file's input
     /// carries no `FunctionMeta` flags, so the overlay cannot tell whether
-    /// its methods are extension declarations: when a dirty C# file declares
-    /// a method named `member`, no edge binds where the full build may bind
-    /// one, as the full build's BlindSpot would leave the call.
+    /// its methods are extension declarations. When a dirty C# file declares
+    /// a method named `member`, no edge binds and the result is
+    /// `Err(DirtyNamesake)`: the caller records a [`CallGap`], so the
+    /// payload says the overlay fell back.
     fn csharp_extension_edge(
         &self,
         source: &str,
         receiver: ReceiverSite<'_>,
         member: &str,
+        arguments: Option<CallArguments<'_>>,
         imports: &[RawImport],
         owner: Option<&str>,
-    ) -> Option<(u32, f32)> {
+    ) -> Result<Option<(u32, f32)>, DirtyNamesake> {
         let dirty_namesake = self.dirty_by_name.get(member).is_some_and(|ids| {
             ids.iter().any(|&id| {
                 self.kind_of(id) == NodeKind::Method
@@ -3705,20 +3898,18 @@ impl<'a> OverlayFacts<'a> {
             })
         });
         if dirty_namesake {
-            return None;
+            return Err(DirtyNamesake);
         }
         let graph = self.graph;
         let pool = &graph.string_pool;
-        let metas = &graph.function_metas;
         let mut decls: Vec<csharp_extension::ExtensionDecl<'_>> = Vec::new();
         for id in graph.nodes_by_name(member) {
             if self.dirty_base.contains(&id) || self.name_of(id) != member {
                 continue;
             }
-            let Ok(at) = metas.binary_search_by_key(&id, |meta| meta.node_idx.to_native()) else {
+            let Some(meta) = base_function_meta(graph, id) else {
                 continue;
             };
-            let meta = &metas[at];
             let flags = meta.flags.to_native();
             if flags & csharp_extension::EXTENSION_FLAG == 0 {
                 continue;
@@ -3738,13 +3929,21 @@ impl<'a> OverlayFacts<'a> {
                 id,
                 this_type: meta.params.get(1).map_or("", |ty| ty.resolve(pool)),
                 flags,
+                // `params` alternates name and type; [0] is `this`.
+                params: meta
+                    .params
+                    .iter()
+                    .skip(2)
+                    .step_by(2)
+                    .map(|name| name.resolve(pool))
+                    .collect(),
                 file,
                 class,
                 namespace,
             });
         }
         if decls.is_empty() {
-            return None;
+            return Ok(None);
         }
         let held: Rc<[RawImport]>;
         let (name, scope_file, scope_imports): (&str, &str, &[RawImport]) = match receiver {
@@ -3754,7 +3953,7 @@ impl<'a> OverlayFacts<'a> {
                     type_ladder::returned_type(self, callee),
                     self.node_file(callee),
                 ) else {
-                    return None;
+                    return Ok(None);
                 };
                 held = self.raw_imports(file);
                 (name, file, &held[..])
@@ -3790,6 +3989,7 @@ impl<'a> OverlayFacts<'a> {
                 types: &types,
             },
             member,
+            arguments,
             &csharp_extension::CallerScope {
                 file: source,
                 namespaces: self.csharp_namespaces(source),
@@ -3797,10 +3997,25 @@ impl<'a> OverlayFacts<'a> {
                 owner,
             },
         );
-        match verdict {
+        Ok(match verdict {
             csharp_extension::Verdict::Bound { id, confidence } => Some((id, confidence)),
             _ => None,
-        }
+        })
+    }
+
+    /// The `FunctionMeta::flags` the C# access rule reads for `id`
+    /// ([`csharp_access`]): a clean base method's archived flags. A dirty
+    /// file's input carries no flags, so a dirty method reads the flags of
+    /// the base declaration it replaced, which the edit may have changed. A
+    /// method with no such declaration reads as 0 (public, instance), and
+    /// the rule admits a call to it.
+    fn csharp_method_flags(&self, id: u32) -> u16 {
+        let base = match id.checked_sub(self.base_len()) {
+            Some(offset) => self.nodes[offset as usize].replaced_base,
+            None => (!self.dirty_base.contains(&id)).then_some(id),
+        };
+        base.and_then(|base| base_function_meta(self.graph, base))
+            .map_or(0, |meta| meta.flags.to_native())
     }
 
     /// The namespaces the C# file `file` declares (`.`-joined), the index's

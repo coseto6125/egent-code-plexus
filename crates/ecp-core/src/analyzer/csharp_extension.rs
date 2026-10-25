@@ -13,14 +13,20 @@
 //! Scope forms: the caller file's namespaces and their enclosing ones, its
 //! `using N;` and `using static N.C;` directives (a namespace-level
 //! `using` counts for the whole file), and `global using` written in the
-//! caller's own file. A `global using` of another file, assembly
-//! boundaries (`internal` across projects) and the call's argument count
-//! are not modeled; the BlindSpot hint says so.
+//! caller's own file. A `global using` of another file and assembly
+//! boundaries (`internal` across projects) are not modeled; the BlindSpot
+//! hint says so.
+//!
+//! The candidate unit is the method declaration (codex ruling P-ext2).
+//! The call's argument count, optional parameters, a `params` array and
+//! named arguments decide which declarations apply. Argument types and C#
+//! betterness are not modeled, so two declarations that both apply stay
+//! ambiguous.
 
 use crate::analyzer::outcome::Tier;
 use crate::analyzer::reexport::ResolveTarget;
 use crate::analyzer::type_ladder::{owned_member, MemberLookup, TypeFacts};
-use crate::analyzer::types::RawImport;
+use crate::analyzer::types::{CallArguments, RawImport};
 use crate::file_category::FileMeta;
 
 /// `FunctionMeta::flags` bit 10: a C# extension method, as
@@ -32,6 +38,25 @@ pub const EXTENSION_FLAG: u16 = 1 << 10;
 /// parameter's type is a type parameter of the method (`this T value`),
 /// which applies to any receiver.
 pub const GENERIC_THIS_FLAG: u16 = 1 << 11;
+
+/// `FunctionMeta::flags` bit 12 of a C# extension method: its parameter
+/// list ends in a `params` array. `FunctionMeta::params` does not list that
+/// parameter. Bits 12-15 stay zero on any other method.
+pub const PARAMS_ARRAY_FLAG: u16 = 1 << 12;
+
+/// `FunctionMeta::flags` bits 13-15 of a C# extension method: how many of the
+/// parameters `FunctionMeta::params` lists take a default value (`int n =
+/// 0`). C# puts them last. The count saturates at [`OPTIONAL_SATURATED`].
+pub const OPTIONAL_SHIFT: u16 = 13;
+
+/// The largest optional-parameter count bits 13-15 hold: it reads as "this
+/// many or more".
+pub const OPTIONAL_SATURATED: u16 = 0b111;
+
+/// The flag bits that record a C# method's optional parameters.
+pub fn optional_bits(count: usize) -> u16 {
+    (count.min(usize::from(OPTIONAL_SATURATED)) as u16) << OPTIONAL_SHIFT
+}
 
 /// The confidence of an extension call edge chosen without proof that it
 /// is the one applicable candidate. No other call tier yields this value,
@@ -49,13 +74,16 @@ pub const BS_KIND_UNRESOLVED: &str = "cs-extension-unresolved";
 const PRIVATE: u16 = 2;
 
 /// One recognised extension declaration named as the call's member.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ExtensionDecl<'a> {
     pub id: u32,
     /// The `this` parameter's type as written (`IEnumerable<TSource>`).
     pub this_type: &'a str,
     /// Its `FunctionMeta::flags`.
     pub flags: u16,
+    /// The names of its parameters after `this`, in order. A `params`
+    /// array is not among them ([`PARAMS_ARRAY_FLAG`]).
+    pub params: Vec<&'a str>,
     /// The file that declares it.
     pub file: &'a str,
     /// The owner key of its static class.
@@ -105,9 +133,20 @@ pub enum Unresolved {
     /// Declarations are in scope, but none is visible and applicable to
     /// the receiver's type.
     Inapplicable,
-    /// This many declaring classes apply, and the lookup cannot tell them
-    /// apart.
+    /// Declarations accept the receiver, but none accepts the call's
+    /// arguments.
+    Arguments,
+    /// This many declarations apply, and the lookup cannot tell them apart.
     Ambiguous(u32),
+}
+
+/// Whether a declaration accepts the call's arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Applies {
+    No,
+    /// The record is absent, or a condition it cannot check decides.
+    Unknown,
+    Yes,
 }
 
 /// The retry's answer.
@@ -141,18 +180,22 @@ enum Fit {
 }
 
 /// The retry of `member` on `receiver` among `decls`, the recognised
-/// extension declarations of that name. An edge binds only for exactly one
-/// declaring class in scope, visible and applicable; its confidence is the
-/// owned-member tier's when the receiver is one project type whose whole
-/// ancestry is resolved and owns no `member`, and the `this` type names
-/// that type or a resolved supertype. Every other single candidate binds
-/// at [`HEURISTIC_CONFIDENCE`]. One class's overloads are one candidate,
-/// bound at its first declaration: the call's arguments are not parsed.
+/// extension declarations of that name, for a call that passes
+/// `arguments` (`None` when the entry records none). An edge binds only
+/// for exactly one declaration in scope, visible, accepting the receiver
+/// and not refused by the arguments. It binds at the owned-member tier's
+/// confidence when that declaration is proven: the receiver is one
+/// project type whose whole ancestry is resolved and owns no `member`, the
+/// `this` type names that type or a resolved supertype, and the arguments
+/// fit its parameters. Every other single candidate binds at
+/// [`HEURISTIC_CONFIDENCE`]. Two candidates, overloads of one class
+/// included, are ambiguous.
 pub fn resolve<F: TypeFacts + ?Sized>(
     facts: &F,
     decls: &[ExtensionDecl<'_>],
     receiver: Receiver<'_>,
     member: &str,
+    arguments: Option<CallArguments<'_>>,
     caller: &CallerScope<'_>,
 ) -> Verdict {
     if decls.is_empty() {
@@ -181,8 +224,10 @@ pub fn resolve<F: TypeFacts + ?Sized>(
     }
     let receiver_key = canonical(receiver.name);
     let mut in_scope = false;
-    // (file, class) → (its first declaration, its best fit)
-    let mut classes: Vec<(&str, &str, u32, Fit)> = Vec::new();
+    let mut accepts_receiver = false;
+    // (declaration, its fit, whether the arguments apply), one per
+    // declaration: overloads of one class are rivals like any other.
+    let mut candidates: Vec<(u32, Fit, Applies)> = Vec::new();
     for decl in decls {
         if !scope_admits(decl, caller) {
             continue;
@@ -195,22 +240,19 @@ pub fn resolve<F: TypeFacts + ?Sized>(
         if fit == Fit::Incompatible {
             continue;
         }
-        match classes
-            .iter_mut()
-            .find(|(file, class, ..)| *file == decl.file && *class == decl.class)
-        {
-            Some((_, _, first, best)) => {
-                *first = (*first).min(decl.id);
-                *best = (*best).max(fit);
-            }
-            None => classes.push((decl.file, decl.class, decl.id, fit)),
+        accepts_receiver = true;
+        let applies = applies(decl, arguments);
+        if applies != Applies::No {
+            candidates.push((decl.id, fit, applies));
         }
     }
-    match classes.as_slice() {
+    match candidates.as_slice() {
+        [] if accepts_receiver => Verdict::Unresolved(Unresolved::Arguments),
         [] if in_scope => Verdict::Unresolved(Unresolved::Inapplicable),
         [] => Verdict::Unresolved(Unresolved::OutOfScope),
-        &[(_, _, id, fit)] => {
-            let proven = closed && matches!(fit, Fit::Exact | Fit::Ancestor);
+        &[(id, fit, applies)] => {
+            let proven =
+                closed && matches!(fit, Fit::Exact | Fit::Ancestor) && applies == Applies::Yes;
             Verdict::Bound {
                 id,
                 confidence: if proven {
@@ -235,12 +277,57 @@ pub fn blind_spot_hint(receiver: &str, member: &str, why: Unresolved) -> String 
         Unresolved::Inapplicable => {
             format!("no extension `{member}` in scope accepts a `{receiver}` receiver")
         }
+        Unresolved::Arguments => format!(
+            "no extension `{member}` that accepts a `{receiver}` receiver \
+             takes the call's arguments"
+        ),
         Unresolved::Ambiguous(n) => format!(
-            "{n} classes declare an applicable extension `{member}` \
-             (call arguments and C# betterness are not modeled)"
+            "{n} extension declarations `{member}` apply \
+             (argument types and C# betterness are not modeled)"
         ),
     };
     format!("`{receiver}` has no member `{member}`; extension lookup unresolved: {reason}")
+}
+
+/// Whether `decl` accepts `arguments`, the arguments after the receiver.
+/// The count must fill every parameter without a default value; a
+/// `params` array takes any surplus; each named argument must name a
+/// parameter no positional argument filled. A record that is absent, an
+/// optional count past [`OPTIONAL_SATURATED`], or a name that only the
+/// unlisted `params` array could carry decide nothing: `Unknown`.
+fn applies(decl: &ExtensionDecl<'_>, arguments: Option<CallArguments<'_>>) -> Applies {
+    let Some(arguments) = arguments else {
+        return Applies::Unknown;
+    };
+    let count = decl.params.len();
+    let params_array = decl.flags & PARAMS_ARRAY_FLAG != 0;
+    let optional = (decl.flags >> OPTIONAL_SHIFT) & OPTIONAL_SATURATED;
+    let positional = arguments.positional as usize;
+    if positional > count && !params_array {
+        return Applies::No;
+    }
+    let mut filled = vec![false; count];
+    filled[..positional.min(count)].fill(true);
+    let mut verdict = Applies::Yes;
+    for name in arguments.named() {
+        match decl.params.iter().position(|&param| param == name) {
+            Some(at) if filled[at] => return Applies::No,
+            Some(at) => filled[at] = true,
+            None if params_array && positional <= count => verdict = Applies::Unknown,
+            None => return Applies::No,
+        }
+    }
+    let required = count.saturating_sub(usize::from(optional));
+    if filled[..required].iter().any(|&set| !set) {
+        // Past saturation, more parameters than the bits say may be
+        // optional.
+        return if optional == OPTIONAL_SATURATED {
+            Applies::Unknown
+        } else {
+            Applies::No
+        };
+    }
+    verdict
 }
 
 /// Whether the declaration's class is in the caller's scope (module doc).
@@ -430,6 +517,7 @@ mod tests {
             id: 0,
             this_type: "Foo",
             flags: EXTENSION_FLAG,
+            params: Vec::new(),
             file: "Ext.cs",
             class,
             namespace,
@@ -480,6 +568,64 @@ mod tests {
         let hint = blind_spot_hint("bool", "ToAsync", Unresolved::Ambiguous(2));
         assert!(hint.contains("`bool`"), "{hint}");
         assert!(hint.contains("`ToAsync`"), "{hint}");
-        assert!(hint.contains("2 classes"), "{hint}");
+        assert!(hint.contains("2 extension declarations"), "{hint}");
+    }
+
+    fn shaped(params: &'static [&'static str], flags: u16) -> ExtensionDecl<'static> {
+        ExtensionDecl {
+            params: params.to_vec(),
+            flags: EXTENSION_FLAG | flags,
+            ..decl(Some(""), "E")
+        }
+    }
+
+    fn call(positional: u32, named: &[&str]) -> String {
+        crate::analyzer::types::CallSite::with_arguments("Foo.M", positional, named)
+    }
+
+    fn applies_to(decl: &ExtensionDecl<'_>, raw: &str) -> Applies {
+        applies(decl, crate::analyzer::types::CallSite::arguments(raw))
+    }
+
+    /// Contract (P-ext2): the count fills every parameter without a
+    /// default; a surplus needs a `params` array; a named argument names a
+    /// parameter no positional argument filled. An absent record and a
+    /// saturated optional count prove nothing.
+    #[test]
+    fn test_applies_argument_shapes_decide_yes_no_or_unknown() {
+        let two = shaped(&["a", "b"], 0);
+        let optional = shaped(&["a", "b"], optional_bits(1));
+        let params = shaped(&["a"], PARAMS_ARRAY_FLAG);
+        let saturated = shaped(&["a", "b", "c", "d", "e", "f", "g", "h"], optional_bits(9));
+        for (name, decl, raw, want) in [
+            ("exact count", &two, call(2, &[]), Applies::Yes),
+            ("too few", &two, call(1, &[]), Applies::No),
+            ("too many", &two, call(3, &[]), Applies::No),
+            ("zero for two", &two, call(0, &[]), Applies::No),
+            ("named fills the rest", &two, call(1, &["b"]), Applies::Yes),
+            ("named twice", &two, call(1, &["a"]), Applies::No),
+            ("unknown name", &two, call(1, &["z"]), Applies::No),
+            ("optional left out", &optional, call(1, &[]), Applies::Yes),
+            ("optional given", &optional, call(2, &[]), Applies::Yes),
+            ("required left out", &optional, call(0, &["b"]), Applies::No),
+            ("params surplus", &params, call(4, &[]), Applies::Yes),
+            ("params empty", &params, call(1, &[]), Applies::Yes),
+            (
+                "params by name",
+                &params,
+                call(1, &["rest"]),
+                Applies::Unknown,
+            ),
+            (
+                "saturated optional",
+                &saturated,
+                call(0, &[]),
+                Applies::Unknown,
+            ),
+        ] {
+            assert_eq!(applies_to(decl, &raw), want, "{name}");
+        }
+        assert_eq!(applies(&two, None), Applies::Unknown, "no record");
+        assert_eq!(optional_bits(9), optional_bits(7), "saturates");
     }
 }

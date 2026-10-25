@@ -117,11 +117,34 @@ pub enum CallSite<'a> {
     ChainedMember { inner: &'a str, fallback: &'a str },
 }
 
+/// The arguments one call passes after its receiver, as the entry records
+/// them ([`CallSite::with_arguments`]): the count of positional arguments
+/// and the parameter names of the named ones. Only the C# parser records
+/// them, on the member sites the extension retry reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallArguments<'a> {
+    /// How many arguments name no parameter.
+    pub positional: u32,
+    /// The named arguments' parameter names, comma-joined, in source order.
+    named: &'a str,
+}
+
+impl<'a> CallArguments<'a> {
+    /// The parameter names the named arguments give, in source order.
+    pub fn named(self) -> impl Iterator<Item = &'a str> {
+        self.named.split(',').filter(|name| !name.is_empty())
+    }
+}
+
 impl<'a> CallSite<'a> {
     const CONSTRUCT_PREFIX: &'static str = "\u{1}new ";
     const UNTYPED_MEMBER_PREFIX: &'static str = "\u{1}member ";
     const FROM_RECEIVER_PREFIX: &'static str = "\u{1}from ";
     const CHAINED_MEMBER_PREFIX: &'static str = "\u{1}chain ";
+    /// Opens the argument record ahead of an entry; the chain separator
+    /// closes it. It wraps the whole entry, so a chain's levels each carry
+    /// their own record.
+    const ARGUMENTS_PREFIX: &'static str = "\u{1}args ";
     /// The receiver of the outermost call [`Self::nested_chain`] cut. It
     /// names nothing; a chain that ends in it types none of its levels.
     pub const CUT_CHAIN: &'static str = "\u{1}cut";
@@ -186,7 +209,45 @@ impl<'a> CallSite<'a> {
         raw
     }
 
+    /// `entry` with the arguments of its call recorded ahead of it:
+    /// `positional` unnamed arguments, then one named argument per name in
+    /// `named`. [`Self::parse`] decodes the result as it decodes `entry`.
+    pub fn with_arguments(entry: &str, positional: u32, named: &[&str]) -> String {
+        use std::fmt::Write;
+        let mut raw = String::with_capacity(Self::ARGUMENTS_PREFIX.len() + 4 + entry.len());
+        raw.push_str(Self::ARGUMENTS_PREFIX);
+        let _ = write!(raw, "{positional}");
+        for name in named {
+            raw.push(',');
+            raw.push_str(name);
+        }
+        raw.push(Self::CHAIN_SEPARATOR);
+        raw.push_str(entry);
+        raw
+    }
+
+    /// The arguments the entry `raw` records ([`Self::with_arguments`]).
+    /// `None` for an entry that records none: every non-C# entry, and a C#
+    /// site whose argument list the parser does not model.
+    pub fn arguments(raw: &'a str) -> Option<CallArguments<'a>> {
+        let (spec, _) = Self::split_arguments(raw)?;
+        let (count, named) = spec.split_once(',').unwrap_or((spec, ""));
+        Some(CallArguments {
+            positional: count.parse().ok()?,
+            named,
+        })
+    }
+
+    /// `(argument record, entry)` of an entry that records its arguments.
+    fn split_arguments(raw: &'a str) -> Option<(&'a str, &'a str)> {
+        raw.strip_prefix(Self::ARGUMENTS_PREFIX)?
+            .split_once(Self::CHAIN_SEPARATOR)
+    }
+
     pub fn parse(raw: &'a str) -> Self {
+        // The argument record is no part of the site: an entry decodes as
+        // it did before the parser recorded arguments.
+        let raw = Self::split_arguments(raw).map_or(raw, |(_, entry)| entry);
         if let Some((fallback, inner)) = raw
             .strip_prefix(Self::CHAINED_MEMBER_PREFIX)
             .and_then(|site| site.split_once(Self::CHAIN_SEPARATOR))
@@ -215,38 +276,41 @@ impl<'a> CallSite<'a> {
         }
     }
 
-    /// Resolve `site` with `resolve`, and a chain (`a().b().c()`) from its
-    /// innermost call outwards: each level takes `typed_member` of the
-    /// targets the level below bound, or else resolves its
+    /// Resolve the entry `raw` with `resolve`, and a chain (`a().b().c()`)
+    /// from its innermost call outwards: each level takes `typed_member` of
+    /// the targets the level below bound, or else resolves its
     /// [`Self::fallback`]. A site that is no chain is one `resolve` call.
-    /// The index and the query-time overlay both walk chains here, so a
-    /// chain binds the same on both sides.
+    /// Each site and level comes with the arguments its own entry records
+    /// ([`Self::arguments`]); a level that falls back keeps them. The index
+    /// and the query-time overlay both walk chains here, so a chain binds
+    /// the same on both sides.
     pub fn resolve_chain<T>(
-        self,
-        mut resolve: impl FnMut(Self) -> T,
-        mut typed_member: impl FnMut(&T, &'a str) -> Option<T>,
+        raw: &'a str,
+        mut resolve: impl FnMut(Self, Option<CallArguments<'a>>) -> T,
+        mut typed_member: impl FnMut(&T, &'a str, Option<CallArguments<'a>>) -> Option<T>,
     ) -> T {
-        let mut levels: Vec<Self> = Vec::new();
-        let mut innermost = self;
-        while let Self::ChainedMember { inner, .. } = innermost {
+        let top = (Self::parse(raw), Self::arguments(raw));
+        let mut levels: Vec<(Self, Option<CallArguments<'a>>)> = Vec::new();
+        let mut innermost = top;
+        while let (Self::ChainedMember { inner, .. }, _) = innermost {
             levels.push(innermost);
-            innermost = Self::parse(inner);
+            innermost = (Self::parse(inner), Self::arguments(inner));
         }
         // A cut chain lost its root: typing its levels through their
         // fallbacks could bind a namesake, so the site resolves as it did
         // before chains.
-        if innermost == Self::Plain(Self::CUT_CHAIN) {
-            return resolve(self.fallback());
+        if innermost.0 == Self::Plain(Self::CUT_CHAIN) {
+            return resolve(top.0.fallback(), top.1);
         }
-        let mut targets = resolve(innermost);
-        for level in levels.into_iter().rev() {
+        let mut targets = resolve(innermost.0, innermost.1);
+        for (level, arguments) in levels.into_iter().rev() {
             // A fallback may be the whole callee text (the JS parser writes
             // `new Foo().bar`); the typed member is its last segment.
             let name = level.name();
             let member = name.rsplit(['.', ':']).next().unwrap_or(name);
-            targets = match typed_member(&targets, member) {
+            targets = match typed_member(&targets, member, arguments) {
                 Some(typed) => typed,
-                None => resolve(level.fallback()),
+                None => resolve(level.fallback(), arguments),
             };
         }
         targets
@@ -2002,28 +2066,30 @@ mod tests {
         let inner = CallSite::chained_member("make", "b");
         let raw = CallSite::chained_member(&inner, &CallSite::untyped_member("c"));
         let mut resolved = Vec::new();
-        let got = CallSite::parse(&raw).resolve_chain(
-            |site| {
+        let got = CallSite::resolve_chain(
+            &raw,
+            |site, _| {
                 resolved.push(site.name().to_string());
                 format!("resolved:{}", site.name())
             },
-            |below, member| (member == "b").then(|| format!("{below}>typed:{member}")),
+            |below, member, _| (member == "b").then(|| format!("{below}>typed:{member}")),
         );
         assert_eq!(resolved, ["make", "c"]);
         assert_eq!(got, "resolved:c");
 
         let mut resolved = Vec::new();
-        let got = CallSite::parse(&raw).resolve_chain(
-            |site| {
+        let got = CallSite::resolve_chain(
+            &raw,
+            |site, _| {
                 resolved.push(site.name().to_string());
                 format!("resolved:{}", site.name())
             },
-            |below, member| Some(format!("{below}>typed:{member}")),
+            |below, member, _| Some(format!("{below}>typed:{member}")),
         );
         assert_eq!(resolved, ["make"]);
         assert_eq!(got, "resolved:make>typed:b>typed:c");
 
-        let plain = CallSite::Plain("f").resolve_chain(|site| site.name(), |_, _| None);
+        let plain = CallSite::resolve_chain("f", |site, _| site.name(), |_, _, _| None);
         assert_eq!(plain, "f");
     }
 
@@ -2032,12 +2098,13 @@ mod tests {
         let inner = CallSite::chained_member(CallSite::CUT_CHAIN, "b");
         let raw = CallSite::chained_member(&inner, "c");
         let mut resolved = Vec::new();
-        let got = CallSite::parse(&raw).resolve_chain(
-            |site| {
+        let got = CallSite::resolve_chain(
+            &raw,
+            |site, _| {
                 resolved.push(site.name().to_string());
                 site.name().to_string()
             },
-            |below, member| Some(format!("{below}>typed:{member}")),
+            |below, member, _| Some(format!("{below}>typed:{member}")),
         );
         assert_eq!(resolved, ["c"]);
         assert_eq!(got, "c");
@@ -2124,5 +2191,76 @@ mod tests {
         );
         let malformed = "\u{1}from compute";
         assert_eq!(CallSite::parse(malformed), CallSite::Plain(malformed));
+    }
+
+    /// Contract: an argument record changes no decoded site. Each entry
+    /// decodes with the record as it decodes without it, and an entry with
+    /// no record reads no arguments.
+    #[test]
+    fn test_call_site_with_arguments_decodes_as_bare_entry() {
+        let chain = CallSite::chained_member("make", "bar");
+        let entries = [
+            "Widget.Spin".to_string(),
+            "Spin".to_string(),
+            CallSite::construct("Widget"),
+            CallSite::untyped_member("bar"),
+            CallSite::from_receiver("Util", "Make"),
+            chain,
+            String::new(),
+        ];
+        for entry in &entries {
+            let recorded = CallSite::with_arguments(entry, 2, &["times"]);
+            assert_eq!(
+                CallSite::parse(&recorded),
+                CallSite::parse(entry),
+                "{entry:?}"
+            );
+            assert_eq!(CallSite::arguments(entry), None, "{entry:?}");
+            let arguments = CallSite::arguments(&recorded).expect("recorded");
+            assert_eq!(arguments.positional, 2);
+            assert_eq!(arguments.named().collect::<Vec<_>>(), ["times"]);
+        }
+        let none = CallSite::with_arguments("Widget.Spin", 0, &[]);
+        let arguments = CallSite::arguments(&none).expect("recorded");
+        assert_eq!(arguments.positional, 0);
+        assert_eq!(arguments.named().count(), 0);
+        // Lookalike text and a record without a separator stay plain.
+        for text in ["args 1", "\u{1}args 1"] {
+            assert_eq!(CallSite::parse(text), CallSite::Plain(text));
+            assert_eq!(CallSite::arguments(text), None);
+        }
+    }
+
+    /// Contract: each chain level reads its own record. The innermost site
+    /// gets the inner call's arguments, and the typed level and its
+    /// fallback get the outer call's.
+    #[test]
+    fn test_call_site_resolve_chain_hands_each_level_its_arguments() {
+        let inner = CallSite::with_arguments("Widget.Make", 1, &[]);
+        let raw = CallSite::with_arguments(&CallSite::chained_member(&inner, "Spin"), 0, &["n"]);
+        let seen: std::cell::RefCell<Vec<(String, Option<u32>)>> = Default::default();
+        CallSite::resolve_chain(
+            &raw,
+            |site, arguments| {
+                seen.borrow_mut()
+                    .push((site.name().to_string(), arguments.map(|a| a.positional)));
+            },
+            |_, member, arguments| {
+                let named: Vec<&str> = arguments.into_iter().flat_map(|a| a.named()).collect();
+                seen.borrow_mut().push((
+                    format!("typed {member} {named:?}"),
+                    arguments.map(|a| a.positional),
+                ));
+                None
+            },
+        );
+        assert_eq!(
+            seen.into_inner(),
+            [
+                ("Widget.Make".to_string(), Some(1)),
+                ("typed Spin [\"n\"]".to_string(), Some(0)),
+                ("Spin".to_string(), Some(0)),
+            ]
+        );
     }
 }

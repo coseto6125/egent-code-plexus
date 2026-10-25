@@ -233,6 +233,40 @@ fn calls_value(call: Node<'_>, source: &[u8], locals: &LocalTypes, nodes: &[RawN
         })
 }
 
+/// `entry` with the arguments of the call `inv` recorded
+/// ([`CallSite::with_arguments`]): the C# extension retry reads them to
+/// tell overloads apart. Only a typed member site or a chain records them,
+/// the two sites that retry. A list the parser cannot model records
+/// nothing: a syntax error, or a positional argument after a named one.
+fn with_call_arguments(entry: String, inv: Node<'_>, source: &[u8]) -> String {
+    let Some(list) = inv
+        .child_by_field_name("arguments")
+        .filter(|list| !list.has_error())
+    else {
+        return entry;
+    };
+    let mut positional = 0u32;
+    let mut named: Vec<&str> = Vec::new();
+    let mut cursor = list.walk();
+    for argument in list.named_children(&mut cursor) {
+        if argument.is_extra() {
+            continue;
+        }
+        if argument.kind() != "argument" {
+            return entry;
+        }
+        match argument
+            .child_by_field_name("name")
+            .map(|name| name.utf8_text(source))
+        {
+            Some(Ok(name)) => named.push(name),
+            None if named.is_empty() => positional += 1,
+            _ => return entry,
+        }
+    }
+    CallSite::with_arguments(&entry, positional, &named)
+}
+
 /// Resolve the callee for a C# `invocation_expression`, applying receiver binding.
 fn csharp_callee(
     inv: Node<'_>,
@@ -275,7 +309,7 @@ fn csharp_callee(
                 _ => None,
             };
             Some(match (ty, receiver.kind()) {
-                (Some(t), _) => format!("{t}.{method}"),
+                (Some(t), _) => with_call_arguments(format!("{t}.{method}"), inv, source),
                 // `Foo.Create().Bar()`: the resolver types the receiver by
                 // the callee's return type.
                 (None, "invocation_expression")
@@ -283,7 +317,11 @@ fn csharp_callee(
                 {
                     match CallSite::nested_chain(|| csharp_callee(receiver, source, locals, nodes))
                     {
-                        Some(inner) => CallSite::chained_member(&inner, method),
+                        Some(inner) => with_call_arguments(
+                            CallSite::chained_member(&inner, method),
+                            inv,
+                            source,
+                        ),
                         None => method.to_string(),
                     }
                 }
@@ -425,6 +463,7 @@ fn enclosing_base_name(nodes: &[RawNode], pos: Pos) -> Option<String> {
 mod tests {
     use super::super::parser::CSharpProvider;
     use ecp_core::analyzer::provider::LanguageProvider;
+    use ecp_core::analyzer::types::CallSite;
     use std::path::Path;
 
     fn parse(src: &str) -> ecp_core::analyzer::types::LocalGraph {
@@ -452,7 +491,10 @@ class Animal {
             .find(|n| n.name == "Breathe")
             .expect("Breathe method not found");
         assert!(
-            breathe.calls.iter().any(|c| c == "Animal.Eat"),
+            breathe
+                .calls
+                .iter()
+                .any(|c| CallSite::parse(c) == CallSite::Plain("Animal.Eat")),
             "expected 'Animal.Eat' in calls, got {:?}",
             breathe.calls
         );
@@ -476,7 +518,10 @@ class Dog : Animal {
             .find(|n| n.name == "Setup")
             .expect("Setup method not found");
         assert!(
-            setup.calls.iter().any(|c| c == "Animal.Init"),
+            setup
+                .calls
+                .iter()
+                .any(|c| CallSite::parse(c) == CallSite::Plain("Animal.Init")),
             "expected 'Animal.Init' in calls, got {:?}",
             setup.calls
         );
@@ -500,7 +545,10 @@ class App {
             .find(|n| n.name == "Start")
             .expect("Start method not found");
         assert!(
-            start.calls.iter().any(|c| c == "MyService.Run"),
+            start
+                .calls
+                .iter()
+                .any(|c| CallSite::parse(c) == CallSite::Plain("MyService.Run")),
             "expected 'MyService.Run' in calls, got {:?}",
             start.calls
         );
@@ -528,7 +576,10 @@ class App {
             .find(|n| n.name == "Use")
             .expect("Use method not found");
         assert!(
-            !use_fn.calls.iter().any(|c| c == "List.Add"),
+            !use_fn
+                .calls
+                .iter()
+                .any(|c| CallSite::parse(c) == CallSite::Plain("List.Add")),
             "must NOT bind generic `List<string>` to bare `List`; got {:?}",
             use_fn.calls
         );
@@ -598,6 +649,84 @@ class Standalone {
             !do_work.calls.iter().any(|c| c == "base.Foo"),
             "must NOT contain synthetic 'base.Foo', got {:?}",
             do_work.calls
+        );
+    }
+
+    /// Contract (P-ext2): a typed member site and a chain record the
+    /// arguments the extension retry reads; each chain level keeps its own.
+    /// `ref` / `out` arguments and a lambda count as one argument each. A
+    /// bare call, an untyped member and a list with a positional argument
+    /// after a named one record none, and every entry decodes as before.
+    #[test]
+    fn test_csharp_callee_typed_member_and_chain_record_arguments() {
+        let src = r#"
+class Widget {
+    Widget Make(int n) { return this; }
+    void Use(Widget w, object o) {
+        w.Spin();
+        w.Spin(3, size: 2, mode: 1);
+        w.Make(1).Spin(ref o, out var x);
+        w.Spin(size: 2, 3);
+        w.Spin(x => x);
+        Helper(1, 2);
+        o.Spin(1);
+    }
+}
+"#;
+        let graph = parse(src);
+        let use_fn = graph.nodes.iter().find(|n| n.name == "Use").expect("Use");
+        // The walk attaches calls in no source order; compare as a sorted list.
+        let decode = |raw: &str| {
+            (
+                format!("{:?}", CallSite::parse(raw)),
+                CallSite::arguments(raw)
+                    .map(|a| (a.positional, a.named().collect::<Vec<_>>().join(","))),
+            )
+        };
+        let mut got: Vec<_> = use_fn.calls.iter().map(|raw| decode(raw)).collect();
+        got.sort();
+        let chain = use_fn
+            .calls
+            .iter()
+            .find(|raw| matches!(CallSite::parse(raw), CallSite::ChainedMember { .. }))
+            .expect("a chained entry");
+        let CallSite::ChainedMember { inner, fallback } = CallSite::parse(chain) else {
+            unreachable!()
+        };
+        let mut want = vec![
+            (
+                format!("{:?}", CallSite::Plain("Widget.Spin")),
+                Some((0, String::new())),
+            ),
+            (
+                format!("{:?}", CallSite::Plain("Widget.Spin")),
+                Some((1, "size,mode".to_owned())),
+            ),
+            (
+                format!("{:?}", CallSite::Plain("Widget.Make")),
+                Some((1, String::new())),
+            ),
+            (
+                format!("{:?}", CallSite::parse(chain)),
+                Some((2, String::new())),
+            ),
+            (format!("{:?}", CallSite::Plain("Widget.Spin")), None),
+            (
+                format!("{:?}", CallSite::Plain("Widget.Spin")),
+                Some((1, String::new())),
+            ),
+            (format!("{:?}", CallSite::Plain("Helper")), None),
+            (format!("{:?}", CallSite::Plain("Spin")), None),
+        ];
+        want.sort();
+        assert_eq!(got, want, "{:?}", use_fn.calls);
+        assert_eq!(fallback, "Spin");
+        assert_eq!(
+            decode(inner),
+            (
+                format!("{:?}", CallSite::Plain("Widget.Make")),
+                Some((1, String::new()))
+            )
         );
     }
 }

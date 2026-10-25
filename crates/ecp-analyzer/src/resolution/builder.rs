@@ -18,7 +18,8 @@ use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::reexport::{export_filter_applies, is_ecmascript, ImportRef};
 use ecp_core::analyzer::type_ladder;
 use ecp_core::analyzer::types::{
-    owner_key, BlindSpot, CallSite, LocalGraph, NameRef, RawImport, RawNode, RawRoute, VariantRef,
+    owner_key, BlindSpot, CallArguments, CallSite, LocalGraph, NameRef, RawImport, RawNode,
+    RawRoute, VariantRef,
 };
 pub use ecp_core::analyzer::types::{
     FUNCTION_REFERENCE_REASON, VALUE_READ_REASON, VARIANT_PATTERN_REASON, VARIANT_USE_REASON,
@@ -2597,6 +2598,8 @@ fn pass1_8_function_metas(
         for (file_idx, local_graph) in local_graphs.iter().enumerate() {
             if !local_graph.raw_function_metas.is_empty() {
                 let base = file_base(raw_map, file_idx as u32);
+                let csharp = Language::from_path(&local_graph.file_path.to_string_lossy())
+                    == Language::CSharp;
                 // Sorted index → binary_search per node, so the inner loop
                 // is O(N log F) instead of O(N*F).
                 let mut meta_idx: Vec<(Span, usize)> = local_graph
@@ -2624,15 +2627,27 @@ fn pass1_8_function_metas(
                     if !rfm.return_type.is_empty() {
                         symbol_table.note_return_type(node_idx, &rfm.return_type);
                     }
+                    if csharp && raw_node.kind == NodeKind::Method {
+                        symbol_table.note_csharp_method_flags(node_idx, rfm.flags);
+                    }
                     if rfm.flags & csharp_extension::EXTENSION_FLAG != 0 {
                         // `params` alternates name and type: [1] is the
-                        // `this` parameter's type.
+                        // `this` parameter's type, [2..] the other names
+                        // at even offsets.
                         let this_type = rfm.params.get(1).map_or("", String::as_str);
+                        let names: Vec<&str> = rfm
+                            .params
+                            .iter()
+                            .skip(2)
+                            .step_by(2)
+                            .map(String::as_str)
+                            .collect();
                         symbol_table.note_csharp_extension(
                             node_idx,
                             &raw_node.name,
                             this_type,
                             rfm.flags,
+                            &names,
                         );
                     }
                     let return_type = string_pool.add(&rfm.return_type);
@@ -3170,11 +3185,16 @@ fn pass2_emit_node_edges(
     // nothing leaves a BlindSpot naming the receiver type and the member.
     let extension_misses: RefCell<Vec<String>> = RefCell::new(Vec::new());
     let caller_owner = raw_node.owner_class.as_deref().and_then(owner_key);
-    let extension = |receiver: ReceiverSite<'_>, member: &str, cap: f32| -> Vec<(u32, f32)> {
+    let extension = |receiver: ReceiverSite<'_>,
+                     member: &str,
+                     arguments: Option<CallArguments<'_>>,
+                     cap: f32|
+     -> Vec<(u32, f32)> {
         match resolver.csharp_extension(
             &local_graph.file_path,
             receiver,
             member,
+            arguments,
             &local_graph.imports,
             caller_owner,
         ) {
@@ -3199,43 +3219,47 @@ fn pass2_emit_node_edges(
     for (call_idx, raw_callee) in raw_node.calls.iter().enumerate() {
         let lookup_key = CallMetaKey::new(raw_node.span, call_idx as u32);
         let meta = indirect_lookup.get(&lookup_key);
-        let resolve = |site: CallSite<'_>| match lexical_lookup.targets(raw_node.span, site.name())
-        {
-            Some(targets) if targets.is_empty() => {
-                resolver.resolve_imported_call(&local_graph.file_path, site, &local_graph.imports)
-            }
-            Some(targets) => targets,
-            None => {
-                let targets = resolver.resolve_call(
+        let resolve =
+            |site: CallSite<'_>, arguments: Option<CallArguments<'_>>| match lexical_lookup
+                .targets(raw_node.span, site.name())
+            {
+                Some(targets) if targets.is_empty() => resolver.resolve_imported_call(
                     &local_graph.file_path,
                     site,
                     &local_graph.imports,
-                    call_heritage,
-                    raw_node.owner_class.as_deref(),
-                    Some(current_node_idx),
-                );
-                // The C# parser writes `Type.member` only for a receiver it
-                // typed: `this`, `base`, a typed local or parameter.
-                match site {
-                    CallSite::Plain(callee)
-                        if targets.is_empty() && language == Language::CSharp =>
-                    {
-                        match callee.rsplit_once('.') {
-                            Some((receiver, member)) => {
-                                extension(ReceiverSite::Named(receiver), member, 1.0)
+                ),
+                Some(targets) => targets,
+                None => {
+                    let targets = resolver.resolve_call(
+                        &local_graph.file_path,
+                        site,
+                        &local_graph.imports,
+                        call_heritage,
+                        raw_node.owner_class.as_deref(),
+                        Some(current_node_idx),
+                    );
+                    // The C# parser writes `Type.member` only for a receiver it
+                    // typed: `this`, `base`, a typed local or parameter.
+                    match site {
+                        CallSite::Plain(callee)
+                            if targets.is_empty() && language == Language::CSharp =>
+                        {
+                            match callee.rsplit_once('.') {
+                                Some((receiver, member)) => {
+                                    extension(ReceiverSite::Named(receiver), member, arguments, 1.0)
+                                }
+                                None => targets,
                             }
-                            None => targets,
                         }
+                        _ => targets,
                     }
-                    _ => targets,
                 }
-            }
-        };
+            };
         // `Foo.create().bar()`: `bar` on the type the one bound `create`
         // returns. Only an unknown return type permits the parser's fallback,
         // except Kotlin's existing top-level extension-function retry.
         let mut chain_failed = false;
-        let targets = CallSite::parse(raw_callee).resolve_chain(resolve, |inner, member| {
+        let targets = CallSite::resolve_chain(raw_callee, resolve, |inner, member, arguments| {
             if chain_failed {
                 return Some(Vec::new());
             }
@@ -3259,7 +3283,7 @@ fn pass2_emit_node_edges(
                             .map(|(id, confidence)| (id, confidence.min(inner.1)))
                             .collect(),
                         Language::CSharp => {
-                            extension(ReceiverSite::Returned(inner.0), member, inner.1)
+                            extension(ReceiverSite::Returned(inner.0), member, arguments, inner.1)
                         }
                         _ => Vec::new(),
                     };

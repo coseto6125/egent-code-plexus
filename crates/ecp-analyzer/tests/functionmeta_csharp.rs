@@ -2,7 +2,9 @@
 
 use ecp_analyzer::c_sharp::parser::CSharpProvider;
 use ecp_analyzer::resolution::builder::GraphBuilder;
-use ecp_core::analyzer::csharp_extension::{EXTENSION_FLAG, GENERIC_THIS_FLAG};
+use ecp_core::analyzer::csharp_extension::{
+    optional_bits, EXTENSION_FLAG, GENERIC_THIS_FLAG, PARAMS_ARRAY_FLAG,
+};
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::graph::{FunctionMeta, NodeKind, ZeroCopyGraph};
 
@@ -305,6 +307,50 @@ fn test_extract_csharp_extension_flag_keeps_visibility() {
     assert_eq!(m.flags & EXTENSION_FLAG, EXTENSION_FLAG);
     assert_eq!(m.visibility(), 3, "internal");
     assert!(m.is_static());
+}
+
+/// Contract (P-ext2): an extension method records the shape the retry
+/// checks a call's arguments against. The `params` array is absent from
+/// `params`; the default-valued parameters are counted.
+#[test]
+fn test_extract_csharp_extension_shape_records_params_array_and_optional_count() {
+    let src = "static class E {\n\
+        public static int Plain(this int v, int a) { return a; }\n\
+        public static int Opt(this int v, int a, int b = 1, string c = null) { return a; }\n\
+        public static int Rest(this int v, int a, params int[] rest) { return a; }\n\
+    }";
+    let g = analyze(src);
+    let shape = |name: &str| meta(&g, name).flags & (PARAMS_ARRAY_FLAG | optional_bits(7));
+    assert_eq!(shape("Plain"), 0);
+    assert_eq!(shape("Opt"), optional_bits(2));
+    assert_eq!(shape("Rest"), PARAMS_ARRAY_FLAG);
+    let names = |name: &str| -> Vec<String> {
+        meta(&g, name)
+            .params
+            .iter()
+            .step_by(2)
+            .map(|p| p.resolve(g.string_pool.as_slice()).to_owned())
+            .collect()
+    };
+    assert_eq!(names("Rest"), ["v", "a"], "the params array is not listed");
+}
+
+/// Contract: a method that is no extension keeps bits 12-15 clear, so no
+/// other consumer of `FunctionMeta::flags` sees a new bit.
+#[test]
+fn test_extract_csharp_plain_method_with_params_array_sets_no_shape_bits() {
+    let src = "class C { public int M(int a = 1, params int[] rest) { return a; } }";
+    assert_eq!(meta(&analyze(src), "M").flags >> 12, 0);
+}
+
+/// Regression: an interface member inside `#if` defaults to public, as one
+/// outside it does. The walk to the interface skips the preprocessor block.
+#[test]
+fn test_extract_csharp_interface_member_under_preprocessor_defaults_public() {
+    let src = "public interface IDoc\n{\n#if HAVE_X\n    IType CreateType(string name);\n#endif\n    IType Other();\n}\n";
+    let g = analyze(src);
+    assert_eq!(meta(&g, "Other").visibility(), 0, "outside `#if`");
+    assert_eq!(meta(&g, "CreateType").visibility(), 0, "inside `#if`");
 }
 
 // ── sorted invariant ──────────────────────────────────────────────────────────

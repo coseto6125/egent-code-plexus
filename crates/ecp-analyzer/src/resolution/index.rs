@@ -10,7 +10,7 @@ use ecp_core::analyzer::type_ladder::{declared_namespace, return_type_key, TypeF
 use ecp_core::analyzer::types::{owner_key, RawExportAlias};
 use ecp_core::file_category::pick_global;
 pub use ecp_core::file_category::{FileMeta, GlobalPick, Language};
-use ecp_core::graph::NodeKind;
+use ecp_core::graph::{FunctionMeta, NodeKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::Cow;
 
@@ -130,9 +130,17 @@ fn path_dirs(path: &str) -> Vec<&str> {
     parts
 }
 
-/// A C# extension method: its node id, its `this` parameter's type as
-/// written, and its `FunctionMeta::flags`.
-type CsharpExtensionDecl = (u32, Box<str>, u16);
+/// A C# extension method as [`SymbolTable::note_csharp_extension`] records
+/// it.
+#[derive(Debug)]
+struct CsharpExtensionDecl {
+    id: u32,
+    /// Its `this` parameter's type as written.
+    this_type: Box<str>,
+    flags: u16,
+    /// The names of its parameters after `this`.
+    params: Box<[Box<str>]>,
+}
 
 /// A high-performance global symbol index mapping node names and file locations
 /// to their corresponding globally unique node IDs.
@@ -334,9 +342,15 @@ pub struct SymbolTable {
     lexical_parents: FxHashMap<u32, u32>,
 
     /// Method name → the C# extension methods of that name, each with its
-    /// `this` parameter's type as written and its `FunctionMeta::flags`
-    /// (see [`Self::note_csharp_extension`]). Overloads included.
+    /// `this` parameter's type as written, its `FunctionMeta::flags` and its
+    /// parameter names (see [`Self::note_csharp_extension`]). Overloads
+    /// included.
     csharp_extensions: FxHashMap<Box<str>, Vec<CsharpExtensionDecl>>,
+
+    /// C# method id → its `FunctionMeta::flags`, for the methods the access
+    /// rule may refuse: static or private ones
+    /// ([`ecp_core::analyzer::csharp_access`]). Sparse.
+    csharp_method_flags: FxHashMap<u32, u16>,
 }
 
 impl SymbolTable {
@@ -633,12 +647,40 @@ impl SymbolTable {
 
     /// Record the C# extension method `node_id` named `name`
     /// ([`ecp_core::analyzer::csharp_extension::EXTENSION_FLAG`]): the type
-    /// its `this` parameter declares and its flags.
-    pub fn note_csharp_extension(&mut self, node_id: u32, name: &str, this_type: &str, flags: u16) {
+    /// its `this` parameter declares, its flags and the names of its
+    /// parameters after `this`.
+    pub fn note_csharp_extension(
+        &mut self,
+        node_id: u32,
+        name: &str,
+        this_type: &str,
+        flags: u16,
+        params: &[&str],
+    ) {
         self.csharp_extensions
             .entry(name.into())
             .or_default()
-            .push((node_id, this_type.into(), flags));
+            .push(CsharpExtensionDecl {
+                id: node_id,
+                this_type: this_type.into(),
+                flags,
+                params: params.iter().map(|&name| name.into()).collect(),
+            });
+    }
+
+    /// Record the `FunctionMeta::flags` of the C# method `node_id` when the
+    /// access rule may refuse a call to it: a static or a private method.
+    pub fn note_csharp_method_flags(&mut self, node_id: u32, flags: u16) {
+        let is_static = flags & FunctionMeta::FLAG_STATIC != 0;
+        if is_static || (flags >> 6) & 0b111 == 2 {
+            self.csharp_method_flags.insert(node_id, flags);
+        }
+    }
+
+    /// The `FunctionMeta::flags` [`Self::note_csharp_method_flags`] kept
+    /// for `node_id`; 0 (public, instance) for any other id.
+    pub(crate) fn csharp_method_flags(&self, node_id: u32) -> u16 {
+        self.csharp_method_flags.get(&node_id).copied().unwrap_or(0)
     }
 
     /// The C# extension declarations named `name`, as
@@ -650,9 +692,9 @@ impl SymbolTable {
         };
         found
             .iter()
-            .filter_map(|(id, this_type, flags)| {
-                let file = self.file_of(*id)?;
-                let class = PickFacts::owner(self, *id)?;
+            .filter_map(|decl| {
+                let file = self.file_of(decl.id)?;
+                let class = PickFacts::owner(self, decl.id)?;
                 let namespace = self
                     .lookup_in_file_with_kind(file, class, ResolveTarget::Type)
                     .and_then(|class_id| {
@@ -662,9 +704,10 @@ impl SymbolTable {
                         )
                     });
                 Some(ExtensionDecl {
-                    id: *id,
-                    this_type,
-                    flags: *flags,
+                    id: decl.id,
+                    this_type: &decl.this_type,
+                    flags: decl.flags,
+                    params: decl.params.iter().map(|name| &**name).collect(),
                     file,
                     class,
                     namespace,

@@ -1,8 +1,10 @@
 //! C# extension-method calls (codex ruling P-ext): a member call whose
 //! receiver type owns no such member retries the extension methods in the
-//! caller's scope. An edge binds only for one applicable declaring class;
-//! a retry that binds nothing leaves a `cs-extension-unresolved` BlindSpot
-//! naming the receiver type and the member, never a same-name global.
+//! caller's scope. An edge binds only for one applicable declaration: the
+//! receiver, the argument count, optional parameters, a `params` array and
+//! named arguments decide (P-ext2). A retry that binds nothing leaves a
+//! `cs-extension-unresolved` BlindSpot naming the receiver type and the
+//! member, never a same-name global.
 //!
 //! Every fixture types the receiver as a parameter (`Widget w`), so the
 //! parser writes `Widget.Spin`; `Widget` and `Gadget` declare no bases, so
@@ -134,23 +136,159 @@ fn test_resolve_call_generic_this_extension_binds_heuristic() {
     };
 }
 
-/// Contract: the call's arguments are not parsed, so one class's overloads
-/// are one candidate, bound once at the class's first declaration. Two
-/// edges, or a BlindSpot, would mean the overloads split into rivals.
+/// `Lib.WidgetExt` declaring `first` on line 5 and `second` on line 6.
+fn overloads(first: &str, second: &str) -> String {
+    ext_class(
+        "Lib",
+        "WidgetExt",
+        &format!("        public static int {first}\n        public static int {second}\n"),
+    )
+}
+
+/// `Run`'s edges and the extension BlindSpots for `call` (replacing
+/// `w.Spin()`) against `ext`.
+fn spin_with(
+    ext: &str,
+    call: &str,
+) -> (
+    Vec<(String, String, u32, f32, String)>,
+    Vec<(String, String)>,
+) {
+    let app = caller("using Lib;").replace("w.Spin()", call);
+    let graph = graph_of(&[WIDGET, ("Lib/WidgetExt.cs", ext), ("App.cs", &app)]);
+    (run_calls(&graph), extension_misses(&graph))
+}
+
+const SPIN_NONE: &str = "Spin(this Widget w) { return 1; }";
+const SPIN_INT: &str = "Spin(this Widget w, int times) { return times; }";
+
+/// Contract (P-ext2): the candidate is the declaration, not the class.
+/// `w.Spin(3)` binds the one-argument overload, on line 6, whichever order
+/// the class declares them in. Before P-ext2 the first declaration won.
 #[test]
-fn test_resolve_call_extension_overloads_by_arity_bind_one_edge_to_first() {
+fn test_resolve_call_extension_overloads_by_arity_bind_applicable_declaration() {
+    let ext = overloads(SPIN_NONE, SPIN_INT);
+    let (calls, misses) = spin_with(&ext, "w.Spin(3)");
+    assert_eq!(
+        calls,
+        vec![edge("Lib/WidgetExt.cs", "Spin", 6, 0.85, "call")]
+    );
+    assert_eq!(misses, vec![]);
+
+    let swapped = overloads(SPIN_INT, SPIN_NONE);
+    let (calls, misses) = spin_with(&swapped, "w.Spin(3)");
+    assert_eq!(
+        calls,
+        vec![edge("Lib/WidgetExt.cs", "Spin", 5, 0.85, "call")]
+    );
+    assert_eq!(misses, vec![]);
+}
+
+/// Zero arguments bind the overload that takes none, in either order.
+#[test]
+fn test_resolve_call_extension_zero_arguments_bind_parameterless_overload() {
+    let (calls, _) = spin_with(&overloads(SPIN_NONE, SPIN_INT), "w.Spin()");
+    assert_eq!(
+        calls,
+        vec![edge("Lib/WidgetExt.cs", "Spin", 5, 0.85, "call")]
+    );
+    let (calls, _) = spin_with(&overloads(SPIN_INT, SPIN_NONE), "w.Spin()");
+    assert_eq!(
+        calls,
+        vec![edge("Lib/WidgetExt.cs", "Spin", 6, 0.85, "call")]
+    );
+}
+
+/// A count no declaration takes binds nothing and says why.
+#[test]
+fn test_resolve_call_extension_count_mismatch_gives_blind_spot_and_no_edge() {
     let ext = ext_class(
         "Lib",
         "WidgetExt",
-        "        public static int Spin(this Widget w) { return 1; }\n        public static int Spin(this Widget w, int times) { return times; }\n",
+        "        public static int Spin(this Widget w, int a, int b) { return a; }\n",
     );
-    let app = caller("using Lib;").replace("w.Spin()", "w.Spin(3)");
-    let graph = graph_of(&[WIDGET, ("Lib/WidgetExt.cs", &ext), ("App.cs", &app)]);
+    let (calls, misses) = spin_with(&ext, "w.Spin(1)");
+    assert_eq!(calls, vec![]);
+    assert_eq!(misses.len(), 1, "{misses:?}");
+    assert!(
+        misses[0].1.contains("takes the call's arguments"),
+        "{misses:?}"
+    );
+}
+
+/// Argument types are not modeled: two overloads of one count stay
+/// ambiguous. Never the first one.
+#[test]
+fn test_resolve_call_extension_same_count_different_types_give_blind_spot() {
+    let ext = overloads(SPIN_INT, "Spin(this Widget w, string name) { return 0; }");
+    let (calls, misses) = spin_with(&ext, "w.Spin(3)");
+    assert_eq!(calls, vec![], "never the first overload");
+    assert_eq!(misses.len(), 1, "{misses:?}");
+    assert!(
+        misses[0]
+            .1
+            .contains("2 extension declarations `Spin` apply"),
+        "{misses:?}"
+    );
+}
+
+/// A default-valued parameter may be left out; the overload that would
+/// need it given is not applicable.
+#[test]
+fn test_resolve_call_extension_optional_parameter_binds_when_omitted() {
+    let ext = overloads(
+        "Spin(this Widget w, int a, int b = 0) { return a; }",
+        "Spin(this Widget w, int a, int b, int c) { return a; }",
+    );
+    let (calls, misses) = spin_with(&ext, "w.Spin(1)");
     assert_eq!(
-        run_calls(&graph),
+        calls,
         vec![edge("Lib/WidgetExt.cs", "Spin", 5, 0.85, "call")]
     );
-    assert_eq!(extension_misses(&graph), vec![]);
+    assert_eq!(misses, vec![]);
+}
+
+/// A `params` array takes the surplus arguments.
+#[test]
+fn test_resolve_call_extension_params_array_takes_surplus_arguments() {
+    let ext = overloads(
+        "Spin(this Widget w, int a, int b) { return a; }",
+        "Spin(this Widget w, params int[] all) { return 0; }",
+    );
+    let (calls, misses) = spin_with(&ext, "w.Spin(1, 2, 3)");
+    assert_eq!(
+        calls,
+        vec![edge("Lib/WidgetExt.cs", "Spin", 6, 0.85, "call")]
+    );
+    assert_eq!(misses, vec![]);
+}
+
+/// A named argument picks the overload that declares that parameter.
+#[test]
+fn test_resolve_call_extension_named_argument_binds_declaring_overload() {
+    let ext = overloads(SPIN_INT, "Spin(this Widget w, int count) { return count; }");
+    let (calls, misses) = spin_with(&ext, "w.Spin(count: 2)");
+    assert_eq!(
+        calls,
+        vec![edge("Lib/WidgetExt.cs", "Spin", 6, 0.85, "call")]
+    );
+    assert_eq!(misses, vec![]);
+}
+
+/// `Make().Spin(3)`: a chain level reads its own arguments.
+#[test]
+fn test_resolve_chain_returned_receiver_overloads_by_arity_bind_applicable() {
+    let ext = overloads(SPIN_NONE, SPIN_INT);
+    let app = "using Lib;\nnamespace App\n{\n    public class Runner\n    {\n        public Widget Make() { return new Widget(); }\n        public int Run()\n        {\n            return Make().Spin(3);\n        }\n    }\n}\n";
+    let graph = graph_of(&[WIDGET, ("Lib/WidgetExt.cs", &ext), ("App.cs", app)]);
+    let spins: Vec<_> = run_calls(&graph)
+        .into_iter()
+        .filter(|call| call.1 == "Spin")
+        .collect();
+    assert_eq!(
+        spins,
+        vec![edge("Lib/WidgetExt.cs", "Spin", 6, 0.85, "call")]
+    );
 }
 
 #[test]
@@ -243,7 +381,10 @@ fn test_resolve_call_two_applicable_extensions_give_blind_spot_and_no_edge() {
         misses[0].1.contains("`Widget` has no member `Spin`"),
         "{misses:?}"
     );
-    assert!(misses[0].1.contains("2 classes"), "{misses:?}");
+    assert!(
+        misses[0].1.contains("2 extension declarations"),
+        "{misses:?}"
+    );
 }
 
 #[test]

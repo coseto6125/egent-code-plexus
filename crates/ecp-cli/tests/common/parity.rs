@@ -9,7 +9,7 @@ use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::graph::{ArchivedZeroCopyGraph, RelType};
 use ecp_core::session::merged::MergedGraph;
-use ecp_core::session::view::{OverlayFileInput, OverlayView};
+use ecp_core::session::view::{CallGap, OverlayFileInput, OverlayView};
 use std::path::Path;
 
 /// One edge by identity, never by node index or uid (a uid collision would
@@ -150,6 +150,30 @@ pub fn edges_after_edit_with(
     );
     let overlay = edges(base, &MergedGraph::new(base, Some(&view)), rel, selects);
     EdgeParity { reindex, overlay }
+}
+
+/// The calls the overlay of `edits` over the base index of `files` reports
+/// it could not resolve as a full build would ([`OverlayView::call_gaps`]),
+/// after the session view cache round trip.
+pub fn call_gaps_after_edit(
+    parse: &dyn Fn(&str, &str) -> LocalGraph,
+    files: &[(&str, &str)],
+    edits: &[(&str, &str)],
+) -> Vec<CallGap> {
+    let mut builder = GraphBuilder::new();
+    for (path, source) in files {
+        builder.add_graph(parse(path, source));
+    }
+    let base = rkyv::to_bytes::<rkyv::rancor::Error>(&builder.build()).unwrap();
+    let base = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&base).unwrap();
+    let inputs: Vec<OverlayFileInput> = edits
+        .iter()
+        .map(|(path, source)| parse(path, source).into())
+        .collect();
+    let view = OverlayView::build(base, &inputs).expect("edits make a view");
+    let cached = OverlayView::from_cache_bytes(&view.to_cache_bytes(), base.nodes.len())
+        .expect("view cache round trip");
+    cached.call_gaps().to_vec()
 }
 
 /// [`edges_after_edit_with`] over a plain [`GraphBuilder`].

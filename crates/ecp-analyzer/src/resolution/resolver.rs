@@ -37,6 +37,7 @@
 //! regression suite and `crates/ecp-analyzer/benches/resolver_lookup.rs` for
 //! the before/after bench numbers.
 
+use ecp_core::analyzer::csharp_access::{self, CallAccess};
 use ecp_core::analyzer::csharp_extension::{self, ReceiverSite};
 use ecp_core::analyzer::import_binding::{
     extension_retry, fqn_extension, fqn_imported_name, fqn_language, fqn_type_path, import_binding,
@@ -53,7 +54,7 @@ use ecp_core::analyzer::same_file_pick::type_receiver_is_closed;
 use ecp_core::analyzer::type_ladder::{
     self, Ownership, TypeCandidates, TypeMember as LadderMember,
 };
-use ecp_core::analyzer::types::{owner_key, CallSite, LocalGraph, RawImport};
+use ecp_core::analyzer::types::{owner_key, CallArguments, CallSite, LocalGraph, RawImport};
 use ecp_core::graph::NodeKind;
 use serde::Serialize;
 use std::borrow::Cow;
@@ -822,6 +823,20 @@ impl<'a> Resolver<'a> {
             targets = resolve(type_member.as_deref().unwrap_or(site.name()), target, true);
             resolution = ladder_resolution(&targets);
         }
+        if language == Language::CSharp {
+            // An instance call never reaches a static method, nor any call a
+            // private member of an unrelated type (codex ruling P-ext2 C).
+            let caller_file = normalize_source_path(source_file);
+            let access = CallAccess::of(site, &caller_file, caller_owner.and_then(owner_key));
+            resolution = resolution.admit(|id| {
+                csharp_access::call_admits(
+                    self.symbol_table,
+                    id,
+                    self.symbol_table.csharp_method_flags(id),
+                    access,
+                )
+            });
+        }
         if resolution.call_fallbacks_allowed()
             && type_member.is_some()
             && language == Language::Kotlin
@@ -1537,12 +1552,15 @@ impl<'a> Resolver<'a> {
     /// is read where [`ReceiverSite`] says: a named type in `source_file`
     /// with `raw_imports`, the type a call returns in the callee's file with
     /// that file's imports. The candidates' scope is always the caller's:
-    /// `source_file`'s namespaces and `raw_imports`.
+    /// `source_file`'s namespaces and `raw_imports`. `arguments` are the
+    /// ones the call's entry records.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn csharp_extension(
         &self,
         source_file: &Path,
         receiver: ReceiverSite<'_>,
         member: &str,
+        arguments: Option<CallArguments<'_>>,
         raw_imports: &[RawImport],
         caller_owner: Option<&str>,
     ) -> csharp_extension::Verdict {
@@ -1593,6 +1611,7 @@ impl<'a> Resolver<'a> {
                 types: &types,
             },
             member,
+            arguments,
             &csharp_extension::CallerScope {
                 file: &caller_file,
                 namespaces: &namespaces,

@@ -1,7 +1,7 @@
 use crate::session::view_cache;
 use ecp_core::contracts::routing::SizeCap;
 use ecp_core::graph::{ArchivedZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC};
-use ecp_core::session::view::HiddenDecl;
+use ecp_core::session::view::{CallGap, HiddenDecl};
 use ecp_core::session::OverlayView;
 use memmap2::Mmap;
 use rkyv::rancor::Error;
@@ -209,7 +209,11 @@ impl Engine {
         let unreadable = self.unreadable_changes_line();
         let ambiguous =
             view.and_then(|view| unpaired_declarations_line(view.hidden_declarations()));
-        crate::output::merge_caveats(unreadable.map(label), ambiguous.map(label))
+        let gaps = view.and_then(|view| call_gaps_line(view.call_gaps()));
+        crate::output::merge_caveats(
+            crate::output::merge_caveats(unreadable.map(label), ambiguous.map(label)),
+            gaps.map(label),
+        )
     }
 
     fn unreadable_changes_line(&self) -> Option<String> {
@@ -475,6 +479,35 @@ fn unpaired_declarations_line(hidden: &[HiddenDecl]) -> Option<String> {
     ))
 }
 
+/// The caveat line for calls the overlay could not resolve as a full index
+/// would ([`CallGap`]), or `None` when there are none. Effect first, then
+/// each call with its reason code, then the fix.
+fn call_gaps_line(gaps: &[CallGap]) -> Option<String> {
+    if gaps.is_empty() {
+        return None;
+    }
+    let mut listed: Vec<String> = gaps
+        .iter()
+        .take(UNPAIRED_GROUPS_SHOWN)
+        .map(|gap| {
+            format!(
+                "{} -> {} ({}:{}, {})",
+                gap.caller, gap.member, gap.path, gap.line, gap.reason
+            )
+        })
+        .collect();
+    if gaps.len() > UNPAIRED_GROUPS_SHOWN {
+        listed.push(format!("and {} more", gaps.len() - UNPAIRED_GROUPS_SHOWN));
+    }
+    Some(format!(
+        "results may be incomplete: the dirty overlay cannot resolve {} C# call(s) as \
+         a full index would: {}. A listed call may lack an edge or keep a stale \
+         one. Run `ecp admin index --repo .` and rerun.",
+        gaps.len(),
+        listed.join(", ")
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -519,5 +552,47 @@ mod tests {
         assert!(line.contains("could not pair 16 base declaration(s)"));
         assert!(line.contains("Method f4 x2 (a.cpp), and 6 more."));
         assert!(!line.contains("f5"), "the sixth group folds into the count");
+    }
+
+    fn gap(caller: &str, line: u32, reason: &str) -> CallGap {
+        CallGap {
+            path: "src/App.cs".to_string(),
+            line,
+            caller: caller.to_string(),
+            member: "Spin".to_string(),
+            reason: reason.to_string(),
+        }
+    }
+
+    /// Stands for: the line names each call site, its member and its
+    /// machine-readable reason code, and no gap gives no line.
+    #[test]
+    fn test_call_gaps_line_names_call_site_and_reason() {
+        assert_eq!(call_gaps_line(&[]), None);
+
+        let line = call_gaps_line(&[gap("Use", 5, "cs-extension-stale-edge")]).unwrap();
+
+        assert!(line.starts_with(
+            "results may be incomplete: the dirty overlay cannot resolve 1 C# call(s)"
+        ));
+        assert!(line.contains("Use -> Spin (src/App.cs:5, cs-extension-stale-edge)."));
+        assert!(line.contains("`ecp admin index --repo .`"));
+        assert!(!line.contains('\n'), "one reason per line");
+    }
+
+    /// Stands for: at most 5 calls are named; "and N more" counts the rest.
+    #[test]
+    fn test_call_gaps_line_over_five_calls_counts_rest() {
+        let gaps: Vec<CallGap> = (0..7)
+            .map(|i| gap(&format!("f{i}"), i, "cs-extension-dirty-declaration"))
+            .collect();
+
+        let line = call_gaps_line(&gaps).unwrap();
+
+        assert!(line.contains("cannot resolve 7 C# call(s)"));
+        assert!(
+            line.contains("f4 -> Spin (src/App.cs:4, cs-extension-dirty-declaration), and 2 more.")
+        );
+        assert!(!line.contains("f5"), "the sixth call folds into the count");
     }
 }

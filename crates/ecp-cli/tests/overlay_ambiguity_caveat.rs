@@ -3,6 +3,9 @@
 //! and their edges. Every graph command that reads the view says so in the
 //! payload's `result` field, names the hidden declarations, and says it as
 //! well on a view-cache hit. A normal deletion says nothing: it is not a gap.
+//!
+//! A C# call the overlay cannot resolve as a full index would (codex ruling
+//! P-ext2 B) reaches the same `result` field, with its call site and reason.
 
 use serde_json::Value;
 use std::fs;
@@ -18,27 +21,35 @@ const U_JAVA: &str =
 /// The line a consumer matches on: the overlay could not pair a declaration.
 const GAP_MARKER: &str = "could not pair";
 
-/// An indexed git repo holding `K.java` (two `save` overloads), `Caller.java`
-/// (calls `K.save`) and `U.java` (two unique methods), with its own cache root.
-struct JavaRepo {
+/// An indexed git repo with its own cache root.
+struct Repo {
     _tmp: tempfile::TempDir,
     repo: PathBuf,
     home: PathBuf,
     session_id: &'static str,
 }
 
-impl JavaRepo {
-    fn new(session_id: &'static str) -> Self {
+impl Repo {
+    /// `K.java` (two `save` overloads), `Caller.java` (calls `K.save`) and
+    /// `U.java` (two unique methods).
+    fn java(session_id: &'static str) -> Self {
+        Self::new(
+            session_id,
+            &[
+                ("src/K.java", K_JAVA),
+                ("src/Caller.java", CALLER_JAVA),
+                ("src/U.java", U_JAVA),
+            ],
+        )
+    }
+
+    fn new(session_id: &'static str, files: &[(&str, &str)]) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("repo");
         let home = tmp.path().join("home");
         fs::create_dir_all(repo.join("src")).unwrap();
         fs::create_dir_all(&home).unwrap();
-        for (rel, text) in [
-            ("src/K.java", K_JAVA),
-            ("src/Caller.java", CALLER_JAVA),
-            ("src/U.java", U_JAVA),
-        ] {
+        for (rel, text) in files {
             fs::write(repo.join(rel), text).unwrap();
         }
         let fixture = Self {
@@ -141,7 +152,7 @@ fn assert_names_hidden_save(result: &str) {
 /// query reads the view from the cache and says the same.
 #[test]
 fn test_find_dirty_java_overloads_result_names_hidden_declarations() {
-    let fx = JavaRepo::new("rpib-java-overloads");
+    let fx = Repo::java("rpib-java-overloads");
     assert!(
         !fx.result(&["find", "save"]).contains(GAP_MARKER),
         "setup: a clean tree has no gap"
@@ -159,7 +170,7 @@ fn test_find_dirty_java_overloads_result_names_hidden_declarations() {
 /// gap, so the answer carries no such line.
 #[test]
 fn test_find_dirty_unique_method_deleted_no_ambiguity_caveat() {
-    let fx = JavaRepo::new("rpib-unique-deleted");
+    let fx = Repo::java("rpib-unique-deleted");
     let kept = "public class U {\n    public void load() {\n    }\n}\n";
     fs::write(fx.repo.join("src/U.java"), kept).unwrap();
 
@@ -175,7 +186,7 @@ fn test_find_dirty_unique_method_deleted_no_ambiguity_caveat() {
 /// from the registry entry.
 #[test]
 fn test_find_by_repo_dirty_overloads_result_names_hidden_declarations() {
-    let fx = JavaRepo::new("rpib-by-repo");
+    let fx = Repo::java("rpib-by-repo");
     fx.touch_comment("src/K.java");
 
     let payload = fx.json_in(
@@ -191,7 +202,7 @@ fn test_find_by_repo_dirty_overloads_result_names_hidden_declarations() {
 /// callers".
 #[test]
 fn test_impact_baseline_dirty_overloads_carries_caveat() {
-    let fx = JavaRepo::new("rpib-impact-baseline");
+    let fx = Repo::java("rpib-impact-baseline");
     fx.touch_comment("src/K.java");
 
     let result = fx.result(&["impact", "--baseline", "HEAD", "--repo", "."]);
@@ -203,7 +214,7 @@ fn test_impact_baseline_dirty_overloads_carries_caveat() {
 /// in the overlay hides nothing from it and its answer carries no such line.
 #[test]
 fn test_routes_dirty_overloads_no_ambiguity_caveat() {
-    let fx = JavaRepo::new("rpib-routes");
+    let fx = Repo::java("rpib-routes");
     fx.touch_comment("src/K.java");
 
     let result = fx.result(&["routes"]);
@@ -215,7 +226,7 @@ fn test_routes_dirty_overloads_no_ambiguity_caveat() {
 /// absence either, so the error payload carries the same line as a hit.
 #[test]
 fn test_impact_batch_dirty_overloads_error_payload_carries_caveat() {
-    let fx = JavaRepo::new("rpib-impact-batch");
+    let fx = Repo::java("rpib-impact-batch");
     fx.touch_comment("src/K.java");
 
     let mut child = fx
@@ -245,4 +256,45 @@ fn test_impact_batch_dirty_overloads_error_payload_carries_caveat() {
 
     assert_eq!(payload["status"], "not_found", "{payload}");
     assert_names_hidden_save(&result_of(&payload));
+}
+
+const WIDGET_CS: &str = "public class Widget\n{\n}\n";
+const WIDGET_EXT_CS: &str = "namespace Lib\n{\n    public static class WidgetExt\n    {\n        public static int Spin(this Widget w) { return 1; }\n    }\n}\n";
+const APP_CS: &str = "using Lib;\nnamespace App\n{\n    public class Runner\n    {\n        public int Run(Widget w)\n        {\n            return w.Spin();\n        }\n    }\n}\n";
+
+/// The reason code a consumer matches on: a clean caller's extension edge
+/// may be stale.
+const STALE_EDGE: &str = "cs-extension-stale-edge";
+
+/// Stands for (P-ext2 B): a dirty `Widget.cs` gains an instance `Spin`, which
+/// a full index binds instead of the extension. The overlay keeps the clean
+/// caller's extension edge, and the answer names that call site and the
+/// reason code, on a view-cache hit as well.
+#[test]
+fn test_find_dirty_csharp_instance_namesake_result_names_stale_extension_call() {
+    let fx = Repo::new(
+        "pext2-cs-stale-edge",
+        &[
+            ("src/Widget.cs", WIDGET_CS),
+            ("src/WidgetExt.cs", WIDGET_EXT_CS),
+            ("src/App.cs", APP_CS),
+        ],
+    );
+    assert!(
+        !fx.result(&["find", "Spin"]).contains(STALE_EDGE),
+        "setup: a clean tree has no gap"
+    );
+
+    let widget = "public class Widget\n{\n    public int Spin() { return 0; }\n}\n";
+    fs::write(fx.repo.join("src/Widget.cs"), widget).unwrap();
+    let first = fx.result(&["find", "Spin"]);
+    let second = fx.result(&["find", "Spin"]);
+
+    for part in [
+        "Run -> Spin (src/App.cs:6, cs-extension-stale-edge)",
+        "ecp admin index",
+    ] {
+        assert!(first.contains(part), "missing {part:?}: {first:?}");
+    }
+    assert_eq!(second, first, "a view-cache hit must carry the same caveat");
 }
