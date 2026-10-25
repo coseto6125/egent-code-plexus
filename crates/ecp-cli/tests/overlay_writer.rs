@@ -342,10 +342,7 @@ fn test_retire_entries_named_entry_drops_it_and_keeps_bin() {
     let stale = snapshot(&session_dir, &["src/a.rs"]);
     let bin = stale["src/a.rs"].fragment_id.clone().unwrap();
 
-    assert_eq!(
-        retire_entries(&session_dir, &stale, |_, _| true).unwrap(),
-        1
-    );
+    assert_eq!(retire_entries(&session_dir, &stale).unwrap(), 1);
 
     let df = DirtyEvents::read(&layout::dirty_events_path(&session_dir)).unwrap();
     assert_eq!(df.entries.keys().collect::<Vec<_>>(), ["src/b.rs"]);
@@ -370,10 +367,7 @@ fn test_retire_entries_same_content_rewritten_since_stays() {
     };
     write_dirty_fragment(&session_dir, &input).unwrap();
 
-    assert_eq!(
-        retire_entries(&session_dir, &stale, |_, _| true).unwrap(),
-        0
-    );
+    assert_eq!(retire_entries(&session_dir, &stale).unwrap(), 0);
     let df = DirtyEvents::read(&layout::dirty_events_path(&session_dir)).unwrap();
     assert_eq!(df.entries["src/a.rs"].mtime_ns, 2000);
     assert_eq!(
@@ -389,13 +383,10 @@ fn test_retire_entries_last_entry_removes_manifest() {
     write_two(&session_dir);
     let stale = snapshot(&session_dir, &["src/a.rs", "src/b.rs"]);
 
-    assert_eq!(
-        retire_entries(&session_dir, &stale, |_, _| true).unwrap(),
-        2
-    );
+    assert_eq!(retire_entries(&session_dir, &stale).unwrap(), 2);
     assert!(!layout::dirty_events_path(&session_dir).exists());
     assert_eq!(
-        retire_entries(&session_dir, &stale, |_, _| true).unwrap(),
+        retire_entries(&session_dir, &stale).unwrap(),
         0,
         "a missing manifest has nothing to retire"
     );

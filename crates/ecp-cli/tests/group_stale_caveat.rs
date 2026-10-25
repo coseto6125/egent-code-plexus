@@ -220,3 +220,42 @@ fn group_impact_behind_head_member_carries_caveat() {
         "impact caveat must name the stale member: {caveat}"
     );
 }
+
+/// Stands for: `group find` takes its member caveats before it queries, and
+/// each member query reads that member's overlay view, so a member whose
+/// dirty overloads the overlay cannot pair says so, prefixed with its name.
+#[test]
+fn test_group_find_dirty_overloads_member_caveat_names_hidden_declarations() {
+    let home_tmp = tempfile::tempdir().unwrap();
+    let repos_tmp = tempfile::tempdir().unwrap();
+    let repo = repos_tmp.path().join("javarepo");
+    fs::create_dir_all(repo.join("src")).unwrap();
+    let k_java =
+        "public class K {\n    public void save(int n) {\n    }\n\n    public void save(String s) {\n    }\n}\n";
+    fs::write(repo.join("src/K.java"), k_java).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "init"]);
+    index_and_group(home_tmp.path(), &[&repo], "ovlgrp");
+    fs::write(
+        repo.join("src/K.java"),
+        format!("{k_java}// comment-only edit\n"),
+    )
+    .unwrap();
+
+    let out = Command::new(ecp_bin())
+        .args(["group", "find", "ovlgrp", "save", "--json"])
+        .env("HOME", home_tmp.path())
+        .env_remove("ECP_HOME")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env("ECP_SESSION_ID", "group-ovl")
+        .env("ECP_SKIP_BG_REBUILD", "1")
+        .output()
+        .unwrap();
+    let v = parse_json(&out);
+    let caveat = v["result"].as_str().unwrap_or_default();
+
+    assert!(caveat.contains("could not pair"), "{v}");
+    assert!(caveat.contains("javarepo"), "{caveat}");
+    assert!(caveat.contains("K.save"), "{caveat}");
+}
