@@ -140,7 +140,10 @@ use std::path::Path;
 /// `annotation class`) owns its members.
 /// schema39: Kotlin and Swift `FunctionMeta.decorators` drop parser markers;
 /// a C# generic attribute class carries its arity in its uid.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema39");
+/// schema40: a Rust nested fn or closure has no owner, a scoped uid and a
+/// lexical-parent row; an HTTP verb matches a whole word of the call name;
+/// NestJS, Spring and Gin routes carry their router prefix.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema40");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

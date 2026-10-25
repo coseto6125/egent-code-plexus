@@ -14,6 +14,9 @@
 //! lets the cypher query `MATCH (c:Class)-[:HasMethod]->(m) RETURN m` work
 //! cross-language without callers having to learn per-language target-kind
 //! routing rules.
+//!
+//! A scoped node (a Rust nested `fn`, a closure node) is no member of any
+//! type, even inside a trait's default method: both passes skip it.
 
 use crate::framework_helpers::{span_area, span_contains, Span};
 use crate::resolution::index::{Language, SymbolTable};
@@ -120,13 +123,13 @@ pub fn emit_edges(
             }
 
             let later = later_overload_ids(raws, path_str, symbol_table);
-            let twins = ArityTwins::of_file(
-                raws,
-                path_str,
-                symbol_table,
-                raw_map,
-                FileOrd(file_ord as u32),
-            );
+            let file = FileOrd(file_ord as u32);
+            let scoped = |raw: usize| {
+                raw_map
+                    .node(file, RawIdx(raw as u32))
+                    .is_some_and(|id| symbol_table.is_lexically_scoped(id))
+            };
+            let twins = ArityTwins::of_file(raws, path_str, symbol_table, raw_map, file);
             let mut local_edges: Vec<Edge> = Vec::new();
             let mut local_emitted = 0usize;
             local_emitted += emit_pass1_span(
@@ -134,8 +137,7 @@ pub fn emit_edges(
                 &owners,
                 path_str,
                 symbol_table,
-                &later,
-                &twins,
+                (&later, &twins, &scoped),
                 reason,
                 &mut local_edges,
             );
@@ -144,7 +146,7 @@ pub fn emit_edges(
                 &classes_by_name,
                 path_str,
                 symbol_table,
-                &later,
+                (&later, &scoped),
                 reason_impl,
                 &mut local_edges,
             );
@@ -264,21 +266,23 @@ fn member_node(
 /// For each Class node `c` in the file, find the innermost-enclosing Class for
 /// every Function/Method/Property in the same file. If that innermost Class is
 /// `c`, emit the corresponding `HasMethod` (Function|Method) or `HasProperty`
-/// (Property) edge from `c` to the member.
-#[allow(clippy::too_many_arguments)]
+/// (Property) edge from `c` to the member. `scoped` tells a scoped member by
+/// raw index; it gets no edge.
 fn emit_pass1_span(
     raws: &[RawNode],
     owners: &[Owner<'_>],
     path_str: &str,
     symbol_table: &SymbolTable,
-    later: &FxHashMap<usize, u32>,
-    twins: &ArityTwins,
+    (later, twins, scoped): (&FxHashMap<usize, u32>, &ArityTwins, &dyn Fn(usize) -> bool),
     reason: ecp_core::pool::StrRef,
     edges_out: &mut Vec<Edge>,
 ) -> usize {
     let mut emitted = 0usize;
 
     for (i, member) in raws.iter().enumerate() {
+        if scoped(i) {
+            continue;
+        }
         let rel_type = match member.kind {
             NodeKind::Function | NodeKind::Method | NodeKind::Constructor => RelType::HasMethod,
             NodeKind::Property => RelType::HasProperty,
@@ -370,13 +374,16 @@ fn emit_pass2_rust_impl(
     classes_by_name: &FxHashMap<&str, Vec<Span>>,
     path_str: &str,
     symbol_table: &SymbolTable,
-    later: &FxHashMap<usize, u32>,
+    (later, scoped): (&FxHashMap<usize, u32>, &dyn Fn(usize) -> bool),
     reason: ecp_core::pool::StrRef,
     edges_out: &mut Vec<Edge>,
 ) -> usize {
     let mut emitted = 0usize;
 
     for (i, member) in raws.iter().enumerate() {
+        if scoped(i) {
+            continue;
+        }
         if !matches!(
             member.kind,
             NodeKind::Function | NodeKind::Method | NodeKind::Constructor | NodeKind::Property

@@ -219,11 +219,8 @@ impl ModuleFacts for IndexFacts<'_, '_> {
             .into_iter()
             .any(|(id, kind)| {
                 kind == NodeKind::Module
-                    && ecp_core::analyzer::same_file_pick::PickFacts::raw_owner(
-                        self.0.symbol_table,
-                        id,
-                    )
-                    .is_none()
+                    && ecp_core::analyzer::same_file_pick::PickFacts::owner(self.0.symbol_table, id)
+                        .is_none()
             })
     }
 
@@ -1822,34 +1819,13 @@ impl<'a> Resolver<'a> {
                 .lookup_call_in_file(&source_file_str, symbol_name, target, free_only);
         if let Some(node_id) = same_file_pick
             .and_then(|pick| match call {
-                Some(scope) if free_only => {
-                    let lexical_owner = if language == Language::Rust {
-                        scope.caller.and_then(|caller| {
-                            self.symbol_table
-                                .rust_lexical_scope_of(caller)
-                                .map(str::to_owned)
-                                .or_else(|| {
-                                    self.symbol_table.name_in_file(caller).map(|name| {
-                                        ecp_core::analyzer::same_file_pick::rust_lexical_owner(
-                                            self.symbol_table,
-                                            caller,
-                                            name,
-                                        )
-                                    })
-                                })
-                        })
-                    } else {
-                        None
-                    };
-                    ecp_core::analyzer::same_file_pick::prefer_free_scoped(
-                        self.symbol_table,
-                        &source_file_str,
-                        symbol_name,
-                        lexical_owner.as_deref(),
-                        scope.owner,
-                        target,
-                    )
-                }
+                Some(scope) if free_only => ecp_core::analyzer::same_file_pick::prefer_free(
+                    self.symbol_table,
+                    &source_file_str,
+                    symbol_name,
+                    scope.owner,
+                    target,
+                ),
                 Some(scope) => self.symbol_table.prefer_owned(
                     &source_file_str,
                     pick,

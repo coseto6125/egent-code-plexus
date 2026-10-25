@@ -12,6 +12,10 @@
 //!
 //! Both ends come from raw indexes through the build's `RawIndexMap`, never
 //! from a name lookup: two same-name declarations each get their own edge.
+//!
+//! A scoped node (a Rust nested `fn`, a closure node) has no owner, yet no
+//! File or module declares it: its callable does, through the lexical-parent
+//! table. It gets no `Defines` edge.
 
 use ecp_core::analyzer::types::{span_contains, LocalGraph};
 use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
@@ -20,11 +24,13 @@ use ecp_core::pool::StringPool;
 use rustc_hash::FxHashMap;
 
 /// Emit `Defines` edges from File / Namespace / Module nodes to their
-/// contained symbols. Returns the number of edges appended.
+/// contained symbols. `is_scoped` tells a scoped node by its node id; it
+/// gets no edge. Returns the number of edges appended.
 pub fn emit_edges(
     local_graphs: &[LocalGraph],
     file_node_idx: &FxHashMap<String, u32>,
     raw_map: &RawIndexMap,
+    is_scoped: impl Fn(u32) -> bool,
     string_pool: &mut StringPool,
     edges_out: &mut Vec<Edge>,
 ) -> usize {
@@ -79,7 +85,10 @@ pub fn emit_edges(
                 continue;
             }
 
-            let Some(child_id) = raw_map.node(file, RawIdx(raw_idx as u32)) else {
+            let Some(child_id) = raw_map
+                .node(file, RawIdx(raw_idx as u32))
+                .filter(|&id| !is_scoped(id))
+            else {
                 continue;
             };
 
@@ -99,21 +108,10 @@ pub fn emit_edges(
                     // Member of a Namespace or Module: container → symbol.
                     // Members of Class/Interface/Trait are covered by HasMethod/HasProperty;
                     // skip them here to preserve the no-duplication invariant.
-                    let container_name = if ecp_core::file_category::Language::from_normalized_path(
-                        &file_path_lossy,
-                    ) == ecp_core::file_category::Language::Rust
-                        && owner
-                            .split("::")
-                            .all(|segment| container_ids.contains_key(segment))
-                    {
-                        owner.rsplit("::").next().unwrap_or(owner)
-                    } else {
-                        owner.as_str()
-                    };
                     // Of two same-name containers (`namespace Acme` twice), the
                     // innermost one around the child; else the first, as a
                     // statement-form `namespace Acme;` contains nothing.
-                    let container = container_ids.get(container_name).and_then(|ids| {
+                    let container = container_ids.get(owner.as_str()).and_then(|ids| {
                         ids.iter()
                             .copied()
                             .filter(|&c| {

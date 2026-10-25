@@ -1,13 +1,18 @@
-//! JS / TS lexical call scoping: a bare call binds the innermost named
-//! function in scope before any name tier. Full indexing (Pass 2) and the
-//! session overlay build this same index over one file's declarations.
+//! Lexical call scoping: a bare call binds the innermost named function in
+//! scope before any name tier. JS / TS admit every file-level function too;
+//! a language that opts in through [`lexical_scope_kinds`] (Rust) admits
+//! only its scoped functions ([`LexicalAdmission`]). Full indexing (Pass 2)
+//! and the session overlay build this same index over one file's
+//! declarations.
 //!
 //! The same lexical facts feed declaration identity: [`file_identities`]
 //! numbers one file's declarations for every path that stores a uid.
 
 use crate::analyzer::heritage::HeritageNode;
 use crate::analyzer::same_file_pick::{rust_impl_members, ImplNode};
-use crate::analyzer::types::{innermost_enclosing, span_contains, RawNode, Span};
+use crate::analyzer::types::{
+    innermost_enclosing, span_contains, CallSite, NameRef, NameRefKind, RawNode, Span,
+};
 use crate::contracts::identity::{
     assign_file, canonical_path, lexical_parents, DeclIdentity, Discriminator, FileDecl, UidSlot,
 };
@@ -19,9 +24,31 @@ use std::path::Path;
 
 /// The kinds `language` scopes under their enclosing callable (design A
 /// §4.2): such a node's uid hashes its parent's anchor instead of an owner.
-/// No language opts in yet; slices C to E add them.
-pub fn lexical_scope_kinds(_language: Language) -> &'static [NodeKind] {
-    &[]
+/// Rust opts in its nested `fn` and closure nodes (slice C); slices D and E
+/// add the other languages.
+pub fn lexical_scope_kinds(language: Language) -> &'static [NodeKind] {
+    match language {
+        Language::Rust => &[NodeKind::Function],
+        _ => &[],
+    }
+}
+
+/// Clears the owner of every node of a `language` file that
+/// [`lexical_parents`] scopes (design A §3.2, invariant I1): a scoped node
+/// has a lexical parent and no owner. A parser that opts in runs this once,
+/// last, so its own owner rules and `stamp_owner_class_by_span` stay as they
+/// are. A language that scopes no kind keeps every owner.
+pub fn clear_scoped_owners(language: Language, nodes: &mut [RawNode]) {
+    let scoped = lexical_scope_kinds(language);
+    if scoped.is_empty() {
+        return;
+    }
+    let decls: Vec<(NodeKind, Span)> = nodes.iter().map(|n| (n.kind, n.span)).collect();
+    for (node, parent) in nodes.iter_mut().zip(lexical_parents(&decls, scoped)) {
+        if parent.is_some() {
+            node.owner_class = None;
+        }
+    }
 }
 
 /// One declaration as [`file_identities`] reads it: kind, owner, name,
@@ -173,8 +200,11 @@ pub fn file_identities<'a, T>(
         })
         .collect();
     // `canonical_path` removes every `\`, the one spelling `check_path`
-    // rejects; `impl_traits` never yields an empty text; no parent is set
-    // while no language opts in; and `enclosing_types` returns in-range
+    // rejects; `impl_traits` never yields an empty text and marks only
+    // methods and constructors, which are never scoped; `lexical_parents`
+    // returns in-range strict containers, scopes no kind that keeps
+    // overloads, and the parser clears each scoped node's owner
+    // ([`clear_scoped_owners`]); and `enclosing_types` returns in-range
     // indices: no `IdentityError` can arise.
     assign_file(&path, &decls).expect("a `/`-separated path and unscoped declarations")
 }
@@ -264,29 +294,54 @@ pub fn file_uids<'a, T>(
         .collect()
 }
 
+/// Which functions the lexical tier of one file admits (design A §4.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LexicalAdmission {
+    /// JS / TS: every function nested in a callable, plus every file-level
+    /// function without an owner, whose scope is the whole file.
+    ScopedAndFileLevel,
+    /// A language that opts in through [`lexical_scope_kinds`]: only the
+    /// nodes [`lexical_parents`] scopes. An unscoped function stays with the
+    /// name tiers, so a module member (`mod tests { fn helper() }`) is
+    /// picked there, as before.
+    ScopedOnly,
+}
+
 /// One file's lexical candidates. Parent discovery runs once, not once per
 /// call.
 #[derive(Default)]
 pub struct LexicalFunctions {
     by_name: FxHashMap<String, Vec<(Option<Span>, u32)>>,
+    /// `None` for a file no lexical tier covers.
+    admission: Option<LexicalAdmission>,
 }
 
 impl LexicalFunctions {
     /// The index over `symbols`, one file's declarations in source order as
     /// `(kind, name, has_owner, span)`. The i-th declaration's id is
-    /// `start + i`. A file that is not JS / TS gets an empty index.
+    /// `start + i`. A JS / TS file admits
+    /// [`LexicalAdmission::ScopedAndFileLevel`]; a file whose language
+    /// scopes a kind ([`lexical_scope_kinds`]) admits
+    /// [`LexicalAdmission::ScopedOnly`]; any other file gets an empty index.
     pub fn new<'a>(
         path: &Path,
         symbols: impl Iterator<Item = (NodeKind, &'a str, bool, Span)>,
         start: u32,
     ) -> Self {
-        let mut index = Self::default();
         if !matches!(
             path.extension().and_then(|ext| ext.to_str()),
             Some("js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts")
         ) {
-            return index;
+            let scoped = lexical_scope_kinds(Language::from_path(&path.to_string_lossy()));
+            return match scoped.is_empty() {
+                true => Self::default(),
+                false => Self::scoped_only(symbols, start, scoped),
+            };
         }
+        let mut index = Self {
+            admission: Some(LexicalAdmission::ScopedAndFileLevel),
+            ..Self::default()
+        };
         let functions: Vec<_> = symbols
             .enumerate()
             .filter(|(_, (kind, ..))| {
@@ -314,6 +369,37 @@ impl LexicalFunctions {
         index
     }
 
+    /// [`LexicalAdmission::ScopedOnly`]: each node [`lexical_parents`]
+    /// scopes, with its parent's span as its scope. A name with no scoped
+    /// node gets no entry, so [`Self::targets`] leaves it to the name tiers.
+    fn scoped_only<'a>(
+        symbols: impl Iterator<Item = (NodeKind, &'a str, bool, Span)>,
+        start: u32,
+        scoped: &[NodeKind],
+    ) -> Self {
+        let mut index = Self {
+            admission: Some(LexicalAdmission::ScopedOnly),
+            ..Self::default()
+        };
+        let symbols: Vec<(NodeKind, &str, Span)> = symbols
+            .map(|(kind, name, _, span)| (kind, name, span))
+            .collect();
+        let decls: Vec<(NodeKind, Span)> = symbols
+            .iter()
+            .map(|&(kind, _, span)| (kind, span))
+            .collect();
+        for (offset, parent) in lexical_parents(&decls, scoped).into_iter().enumerate() {
+            if let Some(parent) = parent {
+                index
+                    .by_name
+                    .entry(symbols[offset].1.to_string())
+                    .or_default()
+                    .push((Some(decls[parent as usize].1), start + offset as u32));
+            }
+        }
+        index
+    }
+
     fn scope_size(scope: Option<Span>) -> (u32, i64) {
         scope
             .map(|span| (span.2 - span.0, span.3 as i64 - span.1 as i64))
@@ -322,8 +408,11 @@ impl LexicalFunctions {
 
     /// The function a bare call to `callee` from `caller` binds, at 1.0.
     /// `None`: the file declares no function of that name, so the name
-    /// tiers decide. An empty result prevents fallback to an inaccessible
-    /// or ambiguous closure: only the import tiers may bind then.
+    /// tiers decide; under [`LexicalAdmission::ScopedOnly`] also when no
+    /// candidate's scope holds `caller`, since the name tiers never return a
+    /// scoped node (invariant I5). An empty result prevents fallback to an
+    /// inaccessible or ambiguous closure: only the import tiers may bind
+    /// then.
     pub fn targets(&self, caller: Span, callee: &str) -> Option<Vec<(u32, f32)>> {
         if callee.contains(['.', ':']) {
             return None;
@@ -345,10 +434,44 @@ impl LexicalFunctions {
                 }
             }
         }
-        Some(match best {
-            Some((_, target)) if !ambiguous => vec![(target, 1.0)],
-            _ => Vec::new(),
-        })
+        match best {
+            Some((_, target)) if !ambiguous => Some(vec![(target, 1.0)]),
+            None if self.admission == Some(LexicalAdmission::ScopedOnly) => None,
+            _ => Some(Vec::new()),
+        }
+    }
+
+    /// [`Self::targets`] for one call site. Under
+    /// [`LexicalAdmission::ScopedOnly`] only a bare call reaches a scoped
+    /// function: a method-syntax site (`x.helper()`, a chain) names a
+    /// method, so it gets `None` and the name tiers decide. JS / TS read
+    /// the site's name, as before.
+    pub fn call_targets(&self, caller: Span, site: CallSite<'_>) -> Option<Vec<(u32, f32)>> {
+        match (self.admission, site) {
+            (Some(LexicalAdmission::ScopedOnly), CallSite::Plain(name)) => {
+                self.targets(caller, name)
+            }
+            (Some(LexicalAdmission::ScopedOnly), _) => None,
+            _ => self.targets(caller, site.name()),
+        }
+    }
+
+    /// The scoped function a bare name reference from `caller` reads
+    /// (`xs.iter().for_each(helper)` inside `outer`), under
+    /// [`LexicalAdmission::ScopedOnly`]: the one candidate [`Self::targets`]
+    /// binds. `None` leaves the reference to the name tiers: no visible
+    /// candidate, two in one scope, a constant reference (it never names a
+    /// function), and every JS / TS reference.
+    pub fn name_ref_target(&self, caller: Span, name_ref: NameRef<'_>) -> Option<u32> {
+        if self.admission != Some(LexicalAdmission::ScopedOnly)
+            || name_ref.kind == NameRefKind::Constant
+        {
+            return None;
+        }
+        match self.targets(caller, name_ref.name)?.as_slice() {
+            [(target, _)] => Some(*target),
+            _ => None,
+        }
     }
 }
 
@@ -741,7 +864,6 @@ mod tests {
             Language::Kotlin,
             Language::CSharp,
             Language::Go,
-            Language::Rust,
             Language::Php,
             Language::Ruby,
             Language::Swift,
@@ -751,6 +873,178 @@ mod tests {
         ] {
             assert!(lexical_scope_kinds(language).is_empty(), "{language:?}");
         }
+    }
+
+    #[test]
+    fn test_lexical_scope_kinds_rust_returns_function_only() {
+        assert_eq!(lexical_scope_kinds(Language::Rust), [NodeKind::Function]);
+    }
+
+    /// `fn helper` (line 0), `fn outer` (lines 1-5) with a nested `fn
+    /// helper` (line 2), `fn b` (lines 6-8), in `path`; ids from 10.
+    fn rust_nested(path: &str) -> LexicalFunctions {
+        index(
+            path,
+            &[
+                (NodeKind::Function, "helper", false, (0, 0, 0, 20)),
+                (NodeKind::Function, "outer", false, (1, 0, 5, 1)),
+                (NodeKind::Function, "helper", false, (2, 4, 2, 24)),
+                (NodeKind::Function, "b", false, (6, 0, 8, 1)),
+            ],
+        )
+    }
+
+    /// Stands for: under `ScopedOnly` the nested `helper` wins inside
+    /// `outer`, and a caller it is invisible to gets `None` (the name tiers
+    /// decide) instead of JS's empty "import tiers only" answer, so `b`
+    /// still reaches the file-level `helper`.
+    #[test]
+    fn test_targets_rust_scoped_only_visible_binds_invisible_returns_none() {
+        let lex = rust_nested("src/a.rs");
+        assert_eq!(lex.targets((3, 4, 3, 12), "helper"), Some(vec![(12, 1.0)]));
+        assert_eq!(lex.targets((1, 0, 5, 1), "helper"), Some(vec![(12, 1.0)]));
+        assert_eq!(lex.targets((7, 4, 7, 12), "helper"), None);
+        assert_eq!(
+            lex.targets((3, 4, 3, 12), "outer"),
+            None,
+            "unscoped: no entry"
+        );
+        let js = rust_nested("src/a.js");
+        assert_eq!(
+            js.targets((7, 4, 7, 12), "helper"),
+            Some(vec![(10, 1.0)]),
+            "control: JS admits the file-level function"
+        );
+    }
+
+    #[test]
+    fn test_targets_rust_two_scoped_in_one_scope_returns_empty() {
+        let lex = index(
+            "src/a.rs",
+            &[
+                (NodeKind::Function, "outer", false, (1, 0, 5, 1)),
+                (NodeKind::Function, "helper", false, (2, 4, 2, 24)),
+                (NodeKind::Function, "helper", false, (3, 4, 3, 24)),
+            ],
+        );
+        assert_eq!(lex.targets((4, 4, 4, 12), "helper"), Some(Vec::new()));
+    }
+
+    /// Stands for: a Rust method-syntax site (`x.helper()`, an untyped
+    /// member) never reaches a nested `fn helper`; a bare call does.
+    #[test]
+    fn test_call_targets_rust_method_syntax_returns_none_bare_binds() {
+        let lex = rust_nested("src/a.rs");
+        let caller = (3, 4, 3, 12);
+        assert_eq!(
+            lex.call_targets(caller, CallSite::Plain("helper")),
+            Some(vec![(12, 1.0)])
+        );
+        assert_eq!(
+            lex.call_targets(caller, CallSite::UntypedMember("helper")),
+            None
+        );
+        assert_eq!(lex.call_targets(caller, CallSite::Plain("A.helper")), None);
+        assert_eq!(
+            rust_nested("src/a.ts").call_targets(caller, CallSite::UntypedMember("helper")),
+            Some(vec![(12, 1.0)]),
+            "control: JS / TS keep reading the site's name"
+        );
+    }
+
+    #[test]
+    fn test_name_ref_target_rust_value_binds_constant_and_js_return_none() {
+        let caller = (3, 4, 3, 12);
+        let value = NameRef {
+            name: "helper",
+            kind: NameRefKind::Value,
+        };
+        let constant = NameRef {
+            kind: NameRefKind::Constant,
+            ..value
+        };
+        assert_eq!(
+            rust_nested("src/a.rs").name_ref_target(caller, value),
+            Some(12)
+        );
+        assert_eq!(
+            rust_nested("src/a.rs").name_ref_target(caller, constant),
+            None
+        );
+        assert_eq!(
+            rust_nested("src/a.rs").name_ref_target((7, 4, 7, 12), value),
+            None,
+            "invisible: the name tiers decide"
+        );
+        assert_eq!(rust_nested("src/a.js").name_ref_target(caller, value), None);
+    }
+
+    fn raw(kind: NodeKind, name: &str, owner: Option<&str>, span: Span) -> RawNode {
+        RawNode {
+            name: name.to_string(),
+            kind,
+            span,
+            is_exported: false,
+            heritage: Vec::new(),
+            type_annotation: None,
+            decorators: Vec::new(),
+            calls: Vec::new(),
+            field_reads: Vec::new(),
+            owner_class: owner.map(str::to_string),
+            content_hash: 0,
+        }
+    }
+
+    /// Stands for: invariant I1. The nested `fn` and the closure lose their
+    /// owner; a module member, a method and a function a module puts
+    /// between it and the enclosing callable keep theirs; a language that
+    /// scopes nothing keeps every owner.
+    #[test]
+    fn test_clear_scoped_owners_rust_scoped_cleared_unscoped_kept() {
+        let nodes = || {
+            vec![
+                raw(NodeKind::Module, "tests", None, (0, 0, 20, 1)),
+                raw(NodeKind::Function, "helper", Some("tests"), (1, 4, 1, 20)),
+                raw(NodeKind::Function, "t", Some("tests"), (2, 4, 10, 5)),
+                raw(NodeKind::Function, "inner", Some("tests"), (3, 8, 3, 24)),
+                raw(
+                    NodeKind::Function,
+                    "<anonymous:5:8>",
+                    Some("tests"),
+                    (4, 8, 4, 30),
+                ),
+                raw(NodeKind::Module, "m", Some("tests"), (5, 8, 7, 9)),
+                raw(NodeKind::Function, "f", Some("m"), (6, 12, 6, 30)),
+                raw(NodeKind::Impl, "A", Some(""), (11, 4, 15, 5)),
+                raw(NodeKind::Method, "new", Some("A"), (12, 8, 14, 9)),
+                raw(NodeKind::Function, "pad", Some("A"), (13, 12, 13, 30)),
+            ]
+        };
+        let mut rust = nodes();
+        clear_scoped_owners(Language::Rust, &mut rust);
+        let owners: Vec<Option<&str>> = rust.iter().map(|n| n.owner_class.as_deref()).collect();
+        assert_eq!(
+            owners,
+            [
+                None,
+                Some("tests"),
+                Some("tests"),
+                None,
+                None,
+                Some("tests"),
+                Some("m"),
+                Some(""),
+                Some("A"),
+                None,
+            ]
+        );
+        let mut python = nodes();
+        clear_scoped_owners(Language::Python, &mut python);
+        assert!(python
+            .iter()
+            .zip(nodes())
+            .all(|(a, b)| a.owner_class == b.owner_class));
+        clear_scoped_owners(Language::Rust, &mut []);
     }
 
     #[test]

@@ -3,9 +3,7 @@ use ecp_core::analyzer::import_binding::{
     fqn_language, owner_path_agrees, DeclaredType, MemberOwner,
 };
 use ecp_core::analyzer::reexport::{is_es_module, pick_call, ExportAliasTable};
-use ecp_core::analyzer::same_file_pick::{
-    self, rust_lexical_scopes, ImplMember as PickImplMember, PickFacts,
-};
+use ecp_core::analyzer::same_file_pick::{self, ImplMember as PickImplMember, PickFacts};
 use ecp_core::analyzer::type_ladder::{declared_namespace, return_type_key, TypeFacts};
 use ecp_core::analyzer::types::{owner_key, RawExportAlias};
 use ecp_core::file_category::pick_global;
@@ -227,15 +225,6 @@ pub struct SymbolTable {
     /// the first same-named member in the file, whichever type owns it.
     node_owner: Vec<u32>,
 
-    /// Parser owner text only where owner-key normalization would lose a
-    /// Rust lexical ancestor such as `B::new`.
-    raw_owner_overrides: FxHashMap<u32, Box<str>>,
-
-    /// Complete Rust callable lexical paths, derived from parser spans.  The
-    /// graph keeps the compact public type owner; only Rust bare-call lookup
-    /// needs this path to distinguish nested declarations.
-    rust_lexical_scopes: FxHashMap<u32, Box<str>>,
-
     /// Owner key → interned id. One entry per distinct owner name, so the
     /// per-node cost is the 4-byte `node_owner` slot.
     owner_ids: FxHashMap<Box<str>, u32>,
@@ -346,7 +335,8 @@ pub struct SymbolTable {
 
     /// Scoped node id → its lexical parent, the rows of the graph's
     /// lexical-parent table (see [`Self::note_lexical_parent`]). Sparse:
-    /// empty while no language opts in.
+    /// rows only for the files of a language that scopes a kind
+    /// ([`ecp_core::analyzer::lexical::lexical_scope_kinds`]).
     lexical_parents: FxHashMap<u32, u32>,
 
     /// Method name → the C# extension methods of that name, each with its
@@ -805,11 +795,6 @@ impl SymbolTable {
         self.node_file_meta.push(file_meta);
         let owner_id = self.intern_owner(owner);
         self.node_owner.push(owner_id);
-        if let Some(raw_owner) =
-            owner.filter(|raw| file_meta.language == Language::Rust && owner_key(raw) != Some(*raw))
-        {
-            self.raw_owner_overrides.insert(node_id, raw_owner.into());
-        }
         if kind == NodeKind::Constructor && owner_id != NO_OWNER {
             self.constructors.push(node_id);
         }
@@ -905,25 +890,6 @@ impl SymbolTable {
             .insert(member, ImplMember { block, trait_owner });
     }
 
-    /// Record the transient full lexical scope of every Rust callable in one
-    /// pass over a parsed file's symbols.
-    pub fn note_rust_lexical_scopes(
-        &mut self,
-        nodes: &[ecp_core::analyzer::types::RawNode],
-        start: u32,
-    ) {
-        for (offset, scope) in rust_lexical_scopes(nodes).into_iter().enumerate() {
-            if let Some(scope) = scope {
-                self.rust_lexical_scopes
-                    .insert(start + offset as u32, scope);
-            }
-        }
-    }
-
-    pub(crate) fn rust_lexical_scope_of(&self, id: u32) -> Option<&str> {
-        self.rust_lexical_scopes.get(&id).map(Box::as_ref)
-    }
-
     /// Whether `id` has no owner and no `impl` block either, and is no
     /// scoped declaration ([`same_file_pick::is_free`]).
     fn is_free(&self, id: u32) -> bool {
@@ -943,6 +909,21 @@ impl SymbolTable {
     /// Whether `id` is scoped ([`Self::note_lexical_parent`]).
     pub fn is_lexically_scoped(&self, id: u32) -> bool {
         !self.lexical_parents.is_empty() && self.lexical_parents.contains_key(&id)
+    }
+
+    /// The outermost unscoped declaration that `id`'s lexical parents
+    /// reach; `id` itself when it is unscoped. A scoped caller (a Rust
+    /// nested `fn` or closure) has no owner, so the name tiers read this
+    /// declaration's owner, as for a call written there.
+    pub fn lexical_root(&self, mut id: u32) -> u32 {
+        // Each row is one step, so more steps than rows is a cycle.
+        for _ in 0..=self.lexical_parents.len() {
+            match self.lexical_parents.get(&id) {
+                Some(&parent) => id = parent,
+                None => break,
+            }
+        }
+        id
     }
 
     /// Whether some declaration named `name` that `caller` admits is a
@@ -1418,7 +1399,6 @@ impl SymbolTable {
         caller: FileMeta,
         free_only: bool,
     ) -> GlobalPick {
-        let rust_free_only = caller.language == Language::Rust && free_only;
         let Some(raw) = self.global_scoped.get(node_name) else {
             return GlobalPick::NoMatch;
         };
@@ -1427,14 +1407,6 @@ impl SymbolTable {
             caller,
             raw.iter()
                 .filter(|&&id| field(self.node_kinds[id as usize]) && !self.is_lexically_scoped(id))
-                .filter(|&&id| {
-                    !rust_free_only
-                        || self.file_of(id).is_some_and(|file| {
-                            ecp_core::analyzer::same_file_pick::rust_free_global_candidate(
-                                self, file, id,
-                            )
-                        })
-                })
                 .map(|&id| (id, self.node_file_meta[id as usize])),
         );
         match pick {
@@ -1570,19 +1542,12 @@ impl SymbolTable {
         target: ResolveTarget,
         free_only: bool,
     ) -> Option<u32> {
-        let rust_free_only = caller.language == Language::Rust && free_only;
         let field = global_field(target, free_only);
         let mut copies: Vec<u32> = Vec::new();
         for &id in self.global_scoped.get(node_name)? {
             if !field(self.node_kinds[id as usize])
                 || !caller.admits(self.node_file_meta[id as usize])
                 || self.is_lexically_scoped(id)
-                || (rust_free_only
-                    && !self.file_of(id).is_some_and(|file| {
-                        ecp_core::analyzer::same_file_pick::rust_free_global_candidate(
-                            self, file, id,
-                        )
-                    }))
             {
                 continue;
             }
@@ -1969,17 +1934,6 @@ impl PickFacts for SymbolTable {
     fn owner(&self, id: u32) -> Option<&str> {
         let owner = *self.node_owner.get(id as usize)?;
         (owner != NO_OWNER).then(|| &*self.owner_keys[owner as usize])
-    }
-
-    fn raw_owner(&self, id: u32) -> Option<&str> {
-        self.raw_owner_overrides
-            .get(&id)
-            .map(Box::as_ref)
-            .or_else(|| self.owner(id))
-    }
-
-    fn rust_lexical_scope(&self, id: u32) -> Option<&str> {
-        self.rust_lexical_scope_of(id)
     }
 
     fn impl_member(&self, id: u32) -> Option<PickImplMember<'_>> {
@@ -2959,6 +2913,24 @@ mod tests {
             st.lookup_global("helper", CALL, caller, false),
             GlobalPick::Unique(1)
         );
+    }
+
+    /// Stands for: a closure in a nested `fn` reads the name tiers through
+    /// the outermost unscoped declaration; an unscoped node is its own root,
+    /// and a corrupt cycle still ends.
+    #[test]
+    fn test_lexical_root_chain_unscoped_and_cycle_returns_outermost() {
+        let mut st = SymbolTable::new();
+        assert_eq!(st.lexical_root(7), 7, "no rows: the node itself");
+        st.note_lexical_parent(2, 1);
+        st.note_lexical_parent(1, 0);
+        assert_eq!(st.lexical_root(2), 0);
+        assert_eq!(st.lexical_root(1), 0);
+        assert_eq!(st.lexical_root(0), 0);
+        st.note_lexical_parent(5, 6);
+        st.note_lexical_parent(6, 5);
+        let root = st.lexical_root(5);
+        assert!(root == 5 || root == 6, "a corrupt cycle ends, at {root}");
     }
 
     // ---- supertypes ----

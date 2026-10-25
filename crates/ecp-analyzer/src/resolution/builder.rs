@@ -926,6 +926,7 @@ impl GraphBuilder {
             &self.local_graphs,
             &file_node_idx,
             &raw_map,
+            |id| symbol_table.is_lexically_scoped(id),
             &mut string_pool,
             &mut edges,
         );
@@ -1119,8 +1120,8 @@ fn file_base(raw_map: &RawIndexMap, file_idx: u32) -> u32 {
 /// [`lexical_parents`] over each file's `(kind, span)`, as
 /// [`file_identities`] derives the parents for the uids. A parent that
 /// Pass 1 tombstoned maps to its surviving twin. A tombstoned scoped node
-/// gets no row: its twin owns the identity and gets its own. Empty while no
-/// language opts in ([`lexical_scope_kinds`]).
+/// gets no row: its twin owns the identity and gets its own. A file whose
+/// language scopes no kind ([`lexical_scope_kinds`]) gets no row.
 fn record_lexical_parents(
     local_graphs: &[LocalGraph],
     raw_map: &RawIndexMap,
@@ -1497,7 +1498,6 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
         }
         if file_meta.language == Language::Rust {
             note_rust_impl_members(&mut symbol_table, &local_graph.nodes, graph_start);
-            symbol_table.note_rust_lexical_scopes(&local_graph.nodes, graph_start);
         }
 
         // NOTE: documents (markdown/yaml section/doc nodes) are parsed into
@@ -2803,9 +2803,14 @@ fn emit_file_closure_references(
     }
 }
 
-/// The file's [`LexicalFunctions`]; a file without calls needs none.
+/// The file's [`LexicalFunctions`]; a file without calls and without name
+/// references (a Rust callback `for_each(helper)`) needs none.
 fn lexical_functions(graph: &LocalGraph, start_index: u32) -> LexicalFunctions {
-    if graph.nodes.iter().all(|node| node.calls.is_empty()) {
+    if graph
+        .nodes
+        .iter()
+        .all(|node| node.calls.is_empty() && node.field_reads.is_empty())
+    {
         return LexicalFunctions::default();
     }
     LexicalFunctions::new(
@@ -3133,7 +3138,7 @@ fn resolve_name_ref(
     symbol_table: &SymbolTable,
     local_graph: &LocalGraph,
     (file, language): (&str, Language),
-    raw_node: &RawNode,
+    owner: Option<&str>,
     name_ref: NameRef<'_>,
 ) -> Option<(u32, f32)> {
     ecp_core::analyzer::name_ref::resolve_name_ref(
@@ -3141,7 +3146,7 @@ fn resolve_name_ref(
         file,
         language,
         &local_graph.imports,
-        raw_node.owner_class.as_deref(),
+        owner,
         name_ref,
         ecp_core::analyzer::name_ref::NameRefTiers {
             same_file: ResolutionTier::SameFile.base_confidence(),
@@ -3218,6 +3223,14 @@ fn pass2_emit_node_edges(
 
     let call_heritage =
         ecp_core::analyzer::heritage::enclosing_class_heritage(raw_node, &local_graph.nodes);
+    // A scoped caller (a Rust nested `fn` or closure) has no owner. The name
+    // tiers read the owner of the unscoped declaration its lexical parents
+    // reach, as for a call written there: a closure in `mod tests { fn t() }`
+    // still reaches `tests::helper`.
+    let scope_owner = match symbol_table.lexical_root(current_node_idx) {
+        root if root == current_node_idx => raw_node.owner_class.as_deref(),
+        root => ecp_core::analyzer::same_file_pick::PickFacts::owner(symbol_table, root),
+    };
     // A C# member call whose receiver type owns no such member retries the
     // extension methods in scope (codex ruling P-ext). A retry that binds
     // nothing leaves a BlindSpot naming the receiver type and the member.
@@ -3263,7 +3276,7 @@ fn pass2_emit_node_edges(
         let meta = indirect_lookup.get(&lookup_key);
         let resolve =
             |site: CallSite<'_>, arguments: Option<CallArguments<'_>>| match lexical_lookup
-                .targets(raw_node.span, site.name())
+                .call_targets(raw_node.span, site)
             {
                 Some(targets) if targets.is_empty() => resolver.resolve_imported_call(
                     &local_graph.file_path,
@@ -3277,7 +3290,7 @@ fn pass2_emit_node_edges(
                         site,
                         &local_graph.imports,
                         call_heritage,
-                        raw_node.owner_class.as_deref(),
+                        scope_owner,
                         Some(current_node_idx),
                     );
                     // The C# parser writes `Type.member` only for a receiver it
@@ -3446,14 +3459,22 @@ fn pass2_emit_node_edges(
     for field_name in &raw_node.field_reads {
         if let Some(name_ref) = NameRef::parse(field_name) {
             let (file, language) = name_file.get_or_insert_with(reader_file);
-            let Some((target_id, confidence)) = resolve_name_ref(
-                resolver,
-                symbol_table,
-                local_graph,
-                (file.as_str(), *language),
-                raw_node,
-                name_ref,
-            ) else {
+            // A bare reference to a scoped function binds through the
+            // lexical tier, as a bare call does; the name tiers never return
+            // a scoped node (I5).
+            let lexical = lexical_lookup
+                .name_ref_target(raw_node.span, name_ref)
+                .map(|id| (id, ResolutionTier::SameFile.base_confidence()));
+            let Some((target_id, confidence)) = lexical.or_else(|| {
+                resolve_name_ref(
+                    resolver,
+                    symbol_table,
+                    local_graph,
+                    (file.as_str(), *language),
+                    scope_owner,
+                    name_ref,
+                )
+            }) else {
                 continue;
             };
             let callable = symbol_table.node_kind(target_id).is_callable();

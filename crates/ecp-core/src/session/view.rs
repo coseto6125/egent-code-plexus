@@ -136,8 +136,8 @@ use crate::analyzer::rust_paths::{
     rust_module_path_base, rust_path_prefix_agrees_with_import, rust_type_path_prefix,
 };
 use crate::analyzer::same_file_pick::{
-    is_free, member_call_admits, prefer_owned, rust_impl_members, rust_lexical_scopes,
-    type_receiver_is_closed, ImplMember, ImplNode, PickFacts, PickScope,
+    is_free, member_call_admits, prefer_owned, rust_impl_members, type_receiver_is_closed,
+    ImplMember, ImplNode, PickFacts, PickScope,
 };
 use crate::analyzer::type_ladder::{
     self, TypeCandidates, TypeFacts, TypeMember as LadderMember, MAX_HERITAGE_DEPTH,
@@ -808,7 +808,14 @@ impl OverlayView {
                     } else {
                         &[]
                     };
-                    let owner = sym.owner_class.as_deref().and_then(owner_key);
+                    // A scoped caller reads the name tiers through the owner
+                    // of the unscoped declaration it sits in, as the index's
+                    // Pass 2 does (`SymbolTable::lexical_root`).
+                    let root = facts.lexical_root(source);
+                    let owner = match root == source {
+                        true => sym.owner_class.as_deref().and_then(owner_key),
+                        false => facts.owner_of(root),
+                    };
                     // Duplicates go once the list is whole (`dedup_gaps`).
                     let note_gap = |member: &str, reason: &str| {
                         gaps.borrow_mut().push(CallGap {
@@ -857,9 +864,9 @@ impl OverlayView {
                         picked
                     };
                     for raw_callee in &sym.calls {
-                        // The index's Pass 2 order in a JS / TS file: a bare
-                        // call binds the innermost named function in scope
-                        // first, and an ambiguous or unreachable one leaves
+                        // The index's Pass 2 order in a JS / TS or Rust file:
+                        // a bare call binds the innermost named function in
+                        // scope first, and an ambiguous or unreachable one leaves
                         // only the named-import tier. A chain walks from its
                         // innermost call outwards, as the index's does.
                         // Inline, so `parsed` borrows `sym.calls` for as long
@@ -872,8 +879,7 @@ impl OverlayView {
                             raw_callee,
                             |parsed, arguments| 'hit: {
                                 let mut base_metas = chain_metas.borrow_mut();
-                                if let Some(targets) = lexical.targets(span_of(sym), parsed.name())
-                                {
+                                if let Some(targets) = lexical.call_targets(span_of(sym), parsed) {
                                     if let Some(&hit) = targets.first() {
                                         break 'hit Some(hit);
                                     }
@@ -1354,24 +1360,34 @@ impl OverlayView {
                     let mut field_edges: Vec<u32> = Vec::new();
                     for raw in &sym.variant_refs {
                         if let Some(name_ref) = NameRef::parse(raw) {
-                            let Some((target, confidence)) = resolve_overlay_name_ref(
-                                graph,
-                                file_ord,
-                                file,
-                                caller,
-                                sym,
-                                name_ref,
-                                &mut base_metas,
-                                &callables,
-                                &values,
-                                &fields,
-                                &types,
-                                &qualifiers,
-                                &nodes,
-                                &replaced,
-                                &dirty_base,
-                                &facts,
-                            ) else {
+                            // The index's lexical name-reference tier, then
+                            // its name tiers with the same owner.
+                            let lexical_hit = lexical
+                                .name_ref_target(span_of(sym), name_ref)
+                                .map(|id| (id, CONF_SAME_FILE));
+                            let Some((target, confidence)) = lexical_hit.or_else(|| {
+                                resolve_overlay_name_ref(
+                                    graph,
+                                    file_ord,
+                                    file,
+                                    caller,
+                                    match root == source {
+                                        true => sym.owner_class.as_deref(),
+                                        false => owner,
+                                    },
+                                    name_ref,
+                                    &mut base_metas,
+                                    &callables,
+                                    &values,
+                                    &fields,
+                                    &types,
+                                    &qualifiers,
+                                    &nodes,
+                                    &replaced,
+                                    &dirty_base,
+                                    &facts,
+                                )
+                            }) else {
                                 continue;
                             };
                             let callable = facts.kind(target).is_callable();
@@ -2440,9 +2456,6 @@ struct OverlayFacts<'a> {
     /// Virtual idx → the Rust `impl` block that declares it, by the index's
     /// rule ([`rust_impl_members`]).
     dirty_impl_members: FxHashMap<u32, ImplMember<'a>>,
-    /// Virtual Rust callable index → its complete lexical scope.  This
-    /// mirrors the index-only derived map and is never persisted.
-    dirty_rust_lexical_scopes: FxHashMap<u32, Box<str>>,
     /// Per dirty file: the owner keys of its namespaces and modules that
     /// name no type of the file (the index's `build_owner_kinds`).
     dirty_namespaces: Vec<Vec<&'a str>>,
@@ -2469,7 +2482,8 @@ struct OverlayFacts<'a> {
     dirty_flags: FxHashMap<u32, u16>,
     /// Scoped virtual idx → its lexical parent's virtual idx, from the
     /// fresh parse as the index derives its table. A virtual node has no
-    /// row in the graph's table. Sparse: empty while no language opts in.
+    /// row in the graph's table. Sparse: empty for a dirty file whose
+    /// language scopes no kind ([`lexical_scope_kinds`]).
     dirty_lexical_parents: FxHashMap<u32, u32>,
     /// C# file → the namespaces it declares (`.`-joined), the index's
     /// `SymbolTable::csharp_namespaces`. Built on the first C# extension
@@ -2496,7 +2510,6 @@ impl<'a> OverlayFacts<'a> {
         let mut declared: FxHashMap<(usize, &'a str), Vec<u32>> = FxHashMap::default();
         let mut dirty_by_name: FxHashMap<&'a str, Vec<u32>> = FxHashMap::default();
         let mut dirty_impl_members: FxHashMap<u32, ImplMember<'a>> = FxHashMap::default();
-        let mut dirty_rust_lexical_scopes: FxHashMap<u32, Box<str>> = FxHashMap::default();
         let mut dirty_namespaces: Vec<Vec<&'a str>> = Vec::with_capacity(files.len());
         let mut exported = Vec::with_capacity(nodes.len());
         let mut es_modules = Vec::with_capacity(files.len());
@@ -2543,11 +2556,6 @@ impl<'a> OverlayFacts<'a> {
                         },
                     );
                 });
-                for (offset, scope) in rust_lexical_scopes(&file.symbols).into_iter().enumerate() {
-                    if let Some(scope) = scope {
-                        dirty_rust_lexical_scopes.insert(start + offset as u32, scope);
-                    }
-                }
             }
             let scoped = lexical_scope_kinds(Language::from_path(&file.rel_path));
             if !scoped.is_empty() {
@@ -2621,7 +2629,6 @@ impl<'a> OverlayFacts<'a> {
             later_overloads,
             dirty_by_name,
             dirty_impl_members,
-            dirty_rust_lexical_scopes,
             dirty_namespaces,
             base_impls: OnceCell::new(),
             base_namespaces: OnceCell::new(),
@@ -2642,6 +2649,19 @@ impl<'a> OverlayFacts<'a> {
         } else {
             self.graph.is_lexically_scoped(idx)
         }
+    }
+
+    /// The outermost unscoped declaration the dirty parse's lexical
+    /// parents reach from the virtual `idx`; `idx` itself when it is
+    /// unscoped. The index's `SymbolTable::lexical_root`.
+    fn lexical_root(&self, mut idx: u32) -> u32 {
+        for _ in 0..=self.dirty_lexical_parents.len() {
+            match self.dirty_lexical_parents.get(&idx) {
+                Some(&parent) => idx = parent,
+                None => break,
+            }
+        }
+        idx
     }
 
     fn base_len(&self) -> u32 {
@@ -3260,7 +3280,7 @@ impl<'a> ModuleFacts for OverlayFacts<'a> {
     fn declares_top_level_module(&self, file: &str, name: &str) -> bool {
         self.decls_in_file(file, name)
             .into_iter()
-            .any(|(id, kind)| kind == NodeKind::Module && PickFacts::raw_owner(self, id).is_none())
+            .any(|(id, kind)| kind == NodeKind::Module && PickFacts::owner(self, id).is_none())
     }
 
     fn has_file(&self, file: &str) -> bool {
@@ -4460,24 +4480,6 @@ impl PickFacts for OverlayFacts<'_> {
         self.owner_of(id)
     }
 
-    fn raw_owner(&self, id: u32) -> Option<&str> {
-        match id.checked_sub(self.base_len()) {
-            Some(offset) => self.nodes[offset as usize].owner_class.as_deref(),
-            None => {
-                let owner = self.graph.nodes[id as usize]
-                    .owner_class
-                    .resolve(&self.graph.string_pool);
-                (!owner.is_empty()).then_some(owner)
-            }
-        }
-    }
-
-    fn rust_lexical_scope(&self, id: u32) -> Option<&str> {
-        (id >= self.base_len())
-            .then(|| self.dirty_rust_lexical_scopes.get(&id).map(Box::as_ref))
-            .flatten()
-    }
-
     fn impl_member(&self, id: u32) -> Option<ImplMember<'_>> {
         if id >= self.base_len() {
             self.dirty_impl_members.get(&id).copied()
@@ -4725,7 +4727,7 @@ fn resolve_overlay_name_ref(
     file_ord: usize,
     file: &OverlayFileInput,
     caller: FileMeta,
-    symbol: &OverlaySymbol,
+    owner: Option<&str>,
     name_ref: NameRef<'_>,
     base_metas: &mut FxHashMap<usize, FileMeta>,
     callables: &OverlayNames<'_>,
@@ -4743,7 +4745,7 @@ fn resolve_overlay_name_ref(
         &file.rel_path,
         caller.language,
         &file.imports,
-        symbol.owner_class.as_deref(),
+        owner,
         name_ref,
         crate::analyzer::name_ref::NameRefTiers {
             same_file: CONF_SAME_FILE,
@@ -4883,15 +4885,7 @@ fn resolve_callee<'s>(
     let free_only = call.is_some_and(|call| call.free_only);
     // I5: a scoped node is no global candidate.
     let admits = |&(idx, _): &(u32, FileMeta)| {
-        !facts.is_lexically_scoped(idx)
-            && (!free_only
-                || (!is_method(idx)
-                    && (caller.language != Language::Rust
-                        || facts.node_file(idx).is_some_and(|file| {
-                            crate::analyzer::same_file_pick::rust_free_global_candidate(
-                                facts, file, idx,
-                            )
-                        }))))
+        !facts.is_lexically_scoped(idx) && (!free_only || !is_method(idx))
     };
     // Tier 1: same-file, the index's `lookup_call_in_file`. At a call site
     // the pick narrows by owner (`prefer_owned`); when the file holds
@@ -4911,23 +4905,6 @@ fn resolve_callee<'s>(
         .filter(|&(_, kind)| !free_only || kind != NodeKind::Method);
     if let Some(pick) = reexport::pick_call(same_file, call_target) {
         let hit = match call {
-            Some(call) if free_only && caller.language == Language::Rust => {
-                let lexical_owner = call.caller.map(|id| {
-                    crate::analyzer::same_file_pick::rust_lexical_owner(
-                        facts,
-                        id,
-                        facts.name_of(id),
-                    )
-                });
-                crate::analyzer::same_file_pick::prefer_free_scoped(
-                    facts,
-                    importer,
-                    callee,
-                    lexical_owner.as_deref(),
-                    call.owner,
-                    call_target,
-                )
-            }
             Some(call) if free_only => crate::analyzer::same_file_pick::prefer_free(
                 facts,
                 importer,

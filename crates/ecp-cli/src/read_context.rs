@@ -262,11 +262,43 @@ fn facts<'a>(
         end_line: node.end_line(),
         columns: node.columns(),
         name: node.name(merged),
-        qualifier: node
-            .owner_class(merged)
-            .map(PathSegment::from_owner)
-            .unwrap_or_default(),
+        qualifier: display_path(merged, idx, node),
     }
+}
+
+/// The segments of `idx`'s display owner ([`MergedGraph::display_owner`]),
+/// outermost first: the first stored owner up the lexical-parent chain, then
+/// each parent's name. A nested Rust `helper` in `fn outer` gives `outer`,
+/// so `outer.helper` selects it. Built from pool-borrowed parts because the
+/// joined display text is an owned string.
+fn display_path<'a>(
+    merged: &MergedGraph<'a>,
+    idx: u32,
+    node: MergedNode<'a>,
+) -> Vec<PathSegment<'a>> {
+    let mut parents: Vec<&'a str> = Vec::new();
+    let (mut current, mut current_node) = (idx, node);
+    let head = loop {
+        if let Some(owner) = current_node.owner_class(merged) {
+            break PathSegment::from_owner(owner);
+        }
+        // Each row is one step, so more steps than rows is a corrupt cycle.
+        let parent = (current < merged.base_len() && parents.len() < merged.lexical_parents.len())
+            .then(|| merged.lexical_parent(current))
+            .flatten()
+            .and_then(|p| Some((p, merged.node(p)?)));
+        let Some((parent, parent_node)) = parent else {
+            break Vec::new();
+        };
+        parents.push(parent_node.name(merged));
+        (current, current_node) = (parent, parent_node);
+    };
+    head.into_iter()
+        .chain(parents.into_iter().rev().map(|name| PathSegment {
+            name,
+            impl_trait: None,
+        }))
+        .collect()
 }
 
 /// The one name-to-node lookup of a graph command.
@@ -457,5 +489,75 @@ mod tests {
             resolve(&merged, "Writer", Some("class"), None),
             TargetResolution::Ambiguous(a) if a.total() == 2
         ));
+    }
+
+    /// nodes: 0 outer · 1 helper nested in outer · 2 top-level helper ·
+    /// 3 `A::new` · 4 pad nested in `A::new` · 5 inner nested in pad.
+    fn nested_graph_bytes() -> Vec<u8> {
+        let mut fx = GraphFixture::new();
+        let outer = fx.func("src/a.rs", "outer");
+        let nested = fx.func("src/a.rs", "helper");
+        fx.func("src/a.rs", "helper");
+        let new = fx.method("src/a.rs", "A", "new");
+        let pad = fx.func("src/a.rs", "pad");
+        let inner = fx.func("src/a.rs", "inner");
+        let row = |node_idx, parent_idx| ecp_core::graph::LexicalParentFact {
+            node_idx,
+            parent_idx,
+        };
+        fx.assembly_mut().lexical_parents =
+            vec![row(nested, outer), row(pad, new), row(inner, pad)];
+        fx.into_bytes()
+    }
+
+    fn unique(resolution: TargetResolution) -> Option<u32> {
+        match resolution {
+            TargetResolution::Unique(c) => Some(c.node),
+            _ => None,
+        }
+    }
+
+    /// Stands for: a target names a scoped node by its display owner, the
+    /// path `inspect` prints (`outer`, `A::new`, `A::new::pad`), and a root
+    /// qualifier names the top-level declaration. Before R6 the qualifier
+    /// read the empty stored owner, so `outer.helper` matched nothing and
+    /// `::helper` listed both.
+    #[test]
+    fn test_resolve_target_scoped_node_qualified_by_display_owner_selects_it() {
+        let bytes = nested_graph_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        let merged = MergedGraph::new(graph, None);
+        let at = |text: &str| unique(resolve(&merged, text, None, None));
+
+        assert_eq!(at("outer.helper"), Some(1));
+        assert_eq!(at("::helper"), Some(2));
+        assert_eq!(at("new.pad"), Some(4));
+        assert_eq!(at("A.new.pad"), Some(4));
+        assert_eq!(at("A::new::pad::inner"), Some(5));
+        assert_eq!(at("pad.inner"), Some(5));
+        assert_eq!(at("other.helper"), None);
+        assert!(matches!(
+            resolve(&merged, "helper", None, None),
+            TargetResolution::Ambiguous(a) if a.total() == 2
+        ));
+    }
+
+    /// Stands for: a corrupt table whose rows form a cycle ends the walk
+    /// instead of looping, and the candidate keeps a finite path.
+    #[test]
+    fn test_display_path_cyclic_rows_terminates() {
+        let mut fx = GraphFixture::new();
+        let a = fx.func("src/a.rs", "a");
+        let b = fx.func("src/a.rs", "b");
+        let row = |node_idx, parent_idx| ecp_core::graph::LexicalParentFact {
+            node_idx,
+            parent_idx,
+        };
+        fx.assembly_mut().lexical_parents = vec![row(a, b), row(b, a)];
+        let bytes = fx.into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        let merged = MergedGraph::new(graph, None);
+        let path = display_path(&merged, a, merged.node(a).unwrap());
+        assert!(path.len() <= 2, "{path:?}");
     }
 }
