@@ -1696,6 +1696,9 @@ mod tests {
         }
     }
 
+    /// Stands for: a closure whose uid collides links from the first live
+    /// enclosing node to the first live closure. The new file's `File` node
+    /// and its replayed `Defines` (F7a-1) are not what this pins.
     #[test]
     fn test_build_closure_uid_collisions_use_first_live_nodes() {
         let bytes = GraphFixture::new().into_bytes();
@@ -1718,9 +1721,10 @@ mod tests {
         let references: Vec<_> = view
             .edges()
             .iter()
-            .map(|edge| (edge.source, edge.target, edge.rel_type, edge.confidence))
+            .filter(|edge| edge.rel_type == RelType::References)
+            .map(|edge| (edge.source, edge.target, edge.confidence))
             .collect();
-        assert_eq!(references, vec![(0, 2, RelType::References, 1.0)]);
+        assert_eq!(references, vec![(0, 2, 1.0)]);
     }
 
     #[test]

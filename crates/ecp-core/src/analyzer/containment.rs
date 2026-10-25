@@ -245,9 +245,9 @@ mod tests {
 
     /// The first row of each (name, kind, owner) stands for the declaration,
     /// as the index's `SymbolTable::first_declaration` does.
-    fn first_of(
-        rows: &[Row<'static>],
-    ) -> impl Fn(&str, NodeKind, Option<&str>) -> Option<u32> + '_ {
+    fn first_of<'a>(
+        rows: &'a [Row<'static>],
+    ) -> impl Fn(&str, NodeKind, Option<&str>) -> Option<u32> + 'a {
         move |name, kind, owner| {
             rows.iter()
                 .position(|r| r.name == name && r.kind == kind && r.owner == owner)

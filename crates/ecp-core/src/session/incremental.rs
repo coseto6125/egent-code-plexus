@@ -241,19 +241,16 @@ impl<'a> Declarations<'a> {
 /// The function meta of every virtual slot whose fragment paired one, as
 /// pass 1.8 records it for the slot (a tombstone slot included).
 fn function_metas(files: &[OverlayFileInput], base_len: u32) -> Vec<ViewFunctionMeta> {
-    let mut out = Vec::new();
-    let mut node = base_len;
-    for symbol in files.iter().flat_map(|f| &f.symbols) {
-        if let Some(flags) = symbol.flags {
-            out.push(ViewFunctionMeta {
+    (base_len..)
+        .zip(files.iter().flat_map(|f| &f.symbols))
+        .filter_map(|(node, symbol)| {
+            Some(ViewFunctionMeta {
                 node,
-                flags,
+                flags: symbol.flags?,
                 return_type: symbol.return_type.clone(),
-            });
-        }
-        node += 1;
-    }
-    out
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]

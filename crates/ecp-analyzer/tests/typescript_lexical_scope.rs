@@ -113,13 +113,17 @@ fn node(g: &ZeroCopyGraph, path: &str, name: &str, line: u32) -> u32 {
         .unwrap_or_else(|| panic!("setup: {path}:{line} declares `{name}`")) as u32
 }
 
-/// The index of the one node whose name starts with `prefix`.
+/// The index of the one Function whose name starts with `prefix`. A
+/// `Process` node takes its entry function's name, so it is left out.
 fn named_like(g: &ZeroCopyGraph, prefix: &str) -> u32 {
     let pool = g.string_pool.as_slice();
     let hits: Vec<u32> = (0..g.nodes.len() as u32)
-        .filter(|&i| g.nodes[i as usize].name.resolve(pool).starts_with(prefix))
+        .filter(|&i| {
+            let n = &g.nodes[i as usize];
+            n.kind == NodeKind::Function && n.name.resolve(pool).starts_with(prefix)
+        })
         .collect();
-    assert_eq!(hits.len(), 1, "setup: one node named `{prefix}…`");
+    assert_eq!(hits.len(), 1, "setup: one Function named `{prefix}…`");
     hits[0]
 }
 
