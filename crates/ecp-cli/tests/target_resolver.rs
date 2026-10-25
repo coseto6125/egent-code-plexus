@@ -283,3 +283,201 @@ fn test_rename_from_subdirectory_edits_files_under_worktree_top() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(repo.read("pkg/lib.py"), RUN_PY_RENAMED, "{}", stdout(&out));
 }
+
+// ── find, path and pattern select through the same resolver (F5b) ───────────
+
+const ENGINE_PY: &str = "class Engine:\n    def load(self):\n        return 1\n";
+const UTIL_LOAD_PY: &str = "def load():\n    return 2\n";
+
+/// Stands for: qualified `Owner.member` text means the node the resolver
+/// picks for it. Failed before: `find` compared the whole text with the node
+/// name `load`, so `Engine.load` answered `found:false`.
+#[test]
+fn test_find_engine_dot_load_found_true() {
+    let repo = Repo::indexed(&[("engine.py", ENGINE_PY), ("util.py", UTIL_LOAD_PY)]);
+
+    let out = repo.ecp(&["find", "Engine.load", "--format", "json", "--repo", "."]);
+
+    assert!(out.status.success(), "{}", stderr(&out));
+    let payload = json_of(&out);
+    assert_eq!(payload["found"], true, "{payload}");
+    assert_eq!(payload["status"], "success", "one declaration: {payload}");
+    assert_eq!(payload["total_candidates"], 1, "{payload}");
+    assert_eq!(payload["matches"][0]["file"], "engine.py", "{payload}");
+    assert_eq!(payload["matches"][0]["name"], "load", "{payload}");
+}
+
+/// Stands for: `find` reports two same-name declarations as the typed
+/// ambiguity (`status`, `candidates` with a re-runnable `target`) and still
+/// returns its top-ranked match. Failed before: the payload said `success`
+/// and gave no way to select the other declaration.
+#[test]
+fn test_find_bare_name_two_files_reports_typed_ambiguity() {
+    let repo = Repo::indexed(&[("a.py", PARSE_A), ("b.py", PARSE_B)]);
+
+    let out = repo.ecp(&["find", "parse", "--format", "json", "--repo", "."]);
+
+    assert!(out.status.success(), "{}", stderr(&out));
+    let payload = json_of(&out);
+    assert_eq!(payload["status"], "ambiguous", "{payload}");
+    assert_eq!(payload["total_candidates"], 2, "{payload}");
+    assert_eq!(payload["matches"].as_array().unwrap().len(), 1, "{payload}");
+    let candidates = payload["candidates"].as_array().expect("candidates");
+    for file in ["a.py", "b.py"] {
+        let candidate = candidates
+            .iter()
+            .find(|c| c["filePath"] == file)
+            .unwrap_or_else(|| panic!("no candidate for {file}: {payload}"));
+        let target = candidate["target"].as_str().expect("re-runnable target");
+        let mut args = vec!["find"];
+        args.extend(target.split_whitespace());
+        args.extend(["--format", "json", "--repo", "."]);
+        let again = json_of(&repo.ecp(&args));
+        assert_eq!(again["status"], "success", "{target}: {again}");
+        assert_eq!(again["matches"][0]["file"], file, "{target}: {again}");
+    }
+}
+
+/// Stands for: a `--kind` list narrows `find` before it reports an ambiguity.
+/// A class and a function share a name; `--kind function` leaves one.
+#[test]
+fn test_find_kind_filter_leaves_one_declaration_no_ambiguity() {
+    let repo = Repo::indexed(&[("a.py", "class parse:\n    pass\n"), ("b.py", PARSE_B)]);
+
+    let out = repo.ecp(&[
+        "find", "parse", "--kind", "function", "--format", "json", "--repo", ".",
+    ]);
+
+    let payload = json_of(&out);
+    assert_eq!(payload["status"], "success", "{payload}");
+    assert_eq!(payload["matches"][0]["file"], "b.py", "{payload}");
+    assert!(payload.get("candidates").is_none(), "{payload}");
+}
+
+/// Stands for: `--callers-of` takes its caller files from the overlay-aware
+/// graph. Failed before: the walk read the base graph, so a caller written
+/// into an untracked file was never scanned.
+#[test]
+fn test_pattern_callers_of_sees_untracked_caller() {
+    let repo = Repo::indexed(&[("lib.rs", "pub fn alpha() {}\n")]);
+    repo.write("extra.rs", "pub fn use_alpha() { alpha(); }\n");
+
+    let out = repo.ecp(&[
+        "pattern",
+        "-p",
+        "alpha()",
+        "--callers-of",
+        "alpha",
+        "--format",
+        "json",
+        "--repo",
+        ".",
+    ]);
+
+    assert!(out.status.success(), "{}", stderr(&out));
+    let payload = json_of(&out);
+    let files: Vec<&str> = payload["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["file"].as_str().unwrap())
+        .collect();
+    assert!(files.contains(&"extra.rs"), "{payload}");
+}
+
+/// Stands for: `pattern --callers-of` refuses two same-name declarations with
+/// the typed ambiguity, and each candidate's `target` holds the arguments that
+/// select it. Failed before: it scanned the callers of both.
+#[test]
+fn test_pattern_callers_of_bare_name_two_files_reports_typed_ambiguity() {
+    let repo = Repo::indexed(&[("a.py", PARSE_A), ("b.py", PARSE_B)]);
+
+    let out = repo.ecp(&[
+        "pattern",
+        "-p",
+        "pass",
+        "--callers-of",
+        "parse",
+        "--format",
+        "json",
+        "--repo",
+        ".",
+    ]);
+
+    assert!(!out.status.success(), "an ambiguity must exit non-zero");
+    let payload = json_of(&out);
+    assert_eq!(payload["status"], "ambiguous", "{payload}");
+    assert!(payload.get("matches").is_none(), "{payload}");
+    for file in ["a.py", "b.py"] {
+        let candidate = payload["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["filePath"] == file)
+            .unwrap_or_else(|| panic!("no candidate for {file}: {payload}"));
+        let target = candidate["target"].as_str().expect("re-runnable target");
+        let mut args = vec!["pattern", "-p", "pass"];
+        args.extend(target.split_whitespace());
+        args.extend(["--format", "json", "--repo", "."]);
+        let again = repo.ecp(&args);
+        assert!(again.status.success(), "{target}: {}", stderr(&again));
+        assert_eq!(json_of(&again)["scanned_files"], 1, "{target}");
+    }
+}
+
+const APP_PY: &str = "from util import load\n\n\ndef run():\n    return load()\n";
+
+/// Stands for: `path` selects an endpoint with the resolver's grammar. `::load`
+/// is the top-level `load`, not `Engine.load`. Failed before: `path` read
+/// `::load` as a method name and found no symbol.
+#[test]
+fn test_path_colon_colon_name_selects_top_level_endpoint() {
+    let repo = Repo::indexed(&[
+        ("engine.py", ENGINE_PY),
+        ("util.py", UTIL_LOAD_PY),
+        ("app.py", APP_PY),
+    ]);
+
+    let out = repo.ecp(&["path", "run", "::load", "--format", "json", "--repo", "."]);
+
+    assert!(out.status.success(), "{}", stderr(&out));
+    let payload = json_of(&out);
+    assert_eq!(payload["found"], true, "{payload}");
+    let last = payload["path"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["filePath"], "util.py", "{payload}");
+}
+
+/// Stands for: `path` reports an ambiguous endpoint as the typed ambiguity and
+/// names the side. Each `target` holds the `--from-file` / `--to-file`
+/// arguments that select it. Failed before: both declarations seeded one walk.
+#[test]
+fn test_path_bare_name_two_files_reports_typed_ambiguity() {
+    let repo = Repo::indexed(&[
+        ("a.py", PARSE_A),
+        ("b.py", PARSE_B),
+        ("main.py", "def main():\n    return 0\n"),
+    ]);
+
+    let out = repo.ecp(&["path", "main", "parse", "--format", "json", "--repo", "."]);
+
+    assert!(!out.status.success(), "an ambiguity must exit non-zero");
+    let payload = json_of(&out);
+    assert_eq!(payload["status"], "ambiguous", "{payload}");
+    assert_eq!(payload["side"], "to", "{payload}");
+    for file in ["a.py", "b.py"] {
+        let candidate = payload["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["filePath"] == file)
+            .unwrap_or_else(|| panic!("no candidate for {file}: {payload}"));
+        let target = candidate["target"].as_str().expect("re-runnable target");
+        assert!(target.contains(&format!("--to-file {file}")), "{target}");
+        let mut args = vec!["path", "main"];
+        args.extend(target.split_whitespace());
+        args.extend(["--format", "json", "--repo", "."]);
+        let again = repo.ecp(&args);
+        assert!(again.status.success(), "{target}: {}", stderr(&again));
+        assert_eq!(json_of(&again)["toCandidates"], 1, "{target}");
+    }
+}

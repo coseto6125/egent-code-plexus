@@ -32,13 +32,17 @@ use crate::commands::format::kind_to_str;
 use crate::commands::graph_csr::iter_incoming_edges_filtered;
 use crate::engine::Engine;
 use crate::output::{emit_with_caveat, merge_caveats, OutputFormat};
+use crate::read_context::{candidate_json, named_declarations, target_args, target_request};
 use clap::{Args, ValueEnum};
 use ecp_analyzer::resolution::index::Language;
+use ecp_core::contracts::identity::{
+    resolve_target as resolve_named, select, TargetRequest, TargetResolution,
+};
 use ecp_core::graph::{
     ArchivedFileCategory, ArchivedRelType, ArchivedZeroCopyGraph, FileCategory, NodeKind,
 };
 use ecp_core::registry::{resolve_home_ecp, Registry, RegistryFile};
-use ecp_core::session::view::{base_constructors, BaseConstructorIndex};
+use ecp_core::session::view::{base_constructors, BaseConstructorIndex, ViewNode};
 use ecp_core::session::MergedGraph;
 use ecp_core::EcpError;
 use rayon::prelude::*;
@@ -70,6 +74,8 @@ pub enum FindMode {
 #[derive(Args, Debug, Clone)]
 pub struct FindArgs {
     /// Pattern: symbol name (or name fragment in `fuzzy` / `bm25` mode).
+    /// In `exact` mode the name takes the target grammar of `ecp impact`:
+    /// `name`, `Owner.name`, `::name`, `name@line`.
     /// Required unless `--batch` is set (`bm25` mode only — patterns
     /// then come from stdin).
     #[arg(required_unless_present = "batch")]
@@ -86,6 +92,9 @@ pub struct FindArgs {
 
     /// Return all matches instead of the single top-ranked one. Affects
     /// `exact` and `fuzzy` modes; `bm25` always returns top-K buckets.
+    /// Without it, an `exact` name with several declarations returns the
+    /// top-ranked one, `status` `ambiguous`, and `candidates` with a `target`
+    /// that selects each.
     #[arg(long)]
     pub all: bool,
 
@@ -339,7 +348,13 @@ pub struct FindResult {
     /// `--include-tests` wasn't passed. Always 0 in Exact mode (test
     /// exclusion only applies to Fuzzy).
     pub tests_excluded: u32,
+    /// `success`, or `ambiguous` when an exact name has several declarations
+    /// and `--all` is absent.
     pub status: String,
+    /// Present only with `status` `ambiguous`: each declaration with the
+    /// `find` arguments (`target`) that select it alone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidates: Option<serde_json::Value>,
 }
 
 /// Category sort priority for exact/fuzzy ranking — lower is preferred.
@@ -472,35 +487,38 @@ fn overlay_matches(
             })
         })
         .filter(|h| file_filter.is_none_or(|needle| h.rel_path.contains(needle)))
-        .map(|h| {
-            // A shared uid includes the path, so its base category and ranking
-            // still apply even though its span must come from the working tree.
-            let (category, caller_count) = if let Some(idx) = h.replaced_base {
-                let node = &merged.nodes[idx as usize];
-                (
-                    &merged.files[node.file_idx.to_native() as usize].category,
-                    count_incoming(merged, idx as usize, base_constructors(merged, idx)),
-                )
-            } else {
-                let category = ecp_core::file_category::determine_category(&h.rel_path);
-                (archived_category(category), 0)
-            };
-            let kind_str = crate::commands::format::node_kind_to_str(&h.kind).to_string();
-            let signature = format!("{kind_str} {}", h.name);
-            (
-                FindMatch {
-                    file: h.rel_path.to_string(),
-                    line: h.start_line,
-                    name: h.name.clone(),
-                    kind: kind_str,
-                    category: category_to_str(category).to_string(),
-                    caller_count,
-                    signature,
-                },
-                category_priority(category),
-            )
-        })
+        .map(|h| virtual_match(merged, h))
         .collect()
+}
+
+/// One overlay node as a `find` row with its category priority.
+fn virtual_match(merged: &MergedGraph<'_>, h: &ViewNode) -> (FindMatch, u8) {
+    // A shared uid includes the path, so its base category and ranking
+    // still apply even though its span must come from the working tree.
+    let (category, caller_count) = if let Some(idx) = h.replaced_base {
+        let node = &merged.nodes[idx as usize];
+        (
+            &merged.files[node.file_idx.to_native() as usize].category,
+            count_incoming(merged, idx as usize, base_constructors(merged, idx)),
+        )
+    } else {
+        let category = ecp_core::file_category::determine_category(&h.rel_path);
+        (archived_category(category), 0)
+    };
+    let kind_str = crate::commands::format::node_kind_to_str(&h.kind).to_string();
+    let signature = format!("{kind_str} {}", h.name);
+    (
+        FindMatch {
+            file: h.rel_path.to_string(),
+            line: h.start_line,
+            name: h.name.clone(),
+            kind: kind_str,
+            category: category_to_str(category).to_string(),
+            caller_count,
+            signature,
+        },
+        category_priority(category),
+    )
 }
 
 enum CandSrc {
@@ -582,6 +600,72 @@ fn base_candidates(
     (rows, tests_excluded)
 }
 
+type Row = (CandSrc, u32, u8, String);
+
+/// Exact-mode candidates, selected by the shared target resolver: the same
+/// node set `impact` and `inspect` get for the same text. `kinds` is `find`'s
+/// own `--kind` list, applied to the selection. The second value is the typed
+/// ambiguity (`candidates` with a re-runnable `target`) when the selection
+/// holds more than one declaration.
+fn exact_candidates(
+    merged: &MergedGraph<'_>,
+    graph: &ArchivedZeroCopyGraph,
+    request: &TargetRequest,
+    kinds: Option<&[String]>,
+) -> (Vec<Row>, Option<serde_json::Value>) {
+    let named = named_declarations(merged, request.name());
+    let picked: Vec<usize> = select(request, &named)
+        .into_iter()
+        .filter(|&i| {
+            kinds.is_none_or(|kinds| {
+                let kind = crate::commands::format::node_kind_to_str(&named[i].kind);
+                kinds.iter().any(|want| want.eq_ignore_ascii_case(kind))
+            })
+        })
+        .collect();
+
+    let mut constructors = ConstructorLookup::new(graph);
+    let base_len = merged.base_len();
+    let rows: Vec<Row> = picked
+        .iter()
+        .filter_map(|&i| {
+            let c = &named[i];
+            if c.node < base_len {
+                let idx = c.node as usize;
+                let file = &graph.files[graph.nodes[idx].file_idx.to_native() as usize];
+                let caller_count = count_incoming(graph, idx, constructors.of(idx));
+                return Some((
+                    CandSrc::Base(idx),
+                    caller_count,
+                    category_priority(&file.category),
+                    c.file.to_string(),
+                ));
+            }
+            let h = merged
+                .view()?
+                .virtual_nodes()
+                .get((c.node - base_len) as usize)?;
+            let (m, prio) = virtual_match(merged, h);
+            let (caller_count, path) = (m.caller_count, m.file.clone());
+            Some((CandSrc::Overlay(m), caller_count, prio, path))
+        })
+        .collect();
+
+    let ambiguity = (rows.len() > 1)
+        .then(|| match resolve_named(request, &named) {
+            TargetResolution::Ambiguous(a) => Some(
+                a.candidates()
+                    .iter()
+                    .filter(|c| picked.iter().any(|&i| named[i].node == c.node))
+                    .map(|c| candidate_json(c, c.reusable.as_ref().map(target_args)))
+                    .collect::<serde_json::Value>(),
+            ),
+            _ => None,
+        })
+        .flatten();
+    (rows, ambiguity)
+}
+
 fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result<(), EcpError> {
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
     let format = args.format.unwrap_or_default();
@@ -600,29 +684,43 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
     let view = engine.overlay_dir().and_then(|_| engine.overlay_view());
     let merged = MergedGraph::new(graph, view);
 
-    let (base_rows, mut tests_excluded) = base_candidates(
-        graph,
-        &merged,
-        pattern,
-        mode,
-        kind_filter.as_deref(),
-        file_filter,
-        args.include_tests,
-    );
-    let mut candidates: Vec<(CandSrc, u32, u8, String)> = base_rows
-        .into_iter()
-        .map(|(idx, callers, prio, path)| (CandSrc::Base(idx), callers, prio, path))
-        .collect();
-
-    for (m, prio) in overlay_matches(&merged, pattern, mode, kind_filter.as_deref(), file_filter) {
-        if !args.include_tests && mode == FindMode::Fuzzy && m.category == "Test" {
-            tests_excluded += 1;
-            continue;
+    let mut tests_excluded = 0u32;
+    let mut ambiguity = None;
+    let mut candidates: Vec<Row> = Vec::new();
+    if mode == FindMode::Exact {
+        let request = target_request(pattern, None, file_filter)?;
+        (candidates, ambiguity) =
+            exact_candidates(&merged, graph, &request, kind_filter.as_deref());
+    } else {
+        let (base_rows, excluded) = base_candidates(
+            graph,
+            &merged,
+            pattern,
+            mode,
+            kind_filter.as_deref(),
+            file_filter,
+            args.include_tests,
+        );
+        tests_excluded = excluded;
+        candidates.extend(
+            base_rows
+                .into_iter()
+                .map(|(idx, callers, prio, path)| (CandSrc::Base(idx), callers, prio, path)),
+        );
+        for (m, prio) in
+            overlay_matches(&merged, pattern, mode, kind_filter.as_deref(), file_filter)
+        {
+            if !args.include_tests && m.category == "Test" {
+                tests_excluded += 1;
+                continue;
+            }
+            let caller_count = m.caller_count;
+            let file_path = m.file.clone();
+            candidates.push((CandSrc::Overlay(m), caller_count, prio, file_path));
         }
-        let caller_count = m.caller_count;
-        let file_path = m.file.clone();
-        candidates.push((CandSrc::Overlay(m), caller_count, prio, file_path));
     }
+    // `--all` asks for every declaration, so a list of them is no ambiguity.
+    let ambiguity = ambiguity.filter(|_| !args.all);
 
     // Sort: category priority asc, caller_count desc, file path asc.
     candidates.sort_unstable_by(|a, b| {
@@ -692,6 +790,13 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
                     "note: {omitted} more candidate(s) omitted; use --all to see all {total_candidates}"
                 );
             }
+            for target in ambiguity
+                .iter()
+                .flat_map(|c| c.as_array().into_iter().flatten())
+                .filter_map(|c| c["target"].as_str())
+            {
+                eprintln!("note: ambiguous name; select one with `ecp find {target}`");
+            }
             if tests_excluded > 0 {
                 eprintln!(
                     "note: {tests_excluded} test-file match(es) hidden; pass --include-tests to surface them"
@@ -706,7 +811,12 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
                 total_candidates,
                 returned,
                 tests_excluded,
-                status: "success".to_string(),
+                status: match ambiguity {
+                    Some(_) => "ambiguous",
+                    None => "success",
+                }
+                .to_string(),
+                candidates: ambiguity,
             };
             emit_with_caveat(
                 &serde_json::to_value(&result).map_err(|e| EcpError::Output(e.to_string()))?,
