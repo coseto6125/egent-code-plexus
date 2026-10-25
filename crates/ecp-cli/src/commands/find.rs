@@ -466,7 +466,6 @@ impl<'g> ConstructorLookup<'g> {
 fn overlay_matches(
     merged: &MergedGraph<'_>,
     pattern: &str,
-    mode: FindMode,
     kind_filter: Option<&[String]>,
     file_filter: Option<&str>,
 ) -> Vec<(FindMatch, u8)> {
@@ -475,11 +474,7 @@ fn overlay_matches(
     };
     view.virtual_nodes()
         .iter()
-        .filter(|h| match mode {
-            FindMode::Exact => h.name == pattern,
-            FindMode::Fuzzy => h.name.contains(pattern),
-            FindMode::Bm25 => false,
-        })
+        .filter(|h| h.name.contains(pattern))
         .filter(|h| {
             kind_filter.is_none_or(|kinds| {
                 let k = crate::commands::format::node_kind_to_str(&h.kind).to_ascii_lowercase();
@@ -526,18 +521,14 @@ enum CandSrc {
     Overlay(FindMatch),
 }
 
-/// Base-graph candidates for an Exact / Fuzzy query as
+/// Base-graph candidates for a Fuzzy query as
 /// `(node index, caller_count, category priority, file path)`, in node order,
-/// plus how many Test-category fuzzy hits were dropped.
-///
-/// Exact walks the name index when the graph has one; the hits are node
-/// indices ascending, so ties in the caller's `sort_unstable_by` see the same
-/// input order as the full scan. Fuzzy (`contains`) must scan every node.
+/// plus how many Test-category hits were dropped. A substring match cannot
+/// use the name index, so it scans every node.
 fn base_candidates(
     graph: &ArchivedZeroCopyGraph,
     merged: &MergedGraph<'_>,
     pattern: &str,
-    mode: FindMode,
     kind_filter: Option<&[String]>,
     file_filter: Option<&str>,
     include_tests: bool,
@@ -546,12 +537,7 @@ fn base_candidates(
     let mut constructors = ConstructorLookup::new(graph);
     let mut candidate = |node_idx: usize, node: &ecp_core::graph::ArchivedNode| {
         let name = node.name.resolve(&graph.string_pool);
-        let matches = match mode {
-            FindMode::Exact => name == pattern,
-            FindMode::Fuzzy => name.contains(pattern),
-            FindMode::Bm25 => unreachable!("run_exact_or_fuzzy only handles Exact / Fuzzy"),
-        };
-        if !matches || !merged.base_visible(node_idx as u32) {
+        if !name.contains(pattern) || !merged.base_visible(node_idx as u32) {
             return None;
         }
 
@@ -574,8 +560,7 @@ fn base_candidates(
             }
         }
 
-        let is_exact = matches!(mode, FindMode::Exact);
-        if !include_tests && !is_exact && matches!(file.category, ArchivedFileCategory::Test) {
+        if !include_tests && matches!(file.category, ArchivedFileCategory::Test) {
             tests_excluded += 1;
             return None;
         }
@@ -585,18 +570,12 @@ fn base_candidates(
         Some((node_idx, caller_count, prio, file_path))
     };
 
-    let rows = match mode {
-        FindMode::Exact => graph
-            .name_candidates(pattern)
-            .filter_map(|i| candidate(i as usize, &graph.nodes[i as usize]))
-            .collect(),
-        _ => graph
-            .nodes
-            .iter()
-            .enumerate()
-            .filter_map(|(i, node)| candidate(i, node))
-            .collect(),
-    };
+    let rows = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, node)| candidate(i, node))
+        .collect();
     (rows, tests_excluded)
 }
 
@@ -696,7 +675,6 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
             graph,
             &merged,
             pattern,
-            mode,
             kind_filter.as_deref(),
             file_filter,
             args.include_tests,
@@ -707,9 +685,7 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
                 .into_iter()
                 .map(|(idx, callers, prio, path)| (CandSrc::Base(idx), callers, prio, path)),
         );
-        for (m, prio) in
-            overlay_matches(&merged, pattern, mode, kind_filter.as_deref(), file_filter)
-        {
+        for (m, prio) in overlay_matches(&merged, pattern, kind_filter.as_deref(), file_filter) {
             if !args.include_tests && m.category == "Test" {
                 tests_excluded += 1;
                 continue;
@@ -2255,7 +2231,6 @@ mod tests {
     fn candidates(
         g: ZeroCopyGraph,
         pattern: &str,
-        mode: FindMode,
         kinds: Option<&[String]>,
         file: Option<&str>,
         overlay: bool,
@@ -2286,73 +2261,15 @@ mod tests {
             OverlayView::build(graph, &[dirty]).unwrap()
         });
         let merged = MergedGraph::new(graph, view.as_ref());
-        base_candidates(graph, &merged, pattern, mode, kinds, file, false)
-    }
-
-    /// Contract: the name index changes time only. Same rows in the same
-    /// order as the full scan that clearing `name_index` forces.
-    #[test]
-    fn test_base_candidates_exact_with_index_matches_full_scan() {
-        /// (pattern, kinds, file, overlay)
-        type Case<'a> = (&'a str, Option<&'a [String]>, Option<&'a str>, bool);
-        let kinds = vec!["method".to_string(), "function".to_string()];
-        let cases: [Case; 10] = [
-            ("shared", None, None, false),
-            ("shared", Some(kinds.as_slice()), None, false),
-            ("shared", None, Some("s3.ts"), false),
-            ("dup", None, None, false),
-            ("dup", None, None, true),
-            ("dup", Some(kinds.as_slice()), Some("src/"), true),
-            ("naïve_函数", None, None, false),
-            ("absent", None, None, false),
-            ("", None, None, false),
-            ("Shared", None, None, false),
-        ];
-        for (pattern, kind, file, overlay) in cases {
-            let fast = same_name_graph();
-            let mut slow = same_name_graph();
-            slow.name_index.clear();
-            assert!(!fast.name_index.is_empty());
-            assert_eq!(
-                candidates(fast, pattern, FindMode::Exact, kind, file, overlay),
-                candidates(slow, pattern, FindMode::Exact, kind, file, overlay),
-                "{pattern:?} kinds={kind:?} file={file:?} overlay={overlay}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_base_candidates_exact_shared_name_lists_every_node_ascending() {
-        let (rows, _) = candidates(
-            same_name_graph(),
-            "shared",
-            FindMode::Exact,
-            None,
-            None,
-            false,
-        );
-        assert_eq!(rows.len(), 1200);
-        assert!(rows.windows(2).all(|w| w[0].0 < w[1].0), "node order");
-    }
-
-    /// The tombstone has an empty name: the scan matches it by name equality
-    /// and the index skips it, so an empty pattern must keep the scan.
-    #[test]
-    fn test_base_candidates_exact_empty_pattern_matches_scan_with_tombstones() {
-        let mut slow = same_name_graph();
-        slow.name_index.clear();
-        let (scan_rows, _) = candidates(slow, "", FindMode::Exact, None, None, false);
-        assert_eq!(scan_rows.len(), 12);
-        let (rows, _) = candidates(same_name_graph(), "", FindMode::Exact, None, None, false);
-        assert_eq!(rows, scan_rows);
+        base_candidates(graph, &merged, pattern, kinds, file, false)
     }
 
     /// A base node the overlay replaced is hidden (its virtual twin scans
-    /// instead), with or without the index.
+    /// instead).
     #[test]
-    fn test_base_candidates_exact_overlay_hides_replaced_base_nodes() {
-        let (plain, _) = candidates(same_name_graph(), "dup", FindMode::Exact, None, None, false);
-        let (hidden, _) = candidates(same_name_graph(), "dup", FindMode::Exact, None, None, true);
+    fn test_base_candidates_fuzzy_overlay_hides_replaced_base_nodes() {
+        let (plain, _) = candidates(same_name_graph(), "dup", None, None, false);
+        let (hidden, _) = candidates(same_name_graph(), "dup", None, None, true);
         assert!(
             hidden.len() < plain.len(),
             "{} vs {}",
@@ -2365,18 +2282,10 @@ mod tests {
     /// Fuzzy keeps the scan: substring matches the name index cannot find.
     #[test]
     fn test_base_candidates_fuzzy_finds_substring_matches_with_index_present() {
-        let (rows, excluded) = candidates(
-            same_name_graph(),
-            "hare",
-            FindMode::Fuzzy,
-            None,
-            Some("s1.ts"),
-            false,
-        );
+        let (rows, excluded) = candidates(same_name_graph(), "hare", None, Some("s1.ts"), false);
         assert!(!rows.is_empty());
         assert_eq!(excluded, 0);
-        let (dups, excluded) =
-            candidates(same_name_graph(), "up", FindMode::Fuzzy, None, None, false);
+        let (dups, excluded) = candidates(same_name_graph(), "up", None, None, false);
         assert_eq!(dups.len(), 24, "Test-file dups are excluded, not listed");
         assert_eq!(excluded, 12);
     }
