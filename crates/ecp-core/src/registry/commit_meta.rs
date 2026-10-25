@@ -142,7 +142,8 @@ use std::path::Path;
 /// a C# generic attribute class carries its arity in its uid.
 /// schema40: a Rust nested fn or closure has no owner, a scoped uid and a
 /// lexical-parent row; an HTTP verb matches a whole word of the call name;
-/// NestJS, Spring and Gin routes carry their router prefix.
+/// NestJS, Spring, Gin, FastAPI and JS Express routes carry their router
+/// prefix; a route's response shape comes from its handler's span.
 pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema40");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
