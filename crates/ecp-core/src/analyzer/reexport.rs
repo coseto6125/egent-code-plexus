@@ -375,7 +375,8 @@ pub trait ModuleFacts {
     /// The resolved `export *` modules of the TS / JS `module`
     /// ([`resolve_star_modules`]).
     fn star_modules(&self, module: &str) -> Fact<'_, [Box<str>]>;
-    /// The resolver's `import_module_file` for a Python specifier.
+    /// [`crate::analyzer::module_discovery::discover_module`] for a Python
+    /// specifier, through the implementor's memo.
     fn python_module(&self, importer: &str, specifier: &str) -> PyModule<Self::Path>;
     /// Every file `specifier` may name from `importer`, in probe order,
     /// until `visit` returns `false`.

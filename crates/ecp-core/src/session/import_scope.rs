@@ -1,32 +1,24 @@
-//! Module discovery for the overlay's import-member tier, mirroring the full
-//! resolver's `import_module_file` (ecp-analyzer `resolution/resolver.rs`).
+//! The overlay's facts for module discovery, and its memo. The discovery
+//! itself is [`crate::analyzer::module_discovery::discover_module`], shared
+//! with the full resolver's `import_module_file` (ecp-analyzer
+//! `resolution/resolver.rs`).
 //!
 //! The binding rules themselves live in
 //! [`crate::analyzer::import_binding`], shared with the resolver. Module
-//! discovery cannot reuse the resolver's `SymbolTable`; [`ImportScope`]
-//! replays it over the base graph's file paths plus the dirty files.
+//! discovery cannot read the resolver's `SymbolTable`; [`ImportScope`]
+//! answers the same questions over the base graph's file paths plus the
+//! dirty files.
 
 use super::view::OverlayFileInput;
 use crate::analyzer::import_binding::{fqn_extension, import_family, may_suppress, module_head};
+pub use crate::analyzer::module_discovery::Module;
+use crate::analyzer::module_discovery::{discover_module, for_each_layout_candidate, ModuleIndex};
 use crate::analyzer::types::RawImport;
 use crate::file_category::Language;
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::RefCell;
 use std::path::Path;
-use std::rc::Rc;
-
-/// Where an import's module lives in the repo.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum Module<'a> {
-    Missing,
-    Unique(&'a str),
-    Ambiguous,
-    /// Files declaring the imported namespace that define the imported
-    /// member (all of them when the import names the namespace itself).
-    /// Shared, so a cache hit does not copy a large namespace.
-    Namespace(Rc<[&'a str]>),
-}
 
 /// One language's indexed files, as the resolver's `SymbolTable` keys them.
 #[derive(Default)]
@@ -121,7 +113,12 @@ impl<'a> LanguageFiles<'a> {
 /// (directory, specifier) answer is cached as the resolver's `module_cache`.
 /// The shared import rules read it through `&self` while they probe, so the
 /// caches sit in cells.
-pub(crate) struct ImportScope<'a> {
+///
+/// `pub` and hidden for `crates/ecp-cli/tests/module_discovery_parity.rs`,
+/// which feeds one file set to this and to the resolver; nothing outside
+/// the overlay builds one.
+#[doc(hidden)]
+pub struct ImportScope<'a> {
     graph: &'a ArchivedZeroCopyGraph,
     dirty: &'a [OverlayFileInput],
     dirty_base: &'a FxHashSet<u32>,
@@ -130,10 +127,12 @@ pub(crate) struct ImportScope<'a> {
 }
 
 /// language → directory → specifier → module.
-type ModuleCache<'a> = FxHashMap<u8, FxHashMap<Box<str>, FxHashMap<Box<str>, Module<'a>>>>;
+type ModuleCache<'a> = FxHashMap<u8, FxHashMap<Box<str>, FxHashMap<Box<str>, Module<&'a str>>>>;
 
 impl<'a> ImportScope<'a> {
-    pub(crate) fn new(
+    /// The scope over `graph` with the `dirty` files' fresh parses;
+    /// `dirty_base` holds the base node ids those parses replace.
+    pub fn new(
         graph: &'a ArchivedZeroCopyGraph,
         dirty: &'a [OverlayFileInput],
         dirty_base: &'a FxHashSet<u32>,
@@ -278,14 +277,14 @@ impl<'a> ImportScope<'a> {
                 .all(|family| self.module(source_file, &import.source, family) == Module::Missing)
     }
 
-    /// The resolver's `import_module_file`: the module `specifier` names from
-    /// `source_file`, without guessing its member.
-    pub(crate) fn module(
+    /// [`discover_module`] over this build's files, memoized as the
+    /// resolver's `import_module_file` memoizes it.
+    pub fn module(
         &self,
         source_file: &str,
         specifier: &str,
         language: Language,
-    ) -> Module<'a> {
+    ) -> Module<&'a str> {
         let directory = if specifier.starts_with('.') {
             parent(source_file)
         } else {
@@ -300,16 +299,14 @@ impl<'a> ImportScope<'a> {
         {
             return hit.clone();
         }
-        let found = self.with_files(language, |files| match fqn_extension(language) {
-            Some(extension) => fqn_module(
+        let found = self.with_files(language, |files| {
+            let index = ScopeIndex {
                 files,
-                self.graph,
-                self.dirty,
-                self.dirty_base,
-                specifier,
-                extension,
-            ),
-            None => python_module(files, source_file, specifier),
+                graph: self.graph,
+                dirty: self.dirty,
+                dirty_base: self.dirty_base,
+            };
+            discover_module(&index, source_file, specifier, language)
         });
         self.modules
             .borrow_mut()
@@ -326,205 +323,100 @@ fn parent(path: &str) -> &str {
     path.rsplit_once('/').map_or("", |(dir, _)| dir)
 }
 
-/// The resolver's Python import candidates: the specifier's base path
-/// (`for_each_specifier_candidate`), then `python::spec::module_candidates`.
-fn python_candidates(source_file: &str, specifier: &str) -> Vec<String> {
-    let base = if specifier.starts_with('.') {
-        // PEP 328: N leading dots walk N-1 packages up from the caller.
-        let dots = specifier.bytes().take_while(|&b| b == b'.').count();
-        let dotted = specifier[dots..].trim_start_matches('.').replace('.', "/");
-        let dotted = dotted.trim_start_matches('/');
-        let mut dir = parent(source_file);
-        for _ in 1..dots {
-            dir = parent(dir);
-        }
-        match (dir.is_empty(), dotted.is_empty()) {
-            (true, _) => dotted.to_string(),
-            (false, true) => dir.to_string(),
-            (false, false) => format!("{dir}/{dotted}"),
-        }
-    } else if !specifier.contains("://") && !specifier.is_empty() {
-        specifier.trim_end_matches('/').to_string()
-    } else {
-        return Vec::new();
-    };
-    // Python loads packages before modules, and implementation files before stubs.
-    ["/__init__.py", "/__init__.pyi", ".py", ".pyi"]
-        .iter()
-        .map(|suffix| {
-            if base.is_empty() {
-                suffix.trim_start_matches('/').to_string()
-            } else {
-                format!("{base}{suffix}")
-            }
-        })
-        .collect()
-}
-
-fn first_indexed<'a>(files: &LanguageFiles<'a>, candidates: &[String]) -> Option<&'a str> {
-    candidates
-        .iter()
-        .find_map(|candidate| files.paths.get(candidate.as_str()).copied())
-}
-
-/// The resolver's `discover_import_module` for Python: the specifier's own
-/// module, else one implicit source root (`src/pkg/util.py` for `pkg.util`).
-fn python_module<'a>(files: &LanguageFiles<'a>, source_file: &str, specifier: &str) -> Module<'a> {
-    let candidates = python_candidates(source_file, specifier);
-    let exact = first_indexed(files, &candidates);
-    if exact.is_some() || specifier.starts_with('.') {
-        return exact.map_or(Module::Missing, Module::Unique);
-    }
-    let mut found: Option<(&str, &'a str)> = None;
-    for candidate in &candidates {
-        let Some(stem) = Path::new(candidate).file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        for &file in files.by_stem.get(stem).into_iter().flatten() {
-            let Some(root) = file
-                .strip_suffix(candidate.as_str())
-                .filter(|prefix| prefix.ends_with('/'))
-            else {
-                continue;
-            };
-            // A directory already indexed as a module is a package, not an
-            // implicit source root for an absolute import.
-            let root_module = python_candidates(source_file, root.trim_end_matches('/'));
-            if first_indexed(files, &root_module).is_some() {
-                continue;
-            }
-            match found {
-                Some((previous, _)) if previous != root => return Module::Ambiguous,
-                Some(_) => {}
-                None => found = Some((root, file)),
-            }
-        }
-    }
-    found.map_or(Module::Missing, |(_, file)| Module::Unique(file))
-}
-
-/// The resolver's `discover_fqn_module`: the longest prefix of the import
-/// path that names a declared namespace or a conventionally placed file.
-fn fqn_module<'a>(
-    files: &LanguageFiles<'a>,
+/// One language's files of an [`ImportScope`], as [`discover_module`] reads
+/// them. [`ImportScope::module`] builds it for the language it is asked
+/// about, so each method's `language` is that one.
+struct ScopeIndex<'s, 'a> {
+    files: &'s LanguageFiles<'a>,
     graph: &'a ArchivedZeroCopyGraph,
     dirty: &'a [OverlayFileInput],
-    dirty_base: &FxHashSet<u32>,
-    specifier: &str,
-    extension: &str,
-) -> Module<'a> {
-    let normalized = specifier.trim_start_matches('\\').replace('\\', ".");
-    let mut name = normalized.as_str();
-    loop {
-        let declaring = namespace_files(files, graph, dirty, dirty_base, name);
-        if !declaring.is_empty() {
-            let member = normalized
-                .strip_prefix(name)
-                .unwrap_or("")
-                .trim_start_matches('.')
-                .split('.')
-                .next()
-                .unwrap_or("");
-            return Module::Namespace(
-                declaring
-                    .into_iter()
-                    .filter(|file| member.is_empty() || defines(graph, dirty, file, member))
-                    .collect::<Vec<_>>()
-                    .into(),
-            );
-        }
-        let candidate = format!("{}.{extension}", name.replace('.', "/"));
-        let stem = name.rsplit('.').next().unwrap_or(name);
-        let namespace = name.rsplit_once('.').map_or("", |(outer, _)| outer);
-        let placed: Vec<&'a str> = files
-            .by_stem
-            .get(stem)
-            .into_iter()
-            .flatten()
-            .copied()
-            .filter(|file| {
-                (*file == candidate
-                    || file
-                        .strip_suffix(candidate.as_str())
-                        .is_some_and(|root| root.ends_with('/')))
-                    && !files.declares_other_namespace(file, namespace)
-            })
-            .collect();
-        match placed.as_slice() {
-            [] => {}
-            [file] => return Module::Unique(file),
-            _ => return Module::Ambiguous,
-        }
-        let Some((outer, _)) = name.rsplit_once('.') else {
-            break;
-        };
-        name = outer;
-    }
-    Module::Missing
+    dirty_base: &'s FxHashSet<u32>,
 }
 
-/// Files of this language declaring namespace `name` (`.`-separated, as the
-/// resolver's `SymbolTable::namespace_files` keys PHP `\` names).
-fn namespace_files<'a>(
-    files: &LanguageFiles<'a>,
-    graph: &'a ArchivedZeroCopyGraph,
-    dirty: &'a [OverlayFileInput],
-    dirty_base: &FxHashSet<u32>,
-    name: &str,
-) -> Vec<&'a str> {
-    let mut found: Vec<&'a str> = Vec::new();
-    let mut seen: FxHashSet<&'a str> = FxHashSet::default();
-    let backslashed = name.replace('.', "\\");
-    let probes = std::iter::once(name).chain((backslashed != name).then_some(backslashed.as_str()));
-    for probe in probes {
-        for idx in graph.nodes_by_name(probe) {
-            let node = &graph.nodes[idx as usize];
-            if NodeKind::from(&node.kind) != NodeKind::Namespace || dirty_base.contains(&idx) {
-                continue;
+impl<'a> ModuleIndex<'a> for ScopeIndex<'_, 'a> {
+    fn module_file(&self, _language: Language, path: &str) -> Option<&'a str> {
+        self.files.paths.get(path).copied()
+    }
+
+    fn module_files_with_stem(
+        &self,
+        _language: Language,
+        stem: &str,
+    ) -> impl Iterator<Item = &'a str> {
+        self.files.by_stem.get(stem).into_iter().flatten().copied()
+    }
+
+    /// As the resolver's `SymbolTable::namespace_files` keys PHP `\` names.
+    fn namespace_declarers(&self, _language: Language, name: &str) -> Vec<&'a str> {
+        let graph = self.graph;
+        let mut found: Vec<&'a str> = Vec::new();
+        let mut seen: FxHashSet<&'a str> = FxHashSet::default();
+        let backslashed = name.replace('.', "\\");
+        let probes =
+            std::iter::once(name).chain((backslashed != name).then_some(backslashed.as_str()));
+        for probe in probes {
+            for idx in graph.nodes_by_name(probe) {
+                let node = &graph.nodes[idx as usize];
+                if NodeKind::from(&node.kind) != NodeKind::Namespace
+                    || self.dirty_base.contains(&idx)
+                {
+                    continue;
+                }
+                let Some(path) = graph
+                    .files
+                    .get(node.file_idx.to_native() as usize)
+                    .map(|f| f.path.resolve(&graph.string_pool))
+                else {
+                    continue;
+                };
+                if self.files.paths.contains(path) && seen.insert(path) {
+                    found.push(path);
+                }
             }
-            let Some(path) = graph
-                .files
-                .get(node.file_idx.to_native() as usize)
-                .map(|f| f.path.resolve(&graph.string_pool))
-            else {
-                continue;
-            };
-            if files.paths.contains(path) && seen.insert(path) {
+        }
+        for file in self.dirty {
+            let path = file.rel_path.as_str();
+            if self.files.paths.contains(path)
+                && !seen.contains(path)
+                && file
+                    .symbols
+                    .iter()
+                    .any(|s| s.kind == NodeKind::Namespace && s.name.replace('\\', ".") == name)
+            {
                 found.push(path);
             }
         }
+        found
     }
-    for file in dirty {
-        let path = file.rel_path.as_str();
-        if files.paths.contains(path)
-            && !seen.contains(path)
-            && file
-                .symbols
-                .iter()
-                .any(|s| s.kind == NodeKind::Namespace && s.name.replace('\\', ".") == name)
-        {
-            found.push(path);
+
+    /// A dirty file answers from its fresh parse, never from its stale base
+    /// nodes.
+    fn module_declares(&self, file: &str, name: &str) -> bool {
+        let graph = self.graph;
+        match self.dirty.iter().find(|d| d.rel_path == file) {
+            Some(fresh) => fresh.symbols.iter().any(|s| s.name == name),
+            None => graph.nodes_by_name(name).any(|idx| {
+                graph
+                    .files
+                    .get(graph.nodes[idx as usize].file_idx.to_native() as usize)
+                    .is_some_and(|f| f.path.resolve(&graph.string_pool) == file)
+            }),
         }
     }
-    found
-}
 
-/// Does `file` declare anything named `member`? A dirty file answers from its
-/// fresh parse, never from its stale base nodes.
-fn defines(
-    graph: &ArchivedZeroCopyGraph,
-    dirty: &[OverlayFileInput],
-    file: &str,
-    member: &str,
-) -> bool {
-    match dirty.iter().find(|d| d.rel_path == file) {
-        Some(fresh) => fresh.symbols.iter().any(|s| s.name == member),
-        None => graph.nodes_by_name(member).any(|idx| {
-            graph
-                .files
-                .get(graph.nodes[idx as usize].file_idx.to_native() as usize)
-                .is_some_and(|f| f.path.resolve(&graph.string_pool) == file)
-        }),
+    fn declares_other_namespace(&self, file: &str, namespace: &str) -> bool {
+        self.files.declares_other_namespace(file, namespace)
+    }
+
+    /// The layout candidates alone: the overlay reads no path alias here,
+    /// as it read none before discovery was shared.
+    fn for_each_module_candidate(
+        &self,
+        importer: &str,
+        specifier: &str,
+        visit: impl FnMut(&str) -> bool,
+    ) {
+        for_each_layout_candidate(importer, specifier, visit);
     }
 }
 
@@ -561,24 +453,5 @@ mod tests {
         assert_eq!(found, 3_000);
         println!("directory_profile cold_seconds={cold_seconds:.6} warm_seconds={:.6} total_seconds={:.6} found={found}",
             warm.elapsed().as_secs_f64(), total.elapsed().as_secs_f64());
-    }
-
-    #[test]
-    fn test_python_candidates_relative_and_absolute_match_resolver_order() {
-        assert_eq!(
-            python_candidates("a/b/app.py", "..x.y"),
-            [
-                "a/x/y/__init__.py",
-                "a/x/y/__init__.pyi",
-                "a/x/y.py",
-                "a/x/y.pyi"
-            ]
-        );
-        assert_eq!(
-            python_candidates("app.py", "."),
-            ["__init__.py", "__init__.pyi", ".py", ".pyi"]
-        );
-        assert_eq!(python_candidates("app.py", "pkg/util")[2], "pkg/util.py");
-        assert!(python_candidates("app.py", "").is_empty());
     }
 }

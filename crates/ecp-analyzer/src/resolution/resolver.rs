@@ -40,10 +40,11 @@
 use ecp_core::analyzer::csharp_access::{self, CallAccess};
 use ecp_core::analyzer::csharp_extension::{self, ReceiverSite};
 use ecp_core::analyzer::import_binding::{
-    extension_retry, fqn_extension, fqn_imported_name, fqn_language, fqn_type_path, import_binding,
-    import_family, import_member_fallback, may_suppress, module_head, retry_name,
+    extension_retry, fqn_imported_name, fqn_language, fqn_type_path, import_binding, import_family,
+    import_member_fallback, may_suppress, module_head, retry_name,
 };
 use ecp_core::analyzer::ladder::{self, split_qualifier, CallPick, FieldRead};
+use ecp_core::analyzer::module_discovery::{self, Module, ModuleIndex};
 use ecp_core::analyzer::outcome::{NoEdge, Resolution, Tier};
 use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::reexport::{
@@ -72,14 +73,6 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 pub type NodeId = u32;
 
-#[derive(Clone)]
-enum IndexedModule {
-    Missing,
-    Unique(Arc<str>),
-    Ambiguous,
-    Namespace(Arc<[Arc<str>]>),
-}
-
 /// One pass of the import-member tier over the explicit or the wildcard
 /// imports.
 enum MemberHit<'i> {
@@ -93,7 +86,7 @@ enum MemberHit<'i> {
 
 type ModuleCache = FxHashMap<
     std::mem::Discriminant<Language>,
-    FxHashMap<PathBuf, FxHashMap<String, IndexedModule>>,
+    FxHashMap<PathBuf, FxHashMap<String, Module<Arc<str>>>>,
 >;
 
 /// What the import tier reads to follow a module's re-export one hop: the
@@ -258,9 +251,9 @@ impl ModuleFacts for IndexFacts<'_, '_> {
             .0
             .import_module_file(Path::new(importer), specifier, Language::Python)
         {
-            IndexedModule::Unique(file) => PyModule::Unique(file),
-            IndexedModule::Ambiguous => PyModule::Ambiguous,
-            IndexedModule::Missing | IndexedModule::Namespace(_) => PyModule::Missing,
+            Module::Unique(file) => PyModule::Unique(file),
+            Module::Ambiguous => PyModule::Ambiguous,
+            Module::Missing | Module::Namespace(_) => PyModule::Missing,
         }
     }
 
@@ -272,6 +265,59 @@ impl ModuleFacts for IndexFacts<'_, '_> {
     ) {
         self.0
             .for_each_candidate(Path::new(importer), specifier, |candidate| visit(candidate));
+    }
+}
+
+/// The index's [`ModuleIndex`]: the symbol table's files, and the resolver's
+/// candidates (path aliases, Rust module tree).
+impl<'a> ModuleIndex<'a> for IndexFacts<'_, 'a> {
+    fn module_file(&self, language: Language, path: &str) -> Option<&'a str> {
+        if Language::from_normalized_path(path) != language {
+            return None;
+        }
+        let table: &'a SymbolTable = self.0.symbol_table;
+        table.indexed_file_path(path)
+    }
+
+    fn module_files_with_stem(
+        &self,
+        language: Language,
+        stem: &str,
+    ) -> impl Iterator<Item = &'a str> {
+        let table: &'a SymbolTable = self.0.symbol_table;
+        table
+            .module_files_by_stem(stem)
+            .filter(move |file| Language::from_normalized_path(file) == language)
+    }
+
+    fn namespace_declarers(&self, language: Language, name: &str) -> Vec<&'a str> {
+        let table: &'a SymbolTable = self.0.symbol_table;
+        table
+            .namespace_files(name)
+            .iter()
+            .map(String::as_str)
+            .filter(|file| Language::from_normalized_path(file) == language)
+            .collect()
+    }
+
+    fn module_declares(&self, file: &str, name: &str) -> bool {
+        self.0.symbol_table.lookup_in_file(file, name).is_some()
+    }
+
+    fn declares_other_namespace(&self, file: &str, namespace: &str) -> bool {
+        self.0
+            .symbol_table
+            .declares_other_namespace(file, namespace)
+    }
+
+    fn for_each_module_candidate(
+        &self,
+        importer: &str,
+        specifier: &str,
+        visit: impl FnMut(&str) -> bool,
+    ) {
+        self.0
+            .for_each_candidate(Path::new(importer), specifier, visit);
     }
 }
 
@@ -479,17 +525,16 @@ impl<'a> Resolver<'a> {
         for_each_specifier_candidate(source_file, specifier, &self.path_aliases, visit);
     }
 
-    /// Find a module beneath an indexed source root without guessing its member.
-    /// Relative specifiers stay anchored to their caller; absolute module paths
-    /// may have a source-root prefix, but multiple matching roots are ambiguous.
-    /// Only files of `language` count: the caller's, or for the suppression
-    /// check another language of its import family.
-    fn import_module_file(
+    /// [`module_discovery::discover_module`] over this index, memoized per
+    /// language, caller directory (relative specifiers only) and specifier.
+    /// `pub` for `crates/ecp-cli/tests/module_discovery_parity.rs`, which
+    /// feeds one file set to this and to the overlay's `ImportScope`.
+    pub fn import_module_file(
         &self,
         source_file: &Path,
         specifier: &str,
         language: Language,
-    ) -> IndexedModule {
+    ) -> Module<Arc<str>> {
         let directory = if specifier.starts_with('.') {
             source_file.parent().unwrap_or(Path::new(""))
         } else {
@@ -512,176 +557,16 @@ impl<'a> Resolver<'a> {
             .entry(directory.to_path_buf())
             .or_default()
             .entry(specifier.to_string())
-            .or_insert_with(|| self.discover_import_module(source_file, specifier, language))
-            .clone()
-    }
-
-    fn for_each_import_candidate(
-        &self,
-        source_file: &Path,
-        specifier: &str,
-        language: Language,
-        mut visit: impl FnMut(&str) -> bool,
-    ) {
-        if language == Language::Python {
-            let mut verbatim = true;
-            self.for_each_candidate(source_file, specifier, |base| {
-                if verbatim {
-                    verbatim = false;
-                    return true;
-                }
-                crate::python::spec::module_candidates(base, &mut visit);
-                false
-            });
-        } else {
-            self.for_each_candidate(source_file, specifier, visit);
-        }
-    }
-
-    fn first_indexed_module(
-        &self,
-        source_file: &Path,
-        specifier: &str,
-        language: Language,
-    ) -> Option<Arc<str>> {
-        let mut found = None;
-        self.for_each_import_candidate(source_file, specifier, language, |candidate| {
-            if Language::from_normalized_path(candidate) == language
-                && self.symbol_table.has_indexed_file(candidate)
-            {
-                found = Some(Arc::from(candidate));
-                false
-            } else {
-                true
-            }
-        });
-        found
-    }
-
-    fn discover_import_module(
-        &self,
-        source_file: &Path,
-        specifier: &str,
-        language: Language,
-    ) -> IndexedModule {
-        if let Some(extension) = fqn_extension(language) {
-            return self.discover_fqn_module(specifier, language, extension);
-        }
-        let exact = self.first_indexed_module(source_file, specifier, language);
-        if exact.is_some() || specifier.starts_with('.') {
-            return exact.map_or(IndexedModule::Missing, IndexedModule::Unique);
-        }
-        let mut found: Option<(&str, Arc<str>)> = None;
-        let mut ambiguous = false;
-        self.for_each_import_candidate(source_file, specifier, language, |candidate| {
-            if Language::from_normalized_path(candidate) != language {
-                return true;
-            }
-            let Some(stem) = Path::new(candidate).file_stem().and_then(|s| s.to_str()) else {
-                return true;
-            };
-            for file in self.symbol_table.module_files_by_stem(stem) {
-                let Some(root) = file
-                    .strip_suffix(candidate)
-                    .filter(|prefix| prefix.ends_with('/'))
-                else {
-                    continue;
-                };
-                // A directory already indexed as a module is a package,
-                // not an implicit source root for an absolute import.
-                if self
-                    .first_indexed_module(source_file, root.trim_end_matches('/'), language)
-                    .is_some()
-                {
-                    continue;
-                }
-                if let Some((previous_root, _)) = &found {
-                    if *previous_root != root {
-                        ambiguous = true;
-                        return false;
-                    }
-                    // Candidate order already selected this root's package or implementation.
-                    continue;
-                }
-                found = Some((root, Arc::from(file)));
-            }
-            true
-        });
-        if ambiguous {
-            IndexedModule::Ambiguous
-        } else {
-            found.map_or(IndexedModule::Missing, |(_, file)| {
-                IndexedModule::Unique(file)
+            .or_insert_with(|| {
+                module_discovery::discover_module(
+                    &IndexFacts(self),
+                    &normalize_source_path(source_file),
+                    specifier,
+                    language,
+                )
+                .map(|&file| Arc::from(file))
             })
-        }
-    }
-
-    fn discover_fqn_module(
-        &self,
-        specifier: &str,
-        language: Language,
-        extension: &str,
-    ) -> IndexedModule {
-        let normalized = specifier.trim_start_matches('\\').replace('\\', ".");
-        let mut name = normalized.as_str();
-        loop {
-            let files: Vec<Arc<str>> = self
-                .symbol_table
-                .namespace_files(name)
-                .iter()
-                .filter(|file| Language::from_normalized_path(file) == language)
-                .map(|file| Arc::from(file.as_str()))
-                .collect();
-            if !files.is_empty() {
-                let member = normalized
-                    .strip_prefix(name)
-                    .unwrap_or("")
-                    .trim_start_matches('.')
-                    .split('.')
-                    .next()
-                    .unwrap_or("");
-                return IndexedModule::Namespace(
-                    files
-                        .into_iter()
-                        .filter(|file| {
-                            member.is_empty()
-                                || self.symbol_table.lookup_in_file(file, member).is_some()
-                        })
-                        .collect::<Vec<_>>()
-                        .into(),
-                );
-            }
-            let candidate = format!("{}.{}", name.replace('.', "/"), extension);
-            let stem = name.rsplit('.').next().unwrap_or(name);
-            // A placed file that declares another namespace is a namesake:
-            // `use InvalidArgumentException;` is not `Lib\Testing`'s class.
-            let namespace = name.rsplit_once('.').map_or("", |(outer, _)| outer);
-            let files: Vec<Arc<str>> = self
-                .symbol_table
-                .module_files_by_stem(stem)
-                .filter(|file| {
-                    Language::from_normalized_path(file) == language
-                        && (*file == candidate
-                            || file
-                                .strip_suffix(&candidate)
-                                .is_some_and(|root| root.ends_with('/')))
-                        && !self.symbol_table.declares_other_namespace(file, namespace)
-                })
-                .map(Arc::from)
-                .collect();
-            if !files.is_empty() {
-                return if files.len() == 1 {
-                    IndexedModule::Unique(files[0].clone())
-                } else {
-                    IndexedModule::Ambiguous
-                };
-            }
-            let Some((parent, _)) = name.rsplit_once('.') else {
-                break;
-            };
-            name = parent;
-        }
-        IndexedModule::Missing
+            .clone()
     }
 
     /// The module tree's file for the `crate` / `self` / `super`-anchored
@@ -1497,7 +1382,7 @@ impl<'a> Resolver<'a> {
                     .lookup_member_in_file(file, binding.name, target, binding.owner)
             };
             let hit = match self.import_module_file(source_file, &import.source, language) {
-                IndexedModule::Unique(module) => match in_file(&module) {
+                Module::Unique(module) => match in_file(&module) {
                     Some(node_id) => Some((node_id, None)),
                     None => reexport::python_import_reexport(
                         &IndexFacts(self),
@@ -1508,13 +1393,13 @@ impl<'a> Resolver<'a> {
                     )
                     .map(|node_id| (node_id, Some(module))),
                 },
-                IndexedModule::Namespace(files) => {
+                Module::Namespace(files) => {
                     let mut hits = files.iter().filter_map(|file| in_file(file));
                     hits.next()
                         .filter(|_| hits.next().is_none())
                         .map(|node_id| (node_id, None))
                 }
-                IndexedModule::Missing | IndexedModule::Ambiguous => None,
+                Module::Missing | Module::Ambiguous => None,
             };
             let Some((node_id, barrel)) = hit else {
                 continue;
@@ -1578,7 +1463,7 @@ impl<'a> Resolver<'a> {
             && import_family(language).all(|family| {
                 matches!(
                     self.import_module_file(source_file, &import.source, family),
-                    IndexedModule::Missing
+                    Module::Missing
                 )
             })
     }
@@ -2610,7 +2495,7 @@ impl<'a> Resolver<'a> {
             // candidate probe below.
             let language = Language::from_normalized_path(&source_file_str);
             if exported == "*" && import_member_fallback(language) && !fqn_language(language) {
-                if let IndexedModule::Unique(file) =
+                if let Module::Unique(file) =
                     self.import_module_file(source_file, &import.source, language)
                 {
                     return Some(file.to_string());
@@ -3101,13 +2986,11 @@ impl<'a> Resolver<'a> {
                     // The file declares the name under another owner, or
                     // twice: the import's type is not this one, and a
                     // global namesake would be no better.
-                    IndexedModule::Unique(file)
-                        if !st.owner_path_agrees(&file, fqn_type_path(import)) =>
-                    {
+                    Module::Unique(file) if !st.owner_path_agrees(&file, fqn_type_path(import)) => {
                         return TypeCandidates::None;
                     }
-                    IndexedModule::Unique(file) => in_file(&file),
-                    IndexedModule::Namespace(files) => {
+                    Module::Unique(file) => in_file(&file),
+                    Module::Namespace(files) => {
                         let mut hits = files.iter().filter_map(|file| in_file(file));
                         hits.next().filter(|_| hits.next().is_none())
                     }
@@ -3116,13 +2999,13 @@ impl<'a> Resolver<'a> {
                     // same-named project class elsewhere is not this receiver.
                     // Kotlin imports never matched before, so only a proven
                     // external one stops its global lookup.
-                    IndexedModule::Missing
+                    Module::Missing
                         if language != Language::Kotlin
                             || self.import_is_external(source_file, import, language) =>
                     {
                         return TypeCandidates::External;
                     }
-                    IndexedModule::Missing | IndexedModule::Ambiguous => None,
+                    Module::Missing | Module::Ambiguous => None,
                 };
                 if let Some(id) = hit {
                     return TypeCandidates::Unique(id, exported);

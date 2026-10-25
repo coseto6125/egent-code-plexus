@@ -1679,6 +1679,13 @@ impl SymbolTable {
         self.file_scoped.contains_key(file_path)
     }
 
+    /// [`Self::has_indexed_file`]'s path, borrowed from the table.
+    pub(crate) fn indexed_file_path(&self, file_path: &str) -> Option<&str> {
+        self.file_scoped
+            .get_key_value(file_path)
+            .map(|(path, _)| path.as_str())
+    }
+
     /// The name `node_id` is registered under in its file, or, for a type
     /// [`Self::register_arity_sibling`] filed, its first's. The index keeps no
     /// id → name map; this scans the names of one file. The receiver-typing
