@@ -275,7 +275,7 @@ Two tiers: **agent commands** at top level (query / refactor / verify) and **adm
 | `cypher '<query>'` | openCypher escape hatch; `m.content` returns source body |
 | `summary` | Registry overview, framework coverage, LLM-actionable blind-spot catalog, graph freshness |
 | `routes [<path>]` | HTTP route enumeration (declarative + imperative); with `<path>`: handler + caller chain |
-| `contracts` | Cross-repo API contract inventory (routes / queue / RPC) |
+| `contracts` | HTTP route contracts: routes paired with their fetch callers, across repos (queue / RPC not yet) |
 | `processes [trace <pattern>]` | Detected execution-flow nodes; with `trace`: the step sequence in real order |
 | `diff` | Resolver-delta: binding tier-degradation + route / contract changes |
 | `tool-map` | External HTTP / DB / Redis / queue call sites via import-binding analysis |

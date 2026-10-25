@@ -1,6 +1,6 @@
 //! Integration tests for `ecp contracts`.
 //!
-//! v1 scope: structural shape + multi-repo gate + flag surface.
+//! v1 scope: structural shape + error gate + flag surface.
 //! A real 2-repo happy-path fixture is left as an #[ignore] skeleton.
 
 use std::process::Command;
@@ -11,38 +11,34 @@ fn ecp() -> Command {
 
 // ── Gate: single / zero repos ────────────────────────────────────────────────
 
-/// With --repo . (path not registered → 0 repos or 1 repo), the command
-/// should fail with a helpful message mentioning the cross-repo requirement.
+/// Stands for: `contracts` on a directory that is not a git repo gives a
+/// non-zero exit with a reason, never an empty success. The command used to
+/// demand two or more repos; since P8c one repo works, so the fixture is a
+/// plain temp dir instead of the test binary's own crate directory.
 #[test]
-fn contracts_single_repo_errors() {
+fn contracts_unindexable_repo_errors() {
     let home_tmp = tempfile::tempdir().unwrap();
+    let work_tmp = tempfile::tempdir().unwrap();
     let output = ecp()
         .args(["contracts", "--repo", "."])
+        .current_dir(work_tmp.path())
         .env("HOME", home_tmp.path())
+        .env_remove("ECP_HOME")
         .output()
         .unwrap();
 
-    // Must exit non-zero.
     assert!(
         !output.status.success(),
-        "expected non-zero exit for single-repo contracts"
+        "expected non-zero exit for a non-git directory"
     );
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let combined = format!("{stderr}\n{stdout}");
-
-    // Should contain a hint about the multi-repo requirement.
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
     assert!(
-        combined.contains("≥2")
-            || combined.contains("multi")
-            || combined.contains("cross")
-            || combined.contains("at least")
-            || combined.contains("more than one")
-            || combined.contains("not registered")
-            || combined.contains("not in registry")
-            || combined.contains("contracts requires"),
-        "expected helpful error for single-repo / unregistered path:\n{combined}"
+        !combined.trim().is_empty(),
+        "expected an error message, got nothing"
     );
 }
 

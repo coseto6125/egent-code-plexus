@@ -16,7 +16,7 @@ user indexed).
 ### scope_pref = group-heavy
 
 - Run `ecp group find <group> "<symbol>" --merge rrf` to do cross-repo BM25 search with RRF fusion.
-- Run `ecp group contracts <group>` to inventory routes / queue / RPC contracts across the group.
+- Run `ecp group contracts <group>` to inventory HTTP and gRPC contracts across the group.
 - Run `ecp group impact <group> --baseline origin/main` to see the full blast radius of a multi-repo change before merging.
 
 ### scope_pref = single-repo

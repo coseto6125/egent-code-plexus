@@ -56,7 +56,7 @@ pub enum Commands {
     Summary(commands::summary::SummaryArgs),
     /// List HTTP routes; with path, show handler + caller chain
     Routes(commands::routes::RoutesArgs),
-    /// Cross-repo API contracts inventory (routes / queue / RPC)
+    /// HTTP route contracts: routes paired with their fetch callers, across repos (queue / RPC not implemented)
     Contracts(commands::contracts::ContractsArgs),
     /// Edge-level resolver delta — binding tier-degradation (silent break), route / contract changes.
     ///

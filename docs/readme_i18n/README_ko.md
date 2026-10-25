@@ -222,7 +222,7 @@ ecp impact --literal session_meta.json
 | `cypher '<query>'` | openCypher 이스케이프 해치; `m.content`는 소스 본문 반환 |
 | `summary` | 레지스트리 개요, 프레임워크 커버리지, LLM 실행 가능한 블라인드 스팟 카탈로그, 그래프 신선도 |
 | `routes [<path>]` | HTTP 라우트 열거 (선언적 + 명령적); `<path>` 포함 시: 핸들러 + 호출자 체인 |
-| `contracts` | 크로스 리포 API 컨트랙트 인벤토리 (라우트 / 큐 / RPC) |
+| `contracts` | HTTP 라우트 컨트랙트: 라우트와 이를 호출하는 fetch를 짝지음, 리포 간 지원 (큐 / RPC는 아직 미지원) |
 | `diff` | 리졸버 델타: 바인딩 계층 저하 + 라우트 / 컨트랙트 변경 |
 | `tool-map` | 임포트 바인딩 분석을 통한 외부 HTTP / DB / Redis / 큐 콜 사이트 |
 | `shape-check` | HTTP 소비자 접근 패턴과 Route 응답 형태 간의 드리프트 |

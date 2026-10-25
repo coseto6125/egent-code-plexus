@@ -222,7 +222,7 @@ Dois níveis: **comandos de agente** no nível superior (consultar / refatorar /
 | `cypher '<query>'` | Saída de escape openCypher; `m.content` retorna o corpo do código-fonte |
 | `summary` | Visão geral do registro, cobertura de frameworks, catálogo de blind-spots acionável por LLM, atualidade do grafo |
 | `routes [<path>]` | Enumeração de rotas HTTP (declarativa + imperativa); com `<path>`: cadeia handler + chamador |
-| `contracts` | Inventário de contratos de API entre repositórios (routes / queue / RPC) |
+| `contracts` | Contratos de rotas HTTP: rotas pareadas com os fetch que as chamam, entre repositórios (queue / RPC ainda não) |
 | `diff` | Delta do resolvedor: degradação de tier de binding + mudanças em rotas / contratos |
 | `tool-map` | Pontos de chamada externos HTTP / DB / Redis / queue via análise de binding de importação |
 | `shape-check` | Desvio entre padrões de acesso do consumidor HTTP e formatos de resposta de Route |

@@ -20,7 +20,7 @@ description: Symbol-level code analysis, blast-radius impact, cross-repo API con
 | Arbitrary graph query / source body | `ecp cypher "MATCH (m:Method) WHERE m.name='X' RETURN m,m" --repo .` (positional; `--query` alias. Single-repo. Grammar below) |
 | Rename a symbol | Find the sites with `ecp impact old --repo .` (and `ecp find old --repo .`), then rename with LSP or edit them. **Never blind find-replace.** |
 | HTTP route → handler → upstream callers | `ecp routes <path?> --repo .` (no path = list all) |
-| Cross-repo API contracts (routes / queue / RPC) | `ecp contracts --repo @all` (needs ≥2 repos in group) |
+| HTTP route contracts (route ↔ fetch caller), one or many repos | `ecp contracts --repo @all` (queue / RPC not implemented: non-zero exit) |
 | HTTP consumer → Route shape drift | `ecp shape-check [--route <path>] --repo .` (no `--route` = scan all; drift = consumer reads key absent from Route's response/error keys) |
 | Binding / route / contract delta — edge view | `ecp diff --section <bindings\|routes\|contracts\|all> --baseline <ref> --repo .` (`--baseline` required: branch / tag / SHA / `HEAD~N` / `PR/<n>`; multi via `,`; `--verbose` full lists) |
 | Registry health / freshness / frameworks / blind spots | `ecp summary [--repo @all --detailed]` (was `ecp coverage`, aliased one release) |
