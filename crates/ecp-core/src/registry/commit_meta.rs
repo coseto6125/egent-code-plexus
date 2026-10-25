@@ -129,7 +129,14 @@ use std::path::Path;
 /// receiver keeps its type; a generic method call records the method name
 /// without its type arguments. Overlay fragments of schema36 are ignored by
 /// their fingerprint.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema37");
+/// schema38: a C# partial attribute class groups with its parts; a chained
+/// C# member call takes the access rule; a keyword-type receiver is a static
+/// call; a Color-Color receiver admits static and instance members; an
+/// inline route handler is recorded at its argument's span
+/// (`Unbound::Inline`), so a middleware closure never serves the route; an
+/// echo route's handler is the argument after the path; a Spring mapping is
+/// dropped only on an HTTP client (`@FeignClient`, `@HttpExchange`).
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema38");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

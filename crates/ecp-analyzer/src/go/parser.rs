@@ -365,7 +365,6 @@ impl LanguageProvider for GoProvider {
         let idx_route_call = self.query.capture_index_for_name("route.call");
         let idx_route_method = self.query.capture_index_for_name("route.method");
         let idx_route_path = self.query.capture_index_for_name("route.path");
-        let idx_route_handler = self.query.capture_index_for_name("route.handler");
 
         let idx_function_anonymous = self.query.capture_index_for_name("function.anonymous");
 
@@ -374,11 +373,14 @@ impl LanguageProvider for GoProvider {
             .capture_index_for_name("blind.reflect_method_by_name");
         let idx_blind_plugin_open = self.query.capture_index_for_name("blind.plugin_open");
 
-        // Pending framework refs for gin / echo. Collected during the
-        // match loop; only emitted after we confirm an import gate match
-        // (so we don't pollute framework_refs when net/http or chi is used).
-        let mut pending_gin: Vec<(String, (u32, u32, u32, u32))> = Vec::new();
-        let mut pending_echo: Vec<(String, (u32, u32, u32, u32))> = Vec::new();
+        // The argument list of each route registration, by its index in
+        // `routes`. Which argument is the handler depends on the framework
+        // the file imports, so the handler and the gin / echo framework ref
+        // are read after the match loop.
+        let mut route_arguments: Vec<(usize, Option<tree_sitter::Node>)> = Vec::new();
+        // One route per registration call: the optional handler capture
+        // can match one call more than once.
+        let mut route_calls: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
         let idx_field_name = self.query.capture_index_for_name("field.name");
         let idx_field_type = self.query.capture_index_for_name("field.type");
@@ -424,7 +426,6 @@ impl LanguageProvider for GoProvider {
             let mut route_method_node = None;
             let mut route_path_node = None;
             let mut route_span_node = None;
-            let mut route_handler_node: Option<tree_sitter::Node> = None;
 
             // Buffers for per-name struct-field emission. `X, Y int` produces
             // multiple `@field.name` captures + one `@field.type`; we collect
@@ -504,8 +505,6 @@ impl LanguageProvider for GoProvider {
                     route_method_node = Some(cap.node);
                 } else if cap_idx == idx_route_path {
                     route_path_node = Some(cap.node);
-                } else if cap_idx == idx_route_handler {
-                    route_handler_node = Some(cap.node);
                 } else if cap_idx == idx_field_name {
                     // One `field_declaration` can declare multiple names
                     // (`X, Y int`), so buffer name nodes here and emit one
@@ -857,50 +856,31 @@ impl LanguageProvider for GoProvider {
                 if let (Some(m_node), Some(p_node), Some(span_node)) =
                     (route_method_node, route_path_node, route_span_node)
                 {
-                    let method_str =
-                        std::str::from_utf8(&source[m_node.start_byte()..m_node.end_byte()])
-                            .unwrap_or("")
-                            .to_string();
-                    let path_raw =
-                        std::str::from_utf8(&source[p_node.start_byte()..p_node.end_byte()])
-                            .unwrap_or("");
-                    let path_str = path_raw.trim_matches(|c| c == '"' || c == '`').to_string();
-                    let start = span_node.start_position();
-                    let end = span_node.end_position();
-
-                    // gin and echo run the last argument as the handler;
-                    // the ones before it are middleware.
-                    let handler = crate::route_detector::last_argument_handler(
-                        span_node.child_by_field_name("arguments"),
-                        source,
-                        &["func_literal"],
-                        &["identifier", "selector_expression"],
-                    );
-                    routes.push(ecp_core::analyzer::types::RawRoute {
-                        method: method_str,
-                        path: path_str,
-                        handler,
-                        span: (
-                            start.row as u32,
-                            start.column as u32,
-                            end.row as u32,
-                            end.column as u32,
-                        ),
-                        scope: None,
-                    });
-
-                    // Stage a framework_ref for gin / echo. We can't tell
-                    // them apart from the route shape alone, so push to
-                    // both pending lists; the import-gate pass below picks
-                    // the matching one (or drops both if neither imported).
-                    if let Some(h_node) = route_handler_node {
-                        if let Ok(handler_name) =
-                            std::str::from_utf8(&source[h_node.start_byte()..h_node.end_byte()])
-                        {
-                            let span = node_span(&h_node);
-                            pending_gin.push((handler_name.to_string(), span));
-                            pending_echo.push((handler_name.to_string(), span));
-                        }
+                    if route_calls.insert(span_node.id()) {
+                        let method_str =
+                            std::str::from_utf8(&source[m_node.start_byte()..m_node.end_byte()])
+                                .unwrap_or("")
+                                .to_string();
+                        let path_raw =
+                            std::str::from_utf8(&source[p_node.start_byte()..p_node.end_byte()])
+                                .unwrap_or("");
+                        let path_str = path_raw.trim_matches(|c| c == '"' || c == '`').to_string();
+                        let start = span_node.start_position();
+                        let end = span_node.end_position();
+                        route_arguments
+                            .push((routes.len(), span_node.child_by_field_name("arguments")));
+                        routes.push(ecp_core::analyzer::types::RawRoute {
+                            method: method_str,
+                            path: path_str,
+                            handler: None,
+                            span: (
+                                start.row as u32,
+                                start.column as u32,
+                                end.row as u32,
+                                end.column as u32,
+                            ),
+                            scope: None,
+                        });
                     }
                 }
             }
@@ -1011,34 +991,51 @@ impl LanguageProvider for GoProvider {
         // owner_class is set at emit time via receiver_type_from_method_decl().
         // No post-loop needed; recv_map is still used for call-site resolution.
 
-        // Gate-and-emit pending gin / echo framework refs. Both lists hold
-        // the same handlers (we couldn't tell them apart at capture time);
-        // only one matches an import gate, so at most one set is emitted.
+        // The handler argument of each route, once the imports name the
+        // framework. Echo's `GET(path, h, m ...MiddlewareFunc)` takes the
+        // handler right after the path; gin's `GET(path, handlers...)` and
+        // any other router run the last argument, after the middleware.
+        // A gin or echo route also stages a framework ref to a handler that
+        // the registration names by a bare identifier.
+        let gin = has_import_from(&imports, GIN_REQUIRED);
+        let echo = !gin && has_import_from(&imports, ECHO_REQUIRED);
         let mut framework_refs: Vec<RawFrameworkRef> = Vec::new();
-        if has_import_from(&imports, GIN_REQUIRED) {
-            for (target_name, span) in &pending_gin {
-                let source_name = enclosing_function_name(&nodes, *span)
-                    .unwrap_or_else(|| MODULE_LEVEL_SOURCE.to_string());
-                framework_refs.push(RawFrameworkRef {
-                    source_name,
-                    target_name: target_name.clone(),
-                    confidence: framework_confidence::GIN_ROUTE,
-                    reason: "gin-route".to_string(),
-                    span: *span,
-                });
+        for (route, arguments) in route_arguments {
+            let arguments = crate::route_detector::call_arguments(arguments);
+            let handler_arg = if echo {
+                arguments.get(1)
+            } else {
+                arguments.last()
+            };
+            let Some(&handler_arg) = handler_arg else {
+                continue;
+            };
+            routes[route].handler = crate::route_detector::argument_handler(
+                handler_arg,
+                source,
+                &["func_literal"],
+                &["identifier", "selector_expression"],
+            );
+            if !(gin || echo) || handler_arg.kind() != "identifier" {
+                continue;
             }
-        } else if has_import_from(&imports, ECHO_REQUIRED) {
-            for (target_name, span) in &pending_echo {
-                let source_name = enclosing_function_name(&nodes, *span)
-                    .unwrap_or_else(|| MODULE_LEVEL_SOURCE.to_string());
-                framework_refs.push(RawFrameworkRef {
-                    source_name,
-                    target_name: target_name.clone(),
-                    confidence: framework_confidence::ECHO_ROUTE,
-                    reason: "echo-route".to_string(),
-                    span: *span,
-                });
-            }
+            let Ok(target_name) = handler_arg.utf8_text(source) else {
+                continue;
+            };
+            let span = node_span(&handler_arg);
+            let (confidence, reason) = if gin {
+                (framework_confidence::GIN_ROUTE, "gin-route")
+            } else {
+                (framework_confidence::ECHO_ROUTE, "echo-route")
+            };
+            framework_refs.push(RawFrameworkRef {
+                source_name: enclosing_function_name(&nodes, span)
+                    .unwrap_or_else(|| MODULE_LEVEL_SOURCE.to_string()),
+                target_name: target_name.to_string(),
+                confidence,
+                reason: reason.to_string(),
+                span,
+            });
         }
 
         let raw_function_metas =

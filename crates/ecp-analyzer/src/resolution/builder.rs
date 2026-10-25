@@ -1890,9 +1890,10 @@ fn pass1_5_extract_routes(
                     (None, Some(RawEndpoint::Unresolved(Unbound::Named(name)))) => {
                         HandlerFact::Unresolved(name.as_str().to_string())
                     }
-                    (None, Some(RawEndpoint::Unresolved(Unbound::Anonymous))) => {
-                        HandlerFact::Inline
-                    }
+                    (
+                        None,
+                        Some(RawEndpoint::Unresolved(Unbound::Anonymous | Unbound::Inline(_))),
+                    ) => HandlerFact::Inline,
                     (None, Some(RawEndpoint::File) | None) => HandlerFact::Absent,
                 };
                 facts.push((route_idx, fact));

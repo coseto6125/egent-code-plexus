@@ -1,6 +1,7 @@
 //! Go route identity: one Route node per (file, verb, path) (C1
-//! `RouteKey`), and the handler edge starts at the handler the gin / echo
-//! registration passes last (C4 `RawRoute.handler`).
+//! `RouteKey`), and the handler edge starts at the handler the registration
+//! passes: gin's last argument, echo's argument after the path (C4
+//! `RawRoute.handler`).
 
 use ecp_analyzer::go::parser::GoProvider;
 use ecp_analyzer::resolution::builder::GraphBuilder;
@@ -168,4 +169,92 @@ func main() {
             ("second".into(), 9, "named", "call-arg".into()),
         ]
     );
+}
+
+/// Echo's handler is the argument after the path, and the middleware
+/// follow it: `e.GET("/x", handle, auth)` binds `handle`. With no
+/// middleware the second argument is also the last; with the path alone
+/// there is no handler. On HEAD the parser took
+/// the last argument for every framework, so `auth` served `GET /x`.
+#[test]
+fn test_route_echo_handler_after_path_binds_before_middleware() {
+    let src = r#"package main
+
+import "github.com/labstack/echo/v4"
+
+func handle(c echo.Context) error {
+	return c.String(200, "x")
+}
+
+func auth(next echo.HandlerFunc) echo.HandlerFunc {
+	return next
+}
+
+func main() {
+	e := echo.New()
+	e.GET("/x", handle, auth)
+	e.GET("/plain", handle)
+	e.GET("/none")
+}
+"#;
+    let g = build("main.go", src);
+    assert_eq!(
+        handlers(&g, "GET /x"),
+        vec![("handle".into(), 5, "named", "call-arg".into())]
+    );
+    assert_eq!(
+        handlers(&g, "GET /plain"),
+        vec![("handle".into(), 5, "named", "call-arg".into())]
+    );
+    // A registration with the path alone has no handler argument.
+    assert_eq!(handlers(&g, "GET /none"), Vec::new());
+}
+
+/// Gin runs the last argument as the handler, after the middleware:
+/// `r.GET("/x", auth, handle)` binds `handle`, never `auth`.
+#[test]
+fn test_route_gin_middleware_before_handler_binds_last() {
+    let src = r#"package main
+
+import "github.com/gin-gonic/gin"
+
+func auth(c *gin.Context) {
+	c.Next()
+}
+
+func handle(c *gin.Context) {
+	c.JSON(200, nil)
+}
+
+func main() {
+	r := gin.Default()
+	r.GET("/x", auth, handle)
+}
+"#;
+    let g = build("main.go", src);
+    assert_eq!(
+        handlers(&g, "GET /x"),
+        vec![("handle".into(), 9, "named", "call-arg".into())]
+    );
+}
+
+/// A gin middleware closure before an empty inline handler never serves
+/// the route: the middleware calls `c.Next()`, so it has a closure node,
+/// and the empty handler has none. The route gets no handler edge and no
+/// BlindSpot. On HEAD the binding took the one closure node anywhere in
+/// the registration, so the middleware got a `HandlesRoute` edge.
+#[test]
+fn test_route_gin_middleware_closure_before_empty_handler_binds_nothing() {
+    let src = r#"package main
+
+import "github.com/gin-gonic/gin"
+
+func main() {
+	r := gin.Default()
+	r.GET("/x", func(c *gin.Context) { c.Next() }, func(c *gin.Context) {})
+}
+"#;
+    let g = build("main.go", src);
+    assert_eq!(handlers(&g, "GET /x"), Vec::new());
+    assert_eq!(handler_spot_kinds(&g), Vec::<String>::new());
 }

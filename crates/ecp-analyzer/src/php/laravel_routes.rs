@@ -711,8 +711,9 @@ fn singular(segment: &str) -> String {
 }
 
 /// The handler of a route registration's action argument: a closure or
-/// arrow function written in place is anonymous; any other argument names
-/// the controller action [`route_action`] reads.
+/// arrow function written in place is inline at its own span, so binding
+/// takes only the closure node it became; any other argument names the
+/// controller action [`route_action`] reads.
 fn route_handler(
     action: Node,
     controller: Option<&str>,
@@ -721,7 +722,7 @@ fn route_handler(
 ) -> Option<RawEndpoint> {
     match action.kind() {
         "anonymous_function" | "arrow_function" => {
-            Some(RawEndpoint::Unresolved(Unbound::Anonymous))
+            Some(RawEndpoint::Unresolved(Unbound::Inline(node_span(&action))))
         }
         _ => RawRoute::named_handler(route_action(action, controller, source, names).as_deref()),
     }

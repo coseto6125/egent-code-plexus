@@ -172,15 +172,15 @@
 ;; Routes — `r.GET("/path", handler)`-style HTTP router method invocations.
 ;; Matches gin / echo / chi / fiber etc. (they all share this shape).
 ;; Behavior cross-checked against GitNexus
-;; `go.ts:23-39` (independent implementation). The handler capture
-;; lets the parser emit a `RawFrameworkRef` gated by gin / echo imports.
+;; `go.ts:23-39` (independent implementation). The parser picks the
+;; handler argument once it has read the imports (echo: the argument after
+;; the path; gin and the others: the last argument).
 (call_expression
   function: (selector_expression
     field: (field_identifier) @route.method
       (#match? @route.method "^(GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)$"))
   arguments: (argument_list
     [(interpreted_string_literal) @route.path (MISSING) @route.path]
-    (identifier)? @route.handler
   )
 ) @route.call
 

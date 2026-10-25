@@ -127,10 +127,11 @@ class UserController {
     assert_eq!(handler_spot_kinds(&g), Vec::<String>::new());
 }
 
-/// A Spring mapping on a class without `@Controller` / `@RestController`
-/// serves no request. On HEAD it became a Route node.
+/// A Spring mapping on a Feign client interface describes a request the
+/// application sends, so it declares no route. A mapping on a plain class
+/// still routes: a controller in another file can extend it.
 #[test]
-fn test_route_kotlin_spring_mapping_outside_controller_no_route() {
+fn test_route_kotlin_spring_mapping_on_client_interface_no_route() {
     let src = r#"package demo
 
 import org.springframework.web.bind.annotation.GetMapping
@@ -144,13 +145,54 @@ class UserController {
     }
 }
 
-class NotAController {
+open class BaseController {
     @GetMapping("/x")
-    fun notARoute(): String {
+    fun inherited(): String {
         return "x"
     }
 }
+
+@FeignClient(name = "users")
+interface UserClient {
+    @GetMapping("/remote")
+    fun fetch(): String
+}
 "#;
     let g = build("src/main/kotlin/demo/UserController.kt", src);
-    assert_eq!(route_names(&g), vec!["GET /users"]);
+    assert_eq!(route_names(&g), vec!["GET /users", "GET /x"]);
+}
+
+/// Spring serves the mappings an interface declares for the controller
+/// that implements it, and a composed stereotype such as `@ApiController`
+/// marks a controller. On HEAD a mapping routed only on a class carrying
+/// `@Controller` or `@RestController`, so both routes disappeared.
+#[test]
+fn test_route_kotlin_spring_mapping_on_interface_and_composed_stereotype_routes() {
+    let src = r#"package demo
+
+import org.springframework.web.bind.annotation.GetMapping
+
+interface PetApi {
+    @GetMapping("/pets")
+    fun listPets(): String {
+        return "pets"
+    }
+}
+
+@ApiController
+class StoreController {
+    @GetMapping("/store")
+    fun inventory(): String {
+        return "store"
+    }
+}
+"#;
+    let g = build("src/main/kotlin/demo/PetApi.kt", src);
+    assert_eq!(route_names(&g), vec!["GET /pets", "GET /store"]);
+    let pets = handlers(&g, "GET /pets");
+    assert_eq!(pets.len(), 1, "{pets:?}");
+    assert_eq!(pets[0].0, "listPets");
+    let store = handlers(&g, "GET /store");
+    assert_eq!(store.len(), 1, "{store:?}");
+    assert_eq!(store[0].0, "inventory");
 }

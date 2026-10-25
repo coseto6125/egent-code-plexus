@@ -10,6 +10,12 @@
 //! topic is not a string literal and matches no detector query, so it does not
 //! apply here; the dependency (import gate) is covered per language below;
 //! duplicate call sites are the two-spellings-one-file test.
+//!
+//! Python, JavaScript, TypeScript, Go, Java, Kotlin and Rust each have a
+//! row. The other mainstream languages have none because no event-topic
+//! detector exists for them (`ecp_analyzer::event_topic` holds Kafka, Redis,
+//! RabbitMQ, SQS and Celery specs for those seven only), so no record of
+//! theirs carries a topic spelling: C#, PHP, Ruby, Swift, C, C++ and Dart.
 
 use ecp_analyzer::event_topic::{extract_event_topics, normalize::canonicalize, KAFKA_PYTHON};
 use ecp_analyzer::go::parser::GoProvider;

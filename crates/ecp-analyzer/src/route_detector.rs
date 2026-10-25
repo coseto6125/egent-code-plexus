@@ -1,4 +1,4 @@
-use crate::framework_helpers::{span_area, span_contains, strip_python_string_quotes};
+use crate::framework_helpers::{node_span, span_area, span_contains, strip_python_string_quotes};
 use ecp_core::analyzer::types::{RawNode, RawRoute};
 use ecp_core::contracts::raw_records::{RawEndpoint, Unbound};
 use ecp_core::graph::NodeKind;
@@ -194,45 +194,47 @@ fn decorator_name(decorator: &str) -> (String, &str) {
 }
 
 /// The routes the decorators of `node` declare; `nodes` is its file. A
-/// Spring mapping (`@GetMapping`, `@RequestMapping`) on a method routes only
-/// when its class carries `@Controller` or `@RestController`: a mapping on
-/// a plain class or a Feign client interface serves no request. Pass 1.5 and
-/// the entry-point scorer both read this.
+/// Spring mapping (`@GetMapping`, `@RequestMapping`) on a method of an HTTP
+/// client interface (`@FeignClient`, `@HttpExchange`) describes a request
+/// the application sends, so it declares no route. Every other mapping
+/// routes: Spring serves the mappings that an interface or a base class
+/// declares for the controller that implements or extends it (an
+/// openapi-generator `PetApi`), and a composed stereotype such as
+/// `@ApiController` marks a controller too. Pass 1.5 and the entry-point
+/// scorer both read this.
 pub fn node_decorator_routes(node: &RawNode, nodes: &[RawNode]) -> Vec<DetectedRoute> {
-    let mut spring_served = None;
+    let mut client = None;
     node.decorators
         .iter()
         .filter(|decorator| {
             !decorator_name(decorator).0.ends_with("mapping")
-                || *spring_served.get_or_insert_with(|| in_spring_controller(node, nodes))
+                || !*client.get_or_insert_with(|| in_http_client(node, nodes))
         })
         .flat_map(|decorator| detect_all_from_decorator(decorator))
         .collect()
 }
 
-/// Whether the innermost class around `node` named like its owner carries
-/// `@Controller` or `@RestController`. A node with no owner, or whose class
-/// is not in `nodes`, counts as served: nothing proves otherwise.
-fn in_spring_controller(node: &RawNode, nodes: &[RawNode]) -> bool {
+/// Whether the innermost class or interface around `node` named like its
+/// owner carries `@FeignClient` or `@HttpExchange`. A node with no owner,
+/// or whose owner is not in `nodes`, is no client: nothing proves it.
+fn in_http_client(node: &RawNode, nodes: &[RawNode]) -> bool {
     let Some(owner) = node.owner_class.as_deref() else {
-        return true;
+        return false;
     };
-    let class = nodes
+    nodes
         .iter()
         .filter(|n| {
             matches!(n.kind, NodeKind::Class | NodeKind::Interface)
                 && n.name == owner
                 && span_contains(n.span, node.span)
         })
-        .min_by_key(|n| span_area(n.span));
-    class.is_none_or(|class| {
-        class.decorators.iter().any(|d| {
-            matches!(
-                decorator_name(d).0.as_str(),
-                "controller" | "restcontroller"
-            )
+        .min_by_key(|n| span_area(n.span))
+        .is_some_and(|class| {
+            class
+                .decorators
+                .iter()
+                .any(|d| matches!(decorator_name(d).0.as_str(), "feignclient" | "httpexchange"))
         })
-    })
 }
 
 /// The HTTP verbs a decorator names, in source order. A verb-named decorator
@@ -461,28 +463,49 @@ pub fn is_absent_handler_hint(hint: &str, route_name: &str) -> bool {
     hint.strip_prefix(route_name) == Some(ABSENT_HANDLER_TAIL)
 }
 
+/// The arguments of a registration call, comments skipped.
+pub fn call_arguments<'t>(args: Option<tree_sitter::Node<'t>>) -> Vec<tree_sitter::Node<'t>> {
+    let Some(args) = args else {
+        return Vec::new();
+    };
+    let mut cursor = args.walk();
+    args.named_children(&mut cursor)
+        .filter(|n| !n.is_extra())
+        .collect()
+}
+
+/// The handler that a registration's handler argument `arg` gives. A
+/// function written in place is [`Unbound::Inline`] at the argument's own
+/// span, so binding takes only the closure node that argument became, never
+/// a middleware closure of the same call. An argument of a kind in
+/// `name_kinds` names the handler by its text. Anything else (the path
+/// alone, a call that builds the handler) is no handler.
+pub fn argument_handler(
+    arg: tree_sitter::Node,
+    source: &[u8],
+    function_kinds: &[&str],
+    name_kinds: &[&str],
+) -> Option<RawEndpoint> {
+    match arg.kind() {
+        kind if function_kinds.contains(&kind) => {
+            Some(RawEndpoint::Unresolved(Unbound::Inline(node_span(&arg))))
+        }
+        kind if name_kinds.contains(&kind) => RawRoute::named_handler(arg.utf8_text(source).ok()),
+        _ => None,
+    }
+}
+
 /// The handler that a registration call passes as its last argument
-/// (Express, gin and their kin run the last one): a function written in
-/// place is anonymous, an argument of a kind in `name_kinds` names the
-/// handler by its text, and anything else (the path alone, a call that
-/// builds the handler) is no handler. Comments are skipped.
+/// (Express and gin run the last one; the ones before it are middleware),
+/// read by [`argument_handler`].
 pub fn last_argument_handler(
     args: Option<tree_sitter::Node>,
     source: &[u8],
     function_kinds: &[&str],
     name_kinds: &[&str],
 ) -> Option<RawEndpoint> {
-    let args = args?;
-    let mut cursor = args.walk();
-    let last = args
-        .named_children(&mut cursor)
-        .filter(|n| !n.is_extra())
-        .last()?;
-    match last.kind() {
-        kind if function_kinds.contains(&kind) => Some(RawEndpoint::Unresolved(Unbound::Anonymous)),
-        kind if name_kinds.contains(&kind) => RawRoute::named_handler(last.utf8_text(source).ok()),
-        _ => None,
-    }
+    let last = *call_arguments(args).last()?;
+    argument_handler(last, source, function_kinds, name_kinds)
 }
 
 #[cfg(test)]

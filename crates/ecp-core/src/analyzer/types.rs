@@ -635,9 +635,10 @@ pub struct RawRoute {
     pub path: String,
     /// What serves the route (C4 `RecordKind::Route`). A producer writes
     /// `Unresolved(Named)` for a handler the source names and
-    /// `Unresolved(Anonymous)` for a function written at the registration;
-    /// [`Self::bind`] turns either into `Node` when one node of the file is
-    /// that handler. `None`: the producer saw no handler.
+    /// `Unresolved(Inline)` at the handler argument's span for a function
+    /// written at the registration; [`Self::bind`] turns either into `Node`
+    /// when one node of the file is that handler. `None`: the producer saw
+    /// no handler.
     pub handler: Option<RawEndpoint>,
     pub span: (u32, u32, u32, u32),
     /// What the enclosing route groups apply (Laravel `Route::group`,
@@ -701,8 +702,8 @@ impl RawRoute {
     /// |---|---|
     /// | `Named`, record without a group scope | the node [`bind_name`] binds from the site; else the declaration a decorator at the site decorates, when it has that name; else `Named` |
     /// | `Named`, record with a group scope | `Named`: a Laravel action binds across files, after heritage |
-    /// | `Anonymous` | the one outermost `<anonymous:` closure node inside the site; else `Anonymous` |
-    /// | `Node`, `File`, `None` | unchanged |
+    /// | `Inline(at)` | the outermost `<anonymous:` closure node that starts where the handler argument `at` starts and lies inside it; else `Inline(at)` |
+    /// | `Anonymous`, `Node`, `File`, `None` | unchanged |
     ///
     /// An include or controller-middleware record is never bound. Binding
     /// twice gives the same endpoint.
@@ -714,9 +715,9 @@ impl RawRoute {
             Some(RawEndpoint::Unresolved(Unbound::Named(name))) if self.scope.is_none() => {
                 Some(bind_route_handler(nodes, self.span, name.as_str()))
             }
-            Some(RawEndpoint::Unresolved(Unbound::Anonymous)) => {
-                Some(route_closure(nodes, self.span).map_or(
-                    RawEndpoint::Unresolved(Unbound::Anonymous),
+            Some(RawEndpoint::Unresolved(Unbound::Inline(at))) => {
+                Some(route_closure(nodes, *at).map_or(
+                    RawEndpoint::Unresolved(Unbound::Inline(*at)),
                     RawEndpoint::Node,
                 ))
             }
@@ -756,35 +757,24 @@ fn bind_route_handler(nodes: &[RawNode], site: Span, name: &str) -> RawEndpoint 
         .clone()
 }
 
-/// The closure node a function written inside `site` became: the one
-/// outermost `<anonymous:` `Function` node the site contains. Two sibling
-/// closures bind neither.
-fn route_closure(nodes: &[RawNode], site: Span) -> Option<RawIdx> {
-    let closures: Vec<usize> = nodes
+/// The closure node that the handler argument at `at` became: the outermost
+/// `<anonymous:` `Function` node that starts where the argument starts and
+/// lies inside it. A middleware closure of the same registration starts
+/// elsewhere, and a closure nested in the handler's body starts later, so
+/// neither takes the handler's place. A handler with no node of its own (a
+/// parser emits none for an empty body) binds nothing.
+fn route_closure(nodes: &[RawNode], at: Span) -> Option<RawIdx> {
+    let (i, _) = nodes
         .iter()
         .enumerate()
         .filter(|(_, n)| {
             n.kind == NodeKind::Function
                 && n.name.starts_with("<anonymous:")
-                && span_contains(site, n.span)
+                && (n.span.0, n.span.1) == (at.0, at.1)
+                && span_contains(at, n.span)
         })
-        .map(|(i, _)| i)
-        .collect();
-    let outermost: Vec<usize> = closures
-        .iter()
-        .copied()
-        .filter(|&i| {
-            !closures.iter().any(|&o| {
-                o != i
-                    && nodes[o].span != nodes[i].span
-                    && span_contains(nodes[o].span, nodes[i].span)
-            })
-        })
-        .collect();
-    match outermost.as_slice() {
-        [only] => RawIdx::checked(*only, nodes.len()),
-        _ => None,
-    }
+        .max_by_key(|&(i, n)| ((n.span.2, n.span.3), std::cmp::Reverse(i)))?;
+    RawIdx::checked(i, nodes.len())
 }
 
 /// The group scope of one [`RawRoute`], as far as its own file shows it.
@@ -1865,7 +1855,9 @@ mod tests {
         RawRoute::named_handler(Some(name))
     }
 
-    const ANONYMOUS: Option<RawEndpoint> = Some(RawEndpoint::Unresolved(Unbound::Anonymous));
+    fn inline(at: Span) -> Option<RawEndpoint> {
+        Some(RawEndpoint::Unresolved(Unbound::Inline(at)))
+    }
 
     /// `app.get('/x', list)` inside `setup`: the file declares a class
     /// member `list` before the top-level `list`. JS binds the bare name to
@@ -1919,23 +1911,57 @@ mod tests {
         );
     }
 
-    /// An inline function binds the one outermost closure node inside the
-    /// registration; none, or two sibling closures, keep it anonymous.
+    /// An inline handler binds the closure node its own argument became,
+    /// never a middleware closure of the same registration, nor a closure
+    /// nested in its body. Without a node of its own it stays inline.
+    /// On HEAD the rule took the one outermost closure anywhere in the
+    /// registration, so the middleware at 3:18 served the route.
     #[test]
-    fn test_raw_route_bind_anonymous_binds_outermost_closure_only() {
+    fn test_raw_route_bind_inline_binds_handler_argument_closure_only() {
         let nodes = [
             bind_node("main", NodeKind::Function, (0, 0, 20, 1)),
-            bind_node("<anonymous:3:18>", NodeKind::Function, (2, 18, 4, 3)),
-            bind_node("<anonymous:4:3>", NodeKind::Function, (3, 2, 3, 20)),
-            bind_node("<anonymous:9:10>", NodeKind::Function, (8, 10, 8, 20)),
-            bind_node("<anonymous:9:30>", NodeKind::Function, (8, 30, 8, 40)),
+            // `app.get("/x", (req, res, next) => next(), (req, res) => {})`:
+            // the middleware has a node, the empty handler has none.
+            bind_node("<anonymous:3:18>", NodeKind::Function, (2, 18, 2, 40)),
+            // `app.get("/y", (req, res) => { items.forEach(i => use(i)) })`:
+            // the handler and the closure in its body both have nodes.
+            bind_node("<anonymous:6:16>", NodeKind::Function, (5, 16, 7, 3)),
+            bind_node("<anonymous:7:20>", NodeKind::Function, (6, 20, 6, 38)),
+            // A named function at the handler's position is no closure.
+            bind_node("named", NodeKind::Function, (9, 16, 9, 30)),
         ];
+        let empty_handler = (2, 42, 2, 60);
         assert_eq!(
-            route(ANONYMOUS, (2, 2, 4, 4)).bind(&nodes),
+            route(inline(empty_handler), (2, 2, 2, 61)).bind(&nodes),
+            inline(empty_handler)
+        );
+        assert_eq!(
+            route(inline((2, 18, 2, 40)), (2, 2, 2, 41)).bind(&nodes),
             Some(RawEndpoint::Node(RawIdx(1)))
         );
-        assert_eq!(route(ANONYMOUS, (6, 2, 6, 30)).bind(&nodes), ANONYMOUS);
-        assert_eq!(route(ANONYMOUS, (8, 2, 8, 42)).bind(&nodes), ANONYMOUS);
+        assert_eq!(
+            route(inline((5, 16, 7, 3)), (5, 2, 7, 4)).bind(&nodes),
+            Some(RawEndpoint::Node(RawIdx(2)))
+        );
+        assert_eq!(
+            route(inline((9, 16, 9, 30)), (9, 2, 9, 31)).bind(&nodes),
+            inline((9, 16, 9, 30))
+        );
+    }
+
+    /// An `Anonymous` handler has no argument span, so it never binds.
+    #[test]
+    fn test_raw_route_bind_anonymous_without_span_unchanged() {
+        let nodes = [bind_node(
+            "<anonymous:1:0>",
+            NodeKind::Function,
+            (0, 0, 2, 1),
+        )];
+        let anonymous = Some(RawEndpoint::Unresolved(Unbound::Anonymous));
+        assert_eq!(
+            route(anonymous.clone(), (0, 0, 2, 2)).bind(&nodes),
+            anonymous
+        );
     }
 
     /// A Laravel action, an include record's controller, an absent handler

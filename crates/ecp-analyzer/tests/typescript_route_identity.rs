@@ -227,3 +227,28 @@ app.get('/remote', remote);
         )]
     );
 }
+
+/// A middleware closure before an inline handler never serves the route.
+/// On `/x` the middleware calls `next()`, so it has a closure node, and
+/// the empty handler has none: the route gets no handler edge and no
+/// BlindSpot. On `/y` the handler has a node of its own and binds. On HEAD
+/// the binding took the one closure node anywhere in the registration, so
+/// the `/x` middleware got a `HandlesRoute` edge.
+#[test]
+fn test_route_express_middleware_closure_before_handler_never_binds() {
+    let src = r#"import express from 'express';
+const app = express();
+
+app.get('/x', (req, res, next) => next(), (req, res) => {});
+app.get('/y', (req, res, next) => next(), (req, res) => {
+  res.send('y');
+});
+"#;
+    let g = build("src/app.ts", src);
+    assert_eq!(handlers(&g, "GET /x"), Vec::new());
+    assert_eq!(
+        handlers(&g, "GET /y"),
+        vec![("<anonymous:5:42>".to_string(), 5, "inline_anonymous")]
+    );
+    assert_eq!(handler_spots(&g), Vec::<(String, String)>::new());
+}

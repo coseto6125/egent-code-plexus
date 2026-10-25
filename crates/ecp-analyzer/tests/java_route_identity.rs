@@ -140,12 +140,13 @@ fn test_route_java_spring_one_node_per_route_binds_annotated_method() {
     assert_eq!(handler_spot_kinds(&g), Vec::<String>::new());
 }
 
-/// A Spring mapping routes only on a `@Controller` / `@RestController`
-/// class: the plain class and the Feign client interface serve no request
-/// (fixture `crates/ecp-cli/tests/fixtures/spring_controller.java`, class
-/// `NotAController`). On HEAD each mapping became a Route node.
+/// A Spring mapping on an HTTP client interface (`@FeignClient`,
+/// `@HttpExchange`) describes a request the application sends, so it
+/// declares no route. A mapping on a plain class still routes: a
+/// controller in another file can extend it, and nothing in this file
+/// proves otherwise.
 #[test]
-fn test_route_java_spring_mapping_outside_controller_no_route() {
+fn test_route_java_spring_mapping_on_client_interface_no_route() {
     let src = r#"package com.example;
 
 import org.springframework.web.bind.annotation.GetMapping;
@@ -157,9 +158,9 @@ public class UserController {
     public String list() { return "all"; }
 }
 
-class NotAController {
+class BaseController {
     @GetMapping("/x")
-    public String notARoute() { return "x"; }
+    public String inherited() { return "x"; }
 }
 
 @FeignClient(name = "users")
@@ -167,7 +168,45 @@ interface UserClient {
     @GetMapping("/remote")
     String fetch();
 }
+
+@HttpExchange("/api")
+interface OrderClient {
+    @GetMapping("/orders")
+    String orders();
+}
 "#;
     let g = build("src/main/java/com/example/UserController.java", src);
-    assert_eq!(route_names(&g), vec!["GET /users"]);
+    assert_eq!(route_names(&g), vec!["GET /users", "GET /x"]);
+}
+
+/// Spring serves the mappings an interface declares for the controller
+/// that implements it (openapi-generator's `PetApi` with `@GetMapping`
+/// default methods), and a composed stereotype such as `@ApiController`
+/// marks a controller. On HEAD a mapping routed only on a class carrying
+/// `@Controller` or `@RestController`, so both routes disappeared.
+#[test]
+fn test_route_java_spring_mapping_on_interface_and_composed_stereotype_routes() {
+    let src = r#"package com.example;
+
+import org.springframework.web.bind.annotation.GetMapping;
+
+public interface PetApi {
+    @GetMapping("/pets")
+    default String listPets() { return "pets"; }
+}
+
+@ApiController
+class StoreController {
+    @GetMapping("/store")
+    public String inventory() { return "store"; }
+}
+"#;
+    let g = build("src/main/java/com/example/PetApi.java", src);
+    assert_eq!(route_names(&g), vec!["GET /pets", "GET /store"]);
+    let pets = handlers(&g, "GET /pets");
+    assert_eq!(pets.len(), 1, "{pets:?}");
+    assert_eq!(pets[0].0, "listPets");
+    let store = handlers(&g, "GET /store");
+    assert_eq!(store.len(), 1, "{store:?}");
+    assert_eq!(store[0].0, "inventory");
 }

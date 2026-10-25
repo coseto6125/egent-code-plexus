@@ -186,10 +186,16 @@ pub enum Unbound {
     /// The spelling is kept, so a later pass can bind it across files (a
     /// Laravel `Ctrl@method` action, an imported handler).
     Named(SourceName),
-    /// Code with no name and no node, such as an inline handler that the
-    /// parser emits no closure node for. The record's own span gives the
+    /// No name: the producer saw an empty or whitespace-only reference
+    /// ([`bind_name`] with a blank name). The record's own span gives the
     /// line.
     Anonymous,
+    /// A function written in place as a route's handler argument (an
+    /// Express arrow, a gin `func_literal`, a Laravel closure, a Sinatra
+    /// block), at the argument's span. Binding takes only the closure node
+    /// that starts there, so a middleware closure of the same registration
+    /// never serves the route; with no such node the handler stays inline.
+    Inline(Span),
 }
 
 /// The endpoint of a raw record, bound in [`ParsePhase::BindRecords`].

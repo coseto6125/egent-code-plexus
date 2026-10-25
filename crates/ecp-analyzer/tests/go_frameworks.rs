@@ -119,3 +119,44 @@ fn gin_and_echo_share_no_ambiguity() {
     assert!(has_ref(&refs, "h", "gin-route"));
     assert!(!refs.iter().any(|r| r.reason == "echo-route"));
 }
+
+/// Echo's framework ref names the handler after the path, never a
+/// middleware that follows it. On HEAD the optional handler capture could
+/// match either identifier, so `auth` got an `echo-route` ref.
+#[test]
+fn test_parse_file_echo_middleware_after_handler_ref_names_handler() {
+    let src = r#"
+        package main
+        import "github.com/labstack/echo/v4"
+        func main() {
+            e := echo.New()
+            e.GET("/users", listUsers, auth)
+        }
+    "#;
+    let refs = parse(src);
+    let targets: Vec<(&str, &str)> = refs
+        .iter()
+        .map(|r| (r.target_name.as_str(), r.reason.as_str()))
+        .collect();
+    assert_eq!(targets, vec![("listUsers", "echo-route")]);
+}
+
+/// Gin's framework ref names the last argument, never the middleware
+/// before it.
+#[test]
+fn test_parse_file_gin_middleware_before_handler_ref_names_last() {
+    let src = r#"
+        package main
+        import "github.com/gin-gonic/gin"
+        func main() {
+            r := gin.Default()
+            r.GET("/users", auth, listUsers)
+        }
+    "#;
+    let refs = parse(src);
+    let targets: Vec<(&str, &str)> = refs
+        .iter()
+        .map(|r| (r.target_name.as_str(), r.reason.as_str()))
+        .collect();
+    assert_eq!(targets, vec![("listUsers", "gin-route")]);
+}

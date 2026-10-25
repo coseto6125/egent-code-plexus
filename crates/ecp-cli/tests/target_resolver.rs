@@ -354,6 +354,41 @@ fn test_find_kind_filter_leaves_one_declaration_no_ambiguity() {
     assert!(payload.get("candidates").is_none(), "{payload}");
 }
 
+const X_FUNCTION_TS: &str = "export function X() {\n  return 1;\n}\n";
+const X_METHOD_TS: &str = "export class Lib {\n  X() {\n    return 2;\n  }\n}\n";
+
+/// Stands for: `--kind` narrows the declarations before `--file` ranks them,
+/// in `find` as in `impact` (C1: both filters constrain the target).
+/// `src/a.ts` equals the function's path and only ends the method's path
+/// `lib/src/a.ts`. Failed before: `find` ranked the files first, kept the
+/// function, and `--kind method` then left no match, while `impact`
+/// resolved the method.
+#[test]
+fn test_find_kind_method_file_suffix_selects_method_like_impact() {
+    let repo = Repo::indexed(&[("src/a.ts", X_FUNCTION_TS), ("lib/src/a.ts", X_METHOD_TS)]);
+
+    let found = json_of(&repo.ecp(&[
+        "find", "X", "--file", "src/a.ts", "--kind", "method", "--format", "json", "--repo", ".",
+    ]));
+    assert_eq!(found["status"], "success", "{found}");
+    let matches = found["matches"].as_array().expect("matches");
+    assert_eq!(matches.len(), 1, "{found}");
+    assert_eq!(matches[0]["file"], "lib/src/a.ts", "{found}");
+    assert_eq!(matches[0]["line"], 2, "{found}");
+
+    let out = repo.ecp(&[
+        "impact", "X", "--file", "src/a.ts", "--kind", "method", "--repo", ".", "--format", "json",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let start = &json_of(&out)["impact"][0];
+    assert_eq!(start["depth"], 0, "{start}");
+    assert_eq!(start["ownerClass"], "Lib", "{start}");
+    assert_eq!(
+        start["line"], matches[0]["line"],
+        "find and impact name one declaration: {start}"
+    );
+}
+
 /// Stands for: `--callers-of` takes its caller files from the overlay-aware
 /// graph. Failed before: the walk read the base graph, so a caller written
 /// into an untracked file was never scanned.

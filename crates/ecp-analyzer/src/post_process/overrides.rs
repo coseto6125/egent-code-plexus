@@ -24,15 +24,23 @@
 //!
 //! | Rule | Languages | Candidate | Edge |
 //! |---|---|---|---|
-//! | `Marked` | Java, Kotlin, C#, C++, others | a method the parser marked (`@Override`, `override`) | 1.0, `Exact` |
-//! | `Inferred` | TypeScript, JavaScript, Python, PHP, Ruby, Swift, Dart | a marked method, else any method of a type with bases | marked: 1.0; unmarked: [`NAME_MATCH_CONFIDENCE`], `Heuristic` |
-//! | `TraitImpl` | Rust | a method of an `impl Trait for T` block, which carries the trait as heritage | 1.0, `Exact`, only into that trait, never a supertrait |
+//! | `Marked` | Java, Kotlin, C#, C++, others | a method the parser marked (`@Override`, `override`) | the path confidence, `Exact` |
+//! | `Inferred` | TypeScript, JavaScript, Python, PHP, Ruby, Swift, Dart | a marked method, else any method of a type with bases | marked: the path confidence, `Exact`; unmarked: [`NAME_MATCH_CONFIDENCE`], `Heuristic` |
+//! | `TraitImpl` | Rust | a method of an `impl Trait for T` block, which carries the trait as heritage | the path confidence, `Exact`, only into that trait, never a supertrait |
 //! | `NoConcept` | Go | none | no edge; a [`BS_KIND_NO_OVERRIDE_CONCEPT`] BlindSpot where a method shadows one of an embedded type |
 //!
 //! C has no override and the pass emits nothing for it. The parsers of the
 //! `Inferred` languages capture no mandatory marker, so an unmarked method
 //! there pairs with its base by name alone, and the edge stays below
 //! `HEURISTIC_CEILING` with its own `reason` (C4 evidence classes).
+//!
+//! The path confidence is the weakest resolver confidence on the path the
+//! lookup walked ([`evidence`]): 1.0 for a base in the same file, 0.95
+//! through an import, 0.85 through a qualifier, 0.8 through the heritage
+//! scope. A path through a base bound by a bare name alone (the `Global`
+//! tier, 0.7, at `HEURISTIC_CEILING`) gives [`NAME_MATCH_CONFIDENCE`] with
+//! reason `base-by-name` instead, marked or not. A marked method whose
+//! signature the lookup did not confirm gives [`NAME_MATCH_CONFIDENCE`] too.
 //!
 //! # Nearest declaration
 //!
@@ -84,7 +92,7 @@
 use crate::resolution::index::{DeclaredBase, FileMeta, Language, ResolveTarget, SymbolTable};
 use ecp_core::analyzer::heritage::holds_heritage;
 use ecp_core::analyzer::types::{
-    span_contains, LocalGraph, RawFunctionMeta, RawNode, NEAREST_COPY_CONFIDENCE,
+    owner_key, span_contains, LocalGraph, RawFunctionMeta, RawNode, NEAREST_COPY_CONFIDENCE,
 };
 use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap, HEURISTIC_CEILING};
 use ecp_core::graph::{BlindSpotRecord, Edge, File, FileCategory, FunctionMeta, NodeKind, RelType};
@@ -564,6 +572,10 @@ pub fn emit_edges(
     let mut emitted: FxHashMap<(u32, u32), usize> = FxHashMap::default();
     let mut reported: FxHashSet<(u32, u8, u32, u32)> = FxHashSet::default();
     let mut mros: FxHashMap<u32, Mro> = FxHashMap::default();
+    // The gap finding of a declared base depends on the base alone, and
+    // every method of the type that reaches it would count the same
+    // same-named candidates again.
+    let mut gaps: FxHashMap<(u32, usize), (&'static str, String)> = FxHashMap::default();
     for (file_idx, lg) in local_graphs.iter().enumerate() {
         let file = FileOrd(file_idx as u32);
         let path = lg.file_path.to_string_lossy().replace('\\', "/");
@@ -710,10 +722,12 @@ pub fn emit_edges(
                         )
                     }
                     Stop::Gap { owner, index, base } => {
-                        let (kind, gap) = gap_finding(symbol_table, owner, base);
+                        let (kind, gap) = gaps
+                            .entry((owner, index))
+                            .or_insert_with(|| gap_finding(symbol_table, owner, base));
                         (
                             (source, 1, owner, index as u32),
-                            kind,
+                            *kind,
                             format!(
                                 "base `{}` of `{}` {gap}; no Overrides edge for `{name}`",
                                 base.spelling.trim(),
@@ -772,7 +786,11 @@ fn gap_finding(table: &SymbolTable, owner: u32, base: &DeclaredBase) -> (&'stati
         .file_of(owner)
         .map_or_else(FileMeta::default, FileMeta::from_path);
     let same_named = table
-        .global_candidates(simple_type_name(&base.spelling), ResolveTarget::Type, meta)
+        .global_candidates(
+            owner_key(&base.spelling).unwrap_or(""),
+            ResolveTarget::Type,
+            meta,
+        )
         .len();
     match (candidates, same_named) {
         (1, n) => (
@@ -1243,33 +1261,9 @@ fn slot_name<'a>(
         .map(|n| n.name.as_str())
 }
 
-/// The last path segment of a heritage spelling, without generic or call
-/// arguments: `fmt::Display` → `Display`, `Base<T>` → `Base`,
-/// `App\Base` → `Base`, `Base()` → `Base`.
-fn simple_type_name(heritage: &str) -> &str {
-    let head = heritage
-        .split(['<', '[', '('])
-        .next()
-        .unwrap_or(heritage)
-        .trim();
-    head.rsplit([':', '.', '\\']).next().unwrap_or(head).trim()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_simple_type_name_path_and_generics_returns_last_segment() {
-        assert_eq!(simple_type_name("fmt::Display"), "Display");
-        assert_eq!(simple_type_name("Base<T>"), "Base");
-        assert_eq!(simple_type_name("a.b.Base"), "Base");
-        assert_eq!(simple_type_name(" Base "), "Base");
-        assert_eq!(simple_type_name("App\\Base"), "Base");
-        assert_eq!(simple_type_name("Base()"), "Base");
-        assert_eq!(simple_type_name("Generic[T]"), "Generic");
-        assert_eq!(simple_type_name("   "), "");
-    }
 
     #[test]
     fn test_is_override_marker_each_language_spelling_returns_true() {
@@ -1590,5 +1584,45 @@ mod tests {
         assert_eq!(bind(&base(&[(1, NEAREST_COPY_CONFIDENCE)])), None);
         assert_eq!(bind(&base(&[(1, 1.0), (2, 1.0)])), None);
         assert_eq!(bind(&base(&[])), None);
+    }
+
+    /// Stands for: a gap counts the same-named candidates of the type the
+    /// base spelling names, its last segment. `Outer<int>.Inner` names
+    /// `Inner`; the two project types named `Outer` are no candidates for
+    /// it, so the gap is unresolved. On HEAD the count cut the spelling at
+    /// `<` and read `Outer`: "resolves to none of 2 candidate types",
+    /// `override-base-ambiguous`.
+    #[test]
+    fn test_gap_finding_generic_outer_segment_counts_last_segment_unresolved() {
+        let mut table = SymbolTable::new();
+        table.register_node("src/a/Outer.cs", "Outer", 0, NodeKind::Class);
+        table.register_node("src/b/Outer.cs", "Outer", 1, NodeKind::Class);
+        table.register_node("src/Child.cs", "Child", 2, NodeKind::Class);
+        let base = |spelling: &str| DeclaredBase {
+            spelling: spelling.into(),
+            candidates: Box::default(),
+        };
+        assert_eq!(
+            gap_finding(&table, 2, &base("Outer<int>.Inner")),
+            (
+                BS_KIND_OVERRIDE_BASE_UNRESOLVED,
+                "resolves to no project type (0 same-named candidates)".to_string()
+            )
+        );
+        assert_eq!(
+            gap_finding(&table, 2, &base("Outer<int>")),
+            (
+                BS_KIND_OVERRIDE_BASE_AMBIGUOUS,
+                "resolves to none of 2 candidate types".to_string()
+            ),
+            "control: the table holds both `Outer` types"
+        );
+        assert_eq!(
+            gap_finding(&table, 2, &base("   ")),
+            (
+                BS_KIND_OVERRIDE_BASE_UNRESOLVED,
+                "resolves to no project type (0 same-named candidates)".to_string()
+            )
+        );
     }
 }
