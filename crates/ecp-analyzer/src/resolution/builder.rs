@@ -2425,8 +2425,14 @@ fn pass1_7_entry_points(
     for (file_idx, local_graph) in local_graphs.iter().enumerate() {
         let file_idx = file_idx as u32;
         let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
+        // Pass 1.5 emits no Route node for a Test or Reference file, so
+        // its routes mark no entry point either.
+        let routes: &[RawRoute] = match files[file_idx as usize].category {
+            FileCategory::Test | FileCategory::Reference => &[],
+            _ => &local_graph.routes,
+        };
         let entries = crate::entry_points::score_entry_points(
-            &local_graph.routes,
+            routes,
             &local_graph.framework_refs,
             &local_graph.nodes,
         );

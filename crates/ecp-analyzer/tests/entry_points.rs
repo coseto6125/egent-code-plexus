@@ -475,3 +475,48 @@ fn multi_file_entries_are_isolated_per_file() {
         "EntryPoint's file_idx must match src/main.rs, not src/lib.rs"
     );
 }
+
+/// A route of a Test or Reference file has no Route node (`pass1_5` skips
+/// those files), so its handler is no entry point either. On HEAD the
+/// bound handler of a NestJS `*.spec.ts` route became a `route@…` marker.
+/// The same route at a production path is the control. One path per
+/// mainstream language's test-file convention, plus one vendored path.
+#[test]
+fn test_build_route_in_test_file_no_entrypoint() {
+    let entries_at = |path: &str| {
+        let mut builder = GraphBuilder::new();
+        builder.add_graph(mk_local_graph(
+            path,
+            vec![mk_raw_node("read_items", NodeKind::Function, vec![])],
+            vec![RawRoute {
+                method: "GET".into(),
+                path: "/items".into(),
+                handler: RawRoute::named_handler(Some("read_items")),
+                span: (0, 0, 0, 0),
+                scope: None,
+            }],
+            vec![],
+        ));
+        entry_point_node_indices(&builder.build()).len()
+    };
+    assert_eq!(entries_at("app/main.py"), 1, "control: production route");
+    for path in [
+        "integration/hello-world/e2e/users.spec.ts",
+        "test/app.router.js",
+        "tests/test_main.py",
+        "src/test/java/com/example/UserControllerTest.java",
+        "src/test/kotlin/com/example/UserControllerTest.kt",
+        "Tests/Api/UserControllerTests.cs",
+        "gin_test.go",
+        "tests/routes.rs",
+        "tests/Feature/UserTest.php",
+        "spec/requests/users_spec.rb",
+        "Tests/AppTests/RouteTests.swift",
+        "tests/test_server.c",
+        "tests/server_test.cpp",
+        "test/server_test.dart",
+        "node_modules/express/lib/router.js",
+    ] {
+        assert_eq!(entries_at(path), 0, "{path}: no entry point");
+    }
+}
