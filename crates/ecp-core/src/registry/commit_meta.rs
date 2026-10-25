@@ -93,7 +93,10 @@ use std::path::Path;
 /// schema26: every uid site numbers a file through `assign_file`; a dirty
 /// file's same-uid redefinition becomes the full build's tombstone, and
 /// incremental mode numbers a later overload like the full build.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema26");
+/// schema27: path-literal, SQL, schema-field and event-topic records carry a
+/// bound endpoint; a module-top literal starts at the File node, and a
+/// PathLiteral owner is the bound node's owner (`Walk` for `Walk<'s, 't>`).
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema27");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

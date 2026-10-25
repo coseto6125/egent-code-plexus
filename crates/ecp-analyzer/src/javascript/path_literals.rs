@@ -111,6 +111,7 @@ fn emit(str_node: Node<'_>, value: &str, context: LiteralContext<'_>) -> Option<
         enclosing_symbol: context.symbol.map(str::to_string),
         enclosing_owner: context.owner.map(str::to_string),
         sink_reason: reason,
+        endpoint: None,
     })
 }
 

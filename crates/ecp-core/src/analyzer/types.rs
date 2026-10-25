@@ -1,3 +1,4 @@
+use crate::contracts::raw_records::{bind_name, EndpointRule, RawEndpoint, RecordKind};
 use crate::file_category::Language;
 use crate::graph::NodeKind;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -580,12 +581,9 @@ pub enum RouteInclude {
 
 /// Path-shaped string literal extracted by a per-language `path_literals`
 /// walker. Promoted by `post_process::path_literal_nodes` into a
-/// `NodeKind::PathLiteral` plus a `UsesPathLiteral` edge from the resolved
-/// enclosing symbol. A literal at module top level gets the node and no edge
-/// (`path_literal_nodes.rs`); C4's `File` endpoint is the planned source.
-///
-/// Captured at parse time; resolution to node indices happens in the
-/// post-process pass that has `SymbolTable` + global `nodes` available.
+/// `NodeKind::PathLiteral` plus a `UsesPathLiteral` edge from its
+/// [`Self::endpoint`]: the innermost enclosing callable or `Const`, else the
+/// file (C4 `RecordKind::PathLiteral`).
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 #[rkyv(derive(Debug))]
 pub struct RawPathLiteral {
@@ -607,6 +605,23 @@ pub struct RawPathLiteral {
     /// `sink:read|confidence:high`. Consumed verbatim by the post-process
     /// emitter into `Edge.reason`.
     pub sink_reason: String,
+    /// The node or file the literal attaches to, written by
+    /// [`LocalGraph::bind_records`] once the node list is final. `None`
+    /// before binding.
+    pub endpoint: Option<RawEndpoint>,
+}
+
+impl RawPathLiteral {
+    pub fn bind(&self, nodes: &[RawNode]) -> Option<RawEndpoint> {
+        RecordKind::PathLiteral.bind_site(nodes, self.span)
+    }
+
+    /// [`Self::endpoint`], or the one [`LocalGraph::bind_records`] writes
+    /// when the graph skipped the parse entries (a provider called
+    /// directly). Both come from the site, so they agree.
+    pub fn endpoint_in(&self, nodes: &[RawNode]) -> Option<RawEndpoint> {
+        self.endpoint.clone().or_else(|| self.bind(nodes))
+    }
 }
 
 /// Read vs write classification of a SQL statement, derived from its leading
@@ -647,6 +662,21 @@ pub struct RawSqlRef {
     pub enclosing_symbol: Option<String>,
     /// Owner class when the enclosing symbol is a method.
     pub enclosing_owner: Option<String>,
+    /// The caller the statement attaches to: the innermost enclosing callable
+    /// or `Const`, else the file (C4 `RecordKind::SqlRef`). Written by
+    /// [`LocalGraph::bind_records`]; `None` before binding.
+    pub endpoint: Option<RawEndpoint>,
+}
+
+impl RawSqlRef {
+    pub fn bind(&self, nodes: &[RawNode]) -> Option<RawEndpoint> {
+        RecordKind::SqlRef.bind_site(nodes, self.span)
+    }
+
+    /// As [`RawPathLiteral::endpoint_in`].
+    pub fn endpoint_in(&self, nodes: &[RawNode]) -> Option<RawEndpoint> {
+        self.endpoint.clone().or_else(|| self.bind(nodes))
+    }
 }
 
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
@@ -907,6 +937,37 @@ pub struct RawSchemaField {
     pub owner_class: Box<str>,
     pub framework: FrameworkId,
     pub span: (u32, u32, u32, u32),
+    /// The owning type (C4 `RecordKind::SchemaField`, no file fallback).
+    /// Written by [`LocalGraph::bind_records`]; `None` before binding and
+    /// when no type of this file owns the field.
+    pub endpoint: Option<RawEndpoint>,
+}
+
+impl RawSchemaField {
+    /// The innermost enclosing type, when its name is the `owner_class` the
+    /// producer read. A producer whose spans do not nest (an OpenAPI schema
+    /// whose key spans fell back to `(0, 0, 0, 0)`) binds by that name
+    /// instead, and only to a type the site provably sees: two visible
+    /// same-name types bind neither.
+    pub fn bind(&self, nodes: &[RawNode]) -> Option<RawEndpoint> {
+        let owner = &*self.owner_class;
+        let by_site = RecordKind::SchemaField.bind_site(nodes, self.span);
+        if let Some(RawEndpoint::Node(idx)) = &by_site {
+            if nodes[idx.index()].name == owner {
+                return by_site;
+            }
+        }
+        let EndpointRule::Enclosing { accept, .. } = RecordKind::SchemaField.endpoint_rule() else {
+            return None;
+        };
+        let bound = bind_name(nodes, self.span, owner, accept);
+        bound.endpoint().node().map(RawEndpoint::Node)
+    }
+
+    /// As [`RawPathLiteral::endpoint_in`].
+    pub fn endpoint_in(&self, nodes: &[RawNode]) -> Option<RawEndpoint> {
+        self.endpoint.clone().or_else(|| self.bind(nodes))
+    }
 }
 
 /// Message-bus publish/subscribe call site.
@@ -929,6 +990,21 @@ pub struct RawEventTopic {
     /// Empty string when the detector's producer-capture is absent.
     pub enclosing_fn: Box<str>,
     pub span: (u32, u32, u32, u32),
+    /// The publisher or subscriber: the innermost enclosing callable, else
+    /// the file (C4 `RecordKind::EventTopic`). Written by
+    /// [`LocalGraph::bind_records`]; `None` before binding.
+    pub endpoint: Option<RawEndpoint>,
+}
+
+impl RawEventTopic {
+    pub fn bind(&self, nodes: &[RawNode]) -> Option<RawEndpoint> {
+        RecordKind::EventTopic.bind_site(nodes, self.span)
+    }
+
+    /// As [`RawPathLiteral::endpoint_in`].
+    pub fn endpoint_in(&self, nodes: &[RawNode]) -> Option<RawEndpoint> {
+        self.endpoint.clone().or_else(|| self.bind(nodes))
+    }
 }
 
 /// Transactional scope boundary (e.g. `@Transactional`, `atomic()`).
@@ -1118,6 +1194,26 @@ pub struct LocalGraph {
 }
 
 impl LocalGraph {
+    /// C4 `ParsePhase::BindRecords`: write the endpoint of every path
+    /// literal, SQL reference, schema field and event topic from its site.
+    /// Runs once the provider has returned, when the node list is final;
+    /// nodes stay untouched.
+    pub fn bind_records(&mut self) {
+        let nodes = &self.nodes;
+        for r in self.path_literals.iter_mut().flat_map(|b| b.iter_mut()) {
+            r.endpoint = r.bind(nodes);
+        }
+        for r in self.sql_refs.iter_mut().flat_map(|b| b.iter_mut()) {
+            r.endpoint = r.bind(nodes);
+        }
+        for r in self.schema_fields.iter_mut().flat_map(|b| b.iter_mut()) {
+            r.endpoint = r.bind(nodes);
+        }
+        for r in self.event_topics.iter_mut().flat_map(|b| b.iter_mut()) {
+            r.endpoint = r.bind(nodes);
+        }
+    }
+
     /// A graph for a file the pipeline could not analyse, carrying nothing but
     /// the reason.
     ///
@@ -1331,12 +1427,168 @@ mod tests {
             span: (1, 0, 1, 40),
             enclosing_symbol: Some("list_channels".to_string()),
             enclosing_owner: None,
+            endpoint: None,
         };
         assert_eq!(r.tables[0].0, "channels");
         assert_eq!(r.tables[0].1, SqlVerb::Read);
         assert!(!r.unresolved);
         assert_eq!(SqlVerb::Read.as_reason(), "read");
         assert_eq!(SqlVerb::Write.as_reason(), "write");
+    }
+
+    use crate::contracts::raw_records::RawIdx;
+
+    fn bind_node(name: &str, kind: NodeKind, span: Span) -> RawNode {
+        RawNode {
+            name: name.to_string(),
+            kind,
+            span,
+            is_exported: false,
+            heritage: Vec::new(),
+            type_annotation: None,
+            decorators: Vec::new(),
+            calls: Vec::new(),
+            field_reads: Vec::new(),
+            owner_class: None,
+            content_hash: 0,
+        }
+    }
+
+    fn schema_field(owner: &str, span: Span) -> RawSchemaField {
+        RawSchemaField {
+            name: "email".into(),
+            type_class: SchemaType::String,
+            owner_class: owner.into(),
+            framework: FrameworkId::Pydantic,
+            span,
+            endpoint: None,
+        }
+    }
+
+    fn event_topic(span: Span) -> RawEventTopic {
+        RawEventTopic {
+            topic_literal: Some("orders".into()),
+            direction: PubSub::Publish,
+            lib: FrameworkId::Pydantic,
+            enclosing_fn: "".into(),
+            span,
+            endpoint: None,
+        }
+    }
+
+    #[test]
+    fn test_bind_schema_field_inside_owner_type_binds_that_type() {
+        let nodes = [
+            bind_node("User", NodeKind::Class, (0, 0, 3, 0)),
+            bind_node("Order", NodeKind::Class, (4, 0, 7, 0)),
+        ];
+        assert_eq!(
+            schema_field("Order", (5, 4, 5, 20)).bind(&nodes),
+            Some(RawEndpoint::Node(RawIdx(1)))
+        );
+    }
+
+    /// An OpenAPI schema whose key spans fell back to `(0, 0, 0, 0)`: every
+    /// type contains every field by span, so the owner's name decides.
+    #[test]
+    fn test_bind_schema_field_zero_spans_binds_by_owner_name() {
+        let zero = (0, 0, 0, 0);
+        let nodes = [
+            bind_node("User", NodeKind::Struct, zero),
+            bind_node("Order", NodeKind::Struct, zero),
+        ];
+        assert_eq!(
+            schema_field("Order", zero).bind(&nodes),
+            Some(RawEndpoint::Node(RawIdx(1)))
+        );
+    }
+
+    #[test]
+    fn test_bind_schema_field_two_visible_same_name_types_binds_none() {
+        let zero = (0, 0, 0, 0);
+        let nodes = [
+            bind_node("Other", NodeKind::Struct, zero),
+            bind_node("Order", NodeKind::Struct, (1, 0, 2, 0)),
+            bind_node("Order", NodeKind::Struct, (3, 0, 4, 0)),
+        ];
+        assert_eq!(schema_field("Order", zero).bind(&nodes), None);
+    }
+
+    #[test]
+    fn test_bind_schema_field_no_type_or_blank_owner_binds_none() {
+        let nodes = [bind_node("load", NodeKind::Function, (0, 0, 3, 0))];
+        assert_eq!(schema_field("User", (1, 0, 1, 9)).bind(&nodes), None);
+        assert_eq!(schema_field("  ", (1, 0, 1, 9)).bind(&nodes), None);
+        assert_eq!(schema_field("User", (1, 0, 1, 9)).bind(&[]), None);
+    }
+
+    #[test]
+    fn test_bind_event_topic_module_top_binds_file_inside_callable_binds_it() {
+        let nodes = [bind_node("publish", NodeKind::Function, (2, 0, 4, 0))];
+        assert_eq!(
+            event_topic((0, 0, 0, 30)).bind(&nodes),
+            Some(RawEndpoint::File)
+        );
+        assert_eq!(
+            event_topic((3, 4, 3, 30)).bind(&nodes),
+            Some(RawEndpoint::Node(RawIdx(0)))
+        );
+    }
+
+    /// Binding twice (a cached graph re-entering a parse entry) writes the
+    /// same endpoints; a graph with no records stays untouched.
+    #[test]
+    fn test_bind_records_twice_writes_same_endpoints_and_empty_graph_is_noop() {
+        let mut graph = LocalGraph {
+            nodes: vec![
+                bind_node("load", NodeKind::Function, (2, 0, 4, 0)),
+                bind_node("User", NodeKind::Class, (6, 0, 8, 0)),
+            ],
+            path_literals: Some(Box::new([RawPathLiteral {
+                value: "conf/a.json".into(),
+                span: (3, 4, 3, 20),
+                enclosing_symbol: Some("load".into()),
+                enclosing_owner: None,
+                sink_reason: String::new(),
+                endpoint: None,
+            }])),
+            sql_refs: Some(Box::new([RawSqlRef {
+                tables: Vec::new(),
+                unresolved: false,
+                span: (0, 0, 0, 30),
+                enclosing_symbol: None,
+                enclosing_owner: None,
+                endpoint: None,
+            }])),
+            schema_fields: Some(Box::new([schema_field("User", (7, 4, 7, 20))])),
+            event_topics: Some(Box::new([event_topic((9, 0, 9, 30))])),
+            ..LocalGraph::default()
+        };
+        graph.bind_records();
+        let endpoints = |g: &LocalGraph| {
+            (
+                g.path_literals.as_ref().unwrap()[0].endpoint.clone(),
+                g.sql_refs.as_ref().unwrap()[0].endpoint.clone(),
+                g.schema_fields.as_ref().unwrap()[0].endpoint.clone(),
+                g.event_topics.as_ref().unwrap()[0].endpoint.clone(),
+            )
+        };
+        let first = endpoints(&graph);
+        assert_eq!(
+            first,
+            (
+                Some(RawEndpoint::Node(RawIdx(0))),
+                Some(RawEndpoint::File),
+                Some(RawEndpoint::Node(RawIdx(1))),
+                Some(RawEndpoint::File),
+            )
+        );
+        graph.bind_records();
+        assert_eq!(endpoints(&graph), first);
+
+        let mut empty = LocalGraph::default();
+        empty.bind_records();
+        assert!(empty.path_literals.is_none() && empty.schema_fields.is_none());
     }
 
     #[test]

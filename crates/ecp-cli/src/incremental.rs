@@ -421,6 +421,7 @@ mod tests {
                     owner_class: "User".into(),
                     framework: FrameworkId::Pydantic,
                     span: (1, 0, 1, 4),
+                    endpoint: None,
                 },
                 RawSchemaField {
                     name: "email".into(),
@@ -428,6 +429,7 @@ mod tests {
                     owner_class: "User".into(),
                     framework: FrameworkId::Pydantic,
                     span: (2, 0, 2, 5),
+                    endpoint: None,
                 },
             ]
             .into_boxed_slice(),
@@ -473,6 +475,7 @@ mod tests {
                 owner_class: "User".into(),
                 framework: FrameworkId::Pydantic,
                 span: (3, 0, 3, 14),
+                endpoint: None,
             }]
             .into_boxed_slice(),
         );
@@ -628,6 +631,7 @@ mod tests {
             type_class: SchemaType::String,
             framework: FrameworkId::Pydantic,
             span: (2, 0, 2, 20),
+            endpoint: None,
         }]));
 
         let uid = node_uids_for(&graph)[0];

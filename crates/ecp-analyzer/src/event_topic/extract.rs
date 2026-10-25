@@ -137,6 +137,7 @@ pub fn extract_event_topics(
                 lib: config.framework,
                 enclosing_fn,
                 span,
+                endpoint: None,
             });
             break;
         }

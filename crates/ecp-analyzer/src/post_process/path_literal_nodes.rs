@@ -1,32 +1,37 @@
-//! `PathLiteral` Node emission + `UsesPathLiteral` edge from the enclosing
-//! Function/Method captured by per-language `path_literals` extractors.
+//! `PathLiteral` Node emission + `UsesPathLiteral` edge from the literal's
+//! endpoint, captured by per-language `path_literals` extractors.
 //!
 //! Promotes each `LocalGraph.path_literals` entry to:
 //!   - One `NodeKind::PathLiteral` Node with `name = literal value`,
-//!     `span = literal span`, `owner_class = enclosing_owner.unwrap_or("")`.
-//!   - One `UsesPathLiteral` Edge (enclosing function/method idx → PathLiteral
-//!     idx) with `reason = pre-rendered sink_reason` from the extractor.
+//!     `span = literal span`, `owner_class` = the bound node's owner.
+//!   - One `UsesPathLiteral` Edge (endpoint → PathLiteral idx) with
+//!     `reason = pre-rendered sink_reason` from the extractor.
 //!
-//! Honest-no-data rule: when the enclosing symbol can't be resolved against
-//! `SymbolTable` (module-top-level literals; partial-parse drops), the
-//! PathLiteral Node is still emitted (so `MATCH (n:PathLiteral)` queries see
-//! it) but the edge is skipped — no fabricated source.
+//! The endpoint is the innermost enclosing callable or `Const` by span, else
+//! the file (C4 `RecordKind::PathLiteral`). A `File` endpoint goes to
+//! `file_edges`: the builder appends `File` nodes after this pass and gives
+//! those edges their source then (C4 Open point 3, option b).
 
-use crate::resolution::index::SymbolTable;
 use ecp_core::analyzer::types::LocalGraph;
+use ecp_core::contracts::raw_records::{FileOrd, GlobalEndpoint, RawEndpoint, RawIndexMap};
 use ecp_core::graph::{Edge, Node, NodeKind, RelType};
 use ecp_core::pool::StringPool;
 use ecp_core::uid;
 
-/// Returns the number of `UsesPathLiteral` edges appended. PathLiteral node
-/// count is derivable from `nodes.len()` delta and is logged separately by
-/// the builder.
+/// The source of an edge in `file_edges` until the builder sets it to the
+/// file's `File` node.
+pub const FILE_SOURCE_PENDING: u32 = u32::MAX;
+
+/// Returns the number of `UsesPathLiteral` edges appended to `edges` and
+/// `file_edges`. PathLiteral node count is derivable from `nodes.len()` delta
+/// and is logged separately by the builder.
 pub fn emit_edges(
     local_graphs: &[LocalGraph],
-    symbol_table: &SymbolTable,
+    raw_map: &RawIndexMap,
     string_pool: &mut StringPool,
     nodes: &mut Vec<Node>,
     edges: &mut Vec<Edge>,
+    file_edges: &mut Vec<(FileOrd, Edge)>,
 ) -> usize {
     let mut edge_count = 0usize;
 
@@ -39,13 +44,22 @@ pub fn emit_edges(
         }
         let path_str = lg.file_path.to_string_lossy().replace('\\', "/");
         let file_idx = lg_idx as u32;
+        let file = FileOrd(file_idx);
 
         for raw in literals.iter() {
             let value = raw.value.as_str();
-            let owner_name = raw.enclosing_owner.as_deref().unwrap_or("");
+            let endpoint = raw.endpoint_in(&lg.nodes);
+            // The owner is the bound node's own owner, so two identical
+            // literals in same-name methods of two types get distinct UIDs.
+            let owner_name = match &endpoint {
+                Some(RawEndpoint::Node(idx)) => lg
+                    .nodes
+                    .get(idx.index())
+                    .and_then(|n| n.owner_class.as_deref()),
+                _ => None,
+            }
+            .unwrap_or("");
 
-            // UID: include owner so two identical literals in different
-            // methods of different impl blocks (same file) get distinct UIDs.
             let node_uid = uid::compute(
                 NodeKind::PathLiteral,
                 &path_str,
@@ -71,21 +85,24 @@ pub fn emit_edges(
                 content_hash: 0,
             });
 
-            let Some(enclosing_name) = raw.enclosing_symbol.as_deref() else {
+            let Some(endpoint) = endpoint else {
                 continue;
             };
-            let Some(enclosing_idx) = symbol_table.lookup_in_file(&path_str, enclosing_name) else {
-                continue;
-            };
-
-            let reason_ref = string_pool.add(&raw.sink_reason);
-            edges.push(Edge {
-                source: enclosing_idx,
+            let reason = string_pool.add(&raw.sink_reason);
+            let edge = |source| Edge {
+                source,
                 target: lit_idx,
                 rel_type: RelType::UsesPathLiteral,
                 confidence: 1.0,
-                reason: reason_ref,
-            });
+                reason,
+            };
+            match raw_map.resolve(file, &endpoint) {
+                Some(GlobalEndpoint::Node(source)) => edges.push(edge(source)),
+                Some(GlobalEndpoint::File(file)) => {
+                    file_edges.push((file, edge(FILE_SOURCE_PENDING)))
+                }
+                Some(GlobalEndpoint::Unresolved(_)) | None => continue,
+            }
             edge_count += 1;
         }
     }

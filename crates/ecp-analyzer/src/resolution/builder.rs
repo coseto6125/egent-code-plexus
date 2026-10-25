@@ -112,6 +112,8 @@ struct Pass1Registration {
     nodes: Vec<Node>,
     files: Vec<File>,
     collision_blind_spots: Vec<BlindSpotRecord>,
+    /// `(tombstone slot, surviving slot)` for every collision tombstone.
+    merged: Vec<(u32, u32)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -264,11 +266,19 @@ impl GraphBuilder {
             mut nodes,
             files,
             collision_blind_spots,
+            merged,
         } = pass1_register_nodes(&self.local_graphs);
         // Pass 1 gives every raw node a slot (a collision keeps a tombstone),
         // so the map reads node counts only and holds for the whole build.
+        // A record of a tombstoned twin binds the node that kept its identity
+        // (C4 Open point 2): an edge never starts at an empty-named tombstone.
         let raw_map = RawIndexMap::new(0, self.local_graphs.iter().map(|lg| lg.nodes.len()))
-            .expect("total RawNode count exceeds u32::MAX — graph node ID scheme would overflow");
+            .expect("total RawNode count exceeds u32::MAX — graph node ID scheme would overflow")
+            .with_merged(merged)
+            .expect("pass 1 pairs each tombstone with an earlier slot that is no tombstone");
+        // Edges from a record bound to `File`; the `File` nodes are appended
+        // after the passes that emit them (C4 Open point 3, option b).
+        let mut file_edges: Vec<(FileOrd, Edge)> = Vec::new();
         // Maps forward-slashed file_path → File node index. Populated by the
         // File-node loop after Pass 4, consumed by `post_process::imports_edges`
         // to wire (File)-[:Imports]->(symbol) edges. File nodes are deliberately
@@ -695,7 +705,7 @@ impl GraphBuilder {
         // references them by name; reverse traversal goes via HasProperty.
         crate::post_process::schema_field_mirrors::emit_edges(
             &self.local_graphs,
-            &symbol_table,
+            &raw_map,
             &mut string_pool,
             &mut nodes,
             &mut edges,
@@ -710,10 +720,11 @@ impl GraphBuilder {
         // traversal from function nodes.
         crate::post_process::event_topic_mirrors::emit_edges(
             &self.local_graphs,
-            &symbol_table,
+            &raw_map,
             &mut string_pool,
             &mut nodes,
             &mut edges,
+            &mut file_edges,
         );
 
         // T10: promote `RawTxScope`s → `TransactionScope` Nodes + `OpensTxScope`
@@ -751,18 +762,20 @@ impl GraphBuilder {
         // before the File-node loop runs.
         crate::post_process::path_literal_nodes::emit_edges(
             &self.local_graphs,
-            &symbol_table,
+            &raw_map,
             &mut string_pool,
             &mut nodes,
             &mut edges,
+            &mut file_edges,
         );
 
         crate::post_process::sql_table_edges::emit_edges(
             &self.local_graphs,
-            &symbol_table,
+            &raw_map,
             &mut string_pool,
             &nodes,
             &mut edges,
+            &mut file_edges,
         );
 
         // Saga compensation pairing — emits heuristic `CompensatedBy` edges
@@ -779,6 +792,7 @@ impl GraphBuilder {
         // dense invariant (`index.rs::register_node` debug_assert). File
         // nodes don't enter SymbolTable; they're metadata reachable only
         // via `file_node_idx` for module-level edges (Imports today).
+        let first_file_node = nodes.len() as u32;
         for (i, local_graph) in self.local_graphs.iter().enumerate() {
             let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
             let basename = std::path::Path::new(&path_str)
@@ -815,6 +829,11 @@ impl GraphBuilder {
             });
             file_node_idx.insert(path_str, file_node_id);
         }
+        // The loop pushes one `File` node per `LocalGraph`, in input order.
+        edges.extend(file_edges.into_iter().map(|(file, mut edge)| {
+            edge.source = first_file_node + file.0;
+            edge
+        }));
 
         // Cross-language Imports post-process. Emits (File)-[:Imports]->(symbol)
         // edges by resolving each `RawImport.imported_name` against the same
@@ -858,7 +877,7 @@ impl GraphBuilder {
         crate::post_process::scope_defines::emit_edges(
             &self.local_graphs,
             &file_node_idx,
-            &symbol_table,
+            &raw_map,
             &mut string_pool,
             &mut edges,
         );
@@ -1092,6 +1111,7 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
     // after the main blind-spot pass (below). Using a separate vec avoids
     // borrowing string_pool twice in the node loop.
     let mut collision_blind_spots: Vec<BlindSpotRecord> = Vec::new();
+    let mut merged: Vec<(u32, u32)> = Vec::new();
 
     for (file_idx, local_graph) in local_graphs.iter().enumerate() {
         let file_idx = file_idx as u32;
@@ -1276,6 +1296,7 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
                 // absence from the symbol table, and "" never matches a real
                 // symbol-name query.
                 symbol_table.register_tombstone(raw_node.kind, file_meta);
+                merged.push((current_node_idx, prev_idx));
                 nodes.push(Node {
                     uid: ecp_core::uid::tombstone(uid_u64),
                     name: StrRef::default(),
@@ -1353,6 +1374,7 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
         nodes,
         files,
         collision_blind_spots,
+        merged,
     }
 }
 

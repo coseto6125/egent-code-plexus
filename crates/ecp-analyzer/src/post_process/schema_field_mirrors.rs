@@ -12,9 +12,9 @@
 //!
 //! 1. **Promote**: iterate `LocalGraph.schema_fields`, emit one
 //!    `SchemaField` Node + one `HasProperty` edge (Class → SchemaField)
-//!    per field. SymbolTable lookup resolves the owning class name in
-//!    the same file; misses silently drop the field (no false-positive
-//!    edge to a wrong class).
+//!    per field. The owner is the record's endpoint, the innermost enclosing
+//!    type (`RawSchemaField::bind`); a field with no owning type is dropped
+//!    (no false-positive edge to a wrong class, no `File` fallback).
 //!
 //! 2. **Bucket**: group emitted SchemaField Nodes by
 //!    `(name.to_lowercase(), SchemaType)` so case-variants and
@@ -36,8 +36,8 @@
 //!   than a handful of cross-framework mirrors per identifier).
 //! - Offline-only — runs once at build time, never on `ecp` hot paths.
 
-use crate::resolution::index::SymbolTable;
 use ecp_core::analyzer::types::{LocalGraph, SchemaType};
+use ecp_core::contracts::raw_records::{FileOrd, GlobalEndpoint, RawIndexMap};
 use ecp_core::graph::{Edge, Node, NodeKind, RelType};
 use ecp_core::pool::StringPool;
 use ecp_core::uid;
@@ -47,14 +47,9 @@ use rustc_hash::FxHashMap;
 /// connections + `MirrorsField` heuristic edges. Returns the count of
 /// emitted MirrorsField edges (HasProperty + SchemaField Node counts are
 /// derivable from `nodes.len()` delta; this return is for telemetry).
-///
-/// `file_node_count_before` is the size of `nodes` BEFORE the File-node
-/// append loop runs — used to bound SchemaField nodes to the
-/// raw-symbols-and-extras region so `file_node_idx` registration further
-/// downstream still hits the correct File-node range.
 pub fn emit_edges(
     local_graphs: &[LocalGraph],
-    symbol_table: &SymbolTable,
+    raw_map: &RawIndexMap,
     string_pool: &mut StringPool,
     nodes: &mut Vec<Node>,
     edges: &mut Vec<Edge>,
@@ -69,10 +64,8 @@ pub fn emit_edges(
     // Phase 1 — emit SchemaField Nodes + HasProperty edges, populate buckets.
     //
     // Skip `LocalGraph`s with no `schema_fields` (the majority — most files
-    // carry no ORM/schema surface). Per-file Owner-class lookup uses
-    // SymbolTable's per-file index; misses (e.g. extractor emitted a class
-    // name that SymbolTable doesn't know about, perhaps due to file
-    // boundary edge cases) silently drop the field. No fabricated edges.
+    // carry no ORM/schema surface). A field whose endpoint binds no type of
+    // its file is dropped. No fabricated edges.
     for (lg_idx, local_graph) in local_graphs.iter().enumerate() {
         let Some(ref schema_fields) = local_graph.schema_fields else {
             continue;
@@ -87,13 +80,16 @@ pub fn emit_edges(
             let owner_name = &*raw_sf.owner_class;
             let field_name = &*raw_sf.name;
 
-            // Resolve the owning class to an existing Node idx. If the
-            // SymbolTable doesn't know `owner_name` in this file, the
-            // class was not parsed as a `Class` / `Struct` / `Trait` /
-            // `Interface` — likely a generated-code or DSL pattern that
-            // we don't model. Silently skip rather than emit dangling
-            // HasProperty.
-            let Some(class_idx) = symbol_table.lookup_in_file(&path_str, owner_name) else {
+            // The owning type's node. No `Class` / `Struct` / `Trait` /
+            // `Interface` of this file owns the field: likely a generated-code
+            // or DSL pattern that we don't model. Skip rather than emit a
+            // dangling HasProperty.
+            let Some(endpoint) = raw_sf.endpoint_in(&local_graph.nodes) else {
+                continue;
+            };
+            let Some(GlobalEndpoint::Node(class_idx)) =
+                raw_map.resolve(FileOrd(file_idx), &endpoint)
+            else {
                 continue;
             };
 

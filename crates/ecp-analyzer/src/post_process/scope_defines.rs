@@ -9,8 +9,12 @@
 //! Class → Method / Property containment stays exclusively HasMethod / HasProperty
 //! — Defines must NOT duplicate. The invariant: `owner_class.is_none()` OR the
 //! owner is a Namespace/Module (not a Class/Interface/Trait).
+//!
+//! Both ends come from raw indexes through the build's `RawIndexMap`, never
+//! from a name lookup: two same-name declarations each get their own edge.
 
-use ecp_core::analyzer::types::LocalGraph;
+use ecp_core::analyzer::types::{span_contains, LocalGraph};
+use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
 use ecp_core::graph::{Edge, NodeKind, RelType};
 use ecp_core::pool::StringPool;
 use rustc_hash::FxHashMap;
@@ -20,34 +24,32 @@ use rustc_hash::FxHashMap;
 pub fn emit_edges(
     local_graphs: &[LocalGraph],
     file_node_idx: &FxHashMap<String, u32>,
-    symbol_table: &crate::resolution::index::SymbolTable,
+    raw_map: &RawIndexMap,
     string_pool: &mut StringPool,
     edges_out: &mut Vec<Edge>,
 ) -> usize {
     let reason = string_pool.add("pass2:defines");
     let mut emitted = 0usize;
 
-    for local_graph in local_graphs {
+    for (lg_idx, local_graph) in local_graphs.iter().enumerate() {
         let file_path_lossy = local_graph.file_path.to_string_lossy().replace('\\', "/");
+        let file = FileOrd(lg_idx as u32);
+        let nodes = &local_graph.nodes;
 
         let Some(&file_node_id) = file_node_idx.get(&file_path_lossy) else {
             continue;
         };
 
-        // Collect namespace/module node IDs once so Pass 2 can look them up by name.
-        // Maps container_name → node_id for each Namespace/Module in this file.
-        let container_ids: FxHashMap<&str, u32> = local_graph
-            .nodes
-            .iter()
-            .filter(|n| matches!(n.kind, NodeKind::Namespace | NodeKind::Module))
-            .filter_map(|n| {
-                symbol_table
-                    .lookup_in_file(&file_path_lossy, &n.name)
-                    .map(|id| (n.name.as_str(), id))
-            })
-            .collect();
+        // Namespace/Module raw indexes by name, in source order, so a child
+        // finds its container by its owner name.
+        let mut container_ids: FxHashMap<&str, Vec<usize>> = FxHashMap::default();
+        for (i, n) in nodes.iter().enumerate() {
+            if matches!(n.kind, NodeKind::Namespace | NodeKind::Module) {
+                container_ids.entry(n.name.as_str()).or_default().push(i);
+            }
+        }
 
-        for raw_node in &local_graph.nodes {
+        for (raw_idx, raw_node) in nodes.iter().enumerate() {
             let kind = raw_node.kind;
 
             // Only emit Defines for kinds that represent scope boundaries.
@@ -77,8 +79,7 @@ pub fn emit_edges(
                 continue;
             }
 
-            let Some(child_id) = symbol_table.lookup_in_file(&file_path_lossy, &raw_node.name)
-            else {
+            let Some(child_id) = raw_map.node(file, RawIdx(raw_idx as u32)) else {
                 continue;
             };
 
@@ -109,7 +110,21 @@ pub fn emit_edges(
                     } else {
                         owner.as_str()
                     };
-                    if let Some(&container_id) = container_ids.get(container_name) {
+                    // Of two same-name containers (`namespace Acme` twice), the
+                    // innermost one around the child; else the first, as a
+                    // statement-form `namespace Acme;` contains nothing.
+                    let container = container_ids.get(container_name).and_then(|ids| {
+                        ids.iter()
+                            .copied()
+                            .filter(|&c| {
+                                c != raw_idx && span_contains(nodes[c].span, raw_node.span)
+                            })
+                            .max_by_key(|&c| (nodes[c].span.0, nodes[c].span.1))
+                            .or_else(|| ids.first().copied())
+                    });
+                    if let Some(container_id) =
+                        container.and_then(|c| raw_map.node(file, RawIdx(c as u32)))
+                    {
                         edges_out.push(Edge {
                             source: container_id,
                             target: child_id,

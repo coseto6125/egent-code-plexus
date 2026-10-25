@@ -131,6 +131,10 @@ impl AnalyzerPipeline {
     /// so an empty result hands the file to the next candidate, and the first
     /// result stands when none accepts (today's single-provider answer). An
     /// error ends the chain. `None` when the chain is empty.
+    ///
+    /// Both parse entries, [`Self::parse_file_raw`] (incremental) and
+    /// [`Self::analyze_with_cache`] (cold), go through here, so the graph
+    /// they return has its records bound ([`bound`]).
     fn parse_chain(
         chain: &[&dyn LanguageProvider],
         rel_path: &std::path::Path,
@@ -144,11 +148,11 @@ impl AnalyzerPipeline {
                 Ok(graph) if graph.nodes.is_empty() && graph.blind_spots.is_empty()
             );
             if accepted {
-                return Some((provider.name(), result));
+                return Some((provider.name(), bound(result)));
             }
             fallback.get_or_insert((provider.name(), result));
         }
-        fallback
+        fallback.map(|(name, result)| (name, bound(result)))
     }
 
     /// Analyze files concurrently using a Multi-Producer Single-Consumer architecture
@@ -342,6 +346,15 @@ impl AnalyzerPipeline {
 
         all_graphs
     }
+}
+
+/// C4 `ParsePhase::BindRecords` for one provider's graph: the provider has
+/// returned, so its node list is final.
+fn bound(result: anyhow::Result<LocalGraph>) -> anyhow::Result<LocalGraph> {
+    result.map(|mut graph| {
+        graph.bind_records();
+        graph
+    })
 }
 
 #[cfg(test)]

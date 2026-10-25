@@ -273,6 +273,7 @@ fn test_skip_guarded_when_schemafield_bucket_changes() {
         type_class: SchemaType::String,
         framework: FrameworkId::Pydantic,
         span: (2, 0, 2, 20),
+        endpoint: None,
     }]));
 
     // Old hash matches exactly — without guard (c) we'd skip.

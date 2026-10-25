@@ -28,6 +28,7 @@ use ecp_cli::session::overlay_reader::{accepted_fragments, decode_view_inputs};
 use ecp_cli::session::overlay_writer::write_dirty_events;
 use ecp_cli::session::state::classify;
 use ecp_cli::session::view_cache;
+use ecp_core::analyzer::pipeline::AnalyzerPipeline;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::contracts::dirty_event::PathClass;
@@ -446,6 +447,112 @@ fn test_parse_cache_written_by_0_16_4_replays_parse_or_misses() {
             );
         }
     }
+}
+
+/// The `BUILDER_FINGERPRINT` schema suffix before slice P6 gave four raw
+/// record types a `RawEndpoint` field.
+const PRE_P6_SCHEMA: &str = "+schema26";
+
+/// A trait-impl method whose name the bodiless trait declaration shares. A
+/// lookup by name finds the declaration first.
+const TRAIT_IMPL_SRC: &str = r#"trait Store {
+    fn path(&self) -> String;
+}
+
+struct Disk;
+
+impl Store for Disk {
+    fn path(&self) -> String {
+        std::fs::read_to_string("conf/store.json").unwrap()
+    }
+}
+"#;
+
+/// Stands for: the parse cache that the previous release wrote holds
+/// `LocalGraph`s without record endpoints, so after the P6 bump no entry of
+/// it is read: the reader opens another directory, each of the writer's
+/// entries misses, and a cold index over that cache parses again. A path
+/// literal in a trait-impl method then starts at that method, not at the
+/// bodiless trait declaration (C4 Stored data).
+#[test]
+fn test_prev_release_parse_cache_not_read_after_fingerprint_bump() {
+    assert!(
+        !BUILDER_FINGERPRINT.ends_with(PRE_P6_SCHEMA),
+        "P6 changes what a LocalGraph holds; BUILDER_FINGERPRINT {BUILDER_FINGERPRINT} must move past {PRE_P6_SCHEMA}"
+    );
+    assert_ne!(ParseCache::current_dir_name(), WRITER_PARSE_DIR);
+
+    let tmp = copy_repo();
+    let repo = tmp.path().join("repo");
+    let cache = ParseCache::open(&repo).unwrap();
+    for rel in [
+        "app.py",
+        "pkg/__init__.py",
+        "pkg/core.py",
+        "web/util.ts",
+        "lib.rs",
+    ] {
+        let hash = xxhash_rust::xxh3::xxh3_64(&committed(rel)).to_le_bytes();
+        let name = cache
+            .path_for(Path::new(rel), &hash)
+            .file_name()
+            .unwrap()
+            .to_owned();
+        assert!(
+            repo.join("parse_cache")
+                .join(WRITER_PARSE_DIR)
+                .join(&name)
+                .exists(),
+            "fixture holds no entry for {rel}: key scheme or fixture changed"
+        );
+        assert!(
+            cache.get(Path::new(rel), &hash).is_none(),
+            "{rel}: an entry without record endpoints was replayed"
+        );
+    }
+
+    // The rebuild path: a cold index that offers every file to this cache.
+    let root = tmp.path().join("worktree-p6");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("lib.rs"), committed("lib.rs")).unwrap();
+    fs::write(root.join("store.rs"), TRAIT_IMPL_SRC).unwrap();
+    let mut pipeline = AnalyzerPipeline::new();
+    pipeline.register_provider(Box::new(RustProvider::new().unwrap()));
+    let graphs = pipeline.analyze_with_cache(
+        vec![
+            (root.join("lib.rs"), PathBuf::from("lib.rs")),
+            (root.join("store.rs"), PathBuf::from("store.rs")),
+        ],
+        |rel, hash| cache.get(rel, hash),
+    );
+    assert_eq!(graphs.len(), 2, "both files reach the builder");
+    let mut builder = GraphBuilder::new();
+    for graph in graphs {
+        builder.add_graph(graph);
+    }
+    let graph = builder.build();
+
+    let pool = graph.string_pool.as_slice();
+    let sources: Vec<(NodeKind, String, String, u32)> = graph
+        .edges
+        .iter()
+        .filter(|e| e.rel_type == RelType::UsesPathLiteral)
+        .filter(|e| graph.nodes[e.target as usize].name.resolve(pool) == "conf/store.json")
+        .map(|e| {
+            let source = &graph.nodes[e.source as usize];
+            (
+                source.kind,
+                source.name.resolve(pool).to_string(),
+                source.owner_class.resolve(pool).to_string(),
+                source.span.0 + 1,
+            )
+        })
+        .collect();
+    assert_eq!(
+        sources,
+        vec![(NodeKind::Method, "path".to_string(), "Disk".to_string(), 8)],
+        "the literal's edge starts at the impl method, line 8, not the trait declaration, line 2"
+    );
 }
 
 // ------------------------------------------------- dirty manifest and meta
