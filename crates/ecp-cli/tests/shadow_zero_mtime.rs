@@ -6,19 +6,11 @@
 //! the shadow's `mtime_ns`. No real file has mtime 0, so `accepted_fragments`
 //! drops the fragment on every query and the cascade never reaches a view.
 //!
-//! The test runs the real CLI path (`ecp find` on the dirty tree with one
-//! session id) and reduces the session manifest to lines:
-//!
-//! - `zero-mtime <path>`: the manifest records mtime 0 for the file.
-//! - `stale-mtime <path>`: it records a non-zero mtime other than the file's.
-//! - `reader-drops <path>`: the reader (`accepted_fragments` and
-//!   `decode_view_inputs`) does not serve its fragment to the view.
-//!
-//! The lines must equal `tests/baselines/shadow_zero_mtime.txt` exactly; the
-//! lane that repairs the mtime capture deletes that baseline.
+//! The caller now stats the cascade set before the parse, so the manifest
+//! holds the shadow's real mtime and the reader serves its fragment. The
+//! tests run the real CLI path (`ecp find` on the dirty tree with one session
+//! id) and read the session manifest.
 
-#[path = "common/baseline.rs"]
-mod baseline;
 mod common;
 
 use common::{commit_all, ecp_bin, run_git, write};
@@ -85,34 +77,50 @@ fn mtime_ns(path: &Path) -> Option<u64> {
     Some(modified.duration_since(UNIX_EPOCH).ok()?.as_nanos() as u64)
 }
 
-#[test]
-fn test_accepted_fragments_shadow_cascade_mtime_matches_baseline() {
-    let repo = tempfile::tempdir().unwrap();
-    let home = tempfile::tempdir().unwrap();
+fn setup(repo: &Path, home: &Path) {
     write(
-        repo.path(),
+        repo,
         "src/util.js",
         "export function helper() {\n  return 1;\n}\n",
     );
     write(
-        repo.path(),
+        repo,
         "src/main.js",
         "import { helper } from './util';\n\nexport function run() {\n  return helper();\n}\n",
     );
-    run_git(repo.path(), &["init", "-q", "-b", "main"]);
-    commit_all(repo.path(), "init");
-    ecp(repo.path(), home.path(), &["admin", "index", "--repo", "."]);
-
+    run_git(repo, &["init", "-q", "-b", "main"]);
+    commit_all(repo, "init");
+    ecp(repo, home, &["admin", "index", "--repo", "."]);
     write(
-        repo.path(),
+        repo,
         "src/util.ts",
         "export function helper(): number {\n  return 2;\n}\n",
     );
-    ecp(
-        repo.path(),
-        home.path(),
-        &["find", "helper", "--format", "json"],
-    );
+    ecp(repo, home, &["find", "helper", "--format", "json"]);
+}
+
+fn served_paths(session: &Path, repo: &Path) -> BTreeSet<String> {
+    let (accepted, _) = accepted_fragments(session, repo).unwrap();
+    decode_view_inputs(&accepted)
+        .into_iter()
+        .map(|input| input.rel_path)
+        .collect()
+}
+
+fn manifest_mtime(session: &Path, rel: &str) -> u64 {
+    let manifest = DirtyEvents::read(&layout::dirty_events_path(session)).unwrap();
+    manifest
+        .entries
+        .get(rel)
+        .unwrap_or_else(|| panic!("no manifest entry for {rel}"))
+        .mtime_ns
+}
+
+#[test]
+fn test_accepted_fragments_shadow_cascade_mtime_reader_keeps_file() {
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    setup(repo.path(), home.path());
 
     let session = session_dir(home.path());
     let manifest = DirtyEvents::read(&layout::dirty_events_path(&session)).unwrap();
@@ -121,32 +129,51 @@ fn test_accepted_fragments_shadow_cascade_mtime_matches_baseline() {
         "the dirty file itself must have a fragment: {:?}",
         manifest.entries.keys().collect::<Vec<_>>()
     );
-    assert!(
-        manifest.entries.contains_key("src/util.js"),
-        "the shadow cascade must re-parse util.js: {:?}",
-        manifest.entries.keys().collect::<Vec<_>>()
-    );
-
-    let (accepted, _) = accepted_fragments(&session, repo.path()).unwrap();
-    let served: BTreeSet<String> = decode_view_inputs(&accepted)
-        .into_iter()
-        .map(|input| input.rel_path)
-        .collect();
-    let mut observed = BTreeSet::new();
-    for (rel, entry) in &manifest.entries {
-        if entry.mtime_ns == 0 {
-            observed.insert(format!("zero-mtime {rel}"));
-        } else if mtime_ns(&repo.path().join(rel)) != Some(entry.mtime_ns) {
-            observed.insert(format!("stale-mtime {rel}"));
-        }
-        if !served.contains(rel) {
-            observed.insert(format!("reader-drops {rel}"));
-        }
+    let served = served_paths(&session, repo.path());
+    for rel in ["src/util.ts", "src/util.js"] {
+        let entry = manifest
+            .entries
+            .get(rel)
+            .unwrap_or_else(|| panic!("the shadow cascade must record {rel}"));
+        assert_ne!(entry.mtime_ns, 0, "{rel} must not record mtime 0");
+        assert_eq!(
+            mtime_ns(&repo.path().join(rel)),
+            Some(entry.mtime_ns),
+            "{rel} must record the file's own mtime"
+        );
+        assert!(
+            served.contains(rel),
+            "the reader must serve {rel}: {served:?}"
+        );
     }
+}
 
-    baseline::check(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/baselines/shadow_zero_mtime.txt"),
-        "lane F (area 5 shadow-cascade mtime)",
-        &observed,
+#[test]
+fn test_ensure_fresh_shadow_edited_after_capture_reparses() {
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    setup(repo.path(), home.path());
+    let session = session_dir(home.path());
+    let before = manifest_mtime(&session, "src/util.js");
+
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    write(
+        repo.path(),
+        "src/util.js",
+        "export function helper() {\n  return 3;\n}\n",
     );
+    let edited = mtime_ns(&repo.path().join("src/util.js")).unwrap();
+    assert_ne!(edited, before, "the edit must move the file's mtime");
+    ecp(
+        repo.path(),
+        home.path(),
+        &["find", "helper", "--format", "json"],
+    );
+
+    assert_eq!(
+        manifest_mtime(&session, "src/util.js"),
+        edited,
+        "the gate must not keep the old shadow fragment"
+    );
+    assert!(served_paths(&session, repo.path()).contains("src/util.js"));
 }

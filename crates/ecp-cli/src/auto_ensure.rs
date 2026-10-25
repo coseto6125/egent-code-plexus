@@ -813,6 +813,20 @@ pub(crate) fn ensure_fresh_with_rebuild(
                         }
                     }
                 }
+                // The shadow cascade re-parses tracked files outside the
+                // dirty set; each needs its own pre-parse mtime or the
+                // manifest records 0 and the reader drops its fragment. A
+                // shadow absent from disk is skipped by the parse and gets
+                // no tombstone: it was never dirty.
+                let parse_paths =
+                    crate::reanalyze::expand_shadow_paths(worktree_root, &gate.rel_paths);
+                for rel in &parse_paths {
+                    if !pre_parse_mtimes.contains_key(rel) {
+                        if let Some(ns) = mtime_ns_of(&worktree_root.join(rel)) {
+                            pre_parse_mtimes.insert(rel.clone(), ns);
+                        }
+                    }
+                }
                 // The C3 change and class of each source half, for the
                 // manifest rows. Built only on this miss path: the gate-skip
                 // path above never needs it.
@@ -843,10 +857,10 @@ pub(crate) fn ensure_fresh_with_rebuild(
                 // re-parses them. This removes the second full tree-sitter pass
                 // (the dominant incremental cost on a large repo: ~0.6s for the
                 // 20-provider pipeline init alone).
-                let fresh_graphs = crate::reanalyze::reanalyze_files_under(
+                let fresh_graphs = crate::reanalyze::reanalyze_expanded_under(
                     worktree_root,
                     &crate::git::DiffScope::Unstaged,
-                    &gate.rel_paths,
+                    &parse_paths,
                     size_cap,
                 );
                 test_counters::REANALYZE_CALL_COUNT
@@ -1486,8 +1500,8 @@ fn apply_l1_overlay_updates(
     // writer consumes them directly (no second tree-sitter pass). Each file's
     // mtime was statted by the caller BEFORE the parse, so the manifest entry
     // can only under-claim freshness, never over-claim it (see the freshness
-    // gate in `ensure_fresh`). A missing entry records 0 — no real mtime
-    // matches it, so that fragment is permanently treated as stale.
+    // gate in `ensure_fresh`). The caller stats the shadow cascade too; a
+    // missing entry records 0, which no real mtime matches.
     let mtimes: Vec<u64> = fresh_graphs
         .iter()
         .map(|g| {

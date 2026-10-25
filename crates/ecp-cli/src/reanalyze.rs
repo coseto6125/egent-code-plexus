@@ -158,10 +158,15 @@ pub fn reanalyze_files_under(
     if rel_paths.is_empty() {
         return Vec::new();
     }
+    reanalyze_expanded_under(repo, scope, &expand_shadow_paths(repo, rel_paths), size_cap)
+}
 
-    // Expand the path set with any pre-existing files whose import-resolution
-    // the changed files can steal (ref-gitnexus PR #1479 stale-Calls fix).
-    let expanded: Vec<String> = if let Some(all_tracked) = tracked_files(repo) {
+/// `rel_paths` plus the tracked files whose import resolution the changed
+/// files can steal (ref-gitnexus PR #1479 stale-Calls fix). A caller that
+/// must stat every parsed file before the parse calls this first, then
+/// `reanalyze_expanded_under`, so the parse cascade and the stat set agree.
+pub fn expand_shadow_paths(repo: &Path, rel_paths: &[String]) -> Vec<String> {
+    if let Some(all_tracked) = tracked_files(repo) {
         let changed_pb: Vec<PathBuf> = rel_paths.iter().map(PathBuf::from).collect();
         let shadows = detect_shadow_candidates(&changed_pb, &all_tracked);
         if shadows.is_empty() {
@@ -180,8 +185,19 @@ pub fn reanalyze_files_under(
         }
     } else {
         rel_paths.to_vec()
-    };
-    let rel_paths = expanded.as_slice();
+    }
+}
+
+/// Parse exactly `rel_paths` (already shadow-expanded, no further cascade).
+pub fn reanalyze_expanded_under(
+    repo: &Path,
+    scope: &DiffScope,
+    rel_paths: &[String],
+    size_cap: SizeCap,
+) -> Vec<LocalGraph> {
+    if rel_paths.is_empty() {
+        return Vec::new();
+    }
 
     // Build a pipeline holding only the providers this dirty set's routes
     // list, the set the cold index constructs for the same paths. The full
