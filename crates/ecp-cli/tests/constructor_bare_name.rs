@@ -266,7 +266,57 @@ fn test_impact_bare_annotation_type_selects_type() {
 
         let payload = json_of(&out);
         assert_eq!(payload["status"], "success", "{file}: {payload}");
+        assert_eq!(
+            rows(&payload)[0],
+            (0, "Annotation".into(), name.into()),
+            "{file}: {payload}"
+        );
     }
+}
+
+/// Stands for: `impact` from the attribute-class part of a C# `partial`
+/// type reaches the other part and the construction caller. Failed at
+/// 39dba9fb: the part filter read `is_type`, so the `Annotation` part
+/// expanded to nothing.
+#[test]
+fn test_impact_csharp_partial_attribute_part_lists_other_part_and_caller() {
+    let repo = Repo::indexed(&[
+        ("x.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />\n"),
+        (
+            "a.cs",
+            "public partial class FooAttribute : System.Attribute\n{\n}\n",
+        ),
+        (
+            "b.cs",
+            "public partial class FooAttribute\n{\n    public void Extra() {}\n}\n",
+        ),
+        (
+            "c.cs",
+            "class User\n{\n    public object Use()\n    {\n        return new FooAttribute();\n    }\n}\n",
+        ),
+    ]);
+
+    let out = repo.ecp(&[
+        "impact",
+        "FooAttribute",
+        "--file",
+        "a.cs",
+        "--repo",
+        ".",
+        "--format",
+        "json",
+    ]);
+
+    let payload = json_of(&out);
+    let rows = rows(&payload);
+    assert!(
+        rows.iter().any(|r| r.0 == 0 && r.1 == "Class"),
+        "the b.cs part is at depth 0: {payload}"
+    );
+    assert!(
+        rows.iter().any(|r| r.0 == 1 && r.2 == "Use"),
+        "the construction caller is at depth 1: {payload}"
+    );
 }
 
 /// Stands for: `rename Foo Bar` on a class with a constructor renames the

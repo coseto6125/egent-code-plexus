@@ -317,7 +317,7 @@ pub(crate) fn shortest_path<'g>(
 /// spares every other node the edge scan.
 fn csharp_partial_parts(merged: &MergedGraph<'_>, idx: usize) -> Vec<u32> {
     let is_csharp_type = merged.node(idx as u32).is_some_and(|node| {
-        node.kind().is_type()
+        node.kind().declares_type()
             && node
                 .file_path(merged)
                 .is_some_and(|f| Language::from_normalized_path(f) == Language::CSharp)
