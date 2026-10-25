@@ -13,9 +13,9 @@
 //! - Ready → noop.
 
 use ecp_core::contracts::dirty_event::{
-    ClassifiedPath, DirtyEvent, DirtySet, DuplicatePath, RepoPath, SkipReason,
+    ClassifiedPath, DirtyEvent, DirtySet, NotRepoRelative, RepoPath, SkipReason, SkippedEntry,
 };
-use ecp_core::contracts::routing::{FileRouter, SizeCap};
+use ecp_core::contracts::routing::FileRouter;
 use ecp_core::session::SessionMeta;
 use ignore::WalkBuilder;
 use std::collections::HashMap;
@@ -522,8 +522,31 @@ fn git_fingerprint_shortcut(
 
 /// C5 routing, the same table `reanalyze_files` dispatches on. No syscall.
 fn classify_dirty(dirty: DirtySet) -> DirtySet<ClassifiedPath> {
-    const ROUTER: FileRouter = FileRouter::new(SizeCap::BUILT_IN);
-    dirty.classify(&ROUTER, None)
+    dirty.classify(&FileRouter::PATH_ONLY, None)
+}
+
+/// The repo path of a file the mtime walk found under `worktree_root`, or
+/// the skipped entry the porcelain parse records for a path it cannot name.
+fn walked_repo_path(path: &Path, worktree_root: &Path) -> Result<RepoPath, SkippedEntry> {
+    let rel = path.strip_prefix(worktree_root).unwrap_or(path);
+    let Some(text) = rel.to_str() else {
+        return Err(SkippedEntry {
+            path_lossy: rel.to_string_lossy().into_owned(),
+            reason: SkipReason::NotUtf8,
+        });
+    };
+    // The overlay writer keys its manifest by `/`, so a Windows separator
+    // becomes `/`. On Unix `\` is a file-name byte: mapping it would merge
+    // `a\b.py` into `a/b.py`.
+    let text = if cfg!(windows) {
+        text.replace('\\', "/")
+    } else {
+        text.to_owned()
+    };
+    RepoPath::new(text).map_err(|NotRepoRelative(path_lossy)| SkippedEntry {
+        path_lossy,
+        reason: SkipReason::NotRepoRelative,
+    })
 }
 
 /// True when `path` is one of ecp's own files and must not count as dirty
@@ -567,12 +590,19 @@ pub(crate) fn is_ecp_artifact(
 ///   file set (T7-4), followed by L1 overlay fragment write (T7-5 will replace
 ///   the overlay write with a zero-copy in-place merge).
 /// - Ready → noop.
+///
+/// `worktree_root` may be any directory of the worktree: `diff`, doctor,
+/// summary and the post-tool hook pass the cwd.
 pub fn ensure_fresh(
     need: IndexNeed<'_>,
     graph_path: &Path,
     worktree_root: &Path,
 ) -> Result<EnsureFreshOutcome, String> {
-    ensure_fresh_with_rebuild(need, graph_path, worktree_root).map(|ensured| ensured.outcome)
+    // Normalized here, not in `ensure_fresh_with_rebuild`: its read-context
+    // callers already hold the top, and the query path should not pay a
+    // second `canonicalize` for it.
+    let top = crate::read_context::worktree_top(worktree_root);
+    ensure_fresh_with_rebuild(need, graph_path, &top).map(|ensured| ensured.outcome)
 }
 
 /// What `ensure_fresh_with_rebuild` did, for the read context.
@@ -687,28 +717,27 @@ pub(crate) fn ensure_fresh_with_rebuild(
                 // Prefer the dirty set git already produced in the porcelain
                 // shortcut (O(changed)); only fall back to the whole-tree mtime
                 // walk when the staleness came from the mtime path itself.
+                let walked = dirty_files.is_none();
                 let dirty = match dirty_files {
                     Some(dirty) => dirty,
                     None => {
                         let graph_mtime = fs::metadata(graph_path)
                             .and_then(|m| m.modified())
                             .unwrap_or(std::time::UNIX_EPOCH);
-                        let walked = collect_dirty_files(graph_path, worktree_root, graph_mtime)
-                            .unwrap_or_default();
-                        // Forward slashes throughout: the overlay writer
-                        // normalizes manifest keys to `/`, so the gate's
-                        // lookups must match on Windows too.
-                        let events: Vec<_> = walked
-                            .iter()
-                            .filter_map(|p| p.strip_prefix(worktree_root).ok()?.to_str())
-                            .filter_map(|rel| RepoPath::new(rel.replace('\\', "/")).ok())
-                            .map(DirtyEvent::Modified)
-                            .collect();
-                        let walked =
-                            DirtySet::from_events(events).map_err(|DuplicatePath(p)| {
-                                format!("mtime walk named {} twice", p.as_str())
-                            })?;
-                        classify_dirty(walked)
+                        let mut skipped = Vec::new();
+                        let paths: Vec<RepoPath> =
+                            collect_dirty_files(graph_path, worktree_root, graph_mtime)
+                                .unwrap_or_default()
+                                .iter()
+                                .filter_map(|p| match walked_repo_path(p, worktree_root) {
+                                    Ok(path) => Some(path),
+                                    Err(entry) => {
+                                        skipped.push(entry);
+                                        None
+                                    }
+                                })
+                                .collect();
+                        classify_dirty(DirtySet::from_modified(paths, skipped))
                     }
                 };
                 // Every source half reaches the gate and the parse, removed
@@ -733,6 +762,13 @@ pub(crate) fn ensure_fresh_with_rebuild(
                 if gate.rel_paths.is_empty() {
                     test_counters::FRESH_GATE_SKIP_COUNT
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    // A walk that found only "other" files, or sources whose
+                    // fragments are current, leaves the sidecar behind HEAD;
+                    // every later query would repeat the walk until a
+                    // rebuild. A porcelain verdict already matched HEAD.
+                    if walked {
+                        write_head_sha_sidecar(graph_path, worktree_root);
+                    }
                     return Ok(Ensured::current(Some(dirty)));
                 }
                 // Stat BEFORE parsing: the manifest mtime must belong to the
@@ -1674,12 +1710,7 @@ mod fingerprint_drift_tests {
             "auto_ensure::fingerprint_drift_tests::test_retain_stale_fragments_current_v5_skips_reparse";
 
         if std::env::var_os(CHILD_ENV).is_none() {
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", TEST_NAME, "--nocapture"])
-                .env(CHILD_ENV, "1")
-                .status()
-                .unwrap();
-            assert!(status.success(), "isolated test process failed: {status}");
+            run_child_test(TEST_NAME, CHILD_ENV, "1");
             return;
         }
 
@@ -1720,12 +1751,7 @@ mod fingerprint_drift_tests {
             "auto_ensure::fingerprint_drift_tests::test_retain_stale_fragments_corrupt_v5_reparses";
 
         if std::env::var_os(CHILD_ENV).is_none() {
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", TEST_NAME, "--nocapture"])
-                .env(CHILD_ENV, "1")
-                .status()
-                .unwrap();
-            assert!(status.success(), "isolated test process failed: {status}");
+            run_child_test(TEST_NAME, CHILD_ENV, "1");
             return;
         }
 
@@ -1752,15 +1778,7 @@ mod fingerprint_drift_tests {
         const TEST_NAME: &str = "auto_ensure::fingerprint_drift_tests::test_retain_stale_fragments_native_v4_refresh_restores_call_edge";
         if std::env::var_os(CHILD_ENV).is_none() {
             for fingerprint in ["current", "released"] {
-                let status = std::process::Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact", TEST_NAME, "--nocapture"])
-                    .env(CHILD_ENV, fingerprint)
-                    .status()
-                    .unwrap();
-                assert!(
-                    status.success(),
-                    "{fingerprint}: isolated test process failed: {status}"
-                );
+                run_child_test(TEST_NAME, CHILD_ENV, fingerprint);
             }
             return;
         }
@@ -1844,13 +1862,27 @@ mod fingerprint_drift_tests {
         if std::env::var_os(child_env).is_some() {
             return false;
         }
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", test_name, "--nocapture"])
-            .env(child_env, "1")
-            .status()
-            .unwrap();
-        assert!(status.success(), "isolated test process failed: {status}");
+        run_child_test(test_name, child_env, "1");
         true
+    }
+
+    /// Runs `test_name` alone in a child test process with `child_env` set to
+    /// `value`. A drifted name makes libtest run no test and still exit 0, so
+    /// the child must also report one passed test: libtest's summary line
+    /// stands for "the named test ran and passed".
+    fn run_child_test(test_name: &str, child_env: &str, value: &str) {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture"])
+            .env(child_env, value)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("test result: ok. 1 passed;"),
+            "isolated test process {child_env}={value}: {}\n{stdout}\n{}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     /// A repo at HEAD with one committed `app.py`, and a graph outside it
@@ -1882,9 +1914,12 @@ mod fingerprint_drift_tests {
     }
 
     /// `ensure_fresh` on `repo_and_graph_at_head` with `untracked` written
-    /// after the commit. Returns the `reanalyze_files` calls and the paths
-    /// they received.
-    fn ensure_fresh_beside_untracked(session_id: &str, untracked: &[&str]) -> (usize, usize) {
+    /// after the commit. Returns the probe's verdict before `ensure_fresh`,
+    /// the `reanalyze_files` calls and the paths they received.
+    fn ensure_fresh_beside_untracked(
+        session_id: &str,
+        untracked: &[&str],
+    ) -> (EnsureResult, usize, usize) {
         let tmp = tempdir().unwrap();
         let (worktree, graph_path) = repo_and_graph_at_head(tmp.path());
         std::env::set_var("ECP_HOME", tmp.path().join("ecp-home"));
@@ -1893,11 +1928,15 @@ mod fingerprint_drift_tests {
             fs::write(worktree.join(name), "x = 1\n").unwrap();
         }
 
+        // The verdict proves the gate decided: a probe error would also leave
+        // the counters at zero.
+        let probe = ensure_index(&graph_path, &worktree).unwrap();
         test_counters::reset();
         // The overlay write may fail in a bare temp dir; the counters move
         // before it.
         let _ = ensure_fresh(IndexNeed::NearCurrent, &graph_path, &worktree);
         (
+            probe,
             test_counters::reanalyze_calls(),
             test_counters::reanalyze_paths(),
         )
@@ -1911,8 +1950,11 @@ mod fingerprint_drift_tests {
         ) {
             return;
         }
+        let (probe, calls, paths) =
+            ensure_fresh_beside_untracked("csv-only-test", &["a.csv", "b.csv", "c.csv"]);
+        assert_eq!(probe, EnsureResult::Ready);
         assert_eq!(
-            ensure_fresh_beside_untracked("csv-only-test", &["a.csv", "b.csv", "c.csv"]),
+            (calls, paths),
             (0, 0),
             "untracked .csv files alone must not reach reanalyze_files"
         );
@@ -1926,11 +1968,200 @@ mod fingerprint_drift_tests {
         ) {
             return;
         }
+        let (probe, calls, paths) =
+            ensure_fresh_beside_untracked("csv-py-test", &["a.csv", "new.py"]);
+        assert!(
+            matches!(
+                probe,
+                EnsureResult::Stale {
+                    dirty_files: Some(_),
+                    ..
+                }
+            ),
+            "{probe:?}"
+        );
         assert_eq!(
-            ensure_fresh_beside_untracked("csv-py-test", &["a.csv", "new.py"]),
+            (calls, paths),
             (1, 1),
             "only the .py file may reach reanalyze_files"
         );
+    }
+
+    /// `repo_and_graph_at_head` without its sidecar, so the mtime walk
+    /// decides, with `files` written after the graph. Returns the dirty set
+    /// `ensure_fresh_with_rebuild` saw.
+    fn walked_dirty_set(session_id: &str, files: &[&std::ffi::OsStr]) -> DirtySet<ClassifiedPath> {
+        let tmp = tempdir().unwrap();
+        let (worktree, graph_path) = repo_and_graph_at_head(tmp.path());
+        fs::remove_file(head_sha_sidecar_path(&graph_path)).unwrap();
+        std::env::set_var("ECP_HOME", tmp.path().join("ecp-home"));
+        std::env::set_var("ECP_SESSION_ID", session_id);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        for name in files {
+            let path = worktree.join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "x = 1\n").unwrap();
+        }
+        let probe = ensure_index(&graph_path, &worktree).unwrap();
+        assert!(
+            matches!(
+                probe,
+                EnsureResult::Stale {
+                    dirty_files: None,
+                    ..
+                }
+            ),
+            "the mtime walk must decide: {probe:?}"
+        );
+        ensure_fresh_with_rebuild(IndexNeed::NearCurrent, &graph_path, &worktree)
+            .unwrap()
+            .dirty
+            .expect("the gate returns the set it saw")
+    }
+
+    /// On Unix `\` is a file-name byte: `a\b.py` is no repo path, and must
+    /// neither merge into `a/b.py` nor fail the query as a duplicate.
+    #[cfg(unix)]
+    #[test]
+    fn test_ensure_fresh_with_rebuild_walk_backslash_name_beside_same_path_skips_it() {
+        if rerun_in_child(
+            "ECP_AUTO_ENSURE_BACKSLASH_CHILD",
+            "auto_ensure::fingerprint_drift_tests::test_ensure_fresh_with_rebuild_walk_backslash_name_beside_same_path_skips_it",
+        ) {
+            return;
+        }
+        use ecp_core::contracts::dirty_event::PathClass;
+        use std::ffi::OsStr;
+        let set = walked_dirty_set(
+            "backslash-test",
+            &[OsStr::new("a/b.py"), OsStr::new("a\\b.py")],
+        );
+        assert_eq!(
+            set.events(),
+            &[DirtyEvent::Modified(ClassifiedPath {
+                path: RepoPath::new("a/b.py").unwrap(),
+                class: PathClass::SOURCE,
+            })]
+        );
+        assert_eq!(
+            set.skipped(),
+            &[SkippedEntry {
+                path_lossy: "a\\b.py".into(),
+                reason: SkipReason::NotRepoRelative,
+            }]
+        );
+    }
+
+    /// The read context counts skipped entries into its caveat; a walk that
+    /// dropped the path would report a clean tree.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_ensure_fresh_with_rebuild_walk_non_utf8_name_records_skipped() {
+        if rerun_in_child(
+            "ECP_AUTO_ENSURE_WALK_NOT_UTF8_CHILD",
+            "auto_ensure::fingerprint_drift_tests::test_ensure_fresh_with_rebuild_walk_non_utf8_name_records_skipped",
+        ) {
+            return;
+        }
+        use std::os::unix::ffi::OsStrExt;
+        let set = walked_dirty_set(
+            "walk-not-utf8-test",
+            &[std::ffi::OsStr::from_bytes(b"bad\xff.py")],
+        );
+        assert!(set.events().is_empty(), "{set:?}");
+        assert_eq!(
+            set.skipped(),
+            &[SkippedEntry {
+                path_lossy: "bad\u{FFFD}.py".into(),
+                reason: SkipReason::NotUtf8,
+            }]
+        );
+    }
+
+    /// The newest commit touched only an "other" file, so the walk finds
+    /// nothing to parse. The sidecar must still move to HEAD, or every later
+    /// query repeats the whole-tree walk.
+    #[test]
+    fn test_ensure_fresh_graph_behind_other_only_commit_writes_head_sidecar() {
+        if rerun_in_child(
+            "ECP_AUTO_ENSURE_OTHER_COMMIT_CHILD",
+            "auto_ensure::fingerprint_drift_tests::test_ensure_fresh_graph_behind_other_only_commit_writes_head_sidecar",
+        ) {
+            return;
+        }
+        use ecp_core::contracts::dirty_event::PathClass;
+        assert!(
+            PathClass::classify(
+                &RepoPath::new("README.md").unwrap(),
+                &FileRouter::PATH_ONLY,
+                None
+            )
+            .is_other(),
+            "the fixture needs an \"other\" file"
+        );
+        let tmp = tempdir().unwrap();
+        let (worktree, graph_path) = repo_and_graph_at_head(tmp.path());
+        std::env::set_var("ECP_HOME", tmp.path().join("ecp-home"));
+        std::env::set_var("ECP_SESSION_ID", "other-commit-test");
+        let built_at = git_head_sha(&worktree).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(worktree.join("README.md"), "# readme\n").unwrap();
+        for args in [&["add", "README.md"][..], &["commit", "-qm", "readme"][..]] {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(&worktree)
+                .status()
+                .unwrap()
+                .success());
+        }
+        let head = git_head_sha(&worktree).unwrap();
+        assert_ne!(head, built_at);
+
+        test_counters::reset();
+        ensure_fresh(IndexNeed::NearCurrent, &graph_path, &worktree).unwrap();
+        assert_eq!(test_counters::reanalyze_calls(), 0);
+        assert_eq!(
+            fs::read_to_string(head_sha_sidecar_path(&graph_path))
+                .unwrap()
+                .trim(),
+            head
+        );
+        assert_eq!(
+            ensure_index(&graph_path, &worktree).unwrap(),
+            EnsureResult::Ready,
+            "the second query takes the porcelain shortcut"
+        );
+    }
+
+    /// `diff`, doctor, summary and the post-tool hook pass the cwd. Rooted at
+    /// `pkg/`, the walk would key the fragment `a.py`, a path no reader asks
+    /// for.
+    #[test]
+    fn test_ensure_fresh_from_subdirectory_keys_overlay_by_top_relative_path() {
+        if rerun_in_child(
+            "ECP_AUTO_ENSURE_SUBDIR_CHILD",
+            "auto_ensure::fingerprint_drift_tests::test_ensure_fresh_from_subdirectory_keys_overlay_by_top_relative_path",
+        ) {
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let (worktree, graph_path) = repo_and_graph_at_head(tmp.path());
+        fs::remove_file(head_sha_sidecar_path(&graph_path)).unwrap();
+        std::env::set_var("ECP_HOME", tmp.path().join("ecp-home"));
+        std::env::set_var("ECP_SESSION_ID", "subdir-test");
+        let pkg = worktree.join("pkg");
+        fs::create_dir_all(&pkg).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(pkg.join("a.py"), "def a(): pass\n").unwrap();
+
+        test_counters::reset();
+        ensure_fresh(IndexNeed::NearCurrent, &graph_path, &pkg).unwrap();
+        assert_eq!(test_counters::reanalyze_paths(), 1);
+        let session_dir = resolve_session_overlay_dir(&worktree).unwrap();
+        let manifest =
+            ecp_core::session::DirtyFiles::read(&session_dir.join("dirty_files.json")).unwrap();
+        let keys: Vec<&str> = manifest.entries.keys().map(String::as_str).collect();
+        assert_eq!(keys, ["pkg/a.py"]);
     }
 
     /// A `.json` file is source, so it survives `without_other`; under an

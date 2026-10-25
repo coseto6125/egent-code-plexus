@@ -378,7 +378,10 @@ impl DirtySet<RepoPath> {
                     if x == b'R' || y == b'R' {
                         let from = parse.note(source, Head::Has, Worktree::Absent);
                         if let (Some(from), Some(to)) = (from, to) {
-                            parse.renames.push((from, to));
+                            // `note` checked both halves against the path rule.
+                            parse
+                                .renames
+                                .push((RepoPath(from.to_owned()), RepoPath(to.to_owned())));
                         }
                     }
                 }
@@ -389,6 +392,19 @@ impl DirtySet<RepoPath> {
             }
         }
         Ok(parse.finish())
+    }
+
+    /// The set of the mtime walk: one `Modified` event per path, a path named
+    /// twice kept once, and the entries the walk found but cannot name.
+    pub fn from_modified(
+        paths: impl IntoIterator<Item = RepoPath>,
+        skipped: Vec<SkippedEntry>,
+    ) -> Self {
+        let paths: BTreeSet<RepoPath> = paths.into_iter().collect();
+        Self {
+            events: paths.into_iter().map(DirtyEvent::Modified).collect(),
+            skipped,
+        }
     }
 
     /// Classify every path. Order and skipped entries are kept.
@@ -504,7 +520,9 @@ struct PorcelainParse {
 }
 
 impl PorcelainParse {
-    fn note(&mut self, raw: &[u8], head: Head, worktree: Worktree) -> Option<RepoPath> {
+    /// Merge one entry's facts into its path's record. Returns the path text
+    /// when it is a [`RepoPath`]; the record owns the only allocation.
+    fn note<'a>(&mut self, raw: &'a [u8], head: Head, worktree: Worktree) -> Option<&'a str> {
         let Ok(text) = std::str::from_utf8(raw) else {
             self.skipped.push(SkippedEntry {
                 path_lossy: String::from_utf8_lossy(raw).into_owned(),
@@ -519,17 +537,20 @@ impl PorcelainParse {
             });
             return None;
         }
-        let Ok(path) = RepoPath::new(text) else {
-            self.skipped.push(SkippedEntry {
-                path_lossy: text.to_owned(),
-                reason: SkipReason::NotRepoRelative,
-            });
-            return None;
+        let path = match RepoPath::new(text) {
+            Ok(path) => path,
+            Err(NotRepoRelative(path_lossy)) => {
+                self.skipped.push(SkippedEntry {
+                    path_lossy,
+                    reason: SkipReason::NotRepoRelative,
+                });
+                return None;
+            }
         };
-        let facts = self.facts.entry(path.clone()).or_default();
+        let facts = self.facts.entry(path).or_default();
         facts.head = facts.head.max(head);
         facts.worktree = facts.worktree.max(worktree);
-        Some(path)
+        Some(text)
     }
 
     fn finish(self) -> DirtySet {
@@ -1252,6 +1273,31 @@ mod tests {
             ]
         );
         assert!(set.skipped().is_empty());
+    }
+
+    #[test]
+    fn test_from_modified_duplicate_path_returns_one_sorted_event() {
+        let skipped = vec![SkippedEntry {
+            path_lossy: "a\\b.py".into(),
+            reason: SkipReason::NotRepoRelative,
+        }];
+        let set = DirtySet::from_modified(
+            [path("z.rs"), path("a/b.py"), path("a/b.py")],
+            skipped.clone(),
+        );
+        assert_eq!(
+            set.events(),
+            &[
+                DirtyEvent::Modified(path("a/b.py")),
+                DirtyEvent::Modified(path("z.rs")),
+            ]
+        );
+        assert_eq!(set.skipped(), skipped.as_slice());
+    }
+
+    #[test]
+    fn test_from_modified_empty_returns_empty_set() {
+        assert!(DirtySet::from_modified([], Vec::new()).is_empty());
     }
 
     #[test]

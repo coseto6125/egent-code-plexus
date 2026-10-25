@@ -2098,12 +2098,20 @@ mod tests {
         assert!(!worktree_clean_and_head_matches(&fx.wt, &sha).unwrap());
     }
 
+    #[test]
+    fn test_porcelain_clean_empty_status_returns_true() {
+        assert!(porcelain_clean(
+            b"",
+            Path::new("/nonexistent-worktree"),
+            None
+        ));
+    }
+
     /// Real git never prints malformed porcelain, so this drives the parse
     /// step `worktree_clean_and_head_matches` hands its status stdout to.
     #[test]
-    fn test_worktree_clean_and_head_matches_malformed_status_returns_false() {
+    fn test_porcelain_clean_malformed_status_returns_false() {
         let wt = Path::new("/nonexistent-worktree");
-        assert!(porcelain_clean(b"", wt, None));
         for malformed in [
             b"garbage\0".as_slice(),
             b"?? a.py".as_slice(),
