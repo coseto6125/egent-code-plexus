@@ -10,7 +10,7 @@ use crate::framework_helpers::{
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawImport, RawNode};
+use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawImport, RawNode, OVERRIDE_SENTINEL};
 
 /// Blind-spot kind/hint pairs. Order matches the capture-index dispatch
 /// in `parse_file`.
@@ -556,7 +556,7 @@ impl LanguageProvider for SwiftProvider {
                     // is nested under `(modifiers)` (not a direct
                     // `function_declaration` child), so walk the subtree.
                     if k == NodeKind::Method && has_override_modifier(root, source) {
-                        decorators.push("__override__".to_string());
+                        decorators.push(OVERRIDE_SENTINEL.to_string());
                     }
                     if k == NodeKind::Function || k == NodeKind::Method {
                         if let Some(ext) = find_objc_rename_attribute(root, source) {

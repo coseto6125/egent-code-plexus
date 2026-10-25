@@ -36,18 +36,11 @@ pub fn raw_decl(node: &RawNode) -> DeclFields<'_> {
         node.owner_class.as_deref(),
         node.name.as_str(),
         node.span,
-        match declares_arity(node.kind) || node.kind == NodeKind::Function {
+        match node.kind.declares_type() || node.kind == NodeKind::Function {
             true => node.generic_arity(),
             false => 0,
         },
     )
-}
-
-/// Whether a `kind` declaration carries a generic arity marker: a type, or
-/// the C# attribute class the parser files as [`NodeKind::Annotation`],
-/// which [`NodeKind::is_type`] leaves out.
-pub fn declares_arity(kind: NodeKind) -> bool {
-    kind.is_type() || kind == NodeKind::Annotation
 }
 
 /// Whether a `kind` declaration of a `language` file declares a generic
@@ -59,7 +52,7 @@ pub fn declares_arity(kind: NodeKind) -> bool {
 /// C# by codex rulings P-a and P-a2; every other language keeps the
 /// duplicate rule.
 pub fn splits_by_arity(language: Language, kind: NodeKind) -> bool {
-    language == Language::CSharp && (declares_arity(kind) || kind == NodeKind::Function)
+    language == Language::CSharp && (kind.declares_type() || kind == NodeKind::Function)
 }
 
 /// Whether a [`UidSlot::Later`] of a `kind` declaration in a `language`
@@ -75,8 +68,8 @@ pub fn later_is_arity_twin(language: Language, kind: NodeKind) -> bool {
         && !lexical_scope_kinds(language).contains(&kind)
 }
 
-/// For each declaration of one file, the index of the innermost declaration
-/// that [`declares_arity`] whose span contains it, by
+/// For each declaration of one file, the index of the innermost type
+/// declaration ([`NodeKind::declares_type`]) whose span contains it, by
 /// [`innermost_enclosing`]. A type's own entry is the type that encloses it.
 pub fn enclosing_types(rows: &[(NodeKind, Span)]) -> Vec<Option<usize>> {
     let spans: Vec<Span> = rows.iter().map(|&(_, span)| span).collect();
@@ -85,7 +78,7 @@ pub fn enclosing_types(rows: &[(NodeKind, Span)]) -> Vec<Option<usize>> {
         .map(|i| {
             let mut up = enclosing[i];
             while let Some(j) = up {
-                if declares_arity(rows[j].0) {
+                if rows[j].0.declares_type() {
                     break;
                 }
                 up = enclosing[j];
@@ -144,7 +137,7 @@ pub fn file_identities<'a, T>(
         let mut type_names = FxHashSet::default();
         let twin_types = rows
             .iter()
-            .filter(|r| declares_arity(r.0 .0))
+            .filter(|r| r.0 .0.declares_type())
             .any(|r| !type_names.insert(r.0 .2));
         match twin_types {
             true => {

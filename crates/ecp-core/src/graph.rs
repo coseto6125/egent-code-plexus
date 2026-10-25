@@ -349,6 +349,13 @@ impl NodeKind {
         )
     }
 
+    /// True for a declaration of a type: [`Self::is_type`], plus the
+    /// annotation type (C# attribute class, Kotlin `annotation class`, Java
+    /// `@interface`) that the parsers file as [`Self::Annotation`].
+    pub const fn declares_type(self) -> bool {
+        self.is_type() || matches!(self, Self::Annotation)
+    }
+
     /// True for the type kinds a call site can construct (`new A()`, `A()`,
     /// `A.new`), which then take the `Calls` edge of that construction.
     pub const fn is_constructible(self) -> bool {

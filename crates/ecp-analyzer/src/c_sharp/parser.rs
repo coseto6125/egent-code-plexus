@@ -8,9 +8,8 @@ use crate::framework_helpers::{
 use crate::function_meta::subtree_contains_kind;
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
-use ecp_core::analyzer::lexical::declares_arity;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawImport, RawNode};
+use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawImport, RawNode, OVERRIDE_SENTINEL};
 use ecp_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
@@ -419,7 +418,7 @@ impl LanguageProvider for CSharpProvider {
                         decorators.push(text.to_string());
                     }
                 } else if Some(cap_idx) == idx_override_marker {
-                    decorators.push("__override__".to_string());
+                    decorators.push(OVERRIDE_SENTINEL.to_string());
                 } else if Some(cap_idx) == idx.blind_activator_create {
                     push_blind_spot(
                         &mut blind_spots,
@@ -668,7 +667,7 @@ impl LanguageProvider for CSharpProvider {
                         // own; the identity numbering reads the arity off
                         // this marker. A delegate is the one `Function` that
                         // carries it (`lexical::splits_by_arity`).
-                        let arity = if declares_arity(k) || root.kind() == "delegate_declaration" {
+                        let arity = if k.declares_type() || root.kind() == "delegate_declaration" {
                             generic_arity(root)
                         } else {
                             0
@@ -679,7 +678,7 @@ impl LanguageProvider for CSharpProvider {
                         };
                         // The parts of one `partial` type merge by this
                         // scope (`c_sharp::partial`).
-                        if super::partial::is_partial_kind(k) && is_partial(root, source) {
+                        if k.declares_type() && is_partial(root, source) {
                             decorators
                                 .push(RawNode::partial_marker(&declaring_scope(root, source)));
                         }

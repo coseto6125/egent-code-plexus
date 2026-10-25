@@ -145,6 +145,36 @@ fn test_rename_type_kotlin_secondary_constructor_renames_construction_site() {
     );
 }
 
+/// Stands for: a Kotlin primary constructor writes no `constructor` keyword,
+/// so it stays spelled like the type, and its parameter typed as the type
+/// renames with it.
+#[test]
+fn test_rename_type_kotlin_primary_constructor_self_typed_param_renames() {
+    assert_rename_rewrites_construction(
+        ("Foo.kt", "class Foo(val next: Foo?) {\n}\n"),
+        (
+            "Maker.kt",
+            "class Maker {\n    fun make() {\n        val f = Foo(null)\n    }\n}\n",
+        ),
+    );
+}
+
+/// Stands for: a C# primary constructor beside an explicit one chaining to
+/// it (`: this(0)`) leaves the construction site renamable.
+#[test]
+fn test_rename_type_csharp_primary_constructor_chain_renames_new_site() {
+    assert_rename_rewrites_construction(
+        (
+            "Foo.cs",
+            "class Foo(int x)\n{\n    public Foo() : this(0) {}\n}\n",
+        ),
+        (
+            "Maker.cs",
+            "class Maker\n{\n    void Make()\n    {\n        var f = new Foo();\n    }\n}\n",
+        ),
+    );
+}
+
 #[test]
 fn test_rename_type_kotlin_renames_construction_site() {
     assert_rename_rewrites_construction(

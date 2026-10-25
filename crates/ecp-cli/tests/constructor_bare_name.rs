@@ -246,6 +246,29 @@ fn test_impact_bare_type_cpp_out_of_class_constructor_stays_ambiguous() {
     }
 }
 
+/// Stands for: a C# attribute class and a Kotlin `annotation class` are
+/// types, so a bare name selects them over their own constructors. Failed at
+/// 73949060: the drop read `is_type`, which leaves out `Annotation`, and
+/// both answered `ambiguous`.
+#[test]
+fn test_impact_bare_annotation_type_selects_type() {
+    for (file, src, name) in [
+        (
+            "a.cs",
+            "public class FooAttribute : System.Attribute\n{\n    public FooAttribute() {}\n}\n",
+            "FooAttribute",
+        ),
+        ("Tag.kt", "annotation class Tag(val v: String)\n", "Tag"),
+    ] {
+        let repo = Repo::indexed(&[(file, src)]);
+
+        let out = repo.ecp(&["impact", name, "--repo", ".", "--format", "json"]);
+
+        let payload = json_of(&out);
+        assert_eq!(payload["status"], "success", "{file}: {payload}");
+    }
+}
+
 /// Stands for: `rename Foo Bar` on a class with a constructor renames the
 /// class, the constructor and the construction site in another file, and
 /// leaves an unrelated `Foo` in a third file alone. Failed before: `rename`

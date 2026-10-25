@@ -2,8 +2,10 @@
 //!
 //! Pipeline:
 //! 1. **Plan (graph)**: resolve the target through the one target resolver
-//!    (`resolve_rename_target`), with the overlay, collect inbound-edge
-//!    source files + the target's own file. Refuses an ambiguous target, and
+//!    (`resolve_rename_target`), with the overlay, collect the source files
+//!    of the inbound edges of the target, of every part of a `partial` type
+//!    and of the type's constructors, plus each part's own file. Refuses an
+//!    ambiguous target, and
 //!    refuses to write from a warm-attached graph.
 //! 2. **Verify (AST)**: tree-sitter parse each affected file, find every
 //!    `identifier` byte-range whose text matches the target, and keep the
@@ -28,14 +30,14 @@
 use crate::read_context::{ambiguity_candidates, named_declarations, target_request};
 use clap::Args;
 use ecp_analyzer::identifier_finder::{find_identifier_occurrences, has_identifier_finder};
-use ecp_core::analyzer::types::IdentifierRange;
+use ecp_core::analyzer::types::{span_contains, IdentifierRange, Span};
 use ecp_core::contracts::identity::{
     resolve_target, Candidate, Qualifier, TargetRequest, TargetResolution,
 };
 use ecp_core::file_category::determine_category;
 use ecp_core::graph::{FileCategory, NodeKind};
 use ecp_core::registry::atomic_write_bytes;
-use ecp_core::session::MergedGraph;
+use ecp_core::session::{MergedGraph, MergedNode};
 use ecp_core::EcpError;
 use regex::Regex;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -216,13 +218,13 @@ fn doc_text<'t>(text: &'t str, request: &TargetRequest) -> &'t str {
 }
 
 /// What the graph binds to the chosen declaration. An occurrence of the name
-/// is bound when its innermost enclosing function refers to the declaration
-/// (the declaration itself and the constructors of a renamed type included),
-/// or outside every function (imports, module-level code, class bodies). The
-/// declaration's own span gets no exemption: a parameter named like the
-/// enclosing type shadows it. An occurrence inside any other function
-/// is another binding of the same spelling: a local, a parameter, a
-/// namesake.
+/// is bound when its innermost enclosing function refers to the declaration,
+/// or outside every function (imports, module-level code, class bodies). A
+/// type's constructors are no referrers, except one inside the type that is
+/// spelled like it. The declaration's own span gets no exemption: a
+/// parameter named like the enclosing type shadows it. An occurrence inside
+/// any other function is another binding of the same spelling: a local, a
+/// parameter, a namesake.
 struct Binding<'a> {
     /// The file of each part of the target and every file that holds a
     /// deterministic referrer.
@@ -230,14 +232,20 @@ struct Binding<'a> {
     /// Merged indices: the target and its deterministic referrers.
     referrers: FxHashSet<u32>,
     /// Function, method and constructor spans of each file in `files`:
-    /// (start line, end line, merged index).
-    callables: FxHashMap<&'a str, Vec<(u32, u32, u32)>>,
+    /// (1-based span, merged index).
+    callables: FxHashMap<&'a str, Vec<(Span, u32)>>,
 }
 
 impl<'a> Binding<'a> {
     /// `on_mirror` sees the far end of each heuristic edge of the target: a
-    /// heuristic edge never extends the files a rename writes.
-    fn of(merged: &MergedGraph<'a>, target: &Candidate, mut on_mirror: impl FnMut(&str)) -> Self {
+    /// heuristic edge never extends the files a rename writes. `repo_root`
+    /// holds the target's files, whose text tells how a constructor is spelled.
+    fn of(
+        merged: &MergedGraph<'a>,
+        target: &Candidate,
+        repo_root: &Path,
+        mut on_mirror: impl FnMut(&str),
+    ) -> Self {
         let node = merged
             .node(target.node)
             .expect("the resolver answers merged-space indices");
@@ -254,13 +262,10 @@ impl<'a> Binding<'a> {
         } else {
             parts
         };
-        let spans: Vec<(&'a str, std::ops::RangeInclusive<u32>)> = types
+        let spans: Vec<(&'a str, Span)> = types
             .iter()
             .filter_map(|&idx| merged.node(idx))
-            .map(|n| {
-                let file = n.file_path(merged).unwrap_or_default();
-                (file, n.start_line()..=n.end_line())
-            })
+            .map(|n| (n.file_path(merged).unwrap_or_default(), span_of(&n)))
             .collect();
         let constructors: Vec<u32> = types
             .iter()
@@ -301,17 +306,20 @@ impl<'a> Binding<'a> {
             }
         }
         let callables = callable_spans(merged, &files);
-        // A constructor or destructor inside the target type is spelled like the type: its
-        // name is the declaration's own name, not a shadowing binding.
-        for (file, lines) in &spans {
-            for &(start, end, idx) in callables.get(file).map_or(&[][..], Vec::as_slice) {
-                if lines.contains(&start)
-                    && lines.contains(&end)
+        // A constructor or destructor inside the target type and spelled like
+        // it carries the declaration's own name, not a shadowing binding.
+        // Kotlin names a `constructor(...)` after its class too, but there a
+        // parameter may shadow the type, as in TypeScript.
+        for (file, ty) in &spans {
+            let source = std::fs::read(repo_root.join(file)).unwrap_or_default();
+            for &(span, idx) in callables.get(file).map_or(&[][..], Vec::as_slice) {
+                if span_contains(*ty, span)
                     && merged.node(idx).is_some_and(|n| {
                         let name = n.name(merged);
                         (n.kind() == NodeKind::Constructor && name == target_name)
                             || name.strip_prefix('~') == Some(target_name)
                     })
+                    && !spells_constructor_keyword(&source, span)
                 {
                     referrers.insert(idx);
                 }
@@ -324,18 +332,46 @@ impl<'a> Binding<'a> {
         }
     }
 
-    fn binds(&self, file: &str, line: u32) -> bool {
+    fn binds(&self, file: &str, range: &IdentifierRange) -> bool {
+        let at = (line_of(range), range.col as u32);
+        let point = (at.0, at.1, at.0, at.1);
         // The innermost enclosing function owns the occurrence: a nested
         // function's parameter shadows the name inside its referrer parent.
+        // Spans nest or are disjoint, so the innermost one starts last.
         let innermost = self
             .callables
             .get(file)
             .map_or(&[][..], Vec::as_slice)
             .iter()
-            .filter(|&&(start, end, _)| (start..=end).contains(&line))
-            .min_by_key(|&&(start, end, _)| (end - start, std::cmp::Reverse(start)));
-        innermost.is_none_or(|&(_, _, idx)| self.referrers.contains(&idx))
+            .filter(|&&(span, _)| span_contains(span, point))
+            .max_by_key(|&&((line, col, end_line, end_col), _)| {
+                (line, col, std::cmp::Reverse((end_line, end_col)))
+            });
+        innermost.is_none_or(|&(_, idx)| self.referrers.contains(&idx))
     }
+}
+
+/// The span of `node`: 1-based lines, 0-based byte columns.
+fn span_of(node: &MergedNode<'_>) -> Span {
+    let (start_col, end_col) = node.columns();
+    (node.start_line(), start_col, node.end_line(), end_col)
+}
+
+/// Whether the declaration at `span` of `source` writes the `constructor`
+/// keyword before its parameter list, as a Kotlin secondary constructor does.
+fn spells_constructor_keyword(source: &[u8], span: Span) -> bool {
+    let (line, col, _, _) = span;
+    let offset = source
+        .split_inclusive(|&b| b == b'\n')
+        .take(line.saturating_sub(1) as usize)
+        .map(<[u8]>::len)
+        .sum::<usize>()
+        + col as usize;
+    let rest = source.get(offset..).unwrap_or_default();
+    let header = rest.split(|&b| b == b'(').next().unwrap_or_default();
+    header
+        .split(|b| !(b.is_ascii_alphanumeric() || *b == b'_'))
+        .any(|word| word == b"constructor")
 }
 
 /// The function, method and constructor spans of `files` in merged space:
@@ -344,14 +380,14 @@ impl<'a> Binding<'a> {
 fn callable_spans<'a>(
     merged: &MergedGraph<'a>,
     files: &BTreeSet<&'a str>,
-) -> FxHashMap<&'a str, Vec<(u32, u32, u32)>> {
+) -> FxHashMap<&'a str, Vec<(Span, u32)>> {
     let callable = |kind: NodeKind| {
         matches!(
             kind,
             NodeKind::Function | NodeKind::Method | NodeKind::Constructor
         )
     };
-    let mut out: FxHashMap<&'a str, Vec<(u32, u32, u32)>> = FxHashMap::default();
+    let mut out: FxHashMap<&'a str, Vec<(Span, u32)>> = FxHashMap::default();
     for idx in 0..merged.node_count() {
         let Some(node) = merged.node(idx) else {
             continue;
@@ -360,9 +396,7 @@ fn callable_spans<'a>(
             continue;
         }
         if let Some(file) = node.file_path(merged).filter(|f| files.contains(f)) {
-            out.entry(file)
-                .or_default()
-                .push((node.start_line(), node.end_line(), idx));
+            out.entry(file).or_default().push((span_of(&node), idx));
         }
     }
     out
@@ -633,7 +667,7 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
     let mut heuristic_mirror_names: Vec<String> = Vec::new();
 
     if let Some(target) = &target {
-        let binding = Binding::of(&merged, target, |name| {
+        let binding = Binding::of(&merged, target, &repo_root, |name| {
             heuristic_mirror_count += 1;
             if args.show_heuristic_mirrors {
                 heuristic_mirror_names.push(name.to_string());
@@ -659,7 +693,7 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
             };
             let (bound, left): (Vec<_>, Vec<_>) = occurrences
                 .into_iter()
-                .partition(|r| binding.binds(rel_path, line_of(r)));
+                .partition(|r| binding.binds(rel_path, r));
             unbound.extend(left.iter().map(|r| Site {
                 file: rel_path.to_string(),
                 line: line_of(r),

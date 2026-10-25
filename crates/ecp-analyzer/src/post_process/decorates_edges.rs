@@ -88,10 +88,9 @@ pub fn emit_edges(
             };
 
             for raw_dec in &raw_node.decorators {
-                // Skip the override sentinel injected by the Kotlin/C#/C++ parsers —
-                // that's consumed by the Overrides post-process, not here —
-                // the C# generic-arity marker, which identity reads, and the
-                // C# partial marker, which the partial-type merge reads.
+                // A parser marker is no decorator: the Overrides pass reads
+                // the override sentinel, identity reads the C# arity marker,
+                // and the partial-type merge reads the C# partial marker.
                 if RawNode::is_parser_marker(raw_dec) {
                     continue;
                 }

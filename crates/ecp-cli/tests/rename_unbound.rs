@@ -561,6 +561,90 @@ fn test_rename_unbound_ts_constructor_param_leave_unbound_keeps_parameter() {
     assert_eq!(repo.read("maker.ts"), TS_MAKER.replace("Foo", "Bar"));
 }
 
+const KT_CTOR_SHADOW: &str =
+    "class Foo(val x: Int) {\n    constructor(Foo: String) : this(Foo.length) {\n    }\n}\n";
+
+/// Stands for: Kotlin names a `constructor(...)` after its class, but the
+/// source spells the keyword, so its parameter named like the type is another
+/// binding, as in TypeScript. Failed at 73949060: the span rule made the
+/// constructor a referrer and rewrote the parameter silently.
+#[test]
+fn test_rename_unbound_kotlin_secondary_constructor_param_shadowing_type_refuses() {
+    let repo = Repo::indexed(&[("Foo.kt", KT_CTOR_SHADOW)]);
+
+    let out = repo.ecp(&["rename", "Foo", "Bar", "--file", "Foo.kt"]);
+
+    assert_unbound_refusal(&out);
+    assert!(lists_unbound(&out, "Foo.kt", 2), "{}", stdout(&out));
+    assert_eq!(repo.read("Foo.kt"), KT_CTOR_SHADOW);
+}
+
+const SWIFT_CHAIN_SHADOW: &str = "class Foo {\n    var x: Int\n    init(x: Int) {\n        self.x = x\n    }\n    convenience init(Foo: Int) {\n        self.init(x: Foo)\n    }\n}\n";
+
+/// Stands for: a constructor that chains to another (`self.init`) is no
+/// referrer of the type, so its parameter named like the type stays another
+/// binding. Goes red without the chaining guard in `Binding::of`: Swift is
+/// the language whose chaining edge comes from a constructor not named like
+/// the type.
+#[test]
+fn test_rename_unbound_swift_convenience_init_param_shadowing_type_refuses() {
+    let repo = Repo::indexed(&[("Foo.swift", SWIFT_CHAIN_SHADOW)]);
+
+    let out = repo.ecp(&["rename", "Foo", "Bar", "--file", "Foo.swift"]);
+
+    assert_unbound_refusal(&out);
+    assert!(lists_unbound(&out, "Foo.swift", 6), "{}", stdout(&out));
+    assert!(lists_unbound(&out, "Foo.swift", 7), "{}", stdout(&out));
+    assert_eq!(repo.read("Foo.swift"), SWIFT_CHAIN_SHADOW);
+}
+
+const CPP_B_HEADER: &str = "namespace B { class Foo { public: Foo(); }; }\n";
+const CPP_ONE_LINE: &str =
+    "#include \"b.hpp\"\nnamespace A { class Foo {}; } namespace B { Foo::Foo() {} }\n";
+
+/// Stands for: a constructor of another type on the selected type's line is
+/// no part of the selected type: `A::Foo`'s span ends before `B::Foo::Foo`.
+/// Failed at 73949060: rename compared lines only, made `B::Foo::Foo` a
+/// referrer and rewrote it to `Bar::Bar`.
+#[test]
+fn test_rename_unbound_cpp_foreign_constructor_on_type_line_refuses() {
+    let repo = Repo::indexed(&[("b.hpp", CPP_B_HEADER), ("impl.cpp", CPP_ONE_LINE)]);
+
+    let out = repo.ecp(&[
+        "rename", "Foo", "Bar", "--kind", "class", "--file", "impl.cpp",
+    ]);
+
+    assert_unbound_refusal(&out);
+    assert!(lists_unbound(&out, "impl.cpp", 2), "{}", stdout(&out));
+    assert_eq!(repo.read("impl.cpp"), CPP_ONE_LINE);
+    assert_eq!(repo.read("b.hpp"), CPP_B_HEADER);
+}
+
+/// Stands for: with `--leave-unbound`, only the selected class's name on
+/// the shared line changes.
+#[test]
+fn test_rename_unbound_cpp_foreign_constructor_leave_unbound_renames_selected_class() {
+    let repo = Repo::indexed(&[("b.hpp", CPP_B_HEADER), ("impl.cpp", CPP_ONE_LINE)]);
+
+    let out = repo.ecp(&[
+        "rename",
+        "Foo",
+        "Bar",
+        "--kind",
+        "class",
+        "--file",
+        "impl.cpp",
+        "--leave-unbound",
+    ]);
+
+    assert!(out.status.success(), "{} {}", stderr(&out), stdout(&out));
+    assert_eq!(
+        repo.read("impl.cpp"),
+        CPP_ONE_LINE.replacen("class Foo", "class Bar", 1)
+    );
+    assert_eq!(repo.read("b.hpp"), CPP_B_HEADER);
+}
+
 /// Stands for: a constructor is spelled like its type, so renaming the type
 /// renames the constructor and does not refuse as an unbound namesake.
 #[test]

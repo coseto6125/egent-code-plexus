@@ -12,7 +12,7 @@ use std::fmt;
 use rustc_hash::FxHashMap;
 use xxhash_rust::xxh3::Xxh3;
 
-use crate::analyzer::types::{innermost_enclosing, Span};
+use crate::analyzer::types::{innermost_enclosing, span_contains, Span};
 use crate::error::EcpError;
 use crate::graph::NodeKind;
 use crate::uid;
@@ -1176,7 +1176,10 @@ fn drop_owned_constructors(
             && matches!(c.qualifier.as_slice(), [owner] if owner.name == c.name && owner.impl_trait.is_none())
             && {
                 let mut types = picked.iter().map(|&i| &candidates[i]).filter(|t| {
-                    t.kind.is_type() && t.name == c.name && t.file == c.file && encloses(t, c)
+                    t.kind.declares_type()
+                        && t.name == c.name
+                        && t.file == c.file
+                        && span_contains(span(t), span(c))
                 });
                 types.next().is_some() && types.next().is_none()
             }
@@ -1188,10 +1191,9 @@ fn drop_owned_constructors(
         .collect()
 }
 
-/// `outer`'s span holds `inner`'s, compared as (line, column) pairs.
-fn encloses(outer: &CandidateFacts<'_>, inner: &CandidateFacts<'_>) -> bool {
-    (outer.line, outer.columns.0) <= (inner.line, inner.columns.0)
-        && (inner.end_line, inner.columns.1) <= (outer.end_line, outer.columns.1)
+/// The span of `facts`: 1-based lines, 0-based columns.
+fn span(facts: &CandidateFacts<'_>) -> Span {
+    (facts.line, facts.columns.0, facts.end_line, facts.columns.1)
 }
 
 /// One declaration a request named, as the answer reports it.
@@ -2750,6 +2752,20 @@ mod tests {
         let named = [
             spanned(class(0, "Foo.kt", (1, 4), vec![]), 4, (0, 1)),
             spanned(ctor(1, "Foo.kt", 1), 1, (9, 21)),
+        ];
+        assert_eq!(select(&bare("Foo"), &named), vec![0]);
+    }
+
+    /// Stands for: a C# attribute class or a Kotlin `annotation class` is a
+    /// type, so its own constructor drops as a class's does.
+    #[test]
+    fn test_select_bare_annotation_type_drops_own_constructor() {
+        let named = [
+            CandidateFacts {
+                kind: NodeKind::Annotation,
+                ..class(0, "a.cs", (1, 4), vec![])
+            },
+            ctor(1, "a.cs", 2),
         ];
         assert_eq!(select(&bare("Foo"), &named), vec![0]);
     }

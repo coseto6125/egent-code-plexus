@@ -8,7 +8,9 @@ use crate::framework_helpers::{
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode};
+use ecp_core::analyzer::types::{
+    BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode, OVERRIDE_SENTINEL,
+};
 use ecp_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
@@ -423,7 +425,7 @@ impl LanguageProvider for KotlinProvider {
                         decorators.push(d.to_string());
                     }
                 } else if Some(cap_idx) == idx_override_marker {
-                    decorators.push("__override__".to_string());
+                    decorators.push(OVERRIDE_SENTINEL.to_string());
                 } else if Some(cap_idx) == idx_import_source {
                     import_src = Some(cap.node);
                 } else if Some(cap_idx) == idx_alias {

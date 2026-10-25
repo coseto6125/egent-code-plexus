@@ -11,7 +11,7 @@ use crate::indirect_dispatch::{collect_c_cpp_fn_ptr_vars, detect_c_cpp_indirect}
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawImport, RawNode};
+use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawImport, RawNode, OVERRIDE_SENTINEL};
 
 /// Blind-spot kind/hint pairs. P7 covers C++ dispatch sites that
 /// `indirect_dispatch.rs` doesn't already flag as CallMeta (virtual /
@@ -560,7 +560,7 @@ impl LanguageProvider for CppProvider {
                     };
 
                     let mut decorators = if override_func_ids.contains(&root.id()) {
-                        vec!["__override__".to_string()]
+                        vec![OVERRIDE_SENTINEL.to_string()]
                     } else {
                         vec![]
                     };

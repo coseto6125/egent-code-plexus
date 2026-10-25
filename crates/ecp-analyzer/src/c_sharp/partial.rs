@@ -210,13 +210,6 @@ fn file_stem(path: &str) -> &str {
     name.rsplit_once('.').map_or(name, |(stem, _)| stem)
 }
 
-/// Whether a C# declaration of `kind` is a type that may be `partial`:
-/// [`NodeKind::is_type`], plus the attribute class the parser files as
-/// [`NodeKind::Annotation`], which `is_type` leaves out.
-pub(crate) fn is_partial_kind(kind: NodeKind) -> bool {
-    kind.is_type() || kind == NodeKind::Annotation
-}
-
 /// The kind a part merges by: an attribute class merges as the class it is.
 fn merge_kind(kind: NodeKind) -> NodeKind {
     match kind {
@@ -227,7 +220,7 @@ fn merge_kind(kind: NodeKind) -> NodeKind {
 
 /// The declaring scope of a `partial` type node; `None` for any other node.
 fn partial_scope(node: &RawNode) -> Option<&str> {
-    if is_partial_kind(node.kind) && !node.name.is_empty() {
+    if node.kind.declares_type() && !node.name.is_empty() {
         node.partial_scope()
     } else {
         None
@@ -329,8 +322,8 @@ mod tests {
     fn test_merge_kind_annotation_merges_as_class() {
         assert_eq!(merge_kind(NodeKind::Annotation), NodeKind::Class);
         assert_eq!(merge_kind(NodeKind::Struct), NodeKind::Struct);
-        assert!(is_partial_kind(NodeKind::Annotation));
-        assert!(!is_partial_kind(NodeKind::Function));
+        assert!(NodeKind::Annotation.declares_type());
+        assert!(!NodeKind::Function.declares_type());
     }
 
     #[test]
