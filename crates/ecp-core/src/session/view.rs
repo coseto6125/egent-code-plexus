@@ -96,9 +96,11 @@
 //!   edit, as `graph.bin` does not say which file declared a base. A base
 //!   Rust method of an `impl` the parser emits no `Impl` node for (`impl T
 //!   for &mut X`) reads as free in the same-file pick.
-//! - Rust paths resolve by conventional file layout and module declarations.
-//!   `pub use` chains, `#[path]`, inline modules, and workspace crate-name
-//!   heads stay unresolved when that layout cannot establish the target.
+//! - Rust paths resolve by conventional file layout and module declarations;
+//!   a workspace crate-name head resolves through the crate table graph.bin
+//!   stores. `pub use` chains, `#[path]` and inline modules stay unresolved
+//!   when that layout cannot establish the target, and a crate rooted at a
+//!   custom `[lib] path` gets no `crate::` / `self::` / `super::` chain.
 
 use super::import_scope::{ImportScope, Module};
 use crate::analyzer::heritage::{enclosing_class_heritage, holds_heritage, HeritageNode};
