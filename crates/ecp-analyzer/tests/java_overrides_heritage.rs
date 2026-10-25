@@ -14,6 +14,7 @@ use ecp_analyzer::post_process::overrides::{
     BS_KIND_OVERRIDE_BASE_UNRESOLVED, BS_KIND_OVERRIDE_HIERARCHY_INCOMPLETE, MAX_OVERRIDE_DEPTH,
     NAME_MATCH_CONFIDENCE,
 };
+use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
 use ecp_core::contracts::raw_records::Evidence as StoredEvidence;
 use ecp_core::graph::{NodeKind, RelType};
@@ -441,4 +442,25 @@ fn test_overrides_java_heuristic_base_never_exact() {
         assert_eq!(confidence, NAME_MATCH_CONFIDENCE);
         assert_eq!(edges[0].3, "post_process:overrides:base-by-name");
     }
+}
+
+/// Stands for: `interface J extends I, K` lists both parents in J's
+/// heritage, so `J → I` and `J → K` edges exist and Overrides can walk
+/// through J. Failed before: tree-sitter-java 0.23 gives
+/// `extends_interfaces` no field name, and the query matched it by one.
+#[test]
+fn test_parse_java_interface_extends_lists_every_parent_in_heritage() {
+    let graph = JavaProvider::new()
+        .unwrap()
+        .parse_file(
+            std::path::Path::new("J.java"),
+            b"interface I {}\ninterface K {}\ninterface J extends I, K {\n    void run();\n}\n",
+        )
+        .unwrap();
+    let j = graph
+        .nodes
+        .iter()
+        .find(|n| n.name == "J" && n.kind == NodeKind::Interface)
+        .expect("J is an Interface node");
+    assert_eq!(j.heritage, ["I", "K"]);
 }

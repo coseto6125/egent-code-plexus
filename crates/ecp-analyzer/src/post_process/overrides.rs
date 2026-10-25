@@ -1424,8 +1424,12 @@ mod tests {
             arity.fit(Some(&none), false),
             Fit::Unknown(Ambiguity::Arity { base: 0, own: 1 })
         );
+        // A rest parameter absorbs an arity difference, so the pair holds
+        // by name alone.
+        let own_two = meta(0, &["x", "", "y", ""]);
+        let arity_two = matcher(Signature::Arity, Statics::Paired, Some(&own_two));
         assert_eq!(
-            arity.fit(Some(&rest), false),
+            arity_two.fit(Some(&rest), false),
             Fit::Match { confirmed: false }
         );
         assert_eq!(arity.fit(None, false), Fit::Match { confirmed: false });
