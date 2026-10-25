@@ -533,6 +533,11 @@ const GENERIC_ARITY_MARKER: &str = "__generic_arity__:";
 /// `post_process::decorates_edges` skips it.
 const PARTIAL_MARKER: &str = "__partial__:";
 
+/// The [`RawNode::decorators`] entry the Kotlin, C#, C++ and Swift parsers
+/// write when a method carries the `override` keyword. The Overrides
+/// post-process reads it; it is not a decorator the source wrote.
+pub const OVERRIDE_SENTINEL: &str = "__override__";
+
 impl RawNode {
     /// The [`RawNode::decorators`] entry for a `partial` type declared in
     /// `scope`.
@@ -543,6 +548,15 @@ impl RawNode {
     /// Whether a decorator entry is a [`RawNode::partial_marker`].
     pub fn is_partial_marker(decorator: &str) -> bool {
         decorator.starts_with(PARTIAL_MARKER)
+    }
+
+    /// Whether a decorator entry is any parser marker rather than a
+    /// decorator the source wrote: the [`OVERRIDE_SENTINEL`], a
+    /// [`RawNode::generic_arity_marker`] or a [`RawNode::partial_marker`].
+    pub fn is_parser_marker(decorator: &str) -> bool {
+        decorator == OVERRIDE_SENTINEL
+            || Self::is_generic_arity_marker(decorator)
+            || Self::is_partial_marker(decorator)
     }
 
     /// The declaring scope of a `partial` type, as the parser recorded it;

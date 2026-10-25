@@ -92,10 +92,7 @@ pub fn emit_edges(
                 // that's consumed by the Overrides post-process, not here —
                 // the C# generic-arity marker, which identity reads, and the
                 // C# partial marker, which the partial-type merge reads.
-                if raw_dec == "__override__"
-                    || RawNode::is_generic_arity_marker(raw_dec)
-                    || RawNode::is_partial_marker(raw_dec)
-                {
+                if RawNode::is_parser_marker(raw_dec) {
                     continue;
                 }
 

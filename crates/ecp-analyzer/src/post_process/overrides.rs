@@ -93,6 +93,7 @@ use crate::resolution::index::{DeclaredBase, FileMeta, Language, ResolveTarget, 
 use ecp_core::analyzer::heritage::holds_heritage;
 use ecp_core::analyzer::types::{
     owner_key, span_contains, LocalGraph, RawFunctionMeta, RawNode, NEAREST_COPY_CONFIDENCE,
+    OVERRIDE_SENTINEL,
 };
 use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap, HEURISTIC_CEILING};
 use ecp_core::graph::{BlindSpotRecord, Edge, File, FileCategory, FunctionMeta, NodeKind, RelType};
@@ -143,11 +144,6 @@ pub const MAX_OVERRIDE_DEPTH: usize = 32;
 const EXACT_REASON: &str = "post_process:overrides";
 const NAME_MATCH_REASON: &str = "post_process:overrides:name-in-base";
 const BASE_BY_NAME_REASON: &str = "post_process:overrides:base-by-name";
-
-/// Sentinel written by per-language parsers when the `override` keyword /
-/// annotation is present. Java writes `@Override` (the literal annotation
-/// text); Kotlin / C# / C++ / Swift write this sentinel.
-const OVERRIDE_SENTINEL: &str = "__override__";
 
 /// One declaration of a method name in a type: its slot, and the function
 /// meta the parser paired with it by span (as Pass 1.8 does).
