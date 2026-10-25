@@ -40,7 +40,6 @@ fn graph() -> ZeroCopyGraph {
 struct Row {
     name: String,
     kind: NodeKind,
-    owner: String,
     line: u32,
     uid: u64,
 }
@@ -54,7 +53,6 @@ fn rows(g: &ZeroCopyGraph) -> Vec<Row> {
         .map(|n| Row {
             name: n.name.resolve(pool).to_string(),
             kind: n.kind,
-            owner: n.owner_class.resolve(pool).to_string(),
             line: n.span.0 + 1,
             uid: n.uid,
         })
