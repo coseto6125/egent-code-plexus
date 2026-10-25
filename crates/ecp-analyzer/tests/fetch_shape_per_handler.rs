@@ -1,6 +1,7 @@
-//! Response shape per handler (flow F8): the keys of a Route's response shape come from the span of the handler that serves it, never from the text of the whole file. A file with two handlers gives each Route its own keys, so a client that reads a field only the other handler returns is a drift. A handler with no body span gives no shape, never the union of the file.
+//! Response shape per handler (flow F8): the keys of a Route's response shape come from the span of the handler that serves it, in the handler's own file, never from the text of the whole route file. A file with two handlers gives each Route its own keys, so a client that reads a field only the other handler returns is a drift. A Laravel controller action that Pass 1.95 binds gives its route the keys of the action's body. A route whose handler body has no readable span reads its route file only when that file holds one handler, whose body is in the file; in a file of several handlers it has no shape, never the union of the file.
 
 use ecp_analyzer::javascript::parser::JavaScriptProvider;
+use ecp_analyzer::php::parser::PhpProvider;
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_core::analyzer::pipeline::AnalyzerPipeline;
 use ecp_core::analyzer::types::{LocalGraph, RawNode, RawRoute};
@@ -13,9 +14,12 @@ fn build(files: &[(&str, &str)]) -> ZeroCopyGraph {
     let tmp = tempfile::tempdir().unwrap();
     let mut pipeline = AnalyzerPipeline::new();
     pipeline.register_provider(Box::new(JavaScriptProvider::new().unwrap()));
+    pipeline.register_provider(Box::new(PhpProvider::new().unwrap()));
     let mut builder = GraphBuilder::new().with_repo_root(tmp.path().to_path_buf());
     for (path, src) in files {
-        std::fs::write(tmp.path().join(path), src).unwrap();
+        let abs = tmp.path().join(path);
+        std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        std::fs::write(abs, src).unwrap();
         builder.add_graph(
             pipeline
                 .parse_file_raw(Path::new(path), src.as_bytes())
@@ -94,31 +98,49 @@ fn test_fetch_shape_handler_without_other_json_calls_gives_no_file_union() {
 }
 
 fn graph_with_span(span: (u32, u32, u32, u32)) -> LocalGraph {
+    graph_with_handlers(&[("getUsers", "/users", span)])
+}
+
+/// `api.js` with one function node per `(name, path, span)`, and a route
+/// `GET <path>` served by it. Each route call sits on its own row past the
+/// nodes, so the handler binds by name.
+fn graph_with_handlers(handlers: &[(&str, &str, (u32, u32, u32, u32))]) -> LocalGraph {
+    let site = |row: u32| match handlers.len() {
+        1 => (0, 0, 0, 0),
+        _ => (100 + row, 0, 100 + row, 10),
+    };
     LocalGraph {
         file_path: "api.js".into(),
         content_hash: [0; 8],
-        nodes: vec![RawNode {
-            name: "getUsers".into(),
-            kind: NodeKind::Function,
-            span,
-            is_exported: false,
-            heritage: vec![],
-            type_annotation: None,
-            decorators: vec![],
-            calls: vec![],
-            field_reads: Vec::new(),
-            owner_class: None,
-            content_hash: 0,
-        }],
+        nodes: handlers
+            .iter()
+            .map(|(name, _, span)| RawNode {
+                name: (*name).into(),
+                kind: NodeKind::Function,
+                span: *span,
+                is_exported: false,
+                heritage: vec![],
+                type_annotation: None,
+                decorators: vec![],
+                calls: vec![],
+                field_reads: Vec::new(),
+                owner_class: None,
+                content_hash: 0,
+            })
+            .collect(),
         documents: vec![],
         imports: vec![],
-        routes: vec![RawRoute {
-            method: "get".into(),
-            path: "/users".into(),
-            handler: RawRoute::named_handler(Some("getUsers")),
-            span: (0, 0, 0, 0),
-            scope: None,
-        }],
+        routes: handlers
+            .iter()
+            .zip(0u32..)
+            .map(|((name, path, _), row)| RawRoute {
+                method: "get".into(),
+                path: (*path).into(),
+                handler: RawRoute::named_handler(Some(*name)),
+                span: site(row),
+                scope: None,
+            })
+            .collect(),
         framework_refs: vec![],
         fanout_refs: vec![],
         blind_spots: vec![],
@@ -144,13 +166,38 @@ fn build_file_with_graph(src: &str, graph: LocalGraph) -> ZeroCopyGraph {
 const ONE_LINE: &str = "function getUsers(req, res) { res.json({ id, name }); }";
 
 #[test]
-fn test_fetch_shape_handler_with_no_body_span_is_unknown_not_file_union() {
+fn test_fetch_shape_one_handler_with_no_body_span_reads_the_file() {
     let g = build_file_with_graph(ONE_LINE, graph_with_span((0, 0, 0, 0)));
     assert_eq!(
-        shape_of(&g, "GET /users"),
-        None,
-        "an empty span has no text: the shape is unknown, not the keys of the file"
+        shape_of(&g, "GET /users").unwrap().0,
+        ["id", "name"],
+        "the file holds one handler, so its text is that handler's shape"
     );
+}
+
+const TWO_LINES: &str = "function getUsers(req, res) { res.json({ id, name }); }\nfunction getOrders(req, res) { res.json({ total }); }\n";
+
+#[test]
+fn test_fetch_shape_two_handlers_with_no_body_span_are_unknown_not_file_union() {
+    for span in [(0, 0, 0, 0), (40, 0, 41, 3)] {
+        let g = build_file_with_graph(
+            TWO_LINES,
+            graph_with_handlers(&[
+                ("getUsers", "/users", span),
+                ("getOrders", "/orders", (1, 0, 1, 53)),
+            ]),
+        );
+        assert_eq!(
+            shape_of(&g, "GET /users"),
+            None,
+            "{span:?} has no text, and the file of two handlers is no handler's shape"
+        );
+        assert_eq!(
+            shape_of(&g, "GET /orders").unwrap().0,
+            ["total"],
+            "the readable handler keeps its own keys"
+        );
+    }
 }
 
 #[test]
@@ -160,9 +207,9 @@ fn test_fetch_shape_handler_span_covering_the_body_reads_its_keys() {
 }
 
 #[test]
-fn test_fetch_shape_handler_span_outside_the_file_is_unknown() {
+fn test_fetch_shape_one_handler_with_span_outside_the_file_reads_the_file() {
     let g = build_file_with_graph(ONE_LINE, graph_with_span((40, 0, 41, 3)));
-    assert_eq!(shape_of(&g, "GET /users"), None);
+    assert_eq!(shape_of(&g, "GET /users").unwrap().0, ["id", "name"]);
 }
 
 #[test]
@@ -175,4 +222,49 @@ fn test_fetch_shape_empty_file_is_unknown() {
 fn test_fetch_shape_whitespace_only_file_is_unknown() {
     let g = build_file_with_graph("   \n\t\n", graph_with_span((0, 0, 1, 1)));
     assert_eq!(shape_of(&g, "GET /users"), None);
+}
+
+#[test]
+fn test_fetch_shape_file_with_no_routes_gives_no_shape() {
+    let g = build(&[("api.js", "function f(req, res) { res.json({ id: 1 }); }\n")]);
+    assert!(
+        g.route_shapes.is_empty(),
+        "a handler body that serves no route is no route's shape"
+    );
+}
+
+#[test]
+fn test_fetch_shape_router_mounted_twice_both_routes_read_the_handler() {
+    let src = "const express = require('express');\nconst app = express();\nconst router = express.Router();\nfunction h(req, res) { res.json({ id: 1 }); }\nrouter.get('/x', h);\napp.use('/a', router);\napp.use('/b', router);\n";
+    let g = build(&[("api.js", src)]);
+    assert_eq!(shape_of(&g, "GET /a/x").unwrap().0, ["id"]);
+    assert_eq!(shape_of(&g, "GET /b/x").unwrap().0, ["id"]);
+}
+
+const USER_CONTROLLER: &str = "<?php\nnamespace App\\Http\\Controllers;\n\nclass UserController extends Controller\n{\n    public function show() { echo json_encode(['id' => 1]); }\n    public function orders() { echo json_encode(['total' => 2]); }\n}\n";
+
+#[test]
+fn test_fetch_shape_controller_action_bound_later_reads_the_action_body() {
+    let routes = "<?php\nuse Illuminate\\Support\\Facades\\Route;\nRoute::get('/users', 'UserController@show');\nRoute::get('/orders', 'UserController@orders');\n";
+    let g = build(&[
+        ("routes/api.php", routes),
+        ("app/Http/Controllers/UserController.php", USER_CONTROLLER),
+    ]);
+    assert_eq!(
+        shape_of(&g, "GET /users").unwrap().0,
+        ["id"],
+        "Pass 1.95 binds `show`, and the route reads its body in the controller file"
+    );
+    assert_eq!(shape_of(&g, "GET /orders").unwrap().0, ["total"]);
+}
+
+#[test]
+fn test_fetch_shape_unbound_controller_action_is_unknown() {
+    let routes = "<?php\nuse Illuminate\\Support\\Facades\\Route;\nRoute::get('/users', 'MissingController@show');\necho json_encode(['stray' => 1]);\n";
+    let g = build(&[("routes/api.php", routes)]);
+    assert_eq!(
+        shape_of(&g, "GET /users"),
+        None,
+        "the action's body is in no file of the build; the route file's text is not its shape"
+    );
 }

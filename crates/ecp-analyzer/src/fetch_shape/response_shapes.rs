@@ -53,31 +53,28 @@ pub fn extract(content: &str, lang: Lang) -> ResponseShape {
     }
 }
 
-/// The shape of the handlers whose bodies lie at `spans` (`(start_row,
-/// start_col, end_row, end_col)`, rows from 0, columns in bytes), keys
-/// merged. A span that is empty, ends before it starts, or lies outside
-/// `content` has no text to read and adds no key: a handler with no body
-/// span is an unknown shape, never the shape of the whole file.
-pub fn extract_in_spans(
+impl ResponseShape {
+    /// Add the keys of `other`, each once, sorted.
+    pub fn merge(&mut self, other: ResponseShape) {
+        self.response_keys.extend(other.response_keys);
+        self.error_keys.extend(other.error_keys);
+        dedupe_sort(&mut self.response_keys);
+        dedupe_sort(&mut self.error_keys);
+    }
+}
+
+/// The shape of the handler whose body lies at `span` (`(start_row,
+/// start_col, end_row, end_col)`, rows from 0, columns in bytes) of
+/// `content`. `None` when the span has no text to read: it is empty, ends
+/// before it starts, or lies outside `content`. `None` thus tells a handler
+/// whose body the caller cannot see from one whose body returns no keys
+/// (`Some` of an empty shape).
+pub fn extract_in_span(
     content: &str,
-    spans: &[(u32, u32, u32, u32)],
+    span: (u32, u32, u32, u32),
     lang: Lang,
-) -> ResponseShape {
-    let (mut response_keys, mut error_keys) = (Vec::new(), Vec::new());
-    for span in spans {
-        let Some(text) = text_in_span(content, *span) else {
-            continue;
-        };
-        let shape = extract(text, lang);
-        response_keys.extend(shape.response_keys);
-        error_keys.extend(shape.error_keys);
-    }
-    dedupe_sort(&mut response_keys);
-    dedupe_sort(&mut error_keys);
-    ResponseShape {
-        response_keys,
-        error_keys,
-    }
+) -> Option<ResponseShape> {
+    text_in_span(content, span).map(|text| extract(text, lang))
 }
 
 fn text_in_span(content: &str, span: (u32, u32, u32, u32)) -> Option<&str> {
@@ -742,5 +739,46 @@ mod tests {
         let src = r#"echo json_encode(['a' => 1]);"#;
         let s = extract(src, Lang::JavaScript);
         assert_eq!(s, ResponseShape::default());
+    }
+
+    const TWO_HANDLERS: &str =
+        "function a(req, res) { res.json({ one }); }\nfunction b(req, res) { res.json({ two }); }\n";
+
+    #[test]
+    fn test_extract_in_span_second_line_reads_that_handler_only() {
+        let s = extract_in_span(TWO_HANDLERS, (1, 0, 1, 43), Lang::JavaScript).unwrap();
+        assert_eq!(s.response_keys, vec!["two"]);
+    }
+
+    #[test]
+    fn test_extract_in_span_body_without_json_is_some_empty() {
+        let s = extract_in_span(
+            "function a() { return 1; }",
+            (0, 0, 0, 26),
+            Lang::JavaScript,
+        );
+        assert_eq!(s, Some(ResponseShape::default()));
+    }
+
+    #[test]
+    fn test_extract_in_span_empty_reversed_or_outside_span_is_none() {
+        for span in [(0, 5, 0, 5), (1, 0, 0, 3), (40, 0, 41, 3)] {
+            assert_eq!(
+                extract_in_span(TWO_HANDLERS, span, Lang::JavaScript),
+                None,
+                "{span:?} has no text"
+            );
+        }
+    }
+
+    #[test]
+    fn test_response_shape_merge_keys_once_sorted() {
+        let mut s = extract("res.json({ b, a })", Lang::JavaScript);
+        s.merge(extract(
+            "res.json({ a, c }); res.status(404).json({ e })",
+            Lang::JavaScript,
+        ));
+        assert_eq!(s.response_keys, vec!["a", "b", "c"]);
+        assert_eq!(s.error_keys, vec!["e"]);
     }
 }

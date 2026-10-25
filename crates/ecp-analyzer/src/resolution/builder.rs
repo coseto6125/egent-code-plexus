@@ -352,7 +352,7 @@ impl GraphBuilder {
             actions: controller_actions,
             laravel,
             blind_spots: mut route_blind_spots,
-            handler_spans,
+            mut shape_sources,
         } = pass1_5_extract_routes(
             &self.local_graphs,
             &files,
@@ -367,24 +367,6 @@ impl GraphBuilder {
             eprintln!(
                 "prof build.pass15_routes: {:.3}s",
                 _t_pass15.elapsed().as_secs_f32()
-            );
-        }
-        let _t_pass16 = std::time::Instant::now();
-        // Pass 1.6: Fetch-shape extraction.
-        let (route_shapes_out, fetches_edges) = pass1_6_fetch_shapes(
-            &self.local_graphs,
-            self.repo_root.as_deref(),
-            &emitted_routes,
-            &handler_spans,
-            &nodes,
-            &mut string_pool,
-        );
-        file_edges.extend(fetches_edges);
-
-        if prof {
-            eprintln!(
-                "prof build.pass16_fetch_shape: {:.3}s",
-                _t_pass16.elapsed().as_secs_f32()
             );
         }
         let _t_pass17 = std::time::Instant::now();
@@ -462,6 +444,31 @@ impl GraphBuilder {
             eprintln!(
                 "prof build.pass19_supertypes: {:.3}s",
                 _t_pass19.elapsed().as_secs_f32()
+            );
+        }
+
+        let _t_pass16 = std::time::Instant::now();
+        // Pass 1.6: Fetch-shape extraction. It runs after Pass 1.95, so a
+        // route whose controller action binds there reads the action's body.
+        for edge in action_edges
+            .iter()
+            .filter(|edge| edge.rel_type == RelType::HandlesRoute)
+        {
+            shape_sources.serve(edge.target, &nodes[edge.source as usize]);
+        }
+        let (route_shapes_out, fetches_edges) = pass1_6_fetch_shapes(
+            &self.local_graphs,
+            self.repo_root.as_deref(),
+            &emitted_routes,
+            &shape_sources,
+            &nodes,
+            &mut string_pool,
+        );
+        file_edges.extend(fetches_edges);
+        if prof {
+            eprintln!(
+                "prof build.pass16_fetch_shape: {:.3}s",
+                _t_pass16.elapsed().as_secs_f32()
             );
         }
 
@@ -1597,10 +1604,80 @@ struct ExtractedRoutes {
     laravel: LaravelRoutes,
     /// Route files whose routes lost Laravel include scopes to the cap.
     blind_spots: Vec<BlindSpotRecord>,
-    /// Route node → the spans of the handler nodes that serve it. Pass 1.6
-    /// reads the response shape of each span, never of the whole file. A
-    /// route with no bound handler has no entry.
-    handler_spans: FxHashMap<u32, Vec<Span>>,
+    /// Where Pass 1.6 reads each route's response shape. Pass 1.95 adds the
+    /// controller actions it binds.
+    shape_sources: ShapeSources,
+}
+
+/// Where Pass 1.6 reads a route's response shape: the bodies of the handler
+/// nodes that serve it, never a file of several handlers.
+#[derive(Default)]
+struct ShapeSources {
+    /// Route node → the file and span of each handler node that serves it.
+    handlers: FxHashMap<u32, Vec<(u32, Span)>>,
+    /// The route files whose routes all name one handler, whose body is in
+    /// the file. The text of such a file holds the shape of that one
+    /// handler and no other, so a route whose handler body has no readable
+    /// span reads the file instead.
+    one_handler_files: FxHashSet<u32>,
+}
+
+impl ShapeSources {
+    /// `handler`, a node of the graph, serves `route`.
+    fn serve(&mut self, route: u32, handler: &Node) {
+        let source = (handler.file_idx, handler.span);
+        let sources = self.handlers.entry(route).or_default();
+        if !sources.contains(&source) {
+            sources.push(source);
+        }
+    }
+
+    /// Note the handlers of one route file from its routes' facts.
+    fn note_file(&mut self, file_idx: u32, facts: &[(u32, HandlerFact)], nodes: &[Node]) {
+        let mut handlers: Vec<HandlerIdentity> = Vec::new();
+        for (route, fact) in facts {
+            let identity = match fact {
+                HandlerFact::Bound(handler, _) => {
+                    self.serve(*route, &nodes[*handler as usize]);
+                    HandlerIdentity::Node(*handler)
+                }
+                HandlerFact::Inline => HandlerIdentity::Inline(*route),
+                HandlerFact::Unresolved(name) => HandlerIdentity::Name(name),
+                HandlerFact::Action | HandlerFact::Absent => HandlerIdentity::Unknown(*route),
+            };
+            if !handlers.contains(&identity) {
+                handlers.push(identity);
+            }
+        }
+        if let [only] = handlers.as_slice() {
+            if only.body_in_file() {
+                self.one_handler_files.insert(file_idx);
+            }
+        }
+    }
+}
+
+/// What one route of a file names as its handler, to count the handlers of
+/// the file. A handler with no node and no name is one per route, so two
+/// such routes never count as one handler.
+#[derive(PartialEq)]
+enum HandlerIdentity<'a> {
+    /// A node of the route's file (Pass 1.5 binds no other).
+    Node(u32),
+    /// A function written at the registration of this route, with no node.
+    Inline(u32),
+    /// A name no node of the file binds, such as an import: its body is in
+    /// another file, or nowhere the build shows.
+    Name(&'a str),
+    /// A controller action, or no handler the producer saw, at this route.
+    Unknown(u32),
+}
+
+impl HandlerIdentity<'_> {
+    /// Whether the handler's body is text of the route's file.
+    fn body_in_file(&self) -> bool {
+        matches!(self, Self::Node(_) | Self::Inline(_))
+    }
 }
 
 /// The routers an Express `app.use("/api", router)` mounts, as far as the
@@ -1947,7 +2024,7 @@ fn pass1_5_extract_routes(
     // per-file view alone cannot name a Laravel route's path or handler.
     let laravel = LaravelRoutes::build(local_graphs, raw_map);
     let mounts = RouteMounts::build(local_graphs, files, symbol_table, path_aliases);
-    let mut handler_spans: FxHashMap<u32, Vec<Span>> = FxHashMap::default();
+    let mut shape_sources = ShapeSources::default();
     for (file_idx, local_graph) in local_graphs.iter().enumerate() {
         let file_idx = file_idx as u32;
         let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
@@ -2142,15 +2219,7 @@ fn pass1_5_extract_routes(
                 }
             }
         }
-        for (route, fact) in &facts {
-            if let HandlerFact::Bound(handler, _) = fact {
-                let span = nodes[*handler as usize].span;
-                let spans = handler_spans.entry(*route).or_default();
-                if !spans.contains(&span) {
-                    spans.push(span);
-                }
-            }
-        }
+        shape_sources.note_file(file_idx, &facts, nodes);
         emit_route_handlers(
             facts,
             &path_str,
@@ -2185,7 +2254,7 @@ fn pass1_5_extract_routes(
         actions,
         laravel,
         blind_spots,
-        handler_spans,
+        shape_sources,
     }
 }
 
@@ -2384,6 +2453,22 @@ fn pass1_95_controller_actions(
     edges
 }
 
+/// The text of `file_idx` under `repo_root`, read once per build; `None`
+/// when the file cannot be read.
+fn cached_source<'c>(
+    cache: &'c mut FxHashMap<u32, Option<String>>,
+    repo_root: &std::path::Path,
+    local_graphs: &[LocalGraph],
+    file_idx: u32,
+) -> Option<&'c str> {
+    cache
+        .entry(file_idx)
+        .or_insert_with(|| {
+            std::fs::read_to_string(repo_root.join(&local_graphs[file_idx as usize].file_path)).ok()
+        })
+        .as_deref()
+}
+
 /// Pass 1.6: Fetch-shape extraction.
 ///
 /// Two sub-passes — both gated on `repo_root` being available (it
@@ -2391,12 +2476,14 @@ fn pass1_95_controller_actions(
 /// absolute path so we can re-read the source). Test harnesses that
 /// don't set a repo root simply opt out of fetch-shape data.
 ///
-/// 1.6a — for each Route node, run `response_shapes::extract_in_spans`
-///        on the spans of the handlers that serve it (never on the whole
-///        file: a file of several handlers would give every route the
-///        union of their keys) and stash a `RouteShape` if it produced
-///        any keys (sparse — empty payloads and routes with no bound
-///        handler do not appear).
+/// 1.6a — for each Route node, run `response_shapes::extract_in_span`
+///        on the body of each handler that serves it, in the handler's
+///        own file, and stash a `RouteShape` if it produced any keys
+///        (sparse — empty payloads do not appear). A route with no
+///        handler body to read (no bound handler, an empty or
+///        out-of-file span) reads its own file only when that file
+///        holds one handler: a file of several handlers would give every
+///        route the union of their keys, so such a route has no shape.
 /// 1.6b — build a path→route_idx map, then for every non-handler
 ///        file in `local_graphs` scan for `fetch(url) /
 ///        axios.get(url)` literals and emit `RelType::Fetches`
@@ -2416,7 +2503,7 @@ fn pass1_6_fetch_shapes(
     local_graphs: &[LocalGraph],
     repo_root: Option<&std::path::Path>,
     emitted_routes: &[EmittedRoute],
-    handler_spans: &FxHashMap<u32, Vec<Span>>,
+    shape_sources: &ShapeSources,
     nodes: &[Node],
     string_pool: &mut StringPool,
 ) -> (Vec<RouteShape>, Vec<(FileOrd, Edge)>) {
@@ -2428,36 +2515,41 @@ fn pass1_6_fetch_shapes(
         // (Express-style `router.get('/a')`/`router.get('/b')` in one file),
         // and consumer files re-read once even if they fetch many URLs.
         let mut content_cache: FxHashMap<u32, Option<String>> = FxHashMap::default();
-        let read_content = |file_idx: u32,
-                            cache: &mut FxHashMap<u32, Option<String>>,
-                            local_graphs: &[LocalGraph]|
-         -> Option<String> {
-            if let Some(slot) = cache.get(&file_idx) {
-                return slot.clone();
-            }
-            let lg = &local_graphs[file_idx as usize];
-            let abs = repo_root.join(&lg.file_path);
-            let content = std::fs::read_to_string(&abs).ok();
-            cache.insert(file_idx, content.clone());
-            content
+        let lang_of = |file_idx: u32| {
+            lang_for_path(&local_graphs[file_idx as usize].file_path.to_string_lossy())
         };
 
         // 1.6a — RouteShape per Route.
         for (route_idx, file_idx, _route_method, _route_path) in emitted_routes {
-            let lg = &local_graphs[*file_idx as usize];
-            let Some(lang) = lang_for_path(&lg.file_path.to_string_lossy()) else {
-                continue;
-            };
-            let Some(content) = read_content(*file_idx, &mut content_cache, local_graphs) else {
-                continue;
-            };
-            let Some(spans) = handler_spans.get(route_idx) else {
-                continue;
-            };
-            let shape = response_shapes::extract_in_spans(&content, spans, lang);
-            if shape.response_keys.is_empty() && shape.error_keys.is_empty() {
-                continue;
+            let mut shape: Option<response_shapes::ResponseShape> = None;
+            for &(handler_file, span) in shape_sources.handlers.get(route_idx).into_iter().flatten()
+            {
+                let Some(lang) = lang_of(handler_file) else {
+                    continue;
+                };
+                let Some(content) =
+                    cached_source(&mut content_cache, repo_root, local_graphs, handler_file)
+                else {
+                    continue;
+                };
+                if let Some(read) = response_shapes::extract_in_span(content, span, lang) {
+                    shape.get_or_insert_with(Default::default).merge(read);
+                }
             }
+            if shape.is_none() && shape_sources.one_handler_files.contains(file_idx) {
+                if let Some(lang) = lang_of(*file_idx) {
+                    if let Some(content) =
+                        cached_source(&mut content_cache, repo_root, local_graphs, *file_idx)
+                    {
+                        shape = Some(response_shapes::extract(content, lang));
+                    }
+                }
+            }
+            let Some(shape) = shape
+                .filter(|shape| !shape.response_keys.is_empty() || !shape.error_keys.is_empty())
+            else {
+                continue;
+            };
             let response_keys: Vec<StrRef> = shape
                 .response_keys
                 .iter()

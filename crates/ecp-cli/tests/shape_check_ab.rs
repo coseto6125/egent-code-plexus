@@ -3,16 +3,23 @@
 //! Upstream gitnexus' fixtures use Next.js App Router (`app/api/.../route.ts`
 //! filename convention) which egent-code-plexus does not currently parse as
 //! routes — it detects Express-style `app.get(path, handler)` calls. We
-//! mirror upstream's logical shape (3 clean consumer/route pairs + 1
-//! synthetic drifter) in Express form so the same drift semantics get
-//! exercised end-to-end:
-//! - listUsers → /api/users:        consumer reads {data, error}     vs route emits {data, total, error, details}  → NO drift
-//! - listSearch → /api/search:      consumer reads {courses, articles} vs route emits {courses, articles}          → NO drift
-//! - exportGdpr → /api/gdpr/export: consumer reads {url}             vs route emits {url}                          → NO drift
+//! mirror upstream's logical shape (3 consumer/route pairs + 1 synthetic
+//! drifter) in Express form so the same drift semantics get exercised
+//! end-to-end:
+//! - listUsers → GET /api/users:     consumer reads {data, error}     vs handler emits {data, total}       → DRIFT on `error`
+//! - listSearch → /api/search:      consumer reads {courses, articles} vs route emits {courses, articles}  → NO drift
+//! - exportGdpr → /api/gdpr/export: consumer reads {url}             vs route emits {url}                  → NO drift
 //! - drifter → /api/users:           consumer reads {nonexistent_field} → DRIFT
 //!
-//! The synthetic 4th case ensures the test discriminates — if the entire
-//! pipeline silently no-op'd, the 3 clean cases would pass vacuously.
+//! The Express rewrite splits upstream's `/api/users` handler in two: only
+//! `createUser` (POST) returns `{ error, details }`, and `listUsers` (GET),
+//! the route `fetch('/api/users')` reaches, returns `{ data, total }`. A
+//! route's shape is the shape of its own handler (flow F8), so UserList's
+//! read of `error` is a real drift. Before P8e the whole file's union of
+//! keys hid it.
+//!
+//! The synthetic drifter ensures the test discriminates — if the entire
+//! pipeline silently no-op'd, the clean cases would pass vacuously.
 
 use std::path::Path;
 use std::process::Command;
@@ -80,7 +87,7 @@ fn run(args: &[&str], repo: &Path, home: &Path) -> std::process::Output {
 /// `ecp analyze` + `ecp shape_check`, assert the drift report matches
 /// upstream's expected behavior.
 #[test]
-fn ab_upstream_fixtures_three_clean_one_drift() {
+fn ab_upstream_fixtures_two_clean_two_drift() {
     let repo = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     init_repo(repo.path());
@@ -207,30 +214,44 @@ app.post('/api/gdpr/export', function exportGdpr(req, res) {
         "expected ≥4 Fetches edges; got {total_fetches}\n{stdout}",
     );
 
-    // Drift must be ≥1 (Drifter.tsx fetching /api/users with nonexistent_field).
-    // Allow >1 because /api/users has GET+POST handlers — both match the URL,
-    // so the synthetic drifter contributes one drift row per matching handler.
+    // Drift must be ≥2: Drifter.tsx (nonexistent_field) and UserList.tsx
+    // (error). Allow more because /api/users has GET+POST handlers — a
+    // consumer contributes one drift row per handler its fetch matches.
     assert!(
-        drift_count >= 1,
-        "expected ≥1 drift entry (the Drifter component); got {drift_count}\n{stdout}",
+        drift_count >= 2,
+        "expected ≥2 drift entries (Drifter and UserList); got {drift_count}\n{stdout}",
     );
 
-    // Every drift row must come from Drifter.tsx and flag nonexistent_field.
-    // The 3 clean upstream-equivalent consumers (UserList / SearchBar / GdprExport)
-    // must NOT appear in the drift report.
+    // Every drift row comes from Drifter.tsx (`nonexistent_field`) or from
+    // UserList.tsx (`error`, which only the POST handler returns). The clean
+    // consumers (SearchBar / GdprExport) must NOT appear in the drift report.
+    let mut drifting: Vec<&str> = Vec::new();
     for entry in &drift {
         let consumer_file = entry["consumer_file"].as_str().unwrap_or_default();
-        assert!(
-            consumer_file.ends_with("Drifter.tsx"),
-            "non-Drifter drift entry leaked through: {consumer_file:?}\nfull: {stdout}",
-        );
         let drift_keys = entry["drift_keys"]
             .as_array()
             .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
             .unwrap_or_default();
-        assert!(
-            drift_keys.contains(&"nonexistent_field"),
-            "drift_keys should contain 'nonexistent_field'; got {drift_keys:?}\n{stdout}",
-        );
+        match consumer_file {
+            "components/Drifter.tsx" => assert!(
+                drift_keys.contains(&"nonexistent_field"),
+                "drift_keys should contain 'nonexistent_field'; got {drift_keys:?}\n{stdout}",
+            ),
+            "components/UserList.tsx" => assert_eq!(
+                drift_keys,
+                ["error"],
+                "UserList reads `error`, which GET /api/users does not return\n{stdout}",
+            ),
+            other => panic!("clean consumer drift entry leaked through: {other:?}\nfull: {stdout}"),
+        }
+        if !drifting.contains(&consumer_file) {
+            drifting.push(consumer_file);
+        }
     }
+    drifting.sort_unstable();
+    assert_eq!(
+        drifting,
+        ["components/Drifter.tsx", "components/UserList.tsx"],
+        "both drifting consumers are reported\n{stdout}",
+    );
 }

@@ -43,47 +43,67 @@ const USERS_ROUTER: &str = "const express = require('express');\nconst router = 
 
 #[test]
 fn test_route_express_mount_same_file_composed() {
-    assert_eq!(routes_of("app.use('/api', router);"), ["GET /api/x"]);
+    // Stands for: the composed route of the handler. The `USE` row is the
+    // mount itself, a Route since before P8e (`route_detector.rs`
+    // `detect_from_call_accepts_express_use_mount_point`).
+    assert_eq!(
+        routes_of("app.use('/api', router);"),
+        ["GET /api/x", "USE /api"]
+    );
 }
 
 #[test]
 fn test_route_express_mount_imported_router_composed() {
+    // Stands for: the composed route of the handler. The `USE` row is the
+    // mount itself, a Route since before P8e (`route_detector.rs`
+    // `detect_from_call_accepts_express_use_mount_point`).
     let app = "const express = require('express');\nconst users = require('./routes/users');\nconst app = express();\napp.use('/api', users);\n";
     assert_eq!(
         route_names(&build_files(&[
             ("src/routes/users.js", USERS_ROUTER),
             ("src/app.js", app)
         ])),
-        ["GET /api/list"],
+        ["GET /api/list", "USE /api"],
         "the mount composes onto the router of another file, and its handler has one Route"
     );
 }
 
 #[test]
 fn test_route_express_mount_es_import_composed() {
+    // Stands for: the composed route of the handler. The `USE` row is the
+    // mount itself, a Route since before P8e (`route_detector.rs`
+    // `detect_from_call_accepts_express_use_mount_point`).
     let app = "import express from 'express';\nimport users from './routes/users';\nconst app = express();\napp.use('/api', users);\n";
     assert_eq!(
         route_names(&build_files(&[
             ("src/routes/users.js", USERS_ROUTER),
             ("src/app.js", app)
         ])),
-        ["GET /api/list"]
+        ["GET /api/list", "USE /api"]
     );
 }
 
 #[test]
 fn test_route_express_nested_mounts_compose_outermost_first() {
+    // Stands for: the handler route composed outermost mount first. The two
+    // `USE` rows are the mounts themselves; the inner mount sits on `outer`,
+    // so it takes the `/v1` of `outer` too.
     let app = "const express = require('express');\nconst app = express();\nconst outer = express.Router();\nconst inner = express.Router();\nfunction h(req, res) { res.json({}); }\ninner.get('/x', h);\nouter.use('/mid', inner);\napp.use('/v1', outer);\n";
     assert_eq!(
         route_names(&build_files(&[("src/app.js", app)])),
-        ["GET /v1/mid/x"]
+        ["GET /v1/mid/x", "USE /v1", "USE /v1/mid"]
     );
 }
 
 #[test]
 fn test_route_express_unresolved_mount_keeps_own_path_one_route() {
+    // Stands for: the handler route at its own path, once. The `USE` row is
+    // the mount itself, which keeps its path whether or not it resolves.
     // `mystery` binds no router of the file and no import.
-    assert_eq!(routes_of("app.use('/api', mystery);"), ["GET /x"]);
+    assert_eq!(
+        routes_of("app.use('/api', mystery);"),
+        ["GET /x", "USE /api"]
+    );
     // The import names a module that is not in the build.
     let app = "const express = require('express');\nconst users = require('./routes/missing');\nconst app = express();\napp.use('/api', users);\n";
     assert_eq!(
@@ -91,35 +111,46 @@ fn test_route_express_unresolved_mount_keeps_own_path_one_route() {
             ("src/routes/users.js", USERS_ROUTER),
             ("src/app.js", app)
         ])),
-        ["GET /list"],
+        ["GET /list", "USE /api"],
         "an import that resolves to no file leaves the route at its own path"
     );
 }
 
 #[test]
 fn test_route_express_mount_of_a_function_adds_no_prefix() {
+    // Stands for: a middleware function mounts no router, so `GET /x` keeps
+    // its path. The `USE` row is the mount itself.
     assert_eq!(
         routes_of("app.use('/api', function (req, res, next) { next(); });"),
-        ["GET /x"]
+        ["GET /x", "USE /api"]
     );
 }
 
 #[test]
 fn test_route_express_two_mounts_of_one_router_give_one_route_each() {
+    // Stands for: one handler route per mount. The `USE` rows are the two
+    // mounts themselves.
     assert_eq!(
         routes_of("app.use('/a', router);\napp.use('/b', router);"),
-        ["GET /a/x", "GET /b/x"]
+        ["GET /a/x", "GET /b/x", "USE /a", "USE /b"]
     );
 }
 
 #[test]
 fn test_route_express_mount_root_adds_nothing() {
-    assert_eq!(routes_of("app.use('/', router);"), ["GET /x"]);
+    // Stands for: the root mount adds no segment to `GET /x`. The `USE /`
+    // row is the mount itself.
+    assert_eq!(routes_of("app.use('/', router);"), ["GET /x", "USE /"]);
 }
 
 #[test]
 fn test_route_express_mount_trailing_slash_joint_has_one_slash() {
-    assert_eq!(routes_of("app.use('/api/', router);"), ["GET /api/x"]);
+    // Stands for: one slash at the joint of `/api/` and `/x`. The `USE` row
+    // is the mount itself, at the path its call writes.
+    assert_eq!(
+        routes_of("app.use('/api/', router);"),
+        ["GET /api/x", "USE /api/"]
+    );
 }
 
 #[test]
