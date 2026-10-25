@@ -16,7 +16,7 @@ use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_cli::config_parser::parse_configs;
 use ecp_core::analyzer::outcome::Tier;
 use ecp_core::analyzer::types::LocalGraph;
-use ecp_core::contracts::workspace::{Ecosystem, NameLookup, NameRank, WorkspaceFacts};
+use ecp_core::contracts::workspace::{NameRank, WorkspaceFacts};
 use ecp_core::graph::{ArchivedZeroCopyGraph, RelType, ZeroCopyGraph};
 use ecp_core::session::merged::MergedGraph;
 use ecp_core::session::view::{OverlayFileInput, OverlayView};
@@ -238,8 +238,11 @@ fn test_overlay_view_dirty_rust_file_cross_crate_call_keeps_edge() {
     }
 }
 
+/// C2 open point 2, option (a): the index lets the last member that claims
+/// a code name win, so the table stores that member alone and the overlay
+/// binds what the index binds.
 #[test]
-fn test_graph_bin_crate_table_round_trip_two_crates_same_name_records_ambiguity() {
+fn test_graph_bin_crate_table_two_crates_same_name_last_member_wins_like_index() {
     let caller = "pub fn t() {\n    dup::x();\n}\n";
     let mut files = owned(&[
         (
@@ -276,28 +279,16 @@ fn test_graph_bin_crate_table_round_trip_two_crates_same_name_records_ambiguity(
         .filter(|entry| entry.name == "dup")
         .map(|entry| (stored.scopes[entry.scope.index()].root.as_str(), entry.rank))
         .collect();
-    assert_eq!(
-        dup_rows,
-        vec![
-            ("crates/x1", NameRank::Primary),
-            ("crates/x2", NameRank::Primary),
-        ],
-        "both members keep their row"
-    );
-    assert_eq!(
-        stored.lookup_name(Ecosystem::Cargo, "dup"),
-        NameLookup::Ambiguous { count: 2 }
-    );
+    assert_eq!(dup_rows, vec![("crates/x2", NameRank::Primary)]);
 
-    // The overlay picks no member for an ambiguous head.
-    let base = access(&bytes);
-    let inputs: Vec<OverlayFileInput> = vec![parse(CALLER, caller).into()];
-    let view = OverlayView::build(base, &inputs).expect("an edit makes a view");
-    let overlay = calls(&MergedGraph::new(base, Some(&view)), base, CALLER, "t");
-    assert!(
-        overlay.iter().all(|call| call.callee != "x"),
-        "the overlay binds `dup::x()` to one of two `dup` crates: {overlay:#?}"
-    );
+    for (label, edited) in [
+        ("touched", caller.to_string()),
+        ("one-line edit", one_line_edit(caller)),
+    ] {
+        let (reindex, overlay) = reindex_and_overlay(&files, CALLER, &edited, &["t"]);
+        assert_module_tree_binds(&reindex, &[("crates/x2/src/lib.rs", "x")], label);
+        assert_eq!(overlay, reindex, "{label}");
+    }
 }
 
 #[test]

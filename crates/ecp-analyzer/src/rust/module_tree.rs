@@ -1113,10 +1113,19 @@ impl CargoRows {
         self.members.push((scope, code_name, alternates));
     }
 
-    /// The table. Two members with one code name keep both `Primary` rows,
-    /// so a reader sees the name as ambiguous.
+    /// The table. Of two members with one code name, only the later keeps
+    /// its `Primary` row: `build` lets the last claimant win, and the overlay
+    /// must bind what the index binds (C2 open point 2, option a).
     fn finish(self) -> WorkspaceFacts {
         let mut members = self.members;
+        let shadowed: Vec<bool> = (0..members.len())
+            .map(|i| members[i + 1..].iter().any(|later| later.1 == members[i].1))
+            .collect();
+        for (member, shadowed) in members.iter_mut().zip(shadowed) {
+            if shadowed {
+                member.1.clear();
+            }
+        }
         members.sort_by(|a, b| a.0.root.cmp(&b.0.root));
         let mut names: Vec<ScopeName> = Vec::new();
         for (id, (_, primary, alternates)) in members.iter().enumerate() {
@@ -1765,7 +1774,7 @@ mod tests {
     }
 
     #[test]
-    fn test_workspace_facts_duplicate_code_name_keeps_both_rows() {
+    fn test_workspace_facts_duplicate_code_name_last_member_keeps_row() {
         let dir = make_tree(&[
             ("Cargo.toml", "[workspace]\nmembers = [\"x1\", \"x2\"]\n"),
             ("x1/Cargo.toml", "[package]\nname = \"dup\"\n"),
@@ -1775,16 +1784,10 @@ mod tests {
         ]);
         let tree = RustWorkspaceModTree::build(dir.path());
         let facts = tree.workspace_facts();
-        assert_eq!(
-            name_rows(facts),
-            vec![
-                ("dup", NameRank::Primary, "x1"),
-                ("dup", NameRank::Primary, "x2"),
-            ]
-        );
+        assert_eq!(name_rows(facts), vec![("dup", NameRank::Primary, "x2")]);
         assert_eq!(
             facts.lookup_name(Ecosystem::Cargo, "dup"),
-            NameLookup::Ambiguous { count: 2 }
+            NameLookup::Unique(ScopeId(1))
         );
     }
 
