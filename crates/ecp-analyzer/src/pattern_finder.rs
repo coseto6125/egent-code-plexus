@@ -6,8 +6,10 @@
 //! pattern over the tree-sitter grammars ecp already vendors, so the caller
 //! keeps one parser stack instead of two.
 //!
-//! Dispatch is by file extension, mirroring [`crate::identifier_finder`].
-//! An unsupported extension returns `None` and the caller skips the file.
+//! The C5 route of the path picks the grammar, as in
+//! [`crate::identifier_finder`]: extensions match case-sensitively, and the
+//! `.tsx` dialect gets the TSX grammar. A path whose route has no
+//! `Capability::PatternFinder` returns `None` and the caller skips the file.
 //!
 //! ## Metavariable escaping
 //!
@@ -33,6 +35,7 @@ use ast_grep_core::{Language, Pattern};
 /// Re-exported so callers compile patterns without depending on ast-grep directly.
 pub use ast_grep_core::Pattern as CompiledPattern;
 use ecp_core::analyzer::types::IdentifierRange;
+use ecp_core::contracts::routing::{Dialect, FileRouter, Language as RouteLanguage};
 use std::borrow::Cow;
 
 /// Identifier-safe stand-ins for `$`, taken from ast-grep's language table.
@@ -102,38 +105,43 @@ impl LanguageExt for PatternLang {
     }
 }
 
-/// Grammar for `path`'s extension, or `None` when patterns are unsupported
-/// there. The set is narrower than `identifier_finder`'s: a language joins
-/// only once a test in this module proves a metavariable pattern matches on
-/// it, because a wrong `expando` yields zero hits rather than an error.
+/// Grammar for `path`'s route, or `None` when patterns are unsupported
+/// there. The set is `Capability::PatternFinder`, narrower than the
+/// identifier finder's: a language joins only once a test in this module
+/// proves a metavariable pattern matches on it, because a wrong `expando`
+/// yields zero hits rather than an error.
 pub fn lang_for_path(path: &str) -> Option<PatternLang> {
-    let ext = path.rsplit_once('.').map(|(_, e)| e.to_lowercase())?;
-    let (ts, expando): (TSLanguage, char) = match ext.as_str() {
+    let outcome = FileRouter::PATH_ONLY.route(path);
+    let route = outcome.route()?;
+    let (ts, expando): (TSLanguage, char) = match (route.fixed_language()?, route.dialect()) {
         // Identifiers reject `$`; the stand-in column follows ast-grep.
-        "py" | "pyi" => (tree_sitter_python::LANGUAGE.into(), MICRO),
-        "rs" => (tree_sitter_rust::LANGUAGE.into(), MICRO),
-        "go" => (tree_sitter_go::LANGUAGE.into(), MICRO),
-        "rb" => (tree_sitter_ruby::LANGUAGE.into(), MICRO),
-        "kt" | "kts" => (tree_sitter_kotlin::LANGUAGE.into(), MICRO),
-        "cs" => (tree_sitter_c_sharp::LANGUAGE.into(), MICRO),
+        (RouteLanguage::Python, _) => (tree_sitter_python::LANGUAGE.into(), MICRO),
+        (RouteLanguage::Rust, _) => (tree_sitter_rust::LANGUAGE.into(), MICRO),
+        (RouteLanguage::Go, _) => (tree_sitter_go::LANGUAGE.into(), MICRO),
+        (RouteLanguage::Ruby, _) => (tree_sitter_ruby::LANGUAGE.into(), MICRO),
+        (RouteLanguage::Kotlin, _) => (tree_sitter_kotlin::LANGUAGE.into(), MICRO),
+        (RouteLanguage::CSharp, _) => (tree_sitter_c_sharp::LANGUAGE.into(), MICRO),
         // `LANGUAGE_PHP_ONLY`, not the HTML-mixing `LANGUAGE_PHP` that
         // `identifier_finder` uses: a bare pattern carries no `<?php` opener,
         // so the mixing grammar reads it as HTML text and matches nothing.
-        "php" => (tree_sitter_php::LANGUAGE_PHP_ONLY.into(), MICRO),
-        "swift" => (tree_sitter_swift::LANGUAGE.into(), MICRO),
-        "c" => (tree_sitter_c::LANGUAGE.into(), LINEAR_B),
-        // `.h` routes to C++ for the reason `identifier_finder` documents.
-        "cpp" | "hpp" | "cc" | "hh" | "cxx" | "hxx" | "h" => {
-            (tree_sitter_cpp::LANGUAGE.into(), LINEAR_B)
-        }
+        (RouteLanguage::Php, _) => (tree_sitter_php::LANGUAGE_PHP_ONLY.into(), MICRO),
+        (RouteLanguage::Swift, _) => (tree_sitter_swift::LANGUAGE.into(), MICRO),
+        (RouteLanguage::C, _) => (tree_sitter_c::LANGUAGE.into(), LINEAR_B),
+        // The route sends `.h` to C++.
+        (RouteLanguage::Cpp, _) => (tree_sitter_cpp::LANGUAGE.into(), LINEAR_B),
         // Identifiers already admit `$`, so the sigil passes through.
-        "java" => (tree_sitter_java::LANGUAGE.into(), '$'),
-        "ts" => (tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(), '$'),
-        "tsx" => (tree_sitter_typescript::LANGUAGE_TSX.into(), '$'),
-        "js" | "jsx" | "mjs" | "cjs" => (tree_sitter_javascript::LANGUAGE.into(), '$'),
-        // Dart is absent on purpose: tree-sitter-dart parses no bare call
-        // expression, so `f($X)` matches nothing and reports no error. The
-        // `ast-grep` CLI behaves the same. Add it once a pattern shape holds.
+        (RouteLanguage::Java, _) => (tree_sitter_java::LANGUAGE.into(), '$'),
+        (RouteLanguage::TypeScript, Dialect::Standard) => {
+            (tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(), '$')
+        }
+        (RouteLanguage::TypeScript, Dialect::Tsx) => {
+            (tree_sitter_typescript::LANGUAGE_TSX.into(), '$')
+        }
+        (RouteLanguage::JavaScript, _) => (tree_sitter_javascript::LANGUAGE.into(), '$'),
+        // Dart has no `Capability::PatternFinder` on purpose: tree-sitter-dart
+        // parses no bare call expression, so `f($X)` matches nothing and
+        // reports no error. The `ast-grep` CLI behaves the same. Add it once
+        // a pattern shape holds. The other languages have no pattern support.
         _ => return None,
     };
     Some(PatternLang { ts, expando })
@@ -317,6 +325,44 @@ mod tests {
         assert!(find_pattern_occurrences("a.py", b"pass\n", "a = 1\nb = 2")
             .expect("python is supported")
             .is_err());
+    }
+
+    #[test]
+    fn test_lang_for_path_route_capability_decides_support() {
+        // Every default extension of a language with `PatternFinder` gets a
+        // grammar; every other default extension gets none.
+        use ecp_core::contracts::routing::Capability;
+        for &language in RouteLanguage::ALL {
+            let capable = language.capabilities().contains(Capability::PatternFinder);
+            for ext in language.extensions() {
+                let path = format!("src/x.{ext}");
+                assert_eq!(lang_for_path(&path).is_some(), capable, "{path}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_lang_for_path_route_dialect_picks_tsx_grammar() {
+        // Only the TSX grammar knows JSX node kinds, so the `.tsx` dialect
+        // must reach it and `.ts` must not.
+        let jsx = |path: &str| {
+            lang_for_path(path)
+                .expect("supported")
+                .get_ts_language()
+                .id_for_node_kind("jsx_element", true)
+                != 0
+        };
+        assert!(jsx("ui/App.tsx"));
+        assert!(!jsx("ui/app.ts"));
+        let src = "const a = <A x={f(1)} />;\n";
+        assert_eq!(hits("ui/App.tsx", src, "f($X)").len(), 1);
+    }
+
+    #[test]
+    fn test_lang_for_path_upper_case_extension_unsupported() {
+        // C5 open point 3: extensions are case-sensitive, as in the index.
+        assert!(lang_for_path("src/A.PY").is_none());
+        assert!(lang_for_path("src/a.py").is_some());
     }
 
     #[test]

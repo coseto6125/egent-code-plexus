@@ -35,7 +35,9 @@ use std::path::{Path, PathBuf};
 /// via tree-sitter and rewrites them atomically, with optional dry-run preview.
 /// The closing toon payload gains a `result` field only when the answer carries
 /// a caveat (a warm-attached or behind-HEAD graph, or uncommitted paths that
-/// could not be read); its absence means the graph was current.
+/// could not be read); its absence means the graph was current. It gains a
+/// `not_scanned` list (file, reason) when an affected file has no identifier
+/// finder or cannot be read; those files are left unchanged.
 #[derive(Args, Debug, Clone, Serialize)]
 pub struct RenameArgs {
     /// The symbol name to rename (equivalent to `--symbol` flag).
@@ -86,6 +88,33 @@ pub struct RenameArgs {
 // ---------------------------------------------------------------------------
 // Occurrence record for post-rename verification
 // ---------------------------------------------------------------------------
+
+/// The reason a file without an identifier finder is not scanned.
+const NO_FINDER: &str = "no identifier finder for this file type";
+
+/// An affected file that the rename did not scan, so its references stay.
+#[derive(Debug, Serialize)]
+struct NotScanned {
+    file: String,
+    reason: String,
+}
+
+impl NotScanned {
+    fn new(file: &str, reason: String) -> Self {
+        Self {
+            file: file.to_owned(),
+            reason,
+        }
+    }
+}
+
+/// Adds `not_scanned` only when it holds a file: its absence means every
+/// affected file was scanned.
+fn attach_not_scanned(payload: &mut serde_json::Value, not_scanned: &[NotScanned]) {
+    if !not_scanned.is_empty() {
+        payload["not_scanned"] = json!(not_scanned);
+    }
+}
 
 #[derive(Debug, Serialize)]
 struct Occurrence {
@@ -349,6 +378,9 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
 
     // Stage 2: parse each file, find identifier occurrences.
     let mut hits: Vec<(PathBuf, Vec<IdentifierRange>)> = Vec::new();
+    // Affected files the rename could not scan. Each one is reported, so a
+    // reference in a `.vue` file is never mistaken for "no reference".
+    let mut not_scanned: Vec<NotScanned> = Vec::new();
 
     // Heuristic mirror count + candidate names (T-H2).
     // Count is informational only — never drives mutation.
@@ -407,14 +439,20 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
         for file_idx in affected_file_idx {
             let rel_path = graph.files[file_idx].path.resolve(&graph.string_pool);
             let abs_path = repo_root.join(rel_path);
-            let Ok(bytes) = std::fs::read(&abs_path) else {
-                continue;
+            let bytes = match std::fs::read(&abs_path) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    not_scanned.push(NotScanned::new(rel_path, format!("cannot read file: {e}")));
+                    continue;
+                }
             };
-            let occurrences = find_identifier_occurrences(rel_path, &bytes, ast_target_name);
-            if !occurrences.is_empty() {
-                hits.push((abs_path, occurrences));
+            match find_identifier_occurrences(rel_path, &bytes, ast_target_name) {
+                Some(occurrences) if !occurrences.is_empty() => hits.push((abs_path, occurrences)),
+                Some(_) => {}
+                None => not_scanned.push(NotScanned::new(rel_path, NO_FINDER.to_string())),
             }
         }
+        not_scanned.sort_by(|a, b| a.file.cmp(&b.file));
     }
 
     let total_ast_hits: usize = hits.iter().map(|(_, r)| r.len()).sum();
@@ -443,15 +481,17 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
         }
         // A stale or warm-attached graph is the likeliest reason a symbol the
         // agent just wrote is absent: the verdict must carry that reason. The
-        // payload appears only with a caveat, so the plain output stays as is.
+        // payload appears only with a caveat or an unscanned file, so the
+        // plain output stays as is.
         let caveat = engine.caveat();
-        if caveat.is_some() {
-            let payload = json!({
+        if caveat.is_some() || !not_scanned.is_empty() {
+            let mut payload = json!({
                 "operation": if args.dry_run { "dry-run" } else { "applied" },
                 "old": target_symbol,
                 "new": target_new_name,
                 "rename_count": 0,
             });
+            attach_not_scanned(&mut payload, &not_scanned);
             let _ = crate::output::emit_with_caveat(
                 &payload,
                 crate::output::OutputFormat::Toon,
@@ -501,6 +541,7 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
             &target_new_name,
             total_ast_hits,
             true,
+            &not_scanned,
             engine,
         );
         return Ok(());
@@ -532,6 +573,7 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
         &target_new_name,
         total_ast_hits,
         false,
+        &not_scanned,
         engine,
     );
     Ok(())
@@ -547,12 +589,13 @@ fn emit_verification_payload(
     new: &str,
     rename_count: usize,
     dry_run: bool,
+    not_scanned: &[NotScanned],
     engine: &crate::engine::Engine,
 ) {
     let residuals = scan_word_occurrences(repo_root, old);
     let new_distribution = scan_word_occurrences(repo_root, new);
 
-    let payload = json!({
+    let mut payload = json!({
         "operation": if dry_run { "dry-run" } else { "applied" },
         "old": old,
         "new": new,
@@ -560,6 +603,7 @@ fn emit_verification_payload(
         "residuals": residuals,
         "new_distribution": new_distribution,
     });
+    attach_not_scanned(&mut payload, not_scanned);
 
     // Best-effort: emit as structured JSON after main output.
     let _ = crate::output::emit_with_caveat(

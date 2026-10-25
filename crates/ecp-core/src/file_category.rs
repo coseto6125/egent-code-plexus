@@ -3,6 +3,7 @@
 //! and the session overlay. One classifier, so a path that `impact` hides as
 //! a test is also the path the resolver treats as a test candidate.
 
+use crate::contracts::routing::FileRouter;
 use crate::graph::FileCategory;
 use aho_corasick::{AhoCorasick, MatchKind};
 use std::sync::OnceLock;
@@ -243,79 +244,33 @@ pub enum Language {
 }
 
 impl Language {
-    /// Map a repo-relative file path to its provider language. Mirrors the
-    /// extension routing in `commands/analyze.rs` plus path-based overrides
-    /// for `Dockerfile` / `docker-compose.{yml,yaml}` / `.github/workflows/*`.
+    /// Map a repo-relative file path to its provider language. The value is
+    /// the C5 route's `to_legacy` (`contracts::routing`), so this reader and
+    /// the index cannot disagree on an extension. `/` and `\\` both separate
+    /// components, so no separator rewrite is needed.
     pub fn from_path(path: &str) -> Self {
-        if path.contains('\\') {
-            let normalized = path.replace('\\', "/");
-            Self::from_normalized_path(&normalized)
-        } else {
-            Self::from_normalized_path(path)
+        Self::from_normalized_path(path)
+    }
+
+    /// The same value as [`Self::from_path`]. Kept for callers that already
+    /// converted backslashes; neither form allocates.
+    ///
+    /// The template rules are skipped (`route_ignoring_templates`): every
+    /// caller asks about a graph file, and the walk already left template
+    /// files out of the graph.
+    pub fn from_normalized_path(path: &str) -> Self {
+        match FileRouter::PATH_ONLY.route_ignoring_templates(path) {
+            Some(route) => route.to_legacy(),
+            None => Self::unrouted(path),
         }
     }
 
-    /// Fast path for callers that have already converted backslashes (Pass 1
-    /// in `builder.rs` and most repo-rooted paths on Linux/macOS). Skips the
-    /// `replace('\\','/')` allocation entirely.
-    pub fn from_normalized_path(path: &str) -> Self {
-        let normalized = path;
-        let basename = normalized.rsplit('/').next().unwrap_or("");
-
-        // Path / basename overrides before extension routing.
-        if matches!(basename, "Dockerfile" | "dockerfile") {
-            return Self::Dockerfile;
-        }
-        if matches!(
-            basename,
-            "docker-compose.yml" | "docker-compose.yaml" | "compose.yml" | "compose.yaml"
-        ) {
-            return Self::DockerCompose;
-        }
-        let ext = basename.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
-        if matches!(ext, "yml" | "yaml")
-            && (normalized.contains("/.github/workflows/")
-                || normalized.starts_with(".github/workflows/"))
-        {
-            return Self::GitHubActions;
-        }
-
-        match ext {
-            "rs" => Self::Rust,
-            "py" | "pyi" => Self::Python,
-            "ts" | "tsx" => Self::TypeScript,
-            "js" | "jsx" | "mjs" | "cjs" => Self::JavaScript,
-            "java" => Self::Java,
-            "kt" | "kts" => Self::Kotlin,
-            "go" => Self::Go,
-            "rb" => Self::Ruby,
-            "php" => Self::Php,
-            "cs" => Self::CSharp,
-            "swift" => Self::Swift,
-            "dart" => Self::Dart,
-            "sol" => Self::Solidity,
-            "sql" => Self::Sql,
-            "c" => Self::C,
-            // `.h` routes to C++ (matches ref-gitnexus dispatch). `.h` is genuinely
-            // ambiguous — C headers and C++ headers share the extension — but C++
-            // parsing is a near-superset of C, while C parsing produces ERROR
-            // nodes on any C++-only construct (class, template, namespace, &,
-            // operator overload). Real codebases ship C++ libraries with `.h`
-            // headers (nlohmann/json, doctest, LLVM Fuzzer, Catch2, …); routing
-            // them to the C parser silently drops every class/method/template.
-            "cpp" | "hpp" | "cc" | "hh" | "cxx" | "hxx" | "h" => Self::Cpp,
-            "move" => Self::Move,
-            "nim" => Self::Nim,
-            "cairo" => Self::Cairo,
-            "vy" => Self::Vyper,
-            "v" | "sv" | "vh" | "svh" => Self::Verilog,
-            "tf" | "tfvars" | "hcl" => Self::Hcl,
-            "cr" => Self::Crystal,
-            "lua" | "luau" => Self::Lua,
-            "zig" => Self::Zig,
-            "sh" | "bash" => Self::Bash,
-            "yml" | "yaml" => Self::Yaml,
-            "md" | "txt" | "rst" => Self::Markdown,
+    /// Documentation has no route (C5 open point 2), but `ecp dev uid-audit`
+    /// labels it `Markdown`, as it did before the route existed.
+    fn unrouted(path: &str) -> Self {
+        let basename = path.rsplit(['/', '\\']).next().unwrap_or("");
+        match basename.rsplit_once('.') {
+            Some((_, "md" | "txt" | "rst")) => Self::Markdown,
             _ => Self::Unknown,
         }
     }

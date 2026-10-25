@@ -741,6 +741,18 @@ impl FileRoute {
         }
     }
 
+    /// The `file_category::Language` value of a file on this route: the fixed
+    /// language's [`Language::to_legacy`]. A sniffed route has no language
+    /// before the parse, so it gives the value the path alone gave before
+    /// the content gates: `Yaml` for a YAML file, `Unknown` for a JSON file.
+    pub const fn to_legacy(&self) -> LegacyLanguage {
+        match (self.dispatch, self.format) {
+            (Dispatch::Fixed(language), _) => language.to_legacy(),
+            (Dispatch::Sniffed(_), FileFormat::Yaml) => LegacyLanguage::Yaml,
+            (Dispatch::Sniffed(_), FileFormat::Json | FileFormat::Code) => LegacyLanguage::Unknown,
+        }
+    }
+
     /// The language after parse. `accepted` is the candidate whose content
     /// gate accepted; `script` is the embedded script language the parser
     /// read, if the file has one.
@@ -865,6 +877,49 @@ impl FileRouter {
             }
         }
         RouteOutcome::Unrouted
+    }
+
+    /// The route [`Self::route`] gives `rel_path` when the two template rules
+    /// are skipped, or `None` when no other rule routes it.
+    ///
+    /// `file_category::Language` and `FileMeta` read this once per resolver
+    /// candidate. The template rules scan every path component, and the
+    /// paths those readers see are graph files, which the template rules
+    /// already kept out of the index. So this reads the basename from the
+    /// end of the path, and scans the components only for a YAML file.
+    pub fn route_ignoring_templates(&self, rel_path: &str) -> Option<FileRoute> {
+        let basename = rel_path
+            .rsplit(['/', '\\'])
+            .find(|component| !component.is_empty() && *component != ".")
+            .unwrap_or("");
+        let parts = PathParts {
+            path: rel_path,
+            basename,
+            extension: extension_of(basename),
+        };
+        for &rule in PathRule::ALL {
+            if matches!(
+                rule,
+                PathRule::TemplateDir | PathRule::TemplateInterpolation
+            ) {
+                continue;
+            }
+            if let Some(Decision::Route {
+                format,
+                dispatch,
+                dialect,
+            }) = rule.decide(&parts)
+            {
+                return Some(FileRoute {
+                    rule,
+                    format,
+                    dispatch,
+                    dialect,
+                    size_cap: self.size_cap,
+                });
+            }
+        }
+        None
     }
 }
 
@@ -1442,12 +1497,6 @@ mod tests {
         assert!(router().route("__brick__/a.go").route().is_none());
     }
 
-    // The ledger below lists the differences between the legacy
-    // `file_category::Language` reader and this contract. Each row is a known
-    // defect or a decided change (design note, "Today"). The area 6 adoption
-    // slice deletes it together with `file_category::Language::from_path`;
-    // until then a new difference fails here instead of shipping unnoticed.
-
     #[test]
     fn test_route_every_language_extension_first_provider_is_its_language() {
         for &language in Language::ALL {
@@ -1459,71 +1508,6 @@ mod tests {
                         .route()
                         .and_then(|route| route.providers().next()),
                     Some(language.provider()),
-                    "{path}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_route_path_ledger_matches_today_readers() {
-        // (path, first provider of the contract route,
-        //  today's `file_category::Language`)
-        let ledger: &[(&str, Option<&str>, LegacyLanguage)] = &[
-            ("Dockerfile", Some("dockerfile"), LegacyLanguage::Dockerfile),
-            (
-                "svc/x.dockerfile",
-                Some("dockerfile"),
-                LegacyLanguage::Unknown,
-            ),
-            (
-                "svc/compose.yaml",
-                Some("docker-compose"),
-                LegacyLanguage::DockerCompose,
-            ),
-            (
-                ".github/workflows/ci.yml",
-                Some("github-actions"),
-                LegacyLanguage::GitHubActions,
-            ),
-            ("k8s/deploy.yaml", Some("kubernetes"), LegacyLanguage::Yaml),
-            ("api/spec.json", Some("openapi"), LegacyLanguage::Unknown),
-            ("App.vue", Some("vue"), LegacyLanguage::Unknown),
-            ("api.proto", Some("protobuf"), LegacyLanguage::Unknown),
-            ("README.md", None, LegacyLanguage::Markdown),
-            ("notes.txt", None, LegacyLanguage::Markdown),
-            ("__brick__/lib/a.dart", None, LegacyLanguage::Dart),
-            ("x.mts", None, LegacyLanguage::Unknown),
-            (".py", None, LegacyLanguage::Python),
-        ];
-        for (path, contract, legacy) in ledger {
-            let outcome = router().route(path);
-            assert_eq!(
-                outcome.route().and_then(|route| route.providers().next()),
-                *contract,
-                "contract {path}"
-            );
-            assert_eq!(
-                LegacyLanguage::from_normalized_path(path),
-                *legacy,
-                "legacy {path}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_to_legacy_every_extension_default_matches_today_except_dockerfile_ext() {
-        for &language in Language::ALL {
-            for ext in language.extensions() {
-                let path = format!("src/x.{ext}");
-                let expected = if *ext == "dockerfile" {
-                    LegacyLanguage::Unknown
-                } else {
-                    language.to_legacy()
-                };
-                assert_eq!(
-                    LegacyLanguage::from_normalized_path(&path),
-                    expected,
                     "{path}"
                 );
             }
