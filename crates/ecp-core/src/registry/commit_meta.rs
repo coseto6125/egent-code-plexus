@@ -114,7 +114,11 @@ use std::path::Path;
 /// anonymous node, and an unbound or absent handler is a BlindSpot.
 /// schema33: a C# delegate, or a member of a type beside a same-name type of
 /// another generic arity, is its own node.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema33");
+/// schema34: a C# call whose receiver type lacks the member retries the
+/// extension methods in scope, or records a BlindSpot; a TypeScript method
+/// route needs an `@Controller` class; a nested same-name type owns its own
+/// members; a test file's route marks no entry point.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema34");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

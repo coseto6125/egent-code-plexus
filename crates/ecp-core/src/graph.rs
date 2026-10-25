@@ -1137,7 +1137,9 @@ pub struct FunctionMeta {
     /// - bit 5: `is_extern`   (FFI declared, no Rust/native body)
     /// - bits 6-8: visibility (0=public, 1=protected, 2=private, 3=crate/internal, 4=package, 5=fileprivate, 6-7=reserved)
     /// - bit 9: `is_virtual`  (C++ only: declared `virtual`, or an `override` / `final` member)
-    /// - bits 10-15: reserved (zero)
+    /// - bit 10: C# extension method (static method of a static class whose first parameter carries `this`)
+    /// - bit 11: C# extension on a generic type parameter (`this T`)
+    /// - bits 12-15: reserved (zero)
     pub flags: u16,
     /// Parameter list, flat-encoded as alternating name/type StrRefs:
     /// `[name1, type1, name2, type2, ...]`. Empty Vec when zero params or
