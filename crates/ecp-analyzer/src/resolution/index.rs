@@ -7,7 +7,6 @@ use ecp_core::analyzer::reexport::{is_es_module, pick_call, ExportAliasTable};
 use ecp_core::analyzer::same_file_pick::{self, ImplMember as PickImplMember, PickFacts};
 use ecp_core::analyzer::type_ladder::{declared_namespace, return_type_key, TypeFacts};
 use ecp_core::analyzer::types::{owner_key, RawExportAlias};
-use ecp_core::file_category::pick_global;
 pub use ecp_core::file_category::{FileMeta, GlobalPick, Language};
 use ecp_core::graph::{FunctionMeta, NodeKind};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -1416,7 +1415,8 @@ impl SymbolTable {
     }
 
     /// Every candidate [`lookup_global`] weighs, as a set: kind-filtered, then
-    /// through the same [`FileMeta::admits`] barrier [`pick_global`] applies.
+    /// through the same [`FileMeta::admits`] barrier
+    /// [`pick_global`](ecp_core::file_category::pick_global) applies.
     /// A test double that shares a production name survives here exactly as
     /// it keeps `pick_global` ambiguous; the caller decides among the set.
     pub fn global_candidates(
@@ -1610,38 +1610,34 @@ impl SymbolTable {
         owned_by(type_name).or_else(|| owned_by(self.name_in_file(type_id)?))
     }
 
-    /// The variant a bare name (`RED`, a Java `case MONDAY:`) denotes: the
-    /// one `file` declares, else the one value of that name the caller's
-    /// barrier admits project-wide when that value is a variant, and whether
-    /// it is in `file`. `None` when `file` declares something else of that
-    /// name (a local `#define` shadows the enumerator), or another value
-    /// (a macro or constant in some header) shares the name.
-    pub fn bare_enum_variant(
+    /// `file`'s declarations of `name` with their kinds, scoped ones
+    /// included; `None` when `file` declares no such name. The reader's-file
+    /// half of a bare variant pick ([`ladder::bare_variant`]).
+    pub fn decls_named_in_file(
         &self,
         file: &str,
         name: &str,
-        caller: FileMeta,
-    ) -> Option<(u32, bool)> {
-        let is_variant = |id: u32| self.node_kinds[id as usize] == NodeKind::EnumVariant;
-        if let Some(ids) = self.file_scoped.get(file).and_then(|names| names.get(name)) {
-            return match ids.as_slice() {
-                [id] if is_variant(*id) => Some((*id, true)),
-                _ => None,
-            };
-        }
-        let values = self.global_scoped.get(name)?.iter().copied().filter(|&id| {
-            matches!(
-                self.node_kinds[id as usize],
-                NodeKind::EnumVariant | NodeKind::Macro | NodeKind::Const | NodeKind::Variable
-            )
-        });
-        match pick_global(
-            caller,
-            values.map(|id| (id, self.node_file_meta[id as usize])),
-        ) {
-            GlobalPick::Unique(id) if is_variant(id) => Some((id, false)),
-            _ => None,
-        }
+    ) -> Option<impl Iterator<Item = (u32, NodeKind)> + '_> {
+        let ids = self.file_scoped.get(file)?.get(name)?;
+        Some(ids.iter().map(|&id| (id, self.node_kinds[id as usize])))
+    }
+
+    /// Every value named `name` (an `EnumVariant`, `Macro`, `Const` or
+    /// `Variable`) with its file's meta: what a bare variant name may denote
+    /// project-wide ([`ladder::bare_variant`]).
+    pub fn values_named(&self, name: &str) -> impl Iterator<Item = (u32, FileMeta)> + '_ {
+        self.global_scoped
+            .get(name)
+            .map_or(&[][..], Vec::as_slice)
+            .iter()
+            .copied()
+            .filter(|&id| {
+                matches!(
+                    self.node_kinds[id as usize],
+                    NodeKind::EnumVariant | NodeKind::Macro | NodeKind::Const | NodeKind::Variable
+                )
+            })
+            .map(|id| (id, self.node_file_meta[id as usize]))
     }
 
     /// The one constructor a construction of type `type_id` calls; `None`
@@ -2030,6 +2026,14 @@ impl ResolveFacts for SymbolTable {
 
     fn first_decl_in_file(&self, file: &str, name: &str, target: ResolveTarget) -> Option<u32> {
         self.lookup_in_file_with_kind(file, name, target)
+    }
+
+    fn has_named(&self, name: &str) -> bool {
+        self.global_match_count(name) > 0
+    }
+
+    fn enum_variant_of(&self, type_id: u32, type_name: &str, variant: &str) -> Option<u32> {
+        SymbolTable::enum_variant_of(self, type_id, type_name, variant)
     }
 }
 

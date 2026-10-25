@@ -10,6 +10,7 @@ use crate::resolution::index::{DeclaredBase, FileMeta, Language, ResolveTarget, 
 use crate::resolution::resolver::{ReexportIndex, Resolver};
 use crate::rust::module_tree::RustWorkspaceModTree;
 use ecp_core::analyzer::csharp_extension::{self, ReceiverSite};
+use ecp_core::analyzer::ladder;
 use ecp_core::analyzer::lexical::{
     enclosing_types, file_identities, file_uids, later_is_arity_twin, lexical_scope_kinds,
     raw_decl, splits_by_arity, LexicalFunctions,
@@ -3390,57 +3391,50 @@ struct VariantReasons {
     matched: StrRef,
 }
 
-/// The `EnumVariant` a [`VariantRef`] names, with the edge confidence.
-///
-/// A qualified reference resolves its qualifier as a type through the
-/// ordinary tiers, then takes that type's variant, so `A` of two enums never
-/// mixes. Rust `Self::A` names the caller's own impl type. A bare name (C
-/// enumerators, Java case labels) binds a variant declared in the file, else
-/// the one project-wide variant of that name.
+/// The `EnumVariant` a [`VariantRef`] in the file `file` names, with the
+/// edge confidence: a bare name through [`ladder::bare_variant`], a
+/// qualified path through [`ladder::qualified_variant`], whose qualifier
+/// resolves as a type through the ordinary tiers.
 fn resolve_variant_ref(
     resolver: &Resolver<'_>,
     symbol_table: &SymbolTable,
     local_graph: &LocalGraph,
     raw_node: &RawNode,
+    (file, language): (&str, Language),
     variant_ref: VariantRef<'_>,
 ) -> Option<(u32, f32)> {
-    let split = variant_ref.split();
-    if !symbol_table.has_enum_variant(split.map_or(variant_ref.path, |(_, variant)| variant)) {
-        return None;
-    }
-    let file = local_graph.file_path.to_string_lossy().replace('\\', "/");
-    let Some((qualifier, variant)) = split else {
-        return symbol_table
-            .bare_enum_variant(
-                &file,
-                variant_ref.path,
-                FileMeta::from_normalized_path(&file),
+    let has_variant = |name: &str| symbol_table.has_enum_variant(name);
+    let Some(path) = variant_ref.split() else {
+        let name = variant_ref.path;
+        return ladder::bare_variant(
+            symbol_table,
+            name,
+            FileMeta::from_normalized_path(file),
+            has_variant,
+            || symbol_table.decls_named_in_file(file, name),
+            || symbol_table.values_named(name),
+        )
+        .edge();
+    };
+    ladder::qualified_variant(
+        symbol_table,
+        language,
+        raw_node.owner_class.as_deref(),
+        path,
+        has_variant,
+        |qualifier| match resolver
+            .resolve_symbol(
+                &local_graph.file_path,
+                qualifier,
+                &local_graph.imports,
+                ResolveTarget::Type,
             )
-            .map(|(id, same_file)| {
-                let tier = if same_file {
-                    ResolutionTier::SameFile
-                } else {
-                    ResolutionTier::Global
-                };
-                (id, tier.base_confidence())
-            });
-    };
-    let qualifier = match (Language::from_normalized_path(&file), qualifier) {
-        (Language::Rust, "Self") => raw_node.owner_class.as_deref().and_then(owner_key)?,
-        _ => qualifier,
-    };
-    let types = resolver.resolve_symbol(
-        &local_graph.file_path,
-        qualifier,
-        &local_graph.imports,
-        ResolveTarget::Type,
-    );
-    let &[(type_id, confidence)] = types.as_slice() else {
-        return None;
-    };
-    symbol_table
-        .enum_variant_of(type_id, qualifier, variant)
-        .map(|id| (id, confidence))
+            .as_slice()
+        {
+            &[hit] => Some(hit),
+            _ => None,
+        },
+    )
 }
 
 /// The reasons of the edges a [`NameRef`] yields: `ReadsField` to a
@@ -3461,7 +3455,8 @@ struct NameRefReasons {
 /// unique project-wide declaration ([`ResolutionTier::Global`]). The global tier is
 /// dropped where a module must import a name before it can use it bare, as
 /// there it can only stand for a local the parser did not see. An
-/// ambiguous name binds nothing.
+/// ambiguous name binds nothing. A function a lexical scope in reach
+/// declares (`lexical`) binds before every name tier ([`ladder::name_ref`]).
 fn resolve_name_ref(
     resolver: &Resolver<'_>,
     symbol_table: &SymbolTable,
@@ -3469,20 +3464,16 @@ fn resolve_name_ref(
     (file, language): (&str, Language),
     owner: Option<&str>,
     name_ref: NameRef<'_>,
+    lexical: Option<u32>,
 ) -> Option<(u32, f32)> {
-    ecp_core::analyzer::name_ref::resolve_name_ref(
+    ladder::name_ref(
         symbol_table,
         file,
         language,
         &local_graph.imports,
         owner,
         name_ref,
-        ecp_core::analyzer::name_ref::NameRefTiers {
-            same_file: ResolutionTier::SameFile.base_confidence(),
-            heritage: ResolutionTier::HeritageScoped.base_confidence(),
-            global: ResolutionTier::Global.base_confidence(),
-        },
-        |name| symbol_table.global_match_count(name) > 0,
+        lexical,
         |name, target| {
             resolver.resolve_symbol(&local_graph.file_path, name, &local_graph.imports, target)
         },
@@ -3791,19 +3782,15 @@ fn pass2_emit_node_edges(
             // A bare reference to a scoped function binds through the
             // lexical tier, as a bare call does; the name tiers never return
             // a scoped node (I5).
-            let lexical = lexical_lookup
-                .name_ref_target(raw_node.span, name_ref)
-                .map(|id| (id, ResolutionTier::SameFile.base_confidence()));
-            let Some((target_id, confidence)) = lexical.or_else(|| {
-                resolve_name_ref(
-                    resolver,
-                    symbol_table,
-                    local_graph,
-                    (file.as_str(), *language),
-                    scope_owner,
-                    name_ref,
-                )
-            }) else {
+            let Some((target_id, confidence)) = resolve_name_ref(
+                resolver,
+                symbol_table,
+                local_graph,
+                (file.as_str(), *language),
+                scope_owner,
+                name_ref,
+                lexical_lookup.name_ref_target(raw_node.span, name_ref),
+            ) else {
                 continue;
             };
             let callable = symbol_table.node_kind(target_id).is_callable();
@@ -3832,9 +3819,15 @@ fn pass2_emit_node_edges(
             continue;
         }
         if let Some(variant_ref) = VariantRef::parse(field_name) {
-            let Some((target_id, confidence)) =
-                resolve_variant_ref(resolver, symbol_table, local_graph, raw_node, variant_ref)
-            else {
+            let (file, language) = name_file.get_or_insert_with(reader_file);
+            let Some((target_id, confidence)) = resolve_variant_ref(
+                resolver,
+                symbol_table,
+                local_graph,
+                raw_node,
+                (file.as_str(), *language),
+                variant_ref,
+            ) else {
                 continue;
             };
             // `E::A` and `crate::m::E::A` in one body are one dependency.
@@ -3857,12 +3850,8 @@ fn pass2_emit_node_edges(
             });
             continue;
         }
-        let targets = resolver.resolve_symbol(
-            &local_graph.file_path,
-            field_name,
-            &local_graph.imports,
-            ResolveTarget::Field,
-        );
+        let targets =
+            resolver.resolve_field_read(&local_graph.file_path, field_name, &local_graph.imports);
         for (target_id, confidence) in targets {
             // The arity twin the reader's declaring type holds, as above.
             let target_id = match symbol_table.has_member_twins() {

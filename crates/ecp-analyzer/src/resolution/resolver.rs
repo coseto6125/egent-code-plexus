@@ -43,7 +43,7 @@ use ecp_core::analyzer::import_binding::{
     extension_retry, fqn_extension, fqn_imported_name, fqn_language, fqn_type_path, import_binding,
     import_family, import_member_fallback, may_suppress, module_head, retry_name,
 };
-use ecp_core::analyzer::ladder::{self, CallPick};
+use ecp_core::analyzer::ladder::{self, split_qualifier, CallPick, FieldRead};
 use ecp_core::analyzer::outcome::{NoEdge, Resolution, Tier};
 use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::reexport::{
@@ -1385,8 +1385,8 @@ impl<'a> Resolver<'a> {
         barrel: &mut Option<Arc<str>>,
     ) -> Vec<(NodeId, f32)> {
         // `ResolveTarget::Field` reaches here only for a bare name an import
-        // may bind (Java `import static app.Consts.TABLE`); `resolve_symbol`
-        // keeps `obj.field` reads off the import tiers on its own.
+        // may bind (Java `import static app.Consts.TABLE`); an `obj.field`
+        // read never takes an import tier ([`ladder::field_read`]).
         if raw_imports.is_empty() {
             return Vec::new();
         }
@@ -2211,12 +2211,81 @@ impl<'a> Resolver<'a> {
             }
         }
 
-        // Tier 3: Global fallback — emit only when the kind-filtered candidate
-        // set is unique. Refusing to guess on ambiguity is the dominant defence
-        // against bare-name fan-out (`new`, `format`, `default`, `main`, ...).
-        // `alt_count` in the dump still surfaces the raw same-name count so the
-        // verification harness can distinguish suppressed-ambiguous from
-        // truly-unresolved.
+        // Tier 3 ([`Self::global_tier`]).
+        results.extend(
+            self.global_tier(
+                &source_file_str,
+                symbol_name,
+                raw_imports,
+                target,
+                call.is_some(),
+                free_only,
+            )
+            .edge(),
+        );
+        results
+    }
+
+    /// R24: the `Property` a plain field read `name` binds, through the tier
+    /// [`ladder::field_read`] picks: Tier 1, Tier 3 ([`Self::global_tier`]),
+    /// or for a qualified read the full lookup ([`Self::resolve_symbol`]),
+    /// whose qualifier tier settles it. The decision dump records each tier
+    /// as the full lookup does.
+    pub fn resolve_field_read(
+        &self,
+        source_file: &Path,
+        name: &str,
+        raw_imports: &[RawImport],
+    ) -> Vec<(NodeId, f32)> {
+        let source_file_str = normalize_source_path(source_file);
+        match ladder::field_read(self.symbol_table, &source_file_str, name) {
+            FieldRead::Bound(hit) => {
+                self.record(
+                    &source_file_str,
+                    name,
+                    None,
+                    DecisionTier::SameFile,
+                    Some(hit.id),
+                    0,
+                    Some(hit.confidence),
+                );
+                vec![(hit.id, hit.confidence)]
+            }
+            FieldRead::Qualified => {
+                self.resolve_symbol(source_file, name, raw_imports, ResolveTarget::Field)
+            }
+            FieldRead::Global => self
+                .global_tier(
+                    &source_file_str,
+                    name,
+                    raw_imports,
+                    ResolveTarget::Field,
+                    false,
+                    false,
+                )
+                .edge()
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    /// Tier 3: Global fallback ([`ladder::global`]) — emit only when the
+    /// kind-filtered candidate set is unique. Refusing to guess on ambiguity
+    /// is the dominant defence against bare-name fan-out (`new`, `format`,
+    /// `default`, `main`, ...). `alt_count` in the dump still surfaces the
+    /// raw same-name count so the verification harness can distinguish
+    /// suppressed-ambiguous from truly-unresolved. `nearest` (a call site)
+    /// admits the nearest copy; `free_only` is a bare `f()` that never
+    /// reaches a member.
+    fn global_tier(
+        &self,
+        source_file_str: &str,
+        symbol_name: &str,
+        raw_imports: &[RawImport],
+        target: ResolveTarget,
+        nearest: bool,
+        free_only: bool,
+    ) -> Resolution {
         let specifier = raw_imports
             .iter()
             .find(|i| match &i.alias {
@@ -2225,13 +2294,13 @@ impl<'a> Resolver<'a> {
             })
             .map(|i| i.source.as_str());
         let raw_count = self.symbol_table.global_match_count(symbol_name);
-        let caller_meta = FileMeta::from_path(&source_file_str);
+        let caller_meta = FileMeta::from_path(source_file_str);
 
         let hidden = |node_id: NodeId| {
             self.symbol_table.file_of(node_id).is_some_and(|module| {
                 reexport::import_hides(
                     &IndexFacts(self),
-                    &source_file_str,
+                    source_file_str,
                     symbol_name,
                     raw_imports.iter().map(ImportRef::from),
                     module,
@@ -2240,10 +2309,10 @@ impl<'a> Resolver<'a> {
         };
         let resolution = ladder::global(
             self.symbol_table,
-            &source_file_str,
+            source_file_str,
             caller_meta,
             target,
-            call.is_some(),
+            nearest,
             || {
                 self.symbol_table
                     .global_field_candidates(symbol_name, target, free_only)
@@ -2252,7 +2321,6 @@ impl<'a> Resolver<'a> {
         );
         let (tier, target_id, confidence, alt_count) = match resolution {
             Resolution::Bound(hit) => {
-                results.push((hit.id, hit.confidence));
                 let tier = match hit.tier {
                     Some(Tier::NearestCopy) => DecisionTier::NearestCopy,
                     _ => DecisionTier::Global,
@@ -2270,7 +2338,7 @@ impl<'a> Resolver<'a> {
             _ => (DecisionTier::Unresolved, None, None, raw_count),
         };
         self.record(
-            &source_file_str,
+            source_file_str,
             symbol_name,
             specifier,
             tier,
@@ -2278,25 +2346,10 @@ impl<'a> Resolver<'a> {
             alt_count,
             confidence,
         );
-
-        results
+        resolution
     }
 }
 
-/// Split a qualified callee into `(qualifier, member)` where `qualifier` is
-/// the **immediate** identifier preceding the rightmost separator. Returns
-/// `None` if the name has no `::` / `.` separator or either side is empty.
-///
-/// For multi-segment paths only the last segment is taken as the qualifier
-/// (the only piece the resolver can map back to a registered Type name —
-/// `std::vec::Vec` is registered as just `Vec` keyed by its defining file).
-///
-/// Examples:
-/// * `A::new` → `Some(("A", "new"))`
-/// * `std::vec::Vec::new` → `Some(("Vec", "new"))`
-/// * `obj.method` → `Some(("obj", "method"))`
-/// * `foo` → `None`
-///
 /// Is the prefix preceding `qualifier` inside `full_callee` an "internal"
 /// path (empty, or `crate` / `self` / `super` chain)? Tier 4 only fires on
 /// calls where the qualifier names an internal module rather than the
@@ -2401,37 +2454,6 @@ fn rust_expand_path_head<'s>(prefix: &'s str, imports: &'s [RawImport]) -> Vec<&
         named.splice(..1, path.split("::").chain(tail));
     }
     named
-}
-
-fn split_qualifier(name: &str) -> Option<(&str, &str)> {
-    // Pick the rightmost separator. PHP's `\` is included alongside `::`
-    // and `.` so `\App\helper` resolves with `App` as qualifier. `::` is
-    // 2-char (preferred on tie since the position points at the first `:`,
-    // not the `.`/`\` that might appear at the same column).
-    let candidates = [
-        (name.rfind("::"), 2usize),
-        (name.rfind('.'), 1),
-        (name.rfind('\\'), 1),
-    ];
-    let (split_idx, sep_len) = candidates
-        .iter()
-        .filter_map(|&(idx, len)| idx.map(|i| (i, len)))
-        .max_by_key(|&(i, _)| i)?;
-    let (before, after) = name.split_at(split_idx);
-    let member = &after[sep_len..];
-    if before.is_empty() || member.is_empty() {
-        return None;
-    }
-    let qualifier = before
-        .rsplit_once("::")
-        .or_else(|| before.rsplit_once('.'))
-        .or_else(|| before.rsplit_once('\\'))
-        .map(|(_, q)| q)
-        .unwrap_or(before);
-    if qualifier.is_empty() {
-        return None;
-    }
-    Some((qualifier, member))
 }
 
 /// [`reexport::for_each_specifier_candidate`] with the project's path

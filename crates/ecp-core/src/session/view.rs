@@ -121,7 +121,7 @@ use crate::analyzer::import_binding::{
     extension_retry, fqn_imported_name, fqn_language, fqn_type_path, import_binding,
     import_member_fallback, owner_path_agrees, retry_name, DeclaredType, MemberOwner,
 };
-use crate::analyzer::ladder::{self, CallPick, ResolveFacts};
+use crate::analyzer::ladder::{self, split_qualifier, CallPick, FieldRead, ResolveFacts};
 use crate::analyzer::lexical::{
     enclosing_types, file_identities, later_is_arity_twin, lexical_scope_kinds, splits_by_arity,
     twin_enclosing, LexicalFunctions,
@@ -310,11 +310,8 @@ pub struct ViewEdge {
 }
 
 /// Tier confidences mirroring index-time Pass-2 resolution.
-const CONF_SAME_FILE: f32 = Tier::SameFile.confidence();
 const CONF_IMPORT_SCOPED: f32 = Tier::ImportScoped.confidence();
 const CONF_QUALIFIER_SCOPED: f32 = Tier::QualifierScoped.confidence();
-const CONF_HERITAGE: f32 = Tier::HeritageScoped.confidence();
-const CONF_GLOBAL_UNIQUE: f32 = Tier::Global.confidence();
 /// The index's Tier 3.5 (`try_module_tree_resolve`).
 const CONF_MODULE_TREE: f32 = Tier::ModuleTree.confidence();
 
@@ -1371,32 +1368,28 @@ impl OverlayView {
                         if let Some(name_ref) = NameRef::parse(raw) {
                             // The index's lexical name-reference tier, then
                             // its name tiers with the same owner.
-                            let lexical_hit = lexical
-                                .name_ref_target(span_of(sym), name_ref)
-                                .map(|id| (id, CONF_SAME_FILE));
-                            let Some((target, confidence)) = lexical_hit.or_else(|| {
-                                resolve_overlay_name_ref(
-                                    graph,
-                                    file_ord,
-                                    file,
-                                    caller,
-                                    match root == source {
-                                        true => sym.owner_class.as_deref(),
-                                        false => owner,
-                                    },
-                                    name_ref,
-                                    &mut base_metas,
-                                    &callables,
-                                    &values,
-                                    &fields,
-                                    &types,
-                                    &qualifiers,
-                                    &nodes,
-                                    &replaced,
-                                    &dirty_base,
-                                    &facts,
-                                )
-                            }) else {
+                            let Some((target, confidence)) = resolve_overlay_name_ref(
+                                graph,
+                                file_ord,
+                                file,
+                                caller,
+                                match root == source {
+                                    true => sym.owner_class.as_deref(),
+                                    false => owner,
+                                },
+                                name_ref,
+                                lexical.name_ref_target(span_of(sym), name_ref),
+                                &mut base_metas,
+                                &callables,
+                                &values,
+                                &fields,
+                                &types,
+                                &qualifiers,
+                                &nodes,
+                                &replaced,
+                                &dirty_base,
+                                &facts,
+                            ) else {
                                 continue;
                             };
                             let callable = facts.kind(target).is_callable();
@@ -1461,26 +1454,46 @@ impl OverlayView {
                             });
                             continue;
                         }
-                        let Some((target, confidence)) = resolve_callee(
-                            graph,
-                            CallSite::Plain(raw),
-                            file_ord,
-                            &file.imports,
-                            caller,
-                            &mut base_metas,
-                            &fields,
-                            &types,
-                            &qualifiers,
-                            &nodes,
-                            &replaced,
-                            &dirty_base,
-                            &facts,
-                            Scope {
-                                call: None,
-                                heritage: &[],
-                                type_lookup: false,
-                            },
-                        ) else {
+                        // The index's `Resolver::resolve_field_read`.
+                        let hit = match ladder::field_read(&facts, &file.rel_path, raw) {
+                            FieldRead::Bound(hit) => Some((hit.id, hit.confidence)),
+                            FieldRead::Qualified => resolve_callee(
+                                graph,
+                                CallSite::Plain(raw),
+                                file_ord,
+                                &file.imports,
+                                caller,
+                                &mut base_metas,
+                                &fields,
+                                &types,
+                                &qualifiers,
+                                &nodes,
+                                &replaced,
+                                &dirty_base,
+                                &facts,
+                                Scope {
+                                    call: None,
+                                    heritage: &[],
+                                    type_lookup: false,
+                                },
+                            ),
+                            FieldRead::Global => global_tier(
+                                graph,
+                                raw,
+                                file_ord,
+                                &file.imports,
+                                caller,
+                                &mut base_metas,
+                                &fields,
+                                &nodes,
+                                &replaced,
+                                &dirty_base,
+                                &facts,
+                                (None, false),
+                                &OnceCell::new(),
+                            ),
+                        };
+                        let Some((target, confidence)) = hit else {
                             continue;
                         };
                         let target = twin_read_from(target, file_ord, HeritageNode::span(sym));
@@ -4706,6 +4719,24 @@ impl ResolveFacts for OverlayFacts<'_> {
     fn first_decl_in_file(&self, file: &str, name: &str, target: ResolveTarget) -> Option<u32> {
         self.first_in_file(file, name, target, None)
     }
+
+    /// `OverlayFacts::global_named` is not empty, read without building
+    /// the list.
+    fn has_named(&self, name: &str) -> bool {
+        let graph = self.graph;
+        self.dirty_by_name
+            .get(name)
+            .is_some_and(|ids| !ids.is_empty())
+            || graph.nodes_by_name(name).any(|idx| {
+                !self.dirty_base.contains(&idx)
+                    && !graph.is_later_overload(idx)
+                    && fragment_emits(NodeKind::from(&graph.nodes[idx as usize].kind))
+            })
+    }
+
+    fn enum_variant_of(&self, type_id: u32, type_name: &str, variant: &str) -> Option<u32> {
+        OverlayFacts::enum_variant_of(self, type_id, type_name, variant)
+    }
 }
 
 /// The owner keys of the namespaces and modules among `symbols`, one dirty
@@ -4740,6 +4771,9 @@ impl ImplNode for OverlaySymbol {
     }
 }
 
+/// The index's `resolve_name_ref` in `builder.rs` ([`ladder::name_ref`]):
+/// `resolve` is [`resolve_callee`] over the name table of the target's
+/// kinds, and the import tier alone is [`bind_import`] over the fields.
 #[allow(clippy::too_many_arguments)]
 fn resolve_overlay_name_ref(
     graph: &ArchivedZeroCopyGraph,
@@ -4748,6 +4782,7 @@ fn resolve_overlay_name_ref(
     caller: FileMeta,
     owner: Option<&str>,
     name_ref: NameRef<'_>,
+    lexical: Option<u32>,
     base_metas: &mut FxHashMap<usize, FileMeta>,
     callables: &OverlayNames<'_>,
     values: &OverlayNames<'_>,
@@ -4759,24 +4794,18 @@ fn resolve_overlay_name_ref(
     dirty_base: &FxHashSet<u32>,
     facts: &OverlayFacts<'_>,
 ) -> Option<(u32, f32)> {
-    crate::analyzer::name_ref::resolve_name_ref(
+    ladder::name_ref(
         facts,
         &file.rel_path,
         caller.language,
         &file.imports,
         owner,
         name_ref,
-        crate::analyzer::name_ref::NameRefTiers {
-            same_file: CONF_SAME_FILE,
-            heritage: CONF_HERITAGE,
-            global: CONF_GLOBAL_UNIQUE,
-        },
-        |name| !facts.global_named(name).is_empty(),
+        lexical,
         |name, target| {
             let names = match target {
                 ResolveTarget::Callable => callables,
                 ResolveTarget::Value => values,
-                ResolveTarget::Field => fields,
                 _ => return Vec::new(),
             };
             resolve_callee(
@@ -4802,26 +4831,22 @@ fn resolve_overlay_name_ref(
             .into_iter()
             .collect()
         },
-        |name, target| {
-            if target != ResolveTarget::Field {
-                return Vec::new();
-            }
-            match bind_import(
-                graph,
-                name,
-                file_ord,
-                &file.imports,
-                caller.language,
-                fields,
-                types,
-                nodes,
-                dirty_base,
-                facts,
-                &[],
-            ) {
-                Some(ImportBinding::Resolved(Some(target))) => vec![target],
-                _ => Vec::new(),
-            }
+        // The name tiers ask the import tier alone for a field only.
+        |name, _| match bind_import(
+            graph,
+            name,
+            file_ord,
+            &file.imports,
+            caller.language,
+            fields,
+            types,
+            nodes,
+            dirty_base,
+            facts,
+            &[],
+        ) {
+            Some(ImportBinding::Resolved(Some(target))) => vec![target],
+            _ => Vec::new(),
         },
     )
 }
@@ -4893,17 +4918,8 @@ fn resolve_callee<'s>(
     let importer = facts.scope.dirty()[file_ord].rel_path.as_str();
     let callee = site.name();
     let call = scope.call;
-    let is_method = |idx: u32| match idx.checked_sub(graph.nodes.len() as u32) {
-        Some(offset) => nodes[offset as usize].kind == NodeKind::Method,
-        None => NodeKind::from(&graph.nodes[idx as usize].kind) == NodeKind::Method,
-    };
     let rust_method = site.uses_method_syntax() && caller.language == Language::Rust;
-    let accepts = |idx: u32| !rust_method || is_method(idx);
-    // Read from the call site, never from `site`: a retry under the short
-    // name (`ImportBinding::Retry`) is no receiverless call.
-    let free_only = call.is_some_and(|call| call.free_only);
-    // I5 (a scoped node is no global candidate) is the ladder's filter.
-    let admits = |&(idx, _): &(u32, FileMeta)| !free_only || !is_method(idx);
+    let accepts = |idx: u32| !rust_method || is_method_node(graph, nodes, idx);
     // Tier 1: same-file, the index's `lookup_call_in_file`. At a call site
     // the pick narrows by owner (`prefer_owned`); when the file holds
     // several unrelated owners of the name it binds nothing and the later
@@ -5016,26 +5032,12 @@ fn resolve_callee<'s>(
         }
     }
 
-    // Clean-base candidates via the name index. Dirty-file base nodes are
-    // excluded here: replaced ones already participate as overlay callables
-    // (same name), suppressed ones no longer exist. A later overload is in
-    // no name table of the index.
-    let clean_base = |name: &str| -> Vec<u32> {
-        graph
-            .nodes_by_name(name)
-            .filter(|&idx| {
-                names.target.kind_predicate()(NodeKind::from(&graph.nodes[idx as usize].kind))
-                    && !dirty_base.contains(&idx)
-                    && !graph.is_later_overload(idx)
-            })
-            .collect()
-    };
     // Built on first use: most calls bind at the qualifier, ladder or
     // heritage tier, which never read the bare name's candidates.
     let base_candidates = OnceCell::new();
     let base = || {
         base_candidates
-            .get_or_init(|| clean_base(callee))
+            .get_or_init(|| clean_base(graph, names.target, dirty_base, callee))
             .as_slice()
     };
     let overlay_candidates: &[(u32, FileMeta)] =
@@ -5049,12 +5051,6 @@ fn resolve_callee<'s>(
         imports
     };
     let base_len = graph.nodes.len() as u32;
-    let base_path = |idx: u32| {
-        graph
-            .files
-            .get(graph.nodes[idx as usize].file_idx.to_native() as usize)
-            .map(|f| f.path.resolve(&graph.string_pool))
-    };
     for (import, declared) in segment_imports
         .iter()
         // A TS / JS relative or path-aliased import was probed exactly
@@ -5068,7 +5064,7 @@ fn resolve_callee<'s>(
         let (base_scoped, overlay_scoped): (&[u32], &[(u32, FileMeta)]) = if declared == callee {
             (base(), overlay_candidates)
         } else {
-            base_declared = clean_base(declared);
+            base_declared = clean_base(graph, names.target, dirty_base, declared);
             (
                 base_declared.as_slice(),
                 names
@@ -5081,11 +5077,14 @@ fn resolve_callee<'s>(
         // Base candidates exclude every dirty-base node, so a hit never needs
         // a replaced-base redirect and never lands on a suppressed node:
         // surviving dirty symbols compete with their virtual index instead.
-        let scoped = base_scoped.iter().map(|&idx| (idx, base_path(idx))).chain(
-            overlay_scoped
-                .iter()
-                .map(|&(virt, _)| (virt, Some(&*nodes[(virt - base_len) as usize].rel_path))),
-        );
+        let scoped = base_scoped
+            .iter()
+            .map(|&idx| (idx, base_path(graph, idx)))
+            .chain(
+                overlay_scoped
+                    .iter()
+                    .map(|&(virt, _)| (virt, Some(&*nodes[(virt - base_len) as usize].rel_path))),
+            );
         let hit = match is_relative_specifier(&import.source) {
             // The first probed file declaring the name, then its first
             // declaration: base and virtual indices both follow source order
@@ -5243,9 +5242,88 @@ fn resolve_callee<'s>(
         }
     }
 
-    // Tier 3: the shared candidate filter over clean base + overlay. Same
-    // invariant as Tier 2: a base candidate is clean by construction, never
-    // redirected; overlay candidates are virtual indices.
+    // Tier 3 ([`global_tier`]).
+    global_tier(
+        graph,
+        callee,
+        file_ord,
+        imports,
+        caller,
+        base_metas,
+        names,
+        nodes,
+        replaced,
+        dirty_base,
+        facts,
+        (call, rust_method),
+        &base_candidates,
+    )
+}
+
+/// Whether the merged-space `idx` is a `Method`.
+fn is_method_node(graph: &ArchivedZeroCopyGraph, nodes: &[ViewNode], idx: u32) -> bool {
+    match idx.checked_sub(graph.nodes.len() as u32) {
+        Some(offset) => nodes[offset as usize].kind == NodeKind::Method,
+        None => NodeKind::from(&graph.nodes[idx as usize].kind) == NodeKind::Method,
+    }
+}
+
+/// The clean base declarations of `target`'s kinds named `name`, via the
+/// name index. Dirty-file base nodes are excluded: replaced ones already
+/// take part as overlay declarations of the same name, suppressed ones no
+/// longer exist. A later overload is in no name table of the index.
+fn clean_base(
+    graph: &ArchivedZeroCopyGraph,
+    target: ResolveTarget,
+    dirty_base: &FxHashSet<u32>,
+    name: &str,
+) -> Vec<u32> {
+    graph
+        .nodes_by_name(name)
+        .filter(|&idx| {
+            target.kind_predicate()(NodeKind::from(&graph.nodes[idx as usize].kind))
+                && !dirty_base.contains(&idx)
+                && !graph.is_later_overload(idx)
+        })
+        .collect()
+}
+
+/// The path of the file the base node `idx` is declared in.
+fn base_path(graph: &ArchivedZeroCopyGraph, idx: u32) -> Option<&str> {
+    graph
+        .files
+        .get(graph.nodes[idx as usize].file_idx.to_native() as usize)
+        .map(|f| f.path.resolve(&graph.string_pool))
+}
+
+/// Tier 3 of [`resolve_callee`] and of a bare field read
+/// ([`ladder::field_read`]): the shared candidate filter
+/// ([`ladder::global`]) over the clean base and the overlay declarations
+/// named `callee` in the kinds of `names`, memoized per caller file. Same
+/// invariant as Tier 2: a base candidate is clean by construction, never
+/// redirected; overlay candidates are virtual indices. `call` is the call
+/// site, `rust_method` a Rust method-syntax call; `base_candidates` holds
+/// the clean base candidates once an earlier tier built them.
+#[allow(clippy::too_many_arguments)]
+fn global_tier(
+    graph: &ArchivedZeroCopyGraph,
+    callee: &str,
+    file_ord: usize,
+    imports: &[RawImport],
+    caller: FileMeta,
+    base_metas: &mut FxHashMap<usize, FileMeta>,
+    names: &OverlayNames<'_>,
+    nodes: &[ViewNode],
+    replaced: &FxHashMap<u32, u32>,
+    dirty_base: &FxHashSet<u32>,
+    facts: &OverlayFacts<'_>,
+    (call, rust_method): (Option<CallScope<'_>>, bool),
+    base_candidates: &OnceCell<Vec<u32>>,
+) -> Option<(u32, f32)> {
+    let importer = facts.scope.dirty()[file_ord].rel_path.as_str();
+    // Read from the call site, never from the callee: a retry under the
+    // short name (`ImportBinding::Retry`) is no receiverless call.
+    let free_only = call.is_some_and(|call| call.free_only);
     let key = (
         file_ord,
         (imports.as_ptr() as usize, imports.len()),
@@ -5258,6 +5336,12 @@ fn resolve_callee<'s>(
     if let Some(&hit) = facts.global.borrow().get(&key) {
         return hit;
     }
+    let call_target = if rust_method {
+        ResolveTarget::Method
+    } else {
+        names.target
+    };
+    let base_len = graph.nodes.len() as u32;
     let mut base_meta = |idx: u32| {
         let file_idx = graph.nodes[idx as usize].file_idx.to_native() as usize;
         *base_metas.entry(file_idx).or_insert_with(|| {
@@ -5269,9 +5353,14 @@ fn resolve_callee<'s>(
                 })
         })
     };
+    // I5 (a scoped node is no global candidate) is the ladder's filter.
+    let admits = |&(idx, _): &(u32, FileMeta)| !free_only || !is_method_node(graph, nodes, idx);
+    let overlay_candidates: &[(u32, FileMeta)] =
+        names.anywhere.get(callee).map(Vec::as_slice).unwrap_or(&[]);
     // Read up to three times by the ladder (the pick, the nearest copy, the
     // count), and only on a memo miss.
-    let candidates: Vec<(u32, FileMeta)> = base()
+    let candidates: Vec<(u32, FileMeta)> = base_candidates
+        .get_or_init(|| clean_base(graph, names.target, dirty_base, callee))
         .iter()
         .map(|&idx| (idx, base_meta(idx)))
         .chain(overlay_candidates.iter().copied())
@@ -5280,7 +5369,7 @@ fn resolve_callee<'s>(
     let hidden = |target: u32| {
         let decl_file = match target.checked_sub(base_len) {
             Some(offset) => Some(&*nodes[offset as usize].rel_path),
-            None => base_path(target),
+            None => base_path(graph, target),
         };
         decl_file.is_some_and(|file| {
             reexport::import_hides(
@@ -5662,7 +5751,7 @@ fn resolve_constructed_type<'s>(
 }
 
 /// The values a bare variant name may denote (the index's
-/// `bare_enum_variant` candidates).
+/// `values_named` candidates).
 fn is_value(kind: NodeKind) -> bool {
     matches!(
         kind,
@@ -5707,11 +5796,10 @@ struct VariantCache<'f> {
 
 /// The index's `resolve_variant_ref` (Pass 2 over `field_reads`): the
 /// `EnumVariant` a reference of the dirty file `file` names, with the edge
-/// confidence. A qualified path resolves its qualifier as a type
-/// ([`resolve_type`]; Rust `Self` names the symbol's owner) and takes that
-/// type's variant. A bare name binds the file's only declaration of that
-/// name when it is a variant (1.0), else the one project-wide value of that
-/// name the caller's barrier admits when it is a variant (0.7).
+/// confidence. A bare name takes [`ladder::bare_variant`] over the file's
+/// declarations and the project's values; a qualified path takes
+/// [`ladder::qualified_variant`], whose qualifier resolves as a type
+/// ([`resolve_type`]). Both answers are cached per file in `cache`.
 #[allow(clippy::too_many_arguments)]
 fn resolve_variant_ref<'f>(
     graph: &ArchivedZeroCopyGraph,
@@ -5738,87 +5826,62 @@ fn resolve_variant_ref<'f>(
                     && !dirty_base.contains(&idx)
             })
     };
-    let Some((qualifier, variant)) = variant_ref.split() else {
+    let Some(path) = variant_ref.split() else {
         let name = variant_ref.path;
         return *cache.bare.entry(name).or_insert_with(|| {
-            if !has_variant(name) {
-                return None;
-            }
-            bare_enum_variant(
-                graph,
-                &file.rel_path,
+            ladder::bare_variant(
+                facts,
                 name,
                 caller,
-                base_metas,
-                variants,
-                dirty_base,
-                facts,
+                has_variant,
+                || {
+                    let decls = facts.decls_in_file(&file.rel_path, name);
+                    (!decls.is_empty()).then_some(decls)
+                },
+                || {
+                    // The index's `SymbolTable::values_named`: the clean
+                    // base values, then the overlay's.
+                    let base: Vec<(u32, FileMeta)> = graph
+                        .nodes_by_name(name)
+                        .filter(|&idx| {
+                            is_value(NodeKind::from(&graph.nodes[idx as usize].kind))
+                                && !dirty_base.contains(&idx)
+                                && !graph.is_later_overload(idx)
+                        })
+                        .map(|idx| (idx, base_file_meta(graph, base_metas, idx)))
+                        .collect();
+                    let overlay = variants.values.get(name).into_iter().flatten().copied();
+                    base.into_iter().chain(overlay)
+                },
             )
+            .edge()
         });
     };
-    if !has_variant(variant) {
-        return None;
-    }
-    let qualifier = match (caller.language, qualifier) {
-        (Language::Rust, "Self") => owner_class.and_then(owner_key)?,
-        _ => qualifier,
-    };
-    let (type_idx, confidence) = (*cache.types.entry(qualifier).or_insert_with(|| {
-        resolve_type(
-            graph,
-            qualifier,
-            file_ord,
-            &file.imports,
-            caller,
-            base_metas,
-            (types, qualifiers),
-            nodes,
-            replaced,
-            dirty_base,
-            facts,
-            rust_tree,
-        )
-    }))?;
-    facts
-        .enum_variant_of(type_idx, qualifier, variant)
-        .map(|idx| (idx, confidence))
-}
-
-/// The index's `SymbolTable::bare_enum_variant` for `name` in the dirty file
-/// `file`: the file's declarations of that name decide when it has any.
-#[allow(clippy::too_many_arguments)]
-fn bare_enum_variant(
-    graph: &ArchivedZeroCopyGraph,
-    file: &str,
-    name: &str,
-    caller: FileMeta,
-    base_metas: &mut FxHashMap<usize, FileMeta>,
-    variants: &VariantTables<'_>,
-    dirty_base: &FxHashSet<u32>,
-    facts: &OverlayFacts<'_>,
-) -> Option<(u32, f32)> {
-    let decls = facts.decls_in_file(file, name);
-    if !decls.is_empty() {
-        return match *decls.as_slice() {
-            [(idx, NodeKind::EnumVariant)] => Some((idx, CONF_SAME_FILE)),
-            _ => None,
-        };
-    }
-    let base = graph.nodes_by_name(name).filter(|&idx| {
-        is_value(NodeKind::from(&graph.nodes[idx as usize].kind))
-            && !dirty_base.contains(&idx)
-            && !graph.is_later_overload(idx)
-    });
-    let base: Vec<(u32, FileMeta)> = base
-        .map(|idx| (idx, base_file_meta(graph, base_metas, idx)))
-        .collect();
-    let overlay = variants.values.get(name).into_iter().flatten().copied();
-    match pick_global(caller, base.into_iter().chain(overlay)) {
-        GlobalPick::Unique(idx) if facts.kind_of(idx) == NodeKind::EnumVariant => {
-            Some((idx, CONF_GLOBAL_UNIQUE))
-        }
-        _ => None,
-    }
+    ladder::qualified_variant(
+        facts,
+        caller.language,
+        owner_class,
+        path,
+        has_variant,
+        |qualifier| {
+            *cache.types.entry(qualifier).or_insert_with(|| {
+                resolve_type(
+                    graph,
+                    qualifier,
+                    file_ord,
+                    &file.imports,
+                    caller,
+                    base_metas,
+                    (types, qualifiers),
+                    nodes,
+                    replaced,
+                    dirty_base,
+                    facts,
+                    rust_tree,
+                )
+            })
+        },
+    )
 }
 
 /// The index's supertypes pre-pass (`pass1_9_supertypes` then
@@ -6315,32 +6378,6 @@ fn relative_module_rank(
         },
     );
     found
-}
-
-/// The resolver's `split_qualifier`: `(qualifier, member)` of a qualified
-/// callee, where the qualifier is the segment right before the rightmost
-/// `::`, `.` or `\` (`std::vec::Vec::new` → `("Vec", "new")`). `None` for a
-/// bare name or an empty side.
-fn split_qualifier(name: &str) -> Option<(&str, &str)> {
-    let (split_idx, sep_len) = [
-        (name.rfind("::"), 2usize),
-        (name.rfind('.'), 1),
-        (name.rfind('\\'), 1),
-    ]
-    .into_iter()
-    .filter_map(|(idx, len)| Some((idx?, len)))
-    .max_by_key(|&(idx, _)| idx)?;
-    let (before, after) = name.split_at(split_idx);
-    let member = &after[sep_len..];
-    if before.is_empty() || member.is_empty() {
-        return None;
-    }
-    let qualifier = before
-        .rsplit_once("::")
-        .or_else(|| before.rsplit_once('.'))
-        .or_else(|| before.rsplit_once('\\'))
-        .map_or(before, |(_, q)| q);
-    (!qualifier.is_empty()).then_some((qualifier, member))
 }
 
 /// The resolver's `qualifier_prefix_is_internal`: the path before
@@ -7483,7 +7520,7 @@ mod tests {
             calls,
             vec![(
                 3,
-                CONF_SAME_FILE,
+                Tier::SameFile.confidence(),
                 crate::session::merged::OVERLAY_EDGE_REASON
             )]
         );

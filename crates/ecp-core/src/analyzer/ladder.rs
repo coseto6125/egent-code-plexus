@@ -10,12 +10,19 @@
 //! file a base resolves to and the Tier 3 candidate stream read per-call
 //! inputs (the caller's imports, the overlay's name tables) that neither
 //! facts store holds, so they arrive as closures.
+//!
+//! A body's `field_reads` reach the same tiers through the entry points at
+//! the end: a plain field read ([`field_read`], R24), a name reference
+//! ([`name_ref`], R25) and an enum-variant reference ([`bare_variant`],
+//! [`qualified_variant`], R26).
 
-use crate::analyzer::outcome::{NoEdge, Resolution, Tier};
+use crate::analyzer::name_ref::resolve_name_ref;
+use crate::analyzer::outcome::{Hit, NoEdge, Resolution, Tier};
 use crate::analyzer::reexport::{pick_call, ResolveTarget};
 use crate::analyzer::same_file_pick::{prefer_free, prefer_owned, PickFacts, PickScope};
 use crate::analyzer::type_ladder::TypeFacts;
-use crate::file_category::{pick_global, FileMeta, GlobalPick};
+use crate::analyzer::types::{owner_key, NameRef, RawImport};
+use crate::file_category::{pick_global, FileMeta, GlobalPick, Language};
 use crate::graph::NodeKind;
 
 /// What the name tiers read besides [`TypeFacts`]. Each method answers a
@@ -28,6 +35,14 @@ pub trait ResolveFacts: TypeFacts {
     /// source order. A scoped one counts: [`prefer_owned`] puts the first
     /// unscoped one in its place.
     fn first_decl_in_file(&self, file: &str, name: &str, target: ResolveTarget) -> Option<u32>;
+    /// Whether the index's global name table holds a declaration named
+    /// `name`, of any kind: the gate before a name reference reads a tier.
+    fn has_named(&self, name: &str) -> bool;
+    /// The `EnumVariant` named `variant` that the type `type_id` owns in the
+    /// type's file. `type_name` is the name the reference used for the type;
+    /// when an import alias (`use E as F`) makes it differ from the declared
+    /// name, the declared name is tried too.
+    fn enum_variant_of(&self, type_id: u32, type_name: &str, variant: &str) -> Option<u32>;
 }
 
 /// What a call site adds to a name lookup: the index's and the overlay's
@@ -231,6 +246,172 @@ pub fn global<F: TypeFacts + ?Sized, I: Iterator<Item = (u32, FileMeta)>>(
         }
         GlobalPick::NoMatch => Resolution::NoEdge(NoEdge::Unresolved),
     }
+}
+
+/// Split a qualified name into `(qualifier, member)`, where `qualifier` is
+/// the identifier right before the rightmost `::`, `.` or `\`. `None` for a
+/// bare name or an empty side.
+///
+/// Only the last segment is the qualifier: it is the one piece a lookup can
+/// map back to a registered type name (`std::vec::Vec` is registered as
+/// `Vec`, keyed by its defining file). PHP's `\` counts beside `::` and `.`.
+///
+/// * `A::new` → `("A", "new")`
+/// * `std::vec::Vec::new` → `("Vec", "new")`
+/// * `obj.method` → `("obj", "method")`
+/// * `\App\helper` → `("App", "helper")`
+/// * `foo` → `None`
+pub fn split_qualifier(name: &str) -> Option<(&str, &str)> {
+    let (split_idx, sep_len) = [
+        (name.rfind("::"), 2usize),
+        (name.rfind('.'), 1),
+        (name.rfind('\\'), 1),
+    ]
+    .into_iter()
+    .filter_map(|(idx, len)| Some((idx?, len)))
+    .max_by_key(|&(idx, _)| idx)?;
+    let (before, after) = name.split_at(split_idx);
+    let member = &after[sep_len..];
+    if before.is_empty() || member.is_empty() {
+        return None;
+    }
+    let qualifier = before
+        .rsplit_once("::")
+        .or_else(|| before.rsplit_once('.'))
+        .or_else(|| before.rsplit_once('\\'))
+        .map_or(before, |(_, q)| q);
+    (!qualifier.is_empty()).then_some((qualifier, member))
+}
+
+/// Where a plain field read (`c.timeout`: no [`NameRef`] and no variant
+/// tag) goes after [`field_read`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FieldRead {
+    /// Tier 1 bound the read to a `Property` of the reader's file.
+    Bound(Hit),
+    /// A qualified read: the side's full name lookup of
+    /// [`ResolveTarget::Field`] runs, and its qualifier tier settles it.
+    Qualified,
+    /// A bare read that Tier 1 left: Tier 3 ([`global`]) with no call site.
+    Global,
+}
+
+/// R24: the tiers a plain field read reaches. A bare read takes Tier 1, then
+/// Tier 3. A qualified read never reaches Tier 3: it resolves through its
+/// qualifier or not at all. No import tier runs, because an import binds a
+/// module's name, never the field a receiver reads. No call site: no owner
+/// narrows the pick, no base is probed, and Tier 3 binds no nearest copy.
+pub fn field_read<F: ResolveFacts>(facts: &F, file: &str, name: &str) -> FieldRead {
+    if split_qualifier(name).is_some() {
+        return FieldRead::Qualified;
+    }
+    match same_file(facts, file, name, ResolveTarget::Field, None, &[]) {
+        Resolution::Bound(hit) => FieldRead::Bound(hit),
+        _ => FieldRead::Global,
+    }
+}
+
+/// R25: the declaration a [`NameRef`] names, with the edge confidence. A
+/// function that a lexical scope in reach declares binds first, at Tier 1's
+/// confidence: `lexical` is the side's `LexicalFunctions::name_ref_target`,
+/// as the name tiers never return a scoped node (I5). Then the name tiers
+/// ([`resolve_name_ref`]); `resolve` and `resolve_imported` are the side's
+/// full name lookup and its import tiers alone.
+#[allow(clippy::too_many_arguments)]
+pub fn name_ref<F, Resolve, ResolveImported>(
+    facts: &F,
+    file: &str,
+    language: Language,
+    imports: &[RawImport],
+    owner: Option<&str>,
+    name_ref: NameRef<'_>,
+    lexical: Option<u32>,
+    resolve: Resolve,
+    resolve_imported: ResolveImported,
+) -> Option<(u32, f32)>
+where
+    F: ResolveFacts,
+    Resolve: FnMut(&str, ResolveTarget) -> Vec<(u32, f32)>,
+    ResolveImported: FnMut(&str, ResolveTarget) -> Vec<(u32, f32)>,
+{
+    if let Some(id) = lexical {
+        return Some((id, Tier::SameFile.confidence()));
+    }
+    resolve_name_ref(
+        facts,
+        file,
+        language,
+        imports,
+        owner,
+        name_ref,
+        resolve,
+        resolve_imported,
+    )
+}
+
+/// R26, a bare variant name (C `RED`, a Java `case MONDAY:`): the
+/// `EnumVariant` it denotes. `has_variant` gates first: most captured names
+/// name no variant. Then the reader's file decides when it declares the
+/// name at all (`in_file`, every declaration of it, scoped ones as the
+/// side's store holds them): only a sole variant binds (Tier 1), as a local
+/// `#define` or constant of the name shadows the enumerator. Otherwise the
+/// one value of the name the caller's barrier admits project-wide
+/// ([`pick_global`] over `values`) binds when it is a variant (Tier 3).
+pub fn bare_variant<F, D, V>(
+    facts: &F,
+    name: &str,
+    caller: FileMeta,
+    has_variant: impl Fn(&str) -> bool,
+    in_file: impl FnOnce() -> Option<D>,
+    values: impl FnOnce() -> V,
+) -> Resolution
+where
+    F: PickFacts + ?Sized,
+    D: IntoIterator<Item = (u32, NodeKind)>,
+    V: IntoIterator<Item = (u32, FileMeta)>,
+{
+    if !has_variant(name) {
+        return Resolution::NoEdge(NoEdge::Unresolved);
+    }
+    if let Some(decls) = in_file() {
+        let mut decls = decls.into_iter();
+        return match (decls.next(), decls.next()) {
+            (Some((id, NodeKind::EnumVariant)), None) => Resolution::bound(id, Tier::SameFile),
+            _ => Resolution::NoEdge(NoEdge::Unresolved),
+        };
+    }
+    match pick_global(caller, values()) {
+        GlobalPick::Unique(id) if facts.kind(id) == NodeKind::EnumVariant => {
+            Resolution::bound(id, Tier::Global)
+        }
+        _ => Resolution::NoEdge(NoEdge::Unresolved),
+    }
+}
+
+/// R26, a qualified variant path (`E::A`, `Color.RED`): `has_variant` gates
+/// on the variant, the qualifier resolves as a type (`qualifier_type`, the
+/// side's unique `ResolveTarget::Type` lookup), and that type's own variant
+/// binds at the type's confidence, so `A` of two enums never mixes. Rust
+/// `Self` names the reader's own impl type (`owner_class`).
+pub fn qualified_variant<'r, F: ResolveFacts>(
+    facts: &F,
+    language: Language,
+    owner_class: Option<&'r str>,
+    (qualifier, variant): (&'r str, &'r str),
+    has_variant: impl Fn(&str) -> bool,
+    qualifier_type: impl FnOnce(&'r str) -> Option<(u32, f32)>,
+) -> Option<(u32, f32)> {
+    if !has_variant(variant) {
+        return None;
+    }
+    let qualifier = match (language, qualifier) {
+        (Language::Rust, "Self") => owner_class.and_then(owner_key)?,
+        _ => qualifier,
+    };
+    let (type_id, confidence) = qualifier_type(qualifier)?;
+    facts
+        .enum_variant_of(type_id, qualifier, variant)
+        .map(|id| (id, confidence))
 }
 
 #[cfg(test)]
@@ -469,6 +650,19 @@ mod tests {
             self.in_file(file, name)
                 .into_iter()
                 .find(|&id| wanted(self.kind(id)))
+        }
+        fn has_named(&self, name: &str) -> bool {
+            self.decls.iter().any(|decl| decl.1 == name)
+        }
+        fn enum_variant_of(&self, type_id: u32, type_name: &str, variant: &str) -> Option<u32> {
+            let file = self.file_of(type_id)?;
+            let declared = self.name_of(type_id)?;
+            let owned_by = |owner: &str| {
+                self.in_file(file, variant).into_iter().find(|&id| {
+                    self.kind(id) == NodeKind::EnumVariant && self.owner(id) == Some(owner)
+                })
+            };
+            owned_by(type_name).or_else(|| owned_by(declared))
         }
     }
 
@@ -764,5 +958,174 @@ mod tests {
         assert_eq!((resolution, base), (Resolution::Unknown, None));
         assert_eq!(calls.get(), 2);
         assert!(facts.probes.borrow().is_empty());
+    }
+
+    const P: NodeKind = NodeKind::Property;
+    const EV: NodeKind = NodeKind::EnumVariant;
+
+    /// A plain field read takes Tier 1 for a field of the reader's file, the
+    /// first of two same-named fields in source order, and Tier 3 for
+    /// anything else; a qualified read goes to the qualifier tier.
+    #[test]
+    fn test_ladder_field_read_bare_and_qualified_returns_each_tier() {
+        let decls: [Decl; 4] = [
+            ("a.py", "timeout", P, Some("Config")),
+            ("a.py", "timeout", P, Some("Other")),
+            ("a.py", "run", M, Some("Config")),
+            ("b.py", "remote", P, Some("K")),
+        ];
+        let tier1 = FieldRead::Bound(Hit {
+            id: 0,
+            confidence: 1.0,
+            tier: Some(Tier::SameFile),
+        });
+        let cases: [(&str, FieldRead); 7] = [
+            ("timeout", tier1),
+            // Declared in another file only: Tier 3 decides.
+            ("remote", FieldRead::Global),
+            // A method of the name is no field.
+            ("run", FieldRead::Global),
+            ("absent", FieldRead::Global),
+            ("  ", FieldRead::Global),
+            ("c.timeout", FieldRead::Qualified),
+            // An empty member is no qualified name.
+            ("Config::", FieldRead::Global),
+        ];
+        for facts in both(&decls) {
+            for (name, want) in cases {
+                assert_eq!(field_read(&facts, "a.py", name), want, "{name:?}");
+            }
+        }
+    }
+
+    /// The lexical tier binds first at Tier 1's confidence and asks no name
+    /// tier; a name the project never declares binds nothing.
+    #[test]
+    fn test_ladder_name_ref_lexical_hit_skips_name_tiers() {
+        let facts = Fake::new(Layout::Index, &[("a.py", "helper", F, None)]);
+        let asked = Cell::new(0);
+        let run = |name: &'static str, lexical| {
+            name_ref(
+                &facts,
+                "a.py",
+                Language::Python,
+                &[],
+                None,
+                NameRef {
+                    name,
+                    kind: crate::analyzer::types::NameRefKind::Value,
+                },
+                lexical,
+                |_: &str, _| {
+                    asked.set(asked.get() + 1);
+                    vec![(0, 1.0)]
+                },
+                |_: &str, _| Vec::new(),
+            )
+        };
+        assert_eq!(run("helper", Some(9)), Some((9, 1.0)));
+        assert_eq!(asked.get(), 0, "a lexical hit reads no name tier");
+        assert_eq!(run("missing", None), None);
+        assert_eq!(asked.get(), 0, "an undeclared name reads no name tier");
+        assert_eq!(run("helper", None), Some((0, 1.0)));
+        assert_eq!(asked.get(), 1);
+    }
+
+    /// Every verdict of the bare-variant pick, for the store layouts of
+    /// both sides.
+    #[test]
+    fn test_ladder_bare_variant_returns_each_verdict() {
+        let decls: [Decl; 4] = [
+            ("lib/a.c", "RED", EV, Some("Color")),
+            ("lib/b.c", "BLUE", EV, Some("Color")),
+            ("lib/c.c", "BLUE", NodeKind::Const, None),
+            ("lib/d.c", "LIMIT", NodeKind::Const, None),
+        ];
+        let caller = FileMeta::from_path("app.c");
+        for facts in both(&decls) {
+            let pick = |name: &str, in_file: Option<Vec<(u32, NodeKind)>>| {
+                bare_variant(
+                    &facts,
+                    name,
+                    caller,
+                    |name: &str| facts.decls.iter().any(|d| d.1 == name && d.2 == EV),
+                    || in_file,
+                    || facts.named(name),
+                )
+            };
+            let unresolved = Resolution::NoEdge(NoEdge::Unresolved);
+            // The reader's file decides when it declares the name.
+            assert_eq!(pick("RED", Some(vec![(0, EV)])), bound(0, Tier::SameFile));
+            assert_eq!(pick("RED", Some(vec![(5, NodeKind::Macro)])), unresolved);
+            assert_eq!(pick("RED", Some(vec![(0, EV), (5, EV)])), unresolved);
+            assert_eq!(pick("RED", Some(Vec::new())), unresolved);
+            // Else the one project-wide value, when it is a variant.
+            assert_eq!(pick("RED", None), bound(0, Tier::Global));
+            assert_eq!(pick("RED", None).edge(), Some((0, 0.7)));
+            assert_eq!(pick("BLUE", None), unresolved, "a constant shares the name");
+            // No variant of the name: the gate stops before any store read.
+            let read = Cell::new(false);
+            let gated = bare_variant(
+                &facts,
+                "LIMIT",
+                caller,
+                |_: &str| false,
+                || {
+                    read.set(true);
+                    None::<Vec<(u32, NodeKind)>>
+                },
+                || {
+                    read.set(true);
+                    facts.named("LIMIT")
+                },
+            );
+            assert_eq!((gated, read.get()), (unresolved, false));
+            assert_eq!(pick("  ", None), unresolved);
+        }
+    }
+
+    /// A qualified variant binds the variant its qualifier's type owns: two
+    /// enums with one variant name never mix; Rust `Self` reads the owner;
+    /// an absent enum or a non-unique type binds nothing.
+    #[test]
+    fn test_ladder_qualified_variant_binds_owned_variant() {
+        let decls: [Decl; 4] = [
+            ("e.rs", "Color", NodeKind::Enum, None),
+            ("e.rs", "Red", EV, Some("Color")),
+            ("f.rs", "Shade", NodeKind::Enum, None),
+            ("f.rs", "Red", EV, Some("Shade")),
+        ];
+        let types = |name: &str| match name {
+            "Color" | "Alias" => Some((0, 0.95)),
+            "Shade" => Some((2, 1.0)),
+            _ => None,
+        };
+        let has_variant = |name: &str| name == "Red";
+        for facts in both(&decls) {
+            let asked = RefCell::new(Vec::new());
+            let run =
+                |language, owner: Option<&'static str>, path: (&'static str, &'static str)| {
+                    qualified_variant(&facts, language, owner, path, has_variant, |q| {
+                        asked.borrow_mut().push(q);
+                        types(q)
+                    })
+                };
+            assert_eq!(run(Language::Rust, None, ("Color", "Red")), Some((1, 0.95)));
+            assert_eq!(run(Language::Rust, None, ("Shade", "Red")), Some((3, 1.0)));
+            // An import alias of the enum still reaches its variant.
+            assert_eq!(run(Language::Rust, None, ("Alias", "Red")), Some((1, 0.95)));
+            assert_eq!(
+                run(Language::Rust, Some("Shade"), ("Self", "Red")),
+                Some((3, 1.0))
+            );
+            asked.borrow_mut().clear();
+            assert_eq!(run(Language::Rust, None, ("Self", "Red")), None);
+            assert_eq!(run(Language::Rust, None, ("Color", "Green")), None);
+            assert!(asked.borrow().is_empty(), "no type lookup: {asked:?}");
+            // `Self` is only Rust's; elsewhere it is the qualifier as written.
+            assert_eq!(run(Language::Java, Some("Shade"), ("Self", "Red")), None);
+            assert_eq!(asked.borrow().as_slice(), ["Self"]);
+            assert_eq!(run(Language::Rust, None, ("Missing", "Red")), None);
+        }
     }
 }
