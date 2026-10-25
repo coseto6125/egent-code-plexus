@@ -1,6 +1,6 @@
 ---
 name: ecp
-description: Symbol-level code analysis, blast-radius impact, cross-repo API contracts, AST-aware rename, route map. Defer to grep for string literals, config keys, vendored deps/generated code, fs layout.
+description: Symbol-level code analysis, blast-radius impact, cross-repo API contracts, route map. Defer to grep for string literals, config keys, vendored deps/generated code, fs layout.
 ---
 
 # ecp — egent-code-plexus-rs CLI
@@ -18,7 +18,7 @@ description: Symbol-level code analysis, blast-radius impact, cross-repo API con
 | Schema mirrors (cross-service field alignment) | `ecp heuristics schema-bindings User.email --repo .` (bare = all classes). `--format json`. |
 | Saga compensate/undo/rollback pairs | `ecp heuristics saga [--class OrderService] --repo .` (bare = all classes). `--format json`; `POSSIBLY_RELATED` (≥0.75) or `BLIND_SPOT` (<0.75). Outbox half deferred (T5-33). |
 | Arbitrary graph query / source body | `ecp cypher "MATCH (m:Method) WHERE m.name='X' RETURN m,m" --repo .` (positional; `--query` alias. Single-repo. Grammar below) |
-| AST-aware multi-file rename | `ecp rename --symbol old --new-name new --dry-run --repo .` then drop `--dry-run`. **Never find-replace.** |
+| Rename a symbol | Find the sites with `ecp impact old --repo .` (and `ecp find old --repo .`), then rename with LSP or edit them. **Never blind find-replace.** |
 | HTTP route → handler → upstream callers | `ecp routes <path?> --repo .` (no path = list all) |
 | Cross-repo API contracts (routes / queue / RPC) | `ecp contracts --repo @all` (needs ≥2 repos in group) |
 | HTTP consumer → Route shape drift | `ecp shape-check [--route <path>] --repo .` (no `--route` = scan all; drift = consumer reads key absent from Route's response/error keys) |
@@ -41,7 +41,7 @@ Indexing is automatic: agent commands auto-rebuild stale/missing graphs (`✓ In
 
 ## Output formats
 
-`--format` defaults: **toon** (`inspect / coverage / contracts / routes`); **json** (`cypher`); **text** (`find / rename / impact`). toon = agent→agent, json = scripts, text = humans.
+`--format` defaults: **toon** (`inspect / coverage / contracts / routes`); **json** (`cypher`); **text** (`find / impact`). toon = agent→agent, json = scripts, text = humans.
 
 ## Cypher subset
 
@@ -65,7 +65,6 @@ openCypher read subset: `AND / OR / NOT`, `= != < <= > >=`, `STARTS WITH / ENDS 
 2. **`cypher --repo @group` errors** — single-repo only.
 3. **Default `--graph .ecp-rs/graph.bin`** is a cwd-relative legacy path. Without a checked-in graph, pass `--repo` or absolute `--graph`.
 4. **Auto-ensure runs every agent command** — first query after a source change pays a brief re-index; `✓ Index refreshed` is informational, not an error.
-5. **`rename --markdown`** is OFF by default (code-only). Add it to sweep `.md / .rst / .txt`.
 
 ## PR-touching workflow
 

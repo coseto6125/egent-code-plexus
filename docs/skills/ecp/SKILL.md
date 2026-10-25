@@ -65,7 +65,6 @@ Refresh evidence when source hashes change. A truncated result is not a complete
 | `ecp shape-check` | HTTP consumer ↔ Route response shape drift |
 | `ecp processes` / `processes trace <pat>` | Execution-flow steps in real order — cleaner than `impact --direction down` |
 | `ecp review` | Full audit (impact + summary + tool-map + shape-check + diff) |
-| `ecp rename <old> <new>` | AST-aware multi-file rename |
 | `ecp pattern -p '<pat>'` | Statement shapes the graph has no node for; `--callers-of` scopes by reachability |
 | `ecp heuristics <kind>` | Confidence-tagged pairings no edge proves: `saga`, `schema-bindings`, `event-mirrors` |
 | `ecp admin doctor [check] [--fix]` | Environment health; `--fix` repairs |

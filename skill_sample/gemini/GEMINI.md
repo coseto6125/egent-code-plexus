@@ -17,7 +17,7 @@ This skill provides the structural-knowledge layer for autonomous AI coding agen
 | Find symbol by exact name | `ecp find "name"` |
 | Find symbol by fragment / ranked search | `ecp find "fragment" --mode bm25` |
 | Arbitrary graph query / Cypher escape hatch | `ecp cypher "MATCH (m:Method) WHERE m.name='X' RETURN m"` |
-| AST-aware multi-file rename (No find-replace!) | `ecp rename --symbol old --new-name new --dry-run` |
+| Rename a symbol (No blind find-replace!) | Find the sites with `ecp impact old` (and `ecp find old`), then rename with LSP or edit them |
 | HTTP route → handler → upstream callers | `ecp routes <path?>` |
 | Cross-repo API contracts (routes / queue / RPC) | `ecp contracts --repo @all` |
 | Detect drift between consumer access and Route shape | `ecp shape-check --route <path>?` |

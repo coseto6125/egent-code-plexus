@@ -17,7 +17,7 @@ description: Detailed `ecp` command reference aligned with `ecp --help` and `ecp
 | Find symbol by exact name | `ecp find "name" --repo .` |
 | Find symbol by ranked search | `ecp find "fragment" --mode bm25 --repo .` |
 | Cypher query escape hatch | `ecp cypher "MATCH ... RETURN ..." --repo .` |
-| AST-aware multi-file rename | `ecp rename --symbol old --new-name new --dry-run --repo .` |
+| Rename a symbol | Find the sites with `ecp impact old --repo .` (and `ecp find old --repo .`), then rename with LSP or edit them |
 | HTTP route → handler → upstream callers | `ecp routes <path?> --repo .` |
 | Cross-repo API contracts inventory | `ecp contracts --repo @all` |
 | Route / contract delta — edge view | `ecp diff --section all --baseline <ref> --repo .` |

@@ -270,8 +270,7 @@ Two tiers: **agent commands** at top level (query / refactor / verify) and **adm
 | `inspect <name>` | Symbol → metadata, decorators, signature, callers, callees, 1-hop impact, contained methods / properties / enum variants |
 | `find <pattern>` | Exact · `--mode fuzzy` · `--mode bm25` (5 buckets: source / tests / reference / document / config) |
 | `heuristics <kind>` | Heuristic detectors: `saga` (compensate/undo/rollback name-pairs), `schema-bindings` (MirrorsField), `event-mirrors` (EventTopicMirror). Findings are confidence-tagged and never enter the graph |
-| `impact <name> --direction <up\|down>` | Blast-radius BFS with confidence filtering; `--since <ref>` for change-set impact |
-| `rename --symbol <old> --new-name <new>` | AST-aware multi-file rename across 14 languages. Always `--dry-run` first. |
+| `impact <name> --direction <up\|down>` | Blast-radius BFS with confidence filtering; `--since <ref>` for change-set impact. To rename: find the sites with `impact` (and `find`), then rename with LSP or edit them. |
 | `pattern -p '<pattern>' [--callers-of <symbol>]` | Syntax-shape search over indexed source files; optionally scope matches to one symbol's callers |
 | `cypher '<query>'` | openCypher escape hatch; `m.content` returns source body |
 | `summary` | Registry overview, framework coverage, LLM-actionable blind-spot catalog, graph freshness |
@@ -369,7 +368,7 @@ ecp admin claude install skills all     # ecp + simplify skill packs (or: ecp | 
 ecp admin claude install mcp-server     # optional — hooks + skills + CLI already sufficient
 ```
 
-Hooks feed graph context on every Grep/Glob/Bash without an explicit tool call. The `ecp` skill teaches symbol / impact / route / contract / rename workflows. `simplify` drives graph-first code review.
+Hooks feed graph context on every Grep/Glob/Bash without an explicit tool call. The `ecp` skill teaches symbol / impact / route / contract workflows. `simplify` drives graph-first code review.
 
 ### Gemini CLI
 
@@ -433,7 +432,7 @@ Parse → resolve → serialize runs through an MPSC channel into a single build
 
 ## 🌐 Language coverage
 
-31 languages parsed at the structural level. **14 full-depth** (TypeScript, JavaScript, Python, Java, Kotlin, C#, Go, Rust, PHP, Ruby, Swift, C, C++, Dart) — imports, named bindings, exports, heritage, types, constructors, config, frameworks, entry points, calls, and rename. **17 structural-only**: Bash, Crystal, Cairo, Dockerfile, Docker Compose, GitHub Actions, HCL, Lua, Markdown, Move, Nim, Solidity, SQL, Verilog, Vyper, YAML, Zig.
+31 languages parsed at the structural level. **14 full-depth** (TypeScript, JavaScript, Python, Java, Kotlin, C#, Go, Rust, PHP, Ruby, Swift, C, C++, Dart) — imports, named bindings, exports, heritage, types, constructors, config, frameworks, entry points, and calls. **17 structural-only**: Bash, Crystal, Cairo, Dockerfile, Docker Compose, GitHub Actions, HCL, Lua, Markdown, Move, Nim, Solidity, SQL, Verilog, Vyper, YAML, Zig.
 
 📊 **[Full Language Capability Matrix](./docs/language-matrix.md)** — per-language status and rationale.
 
