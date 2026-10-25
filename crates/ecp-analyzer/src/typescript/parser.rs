@@ -192,6 +192,44 @@ fn body_has_call(node: tree_sitter::Node) -> bool {
     false
 }
 
+/// Whether the class around a route decorator carries `@Controller`. The
+/// grammar puts a class's decorators on the class declaration, or on the
+/// export statement for `@Controller() export class`.
+fn in_controller_class(verb: tree_sitter::Node, source: &[u8]) -> bool {
+    let Some(class) = std::iter::successors(verb.parent(), |n| n.parent()).find(|n| {
+        matches!(
+            n.kind(),
+            "class_declaration" | "abstract_class_declaration" | "class"
+        )
+    }) else {
+        return false;
+    };
+    let is_controller = |decorator: tree_sitter::Node| {
+        let Some(expr) = decorator.named_child(0) else {
+            return false;
+        };
+        let callee = match expr.kind() {
+            "call_expression" => expr.child_by_field_name("function"),
+            _ => Some(expr),
+        };
+        let name = callee.map(|c| match c.kind() {
+            "member_expression" => c.child_by_field_name("property").unwrap_or(c),
+            _ => c,
+        });
+        name.and_then(|n| n.utf8_text(source).ok()) == Some("Controller")
+    };
+    let decorators = |n: tree_sitter::Node| {
+        let mut cursor = n.walk();
+        n.named_children(&mut cursor)
+            .filter(|c| c.kind() == "decorator")
+            .any(is_controller)
+    };
+    decorators(class)
+        || class
+            .parent()
+            .is_some_and(|p| p.kind() == "export_statement" && decorators(p))
+}
+
 /// The name of the method a route decorator decorates, from the decorator's
 /// verb identifier (`Get` in `@Get(':id') find() {}`). The grammar puts a
 /// member's decorators before it in the class body; the method is the first
@@ -732,9 +770,10 @@ impl LanguageProvider for TypeScriptProvider {
             // `has_nestjs` import flag is known (a few lines later in this
             // function — we can't gate here because import processing
             // happens in the same match loop).
-            if let (Some(verb_node), Some(path_node)) =
-                (nestjs_decorator_verb_node, nestjs_decorator_path_node)
-            {
+            if let (Some(verb_node), Some(path_node)) = (
+                nestjs_decorator_verb_node.filter(|verb| in_controller_class(*verb, source)),
+                nestjs_decorator_path_node,
+            ) {
                 if let (Ok(verb_str), Ok(path_str)) = (
                     std::str::from_utf8(&source[verb_node.start_byte()..verb_node.end_byte()]),
                     std::str::from_utf8(&source[path_node.start_byte()..path_node.end_byte()]),

@@ -135,6 +135,34 @@ fn test_route_nestjs_bare_path_binds_decorated_method() {
     assert_eq!(handler_spots(&g), Vec::<(String, String)>::new());
 }
 
+/// A `@Get` method of a class without `@Controller` is no NestJS route
+/// (fixture `nestjs_controller.ts`, class `NotAController`). Its path
+/// equals a controller route's path, so HEAD merged it into that Route
+/// node and bound a second handler to it.
+#[test]
+fn test_route_nestjs_method_outside_controller_class_no_route() {
+    let src = r#"import { Controller, Get } from '@nestjs/common';
+
+@Controller('users')
+export class UsersController {
+  @Get(':id')
+  find() {
+    return 2;
+  }
+}
+
+export class NotAController {
+  @Get(':id')
+  notARoute(id: string) {
+    return id;
+  }
+}
+"#;
+    let g = build("src/users.controller.ts", src);
+    assert_eq!(route_names(&g), vec!["GET /:id"]);
+    assert_eq!(handlers(&g, "GET /:id"), vec![("find".into(), 6, "named")]);
+}
+
 /// `list` is both a class member (first in the file) and a top-level
 /// function. The bare name `list` at the registration is the top-level
 /// function; HEAD bound the first node named `list`, the member.
