@@ -1,9 +1,11 @@
 use ecp_cli::session::overlay_writer::{
-    write_dirty_fragment, write_dirty_fragments_batch, write_dirty_fragments_from_graphs,
-    FragmentInput,
+    write_dirty_events, write_dirty_fragment, write_dirty_fragments_batch,
+    write_dirty_fragments_from_graphs, DirtyPathEvent, FragmentInput,
 };
+use ecp_core::contracts::dirty_event::{PathChange, PathClass};
 use ecp_core::contracts::routing::SizeCap;
 use ecp_core::session::{layout, DirtyEvents, SessionMeta};
+use std::collections::HashMap;
 
 fn make_session_dir(tmp: &std::path::Path, sid: &str) -> std::path::PathBuf {
     let session_dir = tmp.join("sessions").join(sid);
@@ -245,4 +247,70 @@ fn provider_dispatch_covers_common_extensions() {
             "{rel}"
         );
     }
+}
+
+fn parse_ts_files(names: &[&str]) -> Vec<ecp_core::analyzer::types::LocalGraph> {
+    let work = tempfile::tempdir().unwrap();
+    let pairs = names
+        .iter()
+        .map(|name| {
+            let abs = work.path().join(name);
+            std::fs::write(
+                &abs,
+                format!("export function f_{}() {{ return 1; }}\n", &name[..1]),
+            )
+            .unwrap();
+            (abs, std::path::PathBuf::from(name))
+        })
+        .collect();
+    ecp_cli::reanalyze::pipeline().analyze(pairs)
+}
+
+/// Contract: the manifest records the cap the caller parsed under, so a reader
+/// under another cap rejects the fragments instead of serving them.
+#[test]
+fn test_write_dirty_events_non_default_cap_manifest_stamps_given_cap() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sd = make_session_dir(tmp.path(), "sid-cap");
+    let cap = SizeCap::resolve(None, Some(64));
+    assert_ne!(cap.bytes(), SizeCap::BUILT_IN.bytes());
+    let graphs = parse_ts_files(&["a.ts"]);
+
+    write_dirty_events(&sd, cap, &graphs, &[7], &HashMap::new(), &[]).unwrap();
+
+    let manifest = DirtyEvents::read(&layout::dirty_events_path(&sd)).unwrap();
+    assert_eq!(manifest.size_cap_bytes, cap.bytes());
+    assert!(manifest.is_current(cap));
+    assert!(!manifest.is_current(SizeCap::BUILT_IN));
+}
+
+/// Contract: the manifest stores confirmed changes only. `unmerged` and a
+/// `deleted` path that was parsed (it exists again) become `modified`;
+/// `added` stays `added`; none is ever `unmerged`.
+#[test]
+fn test_write_dirty_events_unmerged_deleted_added_store_parsed_change() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sd = make_session_dir(tmp.path(), "sid-parsed");
+    let graphs = parse_ts_files(&["a.ts", "b.ts", "c.ts"]);
+    let event = |change| DirtyPathEvent {
+        change,
+        class: PathClass::SOURCE,
+    };
+    let events = HashMap::from([
+        ("a.ts".to_string(), event(PathChange::Unmerged)),
+        ("b.ts".to_string(), event(PathChange::Deleted)),
+        ("c.ts".to_string(), event(PathChange::Added)),
+    ]);
+
+    write_dirty_events(&sd, SizeCap::BUILT_IN, &graphs, &[1, 2, 3], &events, &[]).unwrap();
+
+    let manifest = DirtyEvents::read(&layout::dirty_events_path(&sd)).unwrap();
+    let change = |p: &str| manifest.entries[p].change;
+    assert_eq!(change("a.ts"), PathChange::Modified);
+    assert_eq!(change("b.ts"), PathChange::Modified);
+    assert_eq!(change("c.ts"), PathChange::Added);
+    assert!(manifest
+        .entries
+        .values()
+        .all(|e| e.change != PathChange::Unmerged));
 }

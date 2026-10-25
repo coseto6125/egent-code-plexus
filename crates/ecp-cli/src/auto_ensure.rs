@@ -17,7 +17,7 @@ use ecp_core::contracts::dirty_event::{
     ClassifiedPath, DirtyEvent, DirtySet, NotRepoRelative, PathClass, RepoPath, SkipReason,
     SkippedEntry,
 };
-use ecp_core::contracts::routing::FileRouter;
+use ecp_core::contracts::routing::{FileRouter, SizeCap};
 use ecp_core::session::SessionMeta;
 use ignore::WalkBuilder;
 use std::collections::HashMap;
@@ -760,7 +760,11 @@ pub(crate) fn ensure_fresh_with_rebuild(
                 // re-parsing it rewrites identical state. Filtering those out
                 // turns the typical agent burst (30+ queries, no edits in
                 // between) from N full L1 refreshes into stat checks.
-                let gate = retain_stale_fragments(worktree_root, rel_paths);
+                // One cap for the whole refresh: the gate, the parse and the
+                // manifest stamp must agree, or the manifest claims a cap its
+                // fragments were not parsed under.
+                let size_cap = ecp_core::config::resolve_size_cap(worktree_root);
+                let gate = retain_stale_fragments(worktree_root, size_cap, rel_paths);
                 if gate.rel_paths.is_empty() {
                     test_counters::FRESH_GATE_SKIP_COUNT
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -826,10 +830,11 @@ pub(crate) fn ensure_fresh_with_rebuild(
                 // re-parses them. This removes the second full tree-sitter pass
                 // (the dominant incremental cost on a large repo: ~0.6s for the
                 // 20-provider pipeline init alone).
-                let fresh_graphs = crate::reanalyze::reanalyze_files(
+                let fresh_graphs = crate::reanalyze::reanalyze_files_under(
                     worktree_root,
                     &crate::git::DiffScope::Unstaged,
                     &gate.rel_paths,
+                    size_cap,
                 );
                 test_counters::REANALYZE_CALL_COUNT
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -843,6 +848,7 @@ pub(crate) fn ensure_fresh_with_rebuild(
                     &events,
                     &tombstones,
                     gate.session_meta,
+                    size_cap,
                 )
                 .map_err(|e| format!("L1 overlay refresh: {e}"))?;
                 // L1 overlay only touches dirty fragments under
@@ -1335,7 +1341,11 @@ struct L1FreshnessGate {
 /// The HEAD-drift check matters: promotion (rebasing fragments onto the new
 /// base SHA) runs inside the full overlay path, so a drifted session must
 /// fall through to it rather than short-circuit here.
-fn retain_stale_fragments(worktree_root: &Path, rel_paths: Vec<String>) -> L1FreshnessGate {
+fn retain_stale_fragments(
+    worktree_root: &Path,
+    size_cap: SizeCap,
+    rel_paths: Vec<String>,
+) -> L1FreshnessGate {
     use ecp_core::session::{layout, DirtyEvents, FRAGMENT_FORMAT_V5};
 
     let pass = |rel_paths, session_meta| L1FreshnessGate {
@@ -1361,7 +1371,7 @@ fn retain_stale_fragments(worktree_root: &Path, rel_paths: Vec<String>) -> L1Fre
     // Fragments another binary parsed hold other parse rules
     // (FU-2026-10-05-36d0314fefe4), and fragments parsed under another cap
     // hold other omissions: every dirty file is re-parsed.
-    if !manifest.is_current(ecp_core::config::resolve_size_cap(worktree_root)) {
+    if !manifest.is_current(size_cap) {
         return pass(rel_paths, Some(meta));
     }
     let mut pre_mtimes = HashMap::new();
@@ -1421,6 +1431,7 @@ fn apply_l1_overlay_updates(
     events: &HashMap<String, DirtyPathEvent>,
     tombstones: &[(String, PathClass)],
     gate_meta: Option<SessionMeta>,
+    size_cap: SizeCap,
 ) -> io::Result<()> {
     use crate::session::{overlay_writer, promotion};
 
@@ -1474,8 +1485,6 @@ fn apply_l1_overlay_updates(
         })
         .collect();
 
-    // The cap `reanalyze_files` parsed under: the same root resolves it.
-    let size_cap = ecp_core::config::resolve_size_cap(worktree_root);
     let (n_written, n_failed) = match overlay_writer::write_dirty_events(
         &session_dir,
         size_cap,
@@ -1804,7 +1813,11 @@ mod fingerprint_drift_tests {
             &[("app.py", event_entry(mtime, "fixture", format))],
             fragment,
         );
-        let gate = retain_stale_fragments(&worktree, vec!["app.py".into()]);
+        let gate = retain_stale_fragments(
+            &worktree,
+            ecp_core::config::resolve_size_cap(&worktree),
+            vec!["app.py".into()],
+        );
         (tmp, gate)
     }
 
@@ -1871,7 +1884,12 @@ mod fingerprint_drift_tests {
         };
 
         assert_eq!(
-            retain_stale_fragments(&worktree, rel_paths()).rel_paths,
+            retain_stale_fragments(
+                &worktree,
+                ecp_core::config::resolve_size_cap(&worktree),
+                rel_paths()
+            )
+            .rel_paths,
             ["app.py", "other.py"],
             "the gate served the legacy namespace"
         );
@@ -1883,9 +1901,13 @@ mod fingerprint_drift_tests {
             &bytes,
         );
         assert!(
-            retain_stale_fragments(&worktree, rel_paths())
-                .rel_paths
-                .is_empty(),
+            retain_stale_fragments(
+                &worktree,
+                ecp_core::config::resolve_size_cap(&worktree),
+                rel_paths()
+            )
+            .rel_paths
+            .is_empty(),
             "control: the same entries in l1/ are current"
         );
     }
@@ -1913,9 +1935,17 @@ mod fingerprint_drift_tests {
             &[],
         );
 
-        let absent = retain_stale_fragments(&worktree, vec!["app.py".into()]);
+        let absent = retain_stale_fragments(
+            &worktree,
+            ecp_core::config::resolve_size_cap(&worktree),
+            vec!["app.py".into()],
+        );
         fs::write(worktree.join("app.py"), "def back(): pass\n").unwrap();
-        let back = retain_stale_fragments(&worktree, vec!["app.py".into()]);
+        let back = retain_stale_fragments(
+            &worktree,
+            ecp_core::config::resolve_size_cap(&worktree),
+            vec!["app.py".into()],
+        );
 
         assert!(absent.rel_paths.is_empty(), "{:?}", absent.rel_paths);
         assert_eq!(back.rel_paths, ["app.py"]);
@@ -1952,7 +1982,12 @@ mod fingerprint_drift_tests {
         assert!(!dirty.from_current_builder());
         ecp_core::session::DirtyEvents::write_atomic(&path, &dirty).unwrap();
         assert_eq!(
-            retain_stale_fragments(&worktree, vec!["app.py".into()]).rel_paths,
+            retain_stale_fragments(
+                &worktree,
+                ecp_core::config::resolve_size_cap(&worktree),
+                vec!["app.py".into()]
+            )
+            .rel_paths,
             ["app.py"],
             "a valid, unchanged V5 fragment from another builder must be reparsed"
         );
@@ -2031,7 +2066,11 @@ mod fingerprint_drift_tests {
                 &old,
             )
             .unwrap();
-            let gate = retain_stale_fragments(&worktree, vec!["app.py".into()]);
+            let gate = retain_stale_fragments(
+                &worktree,
+                ecp_core::config::resolve_size_cap(&worktree),
+                vec!["app.py".into()],
+            );
             assert_eq!(gate.rel_paths, ["app.py"]);
             gate
         } else {
@@ -2052,6 +2091,7 @@ mod fingerprint_drift_tests {
             &HashMap::new(),
             &[],
             gate.session_meta,
+            ecp_core::config::resolve_size_cap(&worktree),
         )
         .unwrap();
         let manifest = ecp_core::session::DirtyEvents::read(
@@ -2060,9 +2100,13 @@ mod fingerprint_drift_tests {
         .unwrap();
         assert_eq!(manifest.entries["app.py"].format, FRAGMENT_FORMAT_V5);
         assert!(manifest.from_current_builder());
-        assert!(retain_stale_fragments(&worktree, vec!["app.py".into()])
-            .rel_paths
-            .is_empty());
+        assert!(retain_stale_fragments(
+            &worktree,
+            ecp_core::config::resolve_size_cap(&worktree),
+            vec!["app.py".into()]
+        )
+        .rel_paths
+        .is_empty());
 
         let (accepted, _) =
             crate::session::overlay_reader::accepted_fragments(&session_dir, &worktree).unwrap();

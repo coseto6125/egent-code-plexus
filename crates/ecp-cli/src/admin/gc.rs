@@ -533,9 +533,9 @@ const ORPHAN_FRAGMENT_IDLE_SECS: u64 = 3600;
 /// writes. A namespace whose manifest cannot be read keeps its bins, and a
 /// session whose writer holds its overlay lock keeps everything.
 ///
-/// The legacy namespace is retired whole (manifest and bins) once nothing
-/// has written it for [`SESSION_IDLE_HOURS`]: today's binary never writes
-/// it, so only an older binary still running in the session keeps it alive.
+/// An idle session (see [`session_is_idle`]) is skipped here: `sweep_sessions`
+/// removes it whole, both namespaces with it. A session that is not idle keeps
+/// its legacy manifest and bins, because a live older binary still reads them.
 pub fn sweep_stale_fragments(repo_root: &Path, dry_run: bool) -> io::Result<SweepStats> {
     let mut stats = SweepStats::default();
     let Ok(sessions) = fs::read_dir(repo_root.join("sessions")) else {
@@ -575,10 +575,6 @@ pub fn sweep_stale_fragments(repo_root: &Path, dry_run: bool) -> io::Result<Swee
         });
         sweep_orphan_bins(&fragments, referenced, now, dry_run, &mut stats);
 
-        if legacy_namespace_idle(&legacy_manifest, &legacy, now) {
-            retire_legacy_namespace(&legacy_manifest, &legacy, dry_run, &mut stats);
-            continue;
-        }
         let referenced = manifest_names(DirtyFiles::read(&legacy_manifest), |m| {
             m.entries
                 .into_values()
@@ -642,45 +638,6 @@ fn sweep_orphan_bins(
                 false
             }
         });
-    }
-}
-
-/// Whether the legacy namespace exists and its last write (the newer of the
-/// manifest's and the bins directory's mtime) lies [`SESSION_IDLE_HOURS`]
-/// back. An unknown time is not idle.
-fn legacy_namespace_idle(manifest: &Path, bins_dir: &Path, now: SystemTime) -> bool {
-    let mtime = |path: &Path| fs::metadata(path).and_then(|m| m.modified()).ok();
-    let (manifest_mtime, dir_mtime) = (mtime(manifest), mtime(bins_dir));
-    if manifest_mtime.is_none() && dir_mtime.is_none() {
-        return false;
-    }
-    idle_for(
-        manifest_mtime.max(dir_mtime),
-        now,
-        SESSION_IDLE_HOURS as u64 * 3600,
-    )
-}
-
-/// Removes the legacy manifest and bins directory, each counted once.
-fn retire_legacy_namespace(
-    manifest: &Path,
-    bins_dir: &Path,
-    dry_run: bool,
-    stats: &mut SweepStats,
-) {
-    if manifest.is_file() {
-        stats.marked += 1;
-        stats.dispose(manifest, dry_run, || match fs::remove_file(manifest) {
-            Ok(()) => true,
-            Err(e) => {
-                eprintln!("gc: remove {}: {e}", manifest.display());
-                false
-            }
-        });
-    }
-    if bins_dir.is_dir() {
-        stats.marked += 1;
-        stats.dispose(bins_dir, dry_run, || retire_and_remove(bins_dir));
     }
 }
 
@@ -1123,61 +1080,6 @@ mod tests {
             layout::legacy_dirty_files_path(&dir).exists(),
             "a live legacy namespace was retired"
         );
-    }
-
-    /// No binary has written the legacy namespace for a day: its manifest
-    /// and bins go whole, the new namespace beside it stays.
-    #[test]
-    fn test_sweep_stale_fragments_idle_legacy_namespace_removed_whole() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = session_dir(tmp.path());
-        let legacy_bins = layout::legacy_overlay_dir(&dir);
-        fs::create_dir_all(&legacy_bins).unwrap();
-        let mut legacy = DirtyFiles::empty();
-        legacy.entries.insert(
-            "a.rs".into(),
-            ecp_core::session::DirtyEntry {
-                mtime_ns: 1,
-                content_hash: "named".into(),
-                fragment_id: "named".into(),
-                tantivy_delta_segment: None,
-                parse_failed: false,
-                dirty_symbols: vec![],
-                format: ecp_core::session::FRAGMENT_FORMAT_V5,
-            },
-        );
-        let legacy_manifest = layout::legacy_dirty_files_path(&dir);
-        DirtyFiles::write_atomic(&legacy_manifest, &legacy).unwrap();
-        fs::write(legacy_bins.join("named.bin"), b"bin").unwrap();
-        let idle = 2 * SESSION_IDLE_HOURS as u64 * 3600;
-        backdate(&legacy_bins.join("named.bin"), idle);
-        backdate(&legacy_bins, idle);
-        backdate(&legacy_manifest, idle);
-        let manifest = DirtyEvents::empty(ecp_core::contracts::routing::SizeCap::BUILT_IN);
-        DirtyEvents::write_atomic(&layout::dirty_events_path(&dir), &manifest).unwrap();
-
-        let dry = sweep_stale_fragments(tmp.path(), true).unwrap();
-        assert!(
-            legacy_manifest.exists() && legacy_bins.exists(),
-            "a dry run deleted"
-        );
-        let stats = sweep_stale_fragments(tmp.path(), false).unwrap();
-
-        assert_eq!(
-            dry.would_remove,
-            [legacy_manifest.clone(), legacy_bins.clone()]
-        );
-        assert_eq!(stats.removed, 2);
-        assert!(!legacy_manifest.exists());
-        assert!(!legacy_bins.exists());
-        assert!(layout::dirty_events_path(&dir).exists());
-        let leftovers: Vec<String> = fs::read_dir(&dir)
-            .unwrap()
-            .flatten()
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.starts_with("graph_overlay"))
-            .collect();
-        assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 
     #[test]

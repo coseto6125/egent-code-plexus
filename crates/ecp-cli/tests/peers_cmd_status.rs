@@ -205,3 +205,45 @@ fn peers_log_empty_prints_no_messages() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("no messages") || stdout.is_empty());
 }
+
+/// Contract: a peer's deleted file prints as `(deleted)` with no symbol list;
+/// an edited file beside it keeps its symbols.
+#[test]
+fn test_peers_diff_tombstone_prints_deleted_marker() {
+    use ecp_core::contracts::dirty_event::PathClass;
+    use ecp_core::session::overlay::{DirtyEventEntry, DirtyEvents};
+    let dir = tempdir().unwrap();
+    write_session(dir.path(), "s-peer", None);
+    write_dirty_in(dir.path(), "s-peer", "src/edited.ts", &["edited_fn"]);
+    let manifest_path =
+        ecp_core::session::layout::dirty_events_path(&dir.path().join("sessions").join("s-peer"));
+    let mut manifest = DirtyEvents::read(&manifest_path).unwrap();
+    manifest.entries.insert(
+        "src/gone.ts".into(),
+        DirtyEventEntry::tombstone(PathClass::SOURCE),
+    );
+    DirtyEvents::write_atomic(&manifest_path, &manifest).unwrap();
+
+    let out = Command::new(bin())
+        .args([
+            "peers",
+            "diff",
+            "s-peer",
+            "--repo",
+            dir.path().to_str().unwrap(),
+        ])
+        .env("ECP_SESSION_ID", "me-diff")
+        .output()
+        .expect("spawn");
+
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(lines.contains(&"--- src/gone.ts (deleted) ---"), "{stdout}");
+    assert!(lines.contains(&"--- src/edited.ts ---"), "{stdout}");
+    assert!(stdout.contains("edited_fn"), "{stdout}");
+}

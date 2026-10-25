@@ -139,6 +139,22 @@ pub(crate) fn make_pipeline_for_names<'a>(
 /// relative-to-repo path (NOT the tempdir path), so call sites can match
 /// against `graph.files[].path` directly.
 pub fn reanalyze_files(repo: &Path, scope: &DiffScope, rel_paths: &[String]) -> Vec<LocalGraph> {
+    reanalyze_files_under(
+        repo,
+        scope,
+        rel_paths,
+        ecp_core::config::resolve_size_cap(repo),
+    )
+}
+
+/// `reanalyze_files` under a cap the caller resolved once, so the caller can
+/// stamp that same cap on whatever it stores from the parse.
+pub fn reanalyze_files_under(
+    repo: &Path,
+    scope: &DiffScope,
+    rel_paths: &[String],
+    size_cap: SizeCap,
+) -> Vec<LocalGraph> {
     if rel_paths.is_empty() {
         return Vec::new();
     }
@@ -177,10 +193,7 @@ pub fn reanalyze_files(repo: &Path, scope: &DiffScope, rel_paths: &[String]) -> 
     }
     // The repo's `[index] max_file_bytes`, as the cold index reads it: a dirty
     // file the base graph holds must not turn into a `file-too-large` omission.
-    let pipeline = make_pipeline_for_names(
-        needed.iter().copied(),
-        ecp_core::config::resolve_size_cap(repo),
-    );
+    let pipeline = make_pipeline_for_names(needed.iter().copied(), size_cap);
 
     match scope {
         DiffScope::Staged => reanalyze_staged(repo, &pipeline, rel_paths),

@@ -192,8 +192,7 @@ impl DirtyEvents {
     }
 
     pub fn read(path: &Path) -> io::Result<Self> {
-        let bytes = fs::read(path)?;
-        serde_json::from_slice(&bytes).map_err(io::Error::other)
+        super::meta::read_json(path)
     }
 
     /// An empty manifest of the running binary under `size_cap`.

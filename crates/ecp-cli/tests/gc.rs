@@ -1428,8 +1428,8 @@ fn test_sweep_stale_fragments_legacy_namespace_orphan_removed_named_kept() {
 
 /// The session ecp 0.14.8 left: its legacy manifest names its bin, so the bin
 /// stays. This binary's refresh writes `l1/` and never touches the legacy
-/// namespace, so the old manifest and bin outlive the refresh. They go whole
-/// once nothing has written the namespace for a day.
+/// namespace, so the old manifest and bin outlive the refresh. They go with
+/// the whole session once the session is idle, and not before.
 #[test]
 fn test_sweep_stale_fragments_session_written_by_0_14_8_legacy_namespace_retired_when_idle() {
     use ecp_core::session::layout;
@@ -1491,17 +1491,66 @@ fn test_sweep_stale_fragments_session_written_by_0_14_8_legacy_namespace_retired
         "the refresh replaced the legacy manifest"
     );
 
+    // A day without a write, but the session itself still active: an older
+    // binary may still read the legacy namespace, so it stays.
     let two_days = 48 * 3600;
     backdate_secs(&layout::legacy_dirty_files_path(&session), two_days);
     backdate_secs(&overlay, two_days);
     let stats = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path(), false).unwrap();
-    assert_eq!(stats.removed, 2, "the manifest and the bins directory");
+    assert_eq!(stats.removed, 0, "an active session lost its legacy files");
+    assert!(overlay.join(old_bin).exists());
+
+    // The session goes idle: the session sweep removes it whole, legacy
+    // namespace included.
+    let idle = SessionMeta {
+        last_touched: (chrono::Utc::now() - chrono::Duration::hours(48)).to_rfc3339(),
+        ..sm
+    };
+    SessionMeta::write_atomic(&session.join("session_meta.json"), &idle).unwrap();
+    let stats = sweep_sessions(tmp.path(), false).unwrap();
+    assert_eq!(stats.marked, 1);
+    assert!(!session.exists(), "the idle session stayed");
     assert!(!overlay.exists());
     assert!(!layout::legacy_dirty_files_path(&session).exists());
-    let kept = std::fs::read_dir(layout::fragments_dir(&session))
-        .unwrap()
-        .count();
-    assert_eq!(kept, 1, "the retired legacy namespace took today's bin");
+}
+
+/// Legacy files older than a day inside a session touched now: kept, because
+/// a live 0.16.4 process can still read `dirty_files.json` + `graph_overlay/`.
+#[test]
+fn test_gc_legacy_namespace_active_session_kept() {
+    use ecp_core::session::layout;
+    let tmp = tempfile::tempdir().unwrap();
+    let (session, overlay) = legacy_fragment_session(
+        tmp.path(),
+        Some(legacy_manifest_naming("aaaa").as_str()),
+        &[("aaaa.bin", 7200)],
+    );
+    let sm = SessionMeta {
+        version: 1,
+        session_id: "sid".into(),
+        pid: None,
+        started_at: chrono::Utc::now().to_rfc3339(),
+        last_touched: chrono::Utc::now().to_rfc3339(),
+        base_sha: "0".repeat(40),
+        source_worktree: String::new(),
+        overlay_version: 0,
+        watcher_pid: None,
+        last_drained_offset: 0,
+        agent_name: None,
+    };
+    SessionMeta::write_atomic(&session.join("session_meta.json"), &sm).unwrap();
+    let two_days = 48 * 3600;
+    backdate_secs(&layout::legacy_dirty_files_path(&session), two_days);
+    backdate_secs(&overlay.join("aaaa.bin"), two_days);
+    backdate_secs(&overlay, two_days);
+
+    let dry = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path(), true).unwrap();
+    let real = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path(), false).unwrap();
+
+    assert!(dry.would_remove.is_empty(), "{:?}", dry.would_remove);
+    assert_eq!(real.removed, 0);
+    assert!(layout::legacy_dirty_files_path(&session).is_file());
+    assert!(overlay.join("aaaa.bin").is_file());
 }
 
 /// A writer holds the overlay lock while it re-publishes a content-addressed

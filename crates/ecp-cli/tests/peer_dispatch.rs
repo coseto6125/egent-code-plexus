@@ -224,3 +224,37 @@ fn watcher_lock_rejects_second_holder() {
         "second flock must fail while first holds it"
     );
 }
+
+/// Contract: the receiver reads that the peer deleted the file, not the
+/// generic "both have it in their overlay / which declarations changed" text.
+#[test]
+fn test_dispatch_tombstone_hard_overlap_reason_says_peer_deleted() {
+    let dir = tempdir().unwrap();
+    let inbox = dir.path().join("inbox.jsonl");
+    let tombstone = DirtyEventEntry::tombstone(PathClass::SOURCE);
+    let my_files = vec!["src/a.rs".to_string()];
+    let cache = ImpactCache::from_set(FxHashSet::default());
+
+    dispatch_peer_dirty_event(
+        dir.path(),
+        "abc12",
+        1234,
+        None,
+        &Utc::now().to_rfc3339(),
+        "src/a.rs",
+        &tombstone,
+        &my_files,
+        &[],
+        &cache,
+    )
+    .unwrap();
+
+    let (entries, _) = drain(&inbox, 0).unwrap();
+    assert_eq!(entries.len(), 1);
+    let InboxEntry::DirtyEvent { file, reason, .. } = &entries[0] else {
+        panic!("expected a dirty event: {:?}", entries[0]);
+    };
+    assert_eq!(file, "src/a.rs");
+    assert!(reason.contains("deleted"), "{reason}");
+    assert!(!reason.contains("WHICH declarations"), "{reason}");
+}

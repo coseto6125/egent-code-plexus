@@ -4,7 +4,7 @@
 //! and restarts from the new base.
 
 use crate::git::safe_exec;
-use ecp_core::registry::atomic_write_json;
+use ecp_core::registry::{atomic_write_json, FileLock};
 use ecp_core::session::layout;
 use ecp_core::session::{DirtyEvents, SessionMeta};
 use std::fs;
@@ -39,6 +39,11 @@ pub fn promote_case_a(
     worktree: &Path,
     new_sha: &str,
 ) -> io::Result<PromoteStats> {
+    // The writer commits bins and manifest under this lock; promotion rewrites
+    // the same manifest and deletes bins, so an unlocked run could drop an
+    // entry a writer just added or delete a bin it just published.
+    let _publish =
+        FileLock::acquire_exclusive(&super::overlay_writer::overlay_lock_path(session_dir))?;
     let manifest_path = layout::dirty_events_path(session_dir);
     // A manifest that does not parse is re-parsed whole by the freshness
     // gate, so it promotes as empty. Failing here instead would fail every

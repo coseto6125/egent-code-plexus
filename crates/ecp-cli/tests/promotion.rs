@@ -286,3 +286,38 @@ fn case_b_atomic_renames_to_stale_then_recreates() {
         "background GC should have removed stale dir after 2s"
     );
 }
+
+/// Contract: promotion rewrites the manifest and deletes bins, so it waits for
+/// a writer that holds the overlay lock instead of racing it.
+#[test]
+fn test_promote_case_a_overlay_lock_held_waits_for_release() {
+    let session_root = tempfile::tempdir().unwrap();
+    let wt = tempfile::tempdir().unwrap();
+    let old_sha = git_init_with_commit(wt.path());
+    let sid_dir = make_session(session_root.path(), &old_sha, wt.path());
+    let held = ecp_core::registry::FileLock::acquire_exclusive(
+        &ecp_cli::session::overlay_writer::overlay_lock_path(&sid_dir),
+    )
+    .unwrap();
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (sid, wt_path) = (sid_dir.clone(), wt.path().to_path_buf());
+    let worker = std::thread::spawn(move || {
+        tx.send(promote_case_a(&sid, &wt_path, &"1".repeat(40)).is_ok())
+            .unwrap();
+    });
+
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_millis(400))
+            .is_err(),
+        "promotion finished while a writer held the overlay lock"
+    );
+    drop(held);
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_secs(4)).unwrap(),
+        "promotion failed after the lock was released"
+    );
+    worker.join().unwrap();
+    let sm = SessionMeta::read(&sid_dir.join("session_meta.json")).unwrap();
+    assert_eq!(sm.base_sha, "1".repeat(40));
+}

@@ -20,12 +20,15 @@
 //! to prove it against. A slice that changes what the bytes mean WITHOUT
 //! bumping the identifier turns the first arm red.
 
+use ecp_analyzer::resolution::builder::GraphBuilder;
+use ecp_analyzer::rust::parser::RustProvider;
 use ecp_cli::engine::{header_compatible, Engine};
 use ecp_cli::parse_cache::ParseCache;
 use ecp_cli::session::overlay_reader::{accepted_fragments, decode_view_inputs};
 use ecp_cli::session::overlay_writer::write_dirty_events;
 use ecp_cli::session::state::classify;
 use ecp_cli::session::view_cache;
+use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::contracts::dirty_event::PathClass;
 use ecp_core::graph::{NodeKind, RelType, GRAPH_FORMAT_VERSION};
@@ -149,6 +152,20 @@ fn writer_fragments_are_current() -> bool {
     BUILDER_FINGERPRINT == WRITER_FINGERPRINT
         && FRAGMENT_FORMAT_V5 == WRITER_FRAGMENT_FORMAT
         && writer_manifest_is_current()
+}
+
+/// rkyv bytes of a graph in today's format, built from the fixture's
+/// committed `lib.rs` the way a full build does (`uid_assign_parity.rs`).
+fn current_format_graph_bytes() -> Vec<u8> {
+    let local = RustProvider::new()
+        .unwrap()
+        .parse_file(Path::new("lib.rs"), &committed("lib.rs"))
+        .unwrap();
+    let mut builder = GraphBuilder::new();
+    builder.add_graph(local);
+    rkyv::to_bytes::<rkyv::rancor::Error>(&builder.build())
+        .unwrap()
+        .to_vec()
 }
 
 /// `(name, kind, file, first line, last line)`, lines 1-based as a reader of
@@ -498,7 +515,7 @@ fn test_dirty_manifest_written_by_0_16_4_returns_dirty_paths_and_symbols() {
 /// manifest moved, it holds none (the files re-parse into the new one), and
 /// is never called stale.
 #[test]
-fn test_session_written_by_0_16_4_classifies_as_augmented_with_two_fragments() {
+fn test_session_written_by_0_16_4_classifies_as_pure_reference_or_augmented() {
     let tmp = copy_repo();
     let meta = SessionMeta::read(&session_dir(&tmp).join("session_meta.json"))
         .expect("session_meta.json written by 0.16.4 must parse");
@@ -673,15 +690,22 @@ fn test_dirty_events_old_writer_manifest_beside_new_namespace_keeps_tombstone() 
         accepted.is_empty(),
         "an entry of the older writer's manifest was served"
     );
-    if writer_graph_is_current() {
-        let engine = Engine::load(graph_in(&tmp))
-            .unwrap()
-            .with_overlay(session.clone(), root.clone());
-        assert!(
-            engine.overlay_view().is_none(),
-            "the overlay served a fragment"
-        );
-    }
+    // The consumer reads a graph of today's format built from the committed
+    // sources, not the writer's graph.bin (refused once the format moved).
+    let graph_path = tmp.path().join("current/graph.bin");
+    fs::create_dir_all(graph_path.parent().unwrap()).unwrap();
+    fs::write(&graph_path, current_format_graph_bytes()).unwrap();
+    let engine = Engine::load(&graph_path)
+        .unwrap()
+        .with_overlay(session.clone(), root.clone());
+    assert!(
+        engine.overlay_view().is_none(),
+        "the overlay served a fragment"
+    );
+    // The base rows are lib.rs's: the view reads tombstones in a later slice
+    // (overlay_reader.rs header), so today nothing hides the deleted symbols.
+    // When that slice lands, flip this to `!contains`.
+    assert!(graph_rows(&engine).iter().any(|r| r.2 == "lib.rs"));
     assert!(
         matches!(
             state,

@@ -35,6 +35,14 @@ pub fn dispatch_peer_dirty_event(
         } => (kind, file, symbol, reason),
         ConcernResult::Ignore => return Ok(()),
     };
+    // A tombstone has no symbols to name; the concern is the deletion itself.
+    let reason = if peer_entry.is_tombstone() {
+        format!(
+            "Peer {peer_session} deleted {file}, which is also in your overlay. Review the file."
+        )
+    } else {
+        reason
+    };
     let entry = InboxEntry::DirtyEvent {
         ts: ts.to_string(),
         peer_session: peer_session.to_string(),

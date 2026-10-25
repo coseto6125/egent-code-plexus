@@ -338,6 +338,10 @@ fn cmd_diff(repo_root: &std::path::Path, peer: &str, symbol: Option<&str>) -> st
                 continue;
             }
         }
+        if entry.is_tombstone() {
+            println!("--- {path_key} (deleted) ---");
+            continue;
+        }
         println!("--- {path_key} ---");
         for s in &entry.dirty_symbols {
             println!(

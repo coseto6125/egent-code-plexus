@@ -75,14 +75,14 @@ pub(crate) fn classify_with_meta(
             Ok(df) => df.entries.len(),
             Err(_) => {
                 return SessionState::Stale {
-                    reason: StaleReason::DirtyFilesCorrupt,
+                    reason: StaleReason::DirtyEventsCorrupt,
                 }
             }
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
         Err(_) => {
             return SessionState::Stale {
-                reason: StaleReason::DirtyFilesCorrupt,
+                reason: StaleReason::DirtyEventsCorrupt,
             }
         }
     };

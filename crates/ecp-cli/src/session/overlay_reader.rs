@@ -13,6 +13,7 @@
 //! fragment format is read; older entries are re-parsed by the freshness gate.
 
 use ecp_core::analyzer::types::{RawExportAlias, RawImport};
+use ecp_core::contracts::routing::SizeCap;
 use ecp_core::graph::NodeKind;
 use ecp_core::session::layout;
 use ecp_core::session::{DirtyEvents, OverlayFileInput, OverlaySymbol, FRAGMENT_FORMAT_V5};
@@ -63,13 +64,26 @@ pub fn accepted_fragments(
     session_dir: &Path,
     worktree_root: &Path,
 ) -> io::Result<(Vec<AcceptedFragment>, u64)> {
+    accepted_fragments_under(
+        session_dir,
+        worktree_root,
+        ecp_core::config::resolve_size_cap(worktree_root),
+    )
+}
+
+/// `accepted_fragments` under a cap the caller resolved once for the query.
+pub fn accepted_fragments_under(
+    session_dir: &Path,
+    worktree_root: &Path,
+    size_cap: SizeCap,
+) -> io::Result<(Vec<AcceptedFragment>, u64)> {
     let mut hasher = Xxh3::new();
     let manifest = layout::dirty_events_path(session_dir);
     if !manifest.exists() {
         return Ok((Vec::new(), hasher.digest()));
     }
     let df = DirtyEvents::read(&manifest)?;
-    if !df.is_current(ecp_core::config::resolve_size_cap(worktree_root)) {
+    if !df.is_current(size_cap) {
         return Ok((Vec::new(), hasher.digest()));
     }
     let mut out = Vec::new();

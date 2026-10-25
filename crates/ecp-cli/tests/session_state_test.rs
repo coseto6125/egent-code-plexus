@@ -149,7 +149,7 @@ fn classify_corrupt_dirty_returns_stale_dirtycorrupt() {
     assert!(matches!(
         classify(tmp.path(), "sid1"),
         SessionState::Stale {
-            reason: StaleReason::DirtyFilesCorrupt
+            reason: StaleReason::DirtyEventsCorrupt
         }
     ));
 }

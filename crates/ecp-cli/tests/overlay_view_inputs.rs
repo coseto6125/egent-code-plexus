@@ -14,7 +14,6 @@ use ecp_cli::session::overlay_writer::{
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{LocalGraph, NameRef, NameRefKind, RawImport, RawNode, VariantRef};
 use ecp_core::contracts::dirty_event::{PathChange, PathClass};
-use ecp_core::contracts::routing::SizeCap;
 use ecp_core::graph::NodeKind;
 use ecp_core::session::{
     layout, DirtyEntry, DirtyEventEntry, DirtyEvents, DirtyFiles, OverlayFileInput, SessionMeta,
@@ -49,7 +48,7 @@ fn make_session_dir(tmp: &Path, sid: &str) -> PathBuf {
     SessionMeta::write_atomic(&session_dir.join("session_meta.json"), &sm).unwrap();
     DirtyEvents::write_atomic(
         &layout::dirty_events_path(&session_dir),
-        &DirtyEvents::empty(SizeCap::BUILT_IN),
+        &DirtyEvents::empty(ecp_core::config::resolve_size_cap(Path::new("/work/x"))),
     )
     .unwrap();
     session_dir
@@ -440,7 +439,7 @@ fn test_load_view_inputs_v3_entry_under_current_fingerprint_returns_no_input() {
         session_with_v3_bin(tmp.path(), ecp_core::registry::BUILDER_FINGERPRINT);
     assert!(DirtyEvents::read(&layout::dirty_events_path(&session_dir))
         .unwrap()
-        .is_current(SizeCap::BUILT_IN));
+        .is_current(ecp_core::config::resolve_size_cap(&worktree)));
 
     let inputs = load_view_inputs(&session_dir, &worktree);
     assert!(inputs.is_empty(), "a v3 fragment was served: {inputs:?}");
@@ -524,7 +523,7 @@ fn session_written_by_0_16_2(tmp: &Path) -> (PathBuf, PathBuf) {
             .unwrap();
     manifest["entries"]["app.py"]["mtime_ns"] = mtime.into();
     let legacy: DirtyFiles = serde_json::from_value(manifest).unwrap();
-    let mut events = DirtyEvents::empty(SizeCap::BUILT_IN);
+    let mut events = DirtyEvents::empty(ecp_core::config::resolve_size_cap(&worktree));
     events.entries = legacy
         .entries
         .iter()
@@ -547,7 +546,7 @@ fn test_load_view_inputs_v4_entry_under_current_fingerprint_returns_no_input() {
     let dirty = DirtyEvents::read(&layout::dirty_events_path(&session_dir)).unwrap();
 
     assert_eq!(dirty.entries["app.py"].format, FRAGMENT_FORMAT_V4);
-    assert!(dirty.is_current(SizeCap::BUILT_IN));
+    assert!(dirty.is_current(ecp_core::config::resolve_size_cap(&worktree)));
     assert!(
         load_view_inputs(&session_dir, &worktree).is_empty(),
         "v4 lacks the complete field reads and return types required by V5"

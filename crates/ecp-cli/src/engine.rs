@@ -247,8 +247,11 @@ impl Engine {
                 let dir = self.overlay_dir.as_deref()?;
                 let root = self.worktree_root.as_deref()?;
                 let graph = self.graph().ok()?;
+                // Resolved once for this query's view, not re-read per call.
+                let size_cap = ecp_core::config::resolve_size_cap(root);
                 let (accepted, inputs_hash) =
-                    crate::session::overlay_reader::accepted_fragments(dir, root).ok()?;
+                    crate::session::overlay_reader::accepted_fragments_under(dir, root, size_cap)
+                        .ok()?;
                 if accepted.is_empty() {
                     return None;
                 }
