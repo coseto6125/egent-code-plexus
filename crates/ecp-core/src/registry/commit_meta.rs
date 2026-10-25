@@ -118,7 +118,11 @@ use std::path::Path;
 /// extension methods in scope, or records a BlindSpot; a TypeScript method
 /// route needs an `@Controller` class; a nested same-name type owns its own
 /// members; a test file's route marks no entry point.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema34");
+/// schema35: a C# call site records its arguments, so the extension retry
+/// selects by applicability; a C# call never binds a private or static
+/// candidate it cannot reach; a Spring mapping routes only on a controller
+/// class. Overlay fragments of schema34 are ignored by their fingerprint.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema35");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

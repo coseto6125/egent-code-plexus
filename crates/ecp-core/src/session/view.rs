@@ -1503,7 +1503,8 @@ impl OverlayView {
 /// 6 (R-PI-b): the view stores the base declarations it could not pair; a 5
 /// view lost that caveat on a cache hit.
 /// 7 (P-ext): a C# extension call adds edges and a reason; a 6 view lacks them.
-pub const VIEW_CACHE_FORMAT: u32 = 7;
+/// 8 (P-ext2): the view stores its C# call gaps; a 7 view lost them.
+pub const VIEW_CACHE_FORMAT: u32 = 8;
 
 /// Every reason [`OverlayView::build`] puts on a [`ViewEdge`]. A cached view
 /// stores each reason as its index here; a view with an unlisted reason is
