@@ -610,6 +610,7 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
     // `--neighbor-kind` and `--neighbor-file` filter its neighbours.
     let request = target_request(name, args.kind.as_deref(), args.file_path.as_deref())
         .map_err(|e| with_neighbor_kind_hint(e, args.kind.as_deref()))?;
+    let kind_filter = neighbor_kinds(args.neighbor_kind.as_deref())?;
 
     // Clean queries must not initialize a view or scan the graph for a delta.
     let view = engine.overlay_dir().and_then(|_| engine.overlay_view());
@@ -672,7 +673,6 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
     };
 
     // Pre-parse the neighbour filters once.
-    let kind_filter = parse_csv_lower(args.neighbor_kind.as_deref());
     let rel_filter = parse_csv_lower(args.relation_types.as_deref());
     let file_substr = args
         .neighbor_file
@@ -726,6 +726,27 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
         strip_edge_boilerplate(&mut result);
     }
     emit_with_caveat(&result, format, engine.caveat())
+}
+
+/// `--neighbor-kind` as the lowercase display names the edge filter compares
+/// against. An unknown kind is an error: it would empty every section.
+fn neighbor_kinds(raw: Option<&str>) -> Result<Option<Vec<String>>, EcpError> {
+    parse_csv_lower(raw)
+        .map(|kinds| {
+            kinds
+                .iter()
+                .map(|k| {
+                    k.parse::<NodeKind>()
+                        .map(|kind| kind.as_str().to_ascii_lowercase())
+                        .map_err(|()| {
+                            EcpError::InvalidArgument(format!(
+                                "--neighbor-kind \"{k}\" is not a node kind"
+                            ))
+                        })
+                })
+                .collect()
+        })
+        .transpose()
 }
 
 /// `--kind` takes one declaration kind. A list there is most often the old
@@ -1273,6 +1294,24 @@ mod tests {
 
     /// Stands for: a list in `--kind` is the old neighbour filter. The error
     /// names `--neighbor-kind` so the agent moves the list there.
+    /// Stands for: `--neighbor-kind` accepts every spelling `NodeKind`
+    /// parses and compares against the display name, so `enum_variant`
+    /// keeps EnumVariant neighbours; an unknown kind fails instead of
+    /// emptying every section.
+    #[test]
+    fn test_neighbor_kinds_parses_spellings_and_rejects_unknown() {
+        assert_eq!(
+            neighbor_kinds(Some("enum_variant, Function")).unwrap(),
+            Some(vec!["enumvariant".to_string(), "function".to_string()])
+        );
+        assert_eq!(neighbor_kinds(Some(" , ")).unwrap(), None);
+        assert_eq!(neighbor_kinds(None).unwrap(), None);
+        let err = neighbor_kinds(Some("function,banana"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("\"banana\" is not a node kind"), "{err}");
+    }
+
     #[test]
     fn test_with_neighbor_kind_hint_list_kind_names_neighbor_flag() {
         let kind = Some("function,method");
