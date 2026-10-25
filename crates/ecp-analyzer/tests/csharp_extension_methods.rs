@@ -44,7 +44,10 @@ fn graph_of(files: &[(&str, &str)]) -> ZeroCopyGraph {
 
 /// Every `Calls` edge out of `Run`: (target file, target name, 1-based
 /// target line, confidence, reason).
-fn run_calls(graph: &ZeroCopyGraph) -> Vec<(String, String, u32, f32, String)> {
+/// `(file, name, line, confidence, reason)` of each `Run` call edge.
+type CallRow = (String, String, u32, f32, String);
+
+fn run_calls(graph: &ZeroCopyGraph) -> Vec<CallRow> {
     let pool = graph.string_pool.as_slice();
     let mut calls: Vec<_> = graph
         .edges
@@ -147,13 +150,7 @@ fn overloads(first: &str, second: &str) -> String {
 
 /// `Run`'s edges and the extension BlindSpots for `call` (replacing
 /// `w.Spin()`) against `ext`.
-fn spin_with(
-    ext: &str,
-    call: &str,
-) -> (
-    Vec<(String, String, u32, f32, String)>,
-    Vec<(String, String)>,
-) {
+fn spin_with(ext: &str, call: &str) -> (Vec<CallRow>, Vec<(String, String)>) {
     let app = caller("using Lib;").replace("w.Spin()", call);
     let graph = graph_of(&[WIDGET, ("Lib/WidgetExt.cs", ext), ("App.cs", &app)]);
     (run_calls(&graph), extension_misses(&graph))

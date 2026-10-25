@@ -135,6 +135,9 @@ fn path_dirs(path: &str) -> Vec<&str> {
 #[derive(Debug)]
 struct CsharpExtensionDecl {
     id: u32,
+    /// Its file. A later overload has no entry in `id_to_file`, so the
+    /// table keeps the path here.
+    file: Box<str>,
     /// Its `this` parameter's type as written.
     this_type: Box<str>,
     flags: u16,
@@ -652,6 +655,7 @@ impl SymbolTable {
     pub fn note_csharp_extension(
         &mut self,
         node_id: u32,
+        file_path: &str,
         name: &str,
         this_type: &str,
         flags: u16,
@@ -662,6 +666,7 @@ impl SymbolTable {
             .or_default()
             .push(CsharpExtensionDecl {
                 id: node_id,
+                file: file_path.into(),
                 this_type: this_type.into(),
                 flags,
                 params: params.iter().map(|&name| name.into()).collect(),
@@ -693,7 +698,7 @@ impl SymbolTable {
         found
             .iter()
             .filter_map(|decl| {
-                let file = self.file_of(decl.id)?;
+                let file = &*decl.file;
                 let class = PickFacts::owner(self, decl.id)?;
                 let namespace = self
                     .lookup_in_file_with_kind(file, class, ResolveTarget::Type)

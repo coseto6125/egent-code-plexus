@@ -1523,3 +1523,16 @@ extension_methods ruby no extension methods: a call resolves only to members of 
 extension_methods rust trait methods resolve through trait impls; no static-class extension form
 extension_methods swift Swift extension members are members of the extended type (swift_extension_dedup.rs); no static-class form
 extension_methods typescript no extension methods: a call resolves only to members of the receiver's type or to free functions
+call_access c the call access rule models C# private and static members only
+call_access cpp the call access rule models C# private and static members only
+call_access dart the call access rule models C# private and static members only
+call_access go the call access rule models C# private and static members only
+call_access java the call access rule models C# private and static members only
+call_access javascript the call access rule models C# private and static members only
+call_access kotlin the call access rule models C# private and static members only
+call_access php the call access rule models C# private and static members only
+call_access python the call access rule models C# private and static members only
+call_access ruby the call access rule models C# private and static members only
+call_access rust the call access rule models C# private and static members only
+call_access swift the call access rule models C# private and static members only
+call_access typescript the call access rule models C# private and static members only
