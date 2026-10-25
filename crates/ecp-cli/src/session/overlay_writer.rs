@@ -466,15 +466,16 @@ fn commit_fragment_results(
     Ok(outcomes)
 }
 
-/// Drops each manifest entry `stale` names, under the publish lock. `stale`
-/// maps a path to the `fragment_id` its entry held when the caller chose it:
-/// an entry another process rewrote since holds another id and stays. A
-/// manifest left with no entry is removed, so a clean tree costs the reader
+/// Drops each manifest entry `stale` names, under the publish lock, when the
+/// entry still equals the one the caller saw and `still_stale` holds for it.
+/// The caller's evidence is older than the lock: `still_stale` re-checks it.
+/// A manifest left with no entry is removed, so a clean tree costs the reader
 /// one failed open. The bins stay for `admin gc`: a `fragment_id` is a
 /// content hash, so another entry can share the bin.
 pub fn retire_entries(
     session_dir: &Path,
-    stale: &HashMap<String, Option<String>>,
+    stale: &HashMap<String, DirtyEventEntry>,
+    still_stale: impl Fn(&str, &DirtyEventEntry) -> bool,
 ) -> io::Result<usize> {
     let _publish = FileLock::acquire_exclusive(&overlay_lock_path(session_dir))?;
     let manifest_path = layout::dirty_events_path(session_dir);
@@ -485,7 +486,7 @@ pub fn retire_entries(
     let before = manifest.entries.len();
     manifest
         .entries
-        .retain(|path, entry| stale.get(path) != Some(&entry.fragment_id));
+        .retain(|path, entry| stale.get(path) != Some(entry) || !still_stale(path, entry));
     let retired = before - manifest.entries.len();
     if retired == 0 {
         return Ok(0);

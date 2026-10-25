@@ -4,7 +4,7 @@ use ecp_cli::session::overlay_writer::{
 };
 use ecp_core::contracts::dirty_event::{PathChange, PathClass};
 use ecp_core::contracts::routing::SizeCap;
-use ecp_core::session::{layout, DirtyEvents, SessionMeta};
+use ecp_core::session::{layout, DirtyEventEntry, DirtyEvents, SessionMeta};
 use std::collections::HashMap;
 
 fn make_session_dir(tmp: &std::path::Path, sid: &str) -> std::path::PathBuf {
@@ -315,53 +315,70 @@ fn test_write_dirty_events_unmerged_deleted_added_store_parsed_change() {
         .all(|e| e.change != PathChange::Unmerged));
 }
 
-fn write_two(session_dir: &std::path::Path) -> (String, String) {
-    let ids: Vec<String> = [("src/a.rs", "fn a() {}"), ("src/b.rs", "fn b() {}")]
-        .into_iter()
-        .map(|(rel, content)| {
-            let input = FragmentInput {
-                rel_path: rel.into(),
-                content: content.as_bytes().to_vec(),
-                mtime_ns: 1000,
-            };
-            write_dirty_fragment(session_dir, &input)
-                .unwrap()
-                .fragment_id
-        })
-        .collect();
-    (ids[0].clone(), ids[1].clone())
+fn write_two(session_dir: &std::path::Path) {
+    for (rel, content) in [("src/a.rs", "fn a() {}"), ("src/b.rs", "fn b() {}")] {
+        let input = FragmentInput {
+            rel_path: rel.into(),
+            content: content.as_bytes().to_vec(),
+            mtime_ns: 1000,
+        };
+        write_dirty_fragment(session_dir, &input).unwrap();
+    }
+}
+
+/// The entries the manifest holds now, as a caller snapshots them.
+fn snapshot(session_dir: &std::path::Path, rels: &[&str]) -> HashMap<String, DirtyEventEntry> {
+    let df = DirtyEvents::read(&layout::dirty_events_path(session_dir)).unwrap();
+    rels.iter()
+        .map(|rel| (rel.to_string(), df.entries[*rel].clone()))
+        .collect()
 }
 
 #[test]
 fn test_retire_entries_named_entry_drops_it_and_keeps_bin() {
     let tmp = tempfile::tempdir().unwrap();
     let session_dir = make_session_dir(tmp.path(), "retire");
-    let (a, _) = write_two(&session_dir);
+    write_two(&session_dir);
+    let stale = snapshot(&session_dir, &["src/a.rs"]);
+    let bin = stale["src/a.rs"].fragment_id.clone().unwrap();
 
-    let stale = HashMap::from([("src/a.rs".to_string(), Some(a.clone()))]);
-    assert_eq!(retire_entries(&session_dir, &stale).unwrap(), 1);
+    assert_eq!(
+        retire_entries(&session_dir, &stale, |_, _| true).unwrap(),
+        1
+    );
 
     let df = DirtyEvents::read(&layout::dirty_events_path(&session_dir)).unwrap();
     assert_eq!(df.entries.keys().collect::<Vec<_>>(), ["src/b.rs"]);
     assert!(
-        layout::fragment_path(&session_dir, &a).exists(),
+        layout::fragment_path(&session_dir, &bin).exists(),
         "a bin can be shared by content hash; admin gc owns its removal"
     );
 }
 
 #[test]
-fn test_retire_entries_rewritten_entry_other_id_stays() {
+fn test_retire_entries_same_content_rewritten_since_stays() {
     let tmp = tempfile::tempdir().unwrap();
     let session_dir = make_session_dir(tmp.path(), "retire-race");
     write_two(&session_dir);
+    let stale = snapshot(&session_dir, &["src/a.rs"]);
+    // Another process re-publishes the same content after a new write: the
+    // fragment id (a content hash) is unchanged, the pre-parse mtime is not.
+    let input = FragmentInput {
+        rel_path: "src/a.rs".into(),
+        content: b"fn a() {}".to_vec(),
+        mtime_ns: 2000,
+    };
+    write_dirty_fragment(&session_dir, &input).unwrap();
 
-    let stale = HashMap::from([("src/a.rs".to_string(), Some("an-older-id".to_string()))]);
-    assert_eq!(retire_entries(&session_dir, &stale).unwrap(), 0);
-    let df = DirtyEvents::read(&layout::dirty_events_path(&session_dir)).unwrap();
     assert_eq!(
-        df.entries.len(),
-        2,
-        "another process rewrote src/a.rs since"
+        retire_entries(&session_dir, &stale, |_, _| true).unwrap(),
+        0
+    );
+    let df = DirtyEvents::read(&layout::dirty_events_path(&session_dir)).unwrap();
+    assert_eq!(df.entries["src/a.rs"].mtime_ns, 2000);
+    assert_eq!(
+        df.entries["src/a.rs"].fragment_id,
+        stale["src/a.rs"].fragment_id
     );
 }
 
@@ -369,16 +386,16 @@ fn test_retire_entries_rewritten_entry_other_id_stays() {
 fn test_retire_entries_last_entry_removes_manifest() {
     let tmp = tempfile::tempdir().unwrap();
     let session_dir = make_session_dir(tmp.path(), "retire-all");
-    let (a, b) = write_two(&session_dir);
+    write_two(&session_dir);
+    let stale = snapshot(&session_dir, &["src/a.rs", "src/b.rs"]);
 
-    let stale = HashMap::from([
-        ("src/a.rs".to_string(), Some(a)),
-        ("src/b.rs".to_string(), Some(b)),
-    ]);
-    assert_eq!(retire_entries(&session_dir, &stale).unwrap(), 2);
+    assert_eq!(
+        retire_entries(&session_dir, &stale, |_, _| true).unwrap(),
+        2
+    );
     assert!(!layout::dirty_events_path(&session_dir).exists());
     assert_eq!(
-        retire_entries(&session_dir, &stale).unwrap(),
+        retire_entries(&session_dir, &stale, |_, _| true).unwrap(),
         0,
         "a missing manifest has nothing to retire"
     );
