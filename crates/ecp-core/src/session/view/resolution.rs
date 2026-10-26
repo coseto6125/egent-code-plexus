@@ -13,8 +13,8 @@ use crate::analyzer::csharp_access::{self, CallAccess};
 use crate::analyzer::csharp_extension::{self, ReceiverSite};
 use crate::analyzer::heritage::{enclosing_class_heritage, holds_heritage, HeritageNode};
 use crate::analyzer::import_binding::{
-    extension_retry, fqn_imported_name, fqn_language, fqn_type_path, import_binding,
-    import_member_fallback, owner_path_agrees, retry_name, DeclaredType, MemberOwner,
+    fqn_imported_name, fqn_language, fqn_type_path, import_binding, import_member_fallback,
+    owner_path_agrees, DeclaredType, MemberOwner,
 };
 use crate::analyzer::ladder::{self, split_qualifier, CallPick, FieldRead, ResolveFacts};
 use crate::analyzer::lexical::{
@@ -1573,7 +1573,12 @@ impl<'a> OverlayFacts<'a> {
                     }
                     Module::Missing
                         if language != Language::Kotlin
-                            || self.scope.is_external(source, import, language) =>
+                            || ladder::import_is_external(
+                                &self.scope,
+                                source,
+                                import,
+                                language,
+                            ) =>
                     {
                         return TypeCandidates::External;
                     }
@@ -1747,28 +1752,26 @@ impl<'a> OverlayFacts<'a> {
                         .iter()
                         .any(|import| import_binding(import, ty, language).is_some()) =>
                 {
-                    let probe = |wildcard| {
-                        import_member_hit(
-                            self.graph,
-                            ty,
-                            callee_file,
-                            &imports,
-                            language,
+                    let hit = ladder::imported_member(
+                        &OverlayImports {
+                            facts: self,
+                            names: types,
                             types,
-                            types,
-                            self.nodes,
-                            self.dirty_base,
-                            self,
-                            wildcard,
-                        )
-                    };
-                    let hit = match probe(false) {
-                        MemberHit::Unbound { bound: false } => probe(true),
-                        explicit => explicit,
-                    };
+                        },
+                        callee_file,
+                        language,
+                        ty,
+                        &imports,
+                        types.target,
+                        true,
+                    );
                     match hit {
-                        MemberHit::Bound(id) => TypeCandidates::Unique(id, self.name_of(id)),
-                        MemberHit::Unbound { .. } => return type_ladder::ChainOutcome::Conclusive,
+                        ladder::MemberHit::Bound(hit) => {
+                            TypeCandidates::Unique(hit.id, self.name_of(hit.id))
+                        }
+                        ladder::MemberHit::Unbound { .. } => {
+                            return type_ladder::ChainOutcome::Conclusive
+                        }
                     }
                 }
                 Language::CSharp
@@ -2469,7 +2472,8 @@ impl ImplNode for OverlaySymbol {
 
 /// The index's `resolve_name_ref` in `builder.rs` ([`ladder::name_ref`]):
 /// `resolve` is [`resolve_callee`] over the name table of the target's
-/// kinds, and the import tier alone is [`bind_import`] over the fields.
+/// kinds, and the import tier alone is [`ladder::imported_member`] over the
+/// fields.
 #[allow(clippy::too_many_arguments)]
 fn resolve_overlay_name_ref(
     graph: &ArchivedZeroCopyGraph,
@@ -2527,22 +2531,24 @@ fn resolve_overlay_name_ref(
             .into_iter()
             .collect()
         },
-        // The name tiers ask the import tier alone for a field only.
-        |name, _| match bind_import(
-            graph,
-            name,
-            file_ord,
-            &file.imports,
+        // The name tiers ask the import tier alone for a field only. The
+        // explicit imports only: the index's `resolve_imported_symbol` also
+        // takes the wildcard pass (divergence, `ladder_import_member_parity`).
+        |name, _| match ladder::imported_member(
+            &OverlayImports {
+                facts,
+                names: fields,
+                types,
+            },
+            facts.scope.dirty()[file_ord].rel_path.as_str(),
             caller.language,
-            fields,
-            types,
-            nodes,
-            dirty_base,
-            facts,
-            &[],
+            name,
+            &file.imports,
+            fields.target,
+            false,
         ) {
-            Some(ImportBinding::Resolved(Some(target))) => vec![target],
-            _ => Vec::new(),
+            ladder::MemberHit::Bound(hit) => vec![(hit.id, CONF_IMPORT_SCOPED)],
+            ladder::MemberHit::Unbound { .. } => Vec::new(),
         },
     )
 }
@@ -2565,7 +2571,7 @@ fn resolve_overlay_name_ref(
 /// member another part declares or inherits
 /// ([`OverlayFacts::partial_type_member`]) → 0.85 or 0.8.
 /// Tier 2 — import-scoped. In an [`import_member_fallback`] language,
-/// [`bind_import`] replays the index's import-member tier, a Python package
+/// [`ladder::import_member`] is the index's import-member tier, a Python package
 /// re-export included. A TS / JS caller takes the index's named-import tier
 /// itself ([`reexport::named_import`]: export eligibility, export aliases,
 /// default imports and the one-hop barrel re-export); a non-relative
@@ -2653,21 +2659,22 @@ fn resolve_callee<'s>(
     // bind after the heritage tier.
     let mut wildcard_open = false;
     if member_policy && binds_imports {
-        match bind_import(
-            graph,
-            callee,
-            file_ord,
-            imports,
+        match ladder::import_member(
+            &OverlayImports {
+                facts,
+                names,
+                types,
+            },
+            importer,
             caller.language,
-            names,
-            types,
-            nodes,
-            dirty_base,
-            facts,
+            callee,
+            imports,
+            names.target,
             scope.heritage,
         ) {
-            Some(ImportBinding::Resolved(hit)) => return hit,
-            Some(ImportBinding::Retry(name)) => {
+            ladder::ImportMember::Bound(hit) => return Some((hit.id, CONF_IMPORT_SCOPED)),
+            ladder::ImportMember::External => return None,
+            ladder::ImportMember::Retry(name) => {
                 return resolve_callee(
                     graph,
                     CallSite::Plain(name),
@@ -2685,33 +2692,23 @@ fn resolve_callee<'s>(
                     scope,
                 );
             }
-            Some(ImportBinding::Continue { wildcard }) => wildcard_open = wildcard,
-            // The index's `extension_fallback` resolves outside a call scope,
-            // with the caller's heritage.
-            Some(ImportBinding::Extension(member)) => {
-                let hit = resolve_callee(
+            ladder::ImportMember::Continue { wildcard } => wildcard_open = wildcard,
+            ladder::ImportMember::Extension(member) => {
+                return extension_fallback(
                     graph,
-                    CallSite::Plain(member),
+                    member,
                     file_ord,
                     imports,
                     caller,
                     base_metas,
-                    names,
-                    types,
-                    qualifiers,
+                    (names, types, qualifiers),
                     nodes,
                     replaced,
                     dirty_base,
                     facts,
-                    Scope {
-                        call: None,
-                        heritage: scope.heritage,
-                        type_lookup: false,
-                    },
+                    scope.heritage,
                 );
-                return hit.filter(|&(idx, _)| is_free(facts, idx));
             }
-            None => {}
         }
     }
     let ecmascript = is_ecmascript(caller.language);
@@ -2857,36 +2854,31 @@ fn resolve_callee<'s>(
         // the import tier typed it, which finds an extension function on the
         // type in another file. A heritage qualifier (`super.x()`) keeps the
         // ladder's verdict.
-        if matches!(verdict, LadderMember::NoEdge)
-            && caller.language == Language::Kotlin
-            && !scope.heritage.iter().any(|base| base == qualifier)
-            && imports.iter().any(|import| {
-                import_binding(import, callee, caller.language)
-                    .and_then(|binding| extension_retry(&binding, caller.language))
-                    .is_some()
-            })
-        {
-            return resolve_callee(
+        let extension = match verdict {
+            LadderMember::NoEdge => ladder::kotlin_extension_retry(
+                caller.language,
+                callee,
+                (qualifier, member),
+                imports,
+                scope.heritage,
+            ),
+            _ => None,
+        };
+        if let Some(member) = extension {
+            return extension_fallback(
                 graph,
-                CallSite::Plain(member),
+                member,
                 file_ord,
                 imports,
                 caller,
                 base_metas,
-                names,
-                types,
-                qualifiers,
+                (names, types, qualifiers),
                 nodes,
                 replaced,
                 dirty_base,
                 facts,
-                Scope {
-                    call: None,
-                    heritage: scope.heritage,
-                    type_lookup: false,
-                },
-            )
-            .filter(|&(idx, _)| is_free(facts, idx));
+                scope.heritage,
+            );
         }
         return ladder_edge(verdict);
     }
@@ -2909,22 +2901,20 @@ fn resolve_callee<'s>(
         return accepts(hit.id).then_some((hit.id, hit.confidence));
     }
 
-    if wildcard_open {
-        if let MemberHit::Bound(target) = import_member_hit(
-            graph,
-            callee,
-            importer,
-            imports,
-            caller.language,
+    if let Some(hit) = ladder::wildcard_member(
+        &OverlayImports {
+            facts,
             names,
             types,
-            nodes,
-            dirty_base,
-            facts,
-            true,
-        ) {
-            return Some((target, CONF_IMPORT_SCOPED));
-        }
+        },
+        wildcard_open,
+        importer,
+        caller.language,
+        callee,
+        imports,
+        names.target,
+    ) {
+        return Some((hit.id, CONF_IMPORT_SCOPED));
     }
 
     // Tier 3 ([`global_tier`]).
@@ -2943,6 +2933,50 @@ fn resolve_callee<'s>(
         (call, rust_method),
         &base_candidates,
     )
+}
+
+/// R17 over the overlay, the index's `Resolver::extension_fallback`
+/// ([`ladder::extension_fallback`]): `member` through [`resolve_callee`]
+/// outside a call scope, with the caller's `heritage`, top-level functions
+/// only.
+#[allow(clippy::too_many_arguments)]
+fn extension_fallback(
+    graph: &ArchivedZeroCopyGraph,
+    member: &str,
+    file_ord: usize,
+    imports: &[RawImport],
+    caller: FileMeta,
+    base_metas: &mut FxHashMap<usize, FileMeta>,
+    (names, types, qualifiers): (&OverlayNames<'_>, &OverlayNames<'_>, &OverlayNames<'_>),
+    nodes: &[ViewNode],
+    replaced: &FxHashMap<u32, u32>,
+    dirty_base: &FxHashSet<u32>,
+    facts: &OverlayFacts<'_>,
+    heritage: &[String],
+) -> Option<(u32, f32)> {
+    ladder::extension_fallback(facts, member, |member| {
+        resolve_callee(
+            graph,
+            CallSite::Plain(member),
+            file_ord,
+            imports,
+            caller,
+            base_metas,
+            names,
+            types,
+            qualifiers,
+            nodes,
+            replaced,
+            dirty_base,
+            facts,
+            Scope {
+                call: None,
+                heritage,
+                type_lookup: false,
+            },
+        )
+    })
+    .next()
 }
 
 /// Whether the merged-space `idx` is a `Method`.
@@ -3007,7 +3041,7 @@ fn global_tier(
 ) -> Option<(u32, f32)> {
     let importer = facts.scope.dirty()[file_ord].rel_path.as_str();
     // Read from the call site, never from the callee: a retry under the
-    // short name (`ImportBinding::Retry`) is no receiverless call.
+    // short name (`ladder::ImportMember::Retry`) is no receiverless call.
     let free_only = call.is_some_and(|call| call.free_only);
     let key = (
         file_ord,
@@ -3724,181 +3758,81 @@ fn base_file_meta(
     })
 }
 
-/// How the import-member policy settles one callee.
-enum ImportBinding<'s> {
-    /// The import tier's target, or no edge: every binding import is external.
-    Resolved(Option<(u32, f32)>),
-    /// Python: resolve this name through the remaining tiers, without
-    /// imports.
-    Retry(&'s str),
-    /// A fully qualified language: the remaining tiers run on the callee
-    /// with its imports, and `wildcard` lets the wildcard imports bind after
-    /// the heritage tier.
-    Continue { wildcard: bool },
-    /// A Kotlin call through a class binding retries its bare member, and
-    /// only a top-level function (an extension on that type) may answer.
-    Extension(&'s str),
+/// The import-member tier's facts over the overlay ([`ladder::ImportMembers`]):
+/// module discovery is the view's [`ImportScope`]; a module file's member
+/// is read from the name table of the lookup's kind family (`names`), and a
+/// member import's type path from the type table (`types`).
+struct OverlayImports<'v, 'a, 'n> {
+    facts: &'v OverlayFacts<'a>,
+    names: &'v OverlayNames<'n>,
+    types: &'v OverlayNames<'n>,
 }
 
-/// One pass of the import-member tier over the explicit or the wildcard
-/// imports (the resolver's `import_member_hit`).
-enum MemberHit {
-    Bound(u32),
-    /// No unique member. `bound` says whether an import of the pass binds
-    /// the callee at all.
-    Unbound {
-        bound: bool,
-    },
+impl<'a> ladder::ImportModules for OverlayImports<'_, 'a, '_> {
+    type Module = &'a str;
+
+    fn import_module(
+        &self,
+        importer: &str,
+        specifier: &str,
+        language: Language,
+    ) -> Module<&'a str> {
+        self.facts.scope.module(importer, specifier, language)
+    }
+
+    fn module_name_indexed(&self, language: Language, name: &str) -> bool {
+        self.facts.scope.has_module_name(language, name)
+    }
 }
 
-/// The index's import-member tier (`Resolver::resolve_symbol_with_import_binding`)
-/// for an [`import_member_fallback`] language. `None` when no import binds
-/// `callee`.
-///
-/// An explicit import binding `callee` whose module holds the member decides
-/// the target; two explicit imports that hold different members leave the
-/// general tiers to decide. When none does, a binding whose module may be
-/// local (relative, single segment, first segment an indexed module name, or
-/// module found) keeps the general tiers, under the member's short name for
-/// Python. Only when every binding import is certainly external is there no
-/// edge: a wrong suppression would drop a genuine caller. A wildcard binds
-/// only when no explicit import binds the name, and below the caller's
-/// heritage: [`resolve_callee`] runs that pass after its heritage tier.
-#[allow(clippy::too_many_arguments)]
-fn bind_import<'s>(
-    graph: &ArchivedZeroCopyGraph,
-    callee: &'s str,
-    file_ord: usize,
-    imports: &'s [RawImport],
-    language: Language,
-    names: &OverlayNames<'_>,
-    types: &OverlayNames<'_>,
-    nodes: &[ViewNode],
-    dirty_base: &FxHashSet<u32>,
-    facts: &OverlayFacts<'_>,
-    heritage: &[String],
-) -> Option<ImportBinding<'s>> {
-    let source_file = facts.scope.dirty()[file_ord].rel_path.as_str();
-    let explicit = import_member_hit(
-        graph,
-        callee,
-        source_file,
-        imports,
-        language,
-        names,
-        types,
-        nodes,
-        dirty_base,
-        facts,
-        false,
-    );
-    if let MemberHit::Bound(target) = explicit {
-        return Some(ImportBinding::Resolved(Some((target, CONF_IMPORT_SCOPED))));
-    }
-    let mut retry = None;
-    let mut extension = None;
-    let mut bound = false;
-    let mut external = true;
-    for import in imports {
-        let Some(binding) = import_binding(import, callee, language) else {
-            continue;
-        };
-        bound = true;
-        retry = retry_name(import, binding.name, callee, language);
-        extension = extension.or(extension_retry(&binding, language));
-        external = external && facts.scope.is_external(source_file, import, language);
-    }
-    if !bound {
-        return None;
-    }
-    // `super.x()` names the caller's base, which no extension function call
-    // does.
-    let heritage_call = split_qualifier(callee)
-        .is_some_and(|(qualifier, _)| heritage.iter().any(|base| base == qualifier));
-    let extension = extension.filter(|_| !heritage_call);
-    if external {
-        return Some(extension.map_or(ImportBinding::Resolved(None), ImportBinding::Extension));
-    }
-    Some(match retry {
-        Some(name) => ImportBinding::Retry(name),
-        None => ImportBinding::Continue {
-            wildcard: matches!(explicit, MemberHit::Unbound { bound: false })
-                && fqn_language(language),
-        },
-    })
-}
-
-/// The resolver's `import_member_hit`: the member the explicit (or the
-/// wildcard) imports binding `callee` hold in their modules. Python keeps the
-/// first hit in source order; in a fully qualified language two different
-/// hits are no hit.
-#[allow(clippy::too_many_arguments)]
-fn import_member_hit(
-    graph: &ArchivedZeroCopyGraph,
-    callee: &str,
-    source_file: &str,
-    imports: &[RawImport],
-    language: Language,
-    names: &OverlayNames<'_>,
-    types: &OverlayNames<'_>,
-    nodes: &[ViewNode],
-    dirty_base: &FxHashSet<u32>,
-    facts: &OverlayFacts<'_>,
-    wildcard: bool,
-) -> MemberHit {
-    let mut found = None;
-    let mut bound = false;
-    for import in imports {
-        let Some(binding) =
-            import_binding(import, callee, language).filter(|b| b.wildcard == wildcard)
-        else {
-            continue;
-        };
-        bound = true;
-        let in_file = |file: &str| {
-            let owner_agrees = match binding.owner {
-                MemberOwner::Type(path) => {
-                    owner_path_agrees_in_file(graph, types, nodes, dirty_base, file, path)
-                }
-                MemberOwner::Any | MemberOwner::TopLevel => true,
-            };
-            if !owner_agrees {
-                return None;
-            }
-            member_in_file(
-                graph,
-                names,
-                nodes,
-                dirty_base,
-                facts,
+impl ladder::ImportMembers for OverlayImports<'_, '_, '_> {
+    fn member_in_file(
+        &self,
+        file: &str,
+        name: &str,
+        target: ResolveTarget,
+        owner: MemberOwner<'_>,
+    ) -> Option<u32> {
+        debug_assert!(
+            target == self.names.target,
+            "a lookup of another kind family"
+        );
+        let facts = self.facts;
+        let owner_agrees = match owner {
+            MemberOwner::Type(path) => owner_path_agrees_in_file(
+                facts.graph,
+                self.types,
+                facts.nodes,
+                facts.dirty_base,
                 file,
-                binding.name,
-                binding.owner,
-            )
+                path,
+            ),
+            MemberOwner::Any | MemberOwner::TopLevel => true,
         };
-        let hit = match facts.scope.module(source_file, &import.source, language) {
-            Module::Unique(file) => in_file(file).or_else(|| {
-                reexport::python_import_reexport(facts, language, file, binding.name, names.target)
-            }),
-            Module::Namespace(files) => {
-                let mut hits = files.iter().filter_map(|&file| in_file(file));
-                hits.next().filter(|_| hits.next().is_none())
-            }
-            Module::Missing | Module::Ambiguous => None,
-        };
-        let Some(target) = hit else {
-            continue;
-        };
-        if !fqn_language(language) {
-            return MemberHit::Bound(target);
+        if !owner_agrees {
+            return None;
         }
-        match found {
-            Some(previous) if previous != target => return MemberHit::Unbound { bound },
-            Some(_) => {}
-            None => found = Some(target),
-        }
+        member_in_file(
+            facts.graph,
+            self.names,
+            facts.nodes,
+            facts.dirty_base,
+            facts,
+            file,
+            name,
+            owner,
+        )
     }
-    found.map_or(MemberHit::Unbound { bound }, MemberHit::Bound)
+
+    fn python_reexport(
+        &self,
+        language: Language,
+        module: &str,
+        name: &str,
+        target: ResolveTarget,
+    ) -> Option<u32> {
+        reexport::python_import_reexport(self.facts, language, module, name, target)
+    }
 }
 
 /// The index's `SymbolTable::owner_path_agrees`: [`owner_path_agrees`] over

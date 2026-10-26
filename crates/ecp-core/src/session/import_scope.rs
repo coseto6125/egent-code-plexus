@@ -10,7 +10,8 @@
 //! dirty files.
 
 use super::view::OverlayFileInput;
-use crate::analyzer::import_binding::{fqn_extension, import_family, may_suppress, module_head};
+use crate::analyzer::import_binding::fqn_extension;
+use crate::analyzer::ladder::ImportModules;
 pub use crate::analyzer::module_discovery::Module;
 use crate::analyzer::module_discovery::{discover_module, for_each_layout_candidate, ModuleIndex};
 use crate::analyzer::types::RawImport;
@@ -277,22 +278,6 @@ impl<'a> ImportScope<'a> {
         })
     }
 
-    /// The resolver's `import_is_external`: a Missing import proves its callee
-    /// external only when [`may_suppress`] allows it and no language of its
-    /// [`import_family`] indexes its head or holds its module.
-    pub(crate) fn is_external(
-        &self,
-        source_file: &str,
-        import: &RawImport,
-        language: Language,
-    ) -> bool {
-        let head = module_head(&import.source);
-        may_suppress(import, language)
-            && import_family(language).all(|family| !self.has_module_name(family, head))
-            && import_family(language)
-                .all(|family| self.module(source_file, &import.source, family) == Module::Missing)
-    }
-
     /// [`discover_module`] over this build's files, memoized as the
     /// resolver's `import_module_file` memoizes it.
     pub fn module(
@@ -332,6 +317,25 @@ impl<'a> ImportScope<'a> {
             .or_default()
             .insert(specifier.into(), found.clone());
         found
+    }
+}
+
+/// The overlay's module discovery for the shared import tiers
+/// ([`crate::analyzer::ladder::import_is_external`]).
+impl<'a> ImportModules for ImportScope<'a> {
+    type Module = &'a str;
+
+    fn import_module(
+        &self,
+        importer: &str,
+        specifier: &str,
+        language: Language,
+    ) -> Module<&'a str> {
+        self.module(importer, specifier, language)
+    }
+
+    fn module_name_indexed(&self, language: Language, name: &str) -> bool {
+        self.has_module_name(language, name)
     }
 }
 

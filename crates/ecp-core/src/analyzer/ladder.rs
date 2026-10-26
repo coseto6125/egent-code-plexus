@@ -15,11 +15,24 @@
 //! the end: a plain field read ([`field_read`], R24), a name reference
 //! ([`name_ref`], R25) and an enum-variant reference ([`bare_variant`],
 //! [`qualified_variant`], R26).
+//!
+//! The import-member tier of Python and the fully qualified languages
+//! (R8: [`import_member`], [`imported_member`]), its wildcard pass after the
+//! heritage tier (R19: [`wildcard_member`]) and the Kotlin extension retry of
+//! the ladder (R17: [`kotlin_extension_retry`], [`extension_fallback`]) read
+//! module discovery and the member a module file holds through
+//! [`ImportModules`] and [`ImportMembers`]: the index's `SymbolTable` has no
+//! module discovery, so these facts sit beside [`ResolveFacts`].
 
+use crate::analyzer::import_binding::{
+    extension_retry, fqn_language, import_binding, import_family, may_suppress, module_head,
+    retry_name, MemberOwner,
+};
+use crate::analyzer::module_discovery::Module;
 use crate::analyzer::name_ref::resolve_name_ref;
 use crate::analyzer::outcome::{Hit, NoEdge, Resolution, Tier};
 use crate::analyzer::reexport::{pick_call, ResolveTarget};
-use crate::analyzer::same_file_pick::{prefer_free, prefer_owned, PickFacts, PickScope};
+use crate::analyzer::same_file_pick::{is_free, prefer_free, prefer_owned, PickFacts, PickScope};
 use crate::analyzer::type_ladder::TypeFacts;
 use crate::analyzer::types::{owner_key, NameRef, RawImport};
 use crate::file_category::{pick_global, FileMeta, GlobalPick, Language};
@@ -413,6 +426,321 @@ pub fn qualified_variant<'r, F: ResolveFacts>(
     facts
         .enum_variant_of(type_id, qualifier, variant)
         .map(|id| (id, confidence))
+}
+
+/// What the import tiers read of module discovery. Each method answers a
+/// question; [`import_is_external`] and [`import_member_hit`] decide.
+pub trait ImportModules {
+    /// A module file path [`Self::import_module`] hands back.
+    type Module: AsRef<str>;
+    /// The module `specifier` names from `importer` among the files of
+    /// `language` ([`crate::analyzer::module_discovery::discover_module`],
+    /// through the side's memo).
+    fn import_module(
+        &self,
+        importer: &str,
+        specifier: &str,
+        language: Language,
+    ) -> Module<Self::Module>;
+    /// Whether a file stem or directory of `language` is named `name`.
+    fn module_name_indexed(&self, language: Language, name: &str) -> bool;
+}
+
+/// What the import-member tier reads of a module file.
+pub trait ImportMembers: ImportModules {
+    /// The first declaration of `name` of `target`'s kinds in `file` whose
+    /// owner satisfies `owner`: for [`MemberOwner::Any`], the match the
+    /// same-file pick takes with no owner (a free function, else one type's
+    /// member); for `TopLevel`, one with no owning type; for `Type`, a member
+    /// of the type its path names, when `file`'s types agree with that path.
+    fn member_in_file(
+        &self,
+        file: &str,
+        name: &str,
+        target: ResolveTarget,
+        owner: MemberOwner<'_>,
+    ) -> Option<u32>;
+    /// The declaration the Python package `module` re-exports as `name`
+    /// ([`crate::analyzer::reexport::python_import_reexport`]); `None` for an
+    /// import of another language.
+    fn python_reexport(
+        &self,
+        language: Language,
+        module: &str,
+        name: &str,
+        target: ResolveTarget,
+    ) -> Option<u32>;
+}
+
+/// Whether `import` proves its callee external: [`may_suppress`] allows it,
+/// and no language of its [`import_family`] indexes a module name equal to
+/// its head or holds its module. Missing discovery alone is not proof: a
+/// wrong suppression drops a genuine caller.
+pub fn import_is_external<F: ImportModules + ?Sized>(
+    facts: &F,
+    importer: &str,
+    import: &RawImport,
+    language: Language,
+) -> bool {
+    let head = module_head(&import.source);
+    may_suppress(import, language)
+        && import_family(language).all(|family| !facts.module_name_indexed(family, head))
+        && import_family(language).all(|family| {
+            matches!(
+                facts.import_module(importer, &import.source, family),
+                Module::Missing
+            )
+        })
+}
+
+/// The member an import binds, the import, and the Python package whose
+/// re-export the member went through (`barrel`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportHit<'i, P> {
+    pub id: u32,
+    pub import: &'i RawImport,
+    pub barrel: Option<P>,
+}
+
+/// One pass of the import-member tier ([`import_member_hit`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum MemberHit<'i, P> {
+    Bound(ImportHit<'i, P>),
+    /// No unique member. `bound` says whether an import of the pass binds
+    /// the name at all.
+    Unbound {
+        bound: bool,
+    },
+}
+
+/// R8, one pass: the member that the explicit imports binding `name` (or,
+/// with `wildcard`, the wildcard imports) hold in their in-repo modules. A
+/// Python package module that lacks the member may re-export it. Python
+/// keeps the first hit in source order, as Python rebinds a name per import.
+/// In a fully qualified language two imports that hold different members
+/// are no hit: the language rejects the call or picks by signature, so the
+/// general tiers decide.
+pub fn import_member_hit<'i, F: ImportMembers + ?Sized>(
+    facts: &F,
+    importer: &str,
+    language: Language,
+    name: &'i str,
+    imports: &'i [RawImport],
+    target: ResolveTarget,
+    wildcard: bool,
+) -> MemberHit<'i, F::Module> {
+    let mut found: Option<(u32, &'i RawImport)> = None;
+    let mut bound = false;
+    for import in imports {
+        let Some(binding) =
+            import_binding(import, name, language).filter(|binding| binding.wildcard == wildcard)
+        else {
+            continue;
+        };
+        bound = true;
+        let in_file = |file: &str| facts.member_in_file(file, binding.name, target, binding.owner);
+        let hit = match facts.import_module(importer, &import.source, language) {
+            Module::Unique(module) => match in_file(module.as_ref()) {
+                Some(id) => Some((id, None)),
+                None => facts
+                    .python_reexport(language, module.as_ref(), binding.name, target)
+                    .map(|id| (id, Some(module))),
+            },
+            Module::Namespace(files) => {
+                let mut hits = files.iter().filter_map(|file| in_file(file.as_ref()));
+                hits.next()
+                    .filter(|_| hits.next().is_none())
+                    .map(|id| (id, None))
+            }
+            Module::Missing | Module::Ambiguous => None,
+        };
+        let Some((id, barrel)) = hit else {
+            continue;
+        };
+        if !fqn_language(language) {
+            return MemberHit::Bound(ImportHit { id, import, barrel });
+        }
+        match found {
+            Some((previous, _)) if previous != id => return MemberHit::Unbound { bound },
+            Some(_) => {}
+            None => found = Some((id, import)),
+        }
+    }
+    found.map_or(MemberHit::Unbound { bound }, |(id, import)| {
+        MemberHit::Bound(ImportHit {
+            id,
+            import,
+            barrel: None,
+        })
+    })
+}
+
+/// How the import-member tier ([`import_member`]) settles one name.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ImportMember<'i, P> {
+    /// An explicit import's module holds the member: Tier 2 binds it.
+    Bound(ImportHit<'i, P>),
+    /// Every import binding the name proves it external: no edge, and no
+    /// later tier runs.
+    External,
+    /// A Kotlin call through an external class binding: the side resolves
+    /// this bare member outside the call scope ([`extension_fallback`]).
+    Extension(&'i str),
+    /// Python: the side resolves this name through its remaining tiers,
+    /// without imports.
+    Retry(&'i str),
+    /// The remaining tiers run on the name with its imports. `wildcard`:
+    /// the wildcard imports bind after the heritage tier
+    /// ([`wildcard_member`]).
+    Continue { wildcard: bool },
+}
+
+/// R8, Tier 2 for a language whose calls bind through an import's member
+/// (`import_member_fallback`); the caller gates on that, on non-empty
+/// `imports` and on a target other than `Field`. An explicit import binding
+/// `name` whose module holds the member decides the target. When none does,
+/// a binding whose module may be local (relative, single segment, first
+/// segment an indexed module name, or module found) keeps the general
+/// tiers, under the callee as written, or the member's short name for a
+/// Python star import ([`retry_name`]). Only when every binding import is
+/// certainly external ([`import_is_external`]) is there no edge, unless a
+/// Kotlin class binding retries its bare member as an extension function
+/// ([`extension_retry`]). `super.x()` (a qualifier among the caller's
+/// `heritage`) names the caller's base, which no extension call does. A
+/// wildcard binds only when no explicit import binds the name, and below
+/// the caller's heritage.
+pub fn import_member<'i, F: ImportMembers + ?Sized>(
+    facts: &F,
+    importer: &str,
+    language: Language,
+    name: &'i str,
+    imports: &'i [RawImport],
+    target: ResolveTarget,
+    heritage: &[String],
+) -> ImportMember<'i, F::Module> {
+    let explicit_bound =
+        match import_member_hit(facts, importer, language, name, imports, target, false) {
+            MemberHit::Bound(hit) => return ImportMember::Bound(hit),
+            MemberHit::Unbound { bound } => bound,
+        };
+    let mut retry = None;
+    let mut extension = None;
+    let mut bound = false;
+    let mut external = true;
+    for import in imports {
+        let Some(binding) = import_binding(import, name, language) else {
+            continue;
+        };
+        bound = true;
+        retry = retry_name(import, binding.name, name, language);
+        extension = extension.or(extension_retry(&binding, language));
+        external = external && import_is_external(facts, importer, import, language);
+    }
+    // No import binds the name: the wildcard pass would find no binding
+    // either.
+    if !bound {
+        return ImportMember::Continue { wildcard: false };
+    }
+    if external {
+        let heritage_call = split_qualifier(name)
+            .is_some_and(|(qualifier, _)| heritage.iter().any(|base| base == qualifier));
+        return match extension.filter(|_| !heritage_call) {
+            Some(member) => ImportMember::Extension(member),
+            None => ImportMember::External,
+        };
+    }
+    match retry {
+        Some(name) => ImportMember::Retry(name),
+        None => ImportMember::Continue {
+            wildcard: !explicit_bound && fqn_language(language),
+        },
+    }
+}
+
+/// R8 on an import-only path (an imported type, a name a lexical scope
+/// hides, a field a name reference reads): the explicit imports, then, with
+/// `wildcards` and when no explicit import binds `name`, the wildcard ones.
+/// No retry, extension or suppression: a miss is no edge.
+pub fn imported_member<'i, F: ImportMembers + ?Sized>(
+    facts: &F,
+    importer: &str,
+    language: Language,
+    name: &'i str,
+    imports: &'i [RawImport],
+    target: ResolveTarget,
+    wildcards: bool,
+) -> MemberHit<'i, F::Module> {
+    match import_member_hit(facts, importer, language, name, imports, target, false) {
+        MemberHit::Unbound { bound: false } if wildcards => {
+            import_member_hit(facts, importer, language, name, imports, target, true)
+        }
+        explicit => explicit,
+    }
+}
+
+/// R19: the wildcard imports' pass, which runs after the heritage tier
+/// (members in scope beat imports) when [`import_member`] left it `open`.
+pub fn wildcard_member<'i, F: ImportMembers + ?Sized>(
+    facts: &F,
+    open: bool,
+    importer: &str,
+    language: Language,
+    name: &'i str,
+    imports: &'i [RawImport],
+    target: ResolveTarget,
+) -> Option<ImportHit<'i, F::Module>> {
+    if !open {
+        return None;
+    }
+    match import_member_hit(facts, importer, language, name, imports, target, true) {
+        MemberHit::Bound(hit) => Some(hit),
+        MemberHit::Unbound { .. } => None,
+    }
+}
+
+/// R17, the ladder's part: the bare member a Kotlin `Type.member` retries
+/// when the receiver-typing ladder bound nothing. A receiver named by a
+/// class import reaches the ladder as `Type.member` only since the import
+/// tier; before it, the call was the bare member, which finds an extension
+/// function declared on the type in another file. A heritage qualifier
+/// (`super.x()`) was always qualified, so it keeps the ladder's verdict.
+pub fn kotlin_extension_retry<'n>(
+    language: Language,
+    name: &str,
+    (qualifier, member): (&str, &'n str),
+    imports: &[RawImport],
+    heritage: &[String],
+) -> Option<&'n str> {
+    (language == Language::Kotlin
+        && !heritage.iter().any(|base| base == qualifier)
+        && imports.iter().any(|import| {
+            import_binding(import, name, language)
+                .and_then(|binding| extension_retry(&binding, language))
+                .is_some()
+        }))
+    .then_some(member)
+}
+
+/// R17: what an extension retry of `member` keeps of `resolve`, the side's
+/// name tiers for the bare member outside a call scope, with the caller's
+/// heritage. Only a top-level function ([`is_free`]) can be an extension on
+/// the type: a typed receiver of a library type (`gson.fromJson()`) or
+/// `super.onResume()` must not land on a same-named member. Extension
+/// receivers are not indexed, so the retry stays a by-name heuristic and
+/// cannot verify the declared receiver type.
+pub fn extension_fallback<'f, F, I>(
+    facts: &'f F,
+    member: &str,
+    resolve: impl FnOnce(&str) -> I,
+) -> impl Iterator<Item = (u32, f32)> + 'f
+where
+    F: PickFacts + ?Sized,
+    I: IntoIterator<Item = (u32, f32)>,
+    I::IntoIter: 'f,
+{
+    resolve(member)
+        .into_iter()
+        .filter(move |&(id, _)| is_free(facts, id))
 }
 
 #[cfg(test)]
@@ -1127,6 +1455,481 @@ mod tests {
             assert_eq!(run(Language::Java, Some("Shade"), ("Self", "Red")), None);
             assert_eq!(asked.borrow().as_slice(), ["Self"]);
             assert_eq!(run(Language::Rust, None, ("Missing", "Red")), None);
+        }
+    }
+
+    /// The import facts both sides answer: specifier -> module, the indexed
+    /// module names, and `(file, name, owner)` members, id = position.
+    #[derive(Default)]
+    struct Imports {
+        modules: Vec<(&'static str, Module<&'static str>)>,
+        module_names: Vec<&'static str>,
+        members: Vec<(&'static str, &'static str, MemberOwner<'static>)>,
+        /// `(package module, name, id)` a Python package re-exports.
+        reexports: Vec<(&'static str, &'static str, u32)>,
+    }
+
+    impl ImportModules for Imports {
+        type Module = &'static str;
+
+        fn import_module(
+            &self,
+            _importer: &str,
+            specifier: &str,
+            _language: Language,
+        ) -> Module<&'static str> {
+            self.modules
+                .iter()
+                .find(|(source, _)| *source == specifier)
+                .map_or(Module::Missing, |(_, module)| module.clone())
+        }
+
+        fn module_name_indexed(&self, _language: Language, name: &str) -> bool {
+            self.module_names.contains(&name)
+        }
+    }
+
+    impl ImportMembers for Imports {
+        fn member_in_file(
+            &self,
+            file: &str,
+            name: &str,
+            _target: ResolveTarget,
+            owner: MemberOwner<'_>,
+        ) -> Option<u32> {
+            self.members
+                .iter()
+                .position(|&(f, n, o)| {
+                    f == file && n == name && (owner == MemberOwner::Any || o == owner)
+                })
+                .map(|id| id as u32)
+        }
+
+        fn python_reexport(
+            &self,
+            language: Language,
+            module: &str,
+            name: &str,
+            _target: ResolveTarget,
+        ) -> Option<u32> {
+            self.reexports
+                .iter()
+                .find(|&&(m, n, _)| language == Language::Python && m == module && n == name)
+                .map(|&(_, _, id)| id)
+        }
+    }
+
+    fn import(source: &str, imported_name: &str, alias: Option<&str>) -> RawImport {
+        RawImport {
+            source: source.to_owned(),
+            imported_name: imported_name.to_owned(),
+            alias: alias.map(str::to_owned),
+            binding_kind: None,
+        }
+    }
+
+    fn hit(id: u32, import: &RawImport) -> ImportHit<'_, &'static str> {
+        ImportHit {
+            id,
+            import,
+            barrel: None,
+        }
+    }
+
+    const IMPORTER: &str = "app/main";
+
+    /// Python binds the explicit import's member; a second import of the
+    /// name never overrides the first hit. A member the module lacks, but
+    /// the package re-exports, binds with the package as its barrel.
+    #[test]
+    fn test_import_member_python_explicit_member_binds_first_hit() {
+        let facts = Imports {
+            modules: vec![
+                ("pkg.util", Module::Unique("pkg/util.py")),
+                ("lib.extra", Module::Unique("lib/extra.py")),
+                ("pkg", Module::Unique("pkg/__init__.py")),
+            ],
+            members: vec![
+                ("pkg/util.py", "helper", MemberOwner::Any),
+                ("lib/extra.py", "helper", MemberOwner::Any),
+            ],
+            reexports: vec![("pkg/__init__.py", "render", 7)],
+            ..Imports::default()
+        };
+        let imports = [
+            import("pkg.util", "helper", None),
+            import("lib.extra", "helper", None),
+            import("pkg", "render", None),
+        ];
+        let run = |name| {
+            import_member(
+                &facts,
+                IMPORTER,
+                Language::Python,
+                name,
+                &imports,
+                CALLABLE,
+                &[],
+            )
+        };
+        assert_eq!(run("helper"), ImportMember::Bound(hit(0, &imports[0])));
+        assert_eq!(
+            run("render"),
+            ImportMember::Bound(ImportHit {
+                id: 7,
+                import: &imports[2],
+                barrel: Some("pkg/__init__.py"),
+            })
+        );
+    }
+
+    /// An import of a name its module does not declare: a module that may be
+    /// local keeps the general tiers (Python under the callee, a fully
+    /// qualified language with no retry name); a module certainly external
+    /// binds nothing.
+    #[test]
+    fn test_import_member_unexported_name_local_retries_external_stops() {
+        let facts = Imports {
+            modules: vec![
+                ("pkg.util", Module::Unique("pkg/util.py")),
+                ("lib.Util.absent", Module::Unique("lib/Util.java")),
+            ],
+            module_names: vec!["pkg", "lib"],
+            ..Imports::default()
+        };
+        let python = [
+            import("pkg.util", "missing", None),
+            import("requests", "get", None),
+        ];
+        assert_eq!(
+            import_member(
+                &facts,
+                IMPORTER,
+                Language::Python,
+                "missing",
+                &python,
+                CALLABLE,
+                &[]
+            ),
+            ImportMember::Retry("missing")
+        );
+        assert_eq!(
+            import_member(
+                &facts,
+                IMPORTER,
+                Language::Python,
+                "get",
+                &python,
+                CALLABLE,
+                &[]
+            ),
+            ImportMember::External
+        );
+        let java = [
+            import("lib.Util.absent", "absent", Some("absent")),
+            import("com.ext.Net.fetch", "fetch", Some("fetch")),
+        ];
+        assert_eq!(
+            import_member(
+                &facts,
+                IMPORTER,
+                Language::Java,
+                "absent",
+                &java,
+                CALLABLE,
+                &[]
+            ),
+            ImportMember::Continue { wildcard: false }
+        );
+        assert_eq!(
+            import_member(
+                &facts,
+                IMPORTER,
+                Language::Java,
+                "fetch",
+                &java,
+                CALLABLE,
+                &[]
+            ),
+            ImportMember::External
+        );
+    }
+
+    /// Two explicit imports of one name holding different members are no
+    /// hit in a fully qualified language: the general tiers decide.
+    #[test]
+    fn test_import_member_java_two_imports_one_name_continues() {
+        let facts = Imports {
+            modules: vec![
+                ("lib.Util.run", Module::Unique("lib/Util.java")),
+                ("lib.Other.run", Module::Unique("lib/Other.java")),
+            ],
+            members: vec![
+                ("lib/Util.java", "run", MemberOwner::Type("lib.Util")),
+                ("lib/Other.java", "run", MemberOwner::Type("lib.Other")),
+            ],
+            ..Imports::default()
+        };
+        let imports = [
+            import("lib.Util.run", "run", Some("run")),
+            import("lib.Other.run", "run", Some("run")),
+        ];
+        assert_eq!(
+            import_member(
+                &facts,
+                IMPORTER,
+                Language::Java,
+                "run",
+                &imports,
+                CALLABLE,
+                &[]
+            ),
+            ImportMember::Continue { wildcard: false }
+        );
+        // One import alone binds its member.
+        assert_eq!(
+            import_member(
+                &facts,
+                IMPORTER,
+                Language::Java,
+                "run",
+                &imports[..1],
+                CALLABLE,
+                &[]
+            ),
+            ImportMember::Bound(hit(0, &imports[0]))
+        );
+    }
+
+    /// A Kotlin call through an external class binding retries its bare
+    /// member, unless the qualifier is the caller's base (`super.x()`).
+    #[test]
+    fn test_import_member_kotlin_external_class_binding_retries_extension() {
+        let facts = Imports::default();
+        let imports = [import(
+            "kotlinx.serialization.protobuf.ProtoBuf",
+            "ProtoBuf",
+            None,
+        )];
+        let name = "ProtoBuf.asConverterFactory";
+        let base = ["ProtoBuf".to_owned()];
+        assert_eq!(
+            import_member(
+                &facts,
+                IMPORTER,
+                Language::Kotlin,
+                name,
+                &imports,
+                CALLABLE,
+                &[]
+            ),
+            ImportMember::Extension("asConverterFactory")
+        );
+        assert_eq!(
+            import_member(
+                &facts,
+                IMPORTER,
+                Language::Kotlin,
+                name,
+                &imports,
+                CALLABLE,
+                &base
+            ),
+            ImportMember::External
+        );
+        // Java has no extension functions.
+        assert_eq!(
+            import_member(
+                &facts,
+                IMPORTER,
+                Language::Java,
+                name,
+                &imports,
+                CALLABLE,
+                &[]
+            ),
+            ImportMember::External
+        );
+    }
+
+    /// A star import never binds in the explicit pass: it opens the wildcard
+    /// pass after heritage, which binds a top-level member of the package
+    /// only. No import of the name, or none at all, leaves it closed.
+    #[test]
+    fn test_wildcard_member_star_import_binds_after_explicit_miss() {
+        let facts = Imports {
+            modules: vec![("util", Module::Namespace(vec!["util/Tools.kt"].into()))],
+            members: vec![("util/Tools.kt", "tidy", MemberOwner::TopLevel)],
+            ..Imports::default()
+        };
+        let imports = [import("base.Base", "Base", None), import("util", "*", None)];
+        let open = match import_member(
+            &facts,
+            IMPORTER,
+            Language::Kotlin,
+            "tidy",
+            &imports,
+            CALLABLE,
+            &[],
+        ) {
+            ImportMember::Continue { wildcard } => wildcard,
+            other => panic!("tier settled the star import: {other:?}"),
+        };
+        assert!(open);
+        let wildcard = |open, name| {
+            wildcard_member(
+                &facts,
+                open,
+                IMPORTER,
+                Language::Kotlin,
+                name,
+                &imports,
+                CALLABLE,
+            )
+        };
+        assert_eq!(wildcard(true, "tidy"), Some(hit(0, &imports[1])));
+        assert_eq!(wildcard(false, "tidy"), None);
+        // A qualified name is no wildcard binding.
+        assert_eq!(wildcard(true, "Tools.tidy"), None);
+        assert_eq!(
+            import_member(
+                &facts,
+                IMPORTER,
+                Language::Kotlin,
+                "tidy",
+                &[],
+                CALLABLE,
+                &[]
+            ),
+            ImportMember::Continue { wildcard: false }
+        );
+        // An empty and a whitespace-only name: no import binds them.
+        for name in ["", "  "] {
+            assert_eq!(
+                import_member(
+                    &facts,
+                    IMPORTER,
+                    Language::Kotlin,
+                    name,
+                    &imports[..1],
+                    CALLABLE,
+                    &[]
+                ),
+                ImportMember::Continue { wildcard: false },
+                "{name:?}"
+            );
+        }
+        // The wildcard's module was removed: no file declares the package.
+        let removed = Imports::default();
+        assert_eq!(
+            wildcard_member(
+                &removed,
+                true,
+                IMPORTER,
+                Language::Kotlin,
+                "tidy",
+                &imports,
+                CALLABLE
+            ),
+            None
+        );
+    }
+
+    /// The import-only path takes the wildcard pass only with `wildcards`:
+    /// the index's `resolve_imported_symbol` does, the overlay's name
+    /// reference import tier does not.
+    #[test]
+    fn test_imported_member_wildcards_flag_gates_wildcard_pass() {
+        let facts = Imports {
+            modules: vec![("app.Consts", Module::Unique("app/Consts.java"))],
+            members: vec![("app/Consts.java", "TABLE", MemberOwner::Type("app.Consts"))],
+            ..Imports::default()
+        };
+        let imports = [import("app.Consts", "*", Some("static:*"))];
+        let run = |wildcards| {
+            imported_member(
+                &facts,
+                IMPORTER,
+                Language::Java,
+                "TABLE",
+                &imports,
+                ResolveTarget::Field,
+                wildcards,
+            )
+        };
+        assert_eq!(run(true), MemberHit::Bound(hit(0, &imports[0])));
+        assert_eq!(run(false), MemberHit::Unbound { bound: false });
+    }
+
+    /// A relative import, an indexed head and a found module each may be
+    /// local; only an absolute, unindexed, undiscovered one is external.
+    #[test]
+    fn test_import_is_external_needs_every_proof() {
+        let facts = Imports {
+            modules: vec![("lib.Found", Module::Unique("lib/Found.java"))],
+            module_names: vec!["pkg"],
+            ..Imports::default()
+        };
+        let external = |source: &str, name: &str| {
+            import_is_external(
+                &facts,
+                IMPORTER,
+                &import(source, name, None),
+                Language::Java,
+            )
+        };
+        assert!(external("com.ext.Net", "Net"));
+        assert!(!external("pkg.Missing", "Missing"));
+        assert!(!external("lib.Found", "Found"));
+        // A single segment and a wildcard never suppress.
+        assert!(!external("Helper", "Helper"));
+        assert!(!external("com.ext", "*"));
+        let python = |source: &str| {
+            import_is_external(
+                &facts,
+                IMPORTER,
+                &import(source, "x", None),
+                Language::Python,
+            )
+        };
+        assert!(python("requests"));
+        assert!(!python(".sibling"));
+    }
+
+    /// R17: only a Kotlin `Type.member` through a class binding retries, and
+    /// never on the caller's base; the retry keeps top-level functions only.
+    #[test]
+    fn test_kotlin_extension_retry_class_binding_keeps_top_level_only() {
+        let imports = [import("lib.Box", "Box", None)];
+        let base = ["Box".to_owned()];
+        let retry = |language, heritage: &[String]| {
+            kotlin_extension_retry(language, "Box.grow", ("Box", "grow"), &imports, heritage)
+        };
+        assert_eq!(retry(Language::Kotlin, &[]), Some("grow"));
+        assert_eq!(retry(Language::Kotlin, &base), None);
+        assert_eq!(retry(Language::Java, &[]), None);
+        assert_eq!(
+            kotlin_extension_retry(Language::Kotlin, "Box.grow", ("Box", "grow"), &[], &[]),
+            None
+        );
+        let decls: [Decl; 2] = [
+            ("lib/Box.kt", "grow", M, Some("Box")),
+            ("lib/BoxExt.kt", "grow", F, None),
+        ];
+        for facts in both(&decls) {
+            let asked = Cell::new(0);
+            let kept: Vec<_> = extension_fallback(&facts, "grow", |member| {
+                assert_eq!(member, "grow");
+                asked.set(asked.get() + 1);
+                vec![(0, 0.85), (1, 0.7)]
+            })
+            .collect();
+            assert_eq!(kept, [(1u32, 0.7f32)]);
+            assert_eq!(asked.get(), 1);
+            assert_eq!(
+                extension_fallback(&facts, "grow", |_| None::<(u32, f32)>).next(),
+                None
+            );
         }
     }
 }

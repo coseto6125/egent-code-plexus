@@ -40,8 +40,8 @@
 use ecp_core::analyzer::csharp_access::{self, CallAccess};
 use ecp_core::analyzer::csharp_extension::{self, ReceiverSite};
 use ecp_core::analyzer::import_binding::{
-    extension_retry, fqn_imported_name, fqn_language, fqn_type_path, import_binding, import_family,
-    import_member_fallback, may_suppress, module_head, retry_name,
+    fqn_imported_name, fqn_language, fqn_type_path, import_binding, import_member_fallback,
+    MemberOwner,
 };
 use ecp_core::analyzer::ladder::{self, split_qualifier, CallPick, FieldRead};
 use ecp_core::analyzer::module_discovery::{self, Module, ModuleIndex};
@@ -72,17 +72,6 @@ use crate::rust::module_tree::RustWorkspaceModTree;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 pub type NodeId = u32;
-
-/// One pass of the import-member tier over the explicit or the wildcard
-/// imports.
-enum MemberHit<'i> {
-    /// The member, the import that bound it, and the Python package whose
-    /// re-export it went through ([`reexport::python_reexport`]).
-    Bound(NodeId, &'i RawImport, Option<Arc<str>>),
-    /// No unique member. `bound` says whether an import of the pass binds
-    /// the callee at all.
-    Unbound { bound: bool },
-}
 
 type ModuleCache = FxHashMap<
     std::mem::Discriminant<Language>,
@@ -318,6 +307,50 @@ impl<'a> ModuleIndex<'a> for IndexFacts<'_, 'a> {
     ) {
         self.0
             .for_each_candidate(Path::new(importer), specifier, visit);
+    }
+}
+
+/// The index's module discovery for the shared import tiers
+/// ([`ladder::import_member`]), through [`Resolver::import_module_file`]'s memo.
+impl ladder::ImportModules for IndexFacts<'_, '_> {
+    type Module = Arc<str>;
+
+    fn import_module(
+        &self,
+        importer: &str,
+        specifier: &str,
+        language: Language,
+    ) -> Module<Arc<str>> {
+        self.0
+            .import_module_file(Path::new(importer), specifier, language)
+    }
+
+    fn module_name_indexed(&self, language: Language, name: &str) -> bool {
+        self.0.symbol_table.has_module_name(language, name)
+    }
+}
+
+impl ladder::ImportMembers for IndexFacts<'_, '_> {
+    fn member_in_file(
+        &self,
+        file: &str,
+        name: &str,
+        target: ResolveTarget,
+        owner: MemberOwner<'_>,
+    ) -> Option<u32> {
+        self.0
+            .symbol_table
+            .lookup_member_in_file(file, name, target, owner)
+    }
+
+    fn python_reexport(
+        &self,
+        language: Language,
+        module: &str,
+        name: &str,
+        target: ResolveTarget,
+    ) -> Option<u32> {
+        reexport::python_import_reexport(self, language, module, name, target)
     }
 }
 
@@ -1281,33 +1314,23 @@ impl<'a> Resolver<'a> {
             *barrel = via;
             return targets;
         }
-        let hit = match self.import_member_hit(
-            source_file,
+        match ladder::imported_member(
+            &IndexFacts(self),
+            &normalize_source_path(source_file),
             language,
             symbol_name,
             raw_imports,
             target,
-            false,
+            true,
         ) {
-            MemberHit::Unbound { bound: false } => self.import_member_hit(
-                source_file,
-                language,
-                symbol_name,
-                raw_imports,
-                target,
-                true,
-            ),
-            explicit => explicit,
-        };
-        match hit {
-            MemberHit::Bound(node_id, import, via) => {
-                *barrel = via;
-                self.import_scoped(source_file, symbol_name, import, node_id)
+            ladder::MemberHit::Bound(hit) => {
+                *barrel = hit.barrel;
+                self.import_scoped(source_file, symbol_name, hit.import, hit.id)
                     .edge()
                     .into_iter()
                     .collect()
             }
-            MemberHit::Unbound { .. } => Vec::new(),
+            ladder::MemberHit::Unbound { .. } => Vec::new(),
         }
     }
 
@@ -1353,73 +1376,6 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    /// One pass of the import-member tier: the member the explicit (or, with
-    /// `wildcard`, the wildcard) imports binding `symbol_name` hold in their
-    /// in-repo modules. Python keeps the first hit in source order, as Python
-    /// rebinds a name per import. In a fully qualified language two imports
-    /// that hold different members are no hit: the language rejects the
-    /// call or picks by signature, so the general tiers decide.
-    fn import_member_hit<'i>(
-        &self,
-        source_file: &Path,
-        language: Language,
-        symbol_name: &str,
-        raw_imports: &'i [RawImport],
-        target: ResolveTarget,
-        wildcard: bool,
-    ) -> MemberHit<'i> {
-        let mut found: Option<(NodeId, &'i RawImport)> = None;
-        let mut bound = false;
-        for import in raw_imports {
-            let Some(binding) = import_binding(import, symbol_name, language)
-                .filter(|binding| binding.wildcard == wildcard)
-            else {
-                continue;
-            };
-            bound = true;
-            let in_file = |file: &str| {
-                self.symbol_table
-                    .lookup_member_in_file(file, binding.name, target, binding.owner)
-            };
-            let hit = match self.import_module_file(source_file, &import.source, language) {
-                Module::Unique(module) => match in_file(&module) {
-                    Some(node_id) => Some((node_id, None)),
-                    None => reexport::python_import_reexport(
-                        &IndexFacts(self),
-                        language,
-                        &module,
-                        binding.name,
-                        target,
-                    )
-                    .map(|node_id| (node_id, Some(module))),
-                },
-                Module::Namespace(files) => {
-                    let mut hits = files.iter().filter_map(|file| in_file(file));
-                    hits.next()
-                        .filter(|_| hits.next().is_none())
-                        .map(|node_id| (node_id, None))
-                }
-                Module::Missing | Module::Ambiguous => None,
-            };
-            let Some((node_id, barrel)) = hit else {
-                continue;
-            };
-            if !fqn_language(language) {
-                return MemberHit::Bound(node_id, import, barrel);
-            }
-            match found {
-                Some((previous, _)) if previous != node_id => {
-                    return MemberHit::Unbound { bound };
-                }
-                Some(_) => {}
-                None => found = Some((node_id, import)),
-            }
-        }
-        found.map_or(MemberHit::Unbound { bound }, |(node_id, import)| {
-            MemberHit::Bound(node_id, import, None)
-        })
-    }
-
     /// `from pkg.sub import mod; mod.compute()` through
     /// [`reexport::python_submodule_member`]. `None` on any miss: the call
     /// then resolves as the bare member, as before.
@@ -1446,28 +1402,6 @@ impl<'a> Resolver<'a> {
         Some((node_id, &raw_imports[position]))
     }
 
-    /// Whether `import` proves its callee external: [`may_suppress`] allows
-    /// it, and no language of its [`import_family`] indexes a module name
-    /// equal to its head or holds its module. Missing discovery alone is not
-    /// proof: a wrong suppression drops a genuine caller.
-    fn import_is_external(
-        &self,
-        source_file: &Path,
-        import: &RawImport,
-        language: Language,
-    ) -> bool {
-        let head = module_head(&import.source);
-        may_suppress(import, language)
-            && import_family(language)
-                .all(|family| !self.symbol_table.has_module_name(family, head))
-            && import_family(language).all(|family| {
-                matches!(
-                    self.import_module_file(source_file, &import.source, family),
-                    Module::Missing
-                )
-            })
-    }
-
     /// Record and return an ImportScoped edge to `node_id` through `import`.
     fn import_scoped(
         &self,
@@ -1490,11 +1424,9 @@ impl<'a> Resolver<'a> {
     }
 
     /// The bare-member retry of a Kotlin call through a class binding
-    /// ([`extension_retry`]). Only a top-level function can be an extension
-    /// on that type: a typed receiver of a library type (`gson.fromJson()`)
-    /// or `super.onResume()` must not land on a same-named member.
-    /// Extension receivers are not indexed, so the top-level retry remains
-    /// a by-name heuristic and cannot verify the declared receiver type.
+    /// ([`ladder::extension_fallback`]): `member` through the name tiers
+    /// outside a call scope, with the caller's heritage, top-level functions
+    /// only.
     pub(crate) fn extension_fallback(
         &self,
         source_file: &Path,
@@ -1503,15 +1435,16 @@ impl<'a> Resolver<'a> {
         target: ResolveTarget,
         caller_heritage: &[String],
     ) -> Vec<(NodeId, f32)> {
-        let mut hits = self.resolve_symbol_with_heritage(
-            source_file,
-            member,
-            raw_imports,
-            target,
-            caller_heritage,
-        );
-        hits.retain(|&(id, _)| self.symbol_table.is_top_level(id));
-        hits
+        ladder::extension_fallback(self.symbol_table, member, |member| {
+            self.resolve_symbol_with_heritage(
+                source_file,
+                member,
+                raw_imports,
+                target,
+                caller_heritage,
+            )
+        })
+        .collect()
     }
 
     /// The C# extension retry ([`csharp_extension::resolve`]) of `member` on
@@ -1765,43 +1698,24 @@ impl<'a> Resolver<'a> {
         // only after the caller's heritage: members in scope beat imports.
         let mut wildcard_open = false;
         if member_fallback {
-            match self.import_member_hit(
-                source_file,
+            match ladder::import_member(
+                &IndexFacts(self),
+                &source_file_str,
                 language,
                 symbol_name,
                 raw_imports,
                 target,
-                false,
+                caller_heritage,
             ) {
-                MemberHit::Bound(node_id, import, via) => {
-                    *barrel = via;
+                ladder::ImportMember::Bound(hit) => {
+                    *barrel = hit.barrel;
                     return self
-                        .import_scoped(source_file, symbol_name, import, node_id)
+                        .import_scoped(source_file, symbol_name, hit.import, hit.id)
                         .edge()
                         .into_iter()
                         .collect();
                 }
-                MemberHit::Unbound { bound } => wildcard_open = !bound && fqn_language(language),
-            }
-            let mut retry = None;
-            let mut extension = None;
-            let mut bound = false;
-            let mut external = true;
-            for import in raw_imports {
-                let Some(binding) = import_binding(import, symbol_name, language) else {
-                    continue;
-                };
-                bound = true;
-                retry = retry_name(import, binding.name, symbol_name, language);
-                extension = extension.or(extension_retry(&binding, language));
-                external = external && self.import_is_external(source_file, import, language);
-            }
-            if bound {
-                // `super.x()` names the caller's base, which no extension
-                // function call does.
-                let heritage_call = split_qualifier(symbol_name)
-                    .is_some_and(|(qualifier, _)| caller_heritage.iter().any(|b| b == qualifier));
-                if let (true, Some(member), false) = (external, extension, heritage_call) {
+                ladder::ImportMember::Extension(member) => {
                     return self.extension_fallback(
                         source_file,
                         member,
@@ -1810,7 +1724,7 @@ impl<'a> Resolver<'a> {
                         caller_heritage,
                     );
                 }
-                if external {
+                ladder::ImportMember::External => {
                     self.record(
                         &source_file_str,
                         symbol_name,
@@ -1825,7 +1739,7 @@ impl<'a> Resolver<'a> {
                 // An import that may be local keeps the previous resolution
                 // path: Python under the member's short name, a fully
                 // qualified language under the callee as written.
-                if let Some(retry) = retry {
+                ladder::ImportMember::Retry(retry) => {
                     return self.resolve_symbol_with_import_binding(
                         source_file,
                         retry,
@@ -1840,6 +1754,7 @@ impl<'a> Resolver<'a> {
                         &mut None,
                     );
                 }
+                ladder::ImportMember::Continue { wildcard } => wildcard_open = wildcard,
             }
         } else if has_imports {
             let (imported, via) =
@@ -2006,20 +1921,17 @@ impl<'a> Resolver<'a> {
                 TypeMember::Ambiguous => DecisionTier::AmbiguousGlobal,
                 TypeMember::NoEdge => DecisionTier::Unresolved,
             };
-            // A Kotlin receiver named by a class import reaches here as
-            // `Type.member` only since the import tier; before it the call was
-            // the bare member, which finds an extension function declared on
-            // the type in another file. A heritage qualifier (`super.x()`)
-            // was always qualified, so it keeps this verdict.
-            if matches!(tier, DecisionTier::Unresolved)
-                && language == Language::Kotlin
-                && !caller_heritage.iter().any(|base| base == qualifier)
-                && raw_imports.iter().any(|import| {
-                    import_binding(import, symbol_name, language)
-                        .and_then(|binding| extension_retry(&binding, language))
-                        .is_some()
-                })
-            {
+            let extension = match tier {
+                DecisionTier::Unresolved => ladder::kotlin_extension_retry(
+                    language,
+                    symbol_name,
+                    (qualifier, member),
+                    raw_imports,
+                    caller_heritage,
+                ),
+                _ => None,
+            };
+            if let Some(member) = extension {
                 return self.extension_fallback(
                     source_file,
                     member,
@@ -2081,22 +1993,21 @@ impl<'a> Resolver<'a> {
             return results;
         }
 
-        if wildcard_open {
-            if let MemberHit::Bound(node_id, import, via) = self.import_member_hit(
-                source_file,
-                language,
-                symbol_name,
-                raw_imports,
-                target,
-                true,
-            ) {
-                *barrel = via;
-                return self
-                    .import_scoped(source_file, symbol_name, import, node_id)
-                    .edge()
-                    .into_iter()
-                    .collect();
-            }
+        if let Some(hit) = ladder::wildcard_member(
+            &IndexFacts(self),
+            wildcard_open,
+            &source_file_str,
+            language,
+            symbol_name,
+            raw_imports,
+            target,
+        ) {
+            *barrel = hit.barrel;
+            return self
+                .import_scoped(source_file, symbol_name, hit.import, hit.id)
+                .edge()
+                .into_iter()
+                .collect();
         }
 
         // Tier 3 ([`Self::global_tier`]).
@@ -2972,7 +2883,12 @@ impl<'a> Resolver<'a> {
                     // external one stops its global lookup.
                     Module::Missing
                         if language != Language::Kotlin
-                            || self.import_is_external(source_file, import, language) =>
+                            || ladder::import_is_external(
+                                &IndexFacts(self),
+                                &normalize_source_path(source_file),
+                                import,
+                                language,
+                            ) =>
                     {
                         return TypeCandidates::External;
                     }
