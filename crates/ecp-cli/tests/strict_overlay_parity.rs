@@ -1364,3 +1364,185 @@ fn test_check_closure_py_init_reexport_dropped_matches_baseline() {
         edits: &[Edit::Write("pkg/__init__.py", "VALUE = 1\n")],
     });
 }
+
+/// A dirty TS barrel re-points `export { X } from './a'` to `'./b'`; both
+/// files declare `X`. The clean importer's `Calls` edge moves from `a.ts` to
+/// `b.ts` in the full index: the row's names are unchanged, only its source.
+#[test]
+fn test_check_closure_ts_barrel_reexport_repointed_matches_baseline() {
+    check(&Scenario {
+        name: "closure_ts_barrel_reexport_repointed",
+        owner: LANE_F_CLEAN_CALLERS,
+        files: &[
+            (
+                "lib/a.ts",
+                "export function X(): number {\n  return 1;\n}\n",
+            ),
+            (
+                "lib/b.ts",
+                "export function X(): number {\n  return 2;\n}\n",
+            ),
+            ("lib/index.ts", "export { X } from './a';\n"),
+            (
+                "c.ts",
+                "import { X } from './lib';\n\nexport function run(): number {\n  return X();\n}\n",
+            ),
+        ],
+        edits: &[Edit::Write("lib/index.ts", "export { X } from './b';\n")],
+    });
+}
+
+/// A dirty TS barrel drops `export * from './a'`. The clean importer's
+/// `Calls` edge `run -> X` is gone in the full index: the star row carries
+/// no name, so the closure reads the names `a.ts` declares.
+#[test]
+fn test_check_closure_ts_star_reexport_dropped_matches_baseline() {
+    check(&Scenario {
+        name: "closure_ts_star_reexport_dropped",
+        owner: LANE_F_CLEAN_CALLERS,
+        files: &[
+            (
+                "lib/a.ts",
+                "export function X(): number {\n  return 1;\n}\n",
+            ),
+            ("lib/index.ts", "export * from './a';\n"),
+            (
+                "c.ts",
+                "import { X } from './lib';\n\nexport function run(): number {\n  return X();\n}\n",
+            ),
+        ],
+        edits: &[Edit::Write("lib/index.ts", "export const unrelated = 1;\n")],
+    });
+}
+
+/// A dirty Python `__init__.py` re-points `from .a import X` to `.b`; both
+/// modules define `X`. The clean caller's `Calls` edge moves to `pkg/b.py`.
+#[test]
+fn test_check_closure_py_init_reexport_repointed_matches_baseline() {
+    check(&Scenario {
+        name: "closure_py_init_reexport_repointed",
+        owner: LANE_F_CLEAN_CALLERS,
+        files: &[
+            ("pkg/a.py", "def X():\n    return 1\n"),
+            ("pkg/b.py", "def X():\n    return 2\n"),
+            ("pkg/__init__.py", "from .a import X\n"),
+            (
+                "main.py",
+                "from pkg import X\n\n\ndef run():\n    return X()\n",
+            ),
+        ],
+        edits: &[Edit::Write("pkg/__init__.py", "from .b import X\n")],
+    });
+}
+
+/// A dirty plain Python module (not an `__init__.py`) drops the
+/// `from .core import compute` its clean importer binds through. The
+/// resolver follows a re-export through any Python module.
+#[test]
+fn test_check_closure_py_module_reexport_dropped_matches_baseline() {
+    check(&Scenario {
+        name: "closure_py_module_reexport_dropped",
+        owner: LANE_F_CLEAN_CALLERS,
+        files: &[
+            ("pkg/__init__.py", ""),
+            ("pkg/core.py", "def compute():\n    return 1\n"),
+            ("pkg/hub.py", "from .core import compute\n"),
+            (
+                "app.py",
+                "from pkg.hub import compute\n\n\ndef run():\n    return compute()\n",
+            ),
+        ],
+        edits: &[Edit::Write("pkg/hub.py", "VALUE = 1\n")],
+    });
+}
+
+/// Stands for: a plain `import os` added to a package `__init__.py`
+/// re-exports nothing (the reader serves the edited file and each closure
+/// dependent) (the parser keeps it as a `*` row with an alias), so
+/// no clean file that also imports `os` enters the closure.
+#[test]
+fn test_invalidation_closure_py_init_plain_import_added_names_no_importer() {
+    let observed = strict_parity::run(&Scenario {
+        name: "closure_py_init_plain_import_added",
+        owner: LANE_F_CLEAN_CALLERS,
+        files: &[
+            ("pkg/__init__.py", "VALUE = 1\n"),
+            ("a.py", "import os\n\n\ndef f():\n    return os.getcwd()\n"),
+            ("b.py", "import os\n\n\ndef g():\n    return os.sep\n"),
+        ],
+        edits: &[Edit::Write("pkg/__init__.py", "import os\n\nVALUE = 1\n")],
+    });
+    let served: BTreeSet<&str> = observed
+        .inputs
+        .iter()
+        .map(|input| input.rel_path.as_str())
+        .collect();
+    assert_eq!(served, BTreeSet::from(["pkg/__init__.py"]));
+    assert!(observed.stale.is_empty(), "{:?}", observed.stale);
+}
+
+/// Stands for: a re-pointed re-export in a plain Python module names the
+/// clean file that imports through that module, and not a clean file that
+/// imports the same name from another module.
+#[test]
+fn test_invalidation_closure_py_module_reexport_repointed_names_importer_of_that_module_only() {
+    let observed = strict_parity::run(&Scenario {
+        name: "closure_py_module_reexport_repointed",
+        owner: LANE_F_CLEAN_CALLERS,
+        files: &[
+            ("pkg/__init__.py", ""),
+            ("pkg/core.py", "def compute():\n    return 1\n"),
+            ("pkg/other.py", "def compute():\n    return 2\n"),
+            ("pkg/hub.py", "from .core import compute\n"),
+            (
+                "app.py",
+                "from pkg.hub import compute\n\n\ndef run():\n    return compute()\n",
+            ),
+            (
+                "side.py",
+                "from pkg.core import compute\n\n\ndef go():\n    return compute()\n",
+            ),
+        ],
+        edits: &[Edit::Write("pkg/hub.py", "from .other import compute\n")],
+    });
+    let served: BTreeSet<&str> = observed
+        .inputs
+        .iter()
+        .map(|input| input.rel_path.as_str())
+        .collect();
+    assert_eq!(
+        served,
+        BTreeSet::from(["app.py", "pkg/hub.py"]),
+        "{:?}",
+        observed.stale
+    );
+}
+
+/// Stands for: a dropped Python star re-export has no target the base
+/// recorded, so the closure says it is incomplete instead of guessing.
+#[test]
+fn test_invalidation_closure_py_star_reexport_dropped_marks_not_computed() {
+    let observed = strict_parity::run(&Scenario {
+        name: "closure_py_star_reexport_dropped",
+        owner: LANE_F_CLEAN_CALLERS,
+        files: &[
+            ("pkg/a.py", "def helper():\n    return 1\n"),
+            ("pkg/__init__.py", "from .a import *\n"),
+            (
+                "main.py",
+                "from pkg import helper\n\n\ndef run():\n    return helper()\n",
+            ),
+        ],
+        edits: &[Edit::Write("pkg/__init__.py", "VALUE = 1\n")],
+    });
+    let served: BTreeSet<&str> = observed
+        .inputs
+        .iter()
+        .map(|input| input.rel_path.as_str())
+        .collect();
+    assert!(
+        observed.stale.not_computed,
+        "{:?} {served:?}",
+        observed.stale
+    );
+}

@@ -16,9 +16,10 @@
 //! each declaration key (kind, owner, name) the base holds and the parse
 //! does not (removed), the parse holds and the base does not (added), or
 //! both hold with another count or another resolution fact (changed): the
-//! ES-module export flag, a callable's return type, parameters and static
-//! flag, a type's resolved bases. A type whose member set changed is
-//! changed. A removed path removes every base declaration of its own.
+//! ES-module export flag, a callable's return type, parameters and flags
+//! word, a type's resolved bases. A type whose member set changed is
+//! changed. A removed path removes every base declaration of its own. Each
+//! re-export row a dirty file adds, drops or re-points (`Changes::add_reexports`).
 //!
 //! ## Dependency facts
 //!
@@ -35,6 +36,7 @@
 //! | an added or removed name | the same, for every base node of that name in any file: a clean call bound to a namesake may turn ambiguous or move |
 //! | a changed type | its clean subtypes, transitively over the base `Extends` / `Implements` in-edges |
 //! | an added or removed name | each file whose archived import rows import that name |
+//! | a re-export row on one side only | each file whose archived import rows import a name it binds, from a source that may reach the dirty file |
 //!
 //! The base graph records a call site only when it bound. Two gaps follow,
 //! and the closure names them in [`StaleClosure`] instead of guessing:
@@ -105,7 +107,7 @@
 
 use super::view::{base_function_meta, OverlayFileInput, OverlaySymbol};
 use crate::analyzer::path_aliases::{import_ecosystem, PathAliases};
-use crate::analyzer::types::BindingKind;
+use crate::analyzer::reexport::ImportRef;
 use crate::contracts::workspace::{
     Ecosystem, ScopeAlias, ScopeDraft, ScopeId, ScopeMatch, WorkspaceFacts,
 };
@@ -309,6 +311,10 @@ pub fn invalidation_closure_with_configs(
     if changes.routes {
         stale.add_kinds(ROUTE_KINDS);
     }
+    if changes.star_unresolved {
+        stale.not_computed = true;
+        stale.add_kinds(REBUILT_RELS.iter().map(|r| r.as_str()));
+    }
 
     let mut deps = Dependents {
         graph,
@@ -325,6 +331,7 @@ pub fn invalidation_closure_with_configs(
     }
     deps.subtypes_of(&changes.types);
     deps.importers_of(&changes.names);
+    deps.importers_through(&changes.reexports);
     deps.rescoped_by(configs);
     if !configs.kept.is_empty() {
         stale.configs = configs.kept.clone();
@@ -385,6 +392,38 @@ struct Changes<'a> {
     removed: Vec<(&'a str, NodeKind)>,
     /// A dirty or removed path held a `Route` node.
     routes: bool,
+    /// Each name a dirty file re-exports on one side only.
+    reexports: Vec<Reexport<'a>>,
+    /// Each file a changed star row re-exports, with that dirty file.
+    star_targets: FxHashMap<u32, (&'a str, bool)>,
+    /// A changed star row whose target the base did not record.
+    star_unresolved: bool,
+}
+
+/// A name a dirty file `path` re-exports on one side only.
+struct Reexport<'a> {
+    name: &'a str,
+    path: &'a str,
+    python: bool,
+}
+
+impl Reexport<'_> {
+    /// Whether an import row of `source` may bind through `path`. A Python
+    /// source spells the module by its path (archived as `pkg/hub`, relative
+    /// as `.hub`), so its last segment is the file stem, or the package
+    /// directory for an `__init__`; a relative `.` / `..` source always may. A TS / JS specifier may go through a
+    /// path alias or a package name, so every one may.
+    fn admits(&self, source: &str) -> bool {
+        if !self.python {
+            return true;
+        }
+        let tail = source.rsplit(['/', '.']).next().unwrap_or_default();
+        let name = file_name(self.path);
+        let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+        tail.is_empty()
+            || tail == stem
+            || (stem == "__init__" && tail == file_name(parent_dir(self.path)))
+    }
 }
 
 impl<'a> Changes<'a> {
@@ -413,6 +452,9 @@ impl<'a> Changes<'a> {
             names: FxHashSet::default(),
             removed: Vec::new(),
             routes: false,
+            reexports: Vec::new(),
+            star_targets: FxHashMap::default(),
+            star_unresolved: false,
         };
 
         // One node scan: each dirty path's base declarations, in graph order.
@@ -459,8 +501,10 @@ impl<'a> Changes<'a> {
                 base.symmetric_difference(&fresh)
                     .map(|&(exported, _)| exported),
             );
-            changes.add_reexport_names(graph, path, idx_of.get(path).copied(), &inputs);
+            changes.add_reexports(graph, path, idx_of.get(path).copied(), &inputs);
         }
+
+        changes.add_star_target_names(graph);
 
         let dirty_types = dirty_type_names(files);
         let mut paths: BTreeSet<&'a str> = base_decls.keys().copied().collect();
@@ -488,66 +532,129 @@ impl<'a> Changes<'a> {
         changes
     }
 
-    /// A dirty barrel or `__init__` that adds or drops a re-export changes
-    /// what an importer of that file binds without changing a declaration:
-    /// each name of an import row present on one side only is changed. A TS
-    /// or JS file exports only the rows marked as re-exports; any other
-    /// language marks none, so every row counts (a Python `from .a import X`
-    /// in `__init__.py` exposes `X`). Counting more only widens the closure.
-    fn add_reexport_names(
+    /// A dirty file that adds, drops or re-points a re-export changes what
+    /// an importer of that file binds without changing a declaration. The
+    /// rows that count are the ones the resolver follows: a TS / JS
+    /// `export *`, re-export row or export-alias local
+    /// (`followed_by_reexport`), and every `from … import` row of a Python
+    /// module (`python_reexport` follows any module, not only a package
+    /// `__init__.py`). A plain Python `import x` binds only `x.member`, so it
+    /// re-exports nothing. A row on one side only, compared with its source,
+    /// names what it binds; a star row names the declarations of the file it
+    /// re-exports, or marks the closure incomplete when the base recorded no
+    /// target for that source.
+    fn add_reexports(
         &mut self,
         graph: &'a ArchivedZeroCopyGraph,
-        path: &str,
+        path: &'a str,
         base_idx: Option<u32>,
         inputs: &FxHashMap<&'a str, Vec<&'a OverlayFileInput>>,
     ) {
-        let pool = &graph.string_pool;
+        let pool = graph.string_pool.as_slice();
         let fresh_files = inputs.get(path).map(Vec::as_slice).unwrap_or_default();
-        let es_module = match fresh_files.first() {
-            Some(file) => matches!(
-                file.file_meta().language,
-                Language::TypeScript | Language::JavaScript
-            ),
-            None => base_idx.is_some_and(|idx| graph.is_es_module_file(idx)),
+        let language = match fresh_files.first() {
+            Some(file) => file.file_meta().language,
+            None => match base_idx {
+                Some(idx) => super::import_scope::stored_language(graph, idx, path),
+                None => return,
+            },
         };
-        // An ES module re-exports by its re-export rows; a Python package
-        // re-exports whatever its `__init__.py` imports. Elsewhere an import
-        // row binds only its own file, so it changes no dependent.
-        let package_init = path == "__init__.py" || path.ends_with("/__init__.py");
-        let exports = |kind: Option<BindingKind>| {
-            if es_module {
-                matches!(
-                    kind,
-                    Some(BindingKind::EsReexport | BindingKind::EsDefaultReexport)
-                )
+        let python = language == Language::Python;
+        if !python && !matches!(language, Language::TypeScript | Language::JavaScript) {
+            return;
+        }
+        let mut exported_as: FxHashMap<&'a str, Vec<&'a str>> = FxHashMap::default();
+        let base_aliases = base_idx
+            .and_then(|idx| graph.file_export_aliases(idx))
+            .into_iter()
+            .flatten()
+            .map(|alias| (alias.local.resolve(pool), alias.exported.resolve(pool)));
+        let fresh_aliases = fresh_files
+            .iter()
+            .flat_map(|file| file.export_aliases.iter())
+            .map(|alias| (&*alias.local, &*alias.exported));
+        for (local, exported) in base_aliases.chain(fresh_aliases) {
+            exported_as.entry(local).or_default().push(exported);
+        }
+        let counts = |row: &ImportRef<'a>| {
+            if python {
+                !(row.imported_name == "*" && row.alias.is_some())
             } else {
-                package_init
+                row.is_star_export()
+                    || row.is_es_reexport()
+                    || exported_as.contains_key(row.local_name())
             }
         };
-        let base: FxHashSet<(&'a str, &'a str)> = base_idx
+        let base: Vec<ImportRef<'a>> = base_idx
             .and_then(|idx| graph.file_imports(idx))
             .into_iter()
             .flatten()
-            .filter(|row| exports(row.binding_kind.as_ref().map(BindingKind::from)))
-            .map(|row| {
-                (
-                    row.imported_name.resolve(pool),
-                    row.alias.as_ref().map_or("", |alias| alias.resolve(pool)),
-                )
-            })
+            .map(|row| ImportRef::from_archived(row, pool, &graph.files))
+            .filter(counts)
             .collect();
-        let fresh: FxHashSet<(&'a str, &'a str)> = fresh_files
+        let fresh: Vec<ImportRef<'a>> = fresh_files
             .iter()
             .flat_map(|file| file.imports.iter())
-            .filter(|row| exports(row.binding_kind))
-            .map(|row| (&*row.imported_name, row.alias.as_deref().unwrap_or("")))
+            .map(ImportRef::from)
+            .filter(counts)
             .collect();
-        for &(imported, alias) in base.symmetric_difference(&fresh) {
-            self.names.extend(
-                [imported, alias]
-                    .into_iter()
-                    .filter(|name| !name.is_empty()),
-            );
+        let key = |row: &ImportRef<'a>| {
+            (
+                row.source,
+                row.imported_name,
+                row.alias,
+                row.binding_kind.map(|kind| kind as u8),
+            )
+        };
+        let base_keys: FxHashSet<_> = base.iter().map(key).collect();
+        let fresh_keys: FxHashSet<_> = fresh.iter().map(key).collect();
+        let changed = base
+            .iter()
+            .filter(|row| !fresh_keys.contains(&key(row)))
+            .chain(fresh.iter().filter(|row| !base_keys.contains(&key(row))));
+        for row in changed {
+            if row.is_star_export() {
+                // A fresh row carries no target; a base row of the same
+                // source recorded the one the index resolved.
+                let target = row.target.or_else(|| {
+                    base.iter()
+                        .find(|b| b.is_star_export() && b.source == row.source)
+                        .and_then(|b| b.target)
+                });
+                match target.and_then(|target| graph.file_idx_of(target)) {
+                    Some(file) => {
+                        self.star_targets.insert(file, (path, python));
+                    }
+                    None => self.star_unresolved = true,
+                }
+                continue;
+            }
+            let local = row.local_name();
+            let exported = exported_as.get(local).into_iter().flatten().copied();
+            for name in [row.imported_name, local].into_iter().chain(exported) {
+                if !name.is_empty() && name != "*" {
+                    self.reexports.push(Reexport { name, path, python });
+                }
+            }
+        }
+    }
+
+    /// The declarations of each star target, as re-exports of the dirty
+    /// file that dropped or added the star row: one node scan, run only
+    /// when a star row changed.
+    fn add_star_target_names(&mut self, graph: &'a ArchivedZeroCopyGraph) {
+        if self.star_targets.is_empty() {
+            return;
+        }
+        let pool = &graph.string_pool;
+        for node in graph.nodes.iter() {
+            let Some(&(path, python)) = self.star_targets.get(&node.file_idx.to_native()) else {
+                continue;
+            };
+            if declares(NodeKind::from(&node.kind)) && node.owner_class.resolve(pool).is_empty() {
+                let name = node.name.resolve(pool);
+                self.reexports.push(Reexport { name, path, python });
+            }
         }
     }
 
@@ -834,6 +941,43 @@ impl Dependents<'_> {
                 .iter()
                 .any(|row| names.contains(row.imported_name.resolve(pool)))
             {
+                self.files.insert(file);
+            }
+        }
+    }
+
+    /// Each clean file whose archived import rows import a name of
+    /// `reexports` from a source that may reach its dirty file, or star-import
+    /// such a source. The source filter keeps one changed Python
+    /// `from .models import User` from naming every importer of `User`.
+    fn importers_through(&mut self, reexports: &[Reexport]) {
+        if reexports.is_empty() {
+            return;
+        }
+        let mut by_name: FxHashMap<&str, Vec<&Reexport>> = FxHashMap::default();
+        for reexport in reexports {
+            by_name.entry(reexport.name).or_default().push(reexport);
+        }
+        let graph = self.graph;
+        let pool = &graph.string_pool;
+        for file in 0..graph.files.len() as u32 {
+            if self.dirty.contains(&file) || self.files.contains(&file) {
+                continue;
+            }
+            let Some(rows) = graph.file_imports(file) else {
+                return; // a graph without module facts has no rows at all
+            };
+            let binds = |row: &crate::graph::ArchivedImportFact| {
+                let source = row.source.resolve(pool);
+                let name = row.imported_name.resolve(pool);
+                if name == "*" && row.alias.is_none() {
+                    return reexports.iter().any(|r| r.python && r.admits(source));
+                }
+                by_name
+                    .get(name)
+                    .is_some_and(|found| found.iter().any(|r| r.admits(source)))
+            };
+            if rows.iter().any(binds) {
                 self.files.insert(file);
             }
         }
