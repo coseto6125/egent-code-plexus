@@ -11,12 +11,12 @@
 (enum_declaration
   name: (identifier) @enum.name) @enum
 
-;; Enum constants — `enum Color { red, green, blue }`. Each `enum_constant`
+;; Enum constants — `enum Color { red, green, blue }`. Each `enum_entry`
 ;; node carries a `name` field (identifier). Dart 2.17+ enhanced enums with
 ;; constructor calls also use this node.
 (enum_declaration
   body: (enum_body
-    (enum_constant
+    (enum_entry
       name: (identifier) @enum_constant.name) @enum_constant_node))
 
 ;; Mixins — semantically closer to a trait (default-method container) than an
@@ -162,12 +162,12 @@
 
 ;; Annotations — `@override`, `@deprecated`, `@Foo()`, `@meta.visibleForTesting`.
 ;; tree-sitter-dart uses an `annotation` node with a `name` field that is
-;; either a bare `identifier` or a `qualified` node.
+;; either a bare `identifier` or a `qualified_name` node.
 (annotation
   name: (identifier) @annotation.name) @annotation
 
 (annotation
-  name: (qualified (_) (identifier) @annotation.name)) @annotation
+  name: (qualified_name (_) (identifier) @annotation.name)) @annotation
 
 ;; Imports — Dart `import 'pkg.dart';`. tree-sitter-dart wraps imports
 ;; three levels deep: `import_or_export > library_import >

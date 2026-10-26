@@ -3867,7 +3867,7 @@ dependencies = [
 [[package]]
 name = "tree-sitter-cpp"
 version = "0.23.4"
-source = "git+https://github.com/tree-sitter/tree-sitter-cpp?rev=8b5b49eb196bec7040441bee33b2c9a4838d6967#8b5b49eb196bec7040441bee33b2c9a4838d6967"
+source = "git+https://github.com/tree-sitter/tree-sitter-cpp?rev=c009222808634c1014f82438d4883753516a2c24#c009222808634c1014f82438d4883753516a2c24"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -3884,9 +3884,9 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-dart"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "325dd1e24ee9ee21111e9c43680ae7d6010aaa9f282b048a99b9c7163c1cf553"
+checksum = "973ff905142c61200ef0bf5e226f03a5f20a9a7d3a0ae2c4c86cdb42f98b63eb"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -4053,7 +4053,9 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-swift"
-version = "0.7.3"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2688c06564afa397313e0db17d140a73e2c6a47f3884794614246167c9dd5dfd"
 dependencies = [
  "cc",
  "tree-sitter-language",

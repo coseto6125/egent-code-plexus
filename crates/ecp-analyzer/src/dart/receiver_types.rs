@@ -225,7 +225,7 @@ fn collect_typed_dart_locals(fn_node: Node<'_>, source: &[u8], scopes: &mut Vec<
         {
             continue;
         }
-        if n.kind() == "initialized_variable_definition" {
+        if n.kind() == "initialized_variable_declaration" {
             let mut ty: Option<String> = None;
             let mut name: Option<String> = None;
             let mut first_comma = None;

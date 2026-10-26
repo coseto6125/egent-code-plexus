@@ -596,7 +596,7 @@ jobs:
   #   ecp-analyzer ── 阻塞於 git/vendor deps 沒 version：
   #     - tree-sitter-crystal (git dep) 需給 version 或改 crates.io 版
   #     - tree-sitter-kotlin (git dep) 同上
-  #     - tree-sitter-move / tree-sitter-swift (vendored path dep) 需先發到
+  #     - tree-sitter-move 等 vendored path dep 需先發到
   #       crates.io 或標 publish = false 在 vendor side
   #   egent-code-plexus ── 需 ecp-core + ecp-analyzer 先 publish
   # Token 設定：repo Settings → Secrets → CARGO_REGISTRY_TOKEN

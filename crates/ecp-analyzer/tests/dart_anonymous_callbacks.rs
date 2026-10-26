@@ -54,18 +54,14 @@ fn block_closure_callback_attaches_call_to_anonymous_node() {
 }
 
 #[test]
-fn arrow_closure_with_call_body_is_a_grammar_limitation() {
-    // tree-sitter-dart 0.2.0 parses `(x) => transform(x)` as application
-    // `((x) => transform)(x)` — the closure body is just the identifier
-    // `transform`, and the call binds OUTSIDE the closure. So an arrow closure
-    // whose body is a single call carries no inner call_expression and cannot
-    // host an <anonymous> call edge. Block-form closures (`(x) { f(x); }`) are
-    // unaffected and covered above. Pinned so a future grammar bump that fixes
-    // the parse flips this test and prompts re-enabling arrow support.
+fn arrow_closure_callback_attaches_call_to_anonymous_node() {
+    // tree-sitter-dart 0.2.0 parsed `(x) => transform(x)` as the application
+    // `((x) => transform)(x)`, so the call sat outside the closure. 0.3.0
+    // parses the arrow body as the call, and it attaches like a block body.
     let g = parse("void main() {\n  items.map((x) =>\n      transform(x));\n}");
     assert!(
-        !anonymous_calls(&g).contains(&"transform"),
-        "grammar limitation changed — arrow closure now carries the call, re-enable arrow capture; nodes: {:?}",
+        anonymous_calls(&g).contains(&"transform"),
+        "expected transform attached to <anonymous>, nodes: {:?}",
         g.nodes
     );
 }

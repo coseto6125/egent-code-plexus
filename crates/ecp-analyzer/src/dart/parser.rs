@@ -501,7 +501,7 @@ impl LanguageProvider for DartProvider {
                 ident_kinds: &["identifier"],
                 kind: crate::calls::NameRefKind::Value,
                 binding_fields: &[
-                    ("initialized_variable_definition", "name"),
+                    ("initialized_variable_declaration", "name"),
                     ("initialized_identifier", "name"),
                     ("for_statement", "name"),
                     ("for_element", "name"),
