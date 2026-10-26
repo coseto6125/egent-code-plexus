@@ -14,6 +14,8 @@ use crate::analyzer::import_binding::fqn_extension;
 use crate::analyzer::ladder::ImportModules;
 pub use crate::analyzer::module_discovery::Module;
 use crate::analyzer::module_discovery::{discover_module, for_each_layout_candidate, ModuleIndex};
+use crate::analyzer::path_aliases::{AliasScope, PathAliases};
+use crate::analyzer::reexport::for_each_specifier_candidate;
 use crate::analyzer::types::RawImport;
 use crate::file_category::Language;
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind};
@@ -128,12 +130,16 @@ pub struct ImportScope<'a> {
     dirty: &'a [OverlayFileInput],
     dirty_base: &'a FxHashSet<u32>,
     removed: &'a FxHashSet<&'a str>,
+    /// The index's path aliases with the stored C2 scope rows
+    /// ([`Self::with_aliases`]); empty by default.
+    aliases: PathAliases,
     languages: RefCell<FxHashMap<u8, LanguageFiles<'a>>>,
     modules: RefCell<ModuleCache<'a>>,
 }
 
-/// language → directory → specifier → module.
-type ModuleCache<'a> = FxHashMap<u8, FxHashMap<Box<str>, FxHashMap<Box<str>, Module<&'a str>>>>;
+/// language → the importer's C2 scope → directory → specifier → module.
+type ModuleCache<'a> =
+    FxHashMap<u8, FxHashMap<AliasScope, FxHashMap<Box<str>, FxHashMap<Box<str>, Module<&'a str>>>>>;
 
 impl<'a> ImportScope<'a> {
     /// The scope over `graph` with the `dirty` files' fresh parses;
@@ -152,9 +158,22 @@ impl<'a> ImportScope<'a> {
             dirty,
             dirty_base,
             removed,
+            aliases: PathAliases::default(),
             languages: RefCell::default(),
             modules: RefCell::default(),
         }
+    }
+
+    /// Read `aliases` (the index's, with the stored scope rows) as the
+    /// resolver reads them: discovery for an importer whose scope has a
+    /// table of its own reads that table (R-A4b).
+    pub(crate) fn with_aliases(mut self, aliases: PathAliases) -> Self {
+        self.aliases = aliases;
+        self
+    }
+
+    pub(crate) fn aliases(&self) -> &PathAliases {
+        &self.aliases
     }
 
     pub(crate) fn dirty(&self) -> &'a [OverlayFileInput] {
@@ -291,10 +310,12 @@ impl<'a> ImportScope<'a> {
         } else {
             ""
         };
+        let scope = self.aliases.scope_of(source_file);
         if let Some(hit) = self
             .modules
             .borrow()
             .get(&(language as u8))
+            .and_then(|scopes| scopes.get(&scope))
             .and_then(|directories| directories.get(directory))
             .and_then(|specifiers| specifiers.get(specifier))
         {
@@ -306,12 +327,15 @@ impl<'a> ImportScope<'a> {
                 graph: self.graph,
                 dirty: self.dirty,
                 dirty_base: self.dirty_base,
+                aliases: &self.aliases,
             };
             discover_module(&index, source_file, specifier, language)
         });
         self.modules
             .borrow_mut()
             .entry(language as u8)
+            .or_default()
+            .entry(scope)
             .or_default()
             .entry(directory.into())
             .or_default()
@@ -351,6 +375,7 @@ struct ScopeIndex<'s, 'a> {
     graph: &'a ArchivedZeroCopyGraph,
     dirty: &'a [OverlayFileInput],
     dirty_base: &'s FxHashSet<u32>,
+    aliases: &'s PathAliases,
 }
 
 impl<'a> ModuleIndex<'a> for ScopeIndex<'_, 'a> {
@@ -428,15 +453,34 @@ impl<'a> ModuleIndex<'a> for ScopeIndex<'_, 'a> {
         self.files.declares_other_namespace(file, namespace)
     }
 
-    /// The layout candidates alone: the overlay reads no path alias here,
-    /// as it read none before discovery was shared.
+    /// The layout candidates, after the aliases of an importer whose scope
+    /// has a table of its own: the ones the index reads for it. An importer
+    /// in no such scope reads no path alias here, as before discovery was
+    /// shared.
     fn for_each_module_candidate(
         &self,
         importer: &str,
         specifier: &str,
         visit: impl FnMut(&str) -> bool,
     ) {
-        for_each_layout_candidate(importer, specifier, visit);
+        let scope = self.aliases.scope_of(importer);
+        if !self.aliases.has_scoped_table(scope) {
+            for_each_layout_candidate(importer, specifier, visit);
+            return;
+        }
+        for_each_specifier_candidate(
+            Path::new(importer),
+            specifier,
+            |expanded| {
+                self.aliases
+                    .expand_scoped(scope, specifier, |alias| expanded(alias))
+            },
+            visit,
+        );
+    }
+
+    fn importer_scope_root(&self, importer: &str) -> Option<&str> {
+        self.aliases.scope_root(self.aliases.scope_of(importer))
     }
 }
 

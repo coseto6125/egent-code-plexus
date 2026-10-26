@@ -706,6 +706,27 @@ impl WorkspaceFacts {
         }
     }
 
+    /// The scope of [`Self::scope_of`] when its answer is `Unique`; `None`
+    /// for `Ambiguous` and `Unscoped`. It collects no candidate list, so the
+    /// import tiers can ask it once per import with no allocation.
+    pub fn unique_scope_of(&self, path: &str, ecosystem: Ecosystem) -> Option<ScopeId> {
+        let mut dir = parent_dir(path);
+        loop {
+            let mut admitting = self
+                .scopes_at(ecosystem, dir)
+                .filter(|&id| self.scopes[id.index()].membership.admits(path));
+            match (admitting.next(), admitting.next()) {
+                (Some(id), None) => return Some(id),
+                (Some(_), Some(_)) => return None,
+                (None, _) => {}
+            }
+            if dir.is_empty() {
+                return None;
+            }
+            dir = parent_dir(dir);
+        }
+    }
+
     /// Every scope at the deepest directory, from `dir` up, that holds a
     /// scope of `ecosystem`, whatever its membership: the conservative set
     /// for a config change in `dir`.
@@ -1594,6 +1615,47 @@ mod tests {
         assert_eq!(
             facts.scope_of("pkg/scripts/b.ts", Ecosystem::Node),
             ScopeMatch::Unique(ScopeId(0))
+        );
+    }
+
+    /// `unique_scope_of` is `scope_of` with `Ambiguous` and `Unscoped`
+    /// both `None`, over every shape the `scope_of` cases above plant.
+    #[test]
+    fn test_unique_scope_of_each_scope_match_returns_unique_only() {
+        let facts = fixture();
+        for (path, ecosystem) in [
+            ("crates/a/src/deep/mod.rs", Ecosystem::Cargo),
+            ("packages/a/src/util.ts", Ecosystem::Node),
+            ("packages/ab/main.ts", Ecosystem::Node),
+            ("main.ts", Ecosystem::Node),
+            ("tools/x.rs", Ecosystem::Cargo),
+        ] {
+            let expected = match facts.scope_of(path, ecosystem) {
+                ScopeMatch::Unique(id) => Some(id),
+                ScopeMatch::Ambiguous(_) | ScopeMatch::Unscoped => None,
+            };
+            assert_eq!(facts.unique_scope_of(path, ecosystem), expected, "{path}");
+        }
+        let ambiguous = two_projects(Membership::Subtree, Membership::Subtree);
+        assert_eq!(
+            ambiguous.unique_scope_of("svc/Program.cs", Ecosystem::DotNet),
+            None
+        );
+        let listed = two_projects(
+            Membership::Listed(strings(&["svc/Program.cs"])),
+            Membership::Listed(strings(&["svc/ProgramTests.cs"])),
+        );
+        assert_eq!(
+            listed.unique_scope_of("svc/ProgramTests.cs", Ecosystem::DotNet),
+            Some(ScopeId(1))
+        );
+        assert_eq!(
+            listed.unique_scope_of("svc/Orphan.cs", Ecosystem::DotNet),
+            None
+        );
+        assert_eq!(
+            WorkspaceFacts::default().unique_scope_of("a.ts", Ecosystem::Node),
+            None
         );
     }
 

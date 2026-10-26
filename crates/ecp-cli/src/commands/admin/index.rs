@@ -349,7 +349,7 @@ pub fn run_analyzer_for_paths(
     let cfg_elapsed = t_cfg.elapsed();
     let t_ingest = std::time::Instant::now();
     let mut builder = GraphBuilder::new()
-        .with_path_aliases(configs.aliases)
+        .with_path_aliases(configs.aliases.with_scopes(&configs.workspace))
         .with_csharp_projects(configs.csharp_projects)
         .with_workspace_scopes(configs.workspace)
         .with_repo_root(src_root.to_path_buf())

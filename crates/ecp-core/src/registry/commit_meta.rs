@@ -148,7 +148,10 @@ use std::path::Path;
 /// callback node has no owner, a scoped uid and a lexical-parent row too. A
 /// schema40 graph stores those owners, which the overlay's identity check
 /// rejects.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema41");
+/// schema42: an import resolves in the caller's workspace scope first (its
+/// own aliases, package names and module root), so a monorepo package's
+/// `@/*` binds inside that package.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema42");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

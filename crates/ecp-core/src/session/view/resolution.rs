@@ -177,9 +177,6 @@ struct OverlayFacts<'a> {
     /// the first module-file probe of the qualifier tier: one pass over
     /// `graph.files`, which most builds never pay.
     stems: OnceCell<FxHashMap<&'a str, Vec<&'a str>>>,
-    /// The path aliases the index resolved with (tsconfig / jsconfig
-    /// `paths`, go.mod, Cargo.toml, ...), read once per view.
-    aliases: PathAliases,
     /// Base idx → virtual idx of a surviving dirty-file symbol.
     replaced: &'a FxHashMap<u32, u32>,
     /// First virtual idx of a uid → its later overloads, in source order.
@@ -350,7 +347,8 @@ impl<'a> OverlayFacts<'a> {
         }
         Self {
             graph,
-            scope: ImportScope::new(graph, files, dirty_base, removed),
+            scope: ImportScope::new(graph, files, dirty_base, removed)
+                .with_aliases(overlay_aliases(graph)),
             nodes,
             dirty_base,
             dirty: files
@@ -369,7 +367,6 @@ impl<'a> OverlayFacts<'a> {
             qualified: RefCell::default(),
             global: RefCell::default(),
             stems: OnceCell::new(),
-            aliases: graph.path_aliases(),
             replaced,
             later_overloads,
             dirty_by_name,
@@ -1010,18 +1007,21 @@ impl<'a> ModuleFacts for OverlayFacts<'a> {
     ) {
         // The index's `for_each_candidate`: a Rust path the module trees
         // place is that one file; any other goes through
-        // `for_each_specifier_candidate` with its path aliases.
+        // `for_each_specifier_candidate` with its path aliases, read in the
+        // importer's scope.
         if let Some(file) = self.anchored_rust_module(importer, specifier) {
             visit(file);
             return;
         }
-        let aliases = &self.aliases;
+        let aliases = self.scope.aliases();
         reexport::for_each_specifier_candidate(
             std::path::Path::new(importer),
             specifier,
             |expanded| {
                 if !aliases.is_empty() {
-                    aliases.expand(specifier, |alias| expanded(alias));
+                    aliases.expand_in(aliases.scope_of(importer), specifier, |alias| {
+                        expanded(alias)
+                    });
                 }
             },
             visit,
@@ -2603,7 +2603,12 @@ fn resolve_callee<'s>(
             true => scoped
                 .filter_map(|(idx, path)| {
                     Some((
-                        relative_module_rank(importer, &import.source, path?, &facts.aliases)?,
+                        relative_module_rank(
+                            importer,
+                            &import.source,
+                            path?,
+                            facts.scope.aliases(),
+                        )?,
                         idx,
                     ))
                 })
@@ -4244,6 +4249,26 @@ fn member_in_file(
         })
 }
 
+/// The path aliases the index resolved with (tsconfig / jsconfig `paths`,
+/// go.mod, Cargo.toml, ...), with one reading per stored C2 scope (R-A4b),
+/// read once per view. A graph whose scope rows are all Cargo rows (the
+/// Rust crate table, which this reading leaves alone) skips deserializing
+/// them.
+fn overlay_aliases(graph: &ArchivedZeroCopyGraph) -> PathAliases {
+    let aliases = graph.path_aliases();
+    let scoped = graph.workspace.scopes.iter().any(|scope| {
+        !matches!(
+            scope.ecosystem,
+            crate::contracts::workspace::ArchivedEcosystem::Cargo
+        )
+    });
+    if scoped {
+        aliases.with_scopes(&graph.workspace_facts())
+    } else {
+        aliases
+    }
+}
+
 /// Whether `specifier` is a `./` or `../` import: the overlay probes the
 /// index's candidate files only for these.
 pub(super) fn is_relative_specifier(specifier: &str) -> bool {
@@ -4252,7 +4277,8 @@ pub(super) fn is_relative_specifier(specifier: &str) -> bool {
 
 /// Where `path` falls in the index's probe order for `specifier` of
 /// `importer` ([`reexport::for_each_specifier_candidate`] with the index's
-/// path `aliases`). `None` when the index never probes it.
+/// path `aliases`, read in the importer's scope). `None` when the index
+/// never probes it.
 pub(super) fn relative_module_rank(
     importer: &str,
     specifier: &str,
@@ -4266,7 +4292,9 @@ pub(super) fn relative_module_rank(
         specifier,
         |expanded| {
             if !aliases.is_empty() {
-                aliases.expand(specifier, |alias| expanded(alias));
+                aliases.expand_in(aliases.scope_of(importer), specifier, |alias| {
+                    expanded(alias)
+                });
             }
         },
         |candidate| {

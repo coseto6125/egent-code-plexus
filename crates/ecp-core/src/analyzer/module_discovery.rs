@@ -67,6 +67,35 @@ pub trait ModuleIndex<'a> {
         specifier: &str,
         visit: impl FnMut(&str) -> bool,
     );
+    /// The root directory of `importer`'s C2 scope (R-A4b); `None` when it
+    /// has none. When several source roots or namespace files hold an
+    /// absolute import's module, the one under this root is the module.
+    fn importer_scope_root(&self, _importer: &str) -> Option<&str> {
+        None
+    }
+}
+
+/// `file` is under the directory `root`, by whole segments; every file is
+/// under the repo root `""`.
+fn under_root(file: &str, root: &str) -> bool {
+    root.is_empty()
+        || file
+            .strip_prefix(root)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// Of several candidates, the single one under the importer's scope root
+/// `root`; `None` when no root is given or not exactly one is under it.
+fn sole_under_root<'a>(
+    candidates: impl IntoIterator<Item = &'a str>,
+    root: Option<&str>,
+) -> Option<&'a str> {
+    let root = root?;
+    let mut under = candidates.into_iter().filter(|file| under_root(file, root));
+    match (under.next(), under.next()) {
+        (Some(file), None) => Some(file),
+        _ => None,
+    }
 }
 
 /// The module `specifier` names from `importer`. Only files of `language`
@@ -81,13 +110,26 @@ pub fn discover_module<'a, I: ModuleIndex<'a>>(
     language: Language,
 ) -> Module<&'a str> {
     match fqn_extension(language) {
-        Some(extension) => fqn_module(index, specifier, language, extension),
+        Some(extension) => fqn_module(index, importer, specifier, language, extension),
         None => path_module(index, importer, specifier, language),
     }
 }
 
+/// The importer's scope root when it can decide between candidates: the
+/// repo root holds every candidate, so it decides nothing.
+fn deciding_scope_root<'i, 'a, I: ModuleIndex<'a>>(
+    index: &'i I,
+    importer: &str,
+) -> Option<&'i str> {
+    index
+        .importer_scope_root(importer)
+        .filter(|root| !root.is_empty())
+}
+
 /// The specifier's own module, else one implicit source root
-/// (`src/pkg/util.py` for `pkg/util`).
+/// (`src/pkg/util.py` for `pkg/util`). Of several roots, the one under the
+/// importer's scope root is the module: two `pyproject.toml` projects that
+/// each hold a package `app` each import their own.
 fn path_module<'a, I: ModuleIndex<'a>>(
     index: &I,
     importer: &str,
@@ -98,8 +140,9 @@ fn path_module<'a, I: ModuleIndex<'a>>(
     if exact.is_some() || specifier.starts_with('.') {
         return exact.map_or(Module::Missing, Module::Unique);
     }
-    let mut found: Option<(&'a str, &'a str)> = None;
-    let mut ambiguous = false;
+    let scope_root = deciding_scope_root(index, importer);
+    // Each distinct root with its first file, in candidate order.
+    let mut roots: Vec<(&'a str, &'a str)> = Vec::new();
     for_each_import_candidate(index, importer, specifier, language, |candidate| {
         if Language::from_normalized_path(candidate) != language {
             return true;
@@ -119,33 +162,47 @@ fn path_module<'a, I: ModuleIndex<'a>>(
             if first_indexed(index, importer, root.trim_end_matches('/'), language).is_some() {
                 continue;
             }
-            match found {
-                Some((previous, _)) if previous != root => {
-                    ambiguous = true;
-                    return false;
-                }
-                // Candidate order already selected this root's package or
-                // implementation.
-                Some(_) => {}
-                None => found = Some((root, file)),
+            // Candidate order already selected this root's package or
+            // implementation.
+            if roots.iter().any(|&(seen, _)| seen == root) {
+                continue;
+            }
+            roots.push((root, file));
+            // Two roots and no scope root to decide: ambiguous already.
+            if roots.len() > 1 && scope_root.is_none() {
+                return false;
             }
         }
         true
     });
-    if ambiguous {
-        return Module::Ambiguous;
+    match roots.as_slice() {
+        [] => Module::Missing,
+        [(_, file)] => Module::Unique(file),
+        _ => {
+            let mut own = roots
+                .iter()
+                .filter(|&&(root, _)| scope_root.is_some_and(|scope| under_root(root, scope)));
+            match (own.next(), own.next()) {
+                (Some(&(_, file)), None) => Module::Unique(file),
+                _ => Module::Ambiguous,
+            }
+        }
     }
-    found.map_or(Module::Missing, |(_, file)| Module::Unique(file))
 }
 
 /// The longest prefix of a fully qualified import path that names a
-/// declared namespace or a conventionally placed file.
+/// declared namespace or a conventionally placed file. Of several files
+/// that declare the imported member or sit at its place, the one under the
+/// importer's scope root is the module: two C# projects or two Composer
+/// packages that each declare it each import their own.
 fn fqn_module<'a, I: ModuleIndex<'a>>(
     index: &I,
+    importer: &str,
     specifier: &str,
     language: Language,
     extension: &str,
 ) -> Module<&'a str> {
+    let scope_root = deciding_scope_root(index, importer);
     let normalized = specifier.trim_start_matches('\\').replace('\\', ".");
     let mut name = normalized.as_str();
     loop {
@@ -158,12 +215,18 @@ fn fqn_module<'a, I: ModuleIndex<'a>>(
                 .split('.')
                 .next()
                 .unwrap_or("");
-            return Module::Namespace(
-                declaring
-                    .into_iter()
-                    .filter(|file| member.is_empty() || index.module_declares(file, member))
-                    .collect(),
-            );
+            let files: Vec<&'a str> = declaring
+                .into_iter()
+                .filter(|file| member.is_empty() || index.module_declares(file, member))
+                .collect();
+            // An import of the namespace itself names every declaring file.
+            let own = (!member.is_empty() && files.len() > 1)
+                .then(|| sole_under_root(files.iter().copied(), scope_root))
+                .flatten();
+            return Module::Namespace(match own {
+                Some(file) => vec![file].into(),
+                None => files.into(),
+            });
         }
         let candidate = format!("{}.{extension}", name.replace('.', "/"));
         let stem = name.rsplit('.').next().unwrap_or(name);
@@ -171,17 +234,23 @@ fn fqn_module<'a, I: ModuleIndex<'a>>(
         // `use InvalidArgumentException;` is not `Lib\Testing`'s class.
         let namespace = name.rsplit_once('.').map_or("", |(outer, _)| outer);
         let placed = {
-            let mut placed = index.module_files_with_stem(language, stem).filter(|file| {
-                (*file == candidate
-                    || file
-                        .strip_suffix(candidate.as_str())
-                        .is_some_and(|root| root.ends_with('/')))
-                    && !index.declares_other_namespace(file, namespace)
-            });
-            match (placed.next(), placed.next()) {
-                (None, _) => None,
-                (Some(file), None) => Some(Module::Unique(file)),
-                (Some(_), Some(_)) => Some(Module::Ambiguous),
+            let placed: Vec<&'a str> = index
+                .module_files_with_stem(language, stem)
+                .filter(|file| {
+                    (*file == candidate
+                        || file
+                            .strip_suffix(candidate.as_str())
+                            .is_some_and(|root| root.ends_with('/')))
+                        && !index.declares_other_namespace(file, namespace)
+                })
+                .collect();
+            match placed.as_slice() {
+                [] => None,
+                [file] => Some(Module::Unique(*file)),
+                _ => Some(
+                    sole_under_root(placed.iter().copied(), scope_root)
+                        .map_or(Module::Ambiguous, Module::Unique),
+                ),
             }
         };
         if let Some(module) = placed {
@@ -262,12 +331,14 @@ pub fn for_each_layout_candidate(importer: &str, specifier: &str, visit: impl Fn
 mod tests {
     use super::*;
 
-    /// A file list, the namespaces its files declare and their declarations.
+    /// A file list, the namespaces its files declare and their declarations,
+    /// and the scope root every importer reads.
     #[derive(Default)]
     struct Files {
         paths: Vec<&'static str>,
         namespaces: Vec<(&'static str, &'static str)>,
         decls: Vec<(&'static str, &'static str)>,
+        scope_root: Option<&'static str>,
     }
 
     impl ModuleIndex<'static> for Files {
@@ -319,6 +390,10 @@ mod tests {
             visit: impl FnMut(&str) -> bool,
         ) {
             for_each_layout_candidate(importer, specifier, visit);
+        }
+
+        fn importer_scope_root(&self, _importer: &str) -> Option<&str> {
+            self.scope_root
         }
     }
 
@@ -472,6 +547,7 @@ mod tests {
                 ("src/Util/Helper.php", "Helper"),
                 ("src/Util/Other.php", "Other"),
             ],
+            scope_root: None,
         }
     }
 
@@ -525,6 +601,80 @@ mod tests {
     #[test]
     fn test_discover_module_fqn_unknown_prefix_returns_missing() {
         assert_eq!(php_module("Vendor\\Pkg\\Thing"), Module::Missing);
+    }
+
+    /// R-A4b: of two source roots, the one under the importer's scope root
+    /// holds the module. The repo root, a root that holds neither and no
+    /// root leave the import ambiguous.
+    #[test]
+    fn test_discover_module_python_two_source_roots_scope_root_returns_own() {
+        let scoped = |root: Option<&'static str>| Files {
+            scope_root: root,
+            ..files(PYTHON)
+        };
+        assert_eq!(
+            discover_module(&scoped(Some("a")), "a/main.py", "dup/x", Language::Python),
+            Module::Unique("a/dup/x.py")
+        );
+        assert_eq!(
+            discover_module(&scoped(Some("b")), "b/main.py", "dup/x", Language::Python),
+            Module::Unique("b/dup/x.py")
+        );
+        for root in [None, Some(""), Some("c"), Some("a/dup/x.py")] {
+            assert_eq!(
+                discover_module(&scoped(root), "a/main.py", "dup/x", Language::Python),
+                Module::Ambiguous,
+                "{root:?}"
+            );
+        }
+        // One root: the scope root decides nothing.
+        assert_eq!(
+            discover_module(
+                &scoped(Some("b")),
+                "b/main.py",
+                "lib/tool",
+                Language::Python
+            ),
+            Module::Unique("src/lib/tool.py")
+        );
+    }
+
+    /// R-A4b: two packages declare one namespace and member, and two place
+    /// one file: the importer's scope root picks its own; the namespace
+    /// itself still names every declarer.
+    #[test]
+    fn test_discover_module_fqn_two_packages_scope_root_returns_own() {
+        let two = |root: Option<&'static str>| Files {
+            paths: vec!["x/src/Util.php", "y/src/Util.php"],
+            namespaces: vec![("x/src/Util.php", "App"), ("y/src/Util.php", "App")],
+            decls: vec![("x/src/Util.php", "Util"), ("y/src/Util.php", "Util")],
+            scope_root: root,
+        };
+        let import = |files: &Files, specifier: &str| {
+            discover_module(files, "y/src/Main.php", specifier, Language::Php)
+        };
+        assert_eq!(
+            import(&two(Some("y")), "App\\Util"),
+            Module::Namespace(Arc::from(["y/src/Util.php"]))
+        );
+        for root in [None, Some(""), Some("z")] {
+            let Module::Namespace(both) = import(&two(root), "App\\Util") else {
+                panic!("a declared namespace is a Namespace answer");
+            };
+            assert_eq!(both.len(), 2, "{root:?}");
+        }
+        let Module::Namespace(itself) = import(&two(Some("y")), "App") else {
+            panic!("a declared namespace is a Namespace answer");
+        };
+        assert_eq!(itself.len(), 2);
+        let placed = Files {
+            scope_root: Some("y"),
+            ..php()
+        };
+        assert_eq!(
+            discover_module(&placed, "y/main.php", "Lib\\Thing", Language::Php),
+            Module::Unique("y/Lib/Thing.php")
+        );
     }
 
     #[test]

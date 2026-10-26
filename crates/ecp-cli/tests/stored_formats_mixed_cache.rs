@@ -413,8 +413,8 @@ impl Rig {
 /// The dump rows stand for the node contract (name, kind, file, lines) and the
 /// Calls edge contract (endpoints, reason, confidence) of `ecp cypher`.
 ///
-/// Expected on HEAD: pass. `BUILDER_FINGERPRINT` is `v<version>+schema41`, the
-/// writer's was `v0.16.4+schema20`, so the lookups miss.
+/// Expected on HEAD: pass. Today's `BUILDER_FINGERPRINT` differs from the
+/// writer's `v0.16.4+schema20`, so the lookups miss.
 #[test]
 fn test_mixed_cache_new_graph_old_parse_cache_query_matches_fresh() {
     let rig = Rig::new();
@@ -470,7 +470,8 @@ fn test_mixed_cache_new_graph_old_parse_cache_query_matches_fresh() {
 /// The expected rows stand for the fixture sources: the line is the line that
 /// declares the symbol (`committed/<file>`), not a rendering to freeze.
 ///
-/// Expected on HEAD: pass (format 18 against 15, schema41 against schema20).
+/// Expected on HEAD: pass (today's graph format and fingerprint differ from
+/// the writer's 15 and `schema20`).
 #[test]
 fn test_mixed_cache_old_graph_new_parse_cache_rebuilds_graph() {
     let rig = Rig::new();

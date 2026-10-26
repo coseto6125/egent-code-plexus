@@ -49,7 +49,7 @@ use ecp_core::analyzer::ladder::{
 };
 use ecp_core::analyzer::module_discovery::{self, Module, ModuleIndex};
 use ecp_core::analyzer::outcome::{NoEdge, Resolution, Tier};
-use ecp_core::analyzer::path_aliases::PathAliases;
+use ecp_core::analyzer::path_aliases::{AliasScope, PathAliases};
 use ecp_core::analyzer::reexport::{
     self, is_ecmascript, probe_rust_module, ExportAliasTable, Fact, FileImports, ImportRef,
     ModuleFacts, PyModule,
@@ -74,9 +74,11 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 pub type NodeId = u32;
 
+/// language → the importer's C2 scope (R-A4b: one specifier names another
+/// module in another scope) → directory → specifier → module.
 type ModuleCache = FxHashMap<
     std::mem::Discriminant<Language>,
-    FxHashMap<PathBuf, FxHashMap<String, Module<Arc<str>>>>,
+    FxHashMap<AliasScope, FxHashMap<PathBuf, FxHashMap<String, Module<Arc<str>>>>>,
 >;
 
 /// What the import tier reads to follow a module's re-export one hop: the
@@ -308,6 +310,11 @@ impl<'a> ModuleIndex<'a> for IndexFacts<'_, 'a> {
     ) {
         self.0
             .for_each_candidate(Path::new(importer), specifier, visit);
+    }
+
+    fn importer_scope_root(&self, importer: &str) -> Option<&str> {
+        let aliases = &self.0.path_aliases;
+        aliases.scope_root(aliases.scope_of(importer))
     }
 }
 
@@ -840,7 +847,8 @@ impl<'a> Resolver<'a> {
     }
 
     /// [`module_discovery::discover_module`] over this index, memoized per
-    /// language, caller directory (relative specifiers only) and specifier.
+    /// language, caller scope, caller directory (relative specifiers only)
+    /// and specifier.
     /// `pub` for `crates/ecp-cli/tests/module_discovery_parity.rs`, which
     /// feeds one file set to this and to the overlay's `ImportScope`.
     pub fn import_module_file(
@@ -854,11 +862,13 @@ impl<'a> Resolver<'a> {
         } else {
             Path::new("")
         };
+        let scope = alias_scope(&self.path_aliases, source_file);
         if let Some(hit) = self
             .module_cache
             .read()
             .unwrap()
             .get(&std::mem::discriminant(&language))
+            .and_then(|scopes| scopes.get(&scope))
             .and_then(|directories| directories.get(directory))
             .and_then(|imports| imports.get(specifier))
         {
@@ -867,6 +877,8 @@ impl<'a> Resolver<'a> {
         let mut cache = self.module_cache.write().unwrap();
         cache
             .entry(std::mem::discriminant(&language))
+            .or_default()
+            .entry(scope)
             .or_default()
             .entry(directory.to_path_buf())
             .or_default()
@@ -2070,8 +2082,13 @@ fn call_target(source_file: &Path, site: CallSite<'_>) -> ResolveTarget {
     }
 }
 
+/// The C2 scope `source_file` imports in ([`PathAliases::scope_of`]).
+fn alias_scope(aliases: &PathAliases, source_file: &Path) -> AliasScope {
+    aliases.scope_of(&normalize_source_path(source_file))
+}
+
 /// [`reexport::for_each_specifier_candidate`] with the project's path
-/// aliases.
+/// aliases, read in `source_file`'s scope (R-A4b).
 fn for_each_specifier_candidate<F>(
     source_file: &std::path::Path,
     specifier: &str,
@@ -2085,7 +2102,9 @@ fn for_each_specifier_candidate<F>(
         specifier,
         |expanded| {
             if !aliases.is_empty() {
-                aliases.expand(specifier, |alias| expanded(alias));
+                aliases.expand_in(alias_scope(aliases, source_file), specifier, |alias| {
+                    expanded(alias)
+                });
             }
         },
         visit,
