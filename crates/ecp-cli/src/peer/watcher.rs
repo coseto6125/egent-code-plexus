@@ -11,13 +11,14 @@ use ecp_core::peer::concern::{ImpactCache, SymbolKey};
 use ecp_core::session::layout;
 use ecp_core::session::{DirtyEvents, SessionMeta};
 use fs2::FileExt;
+use notify::event::{DataChange, ModifyKind};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use rustc_hash::FxHashSet;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Our own manifest, split the way `classify` consumes it: entry keys decide
 /// HARD, declaration lists feed SOFT.
@@ -35,8 +36,6 @@ pub struct WatcherCfg {
 }
 
 pub fn run_watcher(cfg: WatcherCfg) -> std::io::Result<()> {
-    let t0 = std::time::Instant::now();
-    eprintln!("[DEBUG-pw] {:?} start", t0.elapsed());
     let lock_file = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -52,7 +51,6 @@ pub fn run_watcher(cfg: WatcherCfg) -> std::io::Result<()> {
         "watcher acquired flock"
     );
 
-    eprintln!("[DEBUG-pw] {:?} flock ok", t0.elapsed());
     let soft = Arc::new(Mutex::new(SoftState::default()));
     soft.lock()
         .expect("soft state lock poisoned")
@@ -62,7 +60,6 @@ pub fn run_watcher(cfg: WatcherCfg) -> std::io::Result<()> {
     // reads of the same file when N peers fire dirty events in a burst.
     let my_dirty_cache: Arc<Mutex<Option<MyDirtySurface>>> = Arc::new(Mutex::new(None));
 
-    eprintln!("[DEBUG-pw] {:?} rebuild done", t0.elapsed());
     let (tx, rx) = channel::<notify::Result<Event>>();
     let mut watcher = open_watcher(tx, notify::recommended_watcher)?;
     let sessions_dir = cfg.repo_root.join("sessions");
@@ -71,39 +68,44 @@ pub fn run_watcher(cfg: WatcherCfg) -> std::io::Result<()> {
         .watch(&sessions_dir, RecursiveMode::Recursive)
         .map_err(std::io::Error::other)?;
 
+    // Stamped before the rescan: a manifest written in between is delivered
+    // twice rather than never.
+    let mut stamps = ManifestStamps::default();
+    stamps.changed(&sessions_dir);
     // Concerns are edge-triggered on writes, so every peer that went dirty
     // before this point is invisible until it happens to save again. That is
     // the normal case for a watcher restarted mid-session, and for the window
     // between process start and the `watch` call above.
-    eprintln!("[DEBUG-pw] {:?} watch armed", t0.elapsed());
     rescan_peers(&cfg, &soft, &my_dirty_cache);
-    eprintln!("[DEBUG-pw] {:?} rescan done", t0.elapsed());
 
     let mut event_count: u32 = 0;
+    let mut last_reconcile = Instant::now();
     loop {
-        match rx.recv_timeout(Duration::from_secs(1)) {
+        let received = rx.recv_timeout(RECONCILE_EVERY);
+        let timed_out = matches!(received, Err(std::sync::mpsc::RecvTimeoutError::Timeout));
+        match received {
             Ok(Ok(ev)) => {
                 event_count = event_count.wrapping_add(1);
-                let th = std::time::Instant::now();
-                eprintln!(
-                    "[DEBUG-pw] {:?} event {:?} {:?}",
-                    t0.elapsed(),
-                    ev.kind,
-                    ev.paths
-                );
-                let r = handle_event(&cfg, &soft, &my_dirty_cache, ev);
-                eprintln!(
-                    "[DEBUG-pw] {:?} handled in {:?}",
-                    t0.elapsed(),
-                    th.elapsed()
-                );
-                if let Err(e) = r {
+                if let Err(e) = handle_event(&cfg, &soft, &my_dirty_cache, &mut stamps, ev) {
                     log_watcher_error("event handler", &e);
                 }
             }
             Ok(Err(e)) => log_watcher_error("notify error", &e),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+        if last_reconcile.elapsed() >= RECONCILE_EVERY {
+            last_reconcile = Instant::now();
+            for manifest in stamps.changed(&sessions_dir) {
+                let ev = Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Any)))
+                    .add_path(manifest);
+                if let Err(e) = handle_event(&cfg, &soft, &my_dirty_cache, &mut stamps, ev) {
+                    log_watcher_error("reconcile", &e);
+                }
+            }
+        }
+        if timed_out {
+            continue;
         }
         if event_count.is_multiple_of(ecp_core::peer::retention::ROTATE_CHECK_EVERY_N_EVENTS) {
             let _ = ecp_core::peer::retention::rotate_if_needed(
@@ -125,6 +127,7 @@ fn handle_event(
     cfg: &WatcherCfg,
     soft: &Arc<Mutex<SoftState>>,
     my_dirty_cache: &Arc<Mutex<Option<MyDirtySurface>>>,
+    stamps: &mut ManifestStamps,
     ev: Event,
 ) -> std::io::Result<()> {
     if !matches!(ev.kind, EventKind::Modify(_) | EventKind::Create(_)) {
@@ -135,6 +138,7 @@ fn handle_event(
         let Some(session_dir) = event_session_dir(path, created) else {
             continue;
         };
+        stamps.record(&layout::dirty_events_path(session_dir));
         let Some(sid) = session_dir.file_name().and_then(|s| s.to_str()) else {
             continue;
         };
@@ -226,6 +230,45 @@ fn my_dirty_gained_symbols(my_session_dir: &Path, prev: Option<&MyDirtySurface>)
         .values()
         .flat_map(|e| &e.dirty_symbols)
         .any(|s| !prev_keys.contains(&(s.file.as_str(), s.name.as_str())))
+}
+
+/// How often every manifest's stamp is re-read. inotify reports nothing for a
+/// manifest written before the watch on its new `l1/` exists, and drops events
+/// when its queue overflows; the stamp comparison delivers those writes late
+/// instead of never.
+const RECONCILE_EVERY: Duration = Duration::from_secs(1);
+
+/// `(mtime, len)` of each session manifest as last handled.
+#[derive(Default)]
+struct ManifestStamps(rustc_hash::FxHashMap<PathBuf, (std::time::SystemTime, u64)>);
+
+impl ManifestStamps {
+    fn stamp(manifest: &Path) -> Option<(std::time::SystemTime, u64)> {
+        let meta = std::fs::metadata(manifest).ok()?;
+        Some((meta.modified().ok()?, meta.len()))
+    }
+
+    fn record(&mut self, manifest: &Path) {
+        match Self::stamp(manifest) {
+            Some(stamp) => self.0.insert(manifest.to_path_buf(), stamp),
+            None => self.0.remove(manifest),
+        };
+    }
+
+    /// Manifests under `sessions_dir` whose stamp differs from the recorded
+    /// one. Records the new stamps.
+    fn changed(&mut self, sessions_dir: &Path) -> Vec<PathBuf> {
+        let Ok(read) = std::fs::read_dir(sessions_dir) else {
+            return Vec::new();
+        };
+        read.flatten()
+            .filter_map(|entry| {
+                let manifest = layout::dirty_events_path(&entry.path());
+                let stamp = Self::stamp(&manifest)?;
+                (self.0.insert(manifest.clone(), stamp) != Some(stamp)).then_some(manifest)
+            })
+            .collect()
+    }
 }
 
 /// Poll period when the native watcher cannot start.

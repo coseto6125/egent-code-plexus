@@ -120,12 +120,35 @@ impl PeerHarness {
     }
 
     pub fn write_dirty(&self, id: &str, path: &str, symbols: &[(&str, &str)]) {
+        use ecp_core::session::layout;
+        let sdir = self.session_dir(id);
+        let manifest = Self::dirty_manifest(path, symbols);
+        ecp_core::session::DirtyEvents::write_atomic(&layout::dirty_events_path(&sdir), &manifest)
+            .unwrap();
+    }
+
+    /// Publish `id`'s manifest so that no event names the manifest file: the
+    /// whole `l1/` directory is built elsewhere and renamed into place. Stands
+    /// in for every manifest the watcher never gets an event for (a write that
+    /// beats the lazy watch on a new directory, an overflowed inotify queue).
+    pub fn write_dirty_without_file_event(&self, id: &str, path: &str, symbols: &[(&str, &str)]) {
+        use ecp_core::session::layout;
+        let staged = self.repo_root.path().join(format!("staged-{id}"));
+        let staged_l1 = layout::l1_dir(&staged);
+        let manifest = Self::dirty_manifest(path, symbols);
+        ecp_core::session::DirtyEvents::write_atomic(
+            &layout::dirty_events_path(&staged),
+            &manifest,
+        )
+        .unwrap();
+        std::fs::rename(&staged_l1, layout::l1_dir(&self.session_dir(id))).unwrap();
+    }
+
+    fn dirty_manifest(path: &str, symbols: &[(&str, &str)]) -> ecp_core::session::DirtyEvents {
         use ecp_core::contracts::dirty_event::{PathChange, PathClass};
         use ecp_core::contracts::routing::SizeCap;
-        use ecp_core::session::layout;
         use ecp_core::session::overlay::{DirtyEventEntry, DirtyEvents, SymbolKind, SymbolRef};
         use std::collections::BTreeMap;
-        let sdir = self.session_dir(id);
         let mut entries = BTreeMap::new();
         entries.insert(
             path.to_string(),
@@ -151,7 +174,7 @@ impl PeerHarness {
         );
         let mut manifest = DirtyEvents::empty(SizeCap::BUILT_IN);
         manifest.entries = entries;
-        DirtyEvents::write_atomic(&layout::dirty_events_path(&sdir), &manifest).unwrap();
+        manifest
     }
 
     pub fn read_inbox(&self, id: &str) -> Vec<InboxEntry> {
