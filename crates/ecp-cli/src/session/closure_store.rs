@@ -21,8 +21,9 @@
 //! ([`ConfigStamp`]). A reader serves the closure only under the key of the
 //! manifest it reads and the stamps the file stores, and only while each
 //! stamped config still has its stamp, so a closure never meets another
-//! dirty state; a refresh that finds its key stored does nothing beyond an
-//! 8-byte read.
+//! dirty state. A refresh that finds its key stored reads the file back and
+//! keeps it only while every stored parse still has its file's mtime
+//! ([`stored_is_current`]); the key itself covers no dependent.
 
 use super::overlay_reader::{self, AcceptedFragment, ViewInputs};
 use super::view_cache::hash_part;
@@ -260,7 +261,8 @@ pub(crate) fn attach(
 /// resolution configs `configs` (repo-relative, a deleted one included)
 /// unless it is stored already: `auto_ensure` calls this after each L1
 /// refresh and retire pass. The graph is loaded only when the stored key is
-/// not the current one. The closure also re-resolves the clean files the
+/// not the current one, or the stored file is not current
+/// ([`stored_is_current`]). The closure also re-resolves the clean files the
 /// configs rescope, and the file stores their parse for the view.
 pub fn refresh_with_configs(
     worktree_root: &Path,
@@ -273,7 +275,9 @@ pub fn refresh_with_configs(
     let Some(key) = current_key(session_dir, size_cap, &stamps) else {
         return Ok(());
     };
-    if stored_key(session_dir) == Some(key) {
+    if stored_key(session_dir) == Some(key)
+        && stored_is_current(worktree_root, session_dir, size_cap, key)
+    {
         return Ok(());
     }
     let engine = crate::engine::Engine::load(graph_path)?;
@@ -325,7 +329,12 @@ fn store(
     let files = overlay_reader::decode_view_inputs(&dirty.fragments);
     let configs = config_edits(worktree_root, &graph.workspace_facts(), &stamps);
     let closure = invalidation_closure_with_configs(graph, &files, &dirty.tombstones, &configs);
-    let entries = parse(worktree_root, &closure.paths, size_cap);
+    let (entries, omitted) = parse(worktree_root, &closure.paths, size_cap);
+    let stale = if omitted {
+        with_not_computed(closure.stale)
+    } else {
+        closure.stale
+    };
     write(
         session_dir,
         key,
@@ -333,7 +342,7 @@ fn store(
             format: CLOSURE_FORMAT,
             builder_fingerprint: BUILDER_FINGERPRINT.to_string(),
             size_cap_bytes: size_cap.bytes(),
-            stale: closure.stale,
+            stale,
             entries,
             stamps,
             configs,
@@ -515,12 +524,17 @@ fn file_name(path: &str) -> &str {
     path.rsplit_once('/').map_or(path, |(_, name)| name)
 }
 
-/// Parse each of `paths` as the dirty route parses a file. A path that
-/// yields no parse (gone, over the cap, no provider) yields no entry: the
-/// index holds nothing for it that a re-resolution could change.
-fn parse(worktree_root: &Path, paths: &[String], size_cap: SizeCap) -> Vec<ClosureEntry> {
+/// Parse each of `paths` as the dirty route parses a file, and report
+/// whether any parse was omitted. A path that yields no graph (gone, no
+/// provider) yields no entry: the index holds nothing for it that a
+/// re-resolution could change. A path whose parse was omitted (unreadable,
+/// over the cap) yields no entry either, but the index holds its edges and
+/// the closure did not re-resolve them: the caller records that. Stored as a
+/// fragment, an omitted parse would read as an empty file and mask every
+/// indexed declaration and edge of it.
+fn parse(worktree_root: &Path, paths: &[String], size_cap: SizeCap) -> (Vec<ClosureEntry>, bool) {
     if paths.is_empty() {
-        return Vec::new();
+        return (Vec::new(), false);
     }
     // Stat before the parse, as the dirty route does: an edit landing
     // mid-parse records the old mtime, which the reader then refuses.
@@ -537,8 +551,10 @@ fn parse(worktree_root: &Path, paths: &[String], size_cap: SizeCap) -> Vec<Closu
         paths,
         size_cap,
     );
+    let omitted = graphs.iter().any(is_omitted);
     let mut entries: Vec<ClosureEntry> = graphs
         .iter()
+        .filter(|graph| !is_omitted(graph))
         .filter_map(|graph| {
             let rel_path = graph.file_path.to_string_lossy().replace('\\', "/");
             let mtime_ns = *mtimes.get(rel_path.as_str())?;
@@ -551,7 +567,49 @@ fn parse(worktree_root: &Path, paths: &[String], size_cap: SizeCap) -> Vec<Closu
         })
         .collect();
     entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
-    entries
+    (entries, omitted)
+}
+
+/// `LocalGraph::omitted` leaves `content_hash` zero on purpose and records
+/// the reason as a blind spot; a parsed file hashes its bytes.
+fn is_omitted(graph: &ecp_core::analyzer::types::LocalGraph) -> bool {
+    graph.content_hash == [0u8; 8] && !graph.blind_spots.is_empty()
+}
+
+/// `stale` with the closure marked incomplete: a clean file whose re-parse
+/// was omitted keeps its indexed edges of every rebuilt kind, which is what
+/// `StaleClosure::not_computed` says. The names and configs the closure
+/// found stay.
+fn with_not_computed(mut stale: StaleClosure) -> StaleClosure {
+    let all = StaleClosure::not_computed();
+    stale.not_computed = true;
+    stale.kinds.extend(all.kinds);
+    stale.kinds.sort_unstable();
+    stale.kinds.dedup();
+    stale
+}
+
+/// Whether the stored file already is the closure to serve under `key`: it
+/// reads back whole, every stored parse still has its file's mtime and a
+/// valid fragment, and it is not marked incomplete (a retry may now read the
+/// file that failed). The refresh key covers the manifest and the config
+/// stamps but no dependent's mtime, so this is what notices a touched
+/// dependent. Cost: one read and at most `CLOSURE_LIMIT` stats.
+fn stored_is_current(
+    worktree_root: &Path,
+    session_dir: &Path,
+    size_cap: SizeCap,
+    key: u64,
+) -> bool {
+    read(session_dir, size_cap).is_some_and(|(stored, file)| {
+        stored == key
+            && !file.stale.not_computed
+            && file.entries.iter().all(|entry| {
+                crate::auto_ensure::mtime_ns_of(&worktree_root.join(&entry.rel_path))
+                    == Some(entry.mtime_ns)
+                    && overlay_reader::valid_fragment(&entry.fragment)
+            })
+    })
 }
 
 #[cfg(test)]
@@ -1134,5 +1192,240 @@ mod tests {
             .collect();
         assert_eq!(got, fresh);
         assert!(got.iter().any(|(_, r)| r == &vec!["src/b/*".to_string()]));
+    }
+
+    fn current_key_of(manifest: &DirtyEvents) -> u64 {
+        closure_key("base", manifest, &[])
+    }
+
+    /// Stands for: a stored closure whose dependents all keep their mtime
+    /// and fragments is kept, so a refresh of the same dirty state loads no
+    /// graph.
+    #[test]
+    fn test_stored_is_current_untouched_closure_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let (session_dir, worktree, manifest, _) = session(dir.path(), &["src/caller.ts"]);
+        let key = current_key_of(&manifest);
+        let row = entry(&worktree, "src/caller.ts", valid_fragment_bytes());
+        write(
+            &session_dir,
+            key,
+            &closure(StaleClosure::default(), vec![row]),
+        )
+        .unwrap();
+        assert!(stored_is_current(
+            &worktree,
+            &session_dir,
+            SizeCap::BUILT_IN,
+            key
+        ));
+        // A second identical call leaves the same answer and one valid file.
+        assert!(stored_is_current(
+            &worktree,
+            &session_dir,
+            SizeCap::BUILT_IN,
+            key
+        ));
+        assert!(read(&session_dir, SizeCap::BUILT_IN).is_some());
+    }
+
+    /// Stands for: an empty dependent list is a current closure, and a
+    /// stored key other than the asked one is not.
+    #[test]
+    fn test_stored_is_current_empty_closure_current_other_key_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let (session_dir, worktree, manifest, _) = session(dir.path(), &[]);
+        let key = current_key_of(&manifest);
+        write(&session_dir, key, &closure(StaleClosure::default(), vec![])).unwrap();
+        assert!(stored_is_current(
+            &worktree,
+            &session_dir,
+            SizeCap::BUILT_IN,
+            key
+        ));
+        assert!(!stored_is_current(
+            &worktree,
+            &session_dir,
+            SizeCap::BUILT_IN,
+            key + 1
+        ));
+    }
+
+    /// Stands for: an editor saving unchanged bytes moves a dependent's
+    /// mtime; `attach` refuses that entry, so the refresh must recompute
+    /// instead of keeping a closure the reader no longer serves.
+    #[test]
+    fn test_refresh_after_dependent_touched_recomputes_closure() {
+        let dir = tempfile::tempdir().unwrap();
+        let (session_dir, worktree, manifest, mut inputs) = session(dir.path(), &["src/caller.ts"]);
+        let key = current_key_of(&manifest);
+        let row = entry(&worktree, "src/caller.ts", valid_fragment_bytes());
+        write(
+            &session_dir,
+            key,
+            &closure(StaleClosure::default(), vec![row]),
+        )
+        .unwrap();
+        let path = worktree.join("src/caller.ts");
+        let before = crate::auto_ensure::mtime_ns_of(&path).unwrap();
+        filetime::set_file_mtime(
+            &path,
+            filetime::FileTime::from_unix_time((before / 1_000_000_000) as i64 + 10, 0),
+        )
+        .unwrap();
+        assert_ne!(crate::auto_ensure::mtime_ns_of(&path), Some(before));
+        assert!(!stored_is_current(
+            &worktree,
+            &session_dir,
+            SizeCap::BUILT_IN,
+            key
+        ));
+        // The reader agrees with the predicate: it refuses the touched entry.
+        attach(
+            &session_dir,
+            &worktree,
+            SizeCap::BUILT_IN,
+            &manifest,
+            &mut inputs,
+        );
+        assert!(inputs.stale.not_computed);
+    }
+
+    /// Stands for: a dependent removed from disk since the parse is no
+    /// current closure.
+    #[test]
+    fn test_stored_is_current_dependent_removed_is_not_current() {
+        let dir = tempfile::tempdir().unwrap();
+        let (session_dir, worktree, manifest, _) = session(dir.path(), &["src/caller.ts"]);
+        let key = current_key_of(&manifest);
+        let row = entry(&worktree, "src/caller.ts", valid_fragment_bytes());
+        write(
+            &session_dir,
+            key,
+            &closure(StaleClosure::default(), vec![row]),
+        )
+        .unwrap();
+        fs::remove_file(worktree.join("src/caller.ts")).unwrap();
+        assert!(!stored_is_current(
+            &worktree,
+            &session_dir,
+            SizeCap::BUILT_IN,
+            key
+        ));
+    }
+
+    /// Stands for: a stored file whose body fails validation, or whose
+    /// fragment is malformed, is recomputed rather than kept.
+    #[test]
+    fn test_refresh_corrupt_body_recomputes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (session_dir, worktree, manifest, _) = session(dir.path(), &["src/caller.ts"]);
+        let key = current_key_of(&manifest);
+        let row = entry(&worktree, "src/caller.ts", valid_fragment_bytes());
+        write(
+            &session_dir,
+            key,
+            &closure(StaleClosure::default(), vec![row]),
+        )
+        .unwrap();
+        let path = closure_path(&session_dir);
+        let bytes = fs::read(&path).unwrap();
+        fs::write(&path, &bytes[..KEY_LEN + 3]).unwrap();
+        assert_eq!(stored_key(&session_dir), Some(key), "the key still reads");
+        assert!(!stored_is_current(
+            &worktree,
+            &session_dir,
+            SizeCap::BUILT_IN,
+            key
+        ));
+
+        let bad = entry(&worktree, "src/caller.ts", vec![0xff; 4]);
+        write(
+            &session_dir,
+            key,
+            &closure(StaleClosure::default(), vec![bad]),
+        )
+        .unwrap();
+        assert!(!stored_is_current(
+            &worktree,
+            &session_dir,
+            SizeCap::BUILT_IN,
+            key
+        ));
+    }
+
+    /// Stands for: a closure stored as incomplete (a dependent's parse was
+    /// omitted) is retried by the next refresh, since the file may be
+    /// readable now and the key does not move when it is.
+    #[test]
+    fn test_stored_is_current_not_computed_closure_is_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let (session_dir, worktree, manifest, _) = session(dir.path(), &[]);
+        let key = current_key_of(&manifest);
+        write(
+            &session_dir,
+            key,
+            &closure(with_not_computed(StaleClosure::default()), vec![]),
+        )
+        .unwrap();
+        assert!(!stored_is_current(
+            &worktree,
+            &session_dir,
+            SizeCap::BUILT_IN,
+            key
+        ));
+    }
+
+    /// Stands for: a dependent that cannot be read at refresh time is not
+    /// stored as an empty fragment (which would mask its indexed edges),
+    /// and the parse reports the omission so the stored stale closure names
+    /// the rebuilt kinds.
+    #[test]
+    fn test_refresh_dependent_parse_omitted_is_not_stored_as_empty() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (_, worktree, _, _) = session(dir.path(), &[]);
+        fs::write(worktree.join("src/ok.ts"), "export const a = 1;\n").unwrap();
+        fs::write(worktree.join("src/locked.ts"), "export const b = 2;\n").unwrap();
+        let locked = worktree.join("src/locked.ts");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(&locked).is_ok() {
+            return; // root reads past the mode: the failure cannot be planted
+        }
+        let paths = vec!["src/locked.ts".to_string(), "src/ok.ts".to_string()];
+        let (entries, omitted) = parse(&worktree, &paths, SizeCap::BUILT_IN);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).unwrap();
+        let stored: Vec<&str> = entries.iter().map(|e| e.rel_path.as_str()).collect();
+        assert_eq!(stored, vec!["src/ok.ts"]);
+        assert!(omitted);
+        let stale = with_not_computed(StaleClosure::default());
+        assert!(stale.not_computed && !stale.is_empty());
+    }
+
+    /// Stands for: an empty dependent list parses to nothing and omits nothing.
+    #[test]
+    fn test_parse_empty_paths_yields_nothing_omitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let (entries, omitted) = parse(dir.path(), &[], SizeCap::BUILT_IN);
+        assert!(entries.is_empty() && !omitted);
+    }
+
+    /// Stands for: the names and configs the closure found survive the
+    /// not-computed marking, and the kinds are the union.
+    #[test]
+    fn test_with_not_computed_keeps_names_configs_and_kinds() {
+        let stale = StaleClosure {
+            names: vec!["dup".into()],
+            configs: vec!["tsconfig.json".into()],
+            kinds: vec!["Zzz".into()],
+            ..StaleClosure::default()
+        };
+        let marked = with_not_computed(stale);
+        assert!(marked.not_computed);
+        assert_eq!(marked.names, vec!["dup".to_string()]);
+        assert_eq!(marked.configs, vec!["tsconfig.json".to_string()]);
+        assert!(marked.kinds.contains(&"Zzz".to_string()));
+        assert!(marked.kinds.len() > 1);
+        assert!(marked.kinds.windows(2).all(|w| w[0] < w[1]));
     }
 }
