@@ -410,25 +410,36 @@ struct Reexport<'a> {
 }
 
 impl Reexport<'_> {
-    /// Whether an import row of `source` may bind through `path`. A Python
-    /// source spells the module by its path (archived as `pkg/hub`, relative
-    /// as `.hub`), so its last segment is the file stem, or the package
-    /// directory for an `__init__`; a relative `.` / `..` source always may. A TS / JS specifier may go through a
-    /// path alias or a package name, so every one may.
-    fn admits(&self, source: &str) -> bool {
-        !self.python || {
-            let tail = last_segment(source);
-            tail.is_empty() || tail == self.python_module().0
+    /// Whether an import row of `source` in `importer` may bind through
+    /// `path`. A relative Python source (`.hub`, `.`, `..pkg`) resolves
+    /// against the importer's package to a module path. An absolute one
+    /// (archived as `pkg/hub`) is matched by its last segment, which a
+    /// source root in front of the package does not change. A TS / JS
+    /// specifier may go through a path alias or a package name, so every one
+    /// may.
+    fn admits(&self, importer: &str, source: &str) -> bool {
+        if !self.python {
+            return true;
+        }
+        match relative_module(importer, source) {
+            Some(module) => module == self.module_path(),
+            None => last_segment(source) == self.python_module().0,
         }
     }
 
-    /// Whether a Python `from <source> import <name>` row imports the dirty
-    /// module itself (`from pkg import hub`): `name` is the module and
-    /// `source` its package, or a relative `.` / `..`.
-    fn admits_submodule(&self, source: &str, name: &str) -> bool {
+    /// Whether a Python `from <source> import <name>` row in `importer`
+    /// imports the dirty module itself (`from pkg import hub`,
+    /// `from . import hub`): `name` is the module and `source` its package.
+    fn admits_submodule(&self, importer: &str, source: &str, name: &str) -> bool {
         let (module, package) = self.python_module();
-        let tail = last_segment(source);
-        self.python && name == module && (tail.is_empty() || tail == package)
+        if !self.python || name != module {
+            return false;
+        }
+        match relative_module(importer, source) {
+            Some(parent) if parent.is_empty() => name == self.module_path(),
+            Some(parent) => format!("{parent}/{name}") == self.module_path(),
+            None => last_segment(source) == package,
+        }
     }
 
     /// The dirty file's module name and its package's: `pkg/hub.py` is
@@ -441,12 +452,45 @@ impl Reexport<'_> {
             stem => (stem, file_name(dir)),
         }
     }
+
+    /// The dirty file's module as a path: `pkg/hub.py` is `pkg/hub`,
+    /// `pkg/__init__.py` is `pkg`.
+    fn module_path(&self) -> &str {
+        let stem = self
+            .path
+            .rsplit_once('.')
+            .map_or(self.path, |(stem, _)| stem);
+        match stem.strip_suffix("__init__") {
+            Some(dir) => dir.strip_suffix('/').unwrap_or(dir),
+            None => stem,
+        }
+    }
 }
 
-/// The last `/` or `.` segment of an import source: empty for a relative
-/// `.` / `..`.
+/// The last `/` or `.` segment of an import source.
 fn last_segment(source: &str) -> &str {
     source.rsplit(['/', '.']).next().unwrap_or_default()
+}
+
+/// The module path a relative Python source names from `importer`: `.hub`
+/// in `pkg/a.py` is `pkg/hub`, `.` is `pkg`, `..` is the repo root `""`.
+/// `None` for an absolute source.
+fn relative_module(importer: &str, source: &str) -> Option<String> {
+    let rest = source.trim_start_matches('.');
+    let dots = source.len() - rest.len();
+    if dots == 0 {
+        return None;
+    }
+    let mut dir = parent_dir(importer);
+    for _ in 1..dots {
+        dir = parent_dir(dir);
+    }
+    let rest = rest.replace('.', "/");
+    Some(match (dir.is_empty(), rest.is_empty()) {
+        (_, true) => dir.to_owned(),
+        (true, false) => rest,
+        (false, false) => format!("{dir}/{rest}"),
+    })
 }
 
 impl<'a> Changes<'a> {
@@ -1009,6 +1053,7 @@ impl Dependents<'_> {
             let Some(rows) = graph.file_imports(file) else {
                 return; // a graph without module facts has no rows at all
             };
+            let importer = graph.files[file as usize].path.resolve(pool);
             let binds = |row: &crate::graph::ArchivedImportFact| {
                 let source = row.source.resolve(pool);
                 let name = row.imported_name.resolve(pool);
@@ -1016,12 +1061,16 @@ impl Dependents<'_> {
                 // `from pkg import hub` bind `pkg.compute()` / `hub.compute()`
                 // through the module itself (`python_reexport`).
                 if name == "*" {
-                    return reexports.iter().any(|r| r.python && r.admits(source));
+                    return reexports
+                        .iter()
+                        .any(|r| r.python && r.admits(importer, source));
                 }
                 by_name
                     .get(name)
-                    .is_some_and(|found| found.iter().any(|r| r.admits(source)))
-                    || reexports.iter().any(|r| r.admits_submodule(source, name))
+                    .is_some_and(|found| found.iter().any(|r| r.admits(importer, source)))
+                    || reexports
+                        .iter()
+                        .any(|r| r.admits_submodule(importer, source, name))
             };
             if rows.iter().any(binds) {
                 self.files.insert(file);

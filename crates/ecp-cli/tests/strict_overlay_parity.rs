@@ -1645,9 +1645,10 @@ fn test_check_closure_py_reexport_reordered_matches_baseline() {
 
 /// Stands for: a re-pointed re-export in `project/settings.py` names each
 /// clean file that may bind through that module (`from project.settings
-/// import …`, `from project import settings`), and not a clean
-/// `from django.conf import settings`, which imports another package's
-/// namesake.
+/// import …`, `from project import settings`, `from . import settings`
+/// inside `project/`), and neither `from django.conf import settings` nor a
+/// `from . import settings` inside another package: both import another
+/// package's namesake.
 #[test]
 fn test_invalidation_closure_py_submodule_namesake_of_other_package_stays_out() {
     let observed = strict_parity::run(&Scenario {
@@ -1670,6 +1671,16 @@ fn test_invalidation_closure_py_submodule_namesake_of_other_package_stays_out() 
                 "third.py",
                 "from django.conf import settings\n\n\ndef other():\n    return settings.DEBUG\n",
             ),
+            (
+                "project/admin.py",
+                "from . import settings\n\n\ndef admin():\n    return settings.FEATURE_FLAG()\n",
+            ),
+            ("other/__init__.py", ""),
+            ("other/settings.py", "DEBUG = True\n"),
+            (
+                "other/views.py",
+                "from . import settings\n\n\ndef page():\n    return settings.DEBUG\n",
+            ),
         ],
         edits: &[Edit::Write(
             "project/settings.py",
@@ -1683,7 +1694,12 @@ fn test_invalidation_closure_py_submodule_namesake_of_other_package_stays_out() 
         .collect();
     assert_eq!(
         served,
-        BTreeSet::from(["main.py", "project/settings.py", "views.py"]),
+        BTreeSet::from([
+            "main.py",
+            "project/admin.py",
+            "project/settings.py",
+            "views.py"
+        ]),
         "{:?}",
         observed.stale
     );
