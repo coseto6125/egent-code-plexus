@@ -22,8 +22,11 @@
 //! manifest it reads and the stamps the file stores, and only while each
 //! stamped config still has its stamp. A config dirtied after the last
 //! store has no stamp, so the reader serves the old closure until the next
-//! refresh stores a new one; when that refresh fails, [`discard`] removes
-//! the file and the reader reports the closure as not computed. A refresh
+//! refresh stores a new one; when that refresh fails, it stores a marker
+//! ([`store_not_computed`]) that reports the closure as not computed and
+//! names the dirty configs, and only when the marker cannot be written does
+//! [`discard`] remove the file. A stored closure whose config stamp moved
+//! is reported as not computed too, dirty source or not. A refresh
 //! that finds its key stored reads the file back and keeps it only while
 //! every stored parse still has its file's mtime ([`stored_is_current`]);
 //! the key itself covers no dependent.
@@ -172,14 +175,22 @@ fn write(session_dir: &Path, key: u64, file: &ClosureFile) -> io::Result<()> {
     ecp_core::registry::atomic_write_bytes_no_fsync(&closure_path(session_dir), &bytes)
 }
 
-/// Remove the stored closure, so the reader finds none for this dirty state
-/// and reports `StaleClosure::not_computed`: the refresh that should have
-/// replaced it failed. A missing file is the goal state, not an error.
+/// Remove the stored closure. A missing file is the goal state, not an
+/// error.
+pub fn remove(session_dir: &Path) -> io::Result<()> {
+    match fs::remove_file(closure_path(session_dir)) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
+/// [`remove`], best effort: the refresh that should have replaced the
+/// closure failed and so did its [`store_not_computed`] marker. A dirty view
+/// then finds no closure and reports `StaleClosure::not_computed`; a
+/// config-only state finds none and carries no caveat.
 pub fn discard(session_dir: &Path) {
-    if let Err(e) = fs::remove_file(closure_path(session_dir)) {
-        if e.kind() != io::ErrorKind::NotFound {
-            eprintln!("ecp: L1 invalidation closure not removed: {e}");
-        }
+    if let Err(e) = remove(session_dir) {
+        eprintln!("ecp: L1 invalidation closure not removed: {e}");
     }
 }
 
@@ -199,12 +210,20 @@ fn stamps_of(worktree_root: &Path, configs: &[String]) -> Vec<ConfigStamp> {
 /// `size_cap`) to `inputs`: each entry whose file still has its parsed mtime
 /// and is no dirty path, hashed after the dirty inputs, then its stale
 /// kinds, then the dirty configs' stamps and parse ([`ViewInputs::configs`]).
+///
 /// A dirty view with no closure stored for this manifest gets
 /// `StaleClosure::not_computed`, and so does one whose closure file or dirty
 /// config was touched since its parse: that file is served as indexed, and
-/// a touched config serves no config edit. On a clean tree the cost is one
-/// open and an 8-byte read; a stored key other than the clean key (a dirty
-/// config) also reads the whole file and stats each stamp and entry.
+/// a touched config serves no config edit. A config-only state (no dirty
+/// source) whose stored closure is not current gets the same, and the
+/// configs the file stamps stand as kept ([`mark_not_computed`]); without a
+/// file to name them it gets nothing.
+///
+/// Cost on a clean tree: none, since the reader calls this only under a
+/// current manifest, and the gate removes a manifest with no entry once no
+/// config is dirty. Under a manifest with no stored closure, or one stored
+/// under the clean key: one open and an 8-byte read. Otherwise also the
+/// session meta, the whole file, and one stat per stamp and entry.
 pub(crate) fn attach(
     session_dir: &Path,
     worktree_root: &Path,
@@ -213,34 +232,27 @@ pub(crate) fn attach(
     inputs: &mut ViewInputs,
 ) {
     let dirty = !inputs.is_empty();
-    let not_computed = |inputs: &mut ViewInputs| {
-        if dirty {
-            inputs.stale = StaleClosure::not_computed();
-        }
-    };
     // A clean tree reads a closure only when one was stored over dirty
     // configs: no file, or the clean key, costs one open and 8 bytes.
     let stored = if dirty { None } else { stored_key(session_dir) };
     if !dirty && stored.is_none() {
         return;
     }
-    let Some(base_sha) = base_sha(session_dir) else {
-        return not_computed(inputs);
-    };
-    if stored == Some(closure_key(&base_sha, manifest, &[])) {
-        return;
+    let base_sha = base_sha(session_dir);
+    if let Some(sha) = &base_sha {
+        if stored == Some(closure_key(sha, manifest, &[])) {
+            return;
+        }
     }
-    let Some(file) = read(session_dir, size_cap)
-        .filter(|(key, file)| *key == closure_key(&base_sha, manifest, &file.stamps))
-        .map(|(_, file)| file)
-    else {
-        return not_computed(inputs);
+    let Some((key, file)) = read(session_dir, size_cap) else {
+        return mark_not_computed(inputs, dirty, &[]);
     };
-    let configs_current = file.stamps.iter().all(|stamp| {
-        crate::auto_ensure::mtime_ns_of(&worktree_root.join(&stamp.path)) == stamp.mtime_ns
-    });
-    if !configs_current {
-        return not_computed(inputs);
+    let current = base_sha.is_some_and(|sha| key == closure_key(&sha, manifest, &file.stamps))
+        && file.stamps.iter().all(|stamp| {
+            crate::auto_ensure::mtime_ns_of(&worktree_root.join(&stamp.path)) == stamp.mtime_ns
+        });
+    if !current {
+        return mark_not_computed(inputs, dirty, &file.stamps);
     }
     let mut hasher = Xxh3::new();
     hasher.update(&inputs.hash.to_le_bytes());
@@ -272,6 +284,44 @@ pub(crate) fn attach(
     inputs.hash = hasher.digest();
 }
 
+/// Mark `inputs` as served without a current closure. A dirty view is built
+/// anyway, so `StaleClosure::not_computed` alone reaches the caveat. A
+/// config-only state builds a view only while it names a dirty config
+/// (`ViewInputs::is_empty`), so the configs `stamps` name stand as kept:
+/// their archived rows answer, the caveat names them, and they join the
+/// view key so a view cached for other configs is not served. With no
+/// stamp to name, a config-only state stays clean.
+fn mark_not_computed(inputs: &mut ViewInputs, dirty: bool, stamps: &[ConfigStamp]) {
+    if dirty {
+        inputs.stale = StaleClosure::not_computed();
+        return;
+    }
+    if stamps.is_empty() {
+        return;
+    }
+    let kept = kept_paths(stamps);
+    inputs.stale = StaleClosure {
+        configs: kept.clone(),
+        ..StaleClosure::not_computed()
+    };
+    inputs.configs = ConfigEdits {
+        kept,
+        ..ConfigEdits::default()
+    };
+    let mut hasher = Xxh3::new();
+    hasher.update(&inputs.hash.to_le_bytes());
+    hash_part(&mut hasher, format!("{:?}", inputs.stale).as_bytes());
+    hash_part(&mut hasher, format!("{:?}", inputs.configs).as_bytes());
+    inputs.hash = hasher.digest();
+}
+
+/// The paths of `stamps`, sorted and unique as `StaleClosure::configs` and
+/// `ConfigEdits::kept` hold them.
+fn kept_paths(stamps: &[ConfigStamp]) -> Vec<String> {
+    let paths: BTreeSet<&String> = stamps.iter().map(|stamp| &stamp.path).collect();
+    paths.into_iter().cloned().collect()
+}
+
 /// Store the closure of the session's current manifest and the dirty
 /// resolution configs `configs` (repo-relative, a deleted one included)
 /// unless it is stored already: `auto_ensure` calls this after each L1
@@ -279,15 +329,18 @@ pub(crate) fn attach(
 /// not the current one, or the stored file is not current
 /// ([`stored_is_current`]). The closure also re-resolves the clean files the
 /// configs rescope, and the file stores their parse for the view.
+/// `manifest` is the session's current manifest when the caller holds it;
+/// `None` reads it.
 pub fn refresh_with_configs(
     worktree_root: &Path,
     session_dir: &Path,
+    manifest: Option<&DirtyEvents>,
     graph_path: &Path,
     size_cap: SizeCap,
     configs: &[String],
 ) -> io::Result<()> {
     let stamps = stamps_of(worktree_root, configs);
-    let Some(key) = current_key(session_dir, size_cap, &stamps) else {
+    let Some(key) = current_key(session_dir, manifest, size_cap, &stamps) else {
         return Ok(());
     };
     if stored_key(session_dir) == Some(key)
@@ -312,21 +365,78 @@ pub fn refresh_with_graph(
     configs: &[String],
 ) -> io::Result<()> {
     let stamps = stamps_of(worktree_root, configs);
-    match current_key(session_dir, size_cap, &stamps) {
+    match current_key(session_dir, None, size_cap, &stamps) {
         Some(key) => store(worktree_root, session_dir, graph, size_cap, key, stamps),
         None => Ok(()),
     }
 }
 
+/// Store a marker closure under the key of the current manifest and the
+/// dirty configs `configs`: the refresh failed. The marker is
+/// `StaleClosure::not_computed` with no parse, and it names the dirty
+/// configs as kept, so the reader reports the closure as not computed even
+/// for a config-only state, whose view exists only while it names a config.
+/// [`stored_is_current`] refuses the marker, so the next refresh retries.
+/// `manifest` as in [`refresh_with_configs`]. An error without a current
+/// manifest or session meta, so the caller can [`discard`] the old file.
+pub fn store_not_computed(
+    worktree_root: &Path,
+    session_dir: &Path,
+    manifest: Option<&DirtyEvents>,
+    size_cap: SizeCap,
+    configs: &[String],
+) -> io::Result<()> {
+    let stamps = stamps_of(worktree_root, configs);
+    let key = current_key(session_dir, manifest, size_cap, &stamps).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "no current manifest or session meta to key the marker",
+        )
+    })?;
+    let kept = kept_paths(&stamps);
+    write(
+        session_dir,
+        key,
+        &ClosureFile {
+            format: CLOSURE_FORMAT,
+            builder_fingerprint: BUILDER_FINGERPRINT.to_string(),
+            size_cap_bytes: size_cap.bytes(),
+            stale: StaleClosure {
+                configs: kept.clone(),
+                ..StaleClosure::not_computed()
+            },
+            entries: Vec::new(),
+            stamps,
+            configs: ConfigEdits {
+                kept,
+                ..ConfigEdits::default()
+            },
+        },
+    )
+}
+
 /// The key of the current manifest and `stamps` under `size_cap`; `None`
 /// without a current manifest or a session meta: the reader then serves no
-/// dirty input either.
-fn current_key(session_dir: &Path, size_cap: SizeCap, stamps: &[ConfigStamp]) -> Option<u64> {
-    let manifest = DirtyEvents::read(&layout::dirty_events_path(session_dir)).ok()?;
+/// dirty input either. `manifest` is the manifest the caller holds; `None`
+/// reads it.
+fn current_key(
+    session_dir: &Path,
+    manifest: Option<&DirtyEvents>,
+    size_cap: SizeCap,
+    stamps: &[ConfigStamp],
+) -> Option<u64> {
+    let read;
+    let manifest = match manifest {
+        Some(manifest) => manifest,
+        None => {
+            read = DirtyEvents::read(&layout::dirty_events_path(session_dir)).ok()?;
+            &read
+        }
+    };
     if !manifest.is_current(size_cap) {
         return None;
     }
-    Some(closure_key(&base_sha(session_dir)?, &manifest, stamps))
+    Some(closure_key(&base_sha(session_dir)?, manifest, stamps))
 }
 
 /// Compute the closure of the dirty inputs and configs over `graph`, parse
@@ -877,7 +987,8 @@ mod tests {
         discard(&session_dir);
     }
 
-    /// Stands for: a clean tree attaches nothing, whatever is stored.
+    /// Stands for: a clean tree attaches nothing from a closure stored under
+    /// the clean key (no dirty config stamped).
     #[test]
     fn test_attach_empty_inputs_stays_empty() {
         let dir = tempfile::tempdir().unwrap();
@@ -1096,6 +1207,152 @@ mod tests {
         assert!(inputs.configs.is_empty());
         assert!(inputs.stale.not_computed);
         assert_eq!(inputs.hash, 5);
+    }
+
+    fn clean_inputs() -> ViewInputs {
+        ViewInputs {
+            fragments: Vec::new(),
+            tombstones: Vec::new(),
+            stale: StaleClosure::default(),
+            configs: ConfigEdits::default(),
+            hash: 0,
+        }
+    }
+
+    /// Stands for: with no dirty source, a stored closure whose config was
+    /// touched since its parse serves no config edit and still reaches the
+    /// caveat: the view inputs stay non-empty, name the config as kept, and
+    /// say the closure is not computed. On HEAD the config-only state
+    /// dropped the mark and the inputs read as a clean tree.
+    #[test]
+    fn test_attach_config_only_stamp_moved_marks_not_computed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (session_dir, worktree, _, _) = session(dir.path(), &[]);
+        let manifest = DirtyEvents::empty(SizeCap::BUILT_IN);
+        let mut file = config_closure(&worktree);
+        file.stamps[0].mtime_ns = file.stamps[0].mtime_ns.map(|m| m + 1);
+        let key = closure_key("base", &manifest, &file.stamps);
+        write(&session_dir, key, &file).unwrap();
+        let mut inputs = clean_inputs();
+        attach(
+            &session_dir,
+            &worktree,
+            SizeCap::BUILT_IN,
+            &manifest,
+            &mut inputs,
+        );
+        assert!(!inputs.is_empty(), "the view still builds");
+        assert!(inputs.stale.not_computed, "{:?}", inputs.stale);
+        assert!(inputs.stale.kinds.contains(&"Calls".to_string()));
+        assert_eq!(inputs.stale.configs, vec!["tsconfig.json".to_string()]);
+        assert_eq!(inputs.configs.kept, vec!["tsconfig.json".to_string()]);
+        assert!(
+            inputs.configs.applied.is_empty() && inputs.configs.repo_wide.is_none(),
+            "the touched parse is not served: {:?}",
+            inputs.configs
+        );
+        assert_ne!(inputs.hash, 0, "the kept config moves the view key");
+    }
+
+    /// Stands for: with no dirty source, a stored closure keyed over another
+    /// manifest (the manifest moved since the store) reports not computed
+    /// and names the configs it stamps; a session without a stored closure
+    /// stays clean.
+    #[test]
+    fn test_attach_config_only_other_manifest_marks_not_computed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (session_dir, worktree, other, _) = session(dir.path(), &[]);
+        let manifest = DirtyEvents::empty(SizeCap::BUILT_IN);
+        let mut inputs = clean_inputs();
+        attach(
+            &session_dir,
+            &worktree,
+            SizeCap::BUILT_IN,
+            &manifest,
+            &mut inputs,
+        );
+        assert!(inputs.is_empty() && inputs.stale.is_empty(), "no file");
+
+        let file = config_closure(&worktree);
+        let key = closure_key("base", &other, &file.stamps);
+        write(&session_dir, key, &file).unwrap();
+        attach(
+            &session_dir,
+            &worktree,
+            SizeCap::BUILT_IN,
+            &manifest,
+            &mut inputs,
+        );
+        assert!(inputs.stale.not_computed, "{:?}", inputs.stale);
+        assert_eq!(inputs.configs.kept, vec!["tsconfig.json".to_string()]);
+        assert!(inputs.configs.applied.is_empty());
+    }
+
+    /// Stands for: the marker a failed refresh stores makes a config-only
+    /// reader report the closure as not computed and name the dirty config,
+    /// and the next refresh does not keep it. Without the marker (on HEAD,
+    /// `discard`) the reader found no file and served a clean tree.
+    #[test]
+    fn test_store_not_computed_config_only_reader_names_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let (session_dir, worktree, _, _) = session(dir.path(), &[]);
+        fs::write(worktree.join("go.mod"), "module example.com/new\n").unwrap();
+        let manifest = DirtyEvents::empty(SizeCap::BUILT_IN);
+        let configs = vec!["go.mod".to_string()];
+        store_not_computed(
+            &worktree,
+            &session_dir,
+            Some(&manifest),
+            SizeCap::BUILT_IN,
+            &configs,
+        )
+        .unwrap();
+        let mut inputs = clean_inputs();
+        attach(
+            &session_dir,
+            &worktree,
+            SizeCap::BUILT_IN,
+            &manifest,
+            &mut inputs,
+        );
+        assert!(!inputs.is_empty());
+        assert!(inputs.stale.not_computed, "{:?}", inputs.stale);
+        assert_eq!(inputs.stale.configs, configs);
+        assert_eq!(inputs.configs.kept, configs);
+        let stamps = stamps_of(&worktree, &configs);
+        let key = current_key(&session_dir, Some(&manifest), SizeCap::BUILT_IN, &stamps).unwrap();
+        assert!(
+            !stored_is_current(&worktree, &session_dir, SizeCap::BUILT_IN, key),
+            "the marker is retried"
+        );
+    }
+
+    /// Stands for: no current manifest leaves no key, so the marker is an
+    /// error the caller answers with `discard`; nothing is written.
+    #[test]
+    fn test_store_not_computed_no_current_manifest_errs_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (session_dir, worktree, _, _) = session(dir.path(), &[]);
+        let err = store_not_computed(
+            &worktree,
+            &session_dir,
+            None,
+            SizeCap::BUILT_IN,
+            &["go.mod".to_string()],
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert!(!closure_path(&session_dir).exists());
+        let other_cap = DirtyEvents::empty(SizeCap::resolve(Some("1"), None));
+        assert!(store_not_computed(
+            &worktree,
+            &session_dir,
+            Some(&other_cap),
+            SizeCap::BUILT_IN,
+            &[],
+        )
+        .is_err());
+        assert!(!closure_path(&session_dir).exists());
     }
 
     /// A tree of `files` and the scope rows the index stores for it.

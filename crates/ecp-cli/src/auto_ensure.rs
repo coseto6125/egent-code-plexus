@@ -671,7 +671,7 @@ pub(crate) fn ensure_fresh_with_rebuild(
         // the probe's set still names the entries it skipped.
         EnsureResult::Ready => {
             if let (Some(dir), Some(manifest)) = (&session_dir, &manifest) {
-                retire_unclaimed_best_effort(dir, manifest, &[]);
+                retire_all_best_effort(dir, manifest);
             }
             Ok(Ensured::current(
                 ready_dirty.or_else(|| DirtySet::from_events(Vec::new()).ok()),
@@ -792,16 +792,34 @@ pub(crate) fn ensure_fresh_with_rebuild(
                     if walked {
                         write_head_sha_sidecar(graph_path, worktree_root);
                     }
-                    if let (Some(dir), Some(manifest)) = (&session_dir, &manifest) {
-                        retire_unclaimed_best_effort(dir, manifest, &rel_paths);
+                    // A set of neither sources nor configs (a walk that
+                    // found only other kinds) is a clean tree to the
+                    // overlay, as in the Ready arm.
+                    let clean = rel_paths.is_empty() && configs.is_empty();
+                    // The snapshot is the manifest the closure keys over
+                    // while the retire pass left it as it was; else the
+                    // refresh reads the manifest again.
+                    let unchanged = match (&session_dir, &manifest) {
+                        (Some(dir), Some(snapshot)) if clean => {
+                            retire_all_best_effort(dir, snapshot);
+                            None
+                        }
+                        (Some(dir), Some(snapshot)) => {
+                            retire_unclaimed_best_effort(dir, snapshot, &rel_paths)
+                                .then_some(snapshot)
+                        }
+                        _ => None,
+                    };
+                    if !clean {
+                        refresh_closure_best_effort(
+                            worktree_root,
+                            session_dir.as_deref(),
+                            unchanged,
+                            graph_path,
+                            size_cap,
+                            &configs,
+                        );
                     }
-                    refresh_closure_best_effort(
-                        worktree_root,
-                        session_dir.as_deref(),
-                        graph_path,
-                        size_cap,
-                        &configs,
-                    );
                     return Ok(Ensured::refreshed(dirty, size_cap));
                 }
                 // Stat BEFORE parsing: the manifest mtime must belong to the
@@ -895,9 +913,12 @@ pub(crate) fn ensure_fresh_with_rebuild(
                 if let (Some(dir), Some(manifest)) = (&session_dir, &manifest) {
                     retire_unclaimed_best_effort(dir, manifest, &rel_paths);
                 }
+                // The refresh above rewrote the manifest: the snapshot is
+                // not the one the reader sees.
                 refresh_closure_best_effort(
                     worktree_root,
                     session_dir.as_deref(),
+                    None,
                     graph_path,
                     size_cap,
                     &configs,
@@ -1511,12 +1532,13 @@ fn dirty_paths_of(dirty: &DirtySet<ClassifiedPath>, keep: fn(PathClass) -> bool)
 /// only if it still equals its snapshot row: an entry another process
 /// published or rewrote since then stays. An entry that was retired and
 /// re-published identically in between (an ABA) goes; its path is dirty
-/// again, and the next refresh writes it back.
+/// again, and the next refresh writes it back. Returns how many entries it
+/// retired.
 fn retire_unclaimed_entries(
     session_dir: &Path,
     manifest: &ecp_core::session::DirtyEvents,
     dirty_sources: &[String],
-) -> io::Result<()> {
+) -> io::Result<usize> {
     let claimed: std::collections::HashSet<&str> =
         dirty_sources.iter().map(String::as_str).collect();
     let unclaimed: Vec<&str> = manifest
@@ -1526,7 +1548,7 @@ fn retire_unclaimed_entries(
         .filter(|path| !claimed.contains(path))
         .collect();
     if unclaimed.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
     // Only a dirty path whose module prefix starts an unclaimed path can
     // shadow it, so the exact test sees a handful of paths, not the set.
@@ -1552,21 +1574,43 @@ fn retire_unclaimed_entries(
         })
         .collect();
     if stale.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
-    crate::session::overlay_writer::retire_entries(session_dir, &stale).map(drop)
+    crate::session::overlay_writer::retire_entries(session_dir, &stale)
 }
 
 /// Retire is cleanup: the reader's mtime check already drops a stale entry.
 /// A lock timeout (`ecp admin gc` holds `overlay.lock`) or a read-only session
 /// dir must not turn a correct answer into `Error preparing index`, and must
-/// not skip the HEAD sidecar write that follows.
+/// not skip the HEAD sidecar write that follows. Returns true when it left
+/// the manifest as `manifest` holds it (nothing to retire); false when it
+/// retired an entry or failed, so the manifest must be read again.
 fn retire_unclaimed_best_effort(
     session_dir: &Path,
     manifest: &ecp_core::session::DirtyEvents,
     dirty_sources: &[String],
-) {
-    if let Err(e) = retire_unclaimed_entries(session_dir, manifest, dirty_sources) {
+) -> bool {
+    match retire_unclaimed_entries(session_dir, manifest, dirty_sources) {
+        Ok(retired) => retired == 0,
+        Err(e) => {
+            eprintln!("ecp: L1 overlay retire skipped: {e}");
+            false
+        }
+    }
+}
+
+/// The overlay's share of a dirty set that holds no source and no config:
+/// the retire pass drops every entry of `manifest`, and a manifest with no
+/// entry (one a config-only edit left) goes with the stored closure
+/// (`overlay_writer::remove_empty_manifest`). Without the removal the
+/// reader keeps the closure of a config that is no longer dirty, reads it on
+/// every query, and prints its kept-config caveat. Best effort, as retire.
+fn retire_all_best_effort(session_dir: &Path, manifest: &ecp_core::session::DirtyEvents) {
+    if !manifest.entries.is_empty() {
+        retire_unclaimed_best_effort(session_dir, manifest, &[]);
+        return;
+    }
+    if let Err(e) = crate::session::overlay_writer::remove_empty_manifest(session_dir) {
         eprintln!("ecp: L1 overlay retire skipped: {e}");
     }
 }
@@ -1574,65 +1618,83 @@ fn retire_unclaimed_best_effort(
 /// Store the invalidation closure of the manifest this refresh left behind
 /// (`session::closure_store`): the clean files that depend on the dirty
 /// change, re-parsed for the view. It runs after the retire pass, so its key
-/// is the manifest the reader will see; with that key stored already, it
-/// costs three small reads. Best effort, as retire: on failure the reader
-/// finds no closure for this dirty state and reports
-/// `StaleClosure::not_computed`, so clean files answer as indexed. The failed
-/// refresh also discards the stored closure: a config dirtied since the store
-/// has no stamp in it, and the reader would serve it as current.
+/// is the manifest the reader will see. `manifest` is that manifest when the
+/// caller holds it (the gate's snapshot, which the retire pass left as it
+/// was); `None` reads it.
+///
+/// With the key stored already and current, a query pays: one stat per
+/// dirty config, the session meta read, the 8-byte key read, and the whole
+/// closure file with one stat per entry (`closure_store::stored_is_current`);
+/// plus one manifest read when `manifest` is `None`. Nothing is written.
+///
+/// Best effort, as retire. On failure it stores a marker
+/// (`closure_store::store_not_computed`): the reader reports
+/// `StaleClosure::not_computed`, names the dirty configs as kept, and clean
+/// files answer as indexed. Only when the marker cannot be stored is the
+/// old closure discarded: a config dirtied since that store has no stamp in
+/// it, and the reader would serve it as current. A config-only state then
+/// carries no caveat; so does one whose manifest could not be written.
 fn refresh_closure_best_effort(
     worktree_root: &Path,
     session_dir: Option<&Path>,
+    manifest: Option<&ecp_core::session::DirtyEvents>,
     graph_path: &Path,
     size_cap: SizeCap,
     configs: &[String],
 ) {
+    use crate::session::closure_store;
     let Some(dir) = session_dir else {
         return;
     };
-    if !configs.is_empty() {
-        if let Err(e) = ensure_manifest_for_configs(worktree_root, dir, size_cap) {
-            eprintln!("ecp: L1 manifest for dirty configs skipped: {e}");
-        }
-    }
-    if let Err(e) = crate::session::closure_store::refresh_with_configs(
+    let ensured = if configs.is_empty() {
+        None
+    } else {
+        ensure_manifest_for_configs(worktree_root, dir, size_cap, manifest)
+            .map_err(|e| eprintln!("ecp: L1 manifest for dirty configs skipped: {e}"))
+            .ok()
+    };
+    // A failed ensure leaves `None`: the refresh reads what is on disk.
+    let manifest = if configs.is_empty() {
+        manifest
+    } else {
+        ensured.as_deref()
+    };
+    let refreshed = closure_store::refresh_with_configs(
         worktree_root,
         dir,
+        manifest,
         graph_path,
         size_cap,
         configs,
-    ) {
-        eprintln!("ecp: L1 invalidation closure skipped: {e}");
-        crate::session::closure_store::discard(dir);
+    );
+    let Err(e) = refreshed else {
+        return;
+    };
+    eprintln!("ecp: L1 invalidation closure skipped: {e}");
+    let marked = closure_store::store_not_computed(worktree_root, dir, manifest, size_cap, configs);
+    if let Err(e) = marked {
+        eprintln!("ecp: L1 invalidation closure marker skipped: {e}");
+        closure_store::discard(dir);
     }
 }
 
-/// Leave a current manifest in the session when a config is dirty. Only a
-/// source refresh writes one, so a tree whose only dirty file is a config
-/// (`go.mod`, `Cargo.toml`) has none, and the closure key, which hashes the
-/// manifest, would not exist: nothing would be stored and the view would
-/// carry no caveat. An empty manifest names no fragment, so the reader serves
-/// no dirty source from it. A current manifest, entries included, stays.
-fn ensure_manifest_for_configs(
+/// A current manifest for the session when a config is dirty
+/// (`overlay_writer::ensure_current_manifest`). Only a source refresh
+/// writes one, so a tree whose only dirty file is a config (`go.mod`,
+/// `Cargo.toml`) has none. `snapshot` is the manifest the caller holds:
+/// when it is current, this costs nothing. Otherwise the session and its
+/// meta are made first, since the lock and the manifest live in the session
+/// dir and a new session needs its meta before its first manifest.
+fn ensure_manifest_for_configs<'a>(
     worktree_root: &Path,
     session_dir: &Path,
     size_cap: SizeCap,
-) -> io::Result<()> {
-    use ecp_core::session::{layout, DirtyEvents};
-    let path = layout::dirty_events_path(session_dir);
-    if DirtyEvents::read(&path).is_ok_and(|m| m.is_current(size_cap)) {
-        return Ok(());
+    snapshot: Option<&'a ecp_core::session::DirtyEvents>,
+) -> io::Result<std::borrow::Cow<'a, ecp_core::session::DirtyEvents>> {
+    if !snapshot.is_some_and(|m| m.is_current(size_cap)) {
+        ensure_session_meta(session_dir, worktree_root)?;
     }
-    fs::create_dir_all(session_dir)?;
-    ensure_session_meta(session_dir, worktree_root)?;
-    let _publish = ecp_core::registry::FileLock::acquire_exclusive(
-        &crate::session::overlay_writer::overlay_lock_path(session_dir),
-    )?;
-    // A writer may have published a manifest while this one waited.
-    if DirtyEvents::read(&path).is_ok_and(|m| m.is_current(size_cap)) {
-        return Ok(());
-    }
-    DirtyEvents::write_atomic(&path, &DirtyEvents::empty(size_cap))
+    crate::session::overlay_writer::ensure_current_manifest(session_dir, size_cap, snapshot)
 }
 
 /// The path up to the first `.` of its file name, without a trailing
@@ -3166,6 +3228,138 @@ mod retire_unclaimed_tests {
         retire_unclaimed_entries(&session_dir, &snapshot(&session_dir), &dirty).unwrap();
 
         assert_eq!(entries(&session_dir), ["src/util.d.ts", "src/util.ts"]);
+    }
+
+    fn manifest_path(session_dir: &Path) -> PathBuf {
+        layout::dirty_events_path(session_dir)
+    }
+
+    fn closure_path(session_dir: &Path) -> PathBuf {
+        crate::session::closure_store::closure_path(session_dir)
+    }
+
+    /// Writes the empty manifest a config-only edit leaves, and a stored
+    /// closure beside it (its bytes do not matter to the removal).
+    fn config_only_session(session_dir: &Path) {
+        fs::create_dir_all(layout::l1_dir(session_dir)).unwrap();
+        DirtyEvents::write_atomic(
+            &manifest_path(session_dir),
+            &DirtyEvents::empty(SizeCap::BUILT_IN),
+        )
+        .unwrap();
+        fs::write(closure_path(session_dir), [1u8; 16]).unwrap();
+    }
+
+    /// Stands for: once nothing is dirty, the empty manifest a config-only
+    /// edit left goes with its stored closure, so the reader attaches
+    /// nothing and prints no kept-config caveat. On HEAD the Ready arm's
+    /// retire pass returned early on a manifest with no entry and both
+    /// stayed.
+    #[test]
+    fn test_retire_all_best_effort_empty_manifest_removes_it_and_closure() {
+        let (_tmp, _worktree, session_dir) = fixture(&[]);
+        config_only_session(&session_dir);
+        let before = snapshot(&session_dir);
+
+        retire_all_best_effort(&session_dir, &before);
+
+        assert!(!manifest_path(&session_dir).exists());
+        assert!(!closure_path(&session_dir).exists());
+        // A second pass over a session with neither is a no-op, not an error.
+        retire_all_best_effort(&session_dir, &before);
+        assert!(!manifest_path(&session_dir).exists());
+    }
+
+    /// Stands for: an entry another process published after the snapshot
+    /// keeps the manifest and the closure keyed over it: the removal judges
+    /// the manifest under the publish lock, not the snapshot.
+    #[test]
+    fn test_retire_all_best_effort_entry_published_after_snapshot_kept() {
+        let (_tmp, worktree, session_dir) = fixture(&[]);
+        config_only_session(&session_dir);
+        let before = snapshot(&session_dir);
+        publish(&worktree, &session_dir, "src/new.rs");
+
+        retire_all_best_effort(&session_dir, &before);
+
+        assert_eq!(entries(&session_dir), ["src/new.rs"]);
+        assert!(closure_path(&session_dir).exists());
+    }
+
+    /// Stands for: a manifest with entries takes the retire pass, as before.
+    #[test]
+    fn test_retire_all_best_effort_entries_retired() {
+        let (_tmp, _worktree, session_dir) = fixture(&["src/a.rs"]);
+        let before = snapshot(&session_dir);
+
+        retire_all_best_effort(&session_dir, &before);
+
+        assert!(entries(&session_dir).is_empty());
+        assert!(!manifest_path(&session_dir).exists());
+    }
+
+    /// Stands for: with no manifest, a dirty config gets an empty current one
+    /// on disk; a current snapshot is the answer with nothing written; a
+    /// current manifest on disk, entries included, is returned and kept over
+    /// a snapshot that is not current (a second process ensuring the same
+    /// state).
+    #[test]
+    fn test_ensure_manifest_for_configs_absent_current_and_published() {
+        use std::borrow::Cow;
+        let (_tmp, worktree, session_dir) = fixture(&[]);
+        let cap = SizeCap::BUILT_IN;
+
+        let current = DirtyEvents::empty(cap);
+        let got =
+            ensure_manifest_for_configs(&worktree, &session_dir, cap, Some(&current)).unwrap();
+        assert!(matches!(got, Cow::Borrowed(_)));
+        assert!(!manifest_path(&session_dir).exists(), "nothing written");
+
+        let got = ensure_manifest_for_configs(&worktree, &session_dir, cap, None).unwrap();
+        assert!(got.entries.is_empty() && got.is_current(cap));
+        assert!(snapshot(&session_dir).is_current(cap), "written");
+
+        publish(&worktree, &session_dir, "src/a.rs");
+        let other_cap = DirtyEvents::empty(SizeCap::resolve(Some("1"), None));
+        let got =
+            ensure_manifest_for_configs(&worktree, &session_dir, cap, Some(&other_cap)).unwrap();
+        assert_eq!(got.entries.keys().collect::<Vec<_>>(), ["src/a.rs"]);
+        assert_eq!(entries(&session_dir), ["src/a.rs"], "not overwritten");
+    }
+
+    /// Stands for: a refresh that fails in a config-only session (here the
+    /// graph does not load) stores the not-computed marker, so the reader's
+    /// inputs are not a clean tree: they name `go.mod` as kept and say the
+    /// closure was not computed, which the payload prints as its caveat. On
+    /// HEAD the failure discarded the closure, the reader found none, and
+    /// the answer served the indexed module path with no caveat.
+    #[test]
+    fn test_refresh_closure_best_effort_graph_load_fails_view_names_not_computed() {
+        let (tmp, worktree, session_dir) = fixture(&[]);
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(worktree.join("go.mod"), "module example.com/new\n").unwrap();
+        let configs = vec!["go.mod".to_string()];
+
+        refresh_closure_best_effort(
+            &worktree,
+            Some(session_dir.as_path()),
+            None,
+            &tmp.path().join("missing/graph.bin"),
+            SizeCap::BUILT_IN,
+            &configs,
+        );
+
+        let inputs = crate::session::overlay_reader::view_inputs_under(
+            &session_dir,
+            &worktree,
+            SizeCap::BUILT_IN,
+        )
+        .unwrap();
+        assert!(!inputs.is_empty(), "the config-only view builds");
+        assert!(inputs.stale.not_computed, "{:?}", inputs.stale);
+        assert_eq!(inputs.stale.configs, configs);
+        assert_eq!(inputs.configs.kept, configs);
+        assert!(inputs.configs.applied.is_empty());
     }
 
     #[test]

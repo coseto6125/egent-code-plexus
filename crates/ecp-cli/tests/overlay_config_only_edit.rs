@@ -116,6 +116,37 @@ impl Repo {
     fn write(&self, rel: &str, text: &str) {
         fs::write(self.repo.join(rel), text).unwrap();
     }
+
+    fn index(&self) {
+        let out = self
+            .ecp_command()
+            .args(["admin", "index", "--repo", self.repo.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "admin index: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// The fixture's session dir, `<home>/.ecp/<repo dir>/sessions/<id>`;
+    /// `None` before a query made it.
+    fn session_dir(&self) -> Option<PathBuf> {
+        fs::read_dir(self.home.join(".ecp"))
+            .ok()?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path().join("sessions").join(self.session_id))
+            .find(|dir| dir.is_dir())
+    }
+}
+
+/// The empty manifest and the stored closure of a config-only edit.
+fn l1_files(session: &std::path::Path) -> [PathBuf; 2] {
+    [
+        session.join("l1").join("dirty_events.json"),
+        session.join("l1").join("closure.bin"),
+    ]
 }
 
 fn result_of(payload: &Value) -> String {
@@ -205,4 +236,45 @@ fn test_find_cargo_toml_only_edit_result_names_kept_config() {
         1,
         "indexed edge kept: {first}"
     );
+}
+
+/// Stands for: once the `Cargo.toml` edit is committed and HEAD is indexed,
+/// the tree is clean, so the answer carries no kept-config caveat, and the
+/// empty manifest and stored closure the edit left are gone (a clean tree
+/// reads neither again). The marker is the `(kept configs: Cargo.toml)` text
+/// of `result`, present while the edit is dirty. `admin index` stands for
+/// the background rebuild a commit starts (`ECP_SKIP_BG_REBUILD` holds it
+/// off here); without it the query warm-attaches the parent's graph.
+#[test]
+fn test_find_cargo_toml_only_edit_committed_result_has_no_caveat() {
+    let fx = Repo::new(
+        "cfg-only-cargo-commit",
+        &[
+            ("Cargo.toml", CARGO_OLD),
+            ("src/lib.rs", LIB_RS),
+            ("src/a.rs", A_RS),
+        ],
+    );
+    fx.write("Cargo.toml", CARGO_NEW);
+    let dirty = result_of(&fx.find("helper"));
+    assert!(
+        dirty.contains("kept configs: Cargo.toml"),
+        "setup: the caveat shows while the edit is dirty: {dirty:?}"
+    );
+    let session = fx.session_dir().expect("setup: the query made a session");
+    for file in l1_files(&session) {
+        assert!(file.exists(), "setup: {} written", file.display());
+    }
+
+    fx.git(&["commit", "-qam", "bump"]);
+    fx.index();
+    let clean = fx.find("helper");
+    let again = fx.find("helper");
+
+    assert_eq!(result_of(&clean), "", "clean tree, no caveat: {clean}");
+    assert_eq!(result_of(&again), "", "still none: {again}");
+    assert_eq!(callers_in(&clean, "src/a.rs"), 1, "{clean}");
+    for file in l1_files(&session) {
+        assert!(!file.exists(), "{} left behind", file.display());
+    }
 }

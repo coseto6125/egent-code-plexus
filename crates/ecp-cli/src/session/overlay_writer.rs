@@ -32,6 +32,7 @@ use ecp_core::session::view::OverlayFileRecords;
 use ecp_core::session::{DirtyEventEntry, DirtyEvents, SessionMeta};
 use rayon::prelude::*;
 use rkyv::{Archive, Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
@@ -504,14 +505,7 @@ fn commit_fragment_results(
             }
         }
         let manifest_path = layout::dirty_events_path(session_dir);
-        // A manifest of another format, builder or cap, or one that does not
-        // parse, holds entries the freshness gate re-parses whole: none is
-        // kept. Replacing it (instead of failing the write) is what lets
-        // that re-parse land.
-        let mut manifest = DirtyEvents::read(&manifest_path)
-            .ok()
-            .filter(|m| m.is_current(size_cap))
-            .unwrap_or_else(|| DirtyEvents::empty(size_cap));
+        let mut manifest = current_or_empty(&manifest_path, size_cap);
         for fragment in staged {
             manifest.entries.insert(fragment.rel_path, fragment.entry);
             outcomes.push(fragment.outcome);
@@ -531,6 +525,78 @@ fn commit_fragment_results(
     atomic_write_json(&sm_path, &sm)?;
 
     Ok(outcomes)
+}
+
+/// The manifest at `manifest_path` when it parses and is current under
+/// `size_cap`; `None` otherwise. A manifest of another format, builder or
+/// cap, or one that does not parse, holds entries the freshness gate
+/// re-parses whole, so a writer keeps none of them.
+fn read_current(manifest_path: &Path, size_cap: SizeCap) -> Option<DirtyEvents> {
+    DirtyEvents::read(manifest_path)
+        .ok()
+        .filter(|m| m.is_current(size_cap))
+}
+
+/// [`read_current`], or an empty manifest under `size_cap`. Replacing a
+/// manifest that is not current (instead of failing the write) is what lets
+/// the freshness gate's re-parse land.
+fn current_or_empty(manifest_path: &Path, size_cap: SizeCap) -> DirtyEvents {
+    read_current(manifest_path, size_cap).unwrap_or_else(|| DirtyEvents::empty(size_cap))
+}
+
+/// A current manifest for the session, written empty when there is none.
+/// A dirty resolution config with no dirty source needs one: the closure
+/// key hashes the manifest (`closure_store`), and without a key no closure
+/// is stored and the view carries no caveat. An empty manifest names no
+/// fragment, so the reader serves no dirty source from it.
+///
+/// `snapshot` is the manifest the caller read. When it is current it is the
+/// answer, and nothing is read or written. Otherwise the check repeats
+/// under the publish lock, so a current manifest another writer published
+/// meanwhile, entries included, stays and is returned. The caller makes the
+/// session dir and its meta first.
+pub fn ensure_current_manifest<'a>(
+    session_dir: &Path,
+    size_cap: SizeCap,
+    snapshot: Option<&'a DirtyEvents>,
+) -> io::Result<Cow<'a, DirtyEvents>> {
+    if let Some(current) = snapshot.filter(|m| m.is_current(size_cap)) {
+        return Ok(Cow::Borrowed(current));
+    }
+    let _publish = FileLock::acquire_exclusive(&overlay_lock_path(session_dir))?;
+    let manifest_path = layout::dirty_events_path(session_dir);
+    if let Some(current) = read_current(&manifest_path, size_cap) {
+        return Ok(Cow::Owned(current));
+    }
+    let empty = DirtyEvents::empty(size_cap);
+    DirtyEvents::write_atomic(&manifest_path, &empty)?;
+    Ok(Cow::Owned(empty))
+}
+
+/// Removes the manifest when it holds no entry, and the stored closure with
+/// it, under the publish lock: the caller found no dirty source and no
+/// dirty config, so the manifest a config-only edit left behind serves
+/// nothing. Without this the clean tree keeps reading the closure and
+/// printing its caveat. A manifest with entries, a missing one and one that
+/// does not parse stay; the retire pass handles entries. Returns whether
+/// it removed the manifest.
+///
+/// A concurrent query that saw a config dirty and wrote the empty manifest
+/// just before this removal loses it for that one answer; its config is
+/// still dirty, so the next refresh writes it back (the retire pass's ABA).
+pub fn remove_empty_manifest(session_dir: &Path) -> io::Result<bool> {
+    let _publish = FileLock::acquire_exclusive(&overlay_lock_path(session_dir))?;
+    let manifest_path = layout::dirty_events_path(session_dir);
+    if !DirtyEvents::read(&manifest_path).is_ok_and(|m| m.entries.is_empty()) {
+        return Ok(false);
+    }
+    // The closure goes first: an empty manifest left without a closure
+    // reads as a clean tree, a closure left without a manifest is never read.
+    super::closure_store::remove(session_dir)?;
+    match fs::remove_file(&manifest_path) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(true),
+    }
 }
 
 /// Drops each manifest entry `stale` names, under the publish lock, when the
@@ -829,10 +895,7 @@ impl OverlayWriter {
 
         let manifest_path = layout::dirty_events_path(&self.session_dir);
         let size_cap = session_size_cap(&self.session_dir);
-        let mut manifest = DirtyEvents::read(&manifest_path)
-            .ok()
-            .filter(|m| m.is_current(size_cap))
-            .unwrap_or_else(|| DirtyEvents::empty(size_cap));
+        let mut manifest = current_or_empty(&manifest_path, size_cap);
 
         let event = DirtyPathEvent::PARSED_SOURCE;
         manifest.entries.insert(

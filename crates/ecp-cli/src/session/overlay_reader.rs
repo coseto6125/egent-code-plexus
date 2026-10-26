@@ -71,9 +71,11 @@ pub struct ViewInputs {
     /// Repo-relative paths of deleted files and of the old halves of
     /// renames: `OverlayView::build_with_removed`'s `removed`.
     pub tombstones: Vec<String>,
-    /// `OverlayView::build_with_configs`'s `stale`: empty without dirty
-    /// input, and `StaleClosure::not_computed` when no closure is stored for
-    /// this manifest.
+    /// `OverlayView::build_with_configs`'s `stale`: empty on a clean tree,
+    /// and `StaleClosure::not_computed` when no current closure is stored
+    /// for this dirty state (`closure_store::attach`). A config-only state
+    /// marked so also names its configs here and in [`Self::configs`] as
+    /// kept, since only a named config builds its view.
     pub stale: StaleClosure,
     /// `OverlayView::build_with_configs`'s `configs`: the dirty resolution
     /// configs' rows, empty without a dirty config.
