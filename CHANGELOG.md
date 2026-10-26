@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.17.0 - 2026-10-26
+
+### Features
+
+- **Breaking:** architecture phase 2 (crate table, l1 dirty events, one uid assignment, one resolution ladder, workspace scopes, stored parse language, incremental overlay with an invalidation closure, remove ecp rename) (#871)
+- architecture refactor phase 1 contracts and phase 2 waves 1-2 (routing, read context, one Resolution, payload caveats) (#870)
+- architecture refactor phase 0 (parity harness, graph locks, exact Cypher, filter-driver guard) (#869)
+
+### Bug Fixes
+
+- list breaking `type!:` commits in the changelog
+- dry-run reports the ECP.md copy and import only when they would change (#866)
+
 ## v0.16.4 - 2026-10-23
 
 ### Bug Fixes
