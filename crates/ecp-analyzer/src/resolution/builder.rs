@@ -28,6 +28,7 @@ pub use ecp_core::analyzer::types::{
 use ecp_core::contracts::identity::{lexical_parents, RouteKey, UidSlot};
 use ecp_core::contracts::raw_records::{FileOrd, RawEndpoint, RawIdx, RawIndexMap, Unbound};
 use ecp_core::contracts::routing::{FileRouter, Language as RouteLanguage};
+use ecp_core::contracts::workspace::WorkspaceFacts;
 use ecp_core::file_category::determine_category;
 use ecp_core::graph::{
     BlindSpotRecord, CallMeta, Edge, ExportAliasFact, File, FileCategory, FunctionMeta, ImportFact,
@@ -201,6 +202,10 @@ pub struct GraphBuilder {
     /// `partial` declarations compile into one type. Empty by default, so
     /// no part merges.
     csharp_projects: CsharpProjects,
+    /// The C2 scope rows of every ecosystem but Cargo, from the configs the
+    /// index walk found. `build` merges them with the Rust module tree's
+    /// Cargo rows. Empty by default.
+    workspace_scopes: WorkspaceFacts,
 }
 
 impl Default for GraphBuilder {
@@ -219,6 +224,7 @@ impl GraphBuilder {
             repo_root: None,
             symbol_skip_set: None,
             csharp_projects: CsharpProjects::default(),
+            workspace_scopes: WorkspaceFacts::default(),
         }
     }
 
@@ -227,6 +233,13 @@ impl GraphBuilder {
     /// part stays a type of its own.
     pub fn with_csharp_projects(mut self, projects: CsharpProjects) -> Self {
         self.csharp_projects = projects;
+        self
+    }
+
+    /// Provide the C2 scope rows of the repo's non-Cargo configs, which
+    /// `graph.bin` stores beside the Cargo rows.
+    pub fn with_workspace_scopes(mut self, scopes: WorkspaceFacts) -> Self {
+        self.workspace_scopes = scopes;
         self
     }
 
@@ -410,10 +423,17 @@ impl GraphBuilder {
             self.repo_root.as_deref().map(RustWorkspaceModTree::build);
         let mod_tree_ctx = mod_tree.as_ref().zip(self.repo_root.as_deref());
         // The overlay's crate heads: the rows the tree's manifest parse made.
-        let workspace = mod_tree
+        let cargo_rows = mod_tree
             .as_ref()
             .map(|tree| tree.workspace_facts().clone())
             .unwrap_or_default();
+        // Cargo sorts first, so a merge keeps every Cargo id. Rows of two
+        // disjoint ecosystem sets always merge; a caller that passes Cargo
+        // rows of its own loses its rows, never the crate heads.
+        let workspace = match std::mem::take(&mut self.workspace_scopes) {
+            rows if rows.scopes.is_empty() => cargo_rows,
+            rows => cargo_rows.clone().merged_with(rows).unwrap_or(cargo_rows),
+        };
         let reexports = ReexportIndex::build(&self.local_graphs, &symbol_table, &self.path_aliases);
 
         let _t_pass19 = std::time::Instant::now();
