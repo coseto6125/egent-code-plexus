@@ -634,9 +634,10 @@ fn parse_graph(rel_path: &str, content: &[u8], size_cap: SizeCap) -> io::Result<
 }
 
 /// rkyv-serialise a graph's v5 fragment file. Shared by the re-parse route
-/// (`parse_to_fragment`) and the pre-parsed route (`write_fragment_from_graph`)
-/// so both emit byte-identical fragment archives.
-fn archive_fragments(graph: &LocalGraph) -> io::Result<Vec<u8>> {
+/// (`parse_to_fragment`), the pre-parsed route (`write_fragment_from_graph`)
+/// and the invalidation closure's store (`closure_store`), so all three emit
+/// byte-identical fragment archives.
+pub(crate) fn archive_fragments(graph: &LocalGraph) -> io::Result<Vec<u8>> {
     let file = fragment_file_from_local_graph(graph);
     rkyv::to_bytes::<rkyv::rancor::Error>(&file)
         .map(|v| v.into_vec())

@@ -266,12 +266,13 @@ const APP_CS: &str = "using Lib;\nnamespace App\n{\n    public class Runner\n   
 /// may be stale.
 const STALE_EDGE: &str = "cs-extension-stale-edge";
 
-/// Stands for (P-ext2 B): a dirty `Widget.cs` gains an instance `Spin`, which
-/// a full index binds instead of the extension. The overlay keeps the clean
-/// caller's extension edge, and the answer names that call site and the
-/// reason code, on a view-cache hit as well.
+/// Stands for (P-ext2 B, F7b2): a dirty `Widget.cs` gains an instance
+/// `Spin`, which a full index binds instead of the extension. The
+/// invalidation closure re-resolves the clean caller, so the answer carries
+/// no stale-edge caveat and ranks the instance `Spin` first by its one
+/// caller, as a full index does, on a view-cache hit as well.
 #[test]
-fn test_find_dirty_csharp_instance_namesake_result_names_stale_extension_call() {
+fn test_find_dirty_csharp_instance_namesake_rebinds_clean_extension_call() {
     let fx = Repo::new(
         "pext2-cs-stale-edge",
         &[
@@ -287,14 +288,15 @@ fn test_find_dirty_csharp_instance_namesake_result_names_stale_extension_call() 
 
     let widget = "public class Widget\n{\n    public int Spin() { return 0; }\n}\n";
     fs::write(fx.repo.join("src/Widget.cs"), widget).unwrap();
-    let first = fx.result(&["find", "Spin"]);
-    let second = fx.result(&["find", "Spin"]);
+    let first = fx.json_in(&fx.repo, &["find", "Spin"]);
+    let second = fx.json_in(&fx.repo, &["find", "Spin"]);
 
-    for part in [
-        "Run -> Spin (src/App.cs:6, cs-extension-stale-edge)",
-        "ecp admin index",
-    ] {
-        assert!(first.contains(part), "missing {part:?}: {first:?}");
-    }
-    assert_eq!(second, first, "a view-cache hit must carry the same caveat");
+    assert!(!result_of(&first).contains(STALE_EDGE), "{first}");
+    let top = &first["matches"][0];
+    assert_eq!(
+        (top["file"].as_str(), top["caller_count"].as_u64()),
+        (Some("src/Widget.cs"), Some(1)),
+        "{first}"
+    );
+    assert_eq!(second, first, "a view-cache hit must give the same answer");
 }

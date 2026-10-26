@@ -210,10 +210,12 @@ impl Engine {
         let ambiguous =
             view.and_then(|view| unpaired_declarations_line(view.hidden_declarations()));
         let gaps = view.and_then(|view| call_gaps_line(view.call_gaps()));
-        crate::output::merge_caveats(
-            crate::output::merge_caveats(unreadable.map(label), ambiguous.map(label)),
-            gaps.map(label),
-        )
+        let stale = view.and_then(|view| stale_closure_line(view.stale_closure()));
+        [ambiguous, gaps, stale]
+            .into_iter()
+            .fold(unreadable.map(label), |acc, line| {
+                crate::output::merge_caveats(acc, line.map(label))
+            })
     }
 
     fn unreadable_changes_line(&self) -> Option<String> {
@@ -316,8 +318,13 @@ impl Engine {
                     crate::session::overlay_reader::decode_view_inputs_with_records(
                         &inputs.fragments,
                     );
-                let view =
-                    OverlayView::build_with_records(graph, &files, &records, &inputs.tombstones)?;
+                let view = OverlayView::build_with_closure(
+                    graph,
+                    &files,
+                    &records,
+                    &inputs.tombstones,
+                    &inputs.stale,
+                )?;
                 if let Some(key) = key {
                     view_cache::write(dir, key, &view);
                 }
@@ -486,6 +493,29 @@ fn unpaired_declarations_line(hidden: &[HiddenDecl]) -> Option<String> {
 /// The caveat line for calls the overlay could not resolve as a full index
 /// would ([`CallGap`]), or `None` when there are none. Effect first, then
 /// each call with its reason code, then the fix.
+fn stale_closure_line(stale: &ecp_core::session::closure::StaleClosure) -> Option<String> {
+    if stale.is_empty() {
+        return None;
+    }
+    let why = match (stale.unbounded, stale.not_computed) {
+        (Some(n), _) => {
+            format!("the edit reaches {n} clean dependent file(s), past the re-resolve limit")
+        }
+        (None, true) => "no dependency closure was computed for these edits".to_owned(),
+        (None, false) => "the overlay does not re-resolve these kinds".to_owned(),
+    };
+    let names = if stale.names.is_empty() {
+        String::new()
+    } else {
+        format!(" (removed names: {})", stale.names.join(", "))
+    };
+    Some(format!(
+        "results may be incomplete: clean files keep their indexed {} edges{names}, \
+         because {why}. Run `ecp admin index --repo .` and rerun.",
+        stale.kinds.join(", ")
+    ))
+}
+
 fn call_gaps_line(gaps: &[CallGap]) -> Option<String> {
     if gaps.is_empty() {
         return None;
@@ -598,5 +628,39 @@ mod tests {
             line.contains("f4 -> Spin (src/App.cs:4, cs-extension-dirty-declaration), and 2 more.")
         );
         assert!(!line.contains("f5"), "the sixth call folds into the count");
+    }
+
+    /// Stands for: the line names the kinds clean files keep as indexed and
+    /// why (unbounded closure with its count, closure not computed, or a kind
+    /// the overlay never re-resolves), and an empty closure gives no line.
+    #[test]
+    fn test_stale_closure_line_names_kinds_and_cause() {
+        use ecp_core::session::closure::StaleClosure;
+        let kinds = |k: &[&str]| k.iter().map(|k| k.to_string()).collect::<Vec<_>>();
+        assert_eq!(stale_closure_line(&StaleClosure::default()), None);
+
+        let not_computed = stale_closure_line(&StaleClosure::not_computed()).unwrap();
+        assert!(not_computed.contains("no dependency closure was computed"));
+        assert!(not_computed.contains("Calls"));
+
+        let unbounded = stale_closure_line(&StaleClosure {
+            unbounded: Some(300),
+            kinds: kinds(&["Calls", "Imports"]),
+            ..StaleClosure::default()
+        })
+        .unwrap();
+        assert!(unbounded.contains("indexed Calls, Imports edges"));
+        assert!(unbounded.contains("reaches 300 clean dependent file(s)"));
+
+        let routes = stale_closure_line(&StaleClosure {
+            kinds: kinds(&["EntryPoint", "HandlesRoute"]),
+            names: kinds(&["save"]),
+            ..StaleClosure::default()
+        })
+        .unwrap();
+        assert!(routes.contains("(removed names: save)"));
+        assert!(routes.contains("does not re-resolve these kinds"));
+        assert!(routes.contains("`ecp admin index --repo .`"));
+        assert!(!routes.contains('\n'), "one reason per line");
     }
 }

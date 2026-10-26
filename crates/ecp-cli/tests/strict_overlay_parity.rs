@@ -169,8 +169,8 @@ fn test_check_ts_same_name_in_two_files_matches_baseline() {
 }
 
 /// A second `solo` in a new file makes the clean caller's unique-global
-/// call ambiguous in a full index; the overlay never re-resolves a clean
-/// file (`session/view.rs` module doc).
+/// call ambiguous in a full index; the invalidation closure re-resolves the
+/// clean caller, which the base graph records as `solo`'s caller.
 #[test]
 fn test_check_js_candidate_added_matches_baseline() {
     check(&Scenario {
@@ -185,6 +185,316 @@ fn test_check_js_candidate_added_matches_baseline() {
             "function solo() {\n  return 2;\n}\n",
         )],
     });
+}
+
+// ── invalidation closure (F7b2) ──────────────────────────────────────────────
+//
+// Each case edits files other than the caller, whose bytes stay unchanged;
+// a case with no baseline file expects no difference at all.
+
+/// A second same-name function in a new file: the clean caller's
+/// unique-global call turns ambiguous, as in a full index.
+#[test]
+fn test_check_closure_candidate_added_matches_baseline() {
+    check(&Scenario {
+        name: "closure_candidate_added",
+        owner: LANE_F_CLEAN_CALLERS,
+        files: &[
+            ("src/a.ts", "function solo(): number {\n  return 1;\n}\n"),
+            (
+                "src/b.ts",
+                "function run(): number {\n  return solo();\n}\n",
+            ),
+        ],
+        edits: &[Edit::Write(
+            "src/c.ts",
+            "function solo(): number {\n  return 2;\n}\n",
+        )],
+    });
+}
+
+/// The only candidate goes: the clean caller loses its `Calls` edge, and
+/// its import binds what a full index binds.
+#[test]
+fn test_check_closure_candidate_deleted_matches_baseline() {
+    check(&Scenario {
+        name: "closure_candidate_deleted",
+        owner: LANE_F_CLEAN_CALLERS,
+        files: &[("src/lib.ts", TS_LIB), ("src/main.ts", TS_MAIN)],
+        edits: &[Edit::Write(
+            "src/lib.ts",
+            "export function other(): number {\n  return 1;\n}\n",
+        )],
+    });
+}
+
+/// The callee's file stops exporting the name the clean file imports.
+#[test]
+fn test_check_closure_export_changed_matches_baseline() {
+    check(&Scenario {
+        name: "closure_export_changed",
+        owner: LANE_F_CLEAN_CALLERS,
+        files: &[("src/lib.ts", TS_LIB), ("src/main.ts", TS_MAIN)],
+        edits: &[Edit::Write(
+            "src/lib.ts",
+            "function helper(): number {\n  return 1;\n}\n",
+        )],
+    });
+}
+
+/// A clean subclass's supertype gains the method the subclass calls bare.
+#[test]
+fn test_check_closure_supertype_changed_matches_baseline() {
+    check(&Scenario {
+        name: "closure_supertype_changed",
+        owner: LANE_F_CLEAN_CALLERS,
+        files: &[
+            (
+                "src/main/java/com/acme/Base.java",
+                "package com.acme;\n\npublic class Base {\n}\n",
+            ),
+            (
+                "src/main/java/com/acme/Sub.java",
+                "package com.acme;\n\npublic class Sub extends Base {\n    public int run() {\n        return ping();\n    }\n}\n",
+            ),
+        ],
+        edits: &[Edit::Write(
+            "src/main/java/com/acme/Base.java",
+            "package com.acme;\n\npublic class Base {\n    public int ping() {\n        return 1;\n    }\n}\n",
+        )],
+    });
+}
+
+/// `make()` returns another type: the clean chained call `make().go()`
+/// moves to that type's `go`. The two lines left are the dirty `make`'s
+/// type-annotation `Accesses` edge (FU-2026-10-26-0ee756874fb8).
+#[test]
+fn test_check_closure_return_type_changed_matches_baseline() {
+    let make = |ty: &str| {
+        format!(
+            "import {{ {ty} }} from './types';\n\nexport function make(): {ty} {{\n  return new {ty}();\n}}\n"
+        )
+    };
+    let (before, after) = (make("A"), make("B"));
+    check(&Scenario {
+        name: "closure_return_type_changed",
+        owner: LANE_F_INCREMENTAL,
+        files: &[
+            (
+                "src/types.ts",
+                "export class A {\n  go(): number {\n    return 1;\n  }\n}\n\nexport class B {\n  go(): number {\n    return 2;\n  }\n}\n",
+            ),
+            ("src/make.ts", before.as_str()),
+            (
+                "src/main.ts",
+                "import { make } from './make';\n\nexport function run(): number {\n  return make().go();\n}\n",
+            ),
+        ],
+        edits: &[Edit::Write("src/make.ts", &after)],
+    });
+}
+
+/// A dirty file declares, at an earlier path, the table a clean file's SQL
+/// names: the clean `QueriesTable` edge moves to it, as in a full index.
+#[test]
+fn test_check_closure_table_changed_matches_baseline() {
+    let schema = "CREATE TABLE channels (id BIGINT PRIMARY KEY, slug TEXT);\n";
+    check(&Scenario {
+        name: "closure_table_changed",
+        owner: LANE_F_CLEAN_CALLERS,
+        files: &[
+            ("db/z_schema.sql", schema),
+            (
+                "src/api.ts",
+                "async function listChannels(db) {\n  return db.query(\"SELECT id, slug FROM channels WHERE org_id = $1\");\n}\n",
+            ),
+        ],
+        edits: &[Edit::Write("db/a_schema.sql", schema)],
+    });
+}
+
+/// A dirty route file renames its route. Routes, `HandlesRoute` and the
+/// `Fetches` a clean client binds are index-time (C4 Open point 4): the
+/// view's stale kinds name them, and every difference is one of them.
+#[test]
+fn test_overlay_view_closure_route_renamed_names_route_kinds() {
+    let server = |path: &str| {
+        format!(
+            "const express = require('express');\nconst app = express();\nfunction listUsers(req, res) {{ res.json([{{ id: 1 }}]); }}\napp.get('{path}', listUsers);\napp.listen(3000);\n"
+        )
+    };
+    let (before, after) = (server("/api/users"), server("/api/people"));
+    let observed = strict_parity::run(&Scenario {
+        name: "",
+        owner: LANE_F_CLEAN_CALLERS,
+        files: &[
+            ("server.js", before.as_str()),
+            (
+                "client.js",
+                "async function load() {\n  const res = await fetch('/api/users');\n  return res.json();\n}\nmodule.exports = { load };\n",
+            ),
+        ],
+        edits: &[Edit::Write("server.js", &after)],
+    });
+    for kind in ["Fetches", "HandlesRoute", "EntryPoint"] {
+        assert!(
+            observed.stale.kinds.iter().any(|k| k == kind),
+            "{kind} in {:?}",
+            observed.stale.kinds
+        );
+    }
+    let lines = observed.lines();
+    let other: Vec<&String> = lines
+        .iter()
+        .filter(|l| {
+            !["Route", "Fetches", "EntryPoint"]
+                .iter()
+                .any(|k| l.contains(k))
+        })
+        .collect();
+    assert!(other.is_empty(), "{other:#?}");
+}
+
+/// A dirty class renames the field a clean function reads.
+#[test]
+fn test_check_closure_field_renamed_matches_baseline() {
+    check(&Scenario {
+        name: "closure_field_renamed",
+        owner: LANE_F_CLEAN_CALLERS,
+        files: &[
+            (
+                "src/model.ts",
+                "export class User {\n  name: string = '';\n}\n",
+            ),
+            (
+                "src/reader.ts",
+                "import { User } from './model';\n\nexport function show(u: User): string {\n  return u.name;\n}\n",
+            ),
+        ],
+        edits: &[Edit::Write(
+            "src/model.ts",
+            "export class User {\n  title: string = '';\n}\n",
+        )],
+    });
+}
+
+/// More clean dependents than `CLOSURE_LIMIT`: the view re-resolves none
+/// of them and names every rebuilt kind as stale.
+#[test]
+fn test_overlay_view_closure_unbounded_names_stale_kinds() {
+    use ecp_core::session::closure::{CLOSURE_LIMIT, REBUILT_RELS};
+    let callers: Vec<(String, &str)> = (0..=CLOSURE_LIMIT)
+        .map(|i| {
+            (
+                format!("src/c{i:03}.js"),
+                "function run() {\n  return hot();\n}\n",
+            )
+        })
+        .collect();
+    let mut files: Vec<(&str, &str)> = vec![("src/a.js", "function hot() {\n  return 1;\n}\n")];
+    files.extend(
+        callers
+            .iter()
+            .map(|(path, source)| (path.as_str(), *source)),
+    );
+    let observed = strict_parity::run(&Scenario {
+        name: "",
+        owner: LANE_F_CLEAN_CALLERS,
+        files: &files,
+        edits: &[Edit::Write(
+            "src/b.js",
+            "function hot() {\n  return 2;\n}\n",
+        )],
+    });
+    assert_eq!(observed.stale.unbounded, Some(CLOSURE_LIMIT as u32 + 1));
+    for rel in REBUILT_RELS {
+        assert!(
+            observed.stale.kinds.iter().any(|k| k == rel.as_str()),
+            "{rel:?} in {:?}",
+            observed.stale.kinds
+        );
+    }
+    let inputs: Vec<&str> = observed
+        .inputs
+        .iter()
+        .map(|i| i.rel_path.as_str())
+        .collect();
+    assert_eq!(inputs, vec!["src/b.js"], "no clean file re-resolved");
+    let view = observed.view().expect("a dirty view");
+    assert_eq!(view.stale_closure(), &observed.stale, "the view carries it");
+}
+
+/// The 14-language candidate cases, over the dirty-file fixtures: a copy of
+/// the callee's file adds a second `helper`; renaming the callee's `helper`
+/// deletes the only one. The caller's bytes never change.
+fn check_closure_candidate(lang: &str, added: bool) {
+    let fx = dirty_fixture(lang);
+    let callee = fx
+        .files
+        .iter()
+        .find(|(p, _)| *p == fx.callee_file)
+        .map(|(_, s)| *s)
+        .expect("fixture names its own files");
+    let (stem, ext) = fx
+        .callee_file
+        .rsplit_once('.')
+        .expect("a callee file has an extension");
+    let copy = format!("{stem}2.{ext}");
+    let renamed = callee
+        .replace("helper", "renamed")
+        .replace("Helper", "Renamed");
+    let (name, edit) = if added {
+        (
+            format!("closure_candidate_added_{lang}"),
+            Edit::Write(&copy, callee),
+        )
+    } else {
+        (
+            format!("closure_candidate_deleted_{lang}"),
+            Edit::Write(fx.callee_file, &renamed),
+        )
+    };
+    check(&Scenario {
+        name: &name,
+        owner: LANE_F_CLEAN_CALLERS,
+        files: fx.files,
+        edits: &[edit],
+    });
+}
+
+macro_rules! closure_candidate_matrix {
+    ($($lang:ident => $added:ident, $deleted:ident;)*) => {$(
+        #[test]
+        fn $added() {
+            check_closure_candidate(stringify!($lang), true);
+        }
+
+        #[test]
+        fn $deleted() {
+            check_closure_candidate(stringify!($lang), false);
+        }
+    )*};
+}
+
+mod strict_parity_closure_candidate {
+    use super::check_closure_candidate;
+
+    closure_candidate_matrix! {
+        typescript => test_check_closure_candidate_added_typescript_matches_baseline, test_check_closure_candidate_deleted_typescript_matches_baseline;
+        javascript => test_check_closure_candidate_added_javascript_matches_baseline, test_check_closure_candidate_deleted_javascript_matches_baseline;
+        python => test_check_closure_candidate_added_python_matches_baseline, test_check_closure_candidate_deleted_python_matches_baseline;
+        java => test_check_closure_candidate_added_java_matches_baseline, test_check_closure_candidate_deleted_java_matches_baseline;
+        kotlin => test_check_closure_candidate_added_kotlin_matches_baseline, test_check_closure_candidate_deleted_kotlin_matches_baseline;
+        csharp => test_check_closure_candidate_added_csharp_matches_baseline, test_check_closure_candidate_deleted_csharp_matches_baseline;
+        go => test_check_closure_candidate_added_go_matches_baseline, test_check_closure_candidate_deleted_go_matches_baseline;
+        rust => test_check_closure_candidate_added_rust_matches_baseline, test_check_closure_candidate_deleted_rust_matches_baseline;
+        php => test_check_closure_candidate_added_php_matches_baseline, test_check_closure_candidate_deleted_php_matches_baseline;
+        ruby => test_check_closure_candidate_added_ruby_matches_baseline, test_check_closure_candidate_deleted_ruby_matches_baseline;
+        swift => test_check_closure_candidate_added_swift_matches_baseline, test_check_closure_candidate_deleted_swift_matches_baseline;
+        c => test_check_closure_candidate_added_c_matches_baseline, test_check_closure_candidate_deleted_c_matches_baseline;
+        cpp => test_check_closure_candidate_added_cpp_matches_baseline, test_check_closure_candidate_deleted_cpp_matches_baseline;
+        dart => test_check_closure_candidate_added_dart_matches_baseline, test_check_closure_candidate_deleted_dart_matches_baseline;
+    }
 }
 
 // ── 14-language dirty-file matrix ────────────────────────────────────────────

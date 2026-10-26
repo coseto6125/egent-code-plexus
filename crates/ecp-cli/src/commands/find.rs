@@ -39,7 +39,7 @@ use ecp_core::contracts::identity::{
     resolve_target as resolve_named, select, TargetRequest, TargetResolution,
 };
 use ecp_core::graph::{
-    ArchivedFileCategory, ArchivedRelType, ArchivedZeroCopyGraph, FileCategory, NodeKind,
+    ArchivedFileCategory, ArchivedRelType, ArchivedZeroCopyGraph, FileCategory, NodeKind, RelType,
 };
 use ecp_core::registry::{resolve_home_ecp, Registry, RegistryFile};
 use ecp_core::session::view::{base_constructors, BaseConstructorIndex, ViewNode};
@@ -416,15 +416,28 @@ fn call_sources(
         .filter(move |&src| !dedupe || seen.insert(src))
 }
 
-/// Number of `Calls` edges into `node_idx` (see [`call_sources`]).
+/// Number of merged `Calls` edges into `node_idx` and its `constructors`,
+/// counted as [`call_sources`] counts them. The merged graph moves a clean
+/// call that a dirty edit re-binds, so the count follows the overlay.
 ///
 /// The raw in-degree is not that number: it also counts the `Defines` edge
 /// from the declaring file and one `Imports` edge per file that pulls that
 /// module in. Reported under the name `caller_count`, it told an agent that
 /// `compute_hits` in this repo had 17 callers when the graph held 11 `Calls`
 /// edges: the other 6 were the declaring file and 5 importing files.
-fn count_incoming(graph: &ArchivedZeroCopyGraph, node_idx: usize, constructors: Vec<u32>) -> u32 {
-    call_sources(graph, node_idx, constructors).count() as u32
+fn count_incoming(merged: &MergedGraph<'_>, node_idx: u32, constructors: Vec<u32>) -> u32 {
+    let dedupe = !constructors.is_empty();
+    let mut seen = std::collections::HashSet::new();
+    std::iter::once(node_idx)
+        .chain(constructors)
+        .flat_map(|target| {
+            merged
+                .in_edges(target)
+                .filter(|edge| edge.rel_type() == RelType::Calls)
+                .map(|edge| edge.source)
+        })
+        .filter(|&src| !dedupe || seen.insert(src))
+        .count() as u32
 }
 
 /// Constructors for every candidate of one `find` run. The first few types
@@ -474,34 +487,35 @@ fn overlay_matches(
     let Some(view) = merged.view() else {
         return Vec::new();
     };
+    let base_len = merged.base_len();
     view.virtual_nodes()
         .iter()
-        .filter(|h| h.has_owning_file() && h.name.contains(pattern))
-        .filter(|h| {
+        .zip(base_len..)
+        .filter(|(h, _)| h.has_owning_file() && h.name.contains(pattern))
+        .filter(|(h, _)| {
             kind_filter.is_none_or(|kinds| {
                 let k = crate::commands::format::node_kind_to_str(&h.kind).to_ascii_lowercase();
                 kinds.iter().any(|want| want == &k)
             })
         })
-        .filter(|h| file_filter.is_none_or(|needle| h.rel_path.contains(needle)))
-        .map(|h| virtual_match(merged, h))
+        .filter(|(h, _)| file_filter.is_none_or(|needle| h.rel_path.contains(needle)))
+        .map(|(h, idx)| virtual_match(merged, idx, h))
         .collect()
 }
 
-/// One overlay node as a `find` row with its category priority.
-fn virtual_match(merged: &MergedGraph<'_>, h: &ViewNode) -> (FindMatch, u8) {
-    // A shared uid includes the path, so its base category and ranking
-    // still apply even though its span must come from the working tree.
-    let (category, caller_count) = if let Some(idx) = h.replaced_base {
-        let node = &merged.nodes[idx as usize];
-        (
-            &merged.files[node.file_idx.to_native() as usize].category,
-            count_incoming(merged, idx as usize, base_constructors(merged, idx)),
-        )
-    } else {
-        let category = ecp_core::file_category::determine_category(&h.rel_path);
-        (archived_category(category), 0)
+/// The overlay node `h` at merged index `idx` as a `find` row with its
+/// category priority.
+fn virtual_match(merged: &MergedGraph<'_>, idx: u32, h: &ViewNode) -> (FindMatch, u8) {
+    // A shared uid includes the path, so its base category still applies
+    // even though its span must come from the working tree.
+    let category = match h.replaced_base {
+        Some(base) => {
+            let node = &merged.nodes[base as usize];
+            &merged.files[node.file_idx.to_native() as usize].category
+        }
+        None => archived_category(ecp_core::file_category::determine_category(&h.rel_path)),
     };
+    let caller_count = count_incoming(merged, idx, merged.constructors_of(idx));
     let kind_str = crate::commands::format::node_kind_to_str(&h.kind).to_string();
     let signature = format!("{kind_str} {}", h.name);
     (
@@ -568,7 +582,7 @@ fn base_candidates(
         }
 
         let prio = category_priority(&file.category);
-        let caller_count = count_incoming(graph, node_idx, constructors.of(node_idx));
+        let caller_count = count_incoming(merged, node_idx as u32, constructors.of(node_idx));
         Some((node_idx, caller_count, prio, file_path))
     };
 
@@ -615,7 +629,7 @@ fn exact_candidates(
             if c.node < base_len {
                 let idx = c.node as usize;
                 let file = &graph.files[graph.nodes[idx].file_idx.to_native() as usize];
-                let caller_count = count_incoming(graph, idx, constructors.of(idx));
+                let caller_count = count_incoming(merged, c.node, constructors.of(idx));
                 return Some((
                     CandSrc::Base(idx),
                     caller_count,
@@ -627,7 +641,7 @@ fn exact_candidates(
                 .view()?
                 .virtual_nodes()
                 .get((c.node - base_len) as usize)?;
-            let (m, prio) = virtual_match(merged, h);
+            let (m, prio) = virtual_match(merged, c.node, h);
             let (caller_count, path) = (m.caller_count, m.file.clone());
             Some((CandSrc::Overlay(m), caller_count, prio, path))
         })

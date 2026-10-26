@@ -145,16 +145,17 @@ impl Fixture {
         .unwrap();
     }
 
-    /// The view `OverlayView::build_with_records` makes from the current
+    /// The view `OverlayView::build_with_closure` makes from the current
     /// inputs, as `Engine::overlay_view` builds it on a cache miss.
     fn fresh(&self, engine: &Engine) -> OverlayView {
         let inputs = view_inputs(&self.session_dir, &self.worktree).unwrap();
         let (files, records) = decode_view_inputs_with_records(&inputs.fragments);
-        OverlayView::build_with_records(
+        OverlayView::build_with_closure(
             engine.graph().unwrap(),
             &files,
             &records,
             &inputs.tombstones,
+            &inputs.stale,
         )
         .unwrap()
     }

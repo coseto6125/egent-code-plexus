@@ -6,9 +6,12 @@
 //! come from `run_analyzer_for_paths`, the analyzer step of `admin index`.
 //! The overlay side re-parses the dirty set with `reanalyze_files` (shadow
 //! cascade included), writes the fragments and tombstones with
-//! `write_dirty_events`, reads them back through `view_inputs` and
+//! `write_dirty_events`, stores the invalidation closure over the base index
+//! (`closure_store::refresh_with_graph`, the step `auto_ensure` runs after
+//! the write), reads both back through `view_inputs` and
 //! `decode_view_inputs_with_records`, and builds `OverlayView` with the
-//! records (`build_with_records`). The dirty set is the
+//! records and the closure's stale kinds (`build_with_closure`). The dirty
+//! set is the
 //! edited paths, as `git status --porcelain` lists them: a deleted path and
 //! both paths of a rename are dirty, `reanalyze_files` skips the ones
 //! missing on disk exactly as a query does, and each of those gets a
@@ -40,11 +43,13 @@ use crate::common::{commit_all, run_git};
 use ecp_cli::commands::admin::index::run_analyzer_for_paths;
 use ecp_cli::git::DiffScope;
 use ecp_cli::reanalyze::reanalyze_files;
+use ecp_cli::session::closure_store;
 use ecp_cli::session::overlay_reader::{decode_view_inputs_with_records, view_inputs};
 use ecp_cli::session::overlay_writer::write_dirty_events;
 use ecp_core::contracts::dirty_event::PathClass;
 use ecp_core::contracts::routing::SizeCap;
 use ecp_core::graph::{ArchivedZeroCopyGraph, NodeKind, RelType, ZeroCopyGraph};
+use ecp_core::session::closure::StaleClosure;
 use ecp_core::session::merged::MergedGraph;
 use ecp_core::session::view::OverlayFileRecords;
 use ecp_core::session::{layout, DirtyEvents, OverlayFileInput, OverlayView, SessionMeta};
@@ -300,6 +305,9 @@ pub struct Observed {
     /// One per input of `inputs`, in order.
     pub records: Vec<OverlayFileRecords>,
     pub tombstones: Vec<String>,
+    /// What the invalidation closure left as indexed, as the reader serves
+    /// it.
+    pub stale: StaleClosure,
     /// `input dropped <path>` for each written fragment or tombstone the
     /// reader did not serve.
     pub dropped: BTreeSet<String>,
@@ -317,8 +325,13 @@ impl Observed {
     /// The overlay view a query builds, held to its cache round trip.
     pub fn view(&self) -> Option<OverlayView> {
         let base = self.base();
-        let view =
-            OverlayView::build_with_records(base, &self.inputs, &self.records, &self.tombstones);
+        let view = OverlayView::build_with_closure(
+            base,
+            &self.inputs,
+            &self.records,
+            &self.tombstones,
+            &self.stale,
+        );
         if let Some(view) = &view {
             assert_eq!(
                 OverlayView::from_cache_bytes(&view.to_cache_bytes(), base.nodes.len()).as_ref(),
@@ -385,15 +398,19 @@ pub fn run(scenario: &Scenario<'_>) -> Observed {
         .collect();
     let session_root = tempfile::tempdir().unwrap();
     let session = new_session_dir(session_root.path(), repo.path());
+    let size_cap = ecp_core::config::resolve_size_cap(repo.path());
     write_dirty_events(
         &session,
-        ecp_core::config::resolve_size_cap(repo.path()),
+        size_cap,
         &graphs,
         &mtimes,
         &HashMap::new(),
         &tombstones,
     )
     .expect("fragment write");
+    let base = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&base_bytes).unwrap();
+    closure_store::refresh_with_graph(repo.path(), &session, base, size_cap)
+        .expect("closure write");
     let read = view_inputs(&session, repo.path()).expect("fragment read");
     let (inputs, records) = decode_view_inputs_with_records(&read.fragments);
 
@@ -419,6 +436,7 @@ pub fn run(scenario: &Scenario<'_>) -> Observed {
         inputs,
         records,
         tombstones,
+        stale: read.stale,
         dropped,
     }
 }

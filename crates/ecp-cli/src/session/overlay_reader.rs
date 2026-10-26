@@ -18,6 +18,7 @@
 use ecp_core::analyzer::types::{RawExportAlias, RawImport};
 use ecp_core::contracts::routing::{ParsedLanguage, SizeCap};
 use ecp_core::graph::NodeKind;
+use ecp_core::session::closure::StaleClosure;
 use ecp_core::session::layout;
 use ecp_core::session::view::{ArchivedOverlayFileRecords, OverlayFileRecords};
 use ecp_core::session::{DirtyEvents, OverlayFileInput, OverlaySymbol, FRAGMENT_FORMAT_V7};
@@ -32,8 +33,8 @@ use super::overlay_writer::ArchivedFragmentFile;
 /// A manifest entry `view_inputs` let through: its rel_path and the
 /// fragment bytes that passed archive validation.
 pub struct AcceptedFragment {
-    rel_path: String,
-    bytes: Vec<u8>,
+    pub(crate) rel_path: String,
+    pub(crate) bytes: Vec<u8>,
 }
 
 /// Whether `bytes` has the current fragment archive shape and holds a
@@ -59,14 +60,20 @@ fn fragment_language(archived: &ArchivedFragmentFile) -> Option<Option<ParsedLan
 }
 
 /// One manifest read's share of `OverlayView`: the fragments the
-/// acceptance rules let through, the tombstoned paths still absent from the
-/// worktree, and `hash`, an xxh3 over both in manifest order (the inputs'
-/// share of the view cache key).
+/// acceptance rules let through, then the clean files of the invalidation
+/// closure stored for this manifest (`closure_store`), the tombstoned paths
+/// still absent from the worktree, what the closure left as indexed, and
+/// `hash`, an xxh3 over all of them in that order (the inputs' share of the
+/// view cache key).
 pub struct ViewInputs {
     pub fragments: Vec<AcceptedFragment>,
     /// Repo-relative paths of deleted files and of the old halves of
     /// renames: `OverlayView::build_with_removed`'s `removed`.
     pub tombstones: Vec<String>,
+    /// `OverlayView::build_with_closure`'s `stale`: empty without dirty
+    /// input, and `StaleClosure::not_computed` when no closure is stored for
+    /// this manifest.
+    pub stale: StaleClosure,
     pub hash: u64,
 }
 
@@ -128,6 +135,29 @@ pub fn view_inputs_under(
     worktree_root: &Path,
     size_cap: SizeCap,
 ) -> io::Result<ViewInputs> {
+    let (mut inputs, manifest) = manifest_inputs(session_dir, worktree_root, size_cap)?;
+    if let Some(manifest) = manifest.filter(|m| m.is_current(size_cap)) {
+        super::closure_store::attach(session_dir, worktree_root, size_cap, &manifest, &mut inputs);
+    }
+    Ok(inputs)
+}
+
+/// The dirty files' share of [`view_inputs_under`], without the closure:
+/// the input of the closure itself.
+pub fn dirty_inputs_under(
+    session_dir: &Path,
+    worktree_root: &Path,
+    size_cap: SizeCap,
+) -> io::Result<ViewInputs> {
+    manifest_inputs(session_dir, worktree_root, size_cap).map(|(inputs, _)| inputs)
+}
+
+/// [`dirty_inputs_under`] and the manifest it read.
+fn manifest_inputs(
+    session_dir: &Path,
+    worktree_root: &Path,
+    size_cap: SizeCap,
+) -> io::Result<(ViewInputs, Option<DirtyEvents>)> {
     let mut hasher = Xxh3::new();
     let mut fragments = Vec::new();
     let mut tombstones = Vec::new();
@@ -176,11 +206,15 @@ pub fn view_inputs_under(
             bytes,
         });
     }
-    Ok(ViewInputs {
-        fragments,
-        tombstones,
-        hash: hasher.digest(),
-    })
+    Ok((
+        ViewInputs {
+            fragments,
+            tombstones,
+            stale: StaleClosure::default(),
+            hash: hasher.digest(),
+        },
+        manifest,
+    ))
 }
 
 /// The `OverlayView` inputs of `accepted`, one per fragment whose imports

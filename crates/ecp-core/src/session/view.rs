@@ -117,6 +117,15 @@
 //! Clean↔clean edges are untouched. Consumers apply this via
 //! [`OverlayView::masks_base_edge`] + [`OverlayView::redirect`].
 //!
+//! ## Clean files: the invalidation closure
+//!
+//! A clean file that depends on a dirty change is resolved again by
+//! [`Self::build_with_closure`](OverlayView::build_with_closure): the
+//! caller re-parses each file [`super::closure`] names and hands its parse in
+//! beside the dirty ones, so every output above is rebuilt for it too. A
+//! clean file outside the closure keeps its indexed edges, as below, and
+//! [`OverlayView::stale_closure`] names the kinds a closure left as indexed.
+//!
 //! ## What stays out of scope (documented fidelity gaps)
 //!
 //! - `References` edges other than lexical closure, overload-set,
@@ -128,9 +137,9 @@
 //!   when the view is built without records. A path with two `LocalGraph`s
 //!   keeps the base's count of `File` nodes, whatever count its parse now
 //!   has. The controller `EntryPoint` nodes of a dirty file are as indexed.
-//! - A clean file's `Overrides` edges are never rebuilt: a clean subclass
-//!   whose supertype a dirty file changed keeps its indexed edges, and an
-//!   edge into a dirty method the edit removed drops. A dirty callable's
+//! - A clean file outside the closure keeps its `Overrides` edges: an edge
+//!   into a dirty method the edit removed drops. A clean subclass whose
+//!   supertype a dirty file changed is in the closure. A dirty callable's
 //!   lookup reads a clean type as `graph.bin` holds it: its archived
 //!   supertypes ([`ArchivedZeroCopyGraph::supertypes_of`]), each at the
 //!   confidence of its archived `Extends` / `Implements` edge, and its
@@ -144,38 +153,44 @@
 //!   each candidate of an ambiguous answer), a clean C# type taken at any
 //!   type-argument count (`graph.bin` keeps no generic arity), and no
 //!   partial-type global fallback (a C# base whose global candidates are
-//!   the parts of one partial type binds nothing). A clean file's
-//!   `Extends` / `Implements` edges are never rebuilt: a clean subclass of
-//!   a type a dirty file changed keeps its indexed edge, and an edge into a
-//!   dirty type the edit removed drops.
-//! - A clean file's `Decorates` edges are never rebuilt: a clean decorator
-//!   whose name a dirty file now declares (or no longer declares) keeps its
-//!   indexed target, and an edge into a dirty declaration the edit removed
-//!   drops.
-//! - A clean file's `Imports` edges are never rebuilt: an edge into a
-//!   dirty declaration the edit removed drops, one into a declaration that
-//!   survives follows it, and a clean importer of a name the edit now
-//!   exports gains none. A Rust qualified import name reaches the qualifier
-//!   tier, which reads the module trees where the index's import resolver
-//!   has none.
+//!   the parts of one partial type binds nothing). A clean subtype of a
+//!   type a dirty file changed is in the closure; outside it, an edge into
+//!   a dirty type the edit removed drops.
+//! - A clean decorator whose target (a declaration, or the shared
+//!   `Annotation` node of its full name) is named like a name a dirty file
+//!   adds or removes is in the closure. A dotted decorator whose last
+//!   segment alone names the new declaration is not.
+//! - A clean importer of a declaration a dirty file removed or changed, or
+//!   whose archived import rows name a name the edit adds or removes, is in
+//!   the closure. A Rust qualified import name reaches the qualifier tier,
+//!   which reads the module trees where the index's import resolver has
+//!   none.
 //! - The heuristic mirror edges (`MirrorsField`, `EventTopicMirror`) are
 //!   index-time: an `EventTopic` that pairs with its replayed twin keeps its
 //!   base mirror edges, an unpaired or new one has none, and a dirty file's
-//!   `SchemaField` has none. A clean file's `QueriesTable` edge keeps the
-//!   table the index picked, even when a dirty file now declares an earlier
-//!   one.
+//!   `SchemaField` has none. A clean `QueriesTable` edge to a table a dirty
+//!   file now declares again is in the closure (the table's namesake); a
+//!   clean SQL reference to a table no file declared before the edit bound
+//!   nothing, records no dependency, and stays unbound.
 //! - A function's meta in the view holds the flags and return type a
 //!   fragment carries; the parameters and decorators of a dirty function are
 //!   not in it (the `Overrides` and `Decorates` replays read them from the
 //!   fragment).
+//! - A dirty symbol's type-annotation `Accesses` edges stay as indexed: the
+//!   fragment keeps no type annotation (FU-2026-10-26-0ee756874fb8).
 //! - A removed path still counts as a file for the passes over
 //!   `graph.files` (import-candidate probes, module and crate-root
 //!   discovery), and its archived import rows still serve a re-export hop.
 //!   Its declarations are gone, so a probe that lands in it binds nothing
 //!   there.
-//! - Clean files calling a name that only NOW resolves (new symbol breaks a
-//!   previous ambiguity) keep their index-time resolution — clean files are
-//!   never re-resolved at query time.
+//! - A clean call the index left ambiguous records no edge, so a removal
+//!   that leaves one namesake of at least two cannot reach it:
+//!   [`OverlayView::stale_closure`] names the name. A clean call to a name
+//!   no file declared before the edit (an external) stays unbound.
+//! - Routes, their `HandlesRoute` edges, the controller `EntryPoint` nodes
+//!   routes in another file create, and the `Fetches` edges bound to a
+//!   route are index-time: a dirty file that held a `Route` node makes
+//!   [`OverlayView::stale_closure`] name them.
 //! - TS / JS imports run the index's named-import tier through the shared
 //!   rules ([`reexport`](crate::analyzer::reexport)): candidate probing with the path aliases the index
 //!   resolved with (`graph.bin` keeps them), ES-module export eligibility,
@@ -211,6 +226,7 @@
 //!   use` chain the index follows through an import's visibility binds only
 //!   in the index: graph.bin does not store that visibility.
 
+use super::closure::StaleClosure;
 use super::incremental::{self, ReplayInputs};
 use crate::analyzer::containment::{ENUM_VARIANT_DEFINES_REASON, SCOPE_DEFINES_REASON};
 use crate::analyzer::csharp_extension;
@@ -592,6 +608,9 @@ pub struct OverlayView {
     /// ([`Self::build_with_records`]): the base record edges of the dirty
     /// files are then masked.
     records_replayed: bool,
+    /// The clean-file edge kinds the invalidation closure left as indexed
+    /// ([`Self::stale_closure`]).
+    stale_closure: StaleClosure,
 }
 
 /// A group of base declarations the overlay could not pair by identity: the
@@ -1013,7 +1032,36 @@ impl OverlayView {
             defines_files: replayed.defines_files,
             function_metas: replayed.function_metas,
             records_replayed: replayed.records_replayed,
+            stale_closure: StaleClosure::default(),
         })
+    }
+
+    /// [`Self::build_with_records`] over the dirty files and the clean
+    /// files of their invalidation closure ([`super::closure`]), whose
+    /// parses `files` and `records` hold beside the dirty ones: the view
+    /// resolves a closure file as it resolves a dirty one. `stale` is what
+    /// the closure left as indexed; the view carries it for the payload's
+    /// caveat ([`Self::stale_closure`]). No other cost.
+    pub fn build_with_closure(
+        graph: &ArchivedZeroCopyGraph,
+        files: &[OverlayFileInput],
+        records: &[OverlayFileRecords],
+        removed: &[String],
+        stale: &StaleClosure,
+    ) -> Option<Self> {
+        let mut view = Self::build_with_records(graph, files, records, removed)?;
+        view.stale_closure = stale.clone();
+        Some(view)
+    }
+
+    /// The clean-file edges this view may hold as indexed: the kinds and
+    /// names the invalidation closure could not re-resolve (an unbounded
+    /// closure, a dependency `graph.bin` does not record, a dirty route
+    /// file, or no closure for this dirty state). Empty when the closure
+    /// re-resolved every dependent it found, and for a view built without
+    /// one ([`Self::build_with_records`]).
+    pub fn stale_closure(&self) -> &StaleClosure {
+        &self.stale_closure
     }
 
     pub fn base_len(&self) -> u32 {
@@ -1204,7 +1252,9 @@ impl OverlayView {
 /// base `Annotation` node no file references any more. F7b1-4 extends it
 /// again: the view stores a dirty file's `Overrides` edges with three more
 /// reasons, and masks the base ones; so does its heritage replay, for the
-/// `Extends` and `Implements` edges and their two reasons.
+/// `Extends` and `Implements` edges and their two reasons. F7b2 extends it
+/// again: the view stores the clean-file edge kinds its invalidation
+/// closure left as indexed.
 pub const VIEW_CACHE_FORMAT: u32 = 14;
 
 /// The base edge kinds the record replay rebuilds, so masks at a re-parsed
@@ -1297,6 +1347,7 @@ struct CachedView {
     defines_files: Vec<u32>,
     function_metas: Vec<ViewFunctionMeta>,
     records_replayed: bool,
+    stale_closure: StaleClosure,
 }
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -1454,6 +1505,7 @@ impl OverlayView {
             defines_files: sorted(self.defines_files.iter().copied().collect()),
             function_metas: self.function_metas.clone(),
             records_replayed: self.records_replayed,
+            stale_closure: self.stale_closure.clone(),
         })
     }
 
@@ -1527,6 +1579,7 @@ impl OverlayView {
             defines_files: cached.defines_files.into_iter().collect(),
             function_metas: cached.function_metas,
             records_replayed: cached.records_replayed,
+            stale_closure: cached.stale_closure,
         })
     }
 }
@@ -1678,7 +1731,7 @@ fn dedup_gaps(gaps: &mut Vec<CallGap>) {
 }
 
 /// The archived `FunctionMeta` of the base node `id`.
-fn base_function_meta(
+pub(super) fn base_function_meta(
     graph: &ArchivedZeroCopyGraph,
     id: u32,
 ) -> Option<&crate::graph::ArchivedFunctionMeta> {

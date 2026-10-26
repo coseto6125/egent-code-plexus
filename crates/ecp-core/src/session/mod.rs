@@ -1,3 +1,4 @@
+pub mod closure;
 pub mod import_scope;
 mod incremental;
 pub mod layout;

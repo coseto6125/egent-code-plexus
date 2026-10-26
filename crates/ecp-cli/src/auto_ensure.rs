@@ -794,6 +794,12 @@ pub(crate) fn ensure_fresh_with_rebuild(
                     if let (Some(dir), Some(manifest)) = (&session_dir, &manifest) {
                         retire_unclaimed_best_effort(dir, manifest, &rel_paths);
                     }
+                    refresh_closure_best_effort(
+                        worktree_root,
+                        session_dir.as_deref(),
+                        graph_path,
+                        size_cap,
+                    );
                     return Ok(Ensured::refreshed(dirty, size_cap));
                 }
                 // Stat BEFORE parsing: the manifest mtime must belong to the
@@ -887,6 +893,12 @@ pub(crate) fn ensure_fresh_with_rebuild(
                 if let (Some(dir), Some(manifest)) = (&session_dir, &manifest) {
                     retire_unclaimed_best_effort(dir, manifest, &rel_paths);
                 }
+                refresh_closure_best_effort(
+                    worktree_root,
+                    session_dir.as_deref(),
+                    graph_path,
+                    size_cap,
+                );
                 // L1 overlay only touches dirty fragments under
                 // `<repo>/sessions/<sid>/` and does not rewrite graph.bin, but the
                 // working tree is now consistent with the indexed state of the
@@ -1543,6 +1555,28 @@ fn retire_unclaimed_best_effort(
 ) {
     if let Err(e) = retire_unclaimed_entries(session_dir, manifest, dirty_sources) {
         eprintln!("ecp: L1 overlay retire skipped: {e}");
+    }
+}
+
+/// Store the invalidation closure of the manifest this refresh left behind
+/// (`session::closure_store`): the clean files that depend on the dirty
+/// change, re-parsed for the view. It runs after the retire pass, so its key
+/// is the manifest the reader will see; with that key stored already, it
+/// costs three small reads. Best effort, as retire: on failure the reader
+/// finds no closure for this dirty state and reports
+/// `StaleClosure::not_computed`, so clean files answer as indexed.
+fn refresh_closure_best_effort(
+    worktree_root: &Path,
+    session_dir: Option<&Path>,
+    graph_path: &Path,
+    size_cap: SizeCap,
+) {
+    let Some(dir) = session_dir else {
+        return;
+    };
+    if let Err(e) = crate::session::closure_store::refresh(worktree_root, dir, graph_path, size_cap)
+    {
+        eprintln!("ecp: L1 invalidation closure skipped: {e}");
     }
 }
 
