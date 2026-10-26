@@ -20,6 +20,12 @@
 //! to prove it against. A slice that changes what the bytes mean WITHOUT
 //! bumping the identifier turns the first arm red.
 
+mod common;
+
+use common::stored::{
+    committed, copy_tree, fixture, set_mtime, COMMIT_DIR, SESSION, WRITER_FINGERPRINT,
+    WRITER_GRAPH_FORMAT, WRITER_PARSE_DIR,
+};
 use ecp_analyzer::python::PythonProvider;
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_analyzer::rust::parser::RustProvider;
@@ -46,37 +52,16 @@ use ecp_core::session::{
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 use tempfile::TempDir;
 
-const WRITER_GRAPH_FORMAT: u32 = 15;
-const WRITER_FINGERPRINT: &str = "v0.16.4+schema20";
 const WRITER_FRAGMENT_FORMAT: u32 = 5;
 const WRITER_VIEW_CACHE_FORMAT: u32 = 3;
 /// The session-relative dirty manifest the writer kept.
 const WRITER_DIRTY_MANIFEST: &str = "dirty_files.json";
-const WRITER_PARSE_DIR: &str = "568515f1";
 const WRITER_SHA: &str = "e7ca0e6a663e619e7b245890db6cb47653fed6dc";
-const COMMIT_DIR: &str = "branch_main__e7ca0e6a663e619e7b245890db6cb47653fed6dc";
-const SESSION: &str = "fxsession0001";
 const BASE_NODES: usize = 14;
 const DIRTY_FILES: [&str; 2] = ["lib.rs", "pkg/core.py"];
-
-fn fixture() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/stored-by-0.16.4")
-}
-
-fn copy_tree(from: &Path, to: &Path) {
-    fs::create_dir_all(to).unwrap();
-    for entry in fs::read_dir(from).unwrap().flatten() {
-        let target = to.join(entry.file_name());
-        if entry.path().is_dir() {
-            copy_tree(&entry.path(), &target);
-        } else {
-            fs::copy(entry.path(), &target).unwrap();
-        }
-    }
-}
 
 /// A private copy of the fixture's `~/.ecp/<repo>` dir: the readers under test
 /// write into their dirs (`.last-used`, a rebuilt `view_cache.bin`), and the
@@ -96,16 +81,6 @@ fn graph_in(tmp: &TempDir) -> PathBuf {
         .join("repo/commits")
         .join(COMMIT_DIR)
         .join("graph.bin")
-}
-
-fn committed(rel: &str) -> Vec<u8> {
-    fs::read(fixture().join("source/committed").join(rel)).unwrap()
-}
-
-fn set_mtime(path: &Path, mtime_ns: u64) {
-    let file = fs::OpenOptions::new().write(true).open(path).unwrap();
-    file.set_modified(UNIX_EPOCH + Duration::from_nanos(mtime_ns))
-        .unwrap();
 }
 
 /// The working tree the session was taken from: the committed files, then the

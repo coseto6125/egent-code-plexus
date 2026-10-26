@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 pub mod peer_harness;
+pub mod stored;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
