@@ -431,6 +431,35 @@ impl<'a> Changes<'a> {
             }
         }
 
+        // An export alias renames what an importer binds without changing a
+        // declaration: each exported name whose pairing changed is changed.
+        let idx_of: FxHashMap<&str, u32> = path_of.iter().map(|(&i, &p)| (p, i)).collect();
+        let alias_paths: BTreeSet<&'a str> = path_of
+            .values()
+            .copied()
+            .chain(inputs.keys().copied())
+            .collect();
+        for path in alias_paths {
+            let base: FxHashSet<(&'a str, &'a str)> = idx_of
+                .get(path)
+                .and_then(|&idx| graph.file_export_aliases(idx))
+                .into_iter()
+                .flatten()
+                .map(|alias| (alias.exported.resolve(pool), alias.local.resolve(pool)))
+                .collect();
+            let fresh: FxHashSet<(&'a str, &'a str)> = inputs
+                .get(path)
+                .into_iter()
+                .flatten()
+                .flat_map(|file| file.export_aliases.iter())
+                .map(|alias| (&*alias.exported, &*alias.local))
+                .collect();
+            changes.names.extend(
+                base.symmetric_difference(&fresh)
+                    .map(|&(exported, _)| exported),
+            );
+        }
+
         let dirty_types = dirty_type_names(files);
         let mut paths: BTreeSet<&'a str> = base_decls.keys().copied().collect();
         paths.extend(inputs.keys().copied());
@@ -510,6 +539,11 @@ impl<'a> Changes<'a> {
                 self.base.extend(idxs);
                 if is_type(*kind) {
                     self.types.extend(idxs);
+                }
+                // A changed signature can make a clean subtype's method an
+                // override (or stop it being one): walk the owner's subtypes.
+                if is_callable(*kind) {
+                    owners.insert(owner);
                 }
             }
         }

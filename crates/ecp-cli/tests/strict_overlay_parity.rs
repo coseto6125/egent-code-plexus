@@ -265,6 +265,55 @@ fn test_check_closure_supertype_changed_matches_baseline() {
     });
 }
 
+/// A dirty supertype's method changes its parameter type, so a clean
+/// subclass's `@Override` method now overrides it: the subclass is in the
+/// closure through its owner type.
+#[test]
+fn test_check_closure_override_signature_changed_matches_baseline() {
+    check(&Scenario {
+        name: "closure_override_signature_changed",
+        owner: LANE_F_CLEAN_CALLERS,
+        files: &[
+            (
+                "src/main/java/com/acme/Base.java",
+                "package com.acme;\n\npublic class Base {\n    public int foo(int x) {\n        return x;\n    }\n}\n",
+            ),
+            (
+                "src/main/java/com/acme/Child.java",
+                "package com.acme;\n\npublic class Child extends Base {\n    @Override\n    public int foo(String s) {\n        return 2;\n    }\n}\n",
+            ),
+        ],
+        edits: &[Edit::Write(
+            "src/main/java/com/acme/Base.java",
+            "package com.acme;\n\npublic class Base {\n    public int foo(String x) {\n        return 1;\n    }\n}\n",
+        )],
+    });
+}
+
+/// A dirty module swaps its export aliases: no declaration changes, but a
+/// clean `import { A }` now binds the other local function.
+#[test]
+fn test_check_closure_export_alias_swapped_matches_baseline() {
+    let module = |first: &str, second: &str| {
+        format!(
+            "function a(): number {{\n  return 1;\n}}\n\nfunction b(): number {{\n  return 2;\n}}\n\nexport {{ a as {first}, b as {second} }};\n"
+        )
+    };
+    let (before, after) = (module("A", "B"), module("B", "A"));
+    check(&Scenario {
+        name: "closure_export_alias_swapped",
+        owner: LANE_F_CLEAN_CALLERS,
+        files: &[
+            ("src/m.ts", before.as_str()),
+            (
+                "src/main.ts",
+                "import { A } from './m';\n\nexport function run(): number {\n  return A();\n}\n",
+            ),
+        ],
+        edits: &[Edit::Write("src/m.ts", &after)],
+    });
+}
+
 /// `make()` returns another type: the clean chained call `make().go()`
 /// moves to that type's `go`. The two lines left are the dirty `make`'s
 /// type-annotation `Accesses` edge (FU-2026-10-26-0ee756874fb8).
