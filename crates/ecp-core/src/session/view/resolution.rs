@@ -532,15 +532,21 @@ impl<'a> OverlayFacts<'a> {
 
     /// The stored spelling of `file`, a dirty or an indexed path. `None` for
     /// an indexed path the worktree removed.
+    /// The base file index of a clean `file`. `None` for a path the worktree
+    /// no longer has, so no fact reads a removed file's declarations.
+    fn clean_file_idx(&self, file: &str) -> Option<u32> {
+        if self.scope.is_removed(file) {
+            return None;
+        }
+        self.graph.file_idx_of(file)
+    }
+
     fn stored_path(&self, file: &str) -> Option<&'a str> {
         if let Some((&path, _)) = self.dirty.get_key_value(file) {
             return Some(path);
         }
-        if self.scope.is_removed(file) {
-            return None;
-        }
         let graph = self.graph;
-        let file_idx = graph.file_idx_of(file)?;
+        let file_idx = self.clean_file_idx(file)?;
         Some(
             graph.files[file_idx as usize]
                 .path
@@ -996,7 +1002,7 @@ impl<'a> ModuleFacts for OverlayFacts<'a> {
     }
 
     fn has_file(&self, file: &str) -> bool {
-        self.dirty.contains_key(file) || self.graph.file_idx_of(file).is_some()
+        self.dirty.contains_key(file) || self.clean_file_idx(file).is_some()
     }
 
     fn has_module_name(&self, language: Language, name: &str) -> bool {
@@ -1039,7 +1045,7 @@ impl<'a> ModuleFacts for OverlayFacts<'a> {
                         .collect()
                 });
         }
-        let Some(file_idx) = self.graph.file_idx_of(file) else {
+        let Some(file_idx) = self.clean_file_idx(file) else {
             return Vec::new();
         };
         // Only parser-made kinds: the index's file lookups never see the
@@ -1085,7 +1091,7 @@ impl<'a> ModuleFacts for OverlayFacts<'a> {
         if let Some(&file_ord) = self.dirty.get(file) {
             return self.dirty_aliases[file_ord].as_ref().map(Fact::Borrowed);
         }
-        let file_idx = self.graph.file_idx_of(file)?;
+        let file_idx = self.clean_file_idx(file)?;
         if let Some(table) = self.clean_aliases.borrow().get(&file_idx) {
             return table.clone().map(Fact::Shared);
         }
@@ -1110,7 +1116,7 @@ impl<'a> ModuleFacts for OverlayFacts<'a> {
         if let Some(&file_ord) = self.dirty.get(file) {
             return Some(FileImports::Parsed(&self.scope.dirty()[file_ord].imports));
         }
-        let rows = self.graph.file_imports(self.graph.file_idx_of(file)?)?;
+        let rows = self.graph.file_imports(self.clean_file_idx(file)?)?;
         Some(FileImports::Archived {
             rows,
             pool: self.graph.string_pool.as_slice(),

@@ -41,7 +41,8 @@ const NESTED: &[(&str, &str, &str)] = &[
 ];
 
 /// A file-level literal beside one in a nested function, and a literal in a
-/// Rust closure of each of two functions.
+/// Rust argument closure of each of two functions (a `let` closure is no
+/// node, R6, so its literal binds the enclosing top-level fn).
 const MIXED: &[(&str, &str, &str)] = &[
     (
         "python file level beside nested",
@@ -51,7 +52,7 @@ const MIXED: &[(&str, &str, &str)] = &[
     (
         "rust closures",
         "src/load.rs",
-        "use std::fs;\nfn first() -> String {\n    let load = || fs::read_to_string(\"session_meta.json\");\n    load().unwrap()\n}\nfn second() -> String {\n    let load = || fs::read_to_string(\"session_meta.json\");\n    load().unwrap()\n}\n",
+        "use std::fs;\nfn run<T>(f: impl Fn() -> T) -> T {\n    f()\n}\nfn first() -> std::io::Result<String> {\n    run(|| fs::read_to_string(\"session_meta.json\"))\n}\nfn second() -> std::io::Result<String> {\n    run(|| fs::read_to_string(\"session_meta.json\"))\n}\n",
     ),
 ];
 

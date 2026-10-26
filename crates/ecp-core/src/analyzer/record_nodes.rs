@@ -110,7 +110,7 @@ pub fn path_literal_node<'a>(
     };
     let (owner, uid_owner) = match endpoint {
         Some(RawEndpoint::Node(idx)) => {
-            let chain = display_chain(idx.0, parents.len(), &node, |raw| {
+            let chain = display_chain(idx.0, parents.len(), node, |raw| {
                 parents.get(raw as usize).copied().flatten()
             });
             (
