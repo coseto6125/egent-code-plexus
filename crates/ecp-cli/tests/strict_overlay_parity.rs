@@ -1456,10 +1456,10 @@ fn test_check_closure_py_module_reexport_dropped_matches_baseline() {
     });
 }
 
-/// Stands for: a plain `import os` added to a package `__init__.py`
-/// re-exports nothing (the reader serves the edited file and each closure
-/// dependent) (the parser keeps it as a `*` row with an alias), so
-/// no clean file that also imports `os` enters the closure.
+/// Stands for: a plain `import os` added to a package `__init__.py` names
+/// `os`, which no clean `import os` row binds (that row imports `*` under
+/// the alias `os`), so no such file enters the closure (the reader serves
+/// the edited file and each closure dependent).
 #[test]
 fn test_invalidation_closure_py_init_plain_import_added_names_no_importer() {
     let observed = strict_parity::run(&Scenario {

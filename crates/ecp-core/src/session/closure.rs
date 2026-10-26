@@ -536,10 +536,10 @@ impl<'a> Changes<'a> {
     /// an importer of that file binds without changing a declaration. The
     /// rows that count are the ones the resolver follows: a TS / JS
     /// `export *`, re-export row or export-alias local
-    /// (`followed_by_reexport`), and every `from … import` row of a Python
-    /// module (`python_reexport` follows any module, not only a package
-    /// `__init__.py`). A plain Python `import x` binds only `x.member`, so it
-    /// re-exports nothing. A row on one side only, compared with its source,
+    /// (`followed_by_reexport`), and every row of a Python module
+    /// (`python_reexport` follows any module, not only a package
+    /// `__init__.py`; `from pkg import os` binds the `import os` of `pkg`).
+    /// A row on one side only, compared with its source,
     /// names what it binds; a star row names the declarations of the file it
     /// re-exports, or marks the closure incomplete when the base recorded no
     /// target for that source.
@@ -577,13 +577,10 @@ impl<'a> Changes<'a> {
             exported_as.entry(local).or_default().push(exported);
         }
         let counts = |row: &ImportRef<'a>| {
-            if python {
-                !(row.imported_name == "*" && row.alias.is_some())
-            } else {
-                row.is_star_export()
-                    || row.is_es_reexport()
-                    || exported_as.contains_key(row.local_name())
-            }
+            python
+                || row.is_star_export()
+                || row.is_es_reexport()
+                || exported_as.contains_key(row.local_name())
         };
         let base: Vec<ImportRef<'a>> = base_idx
             .and_then(|idx| graph.file_imports(idx))
