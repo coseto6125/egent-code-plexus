@@ -63,6 +63,7 @@ fn build_test_graph(n: usize) -> (Vec<u8>, Vec<u64>) {
         call_metas: vec![],
         raw_function_metas: vec![],
         export_aliases: None,
+        parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
     });
     let g = b.build();
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&g)

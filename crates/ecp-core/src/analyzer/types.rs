@@ -1,6 +1,7 @@
 use crate::contracts::raw_records::{
     bind_enclosing, bind_name, EndpointRule, RawEndpoint, RawIdx, RecordKind, Unbound,
 };
+use crate::contracts::routing::{Language as RouteLanguage, ParsedLanguage};
 use crate::file_category::Language;
 use crate::graph::NodeKind;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -1464,9 +1465,63 @@ pub struct LocalGraph {
     /// export keeps its declaration's name (most files) and for other
     /// languages.
     pub export_aliases: Option<Box<[RawExportAlias]>>,
+    /// C5 language after parse: [`ParsedLanguage::to_bytes`], or
+    /// [`ParsedLanguage::ABSENT`] when no parse decided one (an omitted file,
+    /// a graph built by hand). `AnalyzerPipeline` sets it once the accepting
+    /// provider has returned. The builder stores it in the `File` record, so
+    /// the script of a Vue, Svelte or Astro file and the language a content
+    /// gate accepted reach every index-side reader without a path lookup.
+    ///
+    /// A provider never sets it whole. A single-file-component provider
+    /// reports the script it parsed through [`Self::note_script`], which
+    /// leaves the file byte absent until the pipeline replaces the field.
+    pub parsed_language: [u8; 2],
 }
 
 impl LocalGraph {
+    /// Record one `<script>` block of a single-file component, parsed as
+    /// TypeScript when `block_is_ts`, else as JavaScript. The file reports
+    /// TypeScript if any block is TypeScript, else JavaScript (C5 open point
+    /// 9). A block that differs from the language reported so far adds a
+    /// `sfc-script-mismatch` [`BlindSpot`] at `span`, so the answer names the
+    /// file. A file with no block reports no script.
+    pub fn note_script(&mut self, block_is_ts: bool, span: Span) {
+        let seen = self.reported_script();
+        let block = if block_is_ts {
+            RouteLanguage::TypeScript
+        } else {
+            RouteLanguage::JavaScript
+        };
+        if seen.is_some_and(|seen| seen != block) {
+            self.blind_spots.push(BlindSpot {
+                kind: "sfc-script-mismatch".to_string(),
+                file_path: self.file_path.clone(),
+                span,
+                hint: "the component mixes TypeScript and JavaScript script blocks; \
+                       its imports and calls resolve as TypeScript"
+                    .to_string(),
+                is_test: crate::file_category::is_test_path(&self.file_path.to_string_lossy()),
+            });
+        }
+        let reported = if block_is_ts || seen == Some(RouteLanguage::TypeScript) {
+            RouteLanguage::TypeScript
+        } else {
+            RouteLanguage::JavaScript
+        };
+        self.parsed_language = [ParsedLanguage::ABSENT[0], reported as u8];
+    }
+
+    /// The script language a provider reported through [`Self::note_script`].
+    /// `None` when none did, and for a graph the pipeline has already
+    /// stamped (its file byte then names a language).
+    pub fn reported_script(&self) -> Option<RouteLanguage> {
+        let [file, script] = self.parsed_language;
+        if file != ParsedLanguage::ABSENT[0] {
+            return None;
+        }
+        RouteLanguage::from_discriminant(script)
+    }
+
     /// C4 `ParsePhase::BindRecords`: write the endpoint of every path
     /// literal, SQL reference, schema field and event topic from its site,
     /// and the handler of every route ([`RawRoute::bind`]).
@@ -1530,6 +1585,7 @@ impl LocalGraph {
             call_metas: Vec::new(),
             raw_function_metas: Vec::new(),
             export_aliases: None,
+            parsed_language: ParsedLanguage::ABSENT,
         }
     }
 }
@@ -1555,6 +1611,7 @@ impl Default for LocalGraph {
             call_metas: Vec::new(),
             raw_function_metas: Vec::new(),
             export_aliases: None,
+            parsed_language: ParsedLanguage::ABSENT,
         }
     }
 }

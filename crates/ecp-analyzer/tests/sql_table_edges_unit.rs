@@ -48,6 +48,7 @@ fn empty_lg(path: &str, nodes: Vec<RawNode>) -> LocalGraph {
         call_metas: Vec::new(),
         raw_function_metas: vec![],
         export_aliases: None,
+        parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
     }
 }
 

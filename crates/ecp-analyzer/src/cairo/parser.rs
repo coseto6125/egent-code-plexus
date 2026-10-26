@@ -171,6 +171,7 @@ impl LanguageProvider for CairoProvider {
             call_metas: vec![],
             raw_function_metas: vec![],
             export_aliases: None,
+            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
         })
     }
 }

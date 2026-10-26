@@ -53,6 +53,7 @@ fn local_graph(path: &str, fn_name: &str, content_byte: u8) -> LocalGraph {
         call_metas: vec![],
         raw_function_metas: vec![],
         export_aliases: None,
+        parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
     }
 }
 

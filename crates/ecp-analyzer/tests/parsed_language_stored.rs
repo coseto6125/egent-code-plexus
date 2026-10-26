@@ -3,16 +3,21 @@
 //! language from the path. The script language of a Vue, Svelte or Astro
 //! file and the language a content gate accepted are not in the path.
 //!
-//! No parser reports an SFC script language yet, so these tests hand the
-//! builder the language the parse would decide (`add_parsed_graph`). A Vue
-//! file with a TypeScript script is a TypeScript parse at a `.vue` path.
-//! Each SFC test compares the `.vue` file with the same source at a `.ts`
-//! path: the stored language must make the index read them alike.
+//! Two kinds of test. The builder-level tests set `LocalGraph::parsed_language`
+//! by hand on a graph the TypeScript provider parsed at a `.vue` path: that
+//! is the only way to give a Vue file a *caller*, because the SFC parsers
+//! emit no calls (`sfc_common.rs` `parse_embedded_script`, C5 open point 13).
+//! The real-parse tests run `AnalyzerPipeline::parse_file_raw` on a Vue file,
+//! so the stored value is what the parse reports. Each SFC test compares the
+//! `.vue` file with the same source at a `.ts` path: the stored language must
+//! make the index read them alike.
 mod instantiation_calls_support;
 
 use ecp_analyzer::python::PythonProvider;
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_analyzer::typescript::TypeScriptProvider;
+use ecp_analyzer::vue::parser::VueProvider;
+use ecp_core::analyzer::pipeline::AnalyzerPipeline;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::contracts::routing::{FileRouter, Language, ParsedLanguage};
@@ -20,6 +25,36 @@ use ecp_core::file_category::{FileMeta, Language as LegacyLanguage};
 use ecp_core::graph::{ArchivedZeroCopyGraph, ZeroCopyGraph};
 use instantiation_calls_support::{calls_from, imports_edges_of, Hit};
 use std::path::Path;
+use std::sync::OnceLock;
+
+/// The pipeline that parses the real-parse tests' files.
+fn pipeline() -> &'static AnalyzerPipeline {
+    static PIPELINE: OnceLock<AnalyzerPipeline> = OnceLock::new();
+    PIPELINE.get_or_init(|| {
+        let mut pipeline = AnalyzerPipeline::new();
+        pipeline.register_provider(Box::new(TypeScriptProvider::new().unwrap()));
+        pipeline.register_provider(Box::new(PythonProvider::new().unwrap()));
+        pipeline.register_provider(Box::new(VueProvider::new().unwrap()));
+        pipeline
+    })
+}
+
+fn parse_raw(path: &str, source: &str) -> LocalGraph {
+    pipeline()
+        .parse_file_raw(Path::new(path), source.as_bytes())
+        .unwrap_or_else(|e| panic!("parse {path}: {e}"))
+}
+
+/// A Vue component whose only block is a TypeScript script.
+fn vue_component(script: &str) -> String {
+    format!("<script lang=\"ts\">\n{script}</script>\n")
+}
+
+/// `graph` with the language its parse would have decided.
+fn parsed_as(mut graph: LocalGraph, language: ParsedLanguage) -> LocalGraph {
+    graph.parsed_language = language.to_bytes();
+    graph
+}
 
 /// The language `FileRoute::after_parse` decides for `path`.
 fn parsed(path: &str, accepted: Language, script: Option<Language>) -> ParsedLanguage {
@@ -86,10 +121,10 @@ fn caller_graph(
     let ts = TypeScriptProvider::new().unwrap();
     let mut builder = GraphBuilder::new();
     let caller = parse(&ts, caller_path, caller_source);
-    match caller_language {
-        Some(language) => builder.add_parsed_graph(caller, language),
-        None => builder.add_graph(caller),
-    }
+    builder.add_graph(match caller_language {
+        Some(language) => parsed_as(caller, language),
+        None => caller,
+    });
     let (provider, path, source) = candidate;
     builder.add_graph(parse(provider, path, source));
     builder.build()
@@ -187,7 +222,10 @@ fn test_imports_edges_vue_ts_script_binds_like_ts_importer() {
 fn test_file_flags_vue_ts_script_is_es_module_like_ts() {
     let ts = TypeScriptProvider::new().unwrap();
     let mut builder = GraphBuilder::new();
-    builder.add_parsed_graph(parse(&ts, "src/App.vue", CALLER), vue_ts("src/App.vue"));
+    builder.add_graph(parsed_as(
+        parse(&ts, "src/App.vue", CALLER),
+        vue_ts("src/App.vue"),
+    ));
     builder.add_graph(parse(&ts, "src/app.ts", CALLER));
     let bytes = archive(&builder.build());
     let archived = access(&bytes);
@@ -233,7 +271,7 @@ fn test_graph_bin_file_parsed_language_round_trip() {
         ),
     ];
     for (path, language) in given {
-        builder.add_parsed_graph(file(path), language);
+        builder.add_graph(parsed_as(file(path), language));
     }
     // No parse decided these: a Vue file whose script no parser reported,
     // and a YAML file whose content gate is unknown.
@@ -260,13 +298,14 @@ fn test_graph_bin_file_parsed_language_round_trip() {
     assert_eq!(archived.parsed_language(archived.files.len() as u32), None);
 }
 
-/// Two graphs of one path (they do occur) read one language.
+/// Two graphs of one path (they do occur) come from one parse, so every
+/// `File` record of the path reads the language that parse reported.
 #[test]
-fn test_add_parsed_graph_duplicate_path_every_record_reads_parsed() {
-    let ts = TypeScriptProvider::new().unwrap();
+fn test_add_graph_duplicate_path_every_record_reads_parsed() {
+    let source = vue_component(CALLER);
     let mut builder = GraphBuilder::new();
-    builder.add_graph(parse(&ts, "src/App.vue", CALLER));
-    builder.add_parsed_graph(parse(&ts, "src/App.vue", CALLER), vue_ts("src/App.vue"));
+    builder.add_graph(parse_raw("src/App.vue", &source));
+    builder.add_graph(parse_raw("src/App.vue", &source));
     let graph = builder.build();
     let records: Vec<_> = graph
         .files
@@ -340,4 +379,181 @@ fn test_file_meta_admits_reads_parsed_language_on_both_files() {
     // of one language after parse admit each other.
     assert!(FileMeta::from_path("src/App.vue").admits(FileMeta::from_path("src/Other.vue")));
     assert!(FileMeta::from_path("api/svc.proto").admits(FileMeta::from_path("api/other.proto")));
+}
+
+const TS_HELPER_SOURCE: &str = "export function helper() { return 1; }\n";
+
+/// The index of `files`, each parsed by `AnalyzerPipeline::parse_file_raw`.
+fn index_of(files: &[(&str, String)]) -> ZeroCopyGraph {
+    let mut builder = GraphBuilder::new();
+    for (path, source) in files {
+        builder.add_graph(parse_raw(path, source));
+    }
+    builder.build()
+}
+
+/// The callee side of the global tier through the real parse: the SFC
+/// parsers emit no calls, so a Vue file cannot be the caller of a real
+/// parse, but a TS caller reaches a declaration of the Vue script. The
+/// confidence is the `.ts` control's: the same tier.
+#[test]
+fn test_global_tier_ts_caller_binds_vue_ts_script_declaration() {
+    let edge_to = |helper: (&str, String)| {
+        let graph = index_of(&[("src/app.ts", CALLER.to_string()), helper]);
+        call_targets(&graph, "setup")
+            .into_iter()
+            .filter(|(_, name, _)| name == "helper")
+            .collect::<Vec<_>>()
+    };
+    let control = edge_to(("src/util.ts", TS_HELPER_SOURCE.to_string()));
+    assert_eq!(
+        control.len(),
+        1,
+        "the .ts caller binds the .ts helper: {control:?}"
+    );
+    let vue = edge_to(("src/Util.vue", vue_component(TS_HELPER_SOURCE)));
+    assert_eq!(
+        vue,
+        [(
+            "src/Util.vue".to_string(),
+            "helper".to_string(),
+            control[0].2
+        )],
+        "a TS script declaration binds at the .ts tier"
+    );
+}
+
+/// TypeScript and JavaScript stay apart at the global tier (C5 open point 5):
+/// a Vue file with a JS script is a JavaScript candidate.
+#[test]
+fn test_global_tier_ts_caller_skips_vue_js_script_declaration() {
+    let component = format!("<script lang=\"js\">\n{TS_HELPER_SOURCE}</script>\n");
+    let graph = index_of(&[
+        ("src/app.ts", CALLER.to_string()),
+        ("src/Util.vue", component),
+    ]);
+    let hits = call_targets(&graph, "setup");
+    assert!(
+        hits.iter().all(|(_, name, _)| name != "helper"),
+        "a JS script never binds at a TS caller's global tier: {hits:?}"
+    );
+}
+
+/// C5 Consumers row 4 through the real parse: the `Imports` pass reads the
+/// language the Vue parse reported.
+#[test]
+fn test_imports_edges_real_vue_ts_script_binds_like_ts_importer() {
+    let importer =
+        "import { helper } from './util';\nexport function setup() { return helper(); }\n";
+    let util = ("src/util.ts", TS_HELPER_SOURCE.to_string());
+    let control = index_of(&[("src/app.ts", importer.to_string()), util.clone()]);
+    let vue = index_of(&[("src/App.vue", vue_component(importer)), util]);
+    let control_imports = imports_edges_of(&control, "app.ts");
+    assert!(
+        !control_imports.is_empty(),
+        "the .ts importer has an Imports edge"
+    );
+    assert_eq!(imports_edges_of(&vue, "App.vue"), control_imports);
+}
+
+/// C5 Consumers rows 1 and 2 through the real parse: a Vue file whose TS
+/// script exports is an ES module, one that exports nothing is not, as the
+/// same source in a `.ts` file.
+#[test]
+fn test_file_flags_real_vue_ts_script_is_es_module_like_ts() {
+    for (script, expected) in [
+        ("export function setup() { return 1; }\n", true),
+        ("function setup() { return 1; }\n", false),
+    ] {
+        let graph = index_of(&[
+            ("src/app.ts", script.to_string()),
+            ("src/App.vue", vue_component(script)),
+        ]);
+        let bytes = archive(&graph);
+        let archived = access(&bytes);
+        let flag = |path: &str| archived.is_es_module_file(archived.file_idx_of(path).unwrap());
+        assert_eq!(flag("src/app.ts"), expected, "{script}");
+        assert_eq!(flag("src/App.vue"), expected, "{script}");
+    }
+}
+
+const DEFAULT_IMPORTER: &str =
+    "import Comp from './Comp.vue';\nexport function run() { return Comp(); }\n";
+
+/// `Imports` and `Calls` edges of the importer of a component whose script
+/// is `script`, with the component's file name read as `.ts`, so the Vue
+/// file and its `.ts` control compare equal.
+fn default_import_edges(
+    component: (&str, String),
+    importer: &str,
+) -> (
+    Vec<(String, String, &'static str, u32)>,
+    Vec<(String, String, f32)>,
+) {
+    let graph = index_of(&[("src/main.ts", importer.to_string()), component]);
+    let normalize = |file: String| file.replace(".vue", ".ts");
+    let imports = imports_edges_of(&graph, "main.ts")
+        .into_iter()
+        .map(|(file, name, kind, confidence)| (normalize(file), name, kind, confidence))
+        .collect();
+    let calls = call_targets(&graph, "run")
+        .into_iter()
+        .map(|(file, name, confidence)| (normalize(file), name, confidence))
+        .collect();
+    (imports, calls)
+}
+
+/// Unmasked consumer: `import Comp from './Comp.vue'`. Before the Vue file
+/// stored its script language it was no ES module, so the default import
+/// fell back to a by-name lookup and bound the private `function Comp`.
+/// With a TS script that exports something, the file is an ES module and
+/// the default import binds an exported declaration only: the SFC parser
+/// emits no `default` export, so the import binds nothing. A `.ts` file of
+/// the same source is the control.
+#[test]
+fn test_default_import_vue_with_exports_requires_exported_declaration() {
+    let script = "export function helper() { return 1; }\nfunction Comp() { return 2; }\n";
+    let control = default_import_edges(
+        ("src/Comp.ts", script.to_string()),
+        &DEFAULT_IMPORTER.replace("Comp.vue", "Comp"),
+    );
+    let mut vue = default_import_edges(("src/Comp.vue", vue_component(script)), DEFAULT_IMPORTER);
+    // Both bind the target's File node, whose name is the file's own name.
+    for (_, name, kind, _) in &mut vue.0 {
+        if *kind == "File" && name == "Comp.vue" {
+            *name = "Comp.ts".to_string();
+        }
+    }
+    assert_eq!(
+        vue, control,
+        "the Vue file binds a default import as a .ts file"
+    );
+    assert!(
+        vue.0.iter().all(|(_, name, _, _)| name != "Comp"),
+        "the private Comp is no longer bound by the default import: {:?}",
+        vue.0
+    );
+}
+
+/// A script with no export keeps the by-name fallback, as before: the file
+/// is no ES module, in `.vue` and in `.ts` alike.
+#[test]
+fn test_default_import_vue_script_without_exports_binds_by_name() {
+    let script = "function Comp() { return 2; }\n";
+    let control = default_import_edges(
+        ("src/Comp.ts", script.to_string()),
+        &DEFAULT_IMPORTER.replace("Comp.vue", "Comp"),
+    );
+    let vue = default_import_edges(("src/Comp.vue", vue_component(script)), DEFAULT_IMPORTER);
+    assert_eq!(
+        vue, control,
+        "the Vue file binds a default import as a .ts file"
+    );
+    assert!(
+        vue.0
+            .iter()
+            .any(|(file, name, _, _)| file == "src/Comp.ts" && name == "Comp"),
+        "the by-name fallback binds Comp: {:?}",
+        vue.0
+    );
 }

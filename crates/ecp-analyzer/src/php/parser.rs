@@ -1136,6 +1136,7 @@ impl LanguageProvider for PhpProvider {
             call_metas: vec![],
             raw_function_metas,
             export_aliases: None,
+            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
         })
     }
 }

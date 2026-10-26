@@ -33,6 +33,7 @@ impl LanguageProvider for TypeScriptProvider {
             call_metas: vec![],
             raw_function_metas: vec![],
             export_aliases: None,
+            parsed_language: crate::contracts::routing::ParsedLanguage::ABSENT,
         })
     }
 }

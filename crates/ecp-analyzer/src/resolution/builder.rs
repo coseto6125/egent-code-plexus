@@ -204,10 +204,6 @@ pub struct GraphBuilder {
     /// index walk found. `build` merges them with the Rust module tree's
     /// Cargo rows. Empty by default.
     workspace_scopes: WorkspaceFacts,
-    /// C5 language after parse per `LocalGraph.file_path`, from
-    /// [`Self::add_parsed_graph`]. A graph without an entry gets what its
-    /// path decides (`FileMeta::from_normalized_path`).
-    parsed_languages: FxHashMap<std::path::PathBuf, ParsedLanguage>,
 }
 
 impl Default for GraphBuilder {
@@ -226,7 +222,6 @@ impl GraphBuilder {
             symbol_skip_set: None,
             csharp_projects: CsharpProjects::default(),
             workspace_scopes: WorkspaceFacts::default(),
-            parsed_languages: FxHashMap::default(),
         }
     }
 
@@ -277,18 +272,12 @@ impl GraphBuilder {
         self
     }
 
+    /// Add one parsed file. The `File` record stores `graph.parsed_language`
+    /// (C5 `FileRoute::after_parse`: the script of a Vue, Svelte or Astro
+    /// file, the content gate of a sniffed route), and every index-side
+    /// reader reads it. A graph with none (`ParsedLanguage::ABSENT`) gets what
+    /// its path decides.
     pub fn add_graph(&mut self, graph: LocalGraph) {
-        self.local_graphs.push(graph);
-    }
-
-    /// [`Self::add_graph`] for a file whose language after parse the parse
-    /// decided (C5 `FileRoute::after_parse`): the script of a Vue, Svelte or
-    /// Astro file, the content gate of a sniffed route. The `File` record
-    /// stores it and every index-side reader reads it. A later graph of the
-    /// same path replaces the language.
-    pub fn add_parsed_graph(&mut self, graph: LocalGraph, parsed: ParsedLanguage) {
-        self.parsed_languages
-            .insert(graph.file_path.clone(), parsed);
         self.local_graphs.push(graph);
     }
 
@@ -319,7 +308,7 @@ impl GraphBuilder {
             files,
             collision_blind_spots,
             merged,
-        } = pass1_register_nodes(&self.local_graphs, &self.parsed_languages);
+        } = pass1_register_nodes(&self.local_graphs);
         // Pass 1 gives every raw node a slot (a collision keeps a tombstone),
         // so the map reads node counts only and holds for the whole build.
         // A record of a tombstoned twin binds the node that kept its identity
@@ -1214,10 +1203,7 @@ fn file_indices(local_graphs: &[LocalGraph]) -> FxHashMap<String, u32> {
 /// SymbolTable/StringPool, assigning canonical UIDs, keeping overloads under
 /// their own UIDs and tombstoning other D1 hash collisions (see
 /// BlindSpotRecord `uid-collision`/`ifdef-redef` kinds).
-fn pass1_register_nodes(
-    local_graphs: &[LocalGraph],
-    parsed_languages: &FxHashMap<std::path::PathBuf, ParsedLanguage>,
-) -> Pass1Registration {
+fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
     // Pre-size accumulators from known input cardinalities. Each
     // LocalGraph contributes 1 File node + N symbol nodes. Plus a
     // small per-graph slack for Pass 1.5 Route nodes (one per
@@ -1267,8 +1253,8 @@ fn pass1_register_nodes(
         let category = determine_category(&path_str);
         // The language the parse decided, else what the path decides. Every
         // later reader asks the table, never the path again.
-        let file_meta = match parsed_languages.get(&local_graph.file_path) {
-            Some(&parsed) => FileMeta::of_parsed(&path_str, parsed),
+        let file_meta = match ParsedLanguage::from_bytes(local_graph.parsed_language) {
+            Some(parsed) => FileMeta::of_parsed(&path_str, parsed),
             None => FileMeta::from_normalized_path(&path_str),
         };
         symbol_table.note_file_meta(&path_str, file_meta);
@@ -4551,6 +4537,7 @@ mod tests {
             call_metas: vec![],
             raw_function_metas: vec![],
             export_aliases: None,
+            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
         };
         let target = LocalGraph {
             file_path: "src/b.ts".into(),
@@ -4583,6 +4570,7 @@ mod tests {
             call_metas: vec![],
             raw_function_metas: vec![],
             export_aliases: None,
+            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
         };
 
         let mut builder = GraphBuilder::new();
@@ -4687,7 +4675,7 @@ mod tests {
             ..Default::default()
         };
 
-        let out = pass1_register_nodes(std::slice::from_ref(&g), &FxHashMap::default());
+        let out = pass1_register_nodes(std::slice::from_ref(&g));
 
         assert_eq!(out.nodes.len(), 3, "one graph node per raw node");
         assert_eq!(out.files.len(), 1);
@@ -4723,7 +4711,7 @@ mod tests {
             ..Default::default()
         };
 
-        let out = pass1_register_nodes(std::slice::from_ref(&g), &FxHashMap::default());
+        let out = pass1_register_nodes(std::slice::from_ref(&g));
 
         assert_eq!(
             out.nodes.len(),
@@ -4751,7 +4739,7 @@ mod tests {
             "dup.c",
             vec![raw_fn("twice", 0), raw_fn("twice", 30), raw_fn("twice", 60)],
         );
-        let out = pass1_register_nodes(std::slice::from_ref(&g), &FxHashMap::default());
+        let out = pass1_register_nodes(std::slice::from_ref(&g));
         let survivor = out.nodes[0].uid;
         assert_eq!(
             [out.nodes[1].uid, out.nodes[2].uid],
@@ -4777,7 +4765,7 @@ mod tests {
                 raw_decl("save", NodeKind::Method, 5, &[], Some("A")),
             ],
         );
-        let out = pass1_register_nodes(std::slice::from_ref(&g), &FxHashMap::default());
+        let out = pass1_register_nodes(std::slice::from_ref(&g));
         let first = ecp_core::uid::compute(NodeKind::Method, "A.java", Some("A"), "save");
         assert_eq!(
             [out.nodes[0].uid, out.nodes[1].uid],
@@ -4806,7 +4794,7 @@ mod tests {
                 ],
             ),
         ];
-        let out = pass1_register_nodes(&graphs, &FxHashMap::default());
+        let out = pass1_register_nodes(&graphs);
         let save = ecp_core::uid::compute(NodeKind::Method, "A.java", Some("A"), "save");
         let helper = ecp_core::uid::compute(NodeKind::Function, "A.java", None, "helper");
         assert_eq!(
@@ -4848,7 +4836,7 @@ mod tests {
     /// Pass 1 plus the supertypes pre-pass. `graphs` must already be sorted
     /// by path, as `build()` sorts them before Pass 1.
     fn table_with_supertypes(graphs: &[LocalGraph]) -> SymbolTable {
-        let mut st = pass1_register_nodes(graphs, &FxHashMap::default()).symbol_table;
+        let mut st = pass1_register_nodes(graphs).symbol_table;
         let declared = pass1_9_supertypes(
             graphs,
             &st,
@@ -4873,7 +4861,7 @@ mod tests {
                 raw_decl("helper", NodeKind::Function, 20, &[], None),
             ],
         );
-        let st = pass1_register_nodes(std::slice::from_ref(&g), &FxHashMap::default()).symbol_table;
+        let st = pass1_register_nodes(std::slice::from_ref(&g)).symbol_table;
         let call = ResolveTarget::Callable;
         assert_eq!(st.owned_in_file("db.py", "execute", "Tx", call), vec![1]);
         assert_eq!(
@@ -5230,6 +5218,7 @@ mod tests {
             call_metas: vec![],
             raw_function_metas: vec![],
             export_aliases: None,
+            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
         };
 
         let mut builder = GraphBuilder::new();
@@ -5327,6 +5316,7 @@ mod tests {
             call_metas: vec![],
             raw_function_metas: vec![],
             export_aliases: None,
+            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
         };
         let mut builder = GraphBuilder::new();
         builder.add_graph(g);
@@ -5402,6 +5392,7 @@ mod tests {
             call_metas: vec![],
             raw_function_metas: vec![],
             export_aliases: None,
+            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
         };
 
         let mut builder = GraphBuilder::new();
@@ -5455,6 +5446,7 @@ mod tests {
             call_metas: vec![],
             raw_function_metas: vec![],
             export_aliases: None,
+            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
         }
     }
 
@@ -5612,6 +5604,7 @@ mod tests {
             call_metas: vec![],
             raw_function_metas: vec![],
             export_aliases: None,
+            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
         };
 
         let mut builder = GraphBuilder::new();
@@ -5735,6 +5728,7 @@ mod tests {
                     call_metas: vec![],
                     raw_function_metas: vec![],
                     export_aliases: None,
+                    parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
                 },
                 LocalGraph {
                     file_path: "src/bar.rs".into(),
@@ -5804,6 +5798,7 @@ mod tests {
                     call_metas: vec![],
                     raw_function_metas: vec![],
                     export_aliases: None,
+                    parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
                 },
                 // iface.rs: defines Interface IThing so the Implementor →
                 // IThing heritage edge dispatches to Implements (not Extends).
@@ -5838,6 +5833,7 @@ mod tests {
                     call_metas: vec![],
                     raw_function_metas: vec![],
                     export_aliases: None,
+                    parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
                 },
             ]
         }
@@ -6004,6 +6000,7 @@ mod tests {
             call_metas: vec![],
             raw_function_metas: vec![],
             export_aliases: None,
+            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
         }
     }
 
@@ -6039,6 +6036,7 @@ mod tests {
             call_metas: vec![],
             raw_function_metas: vec![],
             export_aliases: None,
+            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
         }
     }
 

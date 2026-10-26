@@ -173,10 +173,15 @@ impl LanguageProvider for SvelteProvider {
         // ── Pass 2: re-parse each script block ───────────────────────────
         let mut all_nodes: Vec<RawNode> = section_nodes;
         let mut all_imports: Vec<RawImport> = Vec::new();
+        let mut graph = LocalGraph {
+            file_path: path.to_path_buf(),
+            ..Default::default()
+        };
 
         for (script_elem, start_tag, raw_text_node) in script_blocks {
             let is_ts = detect_lang_ts(&start_tag, source);
             let is_module = detect_context_module(&start_tag, source);
+            graph.note_script(is_ts, node_span(&script_elem));
             let section_name = if is_module { "script module" } else { "script" };
 
             // Emit Section node for the script block itself.
@@ -232,12 +237,9 @@ impl LanguageProvider for SvelteProvider {
             all_imports.extend(imports);
         }
 
-        Ok(LocalGraph {
-            file_path: path.to_path_buf(),
-            nodes: all_nodes,
-            imports: all_imports,
-            ..Default::default()
-        })
+        graph.nodes = all_nodes;
+        graph.imports = all_imports;
+        Ok(graph)
     }
 }
 

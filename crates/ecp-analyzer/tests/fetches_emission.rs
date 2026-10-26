@@ -63,6 +63,7 @@ fn route_graph(rel_path: &str, method: &str, route_path: &str, handler: &str) ->
         call_metas: vec![],
         raw_function_metas: vec![],
         export_aliases: None,
+        parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
     }
 }
 
@@ -89,6 +90,7 @@ fn consumer_graph(rel_path: &str) -> LocalGraph {
         call_metas: vec![],
         raw_function_metas: vec![],
         export_aliases: None,
+        parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
     }
 }
 

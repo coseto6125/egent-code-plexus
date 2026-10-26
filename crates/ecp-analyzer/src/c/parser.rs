@@ -830,6 +830,7 @@ impl LanguageProvider for CProvider {
             call_metas,
             raw_function_metas,
             export_aliases: None,
+            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
         })
     }
 }
