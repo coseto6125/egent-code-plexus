@@ -103,3 +103,30 @@ fn named_function_arg_is_not_treated_as_anonymous_callback() {
         g.nodes
     );
 }
+
+#[test]
+fn nested_arrow_closure_call_keeps_typed_receiver() {
+    // `when(() => repository.fetchItems())` inside a test closure: the arrow
+    // closure is its own <anonymous> node and reads `repository` from the
+    // enclosing scope.
+    let g = parse(
+        "void main() {\n  late Repository repository;\n  test('x', () async {\n    when(() => repository.fetchItems()).thenAnswer((_) async => []);\n  });\n}\n",
+    );
+    let calls: Vec<(&str, Vec<&str>)> = g
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
+        .map(|n| {
+            (
+                n.name.as_str(),
+                n.calls.iter().map(String::as_str).collect(),
+            )
+        })
+        .collect();
+    assert!(
+        calls
+            .iter()
+            .any(|(_, c)| c.iter().any(|c| c.ends_with("fetchItems"))),
+        "calls: {calls:?}"
+    );
+}

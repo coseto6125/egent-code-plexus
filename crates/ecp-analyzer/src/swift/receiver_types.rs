@@ -441,7 +441,20 @@ fn swift_callee_name(
     nodes: &[RawNode],
 ) -> Option<String> {
     // The callee is the first non-call-suffix named child of `call_expression`.
-    let target = first_named_where(call, |ch| ch.kind() != "call_suffix")?;
+    let mut target = first_named_where(call, |ch| ch.kind() != "call_suffix")?;
+    // tree-sitter-swift 0.7.4 parses `!a.m(x)` as `(!a.m)(x)` and a continued
+    // `a +\n B.m(x)` as `(a + B.m)(x)`: the called name is the operand that
+    // touches the argument list. The implicit member `.m(x)` is also a
+    // `prefix_expression`; 0.7.3 recorded no call for it, so it stays opaque.
+    while let Some(inner) = match target.kind() {
+        "prefix_expression" => target
+            .child_by_field_name("operation")
+            .filter(|op| op.kind() != ".")
+            .and_then(|_| target.child_by_field_name("target")),
+        _ => target.child_by_field_name("rhs"),
+    } {
+        target = inner;
+    }
     let pos = start_pos(call);
 
     match target.kind() {
