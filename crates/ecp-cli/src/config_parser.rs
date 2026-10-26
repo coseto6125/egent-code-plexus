@@ -1317,27 +1317,25 @@ fn swift_scope(reader: &ConfigReader, path: &str) -> Option<ScopeDraft> {
         .collect::<Vec<_>>()
         .join("\n");
     let mut names = Vec::new();
-    let targets: Vec<regex::Captures> = SWIFT_TARGET_RE.captures_iter(&code).collect();
-    for (i, target) in targets.iter().enumerate() {
-        let (Some(kind), Some(name)) = (target.get(1), target.get(2)) else {
+    for (kind, flat) in swift_target_elements(&code) {
+        let Some(name) = SWIFT_NAME_ARG_RE
+            .captures(&flat)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str())
+        else {
             continue;
         };
-        let body_end = targets
-            .get(i + 1)
-            .and_then(|next| next.get(0))
-            .map_or(code.len(), |next| next.start());
-        let body = &code[name.end()..body_end];
-        let default_dir = if kind.as_str() == "testTarget" {
-            format!("Tests/{}", name.as_str())
+        let default_dir = if kind == "testTarget" {
+            format!("Tests/{name}")
         } else {
-            format!("Sources/{}", name.as_str())
+            format!("Sources/{name}")
         };
         let dir = SWIFT_PATH_ARG_RE
-            .captures(body)
+            .captures(&flat)
             .and_then(|c| c.get(1))
             .map_or(default_dir, |m| m.as_str().to_string());
-        push_alias(&mut scope.aliases, &root, name.as_str(), [dir.as_str()]);
-        names.push((name.as_str().to_string(), NameRank::Primary));
+        push_alias(&mut scope.aliases, &root, name, [dir.as_str()]);
+        names.push((name.to_string(), NameRank::Primary));
     }
     if let Some(package) = non_blank(
         PACKAGE_NAME_RE
@@ -1363,12 +1361,114 @@ fn swift_scope(reader: &ConfigReader, path: &str) -> Option<ScopeDraft> {
     })
 }
 
-static SWIFT_TARGET_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-    regex::Regex::new(
-        r#"\.(target|executableTarget|testTarget|macro|plugin|systemLibrary)\s*\(\s*name\s*:\s*"([^"]+)""#,
-    )
-    .unwrap()
-});
+/// Index of the bracket closing the one at `open`; strings are skipped.
+/// `code.len()` when it never closes.
+fn swift_close(code: &str, open: usize) -> usize {
+    let bytes = code.as_bytes();
+    let (mut depth, mut i, mut in_str) = (0usize, open, false);
+    while i < bytes.len() {
+        match (in_str, bytes[i]) {
+            (true, b'\\') => i += 1,
+            (true, b'"') => in_str = false,
+            (false, b'"') => in_str = true,
+            (false, b'(' | b'[' | b'{') => depth += 1,
+            (false, b')' | b']' | b'}') => {
+                depth -= 1;
+                if depth == 0 {
+                    return i;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    code.len()
+}
+
+/// The arguments of one call with everything nested blanked out, so a
+/// regex over it reads only the call's own `name:` and `path:`.
+fn swift_flatten_args(args: &str) -> String {
+    let (mut depth, mut in_str) = (0usize, false);
+    let mut flat = String::with_capacity(args.len());
+    let mut chars = args.chars();
+    while let Some(c) = chars.next() {
+        let keep = depth == 0;
+        match (in_str, c) {
+            (true, '\\') => {
+                let escaped = chars.next();
+                if keep {
+                    flat.push(c);
+                    flat.extend(escaped);
+                } else {
+                    flat.push_str("  ");
+                }
+                continue;
+            }
+            (true, '"') => in_str = false,
+            (false, '"') => in_str = true,
+            (false, '(' | '[' | '{') => {
+                depth += 1;
+                flat.push(' ');
+                continue;
+            }
+            (false, ')' | ']' | '}') => {
+                depth = depth.saturating_sub(1);
+                flat.push(' ');
+                continue;
+            }
+            _ => {}
+        }
+        flat.push(if keep { c } else { ' ' });
+    }
+    flat
+}
+
+/// The elements of the top-level `targets: [ ... ]` array as
+/// `(constructor, flattened arguments)`. A `.target(name:)` inside a
+/// `dependencies:` list or a `.plugin(name:)` inside `plugins:` is nested in
+/// an element, so it is not one; the `targets:` of a `.product` holds
+/// strings, not constructors, so it is not the array either.
+fn swift_target_elements(code: &str) -> Vec<(&'static str, String)> {
+    let Some(open) = SWIFT_TARGETS_ARRAY_RE
+        .find_iter(code)
+        .map(|m| m.end() - 1)
+        .find(|&open| code[open + 1..].trim_start().starts_with('.'))
+    else {
+        return Vec::new();
+    };
+    let close = swift_close(code, open);
+    let inner = &code[open + 1..close];
+    let mut elements = Vec::new();
+    let mut rest = 0;
+    while let Some(found) = SWIFT_ELEMENT_RE.captures(&inner[rest..]) {
+        let (Some(whole), Some(kind)) = (found.get(0), found.get(1)) else {
+            break;
+        };
+        let paren = rest + whole.end() - 1;
+        let end = swift_close(inner, paren);
+        if let Some(kind) = SWIFT_TARGET_KINDS.iter().find(|k| **k == kind.as_str()) {
+            let args = inner.get(paren + 1..end).unwrap_or("");
+            elements.push((*kind, swift_flatten_args(args)));
+        }
+        rest = (end + 1).min(inner.len());
+    }
+    elements
+}
+
+const SWIFT_TARGET_KINDS: [&str; 6] = [
+    "target",
+    "executableTarget",
+    "testTarget",
+    "macro",
+    "plugin",
+    "systemLibrary",
+];
+static SWIFT_TARGETS_ARRAY_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"\btargets\s*:\s*\[").unwrap());
+static SWIFT_ELEMENT_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"\.(\w+)\s*\(").unwrap());
+static SWIFT_NAME_ARG_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r#"^\s*name\s*:\s*"([^"]+)""#).unwrap());
 static SWIFT_PATH_ARG_RE: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(r#"\bpath\s*:\s*"([^"]+)""#).unwrap());
 static SWIFT_PATH_DEPENDENCY_RE: std::sync::LazyLock<regex::Regex> =

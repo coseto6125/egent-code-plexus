@@ -1,5 +1,6 @@
 //! Shared formatting helpers for archived graph enums. Previously each
-//! command carried its own copy of `kind_to_str` / `rel_to_str`.
+//! command carried its own copy of `kind_to_str` and the live-`RelType`
+//! string form.
 
 use ecp_core::graph::{ArchivedNodeKind, NodeKind, RelType};
 
@@ -16,7 +17,7 @@ pub fn kind_to_str(kind: &ArchivedNodeKind) -> &'static str {
     node_kind_to_str(&NodeKind::from(kind))
 }
 
-/// Owned-`RelType` twin of [`rel_to_str`] — same strings, for code paths
+/// Live-`RelType` string form — the strings the archived graph prints, for code paths
 /// holding a live `RelType` (e.g. merged overlay edges) rather than an
 /// archived one. Distinct from `RelType::as_str`, which renders the PascalCase
 /// variant name cypher's `type(r)` returns.

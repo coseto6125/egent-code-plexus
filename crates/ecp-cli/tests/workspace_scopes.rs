@@ -735,6 +735,7 @@ import PackageDescription
 
 let package = Package(
     name: "Pkg",
+    products: [.library(name: "PkgLib", targets: ["Core"])],
     dependencies: [
         .package(path: "../Other"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.0.0"),
@@ -744,6 +745,12 @@ let package = Package(
         // .target(name: "Old"),
         .target(name: "Net", dependencies: ["Core"], path: "Src/Net"),
         .testTarget(name: "CoreTests", dependencies: ["Core"]),
+        .target(
+            name: "App",
+            dependencies: [.target(name: "Core"), .product(name: "Log", package: "swift-log")],
+            path: "Src/App",
+            plugins: [.plugin(name: "SwiftLintPlugin", package: "SwiftLint")]
+        ),
     ]
 )
 "#,
@@ -763,11 +770,14 @@ let package = Package(
             alias("Core", &["Pkg/Sources/Core"]),
             alias("Net", &["Pkg/Src/Net"]),
             alias("CoreTests", &["Pkg/Tests/CoreTests"]),
-        ]
+            alias("App", &["Pkg/Src/App"]),
+        ],
+        "a nested `.target`/`.plugin` is a dependency, not a target"
     );
     assert_eq!(
         names_of(&facts, pkg_id),
         [
+            "App:Primary",
             "Core:Primary",
             "CoreTests:Primary",
             "Net:Primary",

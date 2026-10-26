@@ -85,8 +85,7 @@ pub struct SymbolHashDiff {
 /// `new_graphs` files as explicitly changed (disables guard (b)).
 ///
 /// `old_schema_field_names` is a per-file map of `SchemaField` names from
-/// the old graph (use `schema_field_names_per_file` to build from an
-/// `ArchivedZeroCopyGraph`). When the new file's schema_field name-set
+/// the old graph, built by the caller. When the new file's schema_field name-set
 /// matches the old, guard (c) clears. Pass an empty map to retain the
 /// pre-v10 conservative fallback (any non-empty schema_fields →
 /// FullReanalyze).

@@ -1759,6 +1759,9 @@ fn ensure_session_meta(session_dir: &Path, worktree: &Path) -> io::Result<()> {
             .map(|mut s| s.insert(session_dir.to_path_buf()))
             .unwrap_or(true);
         if first_visit {
+            // A session written by an older binary has no `l1/`; make it
+            // here for the same watch reason as below.
+            fs::create_dir_all(ecp_core::session::layout::l1_dir(session_dir))?;
             if let Some(name) = crate::session::resolver::resolve_agent_name() {
                 if let Ok(mut meta) = SessionMeta::read(&meta_path) {
                     if meta.apply_agent_name(Some(name)) {
@@ -1937,6 +1940,22 @@ mod fingerprint_drift_tests {
         assert!(ecp_core::session::layout::l1_dir(&session_dir).is_dir());
         assert!(!ecp_core::session::layout::dirty_events_path(&session_dir).exists());
         assert!(session_dir.join("session_meta.json").is_file());
+    }
+
+    /// Stands for: a session whose meta an older binary wrote still gets
+    /// `l1/` before a peer's watch needs it.
+    #[test]
+    fn test_ensure_session_meta_existing_session_without_l1_creates_l1() {
+        let tmp = tempdir().unwrap();
+        let session_dir = tmp.path().join("sessions").join("old");
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::write(session_dir.join("session_meta.json"), "{}").unwrap();
+        let l1 = ecp_core::session::layout::l1_dir(&session_dir);
+        assert!(!l1.exists());
+
+        ensure_session_meta(&session_dir, tmp.path()).unwrap();
+
+        assert!(l1.is_dir());
     }
 
     /// A committed `app.py` holding `source`, `ECP_HOME` / `ECP_SESSION_ID`

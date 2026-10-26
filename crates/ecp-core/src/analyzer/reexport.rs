@@ -194,15 +194,10 @@ impl<'a> FileImports<'a> {
     }
 }
 
-/// Whether exports decide what another file may import from `file`: a TS /
-/// JS file other than a `.d.ts`, whose declarations TS may export
-/// implicitly. Other languages bind imports by their own rules.
-pub fn export_filter_applies(file: &str) -> bool {
-    export_filter_applies_to(Language::from_normalized_path(file), file)
-}
-
-/// [`export_filter_applies`] for a file whose language the caller already
-/// holds: the index passes the language after parse it stores.
+/// Whether exports decide what another file may import from `file`, of
+/// `language`: a TS / JS file other than a `.d.ts`, whose declarations TS may
+/// export implicitly. Other languages bind imports by their own rules. The
+/// index passes the language after parse it stores.
 pub fn export_filter_applies_to(language: Language, file: &str) -> bool {
     is_ecmascript(language) && !file.ends_with(".d.ts")
 }
@@ -222,7 +217,7 @@ pub fn go_dot_import_blocks_unmodeled_type<'a>(
 }
 
 /// The ES-module rule ([`ModuleFacts::is_es_module`]) for `file`, of
-/// `language`: [`export_filter_applies`], and the file exports a
+/// `language`: [`export_filter_applies_to`], and the file exports a
 /// declaration or has an [`ExportAliasTable`].
 pub fn is_es_module(language: Language, file: &str, exports_any: bool, alias_table: bool) -> bool {
     is_ecmascript(language) && !file.ends_with(".d.ts") && (exports_any || alias_table)
@@ -376,7 +371,7 @@ pub trait ModuleFacts {
     fn decls_in_file(&self, file: &str, name: &str) -> Vec<(u32, NodeKind)>;
     /// Whether the declaration `decl` is exported by its file.
     fn is_exported(&self, decl: u32) -> bool;
-    /// Whether `file` is an ES module: [`export_filter_applies`] and it
+    /// Whether `file` is an ES module: [`export_filter_applies_to`] and it
     /// exports a declaration or has an [`ExportAliasTable`].
     fn is_es_module(&self, file: &str) -> bool;
     /// `file`'s [`ExportAliasTable`], `None` when it has none.
@@ -1586,9 +1581,10 @@ mod tests {
 
     #[test]
     fn test_export_filter_applies_ts_js_but_not_dts_or_python() {
-        assert!(export_filter_applies("src/a.ts"));
-        assert!(export_filter_applies("src/a.mjs"));
-        assert!(!export_filter_applies("src/a.d.ts"));
-        assert!(!export_filter_applies("pkg/__init__.py"));
+        let applies = |f: &str| export_filter_applies_to(Language::from_normalized_path(f), f);
+        assert!(applies("src/a.ts"));
+        assert!(applies("src/a.mjs"));
+        assert!(!applies("src/a.d.ts"));
+        assert!(!applies("pkg/__init__.py"));
     }
 }

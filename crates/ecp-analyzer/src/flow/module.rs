@@ -34,6 +34,17 @@ pub(super) fn resolve(files: &[SourceFile], importer: usize, module: &str) -> Op
         }
         format!("{}{}", "../".repeat(climb), name.replace('.', "/"))
     } else {
+        // Same clamp as above: `normalize` drops a `..` at the root, which
+        // would bind the repo's top-level `shared/x` for `../../shared/x`.
+        let mut depth = parent.split('/').filter(|s| !s.is_empty()).count();
+        for segment in module.split('/') {
+            match segment {
+                ".." if depth == 0 => return None,
+                ".." => depth -= 1,
+                "." | "" => {}
+                _ => depth += 1,
+            }
+        }
         module.into()
     };
     let path = normalize(&format!("{parent}/{module}"));
@@ -310,5 +321,50 @@ impl Engine<'_> {
             truncated: self.truncated || ast_cut_in_slice,
             coverage: "Bounded, path-insensitive source analysis with call-site expansion. Boundaries cover the files the selected slice reaches; boundaries_omitted counts the rest. Empty slices do not prove absence beyond supported semantics.".into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn files(paths: &[&str]) -> Vec<SourceFile> {
+        paths
+            .iter()
+            .map(|p| SourceFile {
+                path: (*p).into(),
+                source: String::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_resolve_js_dotdot_above_root_binds_nothing() {
+        let files = files(&["src/a.js", "shared/x.js"]);
+        assert_eq!(resolve(&files, 0, "'../../shared/x'"), None);
+    }
+
+    #[test]
+    fn test_resolve_ts_dotdot_above_root_binds_nothing() {
+        let files = files(&["src/a.ts", "shared/x.ts"]);
+        assert_eq!(resolve(&files, 0, "\"../../shared/x\""), None);
+    }
+
+    #[test]
+    fn test_resolve_js_dotdot_inside_repo_binds_target() {
+        let files = files(&["src/a.js", "shared/x.js"]);
+        assert_eq!(resolve(&files, 0, "'../shared/x'"), Some(1));
+    }
+
+    #[test]
+    fn test_resolve_ts_dotdot_inside_repo_binds_target() {
+        let files = files(&["src/lib/a.ts", "shared/x.ts"]);
+        assert_eq!(resolve(&files, 0, "'../../shared/x'"), Some(1));
+    }
+
+    #[test]
+    fn test_resolve_root_file_dotdot_binds_nothing() {
+        let files = files(&["a.js", "x.js"]);
+        assert_eq!(resolve(&files, 0, "'../x'"), None);
     }
 }
