@@ -157,7 +157,9 @@ use std::path::Path;
 /// schema44: `LocalGraph.parsed_language` (the parse reports its
 /// `ParsedLanguage`; a Vue/Svelte/Astro file resolves as its script language)
 /// and the `sfc-script-mismatch` blind spot for mixed TS/JS script blocks.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema44");
+/// schema45: an L1 fragment carries `FragmentFile.parsed_language`; a
+/// schema44 fragment has no such field and must not be read.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema45");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

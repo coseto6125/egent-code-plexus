@@ -17,7 +17,7 @@ use crate::analyzer::module_discovery::{discover_module, for_each_layout_candida
 use crate::analyzer::path_aliases::{AliasScope, PathAliases};
 use crate::analyzer::reexport::for_each_specifier_candidate;
 use crate::analyzer::types::RawImport;
-use crate::file_category::Language;
+use crate::file_category::{FileMeta, Language};
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::RefCell;
@@ -41,6 +41,7 @@ impl<'a> LanguageFiles<'a> {
     fn build(
         graph: &'a ArchivedZeroCopyGraph,
         dirty: &'a [OverlayFileInput],
+        dirty_metas: &FxHashMap<&'a str, FileMeta>,
         removed: &FxHashSet<&str>,
         language: Language,
     ) -> Self {
@@ -50,12 +51,22 @@ impl<'a> LanguageFiles<'a> {
         let base = graph
             .files
             .iter()
-            .map(|f| f.path.resolve(&graph.string_pool))
-            .filter(|path| !removed.contains(path));
-        for path in base.chain(dirty.iter().map(|f| f.rel_path.as_str())) {
+            .enumerate()
+            .map(|(idx, f)| (f.path.resolve(&graph.string_pool), Some(idx as u32)))
+            .filter(|(path, _)| !removed.contains(path));
+        let fresh = dirty.iter().map(|f| (f.rel_path.as_str(), None));
+        for (path, base_idx) in base.chain(fresh) {
+            // The language the file's latest parse decided: the fragment's
+            // for a dirty path (its base record is stale), else the stored
+            // one (`SymbolTable::file_language` in the index).
+            let file_language = match (dirty_metas.get(path), base_idx) {
+                (Some(meta), _) => meta.language,
+                (None, Some(idx)) => stored_language(graph, idx, path),
+                (None, None) => Language::from_normalized_path(path),
+            };
             // A dirty file usually exists in the base too; a second entry
             // would make its stem ambiguous.
-            if Language::from_normalized_path(path) != language || !files.paths.insert(path) {
+            if file_language != language || !files.paths.insert(path) {
                 continue;
             }
             let file = Path::new(path);
@@ -115,6 +126,34 @@ impl<'a> LanguageFiles<'a> {
     }
 }
 
+/// The [`FileMeta`] of base file `file_idx` from the language `graph.bin`
+/// stores for it: the index's own `FileMeta` (`SymbolTable::file_meta`). A
+/// file stored as `ParsedLanguage::ABSENT` gets what its path decides, as the
+/// builder does when it stores no language. Out of range reads the default.
+pub(crate) fn stored_file_meta(graph: &ArchivedZeroCopyGraph, file_idx: u32) -> FileMeta {
+    let Some(file) = graph.files.get(file_idx as usize) else {
+        return FileMeta::default();
+    };
+    let path = file.path.resolve(&graph.string_pool);
+    match graph.parsed_language(file_idx) {
+        Some(parsed) => FileMeta::of_parsed(path, parsed),
+        None => FileMeta::from_normalized_path(path),
+    }
+}
+
+/// [`stored_file_meta`]'s `language`, without the vendor scan: `path` is the
+/// path of `file_idx`.
+pub(crate) fn stored_language(
+    graph: &ArchivedZeroCopyGraph,
+    file_idx: u32,
+    path: &str,
+) -> Language {
+    graph.parsed_language(file_idx).map_or_else(
+        || Language::from_normalized_path(path),
+        |parsed| parsed.resolution().to_legacy(),
+    )
+}
+
 /// Module discovery for one overlay build. The file index is built lazily per
 /// language, on the first import a policy-language call needs, and each
 /// (directory, specifier) answer is cached as the resolver's `module_cache`.
@@ -130,6 +169,10 @@ pub struct ImportScope<'a> {
     dirty: &'a [OverlayFileInput],
     dirty_base: &'a FxHashSet<u32>,
     removed: &'a FxHashSet<&'a str>,
+    /// Dirty path → the file's [`FileMeta`] from its fresh parse
+    /// ([`OverlayFileInput::file_meta`]); the first input of a path stands,
+    /// as the index's `SymbolTable::note_file_meta` keeps the first record.
+    dirty_metas: FxHashMap<&'a str, FileMeta>,
     /// The index's path aliases with the stored C2 scope rows
     /// ([`Self::with_aliases`]); empty by default.
     aliases: PathAliases,
@@ -153,11 +196,18 @@ impl<'a> ImportScope<'a> {
         dirty_base: &'a FxHashSet<u32>,
         removed: &'a FxHashSet<&'a str>,
     ) -> Self {
+        let mut dirty_metas: FxHashMap<&'a str, FileMeta> = FxHashMap::default();
+        for file in dirty {
+            dirty_metas
+                .entry(file.rel_path.as_str())
+                .or_insert_with(|| file.file_meta());
+        }
         Self {
             graph,
             dirty,
             dirty_base,
             removed,
+            dirty_metas,
             aliases: PathAliases::default(),
             languages: RefCell::default(),
             modules: RefCell::default(),
@@ -186,10 +236,31 @@ impl<'a> ImportScope<'a> {
         self.removed.contains(path)
     }
 
+    /// The [`FileMeta`] of `path` as the index reads it
+    /// (`SymbolTable::file_meta`): the fresh parse's for a dirty path, else
+    /// the base record's stored language, else what the path decides for a
+    /// path no record names. A dirty path wins over its base record: the
+    /// edit may have changed the language (a Vue `<script lang="ts">`).
+    pub(crate) fn file_meta(&self, path: &str) -> FileMeta {
+        if let Some(&meta) = self.dirty_metas.get(path) {
+            return meta;
+        }
+        match self.graph.file_idx_of(path) {
+            Some(idx) => stored_file_meta(self.graph, idx),
+            None => FileMeta::from_normalized_path(path),
+        }
+    }
+
     fn with_files<R>(&self, language: Language, f: impl FnOnce(&LanguageFiles<'a>) -> R) -> R {
         let mut languages = self.languages.borrow_mut();
         let files = languages.entry(language as u8).or_insert_with(|| {
-            LanguageFiles::build(self.graph, self.dirty, self.removed, language)
+            LanguageFiles::build(
+                self.graph,
+                self.dirty,
+                &self.dirty_metas,
+                self.removed,
+                language,
+            )
         });
         f(files)
     }

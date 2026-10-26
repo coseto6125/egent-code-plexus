@@ -317,6 +317,7 @@ fn test_execute_aggregate_streaming_matches_materialising_overlay_optional() {
     let view = OverlayView::build(
         archived,
         &[OverlayFileInput {
+            parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: "src/dirty.rs".into(),
             symbols: vec![
@@ -2924,6 +2925,7 @@ fn test_far_end_name_seeds_with_overlay_keeps_full_scan() {
     let archived =
         rkyv::access::<crate::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
     let dirty = OverlayFileInput {
+        parsed_language: None,
         export_aliases: Vec::new(),
         rel_path: "src/dirty.rs".to_string(),
         symbols: vec![OverlaySymbol {
@@ -2990,6 +2992,7 @@ fn test_execute_overlay_closure_reference_reports_lexical_reason() {
         flags: None,
     };
     let dirty = OverlayFileInput {
+        parsed_language: None,
         export_aliases: Vec::new(),
         rel_path: "src/app.ts".to_string(),
         symbols: vec![symbol("enclosing", 1, 9), symbol("<anonymous:3:2>", 3, 4)],
@@ -3145,6 +3148,7 @@ fn test_first_node_name_with_overlay_matches_scan_and_hides_suppressed() {
         fx.build()
     };
     let dirty = || OverlayFileInput {
+        parsed_language: None,
         export_aliases: Vec::new(),
         rel_path: "src/dirty.rs".to_string(),
         symbols: vec![OverlaySymbol {
@@ -3222,6 +3226,7 @@ fn test_execute_virtual_function_meta_reads_fragment_flags() {
     let view = OverlayView::build(
         graph,
         &[OverlayFileInput {
+            parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: "src/x.ts".into(),
             symbols: vec![

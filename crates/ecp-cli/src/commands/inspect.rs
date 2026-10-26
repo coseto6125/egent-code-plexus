@@ -888,6 +888,7 @@ mod tests {
     /// is gone.
     fn dirty_input() -> OverlayFileInput {
         OverlayFileInput {
+            parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: DIRTY.to_string(),
             symbols: vec![
@@ -1149,6 +1150,7 @@ mod tests {
     /// method is new, every other symbol of the file is gone.
     fn same_name_dirty_input() -> OverlayFileInput {
         OverlayFileInput {
+            parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: "src/s0.ts".to_string(),
             symbols: vec![

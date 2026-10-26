@@ -468,6 +468,7 @@ mod tests {
     /// `target_fn`; `gone_fn` is deleted.
     fn dirty_input() -> OverlayFileInput {
         OverlayFileInput {
+            parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: "src/dirty.rs".to_string(),
             symbols: vec![OverlaySymbol {
@@ -724,6 +725,7 @@ mod tests {
     /// `rel_path` re-parsed with one class `Reader`, or with nothing.
     fn reader_input(rel_path: &str, keeps_reader: bool) -> OverlayFileInput {
         OverlayFileInput {
+            parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: rel_path.to_string(),
             symbols: keeps_reader
@@ -813,6 +815,7 @@ mod tests {
 
     fn source_file(rel_path: &str, symbols: Vec<OverlaySymbol>) -> OverlayFileInput {
         OverlayFileInput {
+            parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: rel_path.to_string(),
             symbols,

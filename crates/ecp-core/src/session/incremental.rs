@@ -700,6 +700,7 @@ mod tests {
 
     fn input(path: &str, symbols: Vec<OverlaySymbol>) -> OverlayFileInput {
         OverlayFileInput {
+            parsed_language: None,
             rel_path: path.to_string(),
             symbols,
             imports: Vec::new(),

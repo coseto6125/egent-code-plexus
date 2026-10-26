@@ -27,7 +27,7 @@ use crate::analyzer::lexical::{
 use crate::analyzer::outcome::{Resolution, Tier};
 use crate::analyzer::path_aliases::PathAliases;
 use crate::analyzer::reexport::{
-    self, export_filter_applies, is_ecmascript, ExportAliasTable, Fact, FileImports, ImportRef,
+    self, export_filter_applies_to, is_ecmascript, ExportAliasTable, Fact, FileImports, ImportRef,
     ModuleFacts, PyModule, ResolveTarget,
 };
 use crate::analyzer::rust_paths::{
@@ -48,7 +48,7 @@ use crate::analyzer::types::{
 use crate::contracts::identity::lexical_parents;
 use crate::file_category::{pick_global, FileMeta, GlobalPick, Language};
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
-use crate::session::import_scope::{ImportScope, Module};
+use crate::session::import_scope::{stored_file_meta, stored_language, ImportScope, Module};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::Cow;
 use std::cell::{OnceCell, RefCell};
@@ -313,7 +313,7 @@ impl<'a> OverlayFacts<'a> {
             dirty_namespaces.push(namespace_owners(&file.symbols));
             let aliases = ExportAliasTable::build(alias_pairs(file));
             es_modules.push(reexport::is_es_module(
-                Language::from_normalized_path(&file.rel_path),
+                file.file_meta().language,
                 &file.rel_path,
                 exports_any,
                 aliases.is_some(),
@@ -328,12 +328,10 @@ impl<'a> OverlayFacts<'a> {
             if NodeKind::from(&block.kind) != NodeKind::Impl {
                 continue;
             }
-            let rust_file = graph
-                .files
-                .get(block.file_idx.to_native() as usize)
-                .is_some_and(|f| {
-                    Language::from_normalized_path(f.path.resolve(pool)) == Language::Rust
-                });
+            let file_idx = block.file_idx.to_native();
+            let rust_file = graph.files.get(file_idx as usize).is_some_and(|f| {
+                stored_language(graph, file_idx, f.path.resolve(pool)) == Language::Rust
+            });
             if !rust_file {
                 continue;
             }
@@ -718,7 +716,7 @@ impl<'a> OverlayFacts<'a> {
             && leaf_path(a_file) == leaf_path(b_file)
             && self
                 .scope
-                .same_namespaces(Language::from_normalized_path(a_file), a_file, b_file)
+                .same_namespaces(self.meta_of(a).language, a_file, b_file)
     }
 
     /// The index's `SymbolTable::nearest_copy`: among `copies`, copies of
@@ -858,6 +856,10 @@ impl<'a> ModuleFacts for OverlayFacts<'a> {
         self.dirty.contains_key(file) || self.clean_file_idx(file).is_some()
     }
 
+    fn file_language(&self, file: &str) -> Language {
+        self.scope.file_meta(file).language
+    }
+
     fn has_module_name(&self, language: Language, name: &str) -> bool {
         self.scope.has_module_name(language, name)
     }
@@ -938,7 +940,7 @@ impl<'a> ModuleFacts for OverlayFacts<'a> {
     }
 
     fn export_aliases(&self, file: &str) -> Option<Fact<'_, ExportAliasTable>> {
-        if !export_filter_applies(file) {
+        if !export_filter_applies_to(self.scope.file_meta(file).language, file) {
             return None;
         }
         if let Some(&file_ord) = self.dirty.get(file) {
@@ -1054,10 +1056,20 @@ impl<'a> OverlayFacts<'a> {
         ids
     }
 
-    /// The [`FileMeta`] of the file `idx` is declared in.
+    /// The [`FileMeta`] of the file `idx` is declared in, as the index reads
+    /// it: the fresh parse's language for a dirty file (a virtual node, or a
+    /// base node of a re-parsed path), else the language `graph.bin` stores.
     fn meta_of(&self, idx: u32) -> FileMeta {
-        self.node_file(idx)
-            .map_or_else(FileMeta::default, FileMeta::from_normalized_path)
+        match idx.checked_sub(self.base_len()) {
+            Some(offset) => self.scope.file_meta(&self.nodes[offset as usize].rel_path),
+            None if self.dirty_base.contains(&idx) => self
+                .node_file(idx)
+                .map_or_else(FileMeta::default, |file| self.scope.file_meta(file)),
+            None => stored_file_meta(
+                self.graph,
+                self.graph.nodes[idx as usize].file_idx.to_native(),
+            ),
+        }
     }
 
     /// The later overloads of the first declaration `first`, in source order
@@ -1159,10 +1171,9 @@ impl<'a> OverlayFacts<'a> {
         let (bases, archived_unresolved) = self.graph.supertypes_of(ty)?;
         // The table keys Rust types by name alone, so a Python or Java
         // namesake of a Rust self type keeps every base its own file gave.
-        let stale = self
-            .node_file(ty)
-            .filter(|&file| Language::from_normalized_path(file) == Language::Rust)
-            .and_then(|_| owner_key(self.name_of(ty)))
+        let stale = (self.meta_of(ty).language == Language::Rust)
+            .then(|| owner_key(self.name_of(ty)))
+            .flatten()
             .and_then(|key| self.dirty_impl_traits.get(key));
         let mut first_unresolved = None;
         let mut kept = Vec::with_capacity(bases.len());
@@ -1197,9 +1208,7 @@ impl<'a> OverlayFacts<'a> {
     fn partial_group(&self, id: u32) -> Vec<u32> {
         // Only a C# type has parts; the test spares every other candidate
         // the edge scan.
-        let csharp = self
-            .node_file(id)
-            .is_some_and(|file| Language::from_normalized_path(file) == Language::CSharp);
+        let csharp = self.meta_of(id).language == Language::CSharp;
         if !csharp {
             return Vec::new();
         }
@@ -1242,7 +1251,7 @@ impl<'a> OverlayFacts<'a> {
         owner: &'o str,
         target: ResolveTarget,
     ) -> Option<(u32, &'o str)> {
-        if Language::from_normalized_path(file) != Language::CSharp
+        if self.scope.file_meta(file).language != Language::CSharp
             || split_qualifier(name).is_some()
             || !matches!(target, ResolveTarget::Callable | ResolveTarget::Method)
         {
@@ -1318,8 +1327,7 @@ impl<'a> OverlayFacts<'a> {
                     && merge_kind(self.kind_of(other)) == kind
                     && self.owner_of(other) == scope
                     && self.node_file(other).is_some_and(|other_file| {
-                        other_file != file
-                            && Language::from_normalized_path(other_file) == Language::CSharp
+                        other_file != file && self.meta_of(other).language == Language::CSharp
                     })
                     && match (
                         *my_namespace.get_or_init(|| namespace(ty)),
@@ -1397,7 +1405,8 @@ impl<'a> OverlayFacts<'a> {
         if let Some(id) = self.first_in_file(source, qualifier, ResolveTarget::Type, None) {
             return TypeCandidates::Unique(id, qualifier);
         }
-        let language = Language::from_normalized_path(source);
+        let caller = self.scope.file_meta(source);
+        let language = caller.language;
         if language == Language::CSharp {
             if let Some(path) = imports.iter().find_map(|import| {
                 (import.alias.as_deref() == Some(qualifier))
@@ -1469,7 +1478,6 @@ impl<'a> OverlayFacts<'a> {
             }
             imported_in_project = true;
         }
-        let caller = FileMeta::from_normalized_path(source);
         if caller.language == Language::Rust && !imported_in_project {
             return TypeCandidates::None;
         }
@@ -1491,7 +1499,7 @@ impl<'a> OverlayFacts<'a> {
             self,
             name,
             ResolveTarget::Type,
-            FileMeta::from_normalized_path(source),
+            self.scope.file_meta(source),
         );
         ids.retain(|&id| {
             self.node_file(id)
@@ -1567,7 +1575,7 @@ impl<'a> OverlayFacts<'a> {
         let Some(callee_file) = self.node_file(callee) else {
             return type_ladder::ChainOutcome::Unknown;
         };
-        let language = Language::from_normalized_path(callee_file);
+        let language = self.meta_of(callee).language;
         let imports = self.raw_imports(callee_file);
         let candidates = if let Some(id) =
             self.first_in_file(callee_file, ty, ResolveTarget::Type, None)
@@ -1765,9 +1773,7 @@ impl<'a> OverlayFacts<'a> {
         let dirty_namesake = self.dirty_by_name.get(member).is_some_and(|ids| {
             ids.iter().any(|&id| {
                 self.kind_of(id) == NodeKind::Method
-                    && self.node_file(id).is_some_and(|file| {
-                        Language::from_normalized_path(file) == Language::CSharp
-                    })
+                    && self.meta_of(id).language == Language::CSharp
                     && (!self.csharp_flags_known(id)
                         || self.csharp_method_flags(id) & csharp_extension::EXTENSION_FLAG != 0)
             })
@@ -1847,7 +1853,7 @@ impl<'a> OverlayFacts<'a> {
                 self,
                 name,
                 ResolveTarget::Type,
-                FileMeta::from_normalized_path(scope_file),
+                self.scope.file_meta(scope_file),
             )
             .into_iter()
             .filter(|&id| {
@@ -1937,12 +1943,12 @@ impl<'a> OverlayFacts<'a> {
                         continue;
                     };
                     let path = file.path.resolve(pool);
-                    if Language::from_normalized_path(path) == Language::CSharp {
+                    if stored_language(graph, node.file_idx.to_native(), path) == Language::CSharp {
                         note(path, node.name.resolve(pool));
                     }
                 }
                 for file in self.scope.dirty() {
-                    if Language::from_normalized_path(&file.rel_path) != Language::CSharp {
+                    if file.file_meta().language != Language::CSharp {
                         continue;
                     }
                     for symbol in &file.symbols {
@@ -1999,6 +2005,10 @@ fn owned_or_inherited(verdict: LadderMember) -> Option<(u32, f32)> {
 }
 
 impl PickFacts for OverlayFacts<'_> {
+    fn file_meta(&self, file: &str) -> FileMeta {
+        self.scope.file_meta(file)
+    }
+
     fn pick_candidates(&self, file: &str, name: &str) -> Cow<'_, [u32]> {
         let mut ids = Vec::new();
         for (id, _) in self.decls_in_file(file, name) {
@@ -2031,7 +2041,7 @@ impl PickFacts for OverlayFacts<'_> {
     }
 
     fn is_namespace_owner(&self, file: &str, owner: &str) -> bool {
-        if Language::from_normalized_path(file) == Language::Go {
+        if self.scope.file_meta(file).language == Language::Go {
             return false;
         }
         if let Some(&file_ord) = self.dirty.get(file) {
@@ -2158,7 +2168,7 @@ impl TypeFacts for OverlayFacts<'_> {
         let Some(owner) = owner_key(owner) else {
             return Vec::new();
         };
-        let scope_meta = FileMeta::from_normalized_path(scope_file);
+        let scope_meta = self.scope.file_meta(scope_file);
         let scope_root = crate_root_prefix(scope_file);
         let same_package_only = scope_meta.language == Language::Go;
         let scope_dir = std::path::Path::new(scope_file).parent();
@@ -2905,14 +2915,10 @@ fn global_tier(
     let base_metas = RefCell::new(base_metas);
     let base_meta = |idx: u32| {
         let file_idx = graph.nodes[idx as usize].file_idx.to_native() as usize;
-        *base_metas.borrow_mut().entry(file_idx).or_insert_with(|| {
-            graph
-                .files
-                .get(file_idx)
-                .map_or_else(FileMeta::default, |f| {
-                    FileMeta::from_path(f.path.resolve(&graph.string_pool))
-                })
-        })
+        *base_metas
+            .borrow_mut()
+            .entry(file_idx)
+            .or_insert_with(|| stored_file_meta(graph, file_idx as u32))
     };
     // I5 (a scoped node is no global candidate) is the ladder's filter.
     let admits = |&(idx, _): &(u32, FileMeta)| !free_only || !is_method_node(graph, nodes, idx);
@@ -3782,7 +3788,7 @@ fn dirty_supertypes(
         if file.symbols.iter().all(|s| s.heritage.is_empty()) {
             continue;
         }
-        let caller = FileMeta::from_path(&file.rel_path);
+        let caller = file.file_meta();
         let is_rust = caller.language == Language::Rust;
         let mut resolve = |name: &str| {
             resolve_type(
@@ -3899,14 +3905,9 @@ fn base_file_meta(
     idx: u32,
 ) -> FileMeta {
     let file_idx = graph.nodes[idx as usize].file_idx.to_native() as usize;
-    *base_metas.entry(file_idx).or_insert_with(|| {
-        graph
-            .files
-            .get(file_idx)
-            .map_or_else(FileMeta::default, |f| {
-                FileMeta::from_path(f.path.resolve(&graph.string_pool))
-            })
-    })
+    *base_metas
+        .entry(file_idx)
+        .or_insert_with(|| stored_file_meta(graph, file_idx as u32))
 }
 
 /// The qualifier tier's facts over the overlay ([`ladder::QualifierFacts`])
@@ -3965,12 +3966,7 @@ impl<'a> ladder::QualifierFacts for OverlayQualifiers<'_, 'a, '_> {
                     && !facts.dirty_base.contains(&idx)
                     && !graph.is_later_overload(idx)
             })
-            .map(|idx| {
-                let meta = facts
-                    .node_file(idx)
-                    .map_or_else(FileMeta::default, FileMeta::from_path);
-                (idx, meta)
-            });
+            .map(|idx| (idx, facts.meta_of(idx)));
         let overlay = self
             .qualifiers
             .anywhere
@@ -4399,10 +4395,7 @@ pub(super) fn resolve_edges(
     // constructed at several sites, and a clean one costs name-index
     // probes.
     let construction_targets: RefCell<FxHashMap<u32, u32>> = RefCell::default();
-    let file_metas: Vec<FileMeta> = files
-        .iter()
-        .map(|f| FileMeta::from_path(&f.rel_path))
-        .collect();
+    let file_metas: Vec<FileMeta> = files.iter().map(OverlayFileInput::file_meta).collect();
 
     // Full indexing tombstones a later same-uid declaration (a
     // half-finished edit) or keeps it as a later overload, and never

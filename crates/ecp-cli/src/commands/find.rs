@@ -2242,6 +2242,7 @@ mod tests {
         let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
         let view = overlay.then(|| {
             let dirty = OverlayFileInput {
+                parsed_language: None,
                 export_aliases: Vec::new(),
                 rel_path: "src/b.ts".to_string(),
                 symbols: vec![OverlaySymbol {

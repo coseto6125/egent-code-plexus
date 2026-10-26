@@ -171,7 +171,8 @@ use crate::analyzer::types::{
     VARIANT_PATTERN_REASON, VARIANT_USE_REASON,
 };
 use crate::contracts::identity::{pair_by_anchor, DeclIdentity, UidSlot};
-use crate::file_category::Language;
+use crate::contracts::routing::ParsedLanguage;
+use crate::file_category::{FileMeta, Language};
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::RefCell;
@@ -249,10 +250,31 @@ pub struct OverlayFileInput {
     pub imports: Vec<RawImport>,
     /// `LocalGraph.export_aliases`, empty when the file has none.
     pub export_aliases: Vec<RawExportAlias>,
+    /// The C5 language after parse that this parse reported: the value the
+    /// index would store in `File.parsed_language`. The overlay reads the
+    /// file's language from it, so a Vue file with a TypeScript script
+    /// resolves as TypeScript on both sides. `None` when no parse decided
+    /// one (an omitted file, a hand-built input, a fragment that stored
+    /// `ParsedLanguage::ABSENT`): the path then decides, as the builder does
+    /// for a record that stores none.
+    pub parsed_language: Option<ParsedLanguage>,
+}
+
+impl OverlayFileInput {
+    /// The [`FileMeta`] the index would record for this file: the language
+    /// after parse when the parse reported one, else the path's.
+    /// `rel_path` is forward-slashed.
+    pub fn file_meta(&self) -> FileMeta {
+        match self.parsed_language {
+            Some(parsed) => FileMeta::of_parsed(&self.rel_path, parsed),
+            None => FileMeta::from_normalized_path(&self.rel_path),
+        }
+    }
 }
 
 impl From<LocalGraph> for OverlayFileInput {
     fn from(local: LocalGraph) -> Self {
+        let parsed_language = ParsedLanguage::from_bytes(local.parsed_language);
         // Paired by span, as the index's Pass 1.8 pairs them.
         let metas: FxHashMap<(u32, u32, u32, u32), (String, u16)> = local
             .raw_function_metas
@@ -292,6 +314,7 @@ impl From<LocalGraph> for OverlayFileInput {
                 .collect(),
             imports: local.imports,
             export_aliases: local.export_aliases.map(Vec::from).unwrap_or_default(),
+            parsed_language,
         }
     }
 }
@@ -696,7 +719,7 @@ impl OverlayView {
                 &identities,
             );
             unpaired_base.extend(unpaired);
-            let language = Language::from_path(&file.rel_path);
+            let language = file.file_meta().language;
             // The innermost type around each symbol, computed on the file's
             // first member twin only.
             let mut declaring_types: Option<Vec<Option<usize>>> = None;
@@ -1431,7 +1454,7 @@ fn stale_extension_gaps(
     let pool = &graph.string_pool;
     let mut names: Vec<&str> = files
         .iter()
-        .filter(|file| Language::from_normalized_path(&file.rel_path) == Language::CSharp)
+        .filter(|file| file.file_meta().language == Language::CSharp)
         .flat_map(|file| &file.symbols)
         .filter(|symbol| symbol.kind == NodeKind::Method)
         .map(|symbol| symbol.name.as_str())
@@ -1859,6 +1882,7 @@ mod tests {
         closure.start_line = 6;
         closure.end_line = 7;
         let file = OverlayFileInput {
+            parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: "App.java".into(),
             symbols: vec![parent, overload, closure.clone(), closure],
@@ -1889,6 +1913,7 @@ mod tests {
         closure.start_line = 6;
         closure.end_line = 7;
         let file = OverlayFileInput {
+            parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: "App.java".into(),
             symbols: vec![parent, overload, closure],
@@ -1929,6 +1954,7 @@ mod tests {
             ..sym("Foo1", &[])
         };
         OverlayFileInput {
+            parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: "N/Foo1.cs".into(),
             symbols: vec![
@@ -1981,6 +2007,7 @@ mod tests {
 
     fn dirty_input() -> OverlayFileInput {
         OverlayFileInput {
+            parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: "src/dirty.rs".to_string(),
             symbols: vec![
@@ -2247,6 +2274,7 @@ mod tests {
             })
             .collect();
         OverlayFileInput {
+            parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: path.to_string(),
             symbols,
@@ -2403,6 +2431,7 @@ mod tests {
         // once dirty-base copies are excluded; target must be keep_fn's
         // VIRTUAL index, never the stale base node.
         let other_dirty = OverlayFileInput {
+            parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: "src/clean.rs".to_string(),
             symbols: vec![sym("caller_two", &["keep_fn"])],
@@ -2435,6 +2464,7 @@ mod tests {
 
     fn search_input(rel_path: &str) -> OverlayFileInput {
         OverlayFileInput {
+            parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: rel_path.to_string(),
             symbols: vec![sym("search", &["scan_range", "go_only"])],
@@ -2483,6 +2513,7 @@ mod tests {
         let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
         let untyped_member = CallSite::untyped_member("Widget");
         let app = OverlayFileInput {
+            parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: "src/app.py".to_string(),
             symbols: vec![
@@ -2528,6 +2559,7 @@ mod tests {
             flags: None,
         };
         let multi = OverlayFileInput {
+            parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: "src/Multi.java".to_string(),
             symbols: vec![
@@ -2548,6 +2580,7 @@ mod tests {
         // The Java extractor encodes `new Multi(1)` as a construction.
         let new_multi = CallSite::construct("Multi");
         let app = OverlayFileInput {
+            parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: "src/App.java".to_string(),
             symbols: vec![sym("makeMulti", &[new_multi.as_str()])],
@@ -2588,6 +2621,7 @@ mod tests {
         let bytes = two_class_graph_bytes();
         let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
         let app = OverlayFileInput {
+            parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: "src/app.py".to_string(),
             symbols: vec![sym("make", &["Beta"])],
@@ -2626,6 +2660,7 @@ mod tests {
             flags: None,
         };
         let outer = OverlayFileInput {
+            parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: "src/outer.ts".to_string(),
             symbols: vec![
@@ -2636,6 +2671,7 @@ mod tests {
         };
         let new_inner = CallSite::construct("Inner");
         let app = OverlayFileInput {
+            parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: "src/app.ts".to_string(),
             symbols: vec![sym("makeInner", &[new_inner.as_str()])],
@@ -2777,6 +2813,7 @@ mod tests {
             ..sym("run", &["K.save", "K.st", "Missing.save"])
         };
         let file = OverlayFileInput {
+            parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: "K.java".into(),
             symbols: vec![
@@ -2816,6 +2853,7 @@ mod tests {
             ..sym(name, calls)
         };
         let file = OverlayFileInput {
+            parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: "K.java".into(),
             symbols: vec![
@@ -2852,6 +2890,7 @@ mod tests {
         let bytes = fx.into_bytes();
         let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
         let file = OverlayFileInput {
+            parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: caller.into(),
             symbols: vec![sym("t", &["c_make"])],
@@ -2918,6 +2957,7 @@ mod tests {
         closure.start_line = 2;
         closure.end_line = 3;
         let closures = OverlayFileInput {
+            parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: "src/Closures.java".into(),
             symbols: vec![parent, closure],
@@ -2931,6 +2971,7 @@ mod tests {
             ..sym("Multi", &[])
         };
         let multi = OverlayFileInput {
+            parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: "src/Multi.java".to_string(),
             symbols: vec![
@@ -2946,6 +2987,7 @@ mod tests {
         };
         let new_multi = CallSite::construct("Multi");
         let app = OverlayFileInput {
+            parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: "src/App.java".to_string(),
             symbols: vec![sym("makeMulti", &[new_multi.as_str()])],
@@ -3013,6 +3055,7 @@ mod tests {
         let bytes = fx.into_bytes();
         let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
         let file = OverlayFileInput {
+            parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: "core/c/test/t.c".into(),
             symbols: vec![sym("t", &["c_make"])],
@@ -3073,6 +3116,7 @@ mod tests {
         let mut keep = sym("keep_fn", &[]);
         keep.flags = Some(0);
         let input = OverlayFileInput {
+            parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: "src/dirty.rs".to_string(),
             symbols: vec![keep],
@@ -3107,6 +3151,7 @@ mod tests {
 
     fn dirty_input_at(path: &str) -> OverlayFileInput {
         OverlayFileInput {
+            parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: path.to_string(),
             symbols: vec![sym("keep_fn", &[])],
@@ -3271,6 +3316,7 @@ mod tests {
             ..sym(name, &[])
         };
         let file = OverlayFileInput {
+            parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: "src/a.rs".to_string(),
             symbols: vec![at("outer", 1, 5), at("helper", 2, 2)],

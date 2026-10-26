@@ -23,7 +23,7 @@ use ecp_core::analyzer::types::{
     LocalGraph, RawEventTopic, RawExportAlias, RawImport, RawSchemaField, RawTxScope,
 };
 use ecp_core::contracts::dirty_event::{PathChange, PathClass};
-use ecp_core::contracts::routing::{FileRouter, RouteOutcome, SizeCap};
+use ecp_core::contracts::routing::{FileRouter, ParsedLanguage, RouteOutcome, SizeCap};
 use ecp_core::graph::NodeKind;
 use ecp_core::registry::{atomic_write_json, replace_file, FileLock};
 use ecp_core::session::layout;
@@ -127,16 +127,39 @@ pub struct FragmentSymbolV3 {
 /// v5 fragment bin payload: the whole dirty file's fresh parse, including
 /// file-level imports and export aliases for query-time Tier-2
 /// (import-scoped) resolution, and the raw records the overlay's per-file
-/// replay rebuilds the record outputs from. `DirtyEventEntry.format ==
-/// FRAGMENT_FORMAT_V7` marks bins of this shape — readers MUST dispatch on
-/// the manifest marker, not guess the encoding.
-#[derive(Archive, Serialize, Deserialize, Debug, Clone, Default)]
+/// replay rebuilds the record outputs from, and the language the parse
+/// decided. `DirtyEventEntry.format == FRAGMENT_FORMAT_V7` marks bins of
+/// this shape — readers MUST dispatch on the manifest marker, not guess the
+/// encoding.
+#[derive(Archive, Serialize, Deserialize, Debug, Clone)]
 #[rkyv(derive(Debug))]
 pub struct FragmentFile {
     pub symbols: Vec<FragmentSymbol>,
     pub imports: Vec<RawImport>,
     pub export_aliases: Vec<RawExportAlias>,
     pub records: OverlayFileRecords,
+    /// `LocalGraph.parsed_language`: the C5 language after parse of the
+    /// fragment's parse ([`ParsedLanguage::to_bytes`]), or
+    /// [`ParsedLanguage::ABSENT`] when the parse decided none. The overlay
+    /// reads the file's language from it, as the index reads the byte
+    /// `graph.bin` stores. A script-language change of a Vue, Svelte or Astro
+    /// file changes the content, hence the fragment id, so a bin never
+    /// outlives the language it holds.
+    pub parsed_language: [u8; 2],
+}
+
+impl Default for FragmentFile {
+    /// An empty file whose parse decided no language: `[0; 2]` would name a
+    /// real one.
+    fn default() -> Self {
+        Self {
+            symbols: Vec::new(),
+            imports: Vec::new(),
+            export_aliases: Vec::new(),
+            records: OverlayFileRecords::default(),
+            parsed_language: ParsedLanguage::ABSENT,
+        }
+    }
 }
 
 /// Exact v4 archive shape, retained to decode fragments written before v5.
@@ -219,6 +242,9 @@ pub fn fragment_file_from_local_graph(graph: &LocalGraph) -> FragmentFile {
         imports: graph.imports.clone(),
         export_aliases: graph.export_aliases.as_deref().unwrap_or(&[]).to_vec(),
         records: OverlayFileRecords::from_local(graph),
+        // A byte pair no parse stamps (a provider's unfinished SFC script
+        // report) is "no language", as the builder reads it.
+        parsed_language: ParsedLanguage::encode(ParsedLanguage::from_bytes(graph.parsed_language)),
     }
 }
 

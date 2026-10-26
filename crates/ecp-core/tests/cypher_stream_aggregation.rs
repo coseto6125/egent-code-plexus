@@ -87,6 +87,7 @@ fn test_execute_aggregate_over_overlay_counts_virtual_and_base_edges() {
     let view = OverlayView::build(
         graph,
         &[OverlayFileInput {
+            parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: "src/dirty.rs".into(),
             symbols: vec![

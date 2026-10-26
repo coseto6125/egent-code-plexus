@@ -2005,6 +2005,7 @@ mod fingerprint_drift_tests {
             imports: vec![],
             export_aliases: vec![],
             records: Default::default(),
+            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
         };
         rkyv::to_bytes::<rkyv::rancor::Error>(&fragment)
             .unwrap()

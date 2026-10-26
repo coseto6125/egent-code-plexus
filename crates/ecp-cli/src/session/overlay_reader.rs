@@ -16,7 +16,7 @@
 //! are re-parsed by the freshness gate.
 
 use ecp_core::analyzer::types::{RawExportAlias, RawImport};
-use ecp_core::contracts::routing::SizeCap;
+use ecp_core::contracts::routing::{ParsedLanguage, SizeCap};
 use ecp_core::graph::NodeKind;
 use ecp_core::session::layout;
 use ecp_core::session::view::{ArchivedOverlayFileRecords, OverlayFileRecords};
@@ -36,12 +36,26 @@ pub struct AcceptedFragment {
     bytes: Vec<u8>,
 }
 
-/// Whether `bytes` has the current fragment archive shape.
+/// Whether `bytes` has the current fragment archive shape and holds a
+/// language the overlay can read: `ParsedLanguage::ABSENT` or a pair
+/// `ParsedLanguage::from_bytes` accepts. A bin that names no language is
+/// corrupt, never read as "no language", so the file re-parses.
 ///
 /// The freshness gate uses this same check before it skips a re-parse. A
 /// regular file alone is not enough: the view reader ignores malformed bins.
 pub(crate) fn valid_fragment(bytes: &[u8]) -> bool {
-    rkyv::access::<ArchivedFragmentFile, RkyvError>(bytes).is_ok()
+    rkyv::access::<ArchivedFragmentFile, RkyvError>(bytes)
+        .is_ok_and(|archived| fragment_language(archived).is_some())
+}
+
+/// The language `archived` holds: `Some(None)` for `ParsedLanguage::ABSENT`
+/// (the parse decided none), `None` for bytes that name no language.
+fn fragment_language(archived: &ArchivedFragmentFile) -> Option<Option<ParsedLanguage>> {
+    let bytes = archived.parsed_language;
+    match ParsedLanguage::from_bytes(bytes) {
+        None if bytes != ParsedLanguage::ABSENT => None,
+        parsed => Some(parsed),
+    }
 }
 
 /// One manifest read's share of `OverlayView`: the fragments the
@@ -202,6 +216,7 @@ fn decode_fragment(
     fragment: &AcceptedFragment,
 ) -> Option<(OverlayFileInput, &ArchivedOverlayFileRecords)> {
     let archived = rkyv::access::<ArchivedFragmentFile, RkyvError>(&fragment.bytes).ok()?;
+    let parsed_language = fragment_language(archived)?;
     // Symbols copy straight off the archived view — a full
     // `rkyv::deserialize` of the whole FragmentFile would allocate every
     // string twice (once into FragmentFile, once into OverlaySymbol).
@@ -243,6 +258,7 @@ fn decode_fragment(
             .collect(),
         imports,
         export_aliases,
+        parsed_language,
     };
     Some((input, &archived.records))
 }
@@ -260,6 +276,16 @@ mod tests {
         symbols: Vec<FragmentSymbol>,
         imports: Vec<RawImport>,
         export_aliases: Vec<RawExportAlias>,
+    }
+
+    /// A `FragmentFile` as V7 bins held it before the file's language joined
+    /// the payload.
+    #[derive(Archive, Serialize)]
+    struct FragmentFileWithoutLanguage {
+        symbols: Vec<FragmentSymbol>,
+        imports: Vec<RawImport>,
+        export_aliases: Vec<RawExportAlias>,
+        records: OverlayFileRecords,
     }
 
     fn accepted(bytes: Vec<u8>) -> AcceptedFragment {
@@ -310,5 +336,61 @@ mod tests {
             plain.iter().map(|i| &i.rel_path).collect::<Vec<_>>(),
             inputs.iter().map(|i| &i.rel_path).collect::<Vec<_>>()
         );
+    }
+
+    /// Stands for: a bin written before the language joined the payload is
+    /// unreadable, so the freshness gate re-parses it and the reader serves
+    /// nothing of it. Never a decoded file whose language defaults to the
+    /// path's. The empty payload is shorter than the current root, which
+    /// the archive check rejects by length.
+    #[test]
+    fn test_valid_fragment_bin_without_parsed_language_rejected() {
+        let old = FragmentFileWithoutLanguage {
+            symbols: Vec::new(),
+            imports: Vec::new(),
+            export_aliases: Vec::new(),
+            records: OverlayFileRecords::default(),
+        };
+        let bytes = rkyv::to_bytes::<RkyvError>(&old).unwrap().into_vec();
+        assert!(!valid_fragment(&bytes));
+        assert!(decode_view_inputs(&[accepted(bytes)]).is_empty());
+    }
+
+    /// Stands for: bytes that name no language are corrupt, never "no
+    /// language". `ABSENT` is the only spelling of "the parse decided none".
+    #[test]
+    fn test_valid_fragment_unnamed_language_bytes_rejected() {
+        let with = |parsed_language: [u8; 2]| {
+            let fragment = FragmentFile {
+                parsed_language,
+                ..FragmentFile::default()
+            };
+            rkyv::to_bytes::<RkyvError>(&fragment).unwrap().into_vec()
+        };
+        assert!(valid_fragment(&with(ParsedLanguage::ABSENT)));
+        assert!(!valid_fragment(&with([0xFE, 0xFE])), "no such language");
+        assert!(
+            !valid_fragment(&with([ParsedLanguage::ABSENT[0], 1])),
+            "a script byte beside an absent file byte is a provider's half state, never stored"
+        );
+        let decoded = decode_view_inputs(&[accepted(with([0xFE, 0xFE]))]);
+        assert!(decoded.is_empty(), "a corrupt bin decodes to nothing");
+    }
+
+    /// Stands for: `FragmentFile::default()` is "no language", not the
+    /// all-zero pair, which names a real language.
+    #[test]
+    fn test_fragment_file_default_parsed_language_is_absent() {
+        assert_eq!(
+            FragmentFile::default().parsed_language,
+            ParsedLanguage::ABSENT
+        );
+        let decoded = decode_view_inputs(&[accepted(
+            rkyv::to_bytes::<RkyvError>(&FragmentFile::default())
+                .unwrap()
+                .into_vec(),
+        )]);
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].parsed_language, None);
     }
 }

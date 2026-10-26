@@ -316,6 +316,7 @@ mod tests {
         let bytes = fx.into_bytes();
         let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
         let input = OverlayFileInput {
+            parsed_language: None,
             rel_path: DIRTY.to_string(),
             symbols: vec![
                 function("checks", (1, 3), FunctionMeta::FLAG_TEST),
