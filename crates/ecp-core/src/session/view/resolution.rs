@@ -6,8 +6,8 @@
 use super::{
     base_function_meta, construction_target, emit_closure_references, fragment_emits, reason_index,
     span_of, CallGap, DirtyNamesake, OverlayFileInput, OverlaySymbol, ViewEdge, ViewNode,
-    CONF_IMPORT_SCOPED, CONF_MODULE_TREE, CONF_QUALIFIER_SCOPED, CS_STRICTEST_FLAGS,
-    GAP_CS_ACCESS_DIRTY_TARGET, GAP_CS_EXTENSION_DIRTY_DECLARATION, GAP_CS_PARTIAL_BARE_CALL,
+    CONF_IMPORT_SCOPED, CONF_MODULE_TREE, CS_STRICTEST_FLAGS, GAP_CS_ACCESS_DIRTY_TARGET,
+    GAP_CS_EXTENSION_DIRTY_DECLARATION, GAP_CS_PARTIAL_BARE_CALL,
 };
 use crate::analyzer::csharp_access::{self, CallAccess};
 use crate::analyzer::csharp_extension::{self, ReceiverSite};
@@ -16,7 +16,10 @@ use crate::analyzer::import_binding::{
     fqn_imported_name, fqn_language, fqn_type_path, import_binding, import_member_fallback,
     owner_path_agrees, DeclaredType, MemberOwner,
 };
-use crate::analyzer::ladder::{self, split_qualifier, CallPick, FieldRead, ResolveFacts};
+pub(super) use crate::analyzer::ladder::qualifier_prefix_is_internal;
+use crate::analyzer::ladder::{
+    self, split_qualifier, CallPick, CrateModule, FieldRead, ResolveFacts, StemFile,
+};
 use crate::analyzer::lexical::{
     lexical_chain_end, lexical_scope_kinds, twin_enclosing, LexicalFunctions,
 };
@@ -28,11 +31,11 @@ use crate::analyzer::reexport::{
 };
 use crate::analyzer::rust_paths::{
     is_rust_source, is_rust_target_root, rust_expand_path_head, rust_module_dir,
-    rust_module_path_base, rust_path_prefix_agrees_with_import, rust_type_path_prefix,
+    rust_module_path_base, rust_type_path_prefix,
 };
 use crate::analyzer::same_file_pick::{
-    is_free, member_call_admits, prefer_owned, rust_impl_members, type_receiver_is_closed,
-    ImplMember, ImplNode, PickFacts, PickScope,
+    is_free, member_call_admits, prefer_owned, rust_impl_members, ImplMember, ImplNode, PickFacts,
+    PickScope,
 };
 use crate::analyzer::type_ladder::{
     self, TypeCandidates, TypeFacts, TypeMember as LadderMember, MAX_HERITAGE_DEPTH,
@@ -97,10 +100,11 @@ impl<'a> OverlayNames<'a> {
 }
 
 type StarModuleCache = FxHashMap<Box<str>, Rc<[Box<str>]>>;
-/// Every input [`OverlayFacts::qualified_callee`] reads that varies within one
-/// view: (dirty file ordinal, its imports slice, callee, kind family, whether
-/// the qualifier is the caller's own type and then its heritage slice, and a
-/// Rust caller, whose `impl` block the same-file pick prefers).
+/// Every input [`OverlayFacts::qualified`] reads that varies within one
+/// view: (dirty file ordinal, its imports slice, callee, kind family, the
+/// heritage slice when the qualifier is the caller's own type or a Python
+/// `super()`, a Rust caller, whose `impl` block the same-file pick prefers,
+/// and whether the Rust module tree runs).
 type QualifiedCache = FxHashMap<
     (
         usize,
@@ -109,8 +113,9 @@ type QualifiedCache = FxHashMap<
         ResolveTarget,
         Option<(usize, usize)>,
         Option<u32>,
+        bool,
     ),
-    Option<(u32, f32)>,
+    Resolution,
 >;
 type NamedImportCache = FxHashMap<(usize, ResolveTarget), FxHashMap<Box<str>, Option<u32>>>;
 /// Every input of [`resolve_callee`]'s Tier 3 that varies within one view:
@@ -163,9 +168,7 @@ struct OverlayFacts<'a> {
     /// answer: a file calls one imported name at many sites, and each probe
     /// walks the specifier's candidate files.
     named_imports: RefCell<NamedImportCache>,
-    /// [`Self::qualified_callee`]'s answers: a file types one receiver at
-    /// many sites (`segment.get()`, `K.m()`), and each probe walks the
-    /// qualifier's files and the same-file pick.
+    /// [`Self::qualified`]'s answers.
     qualified: RefCell<QualifiedCache>,
     /// Tier 3's answers: a file calls one common name (`get`, `checkNotNull`)
     /// at many sites, and each probe filters every base node of that name.
@@ -706,281 +709,55 @@ impl<'a> OverlayFacts<'a> {
         stems.get(stem).map_or(&[], Vec::as_slice)
     }
 
-    /// The index's Tier 2.5 (`Resolver::resolve_symbol_with_import_binding`):
-    /// the qualified callee `callee` = `qualifier` + `member` of the dirty
-    /// file `file_ord` binds, in the file [`Self::qualifier_file`] picks, the
-    /// `member` of `target`'s kinds that [`prefer_owned`] picks with
-    /// `qualifier` as the receiver's type. `this.m()` typed as the caller's
-    /// own type takes the caller's `heritage`, and a self type no file
-    /// declares (Rust `impl W for Pin<P>`) resolves in the caller's file. A
-    /// Python `super().m()` takes the index's base-class rule, which the
-    /// overlay does not replay.
-    #[allow(clippy::too_many_arguments)]
-    fn qualified_callee(
+    /// [`ladder::qualified`] for a qualified callee of the dirty file
+    /// `file_ord`, memoized: a file types one receiver at many sites
+    /// (`segment.get()`, `K.m()`), and each probe walks the qualifier's
+    /// files and the same-file pick. `module_tree` is the overlay's module
+    /// tree lookup of the callee, `None` where the caller stops a Rust path
+    /// at the qualifier tier ([`RustTail::Stop`]).
+    fn qualified(
         &self,
         file_ord: usize,
-        imports: &[RawImport],
-        caller: FileMeta,
-        (callee, qualifier, member): (&str, &str, &str),
-        target: ResolveTarget,
+        site: ladder::QualifiedSite<'_>,
         qualifiers: &OverlayNames<'_>,
-        call: Option<CallPick<'_>>,
         heritage: &[String],
-    ) -> Option<(u32, f32)> {
-        let caller_type = call
+        module_tree: Option<impl FnOnce() -> Option<u32>>,
+    ) -> Resolution {
+        let caller_type = site
+            .call
             .and_then(|call| call.owner)
-            .is_some_and(|owner| owner_key(qualifier) == Some(owner));
+            .and_then(owner_key)
+            .is_some_and(|owner| owner_key(site.qualifier) == Some(owner));
+        let reads_heritage = caller_type
+            || (site.qualifier == CallSite::SUPER_RECEIVER
+                && site.caller.language == Language::Python);
         let key = (
             file_ord,
-            (imports.as_ptr() as usize, imports.len()),
-            Box::<str>::from(callee),
-            target,
-            caller_type.then_some((heritage.as_ptr() as usize, heritage.len())),
-            call.and_then(|call| call.caller)
-                .filter(|_| caller.language == Language::Rust),
+            (site.imports.as_ptr() as usize, site.imports.len()),
+            Box::<str>::from(site.callee),
+            site.target,
+            reads_heritage.then_some((heritage.as_ptr() as usize, heritage.len())),
+            site.call
+                .and_then(|call| call.caller)
+                .filter(|_| site.caller.language == Language::Rust),
+            module_tree.is_some(),
         );
         if let Some(&hit) = self.qualified.borrow().get(&key) {
             return hit;
         }
-        let hit = self.qualified_callee_uncached(
-            file_ord,
-            imports,
-            caller,
-            (callee, qualifier, member),
-            target,
-            qualifiers,
-            call,
+        let (hit, _) = ladder::qualified(
+            &OverlayQualifiers {
+                facts: self,
+                file_ord,
+                qualifiers,
+            },
+            site,
             heritage,
+            StemFile::DeclaringMember,
+            || module_tree.and_then(|lookup| lookup()),
         );
         self.qualified.borrow_mut().insert(key, hit);
         hit
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn qualified_callee_uncached(
-        &self,
-        file_ord: usize,
-        imports: &[RawImport],
-        caller: FileMeta,
-        (callee, qualifier, member): (&str, &str, &str),
-        target: ResolveTarget,
-        qualifiers: &OverlayNames<'_>,
-        call: Option<CallPick<'_>>,
-        heritage: &[String],
-    ) -> Option<(u32, f32)> {
-        if qualifier == CallSite::SUPER_RECEIVER && caller.language == Language::Python {
-            return None;
-        }
-        let caller_type = call
-            .and_then(|call| call.owner)
-            .is_some_and(|owner| owner_key(qualifier) == Some(owner));
-        let source = self.scope.dirty()[file_ord].rel_path.as_str();
-        let file = self
-            .qualifier_file(
-                file_ord,
-                imports,
-                caller,
-                (Some(callee), qualifier, member),
-                target,
-                qualifiers,
-            )
-            .or_else(|| caller_type.then_some(source))?;
-        let heritage: &[String] = if caller_type { heritage } else { &[] };
-        let pick = self.first_in_file(file, member, target, None)?;
-        let qualifier_is_type = type_receiver_is_closed(caller.language)
-            && (caller_type
-                || owner_key(qualifier).is_some_and(|key| {
-                    self.first_in_file(file, key, ResolveTarget::Type, None)
-                        .is_some()
-                }));
-        prefer_owned(
-            self,
-            file,
-            pick,
-            member,
-            Some(qualifier),
-            heritage,
-            target,
-            PickScope {
-                caller: call.and_then(|call| call.caller),
-                typed_receiver: true,
-                untyped_receiver: false,
-                qualifier_is_type,
-            },
-        )
-        .map(|id| (id, CONF_QUALIFIER_SCOPED))
-    }
-
-    /// The index's `Resolver::resolve_qualifier_file`: the file that defines
-    /// `qualifier` and declares `member`, by the same four tiers: the
-    /// caller's own file, an import binding the qualifier, a unique
-    /// project-wide definition, then a file named after the qualifier.
-    /// `callee` is the full qualified callee; the heritage tier passes
-    /// `None`, which skips the Rust path checks and the file-name tier, as
-    /// the index does.
-    ///
-    /// `None` also where the overlay cannot replay the index's answer, so no
-    /// edge stands in for a different one: a Rust path or `use` whose module
-    /// only the module tree places (a workspace crate head, a `pub use`
-    /// chain).
-    fn qualifier_file(
-        &self,
-        file_ord: usize,
-        imports: &[RawImport],
-        caller: FileMeta,
-        (callee, qualifier, member): (Option<&str>, &str, &str),
-        target: ResolveTarget,
-        qualifiers: &OverlayNames<'_>,
-    ) -> Option<&'a str> {
-        let source = self.scope.dirty()[file_ord].rel_path.as_str();
-        let language = caller.language;
-        let declares_member = |file: &str| self.first_in_file(file, member, target, None).is_some();
-        let agrees = |file: &str| {
-            self.rust_type_path_agrees(
-                (file_ord, source),
-                callee,
-                qualifier,
-                file,
-                imports,
-                qualifiers,
-            )
-        };
-        if qualifiers.same_file.contains(&(file_ord, qualifier)) && declares_member(source) {
-            match agrees(source) {
-                Some(true) => return Some(source),
-                Some(false) => {}
-                None => return None,
-            }
-        }
-
-        let ecmascript = is_ecmascript(language);
-        for import in imports
-            .iter()
-            .filter(|i| i.alias.as_deref().unwrap_or(&i.imported_name) == qualifier)
-        {
-            if callee.is_some_and(|callee| {
-                !rust_path_prefix_agrees_with_import(callee, qualifier, &import.source, imports)
-            }) {
-                continue;
-            }
-            let exported = import.imported_name.as_str();
-            if exported == "*" && import_member_fallback(language) && !fqn_language(language) {
-                match self.scope.module(source, &import.source, language) {
-                    Module::Unique(file) => return Some(file),
-                    _ => continue,
-                }
-            }
-            let mut hit = None;
-            // `import * as ns from './a'`: the module is the scope, and a
-            // miss ends the search.
-            if exported == "*" && ecmascript {
-                self.for_each_candidate(source, &import.source, &mut |candidate| {
-                    let found =
-                        reexport::lookup_export_in_file(self, candidate, member, target).is_some();
-                    if found {
-                        hit = self.stored_path(candidate);
-                    }
-                    !found
-                });
-                return hit;
-            }
-            if language == Language::Rust {
-                // `use a::m; m::f()`: `m` may be the module `a::m`, whose own
-                // file then decides.
-                let module_path = if exported.contains("::") {
-                    exported.to_string()
-                } else {
-                    format!("{}::{exported}", import.source)
-                };
-                if let Some(module_file) = self.rust_module_file(source, &module_path) {
-                    return declares_member(module_file).then_some(module_file);
-                }
-                // A head that is neither anchored nor a module of the
-                // caller's file may name a workspace crate, which the index
-                // places through its module tree.
-                let head = module_path.split("::").next().unwrap_or_default();
-                if !matches!(head, "crate" | "self" | "super")
-                    && !qualifiers.same_file.contains(&(file_ord, head))
-                {
-                    return None;
-                }
-            }
-            let default_import = ImportRef::from(import).is_es_default();
-            self.for_each_candidate(source, &import.source, &mut |candidate| {
-                let found = reexport::imported_in_file(
-                    self,
-                    candidate,
-                    exported,
-                    default_import,
-                    ResolveTarget::Qualifier,
-                )
-                .is_some()
-                    && declares_member(candidate);
-                if found {
-                    hit = self.stored_path(candidate);
-                }
-                !found
-            });
-            if hit.is_some() {
-                return hit;
-            }
-        }
-
-        let graph = self.graph;
-        let is_qualifier = ResolveTarget::Qualifier.kind_predicate();
-        let base = graph
-            .nodes_by_name(qualifier)
-            .filter(|&idx| {
-                is_qualifier(NodeKind::from(&graph.nodes[idx as usize].kind))
-                    && !self.dirty_base.contains(&idx)
-                    && !graph.is_later_overload(idx)
-            })
-            .map(|idx| {
-                let meta = self
-                    .node_file(idx)
-                    .map_or_else(FileMeta::default, FileMeta::from_path);
-                (idx, meta)
-            });
-        let overlay = qualifiers
-            .anywhere
-            .get(qualifier)
-            .into_iter()
-            .flatten()
-            .copied();
-        if let GlobalPick::Unique(id) = pick_global(caller, base.chain(overlay)) {
-            if let Some(file) = self.node_file(id).filter(|&file| declares_member(file)) {
-                match agrees(file) {
-                    Some(true) => return Some(file),
-                    Some(false) => {}
-                    None => return None,
-                }
-            }
-        }
-
-        // A module named by its file (`mod util;` ↔ `util.rs`), unique within
-        // the caller's crate root; an external path (`std::fs::read`) never.
-        if !callee.is_some_and(|callee| qualifier_prefix_is_internal(callee, qualifier)) {
-            return None;
-        }
-        let root = crate_root_prefix(source);
-        let named_file = |file: &str| {
-            std::path::Path::new(file)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                == Some(qualifier)
-                && crate_root_prefix(file) == root
-        };
-        // The stem index costs one pass over the file paths per build; a
-        // scan of the member's declarations per call cost more on a common
-        // member name (`add`, `get`) with hundreds of declarations.
-        let mut stems = self
-            .files_by_stem(qualifier)
-            .iter()
-            .filter(|&&file| named_file(file));
-        match (stems.next(), stems.next()) {
-            (Some(&file), None) => declares_member(file).then_some(file),
-            _ => None,
-        }
     }
 }
 
@@ -2526,6 +2303,7 @@ fn resolve_overlay_name_ref(
                     call: None,
                     heritage: &[],
                     type_lookup: false,
+                    rust_tail: RustTail::Stop,
                 },
             )
             .into_iter()
@@ -2583,11 +2361,13 @@ fn resolve_overlay_name_ref(
 /// candidates to files matching its last path segment, unique only. Hit →
 /// 0.95.
 /// Tier 2.5 — qualifier-scoped: a qualified callee (`K.save`, `K::st`)
-/// takes the member in the qualifier's file
-/// ([`OverlayFacts::qualified_callee`]) → 0.85, else the receiver-typing
-/// ladder ([`OverlayFacts::receiver_ladder`]), else no edge; it never
-/// reaches Tier 3. A Rust path the qualifier tier leaves unresolved goes on
-/// to the module tree and then the ladder in `resolve_edges` (Tier 3.5).
+/// takes the member in the qualifier's file through the shared
+/// [`ladder::qualified`] ([`OverlayFacts::qualified`]) → 0.85, else the
+/// receiver-typing ladder ([`OverlayFacts::receiver_ladder`]), else no edge;
+/// it never reaches Tier 3. A Rust path the qualifier tier leaves unresolved
+/// goes on to the module tree (the ladder decides that position) and then
+/// the receiver ladder, at call sites and type lookups only
+/// ([`RustTail`]).
 /// Tier 2.75 — heritage: a bare name in a class with declared bases takes
 /// the member in the first base's file that declares it → 0.8. Then, in a
 /// fully qualified language, the wildcard imports bind.
@@ -2805,9 +2585,10 @@ fn resolve_callee<'s>(
         }
     }
 
-    // Tier 2.5: a qualified callee resolves through its qualifier or not at
-    // all; the index never retries the bare member (`std::fs::read` must
-    // not bind a project `read`).
+    // Tier 2.5, then Tier 3.5 for a Rust `::` path ([`ladder::qualified`]):
+    // a qualified callee resolves through its qualifier or not at all; the
+    // index never retries the bare member (`std::fs::read` must not bind a
+    // project `read`).
     if let Some((qualifier, member)) = split_qualifier(callee) {
         let target = match names.target {
             ResolveTarget::Callable
@@ -2817,29 +2598,37 @@ fn resolve_callee<'s>(
             }
             target => target,
         };
-        // The index's base-class rule for a Python `super().m()` is not
-        // replayed: no edge rather than another tier's guess.
-        if qualifier == CallSite::SUPER_RECEIVER && caller.language == Language::Python {
-            return None;
-        }
-        let hit = facts.qualified_callee(
-            file_ord,
-            imports,
+        let rust_path = caller.language == Language::Rust && callee.contains("::");
+        let tail = match scope.rust_tail {
+            RustTail::Ladder(tree) => Some(tree),
+            RustTail::Stop => None,
+        };
+        let module_tree = tail.filter(|_| rust_path).map(|tree| {
+            move || {
+                let (modules, chain) = tree?;
+                resolve_rust_module_callee(graph, callee, names, nodes, dirty_base, modules, chain)
+                    .map(|(idx, _)| idx)
+            }
+        });
+        let site = ladder::QualifiedSite {
+            source: importer,
             caller,
-            (callee, qualifier, member),
+            language: caller.language,
+            imports,
+            callee,
+            qualifier,
+            member,
             target,
-            qualifiers,
             call,
-            scope.heritage,
-        );
-        // A Rust module path (`crate::x::parse`) never binds a method here,
-        // though the index's qualifier tier would. Its module tree and
-        // receiver ladder run in `resolve_edges`.
-        if caller.language == Language::Rust && callee.contains("::") {
-            return hit.filter(|&(idx, _)| rust_path_binds(graph, nodes, idx, qualifier));
+        };
+        match facts.qualified(file_ord, site, qualifiers, scope.heritage, module_tree) {
+            Resolution::Bound(hit) => return Some((hit.id, hit.confidence)),
+            Resolution::NoEdge(_) => return None,
+            Resolution::Unknown | Resolution::Shadowed => {}
         }
-        if hit.is_some() {
-            return hit;
+        // A Rust path the caller stops at the qualifier tier takes no ladder.
+        if rust_path && tail.is_none() {
+            return None;
         }
         // The receiver-typing ladder: only where every tier above found
         // nothing, so it adds edges and never moves one.
@@ -2888,13 +2677,18 @@ fn resolve_callee<'s>(
     // call that reaches no member skips it.
     if let (Resolution::Bound(hit), _) =
         ladder::heritage(facts, scope.heritage, callee, names.target, call, |base| {
-            facts.qualifier_file(
-                file_ord,
-                imports,
+            ladder::qualifier_file(
+                &OverlayQualifiers {
+                    facts,
+                    file_ord,
+                    qualifiers,
+                },
+                importer,
                 caller,
+                imports,
                 (None, base, callee),
                 names.target,
-                qualifiers,
+                StemFile::DeclaringMember,
             )
         })
     {
@@ -2973,6 +2767,7 @@ fn extension_fallback(
                 call: None,
                 heritage,
                 type_lookup: false,
+                rust_tail: RustTail::Stop,
             },
         )
     })
@@ -3137,6 +2932,25 @@ struct Scope<'c> {
     /// qualified language the index binds it through its named-import tier,
     /// not the import-member tier.
     type_lookup: bool,
+    /// What a Rust `::` path the qualifier tier leaves unbound takes next.
+    rust_tail: RustTail<'c>,
+}
+
+/// The tiers after the qualifier tier for a Rust `::` path. The index runs
+/// the module tree and the receiver-typing ladder for every lookup
+/// (`Resolver::resolve_symbol_with_import_binding`); the overlay runs them
+/// for a call site and a type lookup only. The rest of its lookups stop at
+/// the qualifier tier: a kept divergence, which this parameter makes
+/// explicit.
+#[derive(Clone, Copy, Default)]
+enum RustTail<'c> {
+    /// No tier after the qualifier tier: a name reference, a qualified field
+    /// read, a constructor's type and an extension retry.
+    #[default]
+    Stop,
+    /// The module tree, when the view built one, then the receiver-typing
+    /// ladder: a call site and a type lookup, as the index.
+    Ladder(Option<(&'c RustModules<'c>, &'c [&'c str])>),
 }
 
 /// File-backed Rust modules use the same crate/self/super layout as Pass 2.
@@ -3730,15 +3544,9 @@ fn resolve_type<'s>(
             call: None,
             heritage: &[],
             type_lookup: true,
+            rust_tail: RustTail::Ladder(rust_tree),
         },
     )
-    .or_else(|| {
-        if caller.language != Language::Rust || !name.contains("::") {
-            return None;
-        }
-        let (modules, chain) = rust_tree?;
-        resolve_rust_module_callee(graph, name, types, nodes, dirty_base, modules, chain)
-    })
 }
 
 /// The [`FileMeta`] of the base node `idx`'s file, memoized per file.
@@ -3756,6 +3564,154 @@ fn base_file_meta(
                 FileMeta::from_path(f.path.resolve(&graph.string_pool))
             })
     })
+}
+
+/// The qualifier tier's facts over the overlay ([`ladder::QualifierFacts`])
+/// for a call of the dirty file `file_ord`: the view's facts, and the
+/// qualifier-kind name table (`qualifiers`) for the names that file and the
+/// overlay declare.
+struct OverlayQualifiers<'v, 'a, 'n> {
+    facts: &'v OverlayFacts<'a>,
+    file_ord: usize,
+    qualifiers: &'v OverlayNames<'n>,
+}
+
+impl<'a> ladder::ImportModules for OverlayQualifiers<'_, 'a, '_> {
+    type Module = &'a str;
+
+    fn import_module(
+        &self,
+        importer: &str,
+        specifier: &str,
+        language: Language,
+    ) -> Module<&'a str> {
+        self.facts.scope.module(importer, specifier, language)
+    }
+
+    fn module_name_indexed(&self, language: Language, name: &str) -> bool {
+        self.facts.scope.has_module_name(language, name)
+    }
+}
+
+impl<'a> ladder::QualifierFacts for OverlayQualifiers<'_, 'a, '_> {
+    type Decls = OverlayFacts<'a>;
+
+    fn decls(&self) -> &OverlayFacts<'a> {
+        self.facts
+    }
+
+    fn caller_declares(&self, source: &str, name: &str) -> bool {
+        debug_assert_eq!(source, self.facts.scope.dirty()[self.file_ord].rel_path);
+        self.qualifiers.same_file.contains(&(self.file_ord, name))
+    }
+
+    fn stored_file(&self, path: &str) -> Option<&'a str> {
+        self.facts.stored_path(path)
+    }
+
+    /// The clean base declarations of a qualifier kind (no dirty-file node,
+    /// no later overload) and the overlay's, through [`pick_global`].
+    fn global_qualifier(&self, qualifier: &str, caller: FileMeta) -> GlobalPick {
+        let facts = self.facts;
+        let graph = facts.graph;
+        let is_qualifier = ResolveTarget::Qualifier.kind_predicate();
+        let base = graph
+            .nodes_by_name(qualifier)
+            .filter(|&idx| {
+                is_qualifier(NodeKind::from(&graph.nodes[idx as usize].kind))
+                    && !facts.dirty_base.contains(&idx)
+                    && !graph.is_later_overload(idx)
+            })
+            .map(|idx| {
+                let meta = facts
+                    .node_file(idx)
+                    .map_or_else(FileMeta::default, FileMeta::from_path);
+                (idx, meta)
+            });
+        let overlay = self
+            .qualifiers
+            .anywhere
+            .get(qualifier)
+            .into_iter()
+            .flatten()
+            .copied();
+        pick_global(caller, base.chain(overlay))
+    }
+
+    fn for_each_candidate(
+        &self,
+        importer: &str,
+        specifier: &str,
+        mut visit: impl FnMut(&str) -> bool,
+    ) {
+        ModuleFacts::for_each_candidate(self.facts, importer, specifier, &mut visit);
+    }
+
+    fn exports(&self, file: &str, name: &str, target: ResolveTarget) -> bool {
+        reexport::lookup_export_in_file(self.facts, file, name, target).is_some()
+    }
+
+    fn holds_import(&self, file: &str, imported: &str, default_import: bool) -> bool {
+        reexport::imported_in_file(
+            self.facts,
+            file,
+            imported,
+            default_import,
+            ResolveTarget::Qualifier,
+        )
+        .is_some()
+    }
+
+    fn rust_module_file(&self, source: &str, module_path: &str) -> Option<&'a str> {
+        self.facts.rust_module_file(source, module_path)
+    }
+
+    /// A head that is neither anchored nor a module of the caller's file may
+    /// name a workspace crate, which only the index's module tree places:
+    /// no file, rather than the caller crate's own namesake.
+    fn crate_module(
+        &self,
+        _source: &str,
+        module_path: &str,
+        _member: &str,
+        _target: ResolveTarget,
+    ) -> CrateModule<&'a str> {
+        match module_path.split("::").next() {
+            Some("crate" | "self" | "super") => CrateModule::Local,
+            _ => CrateModule::Placed(None),
+        }
+    }
+
+    fn rust_path_agrees(
+        &self,
+        source: &str,
+        callee: &str,
+        qualifier: &str,
+        candidate: &str,
+        imports: &[RawImport],
+    ) -> Option<bool> {
+        self.facts.rust_type_path_agrees(
+            (self.file_ord, source),
+            Some(callee),
+            qualifier,
+            candidate,
+            imports,
+            self.qualifiers,
+        )
+    }
+
+    fn files_by_stem(&self, stem: &str) -> impl Iterator<Item = &str> {
+        self.facts.files_by_stem(stem).iter().copied()
+    }
+
+    fn type_candidates<'q>(
+        &self,
+        source: &str,
+        name: &'q str,
+        imports: &'q [RawImport],
+    ) -> TypeCandidates<'q> {
+        self.facts.type_candidates(source, name, imports)
+    }
 }
 
 /// The import-member tier's facts over the overlay ([`ladder::ImportMembers`]):
@@ -3988,57 +3944,12 @@ pub(super) fn relative_module_rank(
     found
 }
 
-/// The resolver's `qualifier_prefix_is_internal`: the path before
-/// `qualifier` in `full_callee` is empty or a `crate` / `self` / `super`
-/// chain, so the qualifier may name a project module (`std::fs::read` →
-/// false, `crate::util::f` → true).
-pub(super) fn qualifier_prefix_is_internal(full_callee: &str, qualifier: &str) -> bool {
-    let Some(member_split) = full_callee.rfind("::").or_else(|| full_callee.rfind('.')) else {
-        return false;
-    };
-    let before_member = &full_callee[..member_split];
-    let preceding = before_member
-        .rsplit_once("::")
-        .or_else(|| before_member.rsplit_once('.'))
-        .map_or("", |(p, q)| if q == qualifier { p } else { "" });
-    preceding.is_empty()
-        || preceding
-            .split("::")
-            .all(|s| matches!(s, "crate" | "self" | "super"))
-}
-
 /// The index's `crate_root_prefix` over a `/`-normalized path: everything
 /// before the last `/src/` or `/tests/`, else empty.
 fn crate_root_prefix(path: &str) -> &str {
     path.rsplit_once("/src/")
         .or_else(|| path.rsplit_once("/tests/"))
         .map_or("", |(root, _)| root)
-}
-
-/// Whether the Rust path call `qualifier::m` may bind `idx`: a method only
-/// when `qualifier` is its owning type (`K::st`). A module path
-/// (`crate::x::parse`) never binds a method, as in
-/// [`resolve_rust_module_callee`], though the index's qualifier tier would.
-fn rust_path_binds(
-    graph: &ArchivedZeroCopyGraph,
-    nodes: &[ViewNode],
-    idx: u32,
-    qualifier: &str,
-) -> bool {
-    let (kind, owner) = match idx.checked_sub(graph.nodes.len() as u32) {
-        Some(offset) => {
-            let node = &nodes[offset as usize];
-            (node.kind, node.owner_class.as_deref())
-        }
-        None => {
-            let node = &graph.nodes[idx as usize];
-            (
-                NodeKind::from(&node.kind),
-                Some(node.owner_class.resolve(&graph.string_pool)),
-            )
-        }
-    };
-    kind != NodeKind::Method || owner.and_then(owner_key) == Some(qualifier)
 }
 
 /// The index's `leaf_path`: the last two components of `path`, its
@@ -4479,6 +4390,7 @@ pub(super) fn resolve_edges(
                             }),
                             heritage: if untyped { &[] } else { heritage },
                             type_lookup: false,
+                            rust_tail: RustTail::Ladder(rust_tree),
                         };
                         let lookup = type_member.as_deref().map_or(site, CallSite::Plain);
                         let mut resolve = |site: CallSite<'_>, imports: &[RawImport], scope| {
@@ -4499,9 +4411,9 @@ pub(super) fn resolve_edges(
                                 scope,
                             )
                         };
-                        // The index's order for a Rust path: the qualifier
-                        // tier inside `resolve_callee`, then the module tree,
-                        // then the receiver-typing ladder.
+                        // A Rust path takes the qualifier tier, the module
+                        // tree and the receiver-typing ladder, in the order
+                        // `ladder::qualified` sets (`RustTail::Ladder`).
                         // No Rust receiver is typed by `type_receiver`, so
                         // `site` is the lookup here. A C# untyped member
                         // takes no tier (`Resolver::resolve_call`).
@@ -4513,26 +4425,7 @@ pub(super) fn resolve_edges(
                                 let name = site.name();
                                 *module_calls
                                     .entry((name, owner, heritage.as_ptr()))
-                                    .or_insert_with(|| {
-                                        resolve(site, &file.imports, scope)
-                                            .or_else(|| {
-                                                let (modules, chain) = rust_tree?;
-                                                resolve_rust_module_callee(
-                                                    graph, name, &callables, nodes, dirty_base,
-                                                    modules, chain,
-                                                )
-                                            })
-                                            .or_else(|| {
-                                                let (qualifier, member) = split_qualifier(name)?;
-                                                ladder_edge(facts.receiver_ladder(
-                                                    &file.rel_path,
-                                                    &file.imports,
-                                                    (name, qualifier, member),
-                                                    callables.target,
-                                                    true,
-                                                ))
-                                            })
-                                    })
+                                    .or_insert_with(|| resolve(site, &file.imports, scope))
                             } else {
                                 let hit = resolve(lookup, &file.imports, scope);
                                 // A hit in the caller's file came
@@ -4572,6 +4465,7 @@ pub(super) fn resolve_edges(
                                         call: None,
                                         heritage: scope.heritage,
                                         type_lookup: false,
+                                        rust_tail: RustTail::Stop,
                                     },
                                 )
                                 .filter(|&(idx, _)| is_free(&facts, idx)),
@@ -4654,7 +4548,10 @@ pub(super) fn resolve_edges(
                                         replaced,
                                         dirty_base,
                                         &facts,
-                                        scope,
+                                        Scope {
+                                            rust_tail: RustTail::Stop,
+                                            ..scope
+                                        },
                                     )
                                 },
                             ) {
@@ -4738,6 +4635,7 @@ pub(super) fn resolve_edges(
                                             call: None,
                                             heritage,
                                             type_lookup: false,
+                                            rust_tail: RustTail::Stop,
                                         },
                                     )
                                     .filter(|&(idx, _)| is_free(&facts, idx))
@@ -4889,6 +4787,7 @@ pub(super) fn resolve_edges(
                             call: None,
                             heritage: &[],
                             type_lookup: false,
+                            rust_tail: RustTail::Stop,
                         },
                     ),
                     FieldRead::Global => global_tier(

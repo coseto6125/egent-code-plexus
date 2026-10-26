@@ -43,7 +43,9 @@ use ecp_core::analyzer::import_binding::{
     fqn_imported_name, fqn_language, fqn_type_path, import_binding, import_member_fallback,
     MemberOwner,
 };
-use ecp_core::analyzer::ladder::{self, split_qualifier, CallPick, FieldRead};
+use ecp_core::analyzer::ladder::{
+    self, qualifier_prefix_is_internal, split_qualifier, CallPick, CrateModule, FieldRead, StemFile,
+};
 use ecp_core::analyzer::module_discovery::{self, Module, ModuleIndex};
 use ecp_core::analyzer::outcome::{NoEdge, Resolution, Tier};
 use ecp_core::analyzer::path_aliases::PathAliases;
@@ -51,11 +53,10 @@ use ecp_core::analyzer::reexport::{
     self, is_ecmascript, probe_rust_module, ExportAliasTable, Fact, FileImports, ImportRef,
     ModuleFacts, PyModule,
 };
-use ecp_core::analyzer::rust_paths::{is_rust_source, rust_module_path_base};
-use ecp_core::analyzer::same_file_pick::type_receiver_is_closed;
-use ecp_core::analyzer::type_ladder::{
-    self, Ownership, TypeCandidates, TypeMember as LadderMember,
+use ecp_core::analyzer::rust_paths::{
+    is_rust_source, rust_expand_path_head, rust_module_path_base, rust_type_path_prefix,
 };
+use ecp_core::analyzer::type_ladder::{self, TypeCandidates, TypeMember as LadderMember};
 use ecp_core::analyzer::types::{owner_key, CallArguments, CallSite, LocalGraph, RawImport};
 use ecp_core::graph::NodeKind;
 use serde::Serialize;
@@ -65,8 +66,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use crate::resolution::heuristics::ResolutionTier;
 use crate::resolution::index::{
-    crate_root_prefix, CsharpExtensionDecls, FileMeta, GlobalPick, Language, PickScope,
-    ResolveTarget, SymbolTable,
+    CsharpExtensionDecls, FileMeta, GlobalPick, Language, ResolveTarget, SymbolTable,
 };
 use crate::rust::module_tree::RustWorkspaceModTree;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -351,6 +351,126 @@ impl ladder::ImportMembers for IndexFacts<'_, '_> {
         target: ResolveTarget,
     ) -> Option<u32> {
         reexport::python_import_reexport(self, language, module, name, target)
+    }
+}
+
+/// The index's facts for the qualifier tier ([`ladder::qualified`]): the
+/// symbol table, the resolver's candidates and its Rust module tree.
+impl ladder::QualifierFacts for IndexFacts<'_, '_> {
+    type Decls = SymbolTable;
+
+    fn decls(&self) -> &SymbolTable {
+        self.0.symbol_table
+    }
+
+    fn caller_declares(&self, source: &str, name: &str) -> bool {
+        self.0
+            .symbol_table
+            .lookup_in_file_with_kind(source, name, ResolveTarget::Qualifier)
+            .is_some()
+    }
+
+    fn stored_file(&self, path: &str) -> Option<Arc<str>> {
+        Some(Arc::from(path))
+    }
+
+    fn global_qualifier(&self, qualifier: &str, caller: FileMeta) -> GlobalPick {
+        self.0
+            .symbol_table
+            .lookup_global(qualifier, ResolveTarget::Qualifier, caller, false)
+    }
+
+    fn for_each_candidate(&self, importer: &str, specifier: &str, visit: impl FnMut(&str) -> bool) {
+        self.0
+            .for_each_candidate(Path::new(importer), specifier, visit);
+    }
+
+    fn exports(&self, file: &str, name: &str, target: ResolveTarget) -> bool {
+        reexport::lookup_export_in_file(self, file, name, target).is_some()
+    }
+
+    fn holds_import(&self, file: &str, imported: &str, default_import: bool) -> bool {
+        reexport::imported_in_file(
+            self,
+            file,
+            imported,
+            default_import,
+            ResolveTarget::Qualifier,
+        )
+        .is_some()
+    }
+
+    fn rust_module_file(&self, source: &str, module_path: &str) -> Option<Arc<str>> {
+        self.0
+            .rust_module_file(Path::new(source), module_path)
+            .map(Arc::from)
+    }
+
+    /// The module tree places `<crate>::a::m` (`use other::m; m::f()`),
+    /// which `rust_module_file` cannot; past it only file-stem guesses
+    /// remain, and they pick the caller crate's own `m.rs`.
+    fn crate_module(
+        &self,
+        source: &str,
+        module_path: &str,
+        member: &str,
+        target: ResolveTarget,
+    ) -> CrateModule<Arc<str>> {
+        let resolver = self.0;
+        if !resolver
+            .mod_tree
+            .is_some_and(|tree| tree.names_module(module_path))
+        {
+            return CrateModule::Local;
+        }
+        CrateModule::Placed(
+            resolver
+                .mod_tree_resolve(source, &format!("{module_path}::{member}"))
+                .filter(|resolved| {
+                    resolved.item_name == member
+                        && resolver
+                            .symbol_table
+                            .lookup_in_file_with_kind(&resolved.file, &resolved.item_name, target)
+                            .is_some()
+                })
+                .map(|resolved| Arc::from(resolved.file)),
+        )
+    }
+
+    fn rust_path_agrees(
+        &self,
+        source: &str,
+        callee: &str,
+        qualifier: &str,
+        candidate: &str,
+        imports: &[RawImport],
+    ) -> Option<bool> {
+        Some(self.0.rust_type_path_agrees(
+            Path::new(source),
+            source,
+            Some(callee),
+            qualifier,
+            candidate,
+            imports,
+        ))
+    }
+
+    fn files_by_stem(&self, stem: &str) -> impl Iterator<Item = &str> {
+        self.0
+            .symbol_table
+            .files_by_stem(stem)
+            .iter()
+            .map(String::as_str)
+    }
+
+    fn type_candidates<'q>(
+        &self,
+        source: &str,
+        name: &'q str,
+        imports: &'q [RawImport],
+    ) -> TypeCandidates<'q> {
+        self.0
+            .type_candidates(Path::new(source), source, name, imports)
     }
 }
 
@@ -1765,132 +1885,64 @@ impl<'a> Resolver<'a> {
             }
         }
 
-        // Tier 2.5: Qualifier-scoped lookup. Callees that carry a qualifier
-        // (`A::new`, `std::vec::Vec::new`, `Cls.method`) cannot match Tier 1/2
-        // which are keyed by short names; without this tier they fall through
-        // to Tier 3, where the kind+unique filter near-always rejects the
-        // ultra-common member name (`new`, `default`, `from`, ...). Splitting
-        // and scoping to the qualifier's defining file is the proper fix.
-        //
-        // No fall-through to Tier 3 on a short-name retry: a qualified callee
-        // should resolve via its qualifier or not at all — matching the
-        // "refuse to guess" principle that drives the Layer-1 barriers.
-        //
-        // Concretely, allowing a bare-name fallback would re-introduce a class
-        // of pre-existing false edges that this tier was meant to remove:
-        // `std::fs::read` stripping to `read` and resolving to a same-named
-        // local function, `serde_json::json!` macro calls resolving to a
-        // local `json()` helper, etc. Dump verification of B.1 vs B.1+fallback
-        // showed a ~52% false-positive rate on the fallback path, so we keep
-        // the strict policy. Module-qualified free functions like
-        // `registry::sanitize_branch` whose member is uniquely defined will
-        // be recovered by Phase B.3 (config-aware import resolution) once the
-        // workspace crate index can distinguish `ecp_core::...` (internal,
-        // safe to fall back) from `std::...` (external, refuse).
+        // Tier 2.5, then Tier 3.5 for a `::` path ([`ladder::qualified`]):
+        // a callee that carries a qualifier (`A::new`, `std::vec::Vec::new`,
+        // `Cls.method`) resolves through its qualifier or not at all. Tiers 1
+        // and 2 are keyed by short names, and Tier 3's kind + unique filter
+        // near-always rejects the common member names (`new`, `from`).
         if let Some((qualifier, member)) = split_qualifier(symbol_name) {
-            if qualifier == CallSite::SUPER_RECEIVER
-                && FileMeta::from_path(&source_file_str).language == Language::Python
-            {
-                return self.resolve_super_member(
-                    source_file,
-                    &source_file_str,
-                    symbol_name,
-                    member,
-                    target,
-                    raw_imports,
-                    caller_heritage,
-                );
-            }
-            // `this.m()` reaches here typed as the caller's own type (`C.m`),
-            // whose bases are the caller's heritage. A type the index does
-            // not declare (Rust `impl W for Pin<P>`) is still the caller's,
-            // so its file is the caller's own.
-            let caller_type = call
-                .and_then(|scope| scope.owner)
-                .and_then(owner_key)
-                .is_some_and(|owner| owner_key(qualifier) == Some(owner));
-            let hit = self
-                .resolve_qualifier_file(
-                    source_file,
-                    qualifier,
-                    member,
-                    target,
-                    raw_imports,
-                    Some(symbol_name),
-                )
-                .or_else(|| caller_type.then(|| source_file_str.to_string()))
-                .and_then(|qf| {
-                    let heritage: &[String] = if caller_type { caller_heritage } else { &[] };
-                    // A module or namespace qualifier (`mod.f()`) may reach a
-                    // free function; a type reaches only its own lineage.
-                    let qualifier_is_type = type_receiver_is_closed(language)
-                        && (caller_type
-                            || owner_key(qualifier).is_some_and(|key| {
-                                self.symbol_table
-                                    .lookup_in_file_with_kind(&qf, key, ResolveTarget::Type)
-                                    .is_some()
-                            }));
-                    self.symbol_table
-                        .lookup_in_file_with_kind(&qf, member, target)
-                        .and_then(|pick| {
-                            self.symbol_table.prefer_owned(
-                                &qf,
-                                pick,
-                                member,
-                                Some(qualifier),
-                                heritage,
-                                target,
-                                PickScope {
-                                    caller: call.and_then(|scope| scope.caller),
-                                    typed_receiver: true,
-                                    qualifier_is_type,
-                                    ..PickScope::default()
-                                },
-                            )
-                        })
-                });
-            if let Some(node_id) = hit {
-                let conf = ResolutionTier::QualifierScoped.base_confidence();
-                results.push((node_id, conf));
-                self.record(
-                    &source_file_str,
-                    symbol_name,
-                    None,
-                    DecisionTier::QualifierScoped,
-                    Some(node_id),
-                    0,
-                    Some(conf),
-                );
-                return results;
-            }
-
-            // Tier 3.5: Rust workspace module-tree FQN resolution.
-            //
-            // Fires when Tier 2.5 (qualifier-scoped) fails AND a Rust module
-            // tree is available. Handles `crate::a::b::fn` and
-            // `<crate_name>::a::b::fn` paths by walking the filesystem-backed
-            // mod tree instead of relying on the qualifier-as-Type heuristic.
-            //
-            // Only fires for callee strings with `::` — dot-separated callees
-            // are method calls (handled by heritage / Tier 2.5 via receiver
-            // types) not module-path FQNs.
-            if symbol_name.contains("::") {
-                if let Some(node_id) =
-                    self.try_module_tree_resolve(&source_file_str, symbol_name, member, target)
-                {
-                    const MT_CONF: f32 = Tier::ModuleTree.confidence();
-                    results.push((node_id, MT_CONF));
+            let site = ladder::QualifiedSite {
+                source: &source_file_str,
+                caller: FileMeta::from_path(&source_file_str),
+                language,
+                imports: raw_imports,
+                callee: symbol_name,
+                qualifier,
+                member,
+                target,
+                call,
+            };
+            let (resolution, base) = ladder::qualified(
+                &IndexFacts(self),
+                site,
+                caller_heritage,
+                StemFile::Any,
+                || self.try_module_tree_resolve(&source_file_str, symbol_name, member, target),
+            );
+            match resolution {
+                Resolution::Bound(hit) => {
+                    let tier = match hit.tier {
+                        Some(Tier::ModuleTree) => DecisionTier::ModuleTree,
+                        Some(Tier::TypeOwned) => DecisionTier::TypeOwned,
+                        Some(Tier::TypeHeritage) => DecisionTier::TypeHeritage,
+                        _ => DecisionTier::QualifierScoped,
+                    };
+                    results.push((hit.id, hit.confidence));
+                    self.record(
+                        &source_file_str,
+                        symbol_name,
+                        base,
+                        tier,
+                        Some(hit.id),
+                        0,
+                        Some(hit.confidence),
+                    );
+                    return results;
+                }
+                // A `super()` call no base owns: no later tier runs.
+                Resolution::NoEdge(_) => {
                     self.record(
                         &source_file_str,
                         symbol_name,
                         None,
-                        DecisionTier::ModuleTree,
-                        Some(node_id),
+                        DecisionTier::Unresolved,
+                        None,
                         0,
-                        Some(MT_CONF),
+                        None,
                     );
                     return results;
                 }
+                Resolution::Unknown | Resolution::Shadowed => {}
             }
 
             // Receiver-typing ladder: runs only where every tier above found
@@ -1970,13 +2022,14 @@ impl<'a> Resolver<'a> {
             target,
             call,
             |base| {
-                self.resolve_qualifier_file(
-                    source_file,
-                    base,
-                    symbol_name,
-                    target,
+                ladder::qualifier_file(
+                    &IndexFacts(self),
+                    &source_file_str,
+                    FileMeta::from_path(&source_file_str),
                     raw_imports,
-                    None,
+                    (None, base, symbol_name),
+                    target,
+                    StemFile::Any,
                 )
             },
         ) {
@@ -2149,29 +2202,6 @@ impl<'a> Resolver<'a> {
     }
 }
 
-/// Is the prefix preceding `qualifier` inside `full_callee` an "internal"
-/// path (empty, or `crate` / `self` / `super` chain)? Tier 4 only fires on
-/// calls where the qualifier names an internal module rather than the
-/// trailing segment of an extern crate / std module path. `std::fs::read`
-/// → preceding = `std` → returns false. `auto_ensure::ensure_fresh` →
-/// preceding = `` → returns true. `crate::auto_ensure::ensure_fresh` →
-/// preceding = `crate` → returns true.
-fn qualifier_prefix_is_internal(full_callee: &str, qualifier: &str) -> bool {
-    let Some(member_split) = full_callee.rfind("::").or_else(|| full_callee.rfind('.')) else {
-        return false;
-    };
-    let before_member = &full_callee[..member_split];
-    let preceding = before_member
-        .rsplit_once("::")
-        .or_else(|| before_member.rsplit_once('.'))
-        .map(|(p, q)| if q == qualifier { p } else { "" })
-        .unwrap_or("");
-    preceding.is_empty()
-        || preceding
-            .split("::")
-            .all(|s| matches!(s, "crate" | "self" | "super"))
-}
-
 /// The index ladder's answer as a [`Resolution`]. Every tier answers with
 /// at most one target (B §3.4), so the first is the edge.
 fn ladder_resolution(targets: &[(NodeId, f32)]) -> Resolution {
@@ -2190,69 +2220,6 @@ fn call_target(source_file: &Path, site: CallSite<'_>) -> ResolveTarget {
     } else {
         ResolveTarget::Callable
     }
-}
-
-/// For a Rust path call `a::b::Q::m`, does the module path `a::b` that the
-/// call names for `Q` agree with the import of `Q` from `import_source`?
-/// `de::Error::custom` with `use crate::error::Error` does not: `de::Error`
-/// is another item than the imported `Error`. A head segment that a `use`
-/// brings in (`use crate::error as err;`) expands to its full path first.
-/// A `crate::` path must equal the import source; a relative one, with its
-/// leading `self` / `super` dropped, must be a suffix of it. A call with no
-/// module path before `Q`, or one not written with `::`, always agrees.
-fn rust_path_prefix_agrees_with_import(
-    full_callee: &str,
-    qualifier: &str,
-    import_source: &str,
-    imports: &[RawImport],
-) -> bool {
-    let Some(prefix) = rust_type_path_prefix(full_callee, qualifier) else {
-        return true;
-    };
-    let named = rust_expand_path_head(prefix, imports);
-    // `crate::a::Q` names one module from the crate root: the import must
-    // come from exactly that module. A relative path matches by suffix.
-    if named.first() == Some(&"crate") {
-        return import_source.split("::").eq(named);
-    }
-    let is_anchor = |s: &&str| matches!(*s, "" | "self" | "super");
-    let named: Vec<&str> = named.into_iter().skip_while(is_anchor).collect();
-    let source: Vec<&str> = import_source
-        .split("::")
-        .skip_while(|s| *s == "crate" || is_anchor(s))
-        .collect();
-    source.ends_with(&named)
-}
-
-/// The module path `a::b` that the Rust path call `a::b::Q::m` names before
-/// its qualifier `Q`; `None` when there is none.
-fn rust_type_path_prefix<'c>(full_callee: &'c str, qualifier: &str) -> Option<&'c str> {
-    let (before_member, _) = full_callee.rsplit_once("::")?;
-    let (prefix, q) = before_member.rsplit_once("::")?;
-    (q == qualifier).then_some(prefix)
-}
-
-/// The segments of the Rust module path `prefix`, with a head that a `use`
-/// brings in (`use crate::error as err;`) expanded to its full path.
-fn rust_expand_path_head<'s>(prefix: &'s str, imports: &'s [RawImport]) -> Vec<&'s str> {
-    let mut named: Vec<&str> = prefix.split("::").collect();
-    if let Some(module) = named.first().and_then(|&head| {
-        imports
-            .iter()
-            .find(|i| i.alias.as_deref().unwrap_or(&i.imported_name) == head)
-    }) {
-        // `use crate::error as err;` records the whole path as the imported
-        // name; `use crate::{error as err};` records source `crate`, name
-        // `error`.
-        let name = module.imported_name.as_str();
-        let (path, tail) = if name.contains("::") {
-            (name, None)
-        } else {
-            (module.source.as_str(), Some(name))
-        };
-        named.splice(..1, path.split("::").chain(tail));
-    }
-    named
 }
 
 /// [`reexport::for_each_specifier_candidate`] with the project's path
@@ -2287,428 +2254,6 @@ enum TypeMember {
 }
 
 impl<'a> Resolver<'a> {
-    /// Resolve `qualifier` as a Type (Class / Interface) via Tier 1 → Tier 2 →
-    /// Tier 3 (kind-filtered, unique-only), returning the file_path of the
-    /// resolved target. Used by Tier 2.5 to scope member lookup to the
-    /// qualifier's defining file. Telemetry-silent — internal recursion is
-    /// not surfaced in the decision dump.
-    fn resolve_qualifier_file(
-        &self,
-        source_file: &Path,
-        qualifier: &str,
-        member: &str,
-        target: ResolveTarget,
-        raw_imports: &[RawImport],
-        full_callee: Option<&str>,
-    ) -> Option<String> {
-        #[cfg(not(windows))]
-        let source_file_str = source_file.to_string_lossy();
-        #[cfg(windows)]
-        let source_file_str =
-            std::borrow::Cow::Owned(source_file.to_string_lossy().replace('\\', "/"));
-
-        // Tier 1: same-file qualifier definition. Qualifiers are class /
-        // interface / namespace / module names, so filter to Qualifier
-        // here — avoids a property named `Logger` winning over `class
-        // Logger` in the same file, while still letting `namespace outer
-        // { ... }` and inline `mod foo { ... }` serve as the leading
-        // segment of `outer::member()` / `foo::member()` calls.
-        //
-        // Member-presence gate: file-backed `mod auto_ensure;` declares
-        // the Module node in the parent file, but the actual members
-        // live in `auto_ensure.rs`. Returning the parent file here would
-        // short-circuit the downstream member lookup AND block Tier 4's
-        // module-file fallback. Only claim Tier 1 when the full chain
-        // (qualifier → file → member) resolves in the same file —
-        // matches the inline-mod / inline-namespace case and declines
-        // for the file-backed stub case, letting later tiers handle it.
-        if let Some(id) = self.symbol_table.lookup_in_file_with_kind(
-            &source_file_str,
-            qualifier,
-            ResolveTarget::Qualifier,
-        ) {
-            if let Some(qf) = self.symbol_table.file_of(id) {
-                if self
-                    .symbol_table
-                    .lookup_in_file_with_kind(qf, member, target)
-                    .is_some()
-                    && self.rust_type_path_agrees(
-                        source_file,
-                        &source_file_str,
-                        full_callee,
-                        qualifier,
-                        qf,
-                        raw_imports,
-                    )
-                {
-                    return Some(qf.to_string());
-                }
-            }
-        }
-
-        // Tier 2: imported qualifier (matches alias or imported_name; expands
-        // specifier via the same L0 candidate enumeration used by the bare-
-        // name resolver). Same member-presence gate as Tier 1: the import
-        // tells us which file the qualifier lives in, but that file must
-        // also contain the member to claim this tier.
-        for import in raw_imports {
-            let matches_qualifier = match &import.alias {
-                Some(alias) => alias == qualifier,
-                None => import.imported_name == qualifier,
-            };
-            if !matches_qualifier
-                || full_callee.is_some_and(|callee| {
-                    !rust_path_prefix_agrees_with_import(
-                        callee,
-                        qualifier,
-                        &import.source,
-                        raw_imports,
-                    )
-                })
-            {
-                continue;
-            }
-            let exported = &import.imported_name;
-            // `import * as ns from './a'` / `const ns = require('./a')`: the
-            // qualifier is the module, so its file is the lookup scope. A
-            // miss ends the search: `ns.f()` never means another file's `f`.
-            // A fully qualified `*` import (a wildcard, or a PHP group member)
-            // names no module that the qualifier stands for, so it keeps the
-            // candidate probe below.
-            let language = Language::from_normalized_path(&source_file_str);
-            if exported == "*" && import_member_fallback(language) && !fqn_language(language) {
-                if let Module::Unique(file) =
-                    self.import_module_file(source_file, &import.source, language)
-                {
-                    return Some(file.to_string());
-                }
-                continue;
-            }
-            if exported == "*" && matches!(language, Language::JavaScript | Language::TypeScript) {
-                let mut hit: Option<String> = None;
-                self.for_each_candidate(source_file, &import.source, |candidate| {
-                    let defines_member = reexport::lookup_export_in_file(
-                        &IndexFacts(self),
-                        candidate,
-                        member,
-                        target,
-                    )
-                    .is_some();
-                    if defines_member {
-                        hit = Some(candidate.to_string());
-                    }
-                    !defines_member
-                });
-                return hit;
-            }
-            // `use a::m; m::f()`: in Rust `m` may be the module `a::m`, whose
-            // own file holds `f`. The parent file declaring `mod m;` can
-            // define an `f` of its own, so it is not consulted then; a miss
-            // leaves the call to the module tree (Tier 3.5).
-            let module_path = if exported.contains("::") {
-                exported.clone()
-            } else {
-                format!("{}::{exported}", import.source)
-            };
-            if let Some(module_file) = self.rust_module_file(source_file, &module_path) {
-                if self
-                    .symbol_table
-                    .lookup_in_file_with_kind(&module_file, member, target)
-                    .is_some()
-                {
-                    return Some(module_file);
-                }
-                // The qualifier is that module; the global qualifier lookup
-                // below would find `mod m;` in the parent and its own `f`.
-                return None;
-            }
-            // `use other::m; m::f()` names a workspace crate's module by crate
-            // (or `[lib]`) name, which `rust_module_file` cannot place. The
-            // module tree can; past this point only file-stem guesses remain,
-            // and they pick the caller crate's own `m.rs`. Rust callers only:
-            // the tree is built for any repo with a Cargo.toml, and a Python
-            // `from pkg import m` must not reach a Rust crate named `pkg`. A
-            // head that is a module of the caller's own file (`mod utils;
-            // use utils::fs;`) is not a crate path.
-            let head = module_path.split("::").next().unwrap_or_default();
-            if is_rust_source(source_file)
-                && self
-                    .mod_tree
-                    .is_some_and(|tree| tree.names_module(&module_path))
-                && self
-                    .symbol_table
-                    .lookup_in_file_with_kind(&source_file_str, head, ResolveTarget::Qualifier)
-                    .is_none()
-            {
-                // The caller looks `member` up in the returned file, so a
-                // renamed re-export (`pub use imp::lookup_impl as lookup;`)
-                // would land on an unrelated `lookup` there: the tree must
-                // place `member` under its own name.
-                return self
-                    .mod_tree_resolve(&source_file_str, &format!("{module_path}::{member}"))
-                    .filter(|resolved| {
-                        resolved.item_name == member
-                            && self
-                                .symbol_table
-                                .lookup_in_file_with_kind(
-                                    &resolved.file,
-                                    &resolved.item_name,
-                                    target,
-                                )
-                                .is_some()
-                    })
-                    .map(|resolved| resolved.file);
-            }
-            let mut hit: Option<String> = None;
-            let default_import = ImportRef::from(import).is_es_default();
-            self.for_each_candidate(source_file, &import.source, |candidate| {
-                // Through the module's exports: an ES module may export the
-                // qualifier under another name (`export { Impl as Widget }`).
-                let qualifier_present = reexport::imported_in_file(
-                    &IndexFacts(self),
-                    candidate,
-                    exported,
-                    default_import,
-                    ResolveTarget::Qualifier,
-                )
-                .is_some();
-                let member_present = self
-                    .symbol_table
-                    .lookup_in_file_with_kind(candidate, member, target)
-                    .is_some();
-                if qualifier_present && member_present {
-                    hit = Some(candidate.to_string());
-                    false
-                } else {
-                    true
-                }
-            });
-            if hit.is_some() {
-                return hit;
-            }
-        }
-
-        // Tier 3: kind-filtered unique global. Language + vendor barriers
-        // applied via FileMeta — the same defences as bare-name Tier 3.
-        // Member-presence gate identical to Tier 1's: blocks Module's
-        // declaration-file from outranking the file-stem fallback when
-        // members live elsewhere (`mod foo;` declaration in lib.rs vs.
-        // `fn bar()` body in foo.rs).
-        let caller_meta = FileMeta::from_path(&source_file_str);
-        if let GlobalPick::Unique(id) =
-            self.symbol_table
-                .lookup_global(qualifier, ResolveTarget::Qualifier, caller_meta, false)
-        {
-            if let Some(qf) = self.symbol_table.file_of(id) {
-                if self
-                    .symbol_table
-                    .lookup_in_file_with_kind(qf, member, target)
-                    .is_some()
-                    && self.rust_type_path_agrees(
-                        source_file,
-                        &source_file_str,
-                        full_callee,
-                        qualifier,
-                        qf,
-                        raw_imports,
-                    )
-                {
-                    return Some(qf.to_string());
-                }
-            }
-        }
-
-        // Tier 4: module-file fallback. The qualifier didn't match any Type
-        // anywhere, but Rust / Python / similar languages let a *module name*
-        // act as a qualifier (`mod auto_ensure;` ↔ `auto_ensure.rs`, `import
-        // foo` ↔ `foo.py`). Walk the registered file paths and look for one
-        // whose stem matches the qualifier and lives in the caller's crate.
-        //
-        // Fires only from Tier 2.5 (qualified-call resolution) — heritage
-        // resolution passes `None` because parent class names should resolve
-        // as Types, not as module files.
-        //
-        // Two false-positive defences:
-        //
-        //   1. **Internal-prefix check** — the qualifier's preceding segments
-        //      must be empty (bare relative path), or be `crate`/`self`/`super`.
-        //      `std::fs::read` becomes ("fs", "read") after split_qualifier;
-        //      its preceding segment is `std` → external → declined.
-        //
-        //   2. **Same-crate prefix** — caller and candidate must share the
-        //      same `*/src/` (or `*/tests/`) ancestor. Defends single-crate
-        //      repos where the internal-prefix check alone would let a
-        //      `std::fs::read` call bind to a workspace `src/fs.rs` — the
-        //      preceding segment is `std` so check (1) handles that; check
-        //      (2) is the secondary defence if a future extern crate name
-        //      manages to slip past check (1).
-        let full = full_callee?;
-        if !qualifier_prefix_is_internal(full, qualifier) {
-            return None;
-        }
-        let caller_prefix = crate_root_prefix(&source_file_str);
-        let mut hit: Option<&str> = None;
-        for fp in self.symbol_table.files_by_stem(qualifier) {
-            if crate_root_prefix(fp) != caller_prefix {
-                continue;
-            }
-            if hit.is_some() {
-                return None;
-            }
-            hit = Some(fp);
-        }
-        hit.map(str::to_string)
-    }
-
-    /// Python `super().member()`: `member` on the caller class's bases, by
-    /// the owner index, never by bare name. Bases are tried in declared order
-    /// (a single-pass approximation of the MRO); the first base that owns the
-    /// member wins. A base the project cannot see, an ambiguous one, or one
-    /// whose ownership is unknown stops the walk: it may own the member and
-    /// shadow every later base, so no edge beats a guess.
-    ///
-    /// A first base that only inherits the member is not enough: C3 puts a
-    /// later base ahead of a shared ancestor (`class D(B, C)` with `B(A)`,
-    /// `C(A)` reads `D, B, C, A`), so a later base that reaches the member
-    /// through another owner, or may do so, leaves no edge.
-    #[allow(clippy::too_many_arguments)]
-    fn resolve_super_member(
-        &self,
-        source_file: &Path,
-        source_file_str: &str,
-        symbol_name: &str,
-        member: &str,
-        target: ResolveTarget,
-        raw_imports: &[RawImport],
-        caller_heritage: &[String],
-    ) -> Vec<(NodeId, f32)> {
-        let mut bases = caller_heritage.iter();
-        let mut owner: Option<(&String, NodeId, bool)> = None;
-        for base in bases.by_ref() {
-            let TypeCandidates::Unique(ty, ty_name) =
-                self.super_base_type(source_file, source_file_str, base, raw_imports)
-            else {
-                break;
-            };
-            match self.member_ownership(ty, ty_name, member, target) {
-                Ownership::Owned { id, inherited } => {
-                    owner = Some((base, id, inherited));
-                    break;
-                }
-                Ownership::NotOwned => {}
-                Ownership::Unknown => break,
-            }
-        }
-        let owner = owner.filter(|&(_, id, inherited)| {
-            !inherited
-                || !bases.any(|later| {
-                    self.later_base_may_shadow(
-                        source_file,
-                        source_file_str,
-                        later,
-                        member,
-                        target,
-                        raw_imports,
-                        id,
-                    )
-                })
-        });
-        if let Some((base, id, inherited)) = owner {
-            let (tier, conf) = if inherited {
-                (DecisionTier::TypeHeritage, ResolutionTier::HeritageScoped)
-            } else {
-                (DecisionTier::TypeOwned, ResolutionTier::QualifierScoped)
-            };
-            let conf = conf.base_confidence();
-            self.record(
-                source_file_str,
-                symbol_name,
-                Some(base.as_str()),
-                tier,
-                Some(id),
-                0,
-                Some(conf),
-            );
-            return vec![(id, conf)];
-        }
-        self.record(
-            source_file_str,
-            symbol_name,
-            None,
-            DecisionTier::Unresolved,
-            None,
-            0,
-            None,
-        );
-        Vec::new()
-    }
-
-    /// Can `later`, a base declared after the one that inherits `member`
-    /// from `owner_member`, come first in the C3 order with another
-    /// `member`? A base outside the project cannot derive from a project
-    /// class, so it never comes first; an ambiguous base, or one whose
-    /// ownership is unknown, may.
-    #[allow(clippy::too_many_arguments)]
-    fn later_base_may_shadow(
-        &self,
-        source_file: &Path,
-        source_file_str: &str,
-        later: &str,
-        member: &str,
-        target: ResolveTarget,
-        raw_imports: &[RawImport],
-        owner_member: NodeId,
-    ) -> bool {
-        match self.super_base_type(source_file, source_file_str, later, raw_imports) {
-            TypeCandidates::Unique(ty, ty_name) => {
-                match self.member_ownership(ty, ty_name, member, target) {
-                    Ownership::Owned { id, .. } => id != owner_member,
-                    Ownership::NotOwned => false,
-                    Ownership::Unknown => true,
-                }
-            }
-            TypeCandidates::Set(..) => true,
-            TypeCandidates::External | TypeCandidates::None => false,
-        }
-    }
-
-    /// The project type a Python base expression names. A dotted base
-    /// (`base.Base` under `import base`) resolves its module through the
-    /// qualifier tiers, then the type inside that module; when the module is
-    /// in the project but does not declare the type (a package re-export),
-    /// the last segment goes through [`Self::type_candidates`]. A module the
-    /// project does not hold (`threading.Thread`) gives `None`: a project
-    /// `Thread` is not that base.
-    fn super_base_type<'q>(
-        &self,
-        source_file: &Path,
-        source_file_str: &str,
-        base: &'q str,
-        raw_imports: &'q [RawImport],
-    ) -> TypeCandidates<'q> {
-        let Some((qualifier, type_name)) = split_qualifier(base) else {
-            return self.type_candidates(source_file, source_file_str, base, raw_imports);
-        };
-        let Some(module_file) = self.resolve_qualifier_file(
-            source_file,
-            qualifier,
-            type_name,
-            ResolveTarget::Type,
-            raw_imports,
-            Some(base),
-        ) else {
-            return TypeCandidates::None;
-        };
-        match self.symbol_table.lookup_in_file_with_kind(
-            &module_file,
-            type_name,
-            ResolveTarget::Type,
-        ) {
-            Some(id) => TypeCandidates::Unique(id, type_name),
-            None => self.type_candidates(source_file, source_file_str, type_name, raw_imports),
-        }
-    }
-
     /// Receiver-typing ladder (after Tier 3.5): resolve `qualifier.member`
     /// through the member's owning type instead of the qualifier's file.
     ///
@@ -2965,17 +2510,6 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    /// Ladder steps 2 and 3 ([`type_ladder::member_ownership`]).
-    fn member_ownership(
-        &self,
-        ty: NodeId,
-        ty_name: &str,
-        member: &str,
-        target: ResolveTarget,
-    ) -> Ownership {
-        type_ladder::member_ownership(self.symbol_table, ty, ty_name, member, target)
-    }
-
     /// For a Rust path call `a::b::Q::m`, may `Q` be the type declared in
     /// `candidate_file`? The module path `a::b` names where `Q` lives, so the
     /// candidate must sit in that module: the file the module tree or the
@@ -3129,6 +2663,7 @@ impl<'a> Resolver<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ecp_core::analyzer::rust_paths::rust_path_prefix_agrees_with_import;
     use std::path::PathBuf;
 
     fn cands(src: &str, spec: &str) -> Vec<String> {

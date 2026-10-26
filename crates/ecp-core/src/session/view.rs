@@ -411,7 +411,6 @@ pub struct ViewFunctionMeta {
 
 /// Tier confidences mirroring index-time Pass-2 resolution.
 const CONF_IMPORT_SCOPED: f32 = Tier::ImportScoped.confidence();
-const CONF_QUALIFIER_SCOPED: f32 = Tier::QualifierScoped.confidence();
 /// The index's Tier 3.5 (`try_module_tree_resolve`).
 const CONF_MODULE_TREE: f32 = Tier::ModuleTree.confidence();
 
@@ -2799,7 +2798,10 @@ mod tests {
             .collect();
         assert_eq!(
             calls,
-            vec![(1, CONF_QUALIFIER_SCOPED), (2, CONF_QUALIFIER_SCOPED)]
+            vec![
+                (1, Tier::QualifierScoped.confidence()),
+                (2, Tier::QualifierScoped.confidence())
+            ]
         );
     }
 

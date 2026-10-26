@@ -27,7 +27,7 @@ use std::sync::Arc;
 /// bare callee like `format` never resolves to a Variable/Const that happens
 /// to share the name.
 ///
-/// `Qualifier` is the leading-segment lookup used by `resolve_qualifier_file`
+/// `Qualifier` is the leading-segment lookup used by `ladder::qualifier_file`
 /// — it accepts Type (Class/Struct/Enum/Typedef/Trait/Interface) plus
 /// Namespace (C++ / C# / PHP) and Module (Rust inline `mod`). Without
 /// these, every qualified call whose leading segment isn't a class /

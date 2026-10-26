@@ -23,18 +23,27 @@
 //! module discovery and the member a module file holds through
 //! [`ImportModules`] and [`ImportMembers`]: the index's `SymbolTable` has no
 //! module discovery, so these facts sit beside [`ResolveFacts`].
+//!
+//! A qualified callee (`K.save`, `K::st`, `pkg.Fn`) takes [`qualified`]: a
+//! Python `super().m()` the caller's bases (R12, [`super_member`]), else the
+//! member in the qualifier's file (R13, [`qualifier_file`],
+//! [`qualified_member`]), else for a `::` path the Rust module tree (R14),
+//! whose lookup each side keeps. Those read [`QualifierFacts`].
 
 use crate::analyzer::import_binding::{
-    extension_retry, fqn_language, import_binding, import_family, may_suppress, module_head,
-    retry_name, MemberOwner,
+    extension_retry, fqn_language, import_binding, import_family, import_member_fallback,
+    may_suppress, module_head, retry_name, MemberOwner,
 };
 use crate::analyzer::module_discovery::Module;
 use crate::analyzer::name_ref::resolve_name_ref;
 use crate::analyzer::outcome::{Hit, NoEdge, Resolution, Tier};
-use crate::analyzer::reexport::{pick_call, ResolveTarget};
-use crate::analyzer::same_file_pick::{is_free, prefer_free, prefer_owned, PickFacts, PickScope};
-use crate::analyzer::type_ladder::TypeFacts;
-use crate::analyzer::types::{owner_key, NameRef, RawImport};
+use crate::analyzer::reexport::{is_ecmascript, pick_call, ImportRef, ResolveTarget};
+use crate::analyzer::rust_paths::rust_path_prefix_agrees_with_import;
+use crate::analyzer::same_file_pick::{
+    is_free, prefer_free, prefer_owned, type_receiver_is_closed, PickFacts, PickScope,
+};
+use crate::analyzer::type_ladder::{member_ownership, Ownership, TypeCandidates, TypeFacts};
+use crate::analyzer::types::{owner_key, CallSite, NameRef, RawImport};
 use crate::file_category::{pick_global, FileMeta, GlobalPick, Language};
 use crate::graph::NodeKind;
 
@@ -751,6 +760,487 @@ where
     resolve(member)
         .into_iter()
         .filter(move |&(id, _)| is_free(facts, id))
+}
+
+/// The path before `qualifier` in `full_callee` is empty or a `crate` /
+/// `self` / `super` chain, so the qualifier may name a project module:
+/// `std::fs::read` → preceding `std` → `false`; `auto_ensure::ensure_fresh`
+/// → `true`; `crate::auto_ensure::ensure_fresh` → `true`.
+pub fn qualifier_prefix_is_internal(full_callee: &str, qualifier: &str) -> bool {
+    let Some(member_split) = full_callee.rfind("::").or_else(|| full_callee.rfind('.')) else {
+        return false;
+    };
+    let before_member = &full_callee[..member_split];
+    let preceding = before_member
+        .rsplit_once("::")
+        .or_else(|| before_member.rsplit_once('.'))
+        .map_or("", |(p, q)| if q == qualifier { p } else { "" });
+    preceding.is_empty()
+        || preceding
+            .split("::")
+            .all(|s| matches!(s, "crate" | "self" | "super"))
+}
+
+/// The Rust module a `use` head names when it is a workspace crate's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CrateModule<P> {
+    /// The head names no workspace crate: the import's candidate files
+    /// decide.
+    Local,
+    /// A workspace crate's module. The file holds `member` under its own
+    /// name (a renamed `pub use` re-export would land on an unrelated
+    /// namesake); `None` when it does not, or when the side cannot place
+    /// the module, so no later step stands in for the answer.
+    Placed(Option<P>),
+}
+
+/// What the qualifier tier (R13), the Rust module-tree position (R14) and
+/// the Python `super()` rule (R12) read besides [`ResolveFacts`]. Each
+/// method answers a question about one file or one name; [`qualifier_file`],
+/// [`qualified_member`] and [`qualified`] decide. A file comes back as an
+/// [`ImportModules::Module`].
+pub trait QualifierFacts: ImportModules {
+    /// The declarations the tiers pick from.
+    type Decls: ResolveFacts;
+    fn decls(&self) -> &Self::Decls;
+    /// Whether the caller's file `source` declares `name` of a
+    /// [`ResolveTarget::Qualifier`] kind: a type, a namespace or a module.
+    fn caller_declares(&self, source: &str, name: &str) -> bool;
+    /// `path` as the side stores it. `None` for a file the side does not
+    /// hold.
+    fn stored_file(&self, path: &str) -> Option<Self::Module>;
+    /// [`pick_global`] over the declarations of `qualifier` of a qualifier
+    /// kind that the `caller` barrier weighs.
+    fn global_qualifier(&self, qualifier: &str, caller: FileMeta) -> GlobalPick;
+    /// Each candidate file of `specifier` from `importer`, in probe order,
+    /// until `visit` returns `false`.
+    fn for_each_candidate(&self, importer: &str, specifier: &str, visit: impl FnMut(&str) -> bool);
+    /// Whether the module `file` exports `name` of `target`'s kinds
+    /// ([`crate::analyzer::reexport::lookup_export_in_file`]).
+    fn exports(&self, file: &str, name: &str, target: ResolveTarget) -> bool;
+    /// Whether `file` holds the qualifier an import of `imported` binds
+    /// ([`crate::analyzer::reexport::imported_in_file`]).
+    fn holds_import(&self, file: &str, imported: &str, default_import: bool) -> bool;
+    /// The file of the `crate` / `self` / `super`-anchored Rust module
+    /// `module_path` as seen from `source`.
+    fn rust_module_file(&self, source: &str, module_path: &str) -> Option<Self::Module>;
+    /// The workspace crate module the Rust `use` path `module_path` names,
+    /// with `member` of `target`'s kinds in it.
+    fn crate_module(
+        &self,
+        source: &str,
+        module_path: &str,
+        member: &str,
+        target: ResolveTarget,
+    ) -> CrateModule<Self::Module>;
+    /// May `qualifier` of the Rust path call `callee` (`a::b::Q::m`) be the
+    /// type `candidate` declares? `None` where the side cannot tell: no
+    /// file binds then.
+    fn rust_path_agrees(
+        &self,
+        source: &str,
+        callee: &str,
+        qualifier: &str,
+        candidate: &str,
+        imports: &[RawImport],
+    ) -> Option<bool>;
+    /// The files whose stem is `stem`.
+    fn files_by_stem(&self, stem: &str) -> impl Iterator<Item = &str>;
+    /// The project types `name` can denote in `source` (step 1 of the
+    /// receiver-typing ladder).
+    fn type_candidates<'q>(
+        &self,
+        source: &str,
+        name: &'q str,
+        imports: &'q [RawImport],
+    ) -> TypeCandidates<'q>;
+}
+
+/// Which file the last step of [`qualifier_file`], a module named by its
+/// file, hands back. The two sides differ here; the parameter keeps each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StemFile {
+    /// The one file named after the qualifier in the caller's crate root,
+    /// whether or not it declares the member: the index. A member it lacks
+    /// leaves [`qualified_member`] no edge, and `this.m()` does not fall
+    /// back to the caller's own file.
+    Any,
+    /// That file only when it declares the member: the overlay. A miss lets
+    /// `this.m()` fall back to the caller's own file.
+    DeclaringMember,
+}
+
+/// R13, the file part: the file that defines `qualifier` and declares
+/// `member` of `target`'s kinds, by four steps in order. The caller's own
+/// file; an import binding the qualifier (a module namespace import, an ES
+/// `import * as ns`, a Rust module or workspace crate `use`, then the
+/// import's candidate files); a unique definition project-wide; then a file
+/// named after the qualifier in the caller's crate root (`mod util;` ↔
+/// `util.rs`), never for an external path (`std::fs::read`).
+///
+/// `callee` is the full qualified callee. The heritage tier passes `None`,
+/// which skips the Rust path checks and the file-name step: a base class
+/// resolves as a type, never as a module file.
+pub fn qualifier_file<F: QualifierFacts>(
+    facts: &F,
+    source: &str,
+    caller: FileMeta,
+    imports: &[RawImport],
+    (callee, qualifier, member): (Option<&str>, &str, &str),
+    target: ResolveTarget,
+    stem: StemFile,
+) -> Option<F::Module> {
+    let decls = facts.decls();
+    let language = caller.language;
+    let declares_member = |file: &str| decls.first_decl_in_file(file, member, target).is_some();
+    let agrees = |file: &str| {
+        callee.map_or(Some(true), |callee| {
+            facts.rust_path_agrees(source, callee, qualifier, file, imports)
+        })
+    };
+    // The caller's own file, only when it holds the member too: a
+    // file-backed `mod m;` declares the module here and its members in
+    // `m.rs`, which the file-name step finds.
+    if facts.caller_declares(source, qualifier) && declares_member(source) {
+        match agrees(source) {
+            Some(true) => return facts.stored_file(source),
+            Some(false) => {}
+            None => return None,
+        }
+    }
+
+    for import in imports
+        .iter()
+        .filter(|i| i.alias.as_deref().unwrap_or(&i.imported_name) == qualifier)
+    {
+        if callee.is_some_and(|callee| {
+            !rust_path_prefix_agrees_with_import(callee, qualifier, &import.source, imports)
+        }) {
+            continue;
+        }
+        let exported = import.imported_name.as_str();
+        // A module namespace import: its module is the scope. A fully
+        // qualified `*` import (a wildcard, a PHP group member) names no
+        // module the qualifier stands for, so it keeps the candidate probe.
+        if exported == "*" && import_member_fallback(language) && !fqn_language(language) {
+            match facts.import_module(source, &import.source, language) {
+                Module::Unique(file) => return Some(file),
+                _ => continue,
+            }
+        }
+        // `import * as ns from './a'`: the module is the scope, and a miss
+        // ends the search: `ns.f()` never means another file's `f`.
+        if exported == "*" && is_ecmascript(language) {
+            let mut hit = None;
+            facts.for_each_candidate(source, &import.source, |candidate| {
+                let found = facts.exports(candidate, member, target);
+                if found {
+                    hit = facts.stored_file(candidate);
+                }
+                !found
+            });
+            return hit;
+        }
+        if language == Language::Rust {
+            // `use a::m; m::f()`: `m` may be the module `a::m`, whose own
+            // file then decides. The parent file declaring `mod m;` may
+            // define an `f` of its own, so it is not consulted.
+            let module_path = if exported.contains("::") {
+                exported.to_owned()
+            } else {
+                format!("{}::{exported}", import.source)
+            };
+            if let Some(module_file) = facts.rust_module_file(source, &module_path) {
+                return declares_member(module_file.as_ref()).then_some(module_file);
+            }
+            // A head that is a module of the caller's own file (`mod utils;
+            // use utils::fs;`) is no crate path.
+            let head = module_path.split("::").next().unwrap_or_default();
+            if !facts.caller_declares(source, head) {
+                if let CrateModule::Placed(file) =
+                    facts.crate_module(source, &module_path, member, target)
+                {
+                    return file;
+                }
+            }
+        }
+        // Through the module's exports: an ES module may export the
+        // qualifier under another name (`export { Impl as Widget }`).
+        let default_import = ImportRef::from(import).is_es_default();
+        let mut hit = None;
+        facts.for_each_candidate(source, &import.source, |candidate| {
+            let found = facts.holds_import(candidate, exported, default_import)
+                && declares_member(candidate);
+            if found {
+                hit = facts.stored_file(candidate);
+            }
+            !found
+        });
+        if hit.is_some() {
+            return hit;
+        }
+    }
+
+    if let GlobalPick::Unique(id) = facts.global_qualifier(qualifier, caller) {
+        if let Some(file) = decls.file_of(id).filter(|&file| declares_member(file)) {
+            match agrees(file) {
+                Some(true) => return facts.stored_file(file),
+                Some(false) => {}
+                None => return None,
+            }
+        }
+    }
+
+    // A module named by its file (`mod util;` ↔ `util.rs`, `import foo` ↔
+    // `foo.py`), unique within the caller's crate root (`*/src/`,
+    // `*/tests/`). An external path (`std::fs::read`) never: its preceding
+    // segment is no `crate` / `self` / `super`.
+    let callee = callee?;
+    if !qualifier_prefix_is_internal(callee, qualifier) {
+        return None;
+    }
+    let root = decls.crate_root(source);
+    let mut named = facts
+        .files_by_stem(qualifier)
+        .filter(|&file| decls.crate_root(file) == root);
+    let file = match (named.next(), named.next()) {
+        (Some(file), None) => file,
+        _ => return None,
+    };
+    match stem {
+        StemFile::DeclaringMember if !declares_member(file) => None,
+        _ => facts.stored_file(file),
+    }
+}
+
+/// One qualified call site: `callee` as written, split into `qualifier` and
+/// `member` ([`split_qualifier`]), in the file `source` of `caller`'s meta.
+/// `language` is the language the side resolves the call in.
+#[derive(Clone, Copy)]
+pub struct QualifiedSite<'s> {
+    pub source: &'s str,
+    pub caller: FileMeta,
+    pub language: Language,
+    pub imports: &'s [RawImport],
+    pub callee: &'s str,
+    pub qualifier: &'s str,
+    pub member: &'s str,
+    pub target: ResolveTarget,
+    pub call: Option<CallPick<'s>>,
+}
+
+/// R13, the member part: in the file [`qualifier_file`] picks, the `member`
+/// that [`prefer_owned`] picks with the qualifier as the receiver's type.
+/// `this.m()` typed as the caller's own type (`C.m`) takes the caller's
+/// `heritage`, and a self type no file declares (Rust `impl W for Pin<P>`)
+/// resolves in the caller's file. A module or namespace qualifier
+/// (`mod.f()`) may reach a free function; a type reaches only its lineage.
+///
+/// A Rust path (`crate::x::parse`) binds a method only when the qualifier
+/// is its owning type (`K::st`): a module path never names a method
+/// ([`rust_path_may_bind`]).
+pub fn qualified_member<F: QualifierFacts>(
+    facts: &F,
+    site: QualifiedSite<'_>,
+    heritage: &[String],
+    stem: StemFile,
+) -> Option<u32> {
+    let QualifiedSite {
+        source,
+        caller,
+        language,
+        imports,
+        callee,
+        qualifier,
+        member,
+        target,
+        call,
+    } = site;
+    let decls = facts.decls();
+    let caller_type = call
+        .and_then(|call| call.owner)
+        .and_then(owner_key)
+        .is_some_and(|owner| owner_key(qualifier) == Some(owner));
+    let file = qualifier_file(
+        facts,
+        source,
+        caller,
+        imports,
+        (Some(callee), qualifier, member),
+        target,
+        stem,
+    )
+    .or_else(|| caller_type.then(|| facts.stored_file(source)).flatten())?;
+    let file = file.as_ref();
+    let heritage: &[String] = if caller_type { heritage } else { &[] };
+    let pick = decls.first_decl_in_file(file, member, target)?;
+    let qualifier_is_type = type_receiver_is_closed(language)
+        && (caller_type
+            || owner_key(qualifier).is_some_and(|key| {
+                decls
+                    .first_decl_in_file(file, key, ResolveTarget::Type)
+                    .is_some()
+            }));
+    let id = prefer_owned(
+        decls,
+        file,
+        pick,
+        member,
+        Some(qualifier),
+        heritage,
+        target,
+        PickScope {
+            caller: call.and_then(|call| call.caller),
+            typed_receiver: true,
+            untyped_receiver: false,
+            qualifier_is_type,
+        },
+    )?;
+    rust_path_may_bind(decls, site, id).then_some(id)
+}
+
+/// A Rust path (`crate::x::parse`) names a method only through its owning
+/// type (`K::st`): a module path never names one, whichever tier found it.
+fn rust_path_may_bind<D: PickFacts>(decls: &D, site: QualifiedSite<'_>, id: u32) -> bool {
+    site.language != Language::Rust
+        || !site.callee.contains("::")
+        || decls.kind(id) != NodeKind::Method
+        || decls.owner(id) == Some(site.qualifier)
+}
+
+/// R12, R13 and R14's position: the tiers a qualified callee takes, in
+/// order. A Python `super().m()` takes [`super_member`] and nothing after.
+/// Otherwise the member in the qualifier's file ([`qualified_member`]),
+/// then for a `::` path the Rust module tree: `module_tree` is the side's
+/// lookup of `site.callee` there, under the same method rule
+/// ([`rust_path_may_bind`]). `Unknown` leaves the call to the side's
+/// receiver-typing ladder: it runs only where these tiers bound nothing, so
+/// it adds edges and never moves one. The base name comes back with a
+/// `super()` edge.
+///
+/// No tier retries the bare member: a qualified callee resolves through its
+/// qualifier or not at all. `std::fs::read` stripped to `read` would bind a
+/// project `read`, and `serde_json::json!` a local `json()`.
+pub fn qualified<'h, F: QualifierFacts>(
+    facts: &F,
+    site: QualifiedSite<'_>,
+    heritage: &'h [String],
+    stem: StemFile,
+    module_tree: impl FnOnce() -> Option<u32>,
+) -> (Resolution, Option<&'h str>) {
+    if site.qualifier == CallSite::SUPER_RECEIVER && site.caller.language == Language::Python {
+        return super_member(facts, site, heritage);
+    }
+    if let Some(id) = qualified_member(facts, site, heritage, stem) {
+        return (Resolution::bound(id, Tier::QualifierScoped), None);
+    }
+    if site.callee.contains("::") {
+        if let Some(id) = module_tree().filter(|&id| rust_path_may_bind(facts.decls(), site, id)) {
+            return (Resolution::bound(id, Tier::ModuleTree), None);
+        }
+    }
+    (Resolution::Unknown, None)
+}
+
+/// R12, Python `super().member()`: `member` on the caller class's bases,
+/// by the owner index, never by bare name. Bases are tried in declared
+/// order (a single-pass approximation of the MRO); the first base that owns
+/// the member wins, at [`Tier::TypeOwned`], or [`Tier::TypeHeritage`] when
+/// it only inherits it. A base the project cannot see, an ambiguous one, or
+/// one whose ownership is unknown stops the walk: it may own the member and
+/// shadow every later base, so no edge beats a guess.
+///
+/// A first base that only inherits the member is not enough: C3 puts a
+/// later base ahead of a shared ancestor (`class D(B, C)` with `B(A)`,
+/// `C(A)` reads `D, B, C, A`), so a later base that reaches the member
+/// through another owner, or may do so, leaves no edge. No base, or a call
+/// outside a class, is no edge.
+pub fn super_member<'h, F: QualifierFacts>(
+    facts: &F,
+    site: QualifiedSite<'_>,
+    heritage: &'h [String],
+) -> (Resolution, Option<&'h str>) {
+    let decls = facts.decls();
+    let (member, target) = (site.member, site.target);
+    let mut bases = heritage.iter();
+    let mut owner: Option<(&'h String, u32, bool)> = None;
+    for base in bases.by_ref() {
+        let TypeCandidates::Unique(ty, ty_name) = super_base_type(facts, site, base) else {
+            break;
+        };
+        match member_ownership(decls, ty, ty_name, member, target) {
+            Ownership::Owned { id, inherited } => {
+                owner = Some((base, id, inherited));
+                break;
+            }
+            Ownership::NotOwned => {}
+            Ownership::Unknown => break,
+        }
+    }
+    // Can a later base come first in the C3 order with another `member`? A
+    // base outside the project cannot derive from a project class, so it
+    // never does; an ambiguous base, or one whose ownership is unknown, may.
+    let later_may_shadow =
+        |later: &str, owner_member: u32| match super_base_type(facts, site, later) {
+            TypeCandidates::Unique(ty, ty_name) => {
+                match member_ownership(decls, ty, ty_name, member, target) {
+                    Ownership::Owned { id, .. } => id != owner_member,
+                    Ownership::NotOwned => false,
+                    Ownership::Unknown => true,
+                }
+            }
+            TypeCandidates::Set(..) => true,
+            TypeCandidates::External | TypeCandidates::None => false,
+        };
+    let owner = owner.filter(|&(_, id, inherited)| {
+        !inherited || !bases.any(|later| later_may_shadow(later.as_str(), id))
+    });
+    match owner {
+        Some((base, id, inherited)) => {
+            let tier = if inherited {
+                Tier::TypeHeritage
+            } else {
+                Tier::TypeOwned
+            };
+            (Resolution::bound(id, tier), Some(base.as_str()))
+        }
+        None => (Resolution::NoEdge(NoEdge::Unresolved), None),
+    }
+}
+
+/// The project type a Python base expression names. A dotted base
+/// (`base.Base` under `import base`) resolves its module through
+/// [`qualifier_file`], then the type inside that module; when the module is
+/// in the project but does not declare the type (a package re-export), the
+/// last segment goes through [`QualifierFacts::type_candidates`]. A module
+/// the project does not hold (`threading.Thread`) gives `None`: a project
+/// `Thread` is not that base.
+fn super_base_type<'q, F: QualifierFacts>(
+    facts: &F,
+    site: QualifiedSite<'q>,
+    base: &'q str,
+) -> TypeCandidates<'q> {
+    let Some((qualifier, type_name)) = split_qualifier(base) else {
+        return facts.type_candidates(site.source, base, site.imports);
+    };
+    let Some(module_file) = qualifier_file(
+        facts,
+        site.source,
+        site.caller,
+        site.imports,
+        (Some(base), qualifier, type_name),
+        ResolveTarget::Type,
+        StemFile::Any,
+    ) else {
+        return TypeCandidates::None;
+    };
+    match facts
+        .decls()
+        .first_decl_in_file(module_file.as_ref(), type_name, ResolveTarget::Type)
+    {
+        Some(id) => TypeCandidates::Unique(id, type_name),
+        None => facts.type_candidates(site.source, type_name, site.imports),
+    }
 }
 
 #[cfg(test)]
@@ -1941,5 +2431,391 @@ mod tests {
                 None
             );
         }
+    }
+
+    /// [`QualifierFacts`] over a [`Fake`]: no import binds, every Rust path
+    /// agrees, and a type name denotes the types the fake declares under it.
+    struct Quals {
+        fake: Fake,
+        files: Vec<&'static str>,
+    }
+
+    impl Quals {
+        fn new(decls: &[Decl]) -> Self {
+            let mut files: Vec<&'static str> = decls.iter().map(|decl| decl.0).collect();
+            files.sort_unstable();
+            files.dedup();
+            Self {
+                fake: Fake::new(Layout::Index, decls),
+                files,
+            }
+        }
+    }
+
+    impl ImportModules for Quals {
+        type Module = &'static str;
+
+        fn import_module(
+            &self,
+            _importer: &str,
+            _specifier: &str,
+            _language: Language,
+        ) -> Module<&'static str> {
+            Module::Missing
+        }
+
+        fn module_name_indexed(&self, _language: Language, _name: &str) -> bool {
+            false
+        }
+    }
+
+    impl QualifierFacts for Quals {
+        type Decls = Fake;
+
+        fn decls(&self) -> &Fake {
+            &self.fake
+        }
+        fn caller_declares(&self, source: &str, name: &str) -> bool {
+            let wanted = ResolveTarget::Qualifier.kind_predicate();
+            self.fake
+                .in_file(source, name)
+                .into_iter()
+                .any(|id| wanted(self.fake.kind(id)))
+        }
+        fn stored_file(&self, path: &str) -> Option<&'static str> {
+            self.files.iter().copied().find(|&file| file == path)
+        }
+        fn global_qualifier(&self, qualifier: &str, caller: FileMeta) -> GlobalPick {
+            let wanted = ResolveTarget::Qualifier.kind_predicate();
+            pick_global(
+                caller,
+                self.fake
+                    .named(qualifier)
+                    .into_iter()
+                    .filter(|&(id, _)| wanted(self.fake.kind(id))),
+            )
+        }
+        fn for_each_candidate(
+            &self,
+            _importer: &str,
+            _specifier: &str,
+            _visit: impl FnMut(&str) -> bool,
+        ) {
+        }
+        fn exports(&self, _file: &str, _name: &str, _target: ResolveTarget) -> bool {
+            false
+        }
+        fn holds_import(&self, _file: &str, _imported: &str, _default_import: bool) -> bool {
+            false
+        }
+        fn rust_module_file(&self, _source: &str, _module_path: &str) -> Option<&'static str> {
+            None
+        }
+        fn crate_module(
+            &self,
+            _source: &str,
+            _module_path: &str,
+            _member: &str,
+            _target: ResolveTarget,
+        ) -> CrateModule<&'static str> {
+            CrateModule::Local
+        }
+        fn rust_path_agrees(
+            &self,
+            _source: &str,
+            _callee: &str,
+            _qualifier: &str,
+            _candidate: &str,
+            _imports: &[RawImport],
+        ) -> Option<bool> {
+            Some(true)
+        }
+        fn files_by_stem(&self, stem: &str) -> impl Iterator<Item = &str> {
+            self.files.iter().copied().filter(move |&file| {
+                std::path::Path::new(file)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    == Some(stem)
+            })
+        }
+        fn type_candidates<'q>(
+            &self,
+            _source: &str,
+            name: &'q str,
+            _imports: &'q [RawImport],
+        ) -> TypeCandidates<'q> {
+            match self.fake.types_named(name).as_slice() {
+                [] => TypeCandidates::None,
+                &[id] => TypeCandidates::Unique(id, name),
+                ids => TypeCandidates::Set(ids.to_vec(), name),
+            }
+        }
+    }
+
+    fn site<'s>(source: &'s str, callee: &'s str, call: Option<CallPick<'s>>) -> QualifiedSite<'s> {
+        let (qualifier, member) = split_qualifier(callee).expect("a qualified callee");
+        let caller = FileMeta::from_path(source);
+        QualifiedSite {
+            source,
+            caller,
+            language: caller.language,
+            imports: &[],
+            callee,
+            qualifier,
+            member,
+            target: CALLABLE,
+            call,
+        }
+    }
+
+    /// [`qualified`] at `site` with the module tree answering `tree`; the
+    /// count says how often the tree was asked.
+    fn qualify(
+        facts: &Quals,
+        site: QualifiedSite<'_>,
+        heritage: &[String],
+        stem: StemFile,
+        tree: Option<u32>,
+    ) -> (Resolution, usize) {
+        let asked = Cell::new(0);
+        let (resolution, base) = qualified(facts, site, heritage, stem, || {
+            asked.set(asked.get() + 1);
+            tree
+        });
+        assert_eq!(base, None, "only super() names a base");
+        (resolution, asked.get())
+    }
+
+    /// R13 by step: the caller's own file, a unique definition, a file
+    /// named after the qualifier. A qualifier two files define, one no file
+    /// defines, or a local variable binds nothing and leaves the call to the
+    /// receiver ladder (`Unknown`); a `.` callee never asks the module tree.
+    #[test]
+    fn test_ladder_qualified_each_qualifier_step_returns_member_or_unknown() {
+        let decls: [Decl; 10] = [
+            ("app/Main.java", "Main", C, None),
+            ("app/Main.java", "run", M, Some("Main")),
+            ("app/K.java", "K", C, None),
+            ("app/K.java", "save", M, Some("K")),
+            ("app/Dup.java", "Dup", C, None),
+            ("app/Dup.java", "go", M, Some("Dup")),
+            ("lib/Dup.java", "Dup", C, None),
+            ("lib/Dup.java", "go", M, Some("Dup")),
+            ("app/util.py", "helper", F, None),
+            ("app/main.py", "main", F, None),
+        ];
+        let facts = Quals::new(&decls);
+        let cases: [(&str, &str, Resolution); 6] = [
+            ("app/Main.java", "Main.run", bound(1, Tier::QualifierScoped)),
+            ("app/Main.java", "K.save", bound(3, Tier::QualifierScoped)),
+            (
+                "app/main.py",
+                "util.helper",
+                bound(8, Tier::QualifierScoped),
+            ),
+            ("app/Main.java", "Dup.go", Resolution::Unknown),
+            ("app/Main.java", "Gone.save", Resolution::Unknown),
+            ("app/Main.java", "local.save", Resolution::Unknown),
+        ];
+        for (source, callee, want) in cases {
+            for stem in [StemFile::Any, StemFile::DeclaringMember] {
+                let got = qualify(&facts, site(source, callee, None), &[], stem, Some(99));
+                assert_eq!(got, (want, 0), "{callee} from {source}, {stem:?}");
+            }
+        }
+    }
+
+    /// Divergence D1: the file named after the qualifier lacks the member.
+    /// The index (`Any`) takes that file and binds nothing; the overlay
+    /// (`DeclaringMember`) falls back to the caller's own file, where the
+    /// caller type's member binds.
+    #[test]
+    fn test_ladder_qualified_stem_file_without_member_differs_by_parameter() {
+        let decls: [Decl; 2] = [
+            ("app/Foo.java", "Foo", C, None),
+            ("app/FooExt.java", "a", M, Some("Foo")),
+        ];
+        let facts = Quals::new(&decls);
+        let call = CallPick {
+            owner: Some("Foo"),
+            ..CallPick::default()
+        };
+        let at = site("app/FooExt.java", "Foo.a", Some(call));
+        assert_eq!(
+            qualify(&facts, at, &[], StemFile::Any, None),
+            (Resolution::Unknown, 0)
+        );
+        assert_eq!(
+            qualify(&facts, at, &[], StemFile::DeclaringMember, None),
+            (bound(1, Tier::QualifierScoped), 0)
+        );
+    }
+
+    /// Row 4 and R14: a Rust module path (`crate::x::parse`) never binds a
+    /// method its qualifier does not own, at the qualifier tier or from the
+    /// module tree, which is asked next; `K::st` and a module's free
+    /// function bind at the qualifier tier and never ask it. A path whose
+    /// module file is gone binds only what the module tree places.
+    #[test]
+    fn test_ladder_qualifier_rust_module_path_never_binds_method() {
+        let decls: [Decl; 6] = [
+            ("src/x.rs", "P", NodeKind::Struct, None),
+            ("src/x.rs", "parse", M, Some("P")),
+            ("src/x.rs", "helper", F, None),
+            ("src/lib.rs", "x", NodeKind::Module, None),
+            ("src/k.rs", "K", NodeKind::Struct, None),
+            ("src/k.rs", "st", M, Some("K")),
+        ];
+        let facts = Quals::new(&decls);
+        let ask = |facts: &Quals, callee, tree| {
+            qualify(
+                facts,
+                site("src/lib.rs", callee, None),
+                &[],
+                StemFile::Any,
+                tree,
+            )
+        };
+        assert_eq!(
+            ask(&facts, "crate::x::parse", None),
+            (Resolution::Unknown, 1)
+        );
+        assert_eq!(
+            ask(&facts, "crate::x::parse", Some(2)),
+            (bound(2, Tier::ModuleTree), 1)
+        );
+        // The module tree's answer obeys the same rule: `P::parse` is no
+        // member of the module `x`.
+        assert_eq!(
+            ask(&facts, "crate::x::parse", Some(1)),
+            (Resolution::Unknown, 1)
+        );
+        assert_eq!(
+            ask(&facts, "crate::x::helper", Some(2)),
+            (bound(2, Tier::QualifierScoped), 0)
+        );
+        assert_eq!(
+            ask(&facts, "K::st", Some(2)),
+            (bound(5, Tier::QualifierScoped), 0)
+        );
+        assert_eq!(
+            ask(&facts, "crate::gone::run", None),
+            (Resolution::Unknown, 1)
+        );
+        // The same `::` shape outside Rust is no module path.
+        let cpp: [Decl; 2] = [
+            ("src/x.cpp", "P", C, None),
+            ("src/x.cpp", "parse", M, Some("P")),
+        ];
+        let facts = Quals::new(&cpp);
+        let at = site("src/main.cpp", "x::parse", None);
+        let (resolution, asked) = qualify(&facts, at, &[], StemFile::Any, None);
+        assert_eq!((resolution, asked), (bound(1, Tier::QualifierScoped), 0));
+    }
+
+    /// The prefix before the qualifier is internal only when it is empty or
+    /// a `crate` / `self` / `super` chain.
+    #[test]
+    fn test_qualifier_prefix_is_internal_anchor_chain_returns_true() {
+        let cases = [
+            ("crate::x::parse", "x", true),
+            ("self::x::parse", "x", true),
+            ("super::super::x::parse", "x", true),
+            ("x::parse", "x", true),
+            ("std::fs::read", "fs", false),
+            ("a::x::parse", "x", false),
+            ("parse", "x", false),
+        ];
+        for (callee, qualifier, want) in cases {
+            assert_eq!(
+                qualifier_prefix_is_internal(callee, qualifier),
+                want,
+                "{callee}"
+            );
+        }
+    }
+
+    /// R12: Python `super().m()` walks the caller's bases by owner. The
+    /// first base owning `m` binds (`TypeOwned`, with the base named); one
+    /// that only inherits it binds at `TypeHeritage` unless a later base
+    /// owns another `m`. No base, an unknown base, or a call outside a
+    /// class gives no edge, and the module tree is never asked.
+    #[test]
+    fn test_ladder_super_member_python_bases_returns_each_verdict() {
+        let decls: [Decl; 7] = [
+            ("app/base.py", "Base", C, None),
+            ("app/base.py", "m", M, Some("Base")),
+            ("app/other.py", "Other", C, None),
+            ("app/other.py", "m", M, Some("Other")),
+            ("app/mid.py", "Mid", C, None),
+            ("app/plain.py", "Plain", C, None),
+            ("lib/m.py", "m", F, None),
+        ];
+        let mut facts = Quals::new(&decls);
+        facts.fake.supertypes = vec![(0, vec![]), (2, vec![]), (4, vec![0]), (5, vec![])];
+        let names = |bases: &[&str]| bases.iter().map(|&b| b.to_owned()).collect::<Vec<_>>();
+        let in_class = CallPick {
+            owner: Some("Sub"),
+            ..CallPick::default()
+        };
+        let cases: [(&[&str], Option<CallPick<'_>>, Resolution, Option<&str>); 8] = [
+            (
+                &["Base"],
+                Some(in_class),
+                bound(1, Tier::TypeOwned),
+                Some("Base"),
+            ),
+            (
+                &["Other", "Base"],
+                Some(in_class),
+                bound(3, Tier::TypeOwned),
+                Some("Other"),
+            ),
+            (
+                &["Plain", "Base"],
+                Some(in_class),
+                bound(1, Tier::TypeOwned),
+                Some("Base"),
+            ),
+            (
+                &["Mid"],
+                Some(in_class),
+                bound(1, Tier::TypeHeritage),
+                Some("Mid"),
+            ),
+            (
+                &["Mid", "Other"],
+                Some(in_class),
+                Resolution::NoEdge(NoEdge::Unresolved),
+                None,
+            ),
+            (
+                &["Gone", "Base"],
+                Some(in_class),
+                Resolution::NoEdge(NoEdge::Unresolved),
+                None,
+            ),
+            (
+                &[],
+                Some(in_class),
+                Resolution::NoEdge(NoEdge::Unresolved),
+                None,
+            ),
+            (&[], None, Resolution::NoEdge(NoEdge::Unresolved), None),
+        ];
+        for (bases, call, want, base) in cases {
+            let heritage = names(bases);
+            let at = site("app/sub.py", "super().m", call);
+            let got = qualified(&facts, at, &heritage, StemFile::Any, || {
+                panic!("super() never asks the module tree")
+            });
+            assert_eq!(got, (want, base), "bases {bases:?}");
+        }
+        // `super()` outside Python is an ordinary qualifier.
+        let at = site("app/Sub.java", "super().m", None);
+        assert_eq!(
+            qualify(&facts, at, &names(&["Base"]), StemFile::Any, None),
+            (Resolution::Unknown, 0)
+        );
     }
 }

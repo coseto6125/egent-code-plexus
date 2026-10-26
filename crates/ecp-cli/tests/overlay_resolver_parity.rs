@@ -1779,16 +1779,18 @@ fn test_overlay_rust_parent_root_member_matches_reindex() {
     );
 }
 
+/// A module path (`crate::x::parse`) never names a method: `P::parse` is no
+/// member of the module `x`, so neither side binds it
+/// (FU-2026-10-05-bb4eba1b9224, `ecp_core::analyzer::ladder::qualified_member`).
 #[test]
-fn test_overlay_rust_module_path_excludes_method_despite_index_bug() {
-    check_parity(
+fn test_overlay_rust_module_path_excludes_method_matches_reindex() {
+    parity(
         &RustProvider::new().unwrap(),
         &[
             ("src/lib.rs", "mod x;\nfn run() {}"),
             ("src/x.rs", "pub struct P; impl P { pub fn parse() {} }"),
         ],
         &[("src/lib.rs", "mod x;\nfn run() { crate::x::parse(); }")],
-        &[("src/x.rs".into(), "parse".into(), "P".into(), 85)],
         &[],
     );
 }

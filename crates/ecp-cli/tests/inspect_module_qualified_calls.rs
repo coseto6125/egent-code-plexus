@@ -1,6 +1,6 @@
 //! Integration tests for Rust module-qualified call resolution.
 //!
-//! Pre-fix behaviour: `resolve_qualifier_file` only treated the immediate
+//! Pre-fix behaviour: `ladder::qualifier_file` only treated the immediate
 //! qualifier as a Type lookup, so calls like `auto_ensure::ensure_fresh(...)`
 //! never produced incoming edges — `auto_ensure` is a *module* (a `mod foo;`
 //! declaration corresponding to `foo.rs` in the same crate), not a Type. On
