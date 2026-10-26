@@ -120,7 +120,7 @@
 //! ## Clean files: the invalidation closure
 //!
 //! A clean file that depends on a dirty change is resolved again by
-//! [`Self::build_with_closure`](OverlayView::build_with_closure): the
+//! [`Self::build_with_configs`](OverlayView::build_with_configs): the
 //! caller re-parses each file [`super::closure`] names and hands its parse in
 //! beside the dirty ones, so every output above is rebuilt for it too. A
 //! clean file outside the closure keeps its indexed edges, as below, and
@@ -761,7 +761,9 @@ impl OverlayView {
         removed: &[String],
         configs: &ConfigEdits,
     ) -> Option<Self> {
-        if files.is_empty() && removed.is_empty() {
+        // A dirty config edits resolution with no dirty source: the view
+        // still carries its kept configs to the caveat.
+        if files.is_empty() && removed.is_empty() && configs.is_empty() {
             return None;
         }
         let base_len = graph.nodes.len() as u32;
@@ -1057,31 +1059,20 @@ impl OverlayView {
         })
     }
 
-    /// [`Self::build_with_records`] over the dirty files and the clean
-    /// files of their invalidation closure ([`super::closure`]), whose
-    /// parses `files` and `records` hold beside the dirty ones: the view
-    /// resolves a closure file as it resolves a dirty one. `stale` is what
-    /// the closure left as indexed; the view carries it for the payload's
-    /// caveat ([`Self::stale_closure`]). No other cost.
-    pub fn build_with_closure(
-        graph: &ArchivedZeroCopyGraph,
-        files: &[OverlayFileInput],
-        records: &[OverlayFileRecords],
-        removed: &[String],
-        stale: &StaleClosure,
-    ) -> Option<Self> {
-        let mut view = Self::build_with_records(graph, files, records, removed)?;
-        view.stale_closure = stale.clone();
-        Some(view)
-    }
-
-    /// [`Self::build_with_closure`] when the dirty state also holds
-    /// resolution configs: every file of `files` resolves with `configs`'
-    /// rows merged over the archived config tables (R-A4d,
-    /// [`super::closure::ConfigEdits`]). The merge runs once per build, in
-    /// O(S + N) over the archived table's S rows and N names plus the
-    /// edited rows; no config is parsed here. Equal to
-    /// [`Self::build_with_closure`] for an empty `configs`.
+    /// [`Self::build_with_records`] over the dirty files and the clean files
+    /// of their invalidation closure ([`super::closure`]), whose parses
+    /// `files` and `records` hold beside the dirty ones: the view resolves a
+    /// closure file as it resolves a dirty one. `stale` is what the closure
+    /// left as indexed; the view carries it for the payload's caveat
+    /// ([`Self::stale_closure`]).
+    ///
+    /// When the dirty state also holds resolution configs, every file of
+    /// `files` resolves with `configs`' rows merged over the archived config
+    /// tables (R-A4d, [`super::closure::ConfigEdits`]). The merge runs once
+    /// per build, in O(S + N) over the archived table's S rows and N names
+    /// plus the edited rows; no config is parsed here. `None` when `files`,
+    /// `removed` and `configs` are all empty; a dirty config with no dirty
+    /// source still builds a view, which carries `stale`.
     pub fn build_with_configs(
         graph: &ArchivedZeroCopyGraph,
         files: &[OverlayFileInput],

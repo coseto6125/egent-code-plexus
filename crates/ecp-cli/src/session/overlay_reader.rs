@@ -71,7 +71,7 @@ pub struct ViewInputs {
     /// Repo-relative paths of deleted files and of the old halves of
     /// renames: `OverlayView::build_with_removed`'s `removed`.
     pub tombstones: Vec<String>,
-    /// `OverlayView::build_with_closure`'s `stale`: empty without dirty
+    /// `OverlayView::build_with_configs`'s `stale`: empty without dirty
     /// input, and `StaleClosure::not_computed` when no closure is stored for
     /// this manifest.
     pub stale: StaleClosure,

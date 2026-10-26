@@ -20,10 +20,13 @@
 //! every manifest row, and the path and mtime of each dirty config
 //! ([`ConfigStamp`]). A reader serves the closure only under the key of the
 //! manifest it reads and the stamps the file stores, and only while each
-//! stamped config still has its stamp, so a closure never meets another
-//! dirty state. A refresh that finds its key stored reads the file back and
-//! keeps it only while every stored parse still has its file's mtime
-//! ([`stored_is_current`]); the key itself covers no dependent.
+//! stamped config still has its stamp. A config dirtied after the last
+//! store has no stamp, so the reader serves the old closure until the next
+//! refresh stores a new one; when that refresh fails, [`discard`] removes
+//! the file and the reader reports the closure as not computed. A refresh
+//! that finds its key stored reads the file back and keeps it only while
+//! every stored parse still has its file's mtime ([`stored_is_current`]);
+//! the key itself covers no dependent.
 
 use super::overlay_reader::{self, AcceptedFragment, ViewInputs};
 use super::view_cache::hash_part;
@@ -169,6 +172,17 @@ fn write(session_dir: &Path, key: u64, file: &ClosureFile) -> io::Result<()> {
     ecp_core::registry::atomic_write_bytes_no_fsync(&closure_path(session_dir), &bytes)
 }
 
+/// Remove the stored closure, so the reader finds none for this dirty state
+/// and reports `StaleClosure::not_computed`: the refresh that should have
+/// replaced it failed. A missing file is the goal state, not an error.
+pub fn discard(session_dir: &Path) {
+    if let Err(e) = fs::remove_file(closure_path(session_dir)) {
+        if e.kind() != io::ErrorKind::NotFound {
+            eprintln!("ecp: L1 invalidation closure not removed: {e}");
+        }
+    }
+}
+
 /// The stamp of each of `configs` (repo-relative), in path order.
 fn stamps_of(worktree_root: &Path, configs: &[String]) -> Vec<ConfigStamp> {
     let paths: BTreeSet<&String> = configs.iter().collect();
@@ -188,8 +202,9 @@ fn stamps_of(worktree_root: &Path, configs: &[String]) -> Vec<ConfigStamp> {
 /// A dirty view with no closure stored for this manifest gets
 /// `StaleClosure::not_computed`, and so does one whose closure file or dirty
 /// config was touched since its parse: that file is served as indexed, and
-/// a touched config serves no config edit. On a clean tree with no dirty
-/// config the cost is an 8-byte read.
+/// a touched config serves no config edit. On a clean tree the cost is one
+/// open and an 8-byte read; a stored key other than the clean key (a dirty
+/// config) also reads the whole file and stats each stamp and entry.
 pub(crate) fn attach(
     session_dir: &Path,
     worktree_root: &Path,
@@ -237,7 +252,7 @@ pub(crate) fn attach(
         let current = crate::auto_ensure::mtime_ns_of(&worktree_root.join(&entry.rel_path))
             == Some(entry.mtime_ns);
         if !current || !overlay_reader::valid_fragment(&entry.fragment) {
-            stale = StaleClosure::not_computed();
+            stale = with_not_computed(stale);
             continue;
         }
         hash_part(&mut hasher, entry.rel_path.as_bytes());
@@ -778,6 +793,88 @@ mod tests {
             assert_eq!(inputs.fragments.len(), 1, "corrupt={corrupt}");
             assert!(inputs.stale.not_computed, "corrupt={corrupt}");
         }
+    }
+
+    /// Stands for: a touched dependent marks the closure incomplete but
+    /// keeps what the closure found: its route kinds, removed names and kept
+    /// config still reach the caveat.
+    #[test]
+    fn test_attach_touched_entry_keeps_stored_stale_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let (session_dir, worktree, manifest, mut inputs) = session(dir.path(), &["src/caller.ts"]);
+        let mut row = entry(&worktree, "src/caller.ts", valid_fragment_bytes());
+        row.mtime_ns += 1;
+        let stored = StaleClosure {
+            kinds: vec!["Route".into()],
+            names: vec!["dup".into()],
+            configs: vec!["Cargo.toml".into()],
+            unbounded: Some(200),
+            ..StaleClosure::default()
+        };
+        let key = closure_key("base", &manifest, &[]);
+        write(&session_dir, key, &closure(stored, vec![row])).unwrap();
+        attach(
+            &session_dir,
+            &worktree,
+            SizeCap::BUILT_IN,
+            &manifest,
+            &mut inputs,
+        );
+        let stale = &inputs.stale;
+        assert!(stale.not_computed, "{stale:?}");
+        assert!(stale.kinds.contains(&"Route".to_string()), "{stale:?}");
+        assert!(stale.kinds.contains(&"Calls".to_string()), "{stale:?}");
+        assert_eq!(stale.names, vec!["dup".to_string()]);
+        assert_eq!(stale.configs, vec!["Cargo.toml".to_string()]);
+        assert_eq!(stale.unbounded, Some(200));
+    }
+
+    /// Stands for: a refresh that failed discards the stored closure, so the
+    /// reader of a dirty view reports it not computed instead of serving a
+    /// closure computed before the latest config edit; a missing file is not
+    /// an error.
+    #[test]
+    fn test_discard_stored_closure_reader_reports_not_computed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (session_dir, worktree, manifest, mut inputs) = session(dir.path(), &[]);
+        let key = closure_key("base", &manifest, &[]);
+        write(
+            &session_dir,
+            key,
+            &closure(StaleClosure::default(), Vec::new()),
+        )
+        .unwrap();
+        let mut served = ViewInputs {
+            fragments: Vec::new(),
+            tombstones: Vec::new(),
+            stale: StaleClosure::default(),
+            configs: ConfigEdits::default(),
+            hash: 5,
+        };
+        served.fragments.push(AcceptedFragment {
+            rel_path: "src/dirty.ts".into(),
+            bytes: valid_fragment_bytes(),
+        });
+        attach(
+            &session_dir,
+            &worktree,
+            SizeCap::BUILT_IN,
+            &manifest,
+            &mut served,
+        );
+        assert!(!served.stale.not_computed, "setup: the closure is served");
+
+        discard(&session_dir);
+        assert!(!closure_path(&session_dir).exists());
+        attach(
+            &session_dir,
+            &worktree,
+            SizeCap::BUILT_IN,
+            &manifest,
+            &mut inputs,
+        );
+        assert!(inputs.stale.not_computed, "{:?}", inputs.stale);
+        discard(&session_dir);
     }
 
     /// Stands for: a clean tree attaches nothing, whatever is stored.

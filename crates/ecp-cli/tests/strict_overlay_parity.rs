@@ -1243,3 +1243,119 @@ fn test_render_then_read_returns_owner_and_lines() {
     assert_eq!(owner.as_deref(), Some("lane F (test)"));
     assert_eq!(read, lines);
 }
+
+/// A dirty C++ base method becomes `virtual`. No declaration moves; the clean
+/// `D::run` now overrides it. The `Overrides` edge `D::run -> B::run` in the
+/// full index proves it: only the flags word of `B::run` differs.
+#[test]
+fn test_check_closure_cpp_method_made_virtual_matches_baseline() {
+    check(&Scenario {
+        name: "closure_cpp_method_made_virtual",
+        owner: LANE_F_CLEAN_CALLERS,
+        files: &[
+            ("src/base.h", "class B {\npublic:\n    void run();\n};\n"),
+            (
+                "src/derived.h",
+                "#include \"base.h\"\n\nclass D : public B {\npublic:\n    void run();\n};\n",
+            ),
+        ],
+        edits: &[Edit::Write(
+            "src/base.h",
+            "class B {\npublic:\n    virtual void run();\n};\n",
+        )],
+    });
+}
+
+/// A dirty C# method goes from `public` to `private`. The clean caller's
+/// `Calls` edge `Caller.Go -> Store.Save` is not admitted by a fresh index,
+/// and only the visibility bits of the flags word differ.
+#[test]
+fn test_check_closure_csharp_method_made_private_matches_baseline() {
+    check(&Scenario {
+        name: "closure_csharp_method_made_private",
+        owner: LANE_F_CLEAN_CALLERS,
+        files: &[
+            (
+                "src/Store.cs",
+                "public class Store\n{\n    public void Save()\n    {\n    }\n}\n",
+            ),
+            (
+                "src/Caller.cs",
+                "public class Caller\n{\n    public void Go(Store s)\n    {\n        s.Save();\n    }\n}\n",
+            ),
+        ],
+        edits: &[Edit::Write(
+            "src/Store.cs",
+            "public class Store\n{\n    private void Save()\n    {\n    }\n}\n",
+        )],
+    });
+}
+
+/// Two overloads of a dirty base method: the second one changes its
+/// parameter type, so the clean subclass's `handle(String)` stops overriding
+/// it. The `Overrides` edge `Sub.handle -> Base.handle(String)` in the full
+/// index proves it: the first overload (`int`) is unchanged.
+#[test]
+fn test_check_closure_overload_second_changed_matches_baseline() {
+    check(&Scenario {
+        name: "closure_overload_second_changed",
+        owner: LANE_F_CLEAN_CALLERS,
+        files: &[
+            (
+                "src/main/java/com/acme/Base.java",
+                "package com.acme;\n\npublic class Base {\n    public int handle(int x) {\n        return x;\n    }\n\n    public int handle(String s) {\n        return 1;\n    }\n}\n",
+            ),
+            (
+                "src/main/java/com/acme/Sub.java",
+                "package com.acme;\n\npublic class Sub extends Base {\n    @Override\n    public int handle(String s) {\n        return 2;\n    }\n}\n",
+            ),
+        ],
+        edits: &[Edit::Write(
+            "src/main/java/com/acme/Base.java",
+            "package com.acme;\n\npublic class Base {\n    public int handle(int x) {\n        return x;\n    }\n\n    public int handle(Object s) {\n        return 1;\n    }\n}\n",
+        )],
+    });
+}
+
+/// A dirty TS barrel drops `export { X } from './a'`. The clean importer's
+/// `Calls` edge `run -> X` in `lib/a.ts` is gone in the full index: no
+/// declaration changed, only a re-export row.
+#[test]
+fn test_check_closure_ts_barrel_reexport_dropped_matches_baseline() {
+    check(&Scenario {
+        name: "closure_ts_barrel_reexport_dropped",
+        owner: LANE_F_CLEAN_CALLERS,
+        files: &[
+            (
+                "lib/a.ts",
+                "export function X(): number {\n  return 1;\n}\n",
+            ),
+            ("lib/index.ts", "export { X } from './a';\n"),
+            (
+                "c.ts",
+                "import { X } from './lib';\n\nexport function run(): number {\n  return X();\n}\n",
+            ),
+        ],
+        edits: &[Edit::Write("lib/index.ts", "export const unrelated = 1;\n")],
+    });
+}
+
+/// A dirty Python `__init__.py` drops `from .a import X`. The clean
+/// `from pkg import X` caller's `Calls` edge `run -> X` in `pkg/a.py` is gone
+/// in the full index: no declaration changed, only an import row.
+#[test]
+fn test_check_closure_py_init_reexport_dropped_matches_baseline() {
+    check(&Scenario {
+        name: "closure_py_init_reexport_dropped",
+        owner: LANE_F_CLEAN_CALLERS,
+        files: &[
+            ("pkg/a.py", "def X():\n    return 1\n"),
+            ("pkg/__init__.py", "from .a import X\n"),
+            (
+                "main.py",
+                "from pkg import X\n\n\ndef run():\n    return X()\n",
+            ),
+        ],
+        edits: &[Edit::Write("pkg/__init__.py", "VALUE = 1\n")],
+    });
+}

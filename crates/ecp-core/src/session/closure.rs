@@ -4,7 +4,7 @@
 //!
 //! A clean file is resolved again by re-parsing it, byte-identical, and
 //! handing its parse to the view beside the dirty files
-//! ([`super::view::OverlayView::build_with_closure`]). Every output the view
+//! ([`super::view::OverlayView::build_with_configs`]). Every output the view
 //! rebuilds for a dirty file is then rebuilt for it too, against the dirty
 //! view: its `Calls`, `Imports`, heritage, `Overrides`, `Decorates`,
 //! `ReadsField`, `References` and record edges. Its declarations pair with
@@ -105,11 +105,12 @@
 
 use super::view::{base_function_meta, OverlayFileInput, OverlaySymbol};
 use crate::analyzer::path_aliases::{import_ecosystem, PathAliases};
+use crate::analyzer::types::BindingKind;
 use crate::contracts::workspace::{
     Ecosystem, ScopeAlias, ScopeDraft, ScopeId, ScopeMatch, WorkspaceFacts,
 };
 use crate::file_category::Language;
-use crate::graph::{ArchivedZeroCopyGraph, FunctionMeta, NodeKind, RelType, SYNTHETIC_FILE_IDX};
+use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType, SYNTHETIC_FILE_IDX};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeSet;
 
@@ -458,6 +459,7 @@ impl<'a> Changes<'a> {
                 base.symmetric_difference(&fresh)
                     .map(|&(exported, _)| exported),
             );
+            changes.add_reexport_names(graph, path, idx_of.get(path).copied(), &inputs);
         }
 
         let dirty_types = dirty_type_names(files);
@@ -484,6 +486,69 @@ impl<'a> Changes<'a> {
             changes.diff_path(graph, base, &symbols, es_module, &dirty_types);
         }
         changes
+    }
+
+    /// A dirty barrel or `__init__` that adds or drops a re-export changes
+    /// what an importer of that file binds without changing a declaration:
+    /// each name of an import row present on one side only is changed. A TS
+    /// or JS file exports only the rows marked as re-exports; any other
+    /// language marks none, so every row counts (a Python `from .a import X`
+    /// in `__init__.py` exposes `X`). Counting more only widens the closure.
+    fn add_reexport_names(
+        &mut self,
+        graph: &'a ArchivedZeroCopyGraph,
+        path: &str,
+        base_idx: Option<u32>,
+        inputs: &FxHashMap<&'a str, Vec<&'a OverlayFileInput>>,
+    ) {
+        let pool = &graph.string_pool;
+        let fresh_files = inputs.get(path).map(Vec::as_slice).unwrap_or_default();
+        let es_module = match fresh_files.first() {
+            Some(file) => matches!(
+                file.file_meta().language,
+                Language::TypeScript | Language::JavaScript
+            ),
+            None => base_idx.is_some_and(|idx| graph.is_es_module_file(idx)),
+        };
+        // An ES module re-exports by its re-export rows; a Python package
+        // re-exports whatever its `__init__.py` imports. Elsewhere an import
+        // row binds only its own file, so it changes no dependent.
+        let package_init = path == "__init__.py" || path.ends_with("/__init__.py");
+        let exports = |kind: Option<BindingKind>| {
+            if es_module {
+                matches!(
+                    kind,
+                    Some(BindingKind::EsReexport | BindingKind::EsDefaultReexport)
+                )
+            } else {
+                package_init
+            }
+        };
+        let base: FxHashSet<(&'a str, &'a str)> = base_idx
+            .and_then(|idx| graph.file_imports(idx))
+            .into_iter()
+            .flatten()
+            .filter(|row| exports(row.binding_kind.as_ref().map(BindingKind::from)))
+            .map(|row| {
+                (
+                    row.imported_name.resolve(pool),
+                    row.alias.as_ref().map_or("", |alias| alias.resolve(pool)),
+                )
+            })
+            .collect();
+        let fresh: FxHashSet<(&'a str, &'a str)> = fresh_files
+            .iter()
+            .flat_map(|file| file.imports.iter())
+            .filter(|row| exports(row.binding_kind))
+            .map(|row| (&*row.imported_name, row.alias.as_deref().unwrap_or("")))
+            .collect();
+        for &(imported, alias) in base.symmetric_difference(&fresh) {
+            self.names.extend(
+                [imported, alias]
+                    .into_iter()
+                    .filter(|name| !name.is_empty()),
+            );
+        }
     }
 
     /// One path's removed, added and changed keys.
@@ -531,8 +596,13 @@ impl<'a> Changes<'a> {
                     true
                 }
                 Some(fresh) => {
+                    // Both sides list their declarations in source order (the
+                    // builder numbers nodes in parse order), so overloads pair
+                    // up by position; a reordering only widens the closure.
                     fresh.len() != idxs.len()
-                        || facts_differ(graph, idxs[0], fresh[0], es_module, dirty_types)
+                        || idxs.iter().zip(fresh).any(|(&idx, &symbol)| {
+                            facts_differ(graph, idx, symbol, es_module, dirty_types)
+                        })
                 }
             };
             if changed {
@@ -598,8 +668,10 @@ fn facts_differ(
             return true;
         }
         if let (Some(meta), Some(flags)) = (meta, symbol.flags) {
-            let base_static = meta.flags.to_native() & FunctionMeta::FLAG_STATIC;
-            if base_static != flags & FunctionMeta::FLAG_STATIC {
+            // The whole word: resolution reads static, virtual (`virtual_only`),
+            // visibility and the C# extension bits. Comparing it all only
+            // widens the closure.
+            if meta.flags.to_native() != flags {
                 return true;
             }
             let base_params = meta.params.iter().map(|p| p.resolve(pool));

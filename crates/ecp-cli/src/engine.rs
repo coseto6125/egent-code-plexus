@@ -491,9 +491,8 @@ fn unpaired_declarations_line(hidden: &[HiddenDecl]) -> Option<String> {
     ))
 }
 
-/// The caveat line for calls the overlay could not resolve as a full index
-/// would ([`CallGap`]), or `None` when there are none. Effect first, then
-/// each call with its reason code, then the fix.
+/// The caveat line for the clean-file edges and nodes the invalidation
+/// closure left as indexed, or `None` when it left none.
 fn stale_closure_line(stale: &ecp_core::session::closure::StaleClosure) -> Option<String> {
     if stale.is_empty() {
         return None;
@@ -521,12 +520,15 @@ fn stale_closure_line(stale: &ecp_core::session::closure::StaleClosure) -> Optio
         format!(" (kept configs: {})", stale.configs.join(", "))
     };
     Some(format!(
-        "results may be incomplete: clean files keep their indexed {} edges{names}{configs}, \
+        "results may be incomplete: clean files keep their indexed {} edges and nodes{names}{configs}, \
          because {why}. Run `ecp admin index --repo .` and rerun.",
         stale.kinds.join(", ")
     ))
 }
 
+/// The caveat line for calls the overlay could not resolve as a full index
+/// would ([`CallGap`]), or `None` when there are none. Effect first, then
+/// each call with its reason code, then the fix.
 fn call_gaps_line(gaps: &[CallGap]) -> Option<String> {
     if gaps.is_empty() {
         return None;
@@ -660,7 +662,7 @@ mod tests {
             ..StaleClosure::default()
         })
         .unwrap();
-        assert!(unbounded.contains("indexed Calls, Imports edges"));
+        assert!(unbounded.contains("indexed Calls, Imports edges and nodes"));
         assert!(unbounded.contains("reaches 300 clean dependent file(s)"));
 
         let routes = stale_closure_line(&StaleClosure {
@@ -669,6 +671,10 @@ mod tests {
             ..StaleClosure::default()
         })
         .unwrap();
+        assert!(
+            routes.contains("indexed EntryPoint, HandlesRoute edges and nodes"),
+            "a node kind is not an edge: the line claims both"
+        );
         assert!(routes.contains("(removed names: save)"));
         assert!(routes.contains("does not re-resolve these kinds"));
         assert!(routes.contains("`ecp admin index --repo .`"));

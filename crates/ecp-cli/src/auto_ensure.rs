@@ -1577,7 +1577,9 @@ fn retire_unclaimed_best_effort(
 /// is the manifest the reader will see; with that key stored already, it
 /// costs three small reads. Best effort, as retire: on failure the reader
 /// finds no closure for this dirty state and reports
-/// `StaleClosure::not_computed`, so clean files answer as indexed.
+/// `StaleClosure::not_computed`, so clean files answer as indexed. The failed
+/// refresh also discards the stored closure: a config dirtied since the store
+/// has no stamp in it, and the reader would serve it as current.
 fn refresh_closure_best_effort(
     worktree_root: &Path,
     session_dir: Option<&Path>,
@@ -1588,6 +1590,11 @@ fn refresh_closure_best_effort(
     let Some(dir) = session_dir else {
         return;
     };
+    if !configs.is_empty() {
+        if let Err(e) = ensure_manifest_for_configs(worktree_root, dir, size_cap) {
+            eprintln!("ecp: L1 manifest for dirty configs skipped: {e}");
+        }
+    }
     if let Err(e) = crate::session::closure_store::refresh_with_configs(
         worktree_root,
         dir,
@@ -1596,7 +1603,36 @@ fn refresh_closure_best_effort(
         configs,
     ) {
         eprintln!("ecp: L1 invalidation closure skipped: {e}");
+        crate::session::closure_store::discard(dir);
     }
+}
+
+/// Leave a current manifest in the session when a config is dirty. Only a
+/// source refresh writes one, so a tree whose only dirty file is a config
+/// (`go.mod`, `Cargo.toml`) has none, and the closure key, which hashes the
+/// manifest, would not exist: nothing would be stored and the view would
+/// carry no caveat. An empty manifest names no fragment, so the reader serves
+/// no dirty source from it. A current manifest, entries included, stays.
+fn ensure_manifest_for_configs(
+    worktree_root: &Path,
+    session_dir: &Path,
+    size_cap: SizeCap,
+) -> io::Result<()> {
+    use ecp_core::session::{layout, DirtyEvents};
+    let path = layout::dirty_events_path(session_dir);
+    if DirtyEvents::read(&path).is_ok_and(|m| m.is_current(size_cap)) {
+        return Ok(());
+    }
+    fs::create_dir_all(session_dir)?;
+    ensure_session_meta(session_dir, worktree_root)?;
+    let _publish = ecp_core::registry::FileLock::acquire_exclusive(
+        &crate::session::overlay_writer::overlay_lock_path(session_dir),
+    )?;
+    // A writer may have published a manifest while this one waited.
+    if DirtyEvents::read(&path).is_ok_and(|m| m.is_current(size_cap)) {
+        return Ok(());
+    }
+    DirtyEvents::write_atomic(&path, &DirtyEvents::empty(size_cap))
 }
 
 /// The path up to the first `.` of its file name, without a trailing
