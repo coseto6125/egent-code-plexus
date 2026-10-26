@@ -27,18 +27,29 @@ pub(super) fn resolve(files: &[SourceFile], importer: usize, module: &str) -> Op
         // package, each further dot climbs one directory.
         let name = module.trim_start_matches('.');
         let climb = (module.len() - name.len()).saturating_sub(1);
+        // A level above the repo root names no file; `normalize` would clamp
+        // it to the root and bind an unrelated top-level module.
+        if climb > parent.split('/').filter(|s| !s.is_empty()).count() {
+            return None;
+        }
         format!("{}{}", "../".repeat(climb), name.replace('.', "/"))
     } else {
         module.into()
     };
     let path = normalize(&format!("{parent}/{module}"));
+    // At the repo root `path` is empty: `index.js` is not `/index.js`.
+    let dir = if path.is_empty() {
+        String::new()
+    } else {
+        format!("{path}/")
+    };
     files.iter().position(|f| {
         let p = normalize(&f.path);
         p == path
             || ["js", "mjs", "ts", "tsx", "py", "php"].iter().any(|ext| {
                 p == format!("{path}.{ext}")
-                    || p == format!("{path}/index.{ext}")
-                    || p == format!("{path}/__init__.{ext}")
+                    || p == format!("{dir}index.{ext}")
+                    || p == format!("{dir}__init__.{ext}")
             })
     })
 }

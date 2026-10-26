@@ -33,33 +33,41 @@
 //!   "com.x.Alpha"`), retry with `"Alpha"`. Same confidence as Step 1.
 //!
 //! **Tier 2 — module-style path resolution** (target is `NodeKind::File`).
-//! Triggered only when Tier 1 misses. All emit with `confidence = 0.9`
-//! and `reason = "post_process:imports:module"`:
+//! Triggered only when Tier 1 misses. Steps 3a and 3b resolve the
+//! specifier and emit `confidence = 0.9`, `reason =
+//! "post_process:imports:module"`. Steps 3c to 3f guess, below the 0.7
+//! ceiling, with `reason = "post_process:imports:guess"`:
 //!
 //! - **Step 3a**: probe `import.source` as-is via `enumerate_candidates`
 //!   (TS `./a`, Python `.foo` already encode relativity).
 //! - **Step 3b**: retry with `./` prefix so the resolver's relative branch
 //!   joins caller dir (Ruby `require_relative 'alpha'`, Go `import "x/pkg"`,
 //!   C `#include "alpha.h"`).
-//! - **Step 3c**: basename + suffix match across all indexed files via
+//! - **Step 3c** (guess, 0.6): basename + suffix match across all indexed files via
 //!   pre-built `basename_idx` (C/C++ `#include` where header sits under
 //!   `-I include/`).
-//! - **Step 3d**: caller-extension + last-segment basename match (Go
+//! - **Step 3d** (guess, 0.5): caller-extension + last-segment basename match (Go
 //!   `import "modulePath/pkg"` whose module prefix isn't a filesystem
 //!   path → match `pkg.<caller_ext>`).
 //!
 //! **Tier 3 — language-specific path normalization** (target is
-//! `NodeKind::File`). Same confidence + reason as Tier 2:
+//! `NodeKind::File`):
 //!
-//! - **Step 3e**: Rust `use crate::a::b::Foo` — strip leading `crate::` /
+//! - **Step 3e** (guess, 0.5): Rust `use crate::a::b::Foo` — strip leading `crate::` /
 //!   `self::`, take last `::` segment as module-file basename, suffix-match
 //!   with caller extension.
-//! - **Step 3f**: namespace / module-dir match for C# `using NS;` /
+//! - **Step 3f** (guess, 0.4): namespace / module-dir match for C# `using NS;` /
 //!   Swift `import Module` where the specifier names a directory
 //!   containing the implementation file. Uses `dir_component_idx`.
+//!
+//! Steps 3c to 3f match a name, not a resolved path: each edge they emit
+//! carries its step's confidence, below `HEURISTIC_CEILING`, and
+//! `post_process:imports:guess`, so a reader tells a guess from the resolved
+//! `post_process:imports:module` edge of steps 3a and 3b.
 
 use crate::resolution::index::{Language, ResolveTarget};
 use crate::resolution::resolver::{NodeId, Resolver};
+use ecp_core::analyzer::rust_paths::rust_module_path_base;
 use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::graph::{Edge, RelType};
 use ecp_core::pool::StringPool;
@@ -67,6 +75,15 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::sync::Arc;
+
+/// Confidence of a basename + suffix match (step 3c): the specifier's whole
+/// path tail agrees.
+const SUFFIX_GUESS_CONFIDENCE: f32 = 0.6;
+/// Confidence of a last-segment + caller-extension match (step 3d) and of a
+/// Rust module-name match (step 3e): one name agrees.
+const NAME_GUESS_CONFIDENCE: f32 = 0.5;
+/// Confidence of a namespace / module-directory match (step 3f).
+const DIRECTORY_GUESS_CONFIDENCE: f32 = 0.4;
 
 /// Emit `Imports` edges from each `File` node to the resolved targets of
 /// every `RawImport` in that file. Returns the number of edges appended.
@@ -79,6 +96,7 @@ pub fn emit_edges(
 ) -> usize {
     let reason_named = string_pool.add("post_process:imports");
     let reason_module = string_pool.add("post_process:imports:module");
+    let reason_guess = string_pool.add("post_process:imports:guess");
     let mut emitted = 0usize;
 
     // Pre-pass: build a basename → [(full_path, idx)] index so the
@@ -270,6 +288,8 @@ pub fn emit_edges(
                     // Step 3a: probe as-is (TypeScript `./a`, Python `.foo`, etc.
                     // already encode relativity in the specifier).
                     let mut target_file_idx = probe(cleaned, file_node_idx);
+                    // Set by the first guess step that hits.
+                    let mut guess_confidence: Option<f32> = None;
 
                     // Step 3b: if still miss, retry with `./` prefix so the
                     // resolver's relative-resolution branch joins caller dir
@@ -291,6 +311,9 @@ pub fn emit_edges(
                     // then suffix-filter within the small same-basename bucket.
                     if target_file_idx.is_none() && !cleaned.is_empty() {
                         target_file_idx = suffix_match_single(cleaned, &basename_idx);
+                        if target_file_idx.is_some() {
+                            guess_confidence = Some(SUFFIX_GUESS_CONFIDENCE);
+                        }
                     }
 
                     // Step 3d: caller-extension + last-segment match. Handles
@@ -304,53 +327,36 @@ pub fn emit_edges(
                                 let ext = caller_ext.to_string_lossy();
                                 let candidate = format!("{}.{}", last, ext);
                                 target_file_idx = suffix_match_single(&candidate, &basename_idx);
+                                if target_file_idx.is_some() {
+                                    guess_confidence = Some(NAME_GUESS_CONFIDENCE);
+                                }
                             }
                         }
                     }
 
-                    // Step 3e: Rust `use` path resolution. The Rust parser
-                    // stamps `use crate::a::b::Foo` as `source = "crate::a::b"`
-                    // (parent module path) + `imported_name = "Foo"` (already
-                    // split off). The resolver doesn't grok `::` as a path
-                    // separator nor `crate::` as a crate-root anchor, so this
-                    // step resolves manually.
+                    // Step 3e: Rust `use` path guess. The Rust parser stamps
+                    // `use crate::a::b::Foo` as `source = "crate::a::b"` +
+                    // `imported_name = "Foo"`. Steps 3a and 3b resolve the
+                    // module through the module tree; when they miss, the
+                    // module's file name is matched anywhere in the repo.
                     //
-                    // Cases handled:
-                    //   `use crate::a;`         → source="crate", name="a"      → suffix `a.rs`
-                    //   `use crate::a::Foo;`    → source="crate::a", name="Foo" → suffix `a.rs`
-                    //   `use crate::a::b::Foo;` → source="crate::a::b", name="Foo" → suffix `b.rs`
-                    //   `use std::io;`          → source="std", name="io"       → external, no match
-                    //   `use super::Foo;`       → source="super", name="Foo"    → skipped (needs caller dir walk)
+                    //   `use crate::a;`         -> source="crate", name="a"      -> `a.rs`
+                    //   `use crate::a::b::Foo;` -> source="crate::a::b"          -> `b.rs`
+                    //   `use std::io;`          -> external, no match
+                    //   `use super::Foo;`       -> skipped (the guess has no anchor)
                     if target_file_idx.is_none() {
-                        let raw = import.source.as_str();
-                        let module_last: Option<String> = if raw == "crate" || raw == "self" {
-                            // `use crate::Foo` / `use self::Foo` — imported_name IS
-                            // the module-file basename.
-                            Some(import.imported_name.clone())
-                        } else if let Some(rest) = raw
-                            .strip_prefix("crate::")
-                            .or_else(|| raw.strip_prefix("self::"))
-                        {
-                            // Strip leading qualifier, take last `::` segment.
-                            rest.rsplit("::").next().map(str::to_string)
-                        } else if raw.starts_with("super") {
-                            // super:: requires caller_dir walk; defer.
-                            None
-                        } else {
-                            // Don't probe generic `a::b::c` forms — these are
-                            // external crate imports (`use std::io::Read`,
-                            // `use tokio::io::Interest`) whose last segment is
-                            // a module name that coincidentally matches an
-                            // unrelated internal file. Probing them caused a
-                            // 15× over-extraction in the Rust corner of
-                            // .sample_repo (2092 emit vs 137 valid).
-                            None
-                        };
-                        if let Some(last) = module_last {
+                        if let Some(last) = rust_module_file_stem(
+                            &local_graph.file_path,
+                            &import.source,
+                            &import.imported_name,
+                        ) {
                             if let Some(caller_ext) = local_graph.file_path.extension() {
                                 let candidate =
                                     format!("{}.{}", last, caller_ext.to_string_lossy());
                                 target_file_idx = suffix_match_single(&candidate, &basename_idx);
+                                if target_file_idx.is_some() {
+                                    guess_confidence = Some(NAME_GUESS_CONFIDENCE);
+                                }
                             }
                         }
                     }
@@ -377,6 +383,9 @@ pub fn emit_edges(
                                 }
                                 if !multi {
                                     target_file_idx = hit;
+                                    if hit.is_some() {
+                                        guess_confidence = Some(DIRECTORY_GUESS_CONFIDENCE);
+                                    }
                                 }
                             }
                         }
@@ -388,8 +397,12 @@ pub fn emit_edges(
                                 source: source_file_idx,
                                 target,
                                 rel_type: RelType::Imports,
-                                confidence: 0.9,
-                                reason: reason_module,
+                                confidence: guess_confidence.unwrap_or(0.9),
+                                reason: if guess_confidence.is_some() {
+                                    reason_guess
+                                } else {
+                                    reason_module
+                                },
                             });
                             *emitted += 1;
                         }
@@ -410,6 +423,36 @@ pub fn emit_edges(
     }
 
     emitted
+}
+
+/// The module-file stem a Rust `use` names, for step 3e: the last module
+/// segment of a `crate::` / `self::` path, the item name for `use crate::x;`
+/// (the parser leaves `crate` / `self` as the source then). `super::` and
+/// external crates give `None`: probing them matched unrelated internal files
+/// (2092 emitted against 137 valid on `.sample_repo`). The layout rule is
+/// [`rust_module_path_base`]; a crate without a `src/` ancestor (a `tests/`
+/// file) has no base, and keeps the plain last segment.
+fn rust_module_file_stem(
+    caller: &std::path::Path,
+    source: &str,
+    imported_name: &str,
+) -> Option<String> {
+    let joined;
+    let specifier = if matches!(source, "crate" | "self") {
+        if imported_name.contains("::") {
+            return None;
+        }
+        joined = format!("{source}::{imported_name}");
+        joined.as_str()
+    } else if source.starts_with("crate::") || source.starts_with("self::") {
+        source
+    } else {
+        return None;
+    };
+    let last = rust_module_path_base(caller, specifier)
+        .and_then(|base| base.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .or_else(|| specifier.rsplit("::").next().map(str::to_string))?;
+    Some(last)
 }
 
 /// Suffix-match `candidate` against the basename index. Lookup is O(1)
