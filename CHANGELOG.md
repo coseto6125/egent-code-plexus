@@ -13,6 +13,10 @@
 - list breaking `type!:` commits in the changelog
 - dry-run reports the ECP.md copy and import only when they would change (#866)
 
+### Dependencies
+
+- tantivy 0.27 from crates.io without zstd and the stemmer; the zstd RustSec ignores are gone. Every tree-sitter grammar moves to its latest release: Dart 0.3, Swift 0.7.4 from crates.io (vendored copy removed), Nim and C++ upstream HEAD. Swift calls behind `!`, a binary operator, `??`, a ternary or a range are named again; Dart arrow-closure callbacks attach to their `<anonymous>` node (#874)
+
 ## v0.16.4 - 2026-10-23
 
 ### Bug Fixes
