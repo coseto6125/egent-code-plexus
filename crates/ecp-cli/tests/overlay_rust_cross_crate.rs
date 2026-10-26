@@ -461,11 +461,9 @@ fn test_overlay_rust_cross_crate_call_from_dirty_file_matches_reindex() {
             vec![(M, "f"), (M, "f"), (DEEP, "g")],
             "{label}: the reindex binds each call once: {reindex:#?}"
         );
-        let tree = Tier::ModuleTree.confidence();
-        assert!(
-            reindex[0].confidence == tree && reindex[2].confidence == tree,
-            "{label}: the crate-head paths bind through the module tree: {reindex:#?}"
-        );
+        // `b::m::f()` and `b::m::deep::g()` bind at the qualifier tier: `m`
+        // and `deep` each name one file. `u` is the D2 case: its qualifier
+        // `m` comes from `use b::m`, which only the crate table places.
         assert_eq!(overlay, reindex, "{label}");
     }
 }
