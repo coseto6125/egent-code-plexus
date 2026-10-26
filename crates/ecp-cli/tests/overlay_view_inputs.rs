@@ -7,17 +7,20 @@
 mod parity;
 
 use ecp_analyzer::typescript::TypeScriptProvider;
-use ecp_cli::session::overlay_reader::{accepted_fragments, decode_view_inputs};
+use ecp_cli::session::overlay_reader::{accepted_fragments, decode_view_inputs, view_inputs};
 use ecp_cli::session::overlay_writer::{
-    write_dirty_fragments_from_graphs, FragmentFileV3, FragmentSymbolV3,
+    write_dirty_events, write_dirty_fragments_from_graphs, FragmentFileV3, FragmentSymbolV3,
 };
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{LocalGraph, NameRef, NameRefKind, RawImport, RawNode, VariantRef};
+use ecp_core::contracts::dirty_event::{PathChange, PathClass};
 use ecp_core::graph::NodeKind;
 use ecp_core::session::{
-    DirtyEntry, DirtyFiles, OverlayFileInput, SessionMeta, FRAGMENT_FORMAT_V3, FRAGMENT_FORMAT_V4,
+    layout, DirtyEntry, DirtyEventEntry, DirtyEvents, DirtyFiles, OverlayFileInput, SessionMeta,
+    FRAGMENT_FORMAT_V3, FRAGMENT_FORMAT_V4,
 };
 use parity::{callees, calls_after_edit, Parity};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -44,8 +47,27 @@ fn make_session_dir(tmp: &Path, sid: &str) -> PathBuf {
         agent_name: None,
     };
     SessionMeta::write_atomic(&session_dir.join("session_meta.json"), &sm).unwrap();
-    DirtyFiles::write_atomic(&session_dir.join("dirty_files.json"), &DirtyFiles::empty()).unwrap();
+    DirtyEvents::write_atomic(
+        &layout::dirty_events_path(&session_dir),
+        &DirtyEvents::empty(ecp_core::config::resolve_size_cap(Path::new("/work/x"))),
+    )
+    .unwrap();
     session_dir
+}
+
+/// The manifest entry today's namespace holds for a legacy `entry`: the same
+/// mtime, hash, bin and format, recorded as a modified source file.
+fn event_from_legacy(entry: &DirtyEntry) -> DirtyEventEntry {
+    DirtyEventEntry {
+        change: PathChange::Modified,
+        class: PathClass::SOURCE,
+        mtime_ns: entry.mtime_ns,
+        fragment_id: Some(entry.fragment_id.clone()),
+        content_hash: Some(entry.content_hash.clone()),
+        parse_failed: entry.parse_failed,
+        dirty_symbols: entry.dirty_symbols.clone(),
+        format: entry.format,
+    }
 }
 
 fn rn(name: &str, owner: Option<&str>, calls: &[&str]) -> RawNode {
@@ -161,21 +183,22 @@ fn v1_format_entry_is_skipped() {
     let session_dir = make_session_dir(tmp.path(), "v1-sid");
     let mtime = write_worktree_file(&worktree, "src/old.rs");
 
-    let manifest = session_dir.join("dirty_files.json");
-    let mut df = DirtyFiles::read(&manifest).unwrap();
+    let manifest = layout::dirty_events_path(&session_dir);
+    let mut df = DirtyEvents::read(&manifest).unwrap();
     df.entries.insert(
         "src/old.rs".into(),
-        DirtyEntry {
+        DirtyEventEntry {
+            change: PathChange::Modified,
+            class: PathClass::SOURCE,
             mtime_ns: mtime,
-            content_hash: "cafe".into(),
-            fragment_id: "cafe".into(),
-            tantivy_delta_segment: None,
+            content_hash: Some("cafe".into()),
+            fragment_id: Some("cafe".into()),
             parse_failed: false,
             dirty_symbols: vec![],
             format: 1,
         },
     );
-    DirtyFiles::write_atomic(&manifest, &df).unwrap();
+    DirtyEvents::write_atomic(&manifest, &df).unwrap();
 
     let inputs = load_view_inputs(&session_dir, &worktree);
     assert!(
@@ -184,10 +207,11 @@ fn v1_format_entry_is_skipped() {
     );
 }
 
-/// The session ecp 0.14.8 left for a dirty `app.py`: a v2 bin in a manifest
-/// with no builder fingerprint. Only the recorded mtime is moved to the
-/// copied file's, so the mtime check alone would accept it. Its parse is
-/// another builder's, so the reader must serve the base graph instead.
+/// The session ecp 0.14.8 left for a dirty `app.py`: a v2 bin in a legacy
+/// `dirty_files.json` with no builder fingerprint. Only the recorded mtime is
+/// moved to the copied file's, so the mtime check alone would accept it. The
+/// reader opens `l1/` only and never the legacy namespace, so it must serve
+/// the base graph instead.
 #[test]
 fn test_load_view_inputs_session_written_by_0_14_8_returns_no_input() {
     let fixture =
@@ -209,17 +233,17 @@ fn test_load_view_inputs_session_written_by_0_14_8_returns_no_input() {
             .unwrap();
     manifest["entries"]["app.py"]["mtime_ns"] = mtime.into();
     std::fs::write(
-        session_dir.join("dirty_files.json"),
+        layout::legacy_dirty_files_path(&session_dir),
         serde_json::to_vec(&manifest).unwrap(),
     )
     .unwrap();
-    std::fs::create_dir_all(session_dir.join("graph_overlay")).unwrap();
+    std::fs::create_dir_all(layout::legacy_overlay_dir(&session_dir)).unwrap();
     std::fs::copy(
         fixture.join("graph_overlay/553e94275e6085db.bin"),
-        session_dir.join("graph_overlay/553e94275e6085db.bin"),
+        layout::legacy_overlay_dir(&session_dir).join("553e94275e6085db.bin"),
     )
     .unwrap();
-    let old = DirtyFiles::read(&session_dir.join("dirty_files.json")).unwrap();
+    let old = DirtyFiles::read(&layout::legacy_dirty_files_path(&session_dir)).unwrap();
     assert!(!old.from_current_builder());
     assert_eq!(old.entries["app.py"].mtime_ns, mtime);
 
@@ -361,7 +385,7 @@ fn test_load_view_inputs_two_fragments_for_one_file_serves_the_later() {
     assert_eq!(inputs[0].symbols[0].heritage, ["New"]);
 }
 
-/// A session whose `dirty_files.json` is stamped with `fingerprint` and names
+/// A session whose `l1/dirty_events.json` is stamped with `fingerprint` and names
 /// one v3 bin (`old_fn`, written with the v3 shape: no heritage, no variant
 /// refs) for `src/a.rs`. Returns `(session_dir, worktree)`.
 fn session_with_v3_bin(tmp: &Path, fingerprint: &str) -> (PathBuf, PathBuf) {
@@ -380,29 +404,29 @@ fn session_with_v3_bin(tmp: &Path, fingerprint: &str) -> (PathBuf, PathBuf) {
         imports: vec![],
         export_aliases: vec![],
     };
-    let overlay_dir = session_dir.join("graph_overlay");
-    std::fs::create_dir_all(&overlay_dir).unwrap();
+    std::fs::create_dir_all(layout::fragments_dir(&session_dir)).unwrap();
     std::fs::write(
-        overlay_dir.join("v3frag.bin"),
+        layout::fragment_path(&session_dir, "v3frag"),
         rkyv::to_bytes::<rkyv::rancor::Error>(&file).unwrap(),
     )
     .unwrap();
-    let manifest = session_dir.join("dirty_files.json");
-    let mut df = DirtyFiles::read(&manifest).unwrap();
-    df.builder_fingerprint = Some(fingerprint.to_string());
+    let manifest = layout::dirty_events_path(&session_dir);
+    let mut df = DirtyEvents::read(&manifest).unwrap();
+    df.builder_fingerprint = fingerprint.to_string();
     df.entries.insert(
         "src/a.rs".into(),
-        DirtyEntry {
+        DirtyEventEntry {
+            change: PathChange::Modified,
+            class: PathClass::SOURCE,
             mtime_ns: mtime,
-            content_hash: "h".into(),
-            fragment_id: "v3frag".into(),
-            tantivy_delta_segment: None,
+            content_hash: Some("h".into()),
+            fragment_id: Some("v3frag".into()),
             parse_failed: false,
             dirty_symbols: vec![],
             format: FRAGMENT_FORMAT_V3,
         },
     );
-    DirtyFiles::write_atomic(&manifest, &df).unwrap();
+    DirtyEvents::write_atomic(&manifest, &df).unwrap();
     (session_dir, worktree)
 }
 
@@ -414,9 +438,9 @@ fn test_load_view_inputs_v3_entry_under_current_fingerprint_returns_no_input() {
     let tmp = tempfile::tempdir().unwrap();
     let (session_dir, worktree) =
         session_with_v3_bin(tmp.path(), ecp_core::registry::BUILDER_FINGERPRINT);
-    assert!(DirtyFiles::read(&session_dir.join("dirty_files.json"))
+    assert!(DirtyEvents::read(&layout::dirty_events_path(&session_dir))
         .unwrap()
-        .from_current_builder());
+        .is_current(ecp_core::config::resolve_size_cap(&worktree)));
 
     let inputs = load_view_inputs(&session_dir, &worktree);
     assert!(inputs.is_empty(), "a v3 fragment was served: {inputs:?}");
@@ -424,8 +448,9 @@ fn test_load_view_inputs_v3_entry_under_current_fingerprint_returns_no_input() {
 
 /// The session ecp 0.15.0 left for a dirty `app.py`
 /// (`tests/fixtures/overlay-written-by-0.15.0`, see its README.txt): a v3 bin
-/// in a `v0.15.0+schema11` manifest. Only the recorded mtime is moved to the
-/// copied file's, so the mtime check alone would accept it. Returns
+/// in a legacy `v0.15.0+schema11` `dirty_files.json`. Only the recorded mtime
+/// is moved to the copied file's, so the mtime check alone would accept it.
+/// Returns
 /// `(session_dir, worktree)`.
 fn session_written_by_0_15_0(tmp: &Path) -> (PathBuf, PathBuf) {
     let fixture =
@@ -446,28 +471,28 @@ fn session_written_by_0_15_0(tmp: &Path) -> (PathBuf, PathBuf) {
             .unwrap();
     manifest["entries"]["app.py"]["mtime_ns"] = mtime.into();
     std::fs::write(
-        session_dir.join("dirty_files.json"),
+        layout::legacy_dirty_files_path(&session_dir),
         serde_json::to_vec(&manifest).unwrap(),
     )
     .unwrap();
-    std::fs::create_dir_all(session_dir.join("graph_overlay")).unwrap();
+    std::fs::create_dir_all(layout::legacy_overlay_dir(&session_dir)).unwrap();
     std::fs::copy(
         fixture.join("graph_overlay/e4bdd84a3e2d78f5.bin"),
-        session_dir.join("graph_overlay/e4bdd84a3e2d78f5.bin"),
+        layout::legacy_overlay_dir(&session_dir).join("e4bdd84a3e2d78f5.bin"),
     )
     .unwrap();
     (session_dir, worktree)
 }
 
-/// Contract: a manifest the previous release wrote is another builder's, so
-/// the view serves the base graph until a refresh replaces the manifest
-/// whole. Pass: no input, though the mtime matches. Fail: any input, which
-/// would bind calls from a parse without heritage.
+/// Contract: a manifest of the 0.15.0 release sits in the legacy namespace,
+/// which the reader never opens, so the view serves the base graph. Pass: no
+/// input, though the mtime matches. Fail: any input, which would bind calls
+/// from a parse without heritage.
 #[test]
 fn test_load_view_inputs_session_written_by_0_15_0_returns_no_input() {
     let tmp = tempfile::tempdir().unwrap();
     let (session_dir, worktree) = session_written_by_0_15_0(tmp.path());
-    let old = DirtyFiles::read(&session_dir.join("dirty_files.json")).unwrap();
+    let old = DirtyFiles::read(&layout::legacy_dirty_files_path(&session_dir)).unwrap();
     assert_eq!(old.builder_fingerprint.as_deref(), Some("v0.15.0+schema11"));
     assert_eq!(old.entries["app.py"].format, FRAGMENT_FORMAT_V3);
     assert!(!old.from_current_builder());
@@ -476,8 +501,10 @@ fn test_load_view_inputs_session_written_by_0_15_0_returns_no_input() {
     assert!(inputs.is_empty(), "another builder's fragment: {inputs:?}");
 }
 
-/// The session ecp 0.16.2 left for a dirty `app.py` is a native v4 bin.
-/// V5 is the first format with the facts required to rebuild dirty view edges.
+/// The v4 bin ecp 0.16.2 left for a dirty `app.py`, with its entry carried into
+/// `l1/dirty_events.json` under the running builder and cap: the one thing
+/// that makes the reader reject it is the entry's format. V5 is the first
+/// format with the facts required to rebuild dirty view edges.
 fn session_written_by_0_16_2(tmp: &Path) -> (PathBuf, PathBuf) {
     let fixture =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/overlay-written-by-0.16.2");
@@ -496,15 +523,18 @@ fn session_written_by_0_16_2(tmp: &Path) -> (PathBuf, PathBuf) {
         serde_json::from_str(&std::fs::read_to_string(fixture.join("dirty_files.json")).unwrap())
             .unwrap();
     manifest["entries"]["app.py"]["mtime_ns"] = mtime.into();
-    std::fs::write(
-        session_dir.join("dirty_files.json"),
-        serde_json::to_vec(&manifest).unwrap(),
-    )
-    .unwrap();
-    std::fs::create_dir_all(session_dir.join("graph_overlay")).unwrap();
+    let legacy: DirtyFiles = serde_json::from_value(manifest).unwrap();
+    let mut events = DirtyEvents::empty(ecp_core::config::resolve_size_cap(&worktree));
+    events.entries = legacy
+        .entries
+        .iter()
+        .map(|(path, entry)| (path.clone(), event_from_legacy(entry)))
+        .collect();
+    DirtyEvents::write_atomic(&layout::dirty_events_path(&session_dir), &events).unwrap();
+    std::fs::create_dir_all(layout::fragments_dir(&session_dir)).unwrap();
     std::fs::copy(
         fixture.join("graph_overlay/2e3d1df0cf371fbf.bin"),
-        session_dir.join("graph_overlay/2e3d1df0cf371fbf.bin"),
+        layout::fragment_path(&session_dir, "2e3d1df0cf371fbf"),
     )
     .unwrap();
     (session_dir, worktree)
@@ -514,13 +544,10 @@ fn session_written_by_0_16_2(tmp: &Path) -> (PathBuf, PathBuf) {
 fn test_load_view_inputs_v4_entry_under_current_fingerprint_returns_no_input() {
     let tmp = tempfile::tempdir().unwrap();
     let (session_dir, worktree) = session_written_by_0_16_2(tmp.path());
-    let manifest = session_dir.join("dirty_files.json");
-    let mut dirty = DirtyFiles::read(&manifest).unwrap();
-    dirty.builder_fingerprint = Some(ecp_core::registry::BUILDER_FINGERPRINT.into());
-    DirtyFiles::write_atomic(&manifest, &dirty).unwrap();
+    let dirty = DirtyEvents::read(&layout::dirty_events_path(&session_dir)).unwrap();
 
     assert_eq!(dirty.entries["app.py"].format, FRAGMENT_FORMAT_V4);
-    assert!(dirty.from_current_builder());
+    assert!(dirty.is_current(ecp_core::config::resolve_size_cap(&worktree)));
     assert!(
         load_view_inputs(&session_dir, &worktree).is_empty(),
         "v4 lacks the complete field reads and return types required by V5"
@@ -631,4 +658,89 @@ fn test_build_dirty_impl_removed_keeps_python_namesake_heritage_like_reindex() {
         "the reindex must bind the Python `A.m`, or the fixture proves nothing: {reindex:#?}"
     );
     assert_eq!(overlay, reindex);
+}
+
+/// Record `rel` as deleted, as the freshness gate does for a dirty source
+/// path absent at its stat.
+fn write_tombstone(session_dir: &Path, rel: &str) {
+    write_dirty_events(
+        session_dir,
+        ecp_core::config::resolve_size_cap(Path::new("/work/x")),
+        &[],
+        &[],
+        &HashMap::new(),
+        &[(rel.to_string(), PathClass::SOURCE)],
+    )
+    .unwrap();
+}
+
+/// Stands for: a tombstone is a removed path for the view while its file is
+/// absent, beside the fragments of the other dirty files. Once the file is
+/// back, the tombstone is no input and the base answers for it until the
+/// gate re-parses it; the hash follows, so no cached view of the deletion
+/// is served.
+#[test]
+fn test_view_inputs_tombstone_read_as_removed_path_while_file_absent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let worktree = tmp.path().join("wt");
+    let session_dir = make_session_dir(tmp.path(), "tomb-sid");
+    let mtime = write_worktree_file(&worktree, "src/dirty.rs");
+    let graph = graph_for("src/dirty.rs", vec![rn("free_fn", None, &[])], vec![]);
+    write_dirty_fragments_from_graphs(&session_dir, &[graph], &[mtime]).unwrap();
+    write_tombstone(&session_dir, "src/gone.rs");
+
+    let absent = view_inputs(&session_dir, &worktree).unwrap();
+    write_worktree_file(&worktree, "src/gone.rs");
+    let back = view_inputs(&session_dir, &worktree).unwrap();
+
+    assert_eq!(absent.tombstones, ["src/gone.rs"]);
+    assert_eq!(
+        decode_view_inputs(&absent.fragments)[0].rel_path,
+        "src/dirty.rs"
+    );
+    assert!(back.tombstones.is_empty(), "{:?}", back.tombstones);
+    assert_eq!(back.fragments.len(), 1);
+    assert_ne!(absent.hash, back.hash);
+    assert_eq!(
+        accepted_fragments(&session_dir, &worktree).unwrap().1,
+        back.hash,
+        "`accepted_fragments` hands out the same key share"
+    );
+}
+
+/// Stands for: a session whose only change is an `rm` still has a view to
+/// build: the inputs are not empty, though no fragment exists.
+#[test]
+fn test_view_inputs_tombstone_alone_is_not_empty() {
+    let tmp = tempfile::tempdir().unwrap();
+    let worktree = tmp.path().join("wt");
+    let session_dir = make_session_dir(tmp.path(), "tomb-only-sid");
+    let clean = view_inputs(&session_dir, &worktree).unwrap();
+    write_tombstone(&session_dir, "src/gone.rs");
+
+    let removed = view_inputs(&session_dir, &worktree).unwrap();
+
+    assert!(clean.is_empty());
+    assert!(!removed.is_empty());
+    assert!(removed.fragments.is_empty());
+    assert_eq!(removed.tombstones, ["src/gone.rs"]);
+    assert_ne!(removed.hash, clean.hash);
+}
+
+/// Stands for: a tombstone in a manifest of another size cap is parse
+/// output of other rules, like its fragments: none of it is served.
+#[test]
+fn test_view_inputs_tombstone_under_other_cap_is_skipped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let worktree = tmp.path().join("wt");
+    let session_dir = make_session_dir(tmp.path(), "tomb-cap-sid");
+    write_tombstone(&session_dir, "src/gone.rs");
+    let manifest = layout::dirty_events_path(&session_dir);
+    let mut events = DirtyEvents::read(&manifest).unwrap();
+    events.size_cap_bytes += 1;
+    DirtyEvents::write_atomic(&manifest, &events).unwrap();
+
+    let inputs = view_inputs(&session_dir, &worktree).unwrap();
+
+    assert!(inputs.is_empty(), "{:?}", inputs.tombstones);
 }

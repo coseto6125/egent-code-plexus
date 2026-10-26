@@ -74,6 +74,41 @@ fn spawn_subprocess_failure_returns_err_with_stderr() {
     assert!(err.to_string().contains("boom"));
 }
 
+/// Stands for: a refusal (an ambiguous `impact` target) prints its
+/// re-runnable candidates and caveat on stdout before the non-zero exit, so
+/// the error an MCP client gets must carry them, beside stderr.
+#[test]
+#[cfg(unix)]
+fn test_run_spawn_nonzero_exit_with_stdout_payload_err_carries_payload() {
+    let _guard = stub_guard();
+    let dir = TempDir::new().unwrap();
+    let stub = write_stub(
+        dir.path(),
+        "#!/bin/sh\necho '{\"status\":\"ambiguous\",\"candidates\":[{\"target\":\"load --file K.java\"}],\"result\":\"could not pair\"}'\necho 'ambiguous target' >&2\nexit 2\n",
+    );
+    let tool = dummy_tool("impact");
+    let err = run_spawn(&stub, &tool, &json!({})).unwrap_err().to_string();
+    for part in [
+        "ambiguous target",
+        "candidates",
+        "load --file K.java",
+        "could not pair",
+    ] {
+        assert!(err.contains(part), "missing {part:?}: {err}");
+    }
+}
+
+/// Stands for: a failure with nothing on stdout keeps the stderr-only error.
+#[test]
+fn test_run_spawn_nonzero_exit_empty_stdout_err_has_no_stdout_section() {
+    let _guard = stub_guard();
+    let dir = TempDir::new().unwrap();
+    let stub = write_stub(dir.path(), "#!/bin/sh\necho 'boom' >&2\nexit 1\n");
+    let tool = dummy_tool("inspect");
+    let err = run_spawn(&stub, &tool, &json!({})).unwrap_err().to_string();
+    assert!(err.contains("boom") && !err.contains("stdout:"), "{err}");
+}
+
 #[test]
 fn spawn_peels_subcmd_arg_as_first_prefix() {
     let _guard = stub_guard();

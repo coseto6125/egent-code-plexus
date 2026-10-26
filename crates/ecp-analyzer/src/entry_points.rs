@@ -33,6 +33,7 @@
 //! downstream LLM inspection.
 
 use ecp_core::analyzer::types::{RawFrameworkRef, RawNode, RawRoute};
+use ecp_core::contracts::raw_records::RawEndpoint;
 use ecp_core::graph::NodeKind;
 
 /// One scored entry point. The builder emits one `NodeKind::EntryPoint`
@@ -111,18 +112,22 @@ pub fn score_entry_points(
 
     // 1. Routes — strongest signal (1.0).
     for route in routes {
-        let Some(handler) = &route.handler else {
-            // Imperative `app.get(...)` with no extracted handler name
-            // is registered as a Route node directly by the builder; it
-            // doesn't have a function symbol to mark as an entry point.
+        // The bound declaration's name, or the name the source writes. A
+        // route with no handler, or with an inline function, has no
+        // declaration to mark as an entry point.
+        let handler = match route.bind(nodes) {
+            Some(RawEndpoint::Node(idx)) => nodes
+                .get(idx.index())
+                .map(|node| node.name.as_str())
+                .filter(|name| !name.starts_with("<anonymous")),
+            _ => route.handler_name(),
+        };
+        let Some(handler) = handler else {
             continue;
         };
-        if handler.is_empty() {
-            continue;
-        }
         let reason = format!("route:{} {}", route.method, route.path);
         acc.push(EntryPoint {
-            uid: handler.clone(),
+            uid: handler.to_string(),
             kind: EntryKind::HttpRoute,
             score: 1.0,
             reason,
@@ -135,16 +140,14 @@ pub fn score_entry_points(
     // (mirroring builder Pass 1.5's loop, but only to extract the
     // handler name) so the scorer doesn't miss decorator-style routes.
     for node in nodes {
-        for dec in &node.decorators {
-            if let Some(detected) = crate::route_detector::detect_from_decorator(dec) {
-                let reason = format!("route:{} {}", detected.method, detected.path);
-                acc.push(EntryPoint {
-                    uid: node.name.clone(),
-                    kind: EntryKind::HttpRoute,
-                    score: 1.0,
-                    reason,
-                });
-            }
+        for detected in crate::route_detector::node_decorator_routes(node, nodes) {
+            let reason = format!("route:{} {}", detected.method, detected.path);
+            acc.push(EntryPoint {
+                uid: node.name.clone(),
+                kind: EntryKind::HttpRoute,
+                score: 1.0,
+                reason,
+            });
         }
     }
 
@@ -397,7 +400,7 @@ mod tests {
         let routes = vec![RawRoute {
             method: "GET".into(),
             path: "/items".into(),
-            handler: Some("read_items".into()),
+            handler: RawRoute::named_handler(Some("read_items")),
             span: (0, 0, 0, 0),
             scope: None,
         }];
@@ -499,14 +502,14 @@ mod tests {
             RawRoute {
                 method: "GET".into(),
                 path: "/a".into(),
-                handler: Some("zzz_handler".into()),
+                handler: RawRoute::named_handler(Some("zzz_handler")),
                 span: (0, 0, 0, 0),
                 scope: None,
             },
             RawRoute {
                 method: "GET".into(),
                 path: "/b".into(),
-                handler: Some("aaa_handler".into()),
+                handler: RawRoute::named_handler(Some("aaa_handler")),
                 span: (0, 0, 0, 0),
                 scope: None,
             },
@@ -563,7 +566,7 @@ mod tests {
         let routes = vec![RawRoute {
             method: "GET".into(),
             path: "/items".into(),
-            handler: Some("list_items".into()),
+            handler: RawRoute::named_handler(Some("list_items")),
             span: (0, 0, 0, 0),
             scope: None,
         }];

@@ -402,15 +402,16 @@ fn path_steps_carry_their_relation_type() {
 /// payload otherwise tells the caller that an unreachable pair is a real
 /// answer, which here would be a lie.
 ///
-/// Contract: the miss carries a caveat naming the collision. `ecp impact`
-/// keeps the same contract for the same reason.
+/// Contract: once `--to-file` selects one definition, the miss still carries a
+/// caveat naming the collision. `ecp impact` keeps the same contract for the
+/// same reason.
 #[test]
 fn path_miss_admits_when_a_same_name_collision_suppressed_edges() {
     let tmp = tempfile::tempdir().unwrap();
     indexed_polyglot_repo(tmp.path());
 
-    let out = run_path(tmp.path(), &["run_all", "dupe"]);
-    assert_eq!(out["toCandidates"].as_u64(), Some(2), "{out}");
+    let out = run_path(tmp.path(), &["run_all", "dupe", "--to-file", "amb_a"]);
+    assert_eq!(out["toCandidates"].as_u64(), Some(1), "{out}");
     let caveat = out["result"].as_str().unwrap_or_default();
     assert!(
         caveat.contains("same-named definitions"),
@@ -418,25 +419,40 @@ fn path_miss_admits_when_a_same_name_collision_suppressed_edges() {
     );
 }
 
-/// `--to-file` narrows an overloaded endpoint to one definition. Contract: the
-/// candidate count drops, so the caller can ask about a specific definition
-/// instead of accepting whichever one the walk happened to reach.
+/// A bare endpoint name with two definitions is an ambiguity on that side,
+/// and each candidate carries the flag that selects it. Contract: the walk
+/// never seeds from both definitions at once, and the `--from-file` /
+/// `--to-file` flag a candidate names narrows the endpoint to one definition.
 #[test]
-fn path_endpoint_file_filter_narrows_the_candidate_set() {
+fn path_ambiguous_endpoint_names_the_flag_that_selects_each_definition() {
     let tmp = tempfile::tempdir().unwrap();
     indexed_polyglot_repo(tmp.path());
 
-    let wide = run_path(tmp.path(), &["run_all", "dupe"]);
-    assert_eq!(wide["toCandidates"].as_u64(), Some(2), "{wide}");
+    for (args, side, flag) in [
+        (
+            ["run_all", "dupe", "--direction", "down"],
+            "to",
+            "--to-file",
+        ),
+        (
+            ["dupe", "run_all", "--direction", "up"],
+            "from",
+            "--from-file",
+        ),
+    ] {
+        let wide = run_path(tmp.path(), &args);
+        assert_eq!(wide["status"], "ambiguous", "{wide}");
+        assert_eq!(wide["side"], side, "{wide}");
+        let candidates = wide["candidates"].as_array().expect("candidates");
+        assert_eq!(candidates.len(), 2, "{wide}");
+        for c in candidates {
+            let target = c["target"].as_str().unwrap_or_default();
+            assert!(target.contains(flag), "{side} candidate lacks {flag}: {c}");
+        }
+    }
 
     let narrow = run_path(tmp.path(), &["run_all", "dupe", "--to-file", "amb_a"]);
     assert_eq!(narrow["toCandidates"].as_u64(), Some(1), "{narrow}");
-
-    // The FROM side takes the same treatment; a flag that only worked on one
-    // endpoint would be worse than no flag.
-    let from_wide = run_path(tmp.path(), &["dupe", "run_all", "--direction", "up"]);
-    assert_eq!(from_wide["fromCandidates"].as_u64(), Some(2), "{from_wide}");
-
     let from_narrow = run_path(
         tmp.path(),
         &[
@@ -589,4 +605,59 @@ fn path_test_file_endpoint_is_found_from_either_end() {
     let up = run_path(tmp.path(), &["prod_end", "t_bridge", "--direction", "up"]);
     assert_eq!(down["found"].as_bool(), Some(true), "{down}");
     assert_eq!(up["found"].as_bool(), Some(true), "{up}");
+}
+
+/// Stands for: `path` and `impact` agree on the parts of a C# partial type.
+/// `Reader.Async.cs` is a non-representative part; `TextReader : Reader`
+/// gives an `Extends` edge that lands on the representative part. `impact` joins the parts at zero
+/// steps, so `path` from the async part reaches `TextReader` at one hop.
+/// Failed before: `shortest_path` did not join the parts and answered
+/// `found: false`.
+#[test]
+fn path_partial_type_non_representative_part_reaches_base_class() {
+    let tmp = tempfile::tempdir().unwrap();
+    // The project file is the evidence that the parts compile together.
+    write(
+        tmp.path(),
+        "Lib/Lib.csproj",
+        "<Project Sdk=\"Microsoft.NET.Sdk\"></Project>\n",
+    );
+    write(
+        tmp.path(),
+        "Lib/TextReader.cs",
+        "namespace Lib { public class TextReader : Reader { } }\n",
+    );
+    write(
+        tmp.path(),
+        "Lib/Reader.cs",
+        "namespace Lib { public partial class Reader { public int Read() { return 1; } } }\n",
+    );
+    write(
+        tmp.path(),
+        "Lib/Reader.Async.cs",
+        "namespace Lib { public partial class Reader { public int ReadAsync() { return 2; } } }\n",
+    );
+    init_and_analyze(tmp.path());
+
+    let out = run_path(
+        tmp.path(),
+        &[
+            "Reader",
+            "TextReader",
+            "--from-file",
+            "Reader.Async.cs",
+            "--direction",
+            "up",
+            "--depth",
+            "1",
+        ],
+    );
+
+    assert_eq!(out["found"].as_bool(), Some(true), "{out}");
+    let names = step_names(&out);
+    assert_eq!(
+        names.last().map(String::as_str),
+        Some("TextReader"),
+        "{out}"
+    );
 }

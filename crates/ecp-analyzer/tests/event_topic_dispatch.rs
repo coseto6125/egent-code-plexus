@@ -120,7 +120,7 @@ fn test_canonicalize_applied_when_enabled() {
     let result = run(&src, TOPIC_QUERY, &[CONFIG_KAFKA], &["kafka"]);
 
     assert_eq!(result.len(), 1);
-    let emitted = result[0].topic_literal.as_deref().expect("topic_literal");
+    let emitted = result[0].topic_key.as_deref().expect("topic_key");
     let expected = canonicalize(raw_topic);
     assert_eq!(
         emitted, expected,
@@ -147,7 +147,7 @@ fn test_canonicalize_skipped_when_disabled() {
     let result = run(&src, TOPIC_QUERY, &[CONFIG_RAW], &["kafka"]);
 
     assert_eq!(result.len(), 1);
-    let emitted = result[0].topic_literal.as_deref().expect("topic_literal");
+    let emitted = result[0].topic_key.as_deref().expect("topic_key");
     assert_eq!(
         strip_quotes(emitted),
         raw_topic,
@@ -236,7 +236,7 @@ fn test_direction_classifier_invoked() {
         "classify_amqp_direction(\"consume\") must produce PubSub::Subscribe"
     );
     assert_eq!(
-        result[0].topic_literal.as_deref().expect("topic_literal"),
+        result[0].topic_key.as_deref().expect("topic_key"),
         "order.placed",
         "topic text must be emitted verbatim (canonicalize=false)"
     );

@@ -1,6 +1,6 @@
 # C2: workspace facts
 
-Status: contract, phase 1, revised after the codex review. Types: `crates/ecp-core/src/contracts/workspace.rs`. No code calls them yet.
+Status: contract, phase 1, revised after the codex review. Types: `crates/ecp-core/src/contracts/workspace.rs`. Landed in R1c: `graph.bin` stores the Cargo rows; the overlay view reads them for a `<crate_name>::` head. Gaps that stay: `#[path]` modules, `pub use` chains behind a crate head, inline `mod` blocks, and the shorter-prefix fallback of `resolve_in_crate`. Not yet adopted: every other ecosystem, `scope_of` and the dependency map.
 
 Plan row (`docs/specs/2026-10-25-architecture-direction.md`, "Contracts before code"): resolution scope per file, scope root, effective config, dependency map; stored once, read by index, overlay, flow and the `Imports` pass. Consumers: area 1 (the Rust subset in B's first round), area 4, area 5 (the invalidation closure).
 
@@ -16,7 +16,7 @@ Every path in the table is repo-relative and `/`-separated. It has no leading `.
 
 | Type | Kind | Purpose |
 |---|---|---|
-| `Ecosystem` | stored enum, `u8` | The package ecosystem whose config files make a scope: `Cargo`, `Node`, `Go`, `Python`, `DotNet`. |
+| `Ecosystem` | stored enum, `u8` | The package ecosystem whose config files make a scope: `Cargo`, `Node`, `Go`, `Python`, `DotNet`, `Composer`, `SwiftPm` (the last two appended by R-A4a). |
 | `ConfigRole` | enum | What a config file name does: `Root` can make its directory a scope root; `Contributing` only adds to the configs that read it. |
 | `ConfigRead`, `ConfigPresence` | stored row, enum | One config path the producer tried to read: `Read` or `Missing`. |
 | `Membership` | stored enum | Which files under the root belong to a scope: `Subtree` or `Listed(files)`. |
@@ -53,7 +53,7 @@ All functions are pure. None reads the file system.
 
 | Function | Rule |
 |---|---|
-| `Ecosystem::for_language(Language)` | The ecosystem whose scopes resolve a file of that language. It takes C5's `contracts::routing::Language`, called with `ParsedLanguage::resolution()`. TypeScript, JavaScript, Vue, Astro and Svelte map to `Node`; Rust to `Cargo`; Go to `Go`; Python to `Python`; C# to `DotNet`; the other 27 languages to `None`. The `match` has no wildcard arm. |
+| `Ecosystem::for_language(Language)` | The ecosystem whose scopes resolve a file of that language. It takes C5's `contracts::routing::Language`, called with `ParsedLanguage::resolution()`. TypeScript, JavaScript, Vue, Astro and Svelte map to `Node`; Rust to `Cargo`; Go to `Go`; Python to `Python`; C# to `DotNet`; PHP to `Composer`; Swift to `SwiftPm`; the other 25 languages to `None`. The `match` has no wildcard arm. |
 | `Ecosystem::classify_config(file_name)` | The ecosystem and role of a config file by its name alone (table below). |
 | `WorkspaceFacts::new`, `validate` | `new` returns the table only when every invariant above holds. A reader runs `validate` once on a table it did not build. |
 | `scopes_at(ecosystem, root)` | Every scope whose root is exactly `root`, in table order. |
@@ -80,8 +80,10 @@ Config file names:
 | `go.work` | Go | Contributing |
 | `pyproject.toml` | Python | Root |
 | `*.csproj` | DotNet | Root |
+| `composer.json` | Composer | Root |
+| `Package.swift` | SwiftPm | Root |
 
-These are the files that `parse_configs` reads today. Any other config path, such as `tsconfig.base.json` or a missing `config/base.json`, is a config only because a scope lists it.
+These are the files that `config_parser::parse_repo_configs` reads (R-A4a). Any other config path, such as `tsconfig.base.json` or a missing `config/base.json`, is a config only because a scope lists it.
 
 `invalidated_by(path)` collects, in this order:
 
@@ -131,7 +133,7 @@ Values with no mapping:
 | `ModTree`, `ReExportMap`, `targets`, `file_targets` (`module_tree.rs:121`, `:144`, `:164-167`) | They come from source files, not from config. They stay with area 1's module-tree facts. |
 | Cargo alias rows `name/*` → `src/*` and `name` → `src/lib.rs`, `src/main.rs` (`config_parser.rs:70-75`) | `names` plus `entry_files` replace them. They stay in `alias_table` until area 4, so index edges do not change in B's first round. |
 | pyproject `name/*` → `src/name/*`, `name/*` (`config_parser.rs:86-89`) | Area 4 decides between this alias and `search_roots`. The name comes from the TOML table: `[project] name`, else `[tool.poetry] name` (`:79-85`, through `read_toml` `:179` and `toml_str` `:183`). |
-| `CsprojMeta`, `GlobalJsonMeta`, `NugetConfigMeta`, `ComposerJsonMeta`, `SwiftPackageMeta` (`config_parser.rs:357`, `:374`, `:383`, `:397`, `:420`) | `parse_global_json` (`:518`), `parse_nuget_config` (`:532`), `parse_single_composer_json` (`:562`) and `parse_single_swift_package` (`:603`) have no production caller. The file allows dead code (`:1-4`). Area 4 adds `Ecosystem` variants for them. |
+| `CsprojMeta`, `ComposerJsonMeta`, `SwiftPackageMeta` (`config_parser.rs:357`, `:397`, `:420`) | `GlobalJsonMeta`, `NugetConfigMeta`, `parse_global_json` and `parse_nuget_config` were deleted in 2e87d2d3. R-A4a added the `Composer` and `SwiftPm` variants and reads `parse_single_composer_json` for the Composer row. `parse_single_swift_package` still has test callers only (`crates/ecp-cli/tests/config_php_swift.rs`). |
 | `[dependencies]` of a crate | Not read today. B's first round can fill `Scope.dependencies` (recommended); the lookup does not use them in that round (Open point 3). |
 
 ## Consumers
@@ -204,7 +206,7 @@ Old graphs: a graph without the field fails the version check and rebuilds. Proo
 ## Open points
 
 1. **Per-file scope: a rule or a stored column.** The plan says "resolution scope per file". (a) The rule `scope_of(path, ecosystem)`, as typed: deepest admitting root, with `Membership` deciding inside one root. No column, and a new dirty file gets the same answer as an indexed one. (b) A dense `file_scope: Vec<u32>` keyed by file index: O(1), but a second source of truth, and no value for a file the index did not see. Recommendation: (a), which is complete only with the membership rule of the types (codex rider). Add a per-view memo if a profile shows the cost.
-2. **Duplicate primary names.** Today the last member with a code name wins, with no marker (`module_tree.rs:249`). `lookup_name` returns `Ambiguous`. (a) B's first round writes only the last claimant, so the overlay matches the index. (b) Both sides adopt `Ambiguous` and a baseline file lists the changed edges. Recommendation: (a) in the first round, (b) in area 4.
+2. **Duplicate primary names.** Today the last member with a code name wins, with no marker (`module_tree.rs:249`). `lookup_name` returns `Ambiguous`. (a) B's first round writes only the last claimant, so the overlay matches the index. (b) Both sides adopt `Ambiguous` and a baseline file lists the changed edges. Recommendation: (a) in the first round, (b) in area 4. Landed: (a). The rows read every member the index registers: a re-listed member counts at its last listing, and a member outside the repo has no row but still takes its code name from an earlier member and blocks a package spelling equal to it.
 3. **Dependency-restricted lookup.** Today any member name resolves (`module_tree.rs:292`). The contract carries the dependency map. Recommendation: the first round keeps the workspace-wide lookup on both sides. Area 4 switches both sides to "caller's dependencies first" in one slice.
 4. **Fallback to an ancestor alias table.** codegraph tries the nearest config, then the root map. The contract folds every inherited file into the scope at build time, and it has no query-time chain. Recommendation: no fallback for a scope with its own config that does not extend the root. If a later slice adds one, its hit carries its own reason and a confidence below 0.7.
 5. **`ecp flow` loads no graph** (`commands/flow.rs:1`). (a) Flow maps `graph.bin` and reads the table. (b) Flow runs the same producer over the config files at its ref. Recommendation: (b). The rule stays "one producer", and flow keeps its no-index promise. Rider: the plan's C2 row says "read by … flow", so the plan must list flow's exception: flow reads no stored table. The coordinator owns that plan edit.

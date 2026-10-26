@@ -54,9 +54,9 @@ async fn publish_order(channel: &Channel, body: Vec<u8>) {
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Publish);
     let lit = result[0]
-        .topic_literal
+        .topic_key
         .as_deref()
-        .expect("topic_literal must be Some");
+        .expect("topic_key must be Some");
     assert_eq!(lit, "orders");
 }
 
@@ -80,9 +80,9 @@ async fn consume_orders(channel: &Channel) {
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Subscribe);
     let lit = result[0]
-        .topic_literal
+        .topic_key
         .as_deref()
-        .expect("topic_literal must be Some");
+        .expect("topic_key must be Some");
     assert_eq!(lit, "orders");
 }
 
@@ -101,9 +101,9 @@ async fn poll_queue(channel: &Channel) {
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Subscribe);
     let lit = result[0]
-        .topic_literal
+        .topic_key
         .as_deref()
-        .expect("topic_literal must be Some");
+        .expect("topic_key must be Some");
     assert_eq!(lit, "task/queue");
 }
 
@@ -128,9 +128,9 @@ fn send_notification(channel: &Channel, body: &[u8]) {
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Publish);
     let lit = result[0]
-        .topic_literal
+        .topic_key
         .as_deref()
-        .expect("topic_literal must be Some");
+        .expect("topic_key must be Some");
     assert_eq!(lit, "email");
 }
 
@@ -200,12 +200,12 @@ async fn receive_event(channel: &Channel) {
     assert!(subscribe.is_some(), "must have a Subscribe event");
     let pub_lit = publish
         .unwrap()
-        .topic_literal
+        .topic_key
         .as_deref()
         .expect("publish topic must be Some");
     let sub_lit = subscribe
         .unwrap()
-        .topic_literal
+        .topic_key
         .as_deref()
         .expect("subscribe topic must be Some");
     assert_eq!(pub_lit, "payments");

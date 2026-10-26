@@ -240,3 +240,44 @@ fn kotlin_nested_function_has_function_meta() {
     assert!(outer.is_static());
     assert_eq!(inner.params.len(), 2);
 }
+
+/// Stands for: a Kotlin decorator list shows the annotations the source
+/// wrote and none of the parser's internal markers. An `override fun` carries
+/// the override sentinel in `RawNode::decorators`; before the fix
+/// `FunctionMeta.decorators` listed `__override__` beside `Deprecated`.
+#[test]
+fn test_function_meta_kotlin_override_marker_not_decorator() {
+    let src = "open class B { open fun m() {} }\nclass D : B() { @Deprecated(\"x\") override fun m() {} }\n";
+    let g = analyze(src);
+    let pool = g.string_pool.as_slice();
+    let overriding: Vec<Vec<&str>> = g
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| n.kind == NodeKind::Method && n.name.resolve(pool) == "m")
+        .filter_map(|(i, _)| g.function_meta(i as u32))
+        .map(|m| m.decorators.iter().map(|d| d.resolve(pool)).collect())
+        .filter(|names: &Vec<&str>| names.contains(&"Deprecated"))
+        .collect();
+    assert_eq!(overriding, [["Deprecated"]]);
+    assert!(overriding.iter().flatten().all(|d| !d.starts_with("__")));
+}
+
+/// Stands for: an `override fun` with no annotation has an empty decorator
+/// list; the override sentinel is the only entry the parser writes for it.
+#[test]
+fn test_function_meta_kotlin_override_without_annotation_empty_decorators() {
+    let src = "open class B { open fun m() {} }\nclass D : B() { override fun m() {} }\n";
+    let g = analyze(src);
+    let pool = g.string_pool.as_slice();
+    let all: Vec<Vec<&str>> = g
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| n.kind == NodeKind::Method && n.name.resolve(pool) == "m")
+        .filter_map(|(i, _)| g.function_meta(i as u32))
+        .map(|m| m.decorators.iter().map(|d| d.resolve(pool)).collect())
+        .collect();
+    assert_eq!(all.len(), 2, "both B.m and D.m have FunctionMeta");
+    assert!(all.iter().all(|names| names.is_empty()), "got: {all:?}");
+}

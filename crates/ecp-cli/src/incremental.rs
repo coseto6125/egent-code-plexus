@@ -22,6 +22,7 @@
 //!   Pre-v10: any file with non-empty `schema_fields` forced FullReanalyze
 //!   (conservative fallback). Post-v10: compare new vs old name set per file.
 
+use ecp_core::analyzer::lexical::{file_uids, raw_decl};
 use ecp_core::analyzer::types::{LocalGraph, RawImport};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::PathBuf;
@@ -84,8 +85,7 @@ pub struct SymbolHashDiff {
 /// `new_graphs` files as explicitly changed (disables guard (b)).
 ///
 /// `old_schema_field_names` is a per-file map of `SchemaField` names from
-/// the old graph (use `schema_field_names_per_file` to build from an
-/// `ArchivedZeroCopyGraph`). When the new file's schema_field name-set
+/// the old graph, built by the caller. When the new file's schema_field name-set
 /// matches the old, guard (c) clears. Pass an empty map to retain the
 /// pre-v10 conservative fallback (any non-empty schema_fields →
 /// FullReanalyze).
@@ -179,15 +179,14 @@ pub fn symbol_hash_diff(
 
         // All guards clear — diff per-symbol content_hash.
         let mut changed_uids: FxHashSet<u64> = FxHashSet::default();
-        for node in &lg.nodes {
+        for (node, uid) in lg.nodes.iter().zip(node_uids_for(lg)) {
             // Synthetic nodes (content_hash == 0) are always re-emitted —
             // their "body" is derived from surrounding context, not raw bytes.
             if node.content_hash == 0 {
-                changed_uids.insert(node_uid_for(lg, node));
+                changed_uids.insert(uid);
                 resolve_count += 1;
                 continue;
             }
-            let uid = node_uid_for(lg, node);
             match old_symbol_hashes.get(&uid) {
                 Some(&old_hash) if old_hash == node.content_hash => {
                     // Unchanged body — skip.
@@ -223,34 +222,6 @@ pub fn build_old_hash_map(nodes: &[ecp_core::graph::Node]) -> FxHashMap<u64, u64
         .collect()
 }
 
-/// Build the old SchemaField name-set per file from an archived graph for
-/// use as the `old_schema_field_names` argument to `symbol_hash_diff`.
-/// Uses the v10 `nodes_by_kind(SchemaField)` CSR — O(SchemaField count),
-/// not O(N). Falls back to a linear scan on legacy v9 graphs.
-pub fn schema_field_names_per_file(
-    graph: &ecp_core::graph::ArchivedZeroCopyGraph,
-) -> FxHashMap<String, FxHashSet<String>> {
-    let mut out: FxHashMap<String, FxHashSet<String>> = FxHashMap::default();
-    for idx in graph.nodes_by_kind(ecp_core::graph::NodeKind::SchemaField) {
-        let n = &graph.nodes[idx as usize];
-        if !n.has_owning_file() {
-            continue;
-        }
-        let raw_path = graph.files[n.file_idx.to_native() as usize]
-            .path
-            .resolve(&graph.string_pool);
-        let path_str = if raw_path.contains('\\') {
-            raw_path.replace('\\', "/")
-        } else {
-            raw_path.to_owned()
-        };
-        out.entry(path_str)
-            .or_default()
-            .insert(n.name.resolve(&graph.string_pool).to_string());
-    }
-    out
-}
-
 /// Build the old import-set map from a slice of `LocalGraph`s (the parse
 /// results stored in the previous analysis pass, if available). Each entry
 /// is `path → sorted (source, name)` pairs.
@@ -279,21 +250,17 @@ fn import_set_key(imports: &[RawImport]) -> Vec<(String, String)> {
     pairs
 }
 
-/// Compute the canonical xxh3-64 UID for a `RawNode` using the same
-/// algorithm as `GraphBuilder` Pass 1 (`ecp_core::uid::compute`).
-fn node_uid_for(lg: &LocalGraph, node: &ecp_core::analyzer::types::RawNode) -> u64 {
+/// The uid `GraphBuilder` Pass 1 stores for each node of `lg`, in node
+/// order: a later overload numbered, a later same-uid redefinition a
+/// tombstone (`ecp_core::analyzer::lexical::file_uids`).
+pub fn node_uids_for(lg: &LocalGraph) -> Vec<u64> {
     let raw_path = lg.file_path.to_string_lossy();
     let path_str: std::borrow::Cow<'_, str> = if raw_path.contains('\\') {
         std::borrow::Cow::Owned(raw_path.replace('\\', "/"))
     } else {
         raw_path
     };
-    ecp_core::uid::compute(
-        node.kind,
-        &path_str,
-        node.owner_class.as_deref(),
-        &node.name,
-    )
+    file_uids(&path_str, &lg.nodes, raw_decl)
 }
 
 #[cfg(test)]
@@ -335,6 +302,7 @@ mod tests {
             documents: vec![],
             imports,
             routes: vec![],
+            route_receivers: None,
             framework_refs: vec![],
             fanout_refs: vec![],
             blind_spots: vec![],
@@ -346,6 +314,7 @@ mod tests {
             call_metas: vec![],
             raw_function_metas: vec![],
             export_aliases: None,
+            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
         }
     }
 
@@ -353,7 +322,7 @@ mod tests {
     fn test_unchanged_body_skips_resolver() {
         let node = rn("my_func", NodeKind::Function, 0xABCD_1234);
         let graph = lg("src/a.py", vec![node.clone()], vec![]);
-        let uid = node_uid_for(&graph, &graph.nodes[0]);
+        let uid = node_uids_for(&graph)[0];
 
         let mut old_hashes = FxHashMap::default();
         old_hashes.insert(uid, 0xABCD_1234u64);
@@ -377,12 +346,44 @@ mod tests {
     }
 
     #[test]
+    fn test_symbol_hash_diff_unchanged_later_overload_skipped() {
+        let save = |content_hash| RawNode {
+            owner_class: Some("A".to_string()),
+            ..rn("save", NodeKind::Method, content_hash)
+        };
+        let graph = lg("src/A.java", vec![save(0x10), save(0x20)], vec![]);
+        // The uids the full build stored: the first `save` and its overload 1.
+        let first = ecp_core::uid::compute(NodeKind::Method, "src/A.java", Some("A"), "save");
+        let twin = ecp_core::uid::overload(first, 1);
+        // Only the first overload's body changed since that build.
+        let old_hashes = FxHashMap::from_iter([(first, 0x11), (twin, 0x20)]);
+
+        let result = symbol_hash_diff(
+            &old_hashes,
+            &FxHashMap::default(),
+            &FxHashMap::default(),
+            &[graph],
+            &[],
+        );
+        assert_eq!(result.skipped_count, 1, "the unchanged twin is skipped");
+        assert_eq!(result.resolve_count, 1);
+        match result.decisions.get("src/A.java") {
+            Some(FileDiffDecision::PartialResolve { changed_uids }) => assert_eq!(
+                changed_uids,
+                &FxHashSet::from_iter([first]),
+                "only the edited overload re-resolves"
+            ),
+            other => panic!("expected PartialResolve, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_guard_c_clears_when_schema_field_names_unchanged() {
         use ecp_core::analyzer::types::{FrameworkId, RawSchemaField, SchemaType};
 
         let node = rn("User", NodeKind::Class, 0xDEAD_BEEF);
         let mut graph = lg("src/models.py", vec![node.clone()], vec![]);
-        let uid = node_uid_for(&graph, &graph.nodes[0]);
+        let uid = node_uids_for(&graph)[0];
 
         // New file has two schema fields: name + email.
         graph.schema_fields = Some(
@@ -393,6 +394,7 @@ mod tests {
                     owner_class: "User".into(),
                     framework: FrameworkId::Pydantic,
                     span: (1, 0, 1, 4),
+                    endpoint: None,
                 },
                 RawSchemaField {
                     name: "email".into(),
@@ -400,6 +402,7 @@ mod tests {
                     owner_class: "User".into(),
                     framework: FrameworkId::Pydantic,
                     span: (2, 0, 2, 5),
+                    endpoint: None,
                 },
             ]
             .into_boxed_slice(),
@@ -445,6 +448,7 @@ mod tests {
                 owner_class: "User".into(),
                 framework: FrameworkId::Pydantic,
                 span: (3, 0, 3, 14),
+                endpoint: None,
             }]
             .into_boxed_slice(),
         );
@@ -483,8 +487,7 @@ mod tests {
 
         // Build old hashes: fn3 gets a different hash → changed.
         let mut old_hashes: FxHashMap<u64, u64> = FxHashMap::default();
-        for (i, node) in nodes.iter().enumerate() {
-            let uid = node_uid_for(&graph, node);
+        for (i, (node, uid)) in nodes.iter().zip(node_uids_for(&graph)).enumerate() {
             let hash = if i == 2 {
                 node.content_hash + 1 // fn3 body changed
             } else {
@@ -524,8 +527,7 @@ mod tests {
             FxHashMap::from_iter([("src/c.py".to_string(), vec![])]);
 
         let mut old_hashes: FxHashMap<u64, u64> = FxHashMap::default();
-        for node in &nodes {
-            let uid = node_uid_for(&graph, node);
+        for (node, uid) in nodes.iter().zip(node_uids_for(&graph)) {
             old_hashes.insert(uid, node.content_hash);
         }
 
@@ -565,7 +567,7 @@ mod tests {
 
         // Old hash for js file matches.
         let mut old_hashes: FxHashMap<u64, u64> = FxHashMap::default();
-        old_hashes.insert(node_uid_for(&js_graph, &js_nodes[0]), 0x1111);
+        old_hashes.insert(node_uids_for(&js_graph)[0], 0x1111);
 
         // Only utils.ts was originally changed; utils.js was shadow-included.
         let originally_changed = vec![PathBuf::from("src/utils.ts")];
@@ -602,9 +604,10 @@ mod tests {
             type_class: SchemaType::String,
             framework: FrameworkId::Pydantic,
             span: (2, 0, 2, 20),
+            endpoint: None,
         }]));
 
-        let uid = node_uid_for(&graph, &graph.nodes[0]);
+        let uid = node_uids_for(&graph)[0];
         let mut old_hashes = FxHashMap::default();
         old_hashes.insert(uid, 0xBEEFu64); // hash matches — would normally skip
 
@@ -635,7 +638,7 @@ mod tests {
         // graph edges" not "emit no edges".
         let node = rn("stable_fn", NodeKind::Function, 0xC0FFEE);
         let graph = lg("src/stable.ts", vec![node.clone()], vec![]);
-        let uid = node_uid_for(&graph, &graph.nodes[0]);
+        let uid = node_uids_for(&graph)[0];
 
         let mut old_hashes = FxHashMap::default();
         old_hashes.insert(uid, 0xC0FFEEu64);

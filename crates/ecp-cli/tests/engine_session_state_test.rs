@@ -1,6 +1,7 @@
 use ecp_cli::build::orchestrator::build_l2;
 use ecp_cli::engine::{Engine, GraphView};
-use ecp_core::session::{DirtyFiles, SessionMeta};
+use ecp_core::contracts::routing::SizeCap;
+use ecp_core::session::{layout, DirtyEvents, SessionMeta};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -49,7 +50,7 @@ fn git_init(p: &Path) -> String {
     String::from_utf8(o.stdout).unwrap().trim().to_string()
 }
 
-fn put_session(repo_root: &Path, sid: &str, base_sha: &str, dirty: DirtyFiles) {
+fn put_session(repo_root: &Path, sid: &str, base_sha: &str, dirty: DirtyEvents) {
     let sd = repo_root.join("sessions").join(sid);
     fs::create_dir_all(&sd).unwrap();
     let sm = SessionMeta {
@@ -66,7 +67,7 @@ fn put_session(repo_root: &Path, sid: &str, base_sha: &str, dirty: DirtyFiles) {
         agent_name: None,
     };
     SessionMeta::write_atomic(&sd.join("session_meta.json"), &sm).unwrap();
-    DirtyFiles::write_atomic(&sd.join("dirty_files.json"), &dirty).unwrap();
+    DirtyEvents::write_atomic(&layout::dirty_events_path(&sd), &dirty).unwrap();
 }
 
 #[test]
@@ -86,7 +87,12 @@ fn engine_open_pure_reference_loads_l2only() {
         .parent()
         .unwrap()
         .to_path_buf();
-    put_session(&repo_root, "sid_pure", &sha, DirtyFiles::empty());
+    put_session(
+        &repo_root,
+        "sid_pure",
+        &sha,
+        DirtyEvents::empty(SizeCap::BUILT_IN),
+    );
 
     let engine = Engine::open(&repo_root, "sid_pure").unwrap();
     assert_eq!(engine.view(), GraphView::L2Only);

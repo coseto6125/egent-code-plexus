@@ -71,6 +71,9 @@ impl GraphFixture {
             mtime: 0,
             content_hash: [0u8; 8],
             category,
+            parsed_language: crate::contracts::routing::ParsedLanguage::encode(
+                crate::file_category::FileMeta::from_path(path).parsed,
+            ),
         });
         self.file_idx.insert(path.to_string(), idx);
         idx

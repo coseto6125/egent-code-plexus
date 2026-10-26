@@ -42,9 +42,9 @@ def publish_order(data):
     assert_eq!(result[0].direction, PubSub::Publish);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "orders"
     );
 }
@@ -94,9 +94,9 @@ async def send_payment(payload):
     assert_eq!(result[0].direction, PubSub::Publish);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "payments"
     );
 }
@@ -119,9 +119,9 @@ def emit_event(data):
     assert_eq!(result[0].lib, FrameworkId::Kafka);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "events"
     );
 }

@@ -124,36 +124,41 @@ pub fn read_timeout(c: &Config) -> u32 {
         String::from_utf8_lossy(&idx.stderr)
     );
 
-    let inspect = |field: &str| -> Value {
+    // Contract: `field_readers_note` stands for "the graph holds no reader
+    // of this field, which can mean the language does not capture reads".
+    // Each inspect selects one declaration, so the note is read directly.
+    let inspect = |args: &[&str]| -> Value {
         let out = Command::new(ecp_bin())
-            .args(["inspect", field, "--repo", ".", "--format", "json"])
+            .arg("inspect")
+            .args(args)
+            .args(["--repo", ".", "--format", "json"])
             .current_dir(repo)
             .env("HOME", repo)
             .output()
             .expect("inspect spawn");
         let stdout = String::from_utf8_lossy(&out.stdout);
         let js = stdout.find('{').expect("inspect JSON");
-        serde_json::from_str(&stdout[js..]).expect("parse inspect JSON")
+        let v: Value = serde_json::from_str(&stdout[js..]).expect("parse inspect JSON");
+        assert_eq!(v["status"], "found", "{args:?}: {v}");
+        assert_eq!(v["symbol"]["kind"], "Property", "{args:?}: {v}");
+        v
     };
 
-    let unread = inspect("unused_field");
+    let unread = inspect(&["Config.unused_field"]);
     assert!(
-        unread.get("field_readers_note").is_some()
-            || unread["matches"]
-                .as_array()
-                .map(|a| a.iter().any(|m| m.get("field_readers_note").is_some()))
-                .unwrap_or(false),
+        unread.get("field_readers_note").is_some(),
         "unread field must carry field_readers_note: {unread}"
     );
 
-    let read = inspect("timeout");
-    let has_note = read.get("field_readers_note").is_some()
-        || read["matches"]
-            .as_array()
-            .map(|a| a.iter().any(|m| m.get("field_readers_note").is_some()))
-            .unwrap_or(false);
+    let read = inspect(&[
+        "Config.timeout",
+        "--kind",
+        "property",
+        "--file",
+        "src/lib.rs",
+    ]);
     assert!(
-        !has_note,
+        read.get("field_readers_note").is_none(),
         "field with a reader must NOT carry the note: {read}"
     );
 }

@@ -304,6 +304,7 @@ impl LanguageProvider for LuaProvider {
             nodes,
             imports,
             documents: vec![],
+            route_receivers: None,
             framework_refs: vec![],
             fanout_refs: vec![],
             blind_spots: vec![],
@@ -315,6 +316,7 @@ impl LanguageProvider for LuaProvider {
             call_metas: vec![],
             raw_function_metas: vec![],
             export_aliases: None,
+            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
         })
     }
 }

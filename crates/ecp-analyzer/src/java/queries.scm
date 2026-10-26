@@ -16,7 +16,8 @@
     "protected"
   ])? @export
   name: (identifier) @interface.name
-  interfaces: (extends_interfaces (type_list (_) @heritage))?
+;; tree-sitter-java 0.23 gives `extends_interfaces` no field name.
+  (extends_interfaces (type_list (_) @heritage))?
 ) @interface
 
 ;; Methods

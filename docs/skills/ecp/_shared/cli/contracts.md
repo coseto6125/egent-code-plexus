@@ -1,6 +1,6 @@
 # ecp contracts
 
-Inspect cross-repo API contracts (HTTP, gRPC, Queue).
+Pair HTTP routes with the fetch calls that reach them, in one repo or across repos. `ecp contracts` reads routes only: `--kind queue` and `--kind rpc` exit non-zero as not implemented, and a run that extracts nothing exits non-zero instead of printing an empty list. `ecp group contracts` also reads gRPC.
 
 ## Usage
 ```bash

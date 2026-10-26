@@ -4,6 +4,12 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+/// Read and parse one JSON file; shared by every session-dir record.
+pub(crate) fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<T> {
+    let bytes = fs::read(path)?;
+    serde_json::from_slice(&bytes).map_err(io::Error::other)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub version: u32,
@@ -29,8 +35,7 @@ impl SessionMeta {
         atomic_write_json(path, value)
     }
     pub fn read(path: &Path) -> io::Result<Self> {
-        let bytes = fs::read(path)?;
-        serde_json::from_slice(&bytes).map_err(io::Error::other)
+        read_json(path)
     }
     /// Apply a freshly-resolved agent name. Returns true when the meta
     /// changed and needs rewriting. `None` resolved name never clears an

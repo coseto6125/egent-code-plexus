@@ -8,7 +8,11 @@ all-features = true
 [advisories]
 db-urls = ["https://github.com/RustSec/advisory-db"]
 yanked = "warn"
-ignore = []
+ignore = [
+  { id = "RUSTSEC-2026-0391", reason = "zstd 0.13 via tantivy-sstable (pinned rev 5ca39332); tantivy calls only zstd::bulk one-shot APIs on ecp-written index files, not streaming, legacy-frame or Seekable paths. Drop when the tantivy rev moves past dd0bc23360 (zstd 0.14)." },
+  { id = "RUSTSEC-2026-0398", reason = "zstd 0.13 via tantivy-sstable (pinned rev 5ca39332); tantivy calls only zstd::bulk one-shot APIs on ecp-written index files, not streaming, legacy-frame or Seekable paths. Drop when the tantivy rev moves past dd0bc23360 (zstd 0.14)." },
+  { id = "RUSTSEC-2026-0403", reason = "zstd 0.13 via tantivy-sstable (pinned rev 5ca39332); tantivy calls only zstd::bulk one-shot APIs on ecp-written index files, not streaming, legacy-frame or Seekable paths. Drop when the tantivy rev moves past dd0bc23360 (zstd 0.14)." },
+]
 
 # ==================== Licenses ====================
 [licenses]

@@ -19,7 +19,7 @@ ecp pattern -p 'json.loads($X)' --callers-of load_config
 ## Options
 - `-p` / `--pattern`: the pattern. `$NAME` captures one node, `$$$NAME` a run of them.
 - `--callers-of`: scan only the files holding a symbol's callers. Accepts the
-  same `Owner.method` qualification as `ecp rename`.
+  same `Owner.method` qualification as `ecp impact`.
 - `--lang`: restrict to one extension, without the dot (`py`, `ts`).
 - `--limit`: cap on reported matches (default 200; `0` means no cap).
 

@@ -15,7 +15,9 @@
 //! * `super::Foo` / `self::Foo` → resolved against caller's module path.
 //! * `std::*` / `core::*` / `alloc::*` → external, no file.
 //! * `pub use inner::Foo` re-export chains are walked transitively (max 16
-//!   hops, cycle-safe). See [`RustWorkspaceModTree::follow_pub_use_chain`].
+//!   hops, cycle-safe). The walk and the chain are the rule the overlay
+//!   shares ([`ecp_core::analyzer::ladder::module_tree_item`]); this module
+//!   answers its questions ([`IndexModuleTree`]).
 //!
 //! # Out of scope (documented)
 //! * `cfg`-gated `mod` decls (first filesystem hit wins).
@@ -25,7 +27,12 @@
 //! * Proc-macro-generated re-exports (`paste!`, `derive_more`, etc.) — logged
 //!   as BlindSpot if encountered.
 
+use ecp_core::analyzer::ladder::{self, Published, ReExport, TreeItem};
 use ecp_core::analyzer::rust_paths::rust_module_dir;
+use ecp_core::contracts::workspace::{
+    ConfigPresence, ConfigRead, Ecosystem, Membership, NameRank, Scope, ScopeId, ScopeName,
+    WorkspaceFacts,
+};
 use ecp_core::registry::uid_path;
 use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
@@ -127,10 +134,9 @@ struct ReExportEntry {
     /// `pub use inner::Widget`). May start with `crate`, `super`, `self`, or
     /// a crate name.
     path_prefix: Vec<String>,
-    /// The original item name at the source (last segment before `as`).
+    /// The original item name at the source (last segment before `as`),
+    /// `*` for a glob re-export (`pub use path::*`).
     original_name: String,
-    /// `true` when this is a glob re-export (`pub use path::*`).
-    is_glob: bool,
     /// The module path of the file that contains this `pub use` statement.
     /// Used to resolve relative prefix segments (e.g. `nested` in
     /// `src/deep/mod.rs` means `deep::nested`, not root-level `nested`).
@@ -165,6 +171,9 @@ pub struct RustWorkspaceModTree {
     /// Repo-relative file → each `(index into targets, mod_path)` that
     /// declares it. A module both the lib and a bin declare has two entries.
     file_targets: FxHashMap<String, Vec<(usize, Vec<String>)>>,
+    /// Contract C2's Cargo rows, from the manifest parse above: one scope
+    /// per workspace member, and the names that reach it.
+    workspace: WorkspaceFacts,
 }
 
 /// One Cargo target's modules, `mod_path → repo-relative file`.
@@ -190,6 +199,7 @@ impl RustWorkspaceModTree {
             file_to_crate: FxHashMap::default(),
             targets: Vec::new(),
             file_targets: FxHashMap::default(),
+            workspace: WorkspaceFacts::default(),
         };
         let root_toml = workspace_root.join("Cargo.toml");
         let Some(raw) = read_file(&root_toml) else {
@@ -203,6 +213,7 @@ impl RustWorkspaceModTree {
             members
         };
         let mut fallbacks = Vec::new();
+        let mut rows = CargoRows::default();
         for crate_dir in members {
             let manifest = if crate_dir == workspace_root {
                 Some(raw.clone())
@@ -218,7 +229,17 @@ impl RustWorkspaceModTree {
             };
             let (tree, reexports) = build_mod_tree_and_reexports(&entry_path);
             out.add_target(&tree);
-            for bin_root in bin_roots(&crate_dir, &entry_path) {
+            let bins = bin_roots(&crate_dir, &entry_path);
+            let crate_canon = crate_dir.canonicalize().ok();
+            rows.add_member(
+                &out.workspace_canon,
+                &crate_dir,
+                crate_canon.as_deref(),
+                crate_dir != workspace_root,
+                std::iter::once(&entry_path).chain(&bins),
+                &manifest,
+            );
+            for bin_root in bins {
                 let bin_scope = build_mod_tree_and_reexports(&bin_root);
                 let index = out.add_target(&bin_scope.0);
                 out.targets[index].bin_scope = Some(bin_scope);
@@ -232,9 +253,9 @@ impl RustWorkspaceModTree {
                 out.file_to_crate
                     .insert(file.clone(), (code_name.clone(), mod_path.clone()));
             }
-            let canon_str = crate_dir
-                .canonicalize()
-                .unwrap_or_else(|_| crate_dir.clone())
+            let canon_str = crate_canon
+                .as_deref()
+                .unwrap_or(&crate_dir)
                 .to_string_lossy()
                 .replace('\\', "/");
             let entry = (crate_dir, canon_str, tree, reexports);
@@ -251,12 +272,20 @@ impl RustWorkspaceModTree {
         for (alias, entry) in fallbacks {
             out.crates.entry(alias).or_insert(entry);
         }
+        out.workspace = rows.finish();
 
         out
     }
 
+    /// Contract C2's Cargo rows of this workspace, for `graph.bin`. Empty
+    /// without a root `Cargo.toml`.
+    pub fn workspace_facts(&self) -> &WorkspaceFacts {
+        &self.workspace
+    }
+
     /// Resolve a Rust FQN call to the file path (repo-relative) of the
-    /// module that declares the terminal item.
+    /// module that declares the terminal item, by the module-tree rule the
+    /// overlay shares ([`ladder::module_tree_item`]).
     ///
     /// `full_callee` is the raw call string as captured by the parser, e.g.
     /// `"crate::build::orchestrator::build_l2"`.
@@ -271,88 +300,22 @@ impl RustWorkspaceModTree {
         caller_file: &str,
         workspace_root: &Path,
     ) -> Option<ResolvedFqn> {
-        let segs: Vec<&str> = full_callee.split("::").collect();
-        if segs.len() < 2 {
-            return None;
+        match ladder::module_tree_item(&self.facts(workspace_root), caller_file, full_callee)? {
+            TreeItem::Found { file, item } => Some(ResolvedFqn {
+                file,
+                item_name: item,
+            }),
+            TreeItem::Unknown => None,
         }
-        let head = segs[0];
-        if matches!(head, "crate" | "self" | "super") {
-            if let Some(resolved) = self.resolve_in_bin_target(caller_file, &segs, workspace_root) {
-                return Some(resolved);
-            }
+    }
+
+    /// These trees as [`ladder::ModuleTreeFacts`], for callers named
+    /// relative to `workspace_root`.
+    pub fn facts<'t>(&'t self, workspace_root: &'t Path) -> IndexModuleTree<'t> {
+        IndexModuleTree {
+            tree: self,
+            workspace_root,
         }
-
-        // Determine crate root and module path for the caller. Only `crate`,
-        // `self` and `super` need it, and it costs a `canonicalize` syscall.
-        let caller_crate = || self.crate_for_file(caller_file, workspace_root);
-
-        // Build the module-path segments for the target item.
-        // For `crate::a::b::fn` → segs after `crate` minus last = `[a, b]`,
-        // last = `fn`.
-        let (target_crate_name, path_segs): (&str, &[&str]) = match head {
-            "crate" => {
-                let crate_name = caller_crate()?;
-                return self.resolve_in_crate(
-                    &crate_name,
-                    &segs[1..].iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-                    workspace_root,
-                );
-            }
-            "self" | "super" => {
-                let crate_name = caller_crate()?;
-                let caller_abs = if Path::new(caller_file).is_absolute() {
-                    PathBuf::from(caller_file)
-                } else {
-                    workspace_root.join(caller_file)
-                };
-                let caller_canon = caller_abs.canonicalize().ok()?;
-                let (_cn, caller_mod_path) = self.file_to_crate.get(&caller_canon)?;
-                let up = if head == "super" {
-                    segs.iter().take_while(|&&s| s == "super").count()
-                } else {
-                    0
-                };
-                let (base, rest): (Vec<&str>, &[&str]) = if head == "self" {
-                    (
-                        caller_mod_path.iter().map(String::as_str).collect(),
-                        &segs[1..],
-                    )
-                } else {
-                    if up > caller_mod_path.len() {
-                        return None;
-                    }
-                    (
-                        caller_mod_path[..caller_mod_path.len() - up]
-                            .iter()
-                            .map(String::as_str)
-                            .collect(),
-                        &segs[up..],
-                    )
-                };
-                let combined: Vec<String> = base
-                    .into_iter()
-                    .chain(rest.iter().copied())
-                    .map(str::to_string)
-                    .collect();
-                return self.resolve_in_crate(&crate_name, &combined, workspace_root);
-            }
-            other => {
-                // External std/core/alloc — skip.
-                if matches!(other, "std" | "core" | "alloc" | "proc_macro" | "test") {
-                    return None;
-                }
-                // Try as a workspace crate name.
-                if self.crates.contains_key(other) {
-                    (other, &segs[1..])
-                } else {
-                    return None;
-                }
-            }
-        };
-
-        // path_segs = [...module_path_parts..., item_name]
-        let combined: Vec<String> = path_segs.iter().map(|s| s.to_string()).collect();
-        self.resolve_in_crate(target_crate_name, &combined, workspace_root)
     }
 
     /// The repo-relative file of the module that `module_path` (`crate` /
@@ -364,48 +327,27 @@ impl RustWorkspaceModTree {
     /// the module, or they place it at different files (a module both the
     /// lib and a bin declare).
     pub fn anchored_module_file(&self, caller_file: &str, module_path: &str) -> Option<&str> {
-        let segs: Vec<&str> = module_path.split("::").collect();
-        let mut found: Option<&str> = None;
-        for (target, mod_path) in self.file_targets.get(caller_file)? {
-            let key = anchored_mod_path(mod_path, &segs)?;
-            let file = self.targets[*target].modules.get(&key)?;
-            if found.is_some_and(|f| f != file.as_str()) {
-                return None;
-            }
-            found = Some(file.as_str());
-        }
-        found
+        let file = ladder::anchored_module_file(
+            &self.facts(&self.workspace_canon),
+            caller_file,
+            module_path,
+        )?;
+        // Every module file of a target is a key of `file_targets`.
+        self.file_targets
+            .get_key_value(file.as_str())
+            .map(|(key, _)| key.as_str())
     }
 
-    /// [`Self::resolve_fqn`] for an anchored path from a file that only one
-    /// bin target declares. `file_to_crate` holds the primary tree alone, so
-    /// without this `crate::` there would name the lib's root. The bin's
-    /// `pub use` chains are followed like [`Self::resolve_in_crate`] follows
-    /// a crate's.
-    fn resolve_in_bin_target(
-        &self,
-        caller_file: &str,
-        segs: &[&str],
-        workspace_root: &Path,
-    ) -> Option<ResolvedFqn> {
+    /// The tree and module path of `caller_file` when exactly one target
+    /// declares it and that target is a bin beside the crate's primary
+    /// entry: `crate::` there is the bin's root, which `file_to_crate`,
+    /// built from the primary trees alone, does not hold.
+    fn bin_target(&self, caller_file: &str) -> Option<(TreeScope<'_>, &[String])> {
         let [(target, mod_path)] = self.file_targets.get(caller_file)?.as_slice() else {
             return None;
         };
-        let tree = &self.targets[*target];
-        let (bin_tree, bin_reexports) = tree.bin_scope.as_ref()?;
-        let combined = anchored_mod_path(mod_path, segs)?;
-        (0..combined.len()).rev().find_map(|prefix_len| {
-            let prefix = &combined[..prefix_len];
-            let file = tree.modules.get(prefix)?;
-            let item_name = &combined[prefix_len];
-            let chained = bin_tree.get(prefix).and_then(|abs| {
-                self.follow_chain_in((bin_tree, bin_reexports), abs, item_name, workspace_root, 0)
-            });
-            Some(chained.unwrap_or_else(|| ResolvedFqn {
-                file: file.clone(),
-                item_name: item_name.clone(),
-            }))
-        })
+        let (tree, reexports) = self.targets[*target].bin_scope.as_ref()?;
+        Some((TreeScope { tree, reexports }, mod_path))
     }
 
     /// Register `tree`'s modules as one Cargo target; returns its index in
@@ -428,16 +370,6 @@ impl RustWorkspaceModTree {
             modules,
         });
         index
-    }
-
-    /// True when `path` (`<crate_name>::a::b`) names a module of a
-    /// workspace crate, as opposed to an item inside one.
-    pub fn names_module(&self, path: &str) -> bool {
-        let mut segs = path.split("::");
-        let Some((_, _, tree, _)) = segs.next().and_then(|head| self.crates.get(head)) else {
-            return false;
-        };
-        tree.contains_key(&segs.map(str::to_string).collect::<Vec<_>>())
     }
 
     /// Returns the canonical crate name for a caller file path.
@@ -470,213 +402,10 @@ impl RustWorkspaceModTree {
         best.map(|(_, name)| name)
     }
 
-    /// Given a crate name and a combined path like `["build", "orchestrator",
-    /// "build_l2"]`, walk the mod tree to find the file that hosts `build_l2`.
-    ///
-    /// Strategy (mirrors `_resolve_in_crate` in rs_oracle.py):
-    /// Try longest-to-shortest module prefixes. The file for the matching
-    /// prefix is the declaring file. After a file+item is located, the
-    /// `pub use` re-export chain is followed (up to 16 hops) to reach the
-    /// original definition.
-    fn resolve_in_crate(
-        &self,
-        crate_name: &str,
-        combined: &[String],
-        workspace_root: &Path,
-    ) -> Option<ResolvedFqn> {
-        if combined.is_empty() {
-            return None;
-        }
-        let (_crate_dir, _cdir_str, tree, _reexports) = self.crates.get(crate_name)?;
-
-        for prefix_len in (0..combined.len()).rev() {
-            let prefix = &combined[..prefix_len];
-            // SAFETY note: tree key is `Vec<String>`. We borrow the slice into
-            // an owned vec only on a miss-cycle's final hit to keep the loop
-            // body alloc-free. `HashMap::get` requires `Borrow<Q>` and `Vec`
-            // doesn't implement `Borrow<[String]>`, so we materialize once
-            // outside the loop body — but only on the matched iteration.
-            let key: Vec<String> = prefix.to_vec();
-            let Some(file) = tree.get(&key) else {
-                continue;
-            };
-            let item_name = combined.get(prefix_len).map(String::as_str).unwrap_or("");
-
-            // Follow any `pub use` re-export chain before returning.
-            if let Some(resolved) =
-                self.follow_pub_use_chain(crate_name, file, item_name, workspace_root, 0)
-            {
-                return Some(resolved);
-            }
-
-            let rel = uid_path(file, &self.workspace_canon).ok()?;
-            return Some(ResolvedFqn {
-                file: rel,
-                item_name: item_name.to_string(),
-            });
-        }
-        None
-    }
-
-    /// Walk a `pub use` re-export chain from `(file, item_name)` to the
-    /// original definition site.
-    ///
-    /// Returns `Some(ResolvedFqn)` when the chain leads to a different
-    /// (non-re-export) definition, or `None` when `(file, item_name)` is
-    /// already the canonical definition (no matching re-export entry found).
-    ///
-    /// Max depth: 16 hops. Cycle detection via visited set prevents
-    /// infinite loops. On a glob (`pub use path::*`) the symbol is
-    /// re-resolved using the prefix path within the same crate.
-    pub fn follow_pub_use_chain(
-        &self,
-        crate_name: &str,
-        file: &Path,
-        item_name: &str,
-        workspace_root: &Path,
-        depth: u8,
-    ) -> Option<ResolvedFqn> {
-        let (_crate_dir, _cdir_str, tree, reexports) = self.crates.get(crate_name)?;
-        self.follow_chain_in((tree, reexports), file, item_name, workspace_root, depth)
-    }
-
-    /// [`Self::follow_pub_use_chain`] within `scope`, the module tree and
-    /// `pub use` map of the target that holds `file`: a crate's, or a bin
-    /// target's, whose own `crate::` paths stay in that bin. A prefix that
-    /// names another workspace crate moves to that crate's scope.
-    fn follow_chain_in(
-        &self,
-        scope: (&ModTree, &ReExportMap),
-        file: &Path,
-        item_name: &str,
-        workspace_root: &Path,
-        depth: u8,
-    ) -> Option<ResolvedFqn> {
-        const MAX_DEPTH: u8 = 16;
-        if depth >= MAX_DEPTH || item_name.is_empty() {
-            return None;
-        }
-
-        let (_tree, reexports) = scope;
-
-        // Try exact-name lookup first, then glob wildcard lookup.
-        let file_buf = file.to_path_buf();
-        let entry = reexports
-            .get(&(file_buf.clone(), item_name.to_string()))
-            .or_else(|| reexports.get(&(file_buf, "*".to_string())));
-
-        let entry = entry?;
-
-        // Resolve the path_prefix relative to the current crate.
-        // path_prefix is like ["inner"] meaning `inner::Widget`.
-        // We need to turn it back into a FQN and re-resolve.
-        let target_item = if entry.is_glob {
-            item_name
-        } else {
-            &entry.original_name
-        };
-
-        // Build the absolute (crate-rooted) combined path for recursive resolution.
-        //
-        // If path_prefix starts with "crate" → strip it, resolve from crate root.
-        // If it starts with a known workspace crate name → that crate, strip 1 seg.
-        // If it starts with "self" → use the containing mod's path as base.
-        // If it starts with "super" → go one level up from containing mod.
-        // Otherwise → the prefix is relative to the containing module; prepend it.
-        let first = entry.path_prefix.first().map(String::as_str);
-        let (base, rest): (&[String], &[String]) = match first {
-            Some("crate") => (&entry.path_prefix[..0], &entry.path_prefix[1..]),
-            Some("self") => (&entry.containing_mod_path[..], &entry.path_prefix[1..]),
-            Some("super") => {
-                // Each leading "super" removes one containing mod path segment.
-                let super_count = entry
-                    .path_prefix
-                    .iter()
-                    .take_while(|s| s.as_str() == "super")
-                    .count();
-                let base_len = entry.containing_mod_path.len().saturating_sub(super_count);
-                (
-                    &entry.containing_mod_path[..base_len],
-                    &entry.path_prefix[super_count..],
-                )
-            }
-            Some(other) if self.crates.contains_key(other) => {
-                // Another workspace crate's name as prefix.
-                let (_cd, _cs, tree2, reexports2) = self.crates.get(other)?;
-                let new_combined: Vec<String> = entry.path_prefix[1..]
-                    .iter()
-                    .cloned()
-                    .chain(std::iter::once(target_item.to_string()))
-                    .collect();
-                return self.resolve_chain_in_tree(
-                    (tree2, reexports2),
-                    file,
-                    item_name,
-                    &new_combined,
-                    workspace_root,
-                    depth,
-                );
-            }
-            // Relative to containing module: prepend mod path.
-            Some(_) => (&entry.containing_mod_path[..], &entry.path_prefix[..]),
-            None => (&entry.path_prefix[..], &entry.path_prefix[..]),
-        };
-        let new_combined: Vec<String> = base
-            .iter()
-            .chain(rest)
-            .cloned()
-            .chain(std::iter::once(target_item.to_string()))
-            .collect();
-        self.resolve_chain_in_tree(scope, file, item_name, &new_combined, workspace_root, depth)
-    }
-
-    /// Inner helper used by [`Self::follow_chain_in`] to look up
-    /// `new_combined` in `scope`'s tree and either recurse or return a
-    /// terminal `ResolvedFqn`.
-    ///
-    /// Returns `None` if the combined path doesn't match any entry in the
-    /// tree or if a direct cycle is detected.
-    fn resolve_chain_in_tree(
-        &self,
-        scope: (&ModTree, &ReExportMap),
-        original_file: &Path,
-        original_item: &str,
-        new_combined: &[String],
-        workspace_root: &Path,
-        depth: u8,
-    ) -> Option<ResolvedFqn> {
-        let (tree2, _reexports) = scope;
-        for prefix_len in (0..new_combined.len()).rev() {
-            let key: Vec<String> = new_combined[..prefix_len].to_vec();
-            let Some(candidate_file) = tree2.get(&key) else {
-                continue;
-            };
-            let candidate_item = new_combined
-                .get(prefix_len)
-                .map(String::as_str)
-                .unwrap_or("");
-
-            if candidate_file == original_file && candidate_item == original_item {
-                break;
-            }
-
-            if let Some(deeper) = self.follow_chain_in(
-                scope,
-                candidate_file,
-                candidate_item,
-                workspace_root,
-                depth + 1,
-            ) {
-                return Some(deeper);
-            }
-
-            let rel = uid_path(candidate_file, &self.workspace_canon).ok()?;
-            return Some(ResolvedFqn {
-                file: rel,
-                item_name: candidate_item.to_string(),
-            });
-        }
-        None
+    /// The primary tree of the crate keyed `name` in `crates`.
+    fn crate_scope(&self, name: &str) -> Option<TreeScope<'_>> {
+        let (_, _, tree, reexports) = self.crates.get(name)?;
+        Some(TreeScope { tree, reexports })
     }
 
     /// Whether any crates were indexed.
@@ -685,25 +414,102 @@ impl RustWorkspaceModTree {
     }
 }
 
-/// The module path that the `crate` / `self` / `super`-anchored `segs` name
-/// from the module at `mod_path`; `None` for another head, or a `super`
-/// chain that climbs above the crate root.
-fn anchored_mod_path(mod_path: &[String], segs: &[&str]) -> Option<Vec<String>> {
-    let (base, rest) = match *segs.first()? {
-        "crate" => (&mod_path[..0], &segs[1..]),
-        "self" => (mod_path, &segs[1..]),
-        "super" => {
-            let up = segs.iter().take_while(|&&s| s == "super").count();
-            (&mod_path[..mod_path.len().checked_sub(up)?], &segs[up..])
+/// One Cargo target's module tree and `pub use` map: a crate's primary
+/// tree, or a bin's.
+#[derive(Clone, Copy)]
+pub struct TreeScope<'t> {
+    tree: &'t ModTree,
+    reexports: &'t ReExportMap,
+}
+
+/// The index's module trees as [`ladder::ModuleTreeFacts`]: a module is the
+/// canonical file its tree holds, a caller path is relative to
+/// `workspace_root`.
+pub struct IndexModuleTree<'t> {
+    tree: &'t RustWorkspaceModTree,
+    workspace_root: &'t Path,
+}
+
+impl<'t> ladder::ModuleTreeFacts for IndexModuleTree<'t> {
+    type Root = TreeScope<'t>;
+    type Module = &'t Path;
+    type File = String;
+    type Target = usize;
+
+    fn crate_root(&self, name: &str) -> Option<TreeScope<'t>> {
+        self.tree.crate_scope(name)
+    }
+
+    /// A bin-only caller's bin, else the crate whose directory holds it.
+    fn caller_crate(&self, caller: &str) -> Option<TreeScope<'t>> {
+        if let Some((scope, _)) = self.tree.bin_target(caller) {
+            return Some(scope);
         }
-        _ => return None,
-    };
-    Some(
-        base.iter()
+        let name = self.tree.crate_for_file(caller, self.workspace_root)?;
+        self.tree.crate_scope(&name)
+    }
+
+    /// A bin-only caller's bin, else the crate whose directory holds it with
+    /// the module path a primary tree gives the caller.
+    fn caller_module(&self, caller: &str) -> Option<(TreeScope<'t>, Vec<String>)> {
+        if let Some((scope, mod_path)) = self.tree.bin_target(caller) {
+            return Some((scope, mod_path.to_vec()));
+        }
+        let name = self.tree.crate_for_file(caller, self.workspace_root)?;
+        let caller_abs = if Path::new(caller).is_absolute() {
+            PathBuf::from(caller)
+        } else {
+            self.workspace_root.join(caller)
+        };
+        let caller_canon = caller_abs.canonicalize().ok()?;
+        let (_, mod_path) = self.tree.file_to_crate.get(&caller_canon)?;
+        Some((self.tree.crate_scope(&name)?, mod_path.clone()))
+    }
+
+    fn root_module(&self, root: TreeScope<'t>) -> Option<&'t Path> {
+        root.tree.get::<[String]>(&[]).map(PathBuf::as_path)
+    }
+
+    fn submodule(
+        &self,
+        root: TreeScope<'t>,
+        _parent: &'t Path,
+        path: &[String],
+    ) -> Option<&'t Path> {
+        root.tree.get(path).map(PathBuf::as_path)
+    }
+
+    /// The `pub use` naming `name`, else a glob `pub use` of the module.
+    fn published(&self, root: TreeScope<'t>, module: &'t Path, name: &str) -> Published<'_> {
+        let entry = |name: &str| {
+            root.reexports
+                .get(&(module.to_path_buf(), name.to_string()))
+        };
+        match entry(name).or_else(|| entry("*")) {
+            Some(entry) => Published::ReExport(ReExport {
+                prefix: &entry.path_prefix,
+                original: &entry.original_name,
+                containing: &entry.containing_mod_path,
+            }),
+            None => Published::Own,
+        }
+    }
+
+    fn module_file(&self, module: &'t Path) -> Option<String> {
+        uid_path(module, &self.tree.workspace_canon).ok()
+    }
+
+    fn declaring_targets(&self, caller: &str) -> Vec<(usize, Vec<String>)> {
+        self.tree
+            .file_targets
+            .get(caller)
             .cloned()
-            .chain(rest.iter().map(|s| s.to_string()))
-            .collect(),
-    )
+            .unwrap_or_default()
+    }
+
+    fn target_module(&self, target: usize, path: &[String]) -> Option<String> {
+        self.tree.targets[target].modules.get(path).cloned()
+    }
 }
 
 /// Cargo's auto-discovered bin roots, `src/main.rs`, `src/bin/*.rs` and
@@ -888,14 +694,12 @@ fn insert_pub_use<'a>(
     if path_prefix.is_empty() {
         return;
     }
-    let is_glob = item == "*";
     let exported_name = alias.unwrap_or(item).to_string();
     reexports.insert(
         (file.to_path_buf(), exported_name),
         ReExportEntry {
             path_prefix,
             original_name: item.to_string(),
-            is_glob,
             containing_mod_path: containing_mod_path.to_vec(),
         },
     );
@@ -1005,6 +809,176 @@ fn parse_workspace_members(cargo_toml: &str, workspace_root: &Path) -> Vec<PathB
     members
 }
 
+/// The C2 rows [`RustWorkspaceModTree::build`] collects: every member the
+/// module tree registers, in the order of its last listing.
+#[derive(Default)]
+struct CargoRows {
+    members: Vec<CargoMember>,
+}
+
+/// One member [`RustWorkspaceModTree::build`] registers in `crates`.
+struct CargoMember {
+    /// The canonical member directory: two listings of it are one member.
+    dir: PathBuf,
+    /// `None` when the root or the lib entry does not relativise into the
+    /// repo (`members = ["../x"]`): the table holds repo-relative paths, so
+    /// the member has no row, yet it still shadows names as the index does.
+    scope: Option<Scope>,
+    /// The name code writes: the `[lib] name`, else the package name with
+    /// `-` → `_`.
+    code_name: String,
+    /// The package-name spellings beside `code_name`, before `finish`
+    /// settles which member claims each.
+    spellings: Vec<String>,
+    /// Position among the distinct members by first listing: `build` lets
+    /// the first listing claim a spelling.
+    first_listed: usize,
+}
+
+impl CargoRows {
+    /// Record a member the module tree registers. `entries` are its target
+    /// roots, the lib entry first. `crate_canon` is `crate_dir`
+    /// canonicalized, `None` when that fails. A second listing of one
+    /// directory moves the member to the end, as `build` lets the last
+    /// listing keep the code name.
+    fn add_member<'p>(
+        &mut self,
+        workspace_canon: &Path,
+        crate_dir: &Path,
+        crate_canon: Option<&Path>,
+        under_workspace_manifest: bool,
+        mut entries: impl Iterator<Item = &'p PathBuf>,
+        manifest: &CrateManifest,
+    ) {
+        let dir = crate_canon.unwrap_or(crate_dir);
+        if let Some(at) = self.members.iter().position(|member| member.dir == dir) {
+            let member = self.members.remove(at);
+            self.members.push(member);
+            return;
+        }
+        let rel = |canon: &Path| {
+            uid_path(canon, workspace_canon)
+                .ok()
+                .filter(|rel| !rel.contains('\\'))
+        };
+        let root = crate_canon.and_then(rel);
+        let lib_entry = entries
+            .next()
+            .and_then(|entry| entry.canonicalize().ok())
+            .and_then(|entry| rel(entry.as_path()));
+        let scope = root.zip(lib_entry).map(|(root, lib_entry)| {
+            let entry_files: Vec<String> = std::iter::once(lib_entry)
+                .chain(entries.filter_map(|entry| rel(entry.canonicalize().ok()?.as_path())))
+                .collect();
+            let manifest_path = if root.is_empty() {
+                "Cargo.toml".to_string()
+            } else {
+                format!("{root}/Cargo.toml")
+            };
+            let read = |path: String| ConfigRead {
+                path,
+                presence: ConfigPresence::Read,
+            };
+            let mut config_files = vec![read(manifest_path)];
+            if under_workspace_manifest {
+                config_files.push(read("Cargo.toml".to_string()));
+            }
+            Scope {
+                ecosystem: Ecosystem::Cargo,
+                root,
+                config_files,
+                membership: Membership::Subtree,
+                entry_files,
+                aliases: Vec::new(),
+                search_roots: Vec::new(),
+                dependencies: Vec::new(),
+            }
+        });
+        let package_norm = manifest.name.replace('-', "_");
+        let code_name = manifest
+            .lib_name
+            .clone()
+            .unwrap_or_else(|| package_norm.clone());
+        let mut spellings = Vec::new();
+        for alias in [manifest.name.clone(), package_norm] {
+            if alias != code_name && !spellings.contains(&alias) {
+                spellings.push(alias);
+            }
+        }
+        let first_listed = self.members.len();
+        self.members.push(CargoMember {
+            dir: dir.to_path_buf(),
+            scope,
+            code_name,
+            spellings,
+            first_listed,
+        });
+    }
+
+    /// The table, binding what `build`'s `crates` map binds (C2 open point
+    /// 2, option a). Of two members with one code name only the later
+    /// listing keeps its `Primary` row, as the last `insert` wins. A
+    /// package spelling goes to the first member by first listing that
+    /// carries it, unless some member's code name is that spelling, as the
+    /// `or_insert` fallback does. Both rules read every member, rows or not.
+    fn finish(self) -> WorkspaceFacts {
+        let members = self.members;
+        let code_names: Vec<&str> = members.iter().map(|m| m.code_name.as_str()).collect();
+        let mut by_first: Vec<usize> = (0..members.len()).collect();
+        by_first.sort_by_key(|&i| members[i].first_listed);
+        let mut taken: Vec<&str> = Vec::new();
+        let mut alternates: Vec<Vec<String>> = vec![Vec::new(); members.len()];
+        for i in by_first {
+            for alias in &members[i].spellings {
+                if !code_names.contains(&alias.as_str()) && !taken.contains(&alias.as_str()) {
+                    taken.push(alias);
+                    alternates[i].push(alias.clone());
+                }
+            }
+        }
+        let shadowed: Vec<bool> = (0..members.len())
+            .map(|i| code_names[i + 1..].contains(&code_names[i]))
+            .collect();
+        let mut rows: Vec<(Scope, String, Vec<String>)> = members
+            .into_iter()
+            .zip(shadowed)
+            .zip(alternates)
+            .filter_map(|((member, shadowed), alternates)| {
+                let primary = match shadowed {
+                    true => String::new(),
+                    false => member.code_name,
+                };
+                Some((member.scope?, primary, alternates))
+            })
+            .collect();
+        rows.sort_by(|a, b| a.0.root.cmp(&b.0.root));
+        let mut names: Vec<ScopeName> = Vec::new();
+        for (id, (_, primary, alternates)) in rows.iter().enumerate() {
+            let scope = ScopeId(id as u32);
+            let ranked = std::iter::once((primary, NameRank::Primary))
+                .chain(alternates.iter().map(|alias| (alias, NameRank::Alternate)));
+            names.extend(
+                ranked
+                    .filter(|(name, _)| !name.trim().is_empty())
+                    .map(|(name, rank)| ScopeName {
+                        ecosystem: Ecosystem::Cargo,
+                        name: name.clone(),
+                        rank,
+                        scope,
+                    }),
+            );
+        }
+        names.sort_by(|a, b| {
+            (a.ecosystem, &a.name, a.rank, a.scope).cmp(&(b.ecosystem, &b.name, b.rank, b.scope))
+        });
+        names.dedup();
+        let scopes = rows.into_iter().map(|(scope, ..)| scope).collect();
+        // Every reader refuses a table that breaks C2's invariants, so store
+        // none rather than rows nobody may read.
+        WorkspaceFacts::new(scopes, names).unwrap_or_default()
+    }
+}
+
 struct CrateManifest {
     name: String,
     lib_name: Option<String>,
@@ -1079,6 +1053,7 @@ fn read_file(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ecp_core::contracts::workspace::NameLookup;
     use std::fs;
     use tempfile::TempDir;
 
@@ -1506,5 +1481,294 @@ mod tests {
         let dir = make_tree(&[("src/lib.rs", "pub mod a;\n"), ("src/a.rs", "")]);
         let tree = RustWorkspaceModTree::build(dir.path());
         assert_eq!(tree.anchored_module_file("src/a.rs", "crate"), None);
+    }
+
+    /// `(name, rank, scope root)` of every name row, in table order.
+    fn name_rows(facts: &WorkspaceFacts) -> Vec<(&str, NameRank, &str)> {
+        facts
+            .names
+            .iter()
+            .map(|entry| {
+                (
+                    entry.name.as_str(),
+                    entry.rank,
+                    facts.scopes[entry.scope.index()].root.as_str(),
+                )
+            })
+            .collect()
+    }
+
+    fn config_paths(scope: &Scope) -> Vec<&str> {
+        scope
+            .config_files
+            .iter()
+            .map(|config| {
+                assert_eq!(config.presence, ConfigPresence::Read, "{}", config.path);
+                config.path.as_str()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_workspace_facts_members_mirror_crates_map_keys() {
+        let dir = make_tree(&[
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"crates/b\", \"crates/a\", \"crates/b\", \"crates/nolib\"]\n",
+            ),
+            ("crates/a/Cargo.toml", "[package]\nname = \"a-core\"\n"),
+            ("crates/a/src/lib.rs", ""),
+            ("crates/a/src/main.rs", "fn main() {}\n"),
+            ("crates/a/src/bin/tool.rs", "fn main() {}\n"),
+            (
+                "crates/b/Cargo.toml",
+                "[package]\nname = \"b\"\n\n[lib]\nname = \"other\"\n",
+            ),
+            ("crates/b/src/lib.rs", ""),
+            ("crates/nolib/Cargo.toml", "[package]\nname = \"nolib\"\n"),
+        ]);
+        let tree = RustWorkspaceModTree::build(dir.path());
+        let facts = tree.workspace_facts();
+        assert_eq!(facts.validate(), Ok(()));
+        let scopes: Vec<(&str, Vec<&str>, Vec<&str>)> = facts
+            .scopes
+            .iter()
+            .map(|scope| {
+                assert_eq!(scope.ecosystem, Ecosystem::Cargo);
+                assert_eq!(scope.membership, Membership::Subtree);
+                (
+                    scope.root.as_str(),
+                    config_paths(scope),
+                    scope.entry_files.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            scopes,
+            vec![
+                (
+                    "crates/a",
+                    vec!["crates/a/Cargo.toml", "Cargo.toml"],
+                    vec![
+                        "crates/a/src/lib.rs",
+                        "crates/a/src/main.rs",
+                        "crates/a/src/bin/tool.rs",
+                    ],
+                ),
+                (
+                    "crates/b",
+                    vec!["crates/b/Cargo.toml", "Cargo.toml"],
+                    vec!["crates/b/src/lib.rs"],
+                ),
+            ],
+            "sorted by root; the repeated member once; the member without a target none"
+        );
+        assert_eq!(
+            name_rows(facts),
+            vec![
+                ("a-core", NameRank::Alternate, "crates/a"),
+                ("a_core", NameRank::Primary, "crates/a"),
+                ("b", NameRank::Alternate, "crates/b"),
+                ("other", NameRank::Primary, "crates/b"),
+            ]
+        );
+        // Every name the table answers is a key the index resolves through.
+        for name in ["a-core", "a_core", "b", "other"] {
+            assert!(tree.crates.contains_key(name), "{name}");
+        }
+        assert_eq!(
+            facts.lookup_name(Ecosystem::Cargo, "nolib"),
+            NameLookup::Missing
+        );
+    }
+
+    #[test]
+    fn test_workspace_facts_single_package_root_scope_is_repo_root() {
+        let dir = make_tree(&[
+            ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+            ("src/lib.rs", ""),
+        ]);
+        let tree = RustWorkspaceModTree::build(dir.path());
+        let facts = tree.workspace_facts();
+        assert_eq!(facts.validate(), Ok(()));
+        assert_eq!(facts.scopes.len(), 1);
+        assert_eq!(facts.scopes[0].root, "");
+        assert_eq!(config_paths(&facts.scopes[0]), vec!["Cargo.toml"]);
+        assert_eq!(facts.scopes[0].entry_files, vec!["src/lib.rs".to_string()]);
+        assert_eq!(name_rows(facts), vec![("tool", NameRank::Primary, "")]);
+    }
+
+    #[test]
+    fn test_workspace_facts_duplicate_code_name_last_member_keeps_row() {
+        let dir = make_tree(&[
+            ("Cargo.toml", "[workspace]\nmembers = [\"x1\", \"x2\"]\n"),
+            ("x1/Cargo.toml", "[package]\nname = \"dup\"\n"),
+            ("x1/src/lib.rs", ""),
+            ("x2/Cargo.toml", "[package]\nname = \"dup\"\n"),
+            ("x2/src/lib.rs", ""),
+        ]);
+        let tree = RustWorkspaceModTree::build(dir.path());
+        let facts = tree.workspace_facts();
+        assert_eq!(name_rows(facts), vec![("dup", NameRank::Primary, "x2")]);
+        assert_eq!(
+            facts.lookup_name(Ecosystem::Cargo, "dup"),
+            NameLookup::Unique(ScopeId(1))
+        );
+    }
+
+    #[test]
+    fn test_workspace_facts_relisted_member_last_listing_keeps_row() {
+        let dir = make_tree(&[
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"x1\", \"x2\", \"x1\"]\n",
+            ),
+            ("x1/Cargo.toml", "[package]\nname = \"dup\"\n"),
+            ("x1/src/lib.rs", ""),
+            ("x2/Cargo.toml", "[package]\nname = \"dup\"\n"),
+            ("x2/src/lib.rs", ""),
+        ]);
+        let tree = RustWorkspaceModTree::build(dir.path());
+        assert_eq!(
+            tree.crates["dup"].0,
+            dir.path().join("x1"),
+            "the index binds the last listing"
+        );
+        let facts = tree.workspace_facts();
+        assert_eq!(facts.validate(), Ok(()));
+        assert_eq!(name_rows(facts), vec![("dup", NameRank::Primary, "x1")]);
+        assert_eq!(
+            facts.lookup_name(Ecosystem::Cargo, "dup"),
+            NameLookup::Unique(ScopeId(0))
+        );
+    }
+
+    #[test]
+    fn test_workspace_facts_relisted_member_first_listing_keeps_spelling() {
+        let dir = make_tree(&[
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"x1\", \"x2\", \"x1\"]\n",
+            ),
+            (
+                "x1/Cargo.toml",
+                "[package]\nname = \"pkg\"\n\n[lib]\nname = \"l1\"\n",
+            ),
+            ("x1/src/lib.rs", ""),
+            (
+                "x2/Cargo.toml",
+                "[package]\nname = \"pkg\"\n\n[lib]\nname = \"l2\"\n",
+            ),
+            ("x2/src/lib.rs", ""),
+        ]);
+        let tree = RustWorkspaceModTree::build(dir.path());
+        assert_eq!(tree.crates["pkg"].0, dir.path().join("x1"));
+        assert_eq!(
+            name_rows(tree.workspace_facts()),
+            vec![
+                ("l1", NameRank::Primary, "x1"),
+                ("l2", NameRank::Primary, "x2"),
+                ("pkg", NameRank::Alternate, "x1"),
+            ],
+            "the package spelling stays with the first listing, as in the index"
+        );
+    }
+
+    #[test]
+    fn test_workspace_facts_outside_member_shadows_inside_primary() {
+        let dir = make_tree(&[
+            (
+                "ws/Cargo.toml",
+                "[workspace]\nmembers = [\"a\", \"../ext\"]\n",
+            ),
+            (
+                "ws/a/Cargo.toml",
+                "[package]\nname = \"a\"\n\n[lib]\nname = \"util\"\n",
+            ),
+            ("ws/a/src/lib.rs", ""),
+            (
+                "ext/Cargo.toml",
+                "[package]\nname = \"ext\"\n\n[lib]\nname = \"util\"\n",
+            ),
+            ("ext/src/lib.rs", ""),
+        ]);
+        let ws = dir.path().join("ws");
+        let tree = RustWorkspaceModTree::build(&ws);
+        assert_eq!(
+            tree.crates["util"].0,
+            ws.join("../ext"),
+            "the index binds `util` to the out-of-repo member"
+        );
+        let facts = tree.workspace_facts();
+        assert_eq!(facts.validate(), Ok(()));
+        assert_eq!(name_rows(facts), vec![("a", NameRank::Alternate, "a")]);
+        assert_eq!(
+            facts.lookup_name(Ecosystem::Cargo, "util"),
+            NameLookup::Missing,
+            "the overlay must not bind `util` to `a`"
+        );
+    }
+
+    #[test]
+    fn test_workspace_facts_outside_code_name_blocks_inside_spelling() {
+        let dir = make_tree(&[
+            (
+                "ws/Cargo.toml",
+                "[workspace]\nmembers = [\"a\", \"../ext\"]\n",
+            ),
+            (
+                "ws/a/Cargo.toml",
+                "[package]\nname = \"util\"\n\n[lib]\nname = \"a_lib\"\n",
+            ),
+            ("ws/a/src/lib.rs", ""),
+            (
+                "ext/Cargo.toml",
+                "[package]\nname = \"ext\"\n\n[lib]\nname = \"util\"\n",
+            ),
+            ("ext/src/lib.rs", ""),
+        ]);
+        let ws = dir.path().join("ws");
+        let tree = RustWorkspaceModTree::build(&ws);
+        assert_eq!(tree.crates["util"].0, ws.join("../ext"));
+        let facts = tree.workspace_facts();
+        assert_eq!(name_rows(facts), vec![("a_lib", NameRank::Primary, "a")]);
+        assert_eq!(
+            facts.lookup_name(Ecosystem::Cargo, "util"),
+            NameLookup::Missing,
+            "a code name outranks a package spelling in the index, row or not"
+        );
+    }
+
+    #[test]
+    fn test_workspace_facts_outside_member_and_blank_name_get_no_row() {
+        let dir = make_tree(&[
+            (
+                "ws/Cargo.toml",
+                "[workspace]\nmembers = [\"../ext\", \"blank\", \"ok\"]\n",
+            ),
+            ("ext/Cargo.toml", "[package]\nname = \"ext\"\n"),
+            ("ext/src/lib.rs", ""),
+            ("ws/blank/Cargo.toml", "[package]\nname = \" \"\n"),
+            ("ws/blank/src/lib.rs", ""),
+            ("ws/ok/Cargo.toml", "[package]\nname = \"ok\"\n"),
+            ("ws/ok/src/lib.rs", ""),
+        ]);
+        let tree = RustWorkspaceModTree::build(&dir.path().join("ws"));
+        let facts = tree.workspace_facts();
+        assert_eq!(facts.validate(), Ok(()));
+        let roots: Vec<&str> = facts.scopes.iter().map(|s| s.root.as_str()).collect();
+        assert_eq!(
+            roots,
+            vec!["blank", "ok"],
+            "`../ext` has no repo-relative root"
+        );
+        assert_eq!(name_rows(facts), vec![("ok", NameRank::Primary, "ok")]);
+    }
+
+    #[test]
+    fn test_workspace_facts_without_manifest_is_empty() {
+        let dir = make_tree(&[("src/lib.rs", ""), ("pkg/m.py", "")]);
+        let tree = RustWorkspaceModTree::build(dir.path());
+        assert_eq!(tree.workspace_facts(), &WorkspaceFacts::default());
     }
 }

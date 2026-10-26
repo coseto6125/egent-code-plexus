@@ -1,9 +1,9 @@
 //! `admin gc` and the overlay writer meet at a session's fragment bins. A
-//! bin's name is its content hash, so a writer can re-publish the very bin gc
-//! judged orphan; the overlay lock orders the two, and the freshness gate
+//! bin's name derives from its route key and content hash alone, so a writer
+//! can re-publish the very bin gc judged orphan; the overlay lock orders the two, and the freshness gate
 //! re-parses a file whose bin is gone whatever removed it.
 
-use ecp_core::session::{DirtyFiles, SessionMeta};
+use ecp_core::session::{layout, DirtyEvents, SessionMeta};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -37,9 +37,19 @@ fn test_write_dirty_fragments_from_graphs_overlay_lock_held_publishes_after_rele
     )
     .unwrap();
     let hash = [7u8; 8];
-    let bin = session
-        .join("graph_overlay")
-        .join(format!("{:016x}.bin", u64::from_le_bytes(hash)));
+    let fragments = layout::fragment_path(&session, "x")
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let bins = || {
+        std::fs::read_dir(&fragments)
+            .map(|dir| {
+                dir.flatten()
+                    .filter(|e| e.path().extension().is_some_and(|x| x == "bin"))
+                    .count()
+            })
+            .unwrap_or(0)
+    };
     let writer = {
         let session = session.clone();
         std::thread::spawn(move || {
@@ -56,17 +66,19 @@ fn test_write_dirty_fragments_from_graphs_overlay_lock_held_publishes_after_rele
         })
     };
     std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(bins(), 0, "a bin was published while gc held the session");
     assert!(
-        !bin.exists(),
-        "a bin was published while gc held the session"
-    );
-    assert!(
-        !session.join("dirty_files.json").exists(),
+        !layout::dirty_events_path(&session).exists(),
         "a manifest was committed while gc held the session"
     );
     drop(held);
     writer.join().unwrap().unwrap();
-    assert!(bin.exists(), "the writer never published after the release");
+    let manifest = DirtyEvents::read(&layout::dirty_events_path(&session)).unwrap();
+    let id = manifest.entries["a.py"].fragment_id.clone().unwrap();
+    assert!(
+        layout::fragment_path(&session, &id).exists(),
+        "the writer never published after the release"
+    );
 }
 
 fn run(cmd: &mut Command, label: &str) -> std::process::Output {
@@ -132,12 +144,14 @@ fn find_json(repo: &Path, home: &Path, name: &str) -> serde_json::Value {
     })
 }
 
-fn overlay_dirs(home: &Path) -> Vec<PathBuf> {
+/// The session directories under `home` that hold a `l1/fragments` directory.
+fn session_dirs(home: &Path) -> Vec<PathBuf> {
     walkdir::WalkDir::new(home)
         .into_iter()
         .flatten()
-        .filter(|e| e.file_type().is_dir() && e.file_name() == "graph_overlay")
+        .filter(|e| e.file_type().is_dir())
         .map(|e| e.into_path())
+        .filter(|dir| layout::fragments_dir(dir).is_dir())
         .collect()
 }
 
@@ -167,15 +181,18 @@ fn test_find_fragment_bin_missing_under_current_manifest_reparsed() {
     let first = find_json(&repo, &home, "healed_probe");
     assert_eq!(first["found"], true, "overlay never served: {first}");
 
-    let overlays = overlay_dirs(&home);
-    assert_eq!(overlays.len(), 1, "{overlays:?}");
-    let overlay = &overlays[0];
-    let manifest = DirtyFiles::read(&overlay.parent().unwrap().join("dirty_files.json")).unwrap();
+    let sessions = session_dirs(&home);
+    assert_eq!(sessions.len(), 1, "{sessions:?}");
+    let session = &sessions[0];
+    let manifest = DirtyEvents::read(&layout::dirty_events_path(session)).unwrap();
     let entry = manifest
         .entries
         .get("src/a.rs")
         .expect("the dirty file has no manifest entry");
-    let bin = overlay.join(format!("{}.bin", entry.fragment_id));
+    let bin = layout::fragment_path(
+        session,
+        entry.fragment_id.as_deref().expect("the entry names a bin"),
+    );
     std::fs::remove_file(&bin).unwrap();
 
     let second = find_json(&repo, &home, "healed_probe");

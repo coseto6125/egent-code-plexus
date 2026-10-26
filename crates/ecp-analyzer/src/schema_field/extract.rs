@@ -126,6 +126,7 @@ pub fn extract_schema_fields(
                 owner_class: owner.into(),
                 framework: config.framework,
                 span,
+                endpoint: None,
             });
             break;
         }

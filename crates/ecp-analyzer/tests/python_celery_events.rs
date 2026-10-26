@@ -54,9 +54,9 @@ def enqueue_add(x, y):
     assert_eq!(result[0].direction, PubSub::Publish);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "add"
     );
 }
@@ -81,9 +81,9 @@ def enqueue_add(x, y):
     assert_eq!(result[0].direction, PubSub::Publish);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "add"
     );
 }
@@ -110,9 +110,9 @@ def enqueue_add(x, y):
     assert_eq!(result[0].direction, PubSub::Publish);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "tasks/add"
     );
 }
@@ -173,9 +173,9 @@ def send_event(producer):
     assert_eq!(result[0].direction, PubSub::Publish);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("kafka topic_literal must be Some"),
+            .expect("kafka topic_key must be Some"),
         "events"
     );
 }
@@ -221,9 +221,9 @@ def enqueue():
     assert_eq!(result[0].direction, PubSub::Publish);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "task"
     );
 }
@@ -244,7 +244,7 @@ def enqueue():
         "chained `module.task.apply_async(...)` should emit one RawEventTopic; got {:?}",
         result
     );
-    assert_eq!(result[0].topic_literal.as_deref(), Some("task"));
+    assert_eq!(result[0].topic_key.as_deref(), Some("task"));
 }
 
 /// Deeper chain `pkg.mod.task.delay(...)` — captures rightmost identifier ("task").
@@ -263,7 +263,7 @@ def enqueue():
         "deep-chain `pkg.mod.task.delay(...)` should emit one RawEventTopic; got {:?}",
         result
     );
-    assert_eq!(result[0].topic_literal.as_deref(), Some("task"));
+    assert_eq!(result[0].topic_key.as_deref(), Some("task"));
 }
 
 /// Assignment-form: `result = tasks.add.delay(...)` — idiomatic Flask/FastAPI
@@ -285,7 +285,7 @@ def enqueue():
         "`result = tasks.add.delay(...)` should emit one RawEventTopic; got {:?}",
         result
     );
-    assert_eq!(result[0].topic_literal.as_deref(), Some("add"));
+    assert_eq!(result[0].topic_key.as_deref(), Some("add"));
 }
 
 /// Assignment-form: `result = tasks.add.apply_async(...)`.
@@ -299,7 +299,7 @@ def enqueue():
 "#;
     let result = run(src, &["celery"]);
     assert_eq!(result.len(), 1);
-    assert_eq!(result[0].topic_literal.as_deref(), Some("add"));
+    assert_eq!(result[0].topic_key.as_deref(), Some("add"));
 }
 
 /// Assignment-form async: `result = await tasks.add.delay(...)`.
@@ -313,7 +313,7 @@ async def enqueue():
 "#;
     let result = run(src, &["celery"]);
     assert_eq!(result.len(), 1);
-    assert_eq!(result[0].topic_literal.as_deref(), Some("add"));
+    assert_eq!(result[0].topic_key.as_deref(), Some("add"));
 }
 
 /// Async-wrapper variant of chained receiver: `await module.task.delay(...)`.
@@ -332,7 +332,7 @@ async def enqueue():
         "chained `await module.task.delay(...)` should emit one RawEventTopic; got {:?}",
         result
     );
-    assert_eq!(result[0].topic_literal.as_deref(), Some("task"));
+    assert_eq!(result[0].topic_key.as_deref(), Some("task"));
 }
 
 /// Async wrapper: `await add.delay(...)` → topic="add", Publish.
@@ -355,9 +355,9 @@ async def enqueue_add_async(x, y):
     assert_eq!(result[0].direction, PubSub::Publish);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "add"
     );
 }

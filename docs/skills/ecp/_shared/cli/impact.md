@@ -16,7 +16,7 @@ ecp impact <SYMBOL> [--direction up] [--repo <PATH>]
 - `<SYMBOL>`: Positional argument or `--target X`.
 - `--direction`: `up` (who calls me — default), `down` (who I call), or `both`.
 - `--baseline origin/main`: Compare against a branch to see impact of staged changes.
-- `--kind`, `--file_path`: Filter the results.
+- `--kind`, `--file`: Select the target declaration, not the results. `--kind` takes one kind and applies before `--file`. `--file` ranks a path that equals the value, then one that ends with it, then one that contains it. An ambiguous name returns candidates that you can re-run. `--file_path` is an alias of `--file`.
 - `--ambiguous-callers`: When the name has several same-named definitions, also list the call sites the graph could not attribute (one `git grep` over the definitions' language family, at most 50 sites). They are text-match candidates under `ambiguous_callers`, never counted as callers; a site whose line holds several calls carries `count`. Ruby calls without parentheses are not matched.
 - Test-file callers are listed by default, each entry tagged `test: true`. `--exclude-tests` drops them and reports `hidden_test_callers: N`.
 

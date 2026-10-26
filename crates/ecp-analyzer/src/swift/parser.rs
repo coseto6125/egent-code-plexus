@@ -10,7 +10,7 @@ use crate::framework_helpers::{
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawImport, RawNode};
+use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawImport, RawNode, OVERRIDE_SENTINEL};
 
 /// Blind-spot kind/hint pairs. Order matches the capture-index dispatch
 /// in `parse_file`.
@@ -555,6 +555,9 @@ impl LanguageProvider for SwiftProvider {
                     // alongside Java static-import aliases. The attribute node
                     // is nested under `(modifiers)` (not a direct
                     // `function_declaration` child), so walk the subtree.
+                    if k == NodeKind::Method && has_override_modifier(root, source) {
+                        decorators.push(OVERRIDE_SENTINEL.to_string());
+                    }
                     if k == NodeKind::Function || k == NodeKind::Method {
                         if let Some(ext) = find_objc_rename_attribute(root, source) {
                             imports.push(RawImport {
@@ -662,6 +665,7 @@ impl LanguageProvider for SwiftProvider {
             nodes,
             imports,
             documents: vec![],
+            route_receivers: None,
             framework_refs,
             fanout_refs: vec![],
             blind_spots,
@@ -674,6 +678,7 @@ impl LanguageProvider for SwiftProvider {
             call_metas: vec![],
             raw_function_metas,
             export_aliases: None,
+            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
         })
     }
 }
@@ -768,6 +773,24 @@ fn swift_decl_keyword(class_decl: tree_sitter::Node<'_>) -> &'static str {
         }
     }
     "class"
+}
+
+/// True when the `modifiers` of `decl` hold `override`. Swift requires the
+/// modifier on a class member that overrides a superclass member, so the
+/// `Overrides` pass reads it as the marker, as it reads Kotlin's.
+fn has_override_modifier(decl: tree_sitter::Node<'_>, source: &[u8]) -> bool {
+    let mut cursor = decl.walk();
+    let found = decl
+        .children(&mut cursor)
+        .filter(|child| child.kind() == "modifiers")
+        .any(|modifiers| {
+            let mut inner = modifiers.walk();
+            let found = modifiers.children(&mut inner).any(|m| {
+                m.kind() == "member_modifier" && m.utf8_text(source).is_ok_and(|t| t == "override")
+            });
+            found
+        });
+    found
 }
 
 /// Return true when `func_node` (a `function_declaration`) is directly nested inside

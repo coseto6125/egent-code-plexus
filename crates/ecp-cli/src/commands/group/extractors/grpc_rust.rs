@@ -1,5 +1,6 @@
 //! Rust gRPC server-registration extractor: .add_service(<Svc>Server::new(...)) via tonic.
 
+use super::{capture_line, compile_client_query, consumer_contract};
 use crate::commands::group::types::{ContractRole, ContractType, ExtractedContract, SymbolRef};
 use std::path::Path;
 use std::sync::LazyLock;
@@ -23,6 +24,21 @@ const QUERY_SRC: &str = r#"
           name: (identifier) @svc_server)
         name: (identifier) @new_fn))))
 "#;
+
+/// Client constructors: `GreeterClient::connect(addr)` and
+/// `greeter_client::GreeterClient::new(channel)`.
+const CLIENT_QUERY_SRC: &str = r#"
+(call_expression
+  function: (scoped_identifier
+    path: [(identifier) @svc_client
+           (scoped_identifier name: (identifier) @svc_client)]
+    name: (identifier) @ctor)) @call
+"#;
+
+static CLIENT_QUERY: LazyLock<Option<Query>> = LazyLock::new(|| {
+    let lang: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+    compile_client_query(&lang, CLIENT_QUERY_SRC, "grpc_rust")
+});
 
 static QUERY: LazyLock<Query> = LazyLock::new(|| {
     let lang: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
@@ -92,5 +108,53 @@ pub fn extract_grpc(file_path: &Path, source: &[u8]) -> Vec<ExtractedContract> {
             meta: vec![("service".into(), svc.to_string())],
         });
     }
+    extract_clients(file_path, source, &tree, &mut out);
     out
+}
+
+/// `Consumer` contracts for tonic `<Svc>Client::new` / `connect`. A file that
+/// never mentions `tonic` is skipped, because `HttpClient::new()` has the same
+/// shape.
+fn extract_clients(
+    file_path: &Path,
+    source: &[u8],
+    tree: &tree_sitter::Tree,
+    out: &mut Vec<ExtractedContract>,
+) {
+    if !source.windows(5).any(|w| w == b"tonic") {
+        return;
+    }
+    let Some(query) = CLIENT_QUERY.as_ref() else {
+        return;
+    };
+    let idx = |name: &str| query.capture_index_for_name(name);
+    let (Some(client_idx), Some(ctor_idx), Some(call_idx)) =
+        (idx("svc_client"), idx("ctor"), idx("call"))
+    else {
+        return;
+    };
+
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, tree.root_node(), source);
+    while let Some(m) = matches.next() {
+        let ctor = super::capture_text(m, ctor_idx, source);
+        if !matches!(ctor, "new" | "connect" | "with_interceptor") {
+            continue;
+        }
+        let client = super::capture_text(m, client_idx, source);
+        let Some(svc) = client.strip_suffix("Client") else {
+            continue;
+        };
+        if svc.is_empty() {
+            continue;
+        }
+        out.push(consumer_contract(
+            file_path,
+            ContractType::Grpc,
+            format!("grpc:{svc}:*"),
+            &format!("{client}::{ctor}"),
+            capture_line(m, call_idx),
+            vec![("service".into(), svc.to_string())],
+        ));
+    }
 }

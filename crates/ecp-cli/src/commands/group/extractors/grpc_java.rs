@@ -1,5 +1,6 @@
 //! Java gRPC server-registration extractor: new <Svc>ImplBase() inside addService().
 
+use super::{capture_line, compile_client_query, consumer_contract};
 use crate::commands::group::types::{ContractRole, ContractType, ExtractedContract, SymbolRef};
 use std::path::Path;
 use std::sync::LazyLock;
@@ -21,6 +22,18 @@ const QUERY_SRC: &str = r#"
         (type_identifier) @outer_class
         (type_identifier) @impl_class))))
 "#;
+
+/// Client stubs: `GreeterGrpc.newBlockingStub(channel)`.
+const CLIENT_QUERY_SRC: &str = r#"
+(method_invocation
+  object: (identifier) @grpc_class
+  name: (identifier) @stub_fn) @call
+"#;
+
+static CLIENT_QUERY: LazyLock<Option<Query>> = LazyLock::new(|| {
+    let lang: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
+    compile_client_query(&lang, CLIENT_QUERY_SRC, "grpc_java")
+});
 
 static QUERY: LazyLock<Query> = LazyLock::new(|| {
     let lang: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
@@ -82,5 +95,48 @@ pub fn extract_grpc(file_path: &Path, source: &[u8]) -> Vec<ExtractedContract> {
             meta: vec![("service".into(), svc.to_string())],
         });
     }
+    extract_clients(file_path, source, &tree, &mut out);
     out
+}
+
+/// `Consumer` contracts for `<Svc>Grpc.newStub` / `newBlockingStub` /
+/// `newFutureStub`, the generated entry points of a gRPC client.
+fn extract_clients(
+    file_path: &Path,
+    source: &[u8],
+    tree: &tree_sitter::Tree,
+    out: &mut Vec<ExtractedContract>,
+) {
+    let Some(query) = CLIENT_QUERY.as_ref() else {
+        return;
+    };
+    let idx = |name: &str| query.capture_index_for_name(name);
+    let (Some(class_idx), Some(fn_idx), Some(call_idx)) =
+        (idx("grpc_class"), idx("stub_fn"), idx("call"))
+    else {
+        return;
+    };
+
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, tree.root_node(), source);
+    while let Some(m) = matches.next() {
+        let stub_fn = super::capture_text(m, fn_idx, source);
+        if !matches!(stub_fn, "newStub" | "newBlockingStub" | "newFutureStub") {
+            continue;
+        }
+        let Some(svc) = super::capture_text(m, class_idx, source).strip_suffix("Grpc") else {
+            continue;
+        };
+        if svc.is_empty() {
+            continue;
+        }
+        out.push(consumer_contract(
+            file_path,
+            ContractType::Grpc,
+            format!("grpc:{svc}:*"),
+            &format!("{svc}Grpc.{stub_fn}"),
+            capture_line(m, call_idx),
+            vec![("service".into(), svc.to_string())],
+        ));
+    }
 }

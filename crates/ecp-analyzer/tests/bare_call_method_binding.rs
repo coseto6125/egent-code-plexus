@@ -33,7 +33,7 @@ use ecp_analyzer::swift::parser::SwiftProvider;
 use ecp_analyzer::typescript::parser::TypeScriptProvider;
 use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::graph::{NodeKind, ZeroCopyGraph};
+use ecp_core::graph::{ArchivedZeroCopyGraph, NodeKind, RelType, ZeroCopyGraph};
 use instantiation_calls_support::calls_from;
 use std::path::Path;
 
@@ -138,6 +138,44 @@ fn test_resolve_call_go_package_namesake_type_keeps_cross_file_method() {
     assert!(targets(&graph, "run").contains(&target("cache/purge.go", "cache", "Purge")));
 }
 
+/// [`targets`] with each target's display owner
+/// (`ArchivedZeroCopyGraph::display_owner`), the owner a reader prints: a
+/// Rust nested fn stores none (R6) and prints its lexical parent's path.
+fn display_targets(graph: &ZeroCopyGraph, caller: &str) -> Vec<Target> {
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(graph).expect("archive graph");
+    let archived =
+        rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).expect("access graph");
+    let pool = graph.string_pool.as_slice();
+    let mut out: Vec<Target> = graph
+        .edges
+        .iter()
+        .filter(|e| {
+            e.rel_type == RelType::Calls
+                && graph.nodes[e.source as usize].name.resolve(pool) == caller
+        })
+        .map(|e| {
+            let node = &graph.nodes[e.target as usize];
+            (
+                graph.files[node.file_idx as usize]
+                    .path
+                    .resolve(pool)
+                    .to_string(),
+                archived
+                    .display_owner(e.target)
+                    .map(std::borrow::Cow::into_owned)
+                    .unwrap_or_default(),
+                node.name.resolve(pool).to_string(),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// Stands for: a bare call in `inner` binds the `helper` nested in `outer`
+/// before the file-level namesake, in Rust and Python alike. The target
+/// prints the display owner `outer`: Python stores it, Rust (R6) derives it
+/// from the lexical parent and stores no owner.
 #[test]
 fn test_resolve_call_nested_free_function_precedes_top_level_namesake() {
     let rust = RustProvider::new().unwrap();
@@ -157,7 +195,7 @@ fn test_resolve_call_nested_free_function_precedes_top_level_namesake() {
     for &(provider, path, source) in cases {
         let graph = single(provider, &[(path, source)]);
         assert_eq!(
-            targets(&graph, "inner"),
+            display_targets(&graph, "inner"),
             vec![target(path, "outer", "helper")],
             "{path}"
         );

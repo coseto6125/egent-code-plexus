@@ -90,7 +90,80 @@ use std::path::Path;
 /// instead of line 1, past YAML anchors, tags, comments and directives.
 /// schema25: a non-UTF-8 path that would route is a `path-not-utf8` omission
 /// instead of vanishing; the walk applies the size cap to a symlink's target.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema25");
+/// schema26: every uid site numbers a file through `assign_file`; a dirty
+/// file's same-uid redefinition becomes the full build's tombstone, and
+/// incremental mode numbers a later overload like the full build.
+/// schema27: path-literal, SQL, schema-field and event-topic records carry a
+/// bound endpoint; a module-top literal starts at the File node, and a
+/// PathLiteral owner is the bound node's owner (`Walk` for `Walk<'s, 't>`).
+/// schema28: an EventTopic node keeps its source spelling; `RawEventTopic`
+/// carries the canonical pairing key apart (`topic_key`).
+/// schema29: Fetches start at the File node; a module-level framework ref
+/// binds the File node; Overrides edges follow the stored supertypes per
+/// language rule.
+/// schema30: Overrides bind the nearest declaration along each language's
+/// lookup order and carry the base's resolver confidence; Swift records the
+/// override modifier; Dart heritage lists with-mixins; Java interface
+/// heritage lists its extends-list; a C# delegate carries its return type.
+/// schema31: a C# type beside a same-name type of another generic arity
+/// keeps its own node (an overload uid), and a C# generic base binds by
+/// arity; the parts of a C# partial type in one known project share one
+/// identity for heritage, Overrides and calls.
+/// schema32: one Route node per C1 route key; a route handler is an endpoint
+/// bound by scope or by its decorated declaration, a closure handler binds its
+/// anonymous node, and an unbound or absent handler is a BlindSpot.
+/// schema33: a C# delegate, or a member of a type beside a same-name type of
+/// another generic arity, is its own node.
+/// schema34: a C# call whose receiver type lacks the member retries the
+/// extension methods in scope, or records a BlindSpot; a TypeScript method
+/// route needs an `@Controller` class; a nested same-name type owns its own
+/// members; a test file's route marks no entry point.
+/// schema35: a C# call site records its arguments, so the extension retry
+/// selects by applicability; a C# call never binds a private or static
+/// candidate it cannot reach; a Spring mapping routes only on a controller
+/// class. Overlay fragments of schema34 are ignored by their fingerprint.
+/// schema36: a C# partial type has one representative part, which heritage
+/// edges target; every other part links to it with `PartOf`.
+/// schema37: a C# value receiver of unknown type is an untyped member that
+/// binds only an applicable extension, at 0.5; a typed field or property
+/// receiver keeps its type; a generic method call records the method name
+/// without its type arguments. Overlay fragments of schema36 are ignored by
+/// their fingerprint.
+/// schema38: a C# partial attribute class groups with its parts; a chained
+/// C# member call takes the access rule; a keyword-type receiver is a static
+/// call; a Color-Color receiver admits static and instance members; an
+/// inline route handler is recorded at its argument's span
+/// (`Unbound::Inline`), so a middleware closure never serves the route; an
+/// echo route's handler is the argument after the path; a Spring mapping is
+/// dropped only on an HTTP client (`@FeignClient`, `@HttpExchange`); an
+/// annotation type (C# attribute class, Java `@interface`, Kotlin
+/// `annotation class`) owns its members.
+/// schema39: Kotlin and Swift `FunctionMeta.decorators` drop parser markers;
+/// a C# generic attribute class carries its arity in its uid.
+/// schema40: a Rust nested fn or closure has no owner, a scoped uid and a
+/// lexical-parent row; an HTTP verb matches a whole word of the call name;
+/// NestJS, Spring, Gin, FastAPI and JS Express routes carry their router
+/// prefix; a route's response shape comes from its handler's span.
+/// schema41: a Python, JavaScript or TypeScript nested function, lambda or
+/// callback node has no owner, a scoped uid and a lexical-parent row too. A
+/// schema40 graph stores those owners, which the overlay's identity check
+/// rejects.
+/// schema42: an import resolves in the caller's workspace scope first (its
+/// own aliases, package names and module root), so a monorepo package's
+/// `@/*` binds inside that package.
+/// schema43: the global tier admits a pair by the stored `ParsedLanguage`
+/// (`admits_global`), so a `.proto` file no longer pairs with an unrouted
+/// file; a Python import probes every base path an alias expands to.
+/// schema44: `LocalGraph.parsed_language` (the parse reports its
+/// `ParsedLanguage`; a Vue/Svelte/Astro file resolves as its script language)
+/// and the `sfc-script-mismatch` blind spot for mixed TS/JS script blocks.
+/// schema45: an L1 fragment carries `FragmentFile.parsed_language`; a
+/// schema44 fragment has no such field and must not be read.
+/// schema46: an L1 fragment symbol carries `FragmentSymbol.decorators`; a
+/// schema45 fragment lays its symbols out without it and must not be read.
+/// schema47: an L1 fragment symbol carries `FragmentSymbol.params`; a
+/// schema46 fragment lays its symbols out without it and must not be read.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema47");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

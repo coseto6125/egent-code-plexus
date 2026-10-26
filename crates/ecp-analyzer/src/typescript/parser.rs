@@ -192,6 +192,87 @@ fn body_has_call(node: tree_sitter::Node) -> bool {
     false
 }
 
+/// The `@Controller` prefixes of the class around a route decorator: `None`
+/// when the class carries no `@Controller`, an empty list when it carries
+/// one without a path (`@Controller()`), and one entry per path otherwise
+/// ([`crate::route_detector::nest_controller_prefixes`], the reader the
+/// route decorator pass uses too). The grammar puts a class's decorators on
+/// the class declaration, or on the export statement for
+/// `@Controller() export class`.
+fn controller_prefixes(verb: tree_sitter::Node, source: &[u8]) -> Option<Vec<String>> {
+    let class = std::iter::successors(verb.parent(), |n| n.parent()).find(|n| {
+        matches!(
+            n.kind(),
+            "class_declaration" | "abstract_class_declaration" | "class"
+        )
+    })?;
+    let controller_call = |decorator: tree_sitter::Node| -> Option<Vec<String>> {
+        let expr = decorator.named_child(0)?;
+        let callee = match expr.kind() {
+            "call_expression" => expr.child_by_field_name("function"),
+            _ => Some(expr),
+        };
+        let name = callee.map(|c| match c.kind() {
+            "member_expression" => c.child_by_field_name("property").unwrap_or(c),
+            _ => c,
+        });
+        if name.and_then(|n| n.utf8_text(source).ok()) != Some("Controller") {
+            return None;
+        }
+        let text = decorator.utf8_text(source).ok()?;
+        Some(crate::route_detector::nest_controller_prefixes(text))
+    };
+    let find = |n: tree_sitter::Node| {
+        let mut cursor = n.walk();
+        let found = n
+            .named_children(&mut cursor)
+            .filter(|c| c.kind() == "decorator")
+            .find_map(controller_call);
+        found
+    };
+    find(class).or_else(|| {
+        class
+            .parent()
+            .filter(|p| p.kind() == "export_statement")
+            .and_then(find)
+    })
+}
+
+/// A NestJS route path under one `@Controller` prefix. An empty prefix
+/// leaves a method path as written; any other prefix, or an empty method
+/// path (`@Get()`), goes through the one prefix rule, C1 `join_route_path`,
+/// so `@Controller() @Get()` is `/`.
+fn nestjs_route_path(prefix: &str, path: &str) -> String {
+    match prefix.trim().is_empty() && !path.trim().is_empty() {
+        true => path.to_string(),
+        false => ecp_core::contracts::identity::join_route_path(prefix, path),
+    }
+}
+
+/// The name of the method a route decorator decorates, from the decorator's
+/// verb identifier (`Get` in `@Get(':id') find() {}`). The grammar puts a
+/// member's decorators before it in the class body; the method is the first
+/// following sibling that is not another decorator.
+fn decorated_method_name(verb: tree_sitter::Node, source: &[u8]) -> Option<String> {
+    let decorator = verb
+        .parent()?
+        .parent()
+        .filter(|d| d.kind() == "decorator")?;
+    let mut next = decorator.next_named_sibling();
+    while let Some(n) = next.filter(|n| n.kind() == "decorator" || n.is_extra()) {
+        next = n.next_named_sibling();
+    }
+    let member = next
+        .filter(|n| n.kind() == "method_definition")
+        .or_else(|| {
+            decorator
+                .parent()
+                .filter(|p| p.kind() == "method_definition")
+        })?;
+    let name = member.child_by_field_name("name")?.utf8_text(source).ok()?;
+    Some(name.to_string())
+}
+
 pub struct TypeScriptProvider {
     query: Query,
     indices: TypeScriptCaptureIndices,
@@ -236,10 +317,6 @@ struct TypeScriptCaptureIndices {
     route_method: Option<u32>,
     route_path: Option<u32>,
     route_call: Option<u32>,
-    /// Named handler argument of `app.METHOD(path, handler)` — used by the
-    /// builder to materialize a `HandlesRoute` edge from the handler back
-    /// to the Route node. Absent for inline arrow / anonymous handlers.
-    route_handler: Option<u32>,
     // Framework captures.
     express_handler: Option<u32>,
     nestjs_class: Option<u32>,
@@ -250,6 +327,9 @@ struct TypeScriptCaptureIndices {
     /// string literal is a route, gated by `has_nestjs` import presence).
     nestjs_decorator_verb: Option<u32>,
     nestjs_decorator_path: Option<u32>,
+    /// The argument list of a route decorator: `@Get()` has an empty one,
+    /// which names the controller prefix itself.
+    nestjs_decorator_args: Option<u32>,
     /// Arg-position arrow / function-expression callbacks — emits `<anonymous>`
     /// Function nodes so attach_to_enclosing can host inner calls.
     function_anonymous: Option<u32>,
@@ -294,12 +374,12 @@ impl TypeScriptProvider {
             route_method: query.capture_index_for_name("route.method"),
             route_path: query.capture_index_for_name("route.path"),
             route_call: query.capture_index_for_name("route.call"),
-            route_handler: query.capture_index_for_name("route.handler"),
             express_handler: query.capture_index_for_name("express.route.handler"),
             nestjs_class: query.capture_index_for_name("nestjs.controller.class"),
             nestjs_method: query.capture_index_for_name("nestjs.method.name"),
             nestjs_decorator_verb: query.capture_index_for_name("nestjs.decorator.verb"),
             nestjs_decorator_path: query.capture_index_for_name("nestjs.decorator.path"),
+            nestjs_decorator_args: query.capture_index_for_name("nestjs.decorator.args"),
             blind_eval: query.capture_index_for_name("blind.eval"),
             blind_function_ctor: query.capture_index_for_name("blind.function_ctor"),
             blind_dynamic_import: query.capture_index_for_name("blind.dynamic_import"),
@@ -355,8 +435,9 @@ impl LanguageProvider for TypeScriptProvider {
         type NestJsHandler = (String, String, (u32, u32, u32, u32));
         let mut pending_nestjs_handlers: Vec<NestJsHandler> = Vec::new();
         // NestJS decorator-routes pending `has_nestjs` import gate.
-        // (HTTP_METHOD, raw_path_with_quotes_stripped_by_capture, decorator_span)
-        type NestJsDecoratorRoute = (String, String, (u32, u32, u32, u32));
+        // (HTTP_METHOD, raw_path_with_quotes_stripped_by_capture, decorator_span,
+        // decorated method name)
+        type NestJsDecoratorRoute = (String, String, (u32, u32, u32, u32), Option<String>);
         let mut pending_nestjs_decorator_routes: Vec<NestJsDecoratorRoute> = Vec::new();
         let mut blind_spots: Vec<BlindSpot> = Vec::new();
         let file_category =
@@ -383,13 +464,13 @@ impl LanguageProvider for TypeScriptProvider {
 
             let mut route_method = None;
             let mut route_path = None;
-            let mut route_handler_node: Option<tree_sitter::Node> = None;
             let mut is_route = false;
 
             let mut nestjs_class_node: Option<tree_sitter::Node> = None;
             let mut nestjs_method_node: Option<tree_sitter::Node> = None;
             let mut nestjs_decorator_verb_node: Option<tree_sitter::Node> = None;
             let mut nestjs_decorator_path_node: Option<tree_sitter::Node> = None;
+            let mut nestjs_decorator_args_node: Option<tree_sitter::Node> = None;
 
             for cap in m.captures() {
                 let cap_idx = Some(cap.index);
@@ -444,8 +525,6 @@ impl LanguageProvider for TypeScriptProvider {
                 } else if cap_idx == idx.route_call {
                     is_route = true;
                     root_span_node = Some(cap.node);
-                } else if cap_idx == idx.route_handler {
-                    route_handler_node = Some(cap.node);
                 } else if cap_idx == idx.express_handler {
                     if let Ok(handler_name) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
@@ -461,6 +540,8 @@ impl LanguageProvider for TypeScriptProvider {
                     nestjs_decorator_verb_node = Some(cap.node);
                 } else if cap_idx == idx.nestjs_decorator_path {
                     nestjs_decorator_path_node = Some(cap.node);
+                } else if cap_idx == idx.nestjs_decorator_args {
+                    nestjs_decorator_args_node = Some(cap.node);
                 } else if cap_idx == idx.blind_eval {
                     push_blind_spot(
                         &mut blind_spots,
@@ -688,15 +769,18 @@ impl LanguageProvider for TypeScriptProvider {
                         std::str::from_utf8(&source[r_method.start_byte()..r_method.end_byte()]),
                         std::str::from_utf8(&source[r_path.start_byte()..r_path.end_byte()]),
                     ) {
-                        let handler_name = route_handler_node.and_then(|n| {
-                            std::str::from_utf8(&source[n.start_byte()..n.end_byte()])
-                                .ok()
-                                .map(|s| s.to_string())
-                        });
+                        // The last argument is the handler Express runs;
+                        // the ones before it are middleware.
+                        let handler = crate::route_detector::last_argument_handler(
+                            root.child_by_field_name("arguments"),
+                            source,
+                            &["arrow_function", "function_expression", "function"],
+                            &["identifier", "member_expression"],
+                        );
                         routes.push(RawRoute {
                             method: method_str.to_string(),
                             path: path_str.to_string(),
-                            handler: handler_name,
+                            handler,
                             span: node_span(&root),
                             scope: None,
                         });
@@ -712,18 +796,31 @@ impl LanguageProvider for TypeScriptProvider {
             // `has_nestjs` import flag is known (a few lines later in this
             // function — we can't gate here because import processing
             // happens in the same match loop).
-            if let (Some(verb_node), Some(path_node)) =
-                (nestjs_decorator_verb_node, nestjs_decorator_path_node)
-            {
-                if let (Ok(verb_str), Ok(path_str)) = (
+            // `@Get()` names no path: its route is the controller prefix.
+            let path_text = match (nestjs_decorator_path_node, nestjs_decorator_args_node) {
+                (Some(path_node), _) => {
+                    std::str::from_utf8(&source[path_node.start_byte()..path_node.end_byte()]).ok()
+                }
+                (None, Some(args)) if args.named_child_count() == 0 => Some(""),
+                _ => None,
+            };
+            if let (Some(verb_node), Some(path_str)) = (nestjs_decorator_verb_node, path_text) {
+                if let (Some(prefixes), Ok(verb_str)) = (
+                    controller_prefixes(verb_node, source),
                     std::str::from_utf8(&source[verb_node.start_byte()..verb_node.end_byte()]),
-                    std::str::from_utf8(&source[path_node.start_byte()..path_node.end_byte()]),
                 ) {
-                    pending_nestjs_decorator_routes.push((
-                        verb_str.to_uppercase(),
-                        path_str.to_string(),
-                        node_span(&verb_node),
-                    ));
+                    let prefixes = match prefixes.is_empty() {
+                        true => vec![String::new()],
+                        false => prefixes,
+                    };
+                    for prefix in prefixes {
+                        pending_nestjs_decorator_routes.push((
+                            verb_str.to_uppercase(),
+                            nestjs_route_path(&prefix, path_str),
+                            node_span(&verb_node),
+                            decorated_method_name(verb_node, source),
+                        ));
+                    }
                 }
             }
         }
@@ -822,12 +919,12 @@ impl LanguageProvider for TypeScriptProvider {
         // lax path helper because NestJS conventionally elides the leading
         // `/` (the framework prepends the controller prefix at runtime).
         if has_nestjs {
-            for (verb, raw_path, span) in pending_nestjs_decorator_routes {
+            for (verb, raw_path, span, method) in pending_nestjs_decorator_routes {
                 if let Some(cleaned) = crate::route_detector::clean_route_path_lax(&raw_path) {
                     routes.push(RawRoute {
                         method: verb,
                         path: cleaned,
-                        handler: None,
+                        handler: RawRoute::named_handler(method.as_deref()),
                         span,
                         scope: None,
                     });
@@ -887,7 +984,13 @@ impl LanguageProvider for TypeScriptProvider {
             &mut imports,
         );
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
-        crate::framework_helpers::stamp_js_function_owners(&mut nodes);
+        // The language `file_identities` reads off the same path, so a
+        // nested function loses its owner exactly where its uid is scoped.
+        let language = ecp_core::file_category::Language::from_path(&path.to_string_lossy());
+        crate::framework_helpers::stamp_owner_fn_by_span(language, &mut nodes);
+        // Last owner step: a nested function or callback node has a lexical
+        // parent and no owner (invariant I1), whatever the class pass gave it.
+        ecp_core::analyzer::lexical::clear_scoped_owners(language, &mut nodes);
 
         let tx_scopes =
             collect_typeorm_transactional_scopes(&nodes, &[NodeKind::Method, NodeKind::Function]);
@@ -930,6 +1033,7 @@ impl LanguageProvider for TypeScriptProvider {
             nodes,
             imports,
             documents: vec![],
+            route_receivers: None,
             framework_refs,
             fanout_refs: vec![],
             blind_spots,
@@ -941,6 +1045,7 @@ impl LanguageProvider for TypeScriptProvider {
             call_metas,
             raw_function_metas,
             export_aliases,
+            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
         })
     }
 }

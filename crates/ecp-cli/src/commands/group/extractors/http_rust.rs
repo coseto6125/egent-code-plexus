@@ -1,5 +1,6 @@
 //! Rust HTTP route extractor: axum `.route()` + actix-web attribute macros via tree-sitter.
 
+use super::{capture_line, client_verb, compile_client_query, consumer_contract, http_url_path};
 use crate::commands::group::types::{ContractRole, ContractType, ExtractedContract, SymbolRef};
 use std::path::Path;
 use std::sync::LazyLock;
@@ -38,6 +39,34 @@ const ACTIX_QUERY: &str = r#"
         (string_content) @path))))
 "#;
 
+/// Client calls with a literal URL: `client.get("/x")` and `reqwest::get("/x")`.
+const CLIENT_QUERY_SRC: &str = r#"
+(call_expression
+  function: (field_expression
+    value: (_) @recv
+    field: (field_identifier) @method)
+  arguments: (arguments . (string_literal (string_content) @path))) @call
+
+(call_expression
+  function: (scoped_identifier
+    path: (identifier) @recv
+    name: (identifier) @method)
+  arguments: (arguments . (string_literal (string_content) @path))) @call
+"#;
+
+static CLIENT_QUERY: LazyLock<Option<Query>> = LazyLock::new(|| {
+    let lang: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+    compile_client_query(&lang, CLIENT_QUERY_SRC, "http_rust")
+});
+
+/// A receiver is an HTTP client when it is a known client crate or its name
+/// contains `client`. axum's `.route("/x", get(h))` never has a verb as the
+/// called field, so the two shapes do not collide.
+fn is_client_receiver(recv: &str) -> bool {
+    matches!(recv, "reqwest" | "ureq" | "surf" | "isahc")
+        || recv.to_ascii_lowercase().contains("client")
+}
+
 static AXUM_QUERY_COMPILED: LazyLock<Query> = LazyLock::new(|| {
     let lang: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
     Query::new(&lang, AXUM_QUERY).expect("http_rust: compile AXUM_QUERY")
@@ -66,7 +95,50 @@ pub fn extract_http(file_path: &Path, source: &[u8]) -> Vec<ExtractedContract> {
     let mut out: Vec<ExtractedContract> = Vec::new();
     extract_axum(file_path, source, &tree, &lang, &mut out);
     extract_actix(file_path, source, &tree, &lang, &mut out);
+    extract_clients(file_path, source, &tree, &mut out);
     out
+}
+
+/// `Consumer` contracts for `reqwest`-style calls with a literal URL.
+fn extract_clients(
+    file_path: &Path,
+    source: &[u8],
+    tree: &tree_sitter::Tree,
+    out: &mut Vec<ExtractedContract>,
+) {
+    let Some(query) = CLIENT_QUERY.as_ref() else {
+        return;
+    };
+    let idx = |name: &str| query.capture_index_for_name(name);
+    let (Some(recv_idx), Some(method_idx), Some(path_idx), Some(call_idx)) =
+        (idx("recv"), idx("method"), idx("path"), idx("call"))
+    else {
+        return;
+    };
+
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, tree.root_node(), source);
+    while let Some(m) = matches.next() {
+        let recv = super::capture_text(m, recv_idx, source);
+        let method = super::capture_text(m, method_idx, source);
+        if !is_client_receiver(recv) {
+            continue;
+        }
+        let Some(verb) = client_verb(method) else {
+            continue;
+        };
+        let Some(path) = http_url_path(super::capture_text(m, path_idx, source)) else {
+            continue;
+        };
+        out.push(consumer_contract(
+            file_path,
+            ContractType::Http,
+            format!("http:{verb}:{path}"),
+            &format!("{recv}.{method}"),
+            capture_line(m, call_idx),
+            vec![("method".into(), verb.into())],
+        ));
+    }
 }
 
 fn extract_axum(

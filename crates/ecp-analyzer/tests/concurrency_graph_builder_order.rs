@@ -116,6 +116,7 @@ fn make_fixture_files() -> Vec<LocalGraph> {
             documents: vec![],
             imports: vec![],
             routes: vec![],
+            route_receivers: None,
             framework_refs: vec![RawFrameworkRef {
                 source_name: format!("Cls{i}"),
                 target_name: format!("fn_{i}"),
@@ -139,6 +140,7 @@ fn make_fixture_files() -> Vec<LocalGraph> {
             call_metas: vec![],
             raw_function_metas: vec![],
             export_aliases: None,
+            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
         })
         .collect()
 }

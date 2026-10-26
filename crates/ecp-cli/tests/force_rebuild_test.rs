@@ -1,5 +1,7 @@
 use ecp_cli::build::force::{force_rebuild_l2, invalidate_matching_l1};
-use ecp_core::session::{DirtyEntry, DirtyFiles, SessionMeta};
+use ecp_core::contracts::dirty_event::{PathChange, PathClass};
+use ecp_core::contracts::routing::SizeCap;
+use ecp_core::session::{layout, DirtyEventEntry, DirtyEvents, SessionMeta};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -36,7 +38,7 @@ fn setup_repo_with_l2(tmp: &Path) {
 
 fn add_session(tmp: &Path, sid: &str, base_sha: &str, with_dirty: bool) {
     let sd = tmp.join("sessions").join(sid);
-    fs::create_dir_all(sd.join("graph_overlay")).unwrap();
+    fs::create_dir_all(layout::fragments_dir(&sd)).unwrap();
     let sm = SessionMeta {
         version: 1,
         session_id: sid.into(),
@@ -52,14 +54,15 @@ fn add_session(tmp: &Path, sid: &str, base_sha: &str, with_dirty: bool) {
     };
     SessionMeta::write_atomic(&sd.join("session_meta.json"), &sm).unwrap();
     let df = if with_dirty {
-        let mut d = DirtyFiles::empty();
+        let mut d = DirtyEvents::empty(SizeCap::BUILT_IN);
         d.entries.insert(
             "src/a.rs".into(),
-            DirtyEntry {
+            DirtyEventEntry {
+                change: PathChange::Modified,
+                class: PathClass::SOURCE,
                 mtime_ns: 1,
-                content_hash: "x".into(),
-                fragment_id: "frag1".into(),
-                tantivy_delta_segment: None,
+                content_hash: Some("x".into()),
+                fragment_id: Some("frag1".into()),
                 parse_failed: false,
                 dirty_symbols: vec![],
                 format: 1,
@@ -67,9 +70,9 @@ fn add_session(tmp: &Path, sid: &str, base_sha: &str, with_dirty: bool) {
         );
         d
     } else {
-        DirtyFiles::empty()
+        DirtyEvents::empty(SizeCap::BUILT_IN)
     };
-    DirtyFiles::write_atomic(&sd.join("dirty_files.json"), &df).unwrap();
+    DirtyEvents::write_atomic(&layout::dirty_events_path(&sd), &df).unwrap();
 }
 
 #[test]
@@ -320,7 +323,7 @@ fn invalidate_classifies_corrupt_session_as_stale_skipped() {
     setup_repo_with_l2(tmp.path());
     add_session(tmp.path(), "sid_corrupt", SHA, false);
     fs::write(
-        tmp.path().join("sessions/sid_corrupt/dirty_files.json"),
+        layout::dirty_events_path(&tmp.path().join("sessions/sid_corrupt")),
         b"{ broken",
     )
     .unwrap();
@@ -335,7 +338,7 @@ fn invalidate_reaps_meta_unreadable_session() {
     setup_repo_with_l2(tmp.path());
     // Session dir with NO session_meta.json ⇒ MetaUnreadable. Unrecoverable:
     // no base_sha to rebuild from, so --force reaps it regardless of SHA.
-    let orphan = tmp.path().join("sessions/sid_no_meta/graph_overlay");
+    let orphan = layout::fragments_dir(&tmp.path().join("sessions/sid_no_meta"));
     fs::create_dir_all(&orphan).unwrap();
     let report = invalidate_matching_l1(tmp.path(), SHA).unwrap();
     assert_eq!(report.meta_reaped, 1);
@@ -352,7 +355,7 @@ fn invalidate_reaps_meta_unreadable_for_unrelated_sha() {
     // target SHA — a MetaUnreadable session is reaped under any --force.
     let tmp = tempfile::tempdir().unwrap();
     setup_repo_with_l2(tmp.path());
-    fs::create_dir_all(tmp.path().join("sessions/sid_dead/graph_overlay")).unwrap();
+    fs::create_dir_all(layout::fragments_dir(&tmp.path().join("sessions/sid_dead"))).unwrap();
     let report = invalidate_matching_l1(tmp.path(), SHA2).unwrap();
     assert_eq!(report.meta_reaped, 1);
 }

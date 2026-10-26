@@ -3,7 +3,8 @@
 //! `commit_lookup::CommitIndex`, which is a cli-side concern.
 
 use crate::commit_lookup::CommitIndex;
-use ecp_core::session::{DirtyFiles, SessionMeta, SessionState, StaleReason};
+use ecp_core::session::layout;
+use ecp_core::session::{DirtyEvents, SessionMeta, SessionState, StaleReason};
 use std::fs;
 use std::path::Path;
 
@@ -66,25 +67,27 @@ pub(crate) fn classify_with_meta(
         }
     };
 
-    let dirty_path = sid_dir.join("dirty_files.json");
-    let dirty = match fs::read(&dirty_path) {
-        Ok(bytes) => match serde_json::from_slice::<DirtyFiles>(&bytes) {
-            Ok(df) => df,
+    // Only today's namespace counts: a session whose dirty files sit in the
+    // legacy `dirty_files.json` alone serves none of them (they re-parse).
+    let dirty_path = layout::dirty_events_path(&sid_dir);
+    let fragment_count = match fs::read(&dirty_path) {
+        Ok(bytes) => match serde_json::from_slice::<DirtyEvents>(&bytes) {
+            Ok(df) => df.entries.len(),
             Err(_) => {
                 return SessionState::Stale {
-                    reason: StaleReason::DirtyFilesCorrupt,
+                    reason: StaleReason::DirtyEventsCorrupt,
                 }
             }
         },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => DirtyFiles::empty(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
         Err(_) => {
             return SessionState::Stale {
-                reason: StaleReason::DirtyFilesCorrupt,
+                reason: StaleReason::DirtyEventsCorrupt,
             }
         }
     };
 
-    if dirty.entries.is_empty() {
+    if fragment_count == 0 {
         SessionState::PureReference {
             base_sha: sm.base_sha.clone(),
             l2_dirname,
@@ -93,7 +96,7 @@ pub(crate) fn classify_with_meta(
         SessionState::AugmentedReference {
             base_sha: sm.base_sha.clone(),
             l2_dirname,
-            fragment_count: dirty.entries.len(),
+            fragment_count,
         }
     }
 }

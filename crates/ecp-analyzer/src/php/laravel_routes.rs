@@ -15,10 +15,11 @@
 use super::parser::{walk_to_scoped_root_scope, PHP_ROUTER_SCOPES};
 use crate::framework_helpers::node_span;
 use crate::resolution::index::{SymbolTable, MAX_HERITAGE_DEPTH};
-use crate::route_detector::{clean_route_path_lax, join_route_path};
+use crate::route_detector::{clean_route_path_lax, join_route_segments};
 use ecp_core::analyzer::types::{
     LocalGraph, RawImport, RawRoute, RawRouteScope, RouteInclude, Span,
 };
+use ecp_core::contracts::raw_records::{FileOrd, RawEndpoint, RawIdx, RawIndexMap, Unbound};
 use ecp_core::contracts::routing::{FileRouter, Language};
 use ecp_core::graph::NodeKind;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -244,7 +245,7 @@ impl SiteScope {
             return clean_route_path_lax(raw_path);
         }
         let tail = clean_route_path_lax(raw_path).unwrap_or_default();
-        Some(join_route_path(
+        Some(join_route_segments(
             self.prefixes
                 .iter()
                 .map(String::as_str)
@@ -257,7 +258,9 @@ impl SiteScope {
 pub(super) struct RouteSite {
     pub path: String,
     pub scope: RawRouteScope,
-    pub handler: Option<String>,
+    /// The controller action the route names, or an anonymous handler for
+    /// a closure written in place.
+    pub handler: Option<RawEndpoint>,
 }
 
 /// The names of the file, for resolving the class names a route names.
@@ -328,7 +331,7 @@ pub(super) fn route_site(
     Some(RouteSite {
         path: site.route_path(raw_path)?,
         handler: nth_argument(call, 1)
-            .and_then(|action| route_action(action, controller.as_deref(), source, names)),
+            .and_then(|action| route_handler(action, controller.as_deref(), source, names)),
         scope: site.scope,
     })
 }
@@ -425,7 +428,7 @@ pub(super) fn route_set_sites(
             return Vec::new();
         };
         let handler = nth_argument(call, path_arg + 1)
-            .and_then(|action| route_action(action, controller.as_deref(), source, names));
+            .and_then(|action| route_handler(action, controller.as_deref(), source, names));
         let mut out: Vec<(String, RouteSite)> = Vec::new();
         for method in methods {
             let method = method.to_ascii_uppercase();
@@ -631,9 +634,9 @@ fn resource_sites(
             }
             segments.push(action.suffix);
             let route = RouteSite {
-                path: join_route_path(segments),
+                path: join_route_segments(segments),
                 scope: site.scope.clone(),
-                handler: Some(format!("{class}@{}", action.action)),
+                handler: RawRoute::named_handler(Some(&format!("{class}@{}", action.action))),
             };
             (action.method.to_string(), route)
         })
@@ -705,6 +708,24 @@ fn singular(segment: &str) -> String {
         0
     };
     format!("{head}{}", &word[..word.len() - cut])
+}
+
+/// The handler of a route registration's action argument: a closure or
+/// arrow function written in place is inline at its own span, so binding
+/// takes only the closure node it became; any other argument names the
+/// controller action [`route_action`] reads.
+fn route_handler(
+    action: Node,
+    controller: Option<&str>,
+    source: &[u8],
+    names: FileNames,
+) -> Option<RawEndpoint> {
+    match action.kind() {
+        "anonymous_function" | "arrow_function" => {
+            Some(RawEndpoint::Unresolved(Unbound::Inline(node_span(&action))))
+        }
+        _ => RawRoute::named_handler(route_action(action, controller, source, names).as_deref()),
+    }
 }
 
 /// The `Class@method` the action argument `action` names. A class name
@@ -846,7 +867,7 @@ fn push_include(
         path: join_prefix(site.prefixes.iter().map(String::as_str)),
         // As written; [`resolve_include_controllers`] qualifies it once the
         // file's imports are known.
-        handler: site.controller,
+        handler: RawRoute::named_handler(site.controller.as_deref()),
         span: node_span(&node),
         scope: Some(Box::new(scope)),
     });
@@ -1096,11 +1117,10 @@ fn compose_namespace(outer: Option<&str>, inner: Option<&str>) -> Option<String>
 
 /// Prefix segments joined as a route path, empty when they hold none.
 fn join_prefix<'a>(segments: impl IntoIterator<Item = &'a str>) -> String {
-    let path = join_route_path(segments);
-    if path == "/" {
-        String::new()
-    } else {
-        path
+    let path = join_route_segments(segments);
+    match path.trim_end_matches('/') {
+        "" => String::new(),
+        trimmed => trimmed.to_string(),
     }
 }
 
@@ -1274,12 +1294,12 @@ impl CappedIncludes {
 }
 
 impl LaravelRoutes {
-    pub fn build(local_graphs: &[LocalGraph]) -> Self {
+    pub fn build(local_graphs: &[LocalGraph], raw_map: &RawIndexMap) -> Self {
         let routes = || local_graphs.iter().flat_map(|graph| &graph.routes);
         let has_includes = routes().any(|route| route.method == RawRoute::INCLUDE);
         let has_actions = routes().any(|route| {
             route.scope.is_some()
-                && route.handler.is_some()
+                && route.handler_name().is_some()
                 && route.method != RawRoute::INCLUDE
                 && route.method != RawRoute::CONTROLLER_MIDDLEWARE
         });
@@ -1292,7 +1312,7 @@ impl LaravelRoutes {
             include_scopes,
             capped,
             controllers: if has_actions {
-                ControllerIndex::build(local_graphs)
+                ControllerIndex::build(local_graphs, raw_map)
             } else {
                 ControllerIndex::default()
             },
@@ -1319,7 +1339,7 @@ impl LaravelRoutes {
         includes
             .iter()
             .map(|include| {
-                let path = join_route_path([include.prefix.as_str(), path]);
+                let path = join_route_segments([include.prefix.as_str(), path]);
                 include.promote(scope, path, handler)
             })
             .collect()
@@ -1399,7 +1419,7 @@ fn include_scopes(
                 middleware: scope.middleware.clone(),
                 excluded: scope.excluded_middleware.clone(),
                 namespace: scope.namespace.clone(),
-                controller: record.handler.clone(),
+                controller: record.handler_name().map(str::to_string),
             };
             includes.push((from, target, include));
         }
@@ -1644,14 +1664,11 @@ fn is_framework(fqn: &str) -> bool {
 }
 
 impl ControllerIndex {
-    /// Node indices are the builder's: each file's raw nodes in file order,
-    /// one after another from 0.
-    fn build(local_graphs: &[LocalGraph]) -> Self {
+    /// Node indices are the builder's, read from `raw_map`.
+    fn build(local_graphs: &[LocalGraph], raw_map: &RawIndexMap) -> Self {
         let mut index = Self::default();
-        let mut start = 0u32;
         for (file_idx, graph) in local_graphs.iter().enumerate() {
-            let base = start;
-            start += graph.nodes.len() as u32;
+            let file = FileOrd(file_idx as u32);
             let is_php = graph.file_path.to_str().is_some_and(|path| {
                 FileRouter::PATH_ONLY
                     .route(path)
@@ -1686,7 +1703,9 @@ impl ControllerIndex {
                 }
                 .to_ascii_lowercase();
                 let slot = index.types.len();
-                let node_idx = base + local_idx as u32;
+                let Some(node_idx) = raw_map.node(file, RawIdx(local_idx as u32)) else {
+                    continue;
+                };
                 index.by_node.insert(node_idx, slot);
                 if !is_trait {
                     index
@@ -1728,10 +1747,13 @@ impl ControllerIndex {
                     owner.has_constructor = true;
                     continue;
                 }
+                let Some(method_idx) = raw_map.node(file, RawIdx(local_idx as u32)) else {
+                    continue;
+                };
                 owner
                     .methods
                     .entry(node.name.to_ascii_lowercase())
-                    .or_insert(base + local_idx as u32);
+                    .or_insert(method_idx);
             }
             for record in graph
                 .routes
@@ -2180,8 +2202,8 @@ const UNREAD_STATIC_ENTRY: &str = "a static `middleware()` entry only the runtim
 /// file's imports and namespace.
 pub(super) fn resolve_include_controllers(records: &mut [RawRoute], names: FileNames) {
     for record in records {
-        if let Some(class) = record.handler.as_mut() {
-            *class = names.resolve(class);
+        if let Some(class) = record.handler_name().map(|class| names.resolve(class)) {
+            record.handler = RawRoute::named_handler(Some(&class));
         }
     }
 }

@@ -62,6 +62,34 @@ pub fn match_contracts(
         }
     }
 
+    // Wildcard stage: a provider that answers any verb (`http:ANY:/x`, from
+    // Express `all`, Spring `@RequestMapping`) pairs with a consumer of any verb
+    // on the same path.
+    for (id, providers) in &providers_by_id {
+        let Some(path) = id.strip_prefix("http:ANY:") else {
+            continue;
+        };
+        for (consumer_id, consumers) in &consumers_by_id {
+            let same_path = consumer_id
+                .strip_prefix("http:")
+                .and_then(|rest| rest.split_once(':'))
+                .is_some_and(|(verb, consumer_path)| verb != "ANY" && consumer_path == path);
+            if !same_path {
+                continue;
+            }
+            for p in providers {
+                for c in consumers {
+                    if p.repo == c.repo {
+                        continue;
+                    }
+                    links.push(make_link(c, p, MatchType::Wildcard, 0.9));
+                    matched_uids.insert(c.inner.symbol_uid.clone());
+                    matched_uids.insert(p.inner.symbol_uid.clone());
+                }
+            }
+        }
+    }
+
     // BM25 stage
     if !exact_only {
         let unmatched_consumers: Vec<&StoredContract> = kept

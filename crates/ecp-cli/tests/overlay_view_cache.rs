@@ -1,22 +1,36 @@
 //! The session view cache behind `Engine::overlay_view`: a later engine on
 //! unchanged inputs decodes the stored view instead of building it, and any
 //! change to the graph, the fragments or the cache file itself makes it
-//! build again.
+//! build again. The `test_dirty_events_*` and tombstone tests drive the
+//! freshness gate over the `l1/dirty_events.json` manifest the cache reads,
+//! and the `test_overlay_view_*_file_*` tests run the real binary over a
+//! deleted or renamed file.
 
+use ecp_cli::auto_ensure::{self, test_counters, IndexNeed};
 use ecp_cli::engine::Engine;
-use ecp_cli::session::overlay_reader::{accepted_fragments, decode_view_inputs};
-use ecp_cli::session::overlay_writer::write_dirty_fragments_from_graphs;
+use ecp_cli::session::overlay_reader::{
+    accepted_fragments, decode_view_inputs, decode_view_inputs_with_records, view_inputs,
+};
+use ecp_cli::session::overlay_writer::{write_dirty_events, write_dirty_fragments_from_graphs};
 use ecp_cli::session::view_cache::{self, VIEW_CACHE_FILE};
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
+use ecp_core::contracts::dirty_event::PathClass;
 use ecp_core::graph::NodeKind;
 use ecp_core::graph_fixture::GraphFixture;
-use ecp_core::session::{DirtyFiles, OverlayFileInput, OverlayView, SessionMeta};
+use ecp_core::session::layout;
+use ecp_core::session::{
+    DirtyEvents, OverlayFileInput, OverlayView, SessionMeta, DIRTY_EVENTS_FORMAT,
+};
+use serde_json::Value;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Barrier;
 use std::time::{Duration, UNIX_EPOCH};
 
 const DIRTY: &str = "src/dirty.rs";
+const CLEAN: &str = "src/clean.rs";
 
 struct Fixture {
     _tmp: tempfile::TempDir,
@@ -33,7 +47,7 @@ impl Fixture {
         let mut fx = GraphFixture::new();
         fx.func(DIRTY, "keep_fn");
         fx.func(DIRTY, "gone_fn");
-        fx.func("src/clean.rs", "callee");
+        fx.func(CLEAN, "callee");
         let graph_path = tmp.path().join("graph.bin");
         fs::write(&graph_path, fx.into_bytes()).unwrap();
 
@@ -54,8 +68,13 @@ impl Fixture {
             agent_name: None,
         };
         SessionMeta::write_atomic(&session_dir.join("session_meta.json"), &meta).unwrap();
-        DirtyFiles::write_atomic(&session_dir.join("dirty_files.json"), &DirtyFiles::empty())
-            .unwrap();
+        DirtyEvents::write_atomic(
+            &layout::dirty_events_path(&session_dir),
+            &DirtyEvents::empty(ecp_core::config::resolve_size_cap(Path::new(
+                &meta.source_worktree,
+            ))),
+        )
+        .unwrap();
         Self {
             worktree: tmp.path().join("wt"),
             _tmp: tmp,
@@ -95,9 +114,11 @@ impl Fixture {
     }
 
     fn engine(&self) -> Engine {
-        Engine::load(&self.graph_path)
-            .unwrap()
-            .with_overlay(self.session_dir.clone(), self.worktree.clone())
+        Engine::load(&self.graph_path).unwrap().with_overlay(
+            self.session_dir.clone(),
+            self.worktree.clone(),
+            None,
+        )
     }
 
     /// The inputs `Engine::overlay_view` builds from on a cache miss.
@@ -106,9 +127,38 @@ impl Fixture {
         decode_view_inputs(&accepted)
     }
 
-    /// The view `OverlayView::build` makes from the current inputs.
+    /// Record `rel` as deleted, as the freshness gate does for a dirty
+    /// source path absent at its stat, and remove it from the worktree.
+    fn remove(&self, rel: &str) {
+        let path = self.worktree.join(rel);
+        if path.exists() {
+            fs::remove_file(&path).unwrap();
+        }
+        write_dirty_events(
+            &self.session_dir,
+            ecp_core::config::resolve_size_cap(&self.worktree),
+            &[],
+            &[],
+            &HashMap::new(),
+            &[(rel.to_string(), PathClass::SOURCE)],
+        )
+        .unwrap();
+    }
+
+    /// The view `OverlayView::build_with_configs` makes from the current
+    /// inputs, as `Engine::overlay_view` builds it on a cache miss.
     fn fresh(&self, engine: &Engine) -> OverlayView {
-        OverlayView::build(engine.graph().unwrap(), &self.inputs()).unwrap()
+        let inputs = view_inputs(&self.session_dir, &self.worktree).unwrap();
+        let (files, records) = decode_view_inputs_with_records(&inputs.fragments);
+        OverlayView::build_with_configs(
+            engine.graph().unwrap(),
+            &files,
+            &records,
+            &inputs.tombstones,
+            &inputs.stale,
+            &inputs.configs,
+        )
+        .unwrap()
     }
 
     /// The key `Engine::overlay_view` stores the current inputs under.
@@ -176,6 +226,39 @@ fn tmp_files(dir: &Path) -> Vec<String> {
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|name| name.ends_with(".tmp"))
         .collect()
+}
+
+/// Stands for: the reader accepts the fragments this query's refresh just
+/// stamped. When the effective cap moves between the refresh and the read,
+/// the refresh's cap (`with_overlay`'s third argument) decides, not a second
+/// read of the config.
+#[test]
+fn test_overlay_view_refresh_cap_given_accepts_fragments_stamped_under_it() {
+    let f = Fixture::new();
+    f.edit(&["keep_fn", "added_fn"], 1_000);
+    let manifest_path = layout::dirty_events_path(&f.session_dir);
+    let mut manifest = DirtyEvents::read(&manifest_path).unwrap();
+    let refresh_cap = ecp_core::contracts::routing::SizeCap::resolve(Some("123457"), None);
+    manifest.size_cap_bytes = refresh_cap.bytes();
+    DirtyEvents::write_atomic(&manifest_path, &manifest).unwrap();
+
+    let without = Engine::load(&f.graph_path).unwrap().with_overlay(
+        f.session_dir.clone(),
+        f.worktree.clone(),
+        None,
+    );
+    let with = Engine::load(&f.graph_path).unwrap().with_overlay(
+        f.session_dir.clone(),
+        f.worktree.clone(),
+        Some(refresh_cap),
+    );
+
+    assert!(
+        without.overlay_view().is_none(),
+        "a foreign cap was accepted"
+    );
+    let view = with.overlay_view().expect("the refresh's cap was not used");
+    assert!(view.virtual_nodes().iter().any(|n| n.name == "added_fn"));
 }
 
 #[test]
@@ -350,9 +433,11 @@ fn test_overlay_view_clean_tree_returns_none_writes_no_cache() {
 fn test_overlay_view_missing_session_dir_returns_none_creates_nothing() {
     let f = Fixture::new();
     let missing = f.session_dir.with_file_name("no-such-sid");
-    let engine = Engine::load(&f.graph_path)
-        .unwrap()
-        .with_overlay(missing.clone(), f.worktree.clone());
+    let engine = Engine::load(&f.graph_path).unwrap().with_overlay(
+        missing.clone(),
+        f.worktree.clone(),
+        None,
+    );
 
     assert!(engine.overlay_view().is_none());
     assert!(!missing.exists());
@@ -486,6 +571,64 @@ fn test_view_cache_concurrent_writes_and_reads_never_return_wrong_view() {
     assert!(tmp_files(&f.session_dir).is_empty());
 }
 
+/// The base index of the node named `name`.
+fn base_idx(engine: &Engine, name: &str) -> u32 {
+    let graph = engine.graph().unwrap();
+    graph
+        .nodes
+        .iter()
+        .position(|n| n.name.resolve(&graph.string_pool) == name)
+        .unwrap_or_else(|| panic!("no base node {name}")) as u32
+}
+
+/// Stands for: a view built before an `rm` is never served after it. The
+/// session already holds a cached view of another dirty file, and the `rm`
+/// leaves that fragment as it was, so only the tombstone can move the key.
+/// Failed before F2b: the key hashed fragments alone, and the cached view,
+/// which still serves the deleted file's `callee`, came back.
+#[test]
+fn test_overlay_view_tombstone_changes_view_cache_key() {
+    let f = Fixture::new();
+    f.edit(&["keep_fn"], 1_000);
+    let first = f.engine();
+    first.overlay_view().expect("a view of the edit");
+    let before = f.key(&first);
+    assert!(f.cached(&first).is_some(), "control: the view was cached");
+
+    f.remove(CLEAN);
+    let second = f.engine();
+    let after = f.key(&second);
+    let view = second.overlay_view().expect("a view after the rm");
+
+    assert_ne!(after, before);
+    assert_eq!(
+        view.redirect(base_idx(&second, "callee")),
+        None,
+        "the deleted file's symbol is still served"
+    );
+    assert_eq!(names(view), ["keep_fn"], "the other dirty file stays");
+    assert_eq!(view, &f.fresh(&second));
+    assert_eq!(f.cached(&second).as_ref(), Some(view));
+}
+
+/// Stands for: an `rm` and nothing else still makes a view: the deleted
+/// file's nodes are hidden although the session holds no fragment.
+#[test]
+fn test_overlay_view_tombstone_alone_hides_deleted_file() {
+    let f = Fixture::new();
+    f.remove(CLEAN);
+    let engine = f.engine();
+
+    let view = engine
+        .overlay_view()
+        .expect("a tombstone alone makes a view");
+
+    assert_eq!(view.redirect(base_idx(&engine, "callee")), None);
+    let keep = base_idx(&engine, "keep_fn");
+    assert_eq!(view.redirect(keep), Some(keep), "a clean file stays");
+    assert!(view.virtual_nodes().is_empty());
+}
+
 #[test]
 fn test_accepted_fragments_fragment_change_changes_hash() {
     let f = Fixture::new();
@@ -514,7 +657,7 @@ fn test_accepted_fragments_corrupt_manifest_returns_error() {
     let f = Fixture::new();
     f.edit(&["keep_fn"], 1_000);
     f.engine().overlay_view().unwrap();
-    fs::write(f.session_dir.join("dirty_files.json"), "{ not json").unwrap();
+    fs::write(layout::dirty_events_path(&f.session_dir), "{ not json").unwrap();
 
     assert!(accepted_fragments(&f.session_dir, &f.worktree).is_err());
     assert!(f.engine().overlay_view().is_none());
@@ -581,4 +724,391 @@ fn test_view_cache_key_graph_renamed_over_after_load_keeps_loaded_stamp() {
 
     assert_eq!(engine.view_cache_key(7), Some(loaded));
     assert_ne!(f.engine().view_cache_key(7).unwrap(), loaded);
+}
+
+// ------------------------------------------- freshness gate over the manifest
+
+const CHILD_ENV: &str = "ECP_OVERLAY_VIEW_CACHE_CHILD";
+
+/// Re-runs `test_name` alone in a child process with `env` set and returns
+/// true in the parent; returns false inside the child. The child sets
+/// `ECP_HOME`, `ECP_SESSION_ID` and the cap env var, and reads the
+/// process-wide counters, which no sibling test may share. A drifted name
+/// makes libtest run nothing and exit 0, so the child must report one pass.
+fn rerun_in_child(test_name: &str, env: &[(&str, &str)]) -> bool {
+    if std::env::var_os(CHILD_ENV).is_some() {
+        return false;
+    }
+    let out = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test_name, "--nocapture"])
+        .env(CHILD_ENV, "1")
+        .envs(env.iter().copied())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains("test result: ok. 1 passed;"),
+        "isolated test process {test_name}: {}\n{stdout}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    true
+}
+
+/// A git repo with `files` committed, a graph whose sidecar names HEAD (so
+/// the porcelain shortcut hands the gate its dirty set), and this process's
+/// `ECP_HOME` / `ECP_SESSION_ID` pointing at a session of its own.
+struct GitSession {
+    _tmp: tempfile::TempDir,
+    worktree: PathBuf,
+    graph_path: PathBuf,
+}
+
+impl GitSession {
+    fn new(session_id: &str, files: &[(&str, &str)]) -> Self {
+        let tmp = tempfile::tempdir().unwrap();
+        let worktree = tmp.path().join("repo");
+        fs::create_dir_all(&worktree).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&worktree)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        git(&["config", "user.name", "test"]);
+        for (rel, text) in files {
+            fs::write(worktree.join(rel), text).unwrap();
+        }
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "base"]);
+        let graph_path = tmp.path().join("cache").join("graph.bin");
+        fs::create_dir_all(graph_path.parent().unwrap()).unwrap();
+        fs::write(&graph_path, GraphFixture::new().into_bytes()).unwrap();
+        auto_ensure::write_head_sha_sidecar_with_sha(&graph_path, &git(&["rev-parse", "HEAD"]));
+        std::env::set_var("ECP_HOME", tmp.path().join("ecp-home"));
+        std::env::set_var("ECP_SESSION_ID", session_id);
+        Self {
+            _tmp: tmp,
+            worktree,
+            graph_path,
+        }
+    }
+
+    fn session_dir(&self) -> PathBuf {
+        auto_ensure::resolve_session_overlay_dir(&self.worktree).unwrap()
+    }
+
+    fn manifest(&self) -> DirtyEvents {
+        DirtyEvents::read(&layout::dirty_events_path(&self.session_dir())).unwrap()
+    }
+
+    /// One query's refresh. Returns the paths handed to `reanalyze_files`.
+    fn refresh(&self) -> usize {
+        test_counters::reset();
+        auto_ensure::ensure_fresh(IndexNeed::NearCurrent, &self.graph_path, &self.worktree)
+            .unwrap();
+        test_counters::reanalyze_paths()
+    }
+
+    fn accepted(&self) -> std::io::Result<usize> {
+        accepted_fragments(&self.session_dir(), &self.worktree).map(|(a, _)| a.len())
+    }
+}
+
+const TWO_FILES: [(&str, &str); 2] = [("a.py", "def a(): pass\n"), ("b.py", "def b(): pass\n")];
+
+fn edit_both(s: &GitSession) {
+    fs::write(s.worktree.join("a.py"), "def a2(): pass\n").unwrap();
+    fs::write(s.worktree.join("b.py"), "def b2(): pass\n").unwrap();
+}
+
+/// A manifest without `format` is not this namespace's: the reader serves
+/// none of its entries and the gate re-parses every dirty file, although
+/// every entry's mtime and bin still match.
+#[test]
+fn test_dirty_events_missing_format_reparses_every_dirty_file() {
+    if rerun_in_child(
+        "test_dirty_events_missing_format_reparses_every_dirty_file",
+        &[],
+    ) {
+        return;
+    }
+    let s = GitSession::new("missing-format-test", &TWO_FILES);
+    edit_both(&s);
+    assert_eq!(s.refresh(), 2);
+    assert_eq!(
+        s.refresh(),
+        0,
+        "control: a current manifest skips the re-parse"
+    );
+    assert_eq!(s.accepted().unwrap(), 2);
+    let path = layout::dirty_events_path(&s.session_dir());
+    let mut doc: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    doc.as_object_mut().unwrap().remove("format").unwrap();
+    fs::write(&path, serde_json::to_vec(&doc).unwrap()).unwrap();
+
+    let served = s.accepted();
+    let reparsed = s.refresh();
+
+    assert!(
+        served.is_err(),
+        "a manifest without format was served: {served:?}"
+    );
+    assert_eq!(reparsed, 2, "every dirty file re-parses");
+    let after = s.manifest();
+    assert_eq!(after.format, DIRTY_EVENTS_FORMAT);
+    assert_eq!(after.entries.keys().collect::<Vec<_>>(), ["a.py", "b.py"]);
+    assert_eq!(s.accepted().unwrap(), 2);
+}
+
+/// Fragments parsed under one cap are not current under another: a file
+/// over the new cap would parse to an omission.
+#[test]
+fn test_dirty_events_size_cap_change_marks_manifest_stale() {
+    if rerun_in_child(
+        "test_dirty_events_size_cap_change_marks_manifest_stale",
+        &[("ECP_MAX_FILE_BYTES", "1000000")],
+    ) {
+        return;
+    }
+    let s = GitSession::new("size-cap-test", &TWO_FILES);
+    edit_both(&s);
+    assert_eq!(s.refresh(), 2);
+    assert_eq!(s.refresh(), 0, "control: the same cap skips the re-parse");
+    assert_eq!(s.manifest().size_cap_bytes, 1_000_000);
+    assert_eq!(s.accepted().unwrap(), 2);
+
+    std::env::set_var("ECP_MAX_FILE_BYTES", "2000000");
+    let served = s.accepted().unwrap();
+    let reparsed = s.refresh();
+
+    assert_eq!(served, 0, "fragments of another cap were served");
+    assert_eq!(reparsed, 2, "every dirty file re-parses");
+    assert_eq!(s.manifest().size_cap_bytes, 2_000_000);
+    assert_eq!(s.accepted().unwrap(), 2);
+}
+
+/// `rm` of a tracked source file writes a tombstone: `change: deleted`, a
+/// class, no fragment id and no bin. It stays current while the file is
+/// absent and re-parses once the file is back.
+#[test]
+fn test_overlay_writer_deleted_file_writes_tombstone_without_bin() {
+    if rerun_in_child(
+        "test_overlay_writer_deleted_file_writes_tombstone_without_bin",
+        &[],
+    ) {
+        return;
+    }
+    use ecp_core::contracts::dirty_event::PathChange;
+    let s = GitSession::new("tombstone-test", &TWO_FILES);
+    fs::write(s.worktree.join("a.py"), "def a2(): pass\n").unwrap();
+    fs::remove_file(s.worktree.join("b.py")).unwrap();
+
+    assert_eq!(s.refresh(), 2);
+
+    let manifest = s.manifest();
+    let (edited, gone) = (&manifest.entries["a.py"], &manifest.entries["b.py"]);
+    assert_eq!(edited.change, PathChange::Modified);
+    assert_eq!(gone.change, PathChange::Deleted);
+    assert!(gone.class.is_source());
+    assert_eq!(gone.fragment_id, None);
+    assert!(gone.is_tombstone());
+    let mut bins: Vec<String> = fs::read_dir(layout::fragments_dir(&s.session_dir()))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    bins.sort();
+    assert_eq!(
+        bins,
+        [format!("{}.bin", edited.fragment_id.as_deref().unwrap())]
+    );
+    assert_eq!(s.accepted().unwrap(), 1, "a tombstone has no fragment");
+
+    assert_eq!(s.refresh(), 0, "a tombstone of an absent file is current");
+    fs::write(s.worktree.join("b.py"), "def back(): pass\n").unwrap();
+    assert_eq!(s.refresh(), 1, "the file came back: only it re-parses");
+    let back = s.manifest();
+    assert_eq!(back.entries["b.py"].change, PathChange::Modified);
+    assert!(back.entries["b.py"].fragment_id.is_some());
+}
+
+// ------------------------------------- deleted and renamed files, real binary
+
+const KEPT_PY: &str = "def target_kept():\n    return 1\n";
+const GONE_PY: &str =
+    "from kept import target_kept\n\n\ndef helper_gone():\n    return target_kept()\n";
+const MAIN_PY: &str =
+    "from gone import helper_gone\n\n\ndef caller_main():\n    return helper_gone()\n";
+
+/// An indexed git repo holding `kept.py`, `gone.py` (calls `kept.py`) and
+/// `main.py` (calls `gone.py`), with its own cache root.
+struct IndexedRepo {
+    _tmp: tempfile::TempDir,
+    repo: PathBuf,
+    home: PathBuf,
+    session_id: &'static str,
+}
+
+impl IndexedRepo {
+    fn new(session_id: &'static str) -> Self {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        for (rel, text) in [
+            ("kept.py", KEPT_PY),
+            ("gone.py", GONE_PY),
+            ("main.py", MAIN_PY),
+        ] {
+            fs::write(repo.join(rel), text).unwrap();
+        }
+        let fixture = Self {
+            _tmp: tmp,
+            repo,
+            home,
+            session_id,
+        };
+        fixture.git(&["init", "-q", "-b", "main"]);
+        fixture.git(&["config", "user.email", "test@example.invalid"]);
+        fixture.git(&["config", "user.name", "test"]);
+        fixture.git(&["add", "-A"]);
+        fixture.git(&["commit", "-qm", "base"]);
+        let index = fixture
+            .ecp_command()
+            .args(["admin", "index", "--repo", fixture.repo.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            index.status.success(),
+            "admin index: {}",
+            String::from_utf8_lossy(&index.stderr)
+        );
+        fixture
+    }
+
+    fn git(&self, args: &[&str]) {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(&self.repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+    }
+
+    /// `ecp` with the cache root and the session pinned to the fixture, as
+    /// an agent host runs it.
+    fn ecp_command(&self) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ecp"));
+        command
+            .current_dir(&self.repo)
+            .env("HOME", &self.home)
+            .env_remove("ECP_HOME")
+            .env_remove("CLAUDE_CODE_SESSION_ID")
+            .env("ECP_SESSION_ID", self.session_id)
+            .env("ECP_SKIP_BG_REBUILD", "1");
+        command
+    }
+
+    fn json(&self, args: &[&str]) -> Value {
+        let out = self
+            .ecp_command()
+            .args(args)
+            .args(["--format", "json"])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "ecp {args:?}: {}\n{stdout}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let start = stdout
+            .find('{')
+            .unwrap_or_else(|| panic!("no JSON in stdout: {stdout}"));
+        serde_json::from_str(&stdout[start..]).unwrap()
+    }
+
+    /// `(name, filePath)` of every impact row past the target.
+    fn impact_rows(&self, target: &str, direction: &str) -> Vec<(String, String)> {
+        let value = self.json(&[
+            "impact",
+            "--target",
+            target,
+            "--direction",
+            direction,
+            "--repo",
+            ".",
+        ]);
+        value["impact"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no impact rows: {value}"))
+            .iter()
+            .filter(|row| row["depth"].as_u64() != Some(0))
+            .map(|row| {
+                (
+                    row["name"].as_str().unwrap_or_default().to_string(),
+                    row["filePath"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect()
+    }
+}
+
+/// Stands for: after `rm` of a clean tracked file, no query answers from the
+/// base graph's copy of it. Before F2b the tombstone was written and never
+/// read, so `find` still answered `found: true` from `gone.py`, and impact
+/// still listed `helper_gone` as a caller of `target_kept` and a callee of
+/// `caller_main`.
+#[test]
+fn test_overlay_view_deleted_file_find_found_false() {
+    let fx = IndexedRepo::new("f2b-deleted-file");
+    let has_gone = |rows: &[(String, String)]| {
+        rows.iter()
+            .any(|(name, path)| name == "helper_gone" || path.ends_with("gone.py"))
+    };
+    assert_eq!(fx.json(&["find", "helper_gone"])["found"], true, "setup");
+    assert!(
+        has_gone(&fx.impact_rows("target_kept", "upstream")),
+        "setup: the index must hold the gone.py -> kept.py call"
+    );
+
+    fs::remove_file(fx.repo.join("gone.py")).unwrap();
+    let found = fx.json(&["find", "helper_gone"]);
+    let callers = fx.impact_rows("target_kept", "upstream");
+    let callees = fx.impact_rows("caller_main", "downstream");
+
+    assert_eq!(found["found"], false, "{found}");
+    assert!(!has_gone(&callers), "callers of target_kept: {callers:?}");
+    assert!(!has_gone(&callees), "callees of caller_main: {callees:?}");
+}
+
+/// Stands for: after `git mv`, the old path's nodes are gone from the view
+/// and the new path's parse answers. Before F2b `find --all` listed
+/// `helper_gone` twice, once from the base graph's `gone.py`.
+#[test]
+fn test_overlay_view_renamed_file_old_half_suppressed() {
+    let fx = IndexedRepo::new("f2b-renamed-file");
+    fx.git(&["mv", "gone.py", "moved.py"]);
+
+    let found = fx.json(&["find", "helper_gone", "--all"]);
+    let callers = fx.impact_rows("target_kept", "upstream");
+
+    let files: Vec<&str> = found["matches"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no matches: {found}"))
+        .iter()
+        .map(|m| m["file"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(files, ["moved.py"], "{found}");
+    assert!(
+        callers.iter().all(|(_, path)| !path.ends_with("gone.py")),
+        "callers of target_kept: {callers:?}"
+    );
 }

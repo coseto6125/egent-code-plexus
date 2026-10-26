@@ -982,7 +982,7 @@ fn test_routes_unbound_string_action_reports_unresolved_not_inline() {
     assert_eq!(
         handler_kinds(repo.path(), home.path(), "/admin/logintest"),
         [(
-            "unresolved_action".to_string(),
+            "unresolved".to_string(),
             "AwardController@logintest".to_string(),
             Some("AwardController@logintest".to_string()),
         )]
@@ -993,27 +993,19 @@ fn test_routes_unbound_string_action_reports_unresolved_not_inline() {
     );
 }
 
-/// Two registrations on one line: the BlindSpot of the string action that
-/// binds no method marks its own registration only, so the closure route
-/// beside it stays `inline_anonymous`.
+/// Two registrations of one route on one line: Laravel keeps the later one
+/// (its route collection is keyed by verb and URI), so the route is one row
+/// whose handler is the closure. Contract: the string action's BlindSpot never
+/// marks the closure that replaced it, so the closure stays `inline_anonymous`.
 #[test]
-fn test_routes_unbound_action_and_closure_on_one_line_keep_their_kinds() {
+fn test_routes_same_route_action_then_closure_keeps_the_closure() {
     let repo = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let admin = "<?php\n\nuse Illuminate\\Support\\Facades\\Route;\n\nRoute::get('/x', 'AwardController@missing'); Route::get('/x', function () { return 'ok'; });\n";
     setup_laravel_repo_with(repo.path(), home.path(), &[("routes/admin.php", admin)]);
 
-    let mut kinds = handler_kinds(repo.path(), home.path(), "/admin/x");
-    kinds.sort_unstable();
     assert_eq!(
-        kinds,
-        [
-            ("inline_anonymous".to_string(), "<inline>".to_string(), None),
-            (
-                "unresolved_action".to_string(),
-                "AwardController@missing".to_string(),
-                Some("AwardController@missing".to_string()),
-            ),
-        ]
+        handler_kinds(repo.path(), home.path(), "/admin/x"),
+        [("inline_anonymous".to_string(), "<inline>".to_string(), None)]
     );
 }

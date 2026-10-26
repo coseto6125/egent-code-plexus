@@ -1262,28 +1262,80 @@ fn backdate_secs(path: &std::path::Path, secs: u64) {
     filetime::set_file_mtime(path, filetime::FileTime::from_system_time(then)).unwrap();
 }
 
-/// `sessions/<sid>/` with `manifest` as `dirty_files.json` (written as is
-/// when given) and the named bins in `graph_overlay/`, each `age_secs` old.
+/// `sessions/<sid>/` with `manifest` as `l1/dirty_events.json` (written as is
+/// when given) and the named bins in `l1/fragments/`, each `age_secs` old.
+/// Returns the session directory and its fragments directory.
 fn fragment_session(
     repo_root: &std::path::Path,
     manifest: Option<&str>,
     bins: &[(&str, u64)],
-) -> std::path::PathBuf {
+) -> (std::path::PathBuf, std::path::PathBuf) {
     let session = repo_root.join("sessions").join("sid");
-    let overlay = session.join("graph_overlay");
+    let fragments = ecp_core::session::layout::fragments_dir(&session);
+    std::fs::create_dir_all(&fragments).unwrap();
+    if let Some(manifest) = manifest {
+        std::fs::write(
+            ecp_core::session::layout::dirty_events_path(&session),
+            manifest,
+        )
+        .unwrap();
+    }
+    write_aged_bins(&fragments, bins);
+    (session, fragments)
+}
+
+/// [`fragment_session`] for the legacy namespace: `manifest` as
+/// `dirty_files.json`, the bins in `graph_overlay/`.
+fn legacy_fragment_session(
+    repo_root: &std::path::Path,
+    manifest: Option<&str>,
+    bins: &[(&str, u64)],
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let session = repo_root.join("sessions").join("sid");
+    let overlay = ecp_core::session::layout::legacy_overlay_dir(&session);
     std::fs::create_dir_all(&overlay).unwrap();
     if let Some(manifest) = manifest {
-        std::fs::write(session.join("dirty_files.json"), manifest).unwrap();
+        std::fs::write(
+            ecp_core::session::layout::legacy_dirty_files_path(&session),
+            manifest,
+        )
+        .unwrap();
     }
+    write_aged_bins(&overlay, bins);
+    (session, overlay)
+}
+
+fn write_aged_bins(dir: &std::path::Path, bins: &[(&str, u64)]) {
     for (name, age_secs) in bins {
-        let bin = overlay.join(name);
+        let bin = dir.join(name);
         std::fs::write(&bin, b"x").unwrap();
         backdate_secs(&bin, *age_secs);
     }
-    overlay
 }
 
+/// A `dirty_events.json` whose one entry, `a.py`, names `fragment_id`.
 fn manifest_naming(fragment_id: &str) -> String {
+    use ecp_core::contracts::dirty_event::{PathChange, PathClass};
+    use ecp_core::session::{DirtyEventEntry, DirtyEvents};
+    let mut manifest = DirtyEvents::empty(ecp_core::contracts::routing::SizeCap::BUILT_IN);
+    manifest.entries.insert(
+        "a.py".into(),
+        DirtyEventEntry {
+            change: PathChange::Modified,
+            class: PathClass::SOURCE,
+            mtime_ns: 1,
+            fragment_id: Some(fragment_id.into()),
+            content_hash: Some(fragment_id.into()),
+            parse_failed: false,
+            dirty_symbols: vec![],
+            format: ecp_core::session::FRAGMENT_FORMAT_V7,
+        },
+    );
+    serde_json::to_string(&manifest).unwrap()
+}
+
+/// A legacy `dirty_files.json` whose one entry, `a.py`, names `fragment_id`.
+fn legacy_manifest_naming(fragment_id: &str) -> String {
     format!(
         r#"{{"version":1,"entries":{{"a.py":{{"mtime_ns":1,"content_hash":"{fragment_id}","fragment_id":"{fragment_id}","tantivy_delta_segment":null,"format":3}}}}}}"#
     )
@@ -1292,7 +1344,7 @@ fn manifest_naming(fragment_id: &str) -> String {
 #[test]
 fn test_sweep_stale_fragments_settled_orphans_removed_named_and_young_kept() {
     let tmp = tempfile::tempdir().unwrap();
-    let overlay = fragment_session(
+    let (_, overlay) = fragment_session(
         tmp.path(),
         Some(manifest_naming("aaaa").as_str()),
         &[
@@ -1321,7 +1373,7 @@ fn test_sweep_stale_fragments_settled_orphans_removed_named_and_young_kept() {
 #[test]
 fn test_sweep_stale_fragments_unreadable_manifest_keeps_every_bin() {
     let tmp = tempfile::tempdir().unwrap();
-    let overlay = fragment_session(tmp.path(), Some("not json"), &[("bbbb.bin", 7200)]);
+    let (_, overlay) = fragment_session(tmp.path(), Some("not json"), &[("bbbb.bin", 7200)]);
     let stats = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path(), false).unwrap();
     assert_eq!(stats.removed, 0);
     assert!(overlay.join("bbbb.bin").exists());
@@ -1330,7 +1382,7 @@ fn test_sweep_stale_fragments_unreadable_manifest_keeps_every_bin() {
 #[test]
 fn test_sweep_stale_fragments_idle_session_dry_run_matches_real_sweep() {
     let tmp = tempfile::tempdir().unwrap();
-    let overlay = fragment_session(tmp.path(), None, &[("bbbb.bin", 7200)]);
+    let (session, overlay) = fragment_session(tmp.path(), None, &[("bbbb.bin", 7200)]);
     let old = chrono::Utc::now() - chrono::Duration::hours(48);
     let sm = SessionMeta {
         version: 1,
@@ -1345,7 +1397,7 @@ fn test_sweep_stale_fragments_idle_session_dry_run_matches_real_sweep() {
         last_drained_offset: 0,
         agent_name: None,
     };
-    SessionMeta::write_atomic(&overlay.parent().unwrap().join("session_meta.json"), &sm).unwrap();
+    SessionMeta::write_atomic(&session.join("session_meta.json"), &sm).unwrap();
     assert_eq!(sweep_sessions(tmp.path(), true).unwrap().marked, 1);
     let dry = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path(), true).unwrap();
     assert!(overlay.join("bbbb.bin").exists());
@@ -1355,16 +1407,37 @@ fn test_sweep_stale_fragments_idle_session_dry_run_matches_real_sweep() {
     assert_eq!(dry.would_remove.len(), real.removed);
 }
 
-/// The session ecp 0.14.8 left: its manifest names its bin, so the bin
-/// stays. Once this binary refreshes the session, the old manifest is
-/// replaced whole, and the old bin goes on the next gc.
+/// The legacy namespace is swept against its own manifest: a bin the legacy
+/// `dirty_files.json` names stays, a settled orphan beside it goes.
 #[test]
-fn test_sweep_stale_fragments_session_written_by_0_14_8_bin_removed_after_refresh() {
+fn test_sweep_stale_fragments_legacy_namespace_orphan_removed_named_kept() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, overlay) = legacy_fragment_session(
+        tmp.path(),
+        Some(legacy_manifest_naming("aaaa").as_str()),
+        &[("aaaa.bin", 7200), ("bbbb.bin", 7200)],
+    );
+    let stats = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path(), false).unwrap();
+    assert_eq!(stats.removed, 1);
+    assert!(overlay.join("aaaa.bin").exists(), "a named bin was removed");
+    assert!(
+        !overlay.join("bbbb.bin").exists(),
+        "a settled orphan survived"
+    );
+}
+
+/// The session ecp 0.14.8 left: its legacy manifest names its bin, so the bin
+/// stays. This binary's refresh writes `l1/` and never touches the legacy
+/// namespace, so the old manifest and bin outlive the refresh. They go with
+/// the whole session once the session is idle, and not before.
+#[test]
+fn test_sweep_stale_fragments_session_written_by_0_14_8_legacy_namespace_retired_when_idle() {
+    use ecp_core::session::layout;
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/overlay-written-by-0.14.8");
     let tmp = tempfile::tempdir().unwrap();
     let old_bin = "553e94275e6085db.bin";
-    let overlay = fragment_session(
+    let (session, overlay) = legacy_fragment_session(
         tmp.path(),
         Some(
             std::fs::read_to_string(fixture.join("dirty_files.json"))
@@ -1379,7 +1452,6 @@ fn test_sweep_stale_fragments_session_written_by_0_14_8_bin_removed_after_refres
     )
     .unwrap();
     backdate_secs(&overlay.join(old_bin), 7200);
-    let session = overlay.parent().unwrap();
     let stats = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path(), false).unwrap();
     assert_eq!(stats.removed, 0, "a bin its manifest names was removed");
 
@@ -1402,18 +1474,83 @@ fn test_sweep_stale_fragments_session_written_by_0_14_8_bin_removed_after_refres
         content_hash: [9; 8],
         ..Default::default()
     };
-    ecp_cli::session::overlay_writer::write_dirty_fragments_from_graphs(session, &[fresh], &[1])
+    ecp_cli::session::overlay_writer::write_dirty_fragments_from_graphs(&session, &[fresh], &[1])
         .unwrap();
-    let manifest = ecp_core::session::DirtyFiles::read(&session.join("dirty_files.json")).unwrap();
+    let manifest =
+        ecp_core::session::DirtyEvents::read(&layout::dirty_events_path(&session)).unwrap();
     assert!(manifest.from_current_builder());
     assert_eq!(
         manifest.entries.keys().collect::<Vec<_>>(),
         ["other.py"],
-        "the 0.14.8 entry outlived the refresh"
+        "the 0.14.8 entry leaked into today's manifest"
     );
     let stats = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path(), false).unwrap();
-    assert_eq!(stats.removed, 1);
-    assert!(!overlay.join(old_bin).exists());
+    assert_eq!(stats.removed, 0, "a namespace written today was retired");
+    assert!(
+        overlay.join(old_bin).exists(),
+        "the refresh replaced the legacy manifest"
+    );
+
+    // A day without a write, but the session itself still active: an older
+    // binary may still read the legacy namespace, so it stays.
+    let two_days = 48 * 3600;
+    backdate_secs(&layout::legacy_dirty_files_path(&session), two_days);
+    backdate_secs(&overlay, two_days);
+    let stats = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path(), false).unwrap();
+    assert_eq!(stats.removed, 0, "an active session lost its legacy files");
+    assert!(overlay.join(old_bin).exists());
+
+    // The session goes idle: the session sweep removes it whole, legacy
+    // namespace included.
+    let idle = SessionMeta {
+        last_touched: (chrono::Utc::now() - chrono::Duration::hours(48)).to_rfc3339(),
+        ..sm
+    };
+    SessionMeta::write_atomic(&session.join("session_meta.json"), &idle).unwrap();
+    let stats = sweep_sessions(tmp.path(), false).unwrap();
+    assert_eq!(stats.marked, 1);
+    assert!(!session.exists(), "the idle session stayed");
+    assert!(!overlay.exists());
+    assert!(!layout::legacy_dirty_files_path(&session).exists());
+}
+
+/// Legacy files older than a day inside a session touched now: kept, because
+/// a live 0.16.4 process can still read `dirty_files.json` + `graph_overlay/`.
+#[test]
+fn test_gc_legacy_namespace_active_session_kept() {
+    use ecp_core::session::layout;
+    let tmp = tempfile::tempdir().unwrap();
+    let (session, overlay) = legacy_fragment_session(
+        tmp.path(),
+        Some(legacy_manifest_naming("aaaa").as_str()),
+        &[("aaaa.bin", 7200)],
+    );
+    let sm = SessionMeta {
+        version: 1,
+        session_id: "sid".into(),
+        pid: None,
+        started_at: chrono::Utc::now().to_rfc3339(),
+        last_touched: chrono::Utc::now().to_rfc3339(),
+        base_sha: "0".repeat(40),
+        source_worktree: String::new(),
+        overlay_version: 0,
+        watcher_pid: None,
+        last_drained_offset: 0,
+        agent_name: None,
+    };
+    SessionMeta::write_atomic(&session.join("session_meta.json"), &sm).unwrap();
+    let two_days = 48 * 3600;
+    backdate_secs(&layout::legacy_dirty_files_path(&session), two_days);
+    backdate_secs(&overlay.join("aaaa.bin"), two_days);
+    backdate_secs(&overlay, two_days);
+
+    let dry = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path(), true).unwrap();
+    let real = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path(), false).unwrap();
+
+    assert!(dry.would_remove.is_empty(), "{:?}", dry.would_remove);
+    assert_eq!(real.removed, 0);
+    assert!(layout::legacy_dirty_files_path(&session).is_file());
+    assert!(overlay.join("aaaa.bin").is_file());
 }
 
 /// A writer holds the overlay lock while it re-publishes a content-addressed
@@ -1422,13 +1559,13 @@ fn test_sweep_stale_fragments_session_written_by_0_14_8_bin_removed_after_refres
 #[test]
 fn test_sweep_stale_fragments_overlay_lock_held_session_skipped() {
     let tmp = tempfile::tempdir().unwrap();
-    let overlay = fragment_session(
+    let (session, overlay) = fragment_session(
         tmp.path(),
         Some(manifest_naming("aaaa").as_str()),
         &[("bbbb.bin", 7200)],
     );
     let held = ecp_core::registry::FileLock::try_exclusive(
-        &ecp_cli::session::overlay_writer::overlay_lock_path(overlay.parent().unwrap()),
+        &ecp_cli::session::overlay_writer::overlay_lock_path(&session),
     )
     .unwrap();
     let stats = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path(), false).unwrap();

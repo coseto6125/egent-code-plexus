@@ -25,7 +25,6 @@ pub mod peers;
 pub mod peers_msg;
 pub mod peers_plan;
 pub mod processes;
-pub mod rename;
 pub mod review;
 pub mod routes;
 pub mod schema;

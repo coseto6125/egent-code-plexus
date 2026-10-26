@@ -20,50 +20,48 @@
 //! to prove it against. A slice that changes what the bytes mean WITHOUT
 //! bumping the identifier turns the first arm red.
 
+mod common;
+
+use common::stored::{
+    committed, copy_tree, fixture, set_mtime, COMMIT_DIR, SESSION, WRITER_FINGERPRINT,
+    WRITER_GRAPH_FORMAT, WRITER_PARSE_DIR,
+};
+use ecp_analyzer::python::PythonProvider;
+use ecp_analyzer::resolution::builder::GraphBuilder;
+use ecp_analyzer::rust::parser::RustProvider;
+use ecp_analyzer::typescript::TypeScriptProvider;
 use ecp_cli::engine::{header_compatible, Engine};
 use ecp_cli::parse_cache::ParseCache;
 use ecp_cli::session::overlay_reader::{accepted_fragments, decode_view_inputs};
+use ecp_cli::session::overlay_writer::write_dirty_events;
 use ecp_cli::session::state::classify;
 use ecp_cli::session::view_cache;
+use ecp_core::analyzer::pipeline::AnalyzerPipeline;
+use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::LocalGraph;
+use ecp_core::contracts::dirty_event::PathClass;
 use ecp_core::graph::{NodeKind, RelType, GRAPH_FORMAT_VERSION};
 use ecp_core::registry::{CommitBuildMeta, BUILDER_FINGERPRINT};
+use ecp_core::session::layout;
+use ecp_core::session::merged::MergedGraph;
 use ecp_core::session::overlay::SymbolKind;
 use ecp_core::session::{
-    DirtyFiles, OverlayFileInput, SessionMeta, SessionState, FRAGMENT_FORMAT_V5,
+    DirtyEvents, DirtyFiles, OverlayFileInput, SessionMeta, SessionState, FRAGMENT_FORMAT_V7,
     OVERLAY_EDGE_REASON, VIEW_CACHE_FORMAT,
 };
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 use tempfile::TempDir;
 
-const WRITER_GRAPH_FORMAT: u32 = 15;
-const WRITER_FINGERPRINT: &str = "v0.16.4+schema20";
 const WRITER_FRAGMENT_FORMAT: u32 = 5;
 const WRITER_VIEW_CACHE_FORMAT: u32 = 3;
-const WRITER_PARSE_DIR: &str = "568515f1";
+/// The session-relative dirty manifest the writer kept.
+const WRITER_DIRTY_MANIFEST: &str = "dirty_files.json";
 const WRITER_SHA: &str = "e7ca0e6a663e619e7b245890db6cb47653fed6dc";
-const COMMIT_DIR: &str = "branch_main__e7ca0e6a663e619e7b245890db6cb47653fed6dc";
-const SESSION: &str = "fxsession0001";
 const BASE_NODES: usize = 14;
 const DIRTY_FILES: [&str; 2] = ["lib.rs", "pkg/core.py"];
-
-fn fixture() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/stored-by-0.16.4")
-}
-
-fn copy_tree(from: &Path, to: &Path) {
-    fs::create_dir_all(to).unwrap();
-    for entry in fs::read_dir(from).unwrap().flatten() {
-        let target = to.join(entry.file_name());
-        if entry.path().is_dir() {
-            copy_tree(&entry.path(), &target);
-        } else {
-            fs::copy(entry.path(), &target).unwrap();
-        }
-    }
-}
 
 /// A private copy of the fixture's `~/.ecp/<repo>` dir: the readers under test
 /// write into their dirs (`.last-used`, a rebuilt `view_cache.bin`), and the
@@ -85,23 +83,13 @@ fn graph_in(tmp: &TempDir) -> PathBuf {
         .join("graph.bin")
 }
 
-fn committed(rel: &str) -> Vec<u8> {
-    fs::read(fixture().join("source/committed").join(rel)).unwrap()
-}
-
-fn set_mtime(path: &Path, mtime_ns: u64) {
-    let file = fs::OpenOptions::new().write(true).open(path).unwrap();
-    file.set_modified(UNIX_EPOCH + Duration::from_nanos(mtime_ns))
-        .unwrap();
-}
-
 /// The working tree the session was taken from: the committed files, then the
 /// two uncommitted ones, each stamped with the mtime the manifest recorded.
 fn worktree(tmp: &TempDir) -> PathBuf {
     let root = tmp.path().join("worktree");
     copy_tree(&fixture().join("source/committed"), &root);
     copy_tree(&fixture().join("source/uncommitted"), &root);
-    let manifest_path = session_dir(tmp).join("dirty_files.json");
+    let manifest_path = layout::legacy_dirty_files_path(&session_dir(tmp));
     let manifest = DirtyFiles::read(&manifest_path).unwrap();
     let mut text = fs::read_to_string(&manifest_path).unwrap();
     for (rel, entry) in &manifest.entries {
@@ -132,8 +120,31 @@ fn writer_graph_is_current() -> bool {
     GRAPH_FORMAT_VERSION == WRITER_GRAPH_FORMAT
 }
 
+/// Today's reader opens the manifest the writer kept. Since the C3
+/// tombstone slice it opens `l1/dirty_events.json`, never the writer's
+/// `dirty_files.json`.
+fn writer_manifest_is_current() -> bool {
+    layout::dirty_events_path(Path::new("")) == Path::new(WRITER_DIRTY_MANIFEST)
+}
+
 fn writer_fragments_are_current() -> bool {
-    BUILDER_FINGERPRINT == WRITER_FINGERPRINT && FRAGMENT_FORMAT_V5 == WRITER_FRAGMENT_FORMAT
+    BUILDER_FINGERPRINT == WRITER_FINGERPRINT
+        && FRAGMENT_FORMAT_V7 == WRITER_FRAGMENT_FORMAT
+        && writer_manifest_is_current()
+}
+
+/// rkyv bytes of a graph in today's format, built from the fixture's
+/// committed `lib.rs` the way a full build does (`uid_assign_parity.rs`).
+fn current_format_graph_bytes() -> Vec<u8> {
+    let local = RustProvider::new()
+        .unwrap()
+        .parse_file(Path::new("lib.rs"), &committed("lib.rs"))
+        .unwrap();
+    let mut builder = GraphBuilder::new();
+    builder.add_graph(local);
+    rkyv::to_bytes::<rkyv::rancor::Error>(&builder.build())
+        .unwrap()
+        .to_vec()
 }
 
 /// `(name, kind, file, first line, last line)`, lines 1-based as a reader of
@@ -300,6 +311,109 @@ fn test_graph_bin_written_by_0_16_4_returns_symbols_and_calls_or_is_refused() {
     );
 }
 
+/// The graph format before the lexical-parent table (design A §4.3).
+const PRE_LEXICAL_TABLE_GRAPH_FORMAT: u32 = 16;
+
+/// Stands for: the writer's `graph.bin` has no lexical-parent table, so
+/// today's reader refuses it and the caller rebuilds, and the rebuilt graph
+/// carries the table. It is empty while no language opts in, so every node
+/// of the writer's sources reads as unscoped, and its display owner is its
+/// stored owner, as the writer printed it. The writer's sample holds no
+/// nested function, so it cannot show a table row (that is
+/// `lexical_parent_table.rs`).
+#[test]
+fn test_prev_release_graph_refused_and_rebuilt_lexical_table_present() {
+    const {
+        assert!(
+            GRAPH_FORMAT_VERSION > PRE_LEXICAL_TABLE_GRAPH_FORMAT,
+            "the lexical-parent table changes the graph layout; GRAPH_FORMAT_VERSION must move past it"
+        )
+    };
+    let tmp = copy_repo();
+    let writer_graph = graph_in(&tmp);
+    assert!(
+        !header_compatible(&writer_graph),
+        "a format-{WRITER_GRAPH_FORMAT} graph has no lexical-parent table and must be refused"
+    );
+    let err = Engine::load(&writer_graph)
+        .err()
+        .expect("the writer's graph must not load");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+
+    // The rebuild path: a full build of the writer's committed sources.
+    let rust = RustProvider::new().unwrap();
+    let python = PythonProvider::new().unwrap();
+    let typescript = TypeScriptProvider::new().unwrap();
+    let sources: [(&str, &dyn LanguageProvider); 5] = [
+        ("app.py", &python),
+        ("pkg/__init__.py", &python),
+        ("pkg/core.py", &python),
+        ("web/util.ts", &typescript),
+        ("lib.rs", &rust),
+    ];
+    let mut builder = GraphBuilder::new();
+    for (rel, provider) in sources {
+        builder.add_graph(
+            provider
+                .parse_file(Path::new(rel), &committed(rel))
+                .unwrap(),
+        );
+    }
+    let graph_path = tmp.path().join("rebuilt/graph.bin");
+    fs::create_dir_all(graph_path.parent().unwrap()).unwrap();
+    fs::write(
+        &graph_path,
+        rkyv::to_bytes::<rkyv::rancor::Error>(&builder.build()).unwrap(),
+    )
+    .unwrap();
+    assert!(header_compatible(&graph_path));
+    let engine = Engine::load(&graph_path).expect("the rebuilt graph loads");
+    let graph = engine.graph().unwrap();
+    assert_eq!(graph.version.to_native(), GRAPH_FORMAT_VERSION);
+    assert!(graph.lexical_parents.is_empty(), "no language opts in yet");
+    let pool = graph.string_pool.as_slice();
+    for idx in 0..graph.nodes.len() as u32 {
+        assert_eq!(graph.lexical_parent(idx), None, "node {idx}");
+        let owner = graph.nodes[idx as usize].owner_class.resolve(pool);
+        assert_eq!(
+            graph.display_owner(idx).as_deref(),
+            (!owner.is_empty()).then_some(owner),
+            "node {idx}"
+        );
+    }
+
+    // The consumer still gets the writer's functions, each at the line
+    // that declares it.
+    let mut functions: Vec<(String, String)> = graph_rows(&engine)
+        .into_iter()
+        .filter(|r| r.1 == "Function")
+        .map(|(name, _, file, first, _)| {
+            let source = String::from_utf8(committed(&file)).unwrap();
+            let declaration = source.lines().nth(first as usize - 1).unwrap();
+            assert!(
+                declaration.contains(name.as_str()),
+                "{file}:{first} is `{declaration}`, not the declaration of {name}"
+            );
+            (name, file)
+        })
+        .collect();
+    functions.sort();
+    let function = |name: &str, file: &str| (name.to_string(), file.to_string());
+    assert_eq!(
+        functions,
+        vec![
+            function("compute", "pkg/core.py"),
+            function("go", "app.py"),
+            function("helper", "app.py"),
+            function("helper", "lib.rs"),
+            function("helper", "pkg/core.py"),
+            function("helper", "web/util.ts"),
+            function("render", "web/util.ts"),
+            function("run", "lib.rs"),
+        ]
+    );
+}
+
 /// Stands for: the per-commit `meta.json` the freshness check reads still
 /// parses and names the writer, so an upgrade can tell whose graph it holds.
 #[test]
@@ -415,14 +529,122 @@ fn test_parse_cache_written_by_0_16_4_replays_parse_or_misses() {
     }
 }
 
+/// The `BUILDER_FINGERPRINT` schema suffix before slice P6 gave four raw
+/// record types a `RawEndpoint` field.
+const PRE_P6_SCHEMA: &str = "+schema26";
+
+/// A trait-impl method whose name the bodiless trait declaration shares. A
+/// lookup by name finds the declaration first.
+const TRAIT_IMPL_SRC: &str = r#"trait Store {
+    fn path(&self) -> String;
+}
+
+struct Disk;
+
+impl Store for Disk {
+    fn path(&self) -> String {
+        std::fs::read_to_string("conf/store.json").unwrap()
+    }
+}
+"#;
+
+/// Stands for: the parse cache that the previous release wrote holds
+/// `LocalGraph`s without record endpoints, so after the P6 bump no entry of
+/// it is read: the reader opens another directory, each of the writer's
+/// entries misses, and a cold index over that cache parses again. A path
+/// literal in a trait-impl method then starts at that method, not at the
+/// bodiless trait declaration (C4 Stored data).
+#[test]
+fn test_prev_release_parse_cache_not_read_after_fingerprint_bump() {
+    assert!(
+        !BUILDER_FINGERPRINT.ends_with(PRE_P6_SCHEMA),
+        "P6 changes what a LocalGraph holds; BUILDER_FINGERPRINT {BUILDER_FINGERPRINT} must move past {PRE_P6_SCHEMA}"
+    );
+    assert_ne!(ParseCache::current_dir_name(), WRITER_PARSE_DIR);
+
+    let tmp = copy_repo();
+    let repo = tmp.path().join("repo");
+    let cache = ParseCache::open(&repo).unwrap();
+    for rel in [
+        "app.py",
+        "pkg/__init__.py",
+        "pkg/core.py",
+        "web/util.ts",
+        "lib.rs",
+    ] {
+        let hash = xxhash_rust::xxh3::xxh3_64(&committed(rel)).to_le_bytes();
+        let name = cache
+            .path_for(Path::new(rel), &hash)
+            .file_name()
+            .unwrap()
+            .to_owned();
+        assert!(
+            repo.join("parse_cache")
+                .join(WRITER_PARSE_DIR)
+                .join(&name)
+                .exists(),
+            "fixture holds no entry for {rel}: key scheme or fixture changed"
+        );
+        assert!(
+            cache.get(Path::new(rel), &hash).is_none(),
+            "{rel}: an entry without record endpoints was replayed"
+        );
+    }
+
+    // The rebuild path: a cold index that offers every file to this cache.
+    let root = tmp.path().join("worktree-p6");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("lib.rs"), committed("lib.rs")).unwrap();
+    fs::write(root.join("store.rs"), TRAIT_IMPL_SRC).unwrap();
+    let mut pipeline = AnalyzerPipeline::new();
+    pipeline.register_provider(Box::new(RustProvider::new().unwrap()));
+    let graphs = pipeline.analyze_with_cache(
+        vec![
+            (root.join("lib.rs"), PathBuf::from("lib.rs")),
+            (root.join("store.rs"), PathBuf::from("store.rs")),
+        ],
+        |rel, hash| cache.get(rel, hash),
+    );
+    assert_eq!(graphs.len(), 2, "both files reach the builder");
+    let mut builder = GraphBuilder::new();
+    for graph in graphs {
+        builder.add_graph(graph);
+    }
+    let graph = builder.build();
+
+    let pool = graph.string_pool.as_slice();
+    let sources: Vec<(NodeKind, String, String, u32)> = graph
+        .edges
+        .iter()
+        .filter(|e| e.rel_type == RelType::UsesPathLiteral)
+        .filter(|e| graph.nodes[e.target as usize].name.resolve(pool) == "conf/store.json")
+        .map(|e| {
+            let source = &graph.nodes[e.source as usize];
+            (
+                source.kind,
+                source.name.resolve(pool).to_string(),
+                source.owner_class.resolve(pool).to_string(),
+                source.span.0 + 1,
+            )
+        })
+        .collect();
+    assert_eq!(
+        sources,
+        vec![(NodeKind::Method, "path".to_string(), "Disk".to_string(), 8)],
+        "the literal's edge starts at the impl method, line 8, not the trait declaration, line 2"
+    );
+}
+
 // ------------------------------------------------- dirty manifest and meta
 
 /// Stands for: the session's dirty manifest names the files the user edited
-/// and the symbols in them, so a reader knows which paths the overlay owns.
+/// and the symbols in them. Today no query reads it (see
+/// `writer_manifest_is_current`), but `admin gc` still reads its fragment
+/// names to sweep the legacy namespace, so it must keep parsing as written.
 #[test]
 fn test_dirty_manifest_written_by_0_16_4_returns_dirty_paths_and_symbols() {
     let tmp = copy_repo();
-    let manifest = DirtyFiles::read(&session_dir(&tmp).join("dirty_files.json"))
+    let manifest = DirtyFiles::read(&layout::legacy_dirty_files_path(&session_dir(&tmp)))
         .expect("dirty_files.json written by 0.16.4 must parse");
     assert_eq!(manifest.version, 1);
     assert_eq!(
@@ -475,11 +697,13 @@ fn test_dirty_manifest_written_by_0_16_4_returns_dirty_paths_and_symbols() {
     );
 }
 
-/// Stands for: a session the previous release left behind is still found,
-/// tied to its base commit, and classified as holding two dirty files, so
-/// `ecp` keeps serving the overlay instead of calling the session stale.
+/// Stands for: a session the previous release left behind is still found and
+/// tied to its base commit. While today's reader opens the writer's manifest
+/// it holds two dirty files, so `ecp` keeps serving the overlay; once the
+/// manifest moved, it holds none (the files re-parse into the new one), and
+/// is never called stale.
 #[test]
-fn test_session_written_by_0_16_4_classifies_as_augmented_with_two_fragments() {
+fn test_session_written_by_0_16_4_classifies_as_pure_reference_or_augmented() {
     let tmp = copy_repo();
     let meta = SessionMeta::read(&session_dir(&tmp).join("session_meta.json"))
         .expect("session_meta.json written by 0.16.4 must parse");
@@ -490,7 +714,19 @@ fn test_session_written_by_0_16_4_classifies_as_augmented_with_two_fragments() {
     assert_eq!(meta.watcher_pid, None);
     assert_eq!(meta.last_drained_offset, 0);
 
-    match classify(&tmp.path().join("repo"), SESSION) {
+    let state = classify(&tmp.path().join("repo"), SESSION);
+    if !writer_manifest_is_current() {
+        assert_eq!(
+            state,
+            SessionState::PureReference {
+                base_sha: WRITER_SHA.to_string(),
+                l2_dirname: COMMIT_DIR.to_string(),
+            },
+            "the legacy manifest was read as today's dirty set"
+        );
+        return;
+    }
+    match state {
         SessionState::AugmentedReference {
             base_sha,
             l2_dirname,
@@ -577,7 +813,7 @@ fn test_fragments_written_by_0_16_4_skip_the_file_edited_since() {
     }
     let tmp = copy_repo();
     let root = worktree(&tmp);
-    let manifest = DirtyFiles::read(&session_dir(&tmp).join("dirty_files.json")).unwrap();
+    let manifest = DirtyFiles::read(&layout::legacy_dirty_files_path(&session_dir(&tmp))).unwrap();
     set_mtime(
         &root.join("pkg/core.py"),
         manifest.entries["pkg/core.py"].mtime_ns + 1_000_000_000,
@@ -586,6 +822,121 @@ fn test_fragments_written_by_0_16_4_skip_the_file_edited_since() {
     let inputs = decode_view_inputs(&accepted);
     let paths: Vec<&str> = inputs.iter().map(|i| i.rel_path.as_str()).collect();
     assert_eq!(paths, vec!["lib.rs"]);
+}
+
+/// Stands for: today's binary keeps its tombstones in a namespace the older
+/// binary of the same fingerprint never opens. The older writer reads its
+/// whole `dirty_files.json` into a struct without `change` / `class` and
+/// writes it back; had the tombstone lived there, it would come back as a
+/// `modified` entry. Here the older writer rewrites its manifest and bins
+/// after today's binary recorded `lib.rs` as deleted: the tombstone keeps
+/// its bytes, no entry of the old manifest reaches the overlay, though its
+/// `pkg/core.py` entry still matches the file on disk, and a query hides
+/// the deleted file's symbols.
+#[test]
+fn test_dirty_events_old_writer_manifest_beside_new_namespace_keeps_tombstone() {
+    let tmp = copy_repo();
+    let session = session_dir(&tmp);
+    let root = worktree(&tmp);
+    fs::remove_file(root.join("lib.rs")).unwrap();
+    let cap = ecp_core::config::resolve_size_cap(&root);
+    write_dirty_events(
+        &session,
+        cap,
+        &[],
+        &[],
+        &HashMap::new(),
+        &[("lib.rs".to_string(), PathClass::SOURCE)],
+    )
+    .unwrap();
+    let new_manifest = layout::dirty_events_path(&session);
+    let written = fs::read(&new_manifest).unwrap();
+
+    // The older writer's save: its whole manifest round-trips through its
+    // own entry type, and its bins are written again.
+    let legacy_path = layout::legacy_dirty_files_path(&session);
+    let legacy = DirtyFiles::read(&legacy_path).unwrap();
+    DirtyFiles::write_atomic(&legacy_path, &legacy).unwrap();
+    for entry in legacy.entries.values() {
+        let bin = layout::legacy_overlay_dir(&session).join(format!("{}.bin", entry.fragment_id));
+        let bytes = fs::read(&bin).unwrap();
+        fs::write(&bin, bytes).unwrap();
+    }
+    // Control: an entry of the old manifest is still servable by mtime.
+    let core_mtime = fs::metadata(root.join("pkg/core.py"))
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+    assert_eq!(legacy.entries["pkg/core.py"].mtime_ns, core_mtime);
+
+    let (accepted, _) = accepted_fragments(&session, &root).unwrap();
+    let state = classify(&tmp.path().join("repo"), SESSION);
+
+    assert!(
+        accepted.is_empty(),
+        "an entry of the older writer's manifest was served"
+    );
+    // The consumer reads a graph of today's format built from the committed
+    // sources, not the writer's graph.bin (refused once the format moved).
+    let graph_path = tmp.path().join("current/graph.bin");
+    fs::create_dir_all(graph_path.parent().unwrap()).unwrap();
+    fs::write(&graph_path, current_format_graph_bytes()).unwrap();
+    let engine =
+        Engine::load(&graph_path)
+            .unwrap()
+            .with_overlay(session.clone(), root.clone(), None);
+    let view = engine
+        .overlay_view()
+        .expect("the tombstone makes a view of its own");
+    assert!(
+        view.virtual_nodes().is_empty(),
+        "the overlay served a fragment"
+    );
+    // The merged answer every query reads: the deleted `lib.rs` declared
+    // `helper` and `run`, and none of its nodes is visible.
+    let graph = engine.graph().unwrap();
+    let merged = MergedGraph::new(graph, Some(view));
+    let lib_nodes: Vec<(String, bool)> = (0..graph.nodes.len() as u32)
+        .filter_map(|idx| {
+            let node = merged.node(idx)?;
+            (node.file_path(&merged) == Some("lib.rs"))
+                .then(|| (node.name(&merged).to_string(), merged.base_visible(idx)))
+        })
+        .collect();
+    for name in ["helper", "run"] {
+        assert!(
+            lib_nodes.iter().any(|(n, _)| n == name),
+            "setup: the graph holds {name}: {lib_nodes:?}"
+        );
+    }
+    assert!(
+        lib_nodes.iter().all(|(_, visible)| !visible),
+        "a node of the deleted lib.rs is still served: {lib_nodes:?}"
+    );
+    assert!(
+        matches!(
+            state,
+            SessionState::AugmentedReference {
+                fragment_count: 1,
+                ..
+            }
+        ),
+        "{state:?}"
+    );
+    assert_eq!(
+        fs::read(&new_manifest).unwrap(),
+        written,
+        "the tombstone was rewritten"
+    );
+    let manifest = DirtyEvents::read(&new_manifest).unwrap();
+    assert!(manifest.is_current(cap));
+    assert_eq!(manifest.entries.keys().collect::<Vec<_>>(), ["lib.rs"]);
+    let tombstone = &manifest.entries["lib.rs"];
+    assert!(tombstone.is_tombstone());
+    assert_eq!(tombstone.class, PathClass::SOURCE);
 }
 
 // --------------------------------------------------------------- view cache
@@ -679,9 +1030,10 @@ fn test_view_cache_written_by_0_16_4_misses_under_todays_key_and_matches_a_rebui
         ]
     );
 
-    let engine = Engine::load(&graph_path)
-        .unwrap()
-        .with_overlay(session.clone(), worktree(&tmp));
+    let engine =
+        Engine::load(&graph_path)
+            .unwrap()
+            .with_overlay(session.clone(), worktree(&tmp), None);
     let built = engine.overlay_view().expect("today's code builds a view");
     assert_eq!(
         built, &cached,

@@ -46,22 +46,35 @@ fn write_dirty(root: &std::path::Path, id: &str, symbols: &[&str]) {
 }
 
 fn write_dirty_in(root: &std::path::Path, id: &str, file: &str, symbols: &[&str]) {
-    let syms: Vec<String> = symbols
-        .iter()
-        .map(|s| {
-            format!(
-                r#"{{"name":"{s}","kind":"function","file":"{file}","line_start":1,"line_end":2}}"#
-            )
-        })
-        .collect();
-    let json = format!(
-        r#"{{"version":1,"entries":{{"{}":{{"mtime_ns":0,"content_hash":"h","fragment_id":"f","tantivy_delta_segment":null,"dirty_symbols":[{}]}}}}}}"#,
-        file,
-        syms.join(",")
+    use ecp_core::contracts::dirty_event::{PathChange, PathClass};
+    use ecp_core::contracts::routing::SizeCap;
+    use ecp_core::session::overlay::{DirtyEventEntry, DirtyEvents, SymbolKind, SymbolRef};
+    let mut manifest = DirtyEvents::empty(SizeCap::BUILT_IN);
+    manifest.entries.insert(
+        file.to_string(),
+        DirtyEventEntry {
+            change: PathChange::Modified,
+            class: PathClass::SOURCE,
+            mtime_ns: 0,
+            fragment_id: Some("f".into()),
+            content_hash: Some("h".into()),
+            parse_failed: false,
+            dirty_symbols: symbols
+                .iter()
+                .map(|s| SymbolRef {
+                    name: (*s).into(),
+                    kind: SymbolKind::Function,
+                    file: file.into(),
+                    line_start: 1,
+                    line_end: 2,
+                })
+                .collect(),
+            format: ecp_core::session::overlay::FRAGMENT_FORMAT_V7,
+        },
     );
-    std::fs::write(
-        root.join("sessions").join(id).join("dirty_files.json"),
-        json,
+    DirtyEvents::write_atomic(
+        &ecp_core::session::layout::dirty_events_path(&root.join("sessions").join(id)),
+        &manifest,
     )
     .unwrap();
 }
@@ -191,4 +204,46 @@ fn peers_log_empty_prints_no_messages() {
         .expect("spawn");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("no messages") || stdout.is_empty());
+}
+
+/// Contract: a peer's deleted file prints as `(deleted)` with no symbol list;
+/// an edited file beside it keeps its symbols.
+#[test]
+fn test_peers_diff_tombstone_prints_deleted_marker() {
+    use ecp_core::contracts::dirty_event::PathClass;
+    use ecp_core::session::overlay::{DirtyEventEntry, DirtyEvents};
+    let dir = tempdir().unwrap();
+    write_session(dir.path(), "s-peer", None);
+    write_dirty_in(dir.path(), "s-peer", "src/edited.ts", &["edited_fn"]);
+    let manifest_path =
+        ecp_core::session::layout::dirty_events_path(&dir.path().join("sessions").join("s-peer"));
+    let mut manifest = DirtyEvents::read(&manifest_path).unwrap();
+    manifest.entries.insert(
+        "src/gone.ts".into(),
+        DirtyEventEntry::tombstone(PathClass::SOURCE),
+    );
+    DirtyEvents::write_atomic(&manifest_path, &manifest).unwrap();
+
+    let out = Command::new(bin())
+        .args([
+            "peers",
+            "diff",
+            "s-peer",
+            "--repo",
+            dir.path().to_str().unwrap(),
+        ])
+        .env("ECP_SESSION_ID", "me-diff")
+        .output()
+        .expect("spawn");
+
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(lines.contains(&"--- src/gone.ts (deleted) ---"), "{stdout}");
+    assert!(lines.contains(&"--- src/edited.ts ---"), "{stdout}");
+    assert!(stdout.contains("edited_fn"), "{stdout}");
 }

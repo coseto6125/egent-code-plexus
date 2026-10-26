@@ -336,7 +336,7 @@ fn test_parse_file_nested_prefixes_join_with_single_slashes() {
         .map(|r| r.path)
         .collect();
     paths.sort();
-    assert_eq!(paths, ["/api/v1", "/api/v1/users"]);
+    assert_eq!(paths, ["/api/v1", "/api/v1/users/"]);
 }
 
 #[test]
@@ -402,7 +402,10 @@ Route::controller(OrderController::class)->group(function () {
 "#;
     let mut handlers: Vec<(String, Option<String>)> = parse("routes/web.php", src)
         .into_iter()
-        .map(|r| (r.path, r.handler))
+        .map(|r| {
+            let h = r.handler_name().map(str::to_string);
+            (r.path, h)
+        })
         .collect();
     handlers.sort();
     let expected = [
@@ -423,7 +426,10 @@ Route::controller(OrderController::class)->group(function () {
 fn sites(body: &str) -> Vec<(String, String, Option<String>)> {
     let mut sites: Vec<_> = parse("routes/web.php", &routes_file(body))
         .into_iter()
-        .map(|r| (r.method, r.path, r.handler))
+        .map(|r| {
+            let h = r.handler_name().map(str::to_string);
+            (r.method, r.path, h)
+        })
         .collect();
     sites.sort();
     sites

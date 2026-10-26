@@ -229,3 +229,44 @@ fn swift_nested_function_has_function_meta() {
         .contains("Int"));
     assert!(!inner.params.is_empty());
 }
+
+/// Stands for: a Swift decorator list shows the annotations the source
+/// wrote and none of the parser's internal markers. An `override func` carries
+/// the override sentinel in `RawNode::decorators`; before the fix
+/// `FunctionMeta.decorators` listed `__override__` beside `MainActor`.
+#[test]
+fn test_function_meta_swift_override_marker_not_decorator() {
+    let src = "class B { func m() {} }\nclass D: B { @MainActor override func m() {} }\n";
+    let g = analyze(src);
+    let pool = g.string_pool.as_slice();
+    let overriding: Vec<Vec<&str>> = g
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| n.kind == NodeKind::Method && n.name.resolve(pool) == "m")
+        .filter_map(|(i, _)| g.function_meta(i as u32))
+        .map(|m| m.decorators.iter().map(|d| d.resolve(pool)).collect())
+        .filter(|names: &Vec<&str>| names.contains(&"MainActor"))
+        .collect();
+    assert_eq!(overriding, [["MainActor"]]);
+    assert!(overriding.iter().flatten().all(|d| !d.starts_with("__")));
+}
+
+/// Stands for: an `override func` with no annotation has an empty decorator
+/// list; the override sentinel is the only entry the parser writes for it.
+#[test]
+fn test_function_meta_swift_override_without_annotation_empty_decorators() {
+    let src = "class B { func m() {} }\nclass D: B { override func m() {} }\n";
+    let g = analyze(src);
+    let pool = g.string_pool.as_slice();
+    let all: Vec<Vec<&str>> = g
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| n.kind == NodeKind::Method && n.name.resolve(pool) == "m")
+        .filter_map(|(i, _)| g.function_meta(i as u32))
+        .map(|m| m.decorators.iter().map(|d| d.resolve(pool)).collect())
+        .collect();
+    assert_eq!(all.len(), 2, "both B.m and D.m have FunctionMeta");
+    assert!(all.iter().all(|names| names.is_empty()), "got: {all:?}");
+}

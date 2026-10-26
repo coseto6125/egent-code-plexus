@@ -53,6 +53,65 @@ pub fn extract(content: &str, lang: Lang) -> ResponseShape {
     }
 }
 
+impl ResponseShape {
+    /// Add the keys of `other`, each once, sorted.
+    pub fn merge(&mut self, other: ResponseShape) {
+        self.response_keys.extend(other.response_keys);
+        self.error_keys.extend(other.error_keys);
+        dedupe_sort(&mut self.response_keys);
+        dedupe_sort(&mut self.error_keys);
+    }
+}
+
+/// The shape of the handler whose body lies at `span` (`(start_row,
+/// start_col, end_row, end_col)`, rows from 0, columns in bytes) of
+/// `content`. `None` when the span has no text to read: it is empty, ends
+/// before it starts, or lies outside `content`. `None` thus tells a handler
+/// whose body the caller cannot see from one whose body returns no keys
+/// (`Some` of an empty shape).
+pub fn extract_in_span(
+    content: &str,
+    lines: &LineStarts,
+    span: (u32, u32, u32, u32),
+    lang: Lang,
+) -> Option<ResponseShape> {
+    text_in_span(content, lines, span).map(|text| extract(text, lang))
+}
+
+/// The byte offset where each line of one text starts, built once per file so
+/// that reading many spans of it does not rescan it from byte 0.
+#[derive(Debug, Default)]
+pub struct LineStarts(Vec<usize>);
+
+impl LineStarts {
+    pub fn new(content: &str) -> Self {
+        Self(
+            std::iter::once(0)
+                .chain(content.match_indices('\n').map(|(i, _)| i + 1))
+                .collect(),
+        )
+    }
+
+    /// Where line `row` (from 0) starts; `None` past the last line.
+    fn start(&self, row: u32) -> Option<usize> {
+        self.0.get(row as usize).copied()
+    }
+}
+
+fn text_in_span<'c>(
+    content: &'c str,
+    lines: &LineStarts,
+    span: (u32, u32, u32, u32),
+) -> Option<&'c str> {
+    let (start_row, start_col, end_row, end_col) = span;
+    if (end_row, end_col) <= (start_row, start_col) {
+        return None;
+    }
+    let start = lines.start(start_row)? + start_col as usize;
+    let end = lines.start(end_row)? + end_col as usize;
+    content.get(start..end.min(content.len()))
+}
+
 fn dedupe_sort(v: &mut Vec<String>) {
     let set: HashSet<String> = v.drain(..).collect();
     *v = set.into_iter().collect();
@@ -694,5 +753,80 @@ mod tests {
         let src = r#"echo json_encode(['a' => 1]);"#;
         let s = extract(src, Lang::JavaScript);
         assert_eq!(s, ResponseShape::default());
+    }
+
+    const TWO_HANDLERS: &str =
+        "function a(req, res) { res.json({ one }); }\nfunction b(req, res) { res.json({ two }); }\n";
+
+    #[test]
+    fn test_extract_in_span_second_line_reads_that_handler_only() {
+        let s = extract_in_span(
+            TWO_HANDLERS,
+            &LineStarts::new(TWO_HANDLERS),
+            (1, 0, 1, 43),
+            Lang::JavaScript,
+        )
+        .unwrap();
+        assert_eq!(s.response_keys, vec!["two"]);
+    }
+
+    #[test]
+    fn test_extract_in_span_body_without_json_is_some_empty() {
+        let body = "function a() { return 1; }";
+        let s = extract_in_span(
+            body,
+            &LineStarts::new(body),
+            (0, 0, 0, 26),
+            Lang::JavaScript,
+        );
+        assert_eq!(s, Some(ResponseShape::default()));
+    }
+
+    #[test]
+    fn test_extract_in_span_empty_reversed_or_outside_span_is_none() {
+        for span in [(0, 5, 0, 5), (1, 0, 0, 3), (40, 0, 41, 3)] {
+            assert_eq!(
+                extract_in_span(
+                    TWO_HANDLERS,
+                    &LineStarts::new(TWO_HANDLERS),
+                    span,
+                    Lang::JavaScript
+                ),
+                None,
+                "{span:?} has no text"
+            );
+        }
+    }
+
+    #[test]
+    fn test_line_starts_new_empty_text_has_only_line_zero() {
+        let lines = LineStarts::new("");
+        assert_eq!(lines.start(0), Some(0));
+        assert_eq!(lines.start(1), None);
+    }
+
+    #[test]
+    fn test_line_starts_new_crlf_and_trailing_newline_count_every_newline() {
+        let lines = LineStarts::new("a\r\nb\n");
+        assert_eq!(
+            (
+                lines.start(0),
+                lines.start(1),
+                lines.start(2),
+                lines.start(3)
+            ),
+            (Some(0), Some(3), Some(5), None)
+        );
+    }
+
+    #[test]
+    fn test_response_shape_merge_keys_once_sorted() {
+        let mut s = extract("res.json({ b, a })", Lang::JavaScript);
+        s.merge(extract(
+            "res.json({ a, c }); res.status(404).json({ e })",
+            Lang::JavaScript,
+        ));
+        assert_eq!(s.response_keys, vec!["a", "b", "c"]);
+        assert_eq!(s.error_keys, vec!["e"]);
     }
 }

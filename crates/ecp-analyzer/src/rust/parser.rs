@@ -1,7 +1,7 @@
 use super::receiver_types::{
     build_impl_map, collect_local_types, enclosing_enum_name, enclosing_function_name,
-    enclosing_function_path, enclosing_impl_or_trait_context, enclosing_impl_type,
-    enclosing_struct_type, extract_rust_calls_and_path_literals, impl_self_type, impl_trait_name,
+    enclosing_impl_or_trait_context, enclosing_impl_type, enclosing_struct_type,
+    extract_rust_calls_and_path_literals, impl_self_type, impl_trait_name,
 };
 use super::spec::RustSpec;
 use crate::framework_confidence;
@@ -334,7 +334,9 @@ impl LanguageProvider for RustProvider {
                     // Anonymous closure (arg-position `|params| body`).
                     // Emit an `<anonymous>` Function node only when the body holds a
                     // call, so attach_to_enclosing can host those calls instead of
-                    // dropping them; empty closures stay out of the graph.
+                    // dropping them; empty closures stay out of the graph. A
+                    // closure in a callable body is scoped: its lexical parent,
+                    // not an owner, places it (`clear_scoped_owners`).
                     if body_has_call(cap.node) {
                         let span = node_span(&cap.node);
                         if anonymous_spans.insert(span) {
@@ -348,7 +350,7 @@ impl LanguageProvider for RustProvider {
                                 span,
                                 calls: Vec::new(),
                                 field_reads: Vec::new(),
-                                owner_class: enclosing_function_path(cap.node, source),
+                                owner_class: None,
                                 content_hash: ecp_core::uid::xxh3_64_bytes(
                                     &source[cap.node.start_byte()..cap.node.end_byte()],
                                 ),
@@ -404,10 +406,11 @@ impl LanguageProvider for RustProvider {
                     // ancestry semantics:
                     //
                     // • Method/Constructor/Function inside an impl block → the
-                    //   impl's concrete type (e.g. "Dog").  Functions NOT inside
-                    //   an impl but nested inside another function get the
-                    //   enclosing function name so a local `fn helper()` doesn't
-                    //   collide with a top-level `fn helper()`.
+                    //   impl's concrete type (e.g. "Dog").  A function nested in
+                    //   a callable body is scoped: `clear_scoped_owners` drops
+                    //   this owner, and its uid hashes its lexical parent, so a
+                    //   local `fn helper()` doesn't collide with a top-level
+                    //   `fn helper()`.
                     //
                     // • Impl block itself → trait name for trait-impls
                     //   (e.g. "Display"), empty string for inherent impls.
@@ -426,14 +429,8 @@ impl LanguageProvider for RustProvider {
                     //   name, so a function-local `const X` does not collide with
                     //   a file-level `const X`.
                     let owner = match k {
-                        NodeKind::Method | NodeKind::Constructor => {
+                        NodeKind::Method | NodeKind::Constructor | NodeKind::Function => {
                             enclosing_impl_type(root, source)
-                        }
-                        NodeKind::Function => {
-                            // A nested function belongs to its lexical function,
-                            // even when that function is an impl method.
-                            enclosing_function_path(root, source)
-                                .or_else(|| enclosing_impl_type(root, source))
                         }
                         NodeKind::Impl => {
                             // Trait name for trait-impls; empty string for
@@ -690,6 +687,12 @@ impl LanguageProvider for RustProvider {
         // in framework_helpers) and only fills the gap for module-resident
         // free items, so `scope_defines::Pass2` can emit `Module(foo) → bar`.
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
+        // Last owner step: a nested `fn` or closure node has a lexical
+        // parent and no owner (invariant I1), whatever the steps above set.
+        ecp_core::analyzer::lexical::clear_scoped_owners(
+            ecp_core::file_category::Language::Rust,
+            &mut nodes,
+        );
 
         let tx_scopes =
             collect_rust_transactional_scopes(&nodes, &[NodeKind::Function, NodeKind::Method]);
@@ -701,6 +704,7 @@ impl LanguageProvider for RustProvider {
             nodes,
             imports,
             documents: vec![],
+            route_receivers: None,
             framework_refs,
             fanout_refs: vec![],
             blind_spots,
@@ -712,6 +716,7 @@ impl LanguageProvider for RustProvider {
             call_metas,
             raw_function_metas,
             export_aliases: None,
+            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
         })
     }
 }

@@ -1,6 +1,6 @@
 # C4: raw records
 
-Status: contract, phase 1. Types: `crates/ecp-core/src/contracts/raw_records.rs`. No code calls them yet.
+Status: contract, phase 1. Types: `crates/ecp-core/src/contracts/raw_records.rs`. Landed: slice P5 (`RawIndexMap` replaces the per-pass prefix sums) and slice P6 (`PathLiteral`, `SqlRef`, `SchemaField` and `EventTopic` records carry a bound `endpoint`; a module-top site binds `File`). The section "Today" records the state before those slices.
 
 Plan row (`docs/specs/2026-10-25-architecture-direction.md`, "Contracts before code"): the parser phases (collect captures, finalize nodes, bind raw records), the raw index to global node mapping, the endpoint of a raw record (node, file or unresolved), and the evidence classes exact, ambiguous, heuristic and unresolved. Consumers: areas 2, 4, 5 (the records the overlay replays), 7, 8, 10.
 
@@ -28,7 +28,7 @@ Every `file:line` below was read on branch `feat/arch-p1-contracts` at `f23bce5a
 | `RawIdx` | stored `u32` | A raw index. `to_packed24` checks that it fits a 24-bit field (Open point 9). |
 | `RawEndpoint` | stored enum | `Node(RawIdx)`, `File`, `Unresolved(Unbound)`. |
 | `SourceName` | stored string | A source spelling, trimmed and not empty. Its field is private; `SourceName::new` is the only constructor outside the module. |
-| `Unbound` | stored enum | `Named(SourceName)` or `Anonymous`. |
+| `Unbound` | stored enum | `Named(SourceName)`, `Anonymous`, or `Inline(Span)`. |
 | `EndpointError` | result | A `Node` out of range, or a name that is empty or not trimmed. |
 | `Bound` | value | One endpoint, the evidence that bound it, and the same-name candidates that the site cannot be proven to see. |
 | `Evidence` | enum | `Exact`, `Ambiguous { candidates }`, `Heuristic`, `Unresolved`. |
@@ -57,7 +57,8 @@ Every `file:line` below was read on branch `feat/arch-p1-contracts` at `f23bce5a
 | `RawEndpoint::Node(i)` | `i` is below the node count of the record's own file (`validate`). |
 | `RawEndpoint::File` | The record belongs to the whole file, or sits at module top level. The builder maps it to the file's `File` node. |
 | `Unbound::Named(s)` | `s` is the trimmed source spelling and is not empty. `SourceName::new` trims and returns `None` for a blank name. `RawEndpoint::named` and `bind_name` build it only through `SourceName::new`. `validate` and `Bound::new` reject a value that breaks the rule, such as one read back from an archive. A later pass can bind it across files. |
-| `Unbound::Anonymous` | Code with no name and no node, such as an inline handler with no closure node. The line comes from the record's site. |
+| `Unbound::Anonymous` | No name: the producer saw an empty or whitespace-only reference. The line comes from the record's site. |
+| `Unbound::Inline(Span)` | A function written in place as a route's handler argument, at the argument's span. `RawRoute::bind` takes only the outermost closure node that starts at that span, so a middleware closure of the same registration never serves the route; with no such node the handler stays `Inline`. |
 | `bind_enclosing(nodes, site, accept)` | The innermost node of an accepted kind whose span contains the site. Between identical spans the lower index wins, as in `innermost_enclosing` (`ecp-core/src/analyzer/types.rs:40`). |
 | `bind_name(nodes, site, name, accept)` | A same-name node of an accepted kind is a candidate only when the site provably sees it. Every scope container around the candidate (callable, type, `Impl`, `Module`, `Namespace`) must also contain the site, and none of them may be a type scope. Member visibility (`self.`, an implicit `this`) belongs to area 1. Among the visible candidates, the innermost scope shadows the outer ones. In that scope: 1 match gives `Node`, `Exact`. 2 or more give `Unresolved(Named)`, `Ambiguous` with the true count. 0 gives `Unresolved(Named)`, `Unresolved`. An empty name gives `Unresolved(Anonymous)`, `Unresolved`. A candidate that the site cannot be proven to see never binds. `Bound::out_of_scope` keeps its raw index, so a caller can record a `BlindSpot` or a caveat. The rule ignores declaration order: a declaration after the site in a visible scope counts. It never picks the first of several. |
 | `Bound::new` | `Node` takes `Exact` or `Heuristic`. `File` takes `Exact`. `Unresolved` takes `Ambiguous` (2 or more) or `Unresolved`. A `Named` endpoint with a blank or untrimmed name is `BadName`. |
@@ -233,7 +234,7 @@ Maps to C1 `HandlerRef` (`ecp-core/src/contracts/identity.rs:1312-1327`; C1 Open
 | `Node(i)` whose node is a closure: a `Function` whose name starts with `<anonymous:` (`is_anonymous_closure`, `builder.rs:2183-2185`) | `Closure { uid }` of `RawIndexMap::node`; prints `inline_anonymous` |
 | any other `Node(i)` | `Declaration { uid }` of `RawIndexMap::node` |
 | `Unresolved(Named(s))`, after every cross-file pass | `Unresolved { name: s }` |
-| `Unresolved(Anonymous)` | `Inline { line }`, line = site start row + 1; prints `inline_anonymous` |
+| `Unresolved(Anonymous)`, `Unresolved(Inline(_))` | `Inline { line }`, line = site start row + 1; prints `inline_anonymous` |
 | no endpoint | `Absent` |
 
 Must stop: `RawRoute.handler` as `Option<String>` (`types.rs:507`); binding the first of two same-name handlers (`builder.rs:1508`).
@@ -287,7 +288,7 @@ Proof per the repo `CLAUDE.md`: index with a parse cache that the previous binar
    | 2 | An L1 fragment format after V5 stores those records (`overlay.rs:57`, reader `overlay_reader.rs:76`). | area 5 |
    | 3 | `graph.bin` keeps the fetch sites of clean files, or the route table they match against. A `GRAPH_FORMAT_VERSION` bump. | area 8 |
    | 4 | The overlay masks the base `Fetches` edges of a dirty file, and re-matches every dirty route against all fetch sites and every dirty fetch site against all routes. | area 5 |
-5. **Inline handler.** Closed by C1 Open point 13: option (a). Some parsers emit `<anonymous:…>` closure nodes (`builder.rs:2183-2185`), and only when the body holds a call. A closure node is a `Node` endpoint and maps to `HandlerRef::Closure { uid }`. A handler with no node stays `Unbound::Anonymous` and maps to `Inline { line }`. Both print `inline_anonymous`, so `ecp routes` keeps its values, and the uid lets `impact` reach the calls inside the closure. See the Area 8 mapping table.
+5. **Inline handler.** Closed by C1 Open point 13: option (a). Some parsers emit `<anonymous:…>` closure nodes (`builder.rs:2183-2185`), and only when the body holds a call. A closure node is a `Node` endpoint and maps to `HandlerRef::Closure { uid }`. A handler with no node stays `Unbound::Inline` at its argument's span and maps to `Inline { line }`. Both print `inline_anonymous`, so `ecp routes` keeps its values, and the uid lets `impact` reach the calls inside the closure. See the Area 8 mapping table.
 6. **Call tiers and B's outcome type.** Decided. R1a (`393f52ae`) carries the true count: `NoEdge::Ambiguous(u32)` (`ecp-core/src/analyzer/outcome.rs:83-86`), so `Evidence::Ambiguous { candidates }` can take it. Before R1a, the variant carried no count. The `Global` tier (`Tier::Global`, `outcome.rs:29`) is Heuristic class: a name-only match with no import or scope evidence. Its confidence stays 0.7 (`Tier::confidence`, `outcome.rs:43`). That value sits at `HEURISTIC_CEILING` (`raw_records.rs:471`), so a `Global` edge stays untagged. R-A4 may revisit the class or the value. C4 does not reclassify other call tiers.
 7. **Accepted kinds of a path literal or SQL literal.** The type doc names Function, Method and Const (`types.rs:595`). A literal in a module-level `Variable` binds `File`. Recommendation: keep. The accepted kinds are one shared rule in `RecordKind`, so widening them changes every language. A change ships with tests for the 14 mainstream languages (repo `CLAUDE.md`), each with a literal in the newly accepted kind and one outside it.
 8. **`Decorates` to a synthetic node at 0.8** (`decorates_edges.rs:123-166`). (a) Keep: the synthetic node is the honest unresolved marker (`SYNTHETIC_FILE_IDX`). (b) Drop it below 0.7. Recommendation: (a); area 7 confirms.

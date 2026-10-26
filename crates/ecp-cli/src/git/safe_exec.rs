@@ -115,6 +115,10 @@ pub const DIFF_HARDENING: [&str; 2] = ["--no-ext-diff", "--no-textconv"];
 /// the read itself with [`FILTER_KEYS_ARGS`].
 pub fn filter_overrides(repo_dir: &Path) -> io::Result<FilterOverrides> {
     let out = git()
+        // `GIT_CONFIG` redirects `git config` alone (git-config(1)
+        // ENVIRONMENT). The guarded command never reads that file, so a read
+        // through it lists no driver while the repository's drivers stay live.
+        .env_remove("GIT_CONFIG")
         .args(FILTER_KEYS_ARGS)
         .current_dir(repo_dir)
         .output()?;

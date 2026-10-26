@@ -46,9 +46,9 @@ function publishOrder(data) {
     assert_eq!(result[0].direction, PubSub::Publish);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "orders"
     );
 }
@@ -72,9 +72,9 @@ function emitPayment(payload) {
     assert_eq!(result[0].direction, PubSub::Publish);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "payments"
     );
 }
@@ -129,7 +129,7 @@ function publishRdkafka(data) {
     let result = run(src, &["kafkajs", "node-rdkafka"]);
     let topics: Vec<&str> = result
         .iter()
-        .map(|r| r.topic_literal.as_deref().unwrap())
+        .map(|r| r.topic_key.as_deref().unwrap())
         .collect();
     assert_eq!(
         result.len(),
@@ -164,9 +164,9 @@ class OrderService {
     );
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "orders"
     );
     assert_eq!(result[0].lib, FrameworkId::Kafka);

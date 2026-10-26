@@ -21,9 +21,11 @@
 use crate::engine::Engine;
 use crate::output::{emit, OutputFormat};
 use clap::Args;
+use ecp_analyzer::framework_confidence as fc;
 use ecp_core::graph::ArchivedZeroCopyGraph;
 use ecp_core::registry::{resolve_home_ecp, CommitBuildMeta, Registry, RegistryFile};
 use ecp_core::EcpError;
+use rustc_hash::FxHashMap;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -334,107 +336,159 @@ fn fetch_frameworks(graph: Option<&ArchivedZeroCopyGraph>, status: Option<&'stat
     Value::Object(out)
 }
 
-/// The supported-frameworks catalog: static list of (lang_framework, reason_tag,
-/// confidence) tuples returned alongside `detected` so downstream tooling can
-/// identify frameworks the analyzer supports but hasn't seen in this graph.
+/// One framework signal the analyzer leaves in a graph. A `<method>` suffix in
+/// `reason_tag` stands for a dynamic tail (`fastapi-route-GET`) and matches by
+/// prefix; any other tag matches exactly.
+struct FrameworkSignal {
+    lang_framework: &'static str,
+    reason_tag: &'static str,
+    confidence: f32,
+}
+
+const fn signal(
+    lang_framework: &'static str,
+    reason_tag: &'static str,
+    confidence: f32,
+) -> FrameworkSignal {
+    FrameworkSignal {
+        lang_framework,
+        reason_tag,
+        confidence,
+    }
+}
+
+/// The only table of framework signals: the catalog (`supported`) and the
+/// detection (`detected`) both read it. Detectors whose edges carry no tag
+/// (PHP, Ruby, C# routes) appear in [`ROUTE_FILE_FRAMEWORKS`] instead.
+const FRAMEWORK_SIGNALS: &[FrameworkSignal] = &[
+    signal("Python/FastAPI", "fastapi-depends", fc::FASTAPI_DEPENDS),
+    signal(
+        "Python/FastAPI",
+        "fastapi-route-<method>",
+        fc::FASTAPI_ROUTE,
+    ),
+    signal("Python/Django", "django-url-path", fc::DJANGO_URL),
+    signal("Python/Django", "django-signal-receiver", fc::DJANGO_SIGNAL),
+    signal("Python/Django", "django-signal-connect", fc::DJANGO_SIGNAL),
+    signal("Python/Celery", "celery-task", fc::CELERY_TASK),
+    signal(
+        "Python/reflection",
+        "reflection-getattr-fanout",
+        fc::FANOUT_BASE,
+    ),
+    signal(
+        "PHP/dynamic-dispatch",
+        "php-const-map-dispatch",
+        fc::FANOUT_BASE,
+    ),
+    signal(
+        "PHP/dynamic-dispatch",
+        "php-const-map-dispatch-ambiguous",
+        fc::FANOUT_BASE,
+    ),
+    signal("Rust/Axum", "axum-route-handler", fc::AXUM_ROUTE),
+    signal("Rust/Actix", "actix-route-<method>", fc::ACTIX_ROUTE),
+    signal("Web/Express", "express-route-handler", fc::EXPRESS_ROUTE),
+    signal("Web/Express", "express-route", fc::EXPRESS_ROUTE),
+    signal("Web/Hapi", "hapi-route", fc::HAPI_ROUTE),
+    signal(
+        "TypeScript/NestJS",
+        "nestjs-route-handler",
+        fc::NESTJS_ROUTE,
+    ),
+    signal("Java/Spring", "spring-autowired", fc::SPRING_AUTOWIRED),
+    signal("Java/Spring", "spring-route-handler", fc::SPRING_ROUTE),
+    signal("Go/Gin", "gin-route", fc::GIN_ROUTE),
+    signal("Go/Echo", "echo-route", fc::ECHO_ROUTE),
+    signal("PHP/Laravel", "laravel-route", fc::LARAVEL_ROUTE),
+];
+
+/// Frameworks whose route detector writes `Route` nodes but no tagged edge:
+/// the file extension of the `Route` node is the evidence. The label stays
+/// neutral: the PHP and Ruby route queries also match Slim, Symfony, Sinatra,
+/// Hanami and Roda, so the extension cannot name one framework.
+const ROUTE_FILE_FRAMEWORKS: &[(&str, FrameworkSignal)] = &[
+    (
+        "php",
+        signal("PHP/routes", "route-node:*.php", fc::LARAVEL_ROUTE),
+    ),
+    (
+        "rb",
+        signal("Ruby/routes", "route-node:*.rb", fc::RAILS_ROUTE),
+    ),
+    (
+        "cs",
+        signal("C#/ASP.NET", "route-node:*.cs", fc::ASPNET_ROUTE_ATTR),
+    ),
+];
+
+/// The supported-frameworks catalog, derived from the signal tables so that
+/// the catalog and the detection cannot drift apart.
 fn supported_framework_catalog() -> Vec<Value> {
-    use ecp_analyzer::framework_confidence as fc;
-
-    let patterns: &[(&str, &str)] = &[
-        ("Python/FastAPI", "fastapi-depends"),
-        ("Python/FastAPI", "fastapi-route-<method>"),
-        ("Python/Django", "django-url-path"),
-        ("Python/Django", "django-signal-receiver"),
-        ("Python/Django", "django-signal-connect"),
-        ("Python/Celery", "celery-task"),
-        ("Python/reflection", "reflection-getattr-fanout"),
-        ("PHP/dynamic-dispatch", "php-const-map-dispatch"),
-        ("PHP/dynamic-dispatch", "php-const-map-dispatch-ambiguous"),
-        ("Rust/Axum", "axum-route-handler"),
-        ("Rust/Actix", "actix-route-<method>"),
-        ("Web/Express", "express-route-handler"),
-        ("TypeScript/NestJS", "nestjs-route-handler"),
-        ("Java/Spring", "spring-autowired"),
-        ("Java/Spring", "spring-route-handler"),
-    ];
-
-    let confidence_for = |tag: &str| -> f32 {
-        match tag {
-            "fastapi-depends" => fc::FASTAPI_DEPENDS,
-            "fastapi-route-<method>" => fc::FASTAPI_ROUTE,
-            "django-url-path" => fc::DJANGO_URL,
-            "django-signal-receiver" | "django-signal-connect" => fc::DJANGO_SIGNAL,
-            "celery-task" => fc::CELERY_TASK,
-            "reflection-getattr-fanout"
-            | "php-const-map-dispatch"
-            | "php-const-map-dispatch-ambiguous" => fc::FANOUT_BASE,
-            "axum-route-handler" => fc::AXUM_ROUTE,
-            "actix-route-<method>" => fc::ACTIX_ROUTE,
-            "express-route-handler" => fc::EXPRESS_ROUTE,
-            "nestjs-route-handler" => fc::NESTJS_ROUTE,
-            "spring-autowired" => fc::SPRING_AUTOWIRED,
-            "spring-route-handler" => fc::SPRING_ROUTE,
-            _ => 0.0,
-        }
-    };
-
-    patterns
+    FRAMEWORK_SIGNALS
         .iter()
-        .map(|(lang_fw, tag)| {
+        .chain(ROUTE_FILE_FRAMEWORKS.iter().map(|(_, s)| s))
+        .map(|s| {
             json!({
-                "lang_framework": lang_fw,
-                "reason_tag": tag,
-                "confidence": confidence_for(tag),
+                "lang_framework": s.lang_framework,
+                "reason_tag": s.reason_tag,
+                "confidence": s.confidence,
             })
         })
         .collect()
 }
 
-/// Map an edge `reason` string to the lang_framework it represents. Some
-/// reasons carry a dynamic suffix (`fastapi-route-GET`, `actix-route-POST`)
-/// — match those by prefix. The `Web/Express` bucket covers both the JS
-/// parser tag (`"express-route"`) and the TS parser tag
-/// (`"express-route-handler"`). Returns `None` for non-framework reasons.
+/// Map an edge `reason` string to the lang_framework it represents. Returns
+/// `None` for non-framework reasons.
 fn classify_framework_reason(reason: &str) -> Option<&'static str> {
-    if reason == "fastapi-depends" || reason.starts_with("fastapi-route-") {
-        Some("Python/FastAPI")
-    } else if reason == "django-url-path" || reason.starts_with("django-signal-") {
-        Some("Python/Django")
-    } else if reason == "celery-task" {
-        Some("Python/Celery")
-    } else if reason == "reflection-getattr-fanout" {
-        Some("Python/reflection")
-    } else if reason.starts_with("php-const-map-dispatch") {
-        Some("PHP/dynamic-dispatch")
-    } else if reason == "axum-route-handler" {
-        Some("Rust/Axum")
-    } else if reason.starts_with("actix-route-") {
-        Some("Rust/Actix")
-    } else if reason == "express-route" || reason == "express-route-handler" {
-        Some("Web/Express")
-    } else if reason == "nestjs-route-handler" {
-        Some("TypeScript/NestJS")
-    } else if reason == "spring-autowired" || reason == "spring-route-handler" {
-        Some("Java/Spring")
-    } else {
-        None
-    }
+    FRAMEWORK_SIGNALS
+        .iter()
+        .find(|s| match s.reason_tag.split_once("<method>") {
+            Some((prefix, _)) => reason.starts_with(prefix),
+            None => reason == s.reason_tag,
+        })
+        .map(|s| s.lang_framework)
 }
 
-/// Walk graph edges, group framework-attributable reason tags by
-/// `lang_framework`, return one row per framework with edge count.
-/// `BTreeMap` keeps output stable for snapshot-style assertions.
+/// Walk graph edges and `Route` nodes, group the framework signals by
+/// `lang_framework`, return one row per framework. `edge_count` counts tagged
+/// edges; `route_count` (present only when non-zero) counts `Route` nodes
+/// whose file extension names the framework. `BTreeMap` keeps output stable.
 fn count_detected_frameworks(graph: &ArchivedZeroCopyGraph) -> Value {
-    let mut counts: BTreeMap<&'static str, u32> = BTreeMap::new();
+    let mut counts: BTreeMap<&'static str, (u32, u32)> = BTreeMap::new();
+    // Edges share a few interned reasons: classify each distinct one once.
+    let mut class_of_reason: FxHashMap<u32, Option<&'static str>> = FxHashMap::default();
     for edge in graph.edges.iter() {
-        let reason = edge.reason.resolve(&graph.string_pool);
-        if let Some(fw) = classify_framework_reason(reason) {
-            *counts.entry(fw).or_insert(0) += 1;
+        let class = *class_of_reason
+            .entry(edge.reason.offset.to_native())
+            .or_insert_with(|| classify_framework_reason(edge.reason.resolve(&graph.string_pool)));
+        if let Some(fw) = class {
+            counts.entry(fw).or_default().0 += 1;
+        }
+    }
+    for idx in graph.nodes_by_kind(ecp_core::graph::NodeKind::Route) {
+        let node = &graph.nodes[idx as usize];
+        let file = &graph.files[node.file_idx.to_native() as usize];
+        let ext = Path::new(file.path.resolve(&graph.string_pool))
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        if let Some((_, s)) = ROUTE_FILE_FRAMEWORKS
+            .iter()
+            .find(|(e, _)| e.eq_ignore_ascii_case(ext))
+        {
+            counts.entry(s.lang_framework).or_default().1 += 1;
         }
     }
     json!(counts
         .into_iter()
-        .map(|(fw, count)| json!({ "lang_framework": fw, "edge_count": count }))
+        .map(|(fw, (edges, routes))| {
+            let mut row = json!({ "lang_framework": fw, "edge_count": edges });
+            if routes > 0 {
+                row["route_count"] = json!(routes);
+            }
+            row
+        })
         .collect::<Vec<_>>())
 }
 

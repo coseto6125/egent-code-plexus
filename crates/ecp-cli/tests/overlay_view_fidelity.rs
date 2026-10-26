@@ -412,7 +412,7 @@ fn test_build_edited_main_keeps_entry_point_reference() {
 }
 
 // ── U2: the import tier over a dirty target file ───────────────────────────
-// Python, Java, Kotlin, PHP: n/a — their import tier (`bind_import`) already
+// Python, Java, Kotlin, PHP: n/a — their import tier (`ladder::import_member`) already
 // reads a dirty module from its fresh parse.
 // Go, Swift, Dart, C++: n/a — an import binds a package, module or library
 // (and C++ `#include` / namespace alias a file), never a symbol by name.
@@ -734,7 +734,7 @@ fn test_build_php_construction_through_use_alias_calls_declared_class() {
 // `self::`) is never a `./` specifier. It keeps the last-segment match,
 // tested here only for the duplicate-declaration rule; a `::` call resolves
 // through the module layout instead.
-// Python, Java, Kotlin, PHP: n/a — `bind_import` discovers their modules.
+// Python, Java, Kotlin, PHP: n/a — `ladder::import_member` discovers their modules.
 // Go, Swift, Dart, C, C++, Ruby, C#: n/a — no import of theirs binds a
 // symbol by name (see the U2 note above), so no candidate file is probed.
 
@@ -919,7 +919,7 @@ fn test_build_typescript_dirty_module_file_without_name_falls_through_to_index_f
 }
 
 // ── Import tier: alias and namespace bindings (`import_binding`) ───────────
-// Python, Java, Kotlin, PHP: n/a — `bind_import` already uses
+// Python, Java, Kotlin, PHP: n/a — `ladder::import_member` already uses
 // `import_binding`. Other languages: n/a, as above.
 // Rust: n/a for the namespace import — `use crate::a;` + `a::f()` is a `::`
 // path resolved through the module layout, and a glob `use a::*` has no

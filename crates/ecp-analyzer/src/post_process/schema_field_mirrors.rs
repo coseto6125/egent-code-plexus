@@ -12,9 +12,9 @@
 //!
 //! 1. **Promote**: iterate `LocalGraph.schema_fields`, emit one
 //!    `SchemaField` Node + one `HasProperty` edge (Class → SchemaField)
-//!    per field. SymbolTable lookup resolves the owning class name in
-//!    the same file; misses silently drop the field (no false-positive
-//!    edge to a wrong class).
+//!    per field. The owner is the record's endpoint, the innermost enclosing
+//!    type (`RawSchemaField::bind`); a field with no owning type is dropped
+//!    (no false-positive edge to a wrong class, no `File` fallback).
 //!
 //! 2. **Bucket**: group emitted SchemaField Nodes by
 //!    `(name.to_lowercase(), SchemaType)` so case-variants and
@@ -36,30 +36,25 @@
 //!   than a handful of cross-framework mirrors per identifier).
 //! - Offline-only — runs once at build time, never on `ecp` hot paths.
 
-use crate::resolution::index::SymbolTable;
+use ecp_core::analyzer::record_nodes;
 use ecp_core::analyzer::types::{LocalGraph, SchemaType};
-use ecp_core::graph::{Edge, Node, NodeKind, RelType};
+use ecp_core::contracts::raw_records::{FileOrd, GlobalEndpoint, RawIndexMap};
+use ecp_core::graph::{Edge, Node, RelType};
 use ecp_core::pool::StringPool;
-use ecp_core::uid;
 use rustc_hash::FxHashMap;
 
 /// Promote `RawSchemaField`s to `SchemaField` Nodes + emit `HasProperty`
 /// connections + `MirrorsField` heuristic edges. Returns the count of
 /// emitted MirrorsField edges (HasProperty + SchemaField Node counts are
 /// derivable from `nodes.len()` delta; this return is for telemetry).
-///
-/// `file_node_count_before` is the size of `nodes` BEFORE the File-node
-/// append loop runs — used to bound SchemaField nodes to the
-/// raw-symbols-and-extras region so `file_node_idx` registration further
-/// downstream still hits the correct File-node range.
 pub fn emit_edges(
     local_graphs: &[LocalGraph],
-    symbol_table: &SymbolTable,
+    raw_map: &RawIndexMap,
     string_pool: &mut StringPool,
     nodes: &mut Vec<Node>,
     edges: &mut Vec<Edge>,
 ) -> usize {
-    let reason_has_property = string_pool.add("post_process:schema_field:has_property");
+    let reason_has_property = string_pool.add(record_nodes::SCHEMA_FIELD_HAS_PROPERTY_REASON);
     let reason_mirror = string_pool.add("post_process:schema_field:mirrors_field");
 
     /// Bucket entry: (node_idx, owner_class, exact_name).
@@ -69,10 +64,8 @@ pub fn emit_edges(
     // Phase 1 — emit SchemaField Nodes + HasProperty edges, populate buckets.
     //
     // Skip `LocalGraph`s with no `schema_fields` (the majority — most files
-    // carry no ORM/schema surface). Per-file Owner-class lookup uses
-    // SymbolTable's per-file index; misses (e.g. extractor emitted a class
-    // name that SymbolTable doesn't know about, perhaps due to file
-    // boundary edge cases) silently drop the field. No fabricated edges.
+    // carry no ORM/schema surface). A field whose endpoint binds no type of
+    // its file is dropped. No fabricated edges.
     for (lg_idx, local_graph) in local_graphs.iter().enumerate() {
         let Some(ref schema_fields) = local_graph.schema_fields else {
             continue;
@@ -87,35 +80,32 @@ pub fn emit_edges(
             let owner_name = &*raw_sf.owner_class;
             let field_name = &*raw_sf.name;
 
-            // Resolve the owning class to an existing Node idx. If the
-            // SymbolTable doesn't know `owner_name` in this file, the
-            // class was not parsed as a `Class` / `Struct` / `Trait` /
-            // `Interface` — likely a generated-code or DSL pattern that
-            // we don't model. Silently skip rather than emit dangling
-            // HasProperty.
-            let Some(class_idx) = symbol_table.lookup_in_file(&path_str, owner_name) else {
+            // The owning type's node. No `Class` / `Struct` / `Trait` /
+            // `Interface` of this file owns the field: likely a generated-code
+            // or DSL pattern that we don't model. Skip rather than emit a
+            // dangling HasProperty.
+            let Some(endpoint) = raw_sf.endpoint_in(&local_graph.nodes) else {
+                continue;
+            };
+            let Some(GlobalEndpoint::Node(class_idx)) =
+                raw_map.resolve(FileOrd(file_idx), &endpoint)
+            else {
                 continue;
             };
 
-            // UID: T1-5 canonical xxh3-64 over (kind, path, owner, name).
-            // owner_class is included so cross-framework mirrors with the same
-            // (owner, name) but different SchemaField nodes get distinct UIDs
-            // via path / owner disambiguation upstream.
-            let node_uid = uid::compute(
-                NodeKind::SchemaField,
-                &path_str,
-                Some(owner_name),
-                field_name,
-            );
-            let name_ref = string_pool.add(field_name);
-            let owner_ref = string_pool.add(owner_name);
+            // UID: T1-5 canonical xxh3-64 over (kind, path, owner, name), by
+            // `record_nodes::schema_field_node`, which the overlay's per-file
+            // replay shares.
+            let field = record_nodes::schema_field_node(&path_str, raw_sf);
+            let name_ref = string_pool.add(&field.name);
+            let owner_ref = string_pool.add(field.owner);
             let sf_idx = nodes.len() as u32;
             nodes.push(Node {
-                uid: node_uid,
+                uid: field.uid,
                 name: name_ref,
                 file_idx,
-                kind: NodeKind::SchemaField,
-                span: raw_sf.span,
+                kind: field.kind,
+                span: field.span,
                 community_id: 0,
                 owner_class: owner_ref,
                 content_hash: 0,

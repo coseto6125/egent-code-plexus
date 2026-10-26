@@ -3,7 +3,7 @@
 //! Exercises the full builder pipeline:
 //! `LocalGraph` → `GraphBuilder::build()` → `ZeroCopyGraph` — verifying that
 //! `RawNode.owner_class` (`Option<String>`) survives the sentinel-StrRef
-//! promotion on the final `Node` struct that Cypher / rename consumers see.
+//! promotion on the final `Node` struct that Cypher consumers see.
 //!
 //! Each test feeds one minimal `LocalGraph` through `GraphBuilder`, then
 //! inspects `ZeroCopyGraph.nodes` and asserts:

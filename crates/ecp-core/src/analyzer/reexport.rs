@@ -1,6 +1,6 @@
 //! The import tier's module rules, shared by the index-time resolver
 //! (ecp-analyzer `resolution/resolver.rs`) and the query-time overlay
-//! (`session/view.rs`), so the two cannot drift: which declaration an ES
+//! (`session/view/resolution.rs`), so the two cannot drift: which declaration an ES
 //! module import binds (export eligibility and export aliases), the one-hop
 //! re-export through a Python package or a TS / JS barrel, the Python
 //! submodule from-import, the ES-module privacy rule of the global tier,
@@ -27,7 +27,7 @@ use std::sync::Arc;
 /// bare callee like `format` never resolves to a Variable/Const that happens
 /// to share the name.
 ///
-/// `Qualifier` is the leading-segment lookup used by `resolve_qualifier_file`
+/// `Qualifier` is the leading-segment lookup used by `ladder::qualifier_file`
 /// — it accepts Type (Class/Struct/Enum/Typedef/Trait/Interface) plus
 /// Namespace (C++ / C# / PHP) and Module (Rust inline `mod`). Without
 /// these, every qualified call whose leading segment isn't a class /
@@ -194,11 +194,12 @@ impl<'a> FileImports<'a> {
     }
 }
 
-/// Whether exports decide what another file may import from `file`: a TS /
-/// JS file other than a `.d.ts`, whose declarations TS may export
-/// implicitly. Other languages bind imports by their own rules.
-pub fn export_filter_applies(file: &str) -> bool {
-    is_ecmascript(Language::from_normalized_path(file)) && !file.ends_with(".d.ts")
+/// Whether exports decide what another file may import from `file`, of
+/// `language`: a TS / JS file other than a `.d.ts`, whose declarations TS may
+/// export implicitly. Other languages bind imports by their own rules. The
+/// index passes the language after parse it stores.
+pub fn export_filter_applies_to(language: Language, file: &str) -> bool {
+    is_ecmascript(language) && !file.ends_with(".d.ts")
 }
 
 pub fn is_ecmascript(language: Language) -> bool {
@@ -216,7 +217,7 @@ pub fn go_dot_import_blocks_unmodeled_type<'a>(
 }
 
 /// The ES-module rule ([`ModuleFacts::is_es_module`]) for `file`, of
-/// `language`: [`export_filter_applies`], and the file exports a
+/// `language`: [`export_filter_applies_to`], and the file exports a
 /// declaration or has an [`ExportAliasTable`].
 pub fn is_es_module(language: Language, file: &str, exports_any: bool, alias_table: bool) -> bool {
     is_ecmascript(language) && !file.ends_with(".d.ts") && (exports_any || alias_table)
@@ -342,6 +343,13 @@ pub trait ModuleFacts {
 
     /// Whether `file` is indexed, symbols or not.
     fn has_file(&self, file: &str) -> bool;
+    /// `file`'s language as the import rules compare it. The index reads the
+    /// C5 language after parse it stores per file, so a Vue file with a
+    /// TypeScript script reads as TypeScript. The default derives it from
+    /// the path: an implementor that stores the language overrides it.
+    fn file_language(&self, file: &str) -> Language {
+        Language::from_normalized_path(file)
+    }
     /// Files of `language` directly within `directory`.
     fn files_in_directory(&self, _language: Language, _directory: &str) -> Vec<Self::Path> {
         Vec::new()
@@ -363,7 +371,7 @@ pub trait ModuleFacts {
     fn decls_in_file(&self, file: &str, name: &str) -> Vec<(u32, NodeKind)>;
     /// Whether the declaration `decl` is exported by its file.
     fn is_exported(&self, decl: u32) -> bool;
-    /// Whether `file` is an ES module: [`export_filter_applies`] and it
+    /// Whether `file` is an ES module: [`export_filter_applies_to`] and it
     /// exports a declaration or has an [`ExportAliasTable`].
     fn is_es_module(&self, file: &str) -> bool;
     /// `file`'s [`ExportAliasTable`], `None` when it has none.
@@ -375,7 +383,8 @@ pub trait ModuleFacts {
     /// The resolved `export *` modules of the TS / JS `module`
     /// ([`resolve_star_modules`]).
     fn star_modules(&self, module: &str) -> Fact<'_, [Box<str>]>;
-    /// The resolver's `import_module_file` for a Python specifier.
+    /// [`crate::analyzer::module_discovery::discover_module`] for a Python
+    /// specifier, through the implementor's memo.
     fn python_module(&self, importer: &str, specifier: &str) -> PyModule<Self::Path>;
     /// Every file `specifier` may name from `importer`, in probe order,
     /// until `visit` returns `false`.
@@ -673,27 +682,6 @@ where
     }
 }
 
-/// The top-level callable a Go package selector reaches. A Go import's path
-/// and its declared package name are independent, so an unaliased selector
-/// needs both facts. An explicit alias replaces the package spelling, but
-/// remains constrained to the imported directory.
-pub fn go_imported_package_member<'a, F, I>(
-    facts: &F,
-    importer: &str,
-    receiver: &str,
-    member: &str,
-    imports: I,
-) -> Option<(u32, &'a str)>
-where
-    F: ModuleFacts + ?Sized,
-    I: IntoIterator<Item = ImportRef<'a>>,
-{
-    match go_package_lookup(facts, importer, receiver, member, imports) {
-        GoPackageLookup::Resolved(target) => target,
-        GoPackageLookup::Value | GoPackageLookup::Unmapped => None,
-    }
-}
-
 /// A selector can name a value, an unmapped package, or a resolved package.
 pub enum GoPackageLookup<'a> {
     Value,
@@ -829,7 +817,7 @@ pub fn ecmascript_module<F: ModuleFacts + ?Sized>(
 ) -> Option<Box<str>> {
     let mut found = None;
     for_each_import_candidate(facts, importer, import, &mut |candidate| {
-        if is_ecmascript(Language::from_normalized_path(candidate)) && facts.has_file(candidate) {
+        if is_ecmascript(facts.file_language(candidate)) && facts.has_file(candidate) {
             found = Some(Box::from(candidate));
             false
         } else {
@@ -849,7 +837,7 @@ pub fn resolve_star_modules<'i, F: ModuleFacts + ?Sized>(
     module: &str,
     imports: impl IntoIterator<Item = ImportRef<'i>>,
 ) -> Box<[Box<str>]> {
-    if !is_ecmascript(Language::from_normalized_path(module)) {
+    if !is_ecmascript(facts.file_language(module)) {
         return Box::default();
     }
     imports
@@ -994,7 +982,7 @@ pub fn ecmascript_reexport<F: ModuleFacts + ?Sized>(
     name: &str,
     target: ResolveTarget,
 ) -> Option<u32> {
-    if !is_ecmascript(Language::from_normalized_path(module)) {
+    if !is_ecmascript(facts.file_language(module)) {
         return None;
     }
     if let Some(table) = facts
@@ -1074,7 +1062,7 @@ pub fn python_reexport<F: ModuleFacts + ?Sized>(
     name: &str,
     target: ResolveTarget,
 ) -> Option<u32> {
-    if Language::from_normalized_path(module) != Language::Python {
+    if facts.file_language(module) != Language::Python {
         return None;
     }
     let mut bound = None;
@@ -1306,7 +1294,7 @@ pub fn import_hides<'i, F: ModuleFacts + ?Sized>(
     imports: impl IntoIterator<Item = ImportRef<'i>>,
     decl_file: &str,
 ) -> bool {
-    if !is_ecmascript(Language::from_normalized_path(importer)) || !facts.is_es_module(decl_file) {
+    if !is_ecmascript(facts.file_language(importer)) || !facts.is_es_module(decl_file) {
         return false;
     }
     imports.into_iter().any(|import| {
@@ -1593,9 +1581,10 @@ mod tests {
 
     #[test]
     fn test_export_filter_applies_ts_js_but_not_dts_or_python() {
-        assert!(export_filter_applies("src/a.ts"));
-        assert!(export_filter_applies("src/a.mjs"));
-        assert!(!export_filter_applies("src/a.d.ts"));
-        assert!(!export_filter_applies("pkg/__init__.py"));
+        let applies = |f: &str| export_filter_applies_to(Language::from_normalized_path(f), f);
+        assert!(applies("src/a.ts"));
+        assert!(applies("src/a.mjs"));
+        assert!(!applies("src/a.d.ts"));
+        assert!(!applies("pkg/__init__.py"));
     }
 }

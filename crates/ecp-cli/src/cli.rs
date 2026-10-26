@@ -30,8 +30,15 @@ pub enum Commands {
     ///
     /// For binding tier-degradation or resolver delta, use `ecp diff`.
     Impact(commands::impact::ImpactArgs),
-    /// AST-aware multi-file rename
-    Rename(commands::rename::RenameArgs),
+    /// Removed in 0.17.0. Kept hidden so a stale caller gets the reason.
+    #[command(hide = true)]
+    Rename {
+        // WHY: clap fills the field, no code reads it; the variant only has to
+        // swallow whatever the old command's callers passed.
+        #[allow(dead_code)]
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        args: Vec<String>,
+    },
     /// Syntax-pattern search over source files — the statement shapes the graph
     /// does not hold. `--callers-of` scopes the scan to one symbol's callers.
     Pattern(commands::pattern::PatternArgs),
@@ -49,7 +56,7 @@ pub enum Commands {
     Summary(commands::summary::SummaryArgs),
     /// List HTTP routes; with path, show handler + caller chain
     Routes(commands::routes::RoutesArgs),
-    /// Cross-repo API contracts inventory (routes / queue / RPC)
+    /// HTTP route contracts: routes paired with their fetch callers, across repos (queue / RPC not implemented)
     Contracts(commands::contracts::ContractsArgs),
     /// Edge-level resolver delta — binding tier-degradation (silent break), route / contract changes.
     ///
@@ -179,7 +186,6 @@ impl Commands {
             Commands::Find(args) => !args.skips_cwd_graph(custom_graph),
             Commands::Inspect(_)
             | Commands::Impact(_)
-            | Commands::Rename(_)
             | Commands::Pattern(_)
             | Commands::Cypher(_)
             | Commands::Routes(_)
@@ -204,6 +210,7 @@ impl Commands {
             | Commands::Watch(_)
             | Commands::Peers(_)
             | Commands::Group { .. }
+            | Commands::Rename { .. }
             | Commands::Schema(_)
             | Commands::Insight(_)
             | Commands::Usage(_)
@@ -229,7 +236,6 @@ impl Commands {
                 .as_deref()
                 .filter(|r| std::path::Path::new(r).is_dir()),
             Commands::Impact(args) => args.repo.as_deref(),
-            Commands::Rename(args) => args.repo.as_deref(),
             Commands::Pattern(args) => args.repo.as_deref(),
             Commands::Flow(args) => args.repo.as_deref(),
             Commands::Cypher(args) => args.repo.as_deref(),
@@ -258,6 +264,7 @@ impl Commands {
             | Commands::Watch(_)
             | Commands::Peers(_)
             | Commands::Group { .. }
+            | Commands::Rename { .. }
             | Commands::Schema(_)
             | Commands::Insight(_)
             | Commands::Usage(_)

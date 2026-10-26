@@ -12,8 +12,17 @@
 //! - `params`:       `type identifier` pairs from `parameter` nodes
 //! - `return_type`:  before method name; `void` → empty string for clean consumption
 //! - `decorators`:   C# attribute names with `[]` stripped and `(...)` dropped
+//! - extension:      `static` method, first parameter `this`, in a top-level
+//!   non-generic `static` class → `EXTENSION_FLAG` (bit 10); a `this` type
+//!   that is a method type parameter adds `GENERIC_THIS_FLAG` (bit 11). An
+//!   extension method also records its parameter shape: `PARAMS_ARRAY_FLAG`
+//!   (bit 12) for a trailing `params` array, and its count of parameters
+//!   with a default value in bits 13-15 (`optional_bits`)
 
 use super::{extract_with, node_text, ts_span};
+use ecp_core::analyzer::csharp_extension::{
+    optional_bits, EXTENSION_FLAG, GENERIC_THIS_FLAG, PARAMS_ARRAY_FLAG,
+};
 use ecp_core::analyzer::types::{RawFunctionMeta, RawNode};
 use ecp_core::graph::{FileCategory, FunctionMeta};
 use tree_sitter::Node;
@@ -54,11 +63,10 @@ fn extract_one(
     // Determine default visibility from context:
     // - interface methods default to public (0)
     // - class methods default to private (2)
-    let in_interface = fn_node
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|gp| gp.kind() == "interface_declaration")
-        .unwrap_or(false);
+    // A member inside `#if` sits one preprocessor block deeper, so the walk
+    // skips those blocks.
+    let in_interface = enclosing_declaration(*fn_node)
+        .is_some_and(|declaration| declaration.kind() == "interface_declaration");
     let mut vis_code: u16 = if in_interface { 0 } else { 2 };
 
     // Collect attributes (decorators) and modifiers.
@@ -100,8 +108,13 @@ fn extract_one(
         }
     }
 
-    // Merge query-captured decorators.
+    // Merge query-captured decorators. The parser's internal markers ride in
+    // the same list (`post_process::decorates_edges` skips them the same way);
+    // none is an attribute the source wrote.
     for d in &raw.decorators {
+        if RawNode::is_parser_marker(d) {
+            continue;
+        }
         let name = csharp_attribute_name(d);
         if !name.is_empty() && !decorators.contains(&name) {
             decorators.push(name);
@@ -128,6 +141,12 @@ fn extract_one(
     }
 
     flags |= vis_code << 6;
+    if flags & FunctionMeta::FLAG_STATIC != 0 {
+        flags |= extension_flags(fn_node, source);
+    }
+    if flags & EXTENSION_FLAG != 0 {
+        flags |= shape_flags(fn_node);
+    }
 
     let params = extract_params(fn_node, source);
 
@@ -151,6 +170,120 @@ fn extract_one(
         return_type,
         decorators,
     })
+}
+
+/// [`EXTENSION_FLAG`] for a static method whose first parameter carries
+/// `this` and whose declaring type is a top-level, non-generic `static`
+/// class, plus [`GENERIC_THIS_FLAG`] when that parameter's type is one of the
+/// method's type parameters. 0 for any other method. Preprocessor blocks
+/// between the method and its class add nothing.
+fn extension_flags(fn_node: &Node<'_>, source: &[u8]) -> u16 {
+    if fn_node.kind() != "method_declaration" {
+        return 0;
+    }
+    let Some(first) = fn_node
+        .child_by_field_name("parameters")
+        .and_then(|params| {
+            let mut c = params.walk();
+            let first = params
+                .named_children(&mut c)
+                .find(|p| p.kind() == "parameter");
+            first
+        })
+    else {
+        return 0;
+    };
+    let mut c = first.walk();
+    let this_param = first
+        .children(&mut c)
+        .any(|m| m.kind() == "modifier" && node_text(&m, source).trim() == "this");
+    let Some(class) = enclosing_declaration(*fn_node) else {
+        return 0;
+    };
+    let static_class = class.kind() == "class_declaration"
+        && !has_child_kind(class, "type_parameter_list")
+        && has_modifier(class, source, "static")
+        && enclosing_declaration(class).is_none_or(|outer| {
+            !matches!(
+                outer.kind(),
+                "class_declaration"
+                    | "struct_declaration"
+                    | "interface_declaration"
+                    | "record_declaration"
+            )
+        });
+    if !this_param || !static_class {
+        return 0;
+    }
+    let this_type = first
+        .child_by_field_name("type")
+        .map(|t| node_text(&t, source).trim())
+        .unwrap_or_default();
+    let this_head = this_type.trim_end_matches('?').trim_end();
+    let generic_this = fn_node
+        .child_by_field_name("type_parameters")
+        .is_some_and(|list| {
+            let mut c = list.walk();
+            let generic = list
+                .named_children(&mut c)
+                .filter(|p| p.kind() == "type_parameter")
+                .filter_map(|p| p.child_by_field_name("name"))
+                .any(|name| node_text(&name, source) == this_head);
+            generic
+        });
+    if generic_this {
+        EXTENSION_FLAG | GENERIC_THIS_FLAG
+    } else {
+        EXTENSION_FLAG
+    }
+}
+
+/// The parameter shape the extension retry checks a call's arguments
+/// against: [`PARAMS_ARRAY_FLAG`] for a `params` array, and the count of
+/// parameters with a default value ([`optional_bits`]).
+fn shape_flags(fn_node: &Node<'_>) -> u16 {
+    let Some(list) = fn_node.child_by_field_name("parameters") else {
+        return 0;
+    };
+    let mut c = list.walk();
+    let mut optional = 0;
+    let mut params_array = 0;
+    for child in list.children(&mut c) {
+        match child.kind() {
+            // The grammar inlines a `params` array into the list.
+            "params" => params_array = PARAMS_ARRAY_FLAG,
+            "parameter" if has_child_kind(child, "=") => optional += 1,
+            _ => {}
+        }
+    }
+    params_array | optional_bits(optional)
+}
+
+/// The nearest declaration enclosing `node` past declaration lists and
+/// preprocessor blocks: its type or namespace.
+fn enclosing_declaration(node: Node<'_>) -> Option<Node<'_>> {
+    let mut parent = node.parent();
+    while let Some(p) = parent {
+        if p.kind() != "declaration_list" && !p.kind().starts_with("preproc_") {
+            return Some(p);
+        }
+        parent = p.parent();
+    }
+    None
+}
+
+fn has_child_kind(node: Node<'_>, kind: &str) -> bool {
+    let mut c = node.walk();
+    let found = node.children(&mut c).any(|child| child.kind() == kind);
+    found
+}
+
+fn has_modifier(node: Node<'_>, source: &[u8], modifier: &str) -> bool {
+    let mut c = node.walk();
+    let found = node
+        .children(&mut c)
+        .any(|child| child.kind() == "modifier" && node_text(&child, source).trim() == modifier);
+    found
 }
 
 /// Recursively collect `attribute` children of an `attribute_list` node.

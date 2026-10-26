@@ -817,6 +817,7 @@ impl LanguageProvider for CProvider {
             nodes,
             imports,
             documents: vec![],
+            route_receivers: None,
             framework_refs: vec![],
             fanout_refs: vec![],
             blind_spots,
@@ -829,6 +830,7 @@ impl LanguageProvider for CProvider {
             call_metas,
             raw_function_metas,
             export_aliases: None,
+            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
         })
     }
 }

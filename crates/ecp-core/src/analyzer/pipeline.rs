@@ -1,6 +1,8 @@
 use super::provider::LanguageProvider;
 use super::types::LocalGraph;
-use crate::contracts::routing::{FileRoute, FileRouter, RouteOutcome, SizeCap};
+use crate::contracts::routing::{
+    FileRoute, FileRouter, Language, ParsedLanguage, RouteOutcome, SizeCap,
+};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::path::PathBuf;
@@ -86,7 +88,7 @@ impl AnalyzerPipeline {
                 route.size_cap(),
             ));
         }
-        Self::parse_chain(&chain, rel_path, source)
+        Self::parse_chain(&route, &chain, rel_path, source)
             .map(|(_, result)| result)
             .unwrap_or_else(|| Err(anyhow::anyhow!("no provider for {:?}", rel_path)))
     }
@@ -131,7 +133,13 @@ impl AnalyzerPipeline {
     /// so an empty result hands the file to the next candidate, and the first
     /// result stands when none accepts (today's single-provider answer). An
     /// error ends the chain. `None` when the chain is empty.
+    ///
+    /// Both parse entries, [`Self::parse_file_raw`] (incremental) and
+    /// [`Self::analyze_with_cache`] (cold), go through here, so the graph
+    /// they return has its records bound and its language after parse set
+    /// ([`finish`]).
     fn parse_chain(
+        route: &FileRoute,
         chain: &[&dyn LanguageProvider],
         rel_path: &std::path::Path,
         source: &[u8],
@@ -144,11 +152,26 @@ impl AnalyzerPipeline {
                 Ok(graph) if graph.nodes.is_empty() && graph.blind_spots.is_empty()
             );
             if accepted {
-                return Some((provider.name(), result));
+                let language = route
+                    .candidates()
+                    .iter()
+                    .copied()
+                    .find(|language| language.provider() == provider.name());
+                return Some((provider.name(), finish(route, language, result)));
             }
             fallback.get_or_insert((provider.name(), result));
         }
-        fallback
+        // No provider accepted: a fixed route keeps its language, and a YAML
+        // no content gate accepted is `Yaml`. A JSON file no gate accepted
+        // has none.
+        let unaccepted = route.fixed_language().or_else(|| {
+            route
+                .candidates()
+                .last()
+                .copied()
+                .filter(|language| *language == Language::Yaml)
+        });
+        fallback.map(|(name, result)| (name, finish(route, unaccepted, result)))
     }
 
     /// Analyze files concurrently using a Multi-Producer Single-Consumer architecture
@@ -288,7 +311,7 @@ impl AnalyzerPipeline {
                         // Cache miss / no cache: regular parse path.
                         let t_parse = std::time::Instant::now();
                         let Some((provider_name, result)) =
-                            Self::parse_chain(&chain, &rel_path, source)
+                            Self::parse_chain(&route, &chain, &rel_path, source)
                         else {
                             return;
                         };
@@ -342,6 +365,27 @@ impl AnalyzerPipeline {
 
         all_graphs
     }
+}
+
+/// What the pipeline does with one provider's graph once the provider has
+/// returned, so its node list is final: C4 `ParsePhase::BindRecords`, then
+/// the C5 language after parse. `accepted` is the candidate whose provider
+/// accepted the content; the script the provider reported
+/// ([`LocalGraph::reported_script`]) decides the resolution language. No
+/// accepted language, or a report the language cannot embed, stores
+/// [`ParsedLanguage::ABSENT`].
+fn finish(
+    route: &FileRoute,
+    accepted: Option<Language>,
+    result: anyhow::Result<LocalGraph>,
+) -> anyhow::Result<LocalGraph> {
+    result.map(|mut graph| {
+        graph.bind_records();
+        let parsed =
+            accepted.and_then(|language| route.after_parse(language, graph.reported_script()).ok());
+        graph.parsed_language = ParsedLanguage::encode(parsed);
+        graph
+    })
 }
 
 #[cfg(test)]
@@ -473,6 +517,125 @@ mod tests {
         assert!(pipeline
             .parse_file_raw(std::path::Path::new("notes.txt"), b"AAAAAAAAAAAAAAAAA")
             .is_err());
+    }
+
+    /// A provider that returns a fixed graph, so a test plants what the parse
+    /// reports.
+    struct Planted {
+        name: &'static str,
+        script: Option<bool>,
+    }
+
+    impl LanguageProvider for Planted {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn parse_file(&self, path: &std::path::Path, _source: &[u8]) -> anyhow::Result<LocalGraph> {
+            let mut graph = LocalGraph {
+                file_path: path.to_path_buf(),
+                ..LocalGraph::default()
+            };
+            if let Some(is_ts) = self.script {
+                graph.note_script(is_ts, (0, 0, 0, 0));
+            }
+            Ok(graph)
+        }
+    }
+
+    fn parsed_of(provider: Planted, path: &str) -> [u8; 2] {
+        let mut pipeline = AnalyzerPipeline::new();
+        pipeline.register_provider(Box::new(provider));
+        pipeline
+            .parse_file_raw(std::path::Path::new(path), b"x")
+            .expect("parse")
+            .parsed_language
+    }
+
+    /// A fixed route stores the language its provider parsed, also for an
+    /// empty graph (no provider accepted).
+    #[test]
+    fn test_parse_file_raw_fixed_route_stores_path_language() {
+        let stored = parsed_of(
+            Planted {
+                name: "typescript",
+                script: None,
+            },
+            "src/a.ts",
+        );
+        let parsed = ParsedLanguage::from_bytes(stored).expect("a language is stored");
+        assert_eq!(
+            (parsed.file(), parsed.resolution()),
+            (Language::TypeScript, Language::TypeScript)
+        );
+    }
+
+    /// A single-file component's reported script becomes the resolution
+    /// language; the file language stays the component.
+    #[test]
+    fn test_parse_file_raw_component_script_stores_resolution_language() {
+        for (is_ts, expected) in [(true, Language::TypeScript), (false, Language::JavaScript)] {
+            let stored = parsed_of(
+                Planted {
+                    name: "vue",
+                    script: Some(is_ts),
+                },
+                "src/App.vue",
+            );
+            let parsed = ParsedLanguage::from_bytes(stored).expect("a language is stored");
+            assert_eq!(
+                (parsed.file(), parsed.resolution()),
+                (Language::Vue, expected)
+            );
+        }
+    }
+
+    /// `after_parse` rejects a script on a language that embeds none: the
+    /// graph stores no language rather than an invented one, and the report
+    /// byte does not leak into the stored field.
+    #[test]
+    fn test_parse_file_raw_script_on_plain_language_stores_absent() {
+        let stored = parsed_of(
+            Planted {
+                name: "typescript",
+                script: Some(true),
+            },
+            "src/a.ts",
+        );
+        assert_eq!(stored, ParsedLanguage::ABSENT);
+    }
+
+    /// No content gate of a YAML route accepted the file: it is `Yaml`. A JSON
+    /// file no gate accepted has no language.
+    #[test]
+    fn test_parse_file_raw_unaccepted_sniffed_route_stores_yaml_or_absent() {
+        let mut yaml = AnalyzerPipeline::new();
+        yaml.register_provider(Box::new(Planted {
+            name: "kubernetes",
+            script: None,
+        }));
+        yaml.register_provider(Box::new(Planted {
+            name: "openapi",
+            script: None,
+        }));
+        let graph = yaml
+            .parse_file_raw(std::path::Path::new("config/app.yaml"), b"name: app\n")
+            .expect("parse");
+        let parsed = ParsedLanguage::from_bytes(graph.parsed_language).expect("Yaml is stored");
+        assert_eq!(
+            (parsed.file(), parsed.resolution()),
+            (Language::Yaml, Language::Yaml)
+        );
+
+        let mut json = AnalyzerPipeline::new();
+        json.register_provider(Box::new(Planted {
+            name: "openapi",
+            script: None,
+        }));
+        let graph = json
+            .parse_file_raw(std::path::Path::new("api/data.json"), b"{}")
+            .expect("parse");
+        assert_eq!(graph.parsed_language, ParsedLanguage::ABSENT);
     }
 
     #[test]

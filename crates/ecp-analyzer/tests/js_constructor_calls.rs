@@ -75,15 +75,32 @@ fn test_js_constructor_local_helper_call_keeps_calls_edge() {
         .iter()
         .find(|n| n.name == "helper")
         .expect("helper node");
-    assert!(
-        helper
-            .owner_class
-            .as_deref()
-            .is_some_and(|o| o.contains("constructor")),
-        "helper must record its constructor as lexical owner: {:?}",
-        helper.owner_class
+    // Stands for: `helper` is placed under its constructor. Since R8 the
+    // parser stores no owner (I1); the lexical-parent row names the
+    // constructor and the display owner prints `C::constructor`, the text
+    // HEAD stored as the owner.
+    assert_eq!(helper.owner_class, None);
+    let g = build(local);
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&g).expect("archive graph");
+    let archived =
+        rkyv::access::<ecp_core::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes)
+            .expect("access graph");
+    let pool = g.string_pool.as_slice();
+    let index_of = |name: &str| {
+        (0..g.nodes.len() as u32)
+            .find(|&i| g.nodes[i as usize].name.resolve(pool) == name)
+            .unwrap_or_else(|| panic!("setup: `{name}` is a node"))
+    };
+    let helper = index_of("helper");
+    assert_eq!(
+        archived.lexical_parent(helper),
+        Some(index_of("constructor"))
     );
-    assert_constructor_call_present(&build(local));
+    assert_eq!(
+        archived.display_owner(helper).as_deref(),
+        Some("C::constructor")
+    );
+    assert_constructor_call_present(&g);
 }
 
 #[test]

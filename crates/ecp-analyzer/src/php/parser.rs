@@ -1123,6 +1123,7 @@ impl LanguageProvider for PhpProvider {
             nodes,
             imports,
             documents: vec![],
+            route_receivers: None,
             framework_refs,
             fanout_refs,
             blind_spots,
@@ -1135,6 +1136,7 @@ impl LanguageProvider for PhpProvider {
             call_metas: vec![],
             raw_function_metas,
             export_aliases: None,
+            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
         })
     }
 }

@@ -2144,45 +2144,37 @@ fn node_prop_no_cache(node_idx: u32, prop: &str, graph: MergedGraph<'_>) -> Valu
     let Some(m) = graph.node(node_idx) else {
         return Value::Null;
     };
-    // Function-meta side tables are span/idx-keyed on the BASE graph: a
-    // replaced virtual node reads its uid-identical base twin; a brand-new
-    // symbol has no metas yet and takes the sparse defaults.
-    let fm = m.meta_idx(node_idx);
+    let fm = MetaSource::of(graph, &m, node_idx);
     match prop {
         "filePath" => Value::Str(m.file_path(&graph).unwrap_or("").into()),
-        "ownerClass" => match m.owner_class(&graph) {
-            Some(oc) => Value::Str(oc.into()),
+        "ownerClass" => match graph.display_owner(node_idx) {
+            Some(oc) => Value::Str(oc.as_ref().into()),
             None => Value::Null,
         },
         "line" | "startLine" => Value::Int(m.start_line() as i64),
         "endLine" => Value::Int(m.end_line() as i64),
-        "is_test" | "isTest" => {
-            Value::Bool(fm_flag(graph, fm, crate::graph::FunctionMeta::FLAG_TEST))
-        }
+        "is_test" | "isTest" => Value::Bool(fm.flag(graph, crate::graph::FunctionMeta::FLAG_TEST)),
         "is_async" | "isAsync" => {
-            Value::Bool(fm_flag(graph, fm, crate::graph::FunctionMeta::FLAG_ASYNC))
+            Value::Bool(fm.flag(graph, crate::graph::FunctionMeta::FLAG_ASYNC))
         }
         "is_static" | "isStatic" => {
-            Value::Bool(fm_flag(graph, fm, crate::graph::FunctionMeta::FLAG_STATIC))
+            Value::Bool(fm.flag(graph, crate::graph::FunctionMeta::FLAG_STATIC))
         }
-        "is_abstract" | "isAbstract" => Value::Bool(fm_flag(
-            graph,
-            fm,
-            crate::graph::FunctionMeta::FLAG_ABSTRACT,
-        )),
-        "is_generator" | "isGenerator" => Value::Bool(fm_flag(
-            graph,
-            fm,
-            crate::graph::FunctionMeta::FLAG_GENERATOR,
-        )),
+        "is_abstract" | "isAbstract" => {
+            Value::Bool(fm.flag(graph, crate::graph::FunctionMeta::FLAG_ABSTRACT))
+        }
+        "is_generator" | "isGenerator" => {
+            Value::Bool(fm.flag(graph, crate::graph::FunctionMeta::FLAG_GENERATOR))
+        }
         "is_extern" | "isExtern" => {
-            Value::Bool(fm_flag(graph, fm, crate::graph::FunctionMeta::FLAG_EXTERN))
+            Value::Bool(fm.flag(graph, crate::graph::FunctionMeta::FLAG_EXTERN))
         }
-        "visibility" => Value::Int(fm.map_or(0, |i| archived_fm_visibility(graph, i)) as i64),
+        "visibility" => Value::Int(fm.visibility(graph) as i64),
         // "content" excluded: requires file I/O; use WHERE n.content = … instead.
         // "decorators" is a list — inline-map equality against a list literal is
         // an edge case handled by literal_matches_value's List arm.
         "decorators" => fm
+            .decorators
             .map(|i| archived_fm_decorators(graph, i))
             .unwrap_or(Value::List(Vec::new())),
         // Unknown property or "content": return Null so literal_matches_value → false.
@@ -2318,7 +2310,12 @@ fn eval_expr(
                     })
                 });
                 if let Some(idx) = node_idx {
-                    return Ok(Value::Bool(archived_decorator_contains(graph, idx, needle)));
+                    // The decorators of a virtual node are its base twin's,
+                    // as the generic path reads them (`MetaSource`).
+                    let base = graph.node(idx).and_then(|m| m.meta_idx(idx));
+                    return Ok(Value::Bool(
+                        base.is_some_and(|i| archived_decorator_contains(graph, i, needle)),
+                    ));
                 }
                 // var is unbound or not a node — generic path produces correct Null/false.
             }
@@ -2809,13 +2806,13 @@ fn node_prop_value(
     let Some(m) = graph.node(node_idx) else {
         return Value::Null;
     };
-    let fm = m.meta_idx(node_idx);
+    let fm = MetaSource::of(graph, &m, node_idx);
     match prop {
         "name" => Value::Str(m.name(&graph).into()),
         // u64 uid stored as i64 bits — no allocation per row.
         "uid" => Value::Int(m.uid() as i64),
-        "ownerClass" => match m.owner_class(&graph) {
-            Some(oc) => Value::Str(oc.into()),
+        "ownerClass" => match graph.display_owner(node_idx) {
+            Some(oc) => Value::Str(oc.as_ref().into()),
             None => Value::Null,
         },
         "kind" => Value::Str(m.kind().as_str().into()),
@@ -2864,40 +2861,82 @@ fn node_prop_value(
         // FunctionMeta is sparse (only Function/Method/Constructor nodes).
         // Nodes without a record return safe defaults (false / 0 / empty list)
         // so WHERE m.is_async = true works without needing a Null check.
-        "is_test" | "isTest" => {
-            Value::Bool(fm_flag(graph, fm, crate::graph::FunctionMeta::FLAG_TEST))
-        }
+        "is_test" | "isTest" => Value::Bool(fm.flag(graph, crate::graph::FunctionMeta::FLAG_TEST)),
         "is_async" | "isAsync" => {
-            Value::Bool(fm_flag(graph, fm, crate::graph::FunctionMeta::FLAG_ASYNC))
+            Value::Bool(fm.flag(graph, crate::graph::FunctionMeta::FLAG_ASYNC))
         }
         "is_static" | "isStatic" => {
-            Value::Bool(fm_flag(graph, fm, crate::graph::FunctionMeta::FLAG_STATIC))
+            Value::Bool(fm.flag(graph, crate::graph::FunctionMeta::FLAG_STATIC))
         }
-        "is_abstract" | "isAbstract" => Value::Bool(fm_flag(
-            graph,
-            fm,
-            crate::graph::FunctionMeta::FLAG_ABSTRACT,
-        )),
-        "is_generator" | "isGenerator" => Value::Bool(fm_flag(
-            graph,
-            fm,
-            crate::graph::FunctionMeta::FLAG_GENERATOR,
-        )),
+        "is_abstract" | "isAbstract" => {
+            Value::Bool(fm.flag(graph, crate::graph::FunctionMeta::FLAG_ABSTRACT))
+        }
+        "is_generator" | "isGenerator" => {
+            Value::Bool(fm.flag(graph, crate::graph::FunctionMeta::FLAG_GENERATOR))
+        }
         "is_extern" | "isExtern" => {
-            Value::Bool(fm_flag(graph, fm, crate::graph::FunctionMeta::FLAG_EXTERN))
+            Value::Bool(fm.flag(graph, crate::graph::FunctionMeta::FLAG_EXTERN))
         }
-        "visibility" => Value::Int(fm.map_or(0, |i| archived_fm_visibility(graph, i)) as i64),
+        "visibility" => Value::Int(fm.visibility(graph) as i64),
         "decorators" => fm
+            .decorators
             .map(|i| archived_fm_decorators(graph, i))
             .unwrap_or(Value::List(Vec::new())),
         _ => Value::Null,
     }
 }
 
-/// `archived_fm_flag` over an optional BASE index (`MergedNode::meta_idx`): a
-/// brand-new virtual symbol has no meta record and takes the sparse default.
-fn fm_flag(graph: MergedGraph<'_>, base_idx: Option<u32>, flag: u16) -> bool {
-    base_idx.is_some_and(|i| archived_fm_flag(graph, i, flag))
+/// Where a node's function meta is read. A base node reads its archived
+/// record. A virtual node reads the flags its fragment paired
+/// ([`crate::session::OverlayView::function_meta`]), as a reindex would
+/// store them: none paired means the sparse defaults, never its base twin's
+/// stale flags. A fragment carries no decorators, so a virtual node's are
+/// its base twin's (`MergedNode::meta_idx`), and a brand-new one has none.
+#[derive(Clone, Copy)]
+struct MetaSource {
+    flags: FlagsAt,
+    /// The BASE index whose archived decorators the node reports.
+    decorators: Option<u32>,
+}
+
+#[derive(Clone, Copy)]
+enum FlagsAt {
+    Base(u32),
+    Virtual(Option<u16>),
+}
+
+impl MetaSource {
+    fn of(graph: MergedGraph<'_>, node: &MergedNode<'_>, idx: u32) -> Self {
+        let flags = match node {
+            MergedNode::Base(_) => FlagsAt::Base(idx),
+            MergedNode::Virtual(_) => FlagsAt::Virtual(
+                graph
+                    .view()
+                    .and_then(|view| view.function_meta(idx))
+                    .map(|meta| meta.flags),
+            ),
+        };
+        Self {
+            flags,
+            decorators: node.meta_idx(idx),
+        }
+    }
+
+    /// Whether the meta has `flag`; false without a meta.
+    fn flag(self, graph: MergedGraph<'_>, flag: u16) -> bool {
+        match self.flags {
+            FlagsAt::Base(idx) => archived_fm_flag(graph, idx, flag),
+            FlagsAt::Virtual(flags) => flags.is_some_and(|flags| flags & flag != 0),
+        }
+    }
+
+    /// The 3-bit visibility code; 0 (public) without a meta.
+    fn visibility(self, graph: MergedGraph<'_>) -> u8 {
+        match self.flags {
+            FlagsAt::Base(idx) => archived_fm_visibility(graph, idx),
+            FlagsAt::Virtual(flags) => flags.map_or(0, |flags| ((flags >> 6) & 0b111) as u8),
+        }
+    }
 }
 
 /// Return true when the node's FunctionMeta has the given flag set.

@@ -205,8 +205,15 @@ fn test_overlay_closure_overloads_use_live_parent() {
     );
 }
 
+/// `(file, name, display owner, confidence %)` of each `Calls` target of
+/// the nodes named `caller`. The owner is the display owner both sides of a
+/// parity check print (`ArchivedZeroCopyGraph::display_owner`,
+/// `MergedGraph::display_owner`): a Rust nested fn stores none (R6), so the
+/// stored owner could not tell `A::new`'s `helper` from `B::new`'s.
 fn targets(graph: &ZeroCopyGraph, caller: &str) -> Vec<Target> {
     let pool = &graph.string_pool;
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(graph).unwrap();
+    let archived = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
     let mut result: Vec<_> = graph
         .edges
         .iter()
@@ -219,7 +226,10 @@ fn targets(graph: &ZeroCopyGraph, caller: &str) -> Vec<Target> {
             (
                 graph.files[n.file_idx as usize].path.resolve(pool).into(),
                 n.name.resolve(pool).into(),
-                n.owner_class.resolve(pool).into(),
+                archived
+                    .display_owner(e.target)
+                    .map(std::borrow::Cow::into_owned)
+                    .unwrap_or_default(),
                 (e.confidence * 100.0).round() as u32,
             )
         })
@@ -281,6 +291,10 @@ fn load() {}
     );
 }
 
+/// Stands for: a bare call in `inner` binds the `helper` nested in `outer`
+/// before the file-level one, in the index and in the overlay. The owner is
+/// the display owner `outer`: stored for Python, the lexical parent's name
+/// for Rust (R6), so both rows read the same.
 #[test]
 fn test_overlay_nested_free_function_precedes_top_level_namesake_matches_reindex() {
     let rust = RustProvider::new().unwrap();
@@ -429,6 +443,9 @@ fn test_overlay_go_parenthesized_selector_preserves_member_target() {
     }
 }
 
+/// Stands for: each `new` binds its own nested `helper`, told apart by the
+/// display owners `A::new` and `B::new` (the overlay reads its own lexical
+/// parents for them), never by a stored owner a scoped node lacks.
 #[test]
 fn test_overlay_rust_nested_helpers_under_same_named_methods_keep_lexical_identity() {
     let source = "struct A; struct B; impl A { fn new() { fn helper() {} helper(); } } impl B { fn new() { fn helper() { marker(); } helper(); } } fn marker() {}";
@@ -444,6 +461,8 @@ fn test_overlay_rust_nested_helpers_under_same_named_methods_keep_lexical_identi
     );
 }
 
+/// Stands for: `run` binds its nested `helper` (display owner `run`) over
+/// the file-level namesake, in the index and in the overlay.
 #[test]
 fn test_overlay_rust_outer_call_prefers_its_nested_function() {
     let source = "fn helper() {} fn run() { fn helper() { marker(); } helper(); } fn marker() {}";
@@ -477,6 +496,11 @@ fn test_overlay_rust_nested_helper_in_another_scope_is_not_global() {
     );
 }
 
+/// Stands for: a fn nested in a trait-impl method or in a method of an
+/// `impl` written inside a fn binds from its method, and prints the method's
+/// owner then the method (`A::fmt`, `S::run`), in the index and in the
+/// overlay. Before R6 the stored owner was the lexical string path
+/// (`std::fmt::Display::A::fmt`, `outer::S::run`).
 #[test]
 fn test_overlay_rust_trait_and_local_impl_nested_helpers_match_reindex() {
     let provider = RustProvider::new().unwrap();
@@ -487,12 +511,7 @@ fn test_overlay_rust_trait_and_local_impl_nested_helpers_match_reindex() {
         &provider,
         &[("src/lib.rs", trait_impl)],
         &[("src/lib.rs", &format!("\n{trait_impl}"))],
-        &[(
-            "src/lib.rs".into(),
-            "pad".into(),
-            "std::fmt::Display::A::fmt".into(),
-            100,
-        )],
+        &[("src/lib.rs".into(), "pad".into(), "A::fmt".into(), 100)],
     );
 
     let local_impl = "fn helper() {} fn outer() { struct S; impl S { fn run() { fn helper() { let _ = 1; } helper(); } } }";
@@ -501,15 +520,13 @@ fn test_overlay_rust_trait_and_local_impl_nested_helpers_match_reindex() {
         &provider,
         &[("src/lib.rs", local_impl)],
         &[("src/lib.rs", &format!("\n{local_impl}"))],
-        &[(
-            "src/lib.rs".into(),
-            "helper".into(),
-            "outer::S::run".into(),
-            100,
-        )],
+        &[("src/lib.rs".into(), "helper".into(), "S::run".into(), 100)],
     );
 }
 
+/// Stands for: in `impl T for &A` (and `&mut A`) the method's nested
+/// `helper` binds from it and prints `A::go`: the impl owns its methods by
+/// the referent type, and the scoped `helper` prints its parent's path.
 #[test]
 fn test_overlay_rust_reference_impl_nested_helper_matches_reindex() {
     let provider = RustProvider::new().unwrap();
@@ -523,7 +540,7 @@ fn test_overlay_rust_reference_impl_nested_helper_matches_reindex() {
             &provider,
             &[("src/lib.rs", &source)],
             &[("src/lib.rs", &format!("\n{source}"))],
-            &[("src/lib.rs".into(), "helper".into(), "T::A::go".into(), 100)],
+            &[("src/lib.rs".into(), "helper".into(), "A::go".into(), 100)],
         );
     }
 }
@@ -632,7 +649,10 @@ fn check_parity_from(
             (
                 n.file_path(&merged).unwrap().into(),
                 n.name(&merged).into(),
-                n.owner_class(&merged).unwrap_or_default().into(),
+                merged
+                    .display_owner(e.target)
+                    .map(std::borrow::Cow::into_owned)
+                    .unwrap_or_default(),
                 (e.confidence() * 100.0).round() as u32,
             )
         })
@@ -1759,16 +1779,18 @@ fn test_overlay_rust_parent_root_member_matches_reindex() {
     );
 }
 
+/// A module path (`crate::x::parse`) never names a method: `P::parse` is no
+/// member of the module `x`, so neither side binds it
+/// (FU-2026-10-05-bb4eba1b9224, `ecp_core::analyzer::ladder::qualified_member`).
 #[test]
-fn test_overlay_rust_module_path_excludes_method_despite_index_bug() {
-    check_parity(
+fn test_overlay_rust_module_path_excludes_method_matches_reindex() {
+    parity(
         &RustProvider::new().unwrap(),
         &[
             ("src/lib.rs", "mod x;\nfn run() {}"),
             ("src/x.rs", "pub struct P; impl P { pub fn parse() {} }"),
         ],
         &[("src/lib.rs", "mod x;\nfn run() { crate::x::parse(); }")],
-        &[("src/x.rs".into(), "parse".into(), "P".into(), 85)],
         &[],
     );
 }

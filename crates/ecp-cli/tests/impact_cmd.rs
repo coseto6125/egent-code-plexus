@@ -416,11 +416,38 @@ fn impact_ambiguous_symbol_exits_nonzero() {
     );
 }
 
-/// An overload set is one target: `--file` / `--kind` cannot split two
-/// same-file methods, so naming the set must not fail as ambiguous. The first
-/// overload is the only seed: calls bind to it, and it references each later
-/// overload, so both directions still cover the whole set. Holds for a dirty
-/// file too, where the overlay rebuilds the set.
+/// `ecp impact <extra> --repo . --format json` that may exit non-zero (an
+/// ambiguity prints its payload, then fails): the exit status and the JSON.
+fn run_impact_status(repo: &Path, extra: &[&str]) -> (bool, Value) {
+    let mut args = vec!["impact", "--repo", ".", "--format", "json"];
+    args.extend_from_slice(extra);
+    let out = Command::new(ecp_bin())
+        .args(&args)
+        .current_dir(repo)
+        .env("HOME", repo)
+        .output()
+        .expect("impact failed to spawn");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json_start = stdout
+        .find('{')
+        .unwrap_or_else(|| panic!("{args:?} did not return JSON\nstdout={stdout}"));
+    let value = serde_json::Deserializer::from_str(&stdout[json_start..])
+        .into_iter::<Value>()
+        .next()
+        .unwrap()
+        .unwrap_or_else(|err| panic!("{args:?} did not return JSON: {err}\nstdout={stdout}"));
+    (out.status.success(), value)
+}
+
+/// An overload set is two declarations (C1 Open point 2: no `Signature`
+/// discriminator, so each overload's reusable target names its line). The
+/// bare name is an ambiguity; each candidate's target re-runs to that overload
+/// alone. Calls bind to the first overload, and the first overload references
+/// each later one, so the first's upstream holds the caller and the second's
+/// downstream holds what it calls. Holds for a dirty file too, where the
+/// overlay rebuilds the set; the dirty answer also says that the overlay could
+/// not pair the two base `save` declarations, so a caller in a clean file
+/// would be hidden and the rows alone are no proof of completeness.
 #[test]
 fn test_impact_overloaded_name_seeds_the_set_once() {
     let tmp = tempfile::tempdir().unwrap();
@@ -437,7 +464,28 @@ fn test_impact_overloaded_name_seeds_the_set_once() {
             let src = std::fs::read_to_string(&path).unwrap();
             std::fs::write(&path, format!("{src}// edited\n")).unwrap();
         }
-        let up = run_impact(tmp.path(), &["save", "--direction", "upstream"]);
+        let (ok, bare) = run_impact_status(tmp.path(), &["save"]);
+        assert!(!ok, "{state}: an overload set is an ambiguity: {bare}");
+        assert_eq!(bare["status"], "ambiguous", "{state}: {bare}");
+        let target_at = |line: u64| -> Vec<String> {
+            let candidate = bare["candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["line"] == line)
+                .unwrap_or_else(|| panic!("{state}: no candidate at line {line}: {bare}"));
+            candidate["target"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{state}: no reusable target: {bare}"))
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect()
+        };
+
+        let first = target_at(3);
+        let mut args: Vec<&str> = first.iter().map(String::as_str).collect();
+        args.extend(["--direction", "upstream"]);
+        let up = run_impact(tmp.path(), &args);
         let rows: Vec<(u64, &str, u64)> = up["impact"]
             .as_array()
             .unwrap()
@@ -451,12 +499,19 @@ fn test_impact_overloaded_name_seeds_the_set_once() {
             })
             .collect();
         assert_eq!(rows, [(0, "save", 3), (1, "run", 5)], "{state}: {up}");
-        assert!(
-            up.get("result").is_none(),
-            "{state}: one overload set is no same-name collision: {up}"
-        );
+        let result = up.get("result").and_then(|r| r.as_str());
+        match state {
+            "clean" => assert!(result.is_none(), "clean: no caveat: {up}"),
+            _ => assert!(
+                result.is_some_and(|r| r.contains("could not pair") && r.contains("K.save x2")),
+                "dirty: the caveat names the unpaired base set: {up}"
+            ),
+        }
 
-        let down = run_impact(tmp.path(), &["save", "--direction", "downstream"]);
+        let second = target_at(4);
+        let mut args: Vec<&str> = second.iter().map(String::as_str).collect();
+        args.extend(["--direction", "downstream"]);
+        let down = run_impact(tmp.path(), &args);
         let names: Vec<&str> = down["impact"]
             .as_array()
             .unwrap()

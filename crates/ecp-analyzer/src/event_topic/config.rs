@@ -34,7 +34,8 @@ pub struct EventTopicConfig {
     /// Maps raw direction-capture text to the canonical `PubSub` variant.
     pub direction_classifier: fn(&str) -> PubSub,
     /// When `true`, run `event_topic::normalize::canonicalize()` on the raw
-    /// captured topic string before interning it into the pool.
+    /// captured topic string to build `RawEventTopic::topic_key`, the pairing
+    /// key. `topic_literal` keeps the source spelling either way.
     ///
     /// Default-true ("opt-out"): T5-0 normalization is the locked canonical
     /// form for all topics. Set to `false` only for frameworks that already

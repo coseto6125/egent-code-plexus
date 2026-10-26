@@ -44,6 +44,12 @@ pub enum Ecosystem {
     Python,
     /// `*.csproj` projects.
     DotNet,
+    /// `composer.json` packages. The alias patterns spell a PSR-4
+    /// namespace prefix with `/` for `\`: `App\` is `App/*`.
+    Composer,
+    /// `Package.swift` packages. A target name is a `Primary` name and an
+    /// exact alias pattern whose replacement is the target directory.
+    SwiftPm,
 }
 
 /// What a config file name does to the scope layout.
@@ -75,11 +81,11 @@ impl Ecosystem {
             Language::Go => Some(Self::Go),
             Language::Python => Some(Self::Python),
             Language::CSharp => Some(Self::DotNet),
+            Language::Php => Some(Self::Composer),
+            Language::Swift => Some(Self::SwiftPm),
             Language::Java
             | Language::Kotlin
-            | Language::Php
             | Language::Ruby
-            | Language::Swift
             | Language::C
             | Language::Cpp
             | Language::Dart
@@ -123,6 +129,8 @@ impl Ecosystem {
             "go.mod" => Some((Self::Go, ConfigRole::Root)),
             "go.work" => Some((Self::Go, ConfigRole::Contributing)),
             "pyproject.toml" => Some((Self::Python, ConfigRole::Root)),
+            "composer.json" => Some((Self::Composer, ConfigRole::Root)),
+            "Package.swift" => Some((Self::SwiftPm, ConfigRole::Root)),
             name if name.len() > ".csproj".len() && name.ends_with(".csproj") => {
                 Some((Self::DotNet, ConfigRole::Root))
             }
@@ -284,6 +292,45 @@ pub struct ScopeName {
     pub scope: ScopeId,
 }
 
+/// One scope row as a config producer writes it, before the table gives
+/// it a [`ScopeId`]. [`WorkspaceFacts::from_drafts`] sorts the rows, then
+/// turns `names` into [`ScopeName`] rows and `requires` into the scope's
+/// `dependencies`. Archived in the L1 closure store, which holds the rows
+/// of a dirty config (`session::closure::ConfigEdits`).
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct ScopeDraft {
+    /// The row. Its `dependencies` stay empty: `requires` fills them.
+    pub scope: Scope,
+    /// The names that code in another scope writes for this scope.
+    pub names: Vec<(String, NameRank)>,
+    /// The declared dependencies, by the reference the config writes.
+    pub requires: Vec<Requirement>,
+}
+
+/// One declared dependency of a [`ScopeDraft`].
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct Requirement {
+    /// The name code writes for the dependency.
+    pub name: String,
+    pub target: RequirementTarget,
+}
+
+/// How a [`Requirement`] finds its scope.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+pub enum RequirementTarget {
+    /// The scope that [`WorkspaceFacts::lookup_name`] gives for the name in
+    /// the draft's ecosystem; `External` when no scope carries the name.
+    /// Two scopes of the best rank leave the dependency out: neither is
+    /// the honest target, and `External` would claim a fact.
+    ByName,
+    /// The scope of the draft's ecosystem whose manifest is this path (a
+    /// csproj `ProjectReference`, a Go `replace` to a local directory);
+    /// `External` when no scope has it.
+    ByManifest(String),
+    /// A dependency that the config itself places outside the repo.
+    External,
+}
+
 /// The workspace facts of one commit. B's first round stores only Cargo
 /// rows; area 4 adds rows of other ecosystems without a layout change.
 #[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq, Eq, Default)]
@@ -392,6 +439,14 @@ impl Scope {
     fn reads(&self, path: &str) -> bool {
         self.config_files.iter().any(|config| config.path == path)
     }
+
+    fn retarget(&mut self, map: impl Fn(ScopeId) -> ScopeId) {
+        for dep in &mut self.dependencies {
+            if let DependencyTarget::Workspace(target) = &mut dep.target {
+                *target = map(*target);
+            }
+        }
+    }
 }
 
 impl WorkspaceFacts {
@@ -400,6 +455,190 @@ impl WorkspaceFacts {
         let facts = Self { scopes, names };
         facts.validate()?;
         Ok(facts)
+    }
+
+    /// The table of a producer's rows, in any order. Rows sort by
+    /// identity; of two drafts with one identity the first is kept. Each
+    /// name becomes a [`ScopeName`] of the draft's ecosystem, and each
+    /// requirement a [`Dependency`] by [`RequirementTarget`]'s rule; of two
+    /// requirements with one name the first is kept. The result is
+    /// validated.
+    pub fn from_drafts(mut drafts: Vec<ScopeDraft>) -> Result<Self, WorkspaceFactsError> {
+        drafts.sort_by(|a, b| scope_key(&a.scope).cmp(&scope_key(&b.scope)));
+        drafts.dedup_by(|later, earlier| scope_key(&later.scope) == scope_key(&earlier.scope));
+        let mut names: Vec<ScopeName> =
+            drafts
+                .iter()
+                .zip(0u32..)
+                .flat_map(|(draft, id)| {
+                    draft.names.iter().filter(|(name, _)| !name.is_empty()).map(
+                        move |(name, rank)| ScopeName {
+                            ecosystem: draft.scope.ecosystem,
+                            name: name.clone(),
+                            rank: *rank,
+                            scope: ScopeId(id),
+                        },
+                    )
+                })
+                .collect();
+        names.sort_by(|a, b| name_key(a).cmp(&name_key(b)));
+        names.dedup_by(|later, earlier| name_key(later) == name_key(earlier));
+        let (scopes, requires): (Vec<Scope>, Vec<Vec<Requirement>>) = drafts
+            .into_iter()
+            .map(|draft| (draft.scope, draft.requires))
+            .unzip();
+        let mut facts = Self { scopes, names };
+        for (index, requires) in requires.into_iter().enumerate() {
+            let ecosystem = facts.scopes[index].ecosystem;
+            let mut dependencies: Vec<Dependency> = requires
+                .into_iter()
+                .filter(|req| !req.name.is_empty())
+                .filter_map(|req| {
+                    let target = match &req.target {
+                        RequirementTarget::ByName => {
+                            match facts.lookup_name(ecosystem, &req.name) {
+                                NameLookup::Unique(id) => DependencyTarget::Workspace(id),
+                                NameLookup::Missing => DependencyTarget::External,
+                                NameLookup::Ambiguous { .. } => return None,
+                            }
+                        }
+                        RequirementTarget::ByManifest(manifest) => facts
+                            .scope_with_manifest(ecosystem, manifest)
+                            .map_or(DependencyTarget::External, DependencyTarget::Workspace),
+                        RequirementTarget::External => DependencyTarget::External,
+                    };
+                    Some(Dependency {
+                        name: req.name,
+                        target,
+                    })
+                })
+                .collect();
+            dependencies.sort_by(|a, b| a.name.cmp(&b.name));
+            dependencies.dedup_by(|later, earlier| later.name == earlier.name);
+            facts.scopes[index].dependencies = dependencies;
+        }
+        facts.validate()?;
+        Ok(facts)
+    }
+
+    /// The rows of both tables in one table, such as the Cargo rows of the
+    /// Rust module tree and the rows of every other config. `other`'s ids
+    /// shift past `self`'s rows; then the rows sort by identity and every
+    /// [`ScopeId`] follows its row. Two rows with one identity fail
+    /// validation.
+    pub fn merged_with(self, other: Self) -> Result<Self, WorkspaceFactsError> {
+        let offset = self.scopes.len() as u32;
+        let mut scopes = self.scopes;
+        let mut names = self.names;
+        scopes.extend(other.scopes.into_iter().map(|mut scope| {
+            scope.retarget(|id| ScopeId(id.0 + offset));
+            scope
+        }));
+        names.extend(other.names.into_iter().map(|mut entry| {
+            entry.scope = ScopeId(entry.scope.0 + offset);
+            entry
+        }));
+        let mut order: Vec<usize> = (0..scopes.len()).collect();
+        order.sort_by(|&a, &b| scope_key(&scopes[a]).cmp(&scope_key(&scopes[b])));
+        let mut new_id = vec![0u32; scopes.len()];
+        for (new, &old) in (0u32..).zip(&order) {
+            new_id[old] = new;
+        }
+        // An id past the end keeps its value, so validation reports it.
+        let remap = |id: ScopeId| new_id.get(id.index()).map_or(id, |&new| ScopeId(new));
+        let mut slots: Vec<Option<Scope>> = scopes.into_iter().map(Some).collect();
+        let scopes: Vec<Scope> = order
+            .iter()
+            .filter_map(|&old| slots[old].take())
+            .map(|mut scope| {
+                scope.retarget(remap);
+                scope
+            })
+            .collect();
+        for entry in &mut names {
+            entry.scope = remap(entry.scope);
+        }
+        names.sort_by(|a, b| name_key(a).cmp(&name_key(b)));
+        Self::new(scopes, names)
+    }
+
+    /// This table with each row whose manifest `replaced` lists dropped and
+    /// `rows` added, as a producer that read the new configs would build it
+    /// (the overlay of dirty configs, `session::closure::ConfigEdits`). Of a
+    /// new row and a kept row with one identity, the new row stays.
+    ///
+    /// Each kept row goes back to its draft, and each of its dependencies
+    /// to the requirement that can make it again: by name when the target
+    /// row carries the name, else by the target's manifest. So a dependency
+    /// on a renamed or removed row turns `External`, and one on a name that
+    /// two rows now carry is left out, as [`Self::from_drafts`] rules. A
+    /// Cargo dependency always goes by manifest: the Rust module tree, not a
+    /// name lookup, made it. An `External` dependency stays external: the
+    /// table does not record whether a name lookup or the config made it.
+    ///
+    /// Cost: O(S + N) to rebuild the drafts of S rows and N names, then
+    /// [`Self::from_drafts`], O((S + N) log (S + N)).
+    pub fn with_rows(
+        &self,
+        replaced: &[String],
+        rows: &[ScopeDraft],
+    ) -> Result<Self, WorkspaceFactsError> {
+        let replaced: std::collections::HashSet<&str> =
+            replaced.iter().map(String::as_str).collect();
+        let mut names_of: Vec<Vec<(String, NameRank)>> = vec![Vec::new(); self.scopes.len()];
+        for entry in &self.names {
+            if let Some(names) = names_of.get_mut(entry.scope.index()) {
+                names.push((entry.name.clone(), entry.rank));
+            }
+        }
+        let carries = |target: ScopeId, name: &str| {
+            names_of
+                .get(target.index())
+                .is_some_and(|names| names.iter().any(|(carried, _)| carried == name))
+        };
+        let mut drafts: Vec<ScopeDraft> = rows.to_vec();
+        for (id, scope) in self.ids().zip(&self.scopes) {
+            if replaced.contains(scope.manifest()) {
+                continue;
+            }
+            let requires = scope
+                .dependencies
+                .iter()
+                .map(|dep| Requirement {
+                    name: dep.name.clone(),
+                    target: match dep.target {
+                        DependencyTarget::External => RequirementTarget::External,
+                        DependencyTarget::Workspace(target)
+                            if scope.ecosystem != Ecosystem::Cargo
+                                && carries(target, &dep.name) =>
+                        {
+                            RequirementTarget::ByName
+                        }
+                        DependencyTarget::Workspace(target) => self
+                            .scope(target)
+                            .map_or(RequirementTarget::External, |target| {
+                                RequirementTarget::ByManifest(target.manifest().to_string())
+                            }),
+                    },
+                })
+                .collect();
+            let mut scope = scope.clone();
+            scope.dependencies.clear();
+            drafts.push(ScopeDraft {
+                scope,
+                names: names_of[id.index()].clone(),
+                requires,
+            });
+        }
+        Self::from_drafts(drafts)
+    }
+
+    /// The scope of `ecosystem` whose manifest is `manifest`.
+    pub fn scope_with_manifest(&self, ecosystem: Ecosystem, manifest: &str) -> Option<ScopeId> {
+        self.ids()
+            .zip(&self.scopes)
+            .find(|(_, scope)| scope.ecosystem == ecosystem && scope.manifest() == manifest)
+            .map(|(id, _)| id)
     }
 
     /// Check every invariant the field docs state. A reader runs it once
@@ -534,6 +773,27 @@ impl WorkspaceFacts {
             }
             if dir.is_empty() {
                 return ScopeMatch::Unscoped;
+            }
+            dir = parent_dir(dir);
+        }
+    }
+
+    /// The scope of [`Self::scope_of`] when its answer is `Unique`; `None`
+    /// for `Ambiguous` and `Unscoped`. It collects no candidate list, so the
+    /// import tiers can ask it once per import with no allocation.
+    pub fn unique_scope_of(&self, path: &str, ecosystem: Ecosystem) -> Option<ScopeId> {
+        let mut dir = parent_dir(path);
+        loop {
+            let mut admitting = self
+                .scopes_at(ecosystem, dir)
+                .filter(|&id| self.scopes[id.index()].membership.admits(path));
+            match (admitting.next(), admitting.next()) {
+                (Some(id), None) => return Some(id),
+                (Some(_), Some(_)) => return None,
+                (None, _) => {}
+            }
+            if dir.is_empty() {
+                return None;
             }
             dir = parent_dir(dir);
         }
@@ -845,12 +1105,207 @@ mod tests {
     }
 
     #[test]
-    fn test_for_language_every_language_maps_nine_to_an_ecosystem() {
+    fn test_for_language_every_language_maps_eleven_to_an_ecosystem() {
         let mapped = Language::ALL
             .iter()
             .filter(|&&language| Ecosystem::for_language(language).is_some())
             .count();
-        assert_eq!(mapped, 9);
+        assert_eq!(mapped, 11);
+    }
+
+    #[test]
+    fn test_for_language_php_and_swift_return_composer_and_swiftpm() {
+        assert_eq!(
+            Ecosystem::for_language(Language::Php),
+            Some(Ecosystem::Composer)
+        );
+        assert_eq!(
+            Ecosystem::for_language(Language::Swift),
+            Some(Ecosystem::SwiftPm)
+        );
+    }
+
+    fn draft(scope: Scope, names: &[(&str, NameRank)], requires: Vec<Requirement>) -> ScopeDraft {
+        ScopeDraft {
+            scope,
+            names: names
+                .iter()
+                .map(|(name, rank)| (name.to_string(), *rank))
+                .collect(),
+            requires,
+        }
+    }
+
+    fn require(name: &str, target: RequirementTarget) -> Requirement {
+        Requirement {
+            name: name.to_string(),
+            target,
+        }
+    }
+
+    #[test]
+    fn test_from_drafts_unsorted_rows_sort_and_resolve_requirements() {
+        let b = draft(
+            scope(Ecosystem::Node, "packages/b", &["packages/b/package.json"]),
+            &[("@repo/b", NameRank::Primary)],
+            Vec::new(),
+        );
+        let a = draft(
+            scope(Ecosystem::Node, "packages/a", &["packages/a/package.json"]),
+            &[("@repo/a", NameRank::Primary)],
+            vec![
+                require("react", RequirementTarget::ByName),
+                require("@repo/b", RequirementTarget::ByName),
+                require("@repo/b", RequirementTarget::External),
+                require(
+                    "local",
+                    RequirementTarget::ByManifest("packages/b/package.json".to_string()),
+                ),
+                require(
+                    "gone",
+                    RequirementTarget::ByManifest("packages/gone/package.json".to_string()),
+                ),
+            ],
+        );
+        let facts = WorkspaceFacts::from_drafts(vec![b, a]).unwrap();
+        assert_eq!(facts.scopes[0].root, "packages/a");
+        assert_eq!(facts.scopes[1].root, "packages/b");
+        assert_eq!(
+            facts.lookup_name(Ecosystem::Node, "@repo/b"),
+            NameLookup::Unique(ScopeId(1))
+        );
+        let a = &facts.scopes[0];
+        assert_eq!(
+            a.dependency("@repo/b"),
+            Some(DependencyTarget::Workspace(ScopeId(1))),
+            "the first requirement of a name wins"
+        );
+        assert_eq!(
+            a.dependency("local"),
+            Some(DependencyTarget::Workspace(ScopeId(1)))
+        );
+        assert_eq!(a.dependency("react"), Some(DependencyTarget::External));
+        assert_eq!(a.dependency("gone"), Some(DependencyTarget::External));
+    }
+
+    #[test]
+    fn test_from_drafts_ambiguous_name_requirement_left_out() {
+        let one = draft(
+            scope(Ecosystem::Go, "a", &["a/go.mod"]),
+            &[("example.com/x", NameRank::Primary)],
+            Vec::new(),
+        );
+        let two = draft(
+            scope(Ecosystem::Go, "b", &["b/go.mod"]),
+            &[("example.com/x", NameRank::Primary)],
+            Vec::new(),
+        );
+        let user = draft(
+            scope(Ecosystem::Go, "c", &["c/go.mod"]),
+            &[],
+            vec![require("example.com/x", RequirementTarget::ByName)],
+        );
+        let facts = WorkspaceFacts::from_drafts(vec![one, two, user]).unwrap();
+        assert_eq!(facts.scopes[2].dependency("example.com/x"), None);
+    }
+
+    #[test]
+    fn test_from_drafts_duplicate_identity_keeps_first() {
+        let first = draft(
+            scope(Ecosystem::Python, "", &["pyproject.toml"]),
+            &[("first", NameRank::Primary)],
+            Vec::new(),
+        );
+        let second = draft(
+            scope(Ecosystem::Python, "", &["pyproject.toml"]),
+            &[("second", NameRank::Primary)],
+            Vec::new(),
+        );
+        let facts = WorkspaceFacts::from_drafts(vec![first, second]).unwrap();
+        assert_eq!(facts.scopes.len(), 1);
+        assert_eq!(
+            facts.lookup_name(Ecosystem::Python, "first"),
+            NameLookup::Unique(ScopeId(0))
+        );
+        assert_eq!(
+            facts.lookup_name(Ecosystem::Python, "second"),
+            NameLookup::Missing
+        );
+    }
+
+    #[test]
+    fn test_from_drafts_empty_returns_default() {
+        assert_eq!(
+            WorkspaceFacts::from_drafts(Vec::new()).unwrap(),
+            WorkspaceFacts::default()
+        );
+    }
+
+    #[test]
+    fn test_merged_with_other_table_keeps_cargo_ids_and_shifts_others() {
+        let cargo = WorkspaceFacts::new(
+            vec![scope(Ecosystem::Cargo, "", &["Cargo.toml"])],
+            vec![name(Ecosystem::Cargo, "app", NameRank::Primary, 0)],
+        )
+        .unwrap();
+        let mut go_b = scope(Ecosystem::Go, "b", &["b/go.mod"]);
+        go_b.dependencies = vec![dep(
+            "example.com/a",
+            DependencyTarget::Workspace(ScopeId(1)),
+        )];
+        // Unsorted input ids: `a` is row 1 here and must stay `go_b`'s target.
+        let others = WorkspaceFacts {
+            scopes: vec![go_b, scope(Ecosystem::Go, "a", &["a/go.mod"])],
+            names: vec![name(Ecosystem::Go, "example.com/a", NameRank::Primary, 1)],
+        };
+        let merged = cargo.merged_with(others).unwrap();
+        let roots: Vec<(Ecosystem, &str)> = merged
+            .scopes
+            .iter()
+            .map(|scope| (scope.ecosystem, scope.root.as_str()))
+            .collect();
+        assert_eq!(
+            roots,
+            [
+                (Ecosystem::Cargo, ""),
+                (Ecosystem::Go, "a"),
+                (Ecosystem::Go, "b")
+            ]
+        );
+        assert_eq!(
+            merged.lookup_name(Ecosystem::Cargo, "app"),
+            NameLookup::Unique(ScopeId(0))
+        );
+        assert_eq!(
+            merged.lookup_name(Ecosystem::Go, "example.com/a"),
+            NameLookup::Unique(ScopeId(1))
+        );
+        assert_eq!(
+            merged.scopes[2].dependency("example.com/a"),
+            Some(DependencyTarget::Workspace(ScopeId(1)))
+        );
+    }
+
+    #[test]
+    fn test_merged_with_same_identity_twice_returns_error() {
+        let one = || WorkspaceFacts::new(vec![scope(Ecosystem::Go, "", &["go.mod"])], Vec::new());
+        assert_eq!(
+            one().unwrap().merged_with(one().unwrap()),
+            Err(WorkspaceFactsError::ScopesNotSorted { index: 1 })
+        );
+    }
+
+    #[test]
+    fn test_classify_config_composer_and_package_swift_return_root() {
+        assert_eq!(
+            Ecosystem::classify_config("composer.json"),
+            Some((Ecosystem::Composer, ConfigRole::Root))
+        );
+        assert_eq!(
+            Ecosystem::classify_config("Package.swift"),
+            Some((Ecosystem::SwiftPm, ConfigRole::Root))
+        );
+        assert_eq!(Ecosystem::classify_config("package.swift"), None);
     }
 
     #[test]
@@ -1235,6 +1690,47 @@ mod tests {
         );
     }
 
+    /// `unique_scope_of` is `scope_of` with `Ambiguous` and `Unscoped`
+    /// both `None`, over every shape the `scope_of` cases above plant.
+    #[test]
+    fn test_unique_scope_of_each_scope_match_returns_unique_only() {
+        let facts = fixture();
+        for (path, ecosystem) in [
+            ("crates/a/src/deep/mod.rs", Ecosystem::Cargo),
+            ("packages/a/src/util.ts", Ecosystem::Node),
+            ("packages/ab/main.ts", Ecosystem::Node),
+            ("main.ts", Ecosystem::Node),
+            ("tools/x.rs", Ecosystem::Cargo),
+        ] {
+            let expected = match facts.scope_of(path, ecosystem) {
+                ScopeMatch::Unique(id) => Some(id),
+                ScopeMatch::Ambiguous(_) | ScopeMatch::Unscoped => None,
+            };
+            assert_eq!(facts.unique_scope_of(path, ecosystem), expected, "{path}");
+        }
+        let ambiguous = two_projects(Membership::Subtree, Membership::Subtree);
+        assert_eq!(
+            ambiguous.unique_scope_of("svc/Program.cs", Ecosystem::DotNet),
+            None
+        );
+        let listed = two_projects(
+            Membership::Listed(strings(&["svc/Program.cs"])),
+            Membership::Listed(strings(&["svc/ProgramTests.cs"])),
+        );
+        assert_eq!(
+            listed.unique_scope_of("svc/ProgramTests.cs", Ecosystem::DotNet),
+            Some(ScopeId(1))
+        );
+        assert_eq!(
+            listed.unique_scope_of("svc/Orphan.cs", Ecosystem::DotNet),
+            None
+        );
+        assert_eq!(
+            WorkspaceFacts::default().unique_scope_of("a.ts", Ecosystem::Node),
+            None
+        );
+    }
+
     #[test]
     fn test_admits_listed_membership_returns_listed_only() {
         let listed = Membership::Listed(strings(&["a/x.ts", "a/y.ts"]));
@@ -1496,5 +1992,163 @@ mod tests {
         let back = rkyv::deserialize::<WorkspaceFacts, rkyv::rancor::Error>(archived).unwrap();
         assert_eq!(back, facts);
         assert_eq!(back.validate(), Ok(()));
+    }
+
+    /// `packages/a` depends on `packages/b` by name and on the external
+    /// `react`; `packages/b` carries `@repo/b`.
+    fn node_pair() -> WorkspaceFacts {
+        WorkspaceFacts::from_drafts(vec![
+            draft(
+                scope(Ecosystem::Node, "packages/a", &["packages/a/package.json"]),
+                &[("@repo/a", NameRank::Primary)],
+                vec![
+                    require("@repo/b", RequirementTarget::ByName),
+                    require("react", RequirementTarget::External),
+                ],
+            ),
+            draft(
+                scope(Ecosystem::Node, "packages/b", &["packages/b/package.json"]),
+                &[("@repo/b", NameRank::Primary)],
+                Vec::new(),
+            ),
+        ])
+        .unwrap()
+    }
+
+    /// Stands for: no edit gives the table back, Cargo rows and their
+    /// by-manifest dependencies included.
+    #[test]
+    fn test_with_rows_no_edit_returns_equal_table() {
+        let facts = fixture();
+        assert_eq!(facts.with_rows(&[], &[]), Ok(facts.clone()));
+        let pair = node_pair();
+        assert_eq!(pair.with_rows(&[], &[]), Ok(pair.clone()));
+    }
+
+    /// Stands for: a dirty config replaces its row; a kept row's dependency
+    /// follows the target's new name, as the producer resolves it.
+    #[test]
+    fn test_with_rows_dirty_row_renamed_dependency_turns_external() {
+        let facts = node_pair();
+        let renamed = draft(
+            scope(Ecosystem::Node, "packages/b", &["packages/b/package.json"]),
+            &[("@repo/b2", NameRank::Primary)],
+            Vec::new(),
+        );
+        let merged = facts
+            .with_rows(&strings(&["packages/b/package.json"]), &[renamed])
+            .unwrap();
+        assert_eq!(merged.scopes.len(), 2);
+        let a = merged.scope(ScopeId(0)).unwrap();
+        assert_eq!(a.dependency("@repo/b"), Some(DependencyTarget::External));
+        assert_eq!(a.dependency("react"), Some(DependencyTarget::External));
+        assert_eq!(
+            merged.lookup_name(Ecosystem::Node, "@repo/b2"),
+            NameLookup::Unique(ScopeId(1))
+        );
+        assert_eq!(
+            merged.lookup_name(Ecosystem::Node, "@repo/b"),
+            NameLookup::Missing
+        );
+    }
+
+    /// Stands for: a deleted config removes its row and every name it
+    /// carried; a dependency on it turns external.
+    #[test]
+    fn test_with_rows_deleted_row_removed() {
+        let facts = node_pair();
+        let merged = facts
+            .with_rows(&strings(&["packages/b/package.json"]), &[])
+            .unwrap();
+        assert_eq!(merged.scopes.len(), 1);
+        assert_eq!(merged.scopes[0].root, "packages/a");
+        assert_eq!(
+            merged.scopes[0].dependency("@repo/b"),
+            Some(DependencyTarget::External)
+        );
+        assert_eq!(merged.validate(), Ok(()));
+    }
+
+    /// Stands for: a new config adds its row, sorted into the table, and a
+    /// kept dependency keeps its target across the id shift.
+    #[test]
+    fn test_with_rows_new_row_added_ids_follow_rows() {
+        let facts = node_pair();
+        let mut added = scope(
+            Ecosystem::Node,
+            "packages/a0",
+            &["packages/a0/tsconfig.json"],
+        );
+        added.aliases = vec![ScopeAlias {
+            pattern: "@/*".to_string(),
+            replacements: strings(&["packages/a0/src/*"]),
+        }];
+        let merged = facts
+            .with_rows(&[], &[draft(added.clone(), &[], Vec::new())])
+            .unwrap();
+        let roots: Vec<&str> = merged.scopes.iter().map(|s| s.root.as_str()).collect();
+        assert_eq!(roots, ["packages/a", "packages/a0", "packages/b"]);
+        assert_eq!(merged.scopes[1].aliases, added.aliases);
+        assert_eq!(
+            merged.scopes[0].dependency("@repo/b"),
+            Some(DependencyTarget::Workspace(ScopeId(2)))
+        );
+    }
+
+    /// Stands for: a new row with a kept row's identity wins over it.
+    #[test]
+    fn test_with_rows_same_identity_new_row_wins() {
+        let facts = node_pair();
+        let mut edited = scope(Ecosystem::Node, "packages/b", &["packages/b/package.json"]);
+        edited.entry_files = strings(&["packages/b/src/index.ts"]);
+        let merged = facts
+            .with_rows(
+                &[],
+                &[draft(edited, &[("@repo/b", NameRank::Primary)], Vec::new())],
+            )
+            .unwrap();
+        assert_eq!(merged.scopes.len(), 2);
+        assert_eq!(
+            merged.scopes[1].entry_files,
+            strings(&["packages/b/src/index.ts"])
+        );
+    }
+
+    /// Stands for: a name two rows carry after the edit leaves a by-name
+    /// dependency out, as the producer does for an ambiguous name.
+    #[test]
+    fn test_with_rows_name_now_ambiguous_dependency_left_out() {
+        let facts = node_pair();
+        let twin = draft(
+            scope(Ecosystem::Node, "packages/c", &["packages/c/package.json"]),
+            &[("@repo/b", NameRank::Primary)],
+            Vec::new(),
+        );
+        let merged = facts.with_rows(&[], &[twin]).unwrap();
+        assert_eq!(merged.scopes[0].dependency("@repo/b"), None);
+        assert_eq!(
+            merged.lookup_name(Ecosystem::Node, "@repo/b"),
+            NameLookup::Ambiguous { count: 2 }
+        );
+    }
+
+    /// Stands for: drafts survive the closure store's archive.
+    #[test]
+    fn test_scope_draft_rkyv_roundtrip_returns_equal_draft() {
+        let original = draft(
+            scope(Ecosystem::Go, "svc", &["svc/go.mod"]),
+            &[("example.com/svc", NameRank::Primary)],
+            vec![
+                require("example.com/lib", RequirementTarget::ByName),
+                require(
+                    "example.com/x",
+                    RequirementTarget::ByManifest("x/go.mod".into()),
+                ),
+                require("ext", RequirementTarget::External),
+            ],
+        );
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original).unwrap();
+        let back = rkyv::from_bytes::<ScopeDraft, rkyv::rancor::Error>(&bytes).unwrap();
+        assert_eq!(back, original);
     }
 }

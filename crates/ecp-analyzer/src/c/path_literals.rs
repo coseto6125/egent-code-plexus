@@ -49,6 +49,7 @@ pub(super) fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Optio
         enclosing_symbol,
         enclosing_owner,
         sink_reason: reason,
+        endpoint: None,
     })
 }
 
@@ -87,6 +88,7 @@ pub(super) fn build_concatenated(concat_node: Node<'_>, source: &[u8]) -> Option
         enclosing_symbol,
         enclosing_owner,
         sink_reason: reason,
+        endpoint: None,
     })
 }
 

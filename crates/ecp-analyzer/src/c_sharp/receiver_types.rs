@@ -3,13 +3,17 @@
 //! Handles:
 //! - `this.Foo()` → receiver is the enclosing class/struct name
 //! - `base.Foo()` → first base type from the enclosing class's `heritage`
-//! - `obj.Foo()` where `obj` has a known type from local variable declarations
-//!   or typed method parameters
+//! - `obj.Foo()` where `obj` has a known type from local variable declarations,
+//!   typed method parameters, or a field or property of the enclosing types
+//!   (`TextWriter _writer;` → `TextWriter.Foo`), and `new T().Foo()`
 //! - `Name.Foo()` where `Name` is no local, parameter, field or property in
-//!   scope → [`CallSite::from_receiver`]: the resolver tries `Name` as a type
-//!   (`StringAssert.AreEqual()`) and else resolves the bare member
+//!   scope, and `Outer.Inner.Foo()` → [`CallSite::from_receiver`]: the
+//!   resolver binds `Name` only as a project type (`StringAssert.AreEqual()`)
 //!
-//! Falls back to bare method name when the receiver type cannot be resolved.
+//! A receiver whose type stays unknown (`var x`, a field of a generic type,
+//! `a.b`, `a[i]`, `x?.Foo()` on such a value) is recorded as
+//! [`CallSite::untyped_member`], never as the bare method name: a bare name
+//! means `this.Foo()` (codex ruling P-recv Q1).
 //!
 //! C# AST shape (tree-sitter-c-sharp):
 //! - `invocation_expression` with `member_access_expression` as `function` field
@@ -31,15 +35,33 @@ use crate::calls::{
 };
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use tree_sitter::Node;
 
 #[derive(Debug, Default)]
 struct LocalTypes {
     scopes: Vec<(PosRange, HashMap<String, String>)>,
+    /// Every field and property by name: the range of the type declaration
+    /// that declares it, and its type when that is a plain type name (`""`
+    /// otherwise). Keyed by name, so a lookup reads only the same-name
+    /// members.
+    members: HashMap<String, Vec<(PosRange, String)>>,
 }
 
 impl LocalTypes {
+    /// The declared type of the field or property `name` that the innermost
+    /// type declaration enclosing `pos` and declaring `name` holds: `""` for
+    /// a type that is no plain type name, `None` for no such member.
+    fn member_type(&self, pos: Pos, name: &str) -> Option<&str> {
+        self.members
+            .get(name)?
+            .iter()
+            .filter(|((start, end), _)| *start <= pos && pos <= *end)
+            .min_by_key(|(range, _)| range_width(*range))
+            .map(|(_, ty)| ty.as_str())
+    }
+
     fn lookup(&self, pos: Pos, var: &str) -> Option<&str> {
         let mut best: Option<&str> = None;
         let mut best_width = (u32::MAX, i64::MAX);
@@ -59,12 +81,17 @@ impl LocalTypes {
 }
 
 /// Walk every method/constructor/local-function declaration, collecting typed
-/// parameters and local variable declarations.
+/// parameters and local variable declarations, and every field and property
+/// a type declares.
 fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
     let mut scopes: Vec<(PosRange, HashMap<String, String>)> = Vec::new();
+    let mut members: HashMap<String, Vec<(PosRange, String)>> = HashMap::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         match n.kind() {
+            "field_declaration" | "property_declaration" => {
+                collect_members(n, source, &mut members);
+            }
             "method_declaration" | "constructor_declaration" | "local_function_statement" => {
                 let scope = node_range(n);
                 let mut map: HashMap<String, String> = HashMap::new();
@@ -87,7 +114,66 @@ fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
             stack.push(child);
         }
     }
-    LocalTypes { scopes }
+    LocalTypes { scopes, members }
+}
+
+/// Record the fields or the property `decl` declares, under the range of
+/// the type declaration that holds it, each with its type when that is a
+/// plain type name: `""` for a generic, nullable, array or keyword type.
+fn collect_members(
+    decl: Node<'_>,
+    source: &[u8],
+    out: &mut HashMap<String, Vec<(PosRange, String)>>,
+) {
+    let Some(owner) = std::iter::successors(decl.parent(), |n| n.parent()).find(|n| {
+        matches!(
+            n.kind(),
+            "class_declaration"
+                | "struct_declaration"
+                | "record_declaration"
+                | "interface_declaration"
+        )
+    }) else {
+        return;
+    };
+    let scope = node_range(owner);
+    let plain_type = |ty: Option<Node<'_>>| {
+        ty.filter(|ty| ty.kind() == "identifier")
+            .and_then(|ty| ty.utf8_text(source).ok())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let mut push = |name: Option<Node<'_>>, ty: &str| {
+        if let Some(name) = name
+            .filter(|name| name.kind() == "identifier")
+            .and_then(|name| name.utf8_text(source).ok())
+        {
+            out.entry(name.to_string())
+                .or_default()
+                .push((scope, ty.to_string()));
+        }
+    };
+    if decl.kind() == "property_declaration" {
+        push(
+            decl.child_by_field_name("name"),
+            &plain_type(decl.child_by_field_name("type")),
+        );
+        return;
+    }
+    let mut cursor = decl.walk();
+    let Some(declaration) = decl
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == "variable_declaration")
+    else {
+        return;
+    };
+    let ty = plain_type(declaration.child_by_field_name("type"));
+    let mut cursor = declaration.walk();
+    for declarator in declaration.named_children(&mut cursor) {
+        if declarator.kind() == "variable_declarator" {
+            push(declarator.child_by_field_name("name"), &ty);
+        }
+    }
 }
 
 /// C# formal parameters: `parameter_list` → `parameter` with `name` and `type` fields.
@@ -113,8 +199,8 @@ fn collect_params(params: Node<'_>, source: &[u8], out: &mut HashMap<String, Str
 }
 
 /// Record a declared name whose type is not a plain class name as `""`: it
-/// still shadows a type of the same name, so a call on it keeps the bare
-/// member instead of resolving through that type.
+/// still shadows a type of the same name, so a call on it is an untyped
+/// member call instead of resolving through that type.
 fn declare_untyped(name_node: Node<'_>, source: &[u8], out: &mut HashMap<String, String>) {
     // `implicit_parameter` is the grammar's alias of the identifier in `x => ..`.
     if !matches!(name_node.kind(), "identifier" | "implicit_parameter") {
@@ -162,8 +248,11 @@ fn collect_local_vars(body: Node<'_>, source: &[u8], out: &mut HashMap<String, S
                                 if ty_node.is_none() && is_type_node(child) {
                                     ty_node = Some(child);
                                 } else if child.kind() == "variable_declarator" {
+                                    // `var x = new T(..)`: the construction
+                                    // names the type `var` leaves out.
+                                    let ty = ty_node.or_else(|| constructed_type(child));
                                     if let (Some(ty), Some(nm)) =
-                                        (ty_node, child.child_by_field_name("name"))
+                                        (ty, child.child_by_field_name("name"))
                                     {
                                         if let Some((var, ty_s)) =
                                             simple_id_and_type(nm, ty, source)
@@ -184,6 +273,15 @@ fn collect_local_vars(body: Node<'_>, source: &[u8], out: &mut HashMap<String, S
             stack.push(child);
         }
     }
+}
+
+/// The type node of the `new T(..)` that initializes `declarator`.
+fn constructed_type(declarator: Node<'_>) -> Option<Node<'_>> {
+    let mut cursor = declarator.walk();
+    let creation = declarator
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == "object_creation_expression")?;
+    creation.child_by_field_name("type")
 }
 
 fn is_type_node(n: Node<'_>) -> bool {
@@ -233,6 +331,180 @@ fn calls_value(call: Node<'_>, source: &[u8], locals: &LocalTypes, nodes: &[RawN
         })
 }
 
+/// `entry` with the arguments of the call `inv` recorded
+/// ([`CallSite::with_arguments`]): the C# extension retry reads them to
+/// tell overloads apart. Every member site records them; a bare call, and
+/// a `this.M()` / `base.M()` with no type to name, record none. A list the
+/// parser cannot model records nothing: a syntax error, or a positional
+/// argument after a named one.
+fn with_call_arguments(entry: String, inv: Node<'_>, source: &[u8]) -> String {
+    let Some(list) = inv
+        .child_by_field_name("arguments")
+        .filter(|list| !list.has_error())
+    else {
+        return entry;
+    };
+    let mut positional = 0u32;
+    let mut named: Vec<&str> = Vec::new();
+    let mut cursor = list.walk();
+    for argument in list.named_children(&mut cursor) {
+        if argument.is_extra() {
+            continue;
+        }
+        if argument.kind() != "argument" {
+            return entry;
+        }
+        match argument
+            .child_by_field_name("name")
+            .map(|name| name.utf8_text(source))
+        {
+            Some(Ok(name)) => named.push(name),
+            None if named.is_empty() => positional += 1,
+            _ => return entry,
+        }
+    }
+    CallSite::with_arguments(&entry, positional, &named)
+}
+
+/// The receiver of a member call `r.M()`, as the call site encodes it
+/// (codex ruling P-recv Q1). A receiver written in the call is never `this`
+/// unless it says so: only `M()`, `this.M()` and `base.M()` keep the
+/// implicit-`this` rules.
+enum Receiver<'a> {
+    /// A value or a type whose type the parser reads by name: `this`,
+    /// `base`, a local, parameter, field or property declared with a plain
+    /// type name, `new T()`, a keyword type (`string.Join`).
+    Typed(Cow<'a, str>),
+    /// `this` or `base` with no type to name: the bare member.
+    Implicit,
+    /// A name that may be a type (`StringAssert`), the last segment of a
+    /// dotted name that may be a type path (`Outer.Inner`, `Box<int>`), or a
+    /// value named as its type (`Logger Logger`): the resolver binds it only
+    /// as a project type.
+    MaybeType(&'a str),
+    /// A call whose return type the resolver may read (`Foo.Create().M()`).
+    Call,
+    /// A value of unknown type: a field of a generic type, `var x`, `a.b`,
+    /// `a[i]`, `(T)x`, a delegate's result.
+    Untyped,
+}
+
+/// The receiver `receiver` of the member call at `pos`. C# looks a simple
+/// name up as a local, then as a member of the enclosing types, then as a
+/// type: only a name that is neither a local nor a member may be a type.
+fn classify_receiver<'a>(
+    receiver: Node<'_>,
+    pos: Pos,
+    source: &'a [u8],
+    locals: &'a LocalTypes,
+    nodes: &[RawNode],
+) -> Option<Receiver<'a>> {
+    let text =
+        move |node: Node<'_>| std::str::from_utf8(&source[node.start_byte()..node.end_byte()]);
+    let typed = |ty: &'a str| match ty {
+        "" => Receiver::Untyped,
+        ty => Receiver::Typed(Cow::Borrowed(ty)),
+    };
+    let member = move |name: &str| match locals.member_type(pos, name) {
+        Some(ty) => Some(typed(ty)),
+        None if declares_member(nodes, pos, name) => Some(Receiver::Untyped),
+        None => None,
+    };
+    let is_this = |node: Node<'_>| matches!(node.kind(), "this_expression" | "this");
+    Some(match receiver.kind() {
+        "this_expression" | "this" => enclosing_class_name(nodes, pos)
+            .map_or(Receiver::Implicit, |ty| Receiver::Typed(Cow::Owned(ty))),
+        "base_expression" | "base" => enclosing_base_name(nodes, pos)
+            .map_or(Receiver::Implicit, |ty| Receiver::Typed(Cow::Owned(ty))),
+        "identifier" => {
+            let name = text(receiver).ok()?;
+            let value = match locals.lookup(pos, name) {
+                Some(ty) => typed(ty),
+                None => member(name).unwrap_or(Receiver::MaybeType(name)),
+            };
+            match value {
+                // "Color Color" (C# spec 12.8.7.2): a local, parameter, field
+                // or property whose type has its own spelling is the value
+                // and the type at once, so `Logger.Create()` reaches a static
+                // member as well as an instance one.
+                Receiver::Typed(ty) if ty == name => Receiver::MaybeType(name),
+                value => value,
+            }
+        }
+        // `this._writer.Dispose()`: a member of the caller's own type.
+        "member_access_expression"
+            if receiver
+                .child_by_field_name("expression")
+                .is_some_and(is_this) =>
+        {
+            receiver
+                .child_by_field_name("name")
+                .filter(|name| name.kind() == "identifier")
+                .and_then(|name| text(name).ok())
+                .and_then(member)
+                .unwrap_or(Receiver::Untyped)
+        }
+        "member_access_expression" | "generic_name" | "alias_qualified_name" => {
+            type_path_tail(receiver, pos, source, locals, nodes)
+                .map_or(Receiver::Untyped, Receiver::MaybeType)
+        }
+        "predefined_type" => Receiver::Typed(Cow::Borrowed(text(receiver).ok()?)),
+        "object_creation_expression" => receiver
+            .child_by_field_name("type")
+            .filter(|ty| ty.kind() == "identifier")
+            .and_then(|ty| text(ty).ok())
+            .map_or(Receiver::Untyped, |ty| Receiver::Typed(Cow::Borrowed(ty))),
+        "invocation_expression" if !calls_value(receiver, source, locals, nodes) => Receiver::Call,
+        _ => Receiver::Untyped,
+    })
+}
+
+/// The last segment of the dotted name `receiver` when that name may be a
+/// type path: every segment is a name, and the root is no local, parameter
+/// or member in scope (`Outer.Inner`, `global::Ns.Type`, `Box<int>`).
+/// `None` for a value path (`a.b` with `a` a local or a field) and for any
+/// other expression.
+fn type_path_tail<'a>(
+    receiver: Node<'_>,
+    pos: Pos,
+    source: &'a [u8],
+    locals: &LocalTypes,
+    nodes: &[RawNode],
+) -> Option<&'a str> {
+    let name_of = move |node: Node<'_>| -> Option<&'a str> {
+        let id = match node.kind() {
+            "identifier" => node,
+            "generic_name" => node.named_child(0).filter(|id| id.kind() == "identifier")?,
+            "alias_qualified_name" => return name_of_field(node, source),
+            _ => return None,
+        };
+        std::str::from_utf8(&source[id.start_byte()..id.end_byte()]).ok()
+    };
+    let mut node = receiver;
+    let mut tail = None;
+    while node.kind() == "member_access_expression" {
+        let segment = name_of(node.child_by_field_name("name")?)?;
+        tail.get_or_insert(segment);
+        node = node.child_by_field_name("expression")?;
+    }
+    let root = name_of(node)?;
+    let value = node.kind() == "identifier"
+        && (locals.lookup(pos, root).is_some()
+            || locals.member_type(pos, root).is_some()
+            || declares_member(nodes, pos, root));
+    (!value).then_some(tail.unwrap_or(root))
+}
+
+/// The name segment of an `alias_qualified_name` (`global::Ns` → `Ns`).
+fn name_of_field<'a>(node: Node<'_>, source: &'a [u8]) -> Option<&'a str> {
+    let name = node.child_by_field_name("name")?;
+    let id = match name.kind() {
+        "generic_name" => name.named_child(0).filter(|id| id.kind() == "identifier")?,
+        _ => name,
+    };
+    std::str::from_utf8(&source[id.start_byte()..id.end_byte()]).ok()
+}
+
 /// Resolve the callee for a C# `invocation_expression`, applying receiver binding.
 fn csharp_callee(
     inv: Node<'_>,
@@ -241,58 +513,27 @@ fn csharp_callee(
     nodes: &[RawNode],
 ) -> Option<String> {
     let func = inv.child_by_field_name("function")?;
-    match func.kind() {
-        "identifier" => func.utf8_text(source).ok().map(|s| s.to_string()),
-        "member_access_expression" => {
-            let method_node = func.child_by_field_name("name")?;
-            let method =
-                std::str::from_utf8(&source[method_node.start_byte()..method_node.end_byte()])
-                    .ok()?;
-
-            // `member_access_expression` has an `expression` field for the receiver
-            // (can be `this`, `base`, or an `identifier`).
-            let receiver = func.child_by_field_name("expression")?;
-
-            let pos = start_pos(inv);
-            let ty: Option<String> = match receiver.kind() {
-                "this_expression" | "this" => enclosing_class_name(nodes, pos),
-                "base_expression" | "base" => enclosing_base_name(nodes, pos),
-                "identifier" => {
-                    let var =
-                        std::str::from_utf8(&source[receiver.start_byte()..receiver.end_byte()])
-                            .ok()?;
-                    // C# looks a simple name up as a local, then as a member
-                    // of the enclosing types, then as a type. Only a name
-                    // that is neither may be a type, which the resolver
-                    // decides (`StringAssert.AreEqual()`).
-                    match locals.lookup(pos, var) {
-                        Some("") => None,
-                        Some(t) => Some(t.to_string()),
-                        None if declares_member(nodes, pos, var) => None,
-                        None => return Some(CallSite::from_receiver(var, method)),
-                    }
-                }
-                _ => None,
-            };
-            Some(match (ty, receiver.kind()) {
-                (Some(t), _) => format!("{t}.{method}"),
-                // `Foo.Create().Bar()`: the resolver types the receiver by
-                // the callee's return type.
-                (None, "invocation_expression")
-                    if !calls_value(receiver, source, locals, nodes) =>
-                {
-                    match CallSite::nested_chain(|| csharp_callee(receiver, source, locals, nodes))
-                    {
-                        Some(inner) => CallSite::chained_member(&inner, method),
-                        None => method.to_string(),
-                    }
-                }
-                (None, _) => method.to_string(),
-            })
+    let (receiver, method_node) = match func.kind() {
+        "identifier" => return func.utf8_text(source).ok().map(str::to_string),
+        "member_access_expression" => (
+            func.child_by_field_name("expression")?,
+            func.child_by_field_name("name")?,
+        ),
+        // `_writer?.Close()`: the condition is the receiver, read from the
+        // tree, never from the text after the last `.`.
+        "conditional_access_expression" => {
+            let mut cursor = func.walk();
+            let binding = func
+                .named_children(&mut cursor)
+                .find(|child| child.kind() == "member_binding_expression")?;
+            (
+                func.child_by_field_name("condition")?,
+                binding.child_by_field_name("name")?,
+            )
         }
         _ => {
             // Fallback: take last segment from the full text.
-            func.utf8_text(source).ok().and_then(|s| {
+            return func.utf8_text(source).ok().and_then(|s| {
                 let seg = s.rsplit_once('.').map(|(_, t)| t).unwrap_or(s);
                 let id: String = seg
                     .chars()
@@ -303,9 +544,34 @@ fn csharp_callee(
                 } else {
                     Some(id)
                 }
-            })
+            });
         }
-    }
+    };
+    // `DeserializeObject<Foo>`: the declaration names the method, not its
+    // type arguments.
+    let method_node = match method_node.kind() {
+        "generic_name" => method_node
+            .named_child(0)
+            .filter(|id| id.kind() == "identifier")?,
+        _ => method_node,
+    };
+    let method = method_node.utf8_text(source).ok()?;
+    let entry = match classify_receiver(receiver, start_pos(inv), source, locals, nodes)? {
+        Receiver::Typed(ty) => format!("{ty}.{method}"),
+        Receiver::Implicit => return Some(method.to_string()),
+        Receiver::MaybeType(name) => CallSite::from_receiver(name, method),
+        // `Foo.Create().Bar()`: the resolver types the receiver by the
+        // callee's return type, and else resolves the untyped member.
+        Receiver::Call => {
+            let untyped = CallSite::untyped_member(method);
+            match CallSite::nested_chain(|| csharp_callee(receiver, source, locals, nodes)) {
+                Some(inner) => CallSite::chained_member(&inner, &untyped),
+                None => untyped,
+            }
+        }
+        Receiver::Untyped => CallSite::untyped_member(method),
+    };
+    Some(with_call_arguments(entry, inv, source))
 }
 
 /// Walk the AST once, extracting C# invocation sites (attached to
@@ -425,6 +691,7 @@ fn enclosing_base_name(nodes: &[RawNode], pos: Pos) -> Option<String> {
 mod tests {
     use super::super::parser::CSharpProvider;
     use ecp_core::analyzer::provider::LanguageProvider;
+    use ecp_core::analyzer::types::CallSite;
     use std::path::Path;
 
     fn parse(src: &str) -> ecp_core::analyzer::types::LocalGraph {
@@ -452,7 +719,10 @@ class Animal {
             .find(|n| n.name == "Breathe")
             .expect("Breathe method not found");
         assert!(
-            breathe.calls.iter().any(|c| c == "Animal.Eat"),
+            breathe
+                .calls
+                .iter()
+                .any(|c| CallSite::parse(c) == CallSite::Plain("Animal.Eat")),
             "expected 'Animal.Eat' in calls, got {:?}",
             breathe.calls
         );
@@ -476,7 +746,10 @@ class Dog : Animal {
             .find(|n| n.name == "Setup")
             .expect("Setup method not found");
         assert!(
-            setup.calls.iter().any(|c| c == "Animal.Init"),
+            setup
+                .calls
+                .iter()
+                .any(|c| CallSite::parse(c) == CallSite::Plain("Animal.Init")),
             "expected 'Animal.Init' in calls, got {:?}",
             setup.calls
         );
@@ -500,7 +773,10 @@ class App {
             .find(|n| n.name == "Start")
             .expect("Start method not found");
         assert!(
-            start.calls.iter().any(|c| c == "MyService.Run"),
+            start
+                .calls
+                .iter()
+                .any(|c| CallSite::parse(c) == CallSite::Plain("MyService.Run")),
             "expected 'MyService.Run' in calls, got {:?}",
             start.calls
         );
@@ -528,7 +804,10 @@ class App {
             .find(|n| n.name == "Use")
             .expect("Use method not found");
         assert!(
-            !use_fn.calls.iter().any(|c| c == "List.Add"),
+            !use_fn
+                .calls
+                .iter()
+                .any(|c| CallSite::parse(c) == CallSite::Plain("List.Add")),
             "must NOT bind generic `List<string>` to bare `List`; got {:?}",
             use_fn.calls
         );
@@ -536,8 +815,11 @@ class App {
     }
 
     /// An identifier receiver that is no local, parameter or member reaches
-    /// the resolver as a `from` receiver; a declared name of any type, and a
-    /// property, keep the bare member.
+    /// the resolver as a `from` receiver. A property declared with a plain
+    /// type name types the call; a local, parameter, `foreach` or lambda
+    /// variable of no plain type name is an untyped member, never the bare
+    /// member, which means `this.M()` (codex ruling P-recv Q1). Every member
+    /// site records its arguments.
     #[test]
     fn test_csharp_callee_undeclared_identifier_receiver_emits_from_receiver() {
         let src = r#"
@@ -557,15 +839,17 @@ class App {
         let graph = parse(src);
         // The lambda body's call attaches to an anonymous node.
         let mut got: Vec<String> = graph.nodes.iter().flat_map(|n| n.calls.clone()).collect();
+        let args =
+            |entry: String, positional: u32| CallSite::with_arguments(&entry, positional, &[]);
         let mut want: Vec<String> = vec![
             "Make".into(),
-            ecp_core::analyzer::types::CallSite::from_receiver("StringAssert", "AreEqual"),
-            "Run".into(),
-            "Add".into(),
-            "Go".into(),
-            "Stop".into(),
-            "ForEach".into(),
-            "Halt".into(),
+            args(CallSite::from_receiver("StringAssert", "AreEqual"), 2),
+            args(CallSite::untyped_member("Run"), 0),
+            args(CallSite::untyped_member("Add"), 1),
+            args("Helper.Go".into(), 0),
+            args(CallSite::untyped_member("Stop"), 0),
+            args(CallSite::untyped_member("ForEach"), 1),
+            args(CallSite::untyped_member("Halt"), 0),
         ];
         got.sort();
         want.sort();
@@ -598,6 +882,88 @@ class Standalone {
             !do_work.calls.iter().any(|c| c == "base.Foo"),
             "must NOT contain synthetic 'base.Foo', got {:?}",
             do_work.calls
+        );
+    }
+
+    /// Contract (P-ext2, P-recv): every member site and a chain record the
+    /// arguments the extension retry reads; each chain level keeps its own.
+    /// `ref` / `out` arguments and a lambda count as one argument each. A
+    /// bare call and a list with a positional argument after a named one
+    /// record none, and every entry decodes as before. A chain falls back
+    /// to the untyped member, and `object o; o.Spin(1)` is one.
+    #[test]
+    fn test_csharp_callee_typed_member_and_chain_record_arguments() {
+        let src = r#"
+class Widget {
+    Widget Make(int n) { return this; }
+    void Use(Widget w, object o) {
+        w.Spin();
+        w.Spin(3, size: 2, mode: 1);
+        w.Make(1).Spin(ref o, out var x);
+        w.Spin(size: 2, 3);
+        w.Spin(x => x);
+        Helper(1, 2);
+        o.Spin(1);
+    }
+}
+"#;
+        let graph = parse(src);
+        let use_fn = graph.nodes.iter().find(|n| n.name == "Use").expect("Use");
+        // The walk attaches calls in no source order; compare as a sorted list.
+        let decode = |raw: &str| {
+            (
+                format!("{:?}", CallSite::parse(raw)),
+                CallSite::arguments(raw)
+                    .map(|a| (a.positional, a.named().collect::<Vec<_>>().join(","))),
+            )
+        };
+        let mut got: Vec<_> = use_fn.calls.iter().map(|raw| decode(raw)).collect();
+        got.sort();
+        let chain = use_fn
+            .calls
+            .iter()
+            .find(|raw| matches!(CallSite::parse(raw), CallSite::ChainedMember { .. }))
+            .expect("a chained entry");
+        let CallSite::ChainedMember { inner, fallback } = CallSite::parse(chain) else {
+            unreachable!()
+        };
+        let mut want = vec![
+            (
+                format!("{:?}", CallSite::Plain("Widget.Spin")),
+                Some((0, String::new())),
+            ),
+            (
+                format!("{:?}", CallSite::Plain("Widget.Spin")),
+                Some((1, "size,mode".to_owned())),
+            ),
+            (
+                format!("{:?}", CallSite::Plain("Widget.Make")),
+                Some((1, String::new())),
+            ),
+            (
+                format!("{:?}", CallSite::parse(chain)),
+                Some((2, String::new())),
+            ),
+            (format!("{:?}", CallSite::Plain("Widget.Spin")), None),
+            (
+                format!("{:?}", CallSite::Plain("Widget.Spin")),
+                Some((1, String::new())),
+            ),
+            (format!("{:?}", CallSite::Plain("Helper")), None),
+            (
+                format!("{:?}", CallSite::UntypedMember("Spin")),
+                Some((1, String::new())),
+            ),
+        ];
+        want.sort();
+        assert_eq!(got, want, "{:?}", use_fn.calls);
+        assert_eq!(CallSite::parse(fallback), CallSite::UntypedMember("Spin"));
+        assert_eq!(
+            decode(inner),
+            (
+                format!("{:?}", CallSite::Plain("Widget.Make")),
+                Some((1, String::new()))
+            )
         );
     }
 }

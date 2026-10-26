@@ -22,7 +22,7 @@ decides whether a refactor is safe.
 - `ecp find <name>` — locate a declaration by symbol, not by string match.
 - `ecp impact --target <symbol> --direction upstream` — callers of a symbol.
 - `ecp impact --baseline <ref>` — blast radius of a diff against a git ref.
-- `ecp routes` / `ecp contracts` — HTTP routes and cross-repo API contracts.
+- `ecp routes` / `ecp contracts` — HTTP routes, and route contracts paired with fetch callers across repos.
 - `ecp cypher '<query>'` — arbitrary graph queries across indexed repos.
 - `ecp peers` — collision detection between concurrent agents in one repo.
 

@@ -66,6 +66,7 @@ pub fn try_sql_ref(
         ),
         enclosing_symbol,
         enclosing_owner,
+        endpoint: None,
     })
 }
 

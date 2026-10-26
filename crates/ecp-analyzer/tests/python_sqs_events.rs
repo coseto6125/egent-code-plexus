@@ -49,9 +49,9 @@ def publish_order(sqs, payload):
     assert_eq!(result[0].lib, FrameworkId::Sqs);
     assert_eq!(result[0].direction, PubSub::Publish);
     let lit = result[0]
-        .topic_literal
+        .topic_key
         .as_deref()
-        .expect("topic_literal must be Some for literal QueueUrl");
+        .expect("topic_key must be Some for literal QueueUrl");
     assert_eq!(
         lit,
         "https://sqs.us-east-1.amazonaws.com/123456789012/orders"
@@ -80,9 +80,9 @@ def consume_orders(sqs):
     assert_eq!(result[0].lib, FrameworkId::Sqs);
     assert_eq!(result[0].direction, PubSub::Subscribe);
     let lit = result[0]
-        .topic_literal
+        .topic_key
         .as_deref()
-        .expect("topic_literal must be Some");
+        .expect("topic_key must be Some");
     assert_eq!(
         lit,
         "https://sqs.us-east-1.amazonaws.com/123456789012/orders"
@@ -111,9 +111,9 @@ async def publish_order(sqs, payload):
     assert_eq!(result[0].lib, FrameworkId::Sqs);
     assert_eq!(result[0].direction, PubSub::Publish);
     let lit = result[0]
-        .topic_literal
+        .topic_key
         .as_deref()
-        .expect("topic_literal must be Some");
+        .expect("topic_key must be Some");
     assert_eq!(
         lit,
         "https://sqs.us-east-1.amazonaws.com/123456789012/orders"
@@ -141,9 +141,9 @@ def publish_batch(sqs, entries):
     assert_eq!(result[0].lib, FrameworkId::Sqs);
     assert_eq!(result[0].direction, PubSub::Publish);
     let lit = result[0]
-        .topic_literal
+        .topic_key
         .as_deref()
-        .expect("topic_literal must be Some");
+        .expect("topic_key must be Some");
     assert_eq!(
         lit,
         "https://sqs.us-east-1.amazonaws.com/123456789012/orders"

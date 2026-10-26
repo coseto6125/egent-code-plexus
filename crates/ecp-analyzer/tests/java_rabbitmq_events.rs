@@ -50,9 +50,9 @@ public class OrderService {
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Publish);
     let lit = result[0]
-        .topic_literal
+        .topic_key
         .as_deref()
-        .expect("topic_literal must be Some");
+        .expect("topic_key must be Some");
     assert_eq!(lit, "orders");
 }
 
@@ -72,9 +72,9 @@ public class OrderConsumer {
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Subscribe);
     let lit = result[0]
-        .topic_literal
+        .topic_key
         .as_deref()
-        .expect("topic_literal must be Some");
+        .expect("topic_key must be Some");
     assert_eq!(lit, "orders");
 }
 
@@ -95,9 +95,9 @@ public class Publisher {
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Publish);
     let lit = result[0]
-        .topic_literal
+        .topic_key
         .as_deref()
-        .expect("topic_literal must be Some");
+        .expect("topic_key must be Some");
     assert_eq!(lit, "payments");
 }
 
@@ -118,9 +118,9 @@ public class Consumer {
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Subscribe);
     let lit = result[0]
-        .topic_literal
+        .topic_key
         .as_deref()
-        .expect("topic_literal must be Some");
+        .expect("topic_key must be Some");
     assert_eq!(lit, "notifications");
 }
 
@@ -187,12 +187,12 @@ public class Broker {
     assert!(subscribe.is_some(), "must have a Subscribe event");
     let pub_lit = publish
         .unwrap()
-        .topic_literal
+        .topic_key
         .as_deref()
         .expect("publish topic must be Some");
     let sub_lit = subscribe
         .unwrap()
-        .topic_literal
+        .topic_key
         .as_deref()
         .expect("subscribe topic must be Some");
     assert_eq!(pub_lit, "events");

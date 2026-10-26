@@ -96,7 +96,7 @@ pub fn run(args: ImpactArgs) -> Result<(), EcpError> {
     // Same member-prefixed shape as `group find`'s caveat, so consumers see
     // one consistent staleness convention across group verbs.
     let caveat = engine
-        .caveat()
+        .caveat_reading_view()
         .map(|c| super::member_prefixed(&args.repo, &c));
 
     // 4. Local impact.

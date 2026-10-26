@@ -1,5 +1,6 @@
 //! Bounded source-based value dependency analysis.
 use ast::{lower, Ast};
+use ecp_core::contracts::routing::{Dialect, FileRouter, Language as RouteLanguage, RouteOutcome};
 use engine::{Engine, Scope};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -108,18 +109,38 @@ pub fn is_blade_template(path: &str) -> bool {
     path.ends_with(".blade.php")
 }
 
+/// The grammar of `path`'s C5 route: the languages with `Capability::Flow`,
+/// and the TSX grammar for the `.tsx` dialect.
 fn language(path: &str) -> Option<tree_sitter::Language> {
     // tree-sitter-php reads a Blade template (no `<?php`) as one HTML leaf, so
     // flow would anchor the whole file instead of the requested span.
     if is_blade_template(path) {
         return None;
     }
+    let route = match FileRouter::PATH_ONLY.route(path) {
+        RouteOutcome::Routed(route) => route,
+        RouteOutcome::Unrouted => return unrouted_language(path),
+        RouteOutcome::Excluded(_) => return None,
+    };
+    Some(match (route.fixed_language()?, route.dialect()) {
+        (RouteLanguage::JavaScript, _) => tree_sitter_javascript::LANGUAGE.into(),
+        (RouteLanguage::TypeScript, Dialect::Standard) => {
+            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
+        }
+        (RouteLanguage::TypeScript, Dialect::Tsx) => tree_sitter_typescript::LANGUAGE_TSX.into(),
+        (RouteLanguage::Python, _) => tree_sitter_python::LANGUAGE.into(),
+        (RouteLanguage::Php, _) => tree_sitter_php::LANGUAGE_PHP.into(),
+        _ => return None,
+    })
+}
+
+/// `mts`, `cts` and `phtml` had flow before the route existed, and no rule
+/// routes them yet (C5 open point 4). They keep it until that point is
+/// decided, so no extension loses flow in the move to the route.
+fn unrouted_language(path: &str) -> Option<tree_sitter::Language> {
     Some(match path.rsplit_once('.')?.1 {
-        "js" | "jsx" | "mjs" | "cjs" => tree_sitter_javascript::LANGUAGE.into(),
-        "ts" | "mts" | "cts" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-        "tsx" => tree_sitter_typescript::LANGUAGE_TSX.into(),
-        "py" | "pyi" => tree_sitter_python::LANGUAGE.into(),
-        "php" | "phtml" => tree_sitter_php::LANGUAGE_PHP.into(),
+        "mts" | "cts" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        "phtml" => tree_sitter_php::LANGUAGE_PHP.into(),
         _ => return None,
     })
 }
@@ -502,4 +523,51 @@ pub fn analyze_changes(
 mod tests;
 pub fn supported_path(path: &str) -> bool {
     language(path).is_some()
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+    use ecp_core::contracts::routing::Capability;
+
+    #[test]
+    fn test_supported_path_route_capability_decides_flow() {
+        // Every default extension of a language with `Capability::Flow` is
+        // supported; every other default extension is not.
+        for &language in RouteLanguage::ALL {
+            let capable = language.capabilities().contains(Capability::Flow);
+            for ext in language.extensions() {
+                let path = format!("src/x.{ext}");
+                assert_eq!(supported_path(&path), capable, "{path}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_language_route_dialect_picks_tsx_grammar() {
+        // Only the TSX grammar knows JSX node kinds.
+        let jsx = |path: &str| {
+            language(path)
+                .expect("supported")
+                .id_for_node_kind("jsx_element", true)
+                != 0
+        };
+        assert!(jsx("ui/App.tsx"));
+        assert!(!jsx("ui/app.ts"));
+    }
+
+    #[test]
+    fn test_supported_path_upper_case_and_template_paths_unsupported() {
+        // C5 open point 3 (case) and the template rules, as in the index.
+        assert!(!supported_path("src/A.PY"));
+        assert!(!supported_path("__brick__/lib/a.py"));
+        assert!(supported_path("src/a.py"));
+    }
+
+    #[test]
+    fn test_supported_path_unrouted_mts_cts_phtml_keep_flow() {
+        for path in ["src/a.mts", "src/a.cts", "views/a.phtml"] {
+            assert!(supported_path(path), "{path}");
+        }
+    }
 }

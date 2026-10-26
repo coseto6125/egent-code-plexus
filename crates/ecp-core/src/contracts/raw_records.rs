@@ -143,6 +143,16 @@ impl RawIdx {
     }
 }
 
+impl crate::analyzer::types::RawTxScope {
+    /// A scope for raw node `raw`; `None` above [`RawIdx::PACKED24_MAX`].
+    /// `RawTxScope::new` checks the limit with a `debug_assert` only, so a
+    /// release build packs `2^24` as `0`, the file's first node (C4 Open
+    /// point 9). A producer that can see a large file packs through this.
+    pub fn checked(raw: RawIdx, framework: crate::analyzer::types::FrameworkId) -> Option<Self> {
+        raw.to_packed24().map(|idx| Self::new(idx, framework))
+    }
+}
+
 /// A name as the source writes it: trimmed and not empty. The field is
 /// private, so [`SourceName::new`] is the only constructor outside this
 /// module. [`RawEndpoint::validate`] checks a value read back from an
@@ -176,10 +186,16 @@ pub enum Unbound {
     /// The spelling is kept, so a later pass can bind it across files (a
     /// Laravel `Ctrl@method` action, an imported handler).
     Named(SourceName),
-    /// Code with no name and no node, such as an inline handler that the
-    /// parser emits no closure node for. The record's own span gives the
+    /// No name: the producer saw an empty or whitespace-only reference
+    /// ([`bind_name`] with a blank name). The record's own span gives the
     /// line.
     Anonymous,
+    /// A function written in place as a route's handler argument (an
+    /// Express arrow, a gin `func_literal`, a Laravel closure, a Sinatra
+    /// block), at the argument's span. Binding takes only the closure node
+    /// that starts there, so a middleware closure of the same registration
+    /// never serves the route; with no such node the handler stays inline.
+    Inline(Span),
 }
 
 /// The endpoint of a raw record, bound in [`ParsePhase::BindRecords`].
@@ -1452,6 +1468,20 @@ mod tests {
         ] {
             assert_eq!(Evidence::of_stored(c, rel).check(c, rel), Ok(()));
         }
+    }
+
+    #[test]
+    fn test_raw_tx_scope_new_index_over_24_bits_returns_none() {
+        use crate::analyzer::types::{FrameworkId, RawTxScope};
+        let framework = FrameworkId::SpringTransactional;
+        assert_eq!(
+            RawTxScope::checked(RawIdx(RawIdx::PACKED24_MAX + 1), framework),
+            None,
+            "2^24 would pack as 0 and bind the file's first node"
+        );
+        let at_max = RawTxScope::checked(RawIdx(RawIdx::PACKED24_MAX), framework).unwrap();
+        assert_eq!(at_max.node_idx(), RawIdx::PACKED24_MAX);
+        assert_eq!(at_max.framework(), framework);
     }
 
     // ── RawIndexMap ──

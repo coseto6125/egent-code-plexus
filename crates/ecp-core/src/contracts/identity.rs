@@ -1,8 +1,9 @@
 //! C1 identity: declaration identity, lexical parent, the target request
 //! syntax, the typed target result, and the route and handler keys.
 //!
-//! Design note: `docs/specs/contracts/C1-identity.md`. No production code
-//! calls these types yet; each consuming slice adopts them.
+//! Design note: `docs/specs/contracts/C1-identity.md`. `assign_file` numbers
+//! every file-level uid site (slice R2, through `analyzer::lexical`); the
+//! target and route types wait for their consuming slices.
 
 use std::borrow::Cow;
 use std::collections::hash_map::Entry;
@@ -11,7 +12,7 @@ use std::fmt;
 use rustc_hash::FxHashMap;
 use xxhash_rust::xxh3::Xxh3;
 
-use crate::analyzer::types::{innermost_enclosing, Span};
+use crate::analyzer::types::{innermost_enclosing, span_contains, Span};
 use crate::error::EcpError;
 use crate::graph::NodeKind;
 use crate::uid;
@@ -87,7 +88,7 @@ pub enum Scope {
 /// Why a declaration key or a file's identities cannot be built.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdentityError {
-    /// The path holds a `\` or starts with `./`; see [`canonical_path`].
+    /// The path holds a `\`; see [`canonical_path`].
     NonCanonicalPath(String),
     /// A discriminator with empty text separates nothing.
     EmptyDiscriminator,
@@ -124,16 +125,13 @@ impl fmt::Display for IdentityError {
 impl std::error::Error for IdentityError {}
 
 /// The repo-relative, `/`-separated spelling of a path, as the builder
-/// stores it (`builder.rs` replaces `\` with `/`). Borrowed when unchanged.
+/// stores it: `builder.rs` replaces `\` with `/` and changes nothing else.
+/// A leading `./` is part of the name: a Unix file named `.\a.rs` is stored
+/// `./a.rs`. Borrowed when unchanged.
 pub fn canonical_path(path: &str) -> Cow<'_, str> {
-    let path: Cow<'_, str> = match path.contains('\\') {
+    match path.contains('\\') {
         true => Cow::Owned(path.replace('\\', "/")),
         false => Cow::Borrowed(path),
-    };
-    match path {
-        Cow::Borrowed(p) => Cow::Borrowed(p.strip_prefix("./").unwrap_or(p)),
-        Cow::Owned(s) if s.starts_with("./") => Cow::Owned(s[2..].to_string()),
-        owned => owned,
     }
 }
 
@@ -164,9 +162,9 @@ pub fn owner_match_form(owner: &str) -> Cow<'_, str> {
 }
 
 fn check_path(path: &str) -> Result<(), IdentityError> {
-    match canonical_path(path) {
-        Cow::Borrowed(p) if p.len() == path.len() => Ok(()),
-        _ => Err(IdentityError::NonCanonicalPath(path.to_string())),
+    match path.contains('\\') {
+        true => Err(IdentityError::NonCanonicalPath(path.to_string())),
+        false => Ok(()),
     }
 }
 
@@ -194,15 +192,24 @@ impl<'a> DeclKey<'a> {
         name: &'a str,
     ) -> Result<Self, IdentityError> {
         check_path(path)?;
-        let owner = owner.filter(|o| !o.is_empty());
-        Ok(Self {
+        Ok(Self::unscoped_unchecked(kind, path, owner, name))
+    }
+
+    /// [`DeclKey::unscoped`] for a path the caller has already checked.
+    fn unscoped_unchecked(
+        kind: NodeKind,
+        path: &'a str,
+        owner: Option<&'a str>,
+        name: &'a str,
+    ) -> Self {
+        Self {
             kind,
             path,
-            owner,
+            owner: owner.filter(|o| !o.is_empty()),
             name,
             scope: Scope::Unscoped,
             discriminator: None,
-        })
+        }
     }
 
     /// A declaration that the callable with anchor `parent_anchor` declares.
@@ -218,14 +225,20 @@ impl<'a> DeclKey<'a> {
         if uid::keeps_overloads(kind) {
             return Err(IdentityError::ScopedOverloadKind { kind, decl: None });
         }
-        Ok(Self {
+        Ok(Self::scoped_unchecked(kind, path, name, parent_anchor))
+    }
+
+    /// [`DeclKey::scoped`] for a path and a kind the caller has already
+    /// checked.
+    fn scoped_unchecked(kind: NodeKind, path: &'a str, name: &'a str, parent_anchor: u64) -> Self {
+        Self {
             kind,
             path,
             owner: None,
             name,
             scope: Scope::Lexical { parent_anchor },
             discriminator: None,
-        })
+        }
     }
 
     pub fn with_discriminator(self, d: Discriminator<'a>) -> Result<Self, IdentityError> {
@@ -270,18 +283,23 @@ impl<'a> DeclKey<'a> {
     /// [`DeclKey::uid`] when there is no discriminator. Overlay pairing,
     /// `diff` and a scoped child's uid read the anchor, never an ordinal.
     pub fn anchor(&self) -> u64 {
-        let base = self.uid();
-        let Some(d) = self.discriminator else {
-            return base;
-        };
-        let mut h = Xxh3::new();
-        h.update(&[ANCHOR_TAG]);
-        h.update(&base.to_le_bytes());
-        h.update(&[d.stored_tag(), 0]);
-        h.update(d.text().as_bytes());
-        h.update(&[0xFF]);
-        h.digest()
+        anchor_of(self.uid(), self.discriminator)
     }
+}
+
+/// The anchor of a declaration whose base uid is `base`: `base` itself
+/// without a discriminator, so a caller that holds the uid hashes once.
+fn anchor_of(base: u64, discriminator: Option<Discriminator<'_>>) -> u64 {
+    let Some(d) = discriminator else {
+        return base;
+    };
+    let mut h = Xxh3::new();
+    h.update(&[ANCHOR_TAG]);
+    h.update(&base.to_le_bytes());
+    h.update(&[d.stored_tag(), 0]);
+    h.update(d.text().as_bytes());
+    h.update(&[0xFF]);
+    h.digest()
 }
 
 /// The uid of a lexically scoped declaration.
@@ -302,10 +320,16 @@ pub enum UidSlot {
     First(u64),
     /// A later declaration with an equal base uid, kept as its own node:
     /// `uid::overload(base, ordinal)`, `ordinal` 1-based among the later
-    /// ones. Applies to kinds that keep overloads and to scoped nodes.
+    /// ones. Applies to kinds that keep overloads, to scoped nodes, and to a
+    /// declaration whose arity path ([`FileDecl::arity`]) no earlier
+    /// declaration of the base uid has (C# `Conv<T>` after `Conv`,
+    /// `Foo1<T>.foo` after `Foo1.foo`).
     Later { first: u32, ordinal: u32, uid: u64 },
     /// A later declaration of another kind with an equal base uid. The index
-    /// tombstones it today; `uid` is the base uid it repeats.
+    /// tombstones it today; `uid` is the base uid it repeats. `first` is the
+    /// first declaration of the base uid, or, for a declaration with an
+    /// arity, the first one of the same arity path: the twin that survives
+    /// it.
     Duplicate { first: u32, uid: u64 },
 }
 
@@ -337,6 +361,44 @@ pub struct FileDecl<'a> {
     /// Index of the lexical parent in the same slice, from [`lexical_parents`].
     pub parent: Option<u32>,
     pub discriminator: Option<Discriminator<'a>>,
+    /// The declared generic arity of a declaration whose language keeps two
+    /// same-named types of different arity apart (C#: a type's or a
+    /// delegate's arity, see `analyzer::lexical::splits_by_arity`, and 0
+    /// for every other declaration); `None` everywhere else. A later
+    /// unscoped declaration of an equal base uid repeats an earlier one only
+    /// when both have one arity path (this arity, then that of each
+    /// [`Self::arity_scope`] outward): `Conv<T>` after `Conv`, and
+    /// `Foo1<T>.foo` after `Foo1.foo`, are a [`UidSlot::Later`]; an equal
+    /// path is still a [`UidSlot::Duplicate`]. The arity enters neither the
+    /// base uid nor the anchor, so both declarations share one anchor.
+    pub arity: Option<u32>,
+    /// Index, in the same slice, of the innermost type that encloses this
+    /// declaration, where [`Self::arity`] is set: the next step of the
+    /// arity path. `None` at the top level, wherever the arity is `None`,
+    /// and in a file where no two types share a name, since no two paths
+    /// of one base uid can differ there.
+    pub arity_scope: Option<u32>,
+}
+
+/// Whether declarations `a` and `b` have one arity path: an equal
+/// [`FileDecl::arity`], then an equal one for each enclosing
+/// [`FileDecl::arity_scope`] outward, until both reach the top level or one
+/// enclosing type. A walk longer than the slice is a cycle and has no path.
+fn same_arity_path(decls: &[FileDecl<'_>], mut a: usize, mut b: usize) -> bool {
+    for _ in 0..=decls.len() {
+        if a == b {
+            return true;
+        }
+        if decls[a].arity != decls[b].arity {
+            return false;
+        }
+        match (decls[a].arity_scope, decls[b].arity_scope) {
+            (None, None) => return true,
+            (Some(x), Some(y)) => (a, b) = (x as usize, y as usize),
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// The identity of one declaration of a file.
@@ -348,9 +410,17 @@ pub struct DeclIdentity {
 }
 
 /// Every identity of one file's declarations, in slice order. A parent may
-/// come before or after its children in the slice.
+/// come before or after its children in the slice. A non-canonical `path`
+/// is rejected even when `decls` is empty.
 pub fn assign_file(path: &str, decls: &[FileDecl<'_>]) -> Result<Vec<DeclIdentity>, IdentityError> {
+    check_path(path)?;
     let n = decls.len();
+    if let Some(decl) = decls
+        .iter()
+        .position(|d| d.arity_scope.is_some_and(|s| s as usize >= n))
+    {
+        return Err(IdentityError::BadParent { decl: decl as u32 });
+    }
     let mut anchors: Vec<Option<u64>> = vec![None; n];
     let mut base_uids = vec![0u64; n];
     let mut chain: Vec<usize> = Vec::new();
@@ -374,7 +444,7 @@ pub fn assign_file(path: &str, decls: &[FileDecl<'_>]) -> Result<Vec<DeclIdentit
         for &j in chain.iter().rev() {
             let d = &decls[j];
             let key = match d.parent {
-                None => DeclKey::unscoped(d.kind, path, d.owner, d.name)?,
+                None => DeclKey::unscoped_unchecked(d.kind, path, d.owner, d.name),
                 Some(p) => {
                     if d.owner.is_some_and(|o| !o.is_empty()) {
                         return Err(IdentityError::ScopedWithOwner { decl: j as u32 });
@@ -387,20 +457,23 @@ pub fn assign_file(path: &str, decls: &[FileDecl<'_>]) -> Result<Vec<DeclIdentit
                     }
                     let parent_anchor =
                         anchors[p as usize].expect("the chain resolves a parent before its child");
-                    DeclKey::scoped(d.kind, path, d.name, parent_anchor)?
+                    DeclKey::scoped_unchecked(d.kind, path, d.name, parent_anchor)
                 }
             };
             let key = match d.discriminator {
                 Some(x) => key.with_discriminator(x)?,
                 None => key,
             };
-            base_uids[j] = key.uid();
-            anchors[j] = Some(key.anchor());
+            let base = key.uid();
+            base_uids[j] = base;
+            anchors[j] = Some(anchor_of(base, key.discriminator));
         }
     }
 
-    let mut first_of: FxHashMap<u64, (u32, u32)> = FxHashMap::default();
-    let mut anchor_count: FxHashMap<u64, u32> = FxHashMap::default();
+    let mut first_of: FxHashMap<u64, (u32, u32)> =
+        FxHashMap::with_capacity_and_hasher(n, Default::default());
+    let mut anchor_count: FxHashMap<u64, u32> =
+        FxHashMap::with_capacity_and_hasher(n, Default::default());
     for a in anchors.iter().flatten() {
         *anchor_count.entry(*a).or_insert(0) += 1;
     }
@@ -415,8 +488,19 @@ pub fn assign_file(path: &str, decls: &[FileDecl<'_>]) -> Result<Vec<DeclIdentit
             }
             Entry::Occupied(mut slot) => {
                 let (first, later) = slot.get_mut();
-                match uid::keeps_overloads(d.kind) || d.parent.is_some() {
-                    true => {
+                // The earlier declaration this one repeats. An overload or a
+                // scoped node repeats none. A declaration with an arity
+                // repeats the first one of its arity path, and is a
+                // declaration of its own when no earlier one has that path.
+                let twin = match (uid::keeps_overloads(d.kind) || d.parent.is_some(), d.arity) {
+                    (true, _) => None,
+                    (false, Some(_)) => {
+                        (0..j).find(|&k| base_uids[k] == base && same_arity_path(decls, k, j))
+                    }
+                    (false, None) => Some(*first as usize),
+                };
+                match twin {
+                    None => {
                         *later += 1;
                         UidSlot::Later {
                             first: *first,
@@ -424,8 +508,8 @@ pub fn assign_file(path: &str, decls: &[FileDecl<'_>]) -> Result<Vec<DeclIdentit
                             uid: uid::overload(base, *later),
                         }
                     }
-                    false => UidSlot::Duplicate {
-                        first: *first,
+                    Some(twin) => UidSlot::Duplicate {
+                        first: twin as u32,
                         uid: base,
                     },
                 }
@@ -693,6 +777,10 @@ pub struct CandidateFacts<'a> {
     pub file: &'a str,
     /// 1-based start line, as every command prints it.
     pub line: u32,
+    /// 1-based end line.
+    pub end_line: u32,
+    /// 0-based start and end columns.
+    pub columns: (u32, u32),
     pub name: &'a str,
     /// Owner segments, then lexical parent names, outermost first. Empty
     /// for a root declaration.
@@ -1041,24 +1129,71 @@ impl TargetRequest {
 }
 
 /// The candidates `request` resolves to, as indices into `candidates`: the
-/// per-candidate filters, then the best `--file` tier present.
+/// per-candidate filters, then the best `--file` tier present, then the
+/// constructor exception of [`drop_owned_constructors`].
 pub fn select(request: &TargetRequest, candidates: &[CandidateFacts<'_>]) -> Vec<usize> {
     let admitted = candidates
         .iter()
         .enumerate()
         .filter(|(_, c)| request.admits(c));
-    let Some(needle) = request.file() else {
-        return admitted.map(|(i, _)| i).collect();
+    let picked: Vec<usize> = match request.file() {
+        None => admitted.map(|(i, _)| i).collect(),
+        Some(needle) => {
+            let ranked: Vec<(usize, FileMatch)> = admitted
+                .filter_map(|(i, c)| file_match(needle, c.file).map(|m| (i, m)))
+                .collect();
+            let best = ranked.iter().map(|&(_, m)| m).max();
+            ranked
+                .into_iter()
+                .filter(|&(_, m)| Some(m) == best)
+                .map(|(i, _)| i)
+                .collect()
+        }
     };
-    let ranked: Vec<(usize, FileMatch)> = admitted
-        .filter_map(|(i, c)| file_match(needle, c.file).map(|m| (i, m)))
-        .collect();
-    let best = ranked.iter().map(|&(_, m)| m).max();
-    ranked
-        .into_iter()
-        .filter(|&(_, m)| Some(m) == best)
-        .map(|(i, _)| i)
+    drop_owned_constructors(request, candidates, picked)
+}
+
+/// A bare type name (`Foo`) selects the type over its own same-named
+/// constructors (`class Foo { Foo() {} }` in C#, Java, C++, Dart). A
+/// constructor drops only when its owner is exactly that name and exactly
+/// one type of the same name encloses its whole span, columns included:
+/// the stored owner of a constructor is the bare class name and never the
+/// enclosing path, so the enclosing declaration is the proof. A definition
+/// outside its class (C++ `Foo::Foo() {}`, even on the class's line) sits
+/// in no class's span and stays; a Kotlin or C# primary constructor sits
+/// inside its class's span on the class's line. A qualifier, `--kind` or
+/// `@line` in the request says the caller wants the constructor to compete.
+fn drop_owned_constructors(
+    request: &TargetRequest,
+    candidates: &[CandidateFacts<'_>],
+    picked: Vec<usize>,
+) -> Vec<usize> {
+    if request.qualifier != Qualifier::Any || request.kind.is_some() || request.line.is_some() {
+        return picked;
+    }
+    let owned = |c: &CandidateFacts<'_>| {
+        c.kind == NodeKind::Constructor
+            && matches!(c.qualifier.as_slice(), [owner] if owner.name == c.name && owner.impl_trait.is_none())
+            && {
+                let mut types = picked.iter().map(|&i| &candidates[i]).filter(|t| {
+                    t.kind.declares_type()
+                        && t.name == c.name
+                        && t.file == c.file
+                        && span_contains(span(t), span(c))
+                });
+                types.next().is_some() && types.next().is_none()
+            }
+    };
+    picked
+        .iter()
+        .copied()
+        .filter(|&i| !owned(&candidates[i]))
         .collect()
+}
+
+/// The span of `facts`: 1-based lines, 0-based columns.
+fn span(facts: &CandidateFacts<'_>) -> Span {
+    (facts.line, facts.columns.0, facts.end_line, facts.columns.1)
 }
 
 /// One declaration a request named, as the answer reports it.
@@ -1357,6 +1492,8 @@ mod tests {
             name,
             parent: None,
             discriminator: None,
+            arity: None,
+            arity_scope: None,
         }
     }
 
@@ -1373,6 +1510,8 @@ mod tests {
             kind,
             file,
             line,
+            end_line: line,
+            columns: (0, 0),
             name,
             qualifier,
         }
@@ -1388,10 +1527,29 @@ mod tests {
     // ── declaration identity ──
 
     #[test]
-    fn test_canonical_path_backslash_and_dot_prefix_normalised() {
+    fn test_canonical_path_backslash_replaced_dot_prefix_kept() {
         assert_eq!(canonical_path("src\\a.rs"), "src/a.rs");
-        assert_eq!(canonical_path("./src/a.rs"), "src/a.rs");
+        assert_eq!(canonical_path(".\\a.rs"), "./a.rs");
+        assert_eq!(canonical_path(".\\.\\a.rs"), "././a.rs");
+        assert!(matches!(
+            canonical_path("./src/a.rs"),
+            Cow::Borrowed("./src/a.rs")
+        ));
         assert!(matches!(canonical_path("src/a.rs"), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn test_unscoped_dot_prefix_path_accepted_and_hashed_as_written() {
+        let key = DeclKey::unscoped(NodeKind::Function, "./a.rs", None, "f").unwrap();
+        assert_eq!(key.path(), "./a.rs");
+        assert_eq!(
+            key.uid(),
+            uid::compute(NodeKind::Function, "./a.rs", None, "f")
+        );
+        assert_ne!(
+            key.uid(),
+            uid::compute(NodeKind::Function, "a.rs", None, "f")
+        );
     }
 
     #[test]
@@ -1584,6 +1742,191 @@ mod tests {
         );
     }
 
+    /// `class Conv` and `class Conv<T>` in one file, in either order, with a
+    /// third declaration that repeats the first one's arity.
+    fn arity_file(arities: [u32; 3]) -> Vec<DeclIdentity> {
+        let mut decls = vec![decl(NodeKind::Class, None, "Conv"); 3];
+        for (d, arity) in decls.iter_mut().zip(arities) {
+            d.arity = Some(arity);
+        }
+        assign_file("N/Conv.cs", &decls).unwrap()
+    }
+
+    /// Stands for: a later type whose generic arity no earlier one has keeps
+    /// a node of its own under overload uid 1, in either declaration order,
+    /// while a repeat of an arity is still the tombstoned duplicate of the
+    /// one with that arity (codex ruling P-a, restricted shape (i)).
+    #[test]
+    fn test_assign_file_type_of_new_arity_later_same_arity_duplicate() {
+        let base = uid::compute(NodeKind::Class, "N/Conv.cs", None, "Conv");
+        for arities in [[0, 1, 0], [1, 0, 1]] {
+            let ids = arity_file(arities);
+            assert_eq!(ids[0].slot, UidSlot::First(base), "{arities:?}");
+            assert_eq!(
+                ids[1].slot,
+                UidSlot::Later {
+                    first: 0,
+                    ordinal: 1,
+                    uid: uid::overload(base, 1)
+                },
+                "{arities:?}: the other arity is a type of its own"
+            );
+            assert_eq!(
+                ids[2].slot,
+                UidSlot::Duplicate {
+                    first: 0,
+                    uid: base
+                },
+                "{arities:?}: a repeated arity tombstones against its twin"
+            );
+            assert!(
+                ids.iter().all(|id| id.anchor == base),
+                "{arities:?}: the arity enters no anchor"
+            );
+        }
+    }
+
+    /// Stands for: the twin of a repeated arity is the declaration of that
+    /// arity, not the base uid's first declaration.
+    #[test]
+    fn test_assign_file_repeat_of_later_arity_duplicates_later_twin() {
+        let ids = arity_file([0, 1, 1]);
+        let base = uid::compute(NodeKind::Class, "N/Conv.cs", None, "Conv");
+        assert_eq!(
+            ids[2].slot,
+            UidSlot::Duplicate {
+                first: 1,
+                uid: base
+            }
+        );
+    }
+
+    /// Stands for: a declaration with no arity (every language but C#)
+    /// keeps today's rule, a same-uid type is a duplicate.
+    #[test]
+    fn test_assign_file_type_without_arity_duplicate() {
+        let decls = [
+            decl(NodeKind::Class, None, "Conv"),
+            decl(NodeKind::Class, None, "Conv"),
+        ];
+        let ids = assign_file("Conv.java", &decls).unwrap();
+        let base = uid::compute(NodeKind::Class, "Conv.java", None, "Conv");
+        assert_eq!(
+            ids[1].slot,
+            UidSlot::Duplicate {
+                first: 0,
+                uid: base
+            }
+        );
+    }
+
+    /// `class Foo1` (arity `first`) holding property `foo`, then
+    /// `class Foo1` (arity `second`) holding property `foo`, each property's
+    /// arity scope its own class.
+    fn twin_members(first: u32, second: u32) -> Vec<DeclIdentity> {
+        let mut decls = vec![
+            decl(NodeKind::Class, None, "Foo1"),
+            decl(NodeKind::Property, Some("Foo1"), "foo"),
+            decl(NodeKind::Class, None, "Foo1"),
+            decl(NodeKind::Property, Some("Foo1"), "foo"),
+        ];
+        for (d, arity) in decls.iter_mut().zip([first, 0, second, 0]) {
+            d.arity = Some(arity);
+        }
+        decls[1].arity_scope = Some(0);
+        decls[3].arity_scope = Some(2);
+        assign_file("N/Foo1.cs", &decls).unwrap()
+    }
+
+    /// Stands for: a member of a type of another generic arity is a
+    /// declaration of its own (`Foo1<T>.foo` after `Foo1.foo`, codex ruling
+    /// P-a2): overload uid 1 of the member's base uid, in either order. A
+    /// member of a same-arity duplicate type stays the duplicate it was.
+    #[test]
+    fn test_assign_file_member_of_arity_twin_later_of_same_arity_duplicate() {
+        let foo = uid::compute(NodeKind::Property, "N/Foo1.cs", Some("Foo1"), "foo");
+        for (first, second) in [(0, 1), (1, 0)] {
+            let ids = twin_members(first, second);
+            assert_eq!(
+                ids[3].slot,
+                UidSlot::Later {
+                    first: 1,
+                    ordinal: 1,
+                    uid: uid::overload(foo, 1)
+                },
+                "arity {first} then {second}"
+            );
+            assert_eq!(ids[3].anchor, foo, "the arity enters no anchor");
+        }
+        assert_eq!(
+            twin_members(1, 1)[3].slot,
+            UidSlot::Duplicate { first: 1, uid: foo }
+        );
+    }
+
+    /// Stands for: the arity path runs outward through every enclosing
+    /// type. `Outer.Inner.x` and `Outer<T>.Inner.x` differ only in the
+    /// outer arity, yet each `Inner` and each `x` is a declaration of its
+    /// own; with equal outer arities both repeat.
+    #[test]
+    fn test_assign_file_nested_member_outer_arity_differs_later() {
+        let file = |outer: [u32; 2]| {
+            let mut decls = vec![
+                decl(NodeKind::Class, None, "Outer"),
+                decl(NodeKind::Class, Some("Outer"), "Inner"),
+                decl(NodeKind::Property, Some("Inner"), "x"),
+                decl(NodeKind::Class, None, "Outer"),
+                decl(NodeKind::Class, Some("Outer"), "Inner"),
+                decl(NodeKind::Property, Some("Inner"), "x"),
+            ];
+            for (d, arity) in decls.iter_mut().zip([outer[0], 0, 0, outer[1], 0, 0]) {
+                d.arity = Some(arity);
+            }
+            for (child, scope) in [(1, 0), (2, 1), (4, 3), (5, 4)] {
+                decls[child].arity_scope = Some(scope);
+            }
+            assign_file("N/Outer.cs", &decls).unwrap()
+        };
+        let split = file([0, 1]);
+        assert!(
+            matches!(split[4].slot, UidSlot::Later { first: 1, .. }),
+            "{:?}",
+            split[4]
+        );
+        assert!(
+            matches!(split[5].slot, UidSlot::Later { first: 2, .. }),
+            "{:?}",
+            split[5]
+        );
+        let same = file([1, 1]);
+        assert!(matches!(same[3].slot, UidSlot::Duplicate { first: 0, .. }));
+        assert!(matches!(same[4].slot, UidSlot::Duplicate { first: 1, .. }));
+        assert!(matches!(same[5].slot, UidSlot::Duplicate { first: 2, .. }));
+    }
+
+    /// Stands for: an arity scope outside the slice is rejected like a bad
+    /// parent, and a scope cycle (no caller builds one) has no arity path:
+    /// the walk ends and the repeat is a declaration of its own.
+    #[test]
+    fn test_assign_file_bad_or_cyclic_arity_scope_rejected_or_terminates() {
+        let mut decls = vec![decl(NodeKind::Property, Some("A"), "p"); 2];
+        decls[0].arity = Some(0);
+        decls[1].arity = Some(0);
+        decls[1].arity_scope = Some(7);
+        assert_eq!(
+            assign_file("A.cs", &decls),
+            Err(IdentityError::BadParent { decl: 1 })
+        );
+        decls[0].arity_scope = Some(1);
+        decls[1].arity_scope = Some(0);
+        let ids = assign_file("A.cs", &decls).unwrap();
+        assert!(
+            matches!(ids[1].slot, UidSlot::Later { first: 0, .. }),
+            "{:?}",
+            ids[1]
+        );
+    }
+
     #[test]
     fn test_assign_file_swapped_impls_keep_child_uids() {
         let file = |first: &'static str, second: &'static str| {
@@ -1714,6 +2057,43 @@ mod tests {
     #[test]
     fn test_assign_file_empty_returns_empty() {
         assert_eq!(assign_file("a.rs", &[]), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn test_assign_file_backslash_path_rejected_with_or_without_decls() {
+        let err = Err(IdentityError::NonCanonicalPath("src\\a.rs".into()));
+        assert_eq!(assign_file("src\\a.rs", &[]), err);
+        assert_eq!(
+            assign_file("src\\a.rs", &[decl(NodeKind::Function, None, "f")]),
+            err
+        );
+    }
+
+    #[test]
+    fn test_assign_file_anchor_equals_decl_key_anchor() {
+        let mut decls = vec![
+            decl(NodeKind::Method, Some("A"), "fmt"),
+            decl(NodeKind::Method, Some("A"), "fmt"),
+            decl(NodeKind::Function, None, "pad"),
+        ];
+        decls[1].discriminator = Some(Discriminator::ImplTrait("Display"));
+        decls[2].parent = Some(1);
+        let ids = assign_file("./a.rs", &decls).unwrap();
+        let plain = DeclKey::unscoped(NodeKind::Method, "./a.rs", Some("A"), "fmt").unwrap();
+        let tagged = plain
+            .with_discriminator(Discriminator::ImplTrait("Display"))
+            .unwrap();
+        assert_eq!(ids[0].slot, UidSlot::First(plain.uid()));
+        assert_eq!(
+            ids[0].anchor,
+            plain.uid(),
+            "no discriminator: the anchor is the uid"
+        );
+        assert_eq!(ids[1].anchor, tagged.anchor());
+        assert_ne!(ids[1].anchor, plain.uid());
+        let child = DeclKey::scoped(NodeKind::Function, "./a.rs", "pad", tagged.anchor()).unwrap();
+        assert_eq!(ids[2].slot, UidSlot::First(child.uid()));
+        assert_eq!(ids[2].anchor, child.anchor());
     }
 
     #[test]
@@ -2253,6 +2633,244 @@ mod tests {
             panic!("expected an ambiguity");
         };
         assert!(amb.candidates().iter().all(|c| c.reusable.is_none()));
+    }
+
+    fn bare(name: &str) -> TargetRequest {
+        TargetRequest::parse(name, None, None).unwrap()
+    }
+
+    fn ctor(node: u32, file: &str, line: u32) -> CandidateFacts<'_> {
+        facts(
+            node,
+            NodeKind::Constructor,
+            file,
+            line,
+            vec![seg("Foo")],
+            "Foo",
+        )
+    }
+
+    fn class<'a>(
+        node: u32,
+        file: &'a str,
+        lines: (u32, u32),
+        qualifier: Vec<PathSegment<'a>>,
+    ) -> CandidateFacts<'a> {
+        CandidateFacts {
+            end_line: lines.1,
+            ..facts(node, NodeKind::Class, file, lines.0, qualifier, "Foo")
+        }
+    }
+
+    #[test]
+    fn test_select_bare_type_single_constructor_selects_type() {
+        let named = [class(0, "a.cs", (1, 4), vec![]), ctor(1, "a.cs", 2)];
+        assert_eq!(select(&bare("Foo"), &named), vec![0]);
+    }
+
+    #[test]
+    fn test_select_bare_type_two_overloads_both_drop() {
+        let named = [
+            class(0, "a.cs", (1, 4), vec![seg("N")]),
+            ctor(1, "a.cs", 2),
+            ctor(2, "a.cs", 3),
+        ];
+        assert_eq!(select(&bare("Foo"), &named), vec![0]);
+    }
+
+    #[test]
+    fn test_select_bare_nested_type_selects_nested_type() {
+        let named = [
+            class(0, "a.java", (2, 5), vec![seg("Outer")]),
+            ctor(1, "a.java", 3),
+        ];
+        assert_eq!(select(&bare("Foo"), &named), vec![0]);
+    }
+
+    #[test]
+    fn test_select_bare_two_types_one_file_drops_enclosed_constructor() {
+        let named = [
+            class(0, "a.java", (1, 4), vec![]),
+            class(1, "a.java", (5, 8), vec![seg("Outer")]),
+            ctor(2, "a.java", 6),
+        ];
+        assert_eq!(select(&bare("Foo"), &named), vec![0, 1]);
+    }
+
+    /// Stands for: a constructor declared outside its class encloses in no
+    /// same-file type, so it keeps competing. Failed before: C++
+    /// `namespace B { Foo::Foo() {} }` below `namespace A { class Foo {}; }`
+    /// dropped and the bare name selected `A::Foo`.
+    #[test]
+    fn test_select_bare_out_of_class_constructor_stays() {
+        let named = [
+            class(0, "impl.cpp", (3, 3), vec![seg("A")]),
+            ctor(1, "impl.cpp", 6),
+        ];
+        assert_eq!(select(&bare("Foo"), &named), vec![0, 1]);
+    }
+
+    fn spanned<'a>(
+        facts: CandidateFacts<'a>,
+        end_line: u32,
+        columns: (u32, u32),
+    ) -> CandidateFacts<'a> {
+        CandidateFacts {
+            end_line,
+            columns,
+            ..facts
+        }
+    }
+
+    /// Stands for: an out-of-class definition beside a same-named class on
+    /// one line is not that class's constructor. Failed at 15f1bbe1, which
+    /// compared lines only: `namespace A { class Foo {}; } namespace B {
+    /// Foo::Foo() {} }` on one line dropped the constructor (codex
+    /// counterexample).
+    #[test]
+    fn test_select_bare_out_of_class_constructor_on_type_line_stays() {
+        let named = [
+            spanned(class(0, "impl.cpp", (2, 2), vec![seg("A")]), 2, (14, 26)),
+            spanned(ctor(1, "impl.cpp", 2), 2, (44, 57)),
+        ];
+        assert_eq!(select(&bare("Foo"), &named), vec![0, 1]);
+    }
+
+    #[test]
+    fn test_select_bare_constructor_after_type_end_on_last_line_stays() {
+        let named = [
+            spanned(class(0, "a.cpp", (1, 3), vec![]), 3, (0, 2)),
+            spanned(ctor(1, "a.cpp", 3), 3, (4, 18)),
+        ];
+        assert_eq!(select(&bare("Foo"), &named), vec![0, 1]);
+    }
+
+    /// Stands for: a Kotlin or C# primary constructor sits on its class's
+    /// line, inside the class's span, and drops like any own constructor.
+    #[test]
+    fn test_select_bare_primary_constructor_on_type_line_selects_type() {
+        let named = [
+            spanned(class(0, "Foo.kt", (1, 4), vec![]), 4, (0, 1)),
+            spanned(ctor(1, "Foo.kt", 1), 1, (9, 21)),
+        ];
+        assert_eq!(select(&bare("Foo"), &named), vec![0]);
+    }
+
+    /// Stands for: a C# attribute class or a Kotlin `annotation class` is a
+    /// type, so its own constructor drops as a class's does.
+    #[test]
+    fn test_select_bare_annotation_type_drops_own_constructor() {
+        let named = [
+            CandidateFacts {
+                kind: NodeKind::Annotation,
+                ..class(0, "a.cs", (1, 4), vec![])
+            },
+            ctor(1, "a.cs", 2),
+        ];
+        assert_eq!(select(&bare("Foo"), &named), vec![0]);
+    }
+
+    #[test]
+    fn test_select_bare_type_below_constructor_keeps_constructor() {
+        let named = [ctor(0, "impl.cpp", 2), class(1, "impl.cpp", (5, 8), vec![])];
+        assert_eq!(select(&bare("Foo"), &named), vec![0, 1]);
+    }
+
+    #[test]
+    fn test_select_bare_same_named_types_two_files_stay_ambiguous() {
+        let named = [
+            class(0, "a.cs", (1, 4), vec![]),
+            ctor(1, "a.cs", 2),
+            class(2, "b.cs", (1, 4), vec![]),
+            ctor(3, "b.cs", 2),
+        ];
+        assert_eq!(select(&bare("Foo"), &named), vec![0, 2]);
+    }
+
+    #[test]
+    fn test_select_bare_unrelated_function_namesake_stays_ambiguous() {
+        let named = [
+            class(0, "a.cs", (1, 4), vec![]),
+            ctor(1, "a.cs", 2),
+            facts(2, NodeKind::Function, "b.py", 1, vec![], "Foo"),
+        ];
+        assert_eq!(select(&bare("Foo"), &named), vec![0, 2]);
+    }
+
+    #[test]
+    fn test_select_bare_constructor_in_other_file_than_type_stays() {
+        let named = [class(0, "foo.h", (1, 4), vec![]), ctor(1, "foo.cpp", 2)];
+        assert_eq!(select(&bare("Foo"), &named), vec![0, 1]);
+    }
+
+    #[test]
+    fn test_select_bare_constructor_with_unrecorded_owner_stays() {
+        let named = [
+            class(0, "a.cs", (1, 4), vec![]),
+            facts(1, NodeKind::Constructor, "a.cs", 2, vec![], "Foo"),
+        ];
+        assert_eq!(select(&bare("Foo"), &named), vec![0, 1]);
+    }
+
+    #[test]
+    fn test_select_constructor_owned_by_other_name_stays() {
+        let named = [
+            class(0, "a.cs", (1, 4), vec![]),
+            facts(1, NodeKind::Constructor, "a.cs", 2, vec![seg("Bar")], "Foo"),
+        ];
+        assert_eq!(select(&bare("Foo"), &named), vec![0, 1]);
+    }
+
+    #[test]
+    fn test_select_explicit_kind_constructor_keeps_overloads() {
+        let named = [
+            class(0, "a.cs", (1, 4), vec![]),
+            ctor(1, "a.cs", 2),
+            ctor(2, "a.cs", 3),
+        ];
+        let r = TargetRequest::parse("Foo", Some("constructor"), None).unwrap();
+        assert_eq!(select(&r, &named), vec![1, 2]);
+    }
+
+    #[test]
+    fn test_select_line_selector_reaches_constructor() {
+        let named = [
+            class(0, "a.cs", (1, 4), vec![]),
+            ctor(1, "a.cs", 2),
+            ctor(2, "a.cs", 3),
+        ];
+        let r = TargetRequest::parse("Foo@3", None, None).unwrap();
+        assert_eq!(select(&r, &named), vec![2]);
+    }
+
+    #[test]
+    fn test_select_qualified_foo_foo_keeps_overload_ambiguity() {
+        let named = [
+            class(0, "a.cs", (1, 4), vec![]),
+            ctor(1, "a.cs", 2),
+            ctor(2, "a.cs", 3),
+        ];
+        assert_eq!(select(&bare("Foo.Foo"), &named), vec![1, 2]);
+    }
+
+    #[test]
+    fn test_resolve_target_bare_type_with_constructor_is_unique_and_ctor_reusable() {
+        let named = [
+            class(0, "a.cs", (1, 4), vec![]),
+            ctor(1, "a.cs", 2),
+            ctor(2, "a.cs", 3),
+        ];
+        match resolve_target(&bare("Foo"), &named) {
+            TargetResolution::Unique(c) => assert_eq!((c.node, c.kind), (0, NodeKind::Class)),
+            other => panic!("{other:?}"),
+        }
+        let TargetResolution::Ambiguous(amb) = resolve_target(&bare("Foo.Foo"), &named) else {
+            panic!("expected an ambiguity");
+        };
+        for c in amb.candidates() {
+            let req = c.reusable.as_ref().expect("each overload has a target");
+            assert_eq!(select(req, &named), vec![c.node as usize]);
+        }
     }
 
     #[test]

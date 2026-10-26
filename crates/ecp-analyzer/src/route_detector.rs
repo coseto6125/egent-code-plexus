@@ -1,5 +1,7 @@
-use crate::framework_helpers::strip_python_string_quotes;
-use ecp_core::analyzer::types::RawRoute;
+use crate::framework_helpers::{node_span, span_area, span_contains, strip_python_string_quotes};
+use ecp_core::analyzer::types::{RawNode, RawRoute};
+use ecp_core::contracts::raw_records::{RawEndpoint, Unbound};
+use ecp_core::graph::NodeKind;
 
 const HTTP_METHODS: &[&str] = &[
     "get", "post", "put", "delete", "patch", "options", "head", "connect", "trace",
@@ -172,14 +174,10 @@ fn verbs_in_method_value(value: &str) -> Vec<&'static str> {
     verbs
 }
 
-/// The HTTP verbs a decorator names, in source order. A verb-named decorator
-/// (`@GetMapping`, `[HttpPost]`, `@router.delete`) reads it from the name token
-/// only: the path and keyword arguments may contain verb substrings
-/// (`@PostMapping("/get-token")`). A generic route decorator (`@RequestMapping`,
-/// Flask `@app.route`, Symfony `#[Route]`) reads it from its `method` /
-/// `methods` argument, outside string literals; without one it names no verb,
-/// so a class-level `@RequestMapping("/api")` yields none.
-fn decorator_verbs(decorator: &str) -> Vec<&'static str> {
+/// A decorator's name, lowercased, without its qualifier (`GetMapping` in
+/// `@org.springframework.GetMapping("/x")`), and the decorator text after its
+/// sigil.
+fn decorator_name(decorator: &str) -> (String, &str) {
     let trimmed = decorator
         .trim()
         .trim_start_matches(['#', '@', '['])
@@ -192,6 +190,221 @@ fn decorator_verbs(decorator: &str) -> Vec<&'static str> {
         .next()
         .unwrap_or("")
         .to_lowercase();
+    (name, trimmed)
+}
+
+/// The routes the decorators of `node` declare; `nodes` is its file. A
+/// Spring mapping (`@GetMapping`, `@RequestMapping`) on a method of an HTTP
+/// client interface (`@FeignClient`, `@HttpExchange`) describes a request
+/// the application sends, so it declares no route. Every other mapping
+/// routes: Spring serves the mappings that an interface or a base class
+/// declares for the controller that implements or extends it (an
+/// openapi-generator `PetApi`), and a composed stereotype such as
+/// `@ApiController` marks a controller too. Pass 1.5 and the entry-point
+/// scorer both read this.
+pub fn node_decorator_routes(node: &RawNode, nodes: &[RawNode]) -> Vec<DetectedRoute> {
+    let owner = owner_class(node, nodes);
+    let mut client = None;
+    node.decorators
+        .iter()
+        .filter(|decorator| {
+            !decorator_name(decorator).0.ends_with("mapping")
+                || !*client.get_or_insert_with(|| in_http_client(owner))
+        })
+        .flat_map(|decorator| {
+            let routes = detect_all_from_decorator(decorator);
+            let prefixes = match (routes.is_empty(), owner) {
+                (false, Some(class)) => class_route_prefixes(class, &decorator_name(decorator).0),
+                _ => Vec::new(),
+            };
+            if prefixes.is_empty() {
+                return routes;
+            }
+            prefixes
+                .iter()
+                .flat_map(|prefix| {
+                    routes.iter().map(|route| DetectedRoute {
+                        method: route.method.clone(),
+                        path: ecp_core::contracts::identity::join_route_path(prefix, &route.path),
+                    })
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// The innermost class or interface around `node` named like its owner. A
+/// node with no owner, or whose owner is not in `nodes`, has none: nothing
+/// proves it.
+fn owner_class<'a>(node: &RawNode, nodes: &'a [RawNode]) -> Option<&'a RawNode> {
+    let owner = node.owner_class.as_deref()?;
+    nodes
+        .iter()
+        .filter(|n| {
+            matches!(n.kind, NodeKind::Class | NodeKind::Interface)
+                && n.name == owner
+                && span_contains(n.span, node.span)
+        })
+        .min_by_key(|n| span_area(n.span))
+}
+
+/// Whether `owner` carries `@FeignClient` or `@HttpExchange`.
+fn in_http_client(owner: Option<&RawNode>) -> bool {
+    owner.is_some_and(|class| {
+        class
+            .decorators
+            .iter()
+            .any(|d| matches!(decorator_name(d).0.as_str(), "feignclient" | "httpexchange"))
+    })
+}
+
+/// The path prefixes a class puts on the route of one of its methods whose
+/// decorator is named `method_decorator` (lowercase). A Spring `*Mapping`
+/// method takes the class `@RequestMapping` paths; a verb-named NestJS
+/// method (`@Get`) takes the class `@Controller` paths. A class that has
+/// several paths gives several prefixes, one route each. Empty when the
+/// class names none.
+fn class_route_prefixes(class: &RawNode, method_decorator: &str) -> Vec<String> {
+    let spring = method_decorator.ends_with("mapping");
+    class
+        .decorators
+        .iter()
+        .flat_map(|decorator| match spring {
+            true => spring_class_prefixes(decorator),
+            false => nest_controller_prefixes(decorator),
+        })
+        .collect()
+}
+
+/// The paths of a class-level Spring `@RequestMapping("/api")`,
+/// `@RequestMapping(value = {"/a", "/b"})`; empty for any other decorator.
+fn spring_class_prefixes(decorator: &str) -> Vec<String> {
+    let (name, trimmed) = decorator_name(decorator);
+    if name != "requestmapping" {
+        return Vec::new();
+    }
+    spring_path_args(trimmed)
+        .into_iter()
+        .filter(|p| looks_like_path(p))
+        .collect()
+}
+
+/// The string literals of the `value` / `path` arguments of a Spring mapping,
+/// or of its first argument when that one has no key. `name = "x"`,
+/// `produces = "..."` and the other keyed arguments are not paths.
+fn spring_path_args(decorator: &str) -> Vec<String> {
+    let Some((_, args)) = decorator.split_once('(') else {
+        return Vec::new();
+    };
+    let mut parts: Vec<&str> = Vec::new();
+    let (mut depth, mut start) = (0usize, 0usize);
+    let (mut quote, mut escaped) = (None::<char>, false);
+    for (i, c) in args.char_indices() {
+        if let Some(q) = quote {
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, '\\') => escaped = true,
+                (false, _) if c == q => quote = None,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => quote = Some(c),
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' if depth == 0 => {
+                parts.push(&args[start..i]);
+                start = args.len();
+                break;
+            }
+            ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(&args[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if start < args.len() {
+        parts.push(&args[start..]);
+    }
+    parts
+        .into_iter()
+        .enumerate()
+        .flat_map(|(position, part)| {
+            let part = part.trim();
+            let key_end = part
+                .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .unwrap_or(part.len());
+            let after_key = part[key_end..].trim_start();
+            let value = match (after_key.strip_prefix('='), &part[..key_end]) {
+                (Some(value), "value" | "path") => value,
+                (Some(_), _) => return Vec::new(),
+                (None, _) if position == 0 => part,
+                (None, _) => return Vec::new(),
+            };
+            extract_string_args(value)
+        })
+        .collect()
+}
+
+/// The paths of a NestJS `@Controller('users')`, `@Controller(['a', 'b'])`
+/// and `@Controller({ path: 'users' })`; empty for any other decorator, for
+/// `@Controller()` and for a blank path. The route decorator pass and the
+/// TypeScript parser both read it, so one endpoint gets one path.
+pub fn nest_controller_prefixes(decorator: &str) -> Vec<String> {
+    let (name, trimmed) = decorator_name(decorator);
+    if name != "controller" {
+        return Vec::new();
+    }
+    let args = trimmed
+        .split_once('(')
+        .map_or("", |(_, args)| args.trim_start());
+    let scoped = match args.starts_with('{') {
+        true => object_path_value(args),
+        false => args,
+    };
+    extract_string_args(scoped)
+        .into_iter()
+        .filter(|p| !p.trim().is_empty())
+        .collect()
+}
+
+/// The value text of the `path` key of an object literal: a string or an
+/// array. Empty when the object has no `path` key.
+fn object_path_value(object: &str) -> &str {
+    for (at, _) in object.match_indices("path") {
+        let before = object[..at].chars().next_back();
+        if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            continue;
+        }
+        let after = object[at + 4..]
+            .trim_start_matches(['"', '\''])
+            .trim_start();
+        let Some(rest) = after.strip_prefix(':') else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        return match rest.chars().next() {
+            Some('[') => &rest[..rest.find(']').map_or(rest.len(), |i| i + 1)],
+            Some(quote @ ('"' | '\'')) => {
+                &rest[..rest[1..].find(quote).map_or(rest.len(), |i| i + 2)]
+            }
+            _ => "",
+        };
+    }
+    ""
+}
+
+/// The HTTP verbs a decorator names, in source order. A verb-named decorator
+/// (`@GetMapping`, `[HttpPost]`, `@router.delete`) reads it from the name token
+/// only: the path and keyword arguments may contain verb substrings
+/// (`@PostMapping("/get-token")`). A generic route decorator (`@RequestMapping`,
+/// Flask `@app.route`, Symfony `#[Route]`) reads it from its `method` /
+/// `methods` argument, outside string literals; without one it names no verb,
+/// so a class-level `@RequestMapping("/api")` yields none.
+fn decorator_verbs(decorator: &str) -> Vec<&'static str> {
+    let (name, trimmed) = decorator_name(decorator);
     if matches!(name.as_str(), "requestmapping" | "route" | "api_route") {
         return method_argument(trimmed)
             .map(verbs_in_method_value)
@@ -213,10 +426,12 @@ pub fn detect_all_from_decorator(decorator: &str) -> Vec<DetectedRoute> {
     if verbs.is_empty() {
         return Vec::new();
     }
-    let Some(path) = extract_string_args(decorator)
-        .into_iter()
-        .find(|s| looks_like_path(s))
-    else {
+    let (name, trimmed) = decorator_name(decorator);
+    let strings = match name.ends_with("mapping") {
+        true => spring_path_args(trimmed),
+        false => extract_string_args(decorator),
+    };
+    let Some(path) = strings.into_iter().find(|s| looks_like_path(s)) else {
         return Vec::new();
     };
     verbs
@@ -232,6 +447,25 @@ pub fn detect_all_from_decorator(decorator: &str) -> Vec<DetectedRoute> {
 /// (`builder.rs` pass 1.5, `entry_points.rs`) take one route per decorator.
 pub fn detect_from_decorator(decorator: &str) -> Option<DetectedRoute> {
     detect_all_from_decorator(decorator).into_iter().next()
+}
+
+/// The HTTP verb a call name ends in, on a whole word of the name: `get`,
+/// `router.delete`, `MapDelete` and `HttpGET` name a verb; `getTarget`,
+/// `outputs`, `deleted` and `posted_at` only contain one.
+fn verb_of_call_name(name: &str) -> Option<&'static str> {
+    let last = name
+        .rsplit(|c: char| !c.is_alphanumeric())
+        .find(|s| !s.is_empty())?;
+    let mut word_start = 0;
+    let mut prev_lower = false;
+    for (i, c) in last.char_indices() {
+        if c.is_uppercase() && prev_lower {
+            word_start = i;
+        }
+        prev_lower = c.is_lowercase() || c.is_ascii_digit();
+    }
+    let word = last[word_start..].to_lowercase();
+    HTTP_METHODS.iter().copied().find(|&m| m == word)
 }
 
 pub fn detect_from_call(raw: &RawRoute) -> Option<DetectedRoute> {
@@ -273,7 +507,7 @@ pub fn detect_from_call(raw: &RawRoute) -> Option<DetectedRoute> {
         });
     }
 
-    let method = HTTP_METHODS.iter().find(|&&m| lower.contains(m))?;
+    let method = verb_of_call_name(&raw.method)?;
 
     // Raw path may arrive wrapped in `"…"` / `'…'` because Python / TS
     // tree-sitter `string` nodes carry the literal quote bytes. Peel them
@@ -350,29 +584,128 @@ pub fn clean_route_path_lax(raw_with_quotes: &str) -> Option<String> {
     }
 }
 
-/// Route path segments joined the way a router with groups joins a group
-/// prefix to a route path (Laravel `prefix`): each segment trimmed of `/`,
-/// empty segments dropped, one leading `/`. `["admin/", "/users"]` gives
-/// `/admin/users`; no non-empty segment gives `/`.
-pub fn join_route_path<'a>(segments: impl IntoIterator<Item = &'a str>) -> String {
-    let mut path = String::new();
-    for part in segments
-        .into_iter()
-        .flat_map(|segment| segment.split('/'))
-        .filter(|part| !part.is_empty())
-    {
-        path.push('/');
-        path.push_str(part);
+/// Route path segments of nested router groups (Laravel `prefix`), folded
+/// left to right through the one prefix rule, C1 `join_route_path`. Every
+/// segment but the last is a group prefix, so its trailing `/` never
+/// reaches the route path; the last segment keeps C1's trailing-`/` rule.
+/// No non-empty segment gives `/`.
+pub fn join_route_segments<'a>(segments: impl IntoIterator<Item = &'a str>) -> String {
+    use ecp_core::contracts::identity::join_route_path;
+    let mut segments = segments.into_iter().peekable();
+    let mut joined = String::new();
+    while let Some(segment) = segments.next() {
+        joined = join_route_path(&joined, segment);
+        if segments.peek().is_some() {
+            joined.truncate(joined.trim_end_matches('/').len());
+        }
     }
-    if path.is_empty() {
-        path.push('/');
+    join_route_path(&joined, "")
+}
+
+/// BlindSpot kind of a route whose registration names a handler that binds
+/// no declaration of its file: a Rails `posts#index`, an imported Express
+/// handler, two same-name candidates. Its hint is [`unbound_handler_hint`].
+pub const BS_KIND_ROUTE_UNBOUND_HANDLER: &str = "route-unbound-handler";
+
+/// BlindSpot kind of a route whose registration shows no handler that the
+/// parser reads: a gRPC `rpc`, a handler that a call builds. Its hint is
+/// [`absent_handler_hint`].
+pub const BS_KIND_ROUTE_HANDLER_ABSENT: &str = "route-handler-absent";
+
+const UNBOUND_HANDLER_HEAD: &str = " names handler `";
+const UNBOUND_HANDLER_TAIL: &str = "`, which binds no declaration of this file";
+const ABSENT_HANDLER_TAIL: &str = ": the registration shows no handler the parser reads";
+
+/// The hint of a [`BS_KIND_ROUTE_UNBOUND_HANDLER`] BlindSpot. It starts
+/// with the Route node's name, because one registration can register
+/// several routes at one site.
+pub fn unbound_handler_hint(route_name: &str, handler: &str) -> String {
+    format!("{route_name}{UNBOUND_HANDLER_HEAD}{handler}{UNBOUND_HANDLER_TAIL}")
+}
+
+/// The handler name in an [`unbound_handler_hint`] of `route_name`; `None`
+/// for a hint of another route.
+pub fn unbound_handler<'h>(hint: &'h str, route_name: &str) -> Option<&'h str> {
+    hint.strip_prefix(route_name)?
+        .strip_prefix(UNBOUND_HANDLER_HEAD)?
+        .strip_suffix(UNBOUND_HANDLER_TAIL)
+}
+
+/// The hint of a [`BS_KIND_ROUTE_HANDLER_ABSENT`] BlindSpot.
+pub fn absent_handler_hint(route_name: &str) -> String {
+    format!("{route_name}{ABSENT_HANDLER_TAIL}")
+}
+
+/// Whether `hint` is the [`absent_handler_hint`] of `route_name`.
+pub fn is_absent_handler_hint(hint: &str, route_name: &str) -> bool {
+    hint.strip_prefix(route_name) == Some(ABSENT_HANDLER_TAIL)
+}
+
+/// The arguments of a registration call, comments skipped.
+pub fn call_arguments<'t>(args: Option<tree_sitter::Node<'t>>) -> Vec<tree_sitter::Node<'t>> {
+    let Some(args) = args else {
+        return Vec::new();
+    };
+    let mut cursor = args.walk();
+    args.named_children(&mut cursor)
+        .filter(|n| !n.is_extra())
+        .collect()
+}
+
+/// The handler that a registration's handler argument `arg` gives. A
+/// function written in place is [`Unbound::Inline`] at the argument's own
+/// span, so binding takes only the closure node that argument became, never
+/// a middleware closure of the same call. An argument of a kind in
+/// `name_kinds` names the handler by its text. Anything else (the path
+/// alone, a call that builds the handler) is no handler.
+pub fn argument_handler(
+    arg: tree_sitter::Node,
+    source: &[u8],
+    function_kinds: &[&str],
+    name_kinds: &[&str],
+) -> Option<RawEndpoint> {
+    match arg.kind() {
+        kind if function_kinds.contains(&kind) => {
+            Some(RawEndpoint::Unresolved(Unbound::Inline(node_span(&arg))))
+        }
+        kind if name_kinds.contains(&kind) => RawRoute::named_handler(arg.utf8_text(source).ok()),
+        _ => None,
     }
-    path
+}
+
+/// The handler that a registration call passes as its last argument
+/// (Express and gin run the last one; the ones before it are middleware),
+/// read by [`argument_handler`].
+pub fn last_argument_handler(
+    args: Option<tree_sitter::Node>,
+    source: &[u8],
+    function_kinds: &[&str],
+    name_kinds: &[&str],
+) -> Option<RawEndpoint> {
+    let last = *call_arguments(args).last()?;
+    argument_handler(last, source, function_kinds, name_kinds)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_unbound_handler_hint_round_trip_returns_name_for_own_route_only() {
+        let hint = unbound_handler_hint("GET /users", "posts#index");
+        assert_eq!(unbound_handler(&hint, "GET /users"), Some("posts#index"));
+        assert_eq!(unbound_handler(&hint, "POST /users"), None);
+        assert_eq!(unbound_handler(&hint, "GET /user"), None);
+        assert_eq!(unbound_handler("", "GET /users"), None);
+    }
+
+    #[test]
+    fn test_is_absent_handler_hint_own_route_true_other_false() {
+        let hint = absent_handler_hint("GRPC /pkg.Svc/M");
+        assert!(is_absent_handler_hint(&hint, "GRPC /pkg.Svc/M"));
+        assert!(!is_absent_handler_hint(&hint, "GRPC /pkg.Svc"));
+        assert!(!is_absent_handler_hint("", "GRPC /pkg.Svc/M"));
+    }
 
     fn raw(method: &str, path: &str) -> RawRoute {
         RawRoute {
@@ -499,6 +832,50 @@ mod tests {
             some("POST", "/get-token")
         );
         assert_eq!(dec("@GetMapping(\"/post-it\")"), some("GET", "/post-it"));
+    }
+
+    #[test]
+    fn test_spring_class_prefixes_keyed_arguments_other_than_value_and_path_are_no_prefix() {
+        assert_eq!(
+            spring_class_prefixes("@RequestMapping(name = \"/ctl\")"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            spring_class_prefixes("@RequestMapping(name = \"/ctl\", path = \"/api\")"),
+            vec!["/api".to_string()]
+        );
+        assert_eq!(
+            spring_class_prefixes(
+                "@RequestMapping(produces = \"/json\", value = {\"/a\", \"/b\"})"
+            ),
+            vec!["/a".to_string(), "/b".to_string()]
+        );
+        assert_eq!(
+            spring_class_prefixes("@RequestMapping(\"/api\", name = \"/ctl\")"),
+            vec!["/api".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_spring_class_prefixes_empty_blank_and_bare_mapping_yield_none() {
+        for d in [
+            "@RequestMapping",
+            "@RequestMapping()",
+            "@RequestMapping(\"\")",
+            "@RequestMapping(\"  \")",
+            "@RequestMapping(value = \"\")",
+        ] {
+            assert_eq!(spring_class_prefixes(d), Vec::<String>::new(), "{d}");
+        }
+    }
+
+    #[test]
+    fn test_detect_from_decorator_spring_name_argument_is_not_the_path() {
+        assert_eq!(
+            dec("@GetMapping(name = \"/label\", value = \"/real\")"),
+            some("GET", "/real")
+        );
+        assert_eq!(dec("@GetMapping(name = \"/label\")"), None);
     }
 
     #[test]
@@ -816,20 +1193,110 @@ mod tests {
     }
 
     #[test]
-    fn test_join_route_path_stray_slashes_joins_with_single_slashes() {
+    fn test_join_route_segments_stray_slashes_keeps_c1_trailing_slash() {
         assert_eq!(
-            join_route_path(["/admin/", "import", "/award/"]),
-            "/admin/import/award"
+            join_route_segments(["/admin/", "import", "/award/"]),
+            "/admin/import/award/"
         );
     }
 
     #[test]
-    fn test_join_route_path_empty_segments_returns_root() {
-        assert_eq!(join_route_path(["", "/", ""]), "/");
+    fn test_join_route_segments_empty_segments_returns_root() {
+        assert_eq!(join_route_segments(["", "/", ""]), "/");
+        assert_eq!(join_route_segments(Vec::<&str>::new()), "/");
+        assert_eq!(join_route_segments(["  "]), "/");
     }
 
     #[test]
-    fn test_join_route_path_empty_prefix_keeps_path() {
-        assert_eq!(join_route_path(["", "/users/{id}"]), "/users/{id}");
+    fn test_join_route_segments_empty_prefix_keeps_path() {
+        assert_eq!(join_route_segments(["", "/users/{id}"]), "/users/{id}");
+        assert_eq!(join_route_segments(["/", "/users"]), "/users");
+    }
+
+    #[test]
+    fn test_join_route_segments_slash_only_tail_matches_c1() {
+        assert_eq!(join_route_segments(["/api", "/"]), "/api/");
+        assert_eq!(join_route_segments(["/api", ""]), "/api");
+    }
+
+    #[test]
+    fn test_join_route_segments_prefix_trailing_slash_never_reaches_path() {
+        assert_eq!(join_route_segments(["/api/", "v1/", ""]), "/api/v1");
+        assert_eq!(
+            join_route_segments(["/api/", "v1/", "users/"]),
+            "/api/v1/users/"
+        );
+    }
+
+    fn call(method: &str, path: &str) -> RawRoute {
+        RawRoute {
+            method: method.to_string(),
+            path: path.to_string(),
+            handler: None,
+            span: (0, 0, 0, 0),
+            scope: None,
+        }
+    }
+
+    fn verb(method: &str) -> Option<String> {
+        detect_from_call(&call(method, "/x")).map(|r| r.method)
+    }
+
+    #[test]
+    fn test_detect_from_call_mapdelete_returns_delete() {
+        assert_eq!(verb("MapDelete").as_deref(), Some("DELETE"));
+        assert_eq!(verb("MapGet").as_deref(), Some("GET"));
+        assert_eq!(verb("router.delete").as_deref(), Some("DELETE"));
+        assert_eq!(verb("GET").as_deref(), Some("GET"));
+        assert_eq!(verb("patch").as_deref(), Some("PATCH"));
+    }
+
+    #[test]
+    fn test_detect_from_call_verb_substring_names_return_none() {
+        for name in [
+            "getTarget",
+            "outputs",
+            "deleted",
+            "posted",
+            "puts",
+            "patchwork",
+            "headers",
+            "output",
+            "",
+            "   ",
+        ] {
+            assert_eq!(verb(name), None, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn test_detect_from_call_verb_word_in_the_middle_returns_none() {
+        assert_eq!(verb("MapDeleteAll"), None);
+    }
+
+    #[test]
+    fn test_nest_controller_prefixes_forms_return_each_path() {
+        assert_eq!(nest_controller_prefixes("@Controller('users')"), ["users"]);
+        assert_eq!(
+            nest_controller_prefixes("@Controller([\"a\", 'b'])"),
+            ["a", "b"]
+        );
+        assert_eq!(
+            nest_controller_prefixes("@Controller({ path: ['a', 'b'], host: 'h' })"),
+            ["a", "b"]
+        );
+        assert_eq!(
+            nest_controller_prefixes("@Controller({ host: 'h', path: 'p' })"),
+            ["p"]
+        );
+    }
+
+    #[test]
+    fn test_nest_controller_prefixes_absent_blank_or_other_returns_empty() {
+        assert!(nest_controller_prefixes("@Controller()").is_empty());
+        assert!(nest_controller_prefixes("@Controller").is_empty());
+        assert!(nest_controller_prefixes("@Controller(' ')").is_empty());
+        assert!(nest_controller_prefixes("@Controller({ host: 'h' })").is_empty());
+        assert!(nest_controller_prefixes("@Injectable('x')").is_empty());
     }
 }

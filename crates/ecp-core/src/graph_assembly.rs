@@ -13,10 +13,11 @@
 //! `CallMeta::edge_idx`. Callers hand over what they know; the invariants
 //! are applied once, here.
 
+use crate::contracts::workspace::WorkspaceFacts;
 use crate::graph::{
     BlindSpotRecord, CallMeta, Edge, ExportAliasFact, File, FunctionMeta, ImportFact,
-    NameIndexEntry, Node, NodeKind, PathAliasFact, RouteMiddleware, RouteShape, SupertypeFact,
-    ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
+    LexicalParentFact, NameIndexEntry, Node, NodeKind, PathAliasFact, RouteMiddleware, RouteShape,
+    SupertypeFact, ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
 };
 use crate::pool::StringPool;
 
@@ -67,6 +68,11 @@ pub struct GraphAssembly {
     /// Any order. Sorted by `node_idx` by `finish`, which keeps the first
     /// entry of a repeated Route.
     pub route_middleware: Vec<RouteMiddleware>,
+    /// Contract C2's workspace facts; stored as given.
+    pub workspace: WorkspaceFacts,
+    /// Any order. Sorted by `node_idx` by `finish`, which keeps the first
+    /// row of a repeated node.
+    pub lexical_parents: Vec<LexicalParentFact>,
 }
 
 /// The import / export facts of each file and node, as the builder records
@@ -107,6 +113,8 @@ impl Default for GraphAssembly {
             alias_table: Vec::new(),
             supertype_table: Vec::new(),
             route_middleware: Vec::new(),
+            workspace: WorkspaceFacts::default(),
+            lexical_parents: Vec::new(),
         }
     }
 }
@@ -133,6 +141,8 @@ impl GraphAssembly {
             alias_table,
             mut supertype_table,
             mut route_middleware,
+            workspace,
+            mut lexical_parents,
         } = self;
 
         assert!(
@@ -261,6 +271,9 @@ impl GraphAssembly {
         // `route_middleware_of()` binary-searches by `node_idx`.
         route_middleware.sort_by_key(|entry| entry.node_idx);
         route_middleware.dedup_by_key(|entry| entry.node_idx);
+        // `lexical_parent()` binary-searches by `node_idx`.
+        lexical_parents.sort_by_key(|fact| fact.node_idx);
+        lexical_parents.dedup_by_key(|fact| fact.node_idx);
 
         ZeroCopyGraph {
             magic: GRAPH_MAGIC,
@@ -294,6 +307,8 @@ impl GraphAssembly {
             alias_table,
             supertype_table,
             route_middleware,
+            workspace,
+            lexical_parents,
         }
     }
 }
@@ -625,6 +640,7 @@ mod tests {
             mtime: 0,
             content_hash: [0; 8],
             category: crate::graph::FileCategory::Source,
+            parsed_language: crate::contracts::routing::ParsedLanguage::ABSENT,
         }
     }
 
@@ -832,6 +848,20 @@ mod tests {
             .map(|f| (f.type_idx, f.bases.clone()))
             .collect();
         assert_eq!(got, vec![(2, vec![9]), (5, vec![1])]);
+    }
+
+    #[test]
+    fn test_finish_lexical_parents_sorted_by_node_keeping_first_of_a_repeat() {
+        let row = |node_idx, parent_idx| LexicalParentFact {
+            node_idx,
+            parent_idx,
+        };
+        let g = GraphAssembly {
+            lexical_parents: vec![row(5, 1), row(2, 9), row(5, 7)],
+            ..Default::default()
+        }
+        .finish();
+        assert_eq!(g.lexical_parents, vec![row(2, 9), row(5, 1)]);
     }
 
     #[test]

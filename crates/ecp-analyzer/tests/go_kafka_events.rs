@@ -59,9 +59,9 @@ func publishOrder(writer *kafka.Writer, ctx interface{}) {
     assert_eq!(result[0].direction, PubSub::Publish);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "orders"
     );
 }
@@ -93,9 +93,9 @@ func sendSarama(producer sarama.SyncProducer) {
     assert_eq!(result[0].direction, PubSub::Publish);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "payments"
     );
 }
@@ -172,9 +172,9 @@ func (s *EventService) publishEvent(ctx interface{}) {
     assert_eq!(result[0].lib, FrameworkId::Kafka);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "events"
     );
 }

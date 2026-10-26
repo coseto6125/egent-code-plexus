@@ -8,12 +8,13 @@ use crate::commands::impact::{
     attach_heuristic_fields, attach_hidden_edges, attach_hidden_test_callers, direction_str,
     Direction,
 };
-use crate::commands::symbol_id::{format_fqn, resolve_candidates, split_fqn_target};
+use crate::commands::symbol_id::same_name_def_count;
 use crate::engine::Engine;
+use crate::read_context::{resolve_target, shell_word, target_request};
+use ecp_core::contracts::identity::{TargetRequest, TargetResolution};
 use ecp_core::session::MergedGraph;
 use ecp_core::EcpError;
 use serde_json::{json, Value};
-use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -128,92 +129,35 @@ pub(super) fn impact_by_name(
         .expect("build_payload_with_hints gates on name||target");
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
     let view = engine.overlay_view();
+    let request = target_request(name, args.kind.as_deref(), args.file.as_deref())?;
+    let bare_name = request.name();
 
-    // Split `Owner.Method` form for precise targeting.
-    let (owner_filter, bare_name) = split_fqn_target(name);
-
-    // Resolve name → matching node indices, with optional --file / --kind
-    // disambiguation. FQN `Owner.Method` form is an additional filter on top.
-    let file_needle = args.file.as_deref();
-    // `resolve_candidates` lowercases for the comparison; this binding exists
-    // only for the disambiguation check further down.
-    let kind_needle = args.kind.as_deref();
-    let (matches, same_name_defs) = resolve_candidates(graph, view, name, kind_needle, file_needle);
-
-    if matches.is_empty() {
-        return Err(EcpError::InvalidArgument(format!(
-            "No symbol named '{}' found in graph. Try `ecp find <name> --mode fuzzy` to find candidates, or check --file / --kind filters",
-            format_fqn(owner_filter, bare_name)
-        )));
-    }
-
-    // Several matches left after --file / --kind / FQN narrowing → report
-    // candidates then fail. A narrowing flag that leaves 2+ matches (two
-    // `load` methods, `--kind method`) must not merge unrelated blast radii.
-    if matches.len() > 1 {
-        let fqn_label = format_fqn(owner_filter, bare_name);
-        let candidates: Vec<Value> = matches
-            .iter()
-            .map(|&i| {
-                let meta = merged_node_meta(graph, view, i);
-                json!({
-                    "kind": meta.kind,
-                    "filePath": meta.file_path,
-                    "line": meta.line,
-                })
-            })
-            .collect();
-        let candidate_lines = candidates
-            .iter()
-            .map(|candidate| {
-                format!(
-                    "  {},{},{}",
-                    candidate["filePath"].as_str().unwrap_or(""),
-                    candidate["kind"].as_str().unwrap_or(""),
-                    candidate["line"].as_u64().unwrap_or(0)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let merged = MergedGraph::new(graph, view);
-        let owner_form = owner_filter.is_none()
-            && matches.iter().any(|&i| {
-                merged
-                    .node(i as u32)
-                    .is_some_and(|n| n.owner_class(&merged).is_some())
-            });
-        return Err(EcpError::AmbiguousSymbol {
-            name: fqn_label.to_string(),
-            count: matches.len(),
-            candidates: Some(candidate_lines),
-            file_given: file_needle.is_some(),
-            kind_given: kind_needle.is_some(),
-            owner_form,
-        });
-    }
+    // A narrowing flag that leaves 2+ declarations (two `load` overloads,
+    // `--kind method`) must not merge unrelated blast radii.
+    let start_idx = match resolve_target(&MergedGraph::new(graph, view), &request) {
+        TargetResolution::Unique(c) => c.node as usize,
+        TargetResolution::Ambiguous(a) => return Err(a.to_error(&request)),
+        TargetResolution::NotFound { named } => return Err(not_found(&request, named)),
+    };
+    let same_name_defs = same_name_def_count(graph, view, bare_name);
 
     let min_conf = resolve_min_conf(args);
     let rel_filter = parse_csv_lower(args.relation_types.as_deref());
     let effective_include_tests = args.walks_tests();
 
-    let mut all_results: Vec<Value> = Vec::new();
-    let mut all_heuristic_results: Vec<Value> = Vec::new();
-    let mut hidden_edges_total: u64 = 0;
-    let mut hidden_heuristic_total: u64 = 0;
-    let mut hidden_test_total: u64 = 0;
-    let mut per_match_bfs: Vec<(usize, Vec<Value>)> = Vec::new();
-    for start_idx in &matches {
-        // A budget across the WHOLE call, not per match: a name with k
-        // definitions would otherwise materialise k x max_results nodes.
-        let spent = all_results.len() + all_heuristic_results.len();
-        let remaining = args.max_results.map(|cap| cap.saturating_sub(spent));
-        if remaining == Some(0) {
-            break;
-        }
-        let (det_results, heur_results, hidden_conf, hidden_heur, hidden_tests) = run_bfs(
+    // `max_results` is the budget of the whole call; 0 walks nothing.
+    let (
+        all_results,
+        all_heuristic_results,
+        hidden_edges_total,
+        hidden_heuristic_total,
+        hidden_test_total,
+    ) = match args.max_results {
+        Some(0) => (Vec::new(), Vec::new(), 0, 0, 0),
+        remaining => run_bfs(
             graph,
             view,
-            *start_idx,
+            start_idx,
             &args.direction,
             args.depth,
             min_conf,
@@ -221,18 +165,8 @@ pub(super) fn impact_by_name(
             &rel_filter,
             !args.no_heuristic,
             remaining,
-        );
-        // `per_match_bfs` feeds `coverage_analyses` only, behind
-        // `--test-coverage`; the default path moves the results once.
-        if args.test_coverage {
-            per_match_bfs.push((*start_idx, det_results.clone()));
-        }
-        all_results.extend(det_results);
-        all_heuristic_results.extend(heur_results);
-        hidden_edges_total += hidden_conf;
-        hidden_heuristic_total += hidden_heur;
-        hidden_test_total += hidden_tests;
-    }
+        ),
+    };
 
     // Empty callers hint for upstream direction. A heuristic caller is still a
     // caller: the hint would otherwise call the target uncalled or test-only.
@@ -248,25 +182,19 @@ pub(super) fn impact_by_name(
             .iter()
             .any(|e| e["depth"].as_u64() == Some(0) && e["kind"].as_str() == Some("property"));
 
-    // Collect unique file paths across ALL matches so the blind-spot warning
-    // is accurate when --file / --kind still leaves >1 match.
-    let mut seen_files = HashSet::new();
-    let target_file_paths: Vec<String> = matches
-        .iter()
-        .map(|&idx| merged_node_meta(graph, view, idx).file_path)
-        .filter(|p| seen_files.insert(p.clone()))
-        .collect();
-
-    let mut all_blind_spot_kinds: Vec<String> = Vec::new();
-    for fp in &target_file_paths {
-        all_blind_spot_kinds.extend(collect_blind_spots(graph, fp));
-    }
+    let target_file = merged_node_meta(graph, view, start_idx).file_path;
+    let all_blind_spot_kinds = collect_blind_spots(graph, &target_file);
+    // `coverage_analyses` reads the walk behind `--test-coverage` only; the
+    // default path moves the results into the payload once.
+    let coverage_walk = args
+        .test_coverage
+        .then(|| vec![(start_idx, all_results.clone())]);
 
     // Use the original user-supplied name (which may be FQN) as the target
     // label in output — more precise than bare_name when owner was specified.
     let payload = SymbolImpactPayload {
         status: "success".to_string(),
-        target: format_fqn(owner_filter, bare_name),
+        target: name.to_string(),
         direction: direction_str(&args.direction).to_string(),
         impact: all_results,
     };
@@ -288,20 +216,15 @@ pub(super) fn impact_by_name(
         for k in &all_blind_spot_kinds {
             *by_kind.entry(k.clone()).or_insert(0) += 1;
         }
-        let files_field: serde_json::Value = if target_file_paths.len() == 1 {
-            json!(target_file_paths[0])
-        } else {
-            json!(target_file_paths)
-        };
         result_obj["blind_spot_warning"] =
-            blind_spot_warning(files_field, all_blind_spot_kinds.len(), &by_kind);
+            blind_spot_warning(json!(target_file), all_blind_spot_kinds.len(), &by_kind);
     }
 
-    if args.test_coverage {
+    if let Some(walk) = &coverage_walk {
         let analyses = coverage_analyses(
             graph,
             view,
-            &per_match_bfs,
+            walk,
             &args.direction,
             args.depth,
             min_conf,
@@ -344,7 +267,7 @@ pub(super) fn impact_by_name(
     Ok((
         result_obj,
         ImpactHints {
-            empty_hint_name: emit_empty_hint.then(|| format_fqn(owner_filter, bare_name)),
+            empty_hint_name: emit_empty_hint.then(|| name.to_string()),
             empty_hint_is_field,
             hidden_edges: hidden_edges_total,
             hidden_heuristic_edges: hidden_heuristic_total,
@@ -369,14 +292,20 @@ fn ambiguous_callers_command(name: &str, file: Option<&str>, kind: Option<&str>)
     cmd
 }
 
-/// `word` as one shell word: single-quoted when it is empty or holds a
-/// character outside the safe set, with embedded `'` written as `'\''`.
-fn shell_word(word: &str) -> String {
-    let safe = |c: char| c.is_alphanumeric() || "_-./:@%+=,".contains(c);
-    if !word.is_empty() && word.chars().all(safe) {
-        return word.to_string();
-    }
-    format!("'{}'", word.replace('\'', r"'\''"))
+/// The miss an agent reads: whether the name is declared at all, and the
+/// next command when it is not.
+fn not_found(request: &TargetRequest, named: u32) -> EcpError {
+    let target = request.render();
+    EcpError::InvalidArgument(match named {
+        0 => format!(
+            "No symbol named '{target}' found in graph. Try `ecp find <name> --mode fuzzy` to find candidates, or check --file / --kind filters"
+        ),
+        n => format!(
+            "No symbol named '{target}' found in graph: {n} declaration(s) named '{}' exist, but none passes the owner, @line, --file or --kind filter. Run `ecp impact --target {}` to list them",
+            request.name(),
+            shell_word(request.name()),
+        ),
+    })
 }
 
 pub(super) fn collect_blind_spots(

@@ -22,10 +22,14 @@
 
 use crate::commands::impact::bfs::{shortest_path, PathStep, WalkOpts};
 use crate::commands::impact::{direction_str, parse_csv_lower, Direction};
-use crate::commands::symbol_id::resolve_candidates;
+use crate::commands::symbol_id::same_name_def_count;
 use crate::engine::Engine;
 use crate::output::{emit_with_caveat, merge_caveats, OutputFormat};
+use crate::read_context::{
+    ambiguity_candidates_with_flags, resolve_target, shell_word, target_request,
+};
 use clap::Args;
+use ecp_core::contracts::identity::{TargetRequest, TargetResolution};
 use ecp_core::session::MergedGraph;
 use ecp_core::EcpError;
 use serde_json::{json, Value};
@@ -34,9 +38,9 @@ use std::collections::HashSet;
 /// Shortest route between two symbols, as an ordered chain with the edge that
 /// makes each hop.
 ///
-/// Both names take the bare symbol or the `Owner.Method` FQN form. An
-/// overloaded name is not an error: every candidate seeds the same walk, and
-/// the answer reports the file:line of the two endpoints it actually joined.
+/// Both names take the target grammar of `ecp impact`: `name`, `Owner.name`,
+/// `::name` and `name@line`. A name that matches several declarations is an
+/// ambiguity: the answer lists each one with the flags that select it.
 #[derive(Args, Debug)]
 pub struct PathArgs {
     /// Start symbol.
@@ -69,14 +73,21 @@ pub struct PathArgs {
     #[arg(long, default_value = "0.0", value_parser = parse_confidence)]
     pub min_confidence: f32,
 
-    /// Disambiguate `<FROM>` when the name has several definitions: substring
-    /// on the file path.
+    /// Select `<FROM>` among several declarations: substring on the file path.
     #[arg(long)]
     pub from_file: Option<String>,
 
-    /// Disambiguate `<TO>` the same way.
+    /// Select `<TO>` among several declarations: substring on the file path.
     #[arg(long)]
     pub to_file: Option<String>,
+
+    /// Select `<FROM>` among several declarations by node kind, for example `method`.
+    #[arg(long)]
+    pub from_kind: Option<String>,
+
+    /// Select `<TO>` among several declarations by node kind, for example `method`.
+    #[arg(long)]
+    pub to_kind: Option<String>,
 
     /// Allow heuristic edges (MirrorsField, EventTopicMirror) as steps. Each
     /// one is tagged `requiresVerification` in the output.
@@ -107,48 +118,109 @@ fn parse_confidence(raw: &str) -> Result<f32, String> {
 }
 
 pub fn run(args: PathArgs, engine: &Engine) -> Result<(), EcpError> {
-    let (payload, caveat) = build_payload(&args, engine)?;
-    emit_with_caveat(
-        &payload,
-        args.format.unwrap_or_default(),
-        // The engine's staleness caveat comes first: a `found: false` read off
-        // a warm-attached or behind-HEAD graph is provisional, and this payload
-        // otherwise states the opposite in as many words.
-        merge_caveats(engine.caveat(), caveat),
-    )
+    let format = args.format.unwrap_or_default();
+    match build_payload(&args, engine)? {
+        Outcome::Answer(payload, caveat) => emit_with_caveat(
+            &payload,
+            format,
+            // The engine's staleness caveat comes first: a `found: false` read off
+            // a warm-attached or behind-HEAD graph is provisional, and this payload
+            // otherwise states the opposite in as many words.
+            merge_caveats(engine.caveat(), caveat),
+        ),
+        // Exit non-zero (MCP marks `isError`), but give the candidates on stdout
+        // too: an MCP client reads stdout only.
+        Outcome::Ambiguous(payload, error) => {
+            emit_with_caveat(&payload, format, engine.caveat())?;
+            Err(error)
+        }
+    }
 }
 
-/// Payload plus an optional `result` caveat, kept apart from `run` so the
-/// caveat merging and the emit stay one readable line each. MCP reaches this
-/// command by spawning the binary, so `run` is the only caller.
-fn build_payload(args: &PathArgs, engine: &Engine) -> Result<(Value, Option<String>), EcpError> {
+enum Outcome {
+    /// Payload plus an optional `result` caveat.
+    Answer(Value, Option<String>),
+    /// An endpoint names several declarations: the typed ambiguity payload and
+    /// the error that carries the non-zero exit.
+    Ambiguous(Value, EcpError),
+}
+
+enum Endpoint {
+    /// The merged node index, and how many declarations share its name.
+    Node(usize, usize),
+    Ambiguous(Value, EcpError),
+}
+
+/// The one declaration `text` names, through the same resolver as `impact`.
+/// `side` is `from` or `to`; it names the flags that select a candidate.
+fn endpoint(
+    merged: &MergedGraph<'_>,
+    text: &str,
+    kind: Option<&str>,
+    file: Option<&str>,
+    side: &str,
+) -> Result<Endpoint, EcpError> {
+    let request = target_request(text, kind, file)?;
+    match resolve_target(merged, &request) {
+        TargetResolution::Unique(c) => Ok(Endpoint::Node(
+            c.node as usize,
+            same_name_def_count(merged, merged.view(), request.name()),
+        )),
+        TargetResolution::Ambiguous(a) => {
+            let payload = json!({
+                "status": "ambiguous",
+                "error": a.to_error(&request).to_string(),
+                "side": side,
+                "target": text,
+                "candidates": ambiguity_candidates_with_flags(
+                    &a, "", &format!("--{side}-file"), &format!("--{side}-kind")),
+            });
+            Ok(Endpoint::Ambiguous(payload, a.to_error(&request)))
+        }
+        TargetResolution::NotFound { named } => Err(unresolved(&request, named)),
+    }
+}
+
+/// Kept apart from `run` so the caveat merging and the emit stay one readable
+/// line each. MCP reaches this command by spawning the binary, so `run` is
+/// the only caller.
+fn build_payload(args: &PathArgs, engine: &Engine) -> Result<Outcome, EcpError> {
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
     let view = engine.overlay_view();
+    let merged = MergedGraph::new(graph, view);
 
-    let (starts, from_defs) =
-        resolve_candidates(graph, view, &args.from, None, args.from_file.as_deref());
-    if starts.is_empty() {
-        return Err(unresolved(&args.from));
-    }
-    let (goal_vec, to_defs) =
-        resolve_candidates(graph, view, &args.to, None, args.to_file.as_deref());
-    if goal_vec.is_empty() {
-        return Err(unresolved(&args.to));
-    }
-    let mut goals: HashSet<usize> = goal_vec.iter().copied().collect();
-    let to_candidates = goals.len();
+    let (from_node, from_defs) = match endpoint(
+        &merged,
+        &args.from,
+        args.from_kind.as_deref(),
+        args.from_file.as_deref(),
+        "from",
+    )? {
+        Endpoint::Node(node, defs) => (node, defs),
+        Endpoint::Ambiguous(payload, error) => return Ok(Outcome::Ambiguous(payload, error)),
+    };
+    let (to_node, to_defs) = match endpoint(
+        &merged,
+        &args.to,
+        args.to_kind.as_deref(),
+        args.to_file.as_deref(),
+        "to",
+    )? {
+        Endpoint::Node(node, defs) => (node, defs),
+        Endpoint::Ambiguous(payload, error) => return Ok(Outcome::Ambiguous(payload, error)),
+    };
+    let starts = [from_node];
+    let mut goals: HashSet<usize> = HashSet::from([to_node]);
+    let to_candidates = 1;
     // A construction lands on the type's constructor when it has one, so a
     // route reaching `Foo.__init__` reaches `Foo`. The route still ends at
     // the constructor node it actually reached.
-    let merged = MergedGraph::new(graph, view);
-    for &goal in &goal_vec {
-        goals.extend(
-            merged
-                .constructors_of(goal as u32)
-                .into_iter()
-                .map(|c| c as usize),
-        );
-    }
+    goals.extend(
+        merged
+            .constructors_of(to_node as u32)
+            .into_iter()
+            .map(|c| c as usize),
+    );
     let ambiguity = merge_caveats(
         ambiguity_caveat(&args.from, from_defs),
         ambiguity_caveat(&args.to, to_defs),
@@ -174,7 +246,7 @@ fn build_payload(args: &PathArgs, engine: &Engine) -> Result<(Value, Option<Stri
             "direction": direction,
             "found": false,
             "depth": args.depth,
-            "fromCandidates": starts.len(),
+            "fromCandidates": 1,
             "toCandidates": to_candidates,
         });
         let mut caveat = format!(
@@ -202,7 +274,10 @@ fn build_payload(args: &PathArgs, engine: &Engine) -> Result<(Value, Option<Stri
                 ));
             }
         }
-        return Ok((payload, merge_caveats(ambiguity, Some(caveat))));
+        return Ok(Outcome::Answer(
+            payload,
+            merge_caveats(ambiguity, Some(caveat)),
+        ));
     };
 
     let heuristic_steps = steps
@@ -216,7 +291,7 @@ fn build_payload(args: &PathArgs, engine: &Engine) -> Result<(Value, Option<Stri
         "direction": direction,
         "found": true,
         "hops": steps.len() - 1,
-        "fromCandidates": starts.len(),
+        "fromCandidates": 1,
         "toCandidates": to_candidates,
         "path": steps.iter().map(step_json).collect::<Vec<_>>(),
     });
@@ -228,7 +303,7 @@ fn build_payload(args: &PathArgs, engine: &Engine) -> Result<(Value, Option<Stri
             steps.len() - 1
         )
     });
-    Ok((payload, merge_caveats(ambiguity, caveat)))
+    Ok(Outcome::Answer(payload, merge_caveats(ambiguity, caveat)))
 }
 
 /// With two or more same-named definitions in the graph, the resolver may
@@ -267,8 +342,17 @@ fn step_json(step: &PathStep) -> Value {
     })
 }
 
-fn unresolved(name: &str) -> EcpError {
-    EcpError::InvalidArgument(format!(
-        "No symbol named '{name}' found in graph. Try `ecp find {name} --mode fuzzy` for candidates"
-    ))
+fn unresolved(request: &TargetRequest, named: u32) -> EcpError {
+    let target = request.render();
+    EcpError::InvalidArgument(match named {
+        0 => format!(
+            "No symbol named '{target}' found in graph. Try `ecp find {} --mode fuzzy` for candidates",
+            shell_word(request.name())
+        ),
+        n => format!(
+            "No symbol named '{target}' found in graph: {n} declaration(s) named '{}' exist, \
+             but none passes the owner, @line, file or kind filter",
+            request.name()
+        ),
+    })
 }

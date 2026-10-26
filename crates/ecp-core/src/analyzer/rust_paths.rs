@@ -125,8 +125,8 @@ pub fn rust_module_path_base(
 /// leading `self` / `super` dropped, must be a suffix of it. A call with no
 /// module path before `Q`, or one not written with `::`, always agrees.
 ///
-/// A copy of the index resolver's rule, which phase 2 of the overlay parity
-/// work points at this one.
+/// The one copy of this rule: the index and the overlay both call it through
+/// `ladder::qualified`.
 pub fn rust_path_prefix_agrees_with_import(
     full_callee: &str,
     qualifier: &str,

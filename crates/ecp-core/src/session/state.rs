@@ -1,7 +1,7 @@
 //! Derived view of session liveness, classifying each `<repo>/sessions/<sid>/`
 //! as PureReference (clean, can short-circuit overlay merge), Augmented (has
-//! dirty fragments), or Stale (cannot serve queries). Not persisted to disk —
-//! always re-derived from session_meta + dirty_files + commits/.
+//! dirty entries, tombstones included), or Stale (cannot serve queries). Not persisted to disk —
+//! always re-derived from session_meta + `l1/dirty_events.json` + commits/.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionState {
@@ -12,6 +12,7 @@ pub enum SessionState {
     AugmentedReference {
         base_sha: String,
         l2_dirname: String,
+        /// Dirty entries, tombstones included (a tombstone is dirty state).
         fragment_count: usize,
     },
     Stale {
@@ -22,7 +23,8 @@ pub enum SessionState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StaleReason {
     MetaUnreadable,
-    DirtyFilesCorrupt,
+    /// `l1/dirty_events.json` exists and does not parse.
+    DirtyEventsCorrupt,
     L2Missing,
     Orphan,
 }
@@ -32,7 +34,7 @@ impl StaleReason {
     pub fn short(&self) -> &'static str {
         match self {
             Self::MetaUnreadable => "meta",
-            Self::DirtyFilesCorrupt => "dirty_corr",
+            Self::DirtyEventsCorrupt => "dirty_corr",
             Self::L2Missing => "l2_missing",
             Self::Orphan => "orphan",
         }

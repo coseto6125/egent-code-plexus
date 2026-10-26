@@ -10,7 +10,7 @@
 use ecp_cli::git::DiffScope;
 use ecp_cli::reanalyze::reanalyze_files;
 use ecp_cli::session::overlay_writer::{write_dirty_fragment, FragmentInput, OverlayWriter};
-use ecp_core::session::{DirtyFiles, SessionMeta};
+use ecp_core::session::{layout, DirtyEvents, SessionMeta};
 use std::path::{Path, PathBuf};
 
 const ONE_AND_HALF_MIB: usize = 3 * 512 * 1024;
@@ -49,12 +49,16 @@ fn session_dir_for(worktree: &Path) -> PathBuf {
         agent_name: None,
     };
     SessionMeta::write_atomic(&session_dir.join("session_meta.json"), &sm).unwrap();
-    DirtyFiles::write_atomic(&session_dir.join("dirty_files.json"), &DirtyFiles::empty()).unwrap();
+    DirtyEvents::write_atomic(
+        &layout::dirty_events_path(&session_dir),
+        &DirtyEvents::empty(ecp_core::config::resolve_size_cap(worktree)),
+    )
+    .unwrap();
     session_dir
 }
 
 fn dirty_symbol_names(session_dir: &Path, rel: &str) -> Vec<String> {
-    let df = DirtyFiles::read(&session_dir.join("dirty_files.json")).unwrap();
+    let df = DirtyEvents::read(&layout::dirty_events_path(session_dir)).unwrap();
     let entry = df.entries.get(rel).expect("the file has a manifest entry");
     assert!(
         !entry.parse_failed,

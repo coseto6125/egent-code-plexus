@@ -255,6 +255,7 @@ fn extract_proto_fields(text: &str) -> (Vec<RawSchemaField>, Vec<RawNode>) {
                         owner_class: Box::from(owner.as_str()),
                         framework: PROTOBUF_FRAMEWORK,
                         span,
+                        endpoint: None,
                     });
                     pending.as_mut().unwrap().has_field = true;
                 }

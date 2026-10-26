@@ -46,9 +46,9 @@ async function notifyShipped(orderId) {
     assert_eq!(result[0].direction, PubSub::Publish);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "order/shipped"
     );
 }
@@ -69,9 +69,9 @@ async function listenForOrders(handler) {
     assert_eq!(result[0].direction, PubSub::Subscribe);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "order/created"
     );
 }
@@ -91,9 +91,9 @@ async function listenPatterns(handler) {
     assert_eq!(result[0].lib, FrameworkId::Redis);
     assert_eq!(result[0].direction, PubSub::Subscribe);
     let lit = result[0]
-        .topic_literal
+        .topic_key
         .as_deref()
-        .expect("topic_literal must be Some");
+        .expect("topic_key must be Some");
     // canonicalize strips the `.*` suffix and lowercases
     assert!(
         lit.starts_with("order"),
@@ -122,9 +122,9 @@ function emitPayment(amount) {
     assert_eq!(result[0].direction, PubSub::Publish);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "payment/processed"
     );
 }
@@ -149,9 +149,9 @@ function startConsumer() {
     assert_eq!(result[0].direction, PubSub::Subscribe);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "payment/processed"
     );
 }
@@ -175,9 +175,9 @@ function watchAll() {
     assert_eq!(result[0].lib, FrameworkId::Redis);
     assert_eq!(result[0].direction, PubSub::Subscribe);
     let lit = result[0]
-        .topic_literal
+        .topic_key
         .as_deref()
-        .expect("topic_literal must be Some");
+        .expect("topic_key must be Some");
     assert!(
         lit.starts_with("payment"),
         "channel should start with 'payment'; got {}",
@@ -238,9 +238,9 @@ class NotificationService {
     assert_eq!(result[0].direction, PubSub::Publish);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "alerts"
     );
 }

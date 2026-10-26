@@ -32,6 +32,8 @@ fn test_from_str_roundtrip_all_new_variants() {
         ("EVENT_TOPIC_MIRROR", RelType::EventTopicMirror),
         ("OPENSTXSCOPE", RelType::OpensTxScope),
         ("OPENS_TX_SCOPE", RelType::OpensTxScope),
+        ("PARTOF", RelType::PartOf),
+        ("PART_OF", RelType::PartOf),
     ];
     for (s, expected) in rel_cases {
         let got = RelType::from_str(s).unwrap_or_else(|_| panic!("from_str({s:?}) failed"));
@@ -88,7 +90,7 @@ fn test_node_kind_discriminants_locked() {
 
 #[test]
 fn test_rel_type_discriminants_locked() {
-    const GOLDEN: [&str; 23] = [
+    const GOLDEN: [&str; 24] = [
         "Defines",
         "Imports",
         "Calls",
@@ -112,6 +114,7 @@ fn test_rel_type_discriminants_locked() {
         "ReadsField",
         "CompensatedBy",
         "QueriesTable",
+        "PartOf",
     ];
     assert_eq!(RelType::ALL.len(), GOLDEN.len(), "RelType variant count");
     for (i, (rel, expected)) in RelType::ALL.iter().zip(GOLDEN).enumerate() {

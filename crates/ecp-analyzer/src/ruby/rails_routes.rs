@@ -612,7 +612,7 @@ impl<'s, 't> Walk<'s, 't> {
         self.routes.push(RawRoute {
             method: method.to_string(),
             path,
-            handler,
+            handler: RawRoute::named_handler(handler.as_deref()),
             span: span(call),
             scope: None,
         });

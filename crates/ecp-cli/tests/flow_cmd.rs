@@ -441,6 +441,34 @@ fn test_flow_blade_template_rejects_with_blade_reason() {
 }
 
 #[test]
+fn test_flow_template_path_names_excluded_rule() {
+    let repo = tempfile::tempdir().unwrap();
+    let dir = repo.path().join("{{cookiecutter.project_slug}}");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("app.py"), "x = 1\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_ecp"))
+        .args([
+            "flow",
+            "--file",
+            "{{cookiecutter.project_slug}}/app.py",
+            "--line",
+            "1",
+            "--column",
+            "1",
+        ])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Contract: the message says the path is a template path and names the
+    // route rule, not an unsupported language.
+    assert!(stderr.contains("template path"), "{stderr}");
+    assert!(stderr.contains("TemplateInterpolation"), "{stderr}");
+    assert!(!stderr.contains("unsupported source language"), "{stderr}");
+}
+
+#[test]
 fn test_load_sources_blade_template_excluded_from_scope() {
     let repo = tempfile::tempdir().unwrap();
     std::fs::write(repo.path().join("a.php"), "<?php\n$x = 1;\n").unwrap();

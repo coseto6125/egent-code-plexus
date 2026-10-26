@@ -81,6 +81,10 @@ pub fn run_analyzer_for_paths(
     let skipped_not_utf8: std::sync::Mutex<Vec<std::path::PathBuf>> =
         std::sync::Mutex::new(Vec::new());
     let skipped_not_utf8_ref = &skipped_not_utf8;
+    // The config files of the C2 scope rows, found by this walk so the
+    // tree is walked once (`config_parser::parse_repo_configs`).
+    let workspace_configs: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let workspace_configs_ref = &workspace_configs;
     let src_root_ref = src_root;
     let mut walk_builder = WalkBuilder::new(src_root);
     walk_builder
@@ -99,6 +103,17 @@ pub fn run_analyzer_for_paths(
             if let Ok(entry) = result {
                 let path = entry.path();
                 let rel_path = path.strip_prefix(src_root_ref).unwrap_or(path);
+                // The name match runs first, so a source path costs no stat.
+                if let Some(rel) = rel_path
+                    .to_str()
+                    .filter(|rel| crate::config_parser::is_workspace_config(rel))
+                    .filter(|_| path.is_file())
+                {
+                    workspace_configs_ref
+                        .lock()
+                        .expect("workspace-config list is never held across a panic")
+                        .push(rel.replace('\\', "/"));
+                }
                 // Route before the stat: the route is a pure string match, so
                 // an unrouted entry costs no stat.
                 if should_analyze_path(rel_path) {
@@ -137,6 +152,9 @@ pub fn run_analyzer_for_paths(
     let skipped_not_utf8_files = skipped_not_utf8
         .into_inner()
         .expect("skipped-not-utf8 list is never held across a panic");
+    let workspace_config_paths = workspace_configs
+        .into_inner()
+        .expect("workspace-config list is never held across a panic");
 
     if !skipped_large_files.is_empty() {
         tracing::warn!(
@@ -327,11 +345,13 @@ pub fn run_analyzer_for_paths(
     let t_step4 = std::time::Instant::now();
     // ── Step 4: Build global graph ────────────────────────────────────────
     let t_cfg = std::time::Instant::now();
-    let aliases = crate::config_parser::parse_configs(src_root);
+    let configs = crate::config_parser::parse_repo_configs(src_root, &workspace_config_paths);
     let cfg_elapsed = t_cfg.elapsed();
     let t_ingest = std::time::Instant::now();
     let mut builder = GraphBuilder::new()
-        .with_path_aliases(aliases)
+        .with_path_aliases(configs.aliases.with_scopes(&configs.workspace))
+        .with_csharp_projects(configs.csharp_projects)
+        .with_workspace_scopes(configs.workspace)
         .with_repo_root(src_root.to_path_buf())
         .with_resolver_dump(dump_resolver.map(std::path::Path::to_path_buf));
     for graph in local_graphs {
@@ -574,7 +594,7 @@ fn routes(rel_path: &str) -> bool {
 mod tests {
     use super::should_analyze_path;
     use crate::reanalyze::provider_names_for_paths;
-    use ecp_core::contracts::routing::{Language, SizeCap};
+    use ecp_core::contracts::routing::Language;
     use std::path::Path;
 
     #[cfg(unix)]
@@ -583,7 +603,11 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
         let path = Path::new(std::ffi::OsStr::from_bytes(b"src/caf\xe9.py"));
         assert!(!should_analyze_path(path));
-        assert!(crate::reanalyze::pipeline_for_path(path, SizeCap::BUILT_IN).is_none());
+        assert!(crate::reanalyze::pipeline_for_path(
+            path,
+            ecp_core::contracts::routing::SizeCap::BUILT_IN
+        )
+        .is_none());
     }
 
     /// The walk records a non-UTF-8 path as omitted only when its lossy

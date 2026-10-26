@@ -1,4 +1,1 @@
 # owner: lane F (incremental overlay: builder edges of dirty files)
-edge full-only x1 Defines File lib/acme.rb:1 acme.rb #eab36cb8f15fc484 -> Method lib/acme.rb:5 extra #34a4d00a95dc952b conf=1.0
-parent full-only x1 Method lib/acme.rb:5 extra #34a4d00a95dc952b owner=- <- Defines File lib/acme.rb:1 acme.rb #eab36cb8f15fc484
-parent overlay-only x1 Method lib/acme.rb:5 extra #34a4d00a95dc952b owner=- <- none

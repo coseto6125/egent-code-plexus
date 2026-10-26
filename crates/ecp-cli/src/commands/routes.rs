@@ -10,9 +10,14 @@ use crate::commands::format::kind_to_str;
 use crate::engine::Engine;
 use crate::output::{emit_with_caveat, OutputFormat};
 use clap::Args;
+use ecp_analyzer::route_detector::{
+    is_absent_handler_hint, unbound_handler, BS_KIND_ROUTE_HANDLER_ABSENT,
+    BS_KIND_ROUTE_UNBOUND_HANDLER,
+};
+use ecp_core::contracts::identity::HandlerRef;
 use ecp_core::graph::{ArchivedFileCategory, ArchivedNodeKind, ArchivedRelType};
 use ecp_core::EcpError;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 #[derive(Args, Debug, Clone)]
 pub struct RoutesArgs {
@@ -43,7 +48,10 @@ pub struct RoutesArgs {
 
     /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
     /// toon. `json`: full-fidelity JSON. `text`: one compact JSON line per route. Absent,
-    /// `llm` and `toon` join the middleware names of a route into one string. A
+    /// `llm` and `toon` join the middleware names of a route into one string. Each route
+    /// and handler carries `handlerKind`: `named`, `inline_anonymous` (a function written
+    /// at the registration), `unresolved` (a named handler that binds no declaration) or
+    /// `absent` (the registration shows no handler). A
     /// `result` field appears only when the answer carries a caveat (stale or
     /// warm-attached graph, unreadable uncommitted paths); absent means current.
     #[arg(long)]
@@ -79,6 +87,7 @@ fn list_routes(
 
     let mut results = Vec::new();
     let mut test_results = Vec::new();
+    let spots = route_spots(graph);
 
     // v10 kind_offsets CSR: iterate Route nodes only, not all N nodes.
     for idx in graph.nodes_by_kind(ecp_core::graph::NodeKind::Route) {
@@ -97,13 +106,18 @@ fn list_routes(
         // see. Only `Test` flips `is_test` here, matching the builder.rs
         // route-emission skip filter which gates on `Test | Reference`.
         let is_test = matches!(file_node.category, ArchivedFileCategory::Test);
+        let file_path = file_node.path.resolve(&graph.string_pool);
+        let handler_kind = route_handlers(graph, idx as usize, file_path, &spots)
+            .first()
+            .map_or("absent", |h| h.handler.handler_kind());
         let mut row = serde_json::json!({
             "uid": node.uid.to_native().to_string(),
             "method": method,
             "path": path,
             "kind": "Route",
-            "filePath": file_node.path.resolve(&graph.string_pool),
+            "filePath": file_path,
             "line": node.start_line(),
+            "handlerKind": handler_kind,
         });
         add_middleware(&mut row, graph, idx);
         match (is_test, include_tests) {
@@ -375,6 +389,7 @@ fn inspect_route(
     let mut handlers_out = Vec::new();
     let mut callers_out = Vec::new();
     let mut seen_handlers: HashSet<usize> = HashSet::new();
+    let spots = route_spots(graph);
 
     for route_idx in matched {
         let route_node = &graph.nodes[route_idx];
@@ -390,6 +405,7 @@ fn inspect_route(
         // for inline-anonymous handlers (which have no node of their own).
         let enclosing_idx = find_enclosing_scope(graph, route_file_idx, route_line);
 
+        let handlers = route_handlers(graph, route_idx, route_file_path, &spots);
         let mut route_row = serde_json::json!({
             "method": route_method,
             "path": route_path,
@@ -397,100 +413,84 @@ fn inspect_route(
             "filePath": route_file_path,
             "line": route_line,
             "enclosingScope": enclosing_scope_json(graph, enclosing_idx),
+            "handlerKind": handlers.first().map_or("absent", |h| h.handler.handler_kind()),
         });
         add_middleware(&mut route_row, graph, route_idx as u32);
         routes_out.push(route_row);
 
-        // Handler: incoming HandlesRoute edge on the Route node.
-        let in_start = graph.in_offsets[route_idx].to_native() as usize;
-        let in_end = graph.in_offsets[route_idx + 1].to_native() as usize;
-        let mut handler_indices: Vec<usize> = Vec::new();
-        for i in in_start..in_end {
-            let edge_idx = graph.in_edge_idx[i].to_native() as usize;
-            let edge = &graph.edges[edge_idx];
-            if matches!(&edge.rel_type, ArchivedRelType::HandlesRoute) {
-                handler_indices.push(edge.source.to_native() as usize);
-            }
-        }
-
-        // A Laravel route that names a controller action binding no method
-        // has no HandlesRoute edge either; the builder records the action
-        // in a BlindSpot. Its handler is unknown, not inline, and the
-        // registering scope's callers are not its callers.
-        if handler_indices.is_empty() {
-            if let Some(action) = unbound_action(graph, route_file_path, route_node, route_name) {
-                handlers_out.push(serde_json::json!({
+        for handler in handlers {
+            let base = |kind: &str, name: &str| {
+                serde_json::json!({
                     "uid": serde_json::Value::Null,
-                    "name": action,
-                    "kind": "UnresolvedAction",
-                    "handlerKind": "unresolved_action",
-                    "action": action,
+                    "name": name,
+                    "kind": kind,
+                    "handlerKind": handler.handler.handler_kind(),
                     "filePath": route_file_path,
                     "line": route_line,
                     "route": route_name,
                     "enclosingScope": enclosing_scope_json(graph, enclosing_idx),
-                }));
-                continue;
+                })
+            };
+            match (&handler.handler, handler.node) {
+                (
+                    HandlerRef::Declaration { .. } | HandlerRef::Closure { .. },
+                    Some(handler_idx),
+                ) => {
+                    if !seen_handlers.insert(handler_idx) {
+                        continue;
+                    }
+                    let handler_node = &graph.nodes[handler_idx];
+                    if !handler_node.has_owning_file() {
+                        continue;
+                    }
+                    let handler_file = &graph.files[handler_node.file_idx.to_native() as usize];
+                    handlers_out.push(serde_json::json!({
+                        "uid": handler_node.uid.to_native().to_string(),
+                        "name": handler_node.name.resolve(&graph.string_pool),
+                        "kind": kind_to_str(&handler_node.kind),
+                        "handlerKind": handler.handler.handler_kind(),
+                        "filePath": handler_file.path.resolve(&graph.string_pool),
+                        "line": handler_node.start_line(),
+                        "route": route_name,
+                        "enclosingScope": enclosing_scope_json(graph, enclosing_idx),
+                    }));
+                    bfs_upstream(
+                        graph,
+                        handler_idx,
+                        depth,
+                        &handler_node.uid.to_native().to_string(),
+                        &mut callers_out,
+                    );
+                }
+                // A named handler that binds no declaration: its callers
+                // are unknown, and the registering scope's callers are not
+                // its callers.
+                (HandlerRef::Unresolved { name }, _) if handler.laravel_action => {
+                    let mut row = base("UnresolvedAction", name);
+                    row["action"] = serde_json::json!(name);
+                    handlers_out.push(row);
+                }
+                (HandlerRef::Unresolved { name }, _) => {
+                    handlers_out.push(base("UnresolvedHandler", name));
+                }
+                // A function written at the registration with no node of
+                // its own: seed the upstream BFS from the enclosing scope,
+                // so consumers still see who wires up this route.
+                (HandlerRef::Inline { .. }, _) => {
+                    handlers_out.push(base("InlineHandler", "<inline>"));
+                    if let Some(scope_idx) = enclosing_idx {
+                        bfs_upstream(
+                            graph,
+                            scope_idx,
+                            depth,
+                            &route_node.uid.to_native().to_string(),
+                            &mut callers_out,
+                        );
+                    }
+                }
+                (HandlerRef::Absent, _) => handlers_out.push(base("AbsentHandler", "<absent>")),
+                (HandlerRef::Declaration { .. } | HandlerRef::Closure { .. }, None) => {}
             }
-        }
-
-        // Inline-anonymous fallback: no HandlesRoute edge means the
-        // registration was `app.get(path, (req, res) => …)` — the parser
-        // intentionally does not synthesize a Node for an anonymous arrow.
-        // Surface this explicitly instead of returning an empty array, and
-        // seed the upstream BFS from the enclosing scope so consumers still
-        // get meaningful caller context (who wires up this route).
-        if handler_indices.is_empty() {
-            handlers_out.push(serde_json::json!({
-                "uid": serde_json::Value::Null,
-                "name": "<inline>",
-                "kind": "InlineHandler",
-                "handlerKind": "inline_anonymous",
-                "filePath": route_file_path,
-                "line": route_line,
-                "route": route_name,
-                "enclosingScope": enclosing_scope_json(graph, enclosing_idx),
-            }));
-            if let Some(scope_idx) = enclosing_idx {
-                bfs_upstream(
-                    graph,
-                    scope_idx,
-                    depth,
-                    &route_node.uid.to_native().to_string(),
-                    &mut callers_out,
-                );
-            }
-            continue;
-        }
-
-        for handler_idx in handler_indices {
-            if !seen_handlers.insert(handler_idx) {
-                continue;
-            }
-            let handler_node = &graph.nodes[handler_idx];
-            if !handler_node.has_owning_file() {
-                continue;
-            }
-            let handler_file = &graph.files[handler_node.file_idx.to_native() as usize];
-
-            handlers_out.push(serde_json::json!({
-                "uid": handler_node.uid.to_native().to_string(),
-                "name": handler_node.name.resolve(&graph.string_pool),
-                "kind": kind_to_str(&handler_node.kind),
-                "handlerKind": "named",
-                "filePath": handler_file.path.resolve(&graph.string_pool),
-                "line": handler_node.start_line(),
-                "route": route_name,
-                "enclosingScope": enclosing_scope_json(graph, enclosing_idx),
-            }));
-
-            bfs_upstream(
-                graph,
-                handler_idx,
-                depth,
-                &handler_node.uid.to_native().to_string(),
-                &mut callers_out,
-            );
         }
     }
     fill_middleware(&mut routes_out, fmt);
@@ -506,30 +506,125 @@ fn inspect_route(
     emit_with_caveat(&result, fmt, engine.caveat())
 }
 
-/// The controller action, as the route file writes it, of a Laravel Route
-/// node whose action binds no method: the builder's
-/// `laravel-unbound-action` BlindSpot at the registration names it.
-fn unbound_action<'g>(
-    graph: &'g ecp_core::graph::ArchivedZeroCopyGraph,
-    route_file_path: &str,
-    route_node: &ecp_core::graph::ArchivedNode,
-    route_name: &str,
-) -> Option<&'g str> {
-    // Two registrations can share a line; the column tells them apart.
-    let start = (route_node.span.0.to_native(), route_node.span.1.to_native());
-    graph.blind_spots.iter().find_map(|bs| {
-        if (bs.start_row.to_native(), bs.start_col.to_native()) != start
-            || bs.kind.resolve(&graph.string_pool)
-                != ecp_analyzer::php::laravel_routes::BS_KIND_UNBOUND_ACTION
-            || bs.file_path.resolve(&graph.string_pool) != route_file_path
+/// The route BlindSpots that say what serves a Route node with no edge, by
+/// (file, start row, start column) of the registration: (kind, hint).
+type RouteSpots<'g> = HashMap<(&'g str, u32, u32), Vec<(&'g str, &'g str)>>;
+
+/// Index the graph's route-handler BlindSpots once per command, so each
+/// route reads its own in constant time.
+fn route_spots(graph: &ecp_core::graph::ArchivedZeroCopyGraph) -> RouteSpots<'_> {
+    let mut spots: RouteSpots<'_> = HashMap::new();
+    for bs in graph.blind_spots.iter() {
+        let kind = bs.kind.resolve(&graph.string_pool);
+        if kind != BS_KIND_ROUTE_UNBOUND_HANDLER
+            && kind != BS_KIND_ROUTE_HANDLER_ABSENT
+            && kind != ecp_analyzer::php::laravel_routes::BS_KIND_UNBOUND_ACTION
         {
-            return None;
+            continue;
         }
-        ecp_analyzer::php::laravel_routes::unbound_action(
-            bs.hint.resolve(&graph.string_pool),
-            route_name,
-        )
-    })
+        let at = (
+            bs.file_path.resolve(&graph.string_pool),
+            bs.start_row.to_native(),
+            bs.start_col.to_native(),
+        );
+        spots
+            .entry(at)
+            .or_default()
+            .push((kind, bs.hint.resolve(&graph.string_pool)));
+    }
+    spots
+}
+
+/// One binding of a Route node (C1 `RouteBinding`, the route side implied).
+struct RouteHandler {
+    handler: HandlerRef,
+    /// The graph node of a `Declaration` or `Closure` handler.
+    node: Option<usize>,
+    /// An `Unresolved` handler that is a Laravel controller action.
+    laravel_action: bool,
+}
+
+/// What serves Route node `route_idx`, first the bound handlers and then
+/// the unbound names: one `Declaration` per incoming `HandlesRoute` edge
+/// (`Closure` for an `<anonymous:` closure node), one `Unresolved` per
+/// unbound-handler BlindSpot at the registration. With neither, `Absent`
+/// when a BlindSpot says the registration shows no handler, else `Inline`.
+/// Never empty.
+fn route_handlers<'g>(
+    graph: &'g ecp_core::graph::ArchivedZeroCopyGraph,
+    route_idx: usize,
+    route_file_path: &'g str,
+    spots: &RouteSpots<'g>,
+) -> Vec<RouteHandler> {
+    let route_node = &graph.nodes[route_idx];
+    let route_name = route_node.name.resolve(&graph.string_pool);
+    let mut handlers: Vec<RouteHandler> = Vec::new();
+    let in_start = graph.in_offsets[route_idx].to_native() as usize;
+    let in_end = graph.in_offsets[route_idx + 1].to_native() as usize;
+    for i in in_start..in_end {
+        let edge = &graph.edges[graph.in_edge_idx[i].to_native() as usize];
+        if !matches!(&edge.rel_type, ArchivedRelType::HandlesRoute) {
+            continue;
+        }
+        let source = edge.source.to_native() as usize;
+        let node = &graph.nodes[source];
+        let uid = node.uid.to_native();
+        let handler = match node
+            .name
+            .resolve(&graph.string_pool)
+            .starts_with("<anonymous:")
+        {
+            true => HandlerRef::Closure { uid },
+            false => HandlerRef::Declaration { uid },
+        };
+        handlers.push(RouteHandler {
+            handler,
+            node: Some(source),
+            laravel_action: false,
+        });
+    }
+    // Two registrations can share a line; the column tells them apart, and
+    // the hint names the route, for a call that registers several.
+    let at = (
+        route_file_path,
+        route_node.span.0.to_native(),
+        route_node.span.1.to_native(),
+    );
+    let mut absent = false;
+    for &(kind, hint) in spots.get(&at).into_iter().flatten() {
+        let unbound = match kind {
+            BS_KIND_ROUTE_UNBOUND_HANDLER => unbound_handler(hint, route_name).map(|n| (n, false)),
+            BS_KIND_ROUTE_HANDLER_ABSENT => {
+                absent |= is_absent_handler_hint(hint, route_name);
+                None
+            }
+            _ => ecp_analyzer::php::laravel_routes::unbound_action(hint, route_name)
+                .map(|n| (n, true)),
+        };
+        if let Some((name, laravel_action)) = unbound {
+            handlers.push(RouteHandler {
+                handler: HandlerRef::Unresolved {
+                    name: name.to_string(),
+                },
+                node: None,
+                laravel_action,
+            });
+        }
+    }
+    if handlers.is_empty() {
+        let handler = match absent {
+            true => HandlerRef::Absent,
+            false => HandlerRef::Inline {
+                line: route_node.start_line(),
+            },
+        };
+        handlers.push(RouteHandler {
+            handler,
+            node: None,
+            laravel_action: false,
+        });
+    }
+    handlers
 }
 
 /// BFS upstream over non-`HandlesRoute` incoming edges from `seed_idx`,

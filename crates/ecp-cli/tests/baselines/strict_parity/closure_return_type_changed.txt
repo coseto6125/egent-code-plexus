@@ -1,0 +1,3 @@
+# owner: lane F (incremental overlay: builder edges of dirty files)
+edge full-only x1 Accesses Function src/make.ts:3 make #9bc7acccef0bb30f -> Class src/types.ts:7 B #76532769f4f8e642 conf=0.95
+edge overlay-only x1 Accesses Function src/make.ts:3 make #9bc7acccef0bb30f -> Class src/types.ts:1 A #3db3e44eaa36c795 conf=0.95

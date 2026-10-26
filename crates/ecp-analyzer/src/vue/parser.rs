@@ -169,6 +169,10 @@ impl LanguageProvider for VueProvider {
         // ── Pass 2: re-parse each script block ───────────────────────────
         let mut all_nodes: Vec<RawNode> = section_nodes;
         let mut all_imports: Vec<RawImport> = Vec::new();
+        let mut graph = LocalGraph {
+            file_path: path.to_path_buf(),
+            ..Default::default()
+        };
 
         for (script_elem, start_tag, raw_text_node) in script_blocks {
             // Determine `lang` attribute (default: "ts" for Vue 3 SFCs,
@@ -177,6 +181,7 @@ impl LanguageProvider for VueProvider {
             // callers should set `lang="js"` explicitly for JS-only files).
             let is_ts = detect_lang_ts(&start_tag, source);
             let is_setup = detect_setup_attr(&start_tag, source);
+            graph.note_script(is_ts, node_span(&script_elem));
             let section_name = if is_setup { "script setup" } else { "script" };
 
             // Emit Section node for the script block itself.
@@ -232,12 +237,9 @@ impl LanguageProvider for VueProvider {
             all_imports.extend(imports);
         }
 
-        Ok(LocalGraph {
-            file_path: path.to_path_buf(),
-            nodes: all_nodes,
-            imports: all_imports,
-            ..Default::default()
-        })
+        graph.nodes = all_nodes;
+        graph.imports = all_imports;
+        Ok(graph)
     }
 }
 

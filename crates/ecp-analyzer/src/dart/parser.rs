@@ -409,6 +409,9 @@ impl LanguageProvider for DartProvider {
                 {
                     continue;
                 }
+                if k == NodeKind::Class && root.kind() == "class_declaration" {
+                    insert_mixins(root, source, &mut heritage);
+                }
                 if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                     let name_str = name_str.trim();
                     // Dart visibility convention: identifiers starting with `_` are
@@ -546,6 +549,7 @@ impl LanguageProvider for DartProvider {
             nodes,
             imports,
             documents: vec![],
+            route_receivers: None,
             framework_refs,
             fanout_refs: vec![],
             blind_spots,
@@ -558,8 +562,38 @@ impl LanguageProvider for DartProvider {
             call_metas: vec![],
             raw_function_metas,
             export_aliases: None,
+            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
         })
     }
+}
+
+/// Splices `with M1, M2` into `heritage` after the superclass.
+/// tree-sitter-dart 0.2 nests `mixins` inside `superclass`, where the class
+/// pattern of `queries.scm` does not reach, so the captures hold the
+/// superclass and the interfaces only. The order `extends`, `with`,
+/// `implements` is the one the `Overrides` lookup reads.
+fn insert_mixins(class_decl: tree_sitter::Node<'_>, source: &[u8], heritage: &mut Vec<String>) {
+    let Some(superclass) = class_decl.child_by_field_name("superclass") else {
+        return;
+    };
+    let at = usize::from(superclass.child_by_field_name("type").is_some()).min(heritage.len());
+    let interfaces = heritage.split_off(at);
+    let mut cursor = superclass.walk();
+    for mixins in superclass
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() == "mixins")
+    {
+        let mut inner = mixins.walk();
+        for ty in mixins
+            .named_children(&mut inner)
+            .filter(|ty| ty.kind() == "type")
+        {
+            if let Some(name) = ty.named_child(0).and_then(|n| n.utf8_text(source).ok()) {
+                heritage.push(name.trim().to_string());
+            }
+        }
+    }
+    heritage.extend(interfaces);
 }
 
 /// Walk the Dart AST for `.transaction(closure)` / `.runTransaction(closure)`

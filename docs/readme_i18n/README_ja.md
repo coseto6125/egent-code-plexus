@@ -222,7 +222,7 @@ ecp impact --literal session_meta.json
 | `cypher '<query>'` | openCypher エスケープハッチ；`m.content` はソースボディを返す |
 | `summary` | レジストリ概要、フレームワークカバレッジ、LLM 対応ブラインドスポットカタログ、グラフ鮮度 |
 | `routes [<path>]` | HTTP ルート列挙（宣言的 + 命令的）；`<path>` を指定するとハンドラ + 呼び出し元チェーン |
-| `contracts` | クロスリポジトリ API コントラクトインベントリ（ルート / キュー / RPC） |
+| `contracts` | HTTP ルートのコントラクト：ルートと呼び出し側の fetch を対応付け、リポジトリをまたいで表示（キュー / RPC は未対応） |
 | `diff` | リゾルバデルタ：バインディング階層低下 + ルート / コントラクト変更 |
 | `tool-map` | インポートバインディング解析による外部 HTTP / DB / Redis / キューコールサイト |
 | `shape-check` | HTTP コンシューマーアクセスパターンとルートレスポンスシェイプ間のドリフト |

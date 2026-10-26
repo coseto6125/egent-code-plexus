@@ -48,6 +48,7 @@ fn reassigned_field_graph(path: &str) -> LocalGraph {
         documents: vec![],
         imports: vec![],
         routes: vec![],
+        route_receivers: None,
         framework_refs: vec![],
         fanout_refs: vec![],
         blind_spots: vec![],
@@ -59,6 +60,7 @@ fn reassigned_field_graph(path: &str) -> LocalGraph {
         call_metas: vec![],
         raw_function_metas: vec![],
         export_aliases: None,
+        parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
     }
 }
 
@@ -126,6 +128,7 @@ fn non_field_duplicate_still_reports_uid_collision() {
         documents: vec![],
         imports: vec![],
         routes: vec![],
+        route_receivers: None,
         framework_refs: vec![],
         fanout_refs: vec![],
         blind_spots: vec![],
@@ -137,6 +140,7 @@ fn non_field_duplicate_still_reports_uid_collision() {
         call_metas: vec![],
         raw_function_metas: vec![],
         export_aliases: None,
+        parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
     });
     let g = b.build();
     let pool = g.string_pool.as_slice();
