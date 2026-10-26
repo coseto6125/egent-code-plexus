@@ -1642,3 +1642,49 @@ fn test_check_closure_py_reexport_reordered_matches_baseline() {
         )],
     });
 }
+
+/// Stands for: a re-pointed re-export in `project/settings.py` names each
+/// clean file that may bind through that module (`from project.settings
+/// import …`, `from project import settings`), and not a clean
+/// `from django.conf import settings`, which imports another package's
+/// namesake.
+#[test]
+fn test_invalidation_closure_py_submodule_namesake_of_other_package_stays_out() {
+    let observed = strict_parity::run(&Scenario {
+        name: "closure_py_submodule_namesake_of_other_package",
+        owner: LANE_F_CLEAN_CALLERS,
+        files: &[
+            ("project/__init__.py", ""),
+            ("project/defaults.py", "def FEATURE_FLAG():\n    return 1\n"),
+            ("project/other.py", "def FEATURE_FLAG():\n    return 2\n"),
+            ("project/settings.py", "from .defaults import FEATURE_FLAG\n"),
+            (
+                "main.py",
+                "from project.settings import FEATURE_FLAG\n\n\ndef run():\n    return FEATURE_FLAG()\n",
+            ),
+            (
+                "views.py",
+                "from project import settings\n\n\ndef view():\n    return settings.FEATURE_FLAG()\n",
+            ),
+            (
+                "third.py",
+                "from django.conf import settings\n\n\ndef other():\n    return settings.DEBUG\n",
+            ),
+        ],
+        edits: &[Edit::Write(
+            "project/settings.py",
+            "from .other import FEATURE_FLAG\n",
+        )],
+    });
+    let served: BTreeSet<&str> = observed
+        .inputs
+        .iter()
+        .map(|input| input.rel_path.as_str())
+        .collect();
+    assert_eq!(
+        served,
+        BTreeSet::from(["main.py", "project/settings.py", "views.py"]),
+        "{:?}",
+        observed.stale
+    );
+}

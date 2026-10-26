@@ -416,16 +416,37 @@ impl Reexport<'_> {
     /// directory for an `__init__`; a relative `.` / `..` source always may. A TS / JS specifier may go through a
     /// path alias or a package name, so every one may.
     fn admits(&self, source: &str) -> bool {
-        if !self.python {
-            return true;
+        !self.python || {
+            let tail = last_segment(source);
+            tail.is_empty() || tail == self.python_module().0
         }
-        let tail = source.rsplit(['/', '.']).next().unwrap_or_default();
-        let name = file_name(self.path);
-        let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
-        tail.is_empty()
-            || tail == stem
-            || (stem == "__init__" && tail == file_name(parent_dir(self.path)))
     }
+
+    /// Whether a Python `from <source> import <name>` row imports the dirty
+    /// module itself (`from pkg import hub`): `name` is the module and
+    /// `source` its package, or a relative `.` / `..`.
+    fn admits_submodule(&self, source: &str, name: &str) -> bool {
+        let (module, package) = self.python_module();
+        let tail = last_segment(source);
+        self.python && name == module && (tail.is_empty() || tail == package)
+    }
+
+    /// The dirty file's module name and its package's: `pkg/hub.py` is
+    /// (`hub`, `pkg`), `pkg/__init__.py` is (`pkg`, the directory above).
+    fn python_module(&self) -> (&str, &str) {
+        let dir = parent_dir(self.path);
+        let name = file_name(self.path);
+        match name.rsplit_once('.').map_or(name, |(stem, _)| stem) {
+            "__init__" => (file_name(dir), file_name(parent_dir(dir))),
+            stem => (stem, file_name(dir)),
+        }
+    }
+}
+
+/// The last `/` or `.` segment of an import source: empty for a relative
+/// `.` / `..`.
+fn last_segment(source: &str) -> &str {
+    source.rsplit(['/', '.']).next().unwrap_or_default()
 }
 
 impl<'a> Changes<'a> {
@@ -1000,7 +1021,7 @@ impl Dependents<'_> {
                 by_name
                     .get(name)
                     .is_some_and(|found| found.iter().any(|r| r.admits(source)))
-                    || reexports.iter().any(|r| r.python && r.admits(name))
+                    || reexports.iter().any(|r| r.admits_submodule(source, name))
             };
             if rows.iter().any(binds) {
                 self.files.insert(file);
