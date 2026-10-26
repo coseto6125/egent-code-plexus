@@ -3,6 +3,7 @@ pub mod csharp_access;
 pub mod csharp_extension;
 pub mod heritage;
 pub mod import_binding;
+pub mod import_edges;
 pub mod ladder;
 pub mod lang_spec;
 pub mod lexical;
