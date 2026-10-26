@@ -15,7 +15,7 @@ use notify::{Event, EventKind, RecursiveMode, Watcher};
 use rustc_hash::FxHashSet;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::channel;
+use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -60,7 +60,7 @@ pub fn run_watcher(cfg: WatcherCfg) -> std::io::Result<()> {
     let my_dirty_cache: Arc<Mutex<Option<MyDirtySurface>>> = Arc::new(Mutex::new(None));
 
     let (tx, rx) = channel::<notify::Result<Event>>();
-    let mut watcher = notify::recommended_watcher(tx).map_err(std::io::Error::other)?;
+    let mut watcher = open_watcher(tx, notify::recommended_watcher)?;
     let sessions_dir = cfg.repo_root.join("sessions");
     std::fs::create_dir_all(&sessions_dir)?;
     watcher
@@ -207,6 +207,27 @@ fn my_dirty_gained_symbols(my_session_dir: &Path, prev: Option<&MyDirtySurface>)
         .values()
         .flat_map(|e| &e.dirty_symbols)
         .any(|s| !prev_keys.contains(&(s.file.as_str(), s.name.as_str())))
+}
+
+/// Poll period when the native watcher cannot start.
+const POLL_FALLBACK_INTERVAL: Duration = Duration::from_millis(500);
+
+/// The native watcher fails to start once the user's inotify instances run
+/// out (`fs.inotify.max_user_instances`, 128 by default on Linux); without a
+/// fallback this session would never hear from its peers again.
+fn open_watcher(
+    tx: Sender<notify::Result<Event>>,
+    native: impl FnOnce(Sender<notify::Result<Event>>) -> notify::Result<notify::RecommendedWatcher>,
+) -> std::io::Result<Box<dyn Watcher>> {
+    match native(tx.clone()) {
+        Ok(w) => Ok(Box::new(w)),
+        Err(e) => {
+            tracing::warn!(error = %e, "native file watcher unavailable, polling instead");
+            let cfg = notify::Config::default().with_poll_interval(POLL_FALLBACK_INTERVAL);
+            let poll = notify::PollWatcher::new(tx, cfg).map_err(std::io::Error::other)?;
+            Ok(Box::new(poll))
+        }
+    }
 }
 
 /// Fail-open per peer: one unreadable peer must not block the rest.
@@ -846,5 +867,30 @@ mod tests {
         state.rebuild(dir.path());
         assert!(state.seeds.is_empty());
         assert!(!state.cache.contains("src/a.rs", "stale"));
+    }
+
+    #[test]
+    fn test_open_watcher_native_failure_polls_and_delivers_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = channel::<notify::Result<Event>>();
+        let mut watcher = open_watcher(tx, |_| {
+            Err(notify::Error::io(std::io::Error::from_raw_os_error(24)))
+        })
+        .expect("polling fallback");
+        watcher.watch(dir.path(), RecursiveMode::Recursive).unwrap();
+        let target = dir.path().join("l1").join("dirty_events.json");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"{}").unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut seen = false;
+        while !seen && std::time::Instant::now() < deadline {
+            if let Ok(Ok(ev)) = rx.recv_timeout(Duration::from_millis(200)) {
+                seen = ev.paths.iter().any(|p| p.ends_with("l1/dirty_events.json"));
+            }
+        }
+        assert!(
+            seen,
+            "polling watcher never reported the new dirty_events.json"
+        );
     }
 }
