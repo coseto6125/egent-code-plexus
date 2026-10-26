@@ -152,7 +152,7 @@ fn test_imports_edges_basename_guess_confidence_below_ceiling_typescript() {
         &[
             (
                 "src/main.ts",
-                "import \"shared/alpha\";\nimport \"./util\";\n",
+                "import { missing } from \"shared/alpha\";\nimport { absent } from \"./util\";\n",
             ),
             ("pkg/shared/alpha.ts", "export const alpha = 1;\n"),
             ("src/util.ts", "export const util = 1;\n"),
@@ -221,15 +221,22 @@ fn test_imports_edges_rust_crate_path_guesses_last_module() {
     );
 }
 
+/// Stands for: `use crate::y;` names an item of the crate root, so step 3a
+/// resolves the specifier `crate` to `src/lib.rs` and no guess step runs; a
+/// same-stem file elsewhere is not guessed.
 #[test]
-fn test_imports_edges_rust_crate_root_item_guesses_item_as_module() {
+fn test_imports_edges_rust_crate_root_item_binds_crate_root_no_guess() {
+    let files = [
+        ("src/lib.rs", "mod a;\n"),
+        ("src/a.rs", "use crate::y;\n"),
+        ("elsewhere/y.rs", "pub fn f() {}\n"),
+    ];
+    let edges = file_imports(&RustProvider::new().expect("RustProvider"), &files);
+    assert_resolved(&edges, "src/a.rs", "src/lib.rs");
     assert_eq!(
-        rust_guess_targets(
-            "src/a.rs",
-            "use crate::y;\n",
-            &[("elsewhere/y.rs", "pub fn f() {}\n")],
-        ),
-        vec!["elsewhere/y.rs".to_string()]
+        edge(&edges, "src/a.rs", "elsewhere/y.rs"),
+        None,
+        "{edges:?}"
     );
 }
 
