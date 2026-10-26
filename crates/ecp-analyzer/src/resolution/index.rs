@@ -890,14 +890,6 @@ impl SymbolTable {
             .insert(member, ImplMember { block, trait_owner });
     }
 
-    /// Whether `id` has no owner and no `impl` block either, and is no
-    /// scoped declaration ([`same_file_pick::is_free`]).
-    fn is_free(&self, id: u32) -> bool {
-        self.node_owner[id as usize] == NO_OWNER
-            && !self.impl_members.contains_key(&id)
-            && !self.is_lexically_scoped(id)
-    }
-
     /// Record that `node` is scoped under the callable `parent` (contract
     /// C1). From then on no name-tier lookup returns `node` (invariant I5):
     /// only the lexical tier binds it. The builder notes every row of the
@@ -1304,12 +1296,6 @@ impl SymbolTable {
         self.exported_ids.iter().copied()
     }
 
-    /// Whether `id` is declared outside any owning type. A method of a Rust
-    /// `impl` block the parser gave no owner is not: `use m::f` never names it.
-    pub(crate) fn is_top_level(&self, id: NodeId) -> bool {
-        self.is_free(id)
-    }
-
     /// [`Self::lookup_call_in_file`] narrowed by the owner an import binding
     /// requires: [`MemberOwner::Any`] takes the match [`Self::prefer_owned`]
     /// picks with no owner (a free function, else one type's member),
@@ -1482,12 +1468,6 @@ impl SymbolTable {
         same_file_pick::prefer_owned(
             self, file_path, pick, member, owner, heritage, target, scope,
         )
-    }
-
-    /// Whether an untyped member call may bind `id`
-    /// ([`same_file_pick::member_call_admits`]).
-    pub(crate) fn member_call_admits(&self, id: u32, caller_owner: Option<&str>) -> bool {
-        same_file_pick::member_call_admits(self, id, caller_owner)
     }
 
     /// The candidate nearest `caller_file` when `candidates` are copies of
@@ -2458,8 +2438,8 @@ mod tests {
             ("lib.rs", "m", NodeKind::Method, None),
         ]);
         st.note_impl_member(1, 1, Some("T"));
-        assert!(st.is_top_level(0));
-        assert!(!st.is_top_level(1));
+        assert!(same_file_pick::is_free(&st, 0));
+        assert!(!same_file_pick::is_free(&st, 1));
     }
 
     #[test]
@@ -2592,10 +2572,13 @@ mod tests {
         ]);
         st.build_owner_kinds();
         let admits: Vec<bool> = (0..6)
-            .map(|id| st.member_call_admits(id, Some("lexer")))
+            .map(|id| same_file_pick::member_call_admits(&st, id, Some("lexer")))
             .collect();
         assert_eq!(admits, [false, false, true, false, false, false]);
-        assert!(st.member_call_admits(1, None), "a caller with no type");
+        assert!(
+            same_file_pick::member_call_admits(&st, 1, None),
+            "a caller with no type"
+        );
     }
 
     #[test]
@@ -2873,8 +2856,11 @@ mod tests {
         );
         assert_eq!(&*st.pick_candidates("b.py", "helper"), &[2]);
         assert_eq!(&*control.pick_candidates("b.py", "helper"), &[1, 2]);
-        assert!(!st.is_top_level(1), "a nested function is no import target");
-        assert!(st.is_top_level(2));
+        assert!(
+            !same_file_pick::is_free(&st, 1),
+            "a nested function is no import target"
+        );
+        assert!(same_file_pick::is_free(&st, 2));
 
         // Two copies of `pkg/util.py`, one scoped: no copy set remains, and
         // the unscoped copy is the unique global pick.

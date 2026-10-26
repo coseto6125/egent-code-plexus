@@ -908,7 +908,7 @@ impl<'a> Resolver<'a> {
     /// A member call reaches a method or a type's function, never a type or
     /// its constructor by the type's name: an untyped `o.m()`
     /// ([`CallSite::UntypedMember`]) never takes the constructor fallback,
-    /// and every tier's target passes `SymbolTable::member_call_admits` (no
+    /// and every tier's target passes `same_file_pick::member_call_admits` (no
     /// free function, no namespace member, no constructor, no member of the
     /// caller's own type by the name alone). Neither does a bare `m()` that
     /// may be a member call whose receiver the parser dropped take the
