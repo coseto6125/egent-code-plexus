@@ -318,7 +318,8 @@ impl<'a> ModuleIndex<'a> for IndexFacts<'_, 'a> {
 
     fn importer_scope_root(&self, importer: &str) -> Option<&str> {
         let aliases = &self.0.path_aliases;
-        aliases.scope_root(aliases.scope_of(importer))
+        let language = self.0.symbol_table.file_language(importer);
+        aliases.scope_root(aliases.scope_of(importer, language))
     }
 }
 
@@ -852,7 +853,16 @@ impl<'a> Resolver<'a> {
             visit(file);
             return;
         }
-        for_each_specifier_candidate(source_file, specifier, &self.path_aliases, visit);
+        for_each_specifier_candidate(
+            source_file,
+            specifier,
+            &self.path_aliases,
+            || {
+                self.symbol_table
+                    .file_language(&normalize_source_path(source_file))
+            },
+            visit,
+        );
     }
 
     /// [`module_discovery::discover_module`] over this index, memoized per
@@ -871,7 +881,10 @@ impl<'a> Resolver<'a> {
         } else {
             Path::new("")
         };
-        let scope = alias_scope(&self.path_aliases, source_file);
+        let scope = alias_scope(&self.path_aliases, source_file, || {
+            self.symbol_table
+                .file_language(&normalize_source_path(source_file))
+        });
         if let Some(hit) = self
             .module_cache
             .read()
@@ -2098,8 +2111,18 @@ fn call_target(source_file: &Path, site: CallSite<'_>) -> ResolveTarget {
 }
 
 /// The C2 scope `source_file` imports in ([`PathAliases::scope_of`]).
-fn alias_scope(aliases: &PathAliases, source_file: &Path) -> AliasScope {
-    aliases.scope_of(&normalize_source_path(source_file))
+/// `language` yields the file's stored language, read only when the aliases
+/// carry scopes: a Vue `<script lang="ts">` file is TypeScript though its
+/// path names none.
+fn alias_scope(
+    aliases: &PathAliases,
+    source_file: &Path,
+    language: impl FnOnce() -> Language,
+) -> AliasScope {
+    if !aliases.has_scopes() {
+        return AliasScope::default();
+    }
+    aliases.scope_of(&normalize_source_path(source_file), language())
 }
 
 /// [`reexport::for_each_specifier_candidate`] with the project's path
@@ -2108,6 +2131,7 @@ fn for_each_specifier_candidate<F>(
     source_file: &std::path::Path,
     specifier: &str,
     aliases: &PathAliases,
+    importer_language: impl FnOnce() -> Language,
     visit: F,
 ) where
     F: FnMut(&str) -> bool,
@@ -2117,9 +2141,11 @@ fn for_each_specifier_candidate<F>(
         specifier,
         |expanded| {
             if !aliases.is_empty() {
-                aliases.expand_in(alias_scope(aliases, source_file), specifier, |alias| {
-                    expanded(alias)
-                });
+                aliases.expand_in(
+                    alias_scope(aliases, source_file, importer_language),
+                    specifier,
+                    |alias| expanded(alias),
+                );
             }
         },
         visit,
@@ -2527,10 +2553,16 @@ mod tests {
     fn cands(src: &str, spec: &str) -> Vec<String> {
         let mut out = Vec::new();
         let aliases = PathAliases::new();
-        for_each_specifier_candidate(&PathBuf::from(src), spec, &aliases, |c| {
-            out.push(c.to_string());
-            true
-        });
+        for_each_specifier_candidate(
+            &PathBuf::from(src),
+            spec,
+            &aliases,
+            || Language::Unknown,
+            |c| {
+                out.push(c.to_string());
+                true
+            },
+        );
         out
     }
 

@@ -1124,7 +1124,8 @@ impl<'a> ModuleFacts for OverlayFacts<'a> {
             specifier,
             |expanded| {
                 if !aliases.is_empty() {
-                    aliases.expand_in(aliases.scope_of(importer), specifier, |alias| {
+                    let language = self.scope.file_meta(importer).language;
+                    aliases.expand_in(aliases.scope_of(importer, language), specifier, |alias| {
                         expanded(alias)
                     });
                 }
@@ -1660,7 +1661,7 @@ impl<'a> OverlayFacts<'a> {
         imports
     }
 
-    /// The index's `Resolver::resolve_chained_member`: the member `member`
+    /// The index's `Resolver::resolve_chained_member_outcome`: the member `member`
     /// of the type a call to `callee` returns, read in `callee`'s own file
     /// and found by the receiver-typing ladder, at the ladder's confidence
     /// capped by `inner_confidence`. Import and namespace visibility is read
@@ -2739,6 +2740,7 @@ fn resolve_callee<'s>(
                     .iter()
                     .map(|&(virt, _)| (virt, Some(&*nodes[(virt - base_len) as usize].rel_path))),
             );
+        let importer_language = facts.scope.file_meta(importer).language;
         let hit = match is_relative_specifier(&import.source) {
             // The first probed file declaring the name, then its first
             // declaration: base and virtual indices both follow source order
@@ -2751,6 +2753,7 @@ fn resolve_callee<'s>(
                             &import.source,
                             path?,
                             facts.scope.aliases(),
+                            importer_language,
                         )?,
                         idx,
                     ))
@@ -4622,6 +4625,7 @@ pub(super) fn relative_module_rank(
     specifier: &str,
     path: &str,
     aliases: &PathAliases,
+    importer_language: Language,
 ) -> Option<usize> {
     let mut rank = 0;
     let mut found = None;
@@ -4630,9 +4634,11 @@ pub(super) fn relative_module_rank(
         specifier,
         |expanded| {
             if !aliases.is_empty() {
-                aliases.expand_in(aliases.scope_of(importer), specifier, |alias| {
-                    expanded(alias)
-                });
+                aliases.expand_in(
+                    aliases.scope_of(importer, importer_language),
+                    specifier,
+                    |alias| expanded(alias),
+                );
             }
         },
         |candidate| {
@@ -5187,7 +5193,7 @@ fn resolve_overrides(
     let base_len = facts.base_len();
     let file_rules: Vec<Option<Rules>> = files
         .iter()
-        .map(|file| rules_for(Language::from_path(&file.rel_path)))
+        .map(|file| rules_for(file.file_meta().language))
         .collect();
     if file_rules.iter().all(Option::is_none) {
         return Vec::new();
@@ -5304,11 +5310,13 @@ fn resolve_overrides(
     let mut archived: Vec<(u32, &str, u32, Option<RawFunctionMeta>)> = Vec::new();
     let mut scanned: FxHashSet<u32> = FxHashSet::default();
     for &ty in &reached {
-        if ty >= base_len {
+        let group = facts.partial_group(ty);
+        // A dirty type has no archived methods of its own, but a dirty part
+        // of a partial type leaves its clean parts' methods to read.
+        if ty >= base_len && group.is_empty() {
             continue;
         }
         let key = partial(ty);
-        let group = facts.partial_group(ty);
         let parts: &[u32] = if group.is_empty() {
             std::slice::from_ref(&ty)
         } else {

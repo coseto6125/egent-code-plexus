@@ -74,6 +74,7 @@ pub fn same_name_def_count(
             .zip(v.virtual_nodes())
             .filter(|&(idx, vn)| {
                 vn.replaced_base.is_none()
+                    && vn.has_owning_file()
                     && !vn.later_overload
                     && vn.name == bare_name
                     && v.lexical_parent(idx).is_none()

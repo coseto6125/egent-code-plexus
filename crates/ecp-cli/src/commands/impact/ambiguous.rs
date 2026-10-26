@@ -99,7 +99,9 @@ fn same_name_defs(merged: MergedGraph<'_>, name: &str) -> Vec<u32> {
             v.virtual_nodes()
                 .iter()
                 .enumerate()
-                .filter(|(_, vn)| vn.replaced_base.is_none() && vn.name == name)
+                .filter(|(_, vn)| {
+                    vn.replaced_base.is_none() && vn.has_owning_file() && vn.name == name
+                })
                 .map(|(i, _)| base_len + i as u32),
         );
     }

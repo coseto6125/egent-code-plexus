@@ -10,7 +10,7 @@
 //! lookup meets as a BlindSpot at the method, deduplicated per method and
 //! base.
 
-use crate::resolution::index::{DeclaredBase, FileMeta, Language, ResolveTarget, SymbolTable};
+use crate::resolution::index::{DeclaredBase, FileMeta, ResolveTarget, SymbolTable};
 use ecp_core::analyzer::overrides::{
     method_lookup, owner_types, rules_for, Ambiguity, Decl, Incomplete, MethodIndex, MroCache,
     OverrideBase, OverrideEdges, OverrideFacts, OverrideMethod, Stop, Why,
@@ -122,7 +122,7 @@ pub fn emit_edges(
     for (file_idx, lg) in local_graphs.iter().enumerate() {
         let file = FileOrd(file_idx as u32);
         let path = lg.file_path.to_string_lossy().replace('\\', "/");
-        let Some(rules) = rules_for(Language::from_path(&path)) else {
+        let Some(rules) = rules_for(symbol_table.file_language(&path)) else {
             continue;
         };
         let is_test = files
@@ -263,7 +263,7 @@ fn gap_finding(table: &SymbolTable, owner: u32, base: &DeclaredBase) -> (&'stati
     }
     let meta = table
         .file_of(owner)
-        .map_or_else(FileMeta::default, FileMeta::from_path);
+        .map_or_else(FileMeta::default, |file| table.file_meta(file));
     let same_named = table
         .global_candidates(
             owner_key(&base.spelling).unwrap_or(""),

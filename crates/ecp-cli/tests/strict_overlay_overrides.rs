@@ -581,6 +581,28 @@ fn test_overlay_view_removed_supertype_drops_override() {
     );
 }
 
+/// A C# partial `Base` whose first part (the representative, `Base.cs`) is
+/// dirty and whose `virtual Run` sits in a clean second part: the dirty
+/// `Sub.Run` still overrides it, as the reindex has it. Red before the fix:
+/// the replay skipped the virtual representative, so the clean part's
+/// `HasMethod` edges were never read and `Sub.Run` bound nothing.
+#[test]
+fn test_overlay_view_partial_base_dirty_representative_override_matches_reindex() {
+    let base = "namespace Acme\n{\n    public partial class Base\n    {\n    }\n\n    public class Sub : Base\n    {\n        public override void Run()\n        {\n        }\n    }\n}\n";
+    let part = "namespace Acme\n{\n    public partial class Base\n    {\n        public virtual void Run()\n        {\n        }\n    }\n}\n";
+    let edited = format!("{base}// comment-only edit\n");
+    let edges = assert_overrides_match(
+        "partial base, dirty representative",
+        &[("Base.cs", base), ("Part2.cs", part)],
+        &[Edit::Write("Base.cs", &edited)],
+        Expect::Gained("Run"),
+    );
+    assert!(
+        edges.iter().any(|edge| edge.contains("Part2.cs")),
+        "Sub.Run overrides the Run of the clean part: {edges:#?}"
+    );
+}
+
 /// A static method neither overrides nor is overridden in Java; in
 /// TypeScript a static overrides a static. The instance `run` keeps each
 /// fixture from passing empty.

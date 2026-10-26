@@ -175,18 +175,27 @@ impl PathAliases {
 
     /// The scope `importer` (a repo-relative, `/`-separated path) resolves
     /// its imports in: the `Unique` C2 scope of its language's ecosystem.
+    /// `language` is the importer's stored language, not the path's: a Vue
+    /// `<script lang="ts">` file parses as TypeScript though its path names no
+    /// language.
     /// No scope for an `Ambiguous` or `Unscoped` file, for a language this
     /// reading does not serve, and when no scope table is attached. The
     /// lookup walks the importer's directories with one binary search each
     /// and allocates nothing.
-    pub fn scope_of(&self, importer: &str) -> AliasScope {
+    pub fn scope_of(&self, importer: &str, language: Language) -> AliasScope {
         let Some(tables) = &self.scopes else {
             return AliasScope(None);
         };
         AliasScope(
-            import_ecosystem(Language::from_normalized_path(importer))
+            import_ecosystem(language)
                 .and_then(|ecosystem| tables.facts.unique_scope_of(importer, ecosystem)),
         )
+    }
+
+    /// Whether [`Self::with_scopes`] attached scope tables: without them
+    /// [`Self::scope_of`] is always no scope.
+    pub fn has_scopes(&self) -> bool {
+        self.scopes.is_some()
     }
 
     /// The root directory of `scope`; `None` for no scope. The repo root is
@@ -464,9 +473,15 @@ mod tests {
         a
     }
 
+    /// `scope_of` with the language the path names: every fixture path here is
+    /// a plain source file.
+    fn scope_of_path(aliases: &PathAliases, importer: &str) -> AliasScope {
+        aliases.scope_of(importer, Language::from_normalized_path(importer))
+    }
+
     fn collect_in(aliases: &PathAliases, importer: &str, spec: &str) -> Vec<String> {
         let mut out = Vec::new();
-        aliases.expand_in(aliases.scope_of(importer), spec, |c| {
+        aliases.expand_in(scope_of_path(aliases, importer), spec, |c| {
             out.push(c.to_string());
             true
         });
@@ -535,10 +550,13 @@ mod tests {
         );
         assert_eq!(collect_in(&aliases, "lib/b.ts", "@/x"), vec!["src/x"]);
         assert_eq!(
-            aliases.scope_root(aliases.scope_of("apps/web/a.ts")),
+            aliases.scope_root(scope_of_path(&aliases, "apps/web/a.ts")),
             Some("apps/web")
         );
-        assert_eq!(aliases.scope_root(aliases.scope_of("lib/b.ts")), Some(""));
+        assert_eq!(
+            aliases.scope_root(scope_of_path(&aliases, "lib/b.ts")),
+            Some("")
+        );
     }
 
     /// A scope whose config gave no alias (none declared, or a config that
@@ -554,7 +572,7 @@ mod tests {
         )])
         .unwrap();
         let aliases = repo_wide().with_scopes(&facts);
-        let scope = aliases.scope_of("packages/a/main.ts");
+        let scope = scope_of_path(&aliases, "packages/a/main.ts");
         assert_ne!(scope, AliasScope::default());
         assert!(!aliases.has_scoped_table(scope));
         assert_eq!(
@@ -607,7 +625,7 @@ mod tests {
         // An undeclared workspace package and an external one map nothing.
         assert!(from_a("@s/c").is_empty());
         assert!(from_a("left-pad").is_empty());
-        assert!(aliases.has_scoped_table(aliases.scope_of("packages/a/x.ts")));
+        assert!(aliases.has_scoped_table(scope_of_path(&aliases, "packages/a/x.ts")));
     }
 
     /// Two scopes at one root are ambiguous: no scope, the repo-wide
@@ -641,7 +659,7 @@ mod tests {
             "README.md",
         ] {
             assert_eq!(
-                aliases.scope_of(importer),
+                scope_of_path(&aliases, importer),
                 AliasScope::default(),
                 "{importer}"
             );
@@ -652,6 +670,49 @@ mod tests {
             );
         }
         assert_eq!(collect_in(&aliases, "a.ts", "@/u"), vec!["web/u"]);
+    }
+
+    /// A Vue / Svelte / Astro importer parses as TypeScript, JavaScript or
+    /// none (no script): its scope follows the stored language, not its path.
+    #[test]
+    fn test_scope_of_sfc_importer_reads_stored_language() {
+        let facts = WorkspaceFacts::from_drafts(vec![
+            draft(
+                Ecosystem::Node,
+                "tsconfig.json",
+                &[("@/*", &["shared/*"])],
+                &[],
+                &[],
+            ),
+            draft(
+                Ecosystem::Node,
+                "web/tsconfig.json",
+                &[("@/*", &["web/src/*"])],
+                &[],
+                &[],
+            ),
+        ])
+        .unwrap();
+        let aliases = repo_wide().with_scopes(&facts);
+        let expand = |language| {
+            let mut out = Vec::new();
+            aliases.expand_in(
+                aliases.scope_of("web/src/App.vue", language),
+                "@/util",
+                |c| {
+                    out.push(c.to_string());
+                    true
+                },
+            );
+            out
+        };
+        assert_eq!(expand(Language::TypeScript), vec!["web/src/util"]);
+        assert_eq!(expand(Language::JavaScript), vec!["web/src/util"]);
+        assert_eq!(
+            aliases.scope_of("web/src/App.vue", Language::Unknown),
+            AliasScope::default(),
+            "an SFC with no script stores no language: repo-wide aliases only"
+        );
     }
 
     /// A table with no scope of a served ecosystem (a Cargo-only repo, an
@@ -669,7 +730,7 @@ mod tests {
         for facts in [cargo, WorkspaceFacts::default()] {
             let aliases = PathAliases::new().with_scopes(&facts);
             assert!(aliases.is_empty());
-            assert_eq!(aliases.scope_of("src/a.ts"), AliasScope::default());
+            assert_eq!(scope_of_path(&aliases, "src/a.ts"), AliasScope::default());
         }
     }
 
@@ -711,10 +772,14 @@ mod tests {
         .unwrap();
         let aliases = PathAliases::new().with_scopes(&facts);
         let mut out = Vec::new();
-        aliases.expand_in(aliases.scope_of("cmd/main.go"), "ex.com/m/pkg", |c| {
-            out.push(c.to_string());
-            false
-        });
+        aliases.expand_in(
+            scope_of_path(&aliases, "cmd/main.go"),
+            "ex.com/m/pkg",
+            |c| {
+                out.push(c.to_string());
+                false
+            },
+        );
         assert_eq!(out, vec!["./pkg"]);
     }
 

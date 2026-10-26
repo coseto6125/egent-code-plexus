@@ -381,7 +381,8 @@ impl<'a> ImportScope<'a> {
         } else {
             ""
         };
-        let scope = self.aliases.scope_of(source_file);
+        let importer_language = self.file_meta(source_file).language;
+        let scope = self.aliases.scope_of(source_file, importer_language);
         if let Some(hit) = self
             .modules
             .borrow()
@@ -399,6 +400,7 @@ impl<'a> ImportScope<'a> {
                 dirty: self.dirty,
                 dirty_base: self.dirty_base,
                 aliases: &self.aliases,
+                importer_language,
             };
             discover_module(&index, source_file, specifier, language)
         });
@@ -447,6 +449,9 @@ struct ScopeIndex<'s, 'a> {
     dirty: &'a [OverlayFileInput],
     dirty_base: &'s FxHashSet<u32>,
     aliases: &'s PathAliases,
+    /// The stored language of the importer `module` was asked about (not
+    /// `language`, which may be another of its import family).
+    importer_language: Language,
 }
 
 impl<'a> ModuleIndex<'a> for ScopeIndex<'_, 'a> {
@@ -534,7 +539,7 @@ impl<'a> ModuleIndex<'a> for ScopeIndex<'_, 'a> {
         specifier: &str,
         visit: impl FnMut(&str) -> bool,
     ) {
-        let scope = self.aliases.scope_of(importer);
+        let scope = self.aliases.scope_of(importer, self.importer_language);
         if !self.aliases.has_scoped_table(scope) {
             for_each_layout_candidate(importer, specifier, visit);
             return;
@@ -551,7 +556,8 @@ impl<'a> ModuleIndex<'a> for ScopeIndex<'_, 'a> {
     }
 
     fn importer_scope_root(&self, importer: &str) -> Option<&str> {
-        self.aliases.scope_root(self.aliases.scope_of(importer))
+        self.aliases
+            .scope_root(self.aliases.scope_of(importer, self.importer_language))
     }
 }
 

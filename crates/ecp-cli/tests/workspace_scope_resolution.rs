@@ -268,6 +268,45 @@ fn test_resolve_import_monorepo_two_at_aliases_root_config_bind_own_package() {
     );
 }
 
+/// A Vue `<script setup lang="ts">` importer is TypeScript by its stored
+/// language, not by its path: it reads `packages/web`'s `@/*`, not the root's.
+/// Red on HEAD: the scope lookup read the `.vue` path's language (none), so
+/// the call bound the root `packages/shared/src/util.ts`.
+#[test]
+fn test_resolve_import_vue_script_importer_binds_own_package() {
+    let files = [
+        (
+            "tsconfig.json",
+            r#"{ "compilerOptions": { "paths": { "@/*": ["packages/shared/src/*"] } } }"#,
+        ),
+        ("packages/web/tsconfig.json", AT_ALIAS),
+        (
+            "packages/shared/src/util.ts",
+            "export function helper() {\n  return 0;\n}\n",
+        ),
+        (
+            "packages/web/src/util.ts",
+            "export function helper() {\n  return 1;\n}\n",
+        ),
+        (
+            "packages/web/src/App.vue",
+            "<script setup lang=\"ts\">\nimport { helper } from \"@/util\";\n\nexport function run() {\n  return helper();\n}\n</script>\n",
+        ),
+    ];
+    let main = "packages/web/src/App.vue";
+    let util = "packages/web/src/util.ts";
+    let observed = observe("workspace_scope_vue_script_importer", &files, main);
+    assert_scoped_call(&observed, main, "run", "helper", util, IMPORT_SCOPED);
+    assert_imports(
+        &observed,
+        main,
+        "helper",
+        util,
+        &["packages/shared/src/util.ts"],
+    );
+    assert_overlay_parity(&observed);
+}
+
 /// JavaScript reads `jsconfig.json` through the same Node scope rule. Red on
 /// HEAD as the TypeScript repro.
 #[test]

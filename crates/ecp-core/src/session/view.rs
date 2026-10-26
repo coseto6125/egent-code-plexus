@@ -708,12 +708,13 @@ impl OverlayView {
     ///   one Java / Kotlin / PHP declaration builds that language's file
     ///   index too, to compare their files' namespaces.
     ///
-    /// The shared import rules scan nothing: a TS / JS import probes its
-    /// candidate paths by binary search over `graph.files`, reads one
-    /// module's archived import rows per re-export hop, and looks
-    /// declarations up through the name index. The per-file replay
-    /// (`session::incremental`) costs O(dirty symbols) on top: the `File`
-    /// nodes it needs come from the node scan above.
+    /// The shared import rules scan nothing until an import reaches a guess
+    /// step: a TS / JS import probes its candidate paths by binary search
+    /// over `graph.files`, reads one module's archived import rows per
+    /// re-export hop, and looks declarations up through the name index. A
+    /// guess step builds, once per build, a basename and directory index over
+    /// every base `File` node. The replay's other costs are in
+    /// `session::incremental`'s module doc.
     pub fn build(graph: &ArchivedZeroCopyGraph, files: &[OverlayFileInput]) -> Option<Self> {
         Self::build_with_removed(graph, files, &[])
     }
@@ -3008,7 +3009,14 @@ mod tests {
         for (importer, specifier, path) in cases {
             assert!(is_relative_specifier(specifier), "{specifier}");
             assert!(
-                relative_module_rank(importer, specifier, path, &PathAliases::new()).is_some(),
+                relative_module_rank(
+                    importer,
+                    specifier,
+                    path,
+                    &PathAliases::new(),
+                    Language::TypeScript,
+                )
+                .is_some(),
                 "{importer} {specifier} {path}"
             );
         }
@@ -3021,7 +3029,15 @@ mod tests {
     /// the index suffixes; anything else is never probed.
     #[test]
     fn test_relative_module_rank_follows_resolver_probe_order() {
-        let rank = |path: &str| relative_module_rank("src/b.ts", "./a", path, &PathAliases::new());
+        let rank = |path: &str| {
+            relative_module_rank(
+                "src/b.ts",
+                "./a",
+                path,
+                &PathAliases::new(),
+                Language::TypeScript,
+            )
+        };
         assert!(rank("src/a").is_some());
         assert!(rank("src/a") < rank("src/a.ts"));
         assert!(rank("src/a.ts") < rank("src/a.js"));
@@ -3031,7 +3047,14 @@ mod tests {
         assert_eq!(rank("src/a/other.ts"), None);
         assert_eq!(rank("tests/a.ts"), None);
         assert_eq!(rank("src/__mocks__/a.ts"), None);
-        assert!(relative_module_rank("b.ts", "./", "index.ts", &PathAliases::new()).is_some());
+        assert!(relative_module_rank(
+            "b.ts",
+            "./",
+            "index.ts",
+            &PathAliases::new(),
+            Language::TypeScript
+        )
+        .is_some());
     }
 
     #[test]

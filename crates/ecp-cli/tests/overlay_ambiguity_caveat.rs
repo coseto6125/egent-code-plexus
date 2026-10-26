@@ -300,3 +300,35 @@ fn test_find_dirty_csharp_instance_namesake_rebinds_clean_extension_call() {
     );
     assert_eq!(second, first, "a view-cache hit must give the same answer");
 }
+
+/// A `@retry` decorator whose `def retry` is new in the same dirty edit makes
+/// the replay a virtual `Annotation` node named `retry` with no owning file.
+/// It is a reference, not a definition: the dirty view counts one `retry`
+/// definition, as the reindex does, so the impact answer carries no
+/// same-named caveat. Red on HEAD: the dirty view counted two.
+#[test]
+fn test_impact_dirty_new_decorator_and_def_no_same_named_caveat() {
+    let fx = Repo::new(
+        "rpib-new-decorator",
+        &[(
+            "src/app.py",
+            "def run():\n    return 1\n\n\ndef other():\n    return 2\n",
+        )],
+    );
+    fs::write(
+        fx.repo.join("src/app.py"),
+        "def retry(fn):\n    return fn\n\n\n@retry\ndef run():\n    return 1\n\n\ndef other():\n    return 2\n",
+    )
+    .unwrap();
+
+    let payload = fx.json_in(
+        &fx.repo,
+        &["impact", "--target", "retry", "--direction", "upstream"],
+    );
+
+    let result = result_of(&payload);
+    assert!(
+        !result.contains("same-named"),
+        "one definition of `retry`, no same-named caveat: {result:?}"
+    );
+}

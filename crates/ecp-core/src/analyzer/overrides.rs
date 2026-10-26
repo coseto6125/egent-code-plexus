@@ -308,8 +308,10 @@ pub struct Rules {
 }
 
 /// The rules of a file of `language`; `None` for C, which has no override.
-/// The index reads the language from the file's path
-/// (`Language::from_path`), so a caller that must agree with it does too.
+/// The index reads the language the file stored
+/// (`SymbolTable::file_language`; the overlay's `OverlayFileInput::file_meta`):
+/// a Vue `<script lang="ts">` file is TypeScript though its path names none.
+/// A caller that must agree with it reads the stored language too.
 pub fn rules_for(language: Language) -> Option<Rules> {
     use OverrideRule::*;
     use Signature::*;
