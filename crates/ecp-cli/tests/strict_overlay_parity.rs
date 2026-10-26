@@ -1245,23 +1245,25 @@ fn test_render_then_read_returns_owner_and_lines() {
 }
 
 /// A dirty C++ base method becomes `virtual`. No declaration moves; the clean
-/// `D::run` now overrides it. The `Overrides` edge `D::run -> B::run` in the
-/// full index proves it: only the flags word of `B::run` differs.
+/// `D::run() override` now overrides it (C++ pairs a marked method with a
+/// virtual base only), so the full index gains `D::run -> B::run`. The view's
+/// own `Overrides` replay of a dirty base's subtypes covers this edge, so the
+/// case locks the parity, not the closure's flags comparison.
 #[test]
 fn test_check_closure_cpp_method_made_virtual_matches_baseline() {
     check(&Scenario {
         name: "closure_cpp_method_made_virtual",
         owner: LANE_F_CLEAN_CALLERS,
         files: &[
-            ("src/base.h", "class B {\npublic:\n    void run();\n};\n"),
+            ("src/base.h", "class B {\npublic:\n    void run() {}\n};\n"),
             (
                 "src/derived.h",
-                "#include \"base.h\"\n\nclass D : public B {\npublic:\n    void run();\n};\n",
+                "#include \"base.h\"\n\nclass D : public B {\npublic:\n    void run() override {}\n};\n",
             ),
         ],
         edits: &[Edit::Write(
             "src/base.h",
-            "class B {\npublic:\n    virtual void run();\n};\n",
+            "class B {\npublic:\n    virtual void run() {}\n};\n",
         )],
     });
 }
@@ -1294,7 +1296,10 @@ fn test_check_closure_csharp_method_made_private_matches_baseline() {
 /// Two overloads of a dirty base method: the second one changes its
 /// parameter type, so the clean subclass's `handle(String)` stops overriding
 /// it. The `Overrides` edge `Sub.handle -> Base.handle(String)` in the full
-/// index proves it: the first overload (`int`) is unchanged.
+/// index proves it: the first overload (`int`) is unchanged. The view's
+/// `Overrides` replay covers this edge, and call resolution binds the first
+/// same-named overload, so the case locks the parity, not the closure's
+/// per-overload comparison.
 #[test]
 fn test_check_closure_overload_second_changed_matches_baseline() {
     check(&Scenario {
