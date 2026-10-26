@@ -594,7 +594,7 @@ fn routes(rel_path: &str) -> bool {
 mod tests {
     use super::should_analyze_path;
     use crate::reanalyze::provider_names_for_paths;
-    use ecp_core::contracts::routing::{Language, SizeCap};
+    use ecp_core::contracts::routing::Language;
     use std::path::Path;
 
     #[cfg(unix)]
@@ -603,7 +603,11 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
         let path = Path::new(std::ffi::OsStr::from_bytes(b"src/caf\xe9.py"));
         assert!(!should_analyze_path(path));
-        assert!(crate::reanalyze::pipeline_for_path(path, SizeCap::BUILT_IN).is_none());
+        assert!(crate::reanalyze::pipeline_for_path(
+            path,
+            ecp_core::contracts::routing::SizeCap::BUILT_IN
+        )
+        .is_none());
     }
 
     /// The walk records a non-UTF-8 path as omitted only when its lossy

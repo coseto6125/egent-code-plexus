@@ -1734,6 +1734,7 @@ mod tests {
     /// stored as an empty fragment (which would mask its indexed edges),
     /// and the parse reports the omission so the stored stale closure names
     /// the rebuilt kinds.
+    #[cfg(unix)]
     #[test]
     fn test_refresh_dependent_parse_omitted_is_not_stored_as_empty() {
         use std::os::unix::fs::PermissionsExt;
