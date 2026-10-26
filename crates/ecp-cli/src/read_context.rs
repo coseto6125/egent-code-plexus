@@ -241,7 +241,7 @@ pub fn named_declarations<'a>(merged: &MergedGraph<'a>, name: &str) -> Vec<Candi
         out.extend(
             (merged.base_len()..)
                 .zip(view.virtual_nodes())
-                .filter(|(_, n)| n.name == name && seen.insert(n.uid))
+                .filter(|(_, n)| n.has_owning_file() && n.name == name && seen.insert(n.uid))
                 .map(|(i, n)| facts(merged, i, MergedNode::Virtual(n), &n.rel_path)),
         );
     }

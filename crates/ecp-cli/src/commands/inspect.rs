@@ -880,6 +880,7 @@ mod tests {
             return_type: None,
             generic_arity: 0,
             flags: None,
+            decorators: Vec::new(),
         }
     }
 

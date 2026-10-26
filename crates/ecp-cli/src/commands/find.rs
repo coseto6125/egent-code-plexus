@@ -476,7 +476,7 @@ fn overlay_matches(
     };
     view.virtual_nodes()
         .iter()
-        .filter(|h| h.name.contains(pattern))
+        .filter(|h| h.has_owning_file() && h.name.contains(pattern))
         .filter(|h| {
             kind_filter.is_none_or(|kinds| {
                 let k = crate::commands::format::node_kind_to_str(&h.kind).to_ascii_lowercase();
@@ -1245,7 +1245,7 @@ fn overlay_bm25_hits(
     let terms = query_terms(&pattern_lower);
     view.virtual_nodes()
         .iter()
-        .filter(|h| h.replaced_base.is_none())
+        .filter(|h| h.replaced_base.is_none() && h.has_owning_file())
         .filter(|h| {
             kind_set.as_ref().is_none_or(|ks| {
                 let kind = format!("{:?}", h.kind).to_lowercase();
@@ -2260,6 +2260,7 @@ mod tests {
                     return_type: None,
                     generic_arity: 0,
                     flags: None,
+                    decorators: Vec::new(),
                 }],
                 imports: vec![],
             };

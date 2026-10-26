@@ -108,6 +108,11 @@ pub struct FragmentSymbol {
     /// span a meta carries; `None` otherwise. `Some(0)` is a real value
     /// (public instance), so absence is not zero.
     pub flags: Option<u16>,
+    /// `RawNode::decorators` as the parser wrote them, parser markers
+    /// included (`RawNode::is_parser_marker`): the overlay replays the
+    /// node's `Decorates` edges from them, and the override sentinel marks a
+    /// declared override.
+    pub decorators: Vec<String>,
 }
 
 /// The symbol shape of the v2 and v3 fragment bins (`FragmentSymbol` before
@@ -236,6 +241,7 @@ pub fn fragment_file_from_local_graph(graph: &LocalGraph) -> FragmentFile {
                         .filter(|return_type| !return_type.is_empty()),
                     generic_arity: n.generic_arity(),
                     flags: meta.map(|meta| meta.flags),
+                    decorators: n.decorators.clone(),
                 }
             })
             .collect(),

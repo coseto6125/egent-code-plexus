@@ -159,7 +159,9 @@ use std::path::Path;
 /// and the `sfc-script-mismatch` blind spot for mixed TS/JS script blocks.
 /// schema45: an L1 fragment carries `FragmentFile.parsed_language`; a
 /// schema44 fragment has no such field and must not be read.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema45");
+/// schema46: an L1 fragment symbol carries `FragmentSymbol.decorators`; a
+/// schema45 fragment lays its symbols out without it and must not be read.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema46");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

@@ -292,6 +292,7 @@ mod tests {
             return_type: None,
             generic_arity: 0,
             flags: Some(flags),
+            decorators: Vec::new(),
         }
     }
 

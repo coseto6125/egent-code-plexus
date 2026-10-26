@@ -11,6 +11,7 @@ use super::{
 };
 use crate::analyzer::csharp_access::{self, CallAccess};
 use crate::analyzer::csharp_extension::{self, ReceiverSite};
+use crate::analyzer::decorates::{decorates_edges, DECORATES_REASON};
 use crate::analyzer::heritage::{enclosing_class_heritage, holds_heritage, HeritageNode};
 use crate::analyzer::import_binding::{
     fqn_imported_name, fqn_language, fqn_type_path, import_binding, import_member_fallback,
@@ -4692,6 +4693,135 @@ fn resolve_imports<'a>(
     edges
 }
 
+/// The `Decorates` pass of [`resolve_edges`] ([`resolve_decorates`]): what
+/// it reads, and the edges and new `Annotation` nodes it hands the replay.
+pub(super) struct Decorated<'s> {
+    /// `(tombstone, survivor)` virtual indexes: a tombstoned twin's
+    /// decorators source at its survivor, as the index's `RawIndexMap`
+    /// merges the slot.
+    pub survivors: &'s [(u32, u32)],
+    /// The index the replay gives the first new `Annotation` node
+    /// (`incremental::first_annotation`).
+    pub first_annotation: u32,
+    /// The dirty files' `Decorates` edges, each sourced at a virtual node.
+    pub edges: Vec<ViewEdge>,
+    /// The full name of each `Annotation` node the base lacks, the k-th
+    /// taking `first_annotation + k`.
+    pub annotations: Vec<String>,
+}
+
+/// The base `Annotation` node the index made for the decorator `full_name`
+/// ([`decorates_edges`]): the one of that name with no owning file.
+fn base_annotation(graph: &ArchivedZeroCopyGraph, full_name: &str) -> Option<u32> {
+    graph.nodes_by_name(full_name).find(|&idx| {
+        let node = &graph.nodes[idx as usize];
+        NodeKind::from(&node.kind) == NodeKind::Annotation && !node.has_owning_file()
+    })
+}
+
+/// The `Decorates` edges of every dirty declaration, by the index's
+/// derivation ([`decorates_edges`]): a decorator name resolves as the
+/// index's `Resolver::resolve_symbol` resolves it for a type, which is the
+/// lookup of an `Imports` name ([`OverlayImportEdges`]), with the same
+/// resolver (no Rust module tree). A name nothing declares reaches the base
+/// `Annotation` node of its full name, or a new one numbered from
+/// `first_annotation`, one per full name across the dirty files. Runs after
+/// [`resolve_imports`]. Cost per decorator: the name ladder of an import
+/// and, for an unresolved one, one name-index probe per distinct full name.
+#[allow(clippy::too_many_arguments)]
+fn resolve_decorates<'a>(
+    graph: &'a ArchivedZeroCopyGraph,
+    files: &'a [OverlayFileInput],
+    nodes: &'a [ViewNode],
+    replaced: &'a FxHashMap<u32, u32>,
+    dirty_base: &'a FxHashSet<u32>,
+    facts: &OverlayFacts<'a>,
+    base_metas: &mut FxHashMap<usize, FileMeta>,
+    (callables, types, qualifiers): (&OverlayNames<'_>, &OverlayNames<'_>, &OverlayNames<'_>),
+    dirty_files: &FxHashMap<&'a str, u32>,
+    out: &mut Decorated<'_>,
+) {
+    if files
+        .iter()
+        .all(|file| file.symbols.iter().all(|s| s.decorators.is_empty()))
+    {
+        return;
+    }
+    if !facts.tree_free.replace(true) {
+        // The call pass's qualified answers read candidate files through
+        // the module trees.
+        facts.qualified.borrow_mut().clear();
+    }
+    let Decorated {
+        survivors,
+        first_annotation,
+        edges,
+        annotations,
+    } = out;
+    let survivor_of: FxHashMap<u32, u32> = survivors.iter().copied().collect();
+    let first_annotation = *first_annotation;
+    let base_metas = RefCell::new(&mut *base_metas);
+    let guesses = OnceCell::new();
+    let mut seen: FxHashSet<(u32, u32)> = FxHashSet::default();
+    let mut known: FxHashMap<String, u32> = FxHashMap::default();
+    let mut file_start = graph.nodes.len() as u32;
+    for (file_ord, file) in files.iter().enumerate() {
+        let start = file_start;
+        file_start += file.symbols.len() as u32;
+        if file.symbols.iter().all(|s| s.decorators.is_empty()) {
+            continue;
+        }
+        let lookup = OverlayImportEdges {
+            graph,
+            file_ord,
+            file,
+            caller: file.file_meta(),
+            language: facts.scope.file_meta(file.rel_path.as_str()).language,
+            base_metas: &base_metas,
+            callables,
+            types,
+            qualifiers,
+            nodes,
+            replaced,
+            dirty_base,
+            facts,
+            dirty_files,
+            guesses: &guesses,
+        };
+        for (offset, symbol) in file.symbols.iter().enumerate() {
+            let node = start + offset as u32;
+            let source = survivor_of.get(&node).copied().unwrap_or(node);
+            decorates_edges(
+                source,
+                symbol.kind,
+                &symbol.decorators,
+                &mut seen,
+                |name| lookup.named(name, ResolveTarget::Type, false).0,
+                |full_name| {
+                    if let Some(&idx) = known.get(full_name) {
+                        return idx;
+                    }
+                    let idx = base_annotation(graph, full_name).unwrap_or_else(|| {
+                        annotations.push(full_name.to_owned());
+                        first_annotation + annotations.len() as u32 - 1
+                    });
+                    known.insert(full_name.to_owned(), idx);
+                    idx
+                },
+                |target, confidence| {
+                    edges.push(ViewEdge {
+                        source,
+                        target,
+                        rel_type: RelType::Decorates,
+                        confidence,
+                        reason: DECORATES_REASON,
+                    })
+                },
+            );
+        }
+    }
+}
+
 /// The `member_twins` table [`super::OverlayView::build_with_removed`] fills.
 pub(super) type MemberTwins = FxHashMap<u32, (usize, Vec<(u32, Span)>)>;
 
@@ -4700,7 +4830,9 @@ pub(super) type MemberTwins = FxHashMap<u32, (usize, Vec<(u32, Span)>)>;
 /// holds the base paths gone from the worktree: no module lookup finds one.
 /// The `Imports` edges ([`resolve_imports`]) go to `imports` instead: a
 /// re-parsed path's `File` node, their source, is a base index, which these
-/// edges never have; `dirty_files` holds each dirty path's `File` node.
+/// edges never have; `dirty_files` holds each dirty path's `File` node. The
+/// `Decorates` edges ([`resolve_decorates`]) go to `decorated`: a new
+/// `Annotation` node they reach is numbered past every virtual node yet.
 /// Returns the lexical parent of each scoped virtual node.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_edges(
@@ -4719,6 +4851,7 @@ pub(super) fn resolve_edges(
     in_adj: &mut FxHashMap<u32, Vec<u32>>,
     gaps: &RefCell<Vec<CallGap>>,
     (dirty_files, imports): (&FxHashMap<&str, u32>, &mut Vec<ViewEdge>),
+    decorated: &mut Decorated<'_>,
 ) -> FxHashMap<u32, u32> {
     let mut callables = OverlayNames::new(ResolveTarget::Callable);
     let mut values = OverlayNames::new(ResolveTarget::Value);
@@ -5281,6 +5414,18 @@ pub(super) fn resolve_edges(
         &mut base_metas,
         (&callables, &types, &qualifiers),
         dirty_files,
+    );
+    resolve_decorates(
+        graph,
+        files,
+        nodes,
+        replaced,
+        dirty_base,
+        &facts,
+        &mut base_metas,
+        (&callables, &types, &qualifiers),
+        dirty_files,
+        decorated,
     );
     lexical_parents
 }

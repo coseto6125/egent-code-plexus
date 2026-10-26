@@ -70,11 +70,16 @@ pub const FRAGMENT_FORMAT_V6: u32 = 6;
 /// Current fragment bin encoding version written by `overlay_writer`: v6
 /// plus each symbol's `RawFunctionMeta.flags` and the file's raw records
 /// (path literals, SQL references, transaction scopes, schema fields, event
-/// topics: `OverlayFileRecords`), each endpoint bound, and the file's C5
+/// topics: `OverlayFileRecords`), each endpoint bound, the file's C5
 /// language after parse (`ParsedLanguage::to_bytes`, or `ABSENT` when the
-/// parse decided none). V7 is unreleased, so these extend it in place: the
-/// builder fingerprint (`BUILDER_FINGERPRINT`) or the archive check drops a
-/// V7 bin written before them, and the freshness gate re-parses its file. A
+/// parse decided none), and each symbol's raw `RawNode.decorators`, parser
+/// markers included, the last field of `FragmentSymbol`. V7 is unreleased,
+/// so these extend it in place: the builder fingerprint
+/// (`BUILDER_FINGERPRINT`) or the archive check drops a V7 bin written
+/// before them, and the freshness gate re-parses its file. The archive
+/// check is sure only for a field of the `FragmentFile` root, which grows;
+/// a bin that holds symbols written before the decorators may still pass
+/// it, so only the builder fingerprint drops that one for certain. A
 /// bin whose language bytes are neither `ABSENT` nor a pair
 /// `ParsedLanguage::from_bytes` accepts fails the archive check too.
 pub const FRAGMENT_FORMAT_V7: u32 = 7;

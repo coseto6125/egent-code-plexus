@@ -1,6 +1,7 @@
 pub mod containment;
 pub mod csharp_access;
 pub mod csharp_extension;
+pub mod decorates;
 pub mod heritage;
 pub mod import_binding;
 pub mod import_edges;

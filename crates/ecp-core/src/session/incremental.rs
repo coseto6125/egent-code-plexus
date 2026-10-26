@@ -12,6 +12,7 @@
 //! | enum containment | `post_process::enum_variant_defines` | [`containment::enum_variant_defines`] |
 //! | class membership: `HasMethod` / `HasProperty` | `post_process::class_membership` | [`membership::class_membership`], `HasProperty` only with the records |
 //! | `Imports` | `post_process::imports_edges` | [`crate::analyzer::import_edges`], resolved by the view's resolution pass against [`dirty_file_nodes`]; the replay appends them |
+//! | `Decorates` + `Annotation` | `post_process::decorates_edges` | [`crate::analyzer::decorates`], resolved by the view's resolution pass; the replay appends the new `Annotation` nodes from [`first_annotation`] on, then the edges, and suppresses each base `Annotation` node [`orphaned_annotations`] finds |
 //! | function meta | `pass1_8_function_metas` | the flags and return type the fragment paired by span |
 //! | `PathLiteral` + `UsesPathLiteral` | `post_process::path_literal_nodes` | [`record_nodes::path_literal_node`] |
 //! | `QueriesTable` | `post_process::sql_table_edges` | [`record_nodes::sql_table_refs`], the table by [`Tables`] |
@@ -35,6 +36,13 @@
 //! overload, a C# arity twin and a tombstone are in none, and an overload or
 //! a twin binds its own slot.
 //!
+//! An `Annotation` node the index makes for a decorator nothing declares
+//! has no owning file: one node per full name serves every file. A dirty
+//! decorator reaches the base node of its full name, or a new virtual one
+//! with no path when the base has none. A base one whose every base
+//! `Decorates` edge starts at a dirty or removed declaration, and that no
+//! replayed edge reaches, is suppressed, as a fresh build makes none.
+//!
 //! [`OverlayView::build_with_records`](super::view::OverlayView::build_with_records)
 //! calls [`replay`] once, after the virtual nodes and their tombstones are
 //! final. Cost: O(dirty symbols + dirty records + base record nodes of the
@@ -42,8 +50,10 @@
 //! path that declares a type or an enum variant (a C# path also renumbers
 //! its declarations once, O(symbols)), plus O(symbols x types of the file)
 //! span checks for class membership, plus one name-index probe (O(log N)
-//! and the namesakes) per distinct SQL table name. Nothing scans the base
-//! graph: the build's one node scan collects the base record nodes.
+//! and the namesakes) per distinct SQL table name, plus the out-edges of
+//! the dirty base nodes and, per base `Annotation` node they reach, its
+//! in-edges up to the first clean source. Nothing scans the base graph: the
+//! build's one node scan collects the base record nodes.
 
 use super::view::{
     reason_index, OverlayFileInput, OverlayFileRecords, ViewEdge, ViewFunctionMeta, ViewNode,
@@ -90,6 +100,12 @@ pub(super) struct ReplayInputs<'a> {
     /// The dirty files' `Imports` edges, by the index's derivation
     /// ([`crate::analyzer::import_edges`]), sourced at `dirty_files`.
     pub imports: Vec<ViewEdge>,
+    /// The dirty declarations' `Decorates` edges, by the index's derivation
+    /// ([`crate::analyzer::decorates`]), sourced at virtual nodes.
+    pub decorates: Vec<ViewEdge>,
+    /// The full name of each new `Annotation` node `decorates` reaches, the
+    /// k-th at [`first_annotation`] + k.
+    pub annotations: Vec<String>,
     /// The base nodes of the dirty paths whose kind
     /// [`replays_record_kind`], ascending.
     pub base_records: Vec<u32>,
@@ -116,7 +132,9 @@ pub(super) struct Replayed {
     pub records_replayed: bool,
     /// `(base, virtual)`: a base record node and the replayed node of its uid.
     pub replaced: Vec<(u32, u32)>,
-    /// The base record nodes no replayed node pairs with.
+    /// The base record nodes no replayed node pairs with, and the base
+    /// `Annotation` nodes no file references any more
+    /// ([`orphaned_annotations`]).
     pub suppressed: Vec<u32>,
 }
 
@@ -159,6 +177,82 @@ pub(super) fn dirty_file_nodes<'a>(
     table
 }
 
+/// The index the first new `Annotation` node takes: [`replay`] appends
+/// them right after the virtual `File` node of each input of a path outside
+/// `indexed`, numbered from `first_new` as [`dirty_file_nodes`] numbers
+/// them.
+pub(super) fn first_annotation(
+    files: &[OverlayFileInput],
+    indexed: &FxHashSet<&str>,
+    first_new: u32,
+) -> u32 {
+    let new_files = files
+        .iter()
+        .filter(|file| !indexed.contains(file.rel_path.as_str()))
+        .count();
+    first_new + new_files as u32
+}
+
+/// The base `Annotation` nodes with no owning file that a fresh build of
+/// the edited tree makes none of: every base edge into one starts at a
+/// node of `dirty_base` (a re-parsed or removed declaration, whose
+/// `Decorates` edges the view masks), and no edge of `decorates` reaches
+/// it. Ascending. Cost: the out-edges of `dirty_base`, then per candidate
+/// its in-edges up to the first clean source.
+fn orphaned_annotations(
+    graph: &ArchivedZeroCopyGraph,
+    dirty_base: &FxHashSet<u32>,
+    decorates: &[ViewEdge],
+) -> Vec<u32> {
+    let reached: FxHashSet<u32> = decorates.iter().map(|edge| edge.target).collect();
+    let mut candidates: Vec<u32> = Vec::new();
+    for &source in dirty_base {
+        let start = graph.out_offsets[source as usize].to_native() as usize;
+        let end = graph.out_offsets[source as usize + 1].to_native() as usize;
+        for edge in &graph.edges[start..end] {
+            let target = edge.target.to_native();
+            let node = &graph.nodes[target as usize];
+            if RelType::from(&edge.rel_type) == RelType::Decorates
+                && NodeKind::from(&node.kind) == NodeKind::Annotation
+                && !node.has_owning_file()
+                && !reached.contains(&target)
+            {
+                candidates.push(target);
+            }
+        }
+    }
+    candidates.sort_unstable();
+    candidates.dedup();
+    candidates.retain(|&annotation| {
+        let start = graph.in_offsets[annotation as usize].to_native() as usize;
+        let end = graph.in_offsets[annotation as usize + 1].to_native() as usize;
+        graph.in_edge_idx[start..end].iter().all(|edge| {
+            let source = graph.edges[edge.to_native() as usize].source.to_native();
+            dirty_base.contains(&source)
+        })
+    });
+    candidates
+}
+
+/// A new `Annotation` node as the index makes one for an unresolved
+/// decorator ([`crate::analyzer::decorates::annotation_uid`]): no owning
+/// file, so an empty path, and the span `(0, 0, 0, 0)`.
+fn annotation_node(full_name: &str) -> ViewNode {
+    ViewNode {
+        uid: crate::analyzer::decorates::annotation_uid(full_name),
+        name: full_name.to_owned(),
+        kind: NodeKind::Annotation,
+        owner_class: None,
+        rel_path: Arc::from(""),
+        start_line: 1,
+        end_line: 1,
+        start_column: 0,
+        end_column: 0,
+        replaced_base: None,
+        later_overload: false,
+    }
+}
+
 /// Append the per-file outputs of `inputs.files`: virtual `File` and record
 /// nodes onto `nodes`, and `Defines` and record edges onto `edges` with
 /// their adjacency. `nodes` holds every virtual symbol node, tombstones
@@ -182,6 +276,8 @@ pub(super) fn replay(
         base_files,
         dirty_files,
         imports,
+        decorates,
+        annotations,
         base_records,
         dirty_base,
         lexical_parents,
@@ -203,6 +299,7 @@ pub(super) fn replay(
     // its `file_node_idx` keeps. Each input's own `File` node sources its
     // records' file-level edges, as the index's `file_edges` do: the k-th
     // input of an indexed path takes the path's k-th base `File` node.
+    let first_new = base_len + nodes.len() as u32;
     let mut new_files: FxHashMap<&str, u32> = FxHashMap::default();
     let mut file_nodes: Vec<Option<u32>> = Vec::with_capacity(files.len());
     let mut inputs_of: FxHashMap<&str, usize> = FxHashMap::default();
@@ -230,6 +327,13 @@ pub(super) fn replay(
             .all(|(path, idx)| dirty_files.get(*path) == Some(idx)),
         "the Imports edges start at the File nodes this replay numbers"
     );
+    debug_assert_eq!(
+        base_len + nodes.len() as u32,
+        first_annotation(files, &indexed, first_new),
+        "the Decorates edges reach the Annotation nodes this replay numbers"
+    );
+    nodes.extend(annotations.iter().map(|name| annotation_node(name)));
+    replayed.suppressed = orphaned_annotations(graph, dirty_base, &decorates);
 
     let mut push = |edge: ViewEdge| {
         debug_assert!(
@@ -331,6 +435,7 @@ pub(super) fn replay(
         );
     }
     imports.into_iter().for_each(&mut push);
+    decorates.into_iter().for_each(&mut push);
 
     if !records_replay {
         return replayed;
@@ -347,7 +452,7 @@ pub(super) fn replay(
     replay_records(&context, &mut tables, nodes, &mut push);
     let (replaced, suppressed) = pair_records(graph, &base_records, base_len, first_record, nodes);
     replayed.replaced = replaced;
-    replayed.suppressed = suppressed;
+    replayed.suppressed.extend(suppressed);
     replayed.records_replayed = true;
     replayed
 }
@@ -918,6 +1023,7 @@ mod tests {
             return_type: None,
             generic_arity: 0,
             flags: None,
+            decorators: Vec::new(),
         }
     }
 
@@ -1055,6 +1161,206 @@ mod tests {
                 0.6,
                 "post_process:imports:guess".to_string()
             )]
+        );
+    }
+
+    /// A base `Annotation` node as the index makes one for an unresolved
+    /// decorator: no owning file, uid by `annotation_uid`.
+    fn synthetic_annotation(fx: &mut GraphFixture, full_name: &str) -> u32 {
+        let name = fx.intern(full_name);
+        let asm = fx.assembly_mut();
+        let idx = asm.nodes.len() as u32;
+        asm.nodes.push(crate::graph::Node {
+            uid: crate::analyzer::decorates::annotation_uid(full_name),
+            name,
+            file_idx: crate::graph::SYNTHETIC_FILE_IDX,
+            kind: NodeKind::Annotation,
+            span: (0, 0, 0, 0),
+            community_id: 0,
+            owner_class: Default::default(),
+            content_hash: 0,
+        });
+        idx
+    }
+
+    fn decorates_edge(fx: &mut GraphFixture, source: u32, annotation: u32) {
+        fx.edge_with(
+            source,
+            annotation,
+            RelType::Decorates,
+            crate::analyzer::decorates::ANNOTATION_CONFIDENCE,
+            crate::analyzer::decorates::DECORATES_REASON,
+        );
+    }
+
+    fn decorated(name: &str, decorators: &[&str]) -> OverlaySymbol {
+        let mut symbol = func(name, (2, 3));
+        symbol.decorators = decorators.iter().map(|d| d.to_string()).collect();
+        symbol
+    }
+
+    /// Every `Decorates` edge of the merged graph as (source, target,
+    /// confidence, reason).
+    fn decorates(
+        graph: &ArchivedZeroCopyGraph,
+        view: &OverlayView,
+    ) -> Vec<(u32, u32, f32, String)> {
+        let merged = MergedGraph::new(graph, Some(view));
+        let mut out: Vec<(u32, u32, f32, String)> = merged
+            .all_edges()
+            .filter(|e| e.rel_type() == RelType::Decorates)
+            .map(|e| {
+                (
+                    e.source,
+                    e.target,
+                    e.confidence(),
+                    e.reason(graph).to_string(),
+                )
+            })
+            .collect();
+        out.sort_by_key(|e| (e.0, e.1));
+        out
+    }
+
+    fn annotation_edge(source: u32, target: u32) -> (u32, u32, f32, String) {
+        (
+            source,
+            target,
+            crate::analyzer::decorates::ANNOTATION_CONFIDENCE,
+            crate::analyzer::decorates::DECORATES_REASON.to_string(),
+        )
+    }
+
+    /// A decorator no declaration and no base `Annotation` answers gets a
+    /// virtual `Annotation` node with the index's uid and no owning file,
+    /// numbered after the file's declarations, and the replayed edge. The
+    /// view survives its cache round trip. Red before F7b1-3: the dirty
+    /// declaration had no `Decorates` edge.
+    #[test]
+    fn test_replay_new_decorator_name_makes_virtual_annotation_node() {
+        let mut fx = GraphFixture::new();
+        fx.func("src/a.py", "run");
+        let bytes = fx.into_bytes();
+        let graph = access(&bytes);
+        let file = input("src/a.py", vec![decorated("run", &["Foo"])]);
+        let view = OverlayView::build(graph, &[file]).unwrap();
+        let (run, foo) = (view.base_len(), view.base_len() + 1);
+
+        let node = view.node(foo).expect("the virtual Annotation node");
+        assert_eq!(
+            (
+                node.kind,
+                node.name.as_str(),
+                node.uid,
+                node.has_owning_file()
+            ),
+            (
+                NodeKind::Annotation,
+                "Foo",
+                crate::analyzer::decorates::annotation_uid("Foo"),
+                false
+            )
+        );
+        assert_eq!(decorates(graph, &view), [annotation_edge(run, foo)]);
+        assert_eq!(
+            OverlayView::from_cache_bytes(&view.to_cache_bytes(), graph.nodes.len()).as_ref(),
+            Some(&view),
+            "a Decorates reason missing from VIEW_EDGE_REASONS keeps the view out of the cache"
+        );
+    }
+
+    /// A dirty declaration that keeps a decorator reaches the base
+    /// `Annotation` node of its full name: no second node. Its base edge is
+    /// masked, so the edge is not doubled.
+    #[test]
+    fn test_replay_kept_decorator_reaches_base_annotation_node() {
+        let mut fx = GraphFixture::new();
+        let run = fx.func("src/a.py", "run");
+        let foo = synthetic_annotation(&mut fx, "Foo");
+        decorates_edge(&mut fx, run, foo);
+        let bytes = fx.into_bytes();
+        let graph = access(&bytes);
+        let file = input("src/a.py", vec![decorated("run", &["Foo"])]);
+        let view = OverlayView::build(graph, &[file]).unwrap();
+
+        assert!(view.masks_base_edge(run, RelType::Decorates));
+        assert_eq!(view.virtual_nodes().len(), 1, "no new Annotation node");
+        assert_eq!(
+            decorates(graph, &view),
+            [annotation_edge(view.base_len(), foo)]
+        );
+        assert_eq!(view.redirect(foo), Some(foo));
+    }
+
+    /// Two files use `Foo`; the edit drops it from one. The shared base
+    /// `Annotation` node stays, with the clean file's edge only.
+    #[test]
+    fn test_replay_dropped_decorator_keeps_annotation_a_clean_file_uses() {
+        let mut fx = GraphFixture::new();
+        let run = fx.func("src/a.py", "run");
+        let go = fx.func("src/b.py", "go");
+        let foo = synthetic_annotation(&mut fx, "Foo");
+        decorates_edge(&mut fx, run, foo);
+        decorates_edge(&mut fx, go, foo);
+        let bytes = fx.into_bytes();
+        let graph = access(&bytes);
+        let view =
+            OverlayView::build(graph, &[input("src/a.py", vec![decorated("run", &[])])]).unwrap();
+
+        assert_eq!(decorates(graph, &view), [annotation_edge(go, foo)]);
+        assert_eq!(view.redirect(foo), Some(foo));
+    }
+
+    /// The edit drops the last reference to `Foo`: a fresh build makes no
+    /// `Annotation` node for it, so the view suppresses the base one. A
+    /// removed file's reference goes the same way.
+    #[test]
+    fn test_replay_last_decorator_reference_removed_suppresses_annotation() {
+        let mut fx = GraphFixture::new();
+        let run = fx.func("src/a.py", "run");
+        fx.func("src/b.py", "go");
+        let foo = synthetic_annotation(&mut fx, "Foo");
+        decorates_edge(&mut fx, run, foo);
+        let bytes = fx.into_bytes();
+        let graph = access(&bytes);
+
+        let edited =
+            OverlayView::build(graph, &[input("src/a.py", vec![decorated("run", &[])])]).unwrap();
+        assert!(decorates(graph, &edited).is_empty());
+        assert_eq!(edited.redirect(foo), None);
+
+        let removed =
+            OverlayView::build_with_removed(graph, &[], &["src/a.py".to_string()]).unwrap();
+        assert!(decorates(graph, &removed).is_empty());
+        assert_eq!(removed.redirect(foo), None);
+        assert_eq!(
+            OverlayView::from_cache_bytes(&removed.to_cache_bytes(), graph.nodes.len()).as_ref(),
+            Some(&removed)
+        );
+    }
+
+    /// A new file's new decorator: the virtual `Annotation` node follows the
+    /// file's virtual `File` node, and two dirty files share it.
+    #[test]
+    fn test_replay_two_new_files_share_one_new_annotation_after_file_nodes() {
+        let bytes = clean_base();
+        let graph = access(&bytes);
+        let files = [
+            input("src/a.py", vec![decorated("run", &["@x.Foo(1)"])]),
+            input("src/b.py", vec![decorated("go", &["x.Foo"])]),
+        ];
+        let view = OverlayView::build(graph, &files).unwrap();
+        let base = view.base_len();
+        // run, go, File a.py, File b.py, then the Annotation.
+        let foo = base + 4;
+
+        assert_eq!(
+            view.node(foo).map(|n| (n.kind, n.name.as_str())),
+            Some((NodeKind::Annotation, "x.Foo"))
+        );
+        assert_eq!(
+            decorates(graph, &view),
+            [annotation_edge(base, foo), annotation_edge(base + 1, foo)]
         );
     }
 

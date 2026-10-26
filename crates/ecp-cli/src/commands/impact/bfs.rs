@@ -458,11 +458,14 @@ pub(super) fn run_bfs<'g>(
                 .to_string();
             line = curr_node.start_line();
         } else {
-            // No has_owning_file guard here: virtual nodes come from freshly
-            // parsed source files, never from synthetic emission.
             let vn = view
                 .and_then(|v| v.node(curr_idx as u32))
                 .expect("virtual index enqueued without a view");
+            // A virtual Annotation the replay made for a decorator nothing
+            // declares has no file:line, as the base branch's.
+            if !vn.has_owning_file() {
+                continue;
+            }
             is_test = is_test_path(&vn.rel_path);
             if is_test && !include_tests && curr_depth > 0 {
                 hidden_test_callers += 1;

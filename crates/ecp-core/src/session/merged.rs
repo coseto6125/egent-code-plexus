@@ -394,7 +394,7 @@ impl<'a> MergedNode<'a> {
                 .then(|| graph.graph.files.get(n.file_idx.to_native() as usize))
                 .flatten()
                 .map(|file| file.path.resolve(&graph.graph.string_pool)),
-            Self::Virtual(n) => Some(&n.rel_path),
+            Self::Virtual(n) => n.has_owning_file().then_some(&*n.rel_path),
         }
     }
 
@@ -486,6 +486,7 @@ mod tests {
                 return_type: None,
                 generic_arity: 0,
                 flags: None,
+                decorators: Vec::new(),
             }],
             imports: vec![],
         }
@@ -744,6 +745,7 @@ mod tests {
                     return_type: None,
                     generic_arity: 0,
                     flags: None,
+                    decorators: Vec::new(),
                 })
                 .into_iter()
                 .collect(),
@@ -810,6 +812,7 @@ mod tests {
             return_type: None,
             generic_arity: 0,
             flags: None,
+            decorators: Vec::new(),
         }
     }
 

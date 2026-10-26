@@ -66,7 +66,13 @@
 //!   import resolver: its whole ladder without a call site, the named-import
 //!   tier in every language outside the import-member policy (not the
 //!   path-segment match of a call), candidate files without the Rust module
-//!   trees, and the guess steps over every file with a `File` node.
+//!   trees, and the guess steps over every file with a `File` node. Each
+//!   dirty declaration's `Decorates` edges come from its decorators
+//!   ([`OverlaySymbol::decorators`]) by [`crate::analyzer::decorates`], each
+//!   name looked up as an `Imports` name is, for a type. A name nothing
+//!   declares reaches the base `Annotation` node of its full name, or a new
+//!   virtual one with an empty path; a base one no file references any more
+//!   is suppressed.
 //! - **record outputs** — given each file's [`OverlayFileRecords`]
 //!   ([`OverlayView::build_with_records`]), the replay rebuilds the record
 //!   nodes and their edges by the index's derivations
@@ -82,7 +88,7 @@
 //!
 //! A base edge whose **source** lies in a dirty file is masked ONLY when the
 //! overlay re-resolves that rel type from fragment data (`Calls`,
-//! `ReadsField`, `Defines`, `HasMethod`, `Imports`, plus the `References` reasons
+//! `ReadsField`, `Defines`, `HasMethod`, `Imports`, `Decorates`, plus the `References` reasons
 //! above, plus `HasProperty`, `UsesPathLiteral`, `QueriesTable`,
 //! `OpensTxScope`, `Publishes` and `Subscribes` when the records replayed) —
 //! for those the overlay adjacency is the file's truth. `Defines` and the
@@ -108,8 +114,12 @@
 //!   indexed, and so are all record outputs and membership `HasProperty`
 //!   when the view is built without records. A path with two `LocalGraph`s
 //!   keeps the base's count of `File` nodes, whatever count its parse now
-//!   has. `Overrides`, `Decorates` with its `Annotation` nodes, and the
-//!   controller `EntryPoint` nodes of a dirty file are as indexed.
+//!   has. `Overrides` and the controller `EntryPoint` nodes of a dirty
+//!   file are as indexed.
+//! - A clean file's `Decorates` edges are never rebuilt: a clean decorator
+//!   whose name a dirty file now declares (or no longer declares) keeps its
+//!   indexed target, and an edge into a dirty declaration the edit removed
+//!   drops.
 //! - A clean file's `Imports` edges are never rebuilt: an edge into a
 //!   dirty declaration the edit removed drops, one into a declaration that
 //!   survives follows it, and a clean importer of a name the edit now
@@ -171,6 +181,7 @@
 use super::incremental::{self, ReplayInputs};
 use crate::analyzer::containment::{ENUM_VARIANT_DEFINES_REASON, SCOPE_DEFINES_REASON};
 use crate::analyzer::csharp_extension;
+use crate::analyzer::decorates::DECORATES_REASON;
 use crate::analyzer::heritage::HeritageNode;
 use crate::analyzer::import_edges::ImportReason;
 use crate::analyzer::lexical::{
@@ -237,6 +248,12 @@ pub struct OverlaySymbol {
     /// meta with the node, or the input does not carry it (a pre-V7
     /// fragment). `Some(0)` is a real value (public instance), not absence.
     pub flags: Option<u16>,
+    /// `RawNode.decorators` as the parser wrote them, parser markers
+    /// included ([`RawNode::is_parser_marker`](crate::analyzer::types::RawNode::is_parser_marker)):
+    /// the replay rebuilds the node's `Decorates` edges from them
+    /// ([`crate::analyzer::decorates`]), and the override sentinel marks a
+    /// declared override. Empty when the node has none.
+    pub decorators: Vec<String>,
 }
 
 impl HeritageNode for OverlaySymbol {
@@ -327,6 +344,7 @@ impl From<LocalGraph> for OverlayFileInput {
                         is_exported: n.is_exported,
                         heritage: n.heritage,
                         variant_refs: n.field_reads,
+                        decorators: n.decorators,
                     }
                 })
                 .collect(),
@@ -427,6 +445,16 @@ pub struct ViewNode {
     pub later_overload: bool,
 }
 
+impl ViewNode {
+    /// False for a node no single file owns: a new `Annotation` node the
+    /// replay makes for a decorator nothing declares, which has an empty
+    /// `rel_path`. The mirror of [`crate::graph::Node::has_owning_file`]:
+    /// a consumer that reports or reads a node's file skips such a node.
+    pub fn has_owning_file(&self) -> bool {
+        !self.rel_path.is_empty()
+    }
+}
+
 /// An overlay-resolved edge. Indices are merged-space: `< base_len` = base
 /// node, `>= base_len` = virtual node.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -463,7 +491,8 @@ pub struct OverlayView {
     replaced: FxHashMap<u32, u32>,
     /// base idxs of dirty-file symbols NOT re-emitted (deleted/renamed),
     /// the base record nodes of a re-parsed file the replay did not pair,
-    /// and every base idx of a removed file.
+    /// every base idx of a removed file, and each base `Annotation` node no
+    /// file references after the edit.
     suppressed: FxHashSet<u32>,
     /// every base idx of a re-parsed dirty file whose kind
     /// [`fragment_emits`], and every base idx of a removed file
@@ -828,12 +857,16 @@ impl OverlayView {
         // Each dirty path's `File` node, numbered as the replay below numbers
         // a new path's: the `Imports` edges start there.
         let indexed: FxHashSet<&str> = dirty_file_idx.values().copied().collect();
-        let dirty_files = incremental::dirty_file_nodes(
-            files,
-            &indexed,
-            &base_files,
-            base_len + nodes.len() as u32,
-        );
+        let first_new = base_len + nodes.len() as u32;
+        let dirty_files = incremental::dirty_file_nodes(files, &indexed, &base_files, first_new);
+        // The `Annotation` nodes the `Decorates` edges reach and the base
+        // lacks follow those `File` nodes.
+        let mut decorated = resolution::Decorated {
+            survivors: &survivors,
+            first_annotation: incremental::first_annotation(files, &indexed, first_new),
+            edges: Vec::new(),
+            annotations: Vec::new(),
+        };
 
         // ── overlay Calls and lexical closure References ──────────────────
         // The resolution submodule binds them. Its name maps borrow `nodes`'
@@ -859,7 +892,13 @@ impl OverlayView {
             &mut in_adj,
             &gaps,
             (&dirty_files, &mut imports),
+            &mut decorated,
         );
+        let resolution::Decorated {
+            edges: decorates,
+            annotations,
+            ..
+        } = decorated;
 
         let mut gaps = gaps.into_inner();
         gaps.extend(stale_extension_gaps(graph, files, &dirty_base, &suppressed));
@@ -887,6 +926,8 @@ impl OverlayView {
                 base_files,
                 dirty_files: &dirty_files,
                 imports,
+                decorates,
+                annotations,
                 base_records,
                 dirty_base: &dirty_base,
                 lexical_parents: &lexical_parents,
@@ -969,12 +1010,12 @@ impl OverlayView {
     /// file too: `HasMethod` always, and `HasProperty` when the records
     /// replayed, as a schema field's `HasProperty` shares the kind (module
     /// doc). `Imports` is rebuilt per file from its `File` node, so masked
-    /// there.
+    /// there. `Decorates` is rebuilt per decorated declaration.
     pub fn masks_base_edge(&self, base_idx: u32, rel: RelType) -> bool {
         let per_file =
             || self.dirty_base.contains(&base_idx) || self.defines_files.contains(&base_idx);
         match rel {
-            RelType::Calls | RelType::ReadsField | RelType::HasMethod => {
+            RelType::Calls | RelType::ReadsField | RelType::HasMethod | RelType::Decorates => {
                 self.dirty_base.contains(&base_idx)
             }
             RelType::HasProperty if self.records_replayed => self.dirty_base.contains(&base_idx),
@@ -987,8 +1028,9 @@ impl OverlayView {
     /// The function meta of the virtual function, method or constructor
     /// `idx`, as the index's `ArchivedZeroCopyGraph::function_metas` holds
     /// it for a base node: `None` for a base index, for another kind, and
-    /// when the parse paired no meta with the node. Parameters and
-    /// decorators are not in a fragment, so the view has none.
+    /// when the parse paired no meta with the node. Parameters are not in a
+    /// fragment, so the view has none; a dirty function's decorators reach
+    /// its `Decorates` edges, not its meta.
     pub fn function_meta(&self, idx: u32) -> Option<&ViewFunctionMeta> {
         self.function_metas
             .binary_search_by_key(&idx, |meta| meta.node)
@@ -1094,7 +1136,10 @@ impl OverlayView {
 /// F7b1 extends it again: the view stores a dirty file's class membership
 /// edges with two more reasons, and masks the base ones. F7b1-2 extends it
 /// again: the view stores a dirty file's `Imports` edges with three more
-/// reasons, and masks the base ones.
+/// reasons, and masks the base ones. F7b1-3 extends it again: the view
+/// stores a dirty file's `Decorates` edges with one more reason and the new
+/// `Annotation` nodes they reach, masks the base edges, and suppresses a
+/// base `Annotation` node no file references any more.
 pub const VIEW_CACHE_FORMAT: u32 = 14;
 
 /// The base edge kinds the record replay rebuilds, so masks at a re-parsed
@@ -1114,7 +1159,7 @@ fn replays_record_edge(rel: RelType) -> bool {
 /// Every reason [`OverlayView::build`] puts on a [`ViewEdge`]. A cached view
 /// stores each reason as its index here; a view with an unlisted reason is
 /// never stored, so it costs a build per query as before the cache.
-const VIEW_EDGE_REASONS: [&str; 37] = [
+const VIEW_EDGE_REASONS: [&str; 38] = [
     OVERLOAD_SET_REASON,
     CLOSURE_REFERENCE_REASON,
     NEAREST_COPY_REASON,
@@ -1152,6 +1197,7 @@ const VIEW_EDGE_REASONS: [&str; 37] = [
     ImportReason::Named.as_str(),
     ImportReason::Module.as_str(),
     ImportReason::Guess.as_str(),
+    DECORATES_REASON,
 ];
 
 pub(super) fn reason_index(reason: &str) -> Option<u8> {
@@ -1913,6 +1959,7 @@ mod tests {
             return_type: None,
             generic_arity: 0,
             flags: None,
+            decorators: Vec::new(),
         }
     }
 
@@ -2607,6 +2654,7 @@ mod tests {
             return_type: None,
             generic_arity: 0,
             flags: None,
+            decorators: Vec::new(),
         };
         let multi = OverlayFileInput {
             parsed_language: None,
@@ -2708,6 +2756,7 @@ mod tests {
             return_type: None,
             generic_arity: 0,
             flags: None,
+            decorators: Vec::new(),
         };
         let outer = OverlayFileInput {
             parsed_language: None,
