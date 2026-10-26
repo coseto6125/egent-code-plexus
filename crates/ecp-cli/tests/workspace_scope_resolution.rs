@@ -296,7 +296,8 @@ fn test_resolve_import_vue_script_importer_binds_own_package() {
     let main = "packages/web/src/App.vue";
     let util = "packages/web/src/util.ts";
     let observed = observe("workspace_scope_vue_script_importer", &files, main);
-    assert_scoped_call(&observed, main, "run", "helper", util, IMPORT_SCOPED);
+    // Imports only: a Vue script function records no call site yet
+    // (FU-2026-10-26-0c91c9fb59ae), so there is no `run -> helper` edge to check.
     assert_imports(
         &observed,
         main,

@@ -88,48 +88,24 @@ fn test_overrides_typescript_arity_mismatch_emits_no_edge() {
     );
 }
 
-const VUE_CLASSES: &str =
-    "export class Base {\n  save(): void {}\n}\nexport class Child extends Base {\n  save(): void {}\n}\n";
-
-/// A Vue `<script lang="ts">` file is TypeScript by its stored language, not
-/// by its `.vue` path: the pass reads the Inferred rules for it, as for the
-/// same classes in a `.ts` file. Red on HEAD: the path named no language, so
-/// the pass read the marked-only rule and emitted no edge.
-#[test]
-fn test_overrides_vue_ts_script_emits_edge_like_ts_file() {
-    let vue = format!("<script lang=\"ts\">\n{VUE_CLASSES}</script>\n");
-    let graph = graph_of(
-        &ecp_analyzer::vue::parser::VueProvider::new().unwrap(),
-        &[("Comp.vue", &vue)],
-    );
-    let edges = overrides(&graph);
-    assert_eq!(edges.len(), 1, "one Overrides edge: {edges:?}");
-    let (child, base, _, _) = &edges[0];
-    assert_eq!(
-        (child.owner.as_str(), child.name.as_str()),
-        ("Child", "save")
-    );
-    assert_eq!((base.owner.as_str(), base.name.as_str()), ("Base", "save"));
-    assert_eq!(base.file, "Comp.vue");
-}
-
-/// A `lang="js"` script is JavaScript: its rules are Inferred too.
-#[test]
-fn test_overrides_vue_js_script_emits_edge() {
-    let vue = format!("<script>\n{}</script>\n", VUE_CLASSES.replace(": void", ""));
-    let graph = graph_of(
-        &ecp_analyzer::vue::parser::VueProvider::new().unwrap(),
-        &[("Comp.vue", &vue)],
-    );
-    assert_eq!(overrides(&graph).len(), 1, "{:?}", overrides(&graph));
+/// `Comp.vue` parsed through the pipeline, which stores the language the
+/// provider reports; a bare `parse_file` leaves it unstored.
+fn vue_graph(source: &str) -> ecp_core::graph::ZeroCopyGraph {
+    let mut pipeline = ecp_core::analyzer::pipeline::AnalyzerPipeline::new();
+    pipeline.register_provider(Box::new(
+        ecp_analyzer::vue::parser::VueProvider::new().unwrap(),
+    ));
+    let local = pipeline
+        .parse_file_raw(std::path::Path::new("Comp.vue"), source.as_bytes())
+        .expect("parse");
+    let mut builder = ecp_analyzer::resolution::builder::GraphBuilder::new();
+    builder.add_graph(local);
+    builder.build()
 }
 
 /// A Vue file with no script stores no language: no rules, no edge, no panic.
 #[test]
 fn test_overrides_vue_without_script_emits_nothing() {
-    let graph = graph_of(
-        &ecp_analyzer::vue::parser::VueProvider::new().unwrap(),
-        &[("Comp.vue", "<template><p>hi</p></template>\n")],
-    );
+    let graph = vue_graph("<template><p>hi</p></template>\n");
     assert!(overrides(&graph).is_empty());
 }

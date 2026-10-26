@@ -593,7 +593,14 @@ fn test_overlay_view_partial_base_dirty_representative_override_matches_reindex(
     let edited = format!("{base}// comment-only edit\n");
     let edges = assert_overrides_match(
         "partial base, dirty representative",
-        &[("Base.cs", base), ("Part2.cs", part)],
+        &[
+            (
+                "Acme.csproj",
+                "<Project Sdk=\"Microsoft.NET.Sdk\">\n</Project>\n",
+            ),
+            ("Base.cs", base),
+            ("Part2.cs", part),
+        ],
         &[Edit::Write("Base.cs", &edited)],
         Expect::Gained("Run"),
     );
