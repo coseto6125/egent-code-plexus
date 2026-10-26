@@ -90,7 +90,7 @@ impl PeerHarness {
         .env("CLAUDE_CODE_SESSION_ID", id)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(std::fs::File::create(session_dir.join("watcher.stderr")).unwrap());
+        .stderr(std::fs::File::create(self.stderr_path(id)).unwrap());
         if let Some(g) = &self.graph {
             cmd.env("HOME", &g.home)
                 .env_remove("ECP_HOME")
@@ -105,6 +105,14 @@ impl PeerHarness {
             child: Some(child),
         });
         self.watchers.last().unwrap()
+    }
+
+    /// Outside `sessions/`: a log the watchers watch would feed them their
+    /// own writes as events.
+    fn stderr_path(&self, id: &str) -> PathBuf {
+        let dir = self.repo_root.path().join("watcher-logs");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(format!("{id}.stderr"))
     }
 
     pub fn session_dir(&self, id: &str) -> PathBuf {
@@ -174,10 +182,17 @@ impl PeerHarness {
                 .collect();
             froms.sort();
             froms.dedup();
-            let stderr = std::fs::read_to_string(self.session_dir(&id).join("watcher.stderr"))
-                .unwrap_or_default();
+            let stderr = std::fs::read_to_string(self.stderr_path(&id)).unwrap_or_default();
             let lines: Vec<&str> = stderr.lines().collect();
-            let tail = lines[lines.len().saturating_sub(60)..].join("\n    ");
+            let tail = if lines.len() <= 50 {
+                lines.join("\n    ")
+            } else {
+                format!(
+                    "{}\n    ...\n    {}",
+                    lines[..25].join("\n    "),
+                    lines[lines.len() - 25..].join("\n    ")
+                )
+            };
             out.push_str(&format!(
                 "\n[{id}] watcher {status}; heard from {froms:?}\n    {tail}"
             ));
