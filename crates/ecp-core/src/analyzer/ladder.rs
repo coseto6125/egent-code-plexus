@@ -1622,6 +1622,12 @@ pub struct CallContext<'c> {
     pub owner: Option<&'c str>,
     /// The calling declaration.
     pub caller: Option<u32>,
+    /// The file's lexical verdict on this site
+    /// (`LexicalFunctions::call_resolution`): `Bound` to the innermost
+    /// function in scope, `Shadowed` for a name a scope of the file declares
+    /// but none in reach binds, else `Unknown`. A language with no lexical
+    /// tier always passes `Unknown`.
+    pub lexical: Resolution,
 }
 
 /// What [`call`] reads per side (R1). Each method answers a question about
@@ -1685,6 +1691,18 @@ pub trait CallFacts<'s> {
     /// The `Calls` target of a construction of the type `type_id`: its one
     /// constructor, else the type.
     fn construction_target(&self, type_id: u32) -> u32;
+    /// The import tiers alone for `name` of `target`'s kinds: the side's
+    /// import-member tier where the language binds through an import's
+    /// member and `bind_imports` holds, else its named-import tier. No name
+    /// tier, no heritage, no wildcard-after-heritage order: this is the part
+    /// of the ladder a name that a lexical scope hides still reaches
+    /// (`import_only`).
+    fn import_tiers(
+        &self,
+        name: &str,
+        target: ResolveTarget,
+        bind_imports: bool,
+    ) -> Option<(u32, f32)>;
     /// The decision dump: the import `import` bound `name` to `id` ahead of
     /// the ladder.
     fn note_import_bound(&self, _name: &str, _import: &RawImport, _id: u32) {}
@@ -1707,6 +1725,11 @@ pub struct CallVerdict<'s> {
 /// R1, the call entry of the index (`Resolver::resolve_call`) and the
 /// overlay (`resolve_edges`): one call site's `Calls` target.
 ///
+/// 0. R6: the file's lexical verdict ([`CallContext::lexical`]) comes first.
+///    A function in scope binds at Tier 1 and nothing else runs. A name a
+///    lexical scope hides ([`Resolution::Shadowed`]) skips every name tier:
+///    only the import tiers and the constructor fallback run
+///    (`import_only`).
 /// 1. Normalize the site (R2-R5). A Python from-imported submodule and a
 ///    mapped Go package settle the call ahead of the ladder; a Go value or
 ///    unmapped package re-classifies the site. A C#, Swift, Kotlin or Dart
@@ -1739,6 +1762,23 @@ pub fn call<'s, F: CallFacts<'s>>(
     // A chain the caller did not type resolves as the entry the parser
     // wrote before chains.
     let mut site = site.fallback();
+    match cx.lexical {
+        Resolution::Bound(_) => {
+            return CallVerdict {
+                resolution: cx.lexical,
+                site,
+                typed: false,
+            };
+        }
+        Resolution::Shadowed => {
+            return CallVerdict {
+                resolution: import_only(facts, &cx, site),
+                site,
+                typed: false,
+            };
+        }
+        _ => {}
+    }
     let imports = || cx.imports.iter().map(ImportRef::from);
     let mut resolution = Resolution::Unknown;
     if let CallSite::FromReceiver { receiver, member } = site {
@@ -1866,6 +1906,47 @@ pub fn call<'s, F: CallFacts<'s>>(
         site,
         typed: typed.is_some(),
     }
+}
+
+/// R6, the import-only path of a call whose name a lexical scope of the file
+/// declares though none in reach binds ([`Resolution::Shadowed`]): the
+/// inaccessible local never binds, so only an import may resolve the callee,
+/// and the constructor fallback follows the same rule, reading the type
+/// through the import tiers alone. A member call on an untyped receiver
+/// names no import. Neither the Kotlin retry, the untyped post-filter nor
+/// the receiverless-member guard runs: a lexical language has no Kotlin
+/// retry, an untyped site returns before the tiers, and a bare name that the
+/// file's own function hides is no member call. The Python submodule and
+/// declared-attribute rules are `FromReceiver` rules, which no lexical tier
+/// shadows (`LexicalFunctions::call_resolution`: `ScopedOnly` reads only a
+/// `Plain` site; the JS / TS parsers write no receiver).
+fn import_only<'s, F: CallFacts<'s>>(
+    facts: &F,
+    cx: &CallContext<'_>,
+    site: CallSite<'s>,
+) -> Resolution {
+    if matches!(site, CallSite::UntypedMember(_)) {
+        return Resolution::Unknown;
+    }
+    let language = cx.language;
+    let mut resolution =
+        Resolution::from_ladder(facts.import_tiers(site.name(), call_target(language, site), true));
+    if resolution.call_fallbacks_allowed() {
+        let constructed = constructed_type(
+            facts.decls(),
+            language,
+            site,
+            cx.imports,
+            F::TYPE_NAME,
+            |name| facts.declares_constructible(name),
+            |path, bind_imports| facts.import_tiers(path, ResolveTarget::Type, bind_imports),
+        );
+        if let Some((type_id, confidence)) = constructed {
+            resolution =
+                Resolution::from_ladder(Some((facts.construction_target(type_id), confidence)));
+        }
+    }
+    resolution
 }
 
 /// The kinds a call site may reach. Rust method syntax (`x.f()`) calls only
@@ -3976,6 +4057,10 @@ mod tests {
         constructors: Vec<(u32, u32)>,
         /// The targets the C# access rule refuses.
         refused: Vec<u32>,
+        /// What the import tiers alone bind, per name and kind family.
+        imported: Vec<(&'static str, ResolveTarget, (u32, f32))>,
+        /// Each import-tier lookup: the name and whether imports may bind.
+        imported_seen: RefCell<Vec<(String, bool)>>,
         /// Each ladder call: the lookup, `untyped`, `free_only`, and how
         /// many bases it received.
         seen: RefCell<Vec<(String, bool, bool, usize)>>,
@@ -3993,6 +4078,8 @@ mod tests {
             receiverless: &[],
             constructors: Vec::new(),
             refused: Vec::new(),
+            imported: Vec::new(),
+            imported_seen: RefCell::default(),
             seen: RefCell::default(),
             bare_calls: Cell::new(0),
             unresolved: RefCell::default(),
@@ -4124,6 +4211,20 @@ mod tests {
                 .find(|(ty, _)| *ty == type_id)
                 .map_or(type_id, |&(_, ctor)| ctor)
         }
+        fn import_tiers(
+            &self,
+            name: &str,
+            target: ResolveTarget,
+            bind_imports: bool,
+        ) -> Option<(u32, f32)> {
+            self.imported_seen
+                .borrow_mut()
+                .push((name.to_owned(), bind_imports));
+            self.imported
+                .iter()
+                .find(|&&(imported, kind, _)| imported == name && kind == target)
+                .map(|&(.., hit)| hit)
+        }
         fn note_untyped_unresolved(&self, name: &str) {
             self.unresolved.borrow_mut().push(name.to_owned());
         }
@@ -4139,6 +4240,7 @@ mod tests {
             heritage,
             owner: Some("Caller"),
             caller: Some(99),
+            lexical: Resolution::Unknown,
         }
     }
 
@@ -4413,6 +4515,123 @@ mod tests {
         let seen = fake.seen.borrow();
         assert_eq!(seen.len(), 13);
         assert!(seen.iter().all(|(lookup, ..)| lookup.trim().is_empty()));
+    }
+
+    fn lexical_cx<'c>(lexical: Resolution, source: &'c str, language: Language) -> CallContext<'c> {
+        CallContext {
+            lexical,
+            ..cx(source, language, &[])
+        }
+    }
+
+    /// B §3.2 R6: a function in scope binds at Tier 1 and nothing after it
+    /// runs: no name tier, no import tier, no fallback.
+    #[test]
+    fn test_call_lexical_bound_returns_before_every_tier() {
+        let mut fake = call_fake(&[("src/main.ts", "helper", F, None)]);
+        fake.ladder = vec![("helper", Resolution::bound(9, Tier::Global))];
+        fake.imported = vec![("helper", ResolveTarget::Callable, (8, 0.95))];
+        let bound = Resolution::bound(0, Tier::Lexical);
+        let verdict = call(
+            &fake,
+            lexical_cx(bound, "src/main.ts", Language::TypeScript),
+            CallSite::Plain("helper"),
+        );
+        assert_eq!(verdict.resolution, bound);
+        assert!(!verdict.typed);
+        assert!(fake.seen.borrow().is_empty());
+        assert!(fake.imported_seen.borrow().is_empty());
+    }
+
+    /// B §3.2 row `Shadowed`: the name tiers skip (the ladder would bind
+    /// `helper` globally), the import tiers decide. A name no import binds
+    /// gets no edge.
+    #[test]
+    fn test_call_lexical_shadowed_skips_name_tiers_and_binds_import() {
+        let mut fake = call_fake(&[("src/main.ts", "helper", F, None)]);
+        fake.ladder = vec![
+            ("helper", Resolution::bound(9, Tier::Global)),
+            ("missing", Resolution::bound(9, Tier::Global)),
+        ];
+        fake.imported = vec![("helper", ResolveTarget::Callable, (8, 0.95))];
+        let shadowed = lexical_cx(Resolution::Shadowed, "src/main.ts", Language::TypeScript);
+        let imported = call(&fake, shadowed, CallSite::Plain("helper"));
+        assert_eq!(
+            imported.resolution,
+            Resolution::from_ladder(Some((8, 0.95)))
+        );
+        let missing = call(&fake, shadowed, CallSite::Plain("missing"));
+        assert_eq!(missing.resolution, Resolution::NoEdge(NoEdge::Unresolved));
+        assert!(fake.seen.borrow().is_empty(), "no name tier ran");
+        assert_eq!(
+            *fake.imported_seen.borrow(),
+            vec![("helper".to_owned(), true), ("missing".to_owned(), true)]
+        );
+    }
+
+    /// B §3.2 row `Shadowed`, constructor column: the import tiers found no
+    /// callable, so the constructor fallback reads the type through the
+    /// import tiers too, never through the full type lookup (which binds a
+    /// namesake at 0.7 here), and lands on the type's constructor.
+    #[test]
+    fn test_call_lexical_shadowed_constructor_fallback_reads_type_through_imports() {
+        let mut fake = call_fake(&[
+            ("src/widget.ts", "Widget", C, None),
+            ("src/widget.ts", "constructor", CTOR, Some("Widget")),
+        ]);
+        fake.imported = vec![("Widget", ResolveTarget::Type, (0, 0.95))];
+        fake.types = vec![("Widget", (7, 0.7))];
+        fake.constructors = vec![(0, 1)];
+        let shadowed = lexical_cx(Resolution::Shadowed, "src/main.ts", Language::TypeScript);
+        let construct = call(&fake, shadowed, CallSite::Construct("Widget"));
+        assert_eq!(
+            construct.resolution,
+            Resolution::from_ladder(Some((1, 0.95)))
+        );
+        let plain = call(&fake, shadowed, CallSite::Plain("Widget"));
+        assert_eq!(
+            plain.resolution,
+            Resolution::NoEdge(NoEdge::Unresolved),
+            "a TS bare call constructs nothing"
+        );
+        assert!(fake.seen.borrow().is_empty());
+    }
+
+    /// B §3.2 row `Shadowed`: a member call on an untyped receiver names no
+    /// import, so the path ends before the import tiers.
+    #[test]
+    fn test_call_lexical_shadowed_untyped_member_asks_no_import_tier() {
+        let mut fake = call_fake(&[("src/main.ts", "helper", F, None)]);
+        fake.imported = vec![("helper", ResolveTarget::Callable, (8, 0.95))];
+        let shadowed = lexical_cx(Resolution::Shadowed, "src/main.ts", Language::TypeScript);
+        let verdict = call(&fake, shadowed, CallSite::UntypedMember("helper"));
+        assert_eq!(verdict.resolution, Resolution::Unknown);
+        assert!(fake.imported_seen.borrow().is_empty());
+    }
+
+    /// The import-only path hands the constructor's type name to the side:
+    /// a qualified `new shop.Widget()` gate reads `Widget` on both
+    /// [`TypeName`]s, so the lexical path moves no edge (a JS / TS callee
+    /// cannot start with `::`).
+    #[test]
+    fn test_call_lexical_shadowed_qualified_construct_binds_last_segment_through_imports() {
+        let mut fake = call_fake(&[("src/shop.ts", "Widget", C, None)]);
+        fake.imported = vec![("Widget", ResolveTarget::Type, (0, 0.95))];
+        let shadowed = lexical_cx(Resolution::Shadowed, "src/main.ts", Language::TypeScript);
+        let construct = call(&fake, shadowed, CallSite::Construct("shop.Widget"));
+        assert_eq!(
+            construct.resolution,
+            Resolution::from_ladder(Some((0, 0.95)))
+        );
+        assert_eq!(
+            fake.imported_seen
+                .borrow()
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["shop.Widget", "shop.Widget", "Widget"],
+            "callable, whole type path, then the last segment"
+        );
     }
 
     /// The kept divergence of R22 ([`TypeName`]): a C++ `new ::Widget()`

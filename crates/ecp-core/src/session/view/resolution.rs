@@ -3562,6 +3562,50 @@ where
         )
     }
 
+    /// The import tiers alone, as the index's `resolve_import_tiers`: where
+    /// the language binds through an import's member
+    /// ([`ladder::imported_member`], wildcards included) and `bind_imports`
+    /// holds, else the named-import tier ([`OverlayFacts::named_import`]).
+    fn import_tiers(
+        &self,
+        name: &str,
+        target: ResolveTarget,
+        bind_imports: bool,
+    ) -> Option<(u32, f32)> {
+        let language = self.caller.language;
+        let imports = self.file.imports.as_slice();
+        if imports.is_empty() {
+            return None;
+        }
+        if !(bind_imports && import_member_fallback(language)) {
+            return self
+                .facts
+                .named_import(self.file_ord, imports, name, target)
+                .map(|decl| (decl, CONF_IMPORT_SCOPED));
+        }
+        let (callables, types, _) = self.names;
+        let names = match target {
+            ResolveTarget::Type => types,
+            _ => callables,
+        };
+        match ladder::imported_member(
+            &OverlayImports {
+                facts: self.facts,
+                names,
+                types,
+            },
+            self.file.rel_path.as_str(),
+            language,
+            name,
+            imports,
+            target,
+            true,
+        ) {
+            ladder::MemberHit::Bound(hit) => Some((hit.id, CONF_IMPORT_SCOPED)),
+            ladder::MemberHit::Unbound { .. } => None,
+        }
+    }
+
     fn construction_target(&self, type_id: u32) -> u32 {
         *self
             .construction_targets
@@ -4513,8 +4557,9 @@ pub(super) fn resolve_edges(
                 // The index's Pass 2 order in a JS / TS or Rust file:
                 // a bare call binds the innermost named function in
                 // scope first, and an ambiguous or unreachable one leaves
-                // only the named-import tier. A chain walks from its
-                // innermost call outwards, as the index's does.
+                // only the import tiers (`CallContext::lexical`). A chain
+                // walks from its innermost call outwards, as the index's
+                // does.
                 // Inline, so `parsed` borrows `sym.calls` for as long
                 // as `module_calls` keeps its name.
                 let mut chain_failed = false;
@@ -4523,56 +4568,12 @@ pub(super) fn resolve_edges(
                 let chain_metas = std::cell::RefCell::new(&mut base_metas);
                 let hit = CallSite::resolve_chain(
                     raw_callee,
-                    |parsed, arguments| 'hit: {
-                        if let Some(targets) = lexical.call_targets(span_of(sym), parsed) {
-                            if let Some(&hit) = targets.first() {
-                                break 'hit Some(hit);
-                            }
-                            // The index's `Resolver::resolve_imported_call`:
-                            // the import tiers alone, for the callee and
-                            // then for the type it constructs.
-                            let site = parsed.fallback();
-                            if matches!(site, CallSite::UntypedMember(_)) {
-                                break 'hit None;
-                            }
-                            let import_scoped = |name: &str, target: ResolveTarget| {
-                                facts
-                                    .named_import(file_ord, &file.imports, name, target)
-                                    .map(|decl| (decl, CONF_IMPORT_SCOPED))
-                            };
-                            let mut resolution = Resolution::from_ladder(import_scoped(
-                                site.name(),
-                                callables.target,
-                            ));
-                            if resolution.call_fallbacks_allowed() {
-                                // `named_import` memoizes per file, so the
-                                // retry reads the file's own imports: only
-                                // TS / JS has a lexical scope, and neither
-                                // drops them for the last segment.
-                                if let Some((ty, confidence)) = ladder::constructed_type(
-                                    &facts,
-                                    caller.language,
-                                    site,
-                                    &file.imports,
-                                    TypeName::LastSegment,
-                                    |name| names_constructible(graph, &types, name),
-                                    |name, _| import_scoped(name, ResolveTarget::Type),
-                                ) {
-                                    let target = *construction_targets
-                                        .borrow_mut()
-                                        .entry(ty)
-                                        .or_insert_with(|| {
-                                            construction_target(graph, nodes, type_ctors, ty)
-                                        });
-                                    resolution =
-                                        Resolution::from_ladder(Some((target, confidence)));
-                                }
-                            }
-                            break 'hit resolution.edge();
-                        }
+                    |parsed, arguments| {
                         // The index's `Resolver::resolve_call`: the shared
-                        // call entry, which normalizes the site and derives
-                        // the call pick from it.
+                        // call entry, which reads the file's lexical verdict
+                        // first (a function in scope binds, a hidden name
+                        // takes the import-only path), then normalizes the
+                        // site and derives the call pick from it.
                         let verdict = ladder::call(
                             &OverlayCall {
                                 graph,
@@ -4600,6 +4601,7 @@ pub(super) fn resolve_edges(
                                 heritage,
                                 owner,
                                 caller: Some(source),
+                                lexical: lexical.call_resolution(span_of(sym), parsed),
                             },
                             parsed,
                         );

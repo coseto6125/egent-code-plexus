@@ -597,6 +597,22 @@ impl<'s, 'r, 'a> ladder::CallFacts<'s> for IndexCall<'r, 'a, '_> {
             .unwrap_or(type_id)
     }
 
+    fn import_tiers(
+        &self,
+        name: &str,
+        target: ResolveTarget,
+        bind_imports: bool,
+    ) -> Option<(u32, f32)> {
+        sole_target(&self.facts.0.resolve_import_tiers(
+            self.source_file,
+            self.language,
+            name,
+            (self.raw_imports, bind_imports),
+            target,
+            &mut None,
+        ))
+    }
+
     fn note_import_bound(&self, name: &str, import: &RawImport, id: u32) {
         let _ = self
             .facts
@@ -903,7 +919,10 @@ impl<'a> Resolver<'a> {
     /// serves References / Decorates / Imports edges, which must never land
     /// on a type through a construction rule. `caller_owner` is the type the
     /// calling member belongs to, `caller` the calling declaration
-    /// (`SymbolTable::prefer_owned`).
+    /// (`SymbolTable::prefer_owned`). `lexical` is the file's verdict on the
+    /// site (`LexicalFunctions::call_resolution`): a function in scope binds
+    /// ahead of every tier, and a name a lexical scope hides takes the
+    /// import-only path.
     ///
     /// A member call reaches a method or a type's function, never a type or
     /// its constructor by the type's name: an untyped `o.m()`
@@ -922,6 +941,7 @@ impl<'a> Resolver<'a> {
         caller_heritage: &[String],
         caller_owner: Option<&str>,
         caller: Option<NodeId>,
+        lexical: Resolution,
     ) -> Vec<(NodeId, f32)> {
         let source = normalize_source_path(source_file);
         let language = Language::from_normalized_path(&source);
@@ -943,6 +963,7 @@ impl<'a> Resolver<'a> {
                 heritage: caller_heritage,
                 owner: caller_owner,
                 caller,
+                lexical,
             },
             site,
         );
@@ -1194,72 +1215,6 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    /// [`Self::resolve_call`] for a name a lexical scope of the file binds,
-    /// though not one enclosing the call: only an import may resolve it,
-    /// never the inaccessible local, and the constructor fallback follows
-    /// the same rule.
-    pub fn resolve_imported_call(
-        &self,
-        source_file: &Path,
-        site: CallSite<'_>,
-        raw_imports: &[RawImport],
-    ) -> Vec<(NodeId, f32)> {
-        let site = site.fallback();
-        if matches!(site, CallSite::UntypedMember(_)) {
-            return Vec::new();
-        }
-        let language = Language::from_normalized_path(&normalize_source_path(source_file));
-        let resolve = |name: &str, target, bind: bool| {
-            self.resolve_import_tiers(
-                source_file,
-                language,
-                name,
-                (raw_imports, bind),
-                target,
-                &mut None,
-            )
-        };
-        let mut targets = Vec::new();
-        let mut resolution = if let Some((node_id, import)) =
-            self.python_submodule_member(source_file, language, site, raw_imports)
-        {
-            self.import_scoped(source_file, site.name(), import, node_id)
-        } else if matches!(site, CallSite::FromReceiver { receiver, .. }
-        if language == Language::Python
-            && receiver.contains('/')
-            && reexport::python_from_import_declared_attribute(
-                &IndexFacts(self),
-                &normalize_source_path(source_file),
-                receiver,
-                raw_imports.iter().map(ImportRef::from),
-            ))
-        {
-            Resolution::NoEdge(NoEdge::DeclaredAttribute)
-        } else {
-            targets = resolve(site.name(), call_target(source_file, site), true);
-            ladder_resolution(&targets)
-        };
-        if resolution.call_fallbacks_allowed() {
-            let table = self.symbol_table;
-            let constructed = ladder::constructed_type(
-                table,
-                language,
-                site,
-                raw_imports,
-                TypeName::Qualifier,
-                |name| table.has_constructible_type(name),
-                |path, bind| sole_target(&resolve(path, ResolveTarget::Type, bind)),
-            );
-            if let Some((type_id, confidence)) = constructed {
-                let target = table.sole_constructor(type_id).unwrap_or(type_id);
-                resolution = Resolution::from_ladder(Some((target, confidence)));
-            }
-        }
-        targets.clear();
-        targets.extend(resolution.edge());
-        targets
-    }
-
     /// Resolve an explicit import without selecting an inaccessible local binding.
     pub fn resolve_imported_symbol(
         &self,
@@ -1395,32 +1350,6 @@ impl<'a> Resolver<'a> {
             ),
             None => (Vec::new(), None),
         }
-    }
-
-    /// `from pkg.sub import mod; mod.compute()` through
-    /// [`reexport::python_submodule_member`]. `None` on any miss: the call
-    /// then resolves as the bare member, as before.
-    fn python_submodule_member<'i>(
-        &self,
-        source_file: &Path,
-        language: Language,
-        site: CallSite<'_>,
-        raw_imports: &'i [RawImport],
-    ) -> Option<(NodeId, &'i RawImport)> {
-        let CallSite::FromReceiver { receiver, member } = site else {
-            return None;
-        };
-        if language != Language::Python {
-            return None;
-        }
-        let (node_id, position) = reexport::python_submodule_member(
-            &IndexFacts(self),
-            &normalize_source_path(source_file),
-            (receiver, member),
-            raw_imports.iter().map(ImportRef::from),
-            call_target(source_file, site),
-        )?;
-        Some((node_id, &raw_imports[position]))
     }
 
     /// Record and return an ImportScoped edge to `node_id` through `import`.

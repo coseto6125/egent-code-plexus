@@ -9,6 +9,7 @@
 //! numbers one file's declarations for every path that stores a uid.
 
 use crate::analyzer::heritage::HeritageNode;
+use crate::analyzer::outcome::{Resolution, Tier};
 use crate::analyzer::same_file_pick::{rust_impl_members, ImplNode};
 use crate::analyzer::types::{
     innermost_enclosing, span_contains, CallSite, NameRef, NameRefKind, RawNode, Span,
@@ -485,18 +486,23 @@ impl LexicalFunctions {
             .any(|&m| m != scope && span_contains(scope, m) && span_contains(m, caller))
     }
 
-    /// The function a bare call to `callee` from `caller` binds, at 1.0.
-    /// `None`: the file declares no function of that name, so the name
-    /// tiers decide; under [`LexicalAdmission::ScopedOnly`] also when no
-    /// candidate's scope holds `caller`, since the name tiers never return a
-    /// scoped node (invariant I5). An empty result prevents fallback to an
-    /// inaccessible or ambiguous closure: only the import tiers may bind
+    /// The lexical verdict of a bare call to `callee` from `caller`:
+    /// [`Resolution::Bound`] to the innermost function in scope, at
+    /// [`Tier::Lexical`]'s 1.0. [`Resolution::Unknown`]: the file declares no
+    /// function of that name, so the name tiers decide; under
+    /// [`LexicalAdmission::ScopedOnly`] also when no candidate's scope holds
+    /// `caller`, since the name tiers never return a scoped node (invariant
+    /// I5). [`Resolution::Shadowed`]: a candidate exists but none in reach
+    /// binds (out of scope, or two in one scope); this prevents fallback to
+    /// an inaccessible or ambiguous closure: only the import tiers may bind
     /// then.
-    pub fn targets(&self, caller: Span, callee: &str) -> Option<Vec<(u32, f32)>> {
+    fn lookup(&self, caller: Span, callee: &str) -> Resolution {
         if callee.contains(['.', ':']) {
-            return None;
+            return Resolution::Unknown;
         }
-        let candidates = self.by_name.get(callee)?;
+        let Some(candidates) = self.by_name.get(callee) else {
+            return Resolution::Unknown;
+        };
         let mut best = None;
         let mut ambiguous = false;
         for &(scope, target) in candidates {
@@ -516,24 +522,37 @@ impl LexicalFunctions {
             }
         }
         match best {
-            Some((_, target)) if !ambiguous => Some(vec![(target, 1.0)]),
-            None if self.admission == Some(LexicalAdmission::ScopedOnly) => None,
-            _ => Some(Vec::new()),
+            Some((_, target)) if !ambiguous => Resolution::bound(target, Tier::Lexical),
+            None if self.admission == Some(LexicalAdmission::ScopedOnly) => Resolution::Unknown,
+            _ => Resolution::Shadowed,
         }
     }
 
-    /// [`Self::targets`] for one call site. Under
+    /// The function a bare call to `callee` from `caller` binds, at 1.0.
+    /// `None`: the name tiers decide ([`Resolution::Unknown`] of
+    /// [`Self::lookup`]). An empty result is [`Resolution::Shadowed`].
+    pub fn targets(&self, caller: Span, callee: &str) -> Option<Vec<(u32, f32)>> {
+        match self.lookup(caller, callee) {
+            Resolution::Unknown => None,
+            Resolution::Shadowed => Some(Vec::new()),
+            bound => Some(bound.edge().into_iter().collect()),
+        }
+    }
+
+    /// [`Self::lookup`] for one call site, the verdict `ladder::call` reads
+    /// ([`crate::analyzer::ladder::CallContext::lexical`]). Under
     /// [`LexicalAdmission::ScopedOnly`] only a bare call reaches a scoped
     /// function: a method-syntax site (`x.helper()`, a chain) names a
-    /// method, so it gets `None` and the name tiers decide. JS / TS read
-    /// the site's name, as before.
-    pub fn call_targets(&self, caller: Span, site: CallSite<'_>) -> Option<Vec<(u32, f32)>> {
+    /// method, so it is `Unknown` and the name tiers decide. JS / TS read
+    /// the site's name, as before. `LexicalAdmission` stays an input of the
+    /// verdict: the ladder's import-only path reads only its result.
+    pub fn call_resolution(&self, caller: Span, site: CallSite<'_>) -> Resolution {
         match (self.admission, site) {
             (Some(LexicalAdmission::ScopedOnly), CallSite::Plain(name)) => {
-                self.targets(caller, name)
+                self.lookup(caller, name)
             }
-            (Some(LexicalAdmission::ScopedOnly), _) => None,
-            _ => self.targets(caller, site.name()),
+            (Some(LexicalAdmission::ScopedOnly), _) => Resolution::Unknown,
+            _ => self.lookup(caller, site.name()),
         }
     }
 
@@ -1133,8 +1152,8 @@ mod tests {
             "unscoped: no entry"
         );
         assert_eq!(
-            lex.call_targets((4, 8, 4, 20), CallSite::UntypedMember("helper")),
-            None
+            lex.call_resolution((4, 8, 4, 20), CallSite::UntypedMember("helper")),
+            Resolution::Unknown
         );
         assert_eq!(
             python_nested("pkg/a.pyi").targets((4, 8, 4, 20), "helper"),
@@ -1248,22 +1267,68 @@ mod tests {
     /// Stands for: a Rust method-syntax site (`x.helper()`, an untyped
     /// member) never reaches a nested `fn helper`; a bare call does.
     #[test]
-    fn test_call_targets_rust_method_syntax_returns_none_bare_binds() {
+    fn test_call_resolution_rust_method_syntax_is_unknown_bare_binds() {
         let lex = rust_nested("src/a.rs");
         let caller = (3, 4, 3, 12);
         assert_eq!(
-            lex.call_targets(caller, CallSite::Plain("helper")),
-            Some(vec![(12, 1.0)])
+            lex.call_resolution(caller, CallSite::Plain("helper")),
+            Resolution::bound(12, Tier::Lexical)
         );
         assert_eq!(
-            lex.call_targets(caller, CallSite::UntypedMember("helper")),
-            None
+            lex.call_resolution(caller, CallSite::UntypedMember("helper")),
+            Resolution::Unknown
         );
-        assert_eq!(lex.call_targets(caller, CallSite::Plain("A.helper")), None);
         assert_eq!(
-            rust_nested("src/a.ts").call_targets(caller, CallSite::UntypedMember("helper")),
-            Some(vec![(12, 1.0)]),
+            lex.call_resolution(caller, CallSite::Plain("A.helper")),
+            Resolution::Unknown
+        );
+        assert_eq!(
+            rust_nested("src/a.ts").call_resolution(caller, CallSite::UntypedMember("helper")),
+            Resolution::bound(12, Tier::Lexical),
             "control: JS / TS keep reading the site's name"
+        );
+    }
+
+    /// Stands for: a name a candidate declares but none in reach binds is
+    /// `Shadowed`, not `Unknown`: JS / TS for a function out of reach and for
+    /// a class's own function of the name, Rust and Python for two in one
+    /// scope. A `ScopedOnly` caller with no candidate in reach is `Unknown`.
+    #[test]
+    fn test_call_resolution_declared_but_out_of_reach_is_shadowed() {
+        let js = rust_nested("src/a.js");
+        assert_eq!(
+            js.call_resolution((7, 4, 7, 12), CallSite::Plain("helper")),
+            Resolution::bound(10, Tier::Lexical),
+            "control: the file-level helper is in reach of `b`"
+        );
+        let nested_elsewhere = index(
+            "src/a.ts",
+            &[
+                (NodeKind::Function, "outer", false, (1, 0, 5, 1)),
+                (NodeKind::Function, "helper", false, (2, 4, 2, 24)),
+                (NodeKind::Function, "run", false, (6, 0, 8, 1)),
+            ],
+        );
+        assert_eq!(
+            nested_elsewhere.call_resolution((7, 4, 7, 12), CallSite::Plain("helper")),
+            Resolution::Shadowed
+        );
+        let two_in_one_scope = index(
+            "src/a.rs",
+            &[
+                (NodeKind::Function, "outer", false, (1, 0, 5, 1)),
+                (NodeKind::Function, "helper", false, (2, 4, 2, 24)),
+                (NodeKind::Function, "helper", false, (3, 4, 3, 24)),
+            ],
+        );
+        assert_eq!(
+            two_in_one_scope.call_resolution((4, 4, 4, 12), CallSite::Plain("helper")),
+            Resolution::Shadowed
+        );
+        assert_eq!(
+            rust_nested("src/a.rs").call_resolution((7, 4, 7, 12), CallSite::Plain("helper")),
+            Resolution::Unknown,
+            "ScopedOnly: no candidate in reach leaves the name tiers"
         );
     }
 

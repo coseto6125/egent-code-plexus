@@ -113,7 +113,7 @@ pub enum Resolution {
     /// This rule does not apply. The next tier runs.
     Unknown,
     /// A lexical scope of the file declares the name, but none in reach binds
-    /// it (`LexicalFunctions::targets` == `Some(vec![])`). The name tiers
+    /// it (`LexicalFunctions::call_resolution` returns it). The name tiers
     /// skip; the import tiers and the call-level fallbacks still run.
     Shadowed,
 }

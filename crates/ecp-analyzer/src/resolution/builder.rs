@@ -3645,58 +3645,47 @@ fn pass2_emit_node_edges(
     for (call_idx, raw_callee) in raw_node.calls.iter().enumerate() {
         let lookup_key = CallMetaKey::new(raw_node.span, call_idx as u32);
         let meta = indirect_lookup.get(&lookup_key);
-        let resolve =
-            |site: CallSite<'_>, arguments: Option<CallArguments<'_>>| match lexical_lookup
-                .call_targets(raw_node.span, site)
-            {
-                Some(targets) if targets.is_empty() => resolver.resolve_imported_call(
+        let resolve = |site: CallSite<'_>, arguments: Option<CallArguments<'_>>| {
+            // A function in scope binds ahead of every tier, and a name a
+            // lexical scope hides takes the import-only path
+            // ([`ecp_core::analyzer::ladder::call`]).
+            let targets = resolver.resolve_call(
+                &local_graph.file_path,
+                site,
+                &local_graph.imports,
+                call_heritage,
+                scope_owner,
+                Some(current_node_idx),
+                lexical_lookup.call_resolution(raw_node.span, site),
+            );
+            // The C# parser writes `Type.member` only for a receiver it
+            // typed: `this`, `base`, a typed local, parameter, field
+            // or property, `new T()`, a keyword type. A value of
+            // unknown type reaches only an extension (codex ruling
+            // P-recv Q2).
+            if !targets.is_empty() || language != Language::CSharp {
+                return targets;
+            }
+            match site {
+                CallSite::Plain(callee) => match callee.rsplit_once('.') {
+                    // `string.M()` names the keyword type: a static
+                    // access, which no extension method reaches.
+                    Some((receiver, _)) if csharp_extension::is_keyword_type(receiver) => targets,
+                    Some((receiver, member)) => {
+                        extension(ReceiverSite::Named(receiver), member, arguments, 1.0)
+                    }
+                    None => targets,
+                },
+                site => match resolver.csharp_untyped_member(
                     &local_graph.file_path,
                     site,
                     &local_graph.imports,
-                ),
-                Some(targets) => targets,
-                None => {
-                    let targets = resolver.resolve_call(
-                        &local_graph.file_path,
-                        site,
-                        &local_graph.imports,
-                        call_heritage,
-                        scope_owner,
-                        Some(current_node_idx),
-                    );
-                    // The C# parser writes `Type.member` only for a receiver it
-                    // typed: `this`, `base`, a typed local, parameter, field
-                    // or property, `new T()`, a keyword type. A value of
-                    // unknown type reaches only an extension (codex ruling
-                    // P-recv Q2).
-                    if !targets.is_empty() || language != Language::CSharp {
-                        return targets;
-                    }
-                    match site {
-                        CallSite::Plain(callee) => match callee.rsplit_once('.') {
-                            // `string.M()` names the keyword type: a static
-                            // access, which no extension method reaches.
-                            Some((receiver, _)) if csharp_extension::is_keyword_type(receiver) => {
-                                targets
-                            }
-                            Some((receiver, member)) => {
-                                extension(ReceiverSite::Named(receiver), member, arguments, 1.0)
-                            }
-                            None => targets,
-                        },
-                        site => match resolver.csharp_untyped_member(
-                            &local_graph.file_path,
-                            site,
-                            &local_graph.imports,
-                        ) {
-                            Some(member) => {
-                                extension(ReceiverSite::Untyped, member, arguments, 1.0)
-                            }
-                            None => targets,
-                        },
-                    }
-                }
-            };
+                ) {
+                    Some(member) => extension(ReceiverSite::Untyped, member, arguments, 1.0),
+                    None => targets,
+                },
+            }
+        };
         // `Foo.create().bar()`: `bar` on the type the one bound `create`
         // returns. Only an unknown return type permits the parser's fallback,
         // except Kotlin's existing top-level extension-function retry.
