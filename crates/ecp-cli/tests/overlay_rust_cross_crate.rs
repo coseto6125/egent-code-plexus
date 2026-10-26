@@ -495,3 +495,78 @@ fn test_overlay_rust_super_path_without_manifest_matches_index() {
         assert_eq!(overlay, reindex, "{label}");
     }
 }
+
+const SHARED: &str = "src/shared.rs";
+
+/// One package with a lib and a bin that both declare `mod shared;` (the
+/// caller), each placing `mod x;` at the file named by its `#[path]`. A
+/// decoy `src/x.rs` is the file layout's answer for `crate::x`.
+fn lib_and_bin_sharing_a_file(lib_x: &str, main_x: &str) -> Vec<(String, String)> {
+    owned(&[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"p\"\nversion = \"0.1.0\"\n",
+        ),
+        (
+            "src/lib.rs",
+            format!("#[path = \"{lib_x}\"]\nmod x;\nmod shared;\n").as_str(),
+        ),
+        (
+            "src/main.rs",
+            format!("#[path = \"{main_x}\"]\nmod x;\nmod shared;\nfn main() {{}}\n").as_str(),
+        ),
+        ("src/x.rs", "pub fn f() {}\n"),
+        ("src/x_both.rs", "pub fn f() {}\n"),
+        ("src/x_lib.rs", "pub fn f() {}\n"),
+        ("src/x_main.rs", "pub fn f() {}\n"),
+        (SHARED, "use crate::x;\n\npub fn t() {\n    x::f();\n}\n"),
+    ])
+}
+
+/// Every target that declares the caller places `crate::x` at one file, which
+/// is not the file layout's: the index binds it, and the overlay of a dirty
+/// copy binds the same file, not the decoy `src/x.rs`.
+#[test]
+fn test_overlay_rust_anchored_path_targets_agree_matches_index() {
+    let files = lib_and_bin_sharing_a_file("x_both.rs", "x_both.rs");
+    let caller = files.last().expect("the caller is last").1.clone();
+    for (label, edited) in [
+        ("touched", caller.clone()),
+        ("one-line edit", one_line_edit(&caller)),
+    ] {
+        let (reindex, overlay) = reindex_and_overlay(&files, SHARED, &edited, &["t"]);
+        assert_eq!(
+            reindex
+                .iter()
+                .map(|call| call.callee_file.as_str())
+                .collect::<Vec<_>>(),
+            ["src/x_both.rs"],
+            "{label}: the reindex binds the module the targets agree on: {reindex:#?}"
+        );
+        assert_eq!(overlay, reindex, "{label}");
+    }
+}
+
+/// The lib and the bin place `crate::x` at different files, so the module
+/// trees name none and both sides fall back to the file layout (`src/x.rs`).
+/// The overlay must not pick one target's file.
+#[test]
+fn test_overlay_rust_anchored_path_targets_disagree_matches_index() {
+    let files = lib_and_bin_sharing_a_file("x_lib.rs", "x_main.rs");
+    let caller = files.last().expect("the caller is last").1.clone();
+    for (label, edited) in [
+        ("touched", caller.clone()),
+        ("one-line edit", one_line_edit(&caller)),
+    ] {
+        let (reindex, overlay) = reindex_and_overlay(&files, SHARED, &edited, &["t"]);
+        assert_eq!(
+            reindex
+                .iter()
+                .map(|call| call.callee_file.as_str())
+                .collect::<Vec<_>>(),
+            ["src/x.rs"],
+            "{label}: the reindex falls back to the file layout: {reindex:#?}"
+        );
+        assert_eq!(overlay, reindex, "{label}");
+    }
+}

@@ -1194,6 +1194,9 @@ pub trait ModuleTreeFacts {
     type Module: Copy + PartialEq;
     /// A module's file as the side stores it.
     type File: AsRef<str>;
+    /// One Cargo target, named for [`ModuleTreeFacts::declaring_targets`]
+    /// and [`ModuleTreeFacts::target_module`].
+    type Target: Copy;
     /// The lib target of the workspace crate that code names `name`, from
     /// the crate table. `None` for a name no crate carries, and for a name
     /// the table cannot give one crate for.
@@ -1219,6 +1222,12 @@ pub trait ModuleTreeFacts {
     fn published(&self, root: Self::Root, module: Self::Module, name: &str) -> Published<'_>;
     /// The stored file of `module`. `None` for a file the side cannot name.
     fn module_file(&self, module: Self::Module) -> Option<Self::File>;
+    /// Each Cargo target (the lib, each bin) that declares the file
+    /// `caller`, with the caller's module path in it. Empty when none does.
+    fn declaring_targets(&self, caller: &str) -> Vec<(Self::Target, Vec<String>)>;
+    /// The file of the module at `path` in `target`'s tree; `path` empty is
+    /// the target's root file. `None` when the tree holds no such module.
+    fn target_module(&self, target: Self::Target, path: &[String]) -> Option<Self::File>;
 }
 
 /// Heads that name a crate outside the workspace.
@@ -1383,6 +1392,53 @@ pub fn module_tree_module<F: ModuleTreeFacts>(
         module = facts.submodule(root, module, &combined[..=at])?;
     }
     Some(module)
+}
+
+/// The module path that the `crate` / `self` / `super`-anchored `segs` name
+/// from the module at `mod_path`; `None` for another head, or a `super`
+/// chain that climbs above the crate root.
+fn anchored_mod_path(mod_path: &[String], segs: &[&str]) -> Option<Vec<String>> {
+    let (base, rest) = match *segs.first()? {
+        "crate" => (&mod_path[..0], &segs[1..]),
+        "self" => (mod_path, &segs[1..]),
+        "super" => {
+            let up = segs.iter().take_while(|&&s| s == "super").count();
+            (&mod_path[..mod_path.len().checked_sub(up)?], &segs[up..])
+        }
+        _ => return None,
+    };
+    Some(
+        base.iter()
+            .cloned()
+            .chain(rest.iter().map(|s| s.to_string()))
+            .collect(),
+    )
+}
+
+/// The file of the module that the `crate` / `self` / `super`-anchored
+/// `module_path` (`super::util`) names from `caller`, read from the tree of
+/// each target that declares the caller: `crate` in a module of
+/// `src/main.rs` is `main.rs`, and `super` in a `#[path]` file is the module
+/// that declares it. `None` when no target declares the caller, when one of
+/// them does not place the module, or when they place it at different files
+/// (a module both the lib and a bin declare). The caller then falls back to
+/// the file layout, as the index does.
+pub fn anchored_module_file<F: ModuleTreeFacts>(
+    facts: &F,
+    caller: &str,
+    module_path: &str,
+) -> Option<F::File> {
+    let segs: Vec<&str> = module_path.split("::").collect();
+    let mut found: Option<F::File> = None;
+    for (target, mod_path) in facts.declaring_targets(caller) {
+        let key = anchored_mod_path(&mod_path, &segs)?;
+        let file = facts.target_module(target, &key)?;
+        if found.as_ref().is_some_and(|f| f.as_ref() != file.as_ref()) {
+            return None;
+        }
+        found = Some(file);
+    }
+    found
 }
 
 /// R14, the member part: the declaration the Rust path `callee` binds
@@ -3148,6 +3204,7 @@ mod tests {
         type Root = &'static str;
         type Module = &'static str;
         type File = &'static str;
+        type Target = &'static str;
 
         fn crate_root(&self, name: &str) -> Option<&'static str> {
             let mut rows = self.crates.iter().filter(|row| row.0 == name);
@@ -3211,6 +3268,19 @@ mod tests {
         }
         fn module_file(&self, module: &'static str) -> Option<&'static str> {
             Some(module)
+        }
+        fn declaring_targets(&self, caller: &str) -> Vec<(&'static str, Vec<String>)> {
+            self.callers
+                .iter()
+                .filter(|row| row.0 == caller)
+                .map(|&(_, root, path)| (root, path.iter().map(|&s| s.to_owned()).collect()))
+                .collect()
+        }
+        fn target_module(&self, target: &'static str, path: &[String]) -> Option<&'static str> {
+            if path.is_empty() {
+                return Some(target);
+            }
+            self.submodule(target, target, path)
         }
     }
 
@@ -3370,6 +3440,78 @@ mod tests {
             crate_module(&tree, &fake, A_LIB, "a::gone", "run", CALLABLE),
             CrateModule::Local
         );
+    }
+
+    const LIB: &str = "src/lib.rs";
+    const MAIN: &str = "src/main.rs";
+    const SHARED: &str = "src/shared.rs";
+
+    /// A file `shared.rs` that each given root declares as `mod shared;`,
+    /// and the `x` module of each root at its own file.
+    fn targets(roots: &[&'static str]) -> Tree {
+        let mut tree = Tree::default();
+        for &root in roots {
+            tree.callers.push((SHARED, root, &["shared"]));
+            tree.modules.push((root, &["shared"], SHARED));
+            tree.modules.push((
+                root,
+                &["x"],
+                if root == LIB {
+                    "src/x_lib.rs"
+                } else {
+                    "src/x_main.rs"
+                },
+            ));
+        }
+        tree
+    }
+
+    #[test]
+    fn test_anchored_module_file_one_target_names_its_file() {
+        let tree = targets(&[LIB]);
+        assert_eq!(
+            anchored_module_file(&tree, SHARED, "crate::x"),
+            Some("src/x_lib.rs")
+        );
+        assert_eq!(anchored_module_file(&tree, SHARED, "crate"), Some(LIB));
+        assert_eq!(anchored_module_file(&tree, SHARED, "self"), Some(SHARED));
+        assert_eq!(anchored_module_file(&tree, SHARED, "super"), Some(LIB));
+    }
+
+    #[test]
+    fn test_anchored_module_file_targets_agree_names_the_shared_file() {
+        let tree = targets(&[LIB, MAIN]);
+        assert_eq!(anchored_module_file(&tree, SHARED, "self"), Some(SHARED));
+    }
+
+    #[test]
+    fn test_anchored_module_file_targets_disagree_returns_none() {
+        let tree = targets(&[LIB, MAIN]);
+        assert_eq!(anchored_module_file(&tree, SHARED, "crate::x"), None);
+        assert_eq!(anchored_module_file(&tree, SHARED, "crate"), None);
+        assert_eq!(anchored_module_file(&tree, SHARED, "super"), None);
+    }
+
+    #[test]
+    fn test_anchored_module_file_one_target_misses_the_module_returns_none() {
+        let mut tree = targets(&[LIB, MAIN]);
+        tree.modules
+            .retain(|row| !(row.0 == MAIN && row.1 == ["x"]));
+        assert_eq!(anchored_module_file(&tree, SHARED, "crate::x"), None);
+    }
+
+    #[test]
+    fn test_anchored_module_file_no_declaring_target_returns_none() {
+        let tree = targets(&[LIB]);
+        assert_eq!(anchored_module_file(&tree, "src/orphan.rs", "crate"), None);
+    }
+
+    #[test]
+    fn test_anchored_module_file_unanchored_or_empty_path_returns_none() {
+        let tree = targets(&[LIB]);
+        for path in ["", " ", "::", "std::fs", "super::super", "crate::missing"] {
+            assert_eq!(anchored_module_file(&tree, SHARED, path), None, "{path:?}");
+        }
     }
 
     /// Row 4 through the real tree: the module tree places `parse`, a

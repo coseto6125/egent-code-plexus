@@ -459,10 +459,41 @@ impl<'a> OverlayFacts<'a> {
         owned_by(type_name).or_else(|| owned_by(self.name_of(type_idx)))
     }
 
-    /// The index's `Resolver::rust_module_file` without a module tree: the
-    /// file of the `crate` / `self` / `super`-anchored Rust module
-    /// `module_path`, by conventional layout.
+    /// The file of the `crate` / `self` / `super`-anchored Rust module
+    /// `module_path` that the module trees of every target declaring `source`
+    /// agree on ([`ladder::anchored_module_file`]); `None` for a path the
+    /// trees do not place, and for one they place at different files.
+    fn anchored_rust_module(&self, source: &str, module_path: &str) -> Option<&'a str> {
+        if !matches!(
+            module_path.split("::").next(),
+            Some("crate" | "self" | "super")
+        ) || !is_rust_source(std::path::Path::new(source))
+        {
+            return None;
+        }
+        match self.dirty.get(source) {
+            Some(&file_ord) => self.with_rust_tree(file_ord, |tree| {
+                ladder::anchored_module_file(tree, source, module_path)
+            }),
+            None => {
+                let position = self.rust.caller(source);
+                let tree = OverlayTree {
+                    modules: &self.rust,
+                    caller: source,
+                    position: &position,
+                };
+                ladder::anchored_module_file(&tree, source, module_path)
+            }
+        }
+    }
+
+    /// The index's `Resolver::rust_module_file`: the file of the anchored
+    /// Rust module `module_path` the trees place ([`Self::anchored_rust_module`]),
+    /// else the one by conventional layout.
     fn rust_module_file(&self, source: &str, module_path: &str) -> Option<&'a str> {
+        if let Some(file) = self.anchored_rust_module(source, module_path) {
+            return self.has_file(file).then_some(file);
+        }
         let base = rust_module_path_base(std::path::Path::new(source), module_path)?;
         let base = base.to_string_lossy().replace('\\', "/");
         let mut found = None;
@@ -977,9 +1008,13 @@ impl<'a> ModuleFacts for OverlayFacts<'a> {
         specifier: &str,
         visit: &mut dyn FnMut(&str) -> bool,
     ) {
-        // The index's `for_each_specifier_candidate` with its path aliases.
-        // A Rust path the index's module tree places is probed here by file
-        // layout only.
+        // The index's `for_each_candidate`: a Rust path the module trees
+        // place is that one file; any other goes through
+        // `for_each_specifier_candidate` with its path aliases.
+        if let Some(file) = self.anchored_rust_module(importer, specifier) {
+            visit(file);
+            return;
+        }
         let aliases = &self.aliases;
         reexport::for_each_specifier_candidate(
             std::path::Path::new(importer),
@@ -3021,6 +3056,10 @@ pub(super) struct RustCaller<'a> {
     /// The root file of the target that declares the caller, and the
     /// caller's module path in it.
     module: Option<(&'a str, Vec<String>)>,
+    /// Every target that declares the caller (the lib, each bin), with the
+    /// caller's module path in it: what `crate::` / `self::` / `super::`
+    /// module files must agree on ([`ladder::anchored_module_file`]).
+    targets: Vec<(&'a str, Vec<String>)>,
 }
 
 impl<'a> RustModules<'a> {
@@ -3196,6 +3235,10 @@ impl<'a> RustModules<'a> {
             }
         }
         let lib = home.map(|(_, lib)| lib);
+        let targets = reached
+            .iter()
+            .map(|(root, _, path)| (*root, path.clone()))
+            .collect();
         let bin = match reached.as_slice() {
             [(root, false, path)] => Some((*root, path.clone())),
             _ => None,
@@ -3209,6 +3252,7 @@ impl<'a> RustModules<'a> {
                     .find(|&(root, primary, _)| primary && root == lib)
                     .map(|(root, _, path)| (root, path))
             }),
+            targets,
         }
     }
 
@@ -3266,6 +3310,7 @@ impl<'a> RustModules<'a> {
             module: chain
                 .first()
                 .map(|&root| (root, chain[1..].iter().filter_map(segment).collect())),
+            targets: Vec::new(),
         };
         let tree = OverlayTree {
             modules: self,
@@ -3301,6 +3346,7 @@ impl<'a> ladder::ModuleTreeFacts for OverlayTree<'_, 'a> {
     type Root = &'a str;
     type Module = &'a str;
     type File = &'a str;
+    type Target = &'a str;
 
     fn crate_root(&self, name: &str) -> Option<&'a str> {
         self.modules.crate_head(name)
@@ -3328,6 +3374,18 @@ impl<'a> ladder::ModuleTreeFacts for OverlayTree<'_, 'a> {
     }
 
     fn module_file(&self, module: &'a str) -> Option<&'a str> {
+        Some(module)
+    }
+
+    fn declaring_targets(&self, caller: &str) -> Vec<(&'a str, Vec<String>)> {
+        self.at(caller, |position| position.targets.clone())
+    }
+
+    fn target_module(&self, target: &'a str, path: &[String]) -> Option<&'a str> {
+        let mut module = target;
+        for at in 0..path.len() {
+            module = self.submodule(target, module, &path[..=at])?;
+        }
         Some(module)
     }
 }

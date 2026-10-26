@@ -327,17 +327,15 @@ impl RustWorkspaceModTree {
     /// the module, or they place it at different files (a module both the
     /// lib and a bin declare).
     pub fn anchored_module_file(&self, caller_file: &str, module_path: &str) -> Option<&str> {
-        let segs: Vec<&str> = module_path.split("::").collect();
-        let mut found: Option<&str> = None;
-        for (target, mod_path) in self.file_targets.get(caller_file)? {
-            let key = anchored_mod_path(mod_path, &segs)?;
-            let file = self.targets[*target].modules.get(&key)?;
-            if found.is_some_and(|f| f != file.as_str()) {
-                return None;
-            }
-            found = Some(file.as_str());
-        }
-        found
+        let file = ladder::anchored_module_file(
+            &self.facts(&self.workspace_canon),
+            caller_file,
+            module_path,
+        )?;
+        // Every module file of a target is a key of `file_targets`.
+        self.file_targets
+            .get_key_value(file.as_str())
+            .map(|(key, _)| key.as_str())
     }
 
     /// The tree and module path of `caller_file` when exactly one target
@@ -436,6 +434,7 @@ impl<'t> ladder::ModuleTreeFacts for IndexModuleTree<'t> {
     type Root = TreeScope<'t>;
     type Module = &'t Path;
     type File = String;
+    type Target = usize;
 
     fn crate_root(&self, name: &str) -> Option<TreeScope<'t>> {
         self.tree.crate_scope(name)
@@ -499,27 +498,18 @@ impl<'t> ladder::ModuleTreeFacts for IndexModuleTree<'t> {
     fn module_file(&self, module: &'t Path) -> Option<String> {
         uid_path(module, &self.tree.workspace_canon).ok()
     }
-}
 
-/// The module path that the `crate` / `self` / `super`-anchored `segs` name
-/// from the module at `mod_path`; `None` for another head, or a `super`
-/// chain that climbs above the crate root.
-fn anchored_mod_path(mod_path: &[String], segs: &[&str]) -> Option<Vec<String>> {
-    let (base, rest) = match *segs.first()? {
-        "crate" => (&mod_path[..0], &segs[1..]),
-        "self" => (mod_path, &segs[1..]),
-        "super" => {
-            let up = segs.iter().take_while(|&&s| s == "super").count();
-            (&mod_path[..mod_path.len().checked_sub(up)?], &segs[up..])
-        }
-        _ => return None,
-    };
-    Some(
-        base.iter()
+    fn declaring_targets(&self, caller: &str) -> Vec<(usize, Vec<String>)> {
+        self.tree
+            .file_targets
+            .get(caller)
             .cloned()
-            .chain(rest.iter().map(|s| s.to_string()))
-            .collect(),
-    )
+            .unwrap_or_default()
+    }
+
+    fn target_module(&self, target: usize, path: &[String]) -> Option<String> {
+        self.tree.targets[target].modules.get(path).cloned()
+    }
 }
 
 /// Cargo's auto-discovered bin roots, `src/main.rs`, `src/bin/*.rs` and
