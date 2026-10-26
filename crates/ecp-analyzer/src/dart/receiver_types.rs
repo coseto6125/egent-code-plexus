@@ -8,7 +8,7 @@
 //! - `super.method()` → `Super.method` from the class's `superclass`
 //!   field's first type identifier.
 //! - `obj.method()` where `obj` is a `formal_parameter` or
-//!   `initialized_variable_definition` with a single `type_identifier`
+//!   `initialized_variable_declaration` with a single `type_identifier`
 //!   annotation → `Type.method`.
 //!
 //! - `Name.method()` where `Name` is no local, parameter, import prefix or

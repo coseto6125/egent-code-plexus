@@ -434,27 +434,37 @@ pub fn extract_swift_calls_and_path_literals(
     (path_literals, sql_refs)
 }
 
+/// The node that names what `call` invokes: the first non-call-suffix named
+/// child of `call_expression`, unwrapped to the operand that touches the
+/// argument list. tree-sitter-swift 0.7.4 attaches a prefix or binary
+/// operator to the callee, so `!a.m(x)` parses as `(!a.m)(x)` and
+/// `a + b.m(x)` as `(a + b.m)(x)`; a trailing closure does the same through
+/// `??`, a ternary and a range. The implicit member `.m(x)` is also a
+/// `prefix_expression` and stays opaque: it names no callable by itself.
+fn swift_callee_node(call: Node<'_>) -> Option<Node<'_>> {
+    let mut target = first_named_where(call, |ch| ch.kind() != "call_suffix")?;
+    while let Some(inner) = match target.kind() {
+        "prefix_expression" => target
+            .child_by_field_name("operation")
+            .filter(|op| op.kind() != ".")
+            .and_then(|_| target.child_by_field_name("target")),
+        "nil_coalescing_expression" => target.child_by_field_name("if_nil"),
+        "ternary_expression" => target.child_by_field_name("if_false"),
+        "range_expression" => target.child_by_field_name("end"),
+        _ => target.child_by_field_name("rhs"),
+    } {
+        target = inner;
+    }
+    Some(target)
+}
+
 fn swift_callee_name(
     call: Node<'_>,
     source: &[u8],
     bindings: &SwiftBindings,
     nodes: &[RawNode],
 ) -> Option<String> {
-    // The callee is the first non-call-suffix named child of `call_expression`.
-    let mut target = first_named_where(call, |ch| ch.kind() != "call_suffix")?;
-    // tree-sitter-swift 0.7.4 parses `!a.m(x)` as `(!a.m)(x)` and a continued
-    // `a +\n B.m(x)` as `(a + B.m)(x)`: the called name is the operand that
-    // touches the argument list. The implicit member `.m(x)` is also a
-    // `prefix_expression`; 0.7.3 recorded no call for it, so it stays opaque.
-    while let Some(inner) = match target.kind() {
-        "prefix_expression" => target
-            .child_by_field_name("operation")
-            .filter(|op| op.kind() != ".")
-            .and_then(|_| target.child_by_field_name("target")),
-        _ => target.child_by_field_name("rhs"),
-    } {
-        target = inner;
-    }
+    let target = swift_callee_node(call)?;
     let pos = start_pos(call);
 
     match target.kind() {
@@ -512,7 +522,7 @@ fn swift_callee_name(
                     // A callee that a local or parameter binds
                     // (`let make = { Beta() }`) is a value, not the
                     // same-named function that would type it.
-                    let calls_local = first_named_where(recv, |ch| ch.kind() != "call_suffix")
+                    let calls_local = swift_callee_node(recv)
                         .filter(|f| f.kind() == "simple_identifier")
                         .and_then(|f| f.utf8_text(source).ok())
                         .is_some_and(|name| bindings.lookup_local(pos, name).is_some());

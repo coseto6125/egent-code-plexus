@@ -4,10 +4,10 @@
 //! (dropping the enclosing symbol); 0.7.3 parses them cleanly. The asserts pin
 //! "symbol still extracted in the presence of the new syntax".
 //!
-//! 0.7.4 binds a prefix operator to the callee (`!a.m(x)` parses as
-//! `(!a.m)(x)`) and a continued binary operator to the next operand
-//! (`a +\n B.m(x)` parses as `(a + B.m)(x)`). The second group pins that the
-//! call still names `m`, as it did under 0.7.3.
+//! 0.7.4 attaches a prefix or binary operator to the callee: `!a.m(x)` parses
+//! as `(!a.m)(x)` and `a + b.m(x)` as `(a + b.m)(x)`; a trailing closure does
+//! the same through `??`, a ternary and a range. The second group pins that
+//! the call names the operand that touches the argument list.
 
 use ecp_analyzer::swift::parser::SwiftProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
@@ -126,4 +126,45 @@ fn test_swift_callee_implicit_member_call_adds_no_bare_call() {
     let calls = calls_of(&g, "check");
     assert!(!calls_member(&calls, "option"), "calls: {calls:?}");
     assert!(calls_member(&calls, "configure"), "calls: {calls:?}");
+}
+
+#[test]
+fn test_swift_callee_trailing_closure_after_nil_coalescing_names_method() {
+    let g = parse("func f(_ b: Box, _ o: Int?) -> Int {\n    return o ?? b.transform { $0 }\n}\n");
+    let calls = calls_of(&g, "f");
+    assert!(calls_member(&calls, "transform"), "calls: {calls:?}");
+}
+
+#[test]
+fn test_swift_callee_trailing_closure_after_ternary_names_method() {
+    let g = parse("func f(_ b: Box, _ c: Bool) -> Int {\n    return c ? 0 : b.other { $0 }\n}\n");
+    let calls = calls_of(&g, "f");
+    assert!(calls_member(&calls, "other"), "calls: {calls:?}");
+}
+
+#[test]
+fn test_swift_callee_trailing_closure_after_range_names_method() {
+    let g = parse("func f(_ b: Box) {\n    let r = 0...b.upper { $0 }\n}\n");
+    let calls = calls_of(&g, "f");
+    assert!(calls_member(&calls, "upper"), "calls: {calls:?}");
+}
+
+#[test]
+fn test_swift_callee_negated_local_closure_call_matches_plain_call() {
+    // `make` is a local closure, so `make().bar()` must not be typed by a
+    // same-named global function, with or without the prefix operator.
+    let src = "func make() -> Alpha { Alpha() }\nfunc plain() {\n    let make = { Beta() }\n    _ = make().bar()\n}\nfunc negated() {\n    let make = { Beta() }\n    _ = !make().bar()\n}\n";
+    let g = parse(src);
+    let bar = |name: &str| -> Vec<String> {
+        calls_of(&g, name)
+            .into_iter()
+            .filter(|c| c.ends_with("bar"))
+            .collect()
+    };
+    assert!(
+        !bar("plain").is_empty(),
+        "plain calls: {:?}",
+        calls_of(&g, "plain")
+    );
+    assert_eq!(bar("negated"), bar("plain"));
 }
