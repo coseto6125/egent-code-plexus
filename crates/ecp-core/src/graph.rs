@@ -40,7 +40,8 @@ pub const GRAPH_MAGIC: [u8; 8] = *b"ECP-RS\0\0";
 ///     file-level name lookup and its display owner names its parent chain.
 /// v18: `RelType::PartOf` (discriminant 23) links each C# partial type
 ///     part to its group's representative part.
-pub const GRAPH_FORMAT_VERSION: u32 = 18;
+/// v19: `File::parsed_language` (C5 `ParsedLanguage` per file).
+pub const GRAPH_FORMAT_VERSION: u32 = 19;
 
 impl std::str::FromStr for NodeKind {
     type Err = ();
@@ -905,6 +906,13 @@ pub struct File {
     pub mtime: u64,
     pub content_hash: [u8; 8],
     pub category: FileCategory,
+    /// v19: C5 `ParsedLanguage` of the file, `ParsedLanguage::encode`d. The
+    /// script language of a Vue, Svelte or Astro file and the language a
+    /// content gate accepted are not in the path, so the index reads this
+    /// value, never a path re-derivation. `ParsedLanguage::ABSENT` when the
+    /// builder had no language for the file. Read it with
+    /// [`ArchivedZeroCopyGraph::parsed_language`].
+    pub parsed_language: [u8; 2],
 }
 
 /// Per-Route response shape extracted from the handler's source. `node_idx`
@@ -1629,6 +1637,16 @@ impl ArchivedZeroCopyGraph {
         self.file_flags
             .get(file_idx as usize)
             .is_some_and(|flags| *flags & FILE_FLAG_ES_MODULE != 0)
+    }
+
+    /// The stored C5 language after parse of file `file_idx`. `None` for an
+    /// index past `files` and for a file stored as `ParsedLanguage::ABSENT`.
+    pub fn parsed_language(
+        &self,
+        file_idx: u32,
+    ) -> Option<crate::contracts::routing::ParsedLanguage> {
+        let file = self.files.get(file_idx as usize)?;
+        crate::contracts::routing::ParsedLanguage::from_bytes(file.parsed_language)
     }
 
     /// Whether `node_idx` is a later overload ([`crate::uid::keeps_overloads`]):

@@ -57,11 +57,7 @@ pub fn unmodeled_return_type<'q>(
     source: &str,
     name: &'q str,
 ) -> ChainOutcome<TypeCandidates<'q>> {
-    let candidates = facts.global_candidates(
-        name,
-        ResolveTarget::Type,
-        FileMeta::from_normalized_path(source),
-    );
+    let candidates = facts.global_candidates(name, ResolveTarget::Type, facts.file_meta(source));
     let mut candidates = distinct_types(facts, candidates.into_iter());
     match (candidates.next(), candidates.next()) {
         (None, None) => ChainOutcome::Conclusive,
@@ -287,11 +283,7 @@ pub fn visible_return_type<'q, F: TypeFacts + ?Sized>(
     name: &'q str,
     mut visible: impl FnMut(u32) -> bool,
 ) -> TypeCandidates<'q> {
-    let candidates = facts.global_candidates(
-        name,
-        ResolveTarget::Type,
-        FileMeta::from_normalized_path(source),
-    );
+    let candidates = facts.global_candidates(name, ResolveTarget::Type, facts.file_meta(source));
     let mut candidates = distinct_types(facts, candidates.into_iter().filter(|&id| visible(id)));
     match (candidates.next(), candidates.next()) {
         (Some(id), None) => TypeCandidates::Unique(id, name),
@@ -468,8 +460,7 @@ pub fn member_ownership<F: TypeFacts + ?Sized>(
         MemberLookup::Ambiguous => return Ownership::Unknown,
         MemberLookup::Miss => {}
     }
-    let shadows =
-        attributes_shadow_methods(FileMeta::from_path(facts.file_of(ty).unwrap_or_default()));
+    let shadows = attributes_shadow_methods(facts.file_meta(facts.file_of(ty).unwrap_or_default()));
     // How each ancestor was first reached: (the type, base position).
     let mut parent: rustc_hash::FxHashMap<u32, (u32, u32)> = rustc_hash::FxHashMap::default();
     let mut frontier = vec![ty];
@@ -608,7 +599,7 @@ pub fn owned_member<F: TypeFacts + ?Sized>(
     let Some(ty_file) = facts.file_of(ty) else {
         return MemberLookup::Miss;
     };
-    let owner_target = if FileMeta::from_path(ty_file).language == Language::Go {
+    let owner_target = if facts.file_meta(ty_file).language == Language::Go {
         ResolveTarget::Type
     } else {
         ResolveTarget::Qualifier
@@ -647,7 +638,7 @@ pub fn owned_member<F: TypeFacts + ?Sized>(
     // elsewhere a member in a file declaring that name belongs to that
     // other type, and any other member cannot be attributed.
     let reopenable = matches!(
-        FileMeta::from_path(ty_file).language,
+        facts.file_meta(ty_file).language,
         Language::Ruby | Language::Crystal | Language::CSharp | Language::Swift | Language::Dart
     );
     if !reopenable
@@ -669,7 +660,7 @@ pub fn type_unique_in_scope<F: TypeFacts + ?Sized>(
     ty_name: &str,
     ty_file: &str,
 ) -> bool {
-    let meta = FileMeta::from_path(ty_file);
+    let meta = facts.file_meta(ty_file);
     let root = facts.crate_root(ty_file);
     let dir = Path::new(ty_file).parent();
     let same_package_only = meta.language == Language::Go;

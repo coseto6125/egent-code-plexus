@@ -167,7 +167,7 @@ pub fn emit_edges(
             // A PHP import binds its alias (`use A\B as C`, and every group
             // member `use A\{B}`), not the declared name, which may be a
             // same-file declaration's name.
-            let language = Language::from_normalized_path(&path_str);
+            let language = resolver.file_language(&path_str);
             let php = language == Language::Php;
             // The import tiers of these languages bind an import by its
             // local name. The general tiers keep the declared name: an alias

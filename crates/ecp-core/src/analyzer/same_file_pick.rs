@@ -6,7 +6,7 @@
 use crate::analyzer::heritage::HeritageNode;
 use crate::analyzer::reexport::ResolveTarget;
 use crate::analyzer::types::{owner_key, RawNode};
-use crate::file_category::Language;
+use crate::file_category::{FileMeta, Language};
 use crate::graph::NodeKind;
 use std::borrow::Cow;
 
@@ -76,6 +76,14 @@ pub trait PickFacts {
     }
     /// The file `id` is declared in.
     fn file_of(&self, id: u32) -> Option<&str>;
+    /// `file`'s vendor flag and language as the ladder's rules read them.
+    /// The index reads the C5 language after parse it stores per file, so a
+    /// Vue file with a TypeScript script reads as TypeScript. The default
+    /// derives both from the path, which gives that file no language after
+    /// parse: an implementor that stores one overrides it.
+    fn file_meta(&self, file: &str) -> FileMeta {
+        FileMeta::from_path(file)
+    }
     /// Every type declaration named `owner` across the project.
     fn types_named(&self, owner: &str) -> Vec<u32>;
     /// Whether `id` is scoped (contract C1): only the lexical tier binds

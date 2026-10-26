@@ -146,6 +146,15 @@ pub const YAML_CANDIDATES: &[Language] = &[Language::Kubernetes, Language::OpenA
 pub const JSON_CANDIDATES: &[Language] = &[Language::OpenApi];
 
 impl Language {
+    /// The variant whose `#[repr(u8)]` discriminant is `byte`, the inverse of
+    /// `language as u8`. `None` for a byte that names no variant.
+    pub fn from_discriminant(byte: u8) -> Option<Self> {
+        Self::ALL
+            .get(byte as usize)
+            .copied()
+            .filter(|language| *language as u8 == byte)
+    }
+
     /// The 14 mainstream languages of the repo's coverage rule.
     pub const MAINSTREAM: [Language; 14] = [
         Self::TypeScript,
@@ -784,6 +793,32 @@ impl ParsedLanguage {
     /// barrier stays in `file_category::FileMeta`.
     pub fn admits_global(self, candidate: ParsedLanguage) -> bool {
         self.resolution == candidate.resolution
+    }
+
+    /// The stored form of "no `ParsedLanguage`": `0xFF` names no language
+    /// (`Language` has fewer than 255 variants, see `RouteKey::SNIFFED`).
+    pub const ABSENT: [u8; 2] = [RouteKey::SNIFFED, RouteKey::SNIFFED];
+
+    /// The stored form (`graph.bin` `File::parsed_language`): the
+    /// discriminants of [`Self::file`] and [`Self::resolution`].
+    pub const fn to_bytes(self) -> [u8; 2] {
+        [self.file as u8, self.resolution as u8]
+    }
+
+    /// [`Self::to_bytes`] of `parsed`, or [`Self::ABSENT`].
+    pub fn encode(parsed: Option<Self>) -> [u8; 2] {
+        parsed.map_or(Self::ABSENT, Self::to_bytes)
+    }
+
+    /// The inverse of [`Self::encode`]. `None` for [`Self::ABSENT`], for a
+    /// byte that names no language, and for a pair `after_parse` never
+    /// makes: a resolution language other than the file language or one of
+    /// its embedded scripts.
+    pub fn from_bytes([file, resolution]: [u8; 2]) -> Option<Self> {
+        let file = Language::from_discriminant(file)?;
+        let resolution = Language::from_discriminant(resolution)?;
+        (resolution == file || file.embedded_scripts().contains(&resolution))
+            .then_some(Self { file, resolution })
     }
 }
 

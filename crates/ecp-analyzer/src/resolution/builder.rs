@@ -16,7 +16,7 @@ use ecp_core::analyzer::lexical::{
     raw_decl, splits_by_arity, LexicalFunctions,
 };
 use ecp_core::analyzer::path_aliases::PathAliases;
-use ecp_core::analyzer::reexport::{export_filter_applies, is_ecmascript, ImportRef};
+use ecp_core::analyzer::reexport::{export_filter_applies_to, is_ecmascript, ImportRef};
 use ecp_core::analyzer::type_ladder;
 use ecp_core::analyzer::types::{
     owner_key, BlindSpot, CallArguments, CallSite, LocalGraph, NameRef, RawImport, RawNode,
@@ -27,7 +27,7 @@ pub use ecp_core::analyzer::types::{
 };
 use ecp_core::contracts::identity::{lexical_parents, RouteKey, UidSlot};
 use ecp_core::contracts::raw_records::{FileOrd, RawEndpoint, RawIdx, RawIndexMap, Unbound};
-use ecp_core::contracts::routing::{FileRouter, Language as RouteLanguage};
+use ecp_core::contracts::routing::{FileRouter, Language as RouteLanguage, ParsedLanguage};
 use ecp_core::contracts::workspace::WorkspaceFacts;
 use ecp_core::file_category::determine_category;
 use ecp_core::graph::{
@@ -204,6 +204,10 @@ pub struct GraphBuilder {
     /// index walk found. `build` merges them with the Rust module tree's
     /// Cargo rows. Empty by default.
     workspace_scopes: WorkspaceFacts,
+    /// C5 language after parse per `LocalGraph.file_path`, from
+    /// [`Self::add_parsed_graph`]. A graph without an entry gets what its
+    /// path decides (`FileMeta::from_normalized_path`).
+    parsed_languages: FxHashMap<std::path::PathBuf, ParsedLanguage>,
 }
 
 impl Default for GraphBuilder {
@@ -222,6 +226,7 @@ impl GraphBuilder {
             symbol_skip_set: None,
             csharp_projects: CsharpProjects::default(),
             workspace_scopes: WorkspaceFacts::default(),
+            parsed_languages: FxHashMap::default(),
         }
     }
 
@@ -276,6 +281,17 @@ impl GraphBuilder {
         self.local_graphs.push(graph);
     }
 
+    /// [`Self::add_graph`] for a file whose language after parse the parse
+    /// decided (C5 `FileRoute::after_parse`): the script of a Vue, Svelte or
+    /// Astro file, the content gate of a sniffed route. The `File` record
+    /// stores it and every index-side reader reads it. A later graph of the
+    /// same path replaces the language.
+    pub fn add_parsed_graph(&mut self, graph: LocalGraph, parsed: ParsedLanguage) {
+        self.parsed_languages
+            .insert(graph.file_path.clone(), parsed);
+        self.local_graphs.push(graph);
+    }
+
     pub fn build(mut self) -> ZeroCopyGraph {
         let prof = std::env::var("ECP_PROF").is_ok();
         let t_total = std::time::Instant::now();
@@ -303,7 +319,7 @@ impl GraphBuilder {
             files,
             collision_blind_spots,
             merged,
-        } = pass1_register_nodes(&self.local_graphs);
+        } = pass1_register_nodes(&self.local_graphs, &self.parsed_languages);
         // Pass 1 gives every raw node a slot (a collision keeps a tombstone),
         // so the map reads node counts only and holds for the whole build.
         // A record of a tombstoned twin binds the node that kept its identity
@@ -1068,7 +1084,7 @@ fn record_module_facts(
     facts.file_export_aliases.push(0);
     for local_graph in local_graphs {
         let path = local_graph.file_path.to_string_lossy().replace('\\', "/");
-        let language = Language::from_normalized_path(&path);
+        let language = symbol_table.file_language(&path);
         let ecmascript = is_ecmascript(language);
         for import in &local_graph.imports {
             let target_file = if ecmascript && followed_by_reexport(local_graph, import) {
@@ -1092,7 +1108,7 @@ fn record_module_facts(
             });
         }
         facts.file_imports.push(facts.imports.len() as u32);
-        if export_filter_applies(&path) {
+        if export_filter_applies_to(language, &path) {
             let aliases = local_graph.export_aliases.as_deref().unwrap_or(&[]);
             facts
                 .export_aliases
@@ -1153,6 +1169,8 @@ fn record_lexical_parents(
     let mut table = Vec::new();
     for (file, local_graph) in local_graphs.iter().enumerate() {
         let path = local_graph.file_path.to_string_lossy();
+        // The path's language, not the stored one: `file_identities` scopes
+        // the uids by the path, and the overlay numbers a file the same way.
         let scoped = lexical_scope_kinds(Language::from_path(&path));
         if scoped.is_empty() {
             continue;
@@ -1196,7 +1214,10 @@ fn file_indices(local_graphs: &[LocalGraph]) -> FxHashMap<String, u32> {
 /// SymbolTable/StringPool, assigning canonical UIDs, keeping overloads under
 /// their own UIDs and tombstoning other D1 hash collisions (see
 /// BlindSpotRecord `uid-collision`/`ifdef-redef` kinds).
-fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
+fn pass1_register_nodes(
+    local_graphs: &[LocalGraph],
+    parsed_languages: &FxHashMap<std::path::PathBuf, ParsedLanguage>,
+) -> Pass1Registration {
     // Pre-size accumulators from known input cardinalities. Each
     // LocalGraph contributes 1 File node + N symbol nodes. Plus a
     // small per-graph slack for Pass 1.5 Route nodes (one per
@@ -1244,7 +1265,13 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
         // .sample_repo distribution), each allocating one `String` for the
         // `\\` -> `/` normalisation. `path_str` is already forward-slash.
         let category = determine_category(&path_str);
-        let file_meta = crate::resolution::index::FileMeta::from_normalized_path(&path_str);
+        // The language the parse decided, else what the path decides. Every
+        // later reader asks the table, never the path again.
+        let file_meta = match parsed_languages.get(&local_graph.file_path) {
+            Some(&parsed) => FileMeta::of_parsed(&path_str, parsed),
+            None => FileMeta::from_normalized_path(&path_str),
+        };
+        symbol_table.note_file_meta(&path_str, file_meta);
         if let Some(aliases) = &local_graph.export_aliases {
             symbol_table.note_export_aliases(&path_str, file_meta.language, aliases);
         }
@@ -1254,6 +1281,7 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
             mtime: 0, // In a real implementation, fetch actual mtime
             content_hash: local_graph.content_hash,
             category,
+            parsed_language: ParsedLanguage::encode(file_meta.parsed),
         });
 
         let graph_start = current_node_idx;
@@ -2983,7 +3011,7 @@ fn pass1_8_function_metas(
         for (file_idx, local_graph) in local_graphs.iter().enumerate() {
             if !local_graph.raw_function_metas.is_empty() {
                 let base = file_base(raw_map, file_idx as u32);
-                let csharp = Language::from_path(&local_graph.file_path.to_string_lossy())
+                let csharp = symbol_table.file_language(&local_graph.file_path.to_string_lossy())
                     == Language::CSharp;
                 // Sorted index → binary_search per node, so the inner loop
                 // is O(N log F) instead of O(N*F).
@@ -3252,7 +3280,7 @@ fn pass1_9_supertypes(
             let resolve_type = |name: &str| {
                 resolver.resolve_symbol(&lg.file_path, name, &lg.imports, ResolveTarget::Type)
             };
-            let language = Language::from_path(&lg.file_path.to_string_lossy());
+            let language = symbol_table.file_language(&lg.file_path.to_string_lossy());
             let is_rust = language == Language::Rust;
             // One `impl Trait for O` block repeats its heritage on every
             // method; the cache keeps that to one resolve per name per file.
@@ -3371,7 +3399,7 @@ fn resolve_base(
             .any(|import| import.alias.as_deref() == Some(name))
     };
     if targets.is_empty() && !aliased() {
-        let caller = FileMeta::from_path(&local_graph.file_path.to_string_lossy());
+        let caller = symbol_table.file_meta(&local_graph.file_path.to_string_lossy());
         targets.extend(
             symbol_table
                 .partial_global_type(name, arity, caller)
@@ -3460,7 +3488,7 @@ fn resolve_variant_ref(
         return ladder::bare_variant(
             symbol_table,
             name,
-            FileMeta::from_normalized_path(file),
+            symbol_table.file_meta(file),
             has_variant,
             || symbol_table.decls_named_in_file(file, name),
             || symbol_table.values_named(name),
@@ -3569,7 +3597,7 @@ fn pass2_emit_node_edges(
     pending_call_metas: &mut Vec<(usize, u8, String)>,
     blind_spots: &mut Vec<BlindSpot>,
 ) {
-    let language = Language::from_path(&local_graph.file_path.to_string_lossy());
+    let language = symbol_table.file_language(&local_graph.file_path.to_string_lossy());
     for base in &raw_node.heritage {
         let targets = resolve_base(resolver, symbol_table, local_graph, language, base);
         for (target_id, confidence) in targets {
@@ -3813,7 +3841,7 @@ fn pass2_emit_node_edges(
     let mut name_file: Option<(String, Language)> = None;
     let reader_file = || {
         let file = local_graph.file_path.to_string_lossy().replace('\\', "/");
-        let language = Language::from_normalized_path(&file);
+        let language = symbol_table.file_language(&file);
         (file, language)
     };
     for field_name in &raw_node.field_reads {
@@ -4659,7 +4687,7 @@ mod tests {
             ..Default::default()
         };
 
-        let out = pass1_register_nodes(std::slice::from_ref(&g));
+        let out = pass1_register_nodes(std::slice::from_ref(&g), &FxHashMap::default());
 
         assert_eq!(out.nodes.len(), 3, "one graph node per raw node");
         assert_eq!(out.files.len(), 1);
@@ -4695,7 +4723,7 @@ mod tests {
             ..Default::default()
         };
 
-        let out = pass1_register_nodes(std::slice::from_ref(&g));
+        let out = pass1_register_nodes(std::slice::from_ref(&g), &FxHashMap::default());
 
         assert_eq!(
             out.nodes.len(),
@@ -4723,7 +4751,7 @@ mod tests {
             "dup.c",
             vec![raw_fn("twice", 0), raw_fn("twice", 30), raw_fn("twice", 60)],
         );
-        let out = pass1_register_nodes(std::slice::from_ref(&g));
+        let out = pass1_register_nodes(std::slice::from_ref(&g), &FxHashMap::default());
         let survivor = out.nodes[0].uid;
         assert_eq!(
             [out.nodes[1].uid, out.nodes[2].uid],
@@ -4749,7 +4777,7 @@ mod tests {
                 raw_decl("save", NodeKind::Method, 5, &[], Some("A")),
             ],
         );
-        let out = pass1_register_nodes(std::slice::from_ref(&g));
+        let out = pass1_register_nodes(std::slice::from_ref(&g), &FxHashMap::default());
         let first = ecp_core::uid::compute(NodeKind::Method, "A.java", Some("A"), "save");
         assert_eq!(
             [out.nodes[0].uid, out.nodes[1].uid],
@@ -4778,7 +4806,7 @@ mod tests {
                 ],
             ),
         ];
-        let out = pass1_register_nodes(&graphs);
+        let out = pass1_register_nodes(&graphs, &FxHashMap::default());
         let save = ecp_core::uid::compute(NodeKind::Method, "A.java", Some("A"), "save");
         let helper = ecp_core::uid::compute(NodeKind::Function, "A.java", None, "helper");
         assert_eq!(
@@ -4820,7 +4848,7 @@ mod tests {
     /// Pass 1 plus the supertypes pre-pass. `graphs` must already be sorted
     /// by path, as `build()` sorts them before Pass 1.
     fn table_with_supertypes(graphs: &[LocalGraph]) -> SymbolTable {
-        let mut st = pass1_register_nodes(graphs).symbol_table;
+        let mut st = pass1_register_nodes(graphs, &FxHashMap::default()).symbol_table;
         let declared = pass1_9_supertypes(
             graphs,
             &st,
@@ -4845,7 +4873,7 @@ mod tests {
                 raw_decl("helper", NodeKind::Function, 20, &[], None),
             ],
         );
-        let st = pass1_register_nodes(std::slice::from_ref(&g)).symbol_table;
+        let st = pass1_register_nodes(std::slice::from_ref(&g), &FxHashMap::default()).symbol_table;
         let call = ResolveTarget::Callable;
         assert_eq!(st.owned_in_file("db.py", "execute", "Tx", call), vec![1]);
         assert_eq!(

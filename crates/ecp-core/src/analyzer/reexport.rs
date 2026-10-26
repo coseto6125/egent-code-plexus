@@ -198,7 +198,13 @@ impl<'a> FileImports<'a> {
 /// JS file other than a `.d.ts`, whose declarations TS may export
 /// implicitly. Other languages bind imports by their own rules.
 pub fn export_filter_applies(file: &str) -> bool {
-    is_ecmascript(Language::from_normalized_path(file)) && !file.ends_with(".d.ts")
+    export_filter_applies_to(Language::from_normalized_path(file), file)
+}
+
+/// [`export_filter_applies`] for a file whose language the caller already
+/// holds: the index passes the language after parse it stores.
+pub fn export_filter_applies_to(language: Language, file: &str) -> bool {
+    is_ecmascript(language) && !file.ends_with(".d.ts")
 }
 
 pub fn is_ecmascript(language: Language) -> bool {
@@ -342,6 +348,13 @@ pub trait ModuleFacts {
 
     /// Whether `file` is indexed, symbols or not.
     fn has_file(&self, file: &str) -> bool;
+    /// `file`'s language as the import rules compare it. The index reads the
+    /// C5 language after parse it stores per file, so a Vue file with a
+    /// TypeScript script reads as TypeScript. The default derives it from
+    /// the path: an implementor that stores the language overrides it.
+    fn file_language(&self, file: &str) -> Language {
+        Language::from_normalized_path(file)
+    }
     /// Files of `language` directly within `directory`.
     fn files_in_directory(&self, _language: Language, _directory: &str) -> Vec<Self::Path> {
         Vec::new()
@@ -809,7 +822,7 @@ pub fn ecmascript_module<F: ModuleFacts + ?Sized>(
 ) -> Option<Box<str>> {
     let mut found = None;
     for_each_import_candidate(facts, importer, import, &mut |candidate| {
-        if is_ecmascript(Language::from_normalized_path(candidate)) && facts.has_file(candidate) {
+        if is_ecmascript(facts.file_language(candidate)) && facts.has_file(candidate) {
             found = Some(Box::from(candidate));
             false
         } else {
@@ -829,7 +842,7 @@ pub fn resolve_star_modules<'i, F: ModuleFacts + ?Sized>(
     module: &str,
     imports: impl IntoIterator<Item = ImportRef<'i>>,
 ) -> Box<[Box<str>]> {
-    if !is_ecmascript(Language::from_normalized_path(module)) {
+    if !is_ecmascript(facts.file_language(module)) {
         return Box::default();
     }
     imports
@@ -974,7 +987,7 @@ pub fn ecmascript_reexport<F: ModuleFacts + ?Sized>(
     name: &str,
     target: ResolveTarget,
 ) -> Option<u32> {
-    if !is_ecmascript(Language::from_normalized_path(module)) {
+    if !is_ecmascript(facts.file_language(module)) {
         return None;
     }
     if let Some(table) = facts
@@ -1054,7 +1067,7 @@ pub fn python_reexport<F: ModuleFacts + ?Sized>(
     name: &str,
     target: ResolveTarget,
 ) -> Option<u32> {
-    if Language::from_normalized_path(module) != Language::Python {
+    if facts.file_language(module) != Language::Python {
         return None;
     }
     let mut bound = None;
@@ -1286,7 +1299,7 @@ pub fn import_hides<'i, F: ModuleFacts + ?Sized>(
     imports: impl IntoIterator<Item = ImportRef<'i>>,
     decl_file: &str,
 ) -> bool {
-    if !is_ecmascript(Language::from_normalized_path(importer)) || !facts.is_es_module(decl_file) {
+    if !is_ecmascript(facts.file_language(importer)) || !facts.is_es_module(decl_file) {
         return false;
     }
     imports.into_iter().any(|import| {

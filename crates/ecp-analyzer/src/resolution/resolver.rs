@@ -120,7 +120,7 @@ impl<'g> ReexportIndex<'g> {
             .filter(|graph| !graph.imports.is_empty())
             .map(|graph| {
                 let path = normalize_source_path(&graph.file_path);
-                let language = Language::from_normalized_path(&path);
+                let language = symbol_table.file_language(&path);
                 if is_ecmascript(language) {
                     ecmascript_aliases.extend(graph.imports.iter().filter_map(|import| {
                         let import = ImportRef::from(import);
@@ -172,12 +172,16 @@ impl ModuleFacts for IndexFacts<'_, '_> {
         self.0.symbol_table.has_indexed_file(file)
     }
 
+    fn file_language(&self, file: &str) -> Language {
+        self.0.symbol_table.file_language(file)
+    }
+
     fn files_in_directory(&self, language: Language, directory: &str) -> Vec<Self::Path> {
         self.0
             .symbol_table
             .files_in_directory(directory)
             .iter()
-            .filter(|file| Language::from_normalized_path(file) == language)
+            .filter(|file| self.0.symbol_table.file_language(file) == language)
             .map(|file| Arc::from(file.as_str()))
             .collect()
     }
@@ -187,7 +191,7 @@ impl ModuleFacts for IndexFacts<'_, '_> {
             .symbol_table
             .namespace_files(namespace)
             .iter()
-            .filter(|file| Language::from_normalized_path(file) == language)
+            .filter(|file| self.0.symbol_table.file_language(file) == language)
             .map(|file| Arc::from(file.as_str()))
             .collect()
     }
@@ -264,7 +268,7 @@ impl ModuleFacts for IndexFacts<'_, '_> {
 /// candidates (path aliases, Rust module tree).
 impl<'a> ModuleIndex<'a> for IndexFacts<'_, 'a> {
     fn module_file(&self, language: Language, path: &str) -> Option<&'a str> {
-        if Language::from_normalized_path(path) != language {
+        if self.0.symbol_table.file_language(path) != language {
             return None;
         }
         let table: &'a SymbolTable = self.0.symbol_table;
@@ -279,7 +283,7 @@ impl<'a> ModuleIndex<'a> for IndexFacts<'_, 'a> {
         let table: &'a SymbolTable = self.0.symbol_table;
         table
             .module_files_by_stem(stem)
-            .filter(move |file| Language::from_normalized_path(file) == language)
+            .filter(move |file| table.file_language(file) == language)
     }
 
     fn namespace_declarers(&self, language: Language, name: &str) -> Vec<&'a str> {
@@ -288,7 +292,7 @@ impl<'a> ModuleIndex<'a> for IndexFacts<'_, 'a> {
             .namespace_files(name)
             .iter()
             .map(String::as_str)
-            .filter(|file| Language::from_normalized_path(file) == language)
+            .filter(|file| table.file_language(file) == language)
             .collect()
     }
 
@@ -569,7 +573,7 @@ impl<'s, 'r, 'a> ladder::CallFacts<'s> for IndexCall<'r, 'a, '_> {
     fn names_type_and_member(&self, callee: &str) -> bool {
         let table = self.facts.0.symbol_table;
         table.has_constructible_type(callee)
-            && table.names_admitted_method(callee, FileMeta::from_normalized_path(self.source))
+            && table.names_admitted_method(callee, table.file_meta(self.source))
     }
 
     fn declares_constructible(&self, name: &str) -> bool {
@@ -761,6 +765,11 @@ impl<'a> Resolver<'a> {
             reexports: None,
             csharp_extensions: None,
         }
+    }
+
+    /// `file`'s language as the index stores it ([`SymbolTable::file_language`]).
+    pub(crate) fn file_language(&self, file: &str) -> Language {
+        self.symbol_table.file_language(file)
     }
 
     /// Read the C# extension declarations from `decls`, the table's
@@ -956,7 +965,7 @@ impl<'a> Resolver<'a> {
         lexical: Resolution,
     ) -> Vec<(NodeId, f32)> {
         let source = normalize_source_path(source_file);
-        let language = Language::from_normalized_path(&source);
+        let language = self.symbol_table.file_language(&source);
         let facts = IndexCall {
             facts: IndexFacts(self),
             source_file,
@@ -1012,7 +1021,7 @@ impl<'a> Resolver<'a> {
         let Some(callee_file) = st.file_of(callee) else {
             return type_ladder::ChainOutcome::Unknown;
         };
-        let language = Language::from_normalized_path(callee_file);
+        let language = st.file_language(callee_file);
         let imports = self
             .reexports
             .and_then(|index| index.modules.get(callee_file))
@@ -1235,7 +1244,9 @@ impl<'a> Resolver<'a> {
         raw_imports: &[RawImport],
         target: ResolveTarget,
     ) -> Vec<(NodeId, f32)> {
-        let language = Language::from_normalized_path(&normalize_source_path(source_file));
+        let language = self
+            .symbol_table
+            .file_language(&normalize_source_path(source_file));
         self.resolve_import_tiers(
             source_file,
             language,
@@ -1258,7 +1269,9 @@ impl<'a> Resolver<'a> {
         raw_imports: &[RawImport],
         target: ResolveTarget,
     ) -> (Vec<(NodeId, f32)>, Option<Arc<str>>) {
-        let language = Language::from_normalized_path(&normalize_source_path(source_file));
+        let language = self
+            .symbol_table
+            .file_language(&normalize_source_path(source_file));
         let mut barrel = None;
         let targets = self.resolve_import_tiers(
             source_file,
@@ -1337,7 +1350,7 @@ impl<'a> Resolver<'a> {
         // Only a TS / JS caller follows a TS / JS re-export.
         let reexports = self
             .reexports
-            .filter(|_| is_ecmascript(Language::from_normalized_path(&importer)));
+            .filter(|_| is_ecmascript(self.symbol_table.file_language(&importer)));
         match reexport::named_import(
             &IndexFacts(self),
             &importer,
@@ -1465,7 +1478,7 @@ impl<'a> Resolver<'a> {
                         st,
                         name,
                         ResolveTarget::Type,
-                        FileMeta::from_normalized_path(scope_file),
+                        st.file_meta(scope_file),
                     )
                     .into_iter()
                     .filter(|&id| st.namespace_return_type_visible(id, scope_file, scope_imports))
@@ -1555,7 +1568,9 @@ impl<'a> Resolver<'a> {
         caller_heritage: &[String],
         barrel: &mut Option<Arc<str>>,
     ) -> Vec<(NodeId, f32)> {
-        let language = Language::from_normalized_path(&normalize_source_path(source_file));
+        let language = self
+            .symbol_table
+            .file_language(&normalize_source_path(source_file));
         // FQN call binding must not change the heritage graph underneath the
         // receiver ladder. Constructors enter through resolve_call instead.
         let bind_import = target != ResolveTarget::Type || !fqn_language(language);
@@ -1735,7 +1750,7 @@ impl<'a> Resolver<'a> {
         if let Some((qualifier, member)) = split_qualifier(symbol_name) {
             let site = ladder::QualifiedSite {
                 source: &source_file_str,
-                caller: FileMeta::from_path(&source_file_str),
+                caller: self.symbol_table.file_meta(&source_file_str),
                 language,
                 imports: raw_imports,
                 callee: symbol_name,
@@ -1876,7 +1891,7 @@ impl<'a> Resolver<'a> {
                 ladder::qualifier_file(
                     &IndexFacts(self),
                     &source_file_str,
-                    FileMeta::from_path(&source_file_str),
+                    self.symbol_table.file_meta(&source_file_str),
                     raw_imports,
                     (None, base, symbol_name),
                     target,
@@ -1997,7 +2012,7 @@ impl<'a> Resolver<'a> {
             })
             .map(|i| i.source.as_str());
         let raw_count = self.symbol_table.global_match_count(symbol_name);
-        let caller_meta = FileMeta::from_path(source_file_str);
+        let caller_meta = self.symbol_table.file_meta(source_file_str);
 
         let hidden = |node_id: NodeId| {
             self.symbol_table.file_of(node_id).is_some_and(|module| {
@@ -2248,7 +2263,7 @@ impl<'a> Resolver<'a> {
         {
             return TypeCandidates::Unique(id, qualifier);
         }
-        let language = Language::from_normalized_path(source_file_str);
+        let language = st.file_language(source_file_str);
         // A C# `using A = Ns.Type;` binds `A` to that type path. Its parse
         // also records `A` as an unaliased import, so it is read here, before
         // the import loop takes that record for a library name.
@@ -2336,7 +2351,7 @@ impl<'a> Resolver<'a> {
             }
             imported_in_project = true;
         }
-        let caller_meta = FileMeta::from_path(source_file_str);
+        let caller_meta = self.symbol_table.file_meta(source_file_str);
         if caller_meta.language == Language::Rust && !imported_in_project {
             return TypeCandidates::None;
         }
@@ -2359,11 +2374,7 @@ impl<'a> Resolver<'a> {
             return TypeCandidates::External;
         };
         let ids: Vec<NodeId> = st
-            .global_candidates(
-                name,
-                ResolveTarget::Type,
-                FileMeta::from_path(source_file_str),
-            )
+            .global_candidates(name, ResolveTarget::Type, st.file_meta(source_file_str))
             .into_iter()
             .filter(|&id| {
                 st.file_of(id)

@@ -640,6 +640,7 @@ mod tests {
             mtime: 0,
             content_hash: [0; 8],
             category: crate::graph::FileCategory::Source,
+            parsed_language: crate::contracts::routing::ParsedLanguage::ABSENT,
         }
     }
 

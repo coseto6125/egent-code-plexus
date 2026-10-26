@@ -151,7 +151,10 @@ use std::path::Path;
 /// schema42: an import resolves in the caller's workspace scope first (its
 /// own aliases, package names and module root), so a monorepo package's
 /// `@/*` binds inside that package.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema42");
+/// schema43: the global tier admits a pair by the stored `ParsedLanguage`
+/// (`admits_global`), so a `.proto` file no longer pairs with an unrouted
+/// file; a Python import probes every base path an alias expands to.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema43");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

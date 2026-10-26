@@ -7,6 +7,7 @@ use ecp_core::analyzer::reexport::{is_es_module, pick_call, ExportAliasTable};
 use ecp_core::analyzer::same_file_pick::{self, ImplMember as PickImplMember, PickFacts};
 use ecp_core::analyzer::type_ladder::{declared_namespace, return_type_key, TypeFacts};
 use ecp_core::analyzer::types::{owner_key, RawExportAlias};
+use ecp_core::contracts::routing::ParsedLanguage;
 pub use ecp_core::file_category::{FileMeta, GlobalPick, Language};
 use ecp_core::graph::{FunctionMeta, NodeKind};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -195,6 +196,12 @@ pub struct SymbolTable {
     /// File metadata per node (language + vendor flag). Cached so the Tier-3
     /// barrier check is O(1) per candidate. Parallel-indexed with `node_kinds`.
     node_file_meta: Vec<FileMeta>,
+
+    /// File metadata per registered file, from the C5 language after parse
+    /// Pass 1 stores in the `File` record ([`Self::note_file_meta`]). Every
+    /// index-side language reader goes through [`Self::file_meta`], so a Vue
+    /// file with a TypeScript script reads as TypeScript, not as its path.
+    file_metas: FxHashMap<String, FileMeta>,
 
     /// Basename-stem → file paths sharing that stem. Populated once after
     /// Pass 1 via [`SymbolTable::build_stem_index`]; the resolver's Tier-4
@@ -396,11 +403,10 @@ impl SymbolTable {
             else {
                 continue;
             };
+            let language = self.file_meta(path).language;
             let names = self
                 .indexed_module_names
-                .entry(std::mem::discriminant(&Language::from_normalized_path(
-                    path,
-                )))
+                .entry(std::mem::discriminant(&language))
                 .or_default();
             names.insert(stem.to_string());
             if let Some(parent) = std::path::Path::new(path).parent() {
@@ -546,7 +552,7 @@ impl SymbolTable {
         // Reverse map for dump-side lookup
         self.id_to_file.insert(node_id, file_path.to_string());
 
-        let file_meta = FileMeta::from_path(file_path);
+        let file_meta = self.file_meta(file_path);
         self.node_kinds.push(kind);
         self.node_file_meta.push(file_meta);
         self.node_owner.push(NO_OWNER);
@@ -1520,7 +1526,7 @@ impl SymbolTable {
             && self.node_kinds[a as usize] == self.node_kinds[b as usize]
             && self.node_owner[a as usize] == self.node_owner[b as usize]
             && leaf_path(a_file) == leaf_path(b_file)
-            && (!fqn_language(Language::from_normalized_path(a_file))
+            && (!fqn_language(self.node_file_meta[a as usize].language)
                 || self.file_namespaces.get(a_file) == self.file_namespaces.get(b_file))
     }
 
@@ -1541,7 +1547,7 @@ impl SymbolTable {
         else {
             return Vec::new();
         };
-        let scope_meta = FileMeta::from_path(scope_file);
+        let scope_meta = self.file_meta(scope_file);
         let scope_root = crate_root_prefix(scope_file);
         let same_package_only = scope_meta.language == Language::Go;
         let scope_dir = std::path::Path::new(scope_file).parent();
@@ -1656,6 +1662,39 @@ impl SymbolTable {
     /// Unlike `has_file`, includes empty and import-only files registered by the builder.
     pub(crate) fn has_indexed_file(&self, file_path: &str) -> bool {
         self.file_scoped.contains_key(file_path)
+    }
+
+    /// Record `file`'s metadata, from its stored language after parse. The
+    /// first record of a path stands: two `LocalGraph`s of one path share
+    /// one entry, as they share one `file_scoped` entry.
+    pub(crate) fn note_file_meta(&mut self, file: &str, meta: FileMeta) {
+        if !self.file_metas.contains_key(file) {
+            self.file_metas.insert(file.to_string(), meta);
+        }
+    }
+
+    /// The metadata of `file`: the stored record for a file Pass 1
+    /// registered, else what the path decides ([`FileMeta::from_path`]) for
+    /// a path the index never saw. Either separator is accepted.
+    pub fn file_meta(&self, file: &str) -> FileMeta {
+        let stored = if file.contains('\\') {
+            self.file_metas.get(&file.replace('\\', "/"))
+        } else {
+            self.file_metas.get(file)
+        };
+        stored.copied().unwrap_or_else(|| FileMeta::from_path(file))
+    }
+
+    /// `file`'s language as the index's rules compare it: the stored
+    /// resolution language ([`Self::file_meta`]).
+    pub fn file_language(&self, file: &str) -> Language {
+        self.file_meta(file).language
+    }
+
+    /// `file`'s C5 language after parse, as `graph.bin` stores it
+    /// (`ArchivedZeroCopyGraph::parsed_language`).
+    pub fn parsed_language(&self, file: &str) -> Option<ParsedLanguage> {
+        self.file_meta(file).parsed
     }
 
     /// [`Self::has_indexed_file`]'s path, borrowed from the table.
@@ -1849,6 +1888,10 @@ impl SymbolTable {
 }
 
 impl PickFacts for SymbolTable {
+    fn file_meta(&self, file: &str) -> FileMeta {
+        SymbolTable::file_meta(self, file)
+    }
+
     fn pick_candidates(&self, file: &str, name: &str) -> Cow<'_, [u32]> {
         let Some(ids) = self.file_scoped.get(file).and_then(|names| names.get(name)) else {
             return Cow::Borrowed(&[]);

@@ -3,7 +3,7 @@
 //! and the session overlay. One classifier, so a path that `impact` hides as
 //! a test is also the path the resolver treats as a test candidate.
 
-use crate::contracts::routing::FileRouter;
+use crate::contracts::routing::{FileRoute, FileRouter, ParsedLanguage};
 use crate::graph::FileCategory;
 use aho_corasick::{AhoCorasick, MatchKind};
 use std::sync::OnceLock;
@@ -327,10 +327,29 @@ pub struct FileMeta {
     /// (`is_some`, `get`, `new`) with stdlib methods, producing one false edge
     /// per call site that survives the kind+unique filter.
     pub is_vendor: bool,
+    /// The value every `file_category::Language` reader compares: the stored
+    /// resolution language's `to_legacy` ([`Self::of_parsed`]), else the
+    /// path's.
     pub language: Language,
+    /// C5 language after parse. The global tier reads it on both files
+    /// ([`Self::admits`]). `None` when nothing decided it: a sniffed file, a
+    /// Vue, Svelte or Astro file whose script no parse reported, an unrouted
+    /// path.
+    pub parsed: Option<ParsedLanguage>,
 }
 
 impl FileMeta {
+    /// The facts of a file whose language after parse is known (the index
+    /// stores it per file). `path` is forward-slashed. A Vue file with a
+    /// TypeScript script reads as TypeScript.
+    pub fn of_parsed(path: &str, parsed: ParsedLanguage) -> Self {
+        Self {
+            is_vendor: is_vendor_path(path),
+            language: parsed.resolution().to_legacy(),
+            parsed: Some(parsed),
+        }
+    }
+
     pub fn from_path(path: &str) -> Self {
         if path.contains('\\') {
             let normalized = path.replace('\\', "/");
@@ -343,18 +362,44 @@ impl FileMeta {
     /// Fast path for callers that have already normalised separators. Skips
     /// the `replace('\\','/')` allocation (one per call) — meaningful in Pass
     /// 1, which calls it once per file.
+    ///
+    /// `parsed` is what the path alone decides: a fixed route whose language
+    /// embeds no script. A sniffed route waits for its content gate, and a
+    /// Vue, Svelte or Astro file for its script, so both stay `None`.
     pub fn from_normalized_path(path: &str) -> Self {
+        let route = FileRouter::PATH_ONLY.route_ignoring_templates(path);
         Self {
-            is_vendor: path.contains("/vendor/") || path.starts_with("vendor/"),
-            language: Language::from_normalized_path(path),
+            is_vendor: is_vendor_path(path),
+            language: route
+                .as_ref()
+                .map_or_else(|| Language::unrouted(path), FileRoute::to_legacy),
+            parsed: route.and_then(|route| {
+                let language = route
+                    .fixed_language()
+                    .filter(|language| language.embedded_scripts().is_empty())?;
+                route.after_parse(language, None).ok()
+            }),
         }
     }
 
     /// Hard barriers: a candidate in another language, or a vendor candidate
-    /// for a non-vendor caller, is never a resolution target.
+    /// for a non-vendor caller, is never a resolution target. The language
+    /// rule is C5 `ParsedLanguage::admits_global` when both files have a
+    /// language after parse. Two files with none compare their path values,
+    /// as before C5. One with and one without never match: no route pairs a
+    /// `.vue` or `.json` file with a `.proto` file.
     pub fn admits(self, candidate: FileMeta) -> bool {
-        candidate.language == self.language && (!candidate.is_vendor || self.is_vendor)
+        let language = match (self.parsed, candidate.parsed) {
+            (Some(caller), Some(candidate)) => caller.admits_global(candidate),
+            (None, None) => candidate.language == self.language,
+            (Some(_), None) | (None, Some(_)) => false,
+        };
+        language && (!candidate.is_vendor || self.is_vendor)
     }
+}
+
+fn is_vendor_path(path: &str) -> bool {
+    path.contains("/vendor/") || path.starts_with("vendor/")
 }
 
 /// Outcome of the bare-name global (Tier 3) lookup.
