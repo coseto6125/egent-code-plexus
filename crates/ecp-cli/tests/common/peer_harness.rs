@@ -177,7 +177,7 @@ impl PeerHarness {
             let stderr = std::fs::read_to_string(self.session_dir(&id).join("watcher.stderr"))
                 .unwrap_or_default();
             let lines: Vec<&str> = stderr.lines().collect();
-            let tail = lines[lines.len().saturating_sub(15)..].join("\n    ");
+            let tail = lines[lines.len().saturating_sub(60)..].join("\n    ");
             out.push_str(&format!(
                 "\n[{id}] watcher {status}; heard from {froms:?}\n    {tail}"
             ));

@@ -35,6 +35,8 @@ pub struct WatcherCfg {
 }
 
 pub fn run_watcher(cfg: WatcherCfg) -> std::io::Result<()> {
+    let t0 = std::time::Instant::now();
+    eprintln!("[DEBUG-pw] {:?} start", t0.elapsed());
     let lock_file = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -50,6 +52,7 @@ pub fn run_watcher(cfg: WatcherCfg) -> std::io::Result<()> {
         "watcher acquired flock"
     );
 
+    eprintln!("[DEBUG-pw] {:?} flock ok", t0.elapsed());
     let soft = Arc::new(Mutex::new(SoftState::default()));
     soft.lock()
         .expect("soft state lock poisoned")
@@ -59,6 +62,7 @@ pub fn run_watcher(cfg: WatcherCfg) -> std::io::Result<()> {
     // reads of the same file when N peers fire dirty events in a burst.
     let my_dirty_cache: Arc<Mutex<Option<MyDirtySurface>>> = Arc::new(Mutex::new(None));
 
+    eprintln!("[DEBUG-pw] {:?} rebuild done", t0.elapsed());
     let (tx, rx) = channel::<notify::Result<Event>>();
     let mut watcher = open_watcher(tx, notify::recommended_watcher)?;
     let sessions_dir = cfg.repo_root.join("sessions");
@@ -71,14 +75,29 @@ pub fn run_watcher(cfg: WatcherCfg) -> std::io::Result<()> {
     // before this point is invisible until it happens to save again. That is
     // the normal case for a watcher restarted mid-session, and for the window
     // between process start and the `watch` call above.
+    eprintln!("[DEBUG-pw] {:?} watch armed", t0.elapsed());
     rescan_peers(&cfg, &soft, &my_dirty_cache);
+    eprintln!("[DEBUG-pw] {:?} rescan done", t0.elapsed());
 
     let mut event_count: u32 = 0;
     loop {
         match rx.recv_timeout(Duration::from_secs(1)) {
             Ok(Ok(ev)) => {
                 event_count = event_count.wrapping_add(1);
-                if let Err(e) = handle_event(&cfg, &soft, &my_dirty_cache, ev) {
+                let th = std::time::Instant::now();
+                eprintln!(
+                    "[DEBUG-pw] {:?} event {:?} {:?}",
+                    t0.elapsed(),
+                    ev.kind,
+                    ev.paths
+                );
+                let r = handle_event(&cfg, &soft, &my_dirty_cache, ev);
+                eprintln!(
+                    "[DEBUG-pw] {:?} handled in {:?}",
+                    t0.elapsed(),
+                    th.elapsed()
+                );
+                if let Err(e) = r {
                     log_watcher_error("event handler", &e);
                 }
             }
