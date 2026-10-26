@@ -495,11 +495,21 @@ pub fn import_is_external<F: ImportModules + ?Sized>(
 
 /// The member an import binds, the import, and the Python package whose
 /// re-export the member went through (`barrel`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct ImportHit<'i, P> {
     pub id: u32,
     pub import: &'i RawImport,
     pub barrel: Option<P>,
+}
+
+/// Two hits are equal when they name one member through the same import
+/// record, not an equal-looking one.
+impl<P: PartialEq> PartialEq for ImportHit<'_, P> {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && std::ptr::eq(self.import, other.import)
+            && self.barrel == other.barrel
+    }
 }
 
 /// One pass of the import-member tier ([`import_member_hit`]).

@@ -328,7 +328,7 @@ fn observe_case(case: &Case) -> Observed {
         .collect();
     let edits: Vec<Edit<'_>> = edited
         .iter()
-        .map(|(path, source)| Edit::Write(*path, source.as_str()))
+        .map(|(path, source)| Edit::Write(path, source.as_str()))
         .chain(case.removed.iter().map(|&path| Edit::Delete(path)))
         .collect();
     run(&Scenario {
