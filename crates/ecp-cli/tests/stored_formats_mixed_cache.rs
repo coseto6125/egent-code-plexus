@@ -801,8 +801,8 @@ fn test_mixed_cache_old_graph_concurrent_duplicate_call_both_answer() {
     let home = rig.home("mixed");
     rig.stage_prev_commit(&rig.repo_root(&home));
 
+    let args = ["find", "helper", "--all", "--format", "json"];
     let (a, b) = std::thread::scope(|s| {
-        let args = ["find", "helper", "--all", "--format", "json"];
         let a = s.spawn(|| rig.ecp(&home, None, &args));
         let b = s.spawn(|| rig.ecp(&home, None, &args));
         (a.join().unwrap(), b.join().unwrap())
