@@ -81,8 +81,10 @@ impl ScopeTable {
 /// The ecosystem whose scopes resolve the imports of a file in `language`,
 /// for the ecosystems this reading serves. Rust keeps its crate table
 /// (`RustWorkspaceModTree`, the stored Cargo rows) and the repo-wide
-/// entries. Swift and every other language keep the repo-wide entries.
-fn import_ecosystem(language: Language) -> Option<Ecosystem> {
+/// entries. Swift and every other language keep the repo-wide entries. The
+/// invalidation closure reads it too, to find the files a dirty config
+/// rescopes (`session::closure`).
+pub(crate) fn import_ecosystem(language: Language) -> Option<Ecosystem> {
     match language {
         Language::TypeScript | Language::JavaScript => Some(Ecosystem::Node),
         Language::Go => Some(Ecosystem::Go),

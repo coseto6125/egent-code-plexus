@@ -8,11 +8,11 @@
 //! cascade included), writes the fragments and tombstones with
 //! `write_dirty_events`, stores the invalidation closure over the base index
 //! (`closure_store::refresh_with_graph`, the step `auto_ensure` runs after
-//! the write), reads both back through `view_inputs` and
-//! `decode_view_inputs_with_records`, and builds `OverlayView` with the
-//! records and the closure's stale kinds (`build_with_closure`). The dirty
-//! set is the
-//! edited paths, as `git status --porcelain` lists them: a deleted path and
+//! the write) with the dirty resolution configs (the dirty paths C3
+//! classifies as configs against the base scope table), reads both back
+//! through `view_inputs` and `decode_view_inputs_with_records`, and builds
+//! `OverlayView` with the records, the closure's stale kinds and the
+//! configs' parse (`build_with_configs`). The dirty set is the edited paths, as `git status --porcelain` lists them: a deleted path and
 //! both paths of a rename are dirty, `reanalyze_files` skips the ones
 //! missing on disk exactly as a query does, and each of those gets a
 //! tombstone, as the freshness gate writes one. Fragment mtimes are the on-disk
@@ -46,10 +46,10 @@ use ecp_cli::reanalyze::reanalyze_files;
 use ecp_cli::session::closure_store;
 use ecp_cli::session::overlay_reader::{decode_view_inputs_with_records, view_inputs};
 use ecp_cli::session::overlay_writer::write_dirty_events;
-use ecp_core::contracts::dirty_event::PathClass;
-use ecp_core::contracts::routing::SizeCap;
+use ecp_core::contracts::dirty_event::{PathClass, RepoPath};
+use ecp_core::contracts::routing::{FileRouter, SizeCap};
 use ecp_core::graph::{ArchivedZeroCopyGraph, NodeKind, RelType, ZeroCopyGraph};
-use ecp_core::session::closure::StaleClosure;
+use ecp_core::session::closure::{ConfigEdits, StaleClosure};
 use ecp_core::session::merged::MergedGraph;
 use ecp_core::session::view::OverlayFileRecords;
 use ecp_core::session::{layout, DirtyEvents, OverlayFileInput, OverlayView, SessionMeta};
@@ -308,6 +308,8 @@ pub struct Observed {
     /// What the invalidation closure left as indexed, as the reader serves
     /// it.
     pub stale: StaleClosure,
+    /// The dirty resolution configs' parse, as the reader serves it.
+    pub configs: ConfigEdits,
     /// `input dropped <path>` for each written fragment or tombstone the
     /// reader did not serve.
     pub dropped: BTreeSet<String>,
@@ -325,12 +327,13 @@ impl Observed {
     /// The overlay view a query builds, held to its cache round trip.
     pub fn view(&self) -> Option<OverlayView> {
         let base = self.base();
-        let view = OverlayView::build_with_closure(
+        let view = OverlayView::build_with_configs(
             base,
             &self.inputs,
             &self.records,
             &self.tombstones,
             &self.stale,
+            &self.configs,
         );
         if let Some(view) = &view {
             assert_eq!(
@@ -384,6 +387,18 @@ pub fn run(scenario: &Scenario<'_>) -> Observed {
     }
 
     let dirty = dirty_paths(scenario.edits);
+    let base = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&base_bytes).unwrap();
+    let facts = base.workspace_facts();
+    let configs: Vec<String> = dirty
+        .iter()
+        .filter(|path| {
+            RepoPath::new(path.as_str()).is_ok_and(|path| {
+                PathClass::classify(&path, &FileRouter::PATH_ONLY, Some(&facts))
+                    .is_resolution_config()
+            })
+        })
+        .cloned()
+        .collect();
     let graphs = reanalyze_files(repo.path(), &DiffScope::Unstaged, &dirty);
     let mtimes: Vec<u64> = graphs
         .iter()
@@ -408,8 +423,7 @@ pub fn run(scenario: &Scenario<'_>) -> Observed {
         &tombstones,
     )
     .expect("fragment write");
-    let base = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&base_bytes).unwrap();
-    closure_store::refresh_with_graph(repo.path(), &session, base, size_cap)
+    closure_store::refresh_with_graph(repo.path(), &session, base, size_cap, &configs)
         .expect("closure write");
     let read = view_inputs(&session, repo.path()).expect("fragment read");
     let (inputs, records) = decode_view_inputs_with_records(&read.fragments);
@@ -437,6 +451,7 @@ pub fn run(scenario: &Scenario<'_>) -> Observed {
         records,
         tombstones,
         stale: read.stale,
+        configs: read.configs,
         dropped,
     }
 }

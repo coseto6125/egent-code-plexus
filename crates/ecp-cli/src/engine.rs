@@ -318,12 +318,13 @@ impl Engine {
                     crate::session::overlay_reader::decode_view_inputs_with_records(
                         &inputs.fragments,
                     );
-                let view = OverlayView::build_with_closure(
+                let view = OverlayView::build_with_configs(
                     graph,
                     &files,
                     &records,
                     &inputs.tombstones,
                     &inputs.stale,
+                    &inputs.configs,
                 )?;
                 if let Some(key) = key {
                     view_cache::write(dir, key, &view);
@@ -502,6 +503,11 @@ fn stale_closure_line(stale: &ecp_core::session::closure::StaleClosure) -> Optio
             format!("the edit reaches {n} clean dependent file(s), past the re-resolve limit")
         }
         (None, true) => "no dependency closure was computed for these edits".to_owned(),
+        (None, false) if !stale.configs.is_empty() => {
+            "the overlay could not apply the new reading of these configs (the parser \
+             rejects one, or one is a Cargo.toml) and resolves with the indexed one"
+                .to_owned()
+        }
         (None, false) => "the overlay does not re-resolve these kinds".to_owned(),
     };
     let names = if stale.names.is_empty() {
@@ -509,8 +515,13 @@ fn stale_closure_line(stale: &ecp_core::session::closure::StaleClosure) -> Optio
     } else {
         format!(" (removed names: {})", stale.names.join(", "))
     };
+    let configs = if stale.configs.is_empty() {
+        String::new()
+    } else {
+        format!(" (kept configs: {})", stale.configs.join(", "))
+    };
     Some(format!(
-        "results may be incomplete: clean files keep their indexed {} edges{names}, \
+        "results may be incomplete: clean files keep their indexed {} edges{names}{configs}, \
          because {why}. Run `ecp admin index --repo .` and rerun.",
         stale.kinds.join(", ")
     ))
@@ -662,5 +673,15 @@ mod tests {
         assert!(routes.contains("does not re-resolve these kinds"));
         assert!(routes.contains("`ecp admin index --repo .`"));
         assert!(!routes.contains('\n'), "one reason per line");
+
+        let kept = stale_closure_line(&StaleClosure {
+            kinds: kinds(&["Calls", "Imports"]),
+            configs: kinds(&["tsconfig.json"]),
+            ..StaleClosure::default()
+        })
+        .unwrap();
+        assert!(kept.contains("(kept configs: tsconfig.json)"));
+        assert!(kept.contains("could not apply the new reading of these configs"));
+        assert!(!kept.contains('\n'), "one reason per line");
     }
 }

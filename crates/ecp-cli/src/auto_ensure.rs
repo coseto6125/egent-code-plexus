@@ -765,6 +765,7 @@ pub(crate) fn ensure_fresh_with_rebuild(
                 // stats each path once and skips a missing one. Config-only
                 // halves stay in the set for areas 4 and 5.
                 let rel_paths = dirty_source_paths(&dirty);
+                let configs = dirty_config_paths(&dirty);
                 // Freshness gate (FU-2026-06-10-f92cecba3daa): each fragment
                 // records its source file's mtime_ns in `l1/dirty_events.json`, so
                 // a dirty file whose mtime still matches was already parsed
@@ -799,6 +800,7 @@ pub(crate) fn ensure_fresh_with_rebuild(
                         session_dir.as_deref(),
                         graph_path,
                         size_cap,
+                        &configs,
                     );
                     return Ok(Ensured::refreshed(dirty, size_cap));
                 }
@@ -898,6 +900,7 @@ pub(crate) fn ensure_fresh_with_rebuild(
                     session_dir.as_deref(),
                     graph_path,
                     size_cap,
+                    &configs,
                 );
                 // L1 overlay only touches dirty fragments under
                 // `<repo>/sessions/<sid>/` and does not rewrite graph.bin, but the
@@ -1478,11 +1481,21 @@ fn retain_stale_fragments(
 /// The source halves of `dirty`, removed halves included: the paths the gate
 /// and the parse take, and the paths whose overlay entries stay claimed.
 fn dirty_source_paths(dirty: &DirtySet<ClassifiedPath>) -> Vec<String> {
+    dirty_paths_of(dirty, PathClass::is_source)
+}
+
+/// The dirty resolution configs, removed halves too: the closure reads
+/// their new rows and the clean files they rescope (R-A4d).
+fn dirty_config_paths(dirty: &DirtySet<ClassifiedPath>) -> Vec<String> {
+    dirty_paths_of(dirty, PathClass::is_resolution_config)
+}
+
+fn dirty_paths_of(dirty: &DirtySet<ClassifiedPath>, keep: fn(PathClass) -> bool) -> Vec<String> {
     dirty
         .events()
         .iter()
         .flat_map(|event| event.halves())
-        .filter(|(_, half)| half.class.is_source())
+        .filter(|(_, half)| keep(half.class))
         .map(|(_, half)| half.path.as_str().to_owned())
         .collect()
 }
@@ -1570,12 +1583,18 @@ fn refresh_closure_best_effort(
     session_dir: Option<&Path>,
     graph_path: &Path,
     size_cap: SizeCap,
+    configs: &[String],
 ) {
     let Some(dir) = session_dir else {
         return;
     };
-    if let Err(e) = crate::session::closure_store::refresh(worktree_root, dir, graph_path, size_cap)
-    {
+    if let Err(e) = crate::session::closure_store::refresh_with_configs(
+        worktree_root,
+        dir,
+        graph_path,
+        size_cap,
+        configs,
+    ) {
         eprintln!("ecp: L1 invalidation closure skipped: {e}");
     }
 }

@@ -18,7 +18,7 @@
 use ecp_core::analyzer::types::{RawExportAlias, RawImport};
 use ecp_core::contracts::routing::{ParsedLanguage, SizeCap};
 use ecp_core::graph::NodeKind;
-use ecp_core::session::closure::StaleClosure;
+use ecp_core::session::closure::{ConfigEdits, StaleClosure};
 use ecp_core::session::layout;
 use ecp_core::session::view::{ArchivedOverlayFileRecords, OverlayFileRecords};
 use ecp_core::session::{DirtyEvents, OverlayFileInput, OverlaySymbol, FRAGMENT_FORMAT_V7};
@@ -62,9 +62,10 @@ fn fragment_language(archived: &ArchivedFragmentFile) -> Option<Option<ParsedLan
 /// One manifest read's share of `OverlayView`: the fragments the
 /// acceptance rules let through, then the clean files of the invalidation
 /// closure stored for this manifest (`closure_store`), the tombstoned paths
-/// still absent from the worktree, what the closure left as indexed, and
-/// `hash`, an xxh3 over all of them in that order (the inputs' share of the
-/// view cache key).
+/// still absent from the worktree, what the closure left as indexed, the
+/// dirty resolution configs' parse stored with the closure, and `hash`, an
+/// xxh3 over all of them in that order (the inputs' share of the view cache
+/// key).
 pub struct ViewInputs {
     pub fragments: Vec<AcceptedFragment>,
     /// Repo-relative paths of deleted files and of the old halves of
@@ -74,13 +75,16 @@ pub struct ViewInputs {
     /// input, and `StaleClosure::not_computed` when no closure is stored for
     /// this manifest.
     pub stale: StaleClosure,
+    /// `OverlayView::build_with_configs`'s `configs`: the dirty resolution
+    /// configs' rows, empty without a dirty config.
+    pub configs: ConfigEdits,
     pub hash: u64,
 }
 
 impl ViewInputs {
     /// True on a clean tree: query paths then stay on their original branch.
     pub fn is_empty(&self) -> bool {
-        self.fragments.is_empty() && self.tombstones.is_empty()
+        self.fragments.is_empty() && self.tombstones.is_empty() && self.configs.is_empty()
     }
 }
 
@@ -211,6 +215,7 @@ fn manifest_inputs(
             fragments,
             tombstones,
             stale: StaleClosure::default(),
+            configs: ConfigEdits::default(),
             hash: hasher.digest(),
         },
         manifest,

@@ -57,6 +57,7 @@ use crate::analyzer::types::{
 use crate::contracts::identity::lexical_parents;
 use crate::file_category::{pick_global, FileMeta, GlobalPick, Language};
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
+use crate::session::closure::ConfigEdits;
 use crate::session::import_scope::{stored_file_meta, stored_language, ImportScope, Module};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::Cow;
@@ -249,6 +250,7 @@ type Supertypes = (Vec<u32>, Option<u32>);
 type ImplSpan<'a> = ((u32, u32, u32, u32), u32, Option<&'a str>);
 
 impl<'a> OverlayFacts<'a> {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         graph: &'a ArchivedZeroCopyGraph,
         files: &'a [OverlayFileInput],
@@ -257,6 +259,7 @@ impl<'a> OverlayFacts<'a> {
         removed: &'a FxHashSet<&'a str>,
         replaced: &'a FxHashMap<u32, u32>,
         later_overloads: &'a FxHashMap<u32, Vec<u32>>,
+        configs: &ConfigEdits,
     ) -> Self {
         let base_len = graph.nodes.len() as u32;
         let mut declared: FxHashMap<(usize, &'a str), Vec<u32>> = FxHashMap::default();
@@ -357,10 +360,18 @@ impl<'a> OverlayFacts<'a> {
             };
             dirty_impl_traits.entry(ty).or_default().push(implemented);
         }
+        // The dirty configs' rows over the archived table, merged once per
+        // view: the alias reading and the crate table both read it.
+        let merged = configs.merged_facts(graph);
+        let rust = RustModules::new(graph, files, removed);
+        if let Some(facts) = &merged {
+            let _ = rust.crates.set(facts.clone());
+        }
         Self {
             graph,
-            scope: ImportScope::new(graph, files, dirty_base, removed)
-                .with_aliases(overlay_aliases(graph)),
+            scope: ImportScope::new(graph, files, dirty_base, removed).with_aliases(
+                overlay_aliases(graph, configs.repo_wide_aliases(), merged.as_ref()),
+            ),
             nodes,
             dirty_base,
             dirty: files
@@ -392,7 +403,7 @@ impl<'a> OverlayFacts<'a> {
             dirty_flags,
             dirty_lexical_parents,
             csharp_namespaces: OnceCell::new(),
-            rust: RustModules::new(graph, files, removed),
+            rust,
             rust_callers: RefCell::default(),
             tree_free: Cell::new(false),
         }
@@ -4571,9 +4582,18 @@ fn member_in_file(
 /// go.mod, Cargo.toml, ...), with one reading per stored C2 scope (R-A4b),
 /// read once per view. A graph whose scope rows are all Cargo rows (the
 /// Rust crate table, which this reading leaves alone) skips deserializing
-/// them.
-fn overlay_aliases(graph: &ArchivedZeroCopyGraph) -> PathAliases {
-    let aliases = graph.path_aliases();
+/// them. With dirty resolution configs (R-A4d, `session::closure`),
+/// `repo_wide` replaces the archived entries and `merged`, the archived rows
+/// with the dirty configs' rows, replaces the stored rows.
+fn overlay_aliases(
+    graph: &ArchivedZeroCopyGraph,
+    repo_wide: Option<PathAliases>,
+    merged: Option<&crate::contracts::workspace::WorkspaceFacts>,
+) -> PathAliases {
+    let aliases = repo_wide.unwrap_or_else(|| graph.path_aliases());
+    if let Some(facts) = merged {
+        return aliases.with_scopes(facts);
+    }
     let scoped = graph.workspace.scopes.iter().any(|scope| {
         !matches!(
             scope.ecosystem,
@@ -5410,6 +5430,8 @@ pub(super) type MemberTwins = FxHashMap<u32, (usize, Vec<(u32, Span)>)>;
 /// `Decorates` edges ([`resolve_decorates`]) go to `decorated`: a new
 /// `Annotation` node they reach is numbered past every virtual node yet.
 /// The `Overrides` edges ([`resolve_overrides`]) go to `overrides`.
+/// `configs` holds the dirty resolution configs' rows, which every module
+/// lookup reads in place of the archived ones.
 /// Returns the lexical parent of each scoped virtual node.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_edges(
@@ -5430,6 +5452,7 @@ pub(super) fn resolve_edges(
     (dirty_files, imports): (&FxHashMap<&str, u32>, &mut Vec<ViewEdge>),
     decorated: &mut Decorated<'_>,
     overrides: &mut Vec<ViewEdge>,
+    configs: &ConfigEdits,
 ) -> FxHashMap<u32, u32> {
     let mut callables = OverlayNames::new(ResolveTarget::Callable);
     let mut values = OverlayNames::new(ResolveTarget::Value);
@@ -5494,6 +5517,7 @@ pub(super) fn resolve_edges(
         removed,
         replaced,
         later_overloads,
+        configs,
     );
     let lexical_parents: FxHashMap<u32, u32> = facts.dirty_lexical_parents.clone();
 

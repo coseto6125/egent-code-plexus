@@ -126,6 +126,13 @@
 //! clean file outside the closure keeps its indexed edges, as below, and
 //! [`OverlayView::stale_closure`] names the kinds a closure left as indexed.
 //!
+//! A dirty resolution config (R-A4d) reaches the view as rows, never as
+//! bytes: [`OverlayView::build_with_configs`] merges the
+//! [`super::closure::ConfigEdits`] the closure refresh parsed over the
+//! archived scope rows and repo-wide alias entries, and every dirty and
+//! closure file resolves its imports and crate paths with the merged
+//! tables. The closure names the clean files those rows rescope.
+//!
 //! ## What stays out of scope (documented fidelity gaps)
 //!
 //! - `References` edges other than lexical closure, overload-set,
@@ -226,7 +233,7 @@
 //!   use` chain the index follows through an import's visibility binds only
 //!   in the index: graph.bin does not store that visibility.
 
-use super::closure::StaleClosure;
+use super::closure::{ConfigEdits, StaleClosure};
 use super::incremental::{self, ReplayInputs};
 use crate::analyzer::containment::{ENUM_VARIANT_DEFINES_REASON, SCOPE_DEFINES_REASON};
 use crate::analyzer::csharp_extension;
@@ -741,6 +748,18 @@ impl OverlayView {
         records: &[OverlayFileRecords],
         removed: &[String],
     ) -> Option<Self> {
+        Self::build_with_tables(graph, files, records, removed, &ConfigEdits::default())
+    }
+
+    /// [`Self::build_with_records`] that resolves with the dirty resolution
+    /// configs' rows (`configs`) merged over the archived config tables.
+    fn build_with_tables(
+        graph: &ArchivedZeroCopyGraph,
+        files: &[OverlayFileInput],
+        records: &[OverlayFileRecords],
+        removed: &[String],
+        configs: &ConfigEdits,
+    ) -> Option<Self> {
         if files.is_empty() && removed.is_empty() {
             return None;
         }
@@ -967,6 +986,7 @@ impl OverlayView {
             (&dirty_files, &mut imports),
             &mut decorated,
             &mut overrides,
+            configs,
         );
         let resolution::Decorated {
             edges: decorates,
@@ -1050,6 +1070,26 @@ impl OverlayView {
         stale: &StaleClosure,
     ) -> Option<Self> {
         let mut view = Self::build_with_records(graph, files, records, removed)?;
+        view.stale_closure = stale.clone();
+        Some(view)
+    }
+
+    /// [`Self::build_with_closure`] when the dirty state also holds
+    /// resolution configs: every file of `files` resolves with `configs`'
+    /// rows merged over the archived config tables (R-A4d,
+    /// [`super::closure::ConfigEdits`]). The merge runs once per build, in
+    /// O(S + N) over the archived table's S rows and N names plus the
+    /// edited rows; no config is parsed here. Equal to
+    /// [`Self::build_with_closure`] for an empty `configs`.
+    pub fn build_with_configs(
+        graph: &ArchivedZeroCopyGraph,
+        files: &[OverlayFileInput],
+        records: &[OverlayFileRecords],
+        removed: &[String],
+        stale: &StaleClosure,
+        configs: &ConfigEdits,
+    ) -> Option<Self> {
+        let mut view = Self::build_with_tables(graph, files, records, removed, configs)?;
         view.stale_closure = stale.clone();
         Some(view)
     }
@@ -1254,7 +1294,8 @@ impl OverlayView {
 /// reasons, and masks the base ones; so does its heritage replay, for the
 /// `Extends` and `Implements` edges and their two reasons. F7b2 extends it
 /// again: the view stores the clean-file edge kinds its invalidation
-/// closure left as indexed.
+/// closure left as indexed. R-A4d extends it again: that record also names
+/// the dirty resolution configs whose archived rows the view kept.
 pub const VIEW_CACHE_FORMAT: u32 = 14;
 
 /// The base edge kinds the record replay rebuilds, so masks at a re-parsed

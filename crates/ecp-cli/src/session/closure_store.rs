@@ -9,20 +9,32 @@
 //! file, so a peer reading it sees only this session's edits, and neither
 //! the retire pass nor `admin gc` touches this file.
 //!
+//! The dirty resolution configs travel here too (R-A4d): the refresh parses
+//! each one once with the index's readers ([`config_edits`]) and stores the
+//! result as [`ConfigEdits`] beside the closure it widens, so the closure
+//! and the view read one parse under one key. The fragment manifest lists
+//! source halves only, and no query parses a config.
+//!
 //! File layout: key (u64 LE) · rkyv [`ClosureFile`]. The key hashes what the
-//! closure was computed from ([`closure_key`]): the session's base SHA and
-//! every manifest row. A reader serves the closure only under the key of the
-//! manifest it reads, so a closure never meets another dirty state; a
-//! refresh that finds its key stored does nothing beyond an 8-byte read.
+//! closure was computed from ([`closure_key`]): the session's base SHA,
+//! every manifest row, and the path and mtime of each dirty config
+//! ([`ConfigStamp`]). A reader serves the closure only under the key of the
+//! manifest it reads and the stamps the file stores, and only while each
+//! stamped config still has its stamp, so a closure never meets another
+//! dirty state; a refresh that finds its key stored does nothing beyond an
+//! 8-byte read.
 
 use super::overlay_reader::{self, AcceptedFragment, ViewInputs};
 use super::view_cache::hash_part;
 use ecp_core::contracts::routing::SizeCap;
+use ecp_core::contracts::workspace::{ConfigPresence, Ecosystem, ScopeAlias, WorkspaceFacts};
 use ecp_core::graph::ArchivedZeroCopyGraph;
 use ecp_core::registry::BUILDER_FINGERPRINT;
-use ecp_core::session::closure::{invalidation_closure, StaleClosure};
+use ecp_core::session::closure::{
+    feeds_repo_wide, invalidation_closure_with_configs, ConfigEdits, StaleClosure,
+};
 use ecp_core::session::{layout, DirtyEvents, SessionMeta};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -32,7 +44,8 @@ use xxhash_rust::xxh3::Xxh3;
 pub const CLOSURE_FILE: &str = "closure.bin";
 
 /// Layout version of [`ClosureFile`]. A file of another version is no
-/// closure: the next refresh rewrites it.
+/// closure: the next refresh rewrites it. Format 1 is unreleased, and R-A4d
+/// extends it in place with the config stamps and edits.
 pub const CLOSURE_FORMAT: u32 = 1;
 
 const KEY_LEN: usize = 8;
@@ -49,6 +62,11 @@ pub struct ClosureFile {
     pub stale: StaleClosure,
     /// One per parse of a closure file, in path order.
     pub entries: Vec<ClosureEntry>,
+    /// The dirty resolution configs the closure was computed over, in path
+    /// order; part of the key.
+    pub stamps: Vec<ConfigStamp>,
+    /// Their parse, which the view merges over the archived config tables.
+    pub configs: ConfigEdits,
 }
 
 /// One clean file's parse.
@@ -63,14 +81,24 @@ pub struct ClosureEntry {
     pub fragment: Vec<u8>,
 }
 
+/// One dirty resolution config as the refresh found it.
+#[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct ConfigStamp {
+    /// Repo-relative, `/`-separated.
+    pub path: String,
+    /// The mtime statted before the parse; `None` for a deleted config.
+    pub mtime_ns: Option<u64>,
+}
+
 /// `<session>/l1/closure.bin`.
 pub fn closure_path(session_dir: &Path) -> PathBuf {
     layout::l1_dir(session_dir).join(CLOSURE_FILE)
 }
 
-/// The key of a closure computed over `manifest` for a session based at
-/// `base_sha`: every row, in manifest order.
-pub fn closure_key(base_sha: &str, manifest: &DirtyEvents) -> u64 {
+/// The key of a closure computed over `manifest` and the dirty configs
+/// `stamps` for a session based at `base_sha`: every row, in manifest
+/// order, then every stamp, in path order.
+pub fn closure_key(base_sha: &str, manifest: &DirtyEvents, stamps: &[ConfigStamp]) -> u64 {
     let mut hasher = Xxh3::new();
     hash_part(&mut hasher, &CLOSURE_FORMAT.to_le_bytes());
     hash_part(&mut hasher, base_sha.as_bytes());
@@ -86,14 +114,22 @@ pub fn closure_key(base_sha: &str, manifest: &DirtyEvents) -> u64 {
         hash_part(&mut hasher, &entry.format.to_le_bytes());
         hash_part(&mut hasher, &[u8::from(entry.parse_failed)]);
     }
+    for stamp in stamps {
+        hash_part(&mut hasher, stamp.path.as_bytes());
+        // An absent config and a config of mtime 0 hash apart.
+        match stamp.mtime_ns {
+            Some(mtime) => hash_part(&mut hasher, &mtime.to_le_bytes()),
+            None => hash_part(&mut hasher, &[]),
+        }
+    }
     hasher.digest()
 }
 
-/// The key of the session's current manifest; `None` without a readable
-/// session meta.
-fn session_key(session_dir: &Path, manifest: &DirtyEvents) -> Option<u64> {
-    let meta = SessionMeta::read(&session_dir.join("session_meta.json")).ok()?;
-    Some(closure_key(&meta.base_sha, manifest))
+/// The session's base SHA; `None` without a readable session meta.
+fn base_sha(session_dir: &Path) -> Option<String> {
+    SessionMeta::read(&session_dir.join("session_meta.json"))
+        .ok()
+        .map(|meta| meta.base_sha)
 }
 
 /// The key the stored closure was written under; `None` without one.
@@ -105,15 +141,14 @@ fn stored_key(session_dir: &Path) -> Option<u64> {
     Some(u64::from_le_bytes(head))
 }
 
-/// The closure stored under `key` by this binary under `size_cap`; `None`
-/// for another key, format, builder or cap, and for bytes that fail
-/// validation.
-fn read(session_dir: &Path, key: u64, size_cap: SizeCap) -> Option<ClosureFile> {
+/// The stored closure and the key it was written under, when this binary
+/// wrote it under `size_cap`; `None` for another format, builder or cap, and
+/// for bytes that fail validation. The caller checks the key against the
+/// file's own stamps.
+fn read(session_dir: &Path, size_cap: SizeCap) -> Option<(u64, ClosureFile)> {
     let bytes = fs::read(closure_path(session_dir)).ok()?;
     let (head, body) = bytes.split_at_checked(KEY_LEN)?;
-    if u64::from_le_bytes(head.try_into().ok()?) != key {
-        return None;
-    }
+    let key = u64::from_le_bytes(head.try_into().ok()?);
     // Checked access refuses misaligned input, and a `fs::read` buffer
     // carries no alignment guarantee past the 8-byte key.
     let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(body.len());
@@ -122,7 +157,7 @@ fn read(session_dir: &Path, key: u64, size_cap: SizeCap) -> Option<ClosureFile> 
     (file.format == CLOSURE_FORMAT
         && file.builder_fingerprint == BUILDER_FINGERPRINT
         && file.size_cap_bytes == size_cap.bytes())
-    .then_some(file)
+    .then_some((key, file))
 }
 
 fn write(session_dir: &Path, key: u64, file: &ClosureFile) -> io::Result<()> {
@@ -133,12 +168,27 @@ fn write(session_dir: &Path, key: u64, file: &ClosureFile) -> io::Result<()> {
     ecp_core::registry::atomic_write_bytes_no_fsync(&closure_path(session_dir), &bytes)
 }
 
+/// The stamp of each of `configs` (repo-relative), in path order.
+fn stamps_of(worktree_root: &Path, configs: &[String]) -> Vec<ConfigStamp> {
+    let paths: BTreeSet<&String> = configs.iter().collect();
+    paths
+        .into_iter()
+        .map(|path| ConfigStamp {
+            path: path.clone(),
+            mtime_ns: crate::auto_ensure::mtime_ns_of(&worktree_root.join(path)),
+        })
+        .collect()
+}
+
 /// Add the closure stored for `manifest` (the current one under
 /// `size_cap`) to `inputs`: each entry whose file still has its parsed mtime
 /// and is no dirty path, hashed after the dirty inputs, then its stale
-/// kinds. A dirty view with no closure stored for this manifest gets
-/// `StaleClosure::not_computed`, and so does one whose closure file was
-/// touched since its parse: that file is served as indexed.
+/// kinds, then the dirty configs' stamps and parse ([`ViewInputs::configs`]).
+/// A dirty view with no closure stored for this manifest gets
+/// `StaleClosure::not_computed`, and so does one whose closure file or dirty
+/// config was touched since its parse: that file is served as indexed, and
+/// a touched config serves no config edit. On a clean tree with no dirty
+/// config the cost is an 8-byte read.
 pub(crate) fn attach(
     session_dir: &Path,
     worktree_root: &Path,
@@ -146,15 +196,36 @@ pub(crate) fn attach(
     manifest: &DirtyEvents,
     inputs: &mut ViewInputs,
 ) {
-    if inputs.is_empty() {
+    let dirty = !inputs.is_empty();
+    let not_computed = |inputs: &mut ViewInputs| {
+        if dirty {
+            inputs.stale = StaleClosure::not_computed();
+        }
+    };
+    // A clean tree reads a closure only when one was stored over dirty
+    // configs: no file, or the clean key, costs one open and 8 bytes.
+    let stored = if dirty { None } else { stored_key(session_dir) };
+    if !dirty && stored.is_none() {
         return;
     }
-    let Some(file) =
-        session_key(session_dir, manifest).and_then(|key| read(session_dir, key, size_cap))
-    else {
-        inputs.stale = StaleClosure::not_computed();
-        return;
+    let Some(base_sha) = base_sha(session_dir) else {
+        return not_computed(inputs);
     };
+    if stored == Some(closure_key(&base_sha, manifest, &[])) {
+        return;
+    }
+    let Some(file) = read(session_dir, size_cap)
+        .filter(|(key, file)| *key == closure_key(&base_sha, manifest, &file.stamps))
+        .map(|(_, file)| file)
+    else {
+        return not_computed(inputs);
+    };
+    let configs_current = file.stamps.iter().all(|stamp| {
+        crate::auto_ensure::mtime_ns_of(&worktree_root.join(&stamp.path)) == stamp.mtime_ns
+    });
+    if !configs_current {
+        return not_computed(inputs);
+    }
     let mut hasher = Xxh3::new();
     hasher.update(&inputs.hash.to_le_bytes());
     let mut stale = file.stale;
@@ -176,20 +247,30 @@ pub(crate) fn attach(
         });
     }
     hash_part(&mut hasher, format!("{stale:?}").as_bytes());
+    // The stamps change with a config's mtime and the parse with its
+    // bytes, so either edit moves the view key.
+    hash_part(&mut hasher, format!("{:?}", file.stamps).as_bytes());
+    hash_part(&mut hasher, format!("{:?}", file.configs).as_bytes());
     inputs.stale = stale;
+    inputs.configs = file.configs;
     inputs.hash = hasher.digest();
 }
 
-/// Store the closure of the session's current manifest unless it is stored
-/// already: `auto_ensure` calls this after each L1 refresh and retire pass.
-/// The graph is loaded only when the stored key is not the manifest's.
-pub fn refresh(
+/// Store the closure of the session's current manifest and the dirty
+/// resolution configs `configs` (repo-relative, a deleted one included)
+/// unless it is stored already: `auto_ensure` calls this after each L1
+/// refresh and retire pass. The graph is loaded only when the stored key is
+/// not the current one. The closure also re-resolves the clean files the
+/// configs rescope, and the file stores their parse for the view.
+pub fn refresh_with_configs(
     worktree_root: &Path,
     session_dir: &Path,
     graph_path: &Path,
     size_cap: SizeCap,
+    configs: &[String],
 ) -> io::Result<()> {
-    let Some(key) = current_key(session_dir, size_cap) else {
+    let stamps = stamps_of(worktree_root, configs);
+    let Some(key) = current_key(session_dir, size_cap, &stamps) else {
         return Ok(());
     };
     if stored_key(session_dir) == Some(key) {
@@ -199,46 +280,51 @@ pub fn refresh(
     let graph = engine
         .graph()
         .map_err(|e| io::Error::other(e.to_string()))?;
-    store(worktree_root, session_dir, graph, size_cap, key)
+    store(worktree_root, session_dir, graph, size_cap, key, stamps)
 }
 
-/// [`refresh`] over a graph the caller holds, whatever key is stored.
+/// [`refresh_with_configs`] over a graph the caller holds, whatever key is
+/// stored.
 pub fn refresh_with_graph(
     worktree_root: &Path,
     session_dir: &Path,
     graph: &ArchivedZeroCopyGraph,
     size_cap: SizeCap,
+    configs: &[String],
 ) -> io::Result<()> {
-    match current_key(session_dir, size_cap) {
-        Some(key) => store(worktree_root, session_dir, graph, size_cap, key),
+    let stamps = stamps_of(worktree_root, configs);
+    match current_key(session_dir, size_cap, &stamps) {
+        Some(key) => store(worktree_root, session_dir, graph, size_cap, key, stamps),
         None => Ok(()),
     }
 }
 
-/// The key of the current manifest under `size_cap`; `None` without a
-/// current manifest or a session meta: the reader then serves no dirty
-/// input either.
-fn current_key(session_dir: &Path, size_cap: SizeCap) -> Option<u64> {
+/// The key of the current manifest and `stamps` under `size_cap`; `None`
+/// without a current manifest or a session meta: the reader then serves no
+/// dirty input either.
+fn current_key(session_dir: &Path, size_cap: SizeCap, stamps: &[ConfigStamp]) -> Option<u64> {
     let manifest = DirtyEvents::read(&layout::dirty_events_path(session_dir)).ok()?;
     if !manifest.is_current(size_cap) {
         return None;
     }
-    session_key(session_dir, &manifest)
+    Some(closure_key(&base_sha(session_dir)?, &manifest, stamps))
 }
 
-/// Compute the closure of the dirty inputs over `graph`, parse its files and
-/// write them under `key`. An empty closure is stored too, so the next
-/// refresh of the same dirty state reads 8 bytes and stops.
+/// Compute the closure of the dirty inputs and configs over `graph`, parse
+/// its files and write them under `key`. An empty closure is stored too, so
+/// the next refresh of the same dirty state reads 8 bytes and stops.
 fn store(
     worktree_root: &Path,
     session_dir: &Path,
     graph: &ArchivedZeroCopyGraph,
     size_cap: SizeCap,
     key: u64,
+    stamps: Vec<ConfigStamp>,
 ) -> io::Result<()> {
     let dirty = overlay_reader::dirty_inputs_under(session_dir, worktree_root, size_cap)?;
     let files = overlay_reader::decode_view_inputs(&dirty.fragments);
-    let closure = invalidation_closure(graph, &files, &dirty.tombstones);
+    let configs = config_edits(worktree_root, &graph.workspace_facts(), &stamps);
+    let closure = invalidation_closure_with_configs(graph, &files, &dirty.tombstones, &configs);
     let entries = parse(worktree_root, &closure.paths, size_cap);
     write(
         session_dir,
@@ -249,8 +335,184 @@ fn store(
             size_cap_bytes: size_cap.bytes(),
             stale: closure.stale,
             entries,
+            stamps,
+            configs,
         },
     )
+}
+
+/// The parse of the dirty configs `stamps` over the archived scope table
+/// `archived` (`ecp_core::session::closure`, "Resolution configs").
+///
+/// A config is kept (its archived rows stand) when the parser rejects it or
+/// it is a `Cargo.toml`, whose rows the Rust module tree makes; then so is
+/// every other dirty config of the same ecosystem, and, when a kept one
+/// feeds the repo-wide entries, every one that does: a half-applied
+/// ecosystem would pair new rows with old ones. Each other config is
+/// applied: the rows at its directory and at each scope it invalidates are
+/// re-derived from the archived configs of their ecosystems plus the
+/// present dirty ones, and the repo-wide entries are re-read when it feeds
+/// them. A merge that breaks a table invariant keeps every config.
+///
+/// Cost: one parse of each config of the touched ecosystems (the rows
+/// cannot be re-derived from fewer, since a row reads its ancestors), plus
+/// O(C · S) for C dirty configs over S archived rows. It runs once per
+/// refresh, never per query.
+pub(crate) fn config_edits(
+    worktree_root: &Path,
+    archived: &WorkspaceFacts,
+    stamps: &[ConfigStamp],
+) -> ConfigEdits {
+    if stamps.is_empty() {
+        return ConfigEdits::default();
+    }
+    let ecosystem_of = |path: &str| archived.config_ecosystem(path);
+    let mut kept: BTreeSet<String> = BTreeSet::new();
+    let mut applied: BTreeSet<String> = BTreeSet::new();
+    for stamp in stamps {
+        let path = &stamp.path;
+        let rejected = ecosystem_of(path.as_str()) == Some(Ecosystem::Cargo)
+            || crate::config_parser::config_rejected(worktree_root, path);
+        let set = if rejected { &mut kept } else { &mut applied };
+        set.insert(path.clone());
+    }
+    // Spread the kept set until it is closed under "same ecosystem" and
+    // "both feed the repo-wide entries".
+    loop {
+        let kept_ecosystems: BTreeSet<Ecosystem> = kept
+            .iter()
+            .filter_map(|path| ecosystem_of(path.as_str()))
+            .collect();
+        let kept_repo_wide = kept.iter().any(|path| feeds_repo_wide(path.as_str()));
+        let joins: Vec<String> = applied
+            .iter()
+            .filter(|path| {
+                ecosystem_of(path.as_str()).is_some_and(|eco| kept_ecosystems.contains(&eco))
+                    || (kept_repo_wide && feeds_repo_wide(path.as_str()))
+            })
+            .cloned()
+            .collect();
+        if joins.is_empty() {
+            break;
+        }
+        for path in joins {
+            applied.remove(&path);
+            kept.insert(path);
+        }
+    }
+    let keep_all = |applied: BTreeSet<String>, mut kept: BTreeSet<String>| {
+        kept.extend(applied);
+        ConfigEdits {
+            kept: kept.into_iter().collect(),
+            ..ConfigEdits::default()
+        }
+    };
+    if applied.is_empty() {
+        return keep_all(applied, kept);
+    }
+
+    let present = |path: &str| worktree_root.join(path).is_file();
+    let mut roots: BTreeSet<(Ecosystem, String)> = BTreeSet::new();
+    for path in &applied {
+        if let Some((eco, _)) = Ecosystem::classify_config(file_name(path)) {
+            if present(path.as_str()) {
+                roots.insert((eco, parent_dir(path).to_string()));
+            }
+        }
+        for id in archived.invalidated_by(path).scopes {
+            if let Some(scope) = archived.scope(id) {
+                roots.insert((scope.ecosystem, scope.root.clone()));
+            }
+        }
+    }
+    roots.retain(|(eco, _)| *eco != Ecosystem::Cargo);
+    let ecosystems: BTreeSet<Ecosystem> = roots.iter().map(|(eco, _)| *eco).collect();
+    let mut replaced: BTreeSet<String> = BTreeSet::new();
+    let mut parse_paths: BTreeSet<String> = applied
+        .iter()
+        .filter(|path| present(path.as_str()))
+        .cloned()
+        .collect();
+    for scope in &archived.scopes {
+        if roots.contains(&(scope.ecosystem, scope.root.clone())) {
+            replaced.insert(scope.manifest().to_string());
+        }
+        if ecosystems.contains(&scope.ecosystem) {
+            parse_paths.extend(
+                scope
+                    .config_files
+                    .iter()
+                    .filter(|config| config.presence == ConfigPresence::Read)
+                    .map(|config| config.path.clone())
+                    .filter(|path| !applied.contains(path) || present(path.as_str())),
+            );
+        }
+    }
+    let parse_paths: Vec<String> = parse_paths.into_iter().collect();
+    let rows: Vec<_> = crate::config_parser::parse_config_rows(worktree_root, &parse_paths)
+        .into_iter()
+        .filter(|draft| roots.contains(&(draft.scope.ecosystem, draft.scope.root.clone())))
+        .collect();
+    let repo_wide = applied
+        .iter()
+        .any(|path| feeds_repo_wide(path.as_str()))
+        .then(|| repo_wide_entries(worktree_root, archived, &applied));
+    let replaced: Vec<String> = replaced.into_iter().collect();
+    if archived.with_rows(&replaced, &rows).is_err() {
+        return keep_all(applied, kept);
+    }
+    ConfigEdits {
+        applied: applied.into_iter().collect(),
+        kept: kept.into_iter().collect(),
+        replaced,
+        rows,
+        repo_wide,
+    }
+}
+
+/// The repo-wide alias entries after the dirty configs `applied`: the root
+/// configs on disk, then the `ProjectReference`s of the archived .NET
+/// projects with each dirty project added or removed, in path order.
+fn repo_wide_entries(
+    worktree_root: &Path,
+    archived: &WorkspaceFacts,
+    applied: &BTreeSet<String>,
+) -> Vec<ScopeAlias> {
+    let mut projects: BTreeSet<String> = archived
+        .scopes
+        .iter()
+        .filter(|scope| scope.ecosystem == Ecosystem::DotNet)
+        .map(|scope| scope.manifest().to_string())
+        .collect();
+    for path in applied {
+        if !matches!(
+            Ecosystem::classify_config(file_name(path)),
+            Some((Ecosystem::DotNet, _))
+        ) {
+            continue;
+        }
+        if worktree_root.join(path).is_file() {
+            projects.insert(path.clone());
+        } else {
+            projects.remove(path);
+        }
+    }
+    let projects: Vec<String> = projects.into_iter().collect();
+    crate::config_parser::repo_wide_aliases(worktree_root, &projects)
+        .entries()
+        .map(|(pattern, replacements)| ScopeAlias {
+            pattern: pattern.to_string(),
+            replacements: replacements.to_vec(),
+        })
+        .collect()
+}
+
+fn parent_dir(path: &str) -> &str {
+    path.rsplit_once('/').map_or("", |(dir, _)| dir)
+}
+
+fn file_name(path: &str) -> &str {
+    path.rsplit_once('/').map_or(path, |(_, name)| name)
 }
 
 /// Parse each of `paths` as the dirty route parses a file. A path that
@@ -343,6 +605,7 @@ mod tests {
             }],
             tombstones: Vec::new(),
             stale: StaleClosure::default(),
+            configs: ConfigEdits::default(),
             hash: 5,
         };
         (session_dir, worktree, manifest, inputs)
@@ -363,6 +626,8 @@ mod tests {
             size_cap_bytes: SizeCap::BUILT_IN.bytes(),
             stale,
             entries,
+            stamps: Vec::new(),
+            configs: ConfigEdits::default(),
         }
     }
 
@@ -397,7 +662,7 @@ mod tests {
             kinds: vec!["Calls".into()],
             ..StaleClosure::default()
         };
-        let key = closure_key("base", &manifest);
+        let key = closure_key("base", &manifest, &[]);
         let file = closure(
             stale.clone(),
             vec![
@@ -438,7 +703,7 @@ mod tests {
             } else {
                 row.mtime_ns += 1;
             }
-            let key = closure_key("base", &manifest);
+            let key = closure_key("base", &manifest, &[]);
             write(
                 &session_dir,
                 key,
@@ -462,7 +727,7 @@ mod tests {
     fn test_attach_empty_inputs_stays_empty() {
         let dir = tempfile::tempdir().unwrap();
         let (session_dir, worktree, manifest, _) = session(dir.path(), &["src/caller.ts"]);
-        let key = closure_key("base", &manifest);
+        let key = closure_key("base", &manifest, &[]);
         let row = entry(&worktree, "src/caller.ts", valid_fragment_bytes());
         write(
             &session_dir,
@@ -474,6 +739,7 @@ mod tests {
             fragments: Vec::new(),
             tombstones: Vec::new(),
             stale: StaleClosure::default(),
+            configs: ConfigEdits::default(),
             hash: 0,
         };
         attach(
@@ -499,14 +765,48 @@ mod tests {
     /// SHA, so a closure is never served for another dirty state.
     #[test]
     fn test_closure_key_other_row_or_sha_differs() {
-        let key = closure_key("a", &manifest_with("x.ts", 1));
-        assert_eq!(key, closure_key("a", &manifest_with("x.ts", 1)));
-        assert_ne!(key, closure_key("b", &manifest_with("x.ts", 1)));
-        assert_ne!(key, closure_key("a", &manifest_with("x.ts", 2)));
-        assert_ne!(key, closure_key("a", &manifest_with("y.ts", 1)));
+        let key = closure_key("a", &manifest_with("x.ts", 1), &[]);
+        assert_eq!(key, closure_key("a", &manifest_with("x.ts", 1), &[]));
+        assert_ne!(key, closure_key("b", &manifest_with("x.ts", 1), &[]));
+        assert_ne!(key, closure_key("a", &manifest_with("x.ts", 2), &[]));
+        assert_ne!(key, closure_key("a", &manifest_with("y.ts", 1), &[]));
         assert_ne!(
             key,
-            closure_key("a", &DirtyEvents::empty(SizeCap::BUILT_IN))
+            closure_key("a", &DirtyEvents::empty(SizeCap::BUILT_IN), &[])
+        );
+    }
+
+    fn stamp(path: &str, mtime_ns: Option<u64>) -> ConfigStamp {
+        ConfigStamp {
+            path: path.into(),
+            mtime_ns,
+        }
+    }
+
+    /// Stands for: a dirty config's edit, deletion or appearance moves the
+    /// key, so a closure computed over other config bytes is never served.
+    #[test]
+    fn test_closure_key_other_config_stamp_differs() {
+        let manifest = manifest_with("x.ts", 1);
+        let key = closure_key("a", &manifest, &[stamp("tsconfig.json", Some(1))]);
+        assert_eq!(
+            key,
+            closure_key("a", &manifest, &[stamp("tsconfig.json", Some(1))])
+        );
+        for other in [
+            vec![],
+            vec![stamp("tsconfig.json", Some(2))],
+            vec![stamp("tsconfig.json", None)],
+            vec![stamp("tsconfig.json", Some(0))],
+            vec![stamp("go.mod", Some(1))],
+            vec![stamp("go.mod", Some(1)), stamp("tsconfig.json", Some(1))],
+        ] {
+            assert_ne!(key, closure_key("a", &manifest, &other), "{other:?}");
+        }
+        assert_ne!(
+            closure_key("a", &manifest, &[stamp("tsconfig.json", None)]),
+            closure_key("a", &manifest, &[stamp("tsconfig.json", Some(0))]),
+            "absent and mtime 0 hash apart"
         );
     }
 
@@ -522,6 +822,7 @@ mod tests {
             stale: StaleClosure {
                 names: vec!["dup".into()],
                 kinds: vec!["Calls".into()],
+                configs: vec!["bad/tsconfig.json".into()],
                 ..StaleClosure::default()
             },
             entries: vec![ClosureEntry {
@@ -529,23 +830,309 @@ mod tests {
                 mtime_ns: 7,
                 fragment: vec![1, 2, 3],
             }],
+            stamps: vec![stamp("go.mod", None)],
+            configs: ConfigEdits {
+                applied: vec!["go.mod".into()],
+                replaced: vec!["go.mod".into()],
+                ..ConfigEdits::default()
+            },
         };
-        assert!(read(dir.path(), 9, SizeCap::BUILT_IN).is_none(), "absent");
+        assert!(read(dir.path(), SizeCap::BUILT_IN).is_none(), "absent");
         write(dir.path(), 9, &file).unwrap();
         assert_eq!(stored_key(dir.path()), Some(9));
-        let back = read(dir.path(), 9, SizeCap::BUILT_IN).expect("same key");
+        let (key, back) = read(dir.path(), SizeCap::BUILT_IN).expect("written");
+        assert_eq!(key, 9);
         assert_eq!(back.stale, file.stale);
         assert_eq!(back.entries[0].rel_path, "src/b.js");
         assert_eq!(back.entries[0].fragment, vec![1, 2, 3]);
+        assert_eq!(back.stamps, file.stamps);
+        assert_eq!(back.configs, file.configs);
         assert!(
-            read(dir.path(), 10, SizeCap::BUILT_IN).is_none(),
-            "other key"
+            read(dir.path(), SizeCap::resolve(Some("1"), None)).is_none(),
+            "other cap"
         );
         fs::write(closure_path(dir.path()), [9u8, 0, 0]).unwrap();
-        assert!(
-            read(dir.path(), 9, SizeCap::BUILT_IN).is_none(),
-            "truncated"
-        );
+        assert!(read(dir.path(), SizeCap::BUILT_IN).is_none(), "truncated");
         assert_eq!(stored_key(dir.path()), None);
+    }
+
+    /// A closure over the dirty config `tsconfig.json` (present in
+    /// `worktree`), its stamp current, and one applied edit.
+    fn config_closure(worktree: &Path) -> ClosureFile {
+        fs::write(worktree.join("tsconfig.json"), "{}").unwrap();
+        let mut file = closure(StaleClosure::default(), Vec::new());
+        file.stamps = stamps_of(worktree, &["tsconfig.json".to_string()]);
+        file.configs = ConfigEdits {
+            applied: vec!["tsconfig.json".into()],
+            repo_wide: Some(Vec::new()),
+            ..ConfigEdits::default()
+        };
+        file
+    }
+
+    /// Stands for: the stored config parse reaches the view inputs and
+    /// moves the view key, beside the dirty files.
+    #[test]
+    fn test_attach_config_closure_serves_configs_and_moves_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let (session_dir, worktree, manifest, mut inputs) = session(dir.path(), &[]);
+        let file = config_closure(&worktree);
+        let key = closure_key("base", &manifest, &file.stamps);
+        let configs = file.configs.clone();
+        write(&session_dir, key, &file).unwrap();
+        attach(
+            &session_dir,
+            &worktree,
+            SizeCap::BUILT_IN,
+            &manifest,
+            &mut inputs,
+        );
+        assert_eq!(inputs.configs, configs);
+        assert!(inputs.stale.is_empty(), "{:?}", inputs.stale);
+        assert_ne!(inputs.hash, 5);
+    }
+
+    /// Stands for: a dirty state of configs alone (no dirty source) is no
+    /// clean tree: the view inputs carry the configs.
+    #[test]
+    fn test_attach_config_only_dirty_state_serves_configs() {
+        let dir = tempfile::tempdir().unwrap();
+        let (session_dir, worktree, _, _) = session(dir.path(), &[]);
+        let manifest = DirtyEvents::empty(SizeCap::BUILT_IN);
+        let file = config_closure(&worktree);
+        let key = closure_key("base", &manifest, &file.stamps);
+        write(&session_dir, key, &file).unwrap();
+        let mut inputs = ViewInputs {
+            fragments: Vec::new(),
+            tombstones: Vec::new(),
+            stale: StaleClosure::default(),
+            configs: ConfigEdits::default(),
+            hash: 0,
+        };
+        attach(
+            &session_dir,
+            &worktree,
+            SizeCap::BUILT_IN,
+            &manifest,
+            &mut inputs,
+        );
+        assert!(!inputs.is_empty());
+        assert_eq!(inputs.configs.applied, vec!["tsconfig.json".to_string()]);
+        assert_ne!(inputs.hash, 0);
+    }
+
+    /// Stands for: a config touched since the refresh parsed it serves no
+    /// config edit, and a dirty view says the closure is not computed.
+    #[test]
+    fn test_attach_config_touched_since_parse_marks_not_computed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (session_dir, worktree, manifest, mut inputs) = session(dir.path(), &[]);
+        let mut file = config_closure(&worktree);
+        file.stamps[0].mtime_ns = file.stamps[0].mtime_ns.map(|m| m + 1);
+        let key = closure_key("base", &manifest, &file.stamps);
+        write(&session_dir, key, &file).unwrap();
+        attach(
+            &session_dir,
+            &worktree,
+            SizeCap::BUILT_IN,
+            &manifest,
+            &mut inputs,
+        );
+        assert!(inputs.configs.is_empty());
+        assert!(inputs.stale.not_computed);
+        assert_eq!(inputs.hash, 5);
+    }
+
+    /// A tree of `files` and the scope rows the index stores for it.
+    fn indexed(files: &[(&str, &str)]) -> (tempfile::TempDir, WorkspaceFacts) {
+        let dir = tempfile::tempdir().unwrap();
+        for (path, text) in files {
+            let full = dir.path().join(path);
+            fs::create_dir_all(full.parent().unwrap()).unwrap();
+            fs::write(full, text).unwrap();
+        }
+        let paths: Vec<String> = files.iter().map(|(path, _)| path.to_string()).collect();
+        let facts = crate::config_parser::parse_repo_configs(dir.path(), &paths).workspace;
+        (dir, facts)
+    }
+
+    fn rewrite(root: &Path, path: &str, text: &str) {
+        fs::write(root.join(path), text).unwrap();
+    }
+
+    fn config_stamps(root: &Path, paths: &[&str]) -> Vec<ConfigStamp> {
+        let paths: Vec<String> = paths.iter().map(|path| path.to_string()).collect();
+        stamps_of(root, &paths)
+    }
+
+    const NODE_PAIR: [(&str, &str); 4] = [
+        (
+            "packages/a/package.json",
+            r#"{"name":"a","dependencies":{"b":"*"}}"#,
+        ),
+        ("packages/b/package.json", r#"{"name":"b"}"#),
+        ("packages/a/src/x.ts", "export const x = 1;"),
+        ("packages/b/src/y.ts", "export const y = 1;"),
+    ];
+
+    /// Stands for: no dirty config parses nothing.
+    #[test]
+    fn test_config_edits_no_stamp_returns_empty() {
+        let (dir, facts) = indexed(&NODE_PAIR);
+        assert!(config_edits(dir.path(), &facts, &[]).is_empty());
+    }
+
+    /// Stands for: an edited config replaces the rows at its root with the
+    /// index's reading of the new bytes, and the merge yields the table a
+    /// fresh index of the edited tree stores.
+    #[test]
+    fn test_config_edits_renamed_package_rows_equal_fresh_index() {
+        let (dir, facts) = indexed(&NODE_PAIR);
+        rewrite(dir.path(), "packages/b/package.json", r#"{"name":"c"}"#);
+        let edits = config_edits(
+            dir.path(),
+            &facts,
+            &config_stamps(dir.path(), &["packages/b/package.json"]),
+        );
+        assert_eq!(edits.applied, vec!["packages/b/package.json".to_string()]);
+        assert!(edits.kept.is_empty());
+        assert!(edits
+            .replaced
+            .contains(&"packages/b/package.json".to_string()));
+        assert_eq!(
+            edits.repo_wide, None,
+            "a nested config feeds no repo-wide entry"
+        );
+        let merged = facts.with_rows(&edits.replaced, &edits.rows).unwrap();
+        let (_, fresh) = indexed(&[
+            NODE_PAIR[0],
+            ("packages/b/package.json", r#"{"name":"c"}"#),
+            NODE_PAIR[2],
+            NODE_PAIR[3],
+        ]);
+        assert_eq!(merged, fresh);
+    }
+
+    /// Stands for: a deleted config removes its rows and adds none.
+    #[test]
+    fn test_config_edits_deleted_config_removes_rows() {
+        let (dir, facts) = indexed(&NODE_PAIR);
+        fs::remove_file(dir.path().join("packages/b/package.json")).unwrap();
+        let edits = config_edits(
+            dir.path(),
+            &facts,
+            &config_stamps(dir.path(), &["packages/b/package.json"]),
+        );
+        assert_eq!(edits.applied, vec!["packages/b/package.json".to_string()]);
+        let merged = facts.with_rows(&edits.replaced, &edits.rows).unwrap();
+        assert!(merged
+            .scopes
+            .iter()
+            .all(|scope| scope.manifest() != "packages/b/package.json"));
+    }
+
+    /// Stands for: a config the reader rejects (malformed or whitespace-only
+    /// bytes) keeps its archived rows, and so does every other dirty config
+    /// of its ecosystem.
+    #[test]
+    fn test_config_edits_malformed_config_kept_with_its_ecosystem() {
+        for bad in ["{ not json", "   "] {
+            let (dir, facts) = indexed(&NODE_PAIR);
+            rewrite(dir.path(), "packages/a/package.json", bad);
+            rewrite(dir.path(), "packages/b/package.json", r#"{"name":"c"}"#);
+            let edits = config_edits(
+                dir.path(),
+                &facts,
+                &config_stamps(
+                    dir.path(),
+                    &["packages/a/package.json", "packages/b/package.json"],
+                ),
+            );
+            assert!(edits.applied.is_empty(), "{bad:?}: {edits:?}");
+            assert_eq!(
+                edits.kept,
+                vec![
+                    "packages/a/package.json".to_string(),
+                    "packages/b/package.json".to_string()
+                ],
+                "{bad:?}"
+            );
+            assert!(edits.replaced.is_empty() && edits.rows.is_empty());
+            assert!(!edits.is_empty());
+        }
+    }
+
+    /// Stands for: well-formed bytes of the wrong shape (a list where the
+    /// reader expects an object) are no rejection: the edit applies, and the
+    /// merge equals the fresh index's table.
+    #[test]
+    fn test_config_edits_list_for_object_applies_equal_fresh_index() {
+        let (dir, facts) = indexed(&NODE_PAIR);
+        rewrite(dir.path(), "packages/b/package.json", "[]");
+        let edits = config_edits(
+            dir.path(),
+            &facts,
+            &config_stamps(dir.path(), &["packages/b/package.json"]),
+        );
+        assert_eq!(edits.applied, vec!["packages/b/package.json".to_string()]);
+        let merged = facts.with_rows(&edits.replaced, &edits.rows).unwrap();
+        let (_, fresh) = indexed(&[
+            NODE_PAIR[0],
+            ("packages/b/package.json", "[]"),
+            NODE_PAIR[2],
+            NODE_PAIR[3],
+        ]);
+        assert_eq!(merged, fresh);
+    }
+
+    /// Stands for: a `Cargo.toml` is kept (the Rust module tree makes its
+    /// rows), and a config of another ecosystem still applies.
+    #[test]
+    fn test_config_edits_cargo_toml_kept_other_ecosystem_applied() {
+        let (dir, facts) = indexed(&NODE_PAIR);
+        fs::create_dir_all(dir.path().join("crates/k")).unwrap();
+        rewrite(
+            dir.path(),
+            "crates/k/Cargo.toml",
+            "[package]\nname = \"k\"\n",
+        );
+        rewrite(dir.path(), "packages/b/package.json", r#"{"name":"c"}"#);
+        let edits = config_edits(
+            dir.path(),
+            &facts,
+            &config_stamps(
+                dir.path(),
+                &["crates/k/Cargo.toml", "packages/b/package.json"],
+            ),
+        );
+        assert_eq!(edits.kept, vec!["crates/k/Cargo.toml".to_string()]);
+        assert_eq!(edits.applied, vec!["packages/b/package.json".to_string()]);
+    }
+
+    /// Stands for: a root config that feeds the repo-wide entries re-reads
+    /// them, equal to the index's reading of the new bytes.
+    #[test]
+    fn test_config_edits_root_tsconfig_rereads_repo_wide_entries() {
+        let tsconfig = r#"{"compilerOptions":{"paths":{"@/*":["src/a/*"]}}}"#;
+        let (dir, facts) = indexed(&[("tsconfig.json", tsconfig), ("src/a/u.ts", "")]);
+        let moved = r#"{"compilerOptions":{"paths":{"@/*":["src/b/*"]}}}"#;
+        rewrite(dir.path(), "tsconfig.json", moved);
+        let edits = config_edits(
+            dir.path(),
+            &facts,
+            &config_stamps(dir.path(), &["tsconfig.json"]),
+        );
+        let entries = edits.repo_wide.expect("re-read");
+        let fresh = crate::config_parser::parse_configs(dir.path());
+        let fresh: Vec<(String, Vec<String>)> = fresh
+            .entries()
+            .map(|(pattern, replacements)| (pattern.to_string(), replacements.to_vec()))
+            .collect();
+        let got: Vec<(String, Vec<String>)> = entries
+            .into_iter()
+            .map(|alias| (alias.pattern, alias.replacements))
+            .collect();
+        assert_eq!(got, fresh);
+        assert!(got.iter().any(|(_, r)| r == &vec!["src/b/*".to_string()]));
     }
 }

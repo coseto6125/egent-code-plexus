@@ -295,8 +295,9 @@ pub struct ScopeName {
 /// One scope row as a config producer writes it, before the table gives
 /// it a [`ScopeId`]. [`WorkspaceFacts::from_drafts`] sorts the rows, then
 /// turns `names` into [`ScopeName`] rows and `requires` into the scope's
-/// `dependencies`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `dependencies`. Archived in the L1 closure store, which holds the rows
+/// of a dirty config (`session::closure::ConfigEdits`).
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct ScopeDraft {
     /// The row. Its `dependencies` stay empty: `requires` fills them.
     pub scope: Scope,
@@ -307,7 +308,7 @@ pub struct ScopeDraft {
 }
 
 /// One declared dependency of a [`ScopeDraft`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct Requirement {
     /// The name code writes for the dependency.
     pub name: String,
@@ -315,7 +316,7 @@ pub struct Requirement {
 }
 
 /// How a [`Requirement`] finds its scope.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub enum RequirementTarget {
     /// The scope that [`WorkspaceFacts::lookup_name`] gives for the name in
     /// the draft's ecosystem; `External` when no scope carries the name.
@@ -559,6 +560,77 @@ impl WorkspaceFacts {
         }
         names.sort_by(|a, b| name_key(a).cmp(&name_key(b)));
         Self::new(scopes, names)
+    }
+
+    /// This table with each row whose manifest `replaced` lists dropped and
+    /// `rows` added, as a producer that read the new configs would build it
+    /// (the overlay of dirty configs, `session::closure::ConfigEdits`). Of a
+    /// new row and a kept row with one identity, the new row stays.
+    ///
+    /// Each kept row goes back to its draft, and each of its dependencies
+    /// to the requirement that can make it again: by name when the target
+    /// row carries the name, else by the target's manifest. So a dependency
+    /// on a renamed or removed row turns `External`, and one on a name that
+    /// two rows now carry is left out, as [`Self::from_drafts`] rules. A
+    /// Cargo dependency always goes by manifest: the Rust module tree, not a
+    /// name lookup, made it. An `External` dependency stays external: the
+    /// table does not record whether a name lookup or the config made it.
+    ///
+    /// Cost: O(S + N) to rebuild the drafts of S rows and N names, then
+    /// [`Self::from_drafts`], O((S + N) log (S + N)).
+    pub fn with_rows(
+        &self,
+        replaced: &[String],
+        rows: &[ScopeDraft],
+    ) -> Result<Self, WorkspaceFactsError> {
+        let replaced: std::collections::HashSet<&str> =
+            replaced.iter().map(String::as_str).collect();
+        let mut names_of: Vec<Vec<(String, NameRank)>> = vec![Vec::new(); self.scopes.len()];
+        for entry in &self.names {
+            if let Some(names) = names_of.get_mut(entry.scope.index()) {
+                names.push((entry.name.clone(), entry.rank));
+            }
+        }
+        let carries = |target: ScopeId, name: &str| {
+            names_of
+                .get(target.index())
+                .is_some_and(|names| names.iter().any(|(carried, _)| carried == name))
+        };
+        let mut drafts: Vec<ScopeDraft> = rows.to_vec();
+        for (id, scope) in self.ids().zip(&self.scopes) {
+            if replaced.contains(scope.manifest()) {
+                continue;
+            }
+            let requires = scope
+                .dependencies
+                .iter()
+                .map(|dep| Requirement {
+                    name: dep.name.clone(),
+                    target: match dep.target {
+                        DependencyTarget::External => RequirementTarget::External,
+                        DependencyTarget::Workspace(target)
+                            if scope.ecosystem != Ecosystem::Cargo
+                                && carries(target, &dep.name) =>
+                        {
+                            RequirementTarget::ByName
+                        }
+                        DependencyTarget::Workspace(target) => self
+                            .scope(target)
+                            .map_or(RequirementTarget::External, |target| {
+                                RequirementTarget::ByManifest(target.manifest().to_string())
+                            }),
+                    },
+                })
+                .collect();
+            let mut scope = scope.clone();
+            scope.dependencies.clear();
+            drafts.push(ScopeDraft {
+                scope,
+                names: names_of[id.index()].clone(),
+                requires,
+            });
+        }
+        Self::from_drafts(drafts)
     }
 
     /// The scope of `ecosystem` whose manifest is `manifest`.
@@ -1920,5 +1992,163 @@ mod tests {
         let back = rkyv::deserialize::<WorkspaceFacts, rkyv::rancor::Error>(archived).unwrap();
         assert_eq!(back, facts);
         assert_eq!(back.validate(), Ok(()));
+    }
+
+    /// `packages/a` depends on `packages/b` by name and on the external
+    /// `react`; `packages/b` carries `@repo/b`.
+    fn node_pair() -> WorkspaceFacts {
+        WorkspaceFacts::from_drafts(vec![
+            draft(
+                scope(Ecosystem::Node, "packages/a", &["packages/a/package.json"]),
+                &[("@repo/a", NameRank::Primary)],
+                vec![
+                    require("@repo/b", RequirementTarget::ByName),
+                    require("react", RequirementTarget::External),
+                ],
+            ),
+            draft(
+                scope(Ecosystem::Node, "packages/b", &["packages/b/package.json"]),
+                &[("@repo/b", NameRank::Primary)],
+                Vec::new(),
+            ),
+        ])
+        .unwrap()
+    }
+
+    /// Stands for: no edit gives the table back, Cargo rows and their
+    /// by-manifest dependencies included.
+    #[test]
+    fn test_with_rows_no_edit_returns_equal_table() {
+        let facts = fixture();
+        assert_eq!(facts.with_rows(&[], &[]), Ok(facts.clone()));
+        let pair = node_pair();
+        assert_eq!(pair.with_rows(&[], &[]), Ok(pair.clone()));
+    }
+
+    /// Stands for: a dirty config replaces its row; a kept row's dependency
+    /// follows the target's new name, as the producer resolves it.
+    #[test]
+    fn test_with_rows_dirty_row_renamed_dependency_turns_external() {
+        let facts = node_pair();
+        let renamed = draft(
+            scope(Ecosystem::Node, "packages/b", &["packages/b/package.json"]),
+            &[("@repo/b2", NameRank::Primary)],
+            Vec::new(),
+        );
+        let merged = facts
+            .with_rows(&strings(&["packages/b/package.json"]), &[renamed])
+            .unwrap();
+        assert_eq!(merged.scopes.len(), 2);
+        let a = merged.scope(ScopeId(0)).unwrap();
+        assert_eq!(a.dependency("@repo/b"), Some(DependencyTarget::External));
+        assert_eq!(a.dependency("react"), Some(DependencyTarget::External));
+        assert_eq!(
+            merged.lookup_name(Ecosystem::Node, "@repo/b2"),
+            NameLookup::Unique(ScopeId(1))
+        );
+        assert_eq!(
+            merged.lookup_name(Ecosystem::Node, "@repo/b"),
+            NameLookup::Missing
+        );
+    }
+
+    /// Stands for: a deleted config removes its row and every name it
+    /// carried; a dependency on it turns external.
+    #[test]
+    fn test_with_rows_deleted_row_removed() {
+        let facts = node_pair();
+        let merged = facts
+            .with_rows(&strings(&["packages/b/package.json"]), &[])
+            .unwrap();
+        assert_eq!(merged.scopes.len(), 1);
+        assert_eq!(merged.scopes[0].root, "packages/a");
+        assert_eq!(
+            merged.scopes[0].dependency("@repo/b"),
+            Some(DependencyTarget::External)
+        );
+        assert_eq!(merged.validate(), Ok(()));
+    }
+
+    /// Stands for: a new config adds its row, sorted into the table, and a
+    /// kept dependency keeps its target across the id shift.
+    #[test]
+    fn test_with_rows_new_row_added_ids_follow_rows() {
+        let facts = node_pair();
+        let mut added = scope(
+            Ecosystem::Node,
+            "packages/a0",
+            &["packages/a0/tsconfig.json"],
+        );
+        added.aliases = vec![ScopeAlias {
+            pattern: "@/*".to_string(),
+            replacements: strings(&["packages/a0/src/*"]),
+        }];
+        let merged = facts
+            .with_rows(&[], &[draft(added.clone(), &[], Vec::new())])
+            .unwrap();
+        let roots: Vec<&str> = merged.scopes.iter().map(|s| s.root.as_str()).collect();
+        assert_eq!(roots, ["packages/a", "packages/a0", "packages/b"]);
+        assert_eq!(merged.scopes[1].aliases, added.aliases);
+        assert_eq!(
+            merged.scopes[0].dependency("@repo/b"),
+            Some(DependencyTarget::Workspace(ScopeId(2)))
+        );
+    }
+
+    /// Stands for: a new row with a kept row's identity wins over it.
+    #[test]
+    fn test_with_rows_same_identity_new_row_wins() {
+        let facts = node_pair();
+        let mut edited = scope(Ecosystem::Node, "packages/b", &["packages/b/package.json"]);
+        edited.entry_files = strings(&["packages/b/src/index.ts"]);
+        let merged = facts
+            .with_rows(
+                &[],
+                &[draft(edited, &[("@repo/b", NameRank::Primary)], Vec::new())],
+            )
+            .unwrap();
+        assert_eq!(merged.scopes.len(), 2);
+        assert_eq!(
+            merged.scopes[1].entry_files,
+            strings(&["packages/b/src/index.ts"])
+        );
+    }
+
+    /// Stands for: a name two rows carry after the edit leaves a by-name
+    /// dependency out, as the producer does for an ambiguous name.
+    #[test]
+    fn test_with_rows_name_now_ambiguous_dependency_left_out() {
+        let facts = node_pair();
+        let twin = draft(
+            scope(Ecosystem::Node, "packages/c", &["packages/c/package.json"]),
+            &[("@repo/b", NameRank::Primary)],
+            Vec::new(),
+        );
+        let merged = facts.with_rows(&[], &[twin]).unwrap();
+        assert_eq!(merged.scopes[0].dependency("@repo/b"), None);
+        assert_eq!(
+            merged.lookup_name(Ecosystem::Node, "@repo/b"),
+            NameLookup::Ambiguous { count: 2 }
+        );
+    }
+
+    /// Stands for: drafts survive the closure store's archive.
+    #[test]
+    fn test_scope_draft_rkyv_roundtrip_returns_equal_draft() {
+        let original = draft(
+            scope(Ecosystem::Go, "svc", &["svc/go.mod"]),
+            &[("example.com/svc", NameRank::Primary)],
+            vec![
+                require("example.com/lib", RequirementTarget::ByName),
+                require(
+                    "example.com/x",
+                    RequirementTarget::ByManifest("x/go.mod".into()),
+                ),
+                require("ext", RequirementTarget::External),
+            ],
+        );
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original).unwrap();
+        let back = rkyv::from_bytes::<ScopeDraft, rkyv::rancor::Error>(&bytes).unwrap();
+        assert_eq!(back, original);
     }
 }

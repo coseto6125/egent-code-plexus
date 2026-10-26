@@ -54,6 +54,33 @@
 //! keeps it unbound and says nothing, because every new declaration would
 //! otherwise carry a caveat that is almost never true.
 //!
+//! ## Resolution configs (R-A4d)
+//!
+//! A dirty resolution config (C3 `PathClass::is_resolution_config`: a
+//! tsconfig / jsconfig, `package.json`, `go.mod`, `pyproject.toml`, a
+//! `.csproj`, `composer.json`, ...) changes the config tables the overlay
+//! resolves with: the C2 scope rows and the repo-wide alias entries. The
+//! refresh that stores the closure parses the dirty configs once, with the
+//! index's per-ecosystem readers, into [`ConfigEdits`]: the archived rows
+//! a dirty config rewrites, their new rows, and the new repo-wide entries
+//! when a config they read changed. The view merges them over the archived
+//! tables ([`ConfigEdits::merged_facts`],
+//! `WorkspaceFacts::with_rows`); no query parses a config.
+//!
+//! | Change | Dependent clean files |
+//! |---|---|
+//! | an applied config | the files of each scope `WorkspaceFacts::invalidated_by` names, read in the archived table |
+//! | an applied config that can add or remove a scope root | every file of its ecosystem under its directory |
+//! | a new row's name | the files of each scope that declares a dependency of that name |
+//! | new repo-wide entries | every file of the ecosystem of a config they read |
+//!
+//! A config the parser rejects (malformed JSON, TOML or project XML), and
+//! a `Cargo.toml`, whose rows the Rust module tree makes and no config
+//! reader here does, keep their archived rows: [`StaleClosure::configs`]
+//! names them, and the kinds name every rebuilt kind. No resolution config
+//! changes which files the index walks, so no config edit is out of scope
+//! for that reason.
+//!
 //! ## The bound
 //!
 //! [`CLOSURE_LIMIT`] clean files. DIR's latency gate allows the first query
@@ -69,10 +96,18 @@
 //! `graph.nodes` (the view's build makes the same two). Then per changed
 //! declaration its in-degree, per changed name O(log N) plus its namesakes'
 //! in-degrees, per changed type its subtype tree, and one pass over the
-//! archived import rows when a name was added or removed. Nothing here runs
-//! per query: the refresh that wrote the dirty fragments computes it once.
+//! archived import rows when a name was added or removed. With dirty
+//! configs, one deserialization of the archived scope table, then per
+//! applied config its `invalidated_by` (O(S)), and one pass over
+//! `graph.files` with a scope lookup per file (O(depth · log S)). Nothing
+//! here runs per query: the refresh that wrote the dirty fragments computes
+//! it once.
 
 use super::view::{base_function_meta, OverlayFileInput, OverlaySymbol};
+use crate::analyzer::path_aliases::{import_ecosystem, PathAliases};
+use crate::contracts::workspace::{
+    Ecosystem, ScopeAlias, ScopeDraft, ScopeId, ScopeMatch, WorkspaceFacts,
+};
 use crate::file_category::Language;
 use crate::graph::{ArchivedZeroCopyGraph, FunctionMeta, NodeKind, RelType, SYNTHETIC_FILE_IDX};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -121,6 +156,10 @@ pub struct StaleClosure {
     /// The removed names whose last namesake a clean ambiguous call may now
     /// bind to (module doc), sorted, unique.
     pub names: Vec<String>,
+    /// The dirty resolution configs whose archived rows the view keeps
+    /// ([`ConfigEdits::kept`]), sorted, unique: the files they scope keep
+    /// the indexed reading.
+    pub configs: Vec<String>,
 }
 
 impl StaleClosure {
@@ -151,6 +190,88 @@ fn rebuilt_kind_names() -> Vec<String> {
     kinds
 }
 
+/// The dirty resolution configs of one dirty state, parsed once by the
+/// refresh that stores the closure (module doc, "Resolution configs"). All
+/// paths are repo-relative, `/`-separated.
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
+pub struct ConfigEdits {
+    /// The dirty configs whose new reading the view applies, a deleted one
+    /// included. Sorted, unique.
+    pub applied: Vec<String>,
+    /// The dirty configs whose archived rows the view keeps: rejected by
+    /// the parser, out of scope (a `Cargo.toml`), or sharing an ecosystem
+    /// or the repo-wide entries with one of those. Sorted, unique.
+    pub kept: Vec<String>,
+    /// The manifests of the archived rows the edit rewrites or removes.
+    /// Sorted, unique.
+    pub replaced: Vec<String>,
+    /// The rows that take their place, and the rows of new configs.
+    pub rows: Vec<ScopeDraft>,
+    /// The repo-wide alias entries after the edit, in declaration order;
+    /// `None` keeps the archived entries.
+    pub repo_wide: Option<Vec<ScopeAlias>>,
+}
+
+impl ConfigEdits {
+    /// No dirty config.
+    pub fn is_empty(&self) -> bool {
+        self.applied.is_empty() && self.kept.is_empty()
+    }
+
+    /// The archived scope table of `graph` with these rows merged; `None`
+    /// when no row changes, and when the merge breaks a table invariant
+    /// (the refresh checked it, so the archived table then stands, as
+    /// [`Self::kept`] says). Cost: `WorkspaceFacts::with_rows`.
+    pub fn merged_facts(&self, graph: &ArchivedZeroCopyGraph) -> Option<WorkspaceFacts> {
+        if self.replaced.is_empty() && self.rows.is_empty() {
+            return None;
+        }
+        graph
+            .workspace_facts()
+            .with_rows(&self.replaced, &self.rows)
+            .ok()
+    }
+
+    /// The repo-wide alias entries after the edit; `None` keeps the
+    /// archived ones (`graph.path_aliases()`).
+    pub fn repo_wide_aliases(&self) -> Option<PathAliases> {
+        let entries = self.repo_wide.as_ref()?;
+        let mut aliases = PathAliases::new();
+        for entry in entries {
+            aliases.add(entry.pattern.clone(), entry.replacements.clone());
+        }
+        Some(aliases)
+    }
+}
+
+/// The repo-root config names whose content the index reads into the
+/// repo-wide alias entries (`config_parser::parse_configs`).
+const REPO_WIDE_CONFIGS: [&str; 11] = [
+    "tsconfig.json",
+    "package.json",
+    "go.mod",
+    "Cargo.toml",
+    "pyproject.toml",
+    "jsconfig.json",
+    "jest.config.json",
+    "jest.config.js",
+    "jest.config.ts",
+    "webpack.config.js",
+    "webpack.config.ts",
+];
+
+/// Whether the index reads `path` into the repo-wide alias entries: a
+/// [`REPO_WIDE_CONFIGS`] name at the repo root, or any `.csproj`, whose
+/// `ProjectReference`s each add an entry.
+pub fn feeds_repo_wide(path: &str) -> bool {
+    REPO_WIDE_CONFIGS.contains(&path)
+        || path
+            .rsplit_once('.')
+            .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("csproj"))
+}
+
 /// The clean files to re-resolve and what stays stale.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Closure {
@@ -167,7 +288,19 @@ pub fn invalidation_closure(
     files: &[OverlayFileInput],
     removed: &[String],
 ) -> Closure {
-    if files.is_empty() && removed.is_empty() {
+    invalidation_closure_with_configs(graph, files, removed, &ConfigEdits::default())
+}
+
+/// [`invalidation_closure`] that also re-resolves the clean files the dirty
+/// resolution configs of `configs` rescope (module doc, "Resolution
+/// configs"), under the same bound.
+pub fn invalidation_closure_with_configs(
+    graph: &ArchivedZeroCopyGraph,
+    files: &[OverlayFileInput],
+    removed: &[String],
+    configs: &ConfigEdits,
+) -> Closure {
+    if files.is_empty() && removed.is_empty() && configs.is_empty() {
         return Closure::default();
     }
     let changes = Changes::of(graph, files, removed);
@@ -191,6 +324,11 @@ pub fn invalidation_closure(
     }
     deps.subtypes_of(&changes.types);
     deps.importers_of(&changes.names);
+    deps.rescoped_by(configs);
+    if !configs.kept.is_empty() {
+        stale.configs = configs.kept.clone();
+        stale.add_kinds(REBUILT_RELS.iter().map(|r| r.as_str()));
+    }
 
     for (name, kind) in &changes.removed {
         if leaves_one_namesake(graph, files, &changes.dirty_files, name) {
@@ -594,6 +732,79 @@ impl Dependents<'_> {
             }
         }
     }
+
+    /// Each clean file the applied configs of `configs` rescope (module
+    /// doc, "Resolution configs"), read in the archived scope table.
+    fn rescoped_by(&mut self, configs: &ConfigEdits) {
+        if configs.applied.is_empty() {
+            return;
+        }
+        let graph = self.graph;
+        let facts = graph.workspace_facts();
+        let mut scopes: FxHashSet<ScopeId> = FxHashSet::default();
+        let mut subtrees: Vec<(Ecosystem, String)> = Vec::new();
+        for path in &configs.applied {
+            let invalidation = facts.invalidated_by(path);
+            scopes.extend(invalidation.scopes);
+            subtrees.extend(
+                invalidation
+                    .rescoped
+                    .map(|subtree| (subtree.ecosystem, subtree.dir)),
+            );
+            if configs.repo_wide.is_some() && feeds_repo_wide(path) {
+                if let Some((ecosystem, _)) = Ecosystem::classify_config(file_name(path)) {
+                    subtrees.push((ecosystem, String::new()));
+                }
+            }
+        }
+        for draft in &configs.rows {
+            for (name, _) in &draft.names {
+                scopes.extend(facts.dependents_of_name(draft.scope.ecosystem, name));
+            }
+        }
+        if scopes.is_empty() && subtrees.is_empty() {
+            return;
+        }
+        let pool = &graph.string_pool;
+        for (i, file) in graph.files.iter().enumerate() {
+            let i = i as u32;
+            if self.dirty.contains(&i) || self.files.contains(&i) {
+                continue;
+            }
+            let path = file.path.resolve(pool);
+            let Some(ecosystem) = import_ecosystem(Language::from_path(path)) else {
+                continue;
+            };
+            let dir = parent_dir(path);
+            let rescoped = subtrees
+                .iter()
+                .any(|(of, root)| *of == ecosystem && is_within(dir, root))
+                || match facts.scope_of(path, ecosystem) {
+                    ScopeMatch::Unique(id) => scopes.contains(&id),
+                    ScopeMatch::Ambiguous(ids) => ids.iter().any(|id| scopes.contains(id)),
+                    ScopeMatch::Unscoped => false,
+                };
+            if rescoped {
+                self.files.insert(i);
+            }
+        }
+    }
+}
+
+fn parent_dir(path: &str) -> &str {
+    path.rsplit_once('/').map_or("", |(dir, _)| dir)
+}
+
+fn file_name(path: &str) -> &str {
+    path.rsplit_once('/').map_or(path, |(_, name)| name)
+}
+
+/// `dir` is `root` or below it, by whole segments; the repo root is "".
+fn is_within(dir: &str, root: &str) -> bool {
+    root.is_empty()
+        || dir
+            .strip_prefix(root)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
 /// The base in-edges of `node`.
@@ -883,6 +1094,205 @@ mod tests {
         let closure = invalidation_closure(graph(&bytes), &[], &["src/a.js".to_string()]);
         assert_eq!(closure.stale.names, vec!["dup".to_string()]);
         assert!(closure.stale.kinds.iter().any(|k| k == "Calls"));
+    }
+
+    fn node_scope(root: &str, manifest: &str) -> crate::contracts::workspace::Scope {
+        use crate::contracts::workspace::{ConfigPresence, ConfigRead, Membership, Scope};
+        Scope {
+            ecosystem: Ecosystem::Node,
+            root: root.to_string(),
+            config_files: vec![ConfigRead {
+                path: manifest.to_string(),
+                presence: ConfigPresence::Read,
+            }],
+            membership: Membership::Subtree,
+            entry_files: Vec::new(),
+            aliases: Vec::new(),
+            search_roots: Vec::new(),
+            dependencies: Vec::new(),
+        }
+    }
+
+    /// `files` (each with one function) over a graph that stores `facts`.
+    fn scoped_graph(files: &[&str], facts: WorkspaceFacts) -> Vec<u8> {
+        let mut fx = GraphFixture::new();
+        for (i, path) in files.iter().enumerate() {
+            fx.func(path, &format!("f{i}"));
+        }
+        let mut graph = fx.build();
+        graph.workspace = facts;
+        rkyv::to_bytes::<RkyvError>(&graph).unwrap().to_vec()
+    }
+
+    fn applied(paths: &[&str]) -> ConfigEdits {
+        ConfigEdits {
+            applied: paths.iter().map(|p| p.to_string()).collect(),
+            ..ConfigEdits::default()
+        }
+    }
+
+    /// Root Node scope (`tsconfig.json`) and `packages/b` (its
+    /// `package.json`); TS files in both and a Python file.
+    fn two_node_scopes() -> Vec<u8> {
+        let facts = WorkspaceFacts::new(
+            vec![
+                node_scope("", "tsconfig.json"),
+                node_scope("packages/b", "packages/b/package.json"),
+            ],
+            Vec::new(),
+        )
+        .unwrap();
+        scoped_graph(
+            &["src/main.ts", "packages/b/src/x.ts", "tools/gen.py"],
+            facts,
+        )
+    }
+
+    /// Stands for: a dirty nested config re-resolves the clean files of its
+    /// own scope, and no file of the enclosing scope or another language.
+    #[test]
+    fn test_invalidation_closure_nested_config_names_own_scope_files() {
+        let bytes = two_node_scopes();
+        let closure = invalidation_closure_with_configs(
+            graph(&bytes),
+            &[],
+            &[],
+            &applied(&["packages/b/package.json"]),
+        );
+        assert_eq!(closure.paths, vec!["packages/b/src/x.ts".to_string()]);
+        assert!(closure.stale.is_empty(), "{:?}", closure.stale);
+    }
+
+    /// Stands for: a root config re-resolves every file of its ecosystem,
+    /// nested scopes included, and no Python file.
+    #[test]
+    fn test_invalidation_closure_root_config_names_every_node_file() {
+        let bytes = two_node_scopes();
+        let closure = invalidation_closure_with_configs(
+            graph(&bytes),
+            &[],
+            &[],
+            &applied(&["tsconfig.json"]),
+        );
+        assert_eq!(
+            closure.paths,
+            vec!["packages/b/src/x.ts".to_string(), "src/main.ts".to_string()]
+        );
+    }
+
+    /// Stands for: a kept (rejected) config re-resolves nothing and names
+    /// itself and every rebuilt kind.
+    #[test]
+    fn test_invalidation_closure_kept_config_names_config_and_kinds() {
+        let bytes = two_node_scopes();
+        let configs = ConfigEdits {
+            kept: vec!["tsconfig.json".to_string()],
+            ..ConfigEdits::default()
+        };
+        let closure = invalidation_closure_with_configs(graph(&bytes), &[], &[], &configs);
+        assert!(closure.paths.is_empty(), "{:?}", closure.paths);
+        assert_eq!(closure.stale.configs, vec!["tsconfig.json".to_string()]);
+        assert!(closure.stale.kinds.iter().any(|k| k == "Imports"));
+        assert!(!closure.stale.not_computed);
+    }
+
+    /// Stands for: a new row's name re-resolves the clean files of a scope
+    /// that declares a dependency of that name (an external one may now be
+    /// in the workspace).
+    #[test]
+    fn test_invalidation_closure_new_row_name_names_dependents() {
+        use crate::contracts::workspace::{Dependency, DependencyTarget};
+        let mut user = node_scope("packages/a", "packages/a/package.json");
+        user.dependencies = vec![Dependency {
+            name: "@repo/new".to_string(),
+            target: DependencyTarget::External,
+        }];
+        let facts = WorkspaceFacts::new(vec![user], Vec::new()).unwrap();
+        let bytes = scoped_graph(&["packages/a/main.ts", "packages/n/index.ts"], facts);
+        let configs = ConfigEdits {
+            applied: vec!["packages/n/package.json".to_string()],
+            rows: vec![ScopeDraft {
+                scope: node_scope("packages/n", "packages/n/package.json"),
+                names: vec![(
+                    "@repo/new".to_string(),
+                    crate::contracts::workspace::NameRank::Primary,
+                )],
+                requires: Vec::new(),
+            }],
+            ..ConfigEdits::default()
+        };
+        let closure = invalidation_closure_with_configs(graph(&bytes), &[], &[], &configs);
+        assert_eq!(
+            closure.paths,
+            vec![
+                "packages/a/main.ts".to_string(),
+                "packages/n/index.ts".to_string()
+            ]
+        );
+    }
+
+    /// Stands for: a config that rescopes more clean files than the bound
+    /// re-resolves none and names every rebuilt kind.
+    #[test]
+    fn test_invalidation_closure_config_past_bound_is_unbounded() {
+        let facts = WorkspaceFacts::new(vec![node_scope("", "tsconfig.json")], Vec::new()).unwrap();
+        let paths: Vec<String> = (0..=CLOSURE_LIMIT)
+            .map(|i| format!("src/m{i}.ts"))
+            .collect();
+        let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
+        let bytes = scoped_graph(&paths, facts);
+        let closure = invalidation_closure_with_configs(
+            graph(&bytes),
+            &[],
+            &[],
+            &applied(&["tsconfig.json"]),
+        );
+        assert!(closure.paths.is_empty());
+        assert_eq!(closure.stale.unbounded, Some(CLOSURE_LIMIT as u32 + 1));
+    }
+
+    /// Stands for: the repo-wide entries a config feeds are its root-level
+    /// names and every project file, whatever its case.
+    #[test]
+    fn test_feeds_repo_wide_root_names_and_projects_only() {
+        assert!(feeds_repo_wide("tsconfig.json"));
+        assert!(feeds_repo_wide("go.mod"));
+        assert!(feeds_repo_wide("src/App/App.csproj"));
+        assert!(feeds_repo_wide("Legacy.CSPROJ"));
+        assert!(!feeds_repo_wide("packages/a/tsconfig.json"));
+        assert!(!feeds_repo_wide("composer.json"));
+        assert!(!feeds_repo_wide(""));
+        assert!(!feeds_repo_wide("   "));
+    }
+
+    /// Stands for: the stored edits survive the closure store's archive,
+    /// and an empty edit set changes nothing.
+    #[test]
+    fn test_config_edits_rkyv_roundtrip_and_empty_tables_none() {
+        let edits = ConfigEdits {
+            applied: vec!["tsconfig.json".to_string()],
+            kept: Vec::new(),
+            replaced: vec!["tsconfig.json".to_string()],
+            rows: vec![ScopeDraft {
+                scope: node_scope("", "tsconfig.json"),
+                names: Vec::new(),
+                requires: Vec::new(),
+            }],
+            repo_wide: Some(vec![ScopeAlias {
+                pattern: "@/*".to_string(),
+                replacements: vec!["src/b/*".to_string()],
+            }]),
+        };
+        let bytes = rkyv::to_bytes::<RkyvError>(&edits).unwrap();
+        let back = rkyv::from_bytes::<ConfigEdits, RkyvError>(&bytes).unwrap();
+        assert_eq!(back, edits);
+        let aliases = edits.repo_wide_aliases().unwrap();
+        let entries: Vec<(&str, &[String])> = aliases.entries().collect();
+        assert_eq!(entries, vec![("@/*", &["src/b/*".to_string()][..])]);
+        let bytes = two_node_scopes();
+        assert_eq!(ConfigEdits::default().merged_facts(graph(&bytes)), None);
+        assert!(ConfigEdits::default().repo_wide_aliases().is_none());
+        assert!(ConfigEdits::default().is_empty());
     }
 
     #[test]

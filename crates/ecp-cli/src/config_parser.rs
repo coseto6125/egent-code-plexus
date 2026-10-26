@@ -35,11 +35,83 @@ pub struct RepoConfigs {
 /// `.csproj` files come from this function's own scan, which the C# rows
 /// and the aliases share.
 pub fn parse_repo_configs(repo_path: &Path, config_paths: &[String]) -> RepoConfigs {
-    let mut aliases = PathAliases::new();
+    let mut aliases = root_aliases(repo_path);
     // The walk reads `.csproj` files down to this entry depth, so every
     // directory one level less deep was read whole.
     let mut csharp_projects =
         CsharpProjects::new(usize::from(resolve_csproj_max_depth()).saturating_sub(1));
+
+    // 11. C# toolchain: *.csproj files
+    let csproj_metas = parse_csproj_files(repo_path);
+    for meta in &csproj_metas {
+        let project_dir = Path::new(&meta.file_path)
+            .parent()
+            .map(|dir| dir.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        csharp_projects.add(&project_dir, meta.default_compile_items);
+    }
+    add_project_reference_aliases(&csproj_metas, &mut aliases);
+
+    let workspace = workspace_scopes(repo_path, config_paths, &csproj_metas);
+    RepoConfigs {
+        aliases,
+        csharp_projects,
+        workspace,
+    }
+}
+
+/// The repo-wide alias entries of the dirty state: the root configs'
+/// entries, then the `ProjectReference` entries of each project in
+/// `csproj_paths` (repo-relative), in that order, as
+/// [`parse_repo_configs`] adds them. The caller names the projects, so
+/// nothing is walked; the overlay of a dirty config passes the projects the
+/// index stored, with the dirty ones added or removed
+/// (`closure_store`).
+pub fn repo_wide_aliases(repo_path: &Path, csproj_paths: &[String]) -> PathAliases {
+    let mut aliases = root_aliases(repo_path);
+    let metas: Vec<CsprojMeta> = csproj_paths
+        .iter()
+        .filter_map(|path| parse_single_csproj(&repo_path.join(path), repo_path))
+        .collect();
+    add_project_reference_aliases(&metas, &mut aliases);
+    aliases
+}
+
+/// Each `ProjectReference` of `metas` as a path alias, so the resolver can
+/// follow cross-project symbol references within the same solution.
+fn add_project_reference_aliases(metas: &[CsprojMeta], aliases: &mut PathAliases) {
+    for meta in metas {
+        for proj_ref in &meta.project_references {
+            // proj_ref is a relative path like "../OtherLib/OtherLib.csproj"
+            // Strip the .csproj suffix and use the directory as the alias target.
+            let ref_path = Path::new(proj_ref);
+            let dir = ref_path
+                .parent()
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            if !dir.is_empty() {
+                // Reject ..-traversal: a malicious .csproj could otherwise
+                // register an alias pointing outside the repo root, letting
+                // the resolver follow it to read files outside the project.
+                if dir.split('/').any(|seg| seg == "..") {
+                    continue;
+                }
+                let stem = ref_path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if !stem.is_empty() {
+                    aliases.add(&stem, vec![format!("{}/*", dir)]);
+                }
+            }
+        }
+    }
+}
+
+/// The repo-wide alias entries of the repo-root configs, steps 1 to 9 of
+/// [`parse_repo_configs`]. Reads only files at the repo root.
+fn root_aliases(repo_path: &Path) -> PathAliases {
+    let mut aliases = PathAliases::new();
 
     // 1. tsconfig.json
     if let Ok(content) = std::fs::read_to_string(repo_path.join("tsconfig.json")) {
@@ -174,49 +246,7 @@ pub fn parse_repo_configs(repo_path: &Path, config_paths: &[String]) -> RepoConf
             break;
         }
     }
-
-    // 11. C# toolchain: *.csproj files
-    let csproj_metas = parse_csproj_files(repo_path);
-    for meta in &csproj_metas {
-        let project_dir = Path::new(&meta.file_path)
-            .parent()
-            .map(|dir| dir.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_default();
-        csharp_projects.add(&project_dir, meta.default_compile_items);
-        // Register each ProjectReference as a path alias so the resolver can
-        // follow cross-project symbol references within the same solution.
-        for proj_ref in &meta.project_references {
-            // proj_ref is a relative path like "../OtherLib/OtherLib.csproj"
-            // Strip the .csproj suffix and use the directory as the alias target.
-            let ref_path = Path::new(proj_ref);
-            let dir = ref_path
-                .parent()
-                .map(|p| p.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_default();
-            if !dir.is_empty() {
-                // Reject ..-traversal: a malicious .csproj could otherwise
-                // register an alias pointing outside the repo root, letting
-                // the resolver follow it to read files outside the project.
-                if dir.split('/').any(|seg| seg == "..") {
-                    continue;
-                }
-                let stem = ref_path
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                if !stem.is_empty() {
-                    aliases.add(&stem, vec![format!("{}/*", dir)]);
-                }
-            }
-        }
-    }
-
-    let workspace = workspace_scopes(repo_path, config_paths, &csproj_metas);
-    RepoConfigs {
-        aliases,
-        csharp_projects,
-        workspace,
-    }
+    aliases
 }
 
 fn read_toml(path: &Path) -> Option<toml::Table> {
@@ -276,6 +306,58 @@ pub fn find_workspace_configs(repo_path: &Path) -> Vec<String> {
 /// breaks one yields no rows, so a consumer never reads a half-built
 /// table.
 fn workspace_scopes(repo: &Path, config_paths: &[String], csproj: &[CsprojMeta]) -> WorkspaceFacts {
+    WorkspaceFacts::from_drafts(scope_drafts(repo, config_paths, csproj)).unwrap_or_else(|err| {
+        tracing::warn!("workspace scopes: the config rows break {err:?}; no rows stored");
+        WorkspaceFacts::default()
+    })
+}
+
+/// The scope rows the configs `config_paths` (repo-relative) and the
+/// projects `csproj` make, as [`workspace_scopes`] stores them, for a caller
+/// that merges them into a stored table: the overlay of a dirty config
+/// (`closure_store`). Each `.csproj` path is parsed alone; no scan runs.
+/// A node row reads only the configs listed here, so the caller passes
+/// every config the rows it wants read (`Scope::config_files`).
+pub fn parse_config_rows(repo_path: &Path, config_paths: &[String]) -> Vec<ScopeDraft> {
+    let csproj: Vec<CsprojMeta> = config_paths
+        .iter()
+        .filter(|path| {
+            matches!(
+                Ecosystem::classify_config(file_name(path)),
+                Some((Ecosystem::DotNet, _))
+            )
+        })
+        .filter_map(|path| parse_single_csproj(&repo_path.join(path), repo_path))
+        .collect();
+    scope_drafts(repo_path, config_paths, &csproj)
+}
+
+/// Whether the parser rejects the config at the repo-relative `path`: a
+/// JSON config that is not JSON with comments, a TOML config that is not
+/// TOML, or a project file with no `<Project>` element. A config a line or
+/// pattern reader takes (`go.mod`, `go.work`, a jest or webpack script,
+/// `Package.swift`) is never rejected, and neither is an unreadable one:
+/// the caller treats that as deleted.
+pub fn config_rejected(repo_path: &Path, path: &str) -> bool {
+    let Ok(text) = std::fs::read_to_string(repo_path.join(path)) else {
+        return false;
+    };
+    let name = file_name(path);
+    if name.ends_with(".json") {
+        parse_jsonc(&text).is_none()
+    } else if name.ends_with(".toml") {
+        text.parse::<toml::Table>().is_err()
+    } else if name.to_ascii_lowercase().ends_with(".csproj") {
+        let xml = strip_xml_comments(&text);
+        !(xml.contains("<Project") && (xml.contains("</Project>") || xml.contains("/>")))
+    } else {
+        false
+    }
+}
+
+/// The scope drafts of [`workspace_scopes`], each row that breaks a table
+/// invariant on its own dropped.
+fn scope_drafts(repo: &Path, config_paths: &[String], csproj: &[CsprojMeta]) -> Vec<ScopeDraft> {
     let mut paths: Vec<&str> = config_paths
         .iter()
         .map(String::as_str)
@@ -306,10 +388,7 @@ fn workspace_scopes(repo: &Path, config_paths: &[String], csproj: &[CsprojMeta])
         }
         alone.is_ok()
     });
-    WorkspaceFacts::from_drafts(drafts).unwrap_or_else(|err| {
-        tracing::warn!("workspace scopes: the config rows break {err:?}; no rows stored");
-        WorkspaceFacts::default()
-    })
+    drafts
 }
 
 struct ConfigReader<'a> {
@@ -2339,5 +2418,121 @@ module.exports = {
 
         let aliases = parse_configs(dir.path());
         assert!(expansions(&aliases, "mycrate").contains(&"src/lib.rs".to_string()));
+    }
+
+    // ── R-A4d: the rows of a given config list ────────────────────────────
+
+    fn tree(files: &[(&str, &str)]) -> TempDir {
+        let dir = TempDir::new().unwrap();
+        for (path, text) in files {
+            let full = dir.path().join(path);
+            fs::create_dir_all(full.parent().unwrap()).unwrap();
+            fs::write(full, text).unwrap();
+        }
+        dir
+    }
+
+    fn paths(items: &[&str]) -> Vec<String> {
+        items.iter().map(|p| p.to_string()).collect()
+    }
+
+    /// Stands for: the rows of a config list equal the rows the index
+    /// stores for the same configs, so the overlay's merge and a fresh
+    /// build agree on every row it rewrites.
+    #[test]
+    fn test_parse_config_rows_equal_index_rows_for_same_configs() {
+        let dir = tree(&[
+            (
+                "tsconfig.json",
+                r#"{ "compilerOptions": { "paths": { "@/*": ["src/b/*"] } } }"#,
+            ),
+            ("go.mod", "module example.com/m\n\ngo 1.21\n"),
+            ("svc/pyproject.toml", "[project]\nname = \"svc-a\"\n"),
+            (
+                "php/composer.json",
+                r#"{ "name": "acme/a", "autoload": { "psr-4": { "App\\": "lib/" } } }"#,
+            ),
+            ("App/App.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />\n"),
+        ]);
+        let configs = paths(&[
+            "App/App.csproj",
+            "go.mod",
+            "php/composer.json",
+            "svc/pyproject.toml",
+            "tsconfig.json",
+        ]);
+        let rows = WorkspaceFacts::from_drafts(parse_config_rows(dir.path(), &configs)).unwrap();
+        let index = parse_repo_configs(dir.path(), &configs).workspace;
+        assert_eq!(rows, index);
+        let node = rows
+            .scopes
+            .iter()
+            .find(|s| s.ecosystem == Ecosystem::Node)
+            .unwrap();
+        assert_eq!(node.aliases[0].replacements, vec!["src/b/*".to_string()]);
+    }
+
+    /// Stands for: an empty list, and a list whose only config is absent
+    /// from disk, make no row.
+    #[test]
+    fn test_parse_config_rows_empty_or_absent_returns_no_row() {
+        let dir = tree(&[]);
+        assert!(parse_config_rows(dir.path(), &[]).is_empty());
+        assert!(parse_config_rows(dir.path(), &paths(&["go.mod", "A.csproj"])).is_empty());
+    }
+
+    /// Stands for: the parser rejects malformed JSON, TOML and project XML,
+    /// and an empty or whitespace-only JSON config; it takes JSON with
+    /// comments, an empty TOML file, and a config a line reader reads.
+    #[test]
+    fn test_config_rejected_malformed_json_toml_xml_true() {
+        let dir = tree(&[
+            ("tsconfig.json", "{ \"compilerOptions\": "),
+            ("blank/tsconfig.json", "   \n"),
+            (
+                "ok/tsconfig.json",
+                "{ // comment\n \"compilerOptions\": {}, }",
+            ),
+            ("pyproject.toml", "[project\nname = "),
+            ("empty/pyproject.toml", ""),
+            ("Bad.csproj", "<Proj"),
+            ("Good.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />"),
+            ("go.mod", "}}} not go"),
+        ]);
+        assert!(config_rejected(dir.path(), "tsconfig.json"));
+        assert!(config_rejected(dir.path(), "blank/tsconfig.json"));
+        assert!(!config_rejected(dir.path(), "ok/tsconfig.json"));
+        assert!(config_rejected(dir.path(), "pyproject.toml"));
+        assert!(!config_rejected(dir.path(), "empty/pyproject.toml"));
+        assert!(config_rejected(dir.path(), "Bad.csproj"));
+        assert!(!config_rejected(dir.path(), "Good.csproj"));
+        assert!(!config_rejected(dir.path(), "go.mod"));
+        assert!(!config_rejected(dir.path(), "absent/tsconfig.json"));
+    }
+
+    /// Stands for: the repo-wide entries of a named project list equal the
+    /// index's, whose scan finds the same projects.
+    #[test]
+    fn test_repo_wide_aliases_named_projects_equal_index_entries() {
+        let dir = tree(&[
+            (
+                "tsconfig.json",
+                r#"{ "compilerOptions": { "paths": { "@/*": ["src/*"] } } }"#,
+            ),
+            (
+                "App.csproj",
+                "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <ItemGroup>\n    <ProjectReference Include=\"Shared/Shared.csproj\" />\n  </ItemGroup>\n</Project>\n",
+            ),
+            ("Shared/Shared.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />\n"),
+        ]);
+        let named = repo_wide_aliases(dir.path(), &paths(&["App.csproj", "Shared/Shared.csproj"]));
+        let index = parse_configs(dir.path());
+        let entries = |a: &PathAliases| -> Vec<(String, Vec<String>)> {
+            a.entries()
+                .map(|(p, r)| (p.to_string(), r.to_vec()))
+                .collect()
+        };
+        assert_eq!(entries(&named), entries(&index));
+        assert!(entries(&named).iter().any(|(p, _)| p == "Shared"));
     }
 }
