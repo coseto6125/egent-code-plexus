@@ -1730,7 +1730,7 @@ fn ensure_session_meta(session_dir: &Path, worktree: &Path) -> io::Result<()> {
     // A peer's recursive watch adds a new directory only after its create
     // event, so a manifest renamed into a just-made `l1/` raises no event.
     // Making `l1/` with the session puts the watch in place first.
-    fs::create_dir_all(layout::l1_dir(session_dir))?;
+    fs::create_dir_all(ecp_core::session::layout::l1_dir(session_dir))?;
     let head_sha = git_head_sha(worktree)?;
     let sid = session_dir
         .file_name()
@@ -1892,8 +1892,8 @@ mod fingerprint_drift_tests {
 
         ensure_session_meta(&session_dir, &worktree).unwrap();
 
-        assert!(layout::l1_dir(&session_dir).is_dir());
-        assert!(!layout::dirty_events_path(&session_dir).exists());
+        assert!(ecp_core::session::layout::l1_dir(&session_dir).is_dir());
+        assert!(!ecp_core::session::layout::dirty_events_path(&session_dir).exists());
         assert!(session_dir.join("session_meta.json").is_file());
     }
 

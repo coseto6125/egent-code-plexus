@@ -64,7 +64,6 @@ use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
-use crate::resolution::heuristics::ResolutionTier;
 use crate::resolution::index::{
     CsharpExtensionDecls, FileMeta, GlobalPick, Language, ResolveTarget, SymbolTable,
 };
@@ -2663,6 +2662,7 @@ impl<'a> Resolver<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resolution::heuristics::ResolutionTier;
     use ecp_core::analyzer::rust_paths::rust_path_prefix_agrees_with_import;
     use std::path::PathBuf;
 
@@ -2969,10 +2969,12 @@ mod tests {
         //   1. Resolve `A` as Type via Tier 1/2/3 → finds A's file (a.rs)
         //   2. Lookup `new` in a.rs → finds it
         //   3. Emit edge at QualifierScoped confidence (0.85)
-        let st = st_with(&[
-            ("a.rs", "A", NodeKind::Class),
-            ("a.rs", "new", NodeKind::Method),
-        ]);
+        // Stands for `impl A { fn new() }`: the build registers `new` owned
+        // by `A`, and a Rust `::` path binds only a method its qualifier
+        // owns (`ladder::rust_path_may_bind`).
+        let mut st = SymbolTable::new();
+        st.register_node("a.rs", "A", 0, NodeKind::Class);
+        st.register_node_owned("a.rs", "new", 1, NodeKind::Method, "A");
         let r = Resolver::new(&st);
         let out = r.resolve_symbol(
             &PathBuf::from("a.rs"),
@@ -2992,10 +2994,12 @@ mod tests {
         // via Tier 3 (kind-filtered, unique Type), member then found in A's
         // file. This is the dominant Rust pattern (`A::new()` from another
         // module).
-        let st = st_with(&[
-            ("a.rs", "A", NodeKind::Class),
-            ("a.rs", "new", NodeKind::Method),
-        ]);
+        // Stands for `impl A { fn new() }`: the build registers `new` owned
+        // by `A`, and a Rust `::` path binds only a method its qualifier
+        // owns (`ladder::rust_path_may_bind`).
+        let mut st = SymbolTable::new();
+        st.register_node("a.rs", "A", 0, NodeKind::Class);
+        st.register_node_owned("a.rs", "new", 1, NodeKind::Method, "A");
         let r = Resolver::new(&st);
         let out = r.resolve_symbol(
             &PathBuf::from("caller.rs"),
