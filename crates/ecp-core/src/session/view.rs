@@ -145,11 +145,12 @@
 //!   edit, as `graph.bin` does not say which file declared a base. A base
 //!   Rust method of an `impl` the parser emits no `Impl` node for (`impl T
 //!   for &mut X`) reads as free in the same-file pick.
-//! - Rust paths resolve by conventional file layout and module declarations;
-//!   a workspace crate-name head resolves through the crate table graph.bin
-//!   stores. `pub use` chains, `#[path]` and inline modules stay unresolved
-//!   when that layout cannot establish the target, and a crate rooted at a
-//!   custom `[lib] path` gets no `crate::` / `self::` / `super::` chain.
+//! - Rust module paths resolve through the module-tree rule the index runs
+//!   ([`crate::analyzer::ladder::module_tree_member`]), with crate roots from
+//!   the crate table graph.bin stores; a tree with no `Cargo.toml` has no
+//!   module tree. `#[path]` and inline modules stay unresolved, and a `pub
+//!   use` chain the index follows through an import's visibility binds only
+//!   in the index: graph.bin does not store that visibility.
 
 use super::incremental::{self, ReplayInputs};
 use crate::analyzer::containment::{ENUM_VARIANT_DEFINES_REASON, SCOPE_DEFINES_REASON};
@@ -411,8 +412,6 @@ pub struct ViewFunctionMeta {
 
 /// Tier confidences mirroring index-time Pass-2 resolution.
 const CONF_IMPORT_SCOPED: f32 = Tier::ImportScoped.confidence();
-/// The index's Tier 3.5 (`try_module_tree_resolve`).
-const CONF_MODULE_TREE: f32 = Tier::ModuleTree.confidence();
 
 #[derive(Debug, Default, PartialEq)]
 pub struct OverlayView {
