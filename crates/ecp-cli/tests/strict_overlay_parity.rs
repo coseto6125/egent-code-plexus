@@ -1519,9 +1519,10 @@ fn test_invalidation_closure_py_module_reexport_repointed_names_importer_of_that
 }
 
 /// Stands for: a dropped Python star re-export has no target the base
-/// recorded, so the closure says it is incomplete instead of guessing.
+/// recorded, so the closure names every rebuilt kind as stale instead of
+/// guessing, and does not ask the store to retry (a retry resolves nothing).
 #[test]
-fn test_invalidation_closure_py_star_reexport_dropped_marks_not_computed() {
+fn test_invalidation_closure_py_star_reexport_dropped_names_rebuilt_kinds() {
     let observed = strict_parity::run(&Scenario {
         name: "closure_py_star_reexport_dropped",
         owner: LANE_F_CLEAN_CALLERS,
@@ -1541,8 +1542,103 @@ fn test_invalidation_closure_py_star_reexport_dropped_marks_not_computed() {
         .map(|input| input.rel_path.as_str())
         .collect();
     assert!(
-        observed.stale.not_computed,
+        !observed.stale.not_computed,
         "{:?} {served:?}",
         observed.stale
     );
+    assert!(
+        observed.stale.kinds.iter().any(|kind| kind == "Calls"),
+        "{:?}",
+        observed.stale
+    );
+}
+
+/// A dirty `__init__.py` re-points `from .a import compute` to `.b`. The
+/// clean caller reaches it through the module object (`import pkg`;
+/// `pkg.compute()`), whose import row names `*`, not `compute`.
+#[test]
+fn test_check_closure_py_module_object_importer_repointed_matches_baseline() {
+    check(&Scenario {
+        name: "closure_py_module_object_importer_repointed",
+        owner: LANE_F_CLEAN_CALLERS,
+        files: &[
+            ("pkg/a.py", "def compute():\n    return 1\n"),
+            ("pkg/b.py", "def compute():\n    return 2\n"),
+            ("pkg/__init__.py", "from .a import compute\n"),
+            (
+                "main.py",
+                "import pkg\n\n\ndef run():\n    return pkg.compute()\n",
+            ),
+        ],
+        edits: &[Edit::Write("pkg/__init__.py", "from .b import compute\n")],
+    });
+}
+
+/// A dirty plain module re-points `from .core import compute` to `.other`.
+/// The clean caller imports the submodule (`from pkg import hub`) and calls
+/// `hub.compute()`: its row names `hub`, not `compute`.
+#[test]
+fn test_check_closure_py_submodule_importer_repointed_matches_baseline() {
+    check(&Scenario {
+        name: "closure_py_submodule_importer_repointed",
+        owner: LANE_F_CLEAN_CALLERS,
+        files: &[
+            ("pkg/__init__.py", ""),
+            ("pkg/core.py", "def compute():\n    return 1\n"),
+            ("pkg/other.py", "def compute():\n    return 2\n"),
+            ("pkg/hub.py", "from .core import compute\n"),
+            (
+                "app.py",
+                "from pkg import hub\n\n\ndef run():\n    return hub.compute()\n",
+            ),
+        ],
+        edits: &[Edit::Write("pkg/hub.py", "from .other import compute\n")],
+    });
+}
+
+/// A dirty TS barrel drops `export * from './a'`, and `a.ts` exports its
+/// function under an alias. The clean importer binds the alias, which the
+/// star target declares under another name.
+#[test]
+fn test_check_closure_ts_star_reexport_of_alias_dropped_matches_baseline() {
+    check(&Scenario {
+        name: "closure_ts_star_reexport_of_alias_dropped",
+        owner: LANE_F_CLEAN_CALLERS,
+        files: &[
+            (
+                "lib/a.ts",
+                "function original(): number {\n  return 1;\n}\nexport { original as publicFn };\n",
+            ),
+            ("lib/index.ts", "export * from './a';\n"),
+            (
+                "c.ts",
+                "import { publicFn } from './lib';\n\nexport function run(): number {\n  return publicFn();\n}\n",
+            ),
+        ],
+        edits: &[Edit::Write("lib/index.ts", "export const unrelated = 1;\n")],
+    });
+}
+
+/// A dirty Python module swaps two imports of one name: the last binding
+/// wins, so the clean importer's `Calls` edge moves from `b.py` to `a.py`.
+#[test]
+fn test_check_closure_py_reexport_reordered_matches_baseline() {
+    check(&Scenario {
+        name: "closure_py_reexport_reordered",
+        owner: LANE_F_CLEAN_CALLERS,
+        files: &[
+            ("pkg/__init__.py", ""),
+            ("pkg/a.py", "def X():\n    return 1\n"),
+            ("pkg/b.py", "def X():\n    return 2\n"),
+            ("pkg/hub.py", "from .a import X\nfrom .b import X\n"),
+            (
+                "app.py",
+                "from pkg.hub import X\n\n\ndef run():\n    return X()\n",
+            ),
+        ],
+        edits: &[Edit::Write(
+            "pkg/hub.py",
+            "from .b import X\nfrom .a import X\n",
+        )],
+    });
 }

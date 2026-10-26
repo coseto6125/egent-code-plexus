@@ -311,8 +311,9 @@ pub fn invalidation_closure_with_configs(
     if changes.routes {
         stale.add_kinds(ROUTE_KINDS);
     }
+    // Not `not_computed`: that asks the store to retry, and a star target the
+    // base never recorded stays unresolved on every retry.
     if changes.star_unresolved {
-        stale.not_computed = true;
         stale.add_kinds(REBUILT_RELS.iter().map(|r| r.as_str()));
     }
 
@@ -396,7 +397,8 @@ struct Changes<'a> {
     reexports: Vec<Reexport<'a>>,
     /// Each file a changed star row re-exports, with that dirty file.
     star_targets: FxHashMap<u32, (&'a str, bool)>,
-    /// A changed star row whose target the base did not record.
+    /// A changed star row whose target the base did not record: the closure
+    /// names every rebuilt kind as stale.
     star_unresolved: bool,
 }
 
@@ -603,6 +605,19 @@ impl<'a> Changes<'a> {
                 row.binding_kind.map(|kind| kind as u8),
             )
         };
+        // A Python name bound by two rows takes the last one, so a reorder
+        // of the same rows changes what it binds.
+        if python && !base.iter().map(key).eq(fresh.iter().map(key)) {
+            for side in [&base, &fresh] {
+                let mut seen: FxHashSet<&'a str> = FxHashSet::default();
+                for row in side.iter() {
+                    let name = row.local_name();
+                    if !seen.insert(name) {
+                        self.reexports.push(Reexport { name, path, python });
+                    }
+                }
+            }
+        }
         let base_keys: FxHashSet<_> = base.iter().map(key).collect();
         let fresh_keys: FxHashSet<_> = fresh.iter().map(key).collect();
         let changed = base
@@ -644,6 +659,15 @@ impl<'a> Changes<'a> {
             return;
         }
         let pool = &graph.string_pool;
+        // The resolver also finds a name the target exports under an alias
+        // (`export { original as publicFn }`).
+        for (&file, &(path, python)) in &self.star_targets {
+            let aliases = graph.file_export_aliases(file).into_iter().flatten();
+            for alias in aliases {
+                let name = alias.exported.resolve(pool);
+                self.reexports.push(Reexport { name, path, python });
+            }
+        }
         for node in graph.nodes.iter() {
             let Some(&(path, python)) = self.star_targets.get(&node.file_idx.to_native()) else {
                 continue;
@@ -967,12 +991,16 @@ impl Dependents<'_> {
             let binds = |row: &crate::graph::ArchivedImportFact| {
                 let source = row.source.resolve(pool);
                 let name = row.imported_name.resolve(pool);
-                if name == "*" && row.alias.is_none() {
+                // `from pkg import *`, `import pkg[.hub] [as h]` and
+                // `from pkg import hub` bind `pkg.compute()` / `hub.compute()`
+                // through the module itself (`python_reexport`).
+                if name == "*" {
                     return reexports.iter().any(|r| r.python && r.admits(source));
                 }
                 by_name
                     .get(name)
                     .is_some_and(|found| found.iter().any(|r| r.admits(source)))
+                    || reexports.iter().any(|r| r.python && r.admits(name))
             };
             if rows.iter().any(binds) {
                 self.files.insert(file);
