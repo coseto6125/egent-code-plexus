@@ -1704,3 +1704,28 @@ fn test_invalidation_closure_py_submodule_namesake_of_other_package_stays_out() 
         observed.stale
     );
 }
+
+/// A dirty plain module whose name ends in `__init__` (`hub__init__.py`) is
+/// a module, not a package: the clean relative importer still binds through
+/// its re-export.
+#[test]
+fn test_check_closure_py_module_named_like_init_reexport_repointed_matches_baseline() {
+    check(&Scenario {
+        name: "closure_py_module_named_like_init_reexport_repointed",
+        owner: LANE_F_CLEAN_CALLERS,
+        files: &[
+            ("pkg/__init__.py", ""),
+            ("pkg/a.py", "def compute():\n    return 1\n"),
+            ("pkg/b.py", "def compute():\n    return 2\n"),
+            ("pkg/hub__init__.py", "from .a import compute\n"),
+            (
+                "pkg/client.py",
+                "from .hub__init__ import compute\n\n\ndef run():\n    return compute()\n",
+            ),
+        ],
+        edits: &[Edit::Write(
+            "pkg/hub__init__.py",
+            "from .b import compute\n",
+        )],
+    });
+}

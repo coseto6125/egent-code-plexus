@@ -460,9 +460,9 @@ impl Reexport<'_> {
             .path
             .rsplit_once('.')
             .map_or(self.path, |(stem, _)| stem);
-        match stem.strip_suffix("__init__") {
-            Some(dir) => dir.strip_suffix('/').unwrap_or(dir),
-            None => stem,
+        match file_name(stem) {
+            "__init__" => parent_dir(stem),
+            _ => stem,
         }
     }
 }
