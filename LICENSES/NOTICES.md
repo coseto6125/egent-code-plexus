@@ -30,14 +30,6 @@ acknowledgment is offered as a courtesy credit, not a license obligation.
 Each grammar lives under `crates/vendor/tree-sitter-<lang>/` and retains its
 own in-tree LICENSE file.
 
-### tree-sitter-swift
-
-- SPDX-License-Identifier: **MIT**
-- Copyright (c) 2021 alex-pinkus
-- Source: https://github.com/alex-pinkus/tree-sitter-swift
-- In-tree path: `crates/vendor/tree-sitter-swift/`
-- License text: [LICENSES/MIT.txt](./MIT.txt)
-
 ### tree-sitter-move
 
 - SPDX-License-Identifier: **MIT**

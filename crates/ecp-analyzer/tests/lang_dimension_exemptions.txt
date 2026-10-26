@@ -494,19 +494,19 @@ generic_arity ruby only C# declares two same-name types that differ by generic a
 generic_arity rust only C# declares two same-name types that differ by generic arity
 generic_arity swift only C# declares two same-name types that differ by generic arity
 generic_arity typescript only C# declares two same-name types that differ by generic arity
-grammar_073 c pre-existing gap
-grammar_073 cpp pre-existing gap
-grammar_073 csharp pre-existing gap
-grammar_073 dart pre-existing gap
-grammar_073 go pre-existing gap
-grammar_073 java pre-existing gap
-grammar_073 javascript pre-existing gap
-grammar_073 kotlin pre-existing gap
-grammar_073 php pre-existing gap
-grammar_073 python pre-existing gap
-grammar_073 ruby pre-existing gap
-grammar_073 rust pre-existing gap
-grammar_073 typescript pre-existing gap
+grammar c pre-existing gap
+grammar cpp pre-existing gap
+grammar csharp pre-existing gap
+grammar dart pre-existing gap
+grammar go pre-existing gap
+grammar java pre-existing gap
+grammar javascript pre-existing gap
+grammar kotlin pre-existing gap
+grammar php pre-existing gap
+grammar python pre-existing gap
+grammar ruby pre-existing gap
+grammar rust pre-existing gap
+grammar typescript pre-existing gap
 heritage c pre-existing gap
 heritage cpp pre-existing gap
 heritage csharp pre-existing gap

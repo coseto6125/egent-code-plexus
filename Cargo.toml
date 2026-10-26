@@ -13,7 +13,6 @@ exclude = [
     "crates/vendor/tree-sitter-cairo",
     "crates/vendor/tree-sitter-move",
     "crates/vendor/tree-sitter-nim",
-    "crates/vendor/tree-sitter-swift",
     "crates/vendor/tree-sitter-vue",
     "crates/vendor/tree-sitter-vyper",
     "crates/vendor/tree-sitter-svelte",
