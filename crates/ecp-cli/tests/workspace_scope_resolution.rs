@@ -510,6 +510,40 @@ fn test_resolve_import_go_no_scope_keeps_package_edge() {
 
 // ─── Python ─────────────────────────────────────────────────────────────────
 
+/// A nested `pyproject.toml` whose project name equals its flat-layout
+/// package (`flaskr`, as in the Flask tutorial) maps `flaskr/*` to
+/// `src/flaskr/*` first. Red before the fix: Python discovery probed only that
+/// first base, so `from flaskr.db import get_db` missed the import tier, and
+/// with a namesake elsewhere the call bound nothing at all.
+#[test]
+fn test_resolve_import_python_project_name_equals_flat_package_binds_module() {
+    let files = [
+        ("pyproject.toml", "[project]\nname = \"outer\"\n"),
+        ("ex/tut/pyproject.toml", "[project]\nname = \"flaskr\"\n"),
+        ("ex/tut/flaskr/__init__.py", ""),
+        ("ex/tut/flaskr/db.py", "def get_db():\n    return 1\n"),
+        (
+            "ex/tut/tests/test_db.py",
+            "from flaskr.db import get_db\n\n\ndef test_get():\n    return get_db()\n",
+        ),
+        ("other/db.py", "def get_db():\n    return 2\n"),
+    ];
+    let observed = observe(
+        "workspace_scope_python_project_name_flat",
+        &files,
+        "ex/tut/tests/test_db.py",
+    );
+    assert_scoped_call(
+        &observed,
+        "ex/tut/tests/test_db.py",
+        "test_get",
+        "get_db",
+        "ex/tut/flaskr/db.py",
+        SCOPED,
+    );
+    assert_overlay_parity(&observed);
+}
+
 /// Two `pyproject.toml` projects each hold a package `app`: `app.models`
 /// from `svc_a` is `svc_a/app/models.py`. Red on HEAD: two source roots make
 /// the module ambiguous.

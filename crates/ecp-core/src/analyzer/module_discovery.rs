@@ -10,7 +10,7 @@
 //! receiver-typing ladder and the Python re-export rules all read its answer.
 
 use crate::analyzer::import_binding::fqn_extension;
-use crate::analyzer::reexport::for_each_specifier_candidate;
+use crate::analyzer::reexport::{for_each_specifier_candidate, EXT_CANDIDATES, INDEX_SUFFIXES};
 use crate::file_category::Language;
 use std::path::Path;
 use std::sync::Arc;
@@ -278,9 +278,12 @@ fn first_indexed<'a, I: ModuleIndex<'a>>(
     found
 }
 
-/// The index's candidates, except that a Python specifier names one base
-/// path (the first candidate after the verbatim one) that Python's loader
-/// probes in [`python_candidates`] order.
+/// The index's candidates, except that for Python each base path after the
+/// verbatim specifier (an alias expansion, then the specifier's own path) is
+/// probed in [`python_candidates`] order, and the shared probe suffixes the
+/// index appends to a base are skipped. A base that misses hands over to the
+/// next one: a project-name alias whose `src/<name>` expansion comes first
+/// must not hide a flat-layout `<name>/` package.
 fn for_each_import_candidate<'a, I: ModuleIndex<'a>>(
     index: &I,
     importer: &str,
@@ -293,19 +296,28 @@ fn for_each_import_candidate<'a, I: ModuleIndex<'a>>(
         return;
     }
     let mut verbatim = true;
-    index.for_each_module_candidate(importer, specifier, |base| {
+    let mut base = String::new();
+    index.for_each_module_candidate(importer, specifier, |candidate| {
         if verbatim {
             verbatim = false;
             return true;
         }
-        python_candidates(base, &mut visit);
-        false
+        let probe_of_base = !base.is_empty()
+            && candidate.strip_prefix(base.as_str()).is_some_and(|rest| {
+                rest.is_empty() || EXT_CANDIDATES.contains(&rest) || INDEX_SUFFIXES.contains(&rest)
+            });
+        if probe_of_base {
+            return true;
+        }
+        base.clear();
+        base.push_str(candidate);
+        python_candidates(candidate, &mut visit)
     });
 }
 
 /// Python loads packages before modules, and implementation files before
-/// stubs.
-fn python_candidates(base: &str, visit: &mut impl FnMut(&str) -> bool) {
+/// stubs. Returns `false` when `visit` stopped the probe.
+fn python_candidates(base: &str, visit: &mut impl FnMut(&str) -> bool) -> bool {
     let mut candidate = String::with_capacity(base.len() + 13);
     for suffix in ["/__init__.py", "/__init__.pyi", ".py", ".pyi"] {
         candidate.clear();
@@ -316,9 +328,10 @@ fn python_candidates(base: &str, visit: &mut impl FnMut(&str) -> bool) {
             candidate.push_str(suffix);
         }
         if !visit(&candidate) {
-            break;
+            return false;
         }
     }
+    true
 }
 
 /// [`ModuleIndex::for_each_module_candidate`] for an index without project
@@ -339,6 +352,8 @@ mod tests {
         namespaces: Vec<(&'static str, &'static str)>,
         decls: Vec<(&'static str, &'static str)>,
         scope_root: Option<&'static str>,
+        /// One project alias `pattern/*` -> each `replacement/*`.
+        alias: Option<(&'static str, &'static [&'static str])>,
     }
 
     impl ModuleIndex<'static> for Files {
@@ -389,7 +404,28 @@ mod tests {
             specifier: &str,
             visit: impl FnMut(&str) -> bool,
         ) {
-            for_each_layout_candidate(importer, specifier, visit);
+            let alias = self.alias;
+            for_each_specifier_candidate(
+                Path::new(importer),
+                specifier,
+                |expanded| {
+                    let Some((pattern, replacements)) = alias else {
+                        return;
+                    };
+                    let Some(rest) = specifier
+                        .strip_prefix(pattern)
+                        .and_then(|r| r.strip_prefix('/'))
+                    else {
+                        return;
+                    };
+                    for replacement in replacements {
+                        if !expanded(&format!("{replacement}/{rest}")) {
+                            return;
+                        }
+                    }
+                },
+                visit,
+            );
         }
 
         fn importer_scope_root(&self, _importer: &str) -> Option<&str> {
@@ -426,6 +462,38 @@ mod tests {
             true
         });
         assert_eq!(seen, ["__init__.py", "__init__.pyi", ".py", ".pyi"]);
+    }
+
+    /// A project-name alias `flaskr/*` -> [`src/flaskr/*`, `flaskr/*`] puts
+    /// the missing `src/flaskr/db` first. Before the fix discovery probed only
+    /// that first base and returned `Missing`; the fix probes the next base and
+    /// returns the flat-layout file.
+    #[test]
+    fn test_discover_module_python_alias_first_base_misses_binds_next_base() {
+        let index = Files {
+            paths: vec!["flaskr/__init__.py", "flaskr/db.py", "tests/test_db.py"],
+            alias: Some(("flaskr", &["src/flaskr", "flaskr"])),
+            ..Files::default()
+        };
+        assert_eq!(
+            discover_module(&index, "tests/test_db.py", "flaskr/db", Language::Python),
+            Module::Unique("flaskr/db.py")
+        );
+    }
+
+    /// The src layout still wins when both bases hold the module: the alias's
+    /// first expansion is probed first.
+    #[test]
+    fn test_discover_module_python_alias_src_layout_first_base_wins() {
+        let index = Files {
+            paths: vec!["src/flaskr/db.py", "flaskr/db.py", "tests/test_db.py"],
+            alias: Some(("flaskr", &["src/flaskr", "flaskr"])),
+            ..Files::default()
+        };
+        assert_eq!(
+            discover_module(&index, "tests/test_db.py", "flaskr/db", Language::Python),
+            Module::Unique("src/flaskr/db.py")
+        );
     }
 
     #[test]
@@ -548,6 +616,7 @@ mod tests {
                 ("src/Util/Other.php", "Other"),
             ],
             scope_root: None,
+            alias: None,
         }
     }
 
@@ -649,6 +718,7 @@ mod tests {
             namespaces: vec![("x/src/Util.php", "App"), ("y/src/Util.php", "App")],
             decls: vec![("x/src/Util.php", "Util"), ("y/src/Util.php", "Util")],
             scope_root: root,
+            alias: None,
         };
         let import = |files: &Files, specifier: &str| {
             discover_module(files, "y/src/Main.php", specifier, Language::Php)
