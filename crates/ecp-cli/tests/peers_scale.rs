@@ -51,20 +51,12 @@ fn eight_session_burst_fans_out_to_every_inbox() {
     });
     let elapsed = start.elapsed();
     eprintln!("[peers_scale] {N} sessions, full fan-out in {elapsed:?}");
-    assert!(
-        all_delivered,
-        "fan-out incomplete after 10s at {N} sessions — inbox coverage: {:?}",
-        ids.iter()
-            .map(|id| {
-                let n = h
-                    .read_inbox(id)
-                    .iter()
-                    .filter(|e| matches!(e, InboxEntry::DirtyEvent { .. }))
-                    .count();
-                (id.clone(), n)
-            })
-            .collect::<Vec<_>>()
-    );
+    if !all_delivered {
+        panic!(
+            "fan-out incomplete after 10s at {N} sessions:{}",
+            h.diagnostics()
+        );
+    }
 
     // Names must survive the fan-out (P1 wiring under concurrency).
     let named = h.read_inbox(&ids[0]).iter().any(|e| {
