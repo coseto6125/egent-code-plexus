@@ -6,6 +6,7 @@ pub mod import_binding;
 pub mod ladder;
 pub mod lang_spec;
 pub mod lexical;
+pub mod membership;
 pub mod module_discovery;
 pub mod name_ref;
 pub mod outcome;

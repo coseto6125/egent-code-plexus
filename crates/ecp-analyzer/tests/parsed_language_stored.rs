@@ -480,16 +480,16 @@ fn test_file_flags_real_vue_ts_script_is_es_module_like_ts() {
 const DEFAULT_IMPORTER: &str =
     "import Comp from './Comp.vue';\nexport function run() { return Comp(); }\n";
 
+type ImportEdge = (String, String, &'static str, u32);
+type CallEdge = (String, String, f32);
+
 /// `Imports` and `Calls` edges of the importer of a component whose script
 /// is `script`, with the component's file name read as `.ts`, so the Vue
 /// file and its `.ts` control compare equal.
 fn default_import_edges(
     component: (&str, String),
     importer: &str,
-) -> (
-    Vec<(String, String, &'static str, u32)>,
-    Vec<(String, String, f32)>,
-) {
+) -> (Vec<ImportEdge>, Vec<CallEdge>) {
     let graph = index_of(&[("src/main.ts", importer.to_string()), component]);
     let normalize = |file: String| file.replace(".vue", ".ts");
     let imports = imports_edges_of(&graph, "main.ts")

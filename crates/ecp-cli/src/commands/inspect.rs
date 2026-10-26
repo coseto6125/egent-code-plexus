@@ -467,9 +467,9 @@ fn build_inspect_block(
 /// generic incoming/outgoing buckets — class membership is structural and
 /// shouldn't disappear because a method happens to live in a test file.
 ///
-/// The overlay rebuilds no membership edges: a dirty type lists its committed
-/// members that still exist (at their working-tree lines), and a type the
-/// overlay added lists none.
+/// The overlay rebuilds the membership edges of a dirty file
+/// (`session::incremental`), so a dirty type lists its current members, a new
+/// one included.
 ///
 /// A C# `partial` type lists the members of every part
 /// ([`MergedGraph::partial_parts`]), whichever part `idx` is, each once.

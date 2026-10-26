@@ -1,4 +1,4 @@
-# owner: lane F (area 5 shadow cascade)
+# owner: lane F (incremental overlay: clean callers re-resolved)
 edge full-only x1 Calls Function src/main.js:3 run #f715e89c1f1150b7 -> Function src/util.ts:1 helper #59a8e46fd78325ba conf=0.95
 edge full-only x1 Imports File src/main.js:1 main.js #0f11a11d135b1cef -> Function src/util.ts:1 helper #59a8e46fd78325ba conf=0.95
 edge overlay-only x1 Calls Function src/main.js:3 run #f715e89c1f1150b7 -> Function src/util.js:1 helper #8fa137fa7813570c conf=0.95

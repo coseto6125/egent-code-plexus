@@ -28,7 +28,7 @@ const OWNER: &str = "lane F (incremental overlay: builder edges of dirty files)"
 
 /// One record output: the node kinds it makes, and the edge kinds it makes
 /// with the kind of node each one ends at (`HasProperty` also ends at class
-/// members, which the overlay keeps as indexed).
+/// members, which class membership replays: `strict_overlay_membership.rs`).
 struct Output {
     name: &'static str,
     nodes: &'static [&'static str],

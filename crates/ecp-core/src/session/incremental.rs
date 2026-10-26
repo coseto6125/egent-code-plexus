@@ -10,6 +10,7 @@
 //! | `File` node | `GraphBuilder::build`, one per `LocalGraph` | one virtual node per input whose path has no entry in `graph.files`; a path that has one keeps its base `File` nodes |
 //! | scope `Defines` | `post_process::scope_defines` | [`containment::scope_defines`] |
 //! | enum containment | `post_process::enum_variant_defines` | [`containment::enum_variant_defines`] |
+//! | class membership: `HasMethod` / `HasProperty` | `post_process::class_membership` | [`membership::class_membership`], `HasProperty` only with the records |
 //! | function meta | `pass1_8_function_metas` | the flags and return type the fragment paired by span |
 //! | `PathLiteral` + `UsesPathLiteral` | `post_process::path_literal_nodes` | [`record_nodes::path_literal_node`] |
 //! | `QueriesTable` | `post_process::sql_table_edges` | [`record_nodes::sql_table_refs`], the table by [`Tables`] |
@@ -22,16 +23,24 @@
 //! nodes and edges of those kinds as indexed. A base record node of a
 //! re-parsed path pairs with the replayed node of its uid (the k-th with the
 //! k-th), so a heuristic mirror edge into it from another file survives as
-//! indexed; an unpaired one is suppressed. A `SchemaField` never pairs: its
-//! `HasProperty` shares a kind with class membership, which the overlay keeps
-//! as indexed, so a mask by kind at the class would drop those too. Its
-//! `MirrorsField` edges drop with it.
+//! indexed; an unpaired one is suppressed. A `SchemaField` never pairs, so
+//! its `MirrorsField` edges drop with it. Its `HasProperty` shares a kind
+//! with class membership, and the view masks a dirty type's base
+//! `HasProperty` by kind: class membership replays `HasProperty` only when
+//! the records replay too, and keeps it as indexed otherwise.
+//!
+//! Class membership reads one path's name tables ([`PathDecls`]), the ones
+//! the index's `SymbolTable` holds for the path after Pass 1: a later
+//! overload, a C# arity twin and a tombstone are in none, and an overload or
+//! a twin binds its own slot.
 //!
 //! [`OverlayView::build_with_records`](super::view::OverlayView::build_with_records)
 //! calls [`replay`] once, after the virtual nodes and their tombstones are
 //! final. Cost: O(dirty symbols + dirty records + base record nodes of the
 //! dirty paths) hash operations, plus one O(symbols of the path) table for a
-//! path that declares an enum variant, plus one name-index probe (O(log N)
+//! path that declares a type or an enum variant (a C# path also renumbers
+//! its declarations once, O(symbols)), plus O(symbols x types of the file)
+//! span checks for class membership, plus one name-index probe (O(log N)
 //! and the namesakes) per distinct SQL table name. Nothing scans the base
 //! graph: the build's one node scan collects the base record nodes.
 
@@ -42,11 +51,15 @@ use crate::analyzer::containment::{
     self, Row, Scope, ENUM_VARIANT_DEFINES_REASON, SCOPE_DEFINES_REASON,
 };
 use crate::analyzer::heritage::HeritageNode;
+use crate::analyzer::lexical::{file_identities, later_is_arity_twin, splits_by_arity};
+use crate::analyzer::membership::{self, MemberLookup, MemberRow};
 use crate::analyzer::record_nodes::{
     self, RecordNode, PATH_LITERAL_SINK_REASONS, SCHEMA_FIELD_HAS_PROPERTY_REASON, TX_SCOPE_REASON,
 };
 use crate::analyzer::types::owner_key;
+use crate::contracts::identity::UidSlot;
 use crate::contracts::raw_records::{FileOrd, GlobalEndpoint, RawEndpoint, RawIdx, RawIndexMap};
+use crate::file_category::Language;
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::Path;
@@ -76,6 +89,9 @@ pub(super) struct ReplayInputs<'a> {
     pub dirty_base: &'a FxHashSet<u32>,
     /// Scoped virtual index → its lexical parent ([`super::view`]'s table).
     pub lexical_parents: &'a FxHashMap<u32, u32>,
+    /// First virtual index → its later overloads, in source order, as the
+    /// index's `SymbolTable::register_overload` numbers them.
+    pub later_overloads: &'a FxHashMap<u32, Vec<u32>>,
 }
 
 /// The replay's rows beside the nodes and edges it appends.
@@ -132,6 +148,7 @@ pub(super) fn replay(
         base_records,
         dirty_base,
         lexical_parents,
+        later_overloads,
     } = inputs;
     let mut replayed = Replayed {
         function_metas: function_metas(files, base_len),
@@ -189,9 +206,11 @@ pub(super) fn replay(
         reason,
     };
 
-    // First declarations per path, built once for a path with a variant
-    // from the path's inputs, which are grouped once on the first variant.
-    let mut declarations: FxHashMap<&str, Declarations<'_>> = FxHashMap::default();
+    // A schema field's `HasProperty` shares the kind the view masks.
+    let records_replay = !records.is_empty() && records.len() == files.len();
+    // Name tables per path, built once for a path with a type or a variant
+    // from the path's inputs, which are grouped once on the first such input.
+    let mut declarations: FxHashMap<&str, PathDecls<'_>> = FxHashMap::default();
     let mut inputs_by_path: Option<FxHashMap<&str, Vec<FileOrd>>> = None;
     for (ord, file) in files.iter().enumerate() {
         let path = file.rel_path.as_str();
@@ -220,10 +239,10 @@ pub(super) fn replay(
             });
         }
 
-        if !file.symbols.iter().any(|s| s.kind == NodeKind::EnumVariant) {
+        if !file.symbols.iter().any(|s| reads_declarations(s.kind)) {
             continue;
         }
-        let table = declarations.entry(path).or_insert_with(|| {
+        let table = &*declarations.entry(path).or_insert_with(|| {
             let by_path = inputs_by_path.get_or_insert_with(|| {
                 let mut by_path: FxHashMap<&str, Vec<FileOrd>> = FxHashMap::default();
                 for (ord, file) in files.iter().enumerate() {
@@ -235,7 +254,7 @@ pub(super) fn replay(
                 by_path
             });
             let ords = by_path.get(path).map(Vec::as_slice).unwrap_or_default();
-            Declarations::of(files, ords, &raw_map, nodes)
+            PathDecls::of(files, ords, &raw_map, nodes)
         });
         containment::enum_variant_defines(
             &file.symbols,
@@ -243,9 +262,33 @@ pub(super) fn replay(
             |name, kind, owner| table.first(name, kind, owner),
             |source, target| push(defines(source, target, ENUM_VARIANT_DEFINES_REASON)),
         );
+        let lookup = FileMembers {
+            decls: table,
+            later_overloads,
+            raw_map: &raw_map,
+            ord,
+            lexical_parents,
+        };
+        membership::class_membership(
+            &file.symbols,
+            member_row,
+            || lookup,
+            |m| {
+                if m.rel_type == RelType::HasProperty && !records_replay {
+                    return;
+                }
+                push(ViewEdge {
+                    source: m.source,
+                    target: m.target,
+                    rel_type: m.rel_type,
+                    confidence: 1.0,
+                    reason: m.reason,
+                });
+            },
+        );
     }
 
-    if records.is_empty() || records.len() != files.len() {
+    if !records_replay {
         return replayed;
     }
     let first_record = nodes.len();
@@ -602,52 +645,191 @@ fn file_node(path: &str) -> ViewNode {
     }
 }
 
-/// The first declaration of each (name, kind, owner key) among one path's
-/// Enum and EnumVariant nodes, in input order: the index's
-/// `SymbolTable::first_declaration`, which registers neither a later
-/// overload nor a tombstone.
-struct Declarations<'a> {
-    /// Keyed by (name, `NodeKind` discriminant, owner key).
-    first: FxHashMap<(&'a str, u8, Option<&'a str>), u32>,
+fn member_row(symbol: &super::view::OverlaySymbol) -> MemberRow<'_> {
+    MemberRow {
+        kind: symbol.kind,
+        owner: symbol.owner_class.as_deref(),
+        name: &symbol.name,
+        span: HeritageNode::span(symbol),
+        arity: symbol.generic_arity,
+    }
 }
 
-impl<'a> Declarations<'a> {
-    /// The table of the inputs `ords` of one path, in input order.
+/// Whether a declaration of `kind` makes its path's [`PathDecls`] worth
+/// building: a type owns members, an enum variant is contained.
+fn reads_declarations(kind: NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::Class
+            | NodeKind::Struct
+            | NodeKind::Trait
+            | NodeKind::Interface
+            | NodeKind::Annotation
+            | NodeKind::Enum
+            | NodeKind::EnumVariant
+    )
+}
+
+/// One path's declarations as the index's `SymbolTable` holds them after
+/// Pass 1, over the path's inputs in input order. Only a registered
+/// declaration is in the name table: a tombstone, a later overload and a C#
+/// arity twin are in none, as the index registers none of them by name.
+struct PathDecls<'a> {
+    /// Name → registered slots, in input order: the index's `file_scoped`.
+    by_name: FxHashMap<&'a str, Vec<u32>>,
+    /// Registered slot → (kind, owner key).
+    decl: FxHashMap<u32, (NodeKind, Option<&'a str>)>,
+    /// First slot → its arity twins: `SymbolTable::register_arity_sibling`.
+    siblings: FxHashMap<u32, Vec<u32>>,
+    /// Every arity twin slot.
+    twins: FxHashSet<u32>,
+    /// The declared generic arity of a C# type and of each arity twin, when
+    /// not 0: `SymbolTable::note_type_arity`.
+    arities: FxHashMap<u32, u32>,
+}
+
+impl<'a> PathDecls<'a> {
+    /// The tables of the inputs `ords` of one path, in input order.
     fn of(
         files: &'a [OverlayFileInput],
         ords: &[FileOrd],
         raw_map: &RawIndexMap,
         nodes: &[ViewNode],
     ) -> Self {
-        let mut first = FxHashMap::default();
+        let mut table = Self {
+            by_name: FxHashMap::default(),
+            decl: FxHashMap::default(),
+            siblings: FxHashMap::default(),
+            twins: FxHashSet::default(),
+            arities: FxHashMap::default(),
+        };
         for &ord in ords {
             let file = &files[ord.0 as usize];
+            let language = file.file_meta().language;
             for (raw, symbol) in file.symbols.iter().enumerate() {
-                if !matches!(symbol.kind, NodeKind::Enum | NodeKind::EnumVariant) {
-                    continue;
-                }
                 let raw = RawIdx(raw as u32);
                 let (Some(slot), Some(node)) = (raw_map.slot(ord, raw), raw_map.node(ord, raw))
                 else {
                     continue;
                 };
-                let registered =
-                    slot == node && !nodes[(slot - raw_map.base()) as usize].later_overload;
-                if registered {
-                    let owner = symbol.owner_class.as_deref().and_then(owner_key);
-                    first
-                        .entry((symbol.name.as_str(), symbol.kind as u8, owner))
-                        .or_insert(slot);
+                if slot != node || nodes[(slot - raw_map.base()) as usize].later_overload {
+                    continue;
+                }
+                table
+                    .by_name
+                    .entry(symbol.name.as_str())
+                    .or_default()
+                    .push(slot);
+                let owner = symbol.owner_class.as_deref().and_then(owner_key);
+                table.decl.insert(slot, (symbol.kind, owner));
+                if splits_by_arity(language, symbol.kind) && symbol.generic_arity > 0 {
+                    table.arities.insert(slot, symbol.generic_arity);
                 }
             }
+            if language == Language::CSharp {
+                table.note_twins(file, ord, language, raw_map);
+            }
         }
-        Self { first }
+        table
     }
 
+    /// Note the arity twins of one C# input, numbered as the view numbers
+    /// them ([`file_identities`]): a `Later` slot that
+    /// [`later_is_arity_twin`] calls a twin, filed beside its first.
+    fn note_twins(
+        &mut self,
+        file: &OverlayFileInput,
+        ord: FileOrd,
+        language: Language,
+        raw_map: &RawIndexMap,
+    ) {
+        let identities = file_identities(&file.rel_path, &file.symbols, |sym| {
+            (
+                sym.kind,
+                sym.owner_class.as_deref(),
+                sym.name.as_str(),
+                HeritageNode::span(sym),
+                sym.generic_arity,
+            )
+        });
+        for (raw, identity) in identities.into_iter().enumerate() {
+            let UidSlot::Later { first, .. } = identity.slot else {
+                continue;
+            };
+            let symbol = &file.symbols[raw];
+            if !later_is_arity_twin(language, symbol.kind) {
+                continue;
+            }
+            let (Some(twin), Some(first)) = (
+                raw_map.node(ord, RawIdx(raw as u32)),
+                raw_map.node(ord, RawIdx(first)),
+            ) else {
+                continue;
+            };
+            self.siblings.entry(first).or_default().push(twin);
+            self.twins.insert(twin);
+            if symbol.generic_arity > 0 {
+                self.arities.insert(twin, symbol.generic_arity);
+            }
+        }
+    }
+
+    /// The first registered declaration of (name, kind, owner key): the
+    /// index's `SymbolTable::first_declaration`.
     fn first(&self, name: &str, kind: NodeKind, owner: Option<&str>) -> Option<u32> {
-        self.first
-            .get(&(name, kind as u8, owner.and_then(owner_key)))
-            .copied()
+        let owner = owner.and_then(owner_key);
+        self.by_name.get(name)?.iter().copied().find(|slot| {
+            self.decl
+                .get(slot)
+                .is_some_and(|&(k, o)| k == kind && o == owner)
+        })
+    }
+}
+
+/// Class membership's lookups for one input: its path's [`PathDecls`], the
+/// view's overload sets, and the input's own slots.
+struct FileMembers<'t, 'a> {
+    decls: &'t PathDecls<'a>,
+    later_overloads: &'t FxHashMap<u32, Vec<u32>>,
+    raw_map: &'t RawIndexMap,
+    ord: FileOrd,
+    lexical_parents: &'t FxHashMap<u32, u32>,
+}
+
+impl MemberLookup for FileMembers<'_, '_> {
+    fn first_declaration(&self, name: &str, kind: NodeKind, owner: Option<&str>) -> Option<u32> {
+        self.decls.first(name, kind, owner)
+    }
+
+    fn lookup_in_file(&self, name: &str) -> Option<u32> {
+        self.decls.by_name.get(name)?.first().copied()
+    }
+
+    fn later_overloads(&self, first: u32) -> &[u32] {
+        self.later_overloads.get(&first).map_or(&[], Vec::as_slice)
+    }
+
+    /// `SymbolTable::with_arity` over the twins of `id`.
+    fn with_arity(&self, id: u32, arity: u32) -> Option<u32> {
+        let type_arity = |member: u32| self.decls.arities.get(&member).copied().unwrap_or(0);
+        match self.decls.siblings.get(&id) {
+            Some(twins) => std::iter::once(id)
+                .chain(twins.iter().copied())
+                .find(|&member| type_arity(member) == arity),
+            None => (arity == 0 || type_arity(id) == arity).then_some(id),
+        }
+    }
+
+    fn is_scoped(&self, raw: usize) -> bool {
+        self.raw_map
+            .node(self.ord, RawIdx(raw as u32))
+            .is_some_and(|id| self.lexical_parents.contains_key(&id))
+    }
+
+    fn twin(&self, raw: usize) -> Option<u32> {
+        self.raw_map
+            .node(self.ord, RawIdx(raw as u32))
+            .filter(|slot| self.decls.twins.contains(slot))
     }
 }
 
@@ -1584,5 +1766,267 @@ mod tests {
         let second = with_records(graph, &files, &records);
         assert_eq!(first, second);
         assert_eq!(first.to_cache_bytes(), second.to_cache_bytes());
+    }
+
+    // ── class membership (F7b1) ─────────────────────────────────────────────
+
+    use crate::analyzer::membership::{CLASS_MEMBERSHIP_IMPL_REASON, CLASS_MEMBERSHIP_REASON};
+
+    fn member(source: u32, target: u32) -> (u32, u32, String) {
+        (source, target, CLASS_MEMBERSHIP_REASON.to_string())
+    }
+
+    /// A base class `K` with members `a` and `gone`, each with its
+    /// `HasMethod`, in `src/k.ts`: (bytes, K).
+    fn class_base() -> (Vec<u8>, u32) {
+        let mut fx = GraphFixture::new();
+        let k = fx.node(NodeKind::Class, "src/k.ts", "K");
+        let a = fx.method("src/k.ts", "K", "a");
+        let gone = fx.method("src/k.ts", "K", "gone");
+        for target in [a, gone] {
+            fx.edge_with(k, target, RelType::HasMethod, 1.0, CLASS_MEMBERSHIP_REASON);
+        }
+        (fx.into_bytes(), k)
+    }
+
+    /// An edit that keeps `a`, removes `gone` and adds `fresh`: the dirty
+    /// class has one `HasMethod` per member it now declares, the new one
+    /// included, and the base edge to the kept member is masked, so `a` has
+    /// one parent.
+    #[test]
+    fn test_replay_dirty_class_new_member_gets_has_method_and_base_edge_masked() {
+        let (bytes, k) = class_base();
+        let graph = access(&bytes);
+        let files = [input(
+            "src/k.ts",
+            vec![
+                sym(NodeKind::Class, None, "K", (1, 9)),
+                sym(NodeKind::Method, Some("K"), "a", (2, 3)),
+                sym(NodeKind::Method, Some("K"), "fresh", (5, 6)),
+            ],
+        )];
+        let view = OverlayView::build(graph, &files).unwrap();
+        let base = view.base_len();
+
+        assert_eq!(view.redirect(k), Some(base));
+        assert!(view.masks_base_edge(k, RelType::HasMethod));
+        assert_eq!(
+            rel_edges(graph, &view, RelType::HasMethod),
+            [member(base, base + 1), member(base, base + 2)]
+        );
+    }
+
+    /// Membership `HasProperty` shares its kind with a schema field's, so it
+    /// is rebuilt only with the records: without them the base edge stays
+    /// (redirected) and the new property gets none; with them each property
+    /// has one edge and the view still round-trips its cache.
+    #[test]
+    fn test_replay_member_property_rebuilt_only_with_records() {
+        let mut fx = GraphFixture::new();
+        let k = fx.node(NodeKind::Class, "src/k.ts", "K");
+        let p = fx.node_owned(NodeKind::Property, "src/k.ts", "K", "p");
+        fx.edge_with(k, p, RelType::HasProperty, 1.0, CLASS_MEMBERSHIP_REASON);
+        let bytes = fx.into_bytes();
+        let graph = access(&bytes);
+        let files = [input(
+            "src/k.ts",
+            vec![
+                sym(NodeKind::Class, None, "K", (1, 5)),
+                sym(NodeKind::Property, Some("K"), "p", (2, 2)),
+                sym(NodeKind::Property, Some("K"), "q", (3, 3)),
+            ],
+        )];
+
+        let without = OverlayView::build(graph, &files).unwrap();
+        let base = without.base_len();
+        assert!(!without.masks_base_edge(k, RelType::HasProperty));
+        assert_eq!(
+            rel_edges(graph, &without, RelType::HasProperty),
+            [member(base, base + 1)]
+        );
+
+        let with = with_records(graph, &files, &[OverlayFileRecords::default()]);
+        assert!(with.masks_base_edge(k, RelType::HasProperty));
+        assert_eq!(
+            rel_edges(graph, &with, RelType::HasProperty),
+            [member(base, base + 1), member(base, base + 2)]
+        );
+    }
+
+    /// An edit that empties the file leaves no membership edge.
+    #[test]
+    fn test_replay_emptied_class_file_has_no_membership_edge() {
+        let (bytes, _) = class_base();
+        let graph = access(&bytes);
+        let view = OverlayView::build(graph, &[input("src/k.ts", Vec::new())]).unwrap();
+        assert!(rel_edges(graph, &view, RelType::HasMethod).is_empty());
+    }
+
+    /// A removed file has no parse: its classes and their membership edges
+    /// are gone.
+    #[test]
+    fn test_replay_removed_class_file_has_no_membership_edge() {
+        let (bytes, _) = class_base();
+        let graph = access(&bytes);
+        let view = OverlayView::build_with_removed(graph, &[], &["src/k.ts".to_string()]).unwrap();
+        assert!(rel_edges(graph, &view, RelType::HasMethod).is_empty());
+    }
+
+    /// Two refreshes of one session build the same membership edges and the
+    /// same cache bytes.
+    #[test]
+    fn test_replay_membership_twice_same_view_and_cache_bytes() {
+        let (bytes, _) = class_base();
+        let graph = access(&bytes);
+        let files = [input(
+            "src/k.ts",
+            vec![
+                sym(NodeKind::Class, None, "K", (1, 9)),
+                sym(NodeKind::Method, Some("K"), "fresh", (2, 3)),
+            ],
+        )];
+        let records = [OverlayFileRecords::default()];
+        let first = with_records(graph, &files, &records);
+        let second = with_records(graph, &files, &records);
+        assert_eq!(first, second);
+        assert_eq!(first.to_cache_bytes(), second.to_cache_bytes());
+        assert_eq!(rel_edges(graph, &first, RelType::HasMethod).len(), 1);
+    }
+
+    /// A Java constructor named like its class binds the constructor, never
+    /// the class itself (`class_membership`'s self-loop rule).
+    #[test]
+    fn test_replay_member_named_like_class_binds_member_without_self_loop() {
+        let bytes = clean_base();
+        let graph = access(&bytes);
+        let files = [input(
+            "src/Foo.java",
+            vec![
+                sym(NodeKind::Class, None, "Foo", (1, 10)),
+                sym(NodeKind::Method, Some("Foo"), "Foo", (2, 4)),
+            ],
+        )];
+        let view = OverlayView::build(graph, &files).unwrap();
+        let base = view.base_len();
+        assert_eq!(
+            rel_edges(graph, &view, RelType::HasMethod),
+            [member(base, base + 1)]
+        );
+    }
+
+    /// A Rust `impl` method outside its struct's span binds through its
+    /// owner, with the owner pass's reason.
+    #[test]
+    fn test_replay_impl_method_outside_struct_span_binds_by_owner() {
+        let bytes = clean_base();
+        let graph = access(&bytes);
+        let files = [input(
+            "src/lib.rs",
+            vec![
+                sym(NodeKind::Struct, None, "Foo", (1, 1)),
+                sym(NodeKind::Method, Some("Foo"), "new", (5, 7)),
+            ],
+        )];
+        let view = OverlayView::build(graph, &files).unwrap();
+        let base = view.base_len();
+        assert_eq!(
+            rel_edges(graph, &view, RelType::HasMethod),
+            [(base, base + 1, CLASS_MEMBERSHIP_IMPL_REASON.to_string())]
+        );
+    }
+
+    /// A class declared twice in one file: the second is a tombstone of
+    /// the first, which owns the members of both, as the index's name
+    /// lookup returns the first declaration.
+    #[test]
+    fn test_replay_class_declared_twice_members_bind_first_declaration() {
+        let bytes = clean_base();
+        let graph = access(&bytes);
+        let files = [input(
+            "src/k.ts",
+            vec![
+                sym(NodeKind::Class, None, "K", (1, 3)),
+                sym(NodeKind::Method, Some("K"), "a", (2, 2)),
+                sym(NodeKind::Class, None, "K", (5, 7)),
+                sym(NodeKind::Method, Some("K"), "b", (6, 6)),
+            ],
+        )];
+        let view = OverlayView::build(graph, &files).unwrap();
+        let base = view.base_len();
+        assert_eq!(
+            rel_edges(graph, &view, RelType::HasMethod),
+            [member(base, base + 1), member(base, base + 3)]
+        );
+    }
+
+    /// Two overloads of one method each get their own edge: a name lookup
+    /// returns the first, so the later one binds its own slot.
+    #[test]
+    fn test_replay_overloaded_member_each_overload_gets_own_edge() {
+        let bytes = clean_base();
+        let graph = access(&bytes);
+        let files = [input(
+            "src/K.java",
+            vec![
+                sym(NodeKind::Class, None, "K", (1, 9)),
+                sym(NodeKind::Method, Some("K"), "save", (2, 3)),
+                sym(NodeKind::Method, Some("K"), "save", (5, 6)),
+            ],
+        )];
+        let view = OverlayView::build(graph, &files).unwrap();
+        let base = view.base_len();
+        assert!(view.node(base + 2).unwrap().later_overload);
+        assert_eq!(
+            rel_edges(graph, &view, RelType::HasMethod),
+            [member(base, base + 1), member(base, base + 2)]
+        );
+    }
+
+    /// A function nested in a TypeScript method is scoped: its callable
+    /// declares it, so the class does not own it.
+    #[test]
+    fn test_replay_scoped_function_in_method_gets_no_membership() {
+        let bytes = clean_base();
+        let graph = access(&bytes);
+        let files = [input(
+            "src/k.ts",
+            vec![
+                sym(NodeKind::Class, None, "K", (1, 10)),
+                sym(NodeKind::Method, Some("K"), "m", (2, 8)),
+                func("inner", (3, 4)),
+            ],
+        )];
+        let view = OverlayView::build(graph, &files).unwrap();
+        let base = view.base_len();
+        assert_eq!(view.lexical_parent(base + 2), Some(base + 1));
+        assert_eq!(
+            rel_edges(graph, &view, RelType::HasMethod),
+            [member(base, base + 1)]
+        );
+    }
+
+    /// A C# member of `Conv<T>` beside `Conv` belongs to the arity twin,
+    /// which no name lookup returns: the twin's own slot is the owner.
+    #[test]
+    fn test_replay_csharp_arity_twin_owns_its_member() {
+        let bytes = clean_base();
+        let graph = access(&bytes);
+        let mut generic = sym(NodeKind::Class, None, "Conv", (5, 7));
+        generic.generic_arity = 1;
+        let files = [input(
+            "src/Conv.cs",
+            vec![
+                sym(NodeKind::Class, None, "Conv", (1, 3)),
+                generic,
+                sym(NodeKind::Method, Some("Conv"), "Run", (6, 6)),
+            ],
+        )];
+        let view = OverlayView::build(graph, &files).unwrap();
+        let base = view.base_len();
+        assert!(view.node(base + 1).unwrap().later_overload, "a twin");
+        assert_eq!(
+            rel_edges(graph, &view, RelType::HasMethod),
+            [member(base + 1, base + 2)]
+        );
     }
 }

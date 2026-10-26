@@ -54,11 +54,14 @@
 //!   derivations: a `File` node for a path `graph.files` lacks (a new file,
 //!   empty or not), scope `Defines` (`File` / `Namespace` / `Module` →
 //!   member) and enum containment (`Enum` → `EnumVariant`), both by
-//!   [`crate::analyzer::containment`], and each virtual function's meta
+//!   [`crate::analyzer::containment`], class membership (`HasMethod` /
+//!   `HasProperty` from a type to its members) by
+//!   [`crate::analyzer::membership`], and each virtual function's meta
 //!   ([`OverlayView::function_meta`]). A re-parsed path that `graph.files`
 //!   holds keeps its base `File` nodes, which source the file's rebuilt
 //!   `Defines`: with the record edges below, the only overlay edges whose
-//!   source is a base index.
+//!   source is a base index. Membership `HasProperty` is rebuilt only with
+//!   the records, as below.
 //! - **record outputs** — given each file's [`OverlayFileRecords`]
 //!   ([`OverlayView::build_with_records`]), the replay rebuilds the record
 //!   nodes and their edges by the index's derivations
@@ -74,14 +77,15 @@
 //!
 //! A base edge whose **source** lies in a dirty file is masked ONLY when the
 //! overlay re-resolves that rel type from fragment data (`Calls`,
-//! `ReadsField`, `Defines`, plus the `References` reasons above, plus
-//! `UsesPathLiteral`, `QueriesTable`, `OpensTxScope`, `Publishes` and
-//! `Subscribes` when the records replayed) — for those the overlay
-//! adjacency is the file's truth. `Defines` and the record edges are masked
-//! at the file's `File` nodes too. `HasProperty` stays as indexed: it shares
-//! its kind with class membership, which the overlay does not rebuild, so a
-//! dirty file's base `SchemaField` nodes are suppressed instead and their
-//! base `HasProperty` drops with them. Rels the fragment carries no
+//! `ReadsField`, `Defines`, `HasMethod`, plus the `References` reasons
+//! above, plus `HasProperty`, `UsesPathLiteral`, `QueriesTable`,
+//! `OpensTxScope`, `Publishes` and `Subscribes` when the records replayed) —
+//! for those the overlay adjacency is the file's truth. `Defines` and the
+//! record edges are masked at the file's `File` nodes too. `HasProperty`
+//! has two producers, class membership and the schema fields: masked by
+//! kind, it needs both rebuilt, so without the records it stays as indexed
+//! and a new member gets none. With them, a dirty file's base `SchemaField`
+//! nodes are suppressed rather than paired. Rels the fragment carries no
 //! inputs for (Extends, …) keep their base edges: slightly stale beats silently absent for a
 //! deterministic edge. A base edge whose **target** lies in a dirty file is
 //! redirected (replaced) or dropped (suppressed) regardless of rel.
@@ -95,11 +99,11 @@
 //!   base ones of its surviving symbols (stale) and gains none for new code.
 //! - Builder-made nodes of a re-parsed dirty file other than `File` and the
 //!   record nodes (routes, entry points, processes) and their edges are as
-//!   indexed, and so are all record outputs when the view is built without
-//!   records. Class membership (`HasMethod` / `HasProperty` to a member) is
-//!   as indexed: a brand-new member gets none. A path with two `LocalGraph`s
+//!   indexed, and so are all record outputs and membership `HasProperty`
+//!   when the view is built without records. A path with two `LocalGraph`s
 //!   keeps the base's count of `File` nodes, whatever count its parse now
-//!   has.
+//!   has. `Overrides`, `Imports`, `Decorates` with its `Annotation` nodes,
+//!   and the controller `EntryPoint` nodes of a dirty file are as indexed.
 //! - The heuristic mirror edges (`MirrorsField`, `EventTopicMirror`) are
 //!   index-time: an `EventTopic` that pairs with its replayed twin keeps its
 //!   base mirror edges, an unpaired or new one has none, and a dirty file's
@@ -159,6 +163,7 @@ use crate::analyzer::heritage::HeritageNode;
 use crate::analyzer::lexical::{
     enclosing_types, file_identities, later_is_arity_twin, splits_by_arity,
 };
+use crate::analyzer::membership::{CLASS_MEMBERSHIP_IMPL_REASON, CLASS_MEMBERSHIP_REASON};
 use crate::analyzer::outcome::Tier;
 use crate::analyzer::record_nodes::{
     EVENT_TOPIC_PUBLISHES_REASON, EVENT_TOPIC_SUBSCRIBES_REASON, PATH_LITERAL_SINK_REASONS,
@@ -858,6 +863,7 @@ impl OverlayView {
                 base_records,
                 dirty_base: &dirty_base,
                 lexical_parents: &lexical_parents,
+                later_overloads: &later_overloads,
             },
             &mut nodes,
             &mut edges,
@@ -932,13 +938,18 @@ impl OverlayView {
     /// keep mask ⊆ rebuild as fragment capabilities grow. `Defines` is
     /// rebuilt per file (`session::incremental`), so it is masked at the
     /// dirty file's declarations and at its `File` nodes; so are the record
-    /// edges when the records replayed. `HasProperty` is not: it shares its
-    /// kind with class membership (module doc).
+    /// edges when the records replayed. Class membership is rebuilt per
+    /// file too: `HasMethod` always, and `HasProperty` when the records
+    /// replayed, as a schema field's `HasProperty` shares the kind (module
+    /// doc).
     pub fn masks_base_edge(&self, base_idx: u32, rel: RelType) -> bool {
         let per_file =
             || self.dirty_base.contains(&base_idx) || self.defines_files.contains(&base_idx);
         match rel {
-            RelType::Calls | RelType::ReadsField => self.dirty_base.contains(&base_idx),
+            RelType::Calls | RelType::ReadsField | RelType::HasMethod => {
+                self.dirty_base.contains(&base_idx)
+            }
+            RelType::HasProperty if self.records_replayed => self.dirty_base.contains(&base_idx),
             RelType::Defines => per_file(),
             rel if self.records_replayed && replays_record_edge(rel) => per_file(),
             _ => false,
@@ -1052,10 +1063,13 @@ impl OverlayView {
 /// nodes they pair or suppress, and whether the records replayed. Fix wave
 /// B extends it again: a dirty file binds no call into a removed module,
 /// and a replayed literal of a nested function hashes its lexical parents.
+/// F7b1 extends it again: the view stores a dirty file's class membership
+/// edges with two more reasons, and masks the base ones.
 pub const VIEW_CACHE_FORMAT: u32 = 14;
 
 /// The base edge kinds the record replay rebuilds, so masks at a re-parsed
-/// file's nodes. `HasProperty` is out (module doc).
+/// file's nodes. `HasProperty` has its own arm in
+/// [`OverlayView::masks_base_edge`] (module doc).
 fn replays_record_edge(rel: RelType) -> bool {
     matches!(
         rel,
@@ -1070,7 +1084,7 @@ fn replays_record_edge(rel: RelType) -> bool {
 /// Every reason [`OverlayView::build`] puts on a [`ViewEdge`]. A cached view
 /// stores each reason as its index here; a view with an unlisted reason is
 /// never stored, so it costs a build per query as before the cache.
-const VIEW_EDGE_REASONS: [&str; 32] = [
+const VIEW_EDGE_REASONS: [&str; 34] = [
     OVERLOAD_SET_REASON,
     CLOSURE_REFERENCE_REASON,
     NEAREST_COPY_REASON,
@@ -1103,6 +1117,8 @@ const VIEW_EDGE_REASONS: [&str; 32] = [
     SCHEMA_FIELD_HAS_PROPERTY_REASON,
     EVENT_TOPIC_PUBLISHES_REASON,
     EVENT_TOPIC_SUBSCRIBES_REASON,
+    CLASS_MEMBERSHIP_REASON,
+    CLASS_MEMBERSHIP_IMPL_REASON,
 ];
 
 pub(super) fn reason_index(reason: &str) -> Option<u8> {

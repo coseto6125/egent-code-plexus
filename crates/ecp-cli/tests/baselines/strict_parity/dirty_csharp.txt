@@ -1,4 +1,1 @@
 # owner: lane F (incremental overlay: builder edges of dirty files)
-edge full-only x1 HasMethod Class src/Lib.cs:14 Extra #cd4c2bf6825ed40e -> Method src/Lib.cs:16 Twice #c9315fb57c1a5005 conf=1.0
-parent full-only x1 Method src/Lib.cs:16 Twice #c9315fb57c1a5005 owner=Extra <- HasMethod Class src/Lib.cs:14 Extra #cd4c2bf6825ed40e
-parent overlay-only x1 Method src/Lib.cs:16 Twice #c9315fb57c1a5005 owner=Extra <- none
