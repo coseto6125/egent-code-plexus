@@ -966,16 +966,6 @@ impl<'a> Resolver<'a> {
     /// Read imports in the callee's file. Java/Kotlin imports bind a type;
     /// C# namespaces and Swift package targets restrict visible types before
     /// member lookup. Other languages retain the directory-scoped fallback.
-    pub fn resolve_chained_member(
-        &self,
-        source_file: &Path,
-        callee: (NodeId, f32),
-        member: &str,
-    ) -> Option<(NodeId, f32)> {
-        self.resolve_chained_member_outcome(source_file, callee, member)
-            .bound()
-    }
-
     pub(crate) fn resolve_chained_member_outcome(
         &self,
         source_file: &Path,

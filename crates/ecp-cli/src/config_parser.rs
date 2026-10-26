@@ -1567,24 +1567,6 @@ pub struct CsprojMeta {
     pub compile_includes: Vec<String>,
 }
 
-/// Parsed metadata from `global.json` (Task F1).
-#[derive(Debug, Clone, PartialEq)]
-pub struct GlobalJsonMeta {
-    /// Always `"global-json"`.
-    pub kind: &'static str,
-    /// The `sdk.version` field, e.g. `"8.0.100"`.
-    pub sdk_version: Option<String>,
-}
-
-/// Parsed metadata from `NuGet.config` (Task F1).
-#[derive(Debug, Clone, PartialEq)]
-pub struct NugetConfigMeta {
-    /// Always `"nuget-config"`.
-    pub kind: &'static str,
-    /// Feed entries: `(key, url)`.
-    pub package_sources: Vec<(String, String)>,
-}
-
 /// Parsed metadata from `composer.json` (Task F2).
 ///
 /// Mirrors the [`CsprojMeta`] shape: a `kind` discriminator plus the most
@@ -1726,34 +1708,6 @@ fn parse_single_csproj(path: &Path, repo_root: &Path) -> Option<CsprojMeta> {
         sdk_style,
         root_namespace: xml_first_text(&content, "RootNamespace"),
         compile_includes: xml_attrs_single(&content, "Compile", "Include"),
-    })
-}
-
-/// Parse `global.json` from `repo_path`.  Returns `None` if absent or malformed.
-pub fn parse_global_json(repo_path: &Path) -> Option<GlobalJsonMeta> {
-    let content = std::fs::read_to_string(repo_path.join("global.json")).ok()?;
-    let json = serde_json::from_str::<serde_json::Value>(&content).ok()?;
-    let sdk_version = json
-        .pointer("/sdk/version")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    Some(GlobalJsonMeta {
-        kind: "global-json",
-        sdk_version,
-    })
-}
-
-/// Parse `NuGet.config` from `repo_path`.  Returns `None` if absent.
-pub fn parse_nuget_config(repo_path: &Path) -> Option<NugetConfigMeta> {
-    let raw = std::fs::read_to_string(repo_path.join("NuGet.config"))
-        .or_else(|_| std::fs::read_to_string(repo_path.join("nuget.config")))
-        .ok()?;
-    let content = strip_xml_comments(&raw);
-
-    let package_sources = xml_attrs_pairs(&content, "add", "key", "value");
-    Some(NugetConfigMeta {
-        kind: "nuget-config",
-        package_sources,
     })
 }
 
@@ -2034,52 +1988,6 @@ mod tests {
         assert_eq!(
             meta.project_references,
             vec!["../Shared/Shared.csproj".to_string()]
-        );
-    }
-
-    #[test]
-    fn global_json_extracts_sdk_version() {
-        let dir = TempDir::new().unwrap();
-        fs::write(
-            dir.path().join("global.json"),
-            r#"{ "sdk": { "version": "8.0.100", "rollForward": "latestMinor" } }"#,
-        )
-        .unwrap();
-
-        let meta = parse_global_json(dir.path()).expect("global.json should parse");
-        assert_eq!(meta.kind, "global-json");
-        assert_eq!(meta.sdk_version.as_deref(), Some("8.0.100"));
-    }
-
-    #[test]
-    fn nuget_config_extracts_package_sources() {
-        let dir = TempDir::new().unwrap();
-        fs::write(
-            dir.path().join("NuGet.config"),
-            r#"<?xml version="1.0" encoding="utf-8"?>
-<configuration>
-  <packageSources>
-    <add key="nuget.org" value="https://api.nuget.org/v3/index.json" />
-    <add key="myget" value="https://www.myget.org/F/myfeed/api/v3/index.json" />
-  </packageSources>
-</configuration>"#,
-        )
-        .unwrap();
-
-        let meta = parse_nuget_config(dir.path()).expect("NuGet.config should parse");
-        assert_eq!(meta.kind, "nuget-config");
-        assert_eq!(
-            meta.package_sources,
-            vec![
-                (
-                    "nuget.org".to_string(),
-                    "https://api.nuget.org/v3/index.json".to_string()
-                ),
-                (
-                    "myget".to_string(),
-                    "https://www.myget.org/F/myfeed/api/v3/index.json".to_string()
-                ),
-            ]
         );
     }
 

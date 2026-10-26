@@ -674,27 +674,6 @@ where
     }
 }
 
-/// The top-level callable a Go package selector reaches. A Go import's path
-/// and its declared package name are independent, so an unaliased selector
-/// needs both facts. An explicit alias replaces the package spelling, but
-/// remains constrained to the imported directory.
-pub fn go_imported_package_member<'a, F, I>(
-    facts: &F,
-    importer: &str,
-    receiver: &str,
-    member: &str,
-    imports: I,
-) -> Option<(u32, &'a str)>
-where
-    F: ModuleFacts + ?Sized,
-    I: IntoIterator<Item = ImportRef<'a>>,
-{
-    match go_package_lookup(facts, importer, receiver, member, imports) {
-        GoPackageLookup::Resolved(target) => target,
-        GoPackageLookup::Value | GoPackageLookup::Unmapped => None,
-    }
-}
-
 /// A selector can name a value, an unmapped package, or a resolved package.
 pub enum GoPackageLookup<'a> {
     Value,

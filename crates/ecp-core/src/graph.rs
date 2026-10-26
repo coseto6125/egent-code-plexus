@@ -1135,9 +1135,6 @@ impl CallMeta {
     pub const fn is_callback(&self) -> bool {
         self.flags & Self::FLAG_CALLBACK != 0
     }
-    pub const fn is_constructor_call(&self) -> bool {
-        self.flags & Self::FLAG_CONSTRUCTOR_CALL != 0
-    }
 }
 
 /// Per-Function/Method/Constructor-node metadata. Sparse: only present

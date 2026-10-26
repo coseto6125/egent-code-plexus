@@ -223,34 +223,6 @@ pub fn build_old_hash_map(nodes: &[ecp_core::graph::Node]) -> FxHashMap<u64, u64
         .collect()
 }
 
-/// Build the old SchemaField name-set per file from an archived graph for
-/// use as the `old_schema_field_names` argument to `symbol_hash_diff`.
-/// Uses the v10 `nodes_by_kind(SchemaField)` CSR — O(SchemaField count),
-/// not O(N). Falls back to a linear scan on legacy v9 graphs.
-pub fn schema_field_names_per_file(
-    graph: &ecp_core::graph::ArchivedZeroCopyGraph,
-) -> FxHashMap<String, FxHashSet<String>> {
-    let mut out: FxHashMap<String, FxHashSet<String>> = FxHashMap::default();
-    for idx in graph.nodes_by_kind(ecp_core::graph::NodeKind::SchemaField) {
-        let n = &graph.nodes[idx as usize];
-        if !n.has_owning_file() {
-            continue;
-        }
-        let raw_path = graph.files[n.file_idx.to_native() as usize]
-            .path
-            .resolve(&graph.string_pool);
-        let path_str = if raw_path.contains('\\') {
-            raw_path.replace('\\', "/")
-        } else {
-            raw_path.to_owned()
-        };
-        out.entry(path_str)
-            .or_default()
-            .insert(n.name.resolve(&graph.string_pool).to_string());
-    }
-    out
-}
-
 /// Build the old import-set map from a slice of `LocalGraph`s (the parse
 /// results stored in the previous analysis pass, if available). Each entry
 /// is `path → sorted (source, name)` pairs.

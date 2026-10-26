@@ -63,10 +63,6 @@ pub mod test_counters {
     /// the background self-heal (the spawn itself is skipped under
     /// ECP_SKIP_BG_REBUILD, so tests assert intent via this counter).
     pub static BEHIND_HEAD_HEAL_COUNT: AtomicUsize = AtomicUsize::new(0);
-    /// FU-2026-06-10-f92cecba3daa: incremented when the L1 freshness gate
-    /// proves every dirty file's fragment current (manifest mtime_ns match)
-    /// and skips the refresh entirely.
-    pub static FRESH_GATE_SKIP_COUNT: AtomicUsize = AtomicUsize::new(0);
     /// Incremented each time `spawn_upgrade_gc` passes its once-per-process
     /// guard, before the env / binary-name gates that skip the spawn in
     /// tests. Left out of `reset` with the guard it counts: the guard is
@@ -82,7 +78,6 @@ pub mod test_counters {
         WARM_ATTACH_COUNT.store(0, Ordering::Relaxed);
         BEHIND_HEAD_HEAL_COUNT.store(0, Ordering::Relaxed);
         super::BEHIND_HEAD_SPAWNED.store(false, Ordering::Relaxed);
-        FRESH_GATE_SKIP_COUNT.store(0, Ordering::Relaxed);
     }
 
     pub fn reanalyze_calls() -> usize {
@@ -107,10 +102,6 @@ pub mod test_counters {
 
     pub fn behind_head_heal_calls() -> usize {
         BEHIND_HEAD_HEAL_COUNT.load(Ordering::Relaxed)
-    }
-
-    pub fn fresh_gate_skips() -> usize {
-        FRESH_GATE_SKIP_COUNT.load(Ordering::Relaxed)
     }
 }
 
@@ -793,8 +784,6 @@ pub(crate) fn ensure_fresh_with_rebuild(
                     &rel_paths,
                 );
                 if gate.rel_paths.is_empty() {
-                    test_counters::FRESH_GATE_SKIP_COUNT
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     // A walk that found only "other" files, or sources whose
                     // fragments are current, leaves the sidecar behind HEAD;
                     // every later query would repeat the walk until a

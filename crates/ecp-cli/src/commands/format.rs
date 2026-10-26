@@ -1,7 +1,7 @@
 //! Shared formatting helpers for archived graph enums. Previously each
 //! command carried its own copy of `kind_to_str` / `rel_to_str`.
 
-use ecp_core::graph::{ArchivedNodeKind, ArchivedRelType, NodeKind, RelType};
+use ecp_core::graph::{ArchivedNodeKind, NodeKind, RelType};
 
 /// Variant name for a live `NodeKind` (e.g. overlay hits).
 ///
@@ -47,10 +47,6 @@ pub fn rel_type_to_str(rel: RelType) -> &'static str {
         RelType::QueriesTable => "queries_table",
         RelType::PartOf => "part_of",
     }
-}
-
-pub fn rel_to_str(rel: &ArchivedRelType) -> &'static str {
-    rel_type_to_str(RelType::from(rel))
 }
 
 #[cfg(test)]

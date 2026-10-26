@@ -97,7 +97,6 @@ pub(crate) fn classify_collision(kind: NodeKind, path: &str) -> &'static str {
 }
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 
 /// Per-graph output from Pass 2 parallel map: `(edges, pending_call_metas,
 /// file_edges, blind_spots)`. `pending_call_metas` entries are
@@ -173,7 +172,6 @@ fn sanitize_id(s: &str) -> String {
 
 pub struct GraphBuilder {
     local_graphs: Vec<LocalGraph>,
-    old_file_hashes: HashMap<String, [u8; 8]>,
     /// When `Some`, the resolver pass 2 buffers every decision and writes a
     /// JSONL line per resolution attempt to this path. Used by the oracle
     /// verification harness (see specs/2026-05-15-resolver-oracle-harness.md).
@@ -218,7 +216,6 @@ impl GraphBuilder {
     pub fn new() -> Self {
         Self {
             local_graphs: Vec::new(),
-            old_file_hashes: HashMap::new(),
             resolver_dump_path: None,
             path_aliases: PathAliases::new(),
             repo_root: None,
@@ -253,11 +250,6 @@ impl GraphBuilder {
     /// Without this, `route_shapes` / `Fetches` edges are skipped.
     pub fn with_repo_root(mut self, root: std::path::PathBuf) -> Self {
         self.repo_root = Some(root);
-        self
-    }
-
-    pub fn with_cache(mut self, hashes: HashMap<String, [u8; 8]>) -> Self {
-        self.old_file_hashes = hashes;
         self
     }
 
