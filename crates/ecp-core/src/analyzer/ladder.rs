@@ -2758,7 +2758,13 @@ mod tests {
             owner: Some("Sub"),
             ..CallPick::default()
         };
-        let cases: [(&[&str], Option<CallPick<'_>>, Resolution, Option<&str>); 8] = [
+        type SuperCase<'a> = (
+            &'a [&'a str],
+            Option<CallPick<'a>>,
+            Resolution,
+            Option<&'a str>,
+        );
+        let cases: [SuperCase<'_>; 8] = [
             (
                 &["Base"],
                 Some(in_class),

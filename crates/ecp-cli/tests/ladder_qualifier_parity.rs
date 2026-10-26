@@ -249,10 +249,16 @@ const GO: Case = Case {
 };
 
 /// A `use`-imported type, and module paths anchored at `crate::`, `self::`
-/// and `super::`. `src/other.rs` holds the decoy free `helper`.
+/// and `super::`. `src/other.rs` holds the decoy free `helper`. The index
+/// places a `super::` path only through the Cargo module tree, so the
+/// fixture carries a `Cargo.toml` (0.16.4 binds nothing without one).
 const RUST: Case = Case {
     name: "ladder_qualifier_rust",
     files: &[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"q\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
         (
             "src/k.rs",
             "pub struct K;\nimpl K {\n pub fn save(&self, id: i32) {}\n pub fn st(id: i32) {}\n}\n",
