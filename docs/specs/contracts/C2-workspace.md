@@ -16,7 +16,7 @@ Every path in the table is repo-relative and `/`-separated. It has no leading `.
 
 | Type | Kind | Purpose |
 |---|---|---|
-| `Ecosystem` | stored enum, `u8` | The package ecosystem whose config files make a scope: `Cargo`, `Node`, `Go`, `Python`, `DotNet`. |
+| `Ecosystem` | stored enum, `u8` | The package ecosystem whose config files make a scope: `Cargo`, `Node`, `Go`, `Python`, `DotNet`, `Composer`, `SwiftPm` (the last two appended by R-A4a). |
 | `ConfigRole` | enum | What a config file name does: `Root` can make its directory a scope root; `Contributing` only adds to the configs that read it. |
 | `ConfigRead`, `ConfigPresence` | stored row, enum | One config path the producer tried to read: `Read` or `Missing`. |
 | `Membership` | stored enum | Which files under the root belong to a scope: `Subtree` or `Listed(files)`. |
@@ -53,7 +53,7 @@ All functions are pure. None reads the file system.
 
 | Function | Rule |
 |---|---|
-| `Ecosystem::for_language(Language)` | The ecosystem whose scopes resolve a file of that language. It takes C5's `contracts::routing::Language`, called with `ParsedLanguage::resolution()`. TypeScript, JavaScript, Vue, Astro and Svelte map to `Node`; Rust to `Cargo`; Go to `Go`; Python to `Python`; C# to `DotNet`; the other 27 languages to `None`. The `match` has no wildcard arm. |
+| `Ecosystem::for_language(Language)` | The ecosystem whose scopes resolve a file of that language. It takes C5's `contracts::routing::Language`, called with `ParsedLanguage::resolution()`. TypeScript, JavaScript, Vue, Astro and Svelte map to `Node`; Rust to `Cargo`; Go to `Go`; Python to `Python`; C# to `DotNet`; PHP to `Composer`; Swift to `SwiftPm`; the other 25 languages to `None`. The `match` has no wildcard arm. |
 | `Ecosystem::classify_config(file_name)` | The ecosystem and role of a config file by its name alone (table below). |
 | `WorkspaceFacts::new`, `validate` | `new` returns the table only when every invariant above holds. A reader runs `validate` once on a table it did not build. |
 | `scopes_at(ecosystem, root)` | Every scope whose root is exactly `root`, in table order. |
@@ -80,8 +80,10 @@ Config file names:
 | `go.work` | Go | Contributing |
 | `pyproject.toml` | Python | Root |
 | `*.csproj` | DotNet | Root |
+| `composer.json` | Composer | Root |
+| `Package.swift` | SwiftPm | Root |
 
-These are the files that `parse_configs` reads today. Any other config path, such as `tsconfig.base.json` or a missing `config/base.json`, is a config only because a scope lists it.
+These are the files that `config_parser::parse_repo_configs` reads (R-A4a). Any other config path, such as `tsconfig.base.json` or a missing `config/base.json`, is a config only because a scope lists it.
 
 `invalidated_by(path)` collects, in this order:
 
@@ -131,7 +133,7 @@ Values with no mapping:
 | `ModTree`, `ReExportMap`, `targets`, `file_targets` (`module_tree.rs:121`, `:144`, `:164-167`) | They come from source files, not from config. They stay with area 1's module-tree facts. |
 | Cargo alias rows `name/*` → `src/*` and `name` → `src/lib.rs`, `src/main.rs` (`config_parser.rs:70-75`) | `names` plus `entry_files` replace them. They stay in `alias_table` until area 4, so index edges do not change in B's first round. |
 | pyproject `name/*` → `src/name/*`, `name/*` (`config_parser.rs:86-89`) | Area 4 decides between this alias and `search_roots`. The name comes from the TOML table: `[project] name`, else `[tool.poetry] name` (`:79-85`, through `read_toml` `:179` and `toml_str` `:183`). |
-| `CsprojMeta`, `GlobalJsonMeta`, `NugetConfigMeta`, `ComposerJsonMeta`, `SwiftPackageMeta` (`config_parser.rs:357`, `:374`, `:383`, `:397`, `:420`) | `parse_global_json` (`:518`), `parse_nuget_config` (`:532`), `parse_single_composer_json` (`:562`) and `parse_single_swift_package` (`:603`) have no production caller. The file allows dead code (`:1-4`). Area 4 adds `Ecosystem` variants for them. |
+| `CsprojMeta`, `GlobalJsonMeta`, `NugetConfigMeta`, `ComposerJsonMeta`, `SwiftPackageMeta` (`config_parser.rs:357`, `:374`, `:383`, `:397`, `:420`) | `parse_global_json` (`:518`), `parse_nuget_config` (`:532`), `parse_single_composer_json` (`:562`) and `parse_single_swift_package` (`:603`) had no production caller. R-A4a added the `Composer` and `SwiftPm` variants and reads `parse_single_composer_json` for the Composer row. `parse_global_json`, `parse_nuget_config` and `parse_single_swift_package` still have test callers only (`crates/ecp-cli/tests/config_php_swift.rs`). |
 | `[dependencies]` of a crate | Not read today. B's first round can fill `Scope.dependencies` (recommended); the lookup does not use them in that round (Open point 3). |
 
 ## Consumers
