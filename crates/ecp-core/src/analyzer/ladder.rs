@@ -1142,6 +1142,306 @@ pub fn qualified<'h, F: QualifierFacts>(
     (Resolution::Unknown, None)
 }
 
+/// The most `pub use` hops [`module_tree_item`] follows from one item.
+const MAX_REEXPORT_HOPS: u8 = 16;
+
+/// One `pub use` re-export, as written in its module (R14).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReExport<'f> {
+    /// The path before the item: `inner` in `pub use inner::W`. It may start
+    /// with `crate`, `self`, `super` or a workspace crate name; any other
+    /// head is a child of the containing module.
+    pub prefix: &'f [String],
+    /// The item at the source (`W` in `pub use inner::W as V`), `*` for a
+    /// glob.
+    pub original: &'f str,
+    /// The module path, in its tree, of the module holding the `pub use`.
+    pub containing: &'f [String],
+}
+
+/// What a module publishes a name through, as one side knows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Published<'f> {
+    /// No `pub use` publishes the name: the module's own declaration does,
+    /// if it has one.
+    Own,
+    /// The `pub use` naming it, else a glob `pub use`.
+    ReExport(ReExport<'f>),
+    /// A `use` of the module may publish the name, and the side cannot see
+    /// whether it is `pub`.
+    Unknown,
+}
+
+/// Where a Rust path lands in the module tree ([`module_tree_item`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TreeItem<P> {
+    /// The item `item` of the module whose file is `file`, past every
+    /// `pub use` the side follows.
+    Found { file: P, item: String },
+    /// A `use` whose visibility the side cannot see stands on the path: no
+    /// file binds.
+    Unknown,
+}
+
+/// What the Rust module-tree tier (R14) reads: the module trees of the
+/// workspace's Cargo targets. Each method answers a question about one
+/// tree, one module or one caller; [`module_tree_item`] and
+/// [`module_tree_member`] decide.
+pub trait ModuleTreeFacts {
+    /// One Cargo target's module tree: a crate's lib target or a bin.
+    type Root: Copy;
+    /// One module of a tree.
+    type Module: Copy + PartialEq;
+    /// A module's file as the side stores it.
+    type File: AsRef<str>;
+    /// The lib target of the workspace crate that code names `name`, from
+    /// the crate table. `None` for a name no crate carries, and for a name
+    /// the table cannot give one crate for.
+    fn crate_root(&self, name: &str) -> Option<Self::Root>;
+    /// The target whose `crate::` the file `caller` writes.
+    fn caller_crate(&self, caller: &str) -> Option<Self::Root>;
+    /// The target and the module path of `caller`'s own module, which
+    /// `self::` and `super::` start from. `None` when no target declares
+    /// the caller.
+    fn caller_module(&self, caller: &str) -> Option<(Self::Root, Vec<String>)>;
+    /// The root module of `root`, its entry file.
+    fn root_module(&self, root: Self::Root) -> Option<Self::Module>;
+    /// The module at `path` (not empty) in `root`'s tree: a file-backed
+    /// `mod` declaration of `parent`, the module at `path` less its last
+    /// segment.
+    fn submodule(
+        &self,
+        root: Self::Root,
+        parent: Self::Module,
+        path: &[String],
+    ) -> Option<Self::Module>;
+    /// What `module` of `root` publishes `name` through.
+    fn published(&self, root: Self::Root, module: Self::Module, name: &str) -> Published<'_>;
+    /// The stored file of `module`. `None` for a file the side cannot name.
+    fn module_file(&self, module: Self::Module) -> Option<Self::File>;
+}
+
+/// Heads that name a crate outside the workspace.
+fn is_external_crate(head: &str) -> bool {
+    matches!(head, "std" | "core" | "alloc" | "proc_macro" | "test")
+}
+
+/// The target and the crate-rooted module path of the head of `segs` from
+/// `caller`, with the segments after that head: `crate`, `self`, a
+/// `super` chain, or a workspace crate name.
+fn tree_anchor<F: ModuleTreeFacts>(
+    facts: &F,
+    caller: &str,
+    segs: &[&str],
+) -> Option<(F::Root, Vec<String>)> {
+    let owned = |segs: &[&str]| segs.iter().map(|&s| s.to_owned()).collect::<Vec<_>>();
+    match *segs.first()? {
+        "crate" => Some((facts.caller_crate(caller)?, owned(&segs[1..]))),
+        head @ ("self" | "super") => {
+            let (root, mut path) = facts.caller_module(caller)?;
+            let up = segs.iter().take_while(|&&s| s == "super").count();
+            path.truncate(path.len().checked_sub(up)?);
+            let rest = if head == "self" {
+                &segs[1..]
+            } else {
+                &segs[up..]
+            };
+            path.extend(rest.iter().map(|&s| s.to_owned()));
+            Some((root, path))
+        }
+        head if is_external_crate(head) => None,
+        head => Some((facts.crate_root(head)?, owned(&segs[1..]))),
+    }
+}
+
+/// The deepest module of `root` that a prefix of `combined` (at most all
+/// segments but the last) names, and the index of the segment after it.
+/// A tree holds a module only below its parent, so the deepest prefix is
+/// the one a walk from the root reaches.
+fn tree_walk<F: ModuleTreeFacts>(
+    facts: &F,
+    root: F::Root,
+    combined: &[String],
+) -> Option<(F::Module, usize)> {
+    if combined.is_empty() {
+        return None;
+    }
+    let mut module = facts.root_module(root)?;
+    let mut at = 0;
+    while at + 1 < combined.len() {
+        match facts.submodule(root, module, &combined[..=at]) {
+            Some(child) => {
+                module = child;
+                at += 1;
+            }
+            None => break,
+        }
+    }
+    Some((module, at))
+}
+
+/// The `pub use` chain from `item` of `module`. `None` when the module
+/// publishes `item` itself, or when the chain leads back to it, past the
+/// hop limit, or to a file the side cannot name: the caller keeps
+/// `(module, item)` then.
+fn tree_follow<F: ModuleTreeFacts>(
+    facts: &F,
+    root: F::Root,
+    module: F::Module,
+    item: &str,
+    depth: u8,
+) -> Option<TreeItem<F::File>> {
+    if depth >= MAX_REEXPORT_HOPS || item.is_empty() {
+        return None;
+    }
+    let entry = match facts.published(root, module, item) {
+        Published::Own => return None,
+        Published::Unknown => return Some(TreeItem::Unknown),
+        Published::ReExport(entry) => entry,
+    };
+    let target = if entry.original == "*" {
+        item
+    } else {
+        entry.original
+    };
+    let (prefix, none): (&[String], &[String]) = (entry.prefix, &[]);
+    let (root, base, rest) = match prefix.first().map(String::as_str) {
+        Some("crate") => (root, none, &prefix[1..]),
+        Some("self") => (root, entry.containing, &prefix[1..]),
+        Some("super") => {
+            let up = prefix.iter().take_while(|s| s.as_str() == "super").count();
+            let kept = entry.containing.len().saturating_sub(up);
+            (root, &entry.containing[..kept], &prefix[up..])
+        }
+        Some(head) => match facts.crate_root(head) {
+            Some(other) => (other, none, &prefix[1..]),
+            None => (root, entry.containing, prefix),
+        },
+        None => (root, none, none),
+    };
+    let combined: Vec<String> = base
+        .iter()
+        .chain(rest)
+        .cloned()
+        .chain(std::iter::once(target.to_owned()))
+        .collect();
+    let (next, at) = tree_walk(facts, root, &combined)?;
+    let next_item = &combined[at];
+    if next == module && next_item == item {
+        return None;
+    }
+    if let Some(deeper) = tree_follow(facts, root, next, next_item, depth + 1) {
+        return Some(deeper);
+    }
+    Some(TreeItem::Found {
+        file: facts.module_file(next)?,
+        item: next_item.clone(),
+    })
+}
+
+/// R14, the file part: where the Rust path `path` (`a::b::f`) lands in the
+/// module tree, read from `caller`. The head picks the tree: `crate`, `self`
+/// and `super` the caller's target, a workspace crate name that crate's lib
+/// target; `std` and the other external crates none. The deepest module a
+/// prefix of the path names holds the next segment as its item, and the
+/// `pub use` chain from that item, at most 16 hops, gives the defining
+/// module. `None` for a path of one segment, an unknown head, or a module
+/// file the side cannot name.
+pub fn module_tree_item<F: ModuleTreeFacts>(
+    facts: &F,
+    caller: &str,
+    path: &str,
+) -> Option<TreeItem<F::File>> {
+    let segs: Vec<&str> = path.split("::").collect();
+    if segs.len() < 2 {
+        return None;
+    }
+    let (root, combined) = tree_anchor(facts, caller, &segs)?;
+    let (module, at) = tree_walk(facts, root, &combined)?;
+    let item = &combined[at];
+    if let Some(found) = tree_follow(facts, root, module, item, 0) {
+        return Some(found);
+    }
+    Some(TreeItem::Found {
+        file: facts.module_file(module)?,
+        item: item.clone(),
+    })
+}
+
+/// The module that every segment of the module path `path` names, read
+/// from `caller`: `b::util`, `crate::a`, `super`. `None` when a segment
+/// names no module.
+pub fn module_tree_module<F: ModuleTreeFacts>(
+    facts: &F,
+    caller: &str,
+    path: &str,
+) -> Option<F::Module> {
+    let segs: Vec<&str> = path.split("::").collect();
+    let (root, combined) = tree_anchor(facts, caller, &segs)?;
+    let mut module = facts.root_module(root)?;
+    for at in 0..combined.len() {
+        module = facts.submodule(root, module, &combined[..=at])?;
+    }
+    Some(module)
+}
+
+/// R14, the member part: the declaration the Rust path `callee` binds
+/// through the module tree. In the file [`module_tree_item`] places, the
+/// item's first declaration of `target`'s kinds, else the first one named
+/// `member` (the callee's last segment, generic arguments dropped).
+/// [`qualified`] then applies the method rule ([`rust_path_may_bind`]).
+pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
+    facts: &F,
+    decls: &D,
+    caller: &str,
+    callee: &str,
+    member: &str,
+    target: ResolveTarget,
+) -> Option<u32> {
+    let TreeItem::Found { file, item } = module_tree_item(facts, caller, callee)? else {
+        return None;
+    };
+    let file = file.as_ref();
+    decls.first_decl_in_file(file, &item, target).or_else(|| {
+        let bare = member.split('<').next().unwrap_or(member);
+        decls.first_decl_in_file(file, bare, target)
+    })
+}
+
+/// [`QualifierFacts::crate_module`] through the module tree: `Local` unless
+/// `module_path` names a module of a workspace crate; then that crate's file
+/// that declares `member` of `target`'s kinds under its own name, past the
+/// `pub use` chain.
+pub fn crate_module<F: ModuleTreeFacts, D: ResolveFacts>(
+    facts: &F,
+    decls: &D,
+    source: &str,
+    module_path: &str,
+    member: &str,
+    target: ResolveTarget,
+) -> CrateModule<F::File> {
+    let head = module_path.split("::").next().unwrap_or_default();
+    if matches!(head, "crate" | "self" | "super")
+        || facts.crate_root(head).is_none()
+        || module_tree_module(facts, source, module_path).is_none()
+    {
+        return CrateModule::Local;
+    }
+    CrateModule::Placed(
+        match module_tree_item(facts, source, &format!("{module_path}::{member}")) {
+            Some(TreeItem::Found { file, item })
+                if item == member
+                    && decls
+                        .first_decl_in_file(file.as_ref(), &item, target)
+                        .is_some() =>
+            {
+                Some(file)
+            }
+            _ => None,
+        },
+    )
+}
+
 /// R12, Python `super().member()`: `member` on the caller class's bases,
 /// by the owner index, never by bare name. Bases are tried in declared
 /// order (a single-pass approximation of the MRO); the first base that owns
@@ -2823,5 +3123,293 @@ mod tests {
             qualify(&facts, at, &names(&["Base"]), StemFile::Any, None),
             (Resolution::Unknown, 0)
         );
+    }
+
+    /// One `pub use` row of a [`Tree`]: `(module file, published name,
+    /// prefix, original, containing module path)`; a glob is named `*`.
+    type ReExportRow = (&'static str, &'static str, Vec<String>, String, Vec<String>);
+
+    /// [`ModuleTreeFacts`] over fixed rows. A root, a module and a file are
+    /// all the module's file, as the overlay stores them.
+    #[derive(Default)]
+    struct Tree {
+        /// `(code name, lib entry file)`, one row per crate table row.
+        crates: Vec<(&'static str, &'static str)>,
+        /// `(caller file, its root, its module path)`.
+        callers: Vec<(&'static str, &'static str, &'static [&'static str])>,
+        /// `(root, module path, file)` for each file-backed `mod`.
+        modules: Vec<(&'static str, &'static [&'static str], &'static str)>,
+        reexports: Vec<ReExportRow>,
+        /// `(module file, name)` a `use` of unknown visibility names.
+        unknown: Vec<(&'static str, &'static str)>,
+    }
+
+    impl ModuleTreeFacts for Tree {
+        type Root = &'static str;
+        type Module = &'static str;
+        type File = &'static str;
+
+        fn crate_root(&self, name: &str) -> Option<&'static str> {
+            let mut rows = self.crates.iter().filter(|row| row.0 == name);
+            match (rows.next(), rows.next()) {
+                (Some(&(_, root)), None) => Some(root),
+                _ => None,
+            }
+        }
+        fn caller_crate(&self, caller: &str) -> Option<&'static str> {
+            self.callers
+                .iter()
+                .find(|row| row.0 == caller)
+                .map(|row| row.1)
+        }
+        fn caller_module(&self, caller: &str) -> Option<(&'static str, Vec<String>)> {
+            self.callers
+                .iter()
+                .find(|row| row.0 == caller)
+                .map(|&(_, root, path)| (root, path.iter().map(|&s| s.to_owned()).collect()))
+        }
+        fn root_module(&self, root: &'static str) -> Option<&'static str> {
+            Some(root)
+        }
+        fn submodule(
+            &self,
+            root: &'static str,
+            _parent: &'static str,
+            path: &[String],
+        ) -> Option<&'static str> {
+            self.modules
+                .iter()
+                .find(|row| {
+                    row.0 == root
+                        && row.1.len() == path.len()
+                        && row.1.iter().zip(path).all(|(&a, b)| a == b.as_str())
+                })
+                .map(|row| row.2)
+        }
+        fn published(
+            &self,
+            _root: &'static str,
+            module: &'static str,
+            name: &str,
+        ) -> Published<'_> {
+            if self.unknown.iter().any(|&(m, n)| m == module && n == name) {
+                return Published::Unknown;
+            }
+            let row = |wanted: &str| {
+                self.reexports
+                    .iter()
+                    .find(|row| row.0 == module && row.1 == wanted)
+            };
+            match row(name).or_else(|| row("*")) {
+                Some(row) => Published::ReExport(ReExport {
+                    prefix: &row.2,
+                    original: &row.3,
+                    containing: &row.4,
+                }),
+                None => Published::Own,
+            }
+        }
+        fn module_file(&self, module: &'static str) -> Option<&'static str> {
+            Some(module)
+        }
+    }
+
+    fn segments(path: &[&str]) -> Vec<String> {
+        path.iter().map(|&s| s.to_owned()).collect()
+    }
+
+    const A_LIB: &str = "crates/a/src/lib.rs";
+    const B_LIB: &str = "crates/b/src/lib.rs";
+    const B_M: &str = "crates/b/src/m/mod.rs";
+    const B_DEEP: &str = "crates/b/src/m/deep.rs";
+
+    /// Two crates: `a` (`mod x;`, `pub use b::m::f;`) and `b` (`mod m;` as
+    /// `m/mod.rs` with `mod deep;`, `mod inner;`, `pub use inner::made as
+    /// make;`, `pub use inner::*;`). `x::hidden` is a `use` whose
+    /// visibility the side cannot see.
+    fn workspace() -> (Tree, Vec<Decl>) {
+        let tree = Tree {
+            crates: vec![("a", A_LIB), ("b", B_LIB)],
+            callers: vec![
+                (A_LIB, A_LIB, &[]),
+                ("crates/a/src/x.rs", A_LIB, &["x"]),
+                (B_DEEP, B_LIB, &["m", "deep"]),
+            ],
+            modules: vec![
+                (A_LIB, &["x"], "crates/a/src/x.rs"),
+                (B_LIB, &["m"], B_M),
+                (B_LIB, &["m", "deep"], B_DEEP),
+                (B_LIB, &["inner"], "crates/b/src/inner.rs"),
+            ],
+            reexports: vec![
+                (A_LIB, "f", segments(&["b", "m"]), "f".into(), vec![]),
+                (B_LIB, "make", segments(&["inner"]), "made".into(), vec![]),
+                (B_LIB, "*", segments(&["inner"]), "*".into(), vec![]),
+            ],
+            unknown: vec![("crates/a/src/x.rs", "hidden")],
+        };
+        let decls = vec![
+            (B_M, "f", F, None),
+            (B_DEEP, "g", F, None),
+            ("crates/b/src/inner.rs", "made", F, None),
+            ("crates/b/src/inner.rs", "globbed", F, None),
+            ("crates/a/src/x.rs", "P", NodeKind::Struct, None),
+            ("crates/a/src/x.rs", "parse", M, Some("P")),
+            ("crates/a/src/x.rs", "helper", F, None),
+            (A_LIB, "x", NodeKind::Module, None),
+            (A_LIB, "gone", NodeKind::Module, None),
+            ("crates/a/src/x.rs", "hidden", F, None),
+        ];
+        (tree, decls)
+    }
+
+    fn member(tree: &Tree, decls: &Fake, caller: &str, callee: &str) -> Option<u32> {
+        let (_, last) = callee.rsplit_once("::").expect("a path");
+        module_tree_member(tree, decls, caller, callee, last, CALLABLE)
+    }
+
+    /// R14: a head no crate table row names binds nothing, and neither do
+    /// `std` and the other external crates; a named crate binds.
+    #[test]
+    fn test_module_tree_member_crate_name_absent_from_table_returns_none() {
+        let (tree, decls) = workspace();
+        let fake = Fake::new(Layout::Index, &decls);
+        assert_eq!(member(&tree, &fake, A_LIB, "b::m::f"), Some(0));
+        for callee in ["nope::m::f", "std::m::f", "core::m::f"] {
+            assert_eq!(member(&tree, &fake, A_LIB, callee), None, "{callee}");
+            assert_eq!(module_tree_item(&tree, A_LIB, callee), None, "{callee}");
+        }
+        assert_eq!(module_tree_item(&tree, A_LIB, "f"), None);
+    }
+
+    /// R14: the table gives no crate for a name two of its rows carry, so
+    /// the head binds no tree: no edge, never a guess between them, and a
+    /// `use` of it stays local.
+    #[test]
+    fn test_module_tree_member_two_crates_one_name_returns_none() {
+        let (mut tree, decls) = workspace();
+        tree.crates.push(("b", "vendor/b/src/lib.rs"));
+        tree.modules
+            .push(("vendor/b/src/lib.rs", &["m"], "vendor/b/src/m.rs"));
+        let decls: Vec<Decl> = decls
+            .into_iter()
+            .chain([("vendor/b/src/m.rs", "f", F, None)])
+            .collect();
+        let fake = Fake::new(Layout::Index, &decls);
+        assert_eq!(member(&tree, &fake, A_LIB, "b::m::f"), None);
+        assert_eq!(
+            crate_module(&tree, &fake, A_LIB, "b::m", "f", CALLABLE),
+            CrateModule::Local
+        );
+        // `a`'s `pub use b::m::f` leads nowhere either: `crate::f` stays in
+        // `a`'s root, which declares no `f`.
+        assert_eq!(member(&tree, &fake, A_LIB, "crate::f"), None);
+    }
+
+    /// R14: the `pub use` chain places the item at its definition: a
+    /// renamed re-export (`make` → `inner::made`), a glob, and a re-export
+    /// of another crate's item. A `use` whose visibility the side cannot
+    /// see binds nothing, even when the module declares the name.
+    #[test]
+    fn test_module_tree_member_pub_use_chain_binds_defining_file() {
+        let (tree, decls) = workspace();
+        let fake = Fake::new(Layout::Index, &decls);
+        assert_eq!(member(&tree, &fake, A_LIB, "b::make"), Some(2));
+        assert_eq!(member(&tree, &fake, A_LIB, "b::globbed"), Some(3));
+        assert_eq!(member(&tree, &fake, A_LIB, "crate::f"), Some(0));
+        assert_eq!(
+            module_tree_item(&tree, A_LIB, "b::make"),
+            Some(TreeItem::Found {
+                file: "crates/b/src/inner.rs",
+                item: "made".into()
+            })
+        );
+        assert_eq!(
+            module_tree_item(&tree, A_LIB, "crate::x::hidden"),
+            Some(TreeItem::Unknown)
+        );
+        assert_eq!(member(&tree, &fake, A_LIB, "crate::x::hidden"), None);
+    }
+
+    /// R14: a module whose file is a directory's `mod.rs` holds its items
+    /// and roots its own submodules; `self::` and `super::` start from the
+    /// caller's module.
+    #[test]
+    fn test_module_tree_member_directory_mod_rs_module_binds_its_file() {
+        let (tree, decls) = workspace();
+        let fake = Fake::new(Layout::Index, &decls);
+        let cases = [
+            (A_LIB, "b::m::f", Some(0)),
+            (A_LIB, "b::m::deep::g", Some(1)),
+            (B_DEEP, "super::f", Some(0)),
+            (B_DEEP, "super::super::m::f", Some(0)),
+            (B_DEEP, "self::g", Some(1)),
+            (B_DEEP, "crate::m::deep::g", Some(1)),
+            (B_DEEP, "super::super::super::f", None),
+        ];
+        for (caller, callee, want) in cases {
+            assert_eq!(
+                member(&tree, &fake, caller, callee),
+                want,
+                "{callee} from {caller}"
+            );
+        }
+        assert_eq!(module_tree_module(&tree, A_LIB, "b::m"), Some(B_M));
+    }
+
+    /// R14: a module whose file is removed is no module. The path stops at
+    /// the declaring file, which declares no `run`, so nothing binds, and
+    /// a `use` of the module stays local.
+    #[test]
+    fn test_module_tree_member_removed_module_file_returns_none() {
+        let (tree, decls) = workspace();
+        let fake = Fake::new(Layout::Index, &decls);
+        assert_eq!(member(&tree, &fake, A_LIB, "crate::gone::run"), None);
+        assert_eq!(module_tree_module(&tree, A_LIB, "crate::gone"), None);
+        assert_eq!(
+            crate_module(&tree, &fake, A_LIB, "a::gone", "run", CALLABLE),
+            CrateModule::Local
+        );
+    }
+
+    /// Row 4 through the real tree: the module tree places `parse`, a
+    /// method of `P`, in `x.rs`, and [`qualified`] still binds nothing,
+    /// since the module `x` does not own it.
+    #[test]
+    fn test_module_tree_member_method_last_segment_never_binds() {
+        let (tree, decls) = workspace();
+        let fake = Fake::new(Layout::Index, &decls);
+        let placed = member(&tree, &fake, A_LIB, "crate::x::parse");
+        assert_eq!(placed, Some(5));
+        let facts = Quals::new(&decls);
+        let at = site(A_LIB, "crate::x::parse", None);
+        assert_eq!(
+            qualify(&facts, at, &[], StemFile::Any, placed),
+            (Resolution::Unknown, 1)
+        );
+    }
+
+    /// Divergence D2: a `use` head that names a workspace crate places the
+    /// module's file, as the index does; `crate` / `self` / `super` heads
+    /// and unknown crates stay local, and a module that lacks the member
+    /// places no file.
+    #[test]
+    fn test_crate_module_workspace_crate_head_returns_placed_file() {
+        let (tree, decls) = workspace();
+        let fake = Fake::new(Layout::Index, &decls);
+        let cases = [
+            ("b::m", "f", CrateModule::Placed(Some(B_M))),
+            ("b::m::deep", "g", CrateModule::Placed(Some(B_DEEP))),
+            ("b::m", "absent", CrateModule::Placed(None)),
+            ("crate::x", "helper", CrateModule::Local),
+            ("nope::m", "f", CrateModule::Local),
+        ];
+        for (module_path, name, want) in cases {
+            assert_eq!(
+                crate_module(&tree, &fake, A_LIB, module_path, name, CALLABLE),
+                want,
+                "{module_path}::{name}"
+            );
+        }
     }
 }

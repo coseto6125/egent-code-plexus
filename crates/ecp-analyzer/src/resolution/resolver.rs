@@ -67,7 +67,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use crate::resolution::index::{
     CsharpExtensionDecls, FileMeta, GlobalPick, Language, ResolveTarget, SymbolTable,
 };
-use crate::rust::module_tree::RustWorkspaceModTree;
+use crate::rust::module_tree::{IndexModuleTree, RustWorkspaceModTree};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 pub type NodeId = u32;
@@ -416,24 +416,20 @@ impl ladder::QualifierFacts for IndexFacts<'_, '_> {
         target: ResolveTarget,
     ) -> CrateModule<Arc<str>> {
         let resolver = self.0;
-        if !resolver
-            .mod_tree
-            .is_some_and(|tree| tree.names_module(module_path))
-        {
+        let Some(tree) = resolver.module_tree() else {
             return CrateModule::Local;
+        };
+        match ladder::crate_module(
+            &tree,
+            resolver.symbol_table,
+            source,
+            module_path,
+            member,
+            target,
+        ) {
+            CrateModule::Local => CrateModule::Local,
+            CrateModule::Placed(file) => CrateModule::Placed(file.map(Arc::from)),
         }
-        CrateModule::Placed(
-            resolver
-                .mod_tree_resolve(source, &format!("{module_path}::{member}"))
-                .filter(|resolved| {
-                    resolved.item_name == member
-                        && resolver
-                            .symbol_table
-                            .lookup_in_file_with_kind(&resolved.file, &resolved.item_name, target)
-                            .is_some()
-                })
-                .map(|resolved| Arc::from(resolved.file)),
-        )
     }
 
     fn rust_path_agrees(
@@ -1906,7 +1902,16 @@ impl<'a> Resolver<'a> {
                 site,
                 caller_heritage,
                 StemFile::Any,
-                || self.try_module_tree_resolve(&source_file_str, symbol_name, member, target),
+                || {
+                    ladder::module_tree_member(
+                        &self.module_tree()?,
+                        self.symbol_table,
+                        &source_file_str,
+                        symbol_name,
+                        member,
+                        target,
+                    )
+                },
             );
             match resolution {
                 Resolution::Bound(hit) => {
@@ -2594,31 +2599,10 @@ impl<'a> Resolver<'a> {
         found
     }
 
-    /// Tier 3.5: attempt module-tree FQN resolution for Rust qualified calls.
-    ///
-    /// `symbol_name` is the full callee string (e.g.
-    /// `"crate::build::orchestrator::build_l2"`).
-    /// `member` is its last `::` segment (the item name, same value that
-    /// `split_qualifier` already extracted for Tier 2.5).
-    ///
-    /// Returns the node id of the resolved target, or `None` if the module
-    /// tree is absent, the FQN doesn't resolve, or the member isn't found in
-    /// the resolved file.
-    fn try_module_tree_resolve(
-        &self,
-        source_file_str: &str,
-        symbol_name: &str,
-        member: &str,
-        target: ResolveTarget,
-    ) -> Option<NodeId> {
-        let resolved = self.mod_tree_resolve(source_file_str, symbol_name)?;
-        self.symbol_table
-            .lookup_in_file_with_kind(&resolved.file, &resolved.item_name, target)
-            .or_else(|| {
-                let bare = member.split('<').next().unwrap_or(member);
-                self.symbol_table
-                    .lookup_in_file_with_kind(&resolved.file, bare, target)
-            })
+    /// Tier 3.5's facts ([`ladder::ModuleTreeFacts`]): the workspace module
+    /// tree. `None` without one (no `Cargo.toml`, a non-Rust repo).
+    fn module_tree(&self) -> Option<IndexModuleTree<'_>> {
+        Some(self.mod_tree?.facts(self.workspace_root.as_deref()?))
     }
 
     fn mod_tree_resolve(

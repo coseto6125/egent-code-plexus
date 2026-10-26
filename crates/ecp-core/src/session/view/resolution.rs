@@ -6,7 +6,7 @@
 use super::{
     base_function_meta, construction_target, emit_closure_references, fragment_emits, reason_index,
     span_of, CallGap, DirtyNamesake, OverlayFileInput, OverlaySymbol, ViewEdge, ViewNode,
-    CONF_IMPORT_SCOPED, CONF_MODULE_TREE, CS_STRICTEST_FLAGS, GAP_CS_ACCESS_DIRTY_TARGET,
+    CONF_IMPORT_SCOPED, CS_STRICTEST_FLAGS, GAP_CS_ACCESS_DIRTY_TARGET,
     GAP_CS_EXTENSION_DIRTY_DECLARATION, GAP_CS_PARTIAL_BARE_CALL,
 };
 use crate::analyzer::csharp_access::{self, CallAccess};
@@ -30,8 +30,8 @@ use crate::analyzer::reexport::{
     ModuleFacts, PyModule, ResolveTarget,
 };
 use crate::analyzer::rust_paths::{
-    is_rust_source, is_rust_target_root, rust_expand_path_head, rust_module_dir,
-    rust_module_path_base, rust_type_path_prefix,
+    is_rust_source, rust_expand_path_head, rust_module_dir, rust_module_path_base,
+    rust_type_path_prefix,
 };
 use crate::analyzer::same_file_pick::{
     is_free, member_call_admits, prefer_owned, rust_impl_members, ImplMember, ImplNode, PickFacts,
@@ -224,6 +224,11 @@ struct OverlayFacts<'a> {
     /// `SymbolTable::csharp_namespaces`. Built on the first C# extension
     /// question.
     csharp_namespaces: OnceCell<FxHashMap<&'a str, Vec<&'a str>>>,
+    /// The Rust module trees ([`ladder::ModuleTreeFacts`]).
+    rust: RustModules<'a>,
+    /// Dirty file ordinal → where it stands in [`Self::rust`], read on its
+    /// first module-tree question.
+    rust_callers: RefCell<FxHashMap<usize, Rc<RustCaller<'a>>>>,
 }
 
 /// A base Rust `Impl` node: its span, its idx and the [`owner_key`] of the
@@ -378,7 +383,27 @@ impl<'a> OverlayFacts<'a> {
             dirty_flags,
             dirty_lexical_parents,
             csharp_namespaces: OnceCell::new(),
+            rust: RustModules::new(graph, files, removed),
+            rust_callers: RefCell::default(),
         }
+    }
+
+    /// `f` over the module trees as the dirty file `file_ord` reads them.
+    fn with_rust_tree<R>(&self, file_ord: usize, f: impl FnOnce(&OverlayTree<'_, 'a>) -> R) -> R {
+        let cached = self.rust_callers.borrow().get(&file_ord).cloned();
+        let caller = self.scope.dirty()[file_ord].rel_path.as_str();
+        let position = cached.unwrap_or_else(|| {
+            let position = Rc::new(self.rust.caller(caller));
+            self.rust_callers
+                .borrow_mut()
+                .insert(file_ord, Rc::clone(&position));
+            position
+        });
+        f(&OverlayTree {
+            modules: &self.rust,
+            caller,
+            position: &position,
+        })
     }
 
     /// Whether `idx` is scoped: a virtual node by the dirty parse, a base
@@ -450,9 +475,9 @@ impl<'a> OverlayFacts<'a> {
 
     /// The index's `Resolver::rust_type_path_agrees`: may `qualifier` of the
     /// Rust path call `callee` (`a::b::Q::m`) be the type declared in
-    /// `candidate`? `None` where only the module tree can tell: a head that
-    /// names a workspace crate, or a module file that does not declare `Q`
-    /// itself (the tree follows its `pub use` chain).
+    /// `candidate`? The module tree places `Q` ([`ladder::module_tree_item`]);
+    /// `None` where it meets a `use` the overlay cannot see through, or a
+    /// module file that does not declare `Q` itself.
     fn rust_type_path_agrees(
         &self,
         (file_ord, source): (usize, &str),
@@ -473,11 +498,34 @@ impl<'a> OverlayFacts<'a> {
         }
         let named = rust_expand_path_head(prefix, imports);
         let declared_here = |module: &str| qualifiers.same_file.contains(&(file_ord, module));
+        let tree_item = |path: String| {
+            self.with_rust_tree(file_ord, |tree| {
+                ladder::module_tree_item(tree, source, &path)
+            })
+        };
         let module_path = match named[0] {
             "crate" | "self" | "super" => named.join("::"),
             head if declared_here(head) => format!("self::{}", named.join("::")),
-            _ => return None,
+            _ => {
+                // Only a workspace crate's module is left; the tree places
+                // `Q` itself, through its `pub use` chain.
+                return match tree_item(format!("{}::{qualifier}", named.join("::"))) {
+                    Some(ladder::TreeItem::Found { file, .. }) => Some(file == candidate),
+                    Some(ladder::TreeItem::Unknown) => None,
+                    None => Some(false),
+                };
+            }
         };
+        // The module may only re-export `Q` (`mod lock; pub use
+        // lock::FileLock;`): the tree follows that `pub use` chain to the
+        // defining file, which the module's own file is not.
+        match tree_item(format!("{module_path}::{qualifier}")) {
+            Some(ladder::TreeItem::Found { file, item }) if item == qualifier => {
+                return Some(file == candidate);
+            }
+            Some(ladder::TreeItem::Unknown) => return None,
+            _ => {}
+        }
         if let Some(module_file) = self.rust_module_file(source, &module_path) {
             if module_file == candidate {
                 return Some(true);
@@ -2599,16 +2647,11 @@ fn resolve_callee<'s>(
             target => target,
         };
         let rust_path = caller.language == Language::Rust && callee.contains("::");
-        let tail = match scope.rust_tail {
-            RustTail::Ladder(tree) => Some(tree),
-            RustTail::Stop => None,
-        };
-        let module_tree = tail.filter(|_| rust_path).map(|tree| {
-            move || {
-                let (modules, chain) = tree?;
-                resolve_rust_module_callee(graph, callee, names, nodes, dirty_base, modules, chain)
-                    .map(|(idx, _)| idx)
-            }
+        let ladder_tail = matches!(scope.rust_tail, RustTail::Ladder);
+        let module_tree = (ladder_tail && rust_path).then_some(move || {
+            facts.with_rust_tree(file_ord, |tree| {
+                ladder::module_tree_member(tree, facts, importer, callee, member, target)
+            })
         });
         let site = ladder::QualifiedSite {
             source: importer,
@@ -2627,7 +2670,7 @@ fn resolve_callee<'s>(
             Resolution::Unknown | Resolution::Shadowed => {}
         }
         // A Rust path the caller stops at the qualifier tier takes no ladder.
-        if rust_path && tail.is_none() {
+        if rust_path && !ladder_tail {
             return None;
         }
         // The receiver-typing ladder: only where every tier above found
@@ -2933,7 +2976,7 @@ struct Scope<'c> {
     /// not the import-member tier.
     type_lookup: bool,
     /// What a Rust `::` path the qualifier tier leaves unbound takes next.
-    rust_tail: RustTail<'c>,
+    rust_tail: RustTail,
 }
 
 /// The tiers after the qualifier tier for a Rust `::` path. The index runs
@@ -2943,32 +2986,41 @@ struct Scope<'c> {
 /// the qualifier tier: a kept divergence, which this parameter makes
 /// explicit.
 #[derive(Clone, Copy, Default)]
-enum RustTail<'c> {
+enum RustTail {
     /// No tier after the qualifier tier: a name reference, a qualified field
     /// read, a constructor's type and an extension retry.
     #[default]
     Stop,
-    /// The module tree, when the view built one, then the receiver-typing
-    /// ladder: a call site and a type lookup, as the index.
-    Ladder(Option<(&'c RustModules<'c>, &'c [&'c str])>),
+    /// The module tree ([`ladder::module_tree_member`]), then the
+    /// receiver-typing ladder: a call site and a type lookup, as the index.
+    Ladder,
 }
 
-/// File-backed Rust modules use the same crate/self/super layout as Pass 2.
-/// A `<crate_name>::` head starts at that crate's entry file from the
-/// index's crate table. Other heads stay unresolved: stripping a path would
-/// bind external calls such as `std::fs::read` to unrelated project
-/// functions.
-/// File-layout evidence shared by all qualified lookups in one overlay build.
-/// Dirty declarations replace archived declarations, including deletion. A
-/// base path the worktree removed is no file.
+/// The overlay's Rust module trees, laid out as the index lays out its own
+/// (`RustWorkspaceModTree`): each Cargo target of the crate table
+/// `graph.bin` stores (a crate's lib entry, then its bins) roots a tree of
+/// file-backed `mod` declarations. Without a stored table (no
+/// `Cargo.toml`) there is no tree, as in the index. Dirty declarations
+/// replace archived declarations, including deletion. A base path the
+/// worktree removed is no file.
 pub(super) struct RustModules<'a> {
     graph: &'a ArchivedZeroCopyGraph,
     dirty: FxHashMap<&'a str, &'a OverlayFileInput>,
     removed: &'a FxHashSet<&'a str>,
-    roots: Vec<&'a str>,
-    /// The `graph.bin` workspace facts, read on the first [`Self::crate_head`]:
-    /// reading them deserializes and validates the whole table.
+    /// The `graph.bin` workspace facts, read on first use: reading them
+    /// deserializes and validates the whole table, once per view.
     pub(super) crates: OnceCell<crate::contracts::workspace::WorkspaceFacts>,
+}
+
+/// Where one caller file stands in the module trees
+/// ([`RustModules::caller`]).
+#[derive(Debug, Default)]
+pub(super) struct RustCaller<'a> {
+    /// The root file of the target whose `crate::` the caller writes.
+    krate: Option<&'a str>,
+    /// The root file of the target that declares the caller, and the
+    /// caller's module path in it.
+    module: Option<(&'a str, Vec<String>)>,
 }
 
 impl<'a> RustModules<'a> {
@@ -2977,58 +3029,29 @@ impl<'a> RustModules<'a> {
         dirty: &'a [OverlayFileInput],
         removed: &'a FxHashSet<&'a str>,
     ) -> Self {
-        let dirty: FxHashMap<_, _> = dirty
-            .iter()
-            .map(|file| (file.rel_path.as_str(), file))
-            .collect();
-        let mut roots = Vec::new();
-        for file in graph
-            .files
-            .iter()
-            .map(|f| f.path.resolve(&graph.string_pool))
-            .filter(|path| !removed.contains(path))
-            .chain(dirty.keys().copied())
-        {
-            let directory = file.rsplit_once('/').map_or("", |(dir, _)| dir);
-            if !dirty.keys().any(|caller| {
-                caller
-                    .strip_prefix(directory)
-                    .is_some_and(|rest| directory.is_empty() || rest.starts_with('/'))
-            }) {
-                continue;
-            }
-            let mut parts = file.rsplit('/');
-            let filename = parts.next().unwrap_or_default();
-            let parent = parts.next().unwrap_or_default();
-            if (matches!(filename, "lib.rs" | "main.rs" | "build.rs")
-                || matches!(parent, "bin" | "examples" | "benches" | "tests"))
-                && is_rust_target_root(std::path::Path::new(file))
-            {
-                roots.push(file);
-            }
-        }
-        roots.sort_unstable();
-        roots.dedup();
         Self {
             graph,
-            dirty,
+            dirty: dirty
+                .iter()
+                .map(|file| (file.rel_path.as_str(), file))
+                .collect(),
             removed,
-            roots,
             crates: OnceCell::new(),
         }
+    }
+
+    fn table(&self) -> &crate::contracts::workspace::WorkspaceFacts {
+        self.crates.get_or_init(|| self.graph.workspace_facts())
     }
 
     /// The entry file of the workspace crate that code names `head`: the
     /// index module tree's `<crate_name>::` head. Of two members with one
     /// code name, the table keeps the row of the one the index binds (the
-    /// last listing). `None` for a head the index treats as external, for a
-    /// name no row carries, and for a name two rows of one rank carry.
+    /// last listing). `None` for a name no row carries, and for a name two
+    /// rows of one rank carry.
     pub(super) fn crate_head(&self, head: &str) -> Option<&'a str> {
         use crate::contracts::workspace::{Ecosystem, NameLookup};
-        if matches!(head, "std" | "core" | "alloc" | "proc_macro" | "test") {
-            return None;
-        }
-        let crates = self.crates.get_or_init(|| self.graph.workspace_facts());
+        let crates = self.table();
         let NameLookup::Unique(id) = crates.lookup_name(Ecosystem::Cargo, head) else {
             return None;
         };
@@ -3071,149 +3094,242 @@ impl<'a> RustModules<'a> {
             .find(|file| *file == requested)
     }
 
-    fn child(&self, parent: &str, name: &str) -> Option<&'a str> {
-        let declared = match self.dirty.get(parent) {
+    /// Whether `file` declares a node of `kind` named `name`; any kind when
+    /// `kind` is `None`. A dirty file answers from its fresh parse.
+    fn declares(&self, file: &str, name: &str, kind: Option<NodeKind>) -> bool {
+        let wanted = |found: NodeKind| kind.is_none_or(|kind| kind == found);
+        match self.dirty.get(file) {
             Some(dirty) => dirty
                 .symbols
                 .iter()
-                .any(|s| s.kind == NodeKind::Module && s.name == name),
+                .any(|s| s.name == name && wanted(s.kind)),
             None => self.graph.nodes_by_name(name).any(|idx| {
                 let node = &self.graph.nodes[idx as usize];
-                NodeKind::from(&node.kind) == NodeKind::Module
+                wanted(NodeKind::from(&node.kind))
                     && self.graph.files[node.file_idx.to_native() as usize]
                         .path
                         .resolve(&self.graph.string_pool)
-                        == parent
+                        == file
             }),
-        };
-        if !declared {
+        }
+    }
+
+    /// The file of the module `name` that `parent` declares (`mod name;`),
+    /// as the index places it: `name.rs`, else `name/mod.rs`, beside a
+    /// target root and in a module's own directory otherwise.
+    fn child(&self, parent: &'a str, name: &str, parent_is_root: bool) -> Option<&'a str> {
+        if !self.declares(parent, name, Some(NodeKind::Module)) {
             return None;
         }
-        let base = rust_module_path_base(std::path::Path::new(parent), "self")?.join(name);
-        let flat = base.with_extension("rs");
-        let nested = base.join("mod.rs");
-        match (self.file(&flat), self.file(&nested)) {
-            (Some(path), None) | (None, Some(path)) => Some(path),
-            _ => None,
-        }
-    }
-
-    /// Establish the caller's unique target owner using declaration chains.
-    /// A bin descendant only belongs to a bin when its target root is indexed.
-    fn caller_chain(&self, caller: &str) -> Option<Vec<&'a str>> {
-        let mut found = None;
-        for &root in &self.roots {
-            let mut chain = vec![root];
-            if root != caller {
-                let root_dir = rust_module_dir(std::path::Path::new(root))?;
-                let Ok(relative) = std::path::Path::new(caller).strip_prefix(&root_dir) else {
-                    continue;
-                };
-                let mut module_path = relative.with_extension("");
-                if module_path.file_name().is_some_and(|name| name == "mod") {
-                    module_path.pop();
-                }
-                for part in module_path.components() {
-                    let Some(child) =
-                        self.child(chain.last().copied()?, part.as_os_str().to_str()?)
-                    else {
-                        break;
-                    };
-                    chain.push(child);
-                }
-                if chain.last().copied() != Some(caller) {
-                    continue;
-                }
-            }
-            if found.is_some() {
-                return None;
-            }
-            found = Some(chain);
-        }
-        found
-    }
-
-    /// The file of `module` from the caller whose [`Self::caller_chain`] is
-    /// `chain`, root first. An empty `chain` (the caller's target is not
-    /// established) still resolves a workspace crate head, as the index's
-    /// module tree does for any caller; `crate`, `self`, `super` and a
-    /// child module of the caller need the chain.
-    pub(super) fn resolve(&self, chain: &[&'a str], module: &str) -> Option<&'a str> {
-        let mut parts = module.split("::").peekable();
-        let head = parts.next()?;
-        let mut file = match head {
-            "crate" => *chain.first()?,
-            "self" => *chain.last()?,
-            "super" => {
-                let mut at = chain.len().checked_sub(2)?;
-                while parts.peek() == Some(&"super") {
-                    parts.next();
-                    at = at.checked_sub(1)?;
-                }
-                chain[at]
-            }
-            _ if !module.contains("::") => {
-                // A declared child module of the caller comes before a crate
-                // of the same name; without a chain the caller's module is
-                // not established.
-                let Some(child) = chain.last().and_then(|&caller| self.child(caller, head)) else {
-                    return self.crate_head(head);
-                };
-                // The full resolver handles simple declared heads through its
-                // file-stem tier.
-                return (std::path::Path::new(child).file_stem()?.to_str()? == head)
-                    .then_some(child);
-            }
-            _ => self.crate_head(head)?,
+        let parent_path = std::path::Path::new(parent);
+        let dir = if parent_is_root {
+            parent_path.parent()?.to_path_buf()
+        } else {
+            rust_module_dir(parent_path)?
         };
-        for part in parts {
-            file = self.child(file, part)?;
+        let base = dir.join(name);
+        self.file(&base.with_extension("rs"))
+            .or_else(|| self.file(&base.join("mod.rs")))
+    }
+
+    /// The module path of `caller` in the tree rooted at `root`: its path
+    /// below the root's directory, each segment a module its parent
+    /// declares. `None` when that walk does not reach the caller.
+    fn module_path(&self, root: &'a str, caller: &str) -> Option<Vec<String>> {
+        if root == caller {
+            return Some(Vec::new());
         }
-        Some(file)
+        let dir = std::path::Path::new(root).parent()?;
+        let relative = std::path::Path::new(caller).strip_prefix(dir).ok()?;
+        let mut module_path = relative.with_extension("");
+        if module_path.file_name().is_some_and(|name| name == "mod") {
+            module_path.pop();
+        }
+        let mut file = root;
+        let mut segments = Vec::new();
+        for part in module_path.components() {
+            let name = part.as_os_str().to_str()?;
+            file = self.child(file, name, segments.is_empty())?;
+            segments.push(name.to_owned());
+        }
+        (file == caller).then_some(segments)
+    }
+
+    /// Where `caller` stands, by the index's rule: a file that one bin
+    /// alone declares is in that bin. Otherwise `crate::` names the lib
+    /// target of the named crate whose directory holds the caller (the
+    /// deepest), and `self::` / `super::` start from the caller's module in
+    /// that lib tree. Reads the crate table.
+    pub(super) fn caller(&self, caller: &str) -> RustCaller<'a> {
+        use crate::contracts::workspace::Ecosystem;
+        let crates = self.table();
+        let mut reached: Vec<(&'a str, bool, Vec<String>)> = Vec::new();
+        let mut home: Option<(usize, &'a str)> = None;
+        for (id, scope) in crates.scopes.iter().enumerate() {
+            if scope.ecosystem != Ecosystem::Cargo {
+                continue;
+            }
+            for (at, entry) in scope.entry_files.iter().enumerate() {
+                let Some(root) = self.file(std::path::Path::new(entry)) else {
+                    continue;
+                };
+                if let Some(path) = self.module_path(root, caller) {
+                    reached.push((root, at == 0, path));
+                }
+            }
+            // The index keys its trees by crate name: a member another
+            // listing shadows has a row but no name, and owns no file.
+            let named = crates.names.iter().any(|name| name.scope.index() == id);
+            let holds = scope.root.is_empty()
+                || caller
+                    .strip_prefix(scope.root.as_str())
+                    .is_some_and(|rest| rest.starts_with('/'));
+            if !named || !holds || home.is_some_and(|(depth, _)| depth >= scope.root.len()) {
+                continue;
+            }
+            let lib = scope
+                .entry_files
+                .first()
+                .and_then(|entry| self.file(std::path::Path::new(entry)));
+            if let Some(lib) = lib {
+                home = Some((scope.root.len(), lib));
+            }
+        }
+        let lib = home.map(|(_, lib)| lib);
+        let bin = match reached.as_slice() {
+            [(root, false, path)] => Some((*root, path.clone())),
+            _ => None,
+        };
+        RustCaller {
+            krate: bin.as_ref().map(|&(root, _)| root).or(lib),
+            module: bin.or_else(|| {
+                let lib = lib?;
+                reached
+                    .into_iter()
+                    .find(|&(root, primary, _)| primary && root == lib)
+                    .map(|(root, _, path)| (root, path))
+            }),
+        }
+    }
+
+    /// What `module` publishes `name` through, as far as `graph.bin` shows:
+    /// it keeps no import visibility, so a `use` naming `name`, or a glob
+    /// `use` while the module declares no `name`, may be a `pub use` and
+    /// answers [`ladder::Published::Unknown`]. Otherwise the module's own.
+    fn published(&self, module: &str, name: &str) -> ladder::Published<'static> {
+        let imports = match self.dirty.get(module) {
+            Some(file) => FileImports::Parsed(&file.imports),
+            None => {
+                let Some(rows) = self
+                    .graph
+                    .file_idx_of(module)
+                    .and_then(|idx| self.graph.file_imports(idx))
+                else {
+                    return ladder::Published::Own;
+                };
+                FileImports::Archived {
+                    rows,
+                    pool: self.graph.string_pool.as_slice(),
+                    files: self.graph.files.as_slice(),
+                }
+            }
+        };
+        let mut glob = false;
+        for import in imports.iter() {
+            if import.alias.unwrap_or(import.imported_name) == name {
+                return ladder::Published::Unknown;
+            }
+            glob |= import.imported_name == "*";
+        }
+        if glob && !self.declares(module, name, None) {
+            ladder::Published::Unknown
+        } else {
+            ladder::Published::Own
+        }
+    }
+
+    /// The file of the module path `module` (`b::util`, `crate::a`) from
+    /// the caller whose module chain is `chain`, root first: the view's
+    /// tests read the trees through it.
+    #[cfg(test)]
+    pub(super) fn resolve(&self, chain: &[&'a str], module: &str) -> Option<&'a str> {
+        let segment = |file: &&'a str| {
+            let path = std::path::Path::new(*file);
+            let stem = path.file_stem()?.to_str()?;
+            match stem {
+                "mod" => path.parent()?.file_name()?.to_str().map(str::to_owned),
+                stem => Some(stem.to_owned()),
+            }
+        };
+        let position = RustCaller {
+            krate: chain.first().copied(),
+            module: chain
+                .first()
+                .map(|&root| (root, chain[1..].iter().filter_map(segment).collect())),
+        };
+        let tree = OverlayTree {
+            modules: self,
+            caller: "",
+            position: &position,
+        };
+        ladder::module_tree_module(&tree, "", module)
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn resolve_rust_module_callee(
-    graph: &ArchivedZeroCopyGraph,
-    callee: &str,
-    names: &OverlayNames<'_>,
-    nodes: &[ViewNode],
-    dirty_base: &FxHashSet<u32>,
-    modules: &RustModules<'_>,
-    chain: &[&str],
-) -> Option<(u32, f32)> {
-    let (module, member) = callee.rsplit_once("::")?;
-    let target_file = modules.resolve(chain, module)?;
-    let base = graph.nodes_by_name(member).filter(|&idx| {
-        let node = &graph.nodes[idx as usize];
-        !dirty_base.contains(&idx)
-            && names.target.kind_predicate()(NodeKind::from(&node.kind))
-            && NodeKind::from(&node.kind) != NodeKind::Method
-            && !graph.is_later_overload(idx)
-            && graph.files[node.file_idx.to_native() as usize]
-                .path
-                .resolve(&graph.string_pool)
-                == target_file
-    });
-    let overlay = names
-        .anywhere
-        .get(member)
-        .into_iter()
-        .flatten()
-        .filter_map(|&(idx, _)| {
-            let node = &nodes[(idx - graph.nodes.len() as u32) as usize];
-            (node.rel_path.as_ref() == target_file && node.kind != NodeKind::Method).then_some(idx)
-        });
-    let mut candidates = base.chain(overlay);
-    let target = candidates.next()?;
-    let uid = |idx: u32| match idx.checked_sub(graph.nodes.len() as u32) {
-        Some(offset) => nodes[offset as usize].uid,
-        None => graph.nodes[idx as usize].uid.to_native(),
-    };
-    candidates
-        .all(|other| uid(other) == uid(target))
-        .then_some((target, CONF_MODULE_TREE))
+/// [`RustModules`] read from one dirty caller ([`ladder::ModuleTreeFacts`]):
+/// a root, a module and a file are all the module's stored path.
+struct OverlayTree<'m, 'a> {
+    modules: &'m RustModules<'a>,
+    /// The caller `position` describes.
+    caller: &'m str,
+    position: &'m RustCaller<'a>,
+}
+
+impl<'a> OverlayTree<'_, 'a> {
+    /// `f` over `caller`'s position: the one held for the dirty caller, or
+    /// one read for another file.
+    fn at<R>(&self, caller: &str, f: impl FnOnce(&RustCaller<'a>) -> R) -> R {
+        if caller == self.caller {
+            f(self.position)
+        } else {
+            f(&self.modules.caller(caller))
+        }
+    }
+}
+
+impl<'a> ladder::ModuleTreeFacts for OverlayTree<'_, 'a> {
+    type Root = &'a str;
+    type Module = &'a str;
+    type File = &'a str;
+
+    fn crate_root(&self, name: &str) -> Option<&'a str> {
+        self.modules.crate_head(name)
+    }
+
+    fn caller_crate(&self, caller: &str) -> Option<&'a str> {
+        self.at(caller, |position| position.krate)
+    }
+
+    fn caller_module(&self, caller: &str) -> Option<(&'a str, Vec<String>)> {
+        self.at(caller, |position| position.module.clone())
+    }
+
+    fn root_module(&self, root: &'a str) -> Option<&'a str> {
+        Some(root)
+    }
+
+    fn submodule(&self, _root: &'a str, parent: &'a str, path: &[String]) -> Option<&'a str> {
+        let (name, above) = path.split_last()?;
+        self.modules.child(parent, name, above.is_empty())
+    }
+
+    fn published(&self, _root: &'a str, module: &'a str, name: &str) -> ladder::Published<'_> {
+        self.modules.published(module, name)
+    }
+
+    fn module_file(&self, module: &'a str) -> Option<&'a str> {
+        Some(module)
+    }
 }
 
 /// Mirror of the index-time constructor fallback
@@ -3337,7 +3453,6 @@ fn resolve_variant_ref<'f>(
     replaced: &FxHashMap<u32, u32>,
     dirty_base: &FxHashSet<u32>,
     facts: &OverlayFacts<'_>,
-    rust_tree: Option<(&RustModules<'_>, &[&str])>,
     cache: &mut VariantCache<'f>,
 ) -> Option<(u32, f32)> {
     // `SymbolTable::has_enum_variant`: most captured paths name no variant.
@@ -3399,7 +3514,6 @@ fn resolve_variant_ref<'f>(
                     replaced,
                     dirty_base,
                     facts,
-                    rust_tree,
                 )
             })
         },
@@ -3424,7 +3538,6 @@ fn dirty_supertypes(
     base_metas: &mut FxHashMap<usize, FileMeta>,
     replaced: &FxHashMap<u32, u32>,
     dirty_base: &FxHashSet<u32>,
-    rust_modules: Option<&RustModules<'_>>,
 ) -> FxHashMap<u32, Supertypes> {
     let base_len = graph.nodes.len() as u32;
     let mut acc: FxHashMap<u32, Supertypes> = FxHashMap::default();
@@ -3436,8 +3549,6 @@ fn dirty_supertypes(
             continue;
         }
         let caller = FileMeta::from_path(&file.rel_path);
-        let chain = rust_modules.and_then(|modules| modules.caller_chain(&file.rel_path));
-        let rust_tree = rust_modules.map(|modules| (modules, chain.as_deref().unwrap_or_default()));
         let is_rust = caller.language == Language::Rust;
         let mut resolve = |name: &str| {
             resolve_type(
@@ -3452,7 +3563,6 @@ fn dirty_supertypes(
                 replaced,
                 dirty_base,
                 facts,
-                rust_tree,
             )
             .map(|(id, _)| id)
         };
@@ -3524,7 +3634,6 @@ fn resolve_type<'s>(
     replaced: &FxHashMap<u32, u32>,
     dirty_base: &FxHashSet<u32>,
     facts: &OverlayFacts<'_>,
-    rust_tree: Option<(&RustModules<'_>, &[&str])>,
 ) -> Option<(u32, f32)> {
     resolve_callee(
         graph,
@@ -3544,7 +3653,7 @@ fn resolve_type<'s>(
             call: None,
             heritage: &[],
             type_lookup: true,
-            rust_tail: RustTail::Ladder(rust_tree),
+            rust_tail: RustTail::Ladder,
         },
     )
 }
@@ -3667,19 +3776,18 @@ impl<'a> ladder::QualifierFacts for OverlayQualifiers<'_, 'a, '_> {
     }
 
     /// A head that is neither anchored nor a module of the caller's file may
-    /// name a workspace crate, which only the index's module tree places:
-    /// no file, rather than the caller crate's own namesake.
+    /// name a workspace crate: the crate table and the module tree place it,
+    /// as the index's do.
     fn crate_module(
         &self,
-        _source: &str,
+        source: &str,
         module_path: &str,
-        _member: &str,
-        _target: ResolveTarget,
+        member: &str,
+        target: ResolveTarget,
     ) -> CrateModule<&'a str> {
-        match module_path.split("::").next() {
-            Some("crate" | "self" | "super") => CrateModule::Local,
-            _ => CrateModule::Placed(None),
-        }
+        self.facts.with_rust_tree(self.file_ord, |tree| {
+            ladder::crate_module(tree, self.facts, source, module_path, member, target)
+        })
     }
 
     fn rust_path_agrees(
@@ -4106,18 +4214,6 @@ pub(super) fn resolve_edges(
         }
     }
     let mut virt_cursor = base_len;
-    let rust_modules = files
-        .iter()
-        .any(|file| {
-            is_rust_source(std::path::Path::new(&file.rel_path))
-                && file.symbols.iter().any(|s| {
-                    s.calls
-                        .iter()
-                        .chain(&s.variant_refs)
-                        .any(|c| c.contains("::"))
-                })
-        })
-        .then(|| RustModules::new(graph, files, removed));
     // The index's supertypes pre-pass, over the dirty files, before
     // any call resolves: the receiver ladder and the same-file pick
     // walk these bases.
@@ -4130,7 +4226,6 @@ pub(super) fn resolve_edges(
         &mut base_metas,
         replaced,
         dirty_base,
-        rust_modules.as_ref(),
     ));
     // The pre-pass's own qualified lookups ran before the dirty bases
     // existed, and the same-file pick's hierarchy rule walks them.
@@ -4154,13 +4249,6 @@ pub(super) fn resolve_edges(
             virt_cursor,
             &mut push_edge,
         );
-        let chain = rust_modules
-            .as_ref()
-            .and_then(|modules| modules.caller_chain(&file.rel_path));
-        // Without a chain, only a crate head resolves: it needs none.
-        let rust_tree = rust_modules
-            .as_ref()
-            .map(|modules| (modules, chain.as_deref().unwrap_or_default()));
         // One cache per dirty file: a repeated qualified call reuses
         // both successful and unresolved lookups without rebuilding paths.
         let mut module_calls = FxHashMap::default();
@@ -4390,7 +4478,7 @@ pub(super) fn resolve_edges(
                             }),
                             heritage: if untyped { &[] } else { heritage },
                             type_lookup: false,
-                            rust_tail: RustTail::Ladder(rust_tree),
+                            rust_tail: RustTail::Ladder,
                         };
                         let lookup = type_member.as_deref().map_or(site, CallSite::Plain);
                         let mut resolve = |site: CallSite<'_>, imports: &[RawImport], scope| {
@@ -4744,7 +4832,6 @@ pub(super) fn resolve_edges(
                         replaced,
                         dirty_base,
                         &facts,
-                        rust_tree,
                         &mut variant_cache,
                     ) else {
                         continue;

@@ -2,17 +2,18 @@
 //! overlay's `<crate_name>::path::f()` heads that read it.
 //!
 //! A full index binds a call into another workspace crate through its
-//! module tree (`RustWorkspaceModTree::resolve_fqn`, Tier 3.5). The overlay
-//! has no file system walk: it reads the crate name → entry file rows the
-//! index stored, then walks the stored `mod` declarations. Each test indexes
-//! a workspace from a temporary root that holds every file, as `ecp admin
-//! index` does, then builds the overlay of a dirty caller over that index.
+//! module tree (Tier 3.5). Both sides run one rule,
+//! `ladder::module_tree_item`: the index over the tree it reads from disk,
+//! the overlay over the crate name → entry file rows the index stored and
+//! the stored `mod` declarations. Each test indexes a workspace from a
+//! temporary root that holds every file, as `ecp admin index` does, then
+//! builds the overlay of a dirty caller over that index.
 //!
 //! What the fixtures do not cover: `pub use` re-export chains behind a crate
-//! head, inline `mod util { .. }` modules, and `crate::` / `self::` /
-//! `super::` paths from a caller file that no target root the overlay knows
-//! declares (a custom `[lib] path` root). The overlay walks file-backed
-//! `mod` declarations only.
+//! head (`graph.bin` keeps no import visibility, so the overlay binds no
+//! edge through a `use` the index follows), inline `mod util { .. }`
+//! modules, and `#[path]` module files. The overlay walks file-backed `mod`
+//! declarations only.
 
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_cli::config_parser::parse_configs;
@@ -416,4 +417,83 @@ fn test_graph_bin_crate_table_non_rust_repo_is_empty() {
     assert_eq!(archived.workspace.scopes.len(), 0);
     assert_eq!(archived.workspace.names.len(), 0);
     assert_eq!(archived.workspace_facts(), WorkspaceFacts::default());
+}
+
+/// Divergence D2: crate `a` writes `use b::m;` and calls `m::f()`, and also
+/// `b::m::f()` and `b::m::deep::g()`, where `m` is the directory module
+/// `m/mod.rs`. The overlay of the dirty caller binds each call to the
+/// target, at the confidence and with the reason, the reindex gives.
+#[test]
+fn test_overlay_rust_cross_crate_call_from_dirty_file_matches_reindex() {
+    const M: &str = "crates/b/src/m/mod.rs";
+    const DEEP: &str = "crates/b/src/m/deep.rs";
+    let caller = "use b::m;\n\npub fn t() {\n    b::m::f();\n}\n\npub fn u() {\n    m::f();\n}\n\npub fn v() {\n    b::m::deep::g();\n}\n";
+    let mut files = owned(&[
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\n",
+        ),
+        (
+            "crates/a/Cargo.toml",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\n[dependencies]\nb = { path = \"../b\" }\n",
+        ),
+        (
+            "crates/b/Cargo.toml",
+            "[package]\nname = \"b\"\nversion = \"0.1.0\"\n",
+        ),
+        ("crates/b/src/lib.rs", "pub mod m;\n"),
+        (M, "pub mod deep;\n\npub fn f() {}\n"),
+        (DEEP, "pub fn g() {}\n"),
+    ]);
+    files.push((CALLER.to_string(), caller.to_string()));
+
+    for (label, edited) in [
+        ("touched", caller.to_string()),
+        ("one-line edit", one_line_edit(caller)),
+    ] {
+        let (reindex, overlay) = reindex_and_overlay(&files, CALLER, &edited, &["t", "u", "v"]);
+        let bound: Vec<(&str, &str)> = reindex
+            .iter()
+            .map(|call| (call.callee_file.as_str(), call.callee.as_str()))
+            .collect();
+        assert_eq!(
+            bound,
+            vec![(M, "f"), (M, "f"), (DEEP, "g")],
+            "{label}: the reindex binds each call once: {reindex:#?}"
+        );
+        let tree = Tier::ModuleTree.confidence();
+        assert!(
+            reindex[0].confidence == tree && reindex[2].confidence == tree,
+            "{label}: the crate-head paths bind through the module tree: {reindex:#?}"
+        );
+        assert_eq!(overlay, reindex, "{label}");
+    }
+}
+
+/// Goal 4: without a `Cargo.toml` the index builds no module tree, so
+/// `super::helper()` gets no module-tree edge. The overlay reads the same
+/// empty crate table and must not bind it through a tree of its own.
+#[test]
+fn test_overlay_rust_super_path_without_manifest_matches_index() {
+    const CHILD: &str = "src/a.rs";
+    let child = "pub fn t() {\n    super::helper();\n}\n";
+    let mut files = owned(&[("src/lib.rs", "pub mod a;\n\npub fn helper() {}\n")]);
+    files.push((CHILD.to_string(), child.to_string()));
+
+    let graph = index(&files);
+    assert_eq!(graph.workspace, WorkspaceFacts::default(), "no crate table");
+
+    for (label, edited) in [
+        ("touched", child.to_string()),
+        ("one-line edit", one_line_edit(child)),
+    ] {
+        let (reindex, overlay) = reindex_and_overlay(&files, CHILD, &edited, &["t"]);
+        assert!(
+            reindex
+                .iter()
+                .all(|call| call.confidence != Tier::ModuleTree.confidence()),
+            "{label}: the index has no module tree: {reindex:#?}"
+        );
+        assert_eq!(overlay, reindex, "{label}");
+    }
 }
