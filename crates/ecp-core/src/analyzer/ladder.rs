@@ -29,6 +29,13 @@
 //! member in the qualifier's file (R13, [`qualifier_file`],
 //! [`qualified_member`]), else for a `::` path the Rust module tree (R14),
 //! whose lookup each side keeps. Those read [`QualifierFacts`].
+//!
+//! One call site enters through [`call`] (R1): it normalizes the site (R2),
+//! derives the call pick from it, runs the side's ladder, then applies the
+//! call-level Kotlin extension retry (R17), the untyped-member post-filter
+//! (R21) and the constructor fallback (R22, [`constructed_type`]) by the
+//! B §3.2 table ([`Resolution::call_fallbacks_allowed`]). Each side answers
+//! through its [`CallFacts`].
 
 use crate::analyzer::import_binding::{
     extension_retry, fqn_language, import_binding, import_family, import_member_fallback,
@@ -37,10 +44,13 @@ use crate::analyzer::import_binding::{
 use crate::analyzer::module_discovery::Module;
 use crate::analyzer::name_ref::resolve_name_ref;
 use crate::analyzer::outcome::{Hit, NoEdge, Resolution, Tier};
-use crate::analyzer::reexport::{is_ecmascript, pick_call, ImportRef, ResolveTarget};
+use crate::analyzer::reexport::{
+    self, is_ecmascript, pick_call, GoPackageLookup, ImportRef, ModuleFacts, ResolveTarget,
+};
 use crate::analyzer::rust_paths::rust_path_prefix_agrees_with_import;
 use crate::analyzer::same_file_pick::{
-    is_free, prefer_free, prefer_owned, type_receiver_is_closed, PickFacts, PickScope,
+    is_free, member_call_admits, prefer_free, prefer_owned, type_receiver_is_closed, PickFacts,
+    PickScope,
 };
 use crate::analyzer::type_ladder::{member_ownership, Ownership, TypeCandidates, TypeFacts};
 use crate::analyzer::types::{owner_key, CallSite, NameRef, RawImport};
@@ -1599,10 +1609,403 @@ fn super_base_type<'q, F: QualifierFacts>(
     }
 }
 
+/// One call site's own inputs to [`call`].
+#[derive(Debug, Clone, Copy)]
+pub struct CallContext<'c> {
+    /// The caller's file, as the side stores it.
+    pub source: &'c str,
+    pub language: Language,
+    pub imports: &'c [RawImport],
+    /// The declared bases of the caller's enclosing type.
+    pub heritage: &'c [String],
+    /// The type the calling member belongs to, as the side keys it.
+    pub owner: Option<&'c str>,
+    /// The calling declaration.
+    pub caller: Option<u32>,
+}
+
+/// What [`call`] reads per side (R1). Each method answers a question about
+/// the side's declarations or runs the side's name tiers; [`call`] decides
+/// the order and every fallback. Each side keeps its decision dump (index)
+/// and its memos and gap notes (overlay) inside its methods.
+pub trait CallFacts<'s> {
+    /// The module facts the shared normalization rules read (R2-R5).
+    type Modules: ModuleFacts + ?Sized;
+    /// The declarations the post-filter and the fallbacks weigh.
+    type Decls: PickFacts + ?Sized;
+    /// How this side names the type of a qualified constructed type path.
+    const TYPE_NAME: TypeName;
+    fn modules(&self) -> &Self::Modules;
+    fn decls(&self) -> &Self::Decls;
+    /// The project types `receiver` can denote in `source` (step 1 of the
+    /// receiver-typing ladder).
+    fn type_candidates<'q>(
+        &self,
+        source: &str,
+        receiver: &'q str,
+        imports: &'q [RawImport],
+    ) -> TypeCandidates<'q>;
+    /// The side's ladder for `site` at the call `call`, with `heritage`:
+    /// under the name `typed` (`Receiver.member`) when the receiver names a
+    /// type, else under the site's own callee.
+    fn ladder(
+        &self,
+        site: CallSite<'s>,
+        typed: Option<&str>,
+        call: CallPick<'_>,
+        heritage: &[String],
+    ) -> Resolution;
+    /// The C# access rule ([`crate::analyzer::csharp_access`]) on the bound
+    /// `id` of `site`: `id`, the one later overload C# admits in its place,
+    /// or `None`.
+    fn csharp_admitted(&self, id: u32, site: CallSite<'_>) -> Option<u32>;
+    /// The bare `member` through the name tiers outside a call scope, with
+    /// `heritage`, of `target`'s kinds.
+    fn bare_member(
+        &self,
+        member: &str,
+        target: ResolveTarget,
+        heritage: &[String],
+    ) -> Option<(u32, f32)>;
+    /// Whether a constructible type and a `Method` the caller's file admits
+    /// are both named `callee`.
+    fn names_type_and_member(&self, callee: &str) -> bool;
+    /// Whether some Class / Struct is declared as `name`.
+    fn declares_constructible(&self, name: &str) -> bool;
+    /// The type `path` names at the call `call`, with `heritage`, through
+    /// the side's ladder; `bind_imports` says whether the import tiers may
+    /// bind it.
+    fn resolve_type(
+        &self,
+        path: &str,
+        bind_imports: bool,
+        call: CallPick<'_>,
+        heritage: &[String],
+    ) -> Option<(u32, f32)>;
+    /// The `Calls` target of a construction of the type `type_id`: its one
+    /// constructor, else the type.
+    fn construction_target(&self, type_id: u32) -> u32;
+    /// The decision dump: the import `import` bound `name` to `id` ahead of
+    /// the ladder.
+    fn note_import_bound(&self, _name: &str, _import: &RawImport, _id: u32) {}
+    /// The decision dump: no tier may bind the C# untyped member `name`.
+    fn note_untyped_unresolved(&self, _name: &str) {}
+}
+
+/// [`call`]'s verdict, with the site its ladder read.
+#[derive(Debug, Clone, Copy)]
+pub struct CallVerdict<'s> {
+    pub resolution: Resolution,
+    /// The site after normalization (R2): a Go value or unmapped package
+    /// re-classified, a Swift, C# or Python receiver that names no type
+    /// read as an untyped member.
+    pub site: CallSite<'s>,
+    /// Whether the receiver named a type (`Receiver.member`).
+    pub typed: bool,
+}
+
+/// R1, the call entry of the index (`Resolver::resolve_call`) and the
+/// overlay (`resolve_edges`): one call site's `Calls` target.
+///
+/// 1. Normalize the site (R2-R5). A Python from-imported submodule and a
+///    mapped Go package settle the call ahead of the ladder; a Go value or
+///    unmapped package re-classifies the site. A C#, Swift, Kotlin or Dart
+///    receiver that names a type, or a Python one on a from-imported type,
+///    resolves as `Receiver.member` ([`type_receiver`]). A Swift or C#
+///    receiver that names none is an untyped member call, never `this.m()`
+///    (codex ruling P-recv Q1); so is a Python receiver whose root is a
+///    value its module declares.
+/// 2. Derive the call pick from the normalized site: an untyped receiver is
+///    no `this`, so no tier reaches the member through the caller's bases.
+///    Run the ladder, except for a C# value of unknown type, which no tier
+///    reaches by its name alone (codex ruling P-recv Q3).
+/// 3. The C# access rule (codex ruling P-ext2 C).
+/// 4. R17: a Kotlin typed receiver the ladder left without an edge retries
+///    the bare member: `fun Reg.ext()` is a top-level function no member
+///    lookup on `Reg` finds.
+/// 5. R21: an untyped member call reaches a method or a type's function
+///    ([`member_call_admits`]), or in Python another module's function.
+/// 6. R22: the constructor fallback ([`constructed_type`]), unless the site
+///    may be a member call whose receiver the parser dropped.
+///
+/// Steps 4 and 6 run where [`Resolution::call_fallbacks_allowed`] allows
+/// them (B §3.2).
+pub fn call<'s, F: CallFacts<'s>>(
+    facts: &F,
+    cx: CallContext<'_>,
+    site: CallSite<'s>,
+) -> CallVerdict<'s> {
+    let language = cx.language;
+    // A chain the caller did not type resolves as the entry the parser
+    // wrote before chains.
+    let mut site = site.fallback();
+    let imports = || cx.imports.iter().map(ImportRef::from);
+    let mut resolution = Resolution::Unknown;
+    if let CallSite::FromReceiver { receiver, member } = site {
+        match language {
+            Language::Python => {
+                if let Some((id, position)) = reexport::python_submodule_member(
+                    facts.modules(),
+                    cx.source,
+                    (receiver, member),
+                    imports(),
+                    call_target(language, site),
+                ) {
+                    facts.note_import_bound(member, &cx.imports[position], id);
+                    resolution = Resolution::bound(id, Tier::ImportScoped);
+                }
+            }
+            Language::Go => match reexport::go_package_lookup(
+                facts.modules(),
+                cx.source,
+                receiver,
+                member,
+                imports(),
+            ) {
+                GoPackageLookup::Resolved(target) => {
+                    let bound = target.and_then(|(id, source)| {
+                        Some((id, cx.imports.iter().find(|i| i.source == source)?))
+                    });
+                    resolution = match bound {
+                        Some((id, import)) => {
+                            facts.note_import_bound(member, import, id);
+                            Resolution::bound(id, Tier::ImportScoped)
+                        }
+                        None => Resolution::NoEdge(NoEdge::PackageMissing),
+                    };
+                }
+                GoPackageLookup::Unmapped => site = CallSite::Plain(member),
+                GoPackageLookup::Value => site = CallSite::UntypedMember(member),
+            },
+            _ => {}
+        }
+    }
+    // A call settled ahead of the ladder is neither typed nor
+    // re-classified: those rules only shape the ladder's lookup.
+    let open = matches!(resolution, Resolution::Unknown);
+    let typed = if open {
+        type_receiver(facts, cx.source, language, cx.imports, site)
+    } else {
+        None
+    };
+    let site = match (site, &typed) {
+        (CallSite::FromReceiver { member, .. }, None)
+            if matches!(language, Language::Swift | Language::CSharp) =>
+        {
+            CallSite::UntypedMember(member)
+        }
+        (CallSite::FromReceiver { receiver, member }, None)
+            if open
+                && language == Language::Python
+                && receiver.contains('/')
+                && reexport::python_from_import_declared_attribute(
+                    facts.modules(),
+                    cx.source,
+                    receiver,
+                    imports(),
+                ) =>
+        {
+            CallSite::UntypedMember(member)
+        }
+        _ => site,
+    };
+    let untyped = matches!(site, CallSite::UntypedMember(_));
+    let heritage: &[String] = if untyped { &[] } else { cx.heritage };
+    let pick = CallPick {
+        owner: cx.owner,
+        caller: cx.caller,
+        untyped,
+        free_only: site.reaches_free_only(language),
+    };
+    if open && untyped && language == Language::CSharp {
+        facts.note_untyped_unresolved(site.name());
+    } else if open {
+        resolution = facts.ladder(site, typed.as_deref(), pick, heritage);
+    }
+    if language == Language::CSharp {
+        resolution = resolution.admit_or(|id| facts.csharp_admitted(id, site));
+    }
+    if resolution.call_fallbacks_allowed() && typed.is_some() && language == Language::Kotlin {
+        let target = call_target(language, site);
+        resolution = Resolution::from_ladder(
+            extension_fallback(facts.decls(), site.name(), |member| {
+                facts.bare_member(member, target, heritage)
+            })
+            .next(),
+        );
+    }
+    if untyped {
+        let decls = facts.decls();
+        // A Python module is a value: `api.helper()` on a receiver the parser
+        // could not type may call another module's function. No value
+        // reaches the caller's own module that way.
+        resolution = resolution.admit(|id| {
+            member_call_admits(decls, id, cx.owner)
+                || (language == Language::Python
+                    && is_free(decls, id)
+                    && decls.file_of(id) != Some(cx.source))
+        });
+    }
+    if resolution.call_fallbacks_allowed() && !may_be_receiverless_member_call(facts, site) {
+        let constructed = constructed_type(
+            facts.decls(),
+            language,
+            site,
+            cx.imports,
+            F::TYPE_NAME,
+            |name| facts.declares_constructible(name),
+            |path, bind_imports| facts.resolve_type(path, bind_imports, pick, heritage),
+        );
+        if let Some((type_id, confidence)) = constructed {
+            resolution =
+                Resolution::from_ladder(Some((facts.construction_target(type_id), confidence)));
+        }
+    }
+    CallVerdict {
+        resolution,
+        site,
+        typed: typed.is_some(),
+    }
+}
+
+/// The kinds a call site may reach. Rust method syntax (`x.f()`) calls only
+/// methods: a free `fn` is never in scope through `.`.
+fn call_target(language: Language, site: CallSite<'_>) -> ResolveTarget {
+    if site.uses_method_syntax() && language == Language::Rust {
+        ResolveTarget::Method
+    } else {
+        ResolveTarget::Callable
+    }
+}
+
+/// R2: the callee of a C#, Swift, Kotlin or Dart member call on an
+/// identifier receiver that is no local, parameter, field or property in
+/// scope ([`CallSite::FromReceiver`]). A receiver that names a project type,
+/// a `using` alias of one, or a library type resolves as `Receiver.member`
+/// through the qualifier tiers and the receiver-typing ladder, and never by
+/// the bare member: `StringAssert.AreEqual()` must not land on
+/// `XUnitAssert.AreEqual`, nor Swift `Util.make()` on the caller's own
+/// `make`. A receiver that names no type is a member the parser cannot see
+/// (an inherited property, a global), or in C# also a library type
+/// (`Console`): `None`.
+///
+/// A Python `FromReceiver` that is no submodule ([`call`] binds those
+/// first) names a type only when its module file declares one
+/// ([`reexport::python_imported_type`]): `from k import K; K.st()` with
+/// several project `st` would otherwise bind none.
+pub fn type_receiver<'s, F: CallFacts<'s>>(
+    facts: &F,
+    source: &str,
+    language: Language,
+    imports: &[RawImport],
+    site: CallSite<'_>,
+) -> Option<String> {
+    let CallSite::FromReceiver { receiver, member } = site else {
+        return None;
+    };
+    let typed = match language {
+        Language::Python => reexport::python_imported_type(
+            facts.modules(),
+            source,
+            receiver,
+            imports.iter().map(ImportRef::from),
+        ),
+        Language::CSharp | Language::Swift | Language::Kotlin | Language::Dart => !matches!(
+            facts.type_candidates(source, receiver, imports),
+            TypeCandidates::None
+        ),
+        _ => false,
+    };
+    typed.then(|| format!("{receiver}.{member}"))
+}
+
+/// Whether a bare `m()` that the constructor fallback would read as a
+/// construction of a type `m` may instead be a member call whose receiver
+/// the parser dropped. The C++, Swift and Ruby parsers write an untyped
+/// receiver as [`CallSite::UntypedMember`], which never constructs; a
+/// parser that still drops one (Kotlin and Dart write a receiver they bind
+/// to a field or local as the bare member) reaches here. When an admitted
+/// `Method` is named `m`, the name is a member's, and `m(x)` never binds a
+/// type `m` of another file (`template <typename T> class number_integer`
+/// in a test file for nlohmann's `sax->number_integer(v)`). A call written
+/// with a qualifier, a `new`, or a Ruby `.new` is no such site.
+fn may_be_receiverless_member_call<'s, F: CallFacts<'s>>(facts: &F, site: CallSite<'_>) -> bool {
+    matches!(site, CallSite::Plain(callee)
+        if !callee.contains(['.', ':']) && facts.names_type_and_member(callee))
+}
+
+/// Which name of a qualified constructed type path ([`constructed_type`])
+/// the gate and the last-segment retry read. The two sides differ on a path
+/// with an empty qualifier (C++ `new ::Widget()`, Ruby `::Widget.new`); the
+/// parameter keeps each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeName {
+    /// The member [`split_qualifier`] gives. A path whose qualifier is
+    /// empty (`::Widget`) names itself, so no type passes the gate: the
+    /// index.
+    Qualifier,
+    /// The text after the last `.`, `:` or `\`: `::Widget` names `Widget`,
+    /// which the last-segment retry may bind: the overlay.
+    LastSegment,
+}
+
+/// R22, the constructor fallback: the Class / Struct a call site
+/// constructs, with the confidence of the lookup that found it; the caller
+/// lands the edge on its construction target. `resolve` looks a type path
+/// up through the side's tiers; its second argument says whether the import
+/// tiers may bind it.
+///
+/// `declares_constructible` is the cheap gate: some Class / Struct is
+/// declared under the type's name, or an import aliases a declared one to it
+/// (`import { Widget as Renamed }`), which only the import tier maps back.
+/// The whole type path resolves first: `u.Widget()` binds through `import pkg
+/// as u`, `Outer.Inner()` through the qualifier tier. A qualified type path
+/// that does not resolve (`new shop.Widget()` through a namespace import,
+/// PHP `new \App\Item()`) retries its last segment only where
+/// [`CallSite::constructed_type`] allows it, and never through an import in a
+/// fully qualified language: `new \App\User()` never names its type through a
+/// `use` of its last segment. `split` names the type of the path
+/// ([`TypeName`]).
+pub fn constructed_type<F: PickFacts + ?Sized>(
+    decls: &F,
+    language: Language,
+    site: CallSite<'_>,
+    imports: &[RawImport],
+    split: TypeName,
+    declares_constructible: impl Fn(&str) -> bool,
+    mut resolve: impl FnMut(&str, bool) -> Option<(u32, f32)>,
+) -> Option<(u32, f32)> {
+    let (type_path, last_segment_fallback) = site.constructed_type(language)?;
+    let type_name = match split {
+        TypeName::Qualifier => split_qualifier(type_path).map_or(type_path, |(_, member)| member),
+        TypeName::LastSegment => type_path
+            .rsplit(['.', ':', '\\'])
+            .next()
+            .unwrap_or(type_path),
+    };
+    let names_type = declares_constructible(type_name)
+        || imports.iter().any(|import| {
+            import.alias.as_deref() == Some(type_name)
+                && declares_constructible(&import.imported_name)
+        });
+    if !names_type {
+        return None;
+    }
+    let qualified = type_name.len() < type_path.len();
+    let (type_id, confidence) = resolve(type_path, true).or_else(|| {
+        (qualified && last_segment_fallback).then(|| resolve(type_name, !fqn_language(language)))?
+    })?;
+    decls
+        .kind(type_id)
+        .is_constructible()
+        .then_some((type_id, confidence))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::analyzer::outcome::Hit;
+    use crate::analyzer::reexport::{ExportAliasTable, Fact, FileImports, PyModule};
     use crate::analyzer::same_file_pick::ImplMember;
     use std::borrow::Cow;
     use std::cell::{Cell, RefCell};
@@ -3553,5 +3956,565 @@ mod tests {
                 "{module_path}::{name}"
             );
         }
+    }
+
+    /// [`CallFacts`] over [`Fake`]: what the ladder and each lookup bind, by
+    /// name, and a log of what [`call`] asked.
+    struct CallFake {
+        decls: Fake,
+        /// The ladder's verdict per lookup name; any other name is `Unknown`.
+        ladder: Vec<(&'static str, Resolution)>,
+        /// What the bare-member lookup binds, per member.
+        bare: Vec<(&'static str, (u32, f32))>,
+        /// What the type lookup binds, per type path.
+        types: Vec<(&'static str, (u32, f32))>,
+        /// The receivers that name a type.
+        typed_receivers: &'static [&'static str],
+        /// The names a constructible type and an admitted method share.
+        receiverless: &'static [&'static str],
+        /// `(type, its one constructor)`.
+        constructors: Vec<(u32, u32)>,
+        /// The targets the C# access rule refuses.
+        refused: Vec<u32>,
+        /// Each ladder call: the lookup, `untyped`, `free_only`, and how
+        /// many bases it received.
+        seen: RefCell<Vec<(String, bool, bool, usize)>>,
+        bare_calls: Cell<u32>,
+        unresolved: RefCell<Vec<String>>,
+    }
+
+    fn call_fake(decls: &[Decl]) -> CallFake {
+        CallFake {
+            decls: Fake::new(Layout::Index, decls),
+            ladder: Vec::new(),
+            bare: Vec::new(),
+            types: Vec::new(),
+            typed_receivers: &[],
+            receiverless: &[],
+            constructors: Vec::new(),
+            refused: Vec::new(),
+            seen: RefCell::default(),
+            bare_calls: Cell::new(0),
+            unresolved: RefCell::default(),
+        }
+    }
+
+    /// No module facts: the sites these tests plant carry no imports.
+    impl ModuleFacts for CallFake {
+        type Path = String;
+        fn has_file(&self, _file: &str) -> bool {
+            false
+        }
+        fn has_module_name(&self, _language: Language, _name: &str) -> bool {
+            false
+        }
+        fn declares(&self, _file: &str, _name: &str) -> bool {
+            false
+        }
+        fn decls_in_file(&self, _file: &str, _name: &str) -> Vec<(u32, NodeKind)> {
+            Vec::new()
+        }
+        fn is_exported(&self, _decl: u32) -> bool {
+            false
+        }
+        fn is_es_module(&self, _file: &str) -> bool {
+            false
+        }
+        fn export_aliases(&self, _file: &str) -> Option<Fact<'_, ExportAliasTable>> {
+            None
+        }
+        fn imports(&self, _file: &str) -> Option<FileImports<'_>> {
+            None
+        }
+        fn star_modules(&self, _module: &str) -> Fact<'_, [Box<str>]> {
+            Fact::Borrowed(&[])
+        }
+        fn python_module(&self, _importer: &str, _specifier: &str) -> PyModule<String> {
+            PyModule::Missing
+        }
+        fn for_each_candidate(
+            &self,
+            _importer: &str,
+            _specifier: &str,
+            _visit: &mut dyn FnMut(&str) -> bool,
+        ) {
+        }
+    }
+
+    impl<'s> CallFacts<'s> for CallFake {
+        type Modules = CallFake;
+        type Decls = Fake;
+        const TYPE_NAME: TypeName = TypeName::Qualifier;
+
+        fn modules(&self) -> &CallFake {
+            self
+        }
+        fn decls(&self) -> &Fake {
+            &self.decls
+        }
+        fn type_candidates<'q>(
+            &self,
+            _source: &str,
+            receiver: &'q str,
+            _imports: &'q [RawImport],
+        ) -> TypeCandidates<'q> {
+            match self.typed_receivers.contains(&receiver) {
+                true => TypeCandidates::Unique(0, receiver),
+                false => TypeCandidates::None,
+            }
+        }
+        fn ladder(
+            &self,
+            site: CallSite<'s>,
+            typed: Option<&str>,
+            call: CallPick<'_>,
+            heritage: &[String],
+        ) -> Resolution {
+            let lookup = typed.unwrap_or(site.name());
+            self.seen.borrow_mut().push((
+                lookup.to_owned(),
+                call.untyped,
+                call.free_only,
+                heritage.len(),
+            ));
+            self.ladder
+                .iter()
+                .find(|(name, _)| *name == lookup)
+                .map_or(Resolution::Unknown, |&(_, resolution)| resolution)
+        }
+        fn csharp_admitted(&self, id: u32, _site: CallSite<'_>) -> Option<u32> {
+            (!self.refused.contains(&id)).then_some(id)
+        }
+        fn bare_member(
+            &self,
+            member: &str,
+            _target: ResolveTarget,
+            _heritage: &[String],
+        ) -> Option<(u32, f32)> {
+            self.bare_calls.set(self.bare_calls.get() + 1);
+            self.bare
+                .iter()
+                .find(|(name, _)| *name == member)
+                .map(|&(_, hit)| hit)
+        }
+        fn names_type_and_member(&self, callee: &str) -> bool {
+            self.receiverless.contains(&callee)
+        }
+        fn declares_constructible(&self, name: &str) -> bool {
+            self.decls
+                .decls
+                .iter()
+                .any(|decl| decl.1 == name && decl.2.is_constructible())
+        }
+        fn resolve_type(
+            &self,
+            path: &str,
+            _bind_imports: bool,
+            _call: CallPick<'_>,
+            _heritage: &[String],
+        ) -> Option<(u32, f32)> {
+            self.types
+                .iter()
+                .find(|(name, _)| *name == path)
+                .map(|&(_, hit)| hit)
+        }
+        fn construction_target(&self, type_id: u32) -> u32 {
+            self.constructors
+                .iter()
+                .find(|(ty, _)| *ty == type_id)
+                .map_or(type_id, |&(_, ctor)| ctor)
+        }
+        fn note_untyped_unresolved(&self, name: &str) {
+            self.unresolved.borrow_mut().push(name.to_owned());
+        }
+    }
+
+    const CTOR: NodeKind = NodeKind::Constructor;
+
+    fn cx<'c>(source: &'c str, language: Language, heritage: &'c [String]) -> CallContext<'c> {
+        CallContext {
+            source,
+            language,
+            imports: &[],
+            heritage,
+            owner: Some("Caller"),
+            caller: Some(99),
+        }
+    }
+
+    /// B §3.2 row `NoEdge(r)`, Ladder reach: a Kotlin typed receiver the
+    /// ladder leaves external retries the bare member, which binds a
+    /// top-level function only. Dart types receivers too but has no
+    /// extension retry.
+    #[test]
+    fn test_call_kotlin_typed_receiver_external_retries_free_extension() {
+        let mut fake = call_fake(&[
+            ("lib/BoxExt.kt", "grow", F, None),
+            ("lib/Box.kt", "grow", M, Some("Other")),
+        ]);
+        fake.typed_receivers = &["Box"];
+        fake.ladder = vec![("Box.grow", Resolution::NoEdge(NoEdge::External))];
+        fake.bare = vec![("grow", (0, 0.7))];
+        let site = CallSite::FromReceiver {
+            receiver: "Box",
+            member: "grow",
+        };
+        let kotlin = call(&fake, cx("app/Main.kt", Language::Kotlin, &[]), site);
+        assert_eq!(kotlin.resolution, Resolution::from_ladder(Some((0, 0.7))));
+        assert!(kotlin.typed);
+        assert_eq!(fake.seen.borrow()[0].0, "Box.grow");
+
+        fake.bare = vec![("grow", (1, 0.7))];
+        let method = call(&fake, cx("app/Main.kt", Language::Kotlin, &[]), site);
+        assert_eq!(
+            method.resolution,
+            Resolution::NoEdge(NoEdge::Unresolved),
+            "a member is no extension"
+        );
+
+        fake.bare_calls.set(0);
+        let dart = call(&fake, cx("lib/main.dart", Language::Dart, &[]), site);
+        assert_eq!(dart.resolution, Resolution::NoEdge(NoEdge::External));
+        assert_eq!(fake.bare_calls.get(), 0);
+    }
+
+    /// B §3.2 row `NoEdge(r)`, Call reach: neither the Kotlin retry nor the
+    /// constructor fallback runs, though each would bind.
+    #[test]
+    fn test_call_noedge_of_call_reach_skips_every_fallback() {
+        let mut fake = call_fake(&[
+            ("pkg/widget.py", "Widget", C, None),
+            ("lib/BoxExt.kt", "grow", F, None),
+        ]);
+        fake.typed_receivers = &["Box"];
+        fake.types = vec![("Widget", (0, 0.7))];
+        fake.bare = vec![("grow", (1, 0.7))];
+        fake.ladder = vec![
+            ("Widget", Resolution::NoEdge(NoEdge::PackageMissing)),
+            ("Box.grow", Resolution::NoEdge(NoEdge::DeclaredAttribute)),
+        ];
+        let python = call(
+            &fake,
+            cx("app/main.py", Language::Python, &[]),
+            CallSite::Plain("Widget"),
+        );
+        assert_eq!(
+            python.resolution,
+            Resolution::NoEdge(NoEdge::PackageMissing)
+        );
+        let site = CallSite::FromReceiver {
+            receiver: "Box",
+            member: "grow",
+        };
+        let kotlin = call(&fake, cx("app/Main.kt", Language::Kotlin, &[]), site);
+        assert_eq!(
+            kotlin.resolution,
+            Resolution::NoEdge(NoEdge::DeclaredAttribute)
+        );
+        assert_eq!(fake.bare_calls.get(), 0);
+    }
+
+    /// B §3.2: an ambiguous ladder leaves the constructor fallback, which
+    /// lands on the class's one constructor at the type lookup's
+    /// confidence. A bound call, a name a member shares, and an untyped
+    /// member call each skip it.
+    #[test]
+    fn test_call_python_ambiguous_ladder_constructor_binds_sole_constructor() {
+        let mut fake = call_fake(&[
+            ("pkg/widget.py", "Widget", C, None),
+            ("pkg/widget.py", "__init__", CTOR, Some("Widget")),
+            ("pkg/a/make.py", "Widget", F, None),
+        ]);
+        fake.types = vec![("Widget", (0, 0.7))];
+        fake.constructors = vec![(0, 1)];
+        fake.ladder = vec![("Widget", Resolution::NoEdge(NoEdge::Ambiguous(2)))];
+        let python = cx("app/main.py", Language::Python, &[]);
+        let construct = call(&fake, python, CallSite::Plain("Widget"));
+        assert_eq!(
+            construct.resolution,
+            Resolution::from_ladder(Some((1, 0.7)))
+        );
+
+        fake.receiverless = &["Widget"];
+        let member = call(&fake, python, CallSite::Plain("Widget"));
+        assert_eq!(member.resolution, Resolution::NoEdge(NoEdge::Ambiguous(2)));
+
+        fake.receiverless = &[];
+        fake.ladder = vec![("Widget", Resolution::bound(2, Tier::Global))];
+        let function = call(&fake, python, CallSite::Plain("Widget"));
+        assert_eq!(
+            function.resolution,
+            Resolution::bound(2, Tier::Global),
+            "a class and a function of one name: the ladder's function stays"
+        );
+
+        fake.ladder = vec![("Widget", Resolution::NoEdge(NoEdge::Ambiguous(2)))];
+        let untyped = call(&fake, python, CallSite::UntypedMember("Widget"));
+        assert_eq!(untyped.resolution, Resolution::NoEdge(NoEdge::Ambiguous(2)));
+    }
+
+    /// R21: an untyped member call keeps a method of another type, and in
+    /// Python another module's function; it refuses a function of the
+    /// caller's module, a member of the caller's own type, and in Go any
+    /// free function. Two classes' namesakes stay the ladder's no edge.
+    #[test]
+    fn test_call_untyped_member_post_filter_admits_member_or_other_module_function() {
+        let mut fake = call_fake(&[
+            ("app/main.py", "helper", F, None),
+            ("lib/tools.py", "compute", F, None),
+            ("lib/other.py", "save", M, Some("Other")),
+            ("lib/caller.py", "own", M, Some("Caller")),
+        ]);
+        let python = cx("app/main.py", Language::Python, &[]);
+        for (name, id, admitted) in [
+            ("helper", 0, false),
+            ("compute", 1, true),
+            ("save", 2, true),
+            ("own", 3, false),
+        ] {
+            fake.ladder = vec![(name, Resolution::bound(id, Tier::Global))];
+            let verdict = call(&fake, python, CallSite::UntypedMember(name));
+            let want = match admitted {
+                true => Resolution::bound(id, Tier::Global),
+                false => Resolution::Unknown,
+            };
+            assert_eq!(verdict.resolution, want, "{name}");
+        }
+        fake.ladder = vec![("compute", Resolution::bound(1, Tier::Global))];
+        let go = call(
+            &fake,
+            cx("main.go", Language::Go, &[]),
+            CallSite::UntypedMember("compute"),
+        );
+        assert_eq!(go.resolution, Resolution::Unknown);
+        fake.ladder = vec![("save", Resolution::NoEdge(NoEdge::Ambiguous(2)))];
+        let two = call(&fake, python, CallSite::UntypedMember("save"));
+        assert_eq!(two.resolution, Resolution::NoEdge(NoEdge::Ambiguous(2)));
+    }
+
+    /// The overlay no longer sets the call pick by hand: [`call`] derives
+    /// `untyped`, `free_only` and the bases from the normalized site. A
+    /// Swift receiver that names no type is an untyped member; a typed one
+    /// resolves as `Receiver.member`. A C# untyped member takes no tier.
+    /// An empty callee reaches the ladder and binds nothing.
+    #[test]
+    fn test_call_pick_follows_normalized_site() {
+        let heritage = vec!["Base".to_owned()];
+        let mut fake = call_fake(&[]);
+        fake.typed_receivers = &["Util"];
+        let cases = [
+            (
+                Language::Python,
+                CallSite::Plain("helper"),
+                ("helper", false, true, 1),
+            ),
+            (
+                Language::Python,
+                CallSite::UntypedMember("m"),
+                ("m", true, false, 0),
+            ),
+            (
+                Language::Swift,
+                CallSite::FromReceiver {
+                    receiver: "value",
+                    member: "make",
+                },
+                ("make", true, false, 0),
+            ),
+            (
+                Language::Swift,
+                CallSite::FromReceiver {
+                    receiver: "Util",
+                    member: "make",
+                },
+                ("Util.make", false, false, 1),
+            ),
+            (
+                Language::Kotlin,
+                CallSite::Plain("run"),
+                ("run", false, false, 1),
+            ),
+            (Language::Python, CallSite::Plain(""), ("", false, true, 1)),
+        ];
+        for (language, site, (lookup, untyped, free_only, bases)) in cases {
+            fake.seen.borrow_mut().clear();
+            let verdict = call(&fake, cx("src/caller", language, &heritage), site);
+            assert_eq!(verdict.resolution, Resolution::Unknown, "{site:?}");
+            assert_eq!(
+                fake.seen.borrow().as_slice(),
+                [(lookup.to_owned(), untyped, free_only, bases)],
+                "{language:?} {site:?}"
+            );
+        }
+        fake.seen.borrow_mut().clear();
+        let csharp = call(
+            &fake,
+            cx("src/Caller.cs", Language::CSharp, &heritage),
+            CallSite::FromReceiver {
+                receiver: "value",
+                member: "Run",
+            },
+        );
+        assert_eq!(csharp.resolution, Resolution::Unknown);
+        assert_eq!(csharp.site, CallSite::UntypedMember("Run"));
+        assert!(
+            fake.seen.borrow().is_empty(),
+            "no tier for a C# untyped member"
+        );
+        assert_eq!(fake.unresolved.borrow().as_slice(), ["Run".to_owned()]);
+    }
+
+    /// B §3.2 row `Bound`: a C# target the access rule refuses leaves the
+    /// call `Unknown`, so the constructor fallback still binds `new
+    /// Widget()`; an admitted target keeps the ladder's edge.
+    #[test]
+    fn test_call_csharp_access_refusal_lets_constructor_bind() {
+        let mut fake = call_fake(&[
+            ("src/Widget.cs", "Widget", C, None),
+            ("src/Widget.cs", "Widget", CTOR, Some("Widget")),
+            ("src/Other.cs", "Widget", M, Some("Other")),
+        ]);
+        fake.types = vec![("Widget", (0, 0.85))];
+        fake.constructors = vec![(0, 1)];
+        fake.ladder = vec![("Widget", Resolution::bound(2, Tier::Global))];
+        let csharp = cx("src/App.cs", Language::CSharp, &[]);
+        let admitted = call(&fake, csharp, CallSite::Construct("Widget"));
+        assert_eq!(admitted.resolution, Resolution::bound(2, Tier::Global));
+        fake.refused = vec![2];
+        let refused = call(&fake, csharp, CallSite::Construct("Widget"));
+        assert_eq!(refused.resolution, Resolution::from_ladder(Some((1, 0.85))));
+    }
+
+    /// An empty or whitespace-only callee, which a broken parse can leave,
+    /// binds nothing on any path: the ladder misses it and no type passes
+    /// the constructor gate under that name. Two identical calls on the same
+    /// facts give one verdict, and each runs the ladder once: the entry
+    /// keeps no state between sites.
+    #[test]
+    fn test_call_empty_callee_and_repeated_call_bind_nothing_twice() {
+        let mut fake = call_fake(&[("pkg/widget.py", "Widget", C, None)]);
+        fake.types = vec![("", (0, 0.7)), (" ", (0, 0.7))];
+        for language in [Language::Python, Language::Kotlin, Language::Cpp] {
+            for callee in ["", " "] {
+                let site = CallSite::Plain(callee);
+                let first = call(&fake, cx("app/main.py", language, &[]), site);
+                let again = call(&fake, cx("app/main.py", language, &[]), site);
+                assert_eq!(first.resolution.edge(), None, "{language:?} {callee:?}");
+                assert_eq!(first.resolution, again.resolution);
+            }
+        }
+        let empty = CallSite::FromReceiver {
+            receiver: "",
+            member: "",
+        };
+        let kotlin = call(&fake, cx("app/Main.kt", Language::Kotlin, &[]), empty);
+        assert_eq!(kotlin.resolution.edge(), None);
+        assert!(!kotlin.typed);
+        let seen = fake.seen.borrow();
+        assert_eq!(seen.len(), 13);
+        assert!(seen.iter().all(|(lookup, ..)| lookup.trim().is_empty()));
+    }
+
+    /// The kept divergence of R22 ([`TypeName`]): a C++ `new ::Widget()`
+    /// names `::Widget` for the index, which no type declares, and `Widget`
+    /// for the overlay, whose last-segment retry binds it. A qualifier that
+    /// is not empty names `Widget` on both.
+    #[test]
+    fn test_constructed_type_empty_qualifier_differs_by_type_name() {
+        let fake = Fake::new(Layout::Index, &[("src/widget.hpp", "Widget", C, None)]);
+        let declares = |name: &str| name == "Widget";
+        let resolve = |path: &str, _bind: bool| (path == "Widget").then_some((0, 0.7));
+        let construct = |path, split| {
+            constructed_type(
+                &fake,
+                Language::Cpp,
+                CallSite::Construct(path),
+                &[],
+                split,
+                declares,
+                resolve,
+            )
+        };
+        assert_eq!(construct("::Widget", TypeName::Qualifier), None);
+        assert_eq!(construct("::Widget", TypeName::LastSegment), Some((0, 0.7)));
+        for split in [TypeName::Qualifier, TypeName::LastSegment] {
+            assert_eq!(
+                construct("shop::Widget", split),
+                Some((0, 0.7)),
+                "{split:?}"
+            );
+        }
+    }
+
+    /// R22: the whole path resolves first; a qualified miss retries its last
+    /// segment where the site allows it, without the import tiers in a
+    /// fully qualified language (PHP) and with them elsewhere (TS). A
+    /// Java `new` never retries. An import alias passes the gate, and a
+    /// resolved type that is no Class / Struct binds nothing.
+    #[test]
+    fn test_constructed_type_last_segment_retry_and_gate_return_each_verdict() {
+        let fake = Fake::new(
+            Layout::Index,
+            &[
+                ("src/Item.php", "Item", C, None),
+                ("src/Shape.ts", "Shape", NodeKind::Interface, None),
+            ],
+        );
+        let declares = |name: &str| name == "Item";
+        let asked: RefCell<Vec<(String, bool)>> = RefCell::default();
+        let run = |language, site, imports: &[RawImport]| {
+            asked.borrow_mut().clear();
+            constructed_type(
+                &fake,
+                language,
+                site,
+                imports,
+                TypeName::Qualifier,
+                declares,
+                |path: &str, bind: bool| {
+                    asked.borrow_mut().push((path.to_owned(), bind));
+                    match path {
+                        "Item" => Some((0, 0.7)),
+                        "Shape" => Some((1, 0.7)),
+                        _ => None,
+                    }
+                },
+            )
+        };
+        let asked_for = |want: &[(&str, bool)]| {
+            let want: Vec<(String, bool)> = want.iter().map(|&(p, b)| (p.to_owned(), b)).collect();
+            assert_eq!(*asked.borrow(), want);
+        };
+        assert_eq!(
+            run(Language::Php, CallSite::Construct("App\\Item"), &[]),
+            Some((0, 0.7))
+        );
+        asked_for(&[("App\\Item", true), ("Item", false)]);
+        assert_eq!(
+            run(Language::TypeScript, CallSite::Construct("shop.Item"), &[]),
+            Some((0, 0.7))
+        );
+        asked_for(&[("shop.Item", true), ("Item", true)]);
+        assert_eq!(
+            run(Language::Java, CallSite::Construct("x.Item"), &[]),
+            None
+        );
+        asked_for(&[("x.Item", true)]);
+        assert_eq!(run(Language::Go, CallSite::Plain("Item"), &[]), None);
+        asked_for(&[]);
+        let alias = [import("./item", "Item", Some("Renamed"))];
+        assert_eq!(
+            run(Language::Python, CallSite::Plain("Renamed"), &alias),
+            None,
+            "the alias passes the gate; the fake's lookup misses `Renamed`"
+        );
+        asked_for(&[("Renamed", true)]);
+        let shape = [import("./shape", "Item", Some("Shape"))];
+        assert_eq!(
+            run(Language::Python, CallSite::Plain("Shape"), &shape),
+            None,
+            "an interface is not constructed"
+        );
+        asked_for(&[("Shape", true)]);
     }
 }

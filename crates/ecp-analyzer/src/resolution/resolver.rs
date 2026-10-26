@@ -44,7 +44,8 @@ use ecp_core::analyzer::import_binding::{
     MemberOwner,
 };
 use ecp_core::analyzer::ladder::{
-    self, qualifier_prefix_is_internal, split_qualifier, CallPick, CrateModule, FieldRead, StemFile,
+    self, qualifier_prefix_is_internal, split_qualifier, CallContext, CallPick, CrateModule,
+    FieldRead, StemFile, TypeName,
 };
 use ecp_core::analyzer::module_discovery::{self, Module, ModuleIndex};
 use ecp_core::analyzer::outcome::{NoEdge, Resolution, Tier};
@@ -61,6 +62,7 @@ use ecp_core::analyzer::types::{owner_key, CallArguments, CallSite, LocalGraph, 
 use ecp_core::graph::NodeKind;
 use serde::Serialize;
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -469,6 +471,154 @@ impl ladder::QualifierFacts for IndexFacts<'_, '_> {
     }
 }
 
+/// The index's facts for one call site's entry ([`ladder::call`]): the
+/// resolver, and the caller's file and imports its tiers read.
+struct IndexCall<'r, 'a, 'p> {
+    facts: IndexFacts<'r, 'a>,
+    source_file: &'p Path,
+    /// `source_file` with forward slashes.
+    source: &'p str,
+    language: Language,
+    raw_imports: &'p [RawImport],
+    caller_owner: Option<&'p str>,
+    /// The ladder's list, kept so its allocation becomes the returned one.
+    targets: RefCell<Vec<(NodeId, f32)>>,
+}
+
+impl<'s, 'r, 'a> ladder::CallFacts<'s> for IndexCall<'r, 'a, '_> {
+    type Modules = IndexFacts<'r, 'a>;
+    type Decls = SymbolTable;
+    const TYPE_NAME: TypeName = TypeName::Qualifier;
+
+    fn modules(&self) -> &IndexFacts<'r, 'a> {
+        &self.facts
+    }
+
+    fn decls(&self) -> &SymbolTable {
+        self.facts.0.symbol_table
+    }
+
+    fn type_candidates<'q>(
+        &self,
+        source: &str,
+        receiver: &'q str,
+        imports: &'q [RawImport],
+    ) -> TypeCandidates<'q> {
+        self.facts
+            .0
+            .type_candidates(self.source_file, source, receiver, imports)
+    }
+
+    fn ladder(
+        &self,
+        site: CallSite<'s>,
+        typed: Option<&str>,
+        call: CallPick<'_>,
+        heritage: &[String],
+    ) -> Resolution {
+        let targets = self.facts.0.resolve_symbol_with_import_binding(
+            self.source_file,
+            typed.unwrap_or(site.name()),
+            self.language,
+            (self.raw_imports, !call.untyped),
+            call_target(self.source_file, site),
+            heritage,
+            Some(call),
+            &mut None,
+        );
+        let resolution = ladder_resolution(&targets);
+        *self.targets.borrow_mut() = targets;
+        resolution
+    }
+
+    fn csharp_admitted(&self, id: u32, site: CallSite<'_>) -> Option<u32> {
+        let table = self.facts.0.symbol_table;
+        let access = CallAccess::of(site, self.source, self.caller_owner.and_then(owner_key));
+        csharp_access::admitted_overload(
+            table,
+            id,
+            table.later_overloads(id),
+            |id| table.csharp_method_flags(id),
+            access,
+        )
+    }
+
+    fn bare_member(
+        &self,
+        member: &str,
+        target: ResolveTarget,
+        heritage: &[String],
+    ) -> Option<(u32, f32)> {
+        ladder_resolution(&self.facts.0.resolve_symbol_with_heritage(
+            self.source_file,
+            member,
+            self.raw_imports,
+            target,
+            heritage,
+        ))
+        .edge()
+    }
+
+    fn names_type_and_member(&self, callee: &str) -> bool {
+        let table = self.facts.0.symbol_table;
+        table.has_constructible_type(callee)
+            && table.names_admitted_method(callee, FileMeta::from_normalized_path(self.source))
+    }
+
+    fn declares_constructible(&self, name: &str) -> bool {
+        self.facts.0.symbol_table.has_constructible_type(name)
+    }
+
+    fn resolve_type(
+        &self,
+        path: &str,
+        bind_imports: bool,
+        call: CallPick<'_>,
+        heritage: &[String],
+    ) -> Option<(u32, f32)> {
+        let types = self.facts.0.resolve_symbol_with_import_binding(
+            self.source_file,
+            path,
+            self.language,
+            (self.raw_imports, bind_imports && !call.untyped),
+            ResolveTarget::Type,
+            heritage,
+            Some(call),
+            &mut None,
+        );
+        sole_target(&types)
+    }
+
+    fn construction_target(&self, type_id: u32) -> u32 {
+        self.facts
+            .0
+            .symbol_table
+            .sole_constructor(type_id)
+            .unwrap_or(type_id)
+    }
+
+    fn note_import_bound(&self, name: &str, import: &RawImport, id: u32) {
+        let _ = self
+            .facts
+            .0
+            .import_scoped(self.source_file, name, import, id);
+    }
+
+    fn note_untyped_unresolved(&self, name: &str) {
+        if self.facts.0.decisions.is_some() {
+            self.facts.0.record(
+                self.source,
+                name,
+                None,
+                DecisionTier::Unresolved,
+                None,
+                0,
+                None,
+            );
+        }
+    }
+}
+
 #[cfg(not(windows))]
 #[inline]
 fn normalize_source_path(path: &Path) -> Cow<'_, str> {
@@ -745,9 +895,10 @@ impl<'a> Resolver<'a> {
         self.resolve_symbol_with_heritage(source_file, symbol_name, raw_imports, target, &[])
     }
 
-    /// Resolve one call site to its `Calls` targets: the callable tiers,
-    /// then, only when they find nothing, the constructor fallback
-    /// ([`Self::resolve_instantiation`]). The fallback lives here, not in
+    /// Resolve one call site to its `Calls` targets through the shared call
+    /// entry ([`ladder::call`]): the callable tiers, then the call-level
+    /// fallbacks, among them the constructor fallback
+    /// ([`ladder::constructed_type`]). The fallback lives here, not in
     /// [`Self::resolve_symbol_with_heritage`], because that method also
     /// serves References / Decorates / Imports edges, which must never land
     /// on a type through a construction rule. `caller_owner` is the type the
@@ -761,7 +912,7 @@ impl<'a> Resolver<'a> {
     /// free function, no namespace member, no constructor, no member of the
     /// caller's own type by the name alone). Neither does a bare `m()` that
     /// may be a member call whose receiver the parser dropped take the
-    /// fallback ([`Self::may_be_receiverless_member_call`]).
+    /// fallback.
     #[allow(clippy::too_many_arguments)]
     pub fn resolve_call(
         &self,
@@ -772,169 +923,33 @@ impl<'a> Resolver<'a> {
         caller_owner: Option<&str>,
         caller: Option<NodeId>,
     ) -> Vec<(NodeId, f32)> {
-        // A chain the caller did not type ([`Self::resolve_chained_member`])
-        // resolves as the entry the parser wrote before chains.
-        let mut site = site.fallback();
-        let language = Language::from_normalized_path(&normalize_source_path(source_file));
-        // `targets` only holds the output buffer, so the ladder's allocation
-        // is reused; every step decides from `resolution` alone.
-        let mut targets = Vec::new();
-        let mut resolution = Resolution::Unknown;
-        if let Some((node_id, import)) =
-            self.python_submodule_member(source_file, language, site, raw_imports)
-        {
-            resolution = self.import_scoped(source_file, site.name(), import, node_id);
-        } else if let CallSite::FromReceiver { receiver, member } = site {
-            if language == Language::Go {
-                match reexport::go_package_lookup(
-                    &IndexFacts(self),
-                    &normalize_source_path(source_file),
-                    receiver,
-                    member,
-                    raw_imports.iter().map(ImportRef::from),
-                ) {
-                    reexport::GoPackageLookup::Resolved(target) => {
-                        let bound = target.and_then(|(node_id, source)| {
-                            raw_imports
-                                .iter()
-                                .find(|import| import.source == source)
-                                .map(|import| (node_id, import))
-                        });
-                        resolution = match bound {
-                            Some((node_id, import)) => {
-                                self.import_scoped(source_file, member, import, node_id)
-                            }
-                            None => Resolution::NoEdge(NoEdge::PackageMissing),
-                        };
-                    }
-                    reexport::GoPackageLookup::Unmapped => site = CallSite::Plain(member),
-                    reexport::GoPackageLookup::Value => site = CallSite::UntypedMember(member),
-                }
-            }
-        }
-        // A call settled ahead of the ladder is neither typed nor
-        // re-classified: those rules only shape the ladder's lookup.
-        let open = matches!(resolution, Resolution::Unknown);
-        let declared_python_attribute = open
-            && matches!(site, CallSite::FromReceiver { receiver, .. }
-            if language == Language::Python
-                && receiver.contains('/')
-                && reexport::python_from_import_declared_attribute(
-                    &IndexFacts(self),
-                    &normalize_source_path(source_file),
-                    receiver,
-                    raw_imports.iter().map(ImportRef::from),
-                ));
-        let type_member = if open {
-            self.type_receiver(source_file, language, site, raw_imports)
-        } else {
-            None
+        let source = normalize_source_path(source_file);
+        let language = Language::from_normalized_path(&source);
+        let facts = IndexCall {
+            facts: IndexFacts(self),
+            source_file,
+            source: &source,
+            language,
+            raw_imports,
+            caller_owner,
+            targets: RefCell::default(),
         };
-        // A Swift or C# receiver that names no type is a value the parser
-        // cannot see (a global, an inherited property) or a library type:
-        // an untyped member call, never `this.m()` (codex ruling P-recv Q1).
-        let site = match (site, &type_member) {
-            (CallSite::FromReceiver { member, .. }, None)
-                if matches!(language, Language::Swift | Language::CSharp) =>
-            {
-                CallSite::UntypedMember(member)
-            }
-            (CallSite::FromReceiver { member, .. }, None) if declared_python_attribute => {
-                CallSite::UntypedMember(member)
-            }
-            _ => site,
-        };
-        let bind_import = !matches!(site, CallSite::UntypedMember(_));
-        let free_only = site.reaches_free_only(language);
-        // An untyped receiver is no `this`: no tier reaches the member
-        // through the caller's bases.
-        let heritage: &[String] = if bind_import { caller_heritage } else { &[] };
-        let resolve = |name: &str, target, bind: bool| {
-            self.resolve_symbol_with_import_binding(
-                source_file,
-                name,
+        let verdict = ladder::call(
+            &facts,
+            CallContext {
+                source: &source,
                 language,
-                (raw_imports, bind && bind_import),
-                target,
-                heritage,
-                Some(CallPick {
-                    owner: caller_owner,
-                    caller,
-                    untyped: !bind_import,
-                    free_only,
-                }),
-                &mut None,
-            )
-        };
-        let target = call_target(source_file, site);
-        // A C# value of unknown type reaches no member by its name alone:
-        // not the caller's, not one of the same file, not a unique one of
-        // the project (codex ruling P-recv Q3). Only the extension retry
-        // ([`Self::csharp_untyped_member`]) may bind it.
-        if open && language == Language::CSharp && !bind_import {
-            if self.decisions.is_some() {
-                self.record(
-                    &normalize_source_path(source_file),
-                    site.name(),
-                    None,
-                    DecisionTier::Unresolved,
-                    None,
-                    0,
-                    None,
-                );
-            }
-        } else if open {
-            targets = resolve(type_member.as_deref().unwrap_or(site.name()), target, true);
-            resolution = ladder_resolution(&targets);
-        }
-        if language == Language::CSharp {
-            // An instance call never reaches a static method, nor any call a
-            // private member of an unrelated type (codex ruling P-ext2 C).
-            let caller_file = normalize_source_path(source_file);
-            let access = CallAccess::of(site, &caller_file, caller_owner.and_then(owner_key));
-            resolution = resolution.admit_or(|id| {
-                csharp_access::admitted_overload(
-                    self.symbol_table,
-                    id,
-                    self.symbol_table.later_overloads(id),
-                    |id| self.symbol_table.csharp_method_flags(id),
-                    access,
-                )
-            });
-        }
-        if resolution.call_fallbacks_allowed()
-            && type_member.is_some()
-            && language == Language::Kotlin
-        {
-            // `fun Reg.ext()` is a top-level function no member lookup on
-            // `Reg` finds.
-            targets =
-                self.extension_fallback(source_file, site.name(), raw_imports, target, heritage);
-            resolution = ladder_resolution(&targets);
-        }
-        if !bind_import {
-            // A Python module is a value: `api.helper()` on a receiver the
-            // parser could not type may call another module's function. No
-            // value reaches the caller's own module that way.
-            let source_file_str = normalize_source_path(source_file);
-            let module_value = |id: NodeId| {
-                language == Language::Python
-                    && self.symbol_table.is_top_level(id)
-                    && self.symbol_table.file_of(id) != Some(source_file_str.as_ref())
-            };
-            resolution = resolution.admit(|id| {
-                self.symbol_table.member_call_admits(id, caller_owner) || module_value(id)
-            });
-        }
-        if resolution.call_fallbacks_allowed()
-            && !self.may_be_receiverless_member_call(source_file, site)
-        {
-            if let Some(edge) = self.resolve_instantiation(language, site, raw_imports, resolve) {
-                resolution = Resolution::from_ladder(Some(edge));
-            }
-        }
+                imports: raw_imports,
+                heritage: caller_heritage,
+                owner: caller_owner,
+                caller,
+            },
+            site,
+        );
+        // The ladder's allocation is reused for the one edge.
+        let mut targets = facts.targets.into_inner();
         targets.clear();
-        targets.extend(resolution.edge());
+        targets.extend(verdict.resolution.edge());
         targets
     }
 
@@ -1157,77 +1172,11 @@ impl<'a> Resolver<'a> {
         )
     }
 
-    /// Whether a bare `m()` that the constructor fallback would read as a
-    /// construction of a type `m` may instead be a member call whose
-    /// receiver the parser dropped. The C++, Swift and Ruby parsers now
-    /// write an untyped receiver as [`CallSite::UntypedMember`], which never
-    /// constructs; a parser that still drops one (Kotlin and Dart write a
-    /// receiver they bind to a field or local as the bare member) reaches
-    /// here. When an admitted `Method` is named `m`, the name is a member's,
-    /// and `m(x)` never binds a type `m` of another file (`template
-    /// <typename T> class number_integer` in a test file for nlohmann's
-    /// `sax->number_integer(v)`). A call written with a qualifier, a `new`,
-    /// or a Ruby `.new` is no such site.
-    fn may_be_receiverless_member_call(&self, source_file: &Path, site: CallSite<'_>) -> bool {
-        let CallSite::Plain(callee) = site else {
-            return false;
-        };
-        !callee.contains(&['.', ':'][..])
-            && self.symbol_table.has_constructible_type(callee)
-            && self.symbol_table.names_admitted_method(
-                callee,
-                FileMeta::from_normalized_path(&normalize_source_path(source_file)),
-            )
-    }
-
-    /// The callee of a C#, Swift, Kotlin or Dart member call on an
-    /// identifier receiver that is no local, parameter, field or property in
-    /// scope ([`CallSite::FromReceiver`]). A receiver that names a project
-    /// type, a `using` alias of one, or a library type resolves as
-    /// `Receiver.member` through the qualifier tiers and the receiver-typing
-    /// ladder, and never by the bare member: `StringAssert.AreEqual()` must
-    /// not land on `XUnitAssert.AreEqual`, nor Swift `Util.make()` on the
-    /// caller's own `make`. A receiver that names no type is a member the
-    /// parser cannot see (an inherited property, a global), or in C# also
-    /// a library type (`Console`): `None`.
-    ///
-    /// A Python `FromReceiver` that is no submodule
-    /// ([`Self::python_submodule_member`] runs first) names a type only when
-    /// its module file declares one ([`reexport::python_imported_type`]):
-    /// `from k import K; K.st()` with several project `st` would otherwise
-    /// bind none.
-    fn type_receiver(
-        &self,
-        source_file: &Path,
-        language: Language,
-        site: CallSite<'_>,
-        raw_imports: &[RawImport],
-    ) -> Option<String> {
-        let CallSite::FromReceiver { receiver, member } = site else {
-            return None;
-        };
-        let source_file_str = normalize_source_path(source_file);
-        let typed = match language {
-            Language::Python => reexport::python_imported_type(
-                &IndexFacts(self),
-                &source_file_str,
-                receiver,
-                raw_imports.iter().map(ImportRef::from),
-            ),
-            Language::CSharp | Language::Swift | Language::Kotlin | Language::Dart => !matches!(
-                self.type_candidates(source_file, &source_file_str, receiver, raw_imports),
-                TypeCandidates::None
-            ),
-            _ => false,
-        };
-        typed.then(|| format!("{receiver}.{member}"))
-    }
-
     /// The member a C# call reaches on a value of unknown type, which only
     /// the extension retry ([`ReceiverSite::Untyped`]) may bind: an untyped
     /// member site, or a `FromReceiver` whose receiver names no type
-    /// ([`Self::resolve_call`] reads it as untyped). `None` for any other
-    /// site. `site` is a C# call's.
+    /// ([`ladder::call`] reads it as untyped). `None` for any other site.
+    /// `site` is a C# call's.
     pub(crate) fn csharp_untyped_member<'s>(
         &self,
         source_file: &Path,
@@ -1236,10 +1185,21 @@ impl<'a> Resolver<'a> {
     ) -> Option<&'s str> {
         match site.fallback() {
             CallSite::UntypedMember(member) => Some(member),
-            site @ CallSite::FromReceiver { member, .. } => self
-                .type_receiver(source_file, Language::CSharp, site, raw_imports)
-                .is_none()
-                .then_some(member),
+            site @ CallSite::FromReceiver { member, .. } => {
+                let source = normalize_source_path(source_file);
+                let facts = IndexCall {
+                    facts: IndexFacts(self),
+                    source_file,
+                    source: &source,
+                    language: Language::CSharp,
+                    raw_imports,
+                    caller_owner: None,
+                    targets: RefCell::default(),
+                };
+                ladder::type_receiver(&facts, &source, Language::CSharp, raw_imports, site)
+                    .is_none()
+                    .then_some(member)
+            }
             _ => None,
         }
     }
@@ -1290,68 +1250,24 @@ impl<'a> Resolver<'a> {
             ladder_resolution(&targets)
         };
         if resolution.call_fallbacks_allowed() {
-            if let Some(edge) = self.resolve_instantiation(language, site, raw_imports, resolve) {
-                resolution = Resolution::from_ladder(Some(edge));
+            let table = self.symbol_table;
+            let constructed = ladder::constructed_type(
+                table,
+                language,
+                site,
+                raw_imports,
+                TypeName::Qualifier,
+                |name| table.has_constructible_type(name),
+                |path, bind| sole_target(&resolve(path, ResolveTarget::Type, bind)),
+            );
+            if let Some((type_id, confidence)) = constructed {
+                let target = table.sole_constructor(type_id).unwrap_or(type_id);
+                resolution = Resolution::from_ladder(Some((target, confidence)));
             }
         }
         targets.clear();
         targets.extend(resolution.edge());
         targets
-    }
-
-    /// Constructor fallback for a call site the callable tiers left empty:
-    /// resolve the constructed type through `resolve` with
-    /// [`ResolveTarget::Type`], keep a Class / Struct, then land on its one
-    /// constructor, or on the type itself when it declares none or several.
-    ///
-    /// A qualified type path that does not resolve (`new shop.Widget()`
-    /// through a namespace import, PHP `new \App\Item()`) retries its last
-    /// segment only where [`CallSite::constructed_type`] allows it; a plain
-    /// `pkg.A()` stays unresolved, like every qualified callee. The third
-    /// argument of `resolve` says whether the import-member tier may bind.
-    fn resolve_instantiation(
-        &self,
-        language: Language,
-        site: CallSite<'_>,
-        raw_imports: &[RawImport],
-        resolve: impl Fn(&str, ResolveTarget, bool) -> Vec<(NodeId, f32)>,
-    ) -> Option<(NodeId, f32)> {
-        let (type_path, last_segment_fallback) = site.constructed_type(language)?;
-        let type_name = split_qualifier(type_path).map_or(type_path, |(_, member)| member);
-        if !self.names_constructible_type(type_name, raw_imports) {
-            return None;
-        }
-        let mut types = resolve(type_path, ResolveTarget::Type, true);
-        if types.is_empty() && last_segment_fallback && type_name.len() < type_path.len() {
-            // A qualified type path (`new \App\User()`) never names its type
-            // through a `use` of its last segment.
-            types = resolve(type_name, ResolveTarget::Type, !fqn_language(language));
-        }
-        let &[(type_id, confidence)] = types.as_slice() else {
-            return None;
-        };
-        if !self.symbol_table.node_kind(type_id).is_constructible() {
-            return None;
-        }
-        let target = self
-            .symbol_table
-            .sole_constructor(type_id)
-            .unwrap_or(type_id);
-        Some((target, confidence))
-    }
-
-    /// The cheap gate of [`Self::resolve_instantiation`]: some Class /
-    /// Struct is declared as `name`, or an import aliases a declared one to
-    /// it (`import { Widget as Renamed }`), which only the import tier maps
-    /// back.
-    fn names_constructible_type(&self, name: &str, raw_imports: &[RawImport]) -> bool {
-        self.symbol_table.has_constructible_type(name)
-            || raw_imports.iter().any(|import| {
-                import.alias.as_deref() == Some(name)
-                    && self
-                        .symbol_table
-                        .has_constructible_type(&import.imported_name)
-            })
     }
 
     /// Resolve an explicit import without selecting an inaccessible local binding.
@@ -2211,6 +2127,15 @@ impl<'a> Resolver<'a> {
 fn ladder_resolution(targets: &[(NodeId, f32)]) -> Resolution {
     debug_assert!(targets.len() <= 1, "a tier bound {targets:?}");
     Resolution::from_ladder(targets.first().copied())
+}
+
+/// The one target of a type lookup; `None` for none or several, which the
+/// constructor fallback reads as no type.
+fn sole_target(targets: &[(NodeId, f32)]) -> Option<(NodeId, f32)> {
+    match *targets {
+        [target] => Some(target),
+        _ => None,
+    }
 }
 
 /// The kinds a call site may reach. Rust method syntax (`x.f()`, recorded as

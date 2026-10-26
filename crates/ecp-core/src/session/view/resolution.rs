@@ -18,12 +18,13 @@ use crate::analyzer::import_binding::{
 };
 pub(super) use crate::analyzer::ladder::qualifier_prefix_is_internal;
 use crate::analyzer::ladder::{
-    self, split_qualifier, CallPick, CrateModule, FieldRead, ResolveFacts, StemFile,
+    self, split_qualifier, CallContext, CallPick, CrateModule, FieldRead, ResolveFacts, StemFile,
+    TypeName,
 };
 use crate::analyzer::lexical::{
     lexical_chain_end, lexical_scope_kinds, twin_enclosing, LexicalFunctions,
 };
-use crate::analyzer::outcome::{NoEdge, Resolution, Tier};
+use crate::analyzer::outcome::{Resolution, Tier};
 use crate::analyzer::path_aliases::PathAliases;
 use crate::analyzer::reexport::{
     self, export_filter_applies, is_ecmascript, ExportAliasTable, Fact, FileImports, ImportRef,
@@ -34,8 +35,7 @@ use crate::analyzer::rust_paths::{
     rust_type_path_prefix,
 };
 use crate::analyzer::same_file_pick::{
-    is_free, member_call_admits, prefer_owned, rust_impl_members, ImplMember, ImplNode, PickFacts,
-    PickScope,
+    is_free, prefer_owned, rust_impl_members, ImplMember, ImplNode, PickFacts, PickScope,
 };
 use crate::analyzer::type_ladder::{
     self, TypeCandidates, TypeFacts, TypeMember as LadderMember, MAX_HERITAGE_DEPTH,
@@ -1504,38 +1504,6 @@ impl<'a> OverlayFacts<'a> {
         }
     }
 
-    /// The index's `Resolver::type_receiver`: a C#, Swift, Kotlin or Dart
-    /// member call on a receiver that names a type (project, alias or
-    /// library), or a Python one on a from-imported type, resolves as
-    /// `Receiver.member`.
-    fn type_receiver(
-        &self,
-        source: &str,
-        language: Language,
-        site: CallSite<'_>,
-        imports: &[RawImport],
-    ) -> Option<String> {
-        let CallSite::FromReceiver { receiver, member } = site else {
-            return None;
-        };
-        let typed = match language {
-            // The call closure in `resolve_edges` binds a submodule receiver
-            // first and types only a site it left open, as the index does.
-            Language::Python => reexport::python_imported_type(
-                self,
-                source,
-                receiver,
-                imports.iter().map(ImportRef::from),
-            ),
-            Language::CSharp | Language::Swift | Language::Kotlin | Language::Dart => !matches!(
-                self.type_candidates(source, receiver, imports),
-                TypeCandidates::None
-            ),
-            _ => false,
-        };
-        typed.then(|| format!("{receiver}.{member}"))
-    }
-
     /// The index's receiver-typing ladder (`Resolver::resolve_member_via_type`)
     /// for the qualified `callee` = `qualifier` + `member` of `source`, which
     /// runs where the qualifier tiers found nothing.
@@ -2004,16 +1972,9 @@ impl<'a> OverlayFacts<'a> {
         })
     }
 
-    /// The index's `Resolver::may_be_receiverless_member_call`: a bare `m()`
-    /// that names a constructible type and an admitted `Method` both, which
-    /// the constructor fallback leaves alone.
-    fn may_be_receiverless_member_call(&self, site: CallSite<'_>, caller: FileMeta) -> bool {
-        let CallSite::Plain(callee) = site else {
-            return false;
-        };
-        if callee.contains(['.', ':']) {
-            return false;
-        }
+    /// Whether `callee` names a constructible type and a `Method` the
+    /// `caller` file admits both ([`ladder::CallFacts::names_type_and_member`]).
+    fn names_type_and_member(&self, callee: &str, caller: FileMeta) -> bool {
         let named = self.global_named(callee);
         named.iter().any(|&id| self.kind_of(id).is_constructible())
             && named
@@ -3390,60 +3351,226 @@ impl<'a> ladder::ModuleTreeFacts for OverlayTree<'_, 'a> {
     }
 }
 
-/// Mirror of the index-time constructor fallback
-/// (`Resolver::resolve_instantiation`) up to the constructed type: a site the
-/// callable tiers left empty resolves the Class / Struct it constructs;
-/// [`construction_target`] then picks the edge's target. `resolve` looks a
-/// type name up under the given imports, as the index's caller does: the
-/// whole ladder from `resolve_call`, the import tiers alone after a lexical
-/// shadow. The whole type path resolves first: `u.Widget()` binds through
-/// `import pkg as u`, `Outer.Inner()` through the qualifier tier. A qualified
-/// path that does not resolve retries its last segment only where
-/// [`CallSite::constructed_type`] allows that fallback.
-fn resolve_constructed_type<'s>(
+/// The constructor fallback's gate over the overlay
+/// ([`ladder::CallFacts::declares_constructible`]): an overlay type or a
+/// constructible base node is named `name`. Most unresolved calls name no
+/// type at all, so this rejects them before [`resolve_callee`] collects
+/// candidates.
+fn names_constructible(
     graph: &ArchivedZeroCopyGraph,
-    site: CallSite<'s>,
-    language: Language,
-    imports: &'s [RawImport],
     types: &OverlayNames<'_>,
-    nodes: &[ViewNode],
-    mut resolve: impl FnMut(&'s str, &'s [RawImport]) -> Option<(u32, f32)>,
-) -> Option<(u32, f32)> {
-    let (type_path, last_segment_fallback) = site.constructed_type(language)?;
-    let type_name = type_path
-        .rsplit(['.', ':', '\\'])
-        .next()
-        .unwrap_or(type_path);
-    let qualified = type_name.len() < type_path.len();
-    // Most unresolved calls name no type at all: reject them before the
-    // candidate collection in `resolve_callee` allocates. An import alias
-    // names no declared type, so it passes through its imported name, as
-    // the index's `names_constructible_type` gate does.
-    let names_constructible = |name: &str| {
-        types.anywhere.contains_key(name)
-            || graph
-                .nodes_by_name(name)
-                .any(|idx| NodeKind::from(&graph.nodes[idx as usize].kind).is_constructible())
-    };
-    if !names_constructible(type_name)
-        && !imports.iter().any(|import| {
-            import.alias.as_deref() == Some(type_name)
-                && names_constructible(import.imported_name.as_str())
-        })
-    {
-        return None;
+    name: &str,
+) -> bool {
+    types.anywhere.contains_key(name)
+        || graph
+            .nodes_by_name(name)
+            .any(|idx| NodeKind::from(&graph.nodes[idx as usize].kind).is_constructible())
+}
+
+/// A dirty file's memo of its Rust `::` path calls: `(callee, caller owner,
+/// caller bases)` to the call's edge.
+type ModuleCalls<'k> = FxHashMap<(&'k str, Option<&'k str>, *const String), Option<(u32, f32)>>;
+
+/// The overlay's facts for one call site's entry ([`ladder::call`]): what
+/// [`resolve_callee`] reads for the dirty file `file_ord`, the caller, and
+/// the edge pass's memos and gap notes.
+struct OverlayCall<'v, 'a, 'n, 'm, 'k, G, A> {
+    graph: &'v ArchivedZeroCopyGraph,
+    file_ord: usize,
+    file: &'v OverlayFileInput,
+    caller: FileMeta,
+    /// The caller's owner key and enclosing bases: with the callee, the key
+    /// of a Rust path's memo.
+    owner: Option<&'k str>,
+    heritage: &'k [String],
+    base_metas: &'v RefCell<&'m mut FxHashMap<usize, FileMeta>>,
+    /// The callable, type and qualifier name tables.
+    names: (
+        &'v OverlayNames<'n>,
+        &'v OverlayNames<'n>,
+        &'v OverlayNames<'n>,
+    ),
+    nodes: &'v [ViewNode],
+    replaced: &'v FxHashMap<u32, u32>,
+    dirty_base: &'v FxHashSet<u32>,
+    facts: &'v OverlayFacts<'a>,
+    type_ctors: &'v FxHashMap<u32, Vec<u32>>,
+    construction_targets: &'v RefCell<FxHashMap<u32, u32>>,
+    module_calls: &'v RefCell<ModuleCalls<'k>>,
+    note_gap: &'v G,
+    csharp_admitted: &'v A,
+}
+
+impl<G, A> OverlayCall<'_, '_, '_, '_, '_, G, A> {
+    /// [`resolve_callee`] for `site` among the declarations of `names`.
+    fn resolve(
+        &self,
+        site: CallSite<'_>,
+        names: &OverlayNames<'_>,
+        imports: &[RawImport],
+        scope: Scope<'_>,
+    ) -> Option<(u32, f32)> {
+        let (_, types, qualifiers) = self.names;
+        resolve_callee(
+            self.graph,
+            site,
+            self.file_ord,
+            imports,
+            self.caller,
+            &mut self.base_metas.borrow_mut(),
+            names,
+            types,
+            qualifiers,
+            self.nodes,
+            self.replaced,
+            self.dirty_base,
+            self.facts,
+            scope,
+        )
     }
-    // A qualified type path (`new \App\User()`) never names its type
-    // through a `use` of its last segment.
-    let retry_imports: &'s [RawImport] = if fqn_language(language) { &[] } else { imports };
-    let (ty, confidence) = resolve(type_path, imports).or_else(|| {
-        (qualified && last_segment_fallback).then(|| resolve(type_name, retry_imports))?
-    })?;
-    let kind = match ty.checked_sub(graph.nodes.len() as u32) {
-        Some(virt_off) => nodes[virt_off as usize].kind,
-        None => NodeKind::from(&graph.nodes[ty as usize].kind),
-    };
-    kind.is_constructible().then_some((ty, confidence))
+}
+
+impl<'a, 'k, G, A> ladder::CallFacts<'k> for OverlayCall<'_, 'a, '_, '_, 'k, G, A>
+where
+    G: Fn(&str, &str),
+    A: Fn(u32, CallAccess<'_>) -> Option<u32>,
+{
+    type Modules = OverlayFacts<'a>;
+    type Decls = OverlayFacts<'a>;
+    const TYPE_NAME: TypeName = TypeName::LastSegment;
+
+    fn modules(&self) -> &OverlayFacts<'a> {
+        self.facts
+    }
+
+    fn decls(&self) -> &OverlayFacts<'a> {
+        self.facts
+    }
+
+    fn type_candidates<'q>(
+        &self,
+        source: &str,
+        receiver: &'q str,
+        imports: &'q [RawImport],
+    ) -> TypeCandidates<'q> {
+        self.facts.type_candidates(source, receiver, imports)
+    }
+
+    /// A Rust path takes the qualifier tier, the module tree and the
+    /// receiver-typing ladder, in the order `ladder::qualified` sets
+    /// (`RustTail::Ladder`), memoized per file. No Rust receiver is typed,
+    /// so `site` is its lookup.
+    fn ladder(
+        &self,
+        site: CallSite<'k>,
+        typed: Option<&str>,
+        call: CallPick<'_>,
+        heritage: &[String],
+    ) -> Resolution {
+        let (callables, ..) = self.names;
+        let imports = self.file.imports.as_slice();
+        let scope = Scope {
+            call: Some(call),
+            heritage,
+            type_lookup: false,
+            rust_tail: RustTail::Ladder,
+        };
+        if self.caller.language == Language::Rust && site.name().contains("::") {
+            let key = (site.name(), self.owner, self.heritage.as_ptr());
+            let memo = self.module_calls.borrow().get(&key).copied();
+            let hit = memo.unwrap_or_else(|| {
+                let hit = self.resolve(site, callables, imports, scope);
+                self.module_calls.borrow_mut().insert(key, hit);
+                hit
+            });
+            return Resolution::from_ladder(hit);
+        }
+        let lookup = typed.map_or(site, CallSite::Plain);
+        let hit = self.resolve(lookup, callables, imports, scope);
+        // A hit in the caller's file came before the partial-type tier.
+        let rel_path = self.file.rel_path.as_str();
+        if self.caller.language == Language::CSharp
+            && hit.is_none_or(|(idx, _)| self.facts.node_file(idx) != Some(rel_path))
+        {
+            if let (CallSite::Plain(name), Some(owner)) = (lookup, self.owner) {
+                if self.facts.unseen_part_owns(rel_path, name, owner) {
+                    (self.note_gap)(name, GAP_CS_PARTIAL_BARE_CALL);
+                }
+            }
+        }
+        Resolution::from_ladder(hit)
+    }
+
+    fn csharp_admitted(&self, id: u32, site: CallSite<'_>) -> Option<u32> {
+        (self.csharp_admitted)(id, CallAccess::of(site, &self.file.rel_path, self.owner))
+    }
+
+    fn bare_member(
+        &self,
+        member: &str,
+        target: ResolveTarget,
+        heritage: &[String],
+    ) -> Option<(u32, f32)> {
+        let (callables, ..) = self.names;
+        debug_assert!(
+            target == callables.target,
+            "a lookup of another kind family"
+        );
+        self.resolve(
+            CallSite::Plain(member),
+            callables,
+            &self.file.imports,
+            Scope {
+                call: None,
+                heritage,
+                type_lookup: false,
+                rust_tail: RustTail::Stop,
+            },
+        )
+    }
+
+    fn names_type_and_member(&self, callee: &str) -> bool {
+        self.facts.names_type_and_member(callee, self.caller)
+    }
+
+    fn declares_constructible(&self, name: &str) -> bool {
+        names_constructible(self.graph, self.names.1, name)
+    }
+
+    fn resolve_type(
+        &self,
+        path: &str,
+        bind_imports: bool,
+        call: CallPick<'_>,
+        heritage: &[String],
+    ) -> Option<(u32, f32)> {
+        let imports: &[RawImport] = if bind_imports {
+            &self.file.imports
+        } else {
+            &[]
+        };
+        self.resolve(
+            CallSite::Plain(path),
+            self.names.1,
+            imports,
+            Scope {
+                call: Some(call),
+                heritage,
+                type_lookup: false,
+                rust_tail: RustTail::Stop,
+            },
+        )
+    }
+
+    fn construction_target(&self, type_id: u32) -> u32 {
+        *self
+            .construction_targets
+            .borrow_mut()
+            .entry(type_id)
+            .or_insert_with(|| {
+                construction_target(self.graph, self.nodes, self.type_ctors, type_id)
+            })
+    }
 }
 
 /// The values a bare variant name may denote (the index's
@@ -4199,7 +4326,7 @@ pub(super) fn resolve_edges(
     // Constructed type → its `Calls` target: a type is often
     // constructed at several sites, and a clean one costs name-index
     // probes.
-    let mut construction_targets: FxHashMap<u32, u32> = FxHashMap::default();
+    let construction_targets: RefCell<FxHashMap<u32, u32>> = RefCell::default();
     let file_metas: Vec<FileMeta> = files
         .iter()
         .map(|f| FileMeta::from_path(&f.rel_path))
@@ -4309,7 +4436,7 @@ pub(super) fn resolve_edges(
         );
         // One cache per dirty file: a repeated qualified call reuses
         // both successful and unresolved lookups without rebuilding paths.
-        let mut module_calls = FxHashMap::default();
+        let module_calls: RefCell<ModuleCalls<'_>> = RefCell::default();
         let mut variant_cache = VariantCache::default();
         let caller = file_metas[file_ord];
         // Most files declare no base anywhere: their symbols skip the
@@ -4397,7 +4524,6 @@ pub(super) fn resolve_edges(
                 let hit = CallSite::resolve_chain(
                     raw_callee,
                     |parsed, arguments| 'hit: {
-                        let mut base_metas = chain_metas.borrow_mut();
                         if let Some(targets) = lexical.call_targets(span_of(sym), parsed) {
                             if let Some(&hit) = targets.first() {
                                 break 'hit Some(hit);
@@ -4423,17 +4549,19 @@ pub(super) fn resolve_edges(
                                 // retry reads the file's own imports: only
                                 // TS / JS has a lexical scope, and neither
                                 // drops them for the last segment.
-                                if let Some((ty, confidence)) = resolve_constructed_type(
-                                    graph,
-                                    site,
+                                if let Some((ty, confidence)) = ladder::constructed_type(
+                                    &facts,
                                     caller.language,
+                                    site,
                                     &file.imports,
-                                    &types,
-                                    nodes,
+                                    TypeName::LastSegment,
+                                    |name| names_constructible(graph, &types, name),
                                     |name, _| import_scoped(name, ResolveTarget::Type),
                                 ) {
-                                    let target =
-                                        *construction_targets.entry(ty).or_insert_with(|| {
+                                    let target = *construction_targets
+                                        .borrow_mut()
+                                        .entry(ty)
+                                        .or_insert_with(|| {
                                             construction_target(graph, nodes, type_ctors, ty)
                                         });
                                     resolution =
@@ -4442,201 +4570,51 @@ pub(super) fn resolve_edges(
                             }
                             break 'hit resolution.edge();
                         }
-                        // The index's `Resolver::resolve_call`. A Python
-                        // from-imported submodule and a mapped Go package
-                        // settle the call ahead of the ladder; a Go value
-                        // or unmapped package re-classifies the site.
-                        let mut resolution = Resolution::Unknown;
-                        let mut site = parsed;
-                        if let CallSite::FromReceiver { receiver, member } = parsed {
-                            match caller.language {
-                                Language::Python => {
-                                    if let Some((target, _)) = reexport::python_submodule_member(
-                                        &facts,
-                                        &file.rel_path,
-                                        (receiver, member),
-                                        file.imports.iter().map(ImportRef::from),
-                                        callables.target,
-                                    ) {
-                                        resolution = Resolution::bound(target, Tier::ImportScoped);
-                                    }
-                                }
-                                Language::Go => match reexport::go_package_lookup(
-                                    &facts,
-                                    &file.rel_path,
-                                    receiver,
-                                    member,
-                                    file.imports.iter().map(ImportRef::from),
-                                ) {
-                                    reexport::GoPackageLookup::Resolved(target) => {
-                                        resolution = target.map_or(
-                                            Resolution::NoEdge(NoEdge::PackageMissing),
-                                            |(target, _)| {
-                                                Resolution::bound(target, Tier::ImportScoped)
-                                            },
-                                        );
-                                    }
-                                    reexport::GoPackageLookup::Unmapped => {
-                                        site = CallSite::Plain(member);
-                                    }
-                                    reexport::GoPackageLookup::Value => {
-                                        site = CallSite::UntypedMember(member);
-                                    }
-                                },
-                                _ => {}
-                            }
-                        }
-                        let open = matches!(resolution, Resolution::Unknown);
-                        // A C#, Swift, Kotlin or Dart receiver that names a
-                        // type resolves as `Receiver.member`; a Swift or C#
-                        // one that names none is an untyped member call.
-                        let type_member = if open {
-                            facts.type_receiver(
-                                &file.rel_path,
-                                caller.language,
-                                site,
-                                &file.imports,
-                            )
-                        } else {
-                            None
-                        };
-                        let site = match (site, &type_member) {
-                            (CallSite::FromReceiver { member, .. }, None)
-                                if matches!(
-                                    caller.language,
-                                    Language::Swift | Language::CSharp
-                                ) =>
-                            {
-                                CallSite::UntypedMember(member)
-                            }
-                            (CallSite::FromReceiver { receiver, member }, None)
-                                if open
-                                    && caller.language == Language::Python
-                                    && receiver.contains('/')
-                                    && reexport::python_from_import_declared_attribute(
-                                        &facts,
-                                        &file.rel_path,
-                                        receiver,
-                                        file.imports.iter().map(ImportRef::from),
-                                    ) =>
-                            {
-                                CallSite::UntypedMember(member)
-                            }
-                            _ => site,
-                        };
-                        let untyped = matches!(site, CallSite::UntypedMember(_));
-                        // An untyped receiver is no `this`: no tier reaches
-                        // the member through the caller's bases.
-                        let scope = Scope {
-                            call: Some(CallPick {
-                                owner,
-                                caller: Some(source),
-                                untyped,
-                                free_only: site.reaches_free_only(caller.language),
-                            }),
-                            heritage: if untyped { &[] } else { heritage },
-                            type_lookup: false,
-                            rust_tail: RustTail::Ladder,
-                        };
-                        let lookup = type_member.as_deref().map_or(site, CallSite::Plain);
-                        let mut resolve = |site: CallSite<'_>, imports: &[RawImport], scope| {
-                            resolve_callee(
+                        // The index's `Resolver::resolve_call`: the shared
+                        // call entry, which normalizes the site and derives
+                        // the call pick from it.
+                        let verdict = ladder::call(
+                            &OverlayCall {
                                 graph,
-                                site,
                                 file_ord,
-                                imports,
+                                file,
                                 caller,
-                                &mut base_metas,
-                                &callables,
-                                &types,
-                                &qualifiers,
+                                owner,
+                                heritage,
+                                base_metas: &chain_metas,
+                                names: (&callables, &types, &qualifiers),
                                 nodes,
                                 replaced,
                                 dirty_base,
-                                &facts,
-                                scope,
-                            )
-                        };
-                        // A Rust path takes the qualifier tier, the module
-                        // tree and the receiver-typing ladder, in the order
-                        // `ladder::qualified` sets (`RustTail::Ladder`).
-                        // No Rust receiver is typed by `type_receiver`, so
-                        // `site` is the lookup here. A C# untyped member
-                        // takes no tier (`Resolver::resolve_call`).
-                        let csharp_untyped = untyped && caller.language == Language::CSharp;
-                        if open && !csharp_untyped {
-                            let hit = if caller.language == Language::Rust
-                                && site.name().contains("::")
-                            {
-                                let name = site.name();
-                                *module_calls
-                                    .entry((name, owner, heritage.as_ptr()))
-                                    .or_insert_with(|| resolve(site, &file.imports, scope))
-                            } else {
-                                let hit = resolve(lookup, &file.imports, scope);
-                                // A hit in the caller's file came
-                                // before the partial-type tier.
-                                if caller.language == Language::CSharp
-                                    && hit.is_none_or(|(idx, _)| {
-                                        facts.node_file(idx) != Some(file.rel_path.as_str())
-                                    })
-                                {
-                                    if let (CallSite::Plain(name), Some(owner)) = (lookup, owner) {
-                                        if facts.unseen_part_owns(&file.rel_path, name, owner) {
-                                            note_gap(name, GAP_CS_PARTIAL_BARE_CALL);
-                                        }
-                                    }
-                                }
-                                hit
-                            };
-                            resolution = Resolution::from_ladder(hit);
-                        }
-                        if caller.language == Language::CSharp {
-                            // The index's C# access rule (codex ruling
-                            // P-ext2 C), after the ladder.
-                            let access = CallAccess::of(site, &file.rel_path, owner);
-                            resolution = resolution.admit_or(|idx| csharp_admitted(idx, access));
-                        }
-                        if resolution.call_fallbacks_allowed()
-                            && type_member.is_some()
-                            && caller.language == Language::Kotlin
-                        {
-                            // `fun Reg.ext()` is a top-level function no
-                            // member lookup on `Reg` finds.
-                            resolution = Resolution::from_ladder(
-                                resolve(
-                                    CallSite::Plain(site.name()),
-                                    &file.imports,
-                                    Scope {
-                                        call: None,
-                                        heritage: scope.heritage,
-                                        type_lookup: false,
-                                        rust_tail: RustTail::Stop,
-                                    },
-                                )
-                                .filter(|&(idx, _)| is_free(&facts, idx)),
-                            );
-                        }
-                        if untyped {
-                            // A Python module is a value: `api.helper()` on
-                            // an untyped receiver may call another module's
-                            // function, never one of the caller's own module.
-                            resolution = resolution.admit(|idx| {
-                                member_call_admits(&facts, idx, owner)
-                                    || (caller.language == Language::Python
-                                        && is_free(&facts, idx)
-                                        && facts.node_file(idx) != Some(file.rel_path.as_str()))
-                            });
-                        }
+                                facts: &facts,
+                                type_ctors,
+                                construction_targets: &construction_targets,
+                                module_calls: &module_calls,
+                                note_gap: &note_gap,
+                                csharp_admitted: &csharp_admitted,
+                            },
+                            CallContext {
+                                source: &file.rel_path,
+                                language: caller.language,
+                                imports: &file.imports,
+                                heritage,
+                                owner,
+                                caller: Some(source),
+                            },
+                            parsed,
+                        );
+                        let mut resolution = verdict.resolution;
                         // The index's C# extension retry of a receiver
                         // the parser typed (`Type.member`) or left
                         // untyped. It runs after `resolve_call` there, so
-                        // no rule above judges its target.
+                        // no rule above judges its target. No C# site it
+                        // reads constructs a type, so the constructor
+                        // fallback before it bound nothing.
                         if resolution.call_fallbacks_allowed()
-                            && type_member.is_none()
+                            && !verdict.typed
                             && caller.language == Language::CSharp
                         {
-                            if let Some((receiver, member)) = match site {
+                            if let Some((receiver, member)) = match verdict.site {
                                 // `string.Format(..)` calls a static
                                 // member of a predefined type: no
                                 // value receives an extension.
@@ -4667,44 +4645,6 @@ pub(super) fn resolve_edges(
                                         None
                                     });
                                 resolution = Resolution::from_ladder(hit);
-                            }
-                        }
-                        if resolution.call_fallbacks_allowed()
-                            && !facts.may_be_receiverless_member_call(site, caller)
-                        {
-                            if let Some((ty, confidence)) = resolve_constructed_type(
-                                graph,
-                                site,
-                                caller.language,
-                                &file.imports,
-                                &types,
-                                nodes,
-                                |name, imports| {
-                                    resolve_callee(
-                                        graph,
-                                        CallSite::Plain(name),
-                                        file_ord,
-                                        imports,
-                                        caller,
-                                        &mut base_metas,
-                                        &types,
-                                        &types,
-                                        &qualifiers,
-                                        nodes,
-                                        replaced,
-                                        dirty_base,
-                                        &facts,
-                                        Scope {
-                                            rust_tail: RustTail::Stop,
-                                            ..scope
-                                        },
-                                    )
-                                },
-                            ) {
-                                let target = *construction_targets.entry(ty).or_insert_with(|| {
-                                    construction_target(graph, nodes, type_ctors, ty)
-                                });
-                                resolution = Resolution::from_ladder(Some((target, confidence)));
                             }
                         }
                         resolution.edge()
