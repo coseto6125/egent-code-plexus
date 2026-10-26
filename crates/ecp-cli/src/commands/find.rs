@@ -2261,6 +2261,7 @@ mod tests {
                     generic_arity: 0,
                     flags: None,
                     decorators: Vec::new(),
+                    params: Vec::new(),
                 }],
                 imports: vec![],
             };

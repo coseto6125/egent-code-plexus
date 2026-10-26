@@ -113,6 +113,10 @@ pub struct FragmentSymbol {
     /// node's `Decorates` edges from them, and the override sentinel marks a
     /// declared override.
     pub decorators: Vec<String>,
+    /// `RawFunctionMeta::params` of a function, method or constructor whose
+    /// span a meta carries, flat as `[name1, type1, ...]`; empty otherwise.
+    /// The overlay matches a dirty method's `Overrides` signature on them.
+    pub params: Vec<String>,
 }
 
 /// The symbol shape of the v2 and v3 fragment bins (`FragmentSymbol` before
@@ -242,6 +246,7 @@ pub fn fragment_file_from_local_graph(graph: &LocalGraph) -> FragmentFile {
                     generic_arity: n.generic_arity(),
                     flags: meta.map(|meta| meta.flags),
                     decorators: n.decorators.clone(),
+                    params: meta.map(|meta| meta.params.clone()).unwrap_or_default(),
                 }
             })
             .collect(),

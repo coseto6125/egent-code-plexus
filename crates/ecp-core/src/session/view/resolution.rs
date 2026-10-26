@@ -12,7 +12,10 @@ use super::{
 use crate::analyzer::csharp_access::{self, CallAccess};
 use crate::analyzer::csharp_extension::{self, ReceiverSite};
 use crate::analyzer::decorates::{decorates_edges, DECORATES_REASON};
-use crate::analyzer::heritage::{enclosing_class_heritage, holds_heritage, HeritageNode};
+use crate::analyzer::heritage::{
+    csharp_base_arity, enclosing_class_heritage, heritage_reason, heritage_rel, holds_heritage,
+    HeritageNode,
+};
 use crate::analyzer::import_binding::{
     fqn_imported_name, fqn_language, fqn_type_path, import_binding, import_member_fallback,
     owner_path_agrees, DeclaredType, MemberOwner,
@@ -27,6 +30,10 @@ use crate::analyzer::lexical::{
     lexical_chain_end, lexical_scope_kinds, twin_enclosing, LexicalFunctions,
 };
 use crate::analyzer::outcome::{Resolution, Tier};
+use crate::analyzer::overrides::{
+    method_lookup, owner_types, rules_for, BaseRow, Decl, MethodIndex, MroCache, OverrideEdges,
+    OverrideFacts, OverrideMethod, Rules, MAX_OVERRIDE_DEPTH,
+};
 use crate::analyzer::path_aliases::PathAliases;
 use crate::analyzer::reexport::{
     self, export_filter_applies_to, is_ecmascript, ExportAliasTable, Fact, FileImports, ImportRef,
@@ -43,7 +50,7 @@ use crate::analyzer::type_ladder::{
     self, TypeCandidates, TypeFacts, TypeMember as LadderMember, MAX_HERITAGE_DEPTH,
 };
 use crate::analyzer::types::{
-    owner_key, CallArguments, CallSite, NameRef, RawImport, Span, VariantRef,
+    owner_key, CallArguments, CallSite, NameRef, RawFunctionMeta, RawImport, Span, VariantRef,
     FUNCTION_REFERENCE_REASON, NEAREST_COPY_CONFIDENCE, NEAREST_COPY_REASON, VALUE_READ_REASON,
     VARIANT_PATTERN_REASON, VARIANT_USE_REASON,
 };
@@ -2652,6 +2659,15 @@ fn resolve_callee<'s>(
             debug_assert!(!replaced.contains_key(&decl));
             return accepts(decl).then_some((decl, CONF_IMPORT_SCOPED));
         }
+    } else if scope.type_lookup && !member_policy && binds_imports {
+        // The index's `resolve_symbol(.., Type)` takes its named-import tier
+        // (`Resolver::resolve_named_import`), which follows no re-export
+        // outside TS / JS, and never the segment match below: `use
+        // crate::Base;` names the crate root, a file no segment matches.
+        if let Some(hit) = facts.named_import_hit(file_ord, imports, callee, names.target, false) {
+            debug_assert!(!replaced.contains_key(&hit.decl));
+            return accepts(hit.decl).then_some((hit.decl, CONF_IMPORT_SCOPED));
+        }
     }
 
     // Built on first use: most calls bind at the qualifier, ladder or
@@ -2667,13 +2683,16 @@ fn resolve_callee<'s>(
 
     // Tier 2: import-scoped, the index's named-import tier: every import
     // binding the callee, in order, until one's module declares the name. An
-    // `Imports` lookup took the index's own tier above.
-    let segment_imports: &[RawImport] =
-        if member_policy || names.target == ResolveTarget::Field || scope.imports.is_some() {
-            &[]
-        } else {
-            imports
-        };
+    // `Imports` lookup and a type lookup took the index's own tier above.
+    let segment_imports: &[RawImport] = if member_policy
+        || names.target == ResolveTarget::Field
+        || scope.imports.is_some()
+        || scope.type_lookup
+    {
+        &[]
+    } else {
+        imports
+    };
     let base_len = graph.nodes.len() as u32;
     for (import, declared) in segment_imports
         .iter()
@@ -3085,9 +3104,10 @@ struct Scope<'c> {
     /// The declared bases of the caller's enclosing class
     /// ([`enclosing_class_heritage`]), probed by the heritage tier.
     heritage: &'c [String],
-    /// A type lookup outside a call (`resolve_symbol(.., Type)`): in a fully
-    /// qualified language the index binds it through its named-import tier,
-    /// not the import-member tier.
+    /// A type lookup outside a call (`resolve_symbol(.., Type)`): outside
+    /// the import-member policy the index binds it through its named-import
+    /// tier, never the path-segment match, and in a fully qualified language
+    /// not through the import-member tier either.
     type_lookup: bool,
     /// What a Rust `::` path the qualifier tier leaves unbound takes next.
     rust_tail: RustTail,
@@ -3891,27 +3911,36 @@ fn resolve_variant_ref<'f>(
     )
 }
 
-/// The index's supertypes pre-pass (`pass1_9_supertypes` then
-/// `SymbolTable::build_supertypes`) over the dirty files: each heritage
-/// subject (a type, the type an `Impl` names, the owner of a Rust trait-impl
-/// method) with its bases resolved as types from the declaring file. A
-/// subject that is a clean type keeps its archived bases too, less the
-/// traits of the dirty files' archived `impl` blocks
-/// ([`OverlayFacts::base_supertypes`]): `graph.bin` records no declaring
-/// file per base, only those blocks.
+/// One heritage row of a dirty file, as the index's `pass1_9_supertypes`
+/// writes it: the subject the heritage belongs to, one declared base
+/// spelling, and the type that spelling resolves to with the resolver's
+/// confidence (`None`: no project type).
+struct HeritageRow<'f> {
+    subject: u32,
+    spelling: &'f str,
+    base: Option<(u32, f32)>,
+}
+
+/// The index's supertypes pre-pass (`pass1_9_supertypes`) over the dirty
+/// files, before any supertype exists: each heritage subject (a type, the
+/// type an `Impl` names, the owner of a Rust trait-impl method) with each of
+/// its bases resolved from the declaring file as the index's `resolve_base`
+/// resolves them ([`resolve_base`]), one row per `(subject, spelling)` of a
+/// file, in declared order. Cost: one type resolution per distinct subject
+/// name and base spelling of a file.
 #[allow(clippy::too_many_arguments)]
-fn dirty_supertypes(
+fn dirty_heritage_rows<'f>(
     graph: &ArchivedZeroCopyGraph,
-    files: &[OverlayFileInput],
+    files: &'f [OverlayFileInput],
     nodes: &[ViewNode],
     facts: &OverlayFacts<'_>,
     names: (&OverlayNames<'_>, &OverlayNames<'_>),
     base_metas: &mut FxHashMap<usize, FileMeta>,
     replaced: &FxHashMap<u32, u32>,
     dirty_base: &FxHashSet<u32>,
-) -> FxHashMap<u32, Supertypes> {
+) -> Vec<HeritageRow<'f>> {
     let base_len = graph.nodes.len() as u32;
-    let mut acc: FxHashMap<u32, Supertypes> = FxHashMap::default();
+    let mut rows: Vec<HeritageRow<'f>> = Vec::new();
     let mut start = 0usize;
     for (file_ord, file) in files.iter().enumerate() {
         let first = start;
@@ -3935,10 +3964,12 @@ fn dirty_supertypes(
                 dirty_base,
                 facts,
             )
-            .map(|(id, _)| id)
         };
         let mut subjects: FxHashMap<&str, Option<u32>> = FxHashMap::default();
-        let mut bases: FxHashMap<&str, Option<u32>> = FxHashMap::default();
+        let mut bases: FxHashMap<&str, Option<(u32, f32)>> = FxHashMap::default();
+        // One `impl Trait for O` block repeats its heritage on every method,
+        // and the index keeps one row per `(subject, base)` of a file.
+        let mut pushed: FxHashSet<(u32, &str)> = FxHashSet::default();
         for (offset, sym) in file.symbols.iter().enumerate() {
             if sym.heritage.is_empty() {
                 continue;
@@ -3962,28 +3993,187 @@ fn dirty_supertypes(
                 };
                 *subjects
                     .entry(type_name)
-                    .or_insert_with(|| resolve(type_name))
+                    .or_insert_with(|| resolve(type_name).map(|(id, _)| id))
             };
             let Some(subject) = subject else {
                 continue;
             };
-            let entry = acc.entry(subject).or_insert_with(|| {
-                (subject < base_len)
-                    .then(|| facts.base_supertypes(subject))
-                    .flatten()
-                    .unwrap_or_default()
-            });
-            for base in &sym.heritage {
-                let resolved = *bases
-                    .entry(base.as_str())
-                    .or_insert_with(|| resolve(base.as_str()));
-                match resolved {
-                    None if entry.1.is_none() => entry.1 = Some(entry.0.len() as u32),
-                    None => {}
-                    Some(id) if id != subject && !entry.0.contains(&id) => entry.0.push(id),
-                    Some(_) => {}
+            for spelling in &sym.heritage {
+                let spelling = spelling.as_str();
+                if !pushed.insert((subject, spelling)) {
+                    continue;
                 }
+                let base = *bases.entry(spelling).or_insert_with(|| {
+                    resolve_base(facts, files, caller.language, spelling, &mut resolve)
+                });
+                rows.push(HeritageRow {
+                    subject,
+                    spelling,
+                    base,
+                });
             }
+        }
+    }
+    rows
+}
+
+/// The index's Pass 2 heritage edges (`pass2_emit_node_edges`) of every
+/// dirty declaration: for each base spelling it lists, in order, an edge to
+/// the type the spelling resolves to ([`resolve_base`]) at the resolver's
+/// confidence, `Implements` to an interface or a trait and `Extends` to
+/// any other type ([`heritage_rel`]). The source is the declaration itself,
+/// a Rust trait-impl method and a tombstoned twin included, as Pass 2 emits
+/// from every raw node's slot. Runs once the dirty supertypes exist, as
+/// Pass 2 runs after the pre-pass. Cost: one type resolution per distinct
+/// base spelling of a file.
+#[allow(clippy::too_many_arguments)]
+fn dirty_heritage_edges(
+    graph: &ArchivedZeroCopyGraph,
+    files: &[OverlayFileInput],
+    nodes: &[ViewNode],
+    facts: &OverlayFacts<'_>,
+    names: (&OverlayNames<'_>, &OverlayNames<'_>),
+    base_metas: &mut FxHashMap<usize, FileMeta>,
+    replaced: &FxHashMap<u32, u32>,
+    dirty_base: &FxHashSet<u32>,
+) -> Vec<ViewEdge> {
+    let base_len = graph.nodes.len() as u32;
+    let mut edges: Vec<ViewEdge> = Vec::new();
+    let mut start = 0usize;
+    for (file_ord, file) in files.iter().enumerate() {
+        let first = start;
+        start += file.symbols.len();
+        if file.symbols.iter().all(|s| s.heritage.is_empty()) {
+            continue;
+        }
+        let caller = file.file_meta();
+        let mut resolve = |name: &str| {
+            resolve_type(
+                graph,
+                name,
+                file_ord,
+                &file.imports,
+                caller,
+                base_metas,
+                names,
+                nodes,
+                replaced,
+                dirty_base,
+                facts,
+            )
+        };
+        let mut bases: FxHashMap<&str, Option<(u32, f32)>> = FxHashMap::default();
+        for (offset, sym) in file.symbols.iter().enumerate() {
+            let source = base_len + (first + offset) as u32;
+            for spelling in &sym.heritage {
+                let spelling = spelling.as_str();
+                let base = *bases.entry(spelling).or_insert_with(|| {
+                    resolve_base(facts, files, caller.language, spelling, &mut resolve)
+                });
+                let Some((target, confidence)) = base else {
+                    continue;
+                };
+                let rel_type = heritage_rel(facts.kind_of(target));
+                edges.push(ViewEdge {
+                    source,
+                    target,
+                    rel_type,
+                    confidence,
+                    reason: heritage_reason(rel_type),
+                });
+            }
+        }
+    }
+    edges
+}
+
+/// The index's `resolve_base` for the base `spelling` of a declaration in a
+/// dirty file of `language`, through that file's type lookup (`resolve`,
+/// [`resolve_type`]). Outside C# it is the lookup's answer as is. A C#
+/// spelling looks up its bare name ([`csharp_base_arity`]), takes the type
+/// of its type-argument count ([`overlay_with_arity`]) and names a partial
+/// type by its representative part. The index's last C# fallback is not
+/// mirrored: a bare name whose global candidates are the parts of one
+/// partial type binds nothing here.
+fn resolve_base(
+    facts: &OverlayFacts<'_>,
+    files: &[OverlayFileInput],
+    language: Language,
+    spelling: &str,
+    resolve: &mut impl FnMut(&str) -> Option<(u32, f32)>,
+) -> Option<(u32, f32)> {
+    if language != Language::CSharp {
+        return resolve(spelling);
+    }
+    let (name, arity) = csharp_base_arity(spelling);
+    let (id, confidence) = resolve(name)?;
+    let id = overlay_with_arity(facts, files, id, arity)?;
+    Some((TypeFacts::partial_type(facts, id), confidence))
+}
+
+/// The index's `SymbolTable::with_arity` for the type `id` a C# bare name
+/// found: with no same-named type beside it in its file, `id` itself when
+/// the spelling has no type arguments or `id` declares `arity`; else the
+/// first of `id` and its same-file namesakes that declares `arity`.
+/// `graph.bin` keeps no generic arity, so a clean `id` stands as it is.
+fn overlay_with_arity(
+    facts: &OverlayFacts<'_>,
+    files: &[OverlayFileInput],
+    id: u32,
+    arity: u32,
+) -> Option<u32> {
+    let Some(mut offset) = id.checked_sub(facts.base_len()).map(|o| o as usize) else {
+        return Some(id);
+    };
+    let file = files.iter().find(|file| {
+        let here = offset < file.symbols.len();
+        if !here {
+            offset -= file.symbols.len();
+        }
+        here
+    })?;
+    let own = &file.symbols[offset];
+    let twins: Vec<usize> = file
+        .symbols
+        .iter()
+        .enumerate()
+        .filter(|&(at, sym)| at != offset && sym.kind.is_type() && sym.name == own.name)
+        .map(|(at, _)| at)
+        .collect();
+    if twins.is_empty() {
+        return (arity == 0 || own.generic_arity == arity).then_some(id);
+    }
+    let first = id - offset as u32;
+    std::iter::once(offset)
+        .chain(twins)
+        .find(|&at| file.symbols[at].generic_arity == arity)
+        .map(|at| first + at as u32)
+}
+
+/// The index's `SymbolTable::build_supertypes` over the dirty files'
+/// heritage `rows` ([`dirty_heritage_rows`]). A subject that is a clean
+/// type keeps its archived bases too, less the traits of the dirty files'
+/// archived `impl` blocks ([`OverlayFacts::base_supertypes`]): `graph.bin`
+/// records no declaring file per base, only those blocks.
+fn dirty_supertypes(
+    facts: &OverlayFacts<'_>,
+    base_len: u32,
+    rows: &[HeritageRow<'_>],
+) -> FxHashMap<u32, Supertypes> {
+    let mut acc: FxHashMap<u32, Supertypes> = FxHashMap::default();
+    for row in rows {
+        let subject = row.subject;
+        let entry = acc.entry(subject).or_insert_with(|| {
+            (subject < base_len)
+                .then(|| facts.base_supertypes(subject))
+                .flatten()
+                .unwrap_or_default()
+        });
+        match row.base {
+            None if entry.1.is_none() => entry.1 = Some(entry.0.len() as u32),
+            None => {}
+            Some((id, _)) if id != subject && !entry.0.contains(&id) => entry.0.push(id),
+            Some(_) => {}
         }
     }
     acc
@@ -4822,6 +5012,392 @@ fn resolve_decorates<'a>(
     }
 }
 
+/// What the shared `Overrides` derivation ([`crate::analyzer::overrides`])
+/// reads over the overlay ([`resolve_overrides`]): the declared bases of
+/// every type a dirty callable's lookup can reach, and the methods each of
+/// those types declares.
+struct OverrideView<'v, 'a> {
+    facts: &'v OverlayFacts<'a>,
+    bases: &'v FxHashMap<u32, Vec<BaseRow>>,
+    methods: &'v MethodIndex<'v>,
+}
+
+impl OverrideFacts for OverrideView<'_, '_> {
+    type Base = BaseRow;
+
+    /// A part of a C# `partial` type with no rows of its own reads its
+    /// representative's, as the index's `build_declared_bases` copies them
+    /// to every part.
+    fn declared_bases(&self, ty: u32) -> &[BaseRow] {
+        self.bases
+            .get(&ty)
+            .or_else(|| self.bases.get(&self.partial_type(ty)))
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    fn partial_type(&self, ty: u32) -> u32 {
+        TypeFacts::partial_type(self.facts, ty)
+    }
+
+    fn node_kind(&self, id: u32) -> NodeKind {
+        self.facts.kind_of(id)
+    }
+
+    fn methods<'s>(&'s self, ty: u32, name: &'s str) -> Option<&'s [Decl<'s>]> {
+        self.methods.get(&(ty, name)).map(Vec::as_slice)
+    }
+}
+
+/// The spelling of a gap among a clean type's bases ([`clean_bases`]):
+/// `graph.bin` keeps no spelling, and a blank one is no base at all.
+const UNSPELLED_BASE: &str = "?";
+
+/// The declared bases of the clean type `ty` as the `Overrides` lookup
+/// reads them from `graph.bin`: its archived supertypes
+/// ([`OverlayFacts::base_supertypes`]) in declared order, each spelled by
+/// its name and bound at the confidence of the type's archived `Extends` /
+/// `Implements` edge to it (Pass 2 emits that edge from the resolution Pass
+/// 1.9 recorded), and a gap where the first unresolved base stood. A base no
+/// such edge reaches is a gap too: its confidence is unknown, and a guessed
+/// one could make an edge the index does not have. Cost: the type's
+/// out-edges.
+fn clean_bases(facts: &OverlayFacts<'_>, ty: u32) -> Vec<BaseRow> {
+    let Some((bases, first_unresolved)) = facts.base_supertypes(ty) else {
+        return Vec::new();
+    };
+    let graph = facts.graph;
+    let out = graph.out_offsets[ty as usize].to_native() as usize
+        ..graph.out_offsets[ty as usize + 1].to_native() as usize;
+    let mut bound: FxHashMap<u32, f32> = FxHashMap::default();
+    for edge in &graph.edges[out] {
+        if matches!(
+            RelType::from(&edge.rel_type),
+            RelType::Extends | RelType::Implements
+        ) {
+            let target = edge.target.to_native();
+            let target = facts.replaced.get(&target).copied().unwrap_or(target);
+            let known = bound.entry(target).or_insert(0.0);
+            *known = known.max(edge.confidence.to_native());
+        }
+    }
+    let gap = || BaseRow {
+        spelling: UNSPELLED_BASE.to_owned(),
+        candidates: Vec::new(),
+    };
+    let mut rows = Vec::with_capacity(bases.len() + 1);
+    for (at, &base) in bases.iter().enumerate() {
+        if first_unresolved == Some(at as u32) {
+            rows.push(gap());
+        }
+        rows.push(match bound.get(&base) {
+            Some(&confidence) => BaseRow {
+                spelling: facts.name_of(base).to_owned(),
+                candidates: vec![(base, confidence)],
+            },
+            None => gap(),
+        });
+    }
+    if first_unresolved == Some(bases.len() as u32) {
+        rows.push(gap());
+    }
+    rows
+}
+
+/// The archived meta of the clean callable `idx`, as the index paired it by
+/// span: the flags and parameters the signature match reads.
+fn archived_meta(graph: &ArchivedZeroCopyGraph, idx: u32) -> Option<RawFunctionMeta> {
+    let meta = base_function_meta(graph, idx)?;
+    let pool = &graph.string_pool;
+    Some(RawFunctionMeta {
+        span: (0, 0, 0, 0),
+        flags: meta.flags.to_native(),
+        params: meta
+            .params
+            .iter()
+            .map(|param| param.resolve(pool).to_owned())
+            .collect(),
+        return_type: String::new(),
+        decorators: Vec::new(),
+    })
+}
+
+/// Records the method `slot` named `name` under the type `key`, once per
+/// node.
+fn add_decl<'a>(
+    methods: &mut MethodIndex<'a>,
+    key: u32,
+    name: &'a str,
+    slot: u32,
+    meta: Option<&'a RawFunctionMeta>,
+) {
+    let decls = methods.entry((key, name)).or_default();
+    if !decls.iter().any(|d| d.slot == slot) {
+        decls.push(Decl { slot, meta });
+    }
+}
+
+/// The `Overrides` edges of every dirty callable, by the index's derivation
+/// ([`crate::analyzer::overrides`]), with its confidence and reason.
+///
+/// A dirty callable's owner type comes from its file's fresh parse
+/// ([`owner_types`]), its marker from [`OverlaySymbol::decorators`] and its
+/// signature from [`OverlaySymbol::params`] and [`OverlaySymbol::flags`]; a
+/// tombstoned twin looks up as its survivor (`survivors`), as the index's
+/// `RawIndexMap` merges its slot. The rules come from the file's path, as
+/// the index reads them. A dirty type's bases are its `heritage` rows, kept
+/// as the index's `SymbolTable::build_declared_bases` keeps them; a clean
+/// type's come from `graph.bin` ([`clean_bases`]), and its methods from its
+/// archived `HasMethod` edges with their archived meta.
+///
+/// Cost: one owner sweep per dirty file (O(n log n) in its symbols); one
+/// breadth-first walk from the dirty owner types over their bases, each
+/// reached type once and at most `MAX_OVERRIDE_DEPTH + 2` levels, reading a
+/// clean type's out-edges, archived supertypes and `PartOf` rows once; then
+/// per dirty callable the lookup of [`method_lookup`], which per path walks
+/// the owner's ancestors once (a Python order once per type). No name
+/// lookup and no graph scan.
+fn resolve_overrides(
+    facts: &OverlayFacts<'_>,
+    files: &[OverlayFileInput],
+    heritage: &[HeritageRow<'_>],
+    survivors: &[(u32, u32)],
+) -> Vec<ViewEdge> {
+    let graph = facts.graph;
+    let base_len = facts.base_len();
+    let file_rules: Vec<Option<Rules>> = files
+        .iter()
+        .map(|file| rules_for(Language::from_path(&file.rel_path)))
+        .collect();
+    if file_rules.iter().all(Option::is_none) {
+        return Vec::new();
+    }
+    let survivor_of: FxHashMap<u32, u32> = survivors.iter().copied().collect();
+    let slot = |virt: u32| survivor_of.get(&virt).copied().unwrap_or(virt);
+    let partial = |ty: u32| TypeFacts::partial_type(facts, ty);
+    let owners: Vec<Vec<Option<usize>>> = files
+        .iter()
+        .map(|file| owner_types(&file.symbols))
+        .collect();
+    let dirty_metas: Vec<Vec<Option<RawFunctionMeta>>> = files
+        .iter()
+        .map(|file| {
+            file.symbols
+                .iter()
+                .map(|symbol| {
+                    symbol.kind.is_callable().then_some(())?;
+                    Some(RawFunctionMeta {
+                        span: HeritageNode::span(symbol),
+                        flags: symbol.flags?,
+                        params: symbol.params.clone(),
+                        return_type: String::new(),
+                        decorators: Vec::new(),
+                    })
+                })
+                .collect()
+        })
+        .collect();
+
+    // The dirty types' declared bases: under the representative part, the
+    // declaring type never its own base, and a base whose one candidate is
+    // the type dropped, as `build_declared_bases` keeps the pre-pass rows.
+    // A clean representative keeps its archived bases first.
+    let mut bases: FxHashMap<u32, Vec<BaseRow>> = FxHashMap::default();
+    for row in heritage {
+        if row.subject < base_len {
+            continue;
+        }
+        let ty = partial(row.subject);
+        let candidates: Vec<(u32, f32)> = row
+            .base
+            .map(|(id, confidence)| (partial(id), confidence))
+            .into_iter()
+            .filter(|&(id, _)| id != ty)
+            .collect();
+        if candidates.is_empty() && row.base.is_some() {
+            continue;
+        }
+        let list = bases.entry(ty).or_insert_with(|| {
+            if ty < base_len {
+                clean_bases(facts, ty)
+            } else {
+                Vec::new()
+            }
+        });
+        let base = BaseRow {
+            spelling: row.spelling.to_owned(),
+            candidates,
+        };
+        if !list.contains(&base) {
+            list.push(base);
+        }
+    }
+
+    // Every type a lookup can reach: the owner types of the dirty files
+    // with rules, then their bound bases, level by level.
+    let mut frontier: Vec<u32> = Vec::new();
+    let mut start = base_len;
+    for (file_ord, file) in files.iter().enumerate() {
+        let first = start;
+        start += file.symbols.len() as u32;
+        if file_rules[file_ord].is_some() {
+            frontier.extend(
+                owners[file_ord]
+                    .iter()
+                    .flatten()
+                    .map(|&owner| slot(first + owner as u32)),
+            );
+        }
+    }
+    let mut reached: Vec<u32> = Vec::new();
+    let mut seen: FxHashSet<u32> = FxHashSet::default();
+    for _ in 0..=MAX_OVERRIDE_DEPTH + 1 {
+        let mut next: Vec<u32> = Vec::new();
+        for ty in frontier {
+            if !seen.insert(ty) {
+                continue;
+            }
+            reached.push(ty);
+            let key = if bases.contains_key(&ty) {
+                ty
+            } else {
+                partial(ty)
+            };
+            if key < base_len && !bases.contains_key(&key) {
+                bases.insert(key, clean_bases(facts, key));
+            }
+            for base in bases.get(&key).into_iter().flatten() {
+                if let [(id, _)] = base.candidates.as_slice() {
+                    next.push(*id);
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+
+    // The methods of each reached clean type, by its archived `HasMethod`
+    // edges and those of its other clean parts, under the representative.
+    let pool = &graph.string_pool;
+    let mut archived: Vec<(u32, &str, u32, Option<RawFunctionMeta>)> = Vec::new();
+    let mut scanned: FxHashSet<u32> = FxHashSet::default();
+    for &ty in &reached {
+        if ty >= base_len {
+            continue;
+        }
+        let key = partial(ty);
+        let group = facts.partial_group(ty);
+        let parts: &[u32] = if group.is_empty() {
+            std::slice::from_ref(&ty)
+        } else {
+            &group
+        };
+        for &part in parts {
+            if part >= base_len || facts.dirty_base.contains(&part) || !scanned.insert(part) {
+                continue;
+            }
+            let out = graph.out_offsets[part as usize].to_native() as usize
+                ..graph.out_offsets[part as usize + 1].to_native() as usize;
+            for edge in &graph.edges[out] {
+                if RelType::from(&edge.rel_type) != RelType::HasMethod {
+                    continue;
+                }
+                let method = edge.target.to_native();
+                let node = &graph.nodes[method as usize];
+                let name = node.name.resolve(pool).trim();
+                if name.is_empty()
+                    || !matches!(
+                        NodeKind::from(&node.kind),
+                        NodeKind::Method | NodeKind::Function
+                    )
+                    || facts.dirty_base.contains(&method)
+                {
+                    continue;
+                }
+                archived.push((key, name, method, archived_meta(graph, method)));
+            }
+        }
+    }
+    // The dirty methods by their owner types, as the index's
+    // `build_method_index` keys them.
+    let mut methods: MethodIndex<'_> = FxHashMap::default();
+    let mut start = base_len;
+    for (file_ord, file) in files.iter().enumerate() {
+        let first = start;
+        start += file.symbols.len() as u32;
+        for (offset, symbol) in file.symbols.iter().enumerate() {
+            let name = symbol.name.trim();
+            if !matches!(symbol.kind, NodeKind::Method | NodeKind::Function) || name.is_empty() {
+                continue;
+            }
+            let Some(owner) = owners[file_ord][offset] else {
+                continue;
+            };
+            add_decl(
+                &mut methods,
+                partial(slot(first + owner as u32)),
+                name,
+                slot(first + offset as u32),
+                dirty_metas[file_ord][offset].as_ref(),
+            );
+        }
+    }
+    for (key, name, method, meta) in &archived {
+        add_decl(&mut methods, *key, name, *method, meta.as_ref());
+    }
+
+    let view = OverrideView {
+        facts,
+        bases: &bases,
+        methods: &methods,
+    };
+    let mut mros = MroCache::default();
+    let mut emitted = OverrideEdges::default();
+    let mut start = base_len;
+    for (file_ord, file) in files.iter().enumerate() {
+        let first = start;
+        start += file.symbols.len() as u32;
+        let Some(rules) = file_rules[file_ord] else {
+            continue;
+        };
+        for (offset, symbol) in file.symbols.iter().enumerate() {
+            let Some(owner) = owners[file_ord][offset] else {
+                continue;
+            };
+            let method = OverrideMethod {
+                name: &symbol.name,
+                kind: symbol.kind,
+                decorators: &symbol.decorators,
+                heritage: &symbol.heritage,
+                meta: dirty_metas[file_ord][offset].as_ref(),
+            };
+            let owner = slot(first + owner as u32);
+            let Some(lookup) = method_lookup(&view, rules, &method, owner, &mut mros) else {
+                continue;
+            };
+            let source = slot(first + offset as u32);
+            for &stop in &lookup.stops {
+                if let Some(edge) = lookup.edge(source, stop) {
+                    emitted.add(edge);
+                }
+            }
+        }
+    }
+    emitted
+        .into_edges()
+        .into_iter()
+        .map(|edge| ViewEdge {
+            source: edge.source,
+            target: edge.target,
+            rel_type: RelType::Overrides,
+            confidence: edge.confidence,
+            reason: edge.reason,
+        })
+        .collect()
+}
+
 /// The `member_twins` table [`super::OverlayView::build_with_removed`] fills.
 pub(super) type MemberTwins = FxHashMap<u32, (usize, Vec<(u32, Span)>)>;
 
@@ -4833,6 +5409,7 @@ pub(super) type MemberTwins = FxHashMap<u32, (usize, Vec<(u32, Span)>)>;
 /// edges never have; `dirty_files` holds each dirty path's `File` node. The
 /// `Decorates` edges ([`resolve_decorates`]) go to `decorated`: a new
 /// `Annotation` node they reach is numbered past every virtual node yet.
+/// The `Overrides` edges ([`resolve_overrides`]) go to `overrides`.
 /// Returns the lexical parent of each scoped virtual node.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_edges(
@@ -4852,6 +5429,7 @@ pub(super) fn resolve_edges(
     gaps: &RefCell<Vec<CallGap>>,
     (dirty_files, imports): (&FxHashMap<&str, u32>, &mut Vec<ViewEdge>),
     decorated: &mut Decorated<'_>,
+    overrides: &mut Vec<ViewEdge>,
 ) -> FxHashMap<u32, u32> {
     let mut callables = OverlayNames::new(ResolveTarget::Callable);
     let mut values = OverlayNames::new(ResolveTarget::Value);
@@ -4936,8 +5514,8 @@ pub(super) fn resolve_edges(
     let mut virt_cursor = base_len;
     // The index's supertypes pre-pass, over the dirty files, before
     // any call resolves: the receiver ladder and the same-file pick
-    // walk these bases.
-    let _ = facts.dirty_supertypes.set(dirty_supertypes(
+    // walk these bases, and the `Overrides` lookup reads the rows.
+    let heritage = dirty_heritage_rows(
         graph,
         files,
         nodes,
@@ -4946,11 +5524,27 @@ pub(super) fn resolve_edges(
         &mut base_metas,
         replaced,
         dirty_base,
-    ));
+    );
+    let _ = facts
+        .dirty_supertypes
+        .set(dirty_supertypes(&facts, base_len, &heritage));
     // The pre-pass's own qualified lookups ran before the dirty bases
     // existed, and the same-file pick's hierarchy rule walks them.
     // Tier 3's memo reads no bases and stays.
     facts.qualified.borrow_mut().clear();
+    // Pass 2's `Extends` / `Implements` edges, once the bases exist.
+    for edge in dirty_heritage_edges(
+        graph,
+        files,
+        nodes,
+        &facts,
+        (&types, &qualifiers),
+        &mut base_metas,
+        replaced,
+        dirty_base,
+    ) {
+        push_edge(edge);
+    }
     // A value read inside `Foo1<T>` reads `Foo1<T>.foo`, the arity
     // twin of the `Foo1.foo` a lookup returns, when both sit in the
     // reader's file (the index's `SymbolTable::twin_read_from`).
@@ -5427,5 +6021,6 @@ pub(super) fn resolve_edges(
         dirty_files,
         decorated,
     );
+    *overrides = resolve_overrides(&facts, files, &heritage, decorated.survivors);
     lexical_parents
 }

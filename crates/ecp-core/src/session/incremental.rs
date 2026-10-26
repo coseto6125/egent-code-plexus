@@ -13,6 +13,7 @@
 //! | class membership: `HasMethod` / `HasProperty` | `post_process::class_membership` | [`membership::class_membership`], `HasProperty` only with the records |
 //! | `Imports` | `post_process::imports_edges` | [`crate::analyzer::import_edges`], resolved by the view's resolution pass against [`dirty_file_nodes`]; the replay appends them |
 //! | `Decorates` + `Annotation` | `post_process::decorates_edges` | [`crate::analyzer::decorates`], resolved by the view's resolution pass; the replay appends the new `Annotation` nodes from [`first_annotation`] on, then the edges, and suppresses each base `Annotation` node [`orphaned_annotations`] finds |
+//! | `Overrides` | `post_process::overrides` | [`crate::analyzer::overrides`], looked up by the view's resolution pass over the dirty types' fresh heritage and the clean types `graph.bin` holds; the replay appends the edges |
 //! | function meta | `pass1_8_function_metas` | the flags and return type the fragment paired by span |
 //! | `PathLiteral` + `UsesPathLiteral` | `post_process::path_literal_nodes` | [`record_nodes::path_literal_node`] |
 //! | `QueriesTable` | `post_process::sql_table_edges` | [`record_nodes::sql_table_refs`], the table by [`Tables`] |
@@ -106,6 +107,9 @@ pub(super) struct ReplayInputs<'a> {
     /// The full name of each new `Annotation` node `decorates` reaches, the
     /// k-th at [`first_annotation`] + k.
     pub annotations: Vec<String>,
+    /// The dirty callables' `Overrides` edges, by the index's derivation
+    /// ([`crate::analyzer::overrides`]), sourced at virtual nodes.
+    pub overrides: Vec<ViewEdge>,
     /// The base nodes of the dirty paths whose kind
     /// [`replays_record_kind`], ascending.
     pub base_records: Vec<u32>,
@@ -278,6 +282,7 @@ pub(super) fn replay(
         imports,
         decorates,
         annotations,
+        overrides,
         base_records,
         dirty_base,
         lexical_parents,
@@ -436,6 +441,7 @@ pub(super) fn replay(
     }
     imports.into_iter().for_each(&mut push);
     decorates.into_iter().for_each(&mut push);
+    overrides.into_iter().for_each(&mut push);
 
     if !records_replay {
         return replayed;
@@ -1024,6 +1030,7 @@ mod tests {
             generic_arity: 0,
             flags: None,
             decorators: Vec::new(),
+            params: Vec::new(),
         }
     }
 

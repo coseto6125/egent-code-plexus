@@ -487,6 +487,7 @@ mod tests {
                 generic_arity: 0,
                 flags: None,
                 decorators: Vec::new(),
+                params: Vec::new(),
             }],
             imports: vec![],
         }
@@ -746,6 +747,7 @@ mod tests {
                     generic_arity: 0,
                     flags: None,
                     decorators: Vec::new(),
+                    params: Vec::new(),
                 })
                 .into_iter()
                 .collect(),
@@ -813,6 +815,7 @@ mod tests {
             generic_arity: 0,
             flags: None,
             decorators: Vec::new(),
+            params: Vec::new(),
         }
     }
 

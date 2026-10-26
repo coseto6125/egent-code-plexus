@@ -161,7 +161,9 @@ use std::path::Path;
 /// schema44 fragment has no such field and must not be read.
 /// schema46: an L1 fragment symbol carries `FragmentSymbol.decorators`; a
 /// schema45 fragment lays its symbols out without it and must not be read.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema46");
+/// schema47: an L1 fragment symbol carries `FragmentSymbol.params`; a
+/// schema46 fragment lays its symbols out without it and must not be read.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema47");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

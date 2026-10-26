@@ -10,6 +10,7 @@ use crate::resolution::index::{DeclaredBase, FileMeta, Language, ResolveTarget, 
 use crate::resolution::resolver::{ReexportIndex, Resolver};
 use crate::rust::module_tree::RustWorkspaceModTree;
 use ecp_core::analyzer::csharp_extension::{self, ReceiverSite};
+use ecp_core::analyzer::heritage;
 use ecp_core::analyzer::ladder;
 use ecp_core::analyzer::lexical::{
     enclosing_types, file_identities, file_uids, later_is_arity_twin, lexical_scope_kinds,
@@ -3336,7 +3337,7 @@ fn pass1_9_supertypes(
 /// `Extends` / `Implements`. Outside C# it is the resolver's answer as is.
 ///
 /// A C# spelling names a type by its bare name and its type-argument count
-/// ([`csharp_base_arity`]): `Conv` is `Conv` of arity 0, `Conv<Version>` is
+/// ([`heritage::csharp_base_arity`]): `Conv` is `Conv` of arity 0, `Conv<Version>` is
 /// `Conv` of arity 1. The bare name resolves through the ordinary tiers, and
 /// each candidate becomes the type of that arity
 /// ([`SymbolTable::with_arity`]). The arity keeps one candidate at most per
@@ -3366,7 +3367,7 @@ fn resolve_base(
     if language != Language::CSharp {
         return resolve(spelling);
     }
-    let (name, arity) = csharp_base_arity(spelling);
+    let (name, arity) = heritage::csharp_base_arity(spelling);
     let mut targets: Vec<(u32, f32)> = Vec::new();
     for (id, confidence) in resolve(name) {
         let Some(id) = symbol_table.with_arity(id, arity) else {
@@ -3393,37 +3394,6 @@ fn resolve_base(
         );
     }
     targets
-}
-
-/// A C# base spelling as the bare type it names and the number of type
-/// arguments of its last segment: `Conv<int, string>` is (`Conv`, 2),
-/// `N.Conv<List<int>>` is (`N.Conv`, 1), `Conv` is (`Conv`, 0). A spelling
-/// whose argument list belongs to an outer segment (`Outer<int>.Inner`) or
-/// does not close stays whole, with arity 0.
-fn csharp_base_arity(spelling: &str) -> (&str, u32) {
-    let whole = (spelling, 0);
-    let Some(open) = spelling.find('<') else {
-        return whole;
-    };
-    let Some(args) = spelling
-        .trim_end()
-        .strip_suffix('>')
-        .and_then(|s| s.get(open + 1..))
-    else {
-        return whole;
-    };
-    let mut depth = 0u32;
-    let mut arity = 1;
-    for c in args.chars() {
-        match c {
-            '<' | '(' | '[' => depth += 1,
-            '>' | ')' | ']' if depth == 0 => return whole,
-            '>' | ')' | ']' => depth -= 1,
-            ',' if depth == 0 => arity += 1,
-            _ => {}
-        }
-    }
-    (spelling[..open].trim_end(), arity)
 }
 
 /// The `reason` of a resolved `Calls` edge, by the tier that resolved it.
@@ -3587,14 +3557,10 @@ fn pass2_emit_node_edges(
     for base in &raw_node.heritage {
         let targets = resolve_base(resolver, symbol_table, local_graph, language, base);
         for (target_id, confidence) in targets {
-            // Kind-based dispatch: Interface/Trait targets → Implements,
-            // concrete class targets → Extends. The resolved target's NodeKind
-            // IS the relationship definition — no per-language parser change
-            // needed (Java `implements`, Kotlin `:`, Go structural, Rust
-            // `impl For` all converge on the same heritage list).
-            let (rel_type, reason) = match symbol_table.node_kind(target_id) {
-                NodeKind::Interface | NodeKind::Trait => (RelType::Implements, reason_implements),
-                _ => (RelType::Extends, reason_heritage),
+            let rel_type = heritage::heritage_rel(symbol_table.node_kind(target_id));
+            let reason = match rel_type {
+                RelType::Implements => reason_implements,
+                _ => reason_heritage,
             };
             edges.push(Edge {
                 source: current_node_idx,
@@ -4119,8 +4085,8 @@ fn pass2_resolve_edges(
     resolver_dump_path: Option<&std::path::Path>,
     symbol_skip_set: Option<&FxHashMap<String, FxHashSet<u64>>>,
 ) -> Pass2Output {
-    let reason_heritage = string_pool.add("heritage");
-    let reason_implements = string_pool.add("pass2:implements");
+    let reason_heritage = string_pool.add(heritage::EXTENDS_REASON);
+    let reason_implements = string_pool.add(heritage::IMPLEMENTS_REASON);
     let reason_type = string_pool.add("type_annotation");
     let reason_call = CallReasons {
         call: string_pool.add("call"),

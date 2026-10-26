@@ -255,6 +255,7 @@ fn decode_fragment(
                 generic_arity: s.generic_arity.to_native(),
                 flags: s.flags.as_ref().map(|flags| flags.to_native()),
                 decorators: s.decorators.iter().map(|d| d.as_str().to_owned()).collect(),
+                params: s.params.iter().map(|p| p.as_str().to_owned()).collect(),
             })
             .collect(),
         imports,
