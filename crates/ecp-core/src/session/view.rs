@@ -56,12 +56,17 @@
 //!   member) and enum containment (`Enum` → `EnumVariant`), both by
 //!   [`crate::analyzer::containment`], class membership (`HasMethod` /
 //!   `HasProperty` from a type to its members) by
-//!   [`crate::analyzer::membership`], and each virtual function's meta
+//!   [`crate::analyzer::membership`], `Imports` from the file's `File` node
+//!   by [`crate::analyzer::import_edges`], and each virtual function's meta
 //!   ([`OverlayView::function_meta`]). A re-parsed path that `graph.files`
 //!   holds keeps its base `File` nodes, which source the file's rebuilt
-//!   `Defines`: with the record edges below, the only overlay edges whose
-//!   source is a base index. Membership `HasProperty` is rebuilt only with
-//!   the records, as below.
+//!   `Defines` and `Imports`: with the record edges below, the only overlay
+//!   edges whose source is a base index. Membership `HasProperty` is rebuilt
+//!   only with the records, as below. An `Imports` lookup runs the index's
+//!   import resolver: its whole ladder without a call site, the named-import
+//!   tier in every language outside the import-member policy (not the
+//!   path-segment match of a call), candidate files without the Rust module
+//!   trees, and the guess steps over every file with a `File` node.
 //! - **record outputs** — given each file's [`OverlayFileRecords`]
 //!   ([`OverlayView::build_with_records`]), the replay rebuilds the record
 //!   nodes and their edges by the index's derivations
@@ -77,11 +82,12 @@
 //!
 //! A base edge whose **source** lies in a dirty file is masked ONLY when the
 //! overlay re-resolves that rel type from fragment data (`Calls`,
-//! `ReadsField`, `Defines`, `HasMethod`, plus the `References` reasons
+//! `ReadsField`, `Defines`, `HasMethod`, `Imports`, plus the `References` reasons
 //! above, plus `HasProperty`, `UsesPathLiteral`, `QueriesTable`,
 //! `OpensTxScope`, `Publishes` and `Subscribes` when the records replayed) —
 //! for those the overlay adjacency is the file's truth. `Defines` and the
-//! record edges are masked at the file's `File` nodes too. `HasProperty`
+//! record edges are masked at the file's `File` nodes too, and `Imports`
+//! there only. `HasProperty`
 //! has two producers, class membership and the schema fields: masked by
 //! kind, it needs both rebuilt, so without the records it stays as indexed
 //! and a new member gets none. With them, a dirty file's base `SchemaField`
@@ -102,8 +108,14 @@
 //!   indexed, and so are all record outputs and membership `HasProperty`
 //!   when the view is built without records. A path with two `LocalGraph`s
 //!   keeps the base's count of `File` nodes, whatever count its parse now
-//!   has. `Overrides`, `Imports`, `Decorates` with its `Annotation` nodes,
-//!   and the controller `EntryPoint` nodes of a dirty file are as indexed.
+//!   has. `Overrides`, `Decorates` with its `Annotation` nodes, and the
+//!   controller `EntryPoint` nodes of a dirty file are as indexed.
+//! - A clean file's `Imports` edges are never rebuilt: an edge into a
+//!   dirty declaration the edit removed drops, one into a declaration that
+//!   survives follows it, and a clean importer of a name the edit now
+//!   exports gains none. A Rust qualified import name reaches the qualifier
+//!   tier, which reads the module trees where the index's import resolver
+//!   has none.
 //! - The heuristic mirror edges (`MirrorsField`, `EventTopicMirror`) are
 //!   index-time: an `EventTopic` that pairs with its replayed twin keeps its
 //!   base mirror edges, an unpaired or new one has none, and a dirty file's
@@ -160,6 +172,7 @@ use super::incremental::{self, ReplayInputs};
 use crate::analyzer::containment::{ENUM_VARIANT_DEFINES_REASON, SCOPE_DEFINES_REASON};
 use crate::analyzer::csharp_extension;
 use crate::analyzer::heritage::HeritageNode;
+use crate::analyzer::import_edges::ImportReason;
 use crate::analyzer::lexical::{
     enclosing_types, file_identities, later_is_arity_twin, splits_by_arity,
 };
@@ -812,6 +825,16 @@ impl OverlayView {
 
         let type_ctors = virtual_constructors(files, &nodes, base_len);
 
+        // Each dirty path's `File` node, numbered as the replay below numbers
+        // a new path's: the `Imports` edges start there.
+        let indexed: FxHashSet<&str> = dirty_file_idx.values().copied().collect();
+        let dirty_files = incremental::dirty_file_nodes(
+            files,
+            &indexed,
+            &base_files,
+            base_len + nodes.len() as u32,
+        );
+
         // ── overlay Calls and lexical closure References ──────────────────
         // The resolution submodule binds them. Its name maps borrow `nodes`'
         // strings and drop when it returns, before `nodes` moves into Self.
@@ -819,6 +842,7 @@ impl OverlayView {
         let mut out_adj: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
         let mut in_adj: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
         let gaps: RefCell<Vec<CallGap>> = RefCell::new(Vec::new());
+        let mut imports: Vec<ViewEdge> = Vec::new();
         let lexical_parents = resolution::resolve_edges(
             graph,
             files,
@@ -834,6 +858,7 @@ impl OverlayView {
             &mut out_adj,
             &mut in_adj,
             &gaps,
+            (&dirty_files, &mut imports),
         );
 
         let mut gaps = gaps.into_inner();
@@ -858,8 +883,10 @@ impl OverlayView {
                 records,
                 base_len,
                 tombstones: survivors,
-                indexed: dirty_file_idx.values().copied().collect(),
+                indexed,
                 base_files,
+                dirty_files: &dirty_files,
+                imports,
                 base_records,
                 dirty_base: &dirty_base,
                 lexical_parents: &lexical_parents,
@@ -941,7 +968,8 @@ impl OverlayView {
     /// edges when the records replayed. Class membership is rebuilt per
     /// file too: `HasMethod` always, and `HasProperty` when the records
     /// replayed, as a schema field's `HasProperty` shares the kind (module
-    /// doc).
+    /// doc). `Imports` is rebuilt per file from its `File` node, so masked
+    /// there.
     pub fn masks_base_edge(&self, base_idx: u32, rel: RelType) -> bool {
         let per_file =
             || self.dirty_base.contains(&base_idx) || self.defines_files.contains(&base_idx);
@@ -950,7 +978,7 @@ impl OverlayView {
                 self.dirty_base.contains(&base_idx)
             }
             RelType::HasProperty if self.records_replayed => self.dirty_base.contains(&base_idx),
-            RelType::Defines => per_file(),
+            RelType::Defines | RelType::Imports => per_file(),
             rel if self.records_replayed && replays_record_edge(rel) => per_file(),
             _ => false,
         }
@@ -996,8 +1024,8 @@ impl OverlayView {
 
     /// Overlay-resolved outgoing edges of `idx`: virtual sources, plus the
     /// base `File` node of a re-parsed path, which sources the file's
-    /// rebuilt `Defines`. A clean base node gains no outgoing edge. Yields
-    /// `(overlay_edge_idx, edge)`.
+    /// rebuilt `Defines` and `Imports`. A clean base node gains no outgoing
+    /// edge. Yields `(overlay_edge_idx, edge)`.
     pub fn overlay_out(&self, idx: u32) -> impl Iterator<Item = (u32, &ViewEdge)> + '_ {
         self.out_adj
             .get(&idx)
@@ -1064,7 +1092,9 @@ impl OverlayView {
 /// B extends it again: a dirty file binds no call into a removed module,
 /// and a replayed literal of a nested function hashes its lexical parents.
 /// F7b1 extends it again: the view stores a dirty file's class membership
-/// edges with two more reasons, and masks the base ones.
+/// edges with two more reasons, and masks the base ones. F7b1-2 extends it
+/// again: the view stores a dirty file's `Imports` edges with three more
+/// reasons, and masks the base ones.
 pub const VIEW_CACHE_FORMAT: u32 = 14;
 
 /// The base edge kinds the record replay rebuilds, so masks at a re-parsed
@@ -1084,7 +1114,7 @@ fn replays_record_edge(rel: RelType) -> bool {
 /// Every reason [`OverlayView::build`] puts on a [`ViewEdge`]. A cached view
 /// stores each reason as its index here; a view with an unlisted reason is
 /// never stored, so it costs a build per query as before the cache.
-const VIEW_EDGE_REASONS: [&str; 34] = [
+const VIEW_EDGE_REASONS: [&str; 37] = [
     OVERLOAD_SET_REASON,
     CLOSURE_REFERENCE_REASON,
     NEAREST_COPY_REASON,
@@ -1119,6 +1149,9 @@ const VIEW_EDGE_REASONS: [&str; 34] = [
     EVENT_TOPIC_SUBSCRIBES_REASON,
     CLASS_MEMBERSHIP_REASON,
     CLASS_MEMBERSHIP_IMPL_REASON,
+    ImportReason::Named.as_str(),
+    ImportReason::Module.as_str(),
+    ImportReason::Guess.as_str(),
 ];
 
 pub(super) fn reason_index(reason: &str) -> Option<u8> {
@@ -1203,9 +1236,10 @@ impl CachedView {
             && self.defines_files.iter().copied().all(base)
             && self.defines_files.windows(2).all(|w| w[0] < w[1])
             && self.edges.iter().all(|e| {
-                // A rebuilt `Defines` or record edge is the one edge a base
-                // node sources: the `File` node of a re-parsed path.
-                let base_source = e.rel_type == RelType::Defines
+                // A rebuilt `Defines`, `Imports` or record edge is the one
+                // edge a base node sources: the `File` node of a re-parsed
+                // path.
+                let base_source = matches!(e.rel_type, RelType::Defines | RelType::Imports)
                     || (self.records_replayed && replays_record_edge(e.rel_type));
                 let source = virt(e.source)
                     || (base_source && self.defines_files.binary_search(&e.source).is_ok());

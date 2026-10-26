@@ -397,11 +397,14 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
+    /// What [`ImportEdgeFacts::named`] answers.
+    type NamedAnswer = (Vec<(u32, f32)>, Option<Arc<str>>);
+
     /// Answers step 1 for callables from `named`, keyed by (name,
     /// binding_only); types bind nothing. Records each candidate probe.
     #[derive(Default)]
     struct Fake<'p> {
-        named: FxHashMap<(String, bool), (Vec<(u32, f32)>, Option<Arc<str>>)>,
+        named: FxHashMap<(String, bool), NamedAnswer>,
         files: FxHashMap<&'p str, u32>,
         candidates: FxHashMap<&'p str, Vec<&'p str>>,
         guesses: GuessIndex<'p>,

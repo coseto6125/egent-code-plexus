@@ -16,6 +16,7 @@ use crate::analyzer::import_binding::{
     fqn_imported_name, fqn_language, fqn_type_path, import_binding, import_member_fallback,
     owner_path_agrees, DeclaredType, MemberOwner,
 };
+use crate::analyzer::import_edges::{import_edges, GuessIndex, ImportEdgeFacts};
 pub(super) use crate::analyzer::ladder::qualifier_prefix_is_internal;
 use crate::analyzer::ladder::{
     self, split_qualifier, CallContext, CallPick, CrateModule, FieldRead, ResolveFacts, StemFile,
@@ -51,8 +52,9 @@ use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
 use crate::session::import_scope::{stored_file_meta, stored_language, ImportScope, Module};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::Cow;
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
 
 /// Overlay symbols of one kind family (`kind`), by name: the Tier-3
 /// overlay-wide candidates of [`resolve_callee`], and the names each dirty
@@ -226,6 +228,10 @@ struct OverlayFacts<'a> {
     /// Dirty file ordinal → where it stands in [`Self::rust`], read on its
     /// first module-tree question.
     rust_callers: RefCell<FxHashMap<usize, Rc<RustCaller<'a>>>>,
+    /// Set for the `Imports` pass ([`resolve_imports`]): candidate files are
+    /// read without the Rust module trees, as the index's import resolver
+    /// has none (`GraphBuilder::build`'s `imports_resolver`).
+    tree_free: Cell<bool>,
 }
 
 /// A base Rust `Impl` node: its span, its idx and the [`owner_key`] of the
@@ -380,6 +386,7 @@ impl<'a> OverlayFacts<'a> {
             csharp_namespaces: OnceCell::new(),
             rust: RustModules::new(graph, files, removed),
             rust_callers: RefCell::default(),
+            tree_free: Cell::new(false),
         }
     }
 
@@ -605,6 +612,80 @@ impl<'a> OverlayFacts<'a> {
             .or_default()
             .insert(callee.into(), hit);
         hit
+    }
+
+    /// The index's `Resolver::resolve_named_import` for the dirty file
+    /// `file_ord`, unmemoized: [`reexport::named_import`] with the barrel a
+    /// re-export hop went through. Only a TS / JS importer follows a
+    /// re-export (`follow`); the index's `may_reach` gate is a pre-filter
+    /// ([`Self::named_import`]).
+    fn named_import_hit(
+        &self,
+        file_ord: usize,
+        imports: &[RawImport],
+        name: &str,
+        target: ResolveTarget,
+        follow: bool,
+    ) -> Option<reexport::NamedImport> {
+        let importer = self.scope.dirty()[file_ord].rel_path.as_str();
+        reexport::named_import(
+            self,
+            importer,
+            imports.iter().map(ImportRef::from),
+            name,
+            target,
+            |_| follow,
+        )
+    }
+
+    /// The `File` node of `path` for an `Imports` edge: a dirty path's from
+    /// `dirty_files` (the replay's numbering), a clean one's last base `File`
+    /// node, as the index's `file_node_idx` keeps the last. `None` for a
+    /// removed path and a path no file has.
+    fn file_node(&self, dirty_files: &FxHashMap<&str, u32>, path: &str) -> Option<u32> {
+        if let Some(&node) = dirty_files.get(path) {
+            return Some(node);
+        }
+        if self.dirty.contains_key(path) || self.scope.is_removed(path) {
+            return None;
+        }
+        let graph = self.graph;
+        let basename = path.rsplit('/').next().unwrap_or(path);
+        graph
+            .nodes_by_name(basename)
+            .filter(|&idx| {
+                let node = &graph.nodes[idx as usize];
+                NodeKind::from(&node.kind) == NodeKind::File
+                    && graph
+                        .files
+                        .get(node.file_idx.to_native() as usize)
+                        .is_some_and(|f| f.path.resolve(&graph.string_pool) == path)
+            })
+            .max()
+    }
+
+    /// Every path with a `File` node and that node, each path once: the clean
+    /// base paths, then `dirty_files`. One pass over the base `File` nodes.
+    fn file_nodes(&self, dirty_files: &FxHashMap<&'a str, u32>) -> Vec<(&'a str, u32)> {
+        let graph = self.graph;
+        let mut last: FxHashMap<&'a str, u32> = FxHashMap::default();
+        for idx in graph.nodes_by_kind(NodeKind::File) {
+            let Some(file) = graph
+                .files
+                .get(graph.nodes[idx as usize].file_idx.to_native() as usize)
+            else {
+                continue;
+            };
+            let path = file.path.resolve(&graph.string_pool);
+            if self.dirty.contains_key(path) || self.scope.is_removed(path) {
+                continue;
+            }
+            let node = last.entry(path).or_insert(idx);
+            *node = (*node).max(idx);
+        }
+        last.into_iter()
+            .chain(dirty_files.iter().map(|(&path, &node)| (path, node)))
+            .collect()
     }
 
     /// The stored spelling of `file`, a dirty or an indexed path. `None` for
@@ -1010,8 +1091,11 @@ impl<'a> ModuleFacts for OverlayFacts<'a> {
         // The index's `for_each_candidate`: a Rust path the module trees
         // place is that one file; any other goes through
         // `for_each_specifier_candidate` with its path aliases, read in the
-        // importer's scope.
-        if let Some(file) = self.anchored_rust_module(importer, specifier) {
+        // importer's scope. The `Imports` pass reads no tree, as the index's.
+        if let Some(file) = (!self.tree_free.get())
+            .then(|| self.anchored_rust_module(importer, specifier))
+            .flatten()
+        {
             visit(file);
             return;
         }
@@ -2358,6 +2442,7 @@ fn resolve_overlay_name_ref(
                     heritage: &[],
                     type_lookup: false,
                     rust_tail: RustTail::Stop,
+                    imports: None,
                 },
             )
             .into_iter()
@@ -2506,7 +2591,10 @@ fn resolve_callee<'s>(
             names.target,
             scope.heritage,
         ) {
-            ladder::ImportMember::Bound(hit) => return Some((hit.id, CONF_IMPORT_SCOPED)),
+            ladder::ImportMember::Bound(hit) => {
+                scope.report_barrel(hit.barrel);
+                return Some((hit.id, CONF_IMPORT_SCOPED));
+            }
             ladder::ImportMember::External => return None,
             ladder::ImportMember::Retry(name) => {
                 return resolve_callee(
@@ -2546,7 +2634,19 @@ fn resolve_callee<'s>(
         }
     }
     let ecmascript = is_ecmascript(caller.language);
-    if ecmascript && binds_imports {
+    if let Some(probe) = scope.imports {
+        // The index's named-import tier, in every language outside the
+        // import-member policy; only a TS / JS importer follows a re-export.
+        if !member_policy && binds_imports {
+            if let Some(hit) =
+                facts.named_import_hit(file_ord, imports, callee, names.target, ecmascript)
+            {
+                debug_assert!(!replaced.contains_key(&hit.decl));
+                *probe.barrel.borrow_mut() = hit.barrel;
+                return accepts(hit.decl).then_some((hit.decl, CONF_IMPORT_SCOPED));
+            }
+        }
+    } else if ecmascript && binds_imports {
         if let Some(decl) = facts.named_import(file_ord, imports, callee, names.target) {
             debug_assert!(!replaced.contains_key(&decl));
             return accepts(decl).then_some((decl, CONF_IMPORT_SCOPED));
@@ -2565,12 +2665,14 @@ fn resolve_callee<'s>(
         names.anywhere.get(callee).map(Vec::as_slice).unwrap_or(&[]);
 
     // Tier 2: import-scoped, the index's named-import tier: every import
-    // binding the callee, in order, until one's module declares the name.
-    let segment_imports: &[RawImport] = if member_policy || names.target == ResolveTarget::Field {
-        &[]
-    } else {
-        imports
-    };
+    // binding the callee, in order, until one's module declares the name. An
+    // `Imports` lookup took the index's own tier above.
+    let segment_imports: &[RawImport] =
+        if member_policy || names.target == ResolveTarget::Field || scope.imports.is_some() {
+            &[]
+        } else {
+            imports
+        };
     let base_len = graph.nodes.len() as u32;
     for (import, declared) in segment_imports
         .iter()
@@ -2659,11 +2761,13 @@ fn resolve_callee<'s>(
         };
         let rust_path = caller.language == Language::Rust && callee.contains("::");
         let ladder_tail = matches!(scope.rust_tail, RustTail::Ladder);
-        let module_tree = (ladder_tail && rust_path).then_some(move || {
-            facts.with_rust_tree(file_ord, |tree| {
-                ladder::module_tree_member(tree, facts, importer, callee, member, target)
-            })
-        });
+        // The index's import resolver has no module tree.
+        let module_tree =
+            (ladder_tail && rust_path && scope.imports.is_none()).then_some(move || {
+                facts.with_rust_tree(file_ord, |tree| {
+                    ladder::module_tree_member(tree, facts, importer, callee, member, target)
+                })
+            });
         let site = ladder::QualifiedSite {
             source: importer,
             caller,
@@ -2762,6 +2866,7 @@ fn resolve_callee<'s>(
         imports,
         names.target,
     ) {
+        scope.report_barrel(hit.barrel);
         return Some((hit.id, CONF_IMPORT_SCOPED));
     }
 
@@ -2822,6 +2927,7 @@ fn extension_fallback(
                 heritage,
                 type_lookup: false,
                 rust_tail: RustTail::Stop,
+                imports: None,
             },
         )
     })
@@ -2984,6 +3090,27 @@ struct Scope<'c> {
     type_lookup: bool,
     /// What a Rust `::` path the qualifier tier leaves unbound takes next.
     rust_tail: RustTail,
+    /// An `Imports` lookup ([`resolve_imports`]), `None` for every other.
+    imports: Option<&'c ImportProbe>,
+}
+
+/// An `Imports` lookup, the index's `Resolver::resolve_import`: outside the
+/// import-member policy the named-import tier runs for every language
+/// ([`OverlayFacts::named_import_hit`]), where a call keeps the path-segment
+/// match, a Rust path reads no module tree, and `barrel` receives the module
+/// a re-export hop of the import tier went through.
+#[derive(Default)]
+struct ImportProbe {
+    barrel: RefCell<Option<Arc<str>>>,
+}
+
+impl Scope<'_> {
+    /// Hand an import tier's barrel to an `Imports` lookup.
+    fn report_barrel(&self, barrel: Option<&str>) {
+        if let Some(probe) = self.imports {
+            *probe.barrel.borrow_mut() = barrel.map(Arc::from);
+        }
+    }
 }
 
 /// The tiers after the qualifier tier for a Rust `::` path. The index runs
@@ -3485,6 +3612,7 @@ where
             heritage,
             type_lookup: false,
             rust_tail: RustTail::Ladder,
+            imports: None,
         };
         if self.caller.language == Language::Rust && site.name().contains("::") {
             let key = (site.name(), self.owner, self.heritage.as_ptr());
@@ -3536,6 +3664,7 @@ where
                 heritage,
                 type_lookup: false,
                 rust_tail: RustTail::Stop,
+                imports: None,
             },
         )
     }
@@ -3569,6 +3698,7 @@ where
                 heritage,
                 type_lookup: false,
                 rust_tail: RustTail::Stop,
+                imports: None,
             },
         )
     }
@@ -3894,6 +4024,7 @@ fn resolve_type<'s>(
             heritage: &[],
             type_lookup: true,
             rust_tail: RustTail::Ladder,
+            imports: None,
         },
     )
 }
@@ -4359,12 +4490,217 @@ fn path_matches_segment(rel_path: &str, segment: &str) -> bool {
         })
 }
 
+/// One dirty input's answers to the `Imports` derivation
+/// ([`crate::analyzer::import_edges`]), as the index's `imports_edges` pass
+/// answers them from its `Resolver`.
+struct OverlayImportEdges<'q, 'a, 'n> {
+    graph: &'a ArchivedZeroCopyGraph,
+    file_ord: usize,
+    file: &'a OverlayFileInput,
+    /// The input's own meta, as its calls read it.
+    caller: FileMeta,
+    /// The importer's language as the index reads it (the first input of
+    /// the path).
+    language: Language,
+    base_metas: &'q RefCell<&'q mut FxHashMap<usize, FileMeta>>,
+    callables: &'q OverlayNames<'n>,
+    types: &'q OverlayNames<'n>,
+    qualifiers: &'q OverlayNames<'n>,
+    nodes: &'a [ViewNode],
+    replaced: &'a FxHashMap<u32, u32>,
+    dirty_base: &'a FxHashSet<u32>,
+    facts: &'q OverlayFacts<'a>,
+    /// Each dirty path's `File` node, as the replay numbers it.
+    dirty_files: &'q FxHashMap<&'a str, u32>,
+    /// Steps 3c to 3f's index, built on the first import that reaches them.
+    guesses: &'q OnceCell<GuessIndex<'a>>,
+}
+
+impl OverlayImportEdges<'_, '_, '_> {
+    /// The index's `Resolver::resolve_import_binding`: the import tiers alone.
+    fn binding(
+        &self,
+        name: &str,
+        target: ResolveTarget,
+        names: &OverlayNames<'_>,
+    ) -> (Vec<(u32, f32)>, Option<Arc<str>>) {
+        let imports = self.file.imports.as_slice();
+        if imports.is_empty() {
+            return (Vec::new(), None);
+        }
+        if !import_member_fallback(self.language) {
+            let follow = is_ecmascript(self.language);
+            return match self
+                .facts
+                .named_import_hit(self.file_ord, imports, name, target, follow)
+            {
+                Some(hit) => (vec![(hit.decl, CONF_IMPORT_SCOPED)], hit.barrel),
+                None => (Vec::new(), None),
+            };
+        }
+        let lookup = OverlayImports {
+            facts: self.facts,
+            names,
+            types: self.types,
+        };
+        match ladder::imported_member(
+            &lookup,
+            self.file.rel_path.as_str(),
+            self.language,
+            name,
+            imports,
+            target,
+            true,
+        ) {
+            ladder::MemberHit::Bound(hit) => (
+                vec![(hit.id, CONF_IMPORT_SCOPED)],
+                hit.barrel.map(Arc::from),
+            ),
+            ladder::MemberHit::Unbound { .. } => (Vec::new(), None),
+        }
+    }
+}
+
+impl ImportEdgeFacts for OverlayImportEdges<'_, '_, '_> {
+    fn named(
+        &self,
+        name: &str,
+        target: ResolveTarget,
+        binding_only: bool,
+    ) -> (Vec<(u32, f32)>, Option<Arc<str>>) {
+        let names = match target {
+            ResolveTarget::Type => self.types,
+            _ => self.callables,
+        };
+        if binding_only {
+            return self.binding(name, target, names);
+        }
+        // The index's `Resolver::resolve_import`: the whole ladder for a
+        // plain name, no call site and no heritage.
+        let probe = ImportProbe::default();
+        let hit = resolve_callee(
+            self.graph,
+            CallSite::Plain(name),
+            self.file_ord,
+            &self.file.imports,
+            self.caller,
+            &mut self.base_metas.borrow_mut(),
+            names,
+            self.types,
+            self.qualifiers,
+            self.nodes,
+            self.replaced,
+            self.dirty_base,
+            self.facts,
+            Scope {
+                call: None,
+                heritage: &[],
+                type_lookup: target == ResolveTarget::Type,
+                rust_tail: RustTail::Ladder,
+                imports: Some(&probe),
+            },
+        );
+        (hit.into_iter().collect(), probe.barrel.into_inner())
+    }
+
+    fn file_node(&self, path: &str) -> Option<u32> {
+        self.facts.file_node(self.dirty_files, path)
+    }
+
+    fn for_each_candidate(&self, specifier: &str, visit: &mut dyn FnMut(&str) -> bool) {
+        ModuleFacts::for_each_candidate(self.facts, &self.file.rel_path, specifier, visit);
+    }
+
+    fn guesses(&self) -> &GuessIndex<'_> {
+        self.guesses
+            .get_or_init(|| GuessIndex::new(self.facts.file_nodes(self.dirty_files)))
+    }
+}
+
+/// The `Imports` edges of every dirty input, from its `File` node in
+/// `dirty_files`, by the index's derivation ([`import_edges`]). Runs after
+/// every call resolved: from here on candidate files are read without the
+/// Rust module trees ([`OverlayFacts::tree_free`]). Cost per import: the
+/// name ladder of a call, a few candidate probes (binary search over
+/// `graph.files`, a name-index probe for a `File` node), and on the first
+/// import that reaches a guess step one pass over the base `File` nodes.
+#[allow(clippy::too_many_arguments)]
+fn resolve_imports<'a>(
+    graph: &'a ArchivedZeroCopyGraph,
+    files: &'a [OverlayFileInput],
+    nodes: &'a [ViewNode],
+    replaced: &'a FxHashMap<u32, u32>,
+    dirty_base: &'a FxHashSet<u32>,
+    facts: &OverlayFacts<'a>,
+    base_metas: &mut FxHashMap<usize, FileMeta>,
+    (callables, types, qualifiers): (&OverlayNames<'_>, &OverlayNames<'_>, &OverlayNames<'_>),
+    dirty_files: &FxHashMap<&'a str, u32>,
+) -> Vec<ViewEdge> {
+    let mut edges = Vec::new();
+    if files.iter().all(|file| file.imports.is_empty()) {
+        return edges;
+    }
+    facts.tree_free.set(true);
+    // The call pass's qualified answers read candidate files through the
+    // module trees.
+    facts.qualified.borrow_mut().clear();
+    let base_metas = RefCell::new(&mut *base_metas);
+    let guesses = OnceCell::new();
+    for (file_ord, file) in files.iter().enumerate() {
+        let path = file.rel_path.as_str();
+        let Some(&source) = dirty_files.get(path) else {
+            continue;
+        };
+        if file.imports.is_empty() {
+            continue;
+        }
+        let language = facts.scope.file_meta(path).language;
+        let lookup = OverlayImportEdges {
+            graph,
+            file_ord,
+            file,
+            caller: file.file_meta(),
+            language,
+            base_metas: &base_metas,
+            callables,
+            types,
+            qualifiers,
+            nodes,
+            replaced,
+            dirty_base,
+            facts,
+            dirty_files,
+            guesses: &guesses,
+        };
+        import_edges(
+            std::path::Path::new(path),
+            source,
+            language,
+            &file.imports,
+            &lookup,
+            |edge| {
+                edges.push(ViewEdge {
+                    source,
+                    target: edge.target,
+                    rel_type: RelType::Imports,
+                    confidence: edge.confidence,
+                    reason: edge.reason.as_str(),
+                })
+            },
+        );
+    }
+    edges
+}
+
 /// The `member_twins` table [`super::OverlayView::build_with_removed`] fills.
 pub(super) type MemberTwins = FxHashMap<u32, (usize, Vec<(u32, Span)>)>;
 
 /// The overlay's edges for every dirty file: `Calls`, lexical closure
 /// `References`, name refs, enum-variant refs and field reads. `removed`
 /// holds the base paths gone from the worktree: no module lookup finds one.
+/// The `Imports` edges ([`resolve_imports`]) go to `imports` instead: a
+/// re-parsed path's `File` node, their source, is a base index, which these
+/// edges never have; `dirty_files` holds each dirty path's `File` node.
 /// Returns the lexical parent of each scoped virtual node.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_edges(
@@ -4382,6 +4718,7 @@ pub(super) fn resolve_edges(
     out_adj: &mut FxHashMap<u32, Vec<u32>>,
     in_adj: &mut FxHashMap<u32, Vec<u32>>,
     gaps: &RefCell<Vec<CallGap>>,
+    (dirty_files, imports): (&FxHashMap<&str, u32>, &mut Vec<ViewEdge>),
 ) -> FxHashMap<u32, u32> {
     let mut callables = OverlayNames::new(ResolveTarget::Callable);
     let mut values = OverlayNames::new(ResolveTarget::Value);
@@ -4745,6 +5082,7 @@ pub(super) fn resolve_edges(
                                             heritage,
                                             type_lookup: false,
                                             rust_tail: RustTail::Stop,
+                                            imports: None,
                                         },
                                     )
                                     .filter(|&(idx, _)| is_free(&facts, idx))
@@ -4896,6 +5234,7 @@ pub(super) fn resolve_edges(
                             heritage: &[],
                             type_lookup: false,
                             rust_tail: RustTail::Stop,
+                            imports: None,
                         },
                     ),
                     FieldRead::Global => global_tier(
@@ -4932,5 +5271,16 @@ pub(super) fn resolve_edges(
             }
         }
     }
+    *imports = resolve_imports(
+        graph,
+        files,
+        nodes,
+        replaced,
+        dirty_base,
+        &facts,
+        &mut base_metas,
+        (&callables, &types, &qualifiers),
+        dirty_files,
+    );
     lexical_parents
 }

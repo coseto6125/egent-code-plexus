@@ -11,6 +11,7 @@
 //! | scope `Defines` | `post_process::scope_defines` | [`containment::scope_defines`] |
 //! | enum containment | `post_process::enum_variant_defines` | [`containment::enum_variant_defines`] |
 //! | class membership: `HasMethod` / `HasProperty` | `post_process::class_membership` | [`membership::class_membership`], `HasProperty` only with the records |
+//! | `Imports` | `post_process::imports_edges` | [`crate::analyzer::import_edges`], resolved by the view's resolution pass against [`dirty_file_nodes`]; the replay appends them |
 //! | function meta | `pass1_8_function_metas` | the flags and return type the fragment paired by span |
 //! | `PathLiteral` + `UsesPathLiteral` | `post_process::path_literal_nodes` | [`record_nodes::path_literal_node`] |
 //! | `QueriesTable` | `post_process::sql_table_edges` | [`record_nodes::sql_table_refs`], the table by [`Tables`] |
@@ -82,6 +83,13 @@ pub(super) struct ReplayInputs<'a> {
     /// `LocalGraph` of the path. The last is the one the index's
     /// `file_node_idx` keeps, so the one its `Defines` start at.
     pub base_files: FxHashMap<&'a str, Vec<u32>>,
+    /// Each dirty path's `File` node by [`dirty_file_nodes`], which the
+    /// `Imports` edges were resolved against before this replay numbered
+    /// the new ones.
+    pub dirty_files: &'a FxHashMap<&'a str, u32>,
+    /// The dirty files' `Imports` edges, by the index's derivation
+    /// ([`crate::analyzer::import_edges`]), sourced at `dirty_files`.
+    pub imports: Vec<ViewEdge>,
     /// The base nodes of the dirty paths whose kind
     /// [`replays_record_kind`], ascending.
     pub base_records: Vec<u32>,
@@ -124,6 +132,33 @@ pub(super) fn replays_record_kind(kind: NodeKind) -> bool {
     )
 }
 
+/// Each dirty path's `File` node, as [`replay`] numbers it: an `indexed`
+/// path's last base `File` node (`base_files`), else the virtual node the
+/// replay appends for the path's last input, the k-th input of an unindexed
+/// path taking `first_new + k`. An indexed path with no base `File` node has
+/// none.
+pub(super) fn dirty_file_nodes<'a>(
+    files: &'a [OverlayFileInput],
+    indexed: &FxHashSet<&str>,
+    base_files: &FxHashMap<&str, Vec<u32>>,
+    first_new: u32,
+) -> FxHashMap<&'a str, u32> {
+    let mut table: FxHashMap<&'a str, u32> = FxHashMap::default();
+    let mut next = first_new;
+    for file in files {
+        let path = file.rel_path.as_str();
+        if indexed.contains(path) {
+            if let Some(&last) = base_files.get(path).and_then(|all| all.last()) {
+                table.insert(path, last);
+            }
+            continue;
+        }
+        table.insert(path, next);
+        next += 1;
+    }
+    table
+}
+
 /// Append the per-file outputs of `inputs.files`: virtual `File` and record
 /// nodes onto `nodes`, and `Defines` and record edges onto `edges` with
 /// their adjacency. `nodes` holds every virtual symbol node, tombstones
@@ -145,6 +180,8 @@ pub(super) fn replay(
         tombstones,
         indexed,
         base_files,
+        dirty_files,
+        imports,
         base_records,
         dirty_base,
         lexical_parents,
@@ -187,6 +224,12 @@ pub(super) fn replay(
         nodes.push(file_node(path));
     }
     replayed.defines_files = base_files.values().flatten().copied().collect();
+    debug_assert!(
+        new_files
+            .iter()
+            .all(|(path, idx)| dirty_files.get(*path) == Some(idx)),
+        "the Imports edges start at the File nodes this replay numbers"
+    );
 
     let mut push = |edge: ViewEdge| {
         debug_assert!(
@@ -287,6 +330,7 @@ pub(super) fn replay(
             },
         );
     }
+    imports.into_iter().for_each(&mut push);
 
     if !records_replay {
         return replayed;
@@ -851,6 +895,7 @@ fn function_metas(files: &[OverlayFileInput], base_len: u32) -> Vec<ViewFunction
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analyzer::types::RawImport;
     use crate::graph::{ArchivedZeroCopyGraph, FunctionMeta};
     use crate::graph_fixture::GraphFixture;
     use crate::session::merged::MergedGraph;
@@ -924,6 +969,159 @@ mod tests {
             .filter(|(_, n)| n.kind == NodeKind::File)
             .map(|(idx, n)| (idx, n.name.clone(), n.rel_path.to_string()))
             .collect()
+    }
+
+    /// `#include "header"` as the C parser records it.
+    fn include(header: &str) -> RawImport {
+        RawImport {
+            source: format!("\"{header}\""),
+            imported_name: "*".to_string(),
+            alias: None,
+            binding_kind: None,
+        }
+    }
+
+    /// Every `Imports` edge of the merged graph as (source, target,
+    /// confidence, reason).
+    fn imports(graph: &ArchivedZeroCopyGraph, view: &OverlayView) -> Vec<(u32, u32, f32, String)> {
+        let merged = MergedGraph::new(graph, Some(view));
+        let mut out: Vec<(u32, u32, f32, String)> = merged
+            .all_edges()
+            .filter(|e| e.rel_type() == RelType::Imports)
+            .map(|e| {
+                (
+                    e.source,
+                    e.target,
+                    e.confidence(),
+                    e.reason(graph).to_string(),
+                )
+            })
+            .collect();
+        out.sort_by_key(|e| (e.0, e.1));
+        out
+    }
+
+    /// A dirty C file swaps `alpha.h` for `beta.h`: the base `Imports` edge
+    /// of its `File` node is masked, and the replayed one starts at that
+    /// node with the index's guess confidence and reason (step 3c).
+    #[test]
+    fn test_replay_dirty_file_imports_start_at_base_file_and_mask_base_ones() {
+        let mut fx = GraphFixture::new();
+        let main = fx.node(NodeKind::File, "src/main.c", "main.c");
+        let alpha = fx.node(NodeKind::File, "include/alpha.h", "alpha.h");
+        let beta = fx.node(NodeKind::File, "include/beta.h", "beta.h");
+        fx.edge_with(
+            main,
+            alpha,
+            RelType::Imports,
+            0.6,
+            "post_process:imports:guess",
+        );
+        let bytes = fx.into_bytes();
+        let graph = access(&bytes);
+        let mut file = input("src/main.c", vec![func("run", (3, 3))]);
+        file.imports = vec![include("beta.h")];
+        let view = OverlayView::build(graph, &[file]).unwrap();
+
+        assert!(view.masks_base_edge(main, RelType::Imports));
+        assert_eq!(
+            imports(graph, &view),
+            [(main, beta, 0.6, "post_process:imports:guess".to_string())]
+        );
+    }
+
+    /// A new file has no base `File` node: its `Imports` edges start at the
+    /// virtual one the replay appends, after the file's declarations.
+    #[test]
+    fn test_replay_new_file_imports_start_at_its_virtual_file_node() {
+        let mut fx = GraphFixture::new();
+        let alpha = fx.node(NodeKind::File, "include/alpha.h", "alpha.h");
+        let bytes = fx.into_bytes();
+        let graph = access(&bytes);
+        let mut file = input("src/new.c", vec![func("run", (3, 3))]);
+        file.imports = vec![include("alpha.h")];
+        let view = OverlayView::build(graph, &[file]).unwrap();
+        let new_file = view.base_len() + 1;
+
+        assert_eq!(
+            file_nodes(&view),
+            [(new_file, "new.c".to_string(), "src/new.c".to_string())]
+        );
+        assert_eq!(
+            imports(graph, &view),
+            [(
+                new_file,
+                alpha,
+                0.6,
+                "post_process:imports:guess".to_string()
+            )]
+        );
+    }
+
+    /// An include of a header no file has adds no edge, and the base one
+    /// stays masked: the dirty file imports nothing.
+    #[test]
+    fn test_replay_import_of_missing_header_emits_nothing() {
+        let mut fx = GraphFixture::new();
+        let main = fx.node(NodeKind::File, "src/main.c", "main.c");
+        let alpha = fx.node(NodeKind::File, "include/alpha.h", "alpha.h");
+        fx.edge_with(
+            main,
+            alpha,
+            RelType::Imports,
+            0.6,
+            "post_process:imports:guess",
+        );
+        let bytes = fx.into_bytes();
+        let graph = access(&bytes);
+        let mut file = input("src/main.c", Vec::new());
+        file.imports = vec![include("gone.h")];
+        let view = OverlayView::build(graph, &[file]).unwrap();
+
+        assert!(view.masks_base_edge(main, RelType::Imports));
+        assert!(imports(graph, &view).is_empty());
+    }
+
+    /// An include of a header the worktree removed binds nothing, as the
+    /// index's file set no longer has it.
+    #[test]
+    fn test_replay_import_of_removed_header_emits_nothing() {
+        let mut fx = GraphFixture::new();
+        fx.node(NodeKind::File, "src/main.c", "main.c");
+        fx.node(NodeKind::File, "include/alpha.h", "alpha.h");
+        let bytes = fx.into_bytes();
+        let graph = access(&bytes);
+        let mut file = input("src/main.c", Vec::new());
+        file.imports = vec![include("alpha.h")];
+        let view =
+            OverlayView::build_with_removed(graph, &[file], &["include/alpha.h".to_string()])
+                .unwrap();
+
+        assert!(imports(graph, &view).is_empty());
+    }
+
+    /// The table numbers a new path's `File` node as the replay does: the
+    /// last input of the path, after every earlier new input; an indexed
+    /// path takes its last base `File` node, or none.
+    #[test]
+    fn test_dirty_file_nodes_numbers_new_paths_in_input_order() {
+        let files = [
+            input("src/a.rs", Vec::new()),
+            input("src/kept.rs", Vec::new()),
+            input("src/a.rs", Vec::new()),
+            input("src/b.rs", Vec::new()),
+            input("src/bare.rs", Vec::new()),
+        ];
+        let indexed: FxHashSet<&str> = ["src/kept.rs", "src/bare.rs"].into_iter().collect();
+        let base_files: FxHashMap<&str, Vec<u32>> =
+            [("src/kept.rs", vec![4, 9])].into_iter().collect();
+        let table = dirty_file_nodes(&files, &indexed, &base_files, 100);
+        let mut rows: Vec<(&str, u32)> = table.into_iter().collect();
+        rows.sort();
+        assert_eq!(
+            rows,
+            [("src/a.rs", 101), ("src/b.rs", 102), ("src/kept.rs", 9)]
+        );
     }
 
     #[test]
@@ -1019,7 +1217,7 @@ mod tests {
         assert!(file_nodes(&view).is_empty(), "the base File node stays");
         assert_eq!(view.redirect(file), Some(file));
         assert!(view.masks_base_edge(file, RelType::Defines));
-        assert!(!view.masks_base_edge(file, RelType::Imports));
+        assert!(view.masks_base_edge(file, RelType::Imports));
         assert_eq!(
             defines(graph, &view),
             [scope(file, base), scope(file, base + 1)]
