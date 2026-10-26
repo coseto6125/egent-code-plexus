@@ -9,14 +9,19 @@ use std::path::{Path, PathBuf};
 
 const L1_DIR: &str = "l1";
 
+/// `<session>/l1`: the directory of the manifest and its bins.
+pub fn l1_dir(session_dir: &Path) -> PathBuf {
+    session_dir.join(L1_DIR)
+}
+
 /// `<session>/l1/dirty_events.json`: the [`super::DirtyEvents`] manifest.
 pub fn dirty_events_path(session_dir: &Path) -> PathBuf {
-    session_dir.join(L1_DIR).join("dirty_events.json")
+    l1_dir(session_dir).join("dirty_events.json")
 }
 
 /// `<session>/l1/fragments`: the bins the manifest names.
 pub fn fragments_dir(session_dir: &Path) -> PathBuf {
-    session_dir.join(L1_DIR).join("fragments")
+    l1_dir(session_dir).join("fragments")
 }
 
 /// `<session>/l1/fragments/<id>.bin`.

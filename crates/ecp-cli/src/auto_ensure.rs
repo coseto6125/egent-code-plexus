@@ -1727,6 +1727,10 @@ fn ensure_session_meta(session_dir: &Path, worktree: &Path) -> io::Result<()> {
         }
         return Ok(());
     }
+    // A peer's recursive watch adds a new directory only after its create
+    // event, so a manifest renamed into a just-made `l1/` raises no event.
+    // Making `l1/` with the session puts the watch in place first.
+    fs::create_dir_all(layout::l1_dir(session_dir))?;
     let head_sha = git_head_sha(worktree)?;
     let sid = session_dir
         .file_name()
@@ -1861,6 +1865,37 @@ fn collect_dirty_files(
 mod fingerprint_drift_tests {
     use super::*;
     use tempfile::tempdir;
+
+    /// Stands for: a new session holds `l1/` before its first manifest
+    /// write, so a peer's recursive watch already covers the directory the
+    /// manifest is renamed into.
+    #[test]
+    fn test_ensure_session_meta_new_session_creates_l1_before_manifest() {
+        let tmp = tempdir().unwrap();
+        let worktree = tmp.path().join("repo");
+        fs::create_dir_all(&worktree).unwrap();
+        for args in [
+            &["init", "-q"][..],
+            &["config", "user.email", "test@example.invalid"],
+            &["config", "user.name", "test"],
+            &["commit", "-q", "--allow-empty", "-m", "base"],
+        ] {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(&worktree)
+                .status()
+                .unwrap()
+                .success());
+        }
+        let session_dir = tmp.path().join("sessions").join("sid");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        ensure_session_meta(&session_dir, &worktree).unwrap();
+
+        assert!(layout::l1_dir(&session_dir).is_dir());
+        assert!(!layout::dirty_events_path(&session_dir).exists());
+        assert!(session_dir.join("session_meta.json").is_file());
+    }
 
     /// A committed `app.py` holding `source`, `ECP_HOME` / `ECP_SESSION_ID`
     /// set, and a session meta based at HEAD. Returns the temp dir, the

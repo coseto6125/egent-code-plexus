@@ -118,6 +118,9 @@ pub fn promote_case_b(session_dir: &Path, old_sha: &str, new_sha: &str) -> io::R
 
     fs::rename(session_dir, &stale)?;
     fs::create_dir(session_dir)?;
+    // `l1/` before the manifest, as `ensure_session_meta` does: a peer's
+    // recursive watch covers it before the first write lands there.
+    fs::create_dir(layout::l1_dir(session_dir))?;
 
     let now = chrono::Utc::now().to_rfc3339();
     let sm = SessionMeta {
