@@ -523,25 +523,40 @@ fn lib_and_bin_sharing_a_file(lib_x: &str, main_x: &str) -> Vec<(String, String)
     ])
 }
 
-/// Every target that declares the caller places `crate::x` at one file, which
-/// is not the file layout's: the index binds it, and the overlay of a dirty
-/// copy binds the same file, not the decoy `src/x.rs`.
+/// A crate whose `[lib] path` has no `src/` segment: the file layout places
+/// no `crate::` path there, the module tree does. `use crate::x; x::f()`
+/// binds `x.rs` in the index, and the overlay of a dirty copy binds it too.
+/// `other/x.rs` makes the qualifier `x` name two files, so no file-stem tier
+/// stands in for the module tree.
+///
+/// Not covered: a `#[path]` module. The overlay's tree walks the file layout
+/// (`RustModules::child`), so it cannot place one.
 #[test]
-fn test_overlay_rust_anchored_path_targets_agree_matches_index() {
-    let files = lib_and_bin_sharing_a_file("x_both.rs", "x_both.rs");
-    let caller = files.last().expect("the caller is last").1.clone();
+fn test_overlay_rust_anchored_path_custom_lib_path_matches_index() {
+    const CHILD: &str = "shared.rs";
+    let child = "use crate::x;\n\npub fn t() {\n    x::f();\n}\n";
+    let mut files = owned(&[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[lib]\npath = \"lib.rs\"\n",
+        ),
+        ("lib.rs", "mod x;\nmod shared;\n"),
+        ("x.rs", "pub fn f() {}\n"),
+        ("other/x.rs", "pub fn f() {}\n"),
+    ]);
+    files.push((CHILD.to_string(), child.to_string()));
     for (label, edited) in [
-        ("touched", caller.clone()),
-        ("one-line edit", one_line_edit(&caller)),
+        ("touched", child.to_string()),
+        ("one-line edit", one_line_edit(child)),
     ] {
-        let (reindex, overlay) = reindex_and_overlay(&files, SHARED, &edited, &["t"]);
+        let (reindex, overlay) = reindex_and_overlay(&files, CHILD, &edited, &["t"]);
         assert_eq!(
             reindex
                 .iter()
                 .map(|call| call.callee_file.as_str())
                 .collect::<Vec<_>>(),
-            ["src/x_both.rs"],
-            "{label}: the reindex binds the module the targets agree on: {reindex:#?}"
+            ["x.rs"],
+            "{label}: the reindex binds the module the crate root places: {reindex:#?}"
         );
         assert_eq!(overlay, reindex, "{label}");
     }
