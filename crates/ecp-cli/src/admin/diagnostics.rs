@@ -144,14 +144,17 @@ pub(crate) fn registry_health(home_ecp: &Path) -> Result<RegistryHealth, EcpErro
         registry.repos.keys().cloned().collect();
 
     // Check each registered repo's commits dir for missing graph.bin / meta.
+    // Staging and retired dirs never hold a finished graph; doctor's staging
+    // check and gc own them.
     for dir_name in registry.repos.keys() {
         let commits_dir = home_ecp.join(dir_name).join("commits");
-        if let Ok(entries) = std::fs::read_dir(&commits_dir) {
-            for entry in entries
-                .flatten()
-                .filter(|e| e.path().is_dir() && e.file_name() != crate::commit_lookup::LOCKS_DIR)
-            {
-                let index_dir = entry.path();
+        if let Ok(listing) = crate::commit_lookup::CommitDirListing::read(&commits_dir) {
+            let index_dirs = listing
+                .dirs
+                .into_iter()
+                .map(|d| d.path)
+                .chain(listing.unparsed.iter().map(|n| commits_dir.join(n)));
+            for index_dir in index_dirs {
                 let graph = index_dir.join("graph.bin");
                 if !graph.is_file() {
                     health.missing_graphs.push(graph);
@@ -340,5 +343,49 @@ mod tests {
             health.missing_graphs
         );
         assert!(health.missing_meta.is_empty(), "{:?}", health.missing_meta);
+    }
+
+    #[test]
+    fn test_registry_health_staging_and_retired_dirs_not_reported_missing_graph() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path();
+        let dir_name = "repo__aabbccdd";
+        let commits = home.join(dir_name).join("commits");
+        let base = format!("branch_main__{}", "a".repeat(40));
+        for name in [
+            format!("{base}.building"),
+            crate::commit_lookup::staging_dir_name(&base, 42, 0),
+            format!("{base}.dead"),
+        ] {
+            std::fs::create_dir_all(commits.join(name)).expect("leftover dir");
+        }
+        let missing = commits.join("branch_dev__".to_string() + &"b".repeat(40));
+        std::fs::create_dir_all(&missing).expect("commit dir");
+        let mut repos = BTreeMap::new();
+        repos.insert(
+            dir_name.into(),
+            RepoAlias {
+                dir_name: dir_name.into(),
+                common_dir: "/work/repo/.git".into(),
+                remote_url: None,
+                aliases: vec!["repo".into()],
+                last_touched: "2026-10-27T00:00:00Z".into(),
+                groups: vec![],
+            },
+        );
+        RegistryFile::write_atomic(
+            &home.join("registry.json"),
+            &RegistryFile {
+                version: 2,
+                repos,
+                groups: vec![],
+            },
+        )
+        .expect("write registry");
+
+        let health = registry_health(home).expect("health");
+
+        assert_eq!(health.missing_graphs, vec![missing.join("graph.bin")]);
+        assert_eq!(health.missing_meta, vec![missing.join("meta.json")]);
     }
 }
