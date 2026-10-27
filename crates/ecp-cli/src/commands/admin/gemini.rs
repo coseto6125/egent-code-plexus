@@ -22,7 +22,7 @@ pub enum GeminiCommands {
 
 #[derive(Subcommand, Debug)]
 pub enum GeminiComponent {
-    /// Gemini native skill (linked from docs/skills/ecp).
+    /// Gemini native skill (the copy built into ecp, linked from ~/.ecp/skills/ecp).
     NativeSkill,
     /// Gemini MCP server (stdio registration).
     McpServer,

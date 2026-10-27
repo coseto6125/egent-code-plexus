@@ -2,7 +2,7 @@
 
 use crate::admin::host_integration::native::codex;
 use crate::commands::admin::skill_fs::copy_dir_replace;
-use crate::commands::admin::skill_source::{resolve, EmbeddedTree};
+use crate::commands::admin::skill_source::{embedded, EmbeddedTree};
 use clap::{Args, Subcommand};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -205,10 +205,8 @@ pub(crate) fn print_status() -> Result<(), ecp_core::EcpError> {
 }
 
 pub(crate) fn install_skills(target: SkillTarget) -> Result<(), ecp_core::EcpError> {
-    let cwd = std::env::current_dir()
-        .map_err(|e| ecp_core::EcpError::Output(format!("current_dir: {e}")))?;
     for &skill in target.expand() {
-        let src = resolve(EmbeddedTree::CodexSample(skill.name()), &cwd)?;
+        let src = embedded(EmbeddedTree::CodexSample(skill.name()))?;
         let dst = codex_skill_dir(skill);
         copy_dir_replace(src.path(), &dst)?;
         println!(

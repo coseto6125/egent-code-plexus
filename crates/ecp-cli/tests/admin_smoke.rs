@@ -54,3 +54,43 @@ fn ecp_admin_help_exits_zero() {
         "help text should mention admin/host; got: {stdout}",
     );
 }
+
+/// The installer reads only the copy built into the binary: an ecp checkout
+/// under cwd whose SKILL.md differs must not reach the installed skill.
+#[test]
+fn test_install_skills_checkout_under_cwd_installs_embedded_copy() {
+    let checkout = tempfile::tempdir().unwrap();
+    let stale = checkout.path().join("docs/skills/ecp");
+    std::fs::create_dir_all(&stale).unwrap();
+    std::fs::write(stale.join("SKILL.md"), "CHECKOUT-SENTINEL\n").unwrap();
+    let home = tempfile::tempdir().unwrap();
+
+    let out = Command::new(ecp_bin())
+        .args([
+            "admin",
+            "claude",
+            "install",
+            "skills",
+            "ecp",
+            "--no-claude-md",
+        ])
+        .current_dir(checkout.path())
+        .env("HOME", home.path())
+        .env("ECP_HOME", home.path().join(".ecp"))
+        .output()
+        .expect("spawn ecp admin claude install skills");
+    assert!(
+        out.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let installed =
+        std::fs::read_to_string(home.path().join(".claude/skills/ecp/SKILL.md")).unwrap();
+    let built_from = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/skills/ecp/SKILL.md"
+    ))
+    .unwrap();
+    assert_eq!(installed, built_from);
+}

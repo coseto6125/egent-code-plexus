@@ -44,6 +44,7 @@ use crate::commands::admin::doctor::checks::install_source::{
     InstallSource, CHANNELS, CHANNEL_SUNSET,
 };
 use crate::commands::admin::doctor::checks::version::{latest_release_version, parse_semver};
+use crate::commands::admin::skill_fs::INSTALL_RECORD;
 use crate::commands::admin::skill_source::{embedded, EmbeddedTree, SkillSource};
 use crate::commands::admin::update_check;
 use crate::git::safe_exec;
@@ -664,9 +665,10 @@ fn is_os_junk(rel: &Path) -> bool {
     )
 }
 
-/// An install writes only regular files and directories. A symlink or a
-/// special file is the user's own doing (`Special`); an extra directory, an
-/// extra or missing file, or other content is `Modified`.
+/// An install writes only regular files and directories, plus its
+/// `INSTALL_RECORD`. A symlink or a special file is the user's own doing
+/// (`Special`); an extra directory, an extra or missing file, or other content
+/// is `Modified`.
 fn skill_state(skill_dir: &Path, shipped: &Path) -> Result<SkillState, EcpError> {
     if !std::fs::symlink_metadata(skill_dir)
         .map_err(io_err(skill_dir))?
@@ -681,7 +683,7 @@ fn skill_state(skill_dir: &Path, shipped: &Path) -> Result<SkillState, EcpError>
         || local
             .files
             .difference(&ours.files)
-            .any(|rel| !is_os_junk(rel))
+            .any(|rel| !is_os_junk(rel) && rel != Path::new(INSTALL_RECORD))
     {
         return Ok(SkillState::Modified);
     }
@@ -878,7 +880,8 @@ fn read_regular(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
 }
 
 /// Run `exe admin claude install skills ecp` from an empty scratch dir, so the
-/// child resolves its own embedded copy rather than a repo checkout. Stdout
+/// child resolves its own embedded copy even when `exe` predates the
+/// embedded-only rule and would prefer a checkout under cwd. Stdout
 /// goes to null instead of through `output_with_timeout`: that helper reads
 /// the pipe only after exit, and a full-skill diff (the tree is ~54 KB)
 /// overflows the pipe buffer, blocking the child until the timeout kills it.
@@ -1362,8 +1365,7 @@ mod tests {
     /// `ecp admin claude install skills ecp` does from a binary-only install.
     fn install_shipped(claude_home: &Path) {
         use crate::commands::admin::claude::{inject_ecp_import_at, install_skills_at};
-        let empty = tempfile::tempdir().unwrap();
-        install_skills_at(ClaudeSkillTarget::Ecp, false, empty.path(), claude_home).unwrap();
+        install_skills_at(ClaudeSkillTarget::Ecp, false, claude_home).unwrap();
         let shipped = shipped_ecp_skill().unwrap();
         inject_ecp_import_at(claude_home, &shipped.path().join("ECP.md"), false).unwrap();
     }

@@ -9,12 +9,7 @@ use std::env;
 const SKILL_NAME: &str = "ecp";
 
 pub(crate) fn install_scripted() -> Result<(), EcpError> {
-    let skill_path = find_skill_path().ok_or_else(|| {
-        EcpError::Output(
-            "could not locate ecp skill source: set ECP_GEMINI_SKILL_PATH or run from a checkout containing docs/skills/ecp"
-                .into(),
-        )
-    })?;
+    let skill_path = find_skill_path()?;
 
     println!("Installing Gemini CLI native skill from {}...", skill_path);
     let output = gemini_cli::run(&["skills", "link", "--consent", &skill_path])?;
@@ -60,20 +55,17 @@ pub fn status() -> HostStatus {
     }
 }
 
-/// Locate the `ecp` skill dir to link. Explicit override wins; otherwise the
-/// shared resolver returns the repo checkout under cwd, or materializes the
-/// copy embedded in the binary to a persistent dir (so a package-manager
-/// install with no checkout still links — `gemini skills link` needs the path
-/// to outlive this call).
-fn find_skill_path() -> Option<String> {
+/// Locate the `ecp` skill dir to link. `ECP_GEMINI_SKILL_PATH` (dev escape
+/// hatch) wins; otherwise the copy embedded in the binary is materialized to a
+/// persistent dir, because `gemini skills link` needs the path to outlive this
+/// call.
+fn find_skill_path() -> Result<String, EcpError> {
     if let Some(override_path) = env::var_os("ECP_GEMINI_SKILL_PATH") {
         let p = std::path::PathBuf::from(override_path);
         if p.exists() {
-            return Some(p.to_string_lossy().into_owned());
+            return Ok(p.to_string_lossy().into_owned());
         }
     }
-    let cwd = env::current_dir().ok()?;
-    let path =
-        skill_source::resolve_persistent(skill_source::EmbeddedTree::EcpSkill, "ecp", &cwd).ok()?;
-    Some(path.to_string_lossy().into_owned())
+    let path = skill_source::resolve_persistent(skill_source::EmbeddedTree::EcpSkill, "ecp")?;
+    Ok(path.to_string_lossy().into_owned())
 }

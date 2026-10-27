@@ -3,9 +3,85 @@
 //! of copy-pasting the recursive directory walk.
 
 use ecp_core::EcpError;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// Written into an installed skill dir: the hash of every file ecp put there,
+/// so doctor can tell an old install nobody touched from one the user edited.
+pub(crate) const INSTALL_RECORD: &str = ".ecp-install.json";
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum InstallState {
+    /// Every file still matches what ecp installed.
+    Untouched,
+    /// This many files were changed, added or removed since ecp installed.
+    Edited(usize),
+    /// No readable record: installed before records existed, or by hand.
+    Unrecorded,
+}
+
+/// Records `installed_from`, the tree just copied into `dst`, rather than
+/// re-reading `dst`: an edit made to `dst` in between must not be recorded as
+/// ecp's. Written through a temp file and a rename, so a symlinked record
+/// path is replaced, never followed.
+pub(crate) fn write_install_record(dst: &Path, installed_from: &Path) -> Result<(), EcpError> {
+    let json = serde_json::to_vec_pretty(&file_hashes(installed_from)?)
+        .map_err(|e| EcpError::Output(format!("install record: {e}")))?;
+    let mut tmp = tempfile::NamedTempFile::new_in(dst)?;
+    std::io::Write::write_all(&mut tmp, &json)?;
+    tmp.persist(dst.join(INSTALL_RECORD))
+        .map_err(|e| EcpError::Output(format!("install record: {e}")))?;
+    Ok(())
+}
+
+pub(crate) fn install_state(dst: &Path) -> Result<InstallState, EcpError> {
+    let Some(recorded) = fs::read(dst.join(INSTALL_RECORD))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<BTreeMap<String, String>>(&b).ok())
+    else {
+        return Ok(InstallState::Unrecorded);
+    };
+    let now = file_hashes(dst)?;
+    let edited = recorded
+        .keys()
+        .chain(now.keys())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|rel| recorded.get(*rel) != now.get(*rel))
+        .count();
+    Ok(match edited {
+        0 => InstallState::Untouched,
+        n => InstallState::Edited(n),
+    })
+}
+
+fn file_hashes(dir: &Path) -> Result<BTreeMap<String, String>, EcpError> {
+    let mut rels = BTreeSet::new();
+    collect_rel_files(dir, dir, &mut rels)?;
+    rels.into_iter()
+        .map(|rel| {
+            let path = dir.join(&rel);
+            // A symlink, FIFO or other special entry is never one ecp wrote,
+            // and reading a FIFO blocks; it gets a value no hash produces.
+            let hash = if fs::symlink_metadata(&path)?.is_file() {
+                format!("{:016x}", xxhash_rust::xxh3::xxh3_64(&fs::read(&path)?))
+            } else {
+                "special".to_owned()
+            };
+            Ok((slash_path(&rel), hash))
+        })
+        .collect()
+}
+
+/// `rel` with forward slashes, so paths compare the same on every platform
+/// (Windows `PathBuf` renders `\`).
+fn slash_path(rel: &Path) -> String {
+    rel.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
 
 pub(crate) fn copy_dir_replace(src: &Path, dst: &Path) -> Result<(), EcpError> {
     if dst.exists() {
@@ -120,13 +196,7 @@ pub(crate) fn skill_diff(
     for rel in rels {
         let src_file = src.join(&rel);
         let dst_file = dst.join(&rel);
-        // Normalize to forward slashes so rel_path is stable across platforms
-        // (Windows PathBuf renders `\`, breaking diff headers and lookups).
-        let rel_path = rel
-            .components()
-            .map(|c| c.as_os_str().to_string_lossy())
-            .collect::<Vec<_>>()
-            .join("/");
+        let rel_path = slash_path(&rel);
         let status = match (src_file.is_file(), dst_file.is_file()) {
             (true, false) => FileStatus::Added,
             (false, true) => FileStatus::Removed,
@@ -153,11 +223,16 @@ pub(crate) fn skill_diff(
 /// Recursively gather file paths under `root`, each relative to `base`.
 fn collect_rel_files(base: &Path, dir: &Path, out: &mut BTreeSet<PathBuf>) -> Result<(), EcpError> {
     for entry in fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.is_dir() {
+        let entry = entry?;
+        let path = entry.path();
+        // `file_type` does not follow a symlink, so a link back to an
+        // ancestor is one entry instead of an endless walk.
+        if entry.file_type()?.is_dir() {
             collect_rel_files(base, &path, out)?;
         } else if let Ok(rel) = path.strip_prefix(base) {
-            out.insert(rel.to_path_buf());
+            if rel != Path::new(INSTALL_RECORD) {
+                out.insert(rel.to_path_buf());
+            }
         }
     }
     Ok(())
@@ -249,6 +324,75 @@ mod tests {
         write(dst.path(), "SKILL.md", "x\n");
         let d = skill_diff(src.path(), dst.path(), true).unwrap();
         assert!(!d.has_changes());
+    }
+
+    #[test]
+    fn test_skill_diff_install_record_not_a_removed_file() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        write(src.path(), "SKILL.md", "x\n");
+        write(dst.path(), "SKILL.md", "x\n");
+        write_install_record(dst.path(), dst.path()).unwrap();
+        assert!(!skill_diff(src.path(), dst.path(), true)
+            .unwrap()
+            .has_changes());
+        assert_eq!(install_state(dst.path()).unwrap(), InstallState::Untouched);
+    }
+
+    #[test]
+    fn test_install_state_deleted_file_counts_as_edit() {
+        let dst = tempfile::tempdir().unwrap();
+        write(dst.path(), "SKILL.md", "x\n");
+        write(dst.path(), "guides/a.md", "a\n");
+        write_install_record(dst.path(), dst.path()).unwrap();
+        fs::remove_file(dst.path().join("guides/a.md")).unwrap();
+        assert_eq!(install_state(dst.path()).unwrap(), InstallState::Edited(1));
+    }
+
+    #[test]
+    fn test_write_install_record_hashes_source_not_destination() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        write(src.path(), "SKILL.md", "shipped\n");
+        write(dst.path(), "SKILL.md", "edited before the record\n");
+        write_install_record(dst.path(), src.path()).unwrap();
+        assert_eq!(install_state(dst.path()).unwrap(), InstallState::Edited(1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_install_record_symlinked_record_replaced_not_followed() {
+        let dst = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("victim.txt");
+        write(outside.path(), "victim.txt", "keep\n");
+        write(dst.path(), "SKILL.md", "x\n");
+        std::os::unix::fs::symlink(&target, dst.path().join(INSTALL_RECORD)).unwrap();
+        write_install_record(dst.path(), dst.path()).unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "keep\n");
+        assert_eq!(install_state(dst.path()).unwrap(), InstallState::Untouched);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_install_state_fifo_counts_as_edit_without_blocking() {
+        let dst = tempfile::tempdir().unwrap();
+        write(dst.path(), "SKILL.md", "x\n");
+        write_install_record(dst.path(), dst.path()).unwrap();
+        let status = std::process::Command::new("mkfifo")
+            .arg(dst.path().join("pipe"))
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(install_state(dst.path()).unwrap(), InstallState::Edited(1));
+    }
+
+    #[test]
+    fn test_install_state_corrupt_record_is_unrecorded() {
+        let dst = tempfile::tempdir().unwrap();
+        write(dst.path(), "SKILL.md", "x\n");
+        write(dst.path(), INSTALL_RECORD, "not json");
+        assert_eq!(install_state(dst.path()).unwrap(), InstallState::Unrecorded);
     }
 
     #[test]

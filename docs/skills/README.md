@@ -22,9 +22,14 @@ ecp admin claude install skills simplify   # just simplify
 ecp admin claude install skills all        # both
 ```
 
-The CLI sources `Ecp` from `docs/skills/ecp/` (this dir) and `Simplify`
-from `skill_sample/claude/simplify/`. Existing global files are
-overwritten — re-run after pulling main to pick up schema additions.
+The CLI installs the copy compiled into the running binary: `Ecp` from
+`docs/skills/ecp/` (this dir) and `Simplify` from
+`skill_sample/claude/simplify/`, both as of build time. It never reads a
+checkout under the current directory. Existing global files are
+overwritten — upgrade the binary and re-run to pick up schema additions.
+
+Dev loop: edit `docs/skills/`, run `cargo build`, then run
+`target/debug/ecp admin claude install skills`.
 
 **Do not propose `scripts/install-skill.sh`, Makefile targets, or rsync
 hooks.** The CLI subcommand is the canonical machine-driven path;
@@ -41,8 +46,8 @@ cp docs/skills/ecp/SKILL.md ~/.claude/skills/ecp/SKILL.md
 ```
 
 When editing, change the repo copy first, commit, then re-run the
-install flow (LLM or manual `cp`) so future PRs against this skill
-have a single review point.
+install flow (rebuild and run the CLI, or manual `cp`) so future PRs
+against this skill have a single review point.
 
 ## Why repo-versioned
 
