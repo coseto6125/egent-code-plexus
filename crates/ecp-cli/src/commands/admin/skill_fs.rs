@@ -21,10 +21,17 @@ pub(crate) enum InstallState {
     Unrecorded,
 }
 
-pub(crate) fn write_install_record(dst: &Path) -> Result<(), EcpError> {
-    let json = serde_json::to_vec_pretty(&file_hashes(dst)?)
+/// Records `installed_from`, the tree just copied into `dst`, rather than
+/// re-reading `dst`: an edit made to `dst` in between must not be recorded as
+/// ecp's. Written through a temp file and a rename, so a symlinked record
+/// path is replaced, never followed.
+pub(crate) fn write_install_record(dst: &Path, installed_from: &Path) -> Result<(), EcpError> {
+    let json = serde_json::to_vec_pretty(&file_hashes(installed_from)?)
         .map_err(|e| EcpError::Output(format!("install record: {e}")))?;
-    fs::write(dst.join(INSTALL_RECORD), json)?;
+    let mut tmp = tempfile::NamedTempFile::new_in(dst)?;
+    std::io::Write::write_all(&mut tmp, &json)?;
+    tmp.persist(dst.join(INSTALL_RECORD))
+        .map_err(|e| EcpError::Output(format!("install record: {e}")))?;
     Ok(())
 }
 
@@ -54,8 +61,15 @@ fn file_hashes(dir: &Path) -> Result<BTreeMap<String, String>, EcpError> {
     collect_rel_files(dir, dir, &mut rels)?;
     rels.into_iter()
         .map(|rel| {
-            let hash = xxhash_rust::xxh3::xxh3_64(&fs::read(dir.join(&rel))?);
-            Ok((slash_path(&rel), format!("{hash:016x}")))
+            let path = dir.join(&rel);
+            // A symlink, FIFO or other special entry is never one ecp wrote,
+            // and reading a FIFO blocks; it gets a value no hash produces.
+            let hash = if fs::symlink_metadata(&path)?.is_file() {
+                format!("{:016x}", xxhash_rust::xxh3::xxh3_64(&fs::read(&path)?))
+            } else {
+                "special".to_owned()
+            };
+            Ok((slash_path(&rel), hash))
         })
         .collect()
 }
@@ -209,8 +223,11 @@ pub(crate) fn skill_diff(
 /// Recursively gather file paths under `root`, each relative to `base`.
 fn collect_rel_files(base: &Path, dir: &Path, out: &mut BTreeSet<PathBuf>) -> Result<(), EcpError> {
     for entry in fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.is_dir() {
+        let entry = entry?;
+        let path = entry.path();
+        // `file_type` does not follow a symlink, so a link back to an
+        // ancestor is one entry instead of an endless walk.
+        if entry.file_type()?.is_dir() {
             collect_rel_files(base, &path, out)?;
         } else if let Ok(rel) = path.strip_prefix(base) {
             if rel != Path::new(INSTALL_RECORD) {
@@ -315,7 +332,7 @@ mod tests {
         let dst = tempfile::tempdir().unwrap();
         write(src.path(), "SKILL.md", "x\n");
         write(dst.path(), "SKILL.md", "x\n");
-        write_install_record(dst.path()).unwrap();
+        write_install_record(dst.path(), dst.path()).unwrap();
         assert!(!skill_diff(src.path(), dst.path(), true)
             .unwrap()
             .has_changes());
@@ -327,8 +344,46 @@ mod tests {
         let dst = tempfile::tempdir().unwrap();
         write(dst.path(), "SKILL.md", "x\n");
         write(dst.path(), "guides/a.md", "a\n");
-        write_install_record(dst.path()).unwrap();
+        write_install_record(dst.path(), dst.path()).unwrap();
         fs::remove_file(dst.path().join("guides/a.md")).unwrap();
+        assert_eq!(install_state(dst.path()).unwrap(), InstallState::Edited(1));
+    }
+
+    #[test]
+    fn test_write_install_record_hashes_source_not_destination() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        write(src.path(), "SKILL.md", "shipped\n");
+        write(dst.path(), "SKILL.md", "edited before the record\n");
+        write_install_record(dst.path(), src.path()).unwrap();
+        assert_eq!(install_state(dst.path()).unwrap(), InstallState::Edited(1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_install_record_symlinked_record_replaced_not_followed() {
+        let dst = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("victim.txt");
+        write(outside.path(), "victim.txt", "keep\n");
+        write(dst.path(), "SKILL.md", "x\n");
+        std::os::unix::fs::symlink(&target, dst.path().join(INSTALL_RECORD)).unwrap();
+        write_install_record(dst.path(), dst.path()).unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "keep\n");
+        assert_eq!(install_state(dst.path()).unwrap(), InstallState::Untouched);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_install_state_fifo_counts_as_edit_without_blocking() {
+        let dst = tempfile::tempdir().unwrap();
+        write(dst.path(), "SKILL.md", "x\n");
+        write_install_record(dst.path(), dst.path()).unwrap();
+        let status = std::process::Command::new("mkfifo")
+            .arg(dst.path().join("pipe"))
+            .status()
+            .unwrap();
+        assert!(status.success());
         assert_eq!(install_state(dst.path()).unwrap(), InstallState::Edited(1));
     }
 

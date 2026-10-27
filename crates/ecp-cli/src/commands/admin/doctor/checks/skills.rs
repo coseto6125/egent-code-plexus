@@ -40,7 +40,10 @@ fn check_at(
     let install = format!("ecp admin claude install skills {}", skill.name());
     let review = format!("review with `{install} --dry-run`, then run it without --dry-run");
 
-    let mut result = if !dst.join("SKILL.md").exists() {
+    // A dir that exists without SKILL.md is still the user's files: only an
+    // absent or empty dir counts as not installed.
+    let absent = std::fs::read_dir(dst).map_or(true, |mut d| d.next().is_none());
+    let mut result = if absent {
         CheckResult::warn(&name, "not installed").with_remediation(&install)
     } else {
         let diff = match skill_diff(src, dst, true) {
@@ -54,7 +57,7 @@ fn check_at(
         if !diff.has_changes() {
             // Recording an identical install lets a later --fix update it.
             if fix && state != InstallState::Untouched {
-                if let Err(e) = write_install_record(dst) {
+                if let Err(e) = write_install_record(dst, src) {
                     return CheckResult::warn(
                         name,
                         format!("up to date; writing the install record failed: {e}"),
@@ -198,6 +201,20 @@ mod tests {
         let r = run(&f, true);
         assert_eq!(r.status, CheckStatus::Ok);
         assert_eq!(install_state(&f.dst).unwrap(), InstallState::Untouched);
+    }
+
+    #[test]
+    fn test_check_at_skill_md_deleted_fix_keeps_remaining_files() {
+        let f = installed_then_upgraded();
+        write(&f.dst, "helper.sh", "echo mine\n");
+        fs::remove_file(f.dst.join("SKILL.md")).unwrap();
+        let r = run(&f, true);
+        assert!(r.message.starts_with("locally edited"), "{}", r.message);
+        assert_eq!(r.fix_applied, None);
+        assert_eq!(
+            fs::read_to_string(f.dst.join("helper.sh")).unwrap(),
+            "echo mine\n"
+        );
     }
 
     #[test]

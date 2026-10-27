@@ -35,11 +35,17 @@ Warnings alone do not fail the run.
 ## `--fix`
 
 Reruns the remediation for the selected check(s) in place:
-- **skills**: `ecp admin claude install skills <name>`, only for a skill that
-  is missing or that nobody edited since ecp installed it. Each install writes
-  `.ecp-install.json`, the hash of every file it wrote, into the skill dir. A
-  skill whose files differ from that record, or that has no record, stays
-  report-only: review it with `--dry-run` and install it by hand.
+- **skills**: installs the copy this ecp binary ships, only for a skill that
+  is missing or that nobody edited since ecp installed it. Each Claude skill
+  install writes `.ecp-install.json`, the hash of every file it wrote, into
+  the skill dir. A skill whose files differ from that record, or that has no
+  record, stays report-only: review it with `--dry-run` and install it by
+  hand. A skill that already matches the shipped copy reports Pass, and
+  `--fix` (re)writes its record.
+
+  The doctor check and `--fix` use the copy embedded in the binary. A manual
+  `ecp admin claude install skills` run inside an ecp repo checkout installs
+  that checkout's `docs/skills/` instead.
 - **index**: `ecp admin index --repo .`.
 - **registry**: removes orphan index dirs (missing/corrupt graph & meta stay
   report-only — a rebuild, not a delete, is the safe fix).

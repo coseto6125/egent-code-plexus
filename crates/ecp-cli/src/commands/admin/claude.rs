@@ -176,7 +176,7 @@ pub(crate) fn install_skill_from(
         return Ok(());
     }
     copy_dir_replace(src, dst)?;
-    write_install_record(dst)?;
+    write_install_record(dst, src)?;
     println!("  installed in {}", dst.display());
     Ok(())
 }
