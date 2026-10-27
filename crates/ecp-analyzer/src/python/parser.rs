@@ -288,6 +288,226 @@ fn resolve_decorator_handler(call_node: Node, source: &[u8]) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The identifier a call is made on: `router` in `router.get("/x")`; `None`
+/// for any other receiver (`self.router`, a call result) or a bare call.
+fn call_receiver(call: Node, source: &[u8]) -> Option<String> {
+    let object = call
+        .child_by_field_name("function")?
+        .child_by_field_name("object")?;
+    (object.kind() == "identifier").then(|| node_text(object, source).to_string())
+}
+
+fn node_text<'s>(node: Node, source: &'s [u8]) -> &'s str {
+    std::str::from_utf8(&source[node.start_byte()..node.end_byte()]).unwrap_or("")
+}
+
+/// The value of keyword argument `key` when it is a plain string literal:
+/// not an f-string with a placeholder, a name, a list or a concatenation.
+fn keyword_string<'s>(call: Node, source: &'s [u8], key: &str) -> Option<&'s str> {
+    let args = call.child_by_field_name("arguments")?;
+    let mut cursor = args.walk();
+    let value = args
+        .children(&mut cursor)
+        .filter(|arg| arg.kind() == "keyword_argument")
+        .find(|arg| {
+            arg.child_by_field_name("name")
+                .is_some_and(|name| node_text(name, source) == key)
+        })?
+        .child_by_field_name("value")?;
+    if value.kind() != "string" {
+        return None;
+    }
+    let mut children = value.walk();
+    if value
+        .children(&mut children)
+        .any(|child| child.kind() == "interpolation")
+    {
+        return None;
+    }
+    crate::framework_helpers::strip_python_string_quotes(node_text(value, source))
+}
+
+/// The FastAPI routers of one file and what includes them.
+#[derive(Default)]
+struct RouterPrefixes {
+    /// `router = APIRouter(prefix="/items")`: router variable → its prefix
+    /// (`""` for a router built with no literal prefix).
+    own: std::collections::HashMap<String, String>,
+    /// `parent.include_router(child, prefix="/v1")`: `(parent, child, prefix)`.
+    includes: Vec<(String, String, String)>,
+}
+
+/// The most prefixes one router takes from its includes: a cap against a
+/// router that a cycle of includes reaches again.
+const MAX_ROUTER_PREFIXES: usize = 16;
+
+impl RouterPrefixes {
+    fn collect(root: Node, source: &[u8]) -> Self {
+        let mut found = Self::default();
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            let mut cursor = node.walk();
+            stack.extend(node.children(&mut cursor));
+            match node.kind() {
+                "assignment" => {
+                    let (Some(left), Some(right)) = (
+                        node.child_by_field_name("left"),
+                        node.child_by_field_name("right"),
+                    ) else {
+                        continue;
+                    };
+                    let is_router = right.kind() == "call"
+                        && right.child_by_field_name("function").is_some_and(|callee| {
+                            node_text(callee, source).rsplit('.').next() == Some("APIRouter")
+                        });
+                    if left.kind() == "identifier" && is_router {
+                        let prefix = keyword_string(right, source, "prefix").unwrap_or("");
+                        found
+                            .own
+                            .insert(node_text(left, source).to_string(), prefix.to_string());
+                    }
+                }
+                "call" => {
+                    let Some(function) = node.child_by_field_name("function") else {
+                        continue;
+                    };
+                    let is_include = function.kind() == "attribute"
+                        && function
+                            .child_by_field_name("attribute")
+                            .is_some_and(|name| node_text(name, source) == "include_router");
+                    let child = node
+                        .child_by_field_name("arguments")
+                        .and_then(|args| args.named_child(0))
+                        .filter(|arg| arg.kind() == "identifier");
+                    let parent = function
+                        .child_by_field_name("object")
+                        .filter(|object| object.kind() == "identifier");
+                    if let (true, Some(child), Some(parent)) = (is_include, child, parent) {
+                        let prefix = keyword_string(node, source, "prefix").unwrap_or("");
+                        found.includes.push((
+                            node_text(parent, source).to_string(),
+                            node_text(child, source).to_string(),
+                            prefix.to_string(),
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+        found
+    }
+
+    /// The prefixes of `router`, one per chain of includes that reaches it,
+    /// outermost include first and its own prefix last, joined by the one
+    /// prefix rule. A router no include in this file attaches has its own
+    /// prefix alone (`""` for a name that is no router of the file).
+    /// `capped` is set when [`MAX_ROUTER_PREFIXES`] left a prefix out.
+    fn of<'a>(
+        &'a self,
+        router: &'a str,
+        chain: &mut Vec<&'a str>,
+        capped: &mut bool,
+    ) -> Vec<String> {
+        let own = self.own.get(router).map_or("", String::as_str);
+        let parents: Vec<_> = self
+            .includes
+            .iter()
+            .filter(|(_, child, _)| child == router)
+            .collect();
+        if parents.is_empty() {
+            return vec![own.to_string()];
+        }
+        chain.push(router);
+        let mut prefixes: Vec<String> = Vec::new();
+        for (parent, _, include_prefix) in parents {
+            let parent = parent.as_str();
+            if chain.contains(&parent) {
+                continue;
+            }
+            for outer in self.of(parent, chain, capped) {
+                let prefix = crate::route_detector::join_route_segments([
+                    outer.as_str(),
+                    include_prefix.as_str(),
+                    own,
+                ]);
+                if prefixes.contains(&prefix) {
+                    continue;
+                }
+                match prefixes.len() < MAX_ROUTER_PREFIXES {
+                    true => prefixes.push(prefix),
+                    false => *capped = true,
+                }
+            }
+        }
+        chain.pop();
+        if prefixes.is_empty() {
+            prefixes.push(own.to_string());
+        }
+        prefixes
+    }
+}
+
+/// Compose FastAPI router prefixes onto `routes`; `receivers[i]` is the
+/// variable `routes[i]` is registered on. A prefix is the router's own
+/// `APIRouter(prefix="/items")` and the `include_router(router, prefix=)`
+/// calls of this file that attach it. A router that another file includes
+/// keeps its own path here: the include is not in this file. A router
+/// included twice gives a record per include, as FastAPI registers it twice.
+fn compose_router_prefixes(
+    root: Node,
+    source: &[u8],
+    routes: &mut Vec<RawRoute>,
+    receivers: &[Option<String>],
+) {
+    if receivers.iter().all(Option::is_none) {
+        return;
+    }
+    let prefixes = RouterPrefixes::collect(root, source);
+    if prefixes.own.is_empty() && prefixes.includes.is_empty() {
+        return;
+    }
+    let mut extra: Vec<RawRoute> = Vec::new();
+    for (route, receiver) in routes.iter_mut().zip(receivers) {
+        let Some(receiver) = receiver.as_deref() else {
+            continue;
+        };
+        let mut capped = false;
+        let mut paths = prefixes
+            .of(receiver, &mut Vec::new(), &mut capped)
+            .into_iter()
+            .map(|prefix| match prefix.trim().trim_matches('/').is_empty() {
+                true => route.path.clone(),
+                false => crate::route_detector::join_route_segments([
+                    prefix.as_str(),
+                    route.path.as_str(),
+                ]),
+            })
+            .collect::<Vec<_>>();
+        let mut unique: Vec<String> = Vec::new();
+        for path in paths.drain(..) {
+            if !unique.contains(&path) {
+                unique.push(path);
+            }
+        }
+        // Past the cap some includes are not composed: the route stays at its
+        // own path instead of being dropped.
+        if capped && !unique.contains(&route.path) {
+            unique.push(route.path.clone());
+        }
+        let mut paths = unique.into_iter();
+        if let Some(first) = paths.next() {
+            for path in paths {
+                extra.push(RawRoute {
+                    path,
+                    ..route.clone()
+                });
+            }
+            route.path = first;
+        }
+    }
+    routes.extend(extra);
+}
+
 /// Push a Django signal RawFrameworkRef when both `sig_node` (signal name) and
 /// `handler_node` (handler identifier) decode as UTF-8. Shared by `@receiver`
 /// decorator and `signal.connect(handler)` capture sites — only `reason` differs.
@@ -801,6 +1021,8 @@ impl LanguageProvider for PythonProvider {
 
         let mut nodes: Vec<RawNode> = Vec::new();
         let mut routes: Vec<RawRoute> = Vec::new();
+        // The variable each record's call is made on, in step with `routes`.
+        let mut route_receivers: Vec<Option<String>> = Vec::new();
         let mut blind_spots: Vec<BlindSpot> = Vec::new();
 
         // Collect (target_name, span) for FastAPI Depends() refs; resolve
@@ -1271,9 +1493,14 @@ impl LanguageProvider for PythonProvider {
                             // as `None`; builder-side symbol-table lookup
                             // takes over there if/when the parser captures
                             // the handler arg.
-                            let decorator_handler =
-                                route_call_node.and_then(|n| resolve_decorator_handler(n, source));
+                            let decorator_handler = RawRoute::named_handler(
+                                route_call_node
+                                    .and_then(|n| resolve_decorator_handler(n, source))
+                                    .as_deref(),
+                            );
+                            let receiver = route_call_node.and_then(|n| call_receiver(n, source));
                             for method in methods_to_emit {
+                                route_receivers.push(receiver.clone());
                                 routes.push(RawRoute {
                                     method,
                                     path: clean_path.clone(),
@@ -1401,6 +1628,8 @@ impl LanguageProvider for PythonProvider {
             });
         }
 
+        compose_router_prefixes(tree.root_node(), source, &mut routes, &route_receivers);
+
         // Dedupe routes by (method, path, span). The generic tree-sitter query
         // `arguments: (argument_list (string) @route.path)` matches EVERY string
         // child of the argument list — so `app.add_url_rule("/path", "endpoint",
@@ -1480,7 +1709,13 @@ impl LanguageProvider for PythonProvider {
         }
 
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
-        crate::framework_helpers::stamp_owner_fn_by_span(&mut nodes);
+        // The language `file_identities` reads off the same path, so a
+        // nested def loses its owner exactly where its uid is scoped.
+        let language = ecp_core::file_category::Language::from_path(&path.to_string_lossy());
+        crate::framework_helpers::stamp_owner_fn_by_span(language, &mut nodes);
+        // Last owner step: a nested def or lambda node has a lexical parent
+        // and no owner (invariant I1), whatever the class pass gave it.
+        ecp_core::analyzer::lexical::clear_scoped_owners(language, &mut nodes);
 
         // T4-7 refactor: `RawSchemaField` now stores owned `Box<str>` so the
         // per-file parser scope can drop cleanly without dangling-pool risk.
@@ -1568,6 +1803,7 @@ impl LanguageProvider for PythonProvider {
             nodes,
             imports,
             documents: vec![],
+            route_receivers: None,
             framework_refs,
             fanout_refs,
             blind_spots,
@@ -1579,6 +1815,7 @@ impl LanguageProvider for PythonProvider {
             call_metas,
             raw_function_metas,
             export_aliases: None,
+            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
         })
     }
 }

@@ -157,3 +157,24 @@ class Resource {
         dtor.unwrap().calls
     );
 }
+
+/// Stands for: a delegate declaration is a Function node that carries its
+/// return type, as a method does. Failed before: the query read the return
+/// type through a `returns:` field that `delegate_declaration` does not
+/// have; the field was optional, so the node appeared without its type.
+#[test]
+fn test_parse_csharp_delegate_declaration_carries_return_type() {
+    let g = parse(
+        "namespace N {\n    public delegate int Handler(string s);\n    public delegate void Notify();\n}\n",
+    );
+    let delegates: Vec<(&str, Option<&str>)> = g
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Function)
+        .map(|n| (n.name.as_str(), n.type_annotation.as_deref()))
+        .collect();
+    assert_eq!(
+        delegates,
+        [("Handler", Some("int")), ("Notify", Some("void"))]
+    );
+}

@@ -10,13 +10,14 @@
 //! parsers — Spring `@Transactional`, Django `@transaction.atomic`, .NET
 //! `[Transactional]`, Symfony `#[Transactional]`, Pony `@db_session`):
 //!
-//! 1. **Compute global node base** — prefix-sum over `local_graphs[0..lg_idx].nodes.len()`
-//!    gives the global node ID offset for each file's raw nodes. `RawTxScope.node_idx()`
-//!    is an index INTO the local graph's `nodes` slice; adding the base gives the
+//! 1. **Compute global node base** — the build's `RawIndexMap` gives the global node
+//!    ID of each file's raw nodes. `RawTxScope.node_idx()`
+//!    is an index INTO the local graph's `nodes` slice; the map's slot for it is the
 //!    globally-unique node ID written into the `Edge.source` field.
 //!
-//! 2. **Emit `TransactionScope` node** — one synthetic node per `RawTxScope`.
-//!    Name: `tx_scope:{enclosing_fn_name}#{framework_as_str}` — deterministic
+//! 2. **Emit `TransactionScope` node** — one synthetic node per `RawTxScope`,
+//!    by [`record_nodes::tx_scope_node`], which the overlay's per-file replay
+//!    shares. Name: `tx_scope:{enclosing_fn_name}#{framework_as_str}` — deterministic
 //!    from the enclosing function name + framework label so the UID is stable
 //!    across re-indexes (assuming function names are stable, which they are for
 //!    decorator-annotated functions).
@@ -34,10 +35,11 @@
 //! patterns. The `TransactionScope` node carries `framework_as_str` in its
 //! name for direct `WHERE s.name CONTAINS 'spring'` filtering.
 
+use ecp_core::analyzer::record_nodes;
 use ecp_core::analyzer::types::LocalGraph;
-use ecp_core::graph::{Edge, Node, NodeKind, RelType};
+use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
+use ecp_core::graph::{Edge, Node, RelType};
 use ecp_core::pool::{StrRef, StringPool};
-use ecp_core::uid;
 
 /// Emit one `NodeKind::TransactionScope` node + one `OpensTxScope` edge per
 /// `RawTxScope` across all local graphs. Returns the count of emitted edges.
@@ -48,34 +50,26 @@ use ecp_core::uid;
 /// `file_node_idx` registration correct downstream).
 pub fn emit_edges(
     local_graphs: &[LocalGraph],
+    raw_map: &RawIndexMap,
     string_pool: &mut StringPool,
     nodes: &mut Vec<Node>,
     edges: &mut Vec<Edge>,
 ) -> usize {
-    let reason = string_pool.add("post_process:tx_scope");
+    let reason = string_pool.add(record_nodes::TX_SCOPE_REASON);
     let mut emitted = 0usize;
-
-    // Prefix-sum base: the global node ID for local_graphs[0] starts at 0,
-    // for local_graphs[1] at local_graphs[0].nodes.len(), and so on.
-    // Mirrors the `node_offset` accumulator in the `function_metas` pass
-    // (builder.rs:977-1017).
-    let mut node_base: u32 = 0;
 
     for (lg_idx, local_graph) in local_graphs.iter().enumerate() {
         let Some(ref tx_scopes) = local_graph.tx_scopes else {
-            node_base += local_graph.nodes.len() as u32;
             continue;
         };
         if tx_scopes.is_empty() {
-            node_base += local_graph.nodes.len() as u32;
             continue;
         }
 
         let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
         // `file_idx` on synthetic nodes mirrors the EventTopic / SchemaField
         // convention: enumeration index into `local_graphs` (= files[] in
-        // the built graph). NOT node_base — that is the node ID offset, not
-        // the files[] index.
+        // the built graph), not the file's first node ID.
         let file_idx = lg_idx as u32;
 
         for raw in tx_scopes.iter() {
@@ -85,21 +79,24 @@ pub fn emit_edges(
                 continue;
             };
 
-            let fn_global_id = node_base + raw.node_idx();
-            let framework_str = raw.framework().as_str();
-
-            // Deterministic name: enclosing function name + framework label.
-            let scope_name = format!("tx_scope:{}#{}", enclosing_node.name, framework_str);
-            let scope_name_ref: StrRef = string_pool.add(&scope_name);
-            let scope_uid = uid::compute(NodeKind::TransactionScope, &path_str, None, &scope_name);
+            let Some(fn_global_id) = raw_map.node(FileOrd(file_idx), RawIdx(raw.node_idx())) else {
+                continue;
+            };
+            let scope = record_nodes::tx_scope_node(
+                &path_str,
+                *raw,
+                &enclosing_node.name,
+                enclosing_node.span,
+            );
+            let scope_name_ref: StrRef = string_pool.add(&scope.name);
 
             let tx_node_idx = nodes.len() as u32;
             nodes.push(Node {
-                uid: scope_uid,
+                uid: scope.uid,
                 name: scope_name_ref,
                 file_idx,
-                kind: NodeKind::TransactionScope,
-                span: enclosing_node.span,
+                kind: scope.kind,
+                span: scope.span,
                 community_id: 0,
                 owner_class: StrRef::default(),
                 content_hash: 0,
@@ -114,8 +111,6 @@ pub fn emit_edges(
             });
             emitted += 1;
         }
-
-        node_base += local_graph.nodes.len() as u32;
     }
 
     emitted

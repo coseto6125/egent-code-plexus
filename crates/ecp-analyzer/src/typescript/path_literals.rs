@@ -67,6 +67,7 @@ fn emit(str_node: Node<'_>, value: &str, source: &[u8]) -> Option<RawPathLiteral
         enclosing_symbol,
         enclosing_owner,
         sink_reason: reason,
+        endpoint: None,
     })
 }
 

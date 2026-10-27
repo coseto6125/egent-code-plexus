@@ -1,4 +1,5 @@
-//! Watcher main loop: inotify-driven peer-dirty fan-in.
+//! Watcher main loop: peer-dirty fan-in driven by file events (inotify, or
+//! polling when inotify is unavailable), plus a 1 s manifest-stamp sweep.
 //!
 //! Lifecycle: run_watcher() blocks until SIGTERM. flock(watcher.lock)
 //! ensures single instance per session. Fail-open: any handler error is
@@ -8,16 +9,17 @@ use crate::commands::impact::run_for_symbol;
 use crate::peer::dispatch::dispatch_peer_dirty_event;
 use chrono::Utc;
 use ecp_core::peer::concern::{ImpactCache, SymbolKey};
-use ecp_core::session::overlay::DirtyFiles;
-use ecp_core::session::SessionMeta;
+use ecp_core::session::layout;
+use ecp_core::session::{DirtyEvents, SessionMeta};
 use fs2::FileExt;
+use notify::event::{DataChange, ModifyKind};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use rustc_hash::FxHashSet;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::channel;
+use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Our own manifest, split the way `classify` consumes it: entry keys decide
 /// HARD, declaration lists feed SOFT.
@@ -55,18 +57,19 @@ pub fn run_watcher(cfg: WatcherCfg) -> std::io::Result<()> {
         .expect("soft state lock poisoned")
         .rebuild(&cfg.my_session_dir);
     // Cached copy of our own dirty symbols. Invalidated whenever our own
-    // dirty_files.json changes (same trigger as impact_cache), avoiding N
+    // l1/dirty_events.json changes (same trigger as impact_cache), avoiding N
     // reads of the same file when N peers fire dirty events in a burst.
     let my_dirty_cache: Arc<Mutex<Option<MyDirtySurface>>> = Arc::new(Mutex::new(None));
 
     let (tx, rx) = channel::<notify::Result<Event>>();
-    let mut watcher = notify::recommended_watcher(tx).map_err(std::io::Error::other)?;
     let sessions_dir = cfg.repo_root.join("sessions");
     std::fs::create_dir_all(&sessions_dir)?;
-    watcher
-        .watch(&sessions_dir, RecursiveMode::Recursive)
-        .map_err(std::io::Error::other)?;
+    let _watcher = open_watcher(tx, &sessions_dir, notify::recommended_watcher)?;
 
+    // Stamped before the rescan: a manifest written in between is delivered
+    // twice rather than never.
+    let mut stamps = ManifestStamps::default();
+    stamps.changed(&sessions_dir);
     // Concerns are edge-triggered on writes, so every peer that went dirty
     // before this point is invisible until it happens to save again. That is
     // the normal case for a watcher restarted mid-session, and for the window
@@ -74,17 +77,33 @@ pub fn run_watcher(cfg: WatcherCfg) -> std::io::Result<()> {
     rescan_peers(&cfg, &soft, &my_dirty_cache);
 
     let mut event_count: u32 = 0;
+    let mut last_reconcile = Instant::now();
     loop {
-        match rx.recv_timeout(Duration::from_secs(1)) {
+        let received = rx.recv_timeout(RECONCILE_EVERY);
+        let timed_out = matches!(received, Err(std::sync::mpsc::RecvTimeoutError::Timeout));
+        match received {
             Ok(Ok(ev)) => {
                 event_count = event_count.wrapping_add(1);
-                if let Err(e) = handle_event(&cfg, &soft, &my_dirty_cache, ev) {
+                if let Err(e) = handle_event(&cfg, &soft, &my_dirty_cache, &mut stamps, ev) {
                     log_watcher_error("event handler", &e);
                 }
             }
             Ok(Err(e)) => log_watcher_error("notify error", &e),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+        if last_reconcile.elapsed() >= RECONCILE_EVERY {
+            last_reconcile = Instant::now();
+            for manifest in stamps.changed(&sessions_dir) {
+                let ev = Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Any)))
+                    .add_path(manifest);
+                if let Err(e) = handle_event(&cfg, &soft, &my_dirty_cache, &mut stamps, ev) {
+                    log_watcher_error("reconcile", &e);
+                }
+            }
+        }
+        if timed_out {
+            continue;
         }
         if event_count.is_multiple_of(ecp_core::peer::retention::ROTATE_CHECK_EVERY_N_EVENTS) {
             let _ = ecp_core::peer::retention::rotate_if_needed(
@@ -106,22 +125,25 @@ fn handle_event(
     cfg: &WatcherCfg,
     soft: &Arc<Mutex<SoftState>>,
     my_dirty_cache: &Arc<Mutex<Option<MyDirtySurface>>>,
+    stamps: &mut ManifestStamps,
     ev: Event,
 ) -> std::io::Result<()> {
     if !matches!(ev.kind, EventKind::Modify(_) | EventKind::Create(_)) {
         return Ok(());
     }
+    let created = matches!(ev.kind, EventKind::Create(_));
     for path in &ev.paths {
-        if !path.ends_with("dirty_files.json") {
+        let Some(session_dir) = event_session_dir(path, created) else {
             continue;
-        }
-        let Some(sid) = path
-            .parent()
-            .and_then(|p| p.file_name())
+        };
+        let Some(sid) = session_dir
+            .file_name()
             .and_then(|s| s.to_str())
+            .filter(|sid| is_live_session_name(sid))
         else {
             continue;
         };
+        stamps.record(&layout::dirty_events_path(session_dir));
         if sid == cfg.my_session_id {
             let prev: Option<MyDirtySurface> = {
                 let mut s = soft.lock().expect("soft state lock poisoned");
@@ -146,9 +168,38 @@ fn handle_event(
             }
             continue;
         }
-        dispatch_peer(cfg, soft, my_dirty_cache, sid, path)?;
+        dispatch_peer(cfg, soft, my_dirty_cache, sid, session_dir)?;
     }
     Ok(())
+}
+
+/// The session whose dirty set an event on `path` changed. `created` is true
+/// for a create event.
+fn event_session_dir(path: &Path, created: bool) -> Option<&Path> {
+    // `<sessions>/<sid>/l1/dirty_events.json`: the legacy manifest an older
+    // binary writes is not today's dirty set.
+    manifest_session_dir(path).or_else(|| {
+        (created && path.is_dir())
+            .then(|| created_dir_session(path))
+            .flatten()
+    })
+}
+
+/// The session dir whose manifest `path` is, or `None` for any other path.
+fn manifest_session_dir(path: &Path) -> Option<&Path> {
+    let session_dir = path.parent()?.parent()?;
+    (layout::dirty_events_path(session_dir) == path).then_some(session_dir)
+}
+
+/// The session dir of a newly created `<sid>` or `<sid>/l1` that already
+/// holds a manifest. inotify watches a new directory only after its create
+/// event, so a manifest written right after `l1/` is made raises no event of
+/// its own; without this, a session's first dirty write never reaches peers.
+fn created_dir_session(dir: &Path) -> Option<&Path> {
+    [Some(dir), dir.parent()]
+        .into_iter()
+        .flatten()
+        .find(|d| layout::dirty_events_path(d).is_file())
 }
 
 /// True when the current dirty set contains a `(file, name)` absent from the
@@ -162,7 +213,7 @@ fn my_dirty_gained_symbols(my_session_dir: &Path, prev: Option<&MyDirtySurface>)
     let Some(prev) = prev else {
         return true;
     };
-    let Ok(now) = DirtyFiles::read(&my_session_dir.join("dirty_files.json")) else {
+    let Ok(now) = DirtyEvents::read(&layout::dirty_events_path(my_session_dir)) else {
         return false;
     };
     // A newly dirty FILE counts even when it declares nothing, since that is
@@ -183,6 +234,89 @@ fn my_dirty_gained_symbols(my_session_dir: &Path, prev: Option<&MyDirtySurface>)
         .any(|s| !prev_keys.contains(&(s.file.as_str(), s.name.as_str())))
 }
 
+/// How often every manifest's stamp is re-read. inotify reports nothing for a
+/// manifest written before the watch on its new `l1/` exists, and drops events
+/// when its queue overflows; the stamp comparison delivers those writes late
+/// instead of never.
+const RECONCILE_EVERY: Duration = Duration::from_secs(1);
+
+/// `(mtime, len)` of each session manifest as last handled.
+#[derive(Default)]
+struct ManifestStamps(rustc_hash::FxHashMap<PathBuf, (std::time::SystemTime, u64)>);
+
+impl ManifestStamps {
+    fn stamp(manifest: &Path) -> Option<(std::time::SystemTime, u64)> {
+        let meta = std::fs::metadata(manifest).ok()?;
+        Some((meta.modified().ok()?, meta.len()))
+    }
+
+    fn record(&mut self, manifest: &Path) {
+        match Self::stamp(manifest) {
+            Some(stamp) => self.0.insert(manifest.to_path_buf(), stamp),
+            None => self.0.remove(manifest),
+        };
+    }
+
+    /// Manifests under `sessions_dir` whose stamp differs from the recorded
+    /// one. Replaces the recorded stamps, so sessions removed since the last
+    /// sweep drop out.
+    fn changed(&mut self, sessions_dir: &Path) -> Vec<PathBuf> {
+        let Ok(read) = std::fs::read_dir(sessions_dir) else {
+            return Vec::new();
+        };
+        let mut live = rustc_hash::FxHashMap::default();
+        let mut changed = Vec::new();
+        for entry in read.flatten() {
+            if !entry.file_name().to_str().is_some_and(is_live_session_name) {
+                continue;
+            }
+            let manifest = layout::dirty_events_path(&entry.path());
+            let Some(stamp) = Self::stamp(&manifest) else {
+                continue;
+            };
+            if self.0.get(&manifest) != Some(&stamp) {
+                changed.push(manifest.clone());
+            }
+            live.insert(manifest, stamp);
+        }
+        self.0 = live;
+        changed
+    }
+}
+
+/// False for `.`-prefixed dirs and for the `<sid>.stale-<sha>` copy that a
+/// base-SHA promotion leaves behind until it is deleted.
+fn is_live_session_name(sid: &str) -> bool {
+    !sid.starts_with('.') && !sid.contains(".stale-")
+}
+
+/// Poll period when the native watcher cannot start.
+const POLL_FALLBACK_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Watches `dir` recursively. The native watcher fails to start once the
+/// user's inotify instances run out (`fs.inotify.max_user_instances`, 128 by
+/// default on Linux), and fails to watch once `max_user_watches` runs out;
+/// without a fallback this session would never hear from its peers again.
+fn open_watcher(
+    tx: Sender<notify::Result<Event>>,
+    dir: &Path,
+    native: impl FnOnce(Sender<notify::Result<Event>>) -> notify::Result<notify::RecommendedWatcher>,
+) -> std::io::Result<Box<dyn Watcher>> {
+    let started =
+        native(tx.clone()).and_then(|mut w| w.watch(dir, RecursiveMode::Recursive).map(|()| w));
+    match started {
+        Ok(w) => Ok(Box::new(w)),
+        Err(e) => {
+            tracing::warn!(error = %e, "native file watcher unavailable, polling instead");
+            let cfg = notify::Config::default().with_poll_interval(POLL_FALLBACK_INTERVAL);
+            let mut poll = notify::PollWatcher::new(tx, cfg).map_err(std::io::Error::other)?;
+            poll.watch(dir, RecursiveMode::Recursive)
+                .map_err(std::io::Error::other)?;
+            Ok(Box::new(poll))
+        }
+    }
+}
+
 /// Fail-open per peer: one unreadable peer must not block the rest.
 fn rescan_peers(
     cfg: &WatcherCfg,
@@ -201,14 +335,13 @@ fn rescan_peers(
         let Some(sid) = path.file_name().and_then(|s| s.to_str()) else {
             continue;
         };
-        if sid == cfg.my_session_id || sid.starts_with('.') || sid.contains(".stale-") {
+        if sid == cfg.my_session_id || !is_live_session_name(sid) {
             continue;
         }
-        let dirty_path = path.join("dirty_files.json");
-        if !dirty_path.exists() {
+        if !layout::dirty_events_path(&path).exists() {
             continue;
         }
-        if let Err(e) = dispatch_peer(cfg, soft, my_dirty_cache, sid, &dirty_path) {
+        if let Err(e) = dispatch_peer(cfg, soft, my_dirty_cache, sid, &path) {
             log_watcher_error("rescan dispatch", &e);
         }
     }
@@ -219,15 +352,15 @@ fn dispatch_peer(
     soft: &Arc<Mutex<SoftState>>,
     my_dirty_cache: &Arc<Mutex<Option<MyDirtySurface>>>,
     peer_sid: &str,
-    peer_dirty_path: &Path,
+    peer_session_dir: &Path,
 ) -> std::io::Result<()> {
-    let peer_dirty = DirtyFiles::read(peer_dirty_path)?;
+    let peer_dirty = DirtyEvents::read(&layout::dirty_events_path(peer_session_dir))?;
     // Populate cache on first call after invalidation; reuse across burst of peer events.
     let (my_files, my_dirty) = {
         let mut guard = my_dirty_cache.lock().expect("my_dirty_cache lock poisoned");
         if guard.is_none() {
             *guard = Some(
-                DirtyFiles::read(&cfg.my_session_dir.join("dirty_files.json"))
+                DirtyEvents::read(&layout::dirty_events_path(&cfg.my_session_dir))
                     .map(|d| {
                         // Entry KEYS decide HARD, so they are read directly —
                         // a file whose parse yielded no declarations still
@@ -246,7 +379,7 @@ fn dispatch_peer(
         let surface = guard.clone().unwrap_or_default();
         (surface.files, surface.symbols)
     };
-    let peer_meta = SessionMeta::read(&peer_dirty_path.with_file_name("session_meta.json"))?;
+    let peer_meta = SessionMeta::read(&peer_session_dir.join("session_meta.json"))?;
     // A session that crashed leaves its dirty manifest behind. On the
     // event-driven path a write proves the peer is alive, but the startup
     // rescan walks the directory unconditionally and would replay a dead
@@ -325,7 +458,7 @@ struct SoftState {
     cache: ImpactCache,
     source: Option<ImpactSource>,
     /// Seeds behind the current cache. An agent iterating inside one function
-    /// rewrites `dirty_files.json` on every save without changing which symbols
+    /// rewrites `l1/dirty_events.json` on every save without changing which symbols
     /// are dirty; recomputing the same radius each time would run dozens of
     /// graph traversals on the watcher's single event-loop thread for a result
     /// that cannot have changed.
@@ -426,7 +559,7 @@ fn warn_on_truncated_seeds(my_session_dir: &Path, kept: usize) {
     if kept < SOFT_IMPACT_MAX_SEEDS {
         return;
     }
-    let Ok(dirty) = DirtyFiles::read(&my_session_dir.join("dirty_files.json")) else {
+    let Ok(dirty) = DirtyEvents::read(&layout::dirty_events_path(my_session_dir)) else {
         return;
     };
     let total = dirty
@@ -445,11 +578,11 @@ fn warn_on_truncated_seeds(my_session_dir: &Path, kept: usize) {
     }
 }
 
-/// Distinct dirty symbols, capped. Order follows `DirtyFiles`' BTreeMap, so
+/// Distinct dirty symbols, capped. Order follows `DirtyEvents`' BTreeMap, so
 /// the surviving prefix is stable across rebuilds instead of shuffling on every
 /// save — which is what lets `rebuild` compare seed lists for equality.
 fn seed_symbols(my_session_dir: &Path) -> Vec<Seed> {
-    let Ok(dirty) = DirtyFiles::read(&my_session_dir.join("dirty_files.json")) else {
+    let Ok(dirty) = DirtyEvents::read(&layout::dirty_events_path(my_session_dir)) else {
         return Vec::new();
     };
     let mut seen = std::collections::HashSet::new();
@@ -541,18 +674,21 @@ fn log_watcher_error(context: &str, err: &dyn std::fmt::Debug) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ecp_core::session::overlay::{DirtyEntry, SymbolKind, SymbolRef};
-    use std::collections::BTreeMap;
+    use ecp_core::contracts::dirty_event::{PathChange, PathClass};
+    use ecp_core::contracts::routing::SizeCap;
+    use ecp_core::session::overlay::{SymbolKind, SymbolRef};
+    use ecp_core::session::DirtyEventEntry;
 
     fn write_dirty_in(dir: &Path, file: &str, symbols: &[&str]) {
-        let mut entries = BTreeMap::new();
-        entries.insert(
+        let mut manifest = DirtyEvents::empty(SizeCap::BUILT_IN);
+        manifest.entries.insert(
             file.to_string(),
-            DirtyEntry {
+            DirtyEventEntry {
+                change: PathChange::Modified,
+                class: PathClass::SOURCE,
                 mtime_ns: 1,
-                content_hash: "h".into(),
-                fragment_id: "f".into(),
-                tantivy_delta_segment: None,
+                fragment_id: Some("f".into()),
+                content_hash: Some("f".into()),
                 parse_failed: false,
                 format: 1,
                 dirty_symbols: symbols
@@ -567,19 +703,95 @@ mod tests {
                     .collect(),
             },
         );
-        DirtyFiles::write_atomic(
-            &dir.join("dirty_files.json"),
-            &DirtyFiles {
-                builder_fingerprint: None,
-                version: 1,
-                entries,
-            },
-        )
-        .expect("write dirty_files.json");
+        DirtyEvents::write_atomic(&layout::dirty_events_path(dir), &manifest)
+            .expect("write l1/dirty_events.json");
     }
 
     fn write_dirty(dir: &Path, symbols: &[&str]) {
         write_dirty_in(dir, "src/a.rs", symbols);
+    }
+
+    /// Only today's manifest path names a session: an older binary's
+    /// `dirty_files.json` and the bins beside the manifest do not.
+    #[test]
+    fn test_manifest_session_dir_new_manifest_path_returns_its_session() {
+        let session = Path::new("/home/.ecp/repo/sessions/sid");
+        assert_eq!(
+            manifest_session_dir(&layout::dirty_events_path(session)),
+            Some(session)
+        );
+        for other in [
+            layout::legacy_dirty_files_path(session),
+            layout::fragment_path(session, "f"),
+            session.join("session_meta.json"),
+        ] {
+            assert_eq!(manifest_session_dir(&other), None, "{}", other.display());
+        }
+    }
+
+    /// Stands for: a manifest written right after its `l1/` (or its session
+    /// dir) is created still reaches peers. inotify adds the watch on a new
+    /// directory only after its create event, so the manifest's own event is
+    /// lost; the directory's create event must name the session instead.
+    /// Failed before: only the manifest path itself named a session, and the
+    /// 8-session fan-out test lost peers on the CI runner.
+    #[test]
+    fn test_event_session_dir_created_l1_with_manifest_returns_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = tmp.path().join("sessions").join("sid");
+        write_dirty(&session, &["verify_token"]);
+        let l1 = layout::dirty_events_path(&session)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+
+        assert_eq!(event_session_dir(&l1, true), Some(session.as_path()));
+        assert_eq!(event_session_dir(&session, true), Some(session.as_path()));
+        assert_eq!(
+            event_session_dir(&layout::dirty_events_path(&session), false),
+            Some(session.as_path())
+        );
+        // A modify of another file in the session, or a non-create event on
+        // the directory, names nothing: it would re-dispatch on every inbox
+        // write.
+        assert_eq!(event_session_dir(&l1, false), None);
+        assert_eq!(event_session_dir(&session.join("inbox.jsonl"), true), None);
+        let fragments = layout::fragments_dir(&session);
+        std::fs::create_dir_all(&fragments).unwrap();
+        assert_eq!(event_session_dir(&fragments, true), None);
+    }
+
+    /// A created `l1/` without a manifest yet names nothing; the manifest's
+    /// own event follows once the watch exists.
+    #[test]
+    fn test_event_session_dir_created_l1_without_manifest_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = tmp.path().join("sessions").join("sid");
+        let fragments = layout::fragments_dir(&session);
+        std::fs::create_dir_all(&fragments).unwrap();
+        let l1 = fragments.parent().unwrap();
+        assert_eq!(event_session_dir(l1, true), None);
+        assert_eq!(event_session_dir(&session, true), None);
+    }
+
+    /// The watcher reads our dirty set from `l1/dirty_events.json`: a file
+    /// written there counts as newly dirty, and a session holding only the
+    /// legacy manifest has nothing dirty.
+    #[test]
+    fn test_my_dirty_gained_symbols_new_namespace_file_reports_dirty() {
+        let legacy_only = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            layout::legacy_dirty_files_path(legacy_only.path()),
+            br#"{"version":1,"entries":{"src/old.rs":{"mtime_ns":1,"content_hash":"h","fragment_id":"h","tantivy_delta_segment":null}}}"#,
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_dirty_in(dir.path(), "src/b.rs", &[]);
+        let empty = MyDirtySurface::default();
+
+        assert!(my_dirty_gained_symbols(dir.path(), Some(&empty)));
+        assert!(!my_dirty_gained_symbols(legacy_only.path(), Some(&empty)));
+        assert!(seed_symbols(legacy_only.path()).is_empty());
     }
 
     fn seed(name: &str, file: &str) -> Seed {
@@ -742,5 +954,63 @@ mod tests {
         state.rebuild(dir.path());
         assert!(state.seeds.is_empty());
         assert!(!state.cache.contains("src/a.rs", "stale"));
+    }
+
+    #[test]
+    fn test_manifest_stamps_changed_skips_stale_and_hidden_sessions() {
+        let sessions = tempfile::tempdir().unwrap();
+        for sid in ["alice", "alice.stale-ab12cd34", ".hidden"] {
+            write_dirty(&sessions.path().join(sid), &["run"]);
+        }
+        let mut stamps = ManifestStamps::default();
+        assert_eq!(
+            stamps.changed(sessions.path()),
+            vec![layout::dirty_events_path(&sessions.path().join("alice"))]
+        );
+    }
+
+    #[test]
+    fn test_manifest_stamps_changed_unchanged_manifest_reported_once() {
+        let sessions = tempfile::tempdir().unwrap();
+        write_dirty(&sessions.path().join("alice"), &["run"]);
+        let mut stamps = ManifestStamps::default();
+        assert_eq!(stamps.changed(sessions.path()).len(), 1);
+        assert!(stamps.changed(sessions.path()).is_empty());
+    }
+
+    #[test]
+    fn test_manifest_stamps_changed_removed_session_dropped() {
+        let sessions = tempfile::tempdir().unwrap();
+        let alice = sessions.path().join("alice");
+        write_dirty(&alice, &["run"]);
+        let mut stamps = ManifestStamps::default();
+        stamps.changed(sessions.path());
+        std::fs::remove_file(layout::dirty_events_path(&alice)).unwrap();
+        stamps.changed(sessions.path());
+        assert!(stamps.0.is_empty());
+    }
+
+    #[test]
+    fn test_open_watcher_native_failure_polls_and_delivers_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = channel::<notify::Result<Event>>();
+        let _watcher = open_watcher(tx, dir.path(), |_| {
+            Err(notify::Error::io(std::io::Error::from_raw_os_error(24)))
+        })
+        .expect("polling fallback");
+        let target = dir.path().join("l1").join("dirty_events.json");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"{}").unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut seen = false;
+        while !seen && std::time::Instant::now() < deadline {
+            if let Ok(Ok(ev)) = rx.recv_timeout(Duration::from_millis(200)) {
+                seen = ev.paths.iter().any(|p| p.ends_with("l1/dirty_events.json"));
+            }
+        }
+        assert!(
+            seen,
+            "polling watcher never reported the new dirty_events.json"
+        );
     }
 }

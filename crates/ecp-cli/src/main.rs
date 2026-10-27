@@ -92,6 +92,10 @@ fn subcommand_label(cmd: &Commands) -> Option<&'static str> {
     }
 }
 
+/// What the hidden `ecp rename` stub answers. The command is gone, and a caller
+/// with stale docs needs the replacement, not a clap usage error.
+const RENAME_REMOVED: &str = "`ecp rename` was removed in 0.17.0: ecp does not edit files. Rename with your editor's LSP rename, or list the declarations and call sites with `ecp find <name>` and `ecp impact <name>`, then edit them.";
+
 /// Stable `ecp <verb>` label for every `Commands` variant. Used as the
 /// telemetry `tool` field; must stay exhaustive so a new variant forces a
 /// label decision at compile time.
@@ -100,7 +104,7 @@ fn command_label(cmd: &Commands) -> &'static str {
         Commands::Inspect(_) => "inspect",
         Commands::Find(_) => "find",
         Commands::Impact(_) => "impact",
-        Commands::Rename(_) => "rename",
+        Commands::Rename { .. } => "rename",
         Commands::Pattern(_) => "pattern",
         Commands::Flow(_) => "flow",
         Commands::Cypher(_) => "cypher",
@@ -251,9 +255,9 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
         Commands::Impact(args) => {
             commands::impact::run(args, engine.expect("needs_graph() gates this arm"))
         }
-        Commands::Rename(args) => {
-            commands::rename::run(args, engine.expect("needs_graph() gates this arm"))
-        }
+        Commands::Rename { .. } => Err(ecp_core::EcpError::InvalidArgument(
+            RENAME_REMOVED.to_string(),
+        )),
         Commands::Pattern(args) => {
             commands::pattern::run(args, engine.expect("needs_graph() gates this arm"))
         }
@@ -317,7 +321,7 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
 /// later with an opaque message. Catch it here and exit with a clear hint.
 ///
 /// The `hint` is the `ecp group <verb>` migration target. Commands without a
-/// group analog (inspect / rename / cypher / routes / shape-check / tool-map
+/// group analog (inspect / cypher / routes / shape-check / tool-map
 /// / review / diff) carry `None` and get redirected to `ecp group --help`.
 fn check_group_atom(cli: &Cli) {
     // The `repo: Option<String>` accessor lives on each variant's args struct,
@@ -329,7 +333,6 @@ fn check_group_atom(cli: &Cli) {
         Commands::Find(a) => (a.repo.as_deref(), Some("find")),
         Commands::Impact(a) => (a.repo.as_deref(), Some("impact")),
         Commands::Inspect(a) => (a.repo.as_deref(), None),
-        Commands::Rename(a) => (a.repo.as_deref(), None),
         Commands::Pattern(a) => (a.repo.as_deref(), None),
         Commands::Flow(a) => (a.repo.as_deref(), None),
         Commands::Cypher(a) => (a.repo.as_deref(), None),

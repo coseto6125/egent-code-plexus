@@ -131,7 +131,11 @@ pub fn member_prefixed(member: &str, caveat: &str) -> String {
 pub fn member_caveats(engines: &[(String, Engine)]) -> Option<String> {
     let lines: Vec<String> = engines
         .iter()
-        .filter_map(|(member, engine)| engine.caveat().map(|c| member_prefixed(member, &c)))
+        .filter_map(|(member, engine)| {
+            engine
+                .caveat_reading_view()
+                .map(|c| member_prefixed(member, &c))
+        })
         .collect();
     (!lines.is_empty()).then(|| lines.join("\n"))
 }

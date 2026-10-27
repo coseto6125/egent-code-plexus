@@ -398,6 +398,9 @@ fn test_inspect_clean_tree_with_session_matches_no_session() {
 
 /// A namesake in a clean file and one in a dirty file are both listed, the
 /// dirty one at its working-tree line.
+/// Contract: `a.rs:1` and `b.rs:7` stand for "the clean and the dirty
+/// declaration are both visible, and the dirty one is at its working-tree
+/// line", read from the ambiguity's `candidates`.
 #[test]
 fn test_inspect_clean_and_dirty_namesakes_lists_both() {
     let r = Repo::indexed(&[
@@ -407,14 +410,14 @@ fn test_inspect_clean_and_dirty_namesakes_lists_both() {
     r.write("b.rs", "\n\n\n\n\n\npub fn twin() {}\n");
     let v = r.inspect("twin");
     assert_eq!(v["status"], "ambiguous", "{v}");
-    let mut spans: Vec<(String, u64)> = v["matches"]
+    let mut spans: Vec<(String, u64)> = v["candidates"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|m| {
+        .map(|c| {
             (
-                m["symbol"]["filePath"].as_str().unwrap().to_string(),
-                m["symbol"]["startLine"].as_u64().unwrap(),
+                c["filePath"].as_str().unwrap().to_string(),
+                c["line"].as_u64().unwrap(),
             )
         })
         .collect();

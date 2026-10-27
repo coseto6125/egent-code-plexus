@@ -1,5 +1,5 @@
 //! C5 routing result: one definition of how a repo-relative path becomes a
-//! file format, a provider, a language, an identifier finder, a capability
+//! file format, a provider, a language, a capability
 //! set and a size cap. Design note: `docs/specs/contracts/C5-routing.md`.
 //!
 //! Every per-language fact is an exhaustive `match` on [`Language`] with no
@@ -93,24 +93,22 @@ listed_enum! {
     /// A capability that a reader dispatches on by language. A language that
     /// lacks one must make the reader say so, never return an empty answer.
     pub enum Capability {
-        /// `ecp rename` finds identifier occurrences in the file.
-        IdentifierFinder = 0,
         /// `ecp pattern` matches a metavariable pattern in the file.
-        PatternFinder = 1,
+        PatternFinder = 0,
         /// `ecp flow` lowers the file.
-        Flow = 2,
+        Flow = 1,
         /// The index extracts response shapes from HTTP handlers.
-        FetchShapes = 3,
+        FetchShapes = 2,
         /// The index extracts HTTP client call sites (`Fetches` sources).
-        FetchConsumer = 4,
+        FetchConsumer = 3,
         /// The parser emits function meta, which sets `is_test` on callers.
-        FunctionMeta = 5,
+        FunctionMeta = 4,
         /// The parser marks non-direct calls.
-        IndirectDispatch = 6,
+        IndirectDispatch = 5,
         /// `ecp tool-map` reads the file's package imports.
-        ToolMapImports = 7,
+        ToolMapImports = 6,
         /// The JS and TS lexical scope index covers the file.
-        LexicalIndex = 8,
+        LexicalIndex = 7,
     }
 }
 
@@ -148,6 +146,15 @@ pub const YAML_CANDIDATES: &[Language] = &[Language::Kubernetes, Language::OpenA
 pub const JSON_CANDIDATES: &[Language] = &[Language::OpenApi];
 
 impl Language {
+    /// The variant whose `#[repr(u8)]` discriminant is `byte`, the inverse of
+    /// `language as u8`. `None` for a byte that names no variant.
+    pub fn from_discriminant(byte: u8) -> Option<Self> {
+        Self::ALL
+            .get(byte as usize)
+            .copied()
+            .filter(|language| *language as u8 == byte)
+    }
+
     /// The 14 mainstream languages of the repo's coverage rule.
     pub const MAINSTREAM: [Language; 14] = [
         Self::TypeScript,
@@ -329,7 +336,6 @@ impl Language {
         use Capability as K;
         match self {
             Self::TypeScript | Self::JavaScript => CapabilitySet::of(&[
-                K::IdentifierFinder,
                 K::PatternFinder,
                 K::Flow,
                 K::FetchShapes,
@@ -340,7 +346,6 @@ impl Language {
                 K::LexicalIndex,
             ]),
             Self::Python => CapabilitySet::of(&[
-                K::IdentifierFinder,
                 K::PatternFinder,
                 K::Flow,
                 K::FetchConsumer,
@@ -348,36 +353,23 @@ impl Language {
                 K::IndirectDispatch,
                 K::ToolMapImports,
             ]),
-            Self::Php => CapabilitySet::of(&[
-                K::IdentifierFinder,
-                K::PatternFinder,
-                K::Flow,
-                K::FetchShapes,
-                K::FunctionMeta,
-            ]),
-            Self::Rust => CapabilitySet::of(&[
-                K::IdentifierFinder,
-                K::PatternFinder,
-                K::FunctionMeta,
-                K::IndirectDispatch,
-                K::ToolMapImports,
-            ]),
-            Self::Go => CapabilitySet::of(&[
-                K::IdentifierFinder,
-                K::PatternFinder,
-                K::FunctionMeta,
-                K::ToolMapImports,
-            ]),
-            Self::C | Self::Cpp => CapabilitySet::of(&[
-                K::IdentifierFinder,
-                K::PatternFinder,
-                K::FunctionMeta,
-                K::IndirectDispatch,
-            ]),
-            Self::Java | Self::Kotlin | Self::CSharp | Self::Ruby | Self::Swift => {
-                CapabilitySet::of(&[K::IdentifierFinder, K::PatternFinder, K::FunctionMeta])
+            Self::Php => {
+                CapabilitySet::of(&[K::PatternFinder, K::Flow, K::FetchShapes, K::FunctionMeta])
             }
-            Self::Dart => CapabilitySet::of(&[K::IdentifierFinder, K::FunctionMeta]),
+            Self::Rust => CapabilitySet::of(&[
+                K::PatternFinder,
+                K::FunctionMeta,
+                K::IndirectDispatch,
+                K::ToolMapImports,
+            ]),
+            Self::Go => CapabilitySet::of(&[K::PatternFinder, K::FunctionMeta, K::ToolMapImports]),
+            Self::C | Self::Cpp => {
+                CapabilitySet::of(&[K::PatternFinder, K::FunctionMeta, K::IndirectDispatch])
+            }
+            Self::Java | Self::Kotlin | Self::CSharp | Self::Ruby | Self::Swift => {
+                CapabilitySet::of(&[K::PatternFinder, K::FunctionMeta])
+            }
+            Self::Dart => CapabilitySet::of(&[K::FunctionMeta]),
             Self::Bash
             | Self::Lua
             | Self::Crystal
@@ -389,8 +381,8 @@ impl Language {
             | Self::Vyper
             | Self::Verilog
             | Self::Cairo
-            | Self::Zig => CapabilitySet::of(&[K::IdentifierFinder]),
-            Self::Dockerfile
+            | Self::Zig
+            | Self::Dockerfile
             | Self::Vue
             | Self::Astro
             | Self::Svelte
@@ -570,18 +562,6 @@ pub enum Dispatch {
     Sniffed(&'static [Language]),
 }
 
-/// Which identifier finder `ecp rename` uses for a file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IdentifierFinder {
-    Supported {
-        language: Language,
-        dialect: Dialect,
-    },
-    /// No finder. The reader reports the file as not scanned; it never drops
-    /// the file without a notice.
-    Unsupported,
-}
-
 /// Where the effective size cap came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SizeCapSource {
@@ -599,10 +579,11 @@ pub enum SizeCapSource {
 /// the cap is routed but not parsed, and the parse returns a graph that
 /// records it as omitted (`file-too-large`).
 ///
-/// The cap is not yet an input of the dirty manifest or of the view cache
-/// key, so a cap change reaches a file only when that file is parsed again.
-/// The overlay pipeline cache compares `bytes`, never `source`: one cap from
-/// two sources parses the same.
+/// The dirty manifest records `bytes` (`DirtyEvents::size_cap_bytes`), and a
+/// manifest under another cap is stale as a whole; the view cache key hashes
+/// the accepted fragments, so it follows. `graph.bin` does not record its
+/// cap: a cap change reaches a clean file at the next rebuild. Every cache
+/// compares `bytes`, never `source`: one cap from two sources parses the same.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SizeCap {
     bytes: u64,
@@ -725,19 +706,15 @@ impl FileRoute {
             })
     }
 
-    pub fn identifier_finder(&self) -> IdentifierFinder {
-        match self.fixed_language() {
-            Some(language)
-                if language
-                    .capabilities()
-                    .contains(Capability::IdentifierFinder) =>
-            {
-                IdentifierFinder::Supported {
-                    language,
-                    dialect: self.dialect,
-                }
-            }
-            _ => IdentifierFinder::Unsupported,
+    /// The `file_category::Language` value of a file on this route: the fixed
+    /// language's [`Language::to_legacy`]. A sniffed route has no language
+    /// before the parse, so it gives the value the path alone gave before
+    /// the content gates: `Yaml` for a YAML file, `Unknown` for a JSON file.
+    pub const fn to_legacy(&self) -> LegacyLanguage {
+        match (self.dispatch, self.format) {
+            (Dispatch::Fixed(language), _) => language.to_legacy(),
+            (Dispatch::Sniffed(_), FileFormat::Yaml) => LegacyLanguage::Yaml,
+            (Dispatch::Sniffed(_), FileFormat::Json | FileFormat::Code) => LegacyLanguage::Unknown,
         }
     }
 
@@ -796,8 +773,8 @@ pub struct ParsedLanguage {
 }
 
 impl ParsedLanguage {
-    /// The language whose provider parsed the file. Tool choice (identifier
-    /// finder, pattern grammar, capability set) reads this value.
+    /// The language whose provider parsed the file. Tool choice (pattern
+    /// grammar, capability set) reads this value.
     pub const fn file(self) -> Language {
         self.file
     }
@@ -816,6 +793,32 @@ impl ParsedLanguage {
     /// barrier stays in `file_category::FileMeta`.
     pub fn admits_global(self, candidate: ParsedLanguage) -> bool {
         self.resolution == candidate.resolution
+    }
+
+    /// The stored form of "no `ParsedLanguage`": `0xFF` names no language
+    /// (`Language` has fewer than 255 variants, see `RouteKey::SNIFFED`).
+    pub const ABSENT: [u8; 2] = [RouteKey::SNIFFED, RouteKey::SNIFFED];
+
+    /// The stored form (`graph.bin` `File::parsed_language`): the
+    /// discriminants of [`Self::file`] and [`Self::resolution`].
+    pub const fn to_bytes(self) -> [u8; 2] {
+        [self.file as u8, self.resolution as u8]
+    }
+
+    /// [`Self::to_bytes`] of `parsed`, or [`Self::ABSENT`].
+    pub fn encode(parsed: Option<Self>) -> [u8; 2] {
+        parsed.map_or(Self::ABSENT, Self::to_bytes)
+    }
+
+    /// The inverse of [`Self::encode`]. `None` for [`Self::ABSENT`], for a
+    /// byte that names no language, and for a pair `after_parse` never
+    /// makes: a resolution language other than the file language or one of
+    /// its embedded scripts.
+    pub fn from_bytes([file, resolution]: [u8; 2]) -> Option<Self> {
+        let file = Language::from_discriminant(file)?;
+        let resolution = Language::from_discriminant(resolution)?;
+        (resolution == file || file.embedded_scripts().contains(&resolution))
+            .then_some(Self { file, resolution })
     }
 }
 
@@ -865,6 +868,49 @@ impl FileRouter {
             }
         }
         RouteOutcome::Unrouted
+    }
+
+    /// The route [`Self::route`] gives `rel_path` when the two template rules
+    /// are skipped, or `None` when no other rule routes it.
+    ///
+    /// `file_category::Language` and `FileMeta` read this once per resolver
+    /// candidate. The template rules scan every path component, and the
+    /// paths those readers see are graph files, which the template rules
+    /// already kept out of the index. So this reads the basename from the
+    /// end of the path, and scans the components only for a YAML file.
+    pub fn route_ignoring_templates(&self, rel_path: &str) -> Option<FileRoute> {
+        let basename = rel_path
+            .rsplit(['/', '\\'])
+            .find(|component| !component.is_empty() && *component != ".")
+            .unwrap_or("");
+        let parts = PathParts {
+            path: rel_path,
+            basename,
+            extension: extension_of(basename),
+        };
+        for &rule in PathRule::ALL {
+            if matches!(
+                rule,
+                PathRule::TemplateDir | PathRule::TemplateInterpolation
+            ) {
+                continue;
+            }
+            if let Some(Decision::Route {
+                format,
+                dispatch,
+                dialect,
+            }) = rule.decide(&parts)
+            {
+                return Some(FileRoute {
+                    rule,
+                    format,
+                    dispatch,
+                    dialect,
+                    size_cap: self.size_cap,
+                });
+            }
+        }
+        None
     }
 }
 
@@ -1236,7 +1282,6 @@ mod tests {
             "the yaml candidate builds no provider until C5 open point 6 lands"
         );
         assert!(route.capabilities_before_parse().is_empty());
-        assert_eq!(route.identifier_finder(), IdentifierFinder::Unsupported);
     }
 
     #[test]
@@ -1247,32 +1292,10 @@ mod tests {
     }
 
     #[test]
-    fn test_route_tsx_dialect_and_identifier_finder() {
+    fn test_route_tsx_dialect_follows_extension() {
         let route = routed("ui/App.tsx");
         assert_eq!(route.dialect(), Dialect::Tsx);
-        assert_eq!(
-            route.identifier_finder(),
-            IdentifierFinder::Supported {
-                language: Language::TypeScript,
-                dialect: Dialect::Tsx
-            }
-        );
         assert_eq!(routed("ui/app.ts").dialect(), Dialect::Standard);
-    }
-
-    #[test]
-    fn test_identifier_finder_vue_unsupported_rust_supported() {
-        assert_eq!(
-            routed("App.vue").identifier_finder(),
-            IdentifierFinder::Unsupported
-        );
-        assert_eq!(
-            routed("src/lib.rs").identifier_finder(),
-            IdentifierFinder::Supported {
-                language: Language::Rust,
-                dialect: Dialect::Standard
-            }
-        );
     }
 
     #[test]
@@ -1442,12 +1465,6 @@ mod tests {
         assert!(router().route("__brick__/a.go").route().is_none());
     }
 
-    // The ledger below lists the differences between the legacy
-    // `file_category::Language` reader and this contract. Each row is a known
-    // defect or a decided change (design note, "Today"). The area 6 adoption
-    // slice deletes it together with `file_category::Language::from_path`;
-    // until then a new difference fails here instead of shipping unnoticed.
-
     #[test]
     fn test_route_every_language_extension_first_provider_is_its_language() {
         for &language in Language::ALL {
@@ -1459,71 +1476,6 @@ mod tests {
                         .route()
                         .and_then(|route| route.providers().next()),
                     Some(language.provider()),
-                    "{path}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_route_path_ledger_matches_today_readers() {
-        // (path, first provider of the contract route,
-        //  today's `file_category::Language`)
-        let ledger: &[(&str, Option<&str>, LegacyLanguage)] = &[
-            ("Dockerfile", Some("dockerfile"), LegacyLanguage::Dockerfile),
-            (
-                "svc/x.dockerfile",
-                Some("dockerfile"),
-                LegacyLanguage::Unknown,
-            ),
-            (
-                "svc/compose.yaml",
-                Some("docker-compose"),
-                LegacyLanguage::DockerCompose,
-            ),
-            (
-                ".github/workflows/ci.yml",
-                Some("github-actions"),
-                LegacyLanguage::GitHubActions,
-            ),
-            ("k8s/deploy.yaml", Some("kubernetes"), LegacyLanguage::Yaml),
-            ("api/spec.json", Some("openapi"), LegacyLanguage::Unknown),
-            ("App.vue", Some("vue"), LegacyLanguage::Unknown),
-            ("api.proto", Some("protobuf"), LegacyLanguage::Unknown),
-            ("README.md", None, LegacyLanguage::Markdown),
-            ("notes.txt", None, LegacyLanguage::Markdown),
-            ("__brick__/lib/a.dart", None, LegacyLanguage::Dart),
-            ("x.mts", None, LegacyLanguage::Unknown),
-            (".py", None, LegacyLanguage::Python),
-        ];
-        for (path, contract, legacy) in ledger {
-            let outcome = router().route(path);
-            assert_eq!(
-                outcome.route().and_then(|route| route.providers().next()),
-                *contract,
-                "contract {path}"
-            );
-            assert_eq!(
-                LegacyLanguage::from_normalized_path(path),
-                *legacy,
-                "legacy {path}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_to_legacy_every_extension_default_matches_today_except_dockerfile_ext() {
-        for &language in Language::ALL {
-            for ext in language.extensions() {
-                let path = format!("src/x.{ext}");
-                let expected = if *ext == "dockerfile" {
-                    LegacyLanguage::Unknown
-                } else {
-                    language.to_legacy()
-                };
-                assert_eq!(
-                    LegacyLanguage::from_normalized_path(&path),
-                    expected,
                     "{path}"
                 );
             }

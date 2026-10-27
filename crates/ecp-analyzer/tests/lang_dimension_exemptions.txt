@@ -481,19 +481,32 @@ gaps_audit ruby pre-existing gap
 gaps_audit rust pre-existing gap
 gaps_audit swift pre-existing gap
 gaps_audit typescript pre-existing gap
-grammar_073 c pre-existing gap
-grammar_073 cpp pre-existing gap
-grammar_073 csharp pre-existing gap
-grammar_073 dart pre-existing gap
-grammar_073 go pre-existing gap
-grammar_073 java pre-existing gap
-grammar_073 javascript pre-existing gap
-grammar_073 kotlin pre-existing gap
-grammar_073 php pre-existing gap
-grammar_073 python pre-existing gap
-grammar_073 ruby pre-existing gap
-grammar_073 rust pre-existing gap
-grammar_073 typescript pre-existing gap
+generic_arity c only C# declares two same-name types that differ by generic arity
+generic_arity cpp only C# declares two same-name types that differ by generic arity
+generic_arity dart only C# declares two same-name types that differ by generic arity
+generic_arity go only C# declares two same-name types that differ by generic arity
+generic_arity java only C# declares two same-name types that differ by generic arity
+generic_arity javascript only C# declares two same-name types that differ by generic arity
+generic_arity kotlin only C# declares two same-name types that differ by generic arity
+generic_arity php only C# declares two same-name types that differ by generic arity
+generic_arity python only C# declares two same-name types that differ by generic arity
+generic_arity ruby only C# declares two same-name types that differ by generic arity
+generic_arity rust only C# declares two same-name types that differ by generic arity
+generic_arity swift only C# declares two same-name types that differ by generic arity
+generic_arity typescript only C# declares two same-name types that differ by generic arity
+grammar c pre-existing gap
+grammar cpp pre-existing gap
+grammar csharp pre-existing gap
+grammar dart pre-existing gap
+grammar go pre-existing gap
+grammar java pre-existing gap
+grammar javascript pre-existing gap
+grammar kotlin pre-existing gap
+grammar php pre-existing gap
+grammar python pre-existing gap
+grammar ruby pre-existing gap
+grammar rust pre-existing gap
+grammar typescript pre-existing gap
 heritage c pre-existing gap
 heritage cpp pre-existing gap
 heritage csharp pre-existing gap
@@ -853,6 +866,19 @@ owner_collision php pre-existing gap
 owner_collision ruby pre-existing gap
 owner_collision rust pre-existing gap
 owner_collision swift pre-existing gap
+parent_identity c no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
+parent_identity cpp no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
+parent_identity csharp no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
+parent_identity dart no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
+parent_identity go no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
+parent_identity java no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
+parent_identity javascript no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
+parent_identity kotlin no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
+parent_identity php no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
+parent_identity python no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
+parent_identity ruby no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
+parent_identity swift no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
+parent_identity typescript no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
 path_literals csharp pre-existing gap
 pointer_return_methods c pre-existing gap
 pointer_return_methods csharp pre-existing gap
@@ -1050,6 +1076,19 @@ round1_fix ruby pre-existing gap
 round1_fix rust pre-existing gap
 round1_fix swift pre-existing gap
 round1_fix typescript pre-existing gap
+route_identity c no route producer for this language
+route_identity cpp no route producer for this language
+route_identity dart no route producer: Dart annotations are stored without their arguments, so no route path is detected
+route_identity swift no route producer for this language
+route_prefix c no route producer for this language
+route_prefix cpp no route producer for this language
+route_prefix csharp [Route("api/[controller]")] class prefix is not composed yet
+route_prefix dart no route producer for this language
+route_prefix kotlin shares the Spring decorator path with Java; no Kotlin fixture yet
+route_prefix php Laravel groups are covered by php_laravel_route_groups.rs
+route_prefix ruby Rails scopes are covered by ruby_rails_routes.rs
+route_prefix rust no group-prefix composition yet
+route_prefix swift no route producer for this language
 send_literal c pre-existing gap
 send_literal cpp pre-existing gap
 send_literal csharp pre-existing gap
@@ -1480,3 +1519,55 @@ visibility ruby pre-existing gap
 visibility rust pre-existing gap
 visibility swift pre-existing gap
 visibility typescript pre-existing gap
+extension_methods c no extension methods: a call resolves only to members of the receiver's type or to free functions
+extension_methods cpp no extension methods: a call resolves only to members of the receiver's type or to free functions
+extension_methods dart Dart extension-on members are covered by dart_extension_trait.rs; this dimension tests the C# static-class retry
+extension_methods go no extension methods: a call resolves only to members of the receiver's type or to free functions
+extension_methods java no extension methods: a call resolves only to members of the receiver's type or to free functions
+extension_methods javascript no extension methods: a call resolves only to members of the receiver's type or to free functions
+extension_methods kotlin Kotlin extension functions are top-level and resolve through the existing extension fallback (kotlin_import_bound_calls.rs)
+extension_methods php no extension methods: a call resolves only to members of the receiver's type or to free functions
+extension_methods python no extension methods: a call resolves only to members of the receiver's type or to free functions
+extension_methods ruby no extension methods: a call resolves only to members of the receiver's type or to free functions
+extension_methods rust trait methods resolve through trait impls; no static-class extension form
+extension_methods swift Swift extension members are members of the extended type (swift_extension_dedup.rs); no static-class form
+extension_methods typescript no extension methods: a call resolves only to members of the receiver's type or to free functions
+call_access c the call access rule models C# private and static members only
+call_access cpp the call access rule models C# private and static members only
+call_access dart the call access rule models C# private and static members only
+call_access go the call access rule models C# private and static members only
+call_access java the call access rule models C# private and static members only
+call_access javascript the call access rule models C# private and static members only
+call_access kotlin the call access rule models C# private and static members only
+call_access php the call access rule models C# private and static members only
+call_access python the call access rule models C# private and static members only
+call_access ruby the call access rule models C# private and static members only
+call_access rust the call access rule models C# private and static members only
+call_access swift the call access rule models C# private and static members only
+call_access typescript the call access rule models C# private and static members only
+partial_parts c only C# declares one type in partial parts across files
+partial_parts cpp only C# declares one type in partial parts across files
+partial_parts dart only C# declares one type in partial parts across files
+partial_parts go only C# declares one type in partial parts across files
+partial_parts java only C# declares one type in partial parts across files
+partial_parts javascript only C# declares one type in partial parts across files
+partial_parts kotlin only C# declares one type in partial parts across files
+partial_parts php only C# declares one type in partial parts across files
+partial_parts python only C# declares one type in partial parts across files
+partial_parts ruby only C# declares one type in partial parts across files
+partial_parts rust only C# declares one type in partial parts across files
+partial_parts swift only C# declares one type in partial parts across files
+partial_parts typescript only C# declares one type in partial parts across files
+value_receiver c the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver cpp the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver dart the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver go the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver java the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver javascript the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver kotlin the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver php the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver python the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver ruby the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver rust the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver swift the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver typescript the value-receiver call shape (field, var, ?., extension retry) is C#-specific

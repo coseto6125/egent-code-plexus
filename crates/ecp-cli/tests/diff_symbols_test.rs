@@ -194,3 +194,93 @@ fn diff_symbols_added_changed_with_intra_callers() {
         "expected bar in callers of foo; got: {callers:?}"
     );
 }
+
+fn git(repo: &std::path::Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+const JAVA_V1: &str = "public class Calc {
+    public int add(int a) { return a + 1; }
+    public int add(String s) { return s.length() + 1; }
+}
+";
+
+const JAVA_V2: &str = "public class Calc {
+    public int add(int a) { return a + 2; }
+    public int add(String s) { return s.length() + 2; }
+}
+";
+
+/// Stands for: `diff` lists every changed overload. Two same-named methods of
+/// one class used to share a key, so the second never appeared and a reviewer
+/// saw one change where there were two.
+#[test]
+fn test_diff_symbols_java_two_changed_overloads_both_listed() {
+    let tmp = TempDir::new().expect("tempdir");
+    let repo = tmp.path();
+    git(repo, &["init", "-q", "-b", "main"]);
+    std::fs::create_dir(repo.join("src")).expect("mkdir src");
+    std::fs::write(repo.join("src/Calc.java"), JAVA_V1).expect("write v1");
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-q", "-m", "v1"]);
+    let baseline_sha = git(repo, &["rev-parse", "HEAD"]);
+    std::fs::write(repo.join("src/Calc.java"), JAVA_V2).expect("write v2");
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-q", "-m", "v2"]);
+
+    let output = Command::new(ecp_bin())
+        .args([
+            "diff",
+            "--section",
+            "symbols",
+            "--baseline",
+            &baseline_sha,
+            "--format",
+            "json",
+        ])
+        .current_dir(repo)
+        .env("HOME", repo)
+        .env("ECP_NO_PROGRESS", "1")
+        .output()
+        .expect("run ecp diff symbols");
+    assert!(
+        output.status.success(),
+        "ecp diff symbols failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("invalid JSON: {e}; stdout: {stdout}"));
+
+    let changed = parsed["sections"]["symbols"]["certain"]["symbols_changed"]
+        .as_array()
+        .expect("symbols_changed must be array");
+    let adds: Vec<&serde_json::Value> = changed
+        .iter()
+        .filter(|sym| sym["name"].as_str() == Some("add"))
+        .collect();
+    assert_eq!(
+        adds.len(),
+        2,
+        "both overloads of Calc.add are listed; got: {changed:?}"
+    );
+    let mut lines: Vec<u64> = adds.iter().map(|s| s["line"].as_u64().unwrap()).collect();
+    lines.sort_unstable();
+    assert_eq!(lines, [2, 3], "one entry per overload line");
+    assert!(
+        adds.iter()
+            .all(|s| s["owner_class"].as_str() == Some("Calc")),
+        "the printed owner of an ordinary method is unchanged; got: {adds:?}"
+    );
+}

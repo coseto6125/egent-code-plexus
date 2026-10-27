@@ -90,7 +90,7 @@ fn test_namespace_prefixes_path_and_controller() {
         "  namespace :admin do\n    resources :posts, only: [:index]\n  end",
     ));
     assert_eq!(pairs(&rs), vec!["GET /admin/posts"]);
-    assert_eq!(rs[0].handler.as_deref(), Some("admin/posts#index"));
+    assert_eq!(rs[0].handler_name(), Some("admin/posts#index"));
 }
 
 #[test]
@@ -129,7 +129,7 @@ fn test_member_block_action_addresses_one_record() {
             "PATCH /agents/:id/toggle_active"
         ]
     );
-    assert_eq!(rs[0].handler.as_deref(), Some("agents#confirm_delete"));
+    assert_eq!(rs[0].handler_name(), Some("agents#confirm_delete"));
 }
 
 #[test]
@@ -146,7 +146,7 @@ fn test_explicit_verb_keeps_literal_path_and_handler() {
         r#"  get "/zendesk/chat", to: "zendesk#chat", as: :zendesk_chat"#,
     ));
     assert_eq!(pairs(&rs), vec!["GET /zendesk/chat"]);
-    assert_eq!(rs[0].handler.as_deref(), Some("zendesk#chat"));
+    assert_eq!(rs[0].handler_name(), Some("zendesk#chat"));
 }
 
 #[test]
@@ -163,7 +163,7 @@ fn test_scope_applies_path_and_module_separately() {
         "  scope path: \"v1\", module: \"api\" do\n    resources :posts, only: [:index]\n  end",
     ));
     assert_eq!(pairs(&rs), vec!["GET /v1/posts"]);
-    assert_eq!(rs[0].handler.as_deref(), Some("api/posts#index"));
+    assert_eq!(rs[0].handler_name(), Some("api/posts#index"));
 }
 
 #[test]
@@ -172,14 +172,14 @@ fn test_scope_with_module_only_leaves_path_unchanged() {
         "  scope module: \"api\" do\n    resources :posts, only: [:index]\n  end",
     ));
     assert_eq!(pairs(&rs), vec!["GET /posts"]);
-    assert_eq!(rs[0].handler.as_deref(), Some("api/posts#index"));
+    assert_eq!(rs[0].handler_name(), Some("api/posts#index"));
 }
 
 #[test]
 fn test_root_maps_to_slash() {
     let rs = routes(&draw(r#"  root to: "home#index""#));
     assert_eq!(pairs(&rs), vec!["GET /"]);
-    assert_eq!(rs[0].handler.as_deref(), Some("home#index"));
+    assert_eq!(rs[0].handler_name(), Some("home#index"));
 }
 
 #[test]
@@ -220,7 +220,7 @@ fn test_deeply_nested_namespaces_accumulate_every_segment() {
         "  namespace :api do\n    namespace :v1 do\n      namespace :admin do\n        resources :posts, only: [:show]\n      end\n    end\n  end",
     ));
     assert_eq!(pairs(&rs), vec!["GET /api/v1/admin/posts/:id"]);
-    assert_eq!(rs[0].handler.as_deref(), Some("api/v1/admin/posts#show"));
+    assert_eq!(rs[0].handler_name(), Some("api/v1/admin/posts#show"));
 }
 
 #[test]
@@ -276,7 +276,7 @@ fn test_path_option_renames_url_segment_but_not_controller() {
         r#"  resources :api_keys, path: "api", only: [:index]"#,
     ));
     assert_eq!(pairs(&rs), vec!["GET /api"]);
-    assert_eq!(rs[0].handler.as_deref(), Some("api_keys#index"));
+    assert_eq!(rs[0].handler_name(), Some("api_keys#index"));
 }
 
 #[test]
@@ -285,7 +285,7 @@ fn test_module_option_moves_controller_but_not_path() {
         "  resources :awards, only: [:index], module: :achievements",
     ));
     assert_eq!(pairs(&rs), vec!["GET /awards"]);
-    assert_eq!(rs[0].handler.as_deref(), Some("achievements/awards#index"));
+    assert_eq!(rs[0].handler_name(), Some("achievements/awards#index"));
 }
 
 #[test]
@@ -331,7 +331,7 @@ fn test_hashrocket_verb_names_path_and_handler() {
         r#"  get "up" => "rails/health#show", as: :rails_health_check"#,
     ));
     assert_eq!(pairs(&rs), vec!["GET /up"]);
-    assert_eq!(rs[0].handler.as_deref(), Some("rails/health#show"));
+    assert_eq!(rs[0].handler_name(), Some("rails/health#show"));
 }
 
 #[test]
@@ -478,7 +478,7 @@ fn test_scope_module_symbol_prefixes_the_controller() {
     let rs = routes(&draw(
         "  scope module: :api do\n    resources :posts, only: [:index]\n  end",
     ));
-    assert_eq!(rs[0].handler.as_deref(), Some("api/posts#index"));
+    assert_eq!(rs[0].handler_name(), Some("api/posts#index"));
 }
 
 #[test]
@@ -493,7 +493,7 @@ fn test_namespace_path_option_renames_the_segment_but_not_the_module() {
         "  namespace :admin, path: \"adm\" do\n    resources :posts, only: [:index]\n  end",
     ));
     assert_eq!(pairs(&rs), vec!["GET /adm/posts"]);
-    assert_eq!(rs[0].handler.as_deref(), Some("admin/posts#index"));
+    assert_eq!(rs[0].handler_name(), Some("admin/posts#index"));
 }
 
 #[test]

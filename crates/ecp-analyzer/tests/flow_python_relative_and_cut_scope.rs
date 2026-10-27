@@ -85,6 +85,67 @@ fn test_python_dotted_relative_import_keeps_both_level_and_path() {
     assert!(!reaches(&report, "pkg/a/sub/lib/util.py"), "{report:#?}");
 }
 
+/// `importer` calls `f(101)` after `from <module> import f`; `files` are the
+/// other files of the repo.
+fn call_from(importer: &str, module: &str, others: Vec<SourceFile>) -> FlowReport {
+    let mut files = vec![file(
+        importer,
+        &format!("from {module} import f\nresult = f(101)\n"),
+    )];
+    files.extend(others);
+    forward(&files, importer, 2, 12)
+}
+
+#[test]
+fn test_flow_python_double_dot_import_binds_parent_package() {
+    let report = call_from(
+        "pkg/a/sub/b.py",
+        "..",
+        vec![
+            file("pkg/a/__init__.py", IDENTITY),
+            file("pkg/a/sub/__init__.py", OTHER),
+        ],
+    );
+    assert!(reaches(&report, "pkg/a/__init__.py"), "{report:#?}");
+    assert!(!reaches(&report, "pkg/a/sub/__init__.py"), "{report:#?}");
+}
+
+#[test]
+fn test_flow_python_single_dot_bare_import_binds_own_package() {
+    let report = call_from(
+        "pkg/a/sub/b.py",
+        ".",
+        vec![
+            file("pkg/a/sub/__init__.py", IDENTITY),
+            file("pkg/a/__init__.py", OTHER),
+        ],
+    );
+    assert!(reaches(&report, "pkg/a/sub/__init__.py"), "{report:#?}");
+    assert!(!reaches(&report, "pkg/a/__init__.py"), "{report:#?}");
+}
+
+#[test]
+fn test_flow_python_level_above_repo_root_binds_nothing() {
+    // `pkg/b.py` has one directory: `...` climbs past the repo root, so the
+    // top-level `util.py` is not its target.
+    let report = call_from("pkg/b.py", "...util", vec![file("util.py", OTHER)]);
+    assert!(!reaches(&report, "util.py"), "{report:#?}");
+    let report = call_from("b.py", "..util", vec![file("util.py", OTHER)]);
+    assert!(!reaches(&report, "util.py"), "{report:#?}");
+}
+
+#[test]
+fn test_flow_python_top_level_file_single_dot_binds_sibling() {
+    let report = call_from("b.py", ".util", vec![file("util.py", IDENTITY)]);
+    assert!(reaches(&report, "util.py"), "{report:#?}");
+}
+
+#[test]
+fn test_flow_python_top_level_file_bare_dot_binds_root_package() {
+    let report = call_from("b.py", ".", vec![file("__init__.py", IDENTITY)]);
+    assert!(reaches(&report, "__init__.py"), "{report:#?}");
+}
+
 fn deep_cut_source() -> String {
     format!("let deep = {}0{};\n", "(".repeat(400), ")".repeat(400))
 }

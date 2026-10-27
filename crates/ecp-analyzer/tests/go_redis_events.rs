@@ -54,9 +54,9 @@ func publishOrder(client *redis.Client, ctx context.Context, data string) {
     assert_eq!(result[0].direction, PubSub::Publish);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "orders"
     );
 }
@@ -84,9 +84,9 @@ func listenPayments(client *redis.Client, ctx context.Context) {
     assert_eq!(result[0].direction, PubSub::Subscribe);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "payments"
     );
 }
@@ -115,9 +115,9 @@ func listenPattern(client *redis.Client, ctx context.Context) {
     // canonicalize: true converts "orders.*" → "orders/*"
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "orders/*"
     );
 }
@@ -144,9 +144,9 @@ func listenEvents(psc redis.PubSubConn) {
     assert_eq!(result[0].direction, PubSub::Subscribe);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "events"
     );
 }

@@ -2,7 +2,7 @@
 
 use ecp_core::peer::concern::{classify, ConcernResult, ImpactCache};
 use ecp_core::peer::inbox::{append_entry, ConcernKindSer, InboxEntry};
-use ecp_core::session::overlay::{DirtyEntry, SymbolRef};
+use ecp_core::session::overlay::{DirtyEventEntry, SymbolRef};
 use std::io;
 use std::path::Path;
 
@@ -14,7 +14,7 @@ pub fn dispatch_peer_dirty_event(
     peer_name: Option<&str>,
     ts: &str,
     peer_file: &str,
-    peer_entry: &DirtyEntry,
+    peer_entry: &DirtyEventEntry,
     my_dirty_files: &[String],
     my_dirty_symbols: &[SymbolRef],
     impact_cache: &ImpactCache,
@@ -34,6 +34,14 @@ pub fn dispatch_peer_dirty_event(
             reason,
         } => (kind, file, symbol, reason),
         ConcernResult::Ignore => return Ok(()),
+    };
+    // A tombstone has no symbols to name; the concern is the deletion itself.
+    let reason = if peer_entry.is_tombstone() {
+        format!(
+            "Peer {peer_session} deleted {file}, which is also in your overlay. Review the file."
+        )
+    } else {
+        reason
     };
     let entry = InboxEntry::DirtyEvent {
         ts: ts.to_string(),

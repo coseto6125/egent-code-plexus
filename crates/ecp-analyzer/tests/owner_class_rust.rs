@@ -2,7 +2,7 @@ use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_analyzer::rust::parser::RustProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::LocalGraph;
-use ecp_core::graph::{RelType, ZeroCopyGraph};
+use ecp_core::graph::{ArchivedZeroCopyGraph, RelType, ZeroCopyGraph};
 use std::path::Path;
 
 fn parse(source: &str) -> LocalGraph {
@@ -20,6 +20,21 @@ fn graph(source: &str) -> ZeroCopyGraph {
     let mut builder = GraphBuilder::new();
     builder.add_graph(parse(source));
     builder.build()
+}
+
+/// The display owner of node `idx`, as `inspect` prints it
+/// (`ArchivedZeroCopyGraph::display_owner`), and its lexical parent: a Rust
+/// nested fn stores no owner (R6) and prints its parent's path.
+fn display_of(graph: &ZeroCopyGraph, idx: u32) -> (Option<String>, Option<u32>) {
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(graph).expect("archive graph");
+    let archived =
+        rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).expect("access graph");
+    (
+        archived
+            .display_owner(idx)
+            .map(std::borrow::Cow::into_owned),
+        archived.lexical_parent(idx),
+    )
 }
 
 fn owner_of(g: &LocalGraph, name: &str) -> Option<String> {
@@ -113,6 +128,10 @@ impl B {
 }
 "#;
 
+/// Stands for: two `new` methods each nest a `helper`; the two keep distinct
+/// uids, each prints its own method as display owner (`A::new`, `B::new`)
+/// with no stored owner (R6, I1), and `B::new` calls its own `helper`.
+/// Before R6 the stored owner was `A::new` / `B::new`.
 #[test]
 fn test_nested_rust_functions_under_same_named_methods_keep_distinct_uids_and_calls() {
     let local = parse(RUST_NESTED_HELPER_UIDS);
@@ -124,14 +143,14 @@ fn test_nested_rust_functions_under_same_named_methods_keep_distinct_uids_and_ca
         .collect();
     assert_eq!(helper_hashes.len(), 2, "{local:#?}");
     assert_ne!(helper_hashes[0], helper_hashes[1], "{local:#?}");
-    let helper_owners: Vec<_> = local
-        .nodes
-        .iter()
-        .filter(|node| node.name == "helper")
-        .filter_map(|node| node.owner_class.as_deref())
-        .collect();
-    assert!(helper_owners.contains(&"A::new"), "{local:#?}");
-    assert!(helper_owners.contains(&"B::new"), "{local:#?}");
+    assert!(
+        local
+            .nodes
+            .iter()
+            .filter(|node| node.name == "helper")
+            .all(|node| node.owner_class.is_none()),
+        "a scoped helper stores no owner: {local:#?}"
+    );
 
     let graph = graph(RUST_NESTED_HELPER_UIDS);
     let pool = graph.string_pool.as_slice();
@@ -143,6 +162,16 @@ fn test_nested_rust_functions_under_same_named_methods_keep_distinct_uids_and_ca
         .collect();
     assert_eq!(helpers.len(), 2, "{graph:#?}");
     assert_ne!(helpers[0].1.uid, helpers[1].1.uid, "{graph:#?}");
+    let mut shown: Vec<Option<String>> = helpers
+        .iter()
+        .map(|&(idx, _)| display_of(&graph, idx as u32).0)
+        .collect();
+    shown.sort();
+    assert_eq!(
+        shown,
+        [Some("A::new".to_string()), Some("B::new".to_string())],
+        "{graph:#?}"
+    );
 
     let b_new = graph
         .nodes
@@ -439,6 +468,10 @@ fn test_resolve_call_rust_local_impl_binds_own_nested_helper() {
     assert_eq!(actual, expected);
 }
 
+/// Stands for: in `impl T for &A` (and `&mut A`) the method's own nested
+/// `helper` is scoped under it (a lexical-parent row, display owner `A::go`,
+/// no stored owner) and its bare call binds that `helper`, not the
+/// file-level one. Before R6 the nested `helper` stored the owner `T::A::go`.
 #[test]
 fn test_resolve_call_rust_reference_impl_binds_own_nested_helper() {
     for self_type in ["&A", "&mut A"] {
@@ -452,10 +485,20 @@ fn test_resolve_call_rust_reference_impl_binds_own_nested_helper() {
             .nodes
             .iter()
             .enumerate()
-            .find(|(_, node)| {
-                node.name.resolve(pool) == "helper" && !node.owner_class.resolve(pool).is_empty()
+            .find(|&(idx, node)| {
+                node.name.resolve(pool) == "helper" && display_of(&graph, idx as u32).1.is_some()
             })
-            .expect("nested helper retains its lexical owner");
+            .expect("the nested helper has a lexical parent");
+        assert_eq!(
+            nested.owner_class.resolve(pool),
+            "",
+            "self type: {self_type}"
+        );
+        assert_eq!(
+            display_of(&graph, nested_id as u32).0.as_deref(),
+            Some("A::go"),
+            "self type: {self_type}"
+        );
         let targets: Vec<_> = graph
             .edges
             .iter()
@@ -592,6 +635,10 @@ fn outer(xs: &[i32]) {
     );
 }
 
+/// Stands for: a fn nested in a method of an `impl` inside a module prints
+/// the method's owner then the method (`A::new`) as its display owner, with
+/// no stored owner (R6, I1), and the method calls it. Before R6 the parser
+/// stored `A::new` as the owner.
 #[test]
 fn test_nested_rust_function_in_module_impl_matches_method_owner_path() {
     let source = r#"
@@ -612,7 +659,7 @@ mod services {
         .iter()
         .find(|node| node.name == "helper")
         .expect("helper raw node");
-    assert_eq!(helper.owner_class.as_deref(), Some("A::new"), "{local:#?}");
+    assert_eq!(helper.owner_class, None, "{local:#?}");
 
     let graph = graph(source);
     let pool = graph.string_pool.as_slice();
@@ -630,6 +677,10 @@ mod services {
         .find(|(_, node)| node.name.resolve(pool) == "helper")
         .map(|(idx, _)| idx as u32)
         .expect("A::new::helper node");
+    assert_eq!(
+        display_of(&graph, helper),
+        (Some("A::new".to_string()), Some(new))
+    );
     assert!(
         graph
             .edges

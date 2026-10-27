@@ -50,9 +50,9 @@ public class OrderPublisher {
     assert_eq!(result[0].direction, PubSub::Publish);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "orders"
     );
 }
@@ -80,9 +80,9 @@ public class PaymentPublisher {
     assert_eq!(result[0].direction, PubSub::Publish);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "payments"
     );
 }
@@ -113,9 +113,9 @@ public class EventSubscriber {
     assert_eq!(result[0].direction, PubSub::Subscribe);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "events"
     );
 }
@@ -147,9 +147,9 @@ public class PatternSubscriber {
     // canonicalize: true converts "orders.*" → "orders/*"
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "orders/*"
     );
 }
@@ -180,9 +180,9 @@ public class ReactiveSubscriber {
     assert_eq!(result[0].direction, PubSub::Subscribe);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "events/*"
     );
 }

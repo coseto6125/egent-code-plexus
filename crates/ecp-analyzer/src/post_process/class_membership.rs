@@ -1,24 +1,20 @@
 //! `HasMethod` / `HasProperty` edge emission — Class membership derivation.
 //!
-//! Two-pass strategy (see spec `docs/superpowers/specs/2026-05-16-class-membership-postprocess.md`):
-//!
-//! - **Pass 1** — span containment, covers 30 languages whose class body
-//!   syntactically encloses its methods/properties (TS / Ruby / Java / PHP /
-//!   Dart / Swift / C++ / C# / Python / etc.).
-//! - **Pass 2** — parser-direct `owner_class` bridge. All parsers (since T1-1)
-//!   stamp each method's owning type directly into `RawNode.owner_class`. This
-//!   pass reads that field and emits the matching `HasMethod` edge.
-//!
-//! Emission convention is **B.1** (5-agent design review): a single edge
-//! type `HasMethod` regardless of target kind (`Method` or `Function`). This
-//! lets the cypher query `MATCH (c:Class)-[:HasMethod]->(m) RETURN m` work
-//! cross-language without callers having to learn per-language target-kind
-//! routing rules.
+//! The derivation itself (the span pass, the parser-direct `owner_class`
+//! pass, emission convention B.1) lives in
+//! [`ecp_core::analyzer::membership`], shared with the overlay's per-file
+//! replay. This pass answers its name lookups from the [`SymbolTable`] and
+//! maps each file's edges into the graph.
 
-use crate::framework_helpers::{span_area, span_contains, Span};
-use crate::resolution::index::SymbolTable;
+use crate::resolution::index::{Language, SymbolTable};
+use ecp_core::analyzer::lexical::{file_identities, file_uids, later_is_arity_twin, raw_decl};
+use ecp_core::analyzer::membership::{
+    self, MemberLookup, MemberRow, CLASS_MEMBERSHIP_IMPL_REASON, CLASS_MEMBERSHIP_REASON,
+};
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
-use ecp_core::graph::{Edge, NodeKind, RelType};
+use ecp_core::contracts::identity::UidSlot;
+use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
+use ecp_core::graph::{Edge, NodeKind};
 use ecp_core::pool::StringPool;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -34,22 +30,28 @@ use std::borrow::Cow;
 /// `symbol_skip_set` — T7-6 incremental skip data. When `Some`, files whose
 /// ALL symbols are in the skip set bypass both pass-1 span and pass-2 impl
 /// emission. `None` = full reanalyze for all files (default, full-build path).
+///
+/// `raw_map` is Pass 1's map over `local_graphs`, in the same order: a C#
+/// arity twin (`Foo1<T>`, `Foo1<T>.foo`) is in no name table, so its edge
+/// binds the node of its own raw slot.
 pub fn emit_edges(
     local_graphs: &[LocalGraph],
+    raw_map: &RawIndexMap,
     symbol_table: &SymbolTable,
     string_pool: &mut StringPool,
     edges_out: &mut Vec<Edge>,
     symbol_skip_set: Option<&FxHashMap<String, FxHashSet<u64>>>,
 ) -> usize {
-    let reason = string_pool.add("post_process:class_membership");
-    let reason_impl = string_pool.add("post_process:class_membership:rust_impl");
+    let reason = string_pool.add(CLASS_MEMBERSHIP_REASON);
+    let reason_impl = string_pool.add(CLASS_MEMBERSHIP_IMPL_REASON);
 
     // Per-file work is independent: writes go to a thread-local edge buffer
     // and only `symbol_table` (read-only) is shared. Same parallel pattern as
     // post_process::imports_edges.
-    let chunk_results: Vec<(usize, Vec<Edge>)> = local_graphs
+    let chunk_results: Vec<Vec<Edge>> = local_graphs
         .par_iter()
-        .map(|local_graph| {
+        .enumerate()
+        .map(|(file_ord, local_graph)| {
             let raws = &local_graph.nodes;
 
             // Forward-slash normalize once. Linux/macOS paths have no `\\`
@@ -62,295 +64,153 @@ pub fn emit_edges(
             };
             let path_str: &str = &path_str_cow;
 
-            // T7-6: skip class_membership for files whose every symbol is unchanged.
-            if let Some(skip_map) = symbol_skip_set {
-                if let Some(skip_uids) = skip_map.get(path_str) {
-                    let all_unchanged = raws.iter().all(|n| {
-                        let uid = ecp_core::uid::compute(
-                            n.kind,
-                            path_str,
-                            n.owner_class.as_deref(),
-                            &n.name,
-                        );
-                        skip_uids.contains(&uid)
-                    });
-                    if all_unchanged {
-                        return (0, Vec::new());
-                    }
+            // T7-6: skip class_membership for files whose every symbol is
+            // unchanged, by Pass 1's uids (overloads numbered).
+            if let Some(skip_uids) = symbol_skip_set.and_then(|m| m.get(path_str)) {
+                if file_uids(path_str, raws, raw_decl)
+                    .iter()
+                    .all(|uid| skip_uids.contains(uid))
+                {
+                    return Vec::new();
                 }
             }
 
-            // Pre-pass: collect Class-like nodes + group by name. Both passes hot-loop
-            // over this O(N) once-per-file index instead of re-scanning `raws`
-            // for kind=Class on every member lookup. Typical K = #classes/file
-            // is 1-10, so this drops both passes from O(N²) to O(N·K) and lets
-            // class-free files short-circuit cleanly.
-            // Includes Struct/Trait/Interface so Rust `struct Foo` + `impl Foo`
-            // bridge correctly now that structs no longer emit as Class.
-            // An enum's methods and cases have separate semantics, but a
-            // `Const` inside it is a type member just like a class constant.
-            // Retain the kind so only constants use enum owners.
-            let mut owners: Vec<(&str, NodeKind, Span)> = Vec::new();
-            let mut classes_by_name: FxHashMap<&str, Vec<Span>> = FxHashMap::default();
-            for n in raws {
-                if matches!(
-                    n.kind,
-                    NodeKind::Class | NodeKind::Struct | NodeKind::Trait | NodeKind::Interface
-                ) {
-                    owners.push((n.name.as_str(), n.kind, n.span));
-                    classes_by_name
-                        .entry(n.name.as_str())
-                        .or_default()
-                        .push(n.span);
-                } else if n.kind == NodeKind::Enum {
-                    owners.push((n.name.as_str(), n.kind, n.span));
-                }
-            }
-            if owners.is_empty() {
-                return (0, Vec::new());
-            }
-
-            let later = later_overload_ids(raws, path_str, symbol_table);
+            let file = FileOrd(file_ord as u32);
             let mut local_edges: Vec<Edge> = Vec::new();
-            let mut local_emitted = 0usize;
-            local_emitted += emit_pass1_span(
+            membership::class_membership(
                 raws,
-                &owners,
-                path_str,
-                symbol_table,
-                &later,
-                reason,
-                &mut local_edges,
+                member_row,
+                || IndexLookup {
+                    symbol_table,
+                    path: path_str,
+                    raw_map,
+                    file,
+                    twins: ArityTwins::of_file(raws, path_str, symbol_table, raw_map, file),
+                },
+                |m| {
+                    local_edges.push(Edge {
+                        source: m.source,
+                        target: m.target,
+                        rel_type: m.rel_type,
+                        confidence: 1.0,
+                        reason: match m.reason {
+                            CLASS_MEMBERSHIP_REASON => reason,
+                            _ => reason_impl,
+                        },
+                    })
+                },
             );
-            local_emitted += emit_pass2_rust_impl(
-                raws,
-                &classes_by_name,
-                path_str,
-                symbol_table,
-                &later,
-                reason_impl,
-                &mut local_edges,
-            );
-            (local_emitted, local_edges)
+            local_edges
         })
         .collect();
 
     let mut emitted = 0usize;
-    for (count, mut local_edges) in chunk_results {
-        emitted += count;
+    for mut local_edges in chunk_results {
+        emitted += local_edges.len();
         edges_out.append(&mut local_edges);
     }
     emitted
 }
 
-/// Raw index → node id of each later overload in the file
-/// ([`ecp_core::uid::keeps_overloads`]). A name lookup returns the first
-/// declaration, so without this map every overload's edge would land on it.
-fn later_overload_ids(
-    raws: &[RawNode],
-    path_str: &str,
-    symbol_table: &SymbolTable,
-) -> FxHashMap<usize, u32> {
-    let mut seen: FxHashMap<(u8, Option<&str>, &str), usize> = FxHashMap::default();
-    let mut ids = FxHashMap::default();
-    for (i, raw) in raws.iter().enumerate() {
-        if !ecp_core::uid::keeps_overloads(raw.kind) {
-            continue;
-        }
-        let owner = raw.owner_class.as_deref();
-        let ordinal = seen
-            .entry((raw.kind as u8, owner, raw.name.as_str()))
-            .or_insert(0);
-        if *ordinal > 0 {
-            if let Some(&id) = symbol_table
-                .first_declaration(path_str, &raw.name, raw.kind, owner)
-                .and_then(|first| symbol_table.later_overloads(first).get(*ordinal - 1))
-            {
-                ids.insert(i, id);
-            }
-        }
-        *ordinal += 1;
+/// A raw node as membership reads it. Only a type's generic arity is read,
+/// so only a type parses its decorators for it.
+fn member_row(n: &RawNode) -> MemberRow<'_> {
+    let is_type = matches!(
+        n.kind,
+        NodeKind::Class
+            | NodeKind::Struct
+            | NodeKind::Trait
+            | NodeKind::Interface
+            | NodeKind::Annotation
+    );
+    MemberRow {
+        kind: n.kind,
+        owner: n.owner_class.as_deref(),
+        name: &n.name,
+        span: n.span,
+        arity: if is_type { n.generic_arity() } else { 0 },
     }
-    ids
 }
 
-/// The node of `member` (raw index `i`) for an edge from `class_idx`, or
-/// `None` to emit none: its own later overload, else the declaration its
-/// kind and owner match, else the file's first declaration of the name.
-/// Only that last lookup can return the class itself, for a member named
-/// like it, which would be a self-loop.
-fn member_node(
-    i: usize,
-    member: &RawNode,
-    path_str: &str,
-    symbol_table: &SymbolTable,
-    later: &FxHashMap<usize, u32>,
-    class_idx: u32,
-) -> Option<u32> {
-    let id = later
-        .get(&i)
-        .copied()
-        .or_else(|| {
-            symbol_table.first_declaration(
-                path_str,
-                &member.name,
-                member.kind,
-                member.owner_class.as_deref(),
-            )
-        })
-        .or_else(|| symbol_table.lookup_in_file(path_str, &member.name))?;
-    (id != class_idx).then_some(id)
+/// The index's answers to membership's lookups over one file's path.
+struct IndexLookup<'a> {
+    symbol_table: &'a SymbolTable,
+    path: &'a str,
+    raw_map: &'a RawIndexMap,
+    file: FileOrd,
+    twins: ArityTwins,
 }
 
-/// Pass 1 — cross-language span containment.
-///
-/// For each Class node `c` in the file, find the innermost-enclosing Class for
-/// every Function/Method/Property in the same file. If that innermost Class is
-/// `c`, emit the corresponding `HasMethod` (Function|Method) or `HasProperty`
-/// (Property) edge from `c` to the member.
-fn emit_pass1_span(
-    raws: &[RawNode],
-    owners: &[(&str, NodeKind, Span)],
-    path_str: &str,
-    symbol_table: &SymbolTable,
-    later: &FxHashMap<usize, u32>,
-    reason: ecp_core::pool::StrRef,
-    edges_out: &mut Vec<Edge>,
-) -> usize {
-    let mut emitted = 0usize;
+impl MemberLookup for IndexLookup<'_> {
+    fn first_declaration(&self, name: &str, kind: NodeKind, owner: Option<&str>) -> Option<u32> {
+        self.symbol_table
+            .first_declaration(self.path, name, kind, owner)
+    }
 
-    for (i, member) in raws.iter().enumerate() {
-        let rel_type = match member.kind {
-            NodeKind::Function | NodeKind::Method | NodeKind::Constructor => RelType::HasMethod,
-            NodeKind::Property => RelType::HasProperty,
-            // A class constant (PHP `const STATUS`) carries its class as
-            // owner, so `scope_defines` gives it no File edge.
-            NodeKind::Const if member.owner_class.is_some() => RelType::HasProperty,
-            _ => continue,
-        };
+    fn lookup_in_file(&self, name: &str) -> Option<u32> {
+        self.symbol_table.lookup_in_file(self.path, name)
+    }
 
-        // Innermost enclosing class via smallest-area span. Scans the
-        // pre-collected classes slice (K entries) instead of all raws.
-        let Some((class_name, _, _)) = owners
-            .iter()
-            .filter(|(_, kind, span)| {
-                (member.kind == NodeKind::Const || *kind != NodeKind::Enum)
-                    && span_contains(*span, member.span)
+    fn later_overloads(&self, first: u32) -> &[u32] {
+        self.symbol_table.later_overloads(first)
+    }
+
+    fn with_arity(&self, id: u32, arity: u32) -> Option<u32> {
+        self.symbol_table.with_arity(id, arity)
+    }
+
+    fn is_scoped(&self, raw: usize) -> bool {
+        self.raw_map
+            .node(self.file, RawIdx(raw as u32))
+            .is_some_and(|id| self.symbol_table.is_lexically_scoped(id))
+    }
+
+    fn twin(&self, raw: usize) -> Option<u32> {
+        self.twins.node(raw)
+    }
+}
+
+/// The node of each C# arity twin of one file (`Conv<T>` after `Conv`,
+/// `Outer<T>.Inner` after `Outer.Inner`, `Foo1<T>.foo` after `Foo1.foo`),
+/// by raw index ([`later_is_arity_twin`]). A twin is in no name table, and
+/// the name lookups return its first; the raw slot is the twin itself.
+/// Empty for every other file.
+struct ArityTwins(FxHashMap<usize, u32>);
+
+impl ArityTwins {
+    fn of_file(
+        raws: &[RawNode],
+        path_str: &str,
+        symbol_table: &SymbolTable,
+        raw_map: &RawIndexMap,
+        file: FileOrd,
+    ) -> Self {
+        let language = Language::from_normalized_path(path_str);
+        if !symbol_table.has_arity_twins() || language != Language::CSharp {
+            return Self(FxHashMap::default());
+        }
+        let twins = file_identities(path_str, raws, raw_decl)
+            .into_iter()
+            .enumerate()
+            .filter(|&(i, identity)| {
+                matches!(identity.slot, UidSlot::Later { .. })
+                    && later_is_arity_twin(language, raws[i].kind)
             })
-            .min_by_key(|(_, _, span)| span_area(*span))
-            .copied()
-        else {
-            continue;
-        };
-
-        // Namespace-qualified type identities are not represented by the
-        // short-name lookup below. Do not bind an ambiguous type constant.
-        if member.kind == NodeKind::Const
-            && (member.owner_class.as_deref() != Some(class_name)
-                || owners
-                    .iter()
-                    .filter(|(name, _, _)| *name == class_name)
-                    .count()
-                    != 1)
-        {
-            continue;
-        }
-
-        let Some(class_idx) = symbol_table.lookup_in_file(path_str, class_name) else {
-            continue;
-        };
-        let Some(member_idx) = member_node(i, member, path_str, symbol_table, later, class_idx)
-        else {
-            continue;
-        };
-
-        edges_out.push(Edge {
-            source: class_idx,
-            target: member_idx,
-            rel_type,
-            confidence: 1.0,
-            reason,
-        });
-        emitted += 1;
+            .filter_map(|(i, _)| Some((i, raw_map.node(file, RawIdx(i as u32))?)))
+            .collect();
+        Self(twins)
     }
 
-    emitted
-}
-
-/// Pass 2 — parser-direct owner_class bridge.
-///
-/// Reads `RawNode.owner_class` set directly by each language parser
-/// (Rust uses impl_map; Go uses recv_map; all others use span containment
-/// within parse_file). Emits `HasMethod` / `HasProperty` for members whose
-/// owning type's span does NOT contain the member's span — i.e., cases where
-/// Pass 1 span containment would miss (Rust impl blocks, Go receiver methods).
-///
-/// Skip emission when Pass 1 already covered the link — checked by
-/// span containment: if the member's span lies inside any Class span in
-/// the same file, Pass 1 already emitted.
-fn emit_pass2_rust_impl(
-    raws: &[RawNode],
-    classes_by_name: &FxHashMap<&str, Vec<Span>>,
-    path_str: &str,
-    symbol_table: &SymbolTable,
-    later: &FxHashMap<usize, u32>,
-    reason: ecp_core::pool::StrRef,
-    edges_out: &mut Vec<Edge>,
-) -> usize {
-    let mut emitted = 0usize;
-
-    for (i, member) in raws.iter().enumerate() {
-        if !matches!(
-            member.kind,
-            NodeKind::Function | NodeKind::Method | NodeKind::Constructor | NodeKind::Property
-        ) {
-            continue;
-        }
-
-        let Some(ref class_name) = member.owner_class else {
-            continue;
-        };
-
-        // Skip if Pass 1 already emitted via span containment.
-        let already_via_span = classes_by_name
-            .get(class_name.as_str())
-            .map(|spans| spans.iter().any(|s| span_contains(*s, member.span)))
-            .unwrap_or(false);
-        if already_via_span {
-            continue;
-        }
-
-        let Some(class_idx) = symbol_table.lookup_in_file(path_str, class_name) else {
-            continue;
-        };
-        let Some(member_idx) = member_node(i, member, path_str, symbol_table, later, class_idx)
-        else {
-            continue;
-        };
-
-        let rel_type = if matches!(member.kind, NodeKind::Property) {
-            RelType::HasProperty
-        } else {
-            RelType::HasMethod
-        };
-
-        edges_out.push(Edge {
-            source: class_idx,
-            target: member_idx,
-            rel_type,
-            confidence: 1.0,
-            reason,
-        });
-        emitted += 1;
+    fn node(&self, raw: usize) -> Option<u32> {
+        self.0.get(&raw).copied()
     }
-
-    emitted
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ecp_core::analyzer::types::LocalGraph;
+    use ecp_core::graph::RelType;
     use std::path::PathBuf;
 
     fn raw(name: &str, kind: NodeKind, span: (u32, u32, u32, u32)) -> RawNode {
@@ -406,8 +266,10 @@ mod tests {
 
     fn run(local_graphs: Vec<LocalGraph>) -> Vec<Edge> {
         let (symbol_table, mut string_pool, mut edges) = build_setup(local_graphs.clone());
+        let raw_map = RawIndexMap::new(0, local_graphs.iter().map(|lg| lg.nodes.len())).unwrap();
         emit_edges(
             &local_graphs,
+            &raw_map,
             &symbol_table,
             &mut string_pool,
             &mut edges,
@@ -424,6 +286,7 @@ mod tests {
             documents: Vec::new(),
             imports: Vec::new(),
             routes: Vec::new(),
+            route_receivers: None,
             framework_refs: Vec::new(),
             fanout_refs: Vec::new(),
             blind_spots: Vec::new(),
@@ -435,6 +298,7 @@ mod tests {
             call_metas: Vec::new(),
             raw_function_metas: vec![],
             export_aliases: None,
+            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
         }
     }
 

@@ -174,6 +174,7 @@ pub fn extract_fields(
                 owner_class: schema_name.as_str().into(),
                 framework,
                 span: spans.field(schema_name, field_name),
+                endpoint: None,
             });
         }
         schemas.push(schema_struct_node(

@@ -79,9 +79,9 @@ fn admin_sessions_list_shows_pure_reference_state() {
         agent_name: None,
     };
     ecp_core::session::SessionMeta::write_atomic(&sd.join("session_meta.json"), &sm).unwrap();
-    ecp_core::session::DirtyFiles::write_atomic(
-        &sd.join("dirty_files.json"),
-        &ecp_core::session::DirtyFiles::empty(),
+    ecp_core::session::DirtyEvents::write_atomic(
+        &ecp_core::session::layout::dirty_events_path(&sd),
+        &ecp_core::session::DirtyEvents::empty(ecp_core::contracts::routing::SizeCap::BUILT_IN),
     )
     .unwrap();
 

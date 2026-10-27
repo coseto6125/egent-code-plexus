@@ -4,8 +4,9 @@
 //! and restarts from the new base.
 
 use crate::git::safe_exec;
-use ecp_core::registry::atomic_write_json;
-use ecp_core::session::{DirtyFiles, SessionMeta};
+use ecp_core::registry::{atomic_write_json, FileLock};
+use ecp_core::session::layout;
+use ecp_core::session::{DirtyEvents, SessionMeta};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -38,12 +39,17 @@ pub fn promote_case_a(
     worktree: &Path,
     new_sha: &str,
 ) -> io::Result<PromoteStats> {
-    let manifest_path = session_dir.join("dirty_files.json");
-    let mut df = if manifest_path.exists() {
-        DirtyFiles::read(&manifest_path)?
-    } else {
-        DirtyFiles::empty()
-    };
+    // The writer commits bins and manifest under this lock; promotion rewrites
+    // the same manifest and deletes bins, so an unlocked run could drop an
+    // entry a writer just added or delete a bin it just published.
+    let _publish =
+        FileLock::acquire_exclusive(&super::overlay_writer::overlay_lock_path(session_dir))?;
+    let manifest_path = layout::dirty_events_path(session_dir);
+    // A manifest that does not parse is re-parsed whole by the freshness
+    // gate, so it promotes as empty. Failing here instead would fail every
+    // refresh and leave it in place.
+    let mut df = DirtyEvents::read(&manifest_path)
+        .unwrap_or_else(|_| DirtyEvents::empty(ecp_core::config::resolve_size_cap(worktree)));
 
     let entries_snapshot: Vec<(String, _)> = df
         .entries
@@ -54,21 +60,22 @@ pub fn promote_case_a(
     let mut dropped = 0usize;
     let mut kept = 0usize;
     for (rel_path, entry) in entries_snapshot {
-        let l2_hash = match git_cat_file_hash(worktree, new_sha, &rel_path) {
-            Ok(h) => h,
-            Err(_) => {
-                // File doesn't exist at new_sha (e.g. deleted in commit) —
-                // keep the L1 fragment so the session still sees a view.
-                kept += 1;
-                continue;
-            }
+        let at_new_sha = git_cat_file_hash(worktree, new_sha, &rel_path);
+        let absorbed = match (&at_new_sha, &entry.fragment_id) {
+            // A tombstone: the commit absorbed the deletion when the path is
+            // gone at new_sha too.
+            (Err(_), None) => true,
+            (Ok(_), None) => false,
+            // File doesn't exist at new_sha (e.g. deleted in commit) — keep
+            // the L1 fragment so the session still sees a view.
+            (Err(_), Some(_)) => false,
+            (Ok(l2_hash), Some(_)) => entry.content_hash.as_deref() == Some(l2_hash.as_str()),
         };
-        if entry.content_hash == l2_hash {
+        if absorbed {
             // Drop fragment + manifest entry.
-            let fragment_path = session_dir
-                .join("graph_overlay")
-                .join(format!("{}.bin", entry.fragment_id));
-            let _ = fs::remove_file(&fragment_path);
+            if let Some(id) = &entry.fragment_id {
+                let _ = fs::remove_file(layout::fragment_path(session_dir, id));
+            }
             df.entries.remove(&rel_path);
             dropped += 1;
         } else {
@@ -84,7 +91,7 @@ pub fn promote_case_a(
         sm.last_touched = chrono::Utc::now().to_rfc3339();
         atomic_write_json(&sm_path, &sm)?;
     }
-    atomic_write_json(&manifest_path, &df)?;
+    DirtyEvents::write_atomic(&manifest_path, &df)?;
 
     Ok(PromoteStats { dropped, kept })
 }
@@ -111,6 +118,9 @@ pub fn promote_case_b(session_dir: &Path, old_sha: &str, new_sha: &str) -> io::R
 
     fs::rename(session_dir, &stale)?;
     fs::create_dir(session_dir)?;
+    // `l1/` before the manifest, as `ensure_session_meta` does: a peer's
+    // recursive watch covers it before the first write lands there.
+    fs::create_dir(layout::l1_dir(session_dir))?;
 
     let now = chrono::Utc::now().to_rfc3339();
     let sm = SessionMeta {
@@ -126,8 +136,12 @@ pub fn promote_case_b(session_dir: &Path, old_sha: &str, new_sha: &str) -> io::R
         last_drained_offset: 0,
         agent_name: prev_agent_name,
     };
+    let size_cap = ecp_core::config::resolve_size_cap(Path::new(&sm.source_worktree));
     atomic_write_json(&session_dir.join("session_meta.json"), &sm)?;
-    atomic_write_json(&session_dir.join("dirty_files.json"), &DirtyFiles::empty())?;
+    DirtyEvents::write_atomic(
+        &layout::dirty_events_path(session_dir),
+        &DirtyEvents::empty(size_cap),
+    )?;
 
     // Background GC stale dir after 2s. The thread is detached — we don't
     // join it; if the process exits sooner, the .stale dir is left for the
@@ -163,4 +177,119 @@ fn git_cat_file_hash(worktree: &Path, sha: &str, rel_path: &str) -> io::Result<S
         return Err(io::Error::other(format!("git cat-file failed for {spec}")));
     }
     Ok(crate::repo_identity::xxh3_hex16(&out.stdout))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ecp_core::contracts::dirty_event::{PathChange, PathClass};
+    use ecp_core::session::DirtyEventEntry;
+
+    fn git(repo: &Path, args: &[&str]) -> String {
+        let out = safe_exec::git()
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    fn fragment(content: &[u8]) -> DirtyEventEntry {
+        let hash = crate::repo_identity::xxh3_hex16(content);
+        DirtyEventEntry {
+            change: PathChange::Modified,
+            class: PathClass::SOURCE,
+            mtime_ns: 1,
+            fragment_id: Some(hash.clone()),
+            content_hash: Some(hash),
+            parse_failed: false,
+            dirty_symbols: Vec::new(),
+            format: ecp_core::session::FRAGMENT_FORMAT_V7,
+        }
+    }
+
+    /// Case A reads `l1/dirty_events.json`: the entry the commit absorbed
+    /// goes with its bin, the uncommitted one stays, a tombstone of a
+    /// deletion the commit absorbed goes, and the legacy manifest an older
+    /// binary wrote is left as it was. Case B resets the new manifest.
+    #[test]
+    fn test_promotion_moves_new_namespace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["config", "user.email", "t@example.invalid"]);
+        git(&repo, &["config", "user.name", "t"]);
+        for name in ["a.py", "gone.py"] {
+            fs::write(repo.join(name), "v1\n").unwrap();
+        }
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "base"]);
+        let old_sha = git(&repo, &["rev-parse", "HEAD"]);
+
+        let session = tmp.path().join("sessions").join("sid");
+        fs::create_dir_all(&session).unwrap();
+        let meta = SessionMeta {
+            version: 1,
+            session_id: "sid".into(),
+            pid: None,
+            started_at: String::new(),
+            last_touched: String::new(),
+            base_sha: old_sha.clone(),
+            source_worktree: repo.to_string_lossy().into(),
+            overlay_version: 0,
+            watcher_pid: None,
+            last_drained_offset: 0,
+            agent_name: None,
+        };
+        SessionMeta::write_atomic(&session.join("session_meta.json"), &meta).unwrap();
+        let mut manifest = DirtyEvents::empty(ecp_core::config::resolve_size_cap(&repo));
+        let absorbed = fragment(b"v2\n");
+        let absorbed_bin =
+            layout::fragment_path(&session, absorbed.fragment_id.as_deref().unwrap());
+        fs::create_dir_all(absorbed_bin.parent().unwrap()).unwrap();
+        fs::write(&absorbed_bin, b"bin").unwrap();
+        manifest.entries.insert("a.py".into(), absorbed);
+        manifest
+            .entries
+            .insert("c.py".into(), fragment(b"uncommitted\n"));
+        manifest.entries.insert(
+            "gone.py".into(),
+            DirtyEventEntry::tombstone(PathClass::SOURCE),
+        );
+        DirtyEvents::write_atomic(&layout::dirty_events_path(&session), &manifest).unwrap();
+        let legacy = br#"{"version":1,"entries":{}}"#;
+        fs::write(layout::legacy_dirty_files_path(&session), legacy).unwrap();
+
+        fs::write(repo.join("a.py"), "v2\n").unwrap();
+        fs::remove_file(repo.join("gone.py")).unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "absorb"]);
+        let new_sha = git(&repo, &["rev-parse", "HEAD"]);
+        assert_eq!(promotion_case(&old_sha, &new_sha, &repo), PromotionCase::A);
+
+        let stats = promote_case_a(&session, &repo, &new_sha).unwrap();
+
+        let after = DirtyEvents::read(&layout::dirty_events_path(&session)).unwrap();
+        let keys: Vec<&str> = after.entries.keys().map(String::as_str).collect();
+        assert_eq!(keys, ["c.py"]);
+        assert_eq!((stats.dropped, stats.kept), (2, 1));
+        assert!(
+            !absorbed_bin.exists(),
+            "the absorbed entry's bin stays behind"
+        );
+        assert_eq!(
+            fs::read(layout::legacy_dirty_files_path(&session)).unwrap(),
+            legacy,
+            "promotion rewrote the legacy manifest"
+        );
+
+        promote_case_b(&session, &new_sha, "f".repeat(40).as_str()).unwrap();
+
+        let reset = DirtyEvents::read(&layout::dirty_events_path(&session)).unwrap();
+        assert!(reset.entries.is_empty());
+        assert!(reset.is_current(ecp_core::config::resolve_size_cap(&repo)));
+        assert!(!layout::legacy_dirty_files_path(&session).exists());
+    }
 }

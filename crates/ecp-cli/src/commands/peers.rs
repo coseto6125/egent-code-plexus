@@ -88,7 +88,7 @@ pub enum PeersCmd {
         #[arg(long, value_enum, default_value_t = StatusFormat::Text)]
         format: StatusFormat,
     },
-    /// Start, stop, or check the inotify-driven peer-dirty watcher daemon.
+    /// Start, stop, or check the peer-dirty watcher daemon.
     Watch(super::watch::WatchArgs),
     /// Rotate logs + cleanup
     Gc,
@@ -223,7 +223,7 @@ fn cmd_status(repo_root: &std::path::Path, format: StatusFormat) -> std::io::Res
 /// engine, and an honest omission beats an empty column (`peers plan` covers
 /// the proactive impact-level question).
 fn cmd_status_pairs(repo_root: &std::path::Path, format: StatusFormat) -> std::io::Result<()> {
-    use ecp_core::session::overlay::DirtyFiles;
+    use ecp_core::session::{layout, DirtyEvents};
     use std::collections::HashSet;
 
     // Empty exclude id matches no session dir → own session included.
@@ -231,12 +231,9 @@ fn cmd_status_pairs(repo_root: &std::path::Path, format: StatusFormat) -> std::i
     let dirty: Vec<HashSet<String>> = sessions
         .iter()
         .map(|s| {
-            DirtyFiles::read(
-                &repo_root
-                    .join("sessions")
-                    .join(&s.session_id)
-                    .join("dirty_files.json"),
-            )
+            DirtyEvents::read(&layout::dirty_events_path(
+                &repo_root.join("sessions").join(&s.session_id),
+            ))
             .map(|d| d.entries.into_keys().collect())
             .unwrap_or_default()
         })
@@ -330,19 +327,20 @@ fn cmd_name(repo_root: &std::path::Path, name: &str) -> std::io::Result<()> {
 }
 
 fn cmd_diff(repo_root: &std::path::Path, peer: &str, symbol: Option<&str>) -> std::io::Result<()> {
-    use ecp_core::session::overlay::DirtyFiles;
+    use ecp_core::session::{layout, DirtyEvents};
     let me = resolve_session_id(None);
     let peer = super::peers_msg::resolve_target_session(repo_root, &me, peer)?;
-    let path = repo_root
-        .join("sessions")
-        .join(&peer)
-        .join("dirty_files.json");
-    let peer_dirty = DirtyFiles::read(&path)?;
+    let path = layout::dirty_events_path(&repo_root.join("sessions").join(&peer));
+    let peer_dirty = DirtyEvents::read(&path)?;
     for (path_key, entry) in &peer_dirty.entries {
         if let Some(sym) = symbol {
             if !entry.dirty_symbols.iter().any(|s| s.name == sym) {
                 continue;
             }
+        }
+        if entry.is_tombstone() {
+            println!("--- {path_key} (deleted) ---");
+            continue;
         }
         println!("--- {path_key} ---");
         for s in &entry.dirty_symbols {

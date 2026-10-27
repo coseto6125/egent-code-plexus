@@ -51,6 +51,6 @@ persisted in the archived graph. Default format `text`.
 
 ## When NOT to use
 
-- A plain rename across one codebase → `ecp rename`.
+- A rename across one codebase → find the sites with `ecp impact <name>` (and `ecp find <name>`), then rename with LSP or edit them.
 - Callers or blast radius of a symbol → `ecp impact`.
 - One symbol's full context → `ecp inspect`.

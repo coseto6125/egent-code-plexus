@@ -150,7 +150,7 @@ fn cross_file_delegator_alias_is_visible_inside_originating_file() {
 fn cross_file_delegator_propagates_through_include_via_heritage_tier() {
     // Cross-file mixin resolution: from inside bar.rb, looking up an
     // unqualified `read` walks Bar's heritage (`["Foo"]`) through the
-    // resolver's Tier 2.75 (HeritageScoped) — `resolve_qualifier_file`
+    // resolver's Tier 2.75 (HeritageScoped) — `ladder::qualifier_file`
     // locates `lib/foo.rb`, then `lookup_in_file` finds the Method
     // RawNode the Ruby parser materialised for the `def_delegators`
     // entry. bar.rb's own RawImport set stays clean (it does not absorb

@@ -43,6 +43,15 @@ pub fn overload(first: u64, ordinal: u32) -> u64 {
     h.digest()
 }
 
+/// UID of the tombstone that holds the slot of a later declaration repeating
+/// `uid` in a kind that keeps no overloads: the bit-inverse, which never
+/// equals the survivor's uid. It is not unique: two or more duplicates of
+/// one `uid` share one tombstone uid. A tombstone is isolated by its empty
+/// name and its absence from the symbol table, not by its uid.
+pub fn tombstone(uid: u64) -> u64 {
+    !uid
+}
+
 /// One-shot xxh3-64 hash of raw bytes. Used for per-symbol content hashing
 /// (T7-2): `content_hash = xxh3_64_bytes(&source[start_byte..end_byte])`.
 ///

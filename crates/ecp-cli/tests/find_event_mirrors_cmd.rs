@@ -247,6 +247,43 @@ fn topic_glob_orders_star_matches() {
     assert_eq!(rows[0]["topic"].as_str().unwrap_or(""), "orders");
 }
 
+/// Redis publish and subscribe on "prod.orders": the source spelling keeps
+/// the environment prefix, the canonical pairing key drops it ("orders").
+const REDIS_PUBLISHER_PROD: &str = r#"
+import redis
+
+def publish_order(r, data):
+    r.publish("prod.orders", data)
+"#;
+
+const REDIS_SUBSCRIBER_PROD: &str = r#"
+import redis
+
+def consume_order(pubsub):
+    pubsub.subscribe("prod.orders")
+"#;
+
+/// Stands for: `--topic` matches the canonical pairing key as well as the
+/// source spelling, and the row still shows the source spelling. `orders`
+/// matches only through the canonical form of `prod.orders`; `prod.*`
+/// matches only through the source spelling; `payments` matches neither.
+#[test]
+fn test_find_event_mirrors_topic_filter_matches_canonical_and_source_spelling() {
+    let tmp = setup_two_files(REDIS_PUBLISHER_PROD, REDIS_SUBSCRIBER_PROD);
+
+    for pattern in ["orders", "prod.*"] {
+        let (json, _) = run_find_mirrors(tmp.path(), &["--topic", pattern]);
+        let rows = mirrors(&json);
+        assert_eq!(rows.len(), 1, "--topic {pattern:?}: {json}");
+        assert_eq!(
+            rows[0]["topic"], "prod.orders",
+            "--topic {pattern:?}: {json}"
+        );
+    }
+    let (json, _) = run_find_mirrors(tmp.path(), &["--topic", "payments"]);
+    assert!(mirrors(&json).is_empty(), "--topic payments: {json}");
+}
+
 /// --topic 'payments*' does NOT match "orders" topic → 0 rows.
 #[test]
 fn topic_glob_payments_star_no_match_on_orders_repo() {

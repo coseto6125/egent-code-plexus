@@ -57,9 +57,9 @@ public class OrderService {
     assert_eq!(result[0].direction, PubSub::Publish);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "orders"
     );
 }
@@ -89,9 +89,9 @@ public class PaymentService {
     assert_eq!(result[0].direction, PubSub::Publish);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "payments"
     );
 }
@@ -120,9 +120,9 @@ public class OrderListener {
     assert_eq!(result[0].direction, PubSub::Subscribe);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "orders"
     );
 }
@@ -189,7 +189,7 @@ public class MultiKafkaService {
     let result = run(src, &["org.apache.kafka", "org.springframework.kafka"]);
     let topics: Vec<&str> = result
         .iter()
-        .map(|r| r.topic_literal.as_deref().unwrap())
+        .map(|r| r.topic_key.as_deref().unwrap())
         .collect();
     assert!(topics.contains(&"events"), "apache kafka topic must appear");
     assert!(

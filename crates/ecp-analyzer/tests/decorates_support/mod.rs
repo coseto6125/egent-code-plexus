@@ -6,6 +6,7 @@ use ecp_analyzer::post_process::decorates_edges;
 use ecp_analyzer::resolution::index::SymbolTable;
 use ecp_analyzer::resolution::resolver::Resolver;
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
+use ecp_core::contracts::raw_records::RawIndexMap;
 use ecp_core::graph::{Edge, Node, NodeKind, RelType};
 use ecp_core::pool::StringPool;
 
@@ -40,7 +41,15 @@ pub fn run_decorates(local_graphs: &[LocalGraph]) -> (Vec<Edge>, Vec<Node>, Stri
     let initial_count = nodes.len();
 
     let mut edges: Vec<Edge> = Vec::new();
-    decorates_edges::emit_edges(local_graphs, &resolver, &mut sp, &mut nodes, &mut edges);
+    let raw_map = RawIndexMap::new(0, local_graphs.iter().map(|g| g.nodes.len())).unwrap();
+    decorates_edges::emit_edges(
+        local_graphs,
+        &raw_map,
+        &resolver,
+        &mut sp,
+        &mut nodes,
+        &mut edges,
+    );
 
     let decorates_only: Vec<Edge> = edges
         .into_iter()

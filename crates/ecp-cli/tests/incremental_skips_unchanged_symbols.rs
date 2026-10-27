@@ -60,6 +60,7 @@ fn lg(path: &str, nodes: Vec<RawNode>, imports: Vec<RawImport>) -> LocalGraph {
         documents: vec![],
         imports,
         routes: vec![],
+        route_receivers: None,
         framework_refs: vec![],
         fanout_refs: vec![],
         blind_spots: vec![],
@@ -71,6 +72,7 @@ fn lg(path: &str, nodes: Vec<RawNode>, imports: Vec<RawImport>) -> LocalGraph {
         call_metas: vec![],
         raw_function_metas: vec![],
         export_aliases: None,
+        parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
     }
 }
 
@@ -273,6 +275,7 @@ fn test_skip_guarded_when_schemafield_bucket_changes() {
         type_class: SchemaType::String,
         framework: FrameworkId::Pydantic,
         span: (2, 0, 2, 20),
+        endpoint: None,
     }]));
 
     // Old hash matches exactly — without guard (c) we'd skip.

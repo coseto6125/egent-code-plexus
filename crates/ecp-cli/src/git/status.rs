@@ -343,6 +343,9 @@ fn config_mentions(config: &[u8], keys: &[&str]) -> bool {
 fn probe(dir: &Path, env: &EnvOverrides, submodule: bool, args: &[&str]) -> io::Result<Child> {
     let mut cmd = safe_exec::git();
     with_env(&mut cmd, env);
+    // The config read must see what the status sees; see
+    // `safe_exec::filter_overrides`. No other probe reads the variable.
+    cmd.env_remove("GIT_CONFIG");
     if submodule {
         for key in SUBMODULE_CLEARED_ENV {
             cmd.env_remove(key);

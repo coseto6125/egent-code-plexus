@@ -8,9 +8,11 @@
 //! This module consolidates those helpers so each parser stays focused on its own
 //! grammar quirks, not span arithmetic.
 
+use ecp_core::analyzer::lexical::lexical_scope_kinds;
 use ecp_core::analyzer::types::{
     BindingKind, FrameworkId, RawExportAlias, RawFrameworkRef, RawImport, RawNode, RawTxScope,
 };
+use ecp_core::file_category::Language;
 use ecp_core::graph::NodeKind;
 
 pub use ecp_core::analyzer::types::{innermost_enclosing, span_contains, Span};
@@ -114,16 +116,7 @@ pub fn push_blind_spot(
     });
 }
 
-/// Area proxy for picking the smallest enclosing span: rows first, then the
-/// column distance. The column term is offset by 2^32 so a span starting past
-/// column 10 000 (minified source) still ranks below one that contains it.
-#[inline]
-pub fn span_area(s: Span) -> u64 {
-    let (r1, c1, r2, c2) = s;
-    let dr = r2.saturating_sub(r1) as u64;
-    let dc = (c2 as u64 + (1 << 32)) - c1 as u64;
-    (dr.min(u32::MAX as u64 >> 1) << 33) + dc
-}
+pub use ecp_core::analyzer::membership::span_area;
 
 /// True iff the raw source bytes at `node`'s start_byte begin with `prefix`.
 ///
@@ -267,7 +260,9 @@ pub fn stamp_owner_class_by_span(nodes: &mut [RawNode]) {
     // An enum owns the methods, constructors and fields its body declares
     // (Java, Kotlin, Dart, PHP, Swift), exactly as a class does; without it
     // they read as free functions, and a type nested in an enum took the
-    // enum's enclosing class as owner.
+    // enum's enclosing class as owner. An annotation type (C# attribute
+    // class, Java `@interface`, Kotlin `annotation class`) owns its members
+    // too; a use-site annotation (Dart `@override`) spans no member.
     let owner_spans: Vec<(String, Span)> = nodes
         .iter()
         .filter(|n| {
@@ -278,6 +273,7 @@ pub fn stamp_owner_class_by_span(nodes: &mut [RawNode]) {
                     | NodeKind::Trait
                     | NodeKind::Interface
                     | NodeKind::Enum
+                    | NodeKind::Annotation
                     | NodeKind::Namespace
                     | NodeKind::Module
             )
@@ -403,14 +399,18 @@ pub fn strip_python_string_quotes(raw: &str) -> Option<&str> {
 ///
 /// After `stamp_owner_class_by_span` has set `owner_class` for class members,
 /// some nodes remain with `owner_class = None` even though they are physically
-/// nested inside another function (e.g. `def wrapper()` inside a decorator
-/// outer function, `function list()` inside another JS function). Two such
-/// nodes with the same name but different outer functions share the uid
-/// `(kind, path, "", name)` → uid-collision BlindSpot.
+/// nested inside another function (a local `class Fake` in a test function,
+/// a variable). Two such nodes with the same name but different outer
+/// functions share the uid `(kind, path, "", name)` → uid-collision BlindSpot.
 ///
 /// This pass resolves that: for every node whose `owner_class` is still `None`
 /// AND whose span is wholly contained inside a `Function`/`Method` node's span,
 /// set `owner_class` to the **innermost** such enclosing function's name.
+///
+/// A kind `language` scopes lexically (`lexical_scope_kinds`: a nested
+/// `def` / `function`, a lambda or callback node) gets no owner here: its
+/// lexical parent places it and its uid hashes the parent's anchor
+/// (`ecp_core::analyzer::lexical::clear_scoped_owners`).
 ///
 /// Top-level (module-scope) definitions are untouched — they have no enclosing
 /// function, so their `owner_class` remains `None` (correct behaviour: module-
@@ -418,7 +418,8 @@ pub fn strip_python_string_quotes(raw: &str) -> Option<&str> {
 ///
 /// Complexity: O(N·F) where N = total nodes, F = function count per file.
 /// Both are small in practice (typical files: <100 nodes, <30 functions).
-pub fn stamp_owner_fn_by_span(nodes: &mut [RawNode]) {
+pub fn stamp_owner_fn_by_span(language: Language, nodes: &mut [RawNode]) {
+    let scoped = lexical_scope_kinds(language);
     // Snapshot (name, span) for all Function/Method nodes. We collect by value
     // so the subsequent mutable iteration over `nodes` doesn't borrow-conflict.
     let fn_spans: Vec<(String, Span)> = nodes
@@ -431,7 +432,7 @@ pub fn stamp_owner_fn_by_span(nodes: &mut [RawNode]) {
     }
     for node in nodes.iter_mut() {
         // Only stamp nodes that didn't receive an owner from the class pass.
-        if node.owner_class.is_some() {
+        if node.owner_class.is_some() || scoped.contains(&node.kind) {
             continue;
         }
         let span = node.span;
@@ -732,40 +733,6 @@ fn js_ts_declared_names<'s>(
     }
 }
 
-/// Preserve the full lexical function path for JS/TS closure identities.
-pub fn stamp_js_function_owners(nodes: &mut [RawNode]) {
-    stamp_owner_fn_by_span(nodes);
-    let functions: Vec<usize> = nodes
-        .iter()
-        .enumerate()
-        .filter(|(_, node)| {
-            matches!(
-                node.kind,
-                NodeKind::Function | NodeKind::Method | NodeKind::Constructor
-            )
-        })
-        .map(|(index, _)| index)
-        .collect();
-    let spans: Vec<Span> = functions.iter().map(|&index| nodes[index].span).collect();
-    let parents = innermost_enclosing(&spans);
-    // Outer functions first: a nested path is built from its parent's stamped path.
-    let mut order: Vec<usize> = (0..functions.len()).collect();
-    order.sort_by_key(|&k| std::cmp::Reverse(span_area(spans[k])));
-    for k in order {
-        let index = functions[k];
-        if nodes[index].kind != NodeKind::Function {
-            continue;
-        }
-        if let Some(parent) = parents[k] {
-            let parent = &nodes[functions[parent]];
-            nodes[index].owner_class = Some(match &parent.owner_class {
-                Some(owner) => format!("{owner}::{}", parent.name),
-                None => parent.name.clone(),
-            });
-        }
-    }
-}
-
 /// Enumerate `Function`/`Method` `RawNode` whose span lies inside `class_span`,
 /// skipping dunder methods (`__init__`, `__repr__`, ...) and `exclude_name`
 /// (the caller — prevents self-fan-out).
@@ -810,12 +777,13 @@ pub fn has_import_from(imports: &[RawImport], modules: &[&str]) -> bool {
         //          under java), Kotlin (io.ktor.server.routing under io.ktor)
         //   `/`  — JS/TS scoped packages (@nestjs/common under @nestjs)
         //   `\\` — PHP namespaces (Illuminate\Support under Illuminate)
+        //   `::` — Rust paths (rdkafka::producer under rdkafka)
         // Zero-alloc byte compare avoids `format!()` per pair.
         let v = value.as_bytes();
         let m = module.as_bytes();
         v.len() > m.len()
             && v.starts_with(m)
-            && (v[m.len()] == b'.' || v[m.len()] == b'/' || v[m.len()] == b'\\')
+            && matches!(&v[m.len()..], [b'.' | b'/' | b'\\', ..] | [b':', b':', ..])
     }
     imports.iter().any(|imp| {
         modules
@@ -1098,6 +1066,33 @@ fn byte_to_row_col(text: &str, byte_pos: usize) -> (usize, usize) {
 mod tests {
     use super::*;
 
+    fn import(source: &str) -> RawImport {
+        RawImport {
+            source: source.into(),
+            imported_name: "x".into(),
+            alias: None,
+            binding_kind: None,
+        }
+    }
+
+    #[test]
+    fn test_has_import_from_rust_submodule_path_matches_crate() {
+        assert!(has_import_from(
+            &[import("rdkafka::producer")],
+            &["rdkafka"]
+        ));
+        assert!(has_import_from(&[import("axum::routing")], &["axum"]));
+        assert!(!has_import_from(
+            &[import("rdkafkax::producer")],
+            &["rdkafka"]
+        ));
+        assert!(!has_import_from(
+            &[import("rdkafka:producer")],
+            &["rdkafka"]
+        ));
+        assert!(!has_import_from(&[import("rdkafka:")], &["rdkafka"]));
+    }
+
     #[test]
     fn import_gate_matches_exact_and_submodule() {
         let imps = vec![
@@ -1160,6 +1155,54 @@ mod tests {
         }
     }
 
+    /// Stands for: the fn-name owner reaches the non-callables of a function
+    /// body only (a local class, a variable), so they keep today's uid; a
+    /// nested function or lambda of a language that scopes `Function` gets
+    /// none (slice D). A language that scopes nothing keeps the old stamp.
+    #[test]
+    fn test_stamp_owner_fn_by_span_scoped_kind_skipped_local_class_stamped() {
+        let nodes = || {
+            vec![
+                fn_node("outer", (0, 0, 20, 0), NodeKind::Function),
+                fn_node("inner", (1, 4, 10, 0), NodeKind::Function),
+                fn_node("deep", (2, 8, 4, 0), NodeKind::Function),
+                fn_node("<anonymous:6:8>", (5, 8, 5, 40), NodeKind::Function),
+                fn_node("Fake", (11, 4, 13, 0), NodeKind::Class),
+                fn_node("x", (14, 4, 14, 20), NodeKind::Variable),
+                fn_node("top", (21, 0, 22, 0), NodeKind::Function),
+            ]
+        };
+        let owners = |nodes: &[RawNode]| -> Vec<Option<String>> {
+            nodes.iter().map(|n| n.owner_class.clone()).collect()
+        };
+        let outer = || Some("outer".to_string());
+        for language in [Language::Python, Language::JavaScript, Language::TypeScript] {
+            let mut stamped = nodes();
+            stamp_owner_fn_by_span(language, &mut stamped);
+            assert_eq!(
+                owners(&stamped),
+                [None, None, None, None, outer(), outer(), None],
+                "{language:?}"
+            );
+        }
+        let mut stamped = nodes();
+        stamp_owner_fn_by_span(Language::Go, &mut stamped);
+        assert_eq!(
+            owners(&stamped),
+            [
+                None,
+                outer(),
+                Some("inner".to_string()),
+                Some("inner".to_string()),
+                outer(),
+                outer(),
+                None
+            ],
+            "control: a language that scopes nothing"
+        );
+        stamp_owner_fn_by_span(Language::Python, &mut []);
+    }
+
     #[test]
     fn enclosing_fn_idx_picks_innermost_when_nested() {
         // outer spans rows 0..20; inner spans rows 5..10. A point at (row=7, col=3)
@@ -1209,317 +1252,7 @@ mod tests {
     }
 }
 
-/// Normalize a raw decorator/attribute/annotation string captured from any
-/// language to a `(lookup_name, full_name)` pair list.
-///
-/// Returns `Vec` to handle multi-arg derive: `#[derive(Serialize, Deserialize)]`
-/// yields `[("Serialize","Serialize"), ("Deserialize","Deserialize")]`.
-///
-/// Language-specific raw formats handled:
-/// - Python: `property`, `functools.cached_property`, `app.get` (no prefix)
-/// - TS/JS/Java/Kotlin/Swift/Dart: `@Foo`, `@Foo(args)` (leading `@`)
-/// - C#: `[Foo]`, `[FooAttribute]` (bracket-wrapped; `Attribute` suffix stripped)
-/// - PHP: `#[Foo]`, `#[Foo(args)]` (leading `#[`)
-/// - Rust: `#[test]`, `#[derive(A, B)]` (leading `#[`; derive expanded)
-///
-/// Resolution semantics:
-/// - `lookup_name` is the bare identifier used for `Resolver::resolve_symbol`.
-/// - `full_name` is the canonical name stored on synthetic `Annotation` nodes
-///   (dotted-module prefix kept: `functools.cached_property`).
-/// - Parameterized forms drop arguments: `@Cached(ttl=60)` → `("Cached","Cached")`.
-/// - Dotted last-segment for lookup: `@functools.cached_property` →
-///   lookup `"cached_property"`, full `"functools.cached_property"`.
-pub fn normalize_decorator(raw: &str) -> Vec<(String, String)> {
-    let s = raw.trim();
-
-    // ── Go: `//go:noinline`, `//go:linkname X Y`, `//go:embed pattern` ──
-    // Lookup uses the bare directive name (noinline / linkname / embed);
-    // full_name keeps the `go:` namespace so it does not collide with
-    // user-space annotations of the same bare name. Arguments after the
-    // directive (linkname target, embed glob) are dropped — the LLM signal
-    // is "this symbol carries directive X", not the directive payload.
-    if let Some(rest) = s.strip_prefix("//go:") {
-        let directive = rest.split_whitespace().next().unwrap_or("");
-        if directive.is_empty() {
-            return vec![];
-        }
-        return vec![(directive.to_string(), format!("go:{}", directive))];
-    }
-
-    // ── Rust / PHP: `#[...]` ─────────────────────────────────────────────
-    // `#[derive(A, B, C)]` → multiple pairs.  Other attrs → single pair.
-    if let Some(inner) = s
-        .strip_prefix("#[")
-        .and_then(|t| t.strip_suffix(']'))
-        .map(str::trim)
-    {
-        if let Some(args) = inner
-            .strip_prefix("derive(")
-            .and_then(|t| t.strip_suffix(')'))
-        {
-            // `derive(A, B, C)` → expand each argument.
-            return args
-                .split(',')
-                .map(|a| {
-                    let n = a.trim().to_string();
-                    (n.clone(), n)
-                })
-                .filter(|(n, _)| !n.is_empty())
-                .collect();
-        }
-        // Other Rust/PHP attrs: `#[test]`, `#[Route('/')]`.
-        let name = bare_ident(inner);
-        if name.is_empty() {
-            return vec![];
-        }
-        return vec![(name.to_string(), name.to_string())];
-    }
-
-    // ── C / C++ standard attribute: `[[nodiscard]]`, `[[deprecated("msg")]]`,
-    // `[[gnu::pure]]`. Strip the double brackets and pick the bare ident
-    // (after any namespace prefix). Must come before the single-bracket
-    // branch because `[[X]]` also matches `[X]` after one strip.
-    if let Some(inner) = s
-        .strip_prefix("[[")
-        .and_then(|t| t.strip_suffix("]]"))
-        .map(str::trim)
-    {
-        if inner.is_empty() {
-            return vec![];
-        }
-        let raw = bare_ident(inner);
-        // `gnu::pure` / `clang::nonnull` → keep last segment for lookup,
-        // preserve the namespaced form as full_name so the Annotation node
-        // distinguishes `gnu::pure` from a plain `pure`.
-        let lookup = raw.rsplit("::").next().unwrap_or(raw);
-        return vec![(lookup.to_string(), raw.to_string())];
-    }
-
-    // ── C / C++ GNU attribute: `__attribute__((nodiscard))` / `((pure))` ─
-    // Take the first identifier inside the inner parens.
-    if let Some(inner) = s
-        .strip_prefix("__attribute__((")
-        .and_then(|t| t.strip_suffix("))"))
-        .map(str::trim)
-    {
-        if inner.is_empty() {
-            return vec![];
-        }
-        let name = bare_ident(inner);
-        if name.is_empty() {
-            return vec![];
-        }
-        return vec![(name.to_string(), name.to_string())];
-    }
-
-    // ── C# / PHP attribute_list: `[Foo]` or `[Foo(args)]` ───────────────
-    // tree-sitter-c-sharp `attribute_list` captures the full `[...]` text.
-    if let Some(inner) = s.strip_prefix('[').and_then(|t| t.strip_suffix(']')) {
-        // Skip if it looks like `#[...]` already handled above, or empty.
-        let inner = inner.trim();
-        if inner.is_empty() {
-            return vec![];
-        }
-        let name = bare_ident(inner);
-        // Strip C# `Attribute` suffix so `[AuthorizeAttribute]` → `Authorize`.
-        let lookup = name.strip_suffix("Attribute").unwrap_or(name);
-        return vec![(lookup.to_string(), name.to_string())];
-    }
-
-    // ── `@Foo` / `@Foo(args)` ────────────────────────────────────────────
-    if let Some(rest) = s.strip_prefix('@') {
-        let name = bare_dotted(rest);
-        if name.is_empty() {
-            return vec![];
-        }
-        let lookup = dotted_last(name);
-        return vec![(lookup.to_string(), name.to_string())];
-    }
-
-    // ── Plain identifier / dotted path (Python) ──────────────────────────
-    let name = bare_dotted(s);
-    if name.is_empty() {
-        return vec![];
-    }
-    let lookup = dotted_last(name);
-    vec![(lookup.to_string(), name.to_string())]
-}
-
-/// Return the bare identifier portion of a raw decorator string, stopping at
-/// `(`, `[`, space, or end.  E.g. `"Route('/path')"` → `"Route"`.
-#[inline]
-fn bare_ident(s: &str) -> &str {
-    s.split(|c: char| c == '(' || c == '[' || c.is_whitespace())
-        .next()
-        .unwrap_or("")
-        .trim()
-}
-
-/// Like `bare_ident` but allows dots (dotted paths like `app.get`).
-#[inline]
-fn bare_dotted(s: &str) -> &str {
-    s.split(|c: char| c == '(' || c == '[' || c == '{' || c.is_whitespace())
-        .next()
-        .unwrap_or("")
-        .trim_end_matches('.')
-}
-
-/// Last segment of a dotted name: `"functools.cached_property"` → `"cached_property"`.
-#[inline]
-fn dotted_last(s: &str) -> &str {
-    s.rsplit('.').next().unwrap_or(s)
-}
-
-#[cfg(test)]
-mod normalize_tests {
-    use super::normalize_decorator;
-
-    #[test]
-    fn python_plain() {
-        assert_eq!(
-            normalize_decorator("property"),
-            vec![("property".into(), "property".into())]
-        );
-    }
-
-    #[test]
-    fn python_dotted() {
-        assert_eq!(
-            normalize_decorator("functools.cached_property"),
-            vec![("cached_property".into(), "functools.cached_property".into())]
-        );
-    }
-
-    #[test]
-    fn at_simple() {
-        assert_eq!(
-            normalize_decorator("@Override"),
-            vec![("Override".into(), "Override".into())]
-        );
-    }
-
-    #[test]
-    fn at_parameterized() {
-        assert_eq!(
-            normalize_decorator("@Cached(ttl=60)"),
-            vec![("Cached".into(), "Cached".into())]
-        );
-    }
-
-    #[test]
-    fn at_dotted() {
-        assert_eq!(
-            normalize_decorator("@functools.cached_property"),
-            vec![("cached_property".into(), "functools.cached_property".into())]
-        );
-    }
-
-    #[test]
-    fn csharp_bracket() {
-        assert_eq!(
-            normalize_decorator("[Authorize]"),
-            vec![("Authorize".into(), "Authorize".into())]
-        );
-    }
-
-    #[test]
-    fn csharp_attribute_suffix_stripped() {
-        assert_eq!(
-            normalize_decorator("[AuthorizeAttribute]"),
-            vec![("Authorize".into(), "AuthorizeAttribute".into())]
-        );
-    }
-
-    #[test]
-    fn rust_test_attr() {
-        assert_eq!(
-            normalize_decorator("#[test]"),
-            vec![("test".into(), "test".into())]
-        );
-    }
-
-    #[test]
-    fn rust_derive_single() {
-        assert_eq!(
-            normalize_decorator("#[derive(Serialize)]"),
-            vec![("Serialize".into(), "Serialize".into())]
-        );
-    }
-
-    #[test]
-    fn rust_derive_multi() {
-        assert_eq!(
-            normalize_decorator("#[derive(Serialize, Deserialize)]"),
-            vec![
-                ("Serialize".into(), "Serialize".into()),
-                ("Deserialize".into(), "Deserialize".into()),
-            ]
-        );
-    }
-
-    #[test]
-    fn go_pragma_noinline() {
-        assert_eq!(
-            normalize_decorator("//go:noinline"),
-            vec![("noinline".into(), "go:noinline".into())]
-        );
-    }
-
-    #[test]
-    fn go_pragma_linkname_with_args() {
-        // Arguments after directive name are dropped — LLM signal is the
-        // directive, not the linkname target.
-        assert_eq!(
-            normalize_decorator("//go:linkname localname pkg.Symbol"),
-            vec![("linkname".into(), "go:linkname".into())]
-        );
-    }
-
-    #[test]
-    fn go_pragma_build_skipped_at_emit_site() {
-        // `//go:build` IS accepted by normalize but the Go parser never emits
-        // it (file-level constraint, not symbol decorator). This test pins the
-        // normalize contract for any unexpected caller.
-        assert_eq!(
-            normalize_decorator("//go:build linux"),
-            vec![("build".into(), "go:build".into())]
-        );
-    }
-
-    #[test]
-    fn cpp_attribute_nodiscard() {
-        assert_eq!(
-            normalize_decorator("[[nodiscard]]"),
-            vec![("nodiscard".into(), "nodiscard".into())]
-        );
-    }
-
-    #[test]
-    fn cpp_attribute_deprecated_with_args() {
-        assert_eq!(
-            normalize_decorator("[[deprecated(\"use NewFn\")]]"),
-            vec![("deprecated".into(), "deprecated".into())]
-        );
-    }
-
-    #[test]
-    fn cpp_attribute_namespaced() {
-        // `[[gnu::pure]]` → lookup "pure" (last segment), full keeps "gnu::pure"
-        // so synthetic Annotation nodes do not collide with a plain `pure`.
-        assert_eq!(
-            normalize_decorator("[[gnu::pure]]"),
-            vec![("pure".into(), "gnu::pure".into())]
-        );
-    }
-
-    #[test]
-    fn c_gnu_attribute() {
-        assert_eq!(
-            normalize_decorator("__attribute__((deprecated))"),
-            vec![("deprecated".into(), "deprecated".into())]
-        );
-    }
-}
+pub use ecp_core::analyzer::decorates::normalize_decorator;
 
 #[cfg(test)]
 mod innermost_enclosing_tests {

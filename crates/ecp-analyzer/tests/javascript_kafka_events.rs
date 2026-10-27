@@ -43,9 +43,9 @@ async function publishOrder(data) {
     assert_eq!(result[0].direction, PubSub::Publish);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "orders"
     );
 }
@@ -69,9 +69,9 @@ function emitPayment(payload) {
     assert_eq!(result[0].direction, PubSub::Publish);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "payments"
     );
 }
@@ -130,7 +130,7 @@ function sendViaRdkafka(payload) {
     );
     let topics: Vec<&str> = result
         .iter()
-        .map(|r| r.topic_literal.as_deref().expect("topic_literal"))
+        .map(|r| r.topic_key.as_deref().expect("topic_key"))
         .collect();
     assert!(topics.contains(&"billing"), "missing 'billing' topic");
     assert!(topics.contains(&"events"), "missing 'events' topic");
@@ -156,9 +156,9 @@ class OrderService {
     assert_eq!(result.len(), 1, "expected one RawEventTopic from method");
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "orders"
     );
 }

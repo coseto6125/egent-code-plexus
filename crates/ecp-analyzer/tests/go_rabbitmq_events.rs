@@ -47,9 +47,9 @@ func publishOrder(ch *amqp.Channel, body []byte) error {
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Publish);
     let lit = result[0]
-        .topic_literal
+        .topic_key
         .as_deref()
-        .expect("topic_literal must be Some");
+        .expect("topic_key must be Some");
     assert_eq!(lit, "orders");
 }
 
@@ -70,9 +70,9 @@ func consumeOrders(ch *amqp.Channel) (<-chan amqp.Delivery, error) {
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Subscribe);
     let lit = result[0]
-        .topic_literal
+        .topic_key
         .as_deref()
-        .expect("topic_literal must be Some");
+        .expect("topic_key must be Some");
     assert_eq!(lit, "orders");
 }
 
@@ -95,9 +95,9 @@ func sendNotification(ch *amqp.Channel, body []byte) error {
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Publish);
     let lit = result[0]
-        .topic_literal
+        .topic_key
         .as_deref()
-        .expect("topic_literal must be Some");
+        .expect("topic_key must be Some");
     assert_eq!(lit, "email");
 }
 
@@ -118,9 +118,9 @@ func pollQueue(ch *amqp.Channel) (amqp.Delivery, bool, error) {
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Subscribe);
     let lit = result[0]
-        .topic_literal
+        .topic_key
         .as_deref()
-        .expect("topic_literal must be Some");
+        .expect("topic_key must be Some");
     assert_eq!(lit, "task/queue");
 }
 
@@ -189,12 +189,12 @@ func receiveEvent(ch *amqp.Channel) (<-chan amqp.Delivery, error) {
     assert!(subscribe.is_some(), "must have a Subscribe event");
     let pub_lit = publish
         .unwrap()
-        .topic_literal
+        .topic_key
         .as_deref()
         .expect("publish topic must be Some");
     let sub_lit = subscribe
         .unwrap()
-        .topic_literal
+        .topic_key
         .as_deref()
         .expect("subscribe topic must be Some");
     assert_eq!(pub_lit, "payments");

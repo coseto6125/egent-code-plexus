@@ -12,7 +12,8 @@ pub struct SchemaArgs {
 
 #[derive(Subcommand, Clone)]
 pub enum SchemaCommands {
-    /// Per-language BlindSpot emitter inventory.
+    /// Per-language BlindSpot emitter inventory, plus the kinds that
+    /// graph-wide passes record for every language (`cross_language_kinds`).
     ///
     /// Distinguishes "no blind spot in this diff" from "ecp doesn't detect
     /// this dispatch pattern in this language yet" — exactly the
@@ -59,7 +60,22 @@ struct LangEntry {
 #[derive(Serialize)]
 struct BlindspotsReport {
     languages: &'static [LangEntry],
+    cross_language_kinds: &'static [&'static str],
 }
+
+/// BlindSpot kinds that graph-wide passes record for any language: the
+/// `Overrides` lookup and the entry-point handler pick. Referenced from the
+/// emitters, so a renamed kind cannot drift from this inventory.
+const CROSS_LANGUAGE_KINDS: &[&str] = &[
+    ecp_analyzer::post_process::overrides::BS_KIND_NO_OVERRIDE_CONCEPT,
+    ecp_analyzer::post_process::overrides::BS_KIND_OVERRIDE_AMBIGUOUS,
+    ecp_analyzer::post_process::overrides::BS_KIND_OVERRIDE_BASE_UNRESOLVED,
+    ecp_analyzer::post_process::overrides::BS_KIND_OVERRIDE_BASE_AMBIGUOUS,
+    ecp_analyzer::post_process::overrides::BS_KIND_OVERRIDE_HIERARCHY_INCOMPLETE,
+    ecp_analyzer::resolution::builder::BS_KIND_ENTRY_POINT_AMBIGUOUS,
+    ecp_analyzer::route_detector::BS_KIND_ROUTE_UNBOUND_HANDLER,
+    ecp_analyzer::route_detector::BS_KIND_ROUTE_HANDLER_ABSENT,
+];
 
 /// Per-lang inventory. Hardcoded because the per-parser `BLIND_SPEC`
 /// tables are `pub(crate)` and reflecting them at runtime is overkill for
@@ -85,7 +101,11 @@ const LANGUAGES: &[LangEntry] = &[
         name: "c_sharp",
         blindspot_emitter: Status::Implemented,
         indirect_dispatch: Status::None,
-        blind_kinds: &["cs-activator-create-instance", "cs-method-invoke"],
+        blind_kinds: &[
+            "cs-activator-create-instance",
+            "cs-method-invoke",
+            ecp_core::analyzer::csharp_extension::BS_KIND_UNRESOLVED,
+        ],
     },
     LangEntry {
         name: "dart",
@@ -193,6 +213,7 @@ pub fn run(args: SchemaArgs) -> Result<(), EcpError> {
 fn blindspots(args: FormatArgs) -> Result<(), EcpError> {
     let report = BlindspotsReport {
         languages: LANGUAGES,
+        cross_language_kinds: CROSS_LANGUAGE_KINDS,
     };
     emit(args.format, &report, print_blindspots_text)
 }
@@ -217,6 +238,13 @@ fn print_blindspots_text(report: &BlindspotsReport) {
             lang.blind_kinds.join(", ")
         );
     }
+    println!(
+        "{:<16} {:<9} {:<9} {}",
+        "(all)",
+        "yes",
+        "-",
+        report.cross_language_kinds.join(", ")
+    );
 }
 
 /// Generic JSON/text dispatcher — keeps each subcommand's run-fn trivial.
@@ -283,7 +311,7 @@ struct ReltypesReport {
     reltypes: Vec<RelTypeView>,
 }
 
-/// 22 RelType variants. Order matches the `#[repr(u8)]` discriminant in
+/// 24 RelType variants. Order matches the `#[repr(u8)]` discriminant in
 /// `ecp_core::graph::RelType` — kept aligned so the JSON output's index
 /// matches the rkyv ordinal.
 const RELTYPES: &[RelTypeEntry] = &[
@@ -298,17 +326,19 @@ const RELTYPES: &[RelTypeEntry] = &[
     RelTypeEntry { rel: RelType::HandlesRoute, name: "HandlesRoute", utility: "A", note: "Function/Method → Route. Materialised even for arrow / lambda handlers." },
     RelTypeEntry { rel: RelType::StepInProcess, name: "StepInProcess", utility: "B", note: "Workflow / Saga step linkage. Process node ↔ step function." },
     RelTypeEntry { rel: RelType::References, name: "References", utility: "C", note: "Generic reference fallback (entry-point scoring, type-annotation linkage). Reason field carries provenance." },
-    RelTypeEntry { rel: RelType::Fetches, name: "Fetches", utility: "A", note: "HTTP-client call site → Route. URL-match across files; reason encodes accessed keys + per-file count." },
+    RelTypeEntry { rel: RelType::Fetches, name: "Fetches", utility: "A", note: "consumer File → Route (URL match; the call site has no node). URL-match across files; reason encodes accessed keys + per-file count." },
     RelTypeEntry { rel: RelType::MirrorsField, name: "MirrorsField", utility: "A", note: "Heuristic ORM-field linkage from in-memory struct to SchemaField. Shown by default in heuristic_callers; --no-heuristic suppresses." },
     RelTypeEntry { rel: RelType::Publishes, name: "Publishes", utility: "A", note: "Producer (kafka.send / SNS publish / RabbitMQ basicPublish) → EventTopic." },
     RelTypeEntry { rel: RelType::Subscribes, name: "Subscribes", utility: "A", note: "Consumer (@KafkaListener / SQS receive) → EventTopic. Pair with Publishes for cross-service event flow." },
     RelTypeEntry { rel: RelType::EventTopicMirror, name: "EventTopicMirror", utility: "B", note: "Heuristic: EventTopic → SchemaField when payload shape inferable. Confidence < 0.85." },
     RelTypeEntry { rel: RelType::OpensTxScope, name: "OpensTxScope", utility: "A", note: "Opener Function/Method → its TransactionScope node. Query as (f)-[:OpensTxScope]->(s:TransactionScope); same forward convention as Publishes/Subscribes." },
-    RelTypeEntry { rel: RelType::Overrides, name: "Overrides", utility: "A", note: "Method-level override (Java @Override, Kotlin override fun, C# override, C++ virtual-match). Distinct from class-level Extends." },
+    RelTypeEntry { rel: RelType::Overrides, name: "Overrides", utility: "A", note: "Method → nearest applicable declaration of its name along its type's declared bases; an overload or a static is skipped (override marker with a matching signature: Exact; name match: Heuristic). Gaps and undecided signatures are override-* BlindSpots. Distinct from class-level Extends." },
     RelTypeEntry { rel: RelType::Decorates, name: "Decorates", utility: "A", note: "Decorator/attribute → decorated symbol (Python @decorator, Java/Kotlin @annotation, C# attribute, Rust attribute macro). 10-language emission." },
-    RelTypeEntry { rel: RelType::UsesPathLiteral, name: "UsesPathLiteral", utility: "A", note: "Function/Method → PathLiteral. Drives `ecp impact --literal <value>` to find every read/write site touching a filesystem path or config key. 14-language emission." },
+    RelTypeEntry { rel: RelType::UsesPathLiteral, name: "UsesPathLiteral", utility: "A", note: "Function/Method/Const → PathLiteral; File for a module-top or class-field site. Drives `ecp impact --literal <value>` to find every read/write site touching a filesystem path or config key. 14-language emission." },
+    RelTypeEntry { rel: RelType::ReadsField, name: "ReadsField", utility: "A", note: "Function/Method → field (Property) it reads, reason field_read; or a module-level Const/Variable it names bare, reason value_read. ecp impact <field> lists every reader." },
     RelTypeEntry { rel: RelType::CompensatedBy, name: "CompensatedBy", utility: "C", note: "Heuristic Saga compensation: compensator → operation it rolls back. reason encodes evidence (saga:calls-back 0.8 / saga:name-only 0.6). Shown by default in heuristic_callers; --no-heuristic suppresses." },
-    RelTypeEntry { rel: RelType::QueriesTable, name: "QueriesTable", utility: "A", note: "Function/Method → database table (Class node) via raw SQL string literal. reason encodes 'read' (SELECT) or 'write' (INSERT/UPDATE/DELETE). ecp impact <table> --upstream surfaces every raw-SQL caller for schema-migration blast radius." },
+    RelTypeEntry { rel: RelType::QueriesTable, name: "QueriesTable", utility: "A", note: "Function/Method/Const → database table (Class node) via raw SQL string literal; File for a module-top site. reason encodes 'read' (SELECT) or 'write' (INSERT/UPDATE/DELETE). ecp impact <table> --upstream surfaces every raw-SQL caller for schema-migration blast radius." },
+    RelTypeEntry { rel: RelType::PartOf, name: "PartOf", utility: "A", note: "C# partial type: each other part → the representative part. Extends/Implements end at the representative. ecp inspect lists the members of all parts; ecp impact from any part walks the same type." },
 ];
 
 fn reltype_views() -> Vec<RelTypeView> {
@@ -446,6 +476,10 @@ const VERSION_HISTORY: &[VersionBumpEntry] = &[
     VersionBumpEntry { version: 13, reason: "Per-file import / export facts (imports, export aliases, ES-module flag, exported-node bitmap) so the session overlay resolves re-exports and ES-module exports like a full reindex." },
     VersionBumpEntry { version: 14, reason: "Path-alias table and per-type resolved supertypes (alias_table, supertype_table) so the session overlay resolves aliased specifiers and walks heritage like a full reindex." },
     VersionBumpEntry { version: 15, reason: "Per-Route middleware side table (route_middleware) so agents see which routes pass through which middleware, such as auth." },
+    VersionBumpEntry { version: 16, reason: "Cargo crate table (workspace: each member's root, entry files and crate names) so the session overlay resolves other_crate::path::f() like a full reindex." },
+    VersionBumpEntry { version: 17, reason: "Lexical-parent table (lexical_parents: each lexically scoped declaration's parent node) so a scoped declaration never answers a global or file-level name lookup." },
+    VersionBumpEntry { version: 18, reason: "PartOf RelType: each C# partial type part links to the one representative part, so a traversal from any part reaches every part's members." },
+    VersionBumpEntry { version: 19, reason: "File records store the parsed language (file and resolution language), so a Vue/Svelte/Astro file resolves as its script language and the global tier pairs files by that stored language." },
     // Future bumps append here. The is_test field on BlindSpotRecord
     // (FU-001) was added without a discriminant bump — rkyv tolerates the
     // trailing-field addition as long as nothing earlier shifts.
@@ -517,32 +551,49 @@ mod tests {
     #[test]
     fn blind_kinds_are_unique_globally() {
         let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for lang in LANGUAGES {
-            for kind in lang.blind_kinds {
-                assert!(
-                    seen.insert(kind),
-                    "duplicate blind kind `{}` across languages",
-                    kind
-                );
-            }
+        let per_language = LANGUAGES.iter().flat_map(|lang| lang.blind_kinds.iter());
+        for kind in per_language.chain(CROSS_LANGUAGE_KINDS) {
+            assert!(
+                seen.insert(kind),
+                "duplicate blind kind `{}` across languages",
+                kind
+            );
         }
+    }
+
+    /// Stands for: an agent reading `schema blindspots` sees every kind the
+    /// `Overrides` pass can record, so an override BlindSpot is never an
+    /// unknown kind.
+    #[test]
+    fn cross_language_kinds_list_every_override_kind() {
+        for kind in ecp_analyzer::post_process::overrides::BS_KINDS {
+            assert!(
+                CROSS_LANGUAGE_KINDS.contains(&kind),
+                "`{kind}` missing from cross_language_kinds"
+            );
+        }
+        assert!(CROSS_LANGUAGE_KINDS.contains(&"entry-point-ambiguous"));
     }
 
     // ── reltypes invariants ─────────────────────────────────────────────
 
     #[test]
     fn reltypes_inventory_count_matches_repr_u8_enum() {
-        // RelType currently has 22 variants (post-merge: `Decorates` from
-        // #365 + `UsesPathLiteral` from #367 + `CompensatedBy` from FU-008 +
-        // `QueriesTable` for code→table SQL edges).
-        // If a new variant lands, bump this number AND append the entry to
-        // RELTYPES. RelType has no VARIANT_COUNT constant like NodeKind does —
-        // manual sync.
+        // RelType currently has 24 variants (post-merge: `Decorates` from
+        // #365 + `UsesPathLiteral` from #367 + `ReadsField` + `CompensatedBy`
+        // from FU-008 + `QueriesTable` for code→table SQL edges + `PartOf`
+        // for C# partial type parts).
+        // If a new variant lands, append the entry to RELTYPES. Each entry
+        // sits at its variant's discriminant, so the JSON index is the rkyv
+        // ordinal (`ReadsField` was missing and shifted the last two).
         assert_eq!(
             RELTYPES.len(),
-            22,
+            RelType::VARIANT_COUNT,
             "reltypes inventory drifted from RelType enum"
         );
+        for (i, r) in RELTYPES.iter().enumerate() {
+            assert_eq!(r.rel as usize, i, "RELTYPES `{}` out of order", r.name);
+        }
     }
 
     #[test]

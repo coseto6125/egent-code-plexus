@@ -47,22 +47,44 @@ function buildAdminConverter() {
         fns.len() >= 2,
         "both convertToMutators definitions must be emitted: {fns:?}"
     );
-    let owners: Vec<_> = fns
-        .iter()
-        .filter_map(|n| n.owner_class.as_deref())
-        .collect();
-    assert!(
-        owners.contains(&"buildUserConverter"),
-        "one convertToMutators must have owner buildUserConverter; owners: {owners:?}"
-    );
-    assert!(
-        owners.contains(&"buildAdminConverter"),
-        "one convertToMutators must have owner buildAdminConverter; owners: {owners:?}"
+    // Stands for: the two nested functions stay two declarations. Since R8
+    // a nested function stores no owner; its lexical parent keeps it apart
+    // (a scoped uid) and prints the old owner text as its display owner.
+    assert!(fns.iter().all(|n| n.owner_class.is_none()), "{fns:?}");
+    assert_eq!(
+        display_owners(src, "convertToMutators"),
+        ["buildAdminConverter", "buildUserConverter"]
     );
 }
 
-/// A function nested inside an outer TS function gets `owner_class`
-/// set to the outer function name.
+/// The display owner of every built node named `name` in `src`, sorted;
+/// asserts that no two of them share a uid.
+fn display_owners(src: &str, name: &str) -> Vec<String> {
+    let mut builder = ecp_analyzer::resolution::builder::GraphBuilder::new();
+    builder.add_graph(parse(src));
+    let g = builder.build();
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&g).expect("archive graph");
+    let archived =
+        rkyv::access::<ecp_core::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes)
+            .expect("access graph");
+    let pool = g.string_pool.as_slice();
+    let named: Vec<u32> = (0..g.nodes.len() as u32)
+        .filter(|&i| g.nodes[i as usize].name.resolve(pool) == name)
+        .collect();
+    let mut owners: Vec<String> = named
+        .iter()
+        .map(|&i| archived.display_owner(i).unwrap_or_default().into_owned())
+        .collect();
+    owners.sort();
+    let mut uids: Vec<u64> = named.iter().map(|&i| g.nodes[i as usize].uid).collect();
+    uids.sort_unstable();
+    uids.dedup();
+    assert_eq!(uids.len(), named.len(), "`{name}`: one uid each");
+    owners
+}
+
+/// A function nested inside an outer TS function prints the outer
+/// function name as its display owner (R8: no stored owner).
 #[test]
 fn nested_function_owner_is_outer_function_name() {
     let src = "\
@@ -73,10 +95,10 @@ function outer(): void {
     let g = parse(src);
     let inners = owners_of(&g, "inner");
     assert!(!inners.is_empty(), "inner must be emitted");
-    assert!(
-        inners.iter().any(|o| o.as_deref() == Some("outer")),
-        "inner must have owner_class=outer; got {inners:?}"
-    );
+    // Stands for: a reader prints `outer` for `inner`. Since R8 the parser
+    // stores no owner (I1) and the display owner walks the lexical parent.
+    assert_eq!(inners, [None]);
+    assert_eq!(display_owners(src, "inner"), ["outer"]);
 }
 
 /// Module-level functions must NOT receive an owner from the fn-nesting pass.

@@ -72,7 +72,7 @@ The honest tradeoff: GitNexus knows more about *any one* of its 14 languages tha
 | LLM-facing area | GitNexus | EgentCodePlexus |
 |---|---|---|
 | Agent integration | MCP server, resources, prompts, setup, hooks, generated skills | Stateless CLI + optional MCP server (`ecp admin mcp serve`) |
-| Core query commands | `query`, `context`, `impact`, `detect_changes`, `rename`, `cypher`, group tools | `inspect`, `find`, `impact`, `routes`, `cypher`, `summary`, `rename`, `contracts`, `diff` |
+| Core query commands | `query`, `context`, `impact`, `detect_changes`, `rename`, `cypher`, group tools | `inspect`, `find`, `impact`, `routes`, `cypher`, `summary`, `contracts`, `diff` |
 | Workflow tools | rich MCP resources, generated repo skills | `tool-map` (egress calls), `shape-check` (response-shape drift), `review` (audit aggregator), `peers` (multi-session collab) |
 | Search | BM25 + semantic + RRF hybrid (documented) | Tantivy BM25 + per-name substring fallback |
 | Storage | Node.js + LadybugDB | Rust + `rkyv` zero-copy mmap |

@@ -1,12 +1,12 @@
 //! The outcome of one resolution rule, and the confidence of each tier.
 //!
-//! The index (`resolver.rs`) and the overlay (`view.rs`) run the same tier
+//! The index (`resolver.rs`) and the overlay (`session/view/resolution.rs`) run the same tier
 //! ladder. Each of them held its own copy of the tier confidences and tested
 //! "did the ladder end, and may the call-level fallbacks still run" by hand.
 //! This module holds both facts once (B §3.1, §3.2). Both call entries
 //! (`Resolver::resolve_call` and the overlay's call closure) carry one
-//! [`Resolution`] through their call-level fallbacks; the tiers inside the
-//! ladders adopt it in later slices.
+//! [`Resolution`] through their call-level fallbacks, and the tiers inside
+//! the ladders return it too.
 
 use super::type_ladder::TypeMember;
 use super::types::NEAREST_COPY_CONFIDENCE;
@@ -113,7 +113,7 @@ pub enum Resolution {
     /// This rule does not apply. The next tier runs.
     Unknown,
     /// A lexical scope of the file declares the name, but none in reach binds
-    /// it (`LexicalFunctions::targets` == `Some(vec![])`). The name tiers
+    /// it (`LexicalFunctions::call_resolution` returns it). The name tiers
     /// skip; the import tiers and the call-level fallbacks still run.
     Shadowed,
 }
@@ -174,12 +174,19 @@ impl Resolution {
     /// The untyped-member post-filter (B §3.2 `admit`): a bound target that
     /// `admits` refuses leaves the call `Unknown`, as an emptied result did.
     pub fn admit(self, admits: impl FnOnce(u32) -> bool) -> Self {
-        if let Resolution::Bound(hit) = self {
-            if !admits(hit.id) {
-                return Resolution::Unknown;
-            }
+        self.admit_or(|id| admits(id).then_some(id))
+    }
+
+    /// [`Self::admit`] with a substitute: `pick` returns the bound target,
+    /// another target that takes its edge at the same tier, or `None` to
+    /// leave the call `Unknown`.
+    pub fn admit_or(self, pick: impl FnOnce(u32) -> Option<u32>) -> Self {
+        match self {
+            Resolution::Bound(hit) => pick(hit.id).map_or(Resolution::Unknown, |id| {
+                Resolution::Bound(Hit { id, ..hit })
+            }),
+            other => other,
         }
-        self
     }
 }
 

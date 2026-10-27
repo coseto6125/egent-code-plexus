@@ -11,6 +11,9 @@ Files
 
 The tests copy app.py into a fresh worktree and move the manifest's
 `mtime_ns` to the copy's mtime, so the mtime check alone would accept it.
+Today's reader opens `<session>/l1/` only and never `dirty_files.json` or
+`graph_overlay/`, so the test copies these files into the legacy namespace and
+expects the reader to serve no input from them.
 
 How it was made (2026-10-22, bash, fresh dirs from mktemp, never ~/.ecp)
   R=$(mktemp -d <scratchpad>/ovl015.XXXXXX); H=$(mktemp -d <scratchpad>/ovl015home.XXXXXX)

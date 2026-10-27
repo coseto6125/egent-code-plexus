@@ -49,6 +49,7 @@ fn mk_local_graph(
         documents: vec![],
         imports: vec![],
         routes,
+        route_receivers: None,
         framework_refs,
         fanout_refs: vec![],
         blind_spots: vec![],
@@ -60,6 +61,7 @@ fn mk_local_graph(
         call_metas: vec![],
         raw_function_metas: vec![],
         export_aliases: None,
+        parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
     }
 }
 
@@ -181,7 +183,7 @@ fn fastapi_route_emits_entrypoint_at_score_1_0() {
         vec![RawRoute {
             method: "GET".into(),
             path: "/items".into(),
-            handler: Some("read_items".into()),
+            handler: RawRoute::named_handler(Some("read_items")),
             span: (0, 0, 0, 0),
             scope: None,
         }],
@@ -294,6 +296,31 @@ fn go_func_main_emits_entrypoint() {
     let graph = builder.build();
     let entries = entry_point_node_indices(&graph);
     assert_eq!(entries.len(), 1);
+}
+
+/// Stands for: Go's `package main` yields a Namespace node named `main`
+/// beside `func main`; the namespace is no handler, so the entry point binds
+/// the function instead of counting two candidates and binding none.
+#[test]
+fn test_build_go_package_main_beside_func_main_binds_function() {
+    let mut package = mk_raw_node("main", NodeKind::Namespace, vec![]);
+    package.span = (4, 0, 4, 12);
+    let mut func = mk_raw_node("main", NodeKind::Function, vec![]);
+    func.span = (23, 0, 34, 1);
+    let lg = mk_local_graph("cmd/gosh/main.go", vec![package, func], vec![], vec![]);
+    let mut builder = GraphBuilder::new();
+    builder.add_graph(lg);
+    let graph = builder.build();
+
+    let entries = entry_point_node_indices(&graph);
+    assert_eq!(entries.len(), 1, "one EntryPoint marker");
+    let targets: Vec<NodeKind> = graph
+        .edges
+        .iter()
+        .filter(|e| e.source as usize == entries[0] && matches!(e.rel_type, RelType::References))
+        .map(|e| graph.nodes[e.target as usize].kind)
+        .collect();
+    assert_eq!(targets, vec![NodeKind::Function]);
 }
 
 /// Kotlin top-level `fun main()` — Function kind, name "main".
@@ -449,4 +476,73 @@ fn multi_file_entries_are_isolated_per_file() {
         entry_file_idx, main_rs_idx,
         "EntryPoint's file_idx must match src/main.rs, not src/lib.rs"
     );
+}
+
+/// A route of a Test or Reference file has no Route node (`pass1_5` skips
+/// those files), so its handler is no entry point either. On HEAD the
+/// bound handler of a NestJS `*.spec.ts` route became a `route@…` marker.
+/// The same route at a production path is the control. One path per
+/// mainstream language's test-file convention, plus one vendored path.
+#[test]
+fn test_build_route_in_test_file_no_entrypoint() {
+    let entries_at = |path: &str| {
+        let mut builder = GraphBuilder::new();
+        builder.add_graph(mk_local_graph(
+            path,
+            vec![mk_raw_node("read_items", NodeKind::Function, vec![])],
+            vec![RawRoute {
+                method: "GET".into(),
+                path: "/items".into(),
+                handler: RawRoute::named_handler(Some("read_items")),
+                span: (0, 0, 0, 0),
+                scope: None,
+            }],
+            vec![],
+        ));
+        entry_point_node_indices(&builder.build()).len()
+    };
+    assert_eq!(entries_at("app/main.py"), 1, "control: production route");
+    for path in [
+        "integration/hello-world/e2e/users.spec.ts",
+        "test/app.router.js",
+        "tests/test_main.py",
+        "src/test/java/com/example/UserControllerTest.java",
+        "src/test/kotlin/com/example/UserControllerTest.kt",
+        "Tests/Api/UserControllerTests.cs",
+        "gin_test.go",
+        "tests/routes.rs",
+        "tests/Feature/UserTest.php",
+        "spec/requests/users_spec.rb",
+        "Tests/AppTests/RouteTests.swift",
+        "tests/test_server.c",
+        "tests/server_test.cpp",
+        "test/server_test.dart",
+        "node_modules/express/lib/router.js",
+    ] {
+        assert_eq!(entries_at(path), 0, "{path}: no entry point");
+    }
+}
+
+/// A decorator-declared route of a test file marks no entry point either:
+/// the scorer reads the decorator itself, not a `RawRoute`, so on HEAD a
+/// `@app.get` handler in `tests/` still became a `route@` marker.
+#[test]
+fn test_build_decorator_route_in_test_file_no_entrypoint() {
+    let entries_at = |path: &str| {
+        let mut builder = GraphBuilder::new();
+        builder.add_graph(mk_local_graph(
+            path,
+            vec![mk_raw_node(
+                "read_items",
+                NodeKind::Function,
+                vec!["@app.get(\"/items\")".into()],
+            )],
+            vec![],
+            vec![],
+        ));
+        entry_point_node_indices(&builder.build()).len()
+    };
+    assert_eq!(entries_at("app/main.py"), 1, "control: production route");
+    assert_eq!(entries_at("tests/test_main.py"), 0);
+    assert_eq!(entries_at("integration/hello-world/e2e/users.spec.ts"), 0);
 }

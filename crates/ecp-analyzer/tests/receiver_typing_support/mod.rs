@@ -9,7 +9,7 @@
 
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::LocalGraph;
+use ecp_core::analyzer::types::{CallSite, LocalGraph};
 use ecp_core::graph::{RelType, ZeroCopyGraph};
 use std::path::Path;
 
@@ -33,8 +33,11 @@ pub fn assert_binder_emits(graphs: &[LocalGraph], caller: &str, callee: &str) {
         .filter(|n| n.name == caller)
         .flat_map(|n| n.calls.iter().map(String::as_str))
         .collect();
+    // A C# entry carries its argument record; compare the decoded sites.
     assert!(
-        calls.contains(&callee),
+        calls
+            .iter()
+            .any(|&raw| CallSite::parse(raw) == CallSite::parse(callee)),
         "binder: `{caller}` should call `{callee}`; calls: {calls:?}"
     );
 }

@@ -2,9 +2,71 @@
 //! index's heritage tier (Tier 2.75, `HeritageScoped`) probes for a bare call
 //! the earlier tiers left unresolved. Index-time resolution and the session
 //! overlay read the same rule from here.
+//!
+//! It also holds the shape of the Pass 2 heritage edges
+//! ([`heritage_rel`], [`heritage_reason`]) and the C# base spelling rule
+//! ([`csharp_base_arity`]): the index's `pass2_emit_node_edges` and the
+//! overlay's replay of a dirty file's `Extends` / `Implements` edges.
 
 use crate::analyzer::types::RawNode;
-use crate::graph::NodeKind;
+use crate::graph::{NodeKind, RelType};
+
+/// The `reason` of an `Extends` edge.
+pub const EXTENDS_REASON: &str = "heritage";
+/// The `reason` of an `Implements` edge.
+pub const IMPLEMENTS_REASON: &str = "pass2:implements";
+/// Every reason [`heritage_reason`] returns.
+pub const HERITAGE_REASONS: [&str; 2] = [EXTENDS_REASON, IMPLEMENTS_REASON];
+
+/// The rel of a heritage edge to a base of kind `target`: an interface or a
+/// trait is implemented, any other type is extended. The resolved target's
+/// kind is the relationship, so no parser decides it (Java `implements`,
+/// Kotlin `:`, Go structural, Rust `impl For` share one heritage list).
+pub fn heritage_rel(target: NodeKind) -> RelType {
+    match target {
+        NodeKind::Interface | NodeKind::Trait => RelType::Implements,
+        _ => RelType::Extends,
+    }
+}
+
+/// The `reason` of a heritage edge of `rel` ([`heritage_rel`]).
+pub fn heritage_reason(rel: RelType) -> &'static str {
+    match rel {
+        RelType::Implements => IMPLEMENTS_REASON,
+        _ => EXTENDS_REASON,
+    }
+}
+
+/// A C# base spelling as the bare type it names and the number of type
+/// arguments of its last segment: `Conv<int, string>` is (`Conv`, 2),
+/// `N.Conv<List<int>>` is (`N.Conv`, 1), `Conv` is (`Conv`, 0). A spelling
+/// whose argument list belongs to an outer segment (`Outer<int>.Inner`) or
+/// does not close stays whole, with arity 0.
+pub fn csharp_base_arity(spelling: &str) -> (&str, u32) {
+    let whole = (spelling, 0);
+    let Some(open) = spelling.find('<') else {
+        return whole;
+    };
+    let Some(args) = spelling
+        .trim_end()
+        .strip_suffix('>')
+        .and_then(|s| s.get(open + 1..))
+    else {
+        return whole;
+    };
+    let mut depth = 0u32;
+    let mut arity = 1;
+    for c in args.chars() {
+        match c {
+            '<' | '(' | '[' => depth += 1,
+            '>' | ')' | ']' if depth == 0 => return whole,
+            '>' | ')' | ']' => depth -= 1,
+            ',' if depth == 0 => arity += 1,
+            _ => {}
+        }
+    }
+    (spelling[..open].trim_end(), arity)
+}
 
 /// A parsed declaration, as the heritage lookup reads it.
 pub trait HeritageNode {
@@ -103,6 +165,40 @@ mod tests {
             kind,
             span,
             heritage: bases.iter().map(|b| b.to_string()).collect(),
+        }
+    }
+
+    /// An interface or a trait is implemented, any other target extended,
+    /// each with its own reason.
+    #[test]
+    fn test_heritage_rel_by_target_kind_returns_rel_and_reason() {
+        for (kind, rel) in [
+            (NodeKind::Interface, RelType::Implements),
+            (NodeKind::Trait, RelType::Implements),
+            (NodeKind::Class, RelType::Extends),
+            (NodeKind::Struct, RelType::Extends),
+            (NodeKind::Enum, RelType::Extends),
+        ] {
+            assert_eq!(heritage_rel(kind), rel, "{kind:?}");
+        }
+        assert_eq!(heritage_reason(RelType::Implements), IMPLEMENTS_REASON);
+        assert_eq!(heritage_reason(RelType::Extends), EXTENDS_REASON);
+    }
+
+    /// The type-argument count of the last segment; a list that belongs to
+    /// an outer segment, or does not close, keeps the spelling whole.
+    #[test]
+    fn test_csharp_base_arity_spellings_return_bare_name_and_count() {
+        for (spelling, expected) in [
+            ("Conv", ("Conv", 0)),
+            ("Conv<int, string>", ("Conv", 2)),
+            ("N.Conv<List<int>>", ("N.Conv", 1)),
+            ("Conv<Func<int, string>>", ("Conv", 1)),
+            ("Outer<int>.Inner", ("Outer<int>.Inner", 0)),
+            ("Conv<int", ("Conv<int", 0)),
+            ("", ("", 0)),
+        ] {
+            assert_eq!(csharp_base_arity(spelling), expected, "{spelling:?}");
         }
     }
 

@@ -1,3 +1,7 @@
+use crate::contracts::raw_records::{
+    bind_enclosing, bind_name, EndpointRule, RawEndpoint, RawIdx, RecordKind, Unbound,
+};
+use crate::contracts::routing::{Language as RouteLanguage, ParsedLanguage};
 use crate::file_category::Language;
 use crate::graph::NodeKind;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -94,16 +98,21 @@ pub enum CallSite<'a> {
     /// so does a PHP `$obj->m()` other than `$this`, which a `use function`
     /// import never names, a Java call on a computed receiver (`a.b().m()`),
     /// which no static import names, an untyped Swift, Ruby, C++ or Dart
-    /// receiver, and a JavaScript or TypeScript call or `new` receiver whose
+    /// receiver, a JavaScript or TypeScript call or `new` receiver whose
     /// type stays unknown (`fetch(u).json()`), which no import or base
-    /// class names.
+    /// class names, and a C# value whose type the parser cannot read
+    /// (`var x`, a field of a generic type, `x?.m()`), which only an
+    /// extension method may bind.
     UntypedMember(&'a str),
     /// A member call whose receiver may name a type. In Python the receiver
     /// is a name a `from` import binds (`from pkg import mod; mod.f()`): a
     /// submodule binds as a module import. In C#, Swift, Kotlin and Dart it
-    /// is an identifier that is no local, parameter or field. A receiver that
-    /// names a type (or a library one) resolves as `Plain("Type.member")`;
-    /// anywhere else the site resolves as `Plain(member)`.
+    /// is an identifier that is no local, parameter or field; in C# also the
+    /// last segment of a dotted name that may be a type path (`Outer.Inner`)
+    /// or a generic type's name (`Box<int>`). A receiver that names a type
+    /// (or a library one) resolves as `Plain("Type.member")`; anywhere else
+    /// the site resolves as `Plain(member)`, in Swift and C# as
+    /// `UntypedMember(member)`.
     FromReceiver { receiver: &'a str, member: &'a str },
     /// A member call whose receiver is itself a call (`Foo.create().bar()`,
     /// `make().bar()`, `new Foo().bar()`). `inner` is the receiver call's own
@@ -114,11 +123,34 @@ pub enum CallSite<'a> {
     ChainedMember { inner: &'a str, fallback: &'a str },
 }
 
+/// The arguments one call passes after its receiver, as the entry records
+/// them ([`CallSite::with_arguments`]): the count of positional arguments
+/// and the parameter names of the named ones. Only the C# parser records
+/// them, on the member sites the extension retry reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallArguments<'a> {
+    /// How many arguments name no parameter.
+    pub positional: u32,
+    /// The named arguments' parameter names, comma-joined, in source order.
+    named: &'a str,
+}
+
+impl<'a> CallArguments<'a> {
+    /// The parameter names the named arguments give, in source order.
+    pub fn named(self) -> impl Iterator<Item = &'a str> {
+        self.named.split(',').filter(|name| !name.is_empty())
+    }
+}
+
 impl<'a> CallSite<'a> {
     const CONSTRUCT_PREFIX: &'static str = "\u{1}new ";
     const UNTYPED_MEMBER_PREFIX: &'static str = "\u{1}member ";
     const FROM_RECEIVER_PREFIX: &'static str = "\u{1}from ";
     const CHAINED_MEMBER_PREFIX: &'static str = "\u{1}chain ";
+    /// Opens the argument record ahead of an entry; the chain separator
+    /// closes it. It wraps the whole entry, so a chain's levels each carry
+    /// their own record.
+    const ARGUMENTS_PREFIX: &'static str = "\u{1}args ";
     /// The receiver of the outermost call [`Self::nested_chain`] cut. It
     /// names nothing; a chain that ends in it types none of its levels.
     pub const CUT_CHAIN: &'static str = "\u{1}cut";
@@ -183,7 +215,45 @@ impl<'a> CallSite<'a> {
         raw
     }
 
+    /// `entry` with the arguments of its call recorded ahead of it:
+    /// `positional` unnamed arguments, then one named argument per name in
+    /// `named`. [`Self::parse`] decodes the result as it decodes `entry`.
+    pub fn with_arguments(entry: &str, positional: u32, named: &[&str]) -> String {
+        use std::fmt::Write;
+        let mut raw = String::with_capacity(Self::ARGUMENTS_PREFIX.len() + 4 + entry.len());
+        raw.push_str(Self::ARGUMENTS_PREFIX);
+        let _ = write!(raw, "{positional}");
+        for name in named {
+            raw.push(',');
+            raw.push_str(name);
+        }
+        raw.push(Self::CHAIN_SEPARATOR);
+        raw.push_str(entry);
+        raw
+    }
+
+    /// The arguments the entry `raw` records ([`Self::with_arguments`]).
+    /// `None` for an entry that records none: every non-C# entry, and a C#
+    /// site whose argument list the parser does not model.
+    pub fn arguments(raw: &'a str) -> Option<CallArguments<'a>> {
+        let (spec, _) = Self::split_arguments(raw)?;
+        let (count, named) = spec.split_once(',').unwrap_or((spec, ""));
+        Some(CallArguments {
+            positional: count.parse().ok()?,
+            named,
+        })
+    }
+
+    /// `(argument record, entry)` of an entry that records its arguments.
+    fn split_arguments(raw: &'a str) -> Option<(&'a str, &'a str)> {
+        raw.strip_prefix(Self::ARGUMENTS_PREFIX)?
+            .split_once(Self::CHAIN_SEPARATOR)
+    }
+
     pub fn parse(raw: &'a str) -> Self {
+        // The argument record is no part of the site: an entry decodes as
+        // it did before the parser recorded arguments.
+        let raw = Self::split_arguments(raw).map_or(raw, |(_, entry)| entry);
         if let Some((fallback, inner)) = raw
             .strip_prefix(Self::CHAINED_MEMBER_PREFIX)
             .and_then(|site| site.split_once(Self::CHAIN_SEPARATOR))
@@ -212,38 +282,41 @@ impl<'a> CallSite<'a> {
         }
     }
 
-    /// Resolve `site` with `resolve`, and a chain (`a().b().c()`) from its
-    /// innermost call outwards: each level takes `typed_member` of the
-    /// targets the level below bound, or else resolves its
+    /// Resolve the entry `raw` with `resolve`, and a chain (`a().b().c()`)
+    /// from its innermost call outwards: each level takes `typed_member` of
+    /// the targets the level below bound, or else resolves its
     /// [`Self::fallback`]. A site that is no chain is one `resolve` call.
-    /// The index and the query-time overlay both walk chains here, so a
-    /// chain binds the same on both sides.
+    /// Each site and level comes with the arguments its own entry records
+    /// ([`Self::arguments`]); a level that falls back keeps them. The index
+    /// and the query-time overlay both walk chains here, so a chain binds
+    /// the same on both sides.
     pub fn resolve_chain<T>(
-        self,
-        mut resolve: impl FnMut(Self) -> T,
-        mut typed_member: impl FnMut(&T, &'a str) -> Option<T>,
+        raw: &'a str,
+        mut resolve: impl FnMut(Self, Option<CallArguments<'a>>) -> T,
+        mut typed_member: impl FnMut(&T, &'a str, Option<CallArguments<'a>>) -> Option<T>,
     ) -> T {
-        let mut levels: Vec<Self> = Vec::new();
-        let mut innermost = self;
-        while let Self::ChainedMember { inner, .. } = innermost {
+        let top = (Self::parse(raw), Self::arguments(raw));
+        let mut levels: Vec<(Self, Option<CallArguments<'a>>)> = Vec::new();
+        let mut innermost = top;
+        while let (Self::ChainedMember { inner, .. }, _) = innermost {
             levels.push(innermost);
-            innermost = Self::parse(inner);
+            innermost = (Self::parse(inner), Self::arguments(inner));
         }
         // A cut chain lost its root: typing its levels through their
         // fallbacks could bind a namesake, so the site resolves as it did
         // before chains.
-        if innermost == Self::Plain(Self::CUT_CHAIN) {
-            return resolve(self.fallback());
+        if innermost.0 == Self::Plain(Self::CUT_CHAIN) {
+            return resolve(top.0.fallback(), top.1);
         }
-        let mut targets = resolve(innermost);
-        for level in levels.into_iter().rev() {
+        let mut targets = resolve(innermost.0, innermost.1);
+        for (level, arguments) in levels.into_iter().rev() {
             // A fallback may be the whole callee text (the JS parser writes
             // `new Foo().bar`); the typed member is its last segment.
             let name = level.name();
             let member = name.rsplit(['.', ':']).next().unwrap_or(name);
-            targets = match typed_member(&targets, member) {
+            targets = match typed_member(&targets, member, arguments) {
                 Some(typed) => typed,
-                None => resolve(level.fallback()),
+                None => resolve(level.fallback(), arguments),
             };
         }
         targets
@@ -274,7 +347,7 @@ impl<'a> CallSite<'a> {
     /// `self.`, Rust `self.` / `Self::`, and C declares no members. A same-named
     /// method of an unrelated class (a Laravel test's private `config()` for the
     /// global helper `config()`, the caller's own or its base's `config`) must
-    /// not bind it at any tier (the resolver's `CallScope::free_only`). Java,
+    /// not bind it at any tier (`ladder::CallPick::free_only`). Java,
     /// Kotlin, C#, Swift, Dart, Scala, C++ and Ruby call a member of the
     /// enclosing type with no receiver. JavaScript, TypeScript and Go also require
     /// an explicit receiver. Their parsers encode retained member fallbacks as a
@@ -444,6 +517,77 @@ pub struct RawNode {
     pub content_hash: u64,
 }
 
+/// The [`RawNode::decorators`] entry prefix that records a type's or a
+/// delegate's declared generic arity (`Conv<T>` is 1, `delegate R
+/// Func<T, R>(T a)` is 2). Only the C# parser writes it, and only for an
+/// arity above 0. It rides in `decorators`, beside the
+/// `__override__` marker, so the parse cache and every `RawNode` builder
+/// keep their shape; `post_process::decorates_edges` skips it.
+const GENERIC_ARITY_MARKER: &str = "__generic_arity__:";
+
+/// The [`RawNode::decorators`] entry prefix that marks a C# type declared
+/// `partial`, followed by the scope that declares it: the namespace, then
+/// each enclosing type as `+Name`, with a backtick and the generic arity
+/// when that is above 0 (`Lib.Json+Outer`1`). The builder merges the parts
+/// of one type by this scope (`c_sharp::partial`). Only the C# parser
+/// writes it, beside [`GENERIC_ARITY_MARKER`], and
+/// `post_process::decorates_edges` skips it.
+const PARTIAL_MARKER: &str = "__partial__:";
+
+/// The [`RawNode::decorators`] entry the Kotlin, C#, C++ and Swift parsers
+/// write when a method carries the `override` keyword. The Overrides
+/// post-process reads it; it is not a decorator the source wrote.
+pub const OVERRIDE_SENTINEL: &str = "__override__";
+
+impl RawNode {
+    /// The [`RawNode::decorators`] entry for a `partial` type declared in
+    /// `scope`.
+    pub fn partial_marker(scope: &str) -> String {
+        format!("{PARTIAL_MARKER}{scope}")
+    }
+
+    /// Whether a decorator entry is a [`RawNode::partial_marker`].
+    pub fn is_partial_marker(decorator: &str) -> bool {
+        decorator.starts_with(PARTIAL_MARKER)
+    }
+
+    /// Whether a decorator entry is any parser marker rather than a
+    /// decorator the source wrote: the [`OVERRIDE_SENTINEL`], a
+    /// [`RawNode::generic_arity_marker`] or a [`RawNode::partial_marker`].
+    pub fn is_parser_marker(decorator: &str) -> bool {
+        decorator == OVERRIDE_SENTINEL
+            || Self::is_generic_arity_marker(decorator)
+            || Self::is_partial_marker(decorator)
+    }
+
+    /// The declaring scope of a `partial` type, as the parser recorded it;
+    /// `None` when the node carries no partial marker.
+    pub fn partial_scope(&self) -> Option<&str> {
+        self.decorators
+            .iter()
+            .find_map(|d| d.strip_prefix(PARTIAL_MARKER))
+    }
+
+    /// The [`RawNode::decorators`] entry for a declared generic arity.
+    pub fn generic_arity_marker(arity: u32) -> String {
+        format!("{GENERIC_ARITY_MARKER}{arity}")
+    }
+
+    /// Whether a decorator entry is a [`RawNode::generic_arity_marker`].
+    pub fn is_generic_arity_marker(decorator: &str) -> bool {
+        decorator.starts_with(GENERIC_ARITY_MARKER)
+    }
+
+    /// The declared generic arity the parser recorded: 0 when the node
+    /// carries no marker.
+    pub fn generic_arity(&self) -> u32 {
+        self.decorators
+            .iter()
+            .find_map(|d| d.strip_prefix(GENERIC_ARITY_MARKER)?.parse().ok())
+            .unwrap_or(0)
+    }
+}
+
 #[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[rkyv(derive(Debug))]
 pub enum BindingKind {
@@ -504,7 +648,13 @@ pub struct RawImport {
 pub struct RawRoute {
     pub method: String,
     pub path: String,
-    pub handler: Option<String>,
+    /// What serves the route (C4 `RecordKind::Route`). A producer writes
+    /// `Unresolved(Named)` for a handler the source names and
+    /// `Unresolved(Inline)` at the handler argument's span for a function
+    /// written at the registration; [`Self::bind`] turns either into `Node`
+    /// when one node of the file is that handler. `None`: the producer saw
+    /// no handler.
+    pub handler: Option<RawEndpoint>,
     pub span: (u32, u32, u32, u32),
     /// What the enclosing route groups apply (Laravel `Route::group`,
     /// `->group(...)`), and, for a [`RawRoute::INCLUDE`] record, the route
@@ -512,12 +662,24 @@ pub struct RawRoute {
     pub scope: Option<Box<RawRouteScope>>,
 }
 
+/// The kinds a route handler binds to: code, or an invokable class.
+const ROUTE_HANDLER: &[NodeKind] = &[
+    NodeKind::Function,
+    NodeKind::Method,
+    NodeKind::Constructor,
+    NodeKind::Class,
+];
+
+/// The kinds whose body holds statements, so a site inside one is a call,
+/// never a decorator.
+const CALLABLE_KINDS: &[NodeKind] = &[NodeKind::Function, NodeKind::Method, NodeKind::Constructor];
+
 impl RawRoute {
     /// `method` of a route-file include record, such as
     /// `Route::prefix('admin')->group(base_path('routes/admin.php'))`. It is
     /// not an endpoint: `path` holds the group prefix (empty for none), and
     /// the builder applies the record's prefix, middleware and namespace to
-    /// every route of the included file. `handler` holds the group's
+    /// every route of the included file. `handler` names the group's
     /// controller (`Route::controller(C::class)->group(...)`), whose method a
     /// bare action string in the included file names.
     pub const INCLUDE: &'static str = "INCLUDE";
@@ -534,6 +696,100 @@ impl RawRoute {
     /// and traits (fully qualified name after a space).
     /// `scope.only` / `scope.except` hold the method filter.
     pub const CONTROLLER_MIDDLEWARE: &'static str = "CONTROLLER_MIDDLEWARE";
+
+    /// A handler the source names: `None` for an empty or whitespace-only
+    /// name, as for no name.
+    pub fn named_handler(name: Option<&str>) -> Option<RawEndpoint> {
+        name.and_then(RawEndpoint::named)
+    }
+
+    /// The handler's name as the source writes it, while no node binds it.
+    pub fn handler_name(&self) -> Option<&str> {
+        match &self.handler {
+            Some(RawEndpoint::Unresolved(Unbound::Named(name))) => Some(name.as_str()),
+            _ => None,
+        }
+    }
+
+    /// The handler once the file's node list is final.
+    ///
+    /// | `handler` | Result |
+    /// |---|---|
+    /// | `Named`, record without a group scope | the node [`bind_name`] binds from the site; else the declaration a decorator at the site decorates, when it has that name; else `Named` |
+    /// | `Named`, record with a group scope | `Named`: a Laravel action binds across files, after heritage |
+    /// | `Inline(at)` | the outermost `<anonymous:` closure node that starts where the handler argument `at` starts and lies inside it; else `Inline(at)` |
+    /// | `Anonymous`, `Node`, `File`, `None` | unchanged |
+    ///
+    /// An include or controller-middleware record is never bound. Binding
+    /// twice gives the same endpoint.
+    pub fn bind(&self, nodes: &[RawNode]) -> Option<RawEndpoint> {
+        if self.method == Self::INCLUDE || self.method == Self::CONTROLLER_MIDDLEWARE {
+            return self.handler.clone();
+        }
+        match &self.handler {
+            Some(RawEndpoint::Unresolved(Unbound::Named(name))) if self.scope.is_none() => {
+                Some(bind_route_handler(nodes, self.span, name.as_str()))
+            }
+            Some(RawEndpoint::Unresolved(Unbound::Inline(at))) => {
+                Some(route_closure(nodes, *at).map_or(
+                    RawEndpoint::Unresolved(Unbound::Inline(*at)),
+                    RawEndpoint::Node,
+                ))
+            }
+            other => other.clone(),
+        }
+    }
+}
+
+/// A handler named at `site`.
+///
+/// Outside every callable, the site can be a decorator: the declaration
+/// that starts first after it is the one it decorates (`@Get(':id')
+/// find()`, `@app.get("/x") def find()`), and binds when it has the name.
+/// A class member or a same-name declaration elsewhere in the file never
+/// takes its place. Otherwise the handler is the one node [`bind_name`]
+/// binds; two visible candidates bind neither.
+fn bind_route_handler(nodes: &[RawNode], site: Span, name: &str) -> RawEndpoint {
+    if bind_enclosing(nodes, site, CALLABLE_KINDS).is_none() {
+        let next = nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| (n.span.0, n.span.1) >= (site.2, site.3))
+            .min_by_key(|(i, n)| {
+                let (r1, c1, r2, c2) = n.span;
+                ((r1, c1), std::cmp::Reverse((r2, c2)), *i)
+            });
+        if let Some((i, n)) = next {
+            if n.name == name && ROUTE_HANDLER.contains(&n.kind) {
+                if let Some(idx) = RawIdx::checked(i, nodes.len()) {
+                    return RawEndpoint::Node(idx);
+                }
+            }
+        }
+    }
+    bind_name(nodes, site, name, ROUTE_HANDLER)
+        .endpoint()
+        .clone()
+}
+
+/// The closure node that the handler argument at `at` became: the outermost
+/// `<anonymous:` `Function` node that starts where the argument starts and
+/// lies inside it. A middleware closure of the same registration starts
+/// elsewhere, and a closure nested in the handler's body starts later, so
+/// neither takes the handler's place. A handler with no node of its own (a
+/// parser emits none for an empty body) binds nothing.
+fn route_closure(nodes: &[RawNode], at: Span) -> Option<RawIdx> {
+    let (i, _) = nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| {
+            n.kind == NodeKind::Function
+                && n.name.starts_with("<anonymous:")
+                && (n.span.0, n.span.1) == (at.0, at.1)
+                && span_contains(at, n.span)
+        })
+        .max_by_key(|&(i, n)| ((n.span.2, n.span.3), std::cmp::Reverse(i)))?;
+    RawIdx::checked(i, nodes.len())
 }
 
 /// The group scope of one [`RawRoute`], as far as its own file shows it.
@@ -580,12 +836,9 @@ pub enum RouteInclude {
 
 /// Path-shaped string literal extracted by a per-language `path_literals`
 /// walker. Promoted by `post_process::path_literal_nodes` into a
-/// `NodeKind::PathLiteral` plus a `UsesPathLiteral` edge from the resolved
-/// enclosing symbol. A literal at module top level gets the node and no edge
-/// (`path_literal_nodes.rs`); C4's `File` endpoint is the planned source.
-///
-/// Captured at parse time; resolution to node indices happens in the
-/// post-process pass that has `SymbolTable` + global `nodes` available.
+/// `NodeKind::PathLiteral` plus a `UsesPathLiteral` edge from its
+/// [`Self::endpoint`]: the innermost enclosing callable or `Const`, else the
+/// file (C4 `RecordKind::PathLiteral`).
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 #[rkyv(derive(Debug))]
 pub struct RawPathLiteral {
@@ -607,6 +860,23 @@ pub struct RawPathLiteral {
     /// `sink:read|confidence:high`. Consumed verbatim by the post-process
     /// emitter into `Edge.reason`.
     pub sink_reason: String,
+    /// The node or file the literal attaches to, written by
+    /// [`LocalGraph::bind_records`] once the node list is final. `None`
+    /// before binding.
+    pub endpoint: Option<RawEndpoint>,
+}
+
+impl RawPathLiteral {
+    pub fn bind(&self, nodes: &[RawNode]) -> Option<RawEndpoint> {
+        RecordKind::PathLiteral.bind_site(nodes, self.span)
+    }
+
+    /// [`Self::endpoint`], or the one [`LocalGraph::bind_records`] writes
+    /// when the graph skipped the parse entries (a provider called
+    /// directly). Both come from the site, so they agree.
+    pub fn endpoint_in(&self, nodes: &[RawNode]) -> Option<RawEndpoint> {
+        self.endpoint.clone().or_else(|| self.bind(nodes))
+    }
 }
 
 /// Read vs write classification of a SQL statement, derived from its leading
@@ -647,6 +917,21 @@ pub struct RawSqlRef {
     pub enclosing_symbol: Option<String>,
     /// Owner class when the enclosing symbol is a method.
     pub enclosing_owner: Option<String>,
+    /// The caller the statement attaches to: the innermost enclosing callable
+    /// or `Const`, else the file (C4 `RecordKind::SqlRef`). Written by
+    /// [`LocalGraph::bind_records`]; `None` before binding.
+    pub endpoint: Option<RawEndpoint>,
+}
+
+impl RawSqlRef {
+    pub fn bind(&self, nodes: &[RawNode]) -> Option<RawEndpoint> {
+        RecordKind::SqlRef.bind_site(nodes, self.span)
+    }
+
+    /// As [`RawPathLiteral::endpoint_in`].
+    pub fn endpoint_in(&self, nodes: &[RawNode]) -> Option<RawEndpoint> {
+        self.endpoint.clone().or_else(|| self.bind(nodes))
+    }
 }
 
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
@@ -907,6 +1192,37 @@ pub struct RawSchemaField {
     pub owner_class: Box<str>,
     pub framework: FrameworkId,
     pub span: (u32, u32, u32, u32),
+    /// The owning type (C4 `RecordKind::SchemaField`, no file fallback).
+    /// Written by [`LocalGraph::bind_records`]; `None` before binding and
+    /// when no type of this file owns the field.
+    pub endpoint: Option<RawEndpoint>,
+}
+
+impl RawSchemaField {
+    /// The innermost enclosing type, when its name is the `owner_class` the
+    /// producer read. A producer whose spans do not nest (an OpenAPI schema
+    /// whose key spans fell back to `(0, 0, 0, 0)`) binds by that name
+    /// instead, and only to a type the site provably sees: two visible
+    /// same-name types bind neither.
+    pub fn bind(&self, nodes: &[RawNode]) -> Option<RawEndpoint> {
+        let owner = &*self.owner_class;
+        let by_site = RecordKind::SchemaField.bind_site(nodes, self.span);
+        if let Some(RawEndpoint::Node(idx)) = &by_site {
+            if nodes[idx.index()].name == owner {
+                return by_site;
+            }
+        }
+        let EndpointRule::Enclosing { accept, .. } = RecordKind::SchemaField.endpoint_rule() else {
+            return None;
+        };
+        let bound = bind_name(nodes, self.span, owner, accept);
+        bound.endpoint().node().map(RawEndpoint::Node)
+    }
+
+    /// As [`RawPathLiteral::endpoint_in`].
+    pub fn endpoint_in(&self, nodes: &[RawNode]) -> Option<RawEndpoint> {
+        self.endpoint.clone().or_else(|| self.bind(nodes))
+    }
 }
 
 /// Message-bus publish/subscribe call site.
@@ -919,16 +1235,36 @@ pub struct RawSchemaField {
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 #[rkyv(derive(Debug))]
 pub struct RawEventTopic {
+    /// The topic as the source spells it, string delimiters stripped.
     /// `None` when the topic string is dynamic (variable arg); emitter
-    /// records a `BlindSpot` instead. Already canonicalised by the
-    /// per-language detector via `event_topic::normalize::canonicalize`.
+    /// records a `BlindSpot` instead.
     pub topic_literal: Option<Box<str>>,
+    /// The pairing key: `topic_literal` run through
+    /// `event_topic::normalize::canonicalize` when the detector config asks
+    /// for it, else equal to `topic_literal`. `None` exactly when
+    /// `topic_literal` is `None`.
+    pub topic_key: Option<Box<str>>,
     pub direction: PubSub,
     pub lib: FrameworkId,
     /// Name of the enclosing function/method at the call site.
     /// Empty string when the detector's producer-capture is absent.
     pub enclosing_fn: Box<str>,
     pub span: (u32, u32, u32, u32),
+    /// The publisher or subscriber: the innermost enclosing callable, else
+    /// the file (C4 `RecordKind::EventTopic`). Written by
+    /// [`LocalGraph::bind_records`]; `None` before binding.
+    pub endpoint: Option<RawEndpoint>,
+}
+
+impl RawEventTopic {
+    pub fn bind(&self, nodes: &[RawNode]) -> Option<RawEndpoint> {
+        RecordKind::EventTopic.bind_site(nodes, self.span)
+    }
+
+    /// As [`RawPathLiteral::endpoint_in`].
+    pub fn endpoint_in(&self, nodes: &[RawNode]) -> Option<RawEndpoint> {
+        self.endpoint.clone().or_else(|| self.bind(nodes))
+    }
 }
 
 /// Transactional scope boundary (e.g. `@Transactional`, `atomic()`).
@@ -1071,6 +1407,16 @@ pub struct RawExportAlias {
     pub local: Box<str>,
 }
 
+/// The variable a route call is made on: `router` in `router.get("/x", h)`,
+/// `app` in `app.use("/api", router)`, at the span of that call. The builder
+/// reads it to compose router mounts onto the routes of the mounted router.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+pub struct RawRouteReceiver {
+    pub span: (u32, u32, u32, u32),
+    pub receiver: String,
+}
+
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 #[rkyv(derive(Debug))]
 pub struct LocalGraph {
@@ -1081,6 +1427,10 @@ pub struct LocalGraph {
     pub documents: Vec<RawDocumentBlock>,
     pub imports: Vec<RawImport>,
     pub routes: Vec<RawRoute>,
+    /// The variable each route call is made on, for the parsers that read
+    /// router mounts (Express). Kept apart from `routes`: it is no endpoint.
+    /// `None` for the files with no such call.
+    pub route_receivers: Option<Box<[RawRouteReceiver]>>,
     pub framework_refs: Vec<RawFrameworkRef>,
     pub fanout_refs: Vec<RawFanoutRef>,
     pub blind_spots: Vec<BlindSpot>,
@@ -1115,9 +1465,87 @@ pub struct LocalGraph {
     /// export keeps its declaration's name (most files) and for other
     /// languages.
     pub export_aliases: Option<Box<[RawExportAlias]>>,
+    /// C5 language after parse: [`ParsedLanguage::to_bytes`], or
+    /// [`ParsedLanguage::ABSENT`] when no parse decided one (an omitted file,
+    /// a graph built by hand). `AnalyzerPipeline` sets it once the accepting
+    /// provider has returned. The builder stores it in the `File` record, so
+    /// the script of a Vue, Svelte or Astro file and the language a content
+    /// gate accepted reach every index-side reader without a path lookup.
+    ///
+    /// A provider never sets it whole. A single-file-component provider
+    /// reports the script it parsed through [`Self::note_script`], which
+    /// leaves the file byte absent until the pipeline replaces the field.
+    pub parsed_language: [u8; 2],
 }
 
 impl LocalGraph {
+    /// Record one `<script>` block of a single-file component, parsed as
+    /// TypeScript when `block_is_ts`, else as JavaScript. The file reports
+    /// TypeScript if any block is TypeScript, else JavaScript (C5 open point
+    /// 9). A block that differs from the language reported so far adds a
+    /// `sfc-script-mismatch` [`BlindSpot`] at `span`, so the answer names the
+    /// file. A file with no block reports no script.
+    pub fn note_script(&mut self, block_is_ts: bool, span: Span) {
+        let seen = self.reported_script();
+        let block = if block_is_ts {
+            RouteLanguage::TypeScript
+        } else {
+            RouteLanguage::JavaScript
+        };
+        if seen.is_some_and(|seen| seen != block) {
+            self.blind_spots.push(BlindSpot {
+                kind: "sfc-script-mismatch".to_string(),
+                file_path: self.file_path.clone(),
+                span,
+                hint: "the component mixes TypeScript and JavaScript script blocks; \
+                       its imports and calls resolve as TypeScript"
+                    .to_string(),
+                is_test: crate::file_category::is_test_path(&self.file_path.to_string_lossy()),
+            });
+        }
+        let reported = if block_is_ts || seen == Some(RouteLanguage::TypeScript) {
+            RouteLanguage::TypeScript
+        } else {
+            RouteLanguage::JavaScript
+        };
+        self.parsed_language = [ParsedLanguage::ABSENT[0], reported as u8];
+    }
+
+    /// The script language a provider reported through [`Self::note_script`].
+    /// `None` when none did, and for a graph the pipeline has already
+    /// stamped (its file byte then names a language).
+    pub fn reported_script(&self) -> Option<RouteLanguage> {
+        let [file, script] = self.parsed_language;
+        if file != ParsedLanguage::ABSENT[0] {
+            return None;
+        }
+        RouteLanguage::from_discriminant(script)
+    }
+
+    /// C4 `ParsePhase::BindRecords`: write the endpoint of every path
+    /// literal, SQL reference, schema field and event topic from its site,
+    /// and the handler of every route ([`RawRoute::bind`]).
+    /// Runs once the provider has returned, when the node list is final;
+    /// nodes stay untouched.
+    pub fn bind_records(&mut self) {
+        let nodes = &self.nodes;
+        for r in &mut self.routes {
+            r.handler = r.bind(nodes);
+        }
+        for r in self.path_literals.iter_mut().flat_map(|b| b.iter_mut()) {
+            r.endpoint = r.bind(nodes);
+        }
+        for r in self.sql_refs.iter_mut().flat_map(|b| b.iter_mut()) {
+            r.endpoint = r.bind(nodes);
+        }
+        for r in self.schema_fields.iter_mut().flat_map(|b| b.iter_mut()) {
+            r.endpoint = r.bind(nodes);
+        }
+        for r in self.event_topics.iter_mut().flat_map(|b| b.iter_mut()) {
+            r.endpoint = r.bind(nodes);
+        }
+    }
+
     /// A graph for a file the pipeline could not analyse, carrying nothing but
     /// the reason.
     ///
@@ -1139,6 +1567,7 @@ impl LocalGraph {
             documents: Vec::new(),
             imports: Vec::new(),
             routes: Vec::new(),
+            route_receivers: None,
             framework_refs: Vec::new(),
             fanout_refs: Vec::new(),
             blind_spots: vec![BlindSpot {
@@ -1156,6 +1585,7 @@ impl LocalGraph {
             call_metas: Vec::new(),
             raw_function_metas: Vec::new(),
             export_aliases: None,
+            parsed_language: ParsedLanguage::ABSENT,
         }
     }
 }
@@ -1169,6 +1599,7 @@ impl Default for LocalGraph {
             documents: Vec::new(),
             imports: Vec::new(),
             routes: Vec::new(),
+            route_receivers: None,
             framework_refs: Vec::new(),
             fanout_refs: Vec::new(),
             blind_spots: Vec::new(),
@@ -1180,6 +1611,7 @@ impl Default for LocalGraph {
             call_metas: Vec::new(),
             raw_function_metas: Vec::new(),
             export_aliases: None,
+            parsed_language: ParsedLanguage::ABSENT,
         }
     }
 }
@@ -1331,12 +1763,325 @@ mod tests {
             span: (1, 0, 1, 40),
             enclosing_symbol: Some("list_channels".to_string()),
             enclosing_owner: None,
+            endpoint: None,
         };
         assert_eq!(r.tables[0].0, "channels");
         assert_eq!(r.tables[0].1, SqlVerb::Read);
         assert!(!r.unresolved);
         assert_eq!(SqlVerb::Read.as_reason(), "read");
         assert_eq!(SqlVerb::Write.as_reason(), "write");
+    }
+
+    use crate::contracts::raw_records::RawIdx;
+
+    fn bind_node(name: &str, kind: NodeKind, span: Span) -> RawNode {
+        RawNode {
+            name: name.to_string(),
+            kind,
+            span,
+            is_exported: false,
+            heritage: Vec::new(),
+            type_annotation: None,
+            decorators: Vec::new(),
+            calls: Vec::new(),
+            field_reads: Vec::new(),
+            owner_class: None,
+            content_hash: 0,
+        }
+    }
+
+    fn schema_field(owner: &str, span: Span) -> RawSchemaField {
+        RawSchemaField {
+            name: "email".into(),
+            type_class: SchemaType::String,
+            owner_class: owner.into(),
+            framework: FrameworkId::Pydantic,
+            span,
+            endpoint: None,
+        }
+    }
+
+    fn event_topic(span: Span) -> RawEventTopic {
+        RawEventTopic {
+            topic_literal: Some("orders".into()),
+            topic_key: Some("orders".into()),
+            direction: PubSub::Publish,
+            lib: FrameworkId::Pydantic,
+            enclosing_fn: "".into(),
+            span,
+            endpoint: None,
+        }
+    }
+
+    #[test]
+    fn test_bind_schema_field_inside_owner_type_binds_that_type() {
+        let nodes = [
+            bind_node("User", NodeKind::Class, (0, 0, 3, 0)),
+            bind_node("Order", NodeKind::Class, (4, 0, 7, 0)),
+        ];
+        assert_eq!(
+            schema_field("Order", (5, 4, 5, 20)).bind(&nodes),
+            Some(RawEndpoint::Node(RawIdx(1)))
+        );
+    }
+
+    /// An OpenAPI schema whose key spans fell back to `(0, 0, 0, 0)`: every
+    /// type contains every field by span, so the owner's name decides.
+    #[test]
+    fn test_bind_schema_field_zero_spans_binds_by_owner_name() {
+        let zero = (0, 0, 0, 0);
+        let nodes = [
+            bind_node("User", NodeKind::Struct, zero),
+            bind_node("Order", NodeKind::Struct, zero),
+        ];
+        assert_eq!(
+            schema_field("Order", zero).bind(&nodes),
+            Some(RawEndpoint::Node(RawIdx(1)))
+        );
+    }
+
+    #[test]
+    fn test_bind_schema_field_two_visible_same_name_types_binds_none() {
+        let zero = (0, 0, 0, 0);
+        let nodes = [
+            bind_node("Other", NodeKind::Struct, zero),
+            bind_node("Order", NodeKind::Struct, (1, 0, 2, 0)),
+            bind_node("Order", NodeKind::Struct, (3, 0, 4, 0)),
+        ];
+        assert_eq!(schema_field("Order", zero).bind(&nodes), None);
+    }
+
+    #[test]
+    fn test_bind_schema_field_no_type_or_blank_owner_binds_none() {
+        let nodes = [bind_node("load", NodeKind::Function, (0, 0, 3, 0))];
+        assert_eq!(schema_field("User", (1, 0, 1, 9)).bind(&nodes), None);
+        assert_eq!(schema_field("  ", (1, 0, 1, 9)).bind(&nodes), None);
+        assert_eq!(schema_field("User", (1, 0, 1, 9)).bind(&[]), None);
+    }
+
+    #[test]
+    fn test_bind_event_topic_module_top_binds_file_inside_callable_binds_it() {
+        let nodes = [bind_node("publish", NodeKind::Function, (2, 0, 4, 0))];
+        assert_eq!(
+            event_topic((0, 0, 0, 30)).bind(&nodes),
+            Some(RawEndpoint::File)
+        );
+        assert_eq!(
+            event_topic((3, 4, 3, 30)).bind(&nodes),
+            Some(RawEndpoint::Node(RawIdx(0)))
+        );
+    }
+
+    /// Binding twice (a cached graph re-entering a parse entry) writes the
+    /// same endpoints; a graph with no records stays untouched.
+    #[test]
+    fn test_bind_records_twice_writes_same_endpoints_and_empty_graph_is_noop() {
+        let mut graph = LocalGraph {
+            nodes: vec![
+                bind_node("load", NodeKind::Function, (2, 0, 4, 0)),
+                bind_node("User", NodeKind::Class, (6, 0, 8, 0)),
+            ],
+            path_literals: Some(Box::new([RawPathLiteral {
+                value: "conf/a.json".into(),
+                span: (3, 4, 3, 20),
+                enclosing_symbol: Some("load".into()),
+                enclosing_owner: None,
+                sink_reason: String::new(),
+                endpoint: None,
+            }])),
+            sql_refs: Some(Box::new([RawSqlRef {
+                tables: Vec::new(),
+                unresolved: false,
+                span: (0, 0, 0, 30),
+                enclosing_symbol: None,
+                enclosing_owner: None,
+                endpoint: None,
+            }])),
+            schema_fields: Some(Box::new([schema_field("User", (7, 4, 7, 20))])),
+            event_topics: Some(Box::new([event_topic((9, 0, 9, 30))])),
+            ..LocalGraph::default()
+        };
+        graph.bind_records();
+        let endpoints = |g: &LocalGraph| {
+            (
+                g.path_literals.as_ref().unwrap()[0].endpoint.clone(),
+                g.sql_refs.as_ref().unwrap()[0].endpoint.clone(),
+                g.schema_fields.as_ref().unwrap()[0].endpoint.clone(),
+                g.event_topics.as_ref().unwrap()[0].endpoint.clone(),
+            )
+        };
+        let first = endpoints(&graph);
+        assert_eq!(
+            first,
+            (
+                Some(RawEndpoint::Node(RawIdx(0))),
+                Some(RawEndpoint::File),
+                Some(RawEndpoint::Node(RawIdx(1))),
+                Some(RawEndpoint::File),
+            )
+        );
+        graph.bind_records();
+        assert_eq!(endpoints(&graph), first);
+
+        let mut empty = LocalGraph::default();
+        empty.bind_records();
+        assert!(empty.path_literals.is_none() && empty.schema_fields.is_none());
+    }
+
+    fn route(handler: Option<RawEndpoint>, span: Span) -> RawRoute {
+        RawRoute {
+            method: "GET".into(),
+            path: "/x".into(),
+            handler,
+            span,
+            scope: None,
+        }
+    }
+
+    fn named(name: &str) -> Option<RawEndpoint> {
+        RawRoute::named_handler(Some(name))
+    }
+
+    fn inline(at: Span) -> Option<RawEndpoint> {
+        Some(RawEndpoint::Unresolved(Unbound::Inline(at)))
+    }
+
+    /// `app.get('/x', list)` inside `setup`: the file declares a class
+    /// member `list` before the top-level `list`. JS binds the bare name to
+    /// the top-level declaration, never to the member a name lookup finds
+    /// first.
+    #[test]
+    fn test_raw_route_bind_class_member_before_top_level_binds_top_level() {
+        let nodes = [
+            bind_node("Admin", NodeKind::Class, (0, 0, 4, 1)),
+            bind_node("list", NodeKind::Method, (1, 2, 3, 3)),
+            bind_node("list", NodeKind::Function, (6, 0, 8, 1)),
+            bind_node("setup", NodeKind::Function, (10, 0, 12, 1)),
+        ];
+        assert_eq!(
+            route(named("list"), (11, 2, 11, 30)).bind(&nodes),
+            Some(RawEndpoint::Node(RawIdx(2)))
+        );
+    }
+
+    /// `@Get('/x')` in a class body decorates the method that follows it,
+    /// although a top-level `find` is visible from the decorator.
+    #[test]
+    fn test_raw_route_bind_decorator_site_binds_decorated_member() {
+        let nodes = [
+            bind_node("Users", NodeKind::Class, (0, 0, 6, 1)),
+            bind_node("find", NodeKind::Method, (3, 2, 5, 3)),
+            bind_node("find", NodeKind::Function, (8, 0, 9, 1)),
+        ];
+        assert_eq!(
+            route(named("find"), (2, 3, 2, 6)).bind(&nodes),
+            Some(RawEndpoint::Node(RawIdx(1)))
+        );
+    }
+
+    /// A decorator whose next declaration has another name binds by
+    /// visibility; two visible top-level `h` (a redefinition) bind neither,
+    /// and the name stays for the unresolved report.
+    #[test]
+    fn test_raw_route_bind_two_visible_same_name_stays_named() {
+        let nodes = [
+            bind_node("h", NodeKind::Function, (0, 0, 1, 0)),
+            bind_node("h", NodeKind::Function, (2, 0, 3, 0)),
+            bind_node("setup", NodeKind::Function, (5, 0, 7, 0)),
+        ];
+        let r = route(named("h"), (6, 2, 6, 20));
+        assert_eq!(r.bind(&nodes), named("h"));
+        assert_eq!(r.handler_name(), Some("h"));
+        assert_eq!(
+            route(named("gone"), (4, 0, 4, 9)).bind(&nodes),
+            named("gone")
+        );
+    }
+
+    /// An inline handler binds the closure node its own argument became,
+    /// never a middleware closure of the same registration, nor a closure
+    /// nested in its body. Without a node of its own it stays inline.
+    /// On HEAD the rule took the one outermost closure anywhere in the
+    /// registration, so the middleware at 3:18 served the route.
+    #[test]
+    fn test_raw_route_bind_inline_binds_handler_argument_closure_only() {
+        let nodes = [
+            bind_node("main", NodeKind::Function, (0, 0, 20, 1)),
+            // `app.get("/x", (req, res, next) => next(), (req, res) => {})`:
+            // the middleware has a node, the empty handler has none.
+            bind_node("<anonymous:3:18>", NodeKind::Function, (2, 18, 2, 40)),
+            // `app.get("/y", (req, res) => { items.forEach(i => use(i)) })`:
+            // the handler and the closure in its body both have nodes.
+            bind_node("<anonymous:6:16>", NodeKind::Function, (5, 16, 7, 3)),
+            bind_node("<anonymous:7:20>", NodeKind::Function, (6, 20, 6, 38)),
+            // A named function at the handler's position is no closure.
+            bind_node("named", NodeKind::Function, (9, 16, 9, 30)),
+        ];
+        let empty_handler = (2, 42, 2, 60);
+        assert_eq!(
+            route(inline(empty_handler), (2, 2, 2, 61)).bind(&nodes),
+            inline(empty_handler)
+        );
+        assert_eq!(
+            route(inline((2, 18, 2, 40)), (2, 2, 2, 41)).bind(&nodes),
+            Some(RawEndpoint::Node(RawIdx(1)))
+        );
+        assert_eq!(
+            route(inline((5, 16, 7, 3)), (5, 2, 7, 4)).bind(&nodes),
+            Some(RawEndpoint::Node(RawIdx(2)))
+        );
+        assert_eq!(
+            route(inline((9, 16, 9, 30)), (9, 2, 9, 31)).bind(&nodes),
+            inline((9, 16, 9, 30))
+        );
+    }
+
+    /// An `Anonymous` handler has no argument span, so it never binds.
+    #[test]
+    fn test_raw_route_bind_anonymous_without_span_unchanged() {
+        let nodes = [bind_node(
+            "<anonymous:1:0>",
+            NodeKind::Function,
+            (0, 0, 2, 1),
+        )];
+        let anonymous = Some(RawEndpoint::Unresolved(Unbound::Anonymous));
+        assert_eq!(
+            route(anonymous.clone(), (0, 0, 2, 2)).bind(&nodes),
+            anonymous
+        );
+    }
+
+    /// A Laravel action, an include record's controller, an absent handler
+    /// and a blank name never bind in the file.
+    #[test]
+    fn test_raw_route_bind_scoped_include_absent_and_blank_unchanged() {
+        let nodes = [bind_node("index", NodeKind::Function, (0, 0, 2, 0))];
+        let mut scoped = route(named("index"), (4, 0, 4, 30));
+        scoped.scope = Some(Box::default());
+        assert_eq!(scoped.bind(&nodes), named("index"));
+        let mut include = route(named("index"), (4, 0, 4, 30));
+        include.method = RawRoute::INCLUDE.into();
+        assert_eq!(include.bind(&nodes), named("index"));
+        assert_eq!(route(None, (4, 0, 4, 30)).bind(&nodes), None);
+        assert_eq!(RawRoute::named_handler(Some(" \t")), None);
+        assert_eq!(RawRoute::named_handler(None), None);
+    }
+
+    /// `bind_records` writes route handlers too, and a second run keeps them.
+    #[test]
+    fn test_bind_records_route_handler_twice_same_endpoint() {
+        let mut graph = LocalGraph {
+            nodes: vec![
+                bind_node("list", NodeKind::Function, (0, 0, 2, 0)),
+                bind_node("setup", NodeKind::Function, (4, 0, 6, 0)),
+            ],
+            routes: vec![route(named("list"), (5, 2, 5, 30))],
+            ..LocalGraph::default()
+        };
+        graph.bind_records();
+        assert_eq!(graph.routes[0].handler, Some(RawEndpoint::Node(RawIdx(0))));
+        graph.bind_records();
+        assert_eq!(graph.routes[0].handler, Some(RawEndpoint::Node(RawIdx(0))));
     }
 
     #[test]
@@ -1439,28 +2184,30 @@ mod tests {
         let inner = CallSite::chained_member("make", "b");
         let raw = CallSite::chained_member(&inner, &CallSite::untyped_member("c"));
         let mut resolved = Vec::new();
-        let got = CallSite::parse(&raw).resolve_chain(
-            |site| {
+        let got = CallSite::resolve_chain(
+            &raw,
+            |site, _| {
                 resolved.push(site.name().to_string());
                 format!("resolved:{}", site.name())
             },
-            |below, member| (member == "b").then(|| format!("{below}>typed:{member}")),
+            |below, member, _| (member == "b").then(|| format!("{below}>typed:{member}")),
         );
         assert_eq!(resolved, ["make", "c"]);
         assert_eq!(got, "resolved:c");
 
         let mut resolved = Vec::new();
-        let got = CallSite::parse(&raw).resolve_chain(
-            |site| {
+        let got = CallSite::resolve_chain(
+            &raw,
+            |site, _| {
                 resolved.push(site.name().to_string());
                 format!("resolved:{}", site.name())
             },
-            |below, member| Some(format!("{below}>typed:{member}")),
+            |below, member, _| Some(format!("{below}>typed:{member}")),
         );
         assert_eq!(resolved, ["make"]);
         assert_eq!(got, "resolved:make>typed:b>typed:c");
 
-        let plain = CallSite::Plain("f").resolve_chain(|site| site.name(), |_, _| None);
+        let plain = CallSite::resolve_chain("f", |site, _| site.name(), |_, _, _| None);
         assert_eq!(plain, "f");
     }
 
@@ -1469,12 +2216,13 @@ mod tests {
         let inner = CallSite::chained_member(CallSite::CUT_CHAIN, "b");
         let raw = CallSite::chained_member(&inner, "c");
         let mut resolved = Vec::new();
-        let got = CallSite::parse(&raw).resolve_chain(
-            |site| {
+        let got = CallSite::resolve_chain(
+            &raw,
+            |site, _| {
                 resolved.push(site.name().to_string());
                 site.name().to_string()
             },
-            |below, member| Some(format!("{below}>typed:{member}")),
+            |below, member, _| Some(format!("{below}>typed:{member}")),
         );
         assert_eq!(resolved, ["c"]);
         assert_eq!(got, "c");
@@ -1561,5 +2309,76 @@ mod tests {
         );
         let malformed = "\u{1}from compute";
         assert_eq!(CallSite::parse(malformed), CallSite::Plain(malformed));
+    }
+
+    /// Contract: an argument record changes no decoded site. Each entry
+    /// decodes with the record as it decodes without it, and an entry with
+    /// no record reads no arguments.
+    #[test]
+    fn test_call_site_with_arguments_decodes_as_bare_entry() {
+        let chain = CallSite::chained_member("make", "bar");
+        let entries = [
+            "Widget.Spin".to_string(),
+            "Spin".to_string(),
+            CallSite::construct("Widget"),
+            CallSite::untyped_member("bar"),
+            CallSite::from_receiver("Util", "Make"),
+            chain,
+            String::new(),
+        ];
+        for entry in &entries {
+            let recorded = CallSite::with_arguments(entry, 2, &["times"]);
+            assert_eq!(
+                CallSite::parse(&recorded),
+                CallSite::parse(entry),
+                "{entry:?}"
+            );
+            assert_eq!(CallSite::arguments(entry), None, "{entry:?}");
+            let arguments = CallSite::arguments(&recorded).expect("recorded");
+            assert_eq!(arguments.positional, 2);
+            assert_eq!(arguments.named().collect::<Vec<_>>(), ["times"]);
+        }
+        let none = CallSite::with_arguments("Widget.Spin", 0, &[]);
+        let arguments = CallSite::arguments(&none).expect("recorded");
+        assert_eq!(arguments.positional, 0);
+        assert_eq!(arguments.named().count(), 0);
+        // Lookalike text and a record without a separator stay plain.
+        for text in ["args 1", "\u{1}args 1"] {
+            assert_eq!(CallSite::parse(text), CallSite::Plain(text));
+            assert_eq!(CallSite::arguments(text), None);
+        }
+    }
+
+    /// Contract: each chain level reads its own record. The innermost site
+    /// gets the inner call's arguments, and the typed level and its
+    /// fallback get the outer call's.
+    #[test]
+    fn test_call_site_resolve_chain_hands_each_level_its_arguments() {
+        let inner = CallSite::with_arguments("Widget.Make", 1, &[]);
+        let raw = CallSite::with_arguments(&CallSite::chained_member(&inner, "Spin"), 0, &["n"]);
+        let seen: std::cell::RefCell<Vec<(String, Option<u32>)>> = Default::default();
+        CallSite::resolve_chain(
+            &raw,
+            |site, arguments| {
+                seen.borrow_mut()
+                    .push((site.name().to_string(), arguments.map(|a| a.positional)));
+            },
+            |_, member, arguments| {
+                let named: Vec<&str> = arguments.into_iter().flat_map(|a| a.named()).collect();
+                seen.borrow_mut().push((
+                    format!("typed {member} {named:?}"),
+                    arguments.map(|a| a.positional),
+                ));
+                None
+            },
+        );
+        assert_eq!(
+            seen.into_inner(),
+            [
+                ("Widget.Make".to_string(), Some(1)),
+                ("typed Spin [\"n\"]".to_string(), Some(0)),
+                ("Spin".to_string(), Some(0)),
+            ]
+        );
     }
 }

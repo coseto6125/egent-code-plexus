@@ -1,4 +1,1 @@
 # owner: lane F (incremental overlay: builder edges of dirty files)
-edge full-only x1 Defines File src/main/kotlin/acme/Lib.kt:1 Lib.kt #0387a4293ab02d4a -> Function src/main/kotlin/acme/Lib.kt:7 extra #4988e0832b24974a conf=1.0
-parent full-only x1 Function src/main/kotlin/acme/Lib.kt:7 extra #4988e0832b24974a owner=- <- Defines File src/main/kotlin/acme/Lib.kt:1 Lib.kt #0387a4293ab02d4a
-parent overlay-only x1 Function src/main/kotlin/acme/Lib.kt:7 extra #4988e0832b24974a owner=- <- none

@@ -13,11 +13,11 @@
 //! `class_membership`'s invariants and makes each pass easier to read.
 
 use crate::resolution::index::SymbolTable;
+use ecp_core::analyzer::containment::{self, Row, ENUM_VARIANT_DEFINES_REASON};
 use ecp_core::analyzer::types::LocalGraph;
-use ecp_core::graph::{Edge, NodeKind, RelType};
+use ecp_core::graph::{Edge, RelType};
 use ecp_core::pool::StringPool;
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
 use std::borrow::Cow;
 
 /// Emit `(Enum)-[:Defines]->(EnumVariant)` edges for all files.
@@ -26,7 +26,9 @@ use std::borrow::Cow;
 /// parser (Rust explicit walk; Kotlin `enum_entry.name` capture) or by
 /// `stamp_owner_class_by_span` (TS / Java / C# / Swift / Dart / C++). Either
 /// way, `owner_class == Some(enum_name)` is the link — no additional span
-/// arithmetic needed here.
+/// arithmetic needed here. The pairing is [`containment::enum_variant_defines`],
+/// which the overlay's per-file replay shares; this pass supplies the
+/// declarations through `SymbolTable::first_declaration`.
 ///
 /// Returns the total number of edges appended to `edges_out`.
 pub fn emit_edges(
@@ -35,18 +37,11 @@ pub fn emit_edges(
     string_pool: &mut StringPool,
     edges_out: &mut Vec<Edge>,
 ) -> usize {
-    let reason = string_pool.add("post_process:enum_variant_defines");
+    let reason = string_pool.add(ENUM_VARIANT_DEFINES_REASON);
 
-    let chunk_results: Vec<(usize, Vec<Edge>)> = local_graphs
+    let chunk_results: Vec<Vec<Edge>> = local_graphs
         .par_iter()
         .map(|local_graph| {
-            let raws = &local_graph.nodes;
-
-            // Fast-exit: skip files with no EnumVariant nodes.
-            if !raws.iter().any(|n| n.kind == NodeKind::EnumVariant) {
-                return (0, Vec::new());
-            }
-
             let raw_path = local_graph.file_path.to_string_lossy();
             let path_str_cow: Cow<'_, str> = if raw_path.contains('\\') {
                 Cow::Owned(raw_path.replace('\\', "/"))
@@ -55,68 +50,28 @@ pub fn emit_edges(
             };
             let path_str: &str = &path_str_cow;
 
-            // Index Enum nodes in this file by name for O(1) lookup. By kind:
-            // a C `typedef enum color color;` registers two `color`s.
-            let enum_by_name: FxHashMap<&str, u32> = raws
-                .iter()
-                .filter(|n| n.kind == NodeKind::Enum)
-                .filter_map(|n| {
-                    symbol_table
-                        .first_declaration(
-                            path_str,
-                            &n.name,
-                            NodeKind::Enum,
-                            n.owner_class.as_deref(),
-                        )
-                        .map(|idx| (n.name.as_str(), idx))
-                })
-                .collect();
-
-            if enum_by_name.is_empty() {
-                return (0, Vec::new());
-            }
-
             let mut local_edges: Vec<Edge> = Vec::new();
-            let mut emitted = 0usize;
-
-            for variant in raws.iter().filter(|n| n.kind == NodeKind::EnumVariant) {
-                let Some(ref enum_name) = variant.owner_class else {
-                    continue;
-                };
-                let Some(&enum_idx) = enum_by_name.get(enum_name.as_str()) else {
-                    continue;
-                };
-                // By owner: two enums of one file may share a variant name
-                // (`Shape::None`, `Fill::None`).
-                let Some(variant_idx) = symbol_table.first_declaration(
-                    path_str,
-                    &variant.name,
-                    NodeKind::EnumVariant,
-                    Some(enum_name.as_str()),
-                ) else {
-                    continue;
-                };
-                // Self-loop guard: same-named enum and variant (extremely rare).
-                if enum_idx == variant_idx {
-                    continue;
-                }
-                local_edges.push(Edge {
-                    source: enum_idx,
-                    target: variant_idx,
-                    rel_type: RelType::Defines,
-                    confidence: 1.0,
-                    reason,
-                });
-                emitted += 1;
-            }
-
-            (emitted, local_edges)
+            containment::enum_variant_defines(
+                &local_graph.nodes,
+                Row::from,
+                |name, kind, owner| symbol_table.first_declaration(path_str, name, kind, owner),
+                |source, target| {
+                    local_edges.push(Edge {
+                        source,
+                        target,
+                        rel_type: RelType::Defines,
+                        confidence: 1.0,
+                        reason,
+                    })
+                },
+            );
+            local_edges
         })
         .collect();
 
     let mut total = 0usize;
-    for (count, mut local_edges) in chunk_results {
-        total += count;
+    for mut local_edges in chunk_results {
+        total += local_edges.len();
         edges_out.append(&mut local_edges);
     }
     total
@@ -126,6 +81,7 @@ pub fn emit_edges(
 mod tests {
     use super::*;
     use ecp_core::analyzer::types::{LocalGraph, RawNode};
+    use ecp_core::graph::NodeKind;
     use std::path::PathBuf;
 
     fn raw(name: &str, kind: NodeKind, span: (u32, u32, u32, u32)) -> RawNode {
@@ -168,6 +124,7 @@ mod tests {
             documents: Vec::new(),
             imports: Vec::new(),
             routes: Vec::new(),
+            route_receivers: None,
             framework_refs: Vec::new(),
             fanout_refs: Vec::new(),
             blind_spots: Vec::new(),
@@ -179,6 +136,7 @@ mod tests {
             call_metas: Vec::new(),
             raw_function_metas: vec![],
             export_aliases: None,
+            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
         }
     }
 

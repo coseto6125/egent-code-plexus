@@ -1,5 +1,6 @@
 //! L1 fragment writer: re-parses a dirty source file, archives the per-file
-//! graph fragment via rkyv, updates `dirty_files.json` + `session_meta.overlay_version`.
+//! graph fragment via rkyv into `l1/fragments/`, updates `l1/dirty_events.json`
+//! (tombstones included) + `session_meta.overlay_version`.
 //!
 //! Atomic semantics: each fragment is written to `<id>.tmp` → fsync → rename,
 //! so a reader merging fragments can never see partial state. The manifest
@@ -21,17 +22,23 @@
 use ecp_core::analyzer::types::{
     LocalGraph, RawEventTopic, RawExportAlias, RawImport, RawSchemaField, RawTxScope,
 };
-use ecp_core::contracts::routing::SizeCap;
+use ecp_core::contracts::dirty_event::{PathChange, PathClass};
+use ecp_core::contracts::routing::{FileRouter, ParsedLanguage, RouteOutcome, SizeCap};
 use ecp_core::graph::NodeKind;
 use ecp_core::registry::{atomic_write_json, replace_file, FileLock};
+use ecp_core::session::layout;
 use ecp_core::session::overlay::{SymbolKind, SymbolRef};
-use ecp_core::session::{DirtyEntry, DirtyFiles, SessionMeta};
+use ecp_core::session::view::OverlayFileRecords;
+use ecp_core::session::{DirtyEventEntry, DirtyEvents, SessionMeta};
 use rayon::prelude::*;
 use rkyv::{Archive, Deserialize, Serialize};
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use xxhash_rust::xxh3::xxh3_64;
 
 /// A single symbol span produced by `parse_to_fragment`.
 ///
@@ -94,6 +101,23 @@ pub struct FragmentSymbol {
     pub heritage: Vec<String>,
     pub variant_refs: Vec<String>,
     pub return_type: Option<String>,
+    /// `RawNode::generic_arity`: a C# type's or delegate's declared generic
+    /// arity, 0 for every other node. The overlay numbers a dirty `Conv<T>` beside `Conv`
+    /// from it, as the full build does.
+    pub generic_arity: u32,
+    /// `RawFunctionMeta::flags` of a function, method or constructor whose
+    /// span a meta carries; `None` otherwise. `Some(0)` is a real value
+    /// (public instance), so absence is not zero.
+    pub flags: Option<u16>,
+    /// `RawNode::decorators` as the parser wrote them, parser markers
+    /// included (`RawNode::is_parser_marker`): the overlay replays the
+    /// node's `Decorates` edges from them, and the override sentinel marks a
+    /// declared override.
+    pub decorators: Vec<String>,
+    /// `RawFunctionMeta::params` of a function, method or constructor whose
+    /// span a meta carries, flat as `[name1, type1, ...]`; empty otherwise.
+    /// The overlay matches a dirty method's `Overrides` signature on them.
+    pub params: Vec<String>,
 }
 
 /// The symbol shape of the v2 and v3 fragment bins (`FragmentSymbol` before
@@ -112,15 +136,40 @@ pub struct FragmentSymbolV3 {
 
 /// v5 fragment bin payload: the whole dirty file's fresh parse, including
 /// file-level imports and export aliases for query-time Tier-2
-/// (import-scoped) resolution. `DirtyEntry.format == FRAGMENT_FORMAT_V5`
-/// marks bins of this shape — readers MUST dispatch on the manifest marker,
-/// not guess the encoding.
+/// (import-scoped) resolution, and the raw records the overlay's per-file
+/// replay rebuilds the record outputs from, and the language the parse
+/// decided. `DirtyEventEntry.format == FRAGMENT_FORMAT_V7` marks bins of
+/// this shape — readers MUST dispatch on the manifest marker, not guess the
+/// encoding.
 #[derive(Archive, Serialize, Deserialize, Debug, Clone)]
 #[rkyv(derive(Debug))]
 pub struct FragmentFile {
     pub symbols: Vec<FragmentSymbol>,
     pub imports: Vec<RawImport>,
     pub export_aliases: Vec<RawExportAlias>,
+    pub records: OverlayFileRecords,
+    /// `LocalGraph.parsed_language`: the C5 language after parse of the
+    /// fragment's parse ([`ParsedLanguage::to_bytes`]), or
+    /// [`ParsedLanguage::ABSENT`] when the parse decided none. The overlay
+    /// reads the file's language from it, as the index reads the byte
+    /// `graph.bin` stores. A script-language change of a Vue, Svelte or Astro
+    /// file changes the content, hence the fragment id, so a bin never
+    /// outlives the language it holds.
+    pub parsed_language: [u8; 2],
+}
+
+impl Default for FragmentFile {
+    /// An empty file whose parse decided no language: `[0; 2]` would name a
+    /// real one.
+    fn default() -> Self {
+        Self {
+            symbols: Vec::new(),
+            imports: Vec::new(),
+            export_aliases: Vec::new(),
+            records: OverlayFileRecords::default(),
+            parsed_language: ParsedLanguage::ABSENT,
+        }
+    }
 }
 
 /// Exact v4 archive shape, retained to decode fragments written before v5.
@@ -167,35 +216,47 @@ pub struct FragmentFileV2 {
 }
 
 pub fn fragment_file_from_local_graph(graph: &LocalGraph) -> FragmentFile {
-    let return_types: std::collections::HashMap<_, _> = graph
+    let metas: std::collections::HashMap<_, _> = graph
         .raw_function_metas
         .iter()
-        .filter(|meta| !meta.return_type.is_empty())
-        .map(|meta| (meta.span, meta.return_type.clone()))
+        .map(|meta| (meta.span, meta))
         .collect();
     FragmentFile {
         symbols: graph
             .nodes
             .iter()
-            .map(|n| FragmentSymbol {
-                name: n.name.clone(),
-                kind: n.kind,
-                span: n.span,
-                owner_class: n.owner_class.clone(),
-                is_exported: n.is_exported,
-                calls: n.calls.clone(),
-                heritage: n.heritage.clone(),
-                variant_refs: n.field_reads.clone(),
-                return_type: matches!(
+            .map(|n| {
+                let meta = matches!(
                     n.kind,
                     NodeKind::Function | NodeKind::Method | NodeKind::Constructor
                 )
-                .then(|| return_types.get(&n.span).cloned())
-                .flatten(),
+                .then(|| metas.get(&n.span))
+                .flatten();
+                FragmentSymbol {
+                    name: n.name.clone(),
+                    kind: n.kind,
+                    span: n.span,
+                    owner_class: n.owner_class.clone(),
+                    is_exported: n.is_exported,
+                    calls: n.calls.clone(),
+                    heritage: n.heritage.clone(),
+                    variant_refs: n.field_reads.clone(),
+                    return_type: meta
+                        .map(|meta| meta.return_type.clone())
+                        .filter(|return_type| !return_type.is_empty()),
+                    generic_arity: n.generic_arity(),
+                    flags: meta.map(|meta| meta.flags),
+                    decorators: n.decorators.clone(),
+                    params: meta.map(|meta| meta.params.clone()).unwrap_or_default(),
+                }
             })
             .collect(),
         imports: graph.imports.clone(),
         export_aliases: graph.export_aliases.as_deref().unwrap_or(&[]).to_vec(),
+        records: OverlayFileRecords::from_local(graph),
+        // A byte pair no parse stamps (a provider's unfinished SFC script
+        // report) is "no language", as the builder reads it.
+        parsed_language: ParsedLanguage::encode(ParsedLanguage::from_bytes(graph.parsed_language)),
     }
 }
 
@@ -211,6 +272,43 @@ pub struct FragmentOutcome {
     #[allow(dead_code)]
     pub fragment_id: String,
     pub parse_failed: bool,
+}
+
+/// The C3 change and class the freshness gate saw for one dirty path, as
+/// the manifest stores them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirtyPathEvent {
+    pub change: PathChange,
+    pub class: PathClass,
+}
+
+impl DirtyPathEvent {
+    /// What a writer records for a parsed file it has no event for (the
+    /// `FragmentInput` route, tests): the file exists and is source.
+    pub const PARSED_SOURCE: Self = Self {
+        change: PathChange::Modified,
+        class: PathClass::SOURCE,
+    };
+
+    /// The event of a file that exists and was parsed. The manifest stores
+    /// confirmed changes only: an `unmerged` path that exists is `modified`
+    /// (C3 `DirtyEvent::confirm`), and so is a `deleted` path that came back
+    /// before the stat.
+    fn parsed(self) -> Self {
+        let change = match self.change {
+            PathChange::Unmerged | PathChange::Deleted => PathChange::Modified,
+            change => change,
+        };
+        Self { change, ..self }
+    }
+}
+
+/// The cap of the worktree this session overlays. An unreadable meta fails
+/// the commit later; until then the env or built-in cap stands.
+fn session_size_cap(session_dir: &Path) -> SizeCap {
+    SessionMeta::read(&session_dir.join("session_meta.json"))
+        .map(|sm| ecp_core::config::resolve_size_cap(Path::new(&sm.source_worktree)))
+        .unwrap_or_else(|_| ecp_core::config::env_size_cap(None))
 }
 
 /// Write or update a dirty-file fragment for the given session.
@@ -251,15 +349,11 @@ pub fn write_dirty_fragments_batch(
         return Ok(Vec::new());
     }
 
-    let overlay_dir = session_dir.join("graph_overlay");
+    let overlay_dir = layout::fragments_dir(session_dir);
     fs::create_dir_all(&overlay_dir)?;
     let batch_seq = WRITE_BATCH_SEQ.fetch_add(1, Ordering::Relaxed);
-    // The cap of the worktree this session overlays, resolved once per batch.
-    // An unreadable meta fails the commit below; until then the env or
-    // built-in cap stands.
-    let size_cap = SessionMeta::read(&session_dir.join("session_meta.json"))
-        .map(|sm| ecp_core::config::resolve_size_cap(Path::new(&sm.source_worktree)))
-        .unwrap_or_else(|_| ecp_core::config::env_size_cap(None));
+    // Resolved once per batch: the parse and the manifest header share it.
+    let size_cap = session_size_cap(session_dir);
 
     // Parallelise fragment writes: hashing and parsing (CPU) + atomic file write (IO).
     // Coalesces the per-file IO while keeping the final manifest commit atomic.
@@ -271,7 +365,7 @@ pub fn write_dirty_fragments_batch(
         })
         .collect();
 
-    commit_fragment_results(session_dir, &overlay_dir, results)
+    commit_fragment_results(session_dir, size_cap, results, &[])
 }
 
 /// Write fragments from already-parsed `LocalGraph`s — the incremental path's
@@ -281,10 +375,40 @@ pub fn write_dirty_fragments_batch(
 /// re-parse route hashes), so `fragment_id` stays byte-identical; `mtimes` is
 /// the paired modification time per graph (stat is cheap, the graph doesn't
 /// carry it). Graphs and `mtimes` MUST be equal length and aligned by index.
+///
+/// Records every graph as [`DirtyPathEvent::PARSED_SOURCE`] under the cap of
+/// the session's worktree; [`write_dirty_events`] is the form that carries
+/// the gate's events and tombstones.
 pub fn write_dirty_fragments_from_graphs(
     session_dir: &Path,
     graphs: &[LocalGraph],
     mtimes: &[u64],
+) -> io::Result<Vec<FragmentOutcome>> {
+    write_dirty_events(
+        session_dir,
+        session_size_cap(session_dir),
+        graphs,
+        mtimes,
+        &HashMap::new(),
+        &[],
+    )
+}
+
+/// The incremental path's writer: one fragment per parsed graph, recorded
+/// with the event `events` holds for its path (else
+/// [`DirtyPathEvent::PARSED_SOURCE`]), and one tombstone per
+/// `(path, class)` in `tombstones` (a dirty source path absent at the
+/// pre-parse stat). `size_cap` is the cap the graphs were parsed under; the
+/// manifest records it, and a later cap re-parses every entry.
+///
+/// Returns one outcome per graph; tombstones have none.
+pub fn write_dirty_events(
+    session_dir: &Path,
+    size_cap: SizeCap,
+    graphs: &[LocalGraph],
+    mtimes: &[u64],
+    events: &HashMap<String, DirtyPathEvent>,
+    tombstones: &[(String, PathClass)],
 ) -> io::Result<Vec<FragmentOutcome>> {
     if graphs.len() != mtimes.len() {
         return Err(io::Error::new(
@@ -296,31 +420,42 @@ pub fn write_dirty_fragments_from_graphs(
             ),
         ));
     }
-    if graphs.is_empty() {
+    if graphs.is_empty() && tombstones.is_empty() {
         return Ok(Vec::new());
     }
 
-    let overlay_dir = session_dir.join("graph_overlay");
+    let overlay_dir = layout::fragments_dir(session_dir);
     fs::create_dir_all(&overlay_dir)?;
     let batch_seq = WRITE_BATCH_SEQ.fetch_add(1, Ordering::Relaxed);
+    let worktree = SessionMeta::read(&session_dir.join("session_meta.json"))
+        .map(|sm| PathBuf::from(sm.source_worktree))
+        .unwrap_or_default();
 
     let results: Vec<io::Result<StagedFragment>> = graphs
         .par_iter()
         .zip(mtimes.par_iter())
         .enumerate()
         .map(|(idx, (graph, &mtime_ns))| {
-            write_fragment_from_graph(&overlay_dir, batch_seq, idx as u64, graph, mtime_ns)
+            write_fragment_from_graph(
+                &overlay_dir,
+                batch_seq,
+                idx as u64,
+                graph,
+                mtime_ns,
+                events,
+                &worktree,
+            )
         })
         .collect();
 
-    commit_fragment_results(session_dir, &overlay_dir, results)
+    commit_fragment_results(session_dir, size_cap, results, tombstones)
 }
 
 /// The lock a writer holds while it publishes fragment bins and commits the
 /// manifest that names them, and `admin gc` holds while it judges a bin
-/// orphan and deletes it. A bin's name is its content hash, so without the
-/// lock gc could delete a bin a writer had just re-published under the name
-/// gc judged orphan.
+/// orphan and deletes it. A bin's name derives from its route key and content
+/// hash alone, so without the lock gc could delete a bin a writer had just
+/// re-published under the name gc judged orphan.
 pub fn overlay_lock_path(session_dir: &Path) -> PathBuf {
     session_dir.join("overlay.lock")
 }
@@ -329,7 +464,7 @@ pub fn overlay_lock_path(session_dir: &Path) -> PathBuf {
 /// the archive was written, the fsynced tmp that becomes `<fragment_id>.bin`.
 struct StagedFragment {
     rel_path: String,
-    entry: DirtyEntry,
+    entry: DirtyEventEntry,
     outcome: FragmentOutcome,
     tmp: Option<PathBuf>,
 }
@@ -351,48 +486,151 @@ fn stage_archive(
 }
 
 /// Shared tail for both write paths: collect per-file results, publish their
-/// bins, then commit the manifest + `overlay_version` bump in one atomic
-/// write each (coalesces N read-modify-write cycles down to 2).
+/// bins, then commit the manifest (fragments and tombstones) + the
+/// `overlay_version` bump in one atomic write each (coalesces N
+/// read-modify-write cycles down to 2).
 fn commit_fragment_results(
     session_dir: &Path,
-    overlay_dir: &Path,
+    size_cap: SizeCap,
     results: Vec<io::Result<StagedFragment>>,
+    tombstones: &[(String, PathClass)],
 ) -> io::Result<Vec<FragmentOutcome>> {
     let staged = results.into_iter().collect::<io::Result<Vec<_>>>()?;
     let mut outcomes = Vec::with_capacity(staged.len());
     {
         let _publish = FileLock::acquire_exclusive(&overlay_lock_path(session_dir))?;
         for fragment in &staged {
-            if let Some(tmp) = &fragment.tmp {
-                let bin = overlay_dir.join(format!("{}.bin", fragment.entry.fragment_id));
-                replace_file(tmp, &bin)?;
+            if let (Some(tmp), Some(id)) = (&fragment.tmp, &fragment.entry.fragment_id) {
+                replace_file(tmp, &layout::fragment_path(session_dir, id))?;
             }
         }
-        let manifest_path = session_dir.join("dirty_files.json");
-        let mut df = if manifest_path.exists() {
-            DirtyFiles::read(&manifest_path)?
-        } else {
-            DirtyFiles::empty()
-        };
-        // Another binary's entries parse by other rules. The freshness gate
-        // re-parses every dirty file of such a manifest, so none is kept.
-        if !df.from_current_builder() {
-            df = DirtyFiles::empty();
-        }
+        let manifest_path = layout::dirty_events_path(session_dir);
+        let mut manifest = current_or_empty(&manifest_path, size_cap);
         for fragment in staged {
-            df.entries.insert(fragment.rel_path, fragment.entry);
+            manifest.entries.insert(fragment.rel_path, fragment.entry);
             outcomes.push(fragment.outcome);
         }
-        atomic_write_json(&manifest_path, &df)?;
+        for (rel_path, class) in tombstones {
+            manifest
+                .entries
+                .insert(rel_path.clone(), DirtyEventEntry::tombstone(*class));
+        }
+        DirtyEvents::write_atomic(&manifest_path, &manifest)?;
     }
 
     let sm_path = session_dir.join("session_meta.json");
     let mut sm = SessionMeta::read(&sm_path)?;
-    sm.overlay_version += outcomes.len() as u32;
+    sm.overlay_version += (outcomes.len() + tombstones.len()) as u32;
     sm.last_touched = chrono::Utc::now().to_rfc3339();
     atomic_write_json(&sm_path, &sm)?;
 
     Ok(outcomes)
+}
+
+/// The manifest at `manifest_path` when it parses and is current under
+/// `size_cap`; `None` otherwise. A manifest of another format, builder or
+/// cap, or one that does not parse, holds entries the freshness gate
+/// re-parses whole, so a writer keeps none of them.
+fn read_current(manifest_path: &Path, size_cap: SizeCap) -> Option<DirtyEvents> {
+    DirtyEvents::read(manifest_path)
+        .ok()
+        .filter(|m| m.is_current(size_cap))
+}
+
+/// [`read_current`], or an empty manifest under `size_cap`. Replacing a
+/// manifest that is not current (instead of failing the write) is what lets
+/// the freshness gate's re-parse land.
+fn current_or_empty(manifest_path: &Path, size_cap: SizeCap) -> DirtyEvents {
+    read_current(manifest_path, size_cap).unwrap_or_else(|| DirtyEvents::empty(size_cap))
+}
+
+/// A current manifest for the session, written empty when there is none.
+/// A dirty resolution config with no dirty source needs one: the closure
+/// key hashes the manifest (`closure_store`), and without a key no closure
+/// is stored and the view carries no caveat. An empty manifest names no
+/// fragment, so the reader serves no dirty source from it.
+///
+/// `snapshot` is the manifest the caller read. When it is current it is the
+/// answer, and nothing is read or written. Otherwise the check repeats
+/// under the publish lock, so a current manifest another writer published
+/// meanwhile, entries included, stays and is returned. The caller makes the
+/// session dir and its meta first.
+pub fn ensure_current_manifest<'a>(
+    session_dir: &Path,
+    size_cap: SizeCap,
+    snapshot: Option<&'a DirtyEvents>,
+) -> io::Result<Cow<'a, DirtyEvents>> {
+    if let Some(current) = snapshot.filter(|m| m.is_current(size_cap)) {
+        return Ok(Cow::Borrowed(current));
+    }
+    let _publish = FileLock::acquire_exclusive(&overlay_lock_path(session_dir))?;
+    let manifest_path = layout::dirty_events_path(session_dir);
+    if let Some(current) = read_current(&manifest_path, size_cap) {
+        return Ok(Cow::Owned(current));
+    }
+    let empty = DirtyEvents::empty(size_cap);
+    DirtyEvents::write_atomic(&manifest_path, &empty)?;
+    Ok(Cow::Owned(empty))
+}
+
+/// Removes the manifest when it holds no entry, and the stored closure with
+/// it, under the publish lock: the caller found no dirty source and no
+/// dirty config, so the manifest a config-only edit left behind serves
+/// nothing. Without this the clean tree keeps reading the closure and
+/// printing its caveat. A manifest with entries, a missing one and one that
+/// does not parse stay; the retire pass handles entries. Returns whether
+/// it removed the manifest.
+///
+/// A concurrent query that saw a config dirty and wrote the empty manifest
+/// just before this removal loses it for that one answer; its config is
+/// still dirty, so the next refresh writes it back (the retire pass's ABA).
+pub fn remove_empty_manifest(session_dir: &Path) -> io::Result<bool> {
+    let _publish = FileLock::acquire_exclusive(&overlay_lock_path(session_dir))?;
+    let manifest_path = layout::dirty_events_path(session_dir);
+    if !DirtyEvents::read(&manifest_path).is_ok_and(|m| m.entries.is_empty()) {
+        return Ok(false);
+    }
+    // The closure goes first: an empty manifest left without a closure
+    // reads as a clean tree, a closure left without a manifest is never read.
+    super::closure_store::remove(session_dir)?;
+    match fs::remove_file(&manifest_path) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(true),
+    }
+}
+
+/// Drops each manifest entry `stale` names, under the publish lock, when the
+/// entry still equals the one the caller saw. An entry published or rewritten
+/// since the caller's snapshot differs from it, so it stays. A manifest left with no entry is removed, so a clean tree costs the reader
+/// one failed open. The bins stay for `admin gc`: a `fragment_id` is a
+/// content hash, so another entry can share the bin.
+pub fn retire_entries(
+    session_dir: &Path,
+    stale: &HashMap<String, DirtyEventEntry>,
+) -> io::Result<usize> {
+    let _publish = FileLock::acquire_exclusive(&overlay_lock_path(session_dir))?;
+    let manifest_path = layout::dirty_events_path(session_dir);
+    // A missing or unparsable manifest has no entry a reader serves.
+    let Ok(mut manifest) = DirtyEvents::read(&manifest_path) else {
+        return Ok(0);
+    };
+    let before = manifest.entries.len();
+    manifest
+        .entries
+        .retain(|path, entry| stale.get(path) != Some(entry));
+    let retired = before - manifest.entries.len();
+    if retired == 0 {
+        return Ok(0);
+    }
+    if manifest.entries.is_empty() {
+        match fs::remove_file(&manifest_path) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+    } else {
+        DirtyEvents::write_atomic(&manifest_path, &manifest)?;
+    }
+    Ok(retired)
 }
 
 fn write_fragment_file(
@@ -402,11 +640,11 @@ fn write_fragment_file(
     input: &FragmentInput,
     size_cap: SizeCap,
 ) -> io::Result<StagedFragment> {
-    let content_hash = content_hash_hex(&input.content);
-    let fragment_id = content_hash.clone();
-
+    let content_hash = xxh3_64(&input.content);
     // Same forward-slash invariant as `write_fragment_from_graph`.
     let rel_path = input.rel_path.replace('\\', "/");
+    let fragment_id = fragment_id_for(&rel_path, content_hash);
+    let content_hash = format!("{content_hash:016x}");
     // Parse and archive stay one fallible unit, as they were when this called a
     // combined `parse_to_fragment`: an rkyv failure marks the entry
     // `parse_failed` like a parse failure does, rather than aborting the whole
@@ -428,14 +666,16 @@ fn write_fragment_file(
     };
     let parse_failed = tmp.is_none();
 
-    let entry = DirtyEntry {
+    let event = DirtyPathEvent::PARSED_SOURCE;
+    let entry = DirtyEventEntry {
+        change: event.change,
+        class: event.class,
         mtime_ns: input.mtime_ns,
-        content_hash: content_hash.clone(),
-        fragment_id: fragment_id.clone(),
-        tantivy_delta_segment: None,
+        fragment_id: Some(fragment_id.clone()),
+        content_hash: Some(content_hash),
         parse_failed,
         dirty_symbols,
-        format: ecp_core::session::overlay::FRAGMENT_FORMAT_V5,
+        format: ecp_core::session::overlay::FRAGMENT_FORMAT_V7,
     };
 
     let outcome = FragmentOutcome {
@@ -460,9 +700,10 @@ fn parse_graph(rel_path: &str, content: &[u8], size_cap: SizeCap) -> io::Result<
 }
 
 /// rkyv-serialise a graph's v5 fragment file. Shared by the re-parse route
-/// (`parse_to_fragment`) and the pre-parsed route (`write_fragment_from_graph`)
-/// so both emit byte-identical fragment archives.
-fn archive_fragments(graph: &LocalGraph) -> io::Result<Vec<u8>> {
+/// (`parse_to_fragment`), the pre-parsed route (`write_fragment_from_graph`)
+/// and the invalidation closure's store (`closure_store`), so all three emit
+/// byte-identical fragment archives.
+pub(crate) fn archive_fragments(graph: &LocalGraph) -> io::Result<Vec<u8>> {
     let file = fragment_file_from_local_graph(graph);
     rkyv::to_bytes::<rkyv::rancor::Error>(&file)
         .map(|v| v.into_vec())
@@ -472,16 +713,24 @@ fn archive_fragments(graph: &LocalGraph) -> io::Result<Vec<u8>> {
 /// Pre-parsed twin of `write_fragment_file`: the dirty file was already parsed
 /// upstream (`reanalyze_files`), so this skips the tree-sitter re-parse and
 /// derives `fragment_id` from the graph's own `content_hash` (the `xxh3_64`
-/// LE bytes — `u64::from_le_bytes` + `{:016x}` reproduces `xxh3_hex16` exactly).
+/// LE bytes) and the path's route key, as `write_fragment_file` does.
 fn write_fragment_from_graph(
     overlay_dir: &Path,
     batch_seq: u64,
     input_idx: u64,
     graph: &LocalGraph,
     mtime_ns: u64,
+    events: &HashMap<String, DirtyPathEvent>,
+    worktree: &Path,
 ) -> io::Result<StagedFragment> {
-    let content_hash = format!("{:016x}", u64::from_le_bytes(graph.content_hash));
-    let fragment_id = content_hash.clone();
+    // Manifest keys feed uid streams and graph-file matching, which both use
+    // forward slashes (the graph builder normalizes `File.path` that way) —
+    // a Windows PathBuf would leak backslashes here and silently kill every
+    // overlay↔base match.
+    let rel_path = graph.file_path.to_string_lossy().replace('\\', "/");
+    let content_hash = graph_content_hash(graph, worktree);
+    let fragment_id = fragment_id_for(&rel_path, content_hash);
+    let content_hash = format!("{content_hash:016x}");
 
     let tmp = match archive_fragments(graph) {
         Ok(archive_bytes) => Some(stage_archive(
@@ -495,19 +744,18 @@ fn write_fragment_from_graph(
     };
     let parse_failed = tmp.is_none();
 
-    // Manifest keys feed uid streams and graph-file matching, which both use
-    // forward slashes (the graph builder normalizes `File.path` that way) —
-    // a Windows PathBuf would leak backslashes here and silently kill every
-    // overlay↔base match.
-    let rel_path = graph.file_path.to_string_lossy().replace('\\', "/");
-    let entry = DirtyEntry {
+    let event = events
+        .get(&rel_path)
+        .map_or(DirtyPathEvent::PARSED_SOURCE, |event| event.parsed());
+    let entry = DirtyEventEntry {
+        change: event.change,
+        class: event.class,
         mtime_ns,
-        content_hash: content_hash.clone(),
-        fragment_id: fragment_id.clone(),
-        tantivy_delta_segment: None,
+        fragment_id: Some(fragment_id.clone()),
+        content_hash: Some(content_hash),
         parse_failed,
         dirty_symbols: symbols_from_graph(graph, &rel_path),
-        format: ecp_core::session::overlay::FRAGMENT_FORMAT_V5,
+        format: ecp_core::session::overlay::FRAGMENT_FORMAT_V7,
     };
     let outcome = FragmentOutcome {
         fragment_id,
@@ -521,8 +769,61 @@ fn write_fragment_from_graph(
     })
 }
 
-fn content_hash_hex(bytes: &[u8]) -> String {
-    crate::repo_identity::xxh3_hex16(bytes)
+/// The fragment id: an xxh3 over the file's route key and its content hash.
+/// Two paths with one content and one route share a bin; one content under two
+/// routes (`deploy.yaml` against `.github/workflows/deploy.yaml`) parses to
+/// different graphs, so it gets two. Both writers call this with the xxh3 of
+/// the content, so the re-parse and the pre-parsed route stay byte-identical.
+fn fragment_id_for(rel_path: &str, content_hash: u64) -> String {
+    // A path no rule routes has no parse; it gets the all-ones key, which no
+    // routed path can produce (`RouteKey::SNIFFED` is only the language byte).
+    let route_key = match FileRouter::PATH_ONLY.route(rel_path) {
+        RouteOutcome::Routed(route) => route.key().to_bytes(),
+        RouteOutcome::Excluded(_) | RouteOutcome::Unrouted => [u8::MAX; 3],
+    };
+    let mut keyed = [0u8; 11];
+    keyed[..3].copy_from_slice(&route_key);
+    keyed[3..].copy_from_slice(&content_hash.to_le_bytes());
+    format!("{:016x}", xxh3_64(&keyed))
+}
+
+/// A graph's content hash. An omitted file (over the cap, unreadable at parse
+/// time) carries the zero hash on purpose, since the parse cache must not trust
+/// a hash of content nobody read. The fragment key needs the real content, so
+/// read the file from the session's worktree; a file that is gone hashes as
+/// empty.
+fn graph_content_hash(graph: &LocalGraph, worktree: &Path) -> u64 {
+    if graph.content_hash != [0u8; 8] {
+        return u64::from_le_bytes(graph.content_hash);
+    }
+    hash_worktree_file(worktree, &graph.file_path)
+}
+
+/// The xxh3 of `rel` under `worktree`, streamed so an over-cap file is never
+/// loaded whole; the digest equals `xxh3_64` of the content. A file that is
+/// gone or unreadable hashes as empty. An unknown worktree root (an empty
+/// path) would resolve `rel` against the process cwd, so it yields the zero
+/// hash, which the promotion compare never matches.
+fn hash_worktree_file(worktree: &Path, rel: &Path) -> u64 {
+    use std::io::Read;
+    if worktree.as_os_str().is_empty() {
+        return 0;
+    }
+    let mut hasher = xxhash_rust::xxh3::Xxh3::new();
+    let mut buf = [0u8; 64 * 1024];
+    let Ok(mut file) = fs::File::open(worktree.join(rel)) else {
+        return xxh3_64(&[]);
+    };
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => return hasher.digest(),
+            Ok(n) => {
+                hasher.update(&buf[..n]);
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return xxh3_64(&[]),
+        }
+    }
 }
 
 static WRITE_BATCH_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -592,35 +893,34 @@ impl OverlayWriter {
         let rel = relativise(&self.session_dir, path);
         let (dirty_symbols, parse_failed) = extract_symbols(path, &rel);
 
-        let manifest_path = self.session_dir.join("dirty_files.json");
-        let mut df = if manifest_path.exists() {
-            DirtyFiles::read(&manifest_path)?
-        } else {
-            DirtyFiles::empty()
-        };
+        let manifest_path = layout::dirty_events_path(&self.session_dir);
+        let size_cap = session_size_cap(&self.session_dir);
+        let mut manifest = current_or_empty(&manifest_path, size_cap);
 
-        df.entries.insert(
+        let event = DirtyPathEvent::PARSED_SOURCE;
+        manifest.entries.insert(
             rel.clone(),
-            DirtyEntry {
+            DirtyEventEntry {
+                change: event.change,
+                class: event.class,
                 mtime_ns: 0,
-                content_hash: content_hash.to_string(),
-                fragment_id: fragment_id.to_string(),
-                tantivy_delta_segment: None,
+                fragment_id: Some(fragment_id.to_string()),
+                content_hash: Some(content_hash.to_string()),
                 parse_failed,
                 dirty_symbols,
-                format: ecp_core::session::overlay::FRAGMENT_FORMAT_V5,
+                format: ecp_core::session::overlay::FRAGMENT_FORMAT_V7,
             },
         );
-        atomic_write_json(&manifest_path, &df)
+        DirtyEvents::write_atomic(&manifest_path, &manifest)
     }
 
-    /// Read the current `dirty_files.json` for this session.
-    pub fn read_dirty(&self) -> io::Result<DirtyFiles> {
-        let manifest_path = self.session_dir.join("dirty_files.json");
+    /// Read the current `l1/dirty_events.json` for this session.
+    pub fn read_dirty(&self) -> io::Result<DirtyEvents> {
+        let manifest_path = layout::dirty_events_path(&self.session_dir);
         if manifest_path.exists() {
-            DirtyFiles::read(&manifest_path)
+            DirtyEvents::read(&manifest_path)
         } else {
-            Ok(DirtyFiles::empty())
+            Ok(DirtyEvents::empty(session_size_cap(&self.session_dir)))
         }
     }
 }
@@ -653,7 +953,7 @@ const MAX_SYMBOLS_PER_ENTRY: usize = 400;
 ///
 /// Load-bearing for `ecp peers`: `peer::concern::classify` reads
 /// `dirty_symbols` and nothing else, so an entry written without them is
-/// invisible to HARD and SOFT alike — both routes into `dirty_files.json`
+/// invisible to HARD and SOFT alike — both routes into `l1/dirty_events.json`
 /// have to fill it.
 ///
 /// This is the file's declaration list, NOT a change set: the file is
@@ -718,5 +1018,106 @@ fn extract_symbols(path: &Path, file_str: &str) -> (Vec<SymbolRef>, bool) {
     match graphs.into_iter().next() {
         None => (vec![], true),
         Some(graph) => (symbols_from_graph(&graph, file_str), false),
+    }
+}
+
+#[cfg(test)]
+mod hash_tests {
+    use super::*;
+
+    /// Stands for: the streamed digest of an over-buffer file equals the
+    /// one-shot `xxh3_64` that `promotion.rs` compares with git's hash.
+    #[test]
+    fn test_hash_worktree_file_larger_than_buffer_matches_xxh3_64() {
+        let dir = tempfile::tempdir().unwrap();
+        let content: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        fs::write(dir.path().join("big.bin"), &content).unwrap();
+
+        let got = hash_worktree_file(dir.path(), Path::new("big.bin"));
+
+        assert_eq!(got, xxh3_64(&content));
+    }
+
+    /// Stands for: a file that is gone hashes as empty content, as before.
+    #[test]
+    fn test_hash_worktree_file_missing_hashes_as_empty() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let got = hash_worktree_file(dir.path(), Path::new("gone.rs"));
+
+        assert_eq!(got, xxh3_64(&[]));
+    }
+
+    /// Stands for: an unknown worktree root never reads a cwd-relative path.
+    /// `Cargo.toml` exists in the test's cwd (the crate root); the hash is
+    /// the zero hash, not that file's digest.
+    #[test]
+    fn test_hash_worktree_file_unknown_root_returns_zero() {
+        let got = hash_worktree_file(Path::new(""), Path::new("Cargo.toml"));
+
+        assert_eq!(got, 0);
+    }
+}
+
+#[cfg(test)]
+mod flags_tests {
+    use super::*;
+
+    const SOURCE: &[u8] = b"namespace Lib
+{
+    public class Svc
+    {
+        private int count;
+        public void M() {}
+        private static void S() {}
+    }
+}
+";
+
+    fn fragment_symbols() -> Vec<FragmentSymbol> {
+        let graph = parse_graph("Lib/Svc.cs", SOURCE, SizeCap::BUILT_IN).unwrap();
+        fragment_file_from_local_graph(&graph).symbols
+    }
+
+    /// Stands for: a fragment carries a method's real flags, and `Some(0)`
+    /// (public instance) stays distinct from the absence of a meta, which is
+    /// `None`. The overlay's C# access rule reads them.
+    #[test]
+    fn test_fragment_file_from_local_graph_method_carries_its_flags() {
+        let symbols = fragment_symbols();
+        let flags_of = |name: &str| {
+            symbols
+                .iter()
+                .find(|s| s.name == name && s.kind == NodeKind::Method)
+                .unwrap_or_else(|| panic!("{name} missing"))
+                .flags
+        };
+        assert_eq!(flags_of("M"), Some(0));
+        assert!(flags_of("S").is_some_and(|flags| flags != 0));
+    }
+
+    /// Stands for: a symbol the parser pairs with no function meta (a type,
+    /// a field) has flags `None`, never `Some(0)`: the overlay treats `None`
+    /// as unknown and reports the gap.
+    #[test]
+    fn test_fragment_file_from_local_graph_non_callable_has_no_flags() {
+        let symbols = fragment_symbols();
+        let non_callable: Vec<_> = symbols
+            .iter()
+            .filter(|s| {
+                !matches!(
+                    s.kind,
+                    NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+                )
+            })
+            .collect();
+        assert!(
+            non_callable.iter().any(|s| s.name == "Svc"),
+            "{non_callable:?}"
+        );
+        assert!(
+            non_callable.iter().all(|s| s.flags.is_none()),
+            "{non_callable:?}"
+        );
     }
 }

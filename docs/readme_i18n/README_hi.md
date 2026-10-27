@@ -222,7 +222,7 @@ ecp impact --literal session_meta.json
 | `cypher '<query>'` | openCypher escape hatch; `m.content` source body लौटाता है |
 | `summary` | Registry overview, framework coverage, LLM-actionable blind-spot catalog, graph freshness |
 | `routes [<path>]` | HTTP route enumeration (declarative + imperative); `<path>` के साथ: handler + caller chain |
-| `contracts` | Cross-repo API contract inventory (routes / queue / RPC) |
+| `contracts` | HTTP route contracts: routes paired with their fetch callers, across repos (queue / RPC not yet) |
 | `diff` | Resolver-delta: binding tier-degradation + route / contract changes |
 | `tool-map` | Import-binding analysis के माध्यम से external HTTP / DB / Redis / queue call sites |
 | `shape-check` | HTTP consumer access patterns और Route response shapes के बीच drift |

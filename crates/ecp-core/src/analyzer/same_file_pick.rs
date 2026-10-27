@@ -6,7 +6,7 @@
 use crate::analyzer::heritage::HeritageNode;
 use crate::analyzer::reexport::ResolveTarget;
 use crate::analyzer::types::{owner_key, RawNode};
-use crate::file_category::Language;
+use crate::file_category::{FileMeta, Language};
 use crate::graph::NodeKind;
 use std::borrow::Cow;
 
@@ -53,27 +53,14 @@ pub struct ImplMember<'a> {
 /// handles in the caller's id space; owners compare by [`owner_key`].
 pub trait PickFacts {
     /// `file`'s declarations of `name` as a name lookup sees them (the
-    /// first of each uid, no later overload), in source order, any kind.
-    /// Each is followed by its later overloads that a Rust `impl` block
-    /// declares: members of several ownerless blocks share one uid, so all
-    /// but the first are overloads.
+    /// first of each uid, no later overload, no scoped node), in source
+    /// order, any kind. Each is followed by its later overloads that a Rust
+    /// `impl` block declares: members of several ownerless blocks share one
+    /// uid, so all but the first are overloads.
     fn pick_candidates(&self, file: &str, name: &str) -> Cow<'_, [u32]>;
     fn kind(&self, id: u32) -> NodeKind;
     /// The [`owner_key`] of the type declaring `id`; `None` at top level.
     fn owner(&self, id: u32) -> Option<&str>;
-    /// The parser's owner text before [`owner_key`] normalizes it.
-    ///
-    /// The default keeps existing facts compact.  Rust nested functions use
-    /// this only to distinguish lexical owners such as `A::new` and `B::new`.
-    fn raw_owner(&self, id: u32) -> Option<&str> {
-        self.owner(id)
-    }
-    /// The complete lexical path of a Rust callable, derived from the fresh
-    /// file symbols.  This stays separate from [`Self::owner`] because Rust
-    /// method ownership intentionally stores only the self type.
-    fn rust_lexical_scope(&self, _id: u32) -> Option<&str> {
-        None
-    }
     /// The `impl` block that declares the Rust callable `id`.
     fn impl_member(&self, id: u32) -> Option<ImplMember<'_>>;
     /// Whether the owner key `owner` names a namespace or module that
@@ -89,28 +76,24 @@ pub trait PickFacts {
     }
     /// The file `id` is declared in.
     fn file_of(&self, id: u32) -> Option<&str>;
+    /// `file`'s vendor flag and language as the ladder's rules read them.
+    /// The index reads the C5 language after parse it stores per file, so a
+    /// Vue file with a TypeScript script reads as TypeScript. The default
+    /// derives both from the path, which gives that file no language after
+    /// parse: an implementor that stores one overrides it.
+    fn file_meta(&self, file: &str) -> FileMeta {
+        FileMeta::from_path(file)
+    }
     /// Every type declaration named `owner` across the project.
     fn types_named(&self, owner: &str) -> Vec<u32>;
+    /// Whether `id` is scoped (contract C1): only the lexical tier binds
+    /// it, so every name-tier candidate source drops it (invariant I5).
+    /// The index reads its sparse map; the overlay reads its dirty map for
+    /// a virtual node and the graph's table for a base node.
+    fn is_lexically_scoped(&self, id: u32) -> bool;
     /// The transitive resolved supertypes of the type `ty`, breadth-first,
     /// each type once, `ty` excluded.
     fn ancestors(&self, ty: u32) -> Vec<u32>;
-}
-
-/// The lexical scope of a Rust callable used for same-file free-function
-/// lookup. Trait implementations retain their public self-type owner, while
-/// nested declarations also need the trait name to stay distinct.
-pub fn rust_lexical_owner<F: PickFacts + ?Sized>(facts: &F, id: u32, name: &str) -> String {
-    if let Some(scope) = facts.rust_lexical_scope(id) {
-        return scope.to_string();
-    }
-    let owner = facts.raw_owner(id);
-    match facts.impl_member(id).and_then(|member| member.trait_owner) {
-        Some(trait_owner) => owner.map_or_else(
-            || format!("{trait_owner}::{name}"),
-            |owner| format!("{trait_owner}::{owner}::{name}"),
-        ),
-        None => owner.map_or_else(|| name.to_string(), |owner| format!("{owner}::{name}")),
-    }
 }
 
 /// Whether a call through a type receiver in `language` reaches only that
@@ -135,32 +118,16 @@ pub fn type_receiver_is_closed(language: Language) -> bool {
     )
 }
 
-/// Whether `id` has no owner and no `impl` block either.
+/// Whether `id` has no owner and no `impl` block either, and is no scoped
+/// declaration: a nested function has no owner, yet only its enclosing
+/// callable reaches it (I5).
 pub fn is_free<F: PickFacts + ?Sized>(facts: &F, id: u32) -> bool {
-    facts.owner(id).is_none() && facts.impl_member(id).is_none()
-}
-
-/// Whether a Rust bare call may reach `id` outside its lexical function.
-///
-/// An unowned declaration is globally free.  A declaration directly owned by
-/// a module remains callable as a module-level free function.  A raw owner
-/// that differs from its normalized owner is normally a lexical function path
-/// and must not reappear through the global tiers. A path made entirely of
-/// declared modules remains a module-level free function.
-pub fn rust_free_global_candidate<F: PickFacts + ?Sized>(facts: &F, file: &str, id: u32) -> bool {
-    match facts.raw_owner(id) {
-        None => true,
-        Some(raw_owner) => {
-            facts.owner(id) == Some(raw_owner) && facts.is_namespace_owner(file, raw_owner)
-                || raw_owner
-                    .split("::")
-                    .all(|segment| facts.is_namespace_owner(file, segment))
-        }
-    }
+    facts.owner(id).is_none() && facts.impl_member(id).is_none() && !facts.is_lexically_scoped(id)
 }
 
 /// A receiverless name that cannot reach a method prefers its enclosing
-/// lexical function or module's declaration, then an unowned declaration.
+/// module's declaration, then an unowned declaration. A scoped declaration
+/// is neither: only the lexical tier binds it (I5).
 pub fn prefer_free<F: PickFacts + ?Sized>(
     facts: &F,
     file: &str,
@@ -202,49 +169,6 @@ pub fn prefer_free<F: PickFacts + ?Sized>(
     module
         .and_then(|module| candidates().find(|&id| facts.owner(id) == Some(module)))
         .or_else(|| candidates().find(|&id| is_free(facts, id)))
-}
-
-/// Like [`prefer_free`], but first chooses one declaration in a known lexical
-/// function scope.  The scope uses the parser's raw owner text because
-/// [`owner_key`] intentionally collapses `A::new` and `B::new` to `new` for
-/// type-member resolution.  An ambiguous lexical scope remains unresolved.
-/// It checks each enclosing lexical scope before an unowned free function.
-/// Falling back to normalized owners would let `B::new` bind
-/// `A::new::helper` merely because both normalize to `new`.
-pub fn prefer_free_scoped<F: PickFacts + ?Sized>(
-    facts: &F,
-    file: &str,
-    member: &str,
-    lexical_owner: Option<&str>,
-    owner: Option<&str>,
-    target: ResolveTarget,
-) -> Option<u32> {
-    if let Some(lexical_owner) = lexical_owner {
-        let predicate = target.kind_predicate();
-        let ids = facts.pick_candidates(file, member);
-        let candidates = || {
-            ids.iter()
-                .copied()
-                .filter(|&id| facts.kind(id) != NodeKind::Method && predicate(facts.kind(id)))
-        };
-        let mut scope = Some(lexical_owner);
-        while let Some(owner) = scope {
-            let mut scoped = candidates().filter(|&id| facts.raw_owner(id) == Some(owner));
-            match (scoped.next(), scoped.next()) {
-                (Some(id), None) => return Some(id),
-                (Some(_), Some(_)) => return None,
-                (None, _) => {}
-            }
-            scope = owner.rsplit_once("::").map(|(parent, _)| parent);
-        }
-        if let Some(id) = prefer_free(facts, file, member, owner, target)
-            .filter(|&id| is_free(facts, id) || rust_free_global_candidate(facts, file, id))
-        {
-            return Some(id);
-        }
-        return candidates().find(|&id| is_free(facts, id));
-    }
-    prefer_free(facts, file, member, owner, target)
 }
 
 /// The owner the pick rules see for `id`, declared in `file`.
@@ -317,6 +241,19 @@ pub fn prefer_owned<F: PickFacts + ?Sized>(
     target: ResolveTarget,
     scope: PickScope,
 ) -> Option<u32> {
+    // I5: a lookup that keeps scoped nodes (`lookup_in_file_with_kind`) may
+    // hand one over; the first unscoped candidate of `target`'s kinds then
+    // stands in for it.
+    let pick = if facts.is_lexically_scoped(pick) {
+        let predicate = target.kind_predicate();
+        facts
+            .pick_candidates(file, member)
+            .iter()
+            .copied()
+            .find(|&id| predicate(facts.kind(id)))?
+    } else {
+        pick
+    };
     let caller = scope.caller;
     let untyped = scope.untyped_receiver;
     let owner = owner.and_then(owner_key);
@@ -534,96 +471,6 @@ pub trait ImplNode: HeritageNode {
     fn owner_class(&self) -> Option<&str>;
 }
 
-/// Derive the complete lexical path of each Rust callable in one source-order
-/// containment pass.  The path is transient index state: public method owners
-/// and persisted graph data retain their existing compact representation.
-///
-/// Rust's parser gives a nested function its enclosing path as raw owner text.
-/// Call resolution needs the matching path for a method caller, even though a
-/// method's public owner remains only its self type.  Trait implementations
-/// therefore use `Trait::Type`, while an outer local function remains a prefix.
-pub fn rust_lexical_scopes<N: ImplNode>(nodes: &[N]) -> Vec<Option<Box<str>>> {
-    fn contains(outer: (u32, u32, u32, u32), inner: (u32, u32, u32, u32)) -> bool {
-        (outer.0, outer.1) <= (inner.0, inner.1) && (inner.2, inner.3) <= (outer.2, outer.3)
-    }
-
-    fn is_scope(kind: NodeKind) -> bool {
-        matches!(
-            kind,
-            NodeKind::Module
-                | NodeKind::Trait
-                | NodeKind::Impl
-                | NodeKind::Function
-                | NodeKind::Method
-                | NodeKind::Constructor
-        )
-    }
-
-    fn is_callable(kind: NodeKind) -> bool {
-        matches!(
-            kind,
-            NodeKind::Function | NodeKind::Method | NodeKind::Constructor
-        )
-    }
-
-    let mut order: Vec<usize> = (0..nodes.len())
-        .filter(|&idx| is_scope(nodes[idx].kind()))
-        .collect();
-    order.sort_unstable_by(|&left, &right| {
-        let left_span = nodes[left].span();
-        let right_span = nodes[right].span();
-        (left_span.0, left_span.1)
-            .cmp(&(right_span.0, right_span.1))
-            .then_with(|| (right_span.2, right_span.3).cmp(&(left_span.2, left_span.3)))
-            .then_with(|| left.cmp(&right))
-    });
-
-    let mut scopes = vec![None; nodes.len()];
-    let mut nearest_callable = vec![None; nodes.len()];
-    let mut stack: Vec<usize> = Vec::new();
-    for idx in order {
-        while stack
-            .last()
-            .is_some_and(|&outer| !contains(nodes[outer].span(), nodes[idx].span()))
-        {
-            stack.pop();
-        }
-        let parent = stack.last().copied();
-        let parent_scope = parent.and_then(|parent| scopes[parent].as_deref());
-        let enclosing_callable = parent.and_then(|parent| {
-            is_callable(nodes[parent].kind())
-                .then_some(parent)
-                .or(nearest_callable[parent])
-        });
-        let scope = match nodes[idx].kind() {
-            NodeKind::Module | NodeKind::Trait => parent_scope
-                .map(|parent| format!("{parent}::{}", nodes[idx].name()))
-                .unwrap_or_else(|| nodes[idx].name().to_string()),
-            NodeKind::Impl => {
-                let owner = nodes[idx]
-                    .owner_class()
-                    .filter(|owner| !owner.is_empty())
-                    .map(|owner| format!("{owner}::{}", nodes[idx].name()))
-                    .unwrap_or_else(|| nodes[idx].name().to_string());
-                enclosing_callable
-                    .and_then(|parent| scopes[parent].as_deref())
-                    .map(|parent| format!("{parent}::{owner}"))
-                    .unwrap_or(owner)
-            }
-            NodeKind::Function | NodeKind::Method | NodeKind::Constructor => parent_scope
-                .map(|parent| format!("{parent}::{}", nodes[idx].name()))
-                .unwrap_or_else(|| nodes[idx].name().to_string()),
-            _ => unreachable!("scope filter admits only known scope kinds"),
-        };
-        scopes[idx] = Some(scope.into_boxed_str());
-        nearest_callable[idx] = is_callable(nodes[idx].kind())
-            .then_some(idx)
-            .or(enclosing_callable);
-        stack.push(idx);
-    }
-    scopes
-}
-
 impl ImplNode for RawNode {
     fn name(&self) -> &str {
         &self.name
@@ -714,15 +561,20 @@ mod tests {
         namespaces: Vec<&'static str>,
         /// `(type id, ancestors)`.
         ancestors: Vec<(u32, Vec<u32>)>,
+        /// Scoped ids, as the lexical-parent table marks them.
+        scoped: Vec<u32>,
     }
 
     impl PickFacts for Decls {
         fn pick_candidates(&self, _file: &str, name: &str) -> Cow<'_, [u32]> {
             Cow::Owned(
                 (0..self.decls.len() as u32)
-                    .filter(|&id| self.decls[id as usize].0 == name)
+                    .filter(|&id| self.decls[id as usize].0 == name && !self.scoped.contains(&id))
                     .collect(),
             )
+        }
+        fn is_lexically_scoped(&self, id: u32) -> bool {
+            self.scoped.contains(&id)
         }
         fn kind(&self, id: u32) -> NodeKind {
             self.decls[id as usize].1
@@ -1036,5 +888,63 @@ mod tests {
         assert!(member_call_admits(&facts, 2, None));
         assert!(!member_call_admits(&facts, 2, Some("A")));
         assert!(!member_call_admits(&facts, 3, None));
+    }
+
+    /// Two ownerless `helper` functions; `scoped` lists the ids the
+    /// lexical-parent table marks.
+    fn twin_helpers(scoped: Vec<u32>) -> Decls {
+        Decls {
+            decls: vec![
+                ("helper", NodeKind::Function, None, None),
+                ("helper", NodeKind::Function, None, None),
+            ],
+            scoped,
+            ..Decls::default()
+        }
+    }
+
+    #[test]
+    fn test_is_free_scoped_declaration_returns_false() {
+        let facts = twin_helpers(vec![0]);
+        assert!(!is_free(&facts, 0), "a nested function is not free (I5)");
+        assert!(is_free(&facts, 1));
+        assert!(is_free(&twin_helpers(vec![]), 0), "control: no row");
+    }
+
+    #[test]
+    fn test_prefer_free_scoped_declaration_skipped_returns_top_level() {
+        let pick = |scoped| prefer_free(&twin_helpers(scoped), "f", "helper", None, CALLABLE);
+        assert_eq!(pick(vec![0]), Some(1));
+        assert_eq!(pick(vec![]), Some(0), "control: the first in source order");
+        assert_eq!(pick(vec![0, 1]), None, "every candidate is scoped");
+    }
+
+    #[test]
+    fn test_prefer_owned_scoped_pick_returns_unscoped_twin() {
+        let pick = |scoped| {
+            prefer_owned(
+                &twin_helpers(scoped),
+                "f",
+                0,
+                "helper",
+                None,
+                &[],
+                CALLABLE,
+                PickScope::default(),
+            )
+        };
+        assert_eq!(pick(vec![0]), Some(1));
+        assert_eq!(pick(vec![]), Some(0), "control: the pick stays");
+        assert_eq!(pick(vec![0, 1]), None, "no unscoped candidate stands in");
+    }
+
+    #[test]
+    fn test_member_call_admits_scoped_declaration_returns_false() {
+        let facts = Decls {
+            decls: vec![("helper", NodeKind::Function, None, None)],
+            scoped: vec![0],
+            ..Decls::default()
+        };
+        assert!(!member_call_admits(&facts, 0, None));
     }
 }

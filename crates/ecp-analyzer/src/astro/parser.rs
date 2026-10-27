@@ -190,6 +190,16 @@ impl LanguageProvider for AstroProvider {
         // ── Pass 2: re-parse frontmatter with TypeScript ──────────────────────
         let mut all_nodes: Vec<RawNode> = section_nodes;
         let mut all_imports: Vec<RawImport> = Vec::new();
+        let mut graph = LocalGraph {
+            file_path: path.to_path_buf(),
+            ..Default::default()
+        };
+        // The frontmatter is the component's script, always parsed as
+        // TypeScript. A client `<script>` only gets a Section, so it reports
+        // no language.
+        if let Some(fm_node) = &frontmatter_node {
+            graph.note_script(true, node_span(fm_node));
+        }
 
         if let Some(body_node) = frontmatter_body {
             // frontmatter_js_block starts on the line immediately after the
@@ -215,11 +225,8 @@ impl LanguageProvider for AstroProvider {
             all_imports.extend(imports);
         }
 
-        Ok(LocalGraph {
-            file_path: path.to_path_buf(),
-            nodes: all_nodes,
-            imports: all_imports,
-            ..Default::default()
-        })
+        graph.nodes = all_nodes;
+        graph.imports = all_imports;
+        Ok(graph)
     }
 }

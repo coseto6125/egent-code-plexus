@@ -60,12 +60,11 @@ Refresh evidence when source hashes change. A truncated result is not a complete
 |---|---|
 | `ecp summary` | Repo health + frameworks + blind spots |
 | `ecp routes <path>` | HTTP route → handler + caller chain |
-| `ecp contracts` | Cross-repo API contracts |
+| `ecp contracts` | HTTP route contracts: routes paired with fetch callers, across repos |
 | `ecp tool-map` | External HTTP / DB / Redis / queue calls |
 | `ecp shape-check` | HTTP consumer ↔ Route response shape drift |
 | `ecp processes` / `processes trace <pat>` | Execution-flow steps in real order — cleaner than `impact --direction down` |
 | `ecp review` | Full audit (impact + summary + tool-map + shape-check + diff) |
-| `ecp rename <old> <new>` | AST-aware multi-file rename |
 | `ecp pattern -p '<pat>'` | Statement shapes the graph has no node for; `--callers-of` scopes by reachability |
 | `ecp heuristics <kind>` | Confidence-tagged pairings no edge proves: `saga`, `schema-bindings`, `event-mirrors` |
 | `ecp admin doctor [check] [--fix]` | Environment health; `--fix` repairs |

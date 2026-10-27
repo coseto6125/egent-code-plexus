@@ -204,6 +204,16 @@
     arguments: (arguments
       [(string (string_fragment) @nestjs.decorator.path) (MISSING) @nestjs.decorator.path])))
 
+;; The same decorator with its argument list captured: `@Get()` names no
+;; path, so the route is the controller prefix (C1 `join_route_path`).
+;; parser.rs keeps this match only when the list holds no argument; a
+;; decorator with a path also matches the pattern above.
+(decorator
+  (call_expression
+    function: (identifier) @nestjs.decorator.verb
+    (#match? @nestjs.decorator.verb "^(Get|Post|Put|Delete|Patch|Options|Head|All)$")
+    arguments: (arguments) @nestjs.decorator.args))
+
 ;; ---- Redis TypeScript (T5-27) ----
 ;; Covers node-redis v4 (`client.publish/subscribe/pSubscribe(...)`) and
 ;; ioredis (`redis.publish/subscribe/psubscribe(...)`).

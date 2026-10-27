@@ -169,19 +169,6 @@ fn synthetic_annotation_does_not_panic_across_commands() {
                 "json",
             ],
         ),
-        (
-            "rename --dry-run (target_indices builder)",
-            &[
-                "rename",
-                "--symbol",
-                "route",
-                "--new-name",
-                "endpoint",
-                "--dry-run",
-                "--repo",
-                ".",
-            ],
-        ),
     ];
 
     for (label, args) in probes {

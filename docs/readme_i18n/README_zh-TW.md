@@ -222,7 +222,7 @@ ecp impact --literal session_meta.json
 | `cypher '<query>'` | openCypher 逃生口；`m.content` 回傳原始碼本體 |
 | `summary` | Registry 總覽、框架覆蓋、LLM 可行動的 blind-spot 目錄、圖譜新鮮度 |
 | `routes [<path>]` | HTTP 路由列舉（宣告式 + 命令式）；帶 `<path>` 時顯示處理器 + 呼叫鏈 |
-| `contracts` | 跨 repo 的 API 契約清單（routes / queue / RPC） |
+| `contracts` | HTTP route 契約：route 與呼叫它的 fetch 配對，可跨 repo（queue / RPC 尚未支援） |
 | `diff` | 解析器差異：綁定層級降級 + 路由 / 契約變更 |
 | `tool-map` | 透過導入綁定分析找出外部 HTTP / DB / Redis / queue 的呼叫點 |
 | `shape-check` | HTTP 消費者存取模式與 Route 回應結構之間的漂移 |

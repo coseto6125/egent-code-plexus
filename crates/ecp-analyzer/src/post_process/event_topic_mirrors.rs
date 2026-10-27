@@ -7,12 +7,11 @@
 //! detectors T5-2..T5-31):
 //!
 //! 1. **Promote** each `RawEventTopic` → `NodeKind::EventTopic` node.
-//! 2. **Connect** the enclosing function/method to the new node via
+//! 2. **Connect** the record's endpoint to the new node via
 //!    `RelType::Publishes` (direction=Publish) or `RelType::Subscribes`
-//!    (direction=Subscribe). The enclosing function is resolved via
-//!    `SymbolTable::lookup_in_file`; if the lookup misses (e.g. anonymous
-//!    callback or detector didn't capture the enclosing function name), the
-//!    `EventTopic` node is still emitted but has no directional edge.
+//!    (direction=Subscribe). The endpoint is the innermost enclosing
+//!    callable by span, else the file (C4 `RecordKind::EventTopic`); a `File`
+//!    endpoint's edge goes to `file_edges`, as in `path_literal_nodes`.
 //! 3. **Mirror** Publish↔Subscribe pairs that share the same canonical topic
 //!    string AND the same `FrameworkId` (same-lib gate). One
 //!    `RelType::EventTopicMirror` edge per matched pair with `confidence=0.85`
@@ -39,14 +38,15 @@
 //! The #275 precedent (`SchemaField` as intermediary, not direct function→field
 //! edges) applies here. An intermediate `EventTopic` node lets LLMs query
 //! `MATCH (f1)-->(t:EventTopic)<--(f2)` without knowing which functions are
-//! producers vs consumers. The node also carries `name` (canonical topic) for
+//! producers vs consumers. The node also carries `name` (first source spelling) for
 //! direct cypher filtering.
 
-use crate::resolution::index::SymbolTable;
+use super::path_literal_nodes::FILE_SOURCE_PENDING;
+use ecp_core::analyzer::record_nodes;
 use ecp_core::analyzer::types::{LocalGraph, PubSub};
-use ecp_core::graph::{Edge, Node, NodeKind, RelType};
+use ecp_core::contracts::raw_records::{FileOrd, GlobalEndpoint, RawIndexMap};
+use ecp_core::graph::{Edge, Node, RelType};
 use ecp_core::pool::StringPool;
-use ecp_core::uid;
 use rustc_hash::FxHashMap;
 
 /// Promote `RawEventTopic`s → `EventTopic` Nodes, emit `Publishes`/`Subscribes`
@@ -55,13 +55,14 @@ use rustc_hash::FxHashMap;
 /// topic and framework. Returns the count of emitted `EventTopicMirror` edges.
 pub fn emit_edges(
     local_graphs: &[LocalGraph],
-    symbol_table: &SymbolTable,
+    raw_map: &RawIndexMap,
     string_pool: &mut StringPool,
     nodes: &mut Vec<Node>,
     edges: &mut Vec<Edge>,
+    file_edges: &mut Vec<(FileOrd, Edge)>,
 ) -> usize {
-    let reason_publishes = string_pool.add("post_process:event_topic:publishes");
-    let reason_subscribes = string_pool.add("post_process:event_topic:subscribes");
+    let reason_publishes = string_pool.add(record_nodes::EVENT_TOPIC_PUBLISHES_REASON);
+    let reason_subscribes = string_pool.add(record_nodes::EVENT_TOPIC_SUBSCRIBES_REASON);
     let reason_mirror = string_pool.add("post_process:event_topic:mirror");
 
     // Phase 1 — promote RawEventTopics to EventTopic nodes + directional edges.
@@ -82,56 +83,61 @@ pub fn emit_edges(
         let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
         let file_idx = lg_idx as u32;
 
-        for raw_et in event_topics.iter() {
-            let Some(ref canonical_topic) = raw_et.topic_literal else {
-                // Dynamic topic — no literal to key on; skip (BlindSpot
-                // emission for dynamic topics is the detector's responsibility).
-                continue;
-            };
-
-            let topic_name = canonical_topic.as_ref();
-            let lib_u8 = raw_et.lib as u8;
-
-            // Emit the EventTopic node.
-            let node_uid = uid::compute(NodeKind::EventTopic, &path_str, None, topic_name);
-            let name_ref = string_pool.add(topic_name);
+        // One node per literal topic, named by its key's earliest spelling
+        // in the file (`record_nodes::event_topic_nodes`, which the overlay's
+        // per-file replay shares). A dynamic topic has no literal to key on
+        // and gets none (BlindSpot emission for dynamic topics is the
+        // detector's responsibility).
+        record_nodes::event_topic_nodes(&path_str, event_topics, |i, topic| {
+            let raw_et = &event_topics[i];
+            let name_ref = string_pool.add(&topic.name);
             let et_idx = nodes.len() as u32;
             nodes.push(Node {
-                uid: node_uid,
+                uid: topic.uid,
                 name: name_ref,
                 file_idx,
-                kind: NodeKind::EventTopic,
-                span: raw_et.span,
+                kind: topic.kind,
+                span: topic.span,
                 community_id: 0,
                 owner_class: ecp_core::pool::StrRef::default(),
                 content_hash: 0,
             });
 
-            // Resolve enclosing function → Publishes / Subscribes edge.
-            let fn_name = raw_et.enclosing_fn.as_ref();
-            if !fn_name.is_empty() {
-                if let Some(fn_idx) = symbol_table.lookup_in_file(&path_str, fn_name) {
-                    let (rel_type, reason) = match raw_et.direction {
-                        PubSub::Publish => (RelType::Publishes, reason_publishes),
-                        PubSub::Subscribe => (RelType::Subscribes, reason_subscribes),
-                    };
-                    edges.push(Edge {
-                        source: fn_idx,
-                        target: et_idx,
-                        rel_type,
-                        confidence: 1.0,
-                        reason,
-                    });
+            // Endpoint → Publishes / Subscribes edge.
+            if let Some(endpoint) = raw_et.endpoint_in(&local_graph.nodes) {
+                let (rel_type, reason) = match raw_et.direction {
+                    PubSub::Publish => (RelType::Publishes, reason_publishes),
+                    PubSub::Subscribe => (RelType::Subscribes, reason_subscribes),
+                };
+                let edge = |source| Edge {
+                    source,
+                    target: et_idx,
+                    rel_type,
+                    confidence: 1.0,
+                    reason,
+                };
+                match raw_map.resolve(FileOrd(file_idx), &endpoint) {
+                    Some(GlobalEndpoint::Node(source)) => edges.push(edge(source)),
+                    Some(GlobalEndpoint::File(file)) => {
+                        file_edges.push((file, edge(FILE_SOURCE_PENDING)))
+                    }
+                    Some(GlobalEndpoint::Unresolved(_)) | None => {}
                 }
             }
 
-            // Index by (canonical_topic, lib) for mirror pairing.
-            let key: TopicKey = (canonical_topic.clone(), lib_u8);
+            // Index by (canonical_topic, lib) for mirror pairing. Records
+            // written before `topic_key` existed hold the canonical form in
+            // `topic_literal`; they key on it unchanged.
+            let Some(canonical_topic) = raw_et.topic_key.as_ref().or(raw_et.topic_literal.as_ref())
+            else {
+                return;
+            };
+            let key: TopicKey = (canonical_topic.clone(), raw_et.lib as u8);
             match raw_et.direction {
                 PubSub::Publish => publishers.entry(key).or_default().push(et_idx),
                 PubSub::Subscribe => subscribers.entry(key).or_default().push(et_idx),
             }
-        }
+        });
     }
 
     // Phase 2 — bidirectional top-1 EventTopicMirror edges.

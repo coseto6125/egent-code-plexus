@@ -23,11 +23,3 @@ pub fn fuzzy_suggestions(query: &str, candidates: &[&str]) -> String {
 pub fn error_with_cause(what: &str, cause: &str, next: &str) -> String {
     format!("✗ {what}\n  cause: {cause}\n  next:  {next}")
 }
-
-/// Collision warning for rename pre-flight.
-pub fn collision_warning(new_name: &str, existing_locations: &[String]) -> String {
-    let locs = existing_locations.join("\n  - ");
-    format!(
-        "⚠ COLLISION: \"{new_name}\" already exists at:\n  - {locs}\n→ Choose a different new name, or inspect: ecp inspect {new_name}"
-    )
-}

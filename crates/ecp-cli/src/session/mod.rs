@@ -1,3 +1,4 @@
+pub mod closure_store;
 pub mod overlay_reader;
 pub mod overlay_writer;
 pub mod promotion;

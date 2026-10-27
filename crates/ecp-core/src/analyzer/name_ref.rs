@@ -2,22 +2,18 @@
 //!
 //! The index and the session overlay own different declaration stores. They
 //! provide lookups as closures, while this module owns the policy so the two
-//! paths cannot drift.
+//! paths cannot drift. Both reach it through [`crate::analyzer::ladder::name_ref`].
 
+use crate::analyzer::ladder::ResolveFacts;
+use crate::analyzer::outcome::Tier;
 use crate::analyzer::reexport::ResolveTarget;
 use crate::analyzer::same_file_pick::prefer_free;
-use crate::analyzer::type_ladder::{self, Ownership, TypeFacts};
+use crate::analyzer::type_ladder::{self, Ownership};
 use crate::analyzer::types::{owner_key, CallSite, NameRef, NameRefKind, RawImport};
 use crate::file_category::Language;
 
-#[derive(Clone, Copy)]
-pub struct NameRefTiers {
-    pub same_file: f32,
-    pub heritage: f32,
-    pub global: f32,
-}
-
-/// Resolve one [`NameRef`] through the index's ordinary symbol tiers.
+/// Resolve one [`NameRef`] through the index's ordinary symbol tiers, at
+/// the [`Tier`] confidences.
 ///
 /// `resolve` and `resolve_imported` apply the host's import and global
 /// tables. The remaining policy is shared because it depends only on the
@@ -30,13 +26,11 @@ pub fn resolve_name_ref<F, Resolve, ResolveImported>(
     imports: &[RawImport],
     owner: Option<&str>,
     name_ref: NameRef<'_>,
-    tiers: NameRefTiers,
-    has_declaration: impl Fn(&str) -> bool,
     mut resolve: Resolve,
     mut resolve_imported: ResolveImported,
 ) -> Option<(u32, f32)>
 where
-    F: TypeFacts + ?Sized,
+    F: ResolveFacts,
     Resolve: FnMut(&str, ResolveTarget) -> Vec<(u32, f32)>,
     ResolveImported: FnMut(&str, ResolveTarget) -> Vec<(u32, f32)>,
 {
@@ -44,7 +38,7 @@ where
         .name
         .rsplit_once('.')
         .map_or(name_ref.name, |(_, member)| member);
-    if !has_declaration(member)
+    if !facts.has_named(member)
         && !imports
             .iter()
             .any(|import| import.alias.as_deref() == Some(member))
@@ -61,7 +55,7 @@ where
     if language == Language::Rust && !qualified {
         if let Some(id) = prefer_free(facts, file, member, owner, target) {
             return (name_ref.kind != NameRefKind::Constant || !facts.kind(id).is_callable())
-                .then_some((id, tiers.same_file));
+                .then_some((id, Tier::SameFile.confidence()));
         }
     }
     if let (false, Some(owner)) = (qualified, owner) {
@@ -78,7 +72,7 @@ where
         };
         for &kind in own_kinds {
             if let [id] = facts.owned_in_file(file, member, owner, kind).as_slice() {
-                return Some((*id, tiers.same_file));
+                return Some((*id, Tier::SameFile.confidence()));
             }
         }
         if let Some(key) = owner_key(owner).filter(|key| {
@@ -95,9 +89,9 @@ where
                         type_ladder::member_ownership(facts, type_id, owner, member, kind)
                     {
                         let confidence = if !inherited && facts.file_of(id) == Some(file) {
-                            tiers.same_file
+                            Tier::SameFile.confidence()
                         } else {
-                            tiers.heritage
+                            Tier::HeritageScoped.confidence()
                         };
                         return Some((id, confidence));
                     }
@@ -126,7 +120,7 @@ where
             | Language::Java
             | Language::CSharp
     );
-    let global = confidence <= tiers.global;
+    let global = confidence <= Tier::Global.confidence();
     let other_package = facts.file_of(id).is_some_and(|target| {
         std::path::Path::new(target).parent() != std::path::Path::new(file).parent()
     });

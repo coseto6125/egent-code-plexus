@@ -1,0 +1,354 @@
+//! C# member accessibility in call binding (codex ruling P-ext2 C): an
+//! instance call never binds a static method, and a `private` member binds
+//! only from its own type and the types nested in it.
+//!
+//! The fixture mirrors Newtonsoft.Json: `JContainer : JToken` calls
+//! `content.GetType()` on an `object`. `JToken` declares `private static
+//! string GetType(JToken)`. Before P-ext2 the parser wrote a bare `GetType`,
+//! the heritage tier bound the call to it, and the chain then typed
+//! `.IsSubclassOf(..)` on a `string` receiver. Since P-recv the parser
+//! writes an untyped member, which binds no member by its name.
+
+mod receiver_typing_support;
+
+use ecp_analyzer::c_sharp::parser::CSharpProvider;
+use ecp_core::graph::{RelType, ZeroCopyGraph};
+use receiver_typing_support::{build, parse_all};
+
+const JTOKEN: (&str, &str) = (
+    "Linq/JToken.cs",
+    "namespace Lib.Linq
+{
+    public class JToken
+    {
+        private static string GetType(JToken token) { return \"\"; }
+        public string Explicit(JToken t)
+        {
+            return JToken.GetType(t);
+        }
+        public bool Instance(JToken t)
+        {
+            return t.GetType() == null;
+        }
+        public class Nested
+        {
+            public string FromNested(JToken t)
+            {
+                return JToken.GetType(t);
+            }
+        }
+    }
+}
+",
+);
+
+const JCONTAINER: (&str, &str) = (
+    "Linq/JContainer.cs",
+    "namespace Lib.Linq
+{
+    public class JContainer : JToken
+    {
+        public bool ValidateContent(object content)
+        {
+            return content.GetType().IsSubclassOf(typeof(JToken));
+        }
+        public int Count() { return 0; }
+        public int UseOther(JContainer other)
+        {
+            return other.Count();
+        }
+    }
+}
+",
+);
+
+fn graph() -> ZeroCopyGraph {
+    let provider = CSharpProvider::new().expect("CSharpProvider::new");
+    build(parse_all(&provider, &[JTOKEN, JCONTAINER]))
+}
+
+/// The callee names of every `Calls` edge out of `caller`.
+fn callees(graph: &ZeroCopyGraph, caller: &str) -> Vec<String> {
+    let pool = graph.string_pool.as_slice();
+    let mut names: Vec<String> = graph
+        .edges
+        .iter()
+        .filter(|e| e.rel_type == RelType::Calls)
+        .filter(|e| graph.nodes[e.source as usize].name.resolve(pool) == caller)
+        .map(|e| {
+            graph.nodes[e.target as usize]
+                .name
+                .resolve(pool)
+                .to_string()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// Regression (JContainer.cs:765): `GetType` on an `object` in a derived
+/// type never reaches the base's private static, and no `string` receiver
+/// types the rest of the chain.
+#[test]
+fn test_resolve_call_derived_type_bare_call_private_static_of_base_emits_no_edge() {
+    let graph = graph();
+    assert_eq!(callees(&graph, "ValidateContent"), Vec::<String>::new());
+    let pool = graph.string_pool.as_slice();
+    let string_receiver: Vec<&str> = graph
+        .blind_spots
+        .iter()
+        .map(|b| b.hint.resolve(pool))
+        .filter(|hint| hint.contains("`string`") || hint.contains("`String`"))
+        .collect();
+    assert_eq!(string_receiver, Vec::<&str>::new());
+}
+
+/// An instance call (`t.GetType()`) never binds a static method, even one
+/// its own type declares.
+#[test]
+fn test_resolve_call_instance_call_static_method_emits_no_edge() {
+    assert_eq!(callees(&graph(), "Instance"), Vec::<String>::new());
+}
+
+/// The explicit static call inside the declaring type, and from a type
+/// nested in it, still binds the private static.
+#[test]
+fn test_resolve_call_explicit_static_call_in_own_or_nested_type_binds() {
+    let graph = graph();
+    assert_eq!(callees(&graph, "Explicit"), ["GetType"]);
+    assert_eq!(callees(&graph, "FromNested"), ["GetType"]);
+}
+
+/// A legal instance call to a public instance method still binds.
+#[test]
+fn test_resolve_call_instance_call_public_instance_method_binds() {
+    assert_eq!(callees(&graph(), "UseOther"), ["Count"]);
+}
+
+/// The target line of every `Calls` edge out of `caller` to `callee`.
+fn target_lines(graph: &ZeroCopyGraph, caller: &str, callee: &str) -> Vec<u32> {
+    let pool = graph.string_pool.as_slice();
+    let mut lines: Vec<u32> = graph
+        .edges
+        .iter()
+        .filter(|e| e.rel_type == RelType::Calls)
+        .filter(|e| graph.nodes[e.source as usize].name.resolve(pool) == caller)
+        .map(|e| &graph.nodes[e.target as usize])
+        .filter(|n| n.name.resolve(pool) == callee)
+        .map(|n| n.span.0)
+        .collect();
+    lines.sort_unstable();
+    lines
+}
+
+/// `Tok` declares `WriteTo` twice, on the two rows `rows` gives, in that
+/// order: `private` on `private_row`, `public` with a `params` array on the
+/// other. `User.Use` calls `t.WriteTo(w)`; `Tok.Own` calls `WriteTo(w)`.
+fn write_to_graph(private_first: bool) -> ZeroCopyGraph {
+    let private = "        private void WriteTo(Writer w) {}";
+    let public = "        public void WriteTo(Writer w, params Conv[] c) {}";
+    let (first, second) = if private_first {
+        (private, public)
+    } else {
+        (public, private)
+    };
+    let tok = format!(
+        "namespace Lib
+{{
+    public class Writer {{}}
+    public class Conv {{}}
+    public class Tok
+    {{
+{first}
+{second}
+        public void Own(Writer w) {{ WriteTo(w); }}
+    }}
+}}
+"
+    );
+    let user = "namespace Lib
+{
+    public class User
+    {
+        public void Use(Tok t, Writer w) { t.WriteTo(w); }
+    }
+}
+";
+    let provider = CSharpProvider::new().expect("CSharpProvider::new");
+    build(parse_all(
+        &provider,
+        &[("Lib/Tok.cs", &tok), ("Lib/User.cs", user)],
+    ))
+}
+
+/// Regression (Linq/JToken.cs:449): the first `WriteTo` is private, so a
+/// call from another type binds the one public overload, as C# does.
+#[test]
+fn test_resolve_call_private_first_overload_outside_type_binds_public_overload() {
+    assert_eq!(target_lines(&write_to_graph(true), "Use", "WriteTo"), [7]);
+}
+
+/// With the public overload first, the outside call binds it.
+#[test]
+fn test_resolve_call_public_first_overload_outside_type_binds_public_overload() {
+    assert_eq!(target_lines(&write_to_graph(false), "Use", "WriteTo"), [6]);
+}
+
+/// Inside its own type the private first overload stays reachable.
+#[test]
+fn test_resolve_call_private_first_overload_own_type_binds_private_overload() {
+    assert_eq!(target_lines(&write_to_graph(true), "Own", "WriteTo"), [6]);
+}
+
+/// Two reachable overloads after a private first one are not told apart:
+/// no edge.
+#[test]
+fn test_resolve_call_private_first_two_public_overloads_outside_type_emits_no_edge() {
+    let tok = "namespace Lib
+{
+    public class Writer {}
+    public class Tok
+    {
+        private void WriteTo(Writer w) {}
+        public void WriteTo(Writer w, int depth) {}
+        public void WriteTo(Writer w, string name) {}
+    }
+}
+";
+    let user = "namespace Lib
+{
+    public class User
+    {
+        public void Use(Tok t, Writer w) { t.WriteTo(w, 1); }
+    }
+}
+";
+    let provider = CSharpProvider::new().expect("CSharpProvider::new");
+    let graph = build(parse_all(
+        &provider,
+        &[("Lib/Tok.cs", tok), ("Lib/User.cs", user)],
+    ));
+    assert_eq!(target_lines(&graph, "Use", "WriteTo"), Vec::<u32>::new());
+}
+
+/// The graph of one file `Lib/App.cs` holding `source`.
+fn one_file(source: &str) -> ZeroCopyGraph {
+    let provider = CSharpProvider::new().expect("CSharpProvider::new");
+    build(parse_all(&provider, &[("Lib/App.cs", source)]))
+}
+
+/// Stands for (B3): a chained member call obeys the access rule a plain
+/// call obeys. `R` declares a private `Read()` (row 4) before a public
+/// `Read(int)` (row 5); `User.Use` calls `Maker.Make().Read(1)` from outside
+/// `R`, so it binds the public overload. Before the fix the chain bound the
+/// first, private declaration.
+#[test]
+fn test_resolve_chain_private_first_overload_outside_type_binds_public_overload() {
+    let graph = one_file(
+        "namespace Lib
+{
+    public class R
+    {
+        private void Read() {}
+        public void Read(int x) {}
+    }
+    public class Maker
+    {
+        public static R Make() { return new R(); }
+    }
+    public class User
+    {
+        public void Use() { Maker.Make().Read(1); }
+    }
+}
+",
+    );
+    assert_eq!(target_lines(&graph, "Use", "Read"), [5]);
+    assert_eq!(target_lines(&graph, "Use", "Make"), [9]);
+}
+
+/// Stands for (B3): a chained call to a private member of another type, with
+/// no reachable overload, binds nothing. Before the fix it bound the private
+/// `Read` (row 4).
+#[test]
+fn test_resolve_chain_private_only_member_outside_type_emits_no_edge() {
+    let graph = one_file(
+        "namespace Lib
+{
+    public class R
+    {
+        private void Read() {}
+    }
+    public class Maker
+    {
+        public static R Make() { return new R(); }
+    }
+    public class User
+    {
+        public void Use() { Maker.Make().Read(); }
+    }
+}
+",
+    );
+    assert_eq!(target_lines(&graph, "Use", "Read"), Vec::<u32>::new());
+}
+
+/// Stands for (F6, "Color Color", C# spec 12.8.7.2): a property named as its
+/// type is the value and the type at once. `Svc.Logger` of type `Logger`:
+/// `Logger.Create()` binds the static `Create` (row 4) and `Logger.Log()`
+/// the instance `Log` (row 5). Before the fix the site was an instance call,
+/// and the access rule refused the static `Create`.
+#[test]
+fn test_resolve_call_color_color_property_binds_static_and_instance_member() {
+    let graph = one_file(
+        "namespace Lib
+{
+    public class Logger
+    {
+        public static Logger Create() { return null; }
+        public void Log() {}
+    }
+    public class Svc
+    {
+        public Logger Logger { get; }
+        public void Run()
+        {
+            Logger.Create();
+            Logger.Log();
+        }
+    }
+}
+",
+    );
+    assert_eq!(target_lines(&graph, "Run", "Create"), [4]);
+    assert_eq!(target_lines(&graph, "Run", "Log"), [5]);
+}
+
+/// Stands for (F6): a value whose type has another name stays an instance
+/// call. `Logger log` is no `Logger` spelling, so `log.Create()` binds no
+/// static `Create`; `log.Log()` binds the instance `Log`. Passes before the
+/// fix as well: it guards the shape beside the rule.
+#[test]
+fn test_resolve_call_differently_named_value_static_member_emits_no_edge() {
+    let graph = one_file(
+        "namespace Lib
+{
+    public class Logger
+    {
+        public static Logger Create() { return null; }
+        public void Log() {}
+    }
+    public class Svc
+    {
+        public void Run(Logger log)
+        {
+            log.Create();
+            log.Log();
+        }
+    }
+}
+",
+    );
+    assert_eq!(target_lines(&graph, "Run", "Create"), Vec::<u32>::new());
+    assert_eq!(target_lines(&graph, "Run", "Log"), [5]);
+}

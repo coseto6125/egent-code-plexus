@@ -650,6 +650,47 @@ router.delete('/items/:id', deleteItem);
     );
 }
 
+/// Stands for: the variable a route call is made on is a side record for the
+/// mount composer, never an endpoint in `routes`. Only calls that survive the
+/// path-shape filter keep their receiver.
+#[test]
+fn test_js_parse_file_router_calls_record_receivers_apart_from_routes() {
+    let src = r#"
+const express = require('express');
+const router = express.Router();
+const cache = new Map();
+
+router.get('/items', listItems);
+cache.get('k');
+"#;
+    let graph = JavaScriptProvider::new()
+        .unwrap()
+        .parse_file("test.js".as_ref(), src.as_bytes())
+        .unwrap();
+    assert_routes(&graph.routes, &[("GET", "/items")]);
+    let receivers: Vec<&str> = graph
+        .route_receivers
+        .iter()
+        .flatten()
+        .map(|r| r.receiver.as_str())
+        .collect();
+    assert_eq!(receivers, ["router"]);
+    assert_eq!(
+        graph.route_receivers.as_deref().unwrap()[0].span,
+        graph.routes[0].span
+    );
+}
+
+/// Stands for: a file with no route call archives no receiver table.
+#[test]
+fn test_js_parse_file_no_route_calls_has_no_receiver_table() {
+    let graph = JavaScriptProvider::new()
+        .unwrap()
+        .parse_file("test.js".as_ref(), b"const x = 1;\n")
+        .unwrap();
+    assert!(graph.route_receivers.is_none());
+}
+
 // ─── JavaScript — Map/headers NEGATIVE fixture ───────────────────────
 
 #[test]
@@ -966,12 +1007,13 @@ fn php_facade_get_emits_zero_routes() {
 
 // ─── TypeScript — NestJS decorator routes ────────────────────────────
 
+/// Stands for: bare-path NestJS decorators (`@Get('list')`, no leading
+/// `/`) emit routes under the `@nestjs/*` gate, each under its controller's
+/// prefix (P8b, C1 `join_route_path`). Without the lax helper and the gate
+/// (parity-r3 PR #152) all 89 corpus-side NestJS decorator routes surfaced
+/// as ref_over. Before P8b the route kept the method path alone (`/list`).
 #[test]
-fn ts_nestjs_decorator_routes_emit_with_bare_paths() {
-    // `@Get('users')` / `@Post('users/:id')` shapes — bare-path NestJS
-    // convention. Without the lax helper + `@nestjs/*` gate added in
-    // parity-r3 PR #152, all 89 corpus-side NestJS decorator routes
-    // surfaced as ref_over.
+fn ts_nestjs_decorator_bare_paths_emit_under_controller_prefix() {
     let src = r#"
         import { Controller, Get, Post, Delete } from '@nestjs/common';
 
@@ -989,7 +1031,11 @@ fn ts_nestjs_decorator_routes_emit_with_bare_paths() {
     "#;
     assert_routes(
         &ts_routes(src),
-        &[("GET", "/list"), ("POST", "/create"), ("DELETE", "/:id")],
+        &[
+            ("GET", "/users/list"),
+            ("POST", "/users/create"),
+            ("DELETE", "/users/:id"),
+        ],
     );
 }
 

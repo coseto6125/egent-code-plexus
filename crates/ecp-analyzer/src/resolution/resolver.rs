@@ -37,59 +37,48 @@
 //! regression suite and `crates/ecp-analyzer/benches/resolver_lookup.rs` for
 //! the before/after bench numbers.
 
+use ecp_core::analyzer::csharp_access::{self, CallAccess};
+use ecp_core::analyzer::csharp_extension::{self, ReceiverSite};
 use ecp_core::analyzer::import_binding::{
-    extension_retry, fqn_extension, fqn_imported_name, fqn_language, fqn_type_path, import_binding,
-    import_family, import_member_fallback, may_suppress, module_head, retry_name,
+    fqn_imported_name, fqn_language, fqn_type_path, import_binding, import_member_fallback,
+    MemberOwner,
 };
+use ecp_core::analyzer::ladder::{
+    self, qualifier_prefix_is_internal, split_qualifier, CallContext, CallPick, CrateModule,
+    FieldRead, StemFile, TypeName,
+};
+use ecp_core::analyzer::module_discovery::{self, Module, ModuleIndex};
 use ecp_core::analyzer::outcome::{NoEdge, Resolution, Tier};
-use ecp_core::analyzer::path_aliases::PathAliases;
+use ecp_core::analyzer::path_aliases::{AliasScope, PathAliases};
 use ecp_core::analyzer::reexport::{
     self, is_ecmascript, probe_rust_module, ExportAliasTable, Fact, FileImports, ImportRef,
     ModuleFacts, PyModule,
 };
-use ecp_core::analyzer::rust_paths::{is_rust_source, rust_module_path_base};
-use ecp_core::analyzer::same_file_pick::type_receiver_is_closed;
-use ecp_core::analyzer::type_ladder::{
-    self, Ownership, TypeCandidates, TypeMember as LadderMember,
+use ecp_core::analyzer::rust_paths::{
+    is_rust_source, rust_expand_path_head, rust_module_path_base, rust_type_path_prefix,
 };
-use ecp_core::analyzer::types::{owner_key, CallSite, LocalGraph, RawImport};
+use ecp_core::analyzer::type_ladder::{self, TypeCandidates, TypeMember as LadderMember};
+use ecp_core::analyzer::types::{owner_key, CallArguments, CallSite, LocalGraph, RawImport};
 use ecp_core::graph::NodeKind;
 use serde::Serialize;
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
-use crate::resolution::heuristics::ResolutionTier;
 use crate::resolution::index::{
-    crate_root_prefix, FileMeta, GlobalPick, Language, PickScope, ResolveTarget, SymbolTable,
+    CsharpExtensionDecls, FileMeta, GlobalPick, Language, ResolveTarget, SymbolTable,
 };
-use crate::rust::module_tree::RustWorkspaceModTree;
+use crate::rust::module_tree::{IndexModuleTree, RustWorkspaceModTree};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 pub type NodeId = u32;
 
-#[derive(Clone)]
-enum IndexedModule {
-    Missing,
-    Unique(Arc<str>),
-    Ambiguous,
-    Namespace(Arc<[Arc<str>]>),
-}
-
-/// One pass of the import-member tier over the explicit or the wildcard
-/// imports.
-enum MemberHit<'i> {
-    /// The member, the import that bound it, and the Python package whose
-    /// re-export it went through ([`reexport::python_reexport`]).
-    Bound(NodeId, &'i RawImport, Option<Arc<str>>),
-    /// No unique member. `bound` says whether an import of the pass binds
-    /// the callee at all.
-    Unbound { bound: bool },
-}
-
+/// language → the importer's C2 scope (R-A4b: one specifier names another
+/// module in another scope) → directory → specifier → module.
 type ModuleCache = FxHashMap<
     std::mem::Discriminant<Language>,
-    FxHashMap<PathBuf, FxHashMap<String, IndexedModule>>,
+    FxHashMap<AliasScope, FxHashMap<PathBuf, FxHashMap<String, Module<Arc<str>>>>>,
 >;
 
 /// What the import tier reads to follow a module's re-export one hop: the
@@ -131,7 +120,7 @@ impl<'g> ReexportIndex<'g> {
             .filter(|graph| !graph.imports.is_empty())
             .map(|graph| {
                 let path = normalize_source_path(&graph.file_path);
-                let language = Language::from_normalized_path(&path);
+                let language = symbol_table.file_language(&path);
                 if is_ecmascript(language) {
                     ecmascript_aliases.extend(graph.imports.iter().filter_map(|import| {
                         let import = ImportRef::from(import);
@@ -183,12 +172,16 @@ impl ModuleFacts for IndexFacts<'_, '_> {
         self.0.symbol_table.has_indexed_file(file)
     }
 
+    fn file_language(&self, file: &str) -> Language {
+        self.0.symbol_table.file_language(file)
+    }
+
     fn files_in_directory(&self, language: Language, directory: &str) -> Vec<Self::Path> {
         self.0
             .symbol_table
             .files_in_directory(directory)
             .iter()
-            .filter(|file| Language::from_normalized_path(file) == language)
+            .filter(|file| self.0.symbol_table.file_language(file) == language)
             .map(|file| Arc::from(file.as_str()))
             .collect()
     }
@@ -198,7 +191,7 @@ impl ModuleFacts for IndexFacts<'_, '_> {
             .symbol_table
             .namespace_files(namespace)
             .iter()
-            .filter(|file| Language::from_normalized_path(file) == language)
+            .filter(|file| self.0.symbol_table.file_language(file) == language)
             .map(|file| Arc::from(file.as_str()))
             .collect()
     }
@@ -216,11 +209,8 @@ impl ModuleFacts for IndexFacts<'_, '_> {
             .into_iter()
             .any(|(id, kind)| {
                 kind == NodeKind::Module
-                    && ecp_core::analyzer::same_file_pick::PickFacts::raw_owner(
-                        self.0.symbol_table,
-                        id,
-                    )
-                    .is_none()
+                    && ecp_core::analyzer::same_file_pick::PickFacts::owner(self.0.symbol_table, id)
+                        .is_none()
             })
     }
 
@@ -257,9 +247,9 @@ impl ModuleFacts for IndexFacts<'_, '_> {
             .0
             .import_module_file(Path::new(importer), specifier, Language::Python)
         {
-            IndexedModule::Unique(file) => PyModule::Unique(file),
-            IndexedModule::Ambiguous => PyModule::Ambiguous,
-            IndexedModule::Missing | IndexedModule::Namespace(_) => PyModule::Missing,
+            Module::Unique(file) => PyModule::Unique(file),
+            Module::Ambiguous => PyModule::Ambiguous,
+            Module::Missing | Module::Namespace(_) => PyModule::Missing,
         }
     }
 
@@ -271,6 +261,389 @@ impl ModuleFacts for IndexFacts<'_, '_> {
     ) {
         self.0
             .for_each_candidate(Path::new(importer), specifier, |candidate| visit(candidate));
+    }
+}
+
+/// The index's [`ModuleIndex`]: the symbol table's files, and the resolver's
+/// candidates (path aliases, Rust module tree).
+impl<'a> ModuleIndex<'a> for IndexFacts<'_, 'a> {
+    fn module_file(&self, language: Language, path: &str) -> Option<&'a str> {
+        if self.0.symbol_table.file_language(path) != language {
+            return None;
+        }
+        let table: &'a SymbolTable = self.0.symbol_table;
+        table.indexed_file_path(path)
+    }
+
+    fn module_files_with_stem(
+        &self,
+        language: Language,
+        stem: &str,
+    ) -> impl Iterator<Item = &'a str> {
+        let table: &'a SymbolTable = self.0.symbol_table;
+        table
+            .module_files_by_stem(stem)
+            .filter(move |file| table.file_language(file) == language)
+    }
+
+    fn namespace_declarers(&self, language: Language, name: &str) -> Vec<&'a str> {
+        let table: &'a SymbolTable = self.0.symbol_table;
+        table
+            .namespace_files(name)
+            .iter()
+            .map(String::as_str)
+            .filter(|file| table.file_language(file) == language)
+            .collect()
+    }
+
+    fn module_declares(&self, file: &str, name: &str) -> bool {
+        self.0.symbol_table.lookup_in_file(file, name).is_some()
+    }
+
+    fn declares_other_namespace(&self, file: &str, namespace: &str) -> bool {
+        self.0
+            .symbol_table
+            .declares_other_namespace(file, namespace)
+    }
+
+    fn for_each_module_candidate(
+        &self,
+        importer: &str,
+        specifier: &str,
+        visit: impl FnMut(&str) -> bool,
+    ) {
+        self.0
+            .for_each_candidate(Path::new(importer), specifier, visit);
+    }
+
+    fn importer_scope_root(&self, importer: &str) -> Option<&str> {
+        let aliases = &self.0.path_aliases;
+        let language = self.0.symbol_table.file_language(importer);
+        aliases.scope_root(aliases.scope_of(importer, language))
+    }
+}
+
+/// The index's module discovery for the shared import tiers
+/// ([`ladder::import_member`]), through [`Resolver::import_module_file`]'s memo.
+impl ladder::ImportModules for IndexFacts<'_, '_> {
+    type Module = Arc<str>;
+
+    fn import_module(
+        &self,
+        importer: &str,
+        specifier: &str,
+        language: Language,
+    ) -> Module<Arc<str>> {
+        self.0
+            .import_module_file(Path::new(importer), specifier, language)
+    }
+
+    fn module_name_indexed(&self, language: Language, name: &str) -> bool {
+        self.0.symbol_table.has_module_name(language, name)
+    }
+}
+
+impl ladder::ImportMembers for IndexFacts<'_, '_> {
+    fn member_in_file(
+        &self,
+        file: &str,
+        name: &str,
+        target: ResolveTarget,
+        owner: MemberOwner<'_>,
+    ) -> Option<u32> {
+        self.0
+            .symbol_table
+            .lookup_member_in_file(file, name, target, owner)
+    }
+
+    fn python_reexport(
+        &self,
+        language: Language,
+        module: &str,
+        name: &str,
+        target: ResolveTarget,
+    ) -> Option<u32> {
+        reexport::python_import_reexport(self, language, module, name, target)
+    }
+}
+
+/// The index's facts for the qualifier tier ([`ladder::qualified`]): the
+/// symbol table, the resolver's candidates and its Rust module tree.
+impl ladder::QualifierFacts for IndexFacts<'_, '_> {
+    type Decls = SymbolTable;
+
+    fn decls(&self) -> &SymbolTable {
+        self.0.symbol_table
+    }
+
+    fn caller_declares(&self, source: &str, name: &str) -> bool {
+        self.0
+            .symbol_table
+            .lookup_in_file_with_kind(source, name, ResolveTarget::Qualifier)
+            .is_some()
+    }
+
+    fn stored_file(&self, path: &str) -> Option<Arc<str>> {
+        Some(Arc::from(path))
+    }
+
+    fn global_qualifier(&self, qualifier: &str, caller: FileMeta) -> GlobalPick {
+        self.0
+            .symbol_table
+            .lookup_global(qualifier, ResolveTarget::Qualifier, caller, false)
+    }
+
+    fn for_each_candidate(&self, importer: &str, specifier: &str, visit: impl FnMut(&str) -> bool) {
+        self.0
+            .for_each_candidate(Path::new(importer), specifier, visit);
+    }
+
+    fn exports(&self, file: &str, name: &str, target: ResolveTarget) -> bool {
+        reexport::lookup_export_in_file(self, file, name, target).is_some()
+    }
+
+    fn holds_import(&self, file: &str, imported: &str, default_import: bool) -> bool {
+        reexport::imported_in_file(
+            self,
+            file,
+            imported,
+            default_import,
+            ResolveTarget::Qualifier,
+        )
+        .is_some()
+    }
+
+    fn rust_module_file(&self, source: &str, module_path: &str) -> Option<Arc<str>> {
+        self.0
+            .rust_module_file(Path::new(source), module_path)
+            .map(Arc::from)
+    }
+
+    /// The module tree places `<crate>::a::m` (`use other::m; m::f()`),
+    /// which `rust_module_file` cannot; past it only file-stem guesses
+    /// remain, and they pick the caller crate's own `m.rs`.
+    fn crate_module(
+        &self,
+        source: &str,
+        module_path: &str,
+        member: &str,
+        target: ResolveTarget,
+    ) -> CrateModule<Arc<str>> {
+        let resolver = self.0;
+        let Some(tree) = resolver.module_tree() else {
+            return CrateModule::Local;
+        };
+        match ladder::crate_module(
+            &tree,
+            resolver.symbol_table,
+            source,
+            module_path,
+            member,
+            target,
+        ) {
+            CrateModule::Local => CrateModule::Local,
+            CrateModule::Placed(file) => CrateModule::Placed(file.map(Arc::from)),
+        }
+    }
+
+    fn rust_path_agrees(
+        &self,
+        source: &str,
+        callee: &str,
+        qualifier: &str,
+        candidate: &str,
+        imports: &[RawImport],
+    ) -> Option<bool> {
+        Some(self.0.rust_type_path_agrees(
+            Path::new(source),
+            source,
+            Some(callee),
+            qualifier,
+            candidate,
+            imports,
+        ))
+    }
+
+    fn files_by_stem(&self, stem: &str) -> impl Iterator<Item = &str> {
+        self.0
+            .symbol_table
+            .files_by_stem(stem)
+            .iter()
+            .map(String::as_str)
+    }
+
+    fn type_candidates<'q>(
+        &self,
+        source: &str,
+        name: &'q str,
+        imports: &'q [RawImport],
+    ) -> TypeCandidates<'q> {
+        self.0
+            .type_candidates(Path::new(source), source, name, imports)
+    }
+}
+
+/// The index's facts for one call site's entry ([`ladder::call`]): the
+/// resolver, and the caller's file and imports its tiers read.
+struct IndexCall<'r, 'a, 'p> {
+    facts: IndexFacts<'r, 'a>,
+    source_file: &'p Path,
+    /// `source_file` with forward slashes.
+    source: &'p str,
+    language: Language,
+    raw_imports: &'p [RawImport],
+    caller_owner: Option<&'p str>,
+    /// The ladder's list, kept so its allocation becomes the returned one.
+    targets: RefCell<Vec<(NodeId, f32)>>,
+}
+
+impl<'s, 'r, 'a> ladder::CallFacts<'s> for IndexCall<'r, 'a, '_> {
+    type Modules = IndexFacts<'r, 'a>;
+    type Decls = SymbolTable;
+    const TYPE_NAME: TypeName = TypeName::Qualifier;
+
+    fn modules(&self) -> &IndexFacts<'r, 'a> {
+        &self.facts
+    }
+
+    fn decls(&self) -> &SymbolTable {
+        self.facts.0.symbol_table
+    }
+
+    fn type_candidates<'q>(
+        &self,
+        source: &str,
+        receiver: &'q str,
+        imports: &'q [RawImport],
+    ) -> TypeCandidates<'q> {
+        self.facts
+            .0
+            .type_candidates(self.source_file, source, receiver, imports)
+    }
+
+    fn ladder(
+        &self,
+        site: CallSite<'s>,
+        typed: Option<&str>,
+        call: CallPick<'_>,
+        heritage: &[String],
+    ) -> Resolution {
+        let targets = self.facts.0.resolve_symbol_with_import_binding(
+            self.source_file,
+            typed.unwrap_or(site.name()),
+            self.language,
+            (self.raw_imports, !call.untyped),
+            call_target(self.source_file, site),
+            heritage,
+            Some(call),
+            &mut None,
+        );
+        let resolution = ladder_resolution(&targets);
+        *self.targets.borrow_mut() = targets;
+        resolution
+    }
+
+    fn csharp_admitted(&self, id: u32, site: CallSite<'_>) -> Option<u32> {
+        let table = self.facts.0.symbol_table;
+        let access = CallAccess::of(site, self.source, self.caller_owner.and_then(owner_key));
+        csharp_access::admitted_overload(
+            table,
+            id,
+            table.later_overloads(id),
+            |id| table.csharp_method_flags(id),
+            access,
+        )
+    }
+
+    fn bare_member(
+        &self,
+        member: &str,
+        target: ResolveTarget,
+        heritage: &[String],
+    ) -> Option<(u32, f32)> {
+        ladder_resolution(&self.facts.0.resolve_symbol_with_heritage(
+            self.source_file,
+            member,
+            self.raw_imports,
+            target,
+            heritage,
+        ))
+        .edge()
+    }
+
+    fn names_type_and_member(&self, callee: &str) -> bool {
+        let table = self.facts.0.symbol_table;
+        table.has_constructible_type(callee)
+            && table.names_admitted_method(callee, table.file_meta(self.source))
+    }
+
+    fn declares_constructible(&self, name: &str) -> bool {
+        self.facts.0.symbol_table.has_constructible_type(name)
+    }
+
+    fn resolve_type(
+        &self,
+        path: &str,
+        bind_imports: bool,
+        call: CallPick<'_>,
+        heritage: &[String],
+    ) -> Option<(u32, f32)> {
+        let types = self.facts.0.resolve_symbol_with_import_binding(
+            self.source_file,
+            path,
+            self.language,
+            (self.raw_imports, bind_imports && !call.untyped),
+            ResolveTarget::Type,
+            heritage,
+            Some(call),
+            &mut None,
+        );
+        sole_target(&types)
+    }
+
+    fn construction_target(&self, type_id: u32) -> u32 {
+        self.facts
+            .0
+            .symbol_table
+            .sole_constructor(type_id)
+            .unwrap_or(type_id)
+    }
+
+    fn import_tiers(
+        &self,
+        name: &str,
+        target: ResolveTarget,
+        bind_imports: bool,
+    ) -> Option<(u32, f32)> {
+        sole_target(&self.facts.0.resolve_import_tiers(
+            self.source_file,
+            self.language,
+            name,
+            (self.raw_imports, bind_imports),
+            target,
+            &mut None,
+        ))
+    }
+
+    fn note_import_bound(&self, name: &str, import: &RawImport, id: u32) {
+        let _ = self
+            .facts
+            .0
+            .import_scoped(self.source_file, name, import, id);
+    }
+
+    fn note_untyped_unresolved(&self, name: &str) {
+        if self.facts.0.decisions.is_some() {
+            self.facts.0.record(
+                self.source,
+                name,
+                None,
+                DecisionTier::Unresolved,
+                None,
+                0,
+                None,
+            );
+        }
     }
 }
 
@@ -374,6 +747,10 @@ pub struct Resolver<'a> {
     /// `None` follows no re-export: the import tier then binds only a
     /// member the imported module declares itself.
     reexports: Option<&'a ReexportIndex<'a>>,
+    /// The C# extension declarations by name, built once per Pass 2
+    /// ([`SymbolTable::csharp_extension_decl_map`]). `None` reads them from
+    /// the table per call.
+    csharp_extensions: Option<&'a CsharpExtensionDecls<'a>>,
 }
 
 impl<'a> Resolver<'a> {
@@ -387,7 +764,21 @@ impl<'a> Resolver<'a> {
             mod_tree: None,
             workspace_root: None,
             reexports: None,
+            csharp_extensions: None,
         }
+    }
+
+    /// `file`'s language as the index stores it ([`SymbolTable::file_language`]).
+    pub(crate) fn file_language(&self, file: &str) -> Language {
+        self.symbol_table.file_language(file)
+    }
+
+    /// Read the C# extension declarations from `decls`, the table's
+    /// [`SymbolTable::csharp_extension_decl_map`], instead of rebuilding a
+    /// name's list per failing call.
+    pub(crate) fn with_csharp_extensions(mut self, decls: &'a CsharpExtensionDecls<'a>) -> Self {
+        self.csharp_extensions = Some(decls);
+        self
     }
 
     /// Let the import tier follow Python package and TS / JS re-exports one
@@ -462,30 +853,44 @@ impl<'a> Resolver<'a> {
             visit(file);
             return;
         }
-        for_each_specifier_candidate(source_file, specifier, &self.path_aliases, visit);
+        for_each_specifier_candidate(
+            source_file,
+            specifier,
+            &self.path_aliases,
+            || {
+                self.symbol_table
+                    .file_language(&normalize_source_path(source_file))
+            },
+            visit,
+        );
     }
 
-    /// Find a module beneath an indexed source root without guessing its member.
-    /// Relative specifiers stay anchored to their caller; absolute module paths
-    /// may have a source-root prefix, but multiple matching roots are ambiguous.
-    /// Only files of `language` count: the caller's, or for the suppression
-    /// check another language of its import family.
-    fn import_module_file(
+    /// [`module_discovery::discover_module`] over this index, memoized per
+    /// language, caller scope, caller directory (relative specifiers only)
+    /// and specifier.
+    /// `pub` for `crates/ecp-cli/tests/module_discovery_parity.rs`, which
+    /// feeds one file set to this and to the overlay's `ImportScope`.
+    pub fn import_module_file(
         &self,
         source_file: &Path,
         specifier: &str,
         language: Language,
-    ) -> IndexedModule {
+    ) -> Module<Arc<str>> {
         let directory = if specifier.starts_with('.') {
             source_file.parent().unwrap_or(Path::new(""))
         } else {
             Path::new("")
         };
+        let scope = alias_scope(&self.path_aliases, source_file, || {
+            self.symbol_table
+                .file_language(&normalize_source_path(source_file))
+        });
         if let Some(hit) = self
             .module_cache
             .read()
             .unwrap()
             .get(&std::mem::discriminant(&language))
+            .and_then(|scopes| scopes.get(&scope))
             .and_then(|directories| directories.get(directory))
             .and_then(|imports| imports.get(specifier))
         {
@@ -495,179 +900,21 @@ impl<'a> Resolver<'a> {
         cache
             .entry(std::mem::discriminant(&language))
             .or_default()
+            .entry(scope)
+            .or_default()
             .entry(directory.to_path_buf())
             .or_default()
             .entry(specifier.to_string())
-            .or_insert_with(|| self.discover_import_module(source_file, specifier, language))
-            .clone()
-    }
-
-    fn for_each_import_candidate(
-        &self,
-        source_file: &Path,
-        specifier: &str,
-        language: Language,
-        mut visit: impl FnMut(&str) -> bool,
-    ) {
-        if language == Language::Python {
-            let mut verbatim = true;
-            self.for_each_candidate(source_file, specifier, |base| {
-                if verbatim {
-                    verbatim = false;
-                    return true;
-                }
-                crate::python::spec::module_candidates(base, &mut visit);
-                false
-            });
-        } else {
-            self.for_each_candidate(source_file, specifier, visit);
-        }
-    }
-
-    fn first_indexed_module(
-        &self,
-        source_file: &Path,
-        specifier: &str,
-        language: Language,
-    ) -> Option<Arc<str>> {
-        let mut found = None;
-        self.for_each_import_candidate(source_file, specifier, language, |candidate| {
-            if Language::from_normalized_path(candidate) == language
-                && self.symbol_table.has_indexed_file(candidate)
-            {
-                found = Some(Arc::from(candidate));
-                false
-            } else {
-                true
-            }
-        });
-        found
-    }
-
-    fn discover_import_module(
-        &self,
-        source_file: &Path,
-        specifier: &str,
-        language: Language,
-    ) -> IndexedModule {
-        if let Some(extension) = fqn_extension(language) {
-            return self.discover_fqn_module(specifier, language, extension);
-        }
-        let exact = self.first_indexed_module(source_file, specifier, language);
-        if exact.is_some() || specifier.starts_with('.') {
-            return exact.map_or(IndexedModule::Missing, IndexedModule::Unique);
-        }
-        let mut found: Option<(&str, Arc<str>)> = None;
-        let mut ambiguous = false;
-        self.for_each_import_candidate(source_file, specifier, language, |candidate| {
-            if Language::from_normalized_path(candidate) != language {
-                return true;
-            }
-            let Some(stem) = Path::new(candidate).file_stem().and_then(|s| s.to_str()) else {
-                return true;
-            };
-            for file in self.symbol_table.module_files_by_stem(stem) {
-                let Some(root) = file
-                    .strip_suffix(candidate)
-                    .filter(|prefix| prefix.ends_with('/'))
-                else {
-                    continue;
-                };
-                // A directory already indexed as a module is a package,
-                // not an implicit source root for an absolute import.
-                if self
-                    .first_indexed_module(source_file, root.trim_end_matches('/'), language)
-                    .is_some()
-                {
-                    continue;
-                }
-                if let Some((previous_root, _)) = &found {
-                    if *previous_root != root {
-                        ambiguous = true;
-                        return false;
-                    }
-                    // Candidate order already selected this root's package or implementation.
-                    continue;
-                }
-                found = Some((root, Arc::from(file)));
-            }
-            true
-        });
-        if ambiguous {
-            IndexedModule::Ambiguous
-        } else {
-            found.map_or(IndexedModule::Missing, |(_, file)| {
-                IndexedModule::Unique(file)
+            .or_insert_with(|| {
+                module_discovery::discover_module(
+                    &IndexFacts(self),
+                    &normalize_source_path(source_file),
+                    specifier,
+                    language,
+                )
+                .map(|&file| Arc::from(file))
             })
-        }
-    }
-
-    fn discover_fqn_module(
-        &self,
-        specifier: &str,
-        language: Language,
-        extension: &str,
-    ) -> IndexedModule {
-        let normalized = specifier.trim_start_matches('\\').replace('\\', ".");
-        let mut name = normalized.as_str();
-        loop {
-            let files: Vec<Arc<str>> = self
-                .symbol_table
-                .namespace_files(name)
-                .iter()
-                .filter(|file| Language::from_normalized_path(file) == language)
-                .map(|file| Arc::from(file.as_str()))
-                .collect();
-            if !files.is_empty() {
-                let member = normalized
-                    .strip_prefix(name)
-                    .unwrap_or("")
-                    .trim_start_matches('.')
-                    .split('.')
-                    .next()
-                    .unwrap_or("");
-                return IndexedModule::Namespace(
-                    files
-                        .into_iter()
-                        .filter(|file| {
-                            member.is_empty()
-                                || self.symbol_table.lookup_in_file(file, member).is_some()
-                        })
-                        .collect::<Vec<_>>()
-                        .into(),
-                );
-            }
-            let candidate = format!("{}.{}", name.replace('.', "/"), extension);
-            let stem = name.rsplit('.').next().unwrap_or(name);
-            // A placed file that declares another namespace is a namesake:
-            // `use InvalidArgumentException;` is not `Lib\Testing`'s class.
-            let namespace = name.rsplit_once('.').map_or("", |(outer, _)| outer);
-            let files: Vec<Arc<str>> = self
-                .symbol_table
-                .module_files_by_stem(stem)
-                .filter(|file| {
-                    Language::from_normalized_path(file) == language
-                        && (*file == candidate
-                            || file
-                                .strip_suffix(&candidate)
-                                .is_some_and(|root| root.ends_with('/')))
-                        && !self.symbol_table.declares_other_namespace(file, namespace)
-                })
-                .map(Arc::from)
-                .collect();
-            if !files.is_empty() {
-                return if files.len() == 1 {
-                    IndexedModule::Unique(files[0].clone())
-                } else {
-                    IndexedModule::Ambiguous
-                };
-            }
-            let Some((parent, _)) = name.rsplit_once('.') else {
-                break;
-            };
-            name = parent;
-        }
-        IndexedModule::Missing
+            .clone()
     }
 
     /// The module tree's file for the `crate` / `self` / `super`-anchored
@@ -698,23 +945,27 @@ impl<'a> Resolver<'a> {
         self.resolve_symbol_with_heritage(source_file, symbol_name, raw_imports, target, &[])
     }
 
-    /// Resolve one call site to its `Calls` targets: the callable tiers,
-    /// then, only when they find nothing, the constructor fallback
-    /// ([`Self::resolve_instantiation`]). The fallback lives here, not in
+    /// Resolve one call site to its `Calls` targets through the shared call
+    /// entry ([`ladder::call`]): the callable tiers, then the call-level
+    /// fallbacks, among them the constructor fallback
+    /// ([`ladder::constructed_type`]). The fallback lives here, not in
     /// [`Self::resolve_symbol_with_heritage`], because that method also
     /// serves References / Decorates / Imports edges, which must never land
     /// on a type through a construction rule. `caller_owner` is the type the
     /// calling member belongs to, `caller` the calling declaration
-    /// (`SymbolTable::prefer_owned`).
+    /// (`SymbolTable::prefer_owned`). `lexical` is the file's verdict on the
+    /// site (`LexicalFunctions::call_resolution`): a function in scope binds
+    /// ahead of every tier, and a name a lexical scope hides takes the
+    /// import-only path.
     ///
     /// A member call reaches a method or a type's function, never a type or
     /// its constructor by the type's name: an untyped `o.m()`
     /// ([`CallSite::UntypedMember`]) never takes the constructor fallback,
-    /// and every tier's target passes `SymbolTable::member_call_admits` (no
+    /// and every tier's target passes `same_file_pick::member_call_admits` (no
     /// free function, no namespace member, no constructor, no member of the
     /// caller's own type by the name alone). Neither does a bare `m()` that
     /// may be a member call whose receiver the parser dropped take the
-    /// fallback ([`Self::may_be_receiverless_member_call`]).
+    /// fallback.
     #[allow(clippy::too_many_arguments)]
     pub fn resolve_call(
         &self,
@@ -724,136 +975,36 @@ impl<'a> Resolver<'a> {
         caller_heritage: &[String],
         caller_owner: Option<&str>,
         caller: Option<NodeId>,
+        lexical: Resolution,
     ) -> Vec<(NodeId, f32)> {
-        // A chain the caller did not type ([`Self::resolve_chained_member`])
-        // resolves as the entry the parser wrote before chains.
-        let mut site = site.fallback();
-        let language = Language::from_normalized_path(&normalize_source_path(source_file));
-        // `targets` only holds the output buffer, so the ladder's allocation
-        // is reused; every step decides from `resolution` alone.
-        let mut targets = Vec::new();
-        let mut resolution = Resolution::Unknown;
-        if let Some((node_id, import)) =
-            self.python_submodule_member(source_file, language, site, raw_imports)
-        {
-            resolution = self.import_scoped(source_file, site.name(), import, node_id);
-        } else if let CallSite::FromReceiver { receiver, member } = site {
-            if language == Language::Go {
-                match reexport::go_package_lookup(
-                    &IndexFacts(self),
-                    &normalize_source_path(source_file),
-                    receiver,
-                    member,
-                    raw_imports.iter().map(ImportRef::from),
-                ) {
-                    reexport::GoPackageLookup::Resolved(target) => {
-                        let bound = target.and_then(|(node_id, source)| {
-                            raw_imports
-                                .iter()
-                                .find(|import| import.source == source)
-                                .map(|import| (node_id, import))
-                        });
-                        resolution = match bound {
-                            Some((node_id, import)) => {
-                                self.import_scoped(source_file, member, import, node_id)
-                            }
-                            None => Resolution::NoEdge(NoEdge::PackageMissing),
-                        };
-                    }
-                    reexport::GoPackageLookup::Unmapped => site = CallSite::Plain(member),
-                    reexport::GoPackageLookup::Value => site = CallSite::UntypedMember(member),
-                }
-            }
-        }
-        // A call settled ahead of the ladder is neither typed nor
-        // re-classified: those rules only shape the ladder's lookup.
-        let open = matches!(resolution, Resolution::Unknown);
-        let declared_python_attribute = open
-            && matches!(site, CallSite::FromReceiver { receiver, .. }
-            if language == Language::Python
-                && receiver.contains('/')
-                && reexport::python_from_import_declared_attribute(
-                    &IndexFacts(self),
-                    &normalize_source_path(source_file),
-                    receiver,
-                    raw_imports.iter().map(ImportRef::from),
-                ));
-        let type_member = if open {
-            self.type_receiver(source_file, language, site, raw_imports)
-        } else {
-            None
+        let source = normalize_source_path(source_file);
+        let language = self.symbol_table.file_language(&source);
+        let facts = IndexCall {
+            facts: IndexFacts(self),
+            source_file,
+            source: &source,
+            language,
+            raw_imports,
+            caller_owner,
+            targets: RefCell::default(),
         };
-        // A Swift receiver that names no type is a value the parser cannot
-        // see (a global, an inherited property): an untyped member call.
-        let site = match (site, &type_member) {
-            (CallSite::FromReceiver { member, .. }, None) if language == Language::Swift => {
-                CallSite::UntypedMember(member)
-            }
-            (CallSite::FromReceiver { member, .. }, None) if declared_python_attribute => {
-                CallSite::UntypedMember(member)
-            }
-            _ => site,
-        };
-        let bind_import = !matches!(site, CallSite::UntypedMember(_));
-        let free_only = site.reaches_free_only(language);
-        // An untyped receiver is no `this`: no tier reaches the member
-        // through the caller's bases.
-        let heritage: &[String] = if bind_import { caller_heritage } else { &[] };
-        let resolve = |name: &str, target, bind: bool| {
-            self.resolve_symbol_with_import_binding(
-                source_file,
-                name,
+        let verdict = ladder::call(
+            &facts,
+            CallContext {
+                source: &source,
                 language,
-                (raw_imports, bind && bind_import),
-                target,
-                heritage,
-                Some(CallScope {
-                    owner: caller_owner,
-                    untyped_receiver: !bind_import,
-                    free_only,
-                    caller,
-                }),
-                &mut None,
-            )
-        };
-        let target = call_target(source_file, site);
-        if open {
-            targets = resolve(type_member.as_deref().unwrap_or(site.name()), target, true);
-            resolution = ladder_resolution(&targets);
-        }
-        if resolution.call_fallbacks_allowed()
-            && type_member.is_some()
-            && language == Language::Kotlin
-        {
-            // `fun Reg.ext()` is a top-level function no member lookup on
-            // `Reg` finds.
-            targets =
-                self.extension_fallback(source_file, site.name(), raw_imports, target, heritage);
-            resolution = ladder_resolution(&targets);
-        }
-        if !bind_import {
-            // A Python module is a value: `api.helper()` on a receiver the
-            // parser could not type may call another module's function. No
-            // value reaches the caller's own module that way.
-            let source_file_str = normalize_source_path(source_file);
-            let module_value = |id: NodeId| {
-                language == Language::Python
-                    && self.symbol_table.is_top_level(id)
-                    && self.symbol_table.file_of(id) != Some(source_file_str.as_ref())
-            };
-            resolution = resolution.admit(|id| {
-                self.symbol_table.member_call_admits(id, caller_owner) || module_value(id)
-            });
-        }
-        if resolution.call_fallbacks_allowed()
-            && !self.may_be_receiverless_member_call(source_file, site)
-        {
-            if let Some(edge) = self.resolve_instantiation(language, site, raw_imports, resolve) {
-                resolution = Resolution::from_ladder(Some(edge));
-            }
-        }
+                imports: raw_imports,
+                heritage: caller_heritage,
+                owner: caller_owner,
+                caller,
+                lexical,
+            },
+            site,
+        );
+        // The ladder's allocation is reused for the one edge.
+        let mut targets = facts.targets.into_inner();
         targets.clear();
-        targets.extend(resolution.edge());
+        targets.extend(verdict.resolution.edge());
         targets
     }
 
@@ -870,16 +1021,6 @@ impl<'a> Resolver<'a> {
     /// Read imports in the callee's file. Java/Kotlin imports bind a type;
     /// C# namespaces and Swift package targets restrict visible types before
     /// member lookup. Other languages retain the directory-scoped fallback.
-    pub fn resolve_chained_member(
-        &self,
-        source_file: &Path,
-        callee: (NodeId, f32),
-        member: &str,
-    ) -> Option<(NodeId, f32)> {
-        self.resolve_chained_member_outcome(source_file, callee, member)
-            .bound()
-    }
-
     pub(crate) fn resolve_chained_member_outcome(
         &self,
         source_file: &Path,
@@ -893,7 +1034,7 @@ impl<'a> Resolver<'a> {
         let Some(callee_file) = st.file_of(callee) else {
             return type_ladder::ChainOutcome::Unknown;
         };
-        let language = Language::from_normalized_path(callee_file);
+        let language = st.file_language(callee_file);
         let imports = self
             .reexports
             .and_then(|index| index.modules.get(callee_file))
@@ -1048,179 +1189,64 @@ impl<'a> Resolver<'a> {
         type_ladder::ChainOutcome::Bound((id, tier.confidence().min(inner_confidence)))
     }
 
-    /// Whether a bare `m()` that the constructor fallback would read as a
-    /// construction of a type `m` may instead be a member call whose
-    /// receiver the parser dropped. The C++, Swift and Ruby parsers now
-    /// write an untyped receiver as [`CallSite::UntypedMember`], which never
-    /// constructs; a parser that still drops one (Kotlin and Dart write a
-    /// receiver they bind to a field or local as the bare member) reaches
-    /// here. When an admitted `Method` is named `m`, the name is a member's,
-    /// and `m(x)` never binds a type `m` of another file (`template
-    /// <typename T> class number_integer` in a test file for nlohmann's
-    /// `sax->number_integer(v)`). A call written with a qualifier, a `new`,
-    /// or a Ruby `.new` is no such site.
-    fn may_be_receiverless_member_call(&self, source_file: &Path, site: CallSite<'_>) -> bool {
-        let CallSite::Plain(callee) = site else {
-            return false;
-        };
-        !callee.contains(&['.', ':'][..])
-            && self.symbol_table.has_constructible_type(callee)
-            && self.symbol_table.names_admitted_method(
-                callee,
-                FileMeta::from_normalized_path(&normalize_source_path(source_file)),
-            )
-    }
-
-    /// The callee of a C#, Swift, Kotlin or Dart member call on an
-    /// identifier receiver that is no local, parameter, field or property in
-    /// scope ([`CallSite::FromReceiver`]). A receiver that names a project
-    /// type, a `using` alias of one, or a library type resolves as
-    /// `Receiver.member` through the qualifier tiers and the receiver-typing
-    /// ladder, and never by the bare member: `StringAssert.AreEqual()` must
-    /// not land on `XUnitAssert.AreEqual`, nor Swift `Util.make()` on the
-    /// caller's own `make`. A receiver that names no type is a member the
-    /// parser cannot see (an inherited property, a global): `None`.
-    ///
-    /// A Python `FromReceiver` that is no submodule
-    /// ([`Self::python_submodule_member`] runs first) names a type only when
-    /// its module file declares one ([`reexport::python_imported_type`]):
-    /// `from k import K; K.st()` with several project `st` would otherwise
-    /// bind none.
-    fn type_receiver(
+    /// The method a C# chained member call (`Make().Read(1)`) from a caller
+    /// declared by `caller_owner` (an `owner_key`) in `source_file` binds in
+    /// place of `target`, the member [`Self::resolve_chained_member_outcome`]
+    /// bound: the access rule a plain call applies ([`Self::resolve_call`],
+    /// codex ruling P-ext2 C). The receiver is the value the inner call
+    /// returns, so the access is an instance call. `None` when C# admits no
+    /// overload, or more than one.
+    pub(crate) fn csharp_admitted_chain_member(
         &self,
         source_file: &Path,
-        language: Language,
-        site: CallSite<'_>,
-        raw_imports: &[RawImport],
-    ) -> Option<String> {
-        let CallSite::FromReceiver { receiver, member } = site else {
-            return None;
+        caller_owner: Option<&str>,
+        target: NodeId,
+    ) -> Option<NodeId> {
+        let caller_file = normalize_source_path(source_file);
+        let access = CallAccess {
+            instance: true,
+            caller_file: &caller_file,
+            caller_owner,
         };
-        let source_file_str = normalize_source_path(source_file);
-        let typed = match language {
-            Language::Python => reexport::python_imported_type(
-                &IndexFacts(self),
-                &source_file_str,
-                receiver,
-                raw_imports.iter().map(ImportRef::from),
-            ),
-            Language::CSharp | Language::Swift | Language::Kotlin | Language::Dart => !matches!(
-                self.type_candidates(source_file, &source_file_str, receiver, raw_imports),
-                TypeCandidates::None
-            ),
-            _ => false,
-        };
-        typed.then(|| format!("{receiver}.{member}"))
+        csharp_access::admitted_overload(
+            self.symbol_table,
+            target,
+            self.symbol_table.later_overloads(target),
+            |id| self.symbol_table.csharp_method_flags(id),
+            access,
+        )
     }
 
-    /// [`Self::resolve_call`] for a name a lexical scope of the file binds,
-    /// though not one enclosing the call: only an import may resolve it,
-    /// never the inaccessible local, and the constructor fallback follows
-    /// the same rule.
-    pub fn resolve_imported_call(
+    /// The member a C# call reaches on a value of unknown type, which only
+    /// the extension retry ([`ReceiverSite::Untyped`]) may bind: an untyped
+    /// member site, or a `FromReceiver` whose receiver names no type
+    /// ([`ladder::call`] reads it as untyped). `None` for any other site.
+    /// `site` is a C# call's.
+    pub(crate) fn csharp_untyped_member<'s>(
         &self,
         source_file: &Path,
-        site: CallSite<'_>,
+        site: CallSite<'s>,
         raw_imports: &[RawImport],
-    ) -> Vec<(NodeId, f32)> {
-        let site = site.fallback();
-        if matches!(site, CallSite::UntypedMember(_)) {
-            return Vec::new();
-        }
-        let language = Language::from_normalized_path(&normalize_source_path(source_file));
-        let resolve = |name: &str, target, bind: bool| {
-            self.resolve_import_tiers(
-                source_file,
-                language,
-                name,
-                (raw_imports, bind),
-                target,
-                &mut None,
-            )
-        };
-        let mut targets = Vec::new();
-        let mut resolution = if let Some((node_id, import)) =
-            self.python_submodule_member(source_file, language, site, raw_imports)
-        {
-            self.import_scoped(source_file, site.name(), import, node_id)
-        } else if matches!(site, CallSite::FromReceiver { receiver, .. }
-        if language == Language::Python
-            && receiver.contains('/')
-            && reexport::python_from_import_declared_attribute(
-                &IndexFacts(self),
-                &normalize_source_path(source_file),
-                receiver,
-                raw_imports.iter().map(ImportRef::from),
-            ))
-        {
-            Resolution::NoEdge(NoEdge::DeclaredAttribute)
-        } else {
-            targets = resolve(site.name(), call_target(source_file, site), true);
-            ladder_resolution(&targets)
-        };
-        if resolution.call_fallbacks_allowed() {
-            if let Some(edge) = self.resolve_instantiation(language, site, raw_imports, resolve) {
-                resolution = Resolution::from_ladder(Some(edge));
+    ) -> Option<&'s str> {
+        match site.fallback() {
+            CallSite::UntypedMember(member) => Some(member),
+            site @ CallSite::FromReceiver { member, .. } => {
+                let source = normalize_source_path(source_file);
+                let facts = IndexCall {
+                    facts: IndexFacts(self),
+                    source_file,
+                    source: &source,
+                    language: Language::CSharp,
+                    raw_imports,
+                    caller_owner: None,
+                    targets: RefCell::default(),
+                };
+                ladder::type_receiver(&facts, &source, Language::CSharp, raw_imports, site)
+                    .is_none()
+                    .then_some(member)
             }
+            _ => None,
         }
-        targets.clear();
-        targets.extend(resolution.edge());
-        targets
-    }
-
-    /// Constructor fallback for a call site the callable tiers left empty:
-    /// resolve the constructed type through `resolve` with
-    /// [`ResolveTarget::Type`], keep a Class / Struct, then land on its one
-    /// constructor, or on the type itself when it declares none or several.
-    ///
-    /// A qualified type path that does not resolve (`new shop.Widget()`
-    /// through a namespace import, PHP `new \App\Item()`) retries its last
-    /// segment only where [`CallSite::constructed_type`] allows it; a plain
-    /// `pkg.A()` stays unresolved, like every qualified callee. The third
-    /// argument of `resolve` says whether the import-member tier may bind.
-    fn resolve_instantiation(
-        &self,
-        language: Language,
-        site: CallSite<'_>,
-        raw_imports: &[RawImport],
-        resolve: impl Fn(&str, ResolveTarget, bool) -> Vec<(NodeId, f32)>,
-    ) -> Option<(NodeId, f32)> {
-        let (type_path, last_segment_fallback) = site.constructed_type(language)?;
-        let type_name = split_qualifier(type_path).map_or(type_path, |(_, member)| member);
-        if !self.names_constructible_type(type_name, raw_imports) {
-            return None;
-        }
-        let mut types = resolve(type_path, ResolveTarget::Type, true);
-        if types.is_empty() && last_segment_fallback && type_name.len() < type_path.len() {
-            // A qualified type path (`new \App\User()`) never names its type
-            // through a `use` of its last segment.
-            types = resolve(type_name, ResolveTarget::Type, !fqn_language(language));
-        }
-        let &[(type_id, confidence)] = types.as_slice() else {
-            return None;
-        };
-        if !self.symbol_table.node_kind(type_id).is_constructible() {
-            return None;
-        }
-        let target = self
-            .symbol_table
-            .sole_constructor(type_id)
-            .unwrap_or(type_id);
-        Some((target, confidence))
-    }
-
-    /// The cheap gate of [`Self::resolve_instantiation`]: some Class /
-    /// Struct is declared as `name`, or an import aliases a declared one to
-    /// it (`import { Widget as Renamed }`), which only the import tier maps
-    /// back.
-    fn names_constructible_type(&self, name: &str, raw_imports: &[RawImport]) -> bool {
-        self.symbol_table.has_constructible_type(name)
-            || raw_imports.iter().any(|import| {
-                import.alias.as_deref() == Some(name)
-                    && self
-                        .symbol_table
-                        .has_constructible_type(&import.imported_name)
-            })
     }
 
     /// Resolve an explicit import without selecting an inaccessible local binding.
@@ -1231,7 +1257,9 @@ impl<'a> Resolver<'a> {
         raw_imports: &[RawImport],
         target: ResolveTarget,
     ) -> Vec<(NodeId, f32)> {
-        let language = Language::from_normalized_path(&normalize_source_path(source_file));
+        let language = self
+            .symbol_table
+            .file_language(&normalize_source_path(source_file));
         self.resolve_import_tiers(
             source_file,
             language,
@@ -1254,7 +1282,9 @@ impl<'a> Resolver<'a> {
         raw_imports: &[RawImport],
         target: ResolveTarget,
     ) -> (Vec<(NodeId, f32)>, Option<Arc<str>>) {
-        let language = Language::from_normalized_path(&normalize_source_path(source_file));
+        let language = self
+            .symbol_table
+            .file_language(&normalize_source_path(source_file));
         let mut barrel = None;
         let targets = self.resolve_import_tiers(
             source_file,
@@ -1287,8 +1317,8 @@ impl<'a> Resolver<'a> {
         barrel: &mut Option<Arc<str>>,
     ) -> Vec<(NodeId, f32)> {
         // `ResolveTarget::Field` reaches here only for a bare name an import
-        // may bind (Java `import static app.Consts.TABLE`); `resolve_symbol`
-        // keeps `obj.field` reads off the import tiers on its own.
+        // may bind (Java `import static app.Consts.TABLE`); an `obj.field`
+        // read never takes an import tier ([`ladder::field_read`]).
         if raw_imports.is_empty() {
             return Vec::new();
         }
@@ -1298,33 +1328,23 @@ impl<'a> Resolver<'a> {
             *barrel = via;
             return targets;
         }
-        let hit = match self.import_member_hit(
-            source_file,
+        match ladder::imported_member(
+            &IndexFacts(self),
+            &normalize_source_path(source_file),
             language,
             symbol_name,
             raw_imports,
             target,
-            false,
+            true,
         ) {
-            MemberHit::Unbound { bound: false } => self.import_member_hit(
-                source_file,
-                language,
-                symbol_name,
-                raw_imports,
-                target,
-                true,
-            ),
-            explicit => explicit,
-        };
-        match hit {
-            MemberHit::Bound(node_id, import, via) => {
-                *barrel = via;
-                self.import_scoped(source_file, symbol_name, import, node_id)
+            ladder::MemberHit::Bound(hit) => {
+                *barrel = hit.barrel;
+                self.import_scoped(source_file, symbol_name, hit.import, hit.id)
                     .edge()
                     .into_iter()
                     .collect()
             }
-            MemberHit::Unbound { .. } => Vec::new(),
+            ladder::MemberHit::Unbound { .. } => Vec::new(),
         }
     }
 
@@ -1343,7 +1363,7 @@ impl<'a> Resolver<'a> {
         // Only a TS / JS caller follows a TS / JS re-export.
         let reexports = self
             .reexports
-            .filter(|_| is_ecmascript(Language::from_normalized_path(&importer)));
+            .filter(|_| is_ecmascript(self.symbol_table.file_language(&importer)));
         match reexport::named_import(
             &IndexFacts(self),
             &importer,
@@ -1370,121 +1390,6 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    /// One pass of the import-member tier: the member the explicit (or, with
-    /// `wildcard`, the wildcard) imports binding `symbol_name` hold in their
-    /// in-repo modules. Python keeps the first hit in source order, as Python
-    /// rebinds a name per import. In a fully qualified language two imports
-    /// that hold different members are no hit: the language rejects the
-    /// call or picks by signature, so the general tiers decide.
-    fn import_member_hit<'i>(
-        &self,
-        source_file: &Path,
-        language: Language,
-        symbol_name: &str,
-        raw_imports: &'i [RawImport],
-        target: ResolveTarget,
-        wildcard: bool,
-    ) -> MemberHit<'i> {
-        let mut found: Option<(NodeId, &'i RawImport)> = None;
-        let mut bound = false;
-        for import in raw_imports {
-            let Some(binding) = import_binding(import, symbol_name, language)
-                .filter(|binding| binding.wildcard == wildcard)
-            else {
-                continue;
-            };
-            bound = true;
-            let in_file = |file: &str| {
-                self.symbol_table
-                    .lookup_member_in_file(file, binding.name, target, binding.owner)
-            };
-            let hit = match self.import_module_file(source_file, &import.source, language) {
-                IndexedModule::Unique(module) => match in_file(&module) {
-                    Some(node_id) => Some((node_id, None)),
-                    None => reexport::python_import_reexport(
-                        &IndexFacts(self),
-                        language,
-                        &module,
-                        binding.name,
-                        target,
-                    )
-                    .map(|node_id| (node_id, Some(module))),
-                },
-                IndexedModule::Namespace(files) => {
-                    let mut hits = files.iter().filter_map(|file| in_file(file));
-                    hits.next()
-                        .filter(|_| hits.next().is_none())
-                        .map(|node_id| (node_id, None))
-                }
-                IndexedModule::Missing | IndexedModule::Ambiguous => None,
-            };
-            let Some((node_id, barrel)) = hit else {
-                continue;
-            };
-            if !fqn_language(language) {
-                return MemberHit::Bound(node_id, import, barrel);
-            }
-            match found {
-                Some((previous, _)) if previous != node_id => {
-                    return MemberHit::Unbound { bound };
-                }
-                Some(_) => {}
-                None => found = Some((node_id, import)),
-            }
-        }
-        found.map_or(MemberHit::Unbound { bound }, |(node_id, import)| {
-            MemberHit::Bound(node_id, import, None)
-        })
-    }
-
-    /// `from pkg.sub import mod; mod.compute()` through
-    /// [`reexport::python_submodule_member`]. `None` on any miss: the call
-    /// then resolves as the bare member, as before.
-    fn python_submodule_member<'i>(
-        &self,
-        source_file: &Path,
-        language: Language,
-        site: CallSite<'_>,
-        raw_imports: &'i [RawImport],
-    ) -> Option<(NodeId, &'i RawImport)> {
-        let CallSite::FromReceiver { receiver, member } = site else {
-            return None;
-        };
-        if language != Language::Python {
-            return None;
-        }
-        let (node_id, position) = reexport::python_submodule_member(
-            &IndexFacts(self),
-            &normalize_source_path(source_file),
-            (receiver, member),
-            raw_imports.iter().map(ImportRef::from),
-            call_target(source_file, site),
-        )?;
-        Some((node_id, &raw_imports[position]))
-    }
-
-    /// Whether `import` proves its callee external: [`may_suppress`] allows
-    /// it, and no language of its [`import_family`] indexes a module name
-    /// equal to its head or holds its module. Missing discovery alone is not
-    /// proof: a wrong suppression drops a genuine caller.
-    fn import_is_external(
-        &self,
-        source_file: &Path,
-        import: &RawImport,
-        language: Language,
-    ) -> bool {
-        let head = module_head(&import.source);
-        may_suppress(import, language)
-            && import_family(language)
-                .all(|family| !self.symbol_table.has_module_name(family, head))
-            && import_family(language).all(|family| {
-                matches!(
-                    self.import_module_file(source_file, &import.source, family),
-                    IndexedModule::Missing
-                )
-            })
-    }
-
     /// Record and return an ImportScoped edge to `node_id` through `import`.
     fn import_scoped(
         &self,
@@ -1507,11 +1412,9 @@ impl<'a> Resolver<'a> {
     }
 
     /// The bare-member retry of a Kotlin call through a class binding
-    /// ([`extension_retry`]). Only a top-level function can be an extension
-    /// on that type: a typed receiver of a library type (`gson.fromJson()`)
-    /// or `super.onResume()` must not land on a same-named member.
-    /// Extension receivers are not indexed, so the top-level retry remains
-    /// a by-name heuristic and cannot verify the declared receiver type.
+    /// ([`ladder::extension_fallback`]): `member` through the name tiers
+    /// outside a call scope, with the caller's heritage, top-level functions
+    /// only.
     pub(crate) fn extension_fallback(
         &self,
         source_file: &Path,
@@ -1520,15 +1423,103 @@ impl<'a> Resolver<'a> {
         target: ResolveTarget,
         caller_heritage: &[String],
     ) -> Vec<(NodeId, f32)> {
-        let mut hits = self.resolve_symbol_with_heritage(
-            source_file,
+        ladder::extension_fallback(self.symbol_table, member, |member| {
+            self.resolve_symbol_with_heritage(
+                source_file,
+                member,
+                raw_imports,
+                target,
+                caller_heritage,
+            )
+        })
+        .collect()
+    }
+
+    /// The C# extension retry ([`csharp_extension::resolve`]) of `member` on
+    /// a receiver whose own member lookup bound nothing. The receiver's type
+    /// is read where [`ReceiverSite`] says: a named type in `source_file`
+    /// with `raw_imports`, the type a call returns in the callee's file with
+    /// that file's imports, or none for an untyped receiver. The candidates'
+    /// scope is always the caller's:
+    /// `source_file`'s namespaces and `raw_imports`. `arguments` are the
+    /// ones the call's entry records.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn csharp_extension(
+        &self,
+        source_file: &Path,
+        receiver: ReceiverSite<'_>,
+        member: &str,
+        arguments: Option<CallArguments<'_>>,
+        raw_imports: &[RawImport],
+        caller_owner: Option<&str>,
+    ) -> csharp_extension::Verdict {
+        let st = self.symbol_table;
+        let built;
+        let decls = match self.csharp_extensions {
+            Some(map) => map.get(member).map_or(&[][..], Vec::as_slice),
+            None => {
+                built = st.csharp_extension_decls(member);
+                built.as_slice()
+            }
+        };
+        if decls.is_empty() {
+            return csharp_extension::Verdict::NotExtension;
+        }
+        let caller_file = normalize_source_path(source_file);
+        let (name, scope_file, scope_imports) = match receiver {
+            ReceiverSite::Named(name) => (Some(name), &*caller_file, raw_imports),
+            ReceiverSite::Returned(callee) => {
+                let (Some(name), Some(file)) =
+                    (type_ladder::returned_type(st, callee), st.file_of(callee))
+                else {
+                    return csharp_extension::Verdict::NotExtension;
+                };
+                let imports = self
+                    .reexports
+                    .and_then(|index| index.modules.get(file))
+                    .map_or(&[][..], |exports| exports.imports);
+                (Some(name), file, imports)
+            }
+            ReceiverSite::Untyped => (None, &*caller_file, raw_imports),
+        };
+        let types: Vec<u32> = match name {
+            None => Vec::new(),
+            Some(name) => {
+                match st.lookup_in_file_with_kind(scope_file, name, ResolveTarget::Type) {
+                    Some(id) => vec![id],
+                    None => type_ladder::TypeFacts::global_candidates(
+                        st,
+                        name,
+                        ResolveTarget::Type,
+                        st.file_meta(scope_file),
+                    )
+                    .into_iter()
+                    .filter(|&id| st.namespace_return_type_visible(id, scope_file, scope_imports))
+                    .collect(),
+                }
+            }
+        };
+        let namespaces: Vec<&str> = st
+            .csharp_namespaces(&caller_file)
+            .iter()
+            .map(String::as_str)
+            .collect();
+        csharp_extension::resolve(
+            st,
+            decls,
+            csharp_extension::Receiver {
+                name,
+                types: &types,
+            },
             member,
-            raw_imports,
-            target,
-            caller_heritage,
-        );
-        hits.retain(|&(id, _)| self.symbol_table.is_top_level(id));
-        hits
+            arguments,
+            &csharp_extension::CallerScope {
+                file: &caller_file,
+                namespaces: &namespaces,
+                imports: raw_imports,
+                owner: caller_owner,
+            },
+        )
     }
 
     /// Variant that exposes the caller's enclosing-class heritage to enable
@@ -1590,7 +1581,9 @@ impl<'a> Resolver<'a> {
         caller_heritage: &[String],
         barrel: &mut Option<Arc<str>>,
     ) -> Vec<(NodeId, f32)> {
-        let language = Language::from_normalized_path(&normalize_source_path(source_file));
+        let language = self
+            .symbol_table
+            .file_language(&normalize_source_path(source_file));
         // FQN call binding must not change the heritage graph underneath the
         // receiver ladder. Constructors enter through resolve_call instead.
         let bind_import = target != ResolveTarget::Type || !fqn_language(language);
@@ -1606,6 +1599,10 @@ impl<'a> Resolver<'a> {
         )
     }
 
+    /// `call` is the call site ([`Self::resolve_call`]), `None` for a plain
+    /// symbol lookup. Its presence also admits
+    /// [`ResolutionTier::NearestCopy`], whose confidence Pass 2 maps to the
+    /// call edge's reason; a retry under another name keeps it.
     #[allow(clippy::too_many_arguments)]
     fn resolve_symbol_with_import_binding(
         &self,
@@ -1615,7 +1612,7 @@ impl<'a> Resolver<'a> {
         (raw_imports, bind_import): (&[RawImport], bool),
         target: ResolveTarget,
         caller_heritage: &[String],
-        call: Option<CallScope<'_>>,
+        call: Option<CallPick<'_>>,
         barrel: &mut Option<Arc<str>>,
     ) -> Vec<(NodeId, f32)> {
         let mut results = Vec::new();
@@ -1630,72 +1627,55 @@ impl<'a> Resolver<'a> {
         // that reaches no member ([`CallSite::reaches_free_only`]) weighs no method of
         // the file, so a free function of the name still wins.
         let free_only = call.is_some_and(|scope| scope.free_only);
-        let same_file_pick =
-            self.symbol_table
-                .lookup_call_in_file(&source_file_str, symbol_name, target, free_only);
-        if let Some(node_id) = same_file_pick
-            .and_then(|pick| match call {
-                Some(scope) if free_only => {
-                    let lexical_owner = if language == Language::Rust {
-                        scope.caller.and_then(|caller| {
-                            self.symbol_table
-                                .rust_lexical_scope_of(caller)
-                                .map(str::to_owned)
-                                .or_else(|| {
-                                    self.symbol_table.name_in_file(caller).map(|name| {
-                                        ecp_core::analyzer::same_file_pick::rust_lexical_owner(
-                                            self.symbol_table,
-                                            caller,
-                                            name,
-                                        )
-                                    })
-                                })
-                        })
-                    } else {
-                        None
-                    };
-                    ecp_core::analyzer::same_file_pick::prefer_free_scoped(
-                        self.symbol_table,
-                        &source_file_str,
-                        symbol_name,
-                        lexical_owner.as_deref(),
-                        scope.owner,
-                        target,
-                    )
-                }
-                Some(scope) => self.symbol_table.prefer_owned(
-                    &source_file_str,
-                    pick,
-                    symbol_name,
-                    scope.owner,
-                    if scope.untyped_receiver {
-                        &[]
-                    } else {
-                        caller_heritage
-                    },
-                    target,
-                    PickScope {
-                        caller: scope.caller,
-                        typed_receiver: false,
-                        untyped_receiver: scope.untyped_receiver,
-                        qualifier_is_type: false,
-                    },
-                ),
-                None => Some(pick),
-            })
-            .filter(|&id| !free_only || self.symbol_table.node_kind(id) != NodeKind::Method)
-        {
-            results.push((node_id, ResolutionTier::SameFile.base_confidence()));
+        if let Resolution::Bound(hit) = ladder::same_file(
+            self.symbol_table,
+            &source_file_str,
+            symbol_name,
+            target,
+            call,
+            caller_heritage,
+        ) {
+            results.push((hit.id, hit.confidence));
             self.record(
                 &source_file_str,
                 symbol_name,
                 None,
                 DecisionTier::SameFile,
-                Some(node_id),
+                Some(hit.id),
                 0,
-                Some(ResolutionTier::SameFile.base_confidence()),
+                Some(hit.confidence),
             );
             return results; // Highest precedence, return early
+        }
+
+        // Tier 1 across the files of a C# partial type: a bare call in one
+        // part reaches what the caller's type owns, as `this.m()` does
+        // (codex ruling P-d). Only a member the type declares in any part,
+        // or inherits through the bases any part lists, binds.
+        if let Some((node_id, tier, decision)) = call
+            .filter(|scope| !scope.untyped && !scope.free_only)
+            .and_then(|scope| {
+                self.partial_type_member(
+                    &source_file_str,
+                    language,
+                    symbol_name,
+                    scope.owner?,
+                    target,
+                )
+            })
+        {
+            let conf = tier.confidence();
+            results.push((node_id, conf));
+            self.record(
+                &source_file_str,
+                symbol_name,
+                None,
+                decision,
+                Some(node_id),
+                0,
+                Some(conf),
+            );
+            return results;
         }
 
         // Tier 2: ImportScoped.
@@ -1708,43 +1688,24 @@ impl<'a> Resolver<'a> {
         // only after the caller's heritage: members in scope beat imports.
         let mut wildcard_open = false;
         if member_fallback {
-            match self.import_member_hit(
-                source_file,
+            match ladder::import_member(
+                &IndexFacts(self),
+                &source_file_str,
                 language,
                 symbol_name,
                 raw_imports,
                 target,
-                false,
+                caller_heritage,
             ) {
-                MemberHit::Bound(node_id, import, via) => {
-                    *barrel = via;
+                ladder::ImportMember::Bound(hit) => {
+                    *barrel = hit.barrel;
                     return self
-                        .import_scoped(source_file, symbol_name, import, node_id)
+                        .import_scoped(source_file, symbol_name, hit.import, hit.id)
                         .edge()
                         .into_iter()
                         .collect();
                 }
-                MemberHit::Unbound { bound } => wildcard_open = !bound && fqn_language(language),
-            }
-            let mut retry = None;
-            let mut extension = None;
-            let mut bound = false;
-            let mut external = true;
-            for import in raw_imports {
-                let Some(binding) = import_binding(import, symbol_name, language) else {
-                    continue;
-                };
-                bound = true;
-                retry = retry_name(import, binding.name, symbol_name, language);
-                extension = extension.or(extension_retry(&binding, language));
-                external = external && self.import_is_external(source_file, import, language);
-            }
-            if bound {
-                // `super.x()` names the caller's base, which no extension
-                // function call does.
-                let heritage_call = split_qualifier(symbol_name)
-                    .is_some_and(|(qualifier, _)| caller_heritage.iter().any(|b| b == qualifier));
-                if let (true, Some(member), false) = (external, extension, heritage_call) {
+                ladder::ImportMember::Extension(member) => {
                     return self.extension_fallback(
                         source_file,
                         member,
@@ -1753,7 +1714,7 @@ impl<'a> Resolver<'a> {
                         caller_heritage,
                     );
                 }
-                if external {
+                ladder::ImportMember::External => {
                     self.record(
                         &source_file_str,
                         symbol_name,
@@ -1768,7 +1729,7 @@ impl<'a> Resolver<'a> {
                 // An import that may be local keeps the previous resolution
                 // path: Python under the member's short name, a fully
                 // qualified language under the callee as written.
-                if let Some(retry) = retry {
+                ladder::ImportMember::Retry(retry) => {
                     return self.resolve_symbol_with_import_binding(
                         source_file,
                         retry,
@@ -1783,6 +1744,7 @@ impl<'a> Resolver<'a> {
                         &mut None,
                     );
                 }
+                ladder::ImportMember::Continue { wildcard } => wildcard_open = wildcard,
             }
         } else if has_imports {
             let (imported, via) =
@@ -1793,132 +1755,73 @@ impl<'a> Resolver<'a> {
             }
         }
 
-        // Tier 2.5: Qualifier-scoped lookup. Callees that carry a qualifier
-        // (`A::new`, `std::vec::Vec::new`, `Cls.method`) cannot match Tier 1/2
-        // which are keyed by short names; without this tier they fall through
-        // to Tier 3, where the kind+unique filter near-always rejects the
-        // ultra-common member name (`new`, `default`, `from`, ...). Splitting
-        // and scoping to the qualifier's defining file is the proper fix.
-        //
-        // No fall-through to Tier 3 on a short-name retry: a qualified callee
-        // should resolve via its qualifier or not at all — matching the
-        // "refuse to guess" principle that drives the Layer-1 barriers.
-        //
-        // Concretely, allowing a bare-name fallback would re-introduce a class
-        // of pre-existing false edges that this tier was meant to remove:
-        // `std::fs::read` stripping to `read` and resolving to a same-named
-        // local function, `serde_json::json!` macro calls resolving to a
-        // local `json()` helper, etc. Dump verification of B.1 vs B.1+fallback
-        // showed a ~52% false-positive rate on the fallback path, so we keep
-        // the strict policy. Module-qualified free functions like
-        // `registry::sanitize_branch` whose member is uniquely defined will
-        // be recovered by Phase B.3 (config-aware import resolution) once the
-        // workspace crate index can distinguish `ecp_core::...` (internal,
-        // safe to fall back) from `std::...` (external, refuse).
+        // Tier 2.5, then Tier 3.5 for a `::` path ([`ladder::qualified`]):
+        // a callee that carries a qualifier (`A::new`, `std::vec::Vec::new`,
+        // `Cls.method`) resolves through its qualifier or not at all. Tiers 1
+        // and 2 are keyed by short names, and Tier 3's kind + unique filter
+        // near-always rejects the common member names (`new`, `from`).
         if let Some((qualifier, member)) = split_qualifier(symbol_name) {
-            if qualifier == CallSite::SUPER_RECEIVER
-                && FileMeta::from_path(&source_file_str).language == Language::Python
-            {
-                return self.resolve_super_member(
-                    source_file,
-                    &source_file_str,
-                    symbol_name,
-                    member,
-                    target,
-                    raw_imports,
-                    caller_heritage,
-                );
-            }
-            // `this.m()` reaches here typed as the caller's own type (`C.m`),
-            // whose bases are the caller's heritage. A type the index does
-            // not declare (Rust `impl W for Pin<P>`) is still the caller's,
-            // so its file is the caller's own.
-            let caller_type = call
-                .and_then(|scope| scope.owner)
-                .and_then(owner_key)
-                .is_some_and(|owner| owner_key(qualifier) == Some(owner));
-            let hit = self
-                .resolve_qualifier_file(
-                    source_file,
-                    qualifier,
-                    member,
-                    target,
-                    raw_imports,
-                    Some(symbol_name),
-                )
-                .or_else(|| caller_type.then(|| source_file_str.to_string()))
-                .and_then(|qf| {
-                    let heritage: &[String] = if caller_type { caller_heritage } else { &[] };
-                    // A module or namespace qualifier (`mod.f()`) may reach a
-                    // free function; a type reaches only its own lineage.
-                    let qualifier_is_type = type_receiver_is_closed(language)
-                        && (caller_type
-                            || owner_key(qualifier).is_some_and(|key| {
-                                self.symbol_table
-                                    .lookup_in_file_with_kind(&qf, key, ResolveTarget::Type)
-                                    .is_some()
-                            }));
-                    self.symbol_table
-                        .lookup_in_file_with_kind(&qf, member, target)
-                        .and_then(|pick| {
-                            self.symbol_table.prefer_owned(
-                                &qf,
-                                pick,
-                                member,
-                                Some(qualifier),
-                                heritage,
-                                target,
-                                PickScope {
-                                    caller: call.and_then(|scope| scope.caller),
-                                    typed_receiver: true,
-                                    qualifier_is_type,
-                                    ..PickScope::default()
-                                },
-                            )
-                        })
-                });
-            if let Some(node_id) = hit {
-                let conf = ResolutionTier::QualifierScoped.base_confidence();
-                results.push((node_id, conf));
-                self.record(
-                    &source_file_str,
-                    symbol_name,
-                    None,
-                    DecisionTier::QualifierScoped,
-                    Some(node_id),
-                    0,
-                    Some(conf),
-                );
-                return results;
-            }
-
-            // Tier 3.5: Rust workspace module-tree FQN resolution.
-            //
-            // Fires when Tier 2.5 (qualifier-scoped) fails AND a Rust module
-            // tree is available. Handles `crate::a::b::fn` and
-            // `<crate_name>::a::b::fn` paths by walking the filesystem-backed
-            // mod tree instead of relying on the qualifier-as-Type heuristic.
-            //
-            // Only fires for callee strings with `::` — dot-separated callees
-            // are method calls (handled by heritage / Tier 2.5 via receiver
-            // types) not module-path FQNs.
-            if symbol_name.contains("::") {
-                if let Some(node_id) =
-                    self.try_module_tree_resolve(&source_file_str, symbol_name, member, target)
-                {
-                    const MT_CONF: f32 = Tier::ModuleTree.confidence();
-                    results.push((node_id, MT_CONF));
+            let site = ladder::QualifiedSite {
+                source: &source_file_str,
+                caller: self.symbol_table.file_meta(&source_file_str),
+                language,
+                imports: raw_imports,
+                callee: symbol_name,
+                qualifier,
+                member,
+                target,
+                call,
+            };
+            let (resolution, base) = ladder::qualified(
+                &IndexFacts(self),
+                site,
+                caller_heritage,
+                StemFile::Any,
+                || {
+                    ladder::module_tree_member(
+                        &self.module_tree()?,
+                        self.symbol_table,
+                        &source_file_str,
+                        symbol_name,
+                        member,
+                        target,
+                    )
+                },
+            );
+            match resolution {
+                Resolution::Bound(hit) => {
+                    let tier = match hit.tier {
+                        Some(Tier::ModuleTree) => DecisionTier::ModuleTree,
+                        Some(Tier::TypeOwned) => DecisionTier::TypeOwned,
+                        Some(Tier::TypeHeritage) => DecisionTier::TypeHeritage,
+                        _ => DecisionTier::QualifierScoped,
+                    };
+                    results.push((hit.id, hit.confidence));
+                    self.record(
+                        &source_file_str,
+                        symbol_name,
+                        base,
+                        tier,
+                        Some(hit.id),
+                        0,
+                        Some(hit.confidence),
+                    );
+                    return results;
+                }
+                // A `super()` call no base owns: no later tier runs.
+                Resolution::NoEdge(_) => {
                     self.record(
                         &source_file_str,
                         symbol_name,
                         None,
-                        DecisionTier::ModuleTree,
-                        Some(node_id),
+                        DecisionTier::Unresolved,
+                        None,
                         0,
-                        Some(MT_CONF),
+                        None,
                     );
                     return results;
                 }
+                Resolution::Unknown | Resolution::Shadowed => {}
             }
 
             // Receiver-typing ladder: runs only where every tier above found
@@ -1949,20 +1852,17 @@ impl<'a> Resolver<'a> {
                 TypeMember::Ambiguous => DecisionTier::AmbiguousGlobal,
                 TypeMember::NoEdge => DecisionTier::Unresolved,
             };
-            // A Kotlin receiver named by a class import reaches here as
-            // `Type.member` only since the import tier; before it the call was
-            // the bare member, which finds an extension function declared on
-            // the type in another file. A heritage qualifier (`super.x()`)
-            // was always qualified, so it keeps this verdict.
-            if matches!(tier, DecisionTier::Unresolved)
-                && language == Language::Kotlin
-                && !caller_heritage.iter().any(|base| base == qualifier)
-                && raw_imports.iter().any(|import| {
-                    import_binding(import, symbol_name, language)
-                        .and_then(|binding| extension_retry(&binding, language))
-                        .is_some()
-                })
-            {
+            let extension = match tier {
+                DecisionTier::Unresolved => ladder::kotlin_extension_retry(
+                    language,
+                    symbol_name,
+                    (qualifier, member),
+                    raw_imports,
+                    caller_heritage,
+                ),
+                _ => None,
+            };
+            if let Some(member) = extension {
                 return self.extension_fallback(
                     source_file,
                     member,
@@ -1994,78 +1894,129 @@ impl<'a> Resolver<'a> {
         // An untyped receiver is no `this`: the caller's bases do not own
         // the member it reaches. Neither do they own what a bare call that
         // reaches no member names.
-        if !caller_heritage.is_empty()
-            && !free_only
-            && !call.is_some_and(|scope| scope.untyped_receiver)
-        {
-            for base in caller_heritage {
-                if let Some(qf) = self.resolve_qualifier_file(
-                    source_file,
-                    base,
-                    symbol_name,
-                    target,
+        if let (Resolution::Bound(hit), Some(base)) = ladder::heritage(
+            self.symbol_table,
+            caller_heritage,
+            symbol_name,
+            target,
+            call,
+            |base| {
+                ladder::qualifier_file(
+                    &IndexFacts(self),
+                    &source_file_str,
+                    self.symbol_table.file_meta(&source_file_str),
                     raw_imports,
-                    None,
-                ) {
-                    if let Some(node_id) = self
-                        .symbol_table
-                        .lookup_in_file_with_kind(&qf, symbol_name, target)
-                        .and_then(|pick| {
-                            self.symbol_table.prefer_owned(
-                                &qf,
-                                pick,
-                                symbol_name,
-                                Some(base.as_str()),
-                                &[],
-                                target,
-                                PickScope {
-                                    typed_receiver: true,
-                                    ..PickScope::default()
-                                },
-                            )
-                        })
-                    {
-                        let conf = ResolutionTier::HeritageScoped.base_confidence();
-                        results.push((node_id, conf));
-                        self.record(
-                            &source_file_str,
-                            symbol_name,
-                            Some(base.as_str()),
-                            DecisionTier::HeritageScoped,
-                            Some(node_id),
-                            0,
-                            Some(conf),
-                        );
-                        return results;
-                    }
-                }
-            }
+                    (None, base, symbol_name),
+                    target,
+                    StemFile::Any,
+                )
+            },
+        ) {
+            results.push((hit.id, hit.confidence));
+            self.record(
+                &source_file_str,
+                symbol_name,
+                Some(base),
+                DecisionTier::HeritageScoped,
+                Some(hit.id),
+                0,
+                Some(hit.confidence),
+            );
+            return results;
         }
 
-        if wildcard_open {
-            if let MemberHit::Bound(node_id, import, via) = self.import_member_hit(
-                source_file,
-                language,
+        if let Some(hit) = ladder::wildcard_member(
+            &IndexFacts(self),
+            wildcard_open,
+            &source_file_str,
+            language,
+            symbol_name,
+            raw_imports,
+            target,
+        ) {
+            *barrel = hit.barrel;
+            return self
+                .import_scoped(source_file, symbol_name, hit.import, hit.id)
+                .edge()
+                .into_iter()
+                .collect();
+        }
+
+        // Tier 3 ([`Self::global_tier`]).
+        results.extend(
+            self.global_tier(
+                &source_file_str,
                 symbol_name,
                 raw_imports,
                 target,
-                true,
-            ) {
-                *barrel = via;
-                return self
-                    .import_scoped(source_file, symbol_name, import, node_id)
-                    .edge()
-                    .into_iter()
-                    .collect();
-            }
-        }
+                call.is_some(),
+                free_only,
+            )
+            .edge(),
+        );
+        results
+    }
 
-        // Tier 3: Global fallback — emit only when the kind-filtered candidate
-        // set is unique. Refusing to guess on ambiguity is the dominant defence
-        // against bare-name fan-out (`new`, `format`, `default`, `main`, ...).
-        // `alt_count` in the dump still surfaces the raw same-name count so the
-        // verification harness can distinguish suppressed-ambiguous from
-        // truly-unresolved.
+    /// R24: the `Property` a plain field read `name` binds, through the tier
+    /// [`ladder::field_read`] picks: Tier 1, Tier 3 ([`Self::global_tier`]),
+    /// or for a qualified read the full lookup ([`Self::resolve_symbol`]),
+    /// whose qualifier tier settles it. The decision dump records each tier
+    /// as the full lookup does.
+    pub fn resolve_field_read(
+        &self,
+        source_file: &Path,
+        name: &str,
+        raw_imports: &[RawImport],
+    ) -> Vec<(NodeId, f32)> {
+        let source_file_str = normalize_source_path(source_file);
+        match ladder::field_read(self.symbol_table, &source_file_str, name) {
+            FieldRead::Bound(hit) => {
+                self.record(
+                    &source_file_str,
+                    name,
+                    None,
+                    DecisionTier::SameFile,
+                    Some(hit.id),
+                    0,
+                    Some(hit.confidence),
+                );
+                vec![(hit.id, hit.confidence)]
+            }
+            FieldRead::Qualified => {
+                self.resolve_symbol(source_file, name, raw_imports, ResolveTarget::Field)
+            }
+            FieldRead::Global => self
+                .global_tier(
+                    &source_file_str,
+                    name,
+                    raw_imports,
+                    ResolveTarget::Field,
+                    false,
+                    false,
+                )
+                .edge()
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    /// Tier 3: Global fallback ([`ladder::global`]) — emit only when the
+    /// kind-filtered candidate set is unique. Refusing to guess on ambiguity
+    /// is the dominant defence against bare-name fan-out (`new`, `format`,
+    /// `default`, `main`, ...). `alt_count` in the dump still surfaces the
+    /// raw same-name count so the verification harness can distinguish
+    /// suppressed-ambiguous from truly-unresolved. `nearest` (a call site)
+    /// admits the nearest copy; `free_only` is a bare `f()` that never
+    /// reaches a member.
+    fn global_tier(
+        &self,
+        source_file_str: &str,
+        symbol_name: &str,
+        raw_imports: &[RawImport],
+        target: ResolveTarget,
+        nearest: bool,
+        free_only: bool,
+    ) -> Resolution {
         let specifier = raw_imports
             .iter()
             .find(|i| match &i.alias {
@@ -2074,65 +2025,51 @@ impl<'a> Resolver<'a> {
             })
             .map(|i| i.source.as_str());
         let raw_count = self.symbol_table.global_match_count(symbol_name);
-        let caller_meta = FileMeta::from_path(&source_file_str);
+        let caller_meta = self.symbol_table.file_meta(source_file_str);
 
         let hidden = |node_id: NodeId| {
             self.symbol_table.file_of(node_id).is_some_and(|module| {
                 reexport::import_hides(
                     &IndexFacts(self),
-                    &source_file_str,
+                    source_file_str,
                     symbol_name,
                     raw_imports.iter().map(ImportRef::from),
                     module,
                 )
             })
         };
-        let (tier, target_id, confidence, alt_count) =
-            match self
-                .symbol_table
-                .lookup_global(symbol_name, target, caller_meta, free_only)
-            {
-                GlobalPick::Unique(node_id) if hidden(node_id) => {
-                    (DecisionTier::Unresolved, None, None, raw_count)
-                }
-                GlobalPick::Unique(node_id) => {
-                    let conf = ResolutionTier::Global.base_confidence();
-                    results.push((node_id, conf));
-                    (
-                        DecisionTier::Global,
-                        Some(node_id),
-                        Some(conf),
-                        raw_count.saturating_sub(1),
-                    )
-                }
-                GlobalPick::Ambiguous => match call
-                    .and_then(|_| {
-                        self.symbol_table.nearest_global_copy(
-                            &source_file_str,
-                            caller_meta,
-                            symbol_name,
-                            target,
-                            free_only,
-                        )
-                    })
-                    .filter(|&node_id| !hidden(node_id))
-                {
-                    Some(node_id) => {
-                        let conf = ResolutionTier::NearestCopy.base_confidence();
-                        results.push((node_id, conf));
-                        (
-                            DecisionTier::NearestCopy,
-                            Some(node_id),
-                            Some(conf),
-                            raw_count.saturating_sub(1),
-                        )
-                    }
-                    None => (DecisionTier::AmbiguousGlobal, None, None, raw_count),
-                },
-                GlobalPick::NoMatch => (DecisionTier::Unresolved, None, None, raw_count),
-            };
+        let resolution = ladder::global(
+            self.symbol_table,
+            source_file_str,
+            caller_meta,
+            target,
+            nearest,
+            || {
+                self.symbol_table
+                    .global_field_candidates(symbol_name, target, free_only)
+            },
+            hidden,
+        );
+        let (tier, target_id, confidence, alt_count) = match resolution {
+            Resolution::Bound(hit) => {
+                let tier = match hit.tier {
+                    Some(Tier::NearestCopy) => DecisionTier::NearestCopy,
+                    _ => DecisionTier::Global,
+                };
+                (
+                    tier,
+                    Some(hit.id),
+                    Some(hit.confidence),
+                    raw_count.saturating_sub(1),
+                )
+            }
+            Resolution::NoEdge(NoEdge::Ambiguous(_)) => {
+                (DecisionTier::AmbiguousGlobal, None, None, raw_count)
+            }
+            _ => (DecisionTier::Unresolved, None, None, raw_count),
+        };
         self.record(
-            &source_file_str,
+            source_file_str,
             symbol_name,
             specifier,
             tier,
@@ -2140,46 +2077,8 @@ impl<'a> Resolver<'a> {
             alt_count,
             confidence,
         );
-
-        results
+        resolution
     }
-}
-
-/// Split a qualified callee into `(qualifier, member)` where `qualifier` is
-/// the **immediate** identifier preceding the rightmost separator. Returns
-/// `None` if the name has no `::` / `.` separator or either side is empty.
-///
-/// For multi-segment paths only the last segment is taken as the qualifier
-/// (the only piece the resolver can map back to a registered Type name —
-/// `std::vec::Vec` is registered as just `Vec` keyed by its defining file).
-///
-/// Examples:
-/// * `A::new` → `Some(("A", "new"))`
-/// * `std::vec::Vec::new` → `Some(("Vec", "new"))`
-/// * `obj.method` → `Some(("obj", "method"))`
-/// * `foo` → `None`
-///
-/// Is the prefix preceding `qualifier` inside `full_callee` an "internal"
-/// path (empty, or `crate` / `self` / `super` chain)? Tier 4 only fires on
-/// calls where the qualifier names an internal module rather than the
-/// trailing segment of an extern crate / std module path. `std::fs::read`
-/// → preceding = `std` → returns false. `auto_ensure::ensure_fresh` →
-/// preceding = `` → returns true. `crate::auto_ensure::ensure_fresh` →
-/// preceding = `crate` → returns true.
-fn qualifier_prefix_is_internal(full_callee: &str, qualifier: &str) -> bool {
-    let Some(member_split) = full_callee.rfind("::").or_else(|| full_callee.rfind('.')) else {
-        return false;
-    };
-    let before_member = &full_callee[..member_split];
-    let preceding = before_member
-        .rsplit_once("::")
-        .or_else(|| before_member.rsplit_once('.'))
-        .map(|(p, q)| if q == qualifier { p } else { "" })
-        .unwrap_or("");
-    preceding.is_empty()
-        || preceding
-            .split("::")
-            .all(|s| matches!(s, "crate" | "self" | "super"))
 }
 
 /// The index ladder's answer as a [`Resolution`]. Every tier answers with
@@ -2187,6 +2086,15 @@ fn qualifier_prefix_is_internal(full_callee: &str, qualifier: &str) -> bool {
 fn ladder_resolution(targets: &[(NodeId, f32)]) -> Resolution {
     debug_assert!(targets.len() <= 1, "a tier bound {targets:?}");
     Resolution::from_ladder(targets.first().copied())
+}
+
+/// The one target of a type lookup; `None` for none or several, which the
+/// constructor fallback reads as no type.
+fn sole_target(targets: &[(NodeId, f32)]) -> Option<(NodeId, f32)> {
+    match *targets {
+        [target] => Some(target),
+        _ => None,
+    }
 }
 
 /// The kinds a call site may reach. Rust method syntax (`x.f()`, recorded as
@@ -2202,106 +2110,28 @@ fn call_target(source_file: &Path, site: CallSite<'_>) -> ResolveTarget {
     }
 }
 
-/// For a Rust path call `a::b::Q::m`, does the module path `a::b` that the
-/// call names for `Q` agree with the import of `Q` from `import_source`?
-/// `de::Error::custom` with `use crate::error::Error` does not: `de::Error`
-/// is another item than the imported `Error`. A head segment that a `use`
-/// brings in (`use crate::error as err;`) expands to its full path first.
-/// A `crate::` path must equal the import source; a relative one, with its
-/// leading `self` / `super` dropped, must be a suffix of it. A call with no
-/// module path before `Q`, or one not written with `::`, always agrees.
-fn rust_path_prefix_agrees_with_import(
-    full_callee: &str,
-    qualifier: &str,
-    import_source: &str,
-    imports: &[RawImport],
-) -> bool {
-    let Some(prefix) = rust_type_path_prefix(full_callee, qualifier) else {
-        return true;
-    };
-    let named = rust_expand_path_head(prefix, imports);
-    // `crate::a::Q` names one module from the crate root: the import must
-    // come from exactly that module. A relative path matches by suffix.
-    if named.first() == Some(&"crate") {
-        return import_source.split("::").eq(named);
+/// The C2 scope `source_file` imports in ([`PathAliases::scope_of`]).
+/// `language` yields the file's stored language, read only when the aliases
+/// carry scopes: a Vue `<script lang="ts">` file is TypeScript though its
+/// path names none.
+fn alias_scope(
+    aliases: &PathAliases,
+    source_file: &Path,
+    language: impl FnOnce() -> Language,
+) -> AliasScope {
+    if !aliases.has_scopes() {
+        return AliasScope::default();
     }
-    let is_anchor = |s: &&str| matches!(*s, "" | "self" | "super");
-    let named: Vec<&str> = named.into_iter().skip_while(is_anchor).collect();
-    let source: Vec<&str> = import_source
-        .split("::")
-        .skip_while(|s| *s == "crate" || is_anchor(s))
-        .collect();
-    source.ends_with(&named)
-}
-
-/// The module path `a::b` that the Rust path call `a::b::Q::m` names before
-/// its qualifier `Q`; `None` when there is none.
-fn rust_type_path_prefix<'c>(full_callee: &'c str, qualifier: &str) -> Option<&'c str> {
-    let (before_member, _) = full_callee.rsplit_once("::")?;
-    let (prefix, q) = before_member.rsplit_once("::")?;
-    (q == qualifier).then_some(prefix)
-}
-
-/// The segments of the Rust module path `prefix`, with a head that a `use`
-/// brings in (`use crate::error as err;`) expanded to its full path.
-fn rust_expand_path_head<'s>(prefix: &'s str, imports: &'s [RawImport]) -> Vec<&'s str> {
-    let mut named: Vec<&str> = prefix.split("::").collect();
-    if let Some(module) = named.first().and_then(|&head| {
-        imports
-            .iter()
-            .find(|i| i.alias.as_deref().unwrap_or(&i.imported_name) == head)
-    }) {
-        // `use crate::error as err;` records the whole path as the imported
-        // name; `use crate::{error as err};` records source `crate`, name
-        // `error`.
-        let name = module.imported_name.as_str();
-        let (path, tail) = if name.contains("::") {
-            (name, None)
-        } else {
-            (module.source.as_str(), Some(name))
-        };
-        named.splice(..1, path.split("::").chain(tail));
-    }
-    named
-}
-
-fn split_qualifier(name: &str) -> Option<(&str, &str)> {
-    // Pick the rightmost separator. PHP's `\` is included alongside `::`
-    // and `.` so `\App\helper` resolves with `App` as qualifier. `::` is
-    // 2-char (preferred on tie since the position points at the first `:`,
-    // not the `.`/`\` that might appear at the same column).
-    let candidates = [
-        (name.rfind("::"), 2usize),
-        (name.rfind('.'), 1),
-        (name.rfind('\\'), 1),
-    ];
-    let (split_idx, sep_len) = candidates
-        .iter()
-        .filter_map(|&(idx, len)| idx.map(|i| (i, len)))
-        .max_by_key(|&(i, _)| i)?;
-    let (before, after) = name.split_at(split_idx);
-    let member = &after[sep_len..];
-    if before.is_empty() || member.is_empty() {
-        return None;
-    }
-    let qualifier = before
-        .rsplit_once("::")
-        .or_else(|| before.rsplit_once('.'))
-        .or_else(|| before.rsplit_once('\\'))
-        .map(|(_, q)| q)
-        .unwrap_or(before);
-    if qualifier.is_empty() {
-        return None;
-    }
-    Some((qualifier, member))
+    aliases.scope_of(&normalize_source_path(source_file), language())
 }
 
 /// [`reexport::for_each_specifier_candidate`] with the project's path
-/// aliases.
+/// aliases, read in `source_file`'s scope (R-A4b).
 fn for_each_specifier_candidate<F>(
     source_file: &std::path::Path,
     specifier: &str,
     aliases: &PathAliases,
+    importer_language: impl FnOnce() -> Language,
     visit: F,
 ) where
     F: FnMut(&str) -> bool,
@@ -2311,31 +2141,15 @@ fn for_each_specifier_candidate<F>(
         specifier,
         |expanded| {
             if !aliases.is_empty() {
-                aliases.expand(specifier, |alias| expanded(alias));
+                aliases.expand_in(
+                    alias_scope(aliases, source_file, importer_language),
+                    specifier,
+                    |alias| expanded(alias),
+                );
             }
         },
         visit,
     );
-}
-
-/// What a call site adds to a name lookup ([`Resolver::resolve_call`]).
-/// Its presence also admits [`ResolutionTier::NearestCopy`], whose
-/// confidence Pass 2 maps to the call edge's reason.
-#[derive(Clone, Copy)]
-struct CallScope<'c> {
-    /// The type the calling member belongs to.
-    owner: Option<&'c str>,
-    /// `o.m()` on a receiver the parser could not type: the member is not
-    /// reached through the caller's bases, so they do not narrow the pick
-    /// (`super(E, self).m()` starts after `E`).
-    untyped_receiver: bool,
-    /// A bare `f()` that never reaches a member ([`CallSite::reaches_free_only`]):
-    /// the same-file and Global tiers weigh no `Method`, and the heritage
-    /// tier does not run. A retry under another name keeps the flag.
-    free_only: bool,
-    /// The calling declaration: a Rust `self.m()` in an `impl` block the
-    /// parser gave no owner reaches that block's own `m`.
-    caller: Option<NodeId>,
 }
 
 /// Outcome of the receiver-typing ladder for one qualified callee.
@@ -2348,428 +2162,6 @@ enum TypeMember {
 }
 
 impl<'a> Resolver<'a> {
-    /// Resolve `qualifier` as a Type (Class / Interface) via Tier 1 → Tier 2 →
-    /// Tier 3 (kind-filtered, unique-only), returning the file_path of the
-    /// resolved target. Used by Tier 2.5 to scope member lookup to the
-    /// qualifier's defining file. Telemetry-silent — internal recursion is
-    /// not surfaced in the decision dump.
-    fn resolve_qualifier_file(
-        &self,
-        source_file: &Path,
-        qualifier: &str,
-        member: &str,
-        target: ResolveTarget,
-        raw_imports: &[RawImport],
-        full_callee: Option<&str>,
-    ) -> Option<String> {
-        #[cfg(not(windows))]
-        let source_file_str = source_file.to_string_lossy();
-        #[cfg(windows)]
-        let source_file_str =
-            std::borrow::Cow::Owned(source_file.to_string_lossy().replace('\\', "/"));
-
-        // Tier 1: same-file qualifier definition. Qualifiers are class /
-        // interface / namespace / module names, so filter to Qualifier
-        // here — avoids a property named `Logger` winning over `class
-        // Logger` in the same file, while still letting `namespace outer
-        // { ... }` and inline `mod foo { ... }` serve as the leading
-        // segment of `outer::member()` / `foo::member()` calls.
-        //
-        // Member-presence gate: file-backed `mod auto_ensure;` declares
-        // the Module node in the parent file, but the actual members
-        // live in `auto_ensure.rs`. Returning the parent file here would
-        // short-circuit the downstream member lookup AND block Tier 4's
-        // module-file fallback. Only claim Tier 1 when the full chain
-        // (qualifier → file → member) resolves in the same file —
-        // matches the inline-mod / inline-namespace case and declines
-        // for the file-backed stub case, letting later tiers handle it.
-        if let Some(id) = self.symbol_table.lookup_in_file_with_kind(
-            &source_file_str,
-            qualifier,
-            ResolveTarget::Qualifier,
-        ) {
-            if let Some(qf) = self.symbol_table.file_of(id) {
-                if self
-                    .symbol_table
-                    .lookup_in_file_with_kind(qf, member, target)
-                    .is_some()
-                    && self.rust_type_path_agrees(
-                        source_file,
-                        &source_file_str,
-                        full_callee,
-                        qualifier,
-                        qf,
-                        raw_imports,
-                    )
-                {
-                    return Some(qf.to_string());
-                }
-            }
-        }
-
-        // Tier 2: imported qualifier (matches alias or imported_name; expands
-        // specifier via the same L0 candidate enumeration used by the bare-
-        // name resolver). Same member-presence gate as Tier 1: the import
-        // tells us which file the qualifier lives in, but that file must
-        // also contain the member to claim this tier.
-        for import in raw_imports {
-            let matches_qualifier = match &import.alias {
-                Some(alias) => alias == qualifier,
-                None => import.imported_name == qualifier,
-            };
-            if !matches_qualifier
-                || full_callee.is_some_and(|callee| {
-                    !rust_path_prefix_agrees_with_import(
-                        callee,
-                        qualifier,
-                        &import.source,
-                        raw_imports,
-                    )
-                })
-            {
-                continue;
-            }
-            let exported = &import.imported_name;
-            // `import * as ns from './a'` / `const ns = require('./a')`: the
-            // qualifier is the module, so its file is the lookup scope. A
-            // miss ends the search: `ns.f()` never means another file's `f`.
-            // A fully qualified `*` import (a wildcard, or a PHP group member)
-            // names no module that the qualifier stands for, so it keeps the
-            // candidate probe below.
-            let language = Language::from_normalized_path(&source_file_str);
-            if exported == "*" && import_member_fallback(language) && !fqn_language(language) {
-                if let IndexedModule::Unique(file) =
-                    self.import_module_file(source_file, &import.source, language)
-                {
-                    return Some(file.to_string());
-                }
-                continue;
-            }
-            if exported == "*" && matches!(language, Language::JavaScript | Language::TypeScript) {
-                let mut hit: Option<String> = None;
-                self.for_each_candidate(source_file, &import.source, |candidate| {
-                    let defines_member = reexport::lookup_export_in_file(
-                        &IndexFacts(self),
-                        candidate,
-                        member,
-                        target,
-                    )
-                    .is_some();
-                    if defines_member {
-                        hit = Some(candidate.to_string());
-                    }
-                    !defines_member
-                });
-                return hit;
-            }
-            // `use a::m; m::f()`: in Rust `m` may be the module `a::m`, whose
-            // own file holds `f`. The parent file declaring `mod m;` can
-            // define an `f` of its own, so it is not consulted then; a miss
-            // leaves the call to the module tree (Tier 3.5).
-            let module_path = if exported.contains("::") {
-                exported.clone()
-            } else {
-                format!("{}::{exported}", import.source)
-            };
-            if let Some(module_file) = self.rust_module_file(source_file, &module_path) {
-                if self
-                    .symbol_table
-                    .lookup_in_file_with_kind(&module_file, member, target)
-                    .is_some()
-                {
-                    return Some(module_file);
-                }
-                // The qualifier is that module; the global qualifier lookup
-                // below would find `mod m;` in the parent and its own `f`.
-                return None;
-            }
-            // `use other::m; m::f()` names a workspace crate's module by crate
-            // (or `[lib]`) name, which `rust_module_file` cannot place. The
-            // module tree can; past this point only file-stem guesses remain,
-            // and they pick the caller crate's own `m.rs`. Rust callers only:
-            // the tree is built for any repo with a Cargo.toml, and a Python
-            // `from pkg import m` must not reach a Rust crate named `pkg`. A
-            // head that is a module of the caller's own file (`mod utils;
-            // use utils::fs;`) is not a crate path.
-            let head = module_path.split("::").next().unwrap_or_default();
-            if is_rust_source(source_file)
-                && self
-                    .mod_tree
-                    .is_some_and(|tree| tree.names_module(&module_path))
-                && self
-                    .symbol_table
-                    .lookup_in_file_with_kind(&source_file_str, head, ResolveTarget::Qualifier)
-                    .is_none()
-            {
-                // The caller looks `member` up in the returned file, so a
-                // renamed re-export (`pub use imp::lookup_impl as lookup;`)
-                // would land on an unrelated `lookup` there: the tree must
-                // place `member` under its own name.
-                return self
-                    .mod_tree_resolve(&source_file_str, &format!("{module_path}::{member}"))
-                    .filter(|resolved| {
-                        resolved.item_name == member
-                            && self
-                                .symbol_table
-                                .lookup_in_file_with_kind(
-                                    &resolved.file,
-                                    &resolved.item_name,
-                                    target,
-                                )
-                                .is_some()
-                    })
-                    .map(|resolved| resolved.file);
-            }
-            let mut hit: Option<String> = None;
-            let default_import = ImportRef::from(import).is_es_default();
-            self.for_each_candidate(source_file, &import.source, |candidate| {
-                // Through the module's exports: an ES module may export the
-                // qualifier under another name (`export { Impl as Widget }`).
-                let qualifier_present = reexport::imported_in_file(
-                    &IndexFacts(self),
-                    candidate,
-                    exported,
-                    default_import,
-                    ResolveTarget::Qualifier,
-                )
-                .is_some();
-                let member_present = self
-                    .symbol_table
-                    .lookup_in_file_with_kind(candidate, member, target)
-                    .is_some();
-                if qualifier_present && member_present {
-                    hit = Some(candidate.to_string());
-                    false
-                } else {
-                    true
-                }
-            });
-            if hit.is_some() {
-                return hit;
-            }
-        }
-
-        // Tier 3: kind-filtered unique global. Language + vendor barriers
-        // applied via FileMeta — the same defences as bare-name Tier 3.
-        // Member-presence gate identical to Tier 1's: blocks Module's
-        // declaration-file from outranking the file-stem fallback when
-        // members live elsewhere (`mod foo;` declaration in lib.rs vs.
-        // `fn bar()` body in foo.rs).
-        let caller_meta = FileMeta::from_path(&source_file_str);
-        if let GlobalPick::Unique(id) =
-            self.symbol_table
-                .lookup_global(qualifier, ResolveTarget::Qualifier, caller_meta, false)
-        {
-            if let Some(qf) = self.symbol_table.file_of(id) {
-                if self
-                    .symbol_table
-                    .lookup_in_file_with_kind(qf, member, target)
-                    .is_some()
-                    && self.rust_type_path_agrees(
-                        source_file,
-                        &source_file_str,
-                        full_callee,
-                        qualifier,
-                        qf,
-                        raw_imports,
-                    )
-                {
-                    return Some(qf.to_string());
-                }
-            }
-        }
-
-        // Tier 4: module-file fallback. The qualifier didn't match any Type
-        // anywhere, but Rust / Python / similar languages let a *module name*
-        // act as a qualifier (`mod auto_ensure;` ↔ `auto_ensure.rs`, `import
-        // foo` ↔ `foo.py`). Walk the registered file paths and look for one
-        // whose stem matches the qualifier and lives in the caller's crate.
-        //
-        // Fires only from Tier 2.5 (qualified-call resolution) — heritage
-        // resolution passes `None` because parent class names should resolve
-        // as Types, not as module files.
-        //
-        // Two false-positive defences:
-        //
-        //   1. **Internal-prefix check** — the qualifier's preceding segments
-        //      must be empty (bare relative path), or be `crate`/`self`/`super`.
-        //      `std::fs::read` becomes ("fs", "read") after split_qualifier;
-        //      its preceding segment is `std` → external → declined.
-        //
-        //   2. **Same-crate prefix** — caller and candidate must share the
-        //      same `*/src/` (or `*/tests/`) ancestor. Defends single-crate
-        //      repos where the internal-prefix check alone would let a
-        //      `std::fs::read` call bind to a workspace `src/fs.rs` — the
-        //      preceding segment is `std` so check (1) handles that; check
-        //      (2) is the secondary defence if a future extern crate name
-        //      manages to slip past check (1).
-        let full = full_callee?;
-        if !qualifier_prefix_is_internal(full, qualifier) {
-            return None;
-        }
-        let caller_prefix = crate_root_prefix(&source_file_str);
-        let mut hit: Option<&str> = None;
-        for fp in self.symbol_table.files_by_stem(qualifier) {
-            if crate_root_prefix(fp) != caller_prefix {
-                continue;
-            }
-            if hit.is_some() {
-                return None;
-            }
-            hit = Some(fp);
-        }
-        hit.map(str::to_string)
-    }
-
-    /// Python `super().member()`: `member` on the caller class's bases, by
-    /// the owner index, never by bare name. Bases are tried in declared order
-    /// (a single-pass approximation of the MRO); the first base that owns the
-    /// member wins. A base the project cannot see, an ambiguous one, or one
-    /// whose ownership is unknown stops the walk: it may own the member and
-    /// shadow every later base, so no edge beats a guess.
-    ///
-    /// A first base that only inherits the member is not enough: C3 puts a
-    /// later base ahead of a shared ancestor (`class D(B, C)` with `B(A)`,
-    /// `C(A)` reads `D, B, C, A`), so a later base that reaches the member
-    /// through another owner, or may do so, leaves no edge.
-    #[allow(clippy::too_many_arguments)]
-    fn resolve_super_member(
-        &self,
-        source_file: &Path,
-        source_file_str: &str,
-        symbol_name: &str,
-        member: &str,
-        target: ResolveTarget,
-        raw_imports: &[RawImport],
-        caller_heritage: &[String],
-    ) -> Vec<(NodeId, f32)> {
-        let mut bases = caller_heritage.iter();
-        let mut owner: Option<(&String, NodeId, bool)> = None;
-        for base in bases.by_ref() {
-            let TypeCandidates::Unique(ty, ty_name) =
-                self.super_base_type(source_file, source_file_str, base, raw_imports)
-            else {
-                break;
-            };
-            match self.member_ownership(ty, ty_name, member, target) {
-                Ownership::Owned { id, inherited } => {
-                    owner = Some((base, id, inherited));
-                    break;
-                }
-                Ownership::NotOwned => {}
-                Ownership::Unknown => break,
-            }
-        }
-        let owner = owner.filter(|&(_, id, inherited)| {
-            !inherited
-                || !bases.any(|later| {
-                    self.later_base_may_shadow(
-                        source_file,
-                        source_file_str,
-                        later,
-                        member,
-                        target,
-                        raw_imports,
-                        id,
-                    )
-                })
-        });
-        if let Some((base, id, inherited)) = owner {
-            let (tier, conf) = if inherited {
-                (DecisionTier::TypeHeritage, ResolutionTier::HeritageScoped)
-            } else {
-                (DecisionTier::TypeOwned, ResolutionTier::QualifierScoped)
-            };
-            let conf = conf.base_confidence();
-            self.record(
-                source_file_str,
-                symbol_name,
-                Some(base.as_str()),
-                tier,
-                Some(id),
-                0,
-                Some(conf),
-            );
-            return vec![(id, conf)];
-        }
-        self.record(
-            source_file_str,
-            symbol_name,
-            None,
-            DecisionTier::Unresolved,
-            None,
-            0,
-            None,
-        );
-        Vec::new()
-    }
-
-    /// Can `later`, a base declared after the one that inherits `member`
-    /// from `owner_member`, come first in the C3 order with another
-    /// `member`? A base outside the project cannot derive from a project
-    /// class, so it never comes first; an ambiguous base, or one whose
-    /// ownership is unknown, may.
-    #[allow(clippy::too_many_arguments)]
-    fn later_base_may_shadow(
-        &self,
-        source_file: &Path,
-        source_file_str: &str,
-        later: &str,
-        member: &str,
-        target: ResolveTarget,
-        raw_imports: &[RawImport],
-        owner_member: NodeId,
-    ) -> bool {
-        match self.super_base_type(source_file, source_file_str, later, raw_imports) {
-            TypeCandidates::Unique(ty, ty_name) => {
-                match self.member_ownership(ty, ty_name, member, target) {
-                    Ownership::Owned { id, .. } => id != owner_member,
-                    Ownership::NotOwned => false,
-                    Ownership::Unknown => true,
-                }
-            }
-            TypeCandidates::Set(..) => true,
-            TypeCandidates::External | TypeCandidates::None => false,
-        }
-    }
-
-    /// The project type a Python base expression names. A dotted base
-    /// (`base.Base` under `import base`) resolves its module through the
-    /// qualifier tiers, then the type inside that module; when the module is
-    /// in the project but does not declare the type (a package re-export),
-    /// the last segment goes through [`Self::type_candidates`]. A module the
-    /// project does not hold (`threading.Thread`) gives `None`: a project
-    /// `Thread` is not that base.
-    fn super_base_type<'q>(
-        &self,
-        source_file: &Path,
-        source_file_str: &str,
-        base: &'q str,
-        raw_imports: &'q [RawImport],
-    ) -> TypeCandidates<'q> {
-        let Some((qualifier, type_name)) = split_qualifier(base) else {
-            return self.type_candidates(source_file, source_file_str, base, raw_imports);
-        };
-        let Some(module_file) = self.resolve_qualifier_file(
-            source_file,
-            qualifier,
-            type_name,
-            ResolveTarget::Type,
-            raw_imports,
-            Some(base),
-        ) else {
-            return TypeCandidates::None;
-        };
-        match self.symbol_table.lookup_in_file_with_kind(
-            &module_file,
-            type_name,
-            ResolveTarget::Type,
-        ) {
-            Some(id) => TypeCandidates::Unique(id, type_name),
-            None => self.type_candidates(source_file, source_file_str, type_name, raw_imports),
-        }
-    }
-
     /// Receiver-typing ladder (after Tier 3.5): resolve `qualifier.member`
     /// through the member's owning type instead of the qualifier's file.
     ///
@@ -2831,6 +2223,50 @@ impl<'a> Resolver<'a> {
         }
     }
 
+    /// The member a bare C# call `name()` reaches in its caller's own type,
+    /// `owner`, when that type is a `partial` type of several parts
+    /// (`SymbolTable::partial_parts`): the ladder from the caller's own part,
+    /// which reads every part's members and bases. Only an owned or an
+    /// inherited member binds; `None` for any other caller or verdict.
+    fn partial_type_member(
+        &self,
+        source_file_str: &str,
+        language: Language,
+        name: &str,
+        owner: &str,
+        target: ResolveTarget,
+    ) -> Option<(NodeId, Tier, DecisionTier)> {
+        if language != Language::CSharp
+            || split_qualifier(name).is_some()
+            || !matches!(target, ResolveTarget::Callable | ResolveTarget::Method)
+        {
+            return None;
+        }
+        let owner = owner_key(owner)?;
+        let ty = self.symbol_table.lookup_in_file_with_kind(
+            source_file_str,
+            owner,
+            ResolveTarget::Type,
+        )?;
+        if self.symbol_table.partial_parts(ty).is_empty() {
+            return None;
+        }
+        match type_ladder::member_via_type(
+            self.symbol_table,
+            TypeCandidates::Unique(ty, owner),
+            source_file_str,
+            name,
+            target,
+            true,
+        ) {
+            LadderMember::Owned(id) => Some((id, Tier::TypeOwned, DecisionTier::TypeOwned)),
+            LadderMember::Inherited(id) => {
+                Some((id, Tier::TypeHeritage, DecisionTier::TypeHeritage))
+            }
+            _ => None,
+        }
+    }
+
     /// Ladder step 1: the project types `qualifier` can name, with no member
     /// gate. Kind filter `is_type` only: a Module / Namespace qualifier keeps
     /// the Tier 2.5 / Tier 4 path.
@@ -2853,7 +2289,7 @@ impl<'a> Resolver<'a> {
         {
             return TypeCandidates::Unique(id, qualifier);
         }
-        let language = Language::from_normalized_path(source_file_str);
+        let language = st.file_language(source_file_str);
         // A C# `using A = Ns.Type;` binds `A` to that type path. Its parse
         // also records `A` as an unaliased import, so it is read here, before
         // the import loop takes that record for a library name.
@@ -2885,13 +2321,11 @@ impl<'a> Resolver<'a> {
                     // The file declares the name under another owner, or
                     // twice: the import's type is not this one, and a
                     // global namesake would be no better.
-                    IndexedModule::Unique(file)
-                        if !st.owner_path_agrees(&file, fqn_type_path(import)) =>
-                    {
+                    Module::Unique(file) if !st.owner_path_agrees(&file, fqn_type_path(import)) => {
                         return TypeCandidates::None;
                     }
-                    IndexedModule::Unique(file) => in_file(&file),
-                    IndexedModule::Namespace(files) => {
+                    Module::Unique(file) => in_file(&file),
+                    Module::Namespace(files) => {
                         let mut hits = files.iter().filter_map(|file| in_file(file));
                         hits.next().filter(|_| hits.next().is_none())
                     }
@@ -2900,13 +2334,18 @@ impl<'a> Resolver<'a> {
                     // same-named project class elsewhere is not this receiver.
                     // Kotlin imports never matched before, so only a proven
                     // external one stops its global lookup.
-                    IndexedModule::Missing
+                    Module::Missing
                         if language != Language::Kotlin
-                            || self.import_is_external(source_file, import, language) =>
+                            || ladder::import_is_external(
+                                &IndexFacts(self),
+                                &normalize_source_path(source_file),
+                                import,
+                                language,
+                            ) =>
                     {
                         return TypeCandidates::External;
                     }
-                    IndexedModule::Missing | IndexedModule::Ambiguous => None,
+                    Module::Missing | Module::Ambiguous => None,
                 };
                 if let Some(id) = hit {
                     return TypeCandidates::Unique(id, exported);
@@ -2938,7 +2377,7 @@ impl<'a> Resolver<'a> {
             }
             imported_in_project = true;
         }
-        let caller_meta = FileMeta::from_path(source_file_str);
+        let caller_meta = self.symbol_table.file_meta(source_file_str);
         if caller_meta.language == Language::Rust && !imported_in_project {
             return TypeCandidates::None;
         }
@@ -2961,11 +2400,7 @@ impl<'a> Resolver<'a> {
             return TypeCandidates::External;
         };
         let ids: Vec<NodeId> = st
-            .global_candidates(
-                name,
-                ResolveTarget::Type,
-                FileMeta::from_path(source_file_str),
-            )
+            .global_candidates(name, ResolveTarget::Type, st.file_meta(source_file_str))
             .into_iter()
             .filter(|&id| {
                 st.file_of(id)
@@ -2977,17 +2412,6 @@ impl<'a> Resolver<'a> {
             1 => TypeCandidates::Unique(ids[0], name),
             _ => TypeCandidates::Set(ids, name),
         }
-    }
-
-    /// Ladder steps 2 and 3 ([`type_ladder::member_ownership`]).
-    fn member_ownership(
-        &self,
-        ty: NodeId,
-        ty_name: &str,
-        member: &str,
-        target: ResolveTarget,
-    ) -> Ownership {
-        type_ladder::member_ownership(self.symbol_table, ty, ty_name, member, target)
     }
 
     /// For a Rust path call `a::b::Q::m`, may `Q` be the type declared in
@@ -3075,31 +2499,10 @@ impl<'a> Resolver<'a> {
         found
     }
 
-    /// Tier 3.5: attempt module-tree FQN resolution for Rust qualified calls.
-    ///
-    /// `symbol_name` is the full callee string (e.g.
-    /// `"crate::build::orchestrator::build_l2"`).
-    /// `member` is its last `::` segment (the item name, same value that
-    /// `split_qualifier` already extracted for Tier 2.5).
-    ///
-    /// Returns the node id of the resolved target, or `None` if the module
-    /// tree is absent, the FQN doesn't resolve, or the member isn't found in
-    /// the resolved file.
-    fn try_module_tree_resolve(
-        &self,
-        source_file_str: &str,
-        symbol_name: &str,
-        member: &str,
-        target: ResolveTarget,
-    ) -> Option<NodeId> {
-        let resolved = self.mod_tree_resolve(source_file_str, symbol_name)?;
-        self.symbol_table
-            .lookup_in_file_with_kind(&resolved.file, &resolved.item_name, target)
-            .or_else(|| {
-                let bare = member.split('<').next().unwrap_or(member);
-                self.symbol_table
-                    .lookup_in_file_with_kind(&resolved.file, bare, target)
-            })
+    /// Tier 3.5's facts ([`ladder::ModuleTreeFacts`]): the workspace module
+    /// tree. `None` without one (no `Cargo.toml`, a non-Rust repo).
+    fn module_tree(&self) -> Option<IndexModuleTree<'_>> {
+        Some(self.mod_tree?.facts(self.workspace_root.as_deref()?))
     }
 
     fn mod_tree_resolve(
@@ -3143,15 +2546,23 @@ impl<'a> Resolver<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resolution::heuristics::ResolutionTier;
+    use ecp_core::analyzer::rust_paths::rust_path_prefix_agrees_with_import;
     use std::path::PathBuf;
 
     fn cands(src: &str, spec: &str) -> Vec<String> {
         let mut out = Vec::new();
         let aliases = PathAliases::new();
-        for_each_specifier_candidate(&PathBuf::from(src), spec, &aliases, |c| {
-            out.push(c.to_string());
-            true
-        });
+        for_each_specifier_candidate(
+            &PathBuf::from(src),
+            spec,
+            &aliases,
+            || Language::Unknown,
+            |c| {
+                out.push(c.to_string());
+                true
+            },
+        );
         out
     }
 
@@ -3448,10 +2859,12 @@ mod tests {
         //   1. Resolve `A` as Type via Tier 1/2/3 → finds A's file (a.rs)
         //   2. Lookup `new` in a.rs → finds it
         //   3. Emit edge at QualifierScoped confidence (0.85)
-        let st = st_with(&[
-            ("a.rs", "A", NodeKind::Class),
-            ("a.rs", "new", NodeKind::Method),
-        ]);
+        // Stands for `impl A { fn new() }`: the build registers `new` owned
+        // by `A`, and a Rust `::` path binds only a method its qualifier
+        // owns (`ladder::rust_path_may_bind`).
+        let mut st = SymbolTable::new();
+        st.register_node("a.rs", "A", 0, NodeKind::Class);
+        st.register_node_owned("a.rs", "new", 1, NodeKind::Method, "A");
         let r = Resolver::new(&st);
         let out = r.resolve_symbol(
             &PathBuf::from("a.rs"),
@@ -3471,10 +2884,12 @@ mod tests {
         // via Tier 3 (kind-filtered, unique Type), member then found in A's
         // file. This is the dominant Rust pattern (`A::new()` from another
         // module).
-        let st = st_with(&[
-            ("a.rs", "A", NodeKind::Class),
-            ("a.rs", "new", NodeKind::Method),
-        ]);
+        // Stands for `impl A { fn new() }`: the build registers `new` owned
+        // by `A`, and a Rust `::` path binds only a method its qualifier
+        // owns (`ladder::rust_path_may_bind`).
+        let mut st = SymbolTable::new();
+        st.register_node("a.rs", "A", 0, NodeKind::Class);
+        st.register_node_owned("a.rs", "new", 1, NodeKind::Method, "A");
         let r = Resolver::new(&st);
         let out = r.resolve_symbol(
             &PathBuf::from("caller.rs"),

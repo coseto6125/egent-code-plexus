@@ -114,6 +114,9 @@ fn extract_one(
 
     // Merge query-captured decorators.
     for d in &raw.decorators {
+        if RawNode::is_parser_marker(d) {
+            continue;
+        }
         let name = swift_attr_name(d);
         if !name.is_empty() && !decorators.contains(&name) {
             decorators.push(name);

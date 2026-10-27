@@ -1,6 +1,6 @@
 //! Integration tests for C++ namespace-qualified call resolution.
 //!
-//! Pre-fix behaviour: `resolve_qualifier_file` Tier 1/2/3 only accepted
+//! Pre-fix behaviour: `ladder::qualifier_file` Tier 1/2/3 only accepted
 //! `ResolveTarget::Type` (Class | Struct | Enum | Typedef | Trait |
 //! Interface) as the qualifier kind — `NodeKind::Namespace` was filtered
 //! out. Every C++ call shaped as `namespace_name::func()` therefore fell
@@ -8,7 +8,7 @@
 //! entirely or mis-resolved via Tier 3's bare-name global fallback.
 //!
 //! The fix adds `ResolveTarget::Qualifier` whose predicate accepts both
-//! Type AND Namespace, used by `resolve_qualifier_file`. C++ namespace
+//! Type AND Namespace, used by `ladder::qualifier_file`. C++ namespace
 //! calls then bind through the file containing the namespace declaration.
 //! Inline-namespace calls (`outer::Widget` where `Widget` lives in
 //! `inline namespace v1`) work as a side effect: members of an inline
@@ -59,7 +59,7 @@ fn cpp_regular_namespace_qualified_call_resolves() {
     // `compute` declared inside `namespace outer { ... }`. Without the
     // Namespace-as-qualifier fix this call drops on the floor — `outer`
     // is a Namespace node, Tier 2.5 only accepts Type qualifiers, so
-    // `resolve_qualifier_file` returns None and the bare-name Tier 3
+    // `ladder::qualifier_file` returns None and the bare-name Tier 3
     // fallback rejects `outer.compute` because that string isn't a
     // registered symbol.
     let tmp = tempfile::tempdir().unwrap();

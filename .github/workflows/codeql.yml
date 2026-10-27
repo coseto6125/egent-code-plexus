@@ -76,8 +76,7 @@ jobs:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
           # Vendored upstream tree-sitter grammars are generated parser code we
-          # don't author; any findings there (e.g. js/redos in
-          # tree-sitter-swift/grammar.js) belong to those upstream projects.
+          # don't author; any findings there belong to those upstream projects.
           config: |
             paths-ignore:
               - crates/vendor/**

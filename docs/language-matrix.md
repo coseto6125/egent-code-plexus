@@ -14,40 +14,40 @@ The matrix is fully resolved — no "feasible but unimplemented" cells. Every `�
 
 ## Matrix
 
-| Language | Imports | Named | Exports | Heritage | Types | Ctor | Config | Frameworks | Entry | Call | Rename | Group extractor |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| TypeScript | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ (HTTP + gRPC) |
-| JavaScript | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ (HTTP + gRPC) |
-| Python | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ (HTTP + gRPC) |
-| Java | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ (HTTP + gRPC) |
-| Kotlin | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | —[^ge] |
-| C# | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | —[^ge] |
-| Go | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ (HTTP + gRPC) |
-| Rust | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ (HTTP + gRPC) |
-| PHP | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | —[^ge] |
-| Ruby | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ | — | ✓ | ✓ | —[^ge] |
-| Swift | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | —[^ge] |
-| C | ✓ | ✓ | ✓ | — | ✓ | — | ✓ | — | ✓ | ✓ | ✓ | —[^ge] |
-| C++ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | —[^ge] |
-| Dart | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | —[^ge] |
-| ─── *structural-only rows below* ─── | | | | | | | | | | | | |
-| Bash | ✓ | ✓ | n/a | n/a | n/a | n/a | n/a | — | — | ✓ | ✓ | — |
-| Lua | ✓ | ✓ | ✓ | ✓ | n/a | — | n/a | — | — | ✓ | ✓ | — |
-| Solidity | ✓ | ✓ | ✓ | ✓ | — | — | n/a | — | — | ✓ | ✓ | — |
-| Crystal | ✓ | ✓ | ✓ | ✓ | — | — | n/a | — | — | ✓ | ✓ | — |
-| Nim | ✓ | ✓ | ✓ | ✓ | — | — | n/a | — | — | ✓ | ✓ | — |
-| Cairo | ✓ | ✓ | ✓ | — | — | — | n/a | — | — | ✓ | ✓ | — |
-| Move | ✓ | ✓ | ✓ | n/a | — | n/a | n/a | — | — | ✓ | ✓ | — |
-| Zig | ✓ | ✓ | ✓ | n/a | — | — | n/a | — | — | ✓ | ✓ | — |
-| HCL | ✓ | ✓ | ✓ | n/a | — | n/a | ✓ | — | — | ✓ | ✓ | — |
-| SQL | n/a | ✓ | n/a | ✓ | — | n/a | n/a | n/a | n/a | ✓ | ✓ | — |
-| Verilog | ✓ | ✓ | ✓ | — | — | — | n/a | — | — | ✓ | ✓ | — |
-| Vyper | ✓ | ✓ | ✓ | n/a | — | — | n/a | — | — | ✓ | ✓ | — |
-| Markdown | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | — |
-| GitHub Actions | ✓ | n/a | ✓ | n/a | n/a | n/a | ✓ | n/a | — | n/a | n/a | — |
-| Docker Compose | — | n/a | n/a | n/a | n/a | n/a | ✓ | n/a | n/a | n/a | n/a | — |
-| Dockerfile | ✓ | n/a | n/a | n/a | n/a | n/a | ✓ | n/a | — | n/a | n/a | — |
-| YAML | n/a | n/a | n/a | n/a | n/a | n/a | ✓ | n/a | n/a | n/a | n/a | — |
+| Language | Imports | Named | Exports | Heritage | Types | Ctor | Config | Frameworks | Entry | Call | Group extractor |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| TypeScript | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ (HTTP + gRPC) |
+| JavaScript | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ | — | ✓ | ✓ (HTTP + gRPC) |
+| Python | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ (HTTP + gRPC) |
+| Java | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ (HTTP + gRPC) |
+| Kotlin | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | —[^ge] |
+| C# | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | —[^ge] |
+| Go | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ | ✓ | ✓ (HTTP + gRPC) |
+| Rust | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ | ✓ | ✓ (HTTP + gRPC) |
+| PHP | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | —[^ge] |
+| Ruby | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ | — | ✓ | —[^ge] |
+| Swift | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | —[^ge] |
+| C | ✓ | ✓ | ✓ | — | ✓ | — | ✓ | — | ✓ | ✓ | —[^ge] |
+| C++ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | —[^ge] |
+| Dart | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | —[^ge] |
+| ─── *structural-only rows below* ─── | | | | | | | | | | | |
+| Bash | ✓ | ✓ | n/a | n/a | n/a | n/a | n/a | — | — | ✓ | — |
+| Lua | ✓ | ✓ | ✓ | ✓ | n/a | — | n/a | — | — | ✓ | — |
+| Solidity | ✓ | ✓ | ✓ | ✓ | — | — | n/a | — | — | ✓ | — |
+| Crystal | ✓ | ✓ | ✓ | ✓ | — | — | n/a | — | — | ✓ | — |
+| Nim | ✓ | ✓ | ✓ | ✓ | — | — | n/a | — | — | ✓ | — |
+| Cairo | ✓ | ✓ | ✓ | — | — | — | n/a | — | — | ✓ | — |
+| Move | ✓ | ✓ | ✓ | n/a | — | n/a | n/a | — | — | ✓ | — |
+| Zig | ✓ | ✓ | ✓ | n/a | — | — | n/a | — | — | ✓ | — |
+| HCL | ✓ | ✓ | ✓ | n/a | — | n/a | ✓ | — | — | ✓ | — |
+| SQL | n/a | ✓ | n/a | ✓ | — | n/a | n/a | n/a | n/a | ✓ | — |
+| Verilog | ✓ | ✓ | ✓ | — | — | — | n/a | — | — | ✓ | — |
+| Vyper | ✓ | ✓ | ✓ | n/a | — | — | n/a | — | — | ✓ | — |
+| Markdown | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | — |
+| GitHub Actions | ✓ | n/a | ✓ | n/a | n/a | n/a | ✓ | n/a | — | n/a | — |
+| Docker Compose | — | n/a | n/a | n/a | n/a | n/a | ✓ | n/a | n/a | n/a | — |
+| Dockerfile | ✓ | n/a | n/a | n/a | n/a | n/a | ✓ | n/a | — | n/a | — |
+| YAML | n/a | n/a | n/a | n/a | n/a | n/a | ✓ | n/a | n/a | n/a | — |
 
 [^ge]: Extractor stub only — first-wave group extractor coverage limited to Go / Python / JS / TS / Java / Rust.
 
@@ -103,10 +103,6 @@ Neither language has a language-level constructor. Go uses factory functions (`N
 **Entry `—` on JavaScript and Ruby**
 
 Absence of a language-level `main` convention (per `entry_points.rs` coverage table). Entry points still surface for these languages via route handlers and framework decorators — just not via a `main()` symbol.
-
-**Rename `n/a` on markup/config rows**
-
-Markdown, GitHub Actions, Docker Compose, Dockerfile, and YAML carry keys / literal strings, not re-bindable code identifiers — `ecp rename` would have nothing to rewrite.
 
 ## Schema emission coverage
 

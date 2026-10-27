@@ -5,7 +5,7 @@
 //! has no node to match. This command answers those by running an ast-grep
 //! pattern through [`ecp_analyzer::pattern_finder`].
 //!
-//! The pipeline mirrors `ecp rename`'s first two stages, minus the write:
+//! The pipeline has two stages:
 //!
 //! 1. **Plan (graph)** — pick candidate files. Default is every indexed file,
 //!    which already excludes ignored paths and unsupported languages.
@@ -26,18 +26,22 @@
 //! attempt failed; the message then carries the parser's own diagnostic. A scan
 //! that met no supported file returns an ordinary empty result.
 
-use crate::commands::symbol_id::{resolve_owner_class, split_fqn_target};
 use crate::engine::Engine;
 use crate::output::{emit_with_caveat, OutputFormat};
+use crate::read_context::{
+    ambiguity_candidates_with_flags, resolve_target, shell_word, target_request,
+};
 use clap::Args;
 use ecp_analyzer::pattern_finder::{
     compile, lang_for_path, match_source, CompiledPattern, PatternError, PatternLang,
 };
-use ecp_core::graph::ArchivedRelType;
+use ecp_core::contracts::identity::TargetResolution;
+use ecp_core::graph::RelType;
+use ecp_core::session::MergedGraph;
 use ecp_core::EcpError;
 use rayon::prelude::*;
-use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use serde_json::{json, Value};
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
 const MAX_PATTERN_WORKERS: usize = 8;
@@ -49,10 +53,21 @@ pub struct PatternArgs {
     #[arg(short = 'p', long)]
     pub pattern: String,
 
-    /// Restrict the scan to files that call this symbol. Accepts the same
-    /// `Owner.method` qualification as `ecp rename`.
+    /// Restrict the scan to files that call this symbol. Takes the target
+    /// grammar of `ecp impact`: `name`, `Owner.name`, `::name`, `name@line`.
+    /// A name that matches several declarations is an ambiguity.
     #[arg(long)]
     pub callers_of: Option<String>,
+
+    /// Select the `--callers-of` symbol among several declarations: substring
+    /// on the file path.
+    #[arg(long, requires = "callers_of")]
+    pub callers_file: Option<String>,
+
+    /// Select the `--callers-of` symbol among several declarations by node
+    /// kind, for example `method`.
+    #[arg(long, requires = "callers_of")]
+    pub callers_kind: Option<String>,
 
     /// Restrict the scan to one file extension, without the dot (`py`,
     /// `ts`). A pattern that fails to compile for it is then an error.
@@ -76,12 +91,34 @@ pub struct PatternArgs {
 
 pub fn run(args: PatternArgs, engine: &Engine) -> Result<(), EcpError> {
     let format = args.format.unwrap_or_default();
-    let payload = build_payload(&args, engine)?;
-    emit_with_caveat(&payload, format, engine.caveat())
+    match scan(&args, engine)? {
+        Scan::Done(payload) => emit_with_caveat(&payload, format, engine.caveat()),
+        // Exit non-zero (MCP marks `isError`), but give the candidates on stdout
+        // too: an MCP client reads stdout only.
+        Scan::Ambiguous(payload, error) => {
+            emit_with_caveat(&payload, format, engine.caveat())?;
+            Err(error)
+        }
+    }
 }
 
-pub fn build_payload(args: &PatternArgs, engine: &Engine) -> Result<serde_json::Value, EcpError> {
+pub fn build_payload(args: &PatternArgs, engine: &Engine) -> Result<Value, EcpError> {
+    match scan(args, engine)? {
+        Scan::Done(payload) => Ok(payload),
+        Scan::Ambiguous(_, error) => Err(error),
+    }
+}
+
+enum Scan {
+    Done(Value),
+    /// `--callers-of` names several declarations: the typed ambiguity payload
+    /// and the error that carries the non-zero exit.
+    Ambiguous(Value, EcpError),
+}
+
+fn scan(args: &PatternArgs, engine: &Engine) -> Result<Scan, EcpError> {
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
+    let merged = MergedGraph::new(graph, engine.overlay_view());
     let repo_root = args
         .repo
         .as_ref()
@@ -128,17 +165,9 @@ pub fn build_payload(args: &PatternArgs, engine: &Engine) -> Result<serde_json::
             .iter()
             .map(|f| f.path.resolve(&graph.string_pool))
             .collect(),
-        // An empty set here means no node carried the name: `caller_files`
-        // seeds the target's own file before walking callers, so a symbol that
-        // exists always yields at least one. Report the miss the way `impact`
-        // and `inspect` do rather than returning a silent empty result.
-        Some(symbol) => match caller_files(symbol, graph) {
-            files if files.is_empty() => {
-                return Err(EcpError::InvalidArgument(format!(
-                    "no symbol named '{symbol}' in the graph — try `ecp find {symbol} --mode fuzzy`"
-                )))
-            }
-            files => files,
+        Some(symbol) => match caller_files(symbol, args, &merged)? {
+            Callers::Files(files) => files,
+            Callers::Ambiguous(payload, error) => return Ok(Scan::Ambiguous(payload, error)),
         },
     };
 
@@ -259,65 +288,76 @@ pub fn build_payload(args: &PatternArgs, engine: &Engine) -> Result<serde_json::
         names
     };
 
-    Ok(json!({
+    Ok(Scan::Done(json!({
         "pattern": args.pattern,
         "scanned_files": scanned_files,
         "languages": languages,
         "total": total,
         "truncated": truncated,
         "matches": matches,
-    }))
+    })))
 }
 
 fn pattern_worker_count(available: usize) -> usize {
     available.clamp(1, MAX_PATTERN_WORKERS)
 }
 
+enum Callers<'g> {
+    Files(Vec<&'g str>),
+    Ambiguous(Value, EcpError),
+}
+
 /// Repo-relative paths of files holding a caller of `symbol`, plus the file
-/// declaring it. `Owner.method` qualification comes from the shared
-/// `split_fqn_target`, so `Foo.run` and `Bar.run` stay apart and a bare name
-/// matches top-level symbols only — an unqualified argument yields
-/// `owner_filter == None`, which pairs with an empty `owner_class`.
+/// declaring it. The target resolves through the same resolver as `impact`,
+/// over the merged graph, so a caller in a dirty or untracked file counts and
+/// `Foo.run` and `Bar.run` stay apart. A target that names no declaration is
+/// an error, and one that names several is an ambiguity.
 fn caller_files<'g>(
     symbol: &str,
-    graph: &'g ecp_core::graph::ArchivedZeroCopyGraph,
-) -> Vec<&'g str> {
-    let (owner_filter, bare_name) = split_fqn_target(symbol);
-    let targets: Vec<usize> = graph
-        .nodes
-        .iter()
-        .enumerate()
-        .filter(|(idx, n)| {
-            n.has_owning_file()
-                && n.name.resolve(&graph.string_pool) == bare_name
-                && resolve_owner_class(graph, *idx) == owner_filter
-        })
-        .map(|(i, _)| i)
-        .collect();
-
-    let mut file_idx: HashSet<usize> = HashSet::new();
-    for target in targets {
-        file_idx.insert(graph.nodes[target].file_idx.to_native() as usize);
-        let start = graph.in_offsets[target].to_native() as usize;
-        let end = graph.in_offsets[target + 1].to_native() as usize;
-        for i in start..end {
-            let edge = &graph.edges[graph.in_edge_idx[i].to_native() as usize];
-            if !matches!(edge.rel_type, ArchivedRelType::Calls) {
-                continue;
-            }
-            let src = &graph.nodes[edge.source.to_native() as usize];
-            if src.has_owning_file() {
-                file_idx.insert(src.file_idx.to_native() as usize);
-            }
+    args: &PatternArgs,
+    merged: &MergedGraph<'g>,
+) -> Result<Callers<'g>, EcpError> {
+    let request = target_request(
+        symbol,
+        args.callers_kind.as_deref(),
+        args.callers_file.as_deref(),
+    )?;
+    let target = match resolve_target(merged, &request) {
+        TargetResolution::Unique(c) => c.node,
+        TargetResolution::Ambiguous(a) => {
+            let error = a.to_error(&request);
+            let payload = json!({
+                "status": "ambiguous",
+                "error": error.to_string(),
+                "target": symbol,
+                "candidates": ambiguity_candidates_with_flags(
+                    &a, "--callers-of ", "--callers-file", "--callers-kind"),
+            });
+            return Ok(Callers::Ambiguous(payload, error));
         }
-    }
+        TargetResolution::NotFound { named } => {
+            let target = request.render();
+            return Err(EcpError::InvalidArgument(match named {
+                0 => format!(
+                    "no symbol named '{target}' in the graph — try `ecp find {} --mode fuzzy`",
+                    shell_word(request.name())
+                ),
+                n => format!(
+                    "no symbol named '{target}' in the graph: {n} declaration(s) named '{}' \
+                     exist, but none passes the owner, @line, --callers-file or --callers-kind filter",
+                    request.name()
+                ),
+            }));
+        }
+    };
 
-    let mut file_idx: Vec<usize> = file_idx.into_iter().collect();
-    file_idx.sort_unstable();
-    file_idx
-        .into_iter()
-        .map(|i| graph.files[i].path.resolve(&graph.string_pool))
-        .collect()
+    let own_file = merged.node(target).and_then(|n| n.file_path(merged));
+    let caller_files = merged
+        .in_edges(target)
+        .filter(|e| matches!(e.rel_type(), RelType::Calls))
+        .filter_map(|e| merged.node(e.source)?.file_path(merged));
+    let files: BTreeSet<&'g str> = own_file.into_iter().chain(caller_files).collect();
+    Ok(Callers::Files(files.into_iter().collect()))
 }
 
 /// First line of a match, so a multi-line hit stays one output row.

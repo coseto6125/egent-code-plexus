@@ -31,7 +31,6 @@ fn top_level_lists_agent_commands() {
         "inspect",
         "find",
         "impact",
-        "rename",
         "cypher",
         "summary",
         "routes",

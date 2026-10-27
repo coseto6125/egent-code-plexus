@@ -1,4 +1,4 @@
-use ecp_cli::hint::{collision_warning, empty_result, error_with_cause, fuzzy_suggestions};
+use ecp_cli::hint::{empty_result, error_with_cause, fuzzy_suggestions};
 
 #[test]
 fn empty_result_format() {
@@ -36,12 +36,4 @@ fn error_with_cause_three_lines() {
     assert!(lines[0].starts_with("✗"));
     assert!(lines[1].contains("cause:"));
     assert!(lines[2].contains("next:"));
-}
-
-#[test]
-fn collision_warning_lists_locations() {
-    let msg = collision_warning("checkUser", &["src/utils/check.rs:50".to_string()]);
-    assert!(msg.contains("COLLISION"));
-    assert!(msg.contains("checkUser"));
-    assert!(msg.contains("src/utils/check.rs:50"));
 }

@@ -286,7 +286,7 @@ fn test_pipeline_for_path_concurrent_duplicate_calls_share_one_pipeline() {
 // ── overlay writer routes by the repo-relative path ──────────────────────────
 
 /// Plants a Bash function in `tools/run.sh`. Consumer reads
-/// `dirty_files.json`'s `dirty_symbols`.
+/// `l1/dirty_events.json`'s `dirty_symbols`.
 ///
 /// Fails on the old code: the writer's pipeline had no `bash` provider, so the
 /// entry was `parse_failed` with no symbols.

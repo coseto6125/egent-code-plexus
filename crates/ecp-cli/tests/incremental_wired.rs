@@ -168,24 +168,24 @@ fn test_edit_file_then_impact_sees_new_symbol_without_full_reindex() {
 
     // ── 6. Verify overlay fragment materialised ───────────────────────────
     let ecp_root = home.join(".ecp");
+    let fragments_tail = ecp_core::session::layout::fragments_dir(Path::new(""));
     let overlay_bins: Vec<_> = walkdir::WalkDir::new(&ecp_root)
-        .max_depth(8)
+        .max_depth(9)
         .into_iter()
         .filter_map(Result::ok)
         .filter(|e| {
             e.path()
                 .parent()
-                .and_then(|d| d.file_name())
-                .is_some_and(|n| n == std::ffi::OsStr::new("graph_overlay"))
+                .is_some_and(|dir| dir.ends_with(&fragments_tail))
                 && e.path().extension() == Some(std::ffi::OsStr::new("bin"))
         })
         .collect();
     assert!(
         !overlay_bins.is_empty(),
-        "expected at least one graph_overlay/*.bin fragment after editing lib.rs;\
+        "expected at least one l1/fragments/*.bin fragment after editing lib.rs;\
          \necp_root tree:\n{:?}",
         walkdir::WalkDir::new(&ecp_root)
-            .max_depth(8)
+            .max_depth(9)
             .into_iter()
             .filter_map(Result::ok)
             .map(|e| e.path().to_path_buf())
@@ -339,7 +339,7 @@ fn test_version_incompatible_falls_through_to_build_l2() {
 
 /// A repeat query over an UNCHANGED dirty working tree must not re-parse the
 /// dirty set: fragments record each parsed file's mtime_ns in
-/// `dirty_files.json`, so the Stale arm can prove the overlay is already
+/// `l1/dirty_events.json`, so the Stale arm can prove the overlay is already
 /// current with stat calls alone. Observable contract (counters are
 /// process-local, the work happens in a spawned `ecp`): the `l1.refreshed
 /// written=N` stderr line appears only when fragments were actually written.

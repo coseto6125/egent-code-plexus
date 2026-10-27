@@ -1,15 +1,15 @@
+use ecp_core::analyzer::csharp_extension::ExtensionDecl;
 use ecp_core::analyzer::import_binding::{
     fqn_language, owner_path_agrees, DeclaredType, MemberOwner,
 };
+use ecp_core::analyzer::ladder::{self, ResolveFacts};
 use ecp_core::analyzer::reexport::{is_es_module, pick_call, ExportAliasTable};
-use ecp_core::analyzer::same_file_pick::{
-    self, rust_lexical_scopes, ImplMember as PickImplMember, PickFacts,
-};
-use ecp_core::analyzer::type_ladder::{return_type_key, TypeFacts};
+use ecp_core::analyzer::same_file_pick::{self, ImplMember as PickImplMember, PickFacts};
+use ecp_core::analyzer::type_ladder::{declared_namespace, return_type_key, TypeFacts};
 use ecp_core::analyzer::types::{owner_key, RawExportAlias};
-use ecp_core::file_category::pick_global;
+use ecp_core::contracts::routing::ParsedLanguage;
 pub use ecp_core::file_category::{FileMeta, GlobalPick, Language};
-use ecp_core::graph::NodeKind;
+use ecp_core::graph::{FunctionMeta, NodeKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::Cow;
 
@@ -38,6 +38,20 @@ impl Supertypes {
     pub fn has_unresolved_base(&self) -> bool {
         self.first_unresolved.is_some()
     }
+}
+
+/// One declared base of a type, as the supertypes pre-pass resolved it.
+/// [`Supertypes`] flattens the bases to ids. A member lookup also needs the
+/// spelling a candidate came from, how many candidates it had, and how
+/// strongly the resolver bound each one (the `Overrides` pass).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeclaredBase {
+    /// The heritage spelling the parser recorded.
+    pub spelling: Box<str>,
+    /// The project types the spelling resolved to, each with the resolver's
+    /// confidence, in resolver order. Never the declaring type. Empty when
+    /// the spelling resolved to no project type.
+    pub candidates: Box<[(u32, f32)]>,
 }
 
 /// A Rust callable declared in an `impl` block ([`SymbolTable::note_impl_member`]).
@@ -115,6 +129,25 @@ fn path_dirs(path: &str) -> Vec<&str> {
     parts
 }
 
+/// [`SymbolTable::csharp_extension_decls`] by member name
+/// ([`SymbolTable::csharp_extension_decl_map`]).
+pub(crate) type CsharpExtensionDecls<'a> = FxHashMap<&'a str, Vec<ExtensionDecl<'a>>>;
+
+/// A C# extension method as [`SymbolTable::note_csharp_extension`] records
+/// it.
+#[derive(Debug)]
+struct CsharpExtensionDecl {
+    id: u32,
+    /// Its file. A later overload has no entry in `id_to_file`, so the
+    /// table keeps the path here.
+    file: Box<str>,
+    /// Its `this` parameter's type as written.
+    this_type: Box<str>,
+    flags: u16,
+    /// The names of its parameters after `this`.
+    params: Box<[Box<str>]>,
+}
+
 /// A high-performance global symbol index mapping node names and file locations
 /// to their corresponding globally unique node IDs.
 #[derive(Debug, Default)]
@@ -164,6 +197,12 @@ pub struct SymbolTable {
     /// barrier check is O(1) per candidate. Parallel-indexed with `node_kinds`.
     node_file_meta: Vec<FileMeta>,
 
+    /// File metadata per registered file, from the C5 language after parse
+    /// Pass 1 stores in the `File` record ([`Self::note_file_meta`]). Every
+    /// index-side language reader goes through [`Self::file_meta`], so a Vue
+    /// file with a TypeScript script reads as TypeScript, not as its path.
+    file_metas: FxHashMap<String, FileMeta>,
+
     /// Basename-stem → file paths sharing that stem. Populated once after
     /// Pass 1 via [`SymbolTable::build_stem_index`]; the resolver's Tier-4
     /// module-file fallback reads it via [`SymbolTable::files_by_stem`].
@@ -193,15 +232,6 @@ pub struct SymbolTable {
     /// the first same-named member in the file, whichever type owns it.
     node_owner: Vec<u32>,
 
-    /// Parser owner text only where owner-key normalization would lose a
-    /// Rust lexical ancestor such as `B::new`.
-    raw_owner_overrides: FxHashMap<u32, Box<str>>,
-
-    /// Complete Rust callable lexical paths, derived from parser spans.  The
-    /// graph keeps the compact public type owner; only Rust bare-call lookup
-    /// needs this path to distinguish nested declarations.
-    rust_lexical_scopes: FxHashMap<u32, Box<str>>,
-
     /// Owner key → interned id. One entry per distinct owner name, so the
     /// per-node cost is the 4-byte `node_owner` slot.
     owner_ids: FxHashMap<Box<str>, u32>,
@@ -213,10 +243,44 @@ pub struct SymbolTable {
     /// [`SymbolTable::register_overload`]). Sparse: most ids have none.
     overloads: FxHashMap<u32, Vec<u32>>,
 
+    /// First declaration → the later C# declarations of its uid that are
+    /// arity twins (`Conv<T>` after `Conv`, `Foo1<T>.foo` after
+    /// `Foo1.foo`), in source order (see
+    /// [`SymbolTable::register_arity_sibling`]). Sparse: most ids have none.
+    arity_siblings: FxHashMap<u32, Vec<u32>>,
+
+    /// The inverse of `arity_siblings`: later twin → its first declaration.
+    arity_first: FxHashMap<u32, u32>,
+
+    /// C# type or delegate id → its declared generic arity, only where
+    /// above 0 (see [`SymbolTable::note_type_arity`]). Every other id
+    /// declares none.
+    type_arities: FxHashMap<u32, u32>,
+
+    /// Member of an arity-twin set → the span of the type that declares it
+    /// (see [`SymbolTable::note_declaring_scope`]). Only members: twin types
+    /// and delegates have none. Sparse: empty outside C#.
+    declaring_scopes: FxHashMap<u32, (u32, u32, u32, u32)>,
+
+    /// Part → the representative part of its C# `partial` type, for every
+    /// part of a type declared in two parts or more (see
+    /// [`SymbolTable::note_partial_type`]). Sparse: most ids have none.
+    partial_first: FxHashMap<u32, u32>,
+
+    /// Representative part → every part of its type, the representative
+    /// first.
+    partial_parts: FxHashMap<u32, Box<[u32]>>,
+
     /// Declared supertypes per type id. Filled once by the builder's
     /// supertypes pre-pass, after Pass 1 and before Pass 2. Types with no
     /// declared heritage have no entry.
     supertypes: FxHashMap<u32, Supertypes>,
+
+    /// Declared bases per type id, in declared order, with each base's
+    /// candidates and their resolver confidence. Filled with `supertypes` by
+    /// [`Self::build_declared_bases`]. Analyzer-side only: no graph table
+    /// stores it.
+    declared_bases: FxHashMap<u32, Vec<DeclaredBase>>,
 
     /// The `impl` block and implemented trait of each Rust member, see
     /// [`Self::note_impl_member`]. Sparse: only Rust callables declared in
@@ -275,6 +339,23 @@ pub struct SymbolTable {
 
     /// The inverse of `return_type_ids`.
     return_type_keys: Vec<Box<str>>,
+
+    /// Scoped node id → its lexical parent, the rows of the graph's
+    /// lexical-parent table (see [`Self::note_lexical_parent`]). Sparse:
+    /// rows only for the files of a language that scopes a kind
+    /// ([`ecp_core::analyzer::lexical::lexical_scope_kinds`]).
+    lexical_parents: FxHashMap<u32, u32>,
+
+    /// Method name → the C# extension methods of that name, each with its
+    /// `this` parameter's type as written, its `FunctionMeta::flags` and its
+    /// parameter names (see [`Self::note_csharp_extension`]). Overloads
+    /// included.
+    csharp_extensions: FxHashMap<Box<str>, Vec<CsharpExtensionDecl>>,
+
+    /// C# method id → its `FunctionMeta::flags`, for the methods the access
+    /// rule may refuse: static or private ones
+    /// ([`ecp_core::analyzer::csharp_access`]). Sparse.
+    csharp_method_flags: FxHashMap<u32, u16>,
 }
 
 impl SymbolTable {
@@ -322,11 +403,10 @@ impl SymbolTable {
             else {
                 continue;
             };
+            let language = self.file_meta(path).language;
             let names = self
                 .indexed_module_names
-                .entry(std::mem::discriminant(&Language::from_normalized_path(
-                    path,
-                )))
+                .entry(std::mem::discriminant(&language))
                 .or_default();
             names.insert(stem.to_string());
             if let Some(parent) = std::path::Path::new(path).parent() {
@@ -472,7 +552,7 @@ impl SymbolTable {
         // Reverse map for dump-side lookup
         self.id_to_file.insert(node_id, file_path.to_string());
 
-        let file_meta = FileMeta::from_path(file_path);
+        let file_meta = self.file_meta(file_path);
         self.node_kinds.push(kind);
         self.node_file_meta.push(file_meta);
         self.node_owner.push(NO_OWNER);
@@ -569,6 +649,96 @@ impl SymbolTable {
         self.return_types.insert(node_id, id);
     }
 
+    /// Record the C# extension method `node_id` named `name`
+    /// ([`ecp_core::analyzer::csharp_extension::EXTENSION_FLAG`]): the type
+    /// its `this` parameter declares, its flags and the names of its
+    /// parameters after `this`.
+    pub fn note_csharp_extension(
+        &mut self,
+        node_id: u32,
+        file_path: &str,
+        name: &str,
+        this_type: &str,
+        flags: u16,
+        params: &[&str],
+    ) {
+        self.csharp_extensions
+            .entry(name.into())
+            .or_default()
+            .push(CsharpExtensionDecl {
+                id: node_id,
+                file: file_path.into(),
+                this_type: this_type.into(),
+                flags,
+                params: params.iter().map(|&name| name.into()).collect(),
+            });
+    }
+
+    /// Record the `FunctionMeta::flags` of the C# method `node_id` when the
+    /// access rule may refuse a call to it: a static or a private method.
+    pub fn note_csharp_method_flags(&mut self, node_id: u32, flags: u16) {
+        let is_static = flags & FunctionMeta::FLAG_STATIC != 0;
+        if is_static || (flags >> 6) & 0b111 == 2 {
+            self.csharp_method_flags.insert(node_id, flags);
+        }
+    }
+
+    /// The `FunctionMeta::flags` [`Self::note_csharp_method_flags`] kept
+    /// for `node_id`; 0 (public, instance) for any other id.
+    pub(crate) fn csharp_method_flags(&self, node_id: u32) -> u16 {
+        self.csharp_method_flags.get(&node_id).copied().unwrap_or(0)
+    }
+
+    /// The C# extension declarations named `name`, as
+    /// [`ecp_core::analyzer::csharp_extension::resolve`] reads them. A
+    /// declaration whose file or class the table cannot place is left out.
+    pub(crate) fn csharp_extension_decls(&self, name: &str) -> Vec<ExtensionDecl<'_>> {
+        let Some(found) = self.csharp_extensions.get(name) else {
+            return Vec::new();
+        };
+        found
+            .iter()
+            .filter_map(|decl| {
+                let file = &*decl.file;
+                let class = PickFacts::owner(self, decl.id)?;
+                let namespace = self
+                    .lookup_in_file_with_kind(file, class, ResolveTarget::Type)
+                    .and_then(|class_id| {
+                        declared_namespace(
+                            PickFacts::owner(self, class_id),
+                            self.csharp_namespaces(file).iter().map(String::as_str),
+                        )
+                    });
+                Some(ExtensionDecl {
+                    id: decl.id,
+                    this_type: &decl.this_type,
+                    flags: decl.flags,
+                    params: decl.params.iter().map(|name| &**name).collect(),
+                    file,
+                    class,
+                    namespace,
+                })
+            })
+            .collect()
+    }
+
+    /// [`Self::csharp_extension_decls`] of every recorded name, built once
+    /// for Pass 2, which reads one name per failing C# member call.
+    pub(crate) fn csharp_extension_decl_map(&self) -> CsharpExtensionDecls<'_> {
+        self.csharp_extensions
+            .keys()
+            .map(|name| (&**name, self.csharp_extension_decls(name)))
+            .collect()
+    }
+
+    /// The namespaces `file` declares (`.`-joined), empty when none.
+    pub(crate) fn csharp_namespaces(&self, file: &str) -> &[String] {
+        self.file_namespaces
+            .get(file)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
     /// The [`return_type_key`] the function `node_id` declares.
     pub fn return_type_of(&self, node_id: u32) -> Option<&str> {
         self.return_types
@@ -631,11 +801,6 @@ impl SymbolTable {
         self.node_file_meta.push(file_meta);
         let owner_id = self.intern_owner(owner);
         self.node_owner.push(owner_id);
-        if let Some(raw_owner) =
-            owner.filter(|raw| file_meta.language == Language::Rust && owner_key(raw) != Some(*raw))
-        {
-            self.raw_owner_overrides.insert(node_id, raw_owner.into());
-        }
         if kind == NodeKind::Constructor && owner_id != NO_OWNER {
             self.constructors.push(node_id);
         }
@@ -731,28 +896,31 @@ impl SymbolTable {
             .insert(member, ImplMember { block, trait_owner });
     }
 
-    /// Record the transient full lexical scope of every Rust callable in one
-    /// pass over a parsed file's symbols.
-    pub fn note_rust_lexical_scopes(
-        &mut self,
-        nodes: &[ecp_core::analyzer::types::RawNode],
-        start: u32,
-    ) {
-        for (offset, scope) in rust_lexical_scopes(nodes).into_iter().enumerate() {
-            if let Some(scope) = scope {
-                self.rust_lexical_scopes
-                    .insert(start + offset as u32, scope);
-            }
-        }
+    /// Record that `node` is scoped under the callable `parent` (contract
+    /// C1). From then on no name-tier lookup returns `node` (invariant I5):
+    /// only the lexical tier binds it. The builder notes every row of the
+    /// graph's lexical-parent table before Pass 2.
+    pub fn note_lexical_parent(&mut self, node: u32, parent: u32) {
+        self.lexical_parents.insert(node, parent);
     }
 
-    pub(crate) fn rust_lexical_scope_of(&self, id: u32) -> Option<&str> {
-        self.rust_lexical_scopes.get(&id).map(Box::as_ref)
+    /// Whether `id` is scoped ([`Self::note_lexical_parent`]).
+    pub fn is_lexically_scoped(&self, id: u32) -> bool {
+        !self.lexical_parents.is_empty() && self.lexical_parents.contains_key(&id)
     }
 
-    /// Whether `id` has no owner and no `impl` block either.
-    fn is_free(&self, id: u32) -> bool {
-        self.node_owner[id as usize] == NO_OWNER && !self.impl_members.contains_key(&id)
+    /// The outermost unscoped declaration that `id`'s lexical parents
+    /// reach; `id` itself when it is unscoped. A scoped caller (a Rust
+    /// nested `fn` or closure) has no owner, so the name tiers read this
+    /// declaration's owner, as for a call written there.
+    ///
+    /// A cycle, which only a corrupt table holds, has no root: `id` stands
+    /// for itself ([`ecp_core::analyzer::lexical::lexical_chain_end`]).
+    pub fn lexical_root(&self, id: u32) -> u32 {
+        ecp_core::analyzer::lexical::lexical_chain_end(id, self.lexical_parents.len(), |id| {
+            self.lexical_parents.get(&id).copied()
+        })
+        .unwrap_or(id)
     }
 
     /// Whether some declaration named `name` that `caller` admits is a
@@ -812,6 +980,169 @@ impl SymbolTable {
         firsts
             .into_iter()
             .map(|first| (first, self.later_overloads(first)))
+    }
+
+    /// Record the declared generic arity of the C# type or delegate
+    /// `node_id`. An arity of 0 records nothing: it is every id's default.
+    pub fn note_type_arity(&mut self, node_id: u32, arity: u32) {
+        if arity > 0 {
+            self.type_arities.insert(node_id, arity);
+        }
+    }
+
+    fn type_arity(&self, node_id: u32) -> u32 {
+        self.type_arities.get(&node_id).copied().unwrap_or(0)
+    }
+
+    /// Register the next id as a later C# declaration of `first`'s uid that
+    /// is an arity twin (`ecp_core::analyzer::lexical::later_is_arity_twin`):
+    /// a type or delegate of another generic arity (`Conv<T>` after
+    /// `Conv`), or a member such a type declares (`Foo1<T>.foo` after
+    /// `Foo1.foo`). A declaration of its own in `file_path`, with `first`'s
+    /// kind and owner, but in no name table and no overload set. A name
+    /// lookup still returns `first`, as before the split;
+    /// [`Self::with_arity`] reaches a later type from it, and
+    /// [`Self::twin_read_from`] a later member. Returns the id.
+    pub fn register_arity_sibling(
+        &mut self,
+        first: u32,
+        file_path: &str,
+        file_meta: FileMeta,
+        arity: u32,
+    ) -> u32 {
+        let id = self.node_kinds.len() as u32;
+        self.node_kinds.push(self.node_kinds[first as usize]);
+        self.node_file_meta.push(file_meta);
+        self.node_owner.push(self.node_owner[first as usize]);
+        self.id_to_file.insert(id, file_path.to_string());
+        self.arity_siblings.entry(first).or_default().push(id);
+        self.arity_first.insert(id, first);
+        self.note_type_arity(id, arity);
+        id
+    }
+
+    /// The type a spelling with `arity` type arguments names, from the id a
+    /// name lookup of its bare name returned. When `id` is the first of
+    /// same-named C# types of different arity, the one of `arity`, or
+    /// `None` when none has it. Otherwise `id` itself when the spelling has
+    /// no type arguments (the rule before arities) or `id` declares
+    /// `arity`, and `None` when it declares another.
+    pub fn with_arity(&self, id: u32, arity: u32) -> Option<u32> {
+        match self.arity_siblings.get(&id) {
+            Some(siblings) => std::iter::once(id)
+                .chain(siblings.iter().copied())
+                .find(|&member| self.type_arity(member) == arity),
+            None => (arity == 0 || self.type_arity(id) == arity).then_some(id),
+        }
+    }
+
+    /// Whether any declaration has an arity twin
+    /// ([`Self::register_arity_sibling`]): a pass that finds twins by
+    /// re-numbering a file skips the work when none has.
+    pub fn has_arity_twins(&self) -> bool {
+        !self.arity_siblings.is_empty()
+    }
+
+    /// Whether any member has an arity twin ([`Self::note_declaring_scope`]):
+    /// a reader with no file path at hand skips [`Self::twin_read_from`]
+    /// when none has.
+    pub fn has_member_twins(&self) -> bool {
+        !self.declaring_scopes.is_empty()
+    }
+
+    /// Record `scope`, the span of the type that declares the member
+    /// `node_id` of an arity-twin set, for [`Self::twin_read_from`].
+    pub fn note_declaring_scope(&mut self, node_id: u32, scope: (u32, u32, u32, u32)) {
+        self.declaring_scopes.insert(node_id, scope);
+    }
+
+    /// The member a read at `reader` in `reader_file` means, from the id
+    /// `id` a name lookup returned. When `id` is the first of a member's
+    /// arity twins in that file, the twin whose declaring type most closely
+    /// encloses the reader: inside `Foo1<T>`, `foo` is `Foo1<T>.foo`
+    /// ([`ecp_core::analyzer::lexical::twin_enclosing`]). Otherwise, and
+    /// when no declaring type encloses the reader, `id` itself, as before
+    /// the split.
+    pub fn twin_read_from(&self, id: u32, reader_file: &str, reader: (u32, u32, u32, u32)) -> u32 {
+        if self.declaring_scopes.is_empty() {
+            return id;
+        }
+        let Some(twins) = self.arity_siblings.get(&id) else {
+            return id;
+        };
+        if self.file_of(id) != Some(reader_file) {
+            return id;
+        }
+        let candidates = std::iter::once(id)
+            .chain(twins.iter().copied())
+            .filter_map(|member| Some((member, *self.declaring_scopes.get(&member)?)));
+        ecp_core::analyzer::lexical::twin_enclosing(candidates, reader).unwrap_or(id)
+    }
+
+    /// Record the nodes `parts`, the representative first, as the parts of
+    /// one C# `partial` type (`c_sharp::partial::partial_groups`). Call it
+    /// after Pass 1 and before the supertypes pre-pass, which reads it.
+    pub fn note_partial_type(&mut self, parts: Vec<u32>) {
+        let Some(&first) = parts.first() else {
+            return;
+        };
+        for &part in &parts {
+            self.partial_first.insert(part, first);
+        }
+        self.partial_parts.insert(first, parts.into_boxed_slice());
+    }
+
+    /// The node that stands for `id`'s type: the representative part of a
+    /// C# `partial` type, else `id` itself. A base that names the type binds
+    /// this node, and the type's declared bases and methods are keyed by it.
+    pub fn partial_type(&self, id: u32) -> u32 {
+        self.partial_first.get(&id).copied().unwrap_or(id)
+    }
+
+    /// Every part of `id`'s C# `partial` type, the representative first,
+    /// `id` included; empty when `id` is no part of a type declared in two
+    /// parts or more.
+    pub fn partial_parts(&self, id: u32) -> &[u32] {
+        self.partial_parts
+            .get(&self.partial_type(id))
+            .map_or(&[][..], |parts| &parts[..])
+    }
+
+    /// Every C# `partial` type of two parts or more: its parts, the
+    /// representative first, ordered by the representative.
+    pub fn partial_types(&self) -> impl Iterator<Item = &[u32]> {
+        let mut types: Vec<&[u32]> = self
+            .partial_parts
+            .values()
+            .map(|parts| &parts[..])
+            .collect();
+        types.sort_unstable_by_key(|parts| parts[0]);
+        types.into_iter()
+    }
+
+    /// The one C# `partial` type of generic arity `arity` that the bare
+    /// name `name` names in the Tier-3 field of `caller`
+    /// ([`Self::global_candidates`]), when every candidate is one of its
+    /// parts. The global tier finds the parts ambiguous, as two types; they
+    /// are one. A candidate of another declared arity is another type
+    /// (`X<T>` beside `partial class X`). `None` when the candidates are no
+    /// parts, or the parts of two types.
+    pub fn partial_global_type(&self, name: &str, arity: u32, caller: FileMeta) -> Option<u32> {
+        let mut found = None;
+        for id in self.global_candidates(name, ResolveTarget::Type, caller) {
+            let Some(id) = self
+                .with_arity(id, arity)
+                .filter(|&id| self.type_arity(id) == arity)
+            else {
+                continue;
+            };
+            match (found, self.partial_type(id)) {
+                (None, ty) => found = Some(ty),
+                (Some(seen), ty) if seen == ty => {}
+                (Some(_), _) => return None,
+            }
+        }
+        found.filter(|&ty| !self.partial_parts(ty).is_empty())
     }
 
     /// The first declaration in `file_path` named `node_name` with `kind` and
@@ -898,10 +1229,8 @@ impl SymbolTable {
         target: ResolveTarget,
         free_only: bool,
     ) -> Option<u32> {
-        let ids = self.file_scoped.get(file_path)?.get(node_name)?;
         pick_call(
-            ids.iter()
-                .map(|&id| (id, self.node_kinds[id as usize]))
+            self.call_decls(file_path, node_name)
                 .filter(|&(_, kind)| !free_only || kind != NodeKind::Method),
             target,
         )
@@ -911,14 +1240,7 @@ impl SymbolTable {
     /// kinds: what the shared import rules read
     /// ([`ecp_core::analyzer::reexport::ModuleFacts::decls_in_file`]).
     pub(crate) fn decls_in_file(&self, file_path: &str, node_name: &str) -> Vec<(u32, NodeKind)> {
-        self.file_scoped
-            .get(file_path)
-            .and_then(|names| names.get(node_name))
-            .map_or_else(Vec::new, |ids| {
-                ids.iter()
-                    .map(|&id| (id, self.node_kinds[id as usize]))
-                    .collect()
-            })
+        self.call_decls(file_path, node_name).collect()
     }
 
     /// Record that `node_id`, declared in `file_path`, is exported. A TS / JS
@@ -978,12 +1300,6 @@ impl SymbolTable {
     /// Every exported declaration of an ES module, in no order.
     pub(crate) fn exported_ids(&self) -> impl Iterator<Item = u32> + '_ {
         self.exported_ids.iter().copied()
-    }
-
-    /// Whether `id` is declared outside any owning type. A method of a Rust
-    /// `impl` block the parser gave no owner is not: `use m::f` never names it.
-    pub(crate) fn is_top_level(&self, id: NodeId) -> bool {
-        self.is_free(id)
     }
 
     /// [`Self::lookup_call_in_file`] narrowed by the owner an import binding
@@ -1053,9 +1369,8 @@ impl SymbolTable {
         )
     }
 
-    /// Tier-3 global lookup: kind-filtered same-name candidates through the
-    /// shared barrier filter, [`pick_global`]. `free_only` is a bare `f()`
-    /// that never reaches a member ([`global_field`]).
+    /// Tier-3 global lookup: the shared verdict ([`ladder::global_pick`])
+    /// over [`Self::global_field_candidates`].
     pub fn lookup_global(
         &self,
         node_name: &str,
@@ -1063,35 +1378,36 @@ impl SymbolTable {
         caller: FileMeta,
         free_only: bool,
     ) -> GlobalPick {
-        let rust_free_only = caller.language == Language::Rust && free_only;
-        let Some(raw) = self.global_scoped.get(node_name) else {
-            return GlobalPick::NoMatch;
-        };
-        let field = global_field(target, free_only);
-        let pick = pick_global(
+        ladder::global_pick(
+            self,
             caller,
-            raw.iter()
-                .filter(|&&id| field(self.node_kinds[id as usize]))
-                .filter(|&&id| {
-                    !rust_free_only
-                        || self.file_of(id).is_some_and(|file| {
-                            ecp_core::analyzer::same_file_pick::rust_free_global_candidate(
-                                self, file, id,
-                            )
-                        })
-                })
-                .map(|&id| (id, self.node_file_meta[id as usize])),
-        );
-        match pick {
-            GlobalPick::Unique(id) if !target.kind_predicate()(self.node_kinds[id as usize]) => {
-                GlobalPick::NoMatch
-            }
-            other => other,
-        }
+            target,
+            self.global_field_candidates(node_name, target, free_only),
+        )
+    }
+
+    /// Every declaration named `node_name` in the field a Tier-3 lookup of
+    /// `target` weighs ([`global_field`]; `free_only` is a bare `f()` that
+    /// never reaches a member), with its file's meta, scoped ones included:
+    /// the shared ladder drops those (I5).
+    pub(crate) fn global_field_candidates(
+        &self,
+        node_name: &str,
+        target: ResolveTarget,
+        free_only: bool,
+    ) -> impl Iterator<Item = (u32, FileMeta)> + '_ {
+        let field = global_field(target, free_only);
+        self.global_scoped
+            .get(node_name)
+            .map_or(&[][..], Vec::as_slice)
+            .iter()
+            .filter(move |&&id| field(self.node_kinds[id as usize]))
+            .map(move |&id| (id, self.node_file_meta[id as usize]))
     }
 
     /// Every candidate [`lookup_global`] weighs, as a set: kind-filtered, then
-    /// through the same [`FileMeta::admits`] barrier [`pick_global`] applies.
+    /// through the same [`FileMeta::admits`] barrier
+    /// [`pick_global`](ecp_core::file_category::pick_global) applies.
     /// A test double that shares a production name survives here exactly as
     /// it keeps `pick_global` ambiguous; the caller decides among the set.
     pub fn global_candidates(
@@ -1109,6 +1425,7 @@ impl SymbolTable {
             .filter(|&id| {
                 predicate(self.node_kinds[id as usize])
                     && caller.admits(self.node_file_meta[id as usize])
+                    && !self.is_lexically_scoped(id)
             })
             .collect()
     }
@@ -1159,12 +1476,6 @@ impl SymbolTable {
         )
     }
 
-    /// Whether an untyped member call may bind `id`
-    /// ([`same_file_pick::member_call_admits`]).
-    pub(crate) fn member_call_admits(&self, id: u32, caller_owner: Option<&str>) -> bool {
-        same_file_pick::member_call_admits(self, id, caller_owner)
-    }
-
     /// The candidate nearest `caller_file` when `candidates` are copies of
     /// one declaration ([`Self::is_copy`]). Duplicated source trees
     /// (`android/` beside the main tree, vendored copies, two packages
@@ -1202,45 +1513,6 @@ impl SymbolTable {
         best.filter(|_| !tie).map(|(_, id)| id)
     }
 
-    /// [`Self::nearest_copy`] over the set [`Self::lookup_global`] found
-    /// ambiguous: the same kind filter and [`FileMeta::admits`] barrier. The
-    /// walk stops at the first candidate that is not a copy, so a common
-    /// name with many unrelated declarations costs two comparisons.
-    pub(crate) fn nearest_global_copy(
-        &self,
-        caller_file: &str,
-        caller: FileMeta,
-        node_name: &str,
-        target: ResolveTarget,
-        free_only: bool,
-    ) -> Option<u32> {
-        let rust_free_only = caller.language == Language::Rust && free_only;
-        let field = global_field(target, free_only);
-        let mut copies: Vec<u32> = Vec::new();
-        for &id in self.global_scoped.get(node_name)? {
-            if !field(self.node_kinds[id as usize])
-                || !caller.admits(self.node_file_meta[id as usize])
-                || (rust_free_only
-                    && !self.file_of(id).is_some_and(|file| {
-                        ecp_core::analyzer::same_file_pick::rust_free_global_candidate(
-                            self, file, id,
-                        )
-                    }))
-            {
-                continue;
-            }
-            if copies
-                .first()
-                .is_some_and(|&first| !self.is_copy(first, id))
-            {
-                return None;
-            }
-            copies.push(id);
-        }
-        self.nearest_copy(caller_file, &copies)
-            .filter(|&id| target.kind_predicate()(self.node_kinds[id as usize]))
-    }
-
     /// Whether `b` repeats declaration `a` in another tree: the same kind
     /// and owner, in a file of the same name in a directory of the same name
     /// (Java's package directory, a Python package), declaring the same
@@ -1254,7 +1526,7 @@ impl SymbolTable {
             && self.node_kinds[a as usize] == self.node_kinds[b as usize]
             && self.node_owner[a as usize] == self.node_owner[b as usize]
             && leaf_path(a_file) == leaf_path(b_file)
-            && (!fqn_language(Language::from_normalized_path(a_file))
+            && (!fqn_language(self.node_file_meta[a as usize].language)
                 || self.file_namespaces.get(a_file) == self.file_namespaces.get(b_file))
     }
 
@@ -1275,7 +1547,7 @@ impl SymbolTable {
         else {
             return Vec::new();
         };
-        let scope_meta = FileMeta::from_path(scope_file);
+        let scope_meta = self.file_meta(scope_file);
         let scope_root = crate_root_prefix(scope_file);
         let same_package_only = scope_meta.language == Language::Go;
         let scope_dir = std::path::Path::new(scope_file).parent();
@@ -1323,38 +1595,34 @@ impl SymbolTable {
         owned_by(type_name).or_else(|| owned_by(self.name_in_file(type_id)?))
     }
 
-    /// The variant a bare name (`RED`, a Java `case MONDAY:`) denotes: the
-    /// one `file` declares, else the one value of that name the caller's
-    /// barrier admits project-wide when that value is a variant, and whether
-    /// it is in `file`. `None` when `file` declares something else of that
-    /// name (a local `#define` shadows the enumerator), or another value
-    /// (a macro or constant in some header) shares the name.
-    pub fn bare_enum_variant(
+    /// `file`'s declarations of `name` with their kinds, scoped ones
+    /// included; `None` when `file` declares no such name. The reader's-file
+    /// half of a bare variant pick ([`ladder::bare_variant`]).
+    pub fn decls_named_in_file(
         &self,
         file: &str,
         name: &str,
-        caller: FileMeta,
-    ) -> Option<(u32, bool)> {
-        let is_variant = |id: u32| self.node_kinds[id as usize] == NodeKind::EnumVariant;
-        if let Some(ids) = self.file_scoped.get(file).and_then(|names| names.get(name)) {
-            return match ids.as_slice() {
-                [id] if is_variant(*id) => Some((*id, true)),
-                _ => None,
-            };
-        }
-        let values = self.global_scoped.get(name)?.iter().copied().filter(|&id| {
-            matches!(
-                self.node_kinds[id as usize],
-                NodeKind::EnumVariant | NodeKind::Macro | NodeKind::Const | NodeKind::Variable
-            )
-        });
-        match pick_global(
-            caller,
-            values.map(|id| (id, self.node_file_meta[id as usize])),
-        ) {
-            GlobalPick::Unique(id) if is_variant(id) => Some((id, false)),
-            _ => None,
-        }
+    ) -> Option<impl Iterator<Item = (u32, NodeKind)> + '_> {
+        let ids = self.file_scoped.get(file)?.get(name)?;
+        Some(ids.iter().map(|&id| (id, self.node_kinds[id as usize])))
+    }
+
+    /// Every value named `name` (an `EnumVariant`, `Macro`, `Const` or
+    /// `Variable`) with its file's meta: what a bare variant name may denote
+    /// project-wide ([`ladder::bare_variant`]).
+    pub fn values_named(&self, name: &str) -> impl Iterator<Item = (u32, FileMeta)> + '_ {
+        self.global_scoped
+            .get(name)
+            .map_or(&[][..], Vec::as_slice)
+            .iter()
+            .copied()
+            .filter(|&id| {
+                matches!(
+                    self.node_kinds[id as usize],
+                    NodeKind::EnumVariant | NodeKind::Macro | NodeKind::Const | NodeKind::Variable
+                )
+            })
+            .map(|id| (id, self.node_file_meta[id as usize]))
     }
 
     /// The one constructor a construction of type `type_id` calls; `None`
@@ -1396,10 +1664,54 @@ impl SymbolTable {
         self.file_scoped.contains_key(file_path)
     }
 
-    /// The name `node_id` is registered under in its file. The index keeps no
+    /// Record `file`'s metadata, from its stored language after parse. The
+    /// first record of a path stands: two `LocalGraph`s of one path share
+    /// one entry, as they share one `file_scoped` entry.
+    pub(crate) fn note_file_meta(&mut self, file: &str, meta: FileMeta) {
+        if !self.file_metas.contains_key(file) {
+            self.file_metas.insert(file.to_string(), meta);
+        }
+    }
+
+    /// The metadata of `file`: the stored record for a file Pass 1
+    /// registered, else what the path decides ([`FileMeta::from_path`]) for
+    /// a path the index never saw. Either separator is accepted.
+    pub fn file_meta(&self, file: &str) -> FileMeta {
+        let stored = if file.contains('\\') {
+            self.file_metas.get(&file.replace('\\', "/"))
+        } else {
+            self.file_metas.get(file)
+        };
+        stored.copied().unwrap_or_else(|| FileMeta::from_path(file))
+    }
+
+    /// `file`'s language as the index's rules compare it: the stored
+    /// resolution language ([`Self::file_meta`]).
+    pub fn file_language(&self, file: &str) -> Language {
+        self.file_meta(file).language
+    }
+
+    /// `file`'s C5 language after parse, as `graph.bin` stores it
+    /// (`ArchivedZeroCopyGraph::parsed_language`).
+    pub fn parsed_language(&self, file: &str) -> Option<ParsedLanguage> {
+        self.file_meta(file).parsed
+    }
+
+    /// [`Self::has_indexed_file`]'s path, borrowed from the table.
+    pub(crate) fn indexed_file_path(&self, file_path: &str) -> Option<&str> {
+        self.file_scoped
+            .get_key_value(file_path)
+            .map(|(path, _)| path.as_str())
+    }
+
+    /// The name `node_id` is registered under in its file, or, for a type
+    /// [`Self::register_arity_sibling`] filed, its first's. The index keeps no
     /// id → name map; this scans the names of one file. The receiver-typing
     /// ladder calls it only for the declared supertypes it walks.
     pub fn name_in_file(&self, node_id: u32) -> Option<&str> {
+        // A later type of another arity is in no name table; it shares its
+        // first's name.
+        let node_id = self.arity_first.get(&node_id).copied().unwrap_or(node_id);
         let file = self.id_to_file.get(&node_id)?;
         self.file_scoped
             .get(file)?
@@ -1437,6 +1749,71 @@ impl SymbolTable {
                 )
             })
             .collect();
+    }
+
+    /// Replace the supertypes map and the declared bases from the pre-pass
+    /// rows `(type_id, base)` in declared order. The supertypes are the ones
+    /// [`Self::build_supertypes`] derives from the same rows. A candidate
+    /// that is the declaring type, or that repeats, is dropped; a base left
+    /// with no candidate that way is dropped too, as `build_supertypes`
+    /// drops it. A spelling repeated with the same candidates collapses to
+    /// its first position.
+    ///
+    /// The parts of a C# `partial` type ([`Self::note_partial_type`]) are
+    /// one type: the rows of every part accumulate under the representative, in
+    /// row order, and each part then reads the whole list.
+    pub fn build_declared_bases(&mut self, declared: Vec<(u32, DeclaredBase)>) {
+        let mut pairs: Vec<(u32, Option<u32>)> = Vec::with_capacity(declared.len());
+        let mut out: FxHashMap<u32, Vec<DeclaredBase>> = FxHashMap::default();
+        for (ty, base) in declared {
+            let ty = self.partial_type(ty);
+            if base.candidates.is_empty() {
+                pairs.push((ty, None));
+            } else {
+                pairs.extend(base.candidates.iter().map(|&(id, _)| (ty, Some(id))));
+            }
+            let mut candidates: Vec<(u32, f32)> = Vec::with_capacity(base.candidates.len());
+            for &(id, confidence) in base.candidates.iter() {
+                if id != ty && !candidates.iter().any(|&(seen, _)| seen == id) {
+                    candidates.push((id, confidence));
+                }
+            }
+            if candidates.is_empty() && !base.candidates.is_empty() {
+                continue;
+            }
+            let base = DeclaredBase {
+                spelling: base.spelling,
+                candidates: candidates.into_boxed_slice(),
+            };
+            let list = out.entry(ty).or_default();
+            if !list.contains(&base) {
+                list.push(base);
+            }
+        }
+        self.build_supertypes(pairs);
+        self.declared_bases = out;
+        for parts in self.partial_parts.values() {
+            let (&first, rest) = parts.split_first().expect("a partial type has parts");
+            if let Some(bases) = self.declared_bases.get(&first).cloned() {
+                for &part in rest {
+                    self.declared_bases.insert(part, bases.clone());
+                }
+            }
+            if let Some(supertypes) = self.supertypes.get(&first).cloned() {
+                for &part in rest {
+                    self.supertypes.insert(part, supertypes.clone());
+                }
+            }
+        }
+    }
+
+    /// Declared bases of `type_id` in declared order; empty when it declares
+    /// no heritage.
+    pub fn declared_bases(&self, type_id: u32) -> &[DeclaredBase] {
+        self.declared_bases
+            .get(&type_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
     }
 
     /// Declared supertypes of `type_id`; `None` when it declares no heritage.
@@ -1511,6 +1888,10 @@ impl SymbolTable {
 }
 
 impl PickFacts for SymbolTable {
+    fn file_meta(&self, file: &str) -> FileMeta {
+        SymbolTable::file_meta(self, file)
+    }
+
     fn pick_candidates(&self, file: &str, name: &str) -> Cow<'_, [u32]> {
         let Some(ids) = self.file_scoped.get(file).and_then(|names| names.get(name)) else {
             return Cow::Borrowed(&[]);
@@ -1521,11 +1902,16 @@ impl PickFacts for SymbolTable {
                 .copied()
                 .filter(|later| self.impl_members.contains_key(later))
         };
-        if ids.iter().all(|&id| impl_overloads(id).next().is_none()) {
+        let scoped = |id: u32| self.is_lexically_scoped(id);
+        if ids
+            .iter()
+            .all(|&id| !scoped(id) && impl_overloads(id).next().is_none())
+        {
             return Cow::Borrowed(ids);
         }
         Cow::Owned(
             ids.iter()
+                .filter(|&&id| !scoped(id))
                 .flat_map(|&id| std::iter::once(id).chain(impl_overloads(id)))
                 .collect(),
         )
@@ -1538,17 +1924,6 @@ impl PickFacts for SymbolTable {
     fn owner(&self, id: u32) -> Option<&str> {
         let owner = *self.node_owner.get(id as usize)?;
         (owner != NO_OWNER).then(|| &*self.owner_keys[owner as usize])
-    }
-
-    fn raw_owner(&self, id: u32) -> Option<&str> {
-        self.raw_owner_overrides
-            .get(&id)
-            .map(Box::as_ref)
-            .or_else(|| self.owner(id))
-    }
-
-    fn rust_lexical_scope(&self, id: u32) -> Option<&str> {
-        self.rust_lexical_scope_of(id)
     }
 
     fn impl_member(&self, id: u32) -> Option<PickImplMember<'_>> {
@@ -1596,6 +1971,10 @@ impl PickFacts for SymbolTable {
 
     fn ancestors(&self, ty: u32) -> Vec<u32> {
         SymbolTable::ancestors(self, ty)
+    }
+
+    fn is_lexically_scoped(&self, id: u32) -> bool {
+        SymbolTable::is_lexically_scoped(self, id)
     }
 }
 
@@ -1652,6 +2031,38 @@ impl TypeFacts for SymbolTable {
 
     fn return_type_of(&self, callee: u32) -> Option<&str> {
         SymbolTable::return_type_of(self, callee)
+    }
+
+    fn partial_parts(&self, ty: u32) -> Cow<'_, [u32]> {
+        Cow::Borrowed(SymbolTable::partial_parts(self, ty))
+    }
+
+    fn partial_type(&self, ty: u32) -> u32 {
+        SymbolTable::partial_type(self, ty)
+    }
+}
+
+impl ResolveFacts for SymbolTable {
+    fn call_decls(&self, file: &str, name: &str) -> impl Iterator<Item = (u32, NodeKind)> + Clone {
+        self.file_scoped
+            .get(file)
+            .and_then(|names| names.get(name))
+            .map_or(&[][..], Vec::as_slice)
+            .iter()
+            .filter(move |&&id| !self.is_lexically_scoped(id))
+            .map(move |&id| (id, self.node_kinds[id as usize]))
+    }
+
+    fn first_decl_in_file(&self, file: &str, name: &str, target: ResolveTarget) -> Option<u32> {
+        self.lookup_in_file_with_kind(file, name, target)
+    }
+
+    fn has_named(&self, name: &str) -> bool {
+        self.global_match_count(name) > 0
+    }
+
+    fn enum_variant_of(&self, type_id: u32, type_name: &str, variant: &str) -> Option<u32> {
+        SymbolTable::enum_variant_of(self, type_id, type_name, variant)
     }
 }
 
@@ -2070,8 +2481,8 @@ mod tests {
             ("lib.rs", "m", NodeKind::Method, None),
         ]);
         st.note_impl_member(1, 1, Some("T"));
-        assert!(st.is_top_level(0));
-        assert!(!st.is_top_level(1));
+        assert!(same_file_pick::is_free(&st, 0));
+        assert!(!same_file_pick::is_free(&st, 1));
     }
 
     #[test]
@@ -2204,10 +2615,13 @@ mod tests {
         ]);
         st.build_owner_kinds();
         let admits: Vec<bool> = (0..6)
-            .map(|id| st.member_call_admits(id, Some("lexer")))
+            .map(|id| same_file_pick::member_call_admits(&st, id, Some("lexer")))
             .collect();
         assert_eq!(admits, [false, false, true, false, false, false]);
-        assert!(st.member_call_admits(1, None), "a caller with no type");
+        assert!(
+            same_file_pick::member_call_admits(&st, 1, None),
+            "a caller with no type"
+        );
     }
 
     #[test]
@@ -2456,6 +2870,94 @@ mod tests {
             .is_empty());
     }
 
+    /// I5 over the file lookups and the nearest-copy tier: a scoped node is
+    /// in none of them, its unscoped same-file twin still is, and a
+    /// scoped copy no longer keeps two copies apart.
+    #[test]
+    fn test_file_lookups_and_nearest_copy_scoped_node_excluded_returns_twin() {
+        let rows = [
+            ("b.py", "outer", NodeKind::Function, None),
+            ("b.py", "helper", NodeKind::Function, None),
+            ("b.py", "helper", NodeKind::Function, None),
+        ];
+        let control = st_owned(&rows);
+        let mut st = st_owned(&rows);
+        st.note_lexical_parent(1, 0);
+        assert!(st.is_lexically_scoped(1) && !st.is_lexically_scoped(2));
+
+        assert_eq!(
+            control.lookup_call_in_file("b.py", "helper", CALL, true),
+            Some(1)
+        );
+        assert_eq!(
+            st.lookup_call_in_file("b.py", "helper", CALL, true),
+            Some(2)
+        );
+        assert_eq!(
+            st.decls_in_file("b.py", "helper"),
+            vec![(2, NodeKind::Function)]
+        );
+        assert_eq!(&*st.pick_candidates("b.py", "helper"), &[2]);
+        assert_eq!(&*control.pick_candidates("b.py", "helper"), &[1, 2]);
+        assert!(
+            !same_file_pick::is_free(&st, 1),
+            "a nested function is no import target"
+        );
+        assert!(same_file_pick::is_free(&st, 2));
+
+        // Two copies of `pkg/util.py`, one scoped: no copy set remains, and
+        // the unscoped copy is the unique global pick.
+        let copies = [
+            ("core/pkg/util.py", "helper", NodeKind::Function, None),
+            (
+                "android/core/pkg/util.py",
+                "helper",
+                NodeKind::Function,
+                None,
+            ),
+        ];
+        let caller = FileMeta::from_path("core/pkg/app.py");
+        let nearest = |st: &SymbolTable| {
+            ladder::nearest_copy(
+                st,
+                "core/pkg/app.py",
+                caller,
+                st.global_field_candidates("helper", CALL, false),
+            )
+        };
+        let control = st_owned(&copies);
+        assert_eq!(
+            nearest(&control),
+            Some(0),
+            "control: the copy in the caller's tree"
+        );
+        let mut st = st_owned(&copies);
+        st.note_lexical_parent(0, 1);
+        assert_eq!(nearest(&st), None);
+        assert_eq!(
+            st.lookup_global("helper", CALL, caller, false),
+            GlobalPick::Unique(1)
+        );
+    }
+
+    /// Stands for: a closure in a nested `fn` reads the name tiers through
+    /// the outermost unscoped declaration; an unscoped node is its own root,
+    /// and a corrupt cycle still ends.
+    #[test]
+    fn test_lexical_root_chain_unscoped_and_cycle_returns_outermost() {
+        let mut st = SymbolTable::new();
+        assert_eq!(st.lexical_root(7), 7, "no rows: the node itself");
+        st.note_lexical_parent(2, 1);
+        st.note_lexical_parent(1, 0);
+        assert_eq!(st.lexical_root(2), 0);
+        assert_eq!(st.lexical_root(1), 0);
+        assert_eq!(st.lexical_root(0), 0);
+        st.note_lexical_parent(5, 6);
+        st.note_lexical_parent(6, 5);
+        let root = st.lexical_root(5);
+        assert!(root == 5 || root == 6, "a corrupt cycle ends, at {root}");
+    }
+
     // ---- supertypes ----
 
     fn st_with_heritage(declared: &[(u32, Option<u32>)]) -> SymbolTable {
@@ -2497,6 +2999,44 @@ mod tests {
             Some(0),
             "an external base listed first precedes every project base"
         );
+    }
+
+    fn declared(spelling: &str, candidates: &[(u32, f32)]) -> DeclaredBase {
+        DeclaredBase {
+            spelling: spelling.into(),
+            candidates: candidates.into(),
+        }
+    }
+
+    /// Stands for: the `Overrides` pass reads the same bases that the
+    /// receiver-typing ladder reads, plus each base's spelling, candidate
+    /// count and resolver confidence.
+    #[test]
+    fn test_build_declared_bases_rows_keep_supertypes_and_candidates() {
+        let mut st = SymbolTable::new();
+        st.build_declared_bases(vec![
+            (0, declared("External", &[])),
+            (0, declared("Base", &[(1, 1.0)])),
+            (0, declared("Dup", &[(2, 0.7), (3, 0.7), (2, 0.7)])),
+            (0, declared("Base", &[(1, 1.0)])),
+            (0, declared("Itself", &[(0, 1.0)])),
+            (4, declared("  ", &[])),
+        ]);
+        let s = st.supertypes(0).unwrap();
+        assert_eq!(&*s.bases, &[1, 2, 3], "build_supertypes over the same rows");
+        assert_eq!(s.first_unresolved, Some(0));
+        let bases = st.declared_bases(0);
+        assert_eq!(
+            bases,
+            &[
+                declared("External", &[]),
+                declared("Base", &[(1, 1.0)]),
+                declared("Dup", &[(2, 0.7), (3, 0.7)]),
+            ],
+            "a repeat collapses, a self base is dropped, an empty base stays"
+        );
+        assert_eq!(st.declared_bases(4), &[declared("  ", &[])]);
+        assert!(st.declared_bases(9).is_empty(), "no heritage, no bases");
     }
 
     #[test]

@@ -11,8 +11,9 @@ use ecp_cli::reanalyze::make_pipeline;
 use ecp_cli::session::overlay_writer::{
     fragments_from_local_graph, write_dirty_fragment, Fragment, FragmentInput,
 };
+use ecp_core::contracts::routing::SizeCap;
 use ecp_core::graph::NodeKind;
-use ecp_core::session::{DirtyFiles, SessionMeta};
+use ecp_core::session::{layout, DirtyEvents, SessionMeta};
 use std::path::Path;
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -42,8 +43,8 @@ fn make_session_dir(tmp: &std::path::Path, sid: &str) -> std::path::PathBuf {
         agent_name: None,
     };
     SessionMeta::write_atomic(&session_dir.join("session_meta.json"), &sm).unwrap();
-    let df = DirtyFiles::empty();
-    DirtyFiles::write_atomic(&session_dir.join("dirty_files.json"), &df).unwrap();
+    let df = DirtyEvents::empty(SizeCap::BUILT_IN);
+    DirtyEvents::write_atomic(&layout::dirty_events_path(&session_dir), &df).unwrap();
     session_dir
 }
 
@@ -128,9 +129,7 @@ fn test_write_dirty_fragment_sets_parse_not_failed_for_known_lang() {
     assert!(!outcome.parse_failed);
 
     // Fragment file must be non-empty (real content, not stub `vec![]`).
-    let frag_path = session_dir
-        .join("graph_overlay")
-        .join(format!("{}.bin", outcome.fragment_id));
+    let frag_path = layout::fragment_path(&session_dir, &outcome.fragment_id);
     let bytes = std::fs::read(&frag_path).unwrap();
     assert!(
         !bytes.is_empty(),

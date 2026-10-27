@@ -1,5 +1,6 @@
 //! Java HTTP route extractor: Spring MVC annotation patterns via tree-sitter.
 
+use super::{capture_line, client_verb, compile_client_query, consumer_contract, http_url_path};
 use crate::commands::group::types::{ContractRole, ContractType, ExtractedContract, SymbolRef};
 use std::path::Path;
 use std::sync::LazyLock;
@@ -21,6 +22,26 @@ const QUERY_SRC: &str = r#"
           (string_fragment) @path))))
   name: (identifier) @handler)
 "#;
+
+/// Client calls with a literal URL: RestTemplate `getForObject("/x", ...)` and
+/// WebClient `webClient.get().uri("/x")`. The second pattern also captures the
+/// verb call that precedes `uri`.
+const CLIENT_QUERY_SRC: &str = r#"
+(method_invocation
+  object: (_)
+  name: (identifier) @callee
+  arguments: (argument_list . (string_literal (string_fragment) @path))) @call
+
+(method_invocation
+  object: (method_invocation name: (identifier) @verb)
+  name: (identifier) @callee
+  arguments: (argument_list . (string_literal (string_fragment) @path))) @call
+"#;
+
+static CLIENT_QUERY: LazyLock<Option<Query>> = LazyLock::new(|| {
+    let lang: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
+    compile_client_query(&lang, CLIENT_QUERY_SRC, "http_java")
+});
 
 static QUERY: LazyLock<Query> = LazyLock::new(|| {
     let lang: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
@@ -82,7 +103,53 @@ pub fn extract_http(file_path: &Path, source: &[u8]) -> Vec<ExtractedContract> {
             meta: vec![("method".into(), http_method.into())],
         });
     }
+    extract_clients(file_path, source, &tree, &mut out);
     out
+}
+
+/// `Consumer` contracts for RestTemplate and WebClient calls with a literal URL.
+fn extract_clients(
+    file_path: &Path,
+    source: &[u8],
+    tree: &tree_sitter::Tree,
+    out: &mut Vec<ExtractedContract>,
+) {
+    let Some(query) = CLIENT_QUERY.as_ref() else {
+        return;
+    };
+    let idx = |name: &str| query.capture_index_for_name(name);
+    let (Some(callee_idx), Some(verb_idx), Some(path_idx), Some(call_idx)) =
+        (idx("callee"), idx("verb"), idx("path"), idx("call"))
+    else {
+        return;
+    };
+
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, tree.root_node(), source);
+    while let Some(m) = matches.next() {
+        let callee = super::capture_text(m, callee_idx, source);
+        let verb = match callee {
+            "uri" => client_verb(super::capture_text(m, verb_idx, source)),
+            "getForObject" | "getForEntity" => Some("GET"),
+            "postForObject" | "postForEntity" | "postForLocation" => Some("POST"),
+            "patchForObject" => Some("PATCH"),
+            _ => None,
+        };
+        let Some(verb) = verb else {
+            continue;
+        };
+        let Some(path) = http_url_path(super::capture_text(m, path_idx, source)) else {
+            continue;
+        };
+        out.push(consumer_contract(
+            file_path,
+            ContractType::Http,
+            format!("http:{verb}:{path}"),
+            callee,
+            capture_line(m, call_idx),
+            vec![("method".into(), verb.into())],
+        ));
+    }
 }
 
 /// Maps Spring annotation name → HTTP method string.

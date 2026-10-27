@@ -125,13 +125,17 @@ changelog_section() {
     type="${entry%%:*}"; label="${entry##*:}"
     local lines
     lines="$(git log "${since}..HEAD" --pretty=format:'%s' 2>/dev/null \
-      | grep -E "^${type}(\(|:)" | grep -vE '^chore\(deps\)' || true)"
+      | grep -E "^${type}(\([^)]*\))?!?:" | grep -vE '^chore\(deps\)' || true)"
     if [[ -n "$lines" ]]; then
       echo "### ${label}"
       echo
       while IFS= read -r l; do
-        # strip the `type(scope): ` prefix for a cleaner bullet
-        echo "- ${l#*: }"
+        # strip the `type(scope): ` prefix for a cleaner bullet; `type!:` is breaking
+        if [[ "$l" =~ ^[a-z]+(\([^\)]*\))?!: ]]; then
+          echo "- **Breaking:** ${l#*: }"
+        else
+          echo "- ${l#*: }"
+        fi
       done <<<"$lines"
       echo
       found_any=1

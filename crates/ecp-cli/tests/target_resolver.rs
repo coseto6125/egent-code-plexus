@@ -1,0 +1,458 @@
+//! One target resolver (architecture direction, area 5; C1 "Target request
+//! syntax" and "Typed target result"): `impact` and `inspect` turn the target
+//! text and its filters into one declaration or a typed ambiguity.
+
+mod common;
+
+use common::{commit_all, ecp_bin, run_git};
+use ecp_cli::read_context::{resolve_target, target_request};
+use ecp_core::contracts::identity::TargetResolution;
+use ecp_core::graph::ArchivedZeroCopyGraph;
+use ecp_core::graph_fixture::GraphFixture;
+use ecp_core::session::MergedGraph;
+use serde_json::Value;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+/// An indexed git repo with its own cache root.
+struct Repo {
+    _tmp: tempfile::TempDir,
+    root: PathBuf,
+    home: PathBuf,
+}
+
+impl Repo {
+    fn indexed(files: &[(&str, &str)]) -> Self {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        let repo = Self {
+            _tmp: tmp,
+            root,
+            home,
+        };
+        for (rel, text) in files {
+            repo.write(rel, text);
+        }
+        run_git(&repo.root, &["init", "-q", "-b", "main"]);
+        commit_all(&repo.root, "base");
+        let out = repo.ecp(&["admin", "index", "--repo", "."]);
+        assert!(out.status.success(), "admin index: {}", stderr(&out));
+        repo
+    }
+
+    fn write(&self, rel: &str, text: &str) {
+        let path = self.root.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+
+    fn ecp(&self, args: &[&str]) -> Output {
+        self.ecp_in(&self.root, args)
+    }
+
+    fn ecp_in(&self, cwd: &Path, args: &[&str]) -> Output {
+        Command::new(ecp_bin())
+            .args(args)
+            .current_dir(cwd)
+            .env("HOME", &self.home)
+            .env_remove("ECP_HOME")
+            .env_remove("CLAUDE_CODE_SESSION_ID")
+            .env("ECP_SESSION_ID", "target-resolver")
+            .env("ECP_SKIP_BG_REBUILD", "1")
+            .output()
+            .expect("ecp failed to spawn")
+    }
+}
+
+fn stdout(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn stderr(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+/// The first JSON object on stdout.
+fn json_of(out: &Output) -> Value {
+    let text = stdout(out);
+    let start = text
+        .find('{')
+        .unwrap_or_else(|| panic!("no JSON on stdout: {text}\nstderr: {}", stderr(out)));
+    serde_json::Deserializer::from_str(&text[start..])
+        .into_iter::<Value>()
+        .next()
+        .unwrap()
+        .unwrap()
+}
+
+const PARSE_A: &str = "def parse():\n    return 1\n";
+const PARSE_B: &str = "def parse():\n    return 2\n";
+
+/// Stands for: two declarations match a bare name, so `impact` cannot know
+/// which one the agent means. It answers `ambiguous`, names both files, and
+/// gives each a target that, run again, selects that declaration alone.
+#[test]
+fn test_impact_two_parse_functions_reports_ambiguity_with_selecting_targets() {
+    let repo = Repo::indexed(&[("a.py", PARSE_A), ("b.py", PARSE_B)]);
+
+    let out = repo.ecp(&["impact", "parse", "--repo", ".", "--format", "json"]);
+
+    assert!(!out.status.success(), "an ambiguity must exit non-zero");
+    let payload = json_of(&out);
+    assert_eq!(payload["status"], "ambiguous", "{payload}");
+    let candidates = payload["candidates"].as_array().expect("candidates");
+    assert_eq!(candidates.len(), 2, "{payload}");
+    for file in ["a.py", "b.py"] {
+        assert!(
+            candidates.iter().any(|c| c.to_string().contains(file)),
+            "candidates must name {file}: {payload}"
+        );
+    }
+    for candidate in candidates {
+        let target = candidate["target"]
+            .as_str()
+            .unwrap_or_else(|| panic!("each candidate has its own target: {payload}"));
+        let mut args = vec!["impact"];
+        args.extend(target.split_whitespace());
+        args.extend(["--repo", ".", "--format", "json"]);
+        let again = repo.ecp(&args);
+        assert!(again.status.success(), "{target}: {}", stderr(&again));
+    }
+}
+
+const K_OVERLOADS: &str = "class K {\n    void load(int n) {}\n    void load(String s) {}\n    void run() { load(1); }\n}\n";
+
+/// Stands for: an overload set is two declarations, not one target seeded at
+/// its first member (FU-2026-10-25-faf69063bbb2). `impact` answers with the
+/// typed ambiguity: both members, each with a target that, run again,
+/// selects that member alone. Failed before: one blast radius for the set.
+#[test]
+fn test_impact_target_load_kind_method_reports_ambiguity_not_merge() {
+    let repo = Repo::indexed(&[("K.java", K_OVERLOADS)]);
+
+    let out = repo.ecp(&[
+        "impact", "load", "--kind", "method", "--repo", ".", "--format", "json",
+    ]);
+
+    assert!(!out.status.success(), "an ambiguity must exit non-zero");
+    let payload = json_of(&out);
+    assert_eq!(payload["status"], "ambiguous", "{payload}");
+    assert!(payload.get("impact").is_none(), "no merged rows: {payload}");
+    let candidates = payload["candidates"].as_array().expect("candidates");
+    let mut lines: Vec<u64> = candidates
+        .iter()
+        .map(|c| c["line"].as_u64().unwrap())
+        .collect();
+    lines.sort();
+    assert_eq!(lines, [2, 3], "{payload}");
+
+    for candidate in candidates {
+        let target = candidate["target"]
+            .as_str()
+            .unwrap_or_else(|| panic!("each overload has its own target: {payload}"));
+        let mut args = vec!["impact"];
+        args.extend(target.split_whitespace());
+        args.extend(["--repo", ".", "--format", "json"]);
+        let again = repo.ecp(&args);
+        assert!(again.status.success(), "{target}: {}", stderr(&again));
+        let start = &json_of(&again)["impact"][0];
+        assert_eq!(start["depth"], 0, "{target}: {start}");
+        assert_eq!(start["line"], candidate["line"], "{target}: {start}");
+    }
+}
+
+/// Stands for: an ambiguity under a dirty overload set is no proof that the
+/// answer is complete either, so the ambiguity payload keeps the overlay
+/// caveat in `result`.
+#[test]
+fn test_impact_ambiguous_dirty_overloads_payload_carries_caveat() {
+    let repo = Repo::indexed(&[("K.java", K_OVERLOADS)]);
+    repo.write("K.java", &format!("{K_OVERLOADS}// comment-only edit\n"));
+
+    let out = repo.ecp(&["impact", "load", "--repo", ".", "--format", "json"]);
+
+    let payload = json_of(&out);
+    assert_eq!(payload["status"], "ambiguous", "{payload}");
+    let result = payload["result"].as_str().unwrap_or_default();
+    assert!(
+        result.contains("could not pair") && result.contains("K.load"),
+        "{payload}"
+    );
+}
+
+/// `::name` selects the declaration with no owner and no lexical parent; a
+/// bare name matches both; an owner form selects the method.
+#[test]
+fn test_resolve_target_colon_colon_name_selects_top_level() {
+    let mut fx = GraphFixture::new();
+    fx.method("src/engine.py", "Engine", "load");
+    fx.func("src/util.py", "load");
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&fx.build()).unwrap();
+    let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+    let merged = MergedGraph::new(graph, None);
+    let file_of =
+        |text: &str| match resolve_target(&merged, &target_request(text, None, None).unwrap()) {
+            TargetResolution::Unique(c) => c.file,
+            other => panic!("{text}: expected one declaration, got {other:?}"),
+        };
+
+    assert_eq!(file_of("::load"), "src/util.py");
+    assert_eq!(file_of(".load"), "src/util.py");
+    assert_eq!(file_of("Engine.load"), "src/engine.py");
+    match resolve_target(&merged, &target_request("load", None, None).unwrap()) {
+        TargetResolution::Ambiguous(a) => assert_eq!(a.total(), 2),
+        other => panic!("bare load: expected an ambiguity, got {other:?}"),
+    }
+    match resolve_target(&merged, &target_request("::missing", None, None).unwrap()) {
+        TargetResolution::NotFound { named } => assert_eq!(named, 0),
+        other => panic!("::missing: expected not found, got {other:?}"),
+    }
+}
+
+/// Blank filters count as absent; an unknown kind and an empty target are
+/// syntax errors, never a silent miss.
+#[test]
+fn test_target_request_blank_filter_absent_bad_kind_error() {
+    let request = target_request("load", Some("  "), Some(" ")).unwrap();
+    assert_eq!(request.kind(), None);
+    assert_eq!(request.file(), None);
+    assert!(target_request("load", Some("function,method"), None).is_err());
+    assert!(target_request("   ", None, None).is_err());
+}
+
+// ── find, path and pattern select through the same resolver (F5b) ───────────
+
+const ENGINE_PY: &str = "class Engine:\n    def load(self):\n        return 1\n";
+const UTIL_LOAD_PY: &str = "def load():\n    return 2\n";
+
+/// Stands for: qualified `Owner.member` text means the node the resolver
+/// picks for it. Failed before: `find` compared the whole text with the node
+/// name `load`, so `Engine.load` answered `found:false`.
+#[test]
+fn test_find_engine_dot_load_found_true() {
+    let repo = Repo::indexed(&[("engine.py", ENGINE_PY), ("util.py", UTIL_LOAD_PY)]);
+
+    let out = repo.ecp(&["find", "Engine.load", "--format", "json", "--repo", "."]);
+
+    assert!(out.status.success(), "{}", stderr(&out));
+    let payload = json_of(&out);
+    assert_eq!(payload["found"], true, "{payload}");
+    assert_eq!(payload["status"], "success", "one declaration: {payload}");
+    assert_eq!(payload["total_candidates"], 1, "{payload}");
+    assert_eq!(payload["matches"][0]["file"], "engine.py", "{payload}");
+    assert_eq!(payload["matches"][0]["name"], "load", "{payload}");
+}
+
+/// Stands for: `find` reports two same-name declarations as the typed
+/// ambiguity (`status`, `candidates` with a re-runnable `target`) and still
+/// returns its top-ranked match. Failed before: the payload said `success`
+/// and gave no way to select the other declaration.
+#[test]
+fn test_find_bare_name_two_files_reports_typed_ambiguity() {
+    let repo = Repo::indexed(&[("a.py", PARSE_A), ("b.py", PARSE_B)]);
+
+    let out = repo.ecp(&["find", "parse", "--format", "json", "--repo", "."]);
+
+    assert!(out.status.success(), "{}", stderr(&out));
+    let payload = json_of(&out);
+    assert_eq!(payload["status"], "ambiguous", "{payload}");
+    assert_eq!(payload["total_candidates"], 2, "{payload}");
+    assert_eq!(payload["matches"].as_array().unwrap().len(), 1, "{payload}");
+    let candidates = payload["candidates"].as_array().expect("candidates");
+    for file in ["a.py", "b.py"] {
+        let candidate = candidates
+            .iter()
+            .find(|c| c["filePath"] == file)
+            .unwrap_or_else(|| panic!("no candidate for {file}: {payload}"));
+        let target = candidate["target"].as_str().expect("re-runnable target");
+        let mut args = vec!["find"];
+        args.extend(target.split_whitespace());
+        args.extend(["--format", "json", "--repo", "."]);
+        let again = json_of(&repo.ecp(&args));
+        assert_eq!(again["status"], "success", "{target}: {again}");
+        assert_eq!(again["matches"][0]["file"], file, "{target}: {again}");
+    }
+}
+
+/// Stands for: a `--kind` list narrows `find` before it reports an ambiguity.
+/// A class and a function share a name; `--kind function` leaves one.
+#[test]
+fn test_find_kind_filter_leaves_one_declaration_no_ambiguity() {
+    let repo = Repo::indexed(&[("a.py", "class parse:\n    pass\n"), ("b.py", PARSE_B)]);
+
+    let out = repo.ecp(&[
+        "find", "parse", "--kind", "function", "--format", "json", "--repo", ".",
+    ]);
+
+    let payload = json_of(&out);
+    assert_eq!(payload["status"], "success", "{payload}");
+    assert_eq!(payload["matches"][0]["file"], "b.py", "{payload}");
+    assert!(payload.get("candidates").is_none(), "{payload}");
+}
+
+const X_FUNCTION_TS: &str = "export function X() {\n  return 1;\n}\n";
+const X_METHOD_TS: &str = "export class Lib {\n  X() {\n    return 2;\n  }\n}\n";
+
+/// Stands for: `--kind` narrows the declarations before `--file` ranks them,
+/// in `find` as in `impact` (C1: both filters constrain the target).
+/// `src/a.ts` equals the function's path and only ends the method's path
+/// `lib/src/a.ts`. Failed before: `find` ranked the files first, kept the
+/// function, and `--kind method` then left no match, while `impact`
+/// resolved the method.
+#[test]
+fn test_find_kind_method_file_suffix_selects_method_like_impact() {
+    let repo = Repo::indexed(&[("src/a.ts", X_FUNCTION_TS), ("lib/src/a.ts", X_METHOD_TS)]);
+
+    let found = json_of(&repo.ecp(&[
+        "find", "X", "--file", "src/a.ts", "--kind", "method", "--format", "json", "--repo", ".",
+    ]));
+    assert_eq!(found["status"], "success", "{found}");
+    let matches = found["matches"].as_array().expect("matches");
+    assert_eq!(matches.len(), 1, "{found}");
+    assert_eq!(matches[0]["file"], "lib/src/a.ts", "{found}");
+    assert_eq!(matches[0]["line"], 2, "{found}");
+
+    let out = repo.ecp(&[
+        "impact", "X", "--file", "src/a.ts", "--kind", "method", "--repo", ".", "--format", "json",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let start = &json_of(&out)["impact"][0];
+    assert_eq!(start["depth"], 0, "{start}");
+    assert_eq!(start["ownerClass"], "Lib", "{start}");
+    assert_eq!(
+        start["line"], matches[0]["line"],
+        "find and impact name one declaration: {start}"
+    );
+}
+
+/// Stands for: `--callers-of` takes its caller files from the overlay-aware
+/// graph. Failed before: the walk read the base graph, so a caller written
+/// into an untracked file was never scanned.
+#[test]
+fn test_pattern_callers_of_sees_untracked_caller() {
+    let repo = Repo::indexed(&[("lib.rs", "pub fn alpha() {}\n")]);
+    repo.write("extra.rs", "pub fn use_alpha() { alpha(); }\n");
+
+    let out = repo.ecp(&[
+        "pattern",
+        "-p",
+        "alpha()",
+        "--callers-of",
+        "alpha",
+        "--format",
+        "json",
+        "--repo",
+        ".",
+    ]);
+
+    assert!(out.status.success(), "{}", stderr(&out));
+    let payload = json_of(&out);
+    let files: Vec<&str> = payload["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["file"].as_str().unwrap())
+        .collect();
+    assert!(files.contains(&"extra.rs"), "{payload}");
+}
+
+/// Stands for: `pattern --callers-of` refuses two same-name declarations with
+/// the typed ambiguity, and each candidate's `target` holds the arguments that
+/// select it. Failed before: it scanned the callers of both.
+#[test]
+fn test_pattern_callers_of_bare_name_two_files_reports_typed_ambiguity() {
+    let repo = Repo::indexed(&[("a.py", PARSE_A), ("b.py", PARSE_B)]);
+
+    let out = repo.ecp(&[
+        "pattern",
+        "-p",
+        "pass",
+        "--callers-of",
+        "parse",
+        "--format",
+        "json",
+        "--repo",
+        ".",
+    ]);
+
+    assert!(!out.status.success(), "an ambiguity must exit non-zero");
+    let payload = json_of(&out);
+    assert_eq!(payload["status"], "ambiguous", "{payload}");
+    assert!(payload.get("matches").is_none(), "{payload}");
+    for file in ["a.py", "b.py"] {
+        let candidate = payload["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["filePath"] == file)
+            .unwrap_or_else(|| panic!("no candidate for {file}: {payload}"));
+        let target = candidate["target"].as_str().expect("re-runnable target");
+        let mut args = vec!["pattern", "-p", "pass"];
+        args.extend(target.split_whitespace());
+        args.extend(["--format", "json", "--repo", "."]);
+        let again = repo.ecp(&args);
+        assert!(again.status.success(), "{target}: {}", stderr(&again));
+        assert_eq!(json_of(&again)["scanned_files"], 1, "{target}");
+    }
+}
+
+const APP_PY: &str = "from util import load\n\n\ndef run():\n    return load()\n";
+
+/// Stands for: `path` selects an endpoint with the resolver's grammar. `::load`
+/// is the top-level `load`, not `Engine.load`. Failed before: `path` read
+/// `::load` as a method name and found no symbol.
+#[test]
+fn test_path_colon_colon_name_selects_top_level_endpoint() {
+    let repo = Repo::indexed(&[
+        ("engine.py", ENGINE_PY),
+        ("util.py", UTIL_LOAD_PY),
+        ("app.py", APP_PY),
+    ]);
+
+    let out = repo.ecp(&["path", "run", "::load", "--format", "json", "--repo", "."]);
+
+    assert!(out.status.success(), "{}", stderr(&out));
+    let payload = json_of(&out);
+    assert_eq!(payload["found"], true, "{payload}");
+    let last = payload["path"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["filePath"], "util.py", "{payload}");
+}
+
+/// Stands for: `path` reports an ambiguous endpoint as the typed ambiguity and
+/// names the side. Each `target` holds the `--from-file` / `--to-file`
+/// arguments that select it. Failed before: both declarations seeded one walk.
+#[test]
+fn test_path_bare_name_two_files_reports_typed_ambiguity() {
+    let repo = Repo::indexed(&[
+        ("a.py", PARSE_A),
+        ("b.py", PARSE_B),
+        ("main.py", "def main():\n    return 0\n"),
+    ]);
+
+    let out = repo.ecp(&["path", "main", "parse", "--format", "json", "--repo", "."]);
+
+    assert!(!out.status.success(), "an ambiguity must exit non-zero");
+    let payload = json_of(&out);
+    assert_eq!(payload["status"], "ambiguous", "{payload}");
+    assert_eq!(payload["side"], "to", "{payload}");
+    for file in ["a.py", "b.py"] {
+        let candidate = payload["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["filePath"] == file)
+            .unwrap_or_else(|| panic!("no candidate for {file}: {payload}"));
+        let target = candidate["target"].as_str().expect("re-runnable target");
+        assert!(target.contains(&format!("--to-file {file}")), "{target}");
+        let mut args = vec!["path", "main"];
+        args.extend(target.split_whitespace());
+        args.extend(["--format", "json", "--repo", "."]);
+        let again = repo.ecp(&args);
+        assert!(again.status.success(), "{target}: {}", stderr(&again));
+        assert_eq!(json_of(&again)["toCandidates"], 1, "{target}");
+    }
+}

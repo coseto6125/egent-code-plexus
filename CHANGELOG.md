@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.17.0 - 2026-10-27
+
+### Features
+
+- **Breaking:** architecture phase 2 (crate table, l1 dirty events, one uid assignment, one resolution ladder, workspace scopes, stored parse language, incremental overlay with an invalidation closure, remove ecp rename) (#871)
+- architecture refactor phase 1 contracts and phase 2 waves 1-2 (routing, read context, one Resolution, payload caveats) (#870)
+- architecture refactor phase 0 (parity harness, graph locks, exact Cypher, filter-driver guard) (#869)
+
+### Bug Fixes
+
+- peer watcher delivers a dirty manifest inotify never reported (written inside a just-created `l1/` before its watch existed) through a 1 s stamp sweep, and polls when the native watcher cannot start or watch (#876)
+- list breaking `type!:` commits in the changelog
+- dry-run reports the ECP.md copy and import only when they would change (#866)
+
+### Dependencies
+
+- tantivy 0.27 from crates.io without zstd and the stemmer; the zstd RustSec ignores are gone. Every tree-sitter grammar moves to its latest release: Dart 0.3, Swift 0.7.4 from crates.io (vendored copy removed), Nim and C++ upstream HEAD. Swift calls behind `!`, a binary operator, `??`, a ternary or a range are named again; Dart arrow-closure callbacks attach to their `<anonymous>` node (#874)
+
 ## v0.16.4 - 2026-10-23
 
 ### Bug Fixes

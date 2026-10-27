@@ -3,6 +3,7 @@
 //! and the session overlay. One classifier, so a path that `impact` hides as
 //! a test is also the path the resolver treats as a test candidate.
 
+use crate::contracts::routing::{FileRoute, FileRouter, ParsedLanguage};
 use crate::graph::FileCategory;
 use aho_corasick::{AhoCorasick, MatchKind};
 use std::sync::OnceLock;
@@ -243,79 +244,33 @@ pub enum Language {
 }
 
 impl Language {
-    /// Map a repo-relative file path to its provider language. Mirrors the
-    /// extension routing in `commands/analyze.rs` plus path-based overrides
-    /// for `Dockerfile` / `docker-compose.{yml,yaml}` / `.github/workflows/*`.
+    /// Map a repo-relative file path to its provider language. The value is
+    /// the C5 route's `to_legacy` (`contracts::routing`), so this reader and
+    /// the index cannot disagree on an extension. `/` and `\\` both separate
+    /// components, so no separator rewrite is needed.
     pub fn from_path(path: &str) -> Self {
-        if path.contains('\\') {
-            let normalized = path.replace('\\', "/");
-            Self::from_normalized_path(&normalized)
-        } else {
-            Self::from_normalized_path(path)
+        Self::from_normalized_path(path)
+    }
+
+    /// The same value as [`Self::from_path`]. Kept for callers that already
+    /// converted backslashes; neither form allocates.
+    ///
+    /// The template rules are skipped (`route_ignoring_templates`): every
+    /// caller asks about a graph file, and the walk already left template
+    /// files out of the graph.
+    pub fn from_normalized_path(path: &str) -> Self {
+        match FileRouter::PATH_ONLY.route_ignoring_templates(path) {
+            Some(route) => route.to_legacy(),
+            None => Self::unrouted(path),
         }
     }
 
-    /// Fast path for callers that have already converted backslashes (Pass 1
-    /// in `builder.rs` and most repo-rooted paths on Linux/macOS). Skips the
-    /// `replace('\\','/')` allocation entirely.
-    pub fn from_normalized_path(path: &str) -> Self {
-        let normalized = path;
-        let basename = normalized.rsplit('/').next().unwrap_or("");
-
-        // Path / basename overrides before extension routing.
-        if matches!(basename, "Dockerfile" | "dockerfile") {
-            return Self::Dockerfile;
-        }
-        if matches!(
-            basename,
-            "docker-compose.yml" | "docker-compose.yaml" | "compose.yml" | "compose.yaml"
-        ) {
-            return Self::DockerCompose;
-        }
-        let ext = basename.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
-        if matches!(ext, "yml" | "yaml")
-            && (normalized.contains("/.github/workflows/")
-                || normalized.starts_with(".github/workflows/"))
-        {
-            return Self::GitHubActions;
-        }
-
-        match ext {
-            "rs" => Self::Rust,
-            "py" | "pyi" => Self::Python,
-            "ts" | "tsx" => Self::TypeScript,
-            "js" | "jsx" | "mjs" | "cjs" => Self::JavaScript,
-            "java" => Self::Java,
-            "kt" | "kts" => Self::Kotlin,
-            "go" => Self::Go,
-            "rb" => Self::Ruby,
-            "php" => Self::Php,
-            "cs" => Self::CSharp,
-            "swift" => Self::Swift,
-            "dart" => Self::Dart,
-            "sol" => Self::Solidity,
-            "sql" => Self::Sql,
-            "c" => Self::C,
-            // `.h` routes to C++ (matches ref-gitnexus dispatch). `.h` is genuinely
-            // ambiguous — C headers and C++ headers share the extension — but C++
-            // parsing is a near-superset of C, while C parsing produces ERROR
-            // nodes on any C++-only construct (class, template, namespace, &,
-            // operator overload). Real codebases ship C++ libraries with `.h`
-            // headers (nlohmann/json, doctest, LLVM Fuzzer, Catch2, …); routing
-            // them to the C parser silently drops every class/method/template.
-            "cpp" | "hpp" | "cc" | "hh" | "cxx" | "hxx" | "h" => Self::Cpp,
-            "move" => Self::Move,
-            "nim" => Self::Nim,
-            "cairo" => Self::Cairo,
-            "vy" => Self::Vyper,
-            "v" | "sv" | "vh" | "svh" => Self::Verilog,
-            "tf" | "tfvars" | "hcl" => Self::Hcl,
-            "cr" => Self::Crystal,
-            "lua" | "luau" => Self::Lua,
-            "zig" => Self::Zig,
-            "sh" | "bash" => Self::Bash,
-            "yml" | "yaml" => Self::Yaml,
-            "md" | "txt" | "rst" => Self::Markdown,
+    /// Documentation has no route (C5 open point 2), but `ecp dev uid-audit`
+    /// labels it `Markdown`, as it did before the route existed.
+    fn unrouted(path: &str) -> Self {
+        let basename = path.rsplit(['/', '\\']).next().unwrap_or("");
+        match basename.rsplit_once('.') {
+            Some((_, "md" | "txt" | "rst")) => Self::Markdown,
             _ => Self::Unknown,
         }
     }
@@ -372,10 +327,29 @@ pub struct FileMeta {
     /// (`is_some`, `get`, `new`) with stdlib methods, producing one false edge
     /// per call site that survives the kind+unique filter.
     pub is_vendor: bool,
+    /// The value every `file_category::Language` reader compares: the stored
+    /// resolution language's `to_legacy` ([`Self::of_parsed`]), else the
+    /// path's.
     pub language: Language,
+    /// C5 language after parse. The global tier reads it on both files
+    /// ([`Self::admits`]). `None` when nothing decided it: a sniffed file, a
+    /// Vue, Svelte or Astro file whose script no parse reported, an unrouted
+    /// path.
+    pub parsed: Option<ParsedLanguage>,
 }
 
 impl FileMeta {
+    /// The facts of a file whose language after parse is known (the index
+    /// stores it per file). `path` is forward-slashed. A Vue file with a
+    /// TypeScript script reads as TypeScript.
+    pub fn of_parsed(path: &str, parsed: ParsedLanguage) -> Self {
+        Self {
+            is_vendor: is_vendor_path(path),
+            language: parsed.resolution().to_legacy(),
+            parsed: Some(parsed),
+        }
+    }
+
     pub fn from_path(path: &str) -> Self {
         if path.contains('\\') {
             let normalized = path.replace('\\', "/");
@@ -388,18 +362,44 @@ impl FileMeta {
     /// Fast path for callers that have already normalised separators. Skips
     /// the `replace('\\','/')` allocation (one per call) — meaningful in Pass
     /// 1, which calls it once per file.
+    ///
+    /// `parsed` is what the path alone decides: a fixed route whose language
+    /// embeds no script. A sniffed route waits for its content gate, and a
+    /// Vue, Svelte or Astro file for its script, so both stay `None`.
     pub fn from_normalized_path(path: &str) -> Self {
+        let route = FileRouter::PATH_ONLY.route_ignoring_templates(path);
         Self {
-            is_vendor: path.contains("/vendor/") || path.starts_with("vendor/"),
-            language: Language::from_normalized_path(path),
+            is_vendor: is_vendor_path(path),
+            language: route
+                .as_ref()
+                .map_or_else(|| Language::unrouted(path), FileRoute::to_legacy),
+            parsed: route.and_then(|route| {
+                let language = route
+                    .fixed_language()
+                    .filter(|language| language.embedded_scripts().is_empty())?;
+                route.after_parse(language, None).ok()
+            }),
         }
     }
 
     /// Hard barriers: a candidate in another language, or a vendor candidate
-    /// for a non-vendor caller, is never a resolution target.
+    /// for a non-vendor caller, is never a resolution target. The language
+    /// rule is C5 `ParsedLanguage::admits_global` when both files have a
+    /// language after parse. Two files with none compare their path values,
+    /// as before C5. One with and one without never match: no route pairs a
+    /// `.vue` or `.json` file with a `.proto` file.
     pub fn admits(self, candidate: FileMeta) -> bool {
-        candidate.language == self.language && (!candidate.is_vendor || self.is_vendor)
+        let language = match (self.parsed, candidate.parsed) {
+            (Some(caller), Some(candidate)) => caller.admits_global(candidate),
+            (None, None) => candidate.language == self.language,
+            (Some(_), None) | (None, Some(_)) => false,
+        };
+        language && (!candidate.is_vendor || self.is_vendor)
     }
+}
+
+fn is_vendor_path(path: &str) -> bool {
+    path.contains("/vendor/") || path.starts_with("vendor/")
 }
 
 /// Outcome of the bare-name global (Tier 3) lookup.

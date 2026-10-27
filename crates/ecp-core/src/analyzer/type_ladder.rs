@@ -57,19 +57,31 @@ pub fn unmodeled_return_type<'q>(
     source: &str,
     name: &'q str,
 ) -> ChainOutcome<TypeCandidates<'q>> {
-    let mut candidates = facts
-        .global_candidates(
-            name,
-            ResolveTarget::Type,
-            FileMeta::from_normalized_path(source),
-        )
-        .into_iter();
+    let candidates = facts.global_candidates(name, ResolveTarget::Type, facts.file_meta(source));
+    let mut candidates = distinct_types(facts, candidates.into_iter());
     match (candidates.next(), candidates.next()) {
         (None, None) => ChainOutcome::Conclusive,
         (Some(id), None) => ChainOutcome::Bound(TypeCandidates::Unique(id, name)),
         (Some(_), Some(_)) => ChainOutcome::Unknown,
         (None, Some(_)) => unreachable!("iterator cannot yield a second item first"),
     }
+}
+
+/// `candidates` with the parts of one C# `partial` type read as one type:
+/// its representative ([`TypeFacts::partial_type`]), yielded once, at the
+/// place of its first part.
+fn distinct_types<'f, F: TypeFacts + ?Sized>(
+    facts: &'f F,
+    candidates: impl Iterator<Item = u32> + 'f,
+) -> impl Iterator<Item = u32> + 'f {
+    let mut seen: Vec<u32> = Vec::new();
+    candidates.filter_map(move |id| {
+        let ty = facts.partial_type(id);
+        (!seen.contains(&ty)).then(|| {
+            seen.push(ty);
+            ty
+        })
+    })
 }
 
 /// Whether a type owns a member, directly or through its supertypes.
@@ -150,6 +162,18 @@ pub trait TypeFacts: PickFacts {
     /// writes it or already reduced by [`return_type_key`]; `None` when it
     /// declares none or is no function.
     fn return_type_of(&self, callee: u32) -> Option<&str>;
+    /// Every part of `ty`'s C# `partial` type, the representative first,
+    /// `ty` included, when the facts know the parts of one type; empty
+    /// otherwise. A member another part declares is the type's own.
+    fn partial_parts(&self, _ty: u32) -> Cow<'_, [u32]> {
+        Cow::Borrowed(&[])
+    }
+    /// The node that stands for `ty`'s type: the representative part of a
+    /// C# `partial` type, else `ty` itself. Two parts of one type are one
+    /// candidate type.
+    fn partial_type(&self, ty: u32) -> u32 {
+        ty
+    }
     /// The crate root of `path`: what precedes its last `/src/` or
     /// `/tests/` segment, else empty.
     fn crate_root<'p>(&self, path: &'p str) -> &'p str {
@@ -259,14 +283,8 @@ pub fn visible_return_type<'q, F: TypeFacts + ?Sized>(
     name: &'q str,
     mut visible: impl FnMut(u32) -> bool,
 ) -> TypeCandidates<'q> {
-    let mut candidates = facts
-        .global_candidates(
-            name,
-            ResolveTarget::Type,
-            FileMeta::from_normalized_path(source),
-        )
-        .into_iter()
-        .filter(|&id| visible(id));
+    let candidates = facts.global_candidates(name, ResolveTarget::Type, facts.file_meta(source));
+    let mut candidates = distinct_types(facts, candidates.into_iter().filter(|&id| visible(id)));
     match (candidates.next(), candidates.next()) {
         (Some(id), None) => TypeCandidates::Unique(id, name),
         _ => TypeCandidates::None,
@@ -276,7 +294,7 @@ pub fn visible_return_type<'q, F: TypeFacts + ?Sized>(
 /// Namespace visible from a type's owner key. A file-scoped namespace has
 /// no stamped owner, so it requires one namespace in the file. Two full
 /// namespace names with one owner key cannot be distinguished.
-fn declared_namespace<'a>(
+pub fn declared_namespace<'a>(
     owner: Option<&str>,
     namespaces: impl Iterator<Item = &'a str>,
 ) -> Option<&'a str> {
@@ -442,8 +460,7 @@ pub fn member_ownership<F: TypeFacts + ?Sized>(
         MemberLookup::Ambiguous => return Ownership::Unknown,
         MemberLookup::Miss => {}
     }
-    let shadows =
-        attributes_shadow_methods(FileMeta::from_path(facts.file_of(ty).unwrap_or_default()));
+    let shadows = attributes_shadow_methods(facts.file_meta(facts.file_of(ty).unwrap_or_default()));
     // How each ancestor was first reached: (the type, base position).
     let mut parent: rustc_hash::FxHashMap<u32, (u32, u32)> = rustc_hash::FxHashMap::default();
     let mut frontier = vec![ty];
@@ -582,22 +599,31 @@ pub fn owned_member<F: TypeFacts + ?Sized>(
     let Some(ty_file) = facts.file_of(ty) else {
         return MemberLookup::Miss;
     };
-    let owner_target = if FileMeta::from_path(ty_file).language == Language::Go {
+    let owner_target = if facts.file_meta(ty_file).language == Language::Go {
         ResolveTarget::Type
     } else {
         ResolveTarget::Qualifier
     };
     let declares_owner = |file: &str| facts.count_in_file(file, ty_name, owner_target);
-    let in_file = facts.owned_in_file(ty_file, member, ty_name, target);
-    if let Some(&first) = in_file.first() {
-        // Several hits are overloads of the one type, unless the file
-        // declares two owners of that name (nested types, a type and a
-        // module); the owner index cannot tell those apart.
-        return if in_file.len() == 1 || declares_owner(ty_file) == 1 {
-            MemberLookup::Hit(first)
-        } else {
-            MemberLookup::Ambiguous
-        };
+    // The type's own file first, then the files of its other C# partial
+    // parts: a member any part declares is the type's own.
+    let parts = facts.partial_parts(ty);
+    let part_files = parts
+        .iter()
+        .filter_map(|&part| facts.file_of(part))
+        .filter(|&file| file != ty_file);
+    for file in std::iter::once(ty_file).chain(part_files) {
+        let in_file = facts.owned_in_file(file, member, ty_name, target);
+        if let Some(&first) = in_file.first() {
+            // Several hits are overloads of the one type, unless the file
+            // declares two owners of that name (nested types, a type and a
+            // module); the owner index cannot tell those apart.
+            return if in_file.len() == 1 || declares_owner(file) == 1 {
+                MemberLookup::Hit(first)
+            } else {
+                MemberLookup::Ambiguous
+            };
+        }
     }
     let elsewhere = facts.owned_global(member, ty_name, target, ty_file);
     let Some(&first) = elsewhere.first() else {
@@ -612,7 +638,7 @@ pub fn owned_member<F: TypeFacts + ?Sized>(
     // elsewhere a member in a file declaring that name belongs to that
     // other type, and any other member cannot be attributed.
     let reopenable = matches!(
-        FileMeta::from_path(ty_file).language,
+        facts.file_meta(ty_file).language,
         Language::Ruby | Language::Crystal | Language::CSharp | Language::Swift | Language::Dart
     );
     if !reopenable
@@ -634,7 +660,7 @@ pub fn type_unique_in_scope<F: TypeFacts + ?Sized>(
     ty_name: &str,
     ty_file: &str,
 ) -> bool {
-    let meta = FileMeta::from_path(ty_file);
+    let meta = facts.file_meta(ty_file);
     let root = facts.crate_root(ty_file);
     let dir = Path::new(ty_file).parent();
     let same_package_only = meta.language == Language::Go;

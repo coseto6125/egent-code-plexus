@@ -58,6 +58,9 @@ fn git(dir: &Path, args: &[&str]) -> Output {
         .env_remove("GIT_COMMON_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
+        // The fixture writes the repository's config; a redirected
+        // `git config` would write it to the redirect target instead.
+        .env_remove("GIT_CONFIG")
         .output()
         .expect("git available");
     assert!(
@@ -212,6 +215,50 @@ fn test_porcelain_all_metadata_only_change_driver_never_runs() {
 #[test]
 fn test_porcelain_all_content_change_driver_never_runs_and_reports_file() {
     assert_driver_never_runs(Change::Content);
+}
+
+/// Runs `test` again in a child test process with `GIT_CONFIG=/dev/null`.
+/// The variable redirects `git config` only (git-config(1) ENVIRONMENT), so a
+/// probe that inherits it lists no driver while the status still reads the
+/// repository's config. The child keeps the variable out of the other tests
+/// of this binary. Returns true in the parent.
+fn rerun_with_git_config_redirected(test: &str) -> bool {
+    if std::env::var_os("ECP_GIT_CONFIG_REDIRECT_CHILD").is_some() {
+        return false;
+    }
+    let out = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test, "--test-threads=1", "--nocapture"])
+        .env("ECP_GIT_CONFIG_REDIRECT_CHILD", "1")
+        .env("GIT_CONFIG", "/dev/null")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains("test result: ok. 1 passed;"),
+        "child run failed:\n{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    true
+}
+
+#[test]
+fn test_porcelain_all_git_config_env_redirect_driver_never_runs() {
+    if rerun_with_git_config_redirected(
+        "test_porcelain_all_git_config_env_redirect_driver_never_runs",
+    ) {
+        return;
+    }
+    assert_driver_never_runs(Change::Content);
+}
+
+#[test]
+fn test_shell_git_provider_diff_git_config_env_redirect_driver_never_runs() {
+    if rerun_with_git_config_redirected(
+        "test_shell_git_provider_diff_git_config_env_redirect_driver_never_runs",
+    ) {
+        return;
+    }
+    test_shell_git_provider_diff_worktree_scopes_driver_never_runs();
 }
 
 /// The diff `ShellGitProvider` runs for `scope`, hardened, without filter

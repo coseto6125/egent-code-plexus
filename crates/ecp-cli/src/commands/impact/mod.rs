@@ -13,8 +13,11 @@ pub use symbol::{run_for_symbol, LocalImpact};
 
 use crate::engine::Engine;
 use crate::output::{emit_with_caveat, merge_caveats, OutputFormat};
+use crate::read_context::{ambiguity_candidates, resolve_target, target_request};
 use clap::{Args, ValueEnum};
 use ecp_core::config;
+use ecp_core::contracts::identity::TargetResolution;
+use ecp_core::session::MergedGraph;
 use ecp_core::{EcpError, HIGH_TRUST_CONFIDENCE};
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -57,12 +60,15 @@ pub struct ImpactArgs {
     #[arg(long, conflicts_with_all = ["name", "batch"])]
     pub baseline: Option<String>,
 
-    /// Disambiguate when name has multiple matches: substring on file path.
+    /// Select the declaration in this file. A file path that equals the value
+    /// ranks first, then one that ends with it, then one that contains it.
+    /// An ambiguous name returns candidates that you can re-run.
     /// `--file_path` / `--file-path` stay as aliases for back-compat.
     #[arg(long = "file", alias = "file_path", alias = "file-path")]
     pub file: Option<String>,
 
-    /// Disambiguate by kind (function | method | class | route | ...).
+    /// Select the declaration of one node kind (function | method | class | ...).
+    /// The kind filter applies before `--file` ranks the declarations.
     #[arg(long)]
     pub kind: Option<String>,
 
@@ -249,7 +255,17 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
         let payload = literal::build_literal_payload(&literal_value, engine)?;
         return emit_with_caveat(&payload, format, engine.caveat());
     }
-    let (payload, hints) = build_payload_with_hints(&args, engine)?;
+    let (payload, hints) = match build_payload_with_hints(&args, engine) {
+        // Exit non-zero (MCP marks `isError`), but give the candidates and the
+        // caveat on stdout too: an MCP client reads stdout only.
+        Err(e @ EcpError::AmbiguousSymbol { .. }) => {
+            let target = args.name.as_deref().or(args.target.as_deref());
+            let failure = unresolved_payload(&args, target.unwrap_or_default(), &e, engine);
+            emit_with_caveat(&failure, format, engine.caveat())?;
+            return Err(e);
+        }
+        other => other?,
+    };
     if let Some(name) = &hints.empty_hint_name {
         if hints.hidden_test_callers > 0 {
             eprintln!(
@@ -327,7 +343,7 @@ fn run_batch(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
         return Ok(());
     }
 
-    let caveat = engine.caveat();
+    let caveat = engine.caveat_reading_view();
 
     for target_name in &targets {
         println!("=== target: {target_name} ===");
@@ -373,22 +389,51 @@ fn run_batch(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
                 p
             }
             Err(e) => {
-                // An agent branches on `status`; a name with several
-                // definitions is not a missing name.
-                let status = match e {
-                    EcpError::AmbiguousSymbol { .. } => "ambiguous",
-                    _ => "not_found",
-                };
-                serde_json::json!({
-                    "error": e.to_string(),
-                    "target": target_name,
-                    "status": status,
-                })
+                let mut p = unresolved_payload(&per_target_args, target_name, &e, engine);
+                // A miss under a hidden set is no proof of absence either.
+                if let Some(c) = &caveat {
+                    p["result"] = serde_json::json!(c);
+                }
+                p
             }
         };
         emit_with_caveat(&payload, format, None)?;
     }
     Ok(())
+}
+
+/// The payload of a target that did not resolve. An agent branches on
+/// `status`: a name with several declarations is not a missing name. An
+/// ambiguity lists its `candidates`, each with the arguments that select it.
+fn unresolved_payload(args: &ImpactArgs, target: &str, e: &EcpError, engine: &Engine) -> Value {
+    let status = match e {
+        EcpError::AmbiguousSymbol { .. } => "ambiguous",
+        _ => "not_found",
+    };
+    let mut p = json!({
+        "error": e.to_string(),
+        "target": target,
+        "status": status,
+    });
+    if let Some(candidates) = (status == "ambiguous")
+        .then(|| ambiguity_of(args, target, engine))
+        .flatten()
+    {
+        p["candidates"] = candidates;
+    }
+    p
+}
+
+/// The candidates of an ambiguous target, resolved again on the error path
+/// only: `EcpError` has no room for them, and its callers (`peers plan`,
+/// `group impact`) match on it.
+fn ambiguity_of(args: &ImpactArgs, target: &str, engine: &Engine) -> Option<Value> {
+    let graph = engine.graph().ok()?;
+    let request = target_request(target, args.kind.as_deref(), args.file.as_deref()).ok()?;
+    match resolve_target(&MergedGraph::new(graph, engine.overlay_view()), &request) {
+        TargetResolution::Ambiguous(a) => Some(ambiguity_candidates(&a)),
+        _ => None,
+    }
 }
 
 /// Library API: returns the JSON payload only, dropping stderr hints.

@@ -14,7 +14,7 @@
 //! 6. Query-string stripping → 1 edge (matched)
 
 use ecp_analyzer::resolution::builder::GraphBuilder;
-use ecp_core::analyzer::types::{LocalGraph, RawNode};
+use ecp_core::analyzer::types::{LocalGraph, RawNode, RawRoute};
 use ecp_core::graph::{NodeKind, RelType};
 
 // ─── LocalGraph helpers ──────────────────────────────────────────────────────
@@ -47,10 +47,11 @@ fn route_graph(rel_path: &str, method: &str, route_path: &str, handler: &str) ->
         routes: vec![ecp_core::analyzer::types::RawRoute {
             method: method.into(),
             path: route_path.into(),
-            handler: Some(handler.into()),
+            handler: RawRoute::named_handler(Some(handler)),
             span: (0, 0, 0, 0),
             scope: None,
         }],
+        route_receivers: None,
         framework_refs: vec![],
         fanout_refs: vec![],
         blind_spots: vec![],
@@ -62,6 +63,7 @@ fn route_graph(rel_path: &str, method: &str, route_path: &str, handler: &str) ->
         call_metas: vec![],
         raw_function_metas: vec![],
         export_aliases: None,
+        parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
     }
 }
 
@@ -76,6 +78,7 @@ fn consumer_graph(rel_path: &str) -> LocalGraph {
         documents: vec![],
         imports: vec![],
         routes: vec![],
+        route_receivers: None,
         framework_refs: vec![],
         fanout_refs: vec![],
         blind_spots: vec![],
@@ -87,6 +90,7 @@ fn consumer_graph(rel_path: &str) -> LocalGraph {
         call_metas: vec![],
         raw_function_metas: vec![],
         export_aliases: None,
+        parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
     }
 }
 
@@ -298,5 +302,50 @@ fn query_string_stripped_matches_route() {
         (edges[0].confidence - 0.8).abs() < 1e-6,
         "exact match after query-string strip must have confidence 0.8; got {}",
         edges[0].confidence
+    );
+}
+
+// ─── Test 7: the edge starts at the consumer's File node ────────────────────
+//
+// C4 Open point 4, option a (slice P7): a call site is text with no position,
+// so the edge belongs to the whole consumer file. Before P7 it started at the
+// file's first declaration, unrelated to the call, and a file with no
+// declaration got no edge. The edge's source claims nothing more: the overlay
+// still replays no fetch site (the other three conditions of Open point 4).
+
+#[test]
+fn test_fetches_edge_source_is_file_node() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("client.ts"),
+        "function unrelated() {}\nasync function load() { return fetch('/api/users').json(); }",
+    )
+    .unwrap();
+    std::fs::write(tmp.path().join("script.ts"), "fetch('/api/users');\n").unwrap();
+
+    let mut builder = GraphBuilder::new().with_repo_root(tmp.path().to_path_buf());
+    builder.add_graph(route_graph("api.ts", "GET", "/api/users", "getUsers"));
+    builder.add_graph(consumer_graph("client.ts"));
+    let mut script = consumer_graph("script.ts");
+    script.nodes.clear();
+    builder.add_graph(script);
+    let graph = builder.build();
+
+    let mut sources: Vec<(NodeKind, String)> = fetches_edges(&graph)
+        .iter()
+        .map(|edge| {
+            let source = &graph.nodes[edge.source as usize];
+            let file = &graph.files[source.file_idx as usize];
+            (source.kind, resolve(&graph, file.path))
+        })
+        .collect();
+    sources.sort_by(|a, b| a.1.cmp(&b.1));
+    assert_eq!(
+        sources,
+        vec![
+            (NodeKind::File, "client.ts".to_string()),
+            (NodeKind::File, "script.ts".to_string()),
+        ],
+        "each Fetches edge starts at its consumer's File node, also in a file with no declaration"
     );
 }

@@ -8,7 +8,8 @@ use std::path::Path;
 /// Invoke `<binary> <subcommand> [subcmd_arg?] [prefix_args...] [argv...]` and
 /// return captured stdout. If `tool.subcmd_arg` is set, the matching JSON key
 /// is peeled out and prepended as the first arg (sub-subcommand router).
-/// Non-zero exit → `Err` carrying stderr. Every graph command prints its
+/// Non-zero exit → `Err` carrying stderr, then stdout when it holds a
+/// payload (a refusal's candidates and caveat). Every graph command prints its
 /// caveat (stale or warm-attached graph, unreadable dirty paths) on stdout: the
 /// payload's `result` field, or the first line of a `--format text` row list.
 /// So stdout alone is enough; stderr stays out of it to keep the payload
@@ -21,8 +22,17 @@ pub fn run_spawn(binary: &Path, tool: &DerivedTool, args: &Value) -> Result<Stri
         .output()
         .with_context(|| format!("spawning {binary:?} {}", tool.subcommand))?;
     if !output.status.success() {
+        // A refusal (an ambiguous target, say) writes its candidates and
+        // caveat to stdout before the non-zero exit; the client needs them.
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = stdout.trim();
+        let payload = if stdout.is_empty() {
+            String::new()
+        } else {
+            format!("\nstdout:\n{stdout}")
+        };
         return Err(anyhow!(
-            "ecp {} exited with {} — stderr:\n{}",
+            "ecp {} exited with {} — stderr:\n{}{payload}",
             tool.subcommand,
             output.status,
             String::from_utf8_lossy(&output.stderr).trim()

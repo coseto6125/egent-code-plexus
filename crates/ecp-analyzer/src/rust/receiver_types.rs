@@ -162,9 +162,10 @@ pub fn enclosing_enum_name(node: Node<'_>, source: &[u8]) -> Option<String> {
 
 /// Walk `node`'s parent chain to find the nearest enclosing `function_item`
 /// and return its name.  Used to set `owner_class` for items nested inside
-/// functions (e.g. `const`/`fn`/`macro_rules!` defined inside a function
-/// body) so that top-level and function-local definitions with the same name
-/// do not collide on UID.
+/// functions (a `const` or `macro_rules!` defined inside a function body) so
+/// that top-level and function-local definitions with the same name do not
+/// collide on UID. A nested `fn` takes no owner: it is scoped
+/// (`ecp_core::analyzer::lexical::clear_scoped_owners`).
 pub fn enclosing_function_name(node: Node<'_>, source: &[u8]) -> Option<String> {
     let mut current = node.parent();
     while let Some(n) = current {
@@ -180,68 +181,6 @@ pub fn enclosing_function_name(node: Node<'_>, source: &[u8]) -> Option<String> 
         current = n.parent();
     }
     None
-}
-
-/// Walk `node`'s parent chain and return its full lexical containment path.
-/// This path is an identity, not a type owner:
-/// `impl A { fn new() { fn helper() {} } }` gives `A::new` to `helper`.
-///
-/// A short function name is insufficient here.  Two `impl` blocks may both
-/// declare `new`, and a nested `helper` under each must keep a distinct UID.
-/// Module names participate for every function they contain, including a
-/// function directly under a module.  An `impl` keeps its established
-/// self-type owner, so modules outside that `impl` do not change a method's
-/// lexical path.  A root-level function returns `None`.
-pub fn enclosing_function_path(node: Node<'_>, source: &[u8]) -> Option<String> {
-    let mut segments = Vec::new();
-    let mut found_impl = false;
-    let mut current = node.parent();
-    while let Some(n) = current {
-        match n.kind() {
-            "function_item" => {
-                if let Some(name) = n
-                    .child_by_field_name("name")
-                    .and_then(|name| node_text(name, source))
-                {
-                    segments.push(name);
-                }
-            }
-            "impl_item" => {
-                if let Some(ty) = impl_self_type(&n, source) {
-                    let lexical_owner = impl_trait_name(&n, source)
-                        .map(|trait_name| format!("{trait_name}::{ty}"))
-                        .unwrap_or(ty);
-                    segments.push(lexical_owner);
-                    found_impl = true;
-                }
-            }
-            "trait_item" => {
-                if let Some(name) = n
-                    .child_by_field_name("name")
-                    .and_then(|name| node_text(name, source))
-                {
-                    segments.push(name);
-                }
-            }
-            "mod_item" => {
-                if !found_impl {
-                    if let Some(name) = n
-                        .child_by_field_name("name")
-                        .and_then(|name| node_text(name, source))
-                    {
-                        segments.push(name);
-                    }
-                }
-            }
-            "source_file" => break,
-            _ => {}
-        }
-        current = n.parent();
-    }
-    (!segments.is_empty()).then(|| {
-        segments.reverse();
-        segments.join("::")
-    })
 }
 
 /// Walk `node`'s parent chain to find the nearest enclosing `impl_item` or
@@ -277,7 +216,9 @@ pub fn enclosing_impl_or_trait_context(node: Node<'_>, source: &[u8]) -> Option<
 
 /// Walk `node`'s parent chain to find the innermost enclosing `impl_item`
 /// and return the self-type name.  Returns `None` when the node is not inside
-/// any impl block (free function, module-level item, etc.).
+/// any impl block (free function, module-level item, etc.). A function the
+/// walk places in an impl method's body takes this owner first; the parser's
+/// last step clears it, since that function is scoped.
 ///
 /// This is the at-emit-time approach: each function_item node has grammar
 /// ancestry `declaration_list → impl_item`, so the parent walk is O(depth)

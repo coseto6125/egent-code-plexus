@@ -1,0 +1,195 @@
+//! C4 `RecordKind::PathLiteral` in Java (slice P6). After the parser
+//! finishes, a path literal binds the innermost enclosing callable or `Const`
+//! by span, else the file, and the `UsesPathLiteral` edge (what `ecp impact`
+//! reads) starts there. Before P6 the pass looked the source up by name: the
+//! first same-name node of the file, and no edge at module top level.
+
+use ecp_analyzer::java::parser::JavaProvider;
+use ecp_analyzer::resolution::builder::GraphBuilder;
+use ecp_core::analyzer::pipeline::AnalyzerPipeline;
+use ecp_core::analyzer::types::LocalGraph;
+use ecp_core::contracts::raw_records::RawEndpoint;
+use ecp_core::graph::{NodeKind, RelType, ZeroCopyGraph};
+use std::path::Path;
+
+const PATH: &str = "Test.java";
+
+/// The incremental parse entry (`parse_file_raw`), which binds the records.
+fn parse(src: &str) -> LocalGraph {
+    let mut pipeline = AnalyzerPipeline::new();
+    pipeline.register_provider(Box::new(JavaProvider::new().expect("JavaProvider::new")));
+    pipeline
+        .parse_file_raw(Path::new(PATH), src.as_bytes())
+        .expect("parse_file_raw")
+}
+
+fn build(graph: LocalGraph) -> ZeroCopyGraph {
+    let mut builder = GraphBuilder::new();
+    builder.add_graph(graph);
+    builder.build()
+}
+
+/// `(kind, name, 1-based line)` of the source of each `UsesPathLiteral` edge
+/// into the path literal `value`, by line.
+fn edge_sources(g: &ZeroCopyGraph, value: &str) -> Vec<(NodeKind, String, u32)> {
+    let pool = g.string_pool.as_slice();
+    let mut out: Vec<_> = g
+        .edges
+        .iter()
+        .filter(|e| e.rel_type == RelType::UsesPathLiteral)
+        .filter(|e| {
+            let target = &g.nodes[e.target as usize];
+            target.kind == NodeKind::PathLiteral && target.name.resolve(pool) == value
+        })
+        .map(|e| {
+            let source = &g.nodes[e.source as usize];
+            (
+                source.kind,
+                source.name.resolve(pool).to_string(),
+                source.span.0 + 1,
+            )
+        })
+        .collect();
+    out.sort_by(|a, b| (a.2, &a.1).cmp(&(b.2, &b.1)));
+    out
+}
+
+/// `(name, line)` of each edge source.
+fn names_lines(sources: &[(NodeKind, String, u32)]) -> Vec<(&str, u32)> {
+    sources
+        .iter()
+        .map(|(_, name, line)| (name.as_str(), *line))
+        .collect()
+}
+
+/// `(name, 1-based line)` of the raw node the parse entry bound the literal
+/// `value` to; `None` for the `File` endpoint.
+fn bound_node(graph: &LocalGraph, value: &str) -> Option<(String, u32)> {
+    let literal = graph
+        .path_literals
+        .iter()
+        .flat_map(|literals| literals.iter())
+        .find(|literal| literal.value == value)
+        .unwrap_or_else(|| panic!("no path literal {value:?}"));
+    match literal
+        .endpoint
+        .as_ref()
+        .expect("the parse entry binds every literal")
+    {
+        RawEndpoint::Node(idx) => {
+            let node = &graph.nodes[idx.index()];
+            Some((node.name.clone(), node.span.0 + 1))
+        }
+        RawEndpoint::File => None,
+        other => panic!("a path literal binds a node or the file, not {other:?}"),
+    }
+}
+
+fn is_callable(kind: NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+    )
+}
+
+const METHOD_SRC: &str = r#"class Store {
+    String load() {
+        return read("conf/app.json");
+    }
+}
+"#;
+
+/// A literal in a method binds that method, and its edge starts there.
+#[test]
+fn test_bind_site_java_path_literal_in_method_starts_at_method() {
+    let graph = parse(METHOD_SRC);
+    assert_eq!(
+        bound_node(&graph, "conf/app.json"),
+        Some(("load".to_string(), 2))
+    );
+    let sources = edge_sources(&build(graph), "conf/app.json");
+    assert_eq!(names_lines(&sources), vec![("load", 2)]);
+    assert!(is_callable(sources[0].0), "{sources:?}");
+}
+
+const TOP_SRC: &str = r#"class App {
+    private String top = "conf/top.json";
+}
+"#;
+
+/// Java has no module-level code. A field initializer sits in no callable and no `Const` (a class is not an accepted kind), so it binds `File`.
+/// Before P6 the literal had no enclosing symbol and got no edge.
+#[test]
+fn test_bind_site_java_module_top_literal_binds_file() {
+    let graph = parse(TOP_SRC);
+    assert_eq!(bound_node(&graph, "conf/top.json"), None);
+    assert_eq!(
+        edge_sources(&build(graph), "conf/top.json"),
+        vec![(NodeKind::File, "Test.java".to_string(), 1)]
+    );
+}
+
+const TWO_SRC: &str = r#"class A {
+    String load() {
+        return read("conf/a.json");
+    }
+}
+class B {
+    String load() {
+        return read("conf/b.json");
+    }
+}
+"#;
+
+/// Two classes of one file each declare `load`.
+/// Before P6 both edges started at the first `load`: the pass looked the
+/// source up by name (`lookup_in_file`).
+#[test]
+fn test_bind_site_java_two_same_name_methods_each_gets_own_edge() {
+    let graph = parse(TWO_SRC);
+    assert_eq!(
+        bound_node(&graph, "conf/a.json"),
+        Some(("load".to_string(), 2))
+    );
+    assert_eq!(
+        bound_node(&graph, "conf/b.json"),
+        Some(("load".to_string(), 7))
+    );
+    let g = build(graph);
+    assert_eq!(
+        names_lines(&edge_sources(&g, "conf/a.json")),
+        vec![("load", 2)]
+    );
+    assert_eq!(
+        names_lines(&edge_sources(&g, "conf/b.json")),
+        vec![("load", 7)]
+    );
+}
+
+const TWO_FIELDS_SRC: &str = r#"class A {
+    private String p = "conf/app.json";
+}
+
+class B {
+    private String p = "conf/app.json";
+}
+"#;
+
+/// Two class-body literals with one value bind `File`; each keeps the class
+/// its walker found as the PathLiteral owner, so the two nodes keep distinct
+/// uids (a shared uid collapses them in every uid index).
+#[test]
+fn test_bind_site_java_same_literal_in_two_class_fields_keeps_owner_and_uid() {
+    let g = build(parse(TWO_FIELDS_SRC));
+    let pool = g.string_pool.as_slice();
+    let mut lits: Vec<(String, u64)> = g
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::PathLiteral && n.name.resolve(pool) == "conf/app.json")
+        .map(|n| (n.owner_class.resolve(pool).to_string(), n.uid))
+        .collect();
+    lits.sort();
+    let owners: Vec<&str> = lits.iter().map(|(o, _)| o.as_str()).collect();
+    assert_eq!(owners, vec!["A", "B"], "{lits:?}");
+    assert_ne!(lits[0].1, lits[1].1, "{lits:?}");
+}

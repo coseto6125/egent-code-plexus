@@ -33,7 +33,15 @@ pub const GRAPH_MAGIC: [u8; 8] = *b"ECP-RS\0\0";
 ///     the position of the first unresolved one), so the overlay resolves an
 ///     aliased specifier and walks heritage like a full reindex.
 /// v15: `route_middleware` (each Route's middleware, outermost group first).
-pub const GRAPH_FORMAT_VERSION: u32 = 15;
+/// v16: `workspace` (the C2 Cargo crate table: each member's root, entry
+///     files and crate names), so the overlay resolves `other_crate::f()`.
+/// v17: `lexical_parents` (each lexically scoped declaration's parent node,
+///     sorted by node), so a scoped declaration never answers a global or
+///     file-level name lookup and its display owner names its parent chain.
+/// v18: `RelType::PartOf` (discriminant 23) links each C# partial type
+///     part to its group's representative part.
+/// v19: `File::parsed_language` (C5 `ParsedLanguage` per file).
+pub const GRAPH_FORMAT_VERSION: u32 = 19;
 
 impl std::str::FromStr for NodeKind {
     type Err = ();
@@ -104,6 +112,7 @@ impl std::str::FromStr for RelType {
             "READSFIELD" | "READS_FIELD" => Ok(RelType::ReadsField),
             "COMPENSATEDBY" | "COMPENSATED_BY" => Ok(RelType::CompensatedBy),
             "QUERIESTABLE" | "QUERIES_TABLE" => Ok(RelType::QueriesTable),
+            "PARTOF" | "PART_OF" => Ok(RelType::PartOf),
             _ => Err(()),
         }
     }
@@ -112,7 +121,7 @@ impl std::str::FromStr for RelType {
 impl RelType {
     /// rkyv discriminants are append-only (see `NodeKind::ALL`). Length of
     /// the `#[repr(u8)]` variant space.
-    pub const VARIANT_COUNT: usize = 23;
+    pub const VARIANT_COUNT: usize = 24;
 
     /// Every variant in `#[repr(u8)]` order. The schema guard test pins
     /// `ALL[i] as u8 == i` plus the variant name for all i, so a reorder /
@@ -142,6 +151,7 @@ impl RelType {
         Self::ReadsField,
         Self::CompensatedBy,
         Self::QueriesTable,
+        Self::PartOf,
     ];
 
     pub const fn is_heuristic(self) -> bool {
@@ -190,6 +200,7 @@ impl RelType {
             Self::ReadsField => "ReadsField",
             Self::CompensatedBy => "CompensatedBy",
             Self::QueriesTable => "QueriesTable",
+            Self::PartOf => "PartOf",
         }
     }
 }
@@ -337,6 +348,13 @@ impl NodeKind {
             self,
             Self::Class | Self::Interface | Self::Struct | Self::Enum | Self::Typedef | Self::Trait
         )
+    }
+
+    /// True for a declaration of a type: [`Self::is_type`], plus the
+    /// annotation type (C# attribute class, Kotlin `annotation class`, Java
+    /// `@interface`) that the parsers file as [`Self::Annotation`].
+    pub const fn declares_type(self) -> bool {
+        self.is_type() || matches!(self, Self::Annotation)
     }
 
     /// True for the type kinds a call site can construct (`new A()`, `A()`,
@@ -547,22 +565,23 @@ pub enum RelType {
     OpensTxScope,
     /// Method-level override edge. Source is a concrete method
     /// (`Function` / `Method` / `Constructor`) on a subtype; target is the
-    /// corresponding method on the *immediate* supertype or interface that the
-    /// source overrides. Distinct from class-level `Extends` / `Implements`
+    /// nearest applicable declaration of its name along the declared bases
+    /// of the source's type: an overload or a static is skipped by the
+    /// signature in its function meta. Distinct from class-level `Extends` / `Implements`
     /// — those link `Class`/`Interface` nodes, while `Overrides` links method
     /// nodes. LLM-utility (A) Graph completeness: refactoring a base method
     /// must find every overriding implementation; without this edge the only
     /// option is grep-and-pray. (C) Edge semantics: `Extends` carries a
     /// different meaning (type hierarchy) and cannot substitute.
     ///
-    /// Target is the **immediate** supertype's method, not a transitive
-    /// ancestor. For `C extends B extends A; A.foo; B.foo; C.foo` the edges
-    /// are `C.foo → B.foo` and `B.foo → A.foo`; querying the full chain
-    /// requires two hops, which is the correct semantic (C overrides B's
-    /// contract, not A's directly).
+    /// Target is the **nearest** declaration, per the language's lookup
+    /// order. For `C extends B extends A; A.foo; B.foo; C.foo` the edges
+    /// are `C.foo → B.foo` and `B.foo → A.foo` (C overrides B's contract,
+    /// not A's directly); when B lacks `foo`, the edge is `C.foo → A.foo`.
+    /// A gap on the way (unresolved or ambiguous base, overload, cycle)
+    /// gives an `override-*` BlindSpot instead of an edge past it.
     ///
-    /// Languages: Java (`@Override`), Kotlin (`override fun`), C# (`override`
-    /// modifier), C++ (`override` specifier or virtual-matched signature).
+    /// Languages and evidence: `ecp_analyzer::post_process::overrides`.
     /// Appended at the END to preserve rkyv discriminants for existing
     /// `graph.bin` files.
     Overrides,
@@ -653,6 +672,21 @@ pub enum RelType {
     /// silently misses breaking callers. Appended at the END for rkyv
     /// discriminant stability.
     QueriesTable,
+    /// A part of a C# `partial` type → the representative part of that
+    /// type. Every other part has one such edge; the representative has
+    /// none. `Extends` / `Implements` edges that name the type end at the
+    /// representative. The representative is the part that declares a base
+    /// list, else the part whose file stem is the type name, else the first
+    /// part by normalized path (`ecp_analyzer::c_sharp::partial`).
+    ///
+    /// LLM-utility (A) Graph completeness: a subclass's `Extends` edge
+    /// reaches one part only. Without this edge, an agent that follows it
+    /// misses the members that the other parts declare. `ecp inspect` lists
+    /// the members of all parts, and `ecp impact` from any part walks the
+    /// same type. (C) Edge semantics: `Extends` means a base type, so it
+    /// cannot express "the same type, declared in another file".
+    /// Appended at the END for rkyv discriminant stability.
+    PartOf,
 }
 
 impl ArchivedRelType {
@@ -698,7 +732,7 @@ pub struct Node {
     /// Owning class/struct for methods and properties; `StrRef::default()` (len=0)
     /// means module-level symbol with no owner.  Appended at the END to preserve
     /// rkyv binary layout for v5 fields; format version bumped to 6.
-    /// Used by `ecp rename` to isolate `Foo.validate` from `Bar.validate` (T1-11).
+    /// Isolates `Foo.validate` from `Bar.validate` in target resolution (T1-11).
     pub owner_class: StrRef,
     /// xxh3-64 hash of the symbol's raw source bytes. Promoted from
     /// `RawNode.content_hash` by the builder. `0` for synthetic nodes
@@ -757,8 +791,7 @@ impl ArchivedNode {
 /// Hash collisions disambiguate by re-resolving the actual name from the
 /// string pool and string-comparing.
 ///
-/// Practical impact: `ecp find <name>`, `ecp rename <old> <new>` (collision
-/// detection), `ecp inspect <name>`, and cypher `MATCH {name: "..."}`
+/// Practical impact: `ecp find <name>`, `ecp inspect <name>`, and cypher `MATCH {name: "..."}`
 /// previously did O(N) linear scans through `graph.nodes`. With this index
 /// they become O(log N + collision_count).
 #[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -873,6 +906,13 @@ pub struct File {
     pub mtime: u64,
     pub content_hash: [u8; 8],
     pub category: FileCategory,
+    /// v19: C5 `ParsedLanguage` of the file, `ParsedLanguage::encode`d. The
+    /// script language of a Vue, Svelte or Astro file and the language a
+    /// content gate accepted are not in the path, so the index reads this
+    /// value, never a path re-derivation. `ParsedLanguage::ABSENT` when the
+    /// builder had no language for the file. Read it with
+    /// [`ArchivedZeroCopyGraph::parsed_language`].
+    pub parsed_language: [u8; 2],
 }
 
 /// Per-Route response shape extracted from the handler's source. `node_idx`
@@ -904,6 +944,19 @@ pub struct RouteShape {
 pub struct RouteMiddleware {
     pub node_idx: u32,
     pub middleware: Vec<StrRef>,
+}
+
+/// One scoped node (contract C1: a declaration whose lexical parent is a
+/// callable) and that parent, both indices into `ZeroCopyGraph.nodes`. A
+/// scoped node has no owner, so without this row a reader cannot tell a
+/// nested `helper` from a top-level one: the overlay's name tiers would
+/// bind it from another scope (invariant I5), and a display owner, rename
+/// or diff identity would print it as top level.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+pub struct LexicalParentFact {
+    pub node_idx: u32,
+    pub parent_idx: u32,
 }
 
 /// File-level record of a truly unresolvable code pattern (eval/dynamic
@@ -1090,9 +1143,6 @@ impl CallMeta {
     pub const fn is_callback(&self) -> bool {
         self.flags & Self::FLAG_CALLBACK != 0
     }
-    pub const fn is_constructor_call(&self) -> bool {
-        self.flags & Self::FLAG_CONSTRUCTOR_CALL != 0
-    }
 }
 
 /// Per-Function/Method/Constructor-node metadata. Sparse: only present
@@ -1117,7 +1167,13 @@ pub struct FunctionMeta {
     /// - bit 4: `is_generator` (yield / function* / iterator)
     /// - bit 5: `is_extern`   (FFI declared, no Rust/native body)
     /// - bits 6-8: visibility (0=public, 1=protected, 2=private, 3=crate/internal, 4=package, 5=fileprivate, 6-7=reserved)
-    /// - bits 9-15: reserved (zero)
+    /// - bit 9: `is_virtual`  (C++ only: declared `virtual`, or an `override` / `final` member)
+    /// - bit 10: C# extension method (static method of a static class whose first parameter carries `this`)
+    /// - bit 11: C# extension on a generic type parameter (`this T`)
+    /// - bit 12: C# extension method whose parameter list ends in a `params` array (absent from `params`)
+    /// - bits 13-15: C# extension method's count of default-valued parameters, saturating at 7
+    ///
+    /// Bits 12-15 stay zero on every method that is no C# extension method.
     pub flags: u16,
     /// Parameter list, flat-encoded as alternating name/type StrRefs:
     /// `[name1, type1, name2, type2, ...]`. Empty Vec when zero params or
@@ -1140,6 +1196,9 @@ impl FunctionMeta {
     pub const FLAG_ABSTRACT: u16 = 0b0000_0000_0000_1000;
     pub const FLAG_GENERATOR: u16 = 0b0000_0000_0001_0000;
     pub const FLAG_EXTERN: u16 = 0b0000_0000_0010_0000;
+    /// Bit 9; bits 6-8 hold the visibility code. The `Overrides` pass reads
+    /// it: a C++ base method overrides only when it is virtual.
+    pub const FLAG_VIRTUAL: u16 = 0b0000_0010_0000_0000;
 
     pub const fn is_test(&self) -> bool {
         self.flags & Self::FLAG_TEST != 0
@@ -1275,6 +1334,20 @@ pub struct ZeroCopyGraph {
     /// Sparse, sorted by `node_idx`: one entry per Route with at least one
     /// middleware.
     pub route_middleware: Vec<RouteMiddleware>,
+
+    // ── Schema v16 additions ─────────────────────────────────────────
+    /// Contract C2's workspace facts: one Cargo scope per workspace member
+    /// and the crate names that reach it, from the manifest parse the
+    /// index's module tree ran. The overlay reads it to resolve a
+    /// `<crate_name>::path::f()` head like the index's module-tree tier.
+    /// Empty for a repo with no root `Cargo.toml`.
+    pub workspace: crate::contracts::workspace::WorkspaceFacts,
+
+    // ── Schema v17 additions ─────────────────────────────────────────
+    /// Sparse, sorted by `node_idx`: one row per scoped node, see
+    /// [`LexicalParentFact`]. Empty while no language opts in
+    /// ([`crate::analyzer::lexical::lexical_scope_kinds`]).
+    pub lexical_parents: Vec<LexicalParentFact>,
 }
 
 impl ZeroCopyGraph {
@@ -1439,6 +1512,39 @@ impl ArchivedZeroCopyGraph {
         aliases
     }
 
+    /// Every part of the C# `partial` type that the node `idx` is a part
+    /// of: the representative first, then the other parts ascending. Empty
+    /// when `idx` is no part of a type declared in two parts or more. Reads
+    /// the [`RelType::PartOf`] edges: each other part has one, to the
+    /// representative.
+    pub fn partial_parts(&self, idx: u32) -> Vec<u32> {
+        fn span(offsets: &[rkyv::Archived<u32>], node: u32) -> std::ops::Range<usize> {
+            let at = node as usize;
+            match (offsets.get(at), offsets.get(at + 1)) {
+                (Some(start), Some(end)) => start.to_native() as usize..end.to_native() as usize,
+                _ => 0..0,
+            }
+        }
+        let part_of = |edge: &ArchivedEdge| RelType::from(&edge.rel_type) == RelType::PartOf;
+        let representative = self.edges[span(self.out_offsets.as_slice(), idx)]
+            .iter()
+            .find(|&edge| part_of(edge))
+            .map_or(idx, |edge| edge.target.to_native());
+        let mut others: Vec<u32> = self.in_edge_idx
+            [span(self.in_offsets.as_slice(), representative)]
+        .iter()
+        .map(|edge_idx| &self.edges[edge_idx.to_native() as usize])
+        .filter(|&edge| part_of(edge))
+        .map(|edge| edge.source.to_native())
+        .collect();
+        if others.is_empty() {
+            return Vec::new();
+        }
+        others.sort_unstable();
+        others.dedup();
+        std::iter::once(representative).chain(others).collect()
+    }
+
     /// `(bases, first_unresolved)` of the type node `type_idx`: the bases in
     /// declared order as node indices, and the number of resolved bases
     /// declared before the first unresolved one (`Some(0)` when the first
@@ -1471,10 +1577,76 @@ impl ArchivedZeroCopyGraph {
             .unwrap_or_default()
     }
 
+    /// The stored workspace facts, owned. A table that fails
+    /// [`WorkspaceFacts::validate`](crate::contracts::workspace::WorkspaceFacts::validate)
+    /// reads as empty: a reader must not resolve through rows that break
+    /// the contract's invariants.
+    pub fn workspace_facts(&self) -> crate::contracts::workspace::WorkspaceFacts {
+        rkyv::deserialize::<crate::contracts::workspace::WorkspaceFacts, rkyv::rancor::Error>(
+            &self.workspace,
+        )
+        .ok()
+        .filter(|facts| facts.validate().is_ok())
+        .unwrap_or_default()
+    }
+
+    /// The lexical parent of `node_idx`: the callable that declares it.
+    /// `None` for an unscoped node, which is every node while no language
+    /// opts in, and for an index past `nodes`.
+    pub fn lexical_parent(&self, node_idx: u32) -> Option<u32> {
+        self.lexical_parents
+            .binary_search_by_key(&node_idx, |fact| fact.node_idx.to_native())
+            .ok()
+            .map(|at| self.lexical_parents[at].parent_idx.to_native())
+    }
+
+    /// Whether `node_idx` is scoped: only the lexical tier may bind it
+    /// (invariant I5), so every name-tier candidate source drops it.
+    pub fn is_lexically_scoped(&self, node_idx: u32) -> bool {
+        self.lexical_parent(node_idx).is_some()
+    }
+
+    /// The owner text a reader prints for `node_idx` (design A §4.5): its
+    /// `owner_class` when set; for a scoped node, the display owner of its
+    /// lexical parent and then the parent's name, joined by `::` (the
+    /// parent's name alone when the parent has none); else `None`.
+    ///
+    /// A nested `helper` in `impl A { fn new }` prints `A::new`. `None`
+    /// also for an index past `nodes` and for rows that form a cycle, which
+    /// only a corrupt table holds ([`crate::analyzer::lexical::display_chain`]).
+    pub fn display_owner(&self, node_idx: u32) -> Option<std::borrow::Cow<'_, str>> {
+        use crate::analyzer::lexical::{display_chain, display_owner_text};
+        let pool = &self.string_pool;
+        let chain = display_chain(
+            node_idx,
+            self.lexical_parents.len(),
+            |idx| {
+                let node = self.nodes.get(idx as usize)?;
+                let owner = node.owner_class.resolve(pool);
+                Some((
+                    (!owner.is_empty()).then_some(owner),
+                    node.name.resolve(pool),
+                ))
+            },
+            |idx| self.lexical_parent(idx),
+        )?;
+        display_owner_text(chain)
+    }
+
     pub fn is_es_module_file(&self, file_idx: u32) -> bool {
         self.file_flags
             .get(file_idx as usize)
             .is_some_and(|flags| *flags & FILE_FLAG_ES_MODULE != 0)
+    }
+
+    /// The stored C5 language after parse of file `file_idx`. `None` for an
+    /// index past `files` and for a file stored as `ParsedLanguage::ABSENT`.
+    pub fn parsed_language(
+        &self,
+        file_idx: u32,
+    ) -> Option<crate::contracts::routing::ParsedLanguage> {
+        let file = self.files.get(file_idx as usize)?;
+        crate::contracts::routing::ParsedLanguage::from_bytes(file.parsed_language)
     }
 
     /// Whether `node_idx` is a later overload ([`crate::uid::keeps_overloads`]):
@@ -1564,6 +1736,8 @@ impl Default for ZeroCopyGraph {
             alias_table: Vec::new(),
             supertype_table: Vec::new(),
             route_middleware: Vec::new(),
+            workspace: Default::default(),
+            lexical_parents: Vec::new(),
         }
     }
 }
@@ -1801,6 +1975,15 @@ mod tests {
         let archived = rkyv::access::<ArchivedRelType, Error>(&bytes).expect("access");
         let back: RelType = RelType::from(archived);
         assert_eq!(back, RelType::QueriesTable);
+    }
+
+    #[test]
+    fn test_part_of_reltype_roundtrips_last_discriminant() {
+        use rkyv::rancor::Error;
+        let bytes = rkyv::to_bytes::<Error>(&RelType::PartOf).expect("serialize");
+        let archived = rkyv::access::<ArchivedRelType, Error>(&bytes).expect("access");
+        assert_eq!(RelType::from(archived), RelType::PartOf);
+        assert_eq!(RelType::PartOf as usize, RelType::VARIANT_COUNT - 1);
     }
 
     #[test]

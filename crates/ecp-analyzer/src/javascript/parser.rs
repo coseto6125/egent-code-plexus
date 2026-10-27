@@ -10,7 +10,7 @@ use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{
-    BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode, RawRoute,
+    BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode, RawRoute, RawRouteReceiver,
 };
 use ecp_core::graph::NodeKind;
 use std::path::Path;
@@ -104,6 +104,20 @@ fn check_object_freeze_enum(node: &tree_sitter::Node) -> Option<bool> {
     Some(scalar_pairs >= 2)
 }
 
+/// The identifier a route call is made on; `None` for any other receiver
+/// (`this.router`, `express.Router()`, a call result).
+fn route_receiver(call: tree_sitter::Node, source: &[u8]) -> Option<String> {
+    let object = call
+        .child_by_field_name("function")?
+        .child_by_field_name("object")?;
+    if object.kind() != "identifier" {
+        return None;
+    }
+    std::str::from_utf8(&source[object.start_byte()..object.end_byte()])
+        .ok()
+        .map(str::to_string)
+}
+
 thread_local! {
     static PARSER: std::cell::RefCell<tree_sitter::Parser> = std::cell::RefCell::new({
         let mut parser = tree_sitter::Parser::new();
@@ -181,6 +195,7 @@ impl LanguageProvider for JavaScriptProvider {
             std::collections::HashSet::new();
         let mut imports: Vec<RawImport> = Vec::new();
         let mut routes: Vec<RawRoute> = Vec::new();
+        let mut receivers: Vec<((u32, u32, u32, u32), String)> = Vec::new();
 
         let idx_heritage = self.query.capture_index_for_name("heritage");
         let idx_export = self.query.capture_index_for_name("export");
@@ -630,10 +645,29 @@ impl LanguageProvider for JavaScriptProvider {
                     ) {
                         let start = root.start_position();
                         let end = root.end_position();
+                        // The last argument is the handler Express runs;
+                        // the ones before it are middleware.
+                        let handler = crate::route_detector::last_argument_handler(
+                            root.child_by_field_name("arguments"),
+                            source,
+                            &["arrow_function", "function_expression", "function"],
+                            &["identifier", "member_expression"],
+                        );
+                        if let Some(receiver) = route_receiver(root, source) {
+                            receivers.push((
+                                (
+                                    start.row as u32,
+                                    start.column as u32,
+                                    end.row as u32,
+                                    end.column as u32,
+                                ),
+                                receiver,
+                            ));
+                        }
                         routes.push(RawRoute {
                             method: method_str.to_string(),
                             path: path_str.to_string(),
-                            handler: None,
+                            handler,
                             span: (
                                 start.row as u32,
                                 start.column as u32,
@@ -711,6 +745,12 @@ impl LanguageProvider for JavaScriptProvider {
             }
             None => false,
         });
+        // Only the receivers of the calls the path-shape filter above kept.
+        let route_receivers: Box<[RawRouteReceiver]> = receivers
+            .into_iter()
+            .filter(|(span, _)| routes.iter().any(|route| route.span == *span))
+            .map(|(span, receiver)| RawRouteReceiver { span, receiver })
+            .collect();
 
         // Resolve framework-ref enclosing functions via span containment.
         // Module-level captures use the MODULE_LEVEL_SOURCE sentinel (consistent
@@ -765,7 +805,13 @@ impl LanguageProvider for JavaScriptProvider {
         );
 
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
-        crate::framework_helpers::stamp_js_function_owners(&mut nodes);
+        // The language `file_identities` reads off the same path, so a
+        // nested function loses its owner exactly where its uid is scoped.
+        let language = ecp_core::file_category::Language::from_path(&path.to_string_lossy());
+        crate::framework_helpers::stamp_owner_fn_by_span(language, &mut nodes);
+        // Last owner step: a nested function or callback node has a lexical
+        // parent and no owner (invariant I1), whatever the class pass gave it.
+        ecp_core::analyzer::lexical::clear_scoped_owners(language, &mut nodes);
 
         let event_topics = {
             let topics = crate::event_topic::extract_event_topics(
@@ -793,6 +839,7 @@ impl LanguageProvider for JavaScriptProvider {
             nodes,
             imports,
             documents: vec![],
+            route_receivers: (!route_receivers.is_empty()).then_some(route_receivers),
             framework_refs,
             fanout_refs: vec![],
             blind_spots,
@@ -804,6 +851,7 @@ impl LanguageProvider for JavaScriptProvider {
             call_metas,
             raw_function_metas,
             export_aliases,
+            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
         })
     }
 }
