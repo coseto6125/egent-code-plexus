@@ -1,4 +1,5 @@
-//! Watcher main loop: inotify-driven peer-dirty fan-in.
+//! Watcher main loop: peer-dirty fan-in driven by file events (inotify, or
+//! polling when inotify is unavailable), plus a 1 s manifest-stamp sweep.
 //!
 //! Lifecycle: run_watcher() blocks until SIGTERM. flock(watcher.lock)
 //! ensures single instance per session. Fail-open: any handler error is
@@ -61,12 +62,9 @@ pub fn run_watcher(cfg: WatcherCfg) -> std::io::Result<()> {
     let my_dirty_cache: Arc<Mutex<Option<MyDirtySurface>>> = Arc::new(Mutex::new(None));
 
     let (tx, rx) = channel::<notify::Result<Event>>();
-    let mut watcher = open_watcher(tx, notify::recommended_watcher)?;
     let sessions_dir = cfg.repo_root.join("sessions");
     std::fs::create_dir_all(&sessions_dir)?;
-    watcher
-        .watch(&sessions_dir, RecursiveMode::Recursive)
-        .map_err(std::io::Error::other)?;
+    let _watcher = open_watcher(tx, &sessions_dir, notify::recommended_watcher)?;
 
     // Stamped before the rescan: a manifest written in between is delivered
     // twice rather than never.
@@ -138,10 +136,14 @@ fn handle_event(
         let Some(session_dir) = event_session_dir(path, created) else {
             continue;
         };
-        stamps.record(&layout::dirty_events_path(session_dir));
-        let Some(sid) = session_dir.file_name().and_then(|s| s.to_str()) else {
+        let Some(sid) = session_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .filter(|sid| is_live_session_name(sid))
+        else {
             continue;
         };
+        stamps.record(&layout::dirty_events_path(session_dir));
         if sid == cfg.my_session_id {
             let prev: Option<MyDirtySurface> = {
                 let mut s = soft.lock().expect("soft state lock poisoned");
@@ -256,37 +258,60 @@ impl ManifestStamps {
     }
 
     /// Manifests under `sessions_dir` whose stamp differs from the recorded
-    /// one. Records the new stamps.
+    /// one. Replaces the recorded stamps, so sessions removed since the last
+    /// sweep drop out.
     fn changed(&mut self, sessions_dir: &Path) -> Vec<PathBuf> {
         let Ok(read) = std::fs::read_dir(sessions_dir) else {
             return Vec::new();
         };
-        read.flatten()
-            .filter_map(|entry| {
-                let manifest = layout::dirty_events_path(&entry.path());
-                let stamp = Self::stamp(&manifest)?;
-                (self.0.insert(manifest.clone(), stamp) != Some(stamp)).then_some(manifest)
-            })
-            .collect()
+        let mut live = rustc_hash::FxHashMap::default();
+        let mut changed = Vec::new();
+        for entry in read.flatten() {
+            if !entry.file_name().to_str().is_some_and(is_live_session_name) {
+                continue;
+            }
+            let manifest = layout::dirty_events_path(&entry.path());
+            let Some(stamp) = Self::stamp(&manifest) else {
+                continue;
+            };
+            if self.0.get(&manifest) != Some(&stamp) {
+                changed.push(manifest.clone());
+            }
+            live.insert(manifest, stamp);
+        }
+        self.0 = live;
+        changed
     }
+}
+
+/// False for `.`-prefixed dirs and for the `<sid>.stale-<sha>` copy that a
+/// base-SHA promotion leaves behind until it is deleted.
+fn is_live_session_name(sid: &str) -> bool {
+    !sid.starts_with('.') && !sid.contains(".stale-")
 }
 
 /// Poll period when the native watcher cannot start.
 const POLL_FALLBACK_INTERVAL: Duration = Duration::from_millis(500);
 
-/// The native watcher fails to start once the user's inotify instances run
-/// out (`fs.inotify.max_user_instances`, 128 by default on Linux); without a
-/// fallback this session would never hear from its peers again.
+/// Watches `dir` recursively. The native watcher fails to start once the
+/// user's inotify instances run out (`fs.inotify.max_user_instances`, 128 by
+/// default on Linux), and fails to watch once `max_user_watches` runs out;
+/// without a fallback this session would never hear from its peers again.
 fn open_watcher(
     tx: Sender<notify::Result<Event>>,
+    dir: &Path,
     native: impl FnOnce(Sender<notify::Result<Event>>) -> notify::Result<notify::RecommendedWatcher>,
 ) -> std::io::Result<Box<dyn Watcher>> {
-    match native(tx.clone()) {
+    let started =
+        native(tx.clone()).and_then(|mut w| w.watch(dir, RecursiveMode::Recursive).map(|()| w));
+    match started {
         Ok(w) => Ok(Box::new(w)),
         Err(e) => {
             tracing::warn!(error = %e, "native file watcher unavailable, polling instead");
             let cfg = notify::Config::default().with_poll_interval(POLL_FALLBACK_INTERVAL);
-            let poll = notify::PollWatcher::new(tx, cfg).map_err(std::io::Error::other)?;
+            let mut poll = notify::PollWatcher::new(tx, cfg).map_err(std::io::Error::other)?;
+            poll.watch(dir, RecursiveMode::Recursive)
+                .map_err(std::io::Error::other)?;
             Ok(Box::new(poll))
         }
     }
@@ -310,7 +335,7 @@ fn rescan_peers(
         let Some(sid) = path.file_name().and_then(|s| s.to_str()) else {
             continue;
         };
-        if sid == cfg.my_session_id || sid.starts_with('.') || sid.contains(".stale-") {
+        if sid == cfg.my_session_id || !is_live_session_name(sid) {
             continue;
         }
         if !layout::dirty_events_path(&path).exists() {
@@ -932,14 +957,47 @@ mod tests {
     }
 
     #[test]
+    fn test_manifest_stamps_changed_skips_stale_and_hidden_sessions() {
+        let sessions = tempfile::tempdir().unwrap();
+        for sid in ["alice", "alice.stale-ab12cd34", ".hidden"] {
+            write_dirty(&sessions.path().join(sid), &["run"]);
+        }
+        let mut stamps = ManifestStamps::default();
+        assert_eq!(
+            stamps.changed(sessions.path()),
+            vec![layout::dirty_events_path(&sessions.path().join("alice"))]
+        );
+    }
+
+    #[test]
+    fn test_manifest_stamps_changed_unchanged_manifest_reported_once() {
+        let sessions = tempfile::tempdir().unwrap();
+        write_dirty(&sessions.path().join("alice"), &["run"]);
+        let mut stamps = ManifestStamps::default();
+        assert_eq!(stamps.changed(sessions.path()).len(), 1);
+        assert!(stamps.changed(sessions.path()).is_empty());
+    }
+
+    #[test]
+    fn test_manifest_stamps_changed_removed_session_dropped() {
+        let sessions = tempfile::tempdir().unwrap();
+        let alice = sessions.path().join("alice");
+        write_dirty(&alice, &["run"]);
+        let mut stamps = ManifestStamps::default();
+        stamps.changed(sessions.path());
+        std::fs::remove_file(layout::dirty_events_path(&alice)).unwrap();
+        stamps.changed(sessions.path());
+        assert!(stamps.0.is_empty());
+    }
+
+    #[test]
     fn test_open_watcher_native_failure_polls_and_delivers_events() {
         let dir = tempfile::tempdir().unwrap();
         let (tx, rx) = channel::<notify::Result<Event>>();
-        let mut watcher = open_watcher(tx, |_| {
+        let _watcher = open_watcher(tx, dir.path(), |_| {
             Err(notify::Error::io(std::io::Error::from_raw_os_error(24)))
         })
         .expect("polling fallback");
-        watcher.watch(dir.path(), RecursiveMode::Recursive).unwrap();
         let target = dir.path().join("l1").join("dirty_events.json");
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
         std::fs::write(&target, b"{}").unwrap();
