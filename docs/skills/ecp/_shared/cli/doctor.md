@@ -21,7 +21,7 @@ Omit it to run every check.
 
 | Check | Pass | Warn / Fail |
 |---|---|---|
-| `skill:<name>` | installed copy matches repo source | stale / not installed → Warn |
+| `skill:<name>` | installed copy matches the copy this ecp ships | not installed / outdated / locally edited / no install record → Warn |
 | `index` | graph fresher than working tree | stale → Warn; missing → Fail |
 | `host:<tool>` | integrated, or optional and absent | config outdated → Warn |
 | `config:git` | git on PATH | absent → **Fail** (core features need it) |
@@ -35,7 +35,11 @@ Warnings alone do not fail the run.
 ## `--fix`
 
 Reruns the remediation for the selected check(s) in place:
-- **skills**: `ecp admin claude install skills <name>`.
+- **skills**: `ecp admin claude install skills <name>`, only for a skill that
+  is missing or that nobody edited since ecp installed it. Each install writes
+  `.ecp-install.json`, the hash of every file it wrote, into the skill dir. A
+  skill whose files differ from that record, or that has no record, stays
+  report-only: review it with `--dry-run` and install it by hand.
 - **index**: `ecp admin index --repo .`.
 - **registry**: removes orphan index dirs (missing/corrupt graph & meta stay
   report-only — a rebuild, not a delete, is the safe fix).
@@ -49,12 +53,5 @@ of the binary.
 ## Related: install diff
 
 `ecp admin claude install skills <target>` always prints a diff of what it
-changes. `--dry-run` prints that diff without writing — the same engine
-`doctor`'s skill check uses to detect staleness.
-
-## Related: install diff
-
-`ecp admin claude install skills <target>` now always prints a diff of what it
-changes (added / removed / modified files, with a warning when an installed
-file looks hand-edited). `--dry-run` prints that diff without writing —
-the same engine `doctor` uses to detect skill staleness.
+changes: added, removed and modified files. `--dry-run` prints that diff
+without writing.

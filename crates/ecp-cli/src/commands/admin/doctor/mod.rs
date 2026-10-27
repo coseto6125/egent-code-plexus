@@ -29,9 +29,10 @@ pub struct DoctorArgs {
     /// registry / version). Omit to run all.
     #[arg(value_enum)]
     pub check: Option<CheckTarget>,
-    /// Apply fixable remediations for the selected check(s): reinstall stale
-    /// skills, rebuild a stale index, remove orphan index dirs, reinstall
-    /// scripted host integrations. Config / version findings are report-only.
+    /// Apply fixable remediations for the selected check(s): install a missing
+    /// skill or update one nobody edited since ecp installed it, rebuild a
+    /// stale index, remove orphan index dirs, reinstall scripted host
+    /// integrations. Edited skills, config and version findings are report-only.
     #[arg(long)]
     pub fix: bool,
     /// Output format. Absent, `llm` or `text`: a check table. `toon`: uncompressed toon.

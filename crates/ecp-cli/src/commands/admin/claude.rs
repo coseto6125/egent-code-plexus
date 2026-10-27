@@ -2,8 +2,8 @@
 
 use crate::admin::host_integration::mcp::claude_code as mcp_claude;
 use crate::commands::admin::claude_code as hooks;
-use crate::commands::admin::skill_fs::{copy_dir_replace, skill_diff};
-use crate::commands::admin::skill_source::{resolve, EmbeddedTree, SkillSource};
+use crate::commands::admin::skill_fs::{copy_dir_replace, skill_diff, write_install_record};
+use crate::commands::admin::skill_source::{embedded, resolve, EmbeddedTree, SkillSource};
 use clap::Subcommand;
 use ecp_core::EcpError;
 use std::fs;
@@ -149,20 +149,35 @@ pub(crate) fn install_skills_at(
 ) -> Result<(), EcpError> {
     for &skill in target.expand() {
         let src = source_skill_dir_at(skill, cwd)?;
-        let src = src.path();
-        let dst = skill_dir_in(claude_home, skill);
-
-        let dst_was_installed = dst.join("SKILL.md").exists();
-        println!("Claude Code skill `{}`:", skill.name());
-        skill_diff(src, &dst, dst_was_installed)?.print();
-
-        if dry_run {
-            println!("  [dry-run] not written");
-            continue;
-        }
-        copy_dir_replace(src, &dst)?;
-        println!("  installed in {}", dst.display());
+        install_skill_from(
+            skill,
+            src.path(),
+            &skill_dir_in(claude_home, skill),
+            dry_run,
+        )?;
     }
+    Ok(())
+}
+
+/// Print the diff of `src` against `dst`, then replace `dst` with `src` and
+/// record what was written, unless `dry_run`.
+pub(crate) fn install_skill_from(
+    skill: ClaudeSkillTarget,
+    src: &Path,
+    dst: &Path,
+    dry_run: bool,
+) -> Result<(), EcpError> {
+    let dst_was_installed = dst.join("SKILL.md").exists();
+    println!("Claude Code skill `{}`:", skill.name());
+    skill_diff(src, dst, dst_was_installed)?.print();
+
+    if dry_run {
+        println!("  [dry-run] not written");
+        return Ok(());
+    }
+    copy_dir_replace(src, dst)?;
+    write_install_record(dst)?;
+    println!("  installed in {}", dst.display());
     Ok(())
 }
 
@@ -304,9 +319,18 @@ pub(crate) fn source_skill_dir_at(
     skill: ClaudeSkillTarget,
     cwd: &std::path::Path,
 ) -> Result<SkillSource, EcpError> {
+    resolve(embedded_tree(skill), cwd)
+}
+
+/// The copy this binary ships, whatever checkout `cwd` holds.
+pub(crate) fn embedded_skill_dir(skill: ClaudeSkillTarget) -> Result<SkillSource, EcpError> {
+    embedded(embedded_tree(skill))
+}
+
+fn embedded_tree(skill: ClaudeSkillTarget) -> EmbeddedTree {
     match skill {
-        ClaudeSkillTarget::Ecp => resolve(EmbeddedTree::EcpSkill, cwd),
-        _ => resolve(EmbeddedTree::ClaudeSample(skill.name()), cwd),
+        ClaudeSkillTarget::Ecp => EmbeddedTree::EcpSkill,
+        _ => EmbeddedTree::ClaudeSample(skill.name()),
     }
 }
 
@@ -318,7 +342,7 @@ pub(crate) fn skill_dir_in(claude_home: &Path, skill: ClaudeSkillTarget) -> Path
     claude_home.join("skills").join(skill.name())
 }
 
-fn claude_home() -> PathBuf {
+pub(crate) fn claude_home() -> PathBuf {
     ecp_core::registry::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".claude")
