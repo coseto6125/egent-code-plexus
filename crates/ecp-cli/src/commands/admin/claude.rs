@@ -3,7 +3,7 @@
 use crate::admin::host_integration::mcp::claude_code as mcp_claude;
 use crate::commands::admin::claude_code as hooks;
 use crate::commands::admin::skill_fs::{copy_dir_replace, skill_diff, write_install_record};
-use crate::commands::admin::skill_source::{embedded, resolve, EmbeddedTree, SkillSource};
+use crate::commands::admin::skill_source::{embedded, EmbeddedTree, SkillSource};
 use clap::Subcommand;
 use ecp_core::EcpError;
 use std::fs;
@@ -55,7 +55,7 @@ pub enum ClaudeSkillTarget {
     /// Install every bundled Claude skill.
     All,
     /// Command-selection skill: when graph-aware ecp workflows beat plain grep
-    /// or help output. Sourced from the canonical `docs/skills/ecp/`.
+    /// or help output. Installs the copy built into this binary (from `docs/skills/ecp/`).
     Ecp,
     /// Review skill: when changed-code review should start from ecp impact
     /// and risk signals.
@@ -122,13 +122,11 @@ pub(crate) fn install_skills(
     dry_run: bool,
     no_claude_md: bool,
 ) -> Result<(), EcpError> {
-    let cwd = std::env::current_dir().map_err(|e| EcpError::Output(format!("current_dir: {e}")))?;
     let claude_home = claude_home();
-    install_skills_at(target, dry_run, &cwd, &claude_home)?;
+    install_skills_at(target, dry_run, &claude_home)?;
     if !no_claude_md {
-        // ECP.md ships inside the `ecp` skill, so resolve that skill's source
-        // (repo tree or embedded copy) and read ECP.md from it.
-        let ecp_src = source_skill_dir_at(ClaudeSkillTarget::Ecp, &cwd)?;
+        // ECP.md ships inside the `ecp` skill's embedded copy.
+        let ecp_src = embedded_skill_dir(ClaudeSkillTarget::Ecp)?;
         let ecp_md_src = ecp_src.path().join("ECP.md");
         for line in inject_ecp_import_at(&claude_home, &ecp_md_src, dry_run)? {
             println!("{line}");
@@ -137,18 +135,16 @@ pub(crate) fn install_skills(
     Ok(())
 }
 
-/// `install_skills` with explicit source-root (`cwd`) and install-root
-/// (`claude_home`) so E2E tests drive the whole diff+copy flow against
-/// tempdirs without mutating process-global cwd / HOME (which race parallel
-/// tests).
+/// `install_skills` with an explicit install-root (`claude_home`) so E2E tests
+/// drive the whole diff+copy flow against a tempdir without mutating
+/// process-global HOME (which races parallel tests).
 pub(crate) fn install_skills_at(
     target: ClaudeSkillTarget,
     dry_run: bool,
-    cwd: &std::path::Path,
     claude_home: &std::path::Path,
 ) -> Result<(), EcpError> {
     for &skill in target.expand() {
-        let src = source_skill_dir_at(skill, cwd)?;
+        let src = embedded_skill_dir(skill)?;
         install_skill_from(
             skill,
             src.path(),
@@ -305,24 +301,10 @@ pub(crate) fn uninstall_ecp_import_at(claude_home: &Path) -> Result<(), EcpError
     Ok(())
 }
 
-/// Path-resolution split out from `source_skill_dir` so unit tests can pin
-/// the skill → repo-subdir mapping without touching process-global cwd
-/// (`std::env::set_current_dir` races with parallel tests).
+/// The copy this binary ships, the only skill source.
 ///
-/// `ecp` skill: canonical source is `docs/skills/ecp/` per
-/// `docs/skills/README.md` (single source-of-truth for runtime
-/// `~/.claude/skills/ecp/`). Others ship from `skill_sample/claude/`.
-///
-/// Both are embedded in the binary, so a package-manager install (no repo tree
-/// under `cwd`) still resolves a usable source — see [`skill_source`].
-pub(crate) fn source_skill_dir_at(
-    skill: ClaudeSkillTarget,
-    cwd: &std::path::Path,
-) -> Result<SkillSource, EcpError> {
-    resolve(embedded_tree(skill), cwd)
-}
-
-/// The copy this binary ships, whatever checkout `cwd` holds.
+/// `ecp` comes from `docs/skills/ecp/` and the others from
+/// `skill_sample/claude/`, both embedded at build time — see [`skill_source`].
 pub(crate) fn embedded_skill_dir(skill: ClaudeSkillTarget) -> Result<SkillSource, EcpError> {
     embedded(embedded_tree(skill))
 }
@@ -382,58 +364,58 @@ mod tests {
     }
 
     #[test]
-    fn source_skill_dir_at_ecp_prefers_repo_docs_skills() {
-        // When `cwd` holds the repo tree, `Ecp` sources from `docs/skills/ecp/`
-        // (canonical) — verbatim, not a materialized embedded copy.
-        let cwd = fake_repo_with_ecp_skill("v1\n");
-        let src = source_skill_dir_at(ClaudeSkillTarget::Ecp, cwd.path()).unwrap();
-        assert_eq!(src.path(), cwd.path().join("docs/skills/ecp"));
-    }
-
-    #[test]
-    fn source_skill_dir_at_ecp_falls_back_to_embedded() {
-        // No repo tree under `cwd` (the npx/uvx case) → embedded copy resolves
-        // anyway, so the skill is installable without a checkout.
-        let cwd = tempfile::tempdir().unwrap();
-        let src = source_skill_dir_at(ClaudeSkillTarget::Ecp, cwd.path()).unwrap();
-        assert!(src.path().join("SKILL.md").is_file());
-        assert_ne!(src.path(), cwd.path().join("docs/skills/ecp"));
-    }
-
-    #[test]
-    fn source_skill_dir_at_simplify_falls_back_to_embedded() {
-        // Simplify (skill_sample/claude/) is embedded too — installable with no
-        // repo tree under `cwd`.
-        let cwd = tempfile::tempdir().unwrap();
-        let src = source_skill_dir_at(ClaudeSkillTarget::Simplify, cwd.path()).unwrap();
+    fn embedded_skill_dir_ecp_materializes_skill_md() {
+        let src = embedded_skill_dir(ClaudeSkillTarget::Ecp).unwrap();
         assert!(src.path().join("SKILL.md").is_file());
     }
 
-    /// Build a fake repo cwd with a source `ecp` skill so install can read it.
-    fn fake_repo_with_ecp_skill(body: &str) -> tempfile::TempDir {
-        let cwd = tempfile::tempdir().unwrap();
-        let src = cwd.path().join("docs").join("skills").join("ecp");
-        std::fs::create_dir_all(&src).unwrap();
-        std::fs::write(src.join("SKILL.md"), body).unwrap();
-        cwd
+    #[test]
+    fn embedded_skill_dir_simplify_materializes_skill_md() {
+        let src = embedded_skill_dir(ClaudeSkillTarget::Simplify).unwrap();
+        assert!(src.path().join("SKILL.md").is_file());
+    }
+
+    fn installed_skill_md(home: &Path) -> std::path::PathBuf {
+        home.join("skills").join("ecp").join("SKILL.md")
+    }
+
+    fn embedded_skill_md() -> Vec<u8> {
+        let src = embedded_skill_dir(ClaudeSkillTarget::Ecp).unwrap();
+        std::fs::read(src.path().join("SKILL.md")).unwrap()
     }
 
     #[test]
-    fn e2e_install_skills_writes_into_claude_home() {
-        let cwd = fake_repo_with_ecp_skill("v1\n");
+    fn e2e_install_skills_writes_embedded_copy_into_claude_home() {
         let home = tempfile::tempdir().unwrap();
-        install_skills_at(ClaudeSkillTarget::Ecp, false, cwd.path(), home.path()).unwrap();
+        install_skills_at(ClaudeSkillTarget::Ecp, false, home.path()).unwrap();
 
-        let installed = home.path().join("skills").join("ecp").join("SKILL.md");
+        let installed = installed_skill_md(home.path());
         assert!(installed.exists(), "skill must be copied into claude_home");
-        assert_eq!(std::fs::read_to_string(installed).unwrap(), "v1\n");
+        assert_eq!(std::fs::read(installed).unwrap(), embedded_skill_md());
+    }
+
+    #[test]
+    fn e2e_install_ignores_checkout_under_cwd() {
+        // Installing never reads `docs/skills/` from a directory the user
+        // stands in: a checkout holding a sentinel SKILL.md must not reach the
+        // installed copy. The install API takes no cwd, so the sentinel
+        // checkout is only reachable through process cwd, which tests leave alone.
+        let checkout = tempfile::tempdir().unwrap();
+        let skill = checkout.path().join("docs").join("skills").join("ecp");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "CHECKOUT-SENTINEL\n").unwrap();
+
+        let home = tempfile::tempdir().unwrap();
+        install_skills_at(ClaudeSkillTarget::Ecp, false, home.path()).unwrap();
+        let installed = std::fs::read(installed_skill_md(home.path())).unwrap();
+        assert!(!String::from_utf8_lossy(&installed).contains("CHECKOUT-SENTINEL"));
+        assert_eq!(installed, embedded_skill_md());
     }
 
     #[test]
     fn e2e_install_dry_run_writes_nothing() {
-        let cwd = fake_repo_with_ecp_skill("v1\n");
         let home = tempfile::tempdir().unwrap();
-        install_skills_at(ClaudeSkillTarget::Ecp, true, cwd.path(), home.path()).unwrap();
+        install_skills_at(ClaudeSkillTarget::Ecp, true, home.path()).unwrap();
         assert!(
             !home.path().join("skills").join("ecp").exists(),
             "dry-run must not write the skill"
@@ -443,18 +425,15 @@ mod tests {
     #[test]
     fn e2e_install_overwrites_stale_installed_copy() {
         let home = tempfile::tempdir().unwrap();
-        // Pre-existing (stale) installed copy.
-        let dst = home.path().join("skills").join("ecp");
-        std::fs::create_dir_all(&dst).unwrap();
-        std::fs::write(dst.join("SKILL.md"), "OLD\n").unwrap();
-        // Fresh repo source differs.
-        let cwd = fake_repo_with_ecp_skill("NEW\n");
+        let installed = installed_skill_md(home.path());
+        std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        std::fs::write(&installed, "OLD\n").unwrap();
 
-        install_skills_at(ClaudeSkillTarget::Ecp, false, cwd.path(), home.path()).unwrap();
+        install_skills_at(ClaudeSkillTarget::Ecp, false, home.path()).unwrap();
         assert_eq!(
-            std::fs::read_to_string(dst.join("SKILL.md")).unwrap(),
-            "NEW\n",
-            "install must overwrite the stale copy with repo source"
+            std::fs::read(&installed).unwrap(),
+            embedded_skill_md(),
+            "install must overwrite the stale copy with the embedded skill"
         );
     }
 

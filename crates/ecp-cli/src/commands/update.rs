@@ -880,7 +880,8 @@ fn read_regular(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
 }
 
 /// Run `exe admin claude install skills ecp` from an empty scratch dir, so the
-/// child resolves its own embedded copy rather than a repo checkout. Stdout
+/// child resolves its own embedded copy even when `exe` predates the
+/// embedded-only rule and would prefer a checkout under cwd. Stdout
 /// goes to null instead of through `output_with_timeout`: that helper reads
 /// the pipe only after exit, and a full-skill diff (the tree is ~54 KB)
 /// overflows the pipe buffer, blocking the child until the timeout kills it.
@@ -1364,8 +1365,7 @@ mod tests {
     /// `ecp admin claude install skills ecp` does from a binary-only install.
     fn install_shipped(claude_home: &Path) {
         use crate::commands::admin::claude::{inject_ecp_import_at, install_skills_at};
-        let empty = tempfile::tempdir().unwrap();
-        install_skills_at(ClaudeSkillTarget::Ecp, false, empty.path(), claude_home).unwrap();
+        install_skills_at(ClaudeSkillTarget::Ecp, false, claude_home).unwrap();
         let shipped = shipped_ecp_skill().unwrap();
         inject_ecp_import_at(claude_home, &shipped.path().join("ECP.md"), false).unwrap();
     }

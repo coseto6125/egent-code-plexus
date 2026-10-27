@@ -9,6 +9,11 @@
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
+    // rustc tracks each embedded file but not the directory listing, so adding
+    // or deleting a skill file needs these to trigger a rebuild.
+    println!("cargo:rerun-if-changed=../../docs/skills");
+    println!("cargo:rerun-if-changed=../../skill_sample");
+
     // Resolve the actual git common directory. In a worktree (e.g.
     // `.claude/worktrees/<topic>/`) `.git` at the worktree root is a text
     // file pointing into the main repo's `.git/worktrees/<topic>/`, NOT

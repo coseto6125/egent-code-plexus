@@ -43,9 +43,8 @@ Reruns the remediation for the selected check(s) in place:
   hand. A skill that already matches the shipped copy reports Pass, and
   `--fix` (re)writes its record.
 
-  The doctor check and `--fix` use the copy embedded in the binary. A manual
-  `ecp admin claude install skills` run inside an ecp repo checkout installs
-  that checkout's `docs/skills/` instead.
+  The doctor check, `--fix` and `ecp admin claude install skills` all use the
+  copy built into the binary.
 - **index**: `ecp admin index --repo .`.
 - **registry**: removes orphan index dirs (missing/corrupt graph & meta stay
   report-only — a rebuild, not a delete, is the safe fix).

@@ -1,20 +1,11 @@
-//! Skill-pack source resolution that works both inside the ecp repo and from a
-//! binary-only install (`npx` / `uvx` / `cargo binstall`).
+//! The one skill source: the copy embedded in the running binary.
 //!
-//! The install / diff / doctor flows are all path-based (`skill_fs.rs`), so the
-//! historical source was `cwd.join("docs/skills/…")` — fine when run from a repo
-//! checkout, but a binary installed via a package manager ships no source tree,
-//! leaving `ecp admin … install skills` with nowhere to read from.
+//! The skill trees are compiled in with `include_dir!`, and every install, link,
+//! compare and refresh path reads that copy. No path consults a checkout under
+//! `cwd`, so the result never depends on the directory the user stands in.
 //!
-//! Fix: embed the canonical skill trees into the binary with `include_dir!`, and
-//! resolve a source root with this priority:
-//!   1. the repo checkout under `cwd` (so editing `docs/skills/` then reinstalling
-//!      takes effect immediately — preserves the repo dev loop), else
-//!   2. a temp dir materialized from the embedded copy (the binary-only case).
-//!
-//! Materializing reuses the existing path-based copy/diff engine unchanged: the
-//! returned [`SkillSource`] owns a `TempDir` when embedded, keeping the files
-//! alive until the caller is done.
+//! Dev loop: edit `docs/skills/`, run `cargo build`, then run the built binary's
+//! install command. [`SkillSource`] owns a `TempDir` for the extracted files.
 
 use crate::commands::admin::skill_fs::copy_dir_replace;
 use ecp_core::EcpError;
@@ -44,19 +35,6 @@ pub(crate) enum EmbeddedTree {
 }
 
 impl EmbeddedTree {
-    /// Repo-relative path (from repo root) for this skill.
-    fn repo_relative(self) -> PathBuf {
-        match self {
-            EmbeddedTree::EcpSkill => PathBuf::from("docs").join("skills").join("ecp"),
-            EmbeddedTree::ClaudeSample(skill) => {
-                PathBuf::from("skill_sample").join("claude").join(skill)
-            }
-            EmbeddedTree::CodexSample(skill) => {
-                PathBuf::from("skill_sample").join("codex").join(skill)
-            }
-        }
-    }
-
     /// The `include_dir!` root tree, plus this skill's path within it. `extract`
     /// reproduces the tree's internal paths, so the skill lands at
     /// `<dest>/<sub>` (empty `sub` for `EcpSkill`, whose root is the skill).
@@ -83,22 +61,7 @@ impl SkillSource {
     }
 }
 
-/// Resolve the source directory for a skill within `tree`, rooted at `cwd`.
-/// Repo checkout under `cwd` wins; otherwise the embedded copy is materialized
-/// into a temp dir.
-pub(crate) fn resolve(tree: EmbeddedTree, cwd: &Path) -> Result<SkillSource, EcpError> {
-    let repo_path = cwd.join(tree.repo_relative());
-    if repo_path.join("SKILL.md").is_file() {
-        return Ok(SkillSource {
-            path: repo_path,
-            _temp: None,
-        });
-    }
-    embedded(tree)
-}
-
-/// Materialize the embedded copy of the skill within `tree` into a temp dir,
-/// with no repo checkout consulted.
+/// Materialize the embedded copy of the skill within `tree` into a temp dir.
 pub(crate) fn embedded(tree: EmbeddedTree) -> Result<SkillSource, EcpError> {
     // Extract the whole embedded tree to a temp dir; `extract` reproduces the
     // tree's internal paths, so the skill lands at `<temp>/<sub>`.
@@ -119,20 +82,13 @@ pub(crate) fn embedded(tree: EmbeddedTree) -> Result<SkillSource, EcpError> {
 }
 
 /// Resolve a skill source to a **persistent** directory, for hosts that link to
-/// the source rather than copying it (Gemini's `skills link`). Repo checkout
-/// under `cwd` wins; otherwise the embedded copy is materialized once under
-/// `~/.ecp/skills/<skill>` and reused — a temp dir would vanish and break the
-/// link. Returns the directory path.
+/// the source rather than copying it (Gemini's `skills link`). The embedded copy
+/// is materialized under `~/.ecp/skills/<skill>` and refreshed on every call — a
+/// temp dir would vanish and break the link. Returns the directory path.
 pub(crate) fn resolve_persistent(
     tree: EmbeddedTree,
     skill_name: &str,
-    cwd: &Path,
 ) -> Result<PathBuf, EcpError> {
-    let repo_path = cwd.join(tree.repo_relative());
-    if repo_path.join("SKILL.md").is_file() {
-        return Ok(repo_path);
-    }
-
     let dest = ecp_core::registry::resolve_home_ecp()
         .join("skills")
         .join(skill_name);
@@ -165,16 +121,6 @@ pub(crate) fn resolve_persistent(
 mod tests {
     use super::*;
 
-    /// A cwd whose repo layout has the `ecp` skill, so `resolve*` returns the
-    /// repo path rather than the embedded copy.
-    fn fake_repo_with_ecp_skill(body: &str) -> tempfile::TempDir {
-        let cwd = tempfile::tempdir().unwrap();
-        let src = cwd.path().join("docs").join("skills").join("ecp");
-        std::fs::create_dir_all(&src).unwrap();
-        std::fs::write(src.join("SKILL.md"), body).unwrap();
-        cwd
-    }
-
     #[test]
     fn embedded_trees_carry_expected_skills() {
         // The bundled skills must be present in the binary so a package-manager
@@ -194,29 +140,8 @@ mod tests {
     }
 
     #[test]
-    fn resolve_prefers_repo_tree_over_embedded() {
-        // A cwd whose repo layout has the skill → that path is returned verbatim,
-        // not a temp dir (repo dev loop: edits take effect without rebuild).
-        let cwd = tempfile::tempdir().unwrap();
-        let repo_ecp = cwd.path().join("docs").join("skills").join("ecp");
-        std::fs::create_dir_all(&repo_ecp).unwrap();
-        std::fs::write(repo_ecp.join("SKILL.md"), "repo copy\n").unwrap();
-
-        let src = resolve(EmbeddedTree::EcpSkill, cwd.path()).unwrap();
-        assert_eq!(src.path(), repo_ecp);
-        assert_eq!(
-            std::fs::read_to_string(src.path().join("SKILL.md")).unwrap(),
-            "repo copy\n"
-        );
-    }
-
-    #[test]
-    fn resolve_falls_back_to_embedded_when_no_repo_tree() {
-        // A cwd with no repo layout (the npx/uvx case) → embedded copy is
-        // materialized and its SKILL.md is readable.
-        let cwd = tempfile::tempdir().unwrap();
-        let src = resolve(EmbeddedTree::EcpSkill, cwd.path()).unwrap();
-        assert_ne!(src.path(), cwd.path().join("docs/skills/ecp"));
+    fn embedded_ecp_skill_materializes_skill_md() {
+        let src = embedded(EmbeddedTree::EcpSkill).unwrap();
         assert!(src.path().join("SKILL.md").is_file());
     }
 
@@ -233,32 +158,33 @@ mod tests {
     }
 
     #[test]
-    fn resolve_codex_simplify_from_embedded() {
-        let cwd = tempfile::tempdir().unwrap();
-        let src = resolve(EmbeddedTree::CodexSample("simplify"), cwd.path()).unwrap();
+    fn embedded_codex_simplify_materializes_skill_md() {
+        let src = embedded(EmbeddedTree::CodexSample("simplify")).unwrap();
         assert!(src.path().join("SKILL.md").is_file());
     }
 
     #[test]
-    fn resolve_persistent_prefers_repo_tree() {
-        // Repo tree present → returned verbatim, so Gemini links to the live
-        // checkout (edits show up without rebuild).
-        let cwd = fake_repo_with_ecp_skill("repo\n");
-        let path = resolve_persistent(EmbeddedTree::EcpSkill, "ecp", cwd.path()).unwrap();
-        assert_eq!(path, cwd.path().join("docs/skills/ecp"));
+    fn resolve_persistent_materializes_to_home_ecp() {
+        // Lands under a persistent `~/.ecp/skills/ecp` (ECP_HOME-scoped here so
+        // the test is isolated), not a temp dir that would vanish and break the
+        // Gemini link.
+        let home = tempfile::tempdir().unwrap();
+        let _guard = EcpHomeGuard::set(home.path());
+        let path = resolve_persistent(EmbeddedTree::EcpSkill, "ecp").unwrap();
+        assert!(path.join("SKILL.md").is_file());
+        assert!(path.starts_with(home.path()));
     }
 
     #[test]
-    fn resolve_persistent_materializes_to_home_ecp_when_no_repo() {
-        // No repo tree (npx/uvx) → embedded copy lands under a persistent
-        // `~/.ecp/skills/ecp` (ECP_HOME-scoped here so the test is isolated),
-        // not a temp dir that would vanish and break the Gemini link.
+    fn resolve_persistent_twice_refreshes_without_error() {
         let home = tempfile::tempdir().unwrap();
-        let cwd = tempfile::tempdir().unwrap();
         let _guard = EcpHomeGuard::set(home.path());
-        let path = resolve_persistent(EmbeddedTree::EcpSkill, "ecp", cwd.path()).unwrap();
-        assert!(path.join("SKILL.md").is_file());
-        assert!(path.starts_with(home.path()));
+        let first = resolve_persistent(EmbeddedTree::EcpSkill, "ecp").unwrap();
+        std::fs::write(first.join("stale.txt"), "x").unwrap();
+        let second = resolve_persistent(EmbeddedTree::EcpSkill, "ecp").unwrap();
+        assert_eq!(first, second);
+        assert!(!second.join("stale.txt").exists());
+        assert!(second.join("SKILL.md").is_file());
     }
 
     /// Scope an `ECP_HOME` override for one test, restoring the prior value on

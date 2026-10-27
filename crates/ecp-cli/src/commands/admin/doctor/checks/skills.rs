@@ -1,6 +1,5 @@
 //! Skill freshness: compare each installed Claude skill against the copy this
-//! binary ships. A repo checkout under cwd is not consulted: an older checkout
-//! would report a current install as stale and suggest downgrading it.
+//! binary ships, the only skill source every install path uses.
 
 use crate::commands::admin::claude::{
     claude_home, claude_skill_dir, embedded_skill_dir, inject_ecp_import_at, install_skill_from,
