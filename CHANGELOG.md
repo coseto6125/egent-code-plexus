@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.17.1 - 2026-10-27
+
+### Bug Fixes
+
+- keep user-edited skills on --fix; install every skill from the copy built into the binary (#877)
+
 ## v0.17.0 - 2026-10-27
 
 ### Features
