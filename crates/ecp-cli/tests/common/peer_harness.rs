@@ -90,7 +90,7 @@ impl PeerHarness {
         .env("CLAUDE_CODE_SESSION_ID", id)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(std::fs::File::create(self.stderr_path(id)).unwrap());
         if let Some(g) = &self.graph {
             cmd.env("HOME", &g.home)
                 .env_remove("ECP_HOME")
@@ -107,17 +107,48 @@ impl PeerHarness {
         self.watchers.last().unwrap()
     }
 
+    /// Outside `sessions/`: a log the watchers watch would feed them their
+    /// own writes as events.
+    fn stderr_path(&self, id: &str) -> PathBuf {
+        let dir = self.repo_root.path().join("watcher-logs");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(format!("{id}.stderr"))
+    }
+
     pub fn session_dir(&self, id: &str) -> PathBuf {
         self.repo_root.path().join("sessions").join(id)
     }
 
     pub fn write_dirty(&self, id: &str, path: &str, symbols: &[(&str, &str)]) {
+        use ecp_core::session::layout;
+        let sdir = self.session_dir(id);
+        let manifest = Self::dirty_manifest(path, symbols);
+        ecp_core::session::DirtyEvents::write_atomic(&layout::dirty_events_path(&sdir), &manifest)
+            .unwrap();
+    }
+
+    /// Publish `id`'s manifest so that no event names the manifest file: the
+    /// whole `l1/` directory is built elsewhere and renamed into place. Stands
+    /// in for every manifest the watcher never gets an event for (a write that
+    /// beats the lazy watch on a new directory, an overflowed inotify queue).
+    pub fn write_dirty_without_file_event(&self, id: &str, path: &str, symbols: &[(&str, &str)]) {
+        use ecp_core::session::layout;
+        let staged = self.repo_root.path().join(format!("staged-{id}"));
+        let staged_l1 = layout::l1_dir(&staged);
+        let manifest = Self::dirty_manifest(path, symbols);
+        ecp_core::session::DirtyEvents::write_atomic(
+            &layout::dirty_events_path(&staged),
+            &manifest,
+        )
+        .unwrap();
+        std::fs::rename(&staged_l1, layout::l1_dir(&self.session_dir(id))).unwrap();
+    }
+
+    fn dirty_manifest(path: &str, symbols: &[(&str, &str)]) -> ecp_core::session::DirtyEvents {
         use ecp_core::contracts::dirty_event::{PathChange, PathClass};
         use ecp_core::contracts::routing::SizeCap;
-        use ecp_core::session::layout;
         use ecp_core::session::overlay::{DirtyEventEntry, DirtyEvents, SymbolKind, SymbolRef};
         use std::collections::BTreeMap;
-        let sdir = self.session_dir(id);
         let mut entries = BTreeMap::new();
         entries.insert(
             path.to_string(),
@@ -143,12 +174,53 @@ impl PeerHarness {
         );
         let mut manifest = DirtyEvents::empty(SizeCap::BUILT_IN);
         manifest.entries = entries;
-        DirtyEvents::write_atomic(&layout::dirty_events_path(&sdir), &manifest).unwrap();
+        manifest
     }
 
     pub fn read_inbox(&self, id: &str) -> Vec<InboxEntry> {
         let (entries, _) = drain(&self.session_dir(id).join("inbox.jsonl"), 0).unwrap();
         entries
+    }
+
+    /// Per-session state for a failed fan-out assertion: whether the watcher
+    /// process is still alive, which peers its inbox heard from, and the tail
+    /// of its stderr. The fan-out flake reproduces only on CI runners.
+    pub fn diagnostics(&mut self) -> String {
+        let mut out = String::new();
+        for i in 0..self.watchers.len() {
+            let id = self.watchers[i].id.clone();
+            let status = match self.watchers[i].child.as_mut().map(Child::try_wait) {
+                Some(Ok(Some(st))) => format!("exited {st}"),
+                Some(Ok(None)) => "running".into(),
+                Some(Err(e)) => format!("try_wait error {e}"),
+                None => "no child".into(),
+            };
+            let mut froms: Vec<String> = self
+                .read_inbox(&id)
+                .into_iter()
+                .filter_map(|e| match e {
+                    InboxEntry::DirtyEvent { peer_session, .. } => Some(peer_session),
+                    _ => None,
+                })
+                .collect();
+            froms.sort();
+            froms.dedup();
+            let stderr = std::fs::read_to_string(self.stderr_path(&id)).unwrap_or_default();
+            let lines: Vec<&str> = stderr.lines().collect();
+            let tail = if lines.len() <= 50 {
+                lines.join("\n    ")
+            } else {
+                format!(
+                    "{}\n    ...\n    {}",
+                    lines[..25].join("\n    "),
+                    lines[lines.len() - 25..].join("\n    ")
+                )
+            };
+            out.push_str(&format!(
+                "\n[{id}] watcher {status}; heard from {froms:?}\n    {tail}"
+            ));
+        }
+        out
     }
 
     pub fn assert_within<F: Fn() -> bool>(&self, timeout: Duration, pred: F) -> bool {

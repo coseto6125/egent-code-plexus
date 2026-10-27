@@ -88,7 +88,7 @@ pub enum PeersCmd {
         #[arg(long, value_enum, default_value_t = StatusFormat::Text)]
         format: StatusFormat,
     },
-    /// Start, stop, or check the inotify-driven peer-dirty watcher daemon.
+    /// Start, stop, or check the peer-dirty watcher daemon.
     Watch(super::watch::WatchArgs),
     /// Rotate logs + cleanup
     Gc,

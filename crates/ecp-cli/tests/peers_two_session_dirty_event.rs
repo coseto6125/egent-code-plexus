@@ -77,3 +77,26 @@ fn dead_peers_leftover_dirty_file_raises_nothing() {
         h.read_inbox("bob")
     );
 }
+
+/// inotify reports nothing for a manifest that lands before the watch on its
+/// new directory exists, and drops events when its queue overflows. A peer
+/// whose manifest arrives that way must still be heard.
+#[test]
+fn test_peer_dirty_without_file_event_reaches_inbox() {
+    let mut h = PeerHarness::new();
+    h.spawn_session("erin");
+    h.spawn_session("frank");
+    std::thread::sleep(Duration::from_millis(1500));
+
+    h.write_dirty_without_file_event("erin", "src/auth.rs", &[("verify_token", "src/auth.rs")]);
+    h.write_dirty_without_file_event("frank", "src/auth.rs", &[("verify_token", "src/auth.rs")]);
+
+    let arrived = h.assert_within(Duration::from_millis(5000), || {
+        !h.read_inbox("erin").is_empty() && !h.read_inbox("frank").is_empty()
+    });
+    assert!(
+        arrived,
+        "a manifest with no file event of its own never reached the peer:{}",
+        h.diagnostics()
+    );
+}
