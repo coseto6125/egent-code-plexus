@@ -40,8 +40,20 @@ fn check_at(
     let review = format!("review with `{install} --dry-run`, then run it without --dry-run");
 
     // A dir that exists without SKILL.md is still the user's files: only an
-    // absent or empty dir counts as not installed.
-    let absent = std::fs::read_dir(dst).map_or(true, |mut d| d.next().is_none());
+    // absent or empty dir counts as not installed. A symlink is left alone, as
+    // `ecp update` does: replacing it would cut the user's link.
+    let absent = match std::fs::symlink_metadata(dst) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(e) => return CheckResult::fail(name, format!("cannot inspect skill dir: {e}")),
+        Ok(m) if m.is_dir() => match std::fs::read_dir(dst) {
+            Ok(mut d) => d.next().is_none(),
+            Err(e) => return CheckResult::fail(name, format!("cannot read skill dir: {e}")),
+        },
+        Ok(_) => {
+            return CheckResult::warn(name, "a symlink or not a directory; left alone")
+                .with_remediation(review)
+        }
+    };
     let mut result = if absent {
         CheckResult::warn(&name, "not installed").with_remediation(&install)
     } else {
@@ -224,6 +236,50 @@ mod tests {
         assert_eq!(r.message, "not installed");
         assert_eq!(r.fix_applied, Some(true));
         assert_eq!(fs::read_to_string(f.dst.join("SKILL.md")).unwrap(), "new\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_check_at_symlinked_skill_dir_fix_keeps_link() {
+        let f = installed_then_upgraded();
+        let real = f.dst.with_file_name("real-simplify");
+        fs::rename(&f.dst, &real).unwrap();
+        std::os::unix::fs::symlink(&real, &f.dst).unwrap();
+        let r = run(&f, true);
+        assert!(r.message.contains("symlink"), "{}", r.message);
+        assert_eq!(r.fix_applied, None);
+        assert!(fs::symlink_metadata(&f.dst)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_to_string(real.join("SKILL.md")).unwrap(), "old\n");
+    }
+
+    #[test]
+    fn test_check_at_skill_path_is_file_fix_leaves_it() {
+        let f = installed_then_upgraded();
+        fs::remove_dir_all(&f.dst).unwrap();
+        fs::write(&f.dst, "not a dir\n").unwrap();
+        let r = run(&f, true);
+        assert_eq!(r.fix_applied, None);
+        assert_eq!(fs::read_to_string(&f.dst).unwrap(), "not a dir\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_check_at_unreadable_skill_dir_fails_not_absent() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = installed_then_upgraded();
+        fs::set_permissions(&f.dst, fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = fs::read_dir(&f.dst).is_ok();
+        let r = run(&f, true);
+        fs::set_permissions(&f.dst, fs::Permissions::from_mode(0o755)).unwrap();
+        if readable {
+            return; // running as root: permissions do not apply
+        }
+        assert_eq!(r.status, CheckStatus::Fail, "{}", r.message);
+        assert_eq!(r.fix_applied, None);
+        assert_eq!(fs::read_to_string(f.dst.join("SKILL.md")).unwrap(), "old\n");
     }
 
     #[test]
