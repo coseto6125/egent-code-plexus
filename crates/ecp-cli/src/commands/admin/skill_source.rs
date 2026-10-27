@@ -47,12 +47,11 @@ impl EmbeddedTree {
     }
 }
 
-/// A resolved skill-source directory. When sourced from the embedded copy it owns
-/// the `TempDir` the files were extracted into, so the path stays valid for the
-/// lifetime of this value.
+/// An extracted skill directory. It owns the `TempDir` the files were extracted
+/// into, so the path stays valid for the lifetime of this value.
 pub(crate) struct SkillSource {
     path: PathBuf,
-    _temp: Option<TempDir>,
+    _temp: TempDir,
 }
 
 impl SkillSource {
@@ -75,10 +74,7 @@ pub(crate) fn embedded(tree: EmbeddedTree) -> Result<SkillSource, EcpError> {
     } else {
         temp.path().join(sub)
     };
-    Ok(SkillSource {
-        path,
-        _temp: Some(temp),
-    })
+    Ok(SkillSource { path, _temp: temp })
 }
 
 /// Resolve a skill source to a **persistent** directory, for hosts that link to
@@ -92,28 +88,9 @@ pub(crate) fn resolve_persistent(
     let dest = ecp_core::registry::resolve_home_ecp()
         .join("skills")
         .join(skill_name);
-    // Refresh so an upgraded binary overwrites a stale materialized copy.
-    if dest.exists() {
-        std::fs::remove_dir_all(&dest).map_err(|e| {
-            EcpError::Output(format!("clear stale skill dir {}: {e}", dest.display()))
-        })?;
-    }
-    let (root, sub) = tree.embedded();
-    if sub.is_empty() {
-        // `extract` writes into an existing dir; create the skill dir itself.
-        std::fs::create_dir_all(&dest)
-            .map_err(|e| EcpError::Output(format!("create {}: {e}", dest.display())))?;
-        root.extract(&dest)
-            .map_err(|e| EcpError::Output(format!("extract embedded skill: {e}")))?;
-    } else {
-        // Extract the tree to a temp dir, then move just the `sub` subtree into
-        // place so `dest` is the skill itself, not `<root>/<sub>`.
-        let temp =
-            tempfile::tempdir().map_err(|e| EcpError::Output(format!("create temp dir: {e}")))?;
-        root.extract(temp.path())
-            .map_err(|e| EcpError::Output(format!("extract embedded skill: {e}")))?;
-        copy_dir_replace(&temp.path().join(sub), &dest)?;
-    }
+    // `copy_dir_replace` clears `dest` first, so an upgraded binary overwrites a
+    // stale materialized copy.
+    copy_dir_replace(embedded(tree)?.path(), &dest)?;
     Ok(dest)
 }
 

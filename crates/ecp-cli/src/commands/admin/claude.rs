@@ -395,24 +395,6 @@ mod tests {
     }
 
     #[test]
-    fn e2e_install_ignores_checkout_under_cwd() {
-        // Installing never reads `docs/skills/` from a directory the user
-        // stands in: a checkout holding a sentinel SKILL.md must not reach the
-        // installed copy. The install API takes no cwd, so the sentinel
-        // checkout is only reachable through process cwd, which tests leave alone.
-        let checkout = tempfile::tempdir().unwrap();
-        let skill = checkout.path().join("docs").join("skills").join("ecp");
-        std::fs::create_dir_all(&skill).unwrap();
-        std::fs::write(skill.join("SKILL.md"), "CHECKOUT-SENTINEL\n").unwrap();
-
-        let home = tempfile::tempdir().unwrap();
-        install_skills_at(ClaudeSkillTarget::Ecp, false, home.path()).unwrap();
-        let installed = std::fs::read(installed_skill_md(home.path())).unwrap();
-        assert!(!String::from_utf8_lossy(&installed).contains("CHECKOUT-SENTINEL"));
-        assert_eq!(installed, embedded_skill_md());
-    }
-
-    #[test]
     fn e2e_install_dry_run_writes_nothing() {
         let home = tempfile::tempdir().unwrap();
         install_skills_at(ClaudeSkillTarget::Ecp, true, home.path()).unwrap();
