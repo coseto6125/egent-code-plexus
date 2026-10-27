@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.17.0 - 2026-10-26
+## v0.17.0 - 2026-10-27
 
 ### Features
 
@@ -10,6 +10,7 @@
 
 ### Bug Fixes
 
+- peer watcher delivers a dirty manifest inotify never reported (written inside a just-created `l1/` before its watch existed) through a 1 s stamp sweep, and polls when the native watcher cannot start or watch (#876)
 - list breaking `type!:` commits in the changelog
 - dry-run reports the ECP.md copy and import only when they would change (#866)
 
