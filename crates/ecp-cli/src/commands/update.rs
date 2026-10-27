@@ -44,6 +44,7 @@ use crate::commands::admin::doctor::checks::install_source::{
     InstallSource, CHANNELS, CHANNEL_SUNSET,
 };
 use crate::commands::admin::doctor::checks::version::{latest_release_version, parse_semver};
+use crate::commands::admin::skill_fs::INSTALL_RECORD;
 use crate::commands::admin::skill_source::{embedded, EmbeddedTree, SkillSource};
 use crate::commands::admin::update_check;
 use crate::git::safe_exec;
@@ -664,9 +665,10 @@ fn is_os_junk(rel: &Path) -> bool {
     )
 }
 
-/// An install writes only regular files and directories. A symlink or a
-/// special file is the user's own doing (`Special`); an extra directory, an
-/// extra or missing file, or other content is `Modified`.
+/// An install writes only regular files and directories, plus its
+/// `INSTALL_RECORD`. A symlink or a special file is the user's own doing
+/// (`Special`); an extra directory, an extra or missing file, or other content
+/// is `Modified`.
 fn skill_state(skill_dir: &Path, shipped: &Path) -> Result<SkillState, EcpError> {
     if !std::fs::symlink_metadata(skill_dir)
         .map_err(io_err(skill_dir))?
@@ -681,7 +683,7 @@ fn skill_state(skill_dir: &Path, shipped: &Path) -> Result<SkillState, EcpError>
         || local
             .files
             .difference(&ours.files)
-            .any(|rel| !is_os_junk(rel))
+            .any(|rel| !is_os_junk(rel) && rel != Path::new(INSTALL_RECORD))
     {
         return Ok(SkillState::Modified);
     }

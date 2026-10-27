@@ -53,8 +53,13 @@ fn check_at(
         };
         if !diff.has_changes() {
             // Recording an identical install lets a later --fix update it.
-            if fix && state == InstallState::Unrecorded {
-                let _ = write_install_record(dst);
+            if fix && state != InstallState::Untouched {
+                if let Err(e) = write_install_record(dst) {
+                    return CheckResult::warn(
+                        name,
+                        format!("up to date; writing the install record failed: {e}"),
+                    );
+                }
             }
             return CheckResult::ok(name, "up to date");
         }
@@ -180,6 +185,16 @@ mod tests {
         let f = installed_then_upgraded();
         write(&f.src, "SKILL.md", "old\n");
         fs::remove_file(f.dst.join(".ecp-install.json")).unwrap();
+        let r = run(&f, true);
+        assert_eq!(r.status, CheckStatus::Ok);
+        assert_eq!(install_state(&f.dst).unwrap(), InstallState::Untouched);
+    }
+
+    #[test]
+    fn test_check_at_edited_back_to_source_fix_rerecords_it() {
+        let f = installed_then_upgraded();
+        write(&f.dst, "SKILL.md", "new\n");
+        assert_eq!(install_state(&f.dst).unwrap(), InstallState::Edited(1));
         let r = run(&f, true);
         assert_eq!(r.status, CheckStatus::Ok);
         assert_eq!(install_state(&f.dst).unwrap(), InstallState::Untouched);
