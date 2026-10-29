@@ -2,33 +2,23 @@ use super::receiver_types::{
     collect_bindings, extended_type_name, extract_swift_calls_and_path_literals,
 };
 use super::spec::SwiftSpec;
+use crate::calls::{NameRefKind, NameRefSpec, VariantRefSpec};
+use crate::driver::{
+    self, imports, node, AnonKey, Anonymous, Compiled, DeclSlot, Effect, FieldReads, FileCx,
+    KindCapture, Op, ParseSpec, Step,
+};
 use crate::framework_confidence;
 use crate::framework_helpers::{
-    detect_ast_framework_patterns, node_span, push_blind_spot, span_area, span_contains,
-    FrameworkPatternSpec, Span,
+    detect_ast_framework_patterns, node_span, span_area, span_contains, FrameworkPatternSpec, Span,
 };
 use crate::parse_budget::{parse_with_budget, ParseBudget};
-use ecp_core::analyzer::lang_spec::LangSpec;
-use ecp_core::analyzer::parse_prof::{self, Pass};
+use ecp_core::analyzer::parse_prof::Pass;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawImport, RawNode, OVERRIDE_SENTINEL};
-
-/// Blind-spot kind/hint pairs. Order matches the capture-index dispatch
-/// in `parse_file`.
-const BLIND_SPEC: &[(&str, &str)] = &[
-    (
-        "swift-nsclass-from-string",
-        "NSClassFromString(<expr>) — runtime Objective-C class load by name; resolved class body is not statically determinable",
-    ),
-    (
-        "swift-perform-selector",
-        "<expr>.perform(Selector(<name>)) — Objective-C selector dispatch; target method bound at runtime via selector lookup",
-    ),
-];
-use ecp_core::graph::NodeKind;
+use ecp_core::analyzer::types::{LocalGraph, RawFunctionMeta, RawNode, OVERRIDE_SENTINEL};
+use ecp_core::graph::{FileCategory, NodeKind};
+use std::collections::HashSet;
 use std::path::Path;
-use streaming_iterator::StreamingIterator;
-use tree_sitter::{Query, QueryCursor};
+use tree_sitter::{Node, Query, Tree};
 
 /// Per upstream `swift.ts:281-316` `astFrameworkPatterns`.
 const SWIFT_FRAMEWORKS: &[FrameworkPatternSpec] = &[
@@ -81,75 +71,13 @@ thread_local! {
     });
 }
 pub struct SwiftProvider {
-    query: Query,
-    /// Capture index → NodeKind mapping, pre-resolved from
-    /// `SwiftSpec::CAPTURE_KIND` at provider construction. The hot loop
-    /// looks up by integer index — no per-capture string compare.
-    capture_kind_by_idx: Vec<Option<NodeKind>>,
-    /// CI-L #2: capture indices resolved once. Same pattern as PHP / Kotlin.
-    indices: SwiftCaptureIndices,
-}
-
-struct SwiftCaptureIndices {
-    import_name: Option<u32>,
-    import_source: Option<u32>,
-    function: Option<u32>,
-    class: Option<u32>,
-    method: Option<u32>,
-    interface: Option<u32>,
-    typealias: Option<u32>,
-    enum_case: Option<u32>,
-    enum_case_name: Option<u32>,
-    trait_: Option<u32>,
-    export: Option<u32>,
-    decorator: Option<u32>,
-    heritage: Option<u32>,
-    type_: Option<u32>,
-    property: Option<u32>,
-    property_name_pat: Option<u32>,
-    constructor: Option<u32>,
-    function_anonymous: Option<u32>,
-    // BlindSpot captures (FU-001 P6a).
-    blind_nsclass_from_string: Option<u32>,
-    blind_perform_selector: Option<u32>,
+    compiled: Compiled<SwiftSpec>,
 }
 
 impl SwiftProvider {
     pub fn new() -> anyhow::Result<Self> {
-        let language = tree_sitter_swift::LANGUAGE.into();
-        let query_source = include_str!("queries.scm");
-        let query = Query::new(&language, query_source)?;
-        let capture_kind_by_idx: Vec<Option<NodeKind>> = query
-            .capture_names()
-            .iter()
-            .map(|name| SwiftSpec::CAPTURE_KIND.get(name).copied())
-            .collect();
-        let indices = SwiftCaptureIndices {
-            import_name: query.capture_index_for_name("import.name"),
-            import_source: query.capture_index_for_name("import.source"),
-            function: query.capture_index_for_name("function"),
-            class: query.capture_index_for_name("class"),
-            method: query.capture_index_for_name("method"),
-            interface: query.capture_index_for_name("interface"),
-            typealias: query.capture_index_for_name("typealias"),
-            enum_case: query.capture_index_for_name("enum_case"),
-            enum_case_name: query.capture_index_for_name("enum_case.name"),
-            trait_: query.capture_index_for_name("trait"),
-            export: query.capture_index_for_name("export"),
-            decorator: query.capture_index_for_name("decorator"),
-            heritage: query.capture_index_for_name("heritage"),
-            type_: query.capture_index_for_name("type"),
-            property: query.capture_index_for_name("property"),
-            property_name_pat: query.capture_index_for_name("property.name.pat"),
-            constructor: query.capture_index_for_name("constructor"),
-            function_anonymous: query.capture_index_for_name("function.anonymous"),
-            blind_nsclass_from_string: query.capture_index_for_name("blind.nsclass_from_string"),
-            blind_perform_selector: query.capture_index_for_name("blind.perform_selector"),
-        };
         Ok(Self {
-            query,
-            capture_kind_by_idx,
-            indices,
+            compiled: Compiled::new()?,
         })
     }
 }
@@ -160,537 +88,492 @@ impl LanguageProvider for SwiftProvider {
     }
 
     fn parse_file(&self, path: &Path, source: &[u8]) -> anyhow::Result<LocalGraph> {
-        let _p = parse_prof::span(Pass::Tree);
-        let tree = PARSER
-            .with(|p| parse_with_budget(&mut p.borrow_mut(), source, ParseBudget::DEFAULT))
-            .ok_or_else(|| anyhow::anyhow!("Failed to parse file"))?;
+        driver::parse(&self.compiled, path, source)
+    }
+}
 
-        drop(_p);
-        let _p = parse_prof::span(Pass::Query);
-        let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(&self.query, tree.root_node(), source);
+/// The captures Swift handles itself. The `.name` kind capture sets name and
+/// kind; every other capture buffers a node or a text for `end_match`.
+#[derive(Clone, Copy)]
+pub enum SwiftRole {
+    Root,
+    ImportName,
+    ImportSource,
+    Export,
+    Decorator,
+    Heritage,
+    Type,
+    Property,
+    PropertyNamePat,
+    Constructor,
+    Typealias,
+    EnumCase,
+    EnumCaseName,
+}
 
-        let mut nodes = Vec::new();
-        let mut imports = Vec::new();
-        let mut blind_spots: Vec<BlindSpot> = Vec::new();
-        let file_category =
-            ecp_core::file_category::determine_category(path.to_str().unwrap_or(""));
-        let is_test_file = file_category == ecp_core::graph::FileCategory::Test;
+#[derive(Clone, Copy)]
+pub enum SwiftHook {
+    Calls,
+    TextFrameworks,
+    MemberOwners,
+}
 
-        // CI-L #2: capture indices pre-resolved in `new()`.
-        let idx = &self.indices;
-        let idx_import_name = idx.import_name;
-        let idx_import_source = idx.import_source;
-        let idx_function = idx.function;
-        let idx_class = idx.class;
-        let idx_method = idx.method;
-        let idx_interface = idx.interface;
-        let idx_typealias = idx.typealias;
-        let idx_enum_case = idx.enum_case;
-        let idx_enum_case_name = idx.enum_case_name;
-        let idx_trait = idx.trait_;
-        let idx_export = idx.export;
-        let idx_decorator = idx.decorator;
-        let idx_heritage = idx.heritage;
-        let idx_type = idx.type_;
-        let idx_property = idx.property;
-        let idx_property_name_pat = idx.property_name_pat;
-        let idx_constructor = idx.constructor;
-        let idx_function_anonymous = idx.function_anonymous;
-        let idx_blind_nsclass = idx.blind_nsclass_from_string;
-        let idx_blind_perform = idx.blind_perform_selector;
+#[derive(Default)]
+pub struct SwiftMatch<'t> {
+    import_name: Option<Node<'t>>,
+    import_src: Option<Node<'t>>,
+    is_exported: bool,
+    decorators: Vec<String>,
+    heritage: Vec<String>,
+    type_annotation: Option<String>,
+    property_root: Option<Node<'t>>,
+    property_name: Option<Node<'t>>,
+    constructor_node: Option<Node<'t>>,
+    typealias_node: Option<Node<'t>>,
+    enum_case_root: Option<Node<'t>>,
+    enum_case_names: Vec<Node<'t>>,
+}
 
-        // Spans of already-emitted anonymous nodes — prevents duplicate
-        // <anonymous> nodes when both trailing and arg-position queries match
-        // the same lambda_literal.
-        let mut emitted_anon_spans: std::collections::HashSet<(u32, u32, u32, u32)> =
-            std::collections::HashSet::new();
+#[derive(Default)]
+pub struct SwiftFile {
+    /// Per (root, name-byte-offset) dedup. tree-sitter-swift fires the
+    /// same property_declaration match ~3-4× per declared name when the
+    /// optional `(type_annotation ...)?` resolves as both present and
+    /// absent alternatives, AND when nested `bound_identifier` re-binds
+    /// through pattern matching. Tracking (root_id, name_start_byte)
+    /// collapses true duplicates while keeping tuple-pattern
+    /// declarations (`let (a, b) = …`) distinct (different name byte
+    /// offsets within the same root).
+    seen_properties: HashSet<(usize, usize)>,
+}
 
-        // Per (root, name-byte-offset) dedup. tree-sitter-swift fires the
-        // same property_declaration match ~3-4× per declared name when the
-        // optional `(type_annotation ...)?` resolves as both present and
-        // absent alternatives, AND when nested `bound_identifier` re-binds
-        // through pattern matching. Tracking (root_id, name_start_byte)
-        // collapses true duplicates while keeping tuple-pattern
-        // declarations (`let (a, b) = …`) distinct (different name byte
-        // offsets within the same root).
-        let mut seen_properties: std::collections::HashSet<(usize, usize)> =
-            std::collections::HashSet::new();
+const fn step(pass: Pass, effect: Effect, op: Op<SwiftHook>) -> Step<SwiftHook> {
+    Step { pass, effect, op }
+}
 
-        while let Some(m) = matches.next() {
-            let mut name_node = None;
-            let mut kind = None;
-            let mut root_span_node = None;
+/// `start_position` / `end_position` cast with `as`, as every Swift
+/// declaration span was before the move; `node::span` saturates instead.
+fn position_span(node: Node<'_>) -> Span {
+    let start = node.start_position();
+    let end = node.end_position();
+    (
+        start.row as u32,
+        start.column as u32,
+        end.row as u32,
+        end.column as u32,
+    )
+}
 
-            let mut import_name = None;
-            let mut import_src = None;
+fn text<'s>(node: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
+    std::str::from_utf8(&source[node.start_byte()..node.end_byte()]).ok()
+}
 
-            let mut is_exported = false;
-            let mut decorators: Vec<String> = Vec::new();
-            let mut heritage = Vec::new();
-            let mut type_annotation = None;
+impl ParseSpec for SwiftSpec {
+    type Role = SwiftRole;
+    type Match<'t> = SwiftMatch<'t>;
+    type File<'t> = SwiftFile;
+    type Hook = SwiftHook;
 
-            let mut property_root: Option<tree_sitter::Node<'_>> = None;
-            let mut property_name: Option<tree_sitter::Node<'_>> = None;
-            let mut constructor_node: Option<tree_sitter::Node<'_>> = None;
-            let mut typealias_node: Option<tree_sitter::Node<'_>> = None;
-            let mut enum_case_root: Option<tree_sitter::Node<'_>> = None;
-            let mut enum_case_names: Vec<tree_sitter::Node<'_>> = Vec::new();
+    const KIND_CAPTURE: KindCapture = KindCapture::NameOverwrite;
+    /// Trailing or arg-position closure whose body contains a call. Emit an
+    /// `<anonymous>` Function node so attach_to_enclosing can host the inner
+    /// calls instead of dropping them (filter (A) callback registration — no
+    /// named enclosing scope). Both queries can match one lambda_literal,
+    /// hence the span dedupe.
+    const ANONYMOUS: Option<Anonymous> = Some(Anonymous {
+        capture: "function.anonymous",
+        call_kinds: &["call_expression"],
+        key: AnonKey::Span,
+    });
+    const BLIND: &'static [(&'static str, (&'static str, &'static str))] = &[
+        (
+            "blind.nsclass_from_string",
+            (
+                "swift-nsclass-from-string",
+                "NSClassFromString(<expr>) — runtime Objective-C class load by name; resolved class body is not statically determinable",
+            ),
+        ),
+        (
+            "blind.perform_selector",
+            (
+                "swift-perform-selector",
+                "<expr>.perform(Selector(<name>)) — Objective-C selector dispatch; target method bound at runtime via selector lookup",
+            ),
+        ),
+    ];
+    const FIELD_READS: Option<FieldReads> = Some(FieldReads {
+        member_kinds: &["navigation_expression"],
+        names: NameRefSpec {
+            ident_kinds: &["simple_identifier"],
+            kind: NameRefKind::Value,
+            binding_fields: &[
+                ("property_declaration", "name"),
+                ("for_statement", "item"),
+                ("catch_block", "error"),
+            ],
+            skip_kinds: &[
+                "import_declaration",
+                "attribute",
+                "type_annotation",
+                "user_type",
+                "type_arguments",
+            ],
+            skip_parents: &["value_argument_label"],
+            call_suffixes: &["call_suffix"],
+            ..NameRefSpec::EMPTY
+        },
+    });
+    const VARIANT_REFS: Option<VariantRefSpec> = Some(VariantRefSpec {
+        path_kinds: &["navigation_expression"],
+        label_parents: &[],
+        bare_label_parents: &[],
+        bare_expressions: false,
+        token_trees: false,
+    });
+    const STEPS: &'static [Step<SwiftHook>] = &[
+        step(Pass::Query, Effect::Nodes, Op::Query),
+        step(Pass::Calls, Effect::Nodes, Op::Hook(SwiftHook::Calls)),
+        step(Pass::Walk, Effect::Nodes, Op::FieldReads),
+        step(Pass::Walk, Effect::Nodes, Op::VariantRefs),
+        step(
+            Pass::Walk,
+            Effect::Neutral,
+            Op::Hook(SwiftHook::TextFrameworks),
+        ),
+        step(Pass::Walk, Effect::Neutral, Op::FunctionMeta),
+        step(
+            Pass::Build,
+            Effect::Nodes,
+            Op::Hook(SwiftHook::MemberOwners),
+        ),
+        step(Pass::Build, Effect::Nodes, Op::StampOwners),
+    ];
 
-            for cap in m.captures() {
-                let cap_idx = cap.index;
-                if let Some(k_from_spec) = self
-                    .capture_kind_by_idx
-                    .get(cap_idx as usize)
-                    .copied()
-                    .flatten()
-                {
-                    // Single config-driven dispatch replaces the five explicit
-                    // Class/Function/Method/Interface/Trait arms.
-                    // Source of truth: SwiftSpec::CAPTURE_KIND in spec.rs.
-                    name_node = Some(cap.node);
-                    kind = Some(k_from_spec);
-                } else if Some(cap_idx) == idx_import_name {
-                    import_name = Some(cap.node);
-                } else if Some(cap_idx) == idx_import_source {
-                    import_src = Some(cap.node);
-                } else if Some(cap_idx) == idx_function
-                    || Some(cap_idx) == idx_class
-                    || Some(cap_idx) == idx_method
-                    || Some(cap_idx) == idx_interface
-                    || Some(cap_idx) == idx_trait
-                {
-                    root_span_node = Some(cap.node);
-                } else if Some(cap_idx) == idx_export {
-                    if let Ok(export_str) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        if export_str == "public" || export_str == "open" {
-                            is_exported = true;
-                        }
-                    }
-                } else if Some(cap_idx) == idx_decorator {
-                    if let Ok(d_str) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        decorators.push(d_str.trim().to_string());
-                    }
-                } else if Some(cap_idx) == idx_heritage {
-                    if let Ok(heritage_str) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        heritage.push(heritage_str.to_string());
-                    }
-                } else if Some(cap_idx) == idx_type {
-                    if let Ok(type_str) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        type_annotation = Some(type_str.to_string());
-                    }
-                } else if Some(cap_idx) == idx_property {
-                    property_root = Some(cap.node);
-                } else if Some(cap_idx) == idx_property_name_pat {
-                    property_name = Some(cap.node);
-                } else if Some(cap_idx) == idx_constructor {
-                    constructor_node = Some(cap.node);
-                } else if Some(cap_idx) == idx_typealias {
-                    typealias_node = Some(cap.node);
-                } else if Some(cap_idx) == idx_enum_case {
-                    enum_case_root = Some(cap.node);
-                } else if Some(cap_idx) == idx_enum_case_name {
-                    enum_case_names.push(cap.node);
-                } else if Some(cap_idx) == idx_function_anonymous {
-                    // Trailing or arg-position closure whose body contains a call.
-                    // Emit an <anonymous> Function node so attach_to_enclosing can
-                    // host the inner calls instead of dropping them (filter (A)
-                    // callback registration — no named enclosing scope).
-                    if body_has_call(cap.node) {
-                        let span = node_span(&cap.node);
-                        if emitted_anon_spans.insert(span) {
-                            nodes.push(RawNode {
-                                decorators: Vec::new(),
-                                is_exported: false,
-                                heritage: Vec::new(),
-                                type_annotation: None,
-                                name: format!("<anonymous:{}:{}>", span.0 + 1, span.1),
-                                kind: NodeKind::Function,
-                                span,
-                                calls: Vec::new(),
-                                field_reads: Vec::new(),
-                                owner_class: None,
-                                content_hash: ecp_core::uid::xxh3_64_bytes(
-                                    &source[cap.node.start_byte()..cap.node.end_byte()],
-                                ),
-                            });
-                        }
-                    }
-                } else if Some(cap_idx) == idx_blind_nsclass {
-                    push_blind_spot(
-                        &mut blind_spots,
-                        BLIND_SPEC[0],
-                        &cap.node,
-                        path,
-                        is_test_file,
-                    );
-                } else if Some(cap_idx) == idx_blind_perform {
-                    push_blind_spot(
-                        &mut blind_spots,
-                        BLIND_SPEC[1],
-                        &cap.node,
-                        path,
-                        is_test_file,
-                    );
-                }
-            }
+    fn query() -> anyhow::Result<Query> {
+        Ok(Query::new(
+            &tree_sitter_swift::LANGUAGE.into(),
+            include_str!("queries.scm"),
+        )?)
+    }
 
-            // Swift `typealias MyInt = Int` / `typealias R<T> = Swift.Result<T, Error>`.
-            // Emit twice:
-            //   1. A Typedef RawNode so graph queries by NodeKind find it (parity
-            //      with Rust `type_item` and TS `type_alias_declaration`, both of
-            //      which map to NodeKind::Typedef). The aggregator's EQUIV class
-            //      `{Typedef, TypeAlias}` pairs this with ref's TypeAlias label.
-            //   2. A RawImport with alias = Some(lhs) so the binding still surfaces
-            //      through the alias-resolution path used by Java static-import.
-            // rhs text covers the full type expression (including generics).
-            if let Some(ta_node) = typealias_node {
-                if let Some((lhs, rhs)) = extract_typealias_parts(ta_node, source) {
-                    let start = ta_node.start_position();
-                    let end = ta_node.end_position();
-                    nodes.push(RawNode {
-                        decorators: vec![],
-                        is_exported,
-                        heritage: vec![],
-                        type_annotation: None,
-                        name: lhs.clone(),
-                        kind: NodeKind::Typedef,
-                        span: (
-                            start.row as u32,
-                            start.column as u32,
-                            end.row as u32,
-                            end.column as u32,
-                        ),
-                        calls: Vec::new(),
-                        field_reads: Vec::new(),
-                        owner_class: None,
-                        content_hash: ecp_core::uid::xxh3_64_bytes(
-                            &source[ta_node.start_byte()..ta_node.end_byte()],
-                        ),
-                    });
-                    imports.push(RawImport {
-                        alias: Some(lhs.clone()),
-                        imported_name: lhs,
-                        source: rhs,
-                        binding_kind: None,
-                    });
-                }
-            }
+    fn role(capture: &str) -> Option<SwiftRole> {
+        Some(match capture {
+            "function" | "class" | "method" | "interface" | "trait" => SwiftRole::Root,
+            "import.name" => SwiftRole::ImportName,
+            "import.source" => SwiftRole::ImportSource,
+            "export" => SwiftRole::Export,
+            "decorator" => SwiftRole::Decorator,
+            "heritage" => SwiftRole::Heritage,
+            "type" => SwiftRole::Type,
+            "property" => SwiftRole::Property,
+            "property.name.pat" => SwiftRole::PropertyNamePat,
+            "constructor" => SwiftRole::Constructor,
+            "typealias" => SwiftRole::Typealias,
+            "enum_case" => SwiftRole::EnumCase,
+            "enum_case.name" => SwiftRole::EnumCaseName,
+            _ => return None,
+        })
+    }
 
-            // Swift enum cases — `case foo` / `case bar(Int)` / `case a, b, c`.
-            // tree-sitter-swift packs all names of a multi-name `case a, b, c`
-            // into a single `enum_entry`, each as a separate `simple_identifier`
-            // child, so the query produces N name captures per match. Always
-            // type-level (enum_entry only ever sits inside enum_class_body),
-            // so no scope walker is needed. Emits EnumVariant (changed from
-            // Property — owner_class stamped by stamp_owner_class_by_span).
-            if let (Some(ec_root), false) = (enum_case_root, enum_case_names.is_empty()) {
-                let start = ec_root.start_position();
-                let end = ec_root.end_position();
-                let span = (
-                    start.row as u32,
-                    start.column as u32,
-                    end.row as u32,
-                    end.column as u32,
-                );
-                for name_node in &enum_case_names {
-                    if let Ok(name_str) =
-                        std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()])
-                    {
-                        nodes.push(RawNode {
-                            decorators: vec![],
-                            is_exported: true, // enum cases follow enum visibility
-                            heritage: vec![],
-                            type_annotation: None,
-                            name: name_str.to_string(),
-                            kind: NodeKind::EnumVariant,
-                            span,
-                            calls: Vec::new(),
-                            field_reads: Vec::new(),
-                            owner_class: None, // stamped by stamp_owner_class_by_span
-                            content_hash: ecp_core::uid::xxh3_64_bytes(
-                                &source[ec_root.start_byte()..ec_root.end_byte()],
-                            ),
-                        });
+    fn parse_tree(source: &[u8]) -> Option<Tree> {
+        PARSER.with(|p| parse_with_budget(&mut p.borrow_mut(), source, ParseBudget::DEFAULT))
+    }
+
+    fn capture<'t>(
+        r: SwiftRole,
+        node: Node<'t>,
+        d: &mut DeclSlot<'t>,
+        m: &mut SwiftMatch<'t>,
+        _f: &mut SwiftFile,
+        cx: &mut FileCx<'t>,
+    ) {
+        let source = cx.source;
+        match r {
+            SwiftRole::Root => d.root = Some(node),
+            SwiftRole::ImportName => m.import_name = Some(node),
+            SwiftRole::ImportSource => m.import_src = Some(node),
+            SwiftRole::Export => {
+                if let Some(export_str) = text(node, source) {
+                    if export_str == "public" || export_str == "open" {
+                        m.is_exported = true;
                     }
                 }
             }
+            SwiftRole::Decorator => {
+                if let Some(d_str) = text(node, source) {
+                    m.decorators.push(d_str.trim().to_string());
+                }
+            }
+            SwiftRole::Heritage => {
+                if let Some(heritage_str) = text(node, source) {
+                    m.heritage.push(heritage_str.to_string());
+                }
+            }
+            SwiftRole::Type => {
+                if let Some(type_str) = text(node, source) {
+                    m.type_annotation = Some(type_str.to_string());
+                }
+            }
+            SwiftRole::Property => m.property_root = Some(node),
+            SwiftRole::PropertyNamePat => m.property_name = Some(node),
+            SwiftRole::Constructor => m.constructor_node = Some(node),
+            SwiftRole::Typealias => m.typealias_node = Some(node),
+            SwiftRole::EnumCase => m.enum_case_root = Some(node),
+            SwiftRole::EnumCaseName => m.enum_case_names.push(node),
+        }
+    }
 
-            // Swift `init(...)` → Constructor. Emitted here before the
-            // function_declaration path so `init` never falls through to Function.
-            if let Some(ctor_node) = constructor_node {
-                let start = ctor_node.start_position();
-                let end = ctor_node.end_position();
-                nodes.push(RawNode {
-                    decorators: vec![],
+    fn end_match<'t>(
+        d: DeclSlot<'t>,
+        m: &mut SwiftMatch<'t>,
+        f: &mut SwiftFile,
+        cx: &mut FileCx<'t>,
+    ) {
+        let source = cx.source;
+        let SwiftMatch {
+            import_name,
+            import_src,
+            is_exported,
+            mut decorators,
+            heritage,
+            type_annotation,
+            property_root,
+            property_name,
+            constructor_node,
+            typealias_node,
+            enum_case_root,
+            enum_case_names,
+        } = std::mem::take(m);
+
+        // Swift `typealias MyInt = Int` / `typealias R<T> = Swift.Result<T, Error>`.
+        // Emit twice:
+        //   1. A Typedef RawNode so graph queries by NodeKind find it (parity
+        //      with Rust `type_item` and TS `type_alias_declaration`, both of
+        //      which map to NodeKind::Typedef). The aggregator's EQUIV class
+        //      `{Typedef, TypeAlias}` pairs this with ref's TypeAlias label.
+        //   2. A RawImport with alias = Some(lhs) so the binding still surfaces
+        //      through the alias-resolution path used by Java static-import.
+        // rhs text covers the full type expression (including generics).
+        if let Some(ta_node) = typealias_node {
+            if let Some((lhs, rhs)) = extract_typealias_parts(ta_node, source) {
+                cx.nodes.push(RawNode {
                     is_exported,
-                    heritage: vec![],
-                    type_annotation: None,
-                    name: "init".to_string(),
-                    kind: NodeKind::Constructor,
-                    span: (
-                        start.row as u32,
-                        start.column as u32,
-                        end.row as u32,
-                        end.column as u32,
-                    ),
-                    calls: Vec::new(),
-                    field_reads: Vec::new(),
-                    owner_class: None,
-                    content_hash: ecp_core::uid::xxh3_64_bytes(
-                        &source[ctor_node.start_byte()..ctor_node.end_byte()],
-                    ),
+                    ..node::decl(
+                        lhs.clone(),
+                        NodeKind::Typedef,
+                        position_span(ta_node),
+                        &source[ta_node.start_byte()..ta_node.end_byte()],
+                    )
                 });
+                let alias = Some(lhs.clone());
+                cx.imports.push(imports::raw(rhs, lhs, alias, None));
             }
+        }
 
-            // Swift property: `var x: Int` / `var x = 0` / `let (a,b) = ...`.
-            // Emitted only at class/struct/protocol/extension/top-level scope —
-            // filter out locals inside function_body, computed_property,
-            // willset_didset_block, and lambda_literal.
-            if let (Some(pr_root), Some(pat_node)) = (property_root, property_name) {
-                // Locality check: walk up from property_declaration.
-                // Stops at the first scope boundary and records which one:
-                //   source_file        → top-level Variable
-                //   class/struct/etc.  → member Property
-                //   function_body / computed_property / lambda / control-flow
-                //                      → local, skip entirely
-                let mut anc = pr_root.parent();
-                let mut emit_kind: Option<NodeKind> = None;
-                while let Some(a) = anc {
-                    match a.kind() {
-                        "function_body"
-                        | "computed_property"
-                        | "willset_didset_block"
-                        | "lambda_literal"
-                        | "if_statement"
-                        | "guard_statement"
-                        | "for_statement"
-                        | "while_statement" => {
-                            // local binding — skip
-                            break;
-                        }
-                        "class_body" | "protocol_body" | "enum_class_body" => {
-                            emit_kind = Some(NodeKind::Property);
-                            break;
-                        }
-                        "source_file" => {
-                            emit_kind = Some(NodeKind::Variable);
-                            break;
-                        }
-                        _ => {}
-                    }
-                    anc = a.parent();
-                }
-                let Some(node_kind) = emit_kind else { continue };
-
-                // Walk the property_declaration's direct children to find
-                // type_annotation (if any). Text is `: <type>` — drop the colon.
-                let type_ann = property_type_from_decl(pr_root, source);
-
-                // Collect (name, byte_offset) pairs from the pattern node.
-                // Handles both `var x` (one leaf) and `let (a, b)` (multiple).
-                let names = collect_pattern_names(pat_node, source);
-
-                let start = pr_root.start_position();
-                let end = pr_root.end_position();
-                let span = (
-                    start.row as u32,
-                    start.column as u32,
-                    end.row as u32,
-                    end.column as u32,
-                );
-
-                for (name_str, name_byte) in names {
-                    if !seen_properties.insert((pr_root.id(), name_byte)) {
-                        continue;
-                    }
-                    nodes.push(RawNode {
-                        decorators: vec![],
-                        is_exported: true,
-                        heritage: vec![],
-                        type_annotation: type_ann.clone(),
-                        name: name_str,
-                        kind: node_kind,
-                        span,
-                        calls: Vec::new(),
-                        field_reads: Vec::new(),
-                        owner_class: None,
-                        content_hash: ecp_core::uid::xxh3_64_bytes(
-                            &source[pr_root.start_byte()..pr_root.end_byte()],
-                        ),
-                    });
-                }
-            }
-
-            if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
-                // Disambiguate class_declaration into Class/Struct/Enum via leading keyword.
-                // `extension TypeName { ... }` shares the same class_declaration CST node in
-                // tree-sitter-swift. Extensions are additive continuations of an existing type —
-                // emitting a duplicate Class/Struct/Enum node for them is the root cause of
-                // ~700 uid collisions in the Swift cluster. Skip the type-level emit; members
-                // declared inside the extension body still emit individually via the
-                // function_declaration / property_declaration / init_declaration paths.
-                let k = if k == NodeKind::Class {
-                    match swift_decl_keyword(root) {
-                        "extension" => continue,
-                        "struct" => NodeKind::Struct,
-                        "enum" => NodeKind::Enum,
-                        _ => NodeKind::Class,
-                    }
-                } else if k == NodeKind::Function && is_class_method(root) {
-                    NodeKind::Method
-                } else {
-                    k
-                };
-                if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
-                    let start = root.start_position();
-                    let end = root.end_position();
-                    // `@objc(extName)` exposes a Swift symbol under an
-                    // Obj-C-visible alias. Emit an alias-only RawImport so the
-                    // rename binding shows up in the named-binding dimension
-                    // alongside Java static-import aliases. The attribute node
-                    // is nested under `(modifiers)` (not a direct
-                    // `function_declaration` child), so walk the subtree.
-                    if k == NodeKind::Method && has_override_modifier(root, source) {
-                        decorators.push(OVERRIDE_SENTINEL.to_string());
-                    }
-                    if k == NodeKind::Function || k == NodeKind::Method {
-                        if let Some(ext) = find_objc_rename_attribute(root, source) {
-                            imports.push(RawImport {
-                                alias: Some(ext.clone()),
-                                imported_name: ext,
-                                source: name_str.to_string(),
-                                binding_kind: None,
-                            });
-                        }
-                    }
-                    nodes.push(RawNode {
-                        decorators,
-                        is_exported,
-                        heritage,
-                        type_annotation,
-                        name: name_str.to_string(),
-                        kind: k,
-                        span: (
-                            start.row as u32,
-                            start.column as u32,
-                            end.row as u32,
-                            end.column as u32,
-                        ),
-                        calls: Vec::new(),
-                        field_reads: Vec::new(),
-                        owner_class: None,
-                        content_hash: ecp_core::uid::xxh3_64_bytes(
-                            &source[root.start_byte()..root.end_byte()],
-                        ),
-                    });
-                }
-            }
-
-            if let (Some(i_name), Some(i_src)) = (import_name, import_src) {
-                if let (Ok(name_str), Ok(src_str)) = (
-                    std::str::from_utf8(&source[i_name.start_byte()..i_name.end_byte()]),
-                    std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]),
-                ) {
-                    imports.push(RawImport {
-                        alias: None,
-                        imported_name: name_str.to_string(),
-                        source: src_str.to_string(),
-                        binding_kind: None,
+        // Swift enum cases — `case foo` / `case bar(Int)` / `case a, b, c`.
+        // tree-sitter-swift packs all names of a multi-name `case a, b, c`
+        // into a single `enum_entry`, each as a separate `simple_identifier`
+        // child, so the query produces N name captures per match. Always
+        // type-level (enum_entry only ever sits inside enum_class_body),
+        // so no scope walker is needed. Emits EnumVariant (changed from
+        // Property — owner_class stamped by stamp_owner_class_by_span).
+        if let (Some(ec_root), false) = (enum_case_root, enum_case_names.is_empty()) {
+            let span = position_span(ec_root);
+            for name_node in &enum_case_names {
+                if let Some(name_str) = text(*name_node, source) {
+                    cx.nodes.push(RawNode {
+                        is_exported: true, // enum cases follow enum visibility
+                        ..node::decl(
+                            name_str.to_string(),
+                            NodeKind::EnumVariant,
+                            span,
+                            &source[ec_root.start_byte()..ec_root.end_byte()],
+                        )
                     });
                 }
             }
         }
 
-        drop(_p);
-        let _p = parse_prof::span(Pass::Calls);
-        // Extract call sites with receiver-type binding: `self.method()` →
-        // `Class.method`, `super.method()` → `Super.method`, typed-var
-        // `obj.method()` → `Type.method` (P0 of Constructor Inference, mirrors
-        // Python's `4e4fb1b` for the resolver's Tier 2.5 qualifier lookup).
-        let bindings = collect_bindings(tree.root_node(), source);
-        let (raw_path_literals, raw_sql_refs) =
-            extract_swift_calls_and_path_literals(tree.root_node(), source, &mut nodes, &bindings);
-        drop(_p);
-        let _p = parse_prof::span(Pass::Walk);
-        crate::calls::extract_field_reads(
-            tree.root_node(),
-            source,
-            &mut nodes,
-            &["navigation_expression"],
-            &crate::calls::NameRefSpec {
-                ident_kinds: &["simple_identifier"],
-                kind: crate::calls::NameRefKind::Value,
-                binding_fields: &[
-                    ("property_declaration", "name"),
-                    ("for_statement", "item"),
-                    ("catch_block", "error"),
-                ],
-                skip_kinds: &[
-                    "import_declaration",
-                    "attribute",
-                    "type_annotation",
-                    "user_type",
-                    "type_arguments",
-                ],
-                skip_parents: &["value_argument_label"],
-                call_suffixes: &["call_suffix"],
-                ..crate::calls::NameRefSpec::EMPTY
-            },
-        );
-        crate::calls::extract_variant_refs(
-            tree.root_node(),
-            source,
-            &mut nodes,
-            &crate::calls::VariantRefSpec {
-                path_kinds: &["navigation_expression"],
-                label_parents: &[],
-                bare_label_parents: &[],
-                bare_expressions: false,
-                token_trees: false,
-            },
-        );
+        // Swift `init(...)` → Constructor. Emitted here before the
+        // function_declaration path so `init` never falls through to Function.
+        if let Some(ctor_node) = constructor_node {
+            cx.nodes.push(RawNode {
+                is_exported,
+                ..node::decl(
+                    "init".to_string(),
+                    NodeKind::Constructor,
+                    position_span(ctor_node),
+                    &source[ctor_node.start_byte()..ctor_node.end_byte()],
+                )
+            });
+        }
 
-        let framework_refs = detect_ast_framework_patterns(source, SWIFT_FRAMEWORKS);
+        // Swift property: `var x: Int` / `var x = 0` / `let (a,b) = ...`.
+        // Emitted only at class/struct/protocol/extension/top-level scope —
+        // filter out locals inside function_body, computed_property,
+        // willset_didset_block, and lambda_literal.
+        if let (Some(pr_root), Some(pat_node)) = (property_root, property_name) {
+            // Locality check: walk up from property_declaration.
+            // Stops at the first scope boundary and records which one:
+            //   source_file        → top-level Variable
+            //   class/struct/etc.  → member Property
+            //   function_body / computed_property / lambda / control-flow
+            //                      → local, skip entirely
+            let mut anc = pr_root.parent();
+            let mut emit_kind: Option<NodeKind> = None;
+            while let Some(a) = anc {
+                match a.kind() {
+                    "function_body"
+                    | "computed_property"
+                    | "willset_didset_block"
+                    | "lambda_literal"
+                    | "if_statement"
+                    | "guard_statement"
+                    | "for_statement"
+                    | "while_statement" => {
+                        // local binding — skip
+                        break;
+                    }
+                    "class_body" | "protocol_body" | "enum_class_body" => {
+                        emit_kind = Some(NodeKind::Property);
+                        break;
+                    }
+                    "source_file" => {
+                        emit_kind = Some(NodeKind::Variable);
+                        break;
+                    }
+                    _ => {}
+                }
+                anc = a.parent();
+            }
+            // A local binding ends the whole match: the declaration and
+            // import sections below never ran for it before the move.
+            let Some(node_kind) = emit_kind else { return };
 
-        let raw_function_metas =
-            crate::function_meta::swift::extract(tree.root_node(), source, &nodes, file_category);
+            // Walk the property_declaration's direct children to find
+            // type_annotation (if any). Text is `: <type>` — drop the colon.
+            let type_ann = property_type_from_decl(pr_root, source);
 
-        drop(_p);
-        let _p = parse_prof::span(Pass::Build);
-        stamp_member_owners(tree.root_node(), source, &mut nodes);
-        crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
-        drop(_p);
-        Ok(LocalGraph {
-            content_hash: [0; 8],
-            routes: vec![],
-            file_path: path.to_path_buf(),
-            nodes,
-            imports,
-            documents: vec![],
-            route_receivers: None,
-            framework_refs,
-            fanout_refs: vec![],
-            blind_spots,
-            schema_fields: None,
-            event_topics: None,
-            tx_scopes: None,
-            path_literals: (!raw_path_literals.is_empty())
-                .then(|| raw_path_literals.into_boxed_slice()),
-            sql_refs: (!raw_sql_refs.is_empty()).then(|| raw_sql_refs.into_boxed_slice()),
-            call_metas: vec![],
-            raw_function_metas,
-            export_aliases: None,
-            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
-        })
+            // Collect (name, byte_offset) pairs from the pattern node.
+            // Handles both `var x` (one leaf) and `let (a, b)` (multiple).
+            let names = collect_pattern_names(pat_node, source);
+
+            let span = position_span(pr_root);
+
+            for (name_str, name_byte) in names {
+                if !f.seen_properties.insert((pr_root.id(), name_byte)) {
+                    continue;
+                }
+                cx.nodes.push(RawNode {
+                    is_exported: true,
+                    type_annotation: type_ann.clone(),
+                    ..node::decl(
+                        name_str,
+                        node_kind,
+                        span,
+                        &source[pr_root.start_byte()..pr_root.end_byte()],
+                    )
+                });
+            }
+        }
+
+        if let (Some(n), Some(k), Some(root)) = (d.name, d.kind, d.root) {
+            // Disambiguate class_declaration into Class/Struct/Enum via leading keyword.
+            // `extension TypeName { ... }` shares the same class_declaration CST node in
+            // tree-sitter-swift. Extensions are additive continuations of an existing type —
+            // emitting a duplicate Class/Struct/Enum node for them is the root cause of
+            // ~700 uid collisions in the Swift cluster. Skip the type-level emit; members
+            // declared inside the extension body still emit individually via the
+            // function_declaration / property_declaration / init_declaration paths.
+            // The `return` also skips the import section, as the old `continue` did.
+            let k = if k == NodeKind::Class {
+                match swift_decl_keyword(root) {
+                    "extension" => return,
+                    "struct" => NodeKind::Struct,
+                    "enum" => NodeKind::Enum,
+                    _ => NodeKind::Class,
+                }
+            } else if k == NodeKind::Function && is_class_method(root) {
+                NodeKind::Method
+            } else {
+                k
+            };
+            if let Some(name_str) = text(n, source) {
+                // `@objc(extName)` exposes a Swift symbol under an
+                // Obj-C-visible alias. Emit an alias-only RawImport so the
+                // rename binding shows up in the named-binding dimension
+                // alongside Java static-import aliases. The attribute node
+                // is nested under `(modifiers)` (not a direct
+                // `function_declaration` child), so walk the subtree.
+                if k == NodeKind::Method && has_override_modifier(root, source) {
+                    decorators.push(OVERRIDE_SENTINEL.to_string());
+                }
+                if k == NodeKind::Function || k == NodeKind::Method {
+                    if let Some(ext) = find_objc_rename_attribute(root, source) {
+                        let alias = Some(ext.clone());
+                        cx.imports
+                            .push(imports::raw(name_str.to_string(), ext, alias, None));
+                    }
+                }
+                cx.nodes.push(RawNode {
+                    decorators,
+                    is_exported,
+                    heritage,
+                    type_annotation,
+                    ..node::decl(
+                        name_str.to_string(),
+                        k,
+                        position_span(root),
+                        &source[root.start_byte()..root.end_byte()],
+                    )
+                });
+            }
+        }
+
+        if let (Some(i_name), Some(i_src)) = (import_name, import_src) {
+            if let (Some(name_str), Some(src_str)) = (text(i_name, source), text(i_src, source)) {
+                cx.imports.push(imports::raw(
+                    src_str.to_string(),
+                    name_str.to_string(),
+                    None,
+                    None,
+                ));
+            }
+        }
+    }
+
+    fn hook<'t>(h: SwiftHook, _c: &Compiled<Self>, _f: &mut SwiftFile, cx: &mut FileCx<'t>) {
+        let root = cx.tree.root_node();
+        match h {
+            SwiftHook::Calls => {
+                // Extract call sites with receiver-type binding: `self.method()` →
+                // `Class.method`, `super.method()` → `Super.method`, typed-var
+                // `obj.method()` → `Type.method` (P0 of Constructor Inference, mirrors
+                // Python's `4e4fb1b` for the resolver's Tier 2.5 qualifier lookup).
+                let bindings = collect_bindings(root, cx.source);
+                let (raw_path_literals, raw_sql_refs) = extract_swift_calls_and_path_literals(
+                    root,
+                    cx.source,
+                    &mut cx.nodes,
+                    &bindings,
+                );
+                cx.path_literals = raw_path_literals;
+                cx.sql_refs = raw_sql_refs;
+            }
+            SwiftHook::TextFrameworks => {
+                cx.framework_refs = detect_ast_framework_patterns(cx.source, SWIFT_FRAMEWORKS);
+            }
+            SwiftHook::MemberOwners => stamp_member_owners(root, cx.source, &mut cx.nodes),
+        }
+    }
+
+    fn function_meta(
+        root: Node<'_>,
+        source: &[u8],
+        nodes: &[RawNode],
+        category: FileCategory,
+    ) -> Vec<RawFunctionMeta> {
+        crate::function_meta::swift::extract(root, source, nodes, category)
     }
 }
 
@@ -748,23 +631,6 @@ fn stamp_member_owners(root: tree_sitter::Node<'_>, source: &[u8], nodes: &mut [
             .min_by_key(|(span, _)| span_area(*span))
             .map(|(_, name)| name.clone());
     }
-}
-
-/// Whether `node`'s subtree contains a `call_expression`. Gates emission of
-/// `<anonymous>` callback nodes so closures without calls (e.g. `arr.map { $0 + 1 }`)
-/// stay out of the graph.
-fn body_has_call(node: tree_sitter::Node) -> bool {
-    let mut stack = vec![node];
-    while let Some(n) = stack.pop() {
-        if n.kind() == "call_expression" {
-            return true;
-        }
-        let mut c = n.walk();
-        for child in n.children(&mut c) {
-            stack.push(child);
-        }
-    }
-    false
 }
 
 /// Return the leading keyword of a `class_declaration` node: "class", "struct", "enum",
