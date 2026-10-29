@@ -526,6 +526,8 @@ Sub-agents edit only. The main session runs every cargo command, serially, with 
 | 7 | implementer | `driver/tap.rs`; `Op::EventTopics` and `Op::SchemaFields` in `driver/mod.rs`; Go and Rust switch to `Op::EventTopics`. | 4: `perf(driver): one query pass feeds event topics and schema fields` |
 | 8 | main session | Build, test, the dump gate, the rule of §5.3 against commit 3. Drop commit 4 if the rule fails. | — |
 
+**Outcome of step 8 (2026-10-30).** Commit 4 passed the dump gate and its 18 tap tests, and failed the §5.3 rule: Rust peak RSS median 238 048 KB against a commit-3 maximum of 236 356 KB, in the second of two 5-run A/Bs. Every per-pass time and the unprofiled wall time passed. The Go and Rust corpus holds no event-import file, so the re-query never ran and the tap's gain was unmeasurable there. Commit 4 is dropped. Its patch is `.claude/salvaged-patches/2026-10-30-p3-t2c4-event-schema-tap.patch` (gitignored, local). The tap returns as its own commit after T3, with TypeScript switched to `Op::SchemaFields`: TypeScript re-runs its query for schema fields on every file, so the gain is measurable on the TypeScript corpus. That commit is a driver change and passes the same dump gate and §5.3 rule against the commit before it.
+
 ### 6.3 Tests and the pass criterion
 
 | Test | Commit | Asserts |
