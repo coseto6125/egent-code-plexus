@@ -1,42 +1,39 @@
-use super::receiver_types::extract_php_calls_and_path_literals;
+use super::receiver_types::{
+    extract_php_calls_and_path_literals, literal_callable, passed_callable,
+};
 use super::spec::PhpSpec;
+use crate::calls::{NameRefSpec, VariantRefSpec};
+use crate::driver::{
+    self, imports, node, AnonKey, Anonymous, Compiled, DeclSlot, Effect, FieldReads, FileCx,
+    KindCapture, Op, ParseSpec, Step, TxRule,
+};
 use crate::framework_confidence;
 use crate::framework_helpers::{
-    collect_symfony_transactional_scopes, enclosing_function_name, has_import_from, node_span,
-    push_blind_spot, MODULE_LEVEL_SOURCE,
+    collect_symfony_transactional_scopes, has_import_from, node_span, push_blind_spot,
 };
 use crate::parse_budget::{parse_with_budget, ParseBudget};
-use ecp_core::analyzer::lang_spec::LangSpec;
-use ecp_core::analyzer::parse_prof::{self, Pass};
+use ecp_core::analyzer::parse_prof::Pass;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{
-    BlindSpot, LocalGraph, NameRef, NameRefKind, RawFrameworkRef, RawImport, RawNode,
+    LocalGraph, NameRef, NameRefKind, RawFrameworkRef, RawFunctionMeta, RawImport, RawNode,
+    RawRoute, Span,
 };
-use ecp_core::graph::NodeKind;
+use ecp_core::graph::{FileCategory, NodeKind};
+use rustc_hash::FxHashMap;
 use std::path::Path;
-use streaming_iterator::StreamingIterator;
-use tree_sitter::{Query, QueryCursor};
+use tree_sitter::{Node, Query, Tree};
 
-/// Blind-spot kind/hint pairs, indexed by `parse_file`: the first three by
-/// the capture-index dispatch, the last after the receiver walk.
-const BLIND_SPEC: &[(&str, &str)] = &[
-    (
-        "php-eval",
-        "eval(arg) — runtime PHP code execution; argument expression is not statically determinable as a callee",
-    ),
-    (
-        "php-call-user-func",
-        "call_user_func(<callable>, ...) with non-literal callable — dispatch through a variable or expression resolved at runtime",
-    ),
-    (
-        "php-variable-call",
-        "$<var>(...) — variable-function call; target callable bound at runtime via the variable's value",
-    ),
-    (
-        "php-variable-method-call",
-        "Cls::$m() / $o->$m() / $o?->{expr}() — method name bound at runtime; no edge names the called method",
-    ),
-];
+/// Pushed by the `blind.call_user_func` role, only for a non-literal callable.
+const BLIND_CALL_USER_FUNC: (&str, &str) = (
+    "php-call-user-func",
+    "call_user_func(<callable>, ...) with non-literal callable — dispatch through a variable or expression resolved at runtime",
+);
+
+/// Pushed by the calls step for a dynamic call with no complete fan-out.
+const BLIND_VARIABLE_METHOD_CALL: (&str, &str) = (
+    "php-variable-method-call",
+    "Cls::$m() / $o->$m() / $o?->{expr}() — method name bound at runtime; no edge names the called method",
+);
 
 /// Walk the root of a parsed PHP file and emit one `BlindSpot` per
 /// `class_declaration` that looks like a pre-8.1 enum imitation:
@@ -89,29 +86,6 @@ fn detect_enum_imitation_blind_spots(
             }
         }
     }
-}
-
-/// Whether `node`'s subtree contains a PHP call expression. Gates emission of
-/// `<anonymous>` callback nodes so empty callbacks (e.g. `array_map(fn($x) => $x * 2, $a)`)
-/// stay out of the graph.
-fn body_has_call(node: tree_sitter::Node) -> bool {
-    let mut stack = vec![node];
-    while let Some(n) = stack.pop() {
-        match n.kind() {
-            "function_call_expression"
-            | "member_call_expression"
-            | "nullsafe_member_call_expression"
-            | "scoped_call_expression" => {
-                return true;
-            }
-            _ => {}
-        }
-        let mut c = n.walk();
-        for child in n.children(&mut c) {
-            stack.push(child);
-        }
-    }
-    false
 }
 
 /// Record `Type::CONST` reads only when the parser emitted that exact constant
@@ -373,109 +347,13 @@ fn extract_controller_action(arr_node: tree_sitter::Node, source: &[u8]) -> Opti
 }
 
 pub struct PhpProvider {
-    query: Query,
-    /// Capture index → NodeKind mapping, pre-resolved from
-    /// `PhpSpec::CAPTURE_KIND` at provider construction. The hot loop
-    /// looks up by integer index — equivalent perf to the previous
-    /// hard-coded if-chain, but the source of truth lives in `spec.rs`.
-    capture_kind_by_idx: Vec<Option<NodeKind>>,
-    /// All capture indices resolved once at provider construction.
-    /// Cuts ~25 `query.capture_index_for_name()` calls per parse_file
-    /// (~73k hashmap lookups across the 2907-file .sample_repo corpus).
-    indices: PhpCaptureIndices,
-}
-
-struct PhpCaptureIndices {
-    type_function: Option<u32>,
-    type_method: Option<u32>,
-    export: Option<u32>,
-    heritage: Option<u32>,
-    decorator: Option<u32>,
-    import_source: Option<u32>,
-    import_alias: Option<u32>,
-    function: Option<u32>,
-    class: Option<u32>,
-    interface: Option<u32>,
-    method: Option<u32>,
-    property: Option<u32>,
-    namespace: Option<u32>,
-    trait_: Option<u32>,
-    enum_: Option<u32>,
-    enum_case_node: Option<u32>,
-    const_: Option<u32>,
-    route_call: Option<u32>,
-    route_scope: Option<u32>,
-    route_method: Option<u32>,
-    route_path: Option<u32>,
-    route_chained_call: Option<u32>,
-    route_chained_object: Option<u32>,
-    laravel_call: Option<u32>,
-    laravel_args: Option<u32>,
-    laravel_include_call: Option<u32>,
-    laravel_route_set: Option<u32>,
-    // BlindSpot captures (FU-001 P5a).
-    blind_eval: Option<u32>,
-    blind_call_user_func: Option<u32>,
-    blind_variable_call: Option<u32>,
-    // Anonymous callback capture.
-    function_anonymous: Option<u32>,
+    compiled: Compiled<PhpSpec>,
 }
 
 impl PhpProvider {
     pub fn new() -> anyhow::Result<Self> {
-        let language = tree_sitter_php::LANGUAGE_PHP.into();
-        let query_source = include_str!("queries.scm");
-        let query = Query::new(&language, query_source)?;
-
-        // Pre-resolve capture-name → NodeKind from the spec table so the
-        // hot loop stays an integer-index lookup (no per-capture string
-        // compare). Capture names not in the spec map yield None and
-        // fall through to the metadata-only branches (heritage, decorator,
-        // route, etc.).
-        let capture_kind_by_idx: Vec<Option<NodeKind>> = query
-            .capture_names()
-            .iter()
-            .map(|name| PhpSpec::CAPTURE_KIND.get(name).copied())
-            .collect();
-
-        let indices = PhpCaptureIndices {
-            type_function: query.capture_index_for_name("type.function"),
-            type_method: query.capture_index_for_name("type.method"),
-            export: query.capture_index_for_name("export"),
-            heritage: query.capture_index_for_name("heritage"),
-            decorator: query.capture_index_for_name("decorator"),
-            import_source: query.capture_index_for_name("import.source"),
-            import_alias: query.capture_index_for_name("import.alias"),
-            function: query.capture_index_for_name("function"),
-            class: query.capture_index_for_name("class"),
-            interface: query.capture_index_for_name("interface"),
-            method: query.capture_index_for_name("method"),
-            property: query.capture_index_for_name("property"),
-            namespace: query.capture_index_for_name("namespace"),
-            trait_: query.capture_index_for_name("trait"),
-            enum_: query.capture_index_for_name("enum"),
-            enum_case_node: query.capture_index_for_name("enum_case_node"),
-            const_: query.capture_index_for_name("const"),
-            route_call: query.capture_index_for_name("route.call"),
-            route_scope: query.capture_index_for_name("route.scope"),
-            route_method: query.capture_index_for_name("route.method"),
-            route_path: query.capture_index_for_name("route.path"),
-            route_chained_call: query.capture_index_for_name("route.chained.call"),
-            route_chained_object: query.capture_index_for_name("route.chained.object"),
-            laravel_call: query.capture_index_for_name("laravel.route.call"),
-            laravel_args: query.capture_index_for_name("laravel.route.args"),
-            laravel_include_call: query.capture_index_for_name("laravel.include.call"),
-            laravel_route_set: query.capture_index_for_name("laravel.route.set"),
-            blind_eval: query.capture_index_for_name("blind.eval"),
-            blind_call_user_func: query.capture_index_for_name("blind.call_user_func"),
-            blind_variable_call: query.capture_index_for_name("blind.variable_call"),
-            function_anonymous: query.capture_index_for_name("function.anonymous"),
-        };
-
         Ok(Self {
-            query,
-            capture_kind_by_idx,
-            indices,
+            compiled: Compiled::new()?,
         })
     }
 }
@@ -486,679 +364,678 @@ impl LanguageProvider for PhpProvider {
     }
 
     fn parse_file(&self, path: &Path, source: &[u8]) -> anyhow::Result<LocalGraph> {
-        let _p = parse_prof::span(Pass::Tree);
-        let tree = PARSER
-            .with(|p| parse_with_budget(&mut p.borrow_mut(), source, ParseBudget::DEFAULT))
-            .ok_or_else(|| anyhow::anyhow!("Failed to parse php file"))?;
+        driver::parse(&self.compiled, path, source)
+    }
+}
 
-        drop(_p);
-        let _p = parse_prof::span(Pass::Query);
-        let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(&self.query, tree.root_node(), source);
+/// The captures PHP handles itself. A root capture sets the declaration
+/// root once per match; the `name.*` kind capture sets name and kind.
+#[derive(Clone, Copy)]
+pub enum PhpRole {
+    Root,
+    Type,
+    Decorator,
+    Export,
+    Heritage,
+    ImportSource,
+    ImportAlias,
+    RouteScope,
+    RouteMethod,
+    RoutePath,
+    /// `route.call` and `route.chained.call`: the whole registration.
+    RouteCall,
+    RouteChainedObject,
+    LaravelCall,
+    LaravelArgs,
+    LaravelInclude,
+    LaravelRouteSet,
+    CallUserFunc,
+}
 
-        use ecp_core::analyzer::types::RawRoute;
-        // Vec + idx-map pattern — see java/parser.rs same-site note.
-        let mut nodes: Vec<RawNode> = Vec::new();
-        let mut node_id_to_idx: rustc_hash::FxHashMap<usize, usize> =
-            rustc_hash::FxHashMap::default();
-        let mut imports = Vec::new();
-        let mut routes = Vec::new();
-        // Verb calls that passed the router gates, as `(method, path
-        // literal, call)`. They become `routes` once the loop has seen the
-        // file's `use` imports, which an `X::class` action resolves through.
-        let mut route_calls: Vec<(String, &str, tree_sitter::Node)> = Vec::new();
-        // Calls and `require`s that may load a route file. A group's
-        // `X::class` middleware resolves through the imports too.
-        let mut include_calls: Vec<tree_sitter::Node> = Vec::new();
-        // `Route::resource` / `match` / `any` calls, each registering
-        // several routes or a method set.
-        let mut route_sets: Vec<tree_sitter::Node> = Vec::new();
-        let mut blind_spots: Vec<BlindSpot> = Vec::new();
-        let file_category =
-            ecp_core::file_category::determine_category(path.to_str().unwrap_or(""));
-        let is_test_file = file_category == ecp_core::graph::FileCategory::Test;
+#[derive(Clone, Copy)]
+pub enum PhpHook {
+    Routes,
+    Calls,
+    LaravelGate,
+    EnumImitation,
+    ConstOwners,
+    QualifiedConstants,
+}
 
-        let idx = &self.indices;
-        let idx_type_function = idx.type_function;
-        let idx_type_method = idx.type_method;
-        let idx_export = idx.export;
-        let idx_heritage = idx.heritage;
-        let idx_decorator = idx.decorator;
+#[derive(Default)]
+pub struct PhpMatch<'t> {
+    /// A `private` or `protected` modifier; every other match is exported.
+    not_exported: bool,
+    heritage: Vec<String>,
+    type_annotation: Option<String>,
+    decorators: Vec<String>,
+    import_src: Option<Node<'t>>,
+    import_alias: Option<Node<'t>>,
+    route_method: Option<String>,
+    route_path: Option<&'t str>,
+    route_span_node: Option<Node<'t>>,
+    route_scope: Option<String>,
+    /// The whole `Route::method(...)` expression.
+    laravel_call_span: Option<Span>,
+    /// The `arguments` node, walked for the 2nd argument.
+    laravel_args_node: Option<Node<'t>>,
+}
 
-        let idx_import_source = idx.import_source;
-        let idx_import_alias = idx.import_alias;
+#[derive(Default)]
+pub struct PhpFile<'t> {
+    /// Dedup lookup for multi-capture merge only; nodes are pushed in
+    /// match order and the map is never iterated.
+    node_id_to_idx: FxHashMap<usize, usize>,
+    /// Verb calls that passed the router gates, as `(method, path
+    /// literal, call)`. They become `routes` once the loop has seen the
+    /// file's `use` imports, which an `X::class` action resolves through.
+    route_calls: Vec<(String, &'t str, Node<'t>)>,
+    /// Calls and `require`s that may load a route file. A group's
+    /// `X::class` middleware resolves through the imports too.
+    include_calls: Vec<Node<'t>>,
+    /// `Route::resource` / `match` / `any` calls, each registering
+    /// several routes or a method set.
+    route_sets: Vec<Node<'t>>,
+    /// Laravel framework refs, emitted if the `Illuminate` import gate matches.
+    pending_laravel: Vec<(String, Span)>,
+    /// The first `Namespace` node's name, read by the routes step and
+    /// again by the controller-middleware step.
+    file_namespace: Option<String>,
+}
 
-        let idx_function = idx.function;
-        let idx_class = idx.class;
-        let idx_interface = idx.interface;
-        let idx_method = idx.method;
-        let idx_property = idx.property;
+const fn step(pass: Pass, effect: Effect, op: Op<PhpHook>) -> Step<PhpHook> {
+    Step { pass, effect, op }
+}
 
-        let idx_namespace = idx.namespace;
-        let idx_trait = idx.trait_;
-        let idx_enum = idx.enum_;
-        let idx_enum_case_node = idx.enum_case_node;
-        let idx_const = idx.const_;
+impl ParseSpec for PhpSpec {
+    type Role = PhpRole;
+    type Match<'t> = PhpMatch<'t>;
+    type File<'t> = PhpFile<'t>;
+    type Hook = PhpHook;
 
-        let idx_route_call = idx.route_call;
-        let idx_route_scope = idx.route_scope;
-        let idx_route_method = idx.route_method;
-        let idx_route_path = idx.route_path;
-        let idx_route_chained_call = idx.route_chained_call;
-        let idx_route_chained_object = idx.route_chained_object;
+    const PARSE_ERROR: &'static str = "Failed to parse php file";
+    const KIND_CAPTURE: KindCapture = KindCapture::NameOverwrite;
+    /// An arg-position anonymous function or arrow function gets an
+    /// `<anonymous>` Function node only when its body holds a call, so
+    /// attach_to_enclosing can host those calls instead of dropping them;
+    /// empty callbacks (`array_map(fn($x) => $x * 2, $a)`) stay out of the
+    /// graph. A callback may be captured once per query match.
+    const ANONYMOUS: Option<Anonymous> = Some(Anonymous {
+        capture: "function.anonymous",
+        call_kinds: &[
+            "function_call_expression",
+            "member_call_expression",
+            "nullsafe_member_call_expression",
+            "scoped_call_expression",
+        ],
+        key: AnonKey::Span,
+    });
+    const BLIND: &'static [(&'static str, (&'static str, &'static str))] = &[
+        (
+            "blind.eval",
+            (
+                "php-eval",
+                "eval(arg) — runtime PHP code execution; argument expression is not statically determinable as a callee",
+            ),
+        ),
+        (
+            "blind.variable_call",
+            (
+                "php-variable-call",
+                "$<var>(...) — variable-function call; target callable bound at runtime via the variable's value",
+            ),
+        ),
+    ];
+    const FIELD_READS: Option<FieldReads> = Some(FieldReads {
+        member_kinds: &["member_access_expression"],
+        names: NameRefSpec {
+            ident_kinds: &["name"],
+            kind: crate::calls::NameRefKind::Constant,
+            skip_kinds: &[
+                "variable_name",
+                "namespace_use_declaration",
+                "namespace_definition",
+                "named_type",
+                "optional_type",
+                "union_type",
+                "intersection_type",
+                "qualified_name",
+                "relative_name",
+                "attribute_list",
+                "class_constant_access_expression",
+            ],
+            skip_parents: &[
+                "object_creation_expression",
+                "named_label_statement",
+                "goto_statement",
+            ],
+            passed_callable: Some(("function_call_expression", passed_callable)),
+            ..NameRefSpec::EMPTY
+        },
+    });
+    const VARIANT_REFS: Option<VariantRefSpec> = Some(VariantRefSpec {
+        path_kinds: &["class_constant_access_expression"],
+        label_parents: &["case_statement", "match_condition_list"],
+        bare_label_parents: &[],
+        bare_expressions: false,
+        token_trees: false,
+    });
+    const TX: TxRule = TxRule::Nodes {
+        collect: collect_symfony_transactional_scopes,
+        kinds: &[NodeKind::Method, NodeKind::Function],
+    };
+    const STEPS: &'static [Step<PhpHook>] = &[
+        step(Pass::Query, Effect::Nodes, Op::Query),
+        step(Pass::Build, Effect::Neutral, Op::Hook(PhpHook::Routes)),
+        step(Pass::Calls, Effect::Nodes, Op::Hook(PhpHook::Calls)),
+        step(Pass::Walk, Effect::Nodes, Op::FieldReads),
+        step(Pass::Walk, Effect::Nodes, Op::VariantRefs),
+        step(Pass::Build, Effect::Neutral, Op::Hook(PhpHook::LaravelGate)),
+        step(Pass::Walk, Effect::Neutral, Op::FunctionMeta),
+        step(
+            Pass::Walk,
+            Effect::Neutral,
+            Op::Hook(PhpHook::EnumImitation),
+        ),
+        step(Pass::Build, Effect::Nodes, Op::StampOwners),
+        step(Pass::Build, Effect::Nodes, Op::Hook(PhpHook::ConstOwners)),
+        step(
+            Pass::Walk,
+            Effect::Nodes,
+            Op::Hook(PhpHook::QualifiedConstants),
+        ),
+        step(Pass::Build, Effect::Bind, Op::TxScopes),
+    ];
 
-        let idx_laravel_call = idx.laravel_call;
-        let idx_laravel_args = idx.laravel_args;
-        let idx_laravel_include_call = idx.laravel_include_call;
-        let idx_laravel_route_set = idx.laravel_route_set;
+    fn query() -> anyhow::Result<Query> {
+        Ok(Query::new(
+            &tree_sitter_php::LANGUAGE_PHP.into(),
+            include_str!("queries.scm"),
+        )?)
+    }
 
-        let idx_blind_eval = idx.blind_eval;
-        let idx_blind_call_user_func = idx.blind_call_user_func;
-        let idx_blind_variable_call = idx.blind_variable_call;
-        let idx_function_anonymous = idx.function_anonymous;
+    fn role(capture: &str) -> Option<PhpRole> {
+        Some(match capture {
+            "function" | "class" | "interface" | "method" | "property" | "namespace" | "trait"
+            | "enum" | "enum_case_node" | "const" => PhpRole::Root,
+            "type.function" | "type.method" => PhpRole::Type,
+            "decorator" => PhpRole::Decorator,
+            "export" => PhpRole::Export,
+            "heritage" => PhpRole::Heritage,
+            "import.source" => PhpRole::ImportSource,
+            "import.alias" => PhpRole::ImportAlias,
+            "route.scope" => PhpRole::RouteScope,
+            "route.method" => PhpRole::RouteMethod,
+            "route.path" => PhpRole::RoutePath,
+            "route.call" | "route.chained.call" => PhpRole::RouteCall,
+            "route.chained.object" => PhpRole::RouteChainedObject,
+            "laravel.route.call" => PhpRole::LaravelCall,
+            "laravel.route.args" => PhpRole::LaravelArgs,
+            "laravel.include.call" => PhpRole::LaravelInclude,
+            "laravel.route.set" => PhpRole::LaravelRouteSet,
+            "blind.call_user_func" => PhpRole::CallUserFunc,
+            _ => return None,
+        })
+    }
 
-        // Dedup spans for <anonymous> nodes — a callback may be captured once
-        // per query match but must emit only one RawNode.
-        let mut emitted_anon_spans: rustc_hash::FxHashSet<(u32, u32, u32, u32)> =
-            rustc_hash::FxHashSet::default();
+    fn parse_tree(source: &[u8]) -> Option<Tree> {
+        PARSER.with(|p| parse_with_budget(&mut p.borrow_mut(), source, ParseBudget::DEFAULT))
+    }
 
-        // Pending Laravel framework refs; emitted after the loop if the
-        // `Illuminate` import gate matches.
-        let mut pending_laravel: Vec<(String, (u32, u32, u32, u32))> = Vec::new();
-
-        while let Some(m) = matches.next() {
-            let mut name_node = None;
-            let mut kind = None;
-            let mut root_span_node = None;
-            let mut is_exported = true;
-            let mut heritage = Vec::new();
-            let mut type_annotation = None;
-            let mut decorators = Vec::new();
-
-            let mut import_src = None;
-            let mut import_alias = None;
-
-            let mut route_method = None;
-            let mut route_path = None;
-            let mut route_span_node = None;
-            let mut route_scope: Option<String> = None;
-
-            // Per-match Laravel route captures. `laravel_call_span` is
-            // the whole `Route::method(...)` expression; `laravel_args_node`
-            // is the `arguments` node — we walk it to find the 2nd arg.
-            let mut laravel_call_span: Option<(u32, u32, u32, u32)> = None;
-            let mut laravel_args_node: Option<tree_sitter::Node> = None;
-
-            for cap in m.captures() {
-                let cap_idx = cap.index;
-                if let Some(k_from_spec) = self
-                    .capture_kind_by_idx
-                    .get(cap_idx as usize)
-                    .copied()
-                    .flatten()
+    fn capture<'t>(
+        r: PhpRole,
+        node: Node<'t>,
+        d: &mut DeclSlot<'t>,
+        m: &mut PhpMatch<'t>,
+        f: &mut PhpFile<'t>,
+        cx: &mut FileCx<'t>,
+    ) {
+        let source = cx.source;
+        match r {
+            PhpRole::Type => {
+                if let Ok(t) = std::str::from_utf8(&source[node.start_byte()..node.end_byte()]) {
+                    m.type_annotation = Some(t.to_string());
+                }
+            }
+            PhpRole::Decorator => {
+                if let Ok(d_str) = std::str::from_utf8(&source[node.start_byte()..node.end_byte()])
                 {
-                    // Single table-driven dispatch replaces the eight explicit
-                    // Function/Class/Interface/Method/Property/Namespace/Trait/Enum arms.
-                    // Source of truth: PhpSpec::CAPTURE_KIND in spec.rs.
-                    name_node = Some(cap.node);
-                    kind = Some(k_from_spec);
-                } else if Some(cap_idx) == idx_type_function || Some(cap_idx) == idx_type_method {
-                    if let Ok(t) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        type_annotation = Some(t.to_string());
-                    }
-                } else if Some(cap_idx) == idx_decorator {
-                    if let Ok(d) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        decorators.push(d.to_string());
-                    }
-                } else if Some(cap_idx) == idx_export {
-                    if let Ok(mod_str) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        if mod_str == "private" || mod_str == "protected" {
-                            is_exported = false;
-                        }
-                    }
-                } else if Some(cap_idx) == idx_heritage {
-                    if let Ok(h) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        heritage.push(h.to_string());
-                    }
-                } else if Some(cap_idx) == idx_import_source {
-                    import_src = Some(cap.node);
-                } else if Some(cap_idx) == idx_import_alias {
-                    import_alias = Some(cap.node);
-                } else if Some(cap_idx) == idx_function
-                    || Some(cap_idx) == idx_class
-                    || Some(cap_idx) == idx_interface
-                    || Some(cap_idx) == idx_method
-                    || Some(cap_idx) == idx_property
-                    || Some(cap_idx) == idx_namespace
-                    || Some(cap_idx) == idx_trait
-                    || Some(cap_idx) == idx_enum
-                    || Some(cap_idx) == idx_enum_case_node
-                    || Some(cap_idx) == idx_const
+                    m.decorators.push(d_str.to_string());
+                }
+            }
+            PhpRole::Export => {
+                if let Ok(mod_str) =
+                    std::str::from_utf8(&source[node.start_byte()..node.end_byte()])
                 {
-                    if root_span_node.is_none() {
-                        root_span_node = Some(cap.node);
+                    if mod_str == "private" || mod_str == "protected" {
+                        m.not_exported = true;
                     }
-                } else if Some(cap_idx) == idx_route_scope {
-                    if let Ok(s_str) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        route_scope = Some(s_str.to_string());
-                    }
-                } else if Some(cap_idx) == idx_route_method {
-                    if let Ok(m_str) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        route_method = Some(m_str.to_uppercase());
-                    }
-                } else if Some(cap_idx) == idx_route_path {
-                    // Kept raw: `laravel_routes::route_site` joins it to the
-                    // group prefixes, then normalizes it like
-                    // `clean_route_path_lax` (`'register'` is `/register`).
-                    route_path =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                            .ok();
-                } else if Some(cap_idx) == idx_route_call {
-                    route_span_node = Some(cap.node);
-                } else if Some(cap_idx) == idx_route_chained_call {
-                    // Same role as idx_route_call for the chained variant — the
-                    // outer member_call_expression spans the whole route registration.
-                    route_span_node = Some(cap.node);
-                } else if Some(cap_idx) == idx_route_chained_object {
-                    // Walk the object chain inward to find the scoped_call root.
-                    // If found, treat that scope as `route_scope` so the scope-name
-                    // allowlist gate downstream fires the same way as for direct
-                    // `Route::get(...)` calls.
-                    if let Some(root_scope) = walk_to_scoped_root_scope(cap.node, source) {
-                        route_scope = Some(root_scope);
-                    }
-                } else if Some(cap_idx) == idx_laravel_call {
-                    laravel_call_span = Some(node_span(&cap.node));
-                } else if Some(cap_idx) == idx_laravel_args {
-                    laravel_args_node = Some(cap.node);
-                } else if Some(cap_idx) == idx_laravel_include_call {
-                    include_calls.push(cap.node);
-                } else if Some(cap_idx) == idx_laravel_route_set {
-                    if !route_sets.iter().any(|call| call.id() == cap.node.id()) {
-                        route_sets.push(cap.node);
-                    }
-                } else if Some(cap_idx) == idx_function_anonymous {
-                    // Anonymous callback (arg-position anonymous function or arrow function).
-                    // Emit an `<anonymous>` Function node only when the body holds a
-                    // call, so attach_to_enclosing can host those calls instead of
-                    // dropping them; empty callbacks stay out of the graph.
-                    if body_has_call(cap.node) {
-                        let span = node_span(&cap.node);
-                        if emitted_anon_spans.insert(span) {
-                            nodes.push(RawNode {
-                                decorators: Vec::new(),
-                                is_exported: false,
-                                heritage: Vec::new(),
-                                type_annotation: None,
-                                name: format!("<anonymous:{}:{}>", span.0 + 1, span.1),
-                                kind: NodeKind::Function,
-                                span,
-                                calls: Vec::new(),
-                                field_reads: Vec::new(),
-                                owner_class: None,
-                                content_hash: ecp_core::uid::xxh3_64_bytes(
-                                    &source[cap.node.start_byte()..cap.node.end_byte()],
-                                ),
-                            });
-                        }
-                    }
-                } else if Some(cap_idx) == idx_blind_eval {
-                    push_blind_spot(
-                        &mut blind_spots,
-                        BLIND_SPEC[0],
-                        &cap.node,
-                        path,
-                        is_test_file,
-                    );
-                } else if Some(cap_idx) == idx_blind_call_user_func {
-                    if super::receiver_types::literal_callable(cap.node, source).is_none() {
-                        push_blind_spot(
-                            &mut blind_spots,
-                            BLIND_SPEC[1],
-                            &cap.node,
-                            path,
-                            is_test_file,
-                        );
-                    }
-                } else if Some(cap_idx) == idx_blind_variable_call {
-                    push_blind_spot(
-                        &mut blind_spots,
-                        BLIND_SPEC[2],
-                        &cap.node,
-                        path,
-                        is_test_file,
-                    );
                 }
             }
-
-            // Stage Laravel framework_ref. Walk the `arguments` node:
-            //   1st `argument` (the path) is ignored here — already in routes.
-            //   2nd `argument` content drives target_name:
-            //     array_creation_expression → "Controller@action"
-            //     anonymous_function / arrow_function → "<anonymous>"
-            //     anything else → skip.
-            if let (Some(span), Some(args)) = (laravel_call_span, laravel_args_node) {
-                let mut cur = args.walk();
-                let mut arg_count = 0;
-                let mut target_name: Option<String> = None;
-                for child in args.children(&mut cur) {
-                    if child.kind() != "argument" {
-                        continue;
-                    }
-                    arg_count += 1;
-                    if arg_count == 2 {
-                        let inner = child.child(0).unwrap_or(child);
-                        target_name = match inner.kind() {
-                            "array_creation_expression" => extract_controller_action(inner, source),
-                            "anonymous_function" | "arrow_function" => {
-                                Some("<anonymous>".to_string())
-                            }
-                            _ => None,
-                        };
-                        break;
-                    }
-                }
-                if let Some(t) = target_name {
-                    pending_laravel.push((t, span));
+            PhpRole::Heritage => {
+                if let Ok(h) = std::str::from_utf8(&source[node.start_byte()..node.end_byte()]) {
+                    m.heritage.push(h.to_string());
                 }
             }
-
-            // Router-class allowlist gate — drop matches where the scope
-            // doesn't belong to a known PHP router class. This is the
-            // primary FP filter for PHP (replaces the path-shape filter
-            // that would mis-reject Laravel bare paths like 'register').
-            let scope_ok = route_scope
-                .as_deref()
-                .map(|s| PHP_ROUTER_SCOPES.contains(&s))
-                .unwrap_or(false);
-            if let (true, Some(rm), Some(rp), Some(rs_node)) =
-                (scope_ok, route_method, route_path, route_span_node)
-            {
-                let exists = route_calls
-                    .iter()
-                    .any(|(method, _, call)| *method == rm && call.id() == rs_node.id());
-                if !exists {
-                    route_calls.push((rm, rp, rs_node));
+            PhpRole::ImportSource => m.import_src = Some(node),
+            PhpRole::ImportAlias => m.import_alias = Some(node),
+            PhpRole::Root => {
+                if d.root.is_none() {
+                    d.root = Some(node);
                 }
             }
+            PhpRole::RouteScope => {
+                if let Ok(s_str) = std::str::from_utf8(&source[node.start_byte()..node.end_byte()])
+                {
+                    m.route_scope = Some(s_str.to_string());
+                }
+            }
+            PhpRole::RouteMethod => {
+                if let Ok(m_str) = std::str::from_utf8(&source[node.start_byte()..node.end_byte()])
+                {
+                    m.route_method = Some(m_str.to_uppercase());
+                }
+            }
+            // Kept raw: `laravel_routes::route_site` joins it to the
+            // group prefixes, then normalizes it like
+            // `clean_route_path_lax` (`'register'` is `/register`).
+            PhpRole::RoutePath => {
+                m.route_path =
+                    std::str::from_utf8(&source[node.start_byte()..node.end_byte()]).ok();
+            }
+            PhpRole::RouteCall => m.route_span_node = Some(node),
+            // Walk the object chain inward to find the scoped_call root.
+            // If found, treat that scope as `route_scope` so the scope-name
+            // allowlist gate downstream fires the same way as for direct
+            // `Route::get(...)` calls.
+            PhpRole::RouteChainedObject => {
+                if let Some(root_scope) = walk_to_scoped_root_scope(node, source) {
+                    m.route_scope = Some(root_scope);
+                }
+            }
+            PhpRole::LaravelCall => m.laravel_call_span = Some(node_span(&node)),
+            PhpRole::LaravelArgs => m.laravel_args_node = Some(node),
+            PhpRole::LaravelInclude => f.include_calls.push(node),
+            PhpRole::LaravelRouteSet => {
+                if !f.route_sets.iter().any(|call| call.id() == node.id()) {
+                    f.route_sets.push(node);
+                }
+            }
+            PhpRole::CallUserFunc => {
+                if literal_callable(node, source).is_none() {
+                    cx.push_blind(BLIND_CALL_USER_FUNC, &node);
+                }
+            }
+        }
+    }
 
-            if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
-                if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
-                    let start = root.start_position();
-                    let end = root.end_position();
+    fn end_match<'t>(
+        d: DeclSlot<'t>,
+        m: &mut PhpMatch<'t>,
+        f: &mut PhpFile<'t>,
+        cx: &mut FileCx<'t>,
+    ) {
+        let source = cx.source;
+        let PhpMatch {
+            not_exported,
+            heritage,
+            type_annotation,
+            decorators,
+            import_src,
+            import_alias,
+            route_method,
+            route_path,
+            route_span_node,
+            route_scope,
+            laravel_call_span,
+            laravel_args_node,
+        } = std::mem::take(m);
+        let is_exported = !not_exported;
 
-                    // PHP's constructor convention is `__construct`; the spec
-                    // table maps it as Method, so promote here.
-                    let k = if k == NodeKind::Method && name_str == "__construct" {
-                        NodeKind::Constructor
-                    } else {
-                        k
+        // Stage Laravel framework_ref. Walk the `arguments` node:
+        //   1st `argument` (the path) is ignored here — already in routes.
+        //   2nd `argument` content drives target_name:
+        //     array_creation_expression → "Controller@action"
+        //     anonymous_function / arrow_function → "<anonymous>"
+        //     anything else → skip.
+        if let (Some(span), Some(args)) = (laravel_call_span, laravel_args_node) {
+            let mut cur = args.walk();
+            let mut arg_count = 0;
+            let mut target_name: Option<String> = None;
+            for child in args.children(&mut cur) {
+                if child.kind() != "argument" {
+                    continue;
+                }
+                arg_count += 1;
+                if arg_count == 2 {
+                    let inner = child.child(0).unwrap_or(child);
+                    target_name = match inner.kind() {
+                        "array_creation_expression" => extract_controller_action(inner, source),
+                        "anonymous_function" | "arrow_function" => Some("<anonymous>".to_string()),
+                        _ => None,
                     };
+                    break;
+                }
+            }
+            if let Some(t) = target_name {
+                f.pending_laravel.push((t, span));
+            }
+        }
 
-                    // Property dedupe on name-node id so multi-declarator
-                    // (`public int $x, $y;`) each gets its own entry.
-                    let node_id = if k == NodeKind::Property {
-                        n.id()
-                    } else {
-                        root.id()
-                    };
-                    let idx = *node_id_to_idx.entry(node_id).or_insert_with(|| {
-                        let i = nodes.len();
-                        nodes.push(RawNode {
-                            decorators: vec![],
-                            is_exported,
-                            heritage: Vec::new(),
-                            type_annotation: type_annotation.clone(),
-                            name: name_str.to_string(),
-                            kind: k,
-                            span: (
-                                start.row as u32,
-                                start.column as u32,
-                                end.row as u32,
-                                end.column as u32,
-                            ),
-                            calls: Vec::new(),
-                            field_reads: Vec::new(),
-                            owner_class: None,
-                            content_hash: ecp_core::uid::xxh3_64_bytes(
-                                &source[root.start_byte()..root.end_byte()],
-                            ),
-                        });
-                        i
+        // Router-class allowlist gate — drop matches where the scope
+        // doesn't belong to a known PHP router class. This is the
+        // primary FP filter for PHP (replaces the path-shape filter
+        // that would mis-reject Laravel bare paths like 'register').
+        let scope_ok = route_scope
+            .as_deref()
+            .map(|s| PHP_ROUTER_SCOPES.contains(&s))
+            .unwrap_or(false);
+        if let (true, Some(rm), Some(rp), Some(rs_node)) =
+            (scope_ok, route_method, route_path, route_span_node)
+        {
+            let exists = f
+                .route_calls
+                .iter()
+                .any(|(method, _, call)| *method == rm && call.id() == rs_node.id());
+            if !exists {
+                f.route_calls.push((rm, rp, rs_node));
+            }
+        }
+
+        if let (Some(n), Some(k), Some(root)) = (d.name, d.kind, d.root) {
+            if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
+                // PHP's constructor convention is `__construct`; the spec
+                // table maps it as Method, so promote here.
+                let k = if k == NodeKind::Method && name_str == "__construct" {
+                    NodeKind::Constructor
+                } else {
+                    k
+                };
+
+                // Property dedupe on name-node id so multi-declarator
+                // (`public int $x, $y;`) each gets its own entry.
+                let node_id = if k == NodeKind::Property {
+                    n.id()
+                } else {
+                    root.id()
+                };
+                let nodes = &mut cx.nodes;
+                let idx = *f.node_id_to_idx.entry(node_id).or_insert_with(|| {
+                    let i = nodes.len();
+                    nodes.push(RawNode {
+                        is_exported,
+                        type_annotation: type_annotation.clone(),
+                        ..node::decl(
+                            name_str.to_string(),
+                            k,
+                            node::span(root),
+                            &source[root.start_byte()..root.end_byte()],
+                        )
                     });
-                    let entry = &mut nodes[idx];
+                    i
+                });
+                let entry = &mut nodes[idx];
 
-                    if !is_exported {
-                        entry.is_exported = false;
+                if !is_exported {
+                    entry.is_exported = false;
+                }
+                if type_annotation.is_some() {
+                    entry.type_annotation = type_annotation;
+                }
+                for h in heritage {
+                    if !entry.heritage.contains(&h) {
+                        entry.heritage.push(h);
                     }
-                    if type_annotation.is_some() {
-                        entry.type_annotation = type_annotation;
-                    }
-                    for h in heritage {
-                        if !entry.heritage.contains(&h) {
-                            entry.heritage.push(h);
-                        }
-                    }
-                    for d in decorators {
-                        if !entry.decorators.contains(&d) {
-                            entry.decorators.push(d);
-                        }
+                }
+                for dec in decorators {
+                    if !entry.decorators.contains(&dec) {
+                        entry.decorators.push(dec);
                     }
                 }
             }
+        }
 
-            if let Some(i_src) = import_src {
-                if let Ok(src_str) =
-                    std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()])
-                {
-                    let group = i_src
-                        .parent()
-                        .and_then(|clause| clause.parent())
-                        .filter(|parent| parent.kind() == "namespace_use_group");
-                    let group_prefix =
-                        group
-                            .and_then(|group| group.parent())
-                            .and_then(|declaration| {
-                                declaration
-                                    .named_children(&mut declaration.walk())
-                                    .find(|child| child.kind() == "namespace_name")
-                            });
-                    let full_src = if let Some(p) = group_prefix {
-                        if let Ok(p_str) =
-                            std::str::from_utf8(&source[p.start_byte()..p.end_byte()])
-                        {
-                            format!(
-                                "{}\\{}",
-                                p_str.trim_end_matches('\\'),
-                                src_str.trim_start_matches('\\')
-                            )
-                        } else {
-                            src_str.to_string()
-                        }
+        if let Some(i_src) = import_src {
+            if let Ok(src_str) = std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()])
+            {
+                let group = i_src
+                    .parent()
+                    .and_then(|clause| clause.parent())
+                    .filter(|parent| parent.kind() == "namespace_use_group");
+                let group_prefix = group
+                    .and_then(|group| group.parent())
+                    .and_then(|declaration| {
+                        declaration
+                            .named_children(&mut declaration.walk())
+                            .find(|child| child.kind() == "namespace_name")
+                    });
+                let full_src = if let Some(p) = group_prefix {
+                    if let Ok(p_str) = std::str::from_utf8(&source[p.start_byte()..p.end_byte()]) {
+                        format!(
+                            "{}\\{}",
+                            p_str.trim_end_matches('\\'),
+                            src_str.trim_start_matches('\\')
+                        )
                     } else {
                         src_str.to_string()
-                    };
+                    }
+                } else {
+                    src_str.to_string()
+                };
 
-                    let alias = if let Some(a) = import_alias {
-                        std::str::from_utf8(&source[a.start_byte()..a.end_byte()])
-                            .ok()
-                            .map(|s| s.to_string())
-                    } else {
-                        None
-                    };
+                let alias = if let Some(a) = import_alias {
+                    std::str::from_utf8(&source[a.start_byte()..a.end_byte()])
+                        .ok()
+                        .map(|s| s.to_string())
+                } else {
+                    None
+                };
 
-                    let imported_name = full_src.split('\\').next_back().unwrap_or("").to_string();
+                let imported_name = full_src.split('\\').next_back().unwrap_or("").to_string();
+                let alias = if group.is_some() {
+                    Some(alias.unwrap_or_else(|| imported_name.clone()))
+                } else {
+                    alias
+                };
+                let imported_name = if group.is_some() {
+                    "*".to_string()
+                } else {
+                    imported_name
+                };
+                cx.imports
+                    .push(imports::raw(full_src, imported_name, alias, None));
+            }
+        }
+    }
 
-                    imports.push(RawImport {
-                        alias: if group.is_some() {
-                            Some(alias.unwrap_or_else(|| imported_name.clone()))
-                        } else {
-                            alias
-                        },
-                        imported_name: if group.is_some() {
-                            "*".to_string()
-                        } else {
-                            imported_name
-                        },
-                        source: full_src,
-                        binding_kind: None,
+    fn hook<'t>(h: PhpHook, _c: &Compiled<Self>, f: &mut PhpFile<'t>, cx: &mut FileCx<'t>) {
+        let root = cx.tree.root_node();
+        let source = cx.source;
+        match h {
+            PhpHook::Routes => {
+                f.file_namespace = cx
+                    .nodes
+                    .iter()
+                    .find(|node| node.kind == NodeKind::Namespace)
+                    .map(|node| node.name.clone());
+                let route_calls = std::mem::take(&mut f.route_calls);
+                let route_sets = std::mem::take(&mut f.route_sets);
+                let include_calls = std::mem::take(&mut f.include_calls);
+                let names = super::laravel_routes::FileNames {
+                    imports: &cx.imports,
+                    namespace: f.file_namespace.as_deref(),
+                };
+                let route_sites = route_calls
+                    .into_iter()
+                    .filter_map(|(method, raw_path, call)| {
+                        let site =
+                            super::laravel_routes::route_site(call, raw_path, source, names)?;
+                        Some((method, site, call))
+                    })
+                    .chain(route_sets.into_iter().flat_map(|call| {
+                        super::laravel_routes::route_set_sites(call, source, names)
+                            .into_iter()
+                            .map(move |(method, site)| (method, site, call))
+                    }));
+                for (method, site, call) in route_sites {
+                    cx.routes.push(RawRoute {
+                        method,
+                        path: site.path,
+                        handler: site.handler,
+                        span: node_span(&call),
+                        scope: Some(Box::new(site.scope)),
                     });
                 }
-            }
-        }
-
-        drop(_p);
-        let _p = parse_prof::span(Pass::Build);
-        // `nodes` already in source order — Vec + idx-map at parse-loop start.
-
-        let file_namespace = nodes
-            .iter()
-            .find(|node| node.kind == NodeKind::Namespace)
-            .map(|node| node.name.clone());
-        let names = super::laravel_routes::FileNames {
-            imports: &imports,
-            namespace: file_namespace.as_deref(),
-        };
-        let route_sites = route_calls
-            .into_iter()
-            .filter_map(|(method, raw_path, call)| {
-                let site = super::laravel_routes::route_site(call, raw_path, source, names)?;
-                Some((method, site, call))
-            })
-            .chain(route_sets.into_iter().flat_map(|call| {
-                super::laravel_routes::route_set_sites(call, source, names)
-                    .into_iter()
-                    .map(move |(method, site)| (method, site, call))
-            }));
-        for (method, site, call) in route_sites {
-            routes.push(RawRoute {
-                method,
-                path: site.path,
-                handler: site.handler,
-                span: node_span(&call),
-                scope: Some(Box::new(site.scope)),
-            });
-        }
-        let mut route_includes: Vec<RawRoute> = Vec::new();
-        for call in include_calls {
-            super::laravel_routes::push_includes(call, source, names, &mut route_includes);
-        }
-        super::laravel_routes::resolve_include_controllers(&mut route_includes, names);
-        routes.append(&mut route_includes);
-
-        drop(_p);
-        let _p = parse_prof::span(Pass::Calls);
-        // Extract call sites with receiver-type binding.
-        // Handles $this->method(), parent::method(), self::method(), static::method().
-        // function_call_expression (bare calls) still go through the shared helper.
-        use crate::calls::extract_calls;
-        extract_calls(
-            tree.root_node(),
-            source,
-            &mut nodes,
-            &["function_call_expression"],
-        );
-        let (raw_path_literals, raw_sql_refs, dynamic_calls) =
-            extract_php_calls_and_path_literals(tree.root_node(), source, &mut nodes);
-        // A fan-out names every value the method variable can hold, so its
-        // site keeps a blind spot only for a late-bound receiver.
-        let mut fanout_refs = Vec::new();
-        let mut bound_cache = super::dynamic_dispatch::BoundValuesCache::default();
-        for call in dynamic_calls {
-            let fanout =
-                super::dynamic_dispatch::const_map_fanout(call, source, &nodes, &mut bound_cache);
-            let keep_blind_spot = fanout.as_ref().is_none_or(|(_, late_bound)| *late_bound);
-            if keep_blind_spot {
-                push_blind_spot(&mut blind_spots, BLIND_SPEC[3], &call, path, is_test_file);
-            }
-            fanout_refs.extend(fanout.map(|(fanout, _)| fanout));
-        }
-        drop(_p);
-        let _p = parse_prof::span(Pass::Walk);
-        crate::calls::extract_field_reads(
-            tree.root_node(),
-            source,
-            &mut nodes,
-            &["member_access_expression"],
-            &crate::calls::NameRefSpec {
-                ident_kinds: &["name"],
-                kind: crate::calls::NameRefKind::Constant,
-                skip_kinds: &[
-                    "variable_name",
-                    "namespace_use_declaration",
-                    "namespace_definition",
-                    "named_type",
-                    "optional_type",
-                    "union_type",
-                    "intersection_type",
-                    "qualified_name",
-                    "relative_name",
-                    "attribute_list",
-                    "class_constant_access_expression",
-                ],
-                skip_parents: &[
-                    "object_creation_expression",
-                    "named_label_statement",
-                    "goto_statement",
-                ],
-                passed_callable: Some((
-                    "function_call_expression",
-                    super::receiver_types::passed_callable,
-                )),
-                ..crate::calls::NameRefSpec::EMPTY
-            },
-        );
-        crate::calls::extract_variant_refs(
-            tree.root_node(),
-            source,
-            &mut nodes,
-            &crate::calls::VariantRefSpec {
-                path_kinds: &["class_constant_access_expression"],
-                label_parents: &["case_statement", "match_condition_list"],
-                bare_label_parents: &[],
-                bare_expressions: false,
-                token_trees: false,
-            },
-        );
-
-        drop(_p);
-        let _p = parse_prof::span(Pass::Build);
-        // Gate Laravel framework_refs by the `Illuminate` import — without
-        // that, bare `Route::` is just an unrelated class name.
-        let mut framework_refs: Vec<RawFrameworkRef> = Vec::new();
-        if has_import_from(&imports, LARAVEL_REQUIRED) {
-            for (target_name, span) in &pending_laravel {
-                let source_name = enclosing_function_name(&nodes, *span)
-                    .unwrap_or_else(|| MODULE_LEVEL_SOURCE.to_string());
-                framework_refs.push(RawFrameworkRef {
-                    source_name,
-                    target_name: target_name.clone(),
-                    confidence: framework_confidence::LARAVEL_ROUTE,
-                    reason: "laravel-route".to_string(),
-                    span: *span,
-                });
-            }
-        }
-
-        // Framework-presence gate (P1 review fix). Scope-name allowlist
-        // alone isn't enough — a user-defined `class Route { static function
-        // get($k) {...} }` in a non-framework PHP project would still pass
-        // (reviewer's regression test confirmed). Require the file to
-        // import from a known PHP web-framework namespace before any Route
-        // is emitted. No path-shape filter (Laravel uses bare paths like
-        // `'register'`). Spec: 2026-05-17-route-precision-design.md.
-        //
-        // A route file a provider loads often calls the global `Route`
-        // facade alias with no `use` line. Its records stay, marked, and the
-        // builder keeps them only when a file that passes this gate loads
-        // the file. A file that binds `Route` to a class of its own keeps
-        // nothing.
-        if !has_import_from(&imports, PHP_HTTP_FRAMEWORK_NAMESPACES) {
-            let own_router = binds_own_router(&imports, &nodes);
-            routes.retain_mut(|route| match route.scope.as_deref_mut() {
-                Some(scope) if !own_router => {
-                    scope.needs_include = true;
-                    true
+                let mut route_includes: Vec<RawRoute> = Vec::new();
+                for call in include_calls {
+                    super::laravel_routes::push_includes(call, source, names, &mut route_includes);
                 }
-                _ => false,
-            });
-        }
-        // A controller imports no router; its middleware records count only
-        // for the routes whose actions bind its methods.
-        super::laravel_routes::push_controller_middleware(
-            tree.root_node(),
-            source,
-            names,
-            &mut routes,
-        );
-
-        drop(_p);
-        let _p = parse_prof::span(Pass::Walk);
-        let raw_function_metas =
-            crate::function_meta::php::extract(tree.root_node(), source, &nodes, file_category);
-
-        // Pre-8.1 enum-imitation detection — emits one BlindSpot per class
-        // that looks like `class Status { const A = 1; const B = 2; }` with
-        // no instance properties. Must run after the main query loop so that
-        // it can still emit for classes whose class_declaration node was
-        // captured by the query (those are in `nodes`; the blind_spot is a
-        // separate signal).
-        detect_enum_imitation_blind_spots(tree.root_node(), path, is_test_file, &mut blind_spots);
-
-        drop(_p);
-        let _p = parse_prof::span(Pass::Build);
-        crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
-        // Constants belong to the innermost named or anonymous type. Anonymous
-        // owners retain distinct identities without exposing their names globally.
-        if nodes.iter().any(|node| node.kind == NodeKind::Const) {
-            let mut owners: Vec<_> = nodes
-                .iter()
-                .filter(|node| {
-                    matches!(
-                        node.kind,
-                        NodeKind::Class | NodeKind::Interface | NodeKind::Trait | NodeKind::Enum
-                    )
-                })
-                .map(|node| (node.name.clone(), node.span))
-                .collect();
-            owners.extend(
-                anonymous_class_body_spans(tree.root_node())
-                    .into_iter()
-                    .map(|span| (format!("@anonymous_{}_{}", span.0, span.1), span)),
-            );
-            for node in nodes.iter_mut().filter(|node| node.kind == NodeKind::Const) {
-                if let Some(owner) = owners
-                    .iter()
-                    .filter(|(_, span)| ecp_core::analyzer::types::span_contains(*span, node.span))
-                    .min_by_key(|(_, span)| crate::framework_helpers::span_area(*span))
-                    .map(|(name, _)| name.clone())
-                {
-                    node.owner_class = Some(owner);
+                super::laravel_routes::resolve_include_controllers(&mut route_includes, names);
+                cx.routes.append(&mut route_includes);
+            }
+            // Extract call sites with receiver-type binding.
+            // Handles $this->method(), parent::method(), self::method(), static::method().
+            // function_call_expression (bare calls) still go through the shared helper.
+            PhpHook::Calls => {
+                crate::calls::extract_calls(
+                    root,
+                    source,
+                    &mut cx.nodes,
+                    &["function_call_expression"],
+                );
+                let (raw_path_literals, raw_sql_refs, dynamic_calls) =
+                    extract_php_calls_and_path_literals(root, source, &mut cx.nodes);
+                cx.path_literals = raw_path_literals;
+                cx.sql_refs = raw_sql_refs;
+                // A fan-out names every value the method variable can hold, so its
+                // site keeps a blind spot only for a late-bound receiver.
+                let mut bound_cache = super::dynamic_dispatch::BoundValuesCache::default();
+                for call in dynamic_calls {
+                    let fanout = super::dynamic_dispatch::const_map_fanout(
+                        call,
+                        source,
+                        &cx.nodes,
+                        &mut bound_cache,
+                    );
+                    let keep_blind_spot = fanout.as_ref().is_none_or(|(_, late_bound)| *late_bound);
+                    if keep_blind_spot {
+                        cx.push_blind(BLIND_VARIABLE_METHOD_CALL, &call);
+                    }
+                    cx.fanout_refs.extend(fanout.map(|(fanout, _)| fanout));
                 }
             }
+            PhpHook::LaravelGate => {
+                // Gate Laravel framework_refs by the `Illuminate` import — without
+                // that, bare `Route::` is just an unrelated class name.
+                if has_import_from(&cx.imports, LARAVEL_REQUIRED) {
+                    for (target_name, span) in &f.pending_laravel {
+                        let source_name = node::enclosing_or_module(&cx.nodes, *span);
+                        cx.framework_refs.push(RawFrameworkRef {
+                            source_name,
+                            target_name: target_name.clone(),
+                            confidence: framework_confidence::LARAVEL_ROUTE,
+                            reason: "laravel-route".to_string(),
+                            span: *span,
+                        });
+                    }
+                }
+
+                // Framework-presence gate (P1 review fix). Scope-name allowlist
+                // alone isn't enough — a user-defined `class Route { static function
+                // get($k) {...} }` in a non-framework PHP project would still pass
+                // (reviewer's regression test confirmed). Require the file to
+                // import from a known PHP web-framework namespace before any Route
+                // is emitted. No path-shape filter (Laravel uses bare paths like
+                // `'register'`). Spec: 2026-05-17-route-precision-design.md.
+                //
+                // A route file a provider loads often calls the global `Route`
+                // facade alias with no `use` line. Its records stay, marked, and the
+                // builder keeps them only when a file that passes this gate loads
+                // the file. A file that binds `Route` to a class of its own keeps
+                // nothing.
+                if !has_import_from(&cx.imports, PHP_HTTP_FRAMEWORK_NAMESPACES) {
+                    let own_router = binds_own_router(&cx.imports, &cx.nodes);
+                    cx.routes
+                        .retain_mut(|route| match route.scope.as_deref_mut() {
+                            Some(scope) if !own_router => {
+                                scope.needs_include = true;
+                                true
+                            }
+                            _ => false,
+                        });
+                }
+                // A controller imports no router; its middleware records count only
+                // for the routes whose actions bind its methods.
+                let names = super::laravel_routes::FileNames {
+                    imports: &cx.imports,
+                    namespace: f.file_namespace.as_deref(),
+                };
+                super::laravel_routes::push_controller_middleware(
+                    root,
+                    source,
+                    names,
+                    &mut cx.routes,
+                );
+            }
+            // Pre-8.1 enum-imitation detection — emits one BlindSpot per class
+            // that looks like `class Status { const A = 1; const B = 2; }` with
+            // no instance properties. Must run after the main query loop so that
+            // it can still emit for classes whose class_declaration node was
+            // captured by the query (those are in `nodes`; the blind_spot is a
+            // separate signal).
+            PhpHook::EnumImitation => {
+                detect_enum_imitation_blind_spots(root, cx.path, cx.is_test, &mut cx.blind_spots);
+            }
+            // Constants belong to the innermost named or anonymous type. Anonymous
+            // owners retain distinct identities without exposing their names globally.
+            PhpHook::ConstOwners => {
+                let nodes = &mut cx.nodes;
+                if nodes.iter().any(|node| node.kind == NodeKind::Const) {
+                    let mut owners: Vec<_> = nodes
+                        .iter()
+                        .filter(|node| {
+                            matches!(
+                                node.kind,
+                                NodeKind::Class
+                                    | NodeKind::Interface
+                                    | NodeKind::Trait
+                                    | NodeKind::Enum
+                            )
+                        })
+                        .map(|node| (node.name.clone(), node.span))
+                        .collect();
+                    owners.extend(
+                        anonymous_class_body_spans(root)
+                            .into_iter()
+                            .map(|span| (format!("@anonymous_{}_{}", span.0, span.1), span)),
+                    );
+                    for node in nodes.iter_mut().filter(|node| node.kind == NodeKind::Const) {
+                        if let Some(owner) = owners
+                            .iter()
+                            .filter(|(_, span)| {
+                                ecp_core::analyzer::types::span_contains(*span, node.span)
+                            })
+                            .min_by_key(|(_, span)| crate::framework_helpers::span_area(*span))
+                            .map(|(name, _)| name.clone())
+                        {
+                            node.owner_class = Some(owner);
+                        }
+                    }
+                }
+            }
+            PhpHook::QualifiedConstants => {
+                extract_qualified_constant_refs(root, source, &mut cx.nodes);
+            }
         }
-        drop(_p);
-        let _p = parse_prof::span(Pass::Walk);
-        extract_qualified_constant_refs(tree.root_node(), source, &mut nodes);
-        drop(_p);
-        let _p = parse_prof::span(Pass::Build);
-        let tx_scopes =
-            collect_symfony_transactional_scopes(&nodes, &[NodeKind::Method, NodeKind::Function]);
-        drop(_p);
-        Ok(LocalGraph {
-            content_hash: [0; 8],
-            routes,
-            file_path: path.to_path_buf(),
-            nodes,
-            imports,
-            documents: vec![],
-            route_receivers: None,
-            framework_refs,
-            fanout_refs,
-            blind_spots,
-            schema_fields: None,
-            event_topics: None,
-            tx_scopes,
-            path_literals: (!raw_path_literals.is_empty())
-                .then(|| raw_path_literals.into_boxed_slice()),
-            sql_refs: (!raw_sql_refs.is_empty()).then(|| raw_sql_refs.into_boxed_slice()),
-            call_metas: vec![],
-            raw_function_metas,
-            export_aliases: None,
-            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
-        })
+    }
+
+    fn function_meta(
+        root: Node<'_>,
+        source: &[u8],
+        nodes: &[RawNode],
+        category: FileCategory,
+    ) -> Vec<RawFunctionMeta> {
+        crate::function_meta::php::extract(root, source, nodes, category)
     }
 }
 

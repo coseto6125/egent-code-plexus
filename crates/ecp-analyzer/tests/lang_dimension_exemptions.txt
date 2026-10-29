@@ -306,7 +306,6 @@ dimensions typescript pre-existing gap
 driver_parity c lands when phase 3 slice T7 moves this parser onto the shared driver
 driver_parity cpp lands when phase 3 slice T7 moves this parser onto the shared driver
 driver_parity dart lands when phase 3 slice T6 moves this parser onto the shared driver
-driver_parity php lands when phase 3 slice T6 moves this parser onto the shared driver
 dynamic_dispatch c pre-existing gap
 dynamic_dispatch cpp pre-existing gap
 dynamic_dispatch csharp pre-existing gap
