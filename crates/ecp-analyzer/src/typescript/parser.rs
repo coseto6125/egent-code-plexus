@@ -468,7 +468,7 @@ impl ParseSpec for TypeScriptSpec {
         // parent and no owner (invariant I1), whatever the class pass gave it.
         step(Pass::Build, Effect::Nodes, Op::ClearScopedOwners),
         step(Pass::Build, Effect::Bind, Op::TxScopes),
-        step(Pass::Walk, Effect::Neutral, Op::SchemaFieldsRequery),
+        step(Pass::Walk, Effect::Neutral, Op::SchemaFields),
         step(Pass::Walk, Effect::Neutral, Op::EventTopicsRequery),
     ];
 

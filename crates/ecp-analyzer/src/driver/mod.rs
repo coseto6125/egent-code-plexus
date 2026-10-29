@@ -7,6 +7,7 @@ mod cx;
 pub mod imports;
 pub mod node;
 mod records;
+mod tap;
 
 pub use cx::{AnonKey, Anonymous, DeclSlot, FileCx, ScopeLanguage, TestRule};
 
@@ -23,6 +24,7 @@ use ecp_core::graph::{FileCategory, NodeKind};
 use imports::ImportOrder;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
+use tap::{TapMatch, TapRange, TapTable};
 use tree_sitter::{Node, Query, QueryCursor, Tree};
 
 /// One language's half of a parse. Every hook and per-match method is
@@ -130,6 +132,8 @@ pub enum Op<H> {
     ClearScopedOwners,
     TxScopes,
     EventTopicsRequery,
+    /// Builds the records from the rows the query pass tapped.
+    SchemaFields,
     SchemaFieldsRequery,
 }
 
@@ -149,6 +153,7 @@ impl<H> Op<H> {
             Op::SortDedupImports(_)
             | Op::FunctionMeta
             | Op::EventTopicsRequery
+            | Op::SchemaFields
             | Op::SchemaFieldsRequery => Some(Effect::Neutral),
         }
     }
@@ -177,8 +182,9 @@ pub enum TxRule {
 }
 
 /// No `Nodes` step after a `Bind` step, every fixed op declares its fixed
-/// effect, and exactly one step runs the query. A hook's real writes are not
-/// checked here; the debug node-count assertion and the dump catch them.
+/// effect, exactly one step runs the query, and the tap step follows it.
+/// A hook's real writes are not checked here; the debug node-count
+/// assertion and the dump catch them.
 pub const fn steps_ok<H>(steps: &[Step<H>]) -> bool {
     let mut bound = false;
     let mut queries = 0;
@@ -195,8 +201,10 @@ pub const fn steps_ok<H>(steps: &[Step<H>]) -> bool {
             Effect::Bind => bound = true,
             _ => {}
         }
-        if matches!(step.op, Op::Query) {
-            queries += 1;
+        match step.op {
+            Op::Query => queries += 1,
+            Op::SchemaFields if queries == 0 => return false,
+            _ => {}
         }
         i += 1;
     }
@@ -217,6 +225,18 @@ const fn params_ok<S: ParseSpec>() -> bool {
     true
 }
 
+/// Whether a spec's steps build its schema fields from the tap.
+const fn taps_schemas<H>(steps: &[Step<H>]) -> bool {
+    let mut i = 0;
+    while i < steps.len() {
+        if matches!(steps[i].op, Op::SchemaFields) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
 #[derive(Clone, Copy)]
 enum Slot<R> {
     Kind(NodeKind),
@@ -226,9 +246,17 @@ enum Slot<R> {
     Skip,
 }
 
+/// One capture index: its dispatch slot, and the tap targets it also feeds.
+#[derive(Clone, Copy)]
+struct Entry<R> {
+    slot: Slot<R>,
+    tap: TapRange,
+}
+
 pub struct Compiled<S: ParseSpec> {
     query: Query,
-    table: Box<[Slot<S::Role>]>,
+    table: Box<[Entry<S::Role>]>,
+    taps: TapTable,
 }
 
 impl<S: ParseSpec> Compiled<S> {
@@ -240,20 +268,35 @@ impl<S: ParseSpec> Compiled<S> {
         const {
             assert!(
                 steps_ok(S::STEPS),
-                "STEPS: a node-changing step follows a bind step, a fixed op declares the wrong effect, or the query step is not exactly one"
+                "STEPS: a node-changing step follows a bind step, a fixed op declares the wrong effect, the query step is not exactly one, or a tap step precedes the query"
             );
             assert!(
                 params_ok::<S>(),
                 "STEPS lists FieldReads or VariantRefs with no spec"
             );
+            assert!(
+                S::SCHEMA_FIELDS.len() <= tap::MAX_CONFIGS,
+                "SCHEMA_FIELDS exceeds the tap's slot table"
+            );
         }
         let query = S::query()?;
+        // A spec that re-queries its schema fields gets no targets, so its
+        // matches pay nothing in the main loop.
+        let tapped = const { taps_schemas(S::STEPS) };
+        let schemas: &[SchemaFieldConfig] = if tapped { S::SCHEMA_FIELDS } else { &[] };
+        let (taps, ranges) = TapTable::new(&query, schemas);
         let table = query
             .capture_names()
             .iter()
-            .map(slot_for::<S>)
+            .zip(ranges)
+            .map(|(name, tap)| {
+                Ok(Entry {
+                    slot: slot_for::<S>(name)?,
+                    tap,
+                })
+            })
             .collect::<anyhow::Result<_>>()?;
-        Ok(Self { query, table })
+        Ok(Self { query, table, taps })
     }
 
     pub fn query(&self) -> &Query {
@@ -262,7 +305,10 @@ impl<S: ParseSpec> Compiled<S> {
 
     pub fn role_at(&self, capture_index: u32) -> Option<S::Role> {
         match self.table.get(capture_index as usize) {
-            Some(Slot::Lang(r)) => Some(*r),
+            Some(Entry {
+                slot: Slot::Lang(r),
+                ..
+            }) => Some(*r),
             _ => None,
         }
     }
@@ -404,22 +450,30 @@ fn run_op<'t, S: ParseSpec>(
         }
         Op::TxScopes => records::tx_scopes(S::TX, cx),
         Op::EventTopicsRequery => records::event_topics_requery(&c.query, S::EVENT_TOPICS, cx),
+        Op::SchemaFields => tap::schema_fields(S::SCHEMA_FIELDS, cx),
         Op::SchemaFieldsRequery => records::schema_fields_requery(&c.query, S::SCHEMA_FIELDS, cx),
     }
 }
 
-/// The hot loop. Each capture costs one table load and one `match`; a
-/// `DeclSlot` and a `Match` start fresh per match, as the copies' locals do.
+/// The hot loop. Each capture costs one table load, one tap-range test and
+/// one `match`; a `DeclSlot` and a `Match` start fresh per match, as the
+/// copies' locals do. The tap closes a match before `end_match`, so a spec's
+/// early return cannot drop a tap row.
 fn run_query<'t, S: ParseSpec>(c: &Compiled<S>, f: &mut S::File<'t>, cx: &mut FileCx<'t>) {
     let tree: &'t Tree = cx.tree;
     let source: &'t [u8] = cx.source;
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(&c.query, tree.root_node(), source);
+    let mut tap = TapMatch::default();
     while let Some(m) = matches.next() {
         let mut d = DeclSlot::default();
         let mut mb: S::Match<'t> = Default::default();
         for cap in m.captures() {
-            match c.table[cap.index as usize] {
+            let entry = &c.table[cap.index as usize];
+            if !entry.tap.is_empty() {
+                tap.write(&c.taps, entry.tap, cap.node);
+            }
+            match entry.slot {
                 Slot::Kind(kind) => d.write_kind(S::KIND_CAPTURE, cap.node, kind),
                 Slot::Blind(i) => cx.push_blind(S::BLIND[i].1, &cap.node),
                 Slot::Anon => {
@@ -431,6 +485,7 @@ fn run_query<'t, S: ParseSpec>(c: &Compiled<S>, f: &mut S::File<'t>, cx: &mut Fi
                 Slot::Skip => {}
             }
         }
+        tap.close(&c.taps, m.captures(), &mut cx.tap_rows);
         S::end_match(d, &mut mb, f, cx);
     }
 }
@@ -581,6 +636,9 @@ mod tests {
         ]));
         assert!(!steps_ok::<()>(&[]));
         assert!(!steps_ok(&[QUERY, QUERY]));
+        let schemas = step(Pass::Walk, Effect::Neutral, Op::SchemaFields);
+        assert!(!steps_ok(&[schemas, QUERY]));
+        assert!(steps_ok(&[QUERY, schemas]));
         assert!(steps_ok(&[
             QUERY,
             step(Pass::Build, Effect::Bind, Op::Hook(()))

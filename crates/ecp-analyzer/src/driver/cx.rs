@@ -2,6 +2,7 @@
 //! today's `parse_file` bodies keep as locals, and the `LocalGraph` assembly.
 
 use super::node;
+use super::tap::TapRow;
 use super::KindCapture;
 use crate::calls::CallSiteIndex;
 use crate::framework_helpers::push_blind_spot;
@@ -134,6 +135,9 @@ pub struct FileCx<'t> {
     /// Shared with JS declarations, which insert their spans here too.
     pub anon_spans: FxHashSet<Span>,
     pub anon_ids: FxHashSet<usize>,
+    /// Candidate schema records from the query pass; `Op::SchemaFields`
+    /// drains them.
+    pub(super) tap_rows: Vec<TapRow>,
 }
 
 impl<'t> FileCx<'t> {
@@ -164,6 +168,7 @@ impl<'t> FileCx<'t> {
             export_aliases: None,
             anon_spans: FxHashSet::default(),
             anon_ids: FxHashSet::default(),
+            tap_rows: Vec::new(),
         }
     }
 
