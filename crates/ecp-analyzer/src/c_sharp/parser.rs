@@ -1,33 +1,22 @@
 use super::receiver_types::extract_csharp_calls_and_path_literals;
 use super::spec::CSharpSpec;
+use crate::calls::{NameRefKind, NameRefSpec, VariantRefSpec};
+use crate::driver::{
+    self, imports, node, AnonKey, Anonymous, Compiled, DeclSlot, Effect, FieldReads, FileCx,
+    KindCapture, Op, ParseSpec, Step, TxRule,
+};
 use crate::framework_confidence;
 use crate::framework_helpers::{
-    collect_dotnet_transactional_scopes, detect_ast_framework_patterns, node_span, push_blind_spot,
-    FrameworkPatternSpec,
+    collect_dotnet_transactional_scopes, detect_ast_framework_patterns, FrameworkPatternSpec,
 };
-use crate::function_meta::subtree_contains_kind;
 use crate::parse_budget::{parse_with_budget, ParseBudget};
-use ecp_core::analyzer::lang_spec::LangSpec;
-use ecp_core::analyzer::parse_prof::{self, Pass};
+use ecp_core::analyzer::parse_prof::Pass;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawImport, RawNode, OVERRIDE_SENTINEL};
-use ecp_core::graph::NodeKind;
+use ecp_core::analyzer::types::{LocalGraph, RawFunctionMeta, RawNode, Span, OVERRIDE_SENTINEL};
+use ecp_core::graph::{FileCategory, NodeKind};
+use rustc_hash::FxHashMap;
 use std::path::Path;
-use streaming_iterator::StreamingIterator;
-use tree_sitter::{Query, QueryCursor};
-
-/// Blind-spot kind/hint pairs. Order matches the capture-index dispatch
-/// in `parse_file`.
-const BLIND_SPEC: &[(&str, &str)] = &[
-    (
-        "cs-activator-create-instance",
-        "Activator.CreateInstance(<expr>) — runtime type instantiation; created object's type/body is not statically determinable",
-    ),
-    (
-        "cs-method-invoke",
-        "<expr>.Invoke(...) — reflective method invocation; target method body resolved at runtime via MethodInfo",
-    ),
-];
+use tree_sitter::{Node, Query, Tree};
 
 /// Per upstream `csharp.ts:153-187` `astFrameworkPatterns`. Substring scan of
 /// the file source; emits one `RawFrameworkRef` per detected framework.
@@ -152,13 +141,6 @@ fn declaring_scope(decl: tree_sitter::Node<'_>, source: &[u8]) -> String {
     scope
 }
 
-/// Whether `node`'s subtree contains a C# `invocation_expression`. Gates
-/// emission of `<anonymous>` callback nodes so empty closures (e.g.
-/// `list.Select(x => x.Name)`) stay out of the graph.
-fn body_has_call(node: tree_sitter::Node) -> bool {
-    subtree_contains_kind(node, "invocation_expression")
-}
-
 thread_local! {
     static PARSER: std::cell::RefCell<tree_sitter::Parser> = std::cell::RefCell::new({
         let mut parser = tree_sitter::Parser::new();
@@ -167,113 +149,15 @@ thread_local! {
         parser
     });
 }
-struct CSharpCaptureIndices {
-    import_name: Option<u32>,
-    import_source: Option<u32>,
-    import_alias: Option<u32>,
-    export: Option<u32>,
-    heritage: Option<u32>,
-    type_: Option<u32>,
-    decorator: Option<u32>,
-    override_marker: Option<u32>,
-    function: Option<u32>,
-    class: Option<u32>,
-    method: Option<u32>,
-    interface: Option<u32>,
-    property: Option<u32>,
-    variable: Option<u32>,
-    constructor: Option<u32>,
-    namespace: Option<u32>,
-    enum_: Option<u32>,
-    enum_member_node: Option<u32>,
-    struct_: Option<u32>,
-    // BlindSpot captures (FU-001 P2c).
-    blind_activator_create: Option<u32>,
-    blind_method_invoke: Option<u32>,
-    function_anonymous: Option<u32>,
-    // Special-member root captures — handled with custom name synthesis in
-    // the parse loop (these nodes lack a plain `name: (identifier)` field).
-    operator_decl: Option<u32>,
-    conv_operator_decl: Option<u32>,
-    indexer_decl: Option<u32>,
-    // event_field root (variable_declaration pattern — multiple declarators).
-    event_field: Option<u32>,
-    // Roots for destructor and event_decl (name-based captures also exist in
-    // spec, but we need the root span separately like enum_member_node).
-    destructor: Option<u32>,
-    event_decl: Option<u32>,
-    // Name captures (not roots) — destructor `~` prefix; event_field multi-declarator keying.
-    destructor_name: Option<u32>,
-    event_field_name: Option<u32>,
-}
 
 pub struct CSharpProvider {
-    query: Query,
-    /// Capture index → NodeKind mapping, pre-resolved from
-    /// `CSharpSpec::CAPTURE_KIND` at provider construction. The hot loop
-    /// looks up by integer index (cap.index as usize) — equivalent perf
-    /// to the previous hard-coded if-chain, but the source of truth
-    /// lives in `spec.rs` const tables.
-    capture_kind_by_idx: Vec<Option<NodeKind>>,
-    /// All capture indices resolved once at provider construction.
-    /// Cuts ~18 `query.capture_index_for_name()` calls per parse_file.
-    indices: CSharpCaptureIndices,
+    compiled: Compiled<CSharpSpec>,
 }
 
 impl CSharpProvider {
     pub fn new() -> anyhow::Result<Self> {
-        let language = tree_sitter_c_sharp::LANGUAGE.into();
-        let query_source = include_str!("queries.scm");
-        let query = Query::new(&language, query_source)?;
-
-        // Pre-resolve capture-name → NodeKind from the spec table so the
-        // hot loop stays an integer-index lookup (no per-capture string
-        // compare). Capture names not in the spec map yield None and
-        // fall through to the metadata-only branches below (heritage,
-        // decorator, etc.).
-        let capture_kind_by_idx: Vec<Option<NodeKind>> = query
-            .capture_names()
-            .iter()
-            .map(|name| CSharpSpec::CAPTURE_KIND.get(name).copied())
-            .collect();
-
-        let indices = CSharpCaptureIndices {
-            import_name: query.capture_index_for_name("import.name"),
-            import_source: query.capture_index_for_name("import.source"),
-            import_alias: query.capture_index_for_name("import.alias"),
-            export: query.capture_index_for_name("export"),
-            heritage: query.capture_index_for_name("heritage"),
-            type_: query.capture_index_for_name("type"),
-            decorator: query.capture_index_for_name("decorator"),
-            override_marker: query.capture_index_for_name("override_marker"),
-            function: query.capture_index_for_name("function"),
-            class: query.capture_index_for_name("class"),
-            method: query.capture_index_for_name("method"),
-            interface: query.capture_index_for_name("interface"),
-            property: query.capture_index_for_name("property"),
-            variable: query.capture_index_for_name("variable"),
-            constructor: query.capture_index_for_name("constructor"),
-            namespace: query.capture_index_for_name("namespace"),
-            enum_: query.capture_index_for_name("enum"),
-            enum_member_node: query.capture_index_for_name("enum_member_node"),
-            struct_: query.capture_index_for_name("struct"),
-            blind_activator_create: query.capture_index_for_name("blind.activator_create"),
-            blind_method_invoke: query.capture_index_for_name("blind.method_invoke"),
-            function_anonymous: query.capture_index_for_name("function.anonymous"),
-            operator_decl: query.capture_index_for_name("operator_decl"),
-            conv_operator_decl: query.capture_index_for_name("conv_operator_decl"),
-            indexer_decl: query.capture_index_for_name("indexer_decl"),
-            event_field: query.capture_index_for_name("event_field"),
-            destructor: query.capture_index_for_name("destructor"),
-            event_decl: query.capture_index_for_name("event_decl"),
-            destructor_name: query.capture_index_for_name("destructor.name"),
-            event_field_name: query.capture_index_for_name("event_field.name"),
-        };
-
         Ok(Self {
-            query,
-            capture_kind_by_idx,
-            indices,
+            compiled: Compiled::new()?,
         })
     }
 }
@@ -284,553 +168,531 @@ impl LanguageProvider for CSharpProvider {
     }
 
     fn parse_file(&self, path: &Path, source: &[u8]) -> anyhow::Result<LocalGraph> {
-        let _p = parse_prof::span(Pass::Tree);
-        let tree = PARSER
-            .with(|p| parse_with_budget(&mut p.borrow_mut(), source, ParseBudget::DEFAULT))
-            .ok_or_else(|| anyhow::anyhow!("Failed to parse file"))?;
+        driver::parse(&self.compiled, path, source)
+    }
+}
 
-        drop(_p);
-        let _p = parse_prof::span(Pass::Query);
-        let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(&self.query, tree.root_node(), source);
+/// The captures C# handles itself. A root capture sets the declaration root
+/// once per match; the kind captures in `CSharpSpec::CAPTURE_KIND` set name
+/// and kind.
+#[derive(Clone, Copy)]
+pub enum CSharpRole {
+    Root,
+    /// `@destructor` and `@destructor.name` are both mandatory in the one
+    /// pattern that uses them, so the root marks the `~` name prefix.
+    DestructorRoot,
+    /// `@event_field` and `@event_field.name` are both mandatory in the one
+    /// pattern that uses them, so the root marks the per-declarator keying.
+    EventFieldRoot,
+    Export,
+    Heritage,
+    Type,
+    Decorator,
+    OverrideMarker,
+    ImportName,
+    ImportSource,
+    ImportAlias,
+    /// Special-member roots: their nodes lack a plain `name:` identifier,
+    /// so `end_match` synthesises the name once metadata is collected.
+    Operator,
+    ConvOperator,
+    Indexer,
+}
 
-        // Vec + idx-map pattern — see java/parser.rs same-site note.
-        let mut nodes: Vec<RawNode> = Vec::new();
-        let mut node_id_to_idx: rustc_hash::FxHashMap<usize, usize> =
-            rustc_hash::FxHashMap::default();
-        let mut imports = Vec::new();
-        let mut blind_spots: Vec<BlindSpot> = Vec::new();
-        let file_category =
-            ecp_core::file_category::determine_category(path.to_str().unwrap_or(""));
-        let is_test_file = file_category == ecp_core::graph::FileCategory::Test;
+#[derive(Clone, Copy)]
+pub enum CSharpHook {
+    Calls,
+    Frameworks,
+}
 
-        // Dedup: the same lambda/closure can be captured by multiple matches.
-        // Span set guards against pushing the same `<anonymous>` node twice.
-        let mut anon_emitted_spans: std::collections::HashSet<(u32, u32, u32, u32)> =
-            std::collections::HashSet::new();
+#[derive(Default)]
+pub struct CSharpMatch<'t> {
+    import_name: Option<Node<'t>>,
+    import_src: Option<Node<'t>>,
+    import_alias: Option<String>,
+    is_exported: bool,
+    heritage: Vec<String>,
+    type_annotation: Option<String>,
+    decorators: Vec<String>,
+    is_destructor_name: bool,
+    is_event_field_name: bool,
+    deferred_operator: Option<Node<'t>>,
+    deferred_conv_operator: Option<Node<'t>>,
+    deferred_indexer: Option<Node<'t>>,
+}
 
-        let idx = &self.indices;
-        let idx_import_name = idx.import_name;
-        let idx_import_source = idx.import_source;
-        let idx_import_alias = idx.import_alias;
+#[derive(Default)]
+pub struct CSharpFile {
+    /// Dedup lookup for multi-capture merge only; nodes are pushed in match
+    /// order and the map is never iterated.
+    node_id_to_idx: FxHashMap<usize, usize>,
+}
 
-        let idx_export = idx.export;
-        let idx_heritage = idx.heritage;
-        let idx_type = idx.type_;
-        let idx_decorator = idx.decorator;
-        let idx_override_marker = idx.override_marker;
+const fn step(pass: Pass, effect: Effect, op: Op<CSharpHook>) -> Step<CSharpHook> {
+    Step { pass, effect, op }
+}
 
-        let idx_function = idx.function;
-        let idx_class = idx.class;
-        let idx_method = idx.method;
-        let idx_interface = idx.interface;
-        let idx_property = idx.property;
-        let idx_variable = idx.variable;
-        let idx_constructor = idx.constructor;
-        let idx_namespace = idx.namespace;
-        let idx_enum = idx.enum_;
-        let idx_enum_member_node = idx.enum_member_node;
-        let idx_struct = idx.struct_;
+/// Truncating `as u32` casts, as the old literals spelled the span.
+fn position_span(n: Node<'_>) -> Span {
+    let start = n.start_position();
+    let end = n.end_position();
+    (
+        start.row as u32,
+        start.column as u32,
+        end.row as u32,
+        end.column as u32,
+    )
+}
 
-        let idx_destructor_name = idx.destructor_name;
-        let idx_event_field_name = idx.event_field_name;
+impl ParseSpec for CSharpSpec {
+    type Role = CSharpRole;
+    type Match<'t> = CSharpMatch<'t>;
+    type File<'t> = CSharpFile;
+    type Hook = CSharpHook;
 
-        while let Some(m) = matches.next() {
-            let mut name_node = None;
-            let mut kind = None;
-            let mut root_span_node = None;
+    const KIND_CAPTURE: KindCapture = KindCapture::NameOverwrite;
+    /// An anonymous callback (lambda / delegate in argument position) gets an
+    /// `<anonymous>` Function node only when its body holds a call, so
+    /// attach_to_enclosing can host those calls instead of dropping them when
+    /// no named enclosing scope exists. Empty closures (e.g.
+    /// `list.Select(x => x.Name)`) stay out of the graph. The same lambda can
+    /// be captured by several matches, so the dedupe keys on its span.
+    const ANONYMOUS: Option<Anonymous> = Some(Anonymous {
+        capture: "function.anonymous",
+        call_kinds: &["invocation_expression"],
+        key: AnonKey::Span,
+    });
+    const BLIND: &'static [(&'static str, (&'static str, &'static str))] = &[
+        (
+            "blind.activator_create",
+            (
+                "cs-activator-create-instance",
+                "Activator.CreateInstance(<expr>) — runtime type instantiation; created object's type/body is not statically determinable",
+            ),
+        ),
+        (
+            "blind.method_invoke",
+            (
+                "cs-method-invoke",
+                "<expr>.Invoke(...) — reflective method invocation; target method body resolved at runtime via MethodInfo",
+            ),
+        ),
+    ];
+    const FIELD_READS: Option<FieldReads> = Some(FieldReads {
+        member_kinds: &["member_access_expression"],
+        names: NameRefSpec {
+            ident_kinds: &["identifier", "implicit_parameter"],
+            kind: NameRefKind::Value,
+            binding_fields: &[
+                ("foreach_statement", "left"),
+                ("catch_declaration", "name"),
+                ("declaration_expression", "name"),
+                ("declaration_pattern", "name"),
+                ("from_clause", "name"),
+                ("tuple_pattern", "name"),
+                ("parenthesized_variable_designation", "name"),
+            ],
+            binding_parents: &["let_clause"],
+            skip_kinds: &[
+                "using_directive",
+                "attribute_list",
+                "type_argument_list",
+                "qualified_name",
+                "generic_name",
+            ],
+            skip_parents: &["labeled_statement", "goto_statement"],
+            ..NameRefSpec::EMPTY
+        },
+    });
+    const VARIANT_REFS: Option<VariantRefSpec> = Some(VariantRefSpec {
+        path_kinds: &["member_access_expression"],
+        label_parents: &[],
+        bare_label_parents: &[],
+        bare_expressions: false,
+        token_trees: false,
+    });
+    const TX: TxRule = TxRule::Nodes {
+        collect: collect_dotnet_transactional_scopes,
+        kinds: &[NodeKind::Method, NodeKind::Constructor, NodeKind::Function],
+    };
+    const STEPS: &'static [Step<CSharpHook>] = &[
+        step(Pass::Query, Effect::Nodes, Op::Query),
+        step(Pass::Calls, Effect::Nodes, Op::Hook(CSharpHook::Calls)),
+        step(Pass::Walk, Effect::Nodes, Op::FieldReads),
+        step(Pass::Walk, Effect::Nodes, Op::VariantRefs),
+        step(
+            Pass::Walk,
+            Effect::Neutral,
+            Op::Hook(CSharpHook::Frameworks),
+        ),
+        step(Pass::Walk, Effect::Neutral, Op::FunctionMeta),
+        step(Pass::Build, Effect::Nodes, Op::StampOwners),
+        step(Pass::Build, Effect::Bind, Op::TxScopes),
+    ];
 
-            let mut import_name = None;
-            let mut import_src = None;
-            let mut import_alias = None;
+    fn query() -> anyhow::Result<Query> {
+        Ok(Query::new(
+            &tree_sitter_c_sharp::LANGUAGE.into(),
+            include_str!("queries.scm"),
+        )?)
+    }
 
-            let mut is_exported = false;
-            let mut heritage_list = Vec::new();
-            let mut type_annotation = None;
-            let mut decorators = Vec::new();
-            // Set when the name capture comes from a destructor_declaration so
-            // the name string gets a `~` prefix appended below.
-            let mut is_destructor_name = false;
-            // Set for event_field_declaration declarator names so node_id keys
-            // on the identifier (same logic as Property/Variable multi-declarator).
-            let mut is_event_field_name = false;
-            // Deferred special-member root captures — node is emitted AFTER the
-            // capture loop so decorator/export/type metadata is fully collected.
-            let mut deferred_operator: Option<tree_sitter::Node<'_>> = None;
-            let mut deferred_conv_operator: Option<tree_sitter::Node<'_>> = None;
-            let mut deferred_indexer: Option<tree_sitter::Node<'_>> = None;
+    fn role(capture: &str) -> Option<CSharpRole> {
+        Some(match capture {
+            "function" | "class" | "method" | "interface" | "property" | "variable"
+            | "constructor" | "namespace" | "enum" | "enum_member_node" | "struct"
+            | "event_decl" => CSharpRole::Root,
+            "destructor" => CSharpRole::DestructorRoot,
+            "event_field" => CSharpRole::EventFieldRoot,
+            "export" => CSharpRole::Export,
+            "heritage" => CSharpRole::Heritage,
+            "type" => CSharpRole::Type,
+            "decorator" => CSharpRole::Decorator,
+            "override_marker" => CSharpRole::OverrideMarker,
+            "import.name" => CSharpRole::ImportName,
+            "import.source" => CSharpRole::ImportSource,
+            "import.alias" => CSharpRole::ImportAlias,
+            "operator_decl" => CSharpRole::Operator,
+            "conv_operator_decl" => CSharpRole::ConvOperator,
+            "indexer_decl" => CSharpRole::Indexer,
+            _ => return None,
+        })
+    }
 
-            for cap in m.captures() {
-                let cap_idx = cap.index;
-                if let Some(k_from_spec) = self
-                    .capture_kind_by_idx
-                    .get(cap_idx as usize)
-                    .copied()
-                    .flatten()
-                {
-                    // Single config-driven dispatch replaces the nine
-                    // explicit Class/Method/Interface/Function/Property/
-                    // Variable/Constructor/Namespace/Enum arms.
-                    // Source of truth: CSharpSpec::CAPTURE_KIND in spec.rs.
-                    name_node = Some(cap.node);
-                    kind = Some(k_from_spec);
-                    // Track special captures for name post-processing.
-                    if Some(cap_idx) == idx_destructor_name {
-                        is_destructor_name = true;
-                    } else if Some(cap_idx) == idx_event_field_name {
-                        is_event_field_name = true;
-                    }
-                } else if Some(cap_idx) == idx_import_name {
-                    import_name = Some(cap.node);
-                } else if Some(cap_idx) == idx_import_source {
-                    import_src = Some(cap.node);
-                } else if Some(cap_idx) == idx_import_alias {
-                    if let Ok(text) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        import_alias = Some(text.to_string());
-                    }
-                } else if Some(cap_idx) == idx_export {
-                    if let Ok(text) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        if text == "public" {
-                            is_exported = true;
-                        }
-                    }
-                } else if Some(cap_idx) == idx_heritage {
-                    // `(base_list (_)*)` also matches the `#pragma` lines
-                    // that bracket an obsolete base.
-                    if cap.node.kind().starts_with("preproc_") {
-                        continue;
-                    }
-                    if let Ok(text) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        heritage_list.push(text.to_string());
-                    }
-                } else if Some(cap_idx) == idx_type {
-                    if let Ok(text) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        type_annotation = Some(text.to_string());
-                    }
-                } else if Some(cap_idx) == idx_decorator {
-                    if let Ok(text) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        decorators.push(text.to_string());
-                    }
-                } else if Some(cap_idx) == idx_override_marker {
-                    decorators.push(OVERRIDE_SENTINEL.to_string());
-                } else if Some(cap_idx) == idx.blind_activator_create {
-                    push_blind_spot(
-                        &mut blind_spots,
-                        BLIND_SPEC[0],
-                        &cap.node,
-                        path,
-                        is_test_file,
-                    );
-                } else if Some(cap_idx) == idx.blind_method_invoke {
-                    push_blind_spot(
-                        &mut blind_spots,
-                        BLIND_SPEC[1],
-                        &cap.node,
-                        path,
-                        is_test_file,
-                    );
-                } else if Some(cap_idx) == idx.function_anonymous {
-                    // Anonymous callback (lambda / delegate in argument position).
-                    // Emit an `<anonymous>` Function node only when the body holds
-                    // a call — attach_to_enclosing can then host those calls instead
-                    // of dropping them when no named enclosing scope exists.
-                    // Empty closures (e.g. `list.Select(x => x.Name)`) stay out of
-                    // the graph.
-                    if body_has_call(cap.node) {
-                        let span = node_span(&cap.node);
-                        if anon_emitted_spans.insert(span) {
-                            nodes.push(RawNode {
-                                decorators: Vec::new(),
-                                is_exported: false,
-                                heritage: Vec::new(),
-                                type_annotation: None,
-                                name: format!("<anonymous:{}:{}>", span.0 + 1, span.1),
-                                kind: NodeKind::Function,
-                                span,
-                                calls: Vec::new(),
-                                field_reads: Vec::new(),
-                                owner_class: None,
-                                content_hash: ecp_core::uid::xxh3_64_bytes(
-                                    &source[cap.node.start_byte()..cap.node.end_byte()],
-                                ),
-                            });
-                        }
-                    }
-                } else if Some(cap_idx) == idx.operator_decl {
-                    // Defer: node emitted after capture loop with fully-collected metadata.
-                    deferred_operator = Some(cap.node);
-                } else if Some(cap_idx) == idx.conv_operator_decl {
-                    // Defer: node emitted after capture loop with fully-collected metadata.
-                    deferred_conv_operator = Some(cap.node);
-                } else if Some(cap_idx) == idx.indexer_decl {
-                    // Defer: node emitted after capture loop with fully-collected metadata.
-                    deferred_indexer = Some(cap.node);
-                } else if Some(cap_idx) == idx.event_field {
-                    // event_field_declaration root — span anchor for the per-declarator
-                    // nodes emitted by the @event_field.name spec-driven captures.
-                    // We only track this as a root; name_node / kind come from the
-                    // spec dispatch above.
-                    if root_span_node.is_none() {
-                        root_span_node = Some(cap.node);
-                    }
-                } else if (Some(cap_idx) == idx_function
-                    || Some(cap_idx) == idx_class
-                    || Some(cap_idx) == idx_method
-                    || Some(cap_idx) == idx_interface
-                    || Some(cap_idx) == idx_property
-                    || Some(cap_idx) == idx_variable
-                    || Some(cap_idx) == idx_constructor
-                    || Some(cap_idx) == idx_namespace
-                    || Some(cap_idx) == idx_enum
-                    || Some(cap_idx) == idx_enum_member_node
-                    || Some(cap_idx) == idx_struct
-                    || Some(cap_idx) == idx.destructor
-                    || Some(cap_idx) == idx.event_decl)
-                    && root_span_node.is_none()
-                {
-                    root_span_node = Some(cap.node);
+    fn parse_tree(source: &[u8]) -> Option<Tree> {
+        PARSER.with(|p| parse_with_budget(&mut p.borrow_mut(), source, ParseBudget::DEFAULT))
+    }
+
+    fn capture<'t>(
+        r: CSharpRole,
+        node: Node<'t>,
+        d: &mut DeclSlot<'t>,
+        m: &mut CSharpMatch<'t>,
+        _f: &mut CSharpFile,
+        cx: &mut FileCx<'t>,
+    ) {
+        let source = cx.source;
+        match r {
+            CSharpRole::Root => {
+                if d.root.is_none() {
+                    d.root = Some(node);
                 }
             }
-
-            // Emit deferred special-member nodes (operator/conv-operator/indexer).
-            // These are processed AFTER the capture loop so that decorator/export/type
-            // metadata is fully accumulated before the RawNode is pushed.
-            let emit_special =
-                |n: tree_sitter::Node<'_>,
-                 name: String,
-                 is_exp: bool,
-                 ty: Option<String>,
-                 decs: Vec<String>,
-                 nodes: &mut Vec<RawNode>,
-                 id_map: &mut rustc_hash::FxHashMap<usize, usize>| {
-                    let start = n.start_position();
-                    let end = n.end_position();
-                    id_map.entry(n.id()).or_insert_with(|| {
-                        let i = nodes.len();
-                        nodes.push(RawNode {
-                            decorators: decs,
-                            is_exported: is_exp,
-                            heritage: Vec::new(),
-                            type_annotation: ty,
-                            name,
-                            kind: NodeKind::Method,
-                            span: (
-                                start.row as u32,
-                                start.column as u32,
-                                end.row as u32,
-                                end.column as u32,
-                            ),
-                            calls: Vec::new(),
-                            field_reads: Vec::new(),
-                            owner_class: None,
-                            content_hash: ecp_core::uid::xxh3_64_bytes(
-                                &source[n.start_byte()..n.end_byte()],
-                            ),
-                        });
-                        i
-                    });
-                };
-            if let Some(op_node) = deferred_operator {
-                // operator_declaration: name = "op_<token>" from the `operator:` field.
-                let op_name = op_node
-                    .child_by_field_name("operator")
-                    .and_then(|tok| {
-                        std::str::from_utf8(&source[tok.start_byte()..tok.end_byte()]).ok()
-                    })
-                    .map(|tok| format!("op_{tok}"))
-                    .unwrap_or_else(|| "op_unknown".to_string());
-                emit_special(
-                    op_node,
-                    op_name,
-                    is_exported,
-                    type_annotation.clone(),
-                    decorators.clone(),
-                    &mut nodes,
-                    &mut node_id_to_idx,
-                );
+            CSharpRole::DestructorRoot => {
+                m.is_destructor_name = true;
+                if d.root.is_none() {
+                    d.root = Some(node);
+                }
             }
-            if let Some(cv_node) = deferred_conv_operator {
-                // conversion_operator_declaration: name = "op_Implicit" / "op_Explicit".
-                let conv_name = {
-                    let mut c = cv_node.walk();
-                    let found = cv_node.children(&mut c).find_map(|ch| match ch.kind() {
-                        "implicit" => Some("op_Implicit"),
-                        "explicit" => Some("op_Explicit"),
-                        _ => None,
-                    });
-                    found.unwrap_or("op_Conversion").to_string()
-                };
-                emit_special(
-                    cv_node,
-                    conv_name,
-                    is_exported,
-                    type_annotation.clone(),
-                    decorators.clone(),
-                    &mut nodes,
-                    &mut node_id_to_idx,
-                );
+            CSharpRole::EventFieldRoot => {
+                m.is_event_field_name = true;
+                if d.root.is_none() {
+                    d.root = Some(node);
+                }
             }
-            if let Some(idx_node) = deferred_indexer {
-                // indexer_declaration: canonical name "this[...]".
-                emit_special(
-                    idx_node,
-                    "this[...]".to_string(),
-                    is_exported,
-                    type_annotation.clone(),
-                    decorators.clone(),
-                    &mut nodes,
-                    &mut node_id_to_idx,
-                );
+            CSharpRole::ImportName => m.import_name = Some(node),
+            CSharpRole::ImportSource => m.import_src = Some(node),
+            CSharpRole::ImportAlias => {
+                if let Ok(text) = std::str::from_utf8(&source[node.start_byte()..node.end_byte()]) {
+                    m.import_alias = Some(text.to_string());
+                }
             }
-
-            // Reclassify class declarations inheriting from `Attribute` (or any
-            // base whose name ends in `Attribute`) as NodeKind::Annotation —
-            // C# attribute-class convention. Heritage check alone is sufficient
-            // because `Attribute` suffix in a base type is the load-bearing
-            // signal; regular classes don't inherit from `*Attribute` types.
-            if kind == Some(NodeKind::Class)
-                && heritage_list.iter().any(|h| h.ends_with("Attribute"))
-            {
-                kind = Some(NodeKind::Annotation);
+            CSharpRole::Export => {
+                if let Ok(text) = std::str::from_utf8(&source[node.start_byte()..node.end_byte()]) {
+                    if text == "public" {
+                        m.is_exported = true;
+                    }
+                }
             }
+            CSharpRole::Heritage => {
+                // `(base_list (_)*)` also matches the `#pragma` lines
+                // that bracket an obsolete base.
+                if node.kind().starts_with("preproc_") {
+                    return;
+                }
+                if let Ok(text) = std::str::from_utf8(&source[node.start_byte()..node.end_byte()]) {
+                    m.heritage.push(text.to_string());
+                }
+            }
+            CSharpRole::Type => {
+                if let Ok(text) = std::str::from_utf8(&source[node.start_byte()..node.end_byte()]) {
+                    m.type_annotation = Some(text.to_string());
+                }
+            }
+            CSharpRole::Decorator => {
+                if let Ok(text) = std::str::from_utf8(&source[node.start_byte()..node.end_byte()]) {
+                    m.decorators.push(text.to_string());
+                }
+            }
+            CSharpRole::OverrideMarker => m.decorators.push(OVERRIDE_SENTINEL.to_string()),
+            CSharpRole::Operator => m.deferred_operator = Some(node),
+            CSharpRole::ConvOperator => m.deferred_conv_operator = Some(node),
+            CSharpRole::Indexer => m.deferred_indexer = Some(node),
+        }
+    }
 
-            if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
-                // tree-sitter-c-sharp recovery can bind the wrong identifier
-                // to a type's `name:` field when a preproc directive sits
-                // between the type keyword and the real name:
-                //   class JsonWriter
-                //   #if HAVE_ASYNC_DISPOSABLE
-                //     : IAsyncDisposable
-                // Recovery wraps the real name in an ERROR sibling and binds
-                // the post-`#if` identifier to `name:`. When `name` has a
-                // preceding ERROR sibling AND the kind is type-like, extract
-                // the leading identifier from that ERROR node's text instead.
-                let real_name = if matches!(
-                    k,
-                    NodeKind::Class | NodeKind::Interface | NodeKind::Annotation
-                ) {
-                    n.prev_sibling().and_then(|s| {
-                        if s.kind() != "ERROR" {
-                            return None;
-                        }
-                        let txt =
-                            std::str::from_utf8(&source[s.start_byte()..s.end_byte()]).ok()?;
-                        let id: String = txt
-                            .chars()
-                            .take_while(|c| c.is_alphanumeric() || *c == '_')
-                            .collect();
-                        if id.is_empty() {
-                            None
-                        } else {
-                            Some(id)
-                        }
-                    })
-                } else {
-                    None
-                };
-                let name_bytes = real_name.as_deref().map(str::as_bytes);
-                let name_result = name_bytes
-                    .map(|b| std::str::from_utf8(b))
-                    .unwrap_or_else(|| std::str::from_utf8(&source[n.start_byte()..n.end_byte()]));
-                if let Ok(name_str) = name_result {
-                    let start = root.start_position();
-                    let end = root.end_position();
+    fn end_match<'t>(
+        d: DeclSlot<'t>,
+        m: &mut CSharpMatch<'t>,
+        f: &mut CSharpFile,
+        cx: &mut FileCx<'t>,
+    ) {
+        let source = cx.source;
+        let CSharpMatch {
+            import_name,
+            import_src,
+            import_alias,
+            is_exported,
+            heritage: heritage_list,
+            type_annotation,
+            decorators,
+            is_destructor_name,
+            is_event_field_name,
+            deferred_operator,
+            deferred_conv_operator,
+            deferred_indexer,
+        } = std::mem::take(m);
+        let (name_node, mut kind, root_span_node) = (d.name, d.kind, d.root);
 
-                    // For Property + Variable nodes, multiple declarators
-                    // share the same root node id (`int x, y, z;`); key on
-                    // the identifier node so each declarator is distinct.
-                    // event_field_declaration has the same multiple-declarator
-                    // pattern (`event EventHandler E, F;`), so same keying.
-                    let node_id = if matches!(k, NodeKind::Property | NodeKind::Variable)
-                        || is_event_field_name
-                    {
-                        n.id()
+        // Emit deferred special-member nodes (operator/conv-operator/indexer).
+        // These are processed AFTER the capture loop so that decorator/export/type
+        // metadata is fully accumulated before the RawNode is pushed.
+        let emit_special = |n: Node<'_>,
+                            name: String,
+                            is_exp: bool,
+                            ty: Option<String>,
+                            decs: Vec<String>,
+                            nodes: &mut Vec<RawNode>,
+                            id_map: &mut FxHashMap<usize, usize>| {
+            id_map.entry(n.id()).or_insert_with(|| {
+                let i = nodes.len();
+                nodes.push(RawNode {
+                    decorators: decs,
+                    is_exported: is_exp,
+                    type_annotation: ty,
+                    ..node::decl(
+                        name,
+                        NodeKind::Method,
+                        position_span(n),
+                        &source[n.start_byte()..n.end_byte()],
+                    )
+                });
+                i
+            });
+        };
+        if let Some(op_node) = deferred_operator {
+            // operator_declaration: name = "op_<token>" from the `operator:` field.
+            let op_name = op_node
+                .child_by_field_name("operator")
+                .and_then(|tok| std::str::from_utf8(&source[tok.start_byte()..tok.end_byte()]).ok())
+                .map(|tok| format!("op_{tok}"))
+                .unwrap_or_else(|| "op_unknown".to_string());
+            emit_special(
+                op_node,
+                op_name,
+                is_exported,
+                type_annotation.clone(),
+                decorators.clone(),
+                &mut cx.nodes,
+                &mut f.node_id_to_idx,
+            );
+        }
+        if let Some(cv_node) = deferred_conv_operator {
+            // conversion_operator_declaration: name = "op_Implicit" / "op_Explicit".
+            let conv_name = {
+                let mut c = cv_node.walk();
+                let found = cv_node.children(&mut c).find_map(|ch| match ch.kind() {
+                    "implicit" => Some("op_Implicit"),
+                    "explicit" => Some("op_Explicit"),
+                    _ => None,
+                });
+                found.unwrap_or("op_Conversion").to_string()
+            };
+            emit_special(
+                cv_node,
+                conv_name,
+                is_exported,
+                type_annotation.clone(),
+                decorators.clone(),
+                &mut cx.nodes,
+                &mut f.node_id_to_idx,
+            );
+        }
+        if let Some(idx_node) = deferred_indexer {
+            // indexer_declaration: canonical name "this[...]".
+            emit_special(
+                idx_node,
+                "this[...]".to_string(),
+                is_exported,
+                type_annotation.clone(),
+                decorators.clone(),
+                &mut cx.nodes,
+                &mut f.node_id_to_idx,
+            );
+        }
+
+        // Reclassify class declarations inheriting from `Attribute` (or any
+        // base whose name ends in `Attribute`) as NodeKind::Annotation —
+        // C# attribute-class convention. Heritage check alone is sufficient
+        // because `Attribute` suffix in a base type is the load-bearing
+        // signal; regular classes don't inherit from `*Attribute` types.
+        if kind == Some(NodeKind::Class) && heritage_list.iter().any(|h| h.ends_with("Attribute")) {
+            kind = Some(NodeKind::Annotation);
+        }
+
+        if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
+            // tree-sitter-c-sharp recovery can bind the wrong identifier
+            // to a type's `name:` field when a preproc directive sits
+            // between the type keyword and the real name:
+            //   class JsonWriter
+            //   #if HAVE_ASYNC_DISPOSABLE
+            //     : IAsyncDisposable
+            // Recovery wraps the real name in an ERROR sibling and binds
+            // the post-`#if` identifier to `name:`. When `name` has a
+            // preceding ERROR sibling AND the kind is type-like, extract
+            // the leading identifier from that ERROR node's text instead.
+            let real_name = if matches!(
+                k,
+                NodeKind::Class | NodeKind::Interface | NodeKind::Annotation
+            ) {
+                n.prev_sibling().and_then(|s| {
+                    if s.kind() != "ERROR" {
+                        return None;
+                    }
+                    let txt = std::str::from_utf8(&source[s.start_byte()..s.end_byte()]).ok()?;
+                    let id: String = txt
+                        .chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect();
+                    if id.is_empty() {
+                        None
                     } else {
-                        root.id()
+                        Some(id)
+                    }
+                })
+            } else {
+                None
+            };
+            let name_bytes = real_name.as_deref().map(str::as_bytes);
+            let name_result = name_bytes
+                .map(|b| std::str::from_utf8(b))
+                .unwrap_or_else(|| std::str::from_utf8(&source[n.start_byte()..n.end_byte()]));
+            if let Ok(name_str) = name_result {
+                // For Property + Variable nodes, multiple declarators
+                // share the same root node id (`int x, y, z;`); key on
+                // the identifier node so each declarator is distinct.
+                // event_field_declaration has the same multiple-declarator
+                // pattern (`event EventHandler E, F;`), so same keying.
+                let node_id = if matches!(k, NodeKind::Property | NodeKind::Variable)
+                    || is_event_field_name
+                {
+                    n.id()
+                } else {
+                    root.id()
+                };
+                let nodes = &mut cx.nodes;
+                let idx = *f.node_id_to_idx.entry(node_id).or_insert_with(|| {
+                    // Destructors: prefix the bare class name with `~`.
+                    let name = if is_destructor_name {
+                        format!("~{name_str}")
+                    } else {
+                        name_str.to_string()
                     };
-                    let idx = *node_id_to_idx.entry(node_id).or_insert_with(|| {
-                        // Destructors: prefix the bare class name with `~`.
-                        let name = if is_destructor_name {
-                            format!("~{name_str}")
-                        } else {
-                            name_str.to_string()
-                        };
-                        let i = nodes.len();
-                        // `Conv<T>` beside `Conv` is a type of its own, and
-                        // `Func<T, R>` beside `Func<R>` a delegate of its
-                        // own; the identity numbering reads the arity off
-                        // this marker. A delegate is the one `Function` that
-                        // carries it (`lexical::splits_by_arity`).
-                        let arity = if k.declares_type() || root.kind() == "delegate_declaration" {
-                            generic_arity(root)
-                        } else {
-                            0
-                        };
-                        let mut decorators = match arity {
-                            0 => vec![],
-                            arity => vec![RawNode::generic_arity_marker(arity)],
-                        };
-                        // The parts of one `partial` type merge by this
-                        // scope (`c_sharp::partial`).
-                        if k.declares_type() && is_partial(root, source) {
-                            decorators
-                                .push(RawNode::partial_marker(&declaring_scope(root, source)));
-                        }
-                        nodes.push(RawNode {
-                            decorators,
-                            is_exported,
-                            heritage: Vec::new(),
-                            type_annotation: type_annotation.clone(),
+                    let i = nodes.len();
+                    // `Conv<T>` beside `Conv` is a type of its own, and
+                    // `Func<T, R>` beside `Func<R>` a delegate of its
+                    // own; the identity numbering reads the arity off
+                    // this marker. A delegate is the one `Function` that
+                    // carries it (`lexical::splits_by_arity`).
+                    let arity = if k.declares_type() || root.kind() == "delegate_declaration" {
+                        generic_arity(root)
+                    } else {
+                        0
+                    };
+                    let mut decorators = match arity {
+                        0 => vec![],
+                        arity => vec![RawNode::generic_arity_marker(arity)],
+                    };
+                    // The parts of one `partial` type merge by this
+                    // scope (`c_sharp::partial`).
+                    if k.declares_type() && is_partial(root, source) {
+                        decorators.push(RawNode::partial_marker(&declaring_scope(root, source)));
+                    }
+                    nodes.push(RawNode {
+                        decorators,
+                        is_exported,
+                        type_annotation: type_annotation.clone(),
+                        ..node::decl(
                             name,
-                            kind: k,
-                            span: (
-                                start.row as u32,
-                                start.column as u32,
-                                end.row as u32,
-                                end.column as u32,
-                            ),
-                            calls: Vec::new(),
-                            field_reads: Vec::new(),
-                            owner_class: None,
-                            content_hash: ecp_core::uid::xxh3_64_bytes(
-                                &source[root.start_byte()..root.end_byte()],
-                            ),
-                        });
-                        i
+                            k,
+                            position_span(root),
+                            &source[root.start_byte()..root.end_byte()],
+                        )
                     });
-                    let entry = &mut nodes[idx];
+                    i
+                });
+                let entry = &mut nodes[idx];
 
-                    if is_exported {
-                        entry.is_exported = true;
-                    }
-                    if type_annotation.is_some() {
-                        entry.type_annotation = type_annotation;
-                    }
-                    for h in heritage_list {
-                        if !entry.heritage.contains(&h) {
-                            entry.heritage.push(h);
-                        }
-                    }
-                    for d in decorators {
-                        if !entry.decorators.contains(&d) {
-                            entry.decorators.push(d);
-                        }
+                if is_exported {
+                    entry.is_exported = true;
+                }
+                if type_annotation.is_some() {
+                    entry.type_annotation = type_annotation;
+                }
+                for h in heritage_list {
+                    if !entry.heritage.contains(&h) {
+                        entry.heritage.push(h);
                     }
                 }
-            }
-
-            if let (Some(i_name), Some(i_src)) = (import_name, import_src) {
-                if let (Ok(name_str), Ok(src_str)) = (
-                    std::str::from_utf8(&source[i_name.start_byte()..i_name.end_byte()]),
-                    std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]),
-                ) {
-                    imports.push(RawImport {
-                        alias: import_alias,
-                        imported_name: name_str.to_string(),
-                        source: src_str.to_string(),
-                        binding_kind: None,
-                    });
+                for d in decorators {
+                    if !entry.decorators.contains(&d) {
+                        entry.decorators.push(d);
+                    }
                 }
             }
         }
 
-        drop(_p);
-        let _p = parse_prof::span(Pass::Calls);
-        // `nodes` already in source order — Vec + idx-map at parse-loop start.
+        if let (Some(i_name), Some(i_src)) = (import_name, import_src) {
+            if let (Ok(name_str), Ok(src_str)) = (
+                std::str::from_utf8(&source[i_name.start_byte()..i_name.end_byte()]),
+                std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]),
+            ) {
+                cx.imports.push(imports::raw(
+                    src_str.to_string(),
+                    name_str.to_string(),
+                    import_alias,
+                    None,
+                ));
+            }
+        }
+    }
 
-        // Extract call sites with receiver-type binding for `this.Foo()`,
-        // `base.Foo()`, and typed-variable `obj.Foo()` patterns; same DFS
-        // also collects path-shaped string literals.
-        let (raw_path_literals, raw_sql_refs) =
-            extract_csharp_calls_and_path_literals(tree.root_node(), source, &mut nodes);
-        drop(_p);
-        let _p = parse_prof::span(Pass::Walk);
-        crate::calls::extract_field_reads(
-            tree.root_node(),
-            source,
-            &mut nodes,
-            &["member_access_expression"],
-            &crate::calls::NameRefSpec {
-                ident_kinds: &["identifier", "implicit_parameter"],
-                kind: crate::calls::NameRefKind::Value,
-                binding_fields: &[
-                    ("foreach_statement", "left"),
-                    ("catch_declaration", "name"),
-                    ("declaration_expression", "name"),
-                    ("declaration_pattern", "name"),
-                    ("from_clause", "name"),
-                    ("tuple_pattern", "name"),
-                    ("parenthesized_variable_designation", "name"),
-                ],
-                binding_parents: &["let_clause"],
-                skip_kinds: &[
-                    "using_directive",
-                    "attribute_list",
-                    "type_argument_list",
-                    "qualified_name",
-                    "generic_name",
-                ],
-                skip_parents: &["labeled_statement", "goto_statement"],
-                ..crate::calls::NameRefSpec::EMPTY
-            },
-        );
-        crate::calls::extract_variant_refs(
-            tree.root_node(),
-            source,
-            &mut nodes,
-            &crate::calls::VariantRefSpec {
-                path_kinds: &["member_access_expression"],
-                label_parents: &[],
-                bare_label_parents: &[],
-                bare_expressions: false,
-                token_trees: false,
-            },
-        );
+    fn hook<'t>(h: CSharpHook, _c: &Compiled<Self>, _f: &mut CSharpFile, cx: &mut FileCx<'t>) {
+        match h {
+            // Extract call sites with receiver-type binding for `this.Foo()`,
+            // `base.Foo()`, and typed-variable `obj.Foo()` patterns; same DFS
+            // also collects path-shaped string literals.
+            CSharpHook::Calls => {
+                let (raw_path_literals, raw_sql_refs) = extract_csharp_calls_and_path_literals(
+                    cx.tree.root_node(),
+                    cx.source,
+                    &mut cx.nodes,
+                );
+                cx.path_literals = raw_path_literals;
+                cx.sql_refs = raw_sql_refs;
+            }
+            CSharpHook::Frameworks => {
+                cx.framework_refs = detect_ast_framework_patterns(cx.source, CSHARP_FRAMEWORKS);
+            }
+        }
+    }
 
-        let framework_refs = detect_ast_framework_patterns(source, CSHARP_FRAMEWORKS);
-
-        let raw_function_metas =
-            crate::function_meta::csharp::extract(tree.root_node(), source, &nodes, file_category);
-
-        drop(_p);
-        let _p = parse_prof::span(Pass::Build);
-        crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
-        let tx_scopes = collect_dotnet_transactional_scopes(
-            &nodes,
-            &[NodeKind::Method, NodeKind::Constructor, NodeKind::Function],
-        );
-        drop(_p);
-        Ok(LocalGraph {
-            content_hash: [0; 8],
-            routes: vec![],
-            file_path: path.to_path_buf(),
-            nodes,
-            imports,
-            documents: vec![],
-            route_receivers: None,
-            framework_refs,
-            fanout_refs: vec![],
-            blind_spots,
-            schema_fields: None,
-            event_topics: None,
-            tx_scopes,
-            path_literals: (!raw_path_literals.is_empty())
-                .then(|| raw_path_literals.into_boxed_slice()),
-            sql_refs: (!raw_sql_refs.is_empty()).then(|| raw_sql_refs.into_boxed_slice()),
-            call_metas: vec![],
-            raw_function_metas,
-            export_aliases: None,
-            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
-        })
+    fn function_meta(
+        root: Node<'_>,
+        source: &[u8],
+        nodes: &[RawNode],
+        category: FileCategory,
+    ) -> Vec<RawFunctionMeta> {
+        crate::function_meta::csharp::extract(root, source, nodes, category)
     }
 }
