@@ -10,6 +10,8 @@ use ecp_core::graph::NodeKind;
 use ecp_core::uid::xxh3_64_bytes;
 use std::path::Path;
 
+type Span4 = (u32, u32, u32, u32);
+
 fn parse_at(path: &str, src: &[u8]) -> LocalGraph {
     PythonProvider::new()
         .expect("PythonProvider::new")
@@ -198,7 +200,7 @@ class Mixed(Protocol, Base):
 #[test]
 fn test_python_driver_lambda_argument_with_call_emits_one_anonymous() {
     let g = parse(b"sorted(xs, key=lambda i: f(i))\nsorted(xs, key=lambda i: i)\n");
-    let got: Vec<(&str, NodeKind, (u32, u32, u32, u32), bool)> = g
+    let got: Vec<(&str, NodeKind, Span4, bool)> = g
         .nodes
         .iter()
         .map(|n| (n.name.as_str(), n.kind, n.span, n.is_exported))
@@ -224,7 +226,7 @@ const CLIENT_SRC: &[u8] =
 fn test_python_driver_test_file_path_drops_client_route_and_marks_blind_spot() {
     let g = parse_at("tests/test_views.py", CLIENT_SRC);
     assert!(g.routes.is_empty(), "{:?}", g.routes);
-    let blind: Vec<(&str, (u32, u32, u32, u32), bool)> = g
+    let blind: Vec<(&str, Span4, bool)> = g
         .blind_spots
         .iter()
         .map(|b| (b.kind.as_str(), b.span, b.is_test))
@@ -237,7 +239,7 @@ fn test_python_driver_test_file_path_drops_client_route_and_marks_blind_spot() {
 #[test]
 fn test_python_driver_source_file_path_keeps_client_route() {
     let g = parse_at("views.py", CLIENT_SRC);
-    let routes: Vec<(&str, &str, Option<&str>, (u32, u32, u32, u32))> = g
+    let routes: Vec<(&str, &str, Option<&str>, Span4)> = g
         .routes
         .iter()
         .map(|r| (r.method.as_str(), r.path.as_str(), r.handler_name(), r.span))
