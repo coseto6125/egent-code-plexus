@@ -6,6 +6,7 @@ use crate::framework_helpers::{
 };
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
+use ecp_core::analyzer::parse_prof::{self, Pass};
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{
     BlindSpot, FrameworkId, LocalGraph, RawImport, RawNode, RawRoute, RawTxScope,
@@ -362,13 +363,18 @@ impl LanguageProvider for RubyProvider {
     }
 
     fn parse_file(&self, path: &Path, source: &[u8]) -> anyhow::Result<LocalGraph> {
+        let _p = parse_prof::span(Pass::Tree);
         let tree = PARSER
             .with(|p| parse_with_budget(&mut p.borrow_mut(), source, ParseBudget::DEFAULT))
             .ok_or_else(|| anyhow::anyhow!("Failed to parse file"))?;
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Walk);
         // Build method-row → is_exported map from visibility markers in class bodies.
         let visibility_map = build_visibility_map(tree.root_node(), source);
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Query);
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
 
@@ -849,6 +855,8 @@ impl LanguageProvider for RubyProvider {
             }
         }
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Walk);
         // Detect module-as-enum imitation: walk AST for qualifying module nodes
         // and emit BlindSpotRecord. Done after the query loop so it is
         // independent of tree-sitter query captures.
@@ -875,6 +883,8 @@ impl LanguageProvider for RubyProvider {
             best
         };
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Build);
         // Apply mixins: for each (module, line), find the smallest enclosing
         // class RawNode by span containment and append the module to its
         // heritage. Mixins outside any class are dropped (matches Ruby
@@ -932,10 +942,14 @@ impl LanguageProvider for RubyProvider {
         // Extract call sites with receiver-type binding.
         // Handles self.method → EnclosingClass.method, Constant.method → Constant.method.
         // Same DFS also collects path-shaped string literals.
+        drop(_p);
+        let _p = parse_prof::span(Pass::Calls);
         let (raw_path_literals, raw_sql_refs) =
             extract_ruby_calls_and_path_literals(tree.root_node(), source, &mut nodes);
         // Ruby has no field-read capture (`obj.x` is a call); the walk records
         // the constants a method reads and its `method(:name)` references.
+        drop(_p);
+        let _p = parse_prof::span(Pass::Walk);
         crate::calls::extract_field_reads(
             tree.root_node(),
             source,
@@ -955,6 +969,8 @@ impl LanguageProvider for RubyProvider {
         // string arg doesn't look like an HTTP route. Same rationale as
         // the JS/TS/Python parsers; spec:
         // `docs/superpowers/specs/2026-05-17-route-precision-design.md`.
+        drop(_p);
+        let _p = parse_prof::span(Pass::Build);
         routes.retain_mut(|r| match crate::route_detector::clean_route_path(&r.path) {
             Some(clean) => {
                 r.path = clean;
@@ -986,17 +1002,24 @@ impl LanguageProvider for RubyProvider {
             }
         }
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Walk);
         let raw_function_metas =
             crate::function_meta::ruby::extract(tree.root_node(), source, &nodes, file_category);
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Build);
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Walk);
         // Block-form transaction detection: walk AST for `call` nodes with
         // method=`transaction` + `do_block` child. Must run after `nodes` is
         // fully populated (stamp_owner_class_by_span finalises spans) so
         // span-containment lookup for the enclosing function is accurate.
         let tx_scopes = collect_ruby_transaction_scopes(tree.root_node(), source, &nodes);
 
+        drop(_p);
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes,

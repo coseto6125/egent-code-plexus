@@ -8,6 +8,7 @@ use crate::framework_helpers::{
 use crate::function_meta::subtree_contains_kind;
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
+use ecp_core::analyzer::parse_prof::{self, Pass};
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawImport, RawNode, OVERRIDE_SENTINEL};
 use ecp_core::graph::NodeKind;
@@ -283,10 +284,13 @@ impl LanguageProvider for CSharpProvider {
     }
 
     fn parse_file(&self, path: &Path, source: &[u8]) -> anyhow::Result<LocalGraph> {
+        let _p = parse_prof::span(Pass::Tree);
         let tree = PARSER
             .with(|p| parse_with_budget(&mut p.borrow_mut(), source, ParseBudget::DEFAULT))
             .ok_or_else(|| anyhow::anyhow!("Failed to parse file"))?;
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Query);
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
 
@@ -740,6 +744,8 @@ impl LanguageProvider for CSharpProvider {
             }
         }
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Calls);
         // `nodes` already in source order — Vec + idx-map at parse-loop start.
 
         // Extract call sites with receiver-type binding for `this.Foo()`,
@@ -747,6 +753,8 @@ impl LanguageProvider for CSharpProvider {
         // also collects path-shaped string literals.
         let (raw_path_literals, raw_sql_refs) =
             extract_csharp_calls_and_path_literals(tree.root_node(), source, &mut nodes);
+        drop(_p);
+        let _p = parse_prof::span(Pass::Walk);
         crate::calls::extract_field_reads(
             tree.root_node(),
             source,
@@ -794,11 +802,14 @@ impl LanguageProvider for CSharpProvider {
         let raw_function_metas =
             crate::function_meta::csharp::extract(tree.root_node(), source, &nodes, file_category);
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Build);
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
         let tx_scopes = collect_dotnet_transactional_scopes(
             &nodes,
             &[NodeKind::Method, NodeKind::Constructor, NodeKind::Function],
         );
+        drop(_p);
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes: vec![],

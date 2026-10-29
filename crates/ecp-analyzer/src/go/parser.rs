@@ -12,6 +12,7 @@ use crate::framework_helpers::{
 use crate::function_meta::subtree_contains_kind;
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
+use ecp_core::analyzer::parse_prof::{self, Pass};
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{
     BlindSpot, FrameworkId, LocalGraph, RawFrameworkRef, RawImport, RawNode, RawTxScope,
@@ -421,10 +422,12 @@ impl LanguageProvider for GoProvider {
     }
 
     fn parse_file(&self, path: &Path, source: &[u8]) -> anyhow::Result<LocalGraph> {
+        let _p = parse_prof::span(Pass::Tree);
         let tree = PARSER
             .with(|p| parse_with_budget(&mut p.borrow_mut(), source, ParseBudget::DEFAULT))
             .ok_or_else(|| anyhow::anyhow!("Failed to parse file"))?;
 
+        drop(_p);
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
 
@@ -435,8 +438,10 @@ impl LanguageProvider for GoProvider {
             ecp_core::file_category::determine_category(path.to_str().unwrap_or(""));
         let is_test_file = file_category == ecp_core::graph::FileCategory::Test;
 
+        let _p = parse_prof::span(Pass::Walk);
         detect_iota_const_blocks(tree.root_node(), path, is_test_file, &mut blind_spots);
 
+        drop(_p);
         let idx_namespace = self.query.capture_index_for_name("namespace");
         let idx_struct = self.query.capture_index_for_name("struct");
         let idx_interface = self.query.capture_index_for_name("interface");
@@ -501,6 +506,7 @@ impl LanguageProvider for GoProvider {
         // a type annotation, the `@variable` entry for the same name is dropped.
         let mut file_var_pending: Vec<RawNode> = Vec::new();
 
+        let _p = parse_prof::span(Pass::Query);
         while let Some(m) = matches.next() {
             let mut name_node = None;
             let mut kind = None;
@@ -1026,6 +1032,8 @@ impl LanguageProvider for GoProvider {
         // the typed `@var` path (which emits Variable nodes with type_annotation).
         // Span check prevents suppressing package-level vars when a local `:=`
         // shadows them by name — only skip when both name AND span match.
+        drop(_p);
+        let _p = parse_prof::span(Pass::Build);
         for pending in file_var_pending {
             if !nodes.iter().any(|n| {
                 n.name == pending.name && n.span == pending.span && n.kind == NodeKind::Variable
@@ -1045,6 +1053,8 @@ impl LanguageProvider for GoProvider {
         // Extract call sites with receiver-type binding. Replaces the shared
         // `extract_calls` for Go so `obj.Method()` can be recorded as
         // `Type.Method` when `obj`'s type is locally known.
+        drop(_p);
+        let _p = parse_prof::span(Pass::Calls);
         let recv_map = build_receiver_map(tree.root_node(), source);
         let local_types = collect_local_types(tree.root_node(), source, &recv_map);
         let (raw_path_literals, raw_sql_refs) = extract_go_calls_and_path_literals_with_imports(
@@ -1054,6 +1064,8 @@ impl LanguageProvider for GoProvider {
             &local_types,
             &imports,
         );
+        drop(_p);
+        let _p = parse_prof::span(Pass::Walk);
         let literal_key_facts =
             collect_literal_key_facts(tree.root_node(), source, &imports, &local_types);
         crate::calls::extract_field_reads_with_literal_key_facts(
@@ -1084,6 +1096,8 @@ impl LanguageProvider for GoProvider {
             Some(&literal_key_facts),
         );
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Build);
         // owner_class is set at emit time via receiver_type_from_method_decl().
         // No post-loop needed; recv_map is still used for call-site resolution.
 
@@ -1134,6 +1148,8 @@ impl LanguageProvider for GoProvider {
             });
         }
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Walk);
         let raw_function_metas =
             crate::function_meta::go::extract(tree.root_node(), source, &nodes, file_category);
 
@@ -1160,6 +1176,7 @@ impl LanguageProvider for GoProvider {
             (!topics.is_empty()).then(|| topics.into_boxed_slice())
         };
 
+        drop(_p);
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes,

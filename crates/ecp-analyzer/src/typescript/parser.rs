@@ -9,6 +9,7 @@ use crate::framework_helpers::{
 use crate::indirect_dispatch::{collect_js_param_names, detect_js_ts_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
+use ecp_core::analyzer::parse_prof::{self, Pass};
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{
     BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode, RawRoute,
@@ -415,9 +416,12 @@ impl LanguageProvider for TypeScriptProvider {
         let mut parser = Parser::new();
         parser.set_language(&language)?;
 
+        let _p = parse_prof::span(Pass::Tree);
         let tree = parse_with_budget(&mut parser, source, ParseBudget::DEFAULT)
             .ok_or_else(|| anyhow::anyhow!("Failed to parse typescript file"))?;
+        drop(_p);
 
+        let _p = parse_prof::span(Pass::Query);
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
 
@@ -824,7 +828,9 @@ impl LanguageProvider for TypeScriptProvider {
                 }
             }
         }
+        drop(_p);
 
+        let _p = parse_prof::span(Pass::Walk);
         // Object.freeze({...}) and `{...} as const` enum-imitation detection.
         // Runs as a separate AST walk (not query-based) because the heuristic
         // requires counting pair children and checking value kinds — logic that
@@ -836,11 +842,13 @@ impl LanguageProvider for TypeScriptProvider {
             is_test_file,
             &mut blind_spots,
         );
+        drop(_p);
 
         // Extract call sites with receiver-type binding:
         // - `this.method()` → resolved to `ClassName.method` via enclosing class
         // - `obj.method()` where `obj` has a type annotation → `Type.method`
         // - everything else falls back to the bare/qualified method name.
+        let _p = parse_prof::span(Pass::Calls);
         let local_types = collect_local_types(tree.root_node(), source);
         let mut call_sites = crate::calls::CallSiteIndex::default();
         let (raw_path_literals, raw_sql_refs) = extract_ts_calls_and_path_literals(
@@ -850,6 +858,8 @@ impl LanguageProvider for TypeScriptProvider {
             &local_types,
             &mut call_sites,
         );
+        drop(_p);
+        let _p = parse_prof::span(Pass::Walk);
         crate::calls::extract_field_reads(
             tree.root_node(),
             source,
@@ -888,7 +898,9 @@ impl LanguageProvider for TypeScriptProvider {
                 token_trees: false,
             },
         );
+        drop(_p);
 
+        let _p = parse_prof::span(Pass::Build);
         // Framework-presence gates: only emit Express/NestJS refs when the file
         // actually imports the matching package.
         const EXPRESS_REQUIRED: &[&str] = &["express"];
@@ -965,7 +977,9 @@ impl LanguageProvider for TypeScriptProvider {
                 });
             }
         }
+        drop(_p);
 
+        let _p = parse_prof::span(Pass::Walk);
         let param_names = collect_js_param_names(tree.root_node(), source);
         let call_metas =
             detect_js_ts_indirect(tree.root_node(), source, &nodes, &param_names, &call_sites);
@@ -976,6 +990,8 @@ impl LanguageProvider for TypeScriptProvider {
             file_category,
         );
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Build);
         let export_aliases =
             crate::framework_helpers::stamp_js_ts_exports(tree.root_node(), source, &mut nodes);
         crate::framework_helpers::mark_js_ts_import_bindings(
@@ -994,7 +1010,9 @@ impl LanguageProvider for TypeScriptProvider {
 
         let tx_scopes =
             collect_typeorm_transactional_scopes(&nodes, &[NodeKind::Method, NodeKind::Function]);
+        drop(_p);
 
+        let _p = parse_prof::span(Pass::Walk);
         // T4-7 refactor: `RawSchemaField` now stores owned `Box<str>` so the
         // per-file parser scope can drop cleanly without dangling-pool risk.
         let fields = crate::schema_field::extract_schema_fields(
@@ -1021,6 +1039,7 @@ impl LanguageProvider for TypeScriptProvider {
             );
             (!topics.is_empty()).then(|| topics.into_boxed_slice())
         };
+        drop(_p);
 
         let path_literals =
             (!raw_path_literals.is_empty()).then(|| raw_path_literals.into_boxed_slice());

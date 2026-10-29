@@ -8,6 +8,7 @@ use crate::framework_helpers::{
 use crate::indirect_dispatch::{collect_python_param_names, detect_python_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
+use ecp_core::analyzer::parse_prof::{self, Pass};
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{
     BlindSpot, FrameworkId, LocalGraph, RawFanoutRef, RawFrameworkRef, RawImport, RawNode,
@@ -949,9 +950,11 @@ impl LanguageProvider for PythonProvider {
     }
 
     fn parse_file(&self, path: &Path, source: &[u8]) -> anyhow::Result<LocalGraph> {
+        let _p = parse_prof::span(Pass::Tree);
         let tree = PARSER
             .with(|p| parse_with_budget(&mut p.borrow_mut(), source, ParseBudget::DEFAULT))
             .ok_or_else(|| anyhow::anyhow!("Failed to parse file"))?;
+        drop(_p);
 
         let idx = &self.indices;
 
@@ -960,6 +963,7 @@ impl LanguageProvider for PythonProvider {
         // can short-circuit framework-specific captures the moment they fire
         // (skip ref construction + push entirely, not just the final extend).
         let mut imports: Vec<RawImport> = Vec::new();
+        let _p = parse_prof::span(Pass::Walk);
         {
             let mut pre_cursor = QueryCursor::new();
             let mut pre_matches = pre_cursor.matches(&self.query, tree.root_node(), source);
@@ -1003,6 +1007,7 @@ impl LanguageProvider for PythonProvider {
                 }
             }
         }
+        drop(_p);
 
         let has_fastapi = has_import_from(&imports, FASTAPI_REQUIRED);
         let has_django = has_import_from(&imports, DJANGO_REQUIRED);
@@ -1016,6 +1021,7 @@ impl LanguageProvider for PythonProvider {
         // (introduced by FU-001 is_test-field); compute once.
         let is_test_file = is_test_path(&path.to_string_lossy());
 
+        let _p = parse_prof::span(Pass::Query);
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
 
@@ -1514,6 +1520,7 @@ impl LanguageProvider for PythonProvider {
                 }
             }
         }
+        drop(_p);
 
         // Extract call sites with receiver-type binding. Replaces the shared
         // `extract_calls` for Python so `x.method()` can be rewritten to
@@ -1521,6 +1528,7 @@ impl LanguageProvider for PythonProvider {
         // (typed param or annotated assignment) — fed back into the resolver's
         // Tier 2.5 qualifier-scoped lookup. Falls back to bare member name
         // when no annotation is in scope.
+        let _p = parse_prof::span(Pass::Calls);
         let local_types = collect_local_types(tree.root_node(), source);
         let mut call_sites = crate::calls::CallSiteIndex::default();
         let (raw_path_literals, raw_sql_refs) = extract_python_calls_and_path_literals(
@@ -1530,6 +1538,8 @@ impl LanguageProvider for PythonProvider {
             &local_types,
             &mut call_sites,
         );
+        drop(_p);
+        let _p = parse_prof::span(Pass::Walk);
         crate::calls::extract_field_reads(
             tree.root_node(),
             source,
@@ -1576,11 +1586,15 @@ impl LanguageProvider for PythonProvider {
                 token_trees: false,
             },
         );
+        drop(_p);
 
+        let _p = parse_prof::span(Pass::Walk);
         let param_names = collect_python_param_names(tree.root_node(), source);
         let call_metas =
             detect_python_indirect(tree.root_node(), source, &nodes, &param_names, &call_sites);
+        drop(_p);
 
+        let _p = parse_prof::span(Pass::Build);
         // Resolve FastAPI Depends() refs: find the innermost enclosing
         // Function/Method node whose span contains the capture span. The site
         // capture itself was gated by `has_fastapi` in the main loop, so no
@@ -1653,9 +1667,13 @@ impl LanguageProvider for PythonProvider {
         } else {
             FileCategory::Source
         };
+        drop(_p);
+        let _p = parse_prof::span(Pass::Walk);
         let raw_function_metas =
             crate::function_meta::python::extract(tree.root_node(), source, &nodes, file_category);
+        drop(_p);
 
+        let _p = parse_prof::span(Pass::Build);
         let tx_scopes = resolve_tx_scopes(&nodes, &pending_tx_scopes);
 
         // §4.5b: promote Class → Interface when ALL bases are Protocol-markers.
@@ -1716,7 +1734,9 @@ impl LanguageProvider for PythonProvider {
         // Last owner step: a nested def or lambda node has a lexical parent
         // and no owner (invariant I1), whatever the class pass gave it.
         ecp_core::analyzer::lexical::clear_scoped_owners(language, &mut nodes);
+        drop(_p);
 
+        let _p = parse_prof::span(Pass::Walk);
         // T4-7 refactor: `RawSchemaField` now stores owned `Box<str>` so the
         // per-file parser scope can drop cleanly without dangling-pool risk.
         let fields = crate::schema_field::extract_schema_fields(
@@ -1747,6 +1767,7 @@ impl LanguageProvider for PythonProvider {
             );
             (!topics.is_empty()).then(|| topics.into_boxed_slice())
         };
+        drop(_p);
 
         let path_literals =
             (!raw_path_literals.is_empty()).then(|| raw_path_literals.into_boxed_slice());
@@ -1754,6 +1775,7 @@ impl LanguageProvider for PythonProvider {
 
         // Framework extractors above need Python module names; the shared
         // resolver consumes paths and explicit namespace bindings.
+        let _p = parse_prof::span(Pass::Imports);
         let mut root_imports = Vec::new();
         let mut root_bindings: rustc_hash::FxHashSet<String> = imports
             .iter()
@@ -1795,6 +1817,7 @@ impl LanguageProvider for PythonProvider {
             }
         }
         imports.extend(root_imports);
+        drop(_p);
 
         Ok(LocalGraph {
             content_hash: [0; 8],

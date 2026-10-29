@@ -12,6 +12,7 @@ use crate::framework_helpers::{
 use crate::indirect_dispatch::{collect_rust_indirect_param_types, detect_rust_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
+use ecp_core::analyzer::parse_prof::{self, Pass};
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode};
 use ecp_core::graph::NodeKind;
@@ -176,10 +177,13 @@ impl LanguageProvider for RustProvider {
     }
 
     fn parse_file(&self, path: &Path, source: &[u8]) -> anyhow::Result<LocalGraph> {
+        let _p = parse_prof::span(Pass::Tree);
         let tree = PARSER
             .with(|p| parse_with_budget(&mut p.borrow_mut(), source, ParseBudget::DEFAULT))
             .ok_or_else(|| anyhow::anyhow!("Failed to parse file"))?;
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Query);
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
 
@@ -539,8 +543,12 @@ impl LanguageProvider for RustProvider {
             }
         }
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Imports);
         push_nested_use_imports(tree.root_node(), source, &mut imports);
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Calls);
         // Extract call sites with receiver-type binding. Replaces the shared
         // `extract_calls` for Rust so `self.method()` inside an impl block and
         // `obj.method()` with locally-typed `obj` are recorded as `Type.method`
@@ -555,6 +563,8 @@ impl LanguageProvider for RustProvider {
             &local_types,
             &mut call_sites,
         );
+        drop(_p);
+        let _p = parse_prof::span(Pass::Walk);
         crate::calls::extract_field_reads(
             tree.root_node(),
             source,
@@ -611,6 +621,8 @@ impl LanguageProvider for RustProvider {
         // heritage sentinel has been removed in T1-12; `class_membership` Pass 2
         // reads `RawNode.owner_class` directly.
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Build);
         // Framework-presence gates: only claim Axum/Actix refs when the file
         // actually `use`s the matching crate. Saves us from false positives in
         // files that happen to define a `get()` fn or use `#[get]` from another
@@ -655,6 +667,8 @@ impl LanguageProvider for RustProvider {
             }
         }
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Walk);
         let raw_function_metas = crate::function_meta::rust_lang::extract(
             tree.root_node(),
             source,
@@ -678,9 +692,11 @@ impl LanguageProvider for RustProvider {
             (!topics.is_empty()).then(|| topics.into_boxed_slice())
         };
 
+        drop(_p);
         let path_literals =
             (!raw_path_literals.is_empty()).then(|| raw_path_literals.into_boxed_slice());
 
+        let _p = parse_prof::span(Pass::Build);
         // FU-016: fill module ownership for items inside `mod foo { ... }`.
         // `enclosing_impl_type` already populated `impl Foo` method ownership;
         // `stamp_owner_class_by_span` preserves those (see the `is_none()` guard
@@ -697,6 +713,7 @@ impl LanguageProvider for RustProvider {
         let tx_scopes =
             collect_rust_transactional_scopes(&nodes, &[NodeKind::Function, NodeKind::Method]);
 
+        drop(_p);
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes: vec![],

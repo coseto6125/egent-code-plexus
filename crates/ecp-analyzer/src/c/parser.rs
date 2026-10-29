@@ -4,6 +4,7 @@ use crate::framework_helpers::push_blind_spot;
 use crate::indirect_dispatch::{collect_c_cpp_fn_ptr_vars, detect_c_cpp_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
+use ecp_core::analyzer::parse_prof::{self, Pass};
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{BindingKind, BlindSpot, LocalGraph, RawImport, RawNode};
 use ecp_core::graph::NodeKind;
@@ -468,10 +469,13 @@ impl LanguageProvider for CProvider {
     }
 
     fn parse_file(&self, path: &Path, source: &[u8]) -> anyhow::Result<LocalGraph> {
+        let _p = parse_prof::span(Pass::Tree);
         let tree = PARSER
             .with(|p| parse_with_budget(&mut p.borrow_mut(), source, ParseBudget::DEFAULT))
             .ok_or_else(|| anyhow::anyhow!("Failed to parse file"))?;
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Query);
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
 
@@ -724,6 +728,8 @@ impl LanguageProvider for CProvider {
             }
         }
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Calls);
         // Extract call sites with C-convention receiver binding: functions
         // taking a `(struct T *self, ...)`-shaped first param are treated
         // as methods on `T`, so call sites rewrite to `T.fn` for the
@@ -738,6 +744,8 @@ impl LanguageProvider for CProvider {
             &methods,
             &mut call_sites,
         );
+        drop(_p);
+        let _p = parse_prof::span(Pass::Walk);
         crate::calls::extract_field_reads(
             tree.root_node(),
             source,
@@ -780,12 +788,16 @@ impl LanguageProvider for CProvider {
             &call_sites,
         );
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Imports);
         // Named bindings: `typedef`, `#define`, `extern` declarations.
         // Emitted as `RawImport` with `alias = Some(short_name)` mirroring
         // Java's static-import convention so downstream resolvers can
         // qualifier-scope-lookup C aliases the same way.
         extract_named_bindings(tree.root_node(), source, &mut imports);
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Walk);
         // `#define NAME` regex fallback — tree-sitter-c (0.24.x) ERROR-
         // recovers around multi-line `\` continuations + `##` token-paste
         // and drops the `preproc_def` wrapper, leaving the (preproc_def …)
@@ -795,6 +807,8 @@ impl LanguageProvider for CProvider {
         // macros in `tsd.h` to full recall after this pass.
         emit_macro_fallback(source, &mut nodes);
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Build);
         // Stamp owner_class from the receiver-convention map (self/this
         // first-param pattern). C has no class syntax; the receiver
         // convention is the closest proxy for struct membership.
@@ -806,10 +820,15 @@ impl LanguageProvider for CProvider {
             }
         }
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Walk);
         let raw_function_metas =
             crate::function_meta::c::extract(tree.root_node(), source, &nodes, file_category);
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Build);
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
+        drop(_p);
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes: vec![],

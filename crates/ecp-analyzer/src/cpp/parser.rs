@@ -10,6 +10,7 @@ use crate::framework_helpers::{
 use crate::indirect_dispatch::{collect_c_cpp_fn_ptr_vars, detect_c_cpp_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
+use ecp_core::analyzer::parse_prof::{self, Pass};
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawImport, RawNode, OVERRIDE_SENTINEL};
 
@@ -312,7 +313,10 @@ impl LanguageProvider for CppProvider {
     fn parse_file(&self, path: &Path, source: &[u8]) -> anyhow::Result<LocalGraph> {
         // Node offsets index `source` unchanged: the patch only overwrites
         // macro names with blanks, so every later step reads `source`.
+        let _p = parse_prof::span(Pass::Walk);
         let patched = blank_decl_prefix_macros(source);
+        drop(_p);
+        let _p = parse_prof::span(Pass::Tree);
         let tree = PARSER
             .with(|p| {
                 parse_with_budget(
@@ -324,6 +328,8 @@ impl LanguageProvider for CppProvider {
             .ok_or_else(|| anyhow::anyhow!("Failed to parse file"))?;
         drop(patched);
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Walk);
         // Pre-pass: collect function_definition node IDs that carry an
         // `override` virtual_specifier. These are collected in a separate
         // QueryCursor pass so we can cross-reference against the main parse
@@ -353,6 +359,8 @@ impl LanguageProvider for CppProvider {
             }
         }
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Query);
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
 
@@ -709,6 +717,8 @@ impl LanguageProvider for CppProvider {
             }
         }
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Build);
         imports.sort_by(|a, b| {
             a.imported_name
                 .cmp(&b.imported_name)
@@ -786,6 +796,8 @@ impl LanguageProvider for CppProvider {
             }
         }
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Calls);
         // Extract call sites with receiver-type binding: `this->method()` /
         // `this.method()` → `Class.method`, `Base::method()` → `Base.method`,
         // and typed-var `obj.method()` / `obj->method()` → `Type.method`.
@@ -802,6 +814,8 @@ impl LanguageProvider for CppProvider {
             &bindings,
             &mut call_sites,
         );
+        drop(_p);
+        let _p = parse_prof::span(Pass::Walk);
         crate::calls::extract_field_reads(
             tree.root_node(),
             source,
@@ -854,6 +868,8 @@ impl LanguageProvider for CppProvider {
 
         let framework_refs = detect_ast_framework_patterns(source, CPP_FRAMEWORKS);
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Walk);
         // `#define NAME` regex fallback — tree-sitter-cpp (0.23.x) ERROR-
         // recovers around deeply nested templates / `JEMALLOC_ALWAYS_INLINE`-
         // style attribute macros stacked on function declarations and drops
@@ -865,10 +881,13 @@ impl LanguageProvider for CppProvider {
         let raw_function_metas =
             crate::function_meta::cpp::extract(tree.root_node(), source, &nodes, file_category);
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Build);
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
         if !friend_spans.is_empty() {
             restamp_friend_owners(&mut nodes, &friend_spans);
         }
+        drop(_p);
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes: vec![],

@@ -8,6 +8,7 @@ use crate::framework_helpers::{
 use crate::indirect_dispatch::{collect_js_param_names, detect_js_ts_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
+use ecp_core::analyzer::parse_prof::{self, Pass};
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{
     BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode, RawRoute, RawRouteReceiver,
@@ -181,10 +182,13 @@ impl LanguageProvider for JavaScriptProvider {
     }
 
     fn parse_file(&self, path: &Path, source: &[u8]) -> anyhow::Result<LocalGraph> {
+        let _p = parse_prof::span(Pass::Tree);
         let tree = PARSER
             .with(|p| parse_with_budget(&mut p.borrow_mut(), source, ParseBudget::DEFAULT))
             .ok_or_else(|| anyhow::anyhow!("Failed to parse file"))?;
+        drop(_p);
 
+        let _p = parse_prof::span(Pass::Query);
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
 
@@ -680,11 +684,13 @@ impl LanguageProvider for JavaScriptProvider {
                 }
             }
         }
+        drop(_p);
 
         // Extract call sites with receiver-type binding:
         // - `this.method()` inside a class body → `ClassName.method`
         // - `obj.method()` (no type info in JS) → `obj.method` (qualified for resolver)
         // - `fn()` → `fn`
+        let _p = parse_prof::span(Pass::Calls);
         let mut call_sites = crate::calls::CallSiteIndex::default();
         let (raw_path_literals, raw_sql_refs) = extract_js_calls_and_path_literals(
             tree.root_node(),
@@ -692,7 +698,9 @@ impl LanguageProvider for JavaScriptProvider {
             &mut nodes,
             &mut call_sites,
         );
+        drop(_p);
 
+        let _p = parse_prof::span(Pass::Walk);
         crate::calls::extract_field_reads(
             tree.root_node(),
             source,
@@ -719,7 +727,9 @@ impl LanguageProvider for JavaScriptProvider {
                 ..crate::calls::NameRefSpec::EMPTY
             },
         );
+        drop(_p);
 
+        let _p = parse_prof::span(Pass::Build);
         // Framework-presence gates: only emit Express/Hapi refs when the file
         // actually imports the matching package. Each framework has its own
         // explicit signal list (rather than a shared regex) so adding more
@@ -783,6 +793,8 @@ impl LanguageProvider for JavaScriptProvider {
             }));
         }
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Walk);
         let param_names = collect_js_param_names(tree.root_node(), source);
 
         let call_metas =
@@ -794,7 +806,9 @@ impl LanguageProvider for JavaScriptProvider {
             &nodes,
             file_category,
         );
+        drop(_p);
 
+        let _p = parse_prof::span(Pass::Build);
         let export_aliases =
             crate::framework_helpers::stamp_js_ts_exports(tree.root_node(), source, &mut nodes);
 
@@ -812,7 +826,9 @@ impl LanguageProvider for JavaScriptProvider {
         // Last owner step: a nested function or callback node has a lexical
         // parent and no owner (invariant I1), whatever the class pass gave it.
         ecp_core::analyzer::lexical::clear_scoped_owners(language, &mut nodes);
+        drop(_p);
 
+        let _p = parse_prof::span(Pass::Walk);
         let event_topics = {
             let topics = crate::event_topic::extract_event_topics(
                 &tree,
@@ -828,6 +844,7 @@ impl LanguageProvider for JavaScriptProvider {
             );
             (!topics.is_empty()).then(|| topics.into_boxed_slice())
         };
+        drop(_p);
 
         let path_literals =
             (!raw_path_literals.is_empty()).then(|| raw_path_literals.into_boxed_slice());

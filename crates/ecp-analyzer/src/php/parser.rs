@@ -7,6 +7,7 @@ use crate::framework_helpers::{
 };
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
+use ecp_core::analyzer::parse_prof::{self, Pass};
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{
     BlindSpot, LocalGraph, NameRef, NameRefKind, RawFrameworkRef, RawImport, RawNode,
@@ -485,10 +486,13 @@ impl LanguageProvider for PhpProvider {
     }
 
     fn parse_file(&self, path: &Path, source: &[u8]) -> anyhow::Result<LocalGraph> {
+        let _p = parse_prof::span(Pass::Tree);
         let tree = PARSER
             .with(|p| parse_with_budget(&mut p.borrow_mut(), source, ParseBudget::DEFAULT))
             .ok_or_else(|| anyhow::anyhow!("Failed to parse php file"))?;
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Query);
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
 
@@ -915,6 +919,8 @@ impl LanguageProvider for PhpProvider {
             }
         }
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Build);
         // `nodes` already in source order — Vec + idx-map at parse-loop start.
 
         let file_namespace = nodes
@@ -952,6 +958,8 @@ impl LanguageProvider for PhpProvider {
         super::laravel_routes::resolve_include_controllers(&mut route_includes, names);
         routes.append(&mut route_includes);
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Calls);
         // Extract call sites with receiver-type binding.
         // Handles $this->method(), parent::method(), self::method(), static::method().
         // function_call_expression (bare calls) still go through the shared helper.
@@ -977,6 +985,8 @@ impl LanguageProvider for PhpProvider {
             }
             fanout_refs.extend(fanout.map(|(fanout, _)| fanout));
         }
+        drop(_p);
+        let _p = parse_prof::span(Pass::Walk);
         crate::calls::extract_field_reads(
             tree.root_node(),
             source,
@@ -1023,6 +1033,8 @@ impl LanguageProvider for PhpProvider {
             },
         );
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Build);
         // Gate Laravel framework_refs by the `Illuminate` import — without
         // that, bare `Route::` is just an unrelated class name.
         let mut framework_refs: Vec<RawFrameworkRef> = Vec::new();
@@ -1072,6 +1084,8 @@ impl LanguageProvider for PhpProvider {
             &mut routes,
         );
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Walk);
         let raw_function_metas =
             crate::function_meta::php::extract(tree.root_node(), source, &nodes, file_category);
 
@@ -1083,6 +1097,8 @@ impl LanguageProvider for PhpProvider {
         // separate signal).
         detect_enum_imitation_blind_spots(tree.root_node(), path, is_test_file, &mut blind_spots);
 
+        drop(_p);
+        let _p = parse_prof::span(Pass::Build);
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
         // Constants belong to the innermost named or anonymous type. Anonymous
         // owners retain distinct identities without exposing their names globally.
@@ -1113,9 +1129,14 @@ impl LanguageProvider for PhpProvider {
                 }
             }
         }
+        drop(_p);
+        let _p = parse_prof::span(Pass::Walk);
         extract_qualified_constant_refs(tree.root_node(), source, &mut nodes);
+        drop(_p);
+        let _p = parse_prof::span(Pass::Build);
         let tx_scopes =
             collect_symfony_transactional_scopes(&nodes, &[NodeKind::Method, NodeKind::Function]);
+        drop(_p);
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes,
