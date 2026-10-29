@@ -12,9 +12,7 @@ use crate::framework_helpers::{
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::parse_prof::Pass;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::{
-    FrameworkId, LocalGraph, RawFunctionMeta, RawNode, RawTxScope, Span,
-};
+use ecp_core::analyzer::types::{FrameworkId, LocalGraph, RawFunctionMeta, RawNode, RawTxScope};
 use ecp_core::graph::{FileCategory, NodeKind};
 use std::path::Path;
 use tree_sitter::{Node, Query, Tree};
@@ -91,7 +89,6 @@ pub enum DartRole {
     Type,
     ImportSource,
     ImportAlias,
-    Decorator,
     Var,
     VarName,
     VarType,
@@ -107,29 +104,11 @@ pub enum DartHook {
 pub struct DartMatch<'t> {
     heritage: Vec<String>,
     type_annotation: Option<String>,
-    decorators: Vec<String>,
     import_source: Option<Node<'t>>,
     import_alias: Option<Node<'t>>,
     var_root: Option<Node<'t>>,
     var_name: Option<Node<'t>>,
     var_type: Option<Node<'t>>,
-}
-
-/// Dart's spans use truncating `as u32` casts; `node::span` saturates, so
-/// it would differ for a row or column past `u32::MAX`.
-fn position_span(node: Node<'_>) -> Span {
-    let start = node.start_position();
-    let end = node.end_position();
-    (
-        start.row as u32,
-        start.column as u32,
-        end.row as u32,
-        end.column as u32,
-    )
-}
-
-const fn step(pass: Pass, effect: Effect, op: Op<DartHook>) -> Step<DartHook> {
-    Step { pass, effect, op }
 }
 
 impl ParseSpec for DartSpec {
@@ -201,15 +180,15 @@ impl ParseSpec for DartSpec {
     });
     const TX: TxRule = TxRule::Tree(collect_dart_tx_scopes);
     const STEPS: &'static [Step<DartHook>] = &[
-        step(Pass::Query, Effect::Nodes, Op::Query),
-        step(Pass::Build, Effect::Nodes, Op::DedupNodes),
-        step(Pass::Calls, Effect::Nodes, Op::Hook(DartHook::Calls)),
-        step(Pass::Walk, Effect::Nodes, Op::FieldReads),
-        step(Pass::Walk, Effect::Nodes, Op::VariantRefs),
-        step(Pass::Walk, Effect::Neutral, Op::Hook(DartHook::Frameworks)),
-        step(Pass::Walk, Effect::Neutral, Op::FunctionMeta),
-        step(Pass::Build, Effect::Nodes, Op::StampOwners),
-        step(Pass::Walk, Effect::Bind, Op::TxScopes),
+        Step::fixed(Pass::Query, Op::Query),
+        Step::fixed(Pass::Build, Op::DedupNodes),
+        Step::hook(Pass::Calls, Effect::Nodes, DartHook::Calls),
+        Step::fixed(Pass::Walk, Op::FieldReads),
+        Step::fixed(Pass::Walk, Op::VariantRefs),
+        Step::hook(Pass::Walk, Effect::Neutral, DartHook::Frameworks),
+        Step::fixed(Pass::Walk, Op::FunctionMeta),
+        Step::fixed(Pass::Build, Op::StampOwners),
+        Step::fixed(Pass::Walk, Op::TxScopes),
     ];
 
     fn query() -> anyhow::Result<Query> {
@@ -221,15 +200,12 @@ impl ParseSpec for DartSpec {
 
     fn role(capture: &str) -> Option<DartRole> {
         Some(match capture {
-            "function" | "class" | "method" | "constructor" | "typedef" | "interface" | "trait"
-            | "property" | "import" | "enum" | "enum_constant_node" | "annotation" => {
-                DartRole::Root
-            }
+            "function" | "class" | "method" | "constructor" | "typedef" | "trait" | "property"
+            | "import" | "enum" | "enum_constant_node" | "annotation" => DartRole::Root,
             "heritage" => DartRole::Heritage,
             "type" => DartRole::Type,
             "import.source" => DartRole::ImportSource,
             "import.alias" => DartRole::ImportAlias,
-            "decorator" => DartRole::Decorator,
             "var" => DartRole::Var,
             "var.name" => DartRole::VarName,
             "var.type" => DartRole::VarType,
@@ -264,12 +240,6 @@ impl ParseSpec for DartSpec {
             }
             DartRole::ImportSource => m.import_source = Some(node),
             DartRole::ImportAlias => m.import_alias = Some(node),
-            DartRole::Decorator => {
-                if let Ok(d_str) = std::str::from_utf8(&source[node.start_byte()..node.end_byte()])
-                {
-                    m.decorators.push(d_str.to_string());
-                }
-            }
             DartRole::Var => m.var_root = Some(node),
             DartRole::VarName => m.var_name = Some(node),
             DartRole::VarType => m.var_type = Some(node),
@@ -281,7 +251,6 @@ impl ParseSpec for DartSpec {
         let DartMatch {
             mut heritage,
             type_annotation,
-            decorators,
             import_source,
             import_alias,
             var_root,
@@ -328,7 +297,7 @@ impl ParseSpec for DartSpec {
                     ..node::decl(
                         name_str.to_string(),
                         NodeKind::Variable,
-                        position_span(v_root),
+                        node::span(v_root),
                         &source[v_root.start_byte()..v_root.end_byte()],
                     )
                 });
@@ -364,14 +333,13 @@ impl ParseSpec for DartSpec {
                 // Method, Interface, Property).
                 let is_exported = !name_str.starts_with('_');
                 cx.nodes.push(RawNode {
-                    decorators,
                     is_exported,
                     heritage,
                     type_annotation,
                     ..node::decl(
                         name_str.to_string(),
                         k,
-                        position_span(root),
+                        node::span(root),
                         &source[root.start_byte()..root.end_byte()],
                     )
                 });

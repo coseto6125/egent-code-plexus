@@ -102,7 +102,6 @@ pub enum SwiftRole {
     Export,
     Decorator,
     Heritage,
-    Type,
     Property,
     PropertyNamePat,
     Constructor,
@@ -125,7 +124,6 @@ pub struct SwiftMatch<'t> {
     is_exported: bool,
     decorators: Vec<String>,
     heritage: Vec<String>,
-    type_annotation: Option<String>,
     property_root: Option<Node<'t>>,
     property_name: Option<Node<'t>>,
     constructor_node: Option<Node<'t>>,
@@ -145,27 +143,6 @@ pub struct SwiftFile {
     /// declarations (`let (a, b) = …`) distinct (different name byte
     /// offsets within the same root).
     seen_properties: HashSet<(usize, usize)>,
-}
-
-const fn step(pass: Pass, effect: Effect, op: Op<SwiftHook>) -> Step<SwiftHook> {
-    Step { pass, effect, op }
-}
-
-/// `start_position` / `end_position` cast with `as`, as every Swift
-/// declaration span was before the move; `node::span` saturates instead.
-fn position_span(node: Node<'_>) -> Span {
-    let start = node.start_position();
-    let end = node.end_position();
-    (
-        start.row as u32,
-        start.column as u32,
-        end.row as u32,
-        end.column as u32,
-    )
-}
-
-fn text<'s>(node: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
-    std::str::from_utf8(&source[node.start_byte()..node.end_byte()]).ok()
 }
 
 impl ParseSpec for SwiftSpec {
@@ -231,22 +208,14 @@ impl ParseSpec for SwiftSpec {
         token_trees: false,
     });
     const STEPS: &'static [Step<SwiftHook>] = &[
-        step(Pass::Query, Effect::Nodes, Op::Query),
-        step(Pass::Calls, Effect::Nodes, Op::Hook(SwiftHook::Calls)),
-        step(Pass::Walk, Effect::Nodes, Op::FieldReads),
-        step(Pass::Walk, Effect::Nodes, Op::VariantRefs),
-        step(
-            Pass::Walk,
-            Effect::Neutral,
-            Op::Hook(SwiftHook::TextFrameworks),
-        ),
-        step(Pass::Walk, Effect::Neutral, Op::FunctionMeta),
-        step(
-            Pass::Build,
-            Effect::Nodes,
-            Op::Hook(SwiftHook::MemberOwners),
-        ),
-        step(Pass::Build, Effect::Nodes, Op::StampOwners),
+        Step::fixed(Pass::Query, Op::Query),
+        Step::hook(Pass::Calls, Effect::Nodes, SwiftHook::Calls),
+        Step::fixed(Pass::Walk, Op::FieldReads),
+        Step::fixed(Pass::Walk, Op::VariantRefs),
+        Step::hook(Pass::Walk, Effect::Neutral, SwiftHook::TextFrameworks),
+        Step::fixed(Pass::Walk, Op::FunctionMeta),
+        Step::hook(Pass::Build, Effect::Nodes, SwiftHook::MemberOwners),
+        Step::fixed(Pass::Build, Op::StampOwners),
     ];
 
     fn query() -> anyhow::Result<Query> {
@@ -258,13 +227,12 @@ impl ParseSpec for SwiftSpec {
 
     fn role(capture: &str) -> Option<SwiftRole> {
         Some(match capture {
-            "function" | "class" | "method" | "interface" | "trait" => SwiftRole::Root,
+            "function" | "class" | "trait" => SwiftRole::Root,
             "import.name" => SwiftRole::ImportName,
             "import.source" => SwiftRole::ImportSource,
             "export" => SwiftRole::Export,
             "decorator" => SwiftRole::Decorator,
             "heritage" => SwiftRole::Heritage,
-            "type" => SwiftRole::Type,
             "property" => SwiftRole::Property,
             "property.name.pat" => SwiftRole::PropertyNamePat,
             "constructor" => SwiftRole::Constructor,
@@ -293,25 +261,20 @@ impl ParseSpec for SwiftSpec {
             SwiftRole::ImportName => m.import_name = Some(node),
             SwiftRole::ImportSource => m.import_src = Some(node),
             SwiftRole::Export => {
-                if let Some(export_str) = text(node, source) {
+                if let Ok(export_str) = node.utf8_text(source) {
                     if export_str == "public" || export_str == "open" {
                         m.is_exported = true;
                     }
                 }
             }
             SwiftRole::Decorator => {
-                if let Some(d_str) = text(node, source) {
+                if let Ok(d_str) = node.utf8_text(source) {
                     m.decorators.push(d_str.trim().to_string());
                 }
             }
             SwiftRole::Heritage => {
-                if let Some(heritage_str) = text(node, source) {
+                if let Ok(heritage_str) = node.utf8_text(source) {
                     m.heritage.push(heritage_str.to_string());
-                }
-            }
-            SwiftRole::Type => {
-                if let Some(type_str) = text(node, source) {
-                    m.type_annotation = Some(type_str.to_string());
                 }
             }
             SwiftRole::Property => m.property_root = Some(node),
@@ -336,7 +299,6 @@ impl ParseSpec for SwiftSpec {
             is_exported,
             mut decorators,
             heritage,
-            type_annotation,
             property_root,
             property_name,
             constructor_node,
@@ -361,7 +323,7 @@ impl ParseSpec for SwiftSpec {
                     ..node::decl(
                         lhs.clone(),
                         NodeKind::Typedef,
-                        position_span(ta_node),
+                        node::span(ta_node),
                         &source[ta_node.start_byte()..ta_node.end_byte()],
                     )
                 });
@@ -378,9 +340,9 @@ impl ParseSpec for SwiftSpec {
         // so no scope walker is needed. Emits EnumVariant (changed from
         // Property — owner_class stamped by stamp_owner_class_by_span).
         if let (Some(ec_root), false) = (enum_case_root, enum_case_names.is_empty()) {
-            let span = position_span(ec_root);
+            let span = node::span(ec_root);
             for name_node in &enum_case_names {
-                if let Some(name_str) = text(*name_node, source) {
+                if let Ok(name_str) = name_node.utf8_text(source) {
                     cx.nodes.push(RawNode {
                         is_exported: true, // enum cases follow enum visibility
                         ..node::decl(
@@ -402,7 +364,7 @@ impl ParseSpec for SwiftSpec {
                 ..node::decl(
                     "init".to_string(),
                     NodeKind::Constructor,
-                    position_span(ctor_node),
+                    node::span(ctor_node),
                     &source[ctor_node.start_byte()..ctor_node.end_byte()],
                 )
             });
@@ -447,7 +409,7 @@ impl ParseSpec for SwiftSpec {
                 anc = a.parent();
             }
             // A local binding ends the whole match: the declaration and
-            // import sections below never ran for it before the move.
+            // import sections below must not run for it.
             let Some(node_kind) = emit_kind else { return };
 
             // Walk the property_declaration's direct children to find
@@ -458,7 +420,7 @@ impl ParseSpec for SwiftSpec {
             // Handles both `var x` (one leaf) and `let (a, b)` (multiple).
             let names = collect_pattern_names(pat_node, source);
 
-            let span = position_span(pr_root);
+            let span = node::span(pr_root);
 
             for (name_str, name_byte) in names {
                 if !f.seen_properties.insert((pr_root.id(), name_byte)) {
@@ -485,7 +447,7 @@ impl ParseSpec for SwiftSpec {
             // ~700 uid collisions in the Swift cluster. Skip the type-level emit; members
             // declared inside the extension body still emit individually via the
             // function_declaration / property_declaration / init_declaration paths.
-            // The `return` also skips the import section, as the old `continue` did.
+            // The `return` also skips the import section: an extension match emits nothing else.
             let k = if k == NodeKind::Class {
                 match swift_decl_keyword(root) {
                     "extension" => return,
@@ -498,7 +460,7 @@ impl ParseSpec for SwiftSpec {
             } else {
                 k
             };
-            if let Some(name_str) = text(n, source) {
+            if let Ok(name_str) = n.utf8_text(source) {
                 // `@objc(extName)` exposes a Swift symbol under an
                 // Obj-C-visible alias. Emit an alias-only RawImport so the
                 // rename binding shows up in the named-binding dimension
@@ -519,11 +481,10 @@ impl ParseSpec for SwiftSpec {
                     decorators,
                     is_exported,
                     heritage,
-                    type_annotation,
                     ..node::decl(
                         name_str.to_string(),
                         k,
-                        position_span(root),
+                        node::span(root),
                         &source[root.start_byte()..root.end_byte()],
                     )
                 });
@@ -531,7 +492,8 @@ impl ParseSpec for SwiftSpec {
         }
 
         if let (Some(i_name), Some(i_src)) = (import_name, import_src) {
-            if let (Some(name_str), Some(src_str)) = (text(i_name, source), text(i_src, source)) {
+            if let (Ok(name_str), Ok(src_str)) = (i_name.utf8_text(source), i_src.utf8_text(source))
+            {
                 cx.imports.push(imports::raw(
                     src_str.to_string(),
                     name_str.to_string(),

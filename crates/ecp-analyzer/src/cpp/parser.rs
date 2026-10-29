@@ -286,7 +286,7 @@ impl LanguageProvider for CppProvider {
 pub enum CppRole {
     Root,
     Type,
-    Export,
+    OverrideMarker,
     Alias,
     ImportSource,
     Import,
@@ -309,7 +309,6 @@ pub enum CppHook {
 #[derive(Default)]
 pub struct CppMatch<'t> {
     type_node: Option<Node<'t>>,
-    is_exported_by_query: bool,
     import_src_node: Option<Node<'t>>,
     import_alias_node: Option<Node<'t>>,
     is_import: bool,
@@ -322,6 +321,8 @@ pub struct CppMatch<'t> {
 
 #[derive(Default)]
 pub struct CppFile {
+    /// Set by the first step, before any reader runs.
+    is_header: bool,
     /// `function_definition` ids that carry an `override` marker. The
     /// marker fires in another match than the declaration's name, so the
     /// pre-scan collects them before the main loop reads them.
@@ -334,23 +335,6 @@ pub struct CppFile {
     friend_spans: FxHashSet<Span>,
     recovered_classes: Vec<(Span, String)>,
     bindings: CppBindings,
-}
-
-const fn step(pass: Pass, effect: Effect, op: Op<CppHook>) -> Step<CppHook> {
-    Step { pass, effect, op }
-}
-
-/// `start_position` / `end_position` cast with `as`, as every C++
-/// declaration span was before the move; `node::span` saturates instead.
-fn position_span(node: Node<'_>) -> Span {
-    let start = node.start_position();
-    let end = node.end_position();
-    (
-        start.row as u32,
-        start.column as u32,
-        end.row as u32,
-        end.column as u32,
-    )
 }
 
 fn is_header(path: &Path) -> bool {
@@ -418,22 +402,17 @@ impl ParseSpec for CppSpec {
     /// macro names with blanks, so every later step reads `source`.
     const PREPARE_SOURCE: Option<PrepareSource> = Some(blank_decl_prefix_macros);
     const STEPS: &'static [Step<CppHook>] = &[
-        step(
-            Pass::Walk,
-            Effect::Neutral,
-            Op::Hook(CppHook::OverridePreScan),
-        ),
-        step(Pass::Query, Effect::Nodes, Op::Query),
-        step(
+        Step::hook(Pass::Walk, Effect::Neutral, CppHook::OverridePreScan),
+        Step::fixed(Pass::Query, Op::Query),
+        Step::fixed(
             Pass::Build,
-            Effect::Neutral,
             Op::SortDedupImports(ImportOrder::NameSourceAlias),
         ),
-        step(Pass::Build, Effect::Nodes, Op::Hook(CppHook::Owners)),
-        step(Pass::Calls, Effect::Nodes, Op::Hook(CppHook::Calls)),
-        step(Pass::Walk, Effect::Nodes, Op::FieldReads),
-        step(Pass::Walk, Effect::Nodes, Op::VariantRefs),
-        step(Pass::Walk, Effect::Neutral, Op::Hook(CppHook::Indirect)),
+        Step::hook(Pass::Build, Effect::Nodes, CppHook::Owners),
+        Step::hook(Pass::Calls, Effect::Nodes, CppHook::Calls),
+        Step::fixed(Pass::Walk, Op::FieldReads),
+        Step::fixed(Pass::Walk, Op::VariantRefs),
+        Step::hook(Pass::Walk, Effect::Neutral, CppHook::Indirect),
         // `#define NAME` regex fallback — tree-sitter-cpp (0.23.x) ERROR-
         // recovers around deeply nested templates / `JEMALLOC_ALWAYS_INLINE`-
         // style attribute macros stacked on function declarations and drops
@@ -441,10 +420,10 @@ impl ParseSpec for CppSpec {
         // emitted 137/673 macros in `doctest.h` and 11/29 in `tsd.h`; the
         // fallback restores full recall. C++ has no bind step, so a node
         // pushed after the calls binds nothing out of place.
-        step(Pass::Walk, Effect::Nodes, Op::Hook(CppHook::MacroFallback)),
-        step(Pass::Walk, Effect::Neutral, Op::FunctionMeta),
-        step(Pass::Build, Effect::Nodes, Op::StampOwners),
-        step(Pass::Build, Effect::Nodes, Op::Hook(CppHook::FriendOwners)),
+        Step::hook(Pass::Walk, Effect::Nodes, CppHook::MacroFallback),
+        Step::fixed(Pass::Walk, Op::FunctionMeta),
+        Step::fixed(Pass::Build, Op::StampOwners),
+        Step::hook(Pass::Build, Effect::Nodes, CppHook::FriendOwners),
     ];
 
     fn query() -> anyhow::Result<Query> {
@@ -459,7 +438,7 @@ impl ParseSpec for CppSpec {
             "function" | "class" | "struct" | "method" | "macro" | "namespace" | "enum_node"
             | "enumerator_node" | "typedef_node" => CppRole::Root,
             "type" => CppRole::Type,
-            "export" => CppRole::Export,
+            "override_marker" => CppRole::OverrideMarker,
             "alias" => CppRole::Alias,
             "import.source" => CppRole::ImportSource,
             "import" => CppRole::Import,
@@ -486,7 +465,7 @@ impl ParseSpec for CppSpec {
         match r {
             CppRole::Root => d.root = Some(node),
             CppRole::Type => m.type_node = Some(node),
-            CppRole::Export => m.is_exported_by_query = true,
+            CppRole::OverrideMarker => {}
             CppRole::Alias => m.import_alias_node = Some(node),
             CppRole::ImportSource => m.import_src_node = Some(node),
             CppRole::Import => m.is_import = true,
@@ -501,7 +480,6 @@ impl ParseSpec for CppSpec {
         let source = cx.source;
         let CppMatch {
             type_node,
-            is_exported_by_query,
             import_src_node,
             import_alias_node,
             is_import,
@@ -576,13 +554,13 @@ impl ParseSpec for CppSpec {
                         root, source,
                     ));
                 }
-                let span = position_span(root);
+                let span = node::span(root);
                 if is_friend {
                     f.friend_spans.insert(span);
                 }
                 cx.nodes.push(RawNode {
                     decorators,
-                    is_exported: is_header(cx.path) || is_exported_by_query,
+                    is_exported: f.is_header,
                     heritage,
                     type_annotation,
                     owner_class,
@@ -602,12 +580,12 @@ impl ParseSpec for CppSpec {
                 std::str::from_utf8(&source[f_name.start_byte()..f_name.end_byte()])
             {
                 cx.nodes.push(RawNode {
-                    is_exported: is_header(cx.path) || is_exported_by_query,
+                    is_exported: f.is_header,
                     type_annotation: slice_type_before(f_root, f_name, source),
                     ..node::decl(
                         name_str.to_string(),
                         NodeKind::Property,
-                        position_span(f_root),
+                        node::span(f_root),
                         &source[f_root.start_byte()..f_root.end_byte()],
                     )
                 });
@@ -641,12 +619,12 @@ impl ParseSpec for CppSpec {
                         NodeKind::Variable
                     };
                     cx.nodes.push(RawNode {
-                        is_exported: is_header(cx.path) || is_exported_by_query,
+                        is_exported: f.is_header,
                         type_annotation: slice_type_before(v_root, v_name, source),
                         ..node::decl(
                             name_str.to_string(),
                             kind,
-                            position_span(v_root),
+                            node::span(v_root),
                             &source[v_root.start_byte()..v_root.end_byte()],
                         )
                     });
@@ -691,22 +669,16 @@ impl ParseSpec for CppSpec {
                 // QueryCursor pass so we can cross-reference against the main parse
                 // loop (where the override pattern fires on a different match than
                 // the @name.method capture, making per-match `has_override` unreliable).
-                let idx_om = c.query().capture_index_for_name("override_marker");
-                if let Some(om_idx) = idx_om {
-                    let mut pre_cursor = QueryCursor::new();
-                    let mut pre_matches = pre_cursor.matches(c.query(), root, source);
-                    while let Some(m) = pre_matches.next() {
-                        for cap in m.captures() {
-                            if cap.index == om_idx {
-                                // Walk up to the enclosing function_definition.
-                                let mut p = cap.node.parent();
-                                while let Some(node) = p {
-                                    if node.kind() == "function_definition" {
-                                        f.override_func_ids.insert(node.id());
-                                        break;
-                                    }
-                                    p = node.parent();
-                                }
+                f.is_header = is_header(cx.path);
+                let mut pre_cursor = QueryCursor::new();
+                let mut pre_matches = pre_cursor.matches(c.query(), root, source);
+                while let Some(m) = pre_matches.next() {
+                    for cap in m.captures() {
+                        if matches!(c.role_at(cap.index), Some(CppRole::OverrideMarker)) {
+                            let func = std::iter::successors(cap.node.parent(), |n| n.parent())
+                                .find(|n| n.kind() == "function_definition");
+                            if let Some(func) = func {
+                                f.override_func_ids.insert(func.id());
                             }
                         }
                     }
@@ -717,7 +689,7 @@ impl ParseSpec for CppSpec {
                 // tree-sitter lost a class or cut it short (a macro before `class`,
                 // an `#if` inside a declaration): owners come from matched braces.
                 f.recovered_classes = if root.has_error() {
-                    stamp_lexical_owners(source, nodes, is_header(cx.path))
+                    stamp_lexical_owners(source, nodes, f.is_header)
                 } else {
                     Vec::new()
                 };

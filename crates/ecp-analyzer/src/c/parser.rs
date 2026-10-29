@@ -494,10 +494,6 @@ pub struct CFile {
     methods: CReceiverMap,
 }
 
-const fn step(pass: Pass, effect: Effect, op: Op<CHook>) -> Step<CHook> {
-    Step { pass, effect, op }
-}
-
 impl ParseSpec for CSpec {
     type Role = CRole;
     type Match<'t> = CMatch<'t>;
@@ -540,20 +536,16 @@ impl ParseSpec for CSpec {
     });
     /// C has no bind step, so the macro-fallback nodes may follow the calls.
     const STEPS: &'static [Step<CHook>] = &[
-        step(Pass::Query, Effect::Nodes, Op::Query),
-        step(Pass::Calls, Effect::Nodes, Op::Hook(CHook::Calls)),
-        step(Pass::Walk, Effect::Nodes, Op::FieldReads),
-        step(Pass::Walk, Effect::Nodes, Op::VariantRefs),
-        step(Pass::Walk, Effect::Neutral, Op::Hook(CHook::Indirect)),
-        step(
-            Pass::Imports,
-            Effect::Neutral,
-            Op::Hook(CHook::NamedBindings),
-        ),
-        step(Pass::Walk, Effect::Nodes, Op::Hook(CHook::MacroFallback)),
-        step(Pass::Build, Effect::Nodes, Op::Hook(CHook::ReceiverOwners)),
-        step(Pass::Walk, Effect::Neutral, Op::FunctionMeta),
-        step(Pass::Build, Effect::Nodes, Op::StampOwners),
+        Step::fixed(Pass::Query, Op::Query),
+        Step::hook(Pass::Calls, Effect::Nodes, CHook::Calls),
+        Step::fixed(Pass::Walk, Op::FieldReads),
+        Step::fixed(Pass::Walk, Op::VariantRefs),
+        Step::hook(Pass::Walk, Effect::Neutral, CHook::Indirect),
+        Step::hook(Pass::Imports, Effect::Neutral, CHook::NamedBindings),
+        Step::hook(Pass::Walk, Effect::Nodes, CHook::MacroFallback),
+        Step::hook(Pass::Build, Effect::Nodes, CHook::ReceiverOwners),
+        Step::fixed(Pass::Walk, Op::FunctionMeta),
+        Step::fixed(Pass::Build, Op::StampOwners),
     ];
 
     fn query() -> anyhow::Result<Query> {
