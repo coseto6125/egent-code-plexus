@@ -1,6 +1,6 @@
 # Phase 3 slice T2: shared parse driver design
 
-Status: design, not implemented. Slice plan: `docs/plans/2026-10-26-phase3-area10-slices.md`. Target: `docs/specs/2026-10-25-architecture-direction.md` §10. Phase contract: `docs/specs/contracts/C4-raw-records.md` (Area 10).
+Status: implemented on branch `feat/arch-p3-parse-driver` (T1-T7). All 14 languages run on the driver, proven byte-identical by the §6.3 dump. Open items: §2.7 and §2.5 *Outcome*. Slice plan: `docs/plans/2026-10-26-phase3-area10-slices.md`. Target: `docs/specs/2026-10-25-architecture-direction.md` §10. Phase contract: `docs/specs/contracts/C4-raw-records.md` (Area 10).
 
 Every `file:line` below is valid at commit `87f2d860` of branch `feat/arch-p3-parse-driver`, with T1 committed. Paths without a crate prefix are under `crates/ecp-analyzer/src/`.
 
@@ -27,8 +27,8 @@ Every `file:line` below is valid at commit `87f2d860` of branch `feat/arch-p3-pa
 4. Each spec lists its steps in its current order. A `const` check rejects a node-changing step after a bind step.
 5. Only three languages bind before their node list is final: Python, Java, Kotlin. Their move changes no output.
 6. The driver is generic over the spec. The hot loop has no `dyn` call. The only new buffer is the tap-row buffer of §2.5, with the bound stated there.
-7. T2 lands the record tap in its own commit after the pure Go and Rust moves. The commit stays only if it passes the perf rule of §5.3.
-8. Two pre-query scans stay as approved exceptions (§2.7): Python's import pre-scan and C++'s override pre-scan. The one-query target of the slice plan is not complete while they remain.
+7. T2 lands the record tap in its own commit after the pure Go and Rust moves. The commit stays only if it passes the perf rule of §5.3. Outcome: only the TypeScript schema-field tap stays (§2.5 *Outcome*).
+8. Two pre-query scans stay as approved exceptions (§2.7): Python's import pre-scan and C++'s override pre-scan. The one-query target of the slice plan is not complete while they remain, nor while event topics and Python schema fields re-query.
 
 ## 1. Does record order matter?
 
@@ -87,11 +87,11 @@ An extraction slice does not bump `BUILDER_FINGERPRINT` (`ecp-core/src/registry/
 | function meta | `Op::FunctionMeta`, with the driver's file category | `fn function_meta` (the existing `function_meta::<lang>::extract`) |
 | owner stamping | `Op::StampOwners`, `Op::StampOwnerFns`, `Op::ClearScopedOwners` | `const SCOPE_LANGUAGE`, extra stamp passes as hooks |
 | tx scopes | `Op::TxScopes`, a bind step | `const TX: TxRule`, with its accepted-kind list |
-| event topics | the tap, `Op::EventTopics`, `Op::EventTopicsRequery` | `const EVENT_TOPICS` |
-| schema fields | the tap, `Op::SchemaFields`, `Op::SchemaFieldsRequery` | `const SCHEMA_FIELDS` |
+| event topics | `Op::EventTopicsRequery` (no tap: §2.5) | `const EVENT_TOPICS` |
+| schema fields | the tap, `Op::SchemaFields` (TypeScript); `Op::SchemaFieldsRequery` (Python) | `const SCHEMA_FIELDS` |
 | test classification | category and `is_test`, once per file | `const TEST_RULE` |
 | pass order | runs `STEPS` in order; `const` phase check | the `STEPS` list |
-| `LocalGraph` | assembles every field with one empty-to-`None` rule | `fn finish` moves spec-only side tables in |
+| `LocalGraph` | assembles every field with one empty-to-`None` rule | nothing: every spec-only table is written into `FileCx` by a step |
 
 ### 2.2 Rust shape
 
@@ -114,7 +114,7 @@ pub trait ParseSpec: LangSpec + Sized + 'static {
     const EVENT_TOPICS: &'static [EventTopicConfig] = &[];
     const SCHEMA_FIELDS: &'static [SchemaFieldConfig] = &[];
     const TX: TxRule = TxRule::None;
-    const PREPARE_SOURCE: Option<fn(&[u8]) -> Option<Vec<u8>>> = None;  // C++
+    const PREPARE_SOURCE: Option<PrepareSource> = None;  // C++; PrepareSource = fn(&[u8]) -> Option<Vec<u8>>
     const POST_TREE: Option<fn(Tree, &[u8]) -> Tree> = None;            // Kotlin
     const STEPS: &'static [Step<Self::Hook>];
 
@@ -126,22 +126,27 @@ pub trait ParseSpec: LangSpec + Sized + 'static {
                    m: &mut Self::Match<'t>, f: &mut Self::File<'t>, cx: &mut FileCx<'t>);
     fn end_match<'t>(d: DeclSlot<'t>, m: &mut Self::Match<'t>,
                      f: &mut Self::File<'t>, cx: &mut FileCx<'t>);
-    fn hook<'t>(h: Self::Hook, f: &mut Self::File<'t>, cx: &mut FileCx<'t>);
+    // `c` lets a pre-query hook run the query and read the role table
+    // (`c.query()`, `c.role_at(index)`), as the main loop does.
+    fn hook<'t>(h: Self::Hook, c: &Compiled<Self>, f: &mut Self::File<'t>, cx: &mut FileCx<'t>);
     fn function_meta(root: Node<'_>, source: &[u8], nodes: &[RawNode],
                      category: FileCategory) -> Vec<RawFunctionMeta>;
-    fn finish<'t>(_f: Self::File<'t>, _g: &mut LocalGraph) {}
 }
 
 pub enum KindCapture { NameOverwrite, NameKeepFirst, RootOverwrite }
-pub struct Step<H> { pub pass: Pass, pub effect: Effect, pub op: Op<H> }
+pub struct Step<H> { pass: Pass, effect: Effect, op: Op<H> }      // private: built only by the two constructors
+impl<H> Step<H> {
+    pub const fn fixed(pass: Pass, op: Op<H>) -> Self;                 // effect = op.fixed_effect()
+    pub const fn hook(pass: Pass, effect: Effect, hook: H) -> Self;    // op = Op::Hook(hook)
+}
 pub enum Effect { Nodes, Neutral, Bind }
 pub enum Op<H> {
     Query, Hook(H), SortDedupImports(ImportOrder), DedupNodes,
     FieldReads, VariantRefs, FunctionMeta,
     StampOwners, StampOwnerFns, ClearScopedOwners,
     TxScopes,
-    EventTopics, EventTopicsRequery,     // EventTopics: added by the tap commit (§6.2)
-    SchemaFields, SchemaFieldsRequery,   // SchemaFields: added by the tap commit (§6.2)
+    EventTopicsRequery,                  // no event-topic tap: §2.5
+    SchemaFields, SchemaFieldsRequery,   // SchemaFields: the tap, TypeScript only (§2.5)
 }
 pub enum TxRule {
     None,
@@ -269,7 +274,7 @@ The tap gives the same records from the main pass. The two families differ in fo
 | an empty capture name | `producer` or `direction` gets no role (`event_topic/extract.rs:59-70`) | `type` gets no role (`schema_field/extract.rs:65-70`) |
 | a config is active when | `has_import_from(imports, gate)` (`event_topic/extract.rs:39-42`). An empty gate is never active: `has_import_from` tests `modules.iter().any(…)` (`framework_helpers.rs:788-791`). | `gate.is_empty() \|\| has_import_from(imports, gate)` (`schema_field/extract.rs:38-41`). An empty gate is always active: TS interfaces need no import (`typescript/schema_extractors.rs:12-19`). |
 | required slots for a candidate | `topic` (`event_topic/extract.rs:107`) | `owner` and `name` (`schema_field/extract.rs:108`) |
-| record | `RawEventTopic` as `event_topic/extract.rs:111-142` | `RawSchemaField` as `schema_field/extract.rs:112-130` |
+| record | `RawEventTopic` as `event_topic/extract.rs:111-142` | `RawSchemaField` from `schema_record` (`schema_field/extract.rs`), which the tap and the re-query both call |
 
 So TS interface schemas never take the event-gate rule. Each family has its own active test, and the step for one family never reads the other family's rows.
 
@@ -298,6 +303,8 @@ So TS interface schemas never take the event-gate rule. Each family has its own 
 **Buffer and bound.** The tap adds one per-file buffer, `FileCx.tap_rows: Vec<TapRow>`, and one per-provider slot table. A row is at most 64 bytes: it holds ranges, not strings. The buffer holds at most one row per config per tapped match: at most 4 rows per match for Go and Rust. It grows by doubling, so a file pays O(log n) allocations for n rows. A file with no tapped capture allocates nothing. The buffer is freed when `parse` returns. A file with tapped captures but no active config now pays for its rows during the query. Today's extractor returns at once for such a file (`event_topic/extract.rs:44-46`). The perf rule of §5.3 measures this cost.
 
 **Fallback ops.** `Op::EventTopicsRequery` and `Op::SchemaFieldsRequery` call `extract_event_topics` and `extract_schema_fields` as today, with `S::EVENT_TOPICS` or `S::SCHEMA_FIELDS`. The pure moves use them. If the tap commit fails §5.3, they stay.
+
+**Outcome.** The full tap (both families, every language) failed §5.3 on Go RSS and was dropped. The driver keeps only the schema-field tap, `Op::SchemaFields`, and only TypeScript uses it. It passed the amended §5.3 rule; the PR body holds the per-run numbers. Every language uses `Op::EventTopicsRequery`, and Python uses `Op::SchemaFieldsRequery`. `Op::EventTopics` does not exist. The table and per-match rules above hold for the schema family only.
 
 ### 2.6 Language matrix
 
@@ -341,12 +348,13 @@ Record and pass parameters:
 
 ### 2.7 Approved exceptions to the one-query target
 
-The slice plan requires that "One query pass feeds imports, schema fields, event topics and override markers" (`docs/plans/2026-10-26-phase3-area10-slices.md:20`). Two languages keep a second run of the query after their move. Each one is an approved intermediate exception. The one-query target is not complete while either remains.
+The slice plan requires that "One query pass feeds imports, schema fields, event topics and override markers" (`docs/plans/2026-10-26-phase3-area10-slices.md:20`). Two languages keep a pre-scan after their move, and the record re-queries remain. Each row is an approved intermediate exception. The one-query target is not complete while any row remains.
 
 | Lang | Pre-scan | Why a tap is not enough | Slice that keeps it | Follow-up that removes it |
 |---|---|---|---|---|
 | python | import pre-scan (`python/parser.rs:961-1010`) | The main loop gates FastAPI, Django and Celery captures on imports at capture time (`:1012-1015`, `:1127-1186`). The imports are complete only after the loop. | T4 keeps it as a pre-query hook under `Pass::Walk`. | Defer the gates: buffer the gated captures as pending refs in the loop, then apply `has_fastapi`, `has_django` and `has_celery` after it. Prove it with the dump, then delete the pre-scan. File the follow-up when T4 closes. |
 | cpp | override pre-scan (`cpp/parser.rs:332-360`) | The `override_marker` capture and the method declaration fire in different matches (`:333-337`). The declaration emit reads the marker set at once and puts the sentinel first in `decorators` (`:570-574`). | T7 keeps it as a pre-query hook under `Pass::Walk`. | Tap the marker into a set of `function_definition` ids, then insert the sentinel at decorator index 0 of each marked node after the loop. That is a node-changing step; C++ has no bind step. Prove it with the dump, then delete the pre-scan. File the follow-up when T7 closes. |
+| all 14 (events), python (schema fields) | re-query (`Op::EventTopicsRequery`, `Op::SchemaFieldsRequery`) | The full tap failed §5.3 on Go RSS (§2.5 *Outcome*). | T2 keeps the re-query steps. | Re-measure a tap that skips row collection for a file with no active config, under a new §5.3 pre-registration. |
 
 ## 3. How the driver keeps each pass order
 
@@ -357,37 +365,43 @@ The driver has no fixed phases with hooks between them. Each spec lists its step
 ```rust
 for step in S::STEPS {
     let _p = parse_prof::span(step.pass);
-    match step.op { Op::Query => run_query::<S>(c, &mut f, &mut cx), Op::Hook(h) => S::hook(h, &mut f, &mut cx), /* fixed ops */ }
+    match step.op { Op::Query => run_query::<S>(c, &mut f, &mut cx), Op::Hook(h) => S::hook(h, c, &mut f, &mut cx), /* fixed ops */ }
 }
 ```
 
 Each step carries its own `Pass`, so the `ECP_PROF` attribution stays as T1 marked it. A T1 span that covers two statements becomes two steps with the same `Pass`. The per-pass total is the same sum.
 
-Each spec states `const _: () = assert!(driver::steps_ok(Self::STEPS));`. The check runs at compile time. In debug builds the driver also calls `ParsePhase::advance` (`ecp-core/src/contracts/raw_records.rs:79-84`) at each phase change. Before the first `Bind` step it advances through `FinalizeNodes`, because `advance` allows no skipped phase.
+`Compiled::<S>::new` holds a `const` block with three asserts, so each check runs at compile time for every spec that builds a `Compiled`:
+
+- `steps_ok(S::STEPS)`, in the table below.
+- `params_ok::<S>()`: a `FieldReads` or `VariantRefs` step has its `FIELD_READS` or `VARIANT_REFS` constant.
+- A spec that taps schema fields holds at most `tap::MAX_CONFIGS` (8) `SCHEMA_FIELDS` configs. The per-match slot table is a fixed array of that size.
+
+A spec builds its steps with `Step::fixed(pass, op)` or `Step::hook(pass, effect, hook)`. `Step::fixed` takes the effect from `Op::fixed_effect`, and it fails to compile for `Op::Hook`. In debug builds the driver also calls `ParsePhase::advance` (`ecp-core/src/contracts/raw_records.rs:79-84`) at each phase change. Before the first `Bind` step it advances through `FinalizeNodes`, because `advance` allows no skipped phase.
 
 **What the phase check enforces, and what it does not:**
 
 | Check | Enforces | Does not enforce |
 |---|---|---|
-| `steps_ok` (compile time) | No step declared `Effect::Nodes` follows a step declared `Effect::Bind`. Each fixed op has its fixed effect: `TxScopes` is `Bind`; `DedupNodes`, `StampOwners`, `StampOwnerFns` and `ClearScopedOwners` are `Nodes`; the record ops are `Neutral`. | The real writes of a hook. A hook gets `&mut FileCx`, so a hook declared `Neutral` can still write `nodes`. |
+| `steps_ok` (compile time) | No step declared `Effect::Nodes` follows a step declared `Effect::Bind`. A fixed op cannot carry another effect: the `Step` fields are private, and `Step::fixed` takes `Op::fixed_effect`: `TxScopes` is `Bind`; `Query`, `DedupNodes`, `FieldReads`, `VariantRefs`, `StampOwners`, `StampOwnerFns` and `ClearScopedOwners` are `Nodes`; `SortDedupImports`, `FunctionMeta` and the record ops are `Neutral`. Exactly one step is `Query`. `SchemaFields` follows the query step. At most one step is `SchemaFields` or `SchemaFieldsRequery`: the tap step drains the tapped rows, so a second schema step would overwrite the records. | The real writes of a hook. A hook gets `&mut FileCx`, so a hook declared `Neutral` can still write `nodes`. |
 | `ParsePhase::advance` (debug) | The declared phases advance in contract order. | Same as above: it reads the labels, not the writes. |
-| node-count assertion (debug) | After the first `Bind` step, `cx.nodes.len()` stays the same through every later step and through `finish`. This catches a late push or removal. | A late retag or reorder that keeps the length. It also does not check side-table writes. |
+| node-count assertion (debug) | After the first `Bind` step, `cx.nodes.len()` stays the same through every later step. This catches a late push or removal. | A late retag or reorder that keeps the length. It also does not check side-table writes. |
 
-The dump of §6.3 is the control for every write the checks cannot see. Code review of each hook's declared effect is the second control. `finish` runs after every step and may only move `File` tables into `LocalGraph` fields that no step reads.
+The dump of §6.3 is the control for every write the checks cannot see. Code review of each hook's declared effect is the second control.
 
 ### 3.2 Step lists for the 14 languages
 
-Notation: `H(x)` is a hook, `[P]` is the `Pass`, `B` marks a bind step. Every other step is node-changing or neutral. The tree phase of §2.2 runs before each list. `EventTopics` and `SchemaFields` mean `EventTopicsRequery` and `SchemaFieldsRequery` until the tap commit for that language lands.
+Notation: `H(x)` is a hook, `[P]` is the `Pass`, `B` marks a bind step. Every other step is node-changing or neutral. The tree phase of §2.2 runs before each list. `EventTopicsRequery` and `SchemaFields` mean `EventTopicsRequery` and `SchemaFieldsRequery` until the tap commit for that language lands.
 
 | Lang | Steps in order | Move |
 |---|---|---|
-| go | H(iota)[Walk] · Query · H(merge file vars)[Build] · SortDedupImports[Build] · H(calls)[Calls] · H(literal keys, field reads)[Walk] · H(routes, gin/echo)[Build] · FunctionMeta[Walk] · TxScopes B[Walk] · EventTopics[Walk] | none |
-| rust | Query · H(nested use)[Imports] · H(calls)[Calls] · FieldReads · VariantRefs · H(indirect)[Walk] · H(axum, actix)[Build] · FunctionMeta · EventTopics[Walk] · StampOwners · ClearScopedOwners · TxScopes B[Build] | none |
-| typescript | Query · H(freeze enum)[Walk] · H(calls)[Calls] · FieldReads · VariantRefs[Walk] · H(routes, express, nestjs)[Build] · H(indirect) · FunctionMeta[Walk] · H(exports, import bindings) · StampOwners · StampOwnerFns · ClearScopedOwners · TxScopes B[Build] · SchemaFields · EventTopics[Walk] | none |
-| javascript | Query · H(calls)[Calls] · FieldReads[Walk] · H(routes, receivers, express, hapi)[Build] · H(indirect) · FunctionMeta[Walk] · H(exports, import bindings) · StampOwners · StampOwnerFns · ClearScopedOwners[Build] · EventTopics[Walk] | none |
-| python | H(import pre-scan)[Walk] · Query · H(calls)[Calls] · FieldReads · VariantRefs · H(indirect)[Walk] · H(depends, gates, fan-out, router prefixes, route dedupe)[Build] · FunctionMeta[Walk] · H(protocol promotion, enum variants) · StampOwners · StampOwnerFns · ClearScopedOwners · TxScopes B[Build] · SchemaFields · EventTopics[Walk] · H(root imports)[Imports] | TxScopes moves from before the promotion (`python/parser.rs:1677`) to after `ClearScopedOwners` (`:1736`) |
-| java | Query · H(spring gate)[Build] · H(calls)[Calls] · FieldReads · VariantRefs · FunctionMeta[Walk] · StampOwners · TxScopes B[Build] · EventTopics[Walk] | TxScopes moves after StampOwners (`java/parser.rs:577` before `:580`) |
-| kotlin | (tree: `POST_TREE`[Walk]) · Query · H(calls)[Calls] · FieldReads · VariantRefs[Walk] · H(ktor gate)[Build] · FunctionMeta[Walk] · StampOwners · TxScopes B[Build] · EventTopics[Walk] | TxScopes moves after StampOwners (`kotlin/parser.rs:695` before `:700`) |
+| go | H(iota)[Walk] · Query · H(merge file vars)[Build] · SortDedupImports[Build] · H(calls)[Calls] · H(literal keys, field reads)[Walk] · H(routes, gin/echo)[Build] · FunctionMeta[Walk] · TxScopes B[Walk] · EventTopicsRequery[Walk] | none |
+| rust | Query · H(nested use)[Imports] · H(calls)[Calls] · FieldReads · VariantRefs · H(indirect)[Walk] · H(axum, actix)[Build] · FunctionMeta · EventTopicsRequery[Walk] · StampOwners · ClearScopedOwners · TxScopes B[Build] | none |
+| typescript | Query · H(freeze enum)[Walk] · H(calls)[Calls] · FieldReads · VariantRefs[Walk] · H(routes, express, nestjs)[Build] · H(indirect) · FunctionMeta[Walk] · H(exports, import bindings) · StampOwners · StampOwnerFns · ClearScopedOwners · TxScopes B[Build] · SchemaFields · EventTopicsRequery[Walk] | none |
+| javascript | Query · H(calls)[Calls] · FieldReads[Walk] · H(routes, receivers, express, hapi)[Build] · H(indirect) · FunctionMeta[Walk] · H(exports, import bindings) · StampOwners · StampOwnerFns · ClearScopedOwners[Build] · EventTopicsRequery[Walk] | none |
+| python | H(import pre-scan)[Walk] · Query · H(calls)[Calls] · FieldReads · VariantRefs · H(indirect)[Walk] · H(depends, gates, fan-out, router prefixes, route dedupe)[Build] · FunctionMeta[Walk] · H(protocol promotion, enum variants) · StampOwners · StampOwnerFns · ClearScopedOwners · TxScopes B[Build] · SchemaFieldsRequery · EventTopicsRequery[Walk] · H(root imports)[Imports] | TxScopes moves from before the promotion (`python/parser.rs:1677`) to after `ClearScopedOwners` (`:1736`) |
+| java | Query · H(spring gate)[Build] · H(calls)[Calls] · FieldReads · VariantRefs · FunctionMeta[Walk] · StampOwners · TxScopes B[Build] · EventTopicsRequery[Walk] | TxScopes moves after StampOwners (`java/parser.rs:577` before `:580`) |
+| kotlin | (tree: `POST_TREE`[Walk]) · Query · H(calls)[Calls] · FieldReads · VariantRefs[Walk] · H(ktor gate)[Build] · FunctionMeta[Walk] · StampOwners · TxScopes B[Build] · EventTopicsRequery[Walk] | TxScopes moves after StampOwners (`kotlin/parser.rs:695` before `:700`) |
 | c_sharp | Query · H(calls)[Calls] · FieldReads · VariantRefs · H(text frameworks) · FunctionMeta[Walk] · StampOwners · TxScopes B[Build] | none |
 | php | Query · H(laravel routes)[Build] · H(calls, fan-out, dynamic blind spots)[Calls] · FieldReads · VariantRefs[Walk] · H(laravel gate, route scope, middleware)[Build] · FunctionMeta · H(enum imitation)[Walk] · StampOwners · H(const owners)[Build] · H(qualified constant refs)[Walk] · TxScopes B[Build] | none |
 | ruby | H(visibility map)[Walk] · Query · H(module as enum)[Walk] · H(mixins, delegator nodes)[Build] · H(calls)[Calls] · FieldReads · H(text frameworks)[Walk] · H(route clean, rails routes)[Build] · FunctionMeta[Walk] · StampOwners[Build] · TxScopes B[Walk] | none |
@@ -400,7 +414,7 @@ Sources for the lists: the `parse_prof::span` boundaries of each `parse_file` (G
 
 Eleven languages fit with no move. Three languages (Python, Java, Kotlin) move one bind step. Section 4 shows that the move changes no output.
 
-A neutral step may follow a bind step. Go runs `EventTopics` after `TxScopes`, and TS runs `SchemaFields` and `EventTopics` after `TxScopes`. They read the tree, the query or tap rows and the imports only, so the check allows them in their current place.
+A neutral step may follow a bind step. Go runs `EventTopicsRequery` after `TxScopes`, and TS runs `SchemaFields` and `EventTopicsRequery` after `TxScopes`. They read the tree, the query or tap rows and the imports only, so the check allows them in their current place.
 
 ## 4. Binding
 
