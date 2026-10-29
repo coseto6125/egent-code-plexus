@@ -3,6 +3,9 @@
 //! before the move, in their emitted order where the order is fixed by
 //! source position.
 
+mod driver_parity_support;
+
+use driver_parity_support::{assert_empty_graph, names_kinds, refs};
 use ecp_analyzer::framework_confidence::{ACTIX_ROUTE, AXUM_ROUTE};
 use ecp_analyzer::rust::parser::RustProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
@@ -15,10 +18,6 @@ fn parse(src: &[u8]) -> LocalGraph {
         .expect("RustProvider::new")
         .parse_file(Path::new("src/app.rs"), src)
         .expect("parse_file")
-}
-
-fn names_kinds(g: &LocalGraph) -> Vec<(&str, NodeKind)> {
-    g.nodes.iter().map(|n| (n.name.as_str(), n.kind)).collect()
 }
 
 fn imports(g: &LocalGraph) -> Vec<(&str, &str, Option<&str>)> {
@@ -34,34 +33,10 @@ fn imports(g: &LocalGraph) -> Vec<(&str, &str, Option<&str>)> {
         .collect()
 }
 
-/// `(source_name, target_name, reason, confidence, span)`
-type Ref<'g> = (&'g str, &'g str, &'g str, f32, (u32, u32, u32, u32));
-
-fn refs(g: &LocalGraph) -> Vec<Ref<'_>> {
-    g.framework_refs
-        .iter()
-        .map(|r| {
-            (
-                r.source_name.as_str(),
-                r.target_name.as_str(),
-                r.reason.as_str(),
-                r.confidence,
-                r.span,
-            )
-        })
-        .collect()
-}
-
 #[test]
 fn test_rust_driver_zero_byte_file_returns_empty_graph() {
     let g = parse(b"");
-    assert_eq!(g.file_path, Path::new("src/app.rs"));
-    assert!(g.nodes.is_empty() && g.imports.is_empty() && g.blind_spots.is_empty());
-    assert!(g.framework_refs.is_empty() && g.call_metas.is_empty());
-    assert!(g.raw_function_metas.is_empty() && g.routes.is_empty() && g.fanout_refs.is_empty());
-    assert!(g.event_topics.is_none() && g.tx_scopes.is_none() && g.schema_fields.is_none());
-    assert!(g.path_literals.is_none() && g.sql_refs.is_none());
-    assert!(g.route_receivers.is_none() && g.export_aliases.is_none());
+    assert_empty_graph(&g, "src/app.rs");
 }
 
 /// The query imports come first in source order; the nested-use walk then

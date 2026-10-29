@@ -3,6 +3,9 @@
 //! before the move, in their emitted order. The expected values come from
 //! a `{:#?}` dump of the old parser over these exact sources.
 
+mod driver_parity_support;
+
+use driver_parity_support::assert_empty_graph;
 use ecp_analyzer::c::parser::CProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{BindingKind, LocalGraph};
@@ -90,13 +93,7 @@ fn binding(name: &'static str, source: &'static str, kind: BindingKind) -> Impor
 #[test]
 fn test_c_driver_zero_byte_file_returns_empty_graph() {
     let g = parse(b"");
-    assert_eq!(g.file_path, Path::new("a.c"));
-    assert!(g.nodes.is_empty() && g.imports.is_empty() && g.blind_spots.is_empty());
-    assert!(g.framework_refs.is_empty() && g.call_metas.is_empty());
-    assert!(g.raw_function_metas.is_empty() && g.routes.is_empty() && g.fanout_refs.is_empty());
-    assert!(g.event_topics.is_none() && g.tx_scopes.is_none() && g.schema_fields.is_none());
-    assert!(g.path_literals.is_none() && g.sql_refs.is_none());
-    assert!(g.route_receivers.is_none() && g.export_aliases.is_none());
+    assert_empty_graph(&g, "a.c");
 }
 
 /// `#include` keeps source order and duplicates: C sorts no imports.

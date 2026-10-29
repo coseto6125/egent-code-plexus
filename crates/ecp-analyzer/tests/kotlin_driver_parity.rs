@@ -3,6 +3,9 @@
 //! before the move; node kinds, owners and spans were cross-checked against
 //! a graph the pre-move parser built from the same sources.
 
+mod driver_parity_support;
+
+use driver_parity_support::{assert_empty_graph, names_kinds, Span4};
 use ecp_analyzer::framework_confidence::KTOR_ROUTE;
 use ecp_analyzer::framework_helpers::MODULE_LEVEL_SOURCE;
 use ecp_analyzer::kotlin::parser::KotlinProvider;
@@ -12,17 +15,11 @@ use ecp_core::graph::NodeKind;
 use ecp_core::uid::xxh3_64_bytes;
 use std::path::Path;
 
-type Span4 = (u32, u32, u32, u32);
-
 fn parse(src: &[u8]) -> LocalGraph {
     KotlinProvider::new()
         .expect("KotlinProvider::new")
         .parse_file(Path::new("a.kt"), src)
         .expect("parse_file")
-}
-
-fn names_kinds(g: &LocalGraph) -> Vec<(&str, NodeKind)> {
-    g.nodes.iter().map(|n| (n.name.as_str(), n.kind)).collect()
 }
 
 /// The only node with this name and kind.
@@ -46,13 +43,7 @@ fn shape(n: &RawNode) -> Shape<'_> {
 #[test]
 fn test_kotlin_driver_zero_byte_file_returns_empty_graph() {
     let g = parse(b"");
-    assert_eq!(g.file_path, Path::new("a.kt"));
-    assert!(g.nodes.is_empty() && g.imports.is_empty() && g.blind_spots.is_empty());
-    assert!(g.framework_refs.is_empty() && g.call_metas.is_empty());
-    assert!(g.raw_function_metas.is_empty() && g.routes.is_empty() && g.fanout_refs.is_empty());
-    assert!(g.event_topics.is_none() && g.tx_scopes.is_none() && g.schema_fields.is_none());
-    assert!(g.path_literals.is_none() && g.sql_refs.is_none());
-    assert!(g.route_receivers.is_none() && g.export_aliases.is_none());
+    assert_empty_graph(&g, "a.kt");
 }
 
 /// Imports keep source order with no sort; a wildcard names `*` and keeps

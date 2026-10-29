@@ -3,6 +3,9 @@
 //! before the move, in their emitted order: query match order, which is
 //! source order for these inputs.
 
+mod driver_parity_support;
+
+use driver_parity_support::{assert_empty_graph, tx, types, Ref, Span4};
 use ecp_analyzer::c_sharp::parser::CSharpProvider;
 use ecp_analyzer::framework_confidence::ASPNET_HINT;
 use ecp_core::analyzer::provider::LanguageProvider;
@@ -10,8 +13,6 @@ use ecp_core::analyzer::types::{FrameworkId, LocalGraph, RawNode, OVERRIDE_SENTI
 use ecp_core::graph::NodeKind;
 use ecp_core::uid::xxh3_64_bytes;
 use std::path::Path;
-
-type Span4 = (u32, u32, u32, u32);
 
 fn parse_at(path: &str, src: &[u8]) -> LocalGraph {
     CSharpProvider::new()
@@ -45,40 +46,14 @@ fn exported(g: &LocalGraph) -> Vec<bool> {
     g.nodes.iter().map(|n| n.is_exported).collect()
 }
 
-fn types(g: &LocalGraph) -> Vec<Option<&str>> {
-    g.nodes
-        .iter()
-        .map(|n| n.type_annotation.as_deref())
-        .collect()
-}
-
 fn decorators(g: &LocalGraph) -> Vec<&[String]> {
     g.nodes.iter().map(|n| n.decorators.as_slice()).collect()
-}
-
-/// `(source_name, target_name, reason, confidence, span)`
-type Ref<'g> = (&'g str, &'g str, &'g str, f32, Span4);
-
-/// `(callable name, framework)` of each tx scope, in emitted order.
-fn tx(g: &LocalGraph) -> Vec<(&str, FrameworkId)> {
-    g.tx_scopes
-        .as_deref()
-        .unwrap_or(&[])
-        .iter()
-        .map(|s| (g.nodes[s.node_idx() as usize].name.as_str(), s.framework()))
-        .collect()
 }
 
 #[test]
 fn test_csharp_driver_zero_byte_file_returns_empty_graph() {
     let g = parse(b"");
-    assert_eq!(g.file_path, Path::new("A.cs"));
-    assert!(g.nodes.is_empty() && g.imports.is_empty() && g.blind_spots.is_empty());
-    assert!(g.framework_refs.is_empty() && g.call_metas.is_empty());
-    assert!(g.raw_function_metas.is_empty() && g.routes.is_empty() && g.fanout_refs.is_empty());
-    assert!(g.event_topics.is_none() && g.tx_scopes.is_none() && g.schema_fields.is_none());
-    assert!(g.path_literals.is_none() && g.sql_refs.is_none());
-    assert!(g.route_receivers.is_none() && g.export_aliases.is_none());
+    assert_empty_graph(&g, "A.cs");
 }
 
 /// The three `using` patterns overlap and C# never dedupes: the alias form

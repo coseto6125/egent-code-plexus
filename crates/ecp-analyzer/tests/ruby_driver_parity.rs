@@ -3,14 +3,15 @@
 //! before the move, in their emitted order where the order is fixed by
 //! the step list.
 
+mod driver_parity_support;
+
+use driver_parity_support::{assert_empty_graph, names_kinds, Span4};
 use ecp_analyzer::ruby::parser::RubyProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
 use ecp_core::graph::NodeKind;
 use ecp_core::uid::xxh3_64_bytes;
 use std::path::Path;
-
-type Span4 = (u32, u32, u32, u32);
 
 fn parse_at(path: &str, src: &[u8]) -> LocalGraph {
     RubyProvider::new()
@@ -21,10 +22,6 @@ fn parse_at(path: &str, src: &[u8]) -> LocalGraph {
 
 fn parse(src: &[u8]) -> LocalGraph {
     parse_at("a.rb", src)
-}
-
-fn names_kinds(g: &LocalGraph) -> Vec<(&str, NodeKind)> {
-    g.nodes.iter().map(|n| (n.name.as_str(), n.kind)).collect()
 }
 
 fn named<'g>(g: &'g LocalGraph, name: &str) -> &'g RawNode {
@@ -60,13 +57,7 @@ fn blind(g: &LocalGraph) -> Vec<(&str, Span4)> {
 #[test]
 fn test_ruby_driver_zero_byte_file_returns_empty_graph() {
     let g = parse(b"");
-    assert_eq!(g.file_path, Path::new("a.rb"));
-    assert!(g.nodes.is_empty() && g.imports.is_empty() && g.blind_spots.is_empty());
-    assert!(g.framework_refs.is_empty() && g.call_metas.is_empty());
-    assert!(g.raw_function_metas.is_empty() && g.routes.is_empty() && g.fanout_refs.is_empty());
-    assert!(g.event_topics.is_none() && g.tx_scopes.is_none() && g.schema_fields.is_none());
-    assert!(g.path_literals.is_none() && g.sql_refs.is_none());
-    assert!(g.route_receivers.is_none() && g.export_aliases.is_none());
+    assert_empty_graph(&g, "a.rb");
 }
 
 /// `require` and `require_relative` each push one import in source order,

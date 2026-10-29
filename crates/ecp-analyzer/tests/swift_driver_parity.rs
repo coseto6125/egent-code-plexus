@@ -4,6 +4,9 @@
 //! blind spots were read off a `LocalGraph` dump the pre-move binary wrote
 //! from the same sources.
 
+mod driver_parity_support;
+
+use driver_parity_support::{assert_empty_graph, names_kinds, refs, Span4};
 use ecp_analyzer::framework_confidence::{SWIFTUI_HINT, UIKIT_HINT, VAPOR_HINT};
 use ecp_analyzer::framework_helpers::MODULE_LEVEL_SOURCE;
 use ecp_analyzer::swift::parser::SwiftProvider;
@@ -13,17 +16,11 @@ use ecp_core::graph::NodeKind;
 use ecp_core::uid::xxh3_64_bytes;
 use std::path::Path;
 
-type Span4 = (u32, u32, u32, u32);
-
 fn parse(src: &[u8]) -> LocalGraph {
     SwiftProvider::new()
         .expect("SwiftProvider::new")
         .parse_file(Path::new("a.swift"), src)
         .expect("parse_file")
-}
-
-fn names_kinds(g: &LocalGraph) -> Vec<(&str, NodeKind)> {
-    g.nodes.iter().map(|n| (n.name.as_str(), n.kind)).collect()
 }
 
 /// The only node with this name and kind.
@@ -63,34 +60,10 @@ fn imports(g: &LocalGraph) -> Vec<(&str, &str, Option<&str>)> {
         .collect()
 }
 
-/// `(source_name, target_name, reason, confidence, span)`
-type Ref<'g> = (&'g str, &'g str, &'g str, f32, Span4);
-
-fn refs(g: &LocalGraph) -> Vec<Ref<'_>> {
-    g.framework_refs
-        .iter()
-        .map(|r| {
-            (
-                r.source_name.as_str(),
-                r.target_name.as_str(),
-                r.reason.as_str(),
-                r.confidence,
-                r.span,
-            )
-        })
-        .collect()
-}
-
 #[test]
 fn test_swift_driver_zero_byte_file_returns_empty_graph() {
     let g = parse(b"");
-    assert_eq!(g.file_path, Path::new("a.swift"));
-    assert!(g.nodes.is_empty() && g.imports.is_empty() && g.blind_spots.is_empty());
-    assert!(g.framework_refs.is_empty() && g.call_metas.is_empty());
-    assert!(g.raw_function_metas.is_empty() && g.routes.is_empty() && g.fanout_refs.is_empty());
-    assert!(g.event_topics.is_none() && g.tx_scopes.is_none() && g.schema_fields.is_none());
-    assert!(g.path_literals.is_none() && g.sql_refs.is_none());
-    assert!(g.route_receivers.is_none() && g.export_aliases.is_none());
+    assert_empty_graph(&g, "a.swift");
 }
 
 /// Imports keep source order with no sort or dedupe; `UIKit` matches no

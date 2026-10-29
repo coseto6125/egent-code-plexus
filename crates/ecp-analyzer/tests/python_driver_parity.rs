@@ -3,14 +3,15 @@
 //! before the move; where the order of two records depends on query match
 //! order rather than source position, the test compares sorted rows.
 
+mod driver_parity_support;
+
+use driver_parity_support::{assert_empty_graph, tx, Span4};
 use ecp_analyzer::python::parser::PythonProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{FrameworkId, LocalGraph, RawNode, SchemaType};
 use ecp_core::graph::NodeKind;
 use ecp_core::uid::xxh3_64_bytes;
 use std::path::Path;
-
-type Span4 = (u32, u32, u32, u32);
 
 fn parse_at(path: &str, src: &[u8]) -> LocalGraph {
     PythonProvider::new()
@@ -30,26 +31,10 @@ fn node<'g>(g: &'g LocalGraph, name: &str) -> &'g RawNode {
         .unwrap_or_else(|| panic!("no node `{name}` in {:?}", g.nodes))
 }
 
-/// `(callable name, framework)` of each tx scope, in emitted order.
-fn tx(g: &LocalGraph) -> Vec<(&str, FrameworkId)> {
-    g.tx_scopes
-        .as_deref()
-        .unwrap_or(&[])
-        .iter()
-        .map(|s| (g.nodes[s.node_idx() as usize].name.as_str(), s.framework()))
-        .collect()
-}
-
 #[test]
 fn test_python_driver_zero_byte_file_returns_empty_graph() {
     let g = parse(b"");
-    assert_eq!(g.file_path, Path::new("a.py"));
-    assert!(g.nodes.is_empty() && g.imports.is_empty() && g.blind_spots.is_empty());
-    assert!(g.framework_refs.is_empty() && g.call_metas.is_empty());
-    assert!(g.raw_function_metas.is_empty() && g.routes.is_empty() && g.fanout_refs.is_empty());
-    assert!(g.event_topics.is_none() && g.tx_scopes.is_none() && g.schema_fields.is_none());
-    assert!(g.path_literals.is_none() && g.sql_refs.is_none());
-    assert!(g.route_receivers.is_none() && g.export_aliases.is_none());
+    assert_empty_graph(&g, "a.py");
 }
 
 /// The pre-scan collects the imports in source order; the last step rewrites

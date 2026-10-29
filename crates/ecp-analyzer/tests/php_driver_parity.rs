@@ -3,6 +3,9 @@
 //! before the move, in their emitted order where the order is fixed by
 //! source position.
 
+mod driver_parity_support;
+
+use driver_parity_support::{assert_empty_graph, names_kinds, refs, Span4};
 use ecp_analyzer::framework_confidence::LARAVEL_ROUTE;
 use ecp_analyzer::php::parser::PhpProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
@@ -10,17 +13,11 @@ use ecp_core::analyzer::types::{FrameworkId, LocalGraph, NameRef, NameRefKind, R
 use ecp_core::graph::NodeKind;
 use std::path::Path;
 
-type Span4 = (u32, u32, u32, u32);
-
 fn parse(src: &str) -> LocalGraph {
     PhpProvider::new()
         .expect("PhpProvider::new")
         .parse_file(Path::new("a.php"), src.as_bytes())
         .expect("parse_file")
-}
-
-fn names_kinds(g: &LocalGraph) -> Vec<(&str, NodeKind)> {
-    g.nodes.iter().map(|n| (n.name.as_str(), n.kind)).collect()
 }
 
 fn node<'g>(g: &'g LocalGraph, name: &str) -> &'g RawNode {
@@ -37,24 +34,6 @@ fn blind_kinds(g: &LocalGraph) -> Vec<&str> {
 fn reads_constant(n: &RawNode, name: &str) -> bool {
     n.field_reads
         .contains(&NameRef::encode(name, NameRefKind::Constant))
-}
-
-/// `(source_name, target_name, reason, confidence, span)`
-type Ref<'g> = (&'g str, &'g str, &'g str, f32, Span4);
-
-fn refs(g: &LocalGraph) -> Vec<Ref<'_>> {
-    g.framework_refs
-        .iter()
-        .map(|r| {
-            (
-                r.source_name.as_str(),
-                r.target_name.as_str(),
-                r.reason.as_str(),
-                r.confidence,
-                r.span,
-            )
-        })
-        .collect()
 }
 
 /// `(method, path, handler name, span, needs_include)`
@@ -78,13 +57,7 @@ fn routes(g: &LocalGraph) -> Vec<RouteRow<'_>> {
 #[test]
 fn test_php_driver_zero_byte_file_returns_empty_graph() {
     let g = parse("");
-    assert_eq!(g.file_path, Path::new("a.php"));
-    assert!(g.nodes.is_empty() && g.imports.is_empty() && g.blind_spots.is_empty());
-    assert!(g.framework_refs.is_empty() && g.call_metas.is_empty());
-    assert!(g.raw_function_metas.is_empty() && g.routes.is_empty() && g.fanout_refs.is_empty());
-    assert!(g.event_topics.is_none() && g.tx_scopes.is_none() && g.schema_fields.is_none());
-    assert!(g.path_literals.is_none() && g.sql_refs.is_none());
-    assert!(g.route_receivers.is_none() && g.export_aliases.is_none());
+    assert_empty_graph(&g, "a.php");
 }
 
 /// Imports keep source order, unsorted. A group clause records the joined

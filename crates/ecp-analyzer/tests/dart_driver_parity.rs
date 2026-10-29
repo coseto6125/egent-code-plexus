@@ -3,13 +3,14 @@
 //! before the move (read from a dump of the old binary), in their emitted
 //! order where the order is fixed by the step list.
 
+mod driver_parity_support;
+
+use driver_parity_support::{assert_empty_graph, names_kinds, types, Span4};
 use ecp_analyzer::dart::parser::DartProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{FrameworkId, LocalGraph, RawNode, RawTxScope};
 use ecp_core::graph::NodeKind;
 use std::path::Path;
-
-type Span4 = (u32, u32, u32, u32);
 
 fn parse_at(path: &str, src: &[u8]) -> LocalGraph {
     DartProvider::new()
@@ -22,10 +23,6 @@ fn parse(src: &[u8]) -> LocalGraph {
     parse_at("a.dart", src)
 }
 
-fn names_kinds(g: &LocalGraph) -> Vec<(&str, NodeKind)> {
-    g.nodes.iter().map(|n| (n.name.as_str(), n.kind)).collect()
-}
-
 /// `(name, kind, span, owner_class)` of every node, in emitted order.
 type NodeRow<'g> = (&'g str, NodeKind, Span4, Option<&'g str>);
 
@@ -33,13 +30,6 @@ fn rows(g: &LocalGraph) -> Vec<NodeRow<'_>> {
     g.nodes
         .iter()
         .map(|n| (n.name.as_str(), n.kind, n.span, n.owner_class.as_deref()))
-        .collect()
-}
-
-fn types(g: &LocalGraph) -> Vec<Option<&str>> {
-    g.nodes
-        .iter()
-        .map(|n| n.type_annotation.as_deref())
         .collect()
 }
 
@@ -75,13 +65,7 @@ fn blind(g: &LocalGraph) -> Vec<(&str, Span4, bool)> {
 #[test]
 fn test_dart_driver_zero_byte_file_returns_empty_graph() {
     let g = parse(b"");
-    assert_eq!(g.file_path, Path::new("a.dart"));
-    assert!(g.nodes.is_empty() && g.imports.is_empty() && g.blind_spots.is_empty());
-    assert!(g.framework_refs.is_empty() && g.call_metas.is_empty());
-    assert!(g.raw_function_metas.is_empty() && g.routes.is_empty() && g.fanout_refs.is_empty());
-    assert!(g.event_topics.is_none() && g.tx_scopes.is_none() && g.schema_fields.is_none());
-    assert!(g.path_literals.is_none() && g.sql_refs.is_none());
-    assert!(g.route_receivers.is_none() && g.export_aliases.is_none());
+    assert_empty_graph(&g, "a.dart");
 }
 
 /// Imports keep source order with no sort and no dedupe; a `show`
