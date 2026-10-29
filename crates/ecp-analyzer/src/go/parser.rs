@@ -575,12 +575,12 @@ impl ParseSpec for GoSpec {
         match r {
             GoRole::Root => d.root = Some(node),
             GoRole::Heritage => {
-                if let Some(h_name) = node.utf8_text(source).ok() {
+                if let Ok(h_name) = node.utf8_text(source) {
                     m.heritage.push(h_name.to_string());
                 }
             }
             GoRole::Type => {
-                if let Some(t_name) = node.utf8_text(source).ok() {
+                if let Ok(t_name) = node.utf8_text(source) {
                     if let Some(ref mut existing) = m.type_annotation {
                         existing.push(' ');
                         existing.push_str(t_name);
@@ -600,7 +600,7 @@ impl ParseSpec for GoSpec {
             GoRole::RoutePath => m.route_path_node = Some(node),
             GoRole::FieldName => m.field_name_nodes.push(node),
             GoRole::FieldType => {
-                if let Some(t_str) = node.utf8_text(source).ok() {
+                if let Ok(t_str) = node.utf8_text(source) {
                     m.field_type_text = Some(t_str.to_string());
                 }
             }
@@ -610,7 +610,7 @@ impl ParseSpec for GoSpec {
             }
             GoRole::VarName => m.var_name_nodes.push(node),
             GoRole::VarType => {
-                if let Some(t_str) = node.utf8_text(source).ok() {
+                if let Ok(t_str) = node.utf8_text(source) {
                     m.var_type_text = Some(t_str.to_string());
                 }
             }
@@ -664,7 +664,7 @@ impl ParseSpec for GoSpec {
         // owner_class = enclosing named struct type, so two structs with a
         // same-named field get distinct uids.
         for name_node in &field_name_nodes {
-            if let Some(name_str) = name_node.utf8_text(source).ok() {
+            if let Ok(name_str) = name_node.utf8_text(source) {
                 let name = name_str.to_string();
                 cx.nodes.push(RawNode {
                     is_exported: is_exported(&name),
@@ -690,7 +690,7 @@ impl ParseSpec for GoSpec {
                     .map(|d| collect_go_pragmas(d, source))
                     .unwrap_or_default();
                 for n in &var_name_nodes {
-                    if let Some(name_str) = n.utf8_text(source).ok() {
+                    if let Ok(name_str) = n.utf8_text(source) {
                         if name_str == "_" {
                             continue;
                         }
@@ -716,7 +716,7 @@ impl ParseSpec for GoSpec {
         // span ends at the name's `var_spec` instead, as on the `@var` path.
         if is_file_var {
             for n in &file_var_name_nodes {
-                if let Some(name_str) = n.utf8_text(source).ok() {
+                if let Ok(name_str) = n.utf8_text(source) {
                     if name_str == "_" {
                         continue;
                     }
@@ -771,7 +771,7 @@ impl ParseSpec for GoSpec {
             if let Some(root) = local_root_node {
                 let enclosing = enclosing_func_or_method_name(root, source);
                 for n in &local_name_nodes {
-                    if let Some(name_str) = n.utf8_text(source).ok() {
+                    if let Ok(name_str) = n.utf8_text(source) {
                         if name_str == "_" {
                             continue;
                         }
@@ -792,7 +792,7 @@ impl ParseSpec for GoSpec {
         }
 
         if let (Some(n), Some(k), Some(root)) = (d.name, d.kind, d.root) {
-            if let Some(name_str) = n.utf8_text(source).ok() {
+            if let Ok(name_str) = n.utf8_text(source) {
                 let name = name_str.to_string();
                 // Each match carries the full declaration node, so two methods
                 // with the same name on different receivers stay distinct.
@@ -851,7 +851,7 @@ impl ParseSpec for GoSpec {
 
         if is_import {
             if let Some(src_node) = import_source {
-                if let Some(src_quoted) = src_node.utf8_text(source).ok() {
+                if let Ok(src_quoted) = src_node.utf8_text(source) {
                     let source_path = src_quoted
                         .trim_matches(|c| c == '"' || c == '`')
                         .to_string();

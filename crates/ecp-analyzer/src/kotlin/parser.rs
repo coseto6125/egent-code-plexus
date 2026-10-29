@@ -381,24 +381,24 @@ impl ParseSpec for KotlinSpec {
                 }
             }
             KotlinRole::Export => {
-                if let Some(modifiers) = node.utf8_text(source).ok() {
+                if let Ok(modifiers) = node.utf8_text(source) {
                     if modifiers.contains("private") || modifiers.contains("internal") {
                         m.is_exported = false;
                     }
                 }
             }
             KotlinRole::Heritage => {
-                if let Some(h) = node.utf8_text(source).ok() {
+                if let Ok(h) = node.utf8_text(source) {
                     m.heritage.push(h.to_string());
                 }
             }
             KotlinRole::Type => {
-                if let Some(t) = node.utf8_text(source).ok() {
+                if let Ok(t) = node.utf8_text(source) {
                     m.type_annotation = Some(t.to_string());
                 }
             }
             KotlinRole::Decorator => {
-                if let Some(dec) = node.utf8_text(source).ok() {
+                if let Ok(dec) = node.utf8_text(source) {
                     m.decorators.push(dec.to_string());
                 }
             }
@@ -446,7 +446,7 @@ impl ParseSpec for KotlinSpec {
             // the tree-sitter pattern; broader cases get whatever shape
             // the grammar offers. Downstream consumers decide.
 
-            if let Some(name_str) = n.utf8_text(source).ok() {
+            if let Ok(name_str) = n.utf8_text(source) {
                 // Property dedupe on name-node id so multi-declarator
                 // patterns each get their own entry; other kinds keep
                 // root-keyed dedupe (multi-decorator captures collapse).
@@ -492,7 +492,7 @@ impl ParseSpec for KotlinSpec {
         }
 
         if let Some(i_src) = m.import_source {
-            if let Some(src_str) = i_src.utf8_text(source).ok() {
+            if let Ok(src_str) = i_src.utf8_text(source) {
                 let alias = m
                     .import_alias
                     .and_then(|a_node| a_node.utf8_text(source).ok())
@@ -521,7 +521,7 @@ impl ParseSpec for KotlinSpec {
         if let (Some(verb), Some(span), Some(path_node)) =
             (m.ktor_verb, m.ktor_route_span, m.ktor_path_node)
         {
-            if let Some(path_str) = path_node.utf8_text(source).ok() {
+            if let Ok(path_str) = path_node.utf8_text(source) {
                 f.pending_ktor_refs.push((verb, path_str.to_string(), span));
             }
         }
