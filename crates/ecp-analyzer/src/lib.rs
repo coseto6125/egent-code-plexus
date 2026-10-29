@@ -19,6 +19,7 @@ pub mod crystal;
 pub mod dart;
 pub mod docker_compose;
 pub mod dockerfile;
+pub mod driver;
 pub mod entry_points;
 pub mod event_topic;
 pub mod fetch_shape;
