@@ -20,7 +20,7 @@ fn test_dump_local_graphs_corpus_writes_path_sorted_debug() {
     let pairs: Vec<(PathBuf, PathBuf)> = ignore::WalkBuilder::new(&root)
         .hidden(false)
         .build()
-        .filter_map(Result::ok)
+        .map(|e| e.unwrap_or_else(|err| panic!("corpus walk: {err}")))
         .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
         .map(|e| {
             let abs = e.into_path();
@@ -34,6 +34,19 @@ fn test_dump_local_graphs_corpus_writes_path_sorted_debug() {
         "no file under {} parsed",
         root.display()
     );
+    // Both binaries share the size cap, so `file-too-large` still compares
+    // like with like; a file the parser never saw proves nothing.
+    let unparsed: Vec<_> = graphs
+        .iter()
+        .filter(|g| {
+            g.nodes.is_empty()
+                && g.blind_spots
+                    .iter()
+                    .any(|b| matches!(b.kind.as_str(), "parse-failed" | "file-unreadable"))
+        })
+        .map(|g| g.file_path.display().to_string())
+        .collect();
+    assert!(unparsed.is_empty(), "not parsed: {unparsed:?}");
     graphs.sort_by(|a, b| a.file_path.cmp(&b.file_path));
     let mut dump = String::new();
     for g in &graphs {
