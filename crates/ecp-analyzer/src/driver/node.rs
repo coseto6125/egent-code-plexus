@@ -26,7 +26,7 @@ pub fn decl(name: String, kind: NodeKind, span: Span, hashed: &[u8]) -> RawNode 
 pub fn anonymous(node: Node<'_>, source: &[u8]) -> RawNode {
     let span = span(node);
     decl(
-        format!("<anonymous:{}:{}>", span.0 + 1, span.1),
+        format!("<anonymous:{}:{}>", span.0.saturating_add(1), span.1),
         NodeKind::Function,
         span,
         &source[node.start_byte()..node.end_byte()],
@@ -46,8 +46,8 @@ pub fn span_from(start: Node<'_>, end: Node<'_>) -> Span {
     (s_row, s_col, e_row, e_col)
 }
 
-/// The answer does not depend on the visit order, so it equals the
-/// stack-based `body_has_call` copies.
+/// Whether `node` or a descendant has one of `kinds`. The answer does not
+/// depend on the visit order, so this walk can replace any other full walk.
 pub fn subtree_has_kind(node: Node<'_>, kinds: &[&str]) -> bool {
     let mut cursor = node.walk();
     loop {
@@ -71,7 +71,7 @@ pub fn enclosing_or_module(nodes: &[RawNode], span: Span) -> String {
 }
 
 /// Removes consecutive nodes equal on name, span and kind. A duplicate that
-/// another node separates stays, as in the Dart copy.
+/// another node separates stays: the cached graphs keep both.
 pub fn dedup_consecutive(nodes: &mut Vec<RawNode>) {
     nodes.dedup_by(|a, b| a.name == b.name && a.span == b.span && a.kind == b.kind);
 }

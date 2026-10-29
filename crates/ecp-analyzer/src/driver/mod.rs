@@ -1,5 +1,7 @@
-//! The shared parse driver: one tree parse, one query loop and an ordered
-//! step list per file; a language supplies the rest as an `impl ParseSpec`.
+//! The shared parse driver: a tree parse, the main query loop and an
+//! ordered step list per file; a language supplies the rest as an
+//! `impl ParseSpec`. A hook may pre-scan the tree and a `*Requery` op runs
+//! the query again, so one file can cost more than one query pass.
 //! A spec must reproduce its old `LocalGraph` byte for byte, record order
 //! included: the parse cache serves graphs the old parser wrote.
 
@@ -32,9 +34,10 @@ use tree_sitter::{Node, Query, QueryCursor, Tree};
 pub trait ParseSpec: LangSpec + Sized + 'static {
     /// A capture the spec handles itself, conditional blind spots included.
     type Role: Copy;
-    /// Per-match buffers; a fresh default per match, as today's loop locals.
+    /// Per-match buffers; a fresh default per match, so no state carries
+    /// from one match into the next.
     type Match<'t>: Default;
-    /// Per-file side tables that `finish` moves into the graph.
+    /// Per-file side tables that the hooks and per-match methods share.
     type File<'t>: Default;
     type Hook: Copy;
 
@@ -84,10 +87,6 @@ pub trait ParseSpec: LangSpec + Sized + 'static {
         nodes: &[RawNode],
         category: FileCategory,
     ) -> Vec<RawFunctionMeta>;
-    /// Runs after every step; it may only move `File` tables into `cx`
-    /// fields that no step reads. `cx` (not the graph) keeps `'t` late-bound,
-    /// so an impl may name its concrete `File` type.
-    fn finish<'t>(_f: Self::File<'t>, _cx: &mut FileCx<'t>) {}
 }
 
 /// What a kind capture (a `CAPTURE_KIND` name) writes into the `DeclSlot`.
@@ -106,6 +105,28 @@ pub struct Step<H> {
     pub pass: Pass,
     pub effect: Effect,
     pub op: Op<H>,
+}
+
+impl<H> Step<H> {
+    /// A fixed op; its effect is the op's own.
+    ///
+    /// # Panics
+    /// `op` is a hook, which declares its own effect through [`Step::hook`].
+    /// In a `const` item the panic is a compile error.
+    pub const fn fixed(pass: Pass, op: Op<H>) -> Self {
+        let effect = op
+            .fixed_effect()
+            .expect("a hook declares its own effect: use Step::hook");
+        Self { pass, effect, op }
+    }
+
+    pub const fn hook(pass: Pass, effect: Effect, hook: H) -> Self {
+        Self {
+            pass,
+            effect,
+            op: Op::Hook(hook),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -182,12 +203,15 @@ pub enum TxRule {
 }
 
 /// No `Nodes` step after a `Bind` step, every fixed op declares its fixed
-/// effect, exactly one step runs the query, and the tap step follows it.
+/// effect, exactly one step runs the query, the tap step follows it, and
+/// at most one step builds schema fields: the tap step drains the tapped
+/// rows, so a second schema step would overwrite the records.
 /// A hook's real writes are not checked here; the debug node-count
 /// assertion and the dump catch them.
 pub const fn steps_ok<H>(steps: &[Step<H>]) -> bool {
     let mut bound = false;
     let mut queries = 0;
+    let mut schemas = false;
     let mut i = 0;
     while i < steps.len() {
         let step = &steps[i];
@@ -205,6 +229,12 @@ pub const fn steps_ok<H>(steps: &[Step<H>]) -> bool {
             Op::Query => queries += 1,
             Op::SchemaFields if queries == 0 => return false,
             _ => {}
+        }
+        if matches!(step.op, Op::SchemaFields | Op::SchemaFieldsRequery) {
+            if schemas {
+                return false;
+            }
+            schemas = true;
         }
         i += 1;
     }
@@ -262,20 +292,19 @@ pub struct Compiled<S: ParseSpec> {
 impl<S: ParseSpec> Compiled<S> {
     /// # Errors
     /// The query does not compile, or one capture name resolves to two of
-    /// kind, blind, anonymous and role: today the if-chain order would pick
-    /// one silently.
+    /// kind, blind, anonymous and role: the slot table has no priority rule.
     pub fn new() -> anyhow::Result<Self> {
         const {
             assert!(
                 steps_ok(S::STEPS),
-                "STEPS: a node-changing step follows a bind step, a fixed op declares the wrong effect, the query step is not exactly one, or a tap step precedes the query"
+                "STEPS: a node-changing step follows a bind step, a fixed op declares the wrong effect, the query step is not exactly one, a tap step precedes the query, or two steps build schema fields"
             );
             assert!(
                 params_ok::<S>(),
                 "STEPS lists FieldReads or VariantRefs with no spec"
             );
             assert!(
-                S::SCHEMA_FIELDS.len() <= tap::MAX_CONFIGS,
+                !taps_schemas(S::STEPS) || S::SCHEMA_FIELDS.len() <= tap::MAX_CONFIGS,
                 "SCHEMA_FIELDS exceeds the tap's slot table"
             );
         }
@@ -335,7 +364,7 @@ fn slot_for<S: ParseSpec>(name: &&str) -> anyhow::Result<Slot<S::Role>> {
 }
 
 /// Parses one file: the tree phase, then `S::STEPS` in order, then the
-/// assembly and `S::finish`.
+/// assembly.
 ///
 /// # Errors
 /// The tree parse fails or exceeds its budget (`S::PARSE_ERROR`).
@@ -347,16 +376,7 @@ pub fn parse<S: ParseSpec>(
     let tree = tree_phase::<S>(source)?;
     let mut cx = FileCx::new(&tree, source, path, S::TEST_RULE);
     let mut file: S::File<'_> = Default::default();
-    let bound_len = run_steps(c, &mut file, &mut cx);
-    S::finish(file, &mut cx);
-    if let Some(len) = bound_len {
-        debug_assert_eq!(
-            cx.nodes.len(),
-            len,
-            "{}: finish changed the node count after a bind step",
-            S::NAME
-        );
-    }
+    run_steps(c, &mut file, &mut cx);
     Ok(cx.into_graph())
 }
 
@@ -380,12 +400,9 @@ fn tree_phase<S: ParseSpec>(source: &[u8]) -> anyhow::Result<Tree> {
     })
 }
 
-/// Returns the node count at the first bind step, when one ran in a debug build.
-fn run_steps<'t, S: ParseSpec>(
-    c: &Compiled<S>,
-    f: &mut S::File<'t>,
-    cx: &mut FileCx<'t>,
-) -> Option<usize> {
+/// A debug build checks that no step after the first bind step changes
+/// the node count.
+fn run_steps<'t, S: ParseSpec>(c: &Compiled<S>, f: &mut S::File<'t>, cx: &mut FileCx<'t>) {
     let mut phase = ParsePhase::CollectCaptures;
     let mut bound_len = None;
     for step in S::STEPS {
@@ -410,7 +427,6 @@ fn run_steps<'t, S: ParseSpec>(
             );
         }
     }
-    bound_len
 }
 
 fn run_op<'t, S: ParseSpec>(
@@ -456,8 +472,8 @@ fn run_op<'t, S: ParseSpec>(
 }
 
 /// The hot loop. Each capture costs one table load, one tap-range test and
-/// one `match`; a `DeclSlot` and a `Match` start fresh per match, as the
-/// copies' locals do. The tap closes a match before `end_match`, so a spec's
+/// one `match`; a `DeclSlot` and a `Match` start fresh per match, so no
+/// capture carries into the next match. The tap closes a match before `end_match`, so a spec's
 /// early return cannot drop a tap row.
 fn run_query<'t, S: ParseSpec>(c: &Compiled<S>, f: &mut S::File<'t>, cx: &mut FileCx<'t>) {
     let tree: &'t Tree = cx.tree;
@@ -495,11 +511,7 @@ mod tests {
     use super::*;
     use ecp_core::analyzer::types::Span;
 
-    const fn step(pass: Pass, effect: Effect, op: Op<()>) -> Step<()> {
-        Step { pass, effect, op }
-    }
-
-    const QUERY: Step<()> = step(Pass::Query, Effect::Nodes, Op::Query);
+    const QUERY: Step<()> = Step::fixed(Pass::Query, Op::Query);
 
     /// Rust grammar: each `fn` item becomes a node, each `use` path an import.
     /// `OVERLAP` also claims the kind capture `function.name` as a role.
@@ -527,11 +539,7 @@ mod tests {
         const KIND_CAPTURE: KindCapture = KindCapture::NameOverwrite;
         const STEPS: &'static [Step<()>] = &[
             QUERY,
-            step(
-                Pass::Build,
-                Effect::Neutral,
-                Op::SortDedupImports(ImportOrder::SourceName),
-            ),
+            Step::fixed(Pass::Build, Op::SortDedupImports(ImportOrder::SourceName)),
         ];
 
         fn query() -> anyhow::Result<Query> {
@@ -612,37 +620,58 @@ mod tests {
 
     #[test]
     fn test_steps_ok_node_step_after_bind_returns_false() {
-        let tx = step(Pass::Build, Effect::Bind, Op::TxScopes);
-        let stamp = step(Pass::Build, Effect::Nodes, Op::StampOwners);
-        let neutral = step(Pass::Walk, Effect::Neutral, Op::EventTopicsRequery);
+        let tx = Step::fixed(Pass::Build, Op::TxScopes);
+        let stamp = Step::fixed(Pass::Build, Op::StampOwners);
+        let neutral = Step::fixed(Pass::Walk, Op::EventTopicsRequery);
         assert!(steps_ok(&[QUERY, stamp, tx, neutral]));
         assert!(!steps_ok(&[QUERY, tx, stamp]));
         assert!(!steps_ok(&[
             QUERY,
             tx,
-            step(Pass::Walk, Effect::Nodes, Op::Hook(()))
+            Step::hook(Pass::Walk, Effect::Nodes, ())
         ]));
     }
 
     #[test]
     fn test_steps_ok_tx_not_bind_returns_false() {
-        assert!(!steps_ok(&[
-            QUERY,
-            step(Pass::Build, Effect::Neutral, Op::TxScopes)
-        ]));
-        assert!(!steps_ok(&[
-            QUERY,
-            step(Pass::Build, Effect::Neutral, Op::StampOwners)
-        ]));
+        // Struct literals: `Step::fixed` cannot build a wrong effect.
+        let wrong = |op: Op<()>| Step {
+            pass: Pass::Build,
+            effect: Effect::Neutral,
+            op,
+        };
+        assert!(!steps_ok(&[QUERY, wrong(Op::TxScopes)]));
+        assert!(!steps_ok(&[QUERY, wrong(Op::StampOwners)]));
         assert!(!steps_ok::<()>(&[]));
         assert!(!steps_ok(&[QUERY, QUERY]));
-        let schemas = step(Pass::Walk, Effect::Neutral, Op::SchemaFields);
+        let schemas = Step::fixed(Pass::Walk, Op::SchemaFields);
         assert!(!steps_ok(&[schemas, QUERY]));
         assert!(steps_ok(&[QUERY, schemas]));
         assert!(steps_ok(&[
             QUERY,
-            step(Pass::Build, Effect::Bind, Op::Hook(()))
+            Step::hook(Pass::Build, Effect::Bind, ())
         ]));
+    }
+
+    #[test]
+    fn test_steps_ok_second_schema_fields_returns_false() {
+        let schemas = Step::fixed(Pass::Walk, Op::SchemaFields);
+        assert!(!steps_ok(&[QUERY, schemas, schemas]));
+    }
+
+    #[test]
+    fn test_steps_ok_schema_fields_with_requery_returns_false() {
+        let schemas = Step::fixed(Pass::Walk, Op::SchemaFields);
+        let requery = Step::fixed(Pass::Walk, Op::SchemaFieldsRequery);
+        assert!(steps_ok(&[QUERY, requery]));
+        assert!(!steps_ok(&[QUERY, schemas, requery]));
+        assert!(!steps_ok(&[QUERY, requery, schemas]));
+    }
+
+    #[test]
+    #[should_panic(expected = "Step::hook")]
+    fn test_step_fixed_hook_op_panics() {
+        let _ = Step::fixed(Pass::Walk, Op::Hook(()));
     }
 
     #[test]
@@ -662,15 +691,12 @@ mod tests {
         assert_eq!(sources, ["a::x", "b::y"]);
     }
 
+    /// The profiled form of this parse lives in `tests/parse_prof_coverage.rs`:
+    /// the profiler flag is process-wide, and that binary holds its only toggle.
     #[test]
-    fn test_parse_profiled_spans_stay_disjoint() {
-        parse_prof::set_enabled(true);
-        parse_prof::reset();
+    fn test_parse_two_fns_emits_decl_spans() {
         let g = parse_test(b"fn a() {}\nfn b() { a(); }\n");
-        let totals = parse_prof::take();
-        parse_prof::set_enabled(false);
         let got: Vec<(&str, Span)> = g.nodes.iter().map(|n| (n.name.as_str(), n.span)).collect();
         assert_eq!(got, [("a", (0, 0, 0, 9)), ("b", (1, 0, 1, 15))]);
-        assert!(totals[Pass::Tree as usize] > 0 && totals[Pass::Query as usize] > 0);
     }
 }

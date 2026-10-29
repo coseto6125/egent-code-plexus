@@ -52,25 +52,11 @@ pub(super) fn node_text<'a>(n: &Node<'_>, source: &'a [u8]) -> &'a str {
     std::str::from_utf8(&source[n.start_byte()..n.end_byte()]).unwrap_or("")
 }
 
-/// Recursive descent: returns true iff any descendant (or `node` itself)
-/// has `node.kind() == kind`. Used by cpp/php/ruby extractors to detect
-/// `yield_expression`, `throw_expression`, etc. anywhere inside a fn body.
+/// True iff any descendant (or `node` itself) has `node.kind() == kind`.
+/// Used by cpp/php/ruby extractors to detect `yield_expression`,
+/// `throw_expression`, etc. anywhere inside a fn body.
 pub(crate) fn subtree_contains_kind(node: Node<'_>, kind: &str) -> bool {
-    if node.kind() == kind {
-        return true;
-    }
-    let mut cursor = node.walk();
-    if cursor.goto_first_child() {
-        loop {
-            if subtree_contains_kind(cursor.node(), kind) {
-                return true;
-            }
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
-    }
-    false
+    crate::driver::node::subtree_has_kind(node, &[kind])
 }
 
 /// Find the first direct child of `node` matching `kind`. Used by

@@ -1,5 +1,5 @@
-//! Per-file state: the borrowed tree and source, the record buffers that
-//! today's `parse_file` bodies keep as locals, and the `LocalGraph` assembly.
+//! Per-file state: the borrowed tree and source, the record buffers the
+//! steps write, and the `LocalGraph` assembly.
 
 use super::node;
 use super::tap::TapRow;
@@ -103,8 +103,9 @@ impl<'t> DeclSlot<'t> {
     }
 }
 
-/// One file's parse state. The fields are today's `parse_file` locals with
-/// the same types; a step writes them, `into_graph` moves them out.
+/// One file's parse state. A step writes the fields; `into_graph` moves each
+/// record buffer into its `LocalGraph` field in its push order, so a graph
+/// keeps the bytes the parse cache already holds.
 pub struct FileCx<'t> {
     pub tree: &'t Tree,
     /// The original bytes, even when `PREPARE_SOURCE` patched what the tree

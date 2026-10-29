@@ -211,7 +211,11 @@ impl AnalyzerPipeline {
             None
         };
         let times = times_owned.as_ref();
-        parse_prof::set_enabled(prof);
+        // Never written `false`: the flag is process-wide, so a run without
+        // ECP_PROF must not switch off a profiler another caller enabled.
+        if prof {
+            parse_prof::set_enabled(true);
+        }
 
         // Producer (A): parse files concurrently
         rayon::scope(|s| {
@@ -401,7 +405,7 @@ impl AnalyzerPipeline {
 struct ProviderTimes {
     count: u64,
     total_ns: u64,
-    pass_ns: [u64; 6],
+    pass_ns: [u64; Pass::COUNT],
 }
 
 /// What the pipeline does with one provider's graph once the provider has

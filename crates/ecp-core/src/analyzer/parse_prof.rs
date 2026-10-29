@@ -2,6 +2,7 @@
 //! `pipeline.rs`. Disabled cost is one relaxed atomic load per span.
 
 use std::cell::Cell;
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
@@ -16,7 +17,11 @@ pub enum Pass {
 }
 
 impl Pass {
-    pub const ALL: [Pass; 6] = [
+    /// The last variant plus one; `ALL` lists every variant in discriminant
+    /// order, which a test checks.
+    pub const COUNT: usize = Pass::Calls as usize + 1;
+
+    pub const ALL: [Pass; Pass::COUNT] = [
         Pass::Tree,
         Pass::Query,
         Pass::Build,
@@ -40,7 +45,7 @@ impl Pass {
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
-    static TOTALS: Cell<[u64; 6]> = const { Cell::new([0; 6]) };
+    static TOTALS: Cell<[u64; Pass::COUNT]> = const { Cell::new([0; Pass::COUNT]) };
     static ACTIVE: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -55,6 +60,10 @@ pub fn enabled() -> bool {
 pub struct Span {
     start: Option<Instant>,
     pass: Pass,
+    // `!Send`: `Drop` writes this thread's `TOTALS` and `ACTIVE`, so a span
+    // dropped on another thread would book its time there and leave the
+    // origin thread's `ACTIVE` set.
+    _thread: PhantomData<*const ()>,
 }
 
 #[must_use = "a span measures until it is dropped"]
@@ -69,7 +78,11 @@ pub fn span(pass: Pass) -> Span {
     } else {
         None
     };
-    Span { start, pass }
+    Span {
+        start,
+        pass,
+        _thread: PhantomData,
+    }
 }
 
 impl Drop for Span {
@@ -86,11 +99,11 @@ impl Drop for Span {
 }
 
 pub fn reset() {
-    TOTALS.with(|t| t.set([0; 6]));
+    TOTALS.with(|t| t.set([0; Pass::COUNT]));
 }
 
-pub fn take() -> [u64; 6] {
-    TOTALS.with(|t| t.replace([0; 6]))
+pub fn take() -> [u64; Pass::COUNT] {
+    TOTALS.with(|t| t.replace([0; Pass::COUNT]))
 }
 
 #[cfg(test)]
@@ -106,6 +119,13 @@ mod tests {
     }
 
     #[test]
+    fn test_pass_all_lists_every_variant_in_order() {
+        for (i, pass) in Pass::ALL.into_iter().enumerate() {
+            assert_eq!(pass as usize, i, "Pass::ALL[{i}] is {}", pass.name());
+        }
+    }
+
+    #[test]
     fn test_parse_prof_disabled_records_nothing() {
         let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set_enabled(false);
@@ -114,7 +134,7 @@ mod tests {
             let _p = span(Pass::Tree);
             busy();
         }
-        assert_eq!(take(), [0; 6]);
+        assert_eq!(take(), [0; Pass::COUNT]);
     }
 
     #[test]
@@ -145,7 +165,7 @@ mod tests {
         let second = take();
         set_enabled(false);
         assert!(first[Pass::Walk as usize] > 0);
-        assert_eq!(second, [0; 6]);
+        assert_eq!(second, [0; Pass::COUNT]);
     }
 
     fn returns_early_inside_span() -> Option<u8> {

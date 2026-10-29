@@ -4,15 +4,16 @@
 //! its gate, its required owner and name slots, and at most one record per
 //! match, from the first active config.
 
-use super::FileCx;
+use super::{node, FileCx};
 use crate::framework_helpers::has_import_from;
 use crate::schema_field::extract::schema_record;
 use crate::schema_field::SchemaFieldConfig;
 use ecp_core::analyzer::types::Span;
 use tree_sitter::{Node, Query, QueryCapture};
 
-/// Schema-field configs per spec; Python has 2. The per-match slot table is
-/// a fixed array of this size, so a file allocates no slots.
+/// Schema-field configs per tapping spec; TypeScript, the only one, has 1.
+/// The per-match slot table is a fixed array of this size, so a file
+/// allocates no slots.
 pub(super) const MAX_CONFIGS: usize = 8;
 
 type ByteRange = (u32, u32);
@@ -138,13 +139,7 @@ impl TapMatch {
     }
 
     fn flush(&mut self, t: &TapTable, first: Node<'_>, rows: &mut Vec<TapRow>) {
-        let (start, end) = (first.start_position(), first.end_position());
-        let span = (
-            start.row as u32,
-            start.column as u32,
-            end.row as u32,
-            end.column as u32,
-        );
+        let span = node::span(first);
         let configs = t.configs as usize;
         let seq = self.seq;
         let candidates = self.slots[..configs].iter().enumerate();
@@ -204,6 +199,7 @@ mod tests {
     use crate::driver::node::rust_tree;
     use crate::driver::{parse, Compiled, ParseSpec, TestRule};
     use crate::python::schema_extractors::{PYDANTIC_CONFIG, SQLALCHEMY_CONFIG};
+    use crate::python::spec::PythonSpec;
     use crate::schema_field::{classify_ts_type, extract_schema_fields};
     use crate::typescript::schema_extractors::TS_INTERFACE_CONFIG;
     use crate::typescript::spec::TypeScriptSpec;
@@ -279,11 +275,6 @@ mod tests {
         }
     }
 
-    fn main_query(language: &Language, queries: &str, frameworks: &str) -> Query {
-        let text = format!("{queries}\n;; ---- framework queries ----\n{frameworks}");
-        Query::new(language, &text).unwrap_or_else(|e| panic!("{e}"))
-    }
-
     fn tree_for(language: &Language, src: &[u8]) -> Tree {
         let mut parser = Parser::new();
         parser.set_language(language).expect("language");
@@ -292,11 +283,7 @@ mod tests {
 
     fn python() -> (Language, Query) {
         let language: Language = tree_sitter_python::LANGUAGE.into();
-        let query = main_query(
-            &language,
-            include_str!("../python/queries.scm"),
-            include_str!("../python/frameworks.scm"),
-        );
+        let query = PythonSpec::query().unwrap_or_else(|e| panic!("{e}"));
         (language, query)
     }
 
@@ -324,11 +311,7 @@ mod tests {
     #[test]
     fn test_schema_tap_ts_interface_empty_gate_is_active() {
         let language: Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
-        let query = main_query(
-            &language,
-            include_str!("../typescript/queries.scm"),
-            include_str!("../typescript/frameworks.scm"),
-        );
+        let query = TypeScriptSpec::query().unwrap_or_else(|e| panic!("{e}"));
         let src = b"interface User { name: string; age: number; }\n";
         let tree = tree_for(&language, src);
         assert!(TS_INTERFACE_CONFIG.import_gate.is_empty());
