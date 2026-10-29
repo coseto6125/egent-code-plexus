@@ -10,6 +10,8 @@ use ecp_core::analyzer::types::{FrameworkId, LocalGraph, NameRef, NameRefKind, R
 use ecp_core::graph::NodeKind;
 use std::path::Path;
 
+type Span4 = (u32, u32, u32, u32);
+
 fn parse(src: &str) -> LocalGraph {
     PhpProvider::new()
         .expect("PhpProvider::new")
@@ -38,7 +40,7 @@ fn reads_constant(n: &RawNode, name: &str) -> bool {
 }
 
 /// `(source_name, target_name, reason, confidence, span)`
-type Ref<'g> = (&'g str, &'g str, &'g str, f32, (u32, u32, u32, u32));
+type Ref<'g> = (&'g str, &'g str, &'g str, f32, Span4);
 
 fn refs(g: &LocalGraph) -> Vec<Ref<'_>> {
     g.framework_refs
@@ -56,13 +58,7 @@ fn refs(g: &LocalGraph) -> Vec<Ref<'_>> {
 }
 
 /// `(method, path, handler name, span, needs_include)`
-type RouteRow<'g> = (
-    &'g str,
-    &'g str,
-    Option<&'g str>,
-    (u32, u32, u32, u32),
-    Option<bool>,
-);
+type RouteRow<'g> = (&'g str, &'g str, Option<&'g str>, Span4, Option<bool>);
 
 fn routes(g: &LocalGraph) -> Vec<RouteRow<'_>> {
     g.routes
@@ -149,7 +145,7 @@ class A {
 class Codes { const A = 1; const B = 2; }
 ";
     let g = parse(src);
-    let got: Vec<(&str, (u32, u32, u32, u32))> = g
+    let got: Vec<(&str, Span4)> = g
         .blind_spots
         .iter()
         .map(|b| (b.kind.as_str(), b.span))
