@@ -310,7 +310,6 @@ driver_parity dart lands when phase 3 slice T6 moves this parser onto the shared
 driver_parity java lands when phase 3 slice T5 moves this parser onto the shared driver
 driver_parity kotlin lands when phase 3 slice T5 moves this parser onto the shared driver
 driver_parity php lands when phase 3 slice T6 moves this parser onto the shared driver
-driver_parity ruby lands when phase 3 slice T4 moves this parser onto the shared driver
 driver_parity swift lands when phase 3 slice T6 moves this parser onto the shared driver
 dynamic_dispatch c pre-existing gap
 dynamic_dispatch cpp pre-existing gap

@@ -1,38 +1,31 @@
-use super::receiver_types::extract_ruby_calls_and_path_literals;
+use super::receiver_types::{extract_ruby_calls_and_path_literals, literal_send_target};
 use super::spec::RubySpec;
+use crate::calls::{NameRefKind, NameRefSpec};
+use crate::driver::{
+    self, node, AnonKey, Anonymous, Compiled, DeclSlot, Effect, FieldReads, FileCx, KindCapture,
+    Op, ParseSpec, Step, TxRule,
+};
 use crate::framework_confidence;
 use crate::framework_helpers::{
     detect_ast_framework_patterns, enclosing_fn_idx_by_span, push_blind_spot, FrameworkPatternSpec,
 };
 use crate::parse_budget::{parse_with_budget, ParseBudget};
-use ecp_core::analyzer::lang_spec::LangSpec;
-use ecp_core::analyzer::parse_prof::{self, Pass};
+use ecp_core::analyzer::parse_prof::Pass;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{
-    BlindSpot, FrameworkId, LocalGraph, RawImport, RawNode, RawRoute, RawTxScope,
+    BlindSpot, FrameworkId, LocalGraph, RawFunctionMeta, RawImport, RawNode, RawRoute, RawTxScope,
 };
-use ecp_core::graph::NodeKind;
+use ecp_core::graph::{FileCategory, NodeKind};
 use std::collections::HashMap;
 use std::path::Path;
-use streaming_iterator::StreamingIterator;
-use tree_sitter::{Node, Query, QueryCursor};
+use tree_sitter::{Node, Query, Tree};
 
-/// Blind-spot kind/hint pairs. Order matches the capture-index dispatch
-/// in `parse_file`.
-const BLIND_SPEC: &[(&str, &str)] = &[
-    (
-        "rb-eval",
-        "eval(<expr>) — runtime Ruby code execution; argument is not statically determinable as a callable",
-    ),
-    (
-        "rb-instance-eval",
-        "<expr>.instance_eval { ... } — runtime code execution in receiver context; block contents bound to receiver at call time",
-    ),
-    (
-        "rb-send",
-        "<expr>.send(<var>, ...) — dynamic method dispatch through a non-literal name; target method resolved at runtime",
-    ),
-];
+/// `<expr>.send(<var>, ...)`: pushed only when the target is not a literal
+/// symbol or string, so it is a role, not a `BLIND` row.
+const BLIND_SEND: (&str, &str) = (
+    "rb-send",
+    "<expr>.send(<var>, ...) — dynamic method dispatch through a non-literal name; target method resolved at runtime",
+);
 
 /// BlindSpot spec for a routing block nested past the Rails walker's cap.
 const BLIND_RAILS_ROUTES_DEPTH: (&str, &str) = (
@@ -314,45 +307,35 @@ fn is_transaction_do_block_call(call_node: tree_sitter::Node<'_>, source: &[u8])
     has_do_block
 }
 
-/// Whether `node`'s subtree contains a Ruby `call` expression. Gates emission
-/// of `<anonymous>` block nodes so empty blocks (e.g. `arr.map { |x| x * 2 }`)
-/// stay out of the graph.
-fn body_has_call(node: tree_sitter::Node<'_>) -> bool {
-    let mut stack = vec![node];
-    while let Some(n) = stack.pop() {
-        if n.kind() == "call" {
-            return true;
+/// The smallest-span class or module RawNode whose rows contain `line`, by
+/// its index in `nodes`. Shared by mixin application and the delegator
+/// Forwardable-scope check.
+fn enclosing_class_idx(nodes: &[RawNode], line: u32) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    let mut best_span: u32 = u32::MAX;
+    for (i, n) in nodes.iter().enumerate() {
+        if n.kind != NodeKind::Class && n.kind != NodeKind::Trait {
+            continue;
         }
-        let mut c = n.walk();
-        for child in n.children(&mut c) {
-            stack.push(child);
+        if n.span.0 <= line && n.span.2 >= line {
+            let width = n.span.2 - n.span.0;
+            if width < best_span {
+                best_span = width;
+                best = Some(i);
+            }
         }
     }
-    false
+    best
 }
 
 pub struct RubyProvider {
-    query: Query,
-    /// Capture index → NodeKind mapping, pre-resolved from
-    /// `RubySpec::CAPTURE_KIND` at provider construction. The hot loop
-    /// looks up by integer index — equivalent perf to the previous
-    /// if-chain, but the source of truth lives in `spec.rs`.
-    capture_kind_by_idx: Vec<Option<NodeKind>>,
+    compiled: Compiled<RubySpec>,
 }
 
 impl RubyProvider {
     pub fn new() -> anyhow::Result<Self> {
-        let language = tree_sitter_ruby::LANGUAGE.into();
-        let query_source = include_str!("queries.scm");
-        let query = Query::new(&language, query_source)?;
-        let capture_kind_by_idx: Vec<Option<NodeKind>> = query
-            .capture_names()
-            .iter()
-            .map(|name| RubySpec::CAPTURE_KIND.get(name).copied())
-            .collect();
         Ok(Self {
-            query,
-            capture_kind_by_idx,
+            compiled: Compiled::new()?,
         })
     }
 }
@@ -363,684 +346,628 @@ impl LanguageProvider for RubyProvider {
     }
 
     fn parse_file(&self, path: &Path, source: &[u8]) -> anyhow::Result<LocalGraph> {
-        let _p = parse_prof::span(Pass::Tree);
-        let tree = PARSER
-            .with(|p| parse_with_budget(&mut p.borrow_mut(), source, ParseBudget::DEFAULT))
-            .ok_or_else(|| anyhow::anyhow!("Failed to parse file"))?;
+        driver::parse(&self.compiled, path, source)
+    }
+}
 
-        drop(_p);
-        let _p = parse_prof::span(Pass::Walk);
-        // Build method-row → is_exported map from visibility markers in class bodies.
-        let visibility_map = build_visibility_map(tree.root_node(), source);
+/// The captures Ruby handles itself. The root-kind captures (`class`,
+/// `module`, `method`, `const`) set root and kind; `Name` sets the name.
+#[derive(Clone, Copy)]
+pub enum RubyRole {
+    Name,
+    Heritage,
+    ImportName,
+    RouteMethod,
+    RoutePath,
+    Route,
+    AttrArgs,
+    MixinModule,
+    AliasNew,
+    AliasOld,
+    AliasMethodArgs,
+    ConstAliasNew,
+    ConstAliasSource,
+    DelegatorMethod,
+    DelegatorArgs,
+    Send,
+}
 
-        drop(_p);
-        let _p = parse_prof::span(Pass::Query);
-        let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(&self.query, tree.root_node(), source);
+#[derive(Clone, Copy)]
+pub enum RubyHook {
+    Visibility,
+    ModuleAsEnum,
+    Bindings,
+    Calls,
+    Frameworks,
+    Routes,
+}
 
-        let mut nodes = Vec::new();
-        let mut imports = Vec::new();
-        let mut routes: Vec<RawRoute> = Vec::new();
-        let mut blind_spots: Vec<BlindSpot> = Vec::new();
-        let file_category =
-            ecp_core::file_category::determine_category(path.to_str().unwrap_or(""));
-        let is_test_file = file_category == ecp_core::graph::FileCategory::Test;
-        // Mixin module additions, applied after primary node emission. Each
-        // entry is (module_name, call_line) — we attach to the smallest
-        // enclosing class node by span containment. Document-order traversal
-        // of tree-sitter matches preserves source ordering (M1 before M2).
-        let mut pending_mixins: Vec<(String, u32)> = Vec::new();
+#[derive(Default)]
+pub struct RubyMatch<'t> {
+    heritage: Vec<String>,
+    import_name: Option<Node<'t>>,
+    route_method: Option<Node<'t>>,
+    route_path: Option<Node<'t>>,
+    route_root: Option<Node<'t>>,
+    attr_args_node: Option<Node<'t>>,
+    mixin_module_node: Option<Node<'t>>,
+    alias_new_node: Option<Node<'t>>,
+    alias_old_node: Option<Node<'t>>,
+    alias_method_args: Option<Node<'t>>,
+    const_alias_new_node: Option<Node<'t>>,
+    const_alias_source_node: Option<Node<'t>>,
+    delegator_method_node: Option<Node<'t>>,
+    delegator_args_node: Option<Node<'t>>,
+}
 
-        let idx_name = self.query.capture_index_for_name("name");
-        let idx_heritage = self.query.capture_index_for_name("heritage");
-        let idx_import_name = self.query.capture_index_for_name("import.name");
-        let idx_decorator = self.query.capture_index_for_name("decorator");
-        let idx_route_method = self.query.capture_index_for_name("route.method");
-        let idx_route_path = self.query.capture_index_for_name("route.path");
-        let idx_route = self.query.capture_index_for_name("route");
-        let idx_attr_args = self.query.capture_index_for_name("attr_args");
-        let idx_mixin_module = self.query.capture_index_for_name("mixin_module");
-        let idx_alias_new = self.query.capture_index_for_name("alias.new");
-        let idx_alias_old = self.query.capture_index_for_name("alias.old");
-        let idx_alias_method_args = self.query.capture_index_for_name("alias_method.args");
-        let idx_const_alias_new = self.query.capture_index_for_name("const_alias.new");
-        let idx_const_alias_source = self.query.capture_index_for_name("const_alias.source");
-        let idx_delegator_method = self.query.capture_index_for_name("delegator_method");
-        let idx_delegator_args = self.query.capture_index_for_name("delegator_args");
+#[derive(Default)]
+pub struct RubyFile {
+    /// Method start row → is_exported, from the visibility markers in
+    /// class bodies; built before the query.
+    visibility_map: HashMap<u32, bool>,
+    /// Mixin module additions, applied after primary node emission. Each
+    /// entry is (module_name, call_line) — we attach to the smallest
+    /// enclosing class node by span containment. Document-order traversal
+    /// of tree-sitter matches preserves source ordering (M1 before M2).
+    pending_mixins: Vec<(String, u32)>,
+    /// Pending delegator emissions: (target, method, line). Applied after
+    /// the match loop so we can cross-check against `pending_mixins` to
+    /// require the enclosing class to `extend`/`include Forwardable`.
+    /// Without a Forwardable mixin we fall back to "low-confidence" emit
+    /// (still pushed, documented false-positive on user-defined methods
+    /// named `def_delegator` / `delegate`).
+    pending_delegators: Vec<(String, String, u32)>,
+}
 
-        let idx_blind_eval = self.query.capture_index_for_name("blind.eval");
-        let idx_blind_instance_eval = self.query.capture_index_for_name("blind.instance_eval");
-        let idx_blind_send = self.query.capture_index_for_name("blind.send");
-        let idx_function_anonymous = self.query.capture_index_for_name("function.anonymous");
+const fn step(pass: Pass, effect: Effect, op: Op<RubyHook>) -> Step<RubyHook> {
+    Step { pass, effect, op }
+}
 
-        // Pending delegator emissions: (target, method, line). Applied after
-        // the match loop so we can cross-check against `pending_mixins` to
-        // require the enclosing class to `extend`/`include Forwardable`.
-        // Without a Forwardable mixin we fall back to "low-confidence" emit
-        // (still pushed, documented false-positive on user-defined methods
-        // named `def_delegator` / `delegate`).
-        let mut pending_delegators: Vec<(String, String, u32)> = Vec::new();
-        // Dedup set for <anonymous> block spans — the same block/do_block node
-        // can appear in multiple query matches (e.g. when both the `call` and
-        // a nested capture overlap); inserting the span guards against duplicate
-        // <anonymous> nodes for the same source range.
-        let mut emitted_anonymous_spans: std::collections::HashSet<(u32, u32, u32, u32)> =
-            std::collections::HashSet::new();
+impl ParseSpec for RubySpec {
+    type Role = RubyRole;
+    type Match<'t> = RubyMatch<'t>;
+    type File<'t> = RubyFile;
+    type Hook = RubyHook;
 
-        while let Some(m) = matches.next() {
-            let mut node_name = None;
-            let mut kind = None;
-            let mut root_node = None;
-            let mut heritage = Vec::new();
-            let mut import_name = None;
-            let mut decorators = Vec::new();
+    const KIND_CAPTURE: KindCapture = KindCapture::RootOverwrite;
+    /// Anonymous block / do_block / lambda attached to a call. Emit an
+    /// `<anonymous>` Function node only when the block body holds a call, so
+    /// attach_to_enclosing can host those calls instead of dropping them;
+    /// empty blocks (e.g. `arr.map { |x| x * 2 }`) stay out of the graph. The
+    /// same block can appear in several matches, so the span dedupes it.
+    const ANONYMOUS: Option<Anonymous> = Some(Anonymous {
+        capture: "function.anonymous",
+        call_kinds: &["call"],
+        key: AnonKey::Span,
+    });
+    const BLIND: &'static [(&'static str, (&'static str, &'static str))] = &[
+        (
+            "blind.eval",
+            (
+                "rb-eval",
+                "eval(<expr>) — runtime Ruby code execution; argument is not statically determinable as a callable",
+            ),
+        ),
+        (
+            "blind.instance_eval",
+            (
+                "rb-instance-eval",
+                "<expr>.instance_eval { ... } — runtime code execution in receiver context; block contents bound to receiver at call time",
+            ),
+        ),
+    ];
+    /// Ruby has no field-read capture (`obj.x` is a call); the walk records
+    /// the constants a method reads and its `method(:name)` references.
+    const FIELD_READS: Option<FieldReads> = Some(FieldReads {
+        member_kinds: &[],
+        names: NameRefSpec {
+            ident_kinds: &["constant"],
+            kind: NameRefKind::Constant,
+            symbol_method_refs: true,
+            ..NameRefSpec::EMPTY
+        },
+    });
+    /// Block-form transaction detection: walk AST for `call` nodes with
+    /// method=`transaction` + `do_block` child. Must run after `nodes` is
+    /// fully populated (stamp_owner_class_by_span finalises spans) so
+    /// span-containment lookup for the enclosing function is accurate.
+    const TX: TxRule = TxRule::Tree(collect_ruby_transaction_scopes);
+    const STEPS: &'static [Step<RubyHook>] = &[
+        step(Pass::Walk, Effect::Neutral, Op::Hook(RubyHook::Visibility)),
+        step(Pass::Query, Effect::Nodes, Op::Query),
+        step(
+            Pass::Walk,
+            Effect::Neutral,
+            Op::Hook(RubyHook::ModuleAsEnum),
+        ),
+        step(Pass::Build, Effect::Nodes, Op::Hook(RubyHook::Bindings)),
+        step(Pass::Calls, Effect::Nodes, Op::Hook(RubyHook::Calls)),
+        step(Pass::Walk, Effect::Nodes, Op::FieldReads),
+        step(Pass::Walk, Effect::Neutral, Op::Hook(RubyHook::Frameworks)),
+        step(Pass::Build, Effect::Neutral, Op::Hook(RubyHook::Routes)),
+        step(Pass::Walk, Effect::Neutral, Op::FunctionMeta),
+        step(Pass::Build, Effect::Nodes, Op::StampOwners),
+        step(Pass::Walk, Effect::Bind, Op::TxScopes),
+    ];
 
-            let mut route_method = None;
-            let mut route_path = None;
-            let mut route_root = None;
+    fn query() -> anyhow::Result<Query> {
+        Ok(Query::new(
+            &tree_sitter_ruby::LANGUAGE.into(),
+            include_str!("queries.scm"),
+        )?)
+    }
 
-            let mut attr_args_node: Option<tree_sitter::Node<'_>> = None;
-            let mut mixin_module_node: Option<tree_sitter::Node<'_>> = None;
-            let mut alias_new_node: Option<tree_sitter::Node<'_>> = None;
-            let mut alias_old_node: Option<tree_sitter::Node<'_>> = None;
-            let mut alias_method_args: Option<tree_sitter::Node<'_>> = None;
-            let mut const_alias_new_node: Option<tree_sitter::Node<'_>> = None;
-            let mut const_alias_source_node: Option<tree_sitter::Node<'_>> = None;
-            let mut delegator_method_node: Option<tree_sitter::Node<'_>> = None;
-            let mut delegator_args_node: Option<tree_sitter::Node<'_>> = None;
+    fn role(capture: &str) -> Option<RubyRole> {
+        Some(match capture {
+            "name" => RubyRole::Name,
+            "heritage" => RubyRole::Heritage,
+            "import.name" => RubyRole::ImportName,
+            "route.method" => RubyRole::RouteMethod,
+            "route.path" => RubyRole::RoutePath,
+            "route" => RubyRole::Route,
+            "attr_args" => RubyRole::AttrArgs,
+            "mixin_module" => RubyRole::MixinModule,
+            "alias.new" => RubyRole::AliasNew,
+            "alias.old" => RubyRole::AliasOld,
+            "alias_method.args" => RubyRole::AliasMethodArgs,
+            "const_alias.new" => RubyRole::ConstAliasNew,
+            "const_alias.source" => RubyRole::ConstAliasSource,
+            "delegator_method" => RubyRole::DelegatorMethod,
+            "delegator_args" => RubyRole::DelegatorArgs,
+            "blind.send" => RubyRole::Send,
+            _ => return None,
+        })
+    }
 
-            for cap in m.captures() {
-                let cap_idx = Some(cap.index);
-                if cap_idx == idx_name {
-                    node_name = Some(cap.node);
-                } else if cap_idx == idx_heritage {
-                    if let Ok(h_str) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        heritage.push(h_str.to_string());
-                    }
-                } else if let Some(k_from_spec) = self
-                    .capture_kind_by_idx
-                    .get(cap.index as usize)
-                    .copied()
-                    .flatten()
+    fn parse_tree(source: &[u8]) -> Option<Tree> {
+        PARSER.with(|p| parse_with_budget(&mut p.borrow_mut(), source, ParseBudget::DEFAULT))
+    }
+
+    fn capture<'t>(
+        r: RubyRole,
+        node: Node<'t>,
+        d: &mut DeclSlot<'t>,
+        m: &mut RubyMatch<'t>,
+        _f: &mut RubyFile,
+        cx: &mut FileCx<'t>,
+    ) {
+        let source = cx.source;
+        match r {
+            RubyRole::Name => d.name = Some(node),
+            RubyRole::Heritage => {
+                if let Ok(h_str) = std::str::from_utf8(&source[node.start_byte()..node.end_byte()])
                 {
-                    // Single spec-driven dispatch replaces the three explicit
-                    // Class/Trait/Method root-capture arms.
-                    // Source of truth: RubySpec::CAPTURE_KIND in spec.rs.
-                    // (`module` → Trait matches ref-gitnexus semantics.)
-                    kind = Some(k_from_spec);
-                    root_node = Some(cap.node);
-                } else if cap_idx == idx_import_name {
-                    import_name = Some(cap.node);
-                } else if cap_idx == idx_decorator {
-                    if let Ok(d_str) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        decorators.push(d_str.to_string());
-                    }
-                } else if cap_idx == idx_route_method {
-                    route_method = Some(cap.node);
-                } else if cap_idx == idx_route_path {
-                    route_path = Some(cap.node);
-                } else if cap_idx == idx_route {
-                    route_root = Some(cap.node);
-                } else if cap_idx == idx_attr_args {
-                    attr_args_node = Some(cap.node);
-                } else if cap_idx == idx_mixin_module {
-                    mixin_module_node = Some(cap.node);
-                } else if cap_idx == idx_alias_new {
-                    alias_new_node = Some(cap.node);
-                } else if cap_idx == idx_alias_old {
-                    alias_old_node = Some(cap.node);
-                } else if cap_idx == idx_alias_method_args {
-                    alias_method_args = Some(cap.node);
-                } else if cap_idx == idx_const_alias_new {
-                    const_alias_new_node = Some(cap.node);
-                } else if cap_idx == idx_const_alias_source {
-                    const_alias_source_node = Some(cap.node);
-                } else if cap_idx == idx_delegator_method {
-                    delegator_method_node = Some(cap.node);
-                } else if cap_idx == idx_delegator_args {
-                    delegator_args_node = Some(cap.node);
-                } else if cap_idx == idx_blind_eval {
-                    push_blind_spot(
-                        &mut blind_spots,
-                        BLIND_SPEC[0],
-                        &cap.node,
-                        path,
-                        is_test_file,
-                    );
-                } else if cap_idx == idx_blind_instance_eval {
-                    push_blind_spot(
-                        &mut blind_spots,
-                        BLIND_SPEC[1],
-                        &cap.node,
-                        path,
-                        is_test_file,
-                    );
-                } else if cap_idx == idx_blind_send
-                    && super::receiver_types::literal_send_target(cap.node, source).is_none()
-                {
-                    push_blind_spot(
-                        &mut blind_spots,
-                        BLIND_SPEC[2],
-                        &cap.node,
-                        path,
-                        is_test_file,
-                    );
-                } else if cap_idx == idx_function_anonymous {
-                    // Anonymous block / do_block / lambda attached to a call.
-                    // Emit an `<anonymous>` Function node only when the block
-                    // body holds a call, so attach_to_enclosing can host those
-                    // calls instead of dropping them; empty blocks stay out of
-                    // the graph.
-                    if body_has_call(cap.node) {
-                        let start = cap.node.start_position();
-                        let end = cap.node.end_position();
-                        let span = (
-                            start.row as u32,
-                            start.column as u32,
-                            end.row as u32,
-                            end.column as u32,
-                        );
-                        if emitted_anonymous_spans.insert(span) {
-                            nodes.push(RawNode {
-                                decorators: Vec::new(),
-                                is_exported: false,
-                                heritage: Vec::new(),
-                                type_annotation: None,
-                                name: format!("<anonymous:{}:{}>", span.0 + 1, span.1),
-                                kind: NodeKind::Function,
-                                span,
-                                calls: Vec::new(),
-                                field_reads: Vec::new(),
-                                owner_class: None,
-                                content_hash: ecp_core::uid::xxh3_64_bytes(
-                                    &source[cap.node.start_byte()..cap.node.end_byte()],
-                                ),
-                            });
-                        }
-                    }
+                    m.heritage.push(h_str.to_string());
                 }
             }
-
-            if let (Some(name_node), Some(k), Some(root)) = (node_name, kind, root_node) {
-                if let Ok(name_str) =
-                    std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()])
-                {
-                    let start = root.start_position();
-                    let end = root.end_position();
-                    // Methods: respect visibility markers. Classes/modules are always exported.
-                    let is_exported = if k == NodeKind::Method {
-                        *visibility_map.get(&(start.row as u32)).unwrap_or(&true)
-                    } else {
-                        // Classes and Traits (modules) are always exported.
-                        true
-                    };
-                    // Ruby's constructor convention is `initialize`; the spec
-                    // table maps it as Method, so promote here.
-                    let k = if k == NodeKind::Method && name_str == "initialize" {
-                        NodeKind::Constructor
-                    } else {
-                        k
-                    };
-                    nodes.push(RawNode {
-                        decorators: decorators.clone(),
-                        is_exported,
-                        heritage,
-                        type_annotation: None,
-                        name: name_str.to_string(),
-                        kind: k,
-                        span: (
-                            start.row as u32,
-                            start.column as u32,
-                            end.row as u32,
-                            end.column as u32,
-                        ),
-                        calls: Vec::new(),
-                        field_reads: Vec::new(),
-                        owner_class: None,
-                        content_hash: ecp_core::uid::xxh3_64_bytes(
-                            &source[root.start_byte()..root.end_byte()],
-                        ),
-                    });
+            RubyRole::ImportName => m.import_name = Some(node),
+            RubyRole::RouteMethod => m.route_method = Some(node),
+            RubyRole::RoutePath => m.route_path = Some(node),
+            RubyRole::Route => m.route_root = Some(node),
+            RubyRole::AttrArgs => m.attr_args_node = Some(node),
+            RubyRole::MixinModule => m.mixin_module_node = Some(node),
+            RubyRole::AliasNew => m.alias_new_node = Some(node),
+            RubyRole::AliasOld => m.alias_old_node = Some(node),
+            RubyRole::AliasMethodArgs => m.alias_method_args = Some(node),
+            RubyRole::ConstAliasNew => m.const_alias_new_node = Some(node),
+            RubyRole::ConstAliasSource => m.const_alias_source_node = Some(node),
+            RubyRole::DelegatorMethod => m.delegator_method_node = Some(node),
+            RubyRole::DelegatorArgs => m.delegator_args_node = Some(node),
+            RubyRole::Send => {
+                if literal_send_target(node, source).is_none() {
+                    cx.push_blind(BLIND_SEND, &node);
                 }
             }
+        }
+    }
 
-            if let Some(i_node) = import_name {
-                if let Ok(name_str) =
-                    std::str::from_utf8(&source[i_node.start_byte()..i_node.end_byte()])
-                {
-                    imports.push(RawImport {
-                        alias: None,
-                        imported_name: name_str.to_string(),
-                        source: name_str.to_string(),
-                        binding_kind: None,
-                    });
-                }
-            }
+    fn end_match<'t>(
+        d: DeclSlot<'t>,
+        m: &mut RubyMatch<'t>,
+        f: &mut RubyFile,
+        cx: &mut FileCx<'t>,
+    ) {
+        let source = cx.source;
+        let RubyMatch {
+            heritage,
+            import_name,
+            route_method,
+            route_path,
+            route_root,
+            attr_args_node,
+            mixin_module_node,
+            alias_new_node,
+            alias_old_node,
+            alias_method_args,
+            const_alias_new_node,
+            const_alias_source_node,
+            delegator_method_node,
+            delegator_args_node,
+        } = std::mem::take(m);
 
-            // A route DSL sends its verb to the mapper: Rails `get "/x"` and
-            // Sinatra `get "/x" do` have no receiver; Hanami `router.get` and
-            // Roda `r.get` send it to a router object. Any other receiver
-            // means an HTTP client — `connection.get "/openapi/v1/tag"` names
-            // an endpoint this application calls, not one it serves. Measured
-            // 2026-09-02 on a Rails 8.1 app: ten such calls under
-            // `app/services/client/**` reached `ecp routes` before this check.
-            let declares_route =
-                route_root.is_some_and(|n| match n.child_by_field_name("receiver") {
-                    None => true,
-                    Some(r) => r
-                        .utf8_text(source)
-                        .is_ok_and(|t| ROUTER_RECEIVERS.contains(&t)),
-                });
-
-            if let (true, Some(r_method), Some(r_path), Some(r_root)) =
-                (declares_route, route_method, route_path, route_root)
+        if let (Some(name_node), Some(k), Some(root)) = (d.name, d.kind, d.root) {
+            if let Ok(name_str) =
+                std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()])
             {
-                if let (Ok(method_str), Ok(path_str)) = (
-                    std::str::from_utf8(&source[r_method.start_byte()..r_method.end_byte()]),
-                    std::str::from_utf8(&source[r_path.start_byte()..r_path.end_byte()]),
-                ) {
-                    let start = r_root.start_position();
-                    let end = r_root.end_position();
-                    // Sinatra `get "/x" do ... end` and Roda `r.get "x" do`
-                    // serve the route with the block written in place.
-                    let handler = r_root.child_by_field_name("block").map(|block| {
-                        ecp_core::contracts::raw_records::RawEndpoint::Unresolved(
-                            ecp_core::contracts::raw_records::Unbound::Inline(
-                                crate::framework_helpers::node_span(&block),
-                            ),
-                        )
-                    });
-                    routes.push(RawRoute {
-                        method: method_str.to_string(),
-                        path: path_str.to_string(),
-                        handler,
-                        span: (
-                            start.row as u32,
-                            start.column as u32,
-                            end.row as u32,
-                            end.column as u32,
-                        ),
-                        scope: None,
-                    });
-                }
-            }
-
-            // attr_reader / attr_writer / attr_accessor → emit one Property per symbol.
-            // is_exported=true unconditionally; private-block detection is punted for MVP
-            // because tree-sitter parses `private` as just another bareword call without
-            // a structural block — distinguishing "below a private call" from "above"
-            // requires a stateful AST sweep that's out of scope for this pass.
-            if let Some(args) = attr_args_node {
-                let mut walker = args.walk();
-                for child in args.named_children(&mut walker) {
-                    if child.kind() != "simple_symbol" {
-                        continue;
-                    }
-                    let Ok(sym_text) =
-                        std::str::from_utf8(&source[child.start_byte()..child.end_byte()])
-                    else {
-                        continue;
-                    };
-                    let prop_name = sym_text.strip_prefix(':').unwrap_or(sym_text);
-                    if prop_name.is_empty() {
-                        continue;
-                    }
-                    let start = child.start_position();
-                    let end = child.end_position();
-                    nodes.push(RawNode {
-                        name: prop_name.to_string(),
-                        kind: NodeKind::Property,
-                        span: (
-                            start.row as u32,
-                            start.column as u32,
-                            end.row as u32,
-                            end.column as u32,
-                        ),
-                        is_exported: true,
-                        heritage: Vec::new(),
-                        type_annotation: None,
-                        decorators: Vec::new(),
-                        calls: Vec::new(),
-                        field_reads: Vec::new(),
-                        owner_class: None,
-                        content_hash: ecp_core::uid::xxh3_64_bytes(
-                            &source[child.start_byte()..child.end_byte()],
-                        ),
-                    });
-                }
-            }
-
-            // include / extend → queue the module name for attachment to the
-            // enclosing class's heritage after all class nodes are emitted.
-            if let Some(mm) = mixin_module_node {
-                if let Ok(mm_str) = std::str::from_utf8(&source[mm.start_byte()..mm.end_byte()]) {
-                    let line = mm.start_position().row as u32;
-                    pending_mixins.push((mm_str.to_string(), line));
-                }
-            }
-
-            // `alias new old` keyword → named binding.
-            if let (Some(n), Some(o)) = (alias_new_node, alias_old_node) {
-                if let (Ok(new_name), Ok(old_name)) = (
-                    std::str::from_utf8(&source[n.start_byte()..n.end_byte()]),
-                    std::str::from_utf8(&source[o.start_byte()..o.end_byte()]),
-                ) {
-                    push_alias_binding(&mut imports, new_name, old_name);
-                }
-            }
-
-            // `alias_method :new, :old` metaprogramming → named binding.
-            // Walk the argument_list and grab the first two simple_symbols.
-            if let Some(args) = alias_method_args {
-                let mut walker = args.walk();
-                let symbols: Vec<&str> = args
-                    .named_children(&mut walker)
-                    .filter(|c| c.kind() == "simple_symbol")
-                    .filter_map(|c| std::str::from_utf8(&source[c.start_byte()..c.end_byte()]).ok())
-                    .map(|s| s.strip_prefix(':').unwrap_or(s))
-                    .filter(|s| !s.is_empty())
-                    .take(2)
-                    .collect();
-                if let [new_name, old_name] = symbols.as_slice() {
-                    push_alias_binding(&mut imports, new_name, old_name);
-                }
-            }
-
-            // `MyConst = OtherModule::Const` → named binding.
-            // lhs is guaranteed `(constant)` by the query, so the assignment
-            // is a constant alias (not a local variable assignment).
-            if let (Some(lhs), Some(rhs)) = (const_alias_new_node, const_alias_source_node) {
-                if let (Ok(new_name), Ok(source_path)) = (
-                    std::str::from_utf8(&source[lhs.start_byte()..lhs.end_byte()]),
-                    std::str::from_utf8(&source[rhs.start_byte()..rhs.end_byte()]),
-                ) {
-                    push_alias_binding(&mut imports, new_name, source_path);
-                }
-            }
-
-            // `def_delegator :target, :method` / `def_delegators :target, :m1, ...` /
-            // `delegate :m1, :m2, to: :target` — parse argument list shape per
-            // method name. Each delegated method is queued for emission; the
-            // Forwardable-mixin check runs after the match loop because the
-            // enclosing class span and `pending_mixins` aren't both finalised
-            // until then.
-            if let (Some(method_node), Some(args)) = (delegator_method_node, delegator_args_node) {
-                let method_name =
-                    std::str::from_utf8(&source[method_node.start_byte()..method_node.end_byte()])
-                        .unwrap_or("");
-                let call_line = method_node.start_position().row as u32;
-                let mut walker = args.walk();
-                let children: Vec<tree_sitter::Node<'_>> =
-                    args.named_children(&mut walker).collect();
-
-                match method_name {
-                    "def_delegator" | "def_delegators" => {
-                        // First simple_symbol = target; rest = delegated methods.
-                        let mut symbols = children
-                            .iter()
-                            .filter(|c| c.kind() == "simple_symbol")
-                            .filter_map(|c| {
-                                std::str::from_utf8(&source[c.start_byte()..c.end_byte()]).ok()
-                            });
-                        if let Some(target_raw) = symbols.next() {
-                            let target = strip_symbol_prefix(target_raw).to_string();
-                            if !target.is_empty() {
-                                for m_raw in symbols {
-                                    let m = strip_symbol_prefix(m_raw);
-                                    if !m.is_empty() {
-                                        pending_delegators.push((
-                                            target.clone(),
-                                            m.to_string(),
-                                            call_line,
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    "delegate" => {
-                        // simple_symbol* (methods), then `pair` with key=`to`,
-                        // value=simple_symbol (target). Walk in order, collect
-                        // method names until the `to:` pair is hit.
-                        let mut methods: Vec<String> = Vec::new();
-                        let mut target: Option<String> = None;
-                        for child in &children {
-                            match child.kind() {
-                                "simple_symbol" => {
-                                    if let Ok(s) = std::str::from_utf8(
-                                        &source[child.start_byte()..child.end_byte()],
-                                    ) {
-                                        let stripped = strip_symbol_prefix(s);
-                                        if !stripped.is_empty() {
-                                            methods.push(stripped.to_string());
-                                        }
-                                    }
-                                }
-                                "pair" => {
-                                    // Look for key=hash_key_symbol with text "to"
-                                    // and value=simple_symbol/string.
-                                    let key = child.child_by_field_name("key");
-                                    let value = child.child_by_field_name("value");
-                                    let key_text = key.and_then(|k| {
-                                        std::str::from_utf8(&source[k.start_byte()..k.end_byte()])
-                                            .ok()
-                                    });
-                                    if key_text == Some("to") {
-                                        if let Some(v) = value {
-                                            if let Ok(t) = std::str::from_utf8(
-                                                &source[v.start_byte()..v.end_byte()],
-                                            ) {
-                                                target = Some(strip_symbol_prefix(t).to_string());
-                                            }
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                        if let Some(t) = target {
-                            if !t.is_empty() {
-                                for m in methods {
-                                    pending_delegators.push((t.clone(), m, call_line));
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
+                let start = root.start_position();
+                // Methods: respect visibility markers. Classes/modules are always exported.
+                let is_exported = if k == NodeKind::Method {
+                    *f.visibility_map.get(&(start.row as u32)).unwrap_or(&true)
+                } else {
+                    // Classes and Traits (modules) are always exported.
+                    true
+                };
+                // Ruby's constructor convention is `initialize`; the spec
+                // table maps it as Method, so promote here.
+                let k = if k == NodeKind::Method && name_str == "initialize" {
+                    NodeKind::Constructor
+                } else {
+                    k
+                };
+                cx.nodes.push(RawNode {
+                    is_exported,
+                    heritage,
+                    ..node::decl(
+                        name_str.to_string(),
+                        k,
+                        node::span(root),
+                        &source[root.start_byte()..root.end_byte()],
+                    )
+                });
             }
         }
 
-        drop(_p);
-        let _p = parse_prof::span(Pass::Walk);
-        // Detect module-as-enum imitation: walk AST for qualifying module nodes
-        // and emit BlindSpotRecord. Done after the query loop so it is
-        // independent of tree-sitter query captures.
-        detect_module_as_enum(tree.root_node(), path, is_test_file, &mut blind_spots);
-
-        // Helper: locate the smallest-span class RawNode whose body contains
-        // `line`. Returns its index in `nodes`. Shared between mixin
-        // application and the delegator Forwardable-scope check below.
-        let enclosing_class_idx = |nodes: &[RawNode], line: u32| -> Option<usize> {
-            let mut best: Option<usize> = None;
-            let mut best_span: u32 = u32::MAX;
-            for (i, n) in nodes.iter().enumerate() {
-                if n.kind != NodeKind::Class && n.kind != NodeKind::Trait {
-                    continue;
-                }
-                if n.span.0 <= line && n.span.2 >= line {
-                    let width = n.span.2 - n.span.0;
-                    if width < best_span {
-                        best_span = width;
-                        best = Some(i);
-                    }
-                }
-            }
-            best
-        };
-
-        drop(_p);
-        let _p = parse_prof::span(Pass::Build);
-        // Apply mixins: for each (module, line), find the smallest enclosing
-        // class RawNode by span containment and append the module to its
-        // heritage. Mixins outside any class are dropped (matches Ruby
-        // semantics — bare top-level `include` is rare and out of scope).
-        for (module_name, line) in &pending_mixins {
-            if let Some(i) = enclosing_class_idx(&nodes, *line) {
-                nodes[i].heritage.push(module_name.clone());
+        if let Some(i_node) = import_name {
+            if let Ok(name_str) =
+                std::str::from_utf8(&source[i_node.start_byte()..i_node.end_byte()])
+            {
+                cx.imports.push(driver::imports::raw(
+                    name_str.to_string(),
+                    name_str.to_string(),
+                    None,
+                    None,
+                ));
             }
         }
 
-        // Apply delegators: `def_delegator/s` / `delegate` add a method
-        // binding on the enclosing class. We require `extend Forwardable`
-        // (or `include Forwardable`) in the same enclosing class as a
-        // sanity check; without it we still emit (Option-A fallback per
-        // spec §4) at the cost of a known false positive when the user
-        // defines their own method named `def_delegator`.
-        //
-        // The emitted RawImport mirrors the alias-keyword shape:
-        // `{ alias: Some(method), imported_name: method, source: "target.method" }`
-        // so downstream rename / resolution code reuses the existing path.
-        for (target, method, line) in pending_delegators {
-            let enclosing = enclosing_class_idx(&nodes, line);
-            let _has_forwardable = enclosing.is_some_and(|idx| {
-                let span = nodes[idx].span;
-                pending_mixins
-                    .iter()
-                    .any(|(m, ml)| m == "Forwardable" && *ml >= span.0 && *ml <= span.2)
-            });
-            // Emit regardless of `_has_forwardable` — Option-A low-confidence
-            // fallback per docs/specs/2026-05-16-ruby-receiver-aware-resolver.md.
-            // The flag is retained as a future hook for telemetry / a
-            // BindingKind discriminant when one becomes available.
-            let source_path = format!("{target}.{method}");
-            push_alias_binding(&mut imports, &method, &source_path);
-            // Also materialise the delegator as a Method RawNode so cross-file
-            // mixin chains resolve via Tier 2.75 (HeritageScoped): without a
-            // real node in the originating module the alias is only visible
-            // to same-file lookups, leaving `class Bar; include Foo; end`
-            // callers unable to reach `Foo`'s delegated methods.
-            nodes.push(RawNode {
-                decorators: vec![],
-                is_exported: true,
-                heritage: vec![],
-                type_annotation: None,
-                name: method.clone(),
-                kind: NodeKind::Method,
-                span: (line, 0, line, 0),
-                calls: vec![],
-                field_reads: Vec::new(),
-                owner_class: None,
-                content_hash: 0,
-            });
-        }
-
-        // Extract call sites with receiver-type binding.
-        // Handles self.method → EnclosingClass.method, Constant.method → Constant.method.
-        // Same DFS also collects path-shaped string literals.
-        drop(_p);
-        let _p = parse_prof::span(Pass::Calls);
-        let (raw_path_literals, raw_sql_refs) =
-            extract_ruby_calls_and_path_literals(tree.root_node(), source, &mut nodes);
-        // Ruby has no field-read capture (`obj.x` is a call); the walk records
-        // the constants a method reads and its `method(:name)` references.
-        drop(_p);
-        let _p = parse_prof::span(Pass::Walk);
-        crate::calls::extract_field_reads(
-            tree.root_node(),
-            source,
-            &mut nodes,
-            &[],
-            &crate::calls::NameRefSpec {
-                ident_kinds: &["constant"],
-                kind: crate::calls::NameRefKind::Constant,
-                symbol_method_refs: true,
-                ..crate::calls::NameRefSpec::EMPTY
-            },
-        );
-
-        let framework_refs = detect_ast_framework_patterns(source, RUBY_FRAMEWORKS);
-
-        // Path-shape filter — drop generic route captures whose first
-        // string arg doesn't look like an HTTP route. Same rationale as
-        // the JS/TS/Python parsers; spec:
-        // `docs/superpowers/specs/2026-05-17-route-precision-design.md`.
-        drop(_p);
-        let _p = parse_prof::span(Pass::Build);
-        routes.retain_mut(|r| match crate::route_detector::clean_route_path(&r.path) {
-            Some(clean) => {
-                r.path = clean;
-                true
-            }
-            None => false,
+        // A route DSL sends its verb to the mapper: Rails `get "/x"` and
+        // Sinatra `get "/x" do` have no receiver; Hanami `router.get` and
+        // Roda `r.get` send it to a router object. Any other receiver
+        // means an HTTP client — `connection.get "/openapi/v1/tag"` names
+        // an endpoint this application calls, not one it serves. Measured
+        // 2026-09-02 on a Rails 8.1 app: ten such calls under
+        // `app/services/client/**` reached `ecp routes` before this check.
+        let declares_route = route_root.is_some_and(|n| match n.child_by_field_name("receiver") {
+            None => true,
+            Some(r) => r
+                .utf8_text(source)
+                .is_ok_and(|t| ROUTER_RECEIVERS.contains(&t)),
         });
 
-        // Rails states most of its routing surface through `resources`, which
-        // the generic matcher above cannot see because it names a symbol
-        // rather than a path. Expand the `routes.draw` DSL, and drop the
-        // generic captures inside those blocks — the expansion reports the
-        // same lines with the enclosing `namespace` / `scope` prefix applied.
-        let rails = crate::ruby::rails_routes::extract(tree.root_node(), source);
-        if !rails.draw_rows.is_empty() {
-            routes.retain(|r| !rails.covers(r.span.0));
-            routes.extend(rails.routes);
-            // A block past the walker's nesting cap keeps its generic captures
-            // (`covers` excludes it) and is reported as a place the graph
-            // stopped looking, the same way `send` and `eval` are.
-            for span in rails.truncated {
-                blind_spots.push(BlindSpot {
-                    kind: BLIND_RAILS_ROUTES_DEPTH.0.to_string(),
-                    file_path: path.to_path_buf(),
-                    span,
-                    hint: BLIND_RAILS_ROUTES_DEPTH.1.to_string(),
-                    is_test: is_test_file,
+        if let (true, Some(r_method), Some(r_path), Some(r_root)) =
+            (declares_route, route_method, route_path, route_root)
+        {
+            if let (Ok(method_str), Ok(path_str)) = (
+                std::str::from_utf8(&source[r_method.start_byte()..r_method.end_byte()]),
+                std::str::from_utf8(&source[r_path.start_byte()..r_path.end_byte()]),
+            ) {
+                let start = r_root.start_position();
+                let end = r_root.end_position();
+                // Sinatra `get "/x" do ... end` and Roda `r.get "x" do`
+                // serve the route with the block written in place.
+                let handler = r_root.child_by_field_name("block").map(|block| {
+                    ecp_core::contracts::raw_records::RawEndpoint::Unresolved(
+                        ecp_core::contracts::raw_records::Unbound::Inline(
+                            crate::framework_helpers::node_span(&block),
+                        ),
+                    )
+                });
+                cx.routes.push(RawRoute {
+                    method: method_str.to_string(),
+                    path: path_str.to_string(),
+                    handler,
+                    span: (
+                        start.row as u32,
+                        start.column as u32,
+                        end.row as u32,
+                        end.column as u32,
+                    ),
+                    scope: None,
                 });
             }
         }
 
-        drop(_p);
-        let _p = parse_prof::span(Pass::Walk);
-        let raw_function_metas =
-            crate::function_meta::ruby::extract(tree.root_node(), source, &nodes, file_category);
+        // attr_reader / attr_writer / attr_accessor → emit one Property per symbol.
+        // is_exported=true unconditionally; private-block detection is punted for MVP
+        // because tree-sitter parses `private` as just another bareword call without
+        // a structural block — distinguishing "below a private call" from "above"
+        // requires a stateful AST sweep that's out of scope for this pass.
+        if let Some(args) = attr_args_node {
+            let mut walker = args.walk();
+            for child in args.named_children(&mut walker) {
+                if child.kind() != "simple_symbol" {
+                    continue;
+                }
+                let Ok(sym_text) =
+                    std::str::from_utf8(&source[child.start_byte()..child.end_byte()])
+                else {
+                    continue;
+                };
+                let prop_name = sym_text.strip_prefix(':').unwrap_or(sym_text);
+                if prop_name.is_empty() {
+                    continue;
+                }
+                cx.nodes.push(RawNode {
+                    is_exported: true,
+                    ..node::decl(
+                        prop_name.to_string(),
+                        NodeKind::Property,
+                        node::span(child),
+                        &source[child.start_byte()..child.end_byte()],
+                    )
+                });
+            }
+        }
 
-        drop(_p);
-        let _p = parse_prof::span(Pass::Build);
-        crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
+        // include / extend → queue the module name for attachment to the
+        // enclosing class's heritage after all class nodes are emitted.
+        if let Some(mm) = mixin_module_node {
+            if let Ok(mm_str) = std::str::from_utf8(&source[mm.start_byte()..mm.end_byte()]) {
+                let line = mm.start_position().row as u32;
+                f.pending_mixins.push((mm_str.to_string(), line));
+            }
+        }
 
-        drop(_p);
-        let _p = parse_prof::span(Pass::Walk);
-        // Block-form transaction detection: walk AST for `call` nodes with
-        // method=`transaction` + `do_block` child. Must run after `nodes` is
-        // fully populated (stamp_owner_class_by_span finalises spans) so
-        // span-containment lookup for the enclosing function is accurate.
-        let tx_scopes = collect_ruby_transaction_scopes(tree.root_node(), source, &nodes);
+        // `alias new old` keyword → named binding.
+        if let (Some(n), Some(o)) = (alias_new_node, alias_old_node) {
+            if let (Ok(new_name), Ok(old_name)) = (
+                std::str::from_utf8(&source[n.start_byte()..n.end_byte()]),
+                std::str::from_utf8(&source[o.start_byte()..o.end_byte()]),
+            ) {
+                push_alias_binding(&mut cx.imports, new_name, old_name);
+            }
+        }
 
-        drop(_p);
-        Ok(LocalGraph {
-            content_hash: [0; 8],
-            routes,
-            file_path: path.to_path_buf(),
-            nodes,
-            imports,
-            documents: vec![],
-            route_receivers: None,
-            framework_refs,
-            fanout_refs: vec![],
-            blind_spots,
-            schema_fields: None,
-            event_topics: None,
-            tx_scopes,
-            path_literals: (!raw_path_literals.is_empty())
-                .then(|| raw_path_literals.into_boxed_slice()),
-            sql_refs: (!raw_sql_refs.is_empty()).then(|| raw_sql_refs.into_boxed_slice()),
-            call_metas: vec![],
-            raw_function_metas,
-            export_aliases: None,
-            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
-        })
+        // `alias_method :new, :old` metaprogramming → named binding.
+        // Walk the argument_list and grab the first two simple_symbols.
+        if let Some(args) = alias_method_args {
+            let mut walker = args.walk();
+            let symbols: Vec<&str> = args
+                .named_children(&mut walker)
+                .filter(|c| c.kind() == "simple_symbol")
+                .filter_map(|c| std::str::from_utf8(&source[c.start_byte()..c.end_byte()]).ok())
+                .map(|s| s.strip_prefix(':').unwrap_or(s))
+                .filter(|s| !s.is_empty())
+                .take(2)
+                .collect();
+            if let [new_name, old_name] = symbols.as_slice() {
+                push_alias_binding(&mut cx.imports, new_name, old_name);
+            }
+        }
+
+        // `MyConst = OtherModule::Const` → named binding.
+        // lhs is guaranteed `(constant)` by the query, so the assignment
+        // is a constant alias (not a local variable assignment).
+        if let (Some(lhs), Some(rhs)) = (const_alias_new_node, const_alias_source_node) {
+            if let (Ok(new_name), Ok(source_path)) = (
+                std::str::from_utf8(&source[lhs.start_byte()..lhs.end_byte()]),
+                std::str::from_utf8(&source[rhs.start_byte()..rhs.end_byte()]),
+            ) {
+                push_alias_binding(&mut cx.imports, new_name, source_path);
+            }
+        }
+
+        // `def_delegator :target, :method` / `def_delegators :target, :m1, ...` /
+        // `delegate :m1, :m2, to: :target` — parse argument list shape per
+        // method name. Each delegated method is queued for emission; the
+        // Forwardable-mixin check runs after the match loop because the
+        // enclosing class span and `pending_mixins` aren't both finalised
+        // until then.
+        if let (Some(method_node), Some(args)) = (delegator_method_node, delegator_args_node) {
+            let method_name =
+                std::str::from_utf8(&source[method_node.start_byte()..method_node.end_byte()])
+                    .unwrap_or("");
+            let call_line = method_node.start_position().row as u32;
+            let mut walker = args.walk();
+            let children: Vec<Node<'_>> = args.named_children(&mut walker).collect();
+
+            match method_name {
+                "def_delegator" | "def_delegators" => {
+                    // First simple_symbol = target; rest = delegated methods.
+                    let mut symbols = children
+                        .iter()
+                        .filter(|c| c.kind() == "simple_symbol")
+                        .filter_map(|c| {
+                            std::str::from_utf8(&source[c.start_byte()..c.end_byte()]).ok()
+                        });
+                    if let Some(target_raw) = symbols.next() {
+                        let target = strip_symbol_prefix(target_raw).to_string();
+                        if !target.is_empty() {
+                            for m_raw in symbols {
+                                let m = strip_symbol_prefix(m_raw);
+                                if !m.is_empty() {
+                                    f.pending_delegators.push((
+                                        target.clone(),
+                                        m.to_string(),
+                                        call_line,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+                "delegate" => {
+                    // simple_symbol* (methods), then `pair` with key=`to`,
+                    // value=simple_symbol (target). Walk in order, collect
+                    // method names until the `to:` pair is hit.
+                    let mut methods: Vec<String> = Vec::new();
+                    let mut target: Option<String> = None;
+                    for child in &children {
+                        match child.kind() {
+                            "simple_symbol" => {
+                                if let Ok(s) = std::str::from_utf8(
+                                    &source[child.start_byte()..child.end_byte()],
+                                ) {
+                                    let stripped = strip_symbol_prefix(s);
+                                    if !stripped.is_empty() {
+                                        methods.push(stripped.to_string());
+                                    }
+                                }
+                            }
+                            "pair" => {
+                                // Look for key=hash_key_symbol with text "to"
+                                // and value=simple_symbol/string.
+                                let key = child.child_by_field_name("key");
+                                let value = child.child_by_field_name("value");
+                                let key_text = key.and_then(|k| {
+                                    std::str::from_utf8(&source[k.start_byte()..k.end_byte()]).ok()
+                                });
+                                if key_text == Some("to") {
+                                    if let Some(v) = value {
+                                        if let Ok(t) = std::str::from_utf8(
+                                            &source[v.start_byte()..v.end_byte()],
+                                        ) {
+                                            target = Some(strip_symbol_prefix(t).to_string());
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    if let Some(t) = target {
+                        if !t.is_empty() {
+                            for m in methods {
+                                f.pending_delegators.push((t.clone(), m, call_line));
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn hook<'t>(h: RubyHook, _c: &Compiled<Self>, f: &mut RubyFile, cx: &mut FileCx<'t>) {
+        let root = cx.tree.root_node();
+        let source = cx.source;
+        match h {
+            RubyHook::Visibility => {
+                // Build method-row → is_exported map from visibility markers in class bodies.
+                f.visibility_map = build_visibility_map(root, source);
+            }
+            RubyHook::ModuleAsEnum => {
+                // Detect module-as-enum imitation: walk AST for qualifying module nodes
+                // and emit BlindSpotRecord. Done after the query loop so it is
+                // independent of tree-sitter query captures.
+                detect_module_as_enum(root, cx.path, cx.is_test, &mut cx.blind_spots);
+            }
+            RubyHook::Bindings => {
+                let nodes = &mut cx.nodes;
+                // Apply mixins: for each (module, line), find the smallest enclosing
+                // class RawNode by span containment and append the module to its
+                // heritage. Mixins outside any class are dropped (matches Ruby
+                // semantics — bare top-level `include` is rare and out of scope).
+                for (module_name, line) in &f.pending_mixins {
+                    if let Some(i) = enclosing_class_idx(nodes, *line) {
+                        nodes[i].heritage.push(module_name.clone());
+                    }
+                }
+
+                // Apply delegators: `def_delegator/s` / `delegate` add a method
+                // binding on the enclosing class. We require `extend Forwardable`
+                // (or `include Forwardable`) in the same enclosing class as a
+                // sanity check; without it we still emit (Option-A fallback per
+                // spec §4) at the cost of a known false positive when the user
+                // defines their own method named `def_delegator`.
+                //
+                // The emitted RawImport mirrors the alias-keyword shape:
+                // `{ alias: Some(method), imported_name: method, source: "target.method" }`
+                // so downstream rename / resolution code reuses the existing path.
+                for (target, method, line) in std::mem::take(&mut f.pending_delegators) {
+                    let enclosing = enclosing_class_idx(nodes, line);
+                    let _has_forwardable = enclosing.is_some_and(|idx| {
+                        let span = nodes[idx].span;
+                        f.pending_mixins
+                            .iter()
+                            .any(|(m, ml)| m == "Forwardable" && *ml >= span.0 && *ml <= span.2)
+                    });
+                    // Emit regardless of `_has_forwardable` — Option-A low-confidence
+                    // fallback per docs/specs/2026-05-16-ruby-receiver-aware-resolver.md.
+                    // The flag is retained as a future hook for telemetry / a
+                    // BindingKind discriminant when one becomes available.
+                    let source_path = format!("{target}.{method}");
+                    push_alias_binding(&mut cx.imports, &method, &source_path);
+                    // Also materialise the delegator as a Method RawNode so cross-file
+                    // mixin chains resolve via Tier 2.75 (HeritageScoped): without a
+                    // real node in the originating module the alias is only visible
+                    // to same-file lookups, leaving `class Bar; include Foo; end`
+                    // callers unable to reach `Foo`'s delegated methods.
+                    nodes.push(RawNode {
+                        is_exported: true,
+                        content_hash: 0,
+                        ..node::decl(method, NodeKind::Method, (line, 0, line, 0), &[])
+                    });
+                }
+            }
+            RubyHook::Calls => {
+                // Extract call sites with receiver-type binding.
+                // Handles self.method → EnclosingClass.method, Constant.method → Constant.method.
+                // Same DFS also collects path-shaped string literals.
+                let (raw_path_literals, raw_sql_refs) =
+                    extract_ruby_calls_and_path_literals(root, source, &mut cx.nodes);
+                cx.path_literals = raw_path_literals;
+                cx.sql_refs = raw_sql_refs;
+            }
+            RubyHook::Frameworks => {
+                cx.framework_refs = detect_ast_framework_patterns(source, RUBY_FRAMEWORKS);
+            }
+            RubyHook::Routes => {
+                // Path-shape filter — drop generic route captures whose first
+                // string arg doesn't look like an HTTP route. Same rationale as
+                // the JS/TS/Python parsers; spec:
+                // `docs/superpowers/specs/2026-05-17-route-precision-design.md`.
+                cx.routes
+                    .retain_mut(|r| match crate::route_detector::clean_route_path(&r.path) {
+                        Some(clean) => {
+                            r.path = clean;
+                            true
+                        }
+                        None => false,
+                    });
+
+                // Rails states most of its routing surface through `resources`, which
+                // the generic matcher above cannot see because it names a symbol
+                // rather than a path. Expand the `routes.draw` DSL, and drop the
+                // generic captures inside those blocks — the expansion reports the
+                // same lines with the enclosing `namespace` / `scope` prefix applied.
+                let rails = crate::ruby::rails_routes::extract(root, source);
+                if !rails.draw_rows.is_empty() {
+                    cx.routes.retain(|r| !rails.covers(r.span.0));
+                    cx.routes.extend(rails.routes);
+                    // A block past the walker's nesting cap keeps its generic captures
+                    // (`covers` excludes it) and is reported as a place the graph
+                    // stopped looking, the same way `send` and `eval` are.
+                    for span in rails.truncated {
+                        cx.blind_spots.push(BlindSpot {
+                            kind: BLIND_RAILS_ROUTES_DEPTH.0.to_string(),
+                            file_path: cx.path.to_path_buf(),
+                            span,
+                            hint: BLIND_RAILS_ROUTES_DEPTH.1.to_string(),
+                            is_test: cx.is_test,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    fn function_meta(
+        root: Node<'_>,
+        source: &[u8],
+        nodes: &[RawNode],
+        category: FileCategory,
+    ) -> Vec<RawFunctionMeta> {
+        crate::function_meta::ruby::extract(root, source, nodes, category)
     }
 }
