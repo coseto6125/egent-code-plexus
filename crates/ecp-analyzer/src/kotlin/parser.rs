@@ -167,10 +167,6 @@ fn is_annotation_class(class_decl: tree_sitter::Node, source: &[u8]) -> bool {
     false
 }
 
-fn text<'s>(node: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
-    std::str::from_utf8(&source[node.start_byte()..node.end_byte()]).ok()
-}
-
 impl KotlinProvider {
     pub fn new() -> anyhow::Result<Self> {
         Ok(Self {
@@ -245,15 +241,11 @@ type KtorRef = (&'static str, String, Span);
 
 #[derive(Default)]
 pub struct KotlinFile {
-    /// Vec + idx-map pattern — see java/parser.rs same-site note.
+    /// Dedup lookup for multi-capture merge only; nodes are pushed in match order and the map is never iterated.
     node_id_to_idx: FxHashMap<usize, usize>,
     /// Emitted only if the file imports `io.ktor.*`; the gate reads the
     /// imports after the query.
     pending_ktor_refs: Vec<KtorRef>,
-}
-
-const fn step(pass: Pass, effect: Effect, op: Op<KotlinHook>) -> Step<KotlinHook> {
-    Step { pass, effect, op }
 }
 
 impl ParseSpec for KotlinSpec {
@@ -322,19 +314,18 @@ impl ParseSpec for KotlinSpec {
         kinds: &[NodeKind::Method, NodeKind::Function, NodeKind::Constructor],
     };
     const POST_TREE: Option<fn(Tree, &[u8]) -> Tree> = Some(recover_same_line_closers);
-    // TxScopes ran before StampOwners before the move; both write disjoint
-    // fields (`tx_scopes` reads kind and decorators, the stamp writes
-    // `owner_class` only), so binding after the stamp emits the same scopes.
+    // Binding after the owner stamp is safe: `tx_scopes` reads kind and
+    // decorators, and the stamp writes only `owner_class`.
     const STEPS: &'static [Step<KotlinHook>] = &[
-        step(Pass::Query, Effect::Nodes, Op::Query),
-        step(Pass::Calls, Effect::Nodes, Op::Hook(KotlinHook::Calls)),
-        step(Pass::Walk, Effect::Nodes, Op::FieldReads),
-        step(Pass::Walk, Effect::Nodes, Op::VariantRefs),
-        step(Pass::Build, Effect::Neutral, Op::Hook(KotlinHook::Ktor)),
-        step(Pass::Walk, Effect::Neutral, Op::FunctionMeta),
-        step(Pass::Build, Effect::Nodes, Op::StampOwners),
-        step(Pass::Build, Effect::Bind, Op::TxScopes),
-        step(Pass::Walk, Effect::Neutral, Op::EventTopicsRequery),
+        Step::fixed(Pass::Query, Op::Query),
+        Step::hook(Pass::Calls, Effect::Nodes, KotlinHook::Calls),
+        Step::fixed(Pass::Walk, Op::FieldReads),
+        Step::fixed(Pass::Walk, Op::VariantRefs),
+        Step::hook(Pass::Build, Effect::Neutral, KotlinHook::Ktor),
+        Step::fixed(Pass::Walk, Op::FunctionMeta),
+        Step::fixed(Pass::Build, Op::StampOwners),
+        Step::fixed(Pass::Build, Op::TxScopes),
+        Step::fixed(Pass::Walk, Op::EventTopicsRequery),
     ];
 
     fn query() -> anyhow::Result<Query> {
@@ -390,24 +381,24 @@ impl ParseSpec for KotlinSpec {
                 }
             }
             KotlinRole::Export => {
-                if let Some(modifiers) = text(node, source) {
+                if let Some(modifiers) = node.utf8_text(source).ok() {
                     if modifiers.contains("private") || modifiers.contains("internal") {
                         m.is_exported = false;
                     }
                 }
             }
             KotlinRole::Heritage => {
-                if let Some(h) = text(node, source) {
+                if let Some(h) = node.utf8_text(source).ok() {
                     m.heritage.push(h.to_string());
                 }
             }
             KotlinRole::Type => {
-                if let Some(t) = text(node, source) {
+                if let Some(t) = node.utf8_text(source).ok() {
                     m.type_annotation = Some(t.to_string());
                 }
             }
             KotlinRole::Decorator => {
-                if let Some(dec) = text(node, source) {
+                if let Some(dec) = node.utf8_text(source).ok() {
                     m.decorators.push(dec.to_string());
                 }
             }
@@ -455,7 +446,7 @@ impl ParseSpec for KotlinSpec {
             // the tree-sitter pattern; broader cases get whatever shape
             // the grammar offers. Downstream consumers decide.
 
-            if let Some(name_str) = text(n, source) {
+            if let Some(name_str) = n.utf8_text(source).ok() {
                 // Property dedupe on name-node id so multi-declarator
                 // patterns each get their own entry; other kinds keep
                 // root-keyed dedupe (multi-decorator captures collapse).
@@ -501,10 +492,10 @@ impl ParseSpec for KotlinSpec {
         }
 
         if let Some(i_src) = m.import_source {
-            if let Some(src_str) = text(i_src, source) {
+            if let Some(src_str) = i_src.utf8_text(source).ok() {
                 let alias = m
                     .import_alias
-                    .and_then(|a_node| text(a_node, source))
+                    .and_then(|a_node| a_node.utf8_text(source).ok())
                     .map(|s| s.to_string());
                 let imported_name = if i_src.parent().is_some_and(|parent| {
                     parent
@@ -530,7 +521,7 @@ impl ParseSpec for KotlinSpec {
         if let (Some(verb), Some(span), Some(path_node)) =
             (m.ktor_verb, m.ktor_route_span, m.ktor_path_node)
         {
-            if let Some(path_str) = text(path_node, source) {
+            if let Some(path_str) = path_node.utf8_text(source).ok() {
                 f.pending_ktor_refs.push((verb, path_str.to_string(), span));
             }
         }

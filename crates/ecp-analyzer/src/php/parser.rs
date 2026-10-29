@@ -443,10 +443,6 @@ pub struct PhpFile<'t> {
     file_namespace: Option<String>,
 }
 
-const fn step(pass: Pass, effect: Effect, op: Op<PhpHook>) -> Step<PhpHook> {
-    Step { pass, effect, op }
-}
-
 impl ParseSpec for PhpSpec {
     type Role = PhpRole;
     type Match<'t> = PhpMatch<'t>;
@@ -525,26 +521,18 @@ impl ParseSpec for PhpSpec {
         kinds: &[NodeKind::Method, NodeKind::Function],
     };
     const STEPS: &'static [Step<PhpHook>] = &[
-        step(Pass::Query, Effect::Nodes, Op::Query),
-        step(Pass::Build, Effect::Neutral, Op::Hook(PhpHook::Routes)),
-        step(Pass::Calls, Effect::Nodes, Op::Hook(PhpHook::Calls)),
-        step(Pass::Walk, Effect::Nodes, Op::FieldReads),
-        step(Pass::Walk, Effect::Nodes, Op::VariantRefs),
-        step(Pass::Build, Effect::Neutral, Op::Hook(PhpHook::LaravelGate)),
-        step(Pass::Walk, Effect::Neutral, Op::FunctionMeta),
-        step(
-            Pass::Walk,
-            Effect::Neutral,
-            Op::Hook(PhpHook::EnumImitation),
-        ),
-        step(Pass::Build, Effect::Nodes, Op::StampOwners),
-        step(Pass::Build, Effect::Nodes, Op::Hook(PhpHook::ConstOwners)),
-        step(
-            Pass::Walk,
-            Effect::Nodes,
-            Op::Hook(PhpHook::QualifiedConstants),
-        ),
-        step(Pass::Build, Effect::Bind, Op::TxScopes),
+        Step::fixed(Pass::Query, Op::Query),
+        Step::hook(Pass::Build, Effect::Neutral, PhpHook::Routes),
+        Step::hook(Pass::Calls, Effect::Nodes, PhpHook::Calls),
+        Step::fixed(Pass::Walk, Op::FieldReads),
+        Step::fixed(Pass::Walk, Op::VariantRefs),
+        Step::hook(Pass::Build, Effect::Neutral, PhpHook::LaravelGate),
+        Step::fixed(Pass::Walk, Op::FunctionMeta),
+        Step::hook(Pass::Walk, Effect::Neutral, PhpHook::EnumImitation),
+        Step::fixed(Pass::Build, Op::StampOwners),
+        Step::hook(Pass::Build, Effect::Nodes, PhpHook::ConstOwners),
+        Step::hook(Pass::Walk, Effect::Nodes, PhpHook::QualifiedConstants),
+        Step::fixed(Pass::Build, Op::TxScopes),
     ];
 
     fn query() -> anyhow::Result<Query> {

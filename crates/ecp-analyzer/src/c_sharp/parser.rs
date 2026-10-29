@@ -12,7 +12,7 @@ use crate::framework_helpers::{
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::parse_prof::Pass;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::{LocalGraph, RawFunctionMeta, RawNode, Span, OVERRIDE_SENTINEL};
+use ecp_core::analyzer::types::{LocalGraph, RawFunctionMeta, RawNode, OVERRIDE_SENTINEL};
 use ecp_core::graph::{FileCategory, NodeKind};
 use rustc_hash::FxHashMap;
 use std::path::Path;
@@ -228,22 +228,6 @@ pub struct CSharpFile {
     node_id_to_idx: FxHashMap<usize, usize>,
 }
 
-const fn step(pass: Pass, effect: Effect, op: Op<CSharpHook>) -> Step<CSharpHook> {
-    Step { pass, effect, op }
-}
-
-/// Truncating `as u32` casts, as the old literals spelled the span.
-fn position_span(n: Node<'_>) -> Span {
-    let start = n.start_position();
-    let end = n.end_position();
-    (
-        start.row as u32,
-        start.column as u32,
-        end.row as u32,
-        end.column as u32,
-    )
-}
-
 impl ParseSpec for CSharpSpec {
     type Role = CSharpRole;
     type Match<'t> = CSharpMatch<'t>;
@@ -316,18 +300,14 @@ impl ParseSpec for CSharpSpec {
         kinds: &[NodeKind::Method, NodeKind::Constructor, NodeKind::Function],
     };
     const STEPS: &'static [Step<CSharpHook>] = &[
-        step(Pass::Query, Effect::Nodes, Op::Query),
-        step(Pass::Calls, Effect::Nodes, Op::Hook(CSharpHook::Calls)),
-        step(Pass::Walk, Effect::Nodes, Op::FieldReads),
-        step(Pass::Walk, Effect::Nodes, Op::VariantRefs),
-        step(
-            Pass::Walk,
-            Effect::Neutral,
-            Op::Hook(CSharpHook::Frameworks),
-        ),
-        step(Pass::Walk, Effect::Neutral, Op::FunctionMeta),
-        step(Pass::Build, Effect::Nodes, Op::StampOwners),
-        step(Pass::Build, Effect::Bind, Op::TxScopes),
+        Step::fixed(Pass::Query, Op::Query),
+        Step::hook(Pass::Calls, Effect::Nodes, CSharpHook::Calls),
+        Step::fixed(Pass::Walk, Op::FieldReads),
+        Step::fixed(Pass::Walk, Op::VariantRefs),
+        Step::hook(Pass::Walk, Effect::Neutral, CSharpHook::Frameworks),
+        Step::fixed(Pass::Walk, Op::FunctionMeta),
+        Step::fixed(Pass::Build, Op::StampOwners),
+        Step::fixed(Pass::Build, Op::TxScopes),
     ];
 
     fn query() -> anyhow::Result<Query> {
@@ -339,9 +319,10 @@ impl ParseSpec for CSharpSpec {
 
     fn role(capture: &str) -> Option<CSharpRole> {
         Some(match capture {
-            "function" | "class" | "method" | "interface" | "property" | "variable"
-            | "constructor" | "namespace" | "enum" | "enum_member_node" | "struct"
-            | "event_decl" => CSharpRole::Root,
+            "function" | "class" | "method" | "interface" | "property" | "constructor"
+            | "namespace" | "enum" | "enum_member_node" | "struct" | "event_decl" => {
+                CSharpRole::Root
+            }
             "destructor" => CSharpRole::DestructorRoot,
             "event_field" => CSharpRole::EventFieldRoot,
             "export" => CSharpRole::Export,
@@ -473,7 +454,7 @@ impl ParseSpec for CSharpSpec {
                     ..node::decl(
                         name,
                         NodeKind::Method,
-                        position_span(n),
+                        node::span(n),
                         &source[n.start_byte()..n.end_byte()],
                     )
                 });
@@ -625,7 +606,7 @@ impl ParseSpec for CSharpSpec {
                         ..node::decl(
                             name,
                             k,
-                            position_span(root),
+                            node::span(root),
                             &source[root.start_byte()..root.end_byte()],
                         )
                     });

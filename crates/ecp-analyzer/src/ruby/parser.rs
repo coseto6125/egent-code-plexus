@@ -419,10 +419,6 @@ pub struct RubyFile {
     pending_delegators: Vec<(String, String, u32)>,
 }
 
-const fn step(pass: Pass, effect: Effect, op: Op<RubyHook>) -> Step<RubyHook> {
-    Step { pass, effect, op }
-}
-
 impl ParseSpec for RubySpec {
     type Role = RubyRole;
     type Match<'t> = RubyMatch<'t>;
@@ -473,21 +469,17 @@ impl ParseSpec for RubySpec {
     /// span-containment lookup for the enclosing function is accurate.
     const TX: TxRule = TxRule::Tree(collect_ruby_transaction_scopes);
     const STEPS: &'static [Step<RubyHook>] = &[
-        step(Pass::Walk, Effect::Neutral, Op::Hook(RubyHook::Visibility)),
-        step(Pass::Query, Effect::Nodes, Op::Query),
-        step(
-            Pass::Walk,
-            Effect::Neutral,
-            Op::Hook(RubyHook::ModuleAsEnum),
-        ),
-        step(Pass::Build, Effect::Nodes, Op::Hook(RubyHook::Bindings)),
-        step(Pass::Calls, Effect::Nodes, Op::Hook(RubyHook::Calls)),
-        step(Pass::Walk, Effect::Nodes, Op::FieldReads),
-        step(Pass::Walk, Effect::Neutral, Op::Hook(RubyHook::Frameworks)),
-        step(Pass::Build, Effect::Neutral, Op::Hook(RubyHook::Routes)),
-        step(Pass::Walk, Effect::Neutral, Op::FunctionMeta),
-        step(Pass::Build, Effect::Nodes, Op::StampOwners),
-        step(Pass::Walk, Effect::Bind, Op::TxScopes),
+        Step::hook(Pass::Walk, Effect::Neutral, RubyHook::Visibility),
+        Step::fixed(Pass::Query, Op::Query),
+        Step::hook(Pass::Walk, Effect::Neutral, RubyHook::ModuleAsEnum),
+        Step::hook(Pass::Build, Effect::Nodes, RubyHook::Bindings),
+        Step::hook(Pass::Calls, Effect::Nodes, RubyHook::Calls),
+        Step::fixed(Pass::Walk, Op::FieldReads),
+        Step::hook(Pass::Walk, Effect::Neutral, RubyHook::Frameworks),
+        Step::hook(Pass::Build, Effect::Neutral, RubyHook::Routes),
+        Step::fixed(Pass::Walk, Op::FunctionMeta),
+        Step::fixed(Pass::Build, Op::StampOwners),
+        Step::fixed(Pass::Walk, Op::TxScopes),
     ];
 
     fn query() -> anyhow::Result<Query> {

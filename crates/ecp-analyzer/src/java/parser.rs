@@ -110,10 +110,6 @@ pub struct JavaFile {
     pending_spring_refs: Vec<RawFrameworkRef>,
 }
 
-const fn step(pass: Pass, effect: Effect, op: Op<JavaHook>) -> Step<JavaHook> {
-    Step { pass, effect, op }
-}
-
 impl ParseSpec for JavaSpec {
     type Role = JavaRole;
     type Match<'t> = JavaMatch<'t>;
@@ -186,15 +182,15 @@ impl ParseSpec for JavaSpec {
     // The tx bind follows owner stamping: stamping writes `owner_class`
     // only, which the binder does not read.
     const STEPS: &'static [Step<JavaHook>] = &[
-        step(Pass::Query, Effect::Nodes, Op::Query),
-        step(Pass::Build, Effect::Neutral, Op::Hook(JavaHook::SpringGate)),
-        step(Pass::Calls, Effect::Nodes, Op::Hook(JavaHook::Calls)),
-        step(Pass::Walk, Effect::Nodes, Op::FieldReads),
-        step(Pass::Walk, Effect::Nodes, Op::VariantRefs),
-        step(Pass::Walk, Effect::Neutral, Op::FunctionMeta),
-        step(Pass::Build, Effect::Nodes, Op::StampOwners),
-        step(Pass::Build, Effect::Bind, Op::TxScopes),
-        step(Pass::Walk, Effect::Neutral, Op::EventTopicsRequery),
+        Step::fixed(Pass::Query, Op::Query),
+        Step::hook(Pass::Build, Effect::Neutral, JavaHook::SpringGate),
+        Step::hook(Pass::Calls, Effect::Nodes, JavaHook::Calls),
+        Step::fixed(Pass::Walk, Op::FieldReads),
+        Step::fixed(Pass::Walk, Op::VariantRefs),
+        Step::fixed(Pass::Walk, Op::FunctionMeta),
+        Step::fixed(Pass::Build, Op::StampOwners),
+        Step::fixed(Pass::Build, Op::TxScopes),
+        Step::fixed(Pass::Walk, Op::EventTopicsRequery),
     ];
 
     fn query() -> anyhow::Result<Query> {
@@ -212,7 +208,7 @@ impl ParseSpec for JavaSpec {
     fn role(capture: &str) -> Option<JavaRole> {
         Some(match capture {
             "namespace" | "class" | "interface" | "method" | "constructor" | "property"
-            | "variable" | "enum" | "enum_constant_node" | "annotation" => JavaRole::Root,
+            | "enum" | "enum_constant_node" | "annotation" => JavaRole::Root,
             "export" => JavaRole::Export,
             "heritage" => JavaRole::Heritage,
             "type" => JavaRole::Type,
