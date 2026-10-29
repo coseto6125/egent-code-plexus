@@ -101,10 +101,12 @@ pub enum KindCapture {
 }
 
 #[derive(Clone, Copy)]
+/// Built only through [`Step::fixed`] and [`Step::hook`], so a fixed op
+/// always carries its own effect.
 pub struct Step<H> {
-    pub pass: Pass,
-    pub effect: Effect,
-    pub op: Op<H>,
+    pass: Pass,
+    effect: Effect,
+    op: Op<H>,
 }
 
 impl<H> Step<H> {
@@ -202,8 +204,8 @@ pub enum TxRule {
     Sites,
 }
 
-/// No `Nodes` step after a `Bind` step, every fixed op declares its fixed
-/// effect, exactly one step runs the query, the tap step follows it, and
+/// No `Nodes` step after a `Bind` step, exactly one step runs the query,
+/// the tap step follows it, and
 /// at most one step builds schema fields: the tap step drains the tapped
 /// rows, so a second schema step would overwrite the records.
 /// A hook's real writes are not checked here; the debug node-count
@@ -215,11 +217,6 @@ pub const fn steps_ok<H>(steps: &[Step<H>]) -> bool {
     let mut i = 0;
     while i < steps.len() {
         let step = &steps[i];
-        if let Some(fixed) = step.op.fixed_effect() {
-            if fixed as u8 != step.effect as u8 {
-                return false;
-            }
-        }
         match step.effect {
             Effect::Nodes if bound => return false,
             Effect::Bind => bound = true,
@@ -297,7 +294,7 @@ impl<S: ParseSpec> Compiled<S> {
         const {
             assert!(
                 steps_ok(S::STEPS),
-                "STEPS: a node-changing step follows a bind step, a fixed op declares the wrong effect, the query step is not exactly one, a tap step precedes the query, or two steps build schema fields"
+                "STEPS: a node-changing step follows a bind step, the query step is not exactly one, a tap step precedes the query, or two steps build schema fields"
             );
             assert!(
                 params_ok::<S>(),
@@ -633,15 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn test_steps_ok_tx_not_bind_returns_false() {
-        // Struct literals: `Step::fixed` cannot build a wrong effect.
-        let wrong = |op: Op<()>| Step {
-            pass: Pass::Build,
-            effect: Effect::Neutral,
-            op,
-        };
-        assert!(!steps_ok(&[QUERY, wrong(Op::TxScopes)]));
-        assert!(!steps_ok(&[QUERY, wrong(Op::StampOwners)]));
+    fn test_steps_ok_query_count_and_tap_order_returns_expected() {
         assert!(!steps_ok::<()>(&[]));
         assert!(!steps_ok(&[QUERY, QUERY]));
         let schemas = Step::fixed(Pass::Walk, Op::SchemaFields);
@@ -672,6 +661,14 @@ mod tests {
     #[should_panic(expected = "Step::hook")]
     fn test_step_fixed_hook_op_panics() {
         let _ = Step::fixed(Pass::Walk, Op::Hook(()));
+    }
+
+    #[test]
+    fn test_step_fixed_takes_op_effect() {
+        let tx = Step::<()>::fixed(Pass::Build, Op::TxScopes);
+        assert!(tx.effect == Effect::Bind);
+        let stamp = Step::<()>::fixed(Pass::Build, Op::StampOwners);
+        assert!(stamp.effect == Effect::Nodes);
     }
 
     #[test]
