@@ -899,10 +899,6 @@ pub struct PythonFile {
     pending_getattr_sites: Vec<Span>,
 }
 
-const fn step(pass: Pass, effect: Effect, op: Op<PythonHook>) -> Step<PythonHook> {
-    Step { pass, effect, op }
-}
-
 impl ParseSpec for PythonSpec {
     type Role = PythonRole;
     type Match<'t> = PythonMatch<'t>;
@@ -1014,44 +1010,32 @@ impl ParseSpec for PythonSpec {
     const SCHEMA_FIELDS: &'static [SchemaFieldConfig] = &[PYDANTIC_CONFIG, SQLALCHEMY_CONFIG];
     const TX: TxRule = TxRule::Sites;
     const STEPS: &'static [Step<PythonHook>] = &[
-        step(
-            Pass::Walk,
-            Effect::Neutral,
-            Op::Hook(PythonHook::ImportPreScan),
-        ),
-        step(Pass::Query, Effect::Nodes, Op::Query),
-        step(Pass::Calls, Effect::Nodes, Op::Hook(PythonHook::Calls)),
-        step(Pass::Walk, Effect::Nodes, Op::FieldReads),
-        step(Pass::Walk, Effect::Nodes, Op::VariantRefs),
-        step(Pass::Walk, Effect::Neutral, Op::Hook(PythonHook::Indirect)),
-        step(
-            Pass::Build,
-            Effect::Neutral,
-            Op::Hook(PythonHook::Frameworks),
-        ),
-        step(Pass::Walk, Effect::Neutral, Op::FunctionMeta),
-        step(Pass::Build, Effect::Nodes, Op::Hook(PythonHook::ClassKinds)),
-        step(Pass::Build, Effect::Nodes, Op::StampOwners),
+        Step::hook(Pass::Walk, Effect::Neutral, PythonHook::ImportPreScan),
+        Step::fixed(Pass::Query, Op::Query),
+        Step::hook(Pass::Calls, Effect::Nodes, PythonHook::Calls),
+        Step::fixed(Pass::Walk, Op::FieldReads),
+        Step::fixed(Pass::Walk, Op::VariantRefs),
+        Step::hook(Pass::Walk, Effect::Neutral, PythonHook::Indirect),
+        Step::hook(Pass::Build, Effect::Neutral, PythonHook::Frameworks),
+        Step::fixed(Pass::Walk, Op::FunctionMeta),
+        Step::hook(Pass::Build, Effect::Nodes, PythonHook::ClassKinds),
+        Step::fixed(Pass::Build, Op::StampOwners),
         // The language `file_identities` reads off the same path, so a
         // nested def loses its owner exactly where its uid is scoped.
-        step(Pass::Build, Effect::Nodes, Op::StampOwnerFns),
+        Step::fixed(Pass::Build, Op::StampOwnerFns),
         // Last owner step: a nested def or lambda node has a lexical parent
         // and no owner (invariant I1), whatever the class pass gave it.
-        step(Pass::Build, Effect::Nodes, Op::ClearScopedOwners),
-        // Moved after the node-changing steps: they retag only non-callables
+        Step::fixed(Pass::Build, Op::ClearScopedOwners),
+        // Runs after the node-changing steps: they retag only non-callables
         // (Class to Interface, an enum-body assignment to EnumVariant),
         // append nodes, or write `owner_class`, and the binder reads only the
         // index, kind and span of a Function, Method or Constructor.
-        step(Pass::Build, Effect::Bind, Op::TxScopes),
-        step(Pass::Walk, Effect::Neutral, Op::SchemaFieldsRequery),
-        step(Pass::Walk, Effect::Neutral, Op::EventTopicsRequery),
+        Step::fixed(Pass::Build, Op::TxScopes),
+        Step::fixed(Pass::Walk, Op::SchemaFieldsRequery),
+        Step::fixed(Pass::Walk, Op::EventTopicsRequery),
         // Framework extractors above need Python module names; the shared
         // resolver consumes paths and explicit namespace bindings.
-        step(
-            Pass::Imports,
-            Effect::Neutral,
-            Op::Hook(PythonHook::RootImports),
-        ),
+        Step::hook(Pass::Imports, Effect::Neutral, PythonHook::RootImports),
     ];
 
     fn query() -> anyhow::Result<Query> {
@@ -1520,30 +1504,23 @@ impl ParseSpec for PythonSpec {
                             _ => {}
                         }
                     }
-                    if let Some(i_name) = import_name_node {
-                        if let Ok(name_str) =
-                            std::str::from_utf8(&source[i_name.start_byte()..i_name.end_byte()])
-                        {
-                            let src_str = if let Some(i_src) = import_src_node {
-                                std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()])
-                                    .unwrap_or("")
-                                    .to_string()
-                            } else {
-                                "".to_string()
-                            };
-                            let alias = import_alias_node.and_then(|a| {
-                                std::str::from_utf8(&source[a.start_byte()..a.end_byte()])
-                                    .ok()
-                                    .map(|s| s.to_string())
-                            });
-                            cx.imports.push(driver::imports::raw(
-                                src_str,
-                                name_str.to_string(),
-                                alias,
-                                None,
-                            ));
-                        }
-                    }
+                    let Some(i_name) = import_name_node else {
+                        continue;
+                    };
+                    let Some(name_str) = i_name.utf8_text(source).ok() else {
+                        continue;
+                    };
+                    let src_str = import_src_node
+                        .map_or_else(String::new, |i_src| node_text(i_src, source).to_string());
+                    let alias = import_alias_node
+                        .and_then(|a| a.utf8_text(source).ok())
+                        .map(str::to_string);
+                    cx.imports.push(driver::imports::raw(
+                        src_str,
+                        name_str.to_string(),
+                        alias,
+                        None,
+                    ));
                 }
                 f.has_fastapi = has_import_from(&cx.imports, FASTAPI_REQUIRED);
                 f.has_django = has_import_from(&cx.imports, DJANGO_REQUIRED);

@@ -275,8 +275,7 @@ impl LanguageProvider for TypeScriptProvider {
 
 /// The captures TypeScript handles itself. A root capture sets the
 /// declaration root; the `.name` kind capture of the same match sets name
-/// and kind. `route.call` sets the same root, as the old loop's one
-/// `root_span_node` did.
+/// and kind. `route.call` sets the same root: a match has at most one root.
 #[derive(Clone, Copy)]
 pub enum TypeScriptRole {
     Root,
@@ -361,10 +360,6 @@ pub struct TypeScriptFile {
     pending_nestjs_decorator_routes: Vec<NestJsDecoratorRoute>,
 }
 
-const fn step(pass: Pass, effect: Effect, op: Op<TypeScriptHook>) -> Step<TypeScriptHook> {
-    Step { pass, effect, op }
-}
-
 impl ParseSpec for TypeScriptSpec {
     type Role = TypeScriptRole;
     type Match<'t> = TypeScriptMatch<'t>;
@@ -435,41 +430,25 @@ impl ParseSpec for TypeScriptSpec {
         kinds: &[NodeKind::Method, NodeKind::Function],
     };
     const STEPS: &'static [Step<TypeScriptHook>] = &[
-        step(Pass::Query, Effect::Nodes, Op::Query),
-        step(
-            Pass::Walk,
-            Effect::Neutral,
-            Op::Hook(TypeScriptHook::FreezeEnums),
-        ),
-        step(Pass::Calls, Effect::Nodes, Op::Hook(TypeScriptHook::Calls)),
-        step(Pass::Walk, Effect::Nodes, Op::FieldReads),
-        step(Pass::Walk, Effect::Nodes, Op::VariantRefs),
-        step(
-            Pass::Build,
-            Effect::Neutral,
-            Op::Hook(TypeScriptHook::Frameworks),
-        ),
-        step(
-            Pass::Walk,
-            Effect::Neutral,
-            Op::Hook(TypeScriptHook::Indirect),
-        ),
-        step(Pass::Walk, Effect::Neutral, Op::FunctionMeta),
-        step(
-            Pass::Build,
-            Effect::Nodes,
-            Op::Hook(TypeScriptHook::Exports),
-        ),
-        step(Pass::Build, Effect::Nodes, Op::StampOwners),
+        Step::fixed(Pass::Query, Op::Query),
+        Step::hook(Pass::Walk, Effect::Neutral, TypeScriptHook::FreezeEnums),
+        Step::hook(Pass::Calls, Effect::Nodes, TypeScriptHook::Calls),
+        Step::fixed(Pass::Walk, Op::FieldReads),
+        Step::fixed(Pass::Walk, Op::VariantRefs),
+        Step::hook(Pass::Build, Effect::Neutral, TypeScriptHook::Frameworks),
+        Step::hook(Pass::Walk, Effect::Neutral, TypeScriptHook::Indirect),
+        Step::fixed(Pass::Walk, Op::FunctionMeta),
+        Step::hook(Pass::Build, Effect::Nodes, TypeScriptHook::Exports),
+        Step::fixed(Pass::Build, Op::StampOwners),
         // The language `file_identities` reads off the same path, so a
         // nested function loses its owner exactly where its uid is scoped.
-        step(Pass::Build, Effect::Nodes, Op::StampOwnerFns),
+        Step::fixed(Pass::Build, Op::StampOwnerFns),
         // Last owner step: a nested function or callback node has a lexical
         // parent and no owner (invariant I1), whatever the class pass gave it.
-        step(Pass::Build, Effect::Nodes, Op::ClearScopedOwners),
-        step(Pass::Build, Effect::Bind, Op::TxScopes),
-        step(Pass::Walk, Effect::Neutral, Op::SchemaFields),
-        step(Pass::Walk, Effect::Neutral, Op::EventTopicsRequery),
+        Step::fixed(Pass::Build, Op::ClearScopedOwners),
+        Step::fixed(Pass::Build, Op::TxScopes),
+        Step::fixed(Pass::Walk, Op::SchemaFields),
+        Step::fixed(Pass::Walk, Op::EventTopicsRequery),
     ];
 
     fn query() -> anyhow::Result<Query> {
@@ -514,8 +493,8 @@ impl ParseSpec for TypeScriptSpec {
         })
     }
 
-    /// A fresh parser per file, as before the move, and always the
-    /// TypeScript grammar: a `.tsx` path parses with it too.
+    /// A fresh parser per file, always the TypeScript grammar: a `.tsx` path
+    /// parses with it too, so the output matches graphs the parse cache holds.
     fn parse_tree(source: &[u8]) -> Option<Tree> {
         let mut parser = Parser::new();
         parser
@@ -621,8 +600,7 @@ impl ParseSpec for TypeScriptSpec {
         // Process definitions
         if let (Some(n), Some(k), Some(root)) = (d.name, d.kind, root_span_node) {
             // A function-valued binding is the `@function` match's node; this
-            // match ends here, skipping every record below, as the old
-            // loop's `continue` did.
+            // match ends here, skipping every record below.
             if matches!(k, NodeKind::Const | NodeKind::Variable)
                 && n.parent()
                     .and_then(|declarator| declarator.child_by_field_name("value"))

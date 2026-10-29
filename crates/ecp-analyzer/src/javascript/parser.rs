@@ -198,10 +198,6 @@ pub struct JavaScriptFile {
     receivers: Vec<(Span, String)>,
 }
 
-const fn step(pass: Pass, effect: Effect, op: Op<JavaScriptHook>) -> Step<JavaScriptHook> {
-    Step { pass, effect, op }
-}
-
 impl ParseSpec for JavaScriptSpec {
     type Role = JavaScriptRole;
     type Match<'t> = JavaScriptMatch<'t>;
@@ -248,33 +244,21 @@ impl ParseSpec for JavaScriptSpec {
     });
     const EVENT_TOPICS: &'static [EventTopicConfig] = &[REDIS_JS, KAFKA_NODE, RABBITMQ_JS, SQS_JS];
     const STEPS: &'static [Step<JavaScriptHook>] = &[
-        step(Pass::Query, Effect::Nodes, Op::Query),
-        step(Pass::Calls, Effect::Nodes, Op::Hook(JavaScriptHook::Calls)),
-        step(Pass::Walk, Effect::Nodes, Op::FieldReads),
-        step(
-            Pass::Build,
-            Effect::Neutral,
-            Op::Hook(JavaScriptHook::Frameworks),
-        ),
-        step(
-            Pass::Walk,
-            Effect::Neutral,
-            Op::Hook(JavaScriptHook::Indirect),
-        ),
-        step(Pass::Walk, Effect::Neutral, Op::FunctionMeta),
-        step(
-            Pass::Build,
-            Effect::Nodes,
-            Op::Hook(JavaScriptHook::Exports),
-        ),
-        step(Pass::Build, Effect::Nodes, Op::StampOwners),
+        Step::fixed(Pass::Query, Op::Query),
+        Step::hook(Pass::Calls, Effect::Nodes, JavaScriptHook::Calls),
+        Step::fixed(Pass::Walk, Op::FieldReads),
+        Step::hook(Pass::Build, Effect::Neutral, JavaScriptHook::Frameworks),
+        Step::hook(Pass::Walk, Effect::Neutral, JavaScriptHook::Indirect),
+        Step::fixed(Pass::Walk, Op::FunctionMeta),
+        Step::hook(Pass::Build, Effect::Nodes, JavaScriptHook::Exports),
+        Step::fixed(Pass::Build, Op::StampOwners),
         // The language `file_identities` reads off the same path, so a
         // nested function loses its owner exactly where its uid is scoped.
-        step(Pass::Build, Effect::Nodes, Op::StampOwnerFns),
+        Step::fixed(Pass::Build, Op::StampOwnerFns),
         // Last owner step: a nested function or callback node has a lexical
         // parent and no owner (invariant I1), whatever the class pass gave it.
-        step(Pass::Build, Effect::Nodes, Op::ClearScopedOwners),
-        step(Pass::Walk, Effect::Neutral, Op::EventTopicsRequery),
+        Step::fixed(Pass::Build, Op::ClearScopedOwners),
+        Step::fixed(Pass::Walk, Op::EventTopicsRequery),
     ];
 
     fn query() -> anyhow::Result<Query> {

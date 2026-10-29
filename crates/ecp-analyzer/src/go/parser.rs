@@ -375,10 +375,6 @@ fn is_db_begin_call(call: tree_sitter::Node<'_>, source: &[u8]) -> bool {
     matches!(method_name, "Begin" | "BeginTx")
 }
 
-fn text<'s>(node: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
-    std::str::from_utf8(&source[node.start_byte()..node.end_byte()]).ok()
-}
-
 fn is_exported(name: &str) -> bool {
     name.chars().next().is_some_and(|c| c.is_uppercase())
 }
@@ -480,10 +476,6 @@ pub struct GoFile<'t> {
     local_types: LocalTypes,
 }
 
-const fn step(pass: Pass, effect: Effect, op: Op<GoHook>) -> Step<GoHook> {
-    Step { pass, effect, op }
-}
-
 impl ParseSpec for GoSpec {
     type Role = GoRole;
     type Match<'t> = GoMatch<'t>;
@@ -520,20 +512,16 @@ impl ParseSpec for GoSpec {
     /// one scope per enclosing function.
     const TX: TxRule = TxRule::Tree(collect_go_sql_tx_scopes);
     const STEPS: &'static [Step<GoHook>] = &[
-        step(Pass::Walk, Effect::Neutral, Op::Hook(GoHook::Iota)),
-        step(Pass::Query, Effect::Nodes, Op::Query),
-        step(Pass::Build, Effect::Nodes, Op::Hook(GoHook::MergeFileVars)),
-        step(
-            Pass::Build,
-            Effect::Neutral,
-            Op::SortDedupImports(ImportOrder::SourceName),
-        ),
-        step(Pass::Calls, Effect::Nodes, Op::Hook(GoHook::Calls)),
-        step(Pass::Walk, Effect::Nodes, Op::Hook(GoHook::FieldReads)),
-        step(Pass::Build, Effect::Neutral, Op::Hook(GoHook::Routes)),
-        step(Pass::Walk, Effect::Neutral, Op::FunctionMeta),
-        step(Pass::Walk, Effect::Bind, Op::TxScopes),
-        step(Pass::Walk, Effect::Neutral, Op::EventTopicsRequery),
+        Step::hook(Pass::Walk, Effect::Neutral, GoHook::Iota),
+        Step::fixed(Pass::Query, Op::Query),
+        Step::hook(Pass::Build, Effect::Nodes, GoHook::MergeFileVars),
+        Step::fixed(Pass::Build, Op::SortDedupImports(ImportOrder::SourceName)),
+        Step::hook(Pass::Calls, Effect::Nodes, GoHook::Calls),
+        Step::hook(Pass::Walk, Effect::Nodes, GoHook::FieldReads),
+        Step::hook(Pass::Build, Effect::Neutral, GoHook::Routes),
+        Step::fixed(Pass::Walk, Op::FunctionMeta),
+        Step::fixed(Pass::Walk, Op::TxScopes),
+        Step::fixed(Pass::Walk, Op::EventTopicsRequery),
     ];
 
     fn query() -> anyhow::Result<Query> {
@@ -587,12 +575,12 @@ impl ParseSpec for GoSpec {
         match r {
             GoRole::Root => d.root = Some(node),
             GoRole::Heritage => {
-                if let Some(h_name) = text(node, source) {
+                if let Some(h_name) = node.utf8_text(source).ok() {
                     m.heritage.push(h_name.to_string());
                 }
             }
             GoRole::Type => {
-                if let Some(t_name) = text(node, source) {
+                if let Some(t_name) = node.utf8_text(source).ok() {
                     if let Some(ref mut existing) = m.type_annotation {
                         existing.push(' ');
                         existing.push_str(t_name);
@@ -612,7 +600,7 @@ impl ParseSpec for GoSpec {
             GoRole::RoutePath => m.route_path_node = Some(node),
             GoRole::FieldName => m.field_name_nodes.push(node),
             GoRole::FieldType => {
-                if let Some(t_str) = text(node, source) {
+                if let Some(t_str) = node.utf8_text(source).ok() {
                     m.field_type_text = Some(t_str.to_string());
                 }
             }
@@ -622,7 +610,7 @@ impl ParseSpec for GoSpec {
             }
             GoRole::VarName => m.var_name_nodes.push(node),
             GoRole::VarType => {
-                if let Some(t_str) = text(node, source) {
+                if let Some(t_str) = node.utf8_text(source).ok() {
                     m.var_type_text = Some(t_str.to_string());
                 }
             }
@@ -676,7 +664,7 @@ impl ParseSpec for GoSpec {
         // owner_class = enclosing named struct type, so two structs with a
         // same-named field get distinct uids.
         for name_node in &field_name_nodes {
-            if let Some(name_str) = text(*name_node, source) {
+            if let Some(name_str) = name_node.utf8_text(source).ok() {
                 let name = name_str.to_string();
                 cx.nodes.push(RawNode {
                     is_exported: is_exported(&name),
@@ -702,7 +690,7 @@ impl ParseSpec for GoSpec {
                     .map(|d| collect_go_pragmas(d, source))
                     .unwrap_or_default();
                 for n in &var_name_nodes {
-                    if let Some(name_str) = text(*n, source) {
+                    if let Some(name_str) = n.utf8_text(source).ok() {
                         if name_str == "_" {
                             continue;
                         }
@@ -728,7 +716,7 @@ impl ParseSpec for GoSpec {
         // span ends at the name's `var_spec` instead, as on the `@var` path.
         if is_file_var {
             for n in &file_var_name_nodes {
-                if let Some(name_str) = text(*n, source) {
+                if let Some(name_str) = n.utf8_text(source).ok() {
                     if name_str == "_" {
                         continue;
                     }
@@ -783,7 +771,7 @@ impl ParseSpec for GoSpec {
             if let Some(root) = local_root_node {
                 let enclosing = enclosing_func_or_method_name(root, source);
                 for n in &local_name_nodes {
-                    if let Some(name_str) = text(*n, source) {
+                    if let Some(name_str) = n.utf8_text(source).ok() {
                         if name_str == "_" {
                             continue;
                         }
@@ -804,7 +792,7 @@ impl ParseSpec for GoSpec {
         }
 
         if let (Some(n), Some(k), Some(root)) = (d.name, d.kind, d.root) {
-            if let Some(name_str) = text(n, source) {
+            if let Some(name_str) = n.utf8_text(source).ok() {
                 let name = name_str.to_string();
                 // Each match carries the full declaration node, so two methods
                 // with the same name on different receivers stay distinct.
@@ -839,8 +827,8 @@ impl ParseSpec for GoSpec {
                 (route_method_node, route_path_node, route_span_node)
             {
                 if f.route_calls.insert(span_node.id()) {
-                    let method_str = text(m_node, source).unwrap_or("").to_string();
-                    let path_raw = text(p_node, source).unwrap_or("");
+                    let method_str = m_node.utf8_text(source).ok().unwrap_or("").to_string();
+                    let path_raw = p_node.utf8_text(source).ok().unwrap_or("");
                     let path_str = path_raw.trim_matches(|c| c == '"' || c == '`').to_string();
                     let path_str = match go_group_prefix(span_node, source) {
                         Some(prefix) => {
@@ -863,12 +851,12 @@ impl ParseSpec for GoSpec {
 
         if is_import {
             if let Some(src_node) = import_source {
-                if let Some(src_quoted) = text(src_node, source) {
+                if let Some(src_quoted) = src_node.utf8_text(source).ok() {
                     let source_path = src_quoted
                         .trim_matches(|c| c == '"' || c == '`')
                         .to_string();
                     let alias = import_alias
-                        .and_then(|a| text(a, source))
+                        .and_then(|a| a.utf8_text(source).ok())
                         .map(str::to_string);
                     // `.` and `_` bind no package name; keep them in `alias`
                     // only, so no symbol named `_` resolves as the import.

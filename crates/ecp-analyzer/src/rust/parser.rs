@@ -131,10 +131,6 @@ pub struct RustFile {
     local_types: Option<LocalTypes>,
 }
 
-const fn step(pass: Pass, effect: Effect, op: Op<RustHook>) -> Step<RustHook> {
-    Step { pass, effect, op }
-}
-
 impl ParseSpec for RustSpec {
     type Role = RustRole;
     type Match<'t> = RustMatch<'t>;
@@ -198,29 +194,25 @@ impl ParseSpec for RustSpec {
         kinds: &[NodeKind::Function, NodeKind::Method],
     };
     const STEPS: &'static [Step<RustHook>] = &[
-        step(Pass::Query, Effect::Nodes, Op::Query),
-        step(
-            Pass::Imports,
-            Effect::Neutral,
-            Op::Hook(RustHook::NestedUse),
-        ),
-        step(Pass::Calls, Effect::Nodes, Op::Hook(RustHook::Calls)),
-        step(Pass::Walk, Effect::Nodes, Op::FieldReads),
-        step(Pass::Walk, Effect::Nodes, Op::VariantRefs),
-        step(Pass::Walk, Effect::Neutral, Op::Hook(RustHook::Indirect)),
-        step(Pass::Build, Effect::Neutral, Op::Hook(RustHook::Frameworks)),
-        step(Pass::Walk, Effect::Neutral, Op::FunctionMeta),
-        step(Pass::Walk, Effect::Neutral, Op::EventTopicsRequery),
+        Step::fixed(Pass::Query, Op::Query),
+        Step::hook(Pass::Imports, Effect::Neutral, RustHook::NestedUse),
+        Step::hook(Pass::Calls, Effect::Nodes, RustHook::Calls),
+        Step::fixed(Pass::Walk, Op::FieldReads),
+        Step::fixed(Pass::Walk, Op::VariantRefs),
+        Step::hook(Pass::Walk, Effect::Neutral, RustHook::Indirect),
+        Step::hook(Pass::Build, Effect::Neutral, RustHook::Frameworks),
+        Step::fixed(Pass::Walk, Op::FunctionMeta),
+        Step::fixed(Pass::Walk, Op::EventTopicsRequery),
         // FU-016: fill module ownership for items inside `mod foo { ... }`.
         // `enclosing_impl_type` already populated `impl Foo` method ownership;
         // `stamp_owner_class_by_span` preserves those (see the `is_none()` guard
         // in framework_helpers) and only fills the gap for module-resident
         // free items, so `scope_defines::Pass2` can emit `Module(foo) → bar`.
-        step(Pass::Build, Effect::Nodes, Op::StampOwners),
+        Step::fixed(Pass::Build, Op::StampOwners),
         // Last owner step: a nested `fn` or closure node has a lexical
         // parent and no owner (invariant I1), whatever the steps above set.
-        step(Pass::Build, Effect::Nodes, Op::ClearScopedOwners),
-        step(Pass::Build, Effect::Bind, Op::TxScopes),
+        Step::fixed(Pass::Build, Op::ClearScopedOwners),
+        Step::fixed(Pass::Build, Op::TxScopes),
     ];
 
     fn query() -> anyhow::Result<Query> {
