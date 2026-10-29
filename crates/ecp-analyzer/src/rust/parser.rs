@@ -1,37 +1,31 @@
 use super::receiver_types::{
     build_impl_map, collect_local_types, enclosing_enum_name, enclosing_function_name,
     enclosing_impl_or_trait_context, enclosing_impl_type, enclosing_struct_type,
-    extract_rust_calls_and_path_literals, impl_self_type, impl_trait_name,
+    extract_rust_calls_and_path_literals, impl_self_type, impl_trait_name, LocalTypes,
 };
 use super::spec::RustSpec;
+use crate::calls::{NameRefKind, NameRefSpec, VariantRefSpec};
+use crate::driver::{
+    self, node, AnonKey, Anonymous, Compiled, DeclSlot, Effect, FieldReads, FileCx, KindCapture,
+    Op, ParseSpec, ScopeLanguage, Step, TxRule,
+};
+use crate::event_topic::{EventTopicConfig, KAFKA_RUST, RABBITMQ_RUST, REDIS_RUST, SQS_RUST};
 use crate::framework_confidence;
 use crate::framework_helpers::{
-    collect_rust_transactional_scopes, has_import_from, node_span, push_blind_spot,
-    MODULE_LEVEL_SOURCE,
+    collect_rust_transactional_scopes, has_import_from, node_span, MODULE_LEVEL_SOURCE,
 };
 use crate::indirect_dispatch::{collect_rust_indirect_param_types, detect_rust_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
-use ecp_core::analyzer::lang_spec::LangSpec;
-use ecp_core::analyzer::parse_prof::{self, Pass};
+use ecp_core::analyzer::parse_prof::Pass;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode};
-use ecp_core::graph::NodeKind;
+use ecp_core::analyzer::types::{
+    LocalGraph, RawFrameworkRef, RawFunctionMeta, RawImport, RawNode, Span,
+};
+use ecp_core::file_category::Language;
+use ecp_core::graph::{FileCategory, NodeKind};
+use std::ops::Range;
 use std::path::Path;
-use streaming_iterator::StreamingIterator;
-use tree_sitter::{Query, QueryCursor};
-
-/// Blind-spot kind/hint pairs. Order matches the capture-index dispatch
-/// in `parse_file`.
-const BLIND_SPEC: &[(&str, &str)] = &[
-    (
-        "rs-transmute-fn",
-        "transmute::<_, fn(...)>(ptr) — bit-cast to a function pointer; target function not statically determinable",
-    ),
-    (
-        "rs-libloading-get",
-        "libloading::Library::get(...) — dynamic symbol load from dlopen'd library; target function resolved at runtime",
-    ),
-];
+use tree_sitter::{Node, Query, Tree};
 
 thread_local! {
     static PARSER: std::cell::RefCell<tree_sitter::Parser> = std::cell::RefCell::new({
@@ -40,22 +34,6 @@ thread_local! {
         parser.set_language(&language).expect("Failed to set language");
         parser
     });
-}
-/// Whether `node`'s subtree contains a `call_expression`. Gates emission of
-/// `<anonymous>` callback nodes so empty closures (e.g. `v.iter().map(|x| x * 2)`)
-/// stay out of the graph.
-fn body_has_call(node: tree_sitter::Node) -> bool {
-    let mut stack = vec![node];
-    while let Some(n) = stack.pop() {
-        if n.kind() == "call_expression" {
-            return true;
-        }
-        let mut c = n.walk();
-        for child in n.children(&mut c) {
-            stack.push(child);
-        }
-    }
-    false
 }
 
 /// The trait an `impl Trait for T` names, as other languages store a base:
@@ -77,96 +55,13 @@ fn trait_path(text: &str) -> String {
 }
 
 pub struct RustProvider {
-    query: Query,
-    indices: RustCaptureIndices,
-    /// Capture index → NodeKind mapping, pre-resolved from
-    /// `RustSpec::CAPTURE_KIND` at provider construction. The hot loop
-    /// looks up by integer index (cap.index as usize) — equivalent perf
-    /// to the previous hard-coded if-chain, but the source of truth
-    /// lives in `spec.rs` const tables.
-    capture_kind_by_idx: Vec<Option<NodeKind>>,
-}
-
-struct RustCaptureIndices {
-    import_name: Option<u32>,
-    import_source: Option<u32>,
-    import_alias: Option<u32>,
-    function: Option<u32>,
-    struct_root: Option<u32>,
-    enum_root: Option<u32>,
-    enum_variant_root: Option<u32>,
-    trait_root: Option<u32>,
-    method: Option<u32>,
-    module_root: Option<u32>,
-    type_alias_root: Option<u32>,
-    const_root: Option<u32>,
-    impl_root: Option<u32>,
-    macro_root: Option<u32>,
-    export: Option<u32>,
-    heritage: Option<u32>,
-    type_ann: Option<u32>,
-    decorator: Option<u32>,
-    property: Option<u32>,
-    axum_handler: Option<u32>,
-    actix_method: Option<u32>,
-    actix_handler: Option<u32>,
-    // BlindSpot captures (FU-001 P4).
-    blind_transmute_fn: Option<u32>,
-    blind_libloading_get: Option<u32>,
-    function_anonymous: Option<u32>,
+    compiled: Compiled<RustSpec>,
 }
 
 impl RustProvider {
     pub fn new() -> anyhow::Result<Self> {
-        let language = tree_sitter_rust::LANGUAGE.into();
-        let query_source = format!(
-            "{}\n;; ---- framework queries ----\n{}",
-            include_str!("queries.scm"),
-            include_str!("frameworks.scm"),
-        );
-        let query = Query::new(&language, &query_source)?;
-        let indices = RustCaptureIndices {
-            import_name: query.capture_index_for_name("import.name"),
-            import_source: query.capture_index_for_name("import.source"),
-            import_alias: query.capture_index_for_name("import.alias"),
-            function: query.capture_index_for_name("function"),
-            struct_root: query.capture_index_for_name("struct"),
-            enum_root: query.capture_index_for_name("enum"),
-            enum_variant_root: query.capture_index_for_name("enum_variant_node"),
-            trait_root: query.capture_index_for_name("trait"),
-            method: query.capture_index_for_name("method"),
-            module_root: query.capture_index_for_name("module"),
-            type_alias_root: query.capture_index_for_name("type_alias"),
-            const_root: query.capture_index_for_name("const_decl"),
-            impl_root: query.capture_index_for_name("impl_block"),
-            macro_root: query.capture_index_for_name("macro_def"),
-            export: query.capture_index_for_name("export"),
-            heritage: query.capture_index_for_name("heritage"),
-            type_ann: query.capture_index_for_name("type"),
-            decorator: query.capture_index_for_name("decorator"),
-            property: query.capture_index_for_name("property"),
-            axum_handler: query.capture_index_for_name("axum.route.handler"),
-            actix_method: query.capture_index_for_name("actix.route.method"),
-            actix_handler: query.capture_index_for_name("actix.route.handler"),
-            blind_transmute_fn: query.capture_index_for_name("blind.transmute_fn"),
-            blind_libloading_get: query.capture_index_for_name("blind.libloading_get"),
-            function_anonymous: query.capture_index_for_name("function.anonymous"),
-        };
-
-        // Pre-resolve capture-name → NodeKind from the spec table so the
-        // hot loop stays an integer-index lookup (no per-capture string
-        // compare). Capture names not in the spec map yield None and
-        // fall through to the metadata-only branches (export, heritage, etc.).
-        let capture_kind_by_idx: Vec<Option<NodeKind>> = query
-            .capture_names()
-            .iter()
-            .map(|name| RustSpec::CAPTURE_KIND.get(name).copied())
-            .collect();
-
         Ok(Self {
-            query,
-            indices,
-            capture_kind_by_idx,
+            compiled: Compiled::new()?,
         })
     }
 }
@@ -177,564 +72,549 @@ impl LanguageProvider for RustProvider {
     }
 
     fn parse_file(&self, path: &Path, source: &[u8]) -> anyhow::Result<LocalGraph> {
-        let _p = parse_prof::span(Pass::Tree);
-        let tree = PARSER
-            .with(|p| parse_with_budget(&mut p.borrow_mut(), source, ParseBudget::DEFAULT))
-            .ok_or_else(|| anyhow::anyhow!("Failed to parse file"))?;
+        driver::parse(&self.compiled, path, source)
+    }
+}
 
-        drop(_p);
-        let _p = parse_prof::span(Pass::Query);
-        let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(&self.query, tree.root_node(), source);
+/// The captures Rust handles itself; the root captures set the kind that a
+/// `.name` capture of the same match only fills while it is empty.
+#[derive(Clone, Copy)]
+pub enum RustRole {
+    ImportName,
+    ImportSource,
+    ImportAlias,
+    Root(NodeKind),
+    Export,
+    Heritage,
+    TypeAnnotation,
+    Decorator,
+    AxumHandler,
+    ActixMethod,
+    ActixHandler,
+}
 
-        let mut nodes: Vec<RawNode> = Vec::new();
-        // Span dedup for `<anonymous>` callback nodes — a closure appearing in
-        // multiple query matches (e.g. nested patterns) must only emit once.
-        let mut anonymous_spans: std::collections::HashSet<(u32, u32, u32, u32)> =
-            std::collections::HashSet::new();
-        let mut imports: Vec<RawImport> = Vec::new();
-        let mut blind_spots: Vec<BlindSpot> = Vec::new();
-        let file_category =
-            ecp_core::file_category::determine_category(path.to_str().unwrap_or(""));
-        let is_test_file = file_category == ecp_core::graph::FileCategory::Test;
+#[derive(Clone, Copy)]
+pub enum RustHook {
+    NestedUse,
+    Calls,
+    Indirect,
+    Frameworks,
+}
 
-        let idx = &self.indices;
+/// `(handler_ident, capture_start_byte, capture_end_byte, span)`
+type AxumCapture = (String, usize, usize, Span);
+/// `(method, handler_ident, span)`
+type ActixCapture = (String, String, Span);
 
-        // Side-table: top-level free `fn` byte ranges + names, used to resolve
-        // the enclosing function for framework-ref captures via byte-range containment.
-        let mut fn_spans: Vec<(String, std::ops::Range<usize>)> = Vec::new();
-        // (handler_ident, capture_start_byte, capture_end_byte, span)
-        type AxumCapture = (String, usize, usize, (u32, u32, u32, u32));
-        // (method, handler_ident, span)
-        type ActixCapture = (String, String, (u32, u32, u32, u32));
-        let mut axum_handler_captures: Vec<AxumCapture> = Vec::new();
-        let mut actix_handler_captures: Vec<ActixCapture> = Vec::new();
+#[derive(Default)]
+pub struct RustMatch<'t> {
+    is_exported: bool,
+    heritage: Vec<String>,
+    type_annotation: Option<String>,
+    decorators: Vec<String>,
+    import_name: Option<Node<'t>>,
+    import_src: Option<Node<'t>>,
+    import_alias: Option<Node<'t>>,
+    // One match = one fn + its attribute.
+    actix_method: Option<Node<'t>>,
+    actix_handler: Option<Node<'t>>,
+}
 
-        while let Some(m) = matches.next() {
-            let mut name_node = None;
-            let mut kind = None;
-            let mut root_span_node = None;
-            let mut is_exported = false;
-            let mut heritage = Vec::new();
-            let mut type_annotation = None;
-            let mut decorators = Vec::new();
+#[derive(Default)]
+pub struct RustFile {
+    /// Function and method byte ranges + names, used to resolve the
+    /// enclosing function of a framework-ref capture by byte-range containment.
+    fn_spans: Vec<(String, Range<usize>)>,
+    axum_handler_captures: Vec<AxumCapture>,
+    actix_handler_captures: Vec<ActixCapture>,
+    /// Written by the calls step, read by the indirect step.
+    local_types: Option<LocalTypes>,
+}
 
-            let mut import_name = None;
-            let mut import_src = None;
-            let mut import_alias = None;
+const fn step(pass: Pass, effect: Effect, op: Op<RustHook>) -> Step<RustHook> {
+    Step { pass, effect, op }
+}
 
-            // Per-match Actix capture pair (one match = one fn + its attribute).
-            let mut actix_method: Option<tree_sitter::Node> = None;
-            let mut actix_handler: Option<tree_sitter::Node> = None;
+impl ParseSpec for RustSpec {
+    type Role = RustRole;
+    type Match<'t> = RustMatch<'t>;
+    type File<'t> = RustFile;
+    type Hook = RustHook;
 
-            for cap in m.captures() {
-                let cap_idx = Some(cap.index);
-                if let Some(k_from_spec) = self
-                    .capture_kind_by_idx
-                    .get(cap.index as usize)
-                    .copied()
-                    .flatten()
-                {
-                    // Single config-driven dispatch replaces the ten explicit
-                    // name_struct/name_enum/… arms. Source of truth: RustSpec::CAPTURE_KIND.
-                    name_node = Some(cap.node);
-                    if kind.is_none() {
-                        kind = Some(k_from_spec);
-                    }
-                } else if cap_idx == idx.import_name {
-                    import_name = Some(cap.node);
-                } else if cap_idx == idx.import_source {
-                    import_src = Some(cap.node);
-                } else if cap_idx == idx.import_alias {
-                    import_alias = Some(cap.node);
-                } else if cap_idx == idx.function {
-                    root_span_node = Some(cap.node);
-                    kind = Some(NodeKind::Function);
-                } else if cap_idx == idx.struct_root {
-                    root_span_node = Some(cap.node);
-                    kind = Some(NodeKind::Struct);
-                } else if cap_idx == idx.enum_root {
-                    root_span_node = Some(cap.node);
-                    kind = Some(NodeKind::Enum);
-                } else if cap_idx == idx.enum_variant_root {
-                    root_span_node = Some(cap.node);
-                    kind = Some(NodeKind::EnumVariant);
-                } else if cap_idx == idx.trait_root {
-                    root_span_node = Some(cap.node);
-                    kind = Some(NodeKind::Trait);
-                } else if cap_idx == idx.module_root {
-                    root_span_node = Some(cap.node);
-                    kind = Some(NodeKind::Module);
-                } else if cap_idx == idx.type_alias_root {
-                    root_span_node = Some(cap.node);
-                    kind = Some(NodeKind::Typedef);
-                } else if cap_idx == idx.const_root {
-                    root_span_node = Some(cap.node);
-                    kind = Some(NodeKind::Const);
-                } else if cap_idx == idx.impl_root {
-                    root_span_node = Some(cap.node);
-                    kind = Some(NodeKind::Impl);
-                } else if cap_idx == idx.macro_root {
-                    root_span_node = Some(cap.node);
-                    kind = Some(NodeKind::Macro);
-                } else if cap_idx == idx.property {
-                    root_span_node = Some(cap.node);
-                    kind = Some(NodeKind::Property);
-                } else if cap_idx == idx.method {
-                    root_span_node = Some(cap.node);
-                    kind = Some(NodeKind::Method);
-                } else if cap_idx == idx.export {
-                    is_exported = true;
-                } else if cap_idx == idx.heritage {
-                    if let Ok(h_str) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        heritage.push(trait_path(h_str));
-                    }
-                } else if cap_idx == idx.type_ann {
-                    if let Ok(t_str) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        type_annotation = Some(t_str.to_string());
-                    }
-                } else if cap_idx == idx.decorator {
-                    if let Ok(d_str) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        decorators.push(d_str.to_string());
-                    }
-                } else if cap_idx == idx.axum_handler {
-                    if let Ok(h_str) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        axum_handler_captures.push((
-                            h_str.to_string(),
-                            cap.node.start_byte(),
-                            cap.node.end_byte(),
-                            node_span(&cap.node),
-                        ));
-                    }
-                } else if cap_idx == idx.actix_method {
-                    actix_method = Some(cap.node);
-                } else if cap_idx == idx.actix_handler {
-                    actix_handler = Some(cap.node);
-                } else if cap_idx == idx.blind_transmute_fn {
-                    push_blind_spot(
-                        &mut blind_spots,
-                        BLIND_SPEC[0],
-                        &cap.node,
-                        path,
-                        is_test_file,
-                    );
-                } else if cap_idx == idx.blind_libloading_get {
-                    push_blind_spot(
-                        &mut blind_spots,
-                        BLIND_SPEC[1],
-                        &cap.node,
-                        path,
-                        is_test_file,
-                    );
-                } else if cap_idx == idx.function_anonymous {
-                    // Anonymous closure (arg-position `|params| body`).
-                    // Emit an `<anonymous>` Function node only when the body holds a
-                    // call, so attach_to_enclosing can host those calls instead of
-                    // dropping them; empty closures stay out of the graph. A
-                    // closure in a callable body is scoped: its lexical parent,
-                    // not an owner, places it (`clear_scoped_owners`).
-                    if body_has_call(cap.node) {
-                        let span = node_span(&cap.node);
-                        if anonymous_spans.insert(span) {
-                            nodes.push(RawNode {
-                                decorators: Vec::new(),
-                                is_exported: false,
-                                heritage: Vec::new(),
-                                type_annotation: None,
-                                name: format!("<anonymous:{}:{}>", span.0 + 1, span.1),
-                                kind: NodeKind::Function,
-                                span,
-                                calls: Vec::new(),
-                                field_reads: Vec::new(),
-                                owner_class: None,
-                                content_hash: ecp_core::uid::xxh3_64_bytes(
-                                    &source[cap.node.start_byte()..cap.node.end_byte()],
-                                ),
-                            });
-                        }
-                    }
-                }
-            }
-
-            if let (Some(method_node), Some(handler_node)) = (actix_method, actix_handler) {
-                if let (Ok(method_str), Ok(handler_str)) = (
-                    std::str::from_utf8(&source[method_node.start_byte()..method_node.end_byte()]),
-                    std::str::from_utf8(
-                        &source[handler_node.start_byte()..handler_node.end_byte()],
-                    ),
-                ) {
-                    actix_handler_captures.push((
-                        method_str.to_string(),
-                        handler_str.to_string(),
-                        node_span(&handler_node),
-                    ));
-                }
-            }
-
-            if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
-                if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
-                    let impl_name;
-                    let name_str = if k == NodeKind::Impl {
-                        let Some(name) = impl_self_type(&root, source) else {
-                            continue;
-                        };
-                        impl_name = name;
-                        impl_name.as_str()
-                    } else {
-                        name_str
-                    };
-                    if matches!(k, NodeKind::Function | NodeKind::Method) {
-                        fn_spans.push((name_str.to_string(), root.start_byte()..root.end_byte()));
-                    }
-                    // Dedup by (name, span): inherent-impl + trait-impl queries
-                    // both fire on `impl Trait for Type { fn m() {} }`. Keep the
-                    // higher-priority kind (Method/Constructor > Function).
-                    let span = node_span(&root);
-                    let new_priority = match k {
-                        NodeKind::Constructor => 3,
-                        NodeKind::Method => 2,
-                        NodeKind::Function => 1,
-                        _ => 0,
-                    };
-
-                    // At-emit-time parent-chain walk to set owner_class, which
-                    // is one of the four UID inputs.  Each kind has different
-                    // ancestry semantics:
-                    //
-                    // • Method/Constructor/Function inside an impl block → the
-                    //   impl's concrete type (e.g. "Dog").  A function nested in
-                    //   a callable body is scoped: `clear_scoped_owners` drops
-                    //   this owner, and its uid hashes its lexical parent, so a
-                    //   local `fn helper()` doesn't collide with a top-level
-                    //   `fn helper()`.
-                    //
-                    // • Impl block itself → trait name for trait-impls
-                    //   (e.g. "Display"), empty string for inherent impls.
-                    //   This distinguishes `impl Dog {}` from
-                    //   `impl Display for Dog {}` in the same file.
-                    //
-                    // • Property (struct/enum field) → enclosing struct/enum name
-                    //   so that `field: T` in two different structs does not
-                    //   collide.
-                    //
-                    // • Typedef (associated type in impl) → impl self-type, so
-                    //   `type Error` in two different impls in the same file
-                    //   does not collide.
-                    //
-                    // • Const/Macro nested inside a function → enclosing function
-                    //   name, so a function-local `const X` does not collide with
-                    //   a file-level `const X`.
-                    let owner = match k {
-                        NodeKind::Method | NodeKind::Constructor | NodeKind::Function => {
-                            enclosing_impl_type(root, source)
-                        }
-                        NodeKind::Impl => {
-                            // Trait name for trait-impls; empty string for
-                            // inherent impls (ensures `impl Dog` ≠ `impl Trait
-                            // for Dog` in UID space while keeping inherent-impl
-                            // nodes distinct from trait-impl nodes).
-                            Some(impl_trait_name(&root, source).unwrap_or_default())
-                        }
-                        NodeKind::Property => enclosing_struct_type(root, source),
-                        NodeKind::Typedef => {
-                            // Associated types can appear in impl blocks or
-                            // trait definitions.  Use the trait name (for trait-
-                            // impls) or trait definition name so that `type Error`
-                            // in `impl Encoder for Http` and `type Error` in
-                            // `impl Decoder for Http` get distinct owner_class.
-                            // Falls back to None for top-level type aliases.
-                            enclosing_impl_or_trait_context(root, source)
-                        }
-                        NodeKind::Const => enclosing_function_name(root, source)
-                            .or_else(|| enclosing_impl_type(root, source)),
-                        NodeKind::Macro => {
-                            // Const/macro inside a function → use function name.
-                            enclosing_function_name(root, source)
-                        }
-                        NodeKind::EnumVariant => {
-                            // Variant → enclosing enum name. Walk parent chain
-                            // to find enum_item, then extract its name.
-                            enclosing_enum_name(root, source)
-                        }
-                        _ => None,
-                    };
-
-                    let mut merged = false;
-                    if new_priority > 0 {
-                        for existing in nodes.iter_mut() {
-                            if existing.name == name_str && existing.span == span {
-                                let existing_priority = match existing.kind {
-                                    NodeKind::Constructor => 3,
-                                    NodeKind::Method => 2,
-                                    NodeKind::Function => 1,
-                                    _ => 0,
-                                };
-                                if existing_priority > 0 && new_priority > existing_priority {
-                                    existing.kind = k;
-                                }
-                                if existing_priority > 0 {
-                                    // Preserve owner_class if not already set.
-                                    if existing.owner_class.is_none() {
-                                        existing.owner_class = owner.clone();
-                                    }
-                                    // Merge decorators from this match (attribute-aware
-                                    // patterns in frameworks.scm fire after the base
-                                    // queries.scm pattern; the base push has empty
-                                    // decorators, the attribute pattern carries them).
-                                    for d in &decorators {
-                                        if !existing.decorators.contains(d) {
-                                            existing.decorators.push(d.clone());
-                                        }
-                                    }
-                                    merged = true;
-                                }
-                                break;
-                            }
-                        }
-                    }
-                    if !merged {
-                        nodes.push(RawNode {
-                            decorators,
-                            is_exported,
-                            heritage,
-                            type_annotation,
-                            name: name_str.to_string(),
-                            kind: k,
-                            span,
-                            calls: Vec::new(),
-                            field_reads: Vec::new(),
-                            owner_class: owner,
-                            content_hash: ecp_core::uid::xxh3_64_bytes(
-                                &source[root.start_byte()..root.end_byte()],
-                            ),
-                        });
-                    }
-                }
-            }
-
-            if let (Some(i_name), Some(i_src)) = (import_name, import_src) {
-                if let (Ok(name_str), Ok(src_str)) = (
-                    std::str::from_utf8(&source[i_name.start_byte()..i_name.end_byte()]),
-                    std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]),
-                ) {
-                    let alias = if let Some(a_node) = import_alias {
-                        std::str::from_utf8(&source[a_node.start_byte()..a_node.end_byte()])
-                            .ok()
-                            .map(|s| s.to_string())
-                    } else {
-                        None
-                    };
-
-                    imports.push(RawImport {
-                        alias,
-                        imported_name: name_str.to_string(),
-                        source: src_str.to_string(),
-                        binding_kind: None,
-                    });
-                }
-            }
-        }
-
-        drop(_p);
-        let _p = parse_prof::span(Pass::Imports);
-        push_nested_use_imports(tree.root_node(), source, &mut imports);
-
-        drop(_p);
-        let _p = parse_prof::span(Pass::Calls);
-        // Extract call sites with receiver-type binding. Replaces the shared
-        // `extract_calls` for Rust so `self.method()` inside an impl block and
-        // `obj.method()` with locally-typed `obj` are recorded as `Type.method`
-        // for the resolver's qualifier-scoped (Tier 2.5) lookup.
-        let impl_map = build_impl_map(tree.root_node(), source);
-        let local_types = collect_local_types(tree.root_node(), source, &impl_map);
-        let mut call_sites = crate::calls::CallSiteIndex::default();
-        let (raw_path_literals, raw_sql_refs) = extract_rust_calls_and_path_literals(
-            tree.root_node(),
-            source,
-            &mut nodes,
-            &local_types,
-            &mut call_sites,
-        );
-        drop(_p);
-        let _p = parse_prof::span(Pass::Walk);
-        crate::calls::extract_field_reads(
-            tree.root_node(),
-            source,
-            &mut nodes,
-            &["field_expression"],
-            &crate::calls::NameRefSpec {
-                ident_kinds: &["identifier", "shorthand_field_identifier"],
-                kind: crate::calls::NameRefKind::Value,
-                binding_fields: &[("const_item", "name"), ("static_item", "name")],
-                skip_kinds: &[
-                    "use_declaration",
-                    "attribute_item",
-                    "inner_attribute_item",
-                    "type_arguments",
-                ],
-                ..crate::calls::NameRefSpec::EMPTY
-            },
-        );
-        crate::calls::extract_variant_refs(
-            tree.root_node(),
-            source,
-            &mut nodes,
-            &crate::calls::VariantRefSpec {
-                // `E::B(..)` / `E::C` / tuple patterns, and the name of a
-                // struct-like `E::A { .. }` expression or pattern.
-                path_kinds: &["scoped_identifier", "scoped_type_identifier"],
-                label_parents: &[],
-                bare_label_parents: &[],
-                bare_expressions: false,
-                token_trees: true,
-            },
-        );
-
-        // Build param type map for indirect-call detection.
-        // `collect_rust_indirect_param_types` captures fn(...)  and &dyn Trait
-        // types that `bare_type_name` (used by LocalTypes) discards.
-        let mut param_types = collect_rust_indirect_param_types(tree.root_node(), source);
-        // Merge LocalTypes bindings (for typed let bindings already collected).
-        for scope in local_types.scopes() {
-            for (var, ty) in &scope.bindings {
-                param_types.entry(var.clone()).or_insert_with(|| ty.clone());
-            }
-            if let Some(ref st) = scope.self_type {
-                param_types
-                    .entry("self".to_string())
-                    .or_insert_with(|| st.clone());
-            }
-        }
-        let call_metas =
-            detect_rust_indirect(tree.root_node(), source, &nodes, &param_types, &call_sites);
-
-        // owner_class is now set at emit time via enclosing_impl_type() parent
-        // walk (see emit block above). The legacy `__impl_target__:Type`
-        // heritage sentinel has been removed in T1-12; `class_membership` Pass 2
-        // reads `RawNode.owner_class` directly.
-
-        drop(_p);
-        let _p = parse_prof::span(Pass::Build);
-        // Framework-presence gates: only claim Axum/Actix refs when the file
-        // actually `use`s the matching crate. Saves us from false positives in
-        // files that happen to define a `get()` fn or use `#[get]` from another
-        // crate.
-        const AXUM_REQUIRED: &[&str] = &["axum"];
-        const ACTIX_REQUIRED: &[&str] = &["actix_web", "actix"];
-        let has_axum = has_import_from(&imports, AXUM_REQUIRED);
-        let has_actix = has_import_from(&imports, ACTIX_REQUIRED);
-
-        // Resolve enclosing function for each framework-ref capture via byte-range
-        // containment; pick the innermost (smallest) function that contains the capture.
-        let mut framework_refs = Vec::with_capacity(axum_handler_captures.len());
-        if has_axum {
-            for (handler_name, cap_start, cap_end, span) in axum_handler_captures {
-                let enclosing = fn_spans
-                    .iter()
-                    .filter(|(_, range)| range.start <= cap_start && cap_end <= range.end)
-                    .min_by_key(|(_, range)| range.end - range.start);
-                if let Some((fn_name, _)) = enclosing {
-                    framework_refs.push(RawFrameworkRef {
-                        source_name: fn_name.clone(),
-                        target_name: handler_name,
-                        confidence: framework_confidence::AXUM_ROUTE,
-                        reason: "axum-route-handler".to_string(),
-                        span,
-                    });
-                }
-            }
-        }
-
-        // Actix attribute-macro routes: emit one ref per #[verb] → fn pair.
-        // No natural source — use module-level sentinel; confidence 0.9 (syntactic, unambiguous).
-        if has_actix {
-            for (method, handler, span) in actix_handler_captures {
-                framework_refs.push(RawFrameworkRef {
-                    source_name: MODULE_LEVEL_SOURCE.to_string(),
-                    target_name: handler,
-                    confidence: framework_confidence::ACTIX_ROUTE,
-                    reason: format!("actix-route-{}", method),
-                    span,
-                });
-            }
-        }
-
-        drop(_p);
-        let _p = parse_prof::span(Pass::Walk);
-        let raw_function_metas = crate::function_meta::rust_lang::extract(
-            tree.root_node(),
-            source,
-            &nodes,
-            file_category,
-        );
-
-        let event_topics = {
-            let topics = crate::event_topic::extract_event_topics(
-                &tree,
-                source,
-                &self.query,
-                &[
-                    crate::event_topic::REDIS_RUST,
-                    crate::event_topic::KAFKA_RUST,
-                    crate::event_topic::RABBITMQ_RUST,
-                    crate::event_topic::SQS_RUST,
-                ],
-                &imports,
-            );
-            (!topics.is_empty()).then(|| topics.into_boxed_slice())
-        };
-
-        drop(_p);
-        let path_literals =
-            (!raw_path_literals.is_empty()).then(|| raw_path_literals.into_boxed_slice());
-
-        let _p = parse_prof::span(Pass::Build);
+    const KIND_CAPTURE: KindCapture = KindCapture::NameKeepFirst;
+    /// A closure gets an `<anonymous>` node only when its body holds a call,
+    /// so attach_to_enclosing can host those calls instead of dropping them;
+    /// empty closures (`v.iter().map(|x| x * 2)`) stay out of the graph.
+    const ANONYMOUS: Option<Anonymous> = Some(Anonymous {
+        capture: "function.anonymous",
+        call_kinds: &["call_expression"],
+        key: AnonKey::Span,
+    });
+    const BLIND: &'static [(&'static str, (&'static str, &'static str))] = &[
+        (
+            "blind.transmute_fn",
+            (
+                "rs-transmute-fn",
+                "transmute::<_, fn(...)>(ptr) — bit-cast to a function pointer; target function not statically determinable",
+            ),
+        ),
+        (
+            "blind.libloading_get",
+            (
+                "rs-libloading-get",
+                "libloading::Library::get(...) — dynamic symbol load from dlopen'd library; target function resolved at runtime",
+            ),
+        ),
+    ];
+    const SCOPE_LANGUAGE: ScopeLanguage = ScopeLanguage::Fixed(Language::Rust);
+    const FIELD_READS: Option<FieldReads> = Some(FieldReads {
+        member_kinds: &["field_expression"],
+        names: NameRefSpec {
+            ident_kinds: &["identifier", "shorthand_field_identifier"],
+            kind: NameRefKind::Value,
+            binding_fields: &[("const_item", "name"), ("static_item", "name")],
+            skip_kinds: &[
+                "use_declaration",
+                "attribute_item",
+                "inner_attribute_item",
+                "type_arguments",
+            ],
+            ..NameRefSpec::EMPTY
+        },
+    });
+    const VARIANT_REFS: Option<VariantRefSpec> = Some(VariantRefSpec {
+        // `E::B(..)` / `E::C` / tuple patterns, and the name of a
+        // struct-like `E::A { .. }` expression or pattern.
+        path_kinds: &["scoped_identifier", "scoped_type_identifier"],
+        label_parents: &[],
+        bare_label_parents: &[],
+        bare_expressions: false,
+        token_trees: true,
+    });
+    const EVENT_TOPICS: &'static [EventTopicConfig] =
+        &[REDIS_RUST, KAFKA_RUST, RABBITMQ_RUST, SQS_RUST];
+    const TX: TxRule = TxRule::Nodes {
+        collect: collect_rust_transactional_scopes,
+        kinds: &[NodeKind::Function, NodeKind::Method],
+    };
+    const STEPS: &'static [Step<RustHook>] = &[
+        step(Pass::Query, Effect::Nodes, Op::Query),
+        step(
+            Pass::Imports,
+            Effect::Neutral,
+            Op::Hook(RustHook::NestedUse),
+        ),
+        step(Pass::Calls, Effect::Nodes, Op::Hook(RustHook::Calls)),
+        step(Pass::Walk, Effect::Nodes, Op::FieldReads),
+        step(Pass::Walk, Effect::Nodes, Op::VariantRefs),
+        step(Pass::Walk, Effect::Neutral, Op::Hook(RustHook::Indirect)),
+        step(Pass::Build, Effect::Neutral, Op::Hook(RustHook::Frameworks)),
+        step(Pass::Walk, Effect::Neutral, Op::FunctionMeta),
+        step(Pass::Walk, Effect::Neutral, Op::EventTopicsRequery),
         // FU-016: fill module ownership for items inside `mod foo { ... }`.
         // `enclosing_impl_type` already populated `impl Foo` method ownership;
         // `stamp_owner_class_by_span` preserves those (see the `is_none()` guard
         // in framework_helpers) and only fills the gap for module-resident
         // free items, so `scope_defines::Pass2` can emit `Module(foo) → bar`.
-        crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
+        step(Pass::Build, Effect::Nodes, Op::StampOwners),
         // Last owner step: a nested `fn` or closure node has a lexical
         // parent and no owner (invariant I1), whatever the steps above set.
-        ecp_core::analyzer::lexical::clear_scoped_owners(
-            ecp_core::file_category::Language::Rust,
-            &mut nodes,
+        step(Pass::Build, Effect::Nodes, Op::ClearScopedOwners),
+        step(Pass::Build, Effect::Bind, Op::TxScopes),
+    ];
+
+    fn query() -> anyhow::Result<Query> {
+        let query_source = format!(
+            "{}\n;; ---- framework queries ----\n{}",
+            include_str!("queries.scm"),
+            include_str!("frameworks.scm"),
         );
+        Ok(Query::new(
+            &tree_sitter_rust::LANGUAGE.into(),
+            &query_source,
+        )?)
+    }
 
-        let tx_scopes =
-            collect_rust_transactional_scopes(&nodes, &[NodeKind::Function, NodeKind::Method]);
-
-        drop(_p);
-        Ok(LocalGraph {
-            content_hash: [0; 8],
-            routes: vec![],
-            file_path: path.to_path_buf(),
-            nodes,
-            imports,
-            documents: vec![],
-            route_receivers: None,
-            framework_refs,
-            fanout_refs: vec![],
-            blind_spots,
-            schema_fields: None,
-            event_topics,
-            tx_scopes,
-            path_literals,
-            sql_refs: (!raw_sql_refs.is_empty()).then(|| raw_sql_refs.into_boxed_slice()),
-            call_metas,
-            raw_function_metas,
-            export_aliases: None,
-            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
+    fn role(capture: &str) -> Option<RustRole> {
+        Some(match capture {
+            "import.name" => RustRole::ImportName,
+            "import.source" => RustRole::ImportSource,
+            "import.alias" => RustRole::ImportAlias,
+            "function" => RustRole::Root(NodeKind::Function),
+            "struct" => RustRole::Root(NodeKind::Struct),
+            "enum" => RustRole::Root(NodeKind::Enum),
+            "enum_variant_node" => RustRole::Root(NodeKind::EnumVariant),
+            "trait" => RustRole::Root(NodeKind::Trait),
+            "module" => RustRole::Root(NodeKind::Module),
+            "type_alias" => RustRole::Root(NodeKind::Typedef),
+            "const_decl" => RustRole::Root(NodeKind::Const),
+            "impl_block" => RustRole::Root(NodeKind::Impl),
+            "macro_def" => RustRole::Root(NodeKind::Macro),
+            "property" => RustRole::Root(NodeKind::Property),
+            "method" => RustRole::Root(NodeKind::Method),
+            "export" => RustRole::Export,
+            "heritage" => RustRole::Heritage,
+            "type" => RustRole::TypeAnnotation,
+            "decorator" => RustRole::Decorator,
+            "axum.route.handler" => RustRole::AxumHandler,
+            "actix.route.method" => RustRole::ActixMethod,
+            "actix.route.handler" => RustRole::ActixHandler,
+            _ => return None,
         })
+    }
+
+    fn parse_tree(source: &[u8]) -> Option<Tree> {
+        PARSER.with(|p| parse_with_budget(&mut p.borrow_mut(), source, ParseBudget::DEFAULT))
+    }
+
+    fn capture<'t>(
+        r: RustRole,
+        node: Node<'t>,
+        d: &mut DeclSlot<'t>,
+        m: &mut RustMatch<'t>,
+        f: &mut RustFile,
+        cx: &mut FileCx<'t>,
+    ) {
+        let source = cx.source;
+        match r {
+            RustRole::ImportName => m.import_name = Some(node),
+            RustRole::ImportSource => m.import_src = Some(node),
+            RustRole::ImportAlias => m.import_alias = Some(node),
+            RustRole::Root(kind) => {
+                d.root = Some(node);
+                d.kind = Some(kind);
+            }
+            RustRole::Export => m.is_exported = true,
+            RustRole::Heritage => {
+                if let Ok(h_str) = std::str::from_utf8(&source[node.start_byte()..node.end_byte()])
+                {
+                    m.heritage.push(trait_path(h_str));
+                }
+            }
+            RustRole::TypeAnnotation => {
+                if let Ok(t_str) = std::str::from_utf8(&source[node.start_byte()..node.end_byte()])
+                {
+                    m.type_annotation = Some(t_str.to_string());
+                }
+            }
+            RustRole::Decorator => {
+                if let Ok(d_str) = std::str::from_utf8(&source[node.start_byte()..node.end_byte()])
+                {
+                    m.decorators.push(d_str.to_string());
+                }
+            }
+            RustRole::AxumHandler => {
+                if let Ok(h_str) = std::str::from_utf8(&source[node.start_byte()..node.end_byte()])
+                {
+                    f.axum_handler_captures.push((
+                        h_str.to_string(),
+                        node.start_byte(),
+                        node.end_byte(),
+                        node_span(&node),
+                    ));
+                }
+            }
+            RustRole::ActixMethod => m.actix_method = Some(node),
+            RustRole::ActixHandler => m.actix_handler = Some(node),
+        }
+    }
+
+    fn end_match<'t>(
+        d: DeclSlot<'t>,
+        m: &mut RustMatch<'t>,
+        f: &mut RustFile,
+        cx: &mut FileCx<'t>,
+    ) {
+        let source = cx.source;
+        let RustMatch {
+            is_exported,
+            heritage,
+            type_annotation,
+            decorators,
+            import_name,
+            import_src,
+            import_alias,
+            actix_method,
+            actix_handler,
+        } = std::mem::take(m);
+
+        if let (Some(method_node), Some(handler_node)) = (actix_method, actix_handler) {
+            if let (Ok(method_str), Ok(handler_str)) = (
+                std::str::from_utf8(&source[method_node.start_byte()..method_node.end_byte()]),
+                std::str::from_utf8(&source[handler_node.start_byte()..handler_node.end_byte()]),
+            ) {
+                f.actix_handler_captures.push((
+                    method_str.to_string(),
+                    handler_str.to_string(),
+                    node_span(&handler_node),
+                ));
+            }
+        }
+
+        if let (Some(n), Some(k), Some(root)) = (d.name, d.kind, d.root) {
+            if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
+                let impl_name;
+                let name_str = if k == NodeKind::Impl {
+                    // An impl whose self type has no name emits nothing,
+                    // the import of this match included.
+                    let Some(name) = impl_self_type(&root, source) else {
+                        return;
+                    };
+                    impl_name = name;
+                    impl_name.as_str()
+                } else {
+                    name_str
+                };
+                if matches!(k, NodeKind::Function | NodeKind::Method) {
+                    f.fn_spans
+                        .push((name_str.to_string(), root.start_byte()..root.end_byte()));
+                }
+                // Dedup by (name, span): inherent-impl + trait-impl queries
+                // both fire on `impl Trait for Type { fn m() {} }`. Keep the
+                // higher-priority kind (Method/Constructor > Function).
+                let span = node_span(&root);
+                let new_priority = match k {
+                    NodeKind::Constructor => 3,
+                    NodeKind::Method => 2,
+                    NodeKind::Function => 1,
+                    _ => 0,
+                };
+
+                // At-emit-time parent-chain walk to set owner_class, which
+                // is one of the four UID inputs.  Each kind has different
+                // ancestry semantics:
+                //
+                // • Method/Constructor/Function inside an impl block → the
+                //   impl's concrete type (e.g. "Dog").  A function nested in
+                //   a callable body is scoped: `clear_scoped_owners` drops
+                //   this owner, and its uid hashes its lexical parent, so a
+                //   local `fn helper()` doesn't collide with a top-level
+                //   `fn helper()`.
+                //
+                // • Impl block itself → trait name for trait-impls
+                //   (e.g. "Display"), empty string for inherent impls.
+                //   This distinguishes `impl Dog {}` from
+                //   `impl Display for Dog {}` in the same file.
+                //
+                // • Property (struct/enum field) → enclosing struct/enum name
+                //   so that `field: T` in two different structs does not
+                //   collide.
+                //
+                // • Typedef (associated type in impl) → impl self-type, so
+                //   `type Error` in two different impls in the same file
+                //   does not collide.
+                //
+                // • Const/Macro nested inside a function → enclosing function
+                //   name, so a function-local `const X` does not collide with
+                //   a file-level `const X`.
+                let owner = match k {
+                    NodeKind::Method | NodeKind::Constructor | NodeKind::Function => {
+                        enclosing_impl_type(root, source)
+                    }
+                    NodeKind::Impl => {
+                        // Trait name for trait-impls; empty string for
+                        // inherent impls (ensures `impl Dog` ≠ `impl Trait
+                        // for Dog` in UID space while keeping inherent-impl
+                        // nodes distinct from trait-impl nodes).
+                        Some(impl_trait_name(&root, source).unwrap_or_default())
+                    }
+                    NodeKind::Property => enclosing_struct_type(root, source),
+                    NodeKind::Typedef => {
+                        // Associated types can appear in impl blocks or
+                        // trait definitions.  Use the trait name (for trait-
+                        // impls) or trait definition name so that `type Error`
+                        // in `impl Encoder for Http` and `type Error` in
+                        // `impl Decoder for Http` get distinct owner_class.
+                        // Falls back to None for top-level type aliases.
+                        enclosing_impl_or_trait_context(root, source)
+                    }
+                    NodeKind::Const => enclosing_function_name(root, source)
+                        .or_else(|| enclosing_impl_type(root, source)),
+                    NodeKind::Macro => {
+                        // Const/macro inside a function → use function name.
+                        enclosing_function_name(root, source)
+                    }
+                    NodeKind::EnumVariant => {
+                        // Variant → enclosing enum name. Walk parent chain
+                        // to find enum_item, then extract its name.
+                        enclosing_enum_name(root, source)
+                    }
+                    _ => None,
+                };
+
+                let mut merged = false;
+                if new_priority > 0 {
+                    for existing in cx.nodes.iter_mut() {
+                        if existing.name == name_str && existing.span == span {
+                            let existing_priority = match existing.kind {
+                                NodeKind::Constructor => 3,
+                                NodeKind::Method => 2,
+                                NodeKind::Function => 1,
+                                _ => 0,
+                            };
+                            if existing_priority > 0 && new_priority > existing_priority {
+                                existing.kind = k;
+                            }
+                            if existing_priority > 0 {
+                                // Preserve owner_class if not already set.
+                                if existing.owner_class.is_none() {
+                                    existing.owner_class = owner.clone();
+                                }
+                                // Merge decorators from this match (attribute-aware
+                                // patterns in frameworks.scm fire after the base
+                                // queries.scm pattern; the base push has empty
+                                // decorators, the attribute pattern carries them).
+                                for d in &decorators {
+                                    if !existing.decorators.contains(d) {
+                                        existing.decorators.push(d.clone());
+                                    }
+                                }
+                                merged = true;
+                            }
+                            break;
+                        }
+                    }
+                }
+                if !merged {
+                    cx.nodes.push(RawNode {
+                        decorators,
+                        is_exported,
+                        heritage,
+                        type_annotation,
+                        owner_class: owner,
+                        ..node::decl(
+                            name_str.to_string(),
+                            k,
+                            span,
+                            &source[root.start_byte()..root.end_byte()],
+                        )
+                    });
+                }
+            }
+        }
+
+        if let (Some(i_name), Some(i_src)) = (import_name, import_src) {
+            if let (Ok(name_str), Ok(src_str)) = (
+                std::str::from_utf8(&source[i_name.start_byte()..i_name.end_byte()]),
+                std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]),
+            ) {
+                let alias = if let Some(a_node) = import_alias {
+                    std::str::from_utf8(&source[a_node.start_byte()..a_node.end_byte()])
+                        .ok()
+                        .map(|s| s.to_string())
+                } else {
+                    None
+                };
+
+                cx.imports.push(driver::imports::raw(
+                    src_str.to_string(),
+                    name_str.to_string(),
+                    alias,
+                    None,
+                ));
+            }
+        }
+    }
+
+    fn hook<'t>(h: RustHook, _c: &Compiled<Self>, f: &mut RustFile, cx: &mut FileCx<'t>) {
+        let root = cx.tree.root_node();
+        let source = cx.source;
+        match h {
+            RustHook::NestedUse => push_nested_use_imports(root, source, &mut cx.imports),
+            RustHook::Calls => {
+                // Extract call sites with receiver-type binding. Replaces the shared
+                // `extract_calls` for Rust so `self.method()` inside an impl block and
+                // `obj.method()` with locally-typed `obj` are recorded as `Type.method`
+                // for the resolver's qualifier-scoped (Tier 2.5) lookup.
+                let impl_map = build_impl_map(root, source);
+                let local_types = collect_local_types(root, source, &impl_map);
+                let (raw_path_literals, raw_sql_refs) = extract_rust_calls_and_path_literals(
+                    root,
+                    source,
+                    &mut cx.nodes,
+                    &local_types,
+                    &mut cx.call_sites,
+                );
+                cx.path_literals = raw_path_literals;
+                cx.sql_refs = raw_sql_refs;
+                f.local_types = Some(local_types);
+            }
+            RustHook::Indirect => {
+                // `collect_rust_indirect_param_types` captures fn(...)  and &dyn Trait
+                // types that `bare_type_name` (used by LocalTypes) discards.
+                let mut param_types = collect_rust_indirect_param_types(root, source);
+                // Merge LocalTypes bindings (for typed let bindings already collected).
+                if let Some(local_types) = &f.local_types {
+                    for scope in local_types.scopes() {
+                        for (var, ty) in &scope.bindings {
+                            param_types.entry(var.clone()).or_insert_with(|| ty.clone());
+                        }
+                        if let Some(ref st) = scope.self_type {
+                            param_types
+                                .entry("self".to_string())
+                                .or_insert_with(|| st.clone());
+                        }
+                    }
+                }
+                cx.call_metas =
+                    detect_rust_indirect(root, source, &cx.nodes, &param_types, &cx.call_sites);
+            }
+            RustHook::Frameworks => {
+                // Framework-presence gates: only claim Axum/Actix refs when the file
+                // actually `use`s the matching crate. Saves us from false positives in
+                // files that happen to define a `get()` fn or use `#[get]` from another
+                // crate.
+                const AXUM_REQUIRED: &[&str] = &["axum"];
+                const ACTIX_REQUIRED: &[&str] = &["actix_web", "actix"];
+                let has_axum = has_import_from(&cx.imports, AXUM_REQUIRED);
+                let has_actix = has_import_from(&cx.imports, ACTIX_REQUIRED);
+
+                // Pick the innermost (smallest) function that contains the capture.
+                let axum_handler_captures = std::mem::take(&mut f.axum_handler_captures);
+                cx.framework_refs.reserve(axum_handler_captures.len());
+                if has_axum {
+                    for (handler_name, cap_start, cap_end, span) in axum_handler_captures {
+                        let enclosing = f
+                            .fn_spans
+                            .iter()
+                            .filter(|(_, range)| range.start <= cap_start && cap_end <= range.end)
+                            .min_by_key(|(_, range)| range.end - range.start);
+                        if let Some((fn_name, _)) = enclosing {
+                            cx.framework_refs.push(RawFrameworkRef {
+                                source_name: fn_name.clone(),
+                                target_name: handler_name,
+                                confidence: framework_confidence::AXUM_ROUTE,
+                                reason: "axum-route-handler".to_string(),
+                                span,
+                            });
+                        }
+                    }
+                }
+
+                // Actix attribute-macro routes: emit one ref per #[verb] → fn pair.
+                // No natural source — use module-level sentinel; confidence 0.9 (syntactic, unambiguous).
+                if has_actix {
+                    for (method, handler, span) in std::mem::take(&mut f.actix_handler_captures) {
+                        cx.framework_refs.push(RawFrameworkRef {
+                            source_name: MODULE_LEVEL_SOURCE.to_string(),
+                            target_name: handler,
+                            confidence: framework_confidence::ACTIX_ROUTE,
+                            reason: format!("actix-route-{}", method),
+                            span,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    fn function_meta(
+        root: Node<'_>,
+        source: &[u8],
+        nodes: &[RawNode],
+        category: FileCategory,
+    ) -> Vec<RawFunctionMeta> {
+        crate::function_meta::rust_lang::extract(root, source, nodes, category)
     }
 }
 

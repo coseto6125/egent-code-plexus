@@ -79,6 +79,19 @@ blueprint_route_decorator ruby pre-existing gap
 blueprint_route_decorator rust pre-existing gap
 blueprint_route_decorator swift pre-existing gap
 blueprint_route_decorator typescript pre-existing gap
+call_access c the call access rule models C# private and static members only
+call_access cpp the call access rule models C# private and static members only
+call_access dart the call access rule models C# private and static members only
+call_access go the call access rule models C# private and static members only
+call_access java the call access rule models C# private and static members only
+call_access javascript the call access rule models C# private and static members only
+call_access kotlin the call access rule models C# private and static members only
+call_access php the call access rule models C# private and static members only
+call_access python the call access rule models C# private and static members only
+call_access ruby the call access rule models C# private and static members only
+call_access rust the call access rule models C# private and static members only
+call_access swift the call access rule models C# private and static members only
+call_access typescript the call access rule models C# private and static members only
 call_user_func_literal c pre-existing gap
 call_user_func_literal cpp pre-existing gap
 call_user_func_literal csharp pre-existing gap
@@ -290,6 +303,19 @@ dimensions ruby pre-existing gap
 dimensions rust pre-existing gap
 dimensions swift pre-existing gap
 dimensions typescript pre-existing gap
+driver_parity c lands when phase 3 slice T7 moves this parser onto the shared driver
+driver_parity cpp lands when phase 3 slice T7 moves this parser onto the shared driver
+driver_parity csharp lands when phase 3 slice T5 moves this parser onto the shared driver
+driver_parity dart lands when phase 3 slice T6 moves this parser onto the shared driver
+driver_parity go lands when phase 3 slice T2 moves this parser onto the shared driver
+driver_parity java lands when phase 3 slice T5 moves this parser onto the shared driver
+driver_parity javascript lands when phase 3 slice T3 moves this parser onto the shared driver
+driver_parity kotlin lands when phase 3 slice T5 moves this parser onto the shared driver
+driver_parity php lands when phase 3 slice T6 moves this parser onto the shared driver
+driver_parity python lands when phase 3 slice T4 moves this parser onto the shared driver
+driver_parity ruby lands when phase 3 slice T4 moves this parser onto the shared driver
+driver_parity swift lands when phase 3 slice T6 moves this parser onto the shared driver
+driver_parity typescript lands when phase 3 slice T3 moves this parser onto the shared driver
 dynamic_dispatch c pre-existing gap
 dynamic_dispatch cpp pre-existing gap
 dynamic_dispatch csharp pre-existing gap
@@ -385,6 +411,19 @@ extension_dedup python pre-existing gap
 extension_dedup ruby pre-existing gap
 extension_dedup rust pre-existing gap
 extension_dedup typescript pre-existing gap
+extension_methods c no extension methods: a call resolves only to members of the receiver's type or to free functions
+extension_methods cpp no extension methods: a call resolves only to members of the receiver's type or to free functions
+extension_methods dart Dart extension-on members are covered by dart_extension_trait.rs; this dimension tests the C# static-class retry
+extension_methods go no extension methods: a call resolves only to members of the receiver's type or to free functions
+extension_methods java no extension methods: a call resolves only to members of the receiver's type or to free functions
+extension_methods javascript no extension methods: a call resolves only to members of the receiver's type or to free functions
+extension_methods kotlin Kotlin extension functions are top-level and resolve through the existing extension fallback (kotlin_import_bound_calls.rs)
+extension_methods php no extension methods: a call resolves only to members of the receiver's type or to free functions
+extension_methods python no extension methods: a call resolves only to members of the receiver's type or to free functions
+extension_methods ruby no extension methods: a call resolves only to members of the receiver's type or to free functions
+extension_methods rust trait methods resolve through trait impls; no static-class extension form
+extension_methods swift Swift extension members are members of the extended type (swift_extension_dedup.rs); no static-class form
+extension_methods typescript no extension methods: a call resolves only to members of the receiver's type or to free functions
 extension_trait c pre-existing gap
 extension_trait cpp pre-existing gap
 extension_trait csharp pre-existing gap
@@ -879,6 +918,19 @@ parent_identity python no `impl Trait for Type` block: the ImplTrait discriminat
 parent_identity ruby no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
 parent_identity swift no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
 parent_identity typescript no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
+partial_parts c only C# declares one type in partial parts across files
+partial_parts cpp only C# declares one type in partial parts across files
+partial_parts dart only C# declares one type in partial parts across files
+partial_parts go only C# declares one type in partial parts across files
+partial_parts java only C# declares one type in partial parts across files
+partial_parts javascript only C# declares one type in partial parts across files
+partial_parts kotlin only C# declares one type in partial parts across files
+partial_parts php only C# declares one type in partial parts across files
+partial_parts python only C# declares one type in partial parts across files
+partial_parts ruby only C# declares one type in partial parts across files
+partial_parts rust only C# declares one type in partial parts across files
+partial_parts swift only C# declares one type in partial parts across files
+partial_parts typescript only C# declares one type in partial parts across files
 path_literals csharp pre-existing gap
 pointer_return_methods c pre-existing gap
 pointer_return_methods csharp pre-existing gap
@@ -1481,6 +1533,19 @@ value_flow ruby pre-existing gap
 value_flow rust pre-existing gap
 value_flow swift pre-existing gap
 value_flow typescript pre-existing gap
+value_receiver c the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver cpp the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver dart the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver go the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver java the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver javascript the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver kotlin the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver php the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver python the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver ruby the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver rust the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver swift the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver typescript the value-receiver call shape (field, var, ?., extension retry) is C#-specific
 variable_dedup c pre-existing gap
 variable_dedup cpp pre-existing gap
 variable_dedup csharp pre-existing gap
@@ -1519,55 +1584,3 @@ visibility ruby pre-existing gap
 visibility rust pre-existing gap
 visibility swift pre-existing gap
 visibility typescript pre-existing gap
-extension_methods c no extension methods: a call resolves only to members of the receiver's type or to free functions
-extension_methods cpp no extension methods: a call resolves only to members of the receiver's type or to free functions
-extension_methods dart Dart extension-on members are covered by dart_extension_trait.rs; this dimension tests the C# static-class retry
-extension_methods go no extension methods: a call resolves only to members of the receiver's type or to free functions
-extension_methods java no extension methods: a call resolves only to members of the receiver's type or to free functions
-extension_methods javascript no extension methods: a call resolves only to members of the receiver's type or to free functions
-extension_methods kotlin Kotlin extension functions are top-level and resolve through the existing extension fallback (kotlin_import_bound_calls.rs)
-extension_methods php no extension methods: a call resolves only to members of the receiver's type or to free functions
-extension_methods python no extension methods: a call resolves only to members of the receiver's type or to free functions
-extension_methods ruby no extension methods: a call resolves only to members of the receiver's type or to free functions
-extension_methods rust trait methods resolve through trait impls; no static-class extension form
-extension_methods swift Swift extension members are members of the extended type (swift_extension_dedup.rs); no static-class form
-extension_methods typescript no extension methods: a call resolves only to members of the receiver's type or to free functions
-call_access c the call access rule models C# private and static members only
-call_access cpp the call access rule models C# private and static members only
-call_access dart the call access rule models C# private and static members only
-call_access go the call access rule models C# private and static members only
-call_access java the call access rule models C# private and static members only
-call_access javascript the call access rule models C# private and static members only
-call_access kotlin the call access rule models C# private and static members only
-call_access php the call access rule models C# private and static members only
-call_access python the call access rule models C# private and static members only
-call_access ruby the call access rule models C# private and static members only
-call_access rust the call access rule models C# private and static members only
-call_access swift the call access rule models C# private and static members only
-call_access typescript the call access rule models C# private and static members only
-partial_parts c only C# declares one type in partial parts across files
-partial_parts cpp only C# declares one type in partial parts across files
-partial_parts dart only C# declares one type in partial parts across files
-partial_parts go only C# declares one type in partial parts across files
-partial_parts java only C# declares one type in partial parts across files
-partial_parts javascript only C# declares one type in partial parts across files
-partial_parts kotlin only C# declares one type in partial parts across files
-partial_parts php only C# declares one type in partial parts across files
-partial_parts python only C# declares one type in partial parts across files
-partial_parts ruby only C# declares one type in partial parts across files
-partial_parts rust only C# declares one type in partial parts across files
-partial_parts swift only C# declares one type in partial parts across files
-partial_parts typescript only C# declares one type in partial parts across files
-value_receiver c the value-receiver call shape (field, var, ?., extension retry) is C#-specific
-value_receiver cpp the value-receiver call shape (field, var, ?., extension retry) is C#-specific
-value_receiver dart the value-receiver call shape (field, var, ?., extension retry) is C#-specific
-value_receiver go the value-receiver call shape (field, var, ?., extension retry) is C#-specific
-value_receiver java the value-receiver call shape (field, var, ?., extension retry) is C#-specific
-value_receiver javascript the value-receiver call shape (field, var, ?., extension retry) is C#-specific
-value_receiver kotlin the value-receiver call shape (field, var, ?., extension retry) is C#-specific
-value_receiver php the value-receiver call shape (field, var, ?., extension retry) is C#-specific
-value_receiver python the value-receiver call shape (field, var, ?., extension retry) is C#-specific
-value_receiver ruby the value-receiver call shape (field, var, ?., extension retry) is C#-specific
-value_receiver rust the value-receiver call shape (field, var, ?., extension retry) is C#-specific
-value_receiver swift the value-receiver call shape (field, var, ?., extension retry) is C#-specific
-value_receiver typescript the value-receiver call shape (field, var, ?., extension retry) is C#-specific
