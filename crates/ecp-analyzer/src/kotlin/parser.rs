@@ -1,69 +1,28 @@
 use super::receiver_types::extract_kotlin_calls_and_path_literals;
 use super::spec::KotlinSpec;
+use crate::calls::{NameRefKind, NameRefSpec, VariantRefSpec};
+use crate::driver::{
+    self, imports, node, AnonKey, Anonymous, Compiled, DeclSlot, Effect, FieldReads, FileCx,
+    KindCapture, Op, ParseSpec, Step, TxRule,
+};
+use crate::event_topic::{EventTopicConfig, KAFKA_KOTLIN};
 use crate::framework_confidence;
 use crate::framework_helpers::{
-    collect_jvm_transactional_scopes, has_import_from, node_span, push_blind_spot,
-    MODULE_LEVEL_SOURCE,
+    collect_jvm_transactional_scopes, has_import_from, MODULE_LEVEL_SOURCE,
 };
 use crate::parse_budget::{parse_with_budget, ParseBudget};
-use ecp_core::analyzer::lang_spec::LangSpec;
-use ecp_core::analyzer::parse_prof::{self, Pass};
+use ecp_core::analyzer::parse_prof::Pass;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{
-    BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode, OVERRIDE_SENTINEL,
+    LocalGraph, RawFrameworkRef, RawFunctionMeta, RawNode, Span, OVERRIDE_SENTINEL,
 };
-use ecp_core::graph::NodeKind;
+use ecp_core::graph::{FileCategory, NodeKind};
+use rustc_hash::FxHashMap;
 use std::path::Path;
-use streaming_iterator::StreamingIterator;
-use tree_sitter::{Query, QueryCursor};
+use tree_sitter::{Node, Query, Tree};
 
 // Framework-presence gate: only emit Ktor refs when the file imports io.ktor.*.
 const KTOR_REQUIRED: &[&str] = &["io.ktor"];
-
-/// Blind-spot kind/hint pairs. Order matches the capture-index dispatch in
-/// `parse_file`.
-const BLIND_SPEC: &[(&str, &str)] = &[
-    (
-        "kt-class-forname",
-        "Class.forName(<expr>) — runtime class loading via Java reflection bridge; loaded class body is not statically determinable",
-    ),
-    (
-        "kt-method-invoke",
-        "<expr>.invoke(...) — reflective method invocation; target method body resolved at runtime via Java Method handle or KCallable",
-    ),
-];
-
-/// Verb capture-index pairs. Indexed in lockstep with the per-verb captures in
-/// `frameworks.scm` so the dispatch reads as a flat table — no alternation regex.
-struct KtorVerbIndices {
-    get: Option<u32>,
-    post: Option<u32>,
-    put: Option<u32>,
-    delete: Option<u32>,
-    patch: Option<u32>,
-}
-
-/// CI-L #2: capture indices the hot loop needs for metadata + root-span
-/// anchors. Resolved once in `KotlinProvider::new()`; the per-file
-/// `parse_file` borrows `&self.indices` and reads fields directly instead
-/// of doing ~10 `query.capture_index_for_name` lookups per call.
-struct KotlinCaptureIndices {
-    export: Option<u32>,
-    heritage: Option<u32>,
-    type_: Option<u32>,
-    alias: Option<u32>,
-    import_source: Option<u32>,
-    decorator: Option<u32>,
-    override_marker: Option<u32>,
-    class: Option<u32>,
-    function: Option<u32>,
-    enum_entry: Option<u32>,
-    typedef: Option<u32>,
-    // BlindSpot captures (FU-001 P2b).
-    blind_class_forname: Option<u32>,
-    blind_method_invoke: Option<u32>,
-    function_anonymous: Option<u32>,
-}
 
 thread_local! {
     static PARSER: std::cell::RefCell<tree_sitter::Parser> = std::cell::RefCell::new({
@@ -74,21 +33,7 @@ thread_local! {
     });
 }
 pub struct KotlinProvider {
-    query: Query,
-    ktor: KtorVerbIndices,
-    idx_ktor_path: Option<u32>,
-    idx_constructor: Option<u32>,
-    idx_property: Option<u32>,
-    idx_variable: Option<u32>,
-    idx_namespace: Option<u32>,
-    /// Capture index → NodeKind mapping, pre-resolved from
-    /// `KotlinSpec::CAPTURE_KIND` at provider construction. The hot loop
-    /// looks up by integer index (cap.index as usize) — equivalent perf
-    /// to the previous hard-coded if-chain, but the source of truth
-    /// lives in `spec.rs` const tables.
-    capture_kind_by_idx: Vec<Option<NodeKind>>,
-    /// CI-L #2: metadata + root-span anchor capture indices, resolved once.
-    indices: KotlinCaptureIndices,
+    compiled: Compiled<KotlinSpec>,
 }
 
 /// tree-sitter-kotlin needs a separator between a class-body member and the
@@ -149,23 +94,6 @@ fn recover_same_line_closers(tree: tree_sitter::Tree, source: &[u8]) -> tree_sit
 /// True when `func` is a Kotlin `fun` declared directly inside a class body
 /// (so its kind should be `Method`, not `Function`). Walks the tree-sitter
 /// parent chain `function_declaration → class_body → class_declaration`.
-/// Whether `node`'s subtree contains a `call_expression`. Gates emission of
-/// `<anonymous>` lambda nodes so empty lambdas (e.g. `list.map { it + 1 }`)
-/// stay out of the graph.
-fn body_has_call(node: tree_sitter::Node) -> bool {
-    let mut stack = vec![node];
-    while let Some(n) = stack.pop() {
-        if n.kind() == "call_expression" {
-            return true;
-        }
-        let mut c = n.walk();
-        for child in n.children(&mut c) {
-            stack.push(child);
-        }
-    }
-    false
-}
-
 fn is_class_method(func: tree_sitter::Node) -> bool {
     let Some(parent) = func.parent() else {
         return false;
@@ -239,66 +167,14 @@ fn is_annotation_class(class_decl: tree_sitter::Node, source: &[u8]) -> bool {
     false
 }
 
+fn text<'s>(node: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
+    std::str::from_utf8(&source[node.start_byte()..node.end_byte()]).ok()
+}
+
 impl KotlinProvider {
     pub fn new() -> anyhow::Result<Self> {
-        let language = tree_sitter_kotlin::LANGUAGE.into();
-        let query_source = format!(
-            "{}\n;; ---- framework queries ----\n{}",
-            include_str!("queries.scm"),
-            include_str!("frameworks.scm"),
-        );
-        let query = Query::new(&language, &query_source)?;
-        let ktor = KtorVerbIndices {
-            get: query.capture_index_for_name("ktor.route.get"),
-            post: query.capture_index_for_name("ktor.route.post"),
-            put: query.capture_index_for_name("ktor.route.put"),
-            delete: query.capture_index_for_name("ktor.route.delete"),
-            patch: query.capture_index_for_name("ktor.route.patch"),
-        };
-        let idx_ktor_path = query.capture_index_for_name("ktor.route.path");
-        let idx_constructor = query.capture_index_for_name("constructor");
-        let idx_property = query.capture_index_for_name("property");
-        let idx_variable = query.capture_index_for_name("variable");
-        let idx_namespace = query.capture_index_for_name("namespace");
-
-        // Pre-resolve capture-name → NodeKind from the spec table so the
-        // hot loop stays an integer-index lookup (no per-capture string
-        // compare). Capture names not in the spec map yield None and
-        // fall through to the metadata-only branches below (heritage,
-        // decorator, etc.).
-        let capture_names = query.capture_names();
-        let capture_kind_by_idx: Vec<Option<NodeKind>> = capture_names
-            .iter()
-            .map(|name| KotlinSpec::CAPTURE_KIND.get(name).copied())
-            .collect();
-
-        let indices = KotlinCaptureIndices {
-            export: query.capture_index_for_name("export"),
-            heritage: query.capture_index_for_name("heritage"),
-            type_: query.capture_index_for_name("type"),
-            alias: query.capture_index_for_name("alias"),
-            import_source: query.capture_index_for_name("import.source"),
-            decorator: query.capture_index_for_name("decorator"),
-            override_marker: query.capture_index_for_name("override_marker"),
-            class: query.capture_index_for_name("class"),
-            function: query.capture_index_for_name("function"),
-            enum_entry: query.capture_index_for_name("enum_entry"),
-            typedef: query.capture_index_for_name("typedef"),
-            blind_class_forname: query.capture_index_for_name("blind.class_forname"),
-            blind_method_invoke: query.capture_index_for_name("blind.method_invoke"),
-            function_anonymous: query.capture_index_for_name("function.anonymous"),
-        };
-
         Ok(Self {
-            query,
-            ktor,
-            idx_ktor_path,
-            idx_constructor,
-            idx_property,
-            idx_variable,
-            idx_namespace,
-            capture_kind_by_idx,
-            indices,
+            compiled: Compiled::new()?,
         })
     }
 }
@@ -309,431 +185,396 @@ impl LanguageProvider for KotlinProvider {
     }
 
     fn parse_file(&self, path: &Path, source: &[u8]) -> anyhow::Result<LocalGraph> {
-        let _p = parse_prof::span(Pass::Tree);
-        let tree = PARSER
-            .with(|p| parse_with_budget(&mut p.borrow_mut(), source, ParseBudget::DEFAULT))
-            .ok_or_else(|| anyhow::anyhow!("Failed to parse file"))?;
-        drop(_p);
-        let _p = parse_prof::span(Pass::Walk);
-        let tree = recover_same_line_closers(tree, source);
+        driver::parse(&self.compiled, path, source)
+    }
+}
 
-        drop(_p);
-        let _p = parse_prof::span(Pass::Query);
-        let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(&self.query, tree.root_node(), source);
+/// The captures Kotlin handles itself. A root capture sets the declaration
+/// root once per match; the `.name` kind capture sets name and kind.
+#[derive(Clone, Copy)]
+pub enum KotlinRole {
+    Root,
+    Export,
+    Heritage,
+    Type,
+    Decorator,
+    OverrideMarker,
+    ImportSource,
+    ImportAlias,
+    KtorVerb(&'static str),
+    KtorPath,
+}
 
-        // Vec + idx-map pattern — see java/parser.rs same-site note.
-        let mut nodes: Vec<RawNode> = Vec::new();
-        let mut node_id_to_idx: rustc_hash::FxHashMap<usize, usize> =
-            rustc_hash::FxHashMap::default();
-        // Span dedup for `<anonymous>` lambda nodes — the trailing and
-        // paren-position queries can both match the same lambda_literal.
-        let mut anonymous_spans: rustc_hash::FxHashSet<(u32, u32, u32, u32)> =
-            rustc_hash::FxHashSet::default();
-        let mut imports = Vec::new();
-        let mut blind_spots: Vec<BlindSpot> = Vec::new();
-        let file_category =
-            ecp_core::file_category::determine_category(path.to_str().unwrap_or(""));
-        let is_test_file = file_category == ecp_core::graph::FileCategory::Test;
+#[derive(Clone, Copy)]
+pub enum KotlinHook {
+    Calls,
+    Ktor,
+}
 
-        // CI-L #2: capture indices pre-resolved in `new()`; this hot loop
-        // borrows the cached struct instead of resolving ~10 strings per call.
-        let idx = &self.indices;
-        let idx_export = idx.export;
-        let idx_heritage = idx.heritage;
-        let idx_type = idx.type_;
-        let idx_alias = idx.alias;
-        let idx_import_source = idx.import_source;
-        let idx_decorator = idx.decorator;
-        let idx_override_marker = idx.override_marker;
-        let idx_class = idx.class;
-        let idx_typedef = idx.typedef;
-        let idx_function = idx.function;
-        let idx_enum_entry = idx.enum_entry;
+pub struct KotlinMatch<'t> {
+    is_exported: bool,
+    heritage: Vec<String>,
+    type_annotation: Option<String>,
+    decorators: Vec<String>,
+    import_source: Option<Node<'t>>,
+    import_alias: Option<Node<'t>>,
+    ktor_verb: Option<&'static str>,
+    ktor_route_span: Option<Span>,
+    ktor_path_node: Option<Node<'t>>,
+}
 
-        // Pending Ktor route refs: (verb, path_string, capture_span).
-        // Emitted only if the file imports `io.ktor.*` — gate applied after the loop.
-        type KtorRef = (&'static str, String, (u32, u32, u32, u32));
-        let mut pending_ktor_refs: Vec<KtorRef> = Vec::new();
+impl Default for KotlinMatch<'_> {
+    /// A declaration is exported unless its `@export` modifiers say otherwise.
+    fn default() -> Self {
+        Self {
+            is_exported: true,
+            heritage: Vec::new(),
+            type_annotation: None,
+            decorators: Vec::new(),
+            import_source: None,
+            import_alias: None,
+            ktor_verb: None,
+            ktor_route_span: None,
+            ktor_path_node: None,
+        }
+    }
+}
 
-        while let Some(m) = matches.next() {
-            let mut name_node = None;
-            let mut kind = None;
-            let mut root_span_node = None;
-            let mut is_exported = true;
-            let mut heritage = Vec::new();
-            let mut type_annotation = None;
-            let mut decorators = Vec::new();
+/// Pending Ktor route ref: (verb, path_string, capture_span).
+type KtorRef = (&'static str, String, Span);
 
-            let mut import_src = None;
-            let mut import_alias = None;
+#[derive(Default)]
+pub struct KotlinFile {
+    /// Vec + idx-map pattern — see java/parser.rs same-site note.
+    node_id_to_idx: FxHashMap<usize, usize>,
+    /// Emitted only if the file imports `io.ktor.*`; the gate reads the
+    /// imports after the query.
+    pending_ktor_refs: Vec<KtorRef>,
+}
 
-            // Ktor route capture state for the current match — populated below
-            // when the corresponding @ktor.route.<verb> + @ktor.route.path pair fires.
-            let mut ktor_verb: Option<&'static str> = None;
-            let mut ktor_route_span: Option<(u32, u32, u32, u32)> = None;
-            let mut ktor_path_node: Option<tree_sitter::Node> = None;
+const fn step(pass: Pass, effect: Effect, op: Op<KotlinHook>) -> Step<KotlinHook> {
+    Step { pass, effect, op }
+}
 
-            for cap in m.captures() {
-                let cap_idx = cap.index;
-                if Some(cap_idx) == self.ktor.get {
-                    ktor_verb = Some("get");
-                    ktor_route_span = Some(node_span(&cap.node));
-                } else if Some(cap_idx) == self.ktor.post {
-                    ktor_verb = Some("post");
-                    ktor_route_span = Some(node_span(&cap.node));
-                } else if Some(cap_idx) == self.ktor.put {
-                    ktor_verb = Some("put");
-                    ktor_route_span = Some(node_span(&cap.node));
-                } else if Some(cap_idx) == self.ktor.delete {
-                    ktor_verb = Some("delete");
-                    ktor_route_span = Some(node_span(&cap.node));
-                } else if Some(cap_idx) == self.ktor.patch {
-                    ktor_verb = Some("patch");
-                    ktor_route_span = Some(node_span(&cap.node));
-                } else if Some(cap_idx) == self.idx_ktor_path {
-                    ktor_path_node = Some(cap.node);
-                } else if let Some(k_from_spec) = self
-                    .capture_kind_by_idx
-                    .get(cap_idx as usize)
-                    .copied()
-                    .flatten()
-                {
-                    // Single config-driven dispatch replaces the four
-                    // explicit Class/Function/Property/Variable arms.
-                    // Source of truth: KotlinSpec::CAPTURE_KIND in spec.rs.
-                    name_node = Some(cap.node);
-                    kind = Some(k_from_spec);
-                } else if Some(cap_idx) == idx_export {
-                    if let Ok(text) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        if text.contains("private") || text.contains("internal") {
-                            is_exported = false;
-                        }
-                    }
-                } else if Some(cap_idx) == idx_heritage {
-                    if let Ok(h) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        heritage.push(h.to_string());
-                    }
-                } else if Some(cap_idx) == idx_type {
-                    if let Ok(t) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        type_annotation = Some(t.to_string());
-                    }
-                } else if Some(cap_idx) == idx_decorator {
-                    if let Ok(d) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        decorators.push(d.to_string());
-                    }
-                } else if Some(cap_idx) == idx_override_marker {
-                    decorators.push(OVERRIDE_SENTINEL.to_string());
-                } else if Some(cap_idx) == idx_import_source {
-                    import_src = Some(cap.node);
-                } else if Some(cap_idx) == idx_alias {
-                    import_alias = Some(cap.node);
-                } else if Some(cap_idx) == idx.blind_class_forname {
-                    push_blind_spot(
-                        &mut blind_spots,
-                        BLIND_SPEC[0],
-                        &cap.node,
-                        path,
-                        is_test_file,
-                    );
-                } else if Some(cap_idx) == idx.blind_method_invoke {
-                    push_blind_spot(
-                        &mut blind_spots,
-                        BLIND_SPEC[1],
-                        &cap.node,
-                        path,
-                        is_test_file,
-                    );
-                } else if Some(cap_idx) == idx.function_anonymous {
-                    // Trailing / paren-position lambda. Emit an `<anonymous>`
-                    // Function node only when the body holds a call, so
-                    // attach_to_enclosing hosts those calls instead of dropping
-                    // them; position-suffixed name keeps the uid distinct.
-                    if body_has_call(cap.node) {
-                        let span = node_span(&cap.node);
-                        if anonymous_spans.insert(span) {
-                            nodes.push(RawNode {
-                                decorators: Vec::new(),
-                                is_exported: false,
-                                heritage: Vec::new(),
-                                type_annotation: None,
-                                name: format!("<anonymous:{}:{}>", span.0 + 1, span.1),
-                                kind: NodeKind::Function,
-                                span,
-                                calls: Vec::new(),
-                                field_reads: Vec::new(),
-                                owner_class: None,
-                                content_hash: ecp_core::uid::xxh3_64_bytes(
-                                    &source[cap.node.start_byte()..cap.node.end_byte()],
-                                ),
-                            });
-                        }
-                    }
-                } else if (Some(cap_idx) == idx_class
-                    || Some(cap_idx) == idx_function
-                    || Some(cap_idx) == self.idx_constructor
-                    || Some(cap_idx) == self.idx_property
-                    || Some(cap_idx) == self.idx_variable
-                    || Some(cap_idx) == self.idx_namespace
-                    || Some(cap_idx) == idx_enum_entry
-                    || Some(cap_idx) == idx_typedef)
-                    && root_span_node.is_none()
-                {
-                    root_span_node = Some(cap.node);
+impl ParseSpec for KotlinSpec {
+    type Role = KotlinRole;
+    type Match<'t> = KotlinMatch<'t>;
+    type File<'t> = KotlinFile;
+    type Hook = KotlinHook;
+
+    const KIND_CAPTURE: KindCapture = KindCapture::NameOverwrite;
+    /// Trailing / paren-position lambda. Emit an `<anonymous>` Function node
+    /// only when the body holds a call, so attach_to_enclosing hosts those
+    /// calls instead of dropping them; the trailing and paren-position
+    /// queries can both match one lambda_literal, hence the span dedupe.
+    const ANONYMOUS: Option<Anonymous> = Some(Anonymous {
+        capture: "function.anonymous",
+        call_kinds: &["call_expression"],
+        key: AnonKey::Span,
+    });
+    const BLIND: &'static [(&'static str, (&'static str, &'static str))] = &[
+        (
+            "blind.class_forname",
+            (
+                "kt-class-forname",
+                "Class.forName(<expr>) — runtime class loading via Java reflection bridge; loaded class body is not statically determinable",
+            ),
+        ),
+        (
+            "blind.method_invoke",
+            (
+                "kt-method-invoke",
+                "<expr>.invoke(...) — reflective method invocation; target method body resolved at runtime via Java Method handle or KCallable",
+            ),
+        ),
+    ];
+    const FIELD_READS: Option<FieldReads> = Some(FieldReads {
+        member_kinds: &["navigation_expression"],
+        names: NameRefSpec {
+            ident_kinds: &["simple_identifier"],
+            kind: NameRefKind::Value,
+            binding_parents: &["variable_declaration", "catch_block"],
+            skip_kinds: &[
+                "import_header",
+                "package_header",
+                "annotation",
+                "type_arguments",
+                "user_type",
+            ],
+            skip_parents: &["navigation_suffix"],
+            call_suffixes: &["call_suffix"],
+            infix_calls: &["infix_expression"],
+            method_refs: &["callable_reference"],
+            named_arg_parents: &["value_argument"],
+            ..NameRefSpec::EMPTY
+        },
+    });
+    const VARIANT_REFS: Option<VariantRefSpec> = Some(VariantRefSpec {
+        path_kinds: &["navigation_expression"],
+        label_parents: &["when_condition"],
+        bare_label_parents: &[],
+        bare_expressions: false,
+        token_trees: false,
+    });
+    const EVENT_TOPICS: &'static [EventTopicConfig] = &[KAFKA_KOTLIN];
+    const TX: TxRule = TxRule::Nodes {
+        collect: collect_jvm_transactional_scopes,
+        kinds: &[NodeKind::Method, NodeKind::Function, NodeKind::Constructor],
+    };
+    const POST_TREE: Option<fn(Tree, &[u8]) -> Tree> = Some(recover_same_line_closers);
+    // TxScopes ran before StampOwners before the move; both write disjoint
+    // fields (`tx_scopes` reads kind and decorators, the stamp writes
+    // `owner_class` only), so binding after the stamp emits the same scopes.
+    const STEPS: &'static [Step<KotlinHook>] = &[
+        step(Pass::Query, Effect::Nodes, Op::Query),
+        step(Pass::Calls, Effect::Nodes, Op::Hook(KotlinHook::Calls)),
+        step(Pass::Walk, Effect::Nodes, Op::FieldReads),
+        step(Pass::Walk, Effect::Nodes, Op::VariantRefs),
+        step(Pass::Build, Effect::Neutral, Op::Hook(KotlinHook::Ktor)),
+        step(Pass::Walk, Effect::Neutral, Op::FunctionMeta),
+        step(Pass::Build, Effect::Nodes, Op::StampOwners),
+        step(Pass::Build, Effect::Bind, Op::TxScopes),
+        step(Pass::Walk, Effect::Neutral, Op::EventTopicsRequery),
+    ];
+
+    fn query() -> anyhow::Result<Query> {
+        let query_source = format!(
+            "{}\n;; ---- framework queries ----\n{}",
+            include_str!("queries.scm"),
+            include_str!("frameworks.scm"),
+        );
+        Ok(Query::new(
+            &tree_sitter_kotlin::LANGUAGE.into(),
+            &query_source,
+        )?)
+    }
+
+    fn role(capture: &str) -> Option<KotlinRole> {
+        Some(match capture {
+            "class" | "function" | "constructor" | "property" | "variable" | "namespace"
+            | "enum_entry" | "typedef" => KotlinRole::Root,
+            "export" => KotlinRole::Export,
+            "heritage" => KotlinRole::Heritage,
+            "type" => KotlinRole::Type,
+            "decorator" => KotlinRole::Decorator,
+            "override_marker" => KotlinRole::OverrideMarker,
+            "import.source" => KotlinRole::ImportSource,
+            "alias" => KotlinRole::ImportAlias,
+            "ktor.route.get" => KotlinRole::KtorVerb("get"),
+            "ktor.route.post" => KotlinRole::KtorVerb("post"),
+            "ktor.route.put" => KotlinRole::KtorVerb("put"),
+            "ktor.route.delete" => KotlinRole::KtorVerb("delete"),
+            "ktor.route.patch" => KotlinRole::KtorVerb("patch"),
+            "ktor.route.path" => KotlinRole::KtorPath,
+            _ => return None,
+        })
+    }
+
+    fn parse_tree(source: &[u8]) -> Option<Tree> {
+        PARSER.with(|p| parse_with_budget(&mut p.borrow_mut(), source, ParseBudget::DEFAULT))
+    }
+
+    fn capture<'t>(
+        r: KotlinRole,
+        node: Node<'t>,
+        d: &mut DeclSlot<'t>,
+        m: &mut KotlinMatch<'t>,
+        _f: &mut KotlinFile,
+        cx: &mut FileCx<'t>,
+    ) {
+        let source = cx.source;
+        match r {
+            KotlinRole::Root => {
+                if d.root.is_none() {
+                    d.root = Some(node);
                 }
             }
-
-            // Demote `Function` to `Method` when the `function_declaration` is
-            // a direct child of `class_body`. Promote `Class` to `Annotation`
-            // when the `class_declaration` carries the `annotation` modifier.
-            // Mirrors the Python class-method fix landed in this PR (see
-            // `python/parser.rs::is_class_method`).
-            if let (Some(k_val), Some(root)) = (kind, root_span_node) {
-                let new_kind = match k_val {
-                    NodeKind::Function if is_class_method(root) => Some(NodeKind::Method),
-                    NodeKind::Class if is_enum_class(root) => Some(NodeKind::Enum),
-                    NodeKind::Class if is_annotation_class(root, source) => {
-                        Some(NodeKind::Annotation)
+            KotlinRole::Export => {
+                if let Some(modifiers) = text(node, source) {
+                    if modifiers.contains("private") || modifiers.contains("internal") {
+                        m.is_exported = false;
                     }
-                    NodeKind::Class if is_interface_class(root) => Some(NodeKind::Interface),
-                    _ => None,
+                }
+            }
+            KotlinRole::Heritage => {
+                if let Some(h) = text(node, source) {
+                    m.heritage.push(h.to_string());
+                }
+            }
+            KotlinRole::Type => {
+                if let Some(t) = text(node, source) {
+                    m.type_annotation = Some(t.to_string());
+                }
+            }
+            KotlinRole::Decorator => {
+                if let Some(dec) = text(node, source) {
+                    m.decorators.push(dec.to_string());
+                }
+            }
+            KotlinRole::OverrideMarker => m.decorators.push(OVERRIDE_SENTINEL.to_string()),
+            KotlinRole::ImportSource => m.import_source = Some(node),
+            KotlinRole::ImportAlias => m.import_alias = Some(node),
+            KotlinRole::KtorVerb(verb) => {
+                m.ktor_verb = Some(verb);
+                m.ktor_route_span = Some(node::span(node));
+            }
+            KotlinRole::KtorPath => m.ktor_path_node = Some(node),
+        }
+    }
+
+    fn end_match<'t>(
+        d: DeclSlot<'t>,
+        m: &mut KotlinMatch<'t>,
+        f: &mut KotlinFile,
+        cx: &mut FileCx<'t>,
+    ) {
+        let source = cx.source;
+        let mut kind = d.kind;
+
+        // Demote `Function` to `Method` when the `function_declaration` is
+        // a direct child of `class_body`. Promote `Class` to `Annotation`
+        // when the `class_declaration` carries the `annotation` modifier.
+        // Mirrors the Python class-method fix landed in this PR (see
+        // `python/parser.rs::is_class_method`).
+        if let (Some(k_val), Some(root)) = (kind, d.root) {
+            let new_kind = match k_val {
+                NodeKind::Function if is_class_method(root) => Some(NodeKind::Method),
+                NodeKind::Class if is_enum_class(root) => Some(NodeKind::Enum),
+                NodeKind::Class if is_annotation_class(root, source) => Some(NodeKind::Annotation),
+                NodeKind::Class if is_interface_class(root) => Some(NodeKind::Interface),
+                _ => None,
+            };
+            if let Some(nk) = new_kind {
+                kind = Some(nk);
+            }
+        }
+
+        if let (Some(n), Some(k), Some(root)) = (d.name, kind, d.root) {
+            // No pre-classification filter. The Variable query already
+            // restricts to `(source_file (property_declaration ...))` via
+            // the tree-sitter pattern; broader cases get whatever shape
+            // the grammar offers. Downstream consumers decide.
+
+            if let Some(name_str) = text(n, source) {
+                // Property dedupe on name-node id so multi-declarator
+                // patterns each get their own entry; other kinds keep
+                // root-keyed dedupe (multi-decorator captures collapse).
+                let node_id = if k == NodeKind::Property {
+                    n.id()
+                } else {
+                    root.id()
                 };
-                if let Some(nk) = new_kind {
-                    kind = Some(nk);
-                }
-            }
-
-            if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
-                // No pre-classification filter. The Variable query already
-                // restricts to `(source_file (property_declaration ...))` via
-                // the tree-sitter pattern; broader cases get whatever shape
-                // the grammar offers. Downstream consumers decide.
-
-                if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
-                    let start = root.start_position();
-                    let end = root.end_position();
-
-                    // Property dedupe on name-node id so multi-declarator
-                    // patterns each get their own entry; other kinds keep
-                    // root-keyed dedupe (multi-decorator captures collapse).
-                    let node_id = if k == NodeKind::Property {
-                        n.id()
-                    } else {
-                        root.id()
-                    };
-                    let idx = *node_id_to_idx.entry(node_id).or_insert_with(|| {
-                        let i = nodes.len();
-                        nodes.push(RawNode {
-                            decorators: vec![],
-                            is_exported,
-                            heritage: Vec::new(),
-                            type_annotation: type_annotation.clone(),
-                            name: name_str.to_string(),
-                            kind: k,
-                            span: (
-                                start.row as u32,
-                                start.column as u32,
-                                end.row as u32,
-                                end.column as u32,
-                            ),
-                            calls: Vec::new(),
-                            field_reads: Vec::new(),
-                            owner_class: None,
-                            content_hash: ecp_core::uid::xxh3_64_bytes(
-                                &source[root.start_byte()..root.end_byte()],
-                            ),
-                        });
-                        i
+                let nodes = &mut cx.nodes;
+                let idx = *f.node_id_to_idx.entry(node_id).or_insert_with(|| {
+                    let i = nodes.len();
+                    nodes.push(RawNode {
+                        is_exported: m.is_exported,
+                        type_annotation: m.type_annotation.clone(),
+                        ..node::decl(
+                            name_str.to_string(),
+                            k,
+                            node::span(root),
+                            &source[root.start_byte()..root.end_byte()],
+                        )
                     });
-                    let entry = &mut nodes[idx];
+                    i
+                });
+                let entry = &mut cx.nodes[idx];
 
-                    if !is_exported {
-                        entry.is_exported = false;
-                    }
-                    if type_annotation.is_some() {
-                        entry.type_annotation = type_annotation;
-                    }
-                    for h in heritage {
-                        if !entry.heritage.contains(&h) {
-                            entry.heritage.push(h);
-                        }
-                    }
-                    for d in decorators {
-                        if !entry.decorators.contains(&d) {
-                            entry.decorators.push(d);
-                        }
+                if !m.is_exported {
+                    entry.is_exported = false;
+                }
+                if m.type_annotation.is_some() {
+                    entry.type_annotation = m.type_annotation.take();
+                }
+                for h in std::mem::take(&mut m.heritage) {
+                    if !entry.heritage.contains(&h) {
+                        entry.heritage.push(h);
                     }
                 }
-            }
-
-            if let Some(i_src) = import_src {
-                if let Ok(src_str) =
-                    std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()])
-                {
-                    let alias = if let Some(a_node) = import_alias {
-                        std::str::from_utf8(&source[a_node.start_byte()..a_node.end_byte()])
-                            .ok()
-                            .map(|s| s.to_string())
-                    } else {
-                        None
-                    };
-
-                    imports.push(RawImport {
-                        alias,
-                        imported_name: if i_src.parent().is_some_and(|parent| {
-                            parent
-                                .named_children(&mut parent.walk())
-                                .any(|child| child.kind() == "wildcard_import")
-                        }) {
-                            "*".to_string()
-                        } else {
-                            src_str.rsplit('.').next().unwrap_or(src_str).to_string()
-                        },
-                        source: src_str.to_string(),
-                        binding_kind: None,
-                    });
-                }
-            }
-
-            // Stash Ktor route capture for post-loop gate. Path is from
-            // `string_content` (already unquoted); verb is the per-pattern
-            // capture name, so no regex alternation in Rust.
-            if let (Some(verb), Some(span), Some(path_node)) =
-                (ktor_verb, ktor_route_span, ktor_path_node)
-            {
-                if let Ok(path_str) =
-                    std::str::from_utf8(&source[path_node.start_byte()..path_node.end_byte()])
-                {
-                    pending_ktor_refs.push((verb, path_str.to_string(), span));
+                for dec in std::mem::take(&mut m.decorators) {
+                    if !entry.decorators.contains(&dec) {
+                        entry.decorators.push(dec);
+                    }
                 }
             }
         }
 
-        drop(_p);
-        let _p = parse_prof::span(Pass::Calls);
-        // `nodes` already in source order — Vec + idx-map at parse-loop start.
+        if let Some(i_src) = m.import_source {
+            if let Some(src_str) = text(i_src, source) {
+                let alias = m
+                    .import_alias
+                    .and_then(|a_node| text(a_node, source))
+                    .map(|s| s.to_string());
+                let imported_name = if i_src.parent().is_some_and(|parent| {
+                    parent
+                        .named_children(&mut parent.walk())
+                        .any(|child| child.kind() == "wildcard_import")
+                }) {
+                    "*".to_string()
+                } else {
+                    src_str.rsplit('.').next().unwrap_or(src_str).to_string()
+                };
+                cx.imports.push(imports::raw(
+                    src_str.to_string(),
+                    imported_name,
+                    alias,
+                    None,
+                ));
+            }
+        }
 
-        // Extract call sites with receiver-type binding for `this.foo()`,
-        // `super.foo()`, and typed-variable `obj.foo()` patterns; same DFS
-        // also collects path-shaped and SQL-shaped string literals.
-        let (raw_path_literals, raw_sql_refs) =
-            extract_kotlin_calls_and_path_literals(tree.root_node(), source, &mut nodes);
-        drop(_p);
-        let _p = parse_prof::span(Pass::Walk);
-        crate::calls::extract_field_reads(
-            tree.root_node(),
-            source,
-            &mut nodes,
-            &["navigation_expression"],
-            &crate::calls::NameRefSpec {
-                ident_kinds: &["simple_identifier"],
-                kind: crate::calls::NameRefKind::Value,
-                binding_parents: &["variable_declaration", "catch_block"],
-                skip_kinds: &[
-                    "import_header",
-                    "package_header",
-                    "annotation",
-                    "type_arguments",
-                    "user_type",
-                ],
-                skip_parents: &["navigation_suffix"],
-                call_suffixes: &["call_suffix"],
-                infix_calls: &["infix_expression"],
-                method_refs: &["callable_reference"],
-                named_arg_parents: &["value_argument"],
-                ..crate::calls::NameRefSpec::EMPTY
-            },
-        );
-        crate::calls::extract_variant_refs(
-            tree.root_node(),
-            source,
-            &mut nodes,
-            &crate::calls::VariantRefSpec {
-                path_kinds: &["navigation_expression"],
-                label_parents: &["when_condition"],
-                bare_label_parents: &[],
-                bare_expressions: false,
-                token_trees: false,
-            },
-        );
+        // Stash Ktor route capture for post-loop gate. Path is from
+        // `string_content` (already unquoted); verb is the per-pattern
+        // capture name, so no regex alternation in Rust.
+        if let (Some(verb), Some(span), Some(path_node)) =
+            (m.ktor_verb, m.ktor_route_span, m.ktor_path_node)
+        {
+            if let Some(path_str) = text(path_node, source) {
+                f.pending_ktor_refs.push((verb, path_str.to_string(), span));
+            }
+        }
+    }
 
-        // Ktor framework-presence gate: only emit refs when the file
-        // imports `io.ktor.*`. The route DSL verbs (`get`/`post`/...) are
-        // common identifiers, so without the gate we would over-claim.
-        drop(_p);
-        let _p = parse_prof::span(Pass::Build);
-        let has_ktor = has_import_from(&imports, KTOR_REQUIRED);
-        let framework_refs: Vec<RawFrameworkRef> = if has_ktor {
-            pending_ktor_refs
-                .into_iter()
-                .map(|(verb, path, span)| RawFrameworkRef {
-                    source_name: MODULE_LEVEL_SOURCE.to_string(),
-                    target_name: path,
-                    confidence: framework_confidence::KTOR_ROUTE,
-                    reason: format!("ktor-route-{}", verb),
-                    span,
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+    fn hook<'t>(h: KotlinHook, _c: &Compiled<Self>, f: &mut KotlinFile, cx: &mut FileCx<'t>) {
+        match h {
+            KotlinHook::Calls => {
+                // Extract call sites with receiver-type binding for `this.foo()`,
+                // `super.foo()`, and typed-variable `obj.foo()` patterns; same DFS
+                // also collects path-shaped and SQL-shaped string literals.
+                let (raw_path_literals, raw_sql_refs) = extract_kotlin_calls_and_path_literals(
+                    cx.tree.root_node(),
+                    cx.source,
+                    &mut cx.nodes,
+                );
+                cx.path_literals = raw_path_literals;
+                cx.sql_refs = raw_sql_refs;
+            }
+            KotlinHook::Ktor => {
+                // The route DSL verbs (`get`/`post`/...) are common
+                // identifiers, so without the gate we would over-claim.
+                if has_import_from(&cx.imports, KTOR_REQUIRED) {
+                    cx.framework_refs = std::mem::take(&mut f.pending_ktor_refs)
+                        .into_iter()
+                        .map(|(verb, path, span)| RawFrameworkRef {
+                            source_name: MODULE_LEVEL_SOURCE.to_string(),
+                            target_name: path,
+                            confidence: framework_confidence::KTOR_ROUTE,
+                            reason: format!("ktor-route-{}", verb),
+                            span,
+                        })
+                        .collect();
+                }
+            }
+        }
+    }
 
-        drop(_p);
-        let _p = parse_prof::span(Pass::Walk);
-        let raw_function_metas =
-            crate::function_meta::kotlin::extract(tree.root_node(), source, &nodes, file_category);
-        drop(_p);
-        let _p = parse_prof::span(Pass::Build);
-        let tx_scopes = collect_jvm_transactional_scopes(
-            &nodes,
-            &[NodeKind::Method, NodeKind::Function, NodeKind::Constructor],
-        );
-
-        crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
-
-        drop(_p);
-        let _p = parse_prof::span(Pass::Walk);
-        let event_topics = {
-            let topics = crate::event_topic::extract_event_topics(
-                &tree,
-                source,
-                &self.query,
-                &[crate::event_topic::KAFKA_KOTLIN],
-                &imports,
-            );
-            (!topics.is_empty()).then(|| topics.into_boxed_slice())
-        };
-
-        drop(_p);
-        Ok(LocalGraph {
-            content_hash: [0; 8],
-            routes: vec![],
-            file_path: path.to_path_buf(),
-            nodes,
-            imports,
-            documents: vec![],
-            route_receivers: None,
-            framework_refs,
-            fanout_refs: vec![],
-            blind_spots,
-            schema_fields: None,
-            event_topics,
-            tx_scopes,
-            path_literals: (!raw_path_literals.is_empty())
-                .then(|| raw_path_literals.into_boxed_slice()),
-            sql_refs: (!raw_sql_refs.is_empty()).then(|| raw_sql_refs.into_boxed_slice()),
-            call_metas: vec![],
-            raw_function_metas,
-            export_aliases: None,
-            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
-        })
+    fn function_meta(
+        root: Node<'_>,
+        source: &[u8],
+        nodes: &[RawNode],
+        category: FileCategory,
+    ) -> Vec<RawFunctionMeta> {
+        crate::function_meta::kotlin::extract(root, source, nodes, category)
     }
 }

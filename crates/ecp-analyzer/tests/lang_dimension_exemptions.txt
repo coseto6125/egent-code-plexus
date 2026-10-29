@@ -307,7 +307,6 @@ driver_parity c lands when phase 3 slice T7 moves this parser onto the shared dr
 driver_parity cpp lands when phase 3 slice T7 moves this parser onto the shared driver
 driver_parity csharp lands when phase 3 slice T5 moves this parser onto the shared driver
 driver_parity dart lands when phase 3 slice T6 moves this parser onto the shared driver
-driver_parity kotlin lands when phase 3 slice T5 moves this parser onto the shared driver
 driver_parity php lands when phase 3 slice T6 moves this parser onto the shared driver
 driver_parity swift lands when phase 3 slice T6 moves this parser onto the shared driver
 dynamic_dispatch c pre-existing gap
