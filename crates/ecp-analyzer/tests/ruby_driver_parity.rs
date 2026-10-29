@@ -10,6 +10,8 @@ use ecp_core::graph::NodeKind;
 use ecp_core::uid::xxh3_64_bytes;
 use std::path::Path;
 
+type Span4 = (u32, u32, u32, u32);
+
 fn parse_at(path: &str, src: &[u8]) -> LocalGraph {
     RubyProvider::new()
         .expect("RubyProvider::new")
@@ -48,7 +50,7 @@ fn imports(g: &LocalGraph) -> Vec<ImportRow<'_>> {
         .collect()
 }
 
-fn blind(g: &LocalGraph) -> Vec<(&str, (u32, u32, u32, u32))> {
+fn blind(g: &LocalGraph) -> Vec<(&str, Span4)> {
     g.blind_spots
         .iter()
         .map(|b| (b.kind.as_str(), b.span))

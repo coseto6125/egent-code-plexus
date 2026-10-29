@@ -12,6 +12,8 @@ use ecp_core::graph::NodeKind;
 use ecp_core::uid::xxh3_64_bytes;
 use std::path::Path;
 
+type Span4 = (u32, u32, u32, u32);
+
 fn parse(src: &[u8]) -> LocalGraph {
     KotlinProvider::new()
         .expect("KotlinProvider::new")
@@ -35,7 +37,7 @@ fn node<'g>(g: &'g LocalGraph, name: &str, kind: NodeKind) -> &'g RawNode {
 }
 
 /// `(span, is_exported, owner_class)`
-type Shape<'g> = ((u32, u32, u32, u32), bool, Option<&'g str>);
+type Shape<'g> = (Span4, bool, Option<&'g str>);
 
 fn shape(n: &RawNode) -> Shape<'_> {
     (n.span, n.is_exported, n.owner_class.as_deref())
@@ -220,7 +222,7 @@ fn test_kotlin_driver_ktor_without_import_emits_no_ref() {
 fn test_kotlin_driver_lambda_argument_with_call_emits_anonymous_node() {
     let src: &[u8] = b"fun f() {\n    list.forEach { process(it) }\n    list.map({ x -> g(x) })\n    list.map { it + 1 }\n}\n";
     let g = parse(src);
-    let anon: Vec<(&str, (u32, u32, u32, u32), u64)> = g
+    let anon: Vec<(&str, Span4, u64)> = g
         .nodes
         .iter()
         .filter(|n| n.name.starts_with("<anonymous"))
@@ -288,7 +290,7 @@ fn test_kotlin_driver_override_merges_into_one_method_with_sentinel() {
 #[test]
 fn test_kotlin_driver_reflection_calls_emit_blind_spots_in_order() {
     let g = parse(b"fun f() {\n    val c = Class.forName(\"x\")\n    m.invoke(o)\n}\n");
-    let spots: Vec<(&str, (u32, u32, u32, u32), bool)> = g
+    let spots: Vec<(&str, Span4, bool)> = g
         .blind_spots
         .iter()
         .map(|b| (b.kind.as_str(), b.span, b.is_test))
