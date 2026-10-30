@@ -77,9 +77,13 @@ fn test_kotlin_ktor_ref_outside_any_named_function_is_module_level() {
     let g = parse(&format!(
         "{IMPORT}val r = routing {{\n    get(\"/x\") {{ call.respondText(\"ok\") }}\n}}\n"
     ));
-    for r in g.framework_refs.iter().filter(|r| r.target_name == "/x") {
-        assert_eq!(r.source_name, MODULE_LEVEL_SOURCE);
-    }
+    let refs: Vec<_> = g
+        .framework_refs
+        .iter()
+        .filter(|r| r.target_name == "/x")
+        .collect();
+    assert_eq!(refs.len(), 1, "{:?}", g.framework_refs);
+    assert_eq!(refs[0].source_name, MODULE_LEVEL_SOURCE);
 }
 
 // FU-2026-10-30-baa83b70b9a0
