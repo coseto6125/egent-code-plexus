@@ -94,3 +94,59 @@ fn test_java_class_members_without_modifier_stay_unexported() {
     assert!(exported(&g, "open", NodeKind::Method));
     assert!(!exported(&g, "Nested", NodeKind::Class));
 }
+
+/// FU-B3: `enum` and `@interface` follow the same visibility rule as a
+/// class, and members of an exported `@interface` stay exported.
+#[test]
+fn test_java_public_enum_and_annotation_type_are_exported() {
+    let g = parse(
+        "public class Outer {\n\
+         \x20   public enum Mode { A }\n\
+         \x20   public @interface Require {\n\
+         \x20       String value() default \"\";\n\
+         \x20       int count();\n\
+         \x20   }\n\
+         }\n\
+         public enum Top { X }\n",
+    );
+    assert!(exported(&g, "Mode", NodeKind::Enum));
+    assert!(exported(&g, "Top", NodeKind::Enum));
+    assert!(exported(&g, "Require", NodeKind::Annotation));
+    assert!(exported(&g, "value", NodeKind::Method));
+    assert!(exported(&g, "count", NodeKind::Method));
+}
+
+#[test]
+fn test_java_package_private_enum_and_annotation_type_stay_unexported() {
+    let g = parse(
+        "enum Hidden { A }\n\
+         @interface Local { int n(); }\n\
+         public class Pub {\n\
+         \x20   enum Inner { B }\n\
+         }\n",
+    );
+    assert!(!exported(&g, "Hidden", NodeKind::Enum));
+    assert!(!exported(&g, "Local", NodeKind::Annotation));
+    assert!(!exported(&g, "n", NodeKind::Method));
+    assert!(!exported(&g, "Inner", NodeKind::Enum));
+}
+
+#[test]
+fn test_java_same_name_enum_in_two_scopes_follows_each_owner() {
+    let g = parse(
+        "public class A { public enum Kind { X } }\n\
+         class B { enum Kind { Y } }\n",
+    );
+    let flags: Vec<_> = g
+        .nodes
+        .iter()
+        .filter(|n| n.name == "Kind" && n.kind == NodeKind::Enum)
+        .map(|n| n.is_exported)
+        .collect();
+    assert_eq!(flags, [true, false]);
+}
+
+#[test]
+fn test_java_empty_file_has_no_exported_nodes() {
+    assert!(parse("").nodes.is_empty());
+}

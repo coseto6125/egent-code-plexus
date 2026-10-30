@@ -110,3 +110,84 @@ fn test_javascript_es_export_still_marks_declaration() {
     assert!(exported(&g, "a"));
     assert!(!exported(&g, "b"));
 }
+
+// FU-2026-10-30 round 2, item C3. Shape from express `lib/express.js:27`:
+// a chained assignment exports the declaration its last value names.
+#[test]
+fn test_javascript_commonjs_exports_then_module_exports_chain_marks_declaration() {
+    let g = parse(b"function createApplication() {}\nfunction other() {}\nexports = module.exports = createApplication;\n");
+    assert!(exported(&g, "createApplication"));
+    assert!(!exported(&g, "other"));
+}
+
+// C3 atypical: `module.exports` on the left, `exports` in the middle.
+#[test]
+fn test_javascript_commonjs_module_exports_then_exports_chain_marks_declaration() {
+    let g = parse(b"function a() {}\nfunction other() {}\nmodule.exports = exports = a;\n");
+    assert!(exported(&g, "a"));
+    assert!(!exported(&g, "other"));
+}
+
+// C3 atypical: three levels, with `module.exports` in the middle.
+#[test]
+fn test_javascript_commonjs_three_level_chain_marks_declaration() {
+    let g =
+        parse(b"var p, q;\nfunction a() {}\nfunction other() {}\np = module.exports = q = a;\n");
+    assert!(exported(&g, "a"));
+    assert!(!exported(&g, "other"));
+}
+
+// C3 atypical: two property targets share one value.
+#[test]
+fn test_javascript_commonjs_chained_property_targets_mark_declaration() {
+    let g = parse(b"function a() {}\nfunction other() {}\nexports.k = module.exports.k = a;\n");
+    assert!(exported(&g, "a"));
+    assert!(!exported(&g, "other"));
+}
+
+// C3 atypical: a chain whose value is an object literal exports the
+// listed declarations, as the direct form does.
+#[test]
+fn test_javascript_commonjs_chain_with_object_value_marks_listed_declarations() {
+    let g = parse(
+        b"function a() {}\nfunction b() {}\nfunction c() {}\nexports = module.exports = { a, k: b };\n",
+    );
+    assert!(exported(&g, "a"));
+    assert!(exported(&g, "b"));
+    assert!(!exported(&g, "c"));
+}
+
+// C3 atypical: a chain whose value names no declaration exports nothing.
+#[test]
+fn test_javascript_commonjs_chain_with_function_expression_marks_nothing() {
+    let g = parse(b"function a() {}\nmodule.exports = exports = function () {};\n");
+    assert!(!exported(&g, "a"));
+}
+
+// C3 guard: a chain with no `exports` target stays unexported.
+#[test]
+fn test_javascript_non_export_chained_assignment_marks_nothing() {
+    let g = parse(b"var p, q;\nfunction a() {}\np = q = a;\nother.exports = module.other = a;\n");
+    assert!(!exported(&g, "a"));
+}
+
+// C3 guard: a bare `exports = a` rebinds the local `exports`; Node still
+// exports the old `module.exports`, so nothing is exported.
+#[test]
+fn test_javascript_bare_exports_reassignment_marks_nothing() {
+    let g = parse(b"function a() {}\nexports = a;\n");
+    assert!(!exported(&g, "a"));
+}
+
+// C3 guard: a chain inside a function body is no top-level export.
+#[test]
+fn test_javascript_chained_exports_inside_function_body_marks_nothing() {
+    let g = parse(b"function a() {}\nfunction init() { exports = module.exports = a; }\n");
+    assert!(!exported(&g, "a"));
+}
+
+// C3 guard: an empty file has no nodes.
+#[test]
+fn test_javascript_empty_file_has_no_nodes() {
+    assert!(parse(b"").nodes.is_empty());
+}

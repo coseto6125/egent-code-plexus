@@ -223,3 +223,82 @@ fn test_dart_annotations_on_variables_getters_and_constructors() {
         .filter(|n| n.kind == NodeKind::Annotation)
         .all(|n| n.decorators.is_empty()));
 }
+
+const ABSTRACT_MEMBERS: &[u8] = b"abstract class Cipher {\n  @override\n  int one();\n  @override\n  @useResult\n  int two(int x);\n  int none();\n  @override\n  void body() {}\n  @a\n  int get g;\n  @b\n  set s(int v);\n  @o\n  bool operator ==(Object other);\n}\n@pragma('x')\nvoid top() {}\n";
+
+/// FU-B1: an annotation on a body-less member reaches its decorators, in
+/// source order; zero annotations stay empty; a member with a body is
+/// unchanged from round 1.
+#[test]
+fn test_dart_abstract_member_annotations_reach_decorators() {
+    let g = parse(ABSTRACT_MEMBERS);
+    let decorators = |name: &str| {
+        g.nodes
+            .iter()
+            .find(|n| n.name == name && n.kind != NodeKind::Annotation)
+            .unwrap_or_else(|| panic!("no `{name}` in {:?}", names_kinds(&g)))
+            .decorators
+            .clone()
+    };
+    assert_eq!(decorators("one"), ["@override"]);
+    assert_eq!(decorators("two"), ["@override", "@useResult"]);
+    assert!(decorators("none").is_empty());
+    assert_eq!(decorators("body"), ["@override"]);
+    assert_eq!(decorators("top"), ["@pragma('x')"]);
+}
+
+/// FU-B2: a body-less member of a class is a Method owned by the class;
+/// a top-level function stays a Function.
+#[test]
+fn test_dart_abstract_member_is_method_not_function() {
+    let g = parse(ABSTRACT_MEMBERS);
+    for name in ["one", "two", "none"] {
+        let m = node(&g, name, NodeKind::Method);
+        assert_eq!(m.owner_class.as_deref(), Some("Cipher"), "{name}");
+        assert!(
+            !g.nodes
+                .iter()
+                .any(|n| n.name == name && n.kind == NodeKind::Function),
+            "{name} also emitted as Function"
+        );
+    }
+    assert_eq!(node(&g, "body", NodeKind::Method).decorators, ["@override"]);
+    assert!(node(&g, "top", NodeKind::Function).owner_class.is_none());
+    assert!(!g
+        .nodes
+        .iter()
+        .any(|n| n.name == "top" && n.kind == NodeKind::Method));
+}
+
+/// FU-B1 (capability): abstract getter, setter and operator signatures keep
+/// their annotations.
+#[test]
+fn test_dart_abstract_getter_setter_operator_annotations() {
+    let g = parse(ABSTRACT_MEMBERS);
+    let marked = |dec: &str| {
+        g.nodes
+            .iter()
+            .filter(|n| n.kind != NodeKind::Annotation && n.decorators == [dec])
+            .map(|n| n.kind)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(marked("@a"), [NodeKind::Property], "getter");
+    assert_eq!(marked("@b"), [NodeKind::Property], "setter");
+    assert_eq!(marked("@o"), [NodeKind::Method], "operator");
+}
+
+#[test]
+fn test_dart_abstract_members_empty_and_nested_shapes() {
+    assert!(parse(b"").nodes.is_empty());
+    let g =
+        parse(b"abstract class A {\n  @x\n  void m();\n}\nabstract class B {\n  void m();\n}\n");
+    let ms: Vec<_> = g
+        .nodes
+        .iter()
+        .filter(|n| n.name == "m" && n.kind == NodeKind::Method)
+        .map(|n| (n.owner_class.as_deref(), n.decorators.clone()))
+        .collect();
+    assert_eq!(ms.len(), 2, "{:?}", names_kinds(&g));
+    assert!(ms.contains(&(Some("A"), vec!["@x".to_string()])));
+    assert!(ms.contains(&(Some("B"), vec![])));
+}

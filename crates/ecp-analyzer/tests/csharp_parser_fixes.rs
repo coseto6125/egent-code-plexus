@@ -208,3 +208,271 @@ fn test_csharp_field_declarators_carry_declared_type() {
         ]
     );
 }
+
+/// Joins source lines; the tests below read as the file they stand for.
+fn lines(src: &[&str]) -> Vec<u8> {
+    let mut joined = src.join("\n");
+    joined.push('\n');
+    joined.into_bytes()
+}
+
+fn node_row<'g>(g: &'g LocalGraph, name: &str) -> Row<'g> {
+    *rows(g)
+        .iter()
+        .find(|row| row.0 == name)
+        .unwrap_or_else(|| panic!("no node `{name}` in {:?}", rows(g)))
+}
+
+/// `(name, owner_class)` of every node that is no namespace or type.
+fn member_owners(g: &LocalGraph) -> Vec<(&str, Option<&str>)> {
+    g.nodes
+        .iter()
+        .filter(|n| {
+            !matches!(
+                n.kind,
+                NodeKind::Namespace | NodeKind::Class | NodeKind::Struct | NodeKind::Interface
+            )
+        })
+        .map(|n| (n.name.as_str(), n.owner_class.as_deref()))
+        .collect()
+}
+
+// FU-2026-10-30 round 2, item C1. Shape from Newtonsoft.Json
+// `Linq/JValue.cs:46-49`: an `#if` splits the base list, and error recovery
+// ends the class at the directive. The class must span to its closing brace
+// and own the members after the split, as it does without the directive.
+#[test]
+fn test_csharp_if_endif_in_base_list_keeps_class_span_and_member_owner() {
+    let g = parse(&lines(&[
+        "namespace N",
+        "{",
+        "    public partial class JValue : JToken, IEquatable<JValue>",
+        "#if HAVE_ICONVERTIBLE",
+        "        , IConvertible",
+        "#endif",
+        "    {",
+        "        private int _a;",
+        "        internal JValue() { }",
+        "        public void M() { }",
+        "    }",
+        "}",
+    ]));
+    assert_eq!(
+        node_row(&g, "N"),
+        ("N", NodeKind::Namespace, (0, 0, 11, 1), None)
+    );
+    assert_eq!(
+        node_row(&g, "JValue"),
+        ("JValue", NodeKind::Class, (2, 4, 10, 5), Some("N"))
+    );
+    assert_eq!(
+        member_owners(&g),
+        [
+            ("_a", Some("JValue")),
+            ("JValue", Some("JValue")),
+            ("M", Some("JValue")),
+        ]
+    );
+}
+
+// C1 atypical: `#if` / `#else` / `#endif` with a base in each branch.
+#[test]
+fn test_csharp_if_else_endif_in_base_list_keeps_class_span_and_member_owner() {
+    let g = parse(&lines(&[
+        "class A : B",
+        "#if X",
+        "    , IX",
+        "#else",
+        "    , IY",
+        "#endif",
+        "{",
+        "    void M() { }",
+        "}",
+    ]));
+    assert_eq!(
+        rows(&g),
+        [
+            ("A", NodeKind::Class, (0, 0, 8, 1), None),
+            ("M", NodeKind::Method, (7, 4, 7, 16), Some("A")),
+        ]
+    );
+}
+
+// C1 atypical: the directive wraps the whole base list, colon included.
+#[test]
+fn test_csharp_if_around_whole_base_list_keeps_class_span_and_member_owner() {
+    let g = parse(&lines(&[
+        "class A",
+        "#if X",
+        "    : B",
+        "#endif",
+        "{",
+        "    void M() { }",
+        "}",
+    ]));
+    assert_eq!(
+        rows(&g),
+        [
+            ("A", NodeKind::Class, (0, 0, 6, 1), None),
+            ("M", NodeKind::Method, (5, 4, 5, 16), Some("A")),
+        ]
+    );
+}
+
+// C1 atypical: two split classes side by side; each owns its own member.
+#[test]
+fn test_csharp_two_classes_with_split_base_lists_own_their_members() {
+    let g = parse(&lines(&[
+        "namespace N",
+        "{",
+        "    class A : B",
+        "#if X",
+        "        , IX",
+        "#endif",
+        "    {",
+        "        void M() { }",
+        "    }",
+        "    class C : D",
+        "#if Y",
+        "        , IY",
+        "#endif",
+        "    {",
+        "        void N() { }",
+        "    }",
+        "}",
+    ]));
+    let ns = Some("N");
+    assert_eq!(
+        rows(&g),
+        [
+            ("N", NodeKind::Namespace, (0, 0, 16, 1), None),
+            ("A", NodeKind::Class, (2, 4, 8, 5), ns),
+            ("M", NodeKind::Method, (7, 8, 7, 20), Some("A")),
+            ("C", NodeKind::Class, (9, 4, 15, 5), ns),
+            ("N", NodeKind::Method, (14, 8, 14, 20), Some("C")),
+        ]
+    );
+}
+
+// C1 atypical: the split class is nested one level deeper; the outer class
+// keeps the members after it.
+#[test]
+fn test_csharp_nested_class_with_split_base_list_owns_its_members() {
+    let g = parse(&lines(&[
+        "class Outer",
+        "{",
+        "    class Inner : B",
+        "#if X",
+        "        , IX",
+        "#endif",
+        "    {",
+        "        void M() { }",
+        "    }",
+        "    void O() { }",
+        "}",
+    ]));
+    assert_eq!(
+        rows(&g),
+        [
+            ("Outer", NodeKind::Class, (0, 0, 10, 1), None),
+            ("Inner", NodeKind::Class, (2, 4, 8, 5), Some("Outer")),
+            ("M", NodeKind::Method, (7, 8, 7, 20), Some("Inner")),
+            ("O", NodeKind::Method, (9, 4, 9, 16), Some("Outer")),
+        ]
+    );
+}
+
+// C1 atypical: struct and interface base lists split the same way.
+#[test]
+fn test_csharp_struct_and_interface_split_base_lists_keep_span_and_owner() {
+    let g = parse(&lines(&[
+        "struct S : IA",
+        "#if X",
+        "    , IB",
+        "#endif",
+        "{",
+        "    void M() { }",
+        "}",
+        "interface I : IA",
+        "#if X",
+        "    , IB",
+        "#endif",
+        "{",
+        "    void N();",
+        "}",
+    ]));
+    assert_eq!(
+        node_row(&g, "S"),
+        ("S", NodeKind::Struct, (0, 0, 6, 1), None)
+    );
+    assert_eq!(
+        node_row(&g, "I"),
+        ("I", NodeKind::Interface, (7, 0, 13, 1), None)
+    );
+    assert_eq!(member_owners(&g), [("M", Some("S")), ("N", Some("I"))]);
+}
+
+// C1 guard: a class with no base list keeps its records.
+#[test]
+fn test_csharp_class_without_base_list_records_unchanged() {
+    let g = parse(&lines(&["class A", "{", "    void M() { }", "}"]));
+    assert_eq!(
+        rows(&g),
+        [
+            ("A", NodeKind::Class, (0, 0, 3, 1), None),
+            ("M", NodeKind::Method, (2, 4, 2, 16), Some("A")),
+        ]
+    );
+}
+
+// C1 guard: a directive inside a method body is no part of a base list.
+#[test]
+fn test_csharp_directive_in_method_body_records_unchanged() {
+    let g = parse(&lines(&[
+        "class A : B",
+        "{",
+        "    void M()",
+        "    {",
+        "#if X",
+        "        Foo();",
+        "#endif",
+        "    }",
+        "    void N() { }",
+        "}",
+    ]));
+    assert_eq!(
+        rows(&g),
+        [
+            ("A", NodeKind::Class, (0, 0, 9, 1), None),
+            ("M", NodeKind::Method, (2, 4, 7, 5), Some("A")),
+            ("N", NodeKind::Method, (8, 4, 8, 16), Some("A")),
+        ]
+    );
+}
+
+// C1 guard: a conditional `using` ahead of a class with an intact base list.
+#[test]
+fn test_csharp_directive_before_class_with_intact_base_list_records_unchanged() {
+    let g = parse(&lines(&[
+        "#if X",
+        "using System.Numerics;",
+        "#endif",
+        "class A : B",
+        "{",
+        "    void M() { }",
+        "}",
+    ]));
+    assert_eq!(
+        rows(&g),
+        [
+            ("A", NodeKind::Class, (3, 0, 6, 1), None),
+            ("M", NodeKind::Method, (5, 4, 5, 16), Some("A")),
+        ]
+    );
+}
+
+// C1 guard: an empty file has no records.
+#[test]
+fn test_csharp_empty_file_has_no_records() {
+    assert!(rows(&parse(b"")).is_empty());
+}
