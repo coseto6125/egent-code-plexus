@@ -13,6 +13,7 @@ pub mod module_discovery;
 pub mod name_ref;
 pub mod outcome;
 pub mod overrides;
+pub mod parse_prof;
 pub mod path_aliases;
 pub mod pipeline;
 pub mod provider;

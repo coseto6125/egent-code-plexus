@@ -1,3 +1,4 @@
+use super::parse_prof::{self, Pass};
 use super::provider::LanguageProvider;
 use super::types::LocalGraph;
 use crate::contracts::routing::{
@@ -201,15 +202,20 @@ impl AnalyzerPipeline {
         let (tx, rx) = crossbeam_channel::unbounded::<LocalGraph>();
         let cache_lookup = &cache_lookup;
         let prof = std::env::var("ECP_PROF").is_ok();
-        // Per-provider (count, total_ns) when ECP_PROF=1. Mutex is fine —
-        // critical section is just a HashMap update, negligible vs the
-        // parse_file work it brackets.
-        let times_owned: Option<Mutex<FxHashMap<&'static str, (u64, u64)>>> = if prof {
+        // Per-provider (count, total_ns, per-pass ns) when ECP_PROF=1. Mutex
+        // is fine — critical section is just a HashMap update, negligible vs
+        // the parse_file work it brackets.
+        let times_owned: Option<Mutex<FxHashMap<&'static str, ProviderTimes>>> = if prof {
             Some(Mutex::new(FxHashMap::default()))
         } else {
             None
         };
         let times = times_owned.as_ref();
+        // Never written `false`: the flag is process-wide, so a run without
+        // ECP_PROF must not switch off a profiler another caller enabled.
+        if prof {
+            parse_prof::set_enabled(true);
+        }
 
         // Producer (A): parse files concurrently
         rayon::scope(|s| {
@@ -309,6 +315,9 @@ impl AnalyzerPipeline {
                         }
 
                         // Cache miss / no cache: regular parse path.
+                        if times.is_some() {
+                            parse_prof::reset();
+                        }
                         let t_parse = std::time::Instant::now();
                         let Some((provider_name, result)) =
                             Self::parse_chain(&route, &chain, &rel_path, source)
@@ -317,10 +326,17 @@ impl AnalyzerPipeline {
                         };
                         let parse_ns = t_parse.elapsed().as_nanos() as u64;
                         if let Some(t) = times {
+                            let pass_ns = parse_prof::take();
                             let mut m = t.lock().unwrap();
-                            let entry = m.entry(provider_name).or_insert((0u64, 0u64));
-                            entry.0 += 1;
-                            entry.1 += parse_ns;
+                            // Passes of an earlier chain provider that declined
+                            // the file land on the provider that finally
+                            // returned: `parse_chain` reports only that name.
+                            let entry = m.entry(provider_name).or_default();
+                            entry.count += 1;
+                            entry.total_ns += parse_ns;
+                            for (sum, ns) in entry.pass_ns.iter_mut().zip(pass_ns) {
+                                *sum += ns;
+                            }
                         }
                         match result {
                             Ok(mut local_graph) => {
@@ -349,9 +365,14 @@ impl AnalyzerPipeline {
             let m = t.into_inner().unwrap();
             let mut rows: Vec<_> = m.into_iter().collect();
             // Sort by total ns descending — surface the hot providers first.
-            rows.sort_by_key(|(_, (_, ns))| std::cmp::Reverse(*ns));
+            rows.sort_by_key(|(_, t)| std::cmp::Reverse(t.total_ns));
             eprintln!("prof per-provider parse_file:");
-            for (name, (n, ns)) in rows {
+            for (name, t) in rows {
+                let ProviderTimes {
+                    count: n,
+                    total_ns: ns,
+                    pass_ns,
+                } = t;
                 let per_file_us = ns.checked_div(n).unwrap_or(0) / 1000;
                 eprintln!(
                     "  {:<16} n={:>6}  total={:>7.2}s  per-file={}µs",
@@ -360,11 +381,31 @@ impl AnalyzerPipeline {
                     ns as f64 / 1e9,
                     per_file_us
                 );
+                let pct = |v: u64| 100.0 * v as f64 / ns.max(1) as f64;
+                let mut line = String::new();
+                for (pass, v) in Pass::ALL.into_iter().zip(pass_ns) {
+                    line += &format!(" {}={:.1}ms({:.0}%)", pass.name(), v as f64 / 1e6, pct(v));
+                }
+                let other = ns.saturating_sub(pass_ns.iter().sum());
+                eprintln!(
+                    "  {:<16}{} other={:.1}ms({:.0}%)",
+                    "",
+                    line,
+                    other as f64 / 1e6,
+                    pct(other)
+                );
             }
         }
 
         all_graphs
     }
+}
+
+#[derive(Default)]
+struct ProviderTimes {
+    count: u64,
+    total_ns: u64,
+    pass_ns: [u64; Pass::COUNT],
 }
 
 /// What the pipeline does with one provider's graph once the provider has

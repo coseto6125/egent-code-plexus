@@ -1,6 +1,6 @@
 use super::config::SchemaFieldConfig;
 use crate::framework_helpers::has_import_from;
-use ecp_core::analyzer::types::{RawImport, RawSchemaField, SchemaType};
+use ecp_core::analyzer::types::{RawImport, RawSchemaField, SchemaType, Span};
 use rustc_hash::FxHashMap;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Query, QueryCursor, Tree};
@@ -109,8 +109,6 @@ pub fn extract_schema_fields(
                 continue;
             };
 
-            let type_class = (config.type_classifier)(type_opt.unwrap_or(""));
-
             let start = m.captures()[0].node.start_position();
             let end = m.captures()[0].node.end_position();
             let span = (
@@ -120,19 +118,31 @@ pub fn extract_schema_fields(
                 end.column as u32,
             );
 
-            out.push(RawSchemaField {
-                name: name.into(),
-                type_class,
-                owner_class: owner.into(),
-                framework: config.framework,
-                span,
-                endpoint: None,
-            });
+            out.push(schema_record(config, owner, name, type_opt, span));
             break;
         }
     }
 
     out
+}
+
+/// The record of one accepted match, shared with the driver's record tap so
+/// both paths build the same bytes.
+pub(crate) fn schema_record(
+    config: &SchemaFieldConfig,
+    owner: &str,
+    name: &str,
+    type_text: Option<&str>,
+    span: Span,
+) -> RawSchemaField {
+    RawSchemaField {
+        name: name.into(),
+        type_class: (config.type_classifier)(type_text.unwrap_or("")),
+        owner_class: owner.into(),
+        framework: config.framework,
+        span,
+        endpoint: None,
+    }
 }
 
 /// Capture role for the dispatch map — maps a slot index to its semantic

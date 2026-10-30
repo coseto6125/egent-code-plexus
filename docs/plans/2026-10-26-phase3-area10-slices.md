@@ -1,7 +1,8 @@
 # Phase 3 (area 10) implementation slices
 
-Status: deferred from 0.17.0 on 2026-10-26. Follow-up `FU-2026-10-26-4de50d62f72d`.
-0.17.0 ships phase 2 and the S1 stored-data tests. No phase 2 slice depends on a slice below.
+Status: T1-T7 done on branch `feat/arch-p3-parse-driver` (2026-10-30). Follow-up `FU-2026-10-26-4de50d62f72d`.
+Design and open items: `docs/plans/2026-10-30-phase3-driver-design.md` (§2.5 *Outcome*, §2.7).
+The one-query rule below is not complete: Python and C++ keep a pre-scan, and event topics and Python schema fields re-query.
 
 ## Sources
 
@@ -30,7 +31,7 @@ Phase 2 moved many of them. Re-pin every line number against `main` before you d
 
 | Slice | Goal | Depends on | Files the agent edits | Model |
 |---|---|---|---|---|
-| T1 | `ECP_PROF` reports per-pass time inside `parse_file`: query pass, walk, node build, imports, calls. Today it reports per-provider totals only. | — | `crates/ecp-core/src/analyzer/pipeline.rs` (the `ECP_PROF` block); new `crates/ecp-analyzer/src/parse_prof.rs`; timer calls only in the 14 mainstream `parser.rs` files | sonnet |
+| T1 | `ECP_PROF` reports per-pass time inside `parse_file`: tree, query pass, node build, walk, imports, calls. It reported per-provider totals only. | — | `crates/ecp-core/src/analyzer/pipeline.rs` (the `ECP_PROF` block); new `crates/ecp-core/src/analyzer/parse_prof.rs`; timer calls in the 14 mainstream `parser.rs` files, which T2-T7 move into the driver's step loop | sonnet |
 | T2 | The shared driver, with Go and Rust moved onto it | T1 | new `crates/ecp-analyzer/src/driver/`; `crates/ecp-analyzer/src/go/parser.rs`; `crates/ecp-analyzer/src/rust/parser.rs` | opus |
 | T3 | TypeScript and JavaScript onto the driver | T2 | `crates/ecp-analyzer/src/typescript/parser.rs`; `crates/ecp-analyzer/src/javascript/parser.rs` | opus |
 | T4 | Python and Ruby onto the driver. Python runs its query twice today. | T2 | `crates/ecp-analyzer/src/python/parser.rs`; `crates/ecp-analyzer/src/ruby/parser.rs` | opus |

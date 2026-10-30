@@ -1,33 +1,21 @@
 use super::receiver_types::{collect_bindings, extract_dart_calls_and_path_literals};
 use super::spec::DartSpec;
+use crate::calls::{NameRefKind, NameRefSpec, VariantRefSpec};
+use crate::driver::{
+    self, node, AnonKey, Anonymous, Compiled, DeclSlot, Effect, FieldReads, FileCx, KindCapture,
+    Op, ParseSpec, Step, TxRule,
+};
 use crate::framework_confidence;
 use crate::framework_helpers::{
-    detect_ast_framework_patterns, enclosing_fn_idx_by_span, node_span, push_blind_spot,
-    FrameworkPatternSpec,
+    detect_ast_framework_patterns, enclosing_fn_idx_by_span, FrameworkPatternSpec,
 };
 use crate::parse_budget::{parse_with_budget, ParseBudget};
-use ecp_core::analyzer::lang_spec::LangSpec;
+use ecp_core::analyzer::parse_prof::Pass;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::{
-    BlindSpot, FrameworkId, LocalGraph, RawImport, RawNode, RawTxScope,
-};
-
-/// Blind-spot kind/hint pairs. Order matches the capture-index dispatch
-/// in `parse_file`.
-const BLIND_SPEC: &[(&str, &str)] = &[
-    (
-        "dart-function-apply",
-        "Function.apply(<fn>, <args>) — reflective function invocation; target callable resolved at runtime via the Function reference",
-    ),
-    (
-        "dart-mirrors-import",
-        "import 'dart:mirrors' — file uses runtime reflection; downstream `reflect(...)` / `MirrorSystem` calls bind names to symbols at runtime",
-    ),
-];
-use ecp_core::graph::NodeKind;
+use ecp_core::analyzer::types::{FrameworkId, LocalGraph, RawFunctionMeta, RawNode, RawTxScope};
+use ecp_core::graph::{FileCategory, NodeKind};
 use std::path::Path;
-use streaming_iterator::StreamingIterator;
-use tree_sitter::{Query, QueryCursor};
+use tree_sitter::{Node, Query, Tree};
 
 /// Per upstream `dart.ts:109-132` `astFrameworkPatterns`.
 const DART_FRAMEWORKS: &[FrameworkPatternSpec] = &[
@@ -70,100 +58,15 @@ thread_local! {
     });
 }
 pub struct DartProvider {
-    query: Query,
-    /// Capture index → NodeKind mapping, pre-resolved from
-    /// `DartSpec::CAPTURE_KIND` at provider construction. The hot loop
-    /// looks up by integer index — no per-capture string compare.
-    capture_kind_by_idx: Vec<Option<NodeKind>>,
-    /// CI-L #2: capture indices resolved once. Same pattern as PHP / Kotlin.
-    indices: DartCaptureIndices,
-}
-
-struct DartCaptureIndices {
-    heritage: Option<u32>,
-    type_: Option<u32>,
-    import_source: Option<u32>,
-    import_alias: Option<u32>,
-    decorator: Option<u32>,
-    class: Option<u32>,
-    function: Option<u32>,
-    method: Option<u32>,
-    constructor: Option<u32>,
-    typedef: Option<u32>,
-    interface: Option<u32>,
-    trait_: Option<u32>,
-    property: Option<u32>,
-    import: Option<u32>,
-    enum_: Option<u32>,
-    enum_constant_node: Option<u32>,
-    annotation: Option<u32>,
-    var: Option<u32>,
-    var_name: Option<u32>,
-    var_type: Option<u32>,
-    // BlindSpot captures (FU-001 P6b).
-    blind_function_apply: Option<u32>,
-    blind_mirrors_import: Option<u32>,
-    function_anonymous: Option<u32>,
+    compiled: Compiled<DartSpec>,
 }
 
 impl DartProvider {
     pub fn new() -> anyhow::Result<Self> {
-        let language = tree_sitter_dart::LANGUAGE.into();
-        let query_source = include_str!("queries.scm");
-        let query = Query::new(&language, query_source)?;
-        let capture_kind_by_idx: Vec<Option<NodeKind>> = query
-            .capture_names()
-            .iter()
-            .map(|name| DartSpec::CAPTURE_KIND.get(name).copied())
-            .collect();
-        let indices = DartCaptureIndices {
-            heritage: query.capture_index_for_name("heritage"),
-            type_: query.capture_index_for_name("type"),
-            import_source: query.capture_index_for_name("import.source"),
-            import_alias: query.capture_index_for_name("import.alias"),
-            decorator: query.capture_index_for_name("decorator"),
-            class: query.capture_index_for_name("class"),
-            function: query.capture_index_for_name("function"),
-            method: query.capture_index_for_name("method"),
-            constructor: query.capture_index_for_name("constructor"),
-            typedef: query.capture_index_for_name("typedef"),
-            interface: query.capture_index_for_name("interface"),
-            trait_: query.capture_index_for_name("trait"),
-            property: query.capture_index_for_name("property"),
-            import: query.capture_index_for_name("import"),
-            enum_: query.capture_index_for_name("enum"),
-            enum_constant_node: query.capture_index_for_name("enum_constant_node"),
-            annotation: query.capture_index_for_name("annotation"),
-            var: query.capture_index_for_name("var"),
-            var_name: query.capture_index_for_name("var.name"),
-            var_type: query.capture_index_for_name("var.type"),
-            blind_function_apply: query.capture_index_for_name("blind.function_apply"),
-            blind_mirrors_import: query.capture_index_for_name("blind.mirrors_import"),
-            function_anonymous: query.capture_index_for_name("function.anonymous"),
-        };
         Ok(Self {
-            query,
-            capture_kind_by_idx,
-            indices,
+            compiled: Compiled::new()?,
         })
     }
-}
-
-/// Whether `node`'s subtree contains a `call_expression`. Gates emission of
-/// `<anonymous>` callback nodes so empty closures (e.g. `list.map((x) => x)`)
-/// stay out of the graph.
-fn body_has_call(node: tree_sitter::Node) -> bool {
-    let mut stack = vec![node];
-    while let Some(n) = stack.pop() {
-        if n.kind() == "call_expression" {
-            return true;
-        }
-        let mut c = n.walk();
-        for child in n.children(&mut c) {
-            stack.push(child);
-        }
-    }
-    false
 }
 
 impl LanguageProvider for DartProvider {
@@ -172,398 +75,342 @@ impl LanguageProvider for DartProvider {
     }
 
     fn parse_file(&self, path: &Path, source: &[u8]) -> anyhow::Result<LocalGraph> {
-        let tree = PARSER
-            .with(|p| parse_with_budget(&mut p.borrow_mut(), source, ParseBudget::DEFAULT))
-            .ok_or_else(|| anyhow::anyhow!("Failed to parse file"))?;
+        driver::parse(&self.compiled, path, source)
+    }
+}
 
-        let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(&self.query, tree.root_node(), source);
+/// The captures Dart handles itself. `Root` is every declaration-root
+/// capture (`@class`, `@function`, `@import`, ...): it gives the span and
+/// the hashed bytes of the node the kind capture names.
+#[derive(Clone, Copy)]
+pub enum DartRole {
+    Root,
+    Heritage,
+    Type,
+    ImportSource,
+    ImportAlias,
+    Var,
+    VarName,
+    VarType,
+}
 
-        let mut nodes = Vec::new();
-        let mut imports = Vec::new();
-        let mut blind_spots: Vec<BlindSpot> = Vec::new();
-        let file_category =
-            ecp_core::file_category::determine_category(path.to_str().unwrap_or(""));
-        let is_test_file = file_category == ecp_core::graph::FileCategory::Test;
+#[derive(Clone, Copy)]
+pub enum DartHook {
+    Calls,
+    Frameworks,
+}
 
-        // CI-L #2: capture indices pre-resolved in `new()`.
-        let idx = &self.indices;
-        let idx_heritage = idx.heritage;
-        let idx_type = idx.type_;
-        let idx_import_source = idx.import_source;
-        let idx_import_alias = idx.import_alias;
-        let idx_decorator = idx.decorator;
-        let idx_class = idx.class;
-        let idx_function = idx.function;
-        let idx_method = idx.method;
-        let idx_constructor = idx.constructor;
-        let idx_typedef = idx.typedef;
-        let idx_interface = idx.interface;
-        let idx_trait = idx.trait_;
-        let idx_property = idx.property;
-        let idx_import = idx.import;
-        let idx_enum = idx.enum_;
-        let idx_enum_constant_node = idx.enum_constant_node;
-        let idx_annotation = idx.annotation;
-        let idx_var = idx.var;
-        let idx_var_name = idx.var_name;
-        let idx_var_type = idx.var_type;
-        let idx_blind_function_apply = idx.blind_function_apply;
-        let idx_blind_mirrors_import = idx.blind_mirrors_import;
-        let idx_function_anonymous = idx.function_anonymous;
+#[derive(Default)]
+pub struct DartMatch<'t> {
+    heritage: Vec<String>,
+    type_annotation: Option<String>,
+    import_source: Option<Node<'t>>,
+    import_alias: Option<Node<'t>>,
+    var_root: Option<Node<'t>>,
+    var_name: Option<Node<'t>>,
+    var_type: Option<Node<'t>>,
+}
 
-        // Track spans of anonymous nodes already emitted to avoid duplicates
-        // when the same closure node fires multiple query matches.
-        let mut emitted_anon_spans: std::collections::HashSet<(u32, u32, u32, u32)> =
-            std::collections::HashSet::new();
+impl ParseSpec for DartSpec {
+    type Role = DartRole;
+    type Match<'t> = DartMatch<'t>;
+    type File<'t> = ();
+    type Hook = DartHook;
 
-        while let Some(m) = matches.next() {
-            let mut name_node = None;
-            let mut kind = None;
-            let mut root_span_node = None;
-            let mut heritage = Vec::new();
-            let mut type_annotation = None;
-            let mut decorators = Vec::new();
+    const KIND_CAPTURE: KindCapture = KindCapture::NameOverwrite;
+    /// Anonymous closure (arg-position `function_expression`). Emit an
+    /// `<anonymous>` Function node only when the body holds a
+    /// call_expression so attach_to_enclosing can host those calls; empty
+    /// closures (e.g. `list.map((x) => x)`) stay out of the graph. The same
+    /// closure node can fire several matches, so the span dedupes it.
+    const ANONYMOUS: Option<Anonymous> = Some(Anonymous {
+        capture: "function.anonymous",
+        call_kinds: &["call_expression"],
+        key: AnonKey::Span,
+    });
+    const BLIND: &'static [(&'static str, (&'static str, &'static str))] = &[
+        (
+            "blind.function_apply",
+            (
+                "dart-function-apply",
+                "Function.apply(<fn>, <args>) — reflective function invocation; target callable resolved at runtime via the Function reference",
+            ),
+        ),
+        (
+            "blind.mirrors_import",
+            (
+                "dart-mirrors-import",
+                "import 'dart:mirrors' — file uses runtime reflection; downstream `reflect(...)` / `MirrorSystem` calls bind names to symbols at runtime",
+            ),
+        ),
+    ];
+    const FIELD_READS: Option<FieldReads> = Some(FieldReads {
+        member_kinds: &["member_expression"],
+        names: NameRefSpec {
+            ident_kinds: &["identifier"],
+            kind: NameRefKind::Value,
+            binding_fields: &[
+                ("initialized_variable_declaration", "name"),
+                ("initialized_identifier", "name"),
+                ("for_statement", "name"),
+                ("for_element", "name"),
+                ("catch_clause", "exception"),
+                ("catch_clause", "stack_trace"),
+            ],
+            skip_kinds: &[
+                "import_or_export",
+                "library_name",
+                "part_directive",
+                "part_of_directive",
+                "annotation",
+                "type_arguments",
+            ],
+            skip_parents: &["label"],
+            ..NameRefSpec::EMPTY
+        },
+    });
+    const VARIANT_REFS: Option<VariantRefSpec> = Some(VariantRefSpec {
+        // A `case Phase.run:` pattern holds the path without a
+        // `member_expression`.
+        path_kinds: &["member_expression", "constant_pattern"],
+        label_parents: &[],
+        bare_label_parents: &[],
+        bare_expressions: false,
+        token_trees: false,
+    });
+    const TX: TxRule = TxRule::Tree(collect_dart_tx_scopes);
+    const STEPS: &'static [Step<DartHook>] = &[
+        Step::fixed(Pass::Query, Op::Query),
+        Step::fixed(Pass::Build, Op::DedupNodes),
+        Step::hook(Pass::Calls, Effect::Nodes, DartHook::Calls),
+        Step::fixed(Pass::Walk, Op::FieldReads),
+        Step::fixed(Pass::Walk, Op::VariantRefs),
+        Step::hook(Pass::Walk, Effect::Neutral, DartHook::Frameworks),
+        Step::fixed(Pass::Walk, Op::FunctionMeta),
+        Step::fixed(Pass::Build, Op::StampOwners),
+        Step::fixed(Pass::Walk, Op::TxScopes),
+    ];
 
-            let mut import_source = None;
-            let mut import_alias = None;
+    fn query() -> anyhow::Result<Query> {
+        Ok(Query::new(
+            &tree_sitter_dart::LANGUAGE.into(),
+            include_str!("queries.scm"),
+        )?)
+    }
 
-            let mut var_root: Option<tree_sitter::Node<'_>> = None;
-            let mut var_name: Option<tree_sitter::Node<'_>> = None;
-            let mut var_type: Option<tree_sitter::Node<'_>> = None;
+    fn role(capture: &str) -> Option<DartRole> {
+        Some(match capture {
+            "function" | "class" | "method" | "constructor" | "typedef" | "trait" | "property"
+            | "import" | "enum" | "enum_constant_node" | "annotation" => DartRole::Root,
+            "heritage" => DartRole::Heritage,
+            "type" => DartRole::Type,
+            "import.source" => DartRole::ImportSource,
+            "import.alias" => DartRole::ImportAlias,
+            "var" => DartRole::Var,
+            "var.name" => DartRole::VarName,
+            "var.type" => DartRole::VarType,
+            _ => return None,
+        })
+    }
 
-            for cap in m.captures() {
-                let cap_idx = cap.index;
-                if let Some(k_from_spec) = self
-                    .capture_kind_by_idx
-                    .get(cap_idx as usize)
-                    .copied()
-                    .flatten()
-                {
-                    // Single config-driven dispatch replaces the eight explicit
-                    // Class/Function/Method/Constructor/Typedef/Interface/Trait/Property arms.
-                    // Source of truth: DartSpec::CAPTURE_KIND in spec.rs.
-                    name_node = Some(cap.node);
-                    kind = Some(k_from_spec);
-                } else if Some(cap_idx) == idx_heritage {
-                    if let Ok(h) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        heritage.push(h.trim().to_string());
-                    }
-                } else if Some(cap_idx) == idx_type {
-                    if let Ok(t) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        type_annotation = Some(t.trim().to_string());
-                    }
-                } else if Some(cap_idx) == idx_import_source {
-                    import_source = Some(cap.node);
-                } else if Some(cap_idx) == idx_import_alias {
-                    import_alias = Some(cap.node);
-                } else if Some(cap_idx) == idx_decorator {
-                    if let Ok(d_str) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        decorators.push(d_str.to_string());
-                    }
-                } else if Some(cap_idx) == idx_var {
-                    var_root = Some(cap.node);
-                } else if Some(cap_idx) == idx_var_name {
-                    var_name = Some(cap.node);
-                } else if Some(cap_idx) == idx_var_type {
-                    var_type = Some(cap.node);
-                } else if Some(cap_idx) == idx_blind_function_apply {
-                    push_blind_spot(
-                        &mut blind_spots,
-                        BLIND_SPEC[0],
-                        &cap.node,
-                        path,
-                        is_test_file,
-                    );
-                } else if Some(cap_idx) == idx_blind_mirrors_import {
-                    push_blind_spot(
-                        &mut blind_spots,
-                        BLIND_SPEC[1],
-                        &cap.node,
-                        path,
-                        is_test_file,
-                    );
-                } else if Some(cap_idx) == idx_function_anonymous {
-                    // Anonymous closure (arg-position `function_expression`).
-                    // Emit an `<anonymous>` Function node only when the body
-                    // holds a call_expression so attach_to_enclosing can host
-                    // those calls; empty closures stay out of the graph.
-                    if body_has_call(cap.node) {
-                        let span = node_span(&cap.node);
-                        if emitted_anon_spans.insert(span) {
-                            nodes.push(RawNode {
-                                decorators: Vec::new(),
-                                is_exported: false,
-                                heritage: Vec::new(),
-                                type_annotation: None,
-                                name: format!("<anonymous:{}:{}>", span.0 + 1, span.1),
-                                kind: NodeKind::Function,
-                                span,
-                                calls: Vec::new(),
-                                field_reads: Vec::new(),
-                                owner_class: None,
-                                content_hash: ecp_core::uid::xxh3_64_bytes(
-                                    &source[cap.node.start_byte()..cap.node.end_byte()],
-                                ),
-                            });
-                        }
-                    }
-                }
+    fn parse_tree(source: &[u8]) -> Option<Tree> {
+        PARSER.with(|p| parse_with_budget(&mut p.borrow_mut(), source, ParseBudget::DEFAULT))
+    }
 
-                if Some(cap_idx) == idx_function
-                    || Some(cap_idx) == idx_class
-                    || Some(cap_idx) == idx_method
-                    || Some(cap_idx) == idx_constructor
-                    || Some(cap_idx) == idx_typedef
-                    || Some(cap_idx) == idx_interface
-                    || Some(cap_idx) == idx_trait
-                    || Some(cap_idx) == idx_property
-                    || Some(cap_idx) == idx_import
-                    || Some(cap_idx) == idx_enum
-                    || Some(cap_idx) == idx_enum_constant_node
-                    || Some(cap_idx) == idx_annotation
-                {
-                    root_span_node = Some(cap.node);
+    fn capture<'t>(
+        r: DartRole,
+        node: Node<'t>,
+        d: &mut DeclSlot<'t>,
+        m: &mut DartMatch<'t>,
+        _f: &mut (),
+        cx: &mut FileCx<'t>,
+    ) {
+        let source = cx.source;
+        match r {
+            DartRole::Root => d.root = Some(node),
+            DartRole::Heritage => {
+                if let Ok(h) = std::str::from_utf8(&source[node.start_byte()..node.end_byte()]) {
+                    m.heritage.push(h.trim().to_string());
                 }
             }
-
-            // Dart top-level variable `double pi = 3.14` → Variable node.
-            // tree-sitter-dart mis-parses `typedef Foo = void Function(...)` as
-            // a top_level_variable_declaration with type text "typedef".  The
-            // type_alias query path does NOT recover these (it only matches
-            // old-style `typedef int Compare(int, int)`), so we synthesize a
-            // Typedef RawNode from the misparsed node here.  Without this the
-            // graph had zero Typedef nodes for new-style Dart typedefs (which
-            // is most of them in modern Dart code).
-            let is_typedef_misparse = var_type
-                .map(|t| {
-                    std::str::from_utf8(&source[t.start_byte()..t.end_byte()])
-                        .map(|s| s.trim() == "typedef")
-                        .unwrap_or(false)
-                })
-                .unwrap_or(false);
-            if is_typedef_misparse {
-                if let (Some(v_root), Some(v_name)) = (var_root, var_name) {
-                    if let Some(node) = synth_typedef_from_misparse(v_root, v_name, source) {
-                        nodes.push(node);
-                    }
+            DartRole::Type => {
+                if let Ok(t) = std::str::from_utf8(&source[node.start_byte()..node.end_byte()]) {
+                    m.type_annotation = Some(t.trim().to_string());
                 }
-                continue;
             }
+            DartRole::ImportSource => m.import_source = Some(node),
+            DartRole::ImportAlias => m.import_alias = Some(node),
+            DartRole::Var => m.var_root = Some(node),
+            DartRole::VarName => m.var_name = Some(node),
+            DartRole::VarType => m.var_type = Some(node),
+        }
+    }
+
+    fn end_match<'t>(d: DeclSlot<'t>, m: &mut DartMatch<'t>, _f: &mut (), cx: &mut FileCx<'t>) {
+        let source = cx.source;
+        let DartMatch {
+            mut heritage,
+            type_annotation,
+            import_source,
+            import_alias,
+            var_root,
+            var_name,
+            var_type,
+        } = std::mem::take(m);
+
+        // Dart top-level variable `double pi = 3.14` → Variable node.
+        // tree-sitter-dart mis-parses `typedef Foo = void Function(...)` as
+        // a top_level_variable_declaration with type text "typedef".  The
+        // type_alias query path does NOT recover these (it only matches
+        // old-style `typedef int Compare(int, int)`), so we synthesize a
+        // Typedef RawNode from the misparsed node here.  Without this the
+        // graph had zero Typedef nodes for new-style Dart typedefs (which
+        // is most of them in modern Dart code).
+        let is_typedef_misparse = var_type
+            .map(|t| {
+                std::str::from_utf8(&source[t.start_byte()..t.end_byte()])
+                    .map(|s| s.trim() == "typedef")
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if is_typedef_misparse {
             if let (Some(v_root), Some(v_name)) = (var_root, var_name) {
-                if let Ok(name_str) =
-                    std::str::from_utf8(&source[v_name.start_byte()..v_name.end_byte()])
-                {
-                    let name_str = name_str.trim();
-                    let start = v_root.start_position();
-                    let end = v_root.end_position();
-                    let type_ann = var_type.and_then(|t| {
-                        std::str::from_utf8(&source[t.start_byte()..t.end_byte()])
-                            .ok()
-                            .map(|s| s.trim().to_string())
-                    });
-                    nodes.push(RawNode {
-                        decorators: vec![],
-                        is_exported: !name_str.starts_with('_'),
-                        heritage: vec![],
-                        type_annotation: type_ann,
-                        name: name_str.to_string(),
-                        kind: NodeKind::Variable,
-                        span: (
-                            start.row as u32,
-                            start.column as u32,
-                            end.row as u32,
-                            end.column as u32,
-                        ),
-                        calls: Vec::new(),
-                        field_reads: Vec::new(),
-                        owner_class: None,
-                        content_hash: ecp_core::uid::xxh3_64_bytes(
-                            &source[v_root.start_byte()..v_root.end_byte()],
-                        ),
-                    });
+                if let Some(node) = synth_typedef_from_misparse(v_root, v_name, source) {
+                    cx.nodes.push(node);
                 }
             }
-
-            if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
-                // queries.scm has both `(function_declaration (function_signature …))`
-                // and a bare `(function_signature …)` Function pattern. The bare
-                // pattern is load-bearing for top-level `external`/signature-only
-                // declarations (no function_declaration wrapper), but it ALSO
-                // fires on the inner function_signature child of every regular
-                // function (parent `function_declaration`) and every class method
-                // (parent `method_signature`), duplicating those outer emits.
-                // Skip the inner cases — they're already covered by @function /
-                // @method patterns that anchor on the outer node.
-                if k == NodeKind::Function
-                    && root.kind() == "function_signature"
-                    && root.parent().is_some_and(|p| {
-                        matches!(p.kind(), "function_declaration" | "method_signature")
-                    })
-                {
-                    continue;
-                }
-                if k == NodeKind::Class && root.kind() == "class_declaration" {
-                    insert_mixins(root, source, &mut heritage);
-                }
-                if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
-                    let name_str = name_str.trim();
-                    // Dart visibility convention: identifiers starting with `_` are
-                    // library-private regardless of `library` directive (per Dart
-                    // language spec). Applies to all symbol kinds (Class, Function,
-                    // Method, Interface, Property).
-                    let is_exported = !name_str.starts_with('_');
-                    let start = root.start_position();
-                    let end = root.end_position();
-
-                    nodes.push(RawNode {
-                        decorators,
-                        is_exported,
-                        heritage: heritage.clone(),
-                        type_annotation: type_annotation.clone(),
-                        name: name_str.to_string(),
-                        kind: k,
-                        span: (
-                            start.row as u32,
-                            start.column as u32,
-                            end.row as u32,
-                            end.column as u32,
-                        ),
-                        calls: Vec::new(),
-                        field_reads: Vec::new(),
-                        owner_class: None,
-                        content_hash: ecp_core::uid::xxh3_64_bytes(
-                            &source[root.start_byte()..root.end_byte()],
-                        ),
-                    });
-                }
-            }
-
-            if let Some(i_src) = import_source {
-                if let Ok(src_str) =
-                    std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()])
-                {
-                    let clean_src = src_str
-                        .trim()
-                        .trim_matches('\'')
-                        .trim_matches('"')
-                        .to_string();
-
-                    let alias_str = if let Some(i_alias) = import_alias {
-                        std::str::from_utf8(&source[i_alias.start_byte()..i_alias.end_byte()])
-                            .ok()
-                            .map(|s| s.trim().to_string())
-                    } else {
-                        None
-                    };
-
-                    let filtered = i_src.parent().is_some_and(|specification| {
-                        specification
-                            .named_children(&mut specification.walk())
-                            .any(|child| child.kind() == "combinator")
-                    });
-                    imports.push(RawImport {
-                        alias: alias_str,
-                        imported_name: if filtered {
-                            String::new()
-                        } else {
-                            clean_src.clone()
-                        },
-                        source: clean_src,
-                        binding_kind: None,
-                    });
-                }
+            return;
+        }
+        if let (Some(v_root), Some(v_name)) = (var_root, var_name) {
+            if let Ok(name_str) =
+                std::str::from_utf8(&source[v_name.start_byte()..v_name.end_byte()])
+            {
+                let name_str = name_str.trim();
+                let type_ann = var_type.and_then(|t| {
+                    std::str::from_utf8(&source[t.start_byte()..t.end_byte()])
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                });
+                cx.nodes.push(RawNode {
+                    is_exported: !name_str.starts_with('_'),
+                    type_annotation: type_ann,
+                    ..node::decl(
+                        name_str.to_string(),
+                        NodeKind::Variable,
+                        node::span(v_root),
+                        &source[v_root.start_byte()..v_root.end_byte()],
+                    )
+                });
             }
         }
 
-        // Deduplicate simple identical node extractions
-        nodes.dedup_by(|a, b| a.name == b.name && a.span == b.span && a.kind == b.kind);
+        if let (Some(n), Some(k), Some(root)) = (d.name, d.kind, d.root) {
+            // queries.scm has both `(function_declaration (function_signature …))`
+            // and a bare `(function_signature …)` Function pattern. The bare
+            // pattern is load-bearing for top-level `external`/signature-only
+            // declarations (no function_declaration wrapper), but it ALSO
+            // fires on the inner function_signature child of every regular
+            // function (parent `function_declaration`) and every class method
+            // (parent `method_signature`), duplicating those outer emits.
+            // Skip the inner cases — they're already covered by @function /
+            // @method patterns that anchor on the outer node.
+            if k == NodeKind::Function
+                && root.kind() == "function_signature"
+                && root.parent().is_some_and(|p| {
+                    matches!(p.kind(), "function_declaration" | "method_signature")
+                })
+            {
+                return;
+            }
+            if k == NodeKind::Class && root.kind() == "class_declaration" {
+                insert_mixins(root, source, &mut heritage);
+            }
+            if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
+                let name_str = name_str.trim();
+                // Dart visibility convention: identifiers starting with `_` are
+                // library-private regardless of `library` directive (per Dart
+                // language spec). Applies to all symbol kinds (Class, Function,
+                // Method, Interface, Property).
+                let is_exported = !name_str.starts_with('_');
+                cx.nodes.push(RawNode {
+                    is_exported,
+                    heritage,
+                    type_annotation,
+                    ..node::decl(
+                        name_str.to_string(),
+                        k,
+                        node::span(root),
+                        &source[root.start_byte()..root.end_byte()],
+                    )
+                });
+            }
+        }
 
-        // Extract call sites with receiver-type binding: `this.method()` →
-        // `Class.method`, `super.method()` → `Super.method`, typed-var
-        // `obj.method()` → `Type.method`. Feeds the resolver's Tier 2.5
-        // qualifier-scoped lookup.
-        let bindings = collect_bindings(tree.root_node(), source);
-        let (raw_path_literals, raw_sql_refs) =
-            extract_dart_calls_and_path_literals(tree.root_node(), source, &mut nodes, &bindings);
-        crate::calls::extract_field_reads(
-            tree.root_node(),
-            source,
-            &mut nodes,
-            &["member_expression"],
-            &crate::calls::NameRefSpec {
-                ident_kinds: &["identifier"],
-                kind: crate::calls::NameRefKind::Value,
-                binding_fields: &[
-                    ("initialized_variable_declaration", "name"),
-                    ("initialized_identifier", "name"),
-                    ("for_statement", "name"),
-                    ("for_element", "name"),
-                    ("catch_clause", "exception"),
-                    ("catch_clause", "stack_trace"),
-                ],
-                skip_kinds: &[
-                    "import_or_export",
-                    "library_name",
-                    "part_directive",
-                    "part_of_directive",
-                    "annotation",
-                    "type_arguments",
-                ],
-                skip_parents: &["label"],
-                ..crate::calls::NameRefSpec::EMPTY
-            },
-        );
-        crate::calls::extract_variant_refs(
-            tree.root_node(),
-            source,
-            &mut nodes,
-            &crate::calls::VariantRefSpec {
-                // A `case Phase.run:` pattern holds the path without a
-                // `member_expression`.
-                path_kinds: &["member_expression", "constant_pattern"],
-                label_parents: &[],
-                bare_label_parents: &[],
-                bare_expressions: false,
-                token_trees: false,
-            },
-        );
+        if let Some(i_src) = import_source {
+            if let Ok(src_str) = std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()])
+            {
+                let clean_src = src_str
+                    .trim()
+                    .trim_matches('\'')
+                    .trim_matches('"')
+                    .to_string();
 
-        let framework_refs = detect_ast_framework_patterns(source, DART_FRAMEWORKS);
+                let alias_str = if let Some(i_alias) = import_alias {
+                    std::str::from_utf8(&source[i_alias.start_byte()..i_alias.end_byte()])
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                } else {
+                    None
+                };
 
-        let raw_function_metas =
-            crate::function_meta::dart::extract(tree.root_node(), source, &nodes, file_category);
+                let filtered = i_src.parent().is_some_and(|specification| {
+                    specification
+                        .named_children(&mut specification.walk())
+                        .any(|child| child.kind() == "combinator")
+                });
+                let imported_name = if filtered {
+                    String::new()
+                } else {
+                    clean_src.clone()
+                };
+                cx.imports.push(driver::imports::raw(
+                    clean_src,
+                    imported_name,
+                    alias_str,
+                    None,
+                ));
+            }
+        }
+    }
 
-        crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
-        let tx_scopes = collect_dart_tx_scopes(tree.root_node(), source, &nodes);
-        Ok(LocalGraph {
-            content_hash: [0; 8],
-            routes: vec![],
-            file_path: path.to_path_buf(),
-            nodes,
-            imports,
-            documents: vec![],
-            route_receivers: None,
-            framework_refs,
-            fanout_refs: vec![],
-            blind_spots,
-            schema_fields: None,
-            event_topics: None,
-            tx_scopes,
-            path_literals: (!raw_path_literals.is_empty())
-                .then(|| raw_path_literals.into_boxed_slice()),
-            sql_refs: (!raw_sql_refs.is_empty()).then(|| raw_sql_refs.into_boxed_slice()),
-            call_metas: vec![],
-            raw_function_metas,
-            export_aliases: None,
-            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
-        })
+    fn hook<'t>(h: DartHook, _c: &Compiled<Self>, _f: &mut (), cx: &mut FileCx<'t>) {
+        let root = cx.tree.root_node();
+        let source = cx.source;
+        match h {
+            DartHook::Calls => {
+                // Extract call sites with receiver-type binding: `this.method()` →
+                // `Class.method`, `super.method()` → `Super.method`, typed-var
+                // `obj.method()` → `Type.method`. Feeds the resolver's Tier 2.5
+                // qualifier-scoped lookup.
+                let bindings = collect_bindings(root, source);
+                let (raw_path_literals, raw_sql_refs) =
+                    extract_dart_calls_and_path_literals(root, source, &mut cx.nodes, &bindings);
+                cx.path_literals = raw_path_literals;
+                cx.sql_refs = raw_sql_refs;
+            }
+            DartHook::Frameworks => {
+                cx.framework_refs = detect_ast_framework_patterns(source, DART_FRAMEWORKS);
+            }
+        }
+    }
+
+    fn function_meta(
+        root: Node<'_>,
+        source: &[u8],
+        nodes: &[RawNode],
+        category: FileCategory,
+    ) -> Vec<RawFunctionMeta> {
+        crate::function_meta::dart::extract(root, source, nodes, category)
     }
 }
 

@@ -1,44 +1,39 @@
 use super::receiver_types::{collect_local_types, extract_ts_calls_and_path_literals};
+use super::schema_extractors::TS_INTERFACE_CONFIG;
 use super::spec::TypeScriptSpec;
+use crate::calls::{NameRefKind, NameRefSpec, VariantRefSpec};
+use crate::driver::{
+    self, node, AnonKey, Anonymous, Compiled, DeclSlot, Effect, FieldReads, FileCx, KindCapture,
+    Op, ParseSpec, Step, TxRule,
+};
+use crate::event_topic::{EventTopicConfig, KAFKA_NODE, RABBITMQ_TS, REDIS_TS, SQS_TS};
 use crate::framework_confidence;
 use crate::framework_helpers::{
-    collect_typeorm_transactional_scopes, enclosing_function_name, has_import_from,
-    js_ts_first_arg_is_literal_string, node_span, push_blind_spot, MODULE_LEVEL_SOURCE,
-    SCALAR_VALUE_KINDS,
+    collect_typeorm_transactional_scopes, has_import_from, js_ts_first_arg_is_literal_string,
+    node_span, push_blind_spot, SCALAR_VALUE_KINDS,
 };
 use crate::indirect_dispatch::{collect_js_param_names, detect_js_ts_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
-use ecp_core::analyzer::lang_spec::LangSpec;
+use crate::schema_field::SchemaFieldConfig;
+use ecp_core::analyzer::parse_prof::Pass;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{
-    BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode, RawRoute,
+    BlindSpot, LocalGraph, RawFrameworkRef, RawFunctionMeta, RawNode, RawRoute, Span,
 };
-use ecp_core::graph::NodeKind;
+use ecp_core::graph::{FileCategory, NodeKind};
 use std::path::Path;
-use streaming_iterator::StreamingIterator;
-use tree_sitter::{Parser, Query, QueryCursor};
+use tree_sitter::{Node, Parser, Query, Tree};
 
-/// Blind-spot kind/hint pairs. Order matches the capture-index lookup in
-/// `parse_file` (eval / Function-ctor / dynamic-import / dynamic-require)
-/// so the dispatch reads as a flat table.
-const BLIND_SPEC: &[(&str, &str)] = &[
-    (
-        "ts-eval",
-        "eval(arg) — runtime JS execution; argument expression is not statically determinable as a callee",
-    ),
-    (
-        "ts-function-ctor",
-        "Function(arg) / new Function(arg) — runtime function compilation; body source is not statically determinable",
-    ),
-    (
-        "ts-dynamic-import",
-        "import(<expr>) with non-literal specifier — dynamic module loading; target module depends on runtime value",
-    ),
-    (
-        "ts-dynamic-require",
-        "require(<expr>) with non-literal specifier — dynamic CommonJS load; target module depends on runtime value",
-    ),
-];
+/// Blind-spot kind/hint pairs pushed only when the first argument is not a
+/// literal string; the unconditional pairs live in `TypeScriptSpec::BLIND`.
+const BLIND_DYNAMIC_IMPORT: (&str, &str) = (
+    "ts-dynamic-import",
+    "import(<expr>) with non-literal specifier — dynamic module loading; target module depends on runtime value",
+);
+const BLIND_DYNAMIC_REQUIRE: (&str, &str) = (
+    "ts-dynamic-require",
+    "require(<expr>) with non-literal specifier — dynamic CommonJS load; target module depends on runtime value",
+);
 
 /// True iff the `object` node has ≥ `min` `pair` children where every
 /// value is a scalar literal (number / string / bool / null).
@@ -175,23 +170,6 @@ fn collect_freeze_enum_spots(
     }
 }
 
-/// Whether `node`'s subtree contains a `call_expression`. Gates emission of
-/// `<anonymous>` callback nodes so empty callbacks (e.g. `arr.map(x => x * 2)`)
-/// stay out of the graph.
-fn body_has_call(node: tree_sitter::Node) -> bool {
-    let mut stack = vec![node];
-    while let Some(n) = stack.pop() {
-        if n.kind() == "call_expression" {
-            return true;
-        }
-        let mut c = n.walk();
-        for child in n.children(&mut c) {
-            stack.push(child);
-        }
-    }
-    false
-}
-
 /// The `@Controller` prefixes of the class around a route decorator: `None`
 /// when the class carries no `@Controller`, an empty list when it carries
 /// one without a path (`@Controller()`), and one entry per path otherwise
@@ -274,133 +252,13 @@ fn decorated_method_name(verb: tree_sitter::Node, source: &[u8]) -> Option<Strin
 }
 
 pub struct TypeScriptProvider {
-    query: Query,
-    indices: TypeScriptCaptureIndices,
-    /// Capture index → NodeKind mapping, pre-resolved from
-    /// `TypeScriptSpec::CAPTURE_KIND` at provider construction. The hot loop
-    /// looks up by integer index (cap.index as usize) — equivalent perf to
-    /// the previous hard-coded if-chain but the source of truth lives in
-    /// `spec.rs` const tables.
-    capture_kind_by_idx: Vec<Option<NodeKind>>,
-}
-
-struct TypeScriptCaptureIndices {
-    // Root-span anchors — track outer declaration node for span/dedup.
-    function: Option<u32>,
-    class: Option<u32>,
-    method: Option<u32>,
-    constructor: Option<u32>,
-    interface: Option<u32>,
-    property: Option<u32>,
-    const_kind: Option<u32>,
-    variable: Option<u32>,
-    typedef: Option<u32>,
-    enum_kind: Option<u32>,
-    enum_member_node: Option<u32>,
-    // Metadata-only captures.
-    export: Option<u32>,
-    heritage: Option<u32>,
-    type_ann: Option<u32>,
-    decorator: Option<u32>,
-    // Import captures.
-    import_name: Option<u32>,
-    import_alias: Option<u32>,
-    import_source: Option<u32>,
-    import: Option<u32>,
-    /// `export * as ns from 'lib'` — captured separately because there's no
-    /// `name` identifier; `imported_name` is set to the "*" sentinel.
-    import_namespace: Option<u32>,
-    /// `export * from 'lib'` — no name and no alias; emitted as a "*" import
-    /// with `alias: None`.
-    import_star: Option<u32>,
-    // Route captures.
-    route_method: Option<u32>,
-    route_path: Option<u32>,
-    route_call: Option<u32>,
-    // Framework captures.
-    express_handler: Option<u32>,
-    nestjs_class: Option<u32>,
-    nestjs_method: Option<u32>,
-    /// `@Get('users')` / `@Post(':id')` decorator-route captures — separate
-    /// pattern in frameworks.scm because the decorator is independent of the
-    /// `@Controller` shape (any method-level decorator carrying a path-shaped
-    /// string literal is a route, gated by `has_nestjs` import presence).
-    nestjs_decorator_verb: Option<u32>,
-    nestjs_decorator_path: Option<u32>,
-    /// The argument list of a route decorator: `@Get()` has an empty one,
-    /// which names the controller prefix itself.
-    nestjs_decorator_args: Option<u32>,
-    /// Arg-position arrow / function-expression callbacks — emits `<anonymous>`
-    /// Function nodes so attach_to_enclosing can host inner calls.
-    function_anonymous: Option<u32>,
-    // BlindSpot captures (FU-001 P1).
-    blind_eval: Option<u32>,
-    blind_function_ctor: Option<u32>,
-    blind_dynamic_import: Option<u32>,
-    blind_dynamic_require: Option<u32>,
+    compiled: Compiled<TypeScriptSpec>,
 }
 
 impl TypeScriptProvider {
     pub fn new() -> anyhow::Result<Self> {
-        let language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
-        let query_source = format!(
-            "{}\n;; ---- framework queries ----\n{}",
-            include_str!("queries.scm"),
-            include_str!("frameworks.scm"),
-        );
-        let query = Query::new(&language, &query_source)?;
-        let indices = TypeScriptCaptureIndices {
-            function: query.capture_index_for_name("function"),
-            class: query.capture_index_for_name("class"),
-            method: query.capture_index_for_name("method"),
-            constructor: query.capture_index_for_name("constructor"),
-            interface: query.capture_index_for_name("interface"),
-            property: query.capture_index_for_name("property"),
-            const_kind: query.capture_index_for_name("const"),
-            variable: query.capture_index_for_name("variable"),
-            typedef: query.capture_index_for_name("typedef"),
-            enum_kind: query.capture_index_for_name("enum"),
-            enum_member_node: query.capture_index_for_name("enum_member_node"),
-            export: query.capture_index_for_name("export"),
-            heritage: query.capture_index_for_name("heritage"),
-            type_ann: query.capture_index_for_name("type"),
-            decorator: query.capture_index_for_name("decorator"),
-            import_name: query.capture_index_for_name("import.name"),
-            import_alias: query.capture_index_for_name("import.alias"),
-            import_source: query.capture_index_for_name("import.source"),
-            import: query.capture_index_for_name("import"),
-            import_namespace: query.capture_index_for_name("import.namespace"),
-            import_star: query.capture_index_for_name("import.star"),
-            route_method: query.capture_index_for_name("route.method"),
-            route_path: query.capture_index_for_name("route.path"),
-            route_call: query.capture_index_for_name("route.call"),
-            express_handler: query.capture_index_for_name("express.route.handler"),
-            nestjs_class: query.capture_index_for_name("nestjs.controller.class"),
-            nestjs_method: query.capture_index_for_name("nestjs.method.name"),
-            nestjs_decorator_verb: query.capture_index_for_name("nestjs.decorator.verb"),
-            nestjs_decorator_path: query.capture_index_for_name("nestjs.decorator.path"),
-            nestjs_decorator_args: query.capture_index_for_name("nestjs.decorator.args"),
-            blind_eval: query.capture_index_for_name("blind.eval"),
-            blind_function_ctor: query.capture_index_for_name("blind.function_ctor"),
-            blind_dynamic_import: query.capture_index_for_name("blind.dynamic_import"),
-            blind_dynamic_require: query.capture_index_for_name("blind.dynamic_require"),
-            function_anonymous: query.capture_index_for_name("function.anonymous"),
-        };
-
-        // Pre-resolve capture-name → NodeKind from the spec table so the
-        // hot loop stays an integer-index lookup (no per-capture string
-        // compare). Capture names not in the spec map yield None and fall
-        // through to the metadata-only branches below.
-        let capture_kind_by_idx: Vec<Option<NodeKind>> = query
-            .capture_names()
-            .iter()
-            .map(|name| TypeScriptSpec::CAPTURE_KIND.get(name).copied())
-            .collect();
-
         Ok(Self {
-            query,
-            indices,
-            capture_kind_by_idx,
+            compiled: Compiled::new()?,
         })
     }
 }
@@ -411,641 +269,670 @@ impl LanguageProvider for TypeScriptProvider {
     }
 
     fn parse_file(&self, path: &Path, source: &[u8]) -> anyhow::Result<LocalGraph> {
-        let language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
+        driver::parse(&self.compiled, path, source)
+    }
+}
+
+/// The captures TypeScript handles itself. A root capture sets the
+/// declaration root; the `.name` kind capture of the same match sets name
+/// and kind. `route.call` sets the same root: a match has at most one root.
+#[derive(Clone, Copy)]
+pub enum TypeScriptRole {
+    Root,
+    Export,
+    Heritage,
+    Type,
+    Decorator,
+    ImportName,
+    ImportAlias,
+    ImportSource,
+    Import,
+    /// `export * as ns from 'lib'` — no `name` identifier; `imported_name`
+    /// is set to the "*" sentinel.
+    ImportNamespace,
+    /// `export * from 'lib'` — no name and no alias; emitted as a "*" import
+    /// with `alias: None`.
+    ImportStar,
+    RouteMethod,
+    RoutePath,
+    RouteCall,
+    ExpressHandler,
+    NestJsClass,
+    NestJsMethod,
+    /// `@Get('users')` / `@Post(':id')` decorator-route captures — separate
+    /// pattern in frameworks.scm because the decorator is independent of the
+    /// `@Controller` shape (any method-level decorator carrying a path-shaped
+    /// string literal is a route, gated by `has_nestjs` import presence).
+    NestJsDecoratorVerb,
+    NestJsDecoratorPath,
+    /// The argument list of a route decorator: `@Get()` has an empty one,
+    /// which names the controller prefix itself.
+    NestJsDecoratorArgs,
+    DynamicImport,
+    DynamicRequire,
+}
+
+#[derive(Clone, Copy)]
+pub enum TypeScriptHook {
+    FreezeEnums,
+    Calls,
+    Frameworks,
+    Indirect,
+    Exports,
+}
+
+/// `(class_name, method_name, method_span)`
+type NestJsHandler = (String, String, Span);
+/// `(HTTP_METHOD, raw_path_with_quotes_stripped_by_capture, decorator_span,
+/// decorated method name)`
+type NestJsDecoratorRoute = (String, String, Span, Option<String>);
+
+#[derive(Default)]
+pub struct TypeScriptMatch<'t> {
+    is_exported: bool,
+    heritage: Vec<String>,
+    type_annotation: Option<String>,
+    decorators: Vec<String>,
+    import_name: Option<Node<'t>>,
+    import_alias: Option<Node<'t>>,
+    import_src: Option<Node<'t>>,
+    is_import: bool,
+    is_import_namespace: bool,
+    is_import_star: bool,
+    route_method: Option<Node<'t>>,
+    route_path: Option<Node<'t>>,
+    is_route: bool,
+    nestjs_class_node: Option<Node<'t>>,
+    nestjs_method_node: Option<Node<'t>>,
+    nestjs_decorator_verb_node: Option<Node<'t>>,
+    nestjs_decorator_path_node: Option<Node<'t>>,
+    nestjs_decorator_args_node: Option<Node<'t>>,
+}
+
+#[derive(Default)]
+pub struct TypeScriptFile {
+    /// `(handler_name, capture_span)`; the enclosing function is resolved
+    /// after all nodes are collected.
+    pending_express_handlers: Vec<(String, Span)>,
+    pending_nestjs_handlers: Vec<NestJsHandler>,
+    /// Gated on `has_nestjs`, which is known only once the query has
+    /// collected every import.
+    pending_nestjs_decorator_routes: Vec<NestJsDecoratorRoute>,
+}
+
+impl ParseSpec for TypeScriptSpec {
+    type Role = TypeScriptRole;
+    type Match<'t> = TypeScriptMatch<'t>;
+    type File<'t> = TypeScriptFile;
+    type Hook = TypeScriptHook;
+
+    const PARSE_ERROR: &'static str = "Failed to parse typescript file";
+    const KIND_CAPTURE: KindCapture = KindCapture::NameOverwrite;
+    /// Anonymous callback (arg-position arrow / function expression). Emit an
+    /// `<anonymous>` Function node only when the body holds a call, so
+    /// attach_to_enclosing can host those calls instead of dropping them;
+    /// empty callbacks (e.g. `arr.map(x => x * 2)`) stay out of the graph.
+    const ANONYMOUS: Option<Anonymous> = Some(Anonymous {
+        capture: "function.anonymous",
+        call_kinds: &["call_expression"],
+        key: AnonKey::Span,
+    });
+    const BLIND: &'static [(&'static str, (&'static str, &'static str))] = &[
+        (
+            "blind.eval",
+            (
+                "ts-eval",
+                "eval(arg) — runtime JS execution; argument expression is not statically determinable as a callee",
+            ),
+        ),
+        (
+            "blind.function_ctor",
+            (
+                "ts-function-ctor",
+                "Function(arg) / new Function(arg) — runtime function compilation; body source is not statically determinable",
+            ),
+        ),
+    ];
+    const FIELD_READS: Option<FieldReads> = Some(FieldReads {
+        member_kinds: &["member_expression"],
+        names: NameRefSpec {
+            ident_kinds: &[
+                "identifier",
+                "shorthand_property_identifier",
+                "shorthand_property_identifier_pattern",
+            ],
+            kind: NameRefKind::Value,
+            binding_fields: &[
+                ("for_in_statement", "left"),
+                ("pair_pattern", "value"),
+                ("object_assignment_pattern", "left"),
+            ],
+            skip_kinds: &[
+                "import_statement",
+                "decorator",
+                "type_annotation",
+                "type_arguments",
+            ],
+            ..NameRefSpec::EMPTY
+        },
+    });
+    const VARIANT_REFS: Option<VariantRefSpec> = Some(VariantRefSpec {
+        path_kinds: &["member_expression"],
+        label_parents: &["switch_case"],
+        bare_label_parents: &[],
+        bare_expressions: false,
+        token_trees: false,
+    });
+    const EVENT_TOPICS: &'static [EventTopicConfig] = &[REDIS_TS, KAFKA_NODE, RABBITMQ_TS, SQS_TS];
+    const SCHEMA_FIELDS: &'static [SchemaFieldConfig] = &[TS_INTERFACE_CONFIG];
+    const TX: TxRule = TxRule::Nodes {
+        collect: collect_typeorm_transactional_scopes,
+        kinds: &[NodeKind::Method, NodeKind::Function],
+    };
+    const STEPS: &'static [Step<TypeScriptHook>] = &[
+        Step::fixed(Pass::Query, Op::Query),
+        Step::hook(Pass::Walk, Effect::Neutral, TypeScriptHook::FreezeEnums),
+        Step::hook(Pass::Calls, Effect::Nodes, TypeScriptHook::Calls),
+        Step::fixed(Pass::Walk, Op::FieldReads),
+        Step::fixed(Pass::Walk, Op::VariantRefs),
+        Step::hook(Pass::Build, Effect::Neutral, TypeScriptHook::Frameworks),
+        Step::hook(Pass::Walk, Effect::Neutral, TypeScriptHook::Indirect),
+        Step::fixed(Pass::Walk, Op::FunctionMeta),
+        Step::hook(Pass::Build, Effect::Nodes, TypeScriptHook::Exports),
+        Step::fixed(Pass::Build, Op::StampOwners),
+        // The language `file_identities` reads off the same path, so a
+        // nested function loses its owner exactly where its uid is scoped.
+        Step::fixed(Pass::Build, Op::StampOwnerFns),
+        // Last owner step: a nested function or callback node has a lexical
+        // parent and no owner (invariant I1), whatever the class pass gave it.
+        Step::fixed(Pass::Build, Op::ClearScopedOwners),
+        Step::fixed(Pass::Build, Op::TxScopes),
+        Step::fixed(Pass::Walk, Op::SchemaFields),
+        Step::fixed(Pass::Walk, Op::EventTopicsRequery),
+    ];
+
+    fn query() -> anyhow::Result<Query> {
+        let query_source = format!(
+            "{}\n;; ---- framework queries ----\n{}",
+            include_str!("queries.scm"),
+            include_str!("frameworks.scm"),
+        );
+        Ok(Query::new(
+            &tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            &query_source,
+        )?)
+    }
+
+    fn role(capture: &str) -> Option<TypeScriptRole> {
+        use TypeScriptRole::*;
+        Some(match capture {
+            "function" | "class" | "method" | "constructor" | "interface" | "property"
+            | "const" | "variable" | "typedef" | "enum" | "enum_member_node" => Root,
+            "export" => Export,
+            "heritage" => Heritage,
+            "type" => Type,
+            "decorator" => Decorator,
+            "import.name" => ImportName,
+            "import.alias" => ImportAlias,
+            "import.source" => ImportSource,
+            "import" => Import,
+            "import.namespace" => ImportNamespace,
+            "import.star" => ImportStar,
+            "route.method" => RouteMethod,
+            "route.path" => RoutePath,
+            "route.call" => RouteCall,
+            "express.route.handler" => ExpressHandler,
+            "nestjs.controller.class" => NestJsClass,
+            "nestjs.method.name" => NestJsMethod,
+            "nestjs.decorator.verb" => NestJsDecoratorVerb,
+            "nestjs.decorator.path" => NestJsDecoratorPath,
+            "nestjs.decorator.args" => NestJsDecoratorArgs,
+            "blind.dynamic_import" => DynamicImport,
+            "blind.dynamic_require" => DynamicRequire,
+            _ => return None,
+        })
+    }
+
+    /// A fresh parser per file, always the TypeScript grammar: a `.tsx` path
+    /// parses with it too, so the output matches graphs the parse cache holds.
+    fn parse_tree(source: &[u8]) -> Option<Tree> {
         let mut parser = Parser::new();
-        parser.set_language(&language)?;
+        parser
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+            .ok()?;
+        parse_with_budget(&mut parser, source, ParseBudget::DEFAULT)
+    }
 
-        let tree = parse_with_budget(&mut parser, source, ParseBudget::DEFAULT)
-            .ok_or_else(|| anyhow::anyhow!("Failed to parse typescript file"))?;
-
-        let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(&self.query, tree.root_node(), source);
-
-        let mut nodes: Vec<RawNode> = Vec::new();
-        // Spans of already-emitted anonymous nodes — dedup when the same closure
-        // is captured by multiple overlapping query patterns.
-        let mut emitted_spans: std::collections::HashSet<(u32, u32, u32, u32)> =
-            std::collections::HashSet::new();
-        let mut imports: Vec<RawImport> = Vec::new();
-        let mut routes: Vec<RawRoute> = Vec::new();
-        // Pending framework-handler captures: (handler_name, capture_span).
-        // Enclosing function is resolved after all nodes are collected.
-        let mut pending_express_handlers: Vec<(String, (u32, u32, u32, u32))> = Vec::new();
-        // (class_name, method_name, method_span)
-        type NestJsHandler = (String, String, (u32, u32, u32, u32));
-        let mut pending_nestjs_handlers: Vec<NestJsHandler> = Vec::new();
-        // NestJS decorator-routes pending `has_nestjs` import gate.
-        // (HTTP_METHOD, raw_path_with_quotes_stripped_by_capture, decorator_span,
-        // decorated method name)
-        type NestJsDecoratorRoute = (String, String, (u32, u32, u32, u32), Option<String>);
-        let mut pending_nestjs_decorator_routes: Vec<NestJsDecoratorRoute> = Vec::new();
-        let mut blind_spots: Vec<BlindSpot> = Vec::new();
-        let file_category =
-            ecp_core::file_category::determine_category(path.to_str().unwrap_or(""));
-        let is_test_file = file_category == ecp_core::graph::FileCategory::Test;
-
-        let idx = &self.indices;
-
-        while let Some(m) = matches.next() {
-            let mut name_node = None;
-            let mut kind = None;
-            let mut root_span_node = None;
-            let mut is_exported = false;
-            let mut heritage = Vec::new();
-            let mut type_annotation = None;
-            let mut decorators = Vec::new();
-
-            let mut import_name = None;
-            let mut import_alias = None;
-            let mut import_src = None;
-            let mut is_import = false;
-            let mut is_import_namespace = false;
-            let mut is_import_star = false;
-
-            let mut route_method = None;
-            let mut route_path = None;
-            let mut is_route = false;
-
-            let mut nestjs_class_node: Option<tree_sitter::Node> = None;
-            let mut nestjs_method_node: Option<tree_sitter::Node> = None;
-            let mut nestjs_decorator_verb_node: Option<tree_sitter::Node> = None;
-            let mut nestjs_decorator_path_node: Option<tree_sitter::Node> = None;
-            let mut nestjs_decorator_args_node: Option<tree_sitter::Node> = None;
-
-            for cap in m.captures() {
-                let cap_idx = Some(cap.index);
-
-                if let Some(k_from_spec) = self
-                    .capture_kind_by_idx
-                    .get(cap.index as usize)
-                    .copied()
-                    .flatten()
-                {
-                    // Single config-driven dispatch replaces the eight explicit
-                    // Function/Class/Method/Interface/Typedef/Property/Const/Variable arms.
-                    // Source of truth: TypeScriptSpec::CAPTURE_KIND in spec.rs.
-                    name_node = Some(cap.node);
-                    kind = Some(k_from_spec);
-                } else if cap_idx == idx.export {
-                    is_exported = true;
-                } else if cap_idx == idx.heritage {
-                    if let Ok(h) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        heritage.push(h.to_string());
-                    }
-                } else if cap_idx == idx.type_ann {
-                    if let Ok(t) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        type_annotation = Some(t.to_string());
-                    }
-                } else if cap_idx == idx.decorator {
-                    if let Ok(d) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        decorators.push(d.to_string());
-                    }
-                } else if cap_idx == idx.import_name {
-                    import_name = Some(cap.node);
-                } else if cap_idx == idx.import_alias {
-                    import_alias = Some(cap.node);
-                } else if cap_idx == idx.import_source {
-                    import_src = Some(cap.node);
-                } else if cap_idx == idx.import {
-                    is_import = true;
-                } else if cap_idx == idx.import_namespace {
-                    is_import_namespace = true;
-                } else if cap_idx == idx.import_star {
-                    is_import_star = true;
-                } else if cap_idx == idx.route_method {
-                    route_method = Some(cap.node);
-                } else if cap_idx == idx.route_path {
-                    route_path = Some(cap.node);
-                } else if cap_idx == idx.route_call {
-                    is_route = true;
-                    root_span_node = Some(cap.node);
-                } else if cap_idx == idx.express_handler {
-                    if let Ok(handler_name) =
-                        std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        pending_express_handlers
-                            .push((handler_name.to_string(), node_span(&cap.node)));
-                    }
-                } else if cap_idx == idx.nestjs_class {
-                    nestjs_class_node = Some(cap.node);
-                } else if cap_idx == idx.nestjs_method {
-                    nestjs_method_node = Some(cap.node);
-                } else if cap_idx == idx.nestjs_decorator_verb {
-                    nestjs_decorator_verb_node = Some(cap.node);
-                } else if cap_idx == idx.nestjs_decorator_path {
-                    nestjs_decorator_path_node = Some(cap.node);
-                } else if cap_idx == idx.nestjs_decorator_args {
-                    nestjs_decorator_args_node = Some(cap.node);
-                } else if cap_idx == idx.blind_eval {
-                    push_blind_spot(
-                        &mut blind_spots,
-                        BLIND_SPEC[0],
-                        &cap.node,
-                        path,
-                        is_test_file,
-                    );
-                } else if cap_idx == idx.blind_function_ctor {
-                    push_blind_spot(
-                        &mut blind_spots,
-                        BLIND_SPEC[1],
-                        &cap.node,
-                        path,
-                        is_test_file,
-                    );
-                } else if cap_idx == idx.blind_dynamic_import {
-                    if !js_ts_first_arg_is_literal_string(&cap.node) {
-                        push_blind_spot(
-                            &mut blind_spots,
-                            BLIND_SPEC[2],
-                            &cap.node,
-                            path,
-                            is_test_file,
-                        );
-                    }
-                } else if cap_idx == idx.blind_dynamic_require {
-                    if !js_ts_first_arg_is_literal_string(&cap.node) {
-                        push_blind_spot(
-                            &mut blind_spots,
-                            BLIND_SPEC[3],
-                            &cap.node,
-                            path,
-                            is_test_file,
-                        );
-                    }
-                } else if cap_idx == idx.function_anonymous {
-                    // Anonymous callback (arg-position arrow / function expression).
-                    // Emit an `<anonymous>` Function node only when the body holds a
-                    // call, so attach_to_enclosing can host those calls instead of
-                    // dropping them; empty callbacks stay out of the graph.
-                    if body_has_call(cap.node) {
-                        let span = node_span(&cap.node);
-                        if emitted_spans.insert(span) {
-                            nodes.push(RawNode {
-                                decorators: Vec::new(),
-                                is_exported: false,
-                                heritage: Vec::new(),
-                                type_annotation: None,
-                                name: format!("<anonymous:{}:{}>", span.0 + 1, span.1),
-                                kind: NodeKind::Function,
-                                span,
-                                calls: Vec::new(),
-                                field_reads: Vec::new(),
-                                owner_class: None,
-                                content_hash: ecp_core::uid::xxh3_64_bytes(
-                                    &source[cap.node.start_byte()..cap.node.end_byte()],
-                                ),
-                            });
-                        }
-                    }
-                } else if cap_idx == idx.function
-                    || cap_idx == idx.class
-                    || cap_idx == idx.method
-                    || cap_idx == idx.constructor
-                    || cap_idx == idx.interface
-                    || cap_idx == idx.property
-                    || cap_idx == idx.const_kind
-                    || cap_idx == idx.variable
-                    || cap_idx == idx.typedef
-                    || cap_idx == idx.enum_kind
-                    || cap_idx == idx.enum_member_node
-                {
-                    root_span_node = Some(cap.node);
+    fn capture<'t>(
+        r: TypeScriptRole,
+        node: Node<'t>,
+        d: &mut DeclSlot<'t>,
+        m: &mut TypeScriptMatch<'t>,
+        f: &mut TypeScriptFile,
+        cx: &mut FileCx<'t>,
+    ) {
+        let source = cx.source;
+        match r {
+            TypeScriptRole::Root => d.root = Some(node),
+            TypeScriptRole::Export => m.is_exported = true,
+            TypeScriptRole::Heritage => {
+                if let Ok(h) = std::str::from_utf8(&source[node.start_byte()..node.end_byte()]) {
+                    m.heritage.push(h.to_string());
                 }
             }
-
-            // Process definitions
-            if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
-                if matches!(k, NodeKind::Const | NodeKind::Variable)
-                    && n.parent()
-                        .and_then(|declarator| declarator.child_by_field_name("value"))
-                        .is_some_and(|value| {
-                            matches!(value.kind(), "arrow_function" | "function_expression")
-                        })
-                {
-                    continue;
+            TypeScriptRole::Type => {
+                if let Ok(t) = std::str::from_utf8(&source[node.start_byte()..node.end_byte()]) {
+                    m.type_annotation = Some(t.to_string());
                 }
-                if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
-                    let span = node_span(&root);
+            }
+            TypeScriptRole::Decorator => {
+                if let Ok(text) = std::str::from_utf8(&source[node.start_byte()..node.end_byte()]) {
+                    m.decorators.push(text.to_string());
+                }
+            }
+            TypeScriptRole::ImportName => m.import_name = Some(node),
+            TypeScriptRole::ImportAlias => m.import_alias = Some(node),
+            TypeScriptRole::ImportSource => m.import_src = Some(node),
+            TypeScriptRole::Import => m.is_import = true,
+            TypeScriptRole::ImportNamespace => m.is_import_namespace = true,
+            TypeScriptRole::ImportStar => m.is_import_star = true,
+            TypeScriptRole::RouteMethod => m.route_method = Some(node),
+            TypeScriptRole::RoutePath => m.route_path = Some(node),
+            TypeScriptRole::RouteCall => {
+                m.is_route = true;
+                d.root = Some(node);
+            }
+            TypeScriptRole::ExpressHandler => {
+                if let Ok(handler_name) =
+                    std::str::from_utf8(&source[node.start_byte()..node.end_byte()])
+                {
+                    f.pending_express_handlers
+                        .push((handler_name.to_string(), node_span(&node)));
+                }
+            }
+            TypeScriptRole::NestJsClass => m.nestjs_class_node = Some(node),
+            TypeScriptRole::NestJsMethod => m.nestjs_method_node = Some(node),
+            TypeScriptRole::NestJsDecoratorVerb => m.nestjs_decorator_verb_node = Some(node),
+            TypeScriptRole::NestJsDecoratorPath => m.nestjs_decorator_path_node = Some(node),
+            TypeScriptRole::NestJsDecoratorArgs => m.nestjs_decorator_args_node = Some(node),
+            TypeScriptRole::DynamicImport => {
+                if !js_ts_first_arg_is_literal_string(&node) {
+                    cx.push_blind(BLIND_DYNAMIC_IMPORT, &node);
+                }
+            }
+            TypeScriptRole::DynamicRequire => {
+                if !js_ts_first_arg_is_literal_string(&node) {
+                    cx.push_blind(BLIND_DYNAMIC_REQUIRE, &node);
+                }
+            }
+        }
+    }
 
-                    let mut existing_found = false;
-                    for node in &mut nodes {
-                        if node.span == span && node.name == name_str {
-                            // Function is more specific than Const/Variable: an
-                            // arrow-function assigned to a const matches both the
-                            // @function and @const patterns; the @const pattern fires
-                            // first in tree-sitter's match order, so we upgrade the
-                            // kind here when the later Function match arrives.
-                            if k == NodeKind::Function
-                                && matches!(node.kind, NodeKind::Const | NodeKind::Variable)
-                            {
-                                node.kind = NodeKind::Function;
-                            }
-                            if is_exported {
-                                node.is_exported = true;
-                            }
-                            if !heritage.is_empty() {
-                                for h in &heritage {
-                                    if !node.heritage.contains(h) {
-                                        node.heritage.push(h.clone());
-                                    }
-                                }
-                            }
-                            if type_annotation.is_some() {
-                                node.type_annotation = type_annotation.clone();
-                            }
-                            if !decorators.is_empty() {
-                                for d in &decorators {
-                                    if !node.decorators.contains(d) {
-                                        node.decorators.push(d.clone());
-                                    }
-                                }
-                            }
-                            existing_found = true;
-                            break;
+    fn end_match<'t>(
+        d: DeclSlot<'t>,
+        m: &mut TypeScriptMatch<'t>,
+        f: &mut TypeScriptFile,
+        cx: &mut FileCx<'t>,
+    ) {
+        let source = cx.source;
+        let TypeScriptMatch {
+            is_exported,
+            heritage,
+            type_annotation,
+            decorators,
+            import_name,
+            import_alias,
+            import_src,
+            is_import,
+            is_import_namespace,
+            is_import_star,
+            route_method,
+            route_path,
+            is_route,
+            nestjs_class_node,
+            nestjs_method_node,
+            nestjs_decorator_verb_node,
+            nestjs_decorator_path_node,
+            nestjs_decorator_args_node,
+        } = std::mem::take(m);
+        let root_span_node = d.root;
+
+        // Process definitions
+        if let (Some(n), Some(k), Some(root)) = (d.name, d.kind, root_span_node) {
+            // A function-valued binding is the `@function` match's node; this
+            // match ends here, skipping every record below.
+            if matches!(k, NodeKind::Const | NodeKind::Variable)
+                && n.parent()
+                    .and_then(|declarator| declarator.child_by_field_name("value"))
+                    .is_some_and(|value| {
+                        matches!(value.kind(), "arrow_function" | "function_expression")
+                    })
+            {
+                return;
+            }
+            if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
+                let span = node_span(&root);
+
+                let mut existing_found = false;
+                for node in &mut cx.nodes {
+                    if node.span == span && node.name == name_str {
+                        // Function is more specific than Const/Variable: an
+                        // arrow-function assigned to a const matches both the
+                        // @function and @const patterns; the @const pattern fires
+                        // first in tree-sitter's match order, so we upgrade the
+                        // kind here when the later Function match arrives.
+                        if k == NodeKind::Function
+                            && matches!(node.kind, NodeKind::Const | NodeKind::Variable)
+                        {
+                            node.kind = NodeKind::Function;
                         }
+                        if is_exported {
+                            node.is_exported = true;
+                        }
+                        if !heritage.is_empty() {
+                            for h in &heritage {
+                                if !node.heritage.contains(h) {
+                                    node.heritage.push(h.clone());
+                                }
+                            }
+                        }
+                        if type_annotation.is_some() {
+                            node.type_annotation = type_annotation.clone();
+                        }
+                        if !decorators.is_empty() {
+                            for d in &decorators {
+                                if !node.decorators.contains(d) {
+                                    node.decorators.push(d.clone());
+                                }
+                            }
+                        }
+                        existing_found = true;
+                        break;
                     }
+                }
 
-                    if !existing_found {
-                        nodes.push(RawNode {
-                            decorators: decorators.clone(),
-                            name: name_str.to_string(),
-                            kind: k,
+                if !existing_found {
+                    cx.nodes.push(RawNode {
+                        decorators: decorators.clone(),
+                        is_exported,
+                        heritage: heritage.clone(),
+                        type_annotation: type_annotation.clone(),
+                        ..node::decl(
+                            name_str.to_string(),
+                            k,
                             span,
-                            is_exported,
-                            heritage: heritage.clone(),
-                            type_annotation: type_annotation.clone(),
-                            calls: Vec::new(),
-                            field_reads: Vec::new(),
-                            owner_class: None,
-                            content_hash: ecp_core::uid::xxh3_64_bytes(
-                                &source[root.start_byte()..root.end_byte()],
-                            ),
-                        });
-                    }
-                }
-            }
-
-            // Process imports
-            if is_import {
-                if let (Some(i_name), Some(i_src)) = (import_name, import_src) {
-                    if let (Ok(name_str), Ok(src_str)) = (
-                        std::str::from_utf8(&source[i_name.start_byte()..i_name.end_byte()]),
-                        std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]),
-                    ) {
-                        let alias_str = import_alias.and_then(|a| {
-                            std::str::from_utf8(&source[a.start_byte()..a.end_byte()])
-                                .ok()
-                                .map(|s| s.to_string())
-                        });
-
-                        imports.push(RawImport {
-                            alias: alias_str,
-                            imported_name: name_str.to_string(),
-                            source: src_str.to_string(),
-                            binding_kind: crate::framework_helpers::js_ts_reexport_kind(i_src),
-                        });
-                    }
-                }
-            }
-
-            // Process namespace re-export `export * as ns from 'lib'`.
-            // No `name` identifier exists; emit with "*" sentinel as imported_name
-            // and the local namespace binding as the alias.
-            if is_import_namespace {
-                if let (Some(a), Some(i_src)) = (import_alias, import_src) {
-                    if let (Ok(alias_str), Ok(src_str)) = (
-                        std::str::from_utf8(&source[a.start_byte()..a.end_byte()]),
-                        std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]),
-                    ) {
-                        imports.push(RawImport {
-                            alias: Some(alias_str.to_string()),
-                            imported_name: "*".to_string(),
-                            source: src_str.to_string(),
-                            binding_kind: None,
-                        });
-                    }
-                }
-            }
-
-            if is_import_star {
-                if let Some(src_str) = import_src
-                    .and_then(|s| std::str::from_utf8(&source[s.start_byte()..s.end_byte()]).ok())
-                {
-                    imports.push(RawImport {
-                        alias: None,
-                        imported_name: "*".to_string(),
-                        source: src_str.to_string(),
-                        binding_kind: None,
+                            &source[root.start_byte()..root.end_byte()],
+                        )
                     });
-                }
-            }
-
-            // Process NestJS @Controller method handler pairs.
-            if let (Some(cls), Some(mth)) = (nestjs_class_node, nestjs_method_node) {
-                if let (Ok(class_name), Ok(method_name)) = (
-                    std::str::from_utf8(&source[cls.start_byte()..cls.end_byte()]),
-                    std::str::from_utf8(&source[mth.start_byte()..mth.end_byte()]),
-                ) {
-                    pending_nestjs_handlers.push((
-                        class_name.to_string(),
-                        method_name.to_string(),
-                        node_span(&mth),
-                    ));
-                }
-            }
-
-            // Process routes
-            if is_route {
-                if let (Some(r_method), Some(r_path), Some(root)) =
-                    (route_method, route_path, root_span_node)
-                {
-                    if let (Ok(method_str), Ok(path_str)) = (
-                        std::str::from_utf8(&source[r_method.start_byte()..r_method.end_byte()]),
-                        std::str::from_utf8(&source[r_path.start_byte()..r_path.end_byte()]),
-                    ) {
-                        // The last argument is the handler Express runs;
-                        // the ones before it are middleware.
-                        let handler = crate::route_detector::last_argument_handler(
-                            root.child_by_field_name("arguments"),
-                            source,
-                            &["arrow_function", "function_expression", "function"],
-                            &["identifier", "member_expression"],
-                        );
-                        routes.push(RawRoute {
-                            method: method_str.to_string(),
-                            path: path_str.to_string(),
-                            handler,
-                            span: node_span(&root),
-                            scope: None,
-                        });
-                    }
-                }
-            }
-
-            // NestJS decorator-route — `@Get('users')` / `@Post(':id')`.
-            // Path string is captured separately from the generic Express
-            // matcher, and the relaxed `clean_route_path_lax` accepts bare
-            // names (NestJS convention) below in the final route cleanup.
-            // Stash as a pending decorator-route; resolve once the
-            // `has_nestjs` import flag is known (a few lines later in this
-            // function — we can't gate here because import processing
-            // happens in the same match loop).
-            // `@Get()` names no path: its route is the controller prefix.
-            let path_text = match (nestjs_decorator_path_node, nestjs_decorator_args_node) {
-                (Some(path_node), _) => {
-                    std::str::from_utf8(&source[path_node.start_byte()..path_node.end_byte()]).ok()
-                }
-                (None, Some(args)) if args.named_child_count() == 0 => Some(""),
-                _ => None,
-            };
-            if let (Some(verb_node), Some(path_str)) = (nestjs_decorator_verb_node, path_text) {
-                if let (Some(prefixes), Ok(verb_str)) = (
-                    controller_prefixes(verb_node, source),
-                    std::str::from_utf8(&source[verb_node.start_byte()..verb_node.end_byte()]),
-                ) {
-                    let prefixes = match prefixes.is_empty() {
-                        true => vec![String::new()],
-                        false => prefixes,
-                    };
-                    for prefix in prefixes {
-                        pending_nestjs_decorator_routes.push((
-                            verb_str.to_uppercase(),
-                            nestjs_route_path(&prefix, path_str),
-                            node_span(&verb_node),
-                            decorated_method_name(verb_node, source),
-                        ));
-                    }
                 }
             }
         }
 
-        // Object.freeze({...}) and `{...} as const` enum-imitation detection.
-        // Runs as a separate AST walk (not query-based) because the heuristic
-        // requires counting pair children and checking value kinds — logic that
-        // can't be expressed as a single tree-sitter predicate.
-        collect_freeze_enum_spots(
-            tree.root_node(),
-            source,
-            path,
-            is_test_file,
-            &mut blind_spots,
-        );
+        // Process imports
+        if is_import {
+            if let (Some(i_name), Some(i_src)) = (import_name, import_src) {
+                if let (Ok(name_str), Ok(src_str)) = (
+                    std::str::from_utf8(&source[i_name.start_byte()..i_name.end_byte()]),
+                    std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]),
+                ) {
+                    let alias_str = import_alias.and_then(|a| {
+                        std::str::from_utf8(&source[a.start_byte()..a.end_byte()])
+                            .ok()
+                            .map(|s| s.to_string())
+                    });
 
-        // Extract call sites with receiver-type binding:
-        // - `this.method()` → resolved to `ClassName.method` via enclosing class
-        // - `obj.method()` where `obj` has a type annotation → `Type.method`
-        // - everything else falls back to the bare/qualified method name.
-        let local_types = collect_local_types(tree.root_node(), source);
-        let mut call_sites = crate::calls::CallSiteIndex::default();
-        let (raw_path_literals, raw_sql_refs) = extract_ts_calls_and_path_literals(
-            tree.root_node(),
-            source,
-            &mut nodes,
-            &local_types,
-            &mut call_sites,
-        );
-        crate::calls::extract_field_reads(
-            tree.root_node(),
-            source,
-            &mut nodes,
-            &["member_expression"],
-            &crate::calls::NameRefSpec {
-                ident_kinds: &[
-                    "identifier",
-                    "shorthand_property_identifier",
-                    "shorthand_property_identifier_pattern",
-                ],
-                kind: crate::calls::NameRefKind::Value,
-                binding_fields: &[
-                    ("for_in_statement", "left"),
-                    ("pair_pattern", "value"),
-                    ("object_assignment_pattern", "left"),
-                ],
-                skip_kinds: &[
-                    "import_statement",
-                    "decorator",
-                    "type_annotation",
-                    "type_arguments",
-                ],
-                ..crate::calls::NameRefSpec::EMPTY
-            },
-        );
-        crate::calls::extract_variant_refs(
-            tree.root_node(),
-            source,
-            &mut nodes,
-            &crate::calls::VariantRefSpec {
-                path_kinds: &["member_expression"],
-                label_parents: &["switch_case"],
-                bare_label_parents: &[],
-                bare_expressions: false,
-                token_trees: false,
-            },
-        );
-
-        // Framework-presence gates: only emit Express/NestJS refs when the file
-        // actually imports the matching package.
-        const EXPRESS_REQUIRED: &[&str] = &["express"];
-        const NESTJS_REQUIRED: &[&str] = &["@nestjs"];
-        let has_express = has_import_from(&imports, EXPRESS_REQUIRED);
-        let has_nestjs = has_import_from(&imports, NESTJS_REQUIRED);
-
-        // Path-shape filter for generic Route emission — see
-        // `docs/superpowers/specs/2026-05-17-route-precision-design.md`.
-        // No framework-presence gate here: imports record ES `import`
-        // statements and top-level `require('lib')` bindings only, so a
-        // router built by `require('express').Router()`, a `require` inside
-        // a function, or an app handed in from another module leaves no
-        // import and gating would drop real routes. The path-shape
-        // predicate alone removes
-        // the dominant FP class (Map/headers/cache `.get("key")`).
-        routes.retain_mut(|r| match crate::route_detector::clean_route_path(&r.path) {
-            Some(clean) => {
-                r.path = clean;
-                true
+                    cx.imports.push(driver::imports::raw(
+                        src_str.to_string(),
+                        name_str.to_string(),
+                        alias_str,
+                        crate::framework_helpers::js_ts_reexport_kind(i_src),
+                    ));
+                }
             }
-            None => false,
-        });
+        }
 
-        // NestJS decorator-routes — `@Get('users')` shape. Gated on
-        // `@nestjs/*` import presence so a custom `@Get(...)` decorator in
-        // an unrelated codebase does not surface a false Route. Uses the
-        // lax path helper because NestJS conventionally elides the leading
-        // `/` (the framework prepends the controller prefix at runtime).
-        if has_nestjs {
-            for (verb, raw_path, span, method) in pending_nestjs_decorator_routes {
-                if let Some(cleaned) = crate::route_detector::clean_route_path_lax(&raw_path) {
-                    routes.push(RawRoute {
-                        method: verb,
-                        path: cleaned,
-                        handler: RawRoute::named_handler(method.as_deref()),
-                        span,
+        // Process namespace re-export `export * as ns from 'lib'`.
+        // No `name` identifier exists; emit with "*" sentinel as imported_name
+        // and the local namespace binding as the alias.
+        if is_import_namespace {
+            if let (Some(a), Some(i_src)) = (import_alias, import_src) {
+                if let (Ok(alias_str), Ok(src_str)) = (
+                    std::str::from_utf8(&source[a.start_byte()..a.end_byte()]),
+                    std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()]),
+                ) {
+                    cx.imports.push(driver::imports::raw(
+                        src_str.to_string(),
+                        "*".to_string(),
+                        Some(alias_str.to_string()),
+                        None,
+                    ));
+                }
+            }
+        }
+
+        if is_import_star {
+            if let Some(src_str) = import_src
+                .and_then(|s| std::str::from_utf8(&source[s.start_byte()..s.end_byte()]).ok())
+            {
+                cx.imports.push(driver::imports::raw(
+                    src_str.to_string(),
+                    "*".to_string(),
+                    None,
+                    None,
+                ));
+            }
+        }
+
+        // Process NestJS @Controller method handler pairs.
+        if let (Some(cls), Some(mth)) = (nestjs_class_node, nestjs_method_node) {
+            if let (Ok(class_name), Ok(method_name)) = (
+                std::str::from_utf8(&source[cls.start_byte()..cls.end_byte()]),
+                std::str::from_utf8(&source[mth.start_byte()..mth.end_byte()]),
+            ) {
+                f.pending_nestjs_handlers.push((
+                    class_name.to_string(),
+                    method_name.to_string(),
+                    node_span(&mth),
+                ));
+            }
+        }
+
+        // Process routes
+        if is_route {
+            if let (Some(r_method), Some(r_path), Some(root)) =
+                (route_method, route_path, root_span_node)
+            {
+                if let (Ok(method_str), Ok(path_str)) = (
+                    std::str::from_utf8(&source[r_method.start_byte()..r_method.end_byte()]),
+                    std::str::from_utf8(&source[r_path.start_byte()..r_path.end_byte()]),
+                ) {
+                    // The last argument is the handler Express runs;
+                    // the ones before it are middleware.
+                    let handler = crate::route_detector::last_argument_handler(
+                        root.child_by_field_name("arguments"),
+                        source,
+                        &["arrow_function", "function_expression", "function"],
+                        &["identifier", "member_expression"],
+                    );
+                    cx.routes.push(RawRoute {
+                        method: method_str.to_string(),
+                        path: path_str.to_string(),
+                        handler,
+                        span: node_span(&root),
                         scope: None,
                     });
                 }
             }
         }
 
-        // Resolve framework-ref enclosing functions via span containment.
-        // Module-level captures use the MODULE_LEVEL_SOURCE sentinel (consistent with Actix).
-        let mut framework_refs: Vec<RawFrameworkRef> = if has_express {
-            pending_express_handlers
-                .into_iter()
-                .map(|(target, cap_span)| {
-                    let source_name = enclosing_function_name(&nodes, cap_span)
-                        .unwrap_or_else(|| MODULE_LEVEL_SOURCE.to_string());
-                    RawFrameworkRef {
-                        source_name,
-                        target_name: target,
-                        confidence: framework_confidence::EXPRESS_ROUTE,
-                        reason: "express-route-handler".to_string(),
-                        span: cap_span,
-                    }
-                })
-                .collect()
-        } else {
-            Vec::new()
+        // NestJS decorator-route — `@Get('users')` / `@Post(':id')`.
+        // Path string is captured separately from the generic Express
+        // matcher, and the relaxed `clean_route_path_lax` accepts bare
+        // names (NestJS convention) in the frameworks step. Stash as a
+        // pending decorator-route; the frameworks step resolves it once the
+        // `has_nestjs` import flag is known.
+        // `@Get()` names no path: its route is the controller prefix.
+        let path_text = match (nestjs_decorator_path_node, nestjs_decorator_args_node) {
+            (Some(path_node), _) => {
+                std::str::from_utf8(&source[path_node.start_byte()..path_node.end_byte()]).ok()
+            }
+            (None, Some(args)) if args.named_child_count() == 0 => Some(""),
+            _ => None,
         };
-
-        // NestJS @Controller → @Get/@Post/... method bindings.
-        if has_nestjs {
-            for (class_name, method_name, span) in pending_nestjs_handlers {
-                framework_refs.push(RawFrameworkRef {
-                    source_name: class_name,
-                    target_name: method_name,
-                    confidence: framework_confidence::NESTJS_ROUTE,
-                    reason: "nestjs-route-handler".to_string(),
-                    span,
-                });
+        if let (Some(verb_node), Some(path_str)) = (nestjs_decorator_verb_node, path_text) {
+            if let (Some(prefixes), Ok(verb_str)) = (
+                controller_prefixes(verb_node, source),
+                std::str::from_utf8(&source[verb_node.start_byte()..verb_node.end_byte()]),
+            ) {
+                let prefixes = match prefixes.is_empty() {
+                    true => vec![String::new()],
+                    false => prefixes,
+                };
+                for prefix in prefixes {
+                    f.pending_nestjs_decorator_routes.push((
+                        verb_str.to_uppercase(),
+                        nestjs_route_path(&prefix, path_str),
+                        node_span(&verb_node),
+                        decorated_method_name(verb_node, source),
+                    ));
+                }
             }
         }
+    }
 
-        let param_names = collect_js_param_names(tree.root_node(), source);
-        let call_metas =
-            detect_js_ts_indirect(tree.root_node(), source, &nodes, &param_names, &call_sites);
-        let raw_function_metas = crate::function_meta::typescript::extract(
-            tree.root_node(),
-            source,
-            &nodes,
-            file_category,
-        );
+    fn hook<'t>(
+        h: TypeScriptHook,
+        _c: &Compiled<Self>,
+        f: &mut TypeScriptFile,
+        cx: &mut FileCx<'t>,
+    ) {
+        let root = cx.tree.root_node();
+        let source = cx.source;
+        match h {
+            // Object.freeze({...}) and `{...} as const` enum-imitation detection.
+            // Runs as a separate AST walk (not query-based) because the heuristic
+            // requires counting pair children and checking value kinds — logic that
+            // can't be expressed as a single tree-sitter predicate.
+            TypeScriptHook::FreezeEnums => {
+                collect_freeze_enum_spots(root, source, cx.path, cx.is_test, &mut cx.blind_spots)
+            }
+            // Extract call sites with receiver-type binding:
+            // - `this.method()` → resolved to `ClassName.method` via enclosing class
+            // - `obj.method()` where `obj` has a type annotation → `Type.method`
+            // - everything else falls back to the bare/qualified method name.
+            TypeScriptHook::Calls => {
+                let local_types = collect_local_types(root, source);
+                let (raw_path_literals, raw_sql_refs) = extract_ts_calls_and_path_literals(
+                    root,
+                    source,
+                    &mut cx.nodes,
+                    &local_types,
+                    &mut cx.call_sites,
+                );
+                cx.path_literals = raw_path_literals;
+                cx.sql_refs = raw_sql_refs;
+            }
+            TypeScriptHook::Frameworks => {
+                // Framework-presence gates: only emit Express/NestJS refs when the file
+                // actually imports the matching package.
+                const EXPRESS_REQUIRED: &[&str] = &["express"];
+                const NESTJS_REQUIRED: &[&str] = &["@nestjs"];
+                let has_express = has_import_from(&cx.imports, EXPRESS_REQUIRED);
+                let has_nestjs = has_import_from(&cx.imports, NESTJS_REQUIRED);
 
-        let export_aliases =
-            crate::framework_helpers::stamp_js_ts_exports(tree.root_node(), source, &mut nodes);
-        crate::framework_helpers::mark_js_ts_import_bindings(
-            tree.root_node(),
-            source,
-            &mut imports,
-        );
-        crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
-        // The language `file_identities` reads off the same path, so a
-        // nested function loses its owner exactly where its uid is scoped.
-        let language = ecp_core::file_category::Language::from_path(&path.to_string_lossy());
-        crate::framework_helpers::stamp_owner_fn_by_span(language, &mut nodes);
-        // Last owner step: a nested function or callback node has a lexical
-        // parent and no owner (invariant I1), whatever the class pass gave it.
-        ecp_core::analyzer::lexical::clear_scoped_owners(language, &mut nodes);
+                // Path-shape filter for generic Route emission — see
+                // `docs/superpowers/specs/2026-05-17-route-precision-design.md`.
+                // No framework-presence gate here: imports record ES `import`
+                // statements and top-level `require('lib')` bindings only, so a
+                // router built by `require('express').Router()`, a `require` inside
+                // a function, or an app handed in from another module leaves no
+                // import and gating would drop real routes. The path-shape
+                // predicate alone removes
+                // the dominant FP class (Map/headers/cache `.get("key")`).
+                cx.routes
+                    .retain_mut(|r| match crate::route_detector::clean_route_path(&r.path) {
+                        Some(clean) => {
+                            r.path = clean;
+                            true
+                        }
+                        None => false,
+                    });
 
-        let tx_scopes =
-            collect_typeorm_transactional_scopes(&nodes, &[NodeKind::Method, NodeKind::Function]);
+                // NestJS decorator-routes — `@Get('users')` shape. Gated on
+                // `@nestjs/*` import presence so a custom `@Get(...)` decorator in
+                // an unrelated codebase does not surface a false Route. Uses the
+                // lax path helper because NestJS conventionally elides the leading
+                // `/` (the framework prepends the controller prefix at runtime).
+                if has_nestjs {
+                    for (verb, raw_path, span, method) in
+                        std::mem::take(&mut f.pending_nestjs_decorator_routes)
+                    {
+                        if let Some(cleaned) =
+                            crate::route_detector::clean_route_path_lax(&raw_path)
+                        {
+                            cx.routes.push(RawRoute {
+                                method: verb,
+                                path: cleaned,
+                                handler: RawRoute::named_handler(method.as_deref()),
+                                span,
+                                scope: None,
+                            });
+                        }
+                    }
+                }
 
-        // T4-7 refactor: `RawSchemaField` now stores owned `Box<str>` so the
-        // per-file parser scope can drop cleanly without dangling-pool risk.
-        let fields = crate::schema_field::extract_schema_fields(
-            &tree,
-            source,
-            &self.query,
-            &[crate::typescript::schema_extractors::TS_INTERFACE_CONFIG],
-            &imports,
-        );
-        let schema_fields = (!fields.is_empty()).then(|| fields.into_boxed_slice());
+                // Resolve framework-ref enclosing functions via span containment.
+                // Module-level captures use the MODULE_LEVEL_SOURCE sentinel (consistent with Actix).
+                let mut framework_refs: Vec<RawFrameworkRef> = if has_express {
+                    std::mem::take(&mut f.pending_express_handlers)
+                        .into_iter()
+                        .map(|(target, cap_span)| RawFrameworkRef {
+                            source_name: node::enclosing_or_module(&cx.nodes, cap_span),
+                            target_name: target,
+                            confidence: framework_confidence::EXPRESS_ROUTE,
+                            reason: "express-route-handler".to_string(),
+                            span: cap_span,
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
 
-        let event_topics = {
-            let topics = crate::event_topic::extract_event_topics(
-                &tree,
-                source,
-                &self.query,
-                &[
-                    crate::event_topic::REDIS_TS,
-                    crate::event_topic::KAFKA_NODE,
-                    crate::event_topic::RABBITMQ_TS,
-                    crate::event_topic::SQS_TS,
-                ],
-                &imports,
-            );
-            (!topics.is_empty()).then(|| topics.into_boxed_slice())
-        };
+                // NestJS @Controller → @Get/@Post/... method bindings.
+                if has_nestjs {
+                    for (class_name, method_name, span) in
+                        std::mem::take(&mut f.pending_nestjs_handlers)
+                    {
+                        framework_refs.push(RawFrameworkRef {
+                            source_name: class_name,
+                            target_name: method_name,
+                            confidence: framework_confidence::NESTJS_ROUTE,
+                            reason: "nestjs-route-handler".to_string(),
+                            span,
+                        });
+                    }
+                }
+                cx.framework_refs = framework_refs;
+            }
+            TypeScriptHook::Indirect => {
+                let param_names = collect_js_param_names(root, source);
+                cx.call_metas =
+                    detect_js_ts_indirect(root, source, &cx.nodes, &param_names, &cx.call_sites);
+            }
+            TypeScriptHook::Exports => {
+                cx.export_aliases =
+                    crate::framework_helpers::stamp_js_ts_exports(root, source, &mut cx.nodes);
+                crate::framework_helpers::mark_js_ts_import_bindings(root, source, &mut cx.imports);
+            }
+        }
+    }
 
-        let path_literals =
-            (!raw_path_literals.is_empty()).then(|| raw_path_literals.into_boxed_slice());
-        let sql_refs = (!raw_sql_refs.is_empty()).then(|| raw_sql_refs.into_boxed_slice());
-
-        Ok(LocalGraph {
-            content_hash: [0; 8],
-            routes,
-            file_path: path.to_path_buf(),
-            nodes,
-            imports,
-            documents: vec![],
-            route_receivers: None,
-            framework_refs,
-            fanout_refs: vec![],
-            blind_spots,
-            schema_fields,
-            event_topics,
-            tx_scopes,
-            path_literals,
-            sql_refs,
-            call_metas,
-            raw_function_metas,
-            export_aliases,
-            parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
-        })
+    fn function_meta(
+        root: Node<'_>,
+        source: &[u8],
+        nodes: &[RawNode],
+        category: FileCategory,
+    ) -> Vec<RawFunctionMeta> {
+        crate::function_meta::typescript::extract(root, source, nodes, category)
     }
 }
