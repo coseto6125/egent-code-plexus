@@ -170,6 +170,8 @@ mod tests {
 
     fn returns_early_inside_span() -> Option<u8> {
         let _p = span(Pass::Tree);
+        // An empty span can read 0 ns on a coarse or fast clock (macOS CI).
+        busy();
         None?;
         Some(1)
     }
