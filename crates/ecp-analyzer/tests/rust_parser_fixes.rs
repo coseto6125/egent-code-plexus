@@ -108,7 +108,7 @@ fn test_rust_scoped_turbofish_call_followed_by_try_keeps_path() {
 
 // FU-2026-10-30-c017b835ee81
 #[test]
-fn test_rust_turbofish_call_without_try_keeps_calls_entry() {
+fn test_rust_turbofish_call_without_try_drops_type_arguments_from_callee() {
     let g = parse("fn b<T>() {}\nfn a() { b::<u8>(); }\n");
     assert_eq!(callee_names(&g, "a"), ["b"]);
 }
@@ -118,4 +118,13 @@ fn test_rust_turbofish_call_without_try_keeps_calls_entry() {
 fn test_rust_plain_call_followed_by_try_keeps_calls_entry() {
     let g = parse("fn b() -> Option<u8> { None }\nfn a() -> Option<u8> { b()?; None }\n");
     assert_eq!(callee_names(&g, "a"), ["b"]);
+}
+
+// FU-2026-10-30-c017b835ee81 sibling: method-call turbofish.
+#[test]
+fn test_rust_method_turbofish_call_drops_type_arguments_from_callee() {
+    let g = parse("fn a(x: Foo) { x.m::<u8>(); }\n");
+    let names = callee_names(&g, "a");
+    assert_eq!(names.len(), 1, "{names:?}");
+    assert!(!names[0].contains('<'), "{names:?}");
 }

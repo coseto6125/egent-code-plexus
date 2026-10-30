@@ -19,7 +19,7 @@ use ecp_core::analyzer::types::{
     RawRoute, Span,
 };
 use ecp_core::graph::{FileCategory, NodeKind};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::Path;
 use tree_sitter::{Node, Query, Tree};
 
@@ -430,12 +430,16 @@ pub struct PhpFile<'t> {
     /// literal, call)`. They become `routes` once the loop has seen the
     /// file's `use` imports, which an `X::class` action resolves through.
     route_calls: Vec<(String, &'t str, Node<'t>)>,
+    /// `(method, call id)` of `route_calls`: the dedupe key, first sighting wins.
+    route_call_keys: FxHashSet<(String, usize)>,
     /// Calls and `require`s that may load a route file. A group's
     /// `X::class` middleware resolves through the imports too.
     include_calls: Vec<Node<'t>>,
     /// `Route::resource` / `match` / `any` calls, each registering
     /// several routes or a method set.
     route_sets: Vec<Node<'t>>,
+    /// Call ids of `route_sets`.
+    route_set_ids: FxHashSet<usize>,
     /// Laravel framework refs, emitted if the `Illuminate` import gate matches.
     pending_laravel: Vec<(String, Span)>,
     /// The first `Namespace` node's name, read by the routes step and
@@ -645,7 +649,7 @@ impl ParseSpec for PhpSpec {
             PhpRole::LaravelArgs => m.laravel_args_node = Some(node),
             PhpRole::LaravelInclude => f.include_calls.push(node),
             PhpRole::LaravelRouteSet => {
-                if !f.route_sets.iter().any(|call| call.id() == node.id()) {
+                if f.route_set_ids.insert(node.id()) {
                     f.route_sets.push(node);
                 }
             }
@@ -721,11 +725,7 @@ impl ParseSpec for PhpSpec {
         if let (true, Some(rm), Some(rp), Some(rs_node)) =
             (scope_ok, route_method, route_path, route_span_node)
         {
-            let exists = f
-                .route_calls
-                .iter()
-                .any(|(method, _, call)| *method == rm && call.id() == rs_node.id());
-            if !exists {
+            if f.route_call_keys.insert((rm.clone(), rs_node.id())) {
                 f.route_calls.push((rm, rp, rs_node));
             }
         }

@@ -7,9 +7,7 @@ use crate::driver::{
 };
 use crate::event_topic::{EventTopicConfig, KAFKA_KOTLIN};
 use crate::framework_confidence;
-use crate::framework_helpers::{
-    collect_jvm_transactional_scopes, has_import_from, MODULE_LEVEL_SOURCE,
-};
+use crate::framework_helpers::{collect_jvm_transactional_scopes, has_import_from};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::parse_prof::Pass;
 use ecp_core::analyzer::provider::LanguageProvider;
@@ -147,24 +145,18 @@ fn is_interface_class(class_decl: tree_sitter::Node) -> bool {
 /// True when the `class_declaration` carries an `annotation` modifier — i.e.
 /// `annotation class Foo`. Distinct from plain `class Foo`.
 fn is_annotation_class(class_decl: tree_sitter::Node, source: &[u8]) -> bool {
-    for i in 0..class_decl.child_count() {
-        let Some(c) = class_decl.child(i) else {
-            continue;
-        };
-        if c.kind() == "modifiers" {
-            for j in 0..c.child_count() {
-                let Some(m) = c.child(j) else { continue };
-                if m.kind() == "class_modifier" || m.kind() == "modifier" {
-                    if let Ok(t) = std::str::from_utf8(&source[m.start_byte()..m.end_byte()]) {
-                        if t == "annotation" {
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    false
+    let mut cursor = class_decl.walk();
+    class_decl
+        .children(&mut cursor)
+        .filter(|c| c.kind() == "modifiers")
+        .any(|modifiers| {
+            let mut inner = modifiers.walk();
+            let found = modifiers.children(&mut inner).any(|m| {
+                matches!(m.kind(), "class_modifier" | "modifier")
+                    && &source[m.start_byte()..m.end_byte()] == b"annotation"
+            });
+            found
+        })
 }
 
 impl KotlinProvider {
@@ -545,10 +537,11 @@ impl ParseSpec for KotlinSpec {
                 // The route DSL verbs (`get`/`post`/...) are common
                 // identifiers, so without the gate we would over-claim.
                 if has_import_from(&cx.imports, KTOR_REQUIRED) {
+                    let nodes = &cx.nodes;
                     cx.framework_refs = std::mem::take(&mut f.pending_ktor_refs)
                         .into_iter()
                         .map(|(verb, path, span)| RawFrameworkRef {
-                            source_name: MODULE_LEVEL_SOURCE.to_string(),
+                            source_name: node::enclosing_or_module(nodes, span),
                             target_name: path,
                             confidence: framework_confidence::KTOR_ROUTE,
                             reason: format!("ktor-route-{}", verb),

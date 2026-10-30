@@ -139,10 +139,12 @@
 ;; `Const`; without this query ecp dropped 42 top-level Go consts on
 ;; `.sample_repo` (`auth.go` AuthUserKey/AuthProxyUserKey,
 ;; `codec/json/*.go` Package, `binding/binding.go` MIME constants, etc.).
+;; `@const` is the `const_spec`, as `@var` is the `var_spec`: a capture on the
+;; source_file root would span and hash the whole file.
 (source_file
   (const_declaration
     (const_spec
-      name: (identifier) @const.name))) @const
+      name: (identifier) @const.name) @const))
 
 ;; File-scope `var ( X T; Y T )` (grouped declaration block).
 (source_file

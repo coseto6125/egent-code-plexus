@@ -561,7 +561,11 @@ pub fn extract_rust_calls_and_path_literals(
 
 /// Derive the callee name for a Rust `call_expression`.
 fn rust_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Option<String> {
-    let function = call.child_by_field_name("function")?;
+    let mut function = call.child_by_field_name("function")?;
+    // `f::<T>()` and `x.m::<T>()`: the type arguments are no part of the callee.
+    if function.kind() == "generic_function" {
+        function = function.child_by_field_name("function")?;
+    }
     match function.kind() {
         // Plain function call: `foo()`
         "identifier" => node_text(function, source),
@@ -615,7 +619,7 @@ fn rust_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Optio
         }
 
         // Scoped path call: `Dog::new()` or `std::vec::Vec::new()`
-        "scoped_identifier" | "generic_function" => node_text(function, source).or_else(|| {
+        "scoped_identifier" => node_text(function, source).or_else(|| {
             function
                 .child_by_field_name("name")
                 .and_then(|n| node_text(n, source))
