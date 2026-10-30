@@ -825,7 +825,6 @@ pub enum PythonRole {
     Root,
     Type,
     Heritage,
-    Export,
     Decorator,
     ImportName,
     ImportSource,
@@ -861,7 +860,6 @@ pub enum PythonHook {
 pub struct PythonMatch<'t> {
     type_annotation_node: Option<Node<'t>>,
     heritage: Vec<String>,
-    is_exported_explicit: bool,
     decorators: Vec<String>,
     route_method: Option<Node<'t>>,
     route_path: Option<Node<'t>>,
@@ -1055,7 +1053,6 @@ impl ParseSpec for PythonSpec {
             "function" | "class" | "property" | "variable" => PythonRole::Root,
             "type" => PythonRole::Type,
             "heritage" => PythonRole::Heritage,
-            "export" => PythonRole::Export,
             "decorator" => PythonRole::Decorator,
             "import.name" => PythonRole::ImportName,
             "import.source" => PythonRole::ImportSource,
@@ -1100,7 +1097,6 @@ impl ParseSpec for PythonSpec {
                     m.heritage.push(h.to_string());
                 }
             }
-            PythonRole::Export => m.is_exported_explicit = true,
             PythonRole::Decorator => {
                 if let Ok(d_str) = std::str::from_utf8(&source[node.start_byte()..node.end_byte()])
                 {
@@ -1216,7 +1212,6 @@ impl ParseSpec for PythonSpec {
         let PythonMatch {
             type_annotation_node,
             heritage,
-            is_exported_explicit,
             decorators,
             route_method,
             route_path,
@@ -1338,7 +1333,7 @@ impl ParseSpec for PythonSpec {
                 } else {
                     cx.nodes.push(RawNode {
                         decorators,
-                        is_exported: is_exported_explicit || !name_str.starts_with('_'),
+                        is_exported: !name_str.starts_with('_'),
                         heritage,
                         type_annotation: type_str,
                         ..node::decl(

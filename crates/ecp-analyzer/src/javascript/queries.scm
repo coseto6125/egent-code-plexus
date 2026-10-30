@@ -300,6 +300,9 @@
 ;; (`<anonymous>` is used for inline functions where no symbolic target
 ;; exists) — fixed: PR #2 review issue #2.
 ;;
+;; The trailing `.` anchors the handler to the last argument: earlier ones
+;; are middleware.
+;;
 ;; Gated downstream by `import ... 'express'`.
 (call_expression
   function: (member_expression
@@ -313,7 +316,8 @@
       (member_expression)
       (arrow_function)
       (function_expression)
-    ] @express.route.handler))
+    ] @express.route.handler
+    .))
 
 ;; Hapi: server.route({ method: 'GET', path: '/u', handler: getUsers })
 ;; Captures the handler identifier from the option-object pair. Gated downstream

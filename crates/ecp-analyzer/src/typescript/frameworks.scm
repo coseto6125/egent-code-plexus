@@ -1,7 +1,7 @@
 ;; Framework-aware queries for TypeScript (Tier 1: Express subset).
 
 ;; Express: app.{get,post,put,delete,patch,use}(<path_str>, <handler_ident>)
-;; Captures the handler identifier passed as second argument.
+;; Captures the last-argument handler identifier; earlier ones are middleware.
 (call_expression
   function: (member_expression
     object: (identifier)
@@ -9,7 +9,8 @@
     (#match? @express.route.method "^(get|post|put|delete|patch|use)$"))
   arguments: (arguments
     [(string) @express.route.path (MISSING) @express.route.path]
-    (identifier) @express.route.handler))
+    (identifier) @express.route.handler
+    .))
 
 ;; NestJS: @Controller-decorated class with @Get/@Post/@Put/@Delete/@Patch
 ;; method-level decorators. Two forms — class is exported via `export class`

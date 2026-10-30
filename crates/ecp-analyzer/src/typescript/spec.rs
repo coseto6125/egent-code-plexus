@@ -8,9 +8,14 @@
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::graph::NodeKind;
 
-pub struct TypeScriptSpec;
+/// `TSX` picks the grammar only: the TSX grammar reads `<p>it's</p>` as JSX,
+/// the TypeScript grammar does not. Every capture table is shared.
+pub struct TsSpec<const TSX: bool>;
 
-impl LangSpec for TypeScriptSpec {
+pub type TypeScriptSpec = TsSpec<false>;
+pub type TsxSpec = TsSpec<true>;
+
+impl<const TSX: bool> LangSpec for TsSpec<TSX> {
     const NAME: &'static str = "typescript";
 
     const CAPTURE_KIND: phf::Map<&'static str, NodeKind> = phf::phf_map! {

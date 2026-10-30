@@ -114,6 +114,100 @@ thread_local! {
         parser
     });
 }
+/// The local names a top-level CommonJS assignment exports: `module.exports = f`,
+/// `module.exports = { f, k: g }`, `exports.k = f` and `module.exports.k = f`.
+/// Only a bare identifier value names a declaration.
+fn commonjs_exported_locals<'s>(root: Node<'_>, source: &'s [u8]) -> Vec<&'s str> {
+    let text =
+        |n: Node<'_>| std::str::from_utf8(&source[n.start_byte()..n.end_byte()]).unwrap_or("");
+    let mut locals = Vec::new();
+    let mut cursor = root.walk();
+    for statement in root.named_children(&mut cursor) {
+        let Some(assign) = statement.named_child(0).filter(|a| {
+            statement.kind() == "expression_statement" && a.kind() == "assignment_expression"
+        }) else {
+            continue;
+        };
+        let (Some(left), Some(right)) = (
+            assign.child_by_field_name("left"),
+            assign.child_by_field_name("right"),
+        ) else {
+            continue;
+        };
+        if left.kind() != "member_expression" {
+            continue;
+        }
+        let property_of_exports = left
+            .child_by_field_name("object")
+            .is_some_and(|o| matches!(text(o), "exports" | "module.exports"));
+        match (text(left), right.kind()) {
+            ("module.exports", "object") => {
+                let mut pairs = right.walk();
+                for entry in right.named_children(&mut pairs) {
+                    match entry.kind() {
+                        "shorthand_property_identifier" => locals.push(text(entry)),
+                        "pair" => locals.extend(
+                            entry
+                                .child_by_field_name("value")
+                                .filter(|v| v.kind() == "identifier")
+                                .map(text),
+                        ),
+                        _ => {}
+                    }
+                }
+            }
+            ("module.exports", "identifier") => locals.push(text(right)),
+            (_, "identifier") if property_of_exports => locals.push(text(right)),
+            _ => {}
+        }
+    }
+    locals
+}
+
+/// Mark the top-level declarations a CommonJS module exports. A nested
+/// declaration of the same name keeps its flag: the span must be a top-level one.
+fn stamp_commonjs_exports(root: Node<'_>, source: &[u8], nodes: &mut [RawNode]) {
+    let locals = commonjs_exported_locals(root, source);
+    if locals.is_empty() {
+        return;
+    }
+    let mut cursor = root.walk();
+    for declaration in root.named_children(&mut cursor) {
+        let mut inner = declaration.walk();
+        let bindings: Vec<(Node<'_>, Node<'_>)> = match declaration.kind() {
+            "lexical_declaration" | "variable_declaration" => declaration
+                .named_children(&mut inner)
+                .filter_map(|d| Some((d.child_by_field_name("name")?, d)))
+                .collect(),
+            "function_declaration" | "generator_function_declaration" | "class_declaration" => {
+                declaration
+                    .child_by_field_name("name")
+                    .map(|name| (name, declaration))
+                    .into_iter()
+                    .collect()
+            }
+            _ => continue,
+        };
+        for (name, owner) in bindings {
+            let Ok(name) = std::str::from_utf8(&source[name.start_byte()..name.end_byte()]) else {
+                continue;
+            };
+            if !locals.contains(&name) {
+                continue;
+            }
+            // A Const / Variable spans its declaration, a function-valued
+            // binding its declarator.
+            let spans = [node_span(&declaration), node_span(&owner)];
+            for node in nodes
+                .iter_mut()
+                .filter(|n| n.name == name && spans.contains(&n.span))
+            {
+                node.is_exported = true;
+            }
+        }
+    }
+}
+
 pub struct JavaScriptProvider {
     compiled: Compiled<JavaScriptSpec>,
 }
@@ -743,6 +837,7 @@ impl ParseSpec for JavaScriptSpec {
             }
             JavaScriptHook::Exports => {
                 cx.export_aliases = stamp_js_ts_exports(root, source, &mut cx.nodes);
+                stamp_commonjs_exports(root, source, &mut cx.nodes);
                 mark_js_ts_import_bindings(root, source, &mut cx.imports);
             }
         }

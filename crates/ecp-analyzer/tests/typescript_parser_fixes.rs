@@ -110,3 +110,20 @@ fn test_typescript_as_const_spot_and_bare_freeze_call_span_unchanged() {
     let bare = parse_at("a.ts", b"use(Object.freeze({ A: 1, B: 2 }));\n");
     assert_eq!(freeze_spots(&bare), [(0, 4, 0, 33)]);
 }
+
+/// FU-2026-10-30-855c06cfb700 sibling: the TypeScript Express query also
+/// takes only the last-argument identifier as the handler.
+#[test]
+fn test_typescript_express_middleware_identifier_gets_no_route_ref() {
+    let g = parse_at(
+        "a.ts",
+        b"import express from 'express';\nconst app = express();\napp.get('/users', auth, listUsers);\n",
+    );
+    let targets: Vec<&str> = g
+        .framework_refs
+        .iter()
+        .filter(|r| r.reason == "express-route")
+        .map(|r| r.target_name.as_str())
+        .collect();
+    assert_eq!(targets, ["listUsers"]);
+}
