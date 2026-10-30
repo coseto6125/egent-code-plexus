@@ -1,6 +1,6 @@
 use super::receiver_types::{collect_local_types, extract_ts_calls_and_path_literals};
 use super::schema_extractors::TS_INTERFACE_CONFIG;
-use super::spec::TypeScriptSpec;
+use super::spec::{TsSpec, TsxSpec, TypeScriptSpec};
 use crate::calls::{NameRefKind, NameRefSpec, VariantRefSpec};
 use crate::driver::{
     self, node, AnonKey, Anonymous, Compiled, DeclSlot, Effect, FieldReads, FileCx, KindCapture,
@@ -22,6 +22,7 @@ use ecp_core::analyzer::types::{
 };
 use ecp_core::graph::{FileCategory, NodeKind};
 use std::path::Path;
+use std::sync::OnceLock;
 use tree_sitter::{Node, Parser, Query, Tree};
 
 /// Blind-spot kind/hint pairs pushed only when the first argument is not a
@@ -55,10 +56,19 @@ fn object_has_min_scalar_pairs(object_node: &tree_sitter::Node, min: usize) -> b
     scalar_count >= min
 }
 
+/// The `const X = …;` statement around a declarator's value, else the value.
+fn declaration_of(value: tree_sitter::Node) -> tree_sitter::Node {
+    value
+        .parent()
+        .filter(|p| p.kind() == "variable_declarator")
+        .and_then(|vd| vd.parent())
+        .filter(|p| matches!(p.kind(), "lexical_declaration" | "variable_declaration"))
+        .unwrap_or(value)
+}
+
 /// Emit `ts-object-freeze-enum` BlindSpots for every `Object.freeze({…})`
 /// call with ≥2 scalar-literal pair entries found anywhere in `root`.
-/// Traversal is depth-first; the `variable_declarator` parent node is used
-/// for span to match the position consumers expect.
+/// Traversal is depth-first; the enclosing declaration gives the span.
 fn collect_freeze_enum_spots(
     root: tree_sitter::Node,
     source: &[u8],
@@ -90,21 +100,7 @@ fn collect_freeze_enum_spots(
                                 if obj_arg.kind() == "object"
                                     && object_has_min_scalar_pairs(&obj_arg, 2)
                                 {
-                                    // Prefer the enclosing variable_declarator span when available.
-                                    let span_node = if node
-                                        .parent()
-                                        .is_some_and(|p| p.kind() == "variable_declarator")
-                                        || node
-                                            .parent()
-                                            .is_some_and(|p| p.kind() == "lexical_declaration")
-                                        || node
-                                            .parent()
-                                            .is_some_and(|p| p.kind() == "variable_declaration")
-                                    {
-                                        node.parent().unwrap()
-                                    } else {
-                                        node
-                                    };
+                                    let span_node = declaration_of(node);
                                     push_blind_spot(
                                         out,
                                         (
@@ -135,15 +131,7 @@ fn collect_freeze_enum_spots(
             if has_const_type {
                 if let Some(obj_node) = node.named_child(0) {
                     if obj_node.kind() == "object" && object_has_min_scalar_pairs(&obj_node, 2) {
-                        // Use the variable_declarator or declaration for span.
-                        let span_node = node
-                            .parent()
-                            .filter(|p| p.kind() == "variable_declarator")
-                            .and_then(|vd| vd.parent())
-                            .filter(|p| {
-                                matches!(p.kind(), "lexical_declaration" | "variable_declaration")
-                            })
-                            .unwrap_or(node);
+                        let span_node = declaration_of(node);
                         push_blind_spot(
                             out,
                             (
@@ -251,14 +239,26 @@ fn decorated_method_name(verb: tree_sitter::Node, source: &[u8]) -> Option<Strin
     Some(name.to_string())
 }
 
+/// A query is bound to its grammar, so each grammar compiles its own.
+fn grammar<const TSX: bool>() -> tree_sitter::Language {
+    match TSX {
+        true => tree_sitter_typescript::LANGUAGE_TSX.into(),
+        false => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+    }
+}
+
 pub struct TypeScriptProvider {
     compiled: Compiled<TypeScriptSpec>,
+    /// Compiled on the first `.tsx` file: a process that parses only `.ts`
+    /// never pays for the second query.
+    compiled_tsx: OnceLock<Compiled<TsxSpec>>,
 }
 
 impl TypeScriptProvider {
     pub fn new() -> anyhow::Result<Self> {
         Ok(Self {
             compiled: Compiled::new()?,
+            compiled_tsx: OnceLock::new(),
         })
     }
 }
@@ -269,7 +269,17 @@ impl LanguageProvider for TypeScriptProvider {
     }
 
     fn parse_file(&self, path: &Path, source: &[u8]) -> anyhow::Result<LocalGraph> {
-        driver::parse(&self.compiled, path, source)
+        if !path.extension().is_some_and(|e| e == "tsx") {
+            return driver::parse(&self.compiled, path, source);
+        }
+        let tsx = match self.compiled_tsx.get() {
+            Some(tsx) => tsx,
+            None => {
+                let tsx = Compiled::new()?;
+                self.compiled_tsx.get_or_init(|| tsx)
+            }
+        };
+        driver::parse(tsx, path, source)
     }
 }
 
@@ -360,7 +370,7 @@ pub struct TypeScriptFile {
     pending_nestjs_decorator_routes: Vec<NestJsDecoratorRoute>,
 }
 
-impl ParseSpec for TypeScriptSpec {
+impl<const TSX: bool> ParseSpec for TsSpec<TSX> {
     type Role = TypeScriptRole;
     type Match<'t> = TypeScriptMatch<'t>;
     type File<'t> = TypeScriptFile;
@@ -457,10 +467,7 @@ impl ParseSpec for TypeScriptSpec {
             include_str!("queries.scm"),
             include_str!("frameworks.scm"),
         );
-        Ok(Query::new(
-            &tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-            &query_source,
-        )?)
+        Ok(Query::new(&grammar::<TSX>(), &query_source)?)
     }
 
     fn role(capture: &str) -> Option<TypeScriptRole> {
@@ -493,13 +500,10 @@ impl ParseSpec for TypeScriptSpec {
         })
     }
 
-    /// A fresh parser per file, always the TypeScript grammar: a `.tsx` path
-    /// parses with it too, so the output matches graphs the parse cache holds.
+    /// A fresh parser per file, on the grammar the spec names.
     fn parse_tree(source: &[u8]) -> Option<Tree> {
         let mut parser = Parser::new();
-        parser
-            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
-            .ok()?;
+        parser.set_language(&grammar::<TSX>()).ok()?;
         parse_with_budget(&mut parser, source, ParseBudget::DEFAULT)
     }
 

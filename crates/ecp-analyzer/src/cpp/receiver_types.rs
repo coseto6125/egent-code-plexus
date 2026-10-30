@@ -27,8 +27,9 @@ use crate::calls::{
     attach_to_enclosing, construction_call, node_range, range_width, start_pos, CallSiteIndex, Pos,
     PosRange,
 };
+use crate::indirect_dispatch::FnPtrVars;
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tree_sitter::Node;
 
 #[derive(Debug, Default)]
@@ -47,19 +48,33 @@ pub struct CppBindings {
 }
 
 impl CppBindings {
-    /// Flatten all local-variable bindings across all scopes into one map.
-    /// Used by indirect-call detection to check if a callee identifier is a
-    /// locally-typed pointer or function-pointer variable.
-    pub fn flat_bindings(&self) -> FxHashMap<String, String> {
-        let mut out = FxHashMap::default();
-        for (_, map) in &self.fn_scopes {
-            for (k, v) in map {
-                if !v.is_empty() {
-                    out.insert(k.clone(), v.clone());
+    /// Every local and parameter binding in its own function, lambda or
+    /// `catch` scope, and every data member of a class this file declares
+    /// over the class body and the class's out-of-class definitions, for
+    /// indirect-call detection: a callee or receiver name then takes the
+    /// type its own scope declares. An untyped binding still hides a
+    /// same-name one of an enclosing scope, and a local or parameter hides
+    /// a member over the same out-of-class definition.
+    pub fn scoped_bindings(&self) -> FnPtrVars {
+        let mut vars = FnPtrVars::default();
+        let mut locals: FxHashSet<(PosRange, &str)> = FxHashSet::default();
+        for (scope, map) in &self.fn_scopes {
+            for (name, ty) in map {
+                locals.insert((*scope, name.as_str()));
+                vars.declare(name.clone(), *scope, (!ty.is_empty()).then(|| ty.clone()));
+            }
+        }
+        for (scope, path) in &self.class_scopes {
+            let Some(fields) = self.fields_of(path) else {
+                continue;
+            };
+            for (name, ty) in fields {
+                if !locals.contains(&(*scope, name.as_str())) {
+                    vars.declare(name.clone(), *scope, (!ty.is_empty()).then(|| ty.clone()));
                 }
             }
         }
-        out
+        vars
     }
 
     /// A class body the tree lost and the lexical recovery found.
@@ -79,7 +94,11 @@ impl CppBindings {
 
     fn field_type(&self, pos: Pos, field: &str) -> Option<&str> {
         let path = self.enclosing_class_path(pos)?;
-        let fields = self.class_fields.get(path).or_else(|| {
+        self.fields_of(path)?.get(field).map(String::as_str)
+    }
+
+    fn fields_of(&self, path: &str) -> Option<&FxHashMap<String, String>> {
+        self.class_fields.get(path).or_else(|| {
             // A definition that names its class by less of the path
             // (`using namespace a; void Foo::bar() {}`) reads the fields of
             // the one class of that name, if the file declares only one.
@@ -90,8 +109,7 @@ impl CppBindings {
                 .filter(|(key, _)| last_segment(key) == name);
             let (_, fields) = same.next()?;
             same.next().is_none().then_some(fields)
-        })?;
-        fields.get(field).map(String::as_str)
+        })
     }
 
     fn lookup_local(&self, pos: Pos, var: &str) -> Option<&str> {

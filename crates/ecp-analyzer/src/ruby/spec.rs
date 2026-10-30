@@ -7,7 +7,7 @@
 //!   `method` — `(method ...)` and `(singleton_method ...)` root nodes → `Method`
 //!   `const`  — `(assignment left: (constant) ...)` → `Const`
 //!
-//! All other captures (`name`, `heritage`, `import.name`, `decorator`,
+//! All other captures (`name`, `heritage`, `import.name`,
 //! `route.*`, `attr_args`, `mixin_module`, `alias.*`, `delegator_*`, etc.)
 //! are metadata-only and absent from this map — their handling lives in
 //! `parser.rs` because it requires imperative AST walking or cross-match

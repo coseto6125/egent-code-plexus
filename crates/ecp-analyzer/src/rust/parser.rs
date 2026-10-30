@@ -647,6 +647,8 @@ fn node_text<'s>(node: tree_sitter::Node, source: &'s [u8]) -> &'s str {
 fn join_path(prefix: &str, path: &str) -> String {
     if prefix.is_empty() {
         path.to_string()
+    } else if path.is_empty() {
+        prefix.to_string()
     } else {
         format!("{prefix}::{path}")
     }

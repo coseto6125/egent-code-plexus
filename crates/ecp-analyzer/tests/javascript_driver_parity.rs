@@ -237,10 +237,9 @@ fn test_javascript_driver_anonymous_callback_with_call_emits_node() {
     );
 }
 
-/// Express runs the last argument: the route's handler is the inline arrow.
-/// Every handler-position argument still yields a ref; the arrow's target
-/// is the bare `<anonymous>` name and its source is the callback node of
-/// the same span.
+/// Express runs the last argument: the route's handler is the inline arrow,
+/// and the only ref. Its target is the bare `<anonymous>` name and its source
+/// is the callback node of the same span; middleware yields no ref.
 #[test]
 fn test_javascript_driver_express_inline_handler_route_and_refs() {
     let g = parse(
@@ -281,13 +280,7 @@ fn test_javascript_driver_express_inline_handler_route_and_refs() {
     assert_eq!(
         refs(&g),
         [
-            (
-                "<module>",
-                "auth",
-                "express-route",
-                EXPRESS_ROUTE,
-                (2, 18, 2, 22)
-            ),
+            // Contract: only the last argument is the handler; `auth` is middleware.
             (
                 "<anonymous:3:24>",
                 "<anonymous>",
@@ -299,14 +292,15 @@ fn test_javascript_driver_express_inline_handler_route_and_refs() {
     );
 }
 
-/// No query reads a CommonJS `module.exports` / `exports.x` assignment:
-/// the assigned functions emit no node and `a` stays unexported.
+/// A CommonJS `module.exports = { a }` exports `a`; the assigned anonymous
+/// functions emit no node.
 #[test]
-fn test_javascript_driver_commonjs_module_exports_marks_nothing() {
+fn test_javascript_driver_commonjs_module_exports_marks_listed_declaration() {
     let g = parse(
         b"function a() { b(); }\nmodule.exports = { a };\nmodule.exports.c = function () { a(); };\nexports.d = () => a();\n",
     );
-    assert_eq!(rows(&g), [("a", NodeKind::Function, (0, 0, 0, 21), false)]);
+    // Contract: `a` is reachable through `module.exports`, so it is exported.
+    assert_eq!(rows(&g), [("a", NodeKind::Function, (0, 0, 0, 21), true)]);
     assert!(g.imports.is_empty() && g.export_aliases.is_none());
     assert!(g.routes.is_empty() && g.framework_refs.is_empty() && g.blind_spots.is_empty());
 }

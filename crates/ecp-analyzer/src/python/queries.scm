@@ -14,10 +14,6 @@
 (class_definition
   name: (identifier) @class.name) @class
 
-;; Export marker (Naming Convention: not starting with _)
-((function_definition name: (identifier) @n) @export (#not-match? @n "^_"))
-((class_definition name: (identifier) @n) @export (#not-match? @n "^_"))
-
 ;; Imports (from ... import ...)
 (import_from_statement
   module_name: [(dotted_name) (relative_import)] @import.source

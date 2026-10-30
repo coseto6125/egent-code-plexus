@@ -905,6 +905,7 @@ parent_identity python no `impl Trait for Type` block: the ImplTrait discriminat
 parent_identity ruby no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
 parent_identity swift no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
 parent_identity typescript no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
+parser_fixes swift no Swift parser defect in this release: the local-property report was not a bug
 partial_parts c only C# declares one type in partial parts across files
 partial_parts cpp only C# declares one type in partial parts across files
 partial_parts dart only C# declares one type in partial parts across files

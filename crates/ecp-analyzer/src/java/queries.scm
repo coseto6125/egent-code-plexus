@@ -54,6 +54,15 @@
     name: (identifier) @property.name)
 ) @property
 
+;; Interface constants — `int MAX = 1;` in an interface body parses as
+;; `constant_declaration`, not `field_declaration`. No modifier capture:
+;; interface constants are implicitly public (see is_interface_member_exported).
+(constant_declaration
+  type: (_) @type
+  declarator: (variable_declarator
+    name: (identifier) @property.name)
+) @property
+
 ;; Records — Java 16+ record declarations. Reuse NodeKind::Class (same
 ;; reference-target semantics; no separate NodeKind needed). Record header
 ;; components (formal_parameters) emit Property nodes, mirroring field_declaration.
@@ -92,6 +101,10 @@
 
 ;; Enums
 (enum_declaration
+  (modifiers [
+    "public"
+    "protected"
+  ])? @export
   name: (identifier) @enum.name
 ) @enum
 
@@ -109,6 +122,10 @@
 
 ;; Annotation types (@interface)
 (annotation_type_declaration
+  (modifiers [
+    "public"
+    "protected"
+  ])? @export
   name: (identifier) @annotation.name
 ) @annotation
 

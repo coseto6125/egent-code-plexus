@@ -40,14 +40,6 @@ const BLIND_IOTA_CONST_BLOCK: (&str, &str) = (
     "const ( ... iota ) block with ≥2 entries — Go enum imitation; verify before treating as plain Const set",
 );
 
-/// Scan all top-level `const_declaration` blocks in the file and emit a
-/// BlindSpot for any that are Go enum imitations: ≥2 `const_spec` children
-/// where at least one spec's value expression contains the identifier `iota`.
-///
-/// Single-line `const X = 1` uses `const_declaration` too but has exactly one
-/// `const_spec`, so the ≥2 guard excludes it. Function-body const blocks are
-/// legal Go but rare; we limit to `source_file` direct children to match the
-/// existing const/var design (see `function_body_const_is_dropped` test).
 /// Symbol-level Go compiler pragmas — directives that genuinely decorate a
 /// single function / method / variable. Allowlisted explicitly rather than
 /// denylisting `//go:build` so future additions like `//go:debug` (package
@@ -193,6 +185,14 @@ fn collect_go_pragmas(decl_node: tree_sitter::Node<'_>, source: &[u8]) -> Vec<St
     out
 }
 
+/// Scan all top-level `const_declaration` blocks in the file and emit a
+/// BlindSpot for any that are Go enum imitations: ≥2 `const_spec` children
+/// where at least one spec's value expression contains the identifier `iota`.
+///
+/// Single-line `const X = 1` uses `const_declaration` too but has exactly one
+/// `const_spec`, so the ≥2 guard excludes it. Function-body const blocks are
+/// legal Go but rare; we limit to `source_file` direct children to match the
+/// existing const/var design (see `function_body_const_is_dropped` test).
 fn detect_iota_const_blocks(
     root: tree_sitter::Node<'_>,
     path: &Path,
@@ -791,7 +791,34 @@ impl ParseSpec for GoSpec {
             }
         }
 
-        if let (Some(n), Some(k), Some(root)) = (d.name, d.kind, d.root) {
+        // A `const_spec` match carries only its first name; `X, Y = 1, 2`
+        // emits one node per name on the shared spec, and `_` as `var` does.
+        if let (Some(NodeKind::Const), Some(root)) = (d.kind, d.root) {
+            let mut cursor = root.walk();
+            // The `name` field spans the whole `X, Y` list: its `,` tokens
+            // carry the field too.
+            for n in root
+                .children_by_field_name("name", &mut cursor)
+                .filter(|n| n.kind() == "identifier")
+            {
+                let Ok(name_str) = n.utf8_text(source) else {
+                    continue;
+                };
+                if name_str == "_" {
+                    continue;
+                }
+                cx.nodes.push(RawNode {
+                    is_exported: is_exported(name_str),
+                    type_annotation: type_annotation.clone(),
+                    ..node::decl(
+                        name_str.to_string(),
+                        NodeKind::Const,
+                        node::span(root),
+                        &source[root.start_byte()..root.end_byte()],
+                    )
+                });
+            }
+        } else if let (Some(n), Some(k), Some(root)) = (d.name, d.kind, d.root) {
             if let Ok(name_str) = n.utf8_text(source) {
                 let name = name_str.to_string();
                 // Each match carries the full declaration node, so two methods

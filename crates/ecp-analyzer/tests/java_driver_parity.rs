@@ -116,7 +116,8 @@ fn test_java_driver_class_with_constructor_and_method_emits_members_in_order() {
     assert!(g.tx_scopes.is_none());
 }
 
-/// `default` is no `public`/`protected` modifier, so the method is not exported.
+/// Contract: an interface member with no access modifier is implicitly
+/// `public`, so a `default` method of a public interface is exported.
 #[test]
 fn test_java_driver_interface_default_method_emits_owned_method() {
     let g = parse(b"public interface Shape {\n    default double area() { return 0; }\n}\n");
@@ -130,13 +131,14 @@ fn test_java_driver_interface_default_method_emits_owned_method() {
     let area = node(&g, "area", NodeKind::Method);
     assert_eq!(
         (area.type_annotation.as_deref(), area.is_exported),
-        (Some("double"), false)
+        (Some("double"), true)
     );
     assert!(node(&g, "Shape", NodeKind::Interface).is_exported);
 }
 
 /// Annotation elements are Methods owned by the annotation type; the
-/// `@interface` pattern has no `@export` capture.
+/// elements are implicitly `public`, so those of a public `@interface` are
+/// exported.
 #[test]
 fn test_java_driver_annotation_type_members_emit_owned_methods() {
     let g = parse(
@@ -156,7 +158,9 @@ fn test_java_driver_annotation_type_members_emit_owned_methods() {
         .map(|n| n.type_annotation.as_deref())
         .collect();
     assert_eq!(types, [None, Some("String"), Some("int")]);
-    assert!(g.nodes.iter().all(|n| !n.is_exported));
+    // Contract: a `public @interface` and its implicitly public elements are exported.
+    let exported: Vec<bool> = g.nodes.iter().map(|n| n.is_exported).collect();
+    assert_eq!(exported, [true, true, true]);
 }
 
 const SPRING_CONTROLLER: &str = "@RestController\npublic class UserController {\n    @Autowired\n    private UserRepo repo;\n    @GetMapping(\"/users\")\n    public String list() { return \"\"; }\n}\n";

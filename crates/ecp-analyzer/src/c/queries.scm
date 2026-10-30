@@ -9,17 +9,18 @@
         declarator: (identifier) @function.name))
   ]) @function
 
-;; Functions — declarations (prototypes / forward-decls, no body)
-;; Anchored to translation_unit to avoid capturing local `extern` re-declarations.
-(translation_unit
-  (declaration
-    declarator: [
-      (function_declarator
-        declarator: (identifier) @function.name)
-      (pointer_declarator
-        declarator: (function_declarator
-          declarator: (identifier) @function.name))
-    ]) @function)
+;; Functions — declarations (prototypes / forward-decls, no body).
+;; Unanchored so prototypes inside `#ifndef` guards and `#if` branches
+;; match; parser.rs keeps only file-scope ones (`is_file_scope`), so a
+;; local `extern` re-declaration inside a body stays out.
+(declaration
+  declarator: [
+    (function_declarator
+      declarator: (identifier) @function.name)
+    (pointer_declarator
+      declarator: (function_declarator
+        declarator: (identifier) @function.name))
+  ]) @function
 
 ;; Structs — definition sites only (must have body).
 ;; Without `body:` anchor, the query matched every `struct hdr_histogram *p;`
@@ -49,9 +50,12 @@
     (enumerator
       name: (identifier) @name.enumerator) @enumerator_node))
 
-;; Typedefs
+;; Typedefs — the alias may sit at any depth of pointer, array and
+;; function-pointer declarators (`typedef char ***A;`, `typedef int B[4];`,
+;; `typedef void *(*C)(int);`): the whole declarator is captured and
+;; parser.rs takes the `type_identifier` inside it.
 (type_definition
-  declarator: (type_identifier) @typedef.name) @typedef
+  declarator: (_) @typedef.name) @typedef
 
 ;; Macros — object-like `#define X val`
 (preproc_def
@@ -91,17 +95,18 @@
     (array_declarator declarator: (field_identifier) @field.name)
   ]) @field
 
-;; Top-level variable declarations — `static const int N = 5;` / `int *p;`.
-;; Captures the outer declaration; the parser slices [decl.start, name.start)
-;; so `static const int` (with qualifiers) is included in the annotation.
-(translation_unit
-  (declaration
-    declarator: [
-      (init_declarator declarator: (identifier) @var.name)
-      (init_declarator declarator: (pointer_declarator (identifier) @var.name))
-      (identifier) @var.name
-      (pointer_declarator (identifier) @var.name)
-    ]) @var)
+;; File-scope variable declarations — `static const int N = 5;` / `int *p;`
+;; / `char **argv;` / `int a[4][4];`. Captures the outer declaration and the
+;; declarator; the parser takes the identifier through pointer and array
+;; declarators (`declared_variable`) and keeps file-scope ones only
+;; (`is_file_scope`), preprocessor conditionals included.
+(declaration
+  declarator: [
+    (init_declarator declarator: (_) @var.name)
+    (identifier) @var.name
+    (pointer_declarator) @var.name
+    (array_declarator) @var.name
+  ]) @var
 
 ;; ---- BlindSpot patterns (FU-001 P7a) ----
 ;; dlsym(<handle>, <name>) — runtime symbol resolution. CallMeta's

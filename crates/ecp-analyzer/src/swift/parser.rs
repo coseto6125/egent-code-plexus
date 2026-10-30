@@ -461,15 +461,15 @@ impl ParseSpec for SwiftSpec {
                 k
             };
             if let Ok(name_str) = n.utf8_text(source) {
+                if k == NodeKind::Method && has_override_modifier(root, source) {
+                    decorators.push(OVERRIDE_SENTINEL.to_string());
+                }
                 // `@objc(extName)` exposes a Swift symbol under an
                 // Obj-C-visible alias. Emit an alias-only RawImport so the
                 // rename binding shows up in the named-binding dimension
                 // alongside Java static-import aliases. The attribute node
                 // is nested under `(modifiers)` (not a direct
                 // `function_declaration` child), so walk the subtree.
-                if k == NodeKind::Method && has_override_modifier(root, source) {
-                    decorators.push(OVERRIDE_SENTINEL.to_string());
-                }
                 if k == NodeKind::Function || k == NodeKind::Method {
                     if let Some(ext) = find_objc_rename_attribute(root, source) {
                         let alias = Some(ext.clone());

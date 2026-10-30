@@ -23,6 +23,7 @@ const DART_FN_KINDS: &[&str] = &[
     "function_declaration",
     "function_signature",
     "method_declaration",
+    "operator_signature",
 ];
 
 pub fn extract(
@@ -147,7 +148,12 @@ fn extract_one(
             .parent()
             .map(|p| p.kind() == "method_declaration")
             .unwrap_or(false);
-        if parent_is_method_decl {
+        // A body-less class member is abstract; an `external` one is not.
+        let is_body_less_class_member = fn_node
+            .parent()
+            .is_some_and(crate::dart::parser::is_class_member_declaration)
+            && flags & FunctionMeta::FLAG_EXTERN == 0;
+        if parent_is_method_decl || is_body_less_class_member {
             flags |= FunctionMeta::FLAG_ABSTRACT;
         }
     }
@@ -196,6 +202,7 @@ fn extract_one(
                     find_child_by_kind(fn_node, "method_signature")
                         .and_then(|m| find_child_by_kind(&m, "function_signature"))
                 })
+                .or_else(|| operator_signature(fn_node))
                 .and_then(|sig| sig.child_by_field_name("return_type"))
         })
         .map(|n| node_text(&n, source))
@@ -313,6 +320,16 @@ fn find_child_by_kind<'a>(node: &Node<'a>, kind: &str) -> Option<Node<'a>> {
     find_child_kind(node, kind)
 }
 
+/// The `operator_signature` of an operator method: the node itself when it is
+/// body-less, else the one under `method_signature`.
+fn operator_signature<'a>(fn_node: &Node<'a>) -> Option<Node<'a>> {
+    if fn_node.kind() == "operator_signature" {
+        return Some(*fn_node);
+    }
+    find_child_by_kind(fn_node, "method_signature")
+        .and_then(|m| find_child_by_kind(&m, "operator_signature"))
+}
+
 /// Extract `[name1, type1, ...]` from Dart formal_parameter_list.
 fn extract_params(fn_node: &Node<'_>, source: &[u8]) -> Vec<String> {
     // Dart: parameters field or formal_parameter_list child.
@@ -325,6 +342,9 @@ fn extract_params(fn_node: &Node<'_>, source: &[u8]) -> Vec<String> {
                 sig.child_by_field_name("parameters")
                     .or_else(|| find_child_by_kind(&sig, "formal_parameter_list"))
             })
+        })
+        .or_else(|| {
+            operator_signature(fn_node).and_then(|sig| sig.child_by_field_name("parameters"))
         });
 
     let Some(params_node) = params_node else {

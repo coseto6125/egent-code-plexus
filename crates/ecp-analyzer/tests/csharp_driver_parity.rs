@@ -56,9 +56,8 @@ fn test_csharp_driver_zero_byte_file_returns_empty_graph() {
     assert_empty_graph(&g, "A.cs");
 }
 
-/// The three `using` patterns overlap and C# never dedupes: the alias form
-/// also matches the identifier pattern (on the alias) and the qualified-name
-/// pattern (without the alias).
+/// Each `using` form is one import in source order; the alias form is the
+/// target with its alias, never also the bare alias or the bare target.
 #[test]
 fn test_csharp_driver_imports_only_file_keeps_overlapping_using_matches() {
     let g = parse(
@@ -86,8 +85,7 @@ fn test_csharp_driver_imports_only_file_keeps_overlapping_using_matches() {
                 None
             ),
             ("System.Math", "System.Math", None),
-            ("Json", "Json", None),
-            ("Newtonsoft.Json", "Newtonsoft.Json", None),
+            // One import per alias directive.
             ("Newtonsoft.Json", "Newtonsoft.Json", Some("Json")),
         ]
     );
@@ -96,7 +94,8 @@ fn test_csharp_driver_imports_only_file_keeps_overlapping_using_matches() {
 }
 
 /// `private int a, b;` keys its dedupe on each name, so two Property nodes
-/// share the declaration's span and hash. Only a `public` modifier exports.
+/// share the declaration's span and hash, and each carries the declared
+/// type. `public` exports; `private` does not.
 /// The class's tightest owner is the namespace; members name the class.
 #[test]
 fn test_csharp_driver_namespace_class_property_and_method_emit_in_order() {
@@ -115,9 +114,17 @@ fn test_csharp_driver_namespace_class_property_and_method_emit_in_order() {
         ]
     );
     assert_eq!(exported(&g), [false, true, true, false, false, true]);
+    // A field's type is its declaration's type, for each declarator.
     assert_eq!(
         types(&g),
-        [None, None, Some("string"), None, None, Some("void")]
+        [
+            None,
+            None,
+            Some("string"),
+            Some("int"),
+            Some("int"),
+            Some("void")
+        ]
     );
     assert_eq!(
         g.nodes[2].content_hash,
@@ -232,7 +239,8 @@ fn test_csharp_driver_lambda_and_delegate_with_call_emit_anonymous() {
 
 /// A partial generic type carries its arity marker, then its partial marker
 /// with the declaring scope; the nested class is owned by the outer one. A
-/// file-scoped namespace spells the scope too, but spans only its own line.
+/// file-scoped namespace spells the scope too, spans to its last
+/// declaration and owns the type.
 #[test]
 fn test_csharp_driver_partial_generic_and_nested_class_emit_markers_and_owner() {
     let g = parse(
@@ -263,8 +271,9 @@ fn test_csharp_driver_partial_generic_and_nested_class_emit_markers_and_owner() 
     assert_eq!(
         rows(&g),
         [
-            ("Lib.Json", NodeKind::Namespace, (0, 0, 0, 19), None),
-            ("W", NodeKind::Class, (1, 0, 1, 25), None),
+            // A file-scoped namespace covers the declarations after it.
+            ("Lib.Json", NodeKind::Namespace, (0, 0, 1, 25), None),
+            ("W", NodeKind::Class, (1, 0, 1, 25), Some("Lib.Json")),
         ]
     );
     assert_eq!(

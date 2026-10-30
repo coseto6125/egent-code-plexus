@@ -79,31 +79,75 @@ thread_local! {
     });
 }
 /// Walks a `body_statement` (or any block node) and builds a map of
-/// `start_row → is_exported` for every `method` / `singleton_method` child.
+/// `start_byte → is_exported` for every `method` / `singleton_method` child.
 ///
 /// Ruby visibility rules: methods are `public` by default.  A bare call to
 /// `private`, `protected`, or `public` (an `identifier` node in tree-sitter)
 /// changes the visibility for every method that follows it within the same
 /// `body_statement`, until the next visibility marker or end-of-scope.
+/// `private :a, :b` sets the named earlier methods and `private def x` the
+/// inline method, leaving the running visibility alone. The key is the start
+/// byte, since two methods can start on one row.
 fn build_visibility_map(node: Node<'_>, source: &[u8]) -> HashMap<u32, bool> {
     let mut map = HashMap::new();
     let mut is_public = true;
+    // Methods of this body so far: (name, start byte), for `private :name`.
+    let mut defs: Vec<(&[u8], u32)> = Vec::new();
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         match child.kind() {
-            "identifier" => {
-                if let Ok(text) = std::str::from_utf8(&source[child.start_byte()..child.end_byte()])
-                {
-                    match text {
-                        "private" | "protected" => is_public = false,
-                        "public" => is_public = true,
+            "identifier" => match &source[child.start_byte()..child.end_byte()] {
+                b"private" | b"protected" => is_public = false,
+                b"public" => is_public = true,
+                _ => {}
+            },
+            "call" => {
+                if child.child_by_field_name("receiver").is_some() {
+                    continue;
+                }
+                let marker = child
+                    .child_by_field_name("method")
+                    .map(|m| &source[m.start_byte()..m.end_byte()]);
+                let visible = match marker {
+                    Some(b"private" | b"protected") => false,
+                    Some(b"public") => true,
+                    _ => continue,
+                };
+                let Some(args) = child.child_by_field_name("arguments") else {
+                    continue;
+                };
+                let mut c2 = args.walk();
+                for arg in args.named_children(&mut c2) {
+                    match arg.kind() {
+                        "method" => {
+                            let pos = arg.start_byte() as u32;
+                            map.insert(pos, visible);
+                            if let Some(name) = arg.child_by_field_name("name") {
+                                defs.push((&source[name.start_byte()..name.end_byte()], pos));
+                            }
+                        }
+                        "simple_symbol" => {
+                            let sym = &source[arg.start_byte()..arg.end_byte()];
+                            let name = sym.strip_prefix(b":").unwrap_or(sym);
+                            if let Some((_, pos)) = defs.iter().rev().find(|(n, _)| *n == name) {
+                                map.insert(*pos, visible);
+                            }
+                        }
                         _ => {}
                     }
                 }
             }
             "method" | "singleton_method" => {
-                map.insert(child.start_position().row as u32, is_public);
+                // Visibility markers change instance methods only; a `def self.x`
+                // keeps the default (exported) and is never a `private :x` target.
+                if child.kind() == "method" {
+                    let pos = child.start_byte() as u32;
+                    map.insert(pos, is_public);
+                    if let Some(name) = child.child_by_field_name("name") {
+                        defs.push((&source[name.start_byte()..name.end_byte()], pos));
+                    }
+                }
                 // Recurse into nested body_statements (nested classes/modules).
                 let mut c2 = child.walk();
                 for sub in child.children(&mut c2) {
@@ -254,9 +298,9 @@ fn collect_ruby_transaction_scopes(
     source: &[u8],
     nodes: &[RawNode],
 ) -> Option<Box<[RawTxScope]>> {
-    // Distinct enclosing function indices — HashSet matches Go / Dart detectors
-    // (avoid the O(K²) Vec::contains pattern flagged by /simplify review).
-    let mut seen_fn_idxs: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    // Distinct enclosing function indices; a BTreeSet keeps them in node order
+    // so the output bytes do not vary between runs.
+    let mut seen_fn_idxs: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
     let mut stack: Vec<tree_sitter::Node<'_>> = vec![root];
 
     while let Some(n) = stack.pop() {
@@ -307,25 +351,22 @@ fn is_transaction_do_block_call(call_node: tree_sitter::Node<'_>, source: &[u8])
     has_do_block
 }
 
-/// The smallest-span class or module RawNode whose rows contain `line`, by
-/// its index in `nodes`. Shared by mixin application and the delegator
-/// Forwardable-scope check.
-fn enclosing_class_idx(nodes: &[RawNode], line: u32) -> Option<usize> {
-    let mut best: Option<usize> = None;
-    let mut best_span: u32 = u32::MAX;
-    for (i, n) in nodes.iter().enumerate() {
-        if n.kind != NodeKind::Class && n.kind != NodeKind::Trait {
-            continue;
-        }
-        if n.span.0 <= line && n.span.2 >= line {
-            let width = n.span.2 - n.span.0;
-            if width < best_span {
-                best_span = width;
-                best = Some(i);
-            }
-        }
-    }
-    best
+/// The smallest-span class or module RawNode whose span contains `pos`
+/// (row, column), by its index in `nodes`. Rows alone would bind two classes
+/// that share a row to the first one. Used by mixin application.
+fn enclosing_class_idx(nodes: &[RawNode], pos: (u32, u32)) -> Option<usize> {
+    nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| matches!(n.kind, NodeKind::Class | NodeKind::Trait))
+        .filter(|(_, n)| (n.span.0, n.span.1) <= pos && pos < (n.span.2, n.span.3))
+        .min_by_key(|(_, n)| {
+            (
+                n.span.2 - n.span.0,
+                i64::from(n.span.3) - i64::from(n.span.1),
+            )
+        })
+        .map(|(i, _)| i)
 }
 
 pub struct RubyProvider {
@@ -402,20 +443,16 @@ pub struct RubyMatch<'t> {
 
 #[derive(Default)]
 pub struct RubyFile {
-    /// Method start row → is_exported, from the visibility markers in
+    /// Method start byte → is_exported, from the visibility markers in
     /// class bodies; built before the query.
     visibility_map: HashMap<u32, bool>,
     /// Mixin module additions, applied after primary node emission. Each
-    /// entry is (module_name, call_line) — we attach to the smallest
+    /// entry is (module_name, (row, column)) — we attach to the smallest
     /// enclosing class node by span containment. Document-order traversal
     /// of tree-sitter matches preserves source ordering (M1 before M2).
-    pending_mixins: Vec<(String, u32)>,
-    /// Pending delegator emissions: (target, method, line). Applied after
-    /// the match loop so we can cross-check against `pending_mixins` to
-    /// require the enclosing class to `extend`/`include Forwardable`.
-    /// Without a Forwardable mixin we fall back to "low-confidence" emit
-    /// (still pushed, documented false-positive on user-defined methods
-    /// named `def_delegator` / `delegate`).
+    pending_mixins: Vec<(String, (u32, u32))>,
+    /// Pending delegator emissions: (target, method, (row, column)). Applied
+    /// after the match loop; emitted whether or not the class extends Forwardable.
     pending_delegators: Vec<(String, String, u32)>,
 }
 
@@ -581,10 +618,11 @@ impl ParseSpec for RubySpec {
             if let Ok(name_str) =
                 std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()])
             {
-                let start = root.start_position();
                 // Methods: respect visibility markers. Classes/modules are always exported.
                 let is_exported = if k == NodeKind::Method {
-                    *f.visibility_map.get(&(start.row as u32)).unwrap_or(&true)
+                    *f.visibility_map
+                        .get(&(root.start_byte() as u32))
+                        .unwrap_or(&true)
                 } else {
                     // Classes and Traits (modules) are always exported.
                     true
@@ -705,8 +743,11 @@ impl ParseSpec for RubySpec {
         // enclosing class's heritage after all class nodes are emitted.
         if let Some(mm) = mixin_module_node {
             if let Ok(mm_str) = std::str::from_utf8(&source[mm.start_byte()..mm.end_byte()]) {
-                let line = mm.start_position().row as u32;
-                f.pending_mixins.push((mm_str.to_string(), line));
+                let pos = (
+                    mm.start_position().row as u32,
+                    mm.start_position().column as u32,
+                );
+                f.pending_mixins.push((mm_str.to_string(), pos));
             }
         }
 
@@ -860,34 +901,22 @@ impl ParseSpec for RubySpec {
                 // class RawNode by span containment and append the module to its
                 // heritage. Mixins outside any class are dropped (matches Ruby
                 // semantics — bare top-level `include` is rare and out of scope).
-                for (module_name, line) in &f.pending_mixins {
-                    if let Some(i) = enclosing_class_idx(nodes, *line) {
+                for (module_name, pos) in &f.pending_mixins {
+                    if let Some(i) = enclosing_class_idx(nodes, *pos) {
                         nodes[i].heritage.push(module_name.clone());
                     }
                 }
 
                 // Apply delegators: `def_delegator/s` / `delegate` add a method
-                // binding on the enclosing class. We require `extend Forwardable`
-                // (or `include Forwardable`) in the same enclosing class as a
-                // sanity check; without it we still emit (Option-A fallback per
-                // spec §4) at the cost of a known false positive when the user
-                // defines their own method named `def_delegator`.
+                // binding on the enclosing class. `extend Forwardable` is not
+                // required (Option-A fallback per spec §4), at the cost of a
+                // known false positive when the user defines their own method
+                // named `def_delegator`.
                 //
                 // The emitted RawImport mirrors the alias-keyword shape:
                 // `{ alias: Some(method), imported_name: method, source: "target.method" }`
                 // so downstream rename / resolution code reuses the existing path.
                 for (target, method, line) in std::mem::take(&mut f.pending_delegators) {
-                    let enclosing = enclosing_class_idx(nodes, line);
-                    let _has_forwardable = enclosing.is_some_and(|idx| {
-                        let span = nodes[idx].span;
-                        f.pending_mixins
-                            .iter()
-                            .any(|(m, ml)| m == "Forwardable" && *ml >= span.0 && *ml <= span.2)
-                    });
-                    // Emit regardless of `_has_forwardable` — Option-A low-confidence
-                    // fallback per docs/specs/2026-05-16-ruby-receiver-aware-resolver.md.
-                    // The flag is retained as a future hook for telemetry / a
-                    // BindingKind discriminant when one becomes available.
                     let source_path = format!("{target}.{method}");
                     push_alias_binding(&mut cx.imports, &method, &source_path);
                     // Also materialise the delegator as a Method RawNode so cross-file

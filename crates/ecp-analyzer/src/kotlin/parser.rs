@@ -11,10 +11,11 @@ use crate::framework_helpers::{
     collect_jvm_transactional_scopes, has_import_from, MODULE_LEVEL_SOURCE,
 };
 use crate::parse_budget::{parse_with_budget, ParseBudget};
+use ecp_core::analyzer::membership::span_area;
 use ecp_core::analyzer::parse_prof::Pass;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{
-    LocalGraph, RawFrameworkRef, RawFunctionMeta, RawNode, Span, OVERRIDE_SENTINEL,
+    span_contains, LocalGraph, RawFrameworkRef, RawFunctionMeta, RawNode, Span, OVERRIDE_SENTINEL,
 };
 use ecp_core::graph::{FileCategory, NodeKind};
 use rustc_hash::FxHashMap;
@@ -34,6 +35,18 @@ thread_local! {
 }
 pub struct KotlinProvider {
     compiled: Compiled<KotlinSpec>,
+}
+
+/// The innermost named Function/Method around `span`. A trailing lambda
+/// (`routing { }`) is an `<anonymous:..>` Function node; a route's source is
+/// the function around it, so lambdas are skipped.
+fn enclosing_named_function(nodes: &[RawNode], span: Span) -> String {
+    nodes
+        .iter()
+        .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
+        .filter(|n| !n.name.starts_with("<anonymous") && span_contains(n.span, span))
+        .min_by_key(|n| span_area(n.span))
+        .map_or_else(|| MODULE_LEVEL_SOURCE.to_string(), |n| n.name.clone())
 }
 
 /// tree-sitter-kotlin needs a separator between a class-body member and the
@@ -147,24 +160,19 @@ fn is_interface_class(class_decl: tree_sitter::Node) -> bool {
 /// True when the `class_declaration` carries an `annotation` modifier — i.e.
 /// `annotation class Foo`. Distinct from plain `class Foo`.
 fn is_annotation_class(class_decl: tree_sitter::Node, source: &[u8]) -> bool {
-    for i in 0..class_decl.child_count() {
-        let Some(c) = class_decl.child(i) else {
-            continue;
-        };
-        if c.kind() == "modifiers" {
-            for j in 0..c.child_count() {
-                let Some(m) = c.child(j) else { continue };
-                if m.kind() == "class_modifier" || m.kind() == "modifier" {
-                    if let Ok(t) = std::str::from_utf8(&source[m.start_byte()..m.end_byte()]) {
-                        if t == "annotation" {
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    false
+    let mut cursor = class_decl.walk();
+    let found = class_decl
+        .children(&mut cursor)
+        .filter(|c| c.kind() == "modifiers")
+        .any(|modifiers| {
+            let mut inner = modifiers.walk();
+            let found = modifiers.children(&mut inner).any(|m| {
+                matches!(m.kind(), "class_modifier" | "modifier")
+                    && &source[m.start_byte()..m.end_byte()] == b"annotation"
+            });
+            found
+        });
+    found
 }
 
 impl KotlinProvider {
@@ -545,10 +553,11 @@ impl ParseSpec for KotlinSpec {
                 // The route DSL verbs (`get`/`post`/...) are common
                 // identifiers, so without the gate we would over-claim.
                 if has_import_from(&cx.imports, KTOR_REQUIRED) {
+                    let nodes = &cx.nodes;
                     cx.framework_refs = std::mem::take(&mut f.pending_ktor_refs)
                         .into_iter()
                         .map(|(verb, path, span)| RawFrameworkRef {
-                            source_name: MODULE_LEVEL_SOURCE.to_string(),
+                            source_name: enclosing_named_function(nodes, span),
                             target_name: path,
                             confidence: framework_confidence::KTOR_ROUTE,
                             reason: format!("ktor-route-{}", verb),

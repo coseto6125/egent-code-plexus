@@ -19,6 +19,9 @@ use ecp_core::analyzer::types::RawNode;
 use ecp_core::graph::NodeKind;
 use rustc_hash::FxHashMap;
 
+use crate::driver::blank_range;
+use crate::preproc_fallback::directive_lines;
+
 /// Keywords an attribute-like macro line can precede.
 const DECL_KEYWORDS: &[&[u8]] = &[
     b"class",
@@ -176,6 +179,88 @@ pub fn blank_decl_prefix_macros(source: &[u8]) -> Option<Vec<u8>> {
         line_start = end + 1;
     }
     patched
+}
+
+/// The last non-whitespace byte before `i`.
+fn prev_non_space(s: &[u8], i: usize) -> Option<u8> {
+    s[..i]
+        .iter()
+        .rev()
+        .copied()
+        .find(|b| !b.is_ascii_whitespace())
+}
+
+const COND_OPEN: &[&[u8]] = &[b"if", b"ifdef", b"ifndef"];
+const COND_NEXT: &[&[u8]] = &[b"else", b"elif", b"elifdef", b"elifndef"];
+
+/// `source` with each conditional that opens a constructor's initializer
+/// list (`Foo()` / `#if X` / `: a(1)` / `#else` / `: a(2)` / `#endif`)
+/// reduced to its first branch: the directive lines and every later branch
+/// become blanks. tree-sitter-cpp reads two `:` lists as the end of the
+/// class, so the next method became a function spanning the class. `None`
+/// when no conditional has that shape. No byte moves.
+pub fn blank_init_list_conditionals(source: &[u8]) -> Option<Vec<u8>> {
+    // A directive is read from the lexer's lines, so a `#else` inside a
+    // comment or a literal opens no branch.
+    let lines = directive_lines(source);
+    let mut patched: Option<Vec<u8>> = None;
+    let mut k = 0;
+    while k < lines.len() {
+        let (line_start, _, word) = lines[k];
+        k += 1;
+        if !word.is_some_and(|w| COND_OPEN.contains(&w)) {
+            continue;
+        }
+        let open_end = skip_directive(source, line_start);
+        let first = skip_trivia(source, open_end);
+        let opens_init_list = prev_non_space(source, line_start) == Some(b')')
+            && source.get(first) == Some(&b':')
+            && source.get(first + 1) != Some(&b':');
+        if !opens_init_list {
+            continue;
+        }
+        let buf = patched.get_or_insert_with(|| source.to_vec());
+        blank_range(buf, line_start, open_end);
+        let (mut depth, mut later) = (0u32, false);
+        let mut i = open_end + 1;
+        while k < lines.len() {
+            let (start, end, word) = lines[k];
+            k += 1;
+            if start < i {
+                continue;
+            }
+            let Some(word) = word else {
+                if later {
+                    blank_range(buf, start, end);
+                }
+                continue;
+            };
+            let directive_end = skip_directive(source, start);
+            let closes = word == b"endif" && depth == 0;
+            if COND_OPEN.contains(&word) {
+                depth += 1;
+            } else if word == b"endif" && depth > 0 {
+                depth -= 1;
+            } else if depth == 0 && COND_NEXT.contains(&word) {
+                later = true;
+            }
+            if later || closes {
+                blank_range(buf, start, directive_end);
+            }
+            i = directive_end + 1;
+            if closes {
+                break;
+            }
+        }
+    }
+    patched
+}
+
+/// The source patches C++ parses with, applied in order; `None` when none
+/// applies. Each only overwrites bytes with blanks.
+pub fn prepare_source(source: &[u8]) -> Option<Vec<u8>> {
+    let macros = blank_decl_prefix_macros(source);
+    blank_init_list_conditionals(macros.as_deref().unwrap_or(source)).or(macros)
 }
 
 /// The type name a base clause or qualifier names, generic arguments and a
@@ -672,6 +757,48 @@ pub fn stamp_lexical_owners(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_blank_init_list_conditionals_keeps_first_branch_only() {
+        let src = b"  Foo()\n#if A\n    : a(1)\n#else\n    : a(2)\n#endif\n  {}\n";
+        let patched = blank_init_list_conditionals(src).expect("init-list conditional");
+        assert_eq!(patched.len(), src.len());
+        assert_eq!(
+            patched,
+            b"  Foo()\n     \n    : a(1)\n     \n          \n      \n  {}\n"
+        );
+    }
+
+    /// A `#else` inside a block comment or a string opens no branch, so the
+    /// comment's `*/` and the string stay.
+    #[test]
+    fn test_blank_init_list_conditionals_else_inside_comment_keeps_comment_end() {
+        let src = b"  Foo()\n#if A\n    : a(1) /* see\n#else\n  */\n#endif\n  {}\n";
+        let patched = blank_init_list_conditionals(src).expect("init-list conditional");
+        assert_eq!(
+            patched,
+            b"  Foo()\n     \n    : a(1) /* see\n#else\n  */\n      \n  {}\n"
+        );
+        let src = b"  Foo()\n#if A\n    : s(R\"(\n#else\n)\")\n#endif\n  {}\n";
+        let patched = blank_init_list_conditionals(src).expect("init-list conditional");
+        assert_eq!(
+            patched,
+            b"  Foo()\n     \n    : s(R\"(\n#else\n)\")\n      \n  {}\n"
+        );
+    }
+
+    #[test]
+    fn test_blank_init_list_conditionals_other_conditionals_unpatched() {
+        // A conditional after the first initializer, a base clause, and a
+        // scope operator: none opens an initializer list.
+        for src in [
+            &b"  Foo()\n    : a(1)\n#if A\n    , b(2)\n#endif\n  {}\n"[..],
+            b"class Foo\n#if A\n  : public Base\n#endif\n{};\n",
+            b"  f(x)\n#if A\n  ::g();\n#endif\n",
+        ] {
+            assert_eq!(blank_init_list_conditionals(src), None, "{src:?}");
+        }
+    }
 
     #[test]
     fn test_blank_decl_prefix_macros_macro_before_class_blanks_macro() {

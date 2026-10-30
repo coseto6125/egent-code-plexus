@@ -286,9 +286,9 @@ class macro_json {
     assert_eq!(named(&g, "TPL_DECL").len(), 1, "the macro stays a node");
 }
 
-/// tree-sitter-cpp parses this whole class as an ERROR: the `#if` sits in
-/// the constructor's initializer list, and `JSON_PRIVATE_UNLESS_TESTED:` is
-/// a macro used as an access specifier.
+/// The `#if` sits in the constructor's initializer list, which the source
+/// patch reduces to its first branch, and `JSON_PRIVATE_UNLESS_TESTED:` is
+/// a macro used as an access specifier, which stays an ERROR in the tree.
 const UNPARSABLE_CLASS: &str = "\
 template<typename T>
 class basic_json

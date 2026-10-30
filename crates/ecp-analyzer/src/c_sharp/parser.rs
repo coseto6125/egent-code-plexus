@@ -1,9 +1,10 @@
 use super::receiver_types::extract_csharp_calls_and_path_literals;
+use super::recovery::prepare_source;
 use super::spec::CSharpSpec;
 use crate::calls::{NameRefKind, NameRefSpec, VariantRefSpec};
 use crate::driver::{
     self, imports, node, AnonKey, Anonymous, Compiled, DeclSlot, Effect, FieldReads, FileCx,
-    KindCapture, Op, ParseSpec, Step, TxRule,
+    KindCapture, Op, ParseSpec, PrepareSource, Step, TxRule,
 };
 use crate::framework_confidence;
 use crate::framework_helpers::{
@@ -12,7 +13,7 @@ use crate::framework_helpers::{
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::parse_prof::Pass;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::{LocalGraph, RawFunctionMeta, RawNode, OVERRIDE_SENTINEL};
+use ecp_core::analyzer::types::{LocalGraph, RawFunctionMeta, RawNode, Span, OVERRIDE_SENTINEL};
 use ecp_core::graph::{FileCategory, NodeKind};
 use rustc_hash::FxHashMap;
 use std::path::Path;
@@ -210,7 +211,8 @@ pub struct CSharpMatch<'t> {
     import_name: Option<Node<'t>>,
     import_src: Option<Node<'t>>,
     import_alias: Option<String>,
-    is_exported: bool,
+    /// The access modifiers the `@export` captures saw, as `ACCESS_*` bits.
+    access: u8,
     heritage: Vec<String>,
     type_annotation: Option<String>,
     decorators: Vec<String>,
@@ -228,6 +230,72 @@ pub struct CSharpFile {
     node_id_to_idx: FxHashMap<usize, usize>,
 }
 
+const ACCESS_PUBLIC: u8 = 1;
+const ACCESS_PROTECTED: u8 = 2;
+const ACCESS_PRIVATE: u8 = 4;
+const ACCESS_INTERNAL: u8 = 8;
+
+/// Whether code outside the assembly can reach `decl`: `public`,
+/// `protected` or `protected internal` (never `private protected`). A
+/// member with no access modifier inside an exported interface is
+/// implicitly `public`.
+fn is_exported_access(access: u8, decl: Node<'_>, source: &[u8]) -> bool {
+    if access == 0 {
+        let interface = decl
+            .parent()
+            .filter(|p| p.kind() == "declaration_list")
+            .and_then(|p| p.parent())
+            .filter(|p| p.kind() == "interface_declaration");
+        return interface
+            .is_some_and(|i| is_exported_access(modifier_access(i, source), i, source));
+    }
+    access & ACCESS_PUBLIC != 0 || (access & ACCESS_PROTECTED != 0 && access & ACCESS_PRIVATE == 0)
+}
+
+/// The `ACCESS_*` bits of `decl`'s own `modifier` children.
+fn modifier_access(decl: Node<'_>, source: &[u8]) -> u8 {
+    let mut cursor = decl.walk();
+    let bits = decl
+        .children(&mut cursor)
+        .filter(|c| c.kind() == "modifier")
+        .map(|c| access_bit(&source[c.start_byte()..c.end_byte()]))
+        .fold(0, |acc, bit| acc | bit);
+    bits
+}
+
+/// The `ACCESS_*` bit of one modifier's text; `0` for a non-access modifier.
+fn access_bit(modifier: &[u8]) -> u8 {
+    match modifier {
+        b"public" => ACCESS_PUBLIC,
+        b"protected" => ACCESS_PROTECTED,
+        b"private" => ACCESS_PRIVATE,
+        b"internal" => ACCESS_INTERNAL,
+        _ => 0,
+    }
+}
+
+/// The bytes a declaration's node covers. A file-scoped namespace
+/// (`namespace A;`) covers the rest of the compilation unit, so it runs to
+/// the end of the last declaration after it; a block one is its own node.
+fn declaration_extent(root: Node<'_>) -> (Span, std::ops::Range<usize>) {
+    let mut end = root;
+    if root.kind() == "file_scoped_namespace_declaration" {
+        let mut next = root.next_named_sibling();
+        while let Some(n) = next {
+            if n.kind() != "comment" {
+                end = n;
+            }
+            next = n.next_named_sibling();
+        }
+    }
+    let span = node::span(root);
+    let last = node::span(end);
+    (
+        (span.0, span.1, last.2, last.3),
+        root.start_byte()..end.end_byte(),
+    )
+}
+
 impl ParseSpec for CSharpSpec {
     type Role = CSharpRole;
     type Match<'t> = CSharpMatch<'t>;
@@ -235,6 +303,7 @@ impl ParseSpec for CSharpSpec {
     type Hook = CSharpHook;
 
     const KIND_CAPTURE: KindCapture = KindCapture::NameOverwrite;
+    const PREPARE_SOURCE: Option<PrepareSource> = Some(prepare_source);
     /// An anonymous callback (lambda / delegate in argument position) gets an
     /// `<anonymous>` Function node only when its body holds a call, so
     /// attach_to_enclosing can host those calls instead of dropping them when
@@ -379,11 +448,7 @@ impl ParseSpec for CSharpSpec {
                 }
             }
             CSharpRole::Export => {
-                if let Ok(text) = std::str::from_utf8(&source[node.start_byte()..node.end_byte()]) {
-                    if text == "public" {
-                        m.is_exported = true;
-                    }
-                }
+                m.access |= access_bit(&source[node.start_byte()..node.end_byte()])
             }
             CSharpRole::Heritage => {
                 // `(base_list (_)*)` also matches the `#pragma` lines
@@ -423,7 +488,7 @@ impl ParseSpec for CSharpSpec {
             import_name,
             import_src,
             import_alias,
-            is_exported,
+            access,
             heritage: heritage_list,
             type_annotation,
             decorators,
@@ -434,6 +499,7 @@ impl ParseSpec for CSharpSpec {
             deferred_indexer,
         } = std::mem::take(m);
         let (name_node, mut kind, root_span_node) = (d.name, d.kind, d.root);
+        let exported_at = |decl: Node<'_>| is_exported_access(access, decl, source);
 
         // Emit deferred special-member nodes (operator/conv-operator/indexer).
         // These are processed AFTER the capture loop so that decorator/export/type
@@ -471,7 +537,7 @@ impl ParseSpec for CSharpSpec {
             emit_special(
                 op_node,
                 op_name,
-                is_exported,
+                exported_at(op_node),
                 type_annotation.clone(),
                 decorators.clone(),
                 &mut cx.nodes,
@@ -492,7 +558,7 @@ impl ParseSpec for CSharpSpec {
             emit_special(
                 cv_node,
                 conv_name,
-                is_exported,
+                exported_at(cv_node),
                 type_annotation.clone(),
                 decorators.clone(),
                 &mut cx.nodes,
@@ -504,7 +570,7 @@ impl ParseSpec for CSharpSpec {
             emit_special(
                 idx_node,
                 "this[...]".to_string(),
-                is_exported,
+                exported_at(idx_node),
                 type_annotation.clone(),
                 decorators.clone(),
                 &mut cx.nodes,
@@ -559,6 +625,7 @@ impl ParseSpec for CSharpSpec {
                 .map(|b| std::str::from_utf8(b))
                 .unwrap_or_else(|| std::str::from_utf8(&source[n.start_byte()..n.end_byte()]));
             if let Ok(name_str) = name_result {
+                let is_exported = exported_at(root);
                 // For Property + Variable nodes, multiple declarators
                 // share the same root node id (`int x, y, z;`); key on
                 // the identifier node so each declarator is distinct.
@@ -599,16 +666,12 @@ impl ParseSpec for CSharpSpec {
                     if k.declares_type() && is_partial(root, source) {
                         decorators.push(RawNode::partial_marker(&declaring_scope(root, source)));
                     }
+                    let (span, bytes) = declaration_extent(root);
                     nodes.push(RawNode {
                         decorators,
                         is_exported,
                         type_annotation: type_annotation.clone(),
-                        ..node::decl(
-                            name,
-                            k,
-                            node::span(root),
-                            &source[root.start_byte()..root.end_byte()],
-                        )
+                        ..node::decl(name, k, span, &source[bytes])
                     });
                     i
                 });

@@ -19,6 +19,7 @@ use ecp_core::analyzer::types::{
     LocalGraph, RawFrameworkRef, RawFunctionMeta, RawNode, RawRoute, RawRouteReceiver, Span,
 };
 use ecp_core::graph::{FileCategory, NodeKind};
+use rustc_hash::FxHashSet;
 use std::path::Path;
 use tree_sitter::{Node, Query, Tree};
 
@@ -114,6 +115,168 @@ thread_local! {
         parser
     });
 }
+
+/// The targets and the final value of an assignment chain
+/// (`exports = module.exports = f` has two targets and the value `f`).
+fn assignment_chain(assign: Node<'_>) -> Option<(Vec<Node<'_>>, Node<'_>)> {
+    let mut targets = Vec::new();
+    let mut value = assign;
+    while value.kind() == "assignment_expression" {
+        targets.push(value.child_by_field_name("left")?);
+        value = value.child_by_field_name("right")?;
+    }
+    Some((targets, value))
+}
+
+/// Fold one assignment chain into the running CommonJS export state.
+/// `exports_aliased` tracks whether `exports` still names `module.exports`:
+/// a rebinding `exports = x` or a lone `module.exports = x` cuts the alias, `exports = module.exports = x`
+/// (or `exports = module.exports`) restores it. A whole `module.exports = ...`
+/// replaces everything exported so far. Returns whether the chain assigns the
+/// whole `module.exports`.
+fn apply_commonjs_chain<'s>(
+    assign: Node<'_>,
+    source: &'s [u8],
+    locals: &mut Vec<&'s str>,
+    exports_aliased: &mut bool,
+) -> bool {
+    let text =
+        |n: Node<'_>| std::str::from_utf8(&source[n.start_byte()..n.end_byte()]).unwrap_or("");
+    let Some((targets, value)) = assignment_chain(assign) else {
+        return false;
+    };
+    let members = || targets.iter().filter(|t| t.kind() == "member_expression");
+    let whole_module = members().any(|t| text(*t) == "module.exports");
+    let property_of_exports = members().any(|t| {
+        t.child_by_field_name("object").is_some_and(|o| {
+            text(o) == "module.exports" || (text(o) == "exports" && *exports_aliased)
+        })
+    });
+    let rebinds_exports = targets
+        .iter()
+        .any(|t| t.kind() == "identifier" && text(*t) == "exports");
+    if whole_module {
+        locals.clear();
+    }
+    match value.kind() {
+        "object" if whole_module => {
+            let mut pairs = value.walk();
+            for entry in value.named_children(&mut pairs) {
+                match entry.kind() {
+                    "shorthand_property_identifier" => locals.push(text(entry)),
+                    "pair" => locals.extend(
+                        entry
+                            .child_by_field_name("value")
+                            .filter(|v| v.kind() == "identifier")
+                            .map(text),
+                    ),
+                    _ => {}
+                }
+            }
+        }
+        "identifier" if whole_module || property_of_exports => locals.push(text(value)),
+        _ => {}
+    }
+    if rebinds_exports {
+        *exports_aliased = whole_module || text(value) == "module.exports";
+    } else if whole_module {
+        // `module.exports = x` alone leaves `exports` on the old object.
+        *exports_aliased = false;
+    }
+    whole_module
+}
+
+/// The local names a top-level CommonJS module exports, folding the
+/// statements in source order: `module.exports = f`,
+/// `module.exports = { f, k: g }`, `exports.k = f` and `module.exports.k = f`,
+/// also as the links of a chain (`exports = module.exports = f`) or as the
+/// value of a declaration (`var app = exports = module.exports = {}`, which
+/// exports `app` too). Only a bare identifier value names a declaration.
+fn commonjs_exported_locals<'s>(root: Node<'_>, source: &'s [u8]) -> Vec<&'s str> {
+    let mut locals = Vec::new();
+    let mut exports_aliased = true;
+    let mut cursor = root.walk();
+    for statement in root.named_children(&mut cursor) {
+        match statement.kind() {
+            "expression_statement" => {
+                if let Some(assign) = statement
+                    .named_child(0)
+                    .filter(|a| a.kind() == "assignment_expression")
+                {
+                    apply_commonjs_chain(assign, source, &mut locals, &mut exports_aliased);
+                }
+            }
+            "lexical_declaration" | "variable_declaration" => {
+                let mut inner = statement.walk();
+                for declarator in statement.named_children(&mut inner) {
+                    let (Some(name), Some(value)) = (
+                        declarator
+                            .child_by_field_name("name")
+                            .filter(|n| n.kind() == "identifier"),
+                        declarator
+                            .child_by_field_name("value")
+                            .filter(|v| v.kind() == "assignment_expression"),
+                    ) else {
+                        continue;
+                    };
+                    if apply_commonjs_chain(value, source, &mut locals, &mut exports_aliased) {
+                        locals.push(
+                            std::str::from_utf8(&source[name.start_byte()..name.end_byte()])
+                                .unwrap_or(""),
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    locals
+}
+
+/// Mark the top-level declarations a CommonJS module exports. A nested
+/// declaration of the same name keeps its flag: the span must be a top-level one.
+fn stamp_commonjs_exports(root: Node<'_>, source: &[u8], nodes: &mut [RawNode]) {
+    let locals: FxHashSet<&str> = commonjs_exported_locals(root, source).into_iter().collect();
+    if locals.is_empty() {
+        return;
+    }
+    let mut cursor = root.walk();
+    for declaration in root.named_children(&mut cursor) {
+        let mut inner = declaration.walk();
+        let bindings: Vec<(Node<'_>, Node<'_>)> = match declaration.kind() {
+            "lexical_declaration" | "variable_declaration" => declaration
+                .named_children(&mut inner)
+                .filter_map(|d| Some((d.child_by_field_name("name")?, d)))
+                .collect(),
+            "function_declaration" | "generator_function_declaration" | "class_declaration" => {
+                declaration
+                    .child_by_field_name("name")
+                    .map(|name| (name, declaration))
+                    .into_iter()
+                    .collect()
+            }
+            _ => continue,
+        };
+        for (name, owner) in bindings {
+            let Ok(name) = std::str::from_utf8(&source[name.start_byte()..name.end_byte()]) else {
+                continue;
+            };
+            if !locals.contains(name) {
+                continue;
+            }
+            // A Const / Variable spans its declaration, a function-valued
+            // binding its declarator.
+            let spans = [node_span(&declaration), node_span(&owner)];
+            for node in nodes
+                .iter_mut()
+                .filter(|n| n.name == name && spans.contains(&n.span))
+            {
+                node.is_exported = true;
+            }
+        }
+    }
+}
+
 pub struct JavaScriptProvider {
     compiled: Compiled<JavaScriptSpec>,
 }
@@ -743,6 +906,7 @@ impl ParseSpec for JavaScriptSpec {
             }
             JavaScriptHook::Exports => {
                 cx.export_aliases = stamp_js_ts_exports(root, source, &mut cx.nodes);
+                stamp_commonjs_exports(root, source, &mut cx.nodes);
                 mark_js_ts_import_bindings(root, source, &mut cx.imports);
             }
         }

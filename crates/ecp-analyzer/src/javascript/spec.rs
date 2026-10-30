@@ -8,7 +8,7 @@
 //!
 //! JS Variables have arrow-function dedup, `const`/`let`/`var` kind split,
 //! and span-dedup against already-emitted Function nodes — `parser.rs`
-//! dispatches `@variable.name` via a dedicated `idx_variable_name` path
+//! dispatches `@variable.name` through `JavaScriptRole::VariableName`
 //! ahead of the spec lookup. Listing it here would be misleading
 //! (the entry would never be consulted), so it's intentionally omitted.
 

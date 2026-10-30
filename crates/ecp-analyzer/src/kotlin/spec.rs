@@ -32,7 +32,7 @@ impl LangSpec for KotlinSpec {
         // `enum class X { A, B, C }` entries — tree-sitter-kotlin produces
         // an `enum_entry` per identifier inside `enum_class_body`. The
         // parent enum class is already captured as `class.name` (promoted
-        // to `Enum` by `is_enum_class` at parser.rs:282); the entries
+        // to `Enum` by `is_enum_class` in parser.rs); the entries
         // emit as `EnumVariant` so state-machine / exhaustiveness queries
         // resolve to the correct level (was `Enum` before NodeKind::EnumVariant
         // was introduced).

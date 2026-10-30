@@ -7,7 +7,6 @@ mod driver_parity_support;
 
 use driver_parity_support::{assert_empty_graph, names_kinds, Span4};
 use ecp_analyzer::framework_confidence::KTOR_ROUTE;
-use ecp_analyzer::framework_helpers::MODULE_LEVEL_SOURCE;
 use ecp_analyzer::kotlin::parser::KotlinProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{FrameworkId, LocalGraph, RawNode, OVERRIDE_SENTINEL};
@@ -167,7 +166,7 @@ const KTOR_SRC: &[u8] = b"import io.ktor.server.routing.*\n\nfun Application.mod
 
 /// The ref spans the whole `get(...) { }` call; both lambdas hold a call.
 #[test]
-fn test_kotlin_driver_ktor_routing_block_emits_module_level_ref() {
+fn test_kotlin_driver_ktor_routing_block_emits_enclosing_callable_ref() {
     let g = parse(KTOR_SRC);
     let refs: Vec<_> = g
         .framework_refs
@@ -184,13 +183,10 @@ fn test_kotlin_driver_ktor_routing_block_emits_module_level_ref() {
         .collect();
     assert_eq!(
         refs,
-        [(
-            MODULE_LEVEL_SOURCE,
-            "/x",
-            "ktor-route-get",
-            KTOR_ROUTE,
-            (4, 8, 4, 44)
-        )]
+        // Contract: a Ktor ref names the innermost enclosing named callable,
+        // here `module`; the `routing { }` lambda is an anonymous node an
+        // agent cannot search by name.
+        [("module", "/x", "ktor-route-get", KTOR_ROUTE, (4, 8, 4, 44))]
     );
     node(&g, "module", NodeKind::Function);
     node(&g, "<anonymous:4:12>", NodeKind::Function);

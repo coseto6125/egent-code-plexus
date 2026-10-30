@@ -289,19 +289,21 @@
     (array_declarator declarator: (field_identifier) @field.name)
   ]) @field
 
-;; Top-level variable / const declarations — `auto x = 5;` / `int N = 5;`.
-;; The parser slices [decl.start, name.start), so `auto x` yields `"auto"`
-;; (no deduced type — that requires semantic analysis the analyzer
+;; File-scope variable / const declarations — `auto x = 5;` / `int N = 5;` /
+;; `char *names[4];`, in a namespace, an `extern "C"` block or a preprocessor
+;; conditional too. The parser takes the identifier through pointer,
+;; reference and array declarators and keeps file-scope ones only
+;; (`is_file_scope`). It slices [decl.start, name.start), so `auto x` yields
+;; `"auto"` (no deduced type — that requires semantic analysis the analyzer
 ;; doesn't perform). Storage-class and qualifier words are preserved.
-(translation_unit
-  (declaration
-    declarator: [
-      (init_declarator declarator: (identifier) @var.name)
-      (init_declarator declarator: (pointer_declarator (identifier) @var.name))
-      (init_declarator declarator: (reference_declarator (identifier) @var.name))
-      (identifier) @var.name
-      (pointer_declarator (identifier) @var.name)
-    ]) @var)
+(declaration
+  declarator: [
+    (init_declarator declarator: (_) @var.name)
+    (identifier) @var.name
+    (pointer_declarator) @var.name
+    (array_declarator) @var.name
+    (reference_declarator) @var.name
+  ]) @var
 
 ;; Preprocessor macro definitions — `#define NAME ...` and `#define F(x) ...`
 (preproc_def
@@ -341,8 +343,11 @@
   name: (type_identifier) @name.typedef
 ) @typedef_node
 
+;; A typedef's alias may sit at any depth of pointer, reference, array and
+;; function-pointer declarators (`typedef void *(*F)(int);`): the whole
+;; declarator is captured and parser.rs takes the `type_identifier` inside it.
 (type_definition
-  declarator: (type_identifier) @name.typedef
+  declarator: (_) @name.typedef
 ) @typedef_node
 
 ;; Override specifier — `void foo() override {}` or `void foo() override = 0;`.

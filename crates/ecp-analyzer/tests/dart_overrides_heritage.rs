@@ -5,7 +5,8 @@
 //! marked method reached the first file's `Base`, and an unmarked one got no
 //! edge.
 //!
-//! The parser keeps no annotation on the method, so the pair is a name match in the declared base.
+//! The parser keeps `@override` in the method's decorators, so the marked
+//! method pairs with a same-file base as `Exact`.
 
 mod overrides_support;
 
@@ -18,7 +19,8 @@ fn test_overrides_dart_two_same_named_bases_binds_declared_one() {
         ("a/decoy.dart", "class Base {\n  void run() {}\n}\n"),
         ("b/child.dart", "class Base {\n  void run() {}\n}\nclass Child extends Base {\n  @override\n  void run() {}\n}\n"),
         "run",
-        Evidence::Heuristic,
+        // Contract: a marked override into a same-file base is Exact.
+        Evidence::Exact,
     );
 }
 
@@ -42,8 +44,8 @@ fn test_dart_parser_mixins_listed_between_superclass_and_interfaces() {
 
 /// Stands for: Dart looks a method up through the mixins, last first, then
 /// the superclass, so `C.m` binds `M.m`, never `B.m`; the interface `I` is
-/// its own branch. The parser drops the `@override` annotation from the
-/// method, so the `Inferred` rule gives the name-match class.
+/// its own branch. The parser keeps the `@override` annotation on the
+/// method, so the `Inferred` rule gives the marked class.
 #[test]
 fn test_overrides_dart_mixin_lookup_selects_target() {
     let graph = overrides_support::graph_of(&dart(), &[("c.dart", MIXIN_FIXTURE)]);
@@ -53,6 +55,7 @@ fn test_overrides_dart_mixin_lookup_selects_target() {
         "C.m -> M.m and C.m -> I.m; never B.m (row 4)"
     );
     for edge in overrides_support::overrides(&graph) {
-        overrides_support::assert_evidence(&edge, Evidence::Heuristic);
+        // Contract: `@override` marks the method, so each edge is Exact.
+        overrides_support::assert_evidence(&edge, Evidence::Exact);
     }
 }

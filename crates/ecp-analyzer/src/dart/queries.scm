@@ -79,6 +79,40 @@
       return_type: (type)? @type
       name: (identifier) @method.name))) @method
 
+;; Body-less class members (abstract / external signatures) sit in
+;; `member_declaration > declaration` with no `method_declaration` wrapper.
+;; The signature is the root, so the span stays the signature's.
+(member_declaration
+  (declaration
+    (function_signature
+      return_type: (type)? @type
+      name: (identifier) @method.name) @method))
+
+(member_declaration
+  (declaration
+    (operator_signature
+      return_type: (type)? @type
+      operator: _ @method.name) @method))
+
+;; Operators with a body. `~`, `[]` and `[]=` are anonymous tokens, hence `_`.
+(method_declaration
+  signature: (method_signature
+    (operator_signature
+      return_type: (type)? @type
+      operator: _ @method.name))) @method
+
+(member_declaration
+  (declaration
+    (getter_signature
+      return_type: (type)? @type
+      name: (identifier) @property.name) @property))
+
+(member_declaration
+  (declaration
+    (setter_signature
+      return_type: (type)? @type
+      name: (identifier) @property.name) @property))
+
 ;; Typedefs — new-style: `typedef Callback = void Function(int);`
 ;; and old-style: `typedef int Compare(int a, int b);`.
 ;; In both cases the first (type_identifier) child of type_alias is the name.

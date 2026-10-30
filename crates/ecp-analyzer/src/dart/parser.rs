@@ -98,6 +98,7 @@ pub enum DartRole {
 pub enum DartHook {
     Calls,
     Frameworks,
+    DeclAnnotationOwners,
 }
 
 #[derive(Default)]
@@ -188,6 +189,7 @@ impl ParseSpec for DartSpec {
         Step::hook(Pass::Walk, Effect::Neutral, DartHook::Frameworks),
         Step::fixed(Pass::Walk, Op::FunctionMeta),
         Step::fixed(Pass::Build, Op::StampOwners),
+        Step::hook(Pass::Build, Effect::Nodes, DartHook::DeclAnnotationOwners),
         Step::fixed(Pass::Walk, Op::TxScopes),
     ];
 
@@ -294,6 +296,7 @@ impl ParseSpec for DartSpec {
                 cx.nodes.push(RawNode {
                     is_exported: !name_str.starts_with('_'),
                     type_annotation: type_ann,
+                    decorators: annotation_texts(v_root, source),
                     ..node::decl(
                         name_str.to_string(),
                         NodeKind::Variable,
@@ -318,12 +321,29 @@ impl ParseSpec for DartSpec {
                 && root.kind() == "function_signature"
                 && root.parent().is_some_and(|p| {
                     matches!(p.kind(), "function_declaration" | "method_signature")
+                        || is_class_member_declaration(p)
                 })
             {
                 return;
             }
-            if k == NodeKind::Class && root.kind() == "class_declaration" {
-                insert_mixins(root, source, &mut heritage);
+            // A named constructor's `name` field holds `Dog` and `named`, so
+            // the pattern matches once per identifier; the last one is the
+            // constructor's own name.
+            if k == NodeKind::Constructor
+                && n.parent().is_some_and(|sig| {
+                    sig.children_by_field_name("name", &mut sig.walk())
+                        .last()
+                        .is_some_and(|last| last.id() != n.id())
+                })
+            {
+                return;
+            }
+            match root.kind() {
+                "class_declaration" if k == NodeKind::Class => {
+                    insert_mixins(root, source, &mut heritage)
+                }
+                "mixin_declaration" => insert_mixin_constraints(root, source, &mut heritage),
+                _ => {}
             }
             if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                 let name_str = name_str.trim();
@@ -332,10 +352,16 @@ impl ParseSpec for DartSpec {
                 // language spec). Applies to all symbol kinds (Class, Function,
                 // Method, Interface, Property).
                 let is_exported = !name_str.starts_with('_');
+                let decorators = if k == NodeKind::Annotation {
+                    Vec::new()
+                } else {
+                    annotation_texts(root, source)
+                };
                 cx.nodes.push(RawNode {
                     is_exported,
                     heritage,
                     type_annotation,
+                    decorators,
                     ..node::decl(
                         name_str.to_string(),
                         k,
@@ -401,6 +427,7 @@ impl ParseSpec for DartSpec {
             DartHook::Frameworks => {
                 cx.framework_refs = detect_ast_framework_patterns(source, DART_FRAMEWORKS);
             }
+            DartHook::DeclAnnotationOwners => restamp_decl_annotation_owners(root, &mut cx.nodes),
         }
     }
 
@@ -412,6 +439,105 @@ impl ParseSpec for DartSpec {
     ) -> Vec<RawFunctionMeta> {
         crate::function_meta::dart::extract(root, source, nodes, category)
     }
+}
+
+/// A `declaration` holding a class member's body-less signature.
+pub(crate) fn is_class_member_declaration(declaration: Node<'_>) -> bool {
+    declaration.kind() == "declaration"
+        && declaration
+            .parent()
+            .is_some_and(|p| p.kind() == "member_declaration")
+}
+
+/// The source text of each annotation that marks `decl`, in source order.
+/// A class member's annotations sit beside its declaration inside
+/// `member_declaration` when the member is a field or a body-less
+/// constructor, and inside it otherwise.
+fn annotation_texts(decl: Node<'_>, source: &[u8]) -> Vec<String> {
+    // A body-less member's signature sits inside `declaration`, the sibling
+    // of its annotations.
+    let anchor = decl
+        .parent()
+        .filter(|p| p.kind() == "declaration")
+        .unwrap_or(decl);
+    let siblings = anchor
+        .parent()
+        .filter(|p| p.kind() == "member_declaration")
+        .into_iter()
+        .flat_map(|p| {
+            let mut cursor = p.walk();
+            p.named_children(&mut cursor)
+                .take_while(|c| c.id() != anchor.id())
+                .collect::<Vec<_>>()
+        });
+    let mut cursor = decl.walk();
+    siblings
+        .chain(decl.named_children(&mut cursor).collect::<Vec<_>>())
+        .filter(|c| c.kind() == "annotation")
+        .filter_map(|a| a.utf8_text(source).ok())
+        .map(|t| t.trim().to_string())
+        .collect()
+}
+
+/// An annotation written before a class, mixin, enum or extension is a
+/// child of that declaration, so the span stamp names the declaration as
+/// the annotation's owner. The annotation marks the declaration and takes
+/// the declaration's own owner instead. Dart has no nested type
+/// declarations, so only top-level declarations hold such annotations.
+fn restamp_decl_annotation_owners(root: Node<'_>, nodes: &mut [RawNode]) {
+    let mut cursor = root.walk();
+    for decl in root.named_children(&mut cursor).filter(|d| {
+        matches!(
+            d.kind(),
+            "class_declaration"
+                | "mixin_declaration"
+                | "enum_declaration"
+                | "extension_declaration"
+        )
+    }) {
+        let mut inner = decl.walk();
+        let annotations: Vec<_> = decl
+            .named_children(&mut inner)
+            .filter(|a| a.kind() == "annotation")
+            .map(node::span)
+            .collect();
+        if annotations.is_empty() {
+            continue;
+        }
+        let decl_span = node::span(decl);
+        let Some(owner) = nodes
+            .iter()
+            .find(|n| {
+                n.span == decl_span
+                    && matches!(n.kind, NodeKind::Class | NodeKind::Trait | NodeKind::Enum)
+            })
+            .map(|n| n.owner_class.clone())
+        else {
+            continue;
+        };
+        for n in nodes
+            .iter_mut()
+            .filter(|n| n.kind == NodeKind::Annotation && annotations.contains(&n.span))
+        {
+            n.owner_class = owner.clone();
+        }
+    }
+}
+
+/// Puts a mixin's `on` constraints at the front of `heritage`, before the
+/// `implements` interfaces the query captures. They are the unlabeled
+/// `type` children of `mixin_declaration`; a generic constraint keeps the
+/// type name only.
+fn insert_mixin_constraints(mixin_decl: Node<'_>, source: &[u8], heritage: &mut Vec<String>) {
+    let mut cursor = mixin_decl.walk();
+    let constraints: Vec<String> = mixin_decl
+        .named_children(&mut cursor)
+        .filter(|ty| ty.kind() == "type")
+        .filter_map(|ty| ty.named_child(0).and_then(|n| n.utf8_text(source).ok()))
+        .map(|name| name.trim().to_string())
+        .collect();
+    let interfaces = std::mem::replace(heritage, constraints);
+    heritage.extend(interfaces);
 }
 
 /// Splices `with M1, M2` into `heritage` after the superclass.

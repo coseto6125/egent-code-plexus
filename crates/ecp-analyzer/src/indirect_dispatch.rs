@@ -10,7 +10,8 @@
 //! a call node, so `call_index` never depends on this walk matching the
 //! extractor's traversal order or its skip rules.
 
-use crate::calls::CallSiteIndex;
+use crate::calls::{node_range, range_width, start_pos, CallSiteIndex, Pos, PosRange};
+use crate::preproc_fallback::depth_at;
 use ecp_core::analyzer::types::{RawCallMeta, RawNode};
 use ecp_core::graph::CallMeta;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -248,12 +249,12 @@ fn is_fn_type(ty: &str) -> bool {
 /// - C++ virtual method call through base pointer/reference (detected via
 ///   `fn_ptr_vars` populated from known base types).
 ///
-/// `fn_ptr_vars` maps local variable names to their type strings for disambiguation.
+/// `fn_ptr_vars` holds each declared name's type in its own scope.
 pub fn detect_c_cpp_indirect(
     root: Node<'_>,
     source: &[u8],
     nodes: &[RawNode],
-    fn_ptr_vars: &FxHashMap<String, String>,
+    fn_ptr_vars: &FnPtrVars,
     is_cpp: bool,
     call_sites: &CallSiteIndex,
 ) -> Vec<RawCallMeta> {
@@ -274,7 +275,7 @@ fn detect_c_cpp_node(
     node: Node<'_>,
     source: &[u8],
     nodes: &[RawNode],
-    fn_ptr_vars: &FxHashMap<String, String>,
+    fn_ptr_vars: &FnPtrVars,
     is_cpp: bool,
     call_sites: &CallSiteIndex,
     out: &mut Vec<RawCallMeta>,
@@ -294,17 +295,18 @@ fn detect_c_cpp_node(
 fn classify_c_cpp_call(
     call: Node<'_>,
     source: &[u8],
-    fn_ptr_vars: &FxHashMap<String, String>,
+    fn_ptr_vars: &FnPtrVars,
     is_cpp: bool,
 ) -> (u8, String) {
     let Some(function) = call.child_by_field_name("function") else {
         return (CallMeta::FLAG_DIRECT, String::new());
     };
+    let pos = start_pos(call);
 
     match function.kind() {
         "identifier" => {
             let name = node_text(function, source).unwrap_or_default();
-            if let Some(ty) = fn_ptr_vars.get(name) {
+            if let Some(ty) = fn_ptr_vars.type_at(name, pos) {
                 // Variable typed as function pointer.
                 let flags = if ty.contains("struct ") || ty.contains("_ops") {
                     CallMeta::FLAG_CALLBACK | CallMeta::FLAG_DYNAMIC_DISPATCH
@@ -330,7 +332,7 @@ fn classify_c_cpp_call(
                 .or_else(|| function.child_by_field_name("argument"))
             {
                 let obj_name = node_text(obj, source).unwrap_or_default();
-                if let Some(ty) = fn_ptr_vars.get(obj_name.trim_start_matches('*')) {
+                if let Some(ty) = fn_ptr_vars.type_at(obj_name.trim_start_matches('*'), pos) {
                     let flags = CallMeta::FLAG_CALLBACK | CallMeta::FLAG_DYNAMIC_DISPATCH;
                     return (flags, ty.to_string());
                 }
@@ -341,7 +343,7 @@ fn classify_c_cpp_call(
                 if let Some(obj) = function.child_by_field_name("value") {
                     let obj_name = node_text(obj, source).unwrap_or_default();
                     let var_name = obj_name.trim_start_matches('*').trim();
-                    if let Some(ty) = fn_ptr_vars.get(var_name) {
+                    if let Some(ty) = fn_ptr_vars.type_at(var_name, pos) {
                         return (CallMeta::FLAG_DYNAMIC_DISPATCH, ty.to_string());
                     }
                 }
@@ -352,67 +354,171 @@ fn classify_c_cpp_call(
     }
 }
 
-/// Build a map of `var_name → type_string` from C/C++ local declarations and
-/// function parameters, focusing on pointer-to-struct and function-pointer types.
-///
-/// This is a lightweight heuristic scan of `let_declaration`-equivalent C nodes
-/// (`declaration`, `parameter_declaration`) to populate the type map for indirect
-/// call detection.
-pub fn collect_c_cpp_fn_ptr_vars(root: Node<'_>, source: &[u8]) -> FxHashMap<String, String> {
-    let mut map = FxHashMap::default();
+/// The scope every name is visible in that no function or lambda declares.
+const FILE_SCOPE: PosRange = ((0, 0), (u32::MAX, u32::MAX));
+
+/// Declared types of the C/C++ names indirect-call detection reads, each
+/// visible in its own scope: the function or lambda of a parameter or
+/// local, the whole file otherwise. A `None` type marks a declaration the
+/// detector does not track; it still hides a same-name one further out, so
+/// one function's parameter never types another function's call.
+#[derive(Debug, Default)]
+pub struct FnPtrVars {
+    decls: FxHashMap<String, Vec<(PosRange, Option<String>)>>,
+}
+
+impl FnPtrVars {
+    /// Record `name` as visible in `scope`; `None` hides an outer binding of
+    /// the name without typing it.
+    pub fn declare(&mut self, name: String, scope: PosRange, ty: Option<String>) {
+        self.decls.entry(name).or_default().push((scope, ty));
+    }
+
+    /// The type of `name` at `pos`, from the innermost scope that declares
+    /// it. At an equal scope a tracked type wins over an untracked one, and
+    /// the later of two tracked ones wins.
+    fn type_at(&self, name: &str, pos: Pos) -> Option<&str> {
+        let mut best: Option<(&Option<String>, (u32, i64))> = None;
+        for (scope, ty) in self.decls.get(name)? {
+            if !(scope.0 <= pos && pos <= scope.1) {
+                continue;
+            }
+            let width = range_width(*scope);
+            if best.is_none_or(|(_, w)| width < w || (width == w && ty.is_some())) {
+                best = Some((ty, width));
+            }
+        }
+        best?.0.as_deref()
+    }
+}
+
+/// Record each C/C++ variable declaration and parameter in `vars`: tracked
+/// with its type when it is a pointer or struct-like shape, untracked
+/// otherwise. A prototype's parameter names nothing outside it and is left
+/// out; so is a prototype, which declares a function, not a variable.
+/// `depths` are the source's brace depths, which the caller passes when the
+/// tree has errors (see [`c_decl_scope`]).
+pub fn collect_c_cpp_fn_ptr_vars(
+    root: Node<'_>,
+    source: &[u8],
+    depths: Option<&[(usize, i32)]>,
+    vars: &mut FnPtrVars,
+) {
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
-        match n.kind() {
-            "declaration" | "parameter_declaration" => {
-                if let Some((var_name, ty)) = c_var_type_pair(n, source) {
-                    map.insert(var_name, ty);
+        if matches!(n.kind(), "declaration" | "parameter_declaration") {
+            let ty = n
+                .child_by_field_name("type")
+                .and_then(|t| node_text(t, source));
+            if let Some((scope, ty)) = c_decl_scope(n, depths).zip(ty) {
+                // `T *a, *b;` binds every declarator, not only the first.
+                let mut c = n.walk();
+                for d in n.children_by_field_name("declarator", &mut c) {
+                    if let Some((var_name, tracked)) = c_var_type_pair(ty, d, source) {
+                        vars.declare(var_name, scope, tracked);
+                    }
                 }
             }
-            _ => {}
         }
         let mut c = n.walk();
         for child in n.children(&mut c) {
             stack.push(child);
         }
     }
-    map
 }
 
-fn c_var_type_pair(decl: Node<'_>, source: &[u8]) -> Option<(String, String)> {
-    // Look for a declarator child; if the type contains `(*)` it's a fn-ptr.
-    let type_node = decl.child_by_field_name("type")?;
-    let ty_text = node_text(type_node, source)?;
-
-    // Find the declarator (name of the variable).
-    let declarator = decl.child_by_field_name("declarator")?;
-    let var_name = find_leaf_identifier(declarator, source)?;
-
-    // Only track struct pointers and function-pointer types for our purposes.
-    let full_decl_text = node_text(decl, source).unwrap_or_default();
-    if full_decl_text.contains("(*)")
-        || full_decl_text.contains("* ")
-        || ty_text.contains("struct ")
-        || ty_text.contains("_ops")
-        || ty_text.ends_with("_t")
-    {
-        Some((var_name, ty_text.to_string()))
-    } else {
-        None
-    }
-}
-
-fn find_leaf_identifier(node: Node<'_>, source: &[u8]) -> Option<String> {
-    if node.kind() == "identifier" || node.kind() == "type_identifier" {
-        return node_text(node, source).map(str::to_string);
-    }
-    // Descend into pointer / function declarators.
-    let mut c = node.walk();
-    for child in node.children(&mut c) {
-        if let Some(name) = find_leaf_identifier(child, source) {
-            return Some(name);
+/// The range a C/C++ declaration is visible in: its function or lambda,
+/// else the file. `None` for a parameter of a prototype, a member
+/// declaration or a function-pointer type, which no call can name.
+///
+/// `depths` are the source's brace depths, read when the tree has errors.
+/// Recovery can let a function body swallow the class members after it
+/// (`#ifdef` groups that split an `else {` from its `}`): a declaration
+/// the source's braces put outside that body belongs to the class around
+/// it, else to the file.
+fn c_decl_scope(decl: Node<'_>, depths: Option<&[(usize, i32)]>) -> Option<PosRange> {
+    let is_param = decl.kind() == "parameter_declaration";
+    let mut lifted = false;
+    let mut cur = decl.parent();
+    while let Some(p) = cur {
+        match p.kind() {
+            "function_definition" | "lambda_expression" if !lifted => {
+                if is_param || !swallowed_by_body(decl, p, depths) {
+                    return Some(node_range(p));
+                }
+                lifted = true;
+            }
+            "class_specifier" | "struct_specifier" | "union_specifier" if lifted => {
+                return Some(node_range(p));
+            }
+            "declaration" | "field_declaration" | "type_definition" if is_param => return None,
+            _ => {}
         }
+        cur = p.parent();
     }
-    None
+    (!is_param).then_some(FILE_SCOPE)
+}
+
+/// Whether `decl` sits inside `function`'s body in the tree but not in the
+/// source: its brace depth is no deeper than the body's own `{`.
+fn swallowed_by_body(decl: Node<'_>, function: Node<'_>, depths: Option<&[(usize, i32)]>) -> bool {
+    let (Some(depths), Some(body)) = (depths, function.child_by_field_name("body")) else {
+        return false;
+    };
+    body.start_byte() < decl.start_byte()
+        && depth_at(depths, decl.start_byte()) <= depth_at(depths, body.start_byte())
+}
+
+/// The name a C/C++ declaration or parameter binds, with its type text when
+/// detection tracks it: a pointer (`list *l`, `char **argv`, `int
+/// (*fp)(int)`) or a struct-like type (`struct s`, `*_ops`, `*_t`). The
+/// declarator node decides pointer-ness, never the spacing around `*`.
+/// A variable a lambda initialises is tracked too: `f(1)` then calls
+/// through the variable, never a function named `f`.
+/// `None` for a prototype or a method declaration, which binds no variable.
+fn c_var_type_pair(
+    ty: &str,
+    declarator: Node<'_>,
+    source: &[u8],
+) -> Option<(String, Option<String>)> {
+    let (name, pointer) = c_declared_name(declarator)?;
+    let var_name = node_text(name, source)?.to_string();
+    let lambda = declarator.kind() == "init_declarator"
+        && declarator
+            .child_by_field_name("value")
+            .is_some_and(|v| v.kind() == "lambda_expression");
+    // A deduced `auto` names no type; only a lambda variable keeps it, as the
+    // marker of a call through a variable.
+    let deduced = matches!(ty, "auto" | "decltype(auto)");
+    let tracked = lambda
+        || (!deduced
+            && (pointer || ty.contains("struct ") || ty.contains("_ops") || ty.ends_with("_t")));
+    Some((var_name, tracked.then(|| ty.to_string())))
+}
+
+/// The identifier a C/C++ variable declarator binds, and whether a pointer
+/// declarator wraps it. A function declarator binds a variable only as a
+/// function pointer (`(*fp)(int)`); any other one is a prototype.
+fn c_declared_name(declarator: Node<'_>) -> Option<(Node<'_>, bool)> {
+    let mut n = declarator;
+    let mut pointer = false;
+    loop {
+        n = match n.kind() {
+            "identifier" => return Some((n, pointer)),
+            // `T *JET_MUTABLE x;`: C++ reads the empty-or-`const` macro as a scope.
+            "qualified_identifier" => n.child_by_field_name("name")?,
+            "init_declarator" | "array_declarator" => n.child_by_field_name("declarator")?,
+            "pointer_declarator" => {
+                pointer = true;
+                n.child_by_field_name("declarator")?
+            }
+            "reference_declarator" | "parenthesized_declarator" => n.named_child(0)?,
+            "function_declarator" => n
+                .child_by_field_name("declarator")
+                .filter(|d| d.kind() == "parenthesized_declarator")?,
+            _ => return None,
+        };
+    }
 }
 
 // ── JavaScript / TypeScript ───────────────────────────────────────────────────

@@ -37,6 +37,38 @@ impl JavaProvider {
     }
 }
 
+/// `Some(true)` for `public`/`protected`, `Some(false)` for `private`, `None`
+/// when `decl` carries no access modifier.
+fn explicit_access(decl: Node) -> Option<bool> {
+    let mut cursor = decl.walk();
+    let modifiers = decl
+        .children(&mut cursor)
+        .find(|c| c.kind() == "modifiers")?;
+    let mut inner = modifiers.walk();
+    let access = modifiers.children(&mut inner).find_map(|c| match c.kind() {
+        "public" | "protected" => Some(true),
+        "private" => Some(false),
+        _ => None,
+    });
+    access
+}
+
+/// A member of an `interface` or `@interface` body with no access modifier
+/// is implicitly `public`, so it is as reachable as its enclosing type. A
+/// `private` member (Java 9 interface method) stays unexported. Any other
+/// declaration returns `false` and keeps the query's `@export` verdict.
+fn is_interface_member_exported(decl: Node) -> bool {
+    fn exported(decl: Node) -> bool {
+        explicit_access(decl).unwrap_or_else(|| enclosing_interface(decl).is_some_and(exported))
+    }
+    fn enclosing_interface(decl: Node) -> Option<Node> {
+        decl.parent()
+            .filter(|p| matches!(p.kind(), "interface_body" | "annotation_type_body"))
+            .and_then(|p| p.parent())
+    }
+    enclosing_interface(decl).is_some() && exported(decl)
+}
+
 /// Returns true if the bytes of the `import_declaration` node contain the
 /// anonymous keyword `static` — used to distinguish `import static X.y` from
 /// plain `import X.y` without adding a named capture for every anonymous node.
@@ -299,6 +331,7 @@ impl ParseSpec for JavaSpec {
         } = std::mem::take(m);
 
         if let (Some(n), Some(k), Some(root)) = (d.name, d.kind, d.root) {
+            let is_exported = is_exported || is_interface_member_exported(root);
             if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                 // Multi-declarator declarations (`int x, y, z;` for
                 // fields OR locals) share one declaration root. Keying

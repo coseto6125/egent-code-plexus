@@ -79,7 +79,7 @@ fn test_typescript_driver_imports_only_file_marks_default_import() {
 
 /// The freeze-enum walk pops the last pushed child first, so the second
 /// declaration's spot comes first. An `as const` spot spans the whole
-/// declaration; an `Object.freeze` spot spans its declarator.
+/// declaration; an `Object.freeze` spot spans it too.
 #[test]
 fn test_typescript_driver_freeze_enum_spots_follow_walk_order() {
     let g = parse(
@@ -89,7 +89,8 @@ fn test_typescript_driver_freeze_enum_spots_follow_walk_order() {
         blind(&g),
         [
             ("ts-object-freeze-enum", (1, 0, 1, 42), false),
-            ("ts-object-freeze-enum", (0, 6, 0, 44), false),
+            // Contract: a freeze spot spans the whole declaration, as `as const` does.
+            ("ts-object-freeze-enum", (0, 0, 0, 45), false),
         ]
     );
     assert!(g
@@ -237,12 +238,12 @@ fn test_typescript_driver_arrow_const_emits_function_only() {
     );
 }
 
-/// A `.tsx` path parses with the TypeScript grammar, as before the move, so
-/// a `<T>` prefix that the TSX grammar would read as JSX gives the same
-/// nodes under both extensions.
+/// A `.tsx` path parses with the TSX grammar; a JSX-free file with the
+/// `<T,>` generic form gives the same nodes under both extensions.
 #[test]
-fn test_typescript_driver_tsx_file_uses_typescript_grammar() {
-    let src: &[u8] = b"export function App() { return render(); }\nconst f = <T>(x: T) => g(x);\n";
+fn test_typescript_driver_tsx_file_without_jsx_matches_typescript_grammar() {
+    // Contract: `<T,>` is the TSX-legal generic arrow, so the source has one reading.
+    let src: &[u8] = b"export function App() { return render(); }\nconst f = <T,>(x: T) => g(x);\n";
     let tsx = parse_at("ui/App.tsx", src);
     let app = &tsx.nodes[0];
     assert_eq!((app.name.as_str(), app.kind), ("App", NodeKind::Function));
