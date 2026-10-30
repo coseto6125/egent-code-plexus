@@ -5,7 +5,7 @@
 use ecp_analyzer::cpp::parser::CppProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
-use ecp_core::graph::NodeKind;
+use ecp_core::graph::{CallMeta, NodeKind};
 use ecp_core::uid::xxh3_64_bytes;
 use std::path::Path;
 
@@ -314,4 +314,243 @@ fn test_cpp_define_after_finished_continuation_is_kept() {
         b"#define LONG(x) \\\n    ((x) + 1)\n#define NEXT 2\n",
     );
     assert_eq!(macro_names(&g), ["LONG", "NEXT"]);
+}
+
+// ---- Round 2 (P5 group A) ----
+
+fn rows_of_kinds<'g>(g: &'g LocalGraph, kinds: &[NodeKind]) -> Vec<Row<'g>> {
+    sorted_rows(g)
+        .into_iter()
+        .filter(|r| kinds.contains(&r.1))
+        .collect()
+}
+
+/// A1, C++ side (`.h` parses as C++): a function-pointer typedef whose
+/// return type is a pointer is a `Typedef` node (`lua.h`, `redismodule.h`).
+#[test]
+fn test_cpp_pointer_return_fn_ptr_typedefs_emit_typedef_nodes() {
+    let g = parse(
+        "lua.h",
+        b"typedef const char * (*lua_Reader) (lua_State *L, void *ud, size_t *sz);\ntypedef void *(*RedisModuleTypeLoadFunc)(RedisModuleIO *rdb, int encver);\ntypedef dict *(*getClientChannelsFn)(client *);\n",
+    );
+    assert_eq!(
+        rows_of_kinds(&g, &[NodeKind::Typedef]),
+        [
+            ("lua_Reader", NodeKind::Typedef, (0, 0, 0, 72), None, None),
+            (
+                "RedisModuleTypeLoadFunc",
+                NodeKind::Typedef,
+                (1, 0, 1, 73),
+                None,
+                None
+            ),
+            (
+                "getClientChannelsFn",
+                NodeKind::Typedef,
+                (2, 0, 2, 47),
+                None,
+                None
+            ),
+        ]
+    );
+}
+
+/// A1 atypical, C++ side: `***`, an array of function pointers, a pointer
+/// to a function pointer, a `**` return and the A1 shape inside `#ifdef`.
+/// The abstract declarator names nothing; `cmp_fn` and `counter_t` stay.
+#[test]
+fn test_cpp_nested_fn_ptr_and_triple_pointer_typedefs_emit_typedef_nodes() {
+    let g = parse(
+        "typedefs2.h",
+        b"typedef char ***str_cube;\ntypedef int (*handlers[4])(int);\ntypedef int (**handler_pp)(int);\ntypedef char **(*argv_fn)(void);\n#ifdef HAVE_ALLOC\ntypedef void *(*alloc_fn)(size_t);\n#endif\ntypedef void *(*)(int);\ntypedef int (*cmp_fn)(int, int);\ntypedef unsigned long counter_t;\n",
+    );
+    assert_eq!(
+        rows_of_kinds(&g, &[NodeKind::Typedef]),
+        [
+            ("str_cube", NodeKind::Typedef, (0, 0, 0, 25), None, None),
+            ("handlers", NodeKind::Typedef, (1, 0, 1, 32), None, None),
+            ("handler_pp", NodeKind::Typedef, (2, 0, 2, 32), None, None),
+            ("argv_fn", NodeKind::Typedef, (3, 0, 3, 32), None, None),
+            ("alloc_fn", NodeKind::Typedef, (5, 0, 5, 34), None, None),
+            ("cmp_fn", NodeKind::Typedef, (8, 0, 8, 32), None, None),
+            ("counter_t", NodeKind::Typedef, (9, 0, 9, 32), None, None),
+        ]
+    );
+    assert!(
+        g.nodes.iter().all(|n| !n.name.is_empty()),
+        "the abstract declarator names nothing: {:?}",
+        sorted_rows(&g)
+    );
+}
+
+/// A2: the file-level guard decision reads the source, not the recovered
+/// tree. The `#if` / `#else` branches each open a brace, so the guard lands
+/// in an ERROR node (`libuv.h`, `atomic.h`, `rb.h`, `json.hpp`); its
+/// `#define` still emits no Macro.
+#[test]
+fn test_cpp_include_guard_in_error_recovered_tree_emits_no_macro_node() {
+    let g = parse(
+        "libuv.h",
+        b"#ifndef __HIREDIS_LIBUV_H__\n#define __HIREDIS_LIBUV_H__\n#define LIBUV_KEEP 1\nint f() {\n#if A\n  if (a) {\n#else\n  if (b) {\n#endif\n  }\n}\n#endif\n",
+    );
+    assert_eq!(macro_names(&g), ["LIBUV_KEEP"]);
+}
+
+/// A2 (`doctest.h` shape): the file-level guard closes before further
+/// top-level blocks, and the tree is error-recovered. The guard is still at
+/// conditional depth 0, so its `#define` emits no Macro, as `SECOND_H` in
+/// the clean-tree guard test below.
+#[test]
+fn test_cpp_guard_before_trailing_block_in_recovered_tree_emits_no_macro_node() {
+    let g = parse(
+        "doctest.h",
+        b"#ifndef DOCTEST_LIBRARY_INCLUDED\n#define DOCTEST_LIBRARY_INCLUDED\n#define DOCTEST_VERSION_MAJOR 2\nint f() {\n#if A\n  if (a) {\n#else\n  if (b) {\n#endif\n  }\n}\n#endif // DOCTEST_LIBRARY_INCLUDED\n#ifdef DOCTEST_UNDEF_NOMINMAX\n#undef NOMINMAX\n#endif\n",
+    );
+    assert_eq!(macro_names(&g), ["DOCTEST_VERSION_MAJOR"]);
+}
+
+/// A2: a guard nested inside the file-level guard keeps its Macro, also
+/// when error recovery closes the outer guard early and lifts the nested
+/// one to the top of the tree (`tests/abi/.../json_v3_10_5.hpp:3288`; the
+/// same guard is kept in `single_include/nlohmann/json.hpp:3506`).
+#[test]
+fn test_cpp_nested_guard_lifted_by_error_recovery_keeps_macro_node() {
+    let g = parse(
+        "json_v3_10_5.hpp",
+        b"#ifndef INCLUDE_NLOHMANN_JSON_HPP_\n#define INCLUDE_NLOHMANN_JSON_HPP_\nint pick() {\n#if A\n  return 1; }\n#else\n  return 2; }\n#endif\n#ifndef INCLUDE_NLOHMANN_JSON_FWD_HPP_\n#define INCLUDE_NLOHMANN_JSON_FWD_HPP_\nint fwd;\n#endif\n#endif\n",
+    );
+    assert_eq!(macro_names(&g), ["INCLUDE_NLOHMANN_JSON_FWD_HPP_"]);
+    assert_eq!(
+        named(&g, "INCLUDE_NLOHMANN_JSON_FWD_HPP_").span,
+        (9, 0, 10, 0)
+    );
+}
+
+/// A2 guard: on a clean tree, two nested guards side by side keep their
+/// Macros, two file-level guards side by side lose theirs, and a `#define`
+/// whose name differs from the `#ifndef` is no guard.
+#[test]
+fn test_cpp_guard_neighbours_on_clean_tree_unchanged() {
+    let g = parse(
+        "guards.h",
+        b"#ifndef OUTER_H\n#define OUTER_H\n#ifndef INNER_H\n#define INNER_H\n#endif\n#ifndef PEER_H\n#define PEER_H\n#endif\n#endif\n#ifndef SECOND_H\n#define SECOND_H\n#endif\n#ifndef WRONG_H\n#define OTHER_H\n#endif\n",
+    );
+    assert_eq!(macro_names(&g), ["INNER_H", "OTHER_H", "PEER_H"]);
+}
+
+/// A2 edge: an empty header and a guard with no name emit no Macro.
+#[test]
+fn test_cpp_empty_file_and_nameless_guard_emit_no_macro_node() {
+    assert!(parse("empty.h", b"").nodes.is_empty());
+    let g = parse("noname.h", b"#ifndef\n#define\n#endif\n");
+    assert!(macro_names(&g).is_empty(), "{:?}", sorted_rows(&g));
+}
+
+/// `(caller_name, caller_span, flags, dispatch_type)`. `call_index` is left
+/// out: receiver typing may rewrite the callee text it indexes.
+type CallMetaRow<'g> = (&'g str, Span, u8, &'g str);
+
+fn call_meta_rows(g: &LocalGraph) -> Vec<CallMetaRow<'_>> {
+    g.call_metas
+        .iter()
+        .map(|m| {
+            (
+                m.caller_name.as_str(),
+                m.caller_span,
+                m.flags,
+                m.dispatch_type.as_str(),
+            )
+        })
+        .collect()
+}
+
+/// A3: a typed parameter types the receiver calls of its own function only.
+/// `b`'s `auto val` and the lambda's `auto val` are bindings the binder
+/// cannot type, so their calls carry no dispatch type; `c`'s own call keeps
+/// `c`'s parameter type.
+#[test]
+fn test_cpp_param_type_does_not_leak_into_same_name_in_other_scope() {
+    let g = parse(
+        "handlers.cpp",
+        b"struct Handler { void run(); };\nvoid a(Handler *val) { val->run(); }\nvoid b() { auto val = make(); val->run(); }\nvoid c(Handler *val) { auto f = [](auto val) { val->run(); }; val->run(); }\n",
+    );
+    let dynamic = CallMeta::FLAG_CALLBACK | CallMeta::FLAG_DYNAMIC_DISPATCH;
+    assert_eq!(
+        call_meta_rows(&g),
+        [
+            ("a", (1, 0, 1, 36), dynamic, "Handler"),
+            ("c", (3, 0, 3, 75), dynamic, "Handler"),
+        ]
+    );
+}
+
+/// A3 (`include/nlohmann/json.hpp:836-906`): two constructors name their
+/// parameter `val` with different types. Each constructor's call through
+/// `val` carries its own parameter's type, never the other one's.
+#[test]
+fn test_cpp_same_name_params_of_two_ctors_keep_own_dispatch_type() {
+    let g = parse(
+        "json.hpp",
+        b"class basic_json {\n  public:\n    template < typename CompatibleType >\n    basic_json(CompatibleType && val)\n    {\n        val.get();\n    }\n    template < typename BasicJsonType >\n    basic_json(const BasicJsonType& val)\n    {\n        val.type();\n    }\n};\n",
+    );
+    let mut ctors: Vec<Span> = g
+        .nodes
+        .iter()
+        .filter(|n| n.name == "basic_json" && n.kind != NodeKind::Class)
+        .map(|n| n.span)
+        .collect();
+    ctors.sort_unstable();
+    assert_eq!(ctors.len(), 2, "two constructors: {:?}", sorted_rows(&g));
+    let dynamic = CallMeta::FLAG_CALLBACK | CallMeta::FLAG_DYNAMIC_DISPATCH;
+    assert_eq!(
+        call_meta_rows(&g),
+        [
+            ("basic_json", ctors[0], dynamic, "CompatibleType"),
+            ("basic_json", ctors[1], dynamic, "BasicJsonType"),
+        ]
+    );
+}
+
+/// A4, C++ side: file-scope arrays are Variables (a `const` one a Const),
+/// like the scalar beside them. A `static` local array and a struct array
+/// member are not Variables.
+#[test]
+fn test_cpp_file_scope_array_decls_emit_variable_nodes() {
+    let g = parse(
+        "arrays.cpp",
+        b"static const uint8_t bitsinbyte[256] = {0};\nstatic char *bio_worker_title[] = {\"a\", \"b\"};\nstatic uint64_t combine_cache[64][64];\nint pair[2], single;\nstruct S { int buf[8]; };\nvoid f(void) { static int local_arr[4]; }\n",
+    );
+    let s = Some;
+    assert_eq!(
+        rows_of_kinds(&g, &[NodeKind::Variable, NodeKind::Const]),
+        [
+            (
+                "bitsinbyte",
+                NodeKind::Const,
+                (0, 0, 0, 43),
+                None,
+                s("static const uint8_t")
+            ),
+            (
+                "bio_worker_title",
+                NodeKind::Variable,
+                (1, 0, 1, 45),
+                None,
+                s("static char *")
+            ),
+            (
+                "combine_cache",
+                NodeKind::Variable,
+                (2, 0, 2, 38),
+                None,
+                s("static uint64_t")
+            ),
+            ("pair", NodeKind::Variable, (3, 0, 3, 20), None, s("int")),
+            ("single", NodeKind::Variable, (3, 0, 3, 20), None, s("int")),
+        ]
+    );
+    assert_eq!(
+        named(&g, "combine_cache").content_hash,
+        xxh3_64_bytes(b"static uint64_t combine_cache[64][64];")
+    );
 }

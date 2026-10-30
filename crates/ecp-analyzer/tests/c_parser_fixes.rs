@@ -6,7 +6,7 @@
 use ecp_analyzer::c::parser::CProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{BindingKind, LocalGraph};
-use ecp_core::graph::NodeKind;
+use ecp_core::graph::{CallMeta, NodeKind};
 use ecp_core::uid::xxh3_64_bytes;
 use std::path::Path;
 
@@ -336,4 +336,365 @@ fn test_c_define_after_finished_continuation_is_kept() {
         b"#define LONG(x) \\\n    ((x) + 1)\n#define NEXT 2\n",
     );
     assert_eq!(macro_names(&g), ["LONG", "NEXT"]);
+}
+
+// ---- Round 2 (P5 group A) ----
+
+fn macro_rows(g: &LocalGraph) -> Vec<Row<'_>> {
+    let mut rows = rows_of(g, &[NodeKind::Macro]);
+    rows.sort_by_key(|r| (r.2, r.0));
+    rows
+}
+
+fn sorted_rows_of<'g>(g: &'g LocalGraph, kinds: &[NodeKind]) -> Vec<Row<'g>> {
+    let mut rows = rows_of(g, kinds);
+    rows.sort_by_key(|r| (r.2, r.0));
+    rows
+}
+
+/// A1: a function-pointer typedef whose return type is a pointer nests the
+/// alias one `pointer_declarator` deeper (`lua.h`, `redismodule.h`,
+/// `defrag.c`); it is a `Typedef` node like `typedef int (*cmp_fn)(int);`.
+#[test]
+fn test_c_pointer_return_fn_ptr_typedefs_emit_typedef_nodes() {
+    let g = parse(
+        "lua.c",
+        b"typedef const char * (*lua_Reader) (lua_State *L, void *ud, size_t *sz);\ntypedef void *(*RedisModuleTypeLoadFunc)(RedisModuleIO *rdb, int encver);\ntypedef dict *(*getClientChannelsFn)(client *);\n",
+    );
+    assert_eq!(
+        rows_of(&g, &[NodeKind::Typedef]),
+        [
+            ("lua_Reader", NodeKind::Typedef, (0, 0, 0, 72), true, None),
+            (
+                "RedisModuleTypeLoadFunc",
+                NodeKind::Typedef,
+                (1, 0, 1, 73),
+                true,
+                None
+            ),
+            (
+                "getClientChannelsFn",
+                NodeKind::Typedef,
+                (2, 0, 2, 47),
+                true,
+                None
+            ),
+        ]
+    );
+    let reader = g
+        .nodes
+        .iter()
+        .find(|n| n.name == "lua_Reader")
+        .expect("lua_Reader");
+    assert_eq!(
+        reader.content_hash,
+        xxh3_64_bytes(b"typedef const char * (*lua_Reader) (lua_State *L, void *ud, size_t *sz);")
+    );
+    assert!(
+        rows_of(&g, &[NodeKind::Function, NodeKind::Variable]).is_empty(),
+        "a typedef declarator is never a function or a variable"
+    );
+}
+
+/// A1 atypical: `***`, an array of function pointers, a pointer to a
+/// function pointer, a `**` return, and the A1 shape inside `#ifdef` are all
+/// `Typedef` nodes. The abstract `typedef void *(*)(int);` names nothing, so
+/// it emits no node. `cmp_fn`, `counter_t` and the pointer-returning
+/// prototype `alloc` keep today's records.
+#[test]
+fn test_c_nested_fn_ptr_and_triple_pointer_typedefs_emit_typedef_nodes() {
+    let g = parse(
+        "typedefs2.c",
+        b"typedef char ***str_cube;\ntypedef int (*handlers[4])(int);\ntypedef int (**handler_pp)(int);\ntypedef char **(*argv_fn)(void);\n#ifdef HAVE_ALLOC\ntypedef void *(*alloc_fn)(size_t);\n#endif\ntypedef void *(*)(int);\ntypedef int (*cmp_fn)(int, int);\ntypedef unsigned long counter_t;\nvoid *alloc(size_t n);\n",
+    );
+    assert_eq!(
+        rows_of(&g, &[NodeKind::Typedef, NodeKind::Function]),
+        [
+            ("str_cube", NodeKind::Typedef, (0, 0, 0, 25), true, None),
+            ("handlers", NodeKind::Typedef, (1, 0, 1, 32), true, None),
+            ("handler_pp", NodeKind::Typedef, (2, 0, 2, 32), true, None),
+            ("argv_fn", NodeKind::Typedef, (3, 0, 3, 32), true, None),
+            ("alloc_fn", NodeKind::Typedef, (5, 0, 5, 34), true, None),
+            ("cmp_fn", NodeKind::Typedef, (8, 0, 8, 32), true, None),
+            ("counter_t", NodeKind::Typedef, (9, 0, 9, 32), true, None),
+            ("alloc", NodeKind::Function, (10, 0, 10, 22), true, None),
+        ]
+    );
+    assert!(
+        g.nodes.iter().all(|n| !n.name.is_empty()),
+        "the abstract declarator names nothing: {:?}",
+        g.nodes
+    );
+}
+
+/// A2: the file-level guard decision reads the source, not the recovered
+/// tree. Here the `#if` / `#else` branches each open a brace, so the whole
+/// guard lands in an ERROR node (`hiredis/adapters/libuv.h` shape). The
+/// guard `#define` still emits no Macro; the real macro stays.
+#[test]
+fn test_c_include_guard_in_error_recovered_tree_emits_no_macro_node() {
+    let g = parse(
+        "libuv.c",
+        b"#ifndef __HIREDIS_LIBUV_H__\n#define __HIREDIS_LIBUV_H__\n#define LIBUV_KEEP 1\nint f() {\n#if A\n  if (a) {\n#else\n  if (b) {\n#endif\n  }\n}\n#endif\n",
+    );
+    assert_eq!(macro_names(&g), ["LIBUV_KEEP"]);
+}
+
+/// A2: a guard nested inside the file-level guard is no file-level guard,
+/// so its `#define` stays a Macro even when error recovery closes the outer
+/// guard early and lifts the nested one to the top of the tree
+/// (`json_v3_10_5.hpp` `INCLUDE_NLOHMANN_JSON_FWD_HPP_` shape).
+#[test]
+fn test_c_nested_guard_lifted_by_error_recovery_keeps_macro_node() {
+    let g = parse(
+        "json.c",
+        b"#ifndef INCLUDE_NLOHMANN_JSON_HPP_\n#define INCLUDE_NLOHMANN_JSON_HPP_\nint pick() {\n#if A\n  return 1; }\n#else\n  return 2; }\n#endif\n#ifndef INCLUDE_NLOHMANN_JSON_FWD_HPP_\n#define INCLUDE_NLOHMANN_JSON_FWD_HPP_\nint fwd;\n#endif\n#endif\n",
+    );
+    assert_eq!(
+        macro_rows(&g),
+        [(
+            "INCLUDE_NLOHMANN_JSON_FWD_HPP_",
+            NodeKind::Macro,
+            (9, 0, 10, 0),
+            true,
+            None
+        )]
+    );
+}
+
+/// A2 guard: on a clean tree, two nested guards side by side keep their
+/// Macros, two file-level guards side by side lose theirs, and a `#define`
+/// whose name differs from the `#ifndef` is no guard.
+#[test]
+fn test_c_guard_neighbours_on_clean_tree_unchanged() {
+    let g = parse(
+        "guards.c",
+        b"#ifndef OUTER_H\n#define OUTER_H\n#ifndef INNER_H\n#define INNER_H\n#endif\n#ifndef PEER_H\n#define PEER_H\n#endif\n#endif\n#ifndef SECOND_H\n#define SECOND_H\n#endif\n#ifndef WRONG_H\n#define OTHER_H\n#endif\n",
+    );
+    assert_eq!(
+        macro_rows(&g),
+        [
+            ("INNER_H", NodeKind::Macro, (3, 0, 4, 0), true, None),
+            ("PEER_H", NodeKind::Macro, (6, 0, 7, 0), true, None),
+            ("OTHER_H", NodeKind::Macro, (13, 0, 14, 0), true, None),
+        ]
+    );
+}
+
+/// A2 edge: an empty file and a guard with no name emit no Macro.
+#[test]
+fn test_c_empty_file_and_nameless_guard_emit_no_macro_node() {
+    assert!(parse("empty.c", b"").nodes.is_empty());
+    let g = parse("noname.c", b"#ifndef\n#define\n#endif\n");
+    assert!(macro_names(&g).is_empty(), "{:?}", g.nodes);
+}
+
+/// `(caller_name, caller_span, call_index, flags, dispatch_type)`
+type CallMetaRow<'g> = (&'g str, Span, u32, u8, &'g str);
+
+fn call_meta_rows(g: &LocalGraph) -> Vec<CallMetaRow<'_>> {
+    g.call_metas
+        .iter()
+        .map(|m| {
+            (
+                m.caller_name.as_str(),
+                m.caller_span,
+                m.call_index,
+                m.flags,
+                m.dispatch_type.as_str(),
+            )
+        })
+        .collect()
+}
+
+/// A3: a function-pointer parameter types the calls of its own function
+/// only. `direct` calls the file-scope function `cb`, which `run`'s
+/// parameter `cb` does not shadow, so that call is direct. The file-scope
+/// `hook` still types the call in `fire`, and `run`'s call inside a nested
+/// block still goes through its parameter.
+#[test]
+fn test_c_fn_ptr_param_types_calls_in_its_own_function_only() {
+    let g = parse(
+        "dispatch.c",
+        b"typedef int (*handler_t)(int);\nstatic handler_t hook;\nint cb(int x) { return x; }\nint run(handler_t cb) { if (cb) { return cb(1); } return 0; }\nint direct(void) { return cb(2); }\nint fire(void) { return hook(3); }\n",
+    );
+    let callback = CallMeta::FLAG_CALLBACK;
+    assert_eq!(
+        call_meta_rows(&g),
+        [
+            ("run", (3, 0, 3, 61), 0, callback, "handler_t"),
+            ("fire", (5, 0, 5, 34), 0, callback, "handler_t"),
+        ]
+    );
+}
+
+/// A4: a file-scope array declaration is a Variable like a scalar one,
+/// guarded or not (`tre/tests/retest.c:64-66`, `jemalloc/src/tsd.c:235`).
+/// The type keeps the declaration prefix, as for a struct field array.
+#[test]
+fn test_c_file_scope_array_decls_emit_variable_nodes() {
+    let g = parse(
+        "retest.c",
+        b"#define MAXSTRSIZE 8192\nstatic wchar_t wstr[MAXSTRSIZE];\nstatic int woffs[MAXSTRSIZE];\n#if defined(JEMALLOC_MALLOC_THREAD_CLEANUP) || defined(_WIN32)\nstatic unsigned             ncleanups;\nstatic malloc_tsd_cleanup_t cleanups[MALLOC_TSD_CLEANUPS_MAX];\n#endif\n",
+    );
+    let s = Some;
+    assert_eq!(
+        sorted_rows_of(&g, &[NodeKind::Variable]),
+        [
+            (
+                "wstr",
+                NodeKind::Variable,
+                (1, 0, 1, 32),
+                true,
+                s("static wchar_t")
+            ),
+            (
+                "woffs",
+                NodeKind::Variable,
+                (2, 0, 2, 29),
+                true,
+                s("static int")
+            ),
+            (
+                "ncleanups",
+                NodeKind::Variable,
+                (4, 0, 4, 38),
+                true,
+                s("static unsigned")
+            ),
+            (
+                "cleanups",
+                NodeKind::Variable,
+                (5, 0, 5, 62),
+                true,
+                s("static malloc_tsd_cleanup_t")
+            ),
+        ]
+    );
+    let wstr = g.nodes.iter().find(|n| n.name == "wstr").expect("wstr");
+    assert_eq!(
+        wstr.content_hash,
+        xxh3_64_bytes(b"static wchar_t wstr[MAXSTRSIZE];")
+    );
+}
+
+/// A4 atypical: an initialised array, an array of pointers, a 2-D array and
+/// an array beside a scalar in one declaration are Variables. A `static`
+/// array inside a body is a local and a struct array member stays a
+/// Property.
+#[test]
+fn test_c_initialised_pointer_and_2d_arrays_emit_variables_but_local_does_not() {
+    let g = parse(
+        "arrays.c",
+        b"static const uint8_t bitsinbyte[256] = {0};\nstatic char *bio_worker_title[] = {\"a\", \"b\"};\nstatic uint64_t combine_cache[64][64];\nint pair[2], single;\nstruct S { int buf[8]; };\nvoid f(void) { static int local_arr[4]; }\n",
+    );
+    let s = Some;
+    assert_eq!(
+        sorted_rows_of(&g, &[NodeKind::Variable, NodeKind::Property]),
+        [
+            (
+                "bitsinbyte",
+                NodeKind::Variable,
+                (0, 0, 0, 43),
+                true,
+                s("static const uint8_t")
+            ),
+            (
+                "bio_worker_title",
+                NodeKind::Variable,
+                (1, 0, 1, 45),
+                true,
+                s("static char *")
+            ),
+            (
+                "combine_cache",
+                NodeKind::Variable,
+                (2, 0, 2, 38),
+                true,
+                s("static uint64_t")
+            ),
+            ("pair", NodeKind::Variable, (3, 0, 3, 20), true, s("int")),
+            ("single", NodeKind::Variable, (3, 0, 3, 20), true, s("int")),
+            ("buf", NodeKind::Property, (4, 11, 4, 22), true, s("int")),
+        ]
+    );
+}
+
+/// A5 (`jemalloc/src/pages.c:636`): a `#ifdef` split inside a string
+/// argument puts the rest of the file in one top-level ERROR node. The
+/// file-scope declarations after the function, guarded or not, are still
+/// nodes (a `static` prototype is an unexported Function). The locals of
+/// the broken body (`before` at brace depth 1, `buf` at depth 2) are not.
+#[test]
+fn test_c_file_scope_decls_after_error_recovered_function_emit_variables() {
+    let g = parse(
+        "pages.c",
+        b"static void\nunmap(void *addr) {\n\tint before = 0;\n#ifdef _WIN32\n\tif (VirtualFree(addr) == 0)\n#else\n\tif (munmap(addr) == -1)\n#endif\n\t{\n\t\tchar buf[64];\n\t\tprintf(\n\t\t    \"Error in \"\n#ifdef _WIN32\n\t\t    \"VirtualFree\"\n#else\n\t\t    \"munmap\"\n#endif\n\t\t    \"(): %s\\n\",\n\t\t    buf);\n\t}\n}\n\n#ifdef HAVE_GATE\nstatic int gate = 1;\n#endif\nstatic int plain;\nstatic int init_gate(void);\n",
+    );
+    let s = Some;
+    assert_eq!(
+        sorted_rows_of(&g, &[NodeKind::Variable, NodeKind::Function]),
+        [
+            (
+                "gate",
+                NodeKind::Variable,
+                (23, 0, 23, 20),
+                true,
+                s("static int")
+            ),
+            (
+                "plain",
+                NodeKind::Variable,
+                (25, 0, 25, 17),
+                true,
+                s("static int")
+            ),
+            (
+                "init_gate",
+                NodeKind::Function,
+                (26, 0, 26, 27),
+                false,
+                None
+            ),
+        ]
+    );
+}
+
+/// A5 (`src/setproctitle.c:57`): `extern char **environ;` is a Variable in
+/// nested `#if` blocks and at file scope; the cause is the `**` declarator,
+/// not the conditional. The one-star neighbour keeps its record and a `**`
+/// local stays out.
+#[test]
+fn test_c_double_pointer_file_scope_decls_emit_variables() {
+    let g = parse(
+        "setproctitle.c",
+        b"#if !HAVE_SETPROCTITLE\n#if (defined __linux || defined __APPLE__)\nextern char **environ;\n#endif\n#endif\nstatic char **argv_copy = 0;\nextern char *single_ptr;\nvoid f(void) { char **local_pp = 0; }\n",
+    );
+    let s = Some;
+    assert_eq!(
+        sorted_rows_of(&g, &[NodeKind::Variable]),
+        [
+            (
+                "environ",
+                NodeKind::Variable,
+                (2, 0, 2, 22),
+                true,
+                s("extern char **")
+            ),
+            (
+                "argv_copy",
+                NodeKind::Variable,
+                (5, 0, 5, 28),
+                true,
+                s("static char **")
+            ),
+            (
+                "single_ptr",
+                NodeKind::Variable,
+                (6, 0, 6, 24),
+                true,
+                s("extern char *")
+            ),
+        ]
+    );
 }
