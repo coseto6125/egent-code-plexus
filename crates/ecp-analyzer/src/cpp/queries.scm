@@ -342,7 +342,16 @@
 ) @typedef_node
 
 (type_definition
-  declarator: (type_identifier) @name.typedef
+  declarator: [
+    (type_identifier) @name.typedef
+    (pointer_declarator declarator: (type_identifier) @name.typedef)
+    (pointer_declarator
+      declarator: (pointer_declarator declarator: (type_identifier) @name.typedef))
+    (array_declarator declarator: (type_identifier) @name.typedef)
+    (function_declarator
+      declarator: (parenthesized_declarator
+        (pointer_declarator declarator: (type_identifier) @name.typedef)))
+  ]
 ) @typedef_node
 
 ;; Override specifier — `void foo() override {}` or `void foo() override = 0;`.

@@ -110,9 +110,9 @@ fn test_dart_driver_imports_only_file_keeps_source_order() {
 }
 
 /// Class, mixin and extension; a field, a getter, the default, named and
-/// factory constructors and a method. A named constructor emits one node
-/// per name identifier on the same span; the mixin is spliced into the
-/// class heritage after the superclass; the stamp sets the owner.
+/// factory constructors and a method. A named constructor emits one node,
+/// named by its last name identifier; the mixin is spliced into the class
+/// heritage after the superclass; the stamp sets the owner.
 #[test]
 fn test_dart_driver_class_mixin_extension_emits_members_in_query_order() {
     let src = concat!(
@@ -142,9 +142,8 @@ fn test_dart_driver_class_mixin_extension_emits_members_in_query_order() {
             ("Dog", NodeKind::Class, (2, 0, 11, 1), None),
             ("name", NodeKind::Property, (3, 2, 3, 19), dog),
             ("Dog", NodeKind::Constructor, (4, 2, 4, 16), dog),
-            ("Dog", NodeKind::Constructor, (5, 2, 5, 22), dog),
+            // Contract: one Constructor node per declaration.
             ("named", NodeKind::Constructor, (5, 2, 5, 22), dog),
-            ("Dog", NodeKind::Constructor, (6, 2, 6, 35), dog),
             ("create", NodeKind::Constructor, (6, 2, 6, 35), dog),
             ("label", NodeKind::Property, (7, 2, 7, 27), dog),
             ("bark", NodeKind::Method, (8, 2, 10, 3), dog),
@@ -162,8 +161,6 @@ fn test_dart_driver_class_mixin_extension_emits_members_in_query_order() {
             None,
             None,
             None,
-            None,
-            None,
             Some("String"),
             Some("void"),
             None,
@@ -177,12 +174,12 @@ fn test_dart_driver_class_mixin_extension_emits_members_in_query_order() {
         .nodes
         .iter()
         .all(|n| n.is_exported && n.decorators.is_empty()));
-    let bark = at(&g, 10);
+    let bark = at(&g, 8);
     assert_eq!(bark.calls, ["print"]);
     assert_eq!(bark.field_reads, ["\u{1}name name"]);
     assert_eq!(bark.content_hash, 8394018138179969286);
-    assert_eq!(at(&g, 7).calls, ["Dog"]);
-    assert_eq!(at(&g, 12).calls, ["bark"]);
+    assert_eq!(at(&g, 6).calls, ["Dog"]);
+    assert_eq!(at(&g, 10).calls, ["bark"]);
     let metas: Vec<Span4> = g.raw_function_metas.iter().map(|m| m.span).collect();
     assert_eq!(metas, [(6, 2, 6, 35), (8, 2, 10, 3), (13, 2, 13, 23)]);
     assert!(g.imports.is_empty() && g.tx_scopes.is_none() && g.path_literals.is_none());

@@ -126,8 +126,8 @@ enum color pick(void) { return GREEN; }
 "#;
 
 /// Query order: each declaration, then its fields or enumerators; the
-/// owner stamp runs last. A prototype has no `@type`, a `static` function
-/// is not exported, and the function-pointer typedef yields no node.
+/// owner stamp runs last. A prototype has no `@type` and a `static` function
+/// is not exported.
 #[test]
 fn test_c_driver_declarations_keep_query_order_and_fields() {
     let g = parse(DECLS);
@@ -210,6 +210,8 @@ fn test_c_driver_declarations_keep_query_order_and_fields() {
                 None,
                 None
             ),
+            // A function-pointer typedef is a Typedef node like the plain ones.
+            ("cmp_fn", NodeKind::Typedef, (5, 0, 5, 32), true, None, None),
             (
                 "LIMIT",
                 NodeKind::Variable,
@@ -262,12 +264,13 @@ fn test_c_driver_declarations_keep_query_order_and_fields() {
         calls_of(&g, "pick", (11, 0, 11, 39)),
         (vec![], vec!["\u{1}name GREEN", "\u{1}variant GREEN"])
     );
+    // Named-binding imports follow source order.
     assert_eq!(
         import_rows(&g),
         [
-            binding("cmp_fn", "int", BindingKind::Alias),
-            binding("point_t", "struct point", BindingKind::Alias),
             binding("counter_t", "unsigned long", BindingKind::Alias),
+            binding("point_t", "struct point", BindingKind::Alias),
+            binding("cmp_fn", "int", BindingKind::Alias),
         ]
     );
     let metas: Vec<FnMetaRow<'_>> = g
@@ -390,7 +393,6 @@ const char *s = "a\
 
 /// `NESTED` sits inside `OUTER`'s continued body, so only the raw-source
 /// fallback sees it: it is pushed after every query node, with hash 0.
-/// The named-binding walk pops a stack, so imports come out in reverse.
 #[test]
 fn test_c_driver_macro_fallback_node_pushed_last_with_zero_hash() {
     let g = parse(FALLBACK);
@@ -421,11 +423,12 @@ fn test_c_driver_macro_fallback_node_pushed_last_with_zero_hash() {
             0
         ]
     );
+    // Named-binding imports follow source order.
     assert_eq!(
         import_rows(&g),
         [
-            binding("OUTER2", "1", BindingKind::Constant),
             binding("OUTER", "(x) #define NESTED x", BindingKind::Macro),
+            binding("OUTER2", "1", BindingKind::Constant),
         ]
     );
 }
@@ -450,8 +453,9 @@ typedef int feature_t;
 "#;
 
 /// Each `#define` body class, `extern`, and typedefs nested in preproc
-/// blocks become named-binding imports in reverse source order. The
-/// include guard is a Macro node but no import.
+/// blocks become named-binding imports in source order. The include guard
+/// is neither a Macro node nor an import; the guarded declarations are
+/// nodes as at file scope.
 #[test]
 fn test_c_driver_named_bindings_classify_and_skip_include_guard() {
     let g = parse(BINDINGS);
@@ -467,8 +471,8 @@ fn test_c_driver_named_bindings_classify_and_skip_include_guard() {
     };
     assert_eq!(
         node_rows(&g),
+        // No guard Macro; the guarded extern, prototype and typedef are nodes.
         [
-            macro_at("BINDINGS_H", 1),
             macro_at("MAX", 2),
             macro_at("HEX", 3),
             macro_at("NAME", 4),
@@ -477,6 +481,30 @@ fn test_c_driver_named_bindings_classify_and_skip_include_guard() {
             macro_at("EXPR", 7),
             macro_at("ADD", 8),
             macro_at("NOBODY", 9),
+            (
+                "g_counter",
+                NodeKind::Variable,
+                (10, 0, 10, 21),
+                true,
+                Some("extern int"),
+                None
+            ),
+            (
+                "ext_fn",
+                NodeKind::Function,
+                (11, 0, 11, 24),
+                true,
+                None,
+                None
+            ),
+            (
+                "str_arr",
+                NodeKind::Typedef,
+                (12, 0, 12, 23),
+                true,
+                None,
+                None
+            ),
             (
                 "feature_t",
                 NodeKind::Typedef,
@@ -487,21 +515,22 @@ fn test_c_driver_named_bindings_classify_and_skip_include_guard() {
             ),
         ]
     );
+    // Source order; a pointer typedef keeps its stars in the source.
     assert_eq!(
         import_rows(&g),
         [
-            binding("feature_t", "int", BindingKind::Alias),
-            binding("str_arr", "char", BindingKind::Alias),
-            binding("ext_fn", "external", BindingKind::Alias),
-            binding("g_counter", "external", BindingKind::Alias),
-            binding("NOBODY", "(x)", BindingKind::Macro),
-            binding("ADD", "(a, b) ((a) + (b))", BindingKind::Macro),
-            binding("EXPR", "(MAX + 1)", BindingKind::Macro),
-            binding("FLAG", "", BindingKind::Flag),
-            binding("ALIAS_OF", "MAX", BindingKind::Alias),
-            binding("NAME", "\"abc\"", BindingKind::Constant),
-            binding("HEX", "0x1FUL", BindingKind::Constant),
             binding("MAX", "100", BindingKind::Constant),
+            binding("HEX", "0x1FUL", BindingKind::Constant),
+            binding("NAME", "\"abc\"", BindingKind::Constant),
+            binding("ALIAS_OF", "MAX", BindingKind::Alias),
+            binding("FLAG", "", BindingKind::Flag),
+            binding("EXPR", "(MAX + 1)", BindingKind::Macro),
+            binding("ADD", "(a, b) ((a) + (b))", BindingKind::Macro),
+            binding("NOBODY", "(x)", BindingKind::Macro),
+            binding("g_counter", "external", BindingKind::Alias),
+            binding("ext_fn", "external", BindingKind::Alias),
+            binding("str_arr", "char **", BindingKind::Alias),
+            binding("feature_t", "int", BindingKind::Alias),
         ]
     );
 }

@@ -119,6 +119,37 @@ fn slice_type_before(
         .filter(|s| !s.is_empty())
 }
 
+/// The type of `name` in a declaration that may hold several declarators
+/// (`int *p, q;`). The first declarator keeps [`slice_type_before`]; a later
+/// one takes the shared specifier before the first declarator plus its own
+/// pointer prefix, so `q` is `int`, never `int *p,`.
+fn declarator_type(
+    decl: tree_sitter::Node<'_>,
+    name: tree_sitter::Node<'_>,
+    source: &[u8],
+) -> Option<String> {
+    let mut top = name;
+    while let Some(p) = top.parent() {
+        if p.id() == decl.id() {
+            break;
+        }
+        top = p;
+    }
+    let first = decl.child_by_field_name("declarator")?;
+    if first.id() == top.id() {
+        return slice_type_before(decl, name, source);
+    }
+    let shared = slice_type_before(decl, first, source)?;
+    let prefix = std::str::from_utf8(source.get(top.start_byte()..name.start_byte())?)
+        .ok()?
+        .trim();
+    Some(if prefix.is_empty() {
+        shared
+    } else {
+        format!("{shared} {prefix}")
+    })
+}
+
 /// Drill into nested declarators (pointer / array / parenthesized / function)
 /// to find the innermost `type_identifier` — the actual alias name for a
 /// `typedef`.
@@ -169,6 +200,70 @@ fn is_include_guard(name: &str, body: Option<&str>) -> bool {
     matches!(body.map(str::trim), None | Some("") | Some("1"))
 }
 
+/// True when `decl` sits at file scope: its parent chain up to the
+/// `translation_unit` holds only preprocessor conditionals. A declaration
+/// inside a body or under an ERROR node is not a file-scope declaration.
+fn is_file_scope(decl: Node<'_>) -> bool {
+    let mut cur = decl.parent();
+    while let Some(p) = cur {
+        match p.kind() {
+            "translation_unit" => return true,
+            "preproc_if" | "preproc_ifdef" | "preproc_else" | "preproc_elif"
+            | "preproc_elifdef" => cur = p.parent(),
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// The `#define X` that opens an include guard: a file-level `#ifndef X` or
+/// `#if !defined(X)` whose first statement defines `X` with no value (or
+/// `1`), where `X` is spelt like a header guard. `#ifndef BUF_SIZE` /
+/// `#define BUF_SIZE 4096` sets a default and `_GNU_SOURCE` a feature, so
+/// neither is a guard.
+fn include_guard_define<'a>(cond: Node<'a>, source: &[u8]) -> Option<Node<'a>> {
+    if cond.parent()?.kind() != "translation_unit" {
+        return None;
+    }
+    let guarded = match cond.kind() {
+        "preproc_ifdef" if cond.child(0)?.kind() == "#ifndef" => {
+            cond.child_by_field_name("name")?
+        }
+        "preproc_if" => {
+            let test = cond.child_by_field_name("condition")?;
+            let defined = test.child_by_field_name("argument")?;
+            if test.kind() != "unary_expression"
+                || test.child_by_field_name("operator")?.kind() != "!"
+                || defined.kind() != "preproc_defined"
+            {
+                return None;
+            }
+            defined.named_child(0)?
+        }
+        _ => return None,
+    };
+    let name = guarded.utf8_text(source).ok()?;
+    let trimmed = name.trim_end_matches('_');
+    let header_like = ["_H", "_HPP", "_HXX", "_HH", "_GUARD", "_INCLUDED"]
+        .iter()
+        .any(|suffix| trimmed.ends_with(suffix));
+    if !header_like {
+        return None;
+    }
+    let mut cursor = cond.walk();
+    let def = cond
+        .named_children(&mut cursor)
+        .skip(1)
+        .find(|c| c.kind() != "comment")?;
+    let value = def
+        .child_by_field_name("value")
+        .map(|v| v.utf8_text(source).map(str::trim));
+    let empty_or_one = matches!(value, None | Some(Ok("")) | Some(Ok("1")));
+    let defines_guard = def.kind() == "preproc_def"
+        && def.child_by_field_name("name")?.utf8_text(source).ok()? == name;
+    (defines_guard && empty_or_one).then_some(def)
+}
+
 /// Find the storage_class_specifier child with text `"extern"`.
 fn extern_specifier<'a>(decl: Node<'a>, source: &[u8]) -> Option<Node<'a>> {
     let mut cursor = decl.walk();
@@ -216,8 +311,10 @@ fn extern_bound_identifier<'a>(decl: Node<'a>) -> Option<Node<'a>> {
 /// - `#define ADD(a,b) ..` → `{ source: "(a,b) ..", alias: Some("ADD"), imported_name: "ADD" }`
 /// - `extern int g;`       → `{ source: "external", alias: Some("g"), imported_name: "g" }`
 fn extract_named_bindings(root: Node<'_>, source: &[u8], imports: &mut Vec<RawImport>) {
+    // The stack holds children in reverse so each pop yields source order.
     let mut cursor = root.walk();
     let mut stack: Vec<Node<'_>> = root.named_children(&mut cursor).collect();
+    stack.reverse();
     while let Some(node) = stack.pop() {
         match node.kind() {
             "type_definition" => emit_typedef_binding(node, source, imports),
@@ -229,7 +326,8 @@ fn extract_named_bindings(root: Node<'_>, source: &[u8], imports: &mut Vec<RawIm
             // still get visited.
             "preproc_if" | "preproc_ifdef" | "preproc_else" | "preproc_elif" => {
                 let mut c = node.walk();
-                stack.extend(node.named_children(&mut c));
+                let children: Vec<Node<'_>> = node.named_children(&mut c).collect();
+                stack.extend(children.into_iter().rev());
             }
             _ => {}
         }
@@ -286,6 +384,26 @@ fn classify_define_body(body: &str) -> BindingKind {
     BindingKind::Macro
 }
 
+/// The `*` prefix of a typedef alias whose declarator is a pointer chain
+/// ending at the alias (`**` for `typedef char **A;`). `None` for any other
+/// declarator shape, so a function-pointer alias keeps its return type.
+fn pointer_prefix(alias_root: Node<'_>, alias: Node<'_>, source: &[u8]) -> Option<String> {
+    if alias_root.kind() != "pointer_declarator" {
+        return None;
+    }
+    let mut cur = alias.parent()?;
+    while cur.id() != alias_root.id() {
+        if cur.kind() != "pointer_declarator" {
+            return None;
+        }
+        cur = cur.parent()?;
+    }
+    let stars = std::str::from_utf8(source.get(alias_root.start_byte()..alias.start_byte())?)
+        .ok()?
+        .trim();
+    (!stars.is_empty()).then(|| stars.to_string())
+}
+
 fn emit_typedef_binding(td: Node<'_>, source: &[u8], imports: &mut Vec<RawImport>) {
     // Children: `typedef` keyword, type spec(s), declarator (alias), `;`.
     // The alias is the type_identifier nested in the last named child that
@@ -336,6 +454,11 @@ fn emit_typedef_binding(td: Node<'_>, source: &[u8], imports: &mut Vec<RawImport
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "<unknown>".to_string());
+    // A data-pointer alias keeps its stars: `typedef char **A;` is `char **`.
+    let underlying = match pointer_prefix(*alias_root, alias_node, source) {
+        Some(stars) => format!("{underlying} {stars}"),
+        None => underlying,
+    };
 
     imports.push(driver::imports::raw(
         underlying,
@@ -604,7 +727,15 @@ impl ParseSpec for CSpec {
             var_name,
         } = std::mem::take(m);
 
-        if let (Some(n), Some(k), Some(root)) = (d.name, d.kind, d.root) {
+        let skip_root = d.root.is_some_and(|r| match r.kind() {
+            "declaration" => !is_file_scope(r),
+            "preproc_def" => r
+                .parent()
+                .and_then(|p| include_guard_define(p, source))
+                .is_some_and(|g| g.id() == r.id()),
+            _ => false,
+        });
+        if let (Some(n), Some(k), Some(root), false) = (d.name, d.kind, d.root, skip_root) {
             // K&R-style multi-line function decl can confuse tree-sitter-c:
             //   XXH_PUBLIC_API XXH_errorcode
             //   XXH64_update(int x, int y) { ... }
@@ -673,7 +804,7 @@ impl ParseSpec for CSpec {
             {
                 cx.nodes.push(RawNode {
                     is_exported: true,
-                    type_annotation: slice_type_before(f_root, f_name, source),
+                    type_annotation: declarator_type(f_root, f_name, source),
                     ..node::decl(
                         name_str.to_string(),
                         NodeKind::Property,
@@ -705,10 +836,11 @@ impl ParseSpec for CSpec {
                 //   2. C reserved keyword check — defensive even when
                 //      has_error is somehow false; `unsigned`/`const`/
                 //      etc. are never legal C variable names.
-                if !v_root.has_error() && !is_c_reserved_keyword(name_str) {
+                if !v_root.has_error() && !is_c_reserved_keyword(name_str) && is_file_scope(v_root)
+                {
                     cx.nodes.push(RawNode {
                         is_exported: true,
-                        type_annotation: slice_type_before(v_root, v_name, source),
+                        type_annotation: declarator_type(v_root, v_name, source),
                         ..node::decl(
                             name_str.to_string(),
                             NodeKind::Variable,
@@ -777,7 +909,7 @@ impl ParseSpec for CSpec {
             // a safety net and emits Macro nodes for any `#define NAME` not
             // already captured. Verified `.sample_repo`: ecp went from 11/29
             // macros in `tsd.h` to full recall after this pass.
-            CHook::MacroFallback => emit_macro_fallback(source, &mut cx.nodes),
+            CHook::MacroFallback => emit_macro_fallback(root, source, &mut cx.nodes),
             CHook::ReceiverOwners => {
                 // Stamp owner_class from the receiver-convention map (self/this
                 // first-param pattern). C has no class syntax; the receiver
@@ -806,14 +938,21 @@ impl ParseSpec for CSpec {
 /// Augment `nodes` with `#define NAME` Macros that tree-sitter ERROR-
 /// recovery dropped. See `preproc_fallback` module docs for the failure
 /// shape this covers.
-fn emit_macro_fallback(source: &[u8], nodes: &mut Vec<RawNode>) {
+fn emit_macro_fallback(root: Node<'_>, source: &[u8], nodes: &mut Vec<RawNode>) {
     let existing: std::collections::HashSet<String> = nodes
         .iter()
         .filter(|n| n.kind == NodeKind::Macro)
         .map(|n| n.name.clone())
         .collect();
+    // The query dropped each include guard's `#define`; keep it dropped.
+    let mut cursor = root.walk();
+    let guard_rows: Vec<u32> = root
+        .named_children(&mut cursor)
+        .filter_map(|cond| include_guard_define(cond, source))
+        .map(|def| def.start_position().row as u32)
+        .collect();
     for hit in crate::preproc_fallback::scan_define_macros(source) {
-        if existing.contains(&hit.name) {
+        if existing.contains(&hit.name) || guard_rows.contains(&hit.line) {
             continue;
         }
         nodes.push(RawNode {

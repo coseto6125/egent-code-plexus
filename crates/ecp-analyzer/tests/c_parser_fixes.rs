@@ -25,7 +25,7 @@ fn parse(path: &str, src: &[u8]) -> LocalGraph {
         .expect("parse_file")
 }
 
-fn rows_of(g: &LocalGraph, kinds: &[NodeKind]) -> Vec<Row<'_>> {
+fn rows_of<'g>(g: &'g LocalGraph, kinds: &[NodeKind]) -> Vec<Row<'g>> {
     g.nodes
         .iter()
         .filter(|n| kinds.contains(&n.kind))
@@ -173,6 +173,25 @@ fn test_c_pointer_fn_ptr_and_array_typedefs_emit_typedef_nodes() {
     );
 }
 
+/// A data-pointer typedef import keeps its stars; a function-pointer or
+/// array typedef keeps the return or element type alone, as before.
+#[test]
+fn test_c_pointer_typedef_import_source_keeps_stars() {
+    let g = parse(
+        "ptr.c",
+        b"typedef char **str_arr;\ntypedef struct node *node_p;\ntypedef int (*cmp_fn)(int);\ntypedef int int_arr[4];\n",
+    );
+    assert_eq!(
+        import_rows(&g),
+        [
+            binding("str_arr", "char **", BindingKind::Alias),
+            binding("node_p", "struct node *", BindingKind::Alias),
+            binding("cmp_fn", "int", BindingKind::Alias),
+            binding("int_arr", "int", BindingKind::Alias),
+        ]
+    );
+}
+
 /// Named-binding imports follow source order, a nested preproc block
 /// included.
 #[test]
@@ -216,6 +235,7 @@ fn test_c_include_guard_define_emits_no_macro_node() {
 /// Atypical guard spellings: a Google-style `_H_` name and the
 /// `#if !defined(X)` form. `#ifndef BUF_SIZE` / `#define BUF_SIZE 4096` has
 /// a body, so it is a default value, not a guard: its Macro and import stay.
+/// Imports keep their own name-suffix rule, so `WIDGET_H_` stays a Flag.
 #[test]
 fn test_c_include_guard_spellings_skipped_but_default_value_define_kept() {
     let g = parse(
@@ -237,6 +257,7 @@ fn test_c_include_guard_spellings_skipped_but_default_value_define_kept() {
         [
             binding("BUF_SIZE", "4096", BindingKind::Constant),
             binding("LEGACY_ON", "1", BindingKind::Constant),
+            binding("WIDGET_H_", "", BindingKind::Flag),
             binding("WIDGET_MAX", "8", BindingKind::Constant),
         ]
     );

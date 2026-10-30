@@ -91,7 +91,8 @@ fn test_dart_override_annotation_marks_method() {
 }
 
 /// Guard: the decorator fix adds no node and moves none; the Annotation
-/// nodes stay.
+/// nodes stay. The class annotation `@immutable` has no owner: it marks
+/// `Dog` and sits outside every type (a separate fix, tested below).
 #[test]
 fn test_dart_annotated_file_node_rows_unchanged() {
     let g = parse(ANNOTATED);
@@ -99,7 +100,8 @@ fn test_dart_annotated_file_node_rows_unchanged() {
     assert_eq!(
         rows(&g),
         [
-            ("immutable", NodeKind::Annotation, (0, 0, 0, 10), dog, true),
+            // Contract: an annotation on a top-level type is not owned by it.
+            ("immutable", NodeKind::Annotation, (0, 0, 0, 10), None, true),
             ("Dog", NodeKind::Class, (0, 0, 12, 1), None, true),
             ("override", NodeKind::Annotation, (2, 2, 2, 11), dog, true),
             ("toString", NodeKind::Method, (2, 2, 3, 29), dog, true),
@@ -169,4 +171,55 @@ fn test_dart_named_constructor_emits_one_node_per_declaration() {
             ("_", NodeKind::Constructor, (10, 2, 10, 9), cat, false),
         ]
     );
+}
+
+/// An annotation written before a class, mixin, enum or extension marks that
+/// declaration, so it takes the declaration's owner (none at top level), not
+/// the declaration itself. A member annotation stays owned by the type.
+#[test]
+fn test_dart_type_annotation_not_owned_by_annotated_type() {
+    let g = parse(
+        b"@a\nclass K {\n  @b\n  void m() {}\n}\n@c\nmixin M {}\n@d\nenum E { x }\n@e\nextension X on int {}\n",
+    );
+    let owners: Vec<(&str, Option<&str>)> = g
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Annotation)
+        .map(|n| (n.name.as_str(), n.owner_class.as_deref()))
+        .collect();
+    assert_eq!(
+        owners,
+        [
+            ("a", None),
+            ("b", Some("K")),
+            ("c", None),
+            ("d", None),
+            ("e", None),
+        ]
+    );
+    assert_eq!(node(&g, "K", NodeKind::Class).decorators, ["@a"]);
+    assert_eq!(node(&g, "M", NodeKind::Trait).decorators, ["@c"]);
+    assert_eq!(node(&g, "E", NodeKind::Enum).decorators, ["@d"]);
+    assert_eq!(node(&g, "X", NodeKind::Trait).decorators, ["@e"]);
+}
+
+/// Annotations on a top-level variable, a getter, a body-less named
+/// constructor and a `const` constructor reach their decorators too; a
+/// second annotation on a field does not become the first one's decorator.
+#[test]
+fn test_dart_annotations_on_variables_getters_and_constructors() {
+    let g = parse(
+        b"@b\nfinal int top = 1;\nclass K {\n  @d\n  K.named();\n  @e\n  const K.c();\n  @f\n  int get g => 1;\n  @x\n  @y\n  int z = 0;\n}\n",
+    );
+    let decorators = |name: &str, kind: NodeKind| node(&g, name, kind).decorators.clone();
+    assert_eq!(decorators("top", NodeKind::Variable), ["@b"]);
+    assert_eq!(decorators("named", NodeKind::Constructor), ["@d"]);
+    assert_eq!(decorators("c", NodeKind::Constructor), ["@e"]);
+    assert_eq!(decorators("g", NodeKind::Property), ["@f"]);
+    assert_eq!(decorators("z", NodeKind::Property), ["@x", "@y"]);
+    assert!(g
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Annotation)
+        .all(|n| n.decorators.is_empty()));
 }

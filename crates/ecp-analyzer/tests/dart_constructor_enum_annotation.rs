@@ -42,8 +42,8 @@ fn constructor_default_emits() {
 }
 
 /// Named constructor: `Foo.named()` — grammar emits two identifier children
-/// for the name field (`Foo` and `named`). Both are captured; at minimum the
-/// constructor-specific suffix "named" must appear.
+/// for the name field (`Foo` and `named`). The last one names the node, so
+/// the constructor-specific suffix "named" must appear.
 #[test]
 fn constructor_named_emits() {
     let g = parse("class Foo { Foo.named() {} }");
@@ -81,8 +81,7 @@ fn constructor_const_emits() {
 }
 
 /// Combined: class with all four constructor flavors must emit ≥ 3 Constructor
-/// nodes (the count may be higher because named/factory constructors emit both
-/// the class-name identifier and the suffix identifier).
+/// nodes. Each declaration emits one node.
 #[test]
 fn constructor_all_flavors_emit_at_least_three() {
     let src = r#"

@@ -94,6 +94,7 @@
   (attribute_list)* @decorator
   (modifier)* @export
   (variable_declaration
+    type: (_) @type
     (variable_declarator
       name: (identifier) @property.name))
 ) @property
@@ -114,12 +115,15 @@
 ;;
 ;; The `name:` field is unreliable across c_sharp grammar versions for
 ;; non-alias forms, so the plain/static patterns match the unnamed
-;; qualified-name / identifier child directly.
+;; qualified-name / identifier child directly. `!name` keeps them off the
+;; alias form, which the third pattern alone records.
 (using_directive
+  !name
   (qualified_name) @import.name @import.source
 ) @import
 
 (using_directive
+  !name
   (identifier) @import.name @import.source
 ) @import
 

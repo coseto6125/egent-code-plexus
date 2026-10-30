@@ -184,3 +184,27 @@ fn test_csharp_interface_member_without_modifier_is_exported() {
         [("IApi", true), ("Run", true)]
     );
 }
+
+/// A field declarator carries its declaration's type, as a property does;
+/// two declarators share it.
+#[test]
+fn test_csharp_field_declarators_carry_declared_type() {
+    let g = parse(
+        b"class Dog\n{\n    private int a, b;\n    public static readonly List<string> Names = new();\n    public string Name { get; set; }\n}\n",
+    );
+    let types: Vec<(&str, Option<&str>)> = g
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Property)
+        .map(|n| (n.name.as_str(), n.type_annotation.as_deref()))
+        .collect();
+    assert_eq!(
+        types,
+        [
+            ("a", Some("int")),
+            ("b", Some("int")),
+            ("Names", Some("List<string>")),
+            ("Name", Some("string")),
+        ]
+    );
+}

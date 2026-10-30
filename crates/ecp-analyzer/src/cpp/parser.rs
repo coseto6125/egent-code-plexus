@@ -1,7 +1,7 @@
 use super::receiver_types::{
     collect_bindings, extract_cpp_calls_and_path_literals, scope_type_name, CppBindings,
 };
-use super::recovery::{blank_decl_prefix_macros, reduce_type_name, stamp_lexical_owners};
+use super::recovery::{prepare_source, reduce_type_name, stamp_lexical_owners};
 use super::spec::CppSpec;
 use crate::calls::{NameRefKind, NameRefSpec, VariantRefSpec};
 use crate::driver::imports::{self, ImportOrder};
@@ -258,6 +258,37 @@ fn slice_type_before(
         .filter(|s| !s.is_empty())
 }
 
+/// The type of `name` in a declaration that may hold several declarators
+/// (`int *p, q;`). The first declarator keeps [`slice_type_before`]; a later
+/// one takes the shared specifier before the first declarator plus its own
+/// pointer / reference prefix, so `q` is `int`, never `int *p,`.
+fn declarator_type(
+    decl: tree_sitter::Node<'_>,
+    name: tree_sitter::Node<'_>,
+    source: &[u8],
+) -> Option<String> {
+    let mut top = name;
+    while let Some(p) = top.parent() {
+        if p.id() == decl.id() {
+            break;
+        }
+        top = p;
+    }
+    let first = decl.child_by_field_name("declarator")?;
+    if first.id() == top.id() {
+        return slice_type_before(decl, name, source);
+    }
+    let shared = slice_type_before(decl, first, source)?;
+    let prefix = std::str::from_utf8(source.get(top.start_byte()..name.start_byte())?)
+        .ok()?
+        .trim();
+    Some(if prefix.is_empty() {
+        shared
+    } else {
+        format!("{shared} {prefix}")
+    })
+}
+
 pub struct CppProvider {
     compiled: Compiled<CppSpec>,
 }
@@ -398,9 +429,10 @@ impl ParseSpec for CppSpec {
         bare_expressions: true,
         token_trees: false,
     });
-    /// Node offsets index `source` unchanged: the patch only overwrites
-    /// macro names with blanks, so every later step reads `source`.
-    const PREPARE_SOURCE: Option<PrepareSource> = Some(blank_decl_prefix_macros);
+    /// Node offsets index `source` unchanged: the patches only overwrite
+    /// macro names and inactive initializer-list branches with blanks, so
+    /// every later step reads `source`.
+    const PREPARE_SOURCE: Option<PrepareSource> = Some(prepare_source);
     const STEPS: &'static [Step<CppHook>] = &[
         Step::hook(Pass::Walk, Effect::Neutral, CppHook::OverridePreScan),
         Step::fixed(Pass::Query, Op::Query),
@@ -581,7 +613,7 @@ impl ParseSpec for CppSpec {
             {
                 cx.nodes.push(RawNode {
                     is_exported: f.is_header,
-                    type_annotation: slice_type_before(f_root, f_name, source),
+                    type_annotation: declarator_type(f_root, f_name, source),
                     ..node::decl(
                         name_str.to_string(),
                         NodeKind::Property,
@@ -620,7 +652,7 @@ impl ParseSpec for CppSpec {
                     };
                     cx.nodes.push(RawNode {
                         is_exported: f.is_header,
-                        type_annotation: slice_type_before(v_root, v_name, source),
+                        type_annotation: declarator_type(v_root, v_name, source),
                         ..node::decl(
                             name_str.to_string(),
                             kind,
@@ -810,25 +842,38 @@ impl ParseSpec for CppSpec {
 
 /// A `friend` function belongs to the namespace around its class, so its
 /// owner is the tightest enclosing `Namespace`, or none at file scope —
-/// never the class the span stamping found.
+/// never the class the span stamping found. A node inside the friend's body
+/// (a lambda) follows the friend, unless a type declared in that body holds it.
 fn restamp_friend_owners(
     nodes: &mut [RawNode],
     friend_spans: &rustc_hash::FxHashSet<(u32, u32, u32, u32)>,
 ) {
+    let contains = |outer: Span, inner: Span| {
+        (outer.0, outer.1) <= (inner.0, inner.1) && (inner.2, inner.3) <= (outer.2, outer.3)
+    };
     let namespaces: Vec<(String, (u32, u32, u32, u32))> = nodes
         .iter()
         .filter(|n| n.kind == NodeKind::Namespace)
         .map(|n| (n.name.clone(), n.span))
         .collect();
+    let types: Vec<Span> = nodes
+        .iter()
+        .filter(|n| matches!(n.kind, NodeKind::Class | NodeKind::Struct | NodeKind::Enum))
+        .map(|n| n.span)
+        .collect();
     for node in nodes.iter_mut() {
-        if !friend_spans.contains(&node.span) {
+        let Some(&friend) = friend_spans.iter().find(|&&f| contains(f, node.span)) else {
+            continue;
+        };
+        let held_by_local_type = types
+            .iter()
+            .any(|&t| t != node.span && contains(friend, t) && contains(t, node.span));
+        if held_by_local_type {
             continue;
         }
         node.owner_class = namespaces
             .iter()
-            .filter(|(_, s)| {
-                (s.0, s.1) <= (node.span.0, node.span.1) && (node.span.2, node.span.3) <= (s.2, s.3)
-            })
+            .filter(|(_, s)| contains(*s, node.span))
             .min_by_key(|(_, s)| crate::framework_helpers::span_area(*s))
             .map(|(name, _)| name.clone());
     }

@@ -217,3 +217,22 @@ fn test_cpp_lambda_in_friend_body_takes_friend_owner_not_class() {
     assert_eq!(named(&g, "bar_run").owner_class, None);
     assert_eq!(lambda_owner_in(&g, "bar_run"), None);
 }
+
+/// Sibling of the C typedef fix: an alias inside a pointer, function-pointer
+/// or array declarator is a `Typedef` node like the plain one beside it.
+#[test]
+fn test_cpp_pointer_fn_ptr_and_array_typedefs_emit_typedef_nodes() {
+    let g = parse(
+        "typedefs.cpp",
+        b"typedef char **str_arr;\ntypedef int (*cmp_fn)(int, int);\ntypedef int int_arr[10];\ntypedef unsigned long counter_t;\n",
+    );
+    assert_eq!(
+        sorted_rows(&g),
+        [
+            ("str_arr", NodeKind::Typedef, (0, 0, 0, 23), None, None),
+            ("cmp_fn", NodeKind::Typedef, (1, 0, 1, 32), None, None),
+            ("int_arr", NodeKind::Typedef, (2, 0, 2, 24), None, None),
+            ("counter_t", NodeKind::Typedef, (3, 0, 3, 32), None, None),
+        ]
+    );
+}
