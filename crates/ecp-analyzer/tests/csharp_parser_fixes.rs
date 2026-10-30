@@ -237,10 +237,11 @@ fn member_owners(g: &LocalGraph) -> Vec<(&str, Option<&str>)> {
         .collect()
 }
 
-// FU-2026-10-30 round 2, item C1. Shape from Newtonsoft.Json
-// `Linq/JValue.cs:46-49`: an `#if` splits the base list, and error recovery
-// ends the class at the directive. The class must span to its closing brace
-// and own the members after the split, as it does without the directive.
+// Guard for FU-2026-10-30 round 2, item C1. The `#if` that splits the base
+// list of Newtonsoft.Json `Linq/JValue.cs:46-49` is not what truncates that
+// class: tree-sitter keeps the span and the members' owner across it. The
+// brace-splitting `#if` groups further down the file do (see the tests after
+// the guards); this shape must stay as it is once those are patched.
 #[test]
 fn test_csharp_if_endif_in_base_list_keeps_class_span_and_member_owner() {
     let g = parse(&lines(&[
@@ -275,7 +276,7 @@ fn test_csharp_if_endif_in_base_list_keeps_class_span_and_member_owner() {
     );
 }
 
-// C1 atypical: `#if` / `#else` / `#endif` with a base in each branch.
+// C1 guard: `#if` / `#else` / `#endif` with a base in each branch.
 #[test]
 fn test_csharp_if_else_endif_in_base_list_keeps_class_span_and_member_owner() {
     let g = parse(&lines(&[
@@ -298,7 +299,7 @@ fn test_csharp_if_else_endif_in_base_list_keeps_class_span_and_member_owner() {
     );
 }
 
-// C1 atypical: the directive wraps the whole base list, colon included.
+// C1 guard: the directive wraps the whole base list, colon included.
 #[test]
 fn test_csharp_if_around_whole_base_list_keeps_class_span_and_member_owner() {
     let g = parse(&lines(&[
@@ -319,7 +320,7 @@ fn test_csharp_if_around_whole_base_list_keeps_class_span_and_member_owner() {
     );
 }
 
-// C1 atypical: two split classes side by side; each owns its own member.
+// C1 guard: two split classes side by side; each owns its own member.
 #[test]
 fn test_csharp_two_classes_with_split_base_lists_own_their_members() {
     let g = parse(&lines(&[
@@ -354,7 +355,7 @@ fn test_csharp_two_classes_with_split_base_lists_own_their_members() {
     );
 }
 
-// C1 atypical: the split class is nested one level deeper; the outer class
+// C1 guard: the split class is nested one level deeper; the outer class
 // keeps the members after it.
 #[test]
 fn test_csharp_nested_class_with_split_base_list_owns_its_members() {
@@ -382,7 +383,7 @@ fn test_csharp_nested_class_with_split_base_list_owns_its_members() {
     );
 }
 
-// C1 atypical: struct and interface base lists split the same way.
+// C1 guard: struct and interface base lists split the same way.
 #[test]
 fn test_csharp_struct_and_interface_split_base_lists_keep_span_and_owner() {
     let g = parse(&lines(&[
@@ -475,4 +476,285 @@ fn test_csharp_directive_before_class_with_intact_base_list_records_unchanged() 
 #[test]
 fn test_csharp_empty_file_has_no_records() {
     assert!(rows(&parse(b"")).is_empty());
+}
+
+/// `(name, kind, span, owner_class)` of every namespace, type and method.
+fn shape_rows(g: &LocalGraph) -> Vec<Row<'_>> {
+    rows(g)
+        .into_iter()
+        .filter(|row| {
+            matches!(
+                row.1,
+                NodeKind::Namespace | NodeKind::Class | NodeKind::Method
+            )
+        })
+        .collect()
+}
+
+// FU-2026-10-30 round 2, item C1 (real cause). A conditional group whose
+// branches leave different brace depths cuts a method body apart:
+// `if (a)` / `{` in the `#if` branch, an unrelated statement in the `#else`
+// branch, the closing `}` outside. Error recovery then ends the class at the
+// method and `After` takes the file's namespace or nothing as owner. The
+// group reads as its first branch, as if only that symbol were defined.
+#[test]
+fn test_csharp_if_group_opening_a_brace_in_one_branch_keeps_class_span() {
+    let g = parse(&lines(&[
+        "class C",
+        "{",
+        "    void M(bool a)",
+        "    {",
+        "#if X",
+        "        if (a)",
+        "{",
+        "#else",
+        "        Alt();",
+        "#endif",
+        "            One();",
+        "        }",
+        "    }",
+        "",
+        "    void After() { }",
+        "}",
+    ]));
+    assert_eq!(
+        shape_rows(&g),
+        [
+            ("C", NodeKind::Class, (0, 0, 15, 1), None),
+            ("M", NodeKind::Method, (2, 4, 12, 5), Some("C")),
+            ("After", NodeKind::Method, (14, 4, 14, 20), Some("C")),
+        ]
+    );
+}
+
+// C1 shape from Newtonsoft.Json `Linq/JValue.cs:328-362` (the `Date` arm of
+// `Compare`): three groups interlock, an `#if` / `#else` that opens a brace
+// in one branch, and an `#if` that closes it again and continues with
+// `else {`. The class, its namespace and the method after it keep their
+// whole spans.
+#[test]
+fn test_csharp_interlocking_if_groups_in_switch_arm_keep_class_span_and_owner() {
+    let g = parse(&lines(&[
+        "namespace N",
+        "{",
+        "    public class C",
+        "    {",
+        "        public int Compare(object a, object b)",
+        "        {",
+        "            switch (kind)",
+        "            {",
+        "                case Kind.Date:",
+        "#if HAS_OFFSET",
+        "                    if (a is DateTime dateA)",
+        "{",
+        "#else",
+        "                    DateTime dateA = (DateTime)a;",
+        "#endif",
+        "                        DateTime dateB;",
+        "                        return dateA.CompareTo(dateB);",
+        "#if HAS_OFFSET",
+        "                    }",
+        "                    else",
+        "{",
+        "                        return 0;",
+        "                    }",
+        "#endif",
+        "                default:",
+        "                    return 1;",
+        "            }",
+        "        }",
+        "",
+        "        public void After() { }",
+        "    }",
+        "}",
+    ]));
+    assert_eq!(
+        shape_rows(&g),
+        [
+            ("N", NodeKind::Namespace, (0, 0, 31, 1), None),
+            ("C", NodeKind::Class, (2, 4, 30, 5), Some("N")),
+            ("Compare", NodeKind::Method, (4, 8, 27, 9), Some("C")),
+            ("After", NodeKind::Method, (29, 8, 29, 31), Some("C")),
+        ]
+    );
+}
+
+// C1 atypical: two such methods side by side, each with its own symbol.
+#[test]
+fn test_csharp_two_brace_splitting_if_groups_keep_every_method_and_owner() {
+    let g = parse(&lines(&[
+        "class C",
+        "{",
+        "    void M(bool a)",
+        "    {",
+        "#if X",
+        "        if (a)",
+        "{",
+        "#else",
+        "        Alt();",
+        "#endif",
+        "            One();",
+        "        }",
+        "    }",
+        "",
+        "    void N(bool a)",
+        "    {",
+        "#if Y",
+        "        if (a)",
+        "{",
+        "#else",
+        "        Alt();",
+        "#endif",
+        "            Two();",
+        "        }",
+        "    }",
+        "",
+        "    void After() { }",
+        "}",
+    ]));
+    assert_eq!(
+        shape_rows(&g),
+        [
+            ("C", NodeKind::Class, (0, 0, 27, 1), None),
+            ("M", NodeKind::Method, (2, 4, 12, 5), Some("C")),
+            ("N", NodeKind::Method, (14, 4, 24, 5), Some("C")),
+            ("After", NodeKind::Method, (26, 4, 26, 20), Some("C")),
+        ]
+    );
+}
+
+// C1 atypical: CRLF line ends. The blanked directive lines keep their breaks.
+#[test]
+fn test_csharp_brace_splitting_if_group_with_crlf_keeps_class_span() {
+    let text = "class C\r\n{\r\n    void M(bool a)\r\n    {\r\n#if X\r\n        if (a)\r\n{\r\n#else\r\n        Alt();\r\n#endif\r\n            One();\r\n        }\r\n    }\r\n\r\n    void After() { }\r\n}\r\n";
+    let g = parse(text.as_bytes());
+    assert_eq!(
+        shape_rows(&g),
+        [
+            ("C", NodeKind::Class, (0, 0, 15, 1), None),
+            ("M", NodeKind::Method, (2, 4, 12, 5), Some("C")),
+            ("After", NodeKind::Method, (14, 4, 14, 20), Some("C")),
+        ]
+    );
+}
+
+// C1 guard: a group that ends in `else` and a chain of `else if` split by an
+// `#if` keep every method record.
+#[test]
+fn test_csharp_if_group_around_else_keeps_method_records() {
+    let dangling = parse(&lines(&[
+        "class C",
+        "{",
+        "    void M(bool a, bool b)",
+        "    {",
+        "#if X",
+        "        if (a)",
+        "        {",
+        "            One();",
+        "        }",
+        "        else",
+        "#endif",
+        "        {",
+        "            Two();",
+        "        }",
+        "    }",
+        "",
+        "    void After() { }",
+        "}",
+    ]));
+    assert_eq!(
+        shape_rows(&dangling),
+        [
+            ("C", NodeKind::Class, (0, 0, 17, 1), None),
+            ("M", NodeKind::Method, (2, 4, 14, 5), Some("C")),
+            ("After", NodeKind::Method, (16, 4, 16, 20), Some("C")),
+        ]
+    );
+    let chain = parse(&lines(&[
+        "class C",
+        "{",
+        "    void M(bool a, bool b)",
+        "    {",
+        "        if (a)",
+        "        {",
+        "            One();",
+        "        }",
+        "#if X",
+        "        else if (b)",
+        "        {",
+        "            Two();",
+        "        }",
+        "#endif",
+        "        else",
+        "        {",
+        "            Three();",
+        "        }",
+        "    }",
+        "",
+        "    void After() { }",
+        "}",
+    ]));
+    assert_eq!(
+        shape_rows(&chain),
+        [
+            ("C", NodeKind::Class, (0, 0, 21, 1), None),
+            ("M", NodeKind::Method, (2, 4, 18, 5), Some("C")),
+            ("After", NodeKind::Method, (20, 4, 20, 20), Some("C")),
+        ]
+    );
+}
+
+// C1 guard: branches that leave the same brace depth keep both branches'
+// members: neither `A` nor `B` is blanked.
+#[test]
+fn test_csharp_if_else_group_with_balanced_branches_keeps_both_branches() {
+    let g = parse(&lines(&[
+        "class C",
+        "{",
+        "#if X",
+        "    void A() { }",
+        "#else",
+        "    void B() { }",
+        "#endif",
+        "",
+        "    void After() { }",
+        "}",
+    ]));
+    assert_eq!(
+        shape_rows(&g),
+        [
+            ("C", NodeKind::Class, (0, 0, 9, 1), None),
+            ("A", NodeKind::Method, (3, 4, 3, 16), Some("C")),
+            ("B", NodeKind::Method, (5, 4, 5, 16), Some("C")),
+            ("After", NodeKind::Method, (8, 4, 8, 20), Some("C")),
+        ]
+    );
+}
+
+// C1 guard: a brace inside a string or char literal is no brace. `A` has
+// a `"{"` and `B` a `@"}"`; counted as braces the branches would differ and
+// `B` would be blanked.
+#[test]
+fn test_csharp_braces_in_string_literals_do_not_split_if_group() {
+    let g = parse(&lines(&[
+        "class C",
+        "{",
+        "#if X",
+        "    void A() { Foo(\"{\"); }",
+        "#else",
+        "    void B() { Foo(@\"}\"); }",
+        "#endif",
+        "",
+        "    void After() { }",
+        "}",
+    ]));
+    assert_eq!(
+        shape_rows(&g),
+        [
+            ("C", NodeKind::Class, (0, 0, 9, 1), None),
+            ("A", NodeKind::Method, (3, 4, 3, 26), Some("C")),
+            ("B", NodeKind::Method, (5, 4, 5, 27), Some("C")),
+            ("After", NodeKind::Method, (8, 4, 8, 20), Some("C")),
+        ]
+    );
 }

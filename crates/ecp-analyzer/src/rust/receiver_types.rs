@@ -237,11 +237,21 @@ pub fn enclosing_impl_type(node: Node<'_>, source: &[u8]) -> Option<String> {
 
 // ── local type scope ──────────────────────────────────────────────────────────
 
+/// One binding of a name: the range it is live in, and its type if known.
+type Binding = (PosRange, Option<String>);
+
+type Bindings = HashMap<String, Vec<Binding>>;
+
 #[derive(Debug, Default)]
 pub struct Scope {
     range: PosRange,
-    /// var_name → bare type name (references/pointers stripped).
+    /// var_name → bare type name (references/pointers stripped), the last
+    /// binding of the name in the function wherever it sits.
     pub bindings: HashMap<String, String>,
+    /// var_name → each binding of the name with the range it is live in. A
+    /// `None` type is a binding whose type is unknown (an untyped `let`, a
+    /// pattern, a closure parameter): it hides an older typed binding.
+    events: HashMap<String, Vec<Binding>>,
     values: HashMap<String, Vec<PosRange>>,
     /// The impl-type in scope when this fn is inside an `impl_item`
     /// (used to resolve `self`).
@@ -269,32 +279,40 @@ impl LocalTypes {
             .is_some_and(|ranges| ranges.iter().any(|range| range.0 <= pos && pos <= range.1))
     }
 
-    /// Look up `var`'s type at `pos`, preferring the innermost scope.
+    /// Look up `var`'s type at `pos`, preferring the innermost scope that
+    /// binds the name. Within it the latest binding live at `pos` wins, so a
+    /// `let` shadows the binding before it only after its own initializer.
     /// Special case: `var == "self"` falls back to `self_type` of the scope.
     pub fn lookup(&self, pos: Pos, var: &str) -> Option<&str> {
-        let mut best: Option<&str> = None;
-        let mut best_width = (u32::MAX, i64::MAX);
+        let mut best: Option<((u32, i64), Option<&str>)> = None;
         for scope in &self.scopes {
-            if scope.range.0 <= pos && pos <= scope.range.1 {
-                let w = range_width(scope.range);
-                // Try explicit binding first.
-                if let Some(ty) = scope.bindings.get(var) {
-                    if w < best_width {
-                        best_width = w;
-                        best = Some(ty.as_str());
-                    }
-                } else if var == "self" {
-                    if let Some(ref st) = scope.self_type {
-                        if w < best_width {
-                            best_width = w;
-                            best = Some(st.as_str());
-                        }
-                    }
+            if !(scope.range.0 <= pos && pos <= scope.range.1) {
+                continue;
+            }
+            let found = match scope.events.get(var) {
+                Some(bindings) => Some(live_type(bindings, pos)),
+                None if var == "self" => scope.self_type.as_deref().map(Some),
+                None => None,
+            };
+            let width = range_width(scope.range);
+            if let Some(ty) = found {
+                if best.is_none_or(|(best_width, _)| width < best_width) {
+                    best = Some((width, ty));
                 }
             }
         }
-        best
+        best.and_then(|(_, ty)| ty)
     }
+}
+
+/// The type of the latest binding in `bindings` live at `pos`; `None` when
+/// none is live or the latest has no known type.
+fn live_type(bindings: &[Binding], pos: Pos) -> Option<&str> {
+    bindings
+        .iter()
+        .filter(|((from, to), _)| *from <= pos && pos <= *to)
+        .max_by_key(|((from, _), _)| *from)
+        .and_then(|(_, ty)| ty.as_deref())
 }
 
 /// Build `LocalTypes` from every `function_item` in the file, resolving the
@@ -330,22 +348,31 @@ fn collect_scopes<'a>(
             });
 
             let mut bindings: HashMap<String, String> = HashMap::new();
+            let mut events = Bindings::new();
             let mut values = HashMap::new();
 
             // Typed parameters.
             if let Some(params) = child.child_by_field_name("parameters") {
                 collect_params(&params, source, &mut bindings);
+                // A parameter is live in the whole function.
+                for (name, ty) in &bindings {
+                    events
+                        .entry(name.clone())
+                        .or_default()
+                        .push((node_range(child), Some(ty.clone())));
+                }
                 collect_parameter_values(params, source, node_range(child), &mut values);
             }
 
             // `let` bindings in the body.
             if let Some(body) = child.child_by_field_name("body") {
-                collect_body_bindings(&body, source, &mut bindings, &mut values);
+                collect_body_bindings(&body, source, &mut bindings, &mut events, &mut values);
             }
 
             out.push(Scope {
                 range: node_range(child),
                 bindings,
+                events,
                 values,
                 self_type,
             });
@@ -431,10 +458,64 @@ fn collect_parameter_values(
     }
 }
 
+/// Record a binding of every name `pattern` binds.
+fn record_binding(
+    pattern: Node<'_>,
+    source: &[u8],
+    range: PosRange,
+    ty: Option<&str>,
+    events: &mut Bindings,
+) {
+    let mut names = Vec::new();
+    pattern_names(pattern, source, &mut names);
+    for name in names {
+        events
+            .entry(name)
+            .or_default()
+            .push((range, ty.map(str::to_string)));
+    }
+}
+
+/// The names a pattern binds. A path (`Kind::A`) or the `type` of a
+/// tuple-struct / struct pattern (`Some` in `Some(x)`) binds nothing.
+fn pattern_names(pattern: Node<'_>, source: &[u8], out: &mut Vec<String>) {
+    match pattern.kind() {
+        "identifier" | "shorthand_field_identifier" => out.extend(node_text(pattern, source)),
+        "scoped_identifier" | "scoped_type_identifier" | "generic_type" | "type_identifier" => {}
+        _ => {
+            let path = pattern.child_by_field_name("type");
+            let mut cursor = pattern.walk();
+            for child in pattern.named_children(&mut cursor) {
+                if Some(child) != path {
+                    pattern_names(child, source, out);
+                }
+            }
+        }
+    }
+}
+
+/// The body of the `if` / `while` whose `let` condition holds `condition`.
+fn let_condition_body(condition: Node<'_>) -> Option<Node<'_>> {
+    let mut current = condition.parent();
+    while let Some(n) = current {
+        if matches!(n.kind(), "if_expression" | "while_expression") {
+            return n
+                .child_by_field_name("consequence")
+                .or_else(|| n.child_by_field_name("body"));
+        }
+        if matches!(n.kind(), "block" | "function_item") {
+            return None;
+        }
+        current = n.parent();
+    }
+    None
+}
+
 fn collect_body_bindings(
     body: &Node<'_>,
     source: &[u8],
     out: &mut HashMap<String, String>,
+    events: &mut Bindings,
     values: &mut HashMap<String, Vec<PosRange>>,
 ) {
     let mut stack = vec![(*body, node_range(*body).1, false)];
@@ -445,20 +526,59 @@ fn collect_body_bindings(
         if matches!(n.kind(), "block" | "closure_expression") {
             scope_end = node_range(n).1;
         }
-        if n.kind() == "closure_expression" {
-            in_closure = true;
-            if let Some(parameters) = n.child_by_field_name("parameters") {
-                collect_parameter_values(parameters, source, node_range(n), values);
+        match n.kind() {
+            "closure_expression" => {
+                in_closure = true;
+                if let Some(parameters) = n.child_by_field_name("parameters") {
+                    collect_parameter_values(parameters, source, node_range(n), values);
+                    let mut cursor = parameters.walk();
+                    for parameter in parameters.named_children(&mut cursor) {
+                        let pattern = parameter.child_by_field_name("pattern");
+                        let ty = parameter
+                            .child_by_field_name("type")
+                            .and_then(|ty| bare_type_name(ty, source));
+                        record_binding(
+                            pattern.unwrap_or(parameter),
+                            source,
+                            node_range(n),
+                            ty.as_deref(),
+                            events,
+                        );
+                    }
+                }
             }
-        }
-        if n.kind() == "let_declaration" {
-            if !in_closure {
-                collect_let_binding(&n, source, out);
+            "match_arm" => {
+                if let Some(pattern) = n.child_by_field_name("pattern") {
+                    record_binding(pattern, source, node_range(n), None, events);
+                }
             }
-            if let Some(pattern) = n.child_by_field_name("pattern") {
-                // The initializer still sees the preceding binding.
-                record_value(pattern, source, (node_range(n).1, scope_end), values);
+            "let_condition" => {
+                if let (Some(pattern), Some(arm)) =
+                    (n.child_by_field_name("pattern"), let_condition_body(n))
+                {
+                    record_binding(pattern, source, node_range(arm), None, events);
+                }
             }
+            "let_declaration" => {
+                if !in_closure {
+                    collect_let_binding(&n, source, out);
+                }
+                if let Some(pattern) = n.child_by_field_name("pattern") {
+                    // The initializer still sees the preceding binding.
+                    let live = (node_range(n).1, scope_end);
+                    record_value(pattern, source, live, values);
+                    // A closure body binds no type, as before; a destructuring
+                    // pattern has no one type for its names.
+                    let simple = matches!(pattern.kind(), "identifier" | "mut_pattern");
+                    let ty = if in_closure || !simple {
+                        None
+                    } else {
+                        let_binding_type(&n, source)
+                    };
+                    record_binding(pattern, source, live, ty.as_deref(), events);
+                }
+            }
+            _ => {}
         }
         let mut c = n.walk();
         for child in n.children(&mut c) {
@@ -470,10 +590,7 @@ fn collect_body_bindings(
 /// `let x: Dog = ...` — extract `x → "Dog"`.
 /// Skips patterns more complex than a plain identifier or `mut x`.
 fn collect_let_binding(node: &Node<'_>, source: &[u8], out: &mut HashMap<String, String>) {
-    let Some(ty_node) = node.child_by_field_name("type") else {
-        return;
-    };
-    let Some(ty) = bare_type_name(ty_node, source) else {
+    let Some(ty) = let_binding_type(node, source) else {
         return;
     };
     let Some(pat) = node.child_by_field_name("pattern") else {
@@ -490,6 +607,13 @@ fn collect_let_binding(node: &Node<'_>, source: &[u8], out: &mut HashMap<String,
     if let Some(name) = var_name {
         out.insert(name, ty);
     }
+}
+
+/// The bare type a `let x: T = ..` annotation names; `None` for a `let`
+/// with no annotation or one that names no simple type.
+fn let_binding_type(node: &Node<'_>, source: &[u8]) -> Option<String> {
+    let ty_node = node.child_by_field_name("type")?;
+    bare_type_name(ty_node, source)
 }
 
 // ── call extraction ───────────────────────────────────────────────────────────

@@ -114,8 +114,22 @@ thread_local! {
         parser
     });
 }
+
+/// The targets and the final value of an assignment chain
+/// (`exports = module.exports = f` has two targets and the value `f`).
+fn assignment_chain(assign: Node<'_>) -> Option<(Vec<Node<'_>>, Node<'_>)> {
+    let mut targets = Vec::new();
+    let mut value = assign;
+    while value.kind() == "assignment_expression" {
+        targets.push(value.child_by_field_name("left")?);
+        value = value.child_by_field_name("right")?;
+    }
+    Some((targets, value))
+}
+
 /// The local names a top-level CommonJS assignment exports: `module.exports = f`,
-/// `module.exports = { f, k: g }`, `exports.k = f` and `module.exports.k = f`.
+/// `module.exports = { f, k: g }`, `exports.k = f` and `module.exports.k = f`,
+/// also as the links of a chain (`exports = module.exports = f`).
 /// Only a bare identifier value names a declaration.
 fn commonjs_exported_locals<'s>(root: Node<'_>, source: &'s [u8]) -> Vec<&'s str> {
     let text =
@@ -128,22 +142,19 @@ fn commonjs_exported_locals<'s>(root: Node<'_>, source: &'s [u8]) -> Vec<&'s str
         }) else {
             continue;
         };
-        let (Some(left), Some(right)) = (
-            assign.child_by_field_name("left"),
-            assign.child_by_field_name("right"),
-        ) else {
+        let Some((targets, value)) = assignment_chain(assign) else {
             continue;
         };
-        if left.kind() != "member_expression" {
-            continue;
-        }
-        let property_of_exports = left
-            .child_by_field_name("object")
-            .is_some_and(|o| matches!(text(o), "exports" | "module.exports"));
-        match (text(left), right.kind()) {
-            ("module.exports", "object") => {
-                let mut pairs = right.walk();
-                for entry in right.named_children(&mut pairs) {
+        let members = || targets.iter().filter(|t| t.kind() == "member_expression");
+        let whole_module = members().any(|t| text(*t) == "module.exports");
+        let property_of_exports = members().any(|t| {
+            t.child_by_field_name("object")
+                .is_some_and(|o| matches!(text(o), "exports" | "module.exports"))
+        });
+        match value.kind() {
+            "object" if whole_module => {
+                let mut pairs = value.walk();
+                for entry in value.named_children(&mut pairs) {
                     match entry.kind() {
                         "shorthand_property_identifier" => locals.push(text(entry)),
                         "pair" => locals.extend(
@@ -156,8 +167,7 @@ fn commonjs_exported_locals<'s>(root: Node<'_>, source: &'s [u8]) -> Vec<&'s str
                     }
                 }
             }
-            ("module.exports", "identifier") => locals.push(text(right)),
-            (_, "identifier") if property_of_exports => locals.push(text(right)),
+            "identifier" if whole_module || property_of_exports => locals.push(text(value)),
             _ => {}
         }
     }

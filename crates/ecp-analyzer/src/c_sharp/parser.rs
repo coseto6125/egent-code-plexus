@@ -1,9 +1,10 @@
 use super::receiver_types::extract_csharp_calls_and_path_literals;
+use super::recovery::prepare_source;
 use super::spec::CSharpSpec;
 use crate::calls::{NameRefKind, NameRefSpec, VariantRefSpec};
 use crate::driver::{
     self, imports, node, AnonKey, Anonymous, Compiled, DeclSlot, Effect, FieldReads, FileCx,
-    KindCapture, Op, ParseSpec, Step, TxRule,
+    KindCapture, Op, ParseSpec, PrepareSource, Step, TxRule,
 };
 use crate::framework_confidence;
 use crate::framework_helpers::{
@@ -297,6 +298,7 @@ impl ParseSpec for CSharpSpec {
     type Hook = CSharpHook;
 
     const KIND_CAPTURE: KindCapture = KindCapture::NameOverwrite;
+    const PREPARE_SOURCE: Option<PrepareSource> = Some(prepare_source);
     /// An anonymous callback (lambda / delegate in argument position) gets an
     /// `<anonymous>` Function node only when its body holds a call, so
     /// attach_to_enclosing can host those calls instead of dropping them when
