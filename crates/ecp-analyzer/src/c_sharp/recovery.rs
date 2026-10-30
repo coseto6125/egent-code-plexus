@@ -230,7 +230,8 @@ impl Group {
 
 /// Overwrite `[from, to)` with blanks, keeping line breaks so rows stay.
 fn blank_range(buf: &mut [u8], from: usize, to: usize) {
-    for b in &mut buf[from..to.min(buf.len())] {
+    let to = to.min(buf.len());
+    for b in &mut buf[from..to] {
         if !matches!(*b, b'\n' | b'\r') {
             *b = b' ';
         }

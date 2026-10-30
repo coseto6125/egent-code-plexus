@@ -1089,14 +1089,16 @@ int read_limit(void) {\n    return MAX_N + limits[0];\n}\n\n\
 int shadow(int MAX_N) {\n    return MAX_N;\n}\n\n\
 int local(void) {\n    int MAX_N = 1;\n    return MAX_N;\n}\n";
 
-/// Known gap: `limits` is an array declarator, which the C parser emits no
-/// node for, so only `MAX_N` binds.
 #[test]
-fn test_value_read_c_scalar_constant_returns_edge_array_constant_known_gap() {
+fn test_value_read_c_scalar_and_array_constants_return_edges() {
     let g = graph(&CProvider::new().unwrap(), &[("c1.c", C_SAME_FILE)]);
+    // Contract: a file-scope array constant binds like a scalar one.
     assert_eq!(
         value_reads(&g, "read_limit"),
-        vec![r("c1.c", "MAX_N", VALUE_READ, SAME_FILE)]
+        vec![
+            r("c1.c", "MAX_N", VALUE_READ, SAME_FILE),
+            r("c1.c", "limits", VALUE_READ, SAME_FILE),
+        ]
     );
 }
 
@@ -1131,14 +1133,16 @@ int readLimit() {\n    return kMax + LIMITS[0];\n}\n\n\
 int shadow(int kMax) {\n    return kMax;\n}\n\n\
 class C {\n    static const int LIMQ = 3;\n    int g() { return LIMQ; }\n};\n";
 
-/// Known gap: `LIMITS` is an array declarator with no node, so only `kMax`
-/// binds.
 #[test]
-fn test_value_read_cpp_constexpr_returns_edge_array_constant_known_gap() {
+fn test_value_read_cpp_constexpr_and_array_constants_return_edges() {
     let g = graph(&CppProvider::new().unwrap(), &[("c2.cpp", CPP_SAME_FILE)]);
+    // Contract: a file-scope array constant binds like a scalar one.
     assert_eq!(
         value_reads(&g, "readLimit"),
-        vec![r("c2.cpp", "kMax", VALUE_READ, SAME_FILE)]
+        vec![
+            r("c2.cpp", "LIMITS", VALUE_READ, SAME_FILE),
+            r("c2.cpp", "kMax", VALUE_READ, SAME_FILE),
+        ]
     );
 }
 
