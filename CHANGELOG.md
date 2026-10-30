@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.17.2 - 2026-10-30
+
+### Bug Fixes
+
+- fix the parser defects the shared-driver refactor surfaced, across 13 languages (#881)
+
+### Refactor
+
+- run the 14 mainstream parsers through one shared parse driver (#880)
+
 ## v0.17.1 - 2026-10-27
 
 ### Bug Fixes
