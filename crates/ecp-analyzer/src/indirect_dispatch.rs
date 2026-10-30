@@ -399,10 +399,17 @@ pub fn collect_c_cpp_fn_ptr_vars(root: Node<'_>, source: &[u8], vars: &mut FnPtr
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         if matches!(n.kind(), "declaration" | "parameter_declaration") {
-            if let Some((scope, (var_name, ty))) =
-                c_decl_scope(n, depths.as_deref()).zip(c_var_type_pair(n, source))
-            {
-                vars.declare(var_name, scope, ty);
+            let ty = n
+                .child_by_field_name("type")
+                .and_then(|t| node_text(t, source));
+            if let Some((scope, ty)) = c_decl_scope(n, depths.as_deref()).zip(ty) {
+                // `T *a, *b;` binds every declarator, not only the first.
+                let mut c = n.walk();
+                for d in n.children_by_field_name("declarator", &mut c) {
+                    if let Some((var_name, tracked)) = c_var_type_pair(ty, d, source) {
+                        vars.declare(var_name, scope, tracked);
+                    }
+                }
             }
         }
         let mut c = n.walk();
@@ -461,9 +468,11 @@ fn swallowed_by_body(decl: Node<'_>, function: Node<'_>, depths: Option<&[(usize
 /// A variable a lambda initialises is tracked too: `f(1)` then calls
 /// through the variable, never a function named `f`.
 /// `None` for a prototype or a method declaration, which binds no variable.
-fn c_var_type_pair(decl: Node<'_>, source: &[u8]) -> Option<(String, Option<String>)> {
-    let ty = node_text(decl.child_by_field_name("type")?, source)?;
-    let declarator = decl.child_by_field_name("declarator")?;
+fn c_var_type_pair(
+    ty: &str,
+    declarator: Node<'_>,
+    source: &[u8],
+) -> Option<(String, Option<String>)> {
     let (name, pointer) = c_declared_name(declarator)?;
     let var_name = node_text(name, source)?.to_string();
     let lambda = declarator.kind() == "init_declarator"
@@ -488,6 +497,8 @@ fn c_declared_name(declarator: Node<'_>) -> Option<(Node<'_>, bool)> {
     loop {
         n = match n.kind() {
             "identifier" => return Some((n, pointer)),
+            // `T *JET_MUTABLE x;`: C++ reads the empty-or-`const` macro as a scope.
+            "qualified_identifier" => n.child_by_field_name("name")?,
             "init_declarator" | "array_declarator" => n.child_by_field_name("declarator")?,
             "pointer_declarator" => {
                 pointer = true;

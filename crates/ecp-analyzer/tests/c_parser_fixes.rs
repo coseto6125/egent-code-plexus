@@ -922,3 +922,20 @@ fn test_c_struct_body_is_no_part_of_type_annotation() {
         .expect("Property `inner`");
     assert_eq!(inner.type_annotation.as_deref(), Some("struct"));
 }
+
+// Round 3 review, redis `ae.c:130-134`: the second declarator of
+// `T *a, *b = ...;` is a variable too.
+#[test]
+fn test_c_second_declarator_types_field_call() {
+    let g = parse(
+        "ae.c",
+        b"typedef struct ev { void (*fin)(int); struct ev *next; } ev;\nvoid run(ev *head) {\n    ev *next_te, *te = head;\n    te->fin(1);\n}\n",
+    );
+    assert_eq!(
+        call_meta_rows(&g)
+            .iter()
+            .map(|r| (r.0, r.4))
+            .collect::<Vec<_>>(),
+        [("run", "ev")]
+    );
+}

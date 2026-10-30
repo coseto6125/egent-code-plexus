@@ -956,3 +956,20 @@ fn test_cpp_auto_pointer_member_call_has_no_dispatch_record() {
         )]
     );
 }
+
+// Round 3 review, jemalloc `witness.h:173-225`: `*JET_MUTABLE name` reads as a
+// qualified identifier in C++; the variable is still a function pointer.
+#[test]
+fn test_cpp_macro_qualified_fn_ptr_variable_keeps_callback_record() {
+    let g = parse(
+        "witness.h",
+        b"typedef void (owner_error_t)(int);\nextern owner_error_t *JET_MUTABLE owner_error;\nstatic inline void assert_owner(int w) {\n    owner_error(w);\n}\n",
+    );
+    assert_eq!(
+        call_meta_rows(&g)
+            .iter()
+            .map(|r| (r.0, r.2, r.3))
+            .collect::<Vec<_>>(),
+        [("assert_owner", CallMeta::FLAG_CALLBACK, "owner_error_t")]
+    );
+}
