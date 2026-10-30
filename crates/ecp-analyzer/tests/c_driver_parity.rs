@@ -389,10 +389,15 @@ const char *s = "a\
 #define INSTR 1\
 ";
 #define OUTER2 1
+int a = (1 +
+#define MIDEXPR 2
+2);
 "#;
 
-/// `NESTED` sits inside `OUTER`'s continued body, so only the raw-source
-/// fallback sees it: it is pushed after every query node, with hash 0.
+/// `NESTED` sits inside `OUTER`'s continued body, so it is no directive and
+/// gets no node. `MIDEXPR` sits in a region tree-sitter error-recovers, so
+/// only the raw-source fallback sees it: pushed after every query node,
+/// with hash 0.
 #[test]
 fn test_c_driver_macro_fallback_node_pushed_last_with_zero_hash() {
     let g = parse(FALLBACK);
@@ -410,7 +415,7 @@ fn test_c_driver_macro_fallback_node_pushed_last_with_zero_hash() {
                 None
             ),
             ("OUTER2", NodeKind::Macro, (5, 0, 6, 0), true, None, None),
-            ("NESTED", NodeKind::Macro, (1, 10, 1, 16), true, None, None),
+            ("MIDEXPR", NodeKind::Macro, (7, 8, 7, 15), true, None, None),
         ]
     );
     let hashes: Vec<u64> = g.nodes.iter().map(|n| n.content_hash).collect();
