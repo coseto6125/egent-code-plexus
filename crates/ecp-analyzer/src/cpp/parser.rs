@@ -13,6 +13,7 @@ use crate::framework_confidence;
 use crate::framework_helpers::{detect_ast_framework_patterns, FrameworkPatternSpec, Span};
 use crate::indirect_dispatch::{collect_c_cpp_fn_ptr_vars, detect_c_cpp_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
+use crate::preproc_fallback::include_guard_define;
 use ecp_core::analyzer::parse_prof::Pass;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{LocalGraph, RawFunctionMeta, RawNode, OVERRIDE_SENTINEL};
@@ -521,7 +522,14 @@ impl ParseSpec for CppSpec {
             var_name,
         } = std::mem::take(m);
 
-        if let (Some(n), Some(k), Some(root)) = (d.name, d.kind, d.root) {
+        // The query matches each include guard's `#define`; it is no macro.
+        let skip_root = d.root.is_some_and(|r| {
+            r.kind() == "preproc_def"
+                && r.parent()
+                    .and_then(|p| include_guard_define(p, source))
+                    .is_some_and(|g| g.id() == r.id())
+        });
+        if let (Some(n), Some(k), Some(root), false) = (d.name, d.kind, d.root, skip_root) {
             let n = innermost_name(n);
             if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                 let is_friend = matches!(k, NodeKind::Function | NodeKind::Method)
@@ -821,7 +829,7 @@ impl ParseSpec for CppSpec {
 
                 cx.framework_refs = detect_ast_framework_patterns(source, CPP_FRAMEWORKS);
             }
-            CppHook::MacroFallback => emit_macro_fallback(source, &mut cx.nodes),
+            CppHook::MacroFallback => emit_macro_fallback(root, source, &mut cx.nodes),
             CppHook::FriendOwners => {
                 if !f.friend_spans.is_empty() {
                     restamp_friend_owners(&mut cx.nodes, &f.friend_spans);
@@ -882,14 +890,21 @@ fn restamp_friend_owners(
 /// Augment `nodes` with `#define NAME` Macros that tree-sitter ERROR-
 /// recovery dropped. Mirror of the C parser's pass — same `preproc_fallback`
 /// scanner; same NodeKind::Macro shape; same dedup-against-existing rule.
-fn emit_macro_fallback(source: &[u8], nodes: &mut Vec<RawNode>) {
+fn emit_macro_fallback(root: Node<'_>, source: &[u8], nodes: &mut Vec<RawNode>) {
     let existing: std::collections::HashSet<String> = nodes
         .iter()
         .filter(|n| n.kind == NodeKind::Macro)
         .map(|n| n.name.clone())
         .collect();
+    // The query dropped each include guard's `#define`; keep it dropped.
+    let mut cursor = root.walk();
+    let guard_rows: Vec<u32> = root
+        .named_children(&mut cursor)
+        .filter_map(|cond| include_guard_define(cond, source))
+        .map(|def| def.start_position().row as u32)
+        .collect();
     for hit in crate::preproc_fallback::scan_define_macros(source) {
-        if existing.contains(&hit.name) {
+        if existing.contains(&hit.name) || guard_rows.contains(&hit.line) {
             continue;
         }
         nodes.push(RawNode {

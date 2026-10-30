@@ -297,3 +297,43 @@ fn test_c_multi_declarator_types_exclude_previous_declarator() {
     assert_eq!(hash_of("y"), xxh3_64_bytes(b"int x, y;"));
     assert_eq!(hash_of("gy"), xxh3_64_bytes(b"int gx, gy;"));
 }
+
+fn macro_names(g: &LocalGraph) -> Vec<&str> {
+    let mut names: Vec<&str> = g
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Macro)
+        .map(|n| n.name.as_str())
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+/// A `#define` on the line after one ending in `\` is part of that macro's
+/// body (the preprocessor splices the lines), so it defines nothing. The
+/// macros before and after the continued pair stay. Covers LF and CRLF.
+#[test]
+fn test_c_define_inside_continued_macro_body_emits_no_macro_node() {
+    let lf = parse(
+        "cont.c",
+        b"#define FIRST 1\n#define OUTER(x) \\\n#define NESTED 1\n#define AFTER 2\n",
+    );
+    assert_eq!(macro_names(&lf), ["AFTER", "FIRST", "OUTER"]);
+
+    let crlf = parse(
+        "cont_crlf.c",
+        b"#define OUTER 1 \\\r\n#define NESTED 2\r\n#define AFTER 3\r\n",
+    );
+    assert_eq!(macro_names(&crlf), ["AFTER", "OUTER"]);
+}
+
+/// Guard: a `\` continuation that is followed by a plain body line does not
+/// hide the next real `#define`.
+#[test]
+fn test_c_define_after_finished_continuation_is_kept() {
+    let g = parse(
+        "cont_end.c",
+        b"#define LONG(x) \\\n    ((x) + 1)\n#define NEXT 2\n",
+    );
+    assert_eq!(macro_names(&g), ["LONG", "NEXT"]);
+}

@@ -32,6 +32,55 @@
 
 use regex::bytes::Regex;
 use std::sync::OnceLock;
+use tree_sitter::Node;
+
+/// The `#define X` that opens an include guard: a file-level `#ifndef X` or
+/// `#if !defined(X)` whose first statement defines `X` with no value (or
+/// `1`), where `X` is spelt like a header guard. `#ifndef BUF_SIZE` /
+/// `#define BUF_SIZE 4096` sets a default and `_GNU_SOURCE` a feature, so
+/// neither is a guard.
+pub fn include_guard_define<'a>(cond: Node<'a>, source: &[u8]) -> Option<Node<'a>> {
+    if cond.parent()?.kind() != "translation_unit" {
+        return None;
+    }
+    let guarded = match cond.kind() {
+        "preproc_ifdef" if cond.child(0)?.kind() == "#ifndef" => {
+            cond.child_by_field_name("name")?
+        }
+        "preproc_if" => {
+            let test = cond.child_by_field_name("condition")?;
+            let defined = test.child_by_field_name("argument")?;
+            if test.kind() != "unary_expression"
+                || test.child_by_field_name("operator")?.kind() != "!"
+                || defined.kind() != "preproc_defined"
+            {
+                return None;
+            }
+            defined.named_child(0)?
+        }
+        _ => return None,
+    };
+    let name = guarded.utf8_text(source).ok()?;
+    let trimmed = name.trim_end_matches('_');
+    let header_like = ["_H", "_HPP", "_HXX", "_HH", "_GUARD", "_INCLUDED"]
+        .iter()
+        .any(|suffix| trimmed.ends_with(suffix));
+    if !header_like {
+        return None;
+    }
+    let mut cursor = cond.walk();
+    let def = cond
+        .named_children(&mut cursor)
+        .skip(1)
+        .find(|c| c.kind() != "comment")?;
+    let value = def
+        .child_by_field_name("value")
+        .map(|v| v.utf8_text(source).map(str::trim));
+    let empty_or_one = matches!(value, None | Some(Ok("")) | Some(Ok("1")));
+    let defines_guard = def.kind() == "preproc_def"
+        && def.child_by_field_name("name")?.utf8_text(source).ok()? == name;
+    (defines_guard && empty_or_one).then_some(def)
+}
 
 /// `#define NAME` shape — anchored at line start (after optional indent),
 /// permissive spacing around the `#`, captures identifier name.
@@ -65,6 +114,11 @@ pub fn scan_define_macros(source: &[u8]) -> Vec<MacroHit> {
         if mask[full.start()] {
             continue;
         }
+        // A `#define` on the line after one ending in `\` is part of that
+        // macro's body, not a definition.
+        if continues_previous_line(source, full.start()) {
+            continue;
+        }
         let name = m.get(1).unwrap();
         let bytes = &source[name.start()..name.end()];
         let Ok(name_str) = std::str::from_utf8(bytes) else {
@@ -80,6 +134,15 @@ pub fn scan_define_macros(source: &[u8]) -> Vec<MacroHit> {
         });
     }
     hits
+}
+
+/// Whether the line that starts at `line_start` is spliced onto the line
+/// before it by a trailing `\` (LF or CRLF).
+fn continues_previous_line(source: &[u8], line_start: usize) -> bool {
+    let before = &source[..line_start];
+    let before = before.strip_suffix(b"\n").unwrap_or(before);
+    let before = before.strip_suffix(b"\r").unwrap_or(before);
+    before.ends_with(b"\\")
 }
 
 /// Bitmap: byte `i` is `true` when inside a `/* */` or `//` comment.

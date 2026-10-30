@@ -236,3 +236,82 @@ fn test_cpp_pointer_fn_ptr_and_array_typedefs_emit_typedef_nodes() {
         ]
     );
 }
+
+fn macro_names(g: &LocalGraph) -> Vec<&str> {
+    let mut names: Vec<&str> = g
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Macro)
+        .map(|n| n.name.as_str())
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+/// `.h` files parse as C++. `#ifndef X` / `#define X` (empty body) is an
+/// include guard: no Macro node, and the raw-source fallback must not
+/// re-add one. The real macro inside stays.
+#[test]
+fn test_cpp_include_guard_define_emits_no_macro_node() {
+    let g = parse(
+        "api.h",
+        b"#ifndef API_H\n#define API_H\n#define API_VERSION 2\n#endif\n",
+    );
+    assert_eq!(macro_names(&g), ["API_VERSION"]);
+}
+
+/// Guard spellings: Google-style `_H_`, `_HPP`, and `#if !defined(X)`.
+/// `#ifndef BUF_SIZE` / `#define BUF_SIZE 4096` has a body, so it is a
+/// default value, not a guard: its Macro stays.
+#[test]
+fn test_cpp_include_guard_spellings_skipped_but_default_value_define_kept() {
+    let g = parse(
+        "widget.hpp",
+        b"#ifndef WIDGET_H_\n#define WIDGET_H_\n#define WIDGET_MAX 8\n#ifndef BUF_SIZE\n#define BUF_SIZE 4096\n#endif\n#endif\n",
+    );
+    assert_eq!(macro_names(&g), ["BUF_SIZE", "WIDGET_MAX"]);
+
+    let g = parse(
+        "legacy.hpp",
+        b"#if !defined(LEGACY_HPP)\n#define LEGACY_HPP\n#define LEGACY_ON 1\n#endif\n",
+    );
+    assert_eq!(macro_names(&g), ["LEGACY_ON"]);
+}
+
+/// Guard: a file-level `#ifndef` whose name is not guard-shaped is a
+/// feature default, so its `#define` stays a Macro.
+#[test]
+fn test_cpp_non_guard_ifndef_define_is_kept() {
+    let g = parse(
+        "feature.h",
+        b"#ifndef USE_FEATURE\n#define USE_FEATURE\n#endif\n",
+    );
+    assert_eq!(macro_names(&g), ["USE_FEATURE"]);
+}
+
+/// A `#define` on the line after one ending in `\` is part of that macro's
+/// body, so it defines nothing. Covers LF and CRLF.
+#[test]
+fn test_cpp_define_inside_continued_macro_body_emits_no_macro_node() {
+    let lf = parse(
+        "cont.h",
+        b"#define FIRST 1\n#define OUTER(x) \\\n#define NESTED 1\n#define AFTER 2\n",
+    );
+    assert_eq!(macro_names(&lf), ["AFTER", "FIRST", "OUTER"]);
+
+    let crlf = parse(
+        "cont_crlf.h",
+        b"#define OUTER 1 \\\r\n#define NESTED 2\r\n#define AFTER 3\r\n",
+    );
+    assert_eq!(macro_names(&crlf), ["AFTER", "OUTER"]);
+}
+
+/// Guard: a finished continuation does not hide the next real `#define`.
+#[test]
+fn test_cpp_define_after_finished_continuation_is_kept() {
+    let g = parse(
+        "cont_end.h",
+        b"#define LONG(x) \\\n    ((x) + 1)\n#define NEXT 2\n",
+    );
+    assert_eq!(macro_names(&g), ["LONG", "NEXT"]);
+}

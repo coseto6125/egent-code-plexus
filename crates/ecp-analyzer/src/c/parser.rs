@@ -8,6 +8,7 @@ use crate::driver::{
 };
 use crate::indirect_dispatch::{collect_c_cpp_fn_ptr_vars, detect_c_cpp_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
+use crate::preproc_fallback::include_guard_define;
 use ecp_core::analyzer::parse_prof::Pass;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{BindingKind, LocalGraph, RawFunctionMeta, RawImport, RawNode};
@@ -214,54 +215,6 @@ fn is_file_scope(decl: Node<'_>) -> bool {
         }
     }
     false
-}
-
-/// The `#define X` that opens an include guard: a file-level `#ifndef X` or
-/// `#if !defined(X)` whose first statement defines `X` with no value (or
-/// `1`), where `X` is spelt like a header guard. `#ifndef BUF_SIZE` /
-/// `#define BUF_SIZE 4096` sets a default and `_GNU_SOURCE` a feature, so
-/// neither is a guard.
-fn include_guard_define<'a>(cond: Node<'a>, source: &[u8]) -> Option<Node<'a>> {
-    if cond.parent()?.kind() != "translation_unit" {
-        return None;
-    }
-    let guarded = match cond.kind() {
-        "preproc_ifdef" if cond.child(0)?.kind() == "#ifndef" => {
-            cond.child_by_field_name("name")?
-        }
-        "preproc_if" => {
-            let test = cond.child_by_field_name("condition")?;
-            let defined = test.child_by_field_name("argument")?;
-            if test.kind() != "unary_expression"
-                || test.child_by_field_name("operator")?.kind() != "!"
-                || defined.kind() != "preproc_defined"
-            {
-                return None;
-            }
-            defined.named_child(0)?
-        }
-        _ => return None,
-    };
-    let name = guarded.utf8_text(source).ok()?;
-    let trimmed = name.trim_end_matches('_');
-    let header_like = ["_H", "_HPP", "_HXX", "_HH", "_GUARD", "_INCLUDED"]
-        .iter()
-        .any(|suffix| trimmed.ends_with(suffix));
-    if !header_like {
-        return None;
-    }
-    let mut cursor = cond.walk();
-    let def = cond
-        .named_children(&mut cursor)
-        .skip(1)
-        .find(|c| c.kind() != "comment")?;
-    let value = def
-        .child_by_field_name("value")
-        .map(|v| v.utf8_text(source).map(str::trim));
-    let empty_or_one = matches!(value, None | Some(Ok("")) | Some(Ok("1")));
-    let defines_guard = def.kind() == "preproc_def"
-        && def.child_by_field_name("name")?.utf8_text(source).ok()? == name;
-    (defines_guard && empty_or_one).then_some(def)
 }
 
 /// Find the storage_class_specifier child with text `"extern"`.
