@@ -758,3 +758,130 @@ fn test_csharp_braces_in_string_literals_do_not_split_if_group() {
         ]
     );
 }
+
+/// A brace in a string inside an interpolation hole is no brace: the group
+/// stays whole and the members of both branches keep their records.
+#[test]
+fn test_csharp_interpolated_hole_brace_keeps_both_branches_members() {
+    let g = parse(&lines(&[
+        "class C",
+        "{",
+        "#if X",
+        r#"    string A() => $"{F("}")}";"#,
+        "#else",
+        "    void B() { }",
+        "#endif",
+        "    string F(string s) => s;",
+        "}",
+    ]));
+    assert_eq!(
+        shape_rows(&g),
+        [
+            ("C", NodeKind::Class, (0, 0, 8, 1), None),
+            ("A", NodeKind::Method, (3, 4, 3, 30), Some("C")),
+            ("B", NodeKind::Method, (5, 4, 5, 16), Some("C")),
+            ("F", NodeKind::Method, (7, 4, 7, 28), Some("C")),
+        ]
+    );
+}
+
+/// Two branches that each open the same method body read as the first one:
+/// the namespace, the class and the method after it keep spans and owners.
+#[test]
+fn test_csharp_if_group_with_equal_open_branches_keeps_later_member_owner() {
+    let g = parse(&lines(&[
+        "namespace N",
+        "{",
+        "    class A",
+        "    {",
+        "#if NET6",
+        "        public void Foo(int a) {",
+        "#else",
+        "        public void Foo(string a) {",
+        "#endif",
+        "            Bar();",
+        "        }",
+        "        public void Later() { }",
+        "    }",
+        "}",
+    ]));
+    assert_eq!(
+        shape_rows(&g),
+        [
+            ("N", NodeKind::Namespace, (0, 0, 13, 1), None),
+            ("A", NodeKind::Class, (2, 4, 12, 5), Some("N")),
+            ("Foo", NodeKind::Method, (5, 8, 10, 9), Some("A")),
+            ("Later", NodeKind::Method, (11, 8, 11, 31), Some("A")),
+        ]
+    );
+}
+
+/// A one-branch group that opens a brace and a later one that closes it
+/// are read together: the method after them stays a member of the class.
+#[test]
+fn test_csharp_open_and_close_if_groups_keep_later_member_owner() {
+    let g = parse(&lines(&[
+        "namespace N",
+        "{",
+        "    class A",
+        "    {",
+        "        public void M()",
+        "        {",
+        "#if X",
+        "            lock (o) {",
+        "#endif",
+        "                Bar();",
+        "#if X",
+        "            }",
+        "#endif",
+        "        }",
+        "        public void Later() { }",
+        "    }",
+        "}",
+    ]));
+    assert_eq!(
+        shape_rows(&g),
+        [
+            ("N", NodeKind::Namespace, (0, 0, 16, 1), None),
+            ("A", NodeKind::Class, (2, 4, 15, 5), Some("N")),
+            ("M", NodeKind::Method, (4, 8, 13, 9), Some("A")),
+            ("Later", NodeKind::Method, (14, 8, 14, 31), Some("A")),
+        ]
+    );
+}
+
+/// `catch` clauses split by `#if` continue the `try`: the method calls what
+/// the kept clauses call, and `catch` / `finally` are never callees or reads.
+#[test]
+fn test_csharp_if_group_of_catch_clauses_emits_no_catch_callee() {
+    let g = parse(&lines(&[
+        "class C",
+        "{",
+        "    void M()",
+        "    {",
+        "        try { Bar(); }",
+        "#if X",
+        "        catch (IOException) { Baz(); }",
+        "#else",
+        "        catch (Exception) { Qux(); }",
+        "#endif",
+        "        finally { }",
+        "    }",
+        "}",
+    ]));
+    let m = g
+        .nodes
+        .iter()
+        .find(|n| n.name == "M")
+        .unwrap_or_else(|| panic!("no `M` in {:?}", rows(&g)));
+    let mut calls: Vec<&str> = m.calls.iter().map(String::as_str).collect();
+    calls.sort_unstable();
+    assert_eq!(calls, ["Bar", "Baz"]);
+    assert!(
+        !m.field_reads
+            .iter()
+            .any(|r| r.ends_with(" catch") || r.ends_with(" finally")),
+        "{:?}",
+        m.field_reads
+    );
+}

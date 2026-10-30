@@ -258,15 +258,20 @@ fn modifier_access(decl: Node<'_>, source: &[u8]) -> u8 {
     let bits = decl
         .children(&mut cursor)
         .filter(|c| c.kind() == "modifier")
-        .map(|c| match &source[c.start_byte()..c.end_byte()] {
-            b"public" => ACCESS_PUBLIC,
-            b"protected" => ACCESS_PROTECTED,
-            b"private" => ACCESS_PRIVATE,
-            b"internal" => ACCESS_INTERNAL,
-            _ => 0,
-        })
+        .map(|c| access_bit(&source[c.start_byte()..c.end_byte()]))
         .fold(0, |acc, bit| acc | bit);
     bits
+}
+
+/// The `ACCESS_*` bit of one modifier's text; `0` for a non-access modifier.
+fn access_bit(modifier: &[u8]) -> u8 {
+    match modifier {
+        b"public" => ACCESS_PUBLIC,
+        b"protected" => ACCESS_PROTECTED,
+        b"private" => ACCESS_PRIVATE,
+        b"internal" => ACCESS_INTERNAL,
+        _ => 0,
+    }
 }
 
 /// The bytes a declaration's node covers. A file-scoped namespace
@@ -443,13 +448,7 @@ impl ParseSpec for CSharpSpec {
                 }
             }
             CSharpRole::Export => {
-                m.access |= match &source[node.start_byte()..node.end_byte()] {
-                    b"public" => ACCESS_PUBLIC,
-                    b"protected" => ACCESS_PROTECTED,
-                    b"private" => ACCESS_PRIVATE,
-                    b"internal" => ACCESS_INTERNAL,
-                    _ => 0,
-                };
+                m.access |= access_bit(&source[node.start_byte()..node.end_byte()])
             }
             CSharpRole::Heritage => {
                 // `(base_list (_)*)` also matches the `#pragma` lines
