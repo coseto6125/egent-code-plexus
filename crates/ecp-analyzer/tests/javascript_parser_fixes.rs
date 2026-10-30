@@ -328,3 +328,21 @@ fn test_javascript_commonjs_module_exports_reassigned_with_crlf_exports_last_onl
     assert!(!exported(&g, "a"));
     assert!(exported(&g, "b"));
 }
+
+/// After a lone `module.exports = a`, `exports` still names the old object,
+/// so `exports.b = b` exports nothing.
+#[test]
+fn test_javascript_commonjs_exports_property_after_whole_module_exports_marks_nothing() {
+    let g = parse(b"function a() {}\nfunction b() {}\nmodule.exports = a;\nexports.b = b;\n");
+    assert!(exported(&g, "a"));
+    assert!(!exported(&g, "b"));
+}
+
+/// `module.exports.b = b` after `module.exports = a` still exports both.
+#[test]
+fn test_javascript_commonjs_module_exports_property_after_whole_module_exports_keeps_both() {
+    let g =
+        parse(b"function a() {}\nfunction b() {}\nmodule.exports = a;\nmodule.exports.b = b;\n");
+    assert!(exported(&g, "a"));
+    assert!(exported(&g, "b"));
+}

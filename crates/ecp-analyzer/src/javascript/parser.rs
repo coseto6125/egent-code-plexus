@@ -130,7 +130,7 @@ fn assignment_chain(assign: Node<'_>) -> Option<(Vec<Node<'_>>, Node<'_>)> {
 
 /// Fold one assignment chain into the running CommonJS export state.
 /// `exports_aliased` tracks whether `exports` still names `module.exports`:
-/// a rebinding `exports = x` cuts the alias, `exports = module.exports = x`
+/// a rebinding `exports = x` or a lone `module.exports = x` cuts the alias, `exports = module.exports = x`
 /// (or `exports = module.exports`) restores it. A whole `module.exports = ...`
 /// replaces everything exported so far. Returns whether the chain assigns the
 /// whole `module.exports`.
@@ -179,6 +179,9 @@ fn apply_commonjs_chain<'s>(
     }
     if rebinds_exports {
         *exports_aliased = whole_module || text(value) == "module.exports";
+    } else if whole_module {
+        // `module.exports = x` alone leaves `exports` on the old object.
+        *exports_aliased = false;
     }
     whole_module
 }
