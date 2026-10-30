@@ -11,6 +11,7 @@
 //! extractor's traversal order or its skip rules.
 
 use crate::calls::{node_range, range_width, start_pos, CallSiteIndex, Pos, PosRange};
+use crate::preproc_fallback::{brace_depths, depth_at};
 use ecp_core::analyzer::types::{RawCallMeta, RawNode};
 use ecp_core::graph::CallMeta;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -389,26 +390,19 @@ impl FnPtrVars {
     }
 }
 
-/// Record each C/C++ declaration and parameter in `vars`: tracked with its
-/// type when it is a pointer-to-struct or function-pointer shape, untracked
+/// Record each C/C++ variable declaration and parameter in `vars`: tracked
+/// with its type when it is a pointer or struct-like shape, untracked
 /// otherwise. A prototype's parameter names nothing outside it and is left
-/// out.
+/// out; so is a prototype, which declares a function, not a variable.
 pub fn collect_c_cpp_fn_ptr_vars(root: Node<'_>, source: &[u8], vars: &mut FnPtrVars) {
+    let depths = root.has_error().then(|| brace_depths(source));
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         if matches!(n.kind(), "declaration" | "parameter_declaration") {
-            if let Some(scope) = c_decl_scope(n) {
-                match c_var_type_pair(n, source) {
-                    Some((var_name, ty)) => vars.declare(var_name, scope, Some(ty)),
-                    None => {
-                        if let Some(var_name) = n
-                            .child_by_field_name("declarator")
-                            .and_then(|d| find_leaf_identifier(d, source))
-                        {
-                            vars.declare(var_name, scope, None);
-                        }
-                    }
-                }
+            if let Some((scope, (var_name, ty))) =
+                c_decl_scope(n, depths.as_deref()).zip(c_var_type_pair(n, source))
+            {
+                vars.declare(var_name, scope, ty);
             }
         }
         let mut c = n.walk();
@@ -421,12 +415,27 @@ pub fn collect_c_cpp_fn_ptr_vars(root: Node<'_>, source: &[u8], vars: &mut FnPtr
 /// The range a C/C++ declaration is visible in: its function or lambda,
 /// else the file. `None` for a parameter of a prototype, a member
 /// declaration or a function-pointer type, which no call can name.
-fn c_decl_scope(decl: Node<'_>) -> Option<PosRange> {
+///
+/// `depths` are the source's brace depths, read when the tree has errors.
+/// Recovery can let a function body swallow the class members after it
+/// (`#ifdef` groups that split an `else {` from its `}`): a declaration
+/// the source's braces put outside that body belongs to the class around
+/// it, else to the file.
+fn c_decl_scope(decl: Node<'_>, depths: Option<&[(usize, i32)]>) -> Option<PosRange> {
     let is_param = decl.kind() == "parameter_declaration";
+    let mut lifted = false;
     let mut cur = decl.parent();
     while let Some(p) = cur {
         match p.kind() {
-            "function_definition" | "lambda_expression" => return Some(node_range(p)),
+            "function_definition" | "lambda_expression" if !lifted => {
+                if is_param || !swallowed_by_body(decl, p, depths) {
+                    return Some(node_range(p));
+                }
+                lifted = true;
+            }
+            "class_specifier" | "struct_specifier" | "union_specifier" if lifted => {
+                return Some(node_range(p));
+            }
             "declaration" | "field_declaration" | "type_definition" if is_param => return None,
             _ => {}
         }
@@ -435,41 +444,58 @@ fn c_decl_scope(decl: Node<'_>) -> Option<PosRange> {
     (!is_param).then_some(FILE_SCOPE)
 }
 
-fn c_var_type_pair(decl: Node<'_>, source: &[u8]) -> Option<(String, String)> {
-    // Look for a declarator child; if the type contains `(*)` it's a fn-ptr.
-    let type_node = decl.child_by_field_name("type")?;
-    let ty_text = node_text(type_node, source)?;
-
-    // Find the declarator (name of the variable).
-    let declarator = decl.child_by_field_name("declarator")?;
-    let var_name = find_leaf_identifier(declarator, source)?;
-
-    // Only track struct pointers and function-pointer types for our purposes.
-    let full_decl_text = node_text(decl, source).unwrap_or_default();
-    if full_decl_text.contains("(*)")
-        || full_decl_text.contains("* ")
-        || ty_text.contains("struct ")
-        || ty_text.contains("_ops")
-        || ty_text.ends_with("_t")
-    {
-        Some((var_name, ty_text.to_string()))
-    } else {
-        None
-    }
+/// Whether `decl` sits inside `function`'s body in the tree but not in the
+/// source: its brace depth is no deeper than the body's own `{`.
+fn swallowed_by_body(decl: Node<'_>, function: Node<'_>, depths: Option<&[(usize, i32)]>) -> bool {
+    let (Some(depths), Some(body)) = (depths, function.child_by_field_name("body")) else {
+        return false;
+    };
+    body.start_byte() < decl.start_byte()
+        && depth_at(depths, decl.start_byte()) <= depth_at(depths, body.start_byte())
 }
 
-fn find_leaf_identifier(node: Node<'_>, source: &[u8]) -> Option<String> {
-    if node.kind() == "identifier" || node.kind() == "type_identifier" {
-        return node_text(node, source).map(str::to_string);
+/// The name a C/C++ declaration or parameter binds, with its type text when
+/// detection tracks it: a pointer (`list *l`, `char **argv`, `int
+/// (*fp)(int)`) or a struct-like type (`struct s`, `*_ops`, `*_t`). The
+/// declarator node decides pointer-ness, never the spacing around `*`.
+/// A variable a lambda initialises is tracked too: `f(1)` then calls
+/// through the variable, never a function named `f`.
+/// `None` for a prototype or a method declaration, which binds no variable.
+fn c_var_type_pair(decl: Node<'_>, source: &[u8]) -> Option<(String, Option<String>)> {
+    let ty = node_text(decl.child_by_field_name("type")?, source)?;
+    let declarator = decl.child_by_field_name("declarator")?;
+    let (name, pointer) = c_declared_name(declarator)?;
+    let var_name = node_text(name, source)?.to_string();
+    let lambda = declarator.kind() == "init_declarator"
+        && declarator
+            .child_by_field_name("value")
+            .is_some_and(|v| v.kind() == "lambda_expression");
+    let tracked =
+        pointer || lambda || ty.contains("struct ") || ty.contains("_ops") || ty.ends_with("_t");
+    Some((var_name, tracked.then(|| ty.to_string())))
+}
+
+/// The identifier a C/C++ variable declarator binds, and whether a pointer
+/// declarator wraps it. A function declarator binds a variable only as a
+/// function pointer (`(*fp)(int)`); any other one is a prototype.
+fn c_declared_name(declarator: Node<'_>) -> Option<(Node<'_>, bool)> {
+    let mut n = declarator;
+    let mut pointer = false;
+    loop {
+        n = match n.kind() {
+            "identifier" => return Some((n, pointer)),
+            "init_declarator" | "array_declarator" => n.child_by_field_name("declarator")?,
+            "pointer_declarator" => {
+                pointer = true;
+                n.child_by_field_name("declarator")?
+            }
+            "reference_declarator" | "parenthesized_declarator" => n.named_child(0)?,
+            "function_declarator" => n
+                .child_by_field_name("declarator")
+                .filter(|d| d.kind() == "parenthesized_declarator")?,
+            _ => return None,
+        };
     }
-    // Descend into pointer / function declarators.
-    let mut c = node.walk();
-    for child in node.children(&mut c) {
-        if let Some(name) = find_leaf_identifier(child, source) {
-            return Some(name);
-        }
-    }
-    None
 }
 
 // ── JavaScript / TypeScript ───────────────────────────────────────────────────

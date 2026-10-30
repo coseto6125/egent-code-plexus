@@ -810,3 +810,115 @@ fn test_c_prototype_param_does_not_type_calls_elsewhere() {
     );
     assert!(g.call_metas.is_empty(), "{:?}", call_meta_rows(&g));
 }
+
+// ---- Round 3 (P6 group A) ----
+
+/// A-R1 (`jemalloc/test/unit/bit_util.c:245-246`): a comment in a
+/// multi-line `#define` ends its `preproc_arg`, so the rest of the macro
+/// body parses as code. Its locals are no Variables; the global before the
+/// macro stays.
+#[test]
+fn test_c_macro_body_locals_after_comment_emit_no_variable() {
+    let g = parse(
+        "bit_util.c",
+        b"static int kept = 1;\n#define TEST_POPCOUNT(t, suf, pri_hex) do {\t\t\t\t\\\n\tt bmul = (t)0x0101010101010101ULL;\t\t\t\t\\\n\tfor (unsigned i = 0; i < (1 << sizeof(t)); i++) {\t\t\\\n\t\tfor (unsigned j = 0; j < 256; j++) {\t\t\t\\\n\t\t\t/*\t\t\t\t\t\t\\\n\t\t\t * Replicate the byte j into various\t\t\\\n\t\t\t * bytes of the integer (as indicated by the\t\\\n\t\t\t * mask in i), and ensure that the popcount of\t\\\n\t\t\t * the result is popcount(i) * popcount(j)\t\\\n\t\t\t */\t\t\t\t\t\t\\\n\t\t\tt mask = (t)expand_byte_to_mask(i);\t\t\\\n\t\t\tt x = (bmul * j) & mask;\t\t\t\\\n\t\t\texpect_u_eq(\t\t\t\t\t\\\n\t\t\t    popcount_byte(i) * popcount_byte(j),\t\\\n\t\t\t    popcount_##suf(x),\t\t\t\t\\\n\t\t\t    \"Unexpected result, x=0x%\"pri_hex, x);\t\\\n\t\t}\t\t\t\t\t\t\t\\\n\t}\t\t\t\t\t\t\t\t\\\n} while (0)\n",
+    );
+    assert_eq!(
+        rows_of(&g, &[NodeKind::Variable]),
+        [(
+            "kept",
+            NodeKind::Variable,
+            (0, 0, 0, 20),
+            true,
+            Some("static int")
+        )]
+    );
+}
+
+/// A-R3, C side (`deps/xxhash/xxhash.h:2655`): both grammars read
+/// `typedef __attribute__((aligned(1))) T x;` as a typedef cut short at the
+/// attribute, with a missing `;`. Its parenthesized declarator holds the
+/// attribute's argument, so neither a Typedef nor a named binding takes the
+/// name `__aligned__`. A macro-call type stays a Typedef with its alias.
+#[test]
+fn test_c_attribute_typedef_emits_no_attribute_named_typedef() {
+    let g = parse(
+        "witness.c",
+        b"typedef ql_head(witness_t) witness_list_t;\ntypedef __attribute__((__aligned__(1))) unsigned int xxh_unalign32;\n",
+    );
+    assert_eq!(
+        rows_of(&g, &[NodeKind::Typedef]),
+        [(
+            "witness_list_t",
+            NodeKind::Typedef,
+            (0, 0, 0, 42),
+            true,
+            None
+        )]
+    );
+    let aliases: Vec<&str> = import_rows(&g).iter().map(|r| r.1).collect();
+    assert_eq!(aliases, ["witness_list_t"]);
+}
+
+/// A-R5 (`src/adlist.c:46`, `deps/jemalloc/src/extent.c:1398`): the
+/// declarator decides pointer-ness, never the spacing around `*`. The
+/// parameter `list *list` types the call through its function-pointer
+/// field, and a function-pointer parameter types the call through it. A
+/// prototype declares a function, not a variable: the direct call of a
+/// prototyped function carries no call meta.
+#[test]
+fn test_c_pointer_declarator_types_calls_and_prototype_types_none() {
+    let g = parse(
+        "adlist.c",
+        b"typedef struct list { void (*free)(void *ptr); } list;\nvoid listEmpty(list *list) { list->free(0); }\nstatic edata_t *extent_split(int n);\nint caller(void) { return extent_split(1) != 0; }\nint run(int (*cb)(int)) { return cb(1); }\n",
+    );
+    assert_eq!(
+        call_meta_rows(&g),
+        [
+            (
+                "listEmpty",
+                (1, 0, 1, 45),
+                0,
+                CallMeta::FLAG_CALLBACK | CallMeta::FLAG_DYNAMIC_DISPATCH,
+                "list"
+            ),
+            ("run", (4, 0, 4, 41), 0, CallMeta::FLAG_CALLBACK, "int"),
+        ]
+    );
+}
+
+/// A-R7, C side: an anonymous struct type is named by its keyword and a
+/// named one by keyword and tag, for a variable and for a struct field;
+/// the body is no part of the type text.
+#[test]
+fn test_c_struct_body_is_no_part_of_type_annotation() {
+    let g = parse(
+        "anon.c",
+        b"static struct { int a; } anon;\nstruct named_s { int b; } named;\nstruct outer { struct { int x; } inner; int y; };\n",
+    );
+    assert_eq!(
+        rows_of(&g, &[NodeKind::Variable]),
+        [
+            (
+                "anon",
+                NodeKind::Variable,
+                (0, 0, 0, 30),
+                true,
+                Some("static struct")
+            ),
+            (
+                "named",
+                NodeKind::Variable,
+                (1, 0, 1, 32),
+                true,
+                Some("struct named_s")
+            ),
+        ]
+    );
+    let inner = g
+        .nodes
+        .iter()
+        .find(|n| n.name == "inner" && n.kind == NodeKind::Property)
+        .expect("Property `inner`");
+    assert_eq!(inner.type_annotation.as_deref(), Some("struct"));
+}

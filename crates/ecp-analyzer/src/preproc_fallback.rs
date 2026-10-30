@@ -43,6 +43,9 @@ struct SrcLine {
     directive: Option<usize>,
     /// A trailing `\` on the line before splices this line onto it.
     spliced: bool,
+    /// The line belongs to a directive: it opens one, or a `\` splices it
+    /// onto one (the body lines of a multi-line `#define`).
+    in_directive: bool,
     /// Only whitespace and comments.
     blank: bool,
 }
@@ -110,6 +113,7 @@ fn scan_lines(source: &[u8]) -> (Vec<SrcLine>, Vec<(usize, bool)>) {
             end,
             directive,
             spliced,
+            in_directive,
             blank,
         });
         let text = line.strip_suffix(b"\r").unwrap_or(line);
@@ -213,14 +217,35 @@ fn directive_word(source: &[u8], line: &SrcLine, after_hash: usize) -> (Vec<u8>,
     (word, rest)
 }
 
-/// Rows of the `#define X` lines that open a file-level include guard: an
-/// `#ifndef X` / `#if !defined(X)` at conditional depth 0 whose next
-/// non-blank line defines `X` with no value or `1`. The decision reads the
-/// source text, so it holds however tree-sitter recovers the region; a
-/// guard nested in another conditional is no file-level guard.
-pub fn include_guard_rows(source: &[u8]) -> Vec<u32> {
+/// Preprocessor rows of one source, read from its text, so they hold
+/// however tree-sitter recovers the region around them.
+#[derive(Debug, Default)]
+pub struct PreprocRows {
+    /// Rows of the `#define X` lines that open a file-level include guard:
+    /// an `#ifndef X` / `#if !defined(X)` at conditional depth 0 whose next
+    /// non-blank line defines `X` with no value or `1`. A guard nested in
+    /// another conditional is no file-level guard.
+    pub guards: Vec<u32>,
+    /// Rows that belong to a directive, the spliced body lines of a
+    /// multi-line `#define` included, ascending. No declaration starts on
+    /// such a row, whatever tree-sitter makes of a macro body.
+    pub directives: Vec<u32>,
+}
+
+impl PreprocRows {
+    pub fn in_directive(&self, row: usize) -> bool {
+        u32::try_from(row).is_ok_and(|row| self.directives.binary_search(&row).is_ok())
+    }
+}
+
+pub fn preproc_rows(source: &[u8]) -> PreprocRows {
     let (lines, _) = scan_lines(source);
-    let mut rows = Vec::new();
+    let mut guards = Vec::new();
+    let directives = lines
+        .iter()
+        .filter(|line| line.in_directive)
+        .map(|line| line.row)
+        .collect();
     let mut depth = 0u32;
     let mut pending: Option<Vec<u8>> = None;
     for (k, line) in lines.iter().enumerate() {
@@ -246,23 +271,66 @@ pub fn include_guard_rows(source: &[u8]) -> Vec<u32> {
             }
             b"endif" => depth = depth.saturating_sub(1),
             b"define" if open.is_some_and(|name| !continued && defines_guard(rest, &name)) => {
-                rows.push(line.row);
+                guards.push(line.row);
             }
             _ => {}
         }
     }
-    rows
+    PreprocRows { guards, directives }
+}
+
+/// Whether `text` ends with the whole word `word`.
+fn ends_with_word(text: &[u8], word: &[u8]) -> bool {
+    text.ends_with(word)
+        && text[..text.len() - word.len()]
+            .last()
+            .is_none_or(|b| !(b.is_ascii_alphanumeric() || *b == b'_'))
+}
+
+/// Whether the `{` at `open` opens a namespace or `extern "C"` body, whose
+/// declarations stay at file scope: the code before it, from the previous
+/// `;` / `{` / `}` with comments and directive lines left out, reads
+/// `namespace`, `namespace a::b`, `inline namespace v1` or `extern "C"`.
+fn opens_file_scope_block(source: &[u8], open: usize) -> bool {
+    let from = source[..open]
+        .iter()
+        .rposition(|b| matches!(b, b';' | b'{' | b'}'))
+        .map_or(0, |i| i + 1);
+    let mut head = Vec::new();
+    for line in source[from..open].split(|&b| b == b'\n') {
+        if !line.trim_ascii_start().starts_with(b"#") {
+            head.extend_from_slice(&strip_comments(line));
+            head.push(b' ');
+        }
+    }
+    let head = head.trim_ascii();
+    if let Some(rest) = head
+        .strip_suffix(b"\"C\"")
+        .or_else(|| head.strip_suffix(b"\"C++\""))
+    {
+        return ends_with_word(rest.trim_ascii_end(), b"extern");
+    }
+    let name = head
+        .iter()
+        .rev()
+        .take_while(|b| b.is_ascii_alphanumeric() || **b == b'_' || **b == b':')
+        .count();
+    let before = head[..head.len() - name].trim_ascii_end();
+    ends_with_word(head, b"namespace") || (name > 0 && ends_with_word(before, b"namespace"))
 }
 
 /// Brace depth after each counted `{` / `}` of `source`, by byte offset.
 /// Only the first branch of each `#if` / `#elif` / `#else` chain counts, as
 /// tree-sitter parses it, so branches that each open a brace do not
-/// accumulate.
+/// accumulate. Namespace and `extern "C"` bodies add no depth: depth 0 is
+/// file scope.
 pub fn brace_depths(source: &[u8]) -> Vec<(usize, i32)> {
     let (lines, braces) = scan_lines(source);
     let mut out = Vec::with_capacity(braces.len());
     let mut braces = braces.into_iter().peekable();
     let mut branches: Vec<bool> = Vec::new();
+    // Per open brace: whether it adds depth.
+    let mut open_braces: Vec<bool> = Vec::new();
     let mut depth = 0i32;
     for line in &lines {
         if let Some(after_hash) = line.directive {
@@ -287,7 +355,13 @@ pub fn brace_depths(source: &[u8]) -> Vec<(usize, i32)> {
             }
             braces.next();
             if !skipped {
-                depth += if open { 1 } else { -1 };
+                if open {
+                    let counts = !opens_file_scope_block(source, at);
+                    open_braces.push(counts);
+                    depth += i32::from(counts);
+                } else {
+                    depth -= i32::from(open_braces.pop().unwrap_or(true));
+                }
                 out.push((at, depth));
             }
         }

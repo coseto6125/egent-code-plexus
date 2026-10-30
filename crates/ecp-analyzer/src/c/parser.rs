@@ -8,7 +8,7 @@ use crate::driver::{
 };
 use crate::indirect_dispatch::{collect_c_cpp_fn_ptr_vars, detect_c_cpp_indirect, FnPtrVars};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
-use crate::preproc_fallback::{brace_depths, depth_at, include_guard_rows};
+use crate::preproc_fallback::{brace_depths, depth_at, preproc_rows, PreprocRows};
 use ecp_core::analyzer::parse_prof::Pass;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{BindingKind, LocalGraph, RawFunctionMeta, RawImport, RawNode};
@@ -114,10 +114,22 @@ fn slice_type_before(
     if end <= start {
         return None;
     }
-    std::str::from_utf8(source.get(start..end)?)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    let text = |from: usize, to: usize| std::str::from_utf8(source.get(from..to)?).ok();
+    // A specifier with a body (`struct { ... } x`, `struct Foo { ... } x`)
+    // names the type by its keyword and tag: the body is no type text.
+    let body = decl
+        .child_by_field_name("type")
+        .and_then(|t| t.child_by_field_name("body"))
+        .filter(|b| start <= b.start_byte() && b.end_byte() <= end);
+    let slice = match body {
+        Some(b) => format!(
+            "{} {}",
+            text(start, b.start_byte())?.trim_end(),
+            text(b.end_byte(), end)?.trim_start()
+        ),
+        None => text(start, end)?.to_string(),
+    };
+    Some(slice.trim().to_string()).filter(|s| !s.is_empty())
 }
 
 /// The type of `name` in a declaration that may hold several declarators
@@ -205,8 +217,13 @@ fn is_include_guard(name: &str, body: Option<&str>) -> bool {
 /// holds only preprocessor conditionals and ERROR nodes. Error recovery
 /// can put a function's locals straight under a top-level ERROR, so under
 /// one the source's brace depth decides; a declaration inside a body node
-/// is never file scope.
+/// is never file scope. A comment in a multi-line `#define` ends its
+/// `preproc_arg`, and the rest of the macro body parses as code: a
+/// declaration that starts on a directive row is never file scope.
 fn is_file_scope(decl: Node<'_>, f: &mut CFile, source: &[u8]) -> bool {
+    if f.rows(source).in_directive(decl.start_position().row) {
+        return false;
+    }
     let mut recovered = false;
     let mut cur = decl.parent();
     while let Some(p) = cur {
@@ -372,6 +389,23 @@ fn pointer_prefix(alias_root: Node<'_>, source: &[u8]) -> Option<String> {
     (!stars.is_empty()).then(|| stars.to_string())
 }
 
+/// Whether the `type_definition` `def` is cut short by a macro call in its
+/// type, so its parenthesized declarator holds a macro argument and never
+/// the alias: the `;` is missing and the declarator is `(...)`.
+/// tree-sitter-cpp reads `typedef ql_head(T) list_t;` as `typedef ql_head
+/// (T)`, and both grammars read `typedef __attribute__((aligned(1))) T x;`
+/// as `typedef __attribute__ ((aligned(1)))`.
+pub(crate) fn is_cut_typedef(def: Node<'_>) -> bool {
+    let mut cursor = def.walk();
+    let missing_semicolon = def
+        .children(&mut cursor)
+        .any(|c| c.is_missing() && c.kind() == ";");
+    missing_semicolon
+        && def
+            .child_by_field_name("declarator")
+            .is_some_and(|d| d.kind() == "parenthesized_declarator")
+}
+
 fn emit_typedef_binding(td: Node<'_>, source: &[u8], imports: &mut Vec<RawImport>) {
     // Children: `typedef` keyword, type spec(s), declarator (alias), `;`.
     // The alias is the type_identifier nested in the last named child that
@@ -379,6 +413,9 @@ fn emit_typedef_binding(td: Node<'_>, source: &[u8], imports: &mut Vec<RawImport
     // with a nested `type_identifier` for the struct tag. Strategy: take the
     // last named child whose kind is a declarator family or a bare
     // `type_identifier`.
+    if is_cut_typedef(td) {
+        return;
+    }
     let mut cursor = td.walk();
     let named: Vec<Node<'_>> = td.named_children(&mut cursor).collect();
     let Some(alias_root) = named.iter().rev().find(|n| {
@@ -584,17 +621,19 @@ pub struct CMatch<'t> {
 pub struct CFile {
     /// Written by the calls step, read by the receiver-owners step.
     methods: CReceiverMap,
-    /// Rows of the file-level include guards' `#define`s, read lazily.
-    guard_rows: Option<Vec<u32>>,
+    /// [`preproc_rows`] of the source, read lazily.
+    rows: Option<PreprocRows>,
     /// [`brace_depths`] of the source, read lazily.
     brace_depths: Option<Vec<(usize, i32)>>,
 }
 
 impl CFile {
+    fn rows(&mut self, source: &[u8]) -> &PreprocRows {
+        self.rows.get_or_insert_with(|| preproc_rows(source))
+    }
+
     fn is_guard_row(&mut self, source: &[u8], row: usize) -> bool {
-        self.guard_rows
-            .get_or_insert_with(|| include_guard_rows(source))
-            .contains(&(row as u32))
+        self.rows(source).guards.contains(&(row as u32))
     }
 }
 
@@ -716,6 +755,7 @@ impl ParseSpec for CSpec {
         // A typedef captures its whole declarator; the alias is the name
         // inside it (`typedef void *(*F)(int);`). An abstract one names none.
         let name = d.name.and_then(|n| match d.kind {
+            Some(NodeKind::Typedef) if d.root.is_some_and(is_cut_typedef) => None,
             Some(NodeKind::Typedef) => {
                 find_typedef_alias_name(n).filter(|a| a.end_byte() > a.start_byte())
             }
@@ -899,10 +939,7 @@ impl ParseSpec for CSpec {
             // already captured. Verified `.sample_repo`: ecp went from 11/29
             // macros in `tsd.h` to full recall after this pass.
             CHook::MacroFallback => {
-                let guard_rows = f
-                    .guard_rows
-                    .get_or_insert_with(|| include_guard_rows(source));
-                emit_macro_fallback(source, guard_rows, &mut cx.nodes)
+                emit_macro_fallback(source, &f.rows(source).guards, &mut cx.nodes)
             }
             CHook::ReceiverOwners => {
                 // Stamp owner_class from the receiver-convention map (self/this

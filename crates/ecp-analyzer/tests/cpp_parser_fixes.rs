@@ -661,3 +661,278 @@ fn test_cpp_top_level_and_anonymous_namespace_variables_have_no_owner() {
         ]
     );
 }
+
+// ---- Round 3 (P6 group A) ----
+
+/// A-R1 (`jemalloc/internal/bit_util.h:53`, `nlohmann/detail/macro_scope.hpp:233`):
+/// a comment in a multi-line `#define` ends its `preproc_arg`, so the rest
+/// of the macro body parses as code. The locals of that body are no
+/// Variables; the real globals before and after the macro stay.
+#[test]
+fn test_cpp_macro_body_locals_after_comment_emit_no_variable() {
+    let pow2 = parse(
+        "bit_util.h",
+        b"static int kept = 1;\n#define POW2_CEIL(x) do {\t\\\n\tif (sizeof(x) > 4) {\t\\\n\t\t/*\t\t\\\n\t\t * keep the shift defined\t\\\n\t\t */\t\t\\\n\t\tint constant_32 = sizeof(x) * 4;\t\\\n\t\tx |= (x >> constant_32);\t\\\n\t}\t\t\\\n} while (0)\n",
+    );
+    let s = Some;
+    assert_eq!(
+        rows_of_kinds(&pow2, &[NodeKind::Variable, NodeKind::Const]),
+        [(
+            "kept",
+            NodeKind::Variable,
+            (0, 0, 0, 20),
+            None,
+            s("static int")
+        )]
+    );
+    let serialize = parse(
+        "macro_scope.hpp",
+        b"static int kept = 1;\n#define SERIALIZE_ENUM(ENUM_TYPE, ...)                                   \\\n    template<typename BasicJsonType>                                     \\\n    inline void to_json(BasicJsonType& j, const ENUM_TYPE& e)            \\\n    {                                                                    \\\n        /* NOLINTNEXTLINE(modernize-avoid-c-arrays) */                   \\\n        static const std::pair<ENUM_TYPE, BasicJsonType> m[] = __VA_ARGS__; \\\n        auto it = std::find_if(std::begin(m), std::end(m), e);           \\\n        j = it->second;                                                  \\\n    }\nint after = 2;\n",
+    );
+    assert_eq!(
+        rows_of_kinds(&serialize, &[NodeKind::Variable, NodeKind::Const]),
+        [
+            (
+                "kept",
+                NodeKind::Variable,
+                (0, 0, 0, 20),
+                None,
+                s("static int")
+            ),
+            ("after", NodeKind::Variable, (10, 0, 10, 14), None, s("int")),
+        ]
+    );
+}
+
+/// A-R2 (`tests/abi/include/nlohmann/json_v3_10_5.hpp:12103`): a block the
+/// grammar cannot place in a class body makes error recovery lift the
+/// following members to namespace scope. `m_it` sits inside the class's
+/// braces, so it is no namespace Variable. Variables in a namespace whose
+/// `{` follows a comment, and in an `extern "C"` block, are file scope and
+/// stay.
+#[test]
+fn test_cpp_members_lifted_by_error_recovery_emit_no_variable() {
+    let g = parse(
+        "iter_impl.hpp",
+        b"namespace detail\n{\nclass iter_impl\n{\n    {\n        m_it = 0;\n    }\n    pointer m_object = nullptr;\n    internal_iterator<T> m_it {};\n};\n}  // namespace detail\nnamespace // anonymous\n{\nint kept_counter = 0;\n}\nextern \"C\" {\nint c_counter;\n}\n",
+    );
+    let s = Some;
+    assert_eq!(
+        rows_of_kinds(&g, &[NodeKind::Variable, NodeKind::Const]),
+        [
+            (
+                "kept_counter",
+                NodeKind::Variable,
+                (13, 0, 13, 21),
+                None,
+                s("int")
+            ),
+            (
+                "c_counter",
+                NodeKind::Variable,
+                (16, 0, 16, 14),
+                None,
+                s("int")
+            ),
+        ]
+    );
+}
+
+/// A-R3 (`jemalloc/internal/prof_recent.h:18`, `prof_structs.h:101`,
+/// `xxhash.h:2655`): tree-sitter-cpp reads `typedef ql_head(T) list_t;` as
+/// `typedef ql_head (T)` with a missing `;`. The alias is the name after
+/// the macro call, never its argument. An attribute-macro typedef whose
+/// alias the tree loses gets no Typedef at all (never `__aligned__`). A
+/// trailing attribute macro after a real alias keeps the alias.
+#[test]
+fn test_cpp_macro_call_typedef_takes_alias_after_the_call() {
+    let g = parse(
+        "prof_structs.h",
+        b"typedef ql_head(prof_recent_t) prof_recent_list_t;\ntypedef rb_tree(prof_tctx_t) prof_tctx_tree_t;\ntypedef __attribute__((__aligned__(1))) __attribute__((__may_alias__)) xxh_u32 xxh_unalign32;\ntypedef xxh_u64x2 xxh_aliasing_u64x2 XXH_ALIASING;\ntypedef void (redisCallbackFn)(struct redisAsyncContext*, void*);\n",
+    );
+    assert_eq!(
+        rows_of_kinds(&g, &[NodeKind::Typedef]),
+        [
+            (
+                "prof_recent_list_t",
+                NodeKind::Typedef,
+                (0, 0, 0, 50),
+                None,
+                None
+            ),
+            (
+                "prof_tctx_tree_t",
+                NodeKind::Typedef,
+                (1, 0, 1, 46),
+                None,
+                None
+            ),
+            (
+                "xxh_aliasing_u64x2",
+                NodeKind::Typedef,
+                (3, 0, 3, 36),
+                None,
+                None
+            ),
+            (
+                "redisCallbackFn",
+                NodeKind::Typedef,
+                (4, 0, 4, 65),
+                None,
+                None
+            ),
+        ]
+    );
+    assert_eq!(
+        named(&g, "prof_recent_list_t").content_hash,
+        xxh3_64_bytes(b"typedef ql_head(prof_recent_t) prof_recent_list_t;")
+    );
+}
+
+/// A-R4 (`src/server.h:3461`, `src/redismodule.h:1276`): a prototype read
+/// as a direct initialisation has type `void`, and a trailing attribute
+/// macro read as one names a macro of the file: neither is a Variable.
+/// Real direct-initialised globals and a `void *` global stay.
+#[test]
+fn test_cpp_void_direct_init_and_macro_call_emit_no_variable() {
+    let g = parse(
+        "server.h",
+        b"#define ATTR_PRINTF(idx,cnt) __attribute__((format(printf,idx,cnt)))\nAPI void (*Module_Log)(Ctx *ctx, const char *fmt, ...) ATTR ATTR_PRINTF(3,4);\nvoid replDataBufReadFromConn(connection *conn, replDataBuf *buf, void (*error_handler)(connection *conn));\nstatic Foo g(1, 2);\nstd::string s(\"x\");\nvoid *cursor;\n",
+    );
+    let s = Some;
+    assert_eq!(
+        rows_of_kinds(&g, &[NodeKind::Variable, NodeKind::Const]),
+        [
+            (
+                "g",
+                NodeKind::Variable,
+                (3, 0, 3, 19),
+                None,
+                s("static Foo")
+            ),
+            (
+                "s",
+                NodeKind::Variable,
+                (4, 0, 4, 19),
+                None,
+                s("std::string")
+            ),
+            (
+                "cursor",
+                NodeKind::Variable,
+                (5, 0, 5, 13),
+                None,
+                s("void *")
+            ),
+        ]
+    );
+}
+
+/// A-R6 (`nlohmann/detail/input/binary_reader.hpp:3045`,
+/// `Fuzzer/FuzzerDictionary.h:71`): a method body sees its class's data
+/// members, in the class body and in an out-of-class definition, and a
+/// parameter of the same name hides the member. A free function sees no
+/// member.
+#[test]
+fn test_cpp_member_receivers_type_calls_in_their_class_methods() {
+    let g = parse(
+        "binary_reader.hpp",
+        b"struct json_sax_t { bool start_object(int n); };\nclass binary_reader {\n  public:\n    bool parse() { return sax->start_object(1); }\n    bool parse_other(other_t* sax) { return sax->start_object(2); }\n    bool later();\n    void print() { print_ascii(W.data(), W.size()); }\n  private:\n    json_sax_t* sax = nullptr;\n    Word W;\n};\nbool binary_reader::later() { return sax->start_object(3); }\nbool free_fn() { return sax->start_object(4); }\n",
+    );
+    let dynamic = CallMeta::FLAG_CALLBACK | CallMeta::FLAG_DYNAMIC_DISPATCH;
+    assert_eq!(
+        call_meta_rows(&g),
+        [
+            ("parse", (3, 4, 3, 49), dynamic, "json_sax_t"),
+            ("parse_other", (4, 4, 4, 67), dynamic, "other_t"),
+            ("print", (6, 4, 6, 53), dynamic, "Word"),
+            ("print", (6, 4, 6, 53), dynamic, "Word"),
+            ("later", (11, 0, 11, 60), dynamic, "json_sax_t"),
+        ]
+    );
+}
+
+/// A-R7 (`Fuzzer/FuzzerDriver.cpp:43`) and A-R8
+/// (`Fuzzer/FuzzerUtilWindows.cpp:29`): an anonymous struct type is named by
+/// its keyword, a named one by keyword and tag, never by its body. A
+/// pointer to `const` is a mutable Variable; a `const` pointer, a
+/// `constexpr` one and a `const` scalar are Consts.
+#[test]
+fn test_cpp_struct_body_types_and_pointer_constness() {
+    let g = parse(
+        "driver.hpp",
+        b"struct {\n#define FLAG_INT(Name) int Name;\n#include \"Flags.def\"\n#undef FLAG_INT\n} Flags;\nstatic struct Named { int b; } named, *named_ptr;\nstatic const FuzzingOptions* HandlerOpt = nullptr;\nHandler *const fixed = nullptr;\nconstexpr const char* name = \"x\";\nconst int limit = 4;\nconst char* const both = \"y\";\n",
+    );
+    let s = Some;
+    assert_eq!(
+        rows_of_kinds(&g, &[NodeKind::Variable, NodeKind::Const]),
+        [
+            ("Flags", NodeKind::Variable, (0, 0, 4, 8), None, s("struct")),
+            (
+                "named",
+                NodeKind::Variable,
+                (5, 0, 5, 49),
+                None,
+                s("static struct Named")
+            ),
+            (
+                "named_ptr",
+                NodeKind::Variable,
+                (5, 0, 5, 49),
+                None,
+                s("static struct Named *")
+            ),
+            (
+                "HandlerOpt",
+                NodeKind::Variable,
+                (6, 0, 6, 50),
+                None,
+                s("static const FuzzingOptions*")
+            ),
+            (
+                "fixed",
+                NodeKind::Const,
+                (7, 0, 7, 31),
+                None,
+                s("Handler *const")
+            ),
+            (
+                "name",
+                NodeKind::Const,
+                (8, 0, 8, 33),
+                None,
+                s("constexpr const char*")
+            ),
+            (
+                "limit",
+                NodeKind::Const,
+                (9, 0, 9, 20),
+                None,
+                s("const int")
+            ),
+            (
+                "both",
+                NodeKind::Const,
+                (10, 0, 10, 29),
+                None,
+                s("const char* const")
+            ),
+        ]
+    );
+}
+
+/// A-R5 follow-up (`tests/src/unit-to_chars.cpp`, `auto check_double =
+/// [](...)`): a variable a lambda initialises is a call target, so `f(1)`
+/// keeps its CALLBACK record with the declared type text. A direct call to
+/// a prototyped function next to it gets no record.
+#[test]
+fn test_cpp_lambda_variable_call_keeps_callback_record() {
+    let g = parse(
+        "lambda.cpp",
+        b"int g(int x);\nvoid run() {\n    auto f = [](int x) { return x; };\n    f(1);\n    g(2);\n}\n",
+    );
+    assert_eq!(
+        call_meta_rows(&g),
+        [("run", (1, 0, 5, 1), CallMeta::FLAG_CALLBACK, "auto")]
+    );
+}
