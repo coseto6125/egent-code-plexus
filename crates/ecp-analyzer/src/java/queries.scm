@@ -101,6 +101,10 @@
 
 ;; Enums
 (enum_declaration
+  (modifiers [
+    "public"
+    "protected"
+  ])? @export
   name: (identifier) @enum.name
 ) @enum
 
@@ -118,6 +122,10 @@
 
 ;; Annotation types (@interface)
 (annotation_type_declaration
+  (modifiers [
+    "public"
+    "protected"
+  ])? @export
   name: (identifier) @annotation.name
 ) @annotation
 

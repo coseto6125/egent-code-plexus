@@ -302,3 +302,49 @@ fn test_dart_abstract_members_empty_and_nested_shapes() {
     assert!(ms.contains(&(Some("A"), vec!["@x".to_string()])));
     assert!(ms.contains(&(Some("B"), vec![])));
 }
+
+/// Operators with a body are Methods named by the operator token, owned by
+/// the class, with their annotations; `~`, `[]` and `[]=` are anonymous
+/// tokens. A top-level function stays a Function.
+#[test]
+fn test_dart_operators_with_body_emit_owned_methods() {
+    let g = parse(
+        b"class C {\n  @override\n  bool operator ==(Object other) { return true; }\n  int operator -() => 1;\n  int operator ~() => 1;\n  int operator [](int i) => 1;\n  void operator []=(int i, int v) {}\n}\nvoid top() {}\n",
+    );
+    for name in ["==", "-", "~", "[]", "[]="] {
+        let m = node(&g, name, NodeKind::Method);
+        assert_eq!(m.owner_class.as_deref(), Some("C"), "{name}");
+    }
+    assert_eq!(node(&g, "==", NodeKind::Method).decorators, ["@override"]);
+    assert!(node(&g, "[]", NodeKind::Method).decorators.is_empty());
+    assert!(node(&g, "top", NodeKind::Function).owner_class.is_none());
+    assert_eq!(
+        g.nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Method)
+            .count(),
+        5,
+        "{:?}",
+        names_kinds(&g)
+    );
+}
+
+/// Body-less members inside `mixin`, `extension` and `enum` bodies are
+/// Methods owned by that type, with their annotations.
+#[test]
+fn test_dart_body_less_members_in_mixin_extension_enum_bodies() {
+    for (src, owner) in [
+        (&b"mixin M {\n  @x\n  void f();\n}\n"[..], "M"),
+        (&b"extension E on int {\n  @x\n  void f();\n}\n"[..], "E"),
+        (&b"enum En {\n  a;\n  @x\n  void f();\n}\n"[..], "En"),
+    ] {
+        let g = parse(src);
+        let m = node(&g, "f", NodeKind::Method);
+        assert_eq!(m.owner_class.as_deref(), Some(owner));
+        assert_eq!(m.decorators, ["@x"], "{owner}");
+        assert!(!g
+            .nodes
+            .iter()
+            .any(|n| n.name == "f" && n.kind == NodeKind::Function));
+    }
+}

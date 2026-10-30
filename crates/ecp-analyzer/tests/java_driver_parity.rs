@@ -137,9 +137,8 @@ fn test_java_driver_interface_default_method_emits_owned_method() {
 }
 
 /// Annotation elements are Methods owned by the annotation type; the
-/// `@interface` pattern has no `@export` capture, so the annotation type
-/// stays unexported. Contract: its elements are implicitly `public`, so those
-/// of a public `@interface` are exported.
+/// elements are implicitly `public`, so those of a public `@interface` are
+/// exported.
 #[test]
 fn test_java_driver_annotation_type_members_emit_owned_methods() {
     let g = parse(
@@ -159,8 +158,9 @@ fn test_java_driver_annotation_type_members_emit_owned_methods() {
         .map(|n| n.type_annotation.as_deref())
         .collect();
     assert_eq!(types, [None, Some("String"), Some("int")]);
+    // Contract: a `public @interface` and its implicitly public elements are exported.
     let exported: Vec<bool> = g.nodes.iter().map(|n| n.is_exported).collect();
-    assert_eq!(exported, [false, true, true]);
+    assert_eq!(exported, [true, true, true]);
 }
 
 const SPRING_CONTROLLER: &str = "@RestController\npublic class UserController {\n    @Autowired\n    private UserRepo repo;\n    @GetMapping(\"/users\")\n    public String list() { return \"\"; }\n}\n";

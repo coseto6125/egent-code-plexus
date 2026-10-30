@@ -321,6 +321,7 @@ impl ParseSpec for DartSpec {
                 && root.kind() == "function_signature"
                 && root.parent().is_some_and(|p| {
                     matches!(p.kind(), "function_declaration" | "method_signature")
+                        || is_class_member_declaration(p)
                 })
             {
                 return;
@@ -440,19 +441,33 @@ impl ParseSpec for DartSpec {
     }
 }
 
+/// A `declaration` holding a class member's body-less signature.
+fn is_class_member_declaration(declaration: Node<'_>) -> bool {
+    declaration.kind() == "declaration"
+        && declaration
+            .parent()
+            .is_some_and(|p| p.kind() == "member_declaration")
+}
+
 /// The source text of each annotation that marks `decl`, in source order.
 /// A class member's annotations sit beside its declaration inside
 /// `member_declaration` when the member is a field or a body-less
 /// constructor, and inside it otherwise.
 fn annotation_texts(decl: Node<'_>, source: &[u8]) -> Vec<String> {
-    let siblings = decl
+    // A body-less member's signature sits inside `declaration`, the sibling
+    // of its annotations.
+    let anchor = decl
+        .parent()
+        .filter(|p| p.kind() == "declaration")
+        .unwrap_or(decl);
+    let siblings = anchor
         .parent()
         .filter(|p| p.kind() == "member_declaration")
         .into_iter()
         .flat_map(|p| {
             let mut cursor = p.walk();
             p.named_children(&mut cursor)
-                .take_while(|c| c.id() != decl.id())
+                .take_while(|c| c.id() != anchor.id())
                 .collect::<Vec<_>>()
         });
     let mut cursor = decl.walk();
