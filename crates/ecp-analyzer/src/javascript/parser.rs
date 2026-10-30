@@ -129,21 +129,16 @@ fn assignment_chain(assign: Node<'_>) -> Option<(Vec<Node<'_>>, Node<'_>)> {
 
 /// The local names a top-level CommonJS assignment exports: `module.exports = f`,
 /// `module.exports = { f, k: g }`, `exports.k = f` and `module.exports.k = f`,
-/// also as the links of a chain (`exports = module.exports = f`).
-/// Only a bare identifier value names a declaration.
+/// also as the links of a chain (`exports = module.exports = f`) or as the
+/// value of a declaration (`var app = exports = module.exports = {}`, which
+/// exports `app` too). Only a bare identifier value names a declaration.
 fn commonjs_exported_locals<'s>(root: Node<'_>, source: &'s [u8]) -> Vec<&'s str> {
     let text =
         |n: Node<'_>| std::str::from_utf8(&source[n.start_byte()..n.end_byte()]).unwrap_or("");
     let mut locals = Vec::new();
-    let mut cursor = root.walk();
-    for statement in root.named_children(&mut cursor) {
-        let Some(assign) = statement.named_child(0).filter(|a| {
-            statement.kind() == "expression_statement" && a.kind() == "assignment_expression"
-        }) else {
-            continue;
-        };
+    let mut chain_exports = |assign: Node<'_>| -> bool {
         let Some((targets, value)) = assignment_chain(assign) else {
-            continue;
+            return false;
         };
         let members = || targets.iter().filter(|t| t.kind() == "member_expression");
         let whole_module = members().any(|t| text(*t) == "module.exports");
@@ -170,7 +165,42 @@ fn commonjs_exported_locals<'s>(root: Node<'_>, source: &'s [u8]) -> Vec<&'s str
             "identifier" if whole_module || property_of_exports => locals.push(text(value)),
             _ => {}
         }
+        whole_module
+    };
+    let mut declared = Vec::new();
+    let mut cursor = root.walk();
+    for statement in root.named_children(&mut cursor) {
+        match statement.kind() {
+            "expression_statement" => {
+                if let Some(assign) = statement
+                    .named_child(0)
+                    .filter(|a| a.kind() == "assignment_expression")
+                {
+                    chain_exports(assign);
+                }
+            }
+            "lexical_declaration" | "variable_declaration" => {
+                let mut inner = statement.walk();
+                for declarator in statement.named_children(&mut inner) {
+                    let (Some(name), Some(value)) = (
+                        declarator
+                            .child_by_field_name("name")
+                            .filter(|n| n.kind() == "identifier"),
+                        declarator
+                            .child_by_field_name("value")
+                            .filter(|v| v.kind() == "assignment_expression"),
+                    ) else {
+                        continue;
+                    };
+                    if chain_exports(value) {
+                        declared.push(text(name));
+                    }
+                }
+            }
+            _ => {}
+        }
     }
+    locals.extend(declared);
     locals
 }
 

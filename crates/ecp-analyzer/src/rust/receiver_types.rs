@@ -476,17 +476,22 @@ fn record_binding(
     }
 }
 
-/// The names a pattern binds. A path (`Kind::A`) or the `type` of a
-/// tuple-struct / struct pattern (`Some` in `Some(x)`) binds nothing.
+/// The names a pattern binds. A path (`Kind::A`), the `type` of a
+/// tuple-struct / struct pattern (`Some` in `Some(x)`) and a match guard
+/// bind nothing.
 fn pattern_names(pattern: Node<'_>, source: &[u8], out: &mut Vec<String>) {
     match pattern.kind() {
         "identifier" | "shorthand_field_identifier" => out.extend(node_text(pattern, source)),
         "scoped_identifier" | "scoped_type_identifier" | "generic_type" | "type_identifier" => {}
         _ => {
-            let path = pattern.child_by_field_name("type");
+            // `condition` is the guard of a match arm (`p if cond =>`).
+            let skipped = [
+                pattern.child_by_field_name("type"),
+                pattern.child_by_field_name("condition"),
+            ];
             let mut cursor = pattern.walk();
             for child in pattern.named_children(&mut cursor) {
-                if Some(child) != path {
+                if !skipped.contains(&Some(child)) {
                     pattern_names(child, source, out);
                 }
             }
@@ -518,6 +523,7 @@ fn collect_body_bindings(
     events: &mut Bindings,
     values: &mut HashMap<String, Vec<PosRange>>,
 ) {
+    let mut aliases: Vec<Alias<'_>> = Vec::new();
     let mut stack = vec![(*body, node_range(*body).1, false)];
     while let Some((n, mut scope_end, mut in_closure)) = stack.pop() {
         if n.kind() == "function_item" {
@@ -534,8 +540,11 @@ fn collect_body_bindings(
                     let mut cursor = parameters.walk();
                     for parameter in parameters.named_children(&mut cursor) {
                         let pattern = parameter.child_by_field_name("pattern");
-                        let ty = parameter
-                            .child_by_field_name("type")
+                        // A pattern parameter (`|Wrapper(x)|`) has a `type` field
+                        // that names the pattern, not the bound names.
+                        let ty = (parameter.kind() == "parameter")
+                            .then(|| parameter.child_by_field_name("type"))
+                            .flatten()
                             .and_then(|ty| bare_type_name(ty, source));
                         record_binding(
                             pattern.unwrap_or(parameter),
@@ -567,15 +576,27 @@ fn collect_body_bindings(
                     // The initializer still sees the preceding binding.
                     let live = (node_range(n).1, scope_end);
                     record_value(pattern, source, live, values);
-                    // A closure body binds no type, as before; a destructuring
-                    // pattern has no one type for its names.
+                    // A destructuring pattern has no one type for its names.
                     let simple = matches!(pattern.kind(), "identifier" | "mut_pattern");
-                    let ty = if in_closure || !simple {
-                        None
-                    } else {
+                    let annotated = n.child_by_field_name("type").is_some();
+                    let ty = if simple {
                         let_binding_type(&n, source)
+                    } else {
+                        None
                     };
-                    record_binding(pattern, source, live, ty.as_deref(), events);
+                    let alias = (simple && !annotated)
+                        .then(|| n.child_by_field_name("value"))
+                        .flatten()
+                        .and_then(|value| Some((alias_source(value, source)?, start_pos(value))));
+                    match alias {
+                        Some((from, at)) => aliases.push(Alias {
+                            pattern,
+                            live,
+                            from,
+                            at,
+                        }),
+                        None => record_binding(pattern, source, live, ty.as_deref(), events),
+                    }
                 }
             }
             _ => {}
@@ -584,6 +605,49 @@ fn collect_body_bindings(
         for child in n.children(&mut c) {
             stack.push((child, scope_end, in_closure));
         }
+    }
+    // The walk visits `let`s out of source order, so an alias resolves only
+    // once every other binding is in, earliest first: `let a = x; let b = a;`.
+    aliases.sort_by_key(|alias| alias.at);
+    for alias in aliases {
+        let ty = events
+            .get(&alias.from)
+            .and_then(|bindings| live_type(bindings, alias.at))
+            .map(str::to_string);
+        record_binding(alias.pattern, source, alias.live, ty.as_deref(), events);
+    }
+}
+
+/// A `let x = y;` or `let x = y.clone();` with no annotation: `x` keeps the
+/// type `y` has where the initializer reads it.
+struct Alias<'t> {
+    pattern: Node<'t>,
+    live: PosRange,
+    from: String,
+    at: Pos,
+}
+
+/// `y` of the initializer `y` or `y.clone()`; `None` for any other shape.
+fn alias_source(value: Node<'_>, source: &[u8]) -> Option<String> {
+    let name = |n: Node<'_>| node_text(n, source);
+    match value.kind() {
+        "identifier" => name(value),
+        "call_expression" => {
+            let function = value.child_by_field_name("function")?;
+            let no_arguments = value
+                .child_by_field_name("arguments")
+                .is_some_and(|arguments| arguments.named_child_count() == 0);
+            let is_clone = function
+                .child_by_field_name("field")
+                .and_then(name)
+                .is_some_and(|field| field == "clone");
+            let receiver = function
+                .child_by_field_name("value")
+                .filter(|receiver| receiver.kind() == "identifier")?;
+            (function.kind() == "field_expression" && no_arguments && is_clone)
+                .then(|| name(receiver))?
+        }
+        _ => None,
     }
 }
 
@@ -776,7 +840,9 @@ fn rust_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Optio
 /// cannot be matched to a simple class name in the resolver.
 fn bare_type_name(ty_node: Node<'_>, source: &[u8]) -> Option<String> {
     match ty_node.kind() {
-        "type_identifier" | "primitive_type" => node_text(ty_node, source),
+        "type_identifier" | "primitive_type" => {
+            node_text(ty_node, source).filter(|name| name != "_")
+        }
         // &T or &mut T
         "reference_type" => {
             let inner = ty_node.child_by_field_name("type")?;

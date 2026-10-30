@@ -375,3 +375,177 @@ fn test_rust_two_typed_lets_side_by_side_keep_their_types() {
 fn test_rust_empty_file_has_no_nodes() {
     assert!(parse("").nodes.is_empty());
 }
+
+// Round 3, C-R1. The guard of a match arm (`p if cond =>`) is no part of the
+// pattern: `buf` there is the parameter, not an arm binding.
+#[test]
+fn test_rust_match_guard_identifier_keeps_parameter_type() {
+    let g = parse("fn a(buf: Buf) { match g() { (false, None) if buf.len() > 3 => 1, _ => 2 } }\n");
+    assert_sites(&g, "a", &[CallSite::Plain("g"), CallSite::Plain("Buf.len")]);
+}
+
+// C-R1 neighbour: a name the pattern does bind shadows in the guard and the
+// arm body alike.
+#[test]
+fn test_rust_match_guard_sees_name_bound_by_the_same_pattern() {
+    let g =
+        parse("fn a(buf: Buf) { match g() { Some(buf) if buf.len() > 3 => buf.n(), _ => 2 } }\n");
+    assert_sites(
+        &g,
+        "a",
+        &[
+            CallSite::Plain("g"),
+            CallSite::UntypedMember("len"),
+            CallSite::UntypedMember("n"),
+        ],
+    );
+}
+
+// Round 3, C-R2. A struct pattern as a closure parameter names its type in a
+// `type` field; the names it binds have no known type.
+#[test]
+fn test_rust_closure_struct_pattern_parameter_binds_names_untyped() {
+    let g = parse("fn a(ctx: Ctx) { let f = |LocalData { ctx, .. }| ctx.set(); ctx.m(); }\n");
+    assert_sites(
+        &g,
+        "a",
+        &[CallSite::UntypedMember("set"), CallSite::Plain("Ctx.m")],
+    );
+}
+
+// C-R2: the same for a tuple-struct pattern.
+#[test]
+fn test_rust_closure_tuple_struct_pattern_parameter_binds_names_untyped() {
+    let g = parse("fn a(x: Dog) { let f = |Wrapper(x)| x.go(); x.m(); }\n");
+    assert_sites(
+        &g,
+        "a",
+        &[CallSite::UntypedMember("go"), CallSite::Plain("Dog.m")],
+    );
+}
+
+// C-R2 neighbour: a typed closure parameter keeps its annotation.
+#[test]
+fn test_rust_closure_typed_parameter_keeps_its_type() {
+    let g = parse("fn a(s: Dog) { let f = |s: Cat| s.n(); s.m(); }\n");
+    assert_sites(
+        &g,
+        "a",
+        &[CallSite::Plain("Cat.n"), CallSite::Plain("Dog.m")],
+    );
+}
+
+// Round 3, C-R3. `_` asks the compiler to infer a type; it is no type name.
+#[test]
+fn test_rust_inferred_underscore_closure_parameter_type_is_unknown() {
+    let g = parse("fn a(s: Dog) { let f = |s: &mut _| s.size_hint(); s.m(); }\n");
+    assert_sites(
+        &g,
+        "a",
+        &[
+            CallSite::UntypedMember("size_hint"),
+            CallSite::Plain("Dog.m"),
+        ],
+    );
+}
+
+// C-R3: the same for a `let` annotation.
+#[test]
+fn test_rust_inferred_underscore_let_type_is_unknown() {
+    let g = parse("fn a() { let x: _ = make(); x.m(); }\n");
+    assert_sites(
+        &g,
+        "a",
+        &[CallSite::Plain("make"), CallSite::UntypedMember("m")],
+    );
+}
+
+// Round 3, C-R4. `let x = x;` and `let mut x = x;` keep the type `x` had.
+#[test]
+fn test_rust_let_rebinding_same_name_keeps_type() {
+    let g = parse("fn a(x: Dog) { let x = x; x.m(); }\nfn b(x: Dog) { let mut x = x; x.m(); }\n");
+    assert_sites(&g, "a", &[CallSite::Plain("Dog.m")]);
+    assert_sites(&g, "b", &[CallSite::Plain("Dog.m")]);
+}
+
+// C-R4: `let x = x.clone();` keeps it too.
+#[test]
+fn test_rust_let_rebinding_clone_keeps_type() {
+    let g = parse("fn a(x: &Dog) { let x = x.clone(); x.m(); }\n");
+    assert_sites(
+        &g,
+        "a",
+        &[CallSite::Plain("Dog.clone"), CallSite::Plain("Dog.m")],
+    );
+}
+
+// C-R4 atypical: a chain of aliases under other names resolves in order.
+#[test]
+fn test_rust_let_alias_chain_keeps_type() {
+    let g = parse("fn a(x: Dog) { let y = x; let z = y.clone(); z.m(); }\n");
+    assert_sites(
+        &g,
+        "a",
+        &[CallSite::Plain("Dog.clone"), CallSite::Plain("Dog.m")],
+    );
+}
+
+// C-R4 atypical: the alias sits in a closure body and reads a captured name.
+#[test]
+fn test_rust_let_alias_inside_closure_keeps_captured_type() {
+    let g = parse("fn a(buf: Buf) { spawn(move || { let mut buf = buf; buf.read(); }); }\n");
+    assert_sites(
+        &g,
+        "a",
+        &[CallSite::Plain("spawn"), CallSite::Plain("Buf.read")],
+    );
+}
+
+// C-R4 neighbour: an annotated `let` inside a closure binds its type.
+#[test]
+fn test_rust_annotated_let_inside_closure_binds_its_type() {
+    let g = parse("fn a(rt: Dog) { spawn(move || { let rt: Runtime = make(); rt.go(); }); }\n");
+    assert_sites(
+        &g,
+        "a",
+        &[
+            CallSite::Plain("spawn"),
+            CallSite::Plain("make"),
+            CallSite::Plain("Runtime.go"),
+        ],
+    );
+}
+
+// C-R4 neighbour: only a bare name or `name.clone()` keeps the type; any
+// other initializer gives an unknown one.
+#[test]
+fn test_rust_let_from_other_initializer_stays_untyped() {
+    let g = parse("fn a(x: Dog) { let x = x.to_string(); x.m(); }\n");
+    assert_sites(
+        &g,
+        "a",
+        &[
+            CallSite::Plain("Dog.to_string"),
+            CallSite::UntypedMember("m"),
+        ],
+    );
+}
+
+// C-R4 neighbour: the aliased name has no known type.
+#[test]
+fn test_rust_let_alias_of_untyped_name_stays_untyped() {
+    let g = parse("fn a() { let x = x.clone(); x.m(); }\nfn b(x: Dog) { let x = make(); let x = x; x.m(); }\n");
+    assert_sites(
+        &g,
+        "a",
+        &[
+            CallSite::UntypedMember("clone"),
+            CallSite::UntypedMember("m"),
+        ],
+    );
+    assert_sites(
+        &g,
+        "b",
+        &[CallSite::Plain("make"), CallSite::UntypedMember("m")],
+    );
+}

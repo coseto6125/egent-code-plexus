@@ -191,3 +191,47 @@ fn test_javascript_chained_exports_inside_function_body_marks_nothing() {
 fn test_javascript_empty_file_has_no_nodes() {
     assert!(parse(b"").nodes.is_empty());
 }
+
+fn exported_by_name(g: &LocalGraph, name: &str) -> bool {
+    g.nodes
+        .iter()
+        .find(|n| n.name == name)
+        .unwrap_or_else(|| panic!("no node {name}: {:?}", g.nodes))
+        .is_exported
+}
+
+// Round 3, C-R5. Shape from express `lib/application.js:40`: a declaration
+// whose value is an export chain names the exported object.
+#[test]
+fn test_javascript_declaration_with_export_chain_value_marks_declared_name() {
+    let g = parse(b"var app = exports = module.exports = {};\nfunction other() {}\n");
+    assert!(exported_by_name(&g, "app"));
+    assert!(!exported(&g, "other"));
+}
+
+// C-R5 atypical: a `let` declaration, and a chain whose value is a declared
+// function: the value is exported as well.
+#[test]
+fn test_javascript_let_with_export_chain_of_identifier_marks_both_names() {
+    let g = parse(b"function make() {}\nlet app = module.exports = make;\nfunction other() {}\n");
+    assert!(exported_by_name(&g, "app"));
+    assert!(exported(&g, "make"));
+    assert!(!exported(&g, "other"));
+}
+
+// C-R5 atypical: two declarators side by side; only the chained one exports.
+#[test]
+fn test_javascript_second_declarator_with_export_chain_marks_only_that_name() {
+    let g = parse(b"var a = 1, app = module.exports = {};\n");
+    assert!(exported_by_name(&g, "app"));
+    assert!(!exported_by_name(&g, "a"));
+}
+
+// C-R5 guard: chains with no `module.exports` target export no declared name.
+#[test]
+fn test_javascript_declaration_with_other_chain_value_marks_nothing() {
+    let g = parse(b"var a = b = 5;\nvar app = exports = {};\nvar p = other.exports = {};\n");
+    assert!(!exported_by_name(&g, "a"));
+    assert!(!exported_by_name(&g, "app"));
+    assert!(!exported_by_name(&g, "p"));
+}
