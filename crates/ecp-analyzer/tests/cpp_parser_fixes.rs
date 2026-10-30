@@ -936,3 +936,23 @@ fn test_cpp_lambda_variable_call_keeps_callback_record() {
         [("run", (1, 0, 5, 1), CallMeta::FLAG_CALLBACK, "auto")]
     );
 }
+
+// Round 3 review: a deduced `auto *` pointer names no type, so its member
+// call gets no record; a pointer with a declared type keeps one.
+#[test]
+fn test_cpp_auto_pointer_member_call_has_no_dispatch_record() {
+    let g = parse(
+        "autoptr.cpp",
+        b"struct Foo { void go(); };\nvoid run() {\n    auto *f = new Foo();\n    f->go();\n    Foo *h = new Foo();\n    h->go();\n}\n",
+    );
+    let rows = call_meta_rows(&g);
+    assert!(rows.iter().all(|r| r.3 != "auto"), "auto record: {rows:?}");
+    assert_eq!(
+        rows.iter().map(|r| (r.0, r.2, r.3)).collect::<Vec<_>>(),
+        [(
+            "run",
+            CallMeta::FLAG_CALLBACK | CallMeta::FLAG_DYNAMIC_DISPATCH,
+            "Foo"
+        )]
+    );
+}

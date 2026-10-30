@@ -470,8 +470,12 @@ fn c_var_type_pair(decl: Node<'_>, source: &[u8]) -> Option<(String, Option<Stri
         && declarator
             .child_by_field_name("value")
             .is_some_and(|v| v.kind() == "lambda_expression");
-    let tracked =
-        pointer || lambda || ty.contains("struct ") || ty.contains("_ops") || ty.ends_with("_t");
+    // A deduced `auto` names no type; only a lambda variable keeps it, as the
+    // marker of a call through a variable.
+    let deduced = matches!(ty, "auto" | "decltype(auto)");
+    let tracked = lambda
+        || (!deduced
+            && (pointer || ty.contains("struct ") || ty.contains("_ops") || ty.ends_with("_t")));
     Some((var_name, tracked.then(|| ty.to_string())))
 }
 
