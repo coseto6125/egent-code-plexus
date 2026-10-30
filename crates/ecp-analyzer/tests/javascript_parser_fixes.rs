@@ -235,3 +235,96 @@ fn test_javascript_declaration_with_other_chain_value_marks_nothing() {
     assert!(!exported_by_name(&g, "app"));
     assert!(!exported_by_name(&g, "p"));
 }
+
+/// A whole `module.exports = X` replaces the earlier one: Node exports only
+/// the last assigned value.
+#[test]
+fn test_javascript_commonjs_module_exports_reassigned_exports_last_value_only() {
+    let g = parse(b"function obsolete() {}\nfunction current() {}\nmodule.exports = obsolete;\nmodule.exports = current;\n");
+    assert!(!exported(&g, "obsolete"));
+    assert!(exported(&g, "current"));
+}
+
+/// A whole `module.exports = X` also drops the property exports made before it.
+#[test]
+fn test_javascript_commonjs_module_exports_reassigned_drops_earlier_property_exports() {
+    let g = parse(b"function a() {}\nfunction b() {}\nexports.a = a;\nmodule.exports = b;\n");
+    assert!(!exported(&g, "a"));
+    assert!(exported(&g, "b"));
+}
+
+/// A `module.exports.k = f` after a whole `module.exports = {...}` adds to the
+/// replaced state; both stay exported.
+#[test]
+fn test_javascript_commonjs_module_exports_object_then_property_keeps_both() {
+    let g = parse(
+        b"function a() {}\nfunction b() {}\nmodule.exports = { a };\nmodule.exports.b = b;\n",
+    );
+    assert!(exported(&g, "a"));
+    assert!(exported(&g, "b"));
+}
+
+/// An object reassignment replaces an earlier identifier export.
+#[test]
+fn test_javascript_commonjs_module_exports_object_replaces_earlier_identifier() {
+    let g =
+        parse(b"function a() {}\nfunction b() {}\nmodule.exports = a;\nmodule.exports = { b };\n");
+    assert!(!exported(&g, "a"));
+    assert!(exported(&g, "b"));
+}
+
+/// A replacement by a value that names no declaration leaves nothing exported.
+#[test]
+fn test_javascript_commonjs_module_exports_reassigned_to_literal_exports_nothing() {
+    let g = parse(b"function a() {}\nmodule.exports = a;\nmodule.exports = 42;\n");
+    assert!(!exported(&g, "a"));
+}
+
+/// A replacement inside a function body is not top level and replaces nothing.
+#[test]
+fn test_javascript_commonjs_nested_module_exports_reassignment_keeps_top_level_export() {
+    let g = parse(b"function a() {}\nfunction b() {}\nmodule.exports = a;\nfunction init() { module.exports = b; }\n");
+    assert!(exported(&g, "a"));
+    assert!(!exported(&g, "b"));
+}
+
+/// After `exports = {}` the name `exports` no longer aliases `module.exports`,
+/// so `exports.x = f` exports nothing.
+#[test]
+fn test_javascript_commonjs_exports_rebound_then_property_marks_nothing() {
+    let g =
+        parse(b"function privateHandler() {}\nexports = {};\nexports.handler = privateHandler;\n");
+    assert!(!exported(&g, "privateHandler"));
+}
+
+/// `module.exports.x = f` still exports after `exports` is rebound.
+#[test]
+fn test_javascript_commonjs_exports_rebound_then_module_exports_property_still_exports() {
+    let g = parse(b"function h() {}\nexports = {};\nmodule.exports.handler = h;\n");
+    assert!(exported(&g, "h"));
+}
+
+/// `exports = module.exports = {}` keeps the alias, so `exports.x = f` exports.
+#[test]
+fn test_javascript_commonjs_exports_rebound_through_chain_keeps_alias() {
+    let g = parse(b"function h() {}\nexports = module.exports = {};\nexports.handler = h;\n");
+    assert!(exported(&g, "h"));
+}
+
+/// `exports = module.exports` restores the alias after a rebinding.
+#[test]
+fn test_javascript_commonjs_exports_realiased_to_module_exports_exports_again() {
+    let g =
+        parse(b"function h() {}\nexports = {};\nexports = module.exports;\nexports.handler = h;\n");
+    assert!(exported(&g, "h"));
+}
+
+/// CRLF line ends do not change the source-order fold.
+#[test]
+fn test_javascript_commonjs_module_exports_reassigned_with_crlf_exports_last_only() {
+    let g = parse(
+        b"function a() {}\r\nfunction b() {}\r\nmodule.exports = a;\r\nmodule.exports = b;\r\n",
+    );
+    assert!(!exported(&g, "a"));
+    assert!(exported(&g, "b"));
+}

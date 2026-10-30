@@ -120,8 +120,12 @@ fn build_visibility_map(node: Node<'_>, source: &[u8]) -> HashMap<u32, bool> {
                 let mut c2 = args.walk();
                 for arg in args.named_children(&mut c2) {
                     match arg.kind() {
-                        "method" | "singleton_method" => {
-                            map.insert(arg.start_byte() as u32, visible);
+                        "method" => {
+                            let pos = arg.start_byte() as u32;
+                            map.insert(pos, visible);
+                            if let Some(name) = arg.child_by_field_name("name") {
+                                defs.push((&source[name.start_byte()..name.end_byte()], pos));
+                            }
                         }
                         "simple_symbol" => {
                             let sym = &source[arg.start_byte()..arg.end_byte()];
@@ -135,10 +139,14 @@ fn build_visibility_map(node: Node<'_>, source: &[u8]) -> HashMap<u32, bool> {
                 }
             }
             "method" | "singleton_method" => {
-                let pos = child.start_byte() as u32;
-                map.insert(pos, is_public);
-                if let Some(name) = child.child_by_field_name("name") {
-                    defs.push((&source[name.start_byte()..name.end_byte()], pos));
+                // Visibility markers change instance methods only; a `def self.x`
+                // keeps the default (exported) and is never a `private :x` target.
+                if child.kind() == "method" {
+                    let pos = child.start_byte() as u32;
+                    map.insert(pos, is_public);
+                    if let Some(name) = child.child_by_field_name("name") {
+                        defs.push((&source[name.start_byte()..name.end_byte()], pos));
+                    }
                 }
                 // Recurse into nested body_statements (nested classes/modules).
                 let mut c2 = child.walk();
@@ -445,7 +453,7 @@ pub struct RubyFile {
     pending_mixins: Vec<(String, (u32, u32))>,
     /// Pending delegator emissions: (target, method, (row, column)). Applied
     /// after the match loop; emitted whether or not the class extends Forwardable.
-    pending_delegators: Vec<(String, String, (u32, u32))>,
+    pending_delegators: Vec<(String, String, u32)>,
 }
 
 impl ParseSpec for RubySpec {
@@ -792,10 +800,7 @@ impl ParseSpec for RubySpec {
             let method_name =
                 std::str::from_utf8(&source[method_node.start_byte()..method_node.end_byte()])
                     .unwrap_or("");
-            let call_line = (
-                method_node.start_position().row as u32,
-                method_node.start_position().column as u32,
-            );
+            let call_line = method_node.start_position().row as u32;
             let mut walker = args.walk();
             let children: Vec<Node<'_>> = args.named_children(&mut walker).collect();
 
@@ -911,7 +916,7 @@ impl ParseSpec for RubySpec {
                 // The emitted RawImport mirrors the alias-keyword shape:
                 // `{ alias: Some(method), imported_name: method, source: "target.method" }`
                 // so downstream rename / resolution code reuses the existing path.
-                for (target, method, (line, _)) in std::mem::take(&mut f.pending_delegators) {
+                for (target, method, line) in std::mem::take(&mut f.pending_delegators) {
                     let source_path = format!("{target}.{method}");
                     push_alias_binding(&mut cx.imports, &method, &source_path);
                     // Also materialise the delegator as a Method RawNode so cross-file

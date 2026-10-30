@@ -59,6 +59,21 @@ fn test_go_const_one_spec_with_two_names_emits_both_on_that_spec() {
     let (x, y) = (konst(&g, "X"), konst(&g, "Y"));
     assert_eq!((x.span.0, x.span.2), (2, 2), "span {:?}", x.span);
     assert_eq!(x.span, y.span);
+    let consts = g.nodes.iter().filter(|n| n.kind == NodeKind::Const).count();
+    assert_eq!(consts, 2, "exactly the two named consts: {:?}", g.nodes);
+}
+
+/// A blank `_` name declares no symbol; the other names of the spec still do.
+#[test]
+fn test_go_const_blank_and_multi_name_emit_exactly_named_nodes() {
+    let g = parse("package p\n\nconst _, Y = 1, 2\n");
+    let names: Vec<_> = g
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Const)
+        .map(|n| n.name.as_str())
+        .collect();
+    assert_eq!(names, ["Y"]);
 }
 
 // FU-2026-10-30-8521e844bbe9 guard: function-local const stays dropped.

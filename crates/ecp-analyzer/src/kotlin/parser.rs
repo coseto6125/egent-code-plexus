@@ -7,12 +7,15 @@ use crate::driver::{
 };
 use crate::event_topic::{EventTopicConfig, KAFKA_KOTLIN};
 use crate::framework_confidence;
-use crate::framework_helpers::{collect_jvm_transactional_scopes, has_import_from};
+use crate::framework_helpers::{
+    collect_jvm_transactional_scopes, has_import_from, MODULE_LEVEL_SOURCE,
+};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
+use ecp_core::analyzer::membership::span_area;
 use ecp_core::analyzer::parse_prof::Pass;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{
-    LocalGraph, RawFrameworkRef, RawFunctionMeta, RawNode, Span, OVERRIDE_SENTINEL,
+    span_contains, LocalGraph, RawFrameworkRef, RawFunctionMeta, RawNode, Span, OVERRIDE_SENTINEL,
 };
 use ecp_core::graph::{FileCategory, NodeKind};
 use rustc_hash::FxHashMap;
@@ -32,6 +35,18 @@ thread_local! {
 }
 pub struct KotlinProvider {
     compiled: Compiled<KotlinSpec>,
+}
+
+/// The innermost named Function/Method around `span`. A trailing lambda
+/// (`routing { }`) is an `<anonymous:..>` Function node; a route's source is
+/// the function around it, so lambdas are skipped.
+fn enclosing_named_function(nodes: &[RawNode], span: Span) -> String {
+    nodes
+        .iter()
+        .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
+        .filter(|n| !n.name.starts_with("<anonymous") && span_contains(n.span, span))
+        .min_by_key(|n| span_area(n.span))
+        .map_or_else(|| MODULE_LEVEL_SOURCE.to_string(), |n| n.name.clone())
 }
 
 /// tree-sitter-kotlin needs a separator between a class-body member and the
@@ -542,7 +557,7 @@ impl ParseSpec for KotlinSpec {
                     cx.framework_refs = std::mem::take(&mut f.pending_ktor_refs)
                         .into_iter()
                         .map(|(verb, path, span)| RawFrameworkRef {
-                            source_name: node::enclosing_or_module(nodes, span),
+                            source_name: enclosing_named_function(nodes, span),
                             target_name: path,
                             confidence: framework_confidence::KTOR_ROUTE,
                             reason: format!("ktor-route-{}", verb),

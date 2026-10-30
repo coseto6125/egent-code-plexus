@@ -65,6 +65,79 @@ fn test_ruby_bare_private_marker_then_public_marker_sections_stay() {
     assert!(named(&g, "c").is_exported);
 }
 
+fn methods_named<'g>(g: &'g LocalGraph, name: &str) -> Vec<&'g RawNode> {
+    let mut v: Vec<_> = g
+        .nodes
+        .iter()
+        .filter(|n| n.name == name && n.kind == NodeKind::Method)
+        .collect();
+    v.sort_by_key(|n| n.span.0);
+    v
+}
+
+/// A later `public :name` makes an inline `private def name` public again,
+/// as `public_instance_methods(false)` reports in Ruby.
+#[test]
+fn test_ruby_private_def_inline_then_public_symbol_makes_it_public() {
+    let g = parse("class A\n  private def foo; end\n  public :foo\nend\n");
+    assert!(named(&g, "foo").is_exported);
+}
+
+/// A later `private :name` hides an inline `public def name`.
+#[test]
+fn test_ruby_public_def_inline_then_private_symbol_hides_it() {
+    let g = parse("class A\n  public def foo; end\n  private :foo\nend\n");
+    assert!(!named(&g, "foo").is_exported);
+}
+
+/// `private :foo` changes the instance method only; the same-name
+/// `def self.foo` stays public.
+#[test]
+fn test_ruby_private_symbol_with_same_name_singleton_hides_instance_only() {
+    let g = parse("class A\n  def foo; end\n  def self.foo; end\n  private :foo\nend\n");
+    let m = methods_named(&g, "foo");
+    assert_eq!(m.len(), 2);
+    assert!(!m[0].is_exported, "instance foo is private");
+    assert!(m[1].is_exported, "singleton foo stays public");
+}
+
+/// The singleton defined before the instance method is not the target either.
+#[test]
+fn test_ruby_private_symbol_singleton_defined_first_hides_instance_only() {
+    let g = parse("class A\n  def self.foo; end\n  def foo; end\n  private :foo\nend\n");
+    let m = methods_named(&g, "foo");
+    assert_eq!(m.len(), 2);
+    assert!(m[0].is_exported, "singleton foo stays public");
+    assert!(!m[1].is_exported, "instance foo is private");
+}
+
+/// A bare `private` does not affect `def self.x`, only the instance methods.
+#[test]
+fn test_ruby_bare_private_leaves_singleton_method_exported() {
+    let g = parse(
+        "class Foo\n  def bar; end\n  private\n  def self.build; end\n  def helper; end\nend\n",
+    );
+    assert!(named(&g, "bar").is_exported);
+    assert!(named(&g, "build").is_exported);
+    assert!(!named(&g, "helper").is_exported);
+}
+
+/// CRLF line ends do not change which methods a bare `private` hides.
+#[test]
+fn test_ruby_bare_private_with_crlf_hides_following_instance_method() {
+    let g =
+        parse("class Foo\r\n  private\r\n  def self.build; end\r\n  def helper; end\r\nend\r\n");
+    assert!(named(&g, "build").is_exported);
+    assert!(!named(&g, "helper").is_exported);
+}
+
+/// A `private :x` naming no method of the body changes nothing.
+#[test]
+fn test_ruby_private_symbol_naming_unknown_method_changes_nothing() {
+    let g = parse("class A\n  def foo; end\n  private :missing\nend\n");
+    assert!(named(&g, "foo").is_exported);
+}
+
 // FU-2026-10-30-e444dfa8c963
 #[test]
 fn test_ruby_include_in_second_class_on_same_row_binds_that_class() {

@@ -45,6 +45,43 @@ fn test_kotlin_ktor_ref_source_name_is_an_enclosing_function_not_module() {
     );
 }
 
+/// A route's source is the named function it is declared in, never the
+/// anonymous lambda of the `routing { }` block around it.
+#[test]
+fn test_kotlin_ktor_ref_source_name_is_the_named_function_not_a_lambda() {
+    let g = parse(&format!(
+        "{IMPORT}fun Application.module() {{\n    routing {{\n        get(\"/x\") {{ call.respondText(\"ok\") }}\n    }}\n}}\n"
+    ));
+    assert_eq!(g.framework_refs.len(), 1, "{:?}", g.framework_refs);
+    assert_eq!(g.framework_refs[0].source_name, "module");
+}
+
+/// Nested route blocks (`route { get }`) still resolve to the named function.
+#[test]
+fn test_kotlin_ktor_ref_in_nested_route_blocks_names_the_function() {
+    let g = parse(&format!(
+        "{IMPORT}fun Application.module() {{\r\n    routing {{\r\n        route(\"/a\") {{\r\n            get(\"/x\") {{ call.respondText(\"ok\") }}\r\n        }}\r\n    }}\r\n}}\r\n"
+    ));
+    let r = g
+        .framework_refs
+        .iter()
+        .find(|r| r.target_name == "/x")
+        .expect("get ref");
+    assert_eq!(r.source_name, "module");
+}
+
+/// A route with no named function around it (top-level property lambda)
+/// keeps the module-level source.
+#[test]
+fn test_kotlin_ktor_ref_outside_any_named_function_is_module_level() {
+    let g = parse(&format!(
+        "{IMPORT}val r = routing {{\n    get(\"/x\") {{ call.respondText(\"ok\") }}\n}}\n"
+    ));
+    for r in g.framework_refs.iter().filter(|r| r.target_name == "/x") {
+        assert_eq!(r.source_name, MODULE_LEVEL_SOURCE);
+    }
+}
+
 // FU-2026-10-30-baa83b70b9a0
 #[test]
 fn test_kotlin_ktor_refs_in_two_functions_carry_their_own_source_names() {
