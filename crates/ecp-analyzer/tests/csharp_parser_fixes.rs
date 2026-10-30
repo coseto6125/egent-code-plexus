@@ -121,10 +121,11 @@ fn test_csharp_file_scoped_namespace_after_usings_starts_at_keyword() {
     assert_eq!(imports(&g), [("System", "System", None)]);
 }
 
-/// Guards: a file-scoped namespace with no declaration keeps its own line,
-/// and a block namespace keeps today's records.
+/// Guards: a file-scoped namespace with no declaration spans its own line,
+/// and a block namespace spans its braces and owns its class, which owns
+/// its method.
 #[test]
-fn test_csharp_empty_file_scoped_and_block_namespace_records_unchanged() {
+fn test_csharp_empty_file_scoped_and_block_namespace_spans_and_owners() {
     let g = parse(b"namespace App.Core;\n");
     assert_eq!(
         rows(&g),

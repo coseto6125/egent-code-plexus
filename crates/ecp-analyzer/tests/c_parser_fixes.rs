@@ -123,9 +123,11 @@ fn test_c_decls_in_every_preproc_branch_emit_but_body_local_extern_does_not() {
     );
 }
 
-/// Guard: the file-scope prototype and variable keep today's records.
+/// Guard: a file-scope prototype is an exported Function with no type
+/// annotation, and a file-scope `extern` variable is a Variable whose
+/// annotation is `extern int`.
 #[test]
-fn test_c_file_scope_extern_decls_unchanged() {
+fn test_c_file_scope_extern_decls_emit_function_and_extern_variable() {
     let g = parse(
         "top.c",
         b"extern int api_open(const char *path);\nextern int api_errno;\n",
@@ -235,7 +237,7 @@ fn test_c_include_guard_define_emits_no_macro_node() {
 /// Atypical guard spellings: a Google-style `_H_` name and the
 /// `#if !defined(X)` form. `#ifndef BUF_SIZE` / `#define BUF_SIZE 4096` has
 /// a body, so it is a default value, not a guard: its Macro and import stay.
-/// Imports keep their own name-suffix rule, so `WIDGET_H_` stays a Flag.
+/// A guard is neither a Macro node nor an import, whatever rule finds it.
 #[test]
 fn test_c_include_guard_spellings_skipped_but_default_value_define_kept() {
     let g = parse(
@@ -257,7 +259,6 @@ fn test_c_include_guard_spellings_skipped_but_default_value_define_kept() {
         [
             binding("BUF_SIZE", "4096", BindingKind::Constant),
             binding("LEGACY_ON", "1", BindingKind::Constant),
-            binding("WIDGET_H_", "", BindingKind::Flag),
             binding("WIDGET_MAX", "8", BindingKind::Constant),
         ]
     );
@@ -400,7 +401,7 @@ fn test_c_pointer_return_fn_ptr_typedefs_emit_typedef_nodes() {
 /// function pointer, a `**` return, and the A1 shape inside `#ifdef` are all
 /// `Typedef` nodes. The abstract `typedef void *(*)(int);` names nothing, so
 /// it emits no node. `cmp_fn`, `counter_t` and the pointer-returning
-/// prototype `alloc` keep today's records.
+/// prototype `alloc` stay a Typedef, a Typedef and a Function.
 #[test]
 fn test_c_nested_fn_ptr_and_triple_pointer_typedefs_emit_typedef_nodes() {
     let g = parse(
@@ -938,4 +939,68 @@ fn test_c_second_declarator_types_field_call() {
             .collect::<Vec<_>>(),
         [("run", "ev")]
     );
+}
+
+/// A guard the `#ifndef` pairing finds (`_HH`) is no import either. A
+/// `#define X 1` alone in its `#ifndef X` group sets a default, so it keeps
+/// its Macro node; imports also drop every guard-spelt name defined as
+/// empty or `1`, so it has no import.
+#[test]
+fn test_c_guard_pairing_drops_import_and_lone_default_keeps_macro() {
+    let g = parse(
+        "cfg.c",
+        b"#ifndef FOO_HH\n#define FOO_HH\nint x;\n#endif\n#ifndef HAVE_STDINT_H\n#define HAVE_STDINT_H 1\n#endif\n",
+    );
+    assert_eq!(
+        rows_of(&g, &[NodeKind::Macro]),
+        [("HAVE_STDINT_H", NodeKind::Macro, (5, 0, 6, 0), true, None)]
+    );
+    assert_eq!(import_rows(&g), []);
+}
+
+/// Declarations in an `extern "C"` block, the usual header wrapper, stay
+/// at file scope.
+#[test]
+fn test_c_extern_c_block_decls_emit_variable_and_function() {
+    let g = parse(
+        "ext.c",
+        b"#ifdef __cplusplus\nextern \"C\" {\n#endif\nint g_count;\nvoid api(void);\n#ifdef __cplusplus\n}\n#endif\n",
+    );
+    let names: Vec<_> = rows_of(&g, &[NodeKind::Variable, NodeKind::Function])
+        .into_iter()
+        .map(|r| (r.0, r.1))
+        .collect();
+    assert_eq!(
+        names,
+        [("g_count", NodeKind::Variable), ("api", NodeKind::Function)]
+    );
+}
+
+/// `typedef struct node Node, *NodePtr;` binds each alias to the shared
+/// type plus its own pointer prefix.
+#[test]
+fn test_c_multi_declarator_typedef_binds_each_alias() {
+    let g = parse("td.c", b"typedef struct node Node, *NodePtr;\n");
+    assert_eq!(
+        import_rows(&g),
+        [
+            binding("Node", "struct node", BindingKind::Alias),
+            binding("NodePtr", "struct node *", BindingKind::Alias),
+        ]
+    );
+}
+
+/// A digit separator or a multi-line raw string in an error-recovered
+/// file leaves later file-scope declarations at file scope.
+#[test]
+fn test_c_digit_separator_in_recovered_tree_keeps_later_global() {
+    let g = parse(
+        "sep.c",
+        b"int @bad;\nvoid f(int n) {\n  if (n > 1'000) {\n    n++;\n  }\n}\nint after_global = 0;\n",
+    );
+    let names: Vec<_> = rows_of(&g, &[NodeKind::Variable])
+        .into_iter()
+        .map(|r| r.0)
+        .collect();
+    assert!(names.contains(&"after_global"), "{names:?}");
 }

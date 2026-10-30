@@ -22,6 +22,7 @@ use ecp_core::analyzer::types::{
 };
 use ecp_core::graph::{FileCategory, NodeKind};
 use std::path::Path;
+use std::sync::OnceLock;
 use tree_sitter::{Node, Parser, Query, Tree};
 
 /// Blind-spot kind/hint pairs pushed only when the first argument is not a
@@ -248,14 +249,16 @@ fn grammar<const TSX: bool>() -> tree_sitter::Language {
 
 pub struct TypeScriptProvider {
     compiled: Compiled<TypeScriptSpec>,
-    compiled_tsx: Compiled<TsxSpec>,
+    /// Compiled on the first `.tsx` file: a process that parses only `.ts`
+    /// never pays for the second query.
+    compiled_tsx: OnceLock<Compiled<TsxSpec>>,
 }
 
 impl TypeScriptProvider {
     pub fn new() -> anyhow::Result<Self> {
         Ok(Self {
             compiled: Compiled::new()?,
-            compiled_tsx: Compiled::new()?,
+            compiled_tsx: OnceLock::new(),
         })
     }
 }
@@ -266,10 +269,17 @@ impl LanguageProvider for TypeScriptProvider {
     }
 
     fn parse_file(&self, path: &Path, source: &[u8]) -> anyhow::Result<LocalGraph> {
-        match path.extension().is_some_and(|e| e == "tsx") {
-            true => driver::parse(&self.compiled_tsx, path, source),
-            false => driver::parse(&self.compiled, path, source),
+        if !path.extension().is_some_and(|e| e == "tsx") {
+            return driver::parse(&self.compiled, path, source);
         }
+        let tsx = match self.compiled_tsx.get() {
+            Some(tsx) => tsx,
+            None => {
+                let tsx = Compiled::new()?;
+                self.compiled_tsx.get_or_init(|| tsx)
+            }
+        };
+        driver::parse(tsx, path, source)
     }
 }
 

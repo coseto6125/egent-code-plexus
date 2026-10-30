@@ -11,7 +11,7 @@
 //! extractor's traversal order or its skip rules.
 
 use crate::calls::{node_range, range_width, start_pos, CallSiteIndex, Pos, PosRange};
-use crate::preproc_fallback::{brace_depths, depth_at};
+use crate::preproc_fallback::depth_at;
 use ecp_core::analyzer::types::{RawCallMeta, RawNode};
 use ecp_core::graph::CallMeta;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -368,6 +368,8 @@ pub struct FnPtrVars {
 }
 
 impl FnPtrVars {
+    /// Record `name` as visible in `scope`; `None` hides an outer binding of
+    /// the name without typing it.
     pub fn declare(&mut self, name: String, scope: PosRange, ty: Option<String>) {
         self.decls.entry(name).or_default().push((scope, ty));
     }
@@ -394,15 +396,21 @@ impl FnPtrVars {
 /// with its type when it is a pointer or struct-like shape, untracked
 /// otherwise. A prototype's parameter names nothing outside it and is left
 /// out; so is a prototype, which declares a function, not a variable.
-pub fn collect_c_cpp_fn_ptr_vars(root: Node<'_>, source: &[u8], vars: &mut FnPtrVars) {
-    let depths = root.has_error().then(|| brace_depths(source));
+/// `depths` are the source's brace depths, which the caller passes when the
+/// tree has errors (see [`c_decl_scope`]).
+pub fn collect_c_cpp_fn_ptr_vars(
+    root: Node<'_>,
+    source: &[u8],
+    depths: Option<&[(usize, i32)]>,
+    vars: &mut FnPtrVars,
+) {
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         if matches!(n.kind(), "declaration" | "parameter_declaration") {
             let ty = n
                 .child_by_field_name("type")
                 .and_then(|t| node_text(t, source));
-            if let Some((scope, ty)) = c_decl_scope(n, depths.as_deref()).zip(ty) {
+            if let Some((scope, ty)) = c_decl_scope(n, depths).zip(ty) {
                 // `T *a, *b;` binds every declarator, not only the first.
                 let mut c = n.walk();
                 for d in n.children_by_field_name("declarator", &mut c) {

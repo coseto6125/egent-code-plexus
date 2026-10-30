@@ -188,6 +188,17 @@ pub struct FieldReads {
 }
 
 pub type PrepareSource = fn(&[u8]) -> Option<Vec<u8>>;
+
+/// Overwrite `[from, to)` of a [`PrepareSource`] patch with blanks, keeping
+/// line breaks so rows stay and no byte moves.
+pub(crate) fn blank_range(buf: &mut [u8], from: usize, to: usize) {
+    let to = to.min(buf.len());
+    for b in &mut buf[from..to] {
+        if !matches!(*b, b'\n' | b'\r') {
+            *b = b' ';
+        }
+    }
+}
 pub type TxFromNodes = fn(&[RawNode], &[NodeKind]) -> Option<Box<[RawTxScope]>>;
 pub type TxFromTree = fn(Node<'_>, &[u8], &[RawNode]) -> Option<Box<[RawTxScope]>>;
 

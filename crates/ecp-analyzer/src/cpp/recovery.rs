@@ -19,6 +19,9 @@ use ecp_core::analyzer::types::RawNode;
 use ecp_core::graph::NodeKind;
 use rustc_hash::FxHashMap;
 
+use crate::driver::blank_range;
+use crate::preproc_fallback::directive_lines;
+
 /// Keywords an attribute-like macro line can precede.
 const DECL_KEYWORDS: &[&[u8]] = &[
     b"class",
@@ -178,23 +181,6 @@ pub fn blank_decl_prefix_macros(source: &[u8]) -> Option<Vec<u8>> {
     patched
 }
 
-/// The word after the `#` of the directive on the line `[start, end)`
-/// (`if`, `ifdef`, `else`, ...); `None` when the line is no directive.
-fn directive_word(s: &[u8], start: usize, end: usize) -> Option<&[u8]> {
-    let blank = |from: usize| {
-        from + s[from..end]
-            .iter()
-            .take_while(|&&b| matches!(b, b' ' | b'\t'))
-            .count()
-    };
-    let hash = blank(start);
-    if s.get(hash) != Some(&b'#') || hash >= end {
-        return None;
-    }
-    let word = blank(hash + 1);
-    Some(&s[word..ident_end(s, word).min(end)])
-}
-
 /// The last non-whitespace byte before `i`.
 fn prev_non_space(s: &[u8], i: usize) -> Option<u8> {
     s[..i]
@@ -202,25 +188,6 @@ fn prev_non_space(s: &[u8], i: usize) -> Option<u8> {
         .rev()
         .copied()
         .find(|b| !b.is_ascii_whitespace())
-}
-
-fn continues_previous_line(s: &[u8], line_start: usize) -> bool {
-    let before = &s[..line_start.saturating_sub(1)];
-    line_start > 0
-        && before
-            .strip_suffix(b"\r")
-            .unwrap_or(before)
-            .ends_with(b"\\")
-}
-
-/// Overwrite `[from, to)` with blanks, keeping line breaks so rows stay.
-fn blank_range(buf: &mut [u8], from: usize, to: usize) {
-    let to = to.min(buf.len());
-    for b in &mut buf[from..to] {
-        if !matches!(*b, b'\n' | b'\r') {
-            *b = b' ';
-        }
-    }
 }
 
 const COND_OPEN: &[&[u8]] = &[b"if", b"ifdef", b"ifndef"];
@@ -233,14 +200,15 @@ const COND_NEXT: &[&[u8]] = &[b"else", b"elif", b"elifdef", b"elifndef"];
 /// class, so the next method became a function spanning the class. `None`
 /// when no conditional has that shape. No byte moves.
 pub fn blank_init_list_conditionals(source: &[u8]) -> Option<Vec<u8>> {
+    // A directive is read from the lexer's lines, so a `#else` inside a
+    // comment or a literal opens no branch.
+    let lines = directive_lines(source);
     let mut patched: Option<Vec<u8>> = None;
-    let mut line_start = 0;
-    while line_start < source.len() {
-        let end = line_end(source, line_start);
-        let opens = directive_word(source, line_start, end).is_some_and(|w| COND_OPEN.contains(&w))
-            && !continues_previous_line(source, line_start);
-        if !opens {
-            line_start = end + 1;
+    let mut k = 0;
+    while k < lines.len() {
+        let (line_start, _, word) = lines[k];
+        k += 1;
+        if !word.is_some_and(|w| COND_OPEN.contains(&w)) {
             continue;
         }
         let open_end = skip_directive(source, line_start);
@@ -249,23 +217,25 @@ pub fn blank_init_list_conditionals(source: &[u8]) -> Option<Vec<u8>> {
             && source.get(first) == Some(&b':')
             && source.get(first + 1) != Some(&b':');
         if !opens_init_list {
-            line_start = end + 1;
             continue;
         }
         let buf = patched.get_or_insert_with(|| source.to_vec());
         blank_range(buf, line_start, open_end);
         let (mut depth, mut later) = (0u32, false);
         let mut i = open_end + 1;
-        while i < source.len() {
-            let e = line_end(source, i);
-            let Some(word) = directive_word(source, i, e) else {
+        while k < lines.len() {
+            let (start, end, word) = lines[k];
+            k += 1;
+            if start < i {
+                continue;
+            }
+            let Some(word) = word else {
                 if later {
-                    blank_range(buf, i, e);
+                    blank_range(buf, start, end);
                 }
-                i = e + 1;
                 continue;
             };
-            let directive_end = skip_directive(source, i);
+            let directive_end = skip_directive(source, start);
             let closes = word == b"endif" && depth == 0;
             if COND_OPEN.contains(&word) {
                 depth += 1;
@@ -275,14 +245,13 @@ pub fn blank_init_list_conditionals(source: &[u8]) -> Option<Vec<u8>> {
                 later = true;
             }
             if later || closes {
-                blank_range(buf, i, directive_end);
+                blank_range(buf, start, directive_end);
             }
             i = directive_end + 1;
             if closes {
                 break;
             }
         }
-        line_start = i;
     }
     patched
 }
@@ -797,6 +766,24 @@ mod tests {
         assert_eq!(
             patched,
             b"  Foo()\n     \n    : a(1)\n     \n          \n      \n  {}\n"
+        );
+    }
+
+    /// A `#else` inside a block comment or a string opens no branch, so the
+    /// comment's `*/` and the string stay.
+    #[test]
+    fn test_blank_init_list_conditionals_else_inside_comment_keeps_comment_end() {
+        let src = b"  Foo()\n#if A\n    : a(1) /* see\n#else\n  */\n#endif\n  {}\n";
+        let patched = blank_init_list_conditionals(src).expect("init-list conditional");
+        assert_eq!(
+            patched,
+            b"  Foo()\n     \n    : a(1) /* see\n#else\n  */\n      \n  {}\n"
+        );
+        let src = b"  Foo()\n#if A\n    : s(R\"(\n#else\n)\")\n#endif\n  {}\n";
+        let patched = blank_init_list_conditionals(src).expect("init-list conditional");
+        assert_eq!(
+            patched,
+            b"  Foo()\n     \n    : s(R\"(\n#else\n)\")\n      \n  {}\n"
         );
     }
 

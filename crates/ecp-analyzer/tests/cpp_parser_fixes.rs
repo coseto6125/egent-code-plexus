@@ -644,8 +644,8 @@ fn test_cpp_guarded_namespace_and_extern_c_variables_emit_variable_nodes() {
     );
 }
 
-/// Off-task 1 guard: a `.cpp` file's top-level variable keeps today's
-/// record, and an anonymous namespace owns nothing.
+/// Guard: a `.cpp` file's top-level variable is an unexported Variable with
+/// no owner, and an anonymous namespace owns nothing.
 #[test]
 fn test_cpp_top_level_and_anonymous_namespace_variables_have_no_owner() {
     let g = parse(
@@ -972,4 +972,82 @@ fn test_cpp_macro_qualified_fn_ptr_variable_keeps_callback_record() {
             .collect::<Vec<_>>(),
         [("assert_owner", CallMeta::FLAG_CALLBACK, "owner_error_t")]
     );
+}
+
+// ---- Round 4 (simplify review) ----
+
+fn variable_names(g: &LocalGraph) -> Vec<&str> {
+    g.nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Variable)
+        .map(|n| n.name.as_str())
+        .collect()
+}
+
+/// In a tree with errors, brace depth decides file scope. A digit
+/// separator, a multi-line raw string and a namespace head with a
+/// visibility macro leave the braces after them counted right, so the
+/// globals after them stay Variables.
+#[test]
+fn test_cpp_recovered_tree_lexer_shapes_keep_later_globals() {
+    for (path, src, global) in [
+        (
+            "sep.cpp",
+            &b"int @bad;\nvoid f(int n) {\n  if (n > 1'000) {\n    n++;\n  }\n}\nint after_global = 0;\n"[..],
+            "after_global",
+        ),
+        (
+            "raw.cpp",
+            b"int @bad;\nconst char *k = R\"({\n  \"a\": 1}\n)\";\nint after_raw = 0;\n",
+            "after_raw",
+        ),
+        (
+            "vis.cpp",
+            b"int @bad;\nnamespace std _GLIBCXX_VISIBILITY(default)\n{\nint ns_counter = 0;\n}\n",
+            "ns_counter",
+        ),
+        (
+            "cmt.cpp",
+            b"int @bad;\nnamespace n /* ; */ {\nint in_ns = 0;\n}\n",
+            "in_ns",
+        ),
+    ] {
+        let g = parse(path, src);
+        assert!(
+            variable_names(&g).contains(&global),
+            "{path}: {:?}",
+            variable_names(&g)
+        );
+    }
+}
+
+/// A `'"'` char literal opens no string, so the `#define` after it is seen
+/// and a direct initialisation that calls that macro is no Variable.
+#[test]
+fn test_cpp_macro_after_quote_char_literal_call_emits_no_variable() {
+    let g = parse(
+        "q.h",
+        b"static const char kQuote = '\"';\n#define ATTR_PRINTF(idx, cnt) __attribute__((format(printf, idx, cnt)))\nAPI void (*Module_Log)(const char *fmt, ...) ATTR ATTR_PRINTF(3, 4);\nconst char *msg = \"done\";\n",
+    );
+    assert!(
+        !variable_names(&g).contains(&"ATTR_PRINTF"),
+        "{:?}",
+        variable_names(&g)
+    );
+}
+
+/// `#ifndef HAVE_STDINT_H` / `#define HAVE_STDINT_H 1` / `#endif` sets a
+/// default: the macro keeps its node. A guard around code does not.
+#[test]
+fn test_cpp_lone_one_valued_define_in_ifndef_keeps_macro_node() {
+    let g = parse(
+        "cfg.hpp",
+        b"#pragma once\n#ifndef HAVE_STDINT_H\n#define HAVE_STDINT_H 1\n#endif\n#ifdef HAVE_STDINT_H\nint y;\n#endif\n",
+    );
+    assert_eq!(macro_names(&g), ["HAVE_STDINT_H"]);
+    let g = parse(
+        "real.hpp",
+        b"#ifndef REAL_HPP\n#define REAL_HPP 1\nint y;\n#endif\n",
+    );
+    assert!(macro_names(&g).is_empty(), "{:?}", macro_names(&g));
 }

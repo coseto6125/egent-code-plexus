@@ -8,7 +8,7 @@
 //! Files included in the fingerprint (under `src/`):
 //!   * every `parser.rs`
 //!   * every tree-sitter query (`*.scm`)
-//!   * top-level `calls.rs`, `framework_helpers.rs`, `route_detector.rs`
+//!   * the top-level helpers in `TOP_LEVEL_FILES`
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,13 +18,17 @@ use sha2::{Digest, Sha256};
 // Top-level helpers at `src/*.rs` whose content affects parse output.
 // `framework_confidence.rs` carries the confidence constants written into
 // `RawFrameworkRef.confidence` — a change there reshapes cached graphs even
-// without touching parser.rs.
+// without touching parser.rs. `preproc_fallback.rs` decides C/C++ file
+// scope, include guards and fallback macros; `indirect_dispatch.rs` writes
+// call metas.
 // `lib.rs` is excluded: it only re-exports.
 const TOP_LEVEL_FILES: &[&str] = &[
     "calls.rs",
     "framework_helpers.rs",
     "framework_confidence.rs",
     "route_detector.rs",
+    "preproc_fallback.rs",
+    "indirect_dispatch.rs",
 ];
 
 fn main() {

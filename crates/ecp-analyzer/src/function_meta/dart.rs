@@ -149,10 +149,10 @@ fn extract_one(
             .map(|p| p.kind() == "method_declaration")
             .unwrap_or(false);
         // A body-less class member is abstract; an `external` one is not.
-        let is_body_less_class_member = fn_node.parent().is_some_and(|d| {
-            d.kind() == "declaration"
-                && d.parent().is_some_and(|m| m.kind() == "member_declaration")
-        }) && flags & FunctionMeta::FLAG_EXTERN == 0;
+        let is_body_less_class_member = fn_node
+            .parent()
+            .is_some_and(crate::dart::parser::is_class_member_declaration)
+            && flags & FunctionMeta::FLAG_EXTERN == 0;
         if parent_is_method_decl || is_body_less_class_member {
             flags |= FunctionMeta::FLAG_ABSTRACT;
         }

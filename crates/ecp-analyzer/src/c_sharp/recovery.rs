@@ -5,6 +5,8 @@
 //! `#endif`), error recovery ends the enclosing class early and its later
 //! members take the namespace as owner.
 
+use crate::driver::blank_range;
+
 /// A line-scan lexer state that outlives the line.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Lex {
@@ -295,16 +297,6 @@ impl Group {
     /// any one of them cannot unbalance the braces around the group.
     fn keeps_depth(&self) -> bool {
         self.branches.iter().all(|b| b.floor == 0 && b.delta == 0)
-    }
-}
-
-/// Overwrite `[from, to)` with blanks, keeping line breaks so rows stay.
-fn blank_range(buf: &mut [u8], from: usize, to: usize) {
-    let to = to.min(buf.len());
-    for b in &mut buf[from..to] {
-        if !matches!(*b, b'\n' | b'\r') {
-            *b = b' ';
-        }
     }
 }
 

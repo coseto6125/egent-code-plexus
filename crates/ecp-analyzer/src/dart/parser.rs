@@ -442,7 +442,7 @@ impl ParseSpec for DartSpec {
 }
 
 /// A `declaration` holding a class member's body-less signature.
-fn is_class_member_declaration(declaration: Node<'_>) -> bool {
+pub(crate) fn is_class_member_declaration(declaration: Node<'_>) -> bool {
     declaration.kind() == "declaration"
         && declaration
             .parent()
@@ -495,6 +495,15 @@ fn restamp_decl_annotation_owners(root: Node<'_>, nodes: &mut [RawNode]) {
                 | "extension_declaration"
         )
     }) {
+        let mut inner = decl.walk();
+        let annotations: Vec<_> = decl
+            .named_children(&mut inner)
+            .filter(|a| a.kind() == "annotation")
+            .map(node::span)
+            .collect();
+        if annotations.is_empty() {
+            continue;
+        }
         let decl_span = node::span(decl);
         let Some(owner) = nodes
             .iter()
@@ -506,18 +515,11 @@ fn restamp_decl_annotation_owners(root: Node<'_>, nodes: &mut [RawNode]) {
         else {
             continue;
         };
-        let mut inner = decl.walk();
-        for ann in decl
-            .named_children(&mut inner)
-            .filter(|a| a.kind() == "annotation")
+        for n in nodes
+            .iter_mut()
+            .filter(|n| n.kind == NodeKind::Annotation && annotations.contains(&n.span))
         {
-            let ann_span = node::span(ann);
-            for n in nodes
-                .iter_mut()
-                .filter(|n| n.kind == NodeKind::Annotation && n.span == ann_span)
-            {
-                n.owner_class = owner.clone();
-            }
+            n.owner_class = owner.clone();
         }
     }
 }
