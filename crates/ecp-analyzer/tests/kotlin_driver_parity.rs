@@ -183,15 +183,10 @@ fn test_kotlin_driver_ktor_routing_block_emits_enclosing_callable_ref() {
         .collect();
     assert_eq!(
         refs,
-        // Contract: a framework ref names the innermost enclosing callable
-        // (`driver::node::enclosing_or_module`), here the `routing { }` lambda.
-        [(
-            "<anonymous:4:12>",
-            "/x",
-            "ktor-route-get",
-            KTOR_ROUTE,
-            (4, 8, 4, 44)
-        )]
+        // Contract: a Ktor ref names the innermost enclosing named callable,
+        // here `module`; the `routing { }` lambda is an anonymous node an
+        // agent cannot search by name.
+        [("module", "/x", "ktor-route-get", KTOR_ROUTE, (4, 8, 4, 44))]
     );
     node(&g, "module", NodeKind::Function);
     node(&g, "<anonymous:4:12>", NodeKind::Function);

@@ -795,7 +795,12 @@ impl ParseSpec for GoSpec {
         // emits one node per name on the shared spec, and `_` as `var` does.
         if let (Some(NodeKind::Const), Some(root)) = (d.kind, d.root) {
             let mut cursor = root.walk();
-            for n in root.children_by_field_name("name", &mut cursor) {
+            // The `name` field spans the whole `X, Y` list: its `,` tokens
+            // carry the field too.
+            for n in root
+                .children_by_field_name("name", &mut cursor)
+                .filter(|n| n.kind() == "identifier")
+            {
                 let Ok(name_str) = n.utf8_text(source) else {
                     continue;
                 };
