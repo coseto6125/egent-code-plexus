@@ -85,9 +85,8 @@ fn dart_instance_method_no_static_flag() {
 
 #[test]
 fn dart_abstract_class_static_method_has_static_flag() {
-    // In Dart, abstract methods without a body are not emitted as graph nodes
-    // (no query pattern matches bodyless method signatures for methods).
-    // We instead test that a static method in an abstract class is correctly flagged.
+    // Body-less abstract members are covered by
+    // test_dart_body_less_class_member_is_abstract_flag.
     let src = "abstract class Base { static void helper() {} }\n";
     let g = analyze(src);
     let m = meta(&g, "helper");
@@ -268,4 +267,49 @@ fn dart_nested_function_has_function_meta() {
         .resolve(g.string_pool.as_slice())
         .is_empty());
     assert!(!inner.params.is_empty());
+}
+
+fn params_of(g: &ZeroCopyGraph, name: &str) -> Vec<String> {
+    let pool = g.string_pool.as_slice();
+    meta(g, name)
+        .params
+        .iter()
+        .map(|p| p.resolve(pool).to_string())
+        .collect()
+}
+
+/// Operator metas carry the parameter names and the return type, in the
+/// `[name, type, ..]` encoding of the other Dart metas (the type slot is
+/// empty today for every Dart parameter), for a body and a body-less form.
+#[test]
+fn test_dart_operator_meta_has_params_and_return_type() {
+    let g = analyze(
+        "abstract class C {\n  bool operator ==(Object other) { return true; }\n  int operator -() => 1;\n  int operator [](int i) => 1;\n  void operator []=(int i, int v) {}\n  bool operator <(Object o);\n}\n",
+    );
+    let pool = g.string_pool.as_slice();
+    let rt = |n: &str| meta(&g, n).return_type.resolve(pool).to_string();
+    assert_eq!(params_of(&g, "=="), ["other", ""]);
+    assert_eq!(rt("=="), "bool");
+    assert!(params_of(&g, "-").is_empty());
+    assert_eq!(rt("-"), "int");
+    assert_eq!(params_of(&g, "[]"), ["i", ""]);
+    assert_eq!(params_of(&g, "[]="), ["i", "", "v", ""]);
+    assert_eq!(rt("[]="), "void");
+    assert_eq!(params_of(&g, "<"), ["o", ""]);
+    assert_eq!(rt("<"), "bool");
+}
+
+/// A body-less class member is abstract; a member with a body, an
+/// `external` member and a top-level `external` function are not.
+#[test]
+fn test_dart_body_less_class_member_is_abstract_flag() {
+    let g = analyze(
+        "abstract class A {\n  int calc();\n  bool operator <(Object o);\n  external void ext();\n  void body() {}\n}\nexternal int top(int a);\n",
+    );
+    assert!(meta(&g, "calc").is_abstract());
+    assert!(meta(&g, "<").is_abstract());
+    assert!(!meta(&g, "ext").is_abstract());
+    assert!(meta(&g, "ext").is_extern());
+    assert!(!meta(&g, "body").is_abstract());
+    assert!(!meta(&g, "top").is_abstract());
 }
