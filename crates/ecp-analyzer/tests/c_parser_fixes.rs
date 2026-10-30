@@ -698,3 +698,115 @@ fn test_c_double_pointer_file_scope_decls_emit_variables() {
         ]
     );
 }
+
+// ---- Round 2 phase B: siblings and off-task fixes ----
+
+/// A5 atypical: the brace depth that decides file scope under an ERROR
+/// node skips braces in char and string literals, comments and directives,
+/// and counts only the first branch of an `#if` / `#else` whose branches
+/// each open a brace. `local` sits at depth 1 and stays out.
+#[test]
+fn test_c_brace_depth_skips_literals_comments_directives_and_later_branches() {
+    let g = parse(
+        "depth.c",
+        b"int pick(int a) {\n  int local = a;\n#if FAST\n  if (a) {\n#else\n  if (!a) {\n#endif\n    a++;\n  }\n  return a;\n}\nstatic int open_brace = '{';\nstatic const char *close_text = \"}}\";\n/* a stray { in a comment */\n#define BLOCK_OPEN {\n#if defined(LEGACY)\nstatic int legacy_gate;\n#else\nstatic int modern_gate;\n#endif\n",
+    );
+    let s = Some;
+    assert_eq!(
+        sorted_rows_of(&g, &[NodeKind::Variable]),
+        [
+            (
+                "open_brace",
+                NodeKind::Variable,
+                (11, 0, 11, 28),
+                true,
+                s("static int")
+            ),
+            (
+                "close_text",
+                NodeKind::Variable,
+                (12, 0, 12, 37),
+                true,
+                s("static const char *")
+            ),
+            (
+                "legacy_gate",
+                NodeKind::Variable,
+                (16, 0, 16, 23),
+                true,
+                s("static int")
+            ),
+            (
+                "modern_gate",
+                NodeKind::Variable,
+                (18, 0, 18, 23),
+                true,
+                s("static int")
+            ),
+        ]
+    );
+}
+
+/// A2 atypical: comments before the guard, after its condition and between
+/// the condition and the `#define` leave it a guard; a `#if` inside a block
+/// comment is no conditional. The real macro stays.
+#[test]
+fn test_c_include_guard_around_comments_emits_no_macro_node() {
+    let g = parse(
+        "cfg.c",
+        b"/* header\n#if FAKE\n*/\n#ifndef CFG_H // guard\n/* note */\n#define CFG_H 1\n#define CFG_ON 1\n#endif\n",
+    );
+    assert_eq!(macro_names(&g), ["CFG_ON"]);
+}
+
+/// A1 sibling: a function-type typedef and an array-of-pointers typedef
+/// are `Typedef` nodes too.
+#[test]
+fn test_c_function_type_and_pointer_array_typedefs_emit_typedef_nodes() {
+    let g = parse(
+        "fntype.c",
+        b"typedef void handler_fn(int);\ntypedef char *names_t[4];\n",
+    );
+    assert_eq!(
+        rows_of(&g, &[NodeKind::Typedef]),
+        [
+            ("handler_fn", NodeKind::Typedef, (0, 0, 0, 29), true, None),
+            ("names_t", NodeKind::Typedef, (1, 0, 1, 25), true, None),
+        ]
+    );
+}
+
+/// Off-task 2: the leading stars of a typedef declarator belong to the
+/// returned or element type, so the import source keeps them
+/// (`void *`, `char **`, `const char *`, `char *`). A function-pointer
+/// typedef with a plain return type and a data-pointer typedef keep
+/// today's sources.
+#[test]
+fn test_c_pointer_return_typedef_import_source_keeps_return_stars() {
+    let g = parse(
+        "returns.c",
+        b"typedef void *(*alloc_fn)(size_t);\ntypedef char **(*argv_fn)(void);\ntypedef const char * (*lua_Reader) (lua_State *L);\ntypedef char *names_t[4];\ntypedef int (*cmp_fn)(int);\ntypedef char **str_arr;\n",
+    );
+    assert_eq!(
+        import_rows(&g),
+        [
+            binding("alloc_fn", "void *", BindingKind::Alias),
+            binding("argv_fn", "char **", BindingKind::Alias),
+            binding("lua_Reader", "const char *", BindingKind::Alias),
+            binding("names_t", "char *", BindingKind::Alias),
+            binding("cmp_fn", "int", BindingKind::Alias),
+            binding("str_arr", "char **", BindingKind::Alias),
+        ]
+    );
+}
+
+/// A3 sibling: a prototype's parameter is visible in the prototype only,
+/// so `install`'s `handler_t cb` never types the call of the function `cb`.
+#[test]
+fn test_c_prototype_param_does_not_type_calls_elsewhere() {
+    let g = parse(
+        "proto.c",
+        b"typedef int (*handler_t)(int);\nint install(handler_t cb);\nint cb(int x) { return x; }\nint direct(void) { return cb(2); }\n",
+    );
+    assert!(g.call_metas.is_empty(), "{:?}", call_meta_rows(&g));
+}

@@ -10,7 +10,7 @@
 //! a call node, so `call_index` never depends on this walk matching the
 //! extractor's traversal order or its skip rules.
 
-use crate::calls::CallSiteIndex;
+use crate::calls::{node_range, range_width, start_pos, CallSiteIndex, Pos, PosRange};
 use ecp_core::analyzer::types::{RawCallMeta, RawNode};
 use ecp_core::graph::CallMeta;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -248,12 +248,12 @@ fn is_fn_type(ty: &str) -> bool {
 /// - C++ virtual method call through base pointer/reference (detected via
 ///   `fn_ptr_vars` populated from known base types).
 ///
-/// `fn_ptr_vars` maps local variable names to their type strings for disambiguation.
+/// `fn_ptr_vars` holds each declared name's type in its own scope.
 pub fn detect_c_cpp_indirect(
     root: Node<'_>,
     source: &[u8],
     nodes: &[RawNode],
-    fn_ptr_vars: &FxHashMap<String, String>,
+    fn_ptr_vars: &FnPtrVars,
     is_cpp: bool,
     call_sites: &CallSiteIndex,
 ) -> Vec<RawCallMeta> {
@@ -274,7 +274,7 @@ fn detect_c_cpp_node(
     node: Node<'_>,
     source: &[u8],
     nodes: &[RawNode],
-    fn_ptr_vars: &FxHashMap<String, String>,
+    fn_ptr_vars: &FnPtrVars,
     is_cpp: bool,
     call_sites: &CallSiteIndex,
     out: &mut Vec<RawCallMeta>,
@@ -294,17 +294,18 @@ fn detect_c_cpp_node(
 fn classify_c_cpp_call(
     call: Node<'_>,
     source: &[u8],
-    fn_ptr_vars: &FxHashMap<String, String>,
+    fn_ptr_vars: &FnPtrVars,
     is_cpp: bool,
 ) -> (u8, String) {
     let Some(function) = call.child_by_field_name("function") else {
         return (CallMeta::FLAG_DIRECT, String::new());
     };
+    let pos = start_pos(call);
 
     match function.kind() {
         "identifier" => {
             let name = node_text(function, source).unwrap_or_default();
-            if let Some(ty) = fn_ptr_vars.get(name) {
+            if let Some(ty) = fn_ptr_vars.type_at(name, pos) {
                 // Variable typed as function pointer.
                 let flags = if ty.contains("struct ") || ty.contains("_ops") {
                     CallMeta::FLAG_CALLBACK | CallMeta::FLAG_DYNAMIC_DISPATCH
@@ -330,7 +331,7 @@ fn classify_c_cpp_call(
                 .or_else(|| function.child_by_field_name("argument"))
             {
                 let obj_name = node_text(obj, source).unwrap_or_default();
-                if let Some(ty) = fn_ptr_vars.get(obj_name.trim_start_matches('*')) {
+                if let Some(ty) = fn_ptr_vars.type_at(obj_name.trim_start_matches('*'), pos) {
                     let flags = CallMeta::FLAG_CALLBACK | CallMeta::FLAG_DYNAMIC_DISPATCH;
                     return (flags, ty.to_string());
                 }
@@ -341,7 +342,7 @@ fn classify_c_cpp_call(
                 if let Some(obj) = function.child_by_field_name("value") {
                     let obj_name = node_text(obj, source).unwrap_or_default();
                     let var_name = obj_name.trim_start_matches('*').trim();
-                    if let Some(ty) = fn_ptr_vars.get(var_name) {
+                    if let Some(ty) = fn_ptr_vars.type_at(var_name, pos) {
                         return (CallMeta::FLAG_DYNAMIC_DISPATCH, ty.to_string());
                     }
                 }
@@ -352,30 +353,86 @@ fn classify_c_cpp_call(
     }
 }
 
-/// Build a map of `var_name → type_string` from C/C++ local declarations and
-/// function parameters, focusing on pointer-to-struct and function-pointer types.
-///
-/// This is a lightweight heuristic scan of `let_declaration`-equivalent C nodes
-/// (`declaration`, `parameter_declaration`) to populate the type map for indirect
-/// call detection.
-pub fn collect_c_cpp_fn_ptr_vars(root: Node<'_>, source: &[u8]) -> FxHashMap<String, String> {
-    let mut map = FxHashMap::default();
+/// The scope every name is visible in that no function or lambda declares.
+const FILE_SCOPE: PosRange = ((0, 0), (u32::MAX, u32::MAX));
+
+/// Declared types of the C/C++ names indirect-call detection reads, each
+/// visible in its own scope: the function or lambda of a parameter or
+/// local, the whole file otherwise. A `None` type marks a declaration the
+/// detector does not track; it still hides a same-name one further out, so
+/// one function's parameter never types another function's call.
+#[derive(Debug, Default)]
+pub struct FnPtrVars {
+    decls: FxHashMap<String, Vec<(PosRange, Option<String>)>>,
+}
+
+impl FnPtrVars {
+    pub fn declare(&mut self, name: String, scope: PosRange, ty: Option<String>) {
+        self.decls.entry(name).or_default().push((scope, ty));
+    }
+
+    /// The type of `name` at `pos`, from the innermost scope that declares
+    /// it. At an equal scope a tracked type wins over an untracked one, and
+    /// the later of two tracked ones wins.
+    fn type_at(&self, name: &str, pos: Pos) -> Option<&str> {
+        let mut best: Option<(&Option<String>, (u32, i64))> = None;
+        for (scope, ty) in self.decls.get(name)? {
+            if !(scope.0 <= pos && pos <= scope.1) {
+                continue;
+            }
+            let width = range_width(*scope);
+            if best.is_none_or(|(_, w)| width < w || (width == w && ty.is_some())) {
+                best = Some((ty, width));
+            }
+        }
+        best?.0.as_deref()
+    }
+}
+
+/// Record each C/C++ declaration and parameter in `vars`: tracked with its
+/// type when it is a pointer-to-struct or function-pointer shape, untracked
+/// otherwise. A prototype's parameter names nothing outside it and is left
+/// out.
+pub fn collect_c_cpp_fn_ptr_vars(root: Node<'_>, source: &[u8], vars: &mut FnPtrVars) {
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
-        match n.kind() {
-            "declaration" | "parameter_declaration" => {
-                if let Some((var_name, ty)) = c_var_type_pair(n, source) {
-                    map.insert(var_name, ty);
+        if matches!(n.kind(), "declaration" | "parameter_declaration") {
+            if let Some(scope) = c_decl_scope(n) {
+                match c_var_type_pair(n, source) {
+                    Some((var_name, ty)) => vars.declare(var_name, scope, Some(ty)),
+                    None => {
+                        if let Some(var_name) = n
+                            .child_by_field_name("declarator")
+                            .and_then(|d| find_leaf_identifier(d, source))
+                        {
+                            vars.declare(var_name, scope, None);
+                        }
+                    }
                 }
             }
-            _ => {}
         }
         let mut c = n.walk();
         for child in n.children(&mut c) {
             stack.push(child);
         }
     }
-    map
+}
+
+/// The range a C/C++ declaration is visible in: its function or lambda,
+/// else the file. `None` for a parameter of a prototype, a member
+/// declaration or a function-pointer type, which no call can name.
+fn c_decl_scope(decl: Node<'_>) -> Option<PosRange> {
+    let is_param = decl.kind() == "parameter_declaration";
+    let mut cur = decl.parent();
+    while let Some(p) = cur {
+        match p.kind() {
+            "function_definition" | "lambda_expression" => return Some(node_range(p)),
+            "declaration" | "field_declaration" | "type_definition" if is_param => return None,
+            _ => {}
+        }
+        cur = p.parent();
+    }
+    (!is_param).then_some(FILE_SCOPE)
 }
 
 fn c_var_type_pair(decl: Node<'_>, source: &[u8]) -> Option<(String, String)> {

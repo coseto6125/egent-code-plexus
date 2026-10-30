@@ -13,7 +13,7 @@ use crate::framework_confidence;
 use crate::framework_helpers::{detect_ast_framework_patterns, FrameworkPatternSpec, Span};
 use crate::indirect_dispatch::{collect_c_cpp_fn_ptr_vars, detect_c_cpp_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
-use crate::preproc_fallback::include_guard_define;
+use crate::preproc_fallback::include_guard_rows;
 use ecp_core::analyzer::parse_prof::Pass;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{LocalGraph, RawFunctionMeta, RawNode, OVERRIDE_SENTINEL};
@@ -367,6 +367,85 @@ pub struct CppFile {
     friend_spans: FxHashSet<Span>,
     recovered_classes: Vec<(Span, String)>,
     bindings: CppBindings,
+    /// Rows of the file-level include guards' `#define`s, read lazily.
+    guard_rows: Option<Vec<u32>>,
+}
+
+impl CppFile {
+    fn is_guard_row(&mut self, source: &[u8], row: usize) -> bool {
+        self.guard_rows
+            .get_or_insert_with(|| include_guard_rows(source))
+            .contains(&(row as u32))
+    }
+}
+
+/// The alias a `typedef` declarator names: the `type_identifier` inside its
+/// pointer, reference, array, function and parenthesized declarators
+/// (`typedef void *(*F)(int);` → `F`); `None` for an abstract declarator.
+fn typedef_alias(n: Node<'_>) -> Option<Node<'_>> {
+    match n.kind() {
+        "type_identifier" => (n.end_byte() > n.start_byte()).then_some(n),
+        "pointer_declarator"
+        | "reference_declarator"
+        | "array_declarator"
+        | "function_declarator"
+        | "parenthesized_declarator" => {
+            let mut cursor = n.walk();
+            let found = n.named_children(&mut cursor).find_map(typedef_alias);
+            found
+        }
+        _ => None,
+    }
+}
+
+/// The identifier a variable declarator names through pointer, reference
+/// and array declarators (`*p`, `&r`, `a[4]`, `*names[]`); `None` for a
+/// function, parenthesized or qualified declarator.
+fn declared_variable(n: Node<'_>) -> Option<Node<'_>> {
+    match n.kind() {
+        "identifier" => Some(n),
+        "pointer_declarator" | "array_declarator" => {
+            declared_variable(n.child_by_field_name("declarator")?)
+        }
+        "reference_declarator" => declared_variable(n.named_child(0)?),
+        _ => None,
+    }
+}
+
+/// `Some(namespace)` when `decl` sits at file scope: its parent chain up to
+/// the `translation_unit` holds only preprocessor conditionals, namespace
+/// bodies and `extern "C"` blocks. The namespace is the innermost named one,
+/// as the owner stamp names it for a function or a constant. `None` when a
+/// body, a class or an ERROR node encloses `decl`.
+fn file_scope_namespace(decl: Node<'_>, source: &[u8]) -> Option<Option<String>> {
+    let mut namespace: Option<String> = None;
+    let mut cur = decl.parent();
+    while let Some(p) = cur {
+        match p.kind() {
+            "translation_unit" => return Some(namespace),
+            "namespace_definition" => {
+                if namespace.is_none() {
+                    namespace = p
+                        .child_by_field_name("name")
+                        .and_then(|n| n.utf8_text(source).ok())
+                        .map(str::to_string);
+                }
+            }
+            "preproc_if"
+            | "preproc_ifdef"
+            | "preproc_else"
+            | "preproc_elif"
+            | "preproc_elifdef"
+            | "linkage_specification" => {}
+            "declaration_list"
+                if p.parent().is_some_and(|g| {
+                    matches!(g.kind(), "namespace_definition" | "linkage_specification")
+                }) => {}
+            _ => return None,
+        }
+        cur = p.parent();
+    }
+    None
 }
 
 fn is_header(path: &Path) -> bool {
@@ -524,12 +603,15 @@ impl ParseSpec for CppSpec {
 
         // The query matches each include guard's `#define`; it is no macro.
         let skip_root = d.root.is_some_and(|r| {
-            r.kind() == "preproc_def"
-                && r.parent()
-                    .and_then(|p| include_guard_define(p, source))
-                    .is_some_and(|g| g.id() == r.id())
+            r.kind() == "preproc_def" && f.is_guard_row(source, r.start_position().row)
         });
-        if let (Some(n), Some(k), Some(root), false) = (d.name, d.kind, d.root, skip_root) {
+        // A typedef captures its whole declarator; the alias is the name
+        // inside it. An abstract declarator names none.
+        let name = d.name.and_then(|n| match d.root.map(|r| r.kind()) {
+            Some("type_definition") => typedef_alias(n),
+            _ => Some(n),
+        });
+        if let (Some(n), Some(k), Some(root), false) = (name, d.kind, d.root, skip_root) {
             let n = innermost_name(n);
             if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                 let is_friend = matches!(k, NodeKind::Function | NodeKind::Method)
@@ -643,16 +725,18 @@ impl ParseSpec for CppSpec {
         // const/constexpr globals → NodeKind::Const: a file-scope
         // `declaration` whose first named child is a `type_qualifier`
         // with text "const" or "constexpr" is a compile-time constant.
-        // The `@var` query already anchors to `(translation_unit
-        // (declaration ...))`, so `v_root` is always translation-unit
-        // level; const-qualified class fields use `field_declaration`
+        // `file_scope_namespace` keeps `v_root` at file or namespace scope;
+        // const-qualified class fields use `field_declaration`
         // (→ @field) and const params use `parameter_declaration`
         // (→ @param) — neither reaches this branch.
-        if let (Some(v_root), Some(v_name)) = (var_root, var_name) {
+        if let (Some(v_root), Some(v_name)) = (var_root, var_name.and_then(declared_variable)) {
             if let Ok(name_str) =
                 std::str::from_utf8(&source[v_name.start_byte()..v_name.end_byte()])
             {
-                if !v_root.has_error() && !is_cpp_reserved_keyword(name_str) {
+                let namespace = (!v_root.has_error() && !is_cpp_reserved_keyword(name_str))
+                    .then(|| file_scope_namespace(v_root, source))
+                    .flatten();
+                if let Some(namespace) = namespace {
                     let kind = if is_const_qualified(v_root, source) {
                         NodeKind::Const
                     } else {
@@ -661,6 +745,7 @@ impl ParseSpec for CppSpec {
                     cx.nodes.push(RawNode {
                         is_exported: f.is_header,
                         type_annotation: declarator_type(v_root, v_name, source),
+                        owner_class: namespace,
                         ..node::decl(
                             name_str.to_string(),
                             kind,
@@ -814,10 +899,11 @@ impl ParseSpec for CppSpec {
                 f.bindings = bindings;
             }
             CppHook::Indirect => {
-                // Merge bindings-derived types with declaration-level fn-pointer vars.
-                let mut fn_ptr_vars = f.bindings.flat_bindings();
-                let decl_vars = collect_c_cpp_fn_ptr_vars(root, source);
-                fn_ptr_vars.extend(decl_vars);
+                // Bindings-derived types first: at an equal scope a
+                // declaration-level fn-pointer type then wins, as it did when
+                // the two maps were merged.
+                let mut fn_ptr_vars = f.bindings.scoped_bindings();
+                collect_c_cpp_fn_ptr_vars(root, source, &mut fn_ptr_vars);
                 cx.call_metas = detect_c_cpp_indirect(
                     root,
                     source,
@@ -829,7 +915,12 @@ impl ParseSpec for CppSpec {
 
                 cx.framework_refs = detect_ast_framework_patterns(source, CPP_FRAMEWORKS);
             }
-            CppHook::MacroFallback => emit_macro_fallback(root, source, &mut cx.nodes),
+            CppHook::MacroFallback => {
+                let guard_rows = f
+                    .guard_rows
+                    .get_or_insert_with(|| include_guard_rows(source));
+                emit_macro_fallback(source, guard_rows, &mut cx.nodes)
+            }
             CppHook::FriendOwners => {
                 if !f.friend_spans.is_empty() {
                     restamp_friend_owners(&mut cx.nodes, &f.friend_spans);
@@ -890,19 +981,13 @@ fn restamp_friend_owners(
 /// Augment `nodes` with `#define NAME` Macros that tree-sitter ERROR-
 /// recovery dropped. Mirror of the C parser's pass — same `preproc_fallback`
 /// scanner; same NodeKind::Macro shape; same dedup-against-existing rule.
-fn emit_macro_fallback(root: Node<'_>, source: &[u8], nodes: &mut Vec<RawNode>) {
+fn emit_macro_fallback(source: &[u8], guard_rows: &[u32], nodes: &mut Vec<RawNode>) {
     let existing: std::collections::HashSet<String> = nodes
         .iter()
         .filter(|n| n.kind == NodeKind::Macro)
         .map(|n| n.name.clone())
         .collect();
     // The query dropped each include guard's `#define`; keep it dropped.
-    let mut cursor = root.walk();
-    let guard_rows: Vec<u32> = root
-        .named_children(&mut cursor)
-        .filter_map(|cond| include_guard_define(cond, source))
-        .map(|def| def.start_position().row as u32)
-        .collect();
     for hit in crate::preproc_fallback::scan_define_macros(source) {
         if existing.contains(&hit.name) || guard_rows.contains(&hit.line) {
             continue;

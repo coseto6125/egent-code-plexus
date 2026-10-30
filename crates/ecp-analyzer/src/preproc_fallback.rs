@@ -32,54 +32,275 @@
 
 use regex::bytes::Regex;
 use std::sync::OnceLock;
-use tree_sitter::Node;
 
-/// The `#define X` that opens an include guard: a file-level `#ifndef X` or
-/// `#if !defined(X)` whose first statement defines `X` with no value (or
-/// `1`), where `X` is spelt like a header guard. `#ifndef BUF_SIZE` /
-/// `#define BUF_SIZE 4096` sets a default and `_GNU_SOURCE` a feature, so
-/// neither is a guard.
-pub fn include_guard_define<'a>(cond: Node<'a>, source: &[u8]) -> Option<Node<'a>> {
-    if cond.parent()?.kind() != "translation_unit" {
-        return None;
-    }
-    let guarded = match cond.kind() {
-        "preproc_ifdef" if cond.child(0)?.kind() == "#ifndef" => {
-            cond.child_by_field_name("name")?
-        }
-        "preproc_if" => {
-            let test = cond.child_by_field_name("condition")?;
-            let defined = test.child_by_field_name("argument")?;
-            if test.kind() != "unary_expression"
-                || test.child_by_field_name("operator")?.kind() != "!"
-                || defined.kind() != "preproc_defined"
-            {
-                return None;
+/// One physical source line, classified by a comment- and literal-aware
+/// scan (block comments carry across lines).
+struct SrcLine {
+    row: u32,
+    /// Exclusive; the `\n` is not part of the line.
+    end: usize,
+    /// The byte after the `#` of a directive that opens on this line.
+    directive: Option<usize>,
+    /// A trailing `\` on the line before splices this line onto it.
+    spliced: bool,
+    /// Only whitespace and comments.
+    blank: bool,
+}
+
+/// The lines of `source`, plus the offset and direction (`true` = `{`) of
+/// every brace outside comments, literals and directives.
+fn scan_lines(source: &[u8]) -> (Vec<SrcLine>, Vec<(usize, bool)>) {
+    let mut lines = Vec::new();
+    let mut braces = Vec::new();
+    let mut in_comment = false;
+    let mut spliced = false;
+    let mut prev_in_directive = false;
+    let mut start = 0;
+    let mut row = 0u32;
+    loop {
+        let end = source[start..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(source.len(), |i| start + i);
+        let line = &source[start..end];
+        let directive = (!spliced && !in_comment)
+            .then(|| line.iter().position(|b| !b.is_ascii_whitespace()))
+            .flatten()
+            .filter(|&i| line[i] == b'#')
+            .map(|i| start + i + 1);
+        let in_directive = directive.is_some() || (spliced && prev_in_directive);
+        let mut blank = true;
+        let mut i = 0;
+        while i < line.len() {
+            let b = line[i];
+            if in_comment {
+                if b == b'*' && line.get(i + 1) == Some(&b'/') {
+                    in_comment = false;
+                    i += 1;
+                }
+                i += 1;
+                continue;
             }
-            defined.named_child(0)?
+            match b {
+                b'/' if line.get(i + 1) == Some(&b'/') => break,
+                b'/' if line.get(i + 1) == Some(&b'*') => {
+                    in_comment = true;
+                    i += 1;
+                }
+                b'"' | b'\'' => {
+                    blank = false;
+                    i += 1;
+                    while i < line.len() && line[i] != b {
+                        i += if line[i] == b'\\' { 2 } else { 1 };
+                    }
+                }
+                b'{' | b'}' => {
+                    blank = false;
+                    if !in_directive {
+                        braces.push((start + i, b == b'{'));
+                    }
+                }
+                _ if b.is_ascii_whitespace() => {}
+                _ => blank = false,
+            }
+            i += 1;
+        }
+        lines.push(SrcLine {
+            row,
+            end,
+            directive,
+            spliced,
+            blank,
+        });
+        let text = line.strip_suffix(b"\r").unwrap_or(line);
+        spliced = text.ends_with(b"\\");
+        prev_in_directive = in_directive;
+        if end >= source.len() {
+            break;
+        }
+        start = end + 1;
+        row += 1;
+    }
+    (lines, braces)
+}
+
+/// `text` without its `/* */` and `//` comments, trimmed.
+fn strip_comments(text: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len());
+    let mut i = 0;
+    while i < text.len() {
+        match (text[i], text.get(i + 1).copied()) {
+            (b'/', Some(b'/')) => break,
+            (b'/', Some(b'*')) => {
+                i = text[i + 2..]
+                    .windows(2)
+                    .position(|w| w == b"*/")
+                    .map_or(text.len(), |p| i + 2 + p + 2);
+                out.push(b' ');
+            }
+            (b, _) => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    out.trim_ascii().to_vec()
+}
+
+/// The identifier `text` starts with, and the rest after it.
+fn split_ident(text: &[u8]) -> Option<(&[u8], &[u8])> {
+    let len = text
+        .iter()
+        .position(|b| !(b.is_ascii_alphanumeric() || *b == b'_'))
+        .unwrap_or(text.len());
+    (len > 0 && !text[0].is_ascii_digit()).then(|| text.split_at(len))
+}
+
+/// The name an `#ifndef X` / `#if !defined(X)` / `#if !defined X` tests,
+/// when that test is the whole condition.
+fn guarded_name(word: &[u8], rest: &[u8]) -> Option<Vec<u8>> {
+    let cond = strip_comments(rest);
+    let name = match word {
+        b"ifndef" => cond.as_slice(),
+        b"if" => {
+            let tail = cond.strip_prefix(b"!")?.trim_ascii_start();
+            let tail = tail.strip_prefix(b"defined")?.trim_ascii();
+            match tail.strip_prefix(b"(") {
+                Some(inner) => inner.strip_suffix(b")")?.trim_ascii(),
+                None => tail,
+            }
         }
         _ => return None,
     };
-    let name = guarded.utf8_text(source).ok()?;
-    let trimmed = name.trim_end_matches('_');
-    let header_like = ["_H", "_HPP", "_HXX", "_HH", "_GUARD", "_INCLUDED"]
+    let (ident, after) = split_ident(name)?;
+    after.is_empty().then(|| ident.to_vec())
+}
+
+/// Whether `#define <rest>` defines `name` with no value or `1`, and
+/// `name` is spelt like a header guard. `#ifndef BUF_SIZE` / `#define
+/// BUF_SIZE 4096` sets a default and `_GNU_SOURCE` a feature: no guards.
+fn defines_guard(rest: &[u8], name: &[u8]) -> bool {
+    let def = strip_comments(rest);
+    let Some((ident, value)) = split_ident(&def) else {
+        return false;
+    };
+    let keep = ident.iter().rposition(|&b| b != b'_').map_or(0, |i| i + 1);
+    let trimmed = &ident[..keep];
+    let header_like = [
+        &b"_H"[..],
+        b"_HPP",
+        b"_HXX",
+        b"_HH",
+        b"_GUARD",
+        b"_INCLUDED",
+    ]
+    .iter()
+    .any(|suffix| trimmed.ends_with(suffix));
+    let value = value.trim_ascii();
+    ident == name && header_like && matches!(value, b"" | b"1")
+}
+
+/// The word after a directive's `#`, and the text after that word.
+fn directive_word(source: &[u8], line: &SrcLine, after_hash: usize) -> (Vec<u8>, usize) {
+    let text = &source[after_hash..line.end];
+    let lead = text.len() - text.trim_ascii_start().len();
+    let word: Vec<u8> = text[lead..]
         .iter()
-        .any(|suffix| trimmed.ends_with(suffix));
-    if !header_like {
-        return None;
+        .take_while(|b| b.is_ascii_alphabetic())
+        .copied()
+        .collect();
+    let rest = after_hash + lead + word.len();
+    (word, rest)
+}
+
+/// Rows of the `#define X` lines that open a file-level include guard: an
+/// `#ifndef X` / `#if !defined(X)` at conditional depth 0 whose next
+/// non-blank line defines `X` with no value or `1`. The decision reads the
+/// source text, so it holds however tree-sitter recovers the region; a
+/// guard nested in another conditional is no file-level guard.
+pub fn include_guard_rows(source: &[u8]) -> Vec<u32> {
+    let (lines, _) = scan_lines(source);
+    let mut rows = Vec::new();
+    let mut depth = 0u32;
+    let mut pending: Option<Vec<u8>> = None;
+    for (k, line) in lines.iter().enumerate() {
+        if line.spliced {
+            continue;
+        }
+        let Some(after_hash) = line.directive else {
+            if !line.blank {
+                pending = None;
+            }
+            continue;
+        };
+        let open = pending.take();
+        let continued = lines.get(k + 1).is_some_and(|next| next.spliced);
+        let (word, rest) = directive_word(source, line, after_hash);
+        let rest = &source[rest..line.end];
+        match word.as_slice() {
+            b"if" | b"ifdef" | b"ifndef" => {
+                if depth == 0 && !continued {
+                    pending = guarded_name(&word, rest);
+                }
+                depth += 1;
+            }
+            b"endif" => depth = depth.saturating_sub(1),
+            b"define" => {
+                if open.is_some_and(|name| !continued && defines_guard(rest, &name)) {
+                    rows.push(line.row);
+                }
+            }
+            _ => {}
+        }
     }
-    let mut cursor = cond.walk();
-    let def = cond
-        .named_children(&mut cursor)
-        .skip(1)
-        .find(|c| c.kind() != "comment")?;
-    let value = def
-        .child_by_field_name("value")
-        .map(|v| v.utf8_text(source).map(str::trim));
-    let empty_or_one = matches!(value, None | Some(Ok("")) | Some(Ok("1")));
-    let defines_guard = def.kind() == "preproc_def"
-        && def.child_by_field_name("name")?.utf8_text(source).ok()? == name;
-    (defines_guard && empty_or_one).then_some(def)
+    rows
+}
+
+/// Brace depth after each counted `{` / `}` of `source`, by byte offset.
+/// Only the first branch of each `#if` / `#elif` / `#else` chain counts, as
+/// tree-sitter parses it, so branches that each open a brace do not
+/// accumulate.
+pub fn brace_depths(source: &[u8]) -> Vec<(usize, i32)> {
+    let (lines, braces) = scan_lines(source);
+    let mut out = Vec::with_capacity(braces.len());
+    let mut braces = braces.into_iter().peekable();
+    let mut branches: Vec<bool> = Vec::new();
+    let mut depth = 0i32;
+    for line in &lines {
+        if let Some(after_hash) = line.directive {
+            let (word, _) = directive_word(source, line, after_hash);
+            match word.as_slice() {
+                b"if" | b"ifdef" | b"ifndef" => branches.push(false),
+                b"elif" | b"else" | b"elifdef" | b"elifndef" => {
+                    if let Some(later) = branches.last_mut() {
+                        *later = true;
+                    }
+                }
+                b"endif" => {
+                    branches.pop();
+                }
+                _ => {}
+            }
+        }
+        let skipped = branches.iter().any(|&later| later);
+        while let Some(&(at, open)) = braces.peek() {
+            if at >= line.end {
+                break;
+            }
+            braces.next();
+            if !skipped {
+                depth += if open { 1 } else { -1 };
+                out.push((at, depth));
+            }
+        }
+    }
+    out
+}
+
+/// The brace depth at byte `offset`, from [`brace_depths`].
+pub fn depth_at(depths: &[(usize, i32)], offset: usize) -> i32 {
+    let before = depths.partition_point(|&(at, _)| at < offset);
+    before.checked_sub(1).map_or(0, |i| depths[i].1)
 }
 
 /// `#define NAME` shape — anchored at line start (after optional indent),

@@ -27,6 +27,7 @@ use crate::calls::{
     attach_to_enclosing, construction_call, node_range, range_width, start_pos, CallSiteIndex, Pos,
     PosRange,
 };
+use crate::indirect_dispatch::FnPtrVars;
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use rustc_hash::FxHashMap;
 use tree_sitter::Node;
@@ -47,19 +48,18 @@ pub struct CppBindings {
 }
 
 impl CppBindings {
-    /// Flatten all local-variable bindings across all scopes into one map.
-    /// Used by indirect-call detection to check if a callee identifier is a
-    /// locally-typed pointer or function-pointer variable.
-    pub fn flat_bindings(&self) -> FxHashMap<String, String> {
-        let mut out = FxHashMap::default();
-        for (_, map) in &self.fn_scopes {
-            for (k, v) in map {
-                if !v.is_empty() {
-                    out.insert(k.clone(), v.clone());
-                }
+    /// Every local and parameter binding in its own function, lambda or
+    /// `catch` scope, for indirect-call detection: a callee or receiver
+    /// name then takes the type its own scope declares. An untyped binding
+    /// still hides a same-name one of an enclosing scope.
+    pub fn scoped_bindings(&self) -> FnPtrVars {
+        let mut vars = FnPtrVars::default();
+        for (scope, map) in &self.fn_scopes {
+            for (name, ty) in map {
+                vars.declare(name.clone(), *scope, (!ty.is_empty()).then(|| ty.clone()));
             }
         }
-        out
+        vars
     }
 
     /// A class body the tree lost and the lexical recovery found.

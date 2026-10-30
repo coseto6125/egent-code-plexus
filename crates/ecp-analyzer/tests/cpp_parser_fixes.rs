@@ -554,3 +554,110 @@ fn test_cpp_file_scope_array_decls_emit_variable_nodes() {
         xxh3_64_bytes(b"static uint64_t combine_cache[64][64];")
     );
 }
+
+// ---- Round 2 phase B: siblings and off-task fixes ----
+
+/// A1 sibling: a reference typedef, a function-type typedef and an
+/// array-of-pointers typedef are `Typedef` nodes too.
+#[test]
+fn test_cpp_reference_and_function_type_typedefs_emit_typedef_nodes() {
+    let g = parse(
+        "aliases.h",
+        b"typedef int &int_ref;\ntypedef void handler_fn(int);\ntypedef char *names_t[4];\n",
+    );
+    assert_eq!(
+        rows_of_kinds(&g, &[NodeKind::Typedef]),
+        [
+            ("int_ref", NodeKind::Typedef, (0, 0, 0, 21), None, None),
+            ("handler_fn", NodeKind::Typedef, (1, 0, 1, 29), None, None),
+            ("names_t", NodeKind::Typedef, (2, 0, 2, 25), None, None),
+        ]
+    );
+}
+
+/// A2 atypical, C++ side: comments around the guard leave it a guard; a
+/// `#if` inside a block comment is no conditional.
+#[test]
+fn test_cpp_include_guard_around_comments_emits_no_macro_node() {
+    let g = parse(
+        "cfg.h",
+        b"/* header\n#if FAKE\n*/\n#ifndef CFG_H // guard\n/* note */\n#define CFG_H 1\n#define CFG_ON 1\n#endif\n",
+    );
+    assert_eq!(macro_names(&g), ["CFG_ON"]);
+}
+
+/// Off-task 1: a C++ file-scope variable inside an include guard, a
+/// namespace or an `extern "C"` block is a Variable (a `const` one a
+/// Const), owned by its innermost named namespace. A function-body local
+/// stays out and a class data member stays a Property of its class.
+#[test]
+fn test_cpp_guarded_namespace_and_extern_c_variables_emit_variable_nodes() {
+    let g = parse(
+        "api.h",
+        b"#ifndef API_H\n#define API_H\nextern int api_errno;\nnamespace ns {\nint counter = 0;\nconst int limit = 4;\nnamespace inner { static char *names[2]; }\n}\nextern \"C\" {\nint c_count;\n}\nextern \"C\" int c_single;\nclass Box {\n  int m;\n};\nvoid f() { int local = 1; }\n#endif\n",
+    );
+    let s = Some;
+    assert_eq!(
+        rows_of_kinds(
+            &g,
+            &[NodeKind::Variable, NodeKind::Const, NodeKind::Property]
+        ),
+        [
+            (
+                "api_errno",
+                NodeKind::Variable,
+                (2, 0, 2, 21),
+                None,
+                s("extern int")
+            ),
+            (
+                "counter",
+                NodeKind::Variable,
+                (4, 0, 4, 16),
+                s("ns"),
+                s("int")
+            ),
+            (
+                "limit",
+                NodeKind::Const,
+                (5, 0, 5, 20),
+                s("ns"),
+                s("const int")
+            ),
+            (
+                "names",
+                NodeKind::Variable,
+                (6, 18, 6, 40),
+                s("inner"),
+                s("static char *")
+            ),
+            ("c_count", NodeKind::Variable, (9, 0, 9, 12), None, s("int")),
+            (
+                "c_single",
+                NodeKind::Variable,
+                (11, 11, 11, 24),
+                None,
+                s("int")
+            ),
+            ("m", NodeKind::Property, (13, 2, 13, 8), s("Box"), s("int")),
+        ]
+    );
+}
+
+/// Off-task 1 guard: a `.cpp` file's top-level variable keeps today's
+/// record, and an anonymous namespace owns nothing.
+#[test]
+fn test_cpp_top_level_and_anonymous_namespace_variables_have_no_owner() {
+    let g = parse(
+        "state.cpp",
+        b"int top = 1;\nnamespace {\nint hidden = 2;\n}\n",
+    );
+    let s = Some;
+    assert_eq!(
+        rows_of_kinds(&g, &[NodeKind::Variable]),
+        [
+            ("top", NodeKind::Variable, (0, 0, 0, 12), None, s("int")),
+            ("hidden", NodeKind::Variable, (2, 0, 2, 15), None, s("int")),
+        ]
+    );
+}

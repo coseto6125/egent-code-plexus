@@ -6,9 +6,9 @@ use crate::calls::{NameRefKind, NameRefSpec, VariantRefSpec};
 use crate::driver::{
     self, node, Compiled, DeclSlot, Effect, FieldReads, FileCx, KindCapture, Op, ParseSpec, Step,
 };
-use crate::indirect_dispatch::{collect_c_cpp_fn_ptr_vars, detect_c_cpp_indirect};
+use crate::indirect_dispatch::{collect_c_cpp_fn_ptr_vars, detect_c_cpp_indirect, FnPtrVars};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
-use crate::preproc_fallback::include_guard_define;
+use crate::preproc_fallback::{brace_depths, depth_at, include_guard_rows};
 use ecp_core::analyzer::parse_prof::Pass;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{BindingKind, LocalGraph, RawFunctionMeta, RawImport, RawNode};
@@ -201,20 +201,41 @@ fn is_include_guard(name: &str, body: Option<&str>) -> bool {
     matches!(body.map(str::trim), None | Some("") | Some("1"))
 }
 
-/// True when `decl` sits at file scope: its parent chain up to the
-/// `translation_unit` holds only preprocessor conditionals. A declaration
-/// inside a body or under an ERROR node is not a file-scope declaration.
-fn is_file_scope(decl: Node<'_>) -> bool {
+/// True when `decl` sits at file scope: its parent chain up to the root
+/// holds only preprocessor conditionals and ERROR nodes. Error recovery
+/// can put a function's locals straight under a top-level ERROR, so under
+/// one the source's brace depth decides; a declaration inside a body node
+/// is never file scope.
+fn is_file_scope(decl: Node<'_>, f: &mut CFile, source: &[u8]) -> bool {
+    let mut recovered = false;
     let mut cur = decl.parent();
     while let Some(p) = cur {
         match p.kind() {
-            "translation_unit" => return true,
+            "translation_unit" => break,
+            "ERROR" => recovered = true,
             "preproc_if" | "preproc_ifdef" | "preproc_else" | "preproc_elif"
-            | "preproc_elifdef" => cur = p.parent(),
+            | "preproc_elifdef" => {}
             _ => return false,
         }
+        cur = p.parent();
     }
-    false
+    !recovered || {
+        let depths = f.brace_depths.get_or_insert_with(|| brace_depths(source));
+        depth_at(depths, decl.start_byte()) == 0
+    }
+}
+
+/// The identifier a variable declarator names through pointer and array
+/// declarators (`*p`, `**pp`, `a[4]`, `*names[]`, `m[2][2]`); `None` for a
+/// function or parenthesized declarator.
+fn declared_variable(declarator: Node<'_>) -> Option<Node<'_>> {
+    match declarator.kind() {
+        "identifier" => Some(declarator),
+        "pointer_declarator" | "array_declarator" => {
+            declared_variable(declarator.child_by_field_name("declarator")?)
+        }
+        _ => None,
+    }
 }
 
 /// Find the storage_class_specifier child with text `"extern"`.
@@ -340,18 +361,12 @@ fn classify_define_body(body: &str) -> BindingKind {
 /// The `*` prefix of a typedef alias whose declarator is a pointer chain
 /// ending at the alias (`**` for `typedef char **A;`). `None` for any other
 /// declarator shape, so a function-pointer alias keeps its return type.
-fn pointer_prefix(alias_root: Node<'_>, alias: Node<'_>, source: &[u8]) -> Option<String> {
-    if alias_root.kind() != "pointer_declarator" {
-        return None;
+fn pointer_prefix(alias_root: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut inner = alias_root;
+    while inner.kind() == "pointer_declarator" {
+        inner = inner.child_by_field_name("declarator")?;
     }
-    let mut cur = alias.parent()?;
-    while cur.id() != alias_root.id() {
-        if cur.kind() != "pointer_declarator" {
-            return None;
-        }
-        cur = cur.parent()?;
-    }
-    let stars = std::str::from_utf8(source.get(alias_root.start_byte()..alias.start_byte())?)
+    let stars = std::str::from_utf8(source.get(alias_root.start_byte()..inner.start_byte())?)
         .ok()?
         .trim();
     (!stars.is_empty()).then(|| stars.to_string())
@@ -407,8 +422,9 @@ fn emit_typedef_binding(td: Node<'_>, source: &[u8], imports: &mut Vec<RawImport
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "<unknown>".to_string());
-    // A data-pointer alias keeps its stars: `typedef char **A;` is `char **`.
-    let underlying = match pointer_prefix(*alias_root, alias_node, source) {
+    // The leading stars belong to the aliased, returned or element type:
+    // `typedef char **A;` is `char **`, `typedef void *(*F)(int);` `void *`.
+    let underlying = match pointer_prefix(*alias_root, source) {
         Some(stars) => format!("{underlying} {stars}"),
         None => underlying,
     };
@@ -568,6 +584,18 @@ pub struct CMatch<'t> {
 pub struct CFile {
     /// Written by the calls step, read by the receiver-owners step.
     methods: CReceiverMap,
+    /// Rows of the file-level include guards' `#define`s, read lazily.
+    guard_rows: Option<Vec<u32>>,
+    /// [`brace_depths`] of the source, read lazily.
+    brace_depths: Option<Vec<(usize, i32)>>,
+}
+
+impl CFile {
+    fn is_guard_row(&mut self, source: &[u8], row: usize) -> bool {
+        self.guard_rows
+            .get_or_insert_with(|| include_guard_rows(source))
+            .contains(&(row as u32))
+    }
 }
 
 impl ParseSpec for CSpec {
@@ -669,7 +697,7 @@ impl ParseSpec for CSpec {
         }
     }
 
-    fn end_match<'t>(d: DeclSlot<'t>, m: &mut CMatch<'t>, _f: &mut CFile, cx: &mut FileCx<'t>) {
+    fn end_match<'t>(d: DeclSlot<'t>, m: &mut CMatch<'t>, f: &mut CFile, cx: &mut FileCx<'t>) {
         let source = cx.source;
         let CMatch {
             type_node,
@@ -681,14 +709,19 @@ impl ParseSpec for CSpec {
         } = std::mem::take(m);
 
         let skip_root = d.root.is_some_and(|r| match r.kind() {
-            "declaration" => !is_file_scope(r),
-            "preproc_def" => r
-                .parent()
-                .and_then(|p| include_guard_define(p, source))
-                .is_some_and(|g| g.id() == r.id()),
+            "declaration" => !is_file_scope(r, f, source),
+            "preproc_def" => f.is_guard_row(source, r.start_position().row),
             _ => false,
         });
-        if let (Some(n), Some(k), Some(root), false) = (d.name, d.kind, d.root, skip_root) {
+        // A typedef captures its whole declarator; the alias is the name
+        // inside it (`typedef void *(*F)(int);`). An abstract one names none.
+        let name = d.name.and_then(|n| match d.kind {
+            Some(NodeKind::Typedef) => {
+                find_typedef_alias_name(n).filter(|a| a.end_byte() > a.start_byte())
+            }
+            _ => Some(n),
+        });
+        if let (Some(n), Some(k), Some(root), false) = (name, d.kind, d.root, skip_root) {
             // K&R-style multi-line function decl can confuse tree-sitter-c:
             //   XXH_PUBLIC_API XXH_errorcode
             //   XXH64_update(int x, int y) { ... }
@@ -771,7 +804,7 @@ impl ParseSpec for CSpec {
         // Top-level variable / const declaration → Variable node.
         // Type slice includes storage-class + qualifiers (see
         // `slice_type_before` doc comment).
-        if let (Some(v_root), Some(v_name)) = (var_root, var_name) {
+        if let (Some(v_root), Some(v_name)) = (var_root, var_name.and_then(declared_variable)) {
             if let Ok(name_str) =
                 std::str::from_utf8(&source[v_name.start_byte()..v_name.end_byte()])
             {
@@ -789,7 +822,9 @@ impl ParseSpec for CSpec {
                 //   2. C reserved keyword check — defensive even when
                 //      has_error is somehow false; `unsigned`/`const`/
                 //      etc. are never legal C variable names.
-                if !v_root.has_error() && !is_c_reserved_keyword(name_str) && is_file_scope(v_root)
+                if !v_root.has_error()
+                    && !is_c_reserved_keyword(name_str)
+                    && is_file_scope(v_root, f, source)
                 {
                     cx.nodes.push(RawNode {
                         is_exported: true,
@@ -840,7 +875,8 @@ impl ParseSpec for CSpec {
                 cx.sql_refs = raw_sql_refs;
             }
             CHook::Indirect => {
-                let fn_ptr_vars = collect_c_cpp_fn_ptr_vars(root, source);
+                let mut fn_ptr_vars = FnPtrVars::default();
+                collect_c_cpp_fn_ptr_vars(root, source, &mut fn_ptr_vars);
                 cx.call_metas = detect_c_cpp_indirect(
                     root,
                     source,
@@ -862,7 +898,12 @@ impl ParseSpec for CSpec {
             // a safety net and emits Macro nodes for any `#define NAME` not
             // already captured. Verified `.sample_repo`: ecp went from 11/29
             // macros in `tsd.h` to full recall after this pass.
-            CHook::MacroFallback => emit_macro_fallback(root, source, &mut cx.nodes),
+            CHook::MacroFallback => {
+                let guard_rows = f
+                    .guard_rows
+                    .get_or_insert_with(|| include_guard_rows(source));
+                emit_macro_fallback(source, guard_rows, &mut cx.nodes)
+            }
             CHook::ReceiverOwners => {
                 // Stamp owner_class from the receiver-convention map (self/this
                 // first-param pattern). C has no class syntax; the receiver
@@ -891,19 +932,13 @@ impl ParseSpec for CSpec {
 /// Augment `nodes` with `#define NAME` Macros that tree-sitter ERROR-
 /// recovery dropped. See `preproc_fallback` module docs for the failure
 /// shape this covers.
-fn emit_macro_fallback(root: Node<'_>, source: &[u8], nodes: &mut Vec<RawNode>) {
+fn emit_macro_fallback(source: &[u8], guard_rows: &[u32], nodes: &mut Vec<RawNode>) {
     let existing: std::collections::HashSet<String> = nodes
         .iter()
         .filter(|n| n.kind == NodeKind::Macro)
         .map(|n| n.name.clone())
         .collect();
     // The query dropped each include guard's `#define`; keep it dropped.
-    let mut cursor = root.walk();
-    let guard_rows: Vec<u32> = root
-        .named_children(&mut cursor)
-        .filter_map(|cond| include_guard_define(cond, source))
-        .map(|def| def.start_position().row as u32)
-        .collect();
     for hit in crate::preproc_fallback::scan_define_macros(source) {
         if existing.contains(&hit.name) || guard_rows.contains(&hit.line) {
             continue;

@@ -50,19 +50,12 @@
     (enumerator
       name: (identifier) @name.enumerator) @enumerator_node))
 
-;; Typedefs — the alias may sit inside a pointer, array or function-pointer
-;; declarator (`typedef char **A;`, `typedef int B[4];`, `typedef int (*C)(int);`).
+;; Typedefs — the alias may sit at any depth of pointer, array and
+;; function-pointer declarators (`typedef char ***A;`, `typedef int B[4];`,
+;; `typedef void *(*C)(int);`): the whole declarator is captured and
+;; parser.rs takes the `type_identifier` inside it.
 (type_definition
-  declarator: [
-    (type_identifier) @typedef.name
-    (pointer_declarator declarator: (type_identifier) @typedef.name)
-    (pointer_declarator
-      declarator: (pointer_declarator declarator: (type_identifier) @typedef.name))
-    (array_declarator declarator: (type_identifier) @typedef.name)
-    (function_declarator
-      declarator: (parenthesized_declarator
-        (pointer_declarator declarator: (type_identifier) @typedef.name)))
-  ]) @typedef
+  declarator: (_) @typedef.name) @typedef
 
 ;; Macros — object-like `#define X val`
 (preproc_def
@@ -102,15 +95,17 @@
     (array_declarator declarator: (field_identifier) @field.name)
   ]) @field
 
-;; File-scope variable declarations — `static const int N = 5;` / `int *p;`.
-;; Captures the outer declaration; the parser keeps file-scope ones only
+;; File-scope variable declarations — `static const int N = 5;` / `int *p;`
+;; / `char **argv;` / `int a[4][4];`. Captures the outer declaration and the
+;; declarator; the parser takes the identifier through pointer and array
+;; declarators (`declared_variable`) and keeps file-scope ones only
 ;; (`is_file_scope`), preprocessor conditionals included.
 (declaration
   declarator: [
-    (init_declarator declarator: (identifier) @var.name)
-    (init_declarator declarator: (pointer_declarator (identifier) @var.name))
+    (init_declarator declarator: (_) @var.name)
     (identifier) @var.name
-    (pointer_declarator (identifier) @var.name)
+    (pointer_declarator) @var.name
+    (array_declarator) @var.name
   ]) @var
 
 ;; ---- BlindSpot patterns (FU-001 P7a) ----
