@@ -540,9 +540,11 @@ fn collect_body_bindings(
                     let mut cursor = parameters.walk();
                     for parameter in parameters.named_children(&mut cursor) {
                         let pattern = parameter.child_by_field_name("pattern");
-                        // A pattern parameter (`|Wrapper(x)|`) has a `type` field
-                        // that names the pattern, not the bound names.
-                        let ty = (parameter.kind() == "parameter")
+                        // The annotation types a plain name only; a destructuring
+                        // pattern (`|Wrapper(x): Wrapper|`) binds its names untyped.
+                        let plain = pattern
+                            .is_some_and(|p| matches!(p.kind(), "identifier" | "mut_pattern"));
+                        let ty = (parameter.kind() == "parameter" && plain)
                             .then(|| parameter.child_by_field_name("type"))
                             .flatten()
                             .and_then(|ty| bare_type_name(ty, source));
@@ -565,7 +567,18 @@ fn collect_body_bindings(
                 if let (Some(pattern), Some(arm)) =
                     (n.child_by_field_name("pattern"), let_condition_body(n))
                 {
-                    record_binding(pattern, source, node_range(arm), None, events);
+                    // Live from the end of the `let` condition, so a later `&&`
+                    // condition sees the binding and the value expression does not.
+                    let live = (node_range(n).1, node_range(arm).1);
+                    record_binding(pattern, source, live, None, events);
+                }
+            }
+            "for_expression" => {
+                if let (Some(pattern), Some(body)) = (
+                    n.child_by_field_name("pattern"),
+                    n.child_by_field_name("body"),
+                ) {
+                    record_binding(pattern, source, node_range(body), None, events);
                 }
             }
             "let_declaration" => {
@@ -807,7 +820,7 @@ fn rust_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Optio
         }
 
         // Scoped path call: `Dog::new()` or `std::vec::Vec::new()`
-        "scoped_identifier" => node_text(function, source).or_else(|| {
+        "scoped_identifier" => scoped_path_text(function, source).or_else(|| {
             function
                 .child_by_field_name("name")
                 .and_then(|n| node_text(n, source))
@@ -830,6 +843,22 @@ fn rust_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Optio
                 Some(id)
             }
         }
+    }
+}
+
+/// The text of a scoped path without the type arguments of its segments:
+/// `a::Wrapper::<u8>::make` is `a::Wrapper::make`.
+fn scoped_path_text(node: Node<'_>, source: &[u8]) -> Option<String> {
+    match node.kind() {
+        "generic_type" => scoped_path_text(node.child_by_field_name("type")?, source),
+        "scoped_identifier" | "scoped_type_identifier" => {
+            let name = node_text(node.child_by_field_name("name")?, source)?;
+            match node.child_by_field_name("path") {
+                Some(path) => Some(format!("{}::{name}", scoped_path_text(path, source)?)),
+                None => node_text(node, source),
+            }
+        }
+        _ => node_text(node, source),
     }
 }
 

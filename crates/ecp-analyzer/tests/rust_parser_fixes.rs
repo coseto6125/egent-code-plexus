@@ -102,8 +102,7 @@ fn test_rust_turbofish_call_followed_by_try_gets_calls_entry() {
 fn test_rust_scoped_turbofish_call_followed_by_try_keeps_path() {
     let g = parse("fn a() -> Option<u8> { m::b::<u8>(1)?; None }\n");
     let names = callee_names(&g, "a");
-    assert_eq!(names.len(), 1, "{names:?}");
-    assert!(names[0].ends_with('b'), "{names:?}");
+    assert_eq!(names, ["m::b"]);
 }
 
 // FU-2026-10-30-c017b835ee81
@@ -124,9 +123,7 @@ fn test_rust_plain_call_followed_by_try_keeps_calls_entry() {
 #[test]
 fn test_rust_method_turbofish_call_drops_type_arguments_from_callee() {
     let g = parse("fn a(x: Foo) { x.m::<u8>(); }\n");
-    let names = callee_names(&g, "a");
-    assert_eq!(names.len(), 1, "{names:?}");
-    assert!(!names[0].contains('<'), "{names:?}");
+    assert_sites(&g, "a", &[CallSite::Plain("Foo.m")]);
 }
 
 /// Every call entry of `caller`, decoded.
@@ -551,4 +548,174 @@ fn test_rust_let_alias_of_untyped_name_stays_untyped() {
         "b",
         &[CallSite::Plain("make"), CallSite::UntypedMember("m")],
     );
+}
+
+// Round 4, R1. A name bound by `if let` is live in the later `&&` conditions
+// and the body; the value expression of the `let` still reads the outer name.
+#[test]
+fn test_rust_let_chain_binding_shadows_parameter_in_later_condition() {
+    let g = parse(
+        "fn f(x: Dog, value: Option<Cat>) { if let Some(x) = value && x.ready() { x.go(); } }\n",
+    );
+    assert_sites(
+        &g,
+        "f",
+        &[
+            CallSite::UntypedMember("ready"),
+            CallSite::UntypedMember("go"),
+        ],
+    );
+}
+
+// R1: the value expression of a `let` condition reads the outer binding.
+#[test]
+fn test_rust_let_chain_value_expression_reads_outer_binding() {
+    let g = parse("fn f(x: Dog) { if let Some(x) = x.next() && x.ready() {} }\n");
+    assert_sites(
+        &g,
+        "f",
+        &[
+            CallSite::Plain("Dog.next"),
+            CallSite::UntypedMember("ready"),
+        ],
+    );
+}
+
+// R1 guard: a plain `if let` binds for the body only; the else branch and
+// the code after it see the parameter.
+#[test]
+fn test_rust_if_let_binding_ends_with_body() {
+    let g = parse("fn f(x: Dog) { if let Some(x) = g() { x.a(); } else { x.b(); } x.c(); }\n");
+    assert_sites(
+        &g,
+        "f",
+        &[
+            CallSite::Plain("g"),
+            CallSite::UntypedMember("a"),
+            CallSite::Plain("Dog.b"),
+            CallSite::Plain("Dog.c"),
+        ],
+    );
+}
+
+// R1 atypical: a condition before the `let` in the chain sees the parameter.
+#[test]
+fn test_rust_let_chain_condition_before_let_reads_outer_binding() {
+    let g = parse("fn f(x: Dog) { if x.ok() && let Some(x) = g() && x.ready() {} }\n");
+    assert_sites(
+        &g,
+        "f",
+        &[
+            CallSite::Plain("Dog.ok"),
+            CallSite::Plain("g"),
+            CallSite::UntypedMember("ready"),
+        ],
+    );
+}
+
+// R1 atypical: `while let` with a chain, CRLF line ends.
+#[test]
+fn test_rust_while_let_chain_crlf_binding_shadows_parameter() {
+    let g = parse(
+        "fn f(x: Dog) {\r\n    while let Some(x) = g()\r\n        && x.ready()\r\n    {}\r\n}\r\n",
+    );
+    assert_sites(
+        &g,
+        "f",
+        &[CallSite::Plain("g"), CallSite::UntypedMember("ready")],
+    );
+}
+
+// R2. The annotation of a destructuring closure parameter types the whole
+// value, not the names the pattern binds.
+#[test]
+fn test_rust_closure_destructured_parameter_with_annotation_binds_names_untyped() {
+    let g = parse("fn a(x: Dog) { let callback = |Wrapper(x): Wrapper| x.run(); x.m(); }\n");
+    assert_sites(
+        &g,
+        "a",
+        &[CallSite::UntypedMember("run"), CallSite::Plain("Dog.m")],
+    );
+}
+
+// R2 guard: `mut` plain parameter keeps its annotation.
+#[test]
+fn test_rust_closure_mut_parameter_keeps_its_type() {
+    let g = parse("fn a(s: Dog) { let f = |mut s: Cat| s.n(); s.m(); }\n");
+    assert_sites(
+        &g,
+        "a",
+        &[CallSite::Plain("Cat.n"), CallSite::Plain("Dog.m")],
+    );
+}
+
+// R3. A `for` pattern binds new names over the loop body only; the iterated
+// value reads the outer binding.
+#[test]
+fn test_rust_for_pattern_shadows_parameter_inside_body_only() {
+    let g = parse("fn f(item: Order, lines: Vec<Line>) { for item in lines { item.total(); } item.done(); }\n");
+    assert_sites(
+        &g,
+        "f",
+        &[
+            CallSite::UntypedMember("total"),
+            CallSite::Plain("Order.done"),
+        ],
+    );
+}
+
+// R3: the iterated value and a destructuring pattern.
+#[test]
+fn test_rust_for_destructuring_pattern_value_reads_outer_binding() {
+    let g = parse("fn f(item: Order) { for (i, item) in item.lines() { item.total(); i.n(); } }\n");
+    assert_sites(
+        &g,
+        "f",
+        &[
+            CallSite::Plain("Order.lines"),
+            CallSite::UntypedMember("total"),
+            CallSite::UntypedMember("n"),
+        ],
+    );
+}
+
+// R3 atypical: a nested `for` rebinding the same name.
+#[test]
+fn test_rust_nested_for_same_name_stays_untyped() {
+    let g =
+        parse("fn f(item: Order) { for item in a() { for item in item.subs() { item.go(); } } }\n");
+    assert_sites(
+        &g,
+        "f",
+        &[
+            CallSite::Plain("a"),
+            CallSite::UntypedMember("subs"),
+            CallSite::UntypedMember("go"),
+        ],
+    );
+}
+
+// R4. The type arguments of a type segment are no part of the callee.
+#[test]
+fn test_rust_type_path_turbofish_call_drops_type_arguments_from_callee() {
+    let g = parse("fn a() { let v = Wrapper::<u8>::make(); }\n");
+    assert_eq!(callee_names(&g, "a"), ["Wrapper::make"]);
+}
+
+// R4: a nested path keeps its module prefix.
+#[test]
+fn test_rust_nested_type_path_turbofish_call_keeps_module_prefix() {
+    let g = parse(
+        "fn a() { a::Wrapper::<u8>::make(); b::<u8>(); Vec::<u8>::with_capacity::<u8>(1); }\n",
+    );
+    let mut names = callee_names(&g, "a");
+    names.sort();
+    assert_eq!(names, ["Vec::with_capacity", "a::Wrapper::make", "b"]);
+}
+
+// R4 guard: a plain scoped path call is unchanged.
+#[test]
+fn test_rust_plain_scoped_call_keeps_path() {
+    let g = parse("fn a() { std::vec::Vec::new(); }\n");
+    assert_eq!(callee_names(&g, "a"), ["std::vec::Vec::new"]);
 }
