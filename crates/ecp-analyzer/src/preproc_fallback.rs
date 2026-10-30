@@ -245,10 +245,8 @@ pub fn include_guard_rows(source: &[u8]) -> Vec<u32> {
                 depth += 1;
             }
             b"endif" => depth = depth.saturating_sub(1),
-            b"define" => {
-                if open.is_some_and(|name| !continued && defines_guard(rest, &name)) {
-                    rows.push(line.row);
-                }
+            b"define" if open.is_some_and(|name| !continued && defines_guard(rest, &name)) => {
+                rows.push(line.row);
             }
             _ => {}
         }
