@@ -215,7 +215,8 @@ fn continues_previous_line(s: &[u8], line_start: usize) -> bool {
 
 /// Overwrite `[from, to)` with blanks, keeping line breaks so rows stay.
 fn blank_range(buf: &mut [u8], from: usize, to: usize) {
-    for b in &mut buf[from..to.min(buf.len())] {
+    let to = to.min(buf.len());
+    for b in &mut buf[from..to] {
         if !matches!(*b, b'\n' | b'\r') {
             *b = b' ';
         }

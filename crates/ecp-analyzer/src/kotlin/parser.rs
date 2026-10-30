@@ -146,7 +146,7 @@ fn is_interface_class(class_decl: tree_sitter::Node) -> bool {
 /// `annotation class Foo`. Distinct from plain `class Foo`.
 fn is_annotation_class(class_decl: tree_sitter::Node, source: &[u8]) -> bool {
     let mut cursor = class_decl.walk();
-    class_decl
+    let found = class_decl
         .children(&mut cursor)
         .filter(|c| c.kind() == "modifiers")
         .any(|modifiers| {
@@ -156,7 +156,8 @@ fn is_annotation_class(class_decl: tree_sitter::Node, source: &[u8]) -> bool {
                     && &source[m.start_byte()..m.end_byte()] == b"annotation"
             });
             found
-        })
+        });
+    found
 }
 
 impl KotlinProvider {

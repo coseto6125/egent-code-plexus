@@ -41,17 +41,16 @@ fn test_typescript_tsx_path_parses_jsx_with_tsx_grammar() {
     assert_eq!(node(&g, "label").kind, NodeKind::Function);
 }
 
-/// FU-2026-10-30-6638b684d5f7. A call inside a JSX attribute arrow belongs
-/// to a callback node, and the sibling element child call stays on `App`.
+/// FU-2026-10-30-6638b684d5f7. Under the TSX grammar both calls reach `App`:
+/// a JSX attribute arrow is not a call argument, so as in JavaScript it gets
+/// no callback node.
 #[test]
 fn test_typescript_tsx_jsx_attribute_arrow_and_child_calls_resolve() {
     let src = b"export function App() { return <Btn onClick={() => helper()}>{label()}</Btn>; }\nfunction helper() {}\nfunction label() { return 1; }\n";
     let g = parse_at("ui/App.tsx", src);
-    assert_eq!(node(&g, "App").calls, ["label"], "{:?}", g.nodes);
+    assert_eq!(node(&g, "App").calls, ["label", "helper"], "{:?}", g.nodes);
     assert!(
-        g.nodes
-            .iter()
-            .any(|n| n.name.starts_with("<anonymous") && n.calls == ["helper"]),
+        !g.nodes.iter().any(|n| n.name.starts_with("<anonymous")),
         "{:?}",
         g.nodes
     );
@@ -122,7 +121,7 @@ fn test_typescript_express_middleware_identifier_gets_no_route_ref() {
     let targets: Vec<&str> = g
         .framework_refs
         .iter()
-        .filter(|r| r.reason == "express-route")
+        .filter(|r| r.reason == "express-route-handler")
         .map(|r| r.target_name.as_str())
         .collect();
     assert_eq!(targets, ["listUsers"]);

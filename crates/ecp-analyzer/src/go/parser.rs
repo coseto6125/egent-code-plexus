@@ -791,7 +791,29 @@ impl ParseSpec for GoSpec {
             }
         }
 
-        if let (Some(n), Some(k), Some(root)) = (d.name, d.kind, d.root) {
+        // A `const_spec` match carries only its first name; `X, Y = 1, 2`
+        // emits one node per name on the shared spec, and `_` as `var` does.
+        if let (Some(NodeKind::Const), Some(root)) = (d.kind, d.root) {
+            let mut cursor = root.walk();
+            for n in root.children_by_field_name("name", &mut cursor) {
+                let Ok(name_str) = n.utf8_text(source) else {
+                    continue;
+                };
+                if name_str == "_" {
+                    continue;
+                }
+                cx.nodes.push(RawNode {
+                    is_exported: is_exported(name_str),
+                    type_annotation: type_annotation.clone(),
+                    ..node::decl(
+                        name_str.to_string(),
+                        NodeKind::Const,
+                        node::span(root),
+                        &source[root.start_byte()..root.end_byte()],
+                    )
+                });
+            }
+        } else if let (Some(n), Some(k), Some(root)) = (d.name, d.kind, d.root) {
             if let Ok(name_str) = n.utf8_text(source) {
                 let name = name_str.to_string();
                 // Each match carries the full declaration node, so two methods
