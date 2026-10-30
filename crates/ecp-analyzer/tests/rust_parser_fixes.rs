@@ -494,25 +494,28 @@ fn test_rust_let_alias_chain_keeps_type() {
 #[test]
 fn test_rust_let_alias_inside_closure_keeps_captured_type() {
     let g = parse("fn a(buf: Buf) { spawn(move || { let mut buf = buf; buf.read(); }); }\n");
-    assert_sites(
-        &g,
-        "a",
-        &[CallSite::Plain("spawn"), CallSite::Plain("Buf.read")],
-    );
+    assert_sites(&g, "a", &[CallSite::Plain("spawn")]);
+    // A closure passed as a call argument owns its calls on an `<anonymous>` node.
+    assert_sites(&g, &anonymous_name(&g), &[CallSite::Plain("Buf.read")]);
+}
+
+fn anonymous_name(g: &LocalGraph) -> String {
+    g.nodes
+        .iter()
+        .find(|n| n.name.starts_with("<anonymous"))
+        .map(|n| n.name.clone())
+        .expect("no <anonymous> node")
 }
 
 // C-R4 neighbour: an annotated `let` inside a closure binds its type.
 #[test]
 fn test_rust_annotated_let_inside_closure_binds_its_type() {
     let g = parse("fn a(rt: Dog) { spawn(move || { let rt: Runtime = make(); rt.go(); }); }\n");
+    assert_sites(&g, "a", &[CallSite::Plain("spawn")]);
     assert_sites(
         &g,
-        "a",
-        &[
-            CallSite::Plain("spawn"),
-            CallSite::Plain("make"),
-            CallSite::Plain("Runtime.go"),
-        ],
+        &anonymous_name(&g),
+        &[CallSite::Plain("make"), CallSite::Plain("Runtime.go")],
     );
 }
 
