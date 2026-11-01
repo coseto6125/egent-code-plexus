@@ -21,11 +21,12 @@ fn node_non_grpc_calls_ignored() {
     assert!(contracts.is_empty());
 }
 
-/// A service registration that follows JSX in a `.tsx` / `.jsx` file is
-/// found: the TypeScript grammar loses the code after JSX.
+/// A registration inside a JSX attribute is found in a `.tsx` / `.jsx` file.
+/// The fixture is a parse probe, not a realistic server: the TypeScript
+/// grammar reads `<button onClick={..}>` as an ERROR and loses the call.
 #[test]
-fn node_grpc_registration_after_jsx_is_extracted() {
-    let src = "export function Page() {\n  const a = <div className=\"x\">{count}</div>;\n  const b = <Foo bar=\"y\" />;\n  server.addService(user_proto.UserService.service, impl);\n  return a;\n}\n";
+fn node_grpc_registration_inside_jsx_is_extracted() {
+    let src = "export function Page() {\n  return <button onClick={() => server.addService(user_proto.UserService.service, impl)}>Go</button>;\n}\n";
     for path in ["Page.tsx", "Page.jsx"] {
         let ids: Vec<String> = extract_grpc(Path::new(path), src.as_bytes())
             .into_iter()

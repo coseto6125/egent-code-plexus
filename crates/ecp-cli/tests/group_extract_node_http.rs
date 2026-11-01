@@ -32,7 +32,7 @@ fn node_non_route_calls_ignored() {
     assert!(contracts.is_empty());
 }
 
-const JSX_ROUTES: &str = "export function Page() {\n  const a = <div className=\"x\">{count}</div>;\n  app.get(\"/api/a\", ha);\n  const b = <Foo bar=\"y\" />;\n  app.post(\"/api/b\", hb);\n  const c = <ul><li key=\"k\">{items}</li></ul>;\n  axios.get(\"/api/c\");\n  return a;\n}\n";
+const JSX_ROUTES: &str = "export function Page() {\n  return (\n    <div>\n      <button onClick={() => fetch(\"/api/a\")}>Load</button>\n      <Form onSubmit={(d) => axios.post(\"/api/b\", d)} />\n      <i onClick={() => axios.get(\"/api/c\")}>it's</i>\n    </div>\n  );\n}\n";
 
 fn sorted_ids(path: &str, source: &str) -> Vec<String> {
     let mut ids: Vec<String> = extract_http(Path::new(path), source.as_bytes())
@@ -43,11 +43,11 @@ fn sorted_ids(path: &str, source: &str) -> Vec<String> {
     ids
 }
 
-/// A route and a client call that follow JSX in a `.tsx` / `.jsx` file are
-/// found: the TypeScript grammar loses the code after JSX, the TSX grammar
-/// parses it.
+/// Client calls written inside JSX attributes (`onClick={() => fetch(..)}`)
+/// are found in a `.tsx` / `.jsx` file. The TypeScript grammar reads the JSX
+/// as an ERROR and loses the calls in it; the TSX grammar parses them.
 #[test]
-fn node_jsx_files_extract_routes_and_clients_after_jsx() {
+fn node_jsx_files_extract_clients_inside_jsx_attributes() {
     let want = ["http:GET:/api/a", "http:GET:/api/c", "http:POST:/api/b"];
     assert_eq!(sorted_ids("Page.tsx", JSX_ROUTES), want);
     assert_eq!(sorted_ids("Page.jsx", JSX_ROUTES), want);
