@@ -20,3 +20,29 @@ fn node_non_grpc_calls_ignored() {
     let contracts = extract_grpc(Path::new("x.ts"), source);
     assert!(contracts.is_empty());
 }
+
+/// A registration inside a JSX attribute is found in a `.tsx` / `.jsx` file.
+/// The fixture is a parse probe, not a realistic server: the TypeScript
+/// grammar reads `<button onClick={..}>` as an ERROR and loses the call.
+#[test]
+fn node_grpc_registration_inside_jsx_is_extracted() {
+    let src = "export function Page() {\n  return <button onClick={() => server.addService(user_proto.UserService.service, impl)}>Go</button>;\n}\n";
+    for path in ["Page.tsx", "Page.jsx", "src/ui/Page.js"] {
+        let ids: Vec<String> = extract_grpc(Path::new(path), src.as_bytes())
+            .into_iter()
+            .map(|c| c.contract_id)
+            .collect();
+        assert_eq!(ids, ["grpc:UserService:*"], "{path}");
+    }
+}
+
+/// Guard: a `.ts` file with a type assertion still extracts; empty input
+/// extracts nothing in either dialect.
+#[test]
+fn node_grpc_plain_ts_with_type_assertion_still_extracts() {
+    let src = "const v = <string>raw;\nserver.addService(user_proto.UserService.service, impl);\n";
+    let got = extract_grpc(Path::new("server.ts"), src.as_bytes());
+    assert_eq!(got.len(), 1);
+    assert!(extract_grpc(Path::new("empty.tsx"), b"").is_empty());
+    assert!(extract_grpc(Path::new("empty.ts"), b"").is_empty());
+}

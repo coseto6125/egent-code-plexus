@@ -173,8 +173,8 @@ fn multi_language_diff_yields_symbols_for_every_touched_language() {
 /// must still surface in `changed_paths` (unfiltered git-diff list), and
 /// must NOT contribute to `changed_symbols` — matching the pre-fix full
 /// pipeline, which also never routes `.md` to a provider
-/// (no extension entry exists for markdown; confirmed dead in `make_pipeline()`
-/// too). If a future fix wires real markdown dispatch, this assertion is the
+/// (no extension entry exists for markdown, and no markdown provider exists).
+/// If a future fix wires real markdown dispatch, this assertion is the
 /// one to update alongside it.
 #[test]
 fn markdown_file_in_diff_reports_path_but_contributes_no_symbols() {

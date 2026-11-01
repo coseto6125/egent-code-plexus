@@ -17,10 +17,10 @@
 
 use ecp_core::analyzer::types::RawNode;
 use ecp_core::graph::NodeKind;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::driver::blank_range;
-use crate::preproc_fallback::directive_lines;
+use crate::preproc_fallback::{directive_lines, Preproc};
 
 /// Keywords an attribute-like macro line can precede.
 const DECL_KEYWORDS: &[&[u8]] = &[
@@ -199,10 +199,13 @@ const COND_NEXT: &[&[u8]] = &[b"else", b"elif", b"elifdef", b"elifndef"];
 /// become blanks. tree-sitter-cpp reads two `:` lists as the end of the
 /// class, so the next method became a function spanning the class. `None`
 /// when no conditional has that shape. No byte moves.
-pub fn blank_init_list_conditionals(source: &[u8]) -> Option<Vec<u8>> {
+/// `lines` is [`directive_lines`] of `source`.
+pub fn blank_init_list_conditionals(
+    source: &[u8],
+    lines: &[(usize, usize, Option<&[u8]>)],
+) -> Option<Vec<u8>> {
     // A directive is read from the lexer's lines, so a `#else` inside a
     // comment or a literal opens no branch.
-    let lines = directive_lines(source);
     let mut patched: Option<Vec<u8>> = None;
     let mut k = 0;
     while k < lines.len() {
@@ -256,11 +259,145 @@ pub fn blank_init_list_conditionals(source: &[u8]) -> Option<Vec<u8>> {
     patched
 }
 
+/// Words that open a type. A builtin type word also opens a functional
+/// cast (`int(x)`), which an expression takes; [`type_argument_macro_call`]
+/// tells the two apart by the `(` after the word.
+const TYPE_WORDS: &[&[u8]] = &[
+    b"const",
+    b"volatile",
+    b"signed",
+    b"unsigned",
+    b"void",
+    b"bool",
+    b"char",
+    b"short",
+    b"int",
+    b"long",
+    b"float",
+    b"double",
+    b"struct",
+    b"class",
+    b"union",
+    b"enum",
+];
+
+/// The name a `#define` line `line` defines when the macro is
+/// function-like: a `(` follows the name with no space.
+fn function_macro_name(line: &[u8]) -> Option<&[u8]> {
+    let hash = line.iter().position(|&b| b == b'#')?;
+    let i = skip_blanks(line, hash + 1);
+    line[i..].starts_with(b"define").then_some(())?;
+    let i = skip_blanks(line, i + b"define".len());
+    let j = ident_end(line, i);
+    (j > i && line.get(j) == Some(&b'(')).then(|| &line[i..j])
+}
+
+fn skip_blanks(s: &[u8], mut i: usize) -> usize {
+    while s.get(i).is_some_and(|&b| matches!(b, b' ' | b'\t')) {
+        i += 1;
+    }
+    i
+}
+
+/// The length of the statement `line` opens when it is one call of a macro
+/// in `macros` that ends the line (`NAME(args);`, a `//` comment after it
+/// allowed) and one argument opens with a [`TYPE_WORDS`] word that no `(`
+/// follows. `None` for any other line.
+fn type_argument_macro_call(line: &[u8], macros: &FxHashSet<&[u8]>) -> Option<usize> {
+    let i = skip_blanks(line, 0);
+    let j = ident_end(line, i);
+    if j == i || line.get(j) != Some(&b'(') || !macros.contains(&line[i..j]) {
+        return None;
+    }
+    let (mut depth, mut k, mut arg_start, mut typed) = (0u32, j, j + 1, false);
+    let close = loop {
+        let b = *line.get(k)?;
+        match b {
+            b'"' | b'\'' => {
+                k = skip_quoted(line, k, b);
+                continue;
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            _ => {}
+        }
+        if depth == 1 && b == b',' || depth == 0 {
+            let arg = skip_blanks(line, arg_start);
+            let word_end = ident_end(line, arg);
+            typed |= TYPE_WORDS.contains(&&line[arg..word_end])
+                && line.get(skip_blanks(line, word_end)) != Some(&b'(');
+            arg_start = k + 1;
+        }
+        if depth == 0 {
+            break k + 1;
+        }
+        k += 1;
+    };
+    let end = close + usize::from(line.get(close) == Some(&b';'));
+    let rest = &line[skip_blanks(line, end)..];
+    (typed && (rest.is_empty() || rest == b"\r" || rest.starts_with(b"//"))).then_some(end)
+}
+
+/// `source` with each one-line statement at file scope that calls a
+/// function-like macro of this file with a type argument
+/// (`DOCTEST_DEFINE_DECORATOR(skip, bool, true);`) overwritten by blanks;
+/// `None` when there is none. No expression takes a type, so tree-sitter-cpp
+/// reads the line as a function head whose parameter list never closes, and
+/// that swallows the rest of the file (doctest.h:1924). Namespace and
+/// `extern "C"` bodies are file scope. Inside a function body the line is a
+/// statement whose call sites the function keeps (jemalloc
+/// `DO_POPCOUNT(bitmap, unsigned);`), so it stays. A line a `\` splices onto
+/// a `#define` never qualifies. No byte moves.
+pub fn blank_type_argument_macro_calls(source: &[u8], pp: &mut Preproc) -> Option<Vec<u8>> {
+    // No `#define`, no function-like macro: skip the line scan.
+    find(source, 0, b"define")?;
+    let lines = pp.directive_lines(source);
+    let macros: FxHashSet<&[u8]> = lines
+        .iter()
+        .filter(|(_, _, word)| *word == Some(&b"define"[..]))
+        .filter_map(|&(start, end, _)| function_macro_name(&source[start..end]))
+        .collect();
+    if macros.is_empty() {
+        return None;
+    }
+    let mut patched: Option<Vec<u8>> = None;
+    for &(start, end, word) in &lines {
+        let before = &source[..start.saturating_sub(1)];
+        let spliced = before
+            .strip_suffix(b"\r")
+            .unwrap_or(before)
+            .ends_with(b"\\");
+        if word.is_some() || spliced {
+            continue;
+        }
+        let call = type_argument_macro_call(&source[start..end], &macros);
+        if let Some(len) = call.filter(|_| pp.depth_at(source, start) == 0) {
+            blank_range(
+                patched.get_or_insert_with(|| source.to_vec()),
+                start,
+                start + len,
+            );
+        }
+    }
+    patched
+}
+
 /// The source patches C++ parses with, applied in order; `None` when none
 /// applies. Each only overwrites bytes with blanks.
 pub fn prepare_source(source: &[u8]) -> Option<Vec<u8>> {
     let macros = blank_decl_prefix_macros(source);
-    blank_init_list_conditionals(macros.as_deref().unwrap_or(source)).or(macros)
+    let patched = {
+        let text = macros.as_deref().unwrap_or(source);
+        let mut pp = Preproc::default();
+        match blank_type_argument_macro_calls(text, &mut pp) {
+            Some(calls) => {
+                let conditionals = blank_init_list_conditionals(&calls, &directive_lines(&calls));
+                Some(conditionals.unwrap_or(calls))
+            }
+            None => blank_init_list_conditionals(text, &pp.directive_lines(text)),
+        }
+    };
+    patched.or(macros)
 }
 
 /// The type name a base clause or qualifier names, generic arguments and a
@@ -758,10 +895,89 @@ pub fn stamp_lexical_owners(
 mod tests {
     use super::*;
 
+    fn init_list(src: &[u8]) -> Option<Vec<u8>> {
+        blank_init_list_conditionals(src, &directive_lines(src))
+    }
+
+    fn type_argument_calls(src: &[u8]) -> Option<Vec<u8>> {
+        blank_type_argument_macro_calls(src, &mut Preproc::default())
+    }
+
+    const DECORATOR: &str = "#define DEF(name, type) struct name { type data; }\n";
+
+    /// A call inside a namespace or `extern "C"` body is at file scope, as
+    /// doctest.h:1924 is inside `namespace doctest`: it is blanked.
+    #[test]
+    fn test_blank_type_argument_macro_calls_namespace_and_extern_c_blanks_call() {
+        for body in ["namespace ns {\n", "extern \"C\" {\n", ""] {
+            let src = format!("{DECORATOR}{body}DEF(a, bool);\nint after;\n");
+            let patched = type_argument_calls(src.as_bytes()).expect("file-scope call");
+            let want = src.replace("DEF(a, bool);", "             ");
+            assert_eq!(String::from_utf8(patched).unwrap(), want, "{body:?}");
+        }
+    }
+
+    /// jemalloc `bit_util.h:241` (`DO_POPCOUNT(bitmap, unsigned);`) and
+    /// `emitter.h:183` (`EMIT_SIMPLE(int, "%d")` in a `switch`): a call in a
+    /// function body is a statement whose call sites the function keeps.
+    #[test]
+    fn test_blank_type_argument_macro_calls_call_in_function_body_unpatched() {
+        let src = format!(
+            "{DECORATOR}unsigned f(unsigned bitmap) {{\n\tDEF(bitmap, unsigned);\n}}\nvoid g(int t) {{\n\tswitch (t) {{\n\tcase 1:\n\t\tDEF(int, \"%d\")\n\t\tbreak;\n\t}}\n}}\n"
+        );
+        assert_eq!(type_argument_calls(src.as_bytes()), None);
+    }
+
+    /// `int(x)` is a functional cast, an expression: the argument holds no
+    /// type.
+    #[test]
+    fn test_blank_type_argument_macro_calls_functional_cast_unpatched() {
+        let src = b"#define CHECK(x) assert(x)\nCHECK(int(n) > 0);\nCHECK(bool (p));\n";
+        assert_eq!(type_argument_calls(src), None);
+    }
+
+    /// The blanks end at the `;`: a CRLF line keeps its `\r`, a trailing `//`
+    /// comment stays, and a `)` or non-ASCII bytes inside a string argument
+    /// close nothing. A call on the last line, with no line end, is blanked.
+    #[test]
+    fn test_blank_type_argument_macro_calls_line_tails_keep_bytes_after_call() {
+        for (call, tail) in [
+            ("DEF(a, bool);", "\r\nint after;"),
+            ("DEF(a, bool);", " // note\nint after;"),
+            ("DEF(a, const char*, \")\");", "\nint after;"),
+            ("DEF(a, const char*, \"\u{e9}\");", "\nint after;"),
+            ("DEF(a, bool)", "\nint after;"),
+            ("DEF(a, bool);", ""),
+        ] {
+            let src = format!("{DECORATOR}{call}{tail}");
+            let patched = type_argument_calls(src.as_bytes()).expect("file-scope call");
+            let want = src.replace(call, &" ".repeat(call.len()));
+            assert_eq!(String::from_utf8(patched).unwrap(), want, "{call:?}");
+        }
+    }
+
+    /// A line a `\` splices onto a `#define` is macro body, no statement.
+    #[test]
+    fn test_blank_type_argument_macro_calls_continued_define_line_unpatched() {
+        let src = format!("{DECORATOR}#define WRAP(n) \\\nDEF(n, int);\nint after;\n");
+        assert_eq!(type_argument_calls(src.as_bytes()), None);
+        let crlf = format!("{DECORATOR}#define WRAP(n) \\\r\nDEF(n, int);\r\nint after;\r\n");
+        assert_eq!(type_argument_calls(crlf.as_bytes()), None);
+    }
+
+    /// No `#define` in the file: no function-like macro, no patch, and an
+    /// empty or blank source is no call.
+    #[test]
+    fn test_blank_type_argument_macro_calls_no_define_unpatched() {
+        for src in [&b""[..], b"  \n\t", b"DEF(a, bool);\n"] {
+            assert_eq!(type_argument_calls(src), None, "{src:?}");
+        }
+    }
+
     #[test]
     fn test_blank_init_list_conditionals_keeps_first_branch_only() {
         let src = b"  Foo()\n#if A\n    : a(1)\n#else\n    : a(2)\n#endif\n  {}\n";
-        let patched = blank_init_list_conditionals(src).expect("init-list conditional");
+        let patched = init_list(src).expect("init-list conditional");
         assert_eq!(patched.len(), src.len());
         assert_eq!(
             patched,
@@ -774,13 +990,13 @@ mod tests {
     #[test]
     fn test_blank_init_list_conditionals_else_inside_comment_keeps_comment_end() {
         let src = b"  Foo()\n#if A\n    : a(1) /* see\n#else\n  */\n#endif\n  {}\n";
-        let patched = blank_init_list_conditionals(src).expect("init-list conditional");
+        let patched = init_list(src).expect("init-list conditional");
         assert_eq!(
             patched,
             b"  Foo()\n     \n    : a(1) /* see\n#else\n  */\n      \n  {}\n"
         );
         let src = b"  Foo()\n#if A\n    : s(R\"(\n#else\n)\")\n#endif\n  {}\n";
-        let patched = blank_init_list_conditionals(src).expect("init-list conditional");
+        let patched = init_list(src).expect("init-list conditional");
         assert_eq!(
             patched,
             b"  Foo()\n     \n    : s(R\"(\n#else\n)\")\n      \n  {}\n"
@@ -796,7 +1012,7 @@ mod tests {
             b"class Foo\n#if A\n  : public Base\n#endif\n{};\n",
             b"  f(x)\n#if A\n  ::g();\n#endif\n",
         ] {
-            assert_eq!(blank_init_list_conditionals(src), None, "{src:?}");
+            assert_eq!(init_list(src), None, "{src:?}");
         }
     }
 

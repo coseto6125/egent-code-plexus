@@ -687,7 +687,7 @@ mod tests {
     }
 
     /// `md`/`txt`/`rst` have no route: no provider parses them, so the cold
-    /// index neither walks them nor constructs the markdown provider for them.
+    /// index does not walk them.
     #[test]
     fn test_provider_names_for_paths_markdown_extensions_select_nothing() {
         for ext in ["md", "txt", "rst"] {

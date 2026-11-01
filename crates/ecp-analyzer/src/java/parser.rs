@@ -55,7 +55,8 @@ fn explicit_access(decl: Node) -> Option<bool> {
 
 /// A member of an `interface` or `@interface` body with no access modifier
 /// is implicitly `public`, so it is as reachable as its enclosing type. A
-/// `private` member (Java 9 interface method) stays unexported. Any other
+/// `private` member (Java 9 interface method) stays unexported. An enum
+/// constant is implicitly `public` too, so it follows its enum. Any other
 /// declaration returns `false` and keeps the query's `@export` verdict.
 fn is_interface_member_exported(decl: Node) -> bool {
     fn exported(decl: Node) -> bool {
@@ -63,7 +64,12 @@ fn is_interface_member_exported(decl: Node) -> bool {
     }
     fn enclosing_interface(decl: Node) -> Option<Node> {
         decl.parent()
-            .filter(|p| matches!(p.kind(), "interface_body" | "annotation_type_body"))
+            .filter(|p| {
+                matches!(
+                    p.kind(),
+                    "interface_body" | "annotation_type_body" | "enum_body"
+                )
+            })
             .and_then(|p| p.parent())
     }
     enclosing_interface(decl).is_some() && exported(decl)

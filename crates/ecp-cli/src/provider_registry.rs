@@ -6,10 +6,9 @@
 //! `ecp_core::contracts::routing::FileRouter` stays the separate source of truth for
 //! path → name; this table only maps name → constructor.
 //!
-//! Two entries are constructible but no route lists them, so only the full
-//! `reanalyze::make_pipeline` builds them: `markdown` (no route reaches a markdown
-//! file) and `yaml` (`FileRoute::providers` omits the generic-YAML candidate until C5
-//! open point 6 lands).
+//! One entry is constructible but no route lists it, so only the full
+//! `reanalyze::make_pipeline` builds it: `yaml` (`FileRoute::providers` omits the
+//! generic-YAML candidate until C5 open point 6 lands).
 
 use ecp_analyzer::{
     astro::parser::AstroProvider, bash::parser::BashProvider, c::parser::CProvider,
@@ -19,8 +18,8 @@ use ecp_analyzer::{
     github_actions::parser::GitHubActionsProvider, go::parser::GoProvider,
     hcl::parser::HclProvider, java::parser::JavaProvider, javascript::parser::JavaScriptProvider,
     kotlin::parser::KotlinProvider, kubernetes::parser::KubernetesProvider,
-    lua::parser::LuaProvider, markdown::parser::MarkdownProvider, move_lang::parser::MoveProvider,
-    nim::parser::NimProvider, openapi::schema_scan::OpenApiProvider, php::parser::PhpProvider,
+    lua::parser::LuaProvider, move_lang::parser::MoveProvider, nim::parser::NimProvider,
+    openapi::schema_scan::OpenApiProvider, php::parser::PhpProvider,
     protobuf::parser::ProtobufProvider, python::parser::PythonProvider, ruby::parser::RubyProvider,
     rust::parser::RustProvider, solidity::parser::SolidityProvider, sql::parser::SqlProvider,
     svelte::parser::SvelteProvider, swift::parser::SwiftProvider,
@@ -52,11 +51,6 @@ pub const PROVIDER_CONSTRUCTORS: &[(&str, ProviderCtor)] = &[
     ("cpp", || Ok(Box::new(CppProvider::new()?))),
     ("swift", || Ok(Box::new(SwiftProvider::new()?))),
     ("dart", || Ok(Box::new(DartProvider::new()?))),
-    ("markdown", || {
-        MarkdownProvider::new()
-            .map(|p| Box::new(p) as Box<dyn LanguageProvider>)
-            .map_err(|e| anyhow::anyhow!(e))
-    }),
     ("yaml", || Ok(Box::new(YamlProvider::new()?))),
     ("github-actions", || {
         Ok(Box::new(GitHubActionsProvider::new()?))
@@ -140,10 +134,21 @@ mod tests {
         }
     }
 
+    /// Every entry constructs, and answers to its registry key. A route lists
+    /// a provider by that key, and the pipeline matches it against
+    /// `LanguageProvider::name`, so a key the provider does not answer to makes
+    /// the route dispatch to nothing (FU 0a44c90c8c30: `yaml` was registered
+    /// under `"yaml"` but answered `"YAML"`).
     #[test]
     fn provider_constructors_test_every_entry_constructs_successfully() {
         for (name, ctor) in PROVIDER_CONSTRUCTORS {
-            assert!(ctor().is_ok(), "constructor for {name:?} returned Err");
+            let provider =
+                ctor().unwrap_or_else(|e| panic!("constructor for {name:?} returned Err: {e}"));
+            assert_eq!(
+                provider.name(),
+                *name,
+                "registry key and provider name differ"
+            );
         }
     }
 }

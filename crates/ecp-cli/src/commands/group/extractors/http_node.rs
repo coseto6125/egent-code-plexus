@@ -1,6 +1,9 @@
 //! Node/TypeScript HTTP route extractor: Express + Fastify patterns via tree-sitter.
 
-use super::{capture_line, client_verb, compile_client_query, consumer_contract, http_url_path};
+use super::{
+    capture_line, client_verb, compile_client_query, consumer_contract, http_url_path,
+    node_grammar, NodeGrammar,
+};
 use crate::commands::group::types::{ContractRole, ContractType, ExtractedContract, SymbolRef};
 use std::path::Path;
 use std::sync::LazyLock;
@@ -48,20 +51,39 @@ const CLIENT_RECEIVERS: &[&str] = &[
     "httpClient",
 ];
 
-static QUERY: LazyLock<Query> = LazyLock::new(|| {
-    let lang: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
-    Query::new(&lang, QUERY_SRC).expect("http_node: compile QUERY_SRC")
-});
+/// One grammar with the queries compiled for it: a query is bound to the
+/// language it was compiled with, so each dialect owns its own pair.
+struct Dialect {
+    language: tree_sitter::Language,
+    query: Query,
+    client_query: Option<Query>,
+}
 
-static CLIENT_QUERY: LazyLock<Option<Query>> = LazyLock::new(|| {
-    let lang: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
-    compile_client_query(&lang, CLIENT_QUERY_SRC, "http_node")
-});
+impl Dialect {
+    fn new(language: tree_sitter::Language) -> Self {
+        Self {
+            query: Query::new(&language, QUERY_SRC).expect("http_node: compile QUERY_SRC"),
+            client_query: compile_client_query(&language, CLIENT_QUERY_SRC, "http_node"),
+            language,
+        }
+    }
+}
+
+static TYPESCRIPT: LazyLock<Dialect> =
+    LazyLock::new(|| Dialect::new(NodeGrammar::TypeScript.language()));
+static TSX: LazyLock<Dialect> = LazyLock::new(|| Dialect::new(NodeGrammar::Tsx.language()));
+
+fn dialect_for(file_path: &Path) -> &'static Dialect {
+    match node_grammar(file_path) {
+        NodeGrammar::TypeScript => &TYPESCRIPT,
+        NodeGrammar::Tsx => &TSX,
+    }
+}
 
 pub fn extract_http(file_path: &Path, source: &[u8]) -> Vec<ExtractedContract> {
+    let dialect = dialect_for(file_path);
     let mut parser = Parser::new();
-    let lang: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
-    if let Err(e) = parser.set_language(&lang) {
+    if let Err(e) = parser.set_language(&dialect.language) {
         tracing::warn!("group::extract_http (node): set_language failed: {e:?}");
         return Vec::new();
     }
@@ -72,7 +94,7 @@ pub fn extract_http(file_path: &Path, source: &[u8]) -> Vec<ExtractedContract> {
         );
         return Vec::new();
     };
-    let query: &tree_sitter::Query = &QUERY;
+    let query: &tree_sitter::Query = &dialect.query;
 
     let method_idx = match query.capture_index_for_name("method") {
         Some(i) => i,
@@ -121,7 +143,13 @@ pub fn extract_http(file_path: &Path, source: &[u8]) -> Vec<ExtractedContract> {
             meta: vec![("method".into(), http_method.into())],
         });
     }
-    extract_clients(file_path, source, &tree, &mut out);
+    extract_clients(
+        file_path,
+        source,
+        &tree,
+        dialect.client_query.as_ref(),
+        &mut out,
+    );
     out
 }
 
@@ -130,9 +158,10 @@ fn extract_clients(
     file_path: &Path,
     source: &[u8],
     tree: &tree_sitter::Tree,
+    query: Option<&Query>,
     out: &mut Vec<ExtractedContract>,
 ) {
-    let Some(query) = CLIENT_QUERY.as_ref() else {
+    let Some(query) = query else {
         return;
     };
     let idx = |name: &str| query.capture_index_for_name(name);

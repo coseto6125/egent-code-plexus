@@ -886,3 +886,84 @@ fn test_csharp_if_group_of_catch_clauses_emits_no_catch_callee() {
         m.field_reads
     );
 }
+
+// FU-2026-10-30-1c9c272115ea follow-up: `#if` groups on the same symbol take
+// one setting of it. Two independent inverted pairs (X and Y): with X and Y
+// defined, `A` closes at the `#if X` brace and `Mid` stays a member of `C`.
+// The pick by group index kept `A` open with the `#else` of its closing
+// group and closed it at the `#if !Y` brace, so `A` swallowed `Mid`. And
+// `#if X` / `#else` method heads with a block that only the `#else` of a
+// later `#if X` opens: `A` calls `Common`, never `OnlyB`, which no setting
+// of X puts in `A`.
+#[test]
+fn test_csharp_if_groups_on_one_symbol_take_one_setting() {
+    let g = parse(&lines(&[
+        "namespace App {",
+        "public class C {",
+        "#if X",
+        "    public void A() {",
+        "#else",
+        "    public void A2() { }",
+        "#endif",
+        "#if X",
+        "    }",
+        "#else",
+        "    public void A3() { }",
+        "#endif",
+        "    public void Mid() { }",
+        "#if Y",
+        "    public void B2() { }",
+        "#else",
+        "    public void B() {",
+        "#endif",
+        "#if !Y",
+        "    }",
+        "#else",
+        "    public void B3() { }",
+        "#endif",
+        "    public void Tail() { }",
+        "}",
+        "}",
+    ]));
+    let mut owners = member_owners(&g);
+    owners.sort_unstable();
+    assert_eq!(
+        owners,
+        [
+            ("A", Some("C")),
+            ("B2", Some("C")),
+            ("B3", Some("C")),
+            ("Mid", Some("C")),
+            ("Tail", Some("C")),
+        ]
+    );
+    assert_eq!(node_row(&g, "A").2, (3, 4, 8, 5));
+
+    let g = parse(&lines(&[
+        "class C {",
+        "#if X",
+        "    void A() {",
+        "#else",
+        "    void B() {",
+        "#endif",
+        "#if X",
+        "#else",
+        "        { OnlyB();",
+        "#endif",
+        "        Common();",
+        "#if !X",
+        "        }",
+        "#endif",
+        "    }",
+        "    void OnlyB() {}",
+        "    void Common() {}",
+        "}",
+    ]));
+    let a = g
+        .nodes
+        .iter()
+        .find(|n| n.name == "A")
+        .unwrap_or_else(|| panic!("no `A` in {:?}", rows(&g)));
+    let calls: Vec<&str> = a.calls.iter().map(String::as_str).collect();
+    assert_eq!(calls, ["Common"]);
+}

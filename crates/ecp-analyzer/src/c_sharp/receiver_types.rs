@@ -33,6 +33,7 @@ use crate::calls::{
     attach_to_enclosing, construction_call, node_range, range_width, span_holds, span_width,
     start_pos, Pos, PosRange,
 };
+use ecp_core::analyzer::csharp_extension::system_type_name;
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use std::borrow::Cow;
@@ -47,6 +48,9 @@ struct LocalTypes {
     /// otherwise). Keyed by name, so a lookup reads only the same-name
     /// members.
     members: HashMap<String, Vec<(PosRange, String)>>,
+    /// Every explicit interface implementation of a property. C# reaches it
+    /// only through the interface, so its simple name names no member.
+    explicit: Vec<PosRange>,
 }
 
 impl LocalTypes {
@@ -60,6 +64,12 @@ impl LocalTypes {
             .filter(|((start, end), _)| *start <= pos && pos <= *end)
             .min_by_key(|(range, _)| range_width(*range))
             .map(|(_, ty)| ty.as_str())
+    }
+
+    fn is_explicit(&self, pos: Pos) -> bool {
+        self.explicit
+            .iter()
+            .any(|(start, end)| *start <= pos && pos <= *end)
     }
 
     fn lookup(&self, pos: Pos, var: &str) -> Option<&str> {
@@ -86,9 +96,13 @@ impl LocalTypes {
 fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
     let mut scopes: Vec<(PosRange, HashMap<String, String>)> = Vec::new();
     let mut members: HashMap<String, Vec<(PosRange, String)>> = HashMap::new();
+    let mut explicit: Vec<PosRange> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         match n.kind() {
+            "property_declaration" if is_explicit_implementation(n) => {
+                explicit.push(node_range(n));
+            }
             "field_declaration" | "property_declaration" => {
                 collect_members(n, source, &mut members);
             }
@@ -114,7 +128,19 @@ fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
             stack.push(child);
         }
     }
-    LocalTypes { scopes, members }
+    LocalTypes {
+        scopes,
+        members,
+        explicit,
+    }
+}
+
+fn is_explicit_implementation(decl: Node<'_>) -> bool {
+    let mut cursor = decl.walk();
+    let explicit = decl
+        .named_children(&mut cursor)
+        .any(|child| child.kind() == "explicit_interface_specifier");
+    explicit
 }
 
 /// Record the fields or the property `decl` declares, under the range of
@@ -138,8 +164,7 @@ fn collect_members(
     };
     let scope = node_range(owner);
     let plain_type = |ty: Option<Node<'_>>| {
-        ty.filter(|ty| ty.kind() == "identifier")
-            .and_then(|ty| ty.utf8_text(source).ok())
+        ty.and_then(|ty| class_type_name(ty, source))
             .unwrap_or_default()
             .to_string()
     };
@@ -306,16 +331,19 @@ fn simple_id_and_type(
     if name_node.kind() != "identifier" {
         return None;
     }
-    // Only bind plain class-name types (single `identifier`).
-    if type_node.kind() != "identifier" {
-        return None;
-    }
+    let ty = class_type_name(type_node, source)?;
     let name = std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()]).ok()?;
-    let ty = std::str::from_utf8(&source[type_node.start_byte()..type_node.end_byte()]).ok()?;
-    if ty.is_empty() {
-        return None;
-    }
     Some((name.to_string(), ty.to_string()))
+}
+
+/// The name of a plain class-name type (a single `identifier`). `dynamic`
+/// parses as an identifier but names no type: a value of it is untyped, so
+/// its member calls keep the resolver's member fallback.
+fn class_type_name<'s>(ty: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
+    (ty.kind() == "identifier")
+        .then(|| ty.utf8_text(source).ok())
+        .flatten()
+        .filter(|ty| !ty.is_empty() && *ty != "dynamic")
 }
 
 /// Whether `call` invokes a local, parameter, field or property. Its result
@@ -327,7 +355,7 @@ fn calls_value(call: Node<'_>, source: &[u8], locals: &LocalTypes, nodes: &[RawN
         .and_then(|function| function.utf8_text(source).ok())
         .is_some_and(|name| {
             let pos = start_pos(call);
-            locals.lookup(pos, name).is_some() || declares_member(nodes, pos, name)
+            locals.lookup(pos, name).is_some() || declares_member(nodes, locals, pos, name)
         })
 }
 
@@ -373,7 +401,9 @@ fn with_call_arguments(entry: String, inv: Node<'_>, source: &[u8]) -> String {
 enum Receiver<'a> {
     /// A value or a type whose type the parser reads by name: `this`,
     /// `base`, a local, parameter, field or property declared with a plain
-    /// type name, `new T()`, a keyword type (`string.Join`).
+    /// type name, `new T()`, a keyword type (`string.Join`), a literal
+    /// (`"..".M()` is a `String` value, spelled by its `System` name so that
+    /// it is no static access) or a cast (`((T)x).M()`).
     Typed(Cow<'a, str>),
     /// `this` or `base` with no type to name: the bare member.
     Implicit,
@@ -385,7 +415,7 @@ enum Receiver<'a> {
     /// A call whose return type the resolver may read (`Foo.Create().M()`).
     Call,
     /// A value of unknown type: a field of a generic type, `var x`, `a.b`,
-    /// `a[i]`, `(T)x`, a delegate's result.
+    /// `a[i]`, `(T?)x`, a delegate's result.
     Untyped,
 }
 
@@ -407,7 +437,7 @@ fn classify_receiver<'a>(
     };
     let member = move |name: &str| match locals.member_type(pos, name) {
         Some(ty) => Some(typed(ty)),
-        None if declares_member(nodes, pos, name) => Some(Receiver::Untyped),
+        None if declares_member(nodes, locals, pos, name) => Some(Receiver::Untyped),
         None => None,
     };
     let is_this = |node: Node<'_>| matches!(node.kind(), "this_expression" | "this");
@@ -449,6 +479,35 @@ fn classify_receiver<'a>(
                 .map_or(Receiver::Untyped, Receiver::MaybeType)
         }
         "predefined_type" => Receiver::Typed(Cow::Borrowed(text(receiver).ok()?)),
+        "string_literal"
+        | "verbatim_string_literal"
+        | "raw_string_literal"
+        | "interpolated_string_expression" => {
+            // `"a"u8` (and `@"a"u8`, `"""a"""u8`) is a `ReadOnlySpan<byte>`,
+            // a generic type no plain receiver name spells.
+            let literal = text(receiver).ok()?;
+            if literal.ends_with("u8") || literal.ends_with("U8") {
+                Receiver::Untyped
+            } else {
+                Receiver::Typed(Cow::Borrowed("String"))
+            }
+        }
+        "character_literal" => Receiver::Typed(Cow::Borrowed("Char")),
+        "boolean_literal" => Receiver::Typed(Cow::Borrowed("Boolean")),
+        "integer_literal" => integer_literal_type(text(receiver).ok()?)
+            .map_or(Receiver::Untyped, |ty| Receiver::Typed(Cow::Borrowed(ty))),
+        "real_literal" => Receiver::Typed(Cow::Borrowed(real_literal_type(text(receiver).ok()?))),
+        // `(x).M()`: the value of the inner expression.
+        "parenthesized_expression" => {
+            let mut cursor = receiver.walk();
+            let inner = receiver
+                .named_children(&mut cursor)
+                .find(|child| !child.is_extra())?;
+            classify_receiver(inner, pos, source, locals, nodes)?
+        }
+        // `((T)x).M()` and `(x as T).M()`: the value has the named type.
+        "cast_expression" => named_type_receiver(receiver.child_by_field_name("type"), source),
+        "as_expression" => named_type_receiver(receiver.child_by_field_name("right"), source),
         "object_creation_expression" => receiver
             .child_by_field_name("type")
             .filter(|ty| ty.kind() == "identifier")
@@ -457,6 +516,71 @@ fn classify_receiver<'a>(
         "invocation_expression" if !calls_value(receiver, source, locals, nodes) => Receiver::Call,
         _ => Receiver::Untyped,
     })
+}
+
+/// The receiver a cast or an `as` expression gives its operand: a plain or
+/// keyword type is the value's type, a generic or qualified type name may be a
+/// project type (its last segment), any other type (`T?`, `T[]`, a tuple)
+/// leaves the value untyped.
+fn named_type_receiver<'a>(ty: Option<Node<'_>>, source: &'a [u8]) -> Receiver<'a> {
+    let Some(ty) = ty else {
+        return Receiver::Untyped;
+    };
+    let range = ty.start_byte()..ty.end_byte();
+    match ty.kind() {
+        "identifier" => class_type_name(ty, source)
+            .map_or(Receiver::Untyped, |ty| Receiver::Typed(Cow::Borrowed(ty))),
+        // A value of a keyword type is no static access: `string.M()` names
+        // the type, which no extension method reaches, so the value takes
+        // the `System` name.
+        "predefined_type" => std::str::from_utf8(&source[range]).map_or(Receiver::Untyped, |ty| {
+            Receiver::Typed(Cow::Borrowed(system_type_name(ty)))
+        }),
+        "qualified_name" | "alias_qualified_name" => {
+            name_of_field(ty, source).map_or(Receiver::Untyped, Receiver::MaybeType)
+        }
+        "generic_name" => ty
+            .named_child(0)
+            .filter(|id| id.kind() == "identifier")
+            .and_then(|id| std::str::from_utf8(&source[id.start_byte()..id.end_byte()]).ok())
+            .map_or(Receiver::Untyped, Receiver::MaybeType),
+        _ => Receiver::Untyped,
+    }
+}
+
+/// The `System` type of an integer literal (C# spec 12.8.4): the first of
+/// `int`, `uint`, `long`, `ulong` that holds the value, narrowed by a `u` /
+/// `l` suffix. `None` for a value no type holds.
+fn integer_literal_type(text: &str) -> Option<&'static str> {
+    let text = text.replace('_', "").to_ascii_lowercase();
+    let digits = text.trim_end_matches(['u', 'l']);
+    let suffix = &text[digits.len()..];
+    let (digits, radix) = match digits.get(..2) {
+        Some("0x") => (&digits[2..], 16),
+        Some("0b") => (&digits[2..], 2),
+        _ => (digits, 10),
+    };
+    let value = u64::from_str_radix(digits, radix).ok()?;
+    let (unsigned, long) = (suffix.contains('u'), suffix.contains('l'));
+    Some(if !unsigned && !long && value <= i32::MAX as u64 {
+        "Int32"
+    } else if !long && value <= u32::MAX as u64 {
+        "UInt32"
+    } else if !unsigned && value <= i64::MAX as u64 {
+        "Int64"
+    } else {
+        "UInt64"
+    })
+}
+
+/// The `System` type of a real literal: `f` is `Single`, `m` is `Decimal`,
+/// anything else (`d` or no suffix) is `Double`.
+fn real_literal_type(text: &str) -> &'static str {
+    match text.bytes().next_back().map(|b| b.to_ascii_lowercase()) {
+        Some(b'f') => "Single",
+        Some(b'm') => "Decimal",
+        _ => "Double",
+    }
 }
 
 /// The last segment of the dotted name `receiver` when that name may be a
@@ -491,7 +615,7 @@ fn type_path_tail<'a>(
     let value = node.kind() == "identifier"
         && (locals.lookup(pos, root).is_some()
             || locals.member_type(pos, root).is_some()
-            || declares_member(nodes, pos, root));
+            || declares_member(nodes, locals, pos, root));
     (!value).then_some(tail.unwrap_or(root))
 }
 
@@ -635,7 +759,7 @@ pub fn extract_csharp_calls_and_path_literals(
 /// Whether a type enclosing `pos` declares a field or property named `name`
 /// (both are `Property` nodes). A nested type's members count for the whole
 /// outer type: that only keeps more calls on the bare member.
-fn declares_member(nodes: &[RawNode], pos: Pos, name: &str) -> bool {
+fn declares_member(nodes: &[RawNode], locals: &LocalTypes, pos: Pos, name: &str) -> bool {
     let is_type = |n: &RawNode| {
         matches!(
             n.kind,
@@ -647,9 +771,10 @@ fn declares_member(nodes: &[RawNode], pos: Pos, name: &str) -> bool {
         .filter(|m| m.kind == NodeKind::Property && m.name == name)
         .any(|m| {
             let at = (m.span.0, m.span.1);
-            nodes
-                .iter()
-                .any(|t| is_type(t) && span_holds(t.span, pos) && span_holds(t.span, at))
+            !locals.is_explicit(at)
+                && nodes
+                    .iter()
+                    .any(|t| is_type(t) && span_holds(t.span, pos) && span_holds(t.span, at))
         })
 }
 

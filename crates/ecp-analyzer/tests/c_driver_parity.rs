@@ -212,11 +212,13 @@ fn test_c_driver_declarations_keep_query_order_and_fields() {
             ),
             // A function-pointer typedef is a Typedef node like the plain ones.
             ("cmp_fn", NodeKind::Typedef, (5, 0, 5, 32), true, None, None),
+            // `const` on the object makes a Const, and file-scope `static`
+            // has internal linkage (FU 9adc33b1cf3e, FU cb159240606e).
             (
                 "LIMIT",
-                NodeKind::Variable,
+                NodeKind::Const,
                 (6, 0, 6, 27),
-                true,
+                false,
                 s("static const int"),
                 None
             ),
@@ -338,11 +340,12 @@ fn test_c_driver_fn_ptr_ops_struct_emits_indirect_call_metas() {
                 s("int"),
                 None
             ),
+            // File-scope `static` has internal linkage (FU cb159240606e).
             (
                 "fops",
                 NodeKind::Variable,
                 (3, 0, 3, 69),
-                true,
+                false,
                 s("static struct file_ops"),
                 None
             ),

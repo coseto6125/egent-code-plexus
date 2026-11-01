@@ -719,3 +719,182 @@ fn test_rust_plain_scoped_call_keeps_path() {
     let g = parse("fn a() { std::vec::Vec::new(); }\n");
     assert_eq!(callee_names(&g, "a"), ["std::vec::Vec::new"]);
 }
+
+// An inherent `fn clone(&self) -> Other` shadows `Clone::clone`, so the
+// alias takes `Other`, not the receiver's type. `Self` and the receiver's
+// own generic type keep the type; a non-plain return type is unknown.
+#[test]
+fn test_rust_let_clone_alias_inherent_clone_returns_its_own_type() {
+    let g = parse(
+        "impl Dog { fn clone(&self) -> Cat { Cat } }\n\
+         fn a(x: Dog) { let y = x.clone(); y.m(); }\n",
+    );
+    assert_sites(
+        &g,
+        "a",
+        &[CallSite::Plain("Dog.clone"), CallSite::Plain("Cat.m")],
+    );
+}
+
+#[test]
+fn test_rust_let_clone_alias_inherent_clone_self_or_generic_keeps_type() {
+    let g = parse(
+        "impl Dog { fn clone(&self) -> Self { Dog } }\n\
+         impl<T> Box2<T> { fn clone(&self) -> Box2<T> { todo!() } }\n\
+         fn a(x: Dog) { let y = x.clone(); y.m(); }\n\
+         fn b(x: Box2) { let y = x.clone(); y.m(); }\n",
+    );
+    assert_sites(
+        &g,
+        "a",
+        &[CallSite::Plain("Dog.clone"), CallSite::Plain("Dog.m")],
+    );
+    assert_sites(
+        &g,
+        "b",
+        &[CallSite::Plain("Box2.clone"), CallSite::Plain("Box2.m")],
+    );
+}
+
+#[test]
+fn test_rust_let_clone_alias_inherent_clone_complex_return_is_untyped() {
+    let g = parse(
+        "impl Dog { fn clone(&self) -> Option<Cat> { None } }\n\
+         impl Pup { fn clone(&self) { } }\n\
+         fn a(x: Dog) { let y = x.clone(); y.m(); }\n\
+         fn b(x: Pup) { let y = x.clone(); y.m(); }\n",
+    );
+    assert_sites(
+        &g,
+        "a",
+        &[CallSite::Plain("Dog.clone"), CallSite::UntypedMember("m")],
+    );
+    assert_sites(
+        &g,
+        "b",
+        &[CallSite::Plain("Pup.clone"), CallSite::UntypedMember("m")],
+    );
+}
+
+// Guard: a `Clone` trait impl is not an inherent `clone`, so the alias
+// keeps the receiver's type, and a plain `let y = x;` is unaffected by one.
+#[test]
+fn test_rust_let_clone_alias_trait_impl_clone_keeps_type() {
+    let g = parse(
+        "impl Clone for Dog { fn clone(&self) -> Dog { Dog } }\n\
+         impl Cat { fn clone(&self) -> Dog { Dog } }\n\
+         fn a(x: Dog) { let y = x.clone(); y.m(); }\n\
+         fn b(x: Cat) { let y = x; y.m(); }\n",
+    );
+    assert_sites(
+        &g,
+        "a",
+        &[CallSite::Plain("Dog.clone"), CallSite::Plain("Dog.m")],
+    );
+    assert_sites(&g, "b", &[CallSite::Plain("Cat.m")]);
+}
+
+// Contract: `fn clone(&self) -> &Self` returns the impl type behind a
+// reference, so the alias takes the impl type, never the literal `Self`.
+// A raw pointer (`*const Self`) never auto-derefs for a method call, and
+// a wrapper the binding model does not unwrap (`Box<Self>`) is not read:
+// both leave the alias untyped.
+#[test]
+fn test_rust_let_clone_alias_inherent_clone_returning_ref_self_takes_impl_type() {
+    let g = parse(
+        "impl Dog { fn clone(&self) -> &Self { self } }\n\
+         impl Pup { fn clone(&self) -> *const Self { self } }\n\
+         impl Cub { fn clone(&self) -> Box<Self> { todo!() } }\n\
+         fn a(x: Dog) { let y = x.clone(); y.m(); }\n\
+         fn b(x: Pup) { let y = x.clone(); y.m(); }\n\
+         fn c(x: Cub) { let y = x.clone(); y.m(); }\n",
+    );
+    assert_sites(
+        &g,
+        "a",
+        &[CallSite::Plain("Dog.clone"), CallSite::Plain("Dog.m")],
+    );
+    assert_sites(
+        &g,
+        "b",
+        &[CallSite::Plain("Pup.clone"), CallSite::UntypedMember("m")],
+    );
+    assert_sites(
+        &g,
+        "c",
+        &[CallSite::Plain("Cub.clone"), CallSite::UntypedMember("m")],
+    );
+}
+
+// Contract: the FU's own shape, a shadowing `let x = x.clone();`, takes the
+// inherent return type.
+#[test]
+fn test_rust_let_clone_alias_inherent_clone_shadowing_rebinding_takes_return_type() {
+    let g = parse(
+        "impl Dog { fn clone(&self) -> Cat { Cat } }\n\
+         fn a(x: Dog) { let x = x.clone(); x.m(); }\n",
+    );
+    assert_sites(
+        &g,
+        "a",
+        &[CallSite::Plain("Dog.clone"), CallSite::Plain("Cat.m")],
+    );
+}
+
+// Contract: an inherent `clone` of one module's `Dog` does not retype the
+// clone of a different module's `Dog` of the same file.
+#[test]
+fn test_rust_let_clone_alias_inherent_clone_in_other_module_does_not_apply() {
+    let g = parse(
+        "mod a { impl Dog { fn clone(&self) -> Cat { Cat } } }\n\
+         mod b { #[derive(Clone)] struct Dog; fn f(x: Dog) { let y = x.clone(); y.m(); } }\n",
+    );
+    assert_sites(
+        &g,
+        "f",
+        &[CallSite::Plain("Dog.clone"), CallSite::Plain("Dog.m")],
+    );
+}
+
+#[test]
+fn test_rust_let_clone_alias_inherent_clone_with_dog_declared_in_two_modules_does_not_apply() {
+    let g = parse(
+        "mod a { struct Dog; impl Dog { fn clone(&self) -> Cat { Cat } } }\n\
+         mod b { struct Dog; fn f(x: Dog) { let y = x.clone(); y.m(); } }\n",
+    );
+    assert_sites(
+        &g,
+        "f",
+        &[CallSite::Plain("Dog.clone"), CallSite::Plain("Dog.m")],
+    );
+}
+
+// Contract: the same bare name with an inherent `clone` in two modules is
+// ambiguous, so neither override applies.
+#[test]
+fn test_rust_let_clone_alias_inherent_clone_twice_in_two_modules_does_not_apply() {
+    let g = parse(
+        "mod a { impl Dog { fn clone(&self) -> Cat { Cat } } }\n\
+         mod b { impl Dog { fn clone(&self) -> Rat { Rat } } }\n\
+         fn f(x: Dog) { let y = x.clone(); y.m(); }\n",
+    );
+    assert_sites(
+        &g,
+        "f",
+        &[CallSite::Plain("Dog.clone"), CallSite::Plain("Dog.m")],
+    );
+}
+
+// Guard: a type and its inherent `clone` in one module keep the override.
+#[test]
+fn test_rust_let_clone_alias_inherent_clone_declared_and_called_in_one_module_applies() {
+    let g = parse(
+        "mod a { struct Dog; impl Dog { fn clone(&self) -> Cat { Cat } }\n\
+         fn f(x: Dog) { let y = x.clone(); y.m(); } }\n",
+    );
+    assert_sites(
+        &g,
+        "f",
+        &[CallSite::Plain("Dog.clone"), CallSite::Plain("Cat.m")],
+    );
+}

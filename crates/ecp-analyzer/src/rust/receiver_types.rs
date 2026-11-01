@@ -35,25 +35,137 @@ use tree_sitter::Node;
 pub struct ImplMap {
     /// fn_name → impl type name (e.g. "Dog").  Pointer/ref stripped.
     pub entries: HashMap<String, String>,
+    /// impl type → what its inherent `fn clone(&self)` returns. An inherent
+    /// `clone` shadows `Clone::clone`, so `let x = y.clone()` takes this type,
+    /// not `y`'s.
+    pub inherent_clones: HashMap<String, CloneReturn>,
+}
+
+/// What an inherent `fn clone(&self)` returns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloneReturn {
+    /// A plain type name, with `Self` and `&Self` already read as the impl type.
+    Returns(String),
+    /// No return type, or one that is not a plain name.
+    Unknown,
+}
+
+/// One inherent `clone` found while walking the file.
+struct InherentClone {
+    impl_type: String,
+    module: Option<usize>,
+    returns: CloneReturn,
 }
 
 /// Walk every `impl_item` and record each method's enclosing impl type.
+///
+/// Inherent `clone` overrides are keyed by the bare type name for the whole
+/// file, so one that cannot be tied to a single module-local type is dropped.
+/// An inherent `clone` in another file is out of scope: a cross-file `impl` is
+/// not seen here, and its `let y = x.clone()` keeps `x`'s type.
 pub fn build_impl_map(root: Node<'_>, source: &[u8]) -> ImplMap {
     let mut entries: HashMap<String, String> = HashMap::new();
-    let mut stack: Vec<Node<'_>> = vec![root];
-    while let Some(n) = stack.pop() {
-        if n.kind() == "impl_item" {
-            let impl_type = impl_self_type(&n, source);
-            if let Some(ty) = impl_type {
-                collect_impl_methods(&n, source, &ty, &mut entries);
+    let mut clones: Vec<InherentClone> = Vec::new();
+    // Modules of the file that declare each bare type name.
+    let mut declared_in: HashMap<String, Vec<Option<usize>>> = HashMap::new();
+    let mut stack: Vec<(Node<'_>, Option<usize>)> = vec![(root, None)];
+    while let Some((n, module)) = stack.pop() {
+        match n.kind() {
+            "impl_item" => {
+                if let Some(ty) = impl_self_type(&n, source) {
+                    collect_impl_methods(&n, source, &ty, &mut entries);
+                    if n.child_by_field_name("trait").is_none() {
+                        if let Some(returns) = inherent_clone_return(&n, source, &ty) {
+                            clones.push(InherentClone {
+                                impl_type: ty,
+                                module,
+                                returns,
+                            });
+                        }
+                    }
+                }
             }
+            "struct_item" | "enum_item" | "union_item" | "type_item" => {
+                if let Some(name) = n
+                    .child_by_field_name("name")
+                    .and_then(|name| node_text(name, source))
+                {
+                    declared_in.entry(name).or_default().push(module);
+                }
+            }
+            _ => {}
         }
+        let child_module = if n.kind() == "mod_item" {
+            Some(n.id())
+        } else {
+            module
+        };
         let mut c = n.walk();
         for child in n.children(&mut c) {
-            stack.push(child);
+            stack.push((child, child_module));
         }
     }
-    ImplMap { entries }
+    let inherent_clones = unambiguous_clones(clones, &declared_in);
+    ImplMap {
+        entries,
+        inherent_clones,
+    }
+}
+
+/// Keep a clone override only when its bare type name has one `clone` and
+/// every declaration of that name in the file sits in the impl's own module:
+/// otherwise a call site's `Dog` may be a different `Dog`.
+fn unambiguous_clones(
+    clones: Vec<InherentClone>,
+    declared_in: &HashMap<String, Vec<Option<usize>>>,
+) -> HashMap<String, CloneReturn> {
+    let mut count: HashMap<&str, usize> = HashMap::new();
+    for clone in &clones {
+        *count.entry(&clone.impl_type).or_default() += 1;
+    }
+    let keep: Vec<bool> = clones
+        .iter()
+        .map(|clone| {
+            count[clone.impl_type.as_str()] == 1
+                && declared_in
+                    .get(&clone.impl_type)
+                    .is_none_or(|modules| modules.iter().all(|m| *m == clone.module))
+        })
+        .collect();
+    clones
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(clone, keep)| keep.then_some((clone.impl_type, clone.returns)))
+        .collect()
+}
+
+/// The return of the `fn clone(&self)` an inherent `impl_item` defines, or
+/// `None` when it defines none.
+fn inherent_clone_return(
+    impl_node: &Node<'_>,
+    source: &[u8],
+    impl_type: &str,
+) -> Option<CloneReturn> {
+    let body = impl_node.child_by_field_name("body")?;
+    let mut cursor = body.walk();
+    let clone = body.children(&mut cursor).find(|f| {
+        f.kind() == "function_item"
+            && f.child_by_field_name("name")
+                .is_some_and(|n| n.utf8_text(source) == Ok("clone"))
+            && f.child_by_field_name("parameters")
+                .and_then(|p| p.named_child(0))
+                .is_some_and(|first| first.kind() == "self_parameter")
+    })?;
+    let Some(returns) = clone.child_by_field_name("return_type") else {
+        return Some(CloneReturn::Unknown);
+    };
+    // `self_type_name` unwraps `&`/generics, so `Self` and `&Self` both read
+    // as the impl type; a raw pointer or a wrapper it cannot unwrap (`Box<Self>`) stays unknown.
+    let named = self_type_name(returns, source);
+    if named.as_deref() == Some("Self") || named.as_deref() == Some(impl_type) {
+        return Some(CloneReturn::Returns(impl_type.to_string()));
+    }
+    Some(bare_type_name(returns, source).map_or(CloneReturn::Unknown, CloneReturn::Returns))
 }
 
 /// Extract the self-type name from an `impl_item`.
@@ -366,7 +478,14 @@ fn collect_scopes<'a>(
 
             // `let` bindings in the body.
             if let Some(body) = child.child_by_field_name("body") {
-                collect_body_bindings(&body, source, &mut bindings, &mut events, &mut values);
+                collect_body_bindings(
+                    &body,
+                    source,
+                    &mut bindings,
+                    &mut events,
+                    &mut values,
+                    &impl_map.inherent_clones,
+                );
             }
 
             out.push(Scope {
@@ -522,6 +641,7 @@ fn collect_body_bindings(
     out: &mut HashMap<String, String>,
     events: &mut Bindings,
     values: &mut HashMap<String, Vec<PosRange>>,
+    inherent_clones: &HashMap<String, CloneReturn>,
 ) {
     let mut aliases: Vec<Alias<'_>> = Vec::new();
     let mut stack = vec![(*body, node_range(*body).1, false)];
@@ -600,12 +720,16 @@ fn collect_body_bindings(
                     let alias = (simple && !annotated)
                         .then(|| n.child_by_field_name("value"))
                         .flatten()
-                        .and_then(|value| Some((alias_source(value, source)?, start_pos(value))));
+                        .and_then(|value| {
+                            let (from, cloned) = alias_source(value, source)?;
+                            Some((from, cloned, start_pos(value)))
+                        });
                     match alias {
-                        Some((from, at)) => aliases.push(Alias {
+                        Some((from, cloned, at)) => aliases.push(Alias {
                             pattern,
                             live,
                             from,
+                            cloned,
                             at,
                         }),
                         None => record_binding(pattern, source, live, ty.as_deref(), events),
@@ -627,6 +751,15 @@ fn collect_body_bindings(
             .get(&alias.from)
             .and_then(|bindings| live_type(bindings, alias.at))
             .map(str::to_string);
+        let inherent = alias
+            .cloned
+            .then(|| ty.as_deref().and_then(|from| inherent_clones.get(from)))
+            .flatten();
+        let ty = match inherent {
+            Some(CloneReturn::Returns(returned)) => Some(returned.clone()),
+            Some(CloneReturn::Unknown) => None,
+            None => ty,
+        };
         record_binding(alias.pattern, source, alias.live, ty.as_deref(), events);
     }
 }
@@ -637,14 +770,17 @@ struct Alias<'t> {
     pattern: Node<'t>,
     live: PosRange,
     from: String,
+    /// The initializer is `from.clone()`, not `from` itself.
+    cloned: bool,
     at: Pos,
 }
 
-/// `y` of the initializer `y` or `y.clone()`; `None` for any other shape.
-fn alias_source(value: Node<'_>, source: &[u8]) -> Option<String> {
+/// `y` of the initializer `y` or `y.clone()`, and whether it was a `clone`;
+/// `None` for any other shape.
+fn alias_source(value: Node<'_>, source: &[u8]) -> Option<(String, bool)> {
     let name = |n: Node<'_>| node_text(n, source);
     match value.kind() {
-        "identifier" => name(value),
+        "identifier" => Some((name(value)?, false)),
         "call_expression" => {
             let function = value.child_by_field_name("function")?;
             let no_arguments = value
@@ -659,6 +795,7 @@ fn alias_source(value: Node<'_>, source: &[u8]) -> Option<String> {
                 .filter(|receiver| receiver.kind() == "identifier")?;
             (function.kind() == "field_expression" && no_arguments && is_clone)
                 .then(|| name(receiver))?
+                .map(|from| (from, true))
         }
         _ => None,
     }

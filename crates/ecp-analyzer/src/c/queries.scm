@@ -22,6 +22,16 @@
         declarator: (identifier) @function.name))
   ]) @function
 
+;; A prototype tree-sitter-c leaves as an ERROR because a macro follows its
+;; parameters (`void __libc_free(void *ptr) PREALIAS(je_free);`). parser.rs
+;; keeps only an ERROR that holds the type and one function declarator and
+;; is followed by the `;` (`recovered_prototype_end`).
+;; Like the prototypes above it captures no `@type`.
+(ERROR
+  type: (_)
+  (function_declarator
+    declarator: (identifier) @function.name)) @function
+
 ;; Structs — definition sites only (must have body).
 ;; Without `body:` anchor, the query matched every `struct hdr_histogram *p;`
 ;; / `sizeof(struct hdr_histogram)` reference site, producing duplicate

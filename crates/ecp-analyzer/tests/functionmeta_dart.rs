@@ -254,6 +254,8 @@ fn dart_function_metas_sorted_by_node_idx() {
     }
 }
 
+/// A function declared inside a body keeps its node and its meta; it takes a
+/// lexical parent (the FU 2cf259e51deb drop was reverted).
 #[test]
 fn dart_nested_function_has_function_meta() {
     let src = "int outer() { int inner(int value) { return value; } return inner(1); }\n";
@@ -279,8 +281,8 @@ fn params_of(g: &ZeroCopyGraph, name: &str) -> Vec<String> {
 }
 
 /// Operator metas carry the parameter names and the return type, in the
-/// `[name, type, ..]` encoding of the other Dart metas (the type slot is
-/// empty today for every Dart parameter), for a body and a body-less form.
+/// `[name, type, ..]` encoding of the other Dart metas, for a body and a
+/// body-less form.
 #[test]
 fn test_dart_operator_meta_has_params_and_return_type() {
     let g = analyze(
@@ -288,14 +290,14 @@ fn test_dart_operator_meta_has_params_and_return_type() {
     );
     let pool = g.string_pool.as_slice();
     let rt = |n: &str| meta(&g, n).return_type.resolve(pool).to_string();
-    assert_eq!(params_of(&g, "=="), ["other", ""]);
+    assert_eq!(params_of(&g, "=="), ["other", "Object"]);
     assert_eq!(rt("=="), "bool");
     assert!(params_of(&g, "-").is_empty());
     assert_eq!(rt("-"), "int");
-    assert_eq!(params_of(&g, "[]"), ["i", ""]);
-    assert_eq!(params_of(&g, "[]="), ["i", "", "v", ""]);
+    assert_eq!(params_of(&g, "[]"), ["i", "int"]);
+    assert_eq!(params_of(&g, "[]="), ["i", "int", "v", "int"]);
     assert_eq!(rt("[]="), "void");
-    assert_eq!(params_of(&g, "<"), ["o", ""]);
+    assert_eq!(params_of(&g, "<"), ["o", "Object"]);
     assert_eq!(rt("<"), "bool");
 }
 
@@ -312,4 +314,40 @@ fn test_dart_body_less_class_member_is_abstract_flag() {
     assert!(meta(&g, "ext").is_extern());
     assert!(!meta(&g, "body").is_abstract());
     assert!(!meta(&g, "top").is_abstract());
+}
+
+/// Every parameter shape reaches the meta as `[name, type]` with the declared
+/// type text: typed, `final`/`var`, untyped, optional positional, named.
+#[test]
+fn test_dart_param_types_are_recorded_for_every_parameter_shape() {
+    let g = analyze(
+        "void f(int a, final String b, var c, d, [double e = 1.0]) {}\nvoid g(int a, {required List<int> items, bool flag = false}) {}\n",
+    );
+    assert_eq!(
+        params_of(&g, "f"),
+        ["a", "int", "b", "String", "c", "", "d", "", "e", "double"]
+    );
+    assert_eq!(
+        params_of(&g, "g"),
+        ["a", "int", "items", "List<int>", "flag", "bool"]
+    );
+}
+
+/// An old-style function-typed parameter (`int callback(String value)`) is
+/// recorded with no type: the `int` is the callback's return type, so it must
+/// not read as the parameter's own type. Its neighbours keep their types.
+#[test]
+fn test_dart_param_types_function_typed_parameter_is_untyped() {
+    let g = analyze(
+        "void f(int callback(String value), String after) {}\nvoid g(int a, {required int cb(String v), bool flag = false}) {}\nvoid h([void cb(int v)]) {}\n",
+    );
+    assert_eq!(params_of(&g, "f"), ["callback", "", "after", "String"]);
+    assert_eq!(params_of(&g, "g"), ["a", "int", "cb", "", "flag", "bool"]);
+    assert_eq!(params_of(&g, "h"), ["cb", ""]);
+}
+
+#[test]
+fn test_dart_param_types_empty_parameter_list_is_empty() {
+    let g = analyze("void f() {}\n");
+    assert!(params_of(&g, "f").is_empty());
 }

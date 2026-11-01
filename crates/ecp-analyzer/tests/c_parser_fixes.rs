@@ -4,6 +4,7 @@
 //! it fails until the fix lands.
 
 use ecp_analyzer::c::parser::CProvider;
+use ecp_analyzer::cpp::parser::CppProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{BindingKind, LocalGraph};
 use ecp_core::graph::{CallMeta, NodeKind};
@@ -114,7 +115,7 @@ fn test_c_decls_in_every_preproc_branch_emit_but_body_local_extern_does_not() {
                 "pick_level",
                 NodeKind::Variable,
                 (6, 0, 6, 26),
-                true,
+                false,
                 Some("static int")
             ),
             ("f", NodeKind::Function, (8, 0, 13, 1), true, Some("void")),
@@ -546,28 +547,28 @@ fn test_c_file_scope_array_decls_emit_variable_nodes() {
                 "wstr",
                 NodeKind::Variable,
                 (1, 0, 1, 32),
-                true,
+                false,
                 s("static wchar_t")
             ),
             (
                 "woffs",
                 NodeKind::Variable,
                 (2, 0, 2, 29),
-                true,
+                false,
                 s("static int")
             ),
             (
                 "ncleanups",
                 NodeKind::Variable,
                 (4, 0, 4, 38),
-                true,
+                false,
                 s("static unsigned")
             ),
             (
                 "cleanups",
                 NodeKind::Variable,
                 (5, 0, 5, 62),
-                true,
+                false,
                 s("static malloc_tsd_cleanup_t")
             ),
         ]
@@ -580,9 +581,9 @@ fn test_c_file_scope_array_decls_emit_variable_nodes() {
 }
 
 /// A4 atypical: an initialised array, an array of pointers, a 2-D array and
-/// an array beside a scalar in one declaration are Variables. A `static`
-/// array inside a body is a local and a struct array member stays a
-/// Property.
+/// an array beside a scalar in one declaration are Variables (a `const`
+/// array a Const). A `static` array inside a body is a local and a struct
+/// array member stays a Property.
 #[test]
 fn test_c_initialised_pointer_and_2d_arrays_emit_variables_but_local_does_not() {
     let g = parse(
@@ -591,27 +592,30 @@ fn test_c_initialised_pointer_and_2d_arrays_emit_variables_but_local_does_not() 
     );
     let s = Some;
     assert_eq!(
-        sorted_rows_of(&g, &[NodeKind::Variable, NodeKind::Property]),
+        sorted_rows_of(
+            &g,
+            &[NodeKind::Variable, NodeKind::Const, NodeKind::Property]
+        ),
         [
             (
                 "bitsinbyte",
-                NodeKind::Variable,
+                NodeKind::Const,
                 (0, 0, 0, 43),
-                true,
+                false,
                 s("static const uint8_t")
             ),
             (
                 "bio_worker_title",
                 NodeKind::Variable,
                 (1, 0, 1, 45),
-                true,
+                false,
                 s("static char *")
             ),
             (
                 "combine_cache",
                 NodeKind::Variable,
                 (2, 0, 2, 38),
-                true,
+                false,
                 s("static uint64_t")
             ),
             ("pair", NodeKind::Variable, (3, 0, 3, 20), true, s("int")),
@@ -640,14 +644,14 @@ fn test_c_file_scope_decls_after_error_recovered_function_emit_variables() {
                 "gate",
                 NodeKind::Variable,
                 (23, 0, 23, 20),
-                true,
+                false,
                 s("static int")
             ),
             (
                 "plain",
                 NodeKind::Variable,
                 (25, 0, 25, 17),
-                true,
+                false,
                 s("static int")
             ),
             (
@@ -686,7 +690,7 @@ fn test_c_double_pointer_file_scope_decls_emit_variables() {
                 "argv_copy",
                 NodeKind::Variable,
                 (5, 0, 5, 28),
-                true,
+                false,
                 s("static char **")
             ),
             (
@@ -720,28 +724,28 @@ fn test_c_brace_depth_skips_literals_comments_directives_and_later_branches() {
                 "open_brace",
                 NodeKind::Variable,
                 (11, 0, 11, 28),
-                true,
+                false,
                 s("static int")
             ),
             (
                 "close_text",
                 NodeKind::Variable,
                 (12, 0, 12, 37),
-                true,
+                false,
                 s("static const char *")
             ),
             (
                 "legacy_gate",
                 NodeKind::Variable,
                 (16, 0, 16, 23),
-                true,
+                false,
                 s("static int")
             ),
             (
                 "modern_gate",
                 NodeKind::Variable,
                 (18, 0, 18, 23),
-                true,
+                false,
                 s("static int")
             ),
         ]
@@ -830,7 +834,7 @@ fn test_c_macro_body_locals_after_comment_emit_no_variable() {
             "kept",
             NodeKind::Variable,
             (0, 0, 0, 20),
-            true,
+            false,
             Some("static int")
         )]
     );
@@ -838,27 +842,56 @@ fn test_c_macro_body_locals_after_comment_emit_no_variable() {
 
 /// A-R3, C side (`deps/xxhash/xxhash.h:2655`): both grammars read
 /// `typedef __attribute__((aligned(1))) T x;` as a typedef cut short at the
-/// attribute, with a missing `;`. Its parenthesized declarator holds the
-/// attribute's argument, so neither a Typedef nor a named binding takes the
-/// name `__aligned__`. A macro-call type stays a Typedef with its alias.
+/// attribute, with a missing `;`, and `T x;` as a declaration on the same
+/// row. Neither a Typedef nor a named binding takes the name `__aligned__`:
+/// the alias is `x`, a Typedef spanning both statements and an `Alias`
+/// binding of `T`, and `x` is no Variable. A macro-call type stays a
+/// Typedef with its alias.
 #[test]
-fn test_c_attribute_typedef_emits_no_attribute_named_typedef() {
+fn test_c_attribute_typedef_takes_alias_of_tail_declaration() {
     let g = parse(
         "witness.c",
         b"typedef ql_head(witness_t) witness_list_t;\ntypedef __attribute__((__aligned__(1))) unsigned int xxh_unalign32;\n",
     );
     assert_eq!(
-        rows_of(&g, &[NodeKind::Typedef]),
-        [(
-            "witness_list_t",
-            NodeKind::Typedef,
-            (0, 0, 0, 42),
-            true,
-            None
-        )]
+        rows_of(&g, &[NodeKind::Typedef, NodeKind::Variable]),
+        [
+            (
+                "witness_list_t",
+                NodeKind::Typedef,
+                (0, 0, 0, 42),
+                true,
+                None
+            ),
+            (
+                "xxh_unalign32",
+                NodeKind::Typedef,
+                (1, 0, 1, 67),
+                true,
+                None
+            ),
+        ]
     );
-    let aliases: Vec<&str> = import_rows(&g).iter().map(|r| r.1).collect();
-    assert_eq!(aliases, ["witness_list_t"]);
+    assert_eq!(
+        named_content_hash(&g, "xxh_unalign32"),
+        xxh3_64_bytes(b"typedef __attribute__((__aligned__(1))) unsigned int xxh_unalign32;")
+    );
+    let aliases: Vec<(&str, &str)> = import_rows(&g).iter().map(|r| (r.1, r.0)).collect();
+    assert_eq!(
+        aliases,
+        [
+            ("witness_list_t", "ql_head(witness_t)"),
+            ("xxh_unalign32", "unsigned int")
+        ]
+    );
+}
+
+fn named_content_hash(g: &LocalGraph, name: &str) -> u64 {
+    g.nodes
+        .iter()
+        .find(|n| n.name == name)
+        .unwrap_or_else(|| panic!("no node `{name}` in {:?}", g.nodes))
+        .content_hash
 }
 
 /// A-R5 (`src/adlist.c:46`, `deps/jemalloc/src/extent.c:1398`): the
@@ -904,7 +937,7 @@ fn test_c_struct_body_is_no_part_of_type_annotation() {
                 "anon",
                 NodeKind::Variable,
                 (0, 0, 0, 30),
-                true,
+                false,
                 Some("static struct")
             ),
             (
@@ -1003,4 +1036,298 @@ fn test_c_digit_separator_in_recovered_tree_keeps_later_global() {
         .map(|r| r.0)
         .collect();
     assert!(names.contains(&"after_global"), "{names:?}");
+}
+
+/// FU-2026-10-30-cb159240606e: a file-scope `static` variable is private to
+/// its translation unit like a `static` function, so neither is exported;
+/// a plain global, a prototype and an `extern` stay exported.
+#[test]
+fn test_c_static_variable_is_not_exported_like_static_function() {
+    let g = parse(
+        "linkage.c",
+        b"static int sv = 3;\nint gv;\nstatic int sf(void) { return sv; }\nint gf(void);\nextern int ev;\n",
+    );
+    let s = Some;
+    assert_eq!(
+        sorted_rows_of(&g, DECL_KINDS),
+        [
+            (
+                "sv",
+                NodeKind::Variable,
+                (0, 0, 0, 18),
+                false,
+                s("static int")
+            ),
+            ("gv", NodeKind::Variable, (1, 0, 1, 7), true, s("int")),
+            ("sf", NodeKind::Function, (2, 0, 2, 34), false, s("int")),
+            ("gf", NodeKind::Function, (3, 0, 3, 13), true, None),
+            (
+                "ev",
+                NodeKind::Variable,
+                (4, 0, 4, 14),
+                true,
+                s("extern int")
+            ),
+        ]
+    );
+}
+
+/// FU-2026-10-30-cb159240606e: lua spells its guards in lower case
+/// (`lapi_h`). A paired guard is neither a Macro node nor an import, and a
+/// lone guard-spelt `#define` is no import, in any case of the suffix.
+#[test]
+fn test_c_lowercase_include_guard_emits_no_macro_or_binding() {
+    let g = parse(
+        "lapi.c",
+        b"#ifndef lapi_h\n#define lapi_h\n#define LAPI_X 2\n#endif\n#define lstate_h\n",
+    );
+    assert_eq!(macro_names(&g), ["LAPI_X", "lstate_h"]);
+    assert_eq!(
+        import_rows(&g),
+        [binding("LAPI_X", "2", BindingKind::Constant)]
+    );
+}
+
+/// FU-2026-10-30-9adc33b1cf3e: one declaration gets one kind in a `.c`
+/// (C provider) and a `.h` (C++ provider). `const` on the object makes a
+/// Const (`T *const x[]`, `const int N`); `const T *p` points at constants
+/// and `p` stays a Variable.
+#[test]
+fn test_c_const_object_declarations_match_header_kinds() {
+    let src = b"const char *const names[] = {\"a\"};\nconst char *p;\nstatic const int N = 5;\nint *const q = 0;\n";
+    // `is_exported`: a `static` object has internal linkage in C and C++
+    // alike, so a `.h` file exports it no more than a `.c` file does.
+    let kinds = |g: &LocalGraph| -> Vec<(String, NodeKind, bool)> {
+        let mut rows: Vec<(String, NodeKind, bool)> = g
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.kind, NodeKind::Variable | NodeKind::Const))
+            .map(|n| (n.name.clone(), n.kind, n.is_exported))
+            .collect();
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        rows
+    };
+    let c = kinds(&parse("names.c", src));
+    let header = kinds(
+        &CppProvider::new()
+            .expect("CppProvider::new")
+            .parse_file(Path::new("names.h"), src)
+            .expect("parse_file"),
+    );
+    let expected = [
+        ("N".to_string(), NodeKind::Const, false),
+        ("names".to_string(), NodeKind::Const, true),
+        ("p".to_string(), NodeKind::Variable, true),
+        ("q".to_string(), NodeKind::Const, true),
+    ];
+    assert_eq!(c, expected);
+    assert_eq!(header, expected);
+}
+
+/// FU-2026-10-30-520106d77de4 (redis `module.c:15317`): `dictForEach(d,
+/// struct RedisModule, module, BODY)` declares `struct RedisModule *module`
+/// for `BODY`, so the call through its function-pointer field is a
+/// dynamic dispatch on `struct RedisModule`. Outside the macro call the
+/// name types nothing.
+#[test]
+fn test_c_macro_bound_struct_variable_types_dispatch_in_macro_body() {
+    let g = parse(
+        "module.c",
+        b"struct RedisModule { void (*defrag_start_cb)(int *ctx); };\nvoid moduleDefragStart(void) {\n    dictForEach(modules, struct RedisModule, module,\n        if (module->defrag_start_cb) {\n            module->defrag_start_cb(&ctx);\n        }\n    );\n}\nvoid plain(void) { module->defrag_start_cb(0); }\n",
+    );
+    let rows: Vec<(&str, u8, &str)> = call_meta_rows(&g)
+        .into_iter()
+        .map(|(caller, _, _, flags, ty)| (caller, flags, ty))
+        .collect();
+    assert_eq!(
+        rows,
+        [(
+            "moduleDefragStart",
+            CallMeta::FLAG_CALLBACK | CallMeta::FLAG_DYNAMIC_DISPATCH,
+            "struct RedisModule"
+        )]
+    );
+}
+
+/// FU-2026-10-30-03b1f2768b78 (jemalloc `prof_data.c:95-112`): an
+/// `rb_gen(...)` call with no `;` lets an ERROR swallow the next
+/// function's head and `{`, so its locals sit under the root. In a tree
+/// with errors the source's brace depth decides: they are no Variables.
+/// The functions around stay.
+#[test]
+fn test_c_locals_after_unterminated_macro_call_emit_no_variable() {
+    let g = parse(
+        "prof_data.c",
+        b"int before(int a) { return a; }\nrb_gen(static UNUSED, gctx_tree_, prof_gctx_tree_t, prof_gctx_t, dump_link,\n    prof_gctx_comp)\n    /* NOLINTEND(performance-no-int-to-ptr) */\n\n    static int prof_tdata_comp(const prof_tdata_t *a, const prof_tdata_t *b) {\n\tint      ret;\n\tuint64_t a_uid = a->thr_uid;\n\tret = (a_uid > 1);\n\treturn ret;\n}\nint after(int b) { return b; }\nint global_after;\n",
+    );
+    let s = Some;
+    assert_eq!(
+        sorted_rows_of(&g, &[NodeKind::Variable]),
+        [(
+            "global_after",
+            NodeKind::Variable,
+            (12, 0, 12, 17),
+            true,
+            s("int")
+        )]
+    );
+    let functions: Vec<&str> = rows_of(&g, &[NodeKind::Function])
+        .iter()
+        .map(|r| r.0)
+        .collect();
+    assert!(
+        functions.contains(&"before") && functions.contains(&"after"),
+        "{functions:?}"
+    );
+}
+
+/// FU-2026-10-30-03b1f2768b78 (jemalloc `test/unit/rb.c:1000`): after a
+/// `TEST_END` with no `;`, tree-sitter-c reads `TEST_END typedef` as one
+/// declaration and `rb_tree(node_t) tree_t;` as the next. The keyword
+/// makes the second a Typedef from `typedef` to its `;`, no Variable.
+#[test]
+fn test_c_typedef_split_by_preceding_macro_emits_typedef_not_variable() {
+    let g = parse(
+        "rb.c",
+        b"TEST_BEGIN(test_rb_update_search) {\n\trun(2);\n}\nTEST_END\n\ntypedef rb_tree(node_t) unsummarized_tree_t;\nrb_gen(static UNUSED, unsummarized_tree_, unsummarized_tree_t, node_t, link,\n    node_cmp);\n",
+    );
+    assert_eq!(
+        rows_of(&g, &[NodeKind::Typedef, NodeKind::Variable]),
+        [(
+            "unsummarized_tree_t",
+            NodeKind::Typedef,
+            (5, 0, 5, 44),
+            true,
+            None
+        )]
+    );
+    assert_eq!(
+        named_content_hash(&g, "unsummarized_tree_t"),
+        xxh3_64_bytes(b"typedef rb_tree(node_t) unsummarized_tree_t;")
+    );
+}
+
+/// FU-2026-10-30-03b1f2768b78 (jemalloc `jemalloc.c:35`): an attribute
+/// macro in a conditional between a global and its `;` leaves the
+/// declaration with a missing `;` and the `;` as an empty statement. The
+/// global is a Variable; the next global is unchanged.
+#[test]
+fn test_c_global_with_attribute_in_conditional_before_semicolon_emits_variable() {
+    let g = parse(
+        "jemalloc.c",
+        b"const char *je_malloc_conf\n#ifndef _WIN32\n    JEMALLOC_ATTR(weak)\n#endif\n        ;\nconst char *opt_symlink = NULL;\n",
+    );
+    let s = Some;
+    assert_eq!(
+        sorted_rows_of(&g, &[NodeKind::Variable, NodeKind::Const]),
+        [
+            (
+                "je_malloc_conf",
+                NodeKind::Variable,
+                (0, 0, 0, 26),
+                true,
+                s("const char *")
+            ),
+            (
+                "opt_symlink",
+                NodeKind::Variable,
+                (5, 0, 5, 31),
+                true,
+                s("const char *")
+            ),
+        ]
+    );
+}
+
+/// FU-2026-10-30-03b1f2768b78 (jemalloc `jemalloc.c:1210`): a prototype
+/// with a non-pointer return type and a trailing macro (`void
+/// __libc_free(void *ptr) PREALIAS(je_free);`) parses as an ERROR before
+/// an empty `;` statement. It is a Function like the pointer-returning
+/// one, spanning its `;`, with no type as a prototype has none.
+#[test]
+fn test_c_prototype_with_trailing_macro_emits_function() {
+    let g = parse(
+        "jemalloc.c",
+        b"#define PREALIAS(je_fn) ALIAS(je_fn)\nvoid *__libc_calloc(size_t n, size_t size) PREALIAS(je_calloc);\nvoid __libc_free(void *ptr) PREALIAS(je_free);\nint __posix_memalign(void **r, size_t a, size_t s) PREALIAS(je_posix_memalign);\n",
+    );
+    assert_eq!(
+        sorted_rows_of(&g, &[NodeKind::Function]),
+        [
+            (
+                "__libc_calloc",
+                NodeKind::Function,
+                (1, 0, 1, 63),
+                true,
+                None
+            ),
+            ("__libc_free", NodeKind::Function, (2, 0, 2, 46), true, None),
+            (
+                "__posix_memalign",
+                NodeKind::Function,
+                (3, 0, 3, 79),
+                true,
+                None
+            ),
+        ]
+    );
+}
+
+// ---- Review fixes (C/C++ batch A) ----
+
+/// The counterexample to FU-2026-10-30-520106d77de4's rule: a macro call's
+/// `struct A, b` pair declares no `b` when the function already binds `b`
+/// (the parameter in `f`, the earlier local in `g`), and declares nothing
+/// when no statement follows the pair (`h`, an expression-only macro). The
+/// dispatch type is the type the call really dispatches on.
+#[test]
+fn test_declare_macro_bound_vars_existing_binding_keeps_its_type() {
+    let g = parse(
+        "with_type.c",
+        b"#define WITH_TYPE(x, type, ptr, expr) (expr)\n#define LOOP(d, type, var, ...) do { __VA_ARGS__ } while (0)\nstruct A { void (*cb)(void); };\nstruct B { void (*cb)(void); };\nvoid f(struct B *b) { WITH_TYPE(0, struct A, b, b->cb()); }\nvoid g(void) {\n    struct B *b = 0;\n    LOOP(d, struct A, b, b->cb(););\n}\nvoid h(void) { WITH_TYPE(0, struct A, a, a->cb()); }\n",
+    );
+    let rows: Vec<(&str, u8, &str)> = call_meta_rows(&g)
+        .into_iter()
+        .map(|(caller, _, _, flags, ty)| (caller, flags, ty))
+        .collect();
+    let dynamic = CallMeta::FLAG_CALLBACK | CallMeta::FLAG_DYNAMIC_DISPATCH;
+    assert_eq!(
+        rows,
+        [("f", dynamic, "struct B"), ("g", dynamic, "struct B")]
+    );
+}
+
+/// After a typedef cut short at an attribute, the tail declaration names
+/// the alias through its array or pointer declarator and past a qualifier
+/// (`float vec4[4]`, `T *tp`, `const T ct`). Each is a Typedef spanning
+/// both statements and an `Alias` binding whose source keeps the pointer
+/// stars; none is a Variable.
+#[test]
+fn test_c_attribute_typedef_tail_declarator_shapes_emit_typedef() {
+    let g = parse(
+        "vec.c",
+        b"typedef __attribute__((__aligned__(16))) float vec4[4];\ntypedef __attribute__((__aligned__(8))) T *tp;\ntypedef __attribute__((__aligned__(8))) const T ct;\n",
+    );
+    assert_eq!(
+        sorted_rows_of(&g, &[NodeKind::Typedef, NodeKind::Variable]),
+        [
+            ("vec4", NodeKind::Typedef, (0, 0, 0, 55), true, None),
+            ("tp", NodeKind::Typedef, (1, 0, 1, 46), true, None),
+            ("ct", NodeKind::Typedef, (2, 0, 2, 51), true, None),
+        ]
+    );
+    let aliases: Vec<(&str, &str)> = import_rows(&g).iter().map(|r| (r.1, r.0)).collect();
+    assert_eq!(aliases, [("vec4", "float"), ("tp", "T *"), ("ct", "T")]);
+}
+
+/// The C binding filter and the preprocessor guard detection read one
+/// guard spelling: `_HXX` / `_HH` endings and a trailing `_` are guard
+/// names, so a guard-spelt `#define` binds no name. A real constant stays.
+#[test]
+fn test_is_include_guard_hxx_hh_and_trailing_underscore_emit_no_binding() {
+    let g = parse(
+        "guards.c",
+        b"#define FOO_HXX\n#define BAR_HH 1\n#define BAZ_H_\n#define LIMIT 4096\n",
+    );
+    let names: Vec<&str> = import_rows(&g).iter().map(|r| r.1).collect();
+    assert_eq!(names, ["LIMIT"]);
 }

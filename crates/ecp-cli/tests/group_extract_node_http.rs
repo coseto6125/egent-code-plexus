@@ -31,3 +31,44 @@ fn node_non_route_calls_ignored() {
     let contracts = extract_http(Path::new("x.ts"), source);
     assert!(contracts.is_empty());
 }
+
+const JSX_ROUTES: &str = "export function Page() {\n  return (\n    <div>\n      <button onClick={() => fetch(\"/api/a\")}>Load</button>\n      <Form onSubmit={(d) => axios.post(\"/api/b\", d)} />\n      <i onClick={() => axios.get(\"/api/c\")}>it's</i>\n    </div>\n  );\n}\n";
+
+fn sorted_ids(path: &str, source: &str) -> Vec<String> {
+    let mut ids: Vec<String> = extract_http(Path::new(path), source.as_bytes())
+        .into_iter()
+        .map(|c| c.contract_id)
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// Client calls written inside JSX attributes (`onClick={() => fetch(..)}`)
+/// are found in a `.tsx` / `.jsx` file. On the TypeScript grammar only
+/// `fetch("/api/a")` was lost; the TSX grammar finds all three.
+#[test]
+fn node_jsx_files_extract_clients_inside_jsx_attributes() {
+    let want = ["http:GET:/api/a", "http:GET:/api/c", "http:POST:/api/b"];
+    assert_eq!(sorted_ids("Page.tsx", JSX_ROUTES), want);
+    assert_eq!(sorted_ids("Page.jsx", JSX_ROUTES), want);
+}
+
+/// The grammar comes from the file's route, so a nested directory, a
+/// JavaScript extension and a Windows separator choose like the bare name.
+#[test]
+fn node_grammar_follows_the_route_for_nested_and_javascript_paths() {
+    let want = ["http:GET:/api/a", "http:GET:/api/c", "http:POST:/api/b"];
+    for path in ["src/ui/Page.js", "src\\ui\\Page.jsx", "lib/Page.mjs"] {
+        assert_eq!(sorted_ids(path, JSX_ROUTES), want, "{path}");
+    }
+}
+
+/// Guard: a `.ts` file keeps the TypeScript grammar, where `<T>x` is a type
+/// assertion, and still extracts its routes; empty input extracts nothing.
+#[test]
+fn node_plain_ts_with_type_assertion_still_extracts() {
+    let src = "const v = <string>raw;\napp.get(\"/api/a\", ha);\n";
+    assert_eq!(sorted_ids("server.ts", src), ["http:GET:/api/a"]);
+    assert!(sorted_ids("empty.tsx", "").is_empty());
+    assert!(sorted_ids("empty.ts", "").is_empty());
+}

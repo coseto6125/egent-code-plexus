@@ -68,8 +68,9 @@ fn var_with_qualifiers() {
     // Documented convention: the full declaration prefix is kept, so
     // `static const int N = 5;` → `"static const int"`. Consumers wanting
     // only the bare type can strip storage-class words downstream.
+    // `const` on the object makes `N` a Const (FU 9adc33b1cf3e).
     let nodes = parse("static const int N = 5;\n");
-    let v = find(&nodes, "N", NodeKind::Variable);
+    let v = find(&nodes, "N", NodeKind::Const);
     let annot = v.type_annotation.as_deref().unwrap_or("");
     assert!(
         annot.contains("int"),

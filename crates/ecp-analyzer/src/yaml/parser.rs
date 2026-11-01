@@ -22,7 +22,7 @@ impl YamlProvider {
 
 impl LanguageProvider for YamlProvider {
     fn name(&self) -> &'static str {
-        "YAML"
+        "yaml"
     }
 
     fn parse_file(&self, path: &Path, source: &[u8]) -> anyhow::Result<LocalGraph> {
