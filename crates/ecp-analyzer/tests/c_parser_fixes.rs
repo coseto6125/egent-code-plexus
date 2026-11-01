@@ -1095,12 +1095,14 @@ fn test_c_lowercase_include_guard_emits_no_macro_or_binding() {
 #[test]
 fn test_c_const_object_declarations_match_header_kinds() {
     let src = b"const char *const names[] = {\"a\"};\nconst char *p;\nstatic const int N = 5;\nint *const q = 0;\n";
-    let kinds = |g: &LocalGraph| -> Vec<(String, NodeKind)> {
-        let mut rows: Vec<(String, NodeKind)> = g
+    // `is_exported`: a `static` object has internal linkage in C and C++
+    // alike, so a `.h` file exports it no more than a `.c` file does.
+    let kinds = |g: &LocalGraph| -> Vec<(String, NodeKind, bool)> {
+        let mut rows: Vec<(String, NodeKind, bool)> = g
             .nodes
             .iter()
             .filter(|n| matches!(n.kind, NodeKind::Variable | NodeKind::Const))
-            .map(|n| (n.name.clone(), n.kind))
+            .map(|n| (n.name.clone(), n.kind, n.is_exported))
             .collect();
         rows.sort_by(|a, b| a.0.cmp(&b.0));
         rows
@@ -1113,10 +1115,10 @@ fn test_c_const_object_declarations_match_header_kinds() {
             .expect("parse_file"),
     );
     let expected = [
-        ("N".to_string(), NodeKind::Const),
-        ("names".to_string(), NodeKind::Const),
-        ("p".to_string(), NodeKind::Variable),
-        ("q".to_string(), NodeKind::Const),
+        ("N".to_string(), NodeKind::Const, false),
+        ("names".to_string(), NodeKind::Const, true),
+        ("p".to_string(), NodeKind::Variable, true),
+        ("q".to_string(), NodeKind::Const, true),
     ];
     assert_eq!(c, expected);
     assert_eq!(header, expected);
@@ -1268,4 +1270,64 @@ fn test_c_prototype_with_trailing_macro_emits_function() {
             ),
         ]
     );
+}
+
+// ---- Review fixes (C/C++ batch A) ----
+
+/// The counterexample to FU-2026-10-30-520106d77de4's rule: a macro call's
+/// `struct A, b` pair declares no `b` when the function already binds `b`
+/// (the parameter in `f`, the earlier local in `g`), and declares nothing
+/// when no statement follows the pair (`h`, an expression-only macro). The
+/// dispatch type is the type the call really dispatches on.
+#[test]
+fn test_declare_macro_bound_vars_existing_binding_keeps_its_type() {
+    let g = parse(
+        "with_type.c",
+        b"#define WITH_TYPE(x, type, ptr, expr) (expr)\n#define LOOP(d, type, var, ...) do { __VA_ARGS__ } while (0)\nstruct A { void (*cb)(void); };\nstruct B { void (*cb)(void); };\nvoid f(struct B *b) { WITH_TYPE(0, struct A, b, b->cb()); }\nvoid g(void) {\n    struct B *b = 0;\n    LOOP(d, struct A, b, b->cb(););\n}\nvoid h(void) { WITH_TYPE(0, struct A, a, a->cb()); }\n",
+    );
+    let rows: Vec<(&str, u8, &str)> = call_meta_rows(&g)
+        .into_iter()
+        .map(|(caller, _, _, flags, ty)| (caller, flags, ty))
+        .collect();
+    let dynamic = CallMeta::FLAG_CALLBACK | CallMeta::FLAG_DYNAMIC_DISPATCH;
+    assert_eq!(
+        rows,
+        [("f", dynamic, "struct B"), ("g", dynamic, "struct B")]
+    );
+}
+
+/// After a typedef cut short at an attribute, the tail declaration names
+/// the alias through its array or pointer declarator and past a qualifier
+/// (`float vec4[4]`, `T *tp`, `const T ct`). Each is a Typedef spanning
+/// both statements and an `Alias` binding whose source keeps the pointer
+/// stars; none is a Variable.
+#[test]
+fn test_c_attribute_typedef_tail_declarator_shapes_emit_typedef() {
+    let g = parse(
+        "vec.c",
+        b"typedef __attribute__((__aligned__(16))) float vec4[4];\ntypedef __attribute__((__aligned__(8))) T *tp;\ntypedef __attribute__((__aligned__(8))) const T ct;\n",
+    );
+    assert_eq!(
+        sorted_rows_of(&g, &[NodeKind::Typedef, NodeKind::Variable]),
+        [
+            ("vec4", NodeKind::Typedef, (0, 0, 0, 55), true, None),
+            ("tp", NodeKind::Typedef, (1, 0, 1, 46), true, None),
+            ("ct", NodeKind::Typedef, (2, 0, 2, 51), true, None),
+        ]
+    );
+    let aliases: Vec<(&str, &str)> = import_rows(&g).iter().map(|r| (r.1, r.0)).collect();
+    assert_eq!(aliases, [("vec4", "float"), ("tp", "T *"), ("ct", "T")]);
+}
+
+/// The C binding filter and the preprocessor guard detection read one
+/// guard spelling: `_HXX` / `_HH` endings and a trailing `_` are guard
+/// names, so a guard-spelt `#define` binds no name. A real constant stays.
+#[test]
+fn test_is_include_guard_hxx_hh_and_trailing_underscore_emit_no_binding() {
+    let g = parse(
+        "guards.c",
+        b"#define FOO_HXX\n#define BAR_HH 1\n#define BAZ_H_\n#define LIMIT 4096\n",
+    );
+    let names: Vec<&str> = import_rows(&g).iter().map(|r| r.1).collect();
+    assert_eq!(names, ["LIMIT"]);
 }

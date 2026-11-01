@@ -4,8 +4,9 @@ use super::receiver_types::{
 use super::recovery::{prepare_source, reduce_type_name, stamp_lexical_owners};
 use super::spec::CppSpec;
 use crate::c::parser::{
-    declarator_type, declared_variable, emit_macro_fallback, is_const_qualified, is_cut_typedef,
-    is_typedef_tail, macro_typedef_tail, nearest_pointer, typedef_alias,
+    declarator_type, declared_variable, emit_macro_fallback, has_missing, has_static_specifier,
+    is_const_qualified, is_cut_typedef, is_typedef_tail, macro_typedef_tail, nearest_pointer,
+    typedef_alias,
 };
 use crate::calls::{NameRefKind, NameRefSpec, VariantRefSpec};
 use crate::driver::imports::{self, ImportOrder};
@@ -318,10 +319,7 @@ impl CppFile {
         if !self.at_source_file_scope(tree, decl, source) {
             return false;
         }
-        let is_void = decl
-            .child_by_field_name("type")
-            .is_some_and(|t| t.kind() == "primitive_type" && t.utf8_text(source) == Ok("void"));
-        if is_void && nearest_pointer(decl, name).is_none() {
+        if has_void_type(decl, source) && nearest_pointer(decl, name).is_none() {
             return false;
         }
         let direct_init = name
@@ -356,23 +354,32 @@ impl CppFile {
     }
 }
 
-/// Whether `node` has a missing `kind` token, which error recovery inserted.
-fn has_missing(node: Node<'_>, kind: &str) -> bool {
-    let mut cursor = node.walk();
-    let found = node
-        .children(&mut cursor)
-        .any(|c| c.is_missing() && c.kind() == kind);
-    found
+/// Whether the `declaration` `decl` has type `void`.
+fn has_void_type(decl: Node<'_>, source: &[u8]) -> bool {
+    decl.child_by_field_name("type")
+        .is_some_and(|t| t.kind() == "primitive_type" && t.utf8_text(source) == Ok("void"))
 }
 
-/// The name and last node of a function that tree-sitter-cpp read as a
-/// variable `T name(args)` with a direct initialisation, where `name` is
-/// the one declarator of the `declaration` `decl`:
+/// A function that tree-sitter-cpp read as a variable: see
+/// [`misread_function`].
+struct MisreadFunction<'t> {
+    name: Node<'t>,
+    end: Node<'t>,
+    /// The node that holds the return type, when the source shows it.
+    return_type: Option<Node<'t>>,
+}
+
+/// The function that tree-sitter-cpp read as a variable `T name(args)` with
+/// a direct initialisation, where `declarator` is the one declarator of the
+/// `declaration` `decl`:
 /// - A definition whose parameters do not parse (`XXH_FORCE_INLINE void` /
 ///   `f(xxh_u64* XXH_RESTRICT acc)` / `{ ... }`): the `;` is missing and the
 ///   body is the next statement. A return type after a macro reads as a
 ///   scope whose `::` is missing (`XXH_FORCE_INLINE XXH_errorcode` /
-///   `XXH3_update(...)`): the name is the part after it.
+///   `XXH3_update(...)`): the name is the part after it, the return type
+///   the scope. Otherwise the declaration's type is the return type only
+///   when nothing sits between it and the name: `XXH_FORCE_INLINE` /
+///   ERROR(`void`) / `f` shows the macro there, never the type.
 /// - A prototype of type `void` (`void f(T *p, void (*cb)(T *p));`): no
 ///   object has type `void`.
 ///
@@ -381,37 +388,76 @@ fn misread_function<'t>(
     decl: Node<'t>,
     declarator: Node<'t>,
     source: &[u8],
-) -> Option<(Node<'t>, Node<'t>)> {
-    let init = declarator
-        .parent()
-        .filter(|p| p.kind() == "init_declarator" && p.parent() == Some(decl))?;
-    init.child_by_field_name("value")
-        .filter(|v| v.kind() == "argument_list")?;
+) -> Option<MisreadFunction<'t>> {
+    // Down from `decl`: `parent()` walks from the root on every call.
     let mut cursor = decl.walk();
-    if decl
-        .children_by_field_name("declarator", &mut cursor)
-        .count()
-        != 1
-    {
+    let mut declarators = decl.children_by_field_name("declarator", &mut cursor);
+    let init = declarators
+        .next()
+        .filter(|d| d.kind() == "init_declarator")?;
+    if declarators.next().is_some() {
         return None;
     }
-    let name = match declarator.kind() {
-        "identifier" => declarator,
-        "qualified_identifier" if has_missing(declarator, "::") => declarator
-            .child_by_field_name("name")
-            .filter(|n| n.kind() == "identifier")?,
+    init.child_by_field_name("declarator")
+        .filter(|d| d.id() == declarator.id())?;
+    init.child_by_field_name("value")
+        .filter(|v| v.kind() == "argument_list")?;
+    let decl_type = decl.child_by_field_name("type");
+    let (name, return_type) = match declarator.kind() {
+        "identifier" => {
+            let adjacent = decl_type.filter(|t| {
+                source
+                    .get(t.end_byte()..init.start_byte())
+                    .is_some_and(|gap| gap.trim_ascii().is_empty())
+            });
+            (declarator, adjacent)
+        }
+        "qualified_identifier" if has_missing(declarator, "::") => (
+            declarator
+                .child_by_field_name("name")
+                .filter(|n| n.kind() == "identifier")?,
+            declarator.child_by_field_name("scope"),
+        ),
         _ => return None,
     };
     let body = decl
         .next_named_sibling()
         .filter(|b| b.kind() == "compound_statement" && has_missing(decl, ";"));
-    if let Some(body) = body {
-        return Some((name, body));
+    let end = match body {
+        Some(body) => body,
+        None if has_void_type(decl, source) && name.id() == declarator.id() => decl,
+        None => return None,
+    };
+    Some(MisreadFunction {
+        name,
+        end,
+        return_type,
+    })
+}
+
+/// Whether every error in the `declaration` `decl` sits in the body of the
+/// class its type defines (`static class D : B { <a member that does not
+/// parse> } d;`, doctest.h:6799): the declarator after the body parsed.
+fn error_only_in_class_body(decl: Node<'_>) -> bool {
+    fn clean_but(node: Node<'_>, inner: Node<'_>) -> bool {
+        let mut cursor = node.walk();
+        let clean = node
+            .children(&mut cursor)
+            .all(|c| c.id() == inner.id() || !c.has_error());
+        clean
     }
-    let is_void = decl
-        .child_by_field_name("type")
-        .is_some_and(|t| t.kind() == "primitive_type" && t.utf8_text(source) == Ok("void"));
-    (is_void && name.id() == declarator.id()).then_some((name, decl))
+    let Some(class) = decl.child_by_field_name("type").filter(|t| {
+        matches!(
+            t.kind(),
+            "class_specifier" | "struct_specifier" | "union_specifier"
+        )
+    }) else {
+        return false;
+    };
+    let Some(body) = class.child_by_field_name("body") else {
+        return false;
+    };
+    clean_but(decl, class) && clean_but(class, body)
 }
 
 /// `Some(namespace)` when `decl` sits at file scope: its parent chain up to
@@ -767,59 +813,64 @@ impl ParseSpec for CppSpec {
         // A function that tree-sitter-cpp reads as a direct-init variable
         // (`MACRO T f(args)` + body, `void f(T *p);`) is a Function, never
         // a Variable: see `misread_function`.
-        let misread = var_root.zip(var_name).and_then(|(decl, declarator)| {
-            Some((decl, misread_function(decl, declarator, source)?))
+        //
+        // The cheap tree walk (`file_scope_namespace`) first: a local
+        // declaration never reaches the sibling walks and the source scans
+        // after it.
+        //
+        // A declaration whose only error is in the body of the class it
+        // defines still declares its variable: see `error_only_in_class_body`.
+        let at_namespace = var_root.zip(var_name).and_then(|(decl, declarator)| {
+            Some((decl, declarator, file_scope_namespace(decl, source)?))
         });
-        if let Some((decl, (name, end))) = misread {
-            let at_file_scope = file_scope_namespace(decl, source).is_some()
-                && f.at_source_file_scope(cx.tree, decl, source);
-            let name_str = name.utf8_text(source).unwrap_or_default();
-            if at_file_scope && !is_cpp_reserved_keyword(name_str) && !f.is_macro(source, name_str)
-            {
-                cx.nodes.push(RawNode {
-                    decorators: crate::framework_helpers::collect_cpp_attributes(decl, source),
-                    is_exported: f.is_header,
-                    type_annotation: decl
-                        .child_by_field_name("type")
-                        .and_then(|t| t.utf8_text(source).ok())
-                        .map(|t| t.trim().to_string()),
-                    ..node::decl(
-                        name_str.to_string(),
-                        NodeKind::Function,
-                        node::span_from(decl, end),
-                        &source[decl.start_byte()..end.end_byte()],
-                    )
-                });
-            }
-        } else if let (Some(v_root), Some(v_name)) =
-            (var_root, var_name.and_then(declared_variable))
-        {
-            if let Ok(name_str) =
-                std::str::from_utf8(&source[v_name.start_byte()..v_name.end_byte()])
-            {
-                // The cheap tree walk first: a local declaration never reaches
-                // the source scans `declares_variable` may run.
-                let namespace = (!v_root.has_error()
+        if let Some((decl, declarator, namespace)) = at_namespace {
+            if let Some(misread) = misread_function(decl, declarator, source) {
+                let name_str = misread.name.utf8_text(source).unwrap_or_default();
+                if f.at_source_file_scope(cx.tree, decl, source)
                     && !is_cpp_reserved_keyword(name_str)
-                    && !is_typedef_tail(v_root))
-                .then(|| file_scope_namespace(v_root, source))
-                .flatten()
-                .filter(|_| f.declares_variable(cx.tree, v_root, v_name, name_str, source));
-                if let Some(namespace) = namespace {
-                    let kind = if is_const_qualified(v_root, v_name, source) {
+                    && !f.is_macro(source, name_str)
+                {
+                    let return_type = misread
+                        .return_type
+                        .and_then(|t| t.utf8_text(source).ok())
+                        .map(|t| t.trim().to_string())
+                        .filter(|t| !f.is_macro(source, t));
+                    cx.nodes.push(RawNode {
+                        decorators: crate::framework_helpers::collect_cpp_attributes(decl, source),
+                        is_exported: f.is_header,
+                        type_annotation: return_type,
+                        ..node::decl(
+                            name_str.to_string(),
+                            NodeKind::Function,
+                            node::span_from(decl, misread.end),
+                            &source[decl.start_byte()..misread.end.end_byte()],
+                        )
+                    });
+                }
+            } else if let Some(v_name) = declared_variable(declarator) {
+                let name_str =
+                    std::str::from_utf8(&source[v_name.start_byte()..v_name.end_byte()]).ok();
+                let declares = name_str.filter(|name_str| {
+                    (!decl.has_error() || error_only_in_class_body(decl))
+                        && !is_cpp_reserved_keyword(name_str)
+                        && !is_typedef_tail(decl)
+                        && f.declares_variable(cx.tree, decl, v_name, name_str, source)
+                });
+                if let Some(name_str) = declares {
+                    let kind = if is_const_qualified(decl, v_name, source) {
                         NodeKind::Const
                     } else {
                         NodeKind::Variable
                     };
                     cx.nodes.push(RawNode {
-                        is_exported: f.is_header,
-                        type_annotation: declarator_type(v_root, v_name, source),
+                        is_exported: f.is_header && !has_static_specifier(decl, source),
+                        type_annotation: declarator_type(decl, v_name, source),
                         owner_class: namespace,
                         ..node::decl(
                             name_str.to_string(),
                             kind,
-                            node::span(v_root),
-                            &source[v_root.start_byte()..v_root.end_byte()],
+                            node::span(decl),
+                            &source[decl.start_byte()..decl.end_byte()],
                         )
                     });
                 }
@@ -890,10 +941,10 @@ impl ParseSpec for CppSpec {
 
                 // C++ has no reserved constructor name; the convention is that a
                 // method whose name equals its enclosing class name is a constructor.
-                // Inline ctors are already Method (via `is_inline_class_member`);
-                // out-of-line `Foo::Foo()` captures the unqualified `Foo` as @name.method.
-                // Post-process: collect Class/Struct names, then promote any Method
-                // whose name appears in that set to Constructor.
+                // An out-of-line `Foo::Foo()` is a Constructor at emit, from its
+                // qualifier. An inline ctor is a Method (via `is_inline_class_member`)
+                // with no qualifier: collect Class/Struct names, then promote any
+                // Method whose name appears in that set to Constructor.
                 // Why: parser has no per-node enclosing-class context at emit time;
                 // file-scope name matching is the cheapest approximation that works
                 // for the common single-class-per-file and multi-class-per-file cases.

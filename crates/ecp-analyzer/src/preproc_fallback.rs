@@ -278,26 +278,25 @@ fn guarded_name(word: &[u8], rest: &[u8]) -> Option<Vec<u8>> {
 fn defines_guard(rest: &[u8], name: &[u8]) -> Option<bool> {
     let def = strip_comments(rest);
     let (ident, value) = split_ident(&def)?;
-    let keep = ident.iter().rposition(|&b| b != b'_').map_or(0, |i| i + 1);
-    let trimmed = &ident[..keep];
-    let header_like = [
-        &b"_H"[..],
-        b"_HPP",
-        b"_HXX",
-        b"_HH",
-        b"_GUARD",
-        b"_INCLUDED",
-    ]
-    .iter()
-    .any(|suffix| ends_with_ignore_case(trimmed, suffix));
     let value = value.trim_ascii();
-    (ident == name && header_like && matches!(value, b"" | b"1")).then_some(value == b"1")
+    (ident == name && is_guard_spelling(ident) && matches!(value, b"" | b"1"))
+        .then_some(value == b"1")
 }
 
-/// Whether `text` ends with `suffix`, ASCII case ignored: lua spells its
-/// guards `lapi_h`.
-pub(crate) fn ends_with_ignore_case(text: &[u8], suffix: &[u8]) -> bool {
-    text.len() >= suffix.len() && text[text.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+/// The endings of a name spelt like a header guard.
+const GUARD_SUFFIXES: &[&[u8]] = &[b"_H", b"_HPP", b"_HXX", b"_HH", b"_GUARD", b"_INCLUDED"];
+
+/// Whether `name`, trailing `_`s cut, ends with one of [`GUARD_SUFFIXES`]
+/// in any ASCII case: lua spells its guards `lapi_h`, others `FOO_H_`.
+pub(crate) fn is_guard_spelling(name: &[u8]) -> bool {
+    let keep = name.iter().rposition(|&b| b != b'_').map_or(0, |i| i + 1);
+    let trimmed = &name[..keep];
+    GUARD_SUFFIXES.iter().any(|suffix| {
+        trimmed
+            .len()
+            .checked_sub(suffix.len())
+            .is_some_and(|at| trimmed[at..].eq_ignore_ascii_case(suffix))
+    })
 }
 
 /// The word after a directive's `#`, and the offset of the text after it.
@@ -538,16 +537,7 @@ fn define_hits(source: &[u8], lines: &[SrcLine]) -> Vec<MacroHit> {
 /// the `#` when a real directive opens on the line, never one inside a
 /// comment, a literal or a spliced line.
 pub(crate) fn directive_lines(source: &[u8]) -> Vec<(usize, usize, Option<&[u8]>)> {
-    scan_lines(source)
-        .0
-        .iter()
-        .map(|line| {
-            let word = line
-                .directive
-                .map(|after_hash| directive_word(source, line, after_hash).0);
-            (line.start, line.end, word)
-        })
-        .collect()
+    Preproc::default().directive_lines(source)
 }
 
 /// The text facts of one C/C++ source, each read on first use and kept for
@@ -580,6 +570,24 @@ impl Preproc {
     /// The brace depth at byte `offset`; 0 is file scope.
     pub fn depth_at(&mut self, source: &[u8], offset: usize) -> i32 {
         depth_at(self.depths(source), offset)
+    }
+
+    /// The lines of `source` as [`directive_lines`] gives them, from this
+    /// source's one scan.
+    pub(crate) fn directive_lines<'s>(
+        &mut self,
+        source: &'s [u8],
+    ) -> Vec<(usize, usize, Option<&'s [u8]>)> {
+        let (lines, _) = self.scan.get_or_insert_with(|| scan_lines(source));
+        lines
+            .iter()
+            .map(|line| {
+                let word = line
+                    .directive
+                    .map(|after_hash| directive_word(source, line, after_hash).0);
+                (line.start, line.end, word)
+            })
+            .collect()
     }
 
     pub fn macros(&mut self, source: &[u8]) -> &[MacroHit] {

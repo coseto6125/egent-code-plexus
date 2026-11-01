@@ -219,21 +219,25 @@ fn c_callee_name(call: Node<'_>, source: &[u8], methods: &CReceiverMap) -> Optio
 }
 
 /// Declare in `vars` each variable a statement-like macro call binds with a
-/// tagged type argument and the whole argument after it:
+/// tagged type argument, a name, and statements after them:
 /// `dictForEach(d, struct RedisModule, module, BODY)` runs `BODY` with
 /// `struct RedisModule *module` (redis `module.c:15317`). No expression is
 /// a `struct T`, so the pair is the macro's declaration. It is visible from
-/// the name to the end of the call; `container_of(p, struct T, member)`
-/// names `member` last, so nothing reads it. tree-sitter-c wraps the
-/// keyword or the tag in an ERROR, so the tokens are read flat.
+/// the name to the end of the call. A call whose later arguments are all
+/// expressions declares nothing (`container_of(p, struct T, member)`,
+/// `WITH_TYPE(struct A, b, b->cb())`), and neither does a name the
+/// enclosing function already binds: the macro may only read it.
+/// tree-sitter-c wraps the keyword or the tag in an ERROR, so the tokens
+/// are read flat.
 pub fn declare_macro_bound_vars(root: Node<'_>, source: &[u8], vars: &mut FnPtrVars) {
+    // Every ancestor of an error has an error, so the walk stays on them.
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
-        if n.kind() == "argument_list" && n.has_error() {
+        if n.kind() == "argument_list" {
             declare_in_arguments(n, source, vars);
         }
         let mut c = n.walk();
-        stack.extend(n.children(&mut c));
+        stack.extend(n.children(&mut c).filter(Node::has_error));
     }
 }
 
@@ -251,19 +255,79 @@ fn declare_in_arguments(args: Node<'_>, source: &[u8], vars: &mut FnPtrVars) {
     let text = |n: Node<'_>| n.utf8_text(source).unwrap_or_default();
     let ident = |n: Node<'_>| n.kind() == "identifier";
     let (_, scope_end) = node_range(args);
-    for w in tokens.windows(5) {
+    for (i, w) in tokens.windows(5).enumerate() {
         let tag = text(w[0]);
-        if matches!(tag, "struct" | "union" | "enum")
+        let bound = matches!(tag, "struct" | "union" | "enum")
             && ident(w[1])
             && text(w[2]) == ","
             && ident(w[3])
-            && matches!(text(w[4]), "," | ")")
-        {
+            && text(w[4]) == ","
+            && tokens[i + 5..].iter().any(|&t| holds_statement(t))
+            && !function_binds(w[3], text(w[3]), source);
+        if bound {
             vars.declare(
                 text(w[3]).to_string(),
                 (start_pos(w[3]), scope_end),
                 Some(format!("{tag} {}", text(w[1]))),
             );
+        }
+    }
+}
+
+/// Whether the macro-argument token `n` is or, through ERROR nodes, holds a
+/// statement, which no expression argument is.
+fn holds_statement(n: Node<'_>) -> bool {
+    let kind = n.kind();
+    if kind.ends_with("_statement")
+        || matches!(
+            kind,
+            "declaration" | ";" | "{" | "if" | "for" | "while" | "do" | "switch" | "return"
+        )
+    {
+        return true;
+    }
+    let mut c = n.walk();
+    let found = kind == "ERROR" && n.children(&mut c).any(holds_statement);
+    found
+}
+
+/// Whether the function around `at` binds `name` before it: a parameter,
+/// or a local declared earlier.
+fn function_binds(at: Node<'_>, name: &str, source: &[u8]) -> bool {
+    let Some(function) = std::iter::successors(at.parent(), |n| n.parent())
+        .find(|n| n.kind() == "function_definition")
+    else {
+        return false;
+    };
+    let mut stack: Vec<Node<'_>> = vec![function];
+    while let Some(n) = stack.pop() {
+        if matches!(n.kind(), "declaration" | "parameter_declaration") {
+            let mut c = n.walk();
+            let binds = n
+                .children_by_field_name("declarator", &mut c)
+                .filter_map(bound_name)
+                .any(|id| id.utf8_text(source) == Ok(name));
+            if binds {
+                return true;
+            }
+        }
+        let mut c = n.walk();
+        stack.extend(
+            n.children(&mut c)
+                .filter(|child| child.start_byte() < at.start_byte()),
+        );
+    }
+    false
+}
+
+/// The identifier a declarator binds, through pointer, array, function,
+/// parenthesized and init declarators.
+fn bound_name(mut d: Node<'_>) -> Option<Node<'_>> {
+    loop {
+        match d.kind() {
+            "identifier" => return Some(d),
+            "parenthesized_declarator" => d = d.named_child(0)?,
+            _ => d = d.child_by_field_name("declarator")?,
         }
     }
 }

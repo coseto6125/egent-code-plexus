@@ -1084,6 +1084,12 @@ fn test_cpp_lowercase_include_guard_emits_no_macro_node() {
 /// look like constructor arguments, tree-sitter-cpp reads a function as a
 /// direct-init variable. A body after it, or a `void` type, makes it a
 /// Function that keeps its calls; a non-void direct init stays a Variable.
+///
+/// The type column is the function's return type, which the graph builder
+/// turns into an Accesses edge: the leading macro is no type. A return type
+/// read as the missing-`::` scope (`XXH_errorcode`) is the type; `void`
+/// behind the macro (xxhash.h:6228 `XXH_FORCE_INLINE void
+/// XXH3_hashLong_internal_loop`) sits in an ERROR, so the type is unknown.
 #[test]
 fn test_cpp_function_misread_as_direct_init_emits_function() {
     let g = parse(
@@ -1099,14 +1105,14 @@ fn test_cpp_function_misread_as_direct_init_emits_function() {
                 NodeKind::Function,
                 (0, 0, 6, 1),
                 None,
-                s("XXH_FORCE_INLINE")
+                None
             ),
             (
                 "XXH3_update",
                 NodeKind::Function,
                 (8, 0, 12, 1),
                 None,
-                s("XXH_FORCE_INLINE")
+                s("XXH_errorcode")
             ),
             (
                 "replDataBufReadFromConn",
@@ -1268,5 +1274,76 @@ fn test_cpp_function_after_unterminated_class_excludes_class_head() {
     assert_eq!(
         named(&g, "set_end").content_hash,
         xxh3_64_bytes(b"void set_end() noexcept\n{\n    finish();\n}")
+    );
+}
+
+// ---- Review fixes (C/C++ batch A) ----
+
+/// jemalloc `bit_util.h:241` (`DO_POPCOUNT(bitmap, unsigned);`): a call of
+/// a function-like macro with a type argument inside a function body is a
+/// statement the body keeps, not a head that swallows the file. A
+/// functional cast (`int(v.size())`) is an expression and holds no type.
+/// `calls` lists the call sites the body's source holds.
+#[test]
+fn test_cpp_macro_call_with_type_argument_in_body_keeps_call_sites() {
+    let g = parse(
+        "bit_util.h",
+        b"#define CHECK(x) assert(x)\n#define DO_POPCOUNT(x, type) do { type t = x; } while (0)\nvoid f(std::vector<int>& v) {\n    CHECK(int(v.size()) > 0);\n}\nunsigned popcount_u_slow(unsigned bitmap) {\n    DO_POPCOUNT(bitmap, unsigned);\n}\n",
+    );
+    let f_calls = &named(&g, "f").calls;
+    assert!(f_calls.iter().any(|c| c.ends_with("size")), "{f_calls:?}");
+    let popcount = &named(&g, "popcount_u_slow").calls;
+    assert!(popcount.iter().any(|c| c == "DO_POPCOUNT"), "{popcount:?}");
+}
+
+/// The C++ side of `test_c_attribute_typedef_tail_declarator_shapes_emit_typedef`:
+/// after a typedef cut short at an attribute, the tail declaration names
+/// the alias through its array or pointer declarator and past a qualifier.
+/// Each is a Typedef spanning both statements, and none is a Variable.
+#[test]
+fn test_cpp_attribute_typedef_tail_declarator_shapes_emit_typedef() {
+    let g = parse(
+        "vec.h",
+        b"typedef __attribute__((__aligned__(16))) float vec4[4];\ntypedef __attribute__((__aligned__(8))) T *tp;\ntypedef __attribute__((__aligned__(8))) const T ct;\n",
+    );
+    assert_eq!(
+        rows_of_kinds(&g, &[NodeKind::Typedef, NodeKind::Variable]),
+        [
+            ("vec4", NodeKind::Typedef, (0, 0, 0, 55), None, None),
+            ("tp", NodeKind::Typedef, (1, 0, 1, 46), None, None),
+            ("ct", NodeKind::Typedef, (2, 0, 2, 51), None, None),
+        ]
+    );
+}
+
+/// FU-2026-10-30-59be3b506694 (doctest.h:6799): a member that does not
+/// parse (`override DOCTEST_NOEXCEPT_MACRO`) puts an error in the class
+/// body, and the declarator after the body still declares a Variable. An
+/// error outside the body (`broken = ;`) declares none.
+#[test]
+fn test_cpp_class_body_error_declaration_emits_variable() {
+    let g = parse(
+        "doctest.cpp",
+        b"static class DiscardOStream : public std::ostream\n{\npublic:\n    std::streamsize xsputn(const char_type*, std::streamsize count) override DOCTEST_NOEXCEPT_MACRO { return count; }\n    int a;\n    DiscardOStream() : std::ostream(nullptr) {}\n} discardOut;\nstatic class Broken { int b; } broken = ;\nstatic int plain;\n",
+    );
+    let s = Some;
+    assert_eq!(
+        rows_of_kinds(&g, &[NodeKind::Variable]),
+        [
+            (
+                "discardOut",
+                NodeKind::Variable,
+                (0, 0, 6, 13),
+                None,
+                s("static class DiscardOStream : public std::ostream")
+            ),
+            (
+                "plain",
+                NodeKind::Variable,
+                (8, 0, 8, 17),
+                None,
+                s("static int")
+            ),
+        ]
     );
 }
