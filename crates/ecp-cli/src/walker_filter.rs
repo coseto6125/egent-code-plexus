@@ -37,41 +37,58 @@ const ENV_OVERRIDE: &str = "ECP_INCLUDE_WORKTREES";
 /// Nested repositories at which a tree with no git commit is refused.
 const NESTED_REPOS_REFUSED_AT: usize = 2;
 
-/// Watches the index walk of a tree with no git commit for repositories
-/// inside it.
+/// Watches a walk of a tree with no git commit for repositories inside it.
 ///
 /// Two or more make the tree a folder of projects: that is where an agent's
 /// failed `cd` lands, and indexing it parses every project at once (on
 /// 2026-11-01 that took the host down). One is common, a non-git project
 /// with one cloned dependency, and only earns a note. A tree with a commit is
-/// not watched: its submodules and ignored clones belong to the project.
+/// not watched: its submodules and embedded clones belong to the project.
+/// The build's archive extract of a dirty checkout has no `.git`, so it is
+/// watched, but `git archive` writes no `.git` entry and it counts none.
 /// `[index] allow_nested_repos = true` in the tree's `.ecp/config.toml`
 /// turns the refusal off for a deliberate multi-repo workspace.
 pub(crate) struct NestedRepoWatch {
+    /// The walk root as the walk spells it, so walked paths strip against it.
     root: PathBuf,
+    /// The root as the messages name it: `.` tells a lost agent nothing.
+    shown_root: PathBuf,
     active: bool,
+    /// Why `.ecp/config.toml` did not load, so a refusal does not ask for a
+    /// setting the user already wrote.
+    config_error: Option<String>,
     count: AtomicUsize,
     found: Mutex<Vec<PathBuf>>,
 }
 
 impl NestedRepoWatch {
     pub(crate) fn for_tree(root: &Path) -> Self {
-        let allowed = ecp_core::config::load(root).is_ok_and(|cfg| cfg.index.allow_nested_repos);
+        let config = ecp_core::config::load(root);
+        let allowed = config
+            .as_ref()
+            .is_ok_and(|cfg| cfg.index.allow_nested_repos);
         Self {
             root: root.to_path_buf(),
-            active: !allowed && !crate::build::orchestrator::tree_has_commit(root),
+            shown_root: dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()),
+            active: !allowed && !crate::git_cache::has_commit(root),
+            config_error: config.err().map(|e| e.to_string()),
             count: AtomicUsize::new(0),
             found: Mutex::new(Vec::new()),
         }
     }
 
-    /// Records `dir` when it holds a `.git` directory or file. The walk calls
-    /// it for every directory it is about to descend into.
+    /// Records `dir` when it is the top of a git checkout. The walk calls it
+    /// for every directory it keeps.
     pub(crate) fn observe_dir(&self, dir: &Path) {
         if !self.active || dir == self.root {
             return;
         }
-        if std::fs::symlink_metadata(dir.join(".git")).is_ok() {
+        // A repository's own `.git` tree holds hundreds of directories and no
+        // checkout; skipping it by name saves a stat for each.
+        let in_git_dir = dir
+            .strip_prefix(&self.root)
+            .is_ok_and(|rel| rel.components().any(|c| c.as_os_str() == ".git"));
+        if !in_git_dir && crate::git_cache::is_repository_root(dir) {
             self.count.fetch_add(1, Ordering::Relaxed);
             self.found
                 .lock()
@@ -86,9 +103,9 @@ impl NestedRepoWatch {
         self.count.load(Ordering::Relaxed) >= NESTED_REPOS_REFUSED_AT
     }
 
-    /// The verdict once the walk ends: an error from two repositories on, a
-    /// note on stderr for one.
-    pub(crate) fn finish(&self) -> io::Result<()> {
+    /// The verdict once the walk ends: an error from two repositories on, and
+    /// for one a note that the caller prints where a note is wanted.
+    pub(crate) fn finish(&self) -> io::Result<Option<String>> {
         let mut found = self
             .found
             .lock()
@@ -104,25 +121,28 @@ impl NestedRepoWatch {
                     .to_string()
             })
             .collect();
+        let config_path = ecp_core::config::config_path(&self.shown_root);
         match names.as_slice() {
-            [] => Ok(()),
-            [only] => {
-                eprintln!(
-                    "note: {} has no git commit and holds the repository {only}; indexing the \
-                     whole tree",
-                    self.root.display()
-                );
-                Ok(())
-            }
+            [] => Ok(None),
+            [only] => Ok(Some(format!(
+                "note: {} has no git commit and holds the repository {only}; indexing the whole \
+                 tree",
+                self.shown_root.display()
+            ))),
             several => Err(io::Error::other(format!(
                 "refusing to index {}: it has no git commit and holds at least {} repositories \
                  ({}), so it is a folder of projects; run ecp inside one of them, query across \
-                 them with `ecp group`, or set `allow_nested_repos = true` under [index] in {} \
-                 to index the whole tree",
-                self.root.display(),
+                 them with `ecp group`, list them in {} to leave them out, or set \
+                 `allow_nested_repos = true` under [index] in {} to index the whole tree{}",
+                self.shown_root.display(),
                 several.len(),
                 several.join(", "),
-                ecp_core::config::config_path(&self.root).display()
+                self.shown_root.join(crate::ECP_IGNORE_FILE).display(),
+                config_path.display(),
+                self.config_error
+                    .as_deref()
+                    .map(|e| format!(" (that config did not load: {e})"))
+                    .unwrap_or_default()
             ))),
         }
     }

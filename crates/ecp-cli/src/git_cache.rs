@@ -14,6 +14,7 @@
 //! not move under us.
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
@@ -207,8 +208,20 @@ fn cached_git_path(
 /// a directory and fail with `ERROR_DIRECTORY` (os error 267). On non-Windows
 /// and on already-plain paths this is a no-op, returning a sub-slice of the
 /// input (no allocation, borrow preserved).
+///
+/// A non-git member records its own directory as its common dir. A git common
+/// dir is named `.git` or (bare) holds `HEAD`, so any other directory is that
+/// member's root: taking its parent would walk every sibling project. The name
+/// check comes first so the usual `.git` case costs no file I/O.
 pub fn worktree_root_from_common_dir(common_dir: &Path) -> &Path {
-    dunce::simplified(common_dir.parent().unwrap_or(common_dir))
+    let root = if common_dir.file_name() == Some(OsStr::new(".git"))
+        || common_dir.join("HEAD").is_file()
+    {
+        common_dir.parent().unwrap_or(common_dir)
+    } else {
+        common_dir
+    };
+    dunce::simplified(root)
 }
 
 /// Registry identity is shared, but source files and HEAD belong to a worktree.
@@ -324,27 +337,60 @@ fn discover_gitdir(start: &Path) -> Option<(PathBuf, PathBuf)> {
         let Ok(meta) = fs::metadata(&dot_git) else {
             continue;
         };
-        let gitdir = if meta.is_dir() {
-            dot_git
-        } else {
-            let content = fs::read_to_string(&dot_git).ok()?;
-            let target = Path::new(content.strip_prefix("gitdir:")?.trim());
-            let abs = if target.is_absolute() {
-                target.to_path_buf()
-            } else {
-                dir.join(target)
-            };
-            fs::canonicalize(abs).ok()?
-        };
-        // A `.git` entry without a `HEAD` is not a repository to git either
-        // (a stub or a vendored fragment); answering for it would turn a
-        // plain source tree into a half-git one.
-        return fs::metadata(gitdir.join("HEAD"))
-            .ok()
-            .filter(|m| m.is_file())
-            .map(|_| (dir.to_path_buf(), gitdir));
+        return gitdir_of(dir, dot_git, &meta).map(|gitdir| (dir.to_path_buf(), gitdir));
     }
     None
+}
+
+/// The gitdir behind an existing `<dir>/.git` entry, when git would open it.
+fn gitdir_of(dir: &Path, dot_git: PathBuf, meta: &fs::Metadata) -> Option<PathBuf> {
+    let gitdir = if meta.is_dir() {
+        dot_git
+    } else {
+        let content = fs::read_to_string(&dot_git).ok()?;
+        let target = Path::new(content.strip_prefix("gitdir:")?.trim());
+        let abs = if target.is_absolute() {
+            target.to_path_buf()
+        } else {
+            dir.join(target)
+        };
+        fs::canonicalize(abs).ok()?
+    };
+    // A `.git` entry without a `HEAD` is not a repository to git either
+    // (a stub or a vendored fragment); answering for it would turn a
+    // plain source tree into a half-git one.
+    fs::metadata(gitdir.join("HEAD"))
+        .is_ok_and(|m| m.is_file())
+        .then_some(gitdir)
+}
+
+/// True when `dir` itself, not an ancestor, is the top of a git checkout: its
+/// `.git` is a directory or a `gitdir:` file that git would open. An unborn
+/// repository counts; an empty `.git` stub or a dangling link does not.
+pub(crate) fn is_repository_root(dir: &Path) -> bool {
+    let dot_git = dir.join(".git");
+    fs::metadata(&dot_git).is_ok_and(|meta| gitdir_of(dir, dot_git, &meta).is_some())
+}
+
+/// True when `tree` is inside a git repository whose HEAD names a commit.
+///
+/// [`head_sha`] cannot answer this: it synthesizes a path-bound SHA for a
+/// non-git tree. The file reader spawns nothing on the query path; the spawn
+/// covers layouts it declines, with the variables that point git at another
+/// repository removed, so they cannot vouch for this tree.
+/// `GIT_CEILING_DIRECTORIES` stays: the build's own `rev-parse` honours it, so
+/// a ceiling that hides the repository also sends the build down the
+/// whole-tree path, and this check must see the tree the same way.
+pub(crate) fn has_commit(tree: &Path) -> bool {
+    head_sha_from_files(tree).is_some()
+        || safe_exec::git()
+            .args(["rev-parse", "HEAD"])
+            .current_dir(tree)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .output()
+            .is_ok_and(|o| o.status.success())
 }
 
 /// The shared dir behind a gitdir: `commondir` redirects a linked worktree,
@@ -445,6 +491,23 @@ mod tests {
             worktree_root_from_common_dir(common),
             Path::new("/home/me/proj")
         );
+    }
+
+    #[test]
+    fn test_worktree_root_from_common_dir_non_git_member_is_its_own_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let member = tmp.path().join("plain");
+        fs::create_dir(&member).unwrap();
+        assert_eq!(worktree_root_from_common_dir(&member), member.as_path());
+    }
+
+    #[test]
+    fn test_worktree_root_from_common_dir_bare_repo_takes_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bare = tmp.path().join("proj.git");
+        fs::create_dir(&bare).unwrap();
+        fs::write(bare.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        assert_eq!(worktree_root_from_common_dir(&bare), tmp.path());
     }
 
     #[test]

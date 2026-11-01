@@ -179,8 +179,8 @@ fn extract_member(
         ));
     }
 
-    // A non-git member's recorded common dir is its own path, so its parent is
-    // walked here, and for a project directly below `$HOME` that is all of it.
+    // A non-git member is walked from its own directory, so a member that is
+    // `$HOME` itself is the case this refusal catches.
     if let Err(e) = crate::build::orchestrator::refuse_machine_wide_tree(src_root) {
         return Err((m, e.to_string()));
     }
@@ -189,7 +189,8 @@ fn extract_member(
     let last_commit = git_head(src_root).unwrap_or_else(|_| "unknown".to_string());
 
     // Walk files, run extractors per language.
-    let contracts = walk_and_extract(src_root, member, all_extractors);
+    let contracts = walk_and_extract(src_root, member, all_extractors)
+        .map_err(|e| (m.clone(), e.to_string()))?;
 
     let snapshot = RepoSnapshot {
         indexed_at: chrono_now(),
@@ -205,14 +206,24 @@ fn walk_and_extract(
     src_root: &Path,
     repo_name: &str,
     all_extractors: &[extractors::ExtractorEntry],
-) -> Vec<StoredContract> {
+) -> std::io::Result<Vec<StoredContract>> {
     use walkdir::WalkDir;
 
     let mut out: Vec<StoredContract> = Vec::new();
 
+    // The paths come first so a folder of projects is refused before any
+    // file is read or parsed.
+    let nested_repos = crate::walker_filter::NestedRepoWatch::for_tree(src_root);
+    let mut files: Vec<(std::path::PathBuf, &'static str)> = Vec::new();
     for entry in WalkDir::new(src_root)
         .follow_links(false)
         .into_iter()
+        .filter_entry(|e| {
+            if e.file_type().is_dir() {
+                nested_repos.observe_dir(e.path());
+            }
+            !nested_repos.refusal_reached()
+        })
         .flatten()
     {
         if !entry.file_type().is_file() {
@@ -220,9 +231,16 @@ fn walk_and_extract(
         }
         let path = entry.path();
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let Some(lang) = extractors::lang_for_extension(ext) else {
-            continue;
-        };
+        if let Some(lang) = extractors::lang_for_extension(ext) {
+            files.push((path.to_path_buf(), lang));
+        }
+    }
+    if let Some(note) = nested_repos.finish()? {
+        eprintln!("{note}");
+    }
+
+    for (path, lang) in &files {
+        let (path, lang) = (path.as_path(), *lang);
 
         let source = match std::fs::read(path) {
             Ok(s) => s,
@@ -242,7 +260,7 @@ fn walk_and_extract(
         }
     }
 
-    out
+    Ok(out)
 }
 
 fn git_head(repo_root: &Path) -> std::io::Result<String> {

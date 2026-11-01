@@ -158,7 +158,9 @@ pub fn run_analyzer_for_paths(
     drop(file_tx);
     let files_to_analyze: Vec<(std::path::PathBuf, std::path::PathBuf)> =
         file_rx.into_iter().collect();
-    nested_repos.finish()?;
+    if let Some(note) = nested_repos.finish()? {
+        eprintln!("{note}");
+    }
     let skipped_large_files = skipped_large
         .into_inner()
         .expect("skipped-large list is never held across a panic");

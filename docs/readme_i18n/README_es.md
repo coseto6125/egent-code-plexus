@@ -389,6 +389,8 @@ Parseo → resolución → serialización fluye a través de un canal MPSC hacia
 | `ECP_MAX_FILE_BYTES` | `1048576` (1 MiB) | Omitir archivos fuente por encima de este tamaño durante la ingesta, en el índice en frío, el reanálisis incremental, la superposición de sesión y `impact --baseline`. La variable de entorno prevalece sobre `[index] max_file_bytes` en `<repo>/.ecp/config.toml`. Limita la RAM máxima del trabajador a `num_threads × MAX`. |
 | `ECP_CSPROJ_MAX_DEPTH` | `4` | Profundidad de recursión para descubrir `*.csproj`. Aumentar para monorepos .NET profundamente anidados. |
 
+Un árbol sin commit de git que contiene dos o más repositorios se rechaza como carpeta de proyectos; defina `[index] allow_nested_repos = true` en su `.ecp/config.toml` para indexar como un solo grafo un espacio de trabajo multirrepositorio intencional.
+
 ---
 
 ## 📜 Licencia y reconocimientos

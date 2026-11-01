@@ -445,6 +445,8 @@ Parse → resolve → serialize runs through an MPSC channel into a single build
 | `ECP_MAX_FILE_BYTES` | `1048576` (1 MiB) | Skip source files above this size during ingest, in the cold index, incremental reanalysis, the session overlay and `impact --baseline`. The env var wins over `[index] max_file_bytes` in `<repo>/.ecp/config.toml`. Caps worst-case worker RAM at `num_threads × MAX`. |
 | `ECP_CSPROJ_MAX_DEPTH` | `4` | `*.csproj` discovery recursion depth. Raise for deeply-nested .NET monorepos. |
 
+A tree with no git commit that holds two or more repositories is refused as a folder of projects; set `[index] allow_nested_repos = true` in its `.ecp/config.toml` to index a deliberate multi-repo workspace as one graph.
+
 ---
 
 ## 📜 License & acknowledgments

@@ -77,6 +77,7 @@ impl Fixture {
             .env("HOME", home)
             .env("ECP_HOME", self.ecp_home.path())
             .env("ECP_SKIP_BG_REBUILD", "1")
+            .env_remove("ECP_INCLUDE_WORKTREES")
             .env_remove("CLAUDE_CODE_SESSION_ID");
         cmd
     }
@@ -285,38 +286,67 @@ fn test_find_in_home_reached_through_symlinked_home_var_refused() {
     assert_eq!(fx.graph_bins(), 0, "no graph is built for home");
 }
 
-#[test]
-fn test_group_sync_non_git_member_below_home_skipped_not_walked() {
-    let fx = Fixture::new();
-    let project = fx.home().join("proj");
-    write_py(&project, "p.py");
-    let built = fx.ecp(&project, &fx.home(), &["admin", "index", "--repo", "."]);
+/// Registers the non-git directory `dir` as the only member of group `g`.
+fn group_of(fx: &Fixture, dir: &Path) -> String {
+    let built = fx.ecp(dir, &fx.home(), &["admin", "index", "--repo", "."]);
     assert!(built.status.success(), "setup build: {}", combined(&built));
     let reg =
         ecp_core::registry::RegistryFile::read_or_empty(&fx.ecp_home.path().join("registry.json"))
             .unwrap();
+    let stem = dir.file_name().unwrap().to_str().unwrap();
     let member = reg
         .repos
         .keys()
-        .find(|k| k.starts_with("proj"))
+        .find(|k| k.starts_with(stem))
         .cloned()
-        .unwrap_or_else(|| panic!("proj not in registry: {:?}", reg.repos.keys()));
-    let added = fx.ecp(
-        &project,
-        &fx.home(),
-        &["admin", "group", "add", &member, "g"],
-    );
+        .unwrap_or_else(|| panic!("{stem} not in registry: {:?}", reg.repos.keys()));
+    let added = fx.ecp(dir, &fx.home(), &["admin", "group", "add", &member, "g"]);
     assert!(added.status.success(), "group add: {}", combined(&added));
+    member
+}
 
-    let synced = fx.ecp(&project, &fx.home(), &["group", "sync", "g"]);
-    assert!(synced.status.success(), "group sync: {}", combined(&synced));
+fn group_missing_repos(fx: &Fixture) -> serde_json::Value {
     let gdir = ecp_cli::commands::group::storage::group_dir(fx.ecp_home.path(), "g").unwrap();
     let meta: serde_json::Value =
         serde_json::from_slice(&std::fs::read(gdir.join("meta.json")).unwrap()).unwrap();
+    meta["missing_repos"].clone()
+}
+
+/// A non-git member is walked from its own directory. Before, the walk began
+/// at the member's parent, which for a project below `$HOME` is all of home.
+#[test]
+fn test_group_sync_non_git_member_below_home_walks_only_the_member() {
+    let fx = Fixture::new();
+    let project = fx.home().join("proj");
+    write_py(&project, "p.py");
+    group_of(&fx, &project);
+
+    let synced = fx.ecp(&project, &fx.home(), &["group", "sync", "g"]);
+    assert!(synced.status.success(), "group sync: {}", combined(&synced));
     assert_eq!(
-        meta["missing_repos"],
+        group_missing_repos(&fx),
+        serde_json::json!([]),
+        "the member syncs from its own directory: {}",
+        combined(&synced)
+    );
+}
+
+/// A non-git member that has become a folder of projects is skipped, not
+/// walked: `group sync` parses every file it walks.
+#[test]
+fn test_group_sync_non_git_member_holding_two_repos_skipped() {
+    let fx = Fixture::new();
+    let folder = folder_of_repos(&fx, &["alpha"]);
+    let member = group_of(&fx, &folder);
+    write_py(&folder.join("beta"), "r.py");
+    fx.git_commit_all(&folder.join("beta"));
+
+    let synced = fx.ecp(&folder, &fx.home(), &["group", "sync", "g"]);
+    assert_eq!(
+        group_missing_repos(&fx),
         serde_json::json!([member]),
-        "the member whose walk root is home is skipped: {meta}"
+        "the folder of projects is skipped: {}",
+        combined(&synced)
     );
 }
 
@@ -426,6 +456,12 @@ fn test_admin_index_non_git_folder_of_two_repos_refused_and_lists_them() {
         "admin index in a folder of two repos",
         &["alpha", "beta"],
     );
+    let shown = dunce::canonicalize(&folder).unwrap();
+    assert!(
+        combined(&out).contains(&format!("refusing to index {}", shown.display())),
+        "the refusal names the folder by its full path, not `.`: {}",
+        combined(&out)
+    );
     assert_eq!(fx.graph_bins(), 0, "no graph is built for the folder");
 }
 
@@ -529,11 +565,12 @@ fn test_admin_index_folder_of_repos_with_allow_nested_repos_indexes() {
 }
 
 #[test]
-fn test_admin_index_git_repo_with_ignored_nested_repos_still_indexes() {
+fn test_admin_index_git_repo_with_embedded_nested_repos_still_indexes() {
     let fx = Fixture::new();
     let project = fx.home().join("mono");
     write_py(&project, "m.py");
-    std::fs::write(project.join(".gitignore"), "vendor/\n").unwrap();
+    // Not ignored: the walk descends into both clones, so only the commit
+    // check keeps the watch off.
     for name in ["a", "b"] {
         let nested = project.join("vendor").join(name);
         write_py(&nested, "v.py");
@@ -547,4 +584,85 @@ fn test_admin_index_git_repo_with_ignored_nested_repos_still_indexes() {
         combined(&out)
     );
     assert_eq!(fx.graph_bins(), 1, "one graph is published");
+}
+
+/// A tree indexed while it held one repository refuses the query that would
+/// parse a second one cloned into it later: the overlay refresh walks the
+/// tree for new files.
+#[test]
+fn test_find_in_non_git_folder_refused_once_a_second_repo_is_cloned() {
+    let fx = Fixture::new();
+    let folder = folder_of_repos(&fx, &["alpha"]);
+    let built = fx.ecp(&folder, &fx.home(), &["admin", "index", "--repo", "."]);
+    assert!(built.status.success(), "setup build: {}", combined(&built));
+    let beta = folder.join("beta");
+    write_py(&beta, "r.py");
+    fx.git_commit_all(&beta);
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+    std::fs::File::options()
+        .write(true)
+        .open(beta.join("r.py"))
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+
+    let out = fx.ecp(&folder, &fx.home(), &["find", "foo"]);
+    assert_folder_refused(&out, "find after a second clone", &["alpha", "beta"]);
+}
+
+/// An empty `.git` directory is no repository to git, so it does not count.
+#[test]
+fn test_admin_index_non_git_folder_ignores_git_stubs() {
+    let fx = Fixture::new();
+    let folder = folder_of_repos(&fx, &["alpha"]);
+    for stub in ["stub1", "stub2"] {
+        write_py(&folder.join(stub), "s.py");
+        std::fs::create_dir_all(folder.join(stub).join(".git")).unwrap();
+    }
+    let out = fx.ecp(&folder, &fx.home(), &["admin", "index", "--repo", "."]);
+    assert!(
+        out.status.success(),
+        "stubs are not repositories: {}",
+        combined(&out)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("note:") && stderr.contains("alpha") && !stderr.contains("stub"),
+        "only the real repository is noted: {stderr}"
+    );
+}
+
+/// Repositories listed in `.ecpignore` are not walked, so they do not count.
+#[test]
+fn test_admin_index_folder_of_repos_listed_in_ecpignore_indexes() {
+    let fx = Fixture::new();
+    let folder = folder_of_repos(&fx, &["alpha", "beta"]);
+    std::fs::write(folder.join(".ecpignore"), "alpha/\nbeta/\n").unwrap();
+    let out = fx.ecp(&folder, &fx.home(), &["admin", "index", "--repo", "."]);
+    assert!(
+        out.status.success(),
+        "ignored clones leave a plain tree: {}",
+        combined(&out)
+    );
+}
+
+/// A config that does not load keeps the refusal on, and the refusal says why
+/// instead of only asking for a setting the user already wrote.
+#[test]
+fn test_admin_index_folder_of_repos_with_unreadable_config_names_the_error() {
+    let fx = Fixture::new();
+    let folder = folder_of_repos(&fx, &["alpha", "beta"]);
+    std::fs::create_dir_all(folder.join(".ecp")).unwrap();
+    std::fs::write(
+        folder.join(".ecp").join("config.toml"),
+        "[index]\nallow_nested_repos = \"true\"\n",
+    )
+    .unwrap();
+    let out = fx.ecp(&folder, &fx.home(), &["admin", "index", "--repo", "."]);
+    assert_folder_refused(&out, "a config with a string flag", &["alpha", "beta"]);
+    assert!(
+        combined(&out).contains("did not load"),
+        "the refusal names the config error: {}",
+        combined(&out)
+    );
 }
