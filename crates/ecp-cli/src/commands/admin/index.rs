@@ -404,6 +404,10 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
     let repo_path = std::path::PathBuf::from(&args.repo);
     if let Some(dump_path) = args.dump_resolver {
         let worktree = repo_path;
+        // This pass walks the raw worktree without reaching a build, and
+        // `ecp diff` runs it on every call.
+        crate::build::orchestrator::refuse_machine_wide_tree(&worktree)
+            .map_err(|e| e.to_string())?;
         if !worktree.exists() {
             return Err(format!("repo path does not exist: {}", worktree.display()));
         }

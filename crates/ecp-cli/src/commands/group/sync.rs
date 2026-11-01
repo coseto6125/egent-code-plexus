@@ -179,6 +179,12 @@ fn extract_member(
         ));
     }
 
+    // A non-git member's recorded common dir is its own path, so its parent is
+    // walked here, and for a project directly below `$HOME` that is all of it.
+    if let Err(e) = crate::build::orchestrator::refuse_machine_wide_tree(src_root) {
+        return Err((m, e.to_string()));
+    }
+
     // Capture last commit via `git rev-parse HEAD`.
     let last_commit = git_head(src_root).unwrap_or_else(|_| "unknown".to_string());
 
