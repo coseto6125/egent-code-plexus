@@ -211,7 +211,7 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
         // CLI invocation falls back to a per-process id, so the fragments the
         // gate just wrote are still read back by this same process.
         let ctx = ReadContext::for_dir(&dir, &cli.graph).map_err(|err| {
-            ecp_core::EcpError::InvalidArgument(match err {
+            ecp_core::EcpError::Output(match err {
                 ReadContextError::Ensure(err) => {
                     format!("Error preparing index for {}: {err}", dir.display())
                 }

@@ -299,11 +299,7 @@ fn run_bm25(args: FindArgs, engine: Option<&Engine>) -> Result<(), EcpError> {
         run_single(pattern, args.mode, args.kind, format, engine, None, caveat)
     } else if targets.len() == 1 {
         let target = targets.into_iter().next().unwrap();
-        let local_engine = crate::auto_ensure::load_ensured(
-            std::path::Path::new(&target.graph_path),
-            &target.worktree_root(),
-        )
-        .map_err(|e| EcpError::Output(format!("{}: {e}", target.display_name)))?;
+        let local_engine = target.load_engine_labeled()?;
         let caveat = single_target_caveat(&target, &local_engine);
         run_single(
             pattern,
@@ -861,11 +857,7 @@ fn run_batch(args: FindArgs, engine: Option<&Engine>) -> Result<(), EcpError> {
 
     let single_repo_engine: Option<(String, Engine)> = if targets.len() == 1 {
         let target = &targets[0];
-        let eng = crate::auto_ensure::load_ensured(
-            std::path::Path::new(&target.graph_path),
-            &target.worktree_root(),
-        )
-        .map_err(|e| EcpError::Output(format!("{}: {e}", target.display_name)))?;
+        let eng = target.load_engine_labeled()?;
         Some((target.display_name.clone(), eng))
     } else {
         None
@@ -1651,13 +1643,7 @@ fn single_target_caveat(target: &RepoTarget, engine: &Engine) -> Option<String> 
 pub(crate) fn load_engines_lossy(targets: &[RepoTarget]) -> Vec<(String, Result<Engine, String>)> {
     targets
         .iter()
-        .map(|target| {
-            let result = crate::auto_ensure::load_ensured(
-                std::path::Path::new(&target.graph_path),
-                &target.worktree_root(),
-            );
-            (target.display_name.clone(), result)
-        })
+        .map(|target| (target.display_name.clone(), target.load_engine()))
         .collect()
 }
 
@@ -1818,11 +1804,7 @@ pub fn compute_hits_limited(
         .map(|(hits, _truncated)| hits)
     } else if targets.len() == 1 {
         let target = targets.into_iter().next().unwrap();
-        let local_engine = crate::auto_ensure::load_ensured(
-            std::path::Path::new(&target.graph_path),
-            &target.worktree_root(),
-        )
-        .map_err(|e| EcpError::Output(format!("{}: {e}", target.display_name)))?;
+        let local_engine = target.load_engine_labeled()?;
         compute_single_limited(
             pattern,
             &args.mode,
@@ -1855,6 +1837,21 @@ impl RepoTarget {
         self.worktree_root
             .clone()
             .unwrap_or_else(|| crate::git_cache::worktree_root_for_repo(&self.common_dir))
+    }
+
+    fn load_engine(&self) -> Result<Engine, String> {
+        crate::auto_ensure::load_ensured(
+            std::path::Path::new(&self.graph_path),
+            &self.worktree_root(),
+        )
+    }
+
+    /// The one error mapping for a single-target load. The copies it replaced
+    /// had drifted to three different variants, two of them naming a cause
+    /// (deserialization, a bad argument) that a refusal or a build error is not.
+    fn load_engine_labeled(&self) -> Result<Engine, EcpError> {
+        self.load_engine()
+            .map_err(|e| EcpError::Output(format!("{}: {e}", self.display_name)))
     }
 }
 

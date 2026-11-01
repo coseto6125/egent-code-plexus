@@ -39,9 +39,10 @@ pub enum EcpError {
     #[error("serialization error: {0}")]
     Serialization(String),
 
-    /// A command failure whose message already names its cause. Encode sites
-    /// prefix their own subject (`json serialize:`, `toon encode:`), so a fixed
-    /// prefix here would mislabel every refusal and subprocess failure.
+    /// A command failure whose message already names its cause. Most sites are
+    /// refusals, subprocess and load failures, not encoding; the output
+    /// encoders prefix their own subject (`json serialize:`, `toon encode:`).
+    /// A fixed prefix here would mislabel every other site.
     #[error("{0}")]
     Output(String),
 }
