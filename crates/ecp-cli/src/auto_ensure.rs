@@ -188,6 +188,10 @@ type Probe = (EnsureResult, Option<DirtySet<ClassifiedPath>>);
 /// that the set cannot name. `EnsureResult::Ready` stays a unit variant for the
 /// doctor, summary and hook matches that never read the set.
 pub(crate) fn probe_index(graph_path: &Path, worktree_root: &Path) -> io::Result<Probe> {
+    // Before the graph lookup: a graph an earlier release built for `$HOME`
+    // would otherwise send this probe on a whole-tree mtime walk and the
+    // refresh on a parse of every changed file, with no build to refuse it.
+    crate::build::orchestrator::refuse_machine_wide_tree(worktree_root)?;
     let graph_mtime = match fs::metadata(graph_path) {
         Ok(m) => m.modified()?,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok((EnsureResult::Missing, None)),

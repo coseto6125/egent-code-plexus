@@ -152,6 +152,9 @@ pub fn force_rebuild_l2(worktree: &Path, target_sha: &str) -> io::Result<ForceRe
     // not publish its subtree as the commit's graph.
     let toplevel = worktree_toplevel(worktree);
     let worktree = toplevel.as_deref().unwrap_or(worktree);
+    // Before the slot, the L1 invalidation and the parse-cache retirement: the
+    // caller checked the path it was given, and the top level can be above it.
+    crate::build::orchestrator::refuse_machine_wide_tree(worktree)?;
     let sha = parse_sha(target_sha)?;
     let repo_root = resolve_home_ecp().join(repo_dir_name_for_cwd(worktree)?);
     force_rebuild_l2_at(worktree, &sha, &repo_root, report_wait)

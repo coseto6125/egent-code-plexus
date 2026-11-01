@@ -759,6 +759,7 @@ pub(crate) fn worktree_toplevel(dir: &Path) -> Option<PathBuf> {
 }
 
 pub(crate) fn head_sha_hex(worktree: &Path) -> io::Result<String> {
+    refuse_machine_wide_tree(worktree)?;
     let out = safe_exec::git()
         .args(["rev-parse", "HEAD"])
         .current_dir(worktree)
@@ -776,6 +777,83 @@ pub(crate) fn head_sha_hex(worktree: &Path) -> io::Result<String> {
     // Identity is path-bound — moving the dir invalidates this digest, treated
     // as a new repo (acceptable for ad-hoc indexing of non-VCS source trees).
     path_bound_sha(worktree)
+}
+
+/// Refuses a tree that holds every project on the machine: a filesystem
+/// root, or the home directory or an ancestor of it when it has no git commit.
+///
+/// These directories are where a failed `cd` lands. On 2026-11-01 an agent's
+/// unquoted `cd $D` with `$D` empty went to a non-git `$HOME`, and
+/// `ecp admin index --force --repo .` there parsed every repo below it until
+/// the host lost power. A tree with a commit is allowed at or above `$HOME`,
+/// because containers and this crate's tests use a project directory as
+/// `$HOME` or put a sandbox `$HOME` inside one. A repo with an unborn HEAD
+/// has no tree to archive: its build fails at `git archive`, or indexes nothing
+/// when every file is ignored. It is refused so the error names the real
+/// cause. Every build, the forced rebuild, the freshness probe,
+/// `admin index --dump-resolver` and `group sync` call this before they read a
+/// file.
+pub(crate) fn refuse_machine_wide_tree(worktree: &Path) -> io::Result<()> {
+    // A tree that does not resolve cannot be walked either; the caller keeps
+    // the error it reported before this check existed.
+    let Ok(tree) = dunce::canonicalize(worktree) else {
+        return Ok(());
+    };
+    let home = machine_home(ecp_core::registry::home_dir(), account_home)
+        .and_then(|h| dunce::canonicalize(h).ok());
+    // `git_cache::head_sha` cannot answer this: it synthesizes a path-bound SHA
+    // for a non-git tree. The file reader spawns nothing on the query path; the
+    // spawn covers layouts it declines, with the variables that point git at
+    // another repository removed, so they cannot vouch for this tree.
+    let has_commit = || {
+        crate::git_cache::head_sha_from_files(&tree).is_some()
+            || safe_exec::git()
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&tree)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_COMMON_DIR")
+                .output()
+                .is_ok_and(|o| o.status.success())
+    };
+    if is_machine_wide(&tree, home.as_deref(), has_commit) {
+        return Err(io::Error::other(format!(
+            "refusing to index {}: it is a filesystem root, or the home directory or an \
+             ancestor of it with no git commit, so it holds every project on this machine; \
+             rerun from inside one project directory, or pass that directory to --repo",
+            tree.display()
+        )));
+    }
+    Ok(())
+}
+
+/// `$HOME`, or the account's home directory when `$HOME` is unset or empty:
+/// a stripped environment must not switch the home check off.
+fn machine_home(
+    env_home: Option<PathBuf>,
+    account: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    env_home
+        .filter(|h| !h.as_os_str().is_empty())
+        .or_else(account)
+}
+
+#[cfg(unix)]
+fn account_home() -> Option<PathBuf> {
+    nix::unistd::User::from_uid(nix::unistd::getuid())
+        .ok()
+        .flatten()
+        .map(|user| user.dir)
+}
+
+#[cfg(not(unix))]
+fn account_home() -> Option<PathBuf> {
+    std::env::home_dir()
+}
+
+/// `has_commit` runs only for home or an ancestor of it, the cases it decides.
+fn is_machine_wide(tree: &Path, home: Option<&Path>, has_commit: impl FnOnce() -> bool) -> bool {
+    tree.parent().is_none() || (home.is_some_and(|h| h.starts_with(tree)) && !has_commit())
 }
 
 /// The sha a non-git source tree is keyed by: a digest of its canonical path.
@@ -1304,6 +1382,99 @@ mod tests {
     use std::cell::RefCell;
 
     const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    /// The commit probe for a tree that is neither a root nor at or above home:
+    /// calling it is a bug.
+    fn git_never_asked() -> bool {
+        panic!("has_commit consulted for a tree that is not home or an ancestor of it")
+    }
+
+    #[test]
+    fn test_is_machine_wide_root_and_commitless_home_or_ancestor_true() {
+        let home = Path::new("/srv/users/me");
+        assert!(
+            is_machine_wide(Path::new("/"), None, git_never_asked),
+            "a root without HOME"
+        );
+        assert!(
+            is_machine_wide(Path::new("/"), Some(home), git_never_asked),
+            "a root, commit or not"
+        );
+        assert!(
+            is_machine_wide(home, Some(home), || false),
+            "a home with no commit"
+        );
+        assert!(
+            is_machine_wide(Path::new("/srv/users"), Some(home), || false),
+            "an ancestor of home with no commit"
+        );
+    }
+
+    #[test]
+    fn test_is_machine_wide_committed_home_project_and_unrelated_dirs_false() {
+        let home = Path::new("/srv/users/me");
+        assert!(
+            !is_machine_wide(home, Some(home), || true),
+            "a home with a commit"
+        );
+        assert!(
+            !is_machine_wide(Path::new("/srv/users"), Some(home), || true),
+            "a repo with a commit that holds a sandbox home"
+        );
+        assert!(
+            !is_machine_wide(Path::new("/srv/users/me/proj"), Some(home), git_never_asked),
+            "below home"
+        );
+        assert!(
+            !is_machine_wide(Path::new("/srv/users/meow"), Some(home), git_never_asked),
+            "a name-prefix sibling"
+        );
+        assert!(
+            !is_machine_wide(Path::new("/opt/src"), Some(home), git_never_asked),
+            "outside home"
+        );
+        assert!(
+            !is_machine_wide(Path::new("/opt/src"), None, git_never_asked),
+            "no HOME set"
+        );
+    }
+
+    #[test]
+    fn test_machine_home_unset_or_empty_home_uses_account_home() {
+        let account = || Some(PathBuf::from("/srv/users/me"));
+        assert_eq!(
+            machine_home(None, account),
+            account(),
+            "HOME unset falls back to the account's home"
+        );
+        assert_eq!(
+            machine_home(Some(PathBuf::new()), account),
+            account(),
+            "HOME empty falls back to the account's home"
+        );
+        assert_eq!(machine_home(None, || None), None, "no home anywhere");
+    }
+
+    #[test]
+    fn test_machine_home_set_home_wins_without_account_lookup() {
+        assert_eq!(
+            machine_home(Some(PathBuf::from("/sandbox/me")), || {
+                panic!("account home looked up although HOME is set")
+            }),
+            Some(PathBuf::from("/sandbox/me"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_account_home_unix_reads_the_passwd_entry() {
+        let home = account_home().expect("the test user has a passwd entry");
+        assert!(
+            home.is_absolute(),
+            "account home {} is absolute",
+            home.display()
+        );
+    }
 
     fn listing(names: &[String]) -> CommitDirListing {
         CommitDirListing::from_entries(
