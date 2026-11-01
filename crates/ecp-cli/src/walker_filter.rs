@@ -30,7 +30,7 @@
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 const ENV_OVERRIDE: &str = "ECP_INCLUDE_WORKTREES";
 
@@ -48,38 +48,57 @@ const NESTED_REPOS_REFUSED_AT: usize = 2;
 /// watched, but `git archive` writes no `.git` entry and it counts none.
 /// `[index] allow_nested_repos = true` in the tree's `.ecp/config.toml`
 /// turns the refusal off for a deliberate multi-repo workspace.
+///
+/// Every walk of a watched tree filters its entries through [`Self::admits`]
+/// and calls [`Self::finish`] before it parses anything.
 pub(crate) struct NestedRepoWatch {
     /// The walk root as the walk spells it, so walked paths strip against it.
     root: PathBuf,
-    /// The root as the messages name it: `.` tells a lost agent nothing.
-    shown_root: PathBuf,
     active: bool,
-    /// Why `.ecp/config.toml` did not load, so a refusal does not ask for a
-    /// setting the user already wrote.
-    config_error: Option<String>,
+    /// Whether `.ecp/config.toml` allows nested repos, and why it did not load
+    /// (so a refusal does not ask for a setting the user already wrote). Read
+    /// only once a repository is found: the overlay walk runs on every query.
+    config: OnceLock<(bool, Option<String>)>,
     count: AtomicUsize,
     found: Mutex<Vec<PathBuf>>,
 }
 
 impl NestedRepoWatch {
     pub(crate) fn for_tree(root: &Path) -> Self {
-        let config = ecp_core::config::load(root);
-        let allowed = config
-            .as_ref()
-            .is_ok_and(|cfg| cfg.index.allow_nested_repos);
         Self {
             root: root.to_path_buf(),
-            shown_root: dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()),
-            active: !allowed && !crate::git_cache::has_commit(root),
-            config_error: config.err().map(|e| e.to_string()),
+            active: !crate::git_cache::has_commit(root),
+            config: OnceLock::new(),
             count: AtomicUsize::new(0),
             found: Mutex::new(Vec::new()),
         }
     }
 
-    /// Records `dir` when it is the top of a git checkout. The walk calls it
-    /// for every directory it keeps.
-    pub(crate) fn observe_dir(&self, dir: &Path) {
+    fn config(&self) -> &(bool, Option<String>) {
+        self.config.get_or_init(|| {
+            let config = ecp_core::config::load(&self.root);
+            let allowed = config
+                .as_ref()
+                .is_ok_and(|cfg| cfg.index.allow_nested_repos);
+            (allowed, config.err().map(|e| e.to_string()))
+        })
+    }
+
+    /// The `filter_entry` verdict for `path`: it prunes agent worktrees and
+    /// nested worktree checkouts, records each kept directory, and keeps
+    /// nothing once the tree is refused, so the walk ends there.
+    pub(crate) fn admits(&self, path: &Path, is_dir: bool) -> bool {
+        if is_skippable_worktree_descendant(path, &self.root) {
+            return false;
+        }
+        if is_dir {
+            self.observe_dir(path);
+        }
+        !self.refusal_reached()
+    }
+
+    /// Records `dir` when it is the top of a git checkout.
+    fn observe_dir(&self, dir: &Path) {
         if !self.active || dir == self.root {
             return;
         }
@@ -100,7 +119,7 @@ impl NestedRepoWatch {
     /// True once the walk has seen enough repositories to refuse, so it can
     /// stop instead of listing the rest of a machine-sized tree.
     pub(crate) fn refusal_reached(&self) -> bool {
-        self.count.load(Ordering::Relaxed) >= NESTED_REPOS_REFUSED_AT
+        self.count.load(Ordering::Relaxed) >= NESTED_REPOS_REFUSED_AT && !self.config().0
     }
 
     /// The verdict once the walk ends: an error from two repositories on, and
@@ -111,7 +130,12 @@ impl NestedRepoWatch {
             .lock()
             .expect("nested-repo list is never held across a panic")
             .clone();
+        if found.is_empty() || self.config().0 {
+            return Ok(None);
+        }
         found.sort();
+        // The root as the messages name it: `.` tells a lost agent nothing.
+        let shown_root = dunce::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone());
         let names: Vec<String> = found
             .iter()
             .map(|dir| {
@@ -121,25 +145,26 @@ impl NestedRepoWatch {
                     .to_string()
             })
             .collect();
-        let config_path = ecp_core::config::config_path(&self.shown_root);
+        let config_path = ecp_core::config::config_path(&shown_root);
         match names.as_slice() {
             [] => Ok(None),
             [only] => Ok(Some(format!(
                 "note: {} has no git commit and holds the repository {only}; indexing the whole \
                  tree",
-                self.shown_root.display()
+                shown_root.display()
             ))),
             several => Err(io::Error::other(format!(
                 "refusing to index {}: it has no git commit and holds at least {} repositories \
                  ({}), so it is a folder of projects; run ecp inside one of them, query across \
                  them with `ecp group`, list them in {} to leave them out, or set \
                  `allow_nested_repos = true` under [index] in {} to index the whole tree{}",
-                self.shown_root.display(),
+                shown_root.display(),
                 several.len(),
                 several.join(", "),
-                self.shown_root.join(crate::ECP_IGNORE_FILE).display(),
+                shown_root.join(crate::ECP_IGNORE_FILE).display(),
                 config_path.display(),
-                self.config_error
+                self.config()
+                    .1
                     .as_deref()
                     .map(|e| format!(" (that config did not load: {e})"))
                     .unwrap_or_default()

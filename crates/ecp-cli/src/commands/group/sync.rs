@@ -207,26 +207,26 @@ fn walk_and_extract(
     repo_name: &str,
     all_extractors: &[extractors::ExtractorEntry],
 ) -> std::io::Result<Vec<StoredContract>> {
-    use walkdir::WalkDir;
-
     let mut out: Vec<StoredContract> = Vec::new();
 
     // The paths come first so a folder of projects is refused before any
-    // file is read or parsed.
-    let nested_repos = crate::walker_filter::NestedRepoWatch::for_tree(src_root);
+    // file is read or parsed. The walk prunes what the index walk prunes
+    // (`.ecpignore`, agent and nested worktrees), so a member the index
+    // accepts is not refused here; no other ignore rule applies, as before.
+    let nested_repos =
+        std::sync::Arc::new(crate::walker_filter::NestedRepoWatch::for_tree(src_root));
+    let nested_repos_filter = std::sync::Arc::clone(&nested_repos);
     let mut files: Vec<(std::path::PathBuf, &'static str)> = Vec::new();
-    for entry in WalkDir::new(src_root)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| {
-            if e.file_type().is_dir() {
-                nested_repos.observe_dir(e.path());
-            }
-            !nested_repos.refusal_reached()
+    for entry in ignore::WalkBuilder::new(src_root)
+        .standard_filters(false)
+        .add_custom_ignore_filename(crate::ECP_IGNORE_FILE)
+        .filter_entry(move |e| {
+            nested_repos_filter.admits(e.path(), e.file_type().is_some_and(|t| t.is_dir()))
         })
+        .build()
         .flatten()
     {
-        if !entry.file_type().is_file() {
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }
         let path = entry.path();

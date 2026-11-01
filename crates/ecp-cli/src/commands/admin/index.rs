@@ -93,17 +93,11 @@ pub fn run_analyzer_for_paths(
     // Prune LLM-agent worktree containers + nested git worktrees so the
     // graph doesn't double-count symbols from sibling source copies.
     // Override via `ECP_INCLUDE_WORKTREES=1` (see `walker_filter` docs).
-    let filter_root = src_root_ref.to_path_buf();
     let nested_repos =
         std::sync::Arc::new(crate::walker_filter::NestedRepoWatch::for_tree(src_root));
     let nested_repos_filter = std::sync::Arc::clone(&nested_repos);
     walk_builder.filter_entry(move |entry| {
-        let kept =
-            !crate::walker_filter::is_skippable_worktree_descendant(entry.path(), &filter_root);
-        if kept && entry.file_type().is_some_and(|t| t.is_dir()) {
-            nested_repos_filter.observe_dir(entry.path());
-        }
-        kept
+        nested_repos_filter.admits(entry.path(), entry.file_type().is_some_and(|t| t.is_dir()))
     });
     let nested_repos_ref = &*nested_repos;
     walk_builder.build_parallel().run(|| {

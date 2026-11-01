@@ -196,10 +196,11 @@ fn cached_git_path(
     to_return
 }
 
-/// Repository-identity tree for a git `common_dir`: the main checkout.
-/// Falls back to `common_dir` itself when it has no parent (defensive: a
-/// bare-repo or root path). Used for persisted shared group state and as
-/// the fallback inside `worktree_root_for_repo`.
+/// The tree a registry `common_dir` names: the parent of a git common dir
+/// (`.git`, or a bare directory holding `HEAD`), the directory itself for a
+/// non-git member, and the path itself when it has no parent. Used for
+/// persisted shared group state and as the fallback inside
+/// `worktree_root_for_repo`.
 ///
 /// `dunce::simplified` strips any Windows verbatim `\\?\` prefix the registry
 /// may carry — older builds wrote `common_dir` via `std::fs::canonicalize`,

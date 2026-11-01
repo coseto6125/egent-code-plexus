@@ -348,6 +348,63 @@ fn test_group_sync_non_git_member_holding_two_repos_skipped() {
         "the folder of projects is skipped: {}",
         combined(&synced)
     );
+    // Any skip lists the member; only the watch names this reason and repo.
+    assert!(
+        combined(&synced).contains("folder of projects") && combined(&synced).contains("beta"),
+        "the skip names its reason: {}",
+        combined(&synced)
+    );
+}
+
+/// `group sync` honours `.ecpignore` as the index walk does, so the remedy the
+/// refusal names works for a group member too.
+#[test]
+fn test_group_sync_non_git_member_with_clones_in_ecpignore_syncs() {
+    let fx = Fixture::new();
+    let folder = folder_of_repos(&fx, &["alpha"]);
+    group_of(&fx, &folder);
+    write_py(&folder.join("beta"), "r.py");
+    fx.git_commit_all(&folder.join("beta"));
+    std::fs::write(folder.join(".ecpignore"), "alpha/\nbeta/\n").unwrap();
+
+    let synced = fx.ecp(&folder, &fx.home(), &["group", "sync", "g"]);
+    assert_eq!(
+        group_missing_repos(&fx),
+        serde_json::json!([]),
+        "ignored clones leave a plain member: {}",
+        combined(&synced)
+    );
+}
+
+/// A linked worktree inside the one clone is pruned as the index walk prunes
+/// it, so it is not counted as a second repository.
+#[test]
+fn test_group_sync_non_git_member_with_one_clone_and_its_worktree_syncs() {
+    let fx = Fixture::new();
+    let folder = folder_of_repos(&fx, &["alpha"]);
+    group_of(&fx, &folder);
+    let admin = folder
+        .join("alpha")
+        .join(".git")
+        .join("worktrees")
+        .join("wt");
+    std::fs::create_dir_all(&admin).unwrap();
+    std::fs::write(admin.join("HEAD"), "ref: refs/heads/wt\n").unwrap();
+    let worktree = folder.join("alpha").join("wt");
+    write_py(&worktree, "w.py");
+    std::fs::write(
+        worktree.join(".git"),
+        format!("gitdir: {}\n", admin.display()),
+    )
+    .unwrap();
+
+    let synced = fx.ecp(&folder, &fx.home(), &["group", "sync", "g"]);
+    assert_eq!(
+        group_missing_repos(&fx),
+        serde_json::json!([]),
+        "one clone and its worktree are one repository: {}",
+        combined(&synced)
+    );
 }
 
 #[test]

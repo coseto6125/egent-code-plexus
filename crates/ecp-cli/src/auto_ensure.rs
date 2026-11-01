@@ -1978,7 +1978,6 @@ fn collect_dirty_files(
     let graph_canonical = fs::canonicalize(graph_path).ok();
     let mut out = Vec::new();
 
-    let filter_root = root.to_path_buf();
     let nested_repos = std::sync::Arc::new(crate::walker_filter::NestedRepoWatch::for_tree(root));
     let nested_repos_filter = std::sync::Arc::clone(&nested_repos);
     for entry in WalkBuilder::new(root)
@@ -1988,23 +1987,13 @@ fn collect_dirty_files(
         .require_git(false)
         .filter_entry(move |e| {
             let name = e.file_name().to_string_lossy();
-            if SKIP_DIRS.contains(&name.as_ref()) {
-                return false;
-            }
-            let kept =
-                !crate::walker_filter::is_skippable_worktree_descendant(e.path(), &filter_root);
-            if kept && e.file_type().is_some_and(|t| t.is_dir()) {
-                nested_repos_filter.observe_dir(e.path());
-            }
-            kept
+            !SKIP_DIRS.contains(&name.as_ref())
+                && nested_repos_filter.admits(e.path(), e.file_type().is_some_and(|t| t.is_dir()))
         })
         .build()
         .filter_map(Result::ok)
         .filter(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
     {
-        if nested_repos.refusal_reached() {
-            break;
-        }
         let skip = graph_canonical
             .as_deref()
             .is_some_and(|gc| fs::canonicalize(entry.path()).ok().as_deref() == Some(gc));
@@ -2019,6 +2008,8 @@ fn collect_dirty_files(
             }
         }
     }
+    // The one-repo note is left to the index build: this walk runs on every
+    // query of a dirty tree and would repeat it each time.
     nested_repos.finish()?;
     Ok(out)
 }
