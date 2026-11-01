@@ -805,6 +805,9 @@ pub(crate) fn refuse_machine_wide_tree(worktree: &Path) -> io::Result<()> {
     // for a non-git tree. The file reader spawns nothing on the query path; the
     // spawn covers layouts it declines, with the variables that point git at
     // another repository removed, so they cannot vouch for this tree.
+    // `GIT_CEILING_DIRECTORIES` stays: the build's own `rev-parse` honours it,
+    // so a ceiling that hides the repository also sends the build down the
+    // whole-tree path, and this check must see the tree the same way.
     let has_commit = || {
         crate::git_cache::head_sha_from_files(&tree).is_some()
             || safe_exec::git()
