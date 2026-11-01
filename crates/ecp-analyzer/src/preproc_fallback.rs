@@ -289,9 +289,15 @@ fn defines_guard(rest: &[u8], name: &[u8]) -> Option<bool> {
         b"_INCLUDED",
     ]
     .iter()
-    .any(|suffix| trimmed.ends_with(suffix));
+    .any(|suffix| ends_with_ignore_case(trimmed, suffix));
     let value = value.trim_ascii();
     (ident == name && header_like && matches!(value, b"" | b"1")).then_some(value == b"1")
+}
+
+/// Whether `text` ends with `suffix`, ASCII case ignored: lua spells its
+/// guards `lapi_h`.
+pub(crate) fn ends_with_ignore_case(text: &[u8], suffix: &[u8]) -> bool {
+    text.len() >= suffix.len() && text[text.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
 }
 
 /// The word after a directive's `#`, and the offset of the text after it.

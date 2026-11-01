@@ -741,9 +741,10 @@ fn test_cpp_members_lifted_by_error_recovery_emit_no_variable() {
 /// A-R3 (`jemalloc/internal/prof_recent.h:18`, `prof_structs.h:101`,
 /// `xxhash.h:2655`): tree-sitter-cpp reads `typedef ql_head(T) list_t;` as
 /// `typedef ql_head (T)` with a missing `;`. The alias is the name after
-/// the macro call, never its argument. An attribute-macro typedef whose
-/// alias the tree loses gets no Typedef at all (never `__aligned__`). A
-/// trailing attribute macro after a real alias keeps the alias.
+/// the macro call, never its argument. An attribute-macro typedef reads as
+/// a cut typedef and a declaration `T name;` on the same row: the alias is
+/// that declarator (never `__aligned__`), and no Variable. A trailing
+/// attribute macro after a real alias keeps the alias.
 #[test]
 fn test_cpp_macro_call_typedef_takes_alias_after_the_call() {
     let g = parse(
@@ -768,6 +769,13 @@ fn test_cpp_macro_call_typedef_takes_alias_after_the_call() {
                 None
             ),
             (
+                "xxh_unalign32",
+                NodeKind::Typedef,
+                (2, 0, 2, 93),
+                None,
+                None
+            ),
+            (
                 "xxh_aliasing_u64x2",
                 NodeKind::Typedef,
                 (3, 0, 3, 36),
@@ -786,6 +794,11 @@ fn test_cpp_macro_call_typedef_takes_alias_after_the_call() {
     assert_eq!(
         named(&g, "prof_recent_list_t").content_hash,
         xxh3_64_bytes(b"typedef ql_head(prof_recent_t) prof_recent_list_t;")
+    );
+    assert!(
+        rows_of_kinds(&g, &[NodeKind::Variable]).is_empty(),
+        "{:?}",
+        sorted_rows(&g)
     );
 }
 
@@ -1050,4 +1063,210 @@ fn test_cpp_lone_one_valued_define_in_ifndef_keeps_macro_node() {
         b"#ifndef REAL_HPP\n#define REAL_HPP 1\nint y;\n#endif\n",
     );
     assert!(macro_names(&g).is_empty(), "{:?}", macro_names(&g));
+}
+
+// ---- Bug sweep (C/C++ batch D) ----
+
+/// FU-2026-10-30-cb159240606e, C++ side: a lower-case guard (lua
+/// `lstate_h`) in a `.h` file is no Macro node either.
+#[test]
+fn test_cpp_lowercase_include_guard_emits_no_macro_node() {
+    let g = parse(
+        "lstate.h",
+        b"#ifndef lstate_h\n#define lstate_h\n#define LUA_X 2\n#endif\n",
+    );
+    assert_eq!(macro_names(&g), ["LUA_X"]);
+}
+
+/// FU-2026-10-30-9adc33b1cf3e and FU-2026-10-30-35d49dbe116a (xxhash.h
+/// `XXH3_accumulate_sve`, `XXH3_update`; redis `server.h:3461`): with a
+/// macro before the return type, or a `void` prototype whose parameters
+/// look like constructor arguments, tree-sitter-cpp reads a function as a
+/// direct-init variable. A body after it, or a `void` type, makes it a
+/// Function that keeps its calls; a non-void direct init stays a Variable.
+#[test]
+fn test_cpp_function_misread_as_direct_init_emits_function() {
+    let g = parse(
+        "xxhash.h",
+        b"XXH_FORCE_INLINE void\nXXH3_accumulate_sve(xxh_u64* XXH_RESTRICT acc,\n               const xxh_u8* XXH_RESTRICT input,\n               size_t nbStripes)\n{\n    XXH3_scramble(acc);\n}\n\nXXH_FORCE_INLINE XXH_errorcode\nXXH3_update(XXH3_state_t* XXH_RESTRICT const state, size_t len)\n{\n    return XXH3_consume(state, len);\n}\nvoid replDataBufReadFromConn(connection *conn, replDataBuf *buf, void (*error_handler)(connection *conn));\nstatic Foo g(1, 2);\n",
+    );
+    let s = Some;
+    assert_eq!(
+        rows_of_kinds(&g, &[NodeKind::Function, NodeKind::Variable]),
+        [
+            (
+                "XXH3_accumulate_sve",
+                NodeKind::Function,
+                (0, 0, 6, 1),
+                None,
+                s("XXH_FORCE_INLINE")
+            ),
+            (
+                "XXH3_update",
+                NodeKind::Function,
+                (8, 0, 12, 1),
+                None,
+                s("XXH_FORCE_INLINE")
+            ),
+            (
+                "replDataBufReadFromConn",
+                NodeKind::Function,
+                (13, 0, 13, 106),
+                None,
+                s("void")
+            ),
+            (
+                "g",
+                NodeKind::Variable,
+                (14, 0, 14, 19),
+                None,
+                s("static Foo")
+            ),
+        ]
+    );
+    assert_eq!(named(&g, "XXH3_accumulate_sve").calls, ["XXH3_scramble"]);
+    assert_eq!(named(&g, "XXH3_update").calls, ["XXH3_consume"]);
+}
+
+/// The unmap source of the C test
+/// `test_c_file_scope_decls_after_error_recovered_function_emit_variables`
+/// (jemalloc `pages.c`): tree-sitter-cpp lifts the declarations after the
+/// function under an ERROR.
+const UNMAP: &str = "static void\nunmap(void *addr) {\n\tint before = 0;\n#ifdef _WIN32\n\tif (VirtualFree(addr) == 0)\n#else\n\tif (munmap(addr) == -1)\n#endif\n\t{\n\t\tchar buf[64];\n\t\tprintf(\n\t\t    \"Error in \"\n#ifdef _WIN32\n\t\t    \"VirtualFree\"\n#else\n\t\t    \"munmap\"\n#endif\n\t\t    \"(): %s\\n\",\n\t\t    buf);\n\t}\n}\n\n";
+
+/// FU-2026-10-30-8deec5e170f9: a `.cpp` file of that shape keeps its
+/// file-scope Variables, as the C provider does: an ERROR is transparent
+/// for the namespace walk, and the brace depth decides. The locals stay
+/// out.
+#[test]
+fn test_cpp_file_scope_decls_under_error_emit_variables() {
+    let src = format!(
+        "{UNMAP}#ifdef HAVE_GATE\nstatic int gate = 1;\n#endif\nstatic int plain;\nstatic int init_gate(void);\n"
+    );
+    let g = parse("pages.cpp", src.as_bytes());
+    let s = Some;
+    assert_eq!(
+        rows_of_kinds(&g, &[NodeKind::Variable]),
+        [
+            (
+                "gate",
+                NodeKind::Variable,
+                (23, 0, 23, 20),
+                None,
+                s("static int")
+            ),
+            (
+                "plain",
+                NodeKind::Variable,
+                (25, 0, 25, 17),
+                None,
+                s("static int")
+            ),
+        ]
+    );
+}
+
+/// FU-2026-10-30-59be3b506694 (doctest.h:6799): `static class D {...}
+/// discardOut;` declares a Variable, also when the declaration sits under
+/// an ERROR.
+#[test]
+fn test_cpp_class_specifier_declaration_under_error_emits_variable() {
+    let src = format!(
+        "{UNMAP}static class DiscardOStream : public std::ostream\n{{\npublic:\n    DiscardOStream() : std::ostream(nullptr) {{}}\n}} discardOut;\nstatic int plain;\n"
+    );
+    let g = parse("doctest.cpp", src.as_bytes());
+    let s = Some;
+    assert_eq!(
+        rows_of_kinds(&g, &[NodeKind::Variable]),
+        [
+            (
+                "discardOut",
+                NodeKind::Variable,
+                (22, 0, 26, 13),
+                None,
+                s("static class DiscardOStream : public std::ostream")
+            ),
+            (
+                "plain",
+                NodeKind::Variable,
+                (27, 0, 27, 17),
+                None,
+                s("static int")
+            ),
+        ]
+    );
+}
+
+/// FU-2026-10-30-1958e9a1e5cd (doctest.h:1924): a one-line call of a
+/// function-like macro defined in the file, with a type as an argument
+/// (`DEFINE_DECORATOR(test_suite, const char*, "");`), swallows the rest
+/// of the file. Blanked, the reporter and the functions after it parse.
+#[test]
+fn test_cpp_macro_call_with_type_argument_keeps_later_definitions() {
+    let g = parse(
+        "doctest.h",
+        b"#define DEFINE_DECORATOR(name, type, def) struct name { type data; }\nnamespace doctest {\nDEFINE_DECORATOR(test_suite, const char*, \"\");\nDEFINE_DECORATOR(skip, bool, true);\nstruct XmlReporter : public IReporter {\n    void log(int x) { write(x); }\n};\nint helper(int a) { return twice(a); }\nstatic int counter = 0;\n}\n",
+    );
+    let rows: Vec<(&str, NodeKind, u32)> = rows_of_kinds(
+        &g,
+        &[NodeKind::Struct, NodeKind::Method, NodeKind::Function],
+    )
+    .into_iter()
+    .map(|r| (r.0, r.1, r.2 .0))
+    .collect();
+    assert_eq!(
+        rows,
+        [
+            ("XmlReporter", NodeKind::Struct, 4),
+            ("log", NodeKind::Method, 5),
+            ("helper", NodeKind::Function, 7),
+        ]
+    );
+    let log = named(&g, "log");
+    assert_eq!(log.owner_class.as_deref(), Some("XmlReporter"));
+    assert_eq!(log.calls, ["write"]);
+}
+
+/// FU-2026-10-26-9418ba5e834b: `A::Foo::Foo() {}` is a constructor of
+/// `Foo` whether or not the file declares a class `Foo`; a destructor
+/// stays a Method.
+#[test]
+fn test_cpp_out_of_class_constructor_without_class_emits_constructor() {
+    let g = parse("foo.cpp", b"A::Foo::Foo() {}\nFoo::~Foo() {}\n");
+    let rows: Vec<(&str, NodeKind, Span, Option<&str>)> = rows_of_kinds(
+        &g,
+        &[NodeKind::Constructor, NodeKind::Method, NodeKind::Function],
+    )
+    .into_iter()
+    .map(|r| (r.0, r.1, r.2, r.3))
+    .collect();
+    assert_eq!(
+        rows[0],
+        ("Foo", NodeKind::Constructor, (0, 0, 0, 16), Some("Foo"))
+    );
+    assert_eq!(
+        (rows[1].0, rows[1].1, rows[1].2),
+        ("~Foo", NodeKind::Method, (1, 0, 1, 14))
+    );
+    assert_eq!(rows.len(), 2, "{rows:?}");
+}
+
+/// FU-2026-10-30-464550698f55 (nlohmann `iter_impl.hpp:47`): a class with
+/// no `;` before a function makes the class the function's type. The
+/// function starts after the class, with no type, and its content is its
+/// own text.
+#[test]
+fn test_cpp_function_after_unterminated_class_excludes_class_head() {
+    let g = parse(
+        "iter_impl.hpp",
+        b"class iter_impl\n{\n    int m_x;\n}\nvoid set_end() noexcept\n{\n    finish();\n}\n",
+    );
+    assert_eq!(
+        rows_of_kinds(&g, &[NodeKind::Function]),
+        [("set_end", NodeKind::Function, (4, 0, 7, 1), None, None)]
+    );
+    assert_eq!(
+        named(&g, "set_end").content_hash,
+        xxh3_64_bytes(b"void set_end() noexcept\n{\n    finish();\n}")
+    );
 }

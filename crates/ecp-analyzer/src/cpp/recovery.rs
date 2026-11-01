@@ -17,7 +17,7 @@
 
 use ecp_core::analyzer::types::RawNode;
 use ecp_core::graph::NodeKind;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::driver::blank_range;
 use crate::preproc_fallback::directive_lines;
@@ -256,11 +256,125 @@ pub fn blank_init_list_conditionals(source: &[u8]) -> Option<Vec<u8>> {
     patched
 }
 
+/// Words that open a type and never an expression.
+const TYPE_WORDS: &[&[u8]] = &[
+    b"const",
+    b"volatile",
+    b"signed",
+    b"unsigned",
+    b"void",
+    b"bool",
+    b"char",
+    b"short",
+    b"int",
+    b"long",
+    b"float",
+    b"double",
+    b"struct",
+    b"class",
+    b"union",
+    b"enum",
+];
+
+/// The name a `#define` line `line` defines when the macro is
+/// function-like: a `(` follows the name with no space.
+fn function_macro_name(line: &[u8]) -> Option<&[u8]> {
+    let hash = line.iter().position(|&b| b == b'#')?;
+    let i = skip_blanks(line, hash + 1);
+    line[i..].starts_with(b"define").then_some(())?;
+    let i = skip_blanks(line, i + b"define".len());
+    let j = ident_end(line, i);
+    (j > i && line.get(j) == Some(&b'(')).then(|| &line[i..j])
+}
+
+fn skip_blanks(s: &[u8], mut i: usize) -> usize {
+    while s.get(i).is_some_and(|&b| matches!(b, b' ' | b'\t')) {
+        i += 1;
+    }
+    i
+}
+
+/// The length of the statement `line` opens when it is one call of a macro
+/// in `macros` that ends the line (`NAME(args);`, a `//` comment after it
+/// allowed) and one argument opens with a [`TYPE_WORDS`] word. `None` for
+/// any other line.
+fn type_argument_macro_call(line: &[u8], macros: &FxHashSet<&[u8]>) -> Option<usize> {
+    let i = skip_blanks(line, 0);
+    let j = ident_end(line, i);
+    if j == i || line.get(j) != Some(&b'(') || !macros.contains(&line[i..j]) {
+        return None;
+    }
+    let (mut depth, mut k, mut arg_start, mut typed) = (0u32, j, j + 1, false);
+    let close = loop {
+        let b = *line.get(k)?;
+        match b {
+            b'"' | b'\'' => {
+                k = skip_quoted(line, k, b);
+                continue;
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            _ => {}
+        }
+        if depth == 1 && b == b',' || depth == 0 {
+            let arg = skip_blanks(line, arg_start);
+            typed |= TYPE_WORDS.contains(&&line[arg..ident_end(line, arg)]);
+            arg_start = k + 1;
+        }
+        if depth == 0 {
+            break k + 1;
+        }
+        k += 1;
+    };
+    let end = close + usize::from(line.get(close) == Some(&b';'));
+    let rest = &line[skip_blanks(line, end)..];
+    (typed && (rest.is_empty() || rest == b"\r" || rest.starts_with(b"//"))).then_some(end)
+}
+
+/// `source` with each one-line statement that calls a function-like macro
+/// of this file with a type argument (`DOCTEST_DEFINE_DECORATOR(skip, bool,
+/// true);`) overwritten by blanks; `None` when there is none. No expression
+/// takes a type, so tree-sitter-cpp reads the line as a function head whose
+/// parameter list never closes, and that swallows the rest of the file
+/// (doctest.h:1924). A line a `\` splices onto a `#define` never qualifies.
+/// No byte moves.
+pub fn blank_type_argument_macro_calls(source: &[u8]) -> Option<Vec<u8>> {
+    let lines = directive_lines(source);
+    let macros: FxHashSet<&[u8]> = lines
+        .iter()
+        .filter(|(_, _, word)| *word == Some(&b"define"[..]))
+        .filter_map(|&(start, end, _)| function_macro_name(&source[start..end]))
+        .collect();
+    if macros.is_empty() {
+        return None;
+    }
+    let mut patched: Option<Vec<u8>> = None;
+    for &(start, end, word) in &lines {
+        let before = &source[..start.saturating_sub(1)];
+        let spliced = before
+            .strip_suffix(b"\r")
+            .unwrap_or(before)
+            .ends_with(b"\\");
+        if word.is_some() || spliced {
+            continue;
+        }
+        if let Some(len) = type_argument_macro_call(&source[start..end], &macros) {
+            blank_range(
+                patched.get_or_insert_with(|| source.to_vec()),
+                start,
+                start + len,
+            );
+        }
+    }
+    patched
+}
+
 /// The source patches C++ parses with, applied in order; `None` when none
 /// applies. Each only overwrites bytes with blanks.
 pub fn prepare_source(source: &[u8]) -> Option<Vec<u8>> {
     let macros = blank_decl_prefix_macros(source);
-    blank_init_list_conditionals(macros.as_deref().unwrap_or(source)).or(macros)
+    let calls = blank_type_argument_macro_calls(macros.as_deref().unwrap_or(source)).or(macros);
+    blank_init_list_conditionals(calls.as_deref().unwrap_or(source)).or(calls)
 }
 
 /// The type name a base clause or qualifier names, generic arguments and a

@@ -22,7 +22,8 @@ use super::path_literals::{
     build_concatenated, build_raw_path_literal, enclosing_symbol_and_owner_pub,
     strip_c_string_value,
 };
-use crate::calls::{attach_to_enclosing, start_pos, CallSiteIndex};
+use crate::calls::{attach_to_enclosing, node_range, start_pos, CallSiteIndex};
+use crate::indirect_dispatch::FnPtrVars;
 use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
 use std::collections::HashMap;
 use tree_sitter::Node;
@@ -214,5 +215,55 @@ fn c_callee_name(call: Node<'_>, source: &[u8], methods: &CReceiverMap) -> Optio
         _ => std::str::from_utf8(&source[function.start_byte()..function.end_byte()])
             .ok()
             .map(str::to_string),
+    }
+}
+
+/// Declare in `vars` each variable a statement-like macro call binds with a
+/// tagged type argument and the whole argument after it:
+/// `dictForEach(d, struct RedisModule, module, BODY)` runs `BODY` with
+/// `struct RedisModule *module` (redis `module.c:15317`). No expression is
+/// a `struct T`, so the pair is the macro's declaration. It is visible from
+/// the name to the end of the call; `container_of(p, struct T, member)`
+/// names `member` last, so nothing reads it. tree-sitter-c wraps the
+/// keyword or the tag in an ERROR, so the tokens are read flat.
+pub fn declare_macro_bound_vars(root: Node<'_>, source: &[u8], vars: &mut FnPtrVars) {
+    let mut stack: Vec<Node<'_>> = vec![root];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "argument_list" && n.has_error() {
+            declare_in_arguments(n, source, vars);
+        }
+        let mut c = n.walk();
+        stack.extend(n.children(&mut c));
+    }
+}
+
+fn declare_in_arguments(args: Node<'_>, source: &[u8], vars: &mut FnPtrVars) {
+    let mut tokens: Vec<Node<'_>> = Vec::new();
+    let mut c = args.walk();
+    for child in args.children(&mut c) {
+        if child.kind() == "ERROR" {
+            let mut e = child.walk();
+            tokens.extend(child.children(&mut e));
+        } else {
+            tokens.push(child);
+        }
+    }
+    let text = |n: Node<'_>| n.utf8_text(source).unwrap_or_default();
+    let ident = |n: Node<'_>| n.kind() == "identifier";
+    let (_, scope_end) = node_range(args);
+    for w in tokens.windows(5) {
+        let tag = text(w[0]);
+        if matches!(tag, "struct" | "union" | "enum")
+            && ident(w[1])
+            && text(w[2]) == ","
+            && ident(w[3])
+            && matches!(text(w[4]), "," | ")")
+        {
+            vars.declare(
+                text(w[3]).to_string(),
+                (start_pos(w[3]), scope_end),
+                Some(format!("{tag} {}", text(w[1]))),
+            );
+        }
     }
 }

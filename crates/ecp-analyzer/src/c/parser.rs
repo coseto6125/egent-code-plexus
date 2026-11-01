@@ -1,5 +1,6 @@
 use super::receiver_types::{
-    collect_receiver_methods, extract_c_calls_and_path_literals, CReceiverMap,
+    collect_receiver_methods, declare_macro_bound_vars, extract_c_calls_and_path_literals,
+    CReceiverMap,
 };
 use super::spec::CSpec;
 use crate::calls::{NameRefKind, NameRefSpec, VariantRefSpec};
@@ -8,7 +9,7 @@ use crate::driver::{
 };
 use crate::indirect_dispatch::{collect_c_cpp_fn_ptr_vars, detect_c_cpp_indirect, FnPtrVars};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
-use crate::preproc_fallback::{Preproc, PreprocRows};
+use crate::preproc_fallback::{ends_with_ignore_case, Preproc, PreprocRows};
 use ecp_core::analyzer::parse_prof::Pass;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{BindingKind, LocalGraph, RawFunctionMeta, RawImport, RawNode};
@@ -76,8 +77,8 @@ fn is_c_reserved_keyword(name: &str) -> bool {
     )
 }
 
-/// Returns true if `node` (a `function_definition`) has a `static` storage class specifier
-/// among its direct children.
+/// Returns true if `node` (a `function_definition` or a `declaration`) has a
+/// `static` storage class specifier among its direct children.
 fn has_static_specifier(node: tree_sitter::Node<'_>, source: &[u8]) -> bool {
     let mut cursor = node.walk();
     let result = node.children(&mut cursor).any(|child| {
@@ -195,14 +196,13 @@ pub(crate) fn typedef_alias(n: Node<'_>) -> Option<Node<'_>> {
 /// guards so they don't drown out real bindings.
 ///
 /// Conservative: matches when the name ends with `_H`, `_HPP`, `_GUARD`,
-/// or `_INCLUDED` AND the body is absent or a bare `1`. Real constants
+/// or `_INCLUDED` in any ASCII case AND the body is absent or a bare `1`. Real constants
 /// like `MAX_SIZE` (no suffix match) or `BUFFER_SIZE 4096` (body not `1`)
 /// pass through.
 fn is_include_guard(name: &str, body: Option<&str>) -> bool {
-    let suffix_match = name.ends_with("_H")
-        || name.ends_with("_HPP")
-        || name.ends_with("_GUARD")
-        || name.ends_with("_INCLUDED");
+    let suffix_match = ["_H", "_HPP", "_GUARD", "_INCLUDED"]
+        .iter()
+        .any(|suffix| ends_with_ignore_case(name.as_bytes(), suffix.as_bytes()));
     if !suffix_match {
         return false;
     }
@@ -211,10 +211,11 @@ fn is_include_guard(name: &str, body: Option<&str>) -> bool {
 
 /// True when `decl` sits at file scope: its parent chain up to the root
 /// holds only preprocessor conditionals, `extern "C"` blocks and ERROR
-/// nodes. Error recovery
-/// can put a function's locals straight under a top-level ERROR, so under
-/// one the source's brace depth decides; a declaration inside a body node
-/// is never file scope. A comment in a multi-line `#define` ends its
+/// nodes. Error recovery can put a function's locals straight under a
+/// top-level ERROR, or under the root once an ERROR swallowed the body's
+/// `{` (`rb_gen(...)` with no `;` before a function), so in a tree with
+/// errors the source's brace depth decides; a declaration inside a body
+/// node is never file scope. A comment in a multi-line `#define` ends its
 /// `preproc_arg`, and the rest of the macro body parses as code: a
 /// declaration that starts on a directive row is never file scope.
 fn is_file_scope(decl: Node<'_>, f: &mut CFile, source: &[u8]) -> bool {
@@ -228,7 +229,10 @@ fn is_file_scope(decl: Node<'_>, f: &mut CFile, source: &[u8]) -> bool {
     let mut cur = decl.parent();
     while let Some(p) = cur {
         match p.kind() {
-            "translation_unit" => break,
+            "translation_unit" => {
+                recovered |= p.has_error();
+                break;
+            }
             "ERROR" => recovered = true,
             "preproc_if"
             | "preproc_ifdef"
@@ -244,6 +248,104 @@ fn is_file_scope(decl: Node<'_>, f: &mut CFile, source: &[u8]) -> bool {
         cur = p.parent();
     }
     !recovered || f.preproc.depth_at(source, decl.start_byte()) == 0
+}
+
+/// True if the variable `name` that the file-scope `declaration` `decl`
+/// declares is itself constant: the declaration is `constexpr`, or `const`
+/// qualifies the name's own object. With no pointer declarator around the
+/// name that is a `const` on the declaration (`const int N`); with one, it
+/// is a `const` on the pointer declarator nearest the name (`T *const p`).
+/// `static const T *p` points at constants, and `p` itself is mutable.
+///
+/// This is intentionally scoped to the `@var` use-site (file-scope
+/// `declaration` nodes) of C and C++, so one declaration in a `.c` and a
+/// `.h` gets one kind. Class fields use `field_declaration` and function
+/// parameters use `parameter_declaration` — neither reaches this helper.
+pub(crate) fn is_const_qualified(decl: Node<'_>, name: Node<'_>, source: &[u8]) -> bool {
+    has_qualifier(decl, "constexpr", source)
+        || has_qualifier(nearest_pointer(decl, name).unwrap_or(decl), "const", source)
+}
+
+/// Whether `node` has a `type_qualifier` child that reads `word`.
+fn has_qualifier(node: Node<'_>, word: &str, source: &[u8]) -> bool {
+    let mut cursor = node.walk();
+    let found = node.children(&mut cursor).any(|child| {
+        child.kind() == "type_qualifier" && child.utf8_text(source).is_ok_and(|t| t.trim() == word)
+    });
+    found
+}
+
+/// The pointer declarator nearest `name` inside `decl`, if any.
+pub(crate) fn nearest_pointer<'t>(decl: Node<'t>, name: Node<'t>) -> Option<Node<'t>> {
+    let mut cur = name.parent();
+    while let Some(p) = cur.filter(|p| p.id() != decl.id()) {
+        if p.kind() == "pointer_declarator" {
+            return Some(p);
+        }
+        cur = p.parent();
+    }
+    None
+}
+
+/// The empty statement `;` that ends `node`'s declaration after the
+/// conditionals and comments between them, if any.
+fn lone_semicolon_after(node: Node<'_>) -> Option<Node<'_>> {
+    let mut next = node.next_named_sibling();
+    while let Some(n) = next.filter(|n| n.kind().starts_with("preproc_") || n.kind() == "comment") {
+        next = n.next_named_sibling();
+    }
+    next.filter(|n| n.kind() == "expression_statement" && n.named_child_count() == 0)
+}
+
+/// Whether the one error in `decl` is its missing `;`, and the `;` follows
+/// after a conditional: an attribute macro sits between them
+/// (`const char *je_malloc_conf` / `#ifndef _WIN32` / `JEMALLOC_ATTR(weak)`
+/// / `#endif` / `;`, jemalloc `jemalloc.c:35`).
+fn semicolon_after_conditional(decl: Node<'_>) -> bool {
+    let mut cursor = decl.walk();
+    let children: Vec<Node<'_>> = decl.children(&mut cursor).collect();
+    let cut = children.split_last().is_some_and(|(last, rest)| {
+        last.is_missing() && last.kind() == ";" && rest.iter().all(|c| !c.has_error())
+    });
+    cut && lone_semicolon_after(decl).is_some()
+}
+
+/// The `;` that ends a prototype tree-sitter-c left as an ERROR because a
+/// macro follows its parameters (`void __libc_free(void *ptr)
+/// PREALIAS(je_free);`, jemalloc `jemalloc.c:1210`): the ERROR holds a
+/// `type` and one function declarator and nothing else, and the `;` is the
+/// next statement. `None` for any other ERROR.
+fn recovered_prototype_end(error: Node<'_>) -> Option<Node<'_>> {
+    let ty = error.child_by_field_name("type")?;
+    let mut cursor = error.walk();
+    let mut declarators = 0;
+    for child in error.named_children(&mut cursor) {
+        match child.kind() {
+            "function_declarator" => declarators += 1,
+            "storage_class_specifier" | "type_qualifier" | "comment" => {}
+            _ if child == ty => {}
+            _ => return None,
+        }
+    }
+    (declarators == 1).then_some(())?;
+    error
+        .next_named_sibling()
+        .filter(|n| n.kind() == "expression_statement" && n.named_child_count() == 0)
+}
+
+/// The `typedef` keyword that tree-sitter-c read as the declarator of the
+/// declaration before `decl`, so `decl` is the rest of the typedef:
+/// `TEST_END` / `typedef rb_tree(node_t) tree_t;` reads as `TEST_END
+/// typedef` and `rb_tree(node_t) tree_t;` (jemalloc `test/unit/rb.c:1000`).
+fn split_typedef_keyword(decl: Node<'_>, source: &[u8]) -> Option<Node<'_>> {
+    let prev = decl
+        .prev_named_sibling()
+        .filter(|p| p.kind() == "declaration")?;
+    let mut cursor = prev.walk();
+    let last = prev
+        .children_by_field_name("declarator", &mut cursor)
+        .last()?;
+    (last.kind() == "identifier" && last.utf8_text(source) == Ok("typedef")).then_some(last)
 }
 
 /// The identifier a variable declarator names through pointer, C++
@@ -416,8 +518,48 @@ pub(crate) fn is_cut_typedef(def: Node<'_>) -> bool {
             .is_some_and(|d| d.kind() == "parenthesized_declarator")
 }
 
+/// The alias of a cut-short typedef ([`is_cut_typedef`]) and the statement
+/// that holds it, on the row the typedef ends: the lone identifier of an
+/// expression statement (tree-sitter-cpp's `list_t;` after `typedef
+/// ql_head(T)`) or the one declarator of a declaration (`T name;` after
+/// `typedef __attribute__((aligned(1)))`). `None` for any other shape: no
+/// alias is guessed.
+pub(crate) fn macro_typedef_tail(def: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
+    let stmt = def
+        .next_named_sibling()
+        .filter(|s| s.start_position().row == def.end_position().row)?;
+    let alias = match stmt.kind() {
+        "expression_statement" if stmt.named_child_count() == 1 => stmt.named_child(0),
+        "declaration" if stmt.named_child_count() == 2 => stmt.child_by_field_name("declarator"),
+        _ => None,
+    }?;
+    (alias.kind() == "identifier").then_some((alias, stmt))
+}
+
+/// Whether the `declaration` `decl` is the tail of a cut-short typedef
+/// before it ([`macro_typedef_tail`]): it names the alias, no variable.
+pub(crate) fn is_typedef_tail(decl: Node<'_>) -> bool {
+    decl.prev_named_sibling()
+        .filter(|p| p.kind() == "type_definition" && is_cut_typedef(*p))
+        .and_then(macro_typedef_tail)
+        .is_some_and(|(_, stmt)| stmt.id() == decl.id())
+}
+
 fn emit_typedef_binding(td: Node<'_>, source: &[u8], imports: &mut Vec<RawImport>) {
     if is_cut_typedef(td) {
+        if let Some((alias, stmt)) = macro_typedef_tail(td) {
+            let underlying = stmt
+                .child_by_field_name("type")
+                .and_then(|t| t.utf8_text(source).ok())
+                .unwrap_or("<unknown>");
+            let alias = alias.utf8_text(source).unwrap_or_default();
+            imports.push(driver::imports::raw(
+                underlying.to_string(),
+                alias.to_string(),
+                Some(alias.to_string()),
+                Some(BindingKind::Alias),
+            ));
+        }
         return;
     }
     // `typedef struct node Node, *NodePtr;` binds each declarator. The
@@ -732,15 +874,26 @@ impl ParseSpec for CSpec {
             var_name,
         } = std::mem::take(m);
 
+        // A typedef cut short by an attribute and a prototype recovered from
+        // an ERROR end in the next statement.
+        let mut tail: Option<Node<'t>> = None;
         let skip_root = d.root.is_some_and(|r| match r.kind() {
             "declaration" => !is_file_scope(r, f, source),
             "preproc_def" => f.preproc.rows(source).is_guard_row(r.start_position().row),
+            "ERROR" => {
+                tail = recovered_prototype_end(r);
+                tail.is_none() || !is_file_scope(r, f, source)
+            }
             _ => false,
         });
         // A typedef captures its whole declarator; the alias is the name
         // inside it (`typedef void *(*F)(int);`). An abstract one names none.
         let name = d.name.and_then(|n| match d.kind {
-            Some(NodeKind::Typedef) if d.root.is_some_and(is_cut_typedef) => None,
+            Some(NodeKind::Typedef) if d.root.is_some_and(is_cut_typedef) => {
+                let (alias, stmt) = macro_typedef_tail(d.root?)?;
+                tail = Some(stmt);
+                Some(alias)
+            }
             Some(NodeKind::Typedef) => typedef_alias(n),
             _ => Some(n),
         });
@@ -792,6 +945,7 @@ impl ParseSpec for CSpec {
                     vec![]
                 };
 
+                let end = tail.unwrap_or(root);
                 cx.nodes.push(RawNode {
                     decorators,
                     is_exported,
@@ -799,8 +953,8 @@ impl ParseSpec for CSpec {
                     ..node::decl(
                         name_str,
                         k,
-                        node::span(root),
-                        &source[root.start_byte()..root.end_byte()],
+                        node::span_from(root, end),
+                        &source[root.start_byte()..end.end_byte()],
                     )
                 });
             }
@@ -824,7 +978,8 @@ impl ParseSpec for CSpec {
             }
         }
 
-        // Top-level variable / const declaration → Variable node.
+        // Top-level variable / const declaration → Variable or Const node,
+        // by the C++ rule (`is_const_qualified`).
         // Type slice includes storage-class + qualifiers (see
         // `slice_type_before` doc comment).
         if let (Some(v_root), Some(v_name)) = (var_root, var_name.and_then(declared_variable)) {
@@ -845,18 +1000,28 @@ impl ParseSpec for CSpec {
                 //   2. C reserved keyword check — defensive even when
                 //      has_error is somehow false; `unsigned`/`const`/
                 //      etc. are never legal C variable names.
-                if !v_root.has_error()
+                if (!v_root.has_error() || semicolon_after_conditional(v_root))
                     && !is_c_reserved_keyword(name_str)
+                    && !is_typedef_tail(v_root)
                     && is_file_scope(v_root, f, source)
                 {
+                    let typedef_keyword = split_typedef_keyword(v_root, source);
+                    let start = typedef_keyword.unwrap_or(v_root);
+                    let (kind, type_annotation) = if typedef_keyword.is_some() {
+                        (NodeKind::Typedef, None)
+                    } else if is_const_qualified(v_root, v_name, source) {
+                        (NodeKind::Const, declarator_type(v_root, v_name, source))
+                    } else {
+                        (NodeKind::Variable, declarator_type(v_root, v_name, source))
+                    };
                     cx.nodes.push(RawNode {
-                        is_exported: true,
-                        type_annotation: declarator_type(v_root, v_name, source),
+                        is_exported: !has_static_specifier(v_root, source),
+                        type_annotation,
                         ..node::decl(
                             name_str.to_string(),
-                            NodeKind::Variable,
-                            node::span(v_root),
-                            &source[v_root.start_byte()..v_root.end_byte()],
+                            kind,
+                            node::span_from(start, v_root),
+                            &source[start.start_byte()..v_root.end_byte()],
                         )
                     });
                 }
@@ -901,6 +1066,9 @@ impl ParseSpec for CSpec {
                 let mut fn_ptr_vars = FnPtrVars::default();
                 let depths = root.has_error().then(|| f.preproc.depths(source));
                 collect_c_cpp_fn_ptr_vars(root, source, depths, &mut fn_ptr_vars);
+                if root.has_error() {
+                    declare_macro_bound_vars(root, source, &mut fn_ptr_vars);
+                }
                 cx.call_metas = detect_c_cpp_indirect(
                     root,
                     source,
