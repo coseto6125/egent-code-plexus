@@ -44,8 +44,8 @@ fn check_in(cwd: &std::path::Path, fix: bool) -> CheckResult {
         // to scanning the whole subtree as an ad-hoc source tree (no file-count
         // cap → OOM in a large mount). A filesystem root, or a `$HOME`, a WSL
         // drive mount or an ancestor of either with no git commit, never
-        // reaches here: the freshness probe above already refused it. Downgrade to a warn that names the
-        // manual escape hatch.
+        // reaches here: the freshness probe above already refused it.
+        // Downgrade to a warn that names the manual escape hatch.
         if !is_git_repo(cwd) {
             return CheckResult::warn(
                 "index",

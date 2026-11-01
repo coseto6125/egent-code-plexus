@@ -280,42 +280,106 @@ fn no_mount_below(mountinfo: io::Result<Vec<u8>>, top: &Path) -> bool {
     if !prefix.ends_with(b"/") {
         prefix.push(b'/');
     }
-    !text
-        .split(|&b| b == b'\n')
-        .filter_map(|line| line.split(|&b| b == b' ').nth(4))
-        .map(unescape_mount_point)
-        .any(|point| point != top && point.starts_with(&prefix))
+    let mount_below = mount_lines(&text)
+        .map(|mount| unescape_mount_point(mount.point))
+        .any(|point| point != top && point.starts_with(&prefix));
+    !mount_below
 }
 
-/// The mount points of Windows drives under WSL: `/mnt/c` by default, moved by
-/// `[automount] root` in `/etc/wsl.conf`. WSL2 mounts a drive as `9p` with
-/// `aname=drvfs`, WSL1 as `drvfs`. Empty when mountinfo cannot be read.
+/// The fields of one mountinfo line that the mount checks read, still escaped:
+/// `<id> <parent> <dev> <root> <point> <opts> [tags] - <fstype> <source> <super-opts>`.
+struct MountLine<'a> {
+    root: &'a [u8],
+    point: &'a [u8],
+    fstype: &'a [u8],
+    source: &'a [u8],
+    super_opts: &'a [u8],
+}
+
+/// Every well-formed line of `mountinfo`; a line without the ` - ` separator
+/// or with fewer fields is skipped.
+fn mount_lines(mountinfo: &[u8]) -> impl Iterator<Item = MountLine<'_>> {
+    mountinfo.split(|&b| b == b'\n').filter_map(|line| {
+        let sep = line.windows(3).position(|w| w == b" - ")?;
+        let mut head = line[..sep].split(|&b| b == b' ').skip(3);
+        let (root, point) = (head.next()?, head.next()?);
+        let mut tail = line[sep + 3..].split(|&b| b == b' ');
+        Some(MountLine {
+            root,
+            point,
+            fstype: tail.next()?,
+            source: tail.next()?,
+            super_opts: tail.next().unwrap_or_default(),
+        })
+    })
+}
+
+/// Where WSL records the Windows path behind each virtiofs share, one symlink
+/// per tag or child share name.
+const VIRTIOFS_TAG_DIR: &str = "/run/wsl/virtiofs";
+
+/// The mount points of whole Windows drives under WSL: `/mnt/c` by default,
+/// moved by `[automount] root` in `/etc/wsl.conf`. Empty when mountinfo cannot
+/// be read.
 pub(crate) fn wsl_drive_mounts() -> Vec<PathBuf> {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    let virtiofs_source = |name: &[u8]| {
+        fs::read_link(Path::new(VIRTIOFS_TAG_DIR).join(std::ffi::OsStr::from_bytes(name)))
+            .ok()
+            .map(|target| target.into_os_string().into_vec())
+    };
     fs::read(MOUNTINFO)
-        .map(|text| drive_mounts_in(&text))
+        .map(|text| drive_mounts_in(&text, virtiofs_source))
         .unwrap_or_default()
 }
 
-/// A mountinfo line is
-/// `<id> <parent> <dev> <root> <point> <opts> [tags] - <fstype> <source> <super-opts>`.
-fn drive_mounts_in(mountinfo: &[u8]) -> Vec<PathBuf> {
+/// A mount counts only when it exposes a whole drive: its Windows source is a
+/// drive root (`C:\`) and its `root` is the top of that source. A drvfs mount
+/// of one folder, or a bind mount of a project inside a drive (a container's
+/// `/workspace`), is one project and indexes like any other.
+///
+/// WSL mounts a drive one of three ways (microsoft/WSL `src/linux/init/drvfs.cpp`):
+/// WSL1 `drvfs` with the Windows path as source; WSL2 `9p` with
+/// `aname=drvfs;path=<windows path>`; WSL2 `virtiofs`, either a share mounted
+/// by its tag or a bind of `/<child>` from an aggregate share, recorded as a
+/// symlink in [`VIRTIOFS_TAG_DIR`] named by the tag or the child.
+fn drive_mounts_in(
+    mountinfo: &[u8],
+    virtiofs_source: impl Fn(&[u8]) -> Option<Vec<u8>>,
+) -> Vec<PathBuf> {
     use std::os::unix::ffi::OsStringExt;
-    mountinfo
-        .split(|&b| b == b'\n')
-        .filter_map(|line| {
-            let sep = line.windows(3).position(|w| w == b" - ")?;
-            let point = line[..sep].split(|&b| b == b' ').nth(4)?;
-            let mut tail = line[sep + 3..].split(|&b| b == b' ');
-            let fstype = tail.next()?;
-            let super_opts = tail.nth(1).unwrap_or_default();
-            let drvfs = fstype == b"drvfs"
-                || (fstype == b"9p"
-                    && super_opts
-                        .split(|&b| b == b',' || b == b';')
-                        .any(|opt| opt == b"aname=drvfs"));
-            drvfs.then(|| PathBuf::from(std::ffi::OsString::from_vec(unescape_mount_point(point))))
+    mount_lines(mountinfo)
+        .filter_map(|mount| {
+            let root = unescape_mount_point(mount.root);
+            let source = unescape_mount_point(mount.source);
+            let windows_source = match mount.fstype {
+                b"drvfs" if root == b"/" => Some(source),
+                b"9p" if root == b"/" => {
+                    let mut opts = mount.super_opts.split(|&b| b == b';' || b == b',');
+                    let drvfs = opts.clone().any(|opt| opt == b"aname=drvfs");
+                    opts.find_map(|opt| opt.strip_prefix(b"path="))
+                        .filter(|_| drvfs)
+                        .map(<[u8]>::to_vec)
+                }
+                b"virtiofs" => match root.strip_prefix(b"/") {
+                    Some([]) => virtiofs_source(&source),
+                    Some(child) if !child.contains(&b'/') => virtiofs_source(child),
+                    _ => None,
+                },
+                _ => None,
+            }?;
+            is_drive_root(&windows_source).then(|| {
+                PathBuf::from(std::ffi::OsString::from_vec(unescape_mount_point(
+                    mount.point,
+                )))
+            })
         })
         .collect()
+}
+
+/// `C:` or `C:\`.
+fn is_drive_root(windows_path: &[u8]) -> bool {
+    matches!(windows_path, [letter, b':'] | [letter, b':', b'\\'] if letter.is_ascii_alphabetic())
 }
 
 /// The kernel writes space, tab, newline and backslash in a mount point as
@@ -1606,31 +1670,65 @@ mod tests {
 42 22 0:37 / /proc rw,nosuid shared:4 - proc proc rw
 ";
 
+    const DRIVE_GUID: &str = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+
+    /// The virtiofs mapping a WSL2 guest records: `C:\` behind a per-share tag,
+    /// `D:\` behind an aggregate child, a folder behind another child.
+    fn virtiofs_map(name: &[u8]) -> Option<Vec<u8>> {
+        match name {
+            b"tag-c" => Some(br"C:\".to_vec()),
+            n if n == DRIVE_GUID.as_bytes() => Some(br"D:\".to_vec()),
+            b"11111111-2222-3333-4444-555555555555" => Some(br"E:\src\proj".to_vec()),
+            _ => None,
+        }
+    }
+
+    fn drives_in(info: &str) -> Vec<PathBuf> {
+        drive_mounts_in(info.as_bytes(), virtiofs_map)
+    }
+
     #[test]
-    fn test_drive_mounts_in_wsl2_and_wsl1_drives_only() {
-        let info = b"\
-22 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw
-78 82 0:34 / /mnt/wsl rw,relatime shared:1 - tmpfs none rw
-135 82 0:73 / /mnt/c rw,noatime - 9p C:\\134 rw,aname=drvfs;path=C:\\;uid=1000;symlinkroot=/mnt/,trans=fd
-136 82 0:74 / /mnt/my\\040drive rw,noatime shared:9 - 9p D:\\134 rw,aname=drvfs;path=D:\\
-137 82 0:75 / /e rw,noatime - drvfs E:\\ rw,noatime,uid=1000
-138 82 0:76 / /srv/share rw,noatime - 9p share rw,aname=other,trans=virtio
-";
+    fn test_drive_mounts_in_whole_drive_each_wsl_mount_kind_listed() {
+        let info = format!(
+            r"135 82 0:73 / /mnt/c rw,noatime - 9p C:\134 rw,aname=drvfs;path=C:\;uid=1000;symlinkroot=/mnt/,trans=fd
+136 82 0:74 / /mnt/my\040drive rw,noatime shared:9 - 9p D:\134 rw,aname=drvfs;path=D:\
+137 82 0:75 / /e rw,noatime - drvfs E:\134 rw,noatime,uid=1000
+138 82 0:76 / /mnt/f rw,relatime - virtiofs tag-c rw
+139 82 0:77 /{DRIVE_GUID} /mnt/g rw,relatime - virtiofs drvfs rw
+"
+        );
         assert_eq!(
-            drive_mounts_in(info),
-            [
-                PathBuf::from("/mnt/c"),
-                PathBuf::from("/mnt/my drive"),
-                PathBuf::from("/e"),
-            ]
+            drives_in(&info),
+            ["/mnt/c", "/mnt/my drive", "/e", "/mnt/f", "/mnt/g"].map(PathBuf::from)
         );
     }
 
     #[test]
-    fn test_drive_mounts_in_no_drive_empty() {
-        assert!(drive_mounts_in(MOUNTINFO_SAMPLE.as_bytes()).is_empty());
-        assert!(drive_mounts_in(b"").is_empty());
-        assert!(drive_mounts_in(b"garbage without separator\n").is_empty());
+    fn test_drive_mounts_in_folder_or_project_bind_not_listed() {
+        let info = format!(
+            r"140 82 0:73 /Users/me/proj /workspace rw,noatime - 9p C:\134 rw,aname=drvfs;path=C:\
+141 82 0:78 / /x rw,noatime - 9p C:\134Users rw,aname=drvfs;path=C:\Users\me\proj
+142 82 0:75 /src /y rw,noatime - drvfs E:\134 rw,noatime
+143 82 0:79 / /z rw,noatime - drvfs E:\134src rw,noatime
+144 82 0:77 /{DRIVE_GUID}/src /w rw,relatime - virtiofs drvfs rw
+145 82 0:80 /11111111-2222-3333-4444-555555555555 /v rw,relatime - virtiofs drvfs rw
+"
+        );
+        assert!(drives_in(&info).is_empty(), "{:?}", drives_in(&info));
+    }
+
+    #[test]
+    fn test_drive_mounts_in_non_wsl_mounts_not_listed() {
+        let info = r"22 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw
+78 82 0:34 / /mnt/wsl rw,relatime shared:1 - tmpfs none rw
+146 82 0:76 / /srv/share rw,noatime - 9p share rw,aname=other,path=C:\,trans=virtio
+147 82 0:81 / /srv/vfs rw,relatime - virtiofs myshare rw
+148 82 0:82 / /mnt/c rw,noatime - 9p C:\134 rw,path=C:\,trans=fd
+";
+        assert!(drives_in(info).is_empty(), "{:?}", drives_in(info));
+        assert!(drives_in(MOUNTINFO_SAMPLE).is_empty());
+        assert!(drives_in("").is_empty());
+        assert!(drives_in("garbage without separator\n").is_empty());
     }
 
     #[test]

@@ -854,7 +854,7 @@ fn drive_mounts() -> Vec<PathBuf> {
 /// `has_commit` runs only for a tree at or above home or a drive mount, the
 /// cases it decides: this check sits on the query path, and `has_commit`
 /// spawns git for a tree with no repository. `drive_mounts` runs for every tree
-/// below home; it reads one procfs file.
+/// that is not a root and not at or above home; it reads one procfs file.
 fn is_machine_wide(
     tree: &Path,
     home: Option<&Path>,
@@ -1406,6 +1406,12 @@ mod tests {
         Vec::new()
     }
 
+    /// The drive-mount reader for a root or a tree at or above home, which the
+    /// check decides without it: calling it is a wasted procfs read.
+    fn drives_never_read() -> Vec<PathBuf> {
+        panic!("mountinfo read for a root or a tree at or above home")
+    }
+
     fn drives() -> Vec<PathBuf> {
         vec![PathBuf::from("/mnt/c"), PathBuf::from("/mnt/d")]
     }
@@ -1453,19 +1459,29 @@ mod tests {
     fn test_is_machine_wide_root_and_commitless_home_or_ancestor_true() {
         let home = Path::new("/srv/users/me");
         assert!(
-            is_machine_wide(Path::new("/"), None, no_drives, git_never_asked),
+            is_machine_wide(Path::new("/"), None, drives_never_read, git_never_asked),
             "a root without HOME"
         );
         assert!(
-            is_machine_wide(Path::new("/"), Some(home), no_drives, git_never_asked),
+            is_machine_wide(
+                Path::new("/"),
+                Some(home),
+                drives_never_read,
+                git_never_asked
+            ),
             "a root, commit or not"
         );
         assert!(
-            is_machine_wide(home, Some(home), no_drives, || false),
+            is_machine_wide(home, Some(home), drives_never_read, || false),
             "a home with no commit"
         );
         assert!(
-            is_machine_wide(Path::new("/srv/users"), Some(home), no_drives, || false),
+            is_machine_wide(
+                Path::new("/srv/users"),
+                Some(home),
+                drives_never_read,
+                || false
+            ),
             "an ancestor of home with no commit"
         );
     }
@@ -1474,11 +1490,16 @@ mod tests {
     fn test_is_machine_wide_committed_home_project_and_unrelated_dirs_false() {
         let home = Path::new("/srv/users/me");
         assert!(
-            !is_machine_wide(home, Some(home), no_drives, || true),
+            !is_machine_wide(home, Some(home), drives_never_read, || true),
             "a home with a commit"
         );
         assert!(
-            !is_machine_wide(Path::new("/srv/users"), Some(home), no_drives, || true),
+            !is_machine_wide(
+                Path::new("/srv/users"),
+                Some(home),
+                drives_never_read,
+                || true
+            ),
             "a repo with a commit that holds a sandbox home"
         );
         assert!(
