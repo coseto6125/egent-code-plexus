@@ -385,6 +385,40 @@ fn test_receiver_typing_empty_and_whitespace_only_source_records_no_calls() {
 // The graph side of the cast: `((Tok)o).CreateReader()` binds the member of
 // the cast type in its own file. Before the fix the untyped receiver bound
 // no edge.
+// `dynamic` parses as an identifier but names no type: a cast to it, a
+// parameter, a local and a field of it leave the value untyped, so the
+// resolver keeps its member fallback instead of looking up `dynamic.M`.
+#[test]
+fn test_dynamic_receivers_stay_untyped() {
+    let sites = call_sites(
+        "class C
+{
+    dynamic field;
+    void Use(object o, dynamic p)
+    {
+        dynamic local = o;
+        ((dynamic)o).CastM();
+        (o as dynamic).AsM();
+        p.ParamM();
+        local.LocalM();
+        field.FieldM();
+    }
+}
+",
+        "Use",
+    );
+    assert_eq!(
+        sites,
+        sorted(vec![
+            CallSite::UntypedMember("CastM"),
+            CallSite::UntypedMember("AsM"),
+            CallSite::UntypedMember("ParamM"),
+            CallSite::UntypedMember("LocalM"),
+            CallSite::UntypedMember("FieldM"),
+        ])
+    );
+}
+
 #[test]
 fn test_resolve_call_cast_receiver_binds_member_of_cast_type() {
     let provider = CSharpProvider::new().expect("CSharpProvider::new");

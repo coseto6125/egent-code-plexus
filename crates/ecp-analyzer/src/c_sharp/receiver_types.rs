@@ -164,8 +164,7 @@ fn collect_members(
     };
     let scope = node_range(owner);
     let plain_type = |ty: Option<Node<'_>>| {
-        ty.filter(|ty| ty.kind() == "identifier")
-            .and_then(|ty| ty.utf8_text(source).ok())
+        ty.and_then(|ty| class_type_name(ty, source))
             .unwrap_or_default()
             .to_string()
     };
@@ -332,16 +331,19 @@ fn simple_id_and_type(
     if name_node.kind() != "identifier" {
         return None;
     }
-    // Only bind plain class-name types (single `identifier`).
-    if type_node.kind() != "identifier" {
-        return None;
-    }
+    let ty = class_type_name(type_node, source)?;
     let name = std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()]).ok()?;
-    let ty = std::str::from_utf8(&source[type_node.start_byte()..type_node.end_byte()]).ok()?;
-    if ty.is_empty() {
-        return None;
-    }
     Some((name.to_string(), ty.to_string()))
+}
+
+/// The name of a plain class-name type (a single `identifier`). `dynamic`
+/// parses as an identifier but names no type: a value of it is untyped, so
+/// its member calls keep the resolver's member fallback.
+fn class_type_name<'s>(ty: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
+    (ty.kind() == "identifier")
+        .then(|| ty.utf8_text(source).ok())
+        .flatten()
+        .filter(|ty| !ty.is_empty() && *ty != "dynamic")
 }
 
 /// Whether `call` invokes a local, parameter, field or property. Its result
@@ -526,7 +528,7 @@ fn named_type_receiver<'a>(ty: Option<Node<'_>>, source: &'a [u8]) -> Receiver<'
     };
     let range = ty.start_byte()..ty.end_byte();
     match ty.kind() {
-        "identifier" => std::str::from_utf8(&source[range])
+        "identifier" => class_type_name(ty, source)
             .map_or(Receiver::Untyped, |ty| Receiver::Typed(Cow::Borrowed(ty))),
         // A value of a keyword type is no static access: `string.M()` names
         // the type, which no extension method reaches, so the value takes
