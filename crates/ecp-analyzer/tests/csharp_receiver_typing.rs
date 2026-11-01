@@ -364,10 +364,13 @@ fn test_resolve_call_cast_receiver_binds_member_of_cast_type() {
     assert_eq!(files, ["Lib/Tok.cs::CreateReader"]);
 }
 
-// FU-2026-10-26-755942c857a3. An explicit interface implementation is no
-// member of the type by name: `b.Remove(null)` binds the ordinary `Remove`
-// (line 12), never `IBag.Remove` (line 7), which is declared first. Before
-// the fix both carried the name `Remove` and the call bound the explicit one.
+// Guard for FU-2026-10-26-755942c857a3: with the explicit implementation
+// now named `IBag.Remove`, `b.Remove(null)` still binds the ordinary
+// `Remove` (line 12) declared in the same class, never `IBag.Remove`
+// (line 7). This shape bound correctly before the rename too. The FU's own
+// shape, an explicit implementation on a nearer base class than the
+// ordinary member, binds nothing today: the walk also meets the interface
+// declaration, and the arity check that separates them is still open.
 #[test]
 fn test_resolve_call_explicit_interface_member_is_not_an_ordinary_target() {
     let provider = CSharpProvider::new().expect("CSharpProvider::new");
