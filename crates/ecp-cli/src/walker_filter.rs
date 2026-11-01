@@ -21,10 +21,112 @@
 //! Set `ECP_INCLUDE_WORKTREES=1` to disable both filters — useful when the
 //! user genuinely wants to index a worktree-containing dir or wants to
 //! verify cross-worktree symbol overlap.
+//!
+//! ## Folders of projects
+//!
+//! [`NestedRepoWatch`] refuses a tree with no git commit that holds two or
+//! more repositories, before any file is parsed.
 
-use std::path::{Component, Path};
+use std::io;
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 const ENV_OVERRIDE: &str = "ECP_INCLUDE_WORKTREES";
+
+/// Nested repositories at which a tree with no git commit is refused.
+const NESTED_REPOS_REFUSED_AT: usize = 2;
+
+/// Watches the index walk of a tree with no git commit for repositories
+/// inside it.
+///
+/// Two or more make the tree a folder of projects: that is where an agent's
+/// failed `cd` lands, and indexing it parses every project at once (on
+/// 2026-11-01 that took the host down). One is common, a non-git project
+/// with one cloned dependency, and only earns a note. A tree with a commit is
+/// not watched: its submodules and ignored clones belong to the project.
+/// `[index] allow_nested_repos = true` in the tree's `.ecp/config.toml`
+/// turns the refusal off for a deliberate multi-repo workspace.
+pub(crate) struct NestedRepoWatch {
+    root: PathBuf,
+    active: bool,
+    count: AtomicUsize,
+    found: Mutex<Vec<PathBuf>>,
+}
+
+impl NestedRepoWatch {
+    pub(crate) fn for_tree(root: &Path) -> Self {
+        let allowed = ecp_core::config::load(root).is_ok_and(|cfg| cfg.index.allow_nested_repos);
+        Self {
+            root: root.to_path_buf(),
+            active: !allowed && !crate::build::orchestrator::tree_has_commit(root),
+            count: AtomicUsize::new(0),
+            found: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Records `dir` when it holds a `.git` directory or file. The walk calls
+    /// it for every directory it is about to descend into.
+    pub(crate) fn observe_dir(&self, dir: &Path) {
+        if !self.active || dir == self.root {
+            return;
+        }
+        if std::fs::symlink_metadata(dir.join(".git")).is_ok() {
+            self.count.fetch_add(1, Ordering::Relaxed);
+            self.found
+                .lock()
+                .expect("nested-repo list is never held across a panic")
+                .push(dir.to_path_buf());
+        }
+    }
+
+    /// True once the walk has seen enough repositories to refuse, so it can
+    /// stop instead of listing the rest of a machine-sized tree.
+    pub(crate) fn refusal_reached(&self) -> bool {
+        self.count.load(Ordering::Relaxed) >= NESTED_REPOS_REFUSED_AT
+    }
+
+    /// The verdict once the walk ends: an error from two repositories on, a
+    /// note on stderr for one.
+    pub(crate) fn finish(&self) -> io::Result<()> {
+        let mut found = self
+            .found
+            .lock()
+            .expect("nested-repo list is never held across a panic")
+            .clone();
+        found.sort();
+        let names: Vec<String> = found
+            .iter()
+            .map(|dir| {
+                dir.strip_prefix(&self.root)
+                    .unwrap_or(dir)
+                    .display()
+                    .to_string()
+            })
+            .collect();
+        match names.as_slice() {
+            [] => Ok(()),
+            [only] => {
+                eprintln!(
+                    "note: {} has no git commit and holds the repository {only}; indexing the \
+                     whole tree",
+                    self.root.display()
+                );
+                Ok(())
+            }
+            several => Err(io::Error::other(format!(
+                "refusing to index {}: it has no git commit and holds at least {} repositories \
+                 ({}), so it is a folder of projects; run ecp inside one of them, query across \
+                 them with `ecp group`, or set `allow_nested_repos = true` under [index] in {} \
+                 to index the whole tree",
+                self.root.display(),
+                several.len(),
+                several.join(", "),
+                ecp_core::config::config_path(&self.root).display()
+            ))),
+        }
+    }
+}
 
 /// Returns `true` when `entry_path` should be pruned from the walk.
 ///

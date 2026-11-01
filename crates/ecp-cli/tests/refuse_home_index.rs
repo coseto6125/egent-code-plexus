@@ -10,6 +10,12 @@
 //! the machine and the host lost power. The asserted text "home directory"
 //! stands for "the refusal names its reason"; "--repo" stands for "the advice
 //! also works when the path came from `--repo`".
+//!
+//! A tree with no git commit that holds two or more repositories is a folder
+//! of projects, not a project, and is refused the same way; one nested
+//! repository only earns a note. The asserted text "folder of projects"
+//! stands for "the refusal names its reason", and the listed repository
+//! names stand for "the caller learns where to go instead".
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -376,4 +382,169 @@ fn test_find_in_git_project_below_home_still_indexes() {
         "a git project below home keeps working: {}",
         combined(&out)
     );
+}
+
+/// A non-git `projects` folder below home holding the named repositories.
+fn folder_of_repos(fx: &Fixture, repos: &[&str]) -> PathBuf {
+    let folder = fx.home().join("projects");
+    write_py(&folder, "top.py");
+    for name in repos {
+        let repo = folder.join(name);
+        write_py(&repo, "r.py");
+        fx.git_commit_all(&repo);
+    }
+    folder
+}
+
+fn assert_folder_refused(out: &Output, what: &str, repos: &[&str]) {
+    assert!(
+        !out.status.success(),
+        "{what} must be refused: {}",
+        combined(out)
+    );
+    assert!(
+        combined(out).contains("folder of projects"),
+        "{what}: the refusal names its reason: {}",
+        combined(out)
+    );
+    for repo in repos {
+        assert!(
+            combined(out).contains(repo),
+            "{what}: the refusal lists {repo}: {}",
+            combined(out)
+        );
+    }
+}
+
+#[test]
+fn test_admin_index_non_git_folder_of_two_repos_refused_and_lists_them() {
+    let fx = Fixture::new();
+    let folder = folder_of_repos(&fx, &["alpha", "beta"]);
+    let out = fx.ecp(&folder, &fx.home(), &["admin", "index", "--repo", "."]);
+    assert_folder_refused(
+        &out,
+        "admin index in a folder of two repos",
+        &["alpha", "beta"],
+    );
+    assert_eq!(fx.graph_bins(), 0, "no graph is built for the folder");
+}
+
+#[test]
+fn test_find_in_non_git_folder_of_two_repos_refused() {
+    let fx = Fixture::new();
+    let folder = folder_of_repos(&fx, &["alpha", "beta"]);
+    let out = fx.ecp(&folder, &fx.home(), &["find", "foo"]);
+    assert_folder_refused(&out, "find in a folder of two repos", &["alpha", "beta"]);
+    assert_eq!(fx.graph_bins(), 0, "no graph is built for the folder");
+}
+
+#[test]
+fn test_admin_index_non_git_folder_counts_repos_at_any_depth() {
+    let fx = Fixture::new();
+    let folder = folder_of_repos(&fx, &["alpha"]);
+    let deep = folder.join("team").join("svc");
+    write_py(&deep, "s.py");
+    fx.git_commit_all(&deep);
+    let out = fx.ecp(&folder, &fx.home(), &["admin", "index", "--repo", "."]);
+    assert_folder_refused(
+        &out,
+        "a folder with one repo at depth 1 and one at depth 2",
+        &["alpha", "svc"],
+    );
+}
+
+/// Only repositories the walk would index count. A linked checkout (a `.git`
+/// file) and anything under `.claude/worktrees/` are pruned by the worktree
+/// filter, so they add no parse load and must not tip the count.
+#[test]
+fn test_admin_index_non_git_folder_skips_pruned_worktrees_in_the_count() {
+    let fx = Fixture::new();
+    let folder = folder_of_repos(&fx, &["alpha"]);
+    let linked = folder.join("linked");
+    write_py(&linked, "l.py");
+    std::fs::write(
+        linked.join(".git"),
+        "gitdir: /nowhere/.git/worktrees/linked\n",
+    )
+    .unwrap();
+    for name in ["wt1", "wt2"] {
+        let wt = folder.join(".claude").join("worktrees").join(name);
+        write_py(&wt, "w.py");
+        fx.git_commit_all(&wt);
+    }
+    let out = fx.ecp(&folder, &fx.home(), &["admin", "index", "--repo", "."]);
+    assert!(
+        out.status.success(),
+        "pruned worktrees leave one counted repo: {}",
+        combined(&out)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("note:") && stderr.contains("alpha"),
+        "the note names the one counted repo: {stderr}"
+    );
+    for pruned in ["linked", "wt1", "wt2"] {
+        assert!(
+            !stderr.contains(pruned),
+            "{pruned} is pruned, so it is not reported: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn test_admin_index_non_git_project_with_one_nested_repo_indexes_and_notes_it() {
+    let fx = Fixture::new();
+    let folder = folder_of_repos(&fx, &["vendored"]);
+    let out = fx.ecp(&folder, &fx.home(), &["admin", "index", "--repo", "."]);
+    assert!(
+        out.status.success(),
+        "one nested repo still indexes: {}",
+        combined(&out)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("note:") && stderr.contains("vendored"),
+        "the note names the nested repo: {stderr}"
+    );
+    assert_eq!(fx.graph_bins(), 1, "one graph is published");
+}
+
+#[test]
+fn test_admin_index_folder_of_repos_with_allow_nested_repos_indexes() {
+    let fx = Fixture::new();
+    let folder = folder_of_repos(&fx, &["alpha", "beta"]);
+    std::fs::create_dir_all(folder.join(".ecp")).unwrap();
+    std::fs::write(
+        folder.join(".ecp").join("config.toml"),
+        "[index]\nallow_nested_repos = true\n",
+    )
+    .unwrap();
+    let out = fx.ecp(&folder, &fx.home(), &["admin", "index", "--repo", "."]);
+    assert!(
+        out.status.success(),
+        "a deliberate multi-repo workspace indexes: {}",
+        combined(&out)
+    );
+    assert_eq!(fx.graph_bins(), 1, "one graph is published");
+}
+
+#[test]
+fn test_admin_index_git_repo_with_ignored_nested_repos_still_indexes() {
+    let fx = Fixture::new();
+    let project = fx.home().join("mono");
+    write_py(&project, "m.py");
+    std::fs::write(project.join(".gitignore"), "vendor/\n").unwrap();
+    for name in ["a", "b"] {
+        let nested = project.join("vendor").join(name);
+        write_py(&nested, "v.py");
+        fx.git_commit_all(&nested);
+    }
+    fx.git_commit_all(&project);
+    let out = fx.ecp(&project, &fx.home(), &["admin", "index", "--repo", "."]);
+    assert!(
+        out.status.success(),
+        "a repo with a commit owns its nested clones: {}",
+        combined(&out)
+    );
+    assert_eq!(fx.graph_bins(), 1, "one graph is published");
 }

@@ -94,12 +94,24 @@ pub fn run_analyzer_for_paths(
     // graph doesn't double-count symbols from sibling source copies.
     // Override via `ECP_INCLUDE_WORKTREES=1` (see `walker_filter` docs).
     let filter_root = src_root_ref.to_path_buf();
+    let nested_repos =
+        std::sync::Arc::new(crate::walker_filter::NestedRepoWatch::for_tree(src_root));
+    let nested_repos_filter = std::sync::Arc::clone(&nested_repos);
     walk_builder.filter_entry(move |entry| {
-        !crate::walker_filter::is_skippable_worktree_descendant(entry.path(), &filter_root)
+        let kept =
+            !crate::walker_filter::is_skippable_worktree_descendant(entry.path(), &filter_root);
+        if kept && entry.file_type().is_some_and(|t| t.is_dir()) {
+            nested_repos_filter.observe_dir(entry.path());
+        }
+        kept
     });
+    let nested_repos_ref = &*nested_repos;
     walk_builder.build_parallel().run(|| {
         let tx = file_tx.clone();
         Box::new(move |result| {
+            if nested_repos_ref.refusal_reached() {
+                return ignore::WalkState::Quit;
+            }
             if let Ok(entry) = result {
                 let path = entry.path();
                 let rel_path = path.strip_prefix(src_root_ref).unwrap_or(path);
@@ -146,6 +158,7 @@ pub fn run_analyzer_for_paths(
     drop(file_tx);
     let files_to_analyze: Vec<(std::path::PathBuf, std::path::PathBuf)> =
         file_rx.into_iter().collect();
+    nested_repos.finish()?;
     let skipped_large_files = skipped_large
         .into_inner()
         .expect("skipped-large list is never held across a panic");
