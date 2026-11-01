@@ -411,12 +411,13 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
     // attach would skip the analyzer, so the dump would never be produced — and
     // discard the graph; only the JSONL is wanted. ~/.ecp is left untouched.
     let repo_path = std::path::PathBuf::from(&args.repo);
+    // Refuse before either pass. The dump pass walks the raw worktree without
+    // reaching a build, and `ecp diff` runs it on every call; on the build
+    // pass, a refusal raised inside `head_sha_hex` would print under the
+    // `git rev-parse HEAD:` label.
+    crate::build::orchestrator::refuse_machine_wide_tree(&repo_path).map_err(|e| e.to_string())?;
     if let Some(dump_path) = args.dump_resolver {
         let worktree = repo_path;
-        // This pass walks the raw worktree without reaching a build, and
-        // `ecp diff` runs it on every call.
-        crate::build::orchestrator::refuse_machine_wide_tree(&worktree)
-            .map_err(|e| e.to_string())?;
         if !worktree.exists() {
             return Err(format!("repo path does not exist: {}", worktree.display()));
         }
