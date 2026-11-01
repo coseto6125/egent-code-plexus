@@ -317,16 +317,11 @@ impl ParseSpec for DartSpec {
             // (parent `method_signature`), duplicating those outer emits.
             // Skip the inner cases — they're already covered by @function /
             // @method patterns that anchor on the outer node.
-            // A function declared inside a body (`local_function_declaration`) is a
-            // function-body local: dropped by design, its calls stay with the
-            // enclosing callable.
             if k == NodeKind::Function
                 && root.kind() == "function_signature"
                 && root.parent().is_some_and(|p| {
-                    matches!(
-                        p.kind(),
-                        "function_declaration" | "method_signature" | "local_function_declaration"
-                    ) || is_class_member_declaration(p)
+                    matches!(p.kind(), "function_declaration" | "method_signature")
+                        || is_class_member_declaration(p)
                 })
             {
                 return;

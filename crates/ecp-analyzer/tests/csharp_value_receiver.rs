@@ -524,12 +524,13 @@ fn test_resolve_call_unknown_chain_receiver_binds_no_own_member() {
     );
 }
 
-/// Receivers next to the ruling's rows: an element, a cast, a `typeof`, a
-/// string literal and a call inside `#if` are values of unknown type, so
-/// none binds the caller's own `M` (HEAD bound it); `await typed.Run()`
+/// Receivers next to the ruling's rows: an element, a `typeof`, a string
+/// literal and a call inside `#if` are values whose type has no `M`, so none
+/// binds the caller's own `M` (HEAD bound it). A cast names its type, so
+/// `((Shapes)o).M()` binds `Shapes.M` (FU cdfe6e8cd408); `await typed.Run()`
 /// keeps the typed binding.
 #[test]
-fn test_resolve_call_adjacent_value_receivers_bind_no_own_member() {
+fn test_resolve_call_adjacent_value_receivers_bind_only_the_cast_type() {
     let shapes = "using System.Threading.Tasks;
 namespace Lib
 {
@@ -553,7 +554,7 @@ namespace Lib
 }
 ";
     let graph = graph(&[("Lib/Shapes.cs", shapes)]);
-    assert_eq!(targets(&graph, "Use"), Vec::<String>::new());
+    assert_eq!(targets(&graph, "Use"), ["Shapes.M"]);
     assert_eq!(targets(&graph, "UseAwait"), ["Shapes.Run"]);
 }
 

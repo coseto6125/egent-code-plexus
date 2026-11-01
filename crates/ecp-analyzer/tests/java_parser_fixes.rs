@@ -152,16 +152,17 @@ fn test_java_empty_file_has_no_exported_nodes() {
 }
 
 /// Enum constants are implicitly `public`, so they are exported exactly when
-/// their enum is: a `public` enum, a nested `public` enum, an enum nested in an
-/// interface (implicitly public), and a constant with arguments or a body.
-/// A package-private enum keeps its constants unexported, and an enum method
-/// still follows its own modifier.
+/// their enum is: a `public` enum, a nested `public` enum, and an enum in a
+/// public interface (implicitly public). A package-private enum, or an enum in
+/// a package-private interface, keeps its constants unexported. A constant
+/// with arguments or a body counts, and an enum method follows its own modifier.
 #[test]
 fn test_java_enum_constants_follow_the_enum_export() {
     let g = parse(
         "public enum Color {\n    RED, GREEN(2), BLUE { void f() {} };\n    Color() {}\n    Color(int n) {}\n    void pkg() {}\n    public void open() {}\n}\n\
          enum Hidden { ONE, TWO }\n\
-         interface Api { enum Mode { FAST } }\n\
+         public interface Api { enum Mode { FAST } }\n\
+         interface Hidden2 { enum Quiet { SLOW } }\n\
          public class Outer { public enum In { A } private enum Priv { P } }\n",
     );
     for name in ["RED", "GREEN", "BLUE"] {
@@ -173,6 +174,7 @@ fn test_java_enum_constants_follow_the_enum_export() {
     assert!(exported(&g, "open", NodeKind::Method));
     assert!(!exported(&g, "Hidden", NodeKind::Enum));
     assert!(exported(&g, "FAST", NodeKind::EnumVariant));
+    assert!(!exported(&g, "SLOW", NodeKind::EnumVariant));
     assert!(exported(&g, "A", NodeKind::EnumVariant));
     assert!(!exported(&g, "P", NodeKind::EnumVariant));
 }

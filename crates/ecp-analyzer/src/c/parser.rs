@@ -315,19 +315,23 @@ fn semicolon_after_conditional(decl: Node<'_>) -> bool {
 /// PREALIAS(je_free);`, jemalloc `jemalloc.c:1210`): the ERROR holds a
 /// `type` and one function declarator and nothing else, and the `;` is the
 /// next statement. `None` for any other ERROR.
+///
+/// `child_by_field_name` finds no field on an ERROR node (it reads the
+/// production's field map, which an ERROR lacks); the per-child field name
+/// the query also matches on is still there.
 fn recovered_prototype_end(error: Node<'_>) -> Option<Node<'_>> {
-    let ty = error.child_by_field_name("type")?;
     let mut cursor = error.walk();
+    let mut types = 0;
     let mut declarators = 0;
-    for child in error.named_children(&mut cursor) {
+    for (i, child) in error.named_children(&mut cursor).enumerate() {
         match child.kind() {
             "function_declarator" => declarators += 1,
             "storage_class_specifier" | "type_qualifier" | "comment" => {}
-            _ if child == ty => {}
+            _ if error.field_name_for_named_child(i as u32) == Some("type") => types += 1,
             _ => return None,
         }
     }
-    (declarators == 1).then_some(())?;
+    (types == 1 && declarators == 1).then_some(())?;
     error
         .next_named_sibling()
         .filter(|n| n.kind() == "expression_statement" && n.named_child_count() == 0)
@@ -337,7 +341,7 @@ fn recovered_prototype_end(error: Node<'_>) -> Option<Node<'_>> {
 /// declaration before `decl`, so `decl` is the rest of the typedef:
 /// `TEST_END` / `typedef rb_tree(node_t) tree_t;` reads as `TEST_END
 /// typedef` and `rb_tree(node_t) tree_t;` (jemalloc `test/unit/rb.c:1000`).
-fn split_typedef_keyword(decl: Node<'_>, source: &[u8]) -> Option<Node<'_>> {
+fn split_typedef_keyword<'tree>(decl: Node<'tree>, source: &[u8]) -> Option<Node<'tree>> {
     let prev = decl
         .prev_named_sibling()
         .filter(|p| p.kind() == "declaration")?;

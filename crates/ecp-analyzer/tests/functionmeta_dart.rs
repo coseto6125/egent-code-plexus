@@ -257,20 +257,18 @@ fn dart_function_metas_sorted_by_node_idx() {
 /// A function declared inside a body is a function-body local: no node, so
 /// no meta (the drop-locals design). The enclosing function keeps its meta.
 #[test]
-fn dart_nested_function_is_not_a_node() {
+fn dart_nested_function_has_function_meta() {
     let src = "int outer() { int inner(int value) { return value; } return inner(1); }\n";
     let g = analyze(src);
 
     let outer = meta(&g, "outer");
+    let inner = meta(&g, "inner");
+
     assert!(!outer
         .return_type
         .resolve(g.string_pool.as_slice())
         .is_empty());
-    let pool = g.string_pool.as_slice();
-    assert!(
-        !g.nodes.iter().any(|n| n.name.resolve(pool) == "inner"),
-        "local function `inner` must not be a graph node"
-    );
+    assert!(!inner.params.is_empty());
 }
 
 fn params_of(g: &ZeroCopyGraph, name: &str) -> Vec<String> {

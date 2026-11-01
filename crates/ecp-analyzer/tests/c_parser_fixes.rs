@@ -1102,7 +1102,7 @@ fn test_c_const_object_declarations_match_header_kinds() {
             .filter(|n| matches!(n.kind, NodeKind::Variable | NodeKind::Const))
             .map(|n| (n.name.clone(), n.kind))
             .collect();
-        rows.sort();
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
         rows
     };
     let c = kinds(&parse("names.c", src));

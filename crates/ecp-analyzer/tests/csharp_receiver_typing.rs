@@ -218,18 +218,35 @@ namespace App
 ",
 );
 
-// The graph side of the literal: a proven `string` extension binds as a
-// typed receiver's extension does, not as the untyped heuristic (0.5,
-// `call:extension-heuristic`) it was before.
+const LIT_INT_EXT: (&str, &str) = (
+    "Lib/IntExt.cs",
+    "namespace Lib
+{
+    public static class IntExt
+    {
+
+        public static string FormatWith(this int n, object a) { return null; }
+    }
+}
+",
+);
+
+// The graph side of the literal. An extension target is never proven for a
+// library receiver type (`csharp_extension::resolve` proves only a receiver
+// that is one project type), so the edge stays at the heuristic confidence
+// (0.5, `call:extension-heuristic`) with or without the fix. What the typed
+// `String` receiver changes is the choice among rivals: `this int` does not
+// accept a `String`, so `"..".FormatWith(1)` binds the `this string`
+// declaration (line 4). Before the fix the receiver was untyped, both
+// declarations applied, and the site bound neither.
 #[test]
-fn test_resolve_call_string_literal_receiver_binds_extension_above_heuristic() {
+fn test_resolve_call_string_literal_receiver_picks_the_string_extension() {
     let provider = CSharpProvider::new().expect("CSharpProvider::new");
-    let graph = build(parse_all(&provider, &[LIT_EXT, LIT_USE]));
-    let edges = call_edges(&graph, "F", "FormatWith");
-    assert_eq!(edges.len(), 1, "{edges:?}");
-    let (_, confidence, reason) = &edges[0];
-    assert!(*confidence > HEURISTIC_CONFIDENCE, "{edges:?}");
-    assert_ne!(reason, HEURISTIC_REASON, "{edges:?}");
+    let graph = build(parse_all(&provider, &[LIT_EXT, LIT_INT_EXT, LIT_USE]));
+    assert_eq!(
+        call_edges(&graph, "F", "FormatWith"),
+        [(4, HEURISTIC_CONFIDENCE, HEURISTIC_REASON.to_string())]
+    );
 }
 
 // FU-2026-10-25-cdfe6e8cd408. A cast names the type of its operand: a plain
