@@ -42,10 +42,10 @@ fn check_in(cwd: &std::path::Path, fix: bool) -> CheckResult {
     if fix {
         // Refuse to auto-index a non-git cwd: `index --repo .` would fall back
         // to scanning the whole subtree as an ad-hoc source tree (no file-count
-        // cap → OOM in a large mount). A filesystem root, or `$HOME` or an
-        // ancestor of it with no git commit, never reaches here: the freshness
-        // probe above already refused it. Downgrade to a warn that names the
-        // manual escape hatch.
+        // cap → OOM in a large mount). A filesystem root, or a `$HOME`, a WSL
+        // drive mount or an ancestor of either with no git commit, never
+        // reaches here: the freshness probe above already refused it.
+        // Downgrade to a warn that names the manual escape hatch.
         if !is_git_repo(cwd) {
             return CheckResult::warn(
                 "index",
@@ -71,8 +71,9 @@ fn check_in(cwd: &std::path::Path, fix: bool) -> CheckResult {
 /// that from `doctor --fix` in a large non-git dir (a mount of
 /// media/node_modules) reads every recognized file into one in-memory graph
 /// with no file-count cap → OOM. We refuse the fix there and report instead.
-/// A filesystem root, or `$HOME` or an ancestor of it with no git commit, is
-/// refused for every command by `orchestrator::refuse_machine_wide_tree`.
+/// A filesystem root, or a `$HOME`, a WSL drive mount or an ancestor of either
+/// with no git commit, is refused for every command by
+/// `orchestrator::refuse_machine_wide_tree`.
 fn is_git_repo(cwd: &std::path::Path) -> bool {
     crate::git_cache::common_dir(cwd).is_ok()
 }

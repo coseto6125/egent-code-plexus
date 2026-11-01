@@ -18,6 +18,8 @@ use crate::git::safe_exec::{self, FilterOverrides};
 mod private_index;
 #[cfg(target_os = "linux")]
 pub use private_index::sweep_orphans;
+#[cfg(target_os = "linux")]
+pub(crate) use private_index::wsl_drive_mounts;
 
 /// `-z` (NUL-terminated) avoids git's C-quoting of paths with spaces or
 /// non-ASCII bytes, which the human-readable format would otherwise wrap in
