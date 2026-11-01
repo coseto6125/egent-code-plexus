@@ -287,6 +287,37 @@ fn no_mount_below(mountinfo: io::Result<Vec<u8>>, top: &Path) -> bool {
         .any(|point| point != top && point.starts_with(&prefix))
 }
 
+/// The mount points of Windows drives under WSL: `/mnt/c` by default, moved by
+/// `[automount] root` in `/etc/wsl.conf`. WSL2 mounts a drive as `9p` with
+/// `aname=drvfs`, WSL1 as `drvfs`. Empty when mountinfo cannot be read.
+pub(crate) fn wsl_drive_mounts() -> Vec<PathBuf> {
+    fs::read(MOUNTINFO)
+        .map(|text| drive_mounts_in(&text))
+        .unwrap_or_default()
+}
+
+/// A mountinfo line is
+/// `<id> <parent> <dev> <root> <point> <opts> [tags] - <fstype> <source> <super-opts>`.
+fn drive_mounts_in(mountinfo: &[u8]) -> Vec<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    mountinfo
+        .split(|&b| b == b'\n')
+        .filter_map(|line| {
+            let sep = line.windows(3).position(|w| w == b" - ")?;
+            let point = line[..sep].split(|&b| b == b' ').nth(4)?;
+            let mut tail = line[sep + 3..].split(|&b| b == b' ');
+            let fstype = tail.next()?;
+            let super_opts = tail.nth(1).unwrap_or_default();
+            let drvfs = fstype == b"drvfs"
+                || (fstype == b"9p"
+                    && super_opts
+                        .split(|&b| b == b',' || b == b';')
+                        .any(|opt| opt == b"aname=drvfs"));
+            drvfs.then(|| PathBuf::from(std::ffi::OsString::from_vec(unescape_mount_point(point))))
+        })
+        .collect()
+}
+
 /// The kernel writes space, tab, newline and backslash in a mount point as
 /// three octal digits after a backslash.
 fn unescape_mount_point(field: &[u8]) -> Vec<u8> {
@@ -1574,6 +1605,33 @@ mod tests {
 41 22 0:36 / /home/u/repo2 rw,relatime shared:3 - fuse.sshfs host: rw
 42 22 0:37 / /proc rw,nosuid shared:4 - proc proc rw
 ";
+
+    #[test]
+    fn test_drive_mounts_in_wsl2_and_wsl1_drives_only() {
+        let info = b"\
+22 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw
+78 82 0:34 / /mnt/wsl rw,relatime shared:1 - tmpfs none rw
+135 82 0:73 / /mnt/c rw,noatime - 9p C:\\134 rw,aname=drvfs;path=C:\\;uid=1000;symlinkroot=/mnt/,trans=fd
+136 82 0:74 / /mnt/my\\040drive rw,noatime shared:9 - 9p D:\\134 rw,aname=drvfs;path=D:\\
+137 82 0:75 / /e rw,noatime - drvfs E:\\ rw,noatime,uid=1000
+138 82 0:76 / /srv/share rw,noatime - 9p share rw,aname=other,trans=virtio
+";
+        assert_eq!(
+            drive_mounts_in(info),
+            [
+                PathBuf::from("/mnt/c"),
+                PathBuf::from("/mnt/my drive"),
+                PathBuf::from("/e"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_drive_mounts_in_no_drive_empty() {
+        assert!(drive_mounts_in(MOUNTINFO_SAMPLE.as_bytes()).is_empty());
+        assert!(drive_mounts_in(b"").is_empty());
+        assert!(drive_mounts_in(b"garbage without separator\n").is_empty());
+    }
 
     #[test]
     fn test_no_mount_below_own_and_unrelated_mounts_true() {

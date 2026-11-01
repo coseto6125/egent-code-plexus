@@ -780,7 +780,9 @@ pub(crate) fn head_sha_hex(worktree: &Path) -> io::Result<String> {
 }
 
 /// Refuses a tree that holds every project on the machine: a filesystem
-/// root, or the home directory or an ancestor of it when it has no git commit.
+/// root, or the home directory, a WSL Windows drive mount (`/mnt/c`) or an
+/// ancestor of either when it has no git commit. A project below the drive
+/// mount indexes as before.
 ///
 /// These directories are where a failed `cd` lands. On 2026-11-01 an agent's
 /// unquoted `cd $D` with `$D` empty went to a non-git `$HOME`, and
@@ -801,13 +803,14 @@ pub(crate) fn refuse_machine_wide_tree(worktree: &Path) -> io::Result<()> {
     };
     let home = machine_home(ecp_core::registry::home_dir(), account_home)
         .and_then(|h| dunce::canonicalize(h).ok());
-    if is_machine_wide(&tree, home.as_deref(), || {
+    if is_machine_wide(&tree, home.as_deref(), drive_mounts, || {
         crate::git_cache::has_commit(&tree)
     }) {
         return Err(io::Error::other(format!(
-            "refusing to index {}: it is a filesystem root, or the home directory or an \
-             ancestor of it with no git commit, so it holds every project on this machine; \
-             rerun from inside one project directory, or pass that directory to --repo",
+            "refusing to index {}: it is a filesystem root, or the home directory, a Windows \
+             drive mount or an ancestor of either with no git commit, so it holds every project \
+             on this machine; rerun from inside one project directory, or pass that directory \
+             to --repo",
             tree.display()
         )));
     }
@@ -838,9 +841,32 @@ fn account_home() -> Option<PathBuf> {
     std::env::home_dir()
 }
 
-/// `has_commit` runs only for home or an ancestor of it, the cases it decides.
-fn is_machine_wide(tree: &Path, home: Option<&Path>, has_commit: impl FnOnce() -> bool) -> bool {
-    tree.parent().is_none() || (home.is_some_and(|h| h.starts_with(tree)) && !has_commit())
+#[cfg(target_os = "linux")]
+fn drive_mounts() -> Vec<PathBuf> {
+    crate::git::status::wsl_drive_mounts()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn drive_mounts() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+/// `has_commit` runs only for a tree at or above home or a drive mount, the
+/// cases it decides: this check sits on the query path, and `has_commit`
+/// spawns git for a tree with no repository. `drive_mounts` runs for every tree
+/// below home; it reads one procfs file.
+fn is_machine_wide(
+    tree: &Path,
+    home: Option<&Path>,
+    drive_mounts: impl FnOnce() -> Vec<PathBuf>,
+    has_commit: impl FnOnce() -> bool,
+) -> bool {
+    if tree.parent().is_none() {
+        return true;
+    }
+    let holds = home.is_some_and(|h| h.starts_with(tree))
+        || drive_mounts().iter().any(|m| m.starts_with(tree));
+    holds && !has_commit()
 }
 
 /// The sha a non-git source tree is keyed by: a digest of its canonical path.
@@ -1370,29 +1396,76 @@ mod tests {
 
     const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 
-    /// The commit probe for a tree that is neither a root nor at or above home:
-    /// calling it is a bug.
+    /// The commit probe for a tree that is neither a root nor at or above home
+    /// or a drive mount: calling it is a bug.
     fn git_never_asked() -> bool {
-        panic!("has_commit consulted for a tree that is not home or an ancestor of it")
+        panic!("has_commit consulted for a tree that is not at or above home or a drive mount")
+    }
+
+    fn no_drives() -> Vec<PathBuf> {
+        Vec::new()
+    }
+
+    fn drives() -> Vec<PathBuf> {
+        vec![PathBuf::from("/mnt/c"), PathBuf::from("/mnt/d")]
+    }
+
+    #[test]
+    fn test_is_machine_wide_commitless_drive_mount_or_ancestor_true() {
+        let home = Path::new("/home/me");
+        assert!(
+            is_machine_wide(Path::new("/mnt/c"), Some(home), drives, || false),
+            "a drive mount with no commit"
+        );
+        assert!(
+            is_machine_wide(Path::new("/mnt"), Some(home), drives, || false),
+            "the directory holding the drive mounts, with no commit"
+        );
+    }
+
+    #[test]
+    fn test_is_machine_wide_drive_mount_with_commit_or_project_below_false() {
+        let home = Path::new("/home/me");
+        assert!(
+            !is_machine_wide(Path::new("/mnt/c"), Some(home), drives, || true),
+            "a drive mount that is itself a repository"
+        );
+        assert!(
+            !is_machine_wide(
+                Path::new("/mnt/c/src/proj"),
+                Some(home),
+                drives,
+                git_never_asked
+            ),
+            "a project below a drive mount"
+        );
+        assert!(
+            !is_machine_wide(Path::new("/mnt/cc"), Some(home), drives, git_never_asked),
+            "a name-prefix sibling of a drive mount"
+        );
+        assert!(
+            !is_machine_wide(Path::new("/mnt/c"), Some(home), no_drives, git_never_asked),
+            "a /mnt/c that is not a drive mount"
+        );
     }
 
     #[test]
     fn test_is_machine_wide_root_and_commitless_home_or_ancestor_true() {
         let home = Path::new("/srv/users/me");
         assert!(
-            is_machine_wide(Path::new("/"), None, git_never_asked),
+            is_machine_wide(Path::new("/"), None, no_drives, git_never_asked),
             "a root without HOME"
         );
         assert!(
-            is_machine_wide(Path::new("/"), Some(home), git_never_asked),
+            is_machine_wide(Path::new("/"), Some(home), no_drives, git_never_asked),
             "a root, commit or not"
         );
         assert!(
-            is_machine_wide(home, Some(home), || false),
+            is_machine_wide(home, Some(home), no_drives, || false),
             "a home with no commit"
         );
         assert!(
-            is_machine_wide(Path::new("/srv/users"), Some(home), || false),
+            is_machine_wide(Path::new("/srv/users"), Some(home), no_drives, || false),
             "an ancestor of home with no commit"
         );
     }
@@ -1401,27 +1474,42 @@ mod tests {
     fn test_is_machine_wide_committed_home_project_and_unrelated_dirs_false() {
         let home = Path::new("/srv/users/me");
         assert!(
-            !is_machine_wide(home, Some(home), || true),
+            !is_machine_wide(home, Some(home), no_drives, || true),
             "a home with a commit"
         );
         assert!(
-            !is_machine_wide(Path::new("/srv/users"), Some(home), || true),
+            !is_machine_wide(Path::new("/srv/users"), Some(home), no_drives, || true),
             "a repo with a commit that holds a sandbox home"
         );
         assert!(
-            !is_machine_wide(Path::new("/srv/users/me/proj"), Some(home), git_never_asked),
+            !is_machine_wide(
+                Path::new("/srv/users/me/proj"),
+                Some(home),
+                no_drives,
+                git_never_asked
+            ),
             "below home"
         );
         assert!(
-            !is_machine_wide(Path::new("/srv/users/meow"), Some(home), git_never_asked),
+            !is_machine_wide(
+                Path::new("/srv/users/meow"),
+                Some(home),
+                no_drives,
+                git_never_asked
+            ),
             "a name-prefix sibling"
         );
         assert!(
-            !is_machine_wide(Path::new("/opt/src"), Some(home), git_never_asked),
+            !is_machine_wide(
+                Path::new("/opt/src"),
+                Some(home),
+                no_drives,
+                git_never_asked
+            ),
             "outside home"
         );
         assert!(
-            !is_machine_wide(Path::new("/opt/src"), None, git_never_asked),
+            !is_machine_wide(Path::new("/opt/src"), None, no_drives, git_never_asked),
             "no HOME set"
         );
     }
