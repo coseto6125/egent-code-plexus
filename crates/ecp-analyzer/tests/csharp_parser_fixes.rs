@@ -886,3 +886,97 @@ fn test_csharp_if_group_of_catch_clauses_emits_no_catch_callee() {
         m.field_reads
     );
 }
+
+/// `"<kind:?> <name>"` of every node, sorted: the order the members are
+/// emitted in is no contract here.
+fn kind_names(g: &LocalGraph) -> Vec<String> {
+    let mut names: Vec<String> = g
+        .nodes
+        .iter()
+        .map(|n| format!("{:?} {}", n.kind, n.name))
+        .collect();
+    names.sort();
+    names
+}
+
+// FU-2026-10-25-c358a4d7ec1e (parser part). An explicit interface
+// implementation is reached only through its interface, so it takes the
+// qualified name and no longer shares a name (and a uid) with the ordinary
+// member beside it: a property, a method, a generic interface's method, an
+// event and an indexer. Before the fix each carried the bare member name.
+#[test]
+fn test_csharp_explicit_interface_members_take_qualified_names() {
+    let g = parse(&lines(&[
+        "class Bag : IList",
+        "{",
+        "    public bool IsReadOnly => false;",
+        "    bool IList.IsReadOnly => true;",
+        "    public void Remove(object o) { }",
+        "    void IList.Remove(object o) { }",
+        "    bool ICollection< int >.Remove(int item) { return true; }",
+        "    event EventHandler IFoo.Changed { add { } remove { } }",
+        "    public object this[int i] { get { return null; } }",
+        "    object IList.this[int i] { get { return null; } }",
+        "}",
+    ]));
+    assert_eq!(
+        kind_names(&g),
+        [
+            "Class Bag",
+            "Method ICollection<int>.Remove",
+            "Method IFoo.Changed",
+            "Method IList.Remove",
+            "Method IList.this[...]",
+            "Method Remove",
+            "Method this[...]",
+            "Property IList.IsReadOnly",
+            "Property IsReadOnly",
+        ]
+    );
+}
+
+// Atypical: a type holds only the explicit forms (no ordinary member of the
+// same name) and names its interfaces by a dotted path.
+#[test]
+fn test_csharp_explicit_interface_member_alone_and_dotted_interface_path() {
+    let g = parse(&lines(&[
+        "class Only : System.Collections.IList, System.IDisposable",
+        "{",
+        "    bool System.Collections.IList.IsFixedSize => false;",
+        "    void System.IDisposable.Dispose() { }",
+        "}",
+    ]));
+    assert_eq!(
+        kind_names(&g),
+        [
+            "Class Only",
+            "Method System.IDisposable.Dispose",
+            "Property System.Collections.IList.IsFixedSize",
+        ]
+    );
+}
+
+// Guard: ordinary members, operators and a field named like an explicit
+// property keep their bare names.
+#[test]
+fn test_csharp_ordinary_members_keep_bare_names() {
+    let g = parse(&lines(&[
+        "class C",
+        "{",
+        "    private int IsReadOnly;",
+        "    public void Remove(object o) { }",
+        "    public static C operator +(C a, C b) { return a; }",
+        "    public static explicit operator int(C c) { return 0; }",
+        "}",
+    ]));
+    assert_eq!(
+        kind_names(&g),
+        [
+            "Class C",
+            "Method Remove",
+            "Method op_+",
+            "Method op_Explicit",
+            "Property IsReadOnly",
+        ]
+    );
+}

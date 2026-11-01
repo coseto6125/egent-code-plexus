@@ -300,12 +300,19 @@ impl Group {
     }
 }
 
+/// The most branch combinations [`prepare_source`] tries when the first
+/// branches leave the braces unbalanced.
+const MAX_BRANCH_CHOICES: usize = 256;
+
 /// `source` with every conditional group that splits syntax (see
-/// [`Group::splits_syntax`]) reduced to its first branch: the group's
-/// directive lines and every later branch become blanks, as if the first
-/// branch's symbol were the only one defined. When the first branches leave
-/// the braces unbalanced, only the groups that keep the brace depth are
-/// reduced. `None` when no group is reduced. No byte moves.
+/// [`Group::splits_syntax`]) reduced to one branch: the group's directive
+/// lines and every other branch become blanks, as if that branch's symbol
+/// were the only one defined. The first branch stays when the kept branches
+/// then balance the braces; otherwise the first combination of branches that
+/// balances them stays (`#if X` / `#else` opens a brace that an `#if !X`
+/// closes). When no combination balances, only the groups that keep the
+/// brace depth are reduced, each to its first branch. `None` when no group
+/// is reduced. No byte moves.
 pub fn prepare_source(source: &[u8]) -> Option<Vec<u8>> {
     if !source.contains(&b'#') {
         return None;
@@ -368,25 +375,54 @@ pub fn prepare_source(source: &[u8]) -> Option<Vec<u8>> {
     if split.is_empty() {
         return None;
     }
-    let patched = blank_groups(source, &split);
-    if braces_balance(&patched) {
-        return Some(patched);
+    let first_branches = blank_groups(source, &split.iter().map(|g| (g, 0)).collect::<Vec<_>>());
+    if braces_balance(&first_branches) {
+        return Some(first_branches);
     }
-    // The first branches do not fit together (`#if X` opens a brace that an
-    // `#if !X` closes). Blanking one half of such a pair breaks a tree that
-    // keeping both halves may not, so only the groups no brace depends on go.
-    split.retain(Group::keeps_depth);
-    (!split.is_empty()).then(|| blank_groups(source, &split))
+    balancing_branches(source, &split).or_else(|| {
+        let neutral: Vec<(&Group, usize)> = split
+            .iter()
+            .filter(|group| group.keeps_depth())
+            .map(|group| (group, 0))
+            .collect();
+        (!neutral.is_empty()).then(|| blank_groups(source, &neutral))
+    })
 }
 
-/// `source` with each of `groups` reduced to its first branch.
-fn blank_groups(source: &[u8], groups: &[Group]) -> Vec<u8> {
+/// `source` with the groups that move the brace depth reduced to the first
+/// combination of branches that balances the braces, the groups that keep
+/// the depth reduced to their first branch. `None` when no combination
+/// balances them, or when there are more than [`MAX_BRANCH_CHOICES`] to try.
+fn balancing_branches(source: &[u8], split: &[Group]) -> Option<Vec<u8>> {
+    let moving: Vec<&Group> = split.iter().filter(|g| !g.keeps_depth()).collect();
+    let combinations = moving
+        .iter()
+        .try_fold(1usize, |total, g| total.checked_mul(g.branches.len()))
+        .filter(|&total| total <= MAX_BRANCH_CHOICES)?;
+    // Combination 0 is every first branch, which the caller tried.
+    (1..combinations).find_map(|mut index| {
+        let mut picks: Vec<(&Group, usize)> = split
+            .iter()
+            .filter(|g| g.keeps_depth())
+            .map(|g| (g, 0))
+            .collect();
+        for group in &moving {
+            picks.push((*group, index % group.branches.len()));
+            index /= group.branches.len();
+        }
+        let patched = blank_groups(source, &picks);
+        braces_balance(&patched).then_some(patched)
+    })
+}
+
+/// `source` with each group of `picks` reduced to the branch it pairs with.
+fn blank_groups(source: &[u8], picks: &[(&Group, usize)]) -> Vec<u8> {
     let mut patched = source.to_vec();
-    for group in groups {
+    for &(group, kept) in picks {
         blank_range(&mut patched, group.endif.0, group.endif.1);
         for (k, branch) in group.branches.iter().enumerate() {
             blank_range(&mut patched, branch.directive.0, branch.directive.1);
-            if k > 0 {
+            if k != kept {
                 blank_range(&mut patched, branch.body.0, branch.body.1);
             }
         }
@@ -653,20 +689,97 @@ mod tests {
         );
     }
 
-    /// When the first branches do not pair (`#if X` / `#else` opens,
-    /// `#if !X` closes), neither half is blanked.
+    /// An inverted pair: `#if X` / `#else` opens a brace in its second
+    /// branch, `#if !X` closes it. The first branches leave the braces
+    /// unbalanced, so each group keeps the branch that pairs with the other.
     #[test]
-    fn test_prepare_source_unpaired_first_branches_blank_neither_half() {
+    fn test_prepare_source_inverted_pair_keeps_the_branches_that_balance() {
         let src = "void M() {\n#if X\n#else\nlock (o) {\n#endif\nBar();\n#if !X\n}\n#endif\n}\n";
+        let out = patched(src).expect("patched");
+        assert_eq!(out.len(), src.len());
+        assert_eq!(
+            trimmed(&out),
+            [
+                "void M() {",
+                "",
+                "",
+                "lock (o) {",
+                "",
+                "Bar();",
+                "",
+                "}",
+                "",
+                "}"
+            ]
+        );
+    }
+
+    /// The same pair with the closing group's branches swapped: the second
+    /// group keeps its second branch, the first group its first.
+    #[test]
+    fn test_prepare_source_inverted_pair_picks_a_later_branch_of_the_closing_group() {
+        let src =
+            "void M() {\n#if X\nlock (o) {\n#endif\nBar();\n#if X\nOther();\n#else\n}\n#endif\n}\n";
+        let out = patched(src).expect("patched");
+        assert_eq!(
+            trimmed(&out),
+            [
+                "void M() {",
+                "",
+                "lock (o) {",
+                "",
+                "Bar();",
+                "",
+                "",
+                "",
+                "}",
+                "",
+                "}"
+            ]
+        );
+    }
+
+    /// CRLF line ends: the inverted pair is reduced and every line break
+    /// stays.
+    #[test]
+    fn test_prepare_source_inverted_pair_crlf_keeps_line_breaks() {
+        let src = "void M() {\r\n#if X\r\n#else\r\nlock (o) {\r\n#endif\r\nBar();\r\n#if !X\r\n}\r\n#endif\r\n}\r\n";
+        let out = patched(src).expect("patched");
+        assert_eq!(out.len(), src.len());
+        assert_eq!(out.matches("\r\n").count(), src.matches("\r\n").count());
+        assert!(out.contains("lock (o) {") && !out.contains('#'), "{out:?}");
+    }
+
+    /// When no choice of branches balances the braces (a lone group opens a
+    /// brace nothing closes), neither half is blanked.
+    #[test]
+    fn test_prepare_source_no_balancing_branches_blank_neither_half() {
+        let src = "void M() {\n#if X\nlock (o) {\n#endif\nBar();\n}\n";
         assert_eq!(patched(src), None);
     }
 
-    /// The unpaired-halves fallback still reduces a group no brace depends
-    /// on.
+    /// The inverted pair is reduced as well as a group no brace depends on.
     #[test]
-    fn test_prepare_source_unpaired_halves_still_reduce_else_group() {
+    fn test_prepare_source_inverted_pair_still_reduces_else_group() {
         let src = "void M() {\n#if X\n#else\nlock (o) {\n#endif\nBar();\n#if !X\n}\n#endif\nif (a) { }\n#if Y\nelse { }\n#endif\n}\n";
         let out = patched(src).expect("patched");
+        assert!(!out.contains('#'), "{out:?}");
+        assert!(
+            out.contains("lock (o) {") && out.contains("else { }"),
+            "{out:?}"
+        );
+    }
+
+    /// Past the search bound the pair is not tried: only the groups no brace
+    /// depends on are reduced.
+    #[test]
+    fn test_prepare_source_too_many_moving_groups_fall_back_to_neutral_groups() {
+        let mut src = String::from("void M() {\n");
+        for _ in 0..9 {
+            src.push_str("#if X\n#else\nlock (o) {\n#endif\nBar();\n#if !X\n}\n#endif\n");
+        }
+        src.push_str("if (a) { }\n#if Y\nelse { }\n#endif\n}\n");
+        let out = patched(&src).expect("patched");
         assert!(out.contains("#if X") && out.contains("#if !X"), "{out:?}");
         assert!(
             !out.contains("#if Y") && out.contains("else { }"),

@@ -142,6 +142,45 @@ fn declaring_scope(decl: tree_sitter::Node<'_>, source: &[u8]) -> String {
     scope
 }
 
+/// The interface an explicit implementation names (`ICollection<T>` of
+/// `bool ICollection<T>.Remove(T item)`), with the whitespace removed; `None`
+/// for any other declaration.
+pub(super) fn explicit_interface(decl: tree_sitter::Node<'_>, source: &[u8]) -> Option<String> {
+    if !matches!(
+        decl.kind(),
+        "method_declaration"
+            | "property_declaration"
+            | "event_declaration"
+            | "indexer_declaration"
+            | "operator_declaration"
+            | "conversion_operator_declaration"
+    ) {
+        return None;
+    }
+    let mut cursor = decl.walk();
+    let specifier = decl
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == "explicit_interface_specifier")?;
+    let text = specifier.utf8_text(source).ok()?;
+    let interface: String = text
+        .trim_end_matches('.')
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    (!interface.is_empty()).then_some(interface)
+}
+
+/// The name a member node carries: an explicit interface implementation is
+/// reached only through its interface, so it takes the qualified name
+/// (`IList.IsReadOnly`) and neither collides with an ordinary member of the
+/// same name nor binds an `x.IsReadOnly` access or call.
+fn qualified_member_name(decl: tree_sitter::Node<'_>, name: &str, source: &[u8]) -> String {
+    match explicit_interface(decl, source) {
+        Some(interface) => format!("{interface}.{name}"),
+        None => name.to_string(),
+    }
+}
+
 thread_local! {
     static PARSER: std::cell::RefCell<tree_sitter::Parser> = std::cell::RefCell::new({
         let mut parser = tree_sitter::Parser::new();
@@ -536,7 +575,7 @@ impl ParseSpec for CSharpSpec {
                 .unwrap_or_else(|| "op_unknown".to_string());
             emit_special(
                 op_node,
-                op_name,
+                qualified_member_name(op_node, &op_name, source),
                 exported_at(op_node),
                 type_annotation.clone(),
                 decorators.clone(),
@@ -557,7 +596,7 @@ impl ParseSpec for CSharpSpec {
             };
             emit_special(
                 cv_node,
-                conv_name,
+                qualified_member_name(cv_node, &conv_name, source),
                 exported_at(cv_node),
                 type_annotation.clone(),
                 decorators.clone(),
@@ -569,7 +608,7 @@ impl ParseSpec for CSharpSpec {
             // indexer_declaration: canonical name "this[...]".
             emit_special(
                 idx_node,
-                "this[...]".to_string(),
+                qualified_member_name(idx_node, "this[...]", source),
                 exported_at(idx_node),
                 type_annotation.clone(),
                 decorators.clone(),
@@ -644,7 +683,7 @@ impl ParseSpec for CSharpSpec {
                     let name = if is_destructor_name {
                         format!("~{name_str}")
                     } else {
-                        name_str.to_string()
+                        qualified_member_name(root, name_str, source)
                     };
                     let i = nodes.len();
                     // `Conv<T>` beside `Conv` is a type of its own, and

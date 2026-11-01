@@ -26,6 +26,7 @@
 //!   - First named child: type (`identifier` / `predefined_type`)
 //!   - `variable_declarator` child with `name` field (`identifier`)
 
+use super::parser::explicit_interface;
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_csharp_string_value,
 };
@@ -154,6 +155,10 @@ fn collect_members(
         }
     };
     if decl.kind() == "property_declaration" {
+        // An explicit implementation is no member of the type by name.
+        if explicit_interface(decl, source).is_some() {
+            return;
+        }
         push(
             decl.child_by_field_name("name"),
             &plain_type(decl.child_by_field_name("type")),
@@ -373,7 +378,9 @@ fn with_call_arguments(entry: String, inv: Node<'_>, source: &[u8]) -> String {
 enum Receiver<'a> {
     /// A value or a type whose type the parser reads by name: `this`,
     /// `base`, a local, parameter, field or property declared with a plain
-    /// type name, `new T()`, a keyword type (`string.Join`).
+    /// type name, `new T()`, a keyword type (`string.Join`), a literal
+    /// (`"..".M()` is a `String` value, spelled by its `System` name so that
+    /// it is no static access) or a cast (`((T)x).M()`).
     Typed(Cow<'a, str>),
     /// `this` or `base` with no type to name: the bare member.
     Implicit,
@@ -385,7 +392,7 @@ enum Receiver<'a> {
     /// A call whose return type the resolver may read (`Foo.Create().M()`).
     Call,
     /// A value of unknown type: a field of a generic type, `var x`, `a.b`,
-    /// `a[i]`, `(T)x`, a delegate's result.
+    /// `a[i]`, `(T?)x`, a delegate's result.
     Untyped,
 }
 
@@ -449,6 +456,26 @@ fn classify_receiver<'a>(
                 .map_or(Receiver::Untyped, Receiver::MaybeType)
         }
         "predefined_type" => Receiver::Typed(Cow::Borrowed(text(receiver).ok()?)),
+        "string_literal"
+        | "verbatim_string_literal"
+        | "raw_string_literal"
+        | "interpolated_string_expression" => Receiver::Typed(Cow::Borrowed("String")),
+        "character_literal" => Receiver::Typed(Cow::Borrowed("Char")),
+        "boolean_literal" => Receiver::Typed(Cow::Borrowed("Boolean")),
+        "integer_literal" => integer_literal_type(text(receiver).ok()?)
+            .map_or(Receiver::Untyped, |ty| Receiver::Typed(Cow::Borrowed(ty))),
+        "real_literal" => Receiver::Typed(Cow::Borrowed(real_literal_type(text(receiver).ok()?))),
+        // `(x).M()`: the value of the inner expression.
+        "parenthesized_expression" => {
+            let mut cursor = receiver.walk();
+            let inner = receiver
+                .named_children(&mut cursor)
+                .find(|child| !child.is_extra())?;
+            classify_receiver(inner, pos, source, locals, nodes)?
+        }
+        // `((T)x).M()` and `(x as T).M()`: the value has the named type.
+        "cast_expression" => named_type_receiver(receiver.child_by_field_name("type"), source),
+        "as_expression" => named_type_receiver(receiver.child_by_field_name("right"), source),
         "object_creation_expression" => receiver
             .child_by_field_name("type")
             .filter(|ty| ty.kind() == "identifier")
@@ -457,6 +484,94 @@ fn classify_receiver<'a>(
         "invocation_expression" if !calls_value(receiver, source, locals, nodes) => Receiver::Call,
         _ => Receiver::Untyped,
     })
+}
+
+/// The receiver a cast or an `as` expression gives its operand: a plain or
+/// keyword type is the value's type, a generic or qualified type name may be a
+/// project type (its last segment), any other type (`T?`, `T[]`, a tuple)
+/// leaves the value untyped.
+fn named_type_receiver<'a>(ty: Option<Node<'_>>, source: &'a [u8]) -> Receiver<'a> {
+    let Some(ty) = ty else {
+        return Receiver::Untyped;
+    };
+    let range = ty.start_byte()..ty.end_byte();
+    match ty.kind() {
+        "identifier" => std::str::from_utf8(&source[range])
+            .map_or(Receiver::Untyped, |ty| Receiver::Typed(Cow::Borrowed(ty))),
+        "predefined_type" => std::str::from_utf8(&source[range]).map_or(Receiver::Untyped, |ty| {
+            Receiver::Typed(Cow::Borrowed(system_type_name(ty)))
+        }),
+        "qualified_name" | "alias_qualified_name" => {
+            name_of_field(ty, source).map_or(Receiver::Untyped, Receiver::MaybeType)
+        }
+        "generic_name" => ty
+            .named_child(0)
+            .filter(|id| id.kind() == "identifier")
+            .and_then(|id| std::str::from_utf8(&source[id.start_byte()..id.end_byte()]).ok())
+            .map_or(Receiver::Untyped, Receiver::MaybeType),
+        _ => Receiver::Untyped,
+    }
+}
+
+/// The `System` type of an integer literal (C# spec 12.8.4): the first of
+/// `int`, `uint`, `long`, `ulong` that holds the value, narrowed by a `u` /
+/// `l` suffix. `None` for a value no type holds.
+fn integer_literal_type(text: &str) -> Option<&'static str> {
+    let text = text.replace('_', "").to_ascii_lowercase();
+    let digits = text.trim_end_matches(['u', 'l']);
+    let suffix = &text[digits.len()..];
+    let (digits, radix) = match digits.get(..2) {
+        Some("0x") => (&digits[2..], 16),
+        Some("0b") => (&digits[2..], 2),
+        _ => (digits, 10),
+    };
+    let value = u64::from_str_radix(digits, radix).ok()?;
+    let (unsigned, long) = (suffix.contains('u'), suffix.contains('l'));
+    Some(if !unsigned && !long && value <= i32::MAX as u64 {
+        "Int32"
+    } else if !long && value <= u32::MAX as u64 {
+        "UInt32"
+    } else if !unsigned && value <= i64::MAX as u64 {
+        "Int64"
+    } else {
+        "UInt64"
+    })
+}
+
+/// The `System` type of a real literal: `f` is `Single`, `m` is `Decimal`,
+/// anything else (`d` or no suffix) is `Double`.
+fn real_literal_type(text: &str) -> &'static str {
+    match text.bytes().next_back().map(|b| b.to_ascii_lowercase()) {
+        Some(b'f') => "Single",
+        Some(b'm') => "Decimal",
+        _ => "Double",
+    }
+}
+
+/// A C# keyword type as its `System` type's name (`string` is `String`): a
+/// value of a keyword type is no static access, so it must not read as the
+/// keyword (`string.M()` names the type, and no extension method reaches it).
+fn system_type_name(name: &str) -> &str {
+    match name {
+        "bool" => "Boolean",
+        "byte" => "Byte",
+        "sbyte" => "SByte",
+        "char" => "Char",
+        "decimal" => "Decimal",
+        "double" => "Double",
+        "float" => "Single",
+        "int" => "Int32",
+        "uint" => "UInt32",
+        "nint" => "IntPtr",
+        "nuint" => "UIntPtr",
+        "long" => "Int64",
+        "ulong" => "UInt64",
+        "short" => "Int16",
+        "ushort" => "UInt16",
+        "object" => "Object",
+        "string" => "String",
+        other => other,
+    }
 }
 
 /// The last segment of the dotted name `receiver` when that name may be a
