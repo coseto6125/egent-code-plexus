@@ -796,7 +796,9 @@ fn test_rust_let_clone_alias_trait_impl_clone_keeps_type() {
 
 // Contract: `fn clone(&self) -> &Self` returns the impl type behind a
 // reference, so the alias takes the impl type, never the literal `Self`.
-// A wrapper the binding model does not unwrap leaves the alias untyped.
+// A raw pointer (`*const Self`) never auto-derefs for a method call, and
+// a wrapper the binding model does not unwrap (`Box<Self>`) is not read:
+// both leave the alias untyped.
 #[test]
 fn test_rust_let_clone_alias_inherent_clone_returning_ref_self_takes_impl_type() {
     let g = parse(
@@ -815,7 +817,7 @@ fn test_rust_let_clone_alias_inherent_clone_returning_ref_self_takes_impl_type()
     assert_sites(
         &g,
         "b",
-        &[CallSite::Plain("Pup.clone"), CallSite::Plain("Pup.m")],
+        &[CallSite::Plain("Pup.clone"), CallSite::UntypedMember("m")],
     );
     assert_sites(
         &g,

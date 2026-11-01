@@ -160,7 +160,7 @@ fn inherent_clone_return(
         return Some(CloneReturn::Unknown);
     };
     // `self_type_name` unwraps `&`/generics, so `Self` and `&Self` both read
-    // as the impl type; a wrapper it cannot unwrap (`Box<Self>`) stays unknown.
+    // as the impl type; a raw pointer or a wrapper it cannot unwrap (`Box<Self>`) stays unknown.
     let named = self_type_name(returns, source);
     if named.as_deref() == Some("Self") || named.as_deref() == Some(impl_type) {
         return Some(CloneReturn::Returns(impl_type.to_string()));

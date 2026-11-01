@@ -48,6 +48,9 @@ struct LocalTypes {
     /// otherwise). Keyed by name, so a lookup reads only the same-name
     /// members.
     members: HashMap<String, Vec<(PosRange, String)>>,
+    /// Every explicit interface implementation of a property. C# reaches it
+    /// only through the interface, so its simple name names no member.
+    explicit: Vec<PosRange>,
 }
 
 impl LocalTypes {
@@ -61,6 +64,12 @@ impl LocalTypes {
             .filter(|((start, end), _)| *start <= pos && pos <= *end)
             .min_by_key(|(range, _)| range_width(*range))
             .map(|(_, ty)| ty.as_str())
+    }
+
+    fn is_explicit(&self, pos: Pos) -> bool {
+        self.explicit
+            .iter()
+            .any(|(start, end)| *start <= pos && pos <= *end)
     }
 
     fn lookup(&self, pos: Pos, var: &str) -> Option<&str> {
@@ -87,9 +96,13 @@ impl LocalTypes {
 fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
     let mut scopes: Vec<(PosRange, HashMap<String, String>)> = Vec::new();
     let mut members: HashMap<String, Vec<(PosRange, String)>> = HashMap::new();
+    let mut explicit: Vec<PosRange> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         match n.kind() {
+            "property_declaration" if is_explicit_implementation(n) => {
+                explicit.push(node_range(n));
+            }
             "field_declaration" | "property_declaration" => {
                 collect_members(n, source, &mut members);
             }
@@ -115,7 +128,19 @@ fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
             stack.push(child);
         }
     }
-    LocalTypes { scopes, members }
+    LocalTypes {
+        scopes,
+        members,
+        explicit,
+    }
+}
+
+fn is_explicit_implementation(decl: Node<'_>) -> bool {
+    let mut cursor = decl.walk();
+    let explicit = decl
+        .named_children(&mut cursor)
+        .any(|child| child.kind() == "explicit_interface_specifier");
+    explicit
 }
 
 /// Record the fields or the property `decl` declares, under the range of
@@ -155,14 +180,6 @@ fn collect_members(
         }
     };
     if decl.kind() == "property_declaration" {
-        // An explicit implementation is no member of the type by name.
-        let mut cursor = decl.walk();
-        if decl
-            .named_children(&mut cursor)
-            .any(|child| child.kind() == "explicit_interface_specifier")
-        {
-            return;
-        }
         push(
             decl.child_by_field_name("name"),
             &plain_type(decl.child_by_field_name("type")),
@@ -336,7 +353,7 @@ fn calls_value(call: Node<'_>, source: &[u8], locals: &LocalTypes, nodes: &[RawN
         .and_then(|function| function.utf8_text(source).ok())
         .is_some_and(|name| {
             let pos = start_pos(call);
-            locals.lookup(pos, name).is_some() || declares_member(nodes, pos, name)
+            locals.lookup(pos, name).is_some() || declares_member(nodes, locals, pos, name)
         })
 }
 
@@ -418,7 +435,7 @@ fn classify_receiver<'a>(
     };
     let member = move |name: &str| match locals.member_type(pos, name) {
         Some(ty) => Some(typed(ty)),
-        None if declares_member(nodes, pos, name) => Some(Receiver::Untyped),
+        None if declares_member(nodes, locals, pos, name) => Some(Receiver::Untyped),
         None => None,
     };
     let is_this = |node: Node<'_>| matches!(node.kind(), "this_expression" | "this");
@@ -596,7 +613,7 @@ fn type_path_tail<'a>(
     let value = node.kind() == "identifier"
         && (locals.lookup(pos, root).is_some()
             || locals.member_type(pos, root).is_some()
-            || declares_member(nodes, pos, root));
+            || declares_member(nodes, locals, pos, root));
     (!value).then_some(tail.unwrap_or(root))
 }
 
@@ -740,7 +757,7 @@ pub fn extract_csharp_calls_and_path_literals(
 /// Whether a type enclosing `pos` declares a field or property named `name`
 /// (both are `Property` nodes). A nested type's members count for the whole
 /// outer type: that only keeps more calls on the bare member.
-fn declares_member(nodes: &[RawNode], pos: Pos, name: &str) -> bool {
+fn declares_member(nodes: &[RawNode], locals: &LocalTypes, pos: Pos, name: &str) -> bool {
     let is_type = |n: &RawNode| {
         matches!(
             n.kind,
@@ -752,9 +769,10 @@ fn declares_member(nodes: &[RawNode], pos: Pos, name: &str) -> bool {
         .filter(|m| m.kind == NodeKind::Property && m.name == name)
         .any(|m| {
             let at = (m.span.0, m.span.1);
-            nodes
-                .iter()
-                .any(|t| is_type(t) && span_holds(t.span, pos) && span_holds(t.span, at))
+            !locals.is_explicit(at)
+                && nodes
+                    .iter()
+                    .any(|t| is_type(t) && span_holds(t.span, pos) && span_holds(t.span, at))
         })
 }
 
