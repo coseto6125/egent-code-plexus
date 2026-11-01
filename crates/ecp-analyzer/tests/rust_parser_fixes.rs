@@ -793,3 +793,106 @@ fn test_rust_let_clone_alias_trait_impl_clone_keeps_type() {
     );
     assert_sites(&g, "b", &[CallSite::Plain("Cat.m")]);
 }
+
+// Contract: `fn clone(&self) -> &Self` returns the impl type behind a
+// reference, so the alias takes the impl type, never the literal `Self`.
+// A wrapper the binding model does not unwrap leaves the alias untyped.
+#[test]
+fn test_rust_let_clone_alias_inherent_clone_returning_ref_self_takes_impl_type() {
+    let g = parse(
+        "impl Dog { fn clone(&self) -> &Self { self } }\n\
+         impl Pup { fn clone(&self) -> *const Self { self } }\n\
+         impl Cub { fn clone(&self) -> Box<Self> { todo!() } }\n\
+         fn a(x: Dog) { let y = x.clone(); y.m(); }\n\
+         fn b(x: Pup) { let y = x.clone(); y.m(); }\n\
+         fn c(x: Cub) { let y = x.clone(); y.m(); }\n",
+    );
+    assert_sites(
+        &g,
+        "a",
+        &[CallSite::Plain("Dog.clone"), CallSite::Plain("Dog.m")],
+    );
+    assert_sites(
+        &g,
+        "b",
+        &[CallSite::Plain("Pup.clone"), CallSite::Plain("Pup.m")],
+    );
+    assert_sites(
+        &g,
+        "c",
+        &[CallSite::Plain("Cub.clone"), CallSite::UntypedMember("m")],
+    );
+}
+
+// Contract: the FU's own shape, a shadowing `let x = x.clone();`, takes the
+// inherent return type.
+#[test]
+fn test_rust_let_clone_alias_inherent_clone_shadowing_rebinding_takes_return_type() {
+    let g = parse(
+        "impl Dog { fn clone(&self) -> Cat { Cat } }\n\
+         fn a(x: Dog) { let x = x.clone(); x.m(); }\n",
+    );
+    assert_sites(
+        &g,
+        "a",
+        &[CallSite::Plain("Dog.clone"), CallSite::Plain("Cat.m")],
+    );
+}
+
+// Contract: an inherent `clone` of one module's `Dog` does not retype the
+// clone of a different module's `Dog` of the same file.
+#[test]
+fn test_rust_let_clone_alias_inherent_clone_in_other_module_does_not_apply() {
+    let g = parse(
+        "mod a { impl Dog { fn clone(&self) -> Cat { Cat } } }\n\
+         mod b { #[derive(Clone)] struct Dog; fn f(x: Dog) { let y = x.clone(); y.m(); } }\n",
+    );
+    assert_sites(
+        &g,
+        "f",
+        &[CallSite::Plain("Dog.clone"), CallSite::Plain("Dog.m")],
+    );
+}
+
+#[test]
+fn test_rust_let_clone_alias_inherent_clone_with_dog_declared_in_two_modules_does_not_apply() {
+    let g = parse(
+        "mod a { struct Dog; impl Dog { fn clone(&self) -> Cat { Cat } } }\n\
+         mod b { struct Dog; fn f(x: Dog) { let y = x.clone(); y.m(); } }\n",
+    );
+    assert_sites(
+        &g,
+        "f",
+        &[CallSite::Plain("Dog.clone"), CallSite::Plain("Dog.m")],
+    );
+}
+
+// Contract: the same bare name with an inherent `clone` in two modules is
+// ambiguous, so neither override applies.
+#[test]
+fn test_rust_let_clone_alias_inherent_clone_twice_in_two_modules_does_not_apply() {
+    let g = parse(
+        "mod a { impl Dog { fn clone(&self) -> Cat { Cat } } }\n\
+         mod b { impl Dog { fn clone(&self) -> Rat { Rat } } }\n\
+         fn f(x: Dog) { let y = x.clone(); y.m(); }\n",
+    );
+    assert_sites(
+        &g,
+        "f",
+        &[CallSite::Plain("Dog.clone"), CallSite::Plain("Dog.m")],
+    );
+}
+
+// Guard: a type and its inherent `clone` in one module keep the override.
+#[test]
+fn test_rust_let_clone_alias_inherent_clone_declared_and_called_in_one_module_applies() {
+    let g = parse(
+        "mod a { struct Dog; impl Dog { fn clone(&self) -> Cat { Cat } }\n\
+         fn f(x: Dog) { let y = x.clone(); y.m(); } }\n",
+    );
+    assert_sites(
+        &g,
+        "f",
+        &[CallSite::Plain("Dog.clone"), CallSite::Plain("Cat.m")],
+    );
+}

@@ -254,8 +254,8 @@ fn dart_function_metas_sorted_by_node_idx() {
     }
 }
 
-/// A function declared inside a body is a function-body local: no node, so
-/// no meta (the drop-locals design). The enclosing function keeps its meta.
+/// A function declared inside a body keeps its node and its meta; it takes a
+/// lexical parent (the FU 2cf259e51deb drop was reverted).
 #[test]
 fn dart_nested_function_has_function_meta() {
     let src = "int outer() { int inner(int value) { return value; } return inner(1); }\n";
@@ -331,6 +331,19 @@ fn test_dart_param_types_are_recorded_for_every_parameter_shape() {
         params_of(&g, "g"),
         ["a", "int", "items", "List<int>", "flag", "bool"]
     );
+}
+
+/// An old-style function-typed parameter (`int callback(String value)`) is
+/// recorded with no type: the `int` is the callback's return type, so it must
+/// not read as the parameter's own type. Its neighbours keep their types.
+#[test]
+fn test_dart_param_types_function_typed_parameter_is_untyped() {
+    let g = analyze(
+        "void f(int callback(String value), String after) {}\nvoid g(int a, {required int cb(String v), bool flag = false}) {}\nvoid h([void cb(int v)]) {}\n",
+    );
+    assert_eq!(params_of(&g, "f"), ["callback", "", "after", "String"]);
+    assert_eq!(params_of(&g, "g"), ["a", "int", "cb", "", "flag", "bool"]);
+    assert_eq!(params_of(&g, "h"), ["cb", ""]);
 }
 
 #[test]

@@ -134,26 +134,21 @@ mod tests {
         }
     }
 
-    /// A route lists a provider by its registry key, and the pipeline matches
-    /// that key against `LanguageProvider::name`. A key the provider does not
-    /// answer to makes the route dispatch to nothing (FU 0a44c90c8c30: `yaml`
-    /// was registered under `"yaml"` but answered `"YAML"`).
+    /// Every entry constructs, and answers to its registry key. A route lists
+    /// a provider by that key, and the pipeline matches it against
+    /// `LanguageProvider::name`, so a key the provider does not answer to makes
+    /// the route dispatch to nothing (FU 0a44c90c8c30: `yaml` was registered
+    /// under `"yaml"` but answered `"YAML"`).
     #[test]
-    fn test_provider_constructors_every_key_matches_provider_name() {
+    fn provider_constructors_test_every_entry_constructs_successfully() {
         for (name, ctor) in PROVIDER_CONSTRUCTORS {
-            let provider = ctor().expect("every entry constructs");
+            let provider =
+                ctor().unwrap_or_else(|e| panic!("constructor for {name:?} returned Err: {e}"));
             assert_eq!(
                 provider.name(),
                 *name,
                 "registry key and provider name differ"
             );
-        }
-    }
-
-    #[test]
-    fn provider_constructors_test_every_entry_constructs_successfully() {
-        for (name, ctor) in PROVIDER_CONSTRUCTORS {
-            assert!(ctor().is_ok(), "constructor for {name:?} returned Err");
         }
     }
 }

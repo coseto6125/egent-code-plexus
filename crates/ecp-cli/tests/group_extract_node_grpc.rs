@@ -27,7 +27,7 @@ fn node_non_grpc_calls_ignored() {
 #[test]
 fn node_grpc_registration_inside_jsx_is_extracted() {
     let src = "export function Page() {\n  return <button onClick={() => server.addService(user_proto.UserService.service, impl)}>Go</button>;\n}\n";
-    for path in ["Page.tsx", "Page.jsx"] {
+    for path in ["Page.tsx", "Page.jsx", "src/ui/Page.js"] {
         let ids: Vec<String> = extract_grpc(Path::new(path), src.as_bytes())
             .into_iter()
             .map(|c| c.contract_id)

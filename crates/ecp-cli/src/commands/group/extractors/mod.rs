@@ -14,6 +14,7 @@ pub mod http_python;
 pub mod http_rust;
 
 use crate::commands::group::types::{ContractRole, ContractType, ExtractedContract, SymbolRef};
+use ecp_core::contracts::routing::{Dialect, FileRouter, Language as RouteLanguage};
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +123,47 @@ pub fn lang_for_extension(ext: &str) -> Option<&'static str> {
         "java" => Some("java"),
         "rs" => Some("rust"),
         _ => None,
+    }
+}
+
+/// The grammars the Node extractors parse with.
+#[derive(Clone, Copy)]
+pub(super) enum NodeGrammar {
+    TypeScript,
+    Tsx,
+}
+
+impl NodeGrammar {
+    pub(super) fn language(self) -> tree_sitter::Language {
+        match self {
+            Self::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            Self::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+        }
+    }
+}
+
+/// The grammar for `file_path`, chosen from its C5 route as `flow` and the
+/// pattern finder choose theirs. Only a standard-dialect TypeScript route keeps
+/// the TypeScript grammar, which reads JSX as type assertions and loses the
+/// calls inside JSX attributes. Every other path goes through TSX, a superset
+/// that also parses JSX: this crate links no JavaScript grammar, so a
+/// JavaScript route cannot take its own yet. An unrouted or excluded path was
+/// extracted before this choice existed, so it keeps the TSX default.
+pub(super) fn node_grammar(file_path: &Path) -> NodeGrammar {
+    let route = file_path
+        .to_str()
+        .map(|path| FileRouter::PATH_ONLY.route(path));
+    let standard_typescript = route
+        .as_ref()
+        .and_then(|outcome| outcome.route())
+        .is_some_and(|route| {
+            route.fixed_language() == Some(RouteLanguage::TypeScript)
+                && route.dialect() == Dialect::Standard
+        });
+    if standard_typescript {
+        NodeGrammar::TypeScript
+    } else {
+        NodeGrammar::Tsx
     }
 }
 

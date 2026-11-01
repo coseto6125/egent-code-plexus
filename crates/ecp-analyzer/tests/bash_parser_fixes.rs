@@ -59,3 +59,28 @@ fn test_bash_empty_and_assignment_free_function_emit_no_const() {
     assert!(const_rows(&parse("")).is_empty());
     assert!(const_rows(&parse("f() { echo hi; }\n")).is_empty());
 }
+
+// Contract: an assignment is a Const exactly when no `function_definition`
+// contains it, wherever the function sits: before, between and after the
+// top-level assignments, nested in another function, or under an `if`.
+#[test]
+fn test_bash_const_outside_every_function_shape_is_kept_and_inside_is_dropped() {
+    let g = parse(
+        "A=1\nf() { B=2; g() { C=3; }; D=4; }\nE=5\nif true; then\n  h() { F=6; }\n  G=7\nfi\nfunction k {\n  H=8\n}\nI=9\n",
+    );
+    let names: Vec<&str> = const_rows(&g).into_iter().map(|(name, _)| name).collect();
+    assert_eq!(names, ["A", "E", "G", "I"]);
+}
+
+// Contract: thousands of top-level assignments with a function in the
+// middle all stay Consts; the function body's own assignment does not.
+#[test]
+fn test_bash_many_top_level_assignments_around_a_function_all_stay_const() {
+    let mut src: String = (0..3000).map(|i| format!("V{i}=1\n")).collect();
+    src.push_str("f() { INNER=1; }\n");
+    src.extend((3000..6000).map(|i| format!("V{i}=1\n")));
+    let g = parse(&src);
+    let rows = const_rows(&g);
+    assert_eq!(rows.len(), 6000);
+    assert!(rows.iter().all(|(name, _)| *name != "INNER"));
+}

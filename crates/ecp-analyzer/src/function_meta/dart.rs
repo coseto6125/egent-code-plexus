@@ -369,7 +369,13 @@ fn collect_param_list(params_node: &Node<'_>, source: &[u8], result: &mut Vec<St
                         .unwrap_or(child);
                     // The type is the unlabelled `type` child; an untyped
                     // `(x)` parameter has no `name` field, only a bare identifier.
+                    // `int callback(String value)` has its own parameter list, and
+                    // there the `type` child is the callback's return type, not the
+                    // parameter's: record it untyped.
+                    let is_function_typed =
+                        find_child_by_kind(&decl, "formal_parameter_list").is_some();
                     let ty = find_child_by_kind(&decl, "type")
+                        .filter(|_| !is_function_typed)
                         .map(|n| node_text(&n, source).to_string())
                         .unwrap_or_default();
                     let name = decl

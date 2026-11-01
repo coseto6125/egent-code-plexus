@@ -1,6 +1,9 @@
 //! Node/TypeScript HTTP route extractor: Express + Fastify patterns via tree-sitter.
 
-use super::{capture_line, client_verb, compile_client_query, consumer_contract, http_url_path};
+use super::{
+    capture_line, client_verb, compile_client_query, consumer_contract, http_url_path,
+    node_grammar, NodeGrammar,
+};
 use crate::commands::group::types::{ContractRole, ContractType, ExtractedContract, SymbolRef};
 use std::path::Path;
 use std::sync::LazyLock;
@@ -67,25 +70,13 @@ impl Dialect {
 }
 
 static TYPESCRIPT: LazyLock<Dialect> =
-    LazyLock::new(|| Dialect::new(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()));
-static TSX: LazyLock<Dialect> =
-    LazyLock::new(|| Dialect::new(tree_sitter_typescript::LANGUAGE_TSX.into()));
-
-/// The TypeScript grammar parses JSX as type assertions and loses the code
-/// after it, so every file but `.ts` / `.mts` / `.cts` (`.tsx`, `.jsx`, and
-/// JavaScript that may hold JSX) goes through the TSX grammar, a superset.
-pub(super) fn is_plain_typescript(file_path: &Path) -> bool {
-    file_path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| matches!(ext, "ts" | "mts" | "cts"))
-}
+    LazyLock::new(|| Dialect::new(NodeGrammar::TypeScript.language()));
+static TSX: LazyLock<Dialect> = LazyLock::new(|| Dialect::new(NodeGrammar::Tsx.language()));
 
 fn dialect_for(file_path: &Path) -> &'static Dialect {
-    if is_plain_typescript(file_path) {
-        &TYPESCRIPT
-    } else {
-        &TSX
+    match node_grammar(file_path) {
+        NodeGrammar::TypeScript => &TYPESCRIPT,
+        NodeGrammar::Tsx => &TSX,
     }
 }
 

@@ -6,6 +6,8 @@ use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{LocalGraph, RawImport, RawNode};
 use ecp_core::graph::NodeKind;
 use rustc_hash::FxHashSet;
+use std::cell::LazyCell;
+use std::ops::Range;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Query, QueryCursor};
@@ -23,8 +25,32 @@ pub struct BashProvider {
     capture_kind_by_idx: Vec<Option<NodeKind>>,
 }
 
-fn inside_function(node: tree_sitter::Node<'_>) -> bool {
-    std::iter::successors(node.parent(), |n| n.parent()).any(|n| n.kind() == "function_definition")
+/// Byte ranges of the outermost `function_definition` nodes, in source order.
+/// Outermost ranges are disjoint, so one binary search answers containment;
+/// a per-capture `parent()` walk would re-descend from the root each time.
+fn function_ranges(root: tree_sitter::Node<'_>) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut cursor = root.walk();
+    'walk: loop {
+        let node = cursor.node();
+        if node.kind() == "function_definition" {
+            ranges.push(node.byte_range());
+        } else if cursor.goto_first_child() {
+            continue;
+        }
+        while !cursor.goto_next_sibling() {
+            if !cursor.goto_parent() {
+                break 'walk;
+            }
+        }
+    }
+    ranges
+}
+
+fn inside_function(ranges: &[Range<usize>], node: tree_sitter::Node<'_>) -> bool {
+    let at = node.start_byte();
+    let after = ranges.partition_point(|range| range.start <= at);
+    after > 0 && at < ranges[after - 1].end
 }
 
 impl BashProvider {
@@ -66,6 +92,9 @@ impl LanguageProvider for BashProvider {
         // re-assignments would produce duplicate UIDs (kind+path+name triple is
         // identical). Track seen names and skip duplicates.
         let mut seen_const_names: FxHashSet<String> = FxHashSet::default();
+
+        // Only a file with a Const capture pays for the walk.
+        let function_spans = LazyCell::new(|| function_ranges(tree.root_node()));
 
         let idx_function = self.query.capture_index_for_name("function");
         let idx_const = self.query.capture_index_for_name("const");
@@ -115,7 +144,8 @@ impl LanguageProvider for BashProvider {
                     // function-body locals: dropped by design, and they must not claim
                     // the name before a later top-level declaration.
                     if k == NodeKind::Const
-                        && (inside_function(root) || !seen_const_names.insert(name_str.to_owned()))
+                        && (inside_function(&function_spans, root)
+                            || !seen_const_names.insert(name_str.to_owned()))
                     {
                         continue;
                     }

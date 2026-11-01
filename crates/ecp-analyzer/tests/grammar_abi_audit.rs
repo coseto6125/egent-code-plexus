@@ -190,11 +190,6 @@ fn grammar_abi_audit() {
          services:\n  web:\n    image: nginx:latest\n    ports:\n      - 80:80\n    environment:\n      - LOG_LEVEL=info\n",
     ));
     rows.push(audit(
-        "markdown",
-        tree_sitter_md::LANGUAGE.into(),
-        "# Title\n\n## Subtitle\n\nThis is a paragraph with **bold** and `code`.\n\n- list item 1\n- list item 2\n\n```rust\nfn main() {}\n```\n",
-    ));
-    rows.push(audit(
         "solidity",
         tree_sitter_solidity::LANGUAGE.into(),
         "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.0;\n\

@@ -44,13 +44,23 @@ fn sorted_ids(path: &str, source: &str) -> Vec<String> {
 }
 
 /// Client calls written inside JSX attributes (`onClick={() => fetch(..)}`)
-/// are found in a `.tsx` / `.jsx` file. The TypeScript grammar reads the JSX
-/// as an ERROR and loses the calls in it; the TSX grammar parses them.
+/// are found in a `.tsx` / `.jsx` file. On the TypeScript grammar only
+/// `fetch("/api/a")` was lost; the TSX grammar finds all three.
 #[test]
 fn node_jsx_files_extract_clients_inside_jsx_attributes() {
     let want = ["http:GET:/api/a", "http:GET:/api/c", "http:POST:/api/b"];
     assert_eq!(sorted_ids("Page.tsx", JSX_ROUTES), want);
     assert_eq!(sorted_ids("Page.jsx", JSX_ROUTES), want);
+}
+
+/// The grammar comes from the file's route, so a nested directory, a
+/// JavaScript extension and a Windows separator choose like the bare name.
+#[test]
+fn node_grammar_follows_the_route_for_nested_and_javascript_paths() {
+    let want = ["http:GET:/api/a", "http:GET:/api/c", "http:POST:/api/b"];
+    for path in ["src/ui/Page.js", "src\\ui\\Page.jsx", "lib/Page.mjs"] {
+        assert_eq!(sorted_ids(path, JSX_ROUTES), want, "{path}");
+    }
 }
 
 /// Guard: a `.ts` file keeps the TypeScript grammar, where `<T>x` is a type

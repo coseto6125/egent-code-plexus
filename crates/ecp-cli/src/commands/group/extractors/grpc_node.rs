@@ -1,6 +1,6 @@
 //! Node/TypeScript gRPC server-registration extractor: server.addService(<svc>_proto.<Svc>.service).
 
-use super::http_node::is_plain_typescript;
+use super::{node_grammar, NodeGrammar};
 use crate::commands::group::types::{ContractRole, ContractType, ExtractedContract, SymbolRef};
 use std::path::Path;
 use std::sync::LazyLock;
@@ -23,29 +23,38 @@ const QUERY_SRC: &str = r#"
       property: (property_identifier) @service_field)))
 "#;
 
-/// A query is bound to the grammar it was compiled with, so each dialect
-/// owns its own (see `http_node::is_plain_typescript` for the split).
-static TYPESCRIPT_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    let lang: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
-    Query::new(&lang, QUERY_SRC).expect("grpc_node: compile QUERY_SRC")
-});
+/// One grammar with the query compiled for it: a query is bound to the
+/// language it was compiled with, so each dialect owns its own.
+struct Dialect {
+    language: tree_sitter::Language,
+    query: Query,
+}
 
-static TSX_QUERY: LazyLock<Query> = LazyLock::new(|| {
-    let lang: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TSX.into();
-    Query::new(&lang, QUERY_SRC).expect("grpc_node: compile QUERY_SRC")
-});
+impl Dialect {
+    fn new(language: tree_sitter::Language) -> Self {
+        Self {
+            query: Query::new(&language, QUERY_SRC).expect("grpc_node: compile QUERY_SRC"),
+            language,
+        }
+    }
+}
+
+static TYPESCRIPT: LazyLock<Dialect> =
+    LazyLock::new(|| Dialect::new(NodeGrammar::TypeScript.language()));
+static TSX: LazyLock<Dialect> = LazyLock::new(|| Dialect::new(NodeGrammar::Tsx.language()));
+
+fn dialect_for(file_path: &Path) -> &'static Dialect {
+    match node_grammar(file_path) {
+        NodeGrammar::TypeScript => &TYPESCRIPT,
+        NodeGrammar::Tsx => &TSX,
+    }
+}
 
 pub fn extract_grpc(file_path: &Path, source: &[u8]) -> Vec<ExtractedContract> {
-    let (lang, query): (tree_sitter::Language, &Query) = if is_plain_typescript(file_path) {
-        (
-            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-            &*TYPESCRIPT_QUERY,
-        )
-    } else {
-        (tree_sitter_typescript::LANGUAGE_TSX.into(), &*TSX_QUERY)
-    };
+    let dialect = dialect_for(file_path);
+    let query = &dialect.query;
     let mut parser = Parser::new();
-    if let Err(e) = parser.set_language(&lang) {
+    if let Err(e) = parser.set_language(&dialect.language) {
         tracing::warn!("group::extract_grpc (node): set_language failed: {e:?}");
         return Vec::new();
     }
