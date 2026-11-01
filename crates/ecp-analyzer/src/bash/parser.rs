@@ -23,6 +23,10 @@ pub struct BashProvider {
     capture_kind_by_idx: Vec<Option<NodeKind>>,
 }
 
+fn inside_function(node: tree_sitter::Node<'_>) -> bool {
+    std::iter::successors(node.parent(), |n| n.parent()).any(|n| n.kind() == "function_definition")
+}
+
 impl BashProvider {
     pub fn new() -> anyhow::Result<Self> {
         let language = tree_sitter_bash::LANGUAGE.into();
@@ -107,7 +111,12 @@ impl LanguageProvider for BashProvider {
                     // Skip re-assignments: only the first occurrence of a Const name
                     // is emitted. Re-assignments (inside if/while/for/function) share
                     // the same (kind, path, name) triple and would cause uid collisions.
-                    if k == NodeKind::Const && !seen_const_names.insert(name_str.to_owned()) {
+                    // Assignments inside a function body (`local x=1`, `count=5`) are
+                    // function-body locals: dropped by design, and they must not claim
+                    // the name before a later top-level declaration.
+                    if k == NodeKind::Const
+                        && (inside_function(root) || !seen_const_names.insert(name_str.to_owned()))
+                    {
                         continue;
                     }
 

@@ -35,17 +35,27 @@ use tree_sitter::Node;
 pub struct ImplMap {
     /// fn_name → impl type name (e.g. "Dog").  Pointer/ref stripped.
     pub entries: HashMap<String, String>,
+    /// impl type → return type of its inherent `fn clone(&self)`, `None` when
+    /// that type is not a plain name. An inherent `clone` shadows
+    /// `Clone::clone`, so `let x = y.clone()` takes this type, not `y`'s.
+    pub inherent_clones: HashMap<String, Option<String>>,
 }
 
 /// Walk every `impl_item` and record each method's enclosing impl type.
 pub fn build_impl_map(root: Node<'_>, source: &[u8]) -> ImplMap {
     let mut entries: HashMap<String, String> = HashMap::new();
+    let mut inherent_clones: HashMap<String, Option<String>> = HashMap::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         if n.kind() == "impl_item" {
             let impl_type = impl_self_type(&n, source);
             if let Some(ty) = impl_type {
                 collect_impl_methods(&n, source, &ty, &mut entries);
+                if n.child_by_field_name("trait").is_none() {
+                    if let Some(returns) = inherent_clone_return(&n, source, &ty) {
+                        inherent_clones.insert(ty, returns);
+                    }
+                }
             }
         }
         let mut c = n.walk();
@@ -53,7 +63,40 @@ pub fn build_impl_map(root: Node<'_>, source: &[u8]) -> ImplMap {
             stack.push(child);
         }
     }
-    ImplMap { entries }
+    ImplMap {
+        entries,
+        inherent_clones,
+    }
+}
+
+/// The return type of the `fn clone(&self)` an inherent `impl_item` defines:
+/// `None` when it defines none, `Some(None)` when the type is not a plain name.
+fn inherent_clone_return(
+    impl_node: &Node<'_>,
+    source: &[u8],
+    impl_type: &str,
+) -> Option<Option<String>> {
+    let body = impl_node.child_by_field_name("body")?;
+    let mut cursor = body.walk();
+    let clone = body.children(&mut cursor).find(|f| {
+        f.kind() == "function_item"
+            && f.child_by_field_name("name")
+                .and_then(|n| node_text(n, source))
+                .as_deref()
+                == Some("clone")
+            && f.child_by_field_name("parameters")
+                .and_then(|p| p.named_child(0))
+                .is_some_and(|first| first.kind() == "self_parameter")
+    })?;
+    let Some(returns) = clone.child_by_field_name("return_type") else {
+        return Some(None);
+    };
+    if node_text(returns, source).as_deref() == Some("Self")
+        || self_type_name(returns, source).as_deref() == Some(impl_type)
+    {
+        return Some(Some(impl_type.to_string()));
+    }
+    Some(bare_type_name(returns, source))
 }
 
 /// Extract the self-type name from an `impl_item`.
@@ -366,7 +409,14 @@ fn collect_scopes<'a>(
 
             // `let` bindings in the body.
             if let Some(body) = child.child_by_field_name("body") {
-                collect_body_bindings(&body, source, &mut bindings, &mut events, &mut values);
+                collect_body_bindings(
+                    &body,
+                    source,
+                    &mut bindings,
+                    &mut events,
+                    &mut values,
+                    &impl_map.inherent_clones,
+                );
             }
 
             out.push(Scope {
@@ -522,6 +572,7 @@ fn collect_body_bindings(
     out: &mut HashMap<String, String>,
     events: &mut Bindings,
     values: &mut HashMap<String, Vec<PosRange>>,
+    inherent_clones: &HashMap<String, Option<String>>,
 ) {
     let mut aliases: Vec<Alias<'_>> = Vec::new();
     let mut stack = vec![(*body, node_range(*body).1, false)];
@@ -600,12 +651,16 @@ fn collect_body_bindings(
                     let alias = (simple && !annotated)
                         .then(|| n.child_by_field_name("value"))
                         .flatten()
-                        .and_then(|value| Some((alias_source(value, source)?, start_pos(value))));
+                        .and_then(|value| {
+                            let (from, cloned) = alias_source(value, source)?;
+                            Some((from, cloned, start_pos(value)))
+                        });
                     match alias {
-                        Some((from, at)) => aliases.push(Alias {
+                        Some((from, cloned, at)) => aliases.push(Alias {
                             pattern,
                             live,
                             from,
+                            cloned,
                             at,
                         }),
                         None => record_binding(pattern, source, live, ty.as_deref(), events),
@@ -627,6 +682,15 @@ fn collect_body_bindings(
             .get(&alias.from)
             .and_then(|bindings| live_type(bindings, alias.at))
             .map(str::to_string);
+        let inherent = alias
+            .cloned
+            .then(|| {
+                ty.as_deref()
+                    .and_then(|from| inherent_clones.get(from))
+                    .cloned()
+            })
+            .flatten();
+        let ty = inherent.unwrap_or(ty);
         record_binding(alias.pattern, source, alias.live, ty.as_deref(), events);
     }
 }
@@ -637,14 +701,17 @@ struct Alias<'t> {
     pattern: Node<'t>,
     live: PosRange,
     from: String,
+    /// The initializer is `from.clone()`, not `from` itself.
+    cloned: bool,
     at: Pos,
 }
 
-/// `y` of the initializer `y` or `y.clone()`; `None` for any other shape.
-fn alias_source(value: Node<'_>, source: &[u8]) -> Option<String> {
+/// `y` of the initializer `y` or `y.clone()`, and whether it was a `clone`;
+/// `None` for any other shape.
+fn alias_source(value: Node<'_>, source: &[u8]) -> Option<(String, bool)> {
     let name = |n: Node<'_>| node_text(n, source);
     match value.kind() {
-        "identifier" => name(value),
+        "identifier" => Some((name(value)?, false)),
         "call_expression" => {
             let function = value.child_by_field_name("function")?;
             let no_arguments = value
@@ -659,6 +726,7 @@ fn alias_source(value: Node<'_>, source: &[u8]) -> Option<String> {
                 .filter(|receiver| receiver.kind() == "identifier")?;
             (function.kind() == "field_expression" && no_arguments && is_clone)
                 .then(|| name(receiver))?
+                .map(|from| (from, true))
         }
         _ => None,
     }

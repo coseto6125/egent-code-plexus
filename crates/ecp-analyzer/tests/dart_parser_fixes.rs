@@ -348,3 +348,41 @@ fn test_dart_body_less_members_in_mixin_extension_enum_bodies() {
             .any(|n| n.name == "f" && n.kind == NodeKind::Function));
     }
 }
+
+/// A function declared inside a method or function body is a body local: it
+/// is not a Function node and no class owns it (`Bloc.onEmit` is not a
+/// member). The enclosing method and function stay.
+#[test]
+fn test_dart_local_function_in_body_is_not_a_node() {
+    let g = parse(
+        b"class Bloc {\n  void add(int e) {\n    void onEmit(int v) {}\n    int twice(int v) => v * 2;\n    onEmit(twice(e));\n  }\n}\nvoid run() {\n  void helper() {}\n  helper();\n}\nvoid helper2() {}\n",
+    );
+    let names: Vec<_> = names_kinds(&g);
+    for local in ["onEmit", "twice", "helper"] {
+        assert!(
+            !g.nodes.iter().any(|n| n.name == local),
+            "local function `{local}` leaked into {names:?}"
+        );
+    }
+    assert_eq!(
+        node(&g, "add", NodeKind::Method).owner_class.as_deref(),
+        Some("Bloc")
+    );
+    assert!(node(&g, "run", NodeKind::Function).owner_class.is_none());
+    assert!(node(&g, "helper2", NodeKind::Function)
+        .owner_class
+        .is_none());
+}
+
+/// Guard: a body-less file and a file with only top-level functions are
+/// unchanged by the local-function filter.
+#[test]
+fn test_dart_local_function_filter_keeps_top_level_functions() {
+    assert!(parse(b"")
+        .nodes
+        .iter()
+        .all(|n| n.kind != NodeKind::Function));
+    let g = parse(b"int a() => 1;\nint b() { return a(); }\n");
+    node(&g, "a", NodeKind::Function);
+    node(&g, "b", NodeKind::Function);
+}

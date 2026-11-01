@@ -20,3 +20,28 @@ fn node_non_grpc_calls_ignored() {
     let contracts = extract_grpc(Path::new("x.ts"), source);
     assert!(contracts.is_empty());
 }
+
+/// A service registration that follows JSX in a `.tsx` / `.jsx` file is
+/// found: the TypeScript grammar loses the code after JSX.
+#[test]
+fn node_grpc_registration_after_jsx_is_extracted() {
+    let src = "export function Page() {\n  const a = <div className=\"x\">{count}</div>;\n  const b = <Foo bar=\"y\" />;\n  server.addService(user_proto.UserService.service, impl);\n  return a;\n}\n";
+    for path in ["Page.tsx", "Page.jsx"] {
+        let ids: Vec<String> = extract_grpc(Path::new(path), src.as_bytes())
+            .into_iter()
+            .map(|c| c.contract_id)
+            .collect();
+        assert_eq!(ids, ["grpc:UserService:*"], "{path}");
+    }
+}
+
+/// Guard: a `.ts` file with a type assertion still extracts; empty input
+/// extracts nothing in either dialect.
+#[test]
+fn node_grpc_plain_ts_with_type_assertion_still_extracts() {
+    let src = "const v = <string>raw;\nserver.addService(user_proto.UserService.service, impl);\n";
+    let got = extract_grpc(Path::new("server.ts"), src.as_bytes());
+    assert_eq!(got.len(), 1);
+    assert!(extract_grpc(Path::new("empty.tsx"), b"").is_empty());
+    assert!(extract_grpc(Path::new("empty.ts"), b"").is_empty());
+}

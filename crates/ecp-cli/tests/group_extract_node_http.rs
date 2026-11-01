@@ -31,3 +31,34 @@ fn node_non_route_calls_ignored() {
     let contracts = extract_http(Path::new("x.ts"), source);
     assert!(contracts.is_empty());
 }
+
+const JSX_ROUTES: &str = "export function Page() {\n  const a = <div className=\"x\">{count}</div>;\n  app.get(\"/api/a\", ha);\n  const b = <Foo bar=\"y\" />;\n  app.post(\"/api/b\", hb);\n  const c = <ul><li key=\"k\">{items}</li></ul>;\n  axios.get(\"/api/c\");\n  return a;\n}\n";
+
+fn sorted_ids(path: &str, source: &str) -> Vec<String> {
+    let mut ids: Vec<String> = extract_http(Path::new(path), source.as_bytes())
+        .into_iter()
+        .map(|c| c.contract_id)
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// A route and a client call that follow JSX in a `.tsx` / `.jsx` file are
+/// found: the TypeScript grammar loses the code after JSX, the TSX grammar
+/// parses it.
+#[test]
+fn node_jsx_files_extract_routes_and_clients_after_jsx() {
+    let want = ["http:GET:/api/a", "http:GET:/api/c", "http:POST:/api/b"];
+    assert_eq!(sorted_ids("Page.tsx", JSX_ROUTES), want);
+    assert_eq!(sorted_ids("Page.jsx", JSX_ROUTES), want);
+}
+
+/// Guard: a `.ts` file keeps the TypeScript grammar, where `<T>x` is a type
+/// assertion, and still extracts its routes; empty input extracts nothing.
+#[test]
+fn node_plain_ts_with_type_assertion_still_extracts() {
+    let src = "const v = <string>raw;\napp.get(\"/api/a\", ha);\n";
+    assert_eq!(sorted_ids("server.ts", src), ["http:GET:/api/a"]);
+    assert!(sorted_ids("empty.tsx", "").is_empty());
+    assert!(sorted_ids("empty.ts", "").is_empty());
+}

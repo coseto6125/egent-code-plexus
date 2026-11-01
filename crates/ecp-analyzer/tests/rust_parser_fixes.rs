@@ -719,3 +719,77 @@ fn test_rust_plain_scoped_call_keeps_path() {
     let g = parse("fn a() { std::vec::Vec::new(); }\n");
     assert_eq!(callee_names(&g, "a"), ["std::vec::Vec::new"]);
 }
+
+// An inherent `fn clone(&self) -> Other` shadows `Clone::clone`, so the
+// alias takes `Other`, not the receiver's type. `Self` and the receiver's
+// own generic type keep the type; a non-plain return type is unknown.
+#[test]
+fn test_rust_let_clone_alias_inherent_clone_returns_its_own_type() {
+    let g = parse(
+        "impl Dog { fn clone(&self) -> Cat { Cat } }\n\
+         fn a(x: Dog) { let y = x.clone(); y.m(); }\n",
+    );
+    assert_sites(
+        &g,
+        "a",
+        &[CallSite::Plain("Dog.clone"), CallSite::Plain("Cat.m")],
+    );
+}
+
+#[test]
+fn test_rust_let_clone_alias_inherent_clone_self_or_generic_keeps_type() {
+    let g = parse(
+        "impl Dog { fn clone(&self) -> Self { Dog } }\n\
+         impl<T> Box2<T> { fn clone(&self) -> Box2<T> { todo!() } }\n\
+         fn a(x: Dog) { let y = x.clone(); y.m(); }\n\
+         fn b(x: Box2) { let y = x.clone(); y.m(); }\n",
+    );
+    assert_sites(
+        &g,
+        "a",
+        &[CallSite::Plain("Dog.clone"), CallSite::Plain("Dog.m")],
+    );
+    assert_sites(
+        &g,
+        "b",
+        &[CallSite::Plain("Box2.clone"), CallSite::Plain("Box2.m")],
+    );
+}
+
+#[test]
+fn test_rust_let_clone_alias_inherent_clone_complex_return_is_untyped() {
+    let g = parse(
+        "impl Dog { fn clone(&self) -> Option<Cat> { None } }\n\
+         impl Pup { fn clone(&self) { } }\n\
+         fn a(x: Dog) { let y = x.clone(); y.m(); }\n\
+         fn b(x: Pup) { let y = x.clone(); y.m(); }\n",
+    );
+    assert_sites(
+        &g,
+        "a",
+        &[CallSite::Plain("Dog.clone"), CallSite::UntypedMember("m")],
+    );
+    assert_sites(
+        &g,
+        "b",
+        &[CallSite::Plain("Pup.clone"), CallSite::UntypedMember("m")],
+    );
+}
+
+// Guard: a `Clone` trait impl is not an inherent `clone`, so the alias
+// keeps the receiver's type, and a plain `let y = x;` is unaffected by one.
+#[test]
+fn test_rust_let_clone_alias_trait_impl_clone_keeps_type() {
+    let g = parse(
+        "impl Clone for Dog { fn clone(&self) -> Dog { Dog } }\n\
+         impl Cat { fn clone(&self) -> Dog { Dog } }\n\
+         fn a(x: Dog) { let y = x.clone(); y.m(); }\n\
+         fn b(x: Cat) { let y = x; y.m(); }\n",
+    );
+    assert_sites(
+        &g,
+        "a",
+        &[CallSite::Plain("Dog.clone"), CallSite::Plain("Dog.m")],
+    );
+    assert_sites(&g, "b", &[CallSite::Plain("Cat.m")]);
+}

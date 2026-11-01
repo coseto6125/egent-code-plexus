@@ -363,13 +363,18 @@ fn collect_param_list(params_node: &Node<'_>, source: &[u8], result: &mut Vec<St
             let child = cursor.node();
             match child.kind() {
                 "formal_parameter" => {
-                    // `Type name` — `type` and `name` fields.
-                    let ty = child
-                        .child_by_field_name("type")
+                    // `this.x` / `super.x` parameters nest a field_/super_formal_parameter.
+                    let decl = find_child_by_kind(&child, "field_formal_parameter")
+                        .or_else(|| find_child_by_kind(&child, "super_formal_parameter"))
+                        .unwrap_or(child);
+                    // The type is the unlabelled `type` child; an untyped
+                    // `(x)` parameter has no `name` field, only a bare identifier.
+                    let ty = find_child_by_kind(&decl, "type")
                         .map(|n| node_text(&n, source).to_string())
                         .unwrap_or_default();
-                    let name = child
+                    let name = decl
                         .child_by_field_name("name")
+                        .or_else(|| find_child_by_kind(&decl, "identifier"))
                         .map(|n| node_text(&n, source).to_string())
                         .unwrap_or_default();
                     if !name.is_empty() {

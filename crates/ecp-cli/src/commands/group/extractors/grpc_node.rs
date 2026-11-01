@@ -1,5 +1,6 @@
 //! Node/TypeScript gRPC server-registration extractor: server.addService(<svc>_proto.<Svc>.service).
 
+use super::http_node::is_plain_typescript;
 use crate::commands::group::types::{ContractRole, ContractType, ExtractedContract, SymbolRef};
 use std::path::Path;
 use std::sync::LazyLock;
@@ -22,14 +23,28 @@ const QUERY_SRC: &str = r#"
       property: (property_identifier) @service_field)))
 "#;
 
-static QUERY: LazyLock<Query> = LazyLock::new(|| {
+/// A query is bound to the grammar it was compiled with, so each dialect
+/// owns its own (see `http_node::is_plain_typescript` for the split).
+static TYPESCRIPT_QUERY: LazyLock<Query> = LazyLock::new(|| {
     let lang: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
     Query::new(&lang, QUERY_SRC).expect("grpc_node: compile QUERY_SRC")
 });
 
+static TSX_QUERY: LazyLock<Query> = LazyLock::new(|| {
+    let lang: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TSX.into();
+    Query::new(&lang, QUERY_SRC).expect("grpc_node: compile QUERY_SRC")
+});
+
 pub fn extract_grpc(file_path: &Path, source: &[u8]) -> Vec<ExtractedContract> {
+    let (lang, query): (tree_sitter::Language, &Query) = if is_plain_typescript(file_path) {
+        (
+            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            &*TYPESCRIPT_QUERY,
+        )
+    } else {
+        (tree_sitter_typescript::LANGUAGE_TSX.into(), &*TSX_QUERY)
+    };
     let mut parser = Parser::new();
-    let lang: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
     if let Err(e) = parser.set_language(&lang) {
         tracing::warn!("group::extract_grpc (node): set_language failed: {e:?}");
         return Vec::new();
@@ -41,7 +56,6 @@ pub fn extract_grpc(file_path: &Path, source: &[u8]) -> Vec<ExtractedContract> {
         );
         return Vec::new();
     };
-    let query: &tree_sitter::Query = &QUERY;
 
     let fn_idx = match query.capture_index_for_name("add_fn") {
         Some(i) => i,
