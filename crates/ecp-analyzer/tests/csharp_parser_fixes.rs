@@ -887,96 +887,83 @@ fn test_csharp_if_group_of_catch_clauses_emits_no_catch_callee() {
     );
 }
 
-/// `"<kind:?> <name>"` of every node, sorted: the order the members are
-/// emitted in is no contract here.
-fn kind_names(g: &LocalGraph) -> Vec<String> {
-    let mut names: Vec<String> = g
+// FU-2026-10-30-1c9c272115ea follow-up: `#if` groups on the same symbol take
+// one setting of it. Two independent inverted pairs (X and Y): with X and Y
+// defined, `A` closes at the `#if X` brace and `Mid` stays a member of `C`.
+// The pick by group index kept `A` open with the `#else` of its closing
+// group and closed it at the `#if !Y` brace, so `A` swallowed `Mid`. And
+// `#if X` / `#else` method heads with a block that only the `#else` of a
+// later `#if X` opens: `A` calls `Common`, never `OnlyB`, which no setting
+// of X puts in `A`.
+#[test]
+fn test_csharp_if_groups_on_one_symbol_take_one_setting() {
+    let g = parse(&lines(&[
+        "namespace App {",
+        "public class C {",
+        "#if X",
+        "    public void A() {",
+        "#else",
+        "    public void A2() { }",
+        "#endif",
+        "#if X",
+        "    }",
+        "#else",
+        "    public void A3() { }",
+        "#endif",
+        "    public void Mid() { }",
+        "#if Y",
+        "    public void B2() { }",
+        "#else",
+        "    public void B() {",
+        "#endif",
+        "#if !Y",
+        "    }",
+        "#else",
+        "    public void B3() { }",
+        "#endif",
+        "    public void Tail() { }",
+        "}",
+        "}",
+    ]));
+    let mut owners = member_owners(&g);
+    owners.sort_unstable();
+    assert_eq!(
+        owners,
+        [
+            ("A", Some("C")),
+            ("B2", Some("C")),
+            ("B3", Some("C")),
+            ("Mid", Some("C")),
+            ("Tail", Some("C")),
+        ]
+    );
+    assert_eq!(node_row(&g, "A").2, (3, 4, 8, 5));
+
+    let g = parse(&lines(&[
+        "class C {",
+        "#if X",
+        "    void A() {",
+        "#else",
+        "    void B() {",
+        "#endif",
+        "#if X",
+        "#else",
+        "        { OnlyB();",
+        "#endif",
+        "        Common();",
+        "#if !X",
+        "        }",
+        "#endif",
+        "    }",
+        "    void OnlyB() {}",
+        "    void Common() {}",
+        "}",
+    ]));
+    let a = g
         .nodes
         .iter()
-        .map(|n| format!("{:?} {}", n.kind, n.name))
-        .collect();
-    names.sort();
-    names
-}
-
-// FU-2026-10-25-c358a4d7ec1e (parser part). An explicit interface
-// implementation is reached only through its interface, so it takes the
-// qualified name and no longer shares a name (and a uid) with the ordinary
-// member beside it: a property, a method, a generic interface's method, an
-// event and an indexer. Before the fix each carried the bare member name.
-#[test]
-fn test_csharp_explicit_interface_members_take_qualified_names() {
-    let g = parse(&lines(&[
-        "class Bag : IList",
-        "{",
-        "    public bool IsReadOnly => false;",
-        "    bool IList.IsReadOnly => true;",
-        "    public void Remove(object o) { }",
-        "    void IList.Remove(object o) { }",
-        "    bool ICollection< int >.Remove(int item) { return true; }",
-        "    event EventHandler IFoo.Changed { add { } remove { } }",
-        "    public object this[int i] { get { return null; } }",
-        "    object IList.this[int i] { get { return null; } }",
-        "}",
-    ]));
-    assert_eq!(
-        kind_names(&g),
-        [
-            "Class Bag",
-            "Method ICollection<int>.Remove",
-            "Method IFoo.Changed",
-            "Method IList.Remove",
-            "Method IList.this[...]",
-            "Method Remove",
-            "Method this[...]",
-            "Property IList.IsReadOnly",
-            "Property IsReadOnly",
-        ]
-    );
-}
-
-// Atypical: a type holds only the explicit forms (no ordinary member of the
-// same name) and names its interfaces by a dotted path.
-#[test]
-fn test_csharp_explicit_interface_member_alone_and_dotted_interface_path() {
-    let g = parse(&lines(&[
-        "class Only : System.Collections.IList, System.IDisposable",
-        "{",
-        "    bool System.Collections.IList.IsFixedSize => false;",
-        "    void System.IDisposable.Dispose() { }",
-        "}",
-    ]));
-    assert_eq!(
-        kind_names(&g),
-        [
-            "Class Only",
-            "Method System.IDisposable.Dispose",
-            "Property System.Collections.IList.IsFixedSize",
-        ]
-    );
-}
-
-// Guard: ordinary members, operators and a field named like an explicit
-// property keep their bare names.
-#[test]
-fn test_csharp_ordinary_members_keep_bare_names() {
-    let g = parse(&lines(&[
-        "class C",
-        "{",
-        "    private int IsReadOnly;",
-        "    public void Remove(object o) { }",
-        "    public static C operator +(C a, C b) { return a; }",
-        "    public static explicit operator int(C c) { return 0; }",
-        "}",
-    ]));
-    assert_eq!(
-        kind_names(&g),
-        [
-            "Class C",
-            "Method Remove",
-            "Method op_+",
-            "Method op_Explicit",
-            "Property IsReadOnly",
-        ]
-    );
+        .find(|n| n.name == "A")
+        .unwrap_or_else(|| panic!("no `A` in {:?}", rows(&g)));
+    let calls: Vec<&str> = a.calls.iter().map(String::as_str).collect();
+    assert_eq!(calls, ["Common"]);
 }

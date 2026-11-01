@@ -17,11 +17,9 @@ mod receiver_typing_support;
 
 use ecp_analyzer::c_sharp::parser::CSharpProvider;
 use ecp_core::analyzer::csharp_extension::{HEURISTIC_CONFIDENCE, HEURISTIC_REASON};
-use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::CallSite;
 use ecp_core::graph::{RelType, ZeroCopyGraph};
-use receiver_typing_support::{build, parse_all};
-use std::path::Path;
+use receiver_typing_support::{build, call_sites, parse_all};
 
 fn graph(files: &[(&str, &str)]) -> ZeroCopyGraph {
     let provider = CSharpProvider::new().expect("CSharpProvider::new");
@@ -74,26 +72,6 @@ fn targets(graph: &ZeroCopyGraph, caller: &str) -> Vec<String> {
         .into_iter()
         .map(|call| call.target)
         .collect()
-}
-
-/// The decoded call sites the parser records for the node named `caller`.
-fn sites(path: &str, source: &str, caller: &str) -> Vec<String> {
-    let provider = CSharpProvider::new().expect("CSharpProvider::new");
-    let local = provider
-        .parse_file(Path::new(path), source.as_bytes())
-        .expect("parse_file");
-    let mut sites: Vec<String> = local
-        .nodes
-        .iter()
-        .filter(|n| n.name == caller)
-        .flat_map(|n| {
-            n.calls
-                .iter()
-                .map(|raw| format!("{:?}", CallSite::parse(raw)))
-        })
-        .collect();
-    sites.sort();
-    sites
 }
 
 const BASE: (&str, &str) = (
@@ -230,7 +208,12 @@ namespace Lib
 }
 ";
     assert_eq!(
-        sites("Lib/Log.cs", writer, "Use"),
+        call_sites(
+            &CSharpProvider::new().expect("CSharpProvider::new"),
+            "Lib/Log.cs",
+            writer,
+            "Use"
+        ),
         [format!("{:?}", CallSite::Plain("TextWriter.Flush"))]
     );
     assert_eq!(

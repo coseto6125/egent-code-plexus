@@ -230,7 +230,7 @@ pub fn resolve<F: TypeFacts + ?Sized>(
                 .is_none_or(|(_, first_unresolved)| first_unresolved.is_none());
         }
     }
-    let receiver_key = receiver.name.map(canonical);
+    let receiver_key = receiver.name.map(system_type_name);
     let mut in_scope = false;
     let mut accepts_receiver = false;
     // (declaration, its fit, whether the arguments apply), one per
@@ -387,7 +387,7 @@ fn fit<F: TypeFacts + ?Sized>(
     let Some(written) = this_type_key(decl.this_type) else {
         return Fit::Incompatible;
     };
-    let this = canonical(written);
+    let this = system_type_name(written);
     if this == "Object" {
         return Fit::Generic;
     }
@@ -396,7 +396,7 @@ fn fit<F: TypeFacts + ?Sized>(
     }
     if ancestors
         .iter()
-        .any(|&ancestor| canonical(ancestor) == this)
+        .any(|&ancestor| system_type_name(ancestor) == this)
     {
         return Fit::Ancestor;
     }
@@ -461,8 +461,11 @@ pub fn is_keyword_type(name: &str) -> bool {
     )
 }
 
-/// A C# keyword type as its `System` type's name (`bool` → `Boolean`).
-fn canonical(name: &str) -> &str {
+/// A C# keyword type as its `System` type's name (`bool` → `Boolean`); any
+/// other name as it is. The parser spells a keyword-typed receiver with it
+/// and `fit` compares receiver and `this` types through it, so both sides
+/// read one table.
+pub fn system_type_name(name: &str) -> &str {
     match name {
         "bool" => "Boolean",
         "byte" => "Byte",
@@ -540,10 +543,10 @@ mod tests {
     }
 
     #[test]
-    fn test_canonical_keyword_and_system_name_meet() {
-        assert_eq!(canonical("bool"), canonical("Boolean"));
-        assert_eq!(canonical("string"), "String");
-        assert_eq!(canonical("JToken"), "JToken");
+    fn test_system_type_name_keyword_and_system_name_meet() {
+        assert_eq!(system_type_name("bool"), system_type_name("Boolean"));
+        assert_eq!(system_type_name("string"), "String");
+        assert_eq!(system_type_name("JToken"), "JToken");
     }
 
     #[test]

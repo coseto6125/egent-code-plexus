@@ -42,6 +42,31 @@ pub fn assert_binder_emits(graphs: &[LocalGraph], caller: &str, callee: &str) {
     );
 }
 
+/// The decoded call sites `provider` records in `source` (read as `path`)
+/// for the node named `caller`, as `{:?}` text, sorted.
+pub fn call_sites<P: LanguageProvider>(
+    provider: &P,
+    path: &str,
+    source: &str,
+    caller: &str,
+) -> Vec<String> {
+    let local = provider
+        .parse_file(Path::new(path), source.as_bytes())
+        .unwrap_or_else(|e| panic!("parse {path}: {e}"));
+    let mut sites: Vec<String> = local
+        .nodes
+        .iter()
+        .filter(|n| n.name == caller)
+        .flat_map(|n| {
+            n.calls
+                .iter()
+                .map(|raw| format!("{:?}", CallSite::parse(raw)))
+        })
+        .collect();
+    sites.sort();
+    sites
+}
+
 pub fn build(graphs: Vec<LocalGraph>) -> ZeroCopyGraph {
     let mut builder = GraphBuilder::new();
     for g in graphs {

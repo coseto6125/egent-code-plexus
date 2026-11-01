@@ -7,31 +7,14 @@ mod receiver_typing_support;
 
 use ecp_analyzer::c_sharp::parser::CSharpProvider;
 use ecp_core::analyzer::csharp_extension::{HEURISTIC_CONFIDENCE, HEURISTIC_REASON};
-use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::CallSite;
 use ecp_core::graph::{RelType, ZeroCopyGraph};
-use receiver_typing_support::{assert_single_call_into_base, build, parse_all};
-use std::path::Path;
+use receiver_typing_support::{assert_single_call_into_base, build, callee_files, parse_all};
 
-/// The decoded call sites the parser records for the node named `caller`,
-/// as `{:?}` text, sorted.
+/// [`receiver_typing_support::call_sites`] of `source` read as `A.cs`.
 fn call_sites(source: &str, caller: &str) -> Vec<String> {
-    let local = CSharpProvider::new()
-        .expect("CSharpProvider::new")
-        .parse_file(Path::new("A.cs"), source.as_bytes())
-        .expect("parse_file");
-    let mut sites: Vec<String> = local
-        .nodes
-        .iter()
-        .filter(|n| n.name == caller)
-        .flat_map(|n| {
-            n.calls
-                .iter()
-                .map(|raw| format!("{:?}", CallSite::parse(raw)))
-        })
-        .collect();
-    sites.sort();
-    sites
+    let provider = CSharpProvider::new().expect("CSharpProvider::new");
+    receiver_typing_support::call_sites(&provider, "A.cs", source, caller)
 }
 
 fn sorted(sites: Vec<CallSite<'_>>) -> Vec<String> {
@@ -249,6 +232,82 @@ fn test_resolve_call_string_literal_receiver_picks_the_string_extension() {
     );
 }
 
+// A `u8` literal is a `ReadOnlySpan<byte>`, never a `String`: in the plain,
+// verbatim and raw forms, either suffix case, parenthesized or not, the
+// receiver stays untyped. Before the fix each was typed `String`.
+#[test]
+fn test_literal_receiver_u8_forms_stay_untyped() {
+    let sites = call_sites(
+        "class Lit
+{
+    void Spans()
+    {
+        \"a\"u8.A();
+        (\"b\"U8).B();
+        @\"c\"u8.C();
+        \"\"\"d\"\"\"u8.D();
+        \"\"u8.E();
+    }
+}
+",
+        "Spans",
+    );
+    assert_eq!(
+        sites,
+        sorted(vec![
+            CallSite::UntypedMember("A"),
+            CallSite::UntypedMember("B"),
+            CallSite::UntypedMember("C"),
+            CallSite::UntypedMember("D"),
+            CallSite::UntypedMember("E"),
+        ])
+    );
+}
+
+const U8_EXT: (&str, &str) = (
+    "Lib/Bytes.cs",
+    "namespace Lib
+{
+    public static class SpanExt
+    {
+        public static int Bytes(this ReadOnlySpan<byte> s) { return 0; }
+    }
+    public static class StringExt
+    {
+        public static int Bytes(this string s) { return 0; }
+    }
+}
+",
+);
+
+const U8_USE: (&str, &str) = (
+    "App/Raw.cs",
+    "using Lib;
+namespace App
+{
+    public class Raw
+    {
+        public int F() { return (\"a\"u8).Bytes(); }
+    }
+}
+",
+);
+
+// The graph side of the `u8` literal: `("a"u8).Bytes()` binds no edge to
+// the `this string` declaration (line 8). Typed `String`, the receiver
+// ruled out the `this ReadOnlySpan<byte>` rival and bound the string one.
+#[test]
+fn test_resolve_call_u8_literal_receiver_binds_no_string_extension() {
+    let provider = CSharpProvider::new().expect("CSharpProvider::new");
+    let graph = build(parse_all(&provider, &[U8_EXT, U8_USE]));
+    let string_ext: Vec<u32> = call_edges(&graph, "F", "Bytes")
+        .into_iter()
+        .map(|(line, _, _)| line)
+        .filter(|&line| line == 8)
+        .collect();
+    assert_eq!(string_ext, Vec::<u32>::new());
+}
+
 // FU-2026-10-25-cdfe6e8cd408. A cast names the type of its operand: a plain
 // type, a keyword type (spelled by its `System` name), `as`, nested
 // parentheses and a parenthesized typed local. A qualified or generic type
@@ -346,31 +405,17 @@ fn test_resolve_call_cast_receiver_binds_member_of_cast_type() {
             ),
         ],
     ));
-    let pool = &graph.string_pool;
-    let files: Vec<String> = graph
-        .edges
-        .iter()
-        .filter(|e| e.rel_type == RelType::Calls)
-        .filter(|e| graph.nodes[e.source as usize].name.resolve(pool) == "Run")
-        .map(|e| {
-            let target = &graph.nodes[e.target as usize];
-            format!(
-                "{}::{}",
-                graph.files[target.file_idx as usize].path.resolve(pool),
-                target.name.resolve(pool)
-            )
-        })
-        .collect();
-    assert_eq!(files, ["Lib/Tok.cs::CreateReader"]);
+    assert_eq!(callee_files(&graph, "Run", "CreateReader"), ["Lib/Tok.cs"]);
 }
 
-// Guard for FU-2026-10-26-755942c857a3: with the explicit implementation
-// now named `IBag.Remove`, `b.Remove(null)` still binds the ordinary
-// `Remove` (line 12) declared in the same class, never `IBag.Remove`
-// (line 7). This shape bound correctly before the rename too. The FU's own
-// shape, an explicit implementation on a nearer base class than the
-// ordinary member, binds nothing today: the walk also meets the interface
-// declaration, and the arity check that separates them is still open.
+// Guard for FU-2026-10-26-755942c857a3: the explicit implementation and
+// the ordinary member both carry the bare name `Remove`, and
+// `b.Remove(null)` on a `Bag` binds the ordinary one (line 12), never the
+// explicit one (line 7). Verified against 0.17.2 (edge to line 13, 1-based,
+// at 0.85). The FU's own shape, an explicit implementation on a nearer base
+// class than the ordinary member, binds nothing today: the walk also meets
+// the interface declaration, and the arity check that separates them is
+// still open.
 #[test]
 fn test_resolve_call_explicit_interface_member_is_not_an_ordinary_target() {
     let provider = CSharpProvider::new().expect("CSharpProvider::new");
@@ -408,9 +453,53 @@ class Caller
     assert_eq!(lines, [12]);
 }
 
+// An interface-typed call binds the interface declaration (line 2), from the
+// implementing class and from another class in the same file. The receiver
+// typer spells the call `IBag.Remove`; while 56dbd869 named the explicit
+// implementation by that same string, the same-file tier bound `Clear` to it
+// at 1.0 and `Go` to nothing. 0.17.2 binds both to the interface at 0.85.
+#[test]
+fn test_resolve_call_interface_typed_receiver_binds_the_interface_member() {
+    let provider = CSharpProvider::new().expect("CSharpProvider::new");
+    let source = "interface IBag
+{
+    void Remove(object o);
+}
+
+class Bag : IBag
+{
+    void IBag.Remove(object o)
+    {
+    }
+
+    public void Clear(IBag x)
+    {
+        x.Remove(1);
+    }
+}
+
+class Other
+{
+    void Go(IBag b)
+    {
+        b.Remove(1);
+    }
+}
+";
+    let graph = build(parse_all(&provider, &[("Bag.cs", source)]));
+    for caller in ["Clear", "Go"] {
+        let lines: Vec<u32> = call_edges(&graph, caller, "Remove")
+            .into_iter()
+            .map(|(line, _, _)| line)
+            .collect();
+        assert_eq!(lines, [2], "{caller}");
+    }
+}
+
 // A property that only an explicit implementation declares is no member in
-// scope: `Item.Run()` stays a name that may be a type, where it was typed by
-// the explicit property's declared type.
+// scope by its simple name (C# reaches it only through the interface), so
+// `Item.Run()` stays a name that may be a type. The node keeps the bare
+// name `Item`; the receiver map, not the node name, skips it.
 #[test]
 fn test_explicit_interface_property_does_not_type_a_simple_name_receiver() {
     let sites = call_sites(

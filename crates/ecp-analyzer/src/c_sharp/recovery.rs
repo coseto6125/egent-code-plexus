@@ -218,14 +218,20 @@ enum Directive {
     Other,
 }
 
-/// The directive on `line`; `None` when the line is code.
-fn directive(line: &[u8]) -> Option<Directive> {
+/// The directive word of `line` and the text after it; `None` when the line
+/// is code.
+fn directive_word(line: &[u8]) -> Option<(&[u8], &[u8])> {
     let rest = line
         .trim_ascii_start()
         .strip_prefix(b"#")?
         .trim_ascii_start();
     let word_len = rest.iter().take_while(|b| b.is_ascii_alphabetic()).count();
-    Some(match &rest[..word_len] {
+    Some(rest.split_at(word_len))
+}
+
+/// The directive on `line`; `None` when the line is code.
+fn directive(line: &[u8]) -> Option<Directive> {
+    Some(match directive_word(line)?.0 {
         b"if" => Directive::If,
         b"elif" | b"else" => Directive::Branch,
         b"endif" => Directive::Endif,
@@ -275,6 +281,8 @@ struct Group {
     endif: (usize, usize),
     /// Whether the innermost branch has seen a line of code.
     saw_code: bool,
+    /// Whether the group sits in a branch of another group.
+    nested: bool,
 }
 
 impl Group {
@@ -300,19 +308,28 @@ impl Group {
     }
 }
 
-/// The most branch combinations [`prepare_source`] tries when the first
-/// branches leave the braces unbalanced.
+/// The most settings of the tested symbols [`prepare_source`] tries.
 const MAX_BRANCH_CHOICES: usize = 256;
 
+/// One run of the source in order, as the brace walk of a setting reads it:
+/// code outside every group as `(delta, floor)`, or the reduced group at
+/// that index of the split groups.
+enum Piece {
+    Code(i32, i32),
+    Group(usize),
+}
+
 /// `source` with every conditional group that splits syntax (see
-/// [`Group::splits_syntax`]) reduced to one branch: the group's directive
-/// lines and every other branch become blanks, as if that branch's symbol
-/// were the only one defined. The first branch stays when the kept branches
-/// then balance the braces; otherwise the first combination of branches that
-/// balances them stays (`#if X` / `#else` opens a brace that an `#if !X`
-/// closes). When no combination balances, only the groups that keep the
-/// brace depth are reduced, each to its first branch. `None` when no group
-/// is reduced. No byte moves.
+/// [`Group::splits_syntax`]) reduced to the branch one setting of its
+/// symbol selects: the group's directive lines and every other branch become
+/// blanks. A group that tests one symbol (`#if X`, `#if !X`, an optional
+/// `#else`) follows the value of that symbol, so groups on the same symbol
+/// never mix branches no compilation keeps together; a group with a compound
+/// condition or an `#elif` keeps its first branch. The first setting reads
+/// each symbol as its first group's first branch does; the first setting
+/// whose kept branches balance the braces stays. When none balances, only the
+/// groups that keep the brace depth are reduced, each to its first branch.
+/// `None` when no group is reduced. No byte moves.
 pub fn prepare_source(source: &[u8]) -> Option<Vec<u8>> {
     if !source.contains(&b'#') {
         return None;
@@ -320,6 +337,12 @@ pub fn prepare_source(source: &[u8]) -> Option<Vec<u8>> {
     let mut lex = Lex::Code;
     let mut open: Vec<Group> = Vec::new();
     let mut split: Vec<Group> = Vec::new();
+    let mut pieces: Vec<Piece> = Vec::new();
+    let (mut delta, mut floor) = (0, 0);
+    // Whether the pieces give every setting's brace walk: a split group in
+    // another group moves the depth its parent recorded, and an unterminated
+    // group's code is in no piece.
+    let mut exact = true;
     let mut start = 0;
     while start < source.len() {
         let end = source[start..]
@@ -329,11 +352,18 @@ pub fn prepare_source(source: &[u8]) -> Option<Vec<u8>> {
         let line = &source[start..end];
         let found = (lex == Lex::Code).then(|| directive(line)).flatten();
         match found {
-            Some(Directive::If) => open.push(Group {
-                branches: vec![Branch::new((start, end), source.len())],
-                endif: (end, end),
-                saw_code: false,
-            }),
+            Some(Directive::If) => {
+                if open.is_empty() {
+                    pieces.push(Piece::Code(delta, floor));
+                    (delta, floor) = (0, 0);
+                }
+                open.push(Group {
+                    branches: vec![Branch::new((start, end), source.len())],
+                    endif: (end, end),
+                    saw_code: false,
+                    nested: !open.is_empty(),
+                });
+            }
             Some(Directive::Branch) => {
                 if let Some(group) = open.last_mut() {
                     group.current().body.1 = start;
@@ -346,7 +376,7 @@ pub fn prepare_source(source: &[u8]) -> Option<Vec<u8>> {
                     group.current().body.1 = start;
                     group.endif = (start, end);
                     // The enclosing branch sees the inner group as its first
-                    // branch, the one that stays after patching.
+                    // branch.
                     if let Some(parent) = open.last_mut() {
                         let kept = &group.branches[0];
                         let outer = parent.current();
@@ -354,7 +384,14 @@ pub fn prepare_source(source: &[u8]) -> Option<Vec<u8>> {
                         outer.delta += kept.delta;
                         parent.saw_code = true;
                     }
+                    // A whole group outside every other leaves the depth as
+                    // it found it in every branch: no piece.
                     if group.splits_syntax() {
+                        if group.nested {
+                            exact = false;
+                        } else {
+                            pieces.push(Piece::Group(split.len()));
+                        }
                         split.push(group);
                     }
                 }
@@ -367,6 +404,9 @@ pub fn prepare_source(source: &[u8]) -> Option<Vec<u8>> {
                     let first_line = has_code && !group.saw_code;
                     group.saw_code |= has_code;
                     group.current().add(&scan, first_line);
+                } else {
+                    floor = floor.min(delta + scan.floor);
+                    delta += scan.delta;
                 }
             }
         }
@@ -375,59 +415,160 @@ pub fn prepare_source(source: &[u8]) -> Option<Vec<u8>> {
     if split.is_empty() {
         return None;
     }
-    let first_branches = blank_groups(source, &split.iter().map(|g| (g, 0)).collect::<Vec<_>>());
-    if braces_balance(&first_branches) {
-        return Some(first_branches);
-    }
-    balancing_branches(source, &split).or_else(|| {
-        let neutral: Vec<(&Group, usize)> = split
-            .iter()
-            .filter(|group| group.keeps_depth())
-            .map(|group| (group, 0))
-            .collect();
-        (!neutral.is_empty()).then(|| blank_groups(source, &neutral))
-    })
-}
-
-/// `source` with the groups that move the brace depth reduced to the first
-/// combination of branches that balances the braces, the groups that keep
-/// the depth reduced to their first branch. `None` when no combination
-/// balances them, or when there are more than [`MAX_BRANCH_CHOICES`] to try.
-fn balancing_branches(source: &[u8], split: &[Group]) -> Option<Vec<u8>> {
-    let moving: Vec<&Group> = split.iter().filter(|g| !g.keeps_depth()).collect();
-    let combinations = moving
-        .iter()
-        .try_fold(1usize, |total, g| total.checked_mul(g.branches.len()))
-        .filter(|&total| total <= MAX_BRANCH_CHOICES)?;
-    // Combination 0 is every first branch, which the caller tried.
-    (1..combinations).find_map(|mut index| {
-        let mut picks: Vec<(&Group, usize)> = split
-            .iter()
-            .filter(|g| g.keeps_depth())
-            .map(|g| (g, 0))
-            .collect();
-        for group in &moving {
-            picks.push((*group, index % group.branches.len()));
-            index /= group.branches.len();
-        }
-        let patched = blank_groups(source, &picks);
-        braces_balance(&patched).then_some(patched)
-    })
-}
-
-/// `source` with each group of `picks` reduced to the branch it pairs with.
-fn blank_groups(source: &[u8], picks: &[(&Group, usize)]) -> Vec<u8> {
-    let mut patched = source.to_vec();
-    for &(group, kept) in picks {
-        blank_range(&mut patched, group.endif.0, group.endif.1);
-        for (k, branch) in group.branches.iter().enumerate() {
-            blank_range(&mut patched, branch.directive.0, branch.directive.1);
-            if k != kept {
-                blank_range(&mut patched, branch.body.0, branch.body.1);
+    exact &= open.is_empty();
+    pieces.push(Piece::Code(delta, floor));
+    consistent_branches(source, &split, exact.then_some(pieces.as_slice())).or_else(|| {
+        split.iter().any(Group::keeps_depth).then(|| {
+            let mut patched = source.to_vec();
+            for group in split.iter().filter(|g| g.keeps_depth()) {
+                reduce_group(&mut patched, group, Some(0));
             }
+            patched
+        })
+    })
+}
+
+/// The symbol a group tests and the value of it that selects the group's
+/// first branch: `(X, true)` for `#if X`, `(X, false)` for `#if !X`, either
+/// with an optional `#else`. `None` for a compound condition, a literal
+/// (`#if false`) or an `#elif`.
+fn condition<'s>(source: &'s [u8], group: &Group) -> Option<(&'s [u8], bool)> {
+    let [first, rest @ ..] = group.branches.as_slice() else {
+        return None;
+    };
+    match rest {
+        [] => {}
+        [alt] if directive_word(&source[alt.directive.0..alt.directive.1])?.0 == b"else" => {}
+        _ => return None,
+    }
+    let (_, mut expr) = directive_word(&source[first.directive.0..first.directive.1])?;
+    if let Some(comment) = expr.windows(2).position(|w| w == b"//") {
+        expr = &expr[..comment];
+    }
+    let mut value = true;
+    loop {
+        expr = expr.trim_ascii();
+        if let Some(operand) = expr.strip_prefix(b"!") {
+            value = !value;
+            expr = operand;
+        } else if let Some(inner) = expr.strip_prefix(b"(").and_then(|e| e.strip_suffix(b")")) {
+            expr = inner;
+        } else {
+            break;
         }
     }
-    patched
+    let symbol = !expr.is_empty()
+        && !expr[0].is_ascii_digit()
+        && expr.iter().all(|&b| is_word_byte(b))
+        && expr != b"true"
+        && expr != b"false";
+    symbol.then_some((expr, value))
+}
+
+/// `source` reduced to the first setting of the tested symbols whose kept
+/// branches balance the braces (see [`prepare_source`]). `pieces`, when
+/// given, holds every setting's brace walk, so only the winning setting is
+/// blanked; without it each setting is blanked and scanned. `None` when no
+/// setting balances, or when more than [`MAX_BRANCH_CHOICES`] settings move
+/// the depth.
+fn consistent_branches(
+    source: &[u8],
+    split: &[Group],
+    pieces: Option<&[Piece]>,
+) -> Option<Vec<u8>> {
+    // Each symbol with the value its first group's first branch reads, and
+    // its bit in a setting when a group that moves the depth tests it. A
+    // symbol only depth-keeping groups test keeps that first value.
+    let mut symbols: Vec<(&[u8], bool, Option<u32>)> = Vec::new();
+    let mut moving = 0u32;
+    let tests: Vec<Option<(usize, bool)>> = split
+        .iter()
+        .map(|group| {
+            let (symbol, first) = condition(source, group)?;
+            let at = symbols
+                .iter()
+                .position(|(s, _, _)| *s == symbol)
+                .unwrap_or_else(|| {
+                    symbols.push((symbol, first, None));
+                    symbols.len() - 1
+                });
+            if !group.keeps_depth() && symbols[at].2.is_none() {
+                symbols[at].2 = Some(moving);
+                moving += 1;
+            }
+            Some((at, first))
+        })
+        .collect();
+    let settings = 1usize
+        .checked_shl(moving)
+        .filter(|&n| n <= MAX_BRANCH_CHOICES)?;
+    let mut picks: Vec<Option<usize>> = vec![Some(0); split.len()];
+    let set_picks = |setting: usize, picks: &mut [Option<usize>]| {
+        for ((pick, test), group) in picks.iter_mut().zip(&tests).zip(split) {
+            let Some((at, first)) = *test else { continue };
+            let (_, default, bit) = symbols[at];
+            let value = default ^ bit.is_some_and(|bit| (setting >> bit) & 1 == 1);
+            *pick = if value == first {
+                Some(0)
+            } else {
+                (group.branches.len() > 1).then_some(1)
+            };
+        }
+    };
+    let blank = |patched: &mut [u8], picks: &[Option<usize>]| {
+        for (group, &kept) in split.iter().zip(picks) {
+            reduce_group(patched, group, kept);
+        }
+    };
+    if let Some(pieces) = pieces {
+        (0..settings).find(|&setting| {
+            set_picks(setting, &mut picks);
+            walk_balances(pieces, split, &picks)
+        })?;
+        let mut patched = source.to_vec();
+        blank(&mut patched[..], &picks);
+        return Some(patched);
+    }
+    let mut patched = source.to_vec();
+    (0..settings).find_map(|setting| {
+        set_picks(setting, &mut picks);
+        patched.copy_from_slice(source);
+        blank(&mut patched[..], &picks);
+        braces_balance(&patched).then(|| std::mem::take(&mut patched))
+    })
+}
+
+/// Whether the pieces, each group read as its kept branch, never close more
+/// braces than they opened and end balanced: [`braces_balance`] of the
+/// patched source, from the depths the scan recorded.
+fn walk_balances(pieces: &[Piece], split: &[Group], picks: &[Option<usize>]) -> bool {
+    let mut depth = 0;
+    for piece in pieces {
+        let (delta, floor) = match *piece {
+            Piece::Code(delta, floor) => (delta, floor),
+            Piece::Group(at) => picks[at].map_or((0, 0), |kept| {
+                let branch = &split[at].branches[kept];
+                (branch.delta, branch.floor)
+            }),
+        };
+        if depth + floor < 0 {
+            return false;
+        }
+        depth += delta;
+    }
+    depth == 0
+}
+
+/// Blanks the directive lines of `group` and every branch body but `kept`
+/// (every body when `None`: no branch is selected).
+fn reduce_group(patched: &mut [u8], group: &Group, kept: Option<usize>) {
+    blank_range(patched, group.endif.0, group.endif.1);
+    for (k, branch) in group.branches.iter().enumerate() {
+        blank_range(patched, branch.directive.0, branch.directive.1);
+        if Some(k) != kept {
+            blank_range(patched, branch.body.0, branch.body.1);
+        }
+    }
 }
 
 /// Whether the code braces of `source` never close more than they opened
@@ -690,101 +831,261 @@ mod tests {
     }
 
     /// An inverted pair: `#if X` / `#else` opens a brace in its second
-    /// branch, `#if !X` closes it. The first branches leave the braces
-    /// unbalanced, so each group keeps the branch that pairs with the other.
+    /// branch, `#if !X` closes it. The first setting (X defined) keeps
+    /// neither brace, which balances, so it stays.
     #[test]
-    fn test_prepare_source_inverted_pair_keeps_the_branches_that_balance() {
+    fn test_prepare_source_inverted_pair_reads_both_groups_with_one_setting() {
         let src = "void M() {\n#if X\n#else\nlock (o) {\n#endif\nBar();\n#if !X\n}\n#endif\n}\n";
         let out = patched(src).expect("patched");
         assert_eq!(out.len(), src.len());
         assert_eq!(
             trimmed(&out),
-            [
-                "void M() {",
-                "",
-                "",
-                "lock (o) {",
-                "",
-                "Bar();",
-                "",
-                "}",
-                "",
-                "}"
-            ]
+            ["void M() {", "", "", "", "", "Bar();", "", "", "", "}"]
         );
     }
 
-    /// The same pair with the closing group's branches swapped: the second
-    /// group keeps its second branch, the first group its first.
+    /// X defined keeps `lock (o) {` with `Two();`, which leaves a brace
+    /// open; X undefined keeps `lock (p) {` with the `}` of `#if !X`. Before
+    /// the per-symbol choice the first branches (`lock (o) {` with `}`)
+    /// balanced and stayed, a pair no setting of X compiles.
     #[test]
-    fn test_prepare_source_inverted_pair_picks_a_later_branch_of_the_closing_group() {
-        let src =
-            "void M() {\n#if X\nlock (o) {\n#endif\nBar();\n#if X\nOther();\n#else\n}\n#endif\n}\n";
+    fn test_prepare_source_inverted_pair_takes_the_second_setting_when_the_first_unbalances() {
+        let src = "void M() {\n#if X\nlock (o) {\n#else\nlock (p) {\n#endif\nBar();\n#if !X\n}\n#else\nTwo();\n#endif\n}\n";
         let out = patched(src).expect("patched");
         assert_eq!(
             trimmed(&out),
             [
                 "void M() {",
                 "",
-                "lock (o) {",
+                "",
+                "",
+                "lock (p) {",
                 "",
                 "Bar();",
                 "",
-                "",
-                "",
                 "}",
+                "",
+                "",
                 "",
                 "}"
             ]
         );
     }
 
-    /// CRLF line ends: the inverted pair is reduced and every line break
+    /// The same pair with the symbol spelled `(ÜBER) // on` and `! ÜBER`:
+    /// both groups test one symbol, so they take the second setting too.
+    #[test]
+    fn test_prepare_source_parenthesized_commented_non_ascii_symbol_is_one_symbol() {
+        let src = "void M() {\n#if (ÜBER) // on\nlock (o) {\n#else\nlock (p) {\n#endif\nBar();\n# if ! ÜBER\n}\n#else\nTwo();\n#endif\n}\n";
+        let out = patched(src).expect("patched");
+        assert!(
+            out.contains("lock (p) {") && !out.contains("lock (o)") && !out.contains("Two"),
+            "{out:?}"
+        );
+    }
+
+    /// CRLF line ends: the second setting is kept and every line break
     /// stays.
     #[test]
     fn test_prepare_source_inverted_pair_crlf_keeps_line_breaks() {
-        let src = "void M() {\r\n#if X\r\n#else\r\nlock (o) {\r\n#endif\r\nBar();\r\n#if !X\r\n}\r\n#endif\r\n}\r\n";
+        let src = "void M() {\r\n#if X\r\nlock (o) {\r\n#else\r\nlock (p) {\r\n#endif\r\nBar();\r\n#if !X\r\n}\r\n#else\r\nTwo();\r\n#endif\r\n}\r\n";
         let out = patched(src).expect("patched");
         assert_eq!(out.len(), src.len());
         assert_eq!(out.matches("\r\n").count(), src.matches("\r\n").count());
-        assert!(out.contains("lock (o) {") && !out.contains('#'), "{out:?}");
+        assert!(
+            out.contains("lock (p) {") && !out.contains("lock (o)") && !out.contains('#'),
+            "{out:?}"
+        );
     }
 
-    /// When no choice of branches balances the braces (a lone group opens a
-    /// brace nothing closes), neither half is blanked.
+    /// The brief's first counterexample. `#if X` / `#else` opens `A` or
+    /// `B`; a later `#if X` / `#else` opens a block only for X undefined,
+    /// and `#if !X` closes it. X defined balances: `A` keeps `Common()` and
+    /// no `OnlyB()`. The search by group index kept `A` with the `#else`
+    /// block, an `A` calling `OnlyB` that no setting compiles.
     #[test]
-    fn test_prepare_source_no_balancing_branches_blank_neither_half() {
+    fn test_prepare_source_groups_on_one_symbol_take_the_same_setting() {
+        let src = "class C {\n#if X\nvoid A() {\n#else\nvoid B() {\n#endif\n#if X\n#else\n{ OnlyB();\n#endif\nCommon();\n#if !X\n}\n#endif\n}\nvoid OnlyB() {}\nvoid Common() {}\n}\n";
+        let out = patched(src).expect("patched");
+        assert_eq!(
+            trimmed(&out),
+            [
+                "class C {",
+                "",
+                "void A() {",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "Common();",
+                "",
+                "",
+                "",
+                "}",
+                "void OnlyB() {}",
+                "void Common() {}",
+                "}"
+            ]
+        );
+    }
+
+    /// The brief's second counterexample: two independent inverted pairs on
+    /// X and Y. Both defined balances: `A` closes at the `#if X` `}` and
+    /// `Mid` stays a member. The search by group index kept `A` open with
+    /// `A3()` and closed it at the `#if !Y` `}`, so `A` swallowed `Mid`.
+    #[test]
+    fn test_prepare_source_two_symbol_pairs_keep_the_unconditional_member_outside() {
+        let src = "class C {\n#if X\nvoid A() {\n#else\nvoid A2() { }\n#endif\n#if X\n}\n#else\nvoid A3() { }\n#endif\nvoid Mid() { }\n#if Y\nvoid B2() { }\n#else\nvoid B() {\n#endif\n#if !Y\n}\n#else\nvoid B3() { }\n#endif\nvoid Tail() { }\n}\n";
+        let out = patched(src).expect("patched");
+        assert_eq!(
+            trimmed(&out),
+            [
+                "class C {",
+                "",
+                "void A() {",
+                "",
+                "",
+                "",
+                "",
+                "}",
+                "",
+                "",
+                "",
+                "void Mid() { }",
+                "",
+                "void B2() { }",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "void B3() { }",
+                "",
+                "void Tail() { }",
+                "}"
+            ]
+        );
+    }
+
+    /// A split group inside a whole `#if Z` group follows the same symbol as
+    /// a group outside it: X undefined keeps `B` and the block. The outer
+    /// group keeps its directives.
+    #[test]
+    fn test_prepare_source_nested_split_group_follows_the_outer_symbol_setting() {
+        let src = "class C {\n#if X\nvoid A() {\n#else\nvoid B() {\n#endif\nCommon();\n#if Z\n#if X\nDone();\n#else\n{ OnlyB();\n#endif\n#endif\n}\n}\n}\n";
+        let out = patched(src).expect("patched");
+        assert_eq!(
+            trimmed(&out),
+            [
+                "class C {",
+                "",
+                "",
+                "",
+                "void B() {",
+                "",
+                "Common();",
+                "#if Z",
+                "",
+                "",
+                "",
+                "{ OnlyB();",
+                "",
+                "#endif",
+                "}",
+                "}",
+                "}"
+            ]
+        );
+    }
+
+    /// A lone `#if X` that opens a brace nothing closes reads as X
+    /// undefined: the group's body goes with its directives.
+    #[test]
+    fn test_prepare_source_lone_opener_reads_its_symbol_undefined() {
         let src = "void M() {\n#if X\nlock (o) {\n#endif\nBar();\n}\n";
+        let out = patched(src).expect("patched");
+        assert_eq!(trimmed(&out), ["void M() {", "", "", "", "Bar();", "}"]);
+    }
+
+    /// When no setting balances the braces (both branches open a brace
+    /// nothing closes), neither branch is blanked.
+    #[test]
+    fn test_prepare_source_no_balancing_setting_blanks_neither_branch() {
+        let src = "void M() {\n#if X\nlock (a) {\n#else\nlock (b) {\n#endif\nBar();\n}\n";
         assert_eq!(patched(src), None);
     }
 
-    /// The inverted pair is reduced as well as a group no brace depends on.
+    /// A compound condition names no one symbol: each group keeps its first
+    /// branch, which leaves the pair unbalanced, so neither group is
+    /// reduced. The search by group index paired the `#else` of the first
+    /// with the second.
+    #[test]
+    fn test_prepare_source_compound_condition_pair_falls_back_to_neutral() {
+        let src = "void M() {\n#if X && Y\n#else\nlock (o) {\n#endif\nBar();\n#if !(X && Y)\n}\n#endif\n}\n";
+        assert_eq!(patched(src), None);
+    }
+
+    /// The inverted pair is reduced with one setting, and a group no brace
+    /// depends on is reduced as well.
     #[test]
     fn test_prepare_source_inverted_pair_still_reduces_else_group() {
         let src = "void M() {\n#if X\n#else\nlock (o) {\n#endif\nBar();\n#if !X\n}\n#endif\nif (a) { }\n#if Y\nelse { }\n#endif\n}\n";
         let out = patched(src).expect("patched");
         assert!(!out.contains('#'), "{out:?}");
         assert!(
-            out.contains("lock (o) {") && out.contains("else { }"),
+            !out.contains("lock (o) {") && out.contains("else { }"),
             "{out:?}"
         );
     }
 
-    /// Past the search bound the pair is not tried: only the groups no brace
-    /// depends on are reduced.
+    /// Past the search bound (nine symbols that move the depth) no setting
+    /// is tried: only the groups no brace depends on are reduced.
     #[test]
     fn test_prepare_source_too_many_moving_groups_fall_back_to_neutral_groups() {
         let mut src = String::from("void M() {\n");
-        for _ in 0..9 {
-            src.push_str("#if X\n#else\nlock (o) {\n#endif\nBar();\n#if !X\n}\n#endif\n");
+        for k in 0..9 {
+            src.push_str(&format!(
+                "#if X{k}\n#else\nlock (o) {{\n#endif\nBar();\n#if !X{k}\n}}\n#endif\n"
+            ));
         }
         src.push_str("if (a) { }\n#if Y\nelse { }\n#endif\n}\n");
         let out = patched(&src).expect("patched");
-        assert!(out.contains("#if X") && out.contains("#if !X"), "{out:?}");
+        assert!(out.contains("#if X8") && out.contains("#if !X8"), "{out:?}");
         assert!(
             !out.contains("#if Y") && out.contains("else { }"),
             "{out:?}"
         );
+    }
+
+    /// `#endif` at the end of the file with no line break closes its group.
+    /// An `#if` left open at the end keeps its directive, and the groups
+    /// before it are still reduced.
+    #[test]
+    fn test_prepare_source_directive_at_eof_without_newline() {
+        let src = "void M() {\n#if X\nlock (o) {\n#endif\nBar();\n}\n#if X\n}\n#endif";
+        let out = patched(src).expect("patched");
+        assert_eq!(out.len(), src.len());
+        assert_eq!(
+            trimmed(&out),
+            [
+                "void M() {",
+                "",
+                "lock (o) {",
+                "",
+                "Bar();",
+                "}",
+                "",
+                "}",
+                ""
+            ]
+        );
+        let open = "void M() {\n#if X\nlock (o) {\n#endif\nBar();\n}\n#if X\n}\n#endif\n#if Y";
+        let out = patched(open).expect("patched");
+        assert!(out.ends_with("#if Y") && !out.contains("#if X"), "{out:?}");
     }
 
     /// A nested group that opens a body in each branch is reduced; the

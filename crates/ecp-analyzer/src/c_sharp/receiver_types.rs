@@ -26,7 +26,6 @@
 //!   - First named child: type (`identifier` / `predefined_type`)
 //!   - `variable_declarator` child with `name` field (`identifier`)
 
-use super::parser::explicit_interface;
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_csharp_string_value,
 };
@@ -34,6 +33,7 @@ use crate::calls::{
     attach_to_enclosing, construction_call, node_range, range_width, span_holds, span_width,
     start_pos, Pos, PosRange,
 };
+use ecp_core::analyzer::csharp_extension::system_type_name;
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use std::borrow::Cow;
@@ -156,7 +156,11 @@ fn collect_members(
     };
     if decl.kind() == "property_declaration" {
         // An explicit implementation is no member of the type by name.
-        if explicit_interface(decl, source).is_some() {
+        let mut cursor = decl.walk();
+        if decl
+            .named_children(&mut cursor)
+            .any(|child| child.kind() == "explicit_interface_specifier")
+        {
             return;
         }
         push(
@@ -459,7 +463,16 @@ fn classify_receiver<'a>(
         "string_literal"
         | "verbatim_string_literal"
         | "raw_string_literal"
-        | "interpolated_string_expression" => Receiver::Typed(Cow::Borrowed("String")),
+        | "interpolated_string_expression" => {
+            // `"a"u8` (and `@"a"u8`, `"""a"""u8`) is a `ReadOnlySpan<byte>`,
+            // a generic type no plain receiver name spells.
+            let literal = text(receiver).ok()?;
+            if literal.ends_with("u8") || literal.ends_with("U8") {
+                Receiver::Untyped
+            } else {
+                Receiver::Typed(Cow::Borrowed("String"))
+            }
+        }
         "character_literal" => Receiver::Typed(Cow::Borrowed("Char")),
         "boolean_literal" => Receiver::Typed(Cow::Borrowed("Boolean")),
         "integer_literal" => integer_literal_type(text(receiver).ok()?)
@@ -498,6 +511,9 @@ fn named_type_receiver<'a>(ty: Option<Node<'_>>, source: &'a [u8]) -> Receiver<'
     match ty.kind() {
         "identifier" => std::str::from_utf8(&source[range])
             .map_or(Receiver::Untyped, |ty| Receiver::Typed(Cow::Borrowed(ty))),
+        // A value of a keyword type is no static access: `string.M()` names
+        // the type, which no extension method reaches, so the value takes
+        // the `System` name.
         "predefined_type" => std::str::from_utf8(&source[range]).map_or(Receiver::Untyped, |ty| {
             Receiver::Typed(Cow::Borrowed(system_type_name(ty)))
         }),
@@ -545,32 +561,6 @@ fn real_literal_type(text: &str) -> &'static str {
         Some(b'f') => "Single",
         Some(b'm') => "Decimal",
         _ => "Double",
-    }
-}
-
-/// A C# keyword type as its `System` type's name (`string` is `String`): a
-/// value of a keyword type is no static access, so it must not read as the
-/// keyword (`string.M()` names the type, and no extension method reaches it).
-fn system_type_name(name: &str) -> &str {
-    match name {
-        "bool" => "Boolean",
-        "byte" => "Byte",
-        "sbyte" => "SByte",
-        "char" => "Char",
-        "decimal" => "Decimal",
-        "double" => "Double",
-        "float" => "Single",
-        "int" => "Int32",
-        "uint" => "UInt32",
-        "nint" => "IntPtr",
-        "nuint" => "UIntPtr",
-        "long" => "Int64",
-        "ulong" => "UInt64",
-        "short" => "Int16",
-        "ushort" => "UInt16",
-        "object" => "Object",
-        "string" => "String",
-        other => other,
     }
 }
 
