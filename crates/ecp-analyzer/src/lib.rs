@@ -37,7 +37,6 @@ pub mod javascript;
 pub mod kotlin;
 pub mod kubernetes;
 pub mod lua;
-pub mod markdown;
 pub mod move_lang;
 pub mod nim;
 pub mod openapi;
