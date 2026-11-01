@@ -303,7 +303,7 @@ fn run_bm25(args: FindArgs, engine: Option<&Engine>) -> Result<(), EcpError> {
             std::path::Path::new(&target.graph_path),
             &target.worktree_root(),
         )
-        .map_err(|e| EcpError::Rkyv(format!("{}: {e}", target.display_name)))?;
+        .map_err(|e| EcpError::Output(format!("{}: {e}", target.display_name)))?;
         let caveat = single_target_caveat(&target, &local_engine);
         run_single(
             pattern,
@@ -865,7 +865,7 @@ fn run_batch(args: FindArgs, engine: Option<&Engine>) -> Result<(), EcpError> {
             std::path::Path::new(&target.graph_path),
             &target.worktree_root(),
         )
-        .map_err(|e| EcpError::InvalidArgument(format!("{}: {e}", target.display_name)))?;
+        .map_err(|e| EcpError::Output(format!("{}: {e}", target.display_name)))?;
         Some((target.display_name.clone(), eng))
     } else {
         None
@@ -1822,7 +1822,7 @@ pub fn compute_hits_limited(
             std::path::Path::new(&target.graph_path),
             &target.worktree_root(),
         )
-        .map_err(|e| EcpError::Rkyv(format!("{}: {e}", target.display_name)))?;
+        .map_err(|e| EcpError::Output(format!("{}: {e}", target.display_name)))?;
         compute_single_limited(
             pattern,
             &args.mode,

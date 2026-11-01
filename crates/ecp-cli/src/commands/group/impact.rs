@@ -91,8 +91,8 @@ pub fn run(args: ImpactArgs) -> Result<(), EcpError> {
     })?;
     let worktree_root =
         crate::git_cache::worktree_root_for_repo(std::path::Path::new(&resolved.common_dir));
-    let engine = crate::auto_ensure::load_ensured(&graph_path, &worktree_root)
-        .map_err(|e| EcpError::Io(std::io::Error::other(e)))?;
+    let engine =
+        crate::auto_ensure::load_ensured(&graph_path, &worktree_root).map_err(EcpError::Output)?;
     // Same member-prefixed shape as `group find`'s caveat, so consumers see
     // one consistent staleness convention across group verbs.
     let caveat = engine

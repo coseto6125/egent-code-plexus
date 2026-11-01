@@ -39,7 +39,10 @@ pub enum EcpError {
     #[error("serialization error: {0}")]
     Serialization(String),
 
-    #[error("output encode error: {0}")]
+    /// A command failure whose message already names its cause. Encode sites
+    /// prefix their own subject (`json serialize:`, `toon encode:`), so a fixed
+    /// prefix here would mislabel every refusal and subprocess failure.
+    #[error("{0}")]
     Output(String),
 }
 
@@ -84,6 +87,12 @@ pub type EcpResult<T> = Result<T, EcpError>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_output_display_adds_no_prefix() {
+        let msg = EcpError::Output("refusing to index /: reason".into()).to_string();
+        assert_eq!(msg, "refusing to index /: reason");
+    }
 
     #[test]
     fn test_graph_not_found_names_admin_index() {
