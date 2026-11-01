@@ -751,7 +751,7 @@ pub(crate) fn ensure_fresh_with_rebuild(
                         let mut skipped = Vec::new();
                         let paths: Vec<RepoPath> =
                             collect_dirty_files(graph_path, worktree_root, graph_mtime)
-                                .unwrap_or_default()
+                                .map_err(|e| e.to_string())?
                                 .iter()
                                 .filter_map(|p| match walked_repo_path(p, worktree_root) {
                                     Ok(path) => Some(path),
@@ -1966,6 +1966,10 @@ fn any_source_newer_than(
 /// Returns all source files under `root` with mtime newer than `graph_mtime`.
 /// Same walk logic as `any_source_newer_than` but collects instead of
 /// short-circuiting — used by `apply_l1_overlay_updates`.
+///
+/// The only error is the folder-of-projects refusal: a tree indexed while it
+/// held one repository must not parse a second one cloned into it later
+/// through the overlay.
 fn collect_dirty_files(
     graph_path: &Path,
     root: &Path,
@@ -1974,7 +1978,8 @@ fn collect_dirty_files(
     let graph_canonical = fs::canonicalize(graph_path).ok();
     let mut out = Vec::new();
 
-    let filter_root = root.to_path_buf();
+    let nested_repos = std::sync::Arc::new(crate::walker_filter::NestedRepoWatch::for_tree(root));
+    let nested_repos_filter = std::sync::Arc::clone(&nested_repos);
     for entry in WalkBuilder::new(root)
         .hidden(false)
         .git_ignore(true)
@@ -1982,10 +1987,8 @@ fn collect_dirty_files(
         .require_git(false)
         .filter_entry(move |e| {
             let name = e.file_name().to_string_lossy();
-            if SKIP_DIRS.contains(&name.as_ref()) {
-                return false;
-            }
-            !crate::walker_filter::is_skippable_worktree_descendant(e.path(), &filter_root)
+            !SKIP_DIRS.contains(&name.as_ref())
+                && nested_repos_filter.admits(e.path(), e.file_type().is_some_and(|t| t.is_dir()))
         })
         .build()
         .filter_map(Result::ok)
@@ -2005,6 +2008,9 @@ fn collect_dirty_files(
             }
         }
     }
+    // The one-repo note is left to the index build: this walk runs on every
+    // query of a dirty tree and would repeat it each time.
+    nested_repos.finish()?;
     Ok(out)
 }
 

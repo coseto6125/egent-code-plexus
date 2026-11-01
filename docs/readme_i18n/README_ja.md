@@ -389,6 +389,8 @@ crates/
 | `ECP_MAX_FILE_BYTES` | `1048576`（1 MiB） | インジェスト中にこのサイズを超えるソースファイルをスキップ。コールドインデックス、増分再解析、セッションオーバーレイ、`impact --baseline` のすべてに適用。環境変数は `<repo>/.ecp/config.toml` の `[index] max_file_bytes` より優先。ワーカー RAM の最悪ケースを `num_threads × MAX` に制限。 |
 | `ECP_CSPROJ_MAX_DEPTH` | `4` | `*.csproj` 検出の再帰深度。深くネストされた .NET モノリポの場合は増やしてください。 |
 
+git コミットがなく、2 つ以上のリポジトリを含むツリーは「プロジェクトの集まり」として拒否されます。意図的なマルチリポジトリのワークスペースを 1 つのグラフとしてインデックスするには、その `.ecp/config.toml` に `[index] allow_nested_repos = true` を設定します。
+
 ---
 
 ## 📜 ライセンスと謝辞

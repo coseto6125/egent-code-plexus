@@ -801,25 +801,9 @@ pub(crate) fn refuse_machine_wide_tree(worktree: &Path) -> io::Result<()> {
     };
     let home = machine_home(ecp_core::registry::home_dir(), account_home)
         .and_then(|h| dunce::canonicalize(h).ok());
-    // `git_cache::head_sha` cannot answer this: it synthesizes a path-bound SHA
-    // for a non-git tree. The file reader spawns nothing on the query path; the
-    // spawn covers layouts it declines, with the variables that point git at
-    // another repository removed, so they cannot vouch for this tree.
-    // `GIT_CEILING_DIRECTORIES` stays: the build's own `rev-parse` honours it,
-    // so a ceiling that hides the repository also sends the build down the
-    // whole-tree path, and this check must see the tree the same way.
-    let has_commit = || {
-        crate::git_cache::head_sha_from_files(&tree).is_some()
-            || safe_exec::git()
-                .args(["rev-parse", "HEAD"])
-                .current_dir(&tree)
-                .env_remove("GIT_DIR")
-                .env_remove("GIT_WORK_TREE")
-                .env_remove("GIT_COMMON_DIR")
-                .output()
-                .is_ok_and(|o| o.status.success())
-    };
-    if is_machine_wide(&tree, home.as_deref(), has_commit) {
+    if is_machine_wide(&tree, home.as_deref(), || {
+        crate::git_cache::has_commit(&tree)
+    }) {
         return Err(io::Error::other(format!(
             "refusing to index {}: it is a filesystem root, or the home directory or an \
              ancestor of it with no git commit, so it holds every project on this machine; \

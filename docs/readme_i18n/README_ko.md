@@ -389,6 +389,8 @@ crates/
 | `ECP_MAX_FILE_BYTES` | `1048576` (1 MiB) | 인제스트 중 이 크기를 초과하는 소스 파일 건너뜀. 콜드 인덱스, 증분 재분석, 세션 오버레이, `impact --baseline`에 모두 적용. 환경 변수가 `<repo>/.ecp/config.toml`의 `[index] max_file_bytes`보다 우선. 최악의 경우 워커 RAM을 `num_threads × MAX`로 제한. |
 | `ECP_CSPROJ_MAX_DEPTH` | `4` | `*.csproj` 발견 재귀 깊이. 깊게 중첩된 .NET 모노리포의 경우 올리세요. |
 
+git 커밋이 없고 저장소를 두 개 이상 담은 트리는 프로젝트 모음으로 보고 거부합니다. 의도한 멀티 저장소 작업 공간을 하나의 그래프로 인덱싱하려면 해당 `.ecp/config.toml`에 `[index] allow_nested_repos = true`를 설정하세요.
+
 ---
 
 ## 📜 라이선스 및 감사의 말

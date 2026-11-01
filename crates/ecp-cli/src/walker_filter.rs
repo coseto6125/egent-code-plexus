@@ -21,10 +21,157 @@
 //! Set `ECP_INCLUDE_WORKTREES=1` to disable both filters — useful when the
 //! user genuinely wants to index a worktree-containing dir or wants to
 //! verify cross-worktree symbol overlap.
+//!
+//! ## Folders of projects
+//!
+//! [`NestedRepoWatch`] refuses a tree with no git commit that holds two or
+//! more repositories, before any file is parsed.
 
-use std::path::{Component, Path};
+use std::io;
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 const ENV_OVERRIDE: &str = "ECP_INCLUDE_WORKTREES";
+
+/// Nested repositories at which a tree with no git commit is refused.
+const NESTED_REPOS_REFUSED_AT: usize = 2;
+
+/// Watches a walk of a tree with no git commit for repositories inside it.
+///
+/// Two or more make the tree a folder of projects: that is where an agent's
+/// failed `cd` lands, and indexing it parses every project at once (on
+/// 2026-11-01 that took the host down). One is common, a non-git project
+/// with one cloned dependency, and only earns a note. A tree with a commit is
+/// not watched: its submodules and embedded clones belong to the project.
+/// The build's archive extract of a dirty checkout has no `.git`, so it is
+/// watched, but `git archive` writes no `.git` entry and it counts none.
+/// `[index] allow_nested_repos = true` in the tree's `.ecp/config.toml`
+/// turns the refusal off for a deliberate multi-repo workspace.
+///
+/// Every walk of a watched tree filters its entries through [`Self::admits`]
+/// and calls [`Self::finish`] before it parses anything.
+pub(crate) struct NestedRepoWatch {
+    /// The walk root as the walk spells it, so walked paths strip against it.
+    root: PathBuf,
+    active: bool,
+    /// Whether `.ecp/config.toml` allows nested repos, and why it did not load
+    /// (so a refusal does not ask for a setting the user already wrote). Read
+    /// only once a repository is found: the overlay walk runs on every query.
+    config: OnceLock<(bool, Option<String>)>,
+    count: AtomicUsize,
+    found: Mutex<Vec<PathBuf>>,
+}
+
+impl NestedRepoWatch {
+    pub(crate) fn for_tree(root: &Path) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            active: !crate::git_cache::has_commit(root),
+            config: OnceLock::new(),
+            count: AtomicUsize::new(0),
+            found: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn config(&self) -> &(bool, Option<String>) {
+        self.config.get_or_init(|| {
+            let config = ecp_core::config::load(&self.root);
+            let allowed = config
+                .as_ref()
+                .is_ok_and(|cfg| cfg.index.allow_nested_repos);
+            (allowed, config.err().map(|e| e.to_string()))
+        })
+    }
+
+    /// The `filter_entry` verdict for `path`: it prunes agent worktrees and
+    /// nested worktree checkouts, records each kept directory, and keeps
+    /// nothing once the tree is refused, so the walk ends there.
+    pub(crate) fn admits(&self, path: &Path, is_dir: bool) -> bool {
+        if is_skippable_worktree_descendant(path, &self.root) {
+            return false;
+        }
+        if is_dir {
+            self.observe_dir(path);
+        }
+        !self.refusal_reached()
+    }
+
+    /// Records `dir` when it is the top of a git checkout.
+    fn observe_dir(&self, dir: &Path) {
+        if !self.active || dir == self.root {
+            return;
+        }
+        // A repository's own `.git` tree holds hundreds of directories and no
+        // checkout; skipping it by name saves a stat for each.
+        let in_git_dir = dir
+            .strip_prefix(&self.root)
+            .is_ok_and(|rel| rel.components().any(|c| c.as_os_str() == ".git"));
+        if !in_git_dir && crate::git_cache::is_repository_root(dir) {
+            self.count.fetch_add(1, Ordering::Relaxed);
+            self.found
+                .lock()
+                .expect("nested-repo list is never held across a panic")
+                .push(dir.to_path_buf());
+        }
+    }
+
+    /// True once the walk has seen enough repositories to refuse, so it can
+    /// stop instead of listing the rest of a machine-sized tree.
+    pub(crate) fn refusal_reached(&self) -> bool {
+        self.count.load(Ordering::Relaxed) >= NESTED_REPOS_REFUSED_AT && !self.config().0
+    }
+
+    /// The verdict once the walk ends: an error from two repositories on, and
+    /// for one a note that the caller prints where a note is wanted.
+    pub(crate) fn finish(&self) -> io::Result<Option<String>> {
+        let mut found = self
+            .found
+            .lock()
+            .expect("nested-repo list is never held across a panic")
+            .clone();
+        if found.is_empty() || self.config().0 {
+            return Ok(None);
+        }
+        found.sort();
+        // The root as the messages name it: `.` tells a lost agent nothing.
+        let shown_root = dunce::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone());
+        let names: Vec<String> = found
+            .iter()
+            .map(|dir| {
+                dir.strip_prefix(&self.root)
+                    .unwrap_or(dir)
+                    .display()
+                    .to_string()
+            })
+            .collect();
+        let config_path = ecp_core::config::config_path(&shown_root);
+        match names.as_slice() {
+            [] => Ok(None),
+            [only] => Ok(Some(format!(
+                "note: {} has no git commit and holds the repository {only}; indexing the whole \
+                 tree",
+                shown_root.display()
+            ))),
+            several => Err(io::Error::other(format!(
+                "refusing to index {}: it has no git commit and holds at least {} repositories \
+                 ({}), so it is a folder of projects; run ecp inside one of them, query across \
+                 them with `ecp group`, list them in {} to leave them out, or set \
+                 `allow_nested_repos = true` under [index] in {} to index the whole tree{}",
+                shown_root.display(),
+                several.len(),
+                several.join(", "),
+                shown_root.join(crate::ECP_IGNORE_FILE).display(),
+                config_path.display(),
+                self.config()
+                    .1
+                    .as_deref()
+                    .map(|e| format!(" (that config did not load: {e})"))
+                    .unwrap_or_default()
+            ))),
+        }
+    }
+}
 
 /// Returns `true` when `entry_path` should be pruned from the walk.
 ///

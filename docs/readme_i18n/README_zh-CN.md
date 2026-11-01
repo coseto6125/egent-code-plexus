@@ -389,6 +389,8 @@ crates/
 | `ECP_MAX_FILE_BYTES` | `1048576`（1 MiB） | 摄取时跳过大于此大小的源码文件；冷索引、增量重新分析、会话叠加层和 `impact --baseline` 都适用。环境变量优先于 `<repo>/.ecp/config.toml` 中的 `[index] max_file_bytes`。将最坏情况下的 worker RAM 上限定在 `num_threads × MAX`。 |
 | `ECP_CSPROJ_MAX_DEPTH` | `4` | `*.csproj` 探索的目录递归深度。深层嵌套的 .NET monorepo 可调高。 |
 
+没有 git commit、却包含两个以上仓库的目录树会被视为项目集合而拒绝索引；若是刻意的多仓库工作区，要索引成一张图，请在其 `.ecp/config.toml` 设置 `[index] allow_nested_repos = true`。
+
 ---
 
 ## 📜 授权与致谢

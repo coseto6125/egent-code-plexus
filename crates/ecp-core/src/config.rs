@@ -32,12 +32,20 @@ pub struct IndexConfig {
     /// bundles, vendored blobs, and generated dumps.
     #[serde(default = "default_max_file_bytes")]
     pub max_file_bytes: u64,
+    /// **effective** — index a tree that has no git commit even when it holds
+    /// two or more repositories. Off by default: such a tree is a folder of
+    /// projects, which is where an agent's failed `cd` lands, and indexing it
+    /// parses every project at once. Set it in the folder's own
+    /// `.ecp/config.toml` for a deliberate multi-repo workspace.
+    #[serde(default)]
+    pub allow_nested_repos: bool,
 }
 
 impl Default for IndexConfig {
     fn default() -> Self {
         Self {
             max_file_bytes: default_max_file_bytes(),
+            allow_nested_repos: false,
         }
     }
 }
