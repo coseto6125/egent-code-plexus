@@ -401,6 +401,9 @@ fn test_dynamic_require_escaped_and_blank_specifiers_emit_a_blind_spot() {
         ("export function go() { require('./a\\x62'); }\n", 1),
         ("export function go() { require(''); require('  '); }\n", 2),
         ("export function go() { require('./a'); }\n", 0),
+        ("export function go(require) { return require(''); }\n", 0),
+        ("const m = require('./a\\x62');\n", 1),
+        ("const t = require(`./c${x}`);\n", 1),
     ] {
         assert_eq!(
             blind_spots_of(source, "js-dynamic-require"),
@@ -408,4 +411,28 @@ fn test_dynamic_require_escaped_and_blank_specifiers_emit_a_blind_spot() {
             "{source}"
         );
     }
+}
+
+/// A top-level specifier binds only when the whole literal is one plain
+/// fragment: a template literal binds like a string, an escaped literal
+/// binds nothing, for `require` and a static `import` alike.
+#[test]
+fn test_top_level_specifier_binds_only_a_plain_literal() {
+    let sources = |source: &str| -> Vec<String> {
+        raw_imports(source).into_iter().map(|i| i.source).collect()
+    };
+    assert_eq!(
+        sources("const t = require(`./c`);\n"),
+        vec!["./c".to_string()]
+    );
+    assert_eq!(
+        blind_spots_of("const t = require(`./c`);\n", "js-dynamic-require"),
+        0
+    );
+    assert!(sources("const m = require('./a\\x62');\n").is_empty());
+    assert!(sources("import { run } from './a\\x62';\n").is_empty());
+    assert_eq!(
+        sources("import { run } from './a';\n"),
+        vec!["./a".to_string()]
+    );
 }

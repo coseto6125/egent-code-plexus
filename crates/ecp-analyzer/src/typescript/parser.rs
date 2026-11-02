@@ -1,6 +1,6 @@
 use super::receiver_types::{
     collect_dynamic_imports, collect_local_types, extract_ts_calls_and_path_literals,
-    literal_specifier,
+    literal_specifier, require_loads,
 };
 use super::schema_extractors::TS_INTERFACE_CONFIG;
 use super::spec::{TsSpec, TsxSpec, TypeScriptSpec};
@@ -29,8 +29,8 @@ use std::sync::OnceLock;
 use tree_sitter::{Node, Parser, Query, Tree};
 
 /// Blind-spot kind/hint pairs pushed only when the first argument is not a
-/// literal the graph reads (for `import()`, [`literal_specifier`]); the
-/// unconditional pairs live in `TypeScriptSpec::BLIND`.
+/// literal the graph reads ([`literal_specifier`]); the unconditional pairs
+/// live in `TypeScriptSpec::BLIND`.
 const BLIND_DYNAMIC_IMPORT: (&str, &str) = (
     "ts-dynamic-import",
     "import(<expr>) whose specifier is no plain string literal (computed, escaped or blank) — dynamic module loading; the target module is not read statically",
@@ -570,7 +570,9 @@ impl<const TSX: bool> ParseSpec for TsSpec<TSX> {
                 }
             }
             TypeScriptRole::DynamicRequire => {
-                if literal_specifier(node, source).is_none() {
+                if literal_specifier(node, source).is_none()
+                    && require_loads(cx.tree.root_node(), source)
+                {
                     cx.push_blind(BLIND_DYNAMIC_REQUIRE, &node);
                 }
             }

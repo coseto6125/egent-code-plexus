@@ -58,12 +58,11 @@ pub fn node_span(node: &tree_sitter::Node) -> Span {
 /// True iff the first positional argument of `call_node` is a JS/TS string
 /// literal (`"foo"`, `'foo'`, or a template string with no interpolation).
 ///
-/// Shared by the TypeScript and JavaScript parsers — both grammars expose
-/// the `arguments` field on `call_expression` with the same node-kind names
-/// (`string` / `template_string` / `template_substitution`). Used to skip
-/// `import("./foo")` / `require("fs")` from BlindSpot emission per
-/// Constraint 2 of the cross-lang spec: literal-arg dynamic loads resolve
-/// statically via the Imports edge and are NOT blind.
+/// Both JS/TS grammars expose the `arguments` field on `call_expression`
+/// with the same node-kind names (`string` / `template_string` /
+/// `template_substitution`). Its caller is `literal_specifier`, which the
+/// dynamic-import binder and the `import()` / `require()` blind-spot gates
+/// share.
 ///
 /// Other languages have different grammar (PHP wraps args in an extra
 /// `argument` node; Ruby symbols are a separate node kind) and provide their

@@ -1228,6 +1228,139 @@ fn test_function_reference_csharp_primary_ctor_field_out_var_hides_only_its_fiel
     );
 }
 
+/// Inside the comprehension the variable still hides the function, and a
+/// walrus binds outside the comprehension (PEP 572), so it hides the name
+/// across the whole declaration.
+#[test]
+fn test_function_reference_python_comprehension_and_walrus_hide_where_python_binds() {
+    for src in [
+        "def handler():\n    return 1\n\n\nINSIDE = {\"ids\": [handler for handler in [1, 2]]}\n",
+        "def handler():\n    return 1\n\n\nINSIDE = {\"ids\": [(handler := x) for x in [1, 2]], \"real\": handler}\n",
+    ] {
+        assert_no_ref(&PythonProvider::new().unwrap(), "app.py", src, "INSIDE");
+    }
+}
+
+/// The pattern binding still hides `LIMIT` in its own initializer.
+#[test]
+fn test_value_read_java_record_field_pattern_binding_still_hides_in_its_field() {
+    let g = graph(
+        &JavaProvider::new().unwrap(),
+        &[(
+            "R.java",
+            "record R(int x) {\n    static final int LIMIT = 3;\n    static Object o = 1;\n    static boolean b = o instanceof Integer LIMIT && LIMIT > 0;\n}\n",
+        )],
+    );
+    assert_eq!(
+        value_reads(&g, "b"),
+        vec![r("R.java", "o", VALUE_READ, SAME_FILE)]
+    );
+}
+
+/// A record's static block and compact constructor hold no function node.
+/// Their locals hide `count` there only, so `go` still reads the field.
+#[test]
+fn test_value_read_java_record_block_locals_hide_only_their_block() {
+    let g = graph(
+        &JavaProvider::new().unwrap(),
+        &[(
+            "R.java",
+            "record R(int x) {\n    static int count = 3;\n    static { int count = 1; }\n    R { int count = x; }\n    int go() { return count; }\n}\n",
+        )],
+    );
+    assert_eq!(
+        value_reads(&g, "go"),
+        vec![r("R.java", "count", VALUE_READ, SAME_FILE)]
+    );
+}
+
+#[test]
+fn test_function_reference_csharp_primary_ctor_field_out_var_still_hides_in_its_field() {
+    assert_no_ref(
+        &CSharpProvider::new().unwrap(),
+        "Svc.cs",
+        "public class Svc(int seed) {\n    static bool B = int.TryParse(\"1\", out var Handler);\n    static int Handler() => 1;\n}\n",
+        "B",
+    );
+}
+
+/// Dart `for` elements and C# query expressions are comprehensions: the
+/// variable hides the function inside them only.
+#[test]
+fn test_function_reference_dart_and_csharp_comprehensions_hide_only_inside() {
+    assert_same_file_ref(
+        &DartProvider::new().unwrap(),
+        "d.dart",
+        "int handler() => 1;\n\nfinal table = {'real': handler, 'ids': [for (var handler in [1, 2]) handler]};\n",
+        "table",
+        "handler",
+    );
+    assert_no_ref(
+        &DartProvider::new().unwrap(),
+        "d.dart",
+        "int handler() => 1;\n\nfinal table = [for (var handler in [1, 2]) handler];\n",
+        "table",
+    );
+    assert_same_file_ref(
+        &CSharpProvider::new().unwrap(),
+        "C.cs",
+        "class C {\n    static int Handler() { return 1; }\n    static object[] T = { (System.Func<int>)Handler, (from Handler in new[] { 1 } select Handler).ToArray() };\n}\n",
+        "T",
+        "Handler",
+    );
+    assert_no_ref(
+        &CSharpProvider::new().unwrap(),
+        "C.cs",
+        "class C {\n    static int Handler() { return 1; }\n    static int[] T = (from Handler in new[] { 1 } select Handler).ToArray();\n}\n",
+        "T",
+    );
+}
+
+/// Inside a function, a comprehension variable hides the name in that
+/// comprehension only: the function's own read after it still references
+/// the module function.
+#[test]
+fn test_function_reference_comprehension_inside_function_hides_only_inside() {
+    let cases: [(&dyn LanguageProvider, &str, &str, &str, &str); 3] = [
+        (
+            &PythonProvider::new().unwrap(),
+            "app.py",
+            "def handler():\n    return 1\n\n\ndef go():\n    ids = [handler for handler in [1, 2]]\n    return handler\n",
+            "go",
+            "handler",
+        ),
+        (
+            &DartProvider::new().unwrap(),
+            "d.dart",
+            "int handler() => 1;\n\nObject go() {\n  final ids = [for (var handler in [1, 2]) handler];\n  return handler;\n}\n",
+            "go",
+            "handler",
+        ),
+        (
+            &CSharpProvider::new().unwrap(),
+            "C.cs",
+            "class C {\n    static int Handler() { return 1; }\n    static System.Func<int> Go() { var ids = from Handler in new[] { 1 } select Handler; return Handler; }\n}\n",
+            "Go",
+            "Handler",
+        ),
+    ];
+    for (provider, file, src, caller, target) in cases {
+        assert_same_file_ref(provider, file, src, caller, target);
+    }
+}
+
+/// A walrus inside a function's comprehension binds in the function, so it
+/// hides the name across the function.
+#[test]
+fn test_function_reference_python_walrus_in_function_comprehension_hides_in_function() {
+    assert_no_ref(
+        &PythonProvider::new().unwrap(),
+        "app.py",
+        "def handler():\n    return 1\n\n\ndef go():\n    ids = [(handler := x) for x in [1, 2]]\n    return handler\n",
+        "go",
+    );
+}
+
 #[test]
 fn test_value_read_kotlin_lambda_parameter_hides_only_its_lambda() {
     let g = graph(

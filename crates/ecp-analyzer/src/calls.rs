@@ -280,8 +280,14 @@ pub fn extract_field_reads_with_literal_key_facts(
                 kind,
                 scope,
             };
+            let comprehension = |range| LocalScope {
+                range,
+                comprehension: true,
+            };
             let mut lambda = if kind & kind_flag::COMPREHENSION != 0 {
-                Some(node_range(n))
+                Some(comprehension(node_range(n)))
+            } else if kind & kind_flag::COMPREHENSION_CLAUSE != 0 {
+                frame.parent.map(|p| comprehension(node_range(p)))
             } else {
                 frame.lambda
             };
@@ -291,6 +297,7 @@ pub fn extract_field_reads_with_literal_key_facts(
                 let child = cursor.node();
                 let field = memo.field(&cursor);
                 let child_kind = memo.kind(child);
+                let mut child_lambda = lambda;
                 if opens_parameters(kind, field, child_kind) {
                     // C++ `lambda_declarator` and Swift `lambda_function_type`
                     // hold the parameters; their parent holds the body too.
@@ -299,7 +306,16 @@ pub fn extract_field_reads_with_literal_key_facts(
                     } else {
                         n
                     };
-                    lambda = Some(node_range(owner));
+                    child_lambda = Some(LocalScope {
+                        range: node_range(owner),
+                        comprehension: false,
+                    });
+                    // A type's parameter list (Java record, C# primary
+                    // constructor) scopes only its own names: the members
+                    // keep the outer scope.
+                    if kind & kind_flag::TYPE_DECL == 0 {
+                        lambda = child_lambda;
+                    }
                 }
                 if child_kind & kind_flag::DECLARATOR != 0 {
                     declarator_count += 1;
@@ -319,7 +335,7 @@ pub fn extract_field_reads_with_literal_key_facts(
                     parent_kind: kind,
                     field,
                     scope: names.child_scope(parent, child_kind, field, &cursor, literal_key_facts),
-                    lambda,
+                    lambda: child_lambda,
                 });
                 if !cursor.goto_next_sibling() {
                     break;
@@ -508,9 +524,9 @@ struct Frame<'t> {
     /// The [`field_flag`]s of the field this node fills in its parent.
     field: u16,
     scope: NameScope,
-    /// The innermost function whose parameters precede this node, which
-    /// scopes the names declared below it.
-    lambda: Option<PosRange>,
+    /// The innermost function whose parameters precede this node, or the
+    /// comprehension that holds it, which scopes the names declared below it.
+    lambda: Option<LocalScope>,
 }
 
 /// What a node passes on to its children's [`NameScope`].
@@ -562,8 +578,15 @@ mod kind_flag {
     pub const CAPTURE_WRAPPER: u32 = 1 << 16;
     /// A generic's type or template parameter list, which declares no value.
     pub const TYPE_PARAMETERS: u32 = 1 << 17;
-    /// A comprehension, whose `for` variables live inside it only.
+    /// A comprehension (Dart `for_element`, C# `query_expression`), whose
+    /// variables live inside it only.
     pub const COMPREHENSION: u32 = 1 << 18;
+    /// A Python `for_in_clause`: its variables live in the comprehension that
+    /// holds it. A walrus elsewhere in that comprehension binds outside it.
+    pub const COMPREHENSION_CLAUSE: u32 = 1 << 19;
+    /// A class, record or struct declaration, whose parameter list (Java
+    /// record, C# primary constructor) is no lambda over its members.
+    pub const TYPE_DECL: u32 = 1 << 20;
 }
 
 /// Bits [`KindMemo::field`] records for a field name.
@@ -634,8 +657,15 @@ impl<'a> KindMemo<'a> {
             ),
             (kind.contains("declarator"), DECLARATOR),
             (
-                kind.ends_with("_comprehension") || kind == "generator_expression",
+                kind == "for_element" || kind == "query_expression",
                 COMPREHENSION,
+            ),
+            (kind == "for_in_clause", COMPREHENSION_CLAUSE),
+            (
+                kind.ends_with("class_declaration")
+                    || kind.ends_with("record_declaration")
+                    || kind.ends_with("struct_declaration"),
+                TYPE_DECL,
             ),
             (spec.method_refs.contains(&kind), METHOD_REF),
             (spec.symbol_method_refs && kind == "call", SYMBOL_CALL),
@@ -864,9 +894,10 @@ struct PendingName<'s> {
 struct PendingBinding<'s> {
     pos: Pos,
     name: &'s str,
-    /// The innermost function whose parameters precede it ([`Frame::lambda`]):
-    /// its scope when no function node holds it.
-    lambda: Option<PosRange>,
+    /// The innermost function or comprehension that scopes it
+    /// ([`Frame::lambda`]): its scope when no function node holds it, or when
+    /// it is a comprehension inside the function node that holds it.
+    lambda: Option<LocalScope>,
 }
 
 #[derive(Default)]
@@ -979,10 +1010,16 @@ impl<'s> NameScan<'s> {
         for (i, (binding, target)) in self.bindings.iter().zip(callables).enumerate() {
             match target {
                 Some(t) if globals.contains(&(t, binding.name)) => {}
-                Some(t) => bound
-                    .entry(binding.name)
-                    .or_default()
-                    .push(span_ends(nodes[t].span)),
+                Some(t) => {
+                    let function = span_ends(nodes[t].span);
+                    let scope = binding
+                        .lambda
+                        .filter(|l| {
+                            l.comprehension && function.0 <= l.range.0 && l.range.1 <= function.1
+                        })
+                        .map_or(function, |l| l.range);
+                    bound.entry(binding.name).or_default().push(scope);
+                }
                 None => open.push(i),
             }
         }
@@ -1446,6 +1483,16 @@ fn same_run(head: &EnclosingContainer, value: &EnclosingContainer) -> bool {
     value.end == head.end && head.start <= value.start
 }
 
+/// A range that scopes the names declared in it.
+#[derive(Clone, Copy)]
+struct LocalScope {
+    range: PosRange,
+    /// A comprehension's range. A function's own parameter list may open a
+    /// range that holds only its signature (Dart `function_signature`), so
+    /// only a comprehension narrows a binding that a function node holds.
+    comprehension: bool,
+}
+
 /// One declarator of a statement that declares several:
 /// `b = h2` in `const a = h1, b = h2`.
 struct Declarator<'s> {
@@ -1585,11 +1632,9 @@ impl<'s> ReadContainers<'s> {
     /// name. `first` is the run of the smallest value span holding it. A
     /// declaration's own name hides nothing: a method of its literal still
     /// reads it. A parameter of a nodeless lambda or a comprehension variable
-    /// hides the name inside that lambda or comprehension only, and never
-    /// past the declaration: a type's parameter list (Java `record R(int x)`)
-    /// also opens a lambda range, one that spans every member. Any other name
-    /// (a local of a lambda without parameters) hides it across the whole
-    /// declaration.
+    /// hides the name inside that lambda or comprehension only. Any other name
+    /// (a local of a lambda without parameters, a Python walrus) hides it
+    /// across the whole declaration.
     fn binding_scope(
         &self,
         first: Option<usize>,
@@ -1598,18 +1643,13 @@ impl<'s> ReadContainers<'s> {
     ) -> Option<PosRange> {
         let run = first.map(|first| self.run(first));
         let declared = run.filter(|run| run.iter().any(|v| nodes[v.node_idx].name == binding.name));
-        match (declared, binding.lambda) {
+        match (declared, binding.lambda.map(|l| l.range)) {
             // A lambda inside the declaration: `TABLE = {"id": lambda TABLE: TABLE}`.
             (Some(run), Some(lambda)) if run[0].start < lambda.0 || lambda.1 < run[0].end => {
                 Some(lambda)
             }
             (Some(_), _) => None,
-            (None, Some(lambda)) => Some(match run {
-                Some(run) if lambda.0 <= run[0].start && run[0].end <= lambda.1 => {
-                    (run[0].start, run[0].end)
-                }
-                _ => lambda,
-            }),
+            (None, Some(lambda)) => Some(lambda),
             (None, None) => run.map(|run| (run[0].start, run[0].end)),
         }
     }

@@ -254,7 +254,8 @@ struct DynamicCandidate<'t> {
 /// The string the first argument of `call` spells, when it is a literal
 /// ([`js_ts_first_arg_is_literal_string`]) without escapes that names
 /// something. A literal this refuses still loads a module at run time, so
-/// the `import()` blind-spot gate asks this, not the literal test alone.
+/// the `import()` and `require()` blind-spot gates ask this, not the literal
+/// test alone.
 pub(crate) fn literal_specifier(call: Node<'_>, source: &[u8]) -> Option<String> {
     if !js_ts_first_arg_is_literal_string(&call) {
         return None;
@@ -441,6 +442,13 @@ fn collect_scope_candidates<'t>(
     }
 }
 
+/// Whether `require` is the CommonJS loader in the file under `root`: no
+/// declaration or write of `require` exists there.
+pub(crate) fn require_loads(root: Node<'_>, source: &[u8]) -> bool {
+    let require = binding_mentions(root, &["require"], source, binds_name);
+    !rebound(require.get("require"), (0, 0))
+}
+
 /// Collect the synthetic imports of every literal `import('<lit>')` and of
 /// each function-scoped `const m = require('<lit>')`, and bind the names that
 /// hold a loaded module ([`DynamicImports`]).
@@ -483,8 +491,7 @@ pub fn collect_dynamic_imports(root: Node<'_>, source: &[u8]) -> DynamicImports 
     }
 
     if candidates.iter().any(|c| c.is_require) {
-        let require = binding_mentions(root, &["require"], source, binds_name);
-        let require_loads = !rebound(require.get("require"), (0, 0));
+        let require_loads = require_loads(root, source);
         candidates.retain(|c| !c.is_require || require_loads);
         loads.extend(
             candidates
