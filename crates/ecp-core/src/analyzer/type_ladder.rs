@@ -192,10 +192,17 @@ pub trait TypeFacts: PickFacts {
     }
 }
 
-/// Whether a return type names the type that declares the function: Rust
-/// and Swift `Self`, PHP `self` / `static`, TypeScript `this`.
-fn names_declaring_type(key: &str) -> bool {
-    matches!(key, "Self" | "self" | "static" | "this")
+/// Whether a declared type `key` names the type that declares the member in
+/// `language`: Rust and Swift `Self`, PHP `self` / `static`, TypeScript
+/// `this`, and Python `Self` (`typing.Self`). The text alone is not enough: a
+/// C++ `struct Self {}` is an ordinary type.
+pub fn names_declaring_type_in(language: Language, key: &str) -> bool {
+    matches!(
+        (language, key),
+        (Language::Rust | Language::Swift | Language::Python, "Self")
+            | (Language::Php, "self" | "static")
+            | (Language::TypeScript | Language::JavaScript, "this")
+    )
 }
 
 /// The type name a declared return type reduces to when only wrappers that
@@ -275,7 +282,10 @@ pub fn returned_type<F: TypeFacts + ?Sized>(facts: &F, callee: u32) -> Option<&s
         kind if kind.is_constructible() => facts.name_of(callee),
         NodeKind::Function | NodeKind::Method => {
             let key = return_type_key(facts.return_type_of(callee)?)?;
-            if names_declaring_type(key) {
+            let language = facts
+                .file_of(callee)
+                .map(|file| facts.file_meta(file).language);
+            if language.is_some_and(|language| names_declaring_type_in(language, key)) {
                 facts.owner(callee)
             } else {
                 Some(key)

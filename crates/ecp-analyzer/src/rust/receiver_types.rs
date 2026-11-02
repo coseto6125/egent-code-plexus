@@ -869,6 +869,11 @@ pub fn extract_rust_calls_and_path_literals(
                     }
                 }
             }
+            "struct_expression" => {
+                if let Some(ty) = struct_literal_type(n, source) {
+                    attach_to_enclosing(start_pos(n), CallSite::construct(&ty), nodes);
+                }
+            }
             "string_literal" | "raw_string_literal" => {
                 if let Some(rpl) = build_raw_path_literal(n, source) {
                     path_literals.push(rpl);
@@ -895,6 +900,19 @@ pub fn extract_rust_calls_and_path_literals(
         }
     }
     (path_literals, sql_refs)
+}
+
+/// The struct a `struct_expression` literal builds, as written
+/// (`crate::table::View { .. }` is `crate::table::View`, `View::<T> { .. }`
+/// is `View`), with `Self` replaced by the enclosing impl's type. `None`
+/// for `Self` outside an impl and for `Self::Variant { .. }`: neither names
+/// a struct this file can type.
+fn struct_literal_type(literal: Node<'_>, source: &[u8]) -> Option<String> {
+    let path = scoped_path_text(literal.child_by_field_name("name")?, source)?;
+    if path == "Self" {
+        return enclosing_impl_type(literal, source);
+    }
+    (!path.starts_with("Self::")).then_some(path)
 }
 
 /// Derive the callee name for a Rust `call_expression`.
@@ -987,7 +1005,9 @@ fn rust_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Optio
 /// `a::Wrapper::<u8>::make` is `a::Wrapper::make`.
 fn scoped_path_text(node: Node<'_>, source: &[u8]) -> Option<String> {
     match node.kind() {
-        "generic_type" => scoped_path_text(node.child_by_field_name("type")?, source),
+        "generic_type" | "generic_type_with_turbofish" => {
+            scoped_path_text(node.child_by_field_name("type")?, source)
+        }
         "scoped_identifier" | "scoped_type_identifier" => {
             let name = node_text(node.child_by_field_name("name")?, source)?;
             match node.child_by_field_name("path") {

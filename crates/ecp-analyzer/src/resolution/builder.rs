@@ -3789,12 +3789,22 @@ fn pass2_emit_node_edges(
     }
 
     if let Some(type_ann) = &raw_node.type_annotation {
-        let targets = resolver.resolve_symbol(
-            &local_graph.file_path,
-            type_ann,
-            &local_graph.imports,
-            ResolveTarget::Type,
-        );
+        // `Self` / `self` / `static` / `this` is no type name: it stands for
+        // the owner, so a declaring-type annotation with no owner binds nothing.
+        let type_name = match type_ladder::return_type_key(type_ann) {
+            Some(key) if type_ladder::names_declaring_type_in(language, key) => {
+                raw_node.owner_class.as_deref().and_then(owner_key)
+            }
+            _ => Some(type_ann.as_str()),
+        };
+        let targets = type_name.map_or_else(Vec::new, |type_name| {
+            resolver.resolve_symbol(
+                &local_graph.file_path,
+                type_name,
+                &local_graph.imports,
+                ResolveTarget::Type,
+            )
+        });
         for (target_id, confidence) in targets {
             edges.push(Edge {
                 source: current_node_idx,

@@ -369,9 +369,10 @@ impl<'a> CallSite<'a> {
 
     /// The type path this site may construct in `language`, and whether an
     /// unresolved qualified path may fall back to its last segment. `None`
-    /// when the site cannot construct a type in `language`: Go, Rust and C
-    /// have no constructors, and in TS / JS / PHP / Java / C# only `new T()`
-    /// constructs.
+    /// when the site cannot construct a type in `language`: C has no
+    /// constructors, Go and Rust construct only through a literal
+    /// (`Foo{..}`, `Foo { .. }`), and in TS / JS / PHP / Java / C# only
+    /// `new T()` constructs.
     ///
     /// The fallback holds only where the site constructs for certain and its
     /// qualifier can name what the type tiers do not resolve: a TS / JS
@@ -388,7 +389,12 @@ impl<'a> CallSite<'a> {
                 Language::TypeScript | Language::JavaScript | Language::Php | Language::Cpp,
                 Self::Construct(ty),
             ) => Some((ty, true)),
-            (Language::Java | Language::CSharp, Self::Construct(ty)) => Some((ty, false)),
+            // A Rust `Shape::Circle { r }` is an enum variant, not the struct
+            // `Circle`: a last-segment retry would bind the wrong type.
+            (
+                Language::Java | Language::CSharp | Language::Rust | Language::Go,
+                Self::Construct(ty),
+            ) => Some((ty, false)),
             (
                 Language::Python
                 | Language::Swift

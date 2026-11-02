@@ -5,10 +5,12 @@
 //! slicing source-before-the-name. Behavior cross-checked against GitNexus
 //! `swift.ts` type-extractor (independent Rust impl).
 
+mod name_ref_support;
+
 use ecp_analyzer::swift::parser::SwiftProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::RawNode;
-use ecp_core::graph::NodeKind;
+use ecp_core::graph::{NodeKind, RelType};
 use std::path::Path;
 
 fn parse(src: &str) -> Vec<RawNode> {
@@ -104,4 +106,29 @@ fn init_emits_constructor() {
 fn init_with_params_emits_constructor() {
     let nodes = parse("class C { init(x: Int, y: String) {} }\n");
     find(&nodes, "init", NodeKind::Constructor);
+}
+
+/// FU-2026-10-30-c0bc9a616111 part A: `Self` stands for the type that owns
+/// the property, so `ecp impact` on the class lists the property.
+#[test]
+fn test_self_property_annotation_binds_owner_type() {
+    let g = name_ref_support::graph(
+        &SwiftProvider::new().unwrap(),
+        &[(
+            "Sources/Resolver.swift",
+            "class Resolver {\n    var twin: Self?\n    var plain: Self\n}\n",
+        )],
+    );
+    for property in ["twin", "plain"] {
+        let edges: Vec<(String, String)> =
+            name_ref_support::refs(&g, property, RelType::Accesses, "type_annotation")
+                .into_iter()
+                .map(|(file, name, _, _)| (file, name))
+                .collect();
+        assert_eq!(
+            edges,
+            [("Sources/Resolver.swift".to_string(), "Resolver".to_string())],
+            "{property}"
+        );
+    }
 }

@@ -477,6 +477,17 @@ pub(super) fn extract_go_calls_and_path_literals_with_imports(
                     attach_to_enclosing(start_pos(n), callee, nodes);
                 }
             }
+            // `Foo{..}`, `&Foo{..}` and `pkg.Foo{..}` construct a named type; a
+            // slice, map, array or struct-type literal names none.
+            "composite_literal" => {
+                if let Some(ty) = n
+                    .child_by_field_name("type")
+                    .filter(|ty| matches!(ty.kind(), "type_identifier" | "qualified_type"))
+                    .and_then(|ty| node_text(ty, source))
+                {
+                    attach_to_enclosing(start_pos(n), CallSite::construct(&ty), nodes);
+                }
+            }
             "interpreted_string_literal" | "raw_string_literal" => {
                 if let Some(rpl) = build_raw_path_literal(n, source) {
                     path_literals.push(rpl);
