@@ -3497,9 +3497,7 @@ impl<'a> RustModules<'a> {
         let mut visited: FxHashSet<&'a str> = FxHashSet::from_iter([root]);
         let mut stack = vec![(root, false)];
         while let Some((file, index_only)) = stack.pop() {
-            let Some(read) = self.module_text(file) else {
-                return None;
-            };
+            let read = self.module_text(file)?;
             let attrs = rust_pub_use::path_attrs(&read.text);
             if !attrs.is_empty() {
                 return None;
