@@ -46,3 +46,45 @@ fn test_self_without_project_class_binds_nothing() {
     );
     assert_eq!(annotated(&g, "make"), Vec::<(String, String)>::new());
 }
+
+/// Contract: `fun find(): Tok?` binds the project class `Tok`, like
+/// `fun make(): Tok`. The `Tok?` text reaches the edge only if the
+/// `(user_type)? @type` capture keeps the `?`; the sibling test
+/// `test_resolve_call_kotlin_nullable_return_chain_binds_return_type_member`
+/// shows the annotation is kept as `Foo?`. Before the change the raw text
+/// `Tok?` names no type: no edge. Not run here: confirm it is red first.
+#[test]
+fn test_nullable_return_annotation_binds_project_type() {
+    let g = graph(
+        &KotlinProvider::new().unwrap(),
+        &[(
+            "src/app.kt",
+            "class Tok\n\nclass Owner {\n    fun find(): Tok? = null\n    fun make(): Tok = Tok()\n}\n",
+        )],
+    );
+    assert_eq!(annotated(&g, "find"), vec![pair("src/app.kt", "Tok")]);
+    assert_eq!(annotated(&g, "make"), vec![pair("src/app.kt", "Tok")]);
+
+    let g = graph(
+        &KotlinProvider::new().unwrap(),
+        &[(
+            "src/app.kt",
+            "class Owner {\n    fun find(): Tok? = null\n}\n",
+        )],
+    );
+    assert_eq!(annotated(&g, "find"), Vec::<(String, String)>::new());
+}
+
+/// Guard: `List<Tok>` is a generic; `return_type_key` gives `None`, so it
+/// binds nothing, before and after the change.
+#[test]
+fn test_generic_return_annotation_binds_nothing() {
+    let g = graph(
+        &KotlinProvider::new().unwrap(),
+        &[(
+            "src/app.kt",
+            "class Tok\n\nclass Owner {\n    fun all(): List<Tok> = listOf()\n}\n",
+        )],
+    );
+    assert_eq!(annotated(&g, "all"), Vec::<(String, String)>::new());
+}

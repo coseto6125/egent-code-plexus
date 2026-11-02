@@ -107,3 +107,39 @@ fn test_self_named_project_type_binds_that_type() {
     .collect();
     assert_eq!(edges, vec![("app.c".to_string(), "Self".to_string())]);
 }
+
+fn annotated(g: &ecp_core::graph::ZeroCopyGraph, source: &str) -> Vec<(String, String)> {
+    name_ref_support::refs(
+        g,
+        source,
+        ecp_core::graph::RelType::Accesses,
+        "type_annotation",
+    )
+    .into_iter()
+    .map(|(file, name, _, _)| (file, name))
+    .collect()
+}
+
+/// Contract: a pointer return `Tok *` and `const Tok *` bind the project type
+/// `Tok`. The parser keeps the declaration prefix as written (`slice_type_before`
+/// gives `Tok *`). Before the change the raw text `Tok *` names no type: no
+/// edge. With no project `Tok` nothing binds. C has no generics.
+#[test]
+fn test_pointer_return_annotation_binds_project_type() {
+    let g = name_ref_support::graph(
+        &CProvider::new().unwrap(),
+        &[(
+            "app.c",
+            "typedef struct { int n; } Tok;\n\nTok *find(void) { return 0; }\n\nconst Tok *peek(void) { return 0; }\n",
+        )],
+    );
+    let tok = [("app.c".to_string(), "Tok".to_string())];
+    assert_eq!(annotated(&g, "find"), tok);
+    assert_eq!(annotated(&g, "peek"), tok);
+
+    let g = name_ref_support::graph(
+        &CProvider::new().unwrap(),
+        &[("app.c", "Tok *find(void) { return 0; }\n")],
+    );
+    assert_eq!(annotated(&g, "find"), Vec::<(String, String)>::new());
+}

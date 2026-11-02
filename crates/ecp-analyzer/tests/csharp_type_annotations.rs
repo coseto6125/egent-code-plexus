@@ -46,3 +46,23 @@ fn test_self_without_project_class_binds_nothing() {
     );
     assert_eq!(annotated(&g, "Make"), Vec::<(String, String)>::new());
 }
+
+/// Guard: C# already reduces the key (`Tok?` to `Tok`), so a nullable return
+/// binds the project class both before and after the change; this adds the
+/// return form beside `csharp_partial_parts.rs`. `List<Tok>` is a generic and
+/// binds nothing.
+#[test]
+fn test_nullable_return_annotation_binds_project_type() {
+    let g = graph(
+        &CSharpProvider::new().unwrap(),
+        &[
+            ("src/Tok.cs", "public class Tok {}\n"),
+            (
+                "src/Owner.cs",
+                "public class Owner {\n    public Tok? Find() { return null; }\n    public System.Collections.Generic.List<Tok> All() { return null; }\n}\n",
+            ),
+        ],
+    );
+    assert_eq!(annotated(&g, "Find"), vec![pair("src/Tok.cs", "Tok")]);
+    assert_eq!(annotated(&g, "All"), Vec::<(String, String)>::new());
+}

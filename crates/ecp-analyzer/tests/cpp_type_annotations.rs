@@ -11,6 +11,8 @@
 //!   `std::map<std::string,User>`).
 //! - **`auto`**: kept literally — the analyzer does not perform deduction.
 
+mod name_ref_support;
+
 use ecp_analyzer::cpp::parser::CppProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::RawNode;
@@ -78,4 +80,54 @@ fn class_field_template() {
     let nodes = parse("class C { std::vector<int> items; };\n");
     let p = find(&nodes, "items", NodeKind::Property);
     assert_eq!(p.type_annotation.as_deref(), Some("std::vector<int>"));
+}
+
+fn annotated(g: &ecp_core::graph::ZeroCopyGraph, source: &str) -> Vec<(String, String)> {
+    name_ref_support::refs(
+        g,
+        source,
+        ecp_core::graph::RelType::Accesses,
+        "type_annotation",
+    )
+    .into_iter()
+    .map(|(file, name, _, _)| (file, name))
+    .collect()
+}
+
+/// Contract: pointer and reference returns (`Tok *`, `const Tok &`) bind the
+/// project struct `Tok`. The parser keeps the prefix as written, so the text
+/// is `Tok *` / `const Tok &`. Before the change those raw texts name no type:
+/// no edge. With no project `Tok` nothing binds.
+#[test]
+fn test_pointer_and_reference_return_annotations_bind_project_type() {
+    let g = name_ref_support::graph(
+        &CppProvider::new().unwrap(),
+        &[(
+            "app.cpp",
+            "struct Tok {};\n\nTok *find() { return nullptr; }\n\nconst Tok &peek(const Tok &t) { return t; }\n",
+        )],
+    );
+    let tok = [("app.cpp".to_string(), "Tok".to_string())];
+    assert_eq!(annotated(&g, "find"), tok);
+    assert_eq!(annotated(&g, "peek"), tok);
+
+    let g = name_ref_support::graph(
+        &CppProvider::new().unwrap(),
+        &[("app.cpp", "Tok *find() { return nullptr; }\n")],
+    );
+    assert_eq!(annotated(&g, "find"), Vec::<(String, String)>::new());
+}
+
+/// Guard: `std::vector<Tok>` is a generic; `return_type_key` gives `None`, so it
+/// binds nothing, before and after the change.
+#[test]
+fn test_generic_return_annotation_binds_nothing() {
+    let g = name_ref_support::graph(
+        &CppProvider::new().unwrap(),
+        &[(
+            "app.cpp",
+            "struct Tok {};\n\nstd::vector<Tok> all() { return {}; }\n",
+        )],
+    );
+    assert_eq!(annotated(&g, "all"), Vec::<(String, String)>::new());
 }

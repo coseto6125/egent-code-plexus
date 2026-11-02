@@ -164,3 +164,35 @@ fn test_self_named_project_type_binds_that_type() {
     .collect();
     assert_eq!(edges, vec![("app.go".to_string(), "Self".to_string())]);
 }
+
+fn annotated(g: &ecp_core::graph::ZeroCopyGraph, source: &str) -> Vec<(String, String)> {
+    name_ref_support::refs(
+        g,
+        source,
+        ecp_core::graph::RelType::Accesses,
+        "type_annotation",
+    )
+    .into_iter()
+    .map(|(file, name, _, _)| (file, name))
+    .collect()
+}
+
+/// Guard: the Go query captures the `type_identifier` inside a `pointer_type`,
+/// so `*Tok` already reaches the edge as `Tok` and binds before and after the
+/// change. `[]Tok` is a `slice_type` the query does not capture: no
+/// annotation, no edge.
+#[test]
+fn test_pointer_return_binds_project_type_and_slice_return_binds_nothing() {
+    let g = name_ref_support::graph(
+        &GoProvider::new().unwrap(),
+        &[(
+            "app.go",
+            "package app\n\ntype Tok struct{ n int }\n\nfunc Find() *Tok { return nil }\n\nfunc All() []Tok { return nil }\n",
+        )],
+    );
+    assert_eq!(
+        annotated(&g, "Find"),
+        [("app.go".to_string(), "Tok".to_string())]
+    );
+    assert_eq!(annotated(&g, "All"), Vec::<(String, String)>::new());
+}

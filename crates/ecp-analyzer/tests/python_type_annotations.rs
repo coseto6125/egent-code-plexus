@@ -47,3 +47,19 @@ fn test_self_return_annotation_outside_class_no_edge() {
     );
     assert_eq!(annotated(&g, "free"), Vec::<(String, String)>::new());
 }
+
+/// Guard: Python already reduces the key, so `-> Tok | None` binds the project
+/// class both before and after the change. `-> list[Tok]` is a generic and
+/// binds nothing.
+#[test]
+fn test_optional_union_return_annotation_binds_project_type() {
+    let g = graph(
+        &PythonProvider::new().unwrap(),
+        &[(
+            "src/app.py",
+            "class Tok:\n    pass\n\ndef find() -> Tok | None:\n    return None\n\ndef all() -> list[Tok]:\n    return []\n",
+        )],
+    );
+    assert_eq!(annotated(&g, "find"), vec![pair("src/app.py", "Tok")]);
+    assert_eq!(annotated(&g, "all"), Vec::<(String, String)>::new());
+}

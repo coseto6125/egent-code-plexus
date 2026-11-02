@@ -132,3 +132,52 @@ fn test_self_property_annotation_binds_owner_type() {
         );
     }
 }
+
+fn annotated(g: &ecp_core::graph::ZeroCopyGraph, source: &str) -> Vec<(String, String)> {
+    name_ref_support::refs(g, source, RelType::Accesses, "type_annotation")
+        .into_iter()
+        .map(|(file, name, _, _)| (file, name))
+        .collect()
+}
+
+fn pair(file: &str, name: &str) -> (String, String) {
+    (file.to_string(), name.to_string())
+}
+
+/// Contract: a property typed `Tok?` binds the project class `Tok`, like
+/// `var plain: Tok`. The parser keeps the `?` (`class_optional_type_property`).
+/// Swift functions carry no return annotation, so the property is the form to
+/// test. Before the change the raw text `Tok?` names no type: no edge for
+/// `maybe`. With no project `Tok` it binds nothing.
+#[test]
+fn test_optional_property_annotation_binds_project_type() {
+    let src = "class Tok {}\nclass Owner {\n    var maybe: Tok?\n    var plain: Tok\n}\n";
+    let g = name_ref_support::graph(
+        &SwiftProvider::new().unwrap(),
+        &[("Sources/App.swift", src)],
+    );
+    assert_eq!(annotated(&g, "maybe"), [pair("Sources/App.swift", "Tok")]);
+    assert_eq!(annotated(&g, "plain"), [pair("Sources/App.swift", "Tok")]);
+
+    let g = name_ref_support::graph(
+        &SwiftProvider::new().unwrap(),
+        &[(
+            "Sources/App.swift",
+            "class Owner {\n    var maybe: Tok?\n}\n",
+        )],
+    );
+    assert_eq!(annotated(&g, "maybe"), Vec::<(String, String)>::new());
+}
+
+/// Guard: `[Tok]` and `Array<Tok>` are generics; `return_type_key` gives
+/// `None`, so they bind nothing, before and after the change.
+#[test]
+fn test_generic_property_annotation_binds_nothing() {
+    let src = "class Tok {}\nclass Owner {\n    var items: [Tok]\n    var more: Array<Tok>\n}\n";
+    let g = name_ref_support::graph(
+        &SwiftProvider::new().unwrap(),
+        &[("Sources/App.swift", src)],
+    );
+    assert_eq!(annotated(&g, "items"), Vec::<(String, String)>::new());
+    assert_eq!(annotated(&g, "more"), Vec::<(String, String)>::new());
+}

@@ -40,3 +40,19 @@ fn test_jsdoc_returns_this_emits_no_annotation_edge() {
     );
     assert_eq!(annotated(&g, "bump"), Vec::<(String, String)>::new());
 }
+
+/// Guard: JavaScript has no type syntax, so a nullable-looking construct (a
+/// JSDoc `{?Tok}` / `{Tok|null}` return and a ternary returning `null`) emits
+/// no `type_annotation` edge to the class `Tok`, before and after the change.
+#[test]
+fn test_jsdoc_nullable_return_emits_no_annotation_edge() {
+    let g = graph(
+        &JavaScriptProvider::new().unwrap(),
+        &[(
+            "src/app.js",
+            "export class Tok {}\n/** @returns {?Tok} */\nexport function maybe(x) { return x ? new Tok() : null; }\n/** @returns {Tok|null} */\nexport function union(x) { return x ? new Tok() : null; }\n",
+        )],
+    );
+    assert_eq!(annotated(&g, "maybe"), Vec::<(String, String)>::new());
+    assert_eq!(annotated(&g, "union"), Vec::<(String, String)>::new());
+}

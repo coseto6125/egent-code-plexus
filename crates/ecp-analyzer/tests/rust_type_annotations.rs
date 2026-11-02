@@ -132,3 +132,32 @@ fn test_cpp_field_typed_with_a_struct_named_self_binds_that_struct() {
     );
     assert_eq!(annotated(&g, "value"), [pair("src/box.cpp", "Self")]);
 }
+
+/// Contract: a `&Tok` / `&mut Tok` / `&'a Tok` return binds the project
+/// struct `Tok`. The `return_type` capture keeps the reference text. Before the
+/// change the raw text `&Tok` names no type: no edge. `Vec<Tok>` is a generic
+/// and binds nothing, before and after. With no project `Tok` nothing binds.
+#[test]
+fn test_reference_return_annotation_binds_project_type() {
+    let g = graph(
+        &RustProvider::new().unwrap(),
+        &[(
+            "src/app.rs",
+            "pub struct Tok;\n\
+             pub fn peek(t: &Tok) -> &Tok { t }\n\
+             pub fn peek_mut(t: &mut Tok) -> &mut Tok { t }\n\
+             pub fn lifetime<'a>(t: &'a Tok) -> &'a Tok { t }\n\
+             pub fn all() -> Vec<Tok> { Vec::new() }\n",
+        )],
+    );
+    for name in ["peek", "peek_mut", "lifetime"] {
+        assert_eq!(annotated(&g, name), [pair("src/app.rs", "Tok")], "{name}");
+    }
+    assert_eq!(annotated(&g, "all"), Vec::<(String, String)>::new());
+
+    let g = graph(
+        &RustProvider::new().unwrap(),
+        &[("src/app.rs", "pub fn peek(t: &Tok) -> &Tok { t }\n")],
+    );
+    assert_eq!(annotated(&g, "peek"), Vec::<(String, String)>::new());
+}

@@ -58,3 +58,22 @@ fn test_method_without_return_type_has_no_annotation_edge() {
     let g = build("<?php\nclass Resolver\n{\n    public function run() {}\n}\n");
     assert_eq!(annotated(&g, "run"), Vec::<(String, String)>::new());
 }
+
+/// Contract: a nullable `?Tok` return binds the project class `Tok`, like
+/// `: Tok`. The parser keeps the `?` (the `?self` test above relies on it).
+/// Before the change the raw text `?Tok` names no type: no edge for `find`.
+/// With no project `Tok` it binds nothing. PHP has no generic return syntax
+/// (`array` is the only collection type), so there is no generic case.
+#[test]
+fn test_nullable_return_annotation_binds_project_type() {
+    let g = build(
+        "<?php\nclass Tok {}\nclass Owner\n{\n\
+         \x20   public function find(): ?Tok { return null; }\n\
+         \x20   public function make(): Tok { return new Tok(); }\n}\n",
+    );
+    assert_eq!(annotated(&g, "find"), [pair("src/Resolver.php", "Tok")]);
+    assert_eq!(annotated(&g, "make"), [pair("src/Resolver.php", "Tok")]);
+
+    let g = build("<?php\nclass Owner\n{\n    public function find(): ?Tok { return null; }\n}\n");
+    assert_eq!(annotated(&g, "find"), Vec::<(String, String)>::new());
+}

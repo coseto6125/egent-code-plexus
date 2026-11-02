@@ -27,3 +27,18 @@ fn test_method_returning_self_emits_no_annotation_edge() {
     assert_eq!(annotated(&g, "bump"), Vec::<(String, String)>::new());
     assert_eq!(annotated(&g, "make"), Vec::<(String, String)>::new());
 }
+
+/// Guard: Ruby has no type syntax, so a YARD `@return [Tok, nil]` comment and
+/// a method returning `nil` or a `Tok` emit no `type_annotation` edge to the
+/// class `Tok`, before and after the change.
+#[test]
+fn test_yard_nullable_return_emits_no_annotation_edge() {
+    let g = graph(
+        &RubyProvider::new().unwrap(),
+        &[(
+            "lib/app.rb",
+            "class Tok\nend\n\nclass Owner\n  # @return [Tok, nil]\n  def find\n    nil\n  end\nend\n",
+        )],
+    );
+    assert_eq!(annotated(&g, "find"), Vec::<(String, String)>::new());
+}
