@@ -590,7 +590,19 @@ pub fn lexical_parents(decls: &[(NodeKind, Span)], scoped_kinds: &[NodeKind]) ->
         return vec![None; decls.len()];
     }
     let spans: Vec<Span> = decls.iter().map(|&(_, span)| span).collect();
-    let enclosing = innermost_enclosing(&spans);
+    lexical_parents_in(decls, &innermost_enclosing(&spans), scoped_kinds)
+}
+
+/// [`lexical_parents`] over `enclosing`, the [`innermost_enclosing`] of
+/// `decls`' spans, for a caller that reads it for another rule too.
+pub fn lexical_parents_in(
+    decls: &[(NodeKind, Span)],
+    enclosing: &[Option<usize>],
+    scoped_kinds: &[NodeKind],
+) -> Vec<Option<u32>> {
+    if scoped_kinds.is_empty() {
+        return vec![None; decls.len()];
+    }
     decls
         .iter()
         .enumerate()

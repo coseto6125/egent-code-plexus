@@ -1356,7 +1356,9 @@ impl SymbolTable {
     /// picks with no owner (a free function, else one type's member),
     /// `TopLevel` a declaration with no owning type, `Type` a member of the
     /// type its path names, when the file's types agree with that path. A
-    /// body-local declaration is none of them: no import names it.
+    /// body-local declaration is none of them: no import names it. A later
+    /// overload counts, as a base node does for the overlay: a body-local
+    /// first `new` must not hide a module-level `new` of its uid.
     pub(crate) fn lookup_member_in_file(
         &self,
         file_path: &str,
@@ -1389,10 +1391,11 @@ impl SymbolTable {
             .get(file_path)?
             .get(node_name)?
             .iter()
-            .copied()
-            .find(|&id| {
+            .flat_map(|&id| std::iter::once(id).chain(self.later_overloads(id).iter().copied()))
+            .filter(|&id| {
                 self.is_module_level(id, owner_id) && predicate(self.node_kinds[id as usize])
             })
+            .min()
     }
 
     /// [`owner_path_agrees`] over the types `file_path` declares.
@@ -2145,6 +2148,24 @@ impl ResolveFacts for SymbolTable {
     fn enum_variant_of(&self, type_id: u32, type_name: &str, variant: &str) -> Option<u32> {
         SymbolTable::enum_variant_of(self, type_id, type_name, variant)
     }
+
+    /// The file's names in no order: the answer is a yes or no.
+    fn any_trait_impl(
+        &self,
+        file: &str,
+        trait_key: &str,
+        mut accepts: impl FnMut(&str) -> bool,
+    ) -> bool {
+        let implements = |id: u32| {
+            self.node_kinds[id as usize] == NodeKind::Impl
+                && PickFacts::owner(self, id) == Some(trait_key)
+        };
+        self.file_scoped.get(file).is_some_and(|names| {
+            names
+                .iter()
+                .any(|(name, ids)| ids.iter().any(|&id| implements(id)) && accepts(name.as_str()))
+        })
+    }
 }
 
 #[cfg(test)]
@@ -2356,6 +2377,56 @@ mod tests {
         assert_eq!(
             only_local.lookup_member_in_file("src/m.rs", "new", CALL, MemberOwner::Type("Foo")),
             None
+        );
+    }
+
+    /// `fn setup() { impl Foo { fn new } }` before the module-level
+    /// `impl Foo { pub fn new }`: the two `new`s share a uid, so the
+    /// module-level one is a later overload, in no name table. A body-local
+    /// first `new` does not hide it from the type-owned lookup.
+    #[test]
+    fn test_lookup_member_in_file_body_local_first_overload_returns_module_level_overload() {
+        let mut st = st_owned(&[
+            ("src/m.rs", "setup", NodeKind::Function, None),
+            ("src/m.rs", "Foo", NodeKind::Struct, None),
+            ("src/m.rs", "new", NodeKind::Method, Some("Foo")),
+        ]);
+        st.register_overload(2, FileMeta::from_path("src/m.rs"));
+        let module_level = 3;
+        st.note_body_local(2);
+        let lookup = |st: &SymbolTable| {
+            st.lookup_member_in_file("src/m.rs", "new", CALL, MemberOwner::Type("Foo"))
+        };
+        assert_eq!(lookup(&st), Some(module_level));
+        st.note_body_local(module_level);
+        assert_eq!(lookup(&st), None, "every overload body-local");
+    }
+
+    /// A trait's `impl` for `ty` in the file: an `Impl` named `ty`, or a
+    /// blanket `impl<T: ..> Trait for T` whose self type names no project
+    /// type. `impl Sizer for Name`, with `Name` declared in `other.rs`,
+    /// implements `Sizer` for `Name` only.
+    #[test]
+    fn test_implements_in_file_named_or_blanket_impl_returns_true() {
+        let rows = [
+            ("lib.rs", "Describe", NodeKind::Trait, None),
+            ("lib.rs", "T", NodeKind::Impl, Some("Describe")),
+            ("other.rs", "Name", NodeKind::Struct, None),
+            ("lib.rs", "Name", NodeKind::Impl, Some("Sizer")),
+            ("lib.rs", "String", NodeKind::Impl, Some("Summary")),
+        ];
+        let st = st_owned(&rows);
+        assert!(st.implements_in_file("lib.rs", "String", "Summary"));
+        assert!(st.implements_in_file("lib.rs", "String", "Describe"));
+        assert!(st.implements_in_file("lib.rs", "Name", "Sizer"));
+        assert!(!st.implements_in_file("lib.rs", "String", "Sizer"));
+        assert!(!st.implements_in_file("other.rs", "String", "Describe"));
+
+        let mut declared_t = rows.to_vec();
+        declared_t.push(("lib.rs", "T", NodeKind::Struct, None));
+        assert!(
+            !st_owned(&declared_t).implements_in_file("lib.rs", "String", "Describe"),
+            "a self type the project declares is no generic parameter"
         );
     }
 

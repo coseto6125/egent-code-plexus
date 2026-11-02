@@ -75,13 +75,23 @@ pub trait ResolveFacts: TypeFacts {
     /// when an import alias (`use E as F`) makes it differ from the declared
     /// name, the declared name is tried too.
     fn enum_variant_of(&self, type_id: u32, type_name: &str, variant: &str) -> Option<u32>;
+    /// Whether `file` holds an `impl trait_key for X` block, an `Impl` node
+    /// whose owner is the trait `trait_key`, whose self type `X` (the node's
+    /// name) `accepts`.
+    fn any_trait_impl(
+        &self,
+        file: &str,
+        trait_key: &str,
+        accepts: impl FnMut(&str) -> bool,
+    ) -> bool;
     /// Whether `file` holds an `impl trait_key for ty` block: an `Impl` node
-    /// named `ty` (an [`owner_key`]) whose owner is the trait `trait_key`.
-    /// The default reads [`ResolveFacts::call_decls`]; a side whose lookup
-    /// allocates overrides it.
+    /// named `ty` (an [`owner_key`]), or a blanket `impl<T: ..> trait_key
+    /// for T`. The parser keeps no generics on an `Impl` node, so a self
+    /// type that names no project type stands for a generic parameter.
     fn implements_in_file(&self, file: &str, ty: &str, trait_key: &str) -> bool {
-        self.call_decls(file, ty)
-            .any(|(id, kind)| kind == NodeKind::Impl && self.owner(id) == Some(trait_key))
+        self.any_trait_impl(file, trait_key, |self_type| {
+            self_type == ty || self.types_named(self_type).is_empty()
+        })
     }
 }
 
@@ -1158,11 +1168,13 @@ pub fn qualified_member<F: QualifierFacts>(
     let file = file.as_ref();
     let heritage: &[String] = if caller_type { heritage } else { &[] };
     let pick = decls.first_decl_in_file(file, member, target)?;
-    let declares_type = owner_key(qualifier).is_some_and(|key| {
-        decls
-            .first_decl_in_file(file, key, ResolveTarget::Type)
-            .is_some()
-    });
+    // Only Rust's `impl_only` reads it once `caller_type` holds.
+    let declares_type = (!caller_type || language == Language::Rust)
+        && owner_key(qualifier).is_some_and(|key| {
+            decls
+                .first_decl_in_file(file, key, ResolveTarget::Type)
+                .is_some()
+        });
     let qualifier_names_type = caller_type || declares_type;
     let qualifier_is_type = type_receiver_is_closed(language) && qualifier_names_type;
     // A Rust method call whose qualifier names no type in the file reached
@@ -1639,7 +1651,8 @@ pub fn anchored_module_file<F: ModuleTreeFacts>(
 /// through the module tree. In the file [`module_tree_item`] places, the
 /// item's first module item ([`is_module_item`]) of `target`'s kinds, else
 /// the first declaration named `member` (the callee's last segment, generic
-/// arguments dropped) that no function body holds. When the item is a type
+/// arguments dropped), later `impl` overloads included, that no function
+/// body holds. When the item is a type
 /// (`m::S` of `m::S::helper`), the path names one of its associated items,
 /// as in the qualifier tier: [`prefer_owned`] picks it with the type as the
 /// receiver, and a free item of the type's file never binds. [`qualified`]
@@ -1662,19 +1675,24 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
     let is_type = ResolveTarget::Type.kind_predicate();
     let mut item_is_type = false;
     for (id, kind) in decls.call_decls(file, &item) {
-        if !is_module_item(decls, id) {
+        let (wanted_kind, type_kind) = (wanted(kind), is_type(kind));
+        if !(wanted_kind || type_kind) || !is_module_item(decls, id) {
             continue;
         }
-        if wanted(kind) {
+        if wanted_kind {
             return Some(id);
         }
-        item_is_type |= is_type(kind);
+        item_is_type = true;
     }
     let bare = member.split('<').next().unwrap_or(member);
+    // The candidates with their `impl` overloads: a body-local
+    // `impl Foo { fn new }` before the module-level one makes the
+    // module-level `new` a later overload.
     let pick = decls
-        .call_decls(file, bare)
-        .find(|&(id, kind)| wanted(kind) && !decls.is_body_local(id))
-        .map(|(id, _)| id)?;
+        .pick_candidates(file, bare)
+        .iter()
+        .copied()
+        .find(|&id| wanted(decls.kind(id)) && !decls.is_body_local(id))?;
     if !item_is_type {
         return Some(pick);
     }
@@ -2580,6 +2598,16 @@ mod tests {
                 })
             };
             owned_by(type_name).or_else(|| owned_by(declared))
+        }
+        fn any_trait_impl(
+            &self,
+            file: &str,
+            trait_key: &str,
+            mut accepts: impl FnMut(&str) -> bool,
+        ) -> bool {
+            self.decls.iter().any(|&(f, name, kind, owner)| {
+                f == file && kind == NodeKind::Impl && owner == Some(trait_key) && accepts(name)
+            })
         }
     }
 

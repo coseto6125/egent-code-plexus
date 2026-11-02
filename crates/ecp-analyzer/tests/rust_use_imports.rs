@@ -292,6 +292,23 @@ fn workspace_go_target_kinds(files: &[(&str, &str)], callee: &str) -> Vec<(Strin
 /// [`workspace_go_target_kinds`] with each edge's confidence, which tells
 /// the tier that bound it.
 fn workspace_go_calls(files: &[(&str, &str)], callee: &str) -> Vec<(String, NodeKind, f32)> {
+    workspace_go_edges(files, callee)
+        .into_iter()
+        .map(|(file, kind, confidence, _)| (file, kind, confidence))
+        .collect()
+}
+
+/// Each target of `go`'s calls to `callee` as (file, 1-based start line):
+/// two same-named declarations of one file differ by the line alone.
+fn workspace_go_lines(files: &[(&str, &str)], callee: &str) -> Vec<(String, u32)> {
+    workspace_go_edges(files, callee)
+        .into_iter()
+        .map(|(file, _, _, line)| (file, line))
+        .collect()
+}
+
+/// [`workspace_go_calls`] with each target's 1-based start line.
+fn workspace_go_edges(files: &[(&str, &str)], callee: &str) -> Vec<(String, NodeKind, f32, u32)> {
     let tmp = tempfile::tempdir().expect("tempdir");
     let rust = RustProvider::new().expect("RustProvider::new");
     let python = PythonProvider::new().expect("PythonProvider::new");
@@ -313,7 +330,7 @@ fn workspace_go_calls(files: &[(&str, &str)], callee: &str) -> Vec<(String, Node
     }
     let graph = builder.build();
     let pool = graph.string_pool.as_slice();
-    let mut out: Vec<(String, NodeKind, f32)> = graph
+    let mut out: Vec<(String, NodeKind, f32, u32)> = graph
         .edges
         .iter()
         .filter(|e| e.rel_type == RelType::Calls)
@@ -326,6 +343,7 @@ fn workspace_go_calls(files: &[(&str, &str)], callee: &str) -> Vec<(String, Node
                 graph.files[file].path.resolve(pool).to_string(),
                 target.kind,
                 e.confidence,
+                target.span.0 + 1,
             )
         })
         .collect();
@@ -1398,4 +1416,93 @@ fn test_module_path_through_pub_use_binds_the_free_fn_past_a_method_namesake() {
         workspace_go_target_kinds(&files, "helper"),
         vec![("src/m.rs".to_string(), NodeKind::Function)]
     );
+}
+
+/// `m.rs` after `prefix`: `fn setup` holds `local`, then the module-level
+/// `pub struct Foo` and its `impl` with `pub fn new`. Rust scopes only `fn`
+/// by its parent, so a body-local `Foo` shares the module-level one's uid;
+/// Pass 1 keeps the first, the body-local one, and tombstones the other
+/// into it.
+fn foo_twin_m_rs(prefix: &str, local: &str) -> String {
+    format!(
+        "{prefix}fn setup() {{\n    {local}\n}}\npub struct Foo;\nimpl Foo {{\n    pub fn new() -> Foo {{ Foo }}\n}}\n"
+    )
+}
+
+/// The 1-based line of the module-level `    pub fn new` in `source`.
+fn module_level_new_line(source: &str) -> u32 {
+    source
+        .lines()
+        .position(|line| line.starts_with("    pub fn new"))
+        .expect("the fixture declares a module-level `new`") as u32
+        + 1
+}
+
+/// What `fn setup` holds beside the module-level `Foo`: a twin struct, then
+/// a twin struct with its own `impl Foo { fn new }`, which makes the
+/// module-level `new` a later overload of the body-local one.
+const FOO_TWINS: [&str; 2] = [
+    "struct Foo;",
+    "struct Foo;\n    impl Foo {\n        fn new() -> Foo { Foo }\n    }",
+];
+
+/// A merged node is body-local only when every declaration Pass 1 merged
+/// into it is: `m.rs`'s module-level `Foo` shadows the glob
+/// `pub use self::inner::*`, so `crate::m::Foo::new()` binds `m.rs`'s
+/// module-level `new`. Before the fix the body-local survivor marked the
+/// merged node body-local, the glob won, and `inner.rs`'s `new` bound
+/// through the module tree; with a body-local `impl Foo { fn new }` the
+/// first `new` must not hide the module-level overload either.
+#[test]
+fn test_module_level_twin_of_body_local_type_shadows_a_glob_pub_use() {
+    for local in FOO_TWINS {
+        let m = foo_twin_m_rs("pub mod inner;\npub use self::inner::*;\n", local);
+        let files = [
+            ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+            (
+                "src/lib.rs",
+                "pub mod m;\npub fn go() {\n    crate::m::Foo::new();\n}\n",
+            ),
+            ("src/m.rs", m.as_str()),
+            (
+                "src/m/inner.rs",
+                "pub struct Foo;\nimpl Foo {\n    pub fn new() -> Foo { Foo }\n}\n",
+            ),
+        ];
+        assert_eq!(
+            workspace_go_lines(&files, "new"),
+            vec![("src/m.rs".to_string(), module_level_new_line(&m))],
+            "{local}"
+        );
+    }
+}
+
+/// The same merged `Foo` without a glob: `use crate::m::Foo;` imports the
+/// module item, and the module path `crate::m::Foo::new()` names it.
+/// `other.rs` declares a second `Foo`, so no tier reaches `m.rs` by the
+/// name alone. Before the fix the import missed the body-local survivor.
+#[test]
+fn test_module_level_twin_of_body_local_type_binds_import_and_module_path() {
+    let other = "pub struct Foo;\nimpl Foo {\n    pub fn new() -> Foo { Foo }\n}\n";
+    let by_import =
+        "pub mod m;\nmod other;\nuse crate::m::Foo;\npub fn go() {\n    Foo::new();\n}\n";
+    let by_path = "pub mod m;\nmod other;\npub fn go() {\n    crate::m::Foo::new();\n}\n";
+    for (lib, local) in [
+        (by_import, FOO_TWINS[0]),
+        (by_path, FOO_TWINS[0]),
+        (by_path, FOO_TWINS[1]),
+    ] {
+        let m = foo_twin_m_rs("", local);
+        let files = [
+            ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+            ("src/lib.rs", lib),
+            ("src/m.rs", m.as_str()),
+            ("src/other.rs", other),
+        ];
+        assert_eq!(
+            workspace_go_lines(&files, "new"),
+            vec![("src/m.rs".to_string(), module_level_new_line(&m))],
+            "{lib} {local}"
+        );
+    }
 }

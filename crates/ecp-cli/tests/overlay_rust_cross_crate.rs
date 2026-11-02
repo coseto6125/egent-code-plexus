@@ -129,10 +129,24 @@ fn reindex_and_overlay(
     edited: &str,
     callers: &[&str],
 ) -> (Vec<Call>, Vec<Call>) {
+    reindex_and_overlay_of(files, caller_file, edited, caller_file, callers)
+}
+
+/// [`reindex_and_overlay`] with the edit in `dirty`, which may be another
+/// file than `caller_file`. The overlay reads `dirty` from its fresh parse
+/// and re-resolves the unchanged `caller_file` against it, as the session's
+/// invalidation closure hands a dependent to the view.
+fn reindex_and_overlay_of(
+    files: &[(String, String)],
+    dirty: &str,
+    edited: &str,
+    caller_file: &str,
+    callers: &[&str],
+) -> (Vec<Call>, Vec<Call>) {
     let edited_tree: Vec<(String, String)> = files
         .iter()
         .map(|(path, source)| {
-            let source = if path == caller_file { edited } else { source };
+            let source = if path == dirty { edited } else { source };
             (path.clone(), source.to_string())
         })
         .collect();
@@ -146,7 +160,14 @@ fn reindex_and_overlay(
 
     let base_bytes = archive(&index(files));
     let base = access(&base_bytes);
-    let inputs: Vec<OverlayFileInput> = vec![parse(caller_file, edited).into()];
+    let mut inputs: Vec<OverlayFileInput> = vec![parse(dirty, edited).into()];
+    if caller_file != dirty {
+        let (_, source) = files
+            .iter()
+            .find(|(path, _)| path == caller_file)
+            .expect("the caller's file is a fixture file");
+        inputs.push(parse(caller_file, source).into());
+    }
     let view = OverlayView::build(base, &inputs).expect("an edit makes a view");
     assert_eq!(
         OverlayView::from_cache_bytes(&view.to_cache_bytes(), base.nodes.len()).as_ref(),
@@ -1041,5 +1062,142 @@ fn test_overlay_rust_module_path_never_binds_a_method_namesake() {
                 .all(|call| call.callee_line != 3),
             "{label}: the method `S::helper` must not bind: {reindex:#?} {overlay:#?}"
         );
+    }
+}
+
+/// `m.rs` declares `Foo` inside `fn setup` and again at module level. Rust
+/// scopes only `fn` by its parent, so both share a uid and the body-local
+/// one survives Pass 1 with the module-level one as its twin; the merged
+/// node is a module item. `use crate::m::Foo; Foo::new()` and the module
+/// path `crate::m::Foo::new()` bind `m.rs`'s module-level `new` on both
+/// sides, with `lib.rs` dirty (the overlay reads `m.rs`'s survivor and its
+/// tombstoned twin from the archive) and with `m.rs` dirty (the twin is a
+/// fresh symbol). With a body-local `impl Foo { fn new }` the module-level
+/// `new` is a later overload of the body-local one. `other.rs` declares a
+/// second `Foo`, so no tier reaches `m.rs` by the name alone. Before the
+/// fix the reindex bound nothing through the import and the overlay with
+/// `m.rs` dirty answered from the twin.
+#[test]
+fn test_overlay_rust_module_level_twin_of_body_local_type_binds_matches_reindex() {
+    const LIB: &str = "src/lib.rs";
+    const M: &str = "src/m.rs";
+    let by_import =
+        "pub mod m;\nmod other;\nuse crate::m::Foo;\npub fn go() {\n    Foo::new();\n}\n";
+    let by_path = "pub mod m;\nmod other;\npub fn go() {\n    crate::m::Foo::new();\n}\n";
+    let twin = "fn setup() {\n    struct Foo;\n}\npub struct Foo;\nimpl Foo {\n    pub fn new() -> Foo { Foo }\n}\n";
+    let twin_impl = "fn setup() {\n    struct Foo;\n    impl Foo {\n        fn new() -> Foo { Foo }\n    }\n}\npub struct Foo;\nimpl Foo {\n    pub fn new() -> Foo { Foo }\n}\n";
+    let other = "pub struct Foo;\nimpl Foo {\n    pub fn new() -> Foo { Foo }\n}\n";
+    let new_line = |m: &str| {
+        m.lines()
+            .position(|line| line.starts_with("    pub fn new"))
+            .expect("a module-level `new`") as u32
+            + 1
+    };
+    for (lib, m) in [(by_import, twin), (by_path, twin), (by_path, twin_impl)] {
+        let files = owned(&[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"a\"\nversion = \"0.1.0\"\n",
+            ),
+            (LIB, lib),
+            (M, m),
+            ("src/other.rs", other),
+        ]);
+        for (dirty, source) in [(LIB, lib), (M, m)] {
+            for (label, edited) in [
+                ("touched", source.to_string()),
+                ("one-line edit", one_line_edit(source)),
+            ] {
+                let (reindex, overlay) =
+                    reindex_and_overlay_of(&files, dirty, &edited, LIB, &["go"]);
+                let m_now = if dirty == M { edited.as_str() } else { m };
+                let bound: Vec<(&str, &str, u32)> = reindex
+                    .iter()
+                    .map(|call| {
+                        (
+                            call.callee_file.as_str(),
+                            call.callee.as_str(),
+                            call.callee_line,
+                        )
+                    })
+                    .collect();
+                assert_eq!(
+                    bound,
+                    [(M, "new", new_line(m_now))],
+                    "{label} {dirty} {lib}: {reindex:#?}"
+                );
+                assert_eq!(overlay, reindex, "{label} {dirty} {lib}");
+            }
+        }
+    }
+}
+
+/// R5's trait arm through a blanket `impl<T: Debug> Describe for T` on both
+/// sides: `self.describe()` in `impl Summary for String` and `s.describe()`
+/// on a `&String` beside `impl From<X> for String` bind `Describe`'s
+/// default `describe`. The third fixture calls from `user.rs`, so the
+/// overlay reads `lib.rs`'s impl blocks from the archived graph. Before the
+/// fix neither side bound it.
+#[test]
+fn test_overlay_rust_trait_default_through_blanket_impl_matches_reindex() {
+    let describe = "pub trait Describe {\n    fn describe(&self) -> String { String::new() }\n}\n\
+        impl<T: std::fmt::Debug> Describe for T {}\n";
+    let by_self = format!(
+        "{describe}pub trait Summary {{\n    fn summarize(&self) -> String;\n}}\n\
+        impl Summary for String {{\n    fn summarize(&self) -> String {{ self.describe() }}\n}}\n"
+    );
+    let from_x = format!(
+        "{describe}pub struct X;\nimpl From<X> for String {{\n    fn from(_: X) -> String {{ String::new() }}\n}}\n"
+    );
+    let by_typed = format!("{from_x}pub fn n(s: &String) -> String {{ s.describe() }}\n");
+    let root = format!("mod user;\n{from_x}");
+    let user = "pub fn n(s: &String) -> String {\n    s.describe()\n}\n";
+    let manifest = (
+        "Cargo.toml",
+        "[package]\nname = \"a\"\nversion = \"0.1.0\"\n",
+    );
+    for (files, dirty, caller) in [
+        (
+            owned(&[manifest, ("src/lib.rs", by_self.as_str())]),
+            "src/lib.rs",
+            "summarize",
+        ),
+        (
+            owned(&[manifest, ("src/lib.rs", by_typed.as_str())]),
+            "src/lib.rs",
+            "n",
+        ),
+        (
+            owned(&[
+                manifest,
+                ("src/lib.rs", root.as_str()),
+                ("src/user.rs", user),
+            ]),
+            "src/user.rs",
+            "n",
+        ),
+    ] {
+        let source = files
+            .iter()
+            .find(|(path, _)| path == dirty)
+            .map(|(_, source)| source.clone())
+            .expect("the dirty file is a fixture file");
+        for (label, edited) in [
+            ("touched", source.clone()),
+            ("one-line edit", one_line_edit(&source)),
+        ] {
+            let (reindex, overlay) = reindex_and_overlay(&files, dirty, &edited, &[caller]);
+            let bound: Vec<(&str, &str)> = reindex
+                .iter()
+                .filter(|call| call.callee == "describe")
+                .map(|call| (call.callee_file.as_str(), call.callee.as_str()))
+                .collect();
+            assert_eq!(
+                bound,
+                [("src/lib.rs", "describe")],
+                "{label} {dirty}: {reindex:#?}"
+            );
+            assert_eq!(overlay, reindex, "{label} {dirty}");
+        }
     }
 }

@@ -27,8 +27,8 @@ use crate::analyzer::ladder::{
     TypeName,
 };
 use crate::analyzer::lexical::{
-    body_locals, inside_callable, lexical_chain_end, lexical_scope_kinds, twin_enclosing,
-    LexicalFunctions,
+    body_locals, decls_enclosing, inside_callable, lexical_chain_end, lexical_scope_kinds,
+    twin_enclosing, LexicalFunctions,
 };
 use crate::analyzer::outcome::{Resolution, Tier};
 use crate::analyzer::overrides::{
@@ -56,7 +56,7 @@ use crate::analyzer::types::{
     UNTYPED_NAME_CONFIDENCE, UNTYPED_NAME_REASON, VALUE_READ_REASON, VARIANT_PATTERN_REASON,
     VARIANT_USE_REASON,
 };
-use crate::contracts::identity::lexical_parents;
+use crate::contracts::identity::lexical_parents_in;
 use crate::file_category::{pick_global, FileMeta, GlobalPick, Language};
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
 use crate::session::closure::ConfigEdits;
@@ -64,6 +64,7 @@ use crate::session::import_scope::{stored_file_meta, stored_language, ImportScop
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::Cow;
 use std::cell::{Cell, OnceCell, RefCell};
+use std::collections::hash_map::Entry;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -276,6 +277,49 @@ fn stored_span(node: &crate::graph::ArchivedNode) -> Span {
     )
 }
 
+/// Whether the base file `file_idx` is a Rust source file.
+fn is_rust_file(graph: &ArchivedZeroCopyGraph, file_idx: usize) -> bool {
+    graph
+        .files
+        .get(file_idx)
+        .is_some_and(|f| is_rust_source(std::path::Path::new(f.path.resolve(&graph.string_pool))))
+}
+
+/// Per base file index, the spans of its callables when it is a Rust file,
+/// none otherwise: one path test per file, one index per callable.
+fn base_rust_callables(graph: &ArchivedZeroCopyGraph) -> Vec<Vec<Span>> {
+    let rust: Vec<bool> = (0..graph.files.len())
+        .map(|file_idx| is_rust_file(graph, file_idx))
+        .collect();
+    let mut callables = vec![Vec::new(); rust.len()];
+    for kind in NodeKind::ALL.into_iter().filter(|kind| kind.is_callable()) {
+        for idx in graph.nodes_by_kind(kind) {
+            let callable = &graph.nodes[idx as usize];
+            let file_idx = callable.file_idx.to_native() as usize;
+            if rust.get(file_idx).copied().unwrap_or(false) {
+                callables[file_idx].push(stored_span(callable));
+            }
+        }
+    }
+    callables
+}
+
+/// What [`RustModules`] reads about the dirty files' symbols, derived once
+/// per view in `OverlayFacts::new`. Virtual idxs number the dirty files'
+/// symbols in order after the graph's nodes.
+#[derive(Debug, Default)]
+pub(super) struct DirtyRustFacts {
+    /// Per dirty file, in input order, the virtual idx of its first symbol.
+    starts: Vec<u32>,
+    /// The declarations no module path names: the scoped ones, and the
+    /// Rust ones inside a function body ([`body_locals`]), where a first of
+    /// a uid with a module-level twin counts as a module item.
+    body_locals: FxHashSet<u32>,
+    /// The declarations no name lookup reads: a later overload, and a
+    /// later twin of a uid, which the index tombstones into the first.
+    repeats: FxHashSet<u32>,
+}
+
 impl<'a> OverlayFacts<'a> {
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -299,25 +343,41 @@ impl<'a> OverlayFacts<'a> {
         let mut dirty_return_types: FxHashMap<u32, &'a str> = FxHashMap::default();
         let mut dirty_flags: FxHashMap<u32, u16> = FxHashMap::default();
         let mut dirty_lexical_parents: FxHashMap<u32, u32> = FxHashMap::default();
-        let mut dirty_body_locals: FxHashSet<u32> = FxHashSet::default();
-        let mut seen_uids: FxHashSet<u64> = FxHashSet::default();
+        let mut rust_facts = DirtyRustFacts::default();
+        // The first virtual idx of each uid, and each later twin of one
+        // with that first idx: the index merges the twin into it.
+        let mut first_of_uid: FxHashMap<u64, u32> = FxHashMap::default();
+        let mut twins: Vec<(u32, u32)> = Vec::new();
+        let mut module_level_firsts: Vec<u32> = Vec::new();
         let mut offset = 0usize;
         for (file_ord, file) in files.iter().enumerate() {
             let mut exports_any = false;
             let first = offset;
+            let file_twins = twins.len();
             for symbol in &file.symbols {
                 let node = &nodes[offset];
-                if !node.later_overload && seen_uids.insert(node.uid) {
-                    let virt = base_len + offset as u32;
-                    declared
-                        .entry((file_ord, node.name.as_str()))
-                        .or_default()
-                        .push(virt);
-                    dirty_by_name
-                        .entry(node.name.as_str())
-                        .or_default()
-                        .push(virt);
-                    exports_any |= symbol.is_exported;
+                let virt = base_len + offset as u32;
+                if node.later_overload {
+                    rust_facts.repeats.insert(virt);
+                } else {
+                    match first_of_uid.entry(node.uid) {
+                        Entry::Occupied(seen) => {
+                            rust_facts.repeats.insert(virt);
+                            twins.push((virt, *seen.get()));
+                        }
+                        Entry::Vacant(slot) => {
+                            slot.insert(virt);
+                            declared
+                                .entry((file_ord, node.name.as_str()))
+                                .or_default()
+                                .push(virt);
+                            dirty_by_name
+                                .entry(node.name.as_str())
+                                .or_default()
+                                .push(virt);
+                            exports_any |= symbol.is_exported;
+                        }
+                    }
                 }
                 exported.push(symbol.is_exported);
                 if let Some(return_type) = symbol.return_type.as_deref() {
@@ -329,6 +389,7 @@ impl<'a> OverlayFacts<'a> {
                 offset += 1;
             }
             let start = base_len + first as u32;
+            rust_facts.starts.push(start);
             let rust_file = is_rust_source(std::path::Path::new(&file.rel_path));
             if rust_file {
                 rust_impl_members(&file.symbols, |member, block, implemented| {
@@ -349,20 +410,35 @@ impl<'a> OverlayFacts<'a> {
                     .iter()
                     .map(|s| (s.kind, HeritageNode::span(s)))
                     .collect();
-                for (offset, parent) in lexical_parents(&decls, scoped).into_iter().enumerate() {
+                let enclosing = decls_enclosing(&decls);
+                let parents = lexical_parents_in(&decls, &enclosing, scoped);
+                for (offset, parent) in parents.into_iter().enumerate() {
                     if let Some(parent) = parent {
                         let virt = start + offset as u32;
                         dirty_lexical_parents.insert(virt, start + parent);
-                        dirty_body_locals.insert(virt);
+                        // A Rust scoped node is body-local too: `body_locals`
+                        // below holds it.
+                        if !rust_file {
+                            rust_facts.body_locals.insert(virt);
+                        }
                     }
                 }
                 if rust_file {
-                    dirty_body_locals.extend(
-                        body_locals(&decls)
-                            .into_iter()
+                    let local = body_locals(&decls, &enclosing);
+                    rust_facts.body_locals.extend(
+                        local
+                            .iter()
                             .enumerate()
-                            .filter(|&(_, body_local)| body_local)
+                            .filter(|&(_, &body_local)| body_local)
                             .map(|(offset, _)| start + offset as u32),
+                    );
+                    // The index's per-node AND: a first of a uid with a
+                    // module-level twin is a module item.
+                    module_level_firsts.extend(
+                        twins[file_twins..]
+                            .iter()
+                            .filter(|&&(twin, _)| !local[(twin - start) as usize])
+                            .map(|&(_, first)| first),
                     );
                 }
             }
@@ -375,6 +451,9 @@ impl<'a> OverlayFacts<'a> {
                 aliases.is_some(),
             ));
             dirty_aliases.push(aliases);
+        }
+        for first in module_level_firsts {
+            rust_facts.body_locals.remove(&first);
         }
         let pool = &graph.string_pool;
         let mut dirty_impl_traits: FxHashMap<&'a str, Vec<&'a str>> = FxHashMap::default();
@@ -402,7 +481,7 @@ impl<'a> OverlayFacts<'a> {
         // The dirty configs' rows over the archived table, merged once per
         // view: the alias reading and the crate table both read it.
         let merged = configs.merged_facts(graph);
-        let rust = RustModules::new(graph, files, removed, dirty_body_locals);
+        let rust = RustModules::new(graph, files, removed, rust_facts);
         if let Some(facts) = &merged {
             let _ = rust.crates.set(facts.clone());
         }
@@ -1243,6 +1322,28 @@ impl<'a> OverlayFacts<'a> {
         later
     }
 
+    /// Clean file index → its Rust `Impl` nodes: span, idx and the trait's
+    /// [`owner_key`]. Built on the first `impl`-block question.
+    fn base_impls(&self) -> &FxHashMap<u32, Vec<ImplSpan<'a>>> {
+        let graph = self.graph;
+        self.base_impls.get_or_init(|| {
+            let mut impls: FxHashMap<u32, Vec<ImplSpan<'a>>> = FxHashMap::default();
+            for impl_idx in graph.nodes_by_kind(NodeKind::Impl) {
+                let block = &graph.nodes[impl_idx as usize];
+                let file_idx = block.file_idx.to_native();
+                if !is_rust_file(graph, file_idx as usize) || self.dirty_base.contains(&impl_idx) {
+                    continue;
+                }
+                impls.entry(file_idx).or_default().push((
+                    stored_span(block),
+                    impl_idx,
+                    owner_key(block.owner_class.resolve(&graph.string_pool)),
+                ));
+            }
+            impls
+        })
+    }
+
     /// The `impl` block of the clean base Rust method `idx`: the innermost
     /// `Impl` node of its file whose span holds it. A method of an `impl`
     /// over a self type the parser emits no `Impl` node for (`impl T for
@@ -1257,33 +1358,7 @@ impl<'a> OverlayFacts<'a> {
         ) {
             return None;
         }
-        let impls = self.base_impls.get_or_init(|| {
-            let mut impls: FxHashMap<u32, Vec<ImplSpan<'a>>> = FxHashMap::default();
-            for impl_idx in graph.nodes_by_kind(NodeKind::Impl) {
-                let block = &graph.nodes[impl_idx as usize];
-                let rust = graph
-                    .files
-                    .get(block.file_idx.to_native() as usize)
-                    .is_some_and(|f| {
-                        is_rust_source(std::path::Path::new(f.path.resolve(&graph.string_pool)))
-                    });
-                if !rust || self.dirty_base.contains(&impl_idx) {
-                    continue;
-                }
-                let span = (
-                    block.span.0.to_native(),
-                    block.span.1.to_native(),
-                    block.span.2.to_native(),
-                    block.span.3.to_native(),
-                );
-                impls.entry(block.file_idx.to_native()).or_default().push((
-                    span,
-                    impl_idx,
-                    owner_key(block.owner_class.resolve(&graph.string_pool)),
-                ));
-            }
-            impls
-        });
+        let impls = self.base_impls();
         let span = (
             node.span.0.to_native(),
             node.span.1.to_native(),
@@ -2498,22 +2573,30 @@ impl ResolveFacts for OverlayFacts<'_> {
         OverlayFacts::enum_variant_of(self, type_id, type_name, variant)
     }
 
-    /// The default over [`Self::call_decls`], without the list it builds
-    /// and sorts per call.
-    fn implements_in_file(&self, file: &str, ty: &str, trait_key: &str) -> bool {
-        let implements =
-            |idx: u32| self.kind_of(idx) == NodeKind::Impl && self.owner_of(idx) == Some(trait_key);
+    /// A dirty file's fresh `Impl` symbols; a clean file's archived `Impl`
+    /// nodes ([`Self::base_impls`]).
+    fn any_trait_impl(
+        &self,
+        file: &str,
+        trait_key: &str,
+        mut accepts: impl FnMut(&str) -> bool,
+    ) -> bool {
         if let Some(&file_ord) = self.dirty.get(file) {
-            return self
-                .declared
-                .get(&(file_ord, ty))
-                .is_some_and(|virts| virts.iter().any(|&virt| implements(virt)));
+            return self.scope.dirty()[file_ord].symbols.iter().any(|s| {
+                s.kind == NodeKind::Impl
+                    && s.owner_class.as_deref().and_then(owner_key) == Some(trait_key)
+                    && accepts(s.name.as_str())
+            });
         }
         let Some(file_idx) = self.clean_file_idx(file) else {
             return false;
         };
-        self.graph.nodes_by_name(ty).any(|idx| {
-            self.graph.nodes[idx as usize].file_idx.to_native() == file_idx && implements(idx)
+        let graph = self.graph;
+        self.base_impls().get(&file_idx).is_some_and(|impls| {
+            impls.iter().any(|&(_, idx, implemented)| {
+                implemented == Some(trait_key)
+                    && accepts(graph.nodes[idx as usize].name.resolve(&graph.string_pool))
+            })
         })
     }
 }
@@ -3339,10 +3422,13 @@ pub(super) struct RustModules<'a> {
     /// scoped ones, and the Rust ones inside a function body
     /// ([`body_locals`]).
     dirty_body_locals: FxHashSet<u32>,
-    /// Clean Rust file index → the spans of its callables, which tell a
-    /// base body-local declaration ([`inside_callable`]). Built on the first
-    /// such question about a Rust node.
-    base_callables: OnceCell<FxHashMap<u32, Vec<Span>>>,
+    /// The virtual idxs no name lookup reads ([`DirtyRustFacts::repeats`]).
+    dirty_repeats: FxHashSet<u32>,
+    /// Per base file index, the spans of its callables in a Rust file and
+    /// none elsewhere, which tell a base body-local declaration
+    /// ([`inside_callable`]). Built on the first such question about a Rust
+    /// node.
+    base_callables: OnceCell<Vec<Vec<Span>>>,
     removed: &'a FxHashSet<&'a str>,
     /// The `graph.bin` workspace facts, read on first use: reading them
     /// deserializes and validates the whole table, once per view.
@@ -3365,26 +3451,23 @@ pub(super) struct RustCaller<'a> {
 }
 
 impl<'a> RustModules<'a> {
-    /// `dirty_body_locals` holds virtual idxs, which number `dirty`'s
-    /// symbols in order after the graph's nodes.
+    /// `facts` numbers `dirty`'s symbols in order after the graph's nodes.
     pub(super) fn new(
         graph: &'a ArchivedZeroCopyGraph,
         dirty: &'a [OverlayFileInput],
         removed: &'a FxHashSet<&'a str>,
-        dirty_body_locals: FxHashSet<u32>,
+        facts: DirtyRustFacts,
     ) -> Self {
-        let mut first = graph.nodes.len() as u32;
+        debug_assert_eq!(facts.starts.len(), dirty.len(), "one start per dirty file");
         Self {
             graph,
             dirty: dirty
                 .iter()
-                .map(|file| {
-                    let start = first;
-                    first += file.symbols.len() as u32;
-                    (file.rel_path.as_str(), (file, start))
-                })
+                .zip(facts.starts)
+                .map(|(file, start)| (file.rel_path.as_str(), (file, start)))
                 .collect(),
-            dirty_body_locals,
+            dirty_body_locals: facts.body_locals,
+            dirty_repeats: facts.repeats,
             base_callables: OnceCell::new(),
             removed,
             crates: OnceCell::new(),
@@ -3402,39 +3485,38 @@ impl<'a> RustModules<'a> {
         if graph.is_lexically_scoped(idx) {
             return true;
         }
-        let is_rust_file = |file_idx: u32| {
-            graph.files.get(file_idx as usize).is_some_and(|f| {
-                is_rust_source(std::path::Path::new(f.path.resolve(&graph.string_pool)))
-            })
-        };
         let node = &graph.nodes[idx as usize];
+        let file_idx = node.file_idx.to_native();
         // The path test first: a repo without Rust never builds the table.
-        if !is_rust_file(node.file_idx.to_native()) {
+        if !is_rust_file(graph, file_idx as usize) {
             return false;
         }
-        let callables = self.base_callables.get_or_init(|| {
-            let mut callables: FxHashMap<u32, Vec<Span>> = FxHashMap::default();
-            let mut rust_files: FxHashMap<u32, bool> = FxHashMap::default();
-            for kind in [NodeKind::Function, NodeKind::Method, NodeKind::Constructor] {
-                for idx in graph.nodes_by_kind(kind) {
-                    let callable = &graph.nodes[idx as usize];
-                    let file_idx = callable.file_idx.to_native();
-                    if *rust_files
-                        .entry(file_idx)
-                        .or_insert_with(|| is_rust_file(file_idx))
-                    {
-                        callables
-                            .entry(file_idx)
-                            .or_default()
-                            .push(stored_span(callable));
-                    }
-                }
-            }
+        let callables = self
+            .base_callables
+            .get_or_init(|| base_rust_callables(graph));
+        let inside = |span: Span| {
             callables
-        });
-        callables
-            .get(&node.file_idx.to_native())
-            .is_some_and(|spans| inside_callable(spans, stored_span(node)))
+                .get(file_idx as usize)
+                .is_some_and(|spans| inside_callable(spans, span))
+        };
+        if !inside(stored_span(node)) {
+            return false;
+        }
+        let kind = NodeKind::from(&node.kind);
+        // The index's per-node AND: Pass 1 merges a later declaration of
+        // `idx`'s uid into `idx` and keeps it as a tombstone of the same
+        // kind, file and span. A callable has none: a nested `fn` hashes its
+        // parent's anchor, and a repeated method is an overload of its own.
+        if kind.is_callable() {
+            return true;
+        }
+        let twin_uid = crate::uid::tombstone(node.uid.to_native());
+        !graph.nodes_by_kind(kind).any(|twin| {
+            let twin = &graph.nodes[twin as usize];
+            twin.uid.to_native() == twin_uid
+                && twin.file_idx.to_native() == file_idx
+                && !inside(stored_span(twin))
+        })
     }
 
     /// Whether `idx` (base or virtual), whose owner is `owner_class`, is
@@ -3508,19 +3590,24 @@ impl<'a> RustModules<'a> {
     /// `wanted` accepts ([`Self::module_level`]): an associated item
     /// (`impl X { const h: u32 = 1; }`) and a body-local declaration
     /// (`fn setup() { struct Foo; }`) are no items of the module. A dirty
-    /// file answers from its fresh parse.
+    /// file answers from its fresh parse. Either side reads the first of
+    /// each uid only, as the index's `SymbolTable::declares_in_file` does:
+    /// no later overload, and no twin the index tombstones.
     fn declares(&self, file: &str, name: &str, wanted: impl Fn(NodeKind) -> bool) -> bool {
         let top_level = |owner: Option<&str>| owner.is_none();
         match self.dirty.get(file) {
             Some(&(dirty, start)) => dirty.symbols.iter().enumerate().any(|(at, s)| {
+                let virt = start + at as u32;
                 s.name == name
                     && wanted(s.kind)
-                    && self.module_level(start + at as u32, s.owner_class.as_deref(), top_level)
+                    && !self.dirty_repeats.contains(&virt)
+                    && self.module_level(virt, s.owner_class.as_deref(), top_level)
             }),
             None => self.graph.nodes_by_name(name).any(|idx| {
                 let node = &self.graph.nodes[idx as usize];
                 let pool = &self.graph.string_pool;
                 wanted(NodeKind::from(&node.kind))
+                    && !self.graph.is_later_overload(idx)
                     && self.graph.files[node.file_idx.to_native() as usize]
                         .path
                         .resolve(pool)
@@ -4864,18 +4951,21 @@ fn member_in_file(
         })
         .min()
         .or_else(|| {
+            // A later overload counts, as a base node does above: a
+            // body-local first `new` must not hide a module-level one.
             names
                 .anywhere
                 .get(member)?
                 .iter()
-                .map(|&(virt, _)| (virt, &nodes[(virt - base_len) as usize]))
-                .find(|&(virt, node)| {
-                    node.rel_path.as_ref() == file
-                        && facts
-                            .rust
-                            .module_level(virt, node.owner_class.as_deref(), owned)
+                .filter(|&&(virt, _)| nodes[(virt - base_len) as usize].rel_path.as_ref() == file)
+                .flat_map(|&(virt, _)| std::iter::once(virt).chain(facts.later_overloads_of(virt)))
+                .filter(|&virt| {
+                    let node = &nodes[(virt - base_len) as usize];
+                    facts
+                        .rust
+                        .module_level(virt, node.owner_class.as_deref(), owned)
                 })
-                .map(|(virt, _)| virt)
+                .min()
         })
 }
 

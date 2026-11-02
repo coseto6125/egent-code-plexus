@@ -882,3 +882,32 @@ fn test_rust_typed_receiver_of_impl_only_type_never_binds_a_trait_it_does_not_im
     )]);
     assert_eq!(callee_owners(&g, "n", "len"), vec![]);
 }
+
+/// `Describe`'s default `describe` and a blanket `impl<T: Debug> Describe
+/// for T`, whose `Impl` node the parser names `T`.
+const BLANKET_DESCRIBE: &str = "pub trait Describe {\n    fn describe(&self) -> String { String::new() }\n}\nimpl<T: std::fmt::Debug> Describe for T {}\n";
+
+/// R5's trait arm through a blanket impl: the parser keeps no generics on
+/// an `Impl` node, so a self type no project type names (`T`) stands for a
+/// generic parameter, and the trait's default method binds for the
+/// impl-only `String`. Both `self.describe()` in `impl Summary for String`
+/// and `s.describe()` on a `&String` beside `impl From<X> for String` bind
+/// `Describe::describe`. Before the fix neither bound: no `Impl` named
+/// `String` implements `Describe`.
+#[test]
+fn test_rust_trait_default_through_blanket_impl_binds_for_impl_only_type() {
+    let by_self = format!(
+        "{BLANKET_DESCRIBE}pub trait Summary {{\n    fn summarize(&self) -> String;\n}}\nimpl Summary for String {{\n    fn summarize(&self) -> String {{ self.describe() }}\n}}\n"
+    );
+    let by_typed = format!(
+        "{BLANKET_DESCRIBE}pub struct X;\nimpl From<X> for String {{\n    fn from(_: X) -> String {{ String::new() }}\n}}\npub fn n(s: &String) -> String {{ s.describe() }}\n"
+    );
+    for (source, caller) in [(by_self.as_str(), "summarize"), (by_typed.as_str(), "n")] {
+        let g = build(&[("src/lib.rs", source)]);
+        assert_eq!(
+            callee_owners(&g, caller, "describe"),
+            vec![("src/lib.rs".to_string(), "Describe".to_string())],
+            "{caller}"
+        );
+    }
+}

@@ -74,10 +74,8 @@ pub fn clear_scoped_owners(language: Language, nodes: &mut [RawNode]) {
 /// `use` names it from outside its function, and it shadows no glob
 /// `pub use`. Uid identity stays with [`lexical_scope_kinds`]. Spans from
 /// one syntax tree nest, so [`inside_callable`] gives the same answer for one
-/// declaration.
-pub fn body_locals(decls: &[(NodeKind, Span)]) -> Vec<bool> {
-    let spans: Vec<Span> = decls.iter().map(|&(_, span)| span).collect();
-    let enclosing = innermost_enclosing(&spans);
+/// declaration. `enclosing` is [`decls_enclosing`] of `decls`.
+pub fn body_locals(decls: &[(NodeKind, Span)], enclosing: &[Option<usize>]) -> Vec<bool> {
     (0..decls.len())
         .map(|i| {
             let mut up = enclosing[i];
@@ -90,6 +88,14 @@ pub fn body_locals(decls: &[(NodeKind, Span)]) -> Vec<bool> {
             false
         })
         .collect()
+}
+
+/// The [`innermost_enclosing`] of `decls`' spans: what [`body_locals`] and
+/// [`lexical_parents_in`](crate::contracts::identity::lexical_parents_in)
+/// read, built once per file.
+pub fn decls_enclosing(decls: &[(NodeKind, Span)]) -> Vec<Option<usize>> {
+    let spans: Vec<Span> = decls.iter().map(|&(_, span)| span).collect();
+    innermost_enclosing(&spans)
 }
 
 /// [`body_locals`] for the one declaration at `span`, from the spans of its
@@ -1557,7 +1563,7 @@ mod tests {
             (NodeKind::Method, (8, 4, 8, 26)),
         ];
         let want = [false, true, true, true, false, false, false];
-        assert_eq!(body_locals(&decls), want);
+        assert_eq!(body_locals(&decls, &decls_enclosing(&decls)), want);
         let callables: Vec<Span> = decls
             .iter()
             .filter(|(kind, _)| kind.is_callable())
@@ -1566,6 +1572,6 @@ mod tests {
         for (&(_, span), want) in decls.iter().zip(want) {
             assert_eq!(inside_callable(&callables, span), want, "{span:?}");
         }
-        assert!(body_locals(&[]).is_empty());
+        assert!(body_locals(&[], &[]).is_empty());
     }
 }
