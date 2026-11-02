@@ -746,6 +746,18 @@ fn test_execute_union_with_unaliased_names_from_different_variables_is_refused()
 }
 
 #[test]
+fn test_execute_union_with_float_and_int_literal_columns_is_refused() {
+    let error = run("MATCH (a:Function {name:'alpha'}) RETURN collect(1.0) \
+         UNION MATCH (b:Function {name:'beta'}) RETURN collect(1)")
+    .expect_err("collect(1.0) and collect(1) are different columns")
+    .to_string();
+    assert!(
+        error.contains("[collect(1.0)]") && error.contains("[collect(1)]"),
+        "{error}"
+    );
+}
+
+#[test]
 fn test_execute_union_with_equal_column_names_concatenates() {
     assert_eq!(
         rows(

@@ -3137,7 +3137,8 @@ fn literal_col_name(lit: &Literal) -> String {
         Literal::Null => "null".into(),
         Literal::Bool(b) => b.to_string(),
         Literal::Int(i) => i.to_string(),
-        Literal::Float(f) => f.to_string(),
+        // Debug keeps the decimal point: `collect(1.0)` stays apart from `collect(1)`.
+        Literal::Float(f) => format!("{f:?}"),
         Literal::Str(s) => format!("'{s}'"),
         Literal::List(items) => {
             let items: Vec<String> = items.iter().map(literal_col_name).collect();
