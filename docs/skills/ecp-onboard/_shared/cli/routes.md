@@ -22,7 +22,7 @@ Options:
           Include routes declared inside test files (`tests/`, `test/`, `*_test.*`, `*.spec.*`, etc.). Default: off — most agent queries want production routes, not test fixtures. When set, the output gains a `test_results` array listing the test-only routes alongside the regular `results`. Test classification reuses `File.category = FileCategory::Test` set at index time (`ecp_core::file_category::determine_category`)
 
       --format <FORMAT>
-          Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed toon. `json`: full-fidelity JSON. `text`: one compact JSON line per route. Absent, `llm` and `toon` join the middleware names of a route into one string. A `result` field appears only when the answer carries a caveat (stale or warm-attached graph, unreadable uncommitted paths); absent means current
+          Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed toon. `json`: full-fidelity JSON. `text`: one compact JSON line per route. Absent, `llm` and `toon` join the middleware names of a route into one string. Each route and handler carries `handlerKind`: `named`, `inline_anonymous` (a function written at the registration), `unresolved` (a named handler that binds no declaration) or `absent` (the registration shows no handler). A `result` field appears only when the answer carries a caveat (stale or warm-attached graph, unreadable uncommitted paths); absent means current
 
           Possible values:
           - llm:  Default output: per-command LLM-tuned payload (token compression, rounded floats, trimmed timestamps, etc.) rendered through the toon encoder. Commands without command-specific tuning fall through to the same output as `Toon`

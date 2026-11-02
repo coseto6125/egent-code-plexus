@@ -15,11 +15,14 @@ pub struct CypherArgs {
     /// - Label alternation:  (a:Function|Method)
     /// - Category labels:    (a:Callable) = Function|Method|Constructor · :Type = Class|Interface|Struct|Enum|Typedef|Trait · :Data = Property|Variable|Const|EnumVariant|SchemaField
     /// - WHERE:              =, <>, <, <=, >, >=, AND, OR, NOT, IN, =~, CONTAINS, STARTS WITH, ENDS WITH
-    /// - Properties (node):  name, kind, filePath, uid, ownerClass, content,
-    ///   line, startLine, endLine, visibility, decorators, and the boolean
+    /// - Properties (node):  name, kind, filePath, uid, ownerClass, lexicalParent,
+    ///   content, line, startLine, endLine, visibility, decorators, and the boolean
     ///   flags is_test/is_async/is_static/is_abstract/is_generator/is_extern
     ///   (camelCase aliases isTest/isAsync/… also accepted). An unknown
     ///   property name fails the query with a structured error on stdout.
+    ///   `ownerClass` is the stored owner, null for a nested fn or closure: match a
+    ///   closure in `outer` with `n.lexicalParent = 'outer'` (the enclosing
+    ///   chain, such as `K::m`, else the stored owner).
     /// - Properties (edge):  confidence, reason, rel_type
     /// - Aggregation:        COUNT(*), COUNT(DISTINCT x), SUM/MIN/MAX/AVG, COLLECT
     /// - Pipeline:           one WITH ... [WHERE ...], OPTIONAL MATCH, UNION [ALL]

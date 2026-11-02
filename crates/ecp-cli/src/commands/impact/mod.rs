@@ -143,7 +143,9 @@ pub struct ImpactArgs {
     /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
     /// toon. `json`: full-fidelity JSON. `text`: pretty-printed JSON. Every impact row
     /// carries `requires_verification`: true when an edge on its path is heuristic or
-    /// below 0.7 confidence (the row keeps its place).
+    /// below 0.7 confidence (the row keeps its place). `ownerClass` is the stored
+    /// owner, null for a nested fn or closure. `lexicalParent` is the enclosing chain (`K::m`),
+    /// else the stored owner.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 

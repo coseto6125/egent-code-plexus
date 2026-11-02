@@ -6,7 +6,7 @@ Usage: ecp find [OPTIONS] [PATTERN]
 
 Arguments:
   [PATTERN]
-          Pattern: symbol name (or name fragment in `fuzzy` / `bm25` mode). Required unless `--batch` is set (`bm25` mode only — patterns then come from stdin)
+          Pattern: symbol name (or name fragment in `fuzzy` / `bm25` mode). In `exact` mode the name takes the target grammar of `ecp impact`: `name`, `Owner.name`, `::name`, `name@line`. Required unless `--batch` is set (`bm25` mode only — patterns then come from stdin)
 
 Options:
       --mode <MODE>
@@ -23,16 +23,16 @@ Options:
           Shorthand for `--mode fuzzy`. Ignored when `--mode` is supplied explicitly with a non-default value
 
       --all
-          Return all matches instead of the single top-ranked one. Affects `exact` and `fuzzy` modes; `bm25` always returns top-K buckets
+          Return all matches instead of the single top-ranked one. Affects `exact` and `fuzzy` modes; `bm25` always returns top-K buckets. Without it, an `exact` name with several declarations returns the top-ranked one, `status` `ambiguous`, and `candidates` with a `target` that selects each
 
       --include-tests
           Include hits from test files in `fuzzy` mode (skipped by default). `exact` mode automatically searches tests without needing this flag. `bm25` mode bucketises into a separate `tests` array and is unaffected by this flag
 
       --kind <KIND>
-          Filter by node kinds (csv: function,method,class,...)
+          Select declarations of these node kinds (csv: function,method,class,...). The kind filter applies before `--file` ranks the declarations
 
       --file <FILE>
-          Disambiguate when name has multiple matches: substring on file path. Same matching rule as `ecp impact --file`
+          Select the declaration in this file. A file path that equals the value ranks first, then one that ends with it, then one that contains it. An ambiguous name returns candidates that you can re-run
 
       --repo <REPO>
           Repository selector (path | name | @all | csv mix). Defaults to cwd. `@<group>` is rejected at the top level — use `ecp group find` instead

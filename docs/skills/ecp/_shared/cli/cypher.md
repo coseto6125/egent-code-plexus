@@ -23,6 +23,9 @@ ecp cypher "MATCH (a)-[r]->(b) RETURN a,b" [--repo <PATH>]
 
 Category labels expand in MATCH and WHERE: `:Callable` (Function|Method|Constructor), `:Type` (Class|Interface|Struct|Enum|Typedef|Trait), `:Data` (Property|Variable|Const|EnumVariant|SchemaField). Prefer `:Callable` over bare `:Function` — the latter skips methods.
 
+## Owner properties
+`n.ownerClass` is the stored owner: the class of a method, null for a nested fn or closure. `n.lexicalParent` is the enclosing chain of a nested fn (`outer`, `K::m`), else the stored owner. `WHERE n.ownerClass = 'outer'` matches no closure in `outer`; write `WHERE n.lexicalParent = 'outer'`.
+
 ## RelTypes
 `Calls`, `Extends`, `Imports`, `Implements`, `HasMethod`, `HasProperty`, `Accesses`, `ReadsField`, `HandlesRoute`, `References`, `Defines`, `Fetches`, `MirrorsField`, `Publishes`, `Subscribes`, `EventTopicMirror`, `OpensTxScope`, `Overrides`, `UsesPathLiteral`, `StepInProcess`, `Decorates`, `CompensatedBy`, `QueriesTable`, `PartOf`.
 

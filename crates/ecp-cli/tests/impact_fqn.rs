@@ -189,3 +189,125 @@ def caller():
         "caller must appear in upstream impact of only_validate: {result}"
     );
 }
+
+/// A Python file with a nested fn `inner` in `outer`, a nested fn `deep` in
+/// `inner`, and a nested fn `helper` in the method `K.m`.
+const NESTED_PY: &str = r#"def outer():
+    def inner():
+        def deep():
+            return 1
+        return deep()
+    return inner()
+
+
+class K:
+    def m(self):
+        def helper():
+            return 2
+        return helper()
+"#;
+
+/// Upstream impact rows of `target` as JSON.
+fn upstream_rows(repo: &Path, target: &str) -> Vec<Value> {
+    let result = run_json(
+        repo,
+        &[
+            "impact",
+            "--target",
+            target,
+            "--direction",
+            "upstream",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(result["status"], "success", "{result}");
+    result["impact"]
+        .as_array()
+        .cloned()
+        .unwrap_or_else(|| panic!("no impact rows: {result}"))
+}
+
+/// `(ownerClass, lexicalParent)` of the row named `name` at `depth`.
+fn owner_pair(rows: &[Value], name: &str, depth: u64) -> (Value, Value) {
+    let row = rows
+        .iter()
+        .find(|r| r["name"] == name && r["depth"] == depth)
+        .unwrap_or_else(|| panic!("no row {name} at depth {depth}: {rows:?}"));
+    (row["ownerClass"].clone(), row["lexicalParent"].clone())
+}
+
+/// Stands for: an `ecp impact` row prints a nested fn's stored owner as
+/// `ownerClass` (null: a scoped node has none) and its enclosing fn chain
+/// as `lexicalParent`, at depth 0 and as a caller; a file-level caller
+/// prints null for both (FU-2026-10-05-ff801e095d23). Failed before:
+/// `ownerClass` held the display chain (bfs.rs `merged.display_owner` in
+/// both emission branches) and `lexicalParent` was absent.
+#[test]
+fn test_impact_json_nested_fn_owner_class_null_lexical_parent_chain() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(tmp.path(), "src/lib.py", NESTED_PY);
+    init_and_analyze(tmp.path());
+
+    let rows = upstream_rows(tmp.path(), "deep");
+    assert_eq!(
+        owner_pair(&rows, "deep", 0),
+        (Value::Null, Value::from("outer::inner"))
+    );
+    assert_eq!(
+        owner_pair(&rows, "inner", 1),
+        (Value::Null, Value::from("outer"))
+    );
+    assert_eq!(owner_pair(&rows, "outer", 2), (Value::Null, Value::Null));
+}
+
+/// Stands for: a nested fn in the method `K.m` prints no `ownerClass` and
+/// the `lexicalParent` `K::m`; its caller, the method, prints the
+/// `ownerClass` `K` and the display owner `K` as `lexicalParent`.
+#[test]
+fn test_impact_json_nested_fn_in_method_lexical_parent_class_method_chain() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(tmp.path(), "src/lib.py", NESTED_PY);
+    init_and_analyze(tmp.path());
+
+    let rows = upstream_rows(tmp.path(), "helper");
+    assert_eq!(
+        owner_pair(&rows, "helper", 0),
+        (Value::Null, Value::from("K::m"))
+    );
+    assert_eq!(
+        owner_pair(&rows, "m", 1),
+        (Value::from("K"), Value::from("K"))
+    );
+}
+
+/// Stands for: an impact row adds `lexicalParent` and renames or removes no
+/// field (machine-parsed output): every row carries both owner fields, and
+/// the start row carries every other field it carried before.
+#[test]
+fn test_impact_json_row_adds_lexical_parent_keeps_other_fields() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(tmp.path(), "src/lib.py", NESTED_PY);
+    init_and_analyze(tmp.path());
+
+    let rows = upstream_rows(tmp.path(), "deep");
+    for row in &rows {
+        for field in ["ownerClass", "lexicalParent"] {
+            assert!(row.get(field).is_some(), "{field} missing: {row}");
+        }
+    }
+    for field in [
+        "uid",
+        "name",
+        "kind",
+        "filePath",
+        "line",
+        "depth",
+        "viaReason",
+        "viaConfidence",
+        "test",
+        "requires_verification",
+    ] {
+        assert!(rows[0].get(field).is_some(), "{field} missing: {}", rows[0]);
+    }
+}

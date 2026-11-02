@@ -28,7 +28,11 @@ pub struct InspectArgs {
 
     /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
     /// toon. `json`: full-fidelity JSON. `text`: pretty-printed JSON. Every format except
-    /// `json` drops the edge boilerplate.
+    /// `json` drops the edge boilerplate. The symbol and each edge carry `ownerClass`
+    /// (the stored owner, null for a nested fn or closure) and `lexicalParent` (the
+    /// enclosing chain `K::m`, else the stored owner). When a field is null on every
+    /// edge, every format except `json` drops it from every edge, and from the symbol
+    /// when it is null there too.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 
@@ -115,6 +119,22 @@ const EDGE_SECTIONS: [&str; 4] = [
     "heuristic_outgoing",
 ];
 
+/// The owner fields of an edge entry and of the symbol header
+/// (`build_inspect_block`): `ownerClass` is the stored owner, null for a
+/// scoped node; `lexicalParent` is the display owner, which for a scoped
+/// node is the enclosing-callable chain (`K::m`).
+const OWNER_FIELDS: [&str; 2] = ["ownerClass", "lexicalParent"];
+
+/// Every edge entry of the `EDGE_SECTIONS` of an inspect result.
+fn edge_entries(result: &serde_json::Value) -> impl Iterator<Item = &serde_json::Value> {
+    EDGE_SECTIONS
+        .into_iter()
+        .filter_map(move |key| result.get(key)?.as_object())
+        .flat_map(|map| map.values())
+        .filter_map(|entries| entries.as_array())
+        .flatten()
+}
+
 /// Strip constant-across-all-edges boilerplate from an edge-section map for
 /// toon/llm output. Operates on the `incoming`, `outgoing`,
 /// `heuristic_incoming`, and `heuristic_outgoing` sections of the inspect
@@ -125,36 +145,20 @@ const EDGE_SECTIONS: [&str; 4] = [
 ///   dropping saves ~20 bytes/edge
 /// - `checks`: when it is the default `{}`; an edge whose value differs
 ///   keeps its own copy
-/// - `ownerClass`: dropped when every entry across ALL edge sections has
-///   `ownerClass: null`; when any entry has a non-null ownerClass the column
-///   is kept because the LLM needs it to distinguish method callers
+/// - `ownerClass`, `lexicalParent`: each one is dropped, from every entry and
+///   from a null symbol header, when every entry across ALL edge sections
+///   holds null for it; when any entry holds a value the column is kept
+///   because the LLM needs it to distinguish method callers and nested fns
 ///
 /// Affects only the toon/llm path; json format uses the unstripped block.
 fn strip_edge_boilerplate(result: &mut serde_json::Value) {
-    let section_keys = EDGE_SECTIONS;
-
-    // First pass: determine whether any entry has a non-null ownerClass.
-    // If so, keep the column so callers can see method ownership.
-    let any_non_null_owner = section_keys.iter().any(|&key| {
-        result
-            .get(key)
-            .and_then(|s| s.as_object())
-            .map(|map| {
-                map.values()
-                    .filter_map(|v| v.as_array())
-                    .flatten()
-                    .any(|entry| {
-                        !matches!(
-                            entry.get("ownerClass"),
-                            Some(serde_json::Value::Null) | None
-                        )
-                    })
-            })
-            .unwrap_or(false)
+    let keep = OWNER_FIELDS.map(|field| {
+        edge_entries(result)
+            .any(|entry| !matches!(entry.get(field), Some(serde_json::Value::Null) | None))
     });
 
     let defaults = edge_defaults();
-    for &key in &section_keys {
+    for key in EDGE_SECTIONS {
         if let Some(section) = result.get_mut(key).and_then(|s| s.as_object_mut()) {
             for entries in section.values_mut() {
                 if let Some(arr) = entries.as_array_mut() {
@@ -165,9 +169,10 @@ fn strip_edge_boilerplate(result: &mut serde_json::Value) {
                                     obj.remove(field);
                                 }
                             }
-                            // Conditional: only drop when the column is all-null.
-                            if !any_non_null_owner {
-                                obj.remove("ownerClass");
+                            for (field, keep) in OWNER_FIELDS.into_iter().zip(keep) {
+                                if !keep {
+                                    obj.remove(field);
+                                }
                             }
                         }
                     }
@@ -176,12 +181,12 @@ fn strip_edge_boilerplate(result: &mut serde_json::Value) {
         }
     }
 
-    // Also strip ownerClass: null from the symbol header when no edge carries a
-    // non-null ownerClass — the null conveys no information and adds noise.
-    if !any_non_null_owner {
-        if let Some(symbol) = result.get_mut("symbol").and_then(|s| s.as_object_mut()) {
-            if matches!(symbol.get("ownerClass"), Some(serde_json::Value::Null)) {
-                symbol.remove("ownerClass");
+    // The symbol header's null owner field conveys no information when no
+    // edge carries a value for it.
+    if let Some(symbol) = result.get_mut("symbol").and_then(|s| s.as_object_mut()) {
+        for (field, keep) in OWNER_FIELDS.into_iter().zip(keep) {
+            if !keep && matches!(symbol.get(field), Some(serde_json::Value::Null)) {
+                symbol.remove(field);
             }
         }
     }
@@ -284,7 +289,8 @@ fn build_inspect_block(
 
         let entry = serde_json::json!({
             "name": target_node.name(merged),
-            "ownerClass": merged.display_owner(edge.target),
+            "ownerClass": target_node.owner_class(merged),
+            "lexicalParent": merged.display_owner(edge.target),
             "kind": target_kind,
             "filePath": target_file_path,
             "reason": edge.reason(merged),
@@ -335,7 +341,8 @@ fn build_inspect_block(
 
             let mut entry = serde_json::json!({
                 "name": source_node.name(merged),
-                "ownerClass": merged.display_owner(edge.source),
+                "ownerClass": source_node.owner_class(merged),
+                "lexicalParent": merged.display_owner(edge.source),
                 "kind": source_kind,
                 "filePath": source_file_path,
                 "reason": edge.reason(merged),
@@ -412,7 +419,8 @@ fn build_inspect_block(
     let mut block = serde_json::json!({
         "symbol": {
             "name": node.name(merged),
-            "ownerClass": merged.display_owner(idx),
+            "ownerClass": node.owner_class(merged),
+            "lexicalParent": merged.display_owner(idx),
             "kind": node_kind_to_str(&kind),
             "filePath": file_path_str,
             "startLine": node.start_line(),
@@ -1305,6 +1313,55 @@ mod tests {
         assert_eq!(calls[1]["checks"], serde_json::json!({"x": true}));
         assert_eq!(block["symbol"]["ownerClass"], "Foo");
         assert_eq!(edge_defaults()["tier"], "unresolved");
+    }
+
+    /// Stands for: the toon/llm compression drops each owner field on its
+    /// own. A column whose every edge entry is null goes, from the entries
+    /// and from a null symbol header; a column with one value stays on every
+    /// entry, null ones included, so the toon table keeps one shape. An
+    /// entry without the field (absent) counts as null.
+    #[test]
+    fn test_strip_edge_boilerplate_owner_fields_dropped_only_when_all_null() {
+        let mut block = serde_json::json!({
+            "symbol": {"name": "inner", "ownerClass": null, "lexicalParent": "outer"},
+            "incoming": {"calls": [
+                {"name": "outer", "ownerClass": null, "lexicalParent": null},
+                {"name": "m", "ownerClass": "K", "lexicalParent": null},
+                {"name": "bare"},
+            ]},
+            "outgoing": {},
+        });
+        strip_edge_boilerplate(&mut block);
+        let calls = &block["incoming"]["calls"];
+        assert_eq!(
+            calls[0],
+            serde_json::json!({"name": "outer", "ownerClass": null})
+        );
+        assert_eq!(
+            calls[1],
+            serde_json::json!({"name": "m", "ownerClass": "K"})
+        );
+        assert_eq!(calls[2], serde_json::json!({"name": "bare"}));
+        assert_eq!(
+            block["symbol"],
+            serde_json::json!({"name": "inner", "ownerClass": null, "lexicalParent": "outer"})
+        );
+
+        let mut nested = serde_json::json!({
+            "symbol": {"name": "outer", "ownerClass": null, "lexicalParent": null},
+            "outgoing": {"calls": [
+                {"name": "inner", "ownerClass": null, "lexicalParent": "outer"},
+            ]},
+        });
+        strip_edge_boilerplate(&mut nested);
+        assert_eq!(
+            nested["outgoing"]["calls"][0],
+            serde_json::json!({"name": "inner", "lexicalParent": "outer"})
+        );
+        assert_eq!(
+            nested["symbol"],
+            serde_json::json!({"name": "outer", "lexicalParent": null})
+        );
     }
 
     #[test]

@@ -16,10 +16,10 @@ Options:
           Git ref — compute blast radius across all symbols changed between this baseline and HEAD. Mutually exclusive with positional <name>
 
       --file <FILE>
-          Disambiguate when name has multiple matches: substring on file path. `--file_path` / `--file-path` stay as aliases for back-compat
+          Select the declaration in this file. A file path that equals the value ranks first, then one that ends with it, then one that contains it. An ambiguous name returns candidates that you can re-run. `--file_path` / `--file-path` stay as aliases for back-compat
 
       --kind <KIND>
-          Disambiguate by kind (function | method | class | route | ...)
+          Select the declaration of one node kind (function | method | class | ...). The kind filter applies before `--file` ranks the declarations
 
       --direction <DIRECTION>
           Direction of traversal
@@ -54,10 +54,10 @@ Options:
           Repository selector
 
       --test-coverage
-          Coverage gap analysis: for each touched symbol, classify by test-caller presence (uncovered / partial / covered). Uses FunctionMeta.is_test flag from per-language extraction. Outputs uncovered symbols first to support LLM PR review ("X 改了沒測試"). Needs test callers in the walk, so it conflicts with --exclude-tests
+          Coverage gap analysis: for each touched symbol, classify by verified (untagged) test callers (uncovered / partial / covered / orphan). A test caller tagged `requires_verification` counts under `unverified_test_callers`, never as coverage. Orphan means no caller at all. Uses FunctionMeta.is_test flag from per-language extraction. Outputs uncovered symbols first to support LLM PR review ("X 改了沒測試"). Needs test callers in the walk, so it conflicts with --exclude-tests
 
       --no-heuristic
-          Suppress heuristic callers (MirrorsField, EventTopicMirror) from the blast radius. Default: heuristic callers ARE shown, in a separate `heuristic_callers` bucket tagged `requires_verification`. Pass this flag for a pure-deterministic blast radius
+          Suppress heuristic callers (MirrorsField, EventTopicMirror, CompensatedBy) from the blast radius. Default: heuristic callers ARE shown, in a separate `heuristic_callers` bucket tagged `requires_verification`. With this flag, `Calls` callers below 0.7 confidence still appear, tagged `requires_verification`
 
       --confidence-threshold <CONFIDENCE_THRESHOLD>
           Informational confidence gate — promotes heuristic edges when T4-7/T5-33 emit per-edge tiers. Currently controls the --explain-confidence report
@@ -68,7 +68,7 @@ Options:
           Emit explain_confidence block with threshold + per-tier filtered counts
 
       --format <FORMAT>
-          Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed toon. `json`: full-fidelity JSON. `text`: pretty-printed JSON
+          Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed toon. `json`: full-fidelity JSON. `text`: pretty-printed JSON. Every impact row carries `requires_verification`: true when an edge on its path is heuristic or below 0.7 confidence (the row keeps its place). `ownerClass` is the stored owner, null for a nested fn or closure. `lexicalParent` is the enclosing chain (`K::m`), else the stored owner
 
           Possible values:
           - llm:  Default output: per-command LLM-tuned payload (token compression, rounded floats, trimmed timestamps, etc.) rendered through the toon encoder. Commands without command-specific tuning fall through to the same output as `Toon`
@@ -88,7 +88,7 @@ Options:
           Symbol-mode only: `--batch` combined with `--baseline` or `--literal` is rejected as an invalid argument. A positional name is also rejected — stdin is the single source of targets, so a positional would be silently ignored otherwise.
 
       --ambiguous-callers
-          List the call sites the graph could not attribute: when the target's name has two or more same-named definitions, the resolver drops bare calls to it as ambiguous, so the caller set is a lower bound. This runs one `git grep` over tracked files in the definitions' language family (`.ts` also searches `.tsx`) and reports, under `ambiguous_callers`, each `name(` / `.name(` / `->name(` / `::name(` site outside the definitions and outside functions already listed as callers (at most 50 sites; `total` counts every call). A site whose line holds several calls carries `count`; it is omitted when 1. Sites are text-match candidates, never merged into the caller list or counts. Ruby calls without parentheses are not matched. Upstream walks only: ignored with `--direction down`
+          List the call sites the graph could not attribute: when the target's name has two or more same-named definitions of a competing kind, the resolver drops bare calls to it as ambiguous, so the caller set is a lower bound. This runs one `git grep` over tracked files in the definitions' language family (`.ts` also searches `.tsx`) and reports, under `ambiguous_callers`, each `name(` / `.name(` / `->name(` / `::name(` site outside the definitions and outside functions already listed as callers (at most 50 sites; `total` counts every call). A site whose line holds several calls carries `count`; it is omitted when 1. Sites are text-match candidates, never merged into the caller list or counts. Ruby calls without parentheses are not matched. Upstream walks only: ignored with `--direction down`
 
       --graph <GRAPH>
           Path to the graph.bin file

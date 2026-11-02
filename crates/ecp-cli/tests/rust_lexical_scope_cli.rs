@@ -255,10 +255,12 @@ fn test_impact_overlay_outer_dot_helper_selects_nested() {
 }
 
 /// Stands for: `inspect` and the `impact` start row print the same
-/// `ownerClass` for each `helper` from a dirty copy as from the index:
-/// `outer` for the nested one (its lexical parent, stored owner empty),
-/// none for the file-level one. Before the fix the dirty copy printed
-/// `null` for the nested `helper` in both commands.
+/// `ownerClass` and `lexicalParent` for each `helper` from a dirty copy as
+/// from the index: for the nested one no owner (its stored owner is empty)
+/// and the lexical parent `outer`; for the file-level one neither. Before
+/// the fix the dirty copy printed `null` for the nested `helper` in both
+/// commands; before FU-2026-10-05-ff801e095d23 both printed the parent
+/// `outer` as `ownerClass`.
 #[test]
 fn test_inspect_overlay_nested_helper_owner_class_matches_index() {
     let repo = Repo::indexed(&[("src/lib.rs", LIB)]);
@@ -266,22 +268,26 @@ fn test_inspect_overlay_nested_helper_owner_class_matches_index() {
         ["helper@10", "helper@1"].map(|target| {
             let out = repo.ecp(&["inspect", target, "--repo", ".", "--format", "json"]);
             assert!(out.status.success(), "inspect {target}: {}", stderr(&out));
-            let inspected = json_of(&out)["symbol"]["ownerClass"].clone();
+            let symbol = json_of(&out)["symbol"].clone();
             let out = repo.impact(target, &[]);
             assert!(out.status.success(), "impact {target}: {}", stderr(&out));
             let start = json_of(&out)["impact"]
                 .as_array()
                 .and_then(|rows| rows.iter().find(|r| r["depth"] == 0).cloned())
                 .unwrap_or_else(|| panic!("impact {target}: no start row"));
-            (inspected, start["ownerClass"].clone())
+            [
+                (
+                    symbol["ownerClass"].clone(),
+                    symbol["lexicalParent"].clone(),
+                ),
+                (start["ownerClass"].clone(), start["lexicalParent"].clone()),
+            ]
         })
     };
     let indexed = owners();
-    let outer = Value::from("outer");
-    assert_eq!(
-        indexed,
-        [(outer.clone(), outer), (Value::Null, Value::Null)]
-    );
+    let nested = (Value::Null, Value::from("outer"));
+    let top = (Value::Null, Value::Null);
+    assert_eq!(indexed, [[nested.clone(), nested], [top.clone(), top]]);
 
     repo.write("src/lib.rs", &format!("{LIB}// comment-only edit\n"));
 

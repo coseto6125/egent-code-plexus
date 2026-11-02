@@ -19,6 +19,7 @@ pub const KNOWN_NODE_PROPS: &[&str] = &[
     "uid",
     "kind",
     "ownerClass",
+    "lexicalParent",
     "line",
     "startLine",
     "endLine",
