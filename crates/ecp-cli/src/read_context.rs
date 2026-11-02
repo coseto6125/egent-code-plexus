@@ -235,8 +235,9 @@ pub fn named_declarations<'a>(merged: &MergedGraph<'a>, name: &str) -> Vec<Candi
         })
         .collect();
     if let Some(view) = merged.view() {
-        // A file that defines one symbol twice yields two virtual nodes under
-        // one uid; the index keeps only the first.
+        // A merged repeat (`uid::merges_repeats`: `x = 1; x = 2`) yields a
+        // virtual node under its first's uid; the index keeps only the first.
+        // A redefinition of any other kind has a uid of its own and stays.
         let mut seen = rustc_hash::FxHashSet::default();
         out.extend(
             (merged.base_len()..)

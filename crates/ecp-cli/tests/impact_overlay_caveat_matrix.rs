@@ -367,11 +367,15 @@ fn test_path_caveat_after_uncommitted_rename_fires() {
     );
 }
 
+/// Stands for: a redefinition group (a first and its later redefinitions,
+/// design uid §2.3) is selected as a method overload group is. Two
+/// same-named defs in one file are two nodes, so the bare name is
+/// ambiguous; the error names the one form that separates them
+/// (`name@line`), never `--file` or `--kind`, and each candidate's `target`
+/// selects it alone. The first, which the bare call binds, lists the caller
+/// with no ambiguity caveat: the index suppressed no call.
 #[test]
-fn test_impact_caveat_same_name_twice_in_one_file_absent_and_caller_listed() {
-    // Two same-named defs in one file share a uid, so the index keeps one
-    // node (reported as a uid-collision blind spot) and resolves the bare
-    // call to it: no suppressed callers, so no ambiguity caveat.
+fn test_impact_same_name_twice_in_one_file_line_form_selects_first_with_caller() {
     let fx = Fixture::index(
         &[
             (
@@ -386,8 +390,50 @@ fn test_impact_caveat_same_name_twice_in_one_file_absent_and_caller_listed() {
         "ts",
         "",
     );
+    let bare = [
+        "impact",
+        "--target",
+        NAME,
+        "--kind",
+        "function",
+        "--direction",
+        "up",
+        "--repo",
+        ".",
+        "--format",
+        "json",
+    ];
+    let out = fx.ecp(&bare, false);
+    assert!(!out.status.success(), "two defs of one file are ambiguous");
+    let failure: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "non-JSON failure payload ({e}): {}",
+            String::from_utf8_lossy(&out.stdout)
+        )
+    });
+    let error = failure["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains(&format!("write the target as `{NAME}@<line>`"))
+            && !error.contains("--file"),
+        "{failure}"
+    );
+    let targets: Vec<&str> = failure["candidates"]
+        .as_array()
+        .expect("candidates array")
+        .iter()
+        .filter_map(|c| c["target"].as_str())
+        .collect();
+    assert_eq!(
+        targets,
+        [
+            format!("{NAME}@1 --file c.ts"),
+            format!("{NAME}@2 --file c.ts")
+        ],
+        "{failure}"
+    );
+    let first = format!("{NAME}@1");
     let json = fx.impact_ok(
-        &["--target", NAME, "--kind", "function", "--direction", "up"],
+        &["--target", &first, "--file", "c.ts", "--direction", "up"],
         false,
     );
     assert!(!has_ambiguity_caveat(&json), "{json}");

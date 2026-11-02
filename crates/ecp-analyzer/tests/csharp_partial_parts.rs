@@ -198,10 +198,13 @@ fn test_partial_groups_reversed_node_ids_same_representative() {
     assert_eq!(representative_files(&reversed, "Lib"), ["Lib/Reader.cs"]);
 }
 
-/// Stands for: two parts in one file are one node, so the group holds that
-/// node once and gets one `PartOf` edge, from the other file's part.
+/// Stands for: the second part in one file is a node of its own (design
+/// uid §2.3, §3 row 21), so the group holds three parts and gets two
+/// `PartOf` edges to the representative in `Reader.cs`: one from the other
+/// file's part, one from `Reader.cs`'s second part. Before the change the
+/// two same-file parts were one node and only the first edge existed.
 #[test]
-fn test_partial_groups_two_parts_in_one_file_one_edge() {
+fn test_partial_groups_two_parts_in_one_file_two_edges() {
     let twice = "namespace Lib\n{\n    public partial class Reader\n    {\n        public void A() {}\n    }\n    public partial class Reader\n    {\n        public void B() {}\n    }\n}\n";
     let async_part = part("Reader", "public void ReadAsync() {}");
     assert_eq!(
@@ -212,7 +215,10 @@ fn test_partial_groups_two_parts_in_one_file_one_edge() {
             ],
             &["Lib"]
         ),
-        [pair("Lib/Reader.Async.cs", "Lib/Reader.cs")]
+        [
+            pair("Lib/Reader.Async.cs", "Lib/Reader.cs"),
+            pair("Lib/Reader.cs", "Lib/Reader.cs")
+        ]
     );
 }
 

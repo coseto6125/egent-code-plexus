@@ -1420,9 +1420,9 @@ fn test_module_path_through_pub_use_binds_the_free_fn_past_a_method_namesake() {
 
 /// `m.rs` after `prefix`: `fn setup` holds `local`, then the module-level
 /// `pub struct Foo` and its `impl` with `pub fn new`. Rust scopes only `fn`
-/// by its parent, so a body-local `Foo` shares the module-level one's uid;
-/// Pass 1 keeps the first, the body-local one, and tombstones the other
-/// into it.
+/// by its parent, so a body-local `Foo` shares the module-level one's base
+/// uid; Pass 1 keeps the module-level one as a redefinition of the
+/// body-local first, a node of its own in no name table (design uid §2.3).
 fn foo_twin_m_rs(prefix: &str, local: &str) -> String {
     format!(
         "{prefix}fn setup() {{\n    {local}\n}}\npub struct Foo;\nimpl Foo {{\n    pub fn new() -> Foo {{ Foo }}\n}}\n"
@@ -1446,13 +1446,13 @@ const FOO_TWINS: [&str; 2] = [
     "struct Foo;\n    impl Foo {\n        fn new() -> Foo { Foo }\n    }",
 ];
 
-/// A merged node is body-local only when every declaration Pass 1 merged
-/// into it is: `m.rs`'s module-level `Foo` shadows the glob
-/// `pub use self::inner::*`, so `crate::m::Foo::new()` binds `m.rs`'s
-/// module-level `new`. Before the fix the body-local survivor marked the
-/// merged node body-local, the glob won, and `inner.rs`'s `new` bound
-/// through the module tree; with a body-local `impl Foo { fn new }` the
-/// first `new` must not hide the module-level overload either.
+/// Stands for: a body-local first never hides its module-level
+/// redefinition (`ladder::module_item`): `m.rs`'s module-level `Foo`
+/// shadows the glob `pub use self::inner::*`, so `crate::m::Foo::new()`
+/// binds `m.rs`'s module-level `new`. Before the fix the body-local first
+/// hid it, the glob won, and `inner.rs`'s `new` bound through the module
+/// tree; with a body-local `impl Foo { fn new }` the first `new` must not
+/// hide the module-level overload either.
 #[test]
 fn test_module_level_twin_of_body_local_type_shadows_a_glob_pub_use() {
     for local in FOO_TWINS {
@@ -1534,7 +1534,7 @@ fn test_module_path_never_binds_body_local_namesake_of_trait_default() {
     );
 }
 
-/// The same merged `Foo` without a glob: `use crate::m::Foo;` imports the
+/// The same `Foo` twins without a glob: `use crate::m::Foo;` imports the
 /// module item, and the module path `crate::m::Foo::new()` names it.
 /// `other.rs` declares a second `Foo`, so no tier reaches `m.rs` by the
 /// name alone. Before the fix the import missed the body-local survivor.
@@ -1566,9 +1566,10 @@ fn test_module_level_twin_of_body_local_type_binds_import_and_module_path() {
 
 /// Contract: a `mod` inside a body breaks the lexical link, so
 /// `fn setup() { mod inner { pub fn helper } }` and the module-level
-/// `pub mod inner { pub fn helper }` are two unscoped `Function`s of one uid;
-/// Pass 1 merges the second into the first, and the merged node is a module
-/// item. `crate::m::inner::helper()` binds it through the module tree.
+/// `pub mod inner { pub fn helper }` are two unscoped `Function`s of one base
+/// uid; Pass 1 keeps the second as a redefinition of the body-local first,
+/// and it is a module item. `crate::m::inner::helper()` binds it through the
+/// module tree.
 /// `other.rs` declares a second `inner::helper`, so no tier reaches `m.rs`
 /// by the name alone. The overlay twin of this test is
 /// `test_overlay_rust_module_level_twin_of_body_local_fn_binds_matches_reindex`.

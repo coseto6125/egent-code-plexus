@@ -1,22 +1,26 @@
-//! T1-5 D1 collision recovery: a merged repeat produces a `uid-collision`
-//! BlindSpotRecord and becomes a tombstone rather than panicking or creating
-//! two nodes with the same UID.
+//! T1-5 D1 collision recovery: a merged repeat becomes a tombstone rather
+//! than panicking or creating two nodes with the same UID.
 //!
 //! A merged repeat is forced by submitting two `RawNode` entries of a kind
 //! that merges repeats (`uid::merges_repeats`) with identical (kind,
 //! file_path, owner_class, name) — the four inputs to `uid::compute` — but
-//! different span values. The second node must lose its name and a
-//! `uid-collision` blind spot must be present. A repeat of any other kind is
-//! a later node of its own (design uid §2.3) and reports nothing.
+//! different span values. The second node must lose its name. In a C/C++
+//! file the merge records an `ifdef-redef` BlindSpot; in any other file it
+//! loses nothing (its edges start at the survivor) and records none. A
+//! repeat of any other kind is a later node of its own (design uid §2.3) and
+//! reports nothing. A true 64-bit collision with another path records
+//! `uid-collision`; no fixture can force a 64-bit hash collision, so the
+//! builder's unit test `test_classify_collision_true_collision_is_uid_collision`
+//! covers that arm.
 
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
 use ecp_core::graph::NodeKind;
 
-/// Two declarations of `kind` named `name` in `src/collision.py`.
-fn make_collision_graph(kind: NodeKind, name: &str) -> LocalGraph {
+/// Two declarations of `kind` named `name` in `path`.
+fn make_collision_graph(path: &str, kind: NodeKind, name: &str) -> LocalGraph {
     LocalGraph {
-        file_path: "src/collision.py".into(),
+        file_path: path.into(),
         content_hash: [1; 8],
         nodes: vec![
             // First definition — kept.
@@ -67,9 +71,11 @@ fn make_collision_graph(kind: NodeKind, name: &str) -> LocalGraph {
     }
 }
 
-fn build(kind: NodeKind, name: &str) -> ecp_core::graph::ZeroCopyGraph {
+const PY: &str = "src/collision.py";
+
+fn build(path: &str, kind: NodeKind, name: &str) -> ecp_core::graph::ZeroCopyGraph {
     let mut b = GraphBuilder::new();
-    b.add_graph(make_collision_graph(kind, name));
+    b.add_graph(make_collision_graph(path, kind, name));
     b.build()
 }
 
@@ -85,7 +91,7 @@ fn kinds(g: &ecp_core::graph::ZeroCopyGraph) -> Vec<&str> {
 /// tombstone with a uid of its own.
 #[test]
 fn collision_drops_second_node_no_panic() {
-    let g = build(NodeKind::Variable, "duplicateVar");
+    let g = build(PY, NodeKind::Variable, "duplicateVar");
     let pool = g.string_pool.as_slice();
 
     let dup_nodes: Vec<_> = g
@@ -111,33 +117,36 @@ fn collision_drops_second_node_no_panic() {
     }
 }
 
+/// Stands for: a merged repeat in a C file is an `#ifdef` twin, and the
+/// merge records one `ifdef-redef` BlindSpot naming the symbol.
 #[test]
-fn collision_emits_uid_collision_blind_spot() {
-    let g = build(NodeKind::Variable, "duplicateVar");
+fn test_build_c_merged_variable_twin_records_ifdef_redef() {
+    let g = build("src/collision.c", NodeKind::Variable, "duplicateVar");
     let pool = g.string_pool.as_slice();
-
-    let collision_spots: Vec<_> = g
+    let spots: Vec<_> = g
         .blind_spots
         .iter()
-        .filter(|bs| bs.kind.resolve(pool) == "uid-collision")
+        .filter(|bs| bs.kind.resolve(pool) == "ifdef-redef")
         .collect();
+    assert_eq!(spots.len(), 1, "all kinds: {:?}", kinds(&g));
+    let hint = spots[0].hint.resolve(pool);
+    assert!(hint.starts_with("ifdef-redef:"), "{hint}");
+    assert!(hint.contains("duplicateVar"), "{hint}");
+    assert!(!kinds(&g).contains(&"uid-collision"), "{:?}", kinds(&g));
+}
 
-    assert_eq!(
-        collision_spots.len(),
-        1,
-        "expected exactly one uid-collision blind spot, got {}; all kinds: {:?}",
-        collision_spots.len(),
-        kinds(&g)
-    );
-
-    let hint = collision_spots[0].hint.resolve(pool);
+/// Stands for: a merged repeat outside C/C++ (Python `x = 1; x = 2`) loses
+/// no information, so it records no collision BlindSpot of any kind. Red
+/// before 1d: it recorded `uid-collision`.
+#[test]
+fn test_build_python_merged_variable_records_no_blind_spot() {
+    let g = build(PY, NodeKind::Variable, "duplicateVar");
+    let kinds = kinds(&g);
     assert!(
-        hint.contains("uid-collision:"),
-        "blind spot hint should start with 'uid-collision:', got: {hint}"
-    );
-    assert!(
-        hint.contains("duplicateVar"),
-        "hint should mention the colliding symbol name, got: {hint}"
+        !kinds
+            .iter()
+            .any(|&k| ecp_core::graph::is_dev_metric_bs_kind(k)),
+        "{kinds:?}"
     );
 }
 
@@ -147,7 +156,7 @@ fn collision_emits_uid_collision_blind_spot() {
 /// was a tombstone with a BlindSpot.
 #[test]
 fn redefined_function_later_node_no_uid_collision_blind_spot() {
-    let g = build(NodeKind::Function, "f");
+    let g = build(PY, NodeKind::Function, "f");
     let pool = g.string_pool.as_slice();
     let named: Vec<u64> = g
         .nodes

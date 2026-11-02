@@ -1210,7 +1210,9 @@ impl SymbolTable {
     /// Whether `file_path` declares a module-level node named `node_name`
     /// whose kind `holds` accepts: an associated item
     /// (`impl X { const h: u32 = 1; }`) and a body-local declaration
-    /// (`fn setup() { struct Foo; }`) are no items of the module.
+    /// (`fn setup() { struct Foo; }`) are no items of the module, but a
+    /// module-level redefinition of a body-local first is
+    /// ([`ladder::module_item`]).
     pub(crate) fn declares_in_file(
         &self,
         file_path: &str,
@@ -1222,7 +1224,7 @@ impl SymbolTable {
             .and_then(|file_map| file_map.get(node_name))
             .is_some_and(|ids| {
                 ids.iter().any(|&id| {
-                    self.is_module_level(id, NO_OWNER) && holds(self.node_kinds[id as usize])
+                    holds(self.node_kinds[id as usize]) && ladder::module_item(self, id).is_some()
                 })
             })
     }
@@ -2049,6 +2051,10 @@ impl PickFacts for SymbolTable {
     fn is_body_local(&self, id: u32) -> bool {
         SymbolTable::is_body_local(self, id)
     }
+
+    fn later_overloads(&self, first: u32) -> Cow<'_, [u32]> {
+        Cow::Borrowed(SymbolTable::later_overloads(self, first))
+    }
 }
 
 impl TypeFacts for SymbolTable {
@@ -2396,6 +2402,37 @@ mod tests {
         assert_eq!(lookup(&st), Some(module_level));
         st.note_body_local(module_level);
         assert_eq!(lookup(&st), None, "every overload body-local");
+    }
+
+    /// Stands for: `fn setup() { struct Foo; }` before the module-level
+    /// `struct Foo` share a base uid, so the module-level one is a later
+    /// redefinition of the body-local first, in no name table (design uid
+    /// §2.3). It is still an item of the module: `declares_in_file` and
+    /// `ladder::module_item` find it through the first. Red before 1d: the
+    /// body-local first hid it.
+    #[test]
+    fn test_declares_in_file_body_local_first_module_level_redefinition_returns_true() {
+        let mut st = st_owned(&[
+            ("src/m.rs", "setup", NodeKind::Function, None),
+            ("src/m.rs", "Foo", NodeKind::Struct, None),
+        ]);
+        st.register_overload(1, FileMeta::from_path("src/m.rs"));
+        let module_level = 2;
+        st.note_body_local(1);
+        let is_type = |kind: NodeKind| kind == NodeKind::Struct;
+        assert!(st.declares_in_file("src/m.rs", "Foo", is_type));
+        assert_eq!(ladder::module_item(&st, 1), Some(module_level));
+        assert_eq!(
+            ladder::module_item(&st, 0),
+            Some(0),
+            "a module item stands for itself"
+        );
+        st.note_body_local(module_level);
+        assert!(
+            !st.declares_in_file("src/m.rs", "Foo", is_type),
+            "every redefinition body-local"
+        );
+        assert_eq!(ladder::module_item(&st, 1), None);
     }
 
     /// A trait's `impl` for `ty` in the file: an `Impl` named `ty`, or a

@@ -104,6 +104,39 @@ fn is_module_item<D: PickFacts + ?Sized>(decls: &D, id: u32) -> bool {
     decls.owner(id).is_none() && !decls.is_body_local(id)
 }
 
+/// What a module path reaches through the name-table first `id`: `id` when
+/// `accept` takes it, else, for a body-local `id`, its first later overload
+/// ([`PickFacts::later_overloads`]) that `accept` takes. Rust scopes only
+/// `fn` by its parent, so `fn setup() { struct Foo; }` and a later
+/// module-level `struct Foo` share a base uid: Pass 1 keeps the module-level
+/// one as a redefinition of the body-local first, out of the name tables
+/// (design uid §2.3). `accept` rejects a body-local declaration.
+fn past_body_local<D: PickFacts + ?Sized>(
+    decls: &D,
+    id: u32,
+    accept: impl Fn(u32) -> bool,
+) -> Option<u32> {
+    if accept(id) {
+        return Some(id);
+    }
+    if !decls.is_body_local(id) {
+        return None;
+    }
+    decls
+        .later_overloads(id)
+        .iter()
+        .copied()
+        .find(|&later| accept(later))
+}
+
+/// The module item ([`is_module_item`]) that the name-table first `id`
+/// stands for ([`past_body_local`]). The index's
+/// `SymbolTable::declares_in_file` and the ladder's module-tree lookups read
+/// it, so both sides agree.
+pub fn module_item<D: PickFacts + ?Sized>(decls: &D, id: u32) -> Option<u32> {
+    past_body_local(decls, id, |id| is_module_item(decls, id))
+}
+
 /// What a call site adds to a name lookup. The index's
 /// `Resolver::resolve_call` and the overlay's edge pass both build one per
 /// call site; `None` in its place is a plain symbol lookup.
@@ -1666,10 +1699,11 @@ pub fn anchored_module_file<F: ModuleTreeFacts>(
 
 /// R14, the member part: the declaration the Rust path `callee` binds
 /// through the module tree. In the file [`module_tree_item`] places, the
-/// item's first module item ([`is_module_item`]) of `target`'s kinds, else
+/// item's first module item ([`module_item`]) of `target`'s kinds, else
 /// the first declaration named `member` (the callee's last segment, generic
-/// arguments dropped), later `impl` overloads included, that no function
-/// body holds. When the item is a type
+/// arguments dropped), later `impl` overloads and the redefinitions of a
+/// body-local first included ([`past_body_local`]), that no function body
+/// holds. When the item is a type
 /// (`m::S` of `m::S::helper`), the path names one of its associated items:
 /// the type's own module-level member, else what [`prefer_owned`] picks
 /// with the type as the receiver. A body-local namesake and a free item of
@@ -1694,9 +1728,12 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
     let mut item_is_type = false;
     for (id, kind) in decls.call_decls(file, &item) {
         let (wanted_kind, type_kind) = (wanted(kind), is_type(kind));
-        if !(wanted_kind || type_kind) || !is_module_item(decls, id) {
+        if !(wanted_kind || type_kind) {
             continue;
         }
+        let Some(id) = module_item(decls, id) else {
+            continue;
+        };
         if wanted_kind {
             return Some(id);
         }
@@ -1705,18 +1742,22 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
     let bare = member.split('<').next().unwrap_or(member);
     // The candidates with their `impl` overloads: a body-local
     // `impl Foo { fn new }` before the module-level one makes the
-    // module-level `new` a later overload.
+    // module-level `new` a later overload. A body-local candidate also
+    // stands for its module-level redefinitions (`past_body_local`).
     let candidates = decls.pick_candidates(file, bare);
     let usable = |id: u32| wanted(decls.kind(id)) && !decls.is_body_local(id);
-    let pick = candidates.iter().copied().find(|&id| usable(id))?;
+    let pick = candidates
+        .iter()
+        .find_map(|&id| past_body_local(decls, id, usable))?;
     if !item_is_type {
         return Some(pick);
     }
     let item_key = owner_key(&item)?;
+    let owned_by_item =
+        |id: u32| usable(id) && decls.owner(id).and_then(owner_key) == Some(item_key);
     if let Some(id) = candidates
         .iter()
-        .copied()
-        .find(|&id| usable(id) && decls.owner(id).and_then(owner_key) == Some(item_key))
+        .find_map(|&id| past_body_local(decls, id, owned_by_item))
     {
         return Some(id);
     }
@@ -1734,13 +1775,17 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
             ..PickScope::default()
         },
     )
-    .filter(|&id| decls.owner(id).is_some() && !decls.is_body_local(id))
+    .and_then(|id| {
+        past_body_local(decls, id, |id| {
+            decls.owner(id).is_some() && !decls.is_body_local(id)
+        })
+    })
 }
 
 /// [`QualifierFacts::crate_module`] through the module tree: `Local` unless
 /// `module_path` names a module of a workspace crate; then that crate's file
 /// that declares `member` of `target`'s kinds under its own name as a
-/// module item ([`is_module_item`]), past the `pub use` chain.
+/// module item ([`module_item`]), past the `pub use` chain.
 pub fn crate_module<F: ModuleTreeFacts, D: ResolveFacts>(
     facts: &F,
     decls: &D,
@@ -1766,7 +1811,7 @@ pub fn crate_module<F: ModuleTreeFacts, D: ResolveFacts>(
             Some(TreeItem::Found { file, item })
                 if item == member
                     && decls.call_decls(file.as_ref(), &item).any(|(id, kind)| {
-                        target.kind_predicate()(kind) && is_module_item(decls, id)
+                        target.kind_predicate()(kind) && module_item(decls, id).is_some()
                     }) =>
             {
                 Some(file)

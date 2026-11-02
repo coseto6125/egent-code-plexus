@@ -311,8 +311,10 @@ pub(super) struct DirtyRustFacts {
     /// Rust ones inside a function body ([`body_locals`]), where a first of
     /// a uid with a module-level twin counts as a module item.
     body_locals: FxHashSet<u32>,
-    /// The declarations no name lookup reads: a later overload, and a
-    /// later twin of a uid, which the index tombstones into the first.
+    /// The later twins of a uid, which the index tombstones into the first:
+    /// no name lookup reads them, and no module path names them. A later
+    /// node (`ViewNode::later_overload`) is no twin: it keeps a node of its
+    /// own.
     repeats: FxHashSet<u32>,
 }
 
@@ -367,9 +369,8 @@ impl<'a> OverlayFacts<'a> {
             for symbol in &file.symbols {
                 let node = &nodes[offset];
                 let virt = base_len + offset as u32;
-                if node.later_overload {
-                    rust_facts.repeats.insert(virt);
-                } else {
+                // A later node is a declaration of its own in no name table.
+                if !node.later_overload {
                     match first_of_uid.entry(node.uid) {
                         Entry::Occupied(seen) => {
                             rust_facts.repeats.insert(virt);
@@ -2323,6 +2324,10 @@ impl PickFacts for OverlayFacts<'_> {
         self.rust.is_body_local(id)
     }
 
+    fn later_overloads(&self, first: u32) -> Cow<'_, [u32]> {
+        Cow::Owned(self.later_overloads_of(first))
+    }
+
     fn types_named(&self, owner: &str) -> Vec<u32> {
         let mut types = self.global_named(owner);
         types.retain(|&id| self.kind_of(id).is_type());
@@ -2992,7 +2997,7 @@ pub(super) struct RustModules<'a> {
     /// The virtual idxs of the dirty declarations no module path names
     /// ([`DirtyRustFacts::body_locals`]).
     dirty_body_locals: FxHashSet<u32>,
-    /// The virtual idxs no name lookup reads ([`DirtyRustFacts::repeats`]).
+    /// The virtual idxs the index tombstones ([`DirtyRustFacts::repeats`]).
     dirty_repeats: FxHashSet<u32>,
     /// Per base file index, the spans of its callables in a Rust file and
     /// none elsewhere, which tell a base body-local declaration
@@ -3199,9 +3204,12 @@ impl<'a> RustModules<'a> {
     /// `wanted` accepts ([`Self::module_level`]): an associated item
     /// (`impl X { const h: u32 = 1; }`) and a body-local declaration
     /// (`fn setup() { struct Foo; }`) are no items of the module. A dirty
-    /// file answers from its fresh parse. Either side reads the first of
-    /// each uid only, as the index's `SymbolTable::declares_in_file` does:
-    /// no later overload, and no twin the index tombstones.
+    /// file answers from its fresh parse. Either side reads every named
+    /// node, later nodes included, but no twin the index tombstones. That is
+    /// the index's `SymbolTable::declares_in_file`, which reads a later node
+    /// through its body-local first only ([`ladder::module_item`]): a later
+    /// node has its first's kind, owner and file, so it adds an answer only
+    /// where that first is body-local and it is not.
     fn declares(&self, file: &str, name: &str, wanted: impl Fn(NodeKind) -> bool) -> bool {
         let top_level = |owner: Option<&str>| owner.is_none();
         match self.dirty.get(file) {
@@ -3220,7 +3228,6 @@ impl<'a> RustModules<'a> {
                         .path
                         .resolve(pool)
                         == file
-                    && !self.graph.is_later_overload(idx)
                     && self.module_level(idx, Some(node.owner_class.resolve(pool)), top_level)
             }),
         }

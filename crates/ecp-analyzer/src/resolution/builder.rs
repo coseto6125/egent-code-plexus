@@ -44,31 +44,30 @@ use ecp_core::pool::{StrRef, StringPool};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-/// Classify a uid-hash collision based on `(kind, path)`. Returns the
-/// BlindSpot `kind` string. See builder.rs near `uid_seen.get` for context.
-/// Method / Constructor collisions never reach it: Pass 1 keeps them as
-/// overloads ([`ecp_core::uid::keeps_overloads`]).
+/// The BlindSpot `kind` a tombstoned slot records, or `None`. See builder.rs
+/// near `uid_seen.get` for context. Only a merged repeat
+/// ([`ecp_core::uid::merges_repeats`]: `Property`, `Variable`, `Const`) and a
+/// true 64-bit collision become tombstones; every other repeat keeps a node
+/// of its own and records nothing.
 ///
-///   `ifdef-redef`    — Macro/Function/Struct/Enum/Typedef/Variable/Const
-///       in C/C++ files. Headers commonly `#define X` or `static int foo()`
-///       under different `#ifdef` branches (32/64-bit, GCC/MSVC,
-///       portability shims). Tree-sitter parses both branches without
-///       preprocessor evaluation, so both emit nodes that collide.
+///   `ifdef-redef`    — a merged repeat in a C/C++ file. Headers commonly
+///       declare `int x;` or a field under different `#ifdef` branches
+///       (32/64-bit, GCC/MSVC, portability shims). Tree-sitter parses both
+///       branches without preprocessor evaluation, so both emit rows.
 ///
-///   `field-reassign` — A non-C-family `Property` colliding with itself: the
-///       same instance field assigned in more than one place (`self.x = …` in
-///       `__init__` then again in another method; `this.x = …`; `@x = …`).
-///       The uid `(kind, path, owner, name)` is identical across assignments
-///       by design — they ARE the same field. Deduping to one node is correct
-///       and loses no information, so this is not a parser bug and must not
-///       surface as a `uid-collision` BlindSpot (it would falsely flag
-///       `ecp impact`/`inspect` traversal as incomplete for ordinary OO code).
+///   `None`           — any other merged repeat: the same field assigned in
+///       more than one place (`self.x = …` in `__init__` then in another
+///       method), a JS `var x` twice, Python `x = 1; x = 2`. They ARE one
+///       entity, and the repeat's edges start at the survivor, so the merge
+///       loses no information. A record would falsely flag `ecp impact` /
+///       `inspect` traversal as incomplete for ordinary code.
 ///
-///   `uid-collision`  — Everything else: a true ambiguity in the corpus
-///       worth investigating. After this reclassification, the count
-///       drops from ~25K to <1K on .sample_repo, making the residual
-///       set tractable.
-pub(crate) fn classify_collision(kind: NodeKind, path: &str) -> &'static str {
+///   `uid-collision`  — a true 64-bit collision with a declaration of another
+///       path (`merged_repeat == false`): worth investigating.
+pub(crate) fn classify_collision(merged_repeat: bool, path: &str) -> Option<&'static str> {
+    if !merged_repeat {
+        return Some(ecp_core::graph::BS_KIND_UID_COLLISION);
+    }
     let is_c_family = path.ends_with(".c")
         || path.ends_with(".h")
         || path.ends_with(".cc")
@@ -77,27 +76,7 @@ pub(crate) fn classify_collision(kind: NodeKind, path: &str) -> &'static str {
         || path.ends_with(".hpp")
         || path.ends_with(".hh")
         || path.ends_with(".hxx");
-    if is_c_family
-        && matches!(
-            kind,
-            NodeKind::Macro
-                | NodeKind::Function
-                | NodeKind::Struct
-                | NodeKind::Enum
-                | NodeKind::Typedef
-                | NodeKind::Variable
-                | NodeKind::Const
-                | NodeKind::Property
-        )
-    {
-        return "ifdef-redef";
-    }
-    // Non-C-family Property reaching here is the same instance field assigned
-    // in more than one place — normal OO, deduped without information loss.
-    if matches!(kind, NodeKind::Property) {
-        return "field-reassign";
-    }
-    "uid-collision"
+    is_c_family.then_some("ifdef-redef")
 }
 
 use std::cell::RefCell;
@@ -1228,11 +1207,14 @@ fn record_scopes(local_graphs: &[LocalGraph], raw_map: &RawIndexMap) -> ScopeRow
 /// by raw index). A scoped one (`parents`) gets no row: the symbol table
 /// reads the lexical table for it.
 ///
-/// Rust scopes only `fn` by its parent, so `fn setup() { struct Foo; }`
-/// and a later module-level `struct Foo` share a uid, and Pass 1 merges the
-/// second into the first. A merged node is body-local only when every raw
-/// node merged into it is ([`fold_twins`]): else a module item vanishes
-/// behind its body-local twin.
+/// Rust scopes only `fn` by its parent, so `fn setup() { const X: u8 = 1; }`
+/// and a later module-level `const X: u8 = 2;` share a uid, and Pass 1
+/// merges the second into the first (`merges_repeats`). A merged node is
+/// body-local only when every raw node merged into it is ([`fold_twins`]):
+/// else a module item vanishes behind its body-local twin. A repeat of any
+/// other kind (`struct Foo` there and at module level) keeps a node of its
+/// own and its own row; the module-item lookups reach it through the
+/// body-local first ([`ecp_core::analyzer::ladder::module_item`]).
 fn rust_body_local_rows(
     raw_map: &RawIndexMap,
     file: FileOrd,
@@ -1464,36 +1446,20 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
                     current_node_idx += 1;
                     continue;
                 }
-                UidSlot::Duplicate { first, .. } => Some(node_of(first)),
+                UidSlot::Duplicate { first, .. } => Some((node_of(first), true)),
                 // A true 64-bit collision: the path hashes into the uid, so
                 // only a declaration of another path holds it already.
-                UidSlot::First(uid) => uid_seen.get(&uid).copied(),
+                UidSlot::First(uid) => uid_seen.get(&uid).map(|&prev| (prev, false)),
             };
 
             // A merged repeat, or a D1 collision: the slot keeps a tombstone
             // that merges into `prev_idx`, so `nodes.len()` stays equal to
             // `current_node_idx` and every later `RawIndexMap` offset holds.
             // The tombstone is in no name table: no query reaches it.
-            if let Some(prev_idx) = merge_into {
-                // Reclassify the collision based on (kind, lang) — most
-                // collisions are not parser bugs but legitimate semantic
-                // ambiguities the indexer can't resolve without semantic
-                // analysis. Triaging them up front lets `uid-collision`
-                // mean "true parser ambiguity worth investigating".
-                //
-                //   - ifdef-redef     : C/C++ Macro/Function/Struct/Enum/
-                //     Typedef/Variable redefined under `#ifdef` branches
-                //     (`#define X` for 32/64-bit, `static int foo() { ... }`
-                //     repeated under different platform guards).
-                //   - uid-collision   : everything else (real parser bug
-                //     or unhandled corpus pattern).
-                let bs_kind = classify_collision(raw_node.kind, &path_str);
-                // `field-reassign` is the same instance field assigned in
-                // multiple places; deduping to one node loses no information,
-                // so it records NO BlindSpot — otherwise it would falsely flag
-                // `ecp impact`/`inspect` traversal as incomplete for ordinary
-                // OO code. The tombstone below still runs (the dedup is real).
-                if bs_kind != "field-reassign" {
+            if let Some((prev_idx, merged_repeat)) = merge_into {
+                // The tombstone below runs either way (the dedup is real);
+                // only a C-family `#ifdef` twin and a true collision record.
+                if let Some(bs_kind) = classify_collision(merged_repeat, &path_str) {
                     // Reconstruct prev info from the first occurrence's Node
                     // (rare path; the alloc savings on every other node pay
                     // for this lookup many times over).
@@ -4632,75 +4598,60 @@ mod tests {
     use ecp_core::analyzer::types::{LocalGraph, RawFrameworkRef, RawImport, RawNode};
     use ecp_core::graph::NodeKind;
 
-    // ---- classify_collision (uid-collision reclassification) ----
+    // ---- classify_collision (tombstone BlindSpot kind) ----
 
+    /// Stands for: a merged repeat in a C/C++ file is an `#ifdef` twin and
+    /// records `ifdef-redef`.
     #[test]
-    fn classify_c_macro_function_struct_is_ifdef_redef() {
-        for kind in [
-            NodeKind::Macro,
-            NodeKind::Function,
-            NodeKind::Struct,
-            NodeKind::Enum,
-            NodeKind::Typedef,
-            NodeKind::Variable,
-            NodeKind::Const,
-            NodeKind::Property,
-        ] {
-            for path in [
-                "C/deps/hiredis/hiredis.h",
-                "C/foo.c",
-                "Cpp/include/nlohmann/json.hpp",
-                "src/foo.cc",
-                "src/foo.cxx",
-                "src/foo.hh",
-                "src/foo.hxx",
-            ] {
-                assert_eq!(
-                    classify_collision(kind, path),
-                    "ifdef-redef",
-                    "kind={kind:?} path={path}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn classify_non_c_non_method_falls_through() {
-        // Go Variable, Rust Impl, Bash Const, etc. stay as `uid-collision`
-        // until per-lang fixes land (or until they get their own kind).
-        for (kind, path) in [
-            (NodeKind::Variable, "Go/auth.go"),
-            (NodeKind::Impl, "Rust/lib.rs"),
-            (NodeKind::Const, "bash/aliases.sh"),
-            (NodeKind::Class, "Swift/AppDelegate.swift"),
-            // C/C++ Class is not in the ifdef-redef list (class is C++-only
-            // and uses body anchoring after the cpp scm tighten).
-            (NodeKind::Class, "Cpp/foo.cpp"),
+    fn test_classify_collision_c_family_merged_repeat_is_ifdef_redef() {
+        for path in [
+            "C/deps/hiredis/hiredis.h",
+            "C/foo.c",
+            "Cpp/include/nlohmann/json.hpp",
+            "src/foo.cc",
+            "src/foo.cxx",
+            "src/foo.hh",
+            "src/foo.hxx",
         ] {
             assert_eq!(
-                classify_collision(kind, path),
-                "uid-collision",
-                "kind={kind:?} path={path}"
+                classify_collision(true, path),
+                Some("ifdef-redef"),
+                "{path}"
             );
         }
     }
 
+    /// Stands for: any other merged repeat (a field assigned twice, Python
+    /// `x = 1; x = 2`, a JS `var x` twice) loses nothing, so it records no
+    /// BlindSpot.
     #[test]
-    fn classify_non_c_property_is_field_reassign() {
-        // An instance field assigned in multiple places (self.x / this.x / @x)
-        // collides with itself by design — not a parser bug.
-        for path in ["py/manager.py", "js/store.js", "Rust/benches/copy.rs"] {
+    fn test_classify_collision_non_c_merged_repeat_records_none() {
+        for path in [
+            "py/manager.py",
+            "js/store.js",
+            "Rust/benches/copy.rs",
+            "Go/auth.go",
+        ] {
+            assert_eq!(classify_collision(true, path), None, "{path}");
+        }
+    }
+
+    /// Stands for: a true 64-bit collision with another path records
+    /// `uid-collision` in every language, C-family included.
+    #[test]
+    fn test_classify_collision_true_collision_is_uid_collision() {
+        for path in [
+            "Swift/AppDelegate.swift",
+            "Cpp/foo.cpp",
+            "C/foo.h",
+            "py/m.py",
+        ] {
             assert_eq!(
-                classify_collision(NodeKind::Property, path),
-                "field-reassign",
-                "non-C-family Property must classify as field-reassign: {path}"
+                classify_collision(false, path),
+                Some("uid-collision"),
+                "{path}"
             );
         }
-        // C-family Property stays ifdef-redef (header redefinition, not OO field).
-        assert_eq!(
-            classify_collision(NodeKind::Property, "c/foo.h"),
-            "ifdef-redef"
-        );
     }
 
     /// L0 end-to-end: caller imports `./b`, defining file lives at

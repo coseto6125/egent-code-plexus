@@ -1337,22 +1337,40 @@ impl Ambiguity {
         &self.candidates
     }
 
-    /// Today's error, with the same message: `EcpError::AmbiguousSymbol`.
+    /// The ambiguity as `EcpError::AmbiguousSymbol`. Its message suggests
+    /// only a form that separates some candidates: no `--file` when they
+    /// share one file, no `--kind` when they share one kind, no
+    /// `Owner.name` form when they share one display. Two candidates of one
+    /// file, kind and display (method overloads, a redefinition) differ by
+    /// line only, so it suggests `name@line` for them.
     pub fn to_error(&self, request: &TargetRequest) -> EcpError {
-        let lines = self
-            .candidates
+        let cs = &self.candidates;
+        let lines = cs
             .iter()
             .map(|c| format!("  {},{},{}", c.file, c.kind.as_str(), c.line))
             .collect::<Vec<_>>()
             .join("\n");
+        let shared =
+            |same: fn(&Candidate, &Candidate) -> bool| cs.windows(2).all(|w| same(&w[0], &w[1]));
+        let line_form = request.line.is_none()
+            && cs.iter().enumerate().any(|(at, a)| {
+                cs[at + 1..].iter().any(|b| {
+                    a.file == b.file
+                        && a.kind == b.kind
+                        && a.display == b.display
+                        && a.line != b.line
+                })
+            });
         EcpError::AmbiguousSymbol {
             name: request.render(),
             count: self.total(),
             candidates: Some(lines),
-            file_given: request.file.is_some(),
-            kind_given: request.kind.is_some(),
+            file_given: request.file.is_some() || shared(|a, b| a.file == b.file),
+            kind_given: request.kind.is_some() || shared(|a, b| a.kind == b.kind),
             owner_form: request.qualifier == Qualifier::Any
-                && self.candidates.iter().any(|c| c.qualified),
+                && cs.iter().any(|c| c.qualified)
+                && !shared(|a, b| a.display == b.display),
+            line_form,
         }
     }
 }
@@ -3302,6 +3320,7 @@ mod tests {
                 file_given,
                 kind_given,
                 owner_form,
+                line_form,
             } => {
                 assert_eq!(name, "load");
                 assert_eq!(count, 2);
@@ -3309,10 +3328,54 @@ mod tests {
                     candidates.as_deref(),
                     Some("  a.rs,Method,3\n  b.rs,Method,9")
                 );
-                assert!(!file_given && kind_given && owner_form);
+                assert!(!file_given && kind_given && owner_form && !line_form);
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// Stands for: a redefinition group (or a method overload group) in one
+    /// file differs by line only, so the error suggests `name@line` and no
+    /// `--file`, `--kind` or `Owner.name` form, none of which separates the
+    /// two; each candidate's reusable target carries its line. Red before
+    /// 1d: the message said "add --file or --kind".
+    #[test]
+    fn test_ambiguity_to_error_one_file_redefinition_suggests_line_form_only() {
+        let named = [
+            facts(1, NodeKind::Function, "c.ts", 1, vec![], "dupfn"),
+            facts(2, NodeKind::Function, "c.ts", 2, vec![], "dupfn"),
+        ];
+        let r = TargetRequest::parse("dupfn", None, None).unwrap();
+        let TargetResolution::Ambiguous(amb) = resolve_target(&r, &named) else {
+            panic!("two nodes of one name are ambiguous");
+        };
+        let lines: Vec<Option<u32>> = amb
+            .candidates()
+            .iter()
+            .map(|c| c.reusable.as_ref().and_then(TargetRequest::line))
+            .collect();
+        assert_eq!(lines, [Some(1), Some(2)]);
+        let error = amb.to_error(&r);
+        assert!(matches!(
+            error,
+            EcpError::AmbiguousSymbol {
+                file_given: true,
+                kind_given: true,
+                owner_form: false,
+                line_form: true,
+                ..
+            }
+        ));
+        let msg = error.to_string();
+        assert!(
+            msg.contains("— write the target as `dupfn@<line>`:") && !msg.contains("add --"),
+            "{msg}"
+        );
+        let at_line = TargetRequest::parse("dupfn@2", None, None).unwrap();
+        assert!(matches!(
+            resolve_target(&at_line, &named),
+            TargetResolution::Unique(Candidate { node: 2, .. })
+        ));
     }
 
     // ── route and handler ──

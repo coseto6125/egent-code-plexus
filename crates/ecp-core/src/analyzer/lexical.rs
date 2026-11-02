@@ -91,8 +91,10 @@ pub fn body_locals(decls: &[(NodeKind, Span)], enclosing: &[Option<usize>]) -> V
 }
 
 /// The per-uid AND over one file's [`body_locals`]: Pass 1 merges each later
-/// twin of a uid into its first, and the merged node is body-local only when
-/// every declaration merged into it is. `twins` holds (twin, its first) as
+/// twin of a uid of a merge kind ([`crate::uid::merges_repeats`]) into its
+/// first, and the merged node is body-local only when every declaration
+/// merged into it is. Any other repeat keeps a node of its own, so it is no
+/// twin here. `twins` holds (twin, its first) as
 /// indices into `local`. The index's builder and the overlay's dirty side
 /// both fold here.
 pub fn fold_twins(local: &mut [bool], twins: impl IntoIterator<Item = (usize, usize)>) {

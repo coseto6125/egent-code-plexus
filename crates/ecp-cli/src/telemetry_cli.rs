@@ -256,6 +256,7 @@ mod tests {
                 file_given: false,
                 kind_given: false,
                 owner_form: false,
+                line_form: false,
             }),
             "no-such-symbol"
         );
@@ -339,6 +340,7 @@ mod tests {
             file_given: false,
             kind_given: false,
             owner_form: false,
+            line_form: false,
         };
         assert_eq!(classify_error(&e), "no-such-symbol");
     }

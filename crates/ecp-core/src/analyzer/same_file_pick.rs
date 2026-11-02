@@ -101,6 +101,14 @@ pub trait PickFacts {
     fn is_body_local(&self, id: u32) -> bool {
         self.is_lexically_scoped(id)
     }
+    /// The later declarations in the overload set of the name-table first
+    /// `first`, in source order: overloads, scoped repeats and
+    /// redefinitions, each of `first`'s kind, owner and file, none in a name
+    /// table (the index's `SymbolTable::later_overloads`). A C# arity
+    /// sibling joins no set. The default knows none.
+    fn later_overloads(&self, _first: u32) -> Cow<'_, [u32]> {
+        Cow::Borrowed(&[])
+    }
     /// The transitive resolved supertypes of the type `ty`, breadth-first,
     /// each type once, `ty` excluded.
     fn ancestors(&self, ty: u32) -> Vec<u32>;

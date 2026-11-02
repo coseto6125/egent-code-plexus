@@ -34,6 +34,7 @@ use ecp_cli::session::overlay_reader::{accepted_fragments, decode_view_inputs};
 use ecp_cli::session::overlay_writer::write_dirty_fragments_from_graphs;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::LocalGraph;
+use ecp_core::contracts::identity::{LaterReason, UidSlot};
 use ecp_core::contracts::routing::SizeCap;
 use ecp_core::graph::{ArchivedZeroCopyGraph, NodeKind, ZeroCopyGraph};
 use ecp_core::session::view::{OverlayFileInput, OverlayView};
@@ -164,8 +165,11 @@ fn reader_inputs(local: &LocalGraph, source: &str) -> Vec<OverlayFileInput> {
 
 /// One language's fixture: `overload_sets` sets of same-name members that
 /// keep overloads, and `redefinitions` later declarations that repeat an
-/// earlier one's identity fields, of a kind that neither keeps overloads
-/// nor merges repeats (`None`: not counted, the parser decides).
+/// earlier one's identity fields and arity path (`LaterReason::Repeat`), of
+/// a kind that neither keeps overloads nor merges repeats (`None`: not
+/// counted, the parser decides). A C# arity sibling (`Conv<T>` beside
+/// `Conv`) repeats the identity fields but not the arity path: it is no
+/// redefinition.
 struct Case {
     provider: Box<dyn LanguageProvider>,
     path: &'static str,
@@ -228,10 +232,17 @@ fn assert_four_paths_equal(case: Case) {
 
     if let Some(expected) = case.redefinitions {
         // Stands for: a redefinition is a node of its own (design uid §2.3),
-        // the n-th one under `overload(first, n)`, never a tombstone.
+        // the n-th one under `overload(first, n)`, never a tombstone. An
+        // arity sibling takes the same uid form, so only the slot reason
+        // tells the two apart.
+        let identities = ecp_core::analyzer::lexical::file_identities(
+            path,
+            &dirty.nodes,
+            ecp_core::analyzer::lexical::raw_decl,
+        );
         let mut firsts: FxHashMap<(u8, Option<&str>, &str), (u64, u32)> = FxHashMap::default();
         let mut later = 0;
-        for (raw, &uid) in dirty.nodes.iter().zip(&full) {
+        for ((raw, &uid), identity) in dirty.nodes.iter().zip(&full).zip(&identities) {
             if ecp_core::uid::keeps_overloads(raw.kind) || ecp_core::uid::merges_repeats(raw.kind) {
                 continue;
             }
@@ -243,7 +254,15 @@ fn assert_four_paths_equal(case: Case) {
             match firsts.get_mut(&key) {
                 Some((first, n)) => {
                     *n += 1;
-                    later += 1;
+                    if matches!(
+                        identity.slot,
+                        UidSlot::Later {
+                            reason: LaterReason::Repeat,
+                            ..
+                        }
+                    ) {
+                        later += 1;
+                    }
                     assert_eq!(
                         uid,
                         ecp_core::uid::overload(*first, *n),
