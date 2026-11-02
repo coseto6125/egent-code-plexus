@@ -567,8 +567,8 @@ const ARITY_THEN_REPEAT: &str = "namespace N
 /// its own arity. Four distinct uids, overload sets `{C@2, C@5}` and
 /// `{C<T>@3, C<T>@4}` (`overload_set` References), none between `C` and
 /// `C<T>`, and the overlay of the file gives the same uids and edges. Red
-/// before 1b: Pass 1 and the overlay read `later_is_arity_twin` for every
-/// later C# type, so no repeat joined an overload set.
+/// before 1b: Pass 1 and the overlay took every later C# type as an arity twin,
+/// so no repeat joined an overload set.
 #[test]
 fn test_assign_file_csharp_arity_sibling_then_same_arity_repeat_distinct_uids() {
     use ecp_core::graph::ArchivedZeroCopyGraph;

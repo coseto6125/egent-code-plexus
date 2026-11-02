@@ -151,21 +151,6 @@ pub fn splits_by_arity(language: Language, kind: NodeKind) -> bool {
     language == Language::CSharp && (kind.declares_type() || kind == NodeKind::Function)
 }
 
-/// Whether a [`UidSlot::Later`] of a `kind` declaration in a `language`
-/// file is an arity twin, a declaration of its own beside its first rather
-/// than an overload: a C# type or delegate of another generic arity
-/// ([`splits_by_arity`]), or a member a type of another arity declares
-/// (`Foo1<T>.foo` beside `Foo1.foo`). A C# file scopes no kind lexically
-/// ([`lexical_scope_kinds`]), so a C# `Later` of a kind that keeps no
-/// overloads is an arity twin or a redefinition (`LaterReason::Arity` or
-/// `LaterReason::Repeat`); this predicate cannot tell the two apart, the
-/// slot's reason can. A twin joins no overload set.
-pub fn later_is_arity_twin(language: Language, kind: NodeKind) -> bool {
-    language == Language::CSharp
-        && !uid::keeps_overloads(kind)
-        && !lexical_scope_kinds(language).contains(&kind)
-}
-
 /// For each declaration of one file, the index of the innermost type
 /// declaration ([`NodeKind::declares_type`]) whose span contains it, by
 /// [`innermost_enclosing`]. A type's own entry is the type that encloses it.
@@ -187,7 +172,7 @@ pub fn enclosing_types(rows: &[(NodeKind, Span)]) -> Vec<Option<usize>> {
 }
 
 /// Among `candidates`, a declaration and its arity twins
-/// ([`later_is_arity_twin`]) each with the span of the type that declares
+/// (`LaterReason::Arity`) each with the span of the type that declares
 /// it, the one whose declaring type most closely encloses `reader`: a read
 /// of `foo` inside `Foo1<T>` reads `Foo1<T>.foo`, not `Foo1.foo`. `None`
 /// when no declaring type encloses `reader`. Spans of one file nest or are
@@ -1278,10 +1263,6 @@ mod tests {
                 ids[3].slot
             );
         }
-        assert!(!later_is_arity_twin(Language::Java, NodeKind::Property));
-        assert!(later_is_arity_twin(Language::CSharp, NodeKind::Property));
-        assert!(later_is_arity_twin(Language::CSharp, NodeKind::Function));
-        assert!(!later_is_arity_twin(Language::CSharp, NodeKind::Method));
     }
 
     #[test]

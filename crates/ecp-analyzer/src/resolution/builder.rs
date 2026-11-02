@@ -767,6 +767,7 @@ impl GraphBuilder {
         // by stamp_owner_class_by_span at parse time; no dependency on HasMethod.
         crate::post_process::enum_variant_defines::emit_edges(
             &self.local_graphs,
+            &raw_map,
             &symbol_table,
             &mut string_pool,
             &mut edges,
@@ -6490,7 +6491,7 @@ mod tests {
     /// redefinition of the first of its own arity (`LaterReason::Repeat`).
     /// Four distinct uids, overload sets `{C@1, C@4}` and `{C<T>@2, C<T>@3}`,
     /// and no `overload_set` edge between `C` and `C<T>`. Red before 1b: the
-    /// Pass 1 branch read `later_is_arity_twin` for every later C# type, so
+    /// Pass 1 branch took every later C# type as an arity twin, so
     /// `C<T>@3` and `C@4` joined no overload set.
     #[test]
     fn test_assign_file_csharp_arity_sibling_then_same_arity_repeat_distinct_uids() {

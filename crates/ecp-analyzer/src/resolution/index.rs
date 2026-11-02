@@ -1027,7 +1027,7 @@ impl SymbolTable {
     }
 
     /// Register the next id as a later C# declaration of `first`'s uid that
-    /// is an arity twin (`ecp_core::analyzer::lexical::later_is_arity_twin`):
+    /// is an arity twin (`LaterReason::Arity`):
     /// a type or delegate of another generic arity (`Conv<T>` after
     /// `Conv`), or a member such a type declares (`Foo1<T>.foo` after
     /// `Foo1.foo`). A declaration of its own in `file_path`, with `first`'s
@@ -1066,13 +1066,6 @@ impl SymbolTable {
                 .find(|&member| self.type_arity(member) == arity),
             None => (arity == 0 || self.type_arity(id) == arity).then_some(id),
         }
-    }
-
-    /// Whether any declaration has an arity twin
-    /// ([`Self::register_arity_sibling`]): a pass that finds twins by
-    /// re-numbering a file skips the work when none has.
-    pub fn has_arity_twins(&self) -> bool {
-        !self.arity_siblings.is_empty()
     }
 
     /// Whether any member has an arity twin ([`Self::note_declaring_scope`]):
