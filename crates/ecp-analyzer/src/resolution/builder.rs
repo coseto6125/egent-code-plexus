@@ -14,7 +14,7 @@ use ecp_core::analyzer::heritage;
 use ecp_core::analyzer::ladder;
 use ecp_core::analyzer::lexical::{
     body_locals, decls_enclosing, enclosing_types, file_identities, file_uids, fold_twins,
-    later_is_arity_twin, lexical_scope_kinds, raw_decl, splits_by_arity, LexicalFunctions,
+    lexical_scope_kinds, path_identities, raw_decl, splits_by_arity, LexicalFunctions,
 };
 use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::reexport::{export_filter_applies_to, is_ecmascript, ImportRef};
@@ -27,7 +27,9 @@ use ecp_core::analyzer::types::{
 pub use ecp_core::analyzer::types::{
     FUNCTION_REFERENCE_REASON, VALUE_READ_REASON, VARIANT_PATTERN_REASON, VARIANT_USE_REASON,
 };
-use ecp_core::contracts::identity::{lexical_parents_in, RouteKey, UidSlot};
+use ecp_core::contracts::identity::{
+    lexical_parents_in, DeclIdentity, LaterReason, RouteKey, UidSlot,
+};
 use ecp_core::contracts::raw_records::{FileOrd, RawEndpoint, RawIdx, RawIndexMap, Unbound};
 use ecp_core::contracts::routing::{FileRouter, Language as RouteLanguage, ParsedLanguage};
 use ecp_core::contracts::workspace::WorkspaceFacts;
@@ -134,6 +136,9 @@ struct Pass1Registration {
     collision_blind_spots: Vec<BlindSpotRecord>,
     /// `(tombstone slot, surviving slot)` for every collision tombstone.
     merged: Vec<(u32, u32)>,
+    /// One bit per raw node: set for each `UidSlot::Later` node, which no
+    /// name table holds (`ZeroCopyGraph::later_nodes`).
+    later_nodes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -292,12 +297,12 @@ impl GraphBuilder {
         // indexed on two machines with different filesystem walk orders would
         // produce different graph.bin payloads — breaks the reproducibility
         // contract pinned by audit §4.2 (inv-003).
-        // `file_path` is unique across LocalGraph entries (one ingest per file),
-        // so unstable sort has no observable tie-breaking concern and avoids
-        // the temporary allocation that stable sort needs.
+        // Stable: two `LocalGraph`s of one path keep their input order, which
+        // numbers the path's declarations (`path_identities`) as the overlay
+        // numbers its inputs.
         let t_sort = std::time::Instant::now();
         self.local_graphs
-            .sort_unstable_by(|a, b| a.file_path.cmp(&b.file_path));
+            .sort_by(|a, b| a.file_path.cmp(&b.file_path));
         if prof {
             eprintln!("prof build.sort: {:.3}s", t_sort.elapsed().as_secs_f32());
         }
@@ -310,6 +315,7 @@ impl GraphBuilder {
             files,
             collision_blind_spots,
             merged,
+            later_nodes,
         } = pass1_register_nodes(&self.local_graphs);
         // Pass 1 gives every raw node a slot (a collision keeps a tombstone),
         // so the map reads node counts only and holds for the whole build.
@@ -1008,6 +1014,7 @@ impl GraphBuilder {
             supertype_table,
             workspace,
             lexical_parents: lexical_table,
+            later_nodes,
         }
         .finish();
 
@@ -1275,9 +1282,12 @@ fn file_indices(local_graphs: &[LocalGraph]) -> FxHashMap<String, u32> {
 }
 
 /// Pass 1: register every `LocalGraph`'s File + symbol nodes into the
-/// SymbolTable/StringPool, assigning canonical UIDs, keeping overloads under
-/// their own UIDs and tombstoning other D1 hash collisions (see
-/// BlindSpotRecord `uid-collision`/`ifdef-redef` kinds).
+/// SymbolTable/StringPool under the uids `assign_file` gives them. A
+/// `UidSlot::Later` keeps a node of its own under its slot uid, out of the
+/// name tables (`later_nodes`); a merged repeat (`UidSlot::Duplicate`) and a
+/// true 64-bit collision with another path become tombstones (see
+/// BlindSpotRecord `uid-collision`/`ifdef-redef` kinds). The inputs of one
+/// path number as one file (`path_identities`).
 fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
     // Pre-size accumulators from known input cardinalities. Each
     // LocalGraph contributes 1 File node + N symbol nodes. Plus a
@@ -1306,6 +1316,12 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
     // borrowing string_pool twice in the node loop.
     let mut collision_blind_spots: Vec<BlindSpotRecord> = Vec::new();
     let mut merged: Vec<(u32, u32)> = Vec::new();
+    let mut later_nodes: Vec<u8> = vec![0; total_symbol_nodes.div_ceil(8)];
+    // A path with 2+ `LocalGraph`s: its inputs, and the identities of each
+    // input once its first input numbered the path.
+    let shared = shared_paths(local_graphs);
+    let mut shared_ids: FxHashMap<u32, Vec<DeclIdentity>> = FxHashMap::default();
+    let mut graph_starts: Vec<u32> = Vec::with_capacity(total_files);
 
     for (file_idx, local_graph) in local_graphs.iter().enumerate() {
         let file_idx = file_idx as u32;
@@ -1346,137 +1362,118 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
         });
 
         let graph_start = current_node_idx;
-        let identities = file_identities(&path_str, &local_graph.nodes, raw_decl);
-        // In-file first declaration → the node of another file whose uid it
-        // repeats. Two `LocalGraph`s of one path do occur; their later
-        // declarations then number against that earlier node, as one file.
-        let mut repeats: FxHashMap<u32, u32> = FxHashMap::default();
+        graph_starts.push(graph_start);
+        // The file's own numbering (`assign_file`), shared with incremental
+        // mode and the overlay view. A slot's `first` indexes the path's
+        // rows, its inputs concatenated.
+        let inputs = shared.get(path_str.as_ref()).map_or(&[][..], Vec::as_slice);
+        let identities = match inputs {
+            [] => file_identities(&path_str, &local_graph.nodes, raw_decl),
+            [first_input, ..] => {
+                if *first_input == file_idx {
+                    let rows: Vec<&[RawNode]> = inputs
+                        .iter()
+                        .map(|&g| local_graphs[g as usize].nodes.as_slice())
+                        .collect();
+                    shared_ids.extend(
+                        inputs
+                            .iter()
+                            .copied()
+                            .zip(path_identities(&path_str, &rows, raw_decl)),
+                    );
+                }
+                shared_ids
+                    .remove(&file_idx)
+                    .expect("the path's first input numbers all of its inputs")
+            }
+        };
+        let node_of = |at: u32| path_node(inputs, local_graphs, &graph_starts, graph_start, at);
+        // This input's first row among the path's rows.
+        let input_offset: u32 = inputs
+            .iter()
+            .take_while(|&&g| g != file_idx)
+            .map(|&g| local_graphs[g as usize].nodes.len() as u32)
+            .sum();
         // The innermost type around each node, computed on the first member
         // twin of the file only.
         let mut declaring_types: Option<Vec<Option<usize>>> = None;
         for (offset, (raw_node, identity)) in local_graph.nodes.iter().zip(identities).enumerate() {
-            // The file's own numbering (`assign_file`), shared with incremental
-            // mode and the overlay view.
             let uid_u64 = identity.slot.uid();
             let arity_splits = splits_by_arity(file_meta.language, raw_node.kind);
-            // An arity twin (`later_is_arity_twin`): a C# type or delegate
-            // of another generic arity than the earlier ones of its uid
-            // (`Conv<T>` after `Conv`), or a member such a type declares
-            // (`Foo1<T>.foo` after `Foo1.foo`). A node of its own under the
-            // overload uid, with its name and owner, filed beside its first
-            // instead of in a name table, so a lookup of the bare name still
-            // returns the first, as before the split (codex rulings P-a and
-            // P-a2).
-            if let (UidSlot::Later { first, .. }, true) = (
-                identity.slot,
-                later_is_arity_twin(file_meta.language, raw_node.kind),
-            ) {
-                let first_idx = repeats.get(&first).copied().unwrap_or(graph_start + first);
-                let twin = symbol_table.register_arity_sibling(
-                    first_idx,
-                    &path_str,
-                    file_meta,
-                    raw_node.generic_arity(),
-                );
-                // A member twin: a read inside its declaring type means it
-                // (`SymbolTable::twin_read_from`). The first's type is known
-                // only when the first is a node of this graph.
-                if !arity_splits {
-                    let types = declaring_types.get_or_insert_with(|| {
-                        let rows: Vec<(NodeKind, Span)> =
-                            local_graph.nodes.iter().map(|n| (n.kind, n.span)).collect();
-                        enclosing_types(&rows)
-                    });
-                    let mut scoped = vec![(twin, offset)];
-                    if !repeats.contains_key(&first) {
-                        scoped.push((first_idx, first as usize));
-                    }
-                    for (id, raw) in scoped {
-                        if let Some(ty) = types[raw] {
-                            symbol_table.note_declaring_scope(id, local_graph.nodes[ty].span);
+            let merge_into = match identity.slot {
+                // A declaration of its own under its slot uid, with its
+                // first's name and owner (already pooled), in no name table:
+                // a lookup of the bare name returns the first. An overload, a
+                // scoped repeat and a redefinition join the first's overload
+                // set. An arity twin (codex rulings P-a and P-a2) is filed
+                // beside its first instead: a C# type or delegate of another
+                // generic arity (`Conv<T>` after `Conv`), or a member such a
+                // type declares (`Foo1<T>.foo` after `Foo1.foo`).
+                UidSlot::Later { first, reason, .. } => {
+                    let first_idx = node_of(first);
+                    match reason {
+                        LaterReason::Arity => {
+                            let twin = symbol_table.register_arity_sibling(
+                                first_idx,
+                                &path_str,
+                                file_meta,
+                                raw_node.generic_arity(),
+                            );
+                            // A member twin: a read inside its declaring type
+                            // means it (`SymbolTable::twin_read_from`). The
+                            // first's type is known only when the first is a
+                            // row of this input.
+                            if !arity_splits {
+                                let types = declaring_types.get_or_insert_with(|| {
+                                    let rows: Vec<(NodeKind, Span)> = local_graph
+                                        .nodes
+                                        .iter()
+                                        .map(|n| (n.kind, n.span))
+                                        .collect();
+                                    enclosing_types(&rows)
+                                });
+                                let first_raw = first.checked_sub(input_offset);
+                                let scoped = std::iter::once((twin, offset))
+                                    .chain(first_raw.map(|raw| (first_idx, raw as usize)));
+                                for (id, raw) in scoped {
+                                    if let Some(ty) = types[raw] {
+                                        symbol_table
+                                            .note_declaring_scope(id, local_graph.nodes[ty].span);
+                                    }
+                                }
+                            }
+                        }
+                        LaterReason::Overload | LaterReason::Scoped | LaterReason::Repeat => {
+                            symbol_table.register_overload(first_idx, file_meta);
                         }
                     }
-                }
-                uid_seen.insert(uid_u64, current_node_idx);
-                let first_node: &Node = &nodes[first_idx as usize];
-                nodes.push(Node {
-                    uid: uid_u64,
-                    name: first_node.name,
-                    file_idx,
-                    kind: raw_node.kind,
-                    span: raw_node.span,
-                    community_id: 0,
-                    owner_class: first_node.owner_class,
-                    content_hash: raw_node.content_hash,
-                });
-                current_node_idx += 1;
-                continue;
-            }
-            let earlier = match identity.slot {
-                UidSlot::First(uid) => {
-                    let earlier = uid_seen.get(&uid).copied();
-                    if let Some(prev_idx) = earlier {
-                        repeats.insert(offset as u32, prev_idx);
-                    }
-                    earlier
-                }
-                UidSlot::Later { first, .. } | UidSlot::Duplicate { first, .. } => {
-                    Some(repeats.get(&first).copied().unwrap_or(graph_start + first))
-                }
-            };
-
-            // D1 collision recovery: if two distinct symbol definitions hash to the
-            // same u64, drop the second and record a BlindSpot for manual review.
-            //
-            // Collision nodes must NOT be registered in the SymbolTable — they
-            // have no valid graph node backing them (we don't push them into
-            // `nodes`). The SymbolTable maps name→node_id, and a phantom node_id
-            // >= nodes.len() at CSR time causes an OOB panic in the out_offsets
-            // loop (builder.rs:1549).
-            //
-            // However, `nodes` MUST still receive a placeholder entry to preserve
-            // position alignment: the build's `RawIndexMap` counts
-            // `lg.nodes.len()` (all raw nodes, including collision ones). If we
-            // skip the `nodes.push` without also adjusting the map, every
-            // subsequent file's node IDs in the map are off by the collision
-            // count, producing wrong `current_node_idx` values and broken edges.
-            //
-            // Solution: push a tombstone Node (kind=File is reused as the most
-            // benign placeholder; it doesn't enter SymbolTable so it's unreachable
-            // from any query) to occupy the position, keeping nodes.len() ≡
-            // current_node_idx throughout Pass 1.
-            if let Some(prev_idx) = earlier {
-                // An overload is a real declaration: it keeps its name and
-                // owner (shared with the first, so already pooled) under a
-                // uid of its own, and loses nothing a BlindSpot would report.
-                // The slot decides, as in the overlay view, so a kind that
-                // lexical scoping opts in numbers alike on both paths. A
-                // `First` slot that repeats another `LocalGraph` of the same
-                // path has no in-file slot to read; it numbers by kind, as
-                // `assign_file` numbers an unscoped declaration.
-                let keeps_overload = match identity.slot {
-                    UidSlot::Later { .. } => true,
-                    UidSlot::Duplicate { .. } => false,
-                    UidSlot::First(_) => ecp_core::uid::keeps_overloads(raw_node.kind),
-                };
-                if keeps_overload {
-                    let ordinal = symbol_table.register_overload(prev_idx, file_meta);
-                    let first: &Node = &nodes[prev_idx as usize];
+                    later_nodes[current_node_idx as usize / 8] |= 1 << (current_node_idx % 8);
+                    uid_seen.insert(uid_u64, current_node_idx);
+                    let first_node: &Node = &nodes[first_idx as usize];
                     nodes.push(Node {
-                        // Equal to the `UidSlot::Later` uid unless the file
-                        // repeats another file's declarations.
-                        uid: ecp_core::uid::overload(first.uid, ordinal),
-                        name: first.name,
+                        uid: uid_u64,
+                        name: first_node.name,
                         file_idx,
                         kind: raw_node.kind,
                         span: raw_node.span,
                         community_id: 0,
-                        owner_class: first.owner_class,
+                        owner_class: first_node.owner_class,
                         content_hash: raw_node.content_hash,
                     });
                     current_node_idx += 1;
                     continue;
                 }
+                UidSlot::Duplicate { first, .. } => Some(node_of(first)),
+                // A true 64-bit collision: the path hashes into the uid, so
+                // only a declaration of another path holds it already.
+                UidSlot::First(uid) => uid_seen.get(&uid).copied(),
+            };
+
+            // A merged repeat, or a D1 collision: the slot keeps a tombstone
+            // that merges into `prev_idx`, so `nodes.len()` stays equal to
+            // `current_node_idx` and every later `RawIndexMap` offset holds.
+            // The tombstone is in no name table: no query reaches it.
+            if let Some(prev_idx) = merge_into {
                 // Reclassify the collision based on (kind, lang) — most
                 // collisions are not parser bugs but legitimate semantic
                 // ambiguities the indexer can't resolve without semantic
@@ -1536,23 +1533,11 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
                         is_test: false,
                     });
                 }
-                // Push a tombstone Node + tombstone SymbolTable entry to keep
-                // both `nodes.len()` and `node_kinds.len()` ≡ current_node_idx.
-                // The tombstone is NOT registered in file_scoped / global_scoped,
-                // so it is invisible to all name-based lookups and cannot produce
-                // OOB edges via class_membership or overrides post-processes.
-                // Tombstone uid+name MUST differ from the surviving node's;
-                // otherwise `seen_uids.insert(node.uid)` would falsely flag a
-                // duplicate and name-based queries (`n.name == X`) would still
-                // hit the tombstone. The surviving node already owns `uid_u64`
-                // and the original `raw_node.name`; the tombstone gets bit-
-                // inverted uid (`!uid_u64`) plus empty name (StrRef::default,
-                // which resolves to "" against any pool). The bit-inverse
-                // never equals the survivor's uid, but it is not unique: every
-                // later duplicate of one base uid gets the same tombstone uid.
-                // Tombstones stay isolated by their empty name and their
-                // absence from the symbol table, and "" never matches a real
-                // symbol-name query.
+                // Tombstone uid and name differ from the survivor's: a merged
+                // repeat stores `tombstone(overload(base, n))`, unique per
+                // ordinal; a D1 collision the bit-inverse of the uid it
+                // repeats. The empty name (StrRef::default resolves to "")
+                // never matches a symbol-name query.
                 symbol_table.register_tombstone(raw_node.kind, file_meta);
                 merged.push((current_node_idx, prev_idx));
                 nodes.push(Node {
@@ -1635,7 +1620,45 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
         files,
         collision_blind_spots,
         merged,
+        later_nodes,
     }
+}
+
+/// The file indices of every path that 2+ `LocalGraph`s share, in input
+/// order, keyed by the `/`-separated path. Empty for a build whose paths
+/// are unique.
+fn shared_paths(local_graphs: &[LocalGraph]) -> FxHashMap<String, Vec<u32>> {
+    let mut by_path: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+    for (idx, graph) in local_graphs.iter().enumerate() {
+        by_path
+            .entry(graph.file_path.to_string_lossy().replace('\\', "/"))
+            .or_default()
+            .push(idx as u32);
+    }
+    by_path.retain(|_, inputs| inputs.len() >= 2);
+    by_path
+}
+
+/// The node of row `at` of a path's rows: the rows of its `inputs` (file
+/// indices, in input order) concatenated, the input `g` starting at node
+/// `starts[g]`. A path of one input (`inputs` empty) starts at
+/// `graph_start`. `at` names a row of an input Pass 1 registered already.
+fn path_node(
+    inputs: &[u32],
+    local_graphs: &[LocalGraph],
+    starts: &[u32],
+    graph_start: u32,
+    at: u32,
+) -> u32 {
+    let mut at = at;
+    for &g in inputs {
+        let len = local_graphs[g as usize].nodes.len() as u32;
+        if at < len {
+            return starts[g as usize] + at;
+        }
+        at -= len;
+    }
+    graph_start + at
 }
 
 /// Map a file path to the language hint accepted by
@@ -3371,11 +3394,12 @@ fn pass1_9_supertypes(
                 let node_id = start + offset as u32;
                 let subject = if raw.kind.is_type() {
                     match raw.partial_scope() {
-                        // A same-file part of a C# `partial` type is a uid
-                        // twin of the first part: its bases are the
-                        // survivor's, as `c_sharp::partial` folds them.
+                        // Each part of a C# `partial` type keeps its bases
+                        // on its own node, a same-file later part too
+                        // (`c_sharp::partial` groups the parts).
                         Some(_) => raw_map.node(FileOrd(file_idx as u32), RawIdx(offset as u32)),
-                        // A UID-collision tombstone holds the id but no name.
+                        // A tombstone or a later redefinition holds the id
+                        // but sits in no name table.
                         None => symbol_table.file_of(node_id).map(|_| node_id),
                     }
                 } else {
@@ -4152,9 +4176,14 @@ fn framework_ref_source(
 /// resolver work. `None` when the skip data has no entry for the file: no
 /// diff data, or the file needs a full reanalyze. An empty inner set means
 /// every symbol changed. The uids are Pass 1's, overloads numbered.
+///
+/// `None` too for a path of `shared` ([`shared_paths`]): Pass 1 numbers its
+/// inputs as one file, the skip data each input alone, so a changed body of
+/// a later input could carry the uid of an unchanged one.
 fn skipped_nodes(
     local_graph: &LocalGraph,
     symbol_skip: Option<&FxHashMap<String, FxHashSet<u64>>>,
+    shared: &FxHashMap<String, Vec<u32>>,
 ) -> Option<Vec<bool>> {
     let symbol_skip = symbol_skip?;
     let raw = local_graph.file_path.to_string_lossy();
@@ -4163,6 +4192,9 @@ fn skipped_nodes(
     } else {
         raw
     };
+    if shared.contains_key(path.as_ref()) {
+        return None;
+    }
     let skip_uids = symbol_skip.get(path.as_ref())?;
     Some(
         file_uids(&path, &local_graph.nodes, raw_decl)
@@ -4170,6 +4202,73 @@ fn skipped_nodes(
             .map(|uid| skip_uids.contains(uid))
             .collect(),
     )
+}
+
+/// B1: the edges a merged row emits start at its survivor
+/// (`RawIndexMap::node`), never at its tombstone slot. A merged row's edge
+/// equal in `(source, target, rel)` to one the file emitted already is
+/// dropped, and so is a survivor's edge to itself. The set of the file's
+/// edges is built on its first merged row only.
+struct MergedRows {
+    /// The file's first edge in the buffer.
+    file_start: usize,
+    /// The keys of the file's edges before `.1`.
+    seen: Option<(FxHashSet<(u32, u32, u8)>, usize)>,
+}
+
+impl MergedRows {
+    fn new(file_start: usize) -> Self {
+        Self {
+            file_start,
+            seen: None,
+        }
+    }
+
+    /// Move the edges `edges[row_start..]`, which the row at `slot` just
+    /// emitted, to `survivor` when the row is merged, and drop the repeats.
+    /// A dropped edge's call meta goes with it; `pending` holds pre-sort
+    /// indices into `edges`, ascending.
+    fn rehome(
+        &mut self,
+        survivor: Option<u32>,
+        slot: u32,
+        row_start: usize,
+        edges: &mut Vec<Edge>,
+        pending: &mut Vec<(usize, u8, String)>,
+    ) {
+        let Some(survivor) = survivor.filter(|&survivor| survivor != slot) else {
+            return;
+        };
+        let key = |edge: &Edge| (edge.source, edge.target, edge.rel_type as u8);
+        let file_start = self.file_start;
+        let (seen, synced) = self
+            .seen
+            .get_or_insert_with(|| (FxHashSet::default(), file_start));
+        seen.extend(edges[*synced..row_start].iter().map(key));
+        let mut moved: Vec<Option<usize>> = Vec::with_capacity(edges.len() - row_start);
+        let mut kept = row_start;
+        for at in row_start..edges.len() {
+            edges[at].source = survivor;
+            let keep = edges[at].target != survivor && seen.insert(key(&edges[at]));
+            moved.push(keep.then_some(kept));
+            if keep {
+                edges.swap(kept, at);
+                kept += 1;
+            }
+        }
+        edges.truncate(kept);
+        let from = pending.partition_point(|&(idx, ..)| idx < row_start);
+        let mut write = from;
+        for read in from..pending.len() {
+            if let Some(to) = moved[pending[read].0 - row_start] {
+                pending[read].0 = to;
+                pending.swap(write, read);
+                write += 1;
+            }
+        }
+        pending.truncate(write);
+        *synced = edges.len();
+    }
 }
 
 /// Pass 2: Resolve imports and build edges
@@ -4263,6 +4362,10 @@ fn pass2_resolve_edges(
     let reason_cache_ref = &reason_cache;
     // T7-6: reference to skip-set (None = full reanalyze for all files).
     let symbol_skip_ref = symbol_skip_set;
+    let shared = match symbol_skip_set {
+        Some(_) => shared_paths(local_graphs),
+        None => FxHashMap::default(),
+    };
 
     // Pre-build per-graph indirect-call lookup keyed by caller span and
     // call index so same-name functions/methods in one file do not collide.
@@ -4295,15 +4398,18 @@ fn pass2_resolve_edges(
         let mut edges = Vec::new();
         let mut current_node_idx = 0u32;
         for (graph_idx, local_graph) in local_graphs.iter().enumerate() {
+            let file = FileOrd(graph_idx as u32);
             let lookup = &indirect_lookups[graph_idx];
             let lexical_lookup =
                 lexical_functions(local_graph, file_base(raw_map, graph_idx as u32));
-            let skipped = skipped_nodes(local_graph, symbol_skip_ref);
+            let skipped = skipped_nodes(local_graph, symbol_skip_ref, &shared);
+            let mut merged_rows = MergedRows::new(edges.len());
             for (node_offset, raw_node) in local_graph.nodes.iter().enumerate() {
                 if skipped.as_ref().is_some_and(|skipped| skipped[node_offset]) {
                     current_node_idx += 1;
                     continue;
                 }
+                let row_start = edges.len();
                 pass2_emit_node_edges(
                     resolver,
                     local_graph,
@@ -4323,6 +4429,13 @@ fn pass2_resolve_edges(
                     &mut pending_call_metas_global,
                     &mut call_blind_spots,
                 );
+                merged_rows.rehome(
+                    raw_map.node(file, RawIdx(node_offset as u32)),
+                    current_node_idx,
+                    row_start,
+                    &mut edges,
+                    &mut pending_call_metas_global,
+                );
                 current_node_idx += 1;
             }
             // T7-6: skip framework/fanout edges when all symbols in this
@@ -4334,7 +4447,7 @@ fn pass2_resolve_edges(
                     symbol_table_ref,
                     local_graph,
                     raw_map,
-                    FileOrd(graph_idx as u32),
+                    file,
                     reason_cache_ref,
                     &mut edges,
                     &mut file_edges,
@@ -4370,12 +4483,15 @@ fn pass2_resolve_edges(
                 let mut local_pending: Vec<(usize, u8, String)> = Vec::new();
                 let mut local_file_edges: Vec<(FileOrd, Edge)> = Vec::new();
                 let mut local_blind_spots: Vec<BlindSpot> = Vec::new();
-                let skipped = skipped_nodes(local_graph, symbol_skip_ref);
+                let skipped = skipped_nodes(local_graph, symbol_skip_ref, &shared);
+                let file = FileOrd(graph_idx as u32);
+                let mut merged_rows = MergedRows::new(0);
                 for (node_offset, raw_node) in local_graph.nodes.iter().enumerate() {
                     let current_node_idx = start_idx + node_offset as u32;
                     if skipped.as_ref().is_some_and(|skipped| skipped[node_offset]) {
                         continue;
                     }
+                    let row_start = local_edges.len();
                     pass2_emit_node_edges(
                         &resolver,
                         local_graph,
@@ -4395,6 +4511,13 @@ fn pass2_resolve_edges(
                         &mut local_pending,
                         &mut local_blind_spots,
                     );
+                    merged_rows.rehome(
+                        raw_map.node(file, RawIdx(node_offset as u32)),
+                        current_node_idx,
+                        row_start,
+                        &mut local_edges,
+                        &mut local_pending,
+                    );
                 }
                 // T7-6: skip framework/fanout edges only when ALL symbols
                 // in this file are unchanged.
@@ -4404,7 +4527,7 @@ fn pass2_resolve_edges(
                         symbol_table_ref,
                         local_graph,
                         raw_map,
-                        FileOrd(graph_idx as u32),
+                        file,
                         reason_cache_ref,
                         &mut local_edges,
                         &mut local_file_edges,
@@ -4780,63 +4903,80 @@ mod tests {
     }
 
     /// `uid::compute` hashes (kind, path, owner, name) and deliberately omits
-    /// the span, so two same-named symbols in one file collide by construction
-    /// — C `#ifdef` redefinitions and overloads reach this path for real.
+    /// the span, so two same-named symbols in one file share a base uid by
+    /// construction — C `#ifdef` redefinitions reach this path for real.
     ///
-    /// The second one is dropped, but a tombstone takes its slot: `nodes.len()`
-    /// has to stay equal to the raw-node count or every later `RawIndexMap`
-    /// offset shifts and edges land on the wrong symbols.
+    /// Stands for: a repeated variable merges into the first (`merges_repeats`)
+    /// and a tombstone takes its slot: `nodes.len()` has to stay equal to the
+    /// raw-node count or every later `RawIndexMap` offset shifts and edges
+    /// land on the wrong symbols. The tombstone stores
+    /// `tombstone(overload(base, 1))`, never the survivor's uid.
     #[test]
-    fn pass1_tombstones_a_uid_collision_without_shifting_indices() {
-        let g = LocalGraph {
-            file_path: "dup.c".into(),
-            content_hash: [0; 8],
-            nodes: vec![raw_fn("twice", 0), raw_fn("twice", 30)],
-            ..Default::default()
-        };
+    fn pass1_tombstones_a_merged_repeat_without_shifting_indices() {
+        let g = graph_of(
+            "dup.c",
+            vec![
+                raw_decl("twice", NodeKind::Variable, 0, &[], None),
+                raw_decl("twice", NodeKind::Variable, 30, &[], None),
+            ],
+        );
 
         let out = pass1_register_nodes(std::slice::from_ref(&g));
 
         assert_eq!(
             out.nodes.len(),
             2,
-            "the tombstone must occupy the dropped node's slot"
+            "the tombstone must occupy the merged node's slot"
         );
+        let base = out.nodes[0].uid;
         assert_eq!(
-            out.nodes[1].uid, !out.nodes[0].uid,
-            "tombstone uid is the bit-inverse, so it never shadows the survivor"
+            out.nodes[1].uid,
+            ecp_core::uid::tombstone(ecp_core::uid::overload(base, 1)),
         );
         assert!(
             out.string_pool.resolve(&out.nodes[1].name).is_empty(),
             "an empty name keeps the tombstone out of name-based lookups"
         );
+        assert_eq!(out.merged, [(1, 0)]);
+        assert_eq!(out.later_nodes, [0], "a tombstone is no later node");
         assert_eq!(
             out.collision_blind_spots.len(),
             1,
-            "the collision is reported, not silently swallowed"
+            "the merge is reported, not silently swallowed"
         );
     }
 
+    /// Stands for: a redefinition is a node of its own (design uid §2.3).
+    /// Three `fn twice` in one C file are three named nodes under the base
+    /// uid and its overloads 1 and 2, each later one in `later_nodes` and in
+    /// no name table, and no BlindSpot reports them. Before the change the
+    /// later two were tombstones sharing `!base`.
     #[test]
-    fn test_pass1_register_nodes_three_duplicates_share_one_tombstone_uid() {
+    fn test_pass1_register_nodes_three_redefinitions_later_nodes_own_uids() {
         let g = graph_of(
             "dup.c",
             vec![raw_fn("twice", 0), raw_fn("twice", 30), raw_fn("twice", 60)],
         );
         let out = pass1_register_nodes(std::slice::from_ref(&g));
-        let survivor = out.nodes[0].uid;
+        let base = out.nodes[0].uid;
         assert_eq!(
-            [out.nodes[1].uid, out.nodes[2].uid],
-            [!survivor, !survivor],
-            "every later duplicate of one base uid stores the same tombstone uid"
+            out.nodes.iter().map(|n| n.uid).collect::<Vec<_>>(),
+            [
+                base,
+                ecp_core::uid::overload(base, 1),
+                ecp_core::uid::overload(base, 2)
+            ]
         );
-        assert!(out.nodes[1..]
+        assert!(out
+            .nodes
             .iter()
-            .all(|n| out.string_pool.resolve(&n.name).is_empty()));
+            .all(|n| out.string_pool.resolve(&n.name) == "twice"));
+        assert_eq!(out.later_nodes, [0b110]);
+        assert!(out.merged.is_empty() && out.collision_blind_spots.is_empty());
         assert_eq!(
             out.symbol_table.lookup_in_file("dup.c", "twice"),
             Some(0),
-            "a name lookup reaches the survivor, never a tombstone"
+            "a name lookup reaches the first, never a later node"
         );
     }
 
@@ -4881,12 +5021,22 @@ mod tests {
         let out = pass1_register_nodes(&graphs);
         let save = ecp_core::uid::compute(NodeKind::Method, "A.java", Some("A"), "save");
         let helper = ecp_core::uid::compute(NodeKind::Function, "A.java", None, "helper");
+        // Stands for: the inputs of one path number as one file
+        // (`path_identities`): the second input's rows repeat the first's,
+        // and a repeated function is a redefinition with a node of its own
+        // (design uid §2.3), like the repeated method.
         assert_eq!(
             out.nodes.iter().map(|n| n.uid).collect::<Vec<_>>(),
-            vec![save, helper, ecp_core::uid::overload(save, 1), !helper],
-            "the second graph's `First` slots repeat the first graph's nodes: \
-             the method becomes an overload and the function a tombstone"
+            vec![
+                save,
+                helper,
+                ecp_core::uid::overload(save, 1),
+                ecp_core::uid::overload(helper, 1)
+            ],
+            "the second graph's rows are later nodes of the first graph's"
         );
+        assert_eq!(out.later_nodes, [0b1100]);
+        assert!(out.collision_blind_spots.is_empty());
     }
 
     fn raw_decl(
@@ -5105,9 +5255,13 @@ mod tests {
         }
     }
 
+    /// Stands for: a redefined class is a later node of its own (design uid
+    /// §2.3), filed beside its first in no name table, so the supertypes
+    /// pre-pass, which walks the table's types, gives it no supertypes; the
+    /// first keeps its own.
     #[test]
-    fn test_pass1_9_supertypes_uid_collision_tombstone_skipped() {
-        // Ids: bases.py A=0, B=1; dup.py Dup=2, Dup tombstone=3.
+    fn test_pass1_9_supertypes_later_redefinition_skipped() {
+        // Ids: bases.py A=0, B=1; dup.py Dup=2, later Dup=3.
         let graphs = vec![
             graph_of(
                 "bases.py",
@@ -5128,7 +5282,7 @@ mod tests {
         assert_eq!(&*st.supertypes(2).unwrap().bases, &[0]);
         assert!(
             st.supertypes(3).is_none(),
-            "a tombstone is unreachable by name and gets no supertypes"
+            "a later node is unreachable by name and gets no supertypes"
         );
     }
 
@@ -6287,5 +6441,187 @@ mod tests {
         let response_keys: Vec<String> =
             shape.response_keys.iter().map(|r| s(&graph, *r)).collect();
         assert_eq!(response_keys, vec!["id".to_string()]);
+    }
+
+    /// `(source, target)` of every `rel` edge whose reason is `reason`, or
+    /// of every `rel` edge when `reason` is `None`, sorted.
+    fn edge_pairs(
+        graph: &ecp_core::graph::ZeroCopyGraph,
+        rel: RelType,
+        reason: Option<&str>,
+    ) -> Vec<(u32, u32)> {
+        let mut pairs: Vec<(u32, u32)> = graph
+            .edges
+            .iter()
+            .filter(|e| e.rel_type == rel)
+            .filter(|e| reason.is_none_or(|r| e.reason.resolve(&graph.string_pool) == r))
+            .map(|e| (e.source, e.target))
+            .collect();
+        pairs.sort_unstable();
+        pairs
+    }
+
+    fn build_of(graphs: Vec<LocalGraph>) -> ecp_core::graph::ZeroCopyGraph {
+        let mut builder = GraphBuilder::new();
+        for graph in graphs {
+            builder.add_graph(graph);
+        }
+        builder.build()
+    }
+
+    /// Rows `C`, `C<T>`, `C<T>`, `C` of one C# file.
+    fn csharp_arity_rows() -> LocalGraph {
+        let class = |row: u32, arity: u32| RawNode {
+            decorators: match arity {
+                0 => Vec::new(),
+                n => vec![RawNode::generic_arity_marker(n)],
+            },
+            ..raw_decl("C", NodeKind::Class, row, &[], None)
+        };
+        graph_of(
+            "N/C.cs",
+            vec![class(0, 0), class(4, 1), class(8, 1), class(12, 0)],
+        )
+    }
+
+    /// Stands for: a C# arity sibling and a same-arity repeat number apart.
+    /// `C<T>` beside `C` is an arity sibling (`LaterReason::Arity`), filed
+    /// beside `C` in no overload set; a repeat of either arity is a
+    /// redefinition of the first of its own arity (`LaterReason::Repeat`).
+    /// Four distinct uids, overload sets `{C@1, C@4}` and `{C<T>@2, C<T>@3}`,
+    /// and no `overload_set` edge between `C` and `C<T>`. Red before 1b: the
+    /// Pass 1 branch read `later_is_arity_twin` for every later C# type, so
+    /// `C<T>@3` and `C@4` joined no overload set.
+    #[test]
+    fn test_assign_file_csharp_arity_sibling_then_same_arity_repeat_distinct_uids() {
+        let out = pass1_register_nodes(&[csharp_arity_rows()]);
+        let uids: Vec<u64> = out.nodes.iter().map(|n| n.uid).collect();
+        let distinct: FxHashSet<u64> = uids.iter().copied().collect();
+        assert_eq!(distinct.len(), 4, "{uids:?}");
+        assert_eq!(out.later_nodes, [0b1110]);
+        assert_eq!(out.symbol_table.later_overloads(0), [3]);
+        assert_eq!(out.symbol_table.later_overloads(1), [2]);
+        assert!(out.merged.is_empty() && out.collision_blind_spots.is_empty());
+
+        let graph = build_of(vec![csharp_arity_rows()]);
+        assert_eq!(
+            edge_pairs(
+                &graph,
+                RelType::References,
+                Some(ecp_core::analyzer::types::OVERLOAD_SET_REASON)
+            ),
+            [(0, 3), (1, 2)]
+        );
+    }
+
+    /// `a.py` in two inputs: the first holds `f` (calling `g`), `g` and
+    /// `h`; the second holds another `f`, which calls `h`.
+    fn two_inputs_one_path() -> Vec<LocalGraph> {
+        let call = |name: &str, row: u32, callee: &str| RawNode {
+            calls: vec![callee.into()],
+            ..raw_fn(name, row)
+        };
+        vec![
+            graph_of(
+                "a.py",
+                vec![call("f", 0, "g"), raw_fn("g", 4), raw_fn("h", 8)],
+            ),
+            graph_of("a.py", vec![call("f", 0, "h")]),
+        ]
+    }
+
+    /// Stands for: the skip data of a path with two inputs cannot name a
+    /// row, because Pass 1 numbers the inputs as one file and the skip data
+    /// each input alone. Every row of such a path re-resolves, so the
+    /// changed second `f` (a later node under `overload(f, 1)`) emits its
+    /// `Calls`. Red before 1b: the second input alone numbered its `f` as
+    /// the base `f`, which the skip set holds, so the row was skipped.
+    #[test]
+    fn test_graph_builder_symbol_skip_set_two_inputs_one_path_changed_second_body_emits_calls() {
+        let full = build_of(two_inputs_one_path());
+        let f = ecp_core::uid::compute(NodeKind::Function, "a.py", None, "f");
+        assert_eq!(full.nodes[3].uid, ecp_core::uid::overload(f, 1));
+        assert_eq!(edge_pairs(&full, RelType::Calls, None), [(0, 1), (3, 2)]);
+
+        let unchanged: FxHashSet<u64> = ["f", "g", "h"]
+            .into_iter()
+            .map(|name| ecp_core::uid::compute(NodeKind::Function, "a.py", None, name))
+            .collect();
+        let mut skip: FxHashMap<String, FxHashSet<u64>> = FxHashMap::default();
+        skip.insert("a.py".into(), unchanged);
+        let mut builder = GraphBuilder::new().with_symbol_skip_set(skip);
+        for graph in two_inputs_one_path() {
+            builder.add_graph(graph);
+        }
+        let partial = builder.build();
+        assert_eq!(
+            edge_pairs(&partial, RelType::Calls, None),
+            [(0, 1), (3, 2)],
+            "the second `f` re-resolves"
+        );
+    }
+
+    /// `m.py`: class `B`, then three `x` of `A`, the later two typed `B`.
+    /// The later two merge into the first (`merges_repeats`).
+    fn merged_properties() -> LocalGraph {
+        let x = |row: u32, ty: Option<&str>| RawNode {
+            type_annotation: ty.map(str::to_string),
+            ..raw_decl("x", NodeKind::Property, row, &[], Some("A"))
+        };
+        graph_of(
+            "m.py",
+            vec![
+                raw_decl("B", NodeKind::Class, 0, &[], None),
+                x(4, None),
+                x(6, Some("B")),
+                x(8, Some("B")),
+            ],
+        )
+    }
+
+    /// Stands for: B1, a merged row's edges start at its survivor, the one
+    /// named node, and an edge equal to one emitted already is dropped. Two
+    /// merged `x: B` give exactly one `Accesses x -> B`, from the named `x`.
+    /// Red before 1b: each tombstone slot sourced its own `Accesses` edge.
+    #[test]
+    fn test_pass2_merged_property_type_accesses_once_from_named_node() {
+        let graph = build_of(vec![merged_properties()]);
+        let pool = &graph.string_pool;
+        assert_eq!(graph.nodes[1].name.resolve(pool), "x");
+        assert!(graph.nodes[2..4]
+            .iter()
+            .all(|n| n.name.resolve(pool).is_empty()));
+        assert_eq!(edge_pairs(&graph, RelType::Accesses, None), [(1, 0)]);
+    }
+
+    /// Stands for: B1 holds on both Pass 2 drivers. The dump-enabled serial
+    /// loop and the parallel loop re-source and dedupe merged rows alike,
+    /// so the two builds hold the same edge multiset.
+    #[test]
+    fn test_pass2_merged_rows_dump_build_equals_normal_build() {
+        let multiset = |graph: &ecp_core::graph::ZeroCopyGraph| {
+            let mut edges: Vec<(u32, u32, u8, String)> = graph
+                .edges
+                .iter()
+                .map(|e| {
+                    (
+                        e.source,
+                        e.target,
+                        e.rel_type as u8,
+                        e.reason.resolve(&graph.string_pool).to_string(),
+                    )
+                })
+                .collect();
+            edges.sort();
+            edges
+        };
+        let normal = build_of(vec![merged_properties()]);
+        let tmp = tempfile::tempdir().unwrap();
+        let mut builder =
+            GraphBuilder::new().with_resolver_dump(Some(tmp.path().join("dump.jsonl")));
+        builder.add_graph(merged_properties());
+        let dumped = builder.build();
+        assert_eq!(multiset(&dumped), multiset(&normal));
+        assert_eq!(edge_pairs(&dumped, RelType::Accesses, None), [(1, 0)]);
     }
 }

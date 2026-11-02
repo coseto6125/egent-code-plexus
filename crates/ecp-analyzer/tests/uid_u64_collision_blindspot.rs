@@ -1,25 +1,28 @@
-//! T1-5 D1 collision recovery: duplicate-uid symbols produce a `uid-collision`
-//! BlindSpotRecord and are silently dropped rather than panicking or creating
+//! T1-5 D1 collision recovery: a merged repeat produces a `uid-collision`
+//! BlindSpotRecord and becomes a tombstone rather than panicking or creating
 //! two nodes with the same UID.
 //!
-//! A collision is forced by submitting two `RawNode` entries with identical
-//! (kind, file_path, owner_class, name) — the four inputs to `uid::compute` —
-//! but different span values. The second node must be absent from the built
-//! graph and a `uid-collision` blind spot must be present.
+//! A merged repeat is forced by submitting two `RawNode` entries of a kind
+//! that merges repeats (`uid::merges_repeats`) with identical (kind,
+//! file_path, owner_class, name) — the four inputs to `uid::compute` — but
+//! different span values. The second node must lose its name and a
+//! `uid-collision` blind spot must be present. A repeat of any other kind is
+//! a later node of its own (design uid §2.3) and reports nothing.
 
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
 use ecp_core::graph::NodeKind;
 
-fn make_collision_graph() -> LocalGraph {
+/// Two declarations of `kind` named `name` in `src/collision.py`.
+fn make_collision_graph(kind: NodeKind, name: &str) -> LocalGraph {
     LocalGraph {
-        file_path: "src/collision.rs".into(),
+        file_path: "src/collision.py".into(),
         content_hash: [1; 8],
         nodes: vec![
             // First definition — kept.
             RawNode {
-                name: "duplicateFn".to_string(),
-                kind: NodeKind::Function,
+                name: name.to_string(),
+                kind,
                 span: (1, 0, 5, 0),
                 is_exported: true,
                 heritage: vec![],
@@ -32,8 +35,8 @@ fn make_collision_graph() -> LocalGraph {
             },
             // Second definition — same (kind, path, owner, name) → same uid → collision.
             RawNode {
-                name: "duplicateFn".to_string(),
-                kind: NodeKind::Function,
+                name: name.to_string(),
+                kind,
                 span: (10, 0, 15, 0), // different span, same hash inputs
                 is_exported: false,
                 heritage: vec![],
@@ -64,23 +67,36 @@ fn make_collision_graph() -> LocalGraph {
     }
 }
 
+fn build(kind: NodeKind, name: &str) -> ecp_core::graph::ZeroCopyGraph {
+    let mut b = GraphBuilder::new();
+    b.add_graph(make_collision_graph(kind, name));
+    b.build()
+}
+
+fn kinds(g: &ecp_core::graph::ZeroCopyGraph) -> Vec<&str> {
+    let pool = g.string_pool.as_slice();
+    g.blind_spots
+        .iter()
+        .map(|bs| bs.kind.resolve(pool))
+        .collect()
+}
+
+/// Stands for: a merged repeat keeps one named node; the second slot is a
+/// tombstone with a uid of its own.
 #[test]
 fn collision_drops_second_node_no_panic() {
-    let mut b = GraphBuilder::new();
-    b.add_graph(make_collision_graph());
-    let g = b.build();
+    let g = build(NodeKind::Variable, "duplicateVar");
     let pool = g.string_pool.as_slice();
 
-    // Only one node with name "duplicateFn" should survive.
     let dup_nodes: Vec<_> = g
         .nodes
         .iter()
-        .filter(|n| n.name.resolve(pool) == "duplicateFn")
+        .filter(|n| n.name.resolve(pool) == "duplicateVar")
         .collect();
     assert_eq!(
         dup_nodes.len(),
         1,
-        "expected exactly one 'duplicateFn' node, got {}",
+        "expected exactly one 'duplicateVar' node, got {}",
         dup_nodes.len()
     );
 
@@ -97,9 +113,7 @@ fn collision_drops_second_node_no_panic() {
 
 #[test]
 fn collision_emits_uid_collision_blind_spot() {
-    let mut b = GraphBuilder::new();
-    b.add_graph(make_collision_graph());
-    let g = b.build();
+    let g = build(NodeKind::Variable, "duplicateVar");
     let pool = g.string_pool.as_slice();
 
     let collision_spots: Vec<_> = g
@@ -113,10 +127,7 @@ fn collision_emits_uid_collision_blind_spot() {
         1,
         "expected exactly one uid-collision blind spot, got {}; all kinds: {:?}",
         collision_spots.len(),
-        g.blind_spots
-            .iter()
-            .map(|bs| bs.kind.resolve(pool))
-            .collect::<Vec<_>>()
+        kinds(&g)
     );
 
     let hint = collision_spots[0].hint.resolve(pool);
@@ -125,7 +136,26 @@ fn collision_emits_uid_collision_blind_spot() {
         "blind spot hint should start with 'uid-collision:', got: {hint}"
     );
     assert!(
-        hint.contains("duplicateFn"),
+        hint.contains("duplicateVar"),
         "hint should mention the colliding symbol name, got: {hint}"
     );
+}
+
+/// Stands for: a Python `def f` twice is a redefinition, a later node of
+/// its own with its name under `overload(f, 1)`, so nothing is lost and no
+/// `uid-collision` BlindSpot reports it. Red before 1b: the second `def`
+/// was a tombstone with a BlindSpot.
+#[test]
+fn redefined_function_later_node_no_uid_collision_blind_spot() {
+    let g = build(NodeKind::Function, "f");
+    let pool = g.string_pool.as_slice();
+    let named: Vec<u64> = g
+        .nodes
+        .iter()
+        .filter(|n| n.name.resolve(pool) == "f")
+        .map(|n| n.uid)
+        .collect();
+    let f = ecp_core::uid::compute(NodeKind::Function, "src/collision.py", None, "f");
+    assert_eq!(named, [f, ecp_core::uid::overload(f, 1)]);
+    assert!(!kinds(&g).contains(&"uid-collision"), "{:?}", kinds(&g));
 }

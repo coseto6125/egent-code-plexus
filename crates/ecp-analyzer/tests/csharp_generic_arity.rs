@@ -40,6 +40,21 @@ fn rows(graph: &ZeroCopyGraph, kind: NodeKind) -> Vec<(u32, String)> {
     rows
 }
 
+/// The 0-based start row of every node in `later_nodes`, sorted.
+fn later_rows(graph: &ZeroCopyGraph) -> Vec<u32> {
+    let mut rows: Vec<u32> = (0..graph.nodes.len())
+        .filter(|&i| {
+            graph
+                .later_nodes
+                .get(i / 8)
+                .is_some_and(|b| *b & (1u8 << (i % 8)) != 0)
+        })
+        .map(|i| graph.nodes[i].span.0)
+        .collect();
+    rows.sort_unstable();
+    rows
+}
+
 /// `(source row, target row)` of every `rel` edge, sorted.
 fn edge_rows(graph: &ZeroCopyGraph, rel: RelType) -> Vec<(u32, u32)> {
     let mut rows: Vec<(u32, u32)> = edge_ends(graph, rel)
@@ -131,10 +146,11 @@ fn test_build_csharp_delegates_of_several_arities_both_orders_each_named() {
 }
 
 /// Stands for: only another arity splits. Two delegates of one name and
-/// one arity stay a uid collision: the second is the tombstone it was.
-/// Passes before the fix as well; it guards the restriction of the ruling.
+/// one arity are a redefinition: the second is a later node of its own
+/// (design uid §2.3), named, in no name table, and no `uid-collision`
+/// BlindSpot reports it. Before 1b it was an empty-named tombstone.
 #[test]
-fn test_build_csharp_delegates_of_one_arity_second_tombstoned() {
+fn test_build_csharp_delegates_of_one_arity_second_later_node() {
     let graph = csharp_graph(
         "namespace N
 {
@@ -145,8 +161,11 @@ fn test_build_csharp_delegates_of_one_arity_second_tombstoned() {
     );
     assert_eq!(
         rows(&graph, NodeKind::Function),
-        named(&[(2, "Handler"), (3, "")])
+        named(&[(2, "Handler"), (3, "Handler")])
     );
+    assert_eq!(later_rows(&graph), [3]);
+    let collisions = overrides_support::blind_spots(&graph, "uid-collision");
+    assert!(collisions.is_empty(), "{collisions:?}");
 }
 
 const FOO1: &str = "namespace N
@@ -296,11 +315,12 @@ fn test_build_csharp_nested_type_in_outer_arity_twins_own_members() {
     assert_eq!(property_reads(&graph), [(7, 6), (15, 14)]);
 }
 
-/// Stands for: same owner, same arity keeps today's rule. Two classes `C`
-/// of one arity in one file each declare `a`: the second class and its
-/// `a` are the tombstones they were. Passes before the fix as well.
+/// Stands for: same owner, same arity. Two classes `C` of one arity in one
+/// file each declare `a`: the second class is a redefinition, a later node
+/// of its own (design uid §2.3); its field `a` repeats the first `a`'s
+/// identity and merges into it (`merges_repeats`), a tombstone.
 #[test]
-fn test_build_csharp_same_arity_class_duplicates_members_tombstoned() {
+fn test_build_csharp_same_arity_class_redefinition_later_member_merged() {
     let graph = csharp_graph(
         "namespace N
 {
@@ -315,7 +335,8 @@ fn test_build_csharp_same_arity_class_duplicates_members_tombstoned() {
 }
 ",
     );
-    assert_eq!(rows(&graph, NodeKind::Class), named(&[(2, "C"), (6, "")]));
+    assert_eq!(rows(&graph, NodeKind::Class), named(&[(2, "C"), (6, "C")]));
+    assert_eq!(later_rows(&graph), [6]);
     assert_eq!(
         rows(&graph, NodeKind::Property),
         named(&[(4, "a"), (8, "")])
@@ -528,4 +549,82 @@ fn test_build_csharp_partial_attribute_class_of_generic_arity_parts_group() {
             "one PartOf edge from the plain part to the attribute part"
         );
     }
+}
+
+/// Rows `C`, `C<T>`, `C<T>`, `C` (0-based rows 2, 3, 4, 5).
+const ARITY_THEN_REPEAT: &str = "namespace N
+{
+    public class C { }
+    public class C<T> { }
+    public class C<T> { }
+    public class C { }
+}
+";
+
+/// Stands for: a C# arity sibling and a same-arity repeat number apart on
+/// the full build and in the overlay. `C<T>` beside `C` is an arity
+/// sibling in no overload set; each repeat is a later node of the first of
+/// its own arity. Four distinct uids, overload sets `{C@2, C@5}` and
+/// `{C<T>@3, C<T>@4}` (`overload_set` References), none between `C` and
+/// `C<T>`, and the overlay of the file gives the same uids and edges. Red
+/// before 1b: Pass 1 and the overlay read `later_is_arity_twin` for every
+/// later C# type, so no repeat joined an overload set.
+#[test]
+fn test_assign_file_csharp_arity_sibling_then_same_arity_repeat_distinct_uids() {
+    use ecp_core::graph::ArchivedZeroCopyGraph;
+    use ecp_core::session::{OverlayFileInput, OverlayView};
+
+    let graph = csharp_graph(ARITY_THEN_REPEAT);
+    let classes: Vec<usize> = (0..graph.nodes.len())
+        .filter(|&i| graph.nodes[i].kind == NodeKind::Class)
+        .collect();
+    let uids: Vec<u64> = classes.iter().map(|&i| graph.nodes[i].uid).collect();
+    let distinct: std::collections::HashSet<u64> = uids.iter().copied().collect();
+    assert_eq!(distinct.len(), 4, "{uids:?}");
+    assert_eq!(later_rows(&graph), [3, 4, 5]);
+    let pool = graph.string_pool.as_slice();
+    let mut full_sets: Vec<(u32, u32)> = graph
+        .edges
+        .iter()
+        .filter(|e| e.reason.resolve(pool) == ecp_core::analyzer::types::OVERLOAD_SET_REASON)
+        .map(|e| {
+            (
+                graph.nodes[e.source as usize].span.0,
+                graph.nodes[e.target as usize].span.0,
+            )
+        })
+        .collect();
+    full_sets.sort_unstable();
+    assert_eq!(full_sets, [(2, 5), (3, 4)]);
+
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&graph).unwrap();
+    let base = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+    let local = ecp_analyzer::c_sharp::parser::CSharpProvider::new()
+        .unwrap()
+        .parse_file(Path::new("App/Shapes.cs"), ARITY_THEN_REPEAT.as_bytes())
+        .unwrap();
+    let view = OverlayView::build(base, &[OverlayFileInput::from(local)]).unwrap();
+    let nodes = view.virtual_nodes();
+    let virtual_classes: Vec<_> = nodes.iter().filter(|n| n.kind == NodeKind::Class).collect();
+    assert_eq!(
+        virtual_classes.iter().map(|n| n.uid).collect::<Vec<_>>(),
+        uids,
+        "the overlay numbers the file as the full build"
+    );
+    assert_eq!(
+        virtual_classes
+            .iter()
+            .map(|n| n.later_overload)
+            .collect::<Vec<_>>(),
+        [false, true, true, true]
+    );
+    let line_of = |idx: u32| nodes[(idx - view.base_len()) as usize].start_line - 1;
+    let mut view_sets: Vec<(u32, u32)> = view
+        .edges()
+        .iter()
+        .filter(|e| e.reason == ecp_core::analyzer::types::OVERLOAD_SET_REASON)
+        .map(|e| (line_of(e.source), line_of(e.target)))
+        .collect();
+    view_sets.sort_unstable();
+    assert_eq!(view_sets, full_sets);
 }

@@ -1238,19 +1238,23 @@ impl<'a> OverlayFacts<'a> {
                 .cloned()
                 .unwrap_or_default();
         }
+        // The index stores each set as `overload_set` References from the
+        // first. A name scan over `later_nodes` cannot tell an overload from
+        // a C# arity sibling, which joins no set.
         let graph = self.graph;
-        let node = &graph.nodes[first as usize];
-        let owner = node.owner_class.resolve(&graph.string_pool);
-        let mut later: Vec<u32> = graph
-            .nodes_by_name(node.name.resolve(&graph.string_pool))
-            .filter(|&idx| {
-                let other = &graph.nodes[idx as usize];
-                idx != first
-                    && other.file_idx == node.file_idx
-                    && NodeKind::from(&other.kind) == NodeKind::from(&node.kind)
-                    && other.owner_class.resolve(&graph.string_pool) == owner
-                    && graph.is_later_overload(idx)
+        let out = &graph.out_offsets;
+        let (start, end) = (
+            out[first as usize].to_native() as usize,
+            out[first as usize + 1].to_native() as usize,
+        );
+        let mut later: Vec<u32> = graph.edges[start..end]
+            .iter()
+            .filter(|edge| {
+                RelType::from(&edge.rel_type) == RelType::References
+                    && edge.reason.resolve(&graph.string_pool)
+                        == crate::analyzer::types::OVERLOAD_SET_REASON
             })
+            .map(|edge| edge.target.to_native())
             .collect();
         later.sort_unstable();
         later
@@ -3111,24 +3115,31 @@ impl<'a> RustModules<'a> {
             return false;
         }
         let kind = NodeKind::from(&node.kind);
-        // The index's per-node AND: Pass 1 merges a later declaration of
-        // `idx`'s uid into `idx` and keeps it as a tombstone of the same
-        // kind, file and span. A method or constructor has none: a repeat is
-        // an overload of its own. An unscoped `fn` (one a `mod` inside the
-        // body holds) can have one.
-        if crate::uid::keeps_overloads(kind) {
+        // The index's per-node AND over the raws Pass 1 merged into `idx`.
+        // Only a property, variable or constant merges a repeat
+        // (`merges_repeats`), as a tombstone of the same kind and file with
+        // the uid `tombstone(overload(uid, n))`; any other repeat is a node
+        // of its own, so `idx` merged nothing.
+        if !crate::uid::merges_repeats(kind) {
             return true;
         }
         if let Some(&body_local) = self.base_twin_scans.borrow().get(&idx) {
             return body_local;
         }
-        let twin_uid = crate::uid::tombstone(node.uid.to_native());
-        let body_local = !graph.nodes_by_kind(kind).any(|twin| {
-            let twin = &graph.nodes[twin as usize];
-            twin.uid.to_native() == twin_uid
-                && twin.file_idx.to_native() == file_idx
-                && !inside(stored_span(twin))
-        });
+        let same_file: Vec<_> = graph
+            .nodes_by_kind(kind)
+            .map(|i| &graph.nodes[i as usize])
+            .filter(|twin| twin.file_idx.to_native() == file_idx)
+            .collect();
+        // A repeat's ordinal counts the earlier declarations of its uid, so
+        // it stays below the file's count of this kind.
+        let base = node.uid.to_native();
+        let twin_uids: FxHashSet<u64> = (1..same_file.len() as u32)
+            .map(|n| crate::uid::tombstone(crate::uid::overload(base, n)))
+            .collect();
+        let body_local = !same_file
+            .iter()
+            .any(|twin| twin_uids.contains(&twin.uid.to_native()) && !inside(stored_span(twin)));
         self.base_twin_scans.borrow_mut().insert(idx, body_local);
         body_local
     }
@@ -5644,8 +5655,17 @@ pub(super) fn resolve_edges(
             }
             _ => target,
         };
+    // B1 (the index's `MergedRows`): a merged row's edges start at its
+    // survivor.
+    let survivor_of: FxHashMap<u32, u32> = decorated.survivors.iter().copied().collect();
     for (file_ord, file) in files.iter().enumerate() {
         let first = (virt_cursor - base_len) as usize;
+        // The keys of the file's per-symbol edges, kept only for a file with
+        // a merged row: its edge equal to one emitted already is dropped.
+        let file_end = virt_cursor + file.symbols.len() as u32;
+        let mut seen: Option<FxHashSet<(u32, u32, u8)>> = (virt_cursor..file_end)
+            .any(|virt| survivor_of.contains_key(&virt))
+            .then(FxHashSet::default);
         emit_closure_references(
             file,
             &nodes[first..first + file.symbols.len()],
@@ -5673,6 +5693,15 @@ pub(super) fn resolve_edges(
         for sym in &file.symbols {
             let source = virt_cursor;
             virt_cursor += 1;
+            let from = survivor_of.get(&source).copied().unwrap_or(source);
+            let mut emit = |edge: ViewEdge| {
+                let fresh = seen.as_mut().is_none_or(|seen| {
+                    seen.insert((edge.source, edge.target, edge.rel_type as u8))
+                });
+                if fresh || from == source {
+                    push_edge(edge);
+                }
+            };
             let heritage: &[String] = if any_heritage {
                 enclosing_class_heritage(sym, &file.symbols)
             } else {
@@ -5928,7 +5957,7 @@ pub(super) fn resolve_edges(
                 );
                 // The index drops self-recursion Calls (builder's
                 // `target_id == current_node_idx` skip).
-                if let Some((target, confidence)) = hit.filter(|&(t, _)| t != source) {
+                if let Some((target, confidence)) = hit.filter(|&(t, _)| t != from) {
                     // The index's Pass 2 names the reason by the same
                     // confidence (`CallReasons::of`).
                     let reason = if confidence == NEAREST_COPY_CONFIDENCE {
@@ -5940,8 +5969,8 @@ pub(super) fn resolve_edges(
                     } else {
                         super::super::merged::OVERLAY_EDGE_REASON
                     };
-                    push_edge(ViewEdge {
-                        source,
+                    emit(ViewEdge {
+                        source: from,
                         target,
                         rel_type: RelType::Calls,
                         confidence,
@@ -5990,7 +6019,7 @@ pub(super) fn resolve_edges(
                         true => target,
                         false => twin_read_from(target, file_ord, HeritageNode::span(sym)),
                     };
-                    if target == source || name_edges.contains(&target) {
+                    if target == from || name_edges.contains(&target) {
                         continue;
                     }
                     name_edges.push(target);
@@ -5999,8 +6028,8 @@ pub(super) fn resolve_edges(
                     } else {
                         (RelType::ReadsField, VALUE_READ_REASON)
                     };
-                    push_edge(ViewEdge {
-                        source,
+                    emit(ViewEdge {
+                        source: from,
                         target,
                         rel_type,
                         confidence,
@@ -6027,12 +6056,12 @@ pub(super) fn resolve_edges(
                     ) else {
                         continue;
                     };
-                    if target == source || emitted.contains(&(target, variant_ref.pattern)) {
+                    if target == from || emitted.contains(&(target, variant_ref.pattern)) {
                         continue;
                     }
                     emitted.push((target, variant_ref.pattern));
-                    push_edge(ViewEdge {
-                        source,
+                    emit(ViewEdge {
+                        source: from,
                         target,
                         rel_type: RelType::References,
                         confidence,
@@ -6071,12 +6100,12 @@ pub(super) fn resolve_edges(
                     continue;
                 };
                 let target = twin_read_from(target, file_ord, HeritageNode::span(sym));
-                if target == source || field_edges.contains(&target) {
+                if target == from || field_edges.contains(&target) {
                     continue;
                 }
                 field_edges.push(target);
-                push_edge(ViewEdge {
-                    source,
+                emit(ViewEdge {
+                    source: from,
                     target,
                     rel_type: RelType::ReadsField,
                     confidence,
@@ -6118,47 +6147,58 @@ mod tests {
     use crate::graph_fixture::GraphFixture;
     use rkyv::rancor::Error as RkyvError;
 
-    /// `src/m.rs`: `fn setup` (lines 0-4) holds `mod inner { pub fn helper }`
-    /// with `helper` on line 2 and `impl Foo { fn new }` with `new` on line 3,
-    /// then the module-level `mod inner { pub fn helper }` with `helper` on
-    /// line `twin_line`. A `mod` breaks the lexical link, so both `helper`s
-    /// are unscoped `Function`s owned by `inner` and share a uid: Pass 1
-    /// keeps the first, the body-local one, and stores the second as its
-    /// tombstone (bit-inverse uid, no name) in the second's slot. Returns
-    /// the bytes and the idxs of the survivor and of `new`.
-    fn inner_helper_twins(twin_line: u32) -> (Vec<u8>, u32, u32, u32) {
+    /// `src/m.rs`: `fn setup` (lines 0-4) holds `mod inner { name }` with
+    /// `name` of `kind` on line 2, a twin-less `lone` of `kind` on line 1
+    /// and `impl Foo { fn new }` with `new` on line 3, then the
+    /// module-level `mod inner { name }` on line `twin_line`. A `mod` breaks
+    /// the lexical link, so both `name`s are unscoped, owned by `inner`, and
+    /// share a base uid. Pass 1 stores the second as Pass 1's `UidSlot`
+    /// says: a merged repeat (`merges_repeats`) as a tombstone with the uid
+    /// `tombstone(overload(base, 1))` and no name, any other repeat as a
+    /// later node of its own under `overload(base, 1)`. Returns the bytes
+    /// and the idxs of the first, of `new`, of `lone` and of the twin.
+    fn inner_twins(kind: NodeKind, name: &str, twin_line: u32) -> (Vec<u8>, u32, u32, u32, u32) {
         const M: &str = "src/m.rs";
         let mut fx = GraphFixture::new();
         let setup = fx.func(M, "setup");
         fx.span(setup, (0, 0, 4, 1));
-        let survivor = fx.node_owned(NodeKind::Function, M, "inner", "helper");
+        let survivor = fx.node_owned(kind, M, "inner", name);
         fx.span(survivor, (2, 8, 2, 30));
         let new = fx.method(M, "Foo", "new");
         fx.span(new, (3, 8, 3, 30));
-        let lone = fx.node_owned(NodeKind::Function, M, "inner", "lone");
+        let lone = fx.node_owned(kind, M, "inner", "lone");
         fx.span(lone, (1, 8, 1, 30));
-        let twin = fx.node_owned(NodeKind::Function, M, "inner", "helper");
+        let twin = fx.node_owned(kind, M, "inner", name);
         fx.span(twin, (twin_line, 4, twin_line, 26));
-        let node = &mut fx.assembly_mut().nodes[twin as usize];
-        node.uid = crate::uid::tombstone(node.uid);
-        node.name = Default::default();
-        node.owner_class = Default::default();
-        (fx.into_bytes(), survivor, new, lone)
+        let assembly = fx.assembly_mut();
+        let node = &mut assembly.nodes[twin as usize];
+        node.uid = crate::uid::overload(node.uid, 1);
+        if crate::uid::merges_repeats(kind) {
+            node.uid = crate::uid::tombstone(node.uid);
+            node.name = Default::default();
+            node.owner_class = Default::default();
+        } else {
+            let later = &mut assembly.later_nodes;
+            later.resize(twin as usize / 8 + 1, 0);
+            later[twin as usize / 8] |= 1 << (twin % 8);
+        }
+        (fx.into_bytes(), survivor, new, lone, twin)
     }
 
-    /// Contract: the clean side's per-uid AND covers an unscoped `fn` (one
-    /// a `mod` inside a body holds), as the index's `rust_body_local_rows`
-    /// does: with a module-level tombstoned twin the survivor is a module
-    /// item, with a body-local one it stays body-local. A method keeps
-    /// overloads, so it has no tombstoned twin and stays body-local. The
-    /// answer is memoized per node: a twin-less `lone` asked in between keeps
-    /// its own answer. Before the fix every callable inside a body was
-    /// body-local.
+    /// Stands for: the clean side's per-uid AND covers the raws Pass 1
+    /// merged, as the index's `rust_body_local_rows` does. A merged
+    /// constant's tombstone stores `tombstone(overload(base, n))`; with it
+    /// at module level the first is a module item, with it in the body the
+    /// first stays body-local. The answer is memoized per node: a twin-less
+    /// `lone` asked in between keeps its own answer. A method has no merged
+    /// twin and stays body-local. Red before the fix: the scan looked for
+    /// `tombstone(base)`, which no node stores since every merged repeat
+    /// takes its ordinal's uid, so the first read body-local on both lines.
     #[test]
-    fn test_is_body_local_unscoped_fn_twin_decides_survivor_method_stays_body_local() {
+    fn test_is_body_local_merged_const_twin_decides_first_method_stays_body_local() {
         let removed = FxHashSet::default();
         for (twin_line, want) in [(6, false), (2, true)] {
-            let (bytes, survivor, new, lone) = inner_helper_twins(twin_line);
+            let (bytes, survivor, new, lone, _) = inner_twins(NodeKind::Const, "LIMIT", twin_line);
             let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
             let modules = RustModules::new(graph, &[], &removed, Default::default());
             assert_eq!(
@@ -6166,13 +6206,31 @@ mod tests {
                 want,
                 "twin on line {twin_line}"
             );
-            assert!(modules.is_body_local(lone), "a twin-less fn in the body");
+            assert!(modules.is_body_local(lone), "a twin-less const in the body");
             assert_eq!(
                 modules.is_body_local(survivor),
                 want,
                 "the memoized answer, twin on line {twin_line}"
             );
             assert!(modules.is_body_local(new), "a method inside the body");
+        }
+    }
+
+    /// Stands for: an unscoped `fn` repeat is a later node of its own, not
+    /// a raw Pass 1 merged into the first, so a module-level repeat leaves
+    /// the first in the body body-local. The repeat's own answer comes
+    /// from its own span.
+    #[test]
+    fn test_is_body_local_later_fn_twin_first_stays_body_local() {
+        let removed = FxHashSet::default();
+        for twin_line in [6, 2] {
+            let (bytes, survivor, _, _, twin) =
+                inner_twins(NodeKind::Function, "helper", twin_line);
+            let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+            assert!(graph.is_later_overload(twin), "the fixture's twin");
+            let modules = RustModules::new(graph, &[], &removed, Default::default());
+            assert!(modules.is_body_local(survivor), "twin on line {twin_line}");
+            assert_eq!(modules.is_body_local(twin), twin_line == 2);
         }
     }
 }

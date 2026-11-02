@@ -41,7 +41,10 @@ pub const GRAPH_MAGIC: [u8; 8] = *b"ECP-RS\0\0";
 /// v18: `RelType::PartOf` (discriminant 23) links each C# partial type
 ///     part to its group's representative part.
 /// v19: `File::parsed_language` (C5 `ParsedLanguage` per file).
-pub const GRAPH_FORMAT_VERSION: u32 = 19;
+/// v20: `later_nodes` (one bit per node that no name table holds: a later
+///     overload, a redefinition, a C# arity sibling), so the overlay skips
+///     the nodes the index's name lookups skip.
+pub const GRAPH_FORMAT_VERSION: u32 = 20;
 
 impl std::str::FromStr for NodeKind {
     type Err = ();
@@ -1351,6 +1354,13 @@ pub struct ZeroCopyGraph {
     /// [`LexicalParentFact`]. Empty while no language opts in
     /// ([`crate::analyzer::lexical::lexical_scope_kinds`]).
     pub lexical_parents: Vec<LexicalParentFact>,
+
+    // ── Schema v20 additions ─────────────────────────────────────────
+    /// Bit `i % 8` of byte `i / 8` is set when `nodes[i]` is a
+    /// `UidSlot::Later` node: Pass 1 keeps it out of every name table
+    /// (`SymbolTable::register_overload`, `register_arity_sibling`), so a
+    /// name lookup returns its first instead.
+    pub later_nodes: Vec<u8>,
 }
 
 impl ZeroCopyGraph {
@@ -1443,8 +1453,8 @@ impl ArchivedZeroCopyGraph {
         Some(hits)
     }
 
-    /// Whether the v13 import / export facts are present and consistent
-    /// with `files` and `nodes`. An archive without them cannot tell a file
+    /// Whether the v13 import / export facts and the v20 `later_nodes`
+    /// bitmap are present and consistent with `files` and `nodes`. An archive without them cannot tell a file
     /// with no imports from a file whose imports were never recorded, so
     /// the loader rejects it and the graph is rebuilt.
     ///
@@ -1456,6 +1466,7 @@ impl ArchivedZeroCopyGraph {
             && csr_consistent(&self.file_export_aliases, files, self.export_aliases.len())
             && self.file_flags.len() == files
             && self.exported_nodes.len() == self.nodes.len().div_ceil(8)
+            && self.later_nodes.len() == self.nodes.len().div_ceil(8)
             && (self.file_path_order.is_empty() || self.file_path_order.len() == files)
     }
 
@@ -1652,26 +1663,14 @@ impl ArchivedZeroCopyGraph {
         crate::contracts::routing::ParsedLanguage::from_bytes(file.parsed_language)
     }
 
-    /// Whether `node_idx` is a later overload ([`crate::uid::keeps_overloads`]):
-    /// a node the index keeps but never binds by name, so a name lookup that
-    /// mirrors the index's resolver must skip it. Its uid is the only mark.
+    /// Whether `node_idx` is a `UidSlot::Later` node ([`ZeroCopyGraph::later_nodes`]):
+    /// a later overload, a redefinition, a scoped repeat or a C# arity
+    /// sibling. The index keeps it but never binds it by name, so a name
+    /// lookup that mirrors the index's resolver must skip it.
     pub fn is_later_overload(&self, node_idx: u32) -> bool {
-        let pool = &self.string_pool;
-        let node = &self.nodes[node_idx as usize];
-        let kind = NodeKind::from(&node.kind);
-        crate::uid::keeps_overloads(kind)
-            && self
-                .files
-                .get(node.file_idx.to_native() as usize)
-                .is_some_and(|file| {
-                    node.uid.to_native()
-                        != crate::uid::compute(
-                            kind,
-                            file.path.resolve(pool),
-                            Some(node.owner_class.resolve(pool)),
-                            node.name.resolve(pool),
-                        )
-                })
+        self.later_nodes
+            .get(node_idx as usize / 8)
+            .is_some_and(|bits| *bits & (1u8 << (node_idx % 8)) != 0)
     }
 
     pub fn is_exported_node(&self, node_idx: u32) -> bool {
@@ -1741,6 +1740,7 @@ impl Default for ZeroCopyGraph {
             route_middleware: Vec::new(),
             workspace: Default::default(),
             lexical_parents: Vec::new(),
+            later_nodes: Vec::new(),
         }
     }
 }

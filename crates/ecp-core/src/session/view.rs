@@ -244,9 +244,7 @@ use crate::analyzer::decorates::DECORATES_REASON;
 use crate::analyzer::heritage::HeritageNode;
 use crate::analyzer::heritage::HERITAGE_REASONS;
 use crate::analyzer::import_edges::ImportReason;
-use crate::analyzer::lexical::{
-    enclosing_types, file_identities, later_is_arity_twin, splits_by_arity,
-};
+use crate::analyzer::lexical::{enclosing_types, path_identities, splits_by_arity, stored_uid};
 use crate::analyzer::membership::{CLASS_MEMBERSHIP_IMPL_REASON, CLASS_MEMBERSHIP_REASON};
 use crate::analyzer::overrides::OVERRIDES_REASONS;
 use crate::analyzer::record_nodes::{
@@ -259,7 +257,7 @@ use crate::analyzer::types::{
     FUNCTION_REFERENCE_REASON, NEAREST_COPY_REASON, OVERLOAD_SET_REASON, UNTYPED_NAME_REASON,
     VALUE_READ_REASON, VARIANT_PATTERN_REASON, VARIANT_USE_REASON,
 };
-use crate::contracts::identity::{pair_by_anchor, DeclIdentity, UidSlot};
+use crate::contracts::identity::{pair_by_anchor, DeclIdentity, LaterReason, UidSlot};
 use crate::contracts::routing::ParsedLanguage;
 use crate::file_category::{FileMeta, Language};
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
@@ -300,7 +298,7 @@ pub struct OverlaySymbol {
     pub return_type: Option<String>,
     /// [`RawNode::generic_arity`](crate::analyzer::types::RawNode::generic_arity):
     /// the declared generic arity of a C# type, 0 for every other node. The
-    /// identity numbering reads it ([`file_identities`]), so a dirty C#
+    /// identity numbering reads it ([`crate::analyzer::lexical::file_identities`]), so a dirty C#
     /// `Conv<T>` beside `Conv` takes the full build's uid.
     pub generic_arity: u32,
     /// `RawFunctionMeta.flags` of a function, method or constructor: static,
@@ -868,10 +866,11 @@ impl OverlayView {
         // First virtual idx → its later overloads, as the index's
         // `SymbolTable::register_overload` numbers them.
         let mut later_overloads: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
-        // Virtual offsets of the later same-uid declarations the index
-        // tombstones. They keep their first's uid and name until every pass
-        // below has read them as its twin, then take the tombstone's shape.
-        let mut tombstones: Vec<usize> = Vec::new();
+        // Virtual offsets of the merged repeats the index tombstones, with
+        // the uid it stores. They keep their first's uid and name until
+        // every pass below has read them as its twin, then take the
+        // tombstone's shape.
+        let mut tombstones: Vec<(usize, u64)> = Vec::new();
         // Each tombstone's virtual idx with its survivor's: the slot pairs
         // of the replay's `RawIndexMap`.
         let mut survivors: Vec<(u32, u32)> = Vec::new();
@@ -882,11 +881,33 @@ impl OverlayView {
         // `SymbolTable::twin_read_from`.
         let mut member_twins: resolution::MemberTwins = FxHashMap::default();
 
+        // The inputs of one path number as one file (`path_identities`), as
+        // the index's Pass 1 numbers its `LocalGraph`s: a slot's `first`
+        // indexes the path's rows, its inputs concatenated in input order.
+        let starts: Vec<u32> = files
+            .iter()
+            .scan(base_len, |next, file| {
+                let start = *next;
+                *next += file.symbols.len() as u32;
+                Some(start)
+            })
+            .collect();
+        let mut path_inputs: FxHashMap<&str, Vec<usize>> = FxHashMap::default();
         for (file_ord, file) in files.iter().enumerate() {
-            let rel: Arc<str> = Arc::from(file.rel_path.as_str());
-            let file_start = base_len + nodes.len() as u32;
+            path_inputs
+                .entry(file.rel_path.as_str())
+                .or_default()
+                .push(file_ord);
+        }
+        let mut file_ids: Vec<Vec<DeclIdentity>> = vec![Vec::new(); files.len()];
+        let mut file_pairs: Vec<Vec<Option<u32>>> = vec![Vec::new(); files.len()];
+        for (&path, inputs) in &path_inputs {
+            let rows: Vec<&[OverlaySymbol]> = inputs
+                .iter()
+                .map(|&k| files[k].symbols.as_slice())
+                .collect();
             // The index's numbering (`assign_file`), from the same fields.
-            let identities = file_identities(&file.rel_path, &file.symbols, |sym| {
+            let per_input = path_identities(path, &rows, |sym| {
                 (
                     sym.kind,
                     sym.owner_class.as_deref(),
@@ -895,31 +916,65 @@ impl OverlayView {
                     sym.generic_arity,
                 )
             });
+            let all: Vec<DeclIdentity> = per_input.iter().flatten().copied().collect();
             let (pairs, unpaired) = pair_with_base(
                 graph,
-                &file.rel_path,
+                path,
                 dirty_base_by_path
-                    .get(file.rel_path.as_str())
+                    .get(path)
                     .map(Vec::as_slice)
                     .unwrap_or_default(),
-                &identities,
+                &all,
             );
             unpaired_base.extend(unpaired);
+            let mut pairs = pairs.into_iter();
+            for (&k, ids) in inputs.iter().zip(per_input) {
+                file_pairs[k] = pairs.by_ref().take(ids.len()).collect();
+                file_ids[k] = ids;
+            }
+        }
+        let path_virt = |inputs: &[usize], mut at: u32| -> u32 {
+            for &k in inputs {
+                let len = files[k].symbols.len() as u32;
+                if at < len {
+                    return starts[k] + at;
+                }
+                at -= len;
+            }
+            unreachable!("a slot's first is a row of its path")
+        };
+
+        for (file_ord, file) in files.iter().enumerate() {
+            let rel: Arc<str> = Arc::from(file.rel_path.as_str());
+            let inputs = &path_inputs[file.rel_path.as_str()];
+            // This input's first row among the path's rows.
+            let input_offset: u32 = inputs
+                .iter()
+                .take_while(|&&k| k != file_ord)
+                .map(|&k| files[k].symbols.len() as u32)
+                .sum();
             let language = file.file_meta().language;
             // The innermost type around each symbol, computed on the file's
             // first member twin only.
             let mut declaring_types: Option<Vec<Option<usize>>> = None;
+            let identities = std::mem::take(&mut file_ids[file_ord]);
+            let pairs = std::mem::take(&mut file_pairs[file_ord]);
             for (offset, ((sym, identity), replaced_base)) in
                 file.symbols.iter().zip(identities).zip(pairs).enumerate()
             {
                 let virt = base_len + nodes.len() as u32;
+                let mut uid = identity.slot.uid();
                 let later_overload = match identity.slot {
                     // An arity twin: a C# type or delegate of another
                     // generic arity, or a member such a type declares. Like
                     // an overload, the index binds it by id only, never by
                     // name, but it joins no overload set
                     // (`register_arity_sibling`).
-                    UidSlot::Later { first, .. } if later_is_arity_twin(language, sym.kind) => {
+                    UidSlot::Later {
+                        first,
+                        reason: LaterReason::Arity,
+                        ..
+                    } => {
                         if !splits_by_arity(language, sym.kind) {
                             let types = declaring_types.get_or_insert_with(|| {
                                 let rows: Vec<(NodeKind, Span)> = file
@@ -932,35 +987,38 @@ impl OverlayView {
                             let scope = |raw: usize| {
                                 types[raw].map(|ty| HeritageNode::span(&file.symbols[ty]))
                             };
-                            let (_, set) =
-                                member_twins.entry(file_start + first).or_insert_with(|| {
-                                    let first_scope = scope(first as usize)
-                                        .map(|span| (file_start + first, span));
-                                    (file_ord, first_scope.into_iter().collect())
-                                });
+                            let first_virt = path_virt(inputs, first);
+                            let (_, set) = member_twins.entry(first_virt).or_insert_with(|| {
+                                // The first's type is known only when the
+                                // first is a row of this input.
+                                let first_scope = first
+                                    .checked_sub(input_offset)
+                                    .and_then(|raw| scope(raw as usize))
+                                    .map(|span| (first_virt, span));
+                                (file_ord, first_scope.into_iter().collect())
+                            });
                             set.extend(scope(offset).map(|span| (virt, span)));
                         }
                         true
                     }
                     UidSlot::Later { first, .. } => {
                         later_overloads
-                            .entry(file_start + first)
+                            .entry(path_virt(inputs, first))
                             .or_default()
                             .push(virt);
                         true
                     }
                     UidSlot::Duplicate { first, .. } => {
-                        tombstones.push(nodes.len());
-                        survivors.push((virt, file_start + first));
+                        let first_virt = path_virt(inputs, first);
+                        uid = nodes[(first_virt - base_len) as usize].uid;
+                        tombstones.push((nodes.len(), stored_uid(identity.slot)));
+                        survivors.push((virt, first_virt));
                         false
                     }
                     UidSlot::First(_) => false,
                 };
-                let uid = identity.slot.uid();
-                // Two inputs of one path both pair a base node: the first
-                // one replaces it.
                 if let Some(base_idx) = replaced_base {
-                    replaced.entry(base_idx).or_insert(virt);
+                    replaced.insert(base_idx, virt);
                 }
                 nodes.push(ViewNode {
                     uid,
@@ -982,8 +1040,9 @@ impl OverlayView {
             .copied()
             .filter(|idx| !replaced.contains_key(idx))
             .collect();
-        // Two inputs of one path can pair different halves of its base, so
-        // the unpaired set is final only once `replaced` is.
+        // A base node pairs one row of its path at most, but another path's
+        // replay can still pair it, so the unpaired set is final only once
+        // `replaced` is.
         let mut hidden_base: Vec<u32> = unpaired_base
             .into_iter()
             .filter(|idx| !replaced.contains_key(idx))
@@ -1048,10 +1107,10 @@ impl OverlayView {
         dedup_gaps(&mut gaps);
 
         // The index's tombstone (`pass1_register_nodes`): the slot stays,
-        // with the bit-inverse uid and no name or owner.
-        for offset in tombstones {
+        // with the stored tombstone uid and no name or owner.
+        for (offset, stored) in tombstones {
             let node = &mut nodes[offset];
-            node.uid = crate::uid::tombstone(node.uid);
+            node.uid = stored;
             node.name.clear();
             node.owner_class = None;
         }
@@ -1075,7 +1134,6 @@ impl OverlayView {
                 base_records,
                 dirty_base: &dirty_base,
                 lexical_parents: &lexical_parents,
-                later_overloads: &later_overloads,
             },
             &mut nodes,
             &mut edges,
@@ -1669,17 +1727,20 @@ impl OverlayView {
     }
 }
 
-/// The base node each declaration of one dirty file replaces, in slice
+/// The base node each declaration of one dirty path replaces, in slice
 /// order: [`pair_by_anchor`] between the anchors of `identities` (the
-/// file's parse) and the anchors of `base` (the path's base nodes in graph
-/// order, numbered by the same [`file_identities`]). A declaration pairs
-/// only when its anchor occurs once on each side, so an overload set without
-/// a discriminator pairs nothing, and its base members are suppressed: an
-/// ordinal proves nothing about which member an edit kept.
+/// path's parse, its inputs concatenated) and the anchors of `base` (the
+/// path's base nodes in graph order, each `graph.files` entry one input of
+/// the same [`path_identities`]). A declaration pairs only when its anchor
+/// occurs once on each side, so an overload set or a redefinition group
+/// without a discriminator pairs nothing, and its base members are hidden
+/// ([`HiddenDecl`]): an ordinal proves nothing about which member an edit
+/// kept.
 ///
-/// A `Duplicate` row takes no part. The index tombstones it and keeps its
-/// first as the one node of that anchor, so the first still pairs. A base
-/// tombstone has an empty name, so its anchor matches no declaration.
+/// A `Duplicate` row (a merged repeat of a property, variable or constant)
+/// takes no part. The index tombstones it and keeps its first as the one
+/// node of that anchor, so the first still pairs. A base tombstone has an
+/// empty name, so its anchor matches no declaration.
 ///
 /// The second value lists the base nodes left unpaired although the parse
 /// still names their anchor and they carry a name: with the anchor unique on
@@ -1698,7 +1759,10 @@ fn pair_with_base(
     let pool = &graph.string_pool;
     // The stored graph keeps no generic arity. Only the anchors are read
     // here, and the arity enters no anchor, so 0 changes none of them.
-    let base_anchors: Vec<u64> = file_identities(path, base, |&i| {
+    let inputs: Vec<&[u32]> = base
+        .chunk_by(|&a, &b| graph.nodes[a as usize].file_idx == graph.nodes[b as usize].file_idx)
+        .collect();
+    let base_anchors: Vec<u64> = path_identities(path, &inputs, |&i| {
         let node = &graph.nodes[i as usize];
         (
             NodeKind::from(&node.kind),
@@ -1714,6 +1778,7 @@ fn pair_with_base(
         )
     })
     .into_iter()
+    .flatten()
     .map(|id| id.anchor)
     .collect();
     let rows: Vec<usize> = (0..identities.len())
@@ -2169,9 +2234,11 @@ mod tests {
         }
     }
 
-    /// Stands for: a closure whose uid collides links from the first live
-    /// enclosing node to the first live closure. The new file's `File` node
-    /// and its replayed `Defines` (F7a-1) are not what this pins.
+    /// Stands for: a repeated `enclosing` and a repeated closure are later
+    /// nodes of their own (design uid §2.3). Each first links its repeat
+    /// (`overload_set` References), then each closure links from the node
+    /// whose lines enclose it, the second `enclosing`. The new file's `File`
+    /// node and its replayed `Defines` (F7a-1) are not what this pins.
     #[test]
     fn test_build_closure_uid_collisions_use_first_live_nodes() {
         let bytes = GraphFixture::new().into_bytes();
@@ -2198,37 +2265,132 @@ mod tests {
             .filter(|edge| edge.rel_type == RelType::References)
             .map(|edge| (edge.source, edge.target, edge.confidence))
             .collect();
-        assert_eq!(references, vec![(0, 2, 1.0)]);
+        assert_eq!(
+            references,
+            vec![(0, 1, 1.0), (2, 3, 1.0), (1, 2, 1.0), (1, 3, 1.0)]
+        );
     }
 
-    #[test]
-    fn test_build_overload_twins_redirect_base_to_closure_parent() {
-        let mut fx = GraphFixture::new();
-        let base_enclosing = fx.func("App.java", "enclosing");
-        let bytes = fx.into_bytes();
-        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+    /// The view of a dirty `App.java` over `bytes`: `enclosing` on lines
+    /// 1-4, `twins` more `enclosing`s on lines 5-9, and a closure on lines
+    /// 6-7. With no twin the one `enclosing` spans lines 1-9.
+    fn enclosing_view(bytes: &[u8], twins: usize) -> OverlayView {
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(bytes).unwrap();
         let mut parent = sym("enclosing", &[]);
         parent.end_line = 4;
-        let mut overload = parent.clone();
-        overload.start_line = 5;
-        overload.end_line = 9;
+        let mut symbols = vec![parent.clone()];
+        for _ in 0..twins {
+            let mut twin = parent.clone();
+            twin.start_line = 5;
+            twin.end_line = 9;
+            symbols.push(twin);
+        }
+        if twins == 0 {
+            symbols[0].end_line = 9;
+        }
         let mut closure = sym("<anonymous:6:2>", &[]);
         closure.start_line = 6;
         closure.end_line = 7;
+        symbols.push(closure);
         let file = OverlayFileInput {
             parsed_language: None,
             export_aliases: Vec::new(),
             rel_path: "App.java".into(),
-            symbols: vec![parent, overload, closure],
+            symbols,
             imports: vec![],
         };
-        let view = OverlayView::build(graph, &[file]).unwrap();
+        OverlayView::build(graph, &[file]).unwrap()
+    }
+
+    /// Stands for: two dirty `enclosing` redefinitions share an anchor, so
+    /// neither replaces the base's one `enclosing`. It is hidden, and the
+    /// caveat names it; no clean caller is redirected onto a guess. Before
+    /// design uid §2.3 the second was a tombstone and the first paired.
+    #[test]
+    fn test_build_overload_twins_hide_base_with_caveat() {
+        let mut fx = GraphFixture::new();
+        let base_enclosing = fx.func("App.java", "enclosing");
+        let bytes = fx.into_bytes();
+        let view = enclosing_view(&bytes, 1);
+        assert_eq!(view.redirect(base_enclosing), None);
+        assert_eq!(
+            view.hidden_declarations(),
+            [HiddenDecl {
+                path: "App.java".into(),
+                kind: NodeKind::Function,
+                owner: String::new(),
+                name: "enclosing".into(),
+                count: 1,
+            }]
+        );
+    }
+
+    /// Stands for: with ONE dirty `enclosing` the base node pairs it, and a
+    /// clean caller of the base node reaches the closure downstream.
+    #[test]
+    fn test_build_one_enclosing_redirects_base_to_closure_parent() {
+        let mut fx = GraphFixture::new();
+        let base_enclosing = fx.func("App.java", "enclosing");
+        let bytes = fx.into_bytes();
+        let view = enclosing_view(&bytes, 0);
         let parent = view.redirect(base_enclosing).unwrap();
-        let closure = view.base_len() + 2;
+        let closure = view.base_len() + 1;
         assert!(
             view.overlay_out(parent)
                 .any(|(_, e)| e.target == closure && e.rel_type == RelType::References),
-            "a clean caller of the base overload must reach the closure downstream"
+            "a clean caller of the base node must reach the closure downstream"
+        );
+        assert!(view.hidden_declarations().is_empty());
+    }
+
+    /// Stands for: the base and the overlay mark the same nodes later. A
+    /// redefined `f` is a later node in the stored `later_nodes` bitmap and
+    /// in the overlay's `later_overload`, so a name scan over either side
+    /// skips it as the index does. Red before 1b: the base read a later
+    /// node from a recomputed uid, which only an overload kind passed, so a
+    /// redefined function read as a first.
+    #[test]
+    fn test_is_later_overload_view_and_base_agree_for_later_function() {
+        let mut fx = GraphFixture::new();
+        let first = fx.func("a.py", "f");
+        fx.span(first, (0, 0, 1, 0));
+        let later = fx.func("a.py", "f");
+        fx.span(later, (3, 0, 4, 0));
+        let assembly = fx.assembly_mut();
+        let node = &mut assembly.nodes[later as usize];
+        node.uid = crate::uid::overload(node.uid, 1);
+        assembly.later_nodes = vec![1 << later];
+        let bytes = fx.into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let mut second = sym("f", &[]);
+        second.start_line = 4;
+        second.end_line = 5;
+        let file = OverlayFileInput {
+            parsed_language: None,
+            export_aliases: Vec::new(),
+            rel_path: "a.py".into(),
+            symbols: vec![sym("f", &[]), second],
+            imports: vec![],
+        };
+        let view = OverlayView::build(graph, &[file]).unwrap();
+        let nodes = view.virtual_nodes();
+        let base_len = view.base_len();
+        let base_side: Vec<bool> = [first, later]
+            .iter()
+            .map(|&i| is_later_overload(graph, nodes, i))
+            .collect();
+        let view_side: Vec<bool> = [base_len, base_len + 1]
+            .iter()
+            .map(|&i| is_later_overload(graph, nodes, i))
+            .collect();
+        assert_eq!(base_side, [false, true]);
+        assert_eq!(view_side, base_side);
+        assert_eq!(
+            [nodes[0].uid, nodes[1].uid],
+            [
+                graph.nodes[first as usize].uid.to_native(),
+                graph.nodes[later as usize].uid.to_native()
+            ]
         );
     }
 

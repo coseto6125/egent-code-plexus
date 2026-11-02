@@ -95,8 +95,9 @@ impl CsharpProjects {
 /// The node ids of every C# `partial` type declared in two parts or more:
 /// the representative part first ([`Part::rank`]), then the other parts
 /// ascending; the groups ordered by their representative. Two parts in one
-/// file share a node already (a uid twin binds its survivor), so a group
-/// lists each node once.
+/// file are two nodes, the second a later node of its own (design uid
+/// §2.3), so `PartOf` links them like parts in two files. A group lists
+/// each node once: a raw node Pass 1 merged maps to its survivor's.
 ///
 /// The representative depends on the parts' declarations only, never on
 /// the file enumeration or the node-id order.
@@ -140,8 +141,9 @@ pub fn partial_groups(
                     merge_kind(node.kind) as u8,
                 ))
                 .or_default();
-            // A same-file twin is the survivor's node: the node declares a
-            // base list when either declaration does, and starts at the first.
+            // A merged raw node maps to its survivor's node: the node
+            // declares a base list when either declaration does, and starts
+            // at the first.
             match group.iter_mut().find(|seen| seen.slot == slot) {
                 Some(seen) => {
                     seen.is_attribute |= part.is_attribute;
