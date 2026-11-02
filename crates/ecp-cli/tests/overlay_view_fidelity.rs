@@ -729,11 +729,10 @@ fn test_build_php_construction_through_use_alias_calls_declared_class() {
 // ── Import tier: the candidate files a relative specifier names ────────────
 // The index expands `./` and `../` from the importer's directory into
 // concrete files and takes the first that declares the bound name
-// (`resolve_named_import`), so a same-stem file elsewhere never competes.
+// (`reexport::named_import`), so a same-stem file elsewhere never competes.
 // Rust: n/a for the relative rule — a `use` path (`crate::`, `super::`,
-// `self::`) is never a `./` specifier. It keeps the last-segment match,
-// tested here only for the duplicate-declaration rule; a `::` call resolves
-// through the module layout instead.
+// `self::`) is never a `./` specifier; a `use` and a `::` call resolve
+// through the module tree (`name_tiers::rust_tree_import`).
 // Python, Java, Kotlin, PHP: n/a — `ladder::import_member` discovers their modules.
 // Go, Swift, Dart, C, C++, Ruby, C#: n/a — no import of theirs binds a
 // symbol by name (see the U2 note above), so no candidate file is probed.

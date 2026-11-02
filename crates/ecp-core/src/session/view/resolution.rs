@@ -2998,6 +2998,32 @@ pub(super) struct RustModules<'a> {
     /// The `graph.bin` workspace facts, read on first use: reading them
     /// deserializes and validates the whole table, once per view.
     pub(super) crates: OnceCell<crate::contracts::workspace::WorkspaceFacts>,
+    /// Rust file → its `use` rows and tree positions ([`ModuleUses`]), each
+    /// read on the first question only a `use` of that module can answer
+    /// ([`Self::reexport`]). The keys are set once per view, on that first
+    /// question, so a module's rows borrow from the view.
+    uses: OnceCell<FxHashMap<&'a str, OnceCell<ModuleUses<'a>>>>,
+}
+
+/// One Rust module file's `use` rows as an index `pub use` row names them
+/// ([`ladder::ReExport`]), and the module's path in each tree that holds
+/// it, which a relative prefix starts from.
+struct ModuleUses<'a> {
+    rows: Vec<UseRow<'a>>,
+    trees: Vec<(&'a str, Vec<String>)>,
+}
+
+/// One `use` of a module file.
+struct UseRow<'a> {
+    /// The name the `use` binds in its module; `*` for a glob.
+    bound: &'a str,
+    /// The path before the item, split as the index splits a `pub use`.
+    /// `None` for a `use` the index never records as one: no path before
+    /// the item (`use c;`, which the parse cannot tell from `use c::c;`), or
+    /// a leading `::`.
+    prefix: Option<Box<[String]>>,
+    /// The item at the source, `*` for a glob.
+    original: &'a str,
 }
 
 /// Where one caller file stands in the module trees
@@ -3037,6 +3063,7 @@ impl<'a> RustModules<'a> {
             base_twin_scans: RefCell::default(),
             removed,
             crates: OnceCell::new(),
+            uses: OnceCell::new(),
         }
     }
 
@@ -3329,6 +3356,134 @@ impl<'a> RustModules<'a> {
         }
     }
 
+    /// What `module` of `root` publishes `name` through where
+    /// [`Self::published`] answers [`ladder::Published::Unknown`] for the
+    /// importer at `importer`: the one `use` binding `name`, else the one
+    /// glob `use`, read as the index reads a `pub use` row.
+    ///
+    /// Why that is sound without the `pub`: an importer outside `module`'s
+    /// subtree that names `name` through `module`, which declares no item
+    /// `name`, compiles only if a `use` of `module` publishes `name` to it.
+    /// So that `use` is a `pub` / `pub(..)` use, the row the index records,
+    /// and reading it gives the index's answer. A descendant of `module`
+    /// also sees a private `use`, which the index does not follow, so it
+    /// keeps `Unknown`; so do two `use`s or two globs that could bind
+    /// `name`, since the index keeps only the `pub` one. `graph.bin` stores
+    /// no import visibility; overlay P3's module-tree rows, which carry it,
+    /// retire this reading.
+    fn reexport(
+        &self,
+        root: &'a str,
+        module: &'a str,
+        name: &str,
+        importer: &RustCaller<'a>,
+    ) -> ladder::Published<'_> {
+        let Some(uses) = self.module_uses(module) else {
+            return ladder::Published::Unknown;
+        };
+        let Some((_, containing)) = uses.trees.iter().find(|(tree, _)| *tree == root) else {
+            return ladder::Published::Unknown;
+        };
+        if importer
+            .targets
+            .iter()
+            .any(|(tree, path)| *tree == root && path.starts_with(containing))
+        {
+            return ladder::Published::Unknown;
+        }
+        let sole = |bound: &str| {
+            let mut rows = uses.rows.iter().filter(|row| row.bound == bound);
+            match (rows.next(), rows.next()) {
+                (Some(row), None) => Some(row),
+                _ => None,
+            }
+        };
+        let row = if uses.rows.iter().any(|row| row.bound == name) {
+            // A `use` and an own item of one name stand in two namespaces,
+            // and the path may name the own item.
+            if self.declares(module, name, |_| true) {
+                return ladder::Published::Unknown;
+            }
+            sole(name)
+        } else {
+            sole("*")
+        };
+        match row {
+            Some(UseRow {
+                prefix: Some(prefix),
+                original,
+                ..
+            }) => ladder::Published::ReExport(ladder::ReExport {
+                prefix,
+                original,
+                containing,
+            }),
+            _ => ladder::Published::Unknown,
+        }
+    }
+
+    /// The `use` rows and tree positions of the Rust file `module`
+    /// ([`Self::uses`]). `None` for a file no key holds.
+    fn module_uses(&self, module: &'a str) -> Option<&ModuleUses<'a>> {
+        let graph = self.graph;
+        let pool = &graph.string_pool;
+        let is_rust = |path: &str| path.ends_with(".rs");
+        let cells = self.uses.get_or_init(|| {
+            let base = graph
+                .files
+                .iter()
+                .map(|file| file.path.resolve(pool))
+                .filter(|path| !self.dirty.contains_key(path) && !self.removed.contains(path));
+            self.dirty
+                .keys()
+                .copied()
+                .chain(base)
+                .filter(|path| is_rust(path))
+                .map(|path| (path, OnceCell::new()))
+                .collect()
+        });
+        let cell = cells.get(module)?;
+        Some(cell.get_or_init(|| {
+            let imports = match self.dirty.get(module) {
+                Some(&(file, _)) => Some(FileImports::Parsed(&file.imports)),
+                None => graph
+                    .file_idx_of(module)
+                    .and_then(|idx| graph.file_imports(idx))
+                    .map(|rows| FileImports::Archived {
+                        rows,
+                        pool: pool.as_slice(),
+                        files: graph.files.as_slice(),
+                    }),
+            };
+            let rows = imports
+                .into_iter()
+                .flat_map(FileImports::iter)
+                .map(|import| {
+                    let source = import.source;
+                    let bare = source == import.imported_name && !source.contains("::");
+                    let prefix =
+                        (!source.is_empty() && !source.starts_with("::") && !bare).then(|| {
+                            source
+                                .split("::")
+                                .map(str::trim)
+                                .filter(|segment| !segment.is_empty())
+                                .map(str::to_owned)
+                                .collect()
+                        });
+                    UseRow {
+                        bound: import.alias.unwrap_or(import.imported_name),
+                        prefix,
+                        original: import.imported_name,
+                    }
+                })
+                .collect();
+            ModuleUses {
+                rows,
+                trees: self.caller(module).targets,
+            }
+        }))
+    }
+
     /// The file of the module path `module` (`b::util`, `crate::a`) from
     /// the caller whose module chain is `chain`, root first: the view's
     /// tests read the trees through it.
@@ -3406,8 +3561,11 @@ impl<'a> ladder::ModuleTreeFacts for OverlayTree<'_, 'a> {
         self.modules.child(parent, name, above.is_empty())
     }
 
-    fn published(&self, _root: &'a str, module: &'a str, name: &str) -> ladder::Published<'_> {
-        self.modules.published(module, name)
+    fn published(&self, root: &'a str, module: &'a str, name: &str) -> ladder::Published<'_> {
+        match self.modules.published(module, name) {
+            ladder::Published::Unknown => self.modules.reexport(root, module, name, self.position),
+            known => known,
+        }
     }
 
     fn declares(&self, module: &'a str, name: &str, namespace: ladder::Namespace) -> bool {

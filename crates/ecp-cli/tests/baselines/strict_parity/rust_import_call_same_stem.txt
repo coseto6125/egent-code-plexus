@@ -1,3 +1,0 @@
-# owner: FU-2026-10-08-2032e2e91ad7 (P1: overlay import probe shares the resolver's tiers)
-edge full-only x1 Calls Function a/src/main_mod.rs:3 run #a4aa346c353cdedc -> Function a/src/util.rs:1 helper #cb6b50e379b7fc10 reason=call conf=0.95
-edge overlay-only x1 Calls Function a/src/main_mod.rs:3 run #a4aa346c353cdedc -> Function a/src/util.rs:1 helper #cb6b50e379b7fc10 reason=call:nearest-copy conf=0.6

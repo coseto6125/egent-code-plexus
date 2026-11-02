@@ -1386,3 +1386,108 @@ fn test_check_rust_custom_lib_path_chain_matches_empty_baseline() {
         ],
     });
 }
+
+/// Workspace `crates/a` and `crates/b`, where `b`'s root holds `b_lib` and
+/// declares `mod make;` (`build`, `other`); `crates/a/src/lib.rs` is
+/// `caller_source`, and `extra` adds files of `b`.
+fn reexport_crates(
+    caller_source: &str,
+    b_lib: &str,
+    extra: &[(&str, &str)],
+) -> Vec<(String, String)> {
+    let mut files = owned(&[
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\n",
+        ),
+        (
+            "crates/a/Cargo.toml",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\n[dependencies]\nb = { path = \"../b\" }\n",
+        ),
+        (
+            "crates/b/Cargo.toml",
+            "[package]\nname = \"b\"\nversion = \"0.1.0\"\n",
+        ),
+        ("crates/b/src/lib.rs", b_lib),
+        (
+            "crates/b/src/make.rs",
+            "pub fn build() {}\n\npub fn other() {}\n",
+        ),
+    ]);
+    files.extend(owned(extra));
+    files.push((CALLER.to_string(), caller_source.to_string()));
+    files
+}
+
+/// `(callee file, callee, confidence, reason)` of each call: the contract
+/// these tests read, without the callee's line.
+fn targets(calls: &[Call]) -> Vec<(&str, &str, f32, &str)> {
+    calls
+        .iter()
+        .map(|call| {
+            (
+                call.callee_file.as_str(),
+                call.callee.as_str(),
+                call.confidence,
+                call.reason.as_str(),
+            )
+        })
+        .collect()
+}
+
+/// `use b::build;` binds through `b`'s `pub use make::build;` with only the
+/// importer dirty: `b`'s root and `make.rs` are clean, read from the
+/// archive, whose import rows keep no visibility. The index's module-tree
+/// import binds `make.rs`'s `build` at the import tier; the overlay must
+/// too, not fall to Tier 3's unique `build` (0.7).
+#[test]
+fn test_overlay_view_dirty_importer_clean_pub_use_reexport_binds_like_index() {
+    let caller = "use b::build;\n\npub fn t() {\n    build();\n}\n";
+    let files = reexport_crates(caller, "mod make;\n\npub use make::build;\n", &[]);
+    let (reindex, overlay) = reindex_and_overlay(&files, CALLER, &one_line_edit(caller), &["t"]);
+    assert_eq!(
+        targets(&reindex),
+        [(
+            "crates/b/src/make.rs",
+            "build",
+            Tier::ImportScoped.confidence(),
+            "call"
+        )],
+        "the index binds through the pub use: {reindex:#?}"
+    );
+    assert_eq!(overlay, reindex);
+}
+
+/// Guard: `b`'s root has a `use` (of `build`), but the importer's path
+/// names `other`, which `b`'s root neither declares nor imports. No `use`
+/// stands on that path, so neither side binds it through the module tree.
+#[test]
+fn test_overlay_view_path_through_module_without_its_use_binds_no_tree_edge() {
+    let caller = "use b::other;\n\npub fn t() {\n    other();\n}\n";
+    let files = reexport_crates(caller, "mod make;\n\npub use make::build;\n", &[]);
+    let (reindex, overlay) = reindex_and_overlay(&files, CALLER, &one_line_edit(caller), &["t"]);
+    assert!(
+        reindex
+            .iter()
+            .all(|call| call.confidence < Tier::ImportScoped.confidence()),
+        "the index binds `other` through no tree: {reindex:#?}"
+    );
+    assert_eq!(overlay, reindex);
+}
+
+/// Guard: a descendant of `b`'s root sees the root's private
+/// `use make::build;`, which the index does not follow as a re-export. The
+/// overlay cannot tell it from a `pub use` there, so it must not follow it
+/// either.
+#[test]
+fn test_overlay_view_descendant_importer_private_use_binds_like_index() {
+    const SUB: &str = "crates/b/src/sub.rs";
+    let sub = "use crate::build;\n\npub fn s() {\n    build();\n}\n";
+    let files = reexport_crates(
+        "pub fn t() {}\n",
+        "mod make;\nmod sub;\n\nuse make::build;\n",
+        &[(SUB, sub)],
+    );
+    let (reindex, overlay) = reindex_and_overlay(&files, SUB, &one_line_edit(sub), &["s"]);
+    assert_eq!(overlay, reindex);
+}
