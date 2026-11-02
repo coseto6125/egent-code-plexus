@@ -1,2 +1,0 @@
-# owner: index pub_use_re misses an attribute-prefixed pub use (FU-2026-11-02-c9367f71b19b)
-edge overlay-only x1 Calls Function crates/a/src/lib.rs:1 t #8dc36e27a017127c -> Function crates/b/src/inner.rs:1 f #fc1f545185493714 reason=call conf=1.0
