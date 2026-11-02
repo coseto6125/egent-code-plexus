@@ -922,6 +922,60 @@ fn test_overlay_dart_restricted_import_rejects_project_namesake_like_reindex() {
     }
 }
 
+/// Stands for: a combinator import binds the names it shows, in the overlay
+/// and in a reindex alike.
+#[test]
+fn test_overlay_dart_visible_combinator_import_binds_project_type_like_reindex() {
+    let dart = DartProvider::new().unwrap();
+    let path = "lib/config.dart";
+    let type_path = "lib/entity/foo.dart";
+    let type_source = "class Foo { void bar() {} }";
+    let expected = vec![
+        (path.into(), "make".into(), "".into(), 100),
+        (type_path.into(), "bar".into(), "Foo".into(), 85),
+    ];
+    for suffix in [" show Foo", " show Other, Foo", " hide Other"] {
+        let source = format!(
+            "import 'entity/foo.dart'{suffix}; import 'package:external/foo.dart'; \
+             Foo make() => throw 0; void run() {{ make().bar(); }}"
+        );
+        let files = [(path, source.as_str()), (type_path, type_source)];
+        for dirty in [
+            vec![(path, source.as_str())],
+            vec![(path, source.as_str()), (type_path, type_source)],
+        ] {
+            check_parity_from("run", &dart, &files, &dirty, &expected, &expected);
+        }
+    }
+}
+
+/// Stands for: a function the importer's combinator import hides is no
+/// fallback target of a bare call, in the overlay and in a reindex alike; a
+/// visible one keeps the global pick.
+#[test]
+fn test_overlay_dart_combinator_import_hides_fallback_binding_like_reindex() {
+    let dart = DartProvider::new().unwrap();
+    let path = "lib/config.dart";
+    let decl_path = "lib/entity/foo.dart";
+    let decl_source = "class Foo {} void helper() {}";
+    let bound = vec![(decl_path.into(), "helper".into(), "".into(), 70)];
+    for (suffix, expected) in [
+        (" show helper", bound.clone()),
+        (" hide Foo", bound),
+        (" show Foo", vec![]),
+        (" hide helper", vec![]),
+    ] {
+        let source = format!("import 'entity/foo.dart'{suffix}; void run() {{ helper(); }}");
+        let files = [(path, source.as_str()), (decl_path, decl_source)];
+        for dirty in [
+            vec![(path, source.as_str())],
+            vec![(path, source.as_str()), (decl_path, decl_source)],
+        ] {
+            check_parity_from("run", &dart, &files, &dirty, &expected, &expected);
+        }
+    }
+}
+
 #[test]
 fn test_overlay_rust_untyped_member_with_free_function_matches_reindex() {
     parity(
@@ -3870,7 +3924,6 @@ fn test_overlay_go_large_imported_package_lookup_reports_timing() {
 }
 
 #[test]
-#[ignore = "FU-2026-10-23-ea1b2e71cc18: published 0.16.2 lacks external import provenance"]
 fn test_overlay_go_external_versioned_package_selector_returns_no_edge() {
     let provider = GoProvider::new().unwrap();
     for (source, receiver) in [("github.com/jackc/pgx/v5", "pgx"), ("gopkg.in/x.v3", "x")] {
@@ -3983,7 +4036,6 @@ fn test_overlay_dart_part_file_library_type_keeps_fallback_edge() {
 }
 
 #[test]
-#[ignore = "FU-2026-10-23-ea1b2e71cc18: retain unmapped local-module fallback until provenance exists"]
 fn test_overlay_go_stdlib_selector_project_namesake_returns_no_edge() {
     let provider = GoProvider::new().unwrap();
     let before = "package main\nfunc run() {}\n";
@@ -4000,4 +4052,60 @@ fn test_overlay_go_stdlib_selector_project_namesake_returns_no_edge() {
         &[("main.go", after)],
         &[],
     );
+}
+
+/// Stands for: a std import, aliased or not, whatever directory a project
+/// namesake sits in, and an external path whose assumed name is the selector,
+/// bind no project declaration, in the overlay and in a reindex alike.
+#[test]
+fn test_overlay_go_stdlib_and_assumed_name_selectors_with_project_namesakes_return_no_edge() {
+    let provider = GoProvider::new().unwrap();
+    let before = "package main\nfunc run() {}\n";
+    for (import, call, namesake) in [
+        (
+            "\"log\"",
+            "log.Printf(\"x\")",
+            (
+                "log/log.go",
+                "package log\nfunc Printf(format string, args ...any) {}\n",
+            ),
+        ),
+        (
+            "l \"log\"",
+            "l.Printf(\"x\")",
+            (
+                "log/log.go",
+                "package log\nfunc Printf(format string, args ...any) {}\n",
+            ),
+        ),
+        (
+            "\"net/http\"",
+            "http.Get()",
+            ("internal/http/http.go", "package http\nfunc Get() {}\n"),
+        ),
+        (
+            "\"gopkg.in/yaml.v3\"",
+            "yaml.Load()",
+            (
+                "yaml/yaml.go",
+                "package yaml\ntype D struct{}\nfunc (D) Load() {}\n",
+            ),
+        ),
+        (
+            "\"github.com/mattn/go-sqlite3\"",
+            "sqlite3.Open()",
+            (
+                "internal/sqlite3/s.go",
+                "package sqlite3\ntype Conn struct{}\nfunc (Conn) Open() {}\n",
+            ),
+        ),
+    ] {
+        let after = format!("package main\nimport {import}\nfunc run() {{ {call} }}\n");
+        parity(
+            &provider,
+            &[("main.go", before), namesake],
+            &[("main.go", after.as_str())],
+            &[],
+        );
+    }
 }

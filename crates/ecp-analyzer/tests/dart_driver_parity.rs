@@ -69,7 +69,7 @@ fn test_dart_driver_zero_byte_file_returns_empty_graph() {
 }
 
 /// Imports keep source order with no sort and no dedupe; a `show`
-/// combinator empties the imported name; the calls walk records the
+/// combinator becomes the imported name; the calls walk records the
 /// package URIs as path literals in its stack order.
 #[test]
 fn test_dart_driver_imports_only_file_keeps_source_order() {
@@ -86,7 +86,7 @@ fn test_dart_driver_imports_only_file_keeps_source_order() {
         [
             ("package:a/a.dart", "package:a/a.dart", None),
             ("dart:async", "dart:async", Some("async")),
-            ("package:b/b.dart", "", None),
+            ("package:b/b.dart", "show B", None),
             ("package:a/a.dart", "package:a/a.dart", None),
         ]
     );

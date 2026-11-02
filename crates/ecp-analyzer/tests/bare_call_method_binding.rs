@@ -724,7 +724,6 @@ fn test_resolve_call_go_declared_package_name_differs_from_import_path_binds_fun
 }
 
 #[test]
-#[ignore = "FU-2026-10-23-ea1b2e71cc18: published 0.16.2 lacks external import provenance"]
 fn test_resolve_call_go_external_versioned_package_selector_returns_no_edge() {
     for (source, receiver) in [("github.com/jackc/pgx/v5", "pgx"), ("gopkg.in/x.v3", "x")] {
         let graph = go_module(&[
@@ -745,7 +744,6 @@ fn test_resolve_call_go_external_versioned_package_selector_returns_no_edge() {
 }
 
 #[test]
-#[ignore = "FU-2026-10-23-ea1b2e71cc18: retain unmapped local-module fallback until provenance exists"]
 fn test_resolve_call_go_stdlib_selector_project_namesake_returns_no_edge() {
     let graph = go_module(&[
         ("go.mod", "module example.com/app\n\ngo 1.21\n"),
@@ -759,6 +757,121 @@ fn test_resolve_call_go_stdlib_selector_project_namesake_returns_no_edge() {
         ),
     ]);
     assert!(targets(&graph, "run").is_empty());
+}
+
+/// Stands for: a standard-library import (dotless first path element) never
+/// binds a project package or method of the same name, whatever the path
+/// shape, alias or directory layout.
+#[test]
+fn test_resolve_call_go_stdlib_import_shapes_with_project_namesakes_return_no_edge() {
+    for (name, files, caller) in [
+        (
+            "root log/ directory",
+            vec![("log/log.go", "package log\n\nfunc Printf() {}\n")],
+            ("\"log\"", "log.Printf()"),
+        ),
+        (
+            "net/http and internal/http",
+            vec![("internal/http/http.go", "package http\n\nfunc Get() {}\n")],
+            ("\"net/http\"", "http.Get()"),
+        ),
+        (
+            "aliased import of a std path",
+            vec![("log/log.go", "package log\n\nfunc Printf() {}\n")],
+            ("l \"log\"", "l.Printf()"),
+        ),
+        (
+            "cgo pseudo-package",
+            vec![("C/c.go", "package C\n\nfunc Puts() {}\n")],
+            ("\"C\"", "C.Puts()"),
+        ),
+        (
+            "versioned std path",
+            vec![(
+                "rand/rand.go",
+                "package rand\n\ntype R struct{}\n\nfunc (R) Int() {}\n",
+            )],
+            ("\"math/rand/v2\"", "rand.Int()"),
+        ),
+    ] {
+        let mut all = vec![("go.mod", "module example.com/app\n\ngo 1.21\n")];
+        all.extend(files);
+        let main = format!(
+            "package main\n\nimport {}\n\nfunc run() {{ {} }}\n",
+            caller.0, caller.1
+        );
+        all.push(("cmd/main.go", main.as_str()));
+        let graph = go_module(&all);
+        assert!(targets(&graph, "run").is_empty(), "{name}");
+    }
+}
+
+/// Stands for: a versioned or prefixed external path binds the name its
+/// package assumes (`yaml.v3` -> `yaml`, `go-sqlite3` -> `sqlite3`), so a
+/// project method of that name is no target of `<name>.Method()`.
+#[test]
+fn test_resolve_call_go_external_assumed_name_selector_with_project_namesake_returns_no_edge() {
+    let yaml = go_module(&[
+        ("go.mod", "module example.com/app\n\ngo 1.21\n"),
+        (
+            "yaml/yaml.go",
+            "package yaml\n\ntype D struct{}\n\nfunc Unmarshal() {}\n\nfunc (D) Load() {}\n",
+        ),
+        (
+            "cmd/main.go",
+            "package main\n\nimport \"gopkg.in/yaml.v3\"\n\nfunc run() { yaml.Unmarshal(); yaml.Load() }\n",
+        ),
+    ]);
+    assert!(targets(&yaml, "run").is_empty());
+
+    let sqlite = go_module(&[
+        ("go.mod", "module example.com/app\n\ngo 1.21\n"),
+        (
+            "internal/sqlite3/s.go",
+            "package sqlite3\n\ntype Conn struct{}\n\nfunc (Conn) Open() {}\n",
+        ),
+        (
+            "cmd/main.go",
+            "package main\n\nimport \"github.com/mattn/go-sqlite3\"\n\nfunc run() { sqlite3.Open() }\n",
+        ),
+    ]);
+    assert!(targets(&sqlite, "run").is_empty());
+}
+
+/// A local variable named like an imported std package shadows it: the call
+/// is an untyped member call, not a package selector.
+#[test]
+fn test_resolve_call_go_local_variable_shadowing_stdlib_import_binds_method() {
+    let graph = go_module(&[
+        ("go.mod", "module example.com/app\n\ngo 1.21\n"),
+        (
+            "lg/lg.go",
+            "package lg\n\ntype L struct{}\n\nfunc (L) Printf(f string) {}\n",
+        ),
+        (
+            "cmd/main.go",
+            "package main\n\nimport \"log\"\n\nfunc run() { log := newThing(); log.Printf(\"x\") }\n",
+        ),
+    ]);
+    assert_eq!(
+        targets(&graph, "run"),
+        vec![target("lg/lg.go", "L", "Printf")]
+    );
+}
+
+/// A std import beside a project import leaves the project selector bound.
+#[test]
+fn test_resolve_call_go_stdlib_import_beside_project_import_keeps_project_binding() {
+    let graph = go_module(&[
+        ("go.mod", "module example.com/app\n\ngo 1.21\n"),
+        ("log/log.go", "package log\n\nfunc F() {}\n"),
+        ("pkg/p.go", "package pkg\n\nfunc F() {}\n"),
+        (
+            "cmd/main.go",
+            "package main\n\nimport (\n\t\"log\"\n\t\"example.com/app/pkg\"\n)\n\nfunc run() { pkg.F() }\n",
+        ),
+    ]);
+    assert_eq!(targets(&graph, "run"), vec![target("pkg/p.go", "", "F")]);
 }
 
 #[test]
