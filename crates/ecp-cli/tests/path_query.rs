@@ -419,6 +419,30 @@ fn path_miss_admits_when_a_same_name_collision_suppressed_edges() {
     );
 }
 
+/// The path twin of impact's competing-kinds rule: a class `Q` beside the
+/// function `Q` the route ends at is no collision for a call. Before the fix
+/// the route carried "2 same-named definitions" for `Q`.
+#[test]
+fn path_collision_caveat_ignores_a_same_name_class() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    write(repo, "q1.ts", "export class Q {}\n");
+    write(
+        repo,
+        "q2.ts",
+        "export function Q() { return 1; }\nexport function callq() { return Q(); }\n",
+    );
+    init_and_analyze(repo);
+
+    let out = run_path(repo, &["callq", "Q", "--to-file", "q2.ts"]);
+    assert_eq!(out["toCandidates"].as_u64(), Some(1), "{out}");
+    let caveat = out["result"].as_str().unwrap_or_default();
+    assert!(
+        !caveat.contains("same-named"),
+        "a class is no competitor of the function Q: {out}"
+    );
+}
+
 /// A bare endpoint name with two definitions is an ambiguity on that side,
 /// and each candidate carries the flag that selects it. Contract: the walk
 /// never seeds from both definitions at once, and the `--from-file` /

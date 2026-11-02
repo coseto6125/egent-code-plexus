@@ -2,7 +2,8 @@
 //! command resolves its target through
 //! [`crate::read_context::resolve_target`].
 
-use ecp_core::graph::ArchivedZeroCopyGraph;
+use ecp_core::analyzer::reexport::ResolveTarget;
+use ecp_core::graph::{ArchivedZeroCopyGraph, NodeKind};
 use ecp_core::session::OverlayView;
 
 /// Resolve the owner class name for a node by reading `Node.owner_class`
@@ -39,8 +40,29 @@ pub fn split_fqn_target(s: &str) -> (Option<&str>, &str) {
     }
 }
 
+/// Whether a definition of kind `other` competes with `target` for a name
+/// lookup: the kinds the resolver weighs together. A call weighs the callable
+/// kinds, a type lookup the type kinds and the callables a type name can
+/// construct, a field read the properties, a value read
+/// [`ResolveTarget::Value`]. A kind outside every group (an `Impl` block
+/// beside its struct) competes only with its own kind.
+fn competing_kinds(target: NodeKind, other: NodeKind) -> bool {
+    if target.is_callable() {
+        other.is_callable()
+    } else if target.declares_type() {
+        other.declares_type() || other.is_callable()
+    } else if target.is_property() {
+        other.is_property()
+    } else if matches!(target, NodeKind::Const | NodeKind::Variable) {
+        (ResolveTarget::Value.kind_predicate())(other)
+    } else {
+        target == other
+    }
+}
+
 /// The Tier-3 resolver-defence counter of `bare_name`: the same-named
-/// definitions the index weighed, which key on the global name collision
+/// definitions the index weighed that compete with a `target_kind` target
+/// ([`competing_kinds`]), which key on the global name collision
 /// rather than on whichever single def the caller disambiguated to. It is the
 /// larger of the on-disk world (surviving base defs plus working-tree-only
 /// defs) and the indexed world (every base def, including those the overlay
@@ -52,6 +74,7 @@ pub fn same_name_def_count(
     graph: &ArchivedZeroCopyGraph,
     view: Option<&OverlayView>,
     bare_name: &str,
+    target_kind: NodeKind,
 ) -> usize {
     let mut base_defs = 0usize;
     let mut disk_defs = 0usize;
@@ -61,6 +84,7 @@ pub fn same_name_def_count(
             || !node.has_owning_file()
             || graph.is_later_overload(idx)
             || graph.is_lexically_scoped(idx)
+            || !competing_kinds(target_kind, NodeKind::from(&node.kind))
         {
             continue;
         }
@@ -77,6 +101,7 @@ pub fn same_name_def_count(
                     && vn.has_owning_file()
                     && !vn.later_overload
                     && vn.name == bare_name
+                    && competing_kinds(target_kind, vn.kind)
                     && v.lexical_parent(idx).is_none()
             })
             .count();
@@ -118,6 +143,36 @@ mod tests {
         }
     }
 
+    /// Stands for: which same-named kinds a lookup weighs together. An
+    /// `Impl` beside its struct, or a class beside a function target, is no
+    /// competitor; before the fix every kind counted.
+    #[test]
+    fn test_competing_kinds_groups_by_resolver_lookup() {
+        use NodeKind::*;
+        for (target, other, want) in [
+            (Function, Method, true),
+            (Method, Constructor, true),
+            (Function, Class, false),
+            (Class, Function, true),
+            (Struct, Struct, true),
+            (Struct, Impl, false),
+            (Struct, Property, false),
+            (Property, Property, true),
+            (Property, Method, false),
+            (Const, Function, true),
+            (Variable, Const, true),
+            (Const, Class, false),
+            (Impl, Impl, true),
+            (Impl, Struct, false),
+        ] {
+            assert_eq!(
+                competing_kinds(target, other),
+                want,
+                "{target:?} vs {other:?}"
+            );
+        }
+    }
+
     /// Stands for: the Tier-3 collision counter skips a lexically scoped
     /// namesake, in the index and in a dirty copy, since the ladder never
     /// weighs it; a caveat built on it would send the agent after callers
@@ -127,12 +182,21 @@ mod tests {
         let source = "fn helper() {}\nfn run() { fn helper() {} helper(); }\n";
         let bytes = rust_graph_bytes(source);
         let archived = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
-        assert_eq!(same_name_def_count(archived, None, "helper"), 1);
+        assert_eq!(
+            same_name_def_count(archived, None, "helper", NodeKind::Function),
+            1
+        );
 
         let dirty: OverlayFileInput = parse_rust(&format!("\n{source}")).into();
         let view = OverlayView::build(archived, &[dirty]).unwrap();
-        assert_eq!(same_name_def_count(archived, Some(&view), "helper"), 1);
-        assert_eq!(same_name_def_count(archived, Some(&view), "absent"), 0);
+        assert_eq!(
+            same_name_def_count(archived, Some(&view), "helper", NodeKind::Function),
+            1
+        );
+        assert_eq!(
+            same_name_def_count(archived, Some(&view), "absent", NodeKind::Function),
+            0
+        );
     }
 
     /// Stands for: a fn in a nested module is named by its innermost module

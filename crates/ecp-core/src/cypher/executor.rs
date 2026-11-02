@@ -720,13 +720,7 @@ fn order_key(
     if let Some(i) = item_col {
         return Ok(OrderKey::Column(i));
     }
-    let exact = match expr {
-        ReturnExpr::Prop(var, prop) => format!("{var}.{prop}"),
-        ReturnExpr::Var(v) => v.clone(),
-        ReturnExpr::Star => "*".into(),
-        ReturnExpr::FunCall { name, .. } => format!("{name}(*)"),
-        ReturnExpr::Subscript(e) => subscript_col_name(e),
-    };
+    let exact = return_expr_col_name(expr);
     if let Some(&i) = col_index.get(&exact) {
         return Ok(OrderKey::Column(i));
     }
@@ -3100,34 +3094,73 @@ fn value_truthy(v: &Value) -> bool {
 }
 
 fn return_item_default_col(item: &ReturnItem) -> String {
-    match &item.expr {
+    return_expr_col_name(&item.expr)
+}
+
+/// The one spelling of a projection's default column name, shared by the
+/// header and by ORDER BY's lookup, so `ORDER BY count(c)` finds `RETURN
+/// COUNT(c)`. A function keeps its arguments: two `labels()` calls on
+/// different variables are two columns.
+fn return_expr_col_name(expr: &ReturnExpr) -> String {
+    match expr {
         ReturnExpr::Var(v) => v.clone(),
         ReturnExpr::Prop(v, p) => format!("{v}.{p}"),
         ReturnExpr::Star => "*".into(),
-        ReturnExpr::FunCall { name, .. } => format!("{name}(*)"),
-        ReturnExpr::Subscript(e) => subscript_col_name(e),
+        ReturnExpr::FunCall {
+            name,
+            distinct,
+            args,
+        } => funcall_col_name(name, *distinct, args),
+        ReturnExpr::Subscript(e) => expr_col_name(e),
     }
 }
 
-/// Default column label for a subscripted projection: `labels(*)[]` style,
-/// built from the innermost base so unaliased columns stay readable.
-fn subscript_col_name(e: &Expr) -> String {
-    // Two subscripts of one base need two names: ORDER BY and the reader
-    // tell the columns apart by name.
-    let bound = |e: &Expr| match e {
-        Expr::Lit(Literal::Int(i)) => i.to_string(),
-        Expr::Lit(Literal::Str(s)) => format!("'{s}'"),
-        _ => "?".into(),
-    };
+/// `count(*)`, `count(DISTINCT b)`, `labels(a)`. The parser upper-cases the
+/// name and stores `(*)` as the single argument `Lit(Null)`.
+fn funcall_col_name(name: &str, distinct: bool, args: &[Expr]) -> String {
+    let name = name.to_ascii_lowercase();
+    let distinct = if distinct { "DISTINCT " } else { "" };
+    match args {
+        [Expr::Lit(Literal::Null)] if name == "count" => format!("{name}(*)"),
+        _ => {
+            let args: Vec<String> = args.iter().map(expr_col_name).collect();
+            format!("{name}({distinct}{})", args.join(", "))
+        }
+    }
+}
+
+fn literal_col_name(lit: &Literal) -> String {
+    match lit {
+        Literal::Null => "null".into(),
+        Literal::Bool(b) => b.to_string(),
+        Literal::Int(i) => i.to_string(),
+        Literal::Float(f) => f.to_string(),
+        Literal::Str(s) => format!("'{s}'"),
+        Literal::List(items) => {
+            let items: Vec<String> = items.iter().map(literal_col_name).collect();
+            format!("[{}]", items.join(", "))
+        }
+    }
+}
+
+/// Default column label of an expression inside a projection (`labels(a)[0]`,
+/// `size(labels(a))`). Two subscripts of one base need two names: ORDER BY
+/// and the reader tell the columns apart by name.
+fn expr_col_name(e: &Expr) -> String {
     match e {
-        Expr::Index(base, idx) => format!("{}[{}]", subscript_col_name(base), bound(idx)),
+        Expr::Index(base, idx) => format!("{}[{}]", expr_col_name(base), expr_col_name(idx)),
         Expr::Slice { base, from, to } => {
-            let side = |e: &Option<Box<Expr>>| e.as_deref().map(bound).unwrap_or_default();
-            format!("{}[{}..{}]", subscript_col_name(base), side(from), side(to))
+            let side = |e: &Option<Box<Expr>>| e.as_deref().map(expr_col_name).unwrap_or_default();
+            format!("{}[{}..{}]", expr_col_name(base), side(from), side(to))
         }
         Expr::Var(v) => v.clone(),
         Expr::Prop(v, p) => format!("{v}.{p}"),
-        Expr::FunCall { name, .. } => format!("{name}(*)"),
+        Expr::Lit(lit) => literal_col_name(lit),
+        Expr::FunCall {
+            name,
+            distinct,
+            args,
+        } => funcall_col_name(name, *distinct, args),
         _ => "expr".into(),
     }
 }

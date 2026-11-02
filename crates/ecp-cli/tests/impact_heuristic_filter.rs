@@ -257,3 +257,39 @@ fn test_explain_confidence_flag_emits_block() {
         "`edges_filtered_by_tier` must be an object:\n{val}"
     );
 }
+
+/// A deterministic `Calls` edge below 0.7 confidence stays in `impact` (no
+/// row moves) and its row carries `requires_verification: true`. Before the
+/// fix the key was absent from `impact` rows: `as_bool()` is `None`.
+#[test]
+fn test_low_confidence_calls_row_requires_verification() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo(tmp.path());
+    let graph_bin = find_graph_bin(tmp.path());
+    std::fs::write(&graph_bin, synthetic_graph_clean()).unwrap();
+
+    let val = run_ecp_impact(tmp.path(), &["--direction", "down"]);
+
+    let rows = val["impact"].as_array().expect("impact array");
+    let row = |name: &str| {
+        rows.iter()
+            .find(|e| e["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("no `{name}` row in impact: {val}"))
+    };
+    assert_eq!(
+        row("target")["requires_verification"].as_bool(),
+        Some(true),
+        "0.6 Calls row must be tagged: {val}"
+    );
+    assert_eq!(
+        row("source")["requires_verification"].as_bool(),
+        Some(false),
+        "the start row is never tagged: {val}"
+    );
+    assert!(
+        val["heuristic_callers"]
+            .as_array()
+            .is_none_or(|h| h.is_empty()),
+        "a Calls row must not move into heuristic_callers: {val}"
+    );
+}

@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::{ecp_bin, run_git};
+use common::{ecp_bin, init_and_analyze, run_git, write};
 use std::path::Path;
 use std::process::Command;
 
@@ -282,5 +282,66 @@ fn test_impact_by_name_kind_leaving_two_matches_refuses_with_candidates() {
             && stderr.contains("src/alpha.py")
             && stderr.contains("src/beta.py"),
         "the refusal lists both candidates: {stderr}"
+    );
+}
+
+fn caveat_of(json: &serde_json::Value) -> &str {
+    json.get("result").and_then(|v| v.as_str()).unwrap_or("")
+}
+
+/// A same-named class and function in two files: the function target weighs
+/// callables only, so the class is no competitor; the class target weighs the
+/// function a type name can construct, so it keeps the caveat. Before the fix
+/// both targets carried "2 same-named definitions".
+#[test]
+fn test_impact_caveat_counts_only_competing_kinds_ts_class_and_function() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    write(repo, "q1.ts", "export class Q {}\n");
+    write(
+        repo,
+        "q2.ts",
+        "export function Q() { return 1; }\nexport function callq() { return Q(); }\n",
+    );
+    init_and_analyze(repo);
+
+    let function = run_impact(
+        repo,
+        repo,
+        &["Q", "--kind", "function", "--direction", "up"],
+    );
+    assert!(
+        !caveat_of(&function).contains("same-named"),
+        "a function target is not competed by a class: {function}"
+    );
+
+    let class = run_impact(repo, repo, &["Q", "--kind", "class", "--direction", "up"]);
+    assert!(
+        caveat_of(&class).contains("2 same-named"),
+        "a class target is still competed by the function Q: {class}"
+    );
+}
+
+/// A Rust struct and its `impl` block share a name; an `Impl` is no
+/// declaration a type lookup binds. Before the fix: "2 same-named".
+#[test]
+fn test_impact_caveat_struct_and_impl_block_do_not_compete_rust() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    write(
+        repo,
+        "src/lib.rs",
+        "pub struct DirtySet { n: u32 }\nimpl DirtySet { pub fn len(&self) -> u32 { self.n } }\n",
+    );
+    init_and_analyze(repo);
+
+    let json = run_impact(
+        repo,
+        repo,
+        &["DirtySet", "--kind", "struct", "--direction", "up"],
+    );
+    assert!(
+        !caveat_of(&json).contains("same-named"),
+        "struct + impl is one type, not a collision: {json}"
     );
 }

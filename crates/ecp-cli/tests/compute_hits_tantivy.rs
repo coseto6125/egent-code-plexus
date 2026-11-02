@@ -219,3 +219,52 @@ fn format_hits_skips_empty_caller_callee_lines() {
     assert!(!out.contains("Called by:"), "empty callers must be skipped");
     assert!(!out.contains("Calls:"), "empty callees must be skipped");
 }
+
+fn hit_with_callers(caller_count: usize, callers: &[&str]) -> Hit {
+    Hit {
+        repo: None,
+        score: 1.0,
+        score_source: ScoreSource::Bm25,
+        kind: "Function".to_string(),
+        file: "src/config.rs".to_string(),
+        language: "Rust".to_string(),
+        line: 42,
+        name: "overloaded".to_string(),
+        signature: "Function overloaded".to_string(),
+        caller_count,
+        callers: callers.iter().map(|c| c.to_string()).collect(),
+        callee_count: 0,
+        callees: vec![],
+        category: ecp_core::graph::FileCategory::Source,
+    }
+}
+
+/// Stands for: a hit with 12 callers and 3 shown tells the model 9 are
+/// missing. Before the fix the line ended at the third name, so 3 of 12
+/// read as the complete caller set.
+#[test]
+fn format_hits_truncated_callers_end_in_plus_n_more() {
+    let out = format_hits(&[hit_with_callers(12, &["a", "b", "c"])]);
+    assert!(
+        out.contains("    Called by: a, b, c, +9 more\n"),
+        "got: {out}"
+    );
+}
+
+/// Stands for: no truncation leaves the line as before, and a count below
+/// the list length (never produced by `compute_hits`) cannot underflow.
+#[test]
+fn format_hits_complete_or_inconsistent_callers_have_no_more_suffix() {
+    for (count, callers) in [
+        (3, vec!["a", "b", "c"]),
+        (1, vec!["a", "b"]),
+        (0, vec!["a"]),
+    ] {
+        let out = format_hits(&[hit_with_callers(count, &callers)]);
+        assert!(
+            out.contains(&format!("    Called by: {}\n", callers.join(", "))),
+            "got: {out}"
+        );
+        assert!(!out.contains("more"), "got: {out}");
+    }
+}

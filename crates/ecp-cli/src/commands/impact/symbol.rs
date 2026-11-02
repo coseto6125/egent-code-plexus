@@ -134,12 +134,12 @@ pub(super) fn impact_by_name(
 
     // A narrowing flag that leaves 2+ declarations (two `load` overloads,
     // `--kind method`) must not merge unrelated blast radii.
-    let start_idx = match resolve_target(&MergedGraph::new(graph, view), &request) {
-        TargetResolution::Unique(c) => c.node as usize,
+    let (start_idx, target_kind) = match resolve_target(&MergedGraph::new(graph, view), &request) {
+        TargetResolution::Unique(c) => (c.node as usize, c.kind),
         TargetResolution::Ambiguous(a) => return Err(a.to_error(&request)),
         TargetResolution::NotFound { named } => return Err(not_found(&request, named)),
     };
-    let same_name_defs = same_name_def_count(graph, view, bare_name);
+    let same_name_defs = same_name_def_count(graph, view, bare_name, target_kind);
 
     let min_conf = resolve_min_conf(args);
     let rel_filter = parse_csv_lower(args.relation_types.as_deref());

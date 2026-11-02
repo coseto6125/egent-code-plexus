@@ -1,5 +1,6 @@
 use super::Direction;
 use crate::commands::format::{kind_to_str, node_kind_to_str, rel_type_to_str};
+use ecp_core::analyzer::outcome::Tier;
 use ecp_core::file_category::is_test_path;
 use ecp_core::file_category::Language;
 use ecp_core::graph::{ArchivedFileCategory, RelType};
@@ -78,7 +79,14 @@ fn base_file_is_test(graph: &ecp_core::graph::ArchivedZeroCopyGraph, file_idx: u
     matches!(graph.files[file_idx].category, ArchivedFileCategory::Test)
 }
 
-/// `Some((heuristic, confidence))` when a walk may follow this edge.
+/// Whether an edge is a lead to verify, not a resolved fact: a heuristic
+/// relation, or a confidence below the lowest tier that binds a name to one
+/// definition ([`Tier::Global`], 0.7, which is not below itself).
+fn edge_needs_verification(rel: RelType, confidence: f32) -> bool {
+    rel.is_heuristic() || confidence < Tier::Global.confidence()
+}
+
+/// `Some((requires_verification, confidence))` when a walk may follow this edge.
 ///
 /// Mirrors the filter chain `run_bfs` keeps inline, for the same measured
 /// reason as [`node_traversable`]. A path must only ever run along edges the
@@ -106,8 +114,7 @@ fn admit_edge(
     if rel.is_scope_containment() {
         return None;
     }
-    let heuristic = rel.is_heuristic();
-    if heuristic && !include_heuristic {
+    if rel.is_heuristic() && !include_heuristic {
         return None;
     }
     if let Some(rels) = rel_filter.as_ref() {
@@ -116,7 +123,7 @@ fn admit_edge(
             return None;
         }
     }
-    Some((heuristic, confidence))
+    Some((edge_needs_verification(rel, confidence), confidence))
 }
 
 /// The edge that reached a node during the walk: the step's own payload plus
@@ -146,7 +153,8 @@ pub(crate) struct PathEdge<'g> {
     pub(crate) rel: &'static str,
     pub(crate) reason: &'g str,
     pub(crate) confidence: f32,
-    pub(crate) heuristic: bool,
+    /// A heuristic relation or a confidence below [`Tier::Global`].
+    pub(crate) requires_verification: bool,
 }
 
 /// Which edges and nodes a walk may use.
@@ -242,7 +250,7 @@ pub(crate) fn shortest_path<'g>(
                         rel: rel_type_to_str(RelType::PartOf),
                         reason: rel_type_to_str(RelType::PartOf),
                         confidence: 1.0,
-                        heuristic: false,
+                        requires_verification: false,
                     },
                 }));
                 queue.push_front((part as usize, curr_depth));
@@ -253,7 +261,7 @@ pub(crate) fn shortest_path<'g>(
         }
 
         let mut consider = |edge: &MergedEdge<'g>, next_idx: usize| {
-            let Some((heuristic, confidence)) =
+            let Some((requires_verification, confidence)) =
                 admit_edge(edge, opts.min_conf, opts.rel_filter, opts.include_heuristic)
             else {
                 return;
@@ -265,7 +273,7 @@ pub(crate) fn shortest_path<'g>(
                         rel: rel_type_to_str(edge.rel_type()),
                         reason: edge.reason(graph),
                         confidence,
-                        heuristic,
+                        requires_verification,
                     },
                 }));
                 queue.push_back((next_idx, curr_depth + 1));
@@ -400,11 +408,15 @@ pub(super) fn run_bfs<'g>(
     include_heuristic: bool,
     max_results: Option<usize>,
 ) -> (Vec<Value>, Vec<Value>, u64, u64, u64) {
-    // (node_idx, depth, via_edge_info, reached_via_heuristic). The reason is
-    // borrowed from the string pool: a hub enqueues six figures of nodes at
-    // depth 2, and an owned String per node was the largest allocation here.
+    // (node_idx, depth, via_edge_info, reached_via_heuristic, requires_verification).
+    // The reason is borrowed from the string pool: a hub enqueues six figures
+    // of nodes at depth 2, and an owned String per node was the largest
+    // allocation here. `reached_via_heuristic` picks the output bucket;
+    // `requires_verification` is the separate tag: some edge on the first
+    // path to the node (the visit that fixes it) is heuristic or below
+    // `Tier::Global` confidence.
     type ViaEdge<'g> = Option<(&'g str, f32)>;
-    type Step<'g> = (usize, usize, ViaEdge<'g>, bool);
+    type Step<'g> = (usize, usize, ViaEdge<'g>, bool, bool);
 
     let merged = MergedGraph::new(graph, view);
     let base_len = graph.nodes.len();
@@ -416,12 +428,12 @@ pub(super) fn run_bfs<'g>(
     let mut hidden_heuristic_edges: u64 = 0;
     let mut hidden_test_callers: u64 = 0;
 
-    queue.push_back((start_idx, 0, None, false));
+    queue.push_back((start_idx, 0, None, false, false));
     visited.insert(start_idx);
     let ctor_seeds = constructor_seeds(&merged, start_idx as u32, direction);
     visited.extend(ctor_seeds.iter().map(|&c| c as usize));
 
-    while let Some((curr_idx, curr_depth, via, via_heuristic)) = queue.pop_front() {
+    while let Some((curr_idx, curr_depth, via, via_heuristic, verify)) = queue.pop_front() {
         // ── node emission (merged space: < base_len = base, else virtual) ──
         let (uid, name, owner_class, kind_str, file_path, line, is_test): (
             u64,
@@ -493,6 +505,7 @@ pub(super) fn run_bfs<'g>(
             "viaReason": via_reason,
             "viaConfidence": via_confidence,
             "test": is_test,
+            "requires_verification": verify,
         });
         if via_heuristic {
             heur_results.push(entry);
@@ -519,6 +532,7 @@ pub(super) fn run_bfs<'g>(
                     curr_depth,
                     Some((rel_type_to_str(RelType::PartOf), 1.0)),
                     via_heuristic,
+                    verify,
                 ));
             }
         }
@@ -561,6 +575,7 @@ pub(super) fn run_bfs<'g>(
                     curr_depth + 1,
                     Some((edge.reason(graph), edge_conf)),
                     is_heur,
+                    verify || edge_needs_verification(rel, edge_conf),
                 ));
             }
         };
@@ -684,6 +699,105 @@ mod tests {
                 ),
                 ("caller".to_string(), "Lib/Use.cs".to_string(), 1),
             ]
+        );
+    }
+
+    /// nodes: 0 target · 1 exact (0.7) · 2 below (0.69) · 3 full (1.0) ·
+    /// 4 behind (1.0 into `below`) · 5 mirror (`MirrorsField`, 0.9)
+    fn confidence_graph() -> Vec<u8> {
+        let mut fx = GraphFixture::new();
+        let target = fx.func("src/t.rs", "target");
+        let exact = fx.func("src/a.rs", "exact");
+        let below = fx.func("src/b.rs", "below");
+        let full = fx.func("src/c.rs", "full");
+        let behind = fx.func("src/d.rs", "behind");
+        let mirror = fx.func("src/e.rs", "mirror");
+        fx.edge_with(exact, target, RelType::Calls, 0.7, "call");
+        fx.edge_with(below, target, RelType::Calls, 0.69, "call");
+        fx.edge_with(full, target, RelType::Calls, 1.0, "call");
+        fx.edge_with(behind, below, RelType::Calls, 1.0, "call");
+        fx.edge_with(mirror, target, RelType::MirrorsField, 0.9, "schema-mirror");
+        fx.into_bytes()
+    }
+
+    /// `(name, requires_verification)` of every row `run_bfs` returns, sorted;
+    /// heuristic rows are listed after `|`.
+    fn verification(
+        graph: &ArchivedZeroCopyGraph,
+        min_conf: f32,
+        include_heuristic: bool,
+    ) -> (Vec<(String, bool)>, Vec<(String, bool)>) {
+        let (det, heur, _, _, _) = run_bfs(
+            graph,
+            None,
+            0,
+            &Direction::Up,
+            3,
+            min_conf,
+            true,
+            &None,
+            include_heuristic,
+            None,
+        );
+        let rows = |entries: &[Value]| {
+            let mut out: Vec<(String, bool)> = entries
+                .iter()
+                .map(|e| {
+                    (
+                        e["name"].as_str().unwrap().to_string(),
+                        e["requires_verification"]
+                            .as_bool()
+                            .expect("every row carries requires_verification"),
+                    )
+                })
+                .collect();
+            out.sort();
+            out
+        };
+        (rows(&det), rows(&heur))
+    }
+
+    /// Stands for: a sub-0.7 `Calls` caller is tagged in place, and so is a
+    /// caller behind it; 0.7 exactly and 1.0 stay untagged. Before the fix no
+    /// row had the key, so `expect` panicked.
+    #[test]
+    fn test_run_bfs_sub_global_confidence_edges_tag_rows_in_place() {
+        let bytes = confidence_graph();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        let (det, heur) = verification(graph, 0.0, false);
+        assert_eq!(
+            det,
+            [
+                ("behind".to_string(), true),
+                ("below".to_string(), true),
+                ("exact".to_string(), false),
+                ("full".to_string(), false),
+                ("target".to_string(), false),
+            ]
+        );
+        assert!(heur.is_empty(), "heuristic rows need the include flag");
+    }
+
+    /// Stands for: a heuristic relation keeps its bucket and is tagged;
+    /// `--no-heuristic` hides it as before.
+    #[test]
+    fn test_run_bfs_heuristic_row_stays_in_heuristic_bucket_tagged() {
+        let bytes = confidence_graph();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        let (det, heur) = verification(graph, 0.0, true);
+        assert_eq!(heur, [("mirror".to_string(), true)]);
+        assert!(det.iter().all(|(name, _)| name != "mirror"));
+    }
+
+    /// Stands for: a `--min-confidence` gate leaves only untagged rows here.
+    #[test]
+    fn test_run_bfs_min_confidence_gate_drops_tagged_rows() {
+        let bytes = confidence_graph();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        let (det, _) = verification(graph, 0.8, false);
+        assert_eq!(
+            det,
+            [("full".to_string(), false), ("target".to_string(), false)]
         );
     }
 }

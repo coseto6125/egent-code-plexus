@@ -885,8 +885,67 @@ fn test_list_index_two_subscripts_of_one_base_return_distinct_columns() {
         let r = execute(&q, g, None, Path::new(".")).unwrap();
         assert_eq!(
             r.columns,
-            ["LABELS(*)[0]", "LABELS(*)[-1]", "LABELS(*)[..1]"]
+            ["labels(a)[0]", "labels(a)[-1]", "labels(a)[..1]"]
         );
+    });
+}
+
+/// Column headers of `query` over the two-node fixture.
+fn two_node_columns(query: &str) -> Vec<String> {
+    let mut columns = Vec::new();
+    with_two(|g| {
+        let q = parse(query).unwrap();
+        columns = execute(&q, g, None, Path::new(".")).unwrap().columns;
+    });
+    columns
+}
+
+/// Stands for: an unaliased function column keeps its arguments, so two
+/// `labels()` calls on different variables are two columns (before: both
+/// `LABELS(*)[0]`), and `count(*)` keeps its star.
+#[test]
+fn test_return_function_columns_keep_their_arguments() {
+    assert_eq!(
+        two_node_columns(
+            "MATCH (a)-[r]->(b) RETURN labels(a)[0], labels(b)[0], type(r), count(b), id(a) LIMIT 1"
+        ),
+        ["labels(a)[0]", "labels(b)[0]", "type(r)", "count(b)", "id(a)"]
+    );
+    assert_eq!(
+        two_node_columns("MATCH (a)-[r]->(b) RETURN count(*), count(DISTINCT b), COUNT(a)"),
+        ["count(*)", "count(DISTINCT b)", "count(a)"]
+    );
+}
+
+/// Stands for: a nested call and a slice bound render in the column name,
+/// and an alias wins over the default name.
+#[test]
+fn test_return_function_column_nested_call_and_alias() {
+    assert_eq!(
+        two_node_columns(
+            "MATCH (a)-[r]->(b) RETURN collect(labels(a)), labels(a)[..1], count(*) AS n"
+        ),
+        ["collect(labels(a))", "labels(a)[..1]", "n"]
+    );
+}
+
+/// Stands for: ORDER BY names the key as the header spells it. A key that is
+/// not projected is refused with `count(a)` (before: `COUNT(*)`), and the
+/// same key sorts once the projection holds it, aliased or not.
+#[test]
+fn test_order_by_function_column_matches_header_spelling() {
+    with_two(|g| {
+        let run = |query: &str| execute(&parse(query).unwrap(), g, None, Path::new("."));
+        let error = run("MATCH (a:Function) RETURN a.name, count(*) ORDER BY count(a)")
+            .expect_err("count(a) is not projected")
+            .to_string();
+        assert!(error.contains("ORDER BY 'count(a)'"), "{error}");
+        for query in [
+            "MATCH (a:Function) RETURN a.name, count(a) ORDER BY count(a) DESC",
+            "MATCH (a:Function) RETURN a.name, COUNT(a) AS n ORDER BY count(a)",
+        ] {
+            assert!(run(query).is_ok(), "{query}");
+        }
     });
 }
 

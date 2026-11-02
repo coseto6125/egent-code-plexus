@@ -164,7 +164,7 @@ fn endpoint(
     match resolve_target(merged, &request) {
         TargetResolution::Unique(c) => Ok(Endpoint::Node(
             c.node as usize,
-            same_name_def_count(merged, merged.view(), request.name()),
+            same_name_def_count(merged, merged.view(), request.name(), c.kind),
         )),
         TargetResolution::Ambiguous(a) => {
             let payload = json!({
@@ -280,9 +280,9 @@ fn build_payload(args: &PathArgs, engine: &Engine) -> Result<Outcome, EcpError> 
         ));
     };
 
-    let heuristic_steps = steps
+    let unverified_steps = steps
         .iter()
-        .filter(|s| s.via.as_ref().is_some_and(|e| e.heuristic))
+        .filter(|s| s.via.as_ref().is_some_and(|e| e.requires_verification))
         .count();
     let payload = json!({
         "status": "success",
@@ -295,11 +295,12 @@ fn build_payload(args: &PathArgs, engine: &Engine) -> Result<Outcome, EcpError> 
         "toCandidates": to_candidates,
         "path": steps.iter().map(step_json).collect::<Vec<_>>(),
     });
-    let caveat = (heuristic_steps > 0).then(|| {
+    let caveat = (unverified_steps > 0).then(|| {
         format!(
-            "{heuristic_steps} of {} hops run along heuristic edges (marked \
-             requiresVerification): the route is inferred, not resolved. Re-run without \
-             --include-heuristic for the deterministic-only answer.",
+            "{unverified_steps} of {} hops run along heuristic or low-confidence (< 0.7) \
+             edges (marked requiresVerification): the route is inferred, not resolved. \
+             Re-run with --min-confidence 0.7, without --include-heuristic, for the \
+             resolved-only answer.",
             steps.len() - 1
         )
     });
@@ -326,8 +327,8 @@ fn ambiguity_caveat(name: &str, same_name_defs: usize) -> Option<String> {
 fn step_json(step: &PathStep) -> Value {
     // The start node has no incoming edge; its via fields stay empty rather
     // than borrowing the next hop's, which would misread as a self-edge.
-    let (rel, reason, confidence, heuristic) = match &step.via {
-        Some(e) => (e.rel, e.reason, e.confidence, e.heuristic),
+    let (rel, reason, confidence, requires_verification) = match &step.via {
+        Some(e) => (e.rel, e.reason, e.confidence, e.requires_verification),
         None => ("", "", 1.0, false),
     };
     json!({
@@ -338,7 +339,7 @@ fn step_json(step: &PathStep) -> Value {
         "viaRelType": rel,
         "viaReason": reason,
         "viaConfidence": confidence,
-        "requiresVerification": heuristic,
+        "requiresVerification": requires_verification,
     })
 }
 

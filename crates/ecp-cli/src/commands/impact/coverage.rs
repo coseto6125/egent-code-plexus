@@ -27,6 +27,9 @@ pub(super) struct SymbolCoverage {
     kind: String,
     test_callers: Vec<String>,
     test_caller_count: usize,
+    /// Test callers behind a heuristic or sub-0.7 edge: reported, never
+    /// counted as coverage.
+    unverified_test_callers: usize,
     prod_caller_count: usize,
     class: CoverageClass,
 }
@@ -84,6 +87,10 @@ fn is_test_caller(
 
 /// Classify a single symbol given its upstream callers (BFS result).
 ///
+/// A test caller tagged `requires_verification` (a heuristic or sub-0.7 edge)
+/// does not make the symbol covered: it is counted apart, as
+/// `unverified_test_callers`.
+///
 /// `bfs_results` is the slice returned by `run_bfs`; depth-0 entry is the
 /// symbol itself. Only depth > 0 entries (actual callers) are examined.
 ///
@@ -108,6 +115,7 @@ fn classify_symbol(
     let kind = meta.kind.to_string();
 
     let mut test_callers: Vec<String> = Vec::new();
+    let mut unverified_test_callers: usize = 0;
     let mut prod_caller_count: usize = 0;
 
     for entry in bfs_results
@@ -121,7 +129,9 @@ fn classify_symbol(
             .parse::<u64>()
             .is_ok_and(|uid| is_test_caller(graph, view, uid_idx, virtual_idx, uid));
 
-        if is_test {
+        if is_test && entry["requires_verification"].as_bool().unwrap_or(false) {
+            unverified_test_callers += 1;
+        } else if is_test {
             let caller_name = entry["name"].as_str().unwrap_or(caller_uid).to_string();
             test_callers.push(caller_name);
         } else {
@@ -145,6 +155,7 @@ fn classify_symbol(
         kind,
         test_callers,
         test_caller_count,
+        unverified_test_callers,
         prod_caller_count,
         class,
     }
@@ -233,6 +244,7 @@ pub(super) fn build_coverage_json(analyses: Vec<SymbolCoverage>) -> Value {
             "line": s.line,
             "kind": s.kind,
             "test_caller_count": s.test_caller_count,
+            "unverified_test_callers": s.unverified_test_callers,
             "prod_caller_count": s.prod_caller_count,
         });
         match s.class {
@@ -360,5 +372,63 @@ mod tests {
         );
         assert_eq!(base.test_callers, ["was_test"]);
         assert_eq!(base.prod_caller_count, 1);
+    }
+
+    fn tagged(mut entry: Value, requires_verification: bool) -> Value {
+        entry["requires_verification"] = json!(requires_verification);
+        entry
+    }
+
+    /// Stands for: a test caller behind a sub-0.7 edge is no coverage. It is
+    /// counted as `unverified_test_callers`, so a symbol whose only test edge
+    /// is a 0.55 guess classifies as `Uncovered` (before: `Covered`, with the
+    /// guess listed in `tests`). A tagged prod caller still counts as prod.
+    #[test]
+    fn test_classify_symbol_tagged_test_callers_are_not_coverage() {
+        let mut fx = GraphFixture::new();
+        let target = fx.func("src/lib.rs", "target");
+        let sure = fx.func("tests/a.rs", "sure");
+        let guess = fx.func("tests/b.rs", "guess");
+        let prod = fx.func("src/p.rs", "prod");
+        fx.function_meta(sure, FunctionMeta::FLAG_TEST, &[]);
+        fx.function_meta(guess, FunctionMeta::FLAG_TEST, &[]);
+        let bytes = fx.into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        let uid = |idx: u32| graph.nodes[idx as usize].uid.to_native();
+        let uid_idx = ecp_core::graph_query::build_uid_index(graph);
+        let classify = |callers: &[Value]| {
+            classify_symbol(
+                graph,
+                None,
+                target as usize,
+                callers,
+                &uid_idx,
+                &virtual_uid_index(None),
+            )
+        };
+
+        let guess_only = classify(&[
+            tagged(caller(uid(guess), "guess"), true),
+            tagged(caller(uid(prod), "prod"), true),
+        ]);
+        assert!(guess_only.test_callers.is_empty());
+        assert_eq!(guess_only.test_caller_count, 0);
+        assert_eq!(guess_only.unverified_test_callers, 1);
+        assert_eq!(guess_only.prod_caller_count, 1);
+        assert_eq!(guess_only.class, CoverageClass::Uncovered);
+
+        let mixed = classify(&[
+            tagged(caller(uid(sure), "sure"), false),
+            tagged(caller(uid(guess), "guess"), true),
+            caller(uid(prod), "prod"),
+        ]);
+        assert_eq!(mixed.test_callers, ["sure"]);
+        assert_eq!(mixed.unverified_test_callers, 1);
+        assert_eq!(mixed.class, CoverageClass::Covered);
+
+        let json = build_coverage_json(vec![guess_only, mixed]);
+        assert_eq!(json["uncovered_symbols"][0]["unverified_test_callers"], 1);
+        assert_eq!(json["covered_symbols"][0]["unverified_test_callers"], 1);
+        assert_eq!(json["covered_symbols"][0]["tests"], json!(["sure"]));
     }
 }

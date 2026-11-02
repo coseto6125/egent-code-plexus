@@ -138,7 +138,9 @@ pub struct ImpactArgs {
     pub explain_confidence: bool,
 
     /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
-    /// toon. `json`: full-fidelity JSON. `text`: pretty-printed JSON.
+    /// toon. `json`: full-fidelity JSON. `text`: pretty-printed JSON. Every impact row
+    /// carries `requires_verification`: true when an edge on its path is heuristic or
+    /// below 0.7 confidence (the row keeps its place).
     #[arg(long)]
     pub format: Option<OutputFormat>,
 
