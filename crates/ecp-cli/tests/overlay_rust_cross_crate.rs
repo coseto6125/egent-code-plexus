@@ -1354,14 +1354,16 @@ fn test_check_rust_crate_head_through_pub_use_matches_baseline() {
 /// for that use; the overlay follows it as a `pub use`
 /// (`RustModules::reexport`).
 ///
-/// Expected in the baseline: unknown until blessed. FU pending.
+/// Expected in the baseline, one line: `edge overlay-only x1 Calls Function
+/// crates/a/src/lib.rs:1 t -> Function crates/b/src/inner.rs:1 f reason=call
+/// conf=1.0`. FU-2026-11-02-c9367f71b19b.
 #[test]
 fn test_check_rust_pub_use_attr_same_line_matches_baseline() {
     let caller = "pub fn t() {\n    b::f();\n}\n";
     let edited = one_line_edit(caller);
     check(&Scenario {
         name: "rust_pub_use_attr_same_line",
-        owner: "index pub_use_re misses an attribute-prefixed pub use (FU pending)",
+        owner: "index pub_use_re misses an attribute-prefixed pub use (FU-2026-11-02-c9367f71b19b)",
         files: &[
             (
                 "Cargo.toml",
