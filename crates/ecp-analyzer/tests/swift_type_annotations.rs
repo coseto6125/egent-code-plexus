@@ -5,10 +5,13 @@
 //! slicing source-before-the-name. Behavior cross-checked against GitNexus
 //! `swift.ts` type-extractor (independent Rust impl).
 
+mod name_ref_support;
+
 use ecp_analyzer::swift::parser::SwiftProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::RawNode;
-use ecp_core::graph::NodeKind;
+use ecp_core::graph::{NodeKind, RelType};
+use name_ref_support::annotated;
 use std::path::Path;
 
 fn parse(src: &str) -> Vec<RawNode> {
@@ -104,4 +107,71 @@ fn init_emits_constructor() {
 fn init_with_params_emits_constructor() {
     let nodes = parse("class C { init(x: Int, y: String) {} }\n");
     find(&nodes, "init", NodeKind::Constructor);
+}
+
+/// FU-2026-10-30-c0bc9a616111 part A: `Self` stands for the type that owns
+/// the property, so `ecp impact` on the class lists the property.
+#[test]
+fn test_self_property_annotation_binds_owner_type() {
+    let g = name_ref_support::graph(
+        &SwiftProvider::new().unwrap(),
+        &[(
+            "Sources/Resolver.swift",
+            "class Resolver {\n    var twin: Self?\n    var plain: Self\n}\n",
+        )],
+    );
+    for property in ["twin", "plain"] {
+        let edges: Vec<(String, String)> =
+            name_ref_support::refs(&g, property, RelType::Accesses, "type_annotation")
+                .into_iter()
+                .map(|(file, name, _, _)| (file, name))
+                .collect();
+        assert_eq!(
+            edges,
+            [("Sources/Resolver.swift".to_string(), "Resolver".to_string())],
+            "{property}"
+        );
+    }
+}
+
+fn pair(file: &str, name: &str) -> (String, String) {
+    (file.to_string(), name.to_string())
+}
+
+/// Contract: a property typed `Tok?` binds the project class `Tok`, like
+/// `var plain: Tok`. The parser keeps the `?` (`class_optional_type_property`).
+/// Swift functions carry no return annotation, so the property is the form to
+/// test. Before the change the raw text `Tok?` names no type: no edge for
+/// `maybe`. With no project `Tok` it binds nothing.
+#[test]
+fn test_optional_property_annotation_binds_project_type() {
+    let src = "class Tok {}\nclass Owner {\n    var maybe: Tok?\n    var plain: Tok\n}\n";
+    let g = name_ref_support::graph(
+        &SwiftProvider::new().unwrap(),
+        &[("Sources/App.swift", src)],
+    );
+    assert_eq!(annotated(&g, "maybe"), [pair("Sources/App.swift", "Tok")]);
+    assert_eq!(annotated(&g, "plain"), [pair("Sources/App.swift", "Tok")]);
+
+    let g = name_ref_support::graph(
+        &SwiftProvider::new().unwrap(),
+        &[(
+            "Sources/App.swift",
+            "class Owner {\n    var maybe: Tok?\n}\n",
+        )],
+    );
+    assert_eq!(annotated(&g, "maybe"), Vec::<(String, String)>::new());
+}
+
+/// Guard: `[Tok]` and `Array<Tok>` are generics; `return_type_key` gives
+/// `None`, so they bind nothing, before and after the change.
+#[test]
+fn test_generic_property_annotation_binds_nothing() {
+    let src = "class Tok {}\nclass Owner {\n    var items: [Tok]\n    var more: Array<Tok>\n}\n";
+    let g = name_ref_support::graph(
+        &SwiftProvider::new().unwrap(),
+        &[("Sources/App.swift", src)],
+    );
+    assert_eq!(annotated(&g, "items"), Vec::<(String, String)>::new());
+    assert_eq!(annotated(&g, "more"), Vec::<(String, String)>::new());
 }

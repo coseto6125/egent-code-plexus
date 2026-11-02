@@ -129,3 +129,11 @@ fn test_this_receiver_in_trait_host_member_in_other_file_binds_by_name() {
         .collect();
     assert_eq!(hits, vec![("Model".to_string(), "getKeyName".to_string())]);
 }
+
+/// Rule U does not apply to PHP (the member name is the main signal there): an untyped member call
+/// keeps the confidence of the tier that found the method and the plain
+/// `call` reason.
+#[test]
+fn test_untyped_member_call_keeps_tier_confidence() {
+    receiver_typing_support::assert_untyped_member_keeps_tier_confidence("php");
+}

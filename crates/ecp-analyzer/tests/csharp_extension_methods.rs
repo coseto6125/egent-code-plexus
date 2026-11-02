@@ -578,3 +578,194 @@ fn test_resolve_call_open_hierarchy_extension_miss_hint_states_index_finding() {
     );
     assert!(!misses[0].1.contains("has no member"), "{misses:?}");
 }
+
+/// `Run`'s edges and the extension BlindSpots for `call` (a literal
+/// receiver, replacing `w.Spin()` in a `Run()` that takes no parameter)
+/// against `Lib.Ext` declaring `body`, with `usings`.
+fn literal_calls(body: &str, usings: &str, call: &str) -> (Vec<CallRow>, Vec<(String, String)>) {
+    let ext = ext_class("Lib", "Ext", body);
+    let app = caller(usings)
+        .replace("Run(Widget w)", "Run()")
+        .replace("w.Spin()", call);
+    let graph = graph_of(&[("Lib/Ext.cs", &ext), ("App.cs", &app)]);
+    (run_calls(&graph), extension_misses(&graph))
+}
+
+const FORMAT_WITH: &str =
+    "        public static string FormatWith(this string s, object a) { return s; }\n";
+
+/// Contract (FU 933678d6bd56): a sealed predefined receiver (`String`)
+/// converts only to itself, `object` and its interfaces, and declares no
+/// instance `FormatWith`, so the exact `this string` match is proven:
+/// 0.85, `call`. Before the fix a receiver with no project type was never
+/// proven: 0.5, `call:extension-heuristic`.
+#[test]
+fn test_resolve_call_string_literal_receiver_extension_binds_at_owned_tier() {
+    let (calls, misses) = literal_calls(FORMAT_WITH, "using Lib;", "\"a{0}\".FormatWith(1)");
+    assert_eq!(
+        calls,
+        vec![edge("Lib/Ext.cs", "FormatWith", 5, 0.85, "call")]
+    );
+    assert_eq!(misses, vec![]);
+}
+
+/// `5.Twice()` on `this int`: an `Int32` receiver is proven the same way.
+/// Before the fix: 0.5, `call:extension-heuristic`.
+#[test]
+fn test_resolve_call_int_literal_receiver_extension_binds_at_owned_tier() {
+    let (calls, _) = literal_calls(
+        "        public static int Twice(this int n) { return n; }\n",
+        "using Lib;",
+        "5.Twice()",
+    );
+    assert_eq!(calls, vec![edge("Lib/Ext.cs", "Twice", 5, 0.85, "call")]);
+}
+
+/// `this long` does not accept an `Int32` receiver (an extension `this`
+/// takes no numeric conversion): no edge, one BlindSpot.
+#[test]
+fn test_resolve_call_int_literal_receiver_long_extension_inapplicable() {
+    let (calls, misses) = literal_calls(
+        "        public static long Twice(this long n) { return n; }\n",
+        "using Lib;",
+        "5.Twice()",
+    );
+    assert_eq!(calls, vec![]);
+    assert_eq!(misses.len(), 1, "{misses:?}");
+    assert!(
+        misses[0].1.contains("accepts a `Int32` receiver"),
+        "{misses:?}"
+    );
+}
+
+/// A `this object` or `this T` declaration accepts any receiver; it is not a
+/// match on the receiver's type, so it stays heuristic.
+#[test]
+fn test_resolve_call_string_literal_receiver_generic_or_object_this_stays_heuristic() {
+    for body in [
+        "        public static int Spin(this object o) { return 1; }\n",
+        "        public static T Spin<T>(this T value) { return value; }\n",
+    ] {
+        let (calls, _) = literal_calls(body, "using Lib;", "\"s\".Spin()");
+        assert_eq!(
+            calls,
+            vec![edge(
+                "Lib/Ext.cs",
+                "Spin",
+                5,
+                HEURISTIC_CONFIDENCE,
+                HEURISTIC_REASON
+            )],
+            "{body}"
+        );
+    }
+}
+
+/// `String` implements `IComparable` through a base the index does not
+/// read: the `this IComparable` fit is a maybe, so the edge stays heuristic.
+#[test]
+fn test_resolve_call_string_literal_receiver_interface_this_stays_heuristic() {
+    let (calls, _) = literal_calls(
+        "        public static int Spin(this IComparable c) { return 1; }\n",
+        "using Lib;",
+        "\"s\".Spin()",
+    );
+    assert_eq!(
+        calls,
+        vec![edge(
+            "Lib/Ext.cs",
+            "Spin",
+            5,
+            HEURISTIC_CONFIDENCE,
+            HEURISTIC_REASON
+        )]
+    );
+}
+
+/// `String` declares instance `Trim()` and `ToString(..)`. A name match does
+/// not prove which one C# picks: `"x".Trim()` calls `String.Trim()`, while
+/// `"x".ToString(1, 2)` calls the `ToString(this string, int, int)`
+/// extension, as no instance overload takes two ints. Without an
+/// applicability model both stay at 0.5: tagged, never proven, never
+/// suppressed.
+#[test]
+fn test_resolve_call_string_literal_receiver_instance_member_name_stays_heuristic() {
+    for (body, call, name) in [
+        (
+            "        public static string Trim(this string s) { return s; }\n",
+            "\"x\".Trim()",
+            "Trim",
+        ),
+        (
+            "        public static string ToString(this string s, int a, int b) { return s; }\n",
+            "\"x\".ToString(1, 2)",
+            "ToString",
+        ),
+    ] {
+        let (calls, _) = literal_calls(body, "using Lib;", call);
+        assert_eq!(
+            calls,
+            vec![edge(
+                "Lib/Ext.cs",
+                name,
+                5,
+                HEURISTIC_CONFIDENCE,
+                HEURISTIC_REASON
+            )],
+            "{call}"
+        );
+    }
+}
+
+/// A `u8` literal is a `ReadOnlySpan<byte>`, read untyped: a single
+/// candidate is never proven.
+#[test]
+fn test_resolve_call_u8_literal_receiver_extension_stays_heuristic() {
+    let (calls, _) = literal_calls(FORMAT_WITH, "using Lib;", "\"a\"u8.FormatWith(1)");
+    assert_eq!(
+        calls,
+        vec![edge(
+            "Lib/Ext.cs",
+            "FormatWith",
+            5,
+            HEURISTIC_CONFIDENCE,
+            HEURISTIC_REASON
+        )]
+    );
+}
+
+/// The arguments still refuse on a proven receiver: `FormatWith()` misses
+/// its `a` parameter.
+#[test]
+fn test_resolve_call_string_literal_receiver_argument_mismatch_unresolved() {
+    let (calls, misses) = literal_calls(FORMAT_WITH, "using Lib;", "\"x\".FormatWith()");
+    assert_eq!(calls, vec![]);
+    assert_eq!(misses.len(), 1, "{misses:?}");
+    assert!(
+        misses[0].1.contains("takes the call's arguments"),
+        "{misses:?}"
+    );
+}
+
+/// Two `this string` declarations that both take one argument stay
+/// ambiguous on a proven receiver.
+#[test]
+fn test_resolve_call_string_literal_receiver_two_candidates_ambiguous() {
+    let body = format!(
+        "{FORMAT_WITH}        public static string FormatWith(this string s, int a) {{ return s; }}\n"
+    );
+    let (calls, misses) = literal_calls(&body, "using Lib;", "\"x\".FormatWith(1)");
+    assert_eq!(calls, vec![]);
+    assert_eq!(misses.len(), 1, "{misses:?}");
+    assert!(
+        misses[0].1.contains("2 extension declarations"),
+        "{misses:?}"
+    );
+}
+
+/// Without `using Lib;` the extension is out of scope: no edge.
+#[test]
+fn test_resolve_call_string_literal_receiver_no_using_no_edge() {
+    let (calls, _) = literal_calls(FORMAT_WITH, "", "\"x\".FormatWith(1)");
+    assert_eq!(calls, vec![]);
+}

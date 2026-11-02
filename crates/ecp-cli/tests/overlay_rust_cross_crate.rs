@@ -129,10 +129,24 @@ fn reindex_and_overlay(
     edited: &str,
     callers: &[&str],
 ) -> (Vec<Call>, Vec<Call>) {
+    reindex_and_overlay_of(files, caller_file, edited, caller_file, callers)
+}
+
+/// [`reindex_and_overlay`] with the edit in `dirty`, which may be another
+/// file than `caller_file`. The overlay reads `dirty` from its fresh parse
+/// and re-resolves the unchanged `caller_file` against it, as the session's
+/// invalidation closure hands a dependent to the view.
+fn reindex_and_overlay_of(
+    files: &[(String, String)],
+    dirty: &str,
+    edited: &str,
+    caller_file: &str,
+    callers: &[&str],
+) -> (Vec<Call>, Vec<Call>) {
     let edited_tree: Vec<(String, String)> = files
         .iter()
         .map(|(path, source)| {
-            let source = if path == caller_file { edited } else { source };
+            let source = if path == dirty { edited } else { source };
             (path.clone(), source.to_string())
         })
         .collect();
@@ -146,7 +160,14 @@ fn reindex_and_overlay(
 
     let base_bytes = archive(&index(files));
     let base = access(&base_bytes);
-    let inputs: Vec<OverlayFileInput> = vec![parse(caller_file, edited).into()];
+    let mut inputs: Vec<OverlayFileInput> = vec![parse(dirty, edited).into()];
+    if caller_file != dirty {
+        let (_, source) = files
+            .iter()
+            .find(|(path, _)| path == caller_file)
+            .expect("the caller's file is a fixture file");
+        inputs.push(parse(caller_file, source).into());
+    }
     let view = OverlayView::build(base, &inputs).expect("an edit makes a view");
     assert_eq!(
         OverlayView::from_cache_bytes(&view.to_cache_bytes(), base.nodes.len()).as_ref(),
@@ -583,5 +604,640 @@ fn test_overlay_rust_anchored_path_targets_disagree_matches_index() {
             "{label}: the reindex falls back to the file layout: {reindex:#?}"
         );
         assert_eq!(overlay, reindex, "{label}");
+    }
+}
+
+/// Rust `Self::m()` names the caller's impl type on both sides: an inherent
+/// impl, a trait default method (the trait's own declaration) and a trait
+/// impl reaching an inherent `new`. `U` holds a second `dup_helper` and
+/// `new`, so only the caller's owner picks the edge.
+#[test]
+fn test_overlay_rust_self_path_call_matches_reindex() {
+    const LIB: &str = "src/lib.rs";
+    let lib = "pub struct S;\nimpl S {\n    pub fn new() -> S { S }\n    pub fn dup_helper() -> i32 { 1 }\n    pub fn self_dup() -> i32 { Self::dup_helper() }\n}\n\
+        pub struct U;\nimpl U {\n    pub fn new() -> U { U }\n    pub fn dup_helper() -> i32 { 2 }\n}\n\
+        pub trait T {\n    fn tdef_self() -> i32 { Self::thelper() }\n    fn thelper() -> i32;\n}\n\
+        impl T for S {\n    fn thelper() -> i32 { Self::new(); 2 }\n}\n";
+    let files = owned(&[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n",
+        ),
+        (LIB, lib),
+    ]);
+    for (label, edited, shift) in [
+        ("touched", lib.to_string(), 0),
+        ("one-line edit", one_line_edit(lib), 1),
+    ] {
+        let (reindex, overlay) =
+            reindex_and_overlay(&files, LIB, &edited, &["self_dup", "tdef_self", "thelper"]);
+        let bound: Vec<(&str, u32)> = reindex
+            .iter()
+            .map(|call| (call.callee.as_str(), call.callee_line))
+            .collect();
+        assert_eq!(
+            bound,
+            [
+                ("dup_helper", 4 + shift),
+                ("thelper", 14 + shift),
+                ("new", 3 + shift),
+            ],
+            "{label}: S.dup_helper, T.thelper, S.new: {reindex:#?}"
+        );
+        assert_eq!(overlay, reindex, "{label}");
+    }
+}
+
+/// FU-2026-10-26-045ff15cd46b: `b::m` writes `pub use self::inner::*;`
+/// beside its own `f` and `h`, and `inner` declares an `h` too. The module's
+/// own items shadow the glob, so both sides bind `m.rs`. A name only the
+/// glob gives (`g`) stays out: the overlay cannot see whether that `use` is
+/// `pub`, so it binds no edge through it.
+#[test]
+fn test_overlay_rust_glob_pub_use_own_item_matches_reindex() {
+    const M: &str = "crates/b/src/m.rs";
+    let caller = "pub fn t() {\n    b::m::f();\n    b::m::h();\n}\n";
+    let mut files = owned(&[
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\n",
+        ),
+        (
+            "crates/a/Cargo.toml",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\n[dependencies]\nb = { path = \"../b\" }\n",
+        ),
+        (
+            "crates/b/Cargo.toml",
+            "[package]\nname = \"b\"\nversion = \"0.1.0\"\n",
+        ),
+        ("crates/b/src/lib.rs", "pub mod m;\n"),
+        (
+            M,
+            "mod inner;\npub use self::inner::*;\npub fn f() {}\npub fn h() {}\n",
+        ),
+        ("crates/b/src/m/inner.rs", "pub fn g() {}\npub fn h() {}\n"),
+    ]);
+    files.push((CALLER.to_string(), caller.to_string()));
+    for (label, edited) in [
+        ("touched", caller.to_string()),
+        ("one-line edit", one_line_edit(caller)),
+    ] {
+        let (reindex, overlay) = reindex_and_overlay(&files, CALLER, &edited, &["t"]);
+        assert_module_tree_binds(&reindex, &[(M, "f"), (M, "h")], label);
+        assert_eq!(overlay, reindex, "{label}");
+    }
+}
+
+/// Rust `Self::tonly()` in `impl T for S`, where `tonly` is only `T`'s
+/// default method, takes the receiver-typing ladder as `S::tonly()` does,
+/// on both sides. In `impl T for U` the same callee binds `U`'s inherent
+/// `tonly`: two callers with different impl types never share an answer.
+#[test]
+fn test_overlay_rust_self_path_trait_default_matches_reindex() {
+    const LIB: &str = "src/lib.rs";
+    let lib = "pub trait T {\n    fn tonly() -> i32 { 1 }\n    fn s_self() -> i32 { 0 }\n    fn s_type() -> i32 { 0 }\n    fn u_self() -> i32 { 0 }\n}\n\
+        pub struct S;\nimpl T for S {\n    fn s_self() -> i32 { Self::tonly() }\n    fn s_type() -> i32 { S::tonly() }\n}\n\
+        pub struct U;\nimpl U {\n    pub fn tonly() -> i32 { 2 }\n}\n\
+        impl T for U {\n    fn u_self() -> i32 { Self::tonly() }\n}\n";
+    let files = owned(&[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n",
+        ),
+        (LIB, lib),
+    ]);
+    for (label, edited, shift) in [
+        ("touched", lib.to_string(), 0),
+        ("one-line edit", one_line_edit(lib), 1),
+    ] {
+        let (reindex, overlay) =
+            reindex_and_overlay(&files, LIB, &edited, &["s_self", "s_type", "u_self"]);
+        let bound: Vec<(&str, u32)> = reindex
+            .iter()
+            .map(|call| (call.callee.as_str(), call.callee_line))
+            .collect();
+        assert_eq!(
+            bound,
+            [
+                ("tonly", 2 + shift),
+                ("tonly", 2 + shift),
+                ("tonly", 14 + shift)
+            ],
+            "{label}: T.tonly twice, U.tonly: {reindex:#?}"
+        );
+        assert_eq!(overlay, reindex, "{label}");
+    }
+}
+
+/// `ArchivedZg` is declared only by `impl ArchivedZg` (an `rkyv::Archive`
+/// derive generates the type), and `other.rs` holds a free `fn later`. A
+/// typed receiver binds the impl's method at the qualifier tier, from the
+/// impl's own file and through a `use`, whichever file is dirty.
+#[test]
+fn test_overlay_rust_typed_receiver_of_impl_only_type_matches_reindex() {
+    const GRAPH: &str = "src/graph.rs";
+    const USER: &str = "src/user.rs";
+    let graph = "#[derive(rkyv::Archive)]\npub struct Zg;\nimpl ArchivedZg {\n    pub fn later(&self, i: u32) -> u32 { i }\n}\npub fn same_file(g: &ArchivedZg) -> u32 {\n    g.later(1)\n}\n";
+    let user = "use crate::graph::ArchivedZg;\npub fn use_arch(g: &ArchivedZg) -> u32 {\n    g.later(1)\n}\n";
+    let files = owned(&[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"zg\"\nversion = \"0.1.0\"\n",
+        ),
+        (
+            "src/lib.rs",
+            "pub mod graph;\npub mod other;\npub mod user;\n",
+        ),
+        (GRAPH, graph),
+        ("src/other.rs", "pub fn later(i: u32) -> u32 { i }\n"),
+        (USER, user),
+    ]);
+    for (caller_file, source, caller, shift) in
+        [(GRAPH, graph, "same_file", 1), (USER, user, "use_arch", 0)]
+    {
+        for (label, edited) in [
+            ("touched", source.to_string()),
+            ("one-line edit", one_line_edit(source)),
+        ] {
+            let (reindex, overlay) = reindex_and_overlay(&files, caller_file, &edited, &[caller]);
+            let line = if label == "touched" { 4 } else { 4 + shift };
+            let bound: Vec<(&str, &str, u32, f32)> = reindex
+                .iter()
+                .map(|call| {
+                    (
+                        call.callee_file.as_str(),
+                        call.callee.as_str(),
+                        call.callee_line,
+                        call.confidence,
+                    )
+                })
+                .collect();
+            assert_eq!(
+                bound,
+                [(GRAPH, "later", line, Tier::QualifierScoped.confidence())],
+                "{caller} {label}: {reindex:#?}"
+            );
+            assert_eq!(overlay, reindex, "{caller} {label}");
+        }
+    }
+}
+
+/// R5: `impl From<Name> for String` and `impl StrExt for str` make `lib.rs`
+/// the qualifier file of the impl-only `String` and `str`, beside `Name`'s
+/// `len` and `trim`. On both sides a method call on a `&String` or a `&str`
+/// binds no other type's method; the `str` impl's own `first_word` binds,
+/// and so does `Tail`'s default `tail`, which `impl Tail for str` inherits.
+#[test]
+fn test_overlay_rust_typed_receiver_of_impl_only_std_type_matches_reindex() {
+    const LIB: &str = "src/lib.rs";
+    let lib = "pub struct Name;\nimpl Name {\n    pub fn len(&self) -> usize { 0 }\n    pub fn trim(&self) -> u32 { 0 }\n}\n\
+        impl From<Name> for String {\n    fn from(_: Name) -> String { String::new() }\n}\n\
+        pub trait StrExt {\n    fn first_word(&self) -> &str;\n}\n\
+        impl StrExt for str {\n    fn first_word(&self) -> &str { self }\n}\n\
+        pub fn n(s: &String) -> usize { s.len() }\npub fn t(s: &str) -> u32 { s.trim() }\npub fn w(s: &str) -> &str { s.first_word() }\n\
+        pub trait Tail {\n    fn tail(&self) -> u8 { 0 }\n    fn other(&self);\n}\nimpl Tail for str {\n    fn other(&self) {}\n}\n\
+        pub fn d(s: &str) -> u8 { s.tail() }\n";
+    let files = owned(&[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n",
+        ),
+        (LIB, lib),
+    ]);
+    for (label, edited, shift) in [
+        ("touched", lib.to_string(), 0),
+        ("one-line edit", one_line_edit(lib), 1),
+    ] {
+        let (reindex, overlay) = reindex_and_overlay(&files, LIB, &edited, &["n", "t", "w", "d"]);
+        let bound: Vec<(&str, u32)> = reindex
+            .iter()
+            .map(|call| (call.callee.as_str(), call.callee_line))
+            .collect();
+        assert_eq!(
+            bound,
+            [("first_word", 13 + shift), ("tail", 19 + shift)],
+            "{label}: str's first_word and Tail's default tail: {reindex:#?}"
+        );
+        assert_eq!(overlay, reindex, "{label}");
+    }
+}
+
+/// A `fn` inside a function body is no item of its module. Without a glob,
+/// `crate::run()` and `use crate::run;` from a dirty `other.rs` bind
+/// nothing on both sides, never the function-local `run`.
+#[test]
+fn test_overlay_rust_function_local_fn_is_no_module_item_matches_reindex() {
+    const OTHER: &str = "src/other.rs";
+    for user in [
+        "pub fn go() {\n    crate::run();\n}\n",
+        "use crate::run;\npub fn go() {\n    run();\n}\n",
+    ] {
+        let files = owned(&[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"a\"\nversion = \"0.1.0\"\n",
+            ),
+            (
+                "src/lib.rs",
+                "mod other;\npub fn setup() {\n    fn run() {}\n    run();\n}\n",
+            ),
+            (OTHER, user),
+        ]);
+        for (label, edited) in [
+            ("touched", user.to_string()),
+            ("one-line edit", one_line_edit(user)),
+        ] {
+            let (reindex, overlay) = reindex_and_overlay(&files, OTHER, &edited, &["go"]);
+            assert_eq!(reindex, [], "{label}: {user}");
+            assert_eq!(overlay, reindex, "{label}: {user}");
+        }
+    }
+}
+
+/// With the root's glob `pub use inner::*`, the function-local `run` does
+/// not shadow it: the reindex binds `inner.rs`. The overlay cannot see that
+/// the glob `use` is `pub` (R2, FU-2026-11-02-768a5edcd559), so the contract
+/// on its side is only that it never binds the function-local `run`.
+#[test]
+fn test_overlay_rust_function_local_fn_never_shadows_a_glob() {
+    const LIB: &str = "src/lib.rs";
+    let lib = "mod inner;\npub use inner::*;\npub fn setup() {\n    fn run() {}\n    run();\n}\npub fn go() {\n    crate::run();\n}\n";
+    let files = owned(&[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n",
+        ),
+        (LIB, lib),
+        ("src/inner.rs", "pub fn run() {}\n"),
+    ]);
+    for (label, edited) in [
+        ("touched", lib.to_string()),
+        ("one-line edit", one_line_edit(lib)),
+    ] {
+        let (reindex, overlay) = reindex_and_overlay(&files, LIB, &edited, &["go"]);
+        assert_module_tree_binds(&reindex, &[("src/inner.rs", "run")], label);
+        assert!(
+            overlay.iter().all(|call| call.callee_file != LIB),
+            "{label}: the function-local `run` must not bind: {overlay:#?}"
+        );
+    }
+}
+
+/// R3 on the type-path check: `m.rs` declares its own `Foo` beside a glob
+/// `pub use self::inner::*` whose `inner.rs` declares a `Foo` too. In
+/// Rust `crate::m::Foo` is `m.rs`'s own, so a call from `inner.rs` binds
+/// `m.rs`'s `Foo::new` on both sides, never `inner.rs`'s.
+#[test]
+fn test_overlay_rust_type_path_own_item_shadows_glob_matches_reindex() {
+    const INNER: &str = "src/m/inner.rs";
+    let inner = "pub struct Foo;\nimpl Foo {\n    pub fn new() -> Foo { Foo }\n}\npub fn go() {\n    crate::m::Foo::new();\n}\n";
+    let files = owned(&[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n",
+        ),
+        ("src/lib.rs", "pub mod m;\n"),
+        (
+            "src/m.rs",
+            "mod inner;\npub use self::inner::*;\npub struct Foo;\nimpl Foo {\n    pub fn new() -> Foo { Foo }\n}\n",
+        ),
+        (INNER, inner),
+    ]);
+    for (label, edited) in [
+        ("touched", inner.to_string()),
+        ("one-line edit", one_line_edit(inner)),
+    ] {
+        let (reindex, overlay) = reindex_and_overlay(&files, INNER, &edited, &["go"]);
+        let bound: Vec<(&str, &str, u32)> = reindex
+            .iter()
+            .map(|call| {
+                (
+                    call.callee_file.as_str(),
+                    call.callee.as_str(),
+                    call.callee_line,
+                )
+            })
+            .collect();
+        assert_eq!(
+            bound,
+            [("src/m.rs", "new", 5)],
+            "{label}: m.rs's own Foo::new: {reindex:#?}"
+        );
+        assert_eq!(overlay, reindex, "{label}");
+    }
+}
+
+/// A type declared inside `m.rs`'s `fn setup` is no item of `m`, so it
+/// never shadows `m`'s glob `pub use self::inner::*`: the reindex binds
+/// `inner.rs`'s `Foo::new` (the caller's own file answers first, at the
+/// qualifier tier; before the fix the body-local one bound at 1.0 through
+/// the module tree). The overlay cannot see
+/// that the glob is `pub` (R2, FU-2026-11-02-768a5edcd559), so on its side
+/// the contract is that it never binds the body-local `Foo::new` of the
+/// clean `m.rs`, which it did before the fix.
+#[test]
+fn test_overlay_rust_body_local_type_never_shadows_a_glob() {
+    const INNER: &str = "src/m/inner.rs";
+    let inner = "pub struct Foo;\nimpl Foo {\n    pub fn new() -> Foo { Foo }\n}\npub fn go() {\n    crate::m::Foo::new();\n}\n";
+    let files = owned(&[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n",
+        ),
+        ("src/lib.rs", "pub mod m;\n"),
+        (
+            "src/m.rs",
+            "pub mod inner;\npub use self::inner::*;\nfn setup() {\n    struct Foo;\n    impl Foo {\n        fn new() -> Foo { Foo }\n    }\n}\n",
+        ),
+        (INNER, inner),
+    ]);
+    for (label, edited) in [
+        ("touched", inner.to_string()),
+        ("one-line edit", one_line_edit(inner)),
+    ] {
+        let (reindex, overlay) = reindex_and_overlay(&files, INNER, &edited, &["go"]);
+        let bound: Vec<(&str, &str)> = reindex
+            .iter()
+            .map(|call| (call.callee_file.as_str(), call.callee.as_str()))
+            .collect();
+        assert_eq!(bound, [(INNER, "new")], "{label}: {reindex:#?}");
+        assert!(
+            overlay.iter().all(|call| call.callee_file != "src/m.rs"),
+            "{label}: the body-local `Foo::new` must not bind: {overlay:#?}"
+        );
+    }
+}
+
+/// R5 on both sides: `self.len()` in `impl Summary for String` and
+/// `s.len()` on a `&String` beside `impl From<Name> for String` call std.
+/// Neither binds `Name::len` nor `Sizer`'s default `len`: `String` does not
+/// implement `Sizer`. The second fixture calls from `user.rs`, so the
+/// overlay reads `lib.rs`'s impl blocks from the archived graph.
+#[test]
+fn test_overlay_rust_impl_only_std_type_never_binds_a_foreign_method_matches_reindex() {
+    let types = "pub struct Name;\nimpl Name {\n    pub fn len(&self) -> usize { 0 }\n}\n\
+        pub trait Summary {\n    fn summarize(&self) -> usize;\n}\n\
+        impl Summary for String {\n    fn summarize(&self) -> usize { self.len() }\n}\n";
+    let sizer = "pub struct Name;\npub trait Sizer {\n    fn len(&self) -> usize { 0 }\n    fn z(&self);\n}\n\
+        impl Sizer for Name {\n    fn z(&self) {}\n}\n\
+        impl From<Name> for String {\n    fn from(_: Name) -> String { String::new() }\n}\n";
+    let manifest = (
+        "Cargo.toml",
+        "[package]\nname = \"a\"\nversion = \"0.1.0\"\n",
+    );
+    let sizer_lib = format!("{sizer}pub fn n(s: &String) -> usize {{ s.len() }}\n");
+    let sizer_root = format!("mod user;\n{sizer}");
+    let user = "pub fn n(s: &String) -> usize { s.len() }\n";
+    for (files, dirty, callers) in [
+        (
+            owned(&[manifest, ("src/lib.rs", types)]),
+            "src/lib.rs",
+            &["summarize"][..],
+        ),
+        (
+            owned(&[manifest, ("src/lib.rs", sizer_lib.as_str())]),
+            "src/lib.rs",
+            &["n"][..],
+        ),
+        (
+            owned(&[
+                manifest,
+                ("src/lib.rs", sizer_root.as_str()),
+                ("src/user.rs", user),
+            ]),
+            "src/user.rs",
+            &["n"][..],
+        ),
+    ] {
+        let source = files
+            .iter()
+            .find(|(path, _)| path == dirty)
+            .map(|(_, source)| source.clone())
+            .expect("the dirty file is a fixture file");
+        for (label, edited) in [
+            ("touched", source.clone()),
+            ("one-line edit", one_line_edit(&source)),
+        ] {
+            let (reindex, overlay) = reindex_and_overlay(&files, dirty, &edited, callers);
+            assert!(
+                reindex.iter().all(|call| call.callee != "len"),
+                "{label} {dirty}: std's len: {reindex:#?}"
+            );
+            assert_eq!(overlay, reindex, "{label} {dirty}");
+        }
+    }
+}
+
+/// `crate::helper()` reaches `m.rs` through the root's `pub use m::helper;`,
+/// where `impl S { pub fn helper(&self) }` comes before the free `helper`.
+/// The reindex binds the free `fn` through the module tree. The overlay
+/// cannot see that the `use` is `pub` (R2), so its contract is that it
+/// never binds the method.
+#[test]
+fn test_overlay_rust_module_path_never_binds_a_method_namesake() {
+    const OTHER: &str = "src/other.rs";
+    let other = "pub fn go() {\n    crate::helper();\n}\n";
+    let files = owned(&[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n",
+        ),
+        ("src/lib.rs", "pub mod m;\nmod other;\npub use m::helper;\n"),
+        (
+            "src/m.rs",
+            "pub struct S;\nimpl S {\n    pub fn helper(&self) {}\n}\npub fn helper() {}\n",
+        ),
+        (OTHER, other),
+    ]);
+    for (label, edited) in [
+        ("touched", other.to_string()),
+        ("one-line edit", one_line_edit(other)),
+    ] {
+        let (reindex, overlay) = reindex_and_overlay(&files, OTHER, &edited, &["go"]);
+        assert_module_tree_binds(&reindex, &[("src/m.rs", "helper")], label);
+        assert!(
+            reindex
+                .iter()
+                .chain(&overlay)
+                .all(|call| call.callee_line != 3),
+            "{label}: the method `S::helper` must not bind: {reindex:#?} {overlay:#?}"
+        );
+    }
+}
+
+/// `m.rs` declares `Foo` inside `fn setup` and again at module level. Rust
+/// scopes only `fn` by its parent, so both share a uid and the body-local
+/// one survives Pass 1 with the module-level one as its twin; the merged
+/// node is a module item. `use crate::m::Foo; Foo::new()` and the module
+/// path `crate::m::Foo::new()` bind `m.rs`'s module-level `new` on both
+/// sides, with `lib.rs` dirty (the overlay reads `m.rs`'s survivor and its
+/// tombstoned twin from the archive) and with `m.rs` dirty (the twin is a
+/// fresh symbol). With a body-local `impl Foo { fn new }` the module-level
+/// `new` is a later overload of the body-local one. `other.rs` declares a
+/// second `Foo`, so no tier reaches `m.rs` by the name alone. Before the
+/// fix the reindex bound nothing through the import and the overlay with
+/// `m.rs` dirty answered from the twin.
+#[test]
+fn test_overlay_rust_module_level_twin_of_body_local_type_binds_matches_reindex() {
+    const LIB: &str = "src/lib.rs";
+    const M: &str = "src/m.rs";
+    let by_import =
+        "pub mod m;\nmod other;\nuse crate::m::Foo;\npub fn go() {\n    Foo::new();\n}\n";
+    let by_path = "pub mod m;\nmod other;\npub fn go() {\n    crate::m::Foo::new();\n}\n";
+    let twin = "fn setup() {\n    struct Foo;\n}\npub struct Foo;\nimpl Foo {\n    pub fn new() -> Foo { Foo }\n}\n";
+    let twin_impl = "fn setup() {\n    struct Foo;\n    impl Foo {\n        fn new() -> Foo { Foo }\n    }\n}\npub struct Foo;\nimpl Foo {\n    pub fn new() -> Foo { Foo }\n}\n";
+    let other = "pub struct Foo;\nimpl Foo {\n    pub fn new() -> Foo { Foo }\n}\n";
+    let new_line = |m: &str| {
+        m.lines()
+            .position(|line| line.starts_with("    pub fn new"))
+            .expect("a module-level `new`") as u32
+            + 1
+    };
+    for (lib, m) in [(by_import, twin), (by_path, twin), (by_path, twin_impl)] {
+        let files = owned(&[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"a\"\nversion = \"0.1.0\"\n",
+            ),
+            (LIB, lib),
+            (M, m),
+            ("src/other.rs", other),
+        ]);
+        for (dirty, source) in [(LIB, lib), (M, m)] {
+            for (label, edited) in [
+                ("touched", source.to_string()),
+                ("one-line edit", one_line_edit(source)),
+            ] {
+                let (reindex, overlay) =
+                    reindex_and_overlay_of(&files, dirty, &edited, LIB, &["go"]);
+                let m_now = if dirty == M { edited.as_str() } else { m };
+                let bound: Vec<(&str, &str, u32)> = reindex
+                    .iter()
+                    .map(|call| {
+                        (
+                            call.callee_file.as_str(),
+                            call.callee.as_str(),
+                            call.callee_line,
+                        )
+                    })
+                    .collect();
+                assert_eq!(
+                    bound,
+                    [(M, "new", new_line(m_now))],
+                    "{label} {dirty} {lib}: {reindex:#?}"
+                );
+                assert_eq!(overlay, reindex, "{label} {dirty} {lib}");
+            }
+        }
+    }
+}
+
+/// R5's trait arm through a blanket `impl<T: Debug> Describe for T` on both
+/// sides: `self.describe()` in `impl Summary for String` and `s.describe()`
+/// on a `&String` beside `impl From<X> for String` bind `Describe`'s
+/// default `describe`. The third fixture calls from `user.rs`, so the
+/// overlay reads `lib.rs`'s impl blocks from the archived graph. Before the
+/// fix neither side bound it.
+#[test]
+fn test_overlay_rust_trait_default_through_blanket_impl_matches_reindex() {
+    let describe = "pub trait Describe {\n    fn describe(&self) -> String { String::new() }\n}\n\
+        impl<T: std::fmt::Debug> Describe for T {}\n";
+    let by_self = format!(
+        "{describe}pub trait Summary {{\n    fn summarize(&self) -> String;\n}}\n\
+        impl Summary for String {{\n    fn summarize(&self) -> String {{ self.describe() }}\n}}\n"
+    );
+    let from_x = format!(
+        "{describe}pub struct X;\nimpl From<X> for String {{\n    fn from(_: X) -> String {{ String::new() }}\n}}\n"
+    );
+    let by_typed = format!("{from_x}pub fn n(s: &String) -> String {{ s.describe() }}\n");
+    let root = format!("mod user;\n{from_x}");
+    let user = "pub fn n(s: &String) -> String {\n    s.describe()\n}\n";
+    let manifest = (
+        "Cargo.toml",
+        "[package]\nname = \"a\"\nversion = \"0.1.0\"\n",
+    );
+    for (files, dirty, caller) in [
+        (
+            owned(&[manifest, ("src/lib.rs", by_self.as_str())]),
+            "src/lib.rs",
+            "summarize",
+        ),
+        (
+            owned(&[manifest, ("src/lib.rs", by_typed.as_str())]),
+            "src/lib.rs",
+            "n",
+        ),
+        (
+            owned(&[
+                manifest,
+                ("src/lib.rs", root.as_str()),
+                ("src/user.rs", user),
+            ]),
+            "src/user.rs",
+            "n",
+        ),
+    ] {
+        let source = files
+            .iter()
+            .find(|(path, _)| path == dirty)
+            .map(|(_, source)| source.clone())
+            .expect("the dirty file is a fixture file");
+        for (label, edited) in [
+            ("touched", source.clone()),
+            ("one-line edit", one_line_edit(&source)),
+        ] {
+            let (reindex, overlay) = reindex_and_overlay(&files, dirty, &edited, &[caller]);
+            let bound: Vec<(&str, &str)> = reindex
+                .iter()
+                .filter(|call| call.callee == "describe")
+                .map(|call| (call.callee_file.as_str(), call.callee.as_str()))
+                .collect();
+            assert_eq!(
+                bound,
+                [("src/lib.rs", "describe")],
+                "{label} {dirty}: {reindex:#?}"
+            );
+            assert_eq!(overlay, reindex, "{label} {dirty}");
+        }
+    }
+}
+
+/// `m.rs` declares `mod inner { pub fn helper }` inside `fn setup` and again
+/// at module level. A `mod` breaks the lexical link, so both `helper`s are
+/// unscoped `Function`s owned by `inner`: they share a uid (a `Function`
+/// keeps no overloads), and Pass 1 keeps the body-local one with the
+/// module-level one as its tombstoned twin. The merged node is a module
+/// item, so `crate::m::inner::helper()` binds it through the module tree on
+/// both sides, with `lib.rs` dirty (the overlay reads `m.rs` from the
+/// archive) and with `m.rs` dirty. `other.rs` declares a second
+/// `inner::helper`, so no tier reaches `m.rs` by the name alone. Before the
+/// fix the overlay with `m.rs` clean took every callable inside a body for
+/// body-local and bound nothing.
+#[test]
+fn test_overlay_rust_module_level_twin_of_body_local_fn_binds_matches_reindex() {
+    const LIB: &str = "src/lib.rs";
+    const M: &str = "src/m.rs";
+    let lib = "pub mod m;\nmod other;\npub fn go() {\n    crate::m::inner::helper();\n}\n";
+    let m = "fn setup() {\n    mod inner {\n        pub fn helper() {}\n    }\n}\n\
+        pub mod inner {\n    pub fn helper() {}\n}\n";
+    let other = "pub mod inner {\n    pub fn helper() {}\n}\n";
+    let files = owned(&[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n",
+        ),
+        (LIB, lib),
+        (M, m),
+        ("src/other.rs", other),
+    ]);
+    for (dirty, source) in [(LIB, lib), (M, m)] {
+        for (label, edited) in [
+            ("touched", source.to_string()),
+            ("one-line edit", one_line_edit(source)),
+        ] {
+            let (reindex, overlay) = reindex_and_overlay_of(&files, dirty, &edited, LIB, &["go"]);
+            assert_module_tree_binds(&reindex, &[(M, "helper")], &format!("{label} {dirty}"));
+            assert_eq!(overlay, reindex, "{label} {dirty}");
+        }
     }
 }

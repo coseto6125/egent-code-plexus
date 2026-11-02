@@ -39,7 +39,8 @@
 //!   onto a Class / Struct's one constructor or the type) against the
 //!   archived `name_index` (O(log N) per lookup, no allocation proportional
 //!   to the graph). A nearest-copy edge keeps the index's
-//!   [`NEAREST_COPY_REASON`] and a heuristic C# extension edge the index's
+//!   [`NEAREST_COPY_REASON`], a guessed untyped-member edge the index's
+//!   [`UNTYPED_NAME_REASON`], and a heuristic C# extension edge the index's
 //!   [`csharp_extension::HEURISTIC_REASON`]; every other overlay call carries
 //!   the uncommitted-edit marker.
 //! - **closure references** — lexical `References` from each enclosing
@@ -254,8 +255,8 @@ use crate::analyzer::record_nodes::{
 use crate::analyzer::types::{
     innermost_enclosing, owner_key, LocalGraph, RawEventTopic, RawExportAlias, RawImport,
     RawPathLiteral, RawSchemaField, RawSqlRef, RawTxScope, Span, CLOSURE_REFERENCE_REASON,
-    FUNCTION_REFERENCE_REASON, NEAREST_COPY_REASON, OVERLOAD_SET_REASON, VALUE_READ_REASON,
-    VARIANT_PATTERN_REASON, VARIANT_USE_REASON,
+    FUNCTION_REFERENCE_REASON, NEAREST_COPY_REASON, OVERLOAD_SET_REASON, UNTYPED_NAME_REASON,
+    VALUE_READ_REASON, VARIANT_PATTERN_REASON, VARIANT_USE_REASON,
 };
 use crate::contracts::identity::{pair_by_anchor, DeclIdentity, UidSlot};
 use crate::contracts::routing::ParsedLanguage;
@@ -1307,10 +1308,11 @@ fn replays_record_edge(rel: RelType) -> bool {
 /// Every reason [`OverlayView::build`] puts on a [`ViewEdge`]. A cached view
 /// stores each reason as its index here; a view with an unlisted reason is
 /// never stored, so it costs a build per query as before the cache.
-const VIEW_EDGE_REASONS: [&str; 43] = [
+const VIEW_EDGE_REASONS: [&str; 44] = [
     OVERLOAD_SET_REASON,
     CLOSURE_REFERENCE_REASON,
     NEAREST_COPY_REASON,
+    UNTYPED_NAME_REASON,
     super::merged::OVERLAY_EDGE_REASON,
     VARIANT_USE_REASON,
     VARIANT_PATTERN_REASON,
@@ -2304,7 +2306,7 @@ mod tests {
         let bytes = fixture.into_bytes();
         let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
         let removed = FxHashSet::default();
-        let modules = RustModules::new(graph, &[], &removed);
+        let modules = RustModules::new(graph, &[], &removed, Default::default());
         for path in paths {
             assert_eq!(modules.file(std::path::Path::new(path)), Some(path));
         }
@@ -2350,7 +2352,7 @@ mod tests {
         let bytes = crate_b_graph_bytes();
         let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
         let removed = FxHashSet::default();
-        let modules = RustModules::new(graph, &[], &removed);
+        let modules = RustModules::new(graph, &[], &removed, Default::default());
         assert_eq!(modules.resolve(&[], "b::util"), Some("b/src/util.rs"));
         assert_eq!(modules.resolve(&[], "b"), Some("b/src/lib.rs"));
         for anchored in [
@@ -2371,7 +2373,7 @@ mod tests {
         let bytes = crate_b_graph_bytes();
         let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
         let removed = FxHashSet::default();
-        let modules = RustModules::new(graph, &[], &removed);
+        let modules = RustModules::new(graph, &[], &removed, Default::default());
         assert!(
             modules.crates.get().is_none(),
             "building the view reads no table"
@@ -2398,7 +2400,7 @@ mod tests {
         let bytes = fixture.into_bytes();
         let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
         let removed = FxHashSet::default();
-        let modules = RustModules::new(graph, &[], &removed);
+        let modules = RustModules::new(graph, &[], &removed, Default::default());
         assert_eq!(
             modules.file(std::path::Path::new("src\\bin\\util.rs")),
             Some("src/bin/util.rs")

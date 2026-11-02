@@ -48,74 +48,136 @@ fn node_text<'a>(node: Node<'_>, source: &'a [u8]) -> Option<&'a str> {
 
 // ── Rust ──────────────────────────────────────────────────────────────────────
 
-/// Collect parameter types for indirect-call detection, including types that
-/// `bare_type_name` (used by LocalTypes) rejects: `fn(...)` function types,
-/// `dyn Trait`, `Box<dyn Trait>`, `Arc<dyn T>`, etc.
+/// Declare the callable-relevant types of every Rust parameter and `let`
+/// binding in `vars`, including types `bare_type_name` (used by LocalTypes)
+/// rejects: `fn(...)`, `dyn Trait`, `Box<dyn Trait>`, `Arc<dyn T>`.
 ///
-/// Returns a map of `var_name → type_text_as_source`.
-pub fn collect_rust_indirect_param_types(
-    root: Node<'_>,
-    source: &[u8],
-) -> FxHashMap<String, String> {
-    let mut map = FxHashMap::default();
+/// A parameter is visible over its fn body. A `let` binding is visible from
+/// the end of its declaration to the end of its block, so a call before it
+/// and its own initializer see the outer binding. A declaration of any other
+/// type still hides a same-name outer one (`None`), and a nested `fn` item
+/// sees none of its enclosing fn's names, as in Rust.
+pub fn collect_rust_indirect_param_types(root: Node<'_>, source: &[u8]) -> FnPtrVars {
+    let mut vars = FnPtrVars::default();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
-        // Collect from function_item parameters only.
         if n.kind() == "function_item" {
-            if let Some(params) = n.child_by_field_name("parameters") {
-                let mut c = params.walk();
-                for p in params.children(&mut c) {
-                    if p.kind() != "parameter" {
-                        continue;
-                    }
-                    let Some(pat) = p.child_by_field_name("pattern") else {
-                        continue;
-                    };
-                    let Some(ty_node) = p.child_by_field_name("type") else {
-                        continue;
-                    };
-                    let var_name = match pat.kind() {
-                        "identifier" => node_text(pat, source).map(str::to_string),
-                        "mut_pattern" => pat
-                            .named_child(0)
-                            .filter(|n| n.kind() == "identifier")
-                            .and_then(|n| node_text(n, source))
-                            .map(str::to_string),
-                        _ => None,
-                    };
-                    let Some(name) = var_name else { continue };
-                    // Get the full type text for fn-ptr and dyn-trait detection.
-                    if let Some(ty_text) = node_text(ty_node, source) {
-                        map.insert(name, ty_text.to_string());
-                    }
-                }
-            }
-        }
-        // Also collect from let_declaration with explicit types.
-        if n.kind() == "let_declaration" {
-            if let Some(ty_node) = n.child_by_field_name("type") {
-                if let Some(pat) = n.child_by_field_name("pattern") {
-                    let var_name = match pat.kind() {
-                        "identifier" => node_text(pat, source).map(str::to_string),
-                        "mut_pattern" => pat
-                            .named_child(0)
-                            .filter(|c| c.kind() == "identifier")
-                            .and_then(|c| node_text(c, source))
-                            .map(str::to_string),
-                        _ => None,
-                    };
-                    if let (Some(name), Some(ty)) = (var_name, node_text(ty_node, source)) {
-                        map.insert(name, ty.to_string());
-                    }
-                }
-            }
+            collect_rust_fn_vars(n, source, &[], &mut vars);
+            continue;
         }
         let mut c = n.walk();
-        for child in n.children(&mut c) {
-            stack.push(child);
+        stack.extend(n.children(&mut c));
+    }
+    vars
+}
+
+/// Declare `function`'s parameters and lets; `outer` are the names its
+/// enclosing fns bind, hidden over this body.
+fn collect_rust_fn_vars(function: Node<'_>, source: &[u8], outer: &[String], vars: &mut FnPtrVars) {
+    let Some(body) = function.child_by_field_name("body") else {
+        return;
+    };
+    let body_range = node_range(body);
+    for name in outer {
+        vars.declare(name.clone(), body_range, None);
+    }
+    let mut own: Vec<String> = Vec::new();
+    if let Some(params) = function.child_by_field_name("parameters") {
+        let mut c = params.walk();
+        for p in params.children(&mut c) {
+            if p.kind() != "parameter" {
+                continue;
+            }
+            let Some(pat) = p.child_by_field_name("pattern") else {
+                continue;
+            };
+            let ty = p.child_by_field_name("type");
+            declare_rust_pattern(pat, ty, body_range, source, vars, &mut own);
         }
     }
-    map
+    let mut nested: Vec<Node<'_>> = Vec::new();
+    let mut stack: Vec<Node<'_>> = vec![body];
+    while let Some(n) = stack.pop() {
+        match n.kind() {
+            "function_item" => {
+                nested.push(n);
+                continue;
+            }
+            "let_declaration" => {
+                if let Some(pat) = n.child_by_field_name("pattern") {
+                    let block_end =
+                        rust_enclosing_block(n).map_or(body_range.1, |b| node_range(b).1);
+                    let scope = (node_range(n).1, block_end);
+                    declare_rust_pattern(
+                        pat,
+                        n.child_by_field_name("type"),
+                        scope,
+                        source,
+                        vars,
+                        &mut own,
+                    );
+                }
+            }
+            _ => {}
+        }
+        let mut c = n.walk();
+        stack.extend(n.children(&mut c));
+    }
+    let mut hidden = outer.to_vec();
+    hidden.extend(own);
+    for n in nested {
+        collect_rust_fn_vars(n, source, &hidden, vars);
+    }
+}
+
+fn rust_enclosing_block(node: Node<'_>) -> Option<Node<'_>> {
+    std::iter::successors(node.parent(), |p| p.parent()).find(|p| p.kind() == "block")
+}
+
+/// Declare every name `pat` binds over `scope`: tracked with the type text
+/// when the pattern is a plain (`mut`) identifier typed `fn`/`dyn`, untracked
+/// otherwise.
+fn declare_rust_pattern(
+    pat: Node<'_>,
+    ty: Option<Node<'_>>,
+    scope: PosRange,
+    source: &[u8],
+    vars: &mut FnPtrVars,
+    names: &mut Vec<String>,
+) {
+    let plain = match pat.kind() {
+        "identifier" => Some(pat),
+        "mut_pattern" => pat.named_child(0).filter(|n| n.kind() == "identifier"),
+        _ => None,
+    };
+    let tracked = plain
+        .zip(ty)
+        .and_then(|(_, t)| node_text(t, source))
+        .filter(|t| is_fn_type(t) || is_dyn_type(t))
+        .map(str::to_string);
+    let mut stack = vec![pat];
+    while let Some(n) = stack.pop() {
+        match n.kind() {
+            "identifier" | "shorthand_field_identifier" => {
+                if let Some(name) = node_text(n, source) {
+                    let ty = if plain == Some(n) {
+                        tracked.clone()
+                    } else {
+                        None
+                    };
+                    vars.declare(name.to_string(), scope, ty);
+                    names.push(name.to_string());
+                }
+            }
+            "scoped_identifier" | "scoped_type_identifier" => continue,
+            _ => {}
+        }
+        let skip_type = matches!(n.kind(), "tuple_struct_pattern" | "struct_pattern")
+            .then(|| n.child_by_field_name("type"))
+            .flatten();
+        let mut c = n.walk();
+        stack.extend(n.children(&mut c).filter(|ch| Some(*ch) != skip_type));
+    }
 }
 
 /// Walk the Rust AST and emit `RawCallMeta` for every non-direct call site.
@@ -128,12 +190,11 @@ pub fn detect_rust_indirect(
     root: Node<'_>,
     source: &[u8],
     nodes: &[RawNode],
-    // Maps var_name → resolved type string (from LocalTypes)
-    param_types: &FxHashMap<String, String>,
+    vars: &FnPtrVars,
     call_sites: &CallSiteIndex,
 ) -> Vec<RawCallMeta> {
     let mut out = Vec::new();
-    detect_rust_node(root, source, nodes, param_types, call_sites, &mut out);
+    detect_rust_node(root, source, nodes, vars, call_sites, &mut out);
     out
 }
 
@@ -141,37 +202,34 @@ fn detect_rust_node(
     node: Node<'_>,
     source: &[u8],
     nodes: &[RawNode],
-    param_types: &FxHashMap<String, String>,
+    vars: &FnPtrVars,
     call_sites: &CallSiteIndex,
     out: &mut Vec<RawCallMeta>,
 ) {
     if node.kind() == "call_expression" {
-        let (flags, dispatch_type, is_real_call) = classify_rust_call(node, source, param_types);
+        let (flags, dispatch_type, is_real_call) = classify_rust_call(node, source, vars);
         if is_real_call && flags & CallMeta::FLAG_DIRECT == 0 {
             record_indirect(node, flags, &dispatch_type, nodes, call_sites, out);
         }
     }
     let mut c = node.walk();
     for child in node.children(&mut c) {
-        detect_rust_node(child, source, nodes, param_types, call_sites, out);
+        detect_rust_node(child, source, nodes, vars, call_sites, out);
     }
 }
 
 /// Classify a Rust `call_expression` node.
 /// Returns `(flags, dispatch_type_string, is_a_real_call)`.
-fn classify_rust_call(
-    call: Node<'_>,
-    source: &[u8],
-    param_types: &FxHashMap<String, String>,
-) -> (u8, String, bool) {
+fn classify_rust_call(call: Node<'_>, source: &[u8], vars: &FnPtrVars) -> (u8, String, bool) {
     let Some(function) = call.child_by_field_name("function") else {
         return (CallMeta::FLAG_DIRECT, String::new(), false);
     };
+    let pos = start_pos(call);
     match function.kind() {
         "identifier" => {
             // Plain function call: `foo()` — check if it's a fn-ptr variable.
             let name = node_text(function, source).unwrap_or_default();
-            if let Some(ty) = param_types.get(name) {
+            if let Some(ty) = vars.type_at(name, pos) {
                 if is_fn_type(ty) {
                     return (CallMeta::FLAG_CALLBACK, ty.to_string(), true);
                 }
@@ -183,7 +241,7 @@ fn classify_rust_call(
             if let Some(value) = function.child_by_field_name("value") {
                 let obj = node_text(value, source).unwrap_or_default();
                 let var_name = obj.trim_start_matches(['*', '&', ' ']);
-                if let Some(ty) = param_types.get(var_name) {
+                if let Some(ty) = vars.type_at(var_name, pos) {
                     // `&dyn Trait`, `dyn Trait`, `Box<dyn Trait>`, `Arc<dyn Trait>` etc.
                     if is_dyn_type(ty) {
                         let dispatch_str = extract_dyn_trait_name(ty);

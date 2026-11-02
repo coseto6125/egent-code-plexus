@@ -1,7 +1,7 @@
 ;; Functions
 (function_declaration
   name: (identifier) @function.name
-  return_type: (type_annotation (type_identifier) @type)?
+  return_type: (type_annotation [(type_identifier) (this_type)] @type)?
 ) @function
 
 (generator_function_declaration
@@ -11,7 +11,7 @@
 (export_statement
   (function_declaration
     name: (identifier) @function.name
-    return_type: (type_annotation (type_identifier) @type)?
+    return_type: (type_annotation [(type_identifier) (this_type)] @type)?
   ) @function
 ) @export
 
@@ -137,7 +137,7 @@
 ;; for the same span, inflating ecp Constructor counts ~25%.
 (method_definition
   name: (property_identifier) @method.name
-  return_type: (type_annotation (type_identifier) @type)?
+  return_type: (type_annotation [(type_identifier) (this_type)] @type)?
   (#not-eq? @method.name "constructor")
 ) @method
 

@@ -1,3 +1,4 @@
+use ecp_core::analyzer::csharp_access;
 use ecp_core::analyzer::csharp_extension::ExtensionDecl;
 use ecp_core::analyzer::import_binding::{
     fqn_language, owner_path_agrees, DeclaredType, MemberOwner,
@@ -96,22 +97,6 @@ pub(crate) fn crate_root_prefix(path: &str) -> &str {
 }
 
 pub use ecp_core::analyzer::reexport::ResolveTarget;
-
-/// The kinds a Tier-3 lookup weighs for `target`. Method syntax narrows the
-/// result, not the field: a same-named free fn still makes the name
-/// ambiguous, so `path.join(..)` on a std type never binds the project's
-/// only `join` method. A bare `f()` that never reaches a member
-/// (`free_only`) drops every `Method` from the field instead: the method of
-/// an unrelated class neither binds the call nor competes with the free
-/// function the call does reach.
-fn global_field(target: ResolveTarget, free_only: bool) -> impl Fn(NodeKind) -> bool {
-    let field = match target {
-        ResolveTarget::Method => ResolveTarget::Callable,
-        other => other,
-    }
-    .kind_predicate();
-    move |kind| field(kind) && !(free_only && kind == NodeKind::Method)
-}
 
 /// The last two components of `path`: its directory's name and its file
 /// name (`collect/Maps.java`), or the whole path at the root.
@@ -346,6 +331,11 @@ pub struct SymbolTable {
     /// ([`ecp_core::analyzer::lexical::lexical_scope_kinds`]).
     lexical_parents: FxHashMap<u32, u32>,
 
+    /// The unscoped Rust nodes every raw merged into which lies inside a
+    /// function body (see [`Self::note_body_local`]). Sparse: empty for a
+    /// file with none.
+    body_locals: FxHashSet<u32>,
+
     /// Method name → the C# extension methods of that name, each with its
     /// `this` parameter's type as written, its `FunctionMeta::flags` and its
     /// parameter names (see [`Self::note_csharp_extension`]). Overloads
@@ -494,6 +484,16 @@ impl SymbolTable {
         )
     }
 
+    /// The namespace the C# type `id` is declared in ([`declared_namespace`]).
+    pub(crate) fn type_namespace(&self, id: u32) -> Option<&str> {
+        declared_namespace(
+            self.owner(id),
+            self.csharp_namespaces(self.file_of(id)?)
+                .iter()
+                .map(String::as_str),
+        )
+    }
+
     pub(crate) fn module_files_by_stem<'a>(&'a self, stem: &str) -> impl Iterator<Item = &'a str> {
         self.files_by_stem(stem)
             .iter()
@@ -631,8 +631,10 @@ impl SymbolTable {
     }
 
     /// Record the return type the function `node_id` declares, as written
-    /// (`RawFunctionMeta.return_type`). Only a type [`return_type_key`]
-    /// reduces to a bare name is kept, interned once per distinct name.
+    /// (`RawFunctionMeta.return_type`), or the type the C# field or property
+    /// `node_id` declares (`RawNode.type_annotation`). Only a type
+    /// [`return_type_key`] reduces to a bare name is kept, interned once per
+    /// distinct name.
     pub fn note_return_type(&mut self, node_id: u32, return_type: &str) {
         let Some(key) = return_type_key(return_type) else {
             return;
@@ -675,10 +677,16 @@ impl SymbolTable {
     }
 
     /// Record the `FunctionMeta::flags` of the C# method `node_id` when the
-    /// access rule may refuse a call to it: a static or a private method.
+    /// access rule may refuse a call to it: a static or a private method, or
+    /// an explicit interface implementation, which no lookup reaches by name.
     pub fn note_csharp_method_flags(&mut self, node_id: u32, flags: u16) {
         let is_static = flags & FunctionMeta::FLAG_STATIC != 0;
-        if is_static || (flags >> 6) & 0b111 == 2 {
+        if is_static
+            || matches!(
+                csharp_access::visibility(flags),
+                csharp_access::PRIVATE | csharp_access::EXPLICIT_IMPL
+            )
+        {
             self.csharp_method_flags.insert(node_id, flags);
         }
     }
@@ -739,7 +747,8 @@ impl SymbolTable {
             .unwrap_or(&[])
     }
 
-    /// The [`return_type_key`] the function `node_id` declares.
+    /// The [`return_type_key`] the function or C# field / property `node_id`
+    /// declares.
     pub fn return_type_of(&self, node_id: u32) -> Option<&str> {
         self.return_types
             .get(&node_id)
@@ -907,6 +916,29 @@ impl SymbolTable {
     /// Whether `id` is scoped ([`Self::note_lexical_parent`]).
     pub fn is_lexically_scoped(&self, id: u32) -> bool {
         !self.lexical_parents.is_empty() && self.lexical_parents.contains_key(&id)
+    }
+
+    /// Record that the unscoped Rust node `node` is body-local: every raw
+    /// Pass 1 merged into it lies inside a function body
+    /// ([`ecp_core::analyzer::lexical::body_locals`],
+    /// [`ecp_core::analyzer::lexical::fold_twins`]), so it is no module item.
+    /// The builder notes each such node before Pass 2.
+    pub fn note_body_local(&mut self, node: u32) {
+        self.body_locals.insert(node);
+    }
+
+    /// Whether `id` is body-local ([`Self::note_body_local`]) or scoped: no
+    /// path from outside its function names it.
+    pub fn is_body_local(&self, id: u32) -> bool {
+        self.body_locals.contains(&id) || self.is_lexically_scoped(id)
+    }
+
+    /// Whether `id` has the owner `owner_id` (`NO_OWNER` for a top-level
+    /// item) and is no body-local declaration: the one rule of the
+    /// module-item lookups, which the overlay's `RustModules::module_level`
+    /// mirrors.
+    fn is_module_level(&self, id: u32, owner_id: u32) -> bool {
+        self.node_owner[id as usize] == owner_id && !self.is_body_local(id)
     }
 
     /// The outermost unscoped declaration that `id`'s lexical parents
@@ -1182,6 +1214,26 @@ impl SymbolTable {
             .and_then(|ids| ids.first().copied())
     }
 
+    /// Whether `file_path` declares a module-level node named `node_name`
+    /// whose kind `holds` accepts: an associated item
+    /// (`impl X { const h: u32 = 1; }`) and a body-local declaration
+    /// (`fn setup() { struct Foo; }`) are no items of the module.
+    pub(crate) fn declares_in_file(
+        &self,
+        file_path: &str,
+        node_name: &str,
+        holds: impl Fn(NodeKind) -> bool,
+    ) -> bool {
+        self.file_scoped
+            .get(file_path)
+            .and_then(|file_map| file_map.get(node_name))
+            .is_some_and(|ids| {
+                ids.iter().any(|&id| {
+                    self.is_module_level(id, NO_OWNER) && holds(self.node_kinds[id as usize])
+                })
+            })
+    }
+
     /// Kind-aware variant of [`lookup_in_file`]: scans the per-name node_id
     /// list and returns the first whose `node_kinds[id]` matches the target
     /// predicate (Callable / Type). Skips same-name-different-kind nodes so
@@ -1306,7 +1358,10 @@ impl SymbolTable {
     /// requires: [`MemberOwner::Any`] takes the match [`Self::prefer_owned`]
     /// picks with no owner (a free function, else one type's member),
     /// `TopLevel` a declaration with no owning type, `Type` a member of the
-    /// type its path names, when the file's types agree with that path.
+    /// type its path names, when the file's types agree with that path. A
+    /// body-local declaration is none of them: no import names it. A later
+    /// overload counts, as a base node does for the overlay: a body-local
+    /// first `new` must not hide a module-level `new` of its uid.
     pub(crate) fn lookup_member_in_file(
         &self,
         file_path: &str,
@@ -1339,10 +1394,11 @@ impl SymbolTable {
             .get(file_path)?
             .get(node_name)?
             .iter()
-            .copied()
-            .find(|&id| {
-                self.node_owner[id as usize] == owner_id && predicate(self.node_kinds[id as usize])
+            .flat_map(|&id| std::iter::once(id).chain(self.later_overloads(id).iter().copied()))
+            .filter(|&id| {
+                self.is_module_level(id, owner_id) && predicate(self.node_kinds[id as usize])
             })
+            .min()
     }
 
     /// [`owner_path_agrees`] over the types `file_path` declares.
@@ -1387,7 +1443,7 @@ impl SymbolTable {
     }
 
     /// Every declaration named `node_name` in the field a Tier-3 lookup of
-    /// `target` weighs ([`global_field`]; `free_only` is a bare `f()` that
+    /// `target` weighs ([`ladder::global_field`]; `free_only` is a bare `f()` that
     /// never reaches a member), with its file's meta, scoped ones included:
     /// the shared ladder drops those (I5).
     pub(crate) fn global_field_candidates(
@@ -1396,13 +1452,33 @@ impl SymbolTable {
         target: ResolveTarget,
         free_only: bool,
     ) -> impl Iterator<Item = (u32, FileMeta)> + '_ {
-        let field = global_field(target, free_only);
+        let field = ladder::global_field(target, free_only);
         self.global_scoped
             .get(node_name)
             .map_or(&[][..], Vec::as_slice)
             .iter()
             .filter(move |&&id| field(self.node_kinds[id as usize]))
             .map(move |&id| (id, self.node_file_meta[id as usize]))
+    }
+
+    /// The Rust `impl` blocks named `name`, with their files' metas, when no
+    /// declaration of a qualifier kind (a type, a namespace, a module) has
+    /// the name: a type only an `impl` declares, such as the
+    /// derive-generated `ArchivedZg`. None otherwise, so a `struct S` beside
+    /// its `impl S` stays the one qualifier.
+    pub(crate) fn impl_only_blocks(
+        &self,
+        name: &str,
+    ) -> impl Iterator<Item = (u32, FileMeta)> + '_ {
+        let ids = self.global_scoped.get(name).map_or(&[][..], Vec::as_slice);
+        let is_qualifier = ResolveTarget::Qualifier.kind_predicate();
+        let impl_only = !ids
+            .iter()
+            .any(|&id| is_qualifier(self.node_kinds[id as usize]));
+        ids.iter()
+            .copied()
+            .filter(move |&id| impl_only && self.node_kinds[id as usize] == NodeKind::Impl)
+            .map(move |id| (id, self.node_file_meta[id as usize]))
     }
 
     /// Every candidate [`lookup_global`] weighs, as a set: kind-filtered, then
@@ -1976,6 +2052,10 @@ impl PickFacts for SymbolTable {
     fn is_lexically_scoped(&self, id: u32) -> bool {
         SymbolTable::is_lexically_scoped(self, id)
     }
+
+    fn is_body_local(&self, id: u32) -> bool {
+        SymbolTable::is_body_local(self, id)
+    }
 }
 
 impl TypeFacts for SymbolTable {
@@ -2040,6 +2120,13 @@ impl TypeFacts for SymbolTable {
     fn partial_type(&self, ty: u32) -> u32 {
         SymbolTable::partial_type(self, ty)
     }
+
+    fn hidden_member(&self, id: u32) -> bool {
+        let hidden = |id: u32| {
+            csharp_access::visibility(self.csharp_method_flags(id)) == csharp_access::EXPLICIT_IMPL
+        };
+        hidden(id) && self.later_overloads(id).iter().all(|&later| hidden(later))
+    }
 }
 
 impl ResolveFacts for SymbolTable {
@@ -2063,6 +2150,24 @@ impl ResolveFacts for SymbolTable {
 
     fn enum_variant_of(&self, type_id: u32, type_name: &str, variant: &str) -> Option<u32> {
         SymbolTable::enum_variant_of(self, type_id, type_name, variant)
+    }
+
+    /// The file's names in no order: the answer is a yes or no.
+    fn any_trait_impl(
+        &self,
+        file: &str,
+        trait_key: &str,
+        mut accepts: impl FnMut(&str) -> bool,
+    ) -> bool {
+        let implements = |id: u32| {
+            self.node_kinds[id as usize] == NodeKind::Impl
+                && PickFacts::owner(self, id) == Some(trait_key)
+        };
+        self.file_scoped.get(file).is_some_and(|names| {
+            names
+                .iter()
+                .any(|(name, ids)| ids.iter().any(|&id| implements(id)) && accepts(name.as_str()))
+        })
     }
 }
 
@@ -2227,6 +2332,113 @@ mod tests {
             lookup("h/Outer1.java", "h.Outer1.Helper"),
             None,
             "`Helper` is nested in `Outer2`, not in the imported `Outer1`"
+        );
+    }
+
+    /// A body-local declaration (a type inside a function body, a method of
+    /// an `impl` there) is no module item: `declares_in_file` and the
+    /// top-level and type-owned `lookup_member_in_file` skip it, and a
+    /// module-level declaration of the same name still binds.
+    #[test]
+    fn test_module_lookups_body_local_node_excluded_returns_module_item() {
+        let rows = [
+            ("src/m.rs", "setup", NodeKind::Function, None),
+            ("src/m.rs", "Foo", NodeKind::Struct, None),
+            ("src/m.rs", "new", NodeKind::Method, Some("Foo")),
+            ("src/m.rs", "Foo", NodeKind::Struct, None),
+            ("src/m.rs", "new", NodeKind::Method, Some("Foo")),
+        ];
+        let mut st = st_owned(&rows);
+        st.note_body_local(1);
+        st.note_body_local(2);
+        assert!(st.is_body_local(1) && !st.is_body_local(3));
+        let is_type = |kind: NodeKind| kind == NodeKind::Struct;
+        assert!(st.declares_in_file("src/m.rs", "Foo", is_type));
+        assert_eq!(
+            st.lookup_member_in_file(
+                "src/m.rs",
+                "Foo",
+                ResolveTarget::Type,
+                MemberOwner::TopLevel
+            ),
+            Some(3)
+        );
+
+        let mut only_local = st_owned(&rows[..3]);
+        only_local.note_body_local(1);
+        only_local.note_body_local(2);
+        assert!(!only_local.declares_in_file("src/m.rs", "Foo", is_type));
+        assert_eq!(
+            only_local.lookup_member_in_file(
+                "src/m.rs",
+                "Foo",
+                ResolveTarget::Type,
+                MemberOwner::TopLevel
+            ),
+            None
+        );
+        assert_eq!(
+            only_local.lookup_member_in_file("src/m.rs", "new", CALL, MemberOwner::Type("Foo")),
+            None
+        );
+    }
+
+    /// `fn setup() { impl Foo { fn new } }` before the module-level
+    /// `impl Foo { pub fn new }`: the two `new`s share a uid, so the
+    /// module-level one is a later overload, in no name table. A body-local
+    /// first `new` does not hide it from the type-owned lookup.
+    #[test]
+    fn test_lookup_member_in_file_body_local_first_overload_returns_module_level_overload() {
+        let mut st = st_owned(&[
+            ("src/m.rs", "setup", NodeKind::Function, None),
+            ("src/m.rs", "Foo", NodeKind::Struct, None),
+            ("src/m.rs", "new", NodeKind::Method, Some("Foo")),
+        ]);
+        st.register_overload(2, FileMeta::from_path("src/m.rs"));
+        let module_level = 3;
+        st.note_body_local(2);
+        let lookup = |st: &SymbolTable| {
+            st.lookup_member_in_file("src/m.rs", "new", CALL, MemberOwner::Type("Foo"))
+        };
+        assert_eq!(lookup(&st), Some(module_level));
+        st.note_body_local(module_level);
+        assert_eq!(lookup(&st), None, "every overload body-local");
+    }
+
+    /// A trait's `impl` for `ty` in the file: an `Impl` named `ty`, or a
+    /// blanket `impl<T: ..> Trait for T` whose self type names no project
+    /// type. `impl Sizer for Name`, with `Name` declared in `other.rs`,
+    /// implements `Sizer` for `Name` only.
+    #[test]
+    fn test_implements_in_file_named_or_blanket_impl_returns_true() {
+        let rows = [
+            ("lib.rs", "Describe", NodeKind::Trait, None),
+            ("lib.rs", "T", NodeKind::Impl, Some("Describe")),
+            ("other.rs", "Name", NodeKind::Struct, None),
+            ("lib.rs", "Name", NodeKind::Impl, Some("Sizer")),
+            ("lib.rs", "String", NodeKind::Impl, Some("Summary")),
+        ];
+        let st = st_owned(&rows);
+        assert!(st.implements_in_file("lib.rs", "String", "Summary"));
+        assert!(st.implements_in_file("lib.rs", "String", "Describe"));
+        assert!(st.implements_in_file("lib.rs", "Name", "Sizer"));
+        assert!(!st.implements_in_file("lib.rs", "String", "Sizer"));
+        assert!(!st.implements_in_file("other.rs", "String", "Describe"));
+
+        // In another file: `register_node` drops a file's `Impl` from the
+        // name table once a same-named type lands in that file (Pass 1's
+        // `register_node_with_meta` keeps both), and the dropped `impl`
+        // would pass this assertion for the wrong reason.
+        let mut declared_t = rows.to_vec();
+        declared_t.push(("other.rs", "T", NodeKind::Struct, None));
+        let st = st_owned(&declared_t);
+        assert!(
+            st.implements_in_file("lib.rs", "T", "Describe"),
+            "the `impl Describe for T` block stays in the name table"
+        );
+        assert!(
+            !st.implements_in_file("lib.rs", "String", "Describe"),
+            "a self type the project declares is no generic parameter"
         );
     }
 

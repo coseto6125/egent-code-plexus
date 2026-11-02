@@ -283,6 +283,32 @@ fn workspace_go_targets(files: &[(&str, &str)], callee: &str) -> Vec<String> {
 /// [`workspace_go_targets`] with each target's kind, for a callee name that
 /// a free `fn` and a method share in one file.
 fn workspace_go_target_kinds(files: &[(&str, &str)], callee: &str) -> Vec<(String, NodeKind)> {
+    workspace_go_calls(files, callee)
+        .into_iter()
+        .map(|(file, kind, _)| (file, kind))
+        .collect()
+}
+
+/// [`workspace_go_target_kinds`] with each edge's confidence, which tells
+/// the tier that bound it.
+fn workspace_go_calls(files: &[(&str, &str)], callee: &str) -> Vec<(String, NodeKind, f32)> {
+    workspace_go_edges(files, callee)
+        .into_iter()
+        .map(|(file, kind, confidence, _)| (file, kind, confidence))
+        .collect()
+}
+
+/// Each target of `go`'s calls to `callee` as (file, 1-based start line):
+/// two same-named declarations of one file differ by the line alone.
+fn workspace_go_lines(files: &[(&str, &str)], callee: &str) -> Vec<(String, u32)> {
+    workspace_go_edges(files, callee)
+        .into_iter()
+        .map(|(file, _, _, line)| (file, line))
+        .collect()
+}
+
+/// [`workspace_go_calls`] with each target's 1-based start line.
+fn workspace_go_edges(files: &[(&str, &str)], callee: &str) -> Vec<(String, NodeKind, f32, u32)> {
     let tmp = tempfile::tempdir().expect("tempdir");
     let rust = RustProvider::new().expect("RustProvider::new");
     let python = PythonProvider::new().expect("PythonProvider::new");
@@ -304,7 +330,7 @@ fn workspace_go_target_kinds(files: &[(&str, &str)], callee: &str) -> Vec<(Strin
     }
     let graph = builder.build();
     let pool = graph.string_pool.as_slice();
-    let mut out: Vec<(String, NodeKind)> = graph
+    let mut out: Vec<(String, NodeKind, f32, u32)> = graph
         .edges
         .iter()
         .filter(|e| e.rel_type == RelType::Calls)
@@ -316,6 +342,8 @@ fn workspace_go_target_kinds(files: &[(&str, &str)], callee: &str) -> Vec<(Strin
             (
                 graph.files[file].path.resolve(pool).to_string(),
                 target.kind,
+                e.confidence,
+                target.span.0 + 1,
             )
         })
         .collect();
@@ -807,12 +835,12 @@ fn test_super_super_in_a_path_attribute_module_climbs_logical_modules() {
     );
 }
 
-/// Method syntax narrows the result, not the ambiguity check: with a free fn
-/// `join` and one project method `join`, `p.join(..)` on an unindexed type
-/// stays ambiguous instead of binding the method. With only the method, the
-/// unique match still binds as before.
+/// Method syntax weighs methods only (Rule U): with a free fn `join` and one
+/// project method `join`, `p.join(..)` on an unindexed type binds the method
+/// as a tagged guess (0.55, `call:untyped-member`), never the free fn. With
+/// only the method, the unique match binds the same way.
 #[test]
-fn test_method_call_with_a_same_named_free_fn_stays_ambiguous() {
+fn test_method_call_with_a_same_named_free_fn_binds_the_method_as_a_guess() {
     let ambiguous = [
         (
             "src/lib.rs",
@@ -825,8 +853,8 @@ fn test_method_call_with_a_same_named_free_fn_stays_ambiguous() {
         ),
     ];
     assert_eq!(
-        workspace_go_targets(&ambiguous, "join"),
-        Vec::<String>::new()
+        workspace_go_calls(&ambiguous, "join"),
+        vec![("src/b.rs".to_string(), NodeKind::Method, 0.55)]
     );
     let unique = [
         (
@@ -924,12 +952,12 @@ fn test_module_qualified_type_through_plain_pub_use_binds_its_definition() {
     );
 }
 
-/// A same-file free `fn join` keeps method syntax on an unindexed type
-/// ambiguous in the same-file tier too: `Path::new(".").join("x")` binds
-/// neither `join`. With only the method in the file, an untyped `x.join()`
-/// still binds it.
+/// The same-file tier follows Rule U too: beside a same-file free `fn join`,
+/// `Path::new(".").join("x")` binds the method `join` as a tagged guess
+/// (0.55), never the free fn. With only the method in the file, an untyped
+/// `x.join()` binds it the same way.
 #[test]
-fn test_method_call_with_a_same_file_free_fn_binds_neither() {
+fn test_method_call_with_a_same_file_free_fn_binds_the_method_as_a_guess() {
     let ambiguous = [(
         "src/lib.rs",
         "pub fn join(x: &str) {}\n\
@@ -938,8 +966,8 @@ fn test_method_call_with_a_same_file_free_fn_binds_neither() {
          pub fn go() { std::path::Path::new(\".\").join(\"x\"); }\n",
     )];
     assert_eq!(
-        workspace_go_target_kinds(&ambiguous, "join"),
-        Vec::<(String, NodeKind)>::new()
+        workspace_go_calls(&ambiguous, "join"),
+        vec![("src/lib.rs".to_string(), NodeKind::Method, 0.55)]
     );
     let method_only = [(
         "src/lib.rs",
@@ -997,5 +1025,571 @@ fn test_module_import_through_renamed_reexport_never_binds_a_private_namesake() 
         targets_of(&files, "lookup").is_empty(),
         "the private namesake must not bind: {:?}",
         targets_of(&files, "lookup")
+    );
+}
+
+/// `other::m` writes `pub use self::inner::*;` beside items of its own. Its
+/// `inner` re-exports `inner::deep` by a glob too.
+fn glob_module(app_lib: &str) -> Vec<(String, String)> {
+    two_crates(
+        app_lib,
+        &[
+            ("crates/other/src/lib.rs", "pub mod m;\n"),
+            (
+                "crates/other/src/m.rs",
+                "mod inner;\nmod k;\npub use self::inner::*;\npub fn f() {}\npub fn h() {}\nfn p() {}\n",
+            ),
+            (
+                "crates/other/src/m/inner.rs",
+                "mod deep;\npub use self::deep::*;\npub fn g() {}\npub fn h() {}\npub fn k() {}\npub fn p() {}\npub fn e() {}\n",
+            ),
+            ("crates/other/src/m/k.rs", "pub fn run() {}\n"),
+            (
+                "crates/other/src/m/inner/deep.rs",
+                "pub fn d() {}\npub fn e() {}\n",
+            ),
+        ],
+    )
+}
+
+/// FU-2026-10-26-045ff15cd46b: a glob `pub use` publishes a name only where
+/// the module declares no item of that name in the same namespace, whatever
+/// the item's visibility. `f`, `h` and the private `p` are `m`'s own (`h`
+/// and `p` also come through the glob); `g` comes only through the glob;
+/// `mod k;` is a type, so a call of `k` takes the glob's `fn k`; `d` and
+/// `e` cross two globs, and `inner`'s own `e` shadows the second one.
+#[test]
+fn test_glob_pub_use_own_item_shadows_the_glob_in_its_namespace() {
+    let files = glob_module(
+        "pub fn go() {\n    other::m::f();\n    other::m::g();\n    other::m::h();\n    other::m::k();\n    other::m::p();\n    other::m::d();\n    other::m::e();\n}\n",
+    );
+    for (callee, want) in [
+        ("f", "crates/other/src/m.rs"),
+        ("h", "crates/other/src/m.rs"),
+        ("p", "crates/other/src/m.rs"),
+        ("g", "crates/other/src/m/inner.rs"),
+        ("k", "crates/other/src/m/inner.rs"),
+        ("e", "crates/other/src/m/inner.rs"),
+        ("d", "crates/other/src/m/inner/deep.rs"),
+    ] {
+        assert_eq!(
+            targets_of(&files, callee),
+            vec![want.to_string()],
+            "{callee}"
+        );
+    }
+}
+
+/// A crate whose root re-exports `inner::rcoll` with `lib_tail`; `other.rs`
+/// declares an `rcoll` too, unless `other` replaces it. `user.rs` is `user`.
+fn reexport_crate(lib_tail: &str, other: &str, user: &str) -> Vec<(String, String)> {
+    [
+        ("Cargo.toml", "[package]\nname = \"rx\"\n"),
+        ("src/inner.rs", "pub fn rcoll() {}\n"),
+        ("src/other.rs", other),
+        ("src/user.rs", user),
+    ]
+    .iter()
+    .map(|&(p, s)| (p.to_string(), s.to_string()))
+    .chain(std::iter::once((
+        "src/lib.rs".to_string(),
+        format!("pub mod inner;\nmod other;\nmod user;\n{lib_tail}"),
+    )))
+    .collect()
+}
+
+const OTHER_RCOLL: &str = "pub fn rcoll() {}\n";
+const USE_RCOLL: &str = "use crate::rcoll;\npub fn go() { rcoll(); }\n";
+
+fn go_calls(files: &[(String, String)], callee: &str) -> Vec<(String, NodeKind, f32)> {
+    let borrowed: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, s)| (p.as_str(), s.as_str()))
+        .collect();
+    workspace_go_calls(&borrowed, callee)
+}
+
+fn inner_rcoll() -> Vec<(String, NodeKind, f32)> {
+    vec![("src/inner.rs".to_string(), NodeKind::Function, 0.95)]
+}
+
+/// FU-2026-11-01-4a461fdca155: `use crate::rcoll;` reaches `inner.rs`
+/// through the root's `pub use inner::rcoll;` and binds at the import tier,
+/// beside a same-named `other::rcoll` that leaves a bare-name pick
+/// ambiguous.
+#[test]
+fn test_use_through_pub_use_reexport_binds_the_defining_file() {
+    let files = reexport_crate("pub use inner::rcoll;\n", OTHER_RCOLL, USE_RCOLL);
+    assert_eq!(go_calls(&files, "rcoll"), inner_rcoll());
+}
+
+/// With no namesake the bare-name tier guessed the same file at 0.7; the
+/// module tree binds it at the import tier.
+#[test]
+fn test_use_through_pub_use_reexport_without_collision_binds_at_import_tier() {
+    let files = reexport_crate(
+        "pub use inner::rcoll;\n",
+        "pub fn unrelated() {}\n",
+        USE_RCOLL,
+    );
+    assert_eq!(go_calls(&files, "rcoll"), inner_rcoll());
+}
+
+/// The `use` forms that name the re-export: an alias, a group, `super::`
+/// from a root child, a glob `pub use`, and a second `pub use` hop.
+#[test]
+fn test_use_through_pub_use_reexport_forms_bind_the_defining_file() {
+    for (lib_tail, user) in [
+        (
+            "pub use inner::rcoll;\n",
+            "use crate::rcoll as rc;\npub fn go() { rc(); }\n",
+        ),
+        (
+            "pub use inner::rcoll;\npub fn rother() {}\n",
+            "use crate::{rcoll, rother};\npub fn go() { rcoll(); rother(); }\n",
+        ),
+        (
+            "pub use inner::rcoll;\n",
+            "use super::rcoll;\npub fn go() { rcoll(); }\n",
+        ),
+        ("pub use inner::*;\n", USE_RCOLL),
+        ("mod hop;\npub use hop::rcoll;\n", USE_RCOLL),
+    ] {
+        let mut files = reexport_crate(lib_tail, OTHER_RCOLL, user);
+        files.push(("src/hop.rs".into(), "pub use crate::inner::rcoll;\n".into()));
+        assert_eq!(go_calls(&files, "rcoll"), inner_rcoll(), "{lib_tail}{user}");
+    }
+}
+
+/// The re-export's file holds a method namesake before the function: a
+/// `use` names no associated item, so the free `fn` binds.
+#[test]
+fn test_use_through_pub_use_reexport_never_binds_a_method_namesake() {
+    let mut files = reexport_crate("pub use inner::rcoll;\n", OTHER_RCOLL, USE_RCOLL);
+    files.retain(|(p, _)| p != "src/inner.rs");
+    files.push((
+        "src/inner.rs".into(),
+        "pub struct S;\nimpl S {\n    pub fn rcoll(&self) {}\n}\npub fn rcoll() {}\n".into(),
+    ));
+    assert_eq!(
+        go_calls(&files, "rcoll"),
+        vec![("src/inner.rs".to_string(), NodeKind::Function, 0.95)]
+    );
+}
+
+/// An item the crate root declares itself binds there, as before.
+#[test]
+fn test_use_of_a_root_item_binds_the_root_file() {
+    let files: Vec<(String, String)> = [
+        ("Cargo.toml", "[package]\nname = \"rx\"\n"),
+        ("src/lib.rs", "mod other;\nmod user;\npub fn rcoll() {}\n"),
+        ("src/other.rs", OTHER_RCOLL),
+        ("src/user.rs", USE_RCOLL),
+    ]
+    .iter()
+    .map(|&(p, s)| (p.to_string(), s.to_string()))
+    .collect();
+    assert_eq!(
+        go_calls(&files, "rcoll"),
+        vec![("src/lib.rs".to_string(), NodeKind::Function, 0.95)]
+    );
+}
+
+/// Without a `Cargo.toml` there is no module tree to follow the `pub use`
+/// through: the call between the two namesakes stays unbound, never a
+/// guess at `other.rs`.
+#[test]
+fn test_use_through_pub_use_reexport_without_module_tree_never_binds_a_namesake() {
+    let mut files = reexport_crate("pub use inner::rcoll;\n", OTHER_RCOLL, USE_RCOLL);
+    files.retain(|(p, _)| p != "Cargo.toml");
+    assert!(
+        go_calls(&files, "rcoll")
+            .iter()
+            .all(|(file, _, _)| file == "src/inner.rs"),
+        "{:?}",
+        go_calls(&files, "rcoll")
+    );
+}
+
+/// `use other::xcoll;` reaches crate `other`'s `pub use imp::xcoll;`, past
+/// an app-local `xcoll` in another module.
+#[test]
+fn test_cross_crate_use_through_pub_use_reexport_binds_the_defining_file() {
+    let mut files = two_crates(
+        "mod local;\nuse other::xcoll;\npub fn go() { xcoll(); }\n",
+        &[
+            ("crates/other/src/lib.rs", "mod imp;\npub use imp::xcoll;\n"),
+            ("crates/other/src/imp.rs", "pub fn xcoll() {}\n"),
+        ],
+    );
+    files.push((
+        "crates/app/src/local.rs".into(),
+        "pub fn xcoll() {}\n".into(),
+    ));
+    assert_eq!(
+        targets_of(&files, "xcoll"),
+        vec!["crates/other/src/imp.rs".to_string()]
+    );
+}
+
+/// `m` declares `X` with an associated `const h` and method `g`; its glob
+/// `pub use` brings `inner`'s free `h` and `g`. An associated item is no
+/// item of the module, so it never shadows the glob.
+#[test]
+fn test_glob_pub_use_associated_item_never_shadows_the_glob() {
+    let files = two_crates(
+        "pub fn go() {\n    other::m::h();\n    other::m::g();\n}\n",
+        &[
+            ("crates/other/src/lib.rs", "pub mod m;\n"),
+            (
+                "crates/other/src/m.rs",
+                "mod inner;\npub use self::inner::*;\npub struct X;\nimpl X {\n    pub const h: u32 = 1;\n    pub fn g() {}\n}\n",
+            ),
+            ("crates/other/src/m/inner.rs", "pub fn h() {}\npub fn g() {}\n"),
+        ],
+    );
+    for callee in ["h", "g"] {
+        assert_eq!(
+            targets_of(&files, callee),
+            vec!["crates/other/src/m/inner.rs".to_string()],
+            "{callee}"
+        );
+    }
+}
+
+/// `crate::m::S::helper()` names an associated item of `S`, never the free
+/// `helper` of `S`'s file, in the module tree as in the qualifier tier: `S`
+/// owns no `helper` (only the trait default does), so the call binds that
+/// method or nothing. `other.rs` declares a second `S`, so the qualifier
+/// tier has no file and the module tree decides; `crate::m::S::new()` binds
+/// the inherent `S::new`, past a free `new` declared first.
+#[test]
+fn test_type_path_through_module_tree_never_binds_a_free_item_of_the_types_file() {
+    let files = [
+        ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+        (
+            "src/lib.rs",
+            "pub mod m;\npub mod other;\nuse m::T;\npub fn go() {\n    crate::m::S::helper();\n    crate::m::S::new();\n}\n",
+        ),
+        (
+            "src/m.rs",
+            "pub fn helper() {}\npub fn new() {}\npub struct S;\nimpl S {\n    pub fn new() -> S { S }\n}\npub trait T {\n    fn helper() {}\n}\nimpl T for S {}\n",
+        ),
+        (
+            "src/other.rs",
+            "pub struct S;\nimpl S {\n    pub fn new() -> S { S }\n}\n",
+        ),
+    ];
+    let helper = workspace_go_calls(&files, "helper");
+    assert!(
+        helper.iter().all(|(_, kind, _)| *kind == NodeKind::Method),
+        "the free `helper` must not bind: {helper:?}"
+    );
+    assert_eq!(
+        workspace_go_target_kinds(&files, "new"),
+        vec![("src/m.rs".to_string(), NodeKind::Method)]
+    );
+}
+
+/// A `fn` inside a function body is no item of its module: it neither
+/// shadows the root's glob `pub use inner::*` nor binds a `crate::` path or
+/// a `use`. With the glob, `crate::run()` and `use crate::run;` reach
+/// `inner.rs`; without it (and without `inner.rs`), they bind nothing.
+#[test]
+fn test_function_local_fn_is_no_module_item_for_paths_or_globs() {
+    const MANIFEST: (&str, &str) = ("Cargo.toml", "[package]\nname = \"tool\"\n");
+    const INNER: (&str, &str) = ("src/inner.rs", "pub fn run() {}\n");
+    let glob = "mod inner;\nmod other;\npub use inner::*;\npub fn setup() {\n    fn run() {}\n    run();\n}\n";
+    let no_glob = "mod other;\npub fn setup() {\n    fn run() {}\n    run();\n}\n";
+    for user in [
+        "pub fn go() {\n    crate::run();\n}\n",
+        "use crate::run;\npub fn go() {\n    run();\n}\n",
+    ] {
+        assert_eq!(
+            workspace_go_targets(
+                &[
+                    MANIFEST,
+                    ("src/lib.rs", glob),
+                    INNER,
+                    ("src/other.rs", user)
+                ],
+                "run"
+            ),
+            vec!["src/inner.rs".to_string()],
+            "glob: {user}"
+        );
+        assert_eq!(
+            workspace_go_targets(
+                &[MANIFEST, ("src/lib.rs", no_glob), ("src/other.rs", user)],
+                "run"
+            ),
+            Vec::<String>::new(),
+            "no glob: {user}"
+        );
+    }
+}
+
+/// `m.rs` holds the glob `pub use self::inner::*` and, inside `fn setup`,
+/// a declaration named `Foo`; `inner.rs` declares the module-level `Foo`.
+fn body_local_foo_crate(local: &str) -> Vec<(String, String)> {
+    [
+        ("Cargo.toml", "[package]\nname = \"tool\"\n".to_string()),
+        ("src/lib.rs", "pub mod m;\n".to_string()),
+        (
+            "src/m.rs",
+            format!("pub mod inner;\npub use self::inner::*;\nfn setup() {{\n    {local}\n}}\n"),
+        ),
+        (
+            "src/m/inner.rs",
+            "pub struct Foo;\nimpl Foo {\n    pub fn new() -> Foo { Foo }\n}\npub fn go() {\n    crate::m::Foo::new();\n}\n"
+                .to_string(),
+        ),
+    ]
+    .into_iter()
+    .map(|(path, source)| (path.to_string(), source))
+    .collect()
+}
+
+/// A type declared inside a function body is no item of its module, so it
+/// never shadows the module's glob `pub use`: `crate::m::Foo::new()` binds
+/// `inner.rs`'s `Foo::new`, never the body-local one. Before the fix a
+/// body-local struct, enum, trait or type alias hid the glob, and the struct
+/// with its own `impl` bound `m.rs`'s `new`.
+#[test]
+fn test_body_local_type_never_shadows_a_glob_pub_use() {
+    for local in [
+        "struct Foo;\n    impl Foo {\n        fn new() -> Foo { Foo }\n    }",
+        "enum Foo { A }",
+        "trait Foo {}",
+        "type Foo = u8;",
+    ] {
+        let files = body_local_foo_crate(local);
+        let borrowed: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(p, s)| (p.as_str(), s.as_str()))
+            .collect();
+        assert_eq!(
+            workspace_go_targets(&borrowed, "new"),
+            vec!["src/m/inner.rs".to_string()],
+            "{local}"
+        );
+    }
+}
+
+/// The methods of an `impl` block inside a function body are no associated
+/// items a module path names: `crate::m::Foo::new()` never binds the
+/// body-local `Foo::new`. `other.rs` declares a second `Foo`, so the
+/// qualifier tier has no unique file and the module tree decides.
+#[test]
+fn test_body_local_impl_method_never_binds_a_module_path() {
+    let files = [
+        ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+        (
+            "src/lib.rs",
+            "pub mod m;\nmod other;\npub fn go() {\n    crate::m::Foo::new();\n}\n",
+        ),
+        (
+            "src/m.rs",
+            "fn setup() {\n    struct Foo;\n    impl Foo {\n        pub fn new() -> Foo { Foo }\n    }\n}\n",
+        ),
+        ("src/other.rs", "pub struct Foo;\n"),
+    ];
+    assert_eq!(workspace_go_targets(&files, "new"), Vec::<String>::new());
+}
+
+/// `crate::helper()` reaches `m.rs` through the root's `pub use m::helper;`,
+/// where `impl S { pub fn helper(&self) }` comes before the free `helper`.
+/// A module path names a module-level item, so the free `fn` binds; before
+/// the fix the tree took the method, rejected it, and bound nothing.
+#[test]
+fn test_module_path_through_pub_use_binds_the_free_fn_past_a_method_namesake() {
+    let files = [
+        ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+        ("src/lib.rs", "pub mod m;\nmod other;\npub use m::helper;\n"),
+        (
+            "src/m.rs",
+            "pub struct S;\nimpl S {\n    pub fn helper(&self) {}\n}\npub fn helper() {}\n",
+        ),
+        ("src/other.rs", "pub fn go() {\n    crate::helper();\n}\n"),
+    ];
+    assert_eq!(
+        workspace_go_target_kinds(&files, "helper"),
+        vec![("src/m.rs".to_string(), NodeKind::Function)]
+    );
+}
+
+/// `m.rs` after `prefix`: `fn setup` holds `local`, then the module-level
+/// `pub struct Foo` and its `impl` with `pub fn new`. Rust scopes only `fn`
+/// by its parent, so a body-local `Foo` shares the module-level one's uid;
+/// Pass 1 keeps the first, the body-local one, and tombstones the other
+/// into it.
+fn foo_twin_m_rs(prefix: &str, local: &str) -> String {
+    format!(
+        "{prefix}fn setup() {{\n    {local}\n}}\npub struct Foo;\nimpl Foo {{\n    pub fn new() -> Foo {{ Foo }}\n}}\n"
+    )
+}
+
+/// The 1-based line of the module-level `    pub fn new` in `source`.
+fn module_level_new_line(source: &str) -> u32 {
+    source
+        .lines()
+        .position(|line| line.starts_with("    pub fn new"))
+        .expect("the fixture declares a module-level `new`") as u32
+        + 1
+}
+
+/// What `fn setup` holds beside the module-level `Foo`: a twin struct, then
+/// a twin struct with its own `impl Foo { fn new }`, which makes the
+/// module-level `new` a later overload of the body-local one.
+const FOO_TWINS: [&str; 2] = [
+    "struct Foo;",
+    "struct Foo;\n    impl Foo {\n        fn new() -> Foo { Foo }\n    }",
+];
+
+/// A merged node is body-local only when every declaration Pass 1 merged
+/// into it is: `m.rs`'s module-level `Foo` shadows the glob
+/// `pub use self::inner::*`, so `crate::m::Foo::new()` binds `m.rs`'s
+/// module-level `new`. Before the fix the body-local survivor marked the
+/// merged node body-local, the glob won, and `inner.rs`'s `new` bound
+/// through the module tree; with a body-local `impl Foo { fn new }` the
+/// first `new` must not hide the module-level overload either.
+#[test]
+fn test_module_level_twin_of_body_local_type_shadows_a_glob_pub_use() {
+    for local in FOO_TWINS {
+        let m = foo_twin_m_rs("pub mod inner;\npub use self::inner::*;\n", local);
+        let files = [
+            ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+            (
+                "src/lib.rs",
+                "pub mod m;\npub fn go() {\n    crate::m::Foo::new();\n}\n",
+            ),
+            ("src/m.rs", m.as_str()),
+            (
+                "src/m/inner.rs",
+                "pub struct Foo;\nimpl Foo {\n    pub fn new() -> Foo { Foo }\n}\n",
+            ),
+        ];
+        assert_eq!(
+            workspace_go_lines(&files, "new"),
+            vec![("src/m.rs".to_string(), module_level_new_line(&m))],
+            "{local}"
+        );
+    }
+}
+
+/// Contract: an earlier `Other::new` in `m.rs` makes the first `new` pick
+/// another type's, so the owner choice weighs every `new`; when it settles
+/// on the body-local `Foo::new`, `crate::m::Foo::new()` still binds the
+/// module-level one. Before the fix the call bound nothing.
+#[test]
+fn test_module_path_through_twin_binds_module_level_member_past_another_types_namesake() {
+    let other = "pub struct Foo;\nimpl Foo {\n    pub fn new() -> Foo { Foo }\n}\n";
+    let lib = "pub mod m;\nmod other;\npub fn go() {\n    crate::m::Foo::new();\n}\n";
+    let m = foo_twin_m_rs(
+        "pub struct Other;\nimpl Other {\n    pub fn new() -> Other { Other }\n}\n",
+        FOO_TWINS[1],
+    );
+    let files = [
+        ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+        ("src/lib.rs", lib),
+        ("src/m.rs", m.as_str()),
+        ("src/other.rs", other),
+    ];
+    let foo_new_line = m
+        .lines()
+        .collect::<Vec<_>>()
+        .iter()
+        .rposition(|line| line.starts_with("    pub fn new"))
+        .expect("module-level Foo::new") as u32
+        + 1;
+    assert_eq!(
+        workspace_go_lines(&files, "new"),
+        vec![("src/m.rs".to_string(), foo_new_line)]
+    );
+}
+
+/// Guard: `crate::m::Foo::hello()` never binds the body-local `Foo::hello`
+/// through the module tree. `other.rs` declares a second `Foo`, so the
+/// qualifier tier has no file and the module tree decides. The trait
+/// default `Make::hello` binds through no path tier (`rust_path_may_bind`
+/// wants the owner `Foo`), a follow-up; this test asserts only that the
+/// body-local line stays unbound, so the follow-up's fix keeps it green.
+#[test]
+fn test_module_path_never_binds_body_local_namesake_of_trait_default() {
+    let m = "pub trait Make {\n    fn hello() {}\n}\npub struct Foo;\nimpl Make for Foo {}\n\
+             pub fn setup() {\n    struct Foo;\n    impl Foo {\n        fn hello() {}\n    }\n}\n";
+    let files = [
+        ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+        (
+            "src/lib.rs",
+            "pub mod m;\nmod other;\npub fn go() {\n    crate::m::Foo::hello();\n}\n",
+        ),
+        ("src/m.rs", m),
+        ("src/other.rs", "pub struct Foo;\n"),
+    ];
+    let lines = workspace_go_lines(&files, "hello");
+    assert!(
+        !lines.contains(&("src/m.rs".to_string(), 9)),
+        "the body-local `Foo::hello` bound: {lines:?}"
+    );
+}
+
+/// The same merged `Foo` without a glob: `use crate::m::Foo;` imports the
+/// module item, and the module path `crate::m::Foo::new()` names it.
+/// `other.rs` declares a second `Foo`, so no tier reaches `m.rs` by the
+/// name alone. Before the fix the import missed the body-local survivor.
+#[test]
+fn test_module_level_twin_of_body_local_type_binds_import_and_module_path() {
+    let other = "pub struct Foo;\nimpl Foo {\n    pub fn new() -> Foo { Foo }\n}\n";
+    let by_import =
+        "pub mod m;\nmod other;\nuse crate::m::Foo;\npub fn go() {\n    Foo::new();\n}\n";
+    let by_path = "pub mod m;\nmod other;\npub fn go() {\n    crate::m::Foo::new();\n}\n";
+    for (lib, local) in [
+        (by_import, FOO_TWINS[0]),
+        (by_path, FOO_TWINS[0]),
+        (by_path, FOO_TWINS[1]),
+    ] {
+        let m = foo_twin_m_rs("", local);
+        let files = [
+            ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+            ("src/lib.rs", lib),
+            ("src/m.rs", m.as_str()),
+            ("src/other.rs", other),
+        ];
+        assert_eq!(
+            workspace_go_lines(&files, "new"),
+            vec![("src/m.rs".to_string(), module_level_new_line(&m))],
+            "{lib} {local}"
+        );
+    }
+}
+
+/// Contract: a `mod` inside a body breaks the lexical link, so
+/// `fn setup() { mod inner { pub fn helper } }` and the module-level
+/// `pub mod inner { pub fn helper }` are two unscoped `Function`s of one uid;
+/// Pass 1 merges the second into the first, and the merged node is a module
+/// item. `crate::m::inner::helper()` binds it through the module tree.
+/// `other.rs` declares a second `inner::helper`, so no tier reaches `m.rs`
+/// by the name alone. The overlay twin of this test is
+/// `test_overlay_rust_module_level_twin_of_body_local_fn_binds_matches_reindex`.
+#[test]
+fn test_module_path_binds_module_level_twin_of_body_local_fn() {
+    let m = "fn setup() {\n    mod inner {\n        pub fn helper() {}\n    }\n}\n\
+        pub mod inner {\n    pub fn helper() {}\n}\n";
+    let files = [
+        ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+        (
+            "src/lib.rs",
+            "pub mod m;\nmod other;\npub fn go() {\n    crate::m::inner::helper();\n}\n",
+        ),
+        ("src/m.rs", m),
+        (
+            "src/other.rs",
+            "pub mod inner {\n    pub fn helper() {}\n}\n",
+        ),
+    ];
+    assert_eq!(
+        workspace_go_target_kinds(&files, "helper"),
+        vec![("src/m.rs".to_string(), NodeKind::Function)]
     );
 }

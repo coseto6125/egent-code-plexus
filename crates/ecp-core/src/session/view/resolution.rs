@@ -27,7 +27,8 @@ use crate::analyzer::ladder::{
     TypeName,
 };
 use crate::analyzer::lexical::{
-    lexical_chain_end, lexical_scope_kinds, twin_enclosing, LexicalFunctions,
+    body_locals, decls_enclosing, fold_twins, inside_callable, lexical_chain_end,
+    lexical_scope_kinds, twin_enclosing, LexicalFunctions,
 };
 use crate::analyzer::outcome::{Resolution, Tier};
 use crate::analyzer::overrides::{
@@ -51,10 +52,11 @@ use crate::analyzer::type_ladder::{
 };
 use crate::analyzer::types::{
     owner_key, CallArguments, CallSite, NameRef, RawFunctionMeta, RawImport, Span, VariantRef,
-    FUNCTION_REFERENCE_REASON, NEAREST_COPY_CONFIDENCE, NEAREST_COPY_REASON, VALUE_READ_REASON,
-    VARIANT_PATTERN_REASON, VARIANT_USE_REASON,
+    FUNCTION_REFERENCE_REASON, NEAREST_COPY_CONFIDENCE, NEAREST_COPY_REASON,
+    UNTYPED_NAME_CONFIDENCE, UNTYPED_NAME_REASON, VALUE_READ_REASON, VARIANT_PATTERN_REASON,
+    VARIANT_USE_REASON,
 };
-use crate::contracts::identity::lexical_parents;
+use crate::contracts::identity::lexical_parents_in;
 use crate::file_category::{pick_global, FileMeta, GlobalPick, Language};
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
 use crate::session::closure::ConfigEdits;
@@ -62,6 +64,7 @@ use crate::session::import_scope::{stored_file_meta, stored_language, ImportScop
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::Cow;
 use std::cell::{Cell, OnceCell, RefCell};
+use std::collections::hash_map::Entry;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -76,6 +79,11 @@ struct OverlayNames<'a> {
     same_file: FxHashSet<(usize, &'a str)>,
     /// name → (virtual idx, file meta), anywhere in the overlay.
     anywhere: FxHashMap<&'a str, Vec<(u32, FileMeta)>>,
+    /// The qualifier table only: the Rust `impl` blocks, keyed as
+    /// `same_file` and `anywhere` are, for a method-syntax receiver typed as
+    /// a type only an `impl` declares ([`ladder::qualifier_file`]).
+    impl_same_file: FxHashSet<(usize, &'a str)>,
+    impl_anywhere: FxHashMap<&'a str, Vec<(u32, FileMeta)>>,
 }
 
 impl<'a> OverlayNames<'a> {
@@ -84,6 +92,8 @@ impl<'a> OverlayNames<'a> {
             target,
             same_file: FxHashSet::default(),
             anywhere: FxHashMap::default(),
+            impl_same_file: FxHashSet::default(),
+            impl_anywhere: FxHashMap::default(),
         }
     }
 
@@ -97,12 +107,19 @@ impl<'a> OverlayNames<'a> {
     ) {
         // The index registers a later overload by id only: no name tier,
         // same-file included, can bind it.
-        if node.later_overload || !self.target.kind_predicate()(node.kind) {
+        if node.later_overload {
             return;
         }
-        self.same_file.insert((file_ord, node.name.as_str()));
+        let (same_file, anywhere) = if self.target.kind_predicate()(node.kind) {
+            (&mut self.same_file, &mut self.anywhere)
+        } else if self.target == ResolveTarget::Qualifier && node.kind == NodeKind::Impl {
+            (&mut self.impl_same_file, &mut self.impl_anywhere)
+        } else {
+            return;
+        };
+        same_file.insert((file_ord, node.name.as_str()));
         if first_of_uid {
-            self.anywhere
+            anywhere
                 .entry(node.name.as_str())
                 .or_default()
                 .push((virt, meta));
@@ -249,6 +266,60 @@ struct OverlayFacts<'a> {
 type Supertypes = (Vec<u32>, Option<u32>);
 type ImplSpan<'a> = ((u32, u32, u32, u32), u32, Option<&'a str>);
 
+/// The span of the stored node `node`, as its parse wrote it.
+fn stored_span(node: &crate::graph::ArchivedNode) -> Span {
+    let span = &node.span;
+    (
+        span.0.to_native(),
+        span.1.to_native(),
+        span.2.to_native(),
+        span.3.to_native(),
+    )
+}
+
+/// Whether the base file `file_idx` is a Rust source file.
+fn is_rust_file(graph: &ArchivedZeroCopyGraph, file_idx: usize) -> bool {
+    graph
+        .files
+        .get(file_idx)
+        .is_some_and(|f| is_rust_source(std::path::Path::new(f.path.resolve(&graph.string_pool))))
+}
+
+/// Per base file index, the spans of its callables when it is a Rust file,
+/// none otherwise: one path test per file, one index per callable.
+fn base_rust_callables(graph: &ArchivedZeroCopyGraph) -> Vec<Vec<Span>> {
+    let rust: Vec<bool> = (0..graph.files.len())
+        .map(|file_idx| is_rust_file(graph, file_idx))
+        .collect();
+    let mut callables = vec![Vec::new(); rust.len()];
+    for kind in NodeKind::ALL.into_iter().filter(|kind| kind.is_callable()) {
+        for idx in graph.nodes_by_kind(kind) {
+            let callable = &graph.nodes[idx as usize];
+            let file_idx = callable.file_idx.to_native() as usize;
+            if rust.get(file_idx).copied().unwrap_or(false) {
+                callables[file_idx].push(stored_span(callable));
+            }
+        }
+    }
+    callables
+}
+
+/// What [`RustModules`] reads about the dirty files' symbols, derived once
+/// per view in `OverlayFacts::new`. Virtual idxs number the dirty files'
+/// symbols in order after the graph's nodes.
+#[derive(Debug, Default)]
+pub(super) struct DirtyRustFacts {
+    /// Per dirty file, in input order, the virtual idx of its first symbol.
+    starts: Vec<u32>,
+    /// The declarations no module path names: the scoped ones, and the
+    /// Rust ones inside a function body ([`body_locals`]), where a first of
+    /// a uid with a module-level twin counts as a module item.
+    body_locals: FxHashSet<u32>,
+    /// The declarations no name lookup reads: a later overload, and a
+    /// later twin of a uid, which the index tombstones into the first.
+    repeats: FxHashSet<u32>,
+}
+
 impl<'a> OverlayFacts<'a> {
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -272,24 +343,47 @@ impl<'a> OverlayFacts<'a> {
         let mut dirty_return_types: FxHashMap<u32, &'a str> = FxHashMap::default();
         let mut dirty_flags: FxHashMap<u32, u16> = FxHashMap::default();
         let mut dirty_lexical_parents: FxHashMap<u32, u32> = FxHashMap::default();
-        let mut seen_uids: FxHashSet<u64> = FxHashSet::default();
+        let mut rust_facts = DirtyRustFacts::default();
+        // The first virtual idx of each uid: the index merges each later
+        // twin into it.
+        let mut first_of_uid: FxHashMap<u64, u32> = FxHashMap::default();
+        // One Rust file's twins as (offset, offset of its first); a uid
+        // hashes the path, so both lie in the file.
+        let mut file_twins: Vec<(usize, usize)> = Vec::new();
         let mut offset = 0usize;
         for (file_ord, file) in files.iter().enumerate() {
             let mut exports_any = false;
             let first = offset;
+            let start = base_len + first as u32;
+            let rust_file = is_rust_source(std::path::Path::new(&file.rel_path));
             for symbol in &file.symbols {
                 let node = &nodes[offset];
-                if !node.later_overload && seen_uids.insert(node.uid) {
-                    let virt = base_len + offset as u32;
-                    declared
-                        .entry((file_ord, node.name.as_str()))
-                        .or_default()
-                        .push(virt);
-                    dirty_by_name
-                        .entry(node.name.as_str())
-                        .or_default()
-                        .push(virt);
-                    exports_any |= symbol.is_exported;
+                let virt = base_len + offset as u32;
+                if node.later_overload {
+                    rust_facts.repeats.insert(virt);
+                } else {
+                    match first_of_uid.entry(node.uid) {
+                        Entry::Occupied(seen) => {
+                            rust_facts.repeats.insert(virt);
+                            if let Some(first_at) =
+                                seen.get().checked_sub(start).filter(|_| rust_file)
+                            {
+                                file_twins.push((offset - first, first_at as usize));
+                            }
+                        }
+                        Entry::Vacant(slot) => {
+                            slot.insert(virt);
+                            declared
+                                .entry((file_ord, node.name.as_str()))
+                                .or_default()
+                                .push(virt);
+                            dirty_by_name
+                                .entry(node.name.as_str())
+                                .or_default()
+                                .push(virt);
+                            exports_any |= symbol.is_exported;
+                        }
+                    }
                 }
                 exported.push(symbol.is_exported);
                 if let Some(return_type) = symbol.return_type.as_deref() {
@@ -300,8 +394,8 @@ impl<'a> OverlayFacts<'a> {
                 }
                 offset += 1;
             }
-            if is_rust_source(std::path::Path::new(&file.rel_path)) {
-                let start = base_len + first as u32;
+            rust_facts.starts.push(start);
+            if rust_file {
                 rust_impl_members(&file.symbols, |member, block, implemented| {
                     dirty_impl_members.insert(
                         start + member as u32,
@@ -313,18 +407,32 @@ impl<'a> OverlayFacts<'a> {
                 });
             }
             let scoped = lexical_scope_kinds(Language::from_path(&file.rel_path));
-            if !scoped.is_empty() {
-                let start = base_len + first as u32;
+            if rust_file || !scoped.is_empty() {
                 // The fields `file_identities` numbers the file from.
                 let decls: Vec<(NodeKind, Span)> = file
                     .symbols
                     .iter()
                     .map(|s| (s.kind, HeritageNode::span(s)))
                     .collect();
-                for (offset, parent) in lexical_parents(&decls, scoped).into_iter().enumerate() {
+                let enclosing = decls_enclosing(&decls);
+                let parents = lexical_parents_in(&decls, &enclosing, scoped);
+                for (offset, parent) in parents.into_iter().enumerate() {
                     if let Some(parent) = parent {
-                        dirty_lexical_parents.insert(start + offset as u32, start + parent);
+                        let virt = start + offset as u32;
+                        dirty_lexical_parents.insert(virt, start + parent);
+                        rust_facts.body_locals.insert(virt);
                     }
+                }
+                if rust_file {
+                    let mut local = body_locals(&decls, &enclosing);
+                    fold_twins(&mut local, file_twins.drain(..));
+                    rust_facts.body_locals.extend(
+                        local
+                            .iter()
+                            .enumerate()
+                            .filter(|&(_, &body_local)| body_local)
+                            .map(|(offset, _)| start + offset as u32),
+                    );
                 }
             }
             dirty_namespaces.push(namespace_owners(&file.symbols));
@@ -363,7 +471,7 @@ impl<'a> OverlayFacts<'a> {
         // The dirty configs' rows over the archived table, merged once per
         // view: the alias reading and the crate table both read it.
         let merged = configs.merged_facts(graph);
-        let rust = RustModules::new(graph, files, removed);
+        let rust = RustModules::new(graph, files, removed, rust_facts);
         if let Some(facts) = &merged {
             let _ = rust.crates.set(facts.clone());
         }
@@ -552,7 +660,7 @@ impl<'a> OverlayFacts<'a> {
         let declared_here = |module: &str| qualifiers.same_file.contains(&(file_ord, module));
         let tree_item = |path: String| {
             self.with_rust_tree(file_ord, |tree| {
-                ladder::module_tree_item(tree, source, &path)
+                ladder::module_tree_item(tree, source, &path, ladder::Namespace::Type)
             })
         };
         let module_path = match named[0] {
@@ -1204,6 +1312,28 @@ impl<'a> OverlayFacts<'a> {
         later
     }
 
+    /// Clean file index → its Rust `Impl` nodes: span, idx and the trait's
+    /// [`owner_key`]. Built on the first `impl`-block question.
+    fn base_impls(&self) -> &FxHashMap<u32, Vec<ImplSpan<'a>>> {
+        let graph = self.graph;
+        self.base_impls.get_or_init(|| {
+            let mut impls: FxHashMap<u32, Vec<ImplSpan<'a>>> = FxHashMap::default();
+            for impl_idx in graph.nodes_by_kind(NodeKind::Impl) {
+                let block = &graph.nodes[impl_idx as usize];
+                let file_idx = block.file_idx.to_native();
+                if !is_rust_file(graph, file_idx as usize) || self.dirty_base.contains(&impl_idx) {
+                    continue;
+                }
+                impls.entry(file_idx).or_default().push((
+                    stored_span(block),
+                    impl_idx,
+                    owner_key(block.owner_class.resolve(&graph.string_pool)),
+                ));
+            }
+            impls
+        })
+    }
+
     /// The `impl` block of the clean base Rust method `idx`: the innermost
     /// `Impl` node of its file whose span holds it. A method of an `impl`
     /// over a self type the parser emits no `Impl` node for (`impl T for
@@ -1218,33 +1348,7 @@ impl<'a> OverlayFacts<'a> {
         ) {
             return None;
         }
-        let impls = self.base_impls.get_or_init(|| {
-            let mut impls: FxHashMap<u32, Vec<ImplSpan<'a>>> = FxHashMap::default();
-            for impl_idx in graph.nodes_by_kind(NodeKind::Impl) {
-                let block = &graph.nodes[impl_idx as usize];
-                let rust = graph
-                    .files
-                    .get(block.file_idx.to_native() as usize)
-                    .is_some_and(|f| {
-                        is_rust_source(std::path::Path::new(f.path.resolve(&graph.string_pool)))
-                    });
-                if !rust || self.dirty_base.contains(&impl_idx) {
-                    continue;
-                }
-                let span = (
-                    block.span.0.to_native(),
-                    block.span.1.to_native(),
-                    block.span.2.to_native(),
-                    block.span.3.to_native(),
-                );
-                impls.entry(block.file_idx.to_native()).or_default().push((
-                    span,
-                    impl_idx,
-                    owner_key(block.owner_class.resolve(&graph.string_pool)),
-                ));
-            }
-            impls
-        });
+        let impls = self.base_impls();
         let span = (
             node.span.0.to_native(),
             node.span.1.to_native(),
@@ -1364,6 +1468,28 @@ impl<'a> OverlayFacts<'a> {
         let owner = owner_key(owner)?;
         let ty = self.first_in_file(file, owner, ResolveTarget::Type, None)?;
         Some((ty, owner))
+    }
+
+    /// The index's `Resolver::csharp_field_receiver_member` before its
+    /// access rule: `member` of `field.member()` on the type of the field or
+    /// property `field` that the caller's own type `owner` (an `owner_key`)
+    /// declares in another `partial` part or inherits. `None` for any other
+    /// site, or when that lookup binds nothing.
+    fn csharp_field_receiver(
+        &self,
+        file: &str,
+        owner: Option<&str>,
+        site: CallSite<'_>,
+        types: &OverlayNames<'_>,
+    ) -> Option<(u32, f32)> {
+        let CallSite::FromReceiver { receiver, member } = site.fallback() else {
+            return None;
+        };
+        let owner = owner?;
+        let ty = self.first_in_file(file, owner, ResolveTarget::Type, None)?;
+        let field = type_ladder::csharp_member_field(self, ty, owner, receiver)?;
+        self.chained_member_outcome((field, 1.0), member, Language::CSharp, types)
+            .bound()
     }
 
     /// The index's `Resolver::partial_type_member`: the member a bare C#
@@ -1585,7 +1711,12 @@ impl<'a> OverlayFacts<'a> {
         if caller.language == Language::Rust && !imported_in_project {
             return TypeCandidates::None;
         }
-        let ids = TypeFacts::global_candidates(self, qualifier, ResolveTarget::Type, caller);
+        // The parts of one C# partial type are one candidate type.
+        let ids: Vec<u32> = type_ladder::distinct_types(
+            self,
+            TypeFacts::global_candidates(self, qualifier, ResolveTarget::Type, caller).into_iter(),
+        )
+        .collect();
         match ids.len() {
             0 => TypeCandidates::None,
             1 => TypeCandidates::Unique(ids[0], qualifier),
@@ -1609,6 +1740,7 @@ impl<'a> OverlayFacts<'a> {
             self.node_file(id)
                 .is_some_and(|file| self.owner_path_agrees(file, path))
         });
+        let ids: Vec<u32> = type_ladder::distinct_types(self, ids.into_iter()).collect();
         match ids.len() {
             0 => TypeCandidates::External,
             1 => TypeCandidates::Unique(ids[0], name),
@@ -1736,16 +1868,23 @@ impl<'a> OverlayFacts<'a> {
                         })
                     })
                 }
-                Language::CSharp => type_ladder::visible_return_type(self, callee_file, ty, |id| {
-                    self.node_file(id).is_some_and(|file| {
-                        self.scope.namespace_return_type_visible(
-                            file,
-                            self.owner_of(id),
-                            callee_file,
-                            &imports,
-                        )
-                    })
-                }),
+                Language::CSharp => type_ladder::csharp_visible_return_type(
+                    self,
+                    callee_file,
+                    ty,
+                    self.csharp_namespaces(callee_file).iter().copied(),
+                    |id| {
+                        self.node_file(id).is_some_and(|file| {
+                            self.scope.namespace_return_type_visible(
+                                file,
+                                self.owner_of(id),
+                                callee_file,
+                                &imports,
+                            )
+                        })
+                    },
+                    |id, namespace| self.type_namespace(id) == Some(namespace),
+                ),
                 Language::Swift => type_ladder::visible_return_type(self, callee_file, ty, |id| {
                     self.node_file(id).is_some_and(|file| {
                         type_ladder::swift_return_type_visible(callee_file, file, &imports)
@@ -2068,6 +2207,41 @@ impl<'a> OverlayFacts<'a> {
             .unwrap_or(&[])
     }
 
+    /// The type the clean C# field or property `idx` declares, the index's
+    /// `SymbolTable::return_type_of` (its `RawNode.type_annotation`).
+    /// `graph.bin` keeps no text of it, only the `type_annotation` `Accesses`
+    /// edge Pass 2 resolved from it: the name of that edge's one target.
+    /// `None` for another language, whose index records no such fact.
+    fn base_property_type(&self, idx: u32) -> Option<&'a str> {
+        if self.meta_of(idx).language != Language::CSharp {
+            return None;
+        }
+        let graph = self.graph;
+        let pool = &graph.string_pool;
+        let out = graph.out_offsets[idx as usize].to_native() as usize
+            ..graph.out_offsets[idx as usize + 1].to_native() as usize;
+        let mut types = graph.edges[out]
+            .iter()
+            .filter(|edge| {
+                RelType::from(&edge.rel_type) == RelType::Accesses
+                    && edge.reason.resolve(pool) == "type_annotation"
+            })
+            .map(|edge| edge.target.to_native());
+        match (types.next(), types.next()) {
+            (Some(ty), None) => Some(graph.nodes[ty as usize].name.resolve(pool)),
+            _ => None,
+        }
+    }
+
+    /// The index's `SymbolTable::type_namespace`: the namespace the C# type
+    /// `id` is declared in.
+    fn type_namespace(&self, id: u32) -> Option<&'a str> {
+        type_ladder::declared_namespace(
+            self.owner_of(id),
+            self.csharp_namespaces(self.node_file(id)?).iter().copied(),
+        )
+    }
+
     /// The index's `SymbolTable::declares_type_beside`: `file` or a file in
     /// its directory declares a type named `name`.
     fn declares_type_beside(&self, file: &str, name: &str) -> bool {
@@ -2194,6 +2368,10 @@ impl PickFacts for OverlayFacts<'_> {
 
     fn is_lexically_scoped(&self, id: u32) -> bool {
         OverlayFacts::is_lexically_scoped(self, id)
+    }
+
+    fn is_body_local(&self, id: u32) -> bool {
+        self.rust.is_body_local(id)
     }
 
     fn types_named(&self, owner: &str) -> Vec<u32> {
@@ -2325,15 +2503,28 @@ impl TypeFacts for OverlayFacts<'_> {
         self.partial_group(ty).first().copied().unwrap_or(ty)
     }
 
+    fn hidden_member(&self, id: u32) -> bool {
+        let hidden = |id: u32| {
+            csharp_access::visibility(self.csharp_method_flags(id)) == csharp_access::EXPLICIT_IMPL
+        };
+        hidden(id) && self.later_overloads_of(id).into_iter().all(hidden)
+    }
+
     /// A dirty function's from its fresh parse; a clean one's from the
     /// archived `FunctionMeta`, which the index wrote from the same
-    /// `RawFunctionMeta.return_type`. A base node of a dirty file is stale.
+    /// `RawFunctionMeta.return_type`; a clean C# field or property's from
+    /// its type's `Accesses` edge ([`Self::base_property_type`]). A base node
+    /// of a dirty file is stale. A dirty field or property has no type
+    /// fact: its fragment carries no `type_annotation` (overlay P2b).
     fn return_type_of(&self, callee: u32) -> Option<&str> {
         if callee >= self.base_len() {
             return self.dirty_return_types.get(&callee).copied();
         }
         if self.dirty_base.contains(&callee) {
             return None;
+        }
+        if self.kind_of(callee) == NodeKind::Property {
+            return self.base_property_type(callee);
         }
         let graph = self.graph;
         let metas = &graph.function_metas;
@@ -2370,6 +2561,33 @@ impl ResolveFacts for OverlayFacts<'_> {
 
     fn enum_variant_of(&self, type_id: u32, type_name: &str, variant: &str) -> Option<u32> {
         OverlayFacts::enum_variant_of(self, type_id, type_name, variant)
+    }
+
+    /// A dirty file's fresh `Impl` symbols; a clean file's archived `Impl`
+    /// nodes ([`Self::base_impls`]).
+    fn any_trait_impl(
+        &self,
+        file: &str,
+        trait_key: &str,
+        mut accepts: impl FnMut(&str) -> bool,
+    ) -> bool {
+        if let Some(&file_ord) = self.dirty.get(file) {
+            return self.scope.dirty()[file_ord].symbols.iter().any(|s| {
+                s.kind == NodeKind::Impl
+                    && s.owner_class.as_deref().and_then(owner_key) == Some(trait_key)
+                    && accepts(s.name.as_str())
+            });
+        }
+        let Some(file_idx) = self.clean_file_idx(file) else {
+            return false;
+        };
+        let graph = self.graph;
+        self.base_impls().get(&file_idx).is_some_and(|impls| {
+            impls.iter().any(|&(_, idx, implemented)| {
+                implemented == Some(trait_key)
+                    && accepts(graph.nodes[idx as usize].name.resolve(&graph.string_pool))
+            })
+        })
     }
 }
 
@@ -2537,8 +2755,10 @@ fn resolve_overlay_name_ref(
 /// invented edge is worse than a missing one), unless `call` is given and
 /// every candidate is a copy of one declaration: then the copy nearest the
 /// caller binds ([`ladder::nearest_copy`]) at
-/// [`NEAREST_COPY_CONFIDENCE`]. A TS / JS import naming the ES module of a
-/// private pick hides it ([`reexport::import_hides`]). Unique → 0.7.
+/// [`NEAREST_COPY_CONFIDENCE`]. An import that puts the pick out of reach
+/// hides it ([`reexport::import_hides`]): a TS / JS import naming its private
+/// ES module, a Dart combinator that leaves a top-level pick out. Unique →
+/// 0.7.
 #[allow(clippy::too_many_arguments)]
 fn resolve_callee<'s>(
     graph: &ArchivedZeroCopyGraph,
@@ -2827,7 +3047,11 @@ fn resolve_callee<'s>(
         let verdict = facts.receiver_ladder(
             importer,
             imports,
-            (callee, qualifier, member),
+            (
+                callee,
+                ladder::self_qualifier(caller.language, qualifier, call),
+                member,
+            ),
             target,
             call.is_some(),
         );
@@ -2968,12 +3192,17 @@ fn extension_fallback(
     .next()
 }
 
+/// The kind of the merged-space `idx`.
+fn node_kind(graph: &ArchivedZeroCopyGraph, nodes: &[ViewNode], idx: u32) -> NodeKind {
+    match idx.checked_sub(graph.nodes.len() as u32) {
+        Some(offset) => nodes[offset as usize].kind,
+        None => NodeKind::from(&graph.nodes[idx as usize].kind),
+    }
+}
+
 /// Whether the merged-space `idx` is a `Method`.
 fn is_method_node(graph: &ArchivedZeroCopyGraph, nodes: &[ViewNode], idx: u32) -> bool {
-    match idx.checked_sub(graph.nodes.len() as u32) {
-        Some(offset) => nodes[offset as usize].kind == NodeKind::Method,
-        None => NodeKind::from(&graph.nodes[idx as usize].kind) == NodeKind::Method,
-    }
+    node_kind(graph, nodes, idx) == NodeKind::Method
 }
 
 /// The clean base declarations of `target`'s kinds named `name`, via the
@@ -3060,8 +3289,10 @@ fn global_tier(
             .entry(file_idx)
             .or_insert_with(|| stored_file_meta(graph, file_idx as u32))
     };
-    // I5 (a scoped node is no global candidate) is the ladder's filter.
-    let admits = |&(idx, _): &(u32, FileMeta)| !free_only || !is_method_node(graph, nodes, idx);
+    // I5 (a scoped node is no global candidate) is the ladder's filter. The
+    // field is the index's (`SymbolTable::global_field_candidates`).
+    let field = ladder::global_field(call_target, free_only);
+    let admits = |&(idx, _): &(u32, FileMeta)| field(node_kind(graph, nodes, idx));
     let overlay_candidates: &[(u32, FileMeta)] =
         names.anywhere.get(callee).map(Vec::as_slice).unwrap_or(&[]);
     let clean: &[u32] =
@@ -3089,6 +3320,7 @@ fn global_tier(
                 callee,
                 imports.iter().map(ImportRef::from),
                 file,
+                || PickFacts::owner(facts, target).is_some(),
             )
         })
     };
@@ -3174,7 +3406,21 @@ enum RustTail {
 /// worktree removed is no file.
 pub(super) struct RustModules<'a> {
     graph: &'a ArchivedZeroCopyGraph,
-    dirty: FxHashMap<&'a str, &'a OverlayFileInput>,
+    /// Each dirty file with the virtual idx of its first symbol.
+    dirty: FxHashMap<&'a str, (&'a OverlayFileInput, u32)>,
+    /// The virtual idxs of the dirty declarations no module path names
+    /// ([`DirtyRustFacts::body_locals`]).
+    dirty_body_locals: FxHashSet<u32>,
+    /// The virtual idxs no name lookup reads ([`DirtyRustFacts::repeats`]).
+    dirty_repeats: FxHashSet<u32>,
+    /// Per base file index, the spans of its callables in a Rust file and
+    /// none elsewhere, which tell a base body-local declaration
+    /// ([`inside_callable`]). Built on the first such question about a Rust
+    /// node.
+    base_callables: OnceCell<Vec<Vec<Span>>>,
+    /// Base node idx → the answer of its twin scan in
+    /// [`Self::is_body_local`], which walks every node of its kind.
+    base_twin_scans: RefCell<FxHashMap<u32, bool>>,
     removed: &'a FxHashSet<&'a str>,
     /// The `graph.bin` workspace facts, read on first use: reading them
     /// deserializes and validates the whole table, once per view.
@@ -3197,20 +3443,93 @@ pub(super) struct RustCaller<'a> {
 }
 
 impl<'a> RustModules<'a> {
+    /// `facts` numbers `dirty`'s symbols in order after the graph's nodes.
     pub(super) fn new(
         graph: &'a ArchivedZeroCopyGraph,
         dirty: &'a [OverlayFileInput],
         removed: &'a FxHashSet<&'a str>,
+        facts: DirtyRustFacts,
     ) -> Self {
+        debug_assert_eq!(facts.starts.len(), dirty.len(), "one start per dirty file");
         Self {
             graph,
             dirty: dirty
                 .iter()
-                .map(|file| (file.rel_path.as_str(), file))
+                .zip(facts.starts)
+                .map(|(file, start)| (file.rel_path.as_str(), (file, start)))
                 .collect(),
+            dirty_body_locals: facts.body_locals,
+            dirty_repeats: facts.repeats,
+            base_callables: OnceCell::new(),
+            base_twin_scans: RefCell::default(),
             removed,
             crates: OnceCell::new(),
         }
+    }
+
+    /// Whether no module path names `idx` (base or virtual) from outside
+    /// its function: a scoped declaration, or a Rust one inside a function
+    /// body. A node Pass 1 merged with a module-level twin is a module item.
+    /// The index's `SymbolTable::is_body_local`.
+    fn is_body_local(&self, idx: u32) -> bool {
+        let graph = self.graph;
+        if idx >= graph.nodes.len() as u32 {
+            return self.dirty_body_locals.contains(&idx);
+        }
+        if graph.is_lexically_scoped(idx) {
+            return true;
+        }
+        let node = &graph.nodes[idx as usize];
+        let file_idx = node.file_idx.to_native();
+        // The path test first: a repo without Rust never builds the table.
+        if !is_rust_file(graph, file_idx as usize) {
+            return false;
+        }
+        let callables = self
+            .base_callables
+            .get_or_init(|| base_rust_callables(graph));
+        let inside = |span: Span| {
+            callables
+                .get(file_idx as usize)
+                .is_some_and(|spans| inside_callable(spans, span))
+        };
+        if !inside(stored_span(node)) {
+            return false;
+        }
+        let kind = NodeKind::from(&node.kind);
+        // The index's per-node AND: Pass 1 merges a later declaration of
+        // `idx`'s uid into `idx` and keeps it as a tombstone of the same
+        // kind, file and span. A method or constructor has none: a repeat is
+        // an overload of its own. An unscoped `fn` (one a `mod` inside the
+        // body holds) can have one.
+        if crate::uid::keeps_overloads(kind) {
+            return true;
+        }
+        if let Some(&body_local) = self.base_twin_scans.borrow().get(&idx) {
+            return body_local;
+        }
+        let twin_uid = crate::uid::tombstone(node.uid.to_native());
+        let body_local = !graph.nodes_by_kind(kind).any(|twin| {
+            let twin = &graph.nodes[twin as usize];
+            twin.uid.to_native() == twin_uid
+                && twin.file_idx.to_native() == file_idx
+                && !inside(stored_span(twin))
+        });
+        self.base_twin_scans.borrow_mut().insert(idx, body_local);
+        body_local
+    }
+
+    /// Whether `idx` (base or virtual), whose owner is `owner_class`, is
+    /// declared where a module path names it with an owner `owned` accepts:
+    /// the one rule of the overlay's module-item lookups, the index's
+    /// `SymbolTable::is_module_level`.
+    fn module_level(
+        &self,
+        idx: u32,
+        owner_class: Option<&str>,
+        owned: impl FnOnce(Option<&str>) -> bool,
+    ) -> bool {
+        owned(owner_class.and_then(owner_key)) && !self.is_body_local(idx)
     }
 
     fn table(&self) -> &crate::contracts::workspace::WorkspaceFacts {
@@ -3267,22 +3586,33 @@ impl<'a> RustModules<'a> {
             .find(|file| *file == requested)
     }
 
-    /// Whether `file` declares a node of `kind` named `name`; any kind when
-    /// `kind` is `None`. A dirty file answers from its fresh parse.
-    fn declares(&self, file: &str, name: &str, kind: Option<NodeKind>) -> bool {
-        let wanted = |found: NodeKind| kind.is_none_or(|kind| kind == found);
+    /// Whether `file` declares a module-level node named `name` whose kind
+    /// `wanted` accepts ([`Self::module_level`]): an associated item
+    /// (`impl X { const h: u32 = 1; }`) and a body-local declaration
+    /// (`fn setup() { struct Foo; }`) are no items of the module. A dirty
+    /// file answers from its fresh parse. Either side reads the first of
+    /// each uid only, as the index's `SymbolTable::declares_in_file` does:
+    /// no later overload, and no twin the index tombstones.
+    fn declares(&self, file: &str, name: &str, wanted: impl Fn(NodeKind) -> bool) -> bool {
+        let top_level = |owner: Option<&str>| owner.is_none();
         match self.dirty.get(file) {
-            Some(dirty) => dirty
-                .symbols
-                .iter()
-                .any(|s| s.name == name && wanted(s.kind)),
+            Some(&(dirty, start)) => dirty.symbols.iter().enumerate().any(|(at, s)| {
+                let virt = start + at as u32;
+                s.name == name
+                    && wanted(s.kind)
+                    && !self.dirty_repeats.contains(&virt)
+                    && self.module_level(virt, s.owner_class.as_deref(), top_level)
+            }),
             None => self.graph.nodes_by_name(name).any(|idx| {
                 let node = &self.graph.nodes[idx as usize];
+                let pool = &self.graph.string_pool;
                 wanted(NodeKind::from(&node.kind))
                     && self.graph.files[node.file_idx.to_native() as usize]
                         .path
-                        .resolve(&self.graph.string_pool)
+                        .resolve(pool)
                         == file
+                    && !self.graph.is_later_overload(idx)
+                    && self.module_level(idx, Some(node.owner_class.resolve(pool)), top_level)
             }),
         }
     }
@@ -3291,7 +3621,7 @@ impl<'a> RustModules<'a> {
     /// as the index places it: `name.rs`, else `name/mod.rs`, beside a
     /// target root and in a module's own directory otherwise.
     fn child(&self, parent: &'a str, name: &str, parent_is_root: bool) -> Option<&'a str> {
-        if !self.declares(parent, name, Some(NodeKind::Module)) {
+        if !self.declares(parent, name, |kind| kind == NodeKind::Module) {
             return None;
         }
         let parent_path = std::path::Path::new(parent);
@@ -3396,7 +3726,7 @@ impl<'a> RustModules<'a> {
     /// answers [`ladder::Published::Unknown`]. Otherwise the module's own.
     fn published(&self, module: &str, name: &str) -> ladder::Published<'static> {
         let imports = match self.dirty.get(module) {
-            Some(file) => FileImports::Parsed(&file.imports),
+            Some((file, _)) => FileImports::Parsed(&file.imports),
             None => {
                 let Some(rows) = self
                     .graph
@@ -3419,7 +3749,7 @@ impl<'a> RustModules<'a> {
             }
             glob |= import.imported_name == "*";
         }
-        if glob && !self.declares(module, name, None) {
+        if glob && !self.declares(module, name, |_| true) {
             ladder::Published::Unknown
         } else {
             ladder::Published::Own
@@ -3505,6 +3835,11 @@ impl<'a> ladder::ModuleTreeFacts for OverlayTree<'_, 'a> {
 
     fn published(&self, _root: &'a str, module: &'a str, name: &str) -> ladder::Published<'_> {
         self.modules.published(module, name)
+    }
+
+    fn declares(&self, module: &'a str, name: &str, namespace: ladder::Namespace) -> bool {
+        self.modules
+            .declares(module, name, |kind| namespace.holds(kind))
     }
 
     fn module_file(&self, module: &'a str) -> Option<&'a str> {
@@ -4273,6 +4608,34 @@ impl<'a> ladder::ImportModules for OverlayQualifiers<'_, 'a, '_> {
     }
 }
 
+impl OverlayQualifiers<'_, '_, '_> {
+    /// The clean base nodes named `name` (no dirty-file node, no later
+    /// overload) whose kind `wanted` accepts.
+    fn clean_base<'s>(
+        &'s self,
+        name: &'s str,
+        wanted: fn(NodeKind) -> bool,
+    ) -> impl Iterator<Item = u32> + 's {
+        let graph: &'s ArchivedZeroCopyGraph = self.facts.graph;
+        let dirty_base: &'s FxHashSet<u32> = self.facts.dirty_base;
+        graph.nodes_by_name(name).filter(move |&idx| {
+            wanted(NodeKind::from(&graph.nodes[idx as usize].kind))
+                && !dirty_base.contains(&idx)
+                && !graph.is_later_overload(idx)
+        })
+    }
+
+    /// Whether a declaration of a qualifier kind, clean base or overlay, is
+    /// named `name`: the index's name table holds the same set.
+    fn names_qualifier(&self, name: &str) -> bool {
+        self.qualifiers.anywhere.contains_key(name)
+            || self
+                .clean_base(name, ResolveTarget::Qualifier.kind_predicate())
+                .next()
+                .is_some()
+    }
+}
+
 impl<'a> ladder::QualifierFacts for OverlayQualifiers<'_, 'a, '_> {
     type Decls = OverlayFacts<'a>;
 
@@ -4280,9 +4643,15 @@ impl<'a> ladder::QualifierFacts for OverlayQualifiers<'_, 'a, '_> {
         self.facts
     }
 
-    fn caller_declares(&self, source: &str, name: &str) -> bool {
+    fn caller_declares(&self, source: &str, name: &str, impl_receiver: bool) -> bool {
         debug_assert_eq!(source, self.facts.scope.dirty()[self.file_ord].rel_path);
         self.qualifiers.same_file.contains(&(self.file_ord, name))
+            || impl_receiver
+                && self
+                    .qualifiers
+                    .impl_same_file
+                    .contains(&(self.file_ord, name))
+                && !self.names_qualifier(name)
     }
 
     fn stored_file(&self, path: &str) -> Option<&'a str> {
@@ -4290,18 +4659,29 @@ impl<'a> ladder::QualifierFacts for OverlayQualifiers<'_, 'a, '_> {
     }
 
     /// The clean base declarations of a qualifier kind (no dirty-file node,
-    /// no later overload) and the overlay's, through [`pick_global`].
-    fn global_qualifier(&self, qualifier: &str, caller: FileMeta) -> GlobalPick {
+    /// no later overload) and the overlay's, through [`pick_global`]; with
+    /// `impl_receiver` and none of them anywhere, the `impl` blocks through
+    /// [`ladder::impl_qualifier_pick`].
+    fn global_qualifier(
+        &self,
+        qualifier: &str,
+        caller: FileMeta,
+        impl_receiver: bool,
+    ) -> GlobalPick {
         let facts = self.facts;
-        let graph = facts.graph;
-        let is_qualifier = ResolveTarget::Qualifier.kind_predicate();
-        let base = graph
-            .nodes_by_name(qualifier)
-            .filter(|&idx| {
-                is_qualifier(NodeKind::from(&graph.nodes[idx as usize].kind))
-                    && !facts.dirty_base.contains(&idx)
-                    && !graph.is_later_overload(idx)
-            })
+        if impl_receiver && !self.names_qualifier(qualifier) {
+            let base = self
+                .clean_base(qualifier, |kind| kind == NodeKind::Impl)
+                .map(|idx| (idx, facts.meta_of(idx)));
+            let overlay = self.qualifiers.impl_anywhere.get(qualifier);
+            return ladder::impl_qualifier_pick(
+                facts,
+                caller,
+                base.chain(overlay.into_iter().flatten().copied()),
+            );
+        }
+        let base = self
+            .clean_base(qualifier, ResolveTarget::Qualifier.kind_predicate())
             .map(|idx| (idx, facts.meta_of(idx)));
         let overlay = self
             .qualifiers
@@ -4547,12 +4927,10 @@ fn member_in_file(
             PickScope::default(),
         );
     }
-    let owned = |owner_class: Option<&str>| match owner {
+    let owned = |found: Option<&str>| match owner {
         MemberOwner::Any => true,
-        MemberOwner::TopLevel => owner_class.and_then(owner_key).is_none(),
-        MemberOwner::Type(ty) => owner_class
-            .and_then(owner_key)
-            .is_some_and(|key| Some(key) == owner_key(ty)),
+        MemberOwner::TopLevel => found.is_none(),
+        MemberOwner::Type(ty) => found.is_some_and(|key| Some(key) == owner_key(ty)),
     };
     let base_len = graph.nodes.len() as u32;
     graph
@@ -4565,19 +4943,29 @@ fn member_in_file(
                     .files
                     .get(node.file_idx.to_native() as usize)
                     .is_some_and(|f| f.path.resolve(&graph.string_pool) == file)
-                && owned(Some(node.owner_class.resolve(&graph.string_pool)))
+                && facts.rust.module_level(
+                    idx,
+                    Some(node.owner_class.resolve(&graph.string_pool)),
+                    owned,
+                )
         })
         .min()
         .or_else(|| {
+            // A later overload counts, as a base node does above: a
+            // body-local first `new` must not hide a module-level one.
             names
                 .anywhere
                 .get(member)?
                 .iter()
-                .map(|&(virt, _)| (virt, &nodes[(virt - base_len) as usize]))
-                .find(|(_, node)| {
-                    node.rel_path.as_ref() == file && owned(node.owner_class.as_deref())
+                .filter(|&&(virt, _)| nodes[(virt - base_len) as usize].rel_path.as_ref() == file)
+                .flat_map(|&(virt, _)| std::iter::once(virt).chain(facts.later_overloads_of(virt)))
+                .filter(|&virt| {
+                    let node = &nodes[(virt - base_len) as usize];
+                    facts
+                        .rust
+                        .module_level(virt, node.owner_class.as_deref(), owned)
                 })
-                .map(|(virt, _)| virt)
+                .min()
         })
 }
 
@@ -5723,6 +6111,27 @@ pub(super) fn resolve_edges(
                             parsed,
                         );
                         let mut resolution = verdict.resolution;
+                        // The index's field receiver of another `partial`
+                        // part or a base
+                        // (`Resolver::csharp_field_receiver_member`), ahead
+                        // of the extension retry.
+                        if resolution.call_fallbacks_allowed()
+                            && caller.language == Language::CSharp
+                        {
+                            let access = CallAccess {
+                                instance: true,
+                                caller_file: &file.rel_path,
+                                caller_owner: owner,
+                            };
+                            if let Some(hit) = facts
+                                .csharp_field_receiver(&file.rel_path, owner, parsed, &types)
+                                .and_then(|(id, confidence)| {
+                                    Some((csharp_admitted(id, access)?, confidence))
+                                })
+                            {
+                                resolution = Resolution::from_ladder(Some(hit));
+                            }
+                        }
                         // The index's C# extension retry of a receiver
                         // the parser typed (`Type.member`) or left
                         // untyped. It runs after `resolve_call` there, so
@@ -5862,6 +6271,8 @@ pub(super) fn resolve_edges(
                     // confidence (`CallReasons::of`).
                     let reason = if confidence == NEAREST_COPY_CONFIDENCE {
                         NEAREST_COPY_REASON
+                    } else if confidence == UNTYPED_NAME_CONFIDENCE {
+                        UNTYPED_NAME_REASON
                     } else if confidence == csharp_extension::HEURISTIC_CONFIDENCE {
                         csharp_extension::HEURISTIC_REASON
                     } else {
@@ -6055,4 +6466,69 @@ pub(super) fn resolve_edges(
     );
     *overrides = resolve_overrides(&facts, files, &heritage, decorated.survivors);
     lexical_parents
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph_fixture::GraphFixture;
+    use rkyv::rancor::Error as RkyvError;
+
+    /// `src/m.rs`: `fn setup` (lines 0-4) holds `mod inner { pub fn helper }`
+    /// with `helper` on line 2 and `impl Foo { fn new }` with `new` on line 3,
+    /// then the module-level `mod inner { pub fn helper }` with `helper` on
+    /// line `twin_line`. A `mod` breaks the lexical link, so both `helper`s
+    /// are unscoped `Function`s owned by `inner` and share a uid: Pass 1
+    /// keeps the first, the body-local one, and stores the second as its
+    /// tombstone (bit-inverse uid, no name) in the second's slot. Returns
+    /// the bytes and the idxs of the survivor and of `new`.
+    fn inner_helper_twins(twin_line: u32) -> (Vec<u8>, u32, u32, u32) {
+        const M: &str = "src/m.rs";
+        let mut fx = GraphFixture::new();
+        let setup = fx.func(M, "setup");
+        fx.span(setup, (0, 0, 4, 1));
+        let survivor = fx.node_owned(NodeKind::Function, M, "inner", "helper");
+        fx.span(survivor, (2, 8, 2, 30));
+        let new = fx.method(M, "Foo", "new");
+        fx.span(new, (3, 8, 3, 30));
+        let lone = fx.node_owned(NodeKind::Function, M, "inner", "lone");
+        fx.span(lone, (1, 8, 1, 30));
+        let twin = fx.node_owned(NodeKind::Function, M, "inner", "helper");
+        fx.span(twin, (twin_line, 4, twin_line, 26));
+        let node = &mut fx.assembly_mut().nodes[twin as usize];
+        node.uid = crate::uid::tombstone(node.uid);
+        node.name = Default::default();
+        node.owner_class = Default::default();
+        (fx.into_bytes(), survivor, new, lone)
+    }
+
+    /// Contract: the clean side's per-uid AND covers an unscoped `fn` (one
+    /// a `mod` inside a body holds), as the index's `rust_body_local_rows`
+    /// does: with a module-level tombstoned twin the survivor is a module
+    /// item, with a body-local one it stays body-local. A method keeps
+    /// overloads, so it has no tombstoned twin and stays body-local. The
+    /// answer is memoized per node: a twin-less `lone` asked in between keeps
+    /// its own answer. Before the fix every callable inside a body was
+    /// body-local.
+    #[test]
+    fn test_is_body_local_unscoped_fn_twin_decides_survivor_method_stays_body_local() {
+        let removed = FxHashSet::default();
+        for (twin_line, want) in [(6, false), (2, true)] {
+            let (bytes, survivor, new, lone) = inner_helper_twins(twin_line);
+            let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+            let modules = RustModules::new(graph, &[], &removed, Default::default());
+            assert_eq!(
+                modules.is_body_local(survivor),
+                want,
+                "twin on line {twin_line}"
+            );
+            assert!(modules.is_body_local(lone), "a twin-less fn in the body");
+            assert_eq!(
+                modules.is_body_local(survivor),
+                want,
+                "the memoized answer, twin on line {twin_line}"
+            );
+            assert!(modules.is_body_local(new), "a method inside the body");
+        }
+    }
 }

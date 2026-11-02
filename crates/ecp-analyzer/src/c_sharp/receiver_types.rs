@@ -34,7 +34,7 @@ use crate::calls::{
     start_pos, Pos, PosRange,
 };
 use ecp_core::analyzer::csharp_extension::system_type_name;
-use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
+use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef, THIS_MEMBER_PREFIX};
 use ecp_core::graph::NodeKind;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -412,6 +412,11 @@ enum Receiver<'a> {
     /// value named as its type (`Logger Logger`): the resolver binds it only
     /// as a project type.
     MaybeType(&'a str),
+    /// `this.name` where `name` is no member the caller's file declares: a
+    /// field or property another `partial` part or a base declares. It
+    /// never names a type, so the call site keeps the qualifier as `this/name`
+    /// (a slash is no identifier character and leaves the member separator).
+    ThisMember(&'a str),
     /// A call whose return type the resolver may read (`Foo.Create().M()`).
     Call,
     /// A value of unknown type: a field of a generic type, `var x`, `a.b`,
@@ -471,8 +476,9 @@ fn classify_receiver<'a>(
                 .child_by_field_name("name")
                 .filter(|name| name.kind() == "identifier")
                 .and_then(|name| text(name).ok())
-                .and_then(member)
-                .unwrap_or(Receiver::Untyped)
+                .map_or(Receiver::Untyped, |name| {
+                    member(name).unwrap_or(Receiver::ThisMember(name))
+                })
         }
         "member_access_expression" | "generic_name" | "alias_qualified_name" => {
             type_path_tail(receiver, pos, source, locals, nodes)
@@ -684,6 +690,9 @@ fn csharp_callee(
         Receiver::Typed(ty) => format!("{ty}.{method}"),
         Receiver::Implicit => return Some(method.to_string()),
         Receiver::MaybeType(name) => CallSite::from_receiver(name, method),
+        Receiver::ThisMember(name) => {
+            CallSite::from_receiver(&format!("{THIS_MEMBER_PREFIX}{name}"), method)
+        }
         // `Foo.Create().Bar()`: the resolver types the receiver by the
         // callee's return type, and else resolves the untyped member.
         Receiver::Call => {

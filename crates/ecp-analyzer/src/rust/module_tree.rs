@@ -27,7 +27,8 @@
 //! * Proc-macro-generated re-exports (`paste!`, `derive_more`, etc.) — logged
 //!   as BlindSpot if encountered.
 
-use ecp_core::analyzer::ladder::{self, Published, ReExport, TreeItem};
+use crate::resolution::index::SymbolTable;
+use ecp_core::analyzer::ladder::{self, Namespace, Published, ReExport, TreeItem};
 use ecp_core::analyzer::rust_paths::rust_module_dir;
 use ecp_core::contracts::workspace::{
     ConfigPresence, ConfigRead, Ecosystem, Membership, NameRank, Scope, ScopeId, ScopeName,
@@ -283,38 +284,40 @@ impl RustWorkspaceModTree {
         &self.workspace
     }
 
-    /// Resolve a Rust FQN call to the file path (repo-relative) of the
-    /// module that declares the terminal item, by the module-tree rule the
-    /// overlay shares ([`ladder::module_tree_item`]).
-    ///
-    /// `full_callee` is the raw call string as captured by the parser, e.g.
-    /// `"crate::build::orchestrator::build_l2"`.
-    /// `caller_file` is the repo-relative path of the file containing the call.
-    /// `workspace_root` is used to make absolute paths relative again.
-    ///
-    /// Returns `None` if the path cannot be resolved (external crate, unknown
-    /// module, or the target file cannot be found on disk).
+    /// [`IndexModuleTree::resolve_fqn`] over [`Self::facts`]: no module's
+    /// own items are known here, so a glob `pub use` is always followed.
+    /// Tests drive the module tree through it; the resolver goes through the
+    /// symbol-aware tree instead (`mod_tree_resolve`).
     pub fn resolve_fqn(
         &self,
         full_callee: &str,
         caller_file: &str,
         workspace_root: &Path,
     ) -> Option<ResolvedFqn> {
-        match ladder::module_tree_item(&self.facts(workspace_root), caller_file, full_callee)? {
-            TreeItem::Found { file, item } => Some(ResolvedFqn {
-                file,
-                item_name: item,
-            }),
-            TreeItem::Unknown => None,
-        }
+        self.facts(workspace_root)
+            .resolve_fqn(full_callee, caller_file)
     }
 
     /// These trees as [`ladder::ModuleTreeFacts`], for callers named
-    /// relative to `workspace_root`.
+    /// relative to `workspace_root`. No module declares an item of its own
+    /// ([`ladder::ModuleTreeFacts::declares`]).
     pub fn facts<'t>(&'t self, workspace_root: &'t Path) -> IndexModuleTree<'t> {
         IndexModuleTree {
             tree: self,
             workspace_root,
+            symbols: None,
+        }
+    }
+
+    /// [`Self::facts`] with each module's own items read from `symbols`.
+    pub fn facts_with_symbols<'t>(
+        &'t self,
+        workspace_root: &'t Path,
+        symbols: &'t SymbolTable,
+    ) -> IndexModuleTree<'t> {
+        IndexModuleTree {
+            symbols: Some(symbols),
+            ..self.facts(workspace_root)
         }
     }
 
@@ -428,6 +431,33 @@ pub struct TreeScope<'t> {
 pub struct IndexModuleTree<'t> {
     tree: &'t RustWorkspaceModTree,
     workspace_root: &'t Path,
+    /// The declarations a module's own items are read from.
+    symbols: Option<&'t SymbolTable>,
+}
+
+impl IndexModuleTree<'_> {
+    /// Resolve a Rust FQN call to the file path (repo-relative) of the
+    /// module that declares the terminal item, by the module-tree rule the
+    /// overlay shares ([`ladder::module_tree_item`]). The terminal item is
+    /// a type (its one production caller places a path call's qualifier).
+    /// With the symbol table ([`RustWorkspaceModTree::facts_with_symbols`]),
+    /// a module's own type shadows a glob `pub use` of the same name.
+    ///
+    /// `full_callee` is the raw call string as captured by the parser, e.g.
+    /// `"crate::build::orchestrator::build_l2"`.
+    /// `caller_file` is the repo-relative path of the file containing the call.
+    ///
+    /// Returns `None` if the path cannot be resolved (external crate, unknown
+    /// module, or the target file cannot be found on disk).
+    pub fn resolve_fqn(&self, full_callee: &str, caller_file: &str) -> Option<ResolvedFqn> {
+        match ladder::module_tree_item(self, caller_file, full_callee, Namespace::Type)? {
+            TreeItem::Found { file, item } => Some(ResolvedFqn {
+                file,
+                item_name: item,
+            }),
+            TreeItem::Unknown => None,
+        }
+    }
 }
 
 impl<'t> ladder::ModuleTreeFacts for IndexModuleTree<'t> {
@@ -493,6 +523,13 @@ impl<'t> ladder::ModuleTreeFacts for IndexModuleTree<'t> {
             }),
             None => Published::Own,
         }
+    }
+
+    fn declares(&self, module: &'t Path, name: &str, namespace: Namespace) -> bool {
+        let (Some(symbols), Some(file)) = (self.symbols, self.module_file(module)) else {
+            return false;
+        };
+        symbols.declares_in_file(&file, name, |kind| namespace.holds(kind))
     }
 
     fn module_file(&self, module: &'t Path) -> Option<String> {

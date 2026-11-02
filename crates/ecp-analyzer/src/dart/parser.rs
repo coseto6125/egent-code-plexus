@@ -389,16 +389,10 @@ impl ParseSpec for DartSpec {
                     None
                 };
 
-                let filtered = i_src.parent().is_some_and(|specification| {
-                    specification
-                        .named_children(&mut specification.walk())
-                        .any(|child| child.kind() == "combinator")
-                });
-                let imported_name = if filtered {
-                    String::new()
-                } else {
-                    clean_src.clone()
-                };
+                let imported_name = i_src
+                    .parent()
+                    .and_then(|specification| combinator_clauses(specification, source))
+                    .unwrap_or_else(|| clean_src.clone());
                 cx.imports.push(driver::imports::raw(
                     clean_src,
                     imported_name,
@@ -447,6 +441,37 @@ pub(crate) fn is_class_member_declaration(declaration: Node<'_>) -> bool {
         && declaration
             .parent()
             .is_some_and(|p| p.kind() == "member_declaration")
+}
+
+/// The `show` / `hide` combinators of an import specification as
+/// `show A,B;hide C`, in source order: Dart identifiers hold no space, comma
+/// or semicolon, so `reexport::dart_visible` reads the text back. `None`
+/// means no combinator. An empty string marks a combinator the grammar read
+/// badly: the import then makes no name visible.
+fn combinator_clauses(specification: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut clauses = Vec::new();
+    let mut cursor = specification.walk();
+    for combinator in specification
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() == "combinator")
+    {
+        let keyword = combinator
+            .children(&mut combinator.walk())
+            .map(|child| child.kind())
+            .find(|kind| matches!(*kind, "show" | "hide"));
+        let names: Vec<&str> = combinator
+            .named_children(&mut combinator.walk())
+            .filter(|child| child.kind() == "identifier")
+            .filter_map(|child| std::str::from_utf8(&source[child.byte_range()]).ok())
+            .collect();
+        match keyword {
+            Some(keyword) if !names.is_empty() && !combinator.has_error() => {
+                clauses.push(format!("{keyword} {}", names.join(",")));
+            }
+            _ => return Some(String::new()),
+        }
+    }
+    (!clauses.is_empty()).then(|| clauses.join(";"))
 }
 
 /// The source text of each annotation that marks `decl`, in source order.

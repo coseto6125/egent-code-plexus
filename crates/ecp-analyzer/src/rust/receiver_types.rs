@@ -357,9 +357,6 @@ type Bindings = HashMap<String, Vec<Binding>>;
 #[derive(Debug, Default)]
 pub struct Scope {
     range: PosRange,
-    /// var_name → bare type name (references/pointers stripped), the last
-    /// binding of the name in the function wherever it sits.
-    pub bindings: HashMap<String, String>,
     /// var_name → each binding of the name with the range it is live in. A
     /// `None` type is a binding whose type is unknown (an untyped `let`, a
     /// pattern, a closure parameter): it hides an older typed binding.
@@ -376,11 +373,6 @@ pub struct LocalTypes {
 }
 
 impl LocalTypes {
-    /// Iterate all scopes for flat export (used by indirect-dispatch detection).
-    pub fn scopes(&self) -> &[Scope] {
-        &self.scopes
-    }
-
     fn contains_value(&self, pos: Pos, name: &str) -> bool {
         // Nested functions cannot capture values from their enclosing function.
         self.scopes
@@ -459,21 +451,21 @@ fn collect_scopes<'a>(
                     .and_then(|name| impl_map.entries.get(&name).cloned())
             });
 
-            let mut bindings: HashMap<String, String> = HashMap::new();
+            let mut params: HashMap<String, String> = HashMap::new();
             let mut events = Bindings::new();
             let mut values = HashMap::new();
 
             // Typed parameters.
-            if let Some(params) = child.child_by_field_name("parameters") {
-                collect_params(&params, source, &mut bindings);
+            if let Some(param_list) = child.child_by_field_name("parameters") {
+                collect_params(&param_list, source, &mut params);
                 // A parameter is live in the whole function.
-                for (name, ty) in &bindings {
+                for (name, ty) in &params {
                     events
                         .entry(name.clone())
                         .or_default()
                         .push((node_range(child), Some(ty.clone())));
                 }
-                collect_parameter_values(params, source, node_range(child), &mut values);
+                collect_parameter_values(param_list, source, node_range(child), &mut values);
             }
 
             // `let` bindings in the body.
@@ -481,7 +473,6 @@ fn collect_scopes<'a>(
                 collect_body_bindings(
                     &body,
                     source,
-                    &mut bindings,
                     &mut events,
                     &mut values,
                     &impl_map.inherent_clones,
@@ -490,7 +481,6 @@ fn collect_scopes<'a>(
 
             out.push(Scope {
                 range: node_range(child),
-                bindings,
                 events,
                 values,
                 self_type,
@@ -638,14 +628,13 @@ fn let_condition_body(condition: Node<'_>) -> Option<Node<'_>> {
 fn collect_body_bindings(
     body: &Node<'_>,
     source: &[u8],
-    out: &mut HashMap<String, String>,
     events: &mut Bindings,
     values: &mut HashMap<String, Vec<PosRange>>,
     inherent_clones: &HashMap<String, CloneReturn>,
 ) {
     let mut aliases: Vec<Alias<'_>> = Vec::new();
-    let mut stack = vec![(*body, node_range(*body).1, false)];
-    while let Some((n, mut scope_end, mut in_closure)) = stack.pop() {
+    let mut stack = vec![(*body, node_range(*body).1)];
+    while let Some((n, mut scope_end)) = stack.pop() {
         if n.kind() == "function_item" {
             continue;
         }
@@ -654,7 +643,6 @@ fn collect_body_bindings(
         }
         match n.kind() {
             "closure_expression" => {
-                in_closure = true;
                 if let Some(parameters) = n.child_by_field_name("parameters") {
                     collect_parameter_values(parameters, source, node_range(n), values);
                     let mut cursor = parameters.walk();
@@ -702,9 +690,6 @@ fn collect_body_bindings(
                 }
             }
             "let_declaration" => {
-                if !in_closure {
-                    collect_let_binding(&n, source, out);
-                }
                 if let Some(pattern) = n.child_by_field_name("pattern") {
                     // The initializer still sees the preceding binding.
                     let live = (node_range(n).1, scope_end);
@@ -740,7 +725,7 @@ fn collect_body_bindings(
         }
         let mut c = n.walk();
         for child in n.children(&mut c) {
-            stack.push((child, scope_end, in_closure));
+            stack.push((child, scope_end));
         }
     }
     // The walk visits `let`s out of source order, so an alias resolves only
@@ -801,28 +786,6 @@ fn alias_source(value: Node<'_>, source: &[u8]) -> Option<(String, bool)> {
     }
 }
 
-/// `let x: Dog = ...` — extract `x → "Dog"`.
-/// Skips patterns more complex than a plain identifier or `mut x`.
-fn collect_let_binding(node: &Node<'_>, source: &[u8], out: &mut HashMap<String, String>) {
-    let Some(ty) = let_binding_type(node, source) else {
-        return;
-    };
-    let Some(pat) = node.child_by_field_name("pattern") else {
-        return;
-    };
-    let var_name = match pat.kind() {
-        "identifier" => node_text(pat, source),
-        "mut_pattern" => pat
-            .named_child(0)
-            .filter(|n| n.kind() == "identifier")
-            .and_then(|n| node_text(n, source)),
-        _ => None,
-    };
-    if let Some(name) = var_name {
-        out.insert(name, ty);
-    }
-}
-
 /// The bare type a `let x: T = ..` annotation names; `None` for a `let`
 /// with no annotation or one that names no simple type.
 fn let_binding_type(node: &Node<'_>, source: &[u8]) -> Option<String> {
@@ -869,6 +832,11 @@ pub fn extract_rust_calls_and_path_literals(
                     }
                 }
             }
+            "struct_expression" => {
+                if let Some(ty) = struct_literal_type(n, source) {
+                    attach_to_enclosing(start_pos(n), CallSite::construct(&ty), nodes);
+                }
+            }
             "string_literal" | "raw_string_literal" => {
                 if let Some(rpl) = build_raw_path_literal(n, source) {
                     path_literals.push(rpl);
@@ -895,6 +863,19 @@ pub fn extract_rust_calls_and_path_literals(
         }
     }
     (path_literals, sql_refs)
+}
+
+/// The struct a `struct_expression` literal builds, as written
+/// (`crate::table::View { .. }` is `crate::table::View`, `View::<T> { .. }`
+/// is `View`), with `Self` replaced by the enclosing impl's type. `None`
+/// for `Self` outside an impl and for `Self::Variant { .. }`: neither names
+/// a struct this file can type.
+fn struct_literal_type(literal: Node<'_>, source: &[u8]) -> Option<String> {
+    let path = scoped_path_text(literal.child_by_field_name("name")?, source)?;
+    if path == "Self" {
+        return enclosing_impl_type(literal, source);
+    }
+    (!path.starts_with("Self::")).then_some(path)
 }
 
 /// Derive the callee name for a Rust `call_expression`.
@@ -987,7 +968,9 @@ fn rust_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Optio
 /// `a::Wrapper::<u8>::make` is `a::Wrapper::make`.
 fn scoped_path_text(node: Node<'_>, source: &[u8]) -> Option<String> {
     match node.kind() {
-        "generic_type" => scoped_path_text(node.child_by_field_name("type")?, source),
+        "generic_type" | "generic_type_with_turbofish" => {
+            scoped_path_text(node.child_by_field_name("type")?, source)
+        }
         "scoped_identifier" | "scoped_type_identifier" => {
             let name = node_text(node.child_by_field_name("name")?, source)?;
             match node.child_by_field_name("path") {

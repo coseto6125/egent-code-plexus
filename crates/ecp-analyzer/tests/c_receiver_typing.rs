@@ -39,3 +39,11 @@ fn test_embedded_struct_call_into_other_file_stays_bare_and_unresolved() {
         "an ambiguous bare C call must stay without an edge"
     );
 }
+
+/// Rule U does not apply to C (the rule never reaches it): an untyped member call
+/// keeps the confidence of the tier that found the method and the plain
+/// `call` reason.
+#[test]
+fn test_untyped_member_call_keeps_tier_confidence() {
+    receiver_typing_support::assert_untyped_member_keeps_tier_confidence("c");
+}

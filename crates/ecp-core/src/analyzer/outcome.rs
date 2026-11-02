@@ -9,7 +9,7 @@
 //! the ladders return it too.
 
 use super::type_ladder::TypeMember;
-use super::types::NEAREST_COPY_CONFIDENCE;
+use super::types::{NEAREST_COPY_CONFIDENCE, UNTYPED_NAME_CONFIDENCE};
 
 /// The tier that bound an edge. The tier alone decides the confidence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -28,6 +28,11 @@ pub enum Tier {
     /// [`NoEdge::Ambiguous`], never a lower-confidence `Global`.
     Global,
     NearestCopy,
+    /// A member call on an untyped receiver bound by the member name alone,
+    /// in a language where that is a guess (`ladder::untyped_bind_is_guess`).
+    /// It replaces the tier that found the method, so a same-named method of
+    /// an unrelated type never reads as evidence.
+    UntypedName,
 }
 
 impl Tier {
@@ -42,6 +47,7 @@ impl Tier {
             Tier::TypeHeritage | Tier::HeritageScoped => 0.8,
             Tier::TypeCandidates | Tier::Global => 0.7,
             Tier::NearestCopy => NEAREST_COPY_CONFIDENCE,
+            Tier::UntypedName => UNTYPED_NAME_CONFIDENCE,
         }
     }
 
@@ -171,6 +177,19 @@ impl Resolution {
         }
     }
 
+    /// A bound edge found by the member name alone becomes a guess: tier
+    /// [`Tier::UntypedName`]. An edge at or below [`NEAREST_COPY_CONFIDENCE`]
+    /// keeps its tier, since the nearest-copy edge is already tagged and
+    /// lower is not raised.
+    pub fn named_only(self) -> Self {
+        match self {
+            Resolution::Bound(hit) if hit.confidence > NEAREST_COPY_CONFIDENCE => {
+                Resolution::bound(hit.id, Tier::UntypedName)
+            }
+            other => other,
+        }
+    }
+
     /// The untyped-member post-filter (B §3.2 `admit`): a bound target that
     /// `admits` refuses leaves the call `Unknown`, as an emptied result did.
     pub fn admit(self, admits: impl FnOnce(u32) -> bool) -> Self {
@@ -218,6 +237,7 @@ mod tests {
             (Tier::TypeHeritage, 0.8),                    // LadderMember::Inherited
             (Tier::TypeCandidates, 0.7),                  // LadderMember::Candidate
             (Tier::NearestCopy, NEAREST_COPY_CONFIDENCE), // LadderMember::NearestCopy
+            (Tier::UntypedName, 0.55),                    // new: Rule U
         ];
         for (tier, confidence) in replaced {
             assert_eq!(tier.confidence(), confidence, "{tier:?}");
@@ -310,6 +330,35 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// Rule U: a bind by the member name alone takes the `UntypedName` tier
+    /// when it sits above the nearest-copy confidence, whether or not the
+    /// ladder reported its tier. A nearest-copy bind, a lower one and an
+    /// edge-less verdict pass through.
+    #[test]
+    fn test_named_only_retags_binds_above_nearest_copy_only() {
+        for confidence in [1.0, 0.95, 0.85, 0.7] {
+            let named = Resolution::from_ladder(Some((4, confidence))).named_only();
+            assert_eq!(
+                named,
+                Resolution::bound(4, Tier::UntypedName),
+                "{confidence}"
+            );
+            assert_eq!(named.edge(), Some((4, UNTYPED_NAME_CONFIDENCE)));
+        }
+        assert_eq!(UNTYPED_NAME_CONFIDENCE, 0.55);
+        let copy = Resolution::bound(4, Tier::NearestCopy);
+        assert_eq!(copy.named_only(), copy);
+        let untagged_copy = Resolution::from_ladder(Some((4, NEAREST_COPY_CONFIDENCE)));
+        assert_eq!(untagged_copy.named_only(), untagged_copy);
+        for other in [
+            Resolution::Unknown,
+            Resolution::Shadowed,
+            Resolution::NoEdge(NoEdge::Ambiguous(2)),
+        ] {
+            assert_eq!(other.named_only(), other);
+        }
     }
 
     /// A refused bound target leaves the call open to the constructor

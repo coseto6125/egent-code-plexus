@@ -41,7 +41,7 @@ use ecp_core::analyzer::csharp_access::{self, CallAccess};
 use ecp_core::analyzer::csharp_extension::{self, ReceiverSite};
 use ecp_core::analyzer::import_binding::{
     fqn_imported_name, fqn_language, fqn_type_path, import_binding, import_member_fallback,
-    MemberOwner,
+    plain_binding, MemberOwner,
 };
 use ecp_core::analyzer::ladder::{
     self, qualifier_prefix_is_internal, split_qualifier, CallContext, CallPick, CrateModule,
@@ -376,21 +376,33 @@ impl ladder::QualifierFacts for IndexFacts<'_, '_> {
         self.0.symbol_table
     }
 
-    fn caller_declares(&self, source: &str, name: &str) -> bool {
-        self.0
-            .symbol_table
-            .lookup_in_file_with_kind(source, name, ResolveTarget::Qualifier)
+    fn caller_declares(&self, source: &str, name: &str, impl_receiver: bool) -> bool {
+        let st = self.0.symbol_table;
+        st.lookup_in_file_with_kind(source, name, ResolveTarget::Qualifier)
             .is_some()
+            || impl_receiver
+                && st
+                    .impl_only_blocks(name)
+                    .any(|(id, _)| st.file_of(id) == Some(source))
     }
 
     fn stored_file(&self, path: &str) -> Option<Arc<str>> {
         Some(Arc::from(path))
     }
 
-    fn global_qualifier(&self, qualifier: &str, caller: FileMeta) -> GlobalPick {
-        self.0
-            .symbol_table
-            .lookup_global(qualifier, ResolveTarget::Qualifier, caller, false)
+    fn global_qualifier(
+        &self,
+        qualifier: &str,
+        caller: FileMeta,
+        impl_receiver: bool,
+    ) -> GlobalPick {
+        let st = self.0.symbol_table;
+        match st.lookup_global(qualifier, ResolveTarget::Qualifier, caller, false) {
+            GlobalPick::NoMatch if impl_receiver => {
+                ladder::impl_qualifier_pick(st, caller, st.impl_only_blocks(qualifier))
+            }
+            pick => pick,
+        }
     }
 
     fn for_each_candidate(&self, importer: &str, specifier: &str, visit: impl FnMut(&str) -> bool) {
@@ -1079,9 +1091,14 @@ impl<'a> Resolver<'a> {
                         st.namespace_type_path_matches(id, path)
                     })
                 }
-                Language::CSharp => type_ladder::visible_return_type(st, callee_file, ty, |id| {
-                    st.namespace_return_type_visible(id, callee_file, imports)
-                }),
+                Language::CSharp => type_ladder::csharp_visible_return_type(
+                    st,
+                    callee_file,
+                    ty,
+                    st.csharp_namespaces(callee_file).iter().map(String::as_str),
+                    |id| st.namespace_return_type_visible(id, callee_file, imports),
+                    |id, namespace| st.type_namespace(id) == Some(namespace),
+                ),
                 Language::Swift => type_ladder::visible_return_type(st, callee_file, ty, |id| {
                     st.file_of(id).is_some_and(|file| {
                         type_ladder::swift_return_type_visible(callee_file, file, imports)
@@ -1249,6 +1266,37 @@ impl<'a> Resolver<'a> {
         }
     }
 
+    /// The member a C# call `field.member()` reaches when the parser could
+    /// not type `field`, yet the caller's own type `caller_owner` (an
+    /// `owner_key`) declares that field or property in another `partial`
+    /// part or inherits it ([`type_ladder::csharp_member_field`]): `member`
+    /// on the type the field declares, read in the field's file as a chain
+    /// reads a return type, under the chain's access rule. `None` for any
+    /// other site, or when that lookup binds nothing.
+    pub(crate) fn csharp_field_receiver_member(
+        &self,
+        source_file: &Path,
+        caller_owner: Option<&str>,
+        site: CallSite<'_>,
+    ) -> Option<(NodeId, f32)> {
+        let CallSite::FromReceiver { receiver, member } = site.fallback() else {
+            return None;
+        };
+        let owner = caller_owner?;
+        let st = self.symbol_table;
+        let ty = st.lookup_in_file_with_kind(
+            &normalize_source_path(source_file),
+            owner,
+            ResolveTarget::Type,
+        )?;
+        let field = type_ladder::csharp_member_field(st, ty, owner, receiver)?;
+        let (id, confidence) = self
+            .resolve_chained_member_outcome(source_file, (field, 1.0), member)
+            .bound()?;
+        let id = self.csharp_admitted_chain_member(source_file, caller_owner, id)?;
+        Some((id, confidence))
+    }
+
     /// Resolve an explicit import without selecting an inaccessible local binding.
     pub fn resolve_imported_symbol(
         &self,
@@ -1350,7 +1398,8 @@ impl<'a> Resolver<'a> {
 
     /// Tier 2 outside the import-member policy: an import whose local name
     /// is the callee, probed through the specifier's candidate files
-    /// ([`reexport::named_import`]), and the barrel a re-export hop went
+    /// ([`reexport::named_import`]), else a Rust import through the module
+    /// tree ([`Self::rust_tree_import`]), and the barrel a re-export hop went
     /// through.
     fn resolve_named_import(
         &self,
@@ -1364,7 +1413,7 @@ impl<'a> Resolver<'a> {
         let reexports = self
             .reexports
             .filter(|_| is_ecmascript(self.symbol_table.file_language(&importer)));
-        match reexport::named_import(
+        let hit = reexport::named_import(
             &IndexFacts(self),
             &importer,
             raw_imports.iter().map(ImportRef::from),
@@ -1373,21 +1422,63 @@ impl<'a> Resolver<'a> {
             |exported_name| {
                 reexports.is_some_and(|index| index.may_reach(self.symbol_table, exported_name))
             },
-        ) {
-            Some(hit) => (
-                self.import_scoped(
-                    source_file,
-                    symbol_name,
-                    &raw_imports[hit.position],
-                    hit.decl,
-                )
-                .edge()
-                .into_iter()
-                .collect(),
-                hit.barrel,
+        )
+        .map(|hit| (hit.position, hit.decl, hit.barrel))
+        .or_else(|| {
+            self.rust_tree_import(&importer, symbol_name, raw_imports, target)
+                .map(|(position, decl)| (position, decl, None))
+        });
+        match hit {
+            Some((position, decl, barrel)) => (
+                self.import_scoped(source_file, symbol_name, &raw_imports[position], decl)
+                    .edge()
+                    .into_iter()
+                    .collect(),
+                barrel,
             ),
             None => (Vec::new(), None),
         }
+    }
+
+    /// The first Rust `use` binding `symbol_name` whose path the module tree
+    /// places ([`ladder::module_tree_item`]), and the module-level item it
+    /// names there: `use crate::f;` where `lib.rs` writes `pub use inner::f;`
+    /// binds `inner.rs`'s `f`, which the candidate probe of `lib.rs` misses.
+    /// A `use` names no associated item, so an owned namesake never binds.
+    /// An importer outside every Cargo target binds nothing here: the
+    /// tree cannot tell which crate its own manifest names (a duplicated
+    /// source tree outside the workspace), so the nearest-copy tier decides.
+    fn rust_tree_import(
+        &self,
+        importer: &str,
+        symbol_name: &str,
+        raw_imports: &[RawImport],
+        target: ResolveTarget,
+    ) -> Option<(usize, NodeId)> {
+        if !is_rust_source(Path::new(importer)) {
+            return None;
+        }
+        let tree = self.module_tree()?;
+        raw_imports
+            .iter()
+            .enumerate()
+            .find_map(|(position, import)| {
+                let imported =
+                    plain_binding(&import.imported_name, import.alias.as_deref(), symbol_name)?;
+                ladder::ModuleTreeFacts::caller_crate(&tree, importer)?;
+                let ladder::TreeItem::Found { file, item } = ladder::module_tree_item(
+                    &tree,
+                    importer,
+                    &format!("{}::{imported}", import.source),
+                    ladder::Namespace::of(target),
+                )?
+                else {
+                    return None;
+                };
+                self.symbol_table
+                    .lookup_member_in_file(&file, &item, target, MemberOwner::TopLevel)
+                    .map(|decl| (position, decl))
+            })
     }
 
     /// Record and return an ImportScoped edge to `node_id` through `import`.
@@ -1830,7 +1921,7 @@ impl<'a> Resolver<'a> {
                 source_file,
                 &source_file_str,
                 symbol_name,
-                qualifier,
+                ladder::self_qualifier(language, qualifier, call),
                 member,
                 target,
                 raw_imports,
@@ -2035,6 +2126,13 @@ impl<'a> Resolver<'a> {
                     symbol_name,
                     raw_imports.iter().map(ImportRef::from),
                     module,
+                    || {
+                        ecp_core::analyzer::same_file_pick::PickFacts::owner(
+                            self.symbol_table,
+                            node_id,
+                        )
+                        .is_some()
+                    },
                 )
             })
         };
@@ -2381,7 +2479,13 @@ impl<'a> Resolver<'a> {
         if caller_meta.language == Language::Rust && !imported_in_project {
             return TypeCandidates::None;
         }
-        let ids = st.global_candidates(qualifier, ResolveTarget::Type, caller_meta);
+        // The parts of one C# partial type are one candidate type.
+        let ids: Vec<NodeId> = type_ladder::distinct_types(
+            st,
+            st.global_candidates(qualifier, ResolveTarget::Type, caller_meta)
+                .into_iter(),
+        )
+        .collect();
         match ids.len() {
             0 => TypeCandidates::None,
             1 => TypeCandidates::Unique(ids[0], qualifier),
@@ -2399,14 +2503,14 @@ impl<'a> Resolver<'a> {
         let Some(name) = owner_key(path) else {
             return TypeCandidates::External;
         };
-        let ids: Vec<NodeId> = st
+        let agreeing = st
             .global_candidates(name, ResolveTarget::Type, st.file_meta(source_file_str))
             .into_iter()
             .filter(|&id| {
                 st.file_of(id)
                     .is_some_and(|file| st.owner_path_agrees(file, path))
-            })
-            .collect();
+            });
+        let ids: Vec<NodeId> = type_ladder::distinct_types(st, agreeing).collect();
         match ids.len() {
             0 => TypeCandidates::External,
             1 => TypeCandidates::Unique(ids[0], name),
@@ -2502,16 +2606,20 @@ impl<'a> Resolver<'a> {
     /// Tier 3.5's facts ([`ladder::ModuleTreeFacts`]): the workspace module
     /// tree. `None` without one (no `Cargo.toml`, a non-Rust repo).
     fn module_tree(&self) -> Option<IndexModuleTree<'_>> {
-        Some(self.mod_tree?.facts(self.workspace_root.as_deref()?))
+        Some(
+            self.mod_tree?
+                .facts_with_symbols(self.workspace_root.as_deref()?, self.symbol_table),
+        )
     }
 
+    /// [`IndexModuleTree::resolve_fqn`] over the symbol-aware tree: a
+    /// module's own type shadows its glob `pub use`, as in the overlay.
     fn mod_tree_resolve(
         &self,
         source_file_str: &str,
         fqn: &str,
     ) -> Option<crate::rust::module_tree::ResolvedFqn> {
-        self.mod_tree?
-            .resolve_fqn(fqn, source_file_str, self.workspace_root.as_ref()?)
+        self.module_tree()?.resolve_fqn(fqn, source_file_str)
     }
 
     #[allow(clippy::too_many_arguments)]

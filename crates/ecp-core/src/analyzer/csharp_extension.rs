@@ -191,9 +191,10 @@ enum Fit {
 /// for exactly one declaration in scope, visible, accepting the receiver
 /// and not refused by the arguments. It binds at the owned-member tier's
 /// confidence when that declaration is proven: the receiver is one
-/// project type whose whole ancestry is resolved and owns no `member`, the
-/// `this` type names that type or a resolved supertype, and the arguments
-/// fit its parameters. Every other single candidate binds at
+/// project type whose whole ancestry is resolved and owns no `member`, or a
+/// sealed predefined type (`String`, `Int32`) with no instance method
+/// named `member`, the `this` type names that type or a resolved supertype,
+/// and the arguments fit its parameters. Every other single candidate binds at
 /// [`HEURISTIC_CONFIDENCE`]. Two candidates, overloads of one class
 /// included, are ambiguous. A receiver of unknown type (`receiver.name` is
 /// `None`) may be any type: every declaration in scope and visible accepts
@@ -231,6 +232,15 @@ pub fn resolve<F: TypeFacts + ?Sized>(
         }
     }
     let receiver_key = receiver.name.map(system_type_name);
+    // A sealed predefined receiver (`"s"`, `5`) has no project type, yet its
+    // members are known: an extension name none of them declares is proven.
+    // `fit` keeps `closed` for the conversions, which an interface `this`
+    // may still pass (`this IComparable`).
+    let proven_receiver = closed
+        || (receiver.types.is_empty()
+            && receiver_key.is_some_and(|key| {
+                is_sealed_predefined(key) && !is_predefined_instance_member(key, member)
+            }));
     let mut in_scope = false;
     let mut accepts_receiver = false;
     // (declaration, its fit, whether the arguments apply), one per
@@ -262,8 +272,9 @@ pub fn resolve<F: TypeFacts + ?Sized>(
         [] if in_scope => Verdict::Unresolved(Unresolved::Inapplicable),
         [] => Verdict::Unresolved(Unresolved::OutOfScope),
         &[(id, fit, applies)] => {
-            let proven =
-                closed && matches!(fit, Fit::Exact | Fit::Ancestor) && applies == Applies::Yes;
+            let proven = proven_receiver
+                && matches!(fit, Fit::Exact | Fit::Ancestor)
+                && applies == Applies::Yes;
             Verdict::Bound {
                 id,
                 confidence: if proven {
@@ -510,6 +521,59 @@ fn is_sealed_predefined(canonical_name: &str) -> bool {
             | "UInt16"
             | "String"
     )
+}
+
+/// Whether the sealed predefined type `canonical_name`
+/// ([`is_sealed_predefined`]) declares or inherits from `Object` a public
+/// instance method named `member` (.NET 8 API). A name match does not prove
+/// that an instance overload applies (`ToString(this string s, int a, int b)`
+/// on `"x".ToString(1, 2)` is a valid extension call), so a hit only keeps
+/// the extension edge heuristic, never suppresses it.
+fn is_predefined_instance_member(canonical_name: &str, member: &str) -> bool {
+    let object = matches!(member, "Equals" | "GetHashCode" | "GetType" | "ToString");
+    let primitive = matches!(member, "CompareTo" | "GetTypeCode" | "TryFormat");
+    object
+        || match canonical_name {
+            "String" => matches!(
+                member,
+                "Clone"
+                    | "CompareTo"
+                    | "Contains"
+                    | "CopyTo"
+                    | "EndsWith"
+                    | "EnumerateRunes"
+                    | "GetEnumerator"
+                    | "GetPinnableReference"
+                    | "GetTypeCode"
+                    | "IndexOf"
+                    | "IndexOfAny"
+                    | "Insert"
+                    | "IsNormalized"
+                    | "LastIndexOf"
+                    | "LastIndexOfAny"
+                    | "Normalize"
+                    | "PadLeft"
+                    | "PadRight"
+                    | "Remove"
+                    | "Replace"
+                    | "ReplaceLineEndings"
+                    | "Split"
+                    | "StartsWith"
+                    | "Substring"
+                    | "ToCharArray"
+                    | "ToLower"
+                    | "ToLowerInvariant"
+                    | "ToUpper"
+                    | "ToUpperInvariant"
+                    | "Trim"
+                    | "TrimEnd"
+                    | "TrimStart"
+                    | "TryCopyTo"
+            ),
+            "IntPtr" => primitive || matches!(member, "ToInt32" | "ToInt64" | "ToPointer"),
+            "UIntPtr" => primitive || matches!(member, "ToUInt32" | "ToUInt64" | "ToPointer"),
+            _ => primitive,
+        }
 }
 
 /// The .NET naming convention of an interface (`IComparable`), or

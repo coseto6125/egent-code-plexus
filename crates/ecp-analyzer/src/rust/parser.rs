@@ -532,24 +532,12 @@ impl ParseSpec for RustSpec {
                 f.local_types = Some(local_types);
             }
             RustHook::Indirect => {
-                // `collect_rust_indirect_param_types` captures fn(...)  and &dyn Trait
-                // types that `bare_type_name` (used by LocalTypes) discards.
-                let mut param_types = collect_rust_indirect_param_types(root, source);
-                // Merge LocalTypes bindings (for typed let bindings already collected).
-                if let Some(local_types) = &f.local_types {
-                    for scope in local_types.scopes() {
-                        for (var, ty) in &scope.bindings {
-                            param_types.entry(var.clone()).or_insert_with(|| ty.clone());
-                        }
-                        if let Some(ref st) = scope.self_type {
-                            param_types
-                                .entry("self".to_string())
-                                .or_insert_with(|| st.clone());
-                        }
-                    }
-                }
+                // `collect_rust_indirect_param_types` captures fn(...) and &dyn Trait
+                // types that `bare_type_name` (used by LocalTypes) discards, scoped
+                // by position so one fn's parameter types never reach another fn.
+                let vars = collect_rust_indirect_param_types(root, source);
                 cx.call_metas =
-                    detect_rust_indirect(root, source, &cx.nodes, &param_types, &cx.call_sites);
+                    detect_rust_indirect(root, source, &cx.nodes, &vars, &cx.call_sites);
             }
             RustHook::Frameworks => {
                 // Framework-presence gates: only claim Axum/Actix refs when the file

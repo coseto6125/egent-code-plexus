@@ -60,7 +60,7 @@
     (annotation)* @decorator
   )? @export
   (simple_identifier) @function.name
-  (user_type)? @type) @function
+  [(user_type) (nullable_type)]? @type) @function
 
 ; Properties — class-scoped only (val/var inside class_body).
 ; Top-level file-scoped `val`/`var` are excluded here (those belong to Variable round).

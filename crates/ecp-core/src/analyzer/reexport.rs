@@ -437,20 +437,10 @@ pub fn imported_file_type<'i, F: ModuleFacts + ?Sized>(
         };
         match language {
             Language::Dart => {
-                if import.imported_name != import.source || import.source.starts_with('/') {
-                    continue;
-                }
-                if let Some(package) = import.source.strip_prefix("package:") {
-                    if let Some(file) = dart_project_package_file(facts, importer, package) {
-                        scan_file_types(facts, &file, name, &mut found, &mut ambiguous);
-                    }
-                } else if !import.source.contains(':') {
-                    if import.source.starts_with('.') {
-                        visit(import.source);
-                    } else {
-                        let relative = format!("./{}", import.source);
-                        visit(&relative);
-                    }
+                if dart_visible(&import, name) {
+                    dart_import_files(facts, importer, import.source, &mut |file| {
+                        scan_file_types(facts, file, name, &mut found, &mut ambiguous)
+                    });
                 }
             }
             // C++ RawImport strips both `"..."` and `<...>` delimiters.
@@ -472,6 +462,52 @@ pub fn imported_file_type<'i, F: ModuleFacts + ?Sized>(
         }
     }
     found.map_or(ImportedFileType::Missing, ImportedFileType::Unique)
+}
+
+/// Whether an unaliased Dart import makes `name` visible. A plain import
+/// (`imported_name == source`) shows everything; otherwise `imported_name`
+/// holds the combinators as the parser writes them (`show A,B;hide C`) and
+/// each one must admit the name. Text that reads as no combinator, such as the
+/// empty name an older parser wrote for any `show` / `hide` import, shows
+/// nothing.
+pub fn dart_visible(import: &ImportRef<'_>, name: &str) -> bool {
+    if import.imported_name == import.source {
+        return true;
+    }
+    !name.is_empty()
+        && import
+            .imported_name
+            .split(';')
+            .all(|clause| match clause.split_once(' ') {
+                Some(("show", names)) => names.split(',').any(|shown| shown == name),
+                Some(("hide", names)) => names.split(',').all(|hidden| hidden != name),
+                _ => false,
+            })
+}
+
+/// Hands `visit` each project file a Dart import `source` can name, until it
+/// returns `false`. A `dart:` or other scheme, an absolute path and an
+/// external `package:` name no project file.
+fn dart_import_files<F: ModuleFacts + ?Sized>(
+    facts: &F,
+    importer: &str,
+    source: &str,
+    visit: &mut dyn FnMut(&str) -> bool,
+) {
+    if source.starts_with('/') {
+        return;
+    }
+    if let Some(package) = source.strip_prefix("package:") {
+        if let Some(file) = dart_project_package_file(facts, importer, package) {
+            visit(&file);
+        }
+    } else if !source.contains(':') {
+        if source.starts_with('.') {
+            facts.for_each_candidate(importer, source, visit);
+        } else {
+            facts.for_each_candidate(importer, &format!("./{source}"), visit);
+        }
+    }
 }
 
 /// Records `file`'s type declarations of `name` into `found`; returns
@@ -691,6 +727,86 @@ pub enum GoPackageLookup<'a> {
     Resolved(Option<(u32, &'a str)>),
 }
 
+/// Whether `source` names a Go standard-library package (or cgo's `C`): a
+/// first path element without a dot is reserved for the standard library, so
+/// no project directory can stand for it. `internal` and `vendor` are left
+/// out: only the standard library itself may import them.
+fn go_std_import(source: &str) -> bool {
+    let root = source.split('/').next().unwrap_or(source);
+    matches!(
+        root,
+        "C" | "archive"
+            | "bufio"
+            | "bytes"
+            | "cmp"
+            | "compress"
+            | "container"
+            | "context"
+            | "crypto"
+            | "database"
+            | "debug"
+            | "embed"
+            | "encoding"
+            | "errors"
+            | "expvar"
+            | "flag"
+            | "fmt"
+            | "go"
+            | "hash"
+            | "html"
+            | "image"
+            | "index"
+            | "io"
+            | "iter"
+            | "log"
+            | "maps"
+            | "math"
+            | "mime"
+            | "net"
+            | "os"
+            | "path"
+            | "plugin"
+            | "reflect"
+            | "regexp"
+            | "runtime"
+            | "slices"
+            | "sort"
+            | "strconv"
+            | "strings"
+            | "structs"
+            | "sync"
+            | "syscall"
+            | "testing"
+            | "text"
+            | "time"
+            | "unicode"
+            | "unique"
+            | "unsafe"
+            | "weak"
+    )
+}
+
+/// The name an unaliased Go import binds when the package clause is unknown,
+/// as goimports assumes it: the last path element, or the one before a
+/// `/vN` major-version suffix, without a `go-` prefix and cut at the first
+/// character that is not an identifier character (`pgx/v5` -> `pgx`,
+/// `yaml.v3` -> `yaml`, `go-sqlite3` -> `sqlite3`).
+fn go_assumed_package_name(source: &str) -> &str {
+    let mut elements = source.rsplit('/');
+    let mut name = elements.next().unwrap_or(source);
+    let is_major_version = name
+        .strip_prefix('v')
+        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()));
+    if is_major_version {
+        name = elements.next().unwrap_or(name);
+    }
+    let name = name.strip_prefix("go-").unwrap_or(name);
+    let end = name
+        .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .unwrap_or(name.len());
+    &name[..end]
+}
+
 pub fn go_package_lookup<'a, F, I>(
     facts: &F,
     importer: &str,
@@ -706,6 +822,7 @@ where
     let mut found = None;
     let mut ambiguous = false;
     let mut package = false;
+    let mut assumed = false;
     let mut mapped = false;
 
     for import in imports {
@@ -713,7 +830,17 @@ where
         if is_alias && import.alias != Some(receiver) {
             continue;
         }
-        package |= is_alias || import.source.rsplit('/').next() == Some(receiver);
+        let by_last_element = import.source.rsplit('/').next() == Some(receiver);
+        let by_assumed_name =
+            !by_last_element && go_assumed_package_name(import.source) == receiver;
+        if go_std_import(import.source) {
+            if is_alias || by_last_element || by_assumed_name {
+                return GoPackageLookup::Resolved(None);
+            }
+            continue;
+        }
+        package |= is_alias || by_last_element;
+        assumed |= !is_alias && by_assumed_name;
         if !is_alias && namespace_files.is_empty() {
             continue;
         }
@@ -756,6 +883,8 @@ where
     }
     if mapped {
         GoPackageLookup::Resolved(found)
+    } else if assumed {
+        GoPackageLookup::Resolved(None)
     } else if package && !namespace_files.is_empty() {
         GoPackageLookup::Unmapped
     } else if package {
@@ -1282,19 +1411,27 @@ fn attribute_shadows_submodule<F: ModuleFacts + ?Sized>(
     })
 }
 
-/// Whether a TS / JS import binding `name` names the ES module that
-/// declares the global tier's pick (in `decl_file`). The import tier found
-/// no export of that name there, so the declaration is private to its
-/// module and out of the importer's reach: the global tier must not bind
-/// it.
+/// Whether an import of the importer puts the global tier's pick (`name`,
+/// declared in `decl_file`) out of its reach, so the global tier must not
+/// bind it. A TS / JS import binding `name` that names the pick's ES module:
+/// the import tier found no export of that name there, so the declaration
+/// is private to its module. A Dart `show` / `hide` import that leaves
+/// `name` out ([`dart_import_hides`]): a combinator filters only a
+/// library's top-level names, so it never hides a member (`is_member`, asked
+/// only for a Dart importer), which the call reaches through its type.
 pub fn import_hides<'i, F: ModuleFacts + ?Sized>(
     facts: &F,
     importer: &str,
     name: &str,
     imports: impl IntoIterator<Item = ImportRef<'i>>,
     decl_file: &str,
+    is_member: impl FnOnce() -> bool,
 ) -> bool {
-    if !is_ecmascript(facts.file_language(importer)) || !facts.is_es_module(decl_file) {
+    let language = facts.file_language(importer);
+    if language == Language::Dart {
+        return !is_member() && dart_import_hides(facts, importer, name, imports, decl_file);
+    }
+    if !is_ecmascript(language) || !facts.is_es_module(decl_file) {
         return false;
     }
     imports.into_iter().any(|import| {
@@ -1302,6 +1439,39 @@ pub fn import_hides<'i, F: ModuleFacts + ?Sized>(
             && import.local_name() == name
             && ecmascript_module(facts, importer, &import).as_deref() == Some(decl_file)
     })
+}
+
+/// A Dart `show` / `hide` import of `decl_file` that makes the top-level
+/// `name` invisible while no other unaliased import of that file shows it:
+/// the declaration is out of the importer's reach, so the global tier must
+/// not bind it. An aliased import binds its names under the alias, not
+/// bare.
+fn dart_import_hides<'i, F: ModuleFacts + ?Sized>(
+    facts: &F,
+    importer: &str,
+    name: &str,
+    imports: impl IntoIterator<Item = ImportRef<'i>>,
+    decl_file: &str,
+) -> bool {
+    let mut filtered_out = false;
+    for import in imports {
+        if import.alias.is_some() {
+            continue;
+        }
+        let mut names_decl_file = false;
+        dart_import_files(facts, importer, import.source, &mut |file| {
+            names_decl_file = file == decl_file;
+            !names_decl_file
+        });
+        if !names_decl_file {
+            continue;
+        }
+        if dart_visible(&import, name) {
+            return false;
+        }
+        filtered_out = true;
+    }
+    filtered_out
 }
 
 /// Extensions probed during candidate enumeration (covers every language
@@ -1586,5 +1756,88 @@ mod tests {
         assert!(applies("src/a.mjs"));
         assert!(!applies("src/a.d.ts"));
         assert!(!applies("pkg/__init__.py"));
+    }
+
+    /// Stands for: a Go import binds the name goimports assumes for its path.
+    #[test]
+    fn test_go_assumed_package_name_versioned_dotted_and_prefixed_paths_return_package() {
+        for (source, name) in [
+            ("github.com/jackc/pgx/v5", "pgx"),
+            ("gopkg.in/yaml.v3", "yaml"),
+            ("gopkg.in/x.v3", "x"),
+            ("github.com/mattn/go-sqlite3", "sqlite3"),
+            ("example.com/app/v2", "app"),
+            ("math/rand/v2", "rand"),
+            ("log", "log"),
+            ("example.com/app/vendor_x", "vendor_x"),
+            ("example.com/app/vfoo", "vfoo"),
+            ("example.com/app/v", "v"),
+            ("v2", "v2"),
+            ("", ""),
+        ] {
+            assert_eq!(go_assumed_package_name(source), name, "{source}");
+        }
+    }
+
+    #[test]
+    fn test_go_std_import_dotless_root_is_std_and_dotted_or_internal_is_not() {
+        for std in ["log", "net/http", "math/rand/v2", "C", "unsafe", "go/ast"] {
+            assert!(go_std_import(std), "{std}");
+        }
+        for project in [
+            "",
+            "github.com/jackc/pgx/v5",
+            "example.com/app/log",
+            "app/log",
+            "internal/log",
+            "vendor/x",
+            "logx",
+            "c",
+        ] {
+            assert!(!go_std_import(project), "{project}");
+        }
+    }
+
+    /// Stands for: what a Dart import binds, from the text the parser wrote
+    /// for its combinators. Text that reads as none (an older parser's empty
+    /// name, a stray word) shows nothing instead of everything.
+    #[test]
+    fn test_dart_visible_combinator_text_admits_only_the_names_it_shows() {
+        let import = |imported_name| ImportRef {
+            source: "a.dart",
+            imported_name,
+            alias: None,
+            binding_kind: None,
+            target: None,
+        };
+        for (imported_name, name, visible) in [
+            ("a.dart", "Foo", true),
+            ("show Foo", "Foo", true),
+            ("show Foo", "Bar", false),
+            ("show Foo,Bar", "Bar", true),
+            ("show Foo,Bar", "Baz", false),
+            ("hide Foo", "Foo", false),
+            ("hide Foo", "Bar", true),
+            ("hide Foo,Bar", "Bar", false),
+            ("show Foo;hide Foo", "Foo", false),
+            ("show Foo;hide Bar", "Foo", true),
+            ("show Foo,Bar;hide Bar", "Bar", false),
+            ("show Foo", "", false),
+            ("show Foo", " ", false),
+            ("show Foo", "Fo", false),
+            ("show Foo", "Foo,Bar", false),
+            ("", "Foo", false),
+            ("show", "Foo", false),
+            ("show ", "Foo", false),
+            ("shows Foo", "Foo", false),
+            ("Foo", "Foo", false),
+            ("show Foo;", "Foo", false),
+        ] {
+            assert_eq!(
+                dart_visible(&import(imported_name), name),
+                visible,
+                "{imported_name:?} / {name:?}"
+            );
+        }
     }
 }

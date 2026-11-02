@@ -68,6 +68,58 @@ pub fn clear_scoped_owners(language: Language, nodes: &mut [RawNode]) {
     }
 }
 
+/// Whether each declaration of one Rust file is body-local: a callable's
+/// span strictly holds it (a type, an `impl` block and its members, a nested
+/// `fn`). A body-local declaration is no item of its module: no path or
+/// `use` names it from outside its function, and it shadows no glob
+/// `pub use`. Uid identity stays with [`lexical_scope_kinds`]. Spans from
+/// one syntax tree nest, so [`inside_callable`] gives the same answer for one
+/// declaration. `enclosing` is [`decls_enclosing`] of `decls`.
+pub fn body_locals(decls: &[(NodeKind, Span)], enclosing: &[Option<usize>]) -> Vec<bool> {
+    (0..decls.len())
+        .map(|i| {
+            let mut up = enclosing[i];
+            while let Some(j) = up {
+                if decls[j].0.is_callable() {
+                    return true;
+                }
+                up = enclosing[j];
+            }
+            false
+        })
+        .collect()
+}
+
+/// The per-uid AND over one file's [`body_locals`]: Pass 1 merges each later
+/// twin of a uid into its first, and the merged node is body-local only when
+/// every declaration merged into it is. `twins` holds (twin, its first) as
+/// indices into `local`. The index's builder and the overlay's dirty side
+/// both fold here.
+pub fn fold_twins(local: &mut [bool], twins: impl IntoIterator<Item = (usize, usize)>) {
+    for (twin, first) in twins {
+        if !local[twin] {
+            local[first] = false;
+        }
+    }
+}
+
+/// The [`innermost_enclosing`] of `decls`' spans: what [`body_locals`] and
+/// [`lexical_parents_in`](crate::contracts::identity::lexical_parents_in)
+/// read, built once per file.
+pub fn decls_enclosing(decls: &[(NodeKind, Span)]) -> Vec<Option<usize>> {
+    let spans: Vec<Span> = decls.iter().map(|&(_, span)| span).collect();
+    innermost_enclosing(&spans)
+}
+
+/// [`body_locals`] for the one declaration at `span`, from the spans of its
+/// file's callables: the form a reader of stored nodes, which keeps no
+/// per-file list, can afford.
+pub fn inside_callable(callables: &[Span], span: Span) -> bool {
+    callables
+        .iter()
+        .any(|&outer| outer != span && span_contains(outer, span))
+}
+
 /// One declaration as [`file_identities`] reads it: kind, owner, name,
 /// 0-based span and declared generic arity ([`RawNode::generic_arity`]).
 /// The arity counts only where [`splits_by_arity`] holds.
@@ -1040,6 +1092,29 @@ mod tests {
         assert!(enclosing_types(&[]).is_empty());
     }
 
+    /// Stands for: a merged node stays body-local only when every twin
+    /// merged into it is body-local too; a module-level twin makes it a
+    /// module item, in any twin order.
+    #[test]
+    fn test_fold_twins_module_level_twin_clears_first_body_local_twins_keep_it() {
+        let mut empty: [bool; 0] = [];
+        fold_twins(&mut empty, []);
+        let mut local = [true, false, true, true, false];
+        fold_twins(&mut local, []);
+        assert_eq!(local, [true, false, true, true, false], "no twins");
+        fold_twins(&mut local, [(2, 0)]);
+        assert_eq!(local, [true, false, true, true, false], "a body-local twin");
+        fold_twins(&mut local, [(2, 0), (4, 0), (3, 0)]);
+        assert_eq!(
+            local,
+            [false, false, true, true, false],
+            "a module-level twin"
+        );
+        let mut module_level_first = [false, true];
+        fold_twins(&mut module_level_first, [(1, 0)]);
+        assert_eq!(module_level_first, [false, true]);
+    }
+
     #[test]
     fn test_twin_enclosing_reader_inside_one_scope_returns_innermost_else_none() {
         let outer = (1, 0, 20, 1);
@@ -1506,5 +1581,33 @@ mod tests {
     fn test_new_python_module_level_function_returns_none() {
         let lex = index("a.py", &[(NodeKind::Function, "f", false, (0, 0, 0, 9))]);
         assert_eq!(lex.targets((1, 0, 1, 9), "f"), None);
+    }
+
+    /// `fn setup() { struct Foo; impl Foo { fn new() } }` beside a
+    /// module-level `struct Bar` and `impl Bar { fn new() }`: the struct,
+    /// the impl block and its method inside `setup` are body-local, the
+    /// module-level items and `setup` itself are not. The span form agrees.
+    #[test]
+    fn test_body_locals_types_and_impl_members_inside_a_fn_body_are_body_local() {
+        let decls = [
+            (NodeKind::Function, (0, 0, 5, 1)),
+            (NodeKind::Struct, (1, 4, 1, 15)),
+            (NodeKind::Impl, (2, 4, 4, 5)),
+            (NodeKind::Method, (3, 8, 3, 30)),
+            (NodeKind::Struct, (6, 0, 6, 11)),
+            (NodeKind::Impl, (7, 0, 9, 1)),
+            (NodeKind::Method, (8, 4, 8, 26)),
+        ];
+        let want = [false, true, true, true, false, false, false];
+        assert_eq!(body_locals(&decls, &decls_enclosing(&decls)), want);
+        let callables: Vec<Span> = decls
+            .iter()
+            .filter(|(kind, _)| kind.is_callable())
+            .map(|&(_, span)| span)
+            .collect();
+        for (&(_, span), want) in decls.iter().zip(want) {
+            assert_eq!(inside_callable(&callables, span), want, "{span:?}");
+        }
+        assert!(body_locals(&[], &[]).is_empty());
     }
 }

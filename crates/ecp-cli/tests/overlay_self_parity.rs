@@ -131,14 +131,6 @@ const WORKSPACE: &[(&str, &str)] = &[
     ),
 ];
 
-/// The one edge the two sides bind differently today, as (caller, callee,
-/// base confidence, overlay confidence). `use kit::build; build()` reaches
-/// `kit`'s `pub use make::build`: the index binds it at the global tier, the
-/// overlay at the import tier; 0.16.4 does the same
-/// (FU-2026-10-26-6d659c216941). The check fails when this edge agrees, or
-/// when any other edge differs.
-const KNOWN_DIVERGENCE: (&str, &str, f32, f32) = ("run", "build", 0.7, 0.95);
-
 #[test]
 fn test_overlay_self_parity_rust_workspace_dirty_unchanged_files_equal_base() {
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&index(WORKSPACE)).unwrap();
@@ -156,6 +148,7 @@ fn test_overlay_self_parity_rust_workspace_dirty_unchanged_files_equal_base() {
         ("run", "start"),
         ("run", "parse"),
         ("run", "version"),
+        ("run", "build"),
     ] {
         let found = expected
             .iter()
@@ -171,17 +164,16 @@ fn test_overlay_self_parity_rust_workspace_dirty_unchanged_files_equal_base() {
         .collect();
     let view = OverlayView::build(base, &inputs).expect("dirty files make a view");
     let merged = MergedGraph::new(base, Some(&view));
-    let (caller, callee, base_conf, overlay_conf) = KNOWN_DIVERGENCE;
-    let mut want = expected.clone();
-    let diverging = want
-        .iter_mut()
-        .filter(|call| call.1 == caller && call.3 == callee && call.5 == base_conf)
-        .map(|call| call.5 = overlay_conf)
-        .count();
+    // `use kit::build; build()` reaches `kit`'s `pub use make::build`: both
+    // sides bind it at the import tier (FU-2026-10-26-6d659c216941).
+    let build = expected
+        .iter()
+        .find(|call| call.1 == "run" && call.3 == "build")
+        .expect("checked above");
     assert_eq!(
-        diverging, 1,
-        "the known divergence is in the base: {expected:#?}"
+        (build.2.as_str(), build.5),
+        ("crates/kit/src/make.rs", 0.95),
+        "the index follows the `pub use` at the import tier"
     );
-    want.sort_by(|a, b| a.partial_cmp(b).expect("a confidence is never NaN"));
-    assert_eq!(calls(&merged, base), want);
+    assert_eq!(calls(&merged, base), expected);
 }

@@ -167,7 +167,13 @@ use std::path::Path;
 /// that declaration, a call through a literal dynamic import binds like a
 /// static import, and a Flask imperative route names its handler; a schema47
 /// graph lacks those edges.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema48");
+/// schema49: Go stdlib and assumed-name selectors, Dart `show`/`hide`, C#
+/// chains, partial-part and inherited field receivers, literal extension
+/// receivers and explicit interface implementations, Rust re-exports, globs,
+/// `Self::` paths and impl-only types bind differently, and an untyped member
+/// call in a guess language drops to 0.55 (`call:untyped-member`); a
+/// schema48 graph holds the old edges.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema49");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

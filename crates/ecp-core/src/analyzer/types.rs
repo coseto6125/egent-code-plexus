@@ -27,6 +27,17 @@ pub const NEAREST_COPY_CONFIDENCE: f32 = 0.6;
 /// proximity is a heuristic, so the edge stays tagged.
 pub const NEAREST_COPY_REASON: &str = "call:nearest-copy";
 
+/// The confidence of a call edge bound by the member name alone to a method,
+/// in a language whose receivers the parser types well enough that an
+/// untyped one is a guess ([`crate::analyzer::ladder::untyped_bind_is_guess`]).
+/// Below [`NEAREST_COPY_CONFIDENCE`] and every other tier, so the index and
+/// the session overlay tell the edge apart by it.
+pub const UNTYPED_NAME_CONFIDENCE: f32 = 0.55;
+
+/// The `reason` of a call edge at [`UNTYPED_NAME_CONFIDENCE`]: the name is
+/// the only evidence, so the edge stays tagged.
+pub const UNTYPED_NAME_REASON: &str = "call:untyped-member";
+
 /// True iff `outer` fully contains `inner` in the same coordinate system.
 #[inline]
 pub fn span_contains(outer: Span, inner: Span) -> bool {
@@ -75,6 +86,13 @@ thread_local! {
     static CHAIN_DEPTH: Cell<u32> = const { Cell::new(0) };
 }
 
+/// The receiver key of a C# `this.name` call whose member the caller's file
+/// does not declare: `this/name`. The parser writes it into a
+/// [`CallSite::FromReceiver`] receiver and the resolver reads it back. The
+/// separator is '/' because `CallSite` splits receiver from member on the
+/// first '.'.
+pub const THIS_MEMBER_PREFIX: &str = "this/";
+
 /// One [`RawNode::calls`] entry, decoded.
 ///
 /// The callee text alone cannot say whether a call constructs its type: in
@@ -109,7 +127,9 @@ pub enum CallSite<'a> {
     /// submodule binds as a module import. In C#, Swift, Kotlin and Dart it
     /// is an identifier that is no local, parameter or field; in C# also the
     /// last segment of a dotted name that may be a type path (`Outer.Inner`)
-    /// or a generic type's name (`Box<int>`). A receiver that names a type
+    /// or a generic type's name (`Box<int>`), and `this/name`
+    /// ([`THIS_MEMBER_PREFIX`]) for a `this.name` member the caller's file
+    /// does not declare, which names no type. A receiver that names a type
     /// (or a library one) resolves as `Plain("Type.member")`; anywhere else
     /// the site resolves as `Plain(member)`, in Swift and C# as
     /// `UntypedMember(member)`.
@@ -367,9 +387,10 @@ impl<'a> CallSite<'a> {
 
     /// The type path this site may construct in `language`, and whether an
     /// unresolved qualified path may fall back to its last segment. `None`
-    /// when the site cannot construct a type in `language`: Go, Rust and C
-    /// have no constructors, and in TS / JS / PHP / Java / C# only `new T()`
-    /// constructs.
+    /// when the site cannot construct a type in `language`: C has no
+    /// constructors, Go and Rust construct only through a literal
+    /// (`Foo{..}`, `Foo { .. }`), and in TS / JS / PHP / Java / C# only
+    /// `new T()` constructs.
     ///
     /// The fallback holds only where the site constructs for certain and its
     /// qualifier can name what the type tiers do not resolve: a TS / JS
@@ -386,7 +407,12 @@ impl<'a> CallSite<'a> {
                 Language::TypeScript | Language::JavaScript | Language::Php | Language::Cpp,
                 Self::Construct(ty),
             ) => Some((ty, true)),
-            (Language::Java | Language::CSharp, Self::Construct(ty)) => Some((ty, false)),
+            // A Rust `Shape::Circle { r }` is an enum variant, not the struct
+            // `Circle`: a last-segment retry would bind the wrong type.
+            (
+                Language::Java | Language::CSharp | Language::Rust | Language::Go,
+                Self::Construct(ty),
+            ) => Some((ty, false)),
             (
                 Language::Python
                 | Language::Swift
@@ -633,7 +659,9 @@ impl From<&ArchivedBindingKind> for BindingKind {
 pub struct RawImport {
     pub source: String,
     /// Empty when the dependency is known but its symbol visibility is unmodeled.
-    /// Dart imports with `show` or `hide` retain only the dependency source.
+    /// A Dart import with `show` or `hide` holds its combinators in source
+    /// order, such as `show A,B;hide C`, which `reexport::dart_visible` reads;
+    /// an unfiltered Dart import holds its source.
     pub imported_name: String,
     pub alias: Option<String>,
     /// `None` for ordinary import statements; `Some(_)` for C named bindings
@@ -2284,6 +2312,24 @@ mod tests {
         assert_eq!(CHAIN_DEPTH.get(), 0);
         let after = encode_chain(CHAIN_DEPTH_LIMIT).unwrap();
         assert_eq!(chain_depth(&after).0, CHAIN_DEPTH_LIMIT);
+    }
+
+    /// Contract: the C# `this.name` receiver key survives the `CallSite`
+    /// round trip whole, because the prefix holds no '.', the one character
+    /// the entry splits on; an empty or whitespace-only member name leaves
+    /// a key that still strips to that name and no further.
+    #[test]
+    fn test_this_member_prefix_receiver_round_trips_through_call_site() {
+        assert!(!THIS_MEMBER_PREFIX.contains('.'));
+        for name in ["_fld", "", " "] {
+            let key = format!("{THIS_MEMBER_PREFIX}{name}");
+            let raw = CallSite::from_receiver(&key, "Create");
+            let CallSite::FromReceiver { receiver, member } = CallSite::parse(&raw) else {
+                panic!("{raw:?} does not decode as a from-receiver entry");
+            };
+            assert_eq!(member, "Create");
+            assert_eq!(receiver.strip_prefix(THIS_MEMBER_PREFIX), Some(name));
+        }
     }
 
     /// Contract: a `from`-receiver entry decodes to its receiver and member,

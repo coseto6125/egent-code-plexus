@@ -13,20 +13,21 @@ use ecp_core::analyzer::csharp_extension::{self, ReceiverSite};
 use ecp_core::analyzer::heritage;
 use ecp_core::analyzer::ladder;
 use ecp_core::analyzer::lexical::{
-    enclosing_types, file_identities, file_uids, later_is_arity_twin, lexical_scope_kinds,
-    raw_decl, splits_by_arity, LexicalFunctions,
+    body_locals, decls_enclosing, enclosing_types, file_identities, file_uids, fold_twins,
+    later_is_arity_twin, lexical_scope_kinds, raw_decl, splits_by_arity, LexicalFunctions,
 };
 use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::reexport::{export_filter_applies_to, is_ecmascript, ImportRef};
+use ecp_core::analyzer::rust_paths::is_rust_source;
 use ecp_core::analyzer::type_ladder;
 use ecp_core::analyzer::types::{
     owner_key, BlindSpot, CallArguments, CallSite, LocalGraph, NameRef, RawImport, RawNode,
-    RawRoute, VariantRef,
+    RawRoute, VariantRef, UNTYPED_NAME_CONFIDENCE, UNTYPED_NAME_REASON,
 };
 pub use ecp_core::analyzer::types::{
     FUNCTION_REFERENCE_REASON, VALUE_READ_REASON, VARIANT_PATTERN_REASON, VARIANT_USE_REASON,
 };
-use ecp_core::contracts::identity::{lexical_parents, RouteKey, UidSlot};
+use ecp_core::contracts::identity::{lexical_parents_in, RouteKey, UidSlot};
 use ecp_core::contracts::raw_records::{FileOrd, RawEndpoint, RawIdx, RawIndexMap, Unbound};
 use ecp_core::contracts::routing::{FileRouter, Language as RouteLanguage, ParsedLanguage};
 use ecp_core::contracts::workspace::WorkspaceFacts;
@@ -320,9 +321,15 @@ impl GraphBuilder {
             .expect("pass 1 pairs each tombstone with an earlier slot that is no tombstone");
         // Before Pass 2: the name tiers must drop a scoped node (I5) from
         // their first lookup on. The same rows become the v17 graph table.
-        let lexical_table = record_lexical_parents(&self.local_graphs, &raw_map);
+        let ScopeRows {
+            lexical_parents: lexical_table,
+            body_locals: body_local_rows,
+        } = record_scopes(&self.local_graphs, &raw_map);
         for fact in &lexical_table {
             symbol_table.note_lexical_parent(fact.node_idx, fact.parent_idx);
+        }
+        for node_idx in body_local_rows {
+            symbol_table.note_body_local(node_idx);
         }
         // Before the supertypes pre-pass: it, Pass 2 and the Overrides
         // method index read the parts of a C# partial type as one type.
@@ -1146,28 +1153,46 @@ fn file_base(raw_map: &RawIndexMap, file_idx: u32) -> u32 {
         .map_or_else(|| raw_map.end(), |range| range.start)
 }
 
-/// The v17 lexical-parent table: one row per scoped node, from
-/// [`lexical_parents`] over each file's `(kind, span)`, as
-/// [`file_identities`] derives the parents for the uids. A parent that
+/// What [`record_scopes`] derives from each file's `(kind, span)`.
+struct ScopeRows {
+    /// The v17 lexical-parent table.
+    lexical_parents: Vec<LexicalParentFact>,
+    /// The unscoped Rust body-local declarations, as node indices.
+    body_locals: Vec<u32>,
+}
+
+/// The v17 lexical-parent table and the Rust body-local rows, from each
+/// file's `(kind, span)` with one [`decls_enclosing`] per file.
+///
+/// The table holds one row per scoped node, from [`lexical_parents_in`],
+/// as [`file_identities`] derives the parents for the uids. A parent that
 /// Pass 1 tombstoned maps to its surviving twin. A tombstoned scoped node
 /// gets no row: its twin owns the identity and gets its own. A file whose
 /// language scopes no kind ([`lexical_scope_kinds`]) gets no row.
-fn record_lexical_parents(
-    local_graphs: &[LocalGraph],
-    raw_map: &RawIndexMap,
-) -> Vec<LexicalParentFact> {
-    let mut table = Vec::new();
+///
+/// The body-local rows ([`rust_body_local_rows`]) are the Rust declarations
+/// inside a function body that the module-item lookups skip. Computed from
+/// `(kind, span)` alone, so `graph.bin` stores nothing new and the overlay
+/// derives the same rows.
+fn record_scopes(local_graphs: &[LocalGraph], raw_map: &RawIndexMap) -> ScopeRows {
+    let mut rows = ScopeRows {
+        lexical_parents: Vec::new(),
+        body_locals: Vec::new(),
+    };
     for (file, local_graph) in local_graphs.iter().enumerate() {
         let path = local_graph.file_path.to_string_lossy();
         // The path's language, not the stored one: `file_identities` scopes
         // the uids by the path, and the overlay numbers a file the same way.
         let scoped = lexical_scope_kinds(Language::from_path(&path));
-        if scoped.is_empty() {
+        let rust = is_rust_source(&local_graph.file_path);
+        if scoped.is_empty() && !rust {
             continue;
         }
         let file = FileOrd(file as u32);
         let decls: Vec<_> = local_graph.nodes.iter().map(|n| (n.kind, n.span)).collect();
-        for (raw, parent) in lexical_parents(&decls, scoped).into_iter().enumerate() {
+        let enclosing = decls_enclosing(&decls);
+        let parents = lexical_parents_in(&decls, &enclosing, scoped);
+        for (raw, &parent) in parents.iter().enumerate() {
             let raw = RawIdx(raw as u32);
             let (Some(node_idx), Some(parent_idx)) = (
                 raw_map.node(file, raw),
@@ -1176,14 +1201,63 @@ fn record_lexical_parents(
                 continue;
             };
             if raw_map.slot(file, raw) == Some(node_idx) {
-                table.push(LexicalParentFact {
+                rows.lexical_parents.push(LexicalParentFact {
                     node_idx,
                     parent_idx,
                 });
             }
         }
+        if rust {
+            let local = body_locals(&decls, &enclosing);
+            rows.body_locals
+                .extend(rust_body_local_rows(raw_map, file, local, &parents));
+        }
     }
-    table
+    rows
+}
+
+/// The node indices of one Rust file's body-local declarations (`local`,
+/// by raw index). A scoped one (`parents`) gets no row: the symbol table
+/// reads the lexical table for it.
+///
+/// Rust scopes only `fn` by its parent, so `fn setup() { struct Foo; }`
+/// and a later module-level `struct Foo` share a uid, and Pass 1 merges the
+/// second into the first. A merged node is body-local only when every raw
+/// node merged into it is ([`fold_twins`]): else a module item vanishes
+/// behind its body-local twin.
+fn rust_body_local_rows(
+    raw_map: &RawIndexMap,
+    file: FileOrd,
+    mut local: Vec<bool>,
+    parents: &[Option<u32>],
+) -> Vec<u32> {
+    // A file with no body-local raw node reads no slot.
+    if !local.contains(&true) {
+        return Vec::new();
+    }
+    // A twin's survivor lies in its file: the uid hashes the path.
+    let twins: Vec<(usize, usize)> = (0..local.len())
+        .filter_map(|at| {
+            let raw = RawIdx(at as u32);
+            let survivor = raw_map.node(file, raw)?;
+            if raw_map.slot(file, raw) == Some(survivor) {
+                return None;
+            }
+            let (survivor_file, first) = raw_map.locate(survivor)?;
+            (survivor_file == file).then_some((at, first.0 as usize))
+        })
+        .collect();
+    fold_twins(&mut local, twins);
+    local
+        .iter()
+        .enumerate()
+        .filter_map(|(at, &body_local)| {
+            let raw = RawIdx(at as u32);
+            let slot = raw_map.slot(file, raw)?;
+            (body_local && parents[at].is_none() && raw_map.node(file, raw) == Some(slot))
+                .then_some(slot)
+        })
+        .collect()
 }
 
 /// Forward-slash path → file index, as Pass 1 numbers the files.
@@ -2996,10 +3070,23 @@ fn pass1_8_function_metas(
     let mut function_metas: Vec<FunctionMeta> = Vec::new();
     {
         for (file_idx, local_graph) in local_graphs.iter().enumerate() {
+            let csharp = symbol_table.file_language(&local_graph.file_path.to_string_lossy())
+                == Language::CSharp;
+            if csharp {
+                // A C# field or property types a receiver in another
+                // `partial` part, which Pass 2 reads before the Accesses
+                // edge of its type exists.
+                let base = file_base(raw_map, file_idx as u32);
+                for (raw_idx, raw_node) in local_graph.nodes.iter().enumerate() {
+                    if let (NodeKind::Property, Some(ty)) =
+                        (raw_node.kind, raw_node.type_annotation.as_deref())
+                    {
+                        symbol_table.note_return_type(base + raw_idx as u32, ty);
+                    }
+                }
+            }
             if !local_graph.raw_function_metas.is_empty() {
                 let base = file_base(raw_map, file_idx as u32);
-                let csharp = symbol_table.file_language(&local_graph.file_path.to_string_lossy())
-                    == Language::CSharp;
                 // Sorted index → binary_search per node, so the inner loop
                 // is O(N log F) instead of O(N*F).
                 let mut meta_idx: Vec<(Span, usize)> = local_graph
@@ -3401,6 +3488,7 @@ fn resolve_base(
 struct CallReasons {
     call: StrRef,
     nearest_copy: StrRef,
+    untyped_name: StrRef,
     extension_heuristic: StrRef,
 }
 
@@ -3408,6 +3496,8 @@ impl CallReasons {
     fn of(self, confidence: f32) -> StrRef {
         if confidence == NEAREST_COPY_CONFIDENCE {
             self.nearest_copy
+        } else if confidence == UNTYPED_NAME_CONFIDENCE {
+            self.untyped_name
         } else if confidence == csharp_extension::HEURISTIC_CONFIDENCE {
             self.extension_heuristic
         } else {
@@ -3656,14 +3746,26 @@ fn pass2_emit_node_edges(
                     }
                     None => targets,
                 },
-                site => match resolver.csharp_untyped_member(
-                    &local_graph.file_path,
-                    site,
-                    &local_graph.imports,
-                ) {
-                    Some(member) => extension(ReceiverSite::Untyped, member, arguments, 1.0),
-                    None => targets,
-                },
+                // A field or property another `partial` part or a base
+                // declares, which the parser cannot see, types the
+                // receiver before the extension retry reads it untyped.
+                site => {
+                    if let Some(target) = resolver.csharp_field_receiver_member(
+                        &local_graph.file_path,
+                        caller_owner,
+                        site,
+                    ) {
+                        return vec![target];
+                    }
+                    match resolver.csharp_untyped_member(
+                        &local_graph.file_path,
+                        site,
+                        &local_graph.imports,
+                    ) {
+                        Some(member) => extension(ReceiverSite::Untyped, member, arguments, 1.0),
+                        None => targets,
+                    }
+                }
             }
         };
         // `Foo.create().bar()`: `bar` on the type the one bound `create`
@@ -3764,12 +3866,27 @@ fn pass2_emit_node_edges(
     }
 
     if let Some(type_ann) = &raw_node.type_annotation {
-        let targets = resolver.resolve_symbol(
-            &local_graph.file_path,
-            type_ann,
-            &local_graph.imports,
-            ResolveTarget::Type,
-        );
+        // `Self` / `self` / `static` / `this` is no type name: it stands for
+        // the owner, so a declaring-type annotation with no owner binds nothing.
+        let type_name = match type_ladder::return_type_key(type_ann) {
+            Some(key) if type_ladder::names_declaring_type_in(language, key) => {
+                raw_node.owner_class.as_deref().and_then(owner_key)
+            }
+            // The reduced key, as `note_return_type` types the member in
+            // every language: a C# or Dart `Tok?` and a Python forward
+            // reference `"Tok"` are `Tok`. The overlay rebuilds a C# member
+            // type from this edge alone (`base_property_type`).
+            Some(key) => Some(key),
+            None => Some(type_ann.as_str()),
+        };
+        let targets = type_name.map_or_else(Vec::new, |type_name| {
+            resolver.resolve_symbol(
+                &local_graph.file_path,
+                type_name,
+                &local_graph.imports,
+                ResolveTarget::Type,
+            )
+        });
         for (target_id, confidence) in targets {
             edges.push(Edge {
                 source: current_node_idx,
@@ -4091,6 +4208,7 @@ fn pass2_resolve_edges(
     let reason_call = CallReasons {
         call: string_pool.add("call"),
         nearest_copy: string_pool.add(NEAREST_COPY_REASON),
+        untyped_name: string_pool.add(UNTYPED_NAME_REASON),
         extension_heuristic: string_pool.add(csharp_extension::HEURISTIC_REASON),
     };
     let reason_reads_field = string_pool.add("field_read");

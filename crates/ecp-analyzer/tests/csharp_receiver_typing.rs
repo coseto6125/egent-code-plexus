@@ -6,7 +6,6 @@
 mod receiver_typing_support;
 
 use ecp_analyzer::c_sharp::parser::CSharpProvider;
-use ecp_core::analyzer::csharp_extension::{HEURISTIC_CONFIDENCE, HEURISTIC_REASON};
 use ecp_core::analyzer::types::CallSite;
 use ecp_core::graph::{RelType, ZeroCopyGraph};
 use receiver_typing_support::{assert_single_call_into_base, build, callee_files, parse_all};
@@ -214,21 +213,21 @@ const LIT_INT_EXT: (&str, &str) = (
 ",
 );
 
-// The graph side of the literal. An extension target is never proven for a
-// library receiver type (`csharp_extension::resolve` proves only a receiver
-// that is one project type), so the edge stays at the heuristic confidence
-// (0.5, `call:extension-heuristic`) with or without the fix. What the typed
-// `String` receiver changes is the choice among rivals: `this int` does not
-// accept a `String`, so `"..".FormatWith(1)` binds the `this string`
-// declaration (line 4). Before the fix the receiver was untyped, both
-// declarations applied, and the site bound neither.
+// The graph side of the literal. Contract: a `String` receiver picks the
+// `this string` declaration (line 4): `this int` does not accept a
+// `String`. Before the receiver typing the receiver was untyped, both
+// declarations applied, and the site bound neither. `String` is a sealed
+// predefined type that declares no instance `FormatWith`, so the match is
+// proven (0.85, `call`); before FU 933678d6bd56 a receiver with no project
+// type was never proven and the edge stayed at 0.5,
+// `call:extension-heuristic`.
 #[test]
 fn test_resolve_call_string_literal_receiver_picks_the_string_extension() {
     let provider = CSharpProvider::new().expect("CSharpProvider::new");
     let graph = build(parse_all(&provider, &[LIT_EXT, LIT_INT_EXT, LIT_USE]));
     assert_eq!(
         call_edges(&graph, "F", "FormatWith"),
-        [(4, HEURISTIC_CONFIDENCE, HEURISTIC_REASON.to_string())]
+        [(4, 0.85, "call".to_string())]
     );
 }
 
@@ -552,4 +551,11 @@ fn test_explicit_interface_property_does_not_type_a_simple_name_receiver() {
             member: "Run"
         }])
     );
+}
+
+/// Rule U does not apply to C#: a value of unknown type reaches no method by
+/// its name alone, so no layout binds an edge.
+#[test]
+fn test_untyped_member_call_binds_nothing() {
+    receiver_typing_support::assert_untyped_member_binds_nothing("cs");
 }
