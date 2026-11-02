@@ -348,7 +348,25 @@ pub(crate) fn shortest_path<'g>(
             continue;
         }
         if goals.contains(&curr_idx) {
-            reached = Some(curr_idx);
+            // Every depth-d rank is final once a depth-d node pops, so among
+            // the goals at this depth the best rank wins, not the goal the
+            // edge order queued first. A depth-0 goal is a seed with no hop,
+            // so it falls back to itself.
+            let at_depth = |g: usize| match pred.get(&g) {
+                Some(Some(hop)) if hop.depth == curr_depth => Some((g, hop.rank)),
+                _ => None,
+            };
+            reached = goals
+                .iter()
+                .filter_map(|&g| at_depth(g))
+                .reduce(|best, c| {
+                    if c.1.beats(best.1) || (!best.1.beats(c.1) && c.0 < best.0) {
+                        c
+                    } else {
+                        best
+                    }
+                })
+                .map_or(Some(curr_idx), |(g, _)| Some(g));
             break;
         }
         if curr_depth >= opts.depth {
@@ -1304,6 +1322,55 @@ mod tests {
                     "high".to_string()
                 ),
                 "low_first={low_first}"
+            );
+        }
+    }
+
+    /// Stands for: `ecp path S Foo` seeds two goals (the type and its
+    /// constructor). `S→A→ctor` has a 0.55 hop, `S→B→Foo` is fully verified,
+    /// both two hops. The verified route wins in either edge order and node
+    /// order. On HEAD the goal queued first won, so with `S→A` first the
+    /// answer was the tagged route to the constructor.
+    #[test]
+    fn test_shortest_path_same_depth_goals_best_rank_wins_any_order() {
+        for (a_first, ctor_first) in [(false, false), (false, true), (true, false), (true, true)] {
+            let mut fx = GraphFixture::new();
+            let s = fx.func("src/s.rs", "s");
+            let (ctor, foo) = if ctor_first {
+                let c = fx.func("src/foo.rs", "ctor");
+                (c, fx.func("src/foo.rs", "Foo"))
+            } else {
+                let f = fx.func("src/foo.rs", "Foo");
+                (fx.func("src/foo.rs", "ctor"), f)
+            };
+            let a = fx.func("src/a.rs", "a");
+            let b = fx.func("src/b.rs", "b");
+            let firsts = if a_first { [a, b] } else { [b, a] };
+            for mid in firsts {
+                fx.edge_with(s, mid, RelType::Calls, 1.0, "call");
+            }
+            fx.edge_with(a, ctor, RelType::Calls, 0.55, "guess");
+            fx.edge_with(b, foo, RelType::Calls, 1.0, "call");
+            let bytes = fx.into_bytes();
+            let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+            let opts = WalkOpts {
+                direction: Direction::Down,
+                depth: 4,
+                min_conf: 0.0,
+                include_tests: true,
+                rel_filter: &None,
+                include_heuristic: false,
+            };
+            let goals = HashSet::from([foo as usize, ctor as usize]);
+            let steps = shortest_path(graph, None, &[s as usize], &goals, &opts).unwrap();
+            let route: Vec<_> = steps.iter().map(|st| st.meta.name.to_string()).collect();
+            let tagged = steps
+                .iter()
+                .any(|st| st.via.is_some_and(|v| v.requires_verification));
+            assert_eq!(
+                (route, tagged),
+                (vec!["s".into(), "b".into(), "Foo".into()], false),
+                "a_first={a_first} ctor_first={ctor_first}"
             );
         }
     }
