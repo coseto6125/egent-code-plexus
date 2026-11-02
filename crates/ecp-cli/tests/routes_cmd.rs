@@ -669,9 +669,12 @@ fn routes_python_decorator_get_method_resolved() {
 
 // ── Python imperative route registration ───────────────────────────────────
 //
-// `app.add_url_rule(rule, endpoint, view_func)` names its handler by the
-// method's argument role, not by the argument's AST kind: the endpoint name
-// is an identifier too. A registration that passes no handler stays `absent`.
+// `app.add_url_rule(rule, endpoint, view_func)` names its path and its
+// handler by the method's argument role, not by the argument's AST kind: the
+// endpoint name is an identifier or a string too, so `"index"` in
+// `add_url_rule("/home", "index", home_view)` is no route `/index`. A
+// registration that passes no handler stays `absent`; one whose handler name
+// has no definition is `unresolved`.
 
 const PY_IMPERATIVE_FIXTURE_SRC: &str = r#"
 from flask import Flask
@@ -695,6 +698,8 @@ app.add_url_rule("/hello3", endpoint="h3", view_func=hello, methods=["POST"])
 app.add_url_rule("/endpoint-var", endpoint_name, home_view)
 app.add_url_rule("/lam", view_func=lambda: "x")
 app.add_url_rule("/noview", endpoint_name)
+app.add_url_rule("/home", "index", home_view)
+app.add_url_rule("/m", view_func=missing_view)
 
 
 @app.route("/deco")
@@ -728,7 +733,9 @@ fn routes_python_add_url_rule_handler_kinds_follow_argument_role() {
             ("/hello", "named"),
             ("/hello2", "named"),
             ("/hello3", "named"),
+            ("/home", "named"),
             ("/lam", "inline_anonymous"),
+            ("/m", "unresolved"),
             ("/noview", "absent"),
         ],
         "full json: {json}"

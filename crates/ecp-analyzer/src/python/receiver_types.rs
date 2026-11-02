@@ -22,8 +22,12 @@ use super::path_literals::build_raw_path_literal;
 use crate::calls::{
     attach_to_enclosing, node_range, range_width, start_pos, CallSiteIndex, Pos, PosRange,
 };
+use crate::dynamic_imports::{
+    binding_mentions, is_field, may_load, rebound, synthetic_imports, DynamicBinding,
+    DynamicImports,
+};
 use crate::framework_helpers::strip_python_string_quotes;
-use ecp_core::analyzer::types::{CallSite, RawImport, RawNode, RawPathLiteral, RawSqlRef};
+use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
@@ -303,41 +307,6 @@ fn simple_name_and_type(
 const LOADER_MODULE: &str = "importlib";
 const LOADER_FUNCTION: &str = "import_module";
 
-/// A name bound to a dynamically loaded module, valid from the end of its
-/// assignment to the end of its scope.
-#[derive(Debug)]
-struct DynamicBinding {
-    name: String,
-    range: PosRange,
-    alias: String,
-}
-
-/// Synthetic `@import<N>` imports of literal `importlib.import_module` loads,
-/// and the names that hold the loaded module.
-#[derive(Debug, Default)]
-pub struct DynamicImports {
-    pub imports: Vec<RawImport>,
-    bindings: Vec<DynamicBinding>,
-}
-
-impl DynamicImports {
-    /// `m.prop()` through a name that holds a loaded module: `@import<N>.prop`.
-    fn member_callee(&self, pos: Pos, receiver: &str, prop: &str) -> Option<String> {
-        self.bindings
-            .iter()
-            .filter(|b| b.name == receiver && b.range.0 <= pos && pos <= b.range.1)
-            .min_by_key(|b| range_width(b.range))
-            .map(|b| format!("{}.{prop}", b.alias))
-    }
-}
-
-/// Whether `node` is the node `parent` holds in `field`.
-fn is_field(parent: Node<'_>, field: &str, node: Node<'_>) -> bool {
-    parent
-        .child_by_field_name(field)
-        .is_some_and(|child| child.id() == node.id())
-}
-
 /// Whether `node` only reads the value of its name.
 fn is_read_position(node: Node<'_>) -> bool {
     let Some(parent) = node.parent() else {
@@ -406,30 +375,23 @@ fn names_no_variable(node: Node<'_>) -> bool {
     }
 }
 
-/// The identifiers in `scope` that bind or write `name`, outside the byte
-/// range `own`. Any mention that is not a plain read counts, so a parameter,
-/// a loop target, an `import`, a `global` and a `del` all do.
-fn rebinding_mentions<'t>(
-    scope: Node<'t>,
-    name: &str,
-    source: &[u8],
-    own: (usize, usize),
-) -> Vec<Node<'t>> {
-    let mut found = Vec::new();
-    let mut stack = vec![scope];
-    while let Some(n) = stack.pop() {
-        if n.kind() == "identifier"
-            && n.utf8_text(source).is_ok_and(|text| text == name)
-            && !(own.0 <= n.start_byte() && n.end_byte() <= own.1)
-            && !names_no_variable(n)
-            && !is_read_position(n)
-        {
-            found.push(n);
-        }
-        let mut c = n.walk();
-        stack.extend(n.children(&mut c));
+/// Whether the leaf `node` is an identifier that binds or writes its name.
+/// Any mention that is not a plain read counts, so a parameter, a loop
+/// target, an `import`, a `global` and a `del` all do.
+fn binds_name(node: Node<'_>) -> bool {
+    node.kind() == "identifier" && !names_no_variable(node) && !is_read_position(node)
+}
+
+/// The one identifier in the file under `root` that binds or writes `name`,
+/// when exactly one does ([`binds_name`]).
+pub(super) fn sole_binding<'t>(root: Node<'t>, name: &str, source: &[u8]) -> Option<Node<'t>> {
+    match binding_mentions(root, &[name], source, binds_name)
+        .get(name)?
+        .as_slice()
+    {
+        [only] => Some(*only),
+        _ => None,
     }
-    found
 }
 
 /// Where a loader name is bound: the byte range it is visible in, and the
@@ -453,10 +415,7 @@ impl LoaderBinding {
 /// An alias, a `from` import of a different module, a class-body import or a
 /// second binding gives `None`.
 fn loader_binding(root: Node<'_>, source: &[u8], name: &str) -> Option<LoaderBinding> {
-    let mentions = rebinding_mentions(root, name, source, (0, 0));
-    let [mention] = mentions.as_slice() else {
-        return None;
-    };
+    let mention = sole_binding(root, name, source)?;
     let dotted = mention.parent().filter(|p| p.kind() == "dotted_name")?;
     let statement = dotted.parent()?;
     let plain = match (name, statement.kind()) {
@@ -569,7 +528,7 @@ fn direct_assignment(call: Node<'_>) -> Option<(Node<'_>, Node<'_>, Node<'_>)> {
 
 /// Collect the synthetic imports of every literal
 /// `importlib.import_module("<absolute name>")`, and bind the names that hold
-/// a loaded module.
+/// a loaded module ([`DynamicImports`]).
 ///
 /// A call counts only when `importlib` (or `import_module`) is bound by one
 /// plain import that precedes it and nothing else in the file binds the name.
@@ -578,12 +537,9 @@ fn direct_assignment(call: Node<'_>) -> Option<(Node<'_>, Node<'_>, Node<'_>)> {
 /// in that scope's subtree. A use before the assignment never binds. Every
 /// other shape (`__import__`, a relative name, a `package` argument, a
 /// non-literal argument) keeps today's result.
-///
-/// Alias `@import<N>`: `N` indexes the specifier by first occurrence in the
-/// source. It has no `.`, so a `receiver.member` callee text splits cleanly.
 pub fn collect_dynamic_imports(root: Node<'_>, source: &[u8]) -> DynamicImports {
-    // The walk below costs a pass over the tree; most files never name the loader.
-    if std::str::from_utf8(source).is_ok_and(|text| !text.contains(LOADER_FUNCTION)) {
+    // The walk below costs a pass over the tree, and every load spells its loader.
+    if !may_load(source, &[LOADER_FUNCTION]) {
         return DynamicImports::default();
     }
     let mut loads: Vec<(Node<'_>, bool, String)> = Vec::new();
@@ -602,12 +558,20 @@ pub fn collect_dynamic_imports(root: Node<'_>, source: &[u8]) -> DynamicImports 
         let mut c = n.walk();
         stack.extend(n.children(&mut c));
     }
-    if loads.is_empty() {
-        return DynamicImports::default();
-    }
 
-    let module_binding = loader_binding(root, source, LOADER_MODULE);
-    let function_binding = loader_binding(root, source, LOADER_FUNCTION);
+    let binding_of = |via_module: bool| {
+        let name = if via_module {
+            LOADER_MODULE
+        } else {
+            LOADER_FUNCTION
+        };
+        loads
+            .iter()
+            .any(|(_, via, _)| *via == via_module)
+            .then(|| loader_binding(root, source, name))
+            .flatten()
+    };
+    let (module_binding, function_binding) = (binding_of(true), binding_of(false));
     loads.retain(|(call, via_module, _)| {
         let binding = if *via_module {
             &module_binding
@@ -616,40 +580,50 @@ pub fn collect_dynamic_imports(root: Node<'_>, source: &[u8]) -> DynamicImports 
         };
         binding.as_ref().is_some_and(|b| b.covers(*call))
     });
-    loads.sort_by_key(|(call, ..)| call.start_byte());
-
-    let mut order: HashMap<&str, usize> = HashMap::new();
-    let mut imports: Vec<RawImport> = Vec::new();
-    for (_, _, specifier) in &loads {
-        if !order.contains_key(specifier.as_str()) {
-            order.insert(specifier, imports.len());
-            imports.push(RawImport {
-                source: specifier.clone(),
-                imported_name: "*".to_string(),
-                alias: Some(format!("@import{}", imports.len())),
-                binding_kind: None,
-            });
-        }
+    if loads.is_empty() {
+        return DynamicImports::default();
     }
+    loads.sort_by_key(|(call, ..)| call.start_byte());
+    let (imports, aliases) = synthetic_imports(loads.iter().map(|(.., spec)| spec.as_str()));
 
-    let mut bindings = Vec::new();
+    // One walk per scope checks every name assigned a load there.
+    let mut scopes: Vec<(Node<'_>, Vec<(Node<'_>, Node<'_>, &str)>)> = Vec::new();
     for (call, _, specifier) in &loads {
         let Some((scope, target, statement)) = direct_assignment(*call) else {
             continue;
         };
-        let Ok(name) = target.utf8_text(source) else {
-            continue;
-        };
-        let own = (target.start_byte(), target.end_byte());
-        if rebinding_mentions(scope, name, source, own).is_empty() {
-            bindings.push(DynamicBinding {
-                name: name.to_string(),
-                range: (node_range(statement).1, node_range(scope).1),
-                alias: format!("@import{}", order[specifier.as_str()]),
-            });
+        let entry = (target, statement, specifier.as_str());
+        match scopes.iter_mut().find(|(s, _)| s.id() == scope.id()) {
+            Some((_, entries)) => entries.push(entry),
+            None => scopes.push((scope, vec![entry])),
         }
     }
-    DynamicImports { imports, bindings }
+    let mut bindings = Vec::new();
+    for (scope, entries) in &scopes {
+        let names: Vec<&str> = entries
+            .iter()
+            .filter_map(|(target, ..)| target.utf8_text(source).ok())
+            .collect();
+        let mentions = binding_mentions(*scope, &names, source, binds_name);
+        for (target, statement, specifier) in entries {
+            let Ok(name) = target.utf8_text(source) else {
+                continue;
+            };
+            if !rebound(mentions.get(name), (target.start_byte(), target.end_byte())) {
+                bindings.push(DynamicBinding {
+                    name: name.to_string(),
+                    range: (node_range(*statement).1, node_range(*scope).1),
+                    alias: aliases[*specifier].clone(),
+                    member: None,
+                });
+            }
+        }
+    }
+    DynamicImports {
+        imports,
+        bindings,
+        loads: loads.iter().map(|(call, ..)| node_range(*call)).collect(),
+    }
 }
 
 /// Walk the Python AST once, attaching callees to enclosing functions

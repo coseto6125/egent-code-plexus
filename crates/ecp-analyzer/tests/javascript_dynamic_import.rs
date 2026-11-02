@@ -48,6 +48,39 @@ fn raw_imports(source: &str) -> Vec<RawImport> {
         .imports
 }
 
+/// How many `js-dynamic-import` blind spots `source` reports.
+fn dynamic_import_blind_spots(source: &str) -> usize {
+    JavaScriptProvider::new()
+        .expect("JavaScriptProvider::new")
+        .parse_file(Path::new("app.js"), source.as_bytes())
+        .expect("parse app.js")
+        .blind_spots
+        .iter()
+        .filter(|b| b.kind == "js-dynamic-import")
+        .count()
+}
+
+/// `(target file, confidence)` of every `Calls` edge from `caller`.
+fn calls_from(graph: &ZeroCopyGraph, caller: &str) -> Vec<(String, f32)> {
+    let pool = graph.string_pool.as_slice();
+    graph
+        .edges
+        .iter()
+        .filter(|e| e.rel_type == RelType::Calls)
+        .filter(|e| graph.nodes[e.source as usize].name.resolve(pool) == caller)
+        .map(|e| {
+            let target = &graph.nodes[e.target as usize];
+            (
+                graph.files[target.file_idx as usize]
+                    .path
+                    .resolve(pool)
+                    .to_string(),
+                e.confidence,
+            )
+        })
+        .collect()
+}
+
 /// `(target file, target name, confidence)` of every `Calls` edge.
 fn calls(graph: &ZeroCopyGraph) -> Vec<(String, String, f32)> {
     let pool = graph.string_pool.as_slice();
@@ -132,6 +165,31 @@ fn test_dynamic_import_top_level_await_binds_in_program_scope() {
 #[test]
 fn test_dynamic_import_function_scoped_require_binds() {
     assert_binds_target("export function go() { const m = require('./a'); m.run(); }\n");
+}
+
+/// The binding ends with its scope: a sibling function after it that calls
+/// the same name keeps today's result.
+#[test]
+fn test_dynamic_import_sibling_function_after_the_scope_never_binds() {
+    for app in [
+        "export async function go() { const { run } = await import('./a'); run(); }\nexport function later() { run(); }\n",
+        "export async function go() { const m = await import('./a'); m.run(); }\nexport function later() { m.run(); }\n",
+    ] {
+        let g = graph(app);
+        assert_eq!(calls_from(&g, "go"), [("a.js".to_string(), import_tier())], "{app}");
+        let leaked: Vec<_> = calls_from(&g, "later")
+            .into_iter()
+            .filter(|(file, confidence)| file == "a.js" && *confidence >= import_tier())
+            .collect();
+        assert!(leaked.is_empty(), "{app}: {leaked:?}");
+    }
+}
+
+#[test]
+fn test_dynamic_import_second_declarator_of_a_const_binds() {
+    assert_binds_target(
+        "export async function go() { const n = 1, m = await import('./a'); m.run(); n; }\n",
+    );
 }
 
 #[test]
@@ -222,21 +280,38 @@ fn test_dynamic_import_every_literal_form_emits_an_imports_edge() {
     }
 }
 
+/// A specifier the binder refuses records no import, and the load still
+/// happens at run time, so it is a blind spot: computed, escaped and blank
+/// literals alike.
 #[test]
-fn test_dynamic_import_nonliteral_and_empty_specifiers_emit_nothing() {
-    for source in [
-        "export async function go(p) { await import(p); }\n",
-        "export async function go(p) { await import(`./${p}`); }\n",
-        "export async function go() { await import(''); await import('  '); }\n",
-        "export async function go() { await import('./a\\u0062'); }\n",
-        "export const x = 1;\n",
+fn test_dynamic_import_nonliteral_and_empty_specifiers_emit_no_import_and_a_blind_spot() {
+    for (source, blind_spots) in [
+        ("export async function go(p) { await import(p); }\n", 1),
+        (
+            "export async function go(p) { await import(`./${p}`); }\n",
+            1,
+        ),
+        (
+            "export async function go() { await import(''); await import('  '); }\n",
+            2,
+        ),
+        (
+            "export async function go() { await import('./a\\u0062'); }\n",
+            1,
+        ),
+        ("export const x = 1;\n", 0),
     ] {
         assert!(raw_imports(source).is_empty(), "{source}");
+        assert_eq!(dynamic_import_blind_spots(source), blind_spots, "{source}");
     }
 }
 
 /// A bare specifier resolves as the static `import` of it does: the dynamic
-/// load adds no resolution rule of its own.
+/// load adds no resolution rule of its own. Today both sides are `true`: a
+/// bare specifier binds the same-stem project file `lodash.js`
+/// (FU-2026-11-02-7859ceda0be1, a resolver defect shared with the static
+/// import). This test pins only the parity; the spec's no-edge state is the
+/// ignored test below.
 #[test]
 fn test_dynamic_import_bare_specifier_resolves_like_static_import() {
     let provider = JavaScriptProvider::new().expect("JavaScriptProvider::new");
@@ -278,5 +353,37 @@ fn test_dynamic_import_aliases_follow_first_occurrence_of_each_specifier() {
             ("./b", "*", Some("@import0")),
             ("./a", "*", Some("@import1")),
         ]
+    );
+}
+
+/// The spec's state for a bare specifier beside a same-stem project file: the
+/// specifier names a package, so neither an `Imports` edge nor a call edge
+/// reaches `lodash.js`. Fails today (FU-2026-11-02-7859ceda0be1).
+#[test]
+#[ignore = "FU-2026-11-02-7859ceda0be1"]
+fn test_dynamic_import_bare_specifier_call_binds_no_project_namesake() {
+    let provider = JavaScriptProvider::new().expect("JavaScriptProvider::new");
+    let mut builder = GraphBuilder::new();
+    for (path, source) in [
+        ("lodash.js", "export function run() {}\n"),
+        (
+            "app.js",
+            "export async function go() { const m = await import('lodash'); m.run(); }\n",
+        ),
+    ] {
+        builder.add_graph(
+            provider
+                .parse_file(Path::new(path), source.as_bytes())
+                .expect("parse"),
+        );
+    }
+    let g = builder.build();
+    assert!(!imports_file(&g, "lodash.js"));
+    assert!(
+        calls_from(&g, "go")
+            .iter()
+            .all(|(file, _)| file != "lodash.js"),
+        "{:?}",
+        calls_from(&g, "go")
     );
 }

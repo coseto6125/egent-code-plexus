@@ -1,5 +1,6 @@
 use super::receiver_types::{
     collect_dynamic_imports, collect_local_types, extract_ts_calls_and_path_literals,
+    literal_specifier,
 };
 use super::schema_extractors::TS_INTERFACE_CONFIG;
 use super::spec::{TsSpec, TsxSpec, TypeScriptSpec};
@@ -28,10 +29,11 @@ use std::sync::OnceLock;
 use tree_sitter::{Node, Parser, Query, Tree};
 
 /// Blind-spot kind/hint pairs pushed only when the first argument is not a
-/// literal string; the unconditional pairs live in `TypeScriptSpec::BLIND`.
+/// literal the graph reads (for `import()`, [`literal_specifier`]); the
+/// unconditional pairs live in `TypeScriptSpec::BLIND`.
 const BLIND_DYNAMIC_IMPORT: (&str, &str) = (
     "ts-dynamic-import",
-    "import(<expr>) with non-literal specifier — dynamic module loading; target module depends on runtime value",
+    "import(<expr>) whose specifier is no plain string literal (computed, escaped or blank) — dynamic module loading; the target module is not read statically",
 );
 const BLIND_DYNAMIC_REQUIRE: (&str, &str) = (
     "ts-dynamic-require",
@@ -561,8 +563,9 @@ impl<const TSX: bool> ParseSpec for TsSpec<TSX> {
             TypeScriptRole::NestJsDecoratorVerb => m.nestjs_decorator_verb_node = Some(node),
             TypeScriptRole::NestJsDecoratorPath => m.nestjs_decorator_path_node = Some(node),
             TypeScriptRole::NestJsDecoratorArgs => m.nestjs_decorator_args_node = Some(node),
+            // A literal the binder refuses still loads a module at run time.
             TypeScriptRole::DynamicImport => {
-                if !js_ts_first_arg_is_literal_string(&node) {
+                if literal_specifier(node, source).is_none() {
                     cx.push_blind(BLIND_DYNAMIC_IMPORT, &node);
                 }
             }
@@ -854,12 +857,14 @@ impl<const TSX: bool> ParseSpec for TsSpec<TSX> {
                 // Path-shape filter for generic Route emission — see
                 // `docs/superpowers/specs/2026-05-17-route-precision-design.md`.
                 // No framework-presence gate here: imports record ES `import`
-                // statements and top-level `require('lib')` bindings only, so a
-                // router built by `require('express').Router()`, a `require` inside
-                // a function, or an app handed in from another module leaves no
-                // import and gating would drop real routes. The path-shape
-                // predicate alone removes
-                // the dominant FP class (Map/headers/cache `.get("key")`).
+                // statements, top-level `require('lib')` bindings and the
+                // synthetic `@import<N>` imports of literal dynamic loads (any
+                // `import('<lit>')`, a function-scoped `const m = require('<lit>')`),
+                // which the presence gates above also see. A router built by
+                // `require('express').Router()` or an app handed in from another
+                // module still leaves no import, and gating would drop real
+                // routes. The path-shape predicate alone removes the dominant FP
+                // class (Map/headers/cache `.get("key")`).
                 cx.routes
                     .retain_mut(|r| match crate::route_detector::clean_route_path(&r.path) {
                         Some(clean) => {

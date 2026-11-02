@@ -146,7 +146,7 @@ def fetch():
 #[test]
 fn classic_flask_route_decorator_still_emits() {
     // Regression guard: the legacy `@app.route(...)` path must keep working.
-    // It's already gated by REGISTRATION_METHOD_NAMES so this didn't depend
+    // It's already gated by REGISTRATIONS so this didn't depend
     // on the new decorator check, but the new condition is OR'd so should
     // never inhibit existing emission.
     let src = r#"

@@ -7,12 +7,14 @@
 //! `obj.method()` where `obj` is a plain identifier is left as the qualified name
 //! `obj.method` (same as the previous `extract_calls` behaviour) — without type
 //! annotations we cannot commit to a type, per the spec's "only commit ✓ for cases
-//! that work without guessing" rule.
+//! that work without guessing" rule. The exception is a name bound by a literal
+//! dynamic load ([`DynamicImports`]): `m.run()` emits `@import<N>.run`, and a
+//! destructured `execute()` emits the export it holds, `@import<N>.run`.
 
 use super::path_literals::{build_raw_path_literal, strip_js_string_value, LiteralContext};
 use crate::calls::{attach_to_enclosing_span, new_expression_call, start_pos, CallSiteIndex};
+use crate::dynamic_imports::DynamicImports;
 use crate::framework_helpers::{enclosing_class, node_span, Span};
-use crate::typescript::receiver_types::DynamicImports;
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use tree_sitter::Node;
 
@@ -24,6 +26,8 @@ use tree_sitter::Node;
 /// Calls:
 /// - `this.method()` inside a class body → emits `ClassName.method`
 /// - `obj.method()` (unknown type) → emits `obj.method` (resolver can try later)
+/// - `m.method()` / `method()` through a name bound by a literal dynamic load →
+///   emits `@import<N>.member`
 /// - `fn()` → emits `fn`
 pub fn extract_js_calls_and_path_literals(
     root: Node<'_>,
@@ -99,14 +103,7 @@ fn js_callee_name(
 ) -> Option<String> {
     let function = call.child_by_field_name("function")?;
     match function.kind() {
-        "identifier" => {
-            let name = function.utf8_text(source).ok()?;
-            Some(
-                dynamic
-                    .callable_callee(start_pos(call), name)
-                    .unwrap_or_else(|| name.to_string()),
-            )
-        }
+        "identifier" => dynamic.bare_callee(call, function, source),
         "member_expression" => {
             let obj = function.child_by_field_name("object")?;
             let prop = function.child_by_field_name("property")?;

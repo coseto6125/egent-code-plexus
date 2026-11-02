@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 // `RawFrameworkRef.confidence` — a change there reshapes cached graphs even
 // without touching parser.rs. `preproc_fallback.rs` decides C/C++ file
 // scope, include guards and fallback macros; `indirect_dispatch.rs` writes
-// call metas.
+// call metas; `dynamic_imports.rs` binds calls through a dynamic load.
 // `lib.rs` is excluded: it only re-exports.
 const TOP_LEVEL_FILES: &[&str] = &[
     "calls.rs",
@@ -29,6 +29,7 @@ const TOP_LEVEL_FILES: &[&str] = &[
     "route_detector.rs",
     "preproc_fallback.rs",
     "indirect_dispatch.rs",
+    "dynamic_imports.rs",
 ];
 
 fn main() {

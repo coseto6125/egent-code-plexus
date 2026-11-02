@@ -67,6 +67,39 @@ fn dynamic_imports(source: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// How many `python-dynamic-import` blind spots `source` reports.
+fn dynamic_import_blind_spots(source: &str) -> usize {
+    PythonProvider::new()
+        .expect("PythonProvider::new")
+        .parse_file(Path::new("app.py"), source.as_bytes())
+        .expect("parse app.py")
+        .blind_spots
+        .iter()
+        .filter(|b| b.kind == "python-dynamic-import")
+        .count()
+}
+
+/// `(target file, confidence)` of every `Calls` edge from `caller`.
+fn calls_from(graph: &ZeroCopyGraph, caller: &str) -> Vec<(String, f32)> {
+    let pool = graph.string_pool.as_slice();
+    graph
+        .edges
+        .iter()
+        .filter(|e| e.rel_type == RelType::Calls)
+        .filter(|e| graph.nodes[e.source as usize].name.resolve(pool) == caller)
+        .map(|e| {
+            let target = &graph.nodes[e.target as usize];
+            (
+                graph.files[target.file_idx as usize]
+                    .path
+                    .resolve(pool)
+                    .to_string(),
+                e.confidence,
+            )
+        })
+        .collect()
+}
+
 /// `(target file, target name, confidence)` of every `Calls` edge that leaves
 /// `app.py`. A call into the importer's own file is the same-file tier (1.0),
 /// not an import.
@@ -184,6 +217,21 @@ fn test_dynamic_import_method_scope_binds() {
     assert_binds_target(&format!(
         "{MODULE_HEADER}class K:\n    def go(self):\n        m = importlib.import_module(\"a\")\n        m.run()\n"
     ));
+}
+
+/// The binding ends with its scope: a sibling function after it that calls
+/// through the same name keeps today's result.
+#[test]
+fn test_dynamic_import_sibling_function_after_the_scope_never_binds() {
+    let g = graph(&format!(
+        "{MODULE_HEADER}def go():\n    m = importlib.import_module(\"a\")\n    m.run()\n\n\ndef later():\n    m.run()\n"
+    ));
+    assert_eq!(calls_from(&g, "go"), [("a.py".to_string(), import_tier())]);
+    let leaked: Vec<_> = calls_from(&g, "later")
+        .into_iter()
+        .filter(|(file, confidence)| file == "a.py" && *confidence >= import_tier())
+        .collect();
+    assert!(leaked.is_empty(), "{leaked:?}");
 }
 
 #[test]
@@ -427,6 +475,52 @@ fn test_dynamic_import_every_literal_form_emits_an_imports_edge() {
     }
 }
 
+/// A load the collector resolved names its module statically, so it reports
+/// no runtime-value blind spot; every load it refused keeps one.
+#[test]
+fn test_dynamic_import_resolved_load_reports_no_runtime_value_blind_spot() {
+    for app in [
+        format!("{MODULE_HEADER}def go():\n    m = importlib.import_module(\"a\")\n    m.run()\n"),
+        format!("{MODULE_HEADER}def go():\n    importlib.import_module(\"a\").run()\n"),
+        format!("{MODULE_HEADER}x = importlib.import_module(\"pkg.sub\")\n"),
+    ] {
+        assert_eq!(dynamic_import_blind_spots(&app), 0, "{app}");
+    }
+}
+
+#[test]
+fn test_dynamic_import_refused_load_keeps_its_blind_spot() {
+    for app in [
+        format!("{MODULE_HEADER}def go(name):\n    return importlib.import_module(name)\n"),
+        format!("{MODULE_HEADER}def go():\n    return importlib.import_module(\".a\")\n"),
+        format!("{MODULE_HEADER}def go():\n    return importlib.import_module(\".a\", \"pkg\")\n"),
+        format!("{MODULE_HEADER}def go():\n    return importlib.import_module(\"a\", package=\"pkg\")\n"),
+        format!("{MODULE_HEADER}def go():\n    return importlib.import_module(\"\")\n"),
+        format!("{MODULE_HEADER}def go(importlib):\n    return importlib.import_module(\"a\")\n"),
+        "def go():\n    return importlib.import_module(\"a\")\n".to_string(),
+        format!("{MODULE_HEADER}from os.path import *\n\n\ndef go():\n    return importlib.import_module(\"a\")\n"),
+    ] {
+        assert_eq!(dynamic_import_blind_spots(&app), 1, "{app}");
+    }
+}
+
+#[test]
+fn test_dynamic_import_blind_spot_follows_each_load_not_the_file() {
+    let app = format!(
+        "{MODULE_HEADER}def go(name):\n    a = importlib.import_module(\"a\")\n    b = importlib.import_module(name)\n    return a, b\n"
+    );
+    let spots: Vec<u32> = PythonProvider::new()
+        .expect("PythonProvider::new")
+        .parse_file(Path::new("app.py"), app.as_bytes())
+        .expect("parse app.py")
+        .blind_spots
+        .iter()
+        .filter(|b| b.kind == "python-dynamic-import")
+        .map(|b| b.span.0)
+        .collect();
+    assert_eq!(spots, [5], "only the variable load on line 6 (row 5)");
+}
+
 #[test]
 fn test_dynamic_import_empty_and_loadless_sources_emit_nothing() {
     for source in [
@@ -442,7 +536,11 @@ fn test_dynamic_import_empty_and_loadless_sources_emit_nothing() {
 }
 
 /// A bare module name resolves as the static `import` of it does: the dynamic
-/// load adds no resolution rule of its own.
+/// load adds no resolution rule of its own. Both sides are `true` today: for
+/// Python a top-level name is a module of the project root, so the edge to
+/// `lodash.py` is the static import's own result. FU-2026-11-02-7859ceda0be1
+/// (a bare package specifier binding a same-stem project file) is a TS/JS
+/// resolver defect; its no-edge pin lives in the TS and JS files.
 #[test]
 fn test_dynamic_import_bare_name_resolves_like_static_import() {
     let edge_to_namesake = |app: &str| {
@@ -461,11 +559,17 @@ fn test_dynamic_import_bare_name_resolves_like_static_import() {
 
 #[test]
 fn test_dynamic_import_dotted_name_is_a_path_source_like_a_static_import() {
+    // `import pkg.sub` also records the root binding `pkg`.
+    let static_source = raw_imports("import pkg.sub\n")
+        .into_iter()
+        .map(|i| i.source)
+        .find(|source| source != "pkg")
+        .expect("static import of pkg.sub");
     assert_eq!(
         dynamic_imports(&format!(
             "{MODULE_HEADER}def go():\n    importlib.import_module(\"pkg.sub\")\n"
         )),
-        [("pkg/sub".to_string(), "@import0".to_string())]
+        [(static_source, "@import0".to_string())]
     );
 }
 

@@ -1076,16 +1076,15 @@ fn ts_nestjs_decorator_route_preserves_leading_slash() {
 
 // ─── Python — imperative handler is read by argument role ───────────────────
 //
-// The handler slot comes from the registration method's signature
-// (`add_url_rule(rule, endpoint, view_func)`), never from an argument's AST
-// kind: `endpoint_name` in `add_url_rule("/x", endpoint_name, actual)` is an
-// identifier too. A bare string argument also reads as a path, so each test
-// looks at the routes of one path only.
+// The handler slot and the path slot come from the registration method's
+// signature (`add_url_rule(rule, endpoint, view_func)`), never from an
+// argument's AST kind: `endpoint_name` in `add_url_rule("/x", endpoint_name,
+// actual)` is an identifier too, and the endpoint `"ep"` in
+// `add_url_rule("/x", "ep", h)` is a string like the rule.
 
 const FLASK_HEAD: &str = "from flask import Flask\n\napp = Flask(__name__)\n\n";
 
-/// The handler names of the routes at `path`, adjacent repeats collapsed
-/// (one registration yields one record per string argument).
+/// The handler names of the routes at `path`, adjacent repeats collapsed.
 fn handlers_at(src: &str, path: &str) -> Vec<Option<String>> {
     let mut handlers: Vec<Option<String>> = py_routes(src)
         .iter()
@@ -1192,11 +1191,89 @@ fn python_fastapi_add_api_route_endpoint_is_handler_by_position_and_keyword() {
     assert_eq!(handlers_at(src, "/c"), no_handler());
 }
 
+/// Sanic's signature is `add_route(handler, uri, ...)`. The keyword form
+/// passes both slots by name; `add_route("/b", handler=h)` would be a
+/// `TypeError` in Sanic (two values for `handler`), so no fixture uses it.
 #[test]
 fn python_sanic_add_route_handler_is_first_argument_or_keyword() {
-    let src = "from sanic import Sanic\n\napp = Sanic(\"x\")\n\napp.add_route(list_items, \"/a\")\napp.add_route(\"/b\", handler=get_item)\n";
+    let src = "from sanic import Sanic\n\napp = Sanic(\"x\")\n\napp.add_route(list_items, \"/a\")\napp.add_route(handler=get_item, uri=\"/b\")\n";
     assert_eq!(handlers_at(src, "/a"), named("list_items"));
     assert_eq!(handlers_at(src, "/b"), named("get_item"));
+}
+
+/// FU-2026-11-02-7c23ff7c6de9: only the rule slot is a path. The endpoint
+/// string `"index"` used to become a second route `/index`.
+#[test]
+fn python_flask_add_url_rule_endpoint_string_is_no_route() {
+    let src = format!(
+        "{FLASK_HEAD}def home():\n    return 1\n\napp.add_url_rule(\"/home\", \"index\", home)\napp.add_url_rule(\"/h3\", endpoint=\"h3name\", view_func=home)\n"
+    );
+    let routes = py_routes(&src);
+    let mut got: Vec<(String, Option<&str>)> = routes
+        .iter()
+        .map(|r| (strip_quotes(&r.path).to_string(), r.handler_name()))
+        .collect();
+    got.sort();
+    assert_eq!(
+        got,
+        [
+            ("/h3".to_string(), Some("home")),
+            ("/home".to_string(), Some("home")),
+        ]
+    );
+}
+
+#[test]
+fn python_flask_add_url_rule_rule_keyword_is_the_path() {
+    let src = format!("{FLASK_HEAD}app.add_url_rule(rule=\"/kw\", view_func=hello)\n");
+    assert_routes(&py_routes(&src), &[("GET", "/kw")]);
+    assert_eq!(handlers_at(&src, "/kw"), named("hello"));
+}
+
+#[test]
+fn python_fastapi_add_api_route_path_slot_ignores_other_strings() {
+    let src = "from fastapi import FastAPI\n\napp = FastAPI()\n\napp.add_api_route(\"/a\", get_items, name=\"list\")\napp.add_api_route(path=\"/b\", endpoint=get_item)\n";
+    assert_routes(&py_routes(src), &[("GET", "/a"), ("GET", "/b")]);
+    assert_eq!(handlers_at(src, "/b"), named("get_item"));
+}
+
+/// aiohttp's `add_route(method, path, handler)` shares Sanic's name: without
+/// a Sanic import the Sanic slots do not apply, so the method constant is
+/// no handler.
+#[test]
+fn python_aiohttp_add_route_method_constant_is_not_the_handler() {
+    let src = "from aiohttp import web, hdrs\n\napp = web.Application()\n\nasync def handle(request):\n    pass\n\napp.router.add_route(hdrs.METH_GET, \"/aio\", handle)\n";
+    assert_eq!(handlers_at(src, "/aio"), no_handler());
+}
+
+/// Pyramid's `add_route(name, pattern)`: the route name is no handler, and a
+/// keyword string of a method with no path slot is no path.
+#[test]
+fn python_pyramid_add_route_name_is_not_the_handler() {
+    let src = "from pyramid.config import Configurator\n\nROUTE_NAME = \"p\"\nconfig = Configurator()\nconfig.add_route(ROUTE_NAME, \"/p\")\nconfig.add_route(name=\"kw\", pattern=\"/kw\")\n";
+    assert_eq!(handlers_at(src, "/p"), no_handler());
+    assert_routes(&py_routes(src), &[("GET", "/p")]);
+}
+
+/// FU-2026-11-02-7c23ff7c6de9 (codex F5): a registration call on an object of
+/// a class this file defines on no base but `object` is no framework route,
+/// even when the file imports something.
+#[test]
+fn python_local_plain_class_receiver_registers_no_route() {
+    let src = "import os\n\n\ndef h():\n    pass\n\n\nclass Store:\n    def add_url_rule(self, rule, endpoint=None, view_func=None):\n        pass\n\n\nstore = Store()\nstore.add_url_rule(\"/x\", view_func=h)\nStore().add_url_rule(\"/y\", view_func=h)\nStore.add_url_rule(\"/z\", view_func=h)\n";
+    assert_no_routes(&py_routes(src), "local plain Store receiver");
+}
+
+/// Recall stays for a receiver the file does not build from a plain local
+/// class: an imported Blueprint, a local subclass of an imported class, and
+/// a name with a second binding.
+#[test]
+fn python_imported_or_derived_receiver_still_registers_routes() {
+    let src = "from flask import Blueprint\nfrom app.api import bp\n\n\ndef h():\n    pass\n\n\nclass MyBp(Blueprint):\n    pass\n\n\nclass Plain:\n    pass\n\n\nmine = MyBp(\"m\", __name__)\nbp.add_url_rule(\"/x\", view_func=h)\nmine.add_url_rule(\"/y\", view_func=h)\n\n\ndef register(app):\n    app.add_url_rule(\"/z\", view_func=h)\n\n\napp = Plain()\n";
+    assert_routes(
+        &py_routes(src),
+        &[("GET", "/x"), ("GET", "/y"), ("GET", "/z")],
+    );
 }
 
 #[test]

@@ -13,7 +13,7 @@ use crate::framework_helpers::{
 };
 use crate::indirect_dispatch::{collect_js_param_names, detect_js_ts_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
-use crate::typescript::receiver_types::collect_dynamic_imports;
+use crate::typescript::receiver_types::{collect_dynamic_imports, literal_specifier};
 use ecp_core::analyzer::parse_prof::Pass;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{
@@ -37,7 +37,7 @@ const BLIND_SPEC: [(&str, &str); 5] = [
     ),
     (
         "js-dynamic-import",
-        "import(<expr>) with non-literal specifier — dynamic module loading; target module depends on runtime value",
+        "import(<expr>) whose specifier is no plain string literal (computed, escaped or blank) — dynamic module loading; the target module is not read statically",
     ),
     (
         "js-dynamic-require",
@@ -538,8 +538,9 @@ impl ParseSpec for JavaScriptSpec {
                         .push((handler_name.to_string(), node_span(&node)));
                 }
             }
+            // A literal the binder refuses still loads a module at run time.
             JavaScriptRole::DynamicImport => {
-                if !js_ts_first_arg_is_literal_string(&node) {
+                if literal_specifier(node, source).is_none() {
                     cx.push_blind(BLIND_SPEC[2], &node);
                 }
             }
@@ -854,11 +855,13 @@ impl ParseSpec for JavaScriptSpec {
                 let has_hapi = has_import_from(&cx.imports, HAPI_REQUIRED);
 
                 // Path-shape filter for generic Route emission. Imports record ES
-                // `import` statements and top-level `require('lib')` bindings only:
-                // a router built by `require('express').Router()`, a `require`
-                // inside a function, or an app handed in from another module
-                // leaves no import, so a framework-presence gate would drop real
-                // Node.js routes. The path-shape predicate alone removes the dominant FP class
+                // `import` statements, top-level `require('lib')` bindings and the
+                // synthetic `@import<N>` imports of literal dynamic loads (any
+                // `import('<lit>')`, a function-scoped `const m = require('<lit>')`),
+                // which the presence gates above also see. A router built by
+                // `require('express').Router()` or an app handed in from another
+                // module still leaves no import, so a framework-presence gate
+                // would drop real Node.js routes. The path-shape predicate alone removes the dominant FP class
                 // (`Map.get("k")` / `headers.get("x-trace")` / `cache.get(id)`)
                 // because none of those literals start with `/`. Spec:
                 // `docs/superpowers/specs/2026-05-17-route-precision-design.md`.

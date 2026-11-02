@@ -129,3 +129,11 @@
   function: (attribute attribute: (identifier) @route.method (#match? @route.method "^(get|post|put|delete|patch|all|options|head|route|add_route|add_url_rule|add_api_route|GET|POST|PUT|DELETE|PATCH|ROUTE)$"))
   arguments: (argument_list [(string) @route.path (MISSING) @route.path])
 ) @route.call
+
+;; A registration method with a path slot may pass it by keyword
+;; (`add_url_rule(rule="/x", view_func=h)`); parser.rs keeps only the string
+;; in the method's path slot (`REGISTRATIONS`).
+(call
+  function: (attribute attribute: (identifier) @route.method (#match? @route.method "^(add_route|add_url_rule|add_api_route)$"))
+  arguments: (argument_list (keyword_argument value: (string) @route.path))
+) @route.call
