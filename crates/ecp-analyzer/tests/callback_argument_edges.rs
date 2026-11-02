@@ -32,7 +32,7 @@ use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::graph::RelType;
 use name_ref_support::{
     assert_one_cross_file, calls, function_refs, graph, r, value_reads, Ref, FUNCTION_REFERENCE,
-    IMPORT, SAME_FILE,
+    IMPORT, SAME_FILE, VALUE_READ,
 };
 
 fn none() -> Vec<Ref> {
@@ -783,5 +783,260 @@ fn test_function_reference_php_named_callback_argument_returns_edge() {
         "<?php\nfunction fmt($x) { return $x; }\n\nfunction apply($xs) {\n    return array_map(array: $xs, callback: 'fmt');\n}\n",
         "apply",
         "fmt",
+    );
+}
+
+// ---- A function named as a value outside any function body ----
+//
+// A `const` / `static` / module variable / class field initializer holds the
+// reference; the declaration is the registrar. PHP cannot express it: a
+// constant expression holds no function value.
+
+#[test]
+fn test_function_reference_typescript_initializer_returns_edge() {
+    assert_same_file_ref(
+        &TypeScriptProvider::new().unwrap(),
+        "app.ts",
+        "function tsHandler(): number { return 1; }\nexport const TABLE = { k: tsHandler };\n",
+        "TABLE",
+        "tsHandler",
+    );
+}
+
+#[test]
+fn test_function_reference_javascript_initializer_returns_edge() {
+    assert_same_file_ref(
+        &JavaScriptProvider::new().unwrap(),
+        "app.js",
+        "function jsHandler() { return 1; }\nexport const TABLE = { k: jsHandler };\n",
+        "TABLE",
+        "jsHandler",
+    );
+}
+
+#[test]
+fn test_function_reference_python_initializer_returns_edge() {
+    assert_same_file_ref(
+        &PythonProvider::new().unwrap(),
+        "app.py",
+        "def py_handler():\n    return 1\n\n\nTABLE = {\"k\": py_handler}\n",
+        "TABLE",
+        "py_handler",
+    );
+}
+
+#[test]
+fn test_function_reference_python_class_attribute_initializer_returns_edge() {
+    assert_same_file_ref(
+        &PythonProvider::new().unwrap(),
+        "app.py",
+        "def py_handler():\n    return 1\n\n\nclass K:\n    attr = {\"k\": py_handler}\n",
+        "attr",
+        "py_handler",
+    );
+}
+
+#[test]
+fn test_function_reference_kotlin_initializer_returns_edge() {
+    assert_same_file_ref(
+        &KotlinProvider::new().unwrap(),
+        "k.kt",
+        "fun ktHandler(): Int = 1\nval handler: () -> Int = ::ktHandler\n",
+        "handler",
+        "ktHandler",
+    );
+}
+
+#[test]
+fn test_function_reference_kotlin_lazy_delegate_initializer_returns_edge() {
+    assert_same_file_ref(
+        &KotlinProvider::new().unwrap(),
+        "k.kt",
+        "fun ktHandler(): Int = 1\nval lazyH by lazy { ktHandler }\n",
+        "lazyH",
+        "ktHandler",
+    );
+}
+
+#[test]
+fn test_function_reference_csharp_field_initializer_returns_edge() {
+    assert_same_file_ref(
+        &CSharpProvider::new().unwrap(),
+        "C.cs",
+        "class C {\n    static int CsHandler() { return 1; }\n    static readonly System.Func<int> Handler = CsHandler;\n}\n",
+        "Handler",
+        "CsHandler",
+    );
+}
+
+#[test]
+fn test_function_reference_go_initializer_returns_edge() {
+    assert_same_file_ref(
+        &GoProvider::new().unwrap(),
+        "main.go",
+        "package main\n\nfunc goHandler() int { return 1 }\n\nvar table = map[string]func() int{\"k\": goHandler}\n",
+        "table",
+        "goHandler",
+    );
+}
+
+#[test]
+fn test_function_reference_rust_option_const_initializer_returns_edge() {
+    assert_same_file_ref(
+        &RustProvider::new().unwrap(),
+        "src/lib.rs",
+        "fn in_option() -> u32 {\n    1\n}\n\npub const OPT: Option<fn() -> u32> = Some(in_option);\n",
+        "OPT",
+        "in_option",
+    );
+}
+
+#[test]
+fn test_function_reference_rust_struct_static_initializer_returns_edge() {
+    assert_same_file_ref(
+        &RustProvider::new().unwrap(),
+        "src/lib.rs",
+        "pub struct Rule {\n    pub collect: fn() -> u32,\n}\n\nfn in_struct() -> u32 {\n    2\n}\n\npub static RULE: Rule = Rule { collect: in_struct };\n",
+        "RULE",
+        "in_struct",
+    );
+}
+
+#[test]
+fn test_function_reference_ruby_initializer_returns_edge() {
+    assert_same_file_ref(
+        &RubyProvider::new().unwrap(),
+        "svc.rb",
+        "def rb_handler\n  1\nend\n\nHANDLER = method(:rb_handler)\n",
+        "HANDLER",
+        "rb_handler",
+    );
+}
+
+#[test]
+fn test_function_reference_swift_initializer_returns_edge() {
+    assert_same_file_ref(
+        &SwiftProvider::new().unwrap(),
+        "s.swift",
+        "func swHandler() -> Int {\n    return 1\n}\n\nlet handler: () -> Int = swHandler\n",
+        "handler",
+        "swHandler",
+    );
+}
+
+#[test]
+fn test_function_reference_c_initializer_returns_edge() {
+    assert_same_file_ref(
+        &CProvider::new().unwrap(),
+        "s.c",
+        "struct ops {\n    int (*open)(void);\n};\n\nstatic int c_open(void) {\n    return 1;\n}\n\nstatic struct ops OPS = { .open = c_open };\n",
+        "OPS",
+        "c_open",
+    );
+}
+
+#[test]
+fn test_function_reference_cpp_initializer_returns_edge() {
+    assert_same_file_ref(
+        &CppProvider::new().unwrap(),
+        "s.cpp",
+        "int cppHandler() {\n    return 1;\n}\n\nauto handler = cppHandler;\n",
+        "handler",
+        "cppHandler",
+    );
+}
+
+#[test]
+fn test_function_reference_dart_initializer_returns_edge() {
+    assert_same_file_ref(
+        &DartProvider::new().unwrap(),
+        "d.dart",
+        "int dartHandler() {\n  return 1;\n}\n\nfinal handler = dartHandler;\n",
+        "handler",
+        "dartHandler",
+    );
+}
+
+#[test]
+fn test_function_reference_java_field_initializer_returns_edge() {
+    let g = graph(
+        &JavaProvider::new().unwrap(),
+        &[(
+            "Main.java",
+            "class Main {\n    static int javaHandler() { return 1; }\n    static final java.util.function.Supplier<Integer> HANDLER = Main::javaHandler;\n}\n",
+        )],
+    );
+    assert_one_cross_file(&function_refs(&g, "HANDLER"), "Main.java", "javaHandler");
+}
+
+/// The smallest enclosing function wins over an enclosing value declaration:
+/// `k` holds the reference, `TABLE` holds none.
+#[test]
+fn test_function_reference_typescript_object_method_in_const_stays_on_method() {
+    let g = graph(
+        &TypeScriptProvider::new().unwrap(),
+        &[(
+            "app.ts",
+            "function tsHandler(): number { return 1; }\nexport const TABLE = { k() { return tsHandler; } };\n",
+        )],
+    );
+    assert_eq!(
+        function_refs(&g, "k"),
+        vec![r("app.ts", "tsHandler", FUNCTION_REFERENCE, SAME_FILE)]
+    );
+    assert_eq!(function_refs(&g, "TABLE"), none());
+}
+
+/// A lambda parameter named like a function shadows it inside the initializer.
+#[test]
+fn test_function_reference_python_lambda_parameter_in_initializer_returns_no_edge() {
+    assert_no_ref(
+        &PythonProvider::new().unwrap(),
+        "app.py",
+        "def handler():\n    return 1\n\n\nTABLE = {\"k\": lambda handler: handler}\n",
+        "TABLE",
+    );
+}
+
+/// `export default { a: h }` declares no node, so no declaration holds the
+/// reference and the graph gets no `References` edge.
+#[test]
+fn test_function_reference_typescript_export_default_object_returns_no_edge() {
+    let g = graph(
+        &TypeScriptProvider::new().unwrap(),
+        &[(
+            "app.ts",
+            "function h(): void {}\nexport default { a: h };\n",
+        )],
+    );
+    assert!(
+        g.edges.iter().all(|e| e.rel_type != RelType::References),
+        "no declaration holds the reference"
+    );
+}
+
+/// A constant read inside another constant's initializer is a value read.
+#[test]
+fn test_value_read_rust_const_initializer_returns_edge() {
+    let g = graph(
+        &RustProvider::new().unwrap(),
+        &[("src/lib.rs", "const A: u32 = 1;\nconst B: u32 = A + 1;\n")],
+    );
+    assert_eq!(
+        value_reads(&g, "B"),
+        vec![r("src/lib.rs", "A", VALUE_READ, SAME_FILE)]
+    );
+}
+
+/// A file with no function node at all still resolves the initializer read.
+#[test]
+fn test_value_read_python_module_variable_without_functions_returns_edge() {
+    let g = graph(
+        &PythonProvider::new().unwrap(),
+        &[("app.py", "A = 1\nB = [A]\n")],
+    );
+    assert_eq!(
+        value_reads(&g, "B"),
+        vec![r("app.py", "A", VALUE_READ, SAME_FILE)]
     );
 }

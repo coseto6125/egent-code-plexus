@@ -204,8 +204,9 @@ pub fn attach_to_enclosing(
 
 /// Walk the AST and attach the **field name** of each member-access read
 /// (`obj.field`, `self.count`, `cfg->timeout`) to the smallest enclosing
-/// function/method/constructor `RawNode`'s `field_reads`. Mirrors
-/// `extract_calls`; `field_kinds` lists this language's member-access AST node
+/// function/method/constructor `RawNode`'s `field_reads`, else (an initializer
+/// outside every function) the smallest enclosing const/variable/property.
+/// Mirrors `extract_calls`; `field_kinds` lists this language's member-access AST node
 /// kinds (e.g. `member_expression` in JS/TS, `field_expression` in C/C++/Rust,
 /// `selector_expression` in Go).
 ///
@@ -236,7 +237,7 @@ pub fn extract_field_reads_with_literal_key_facts(
     names: &NameRefSpec,
     literal_key_facts: Option<&LiteralKeyFacts>,
 ) {
-    let containers = enclosing_containers(nodes);
+    let containers = ReadContainers::new(nodes);
     if containers.is_empty() {
         return;
     }
@@ -893,27 +894,27 @@ impl<'s> NameScan<'s> {
         false
     }
 
-    /// Attach each read to its smallest enclosing function, once per
-    /// function, unless a parameter or local of a function holding it
+    /// Attach each read to its smallest enclosing read container, once per
+    /// container, unless a parameter or local of a container holding it
     /// declares the same name.
-    fn attach(self, containers: &[EnclosingContainer], nodes: &mut [RawNode]) {
+    fn attach(self, containers: &ReadContainers, nodes: &mut [RawNode]) {
         if self.reads.is_empty() {
             return;
         }
         let globals: rustc_hash::FxHashSet<(usize, &str)> = self
             .globals
             .iter()
-            .zip(enclosing_targets(containers, &self.globals, |g| g.pos))
+            .zip(containers.targets(&self.globals, |g| g.pos))
             .filter_map(|(global, target)| Some((target?, global.name)))
             .collect();
         let mut bound: rustc_hash::FxHashMap<&str, Vec<usize>> = rustc_hash::FxHashMap::default();
-        let binding_targets = enclosing_targets(containers, &self.bindings, |b| b.pos);
+        let binding_targets = containers.targets(&self.bindings, |b| b.pos);
         for (binding, target) in self.bindings.iter().zip(binding_targets) {
             if let Some(node_idx) = target.filter(|&t| !globals.contains(&(t, binding.name))) {
                 bound.entry(binding.name).or_default().push(node_idx);
             }
         }
-        let targets = enclosing_targets(containers, &self.reads, |r| r.pos);
+        let targets = containers.targets(&self.reads, |r| r.pos);
         let mut seen: rustc_hash::FxHashSet<(usize, NameRefKind, &str)> =
             rustc_hash::FxHashSet::default();
         for (read, target) in self.reads.iter().zip(targets) {
@@ -1038,14 +1039,14 @@ fn field_name_from(access: Node<'_>, source: &[u8]) -> Option<String> {
 }
 
 fn attach_pending_field_reads(
-    containers: &[EnclosingContainer],
+    containers: &ReadContainers,
     reads: Vec<PendingCall>,
     nodes: &mut [RawNode],
 ) {
     if reads.is_empty() {
         return;
     }
-    let targets = enclosing_targets(containers, &reads, |r| r.pos);
+    let targets = containers.targets(&reads, |r| r.pos);
     for (read, target) in reads.into_iter().zip(targets) {
         if let Some(node_idx) = target {
             nodes[node_idx].field_reads.push(read.name);
@@ -1313,6 +1314,15 @@ fn is_container_kind(kind: NodeKind) -> bool {
     )
 }
 
+/// A declaration whose initializer holds name and field reads when no
+/// function does: `const OPT = Some(handler)`, a Java field `Runnable r = Main::run`.
+fn is_value_kind(kind: NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::Const | NodeKind::Variable | NodeKind::Property
+    )
+}
+
 fn span_ends(span: (u32, u32, u32, u32)) -> (Pos, Pos) {
     ((span.0, span.1), (span.2, span.3))
 }
@@ -1327,10 +1337,14 @@ pub fn span_width(span: (u32, u32, u32, u32)) -> (u32, i64) {
 }
 
 fn enclosing_containers(nodes: &[RawNode]) -> Vec<EnclosingContainer> {
+    containers_of(nodes, is_container_kind)
+}
+
+fn containers_of(nodes: &[RawNode], keep: fn(NodeKind) -> bool) -> Vec<EnclosingContainer> {
     let mut containers: Vec<EnclosingContainer> = nodes
         .iter()
         .enumerate()
-        .filter(|(_, node)| is_container_kind(node.kind))
+        .filter(|(_, node)| keep(node.kind))
         .map(|(node_idx, node)| {
             let (start, end) = span_ends(node.span);
             EnclosingContainer {
@@ -1343,6 +1357,41 @@ fn enclosing_containers(nodes: &[RawNode]) -> Vec<EnclosingContainer> {
         .collect();
     containers.sort_unstable_by_key(|c| (c.start, c.width, c.node_idx));
     containers
+}
+
+/// Where a name or field read lands: the smallest enclosing function, else
+/// the smallest enclosing value declaration. Functions rank first, so
+/// `const f = () => g` keeps `g` on the arrow function and not on `f`.
+struct ReadContainers {
+    callables: Vec<EnclosingContainer>,
+    values: Vec<EnclosingContainer>,
+}
+
+impl ReadContainers {
+    fn new(nodes: &[RawNode]) -> Self {
+        Self {
+            callables: containers_of(nodes, is_container_kind),
+            values: containers_of(nodes, is_value_kind),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.callables.is_empty() && self.values.is_empty()
+    }
+
+    fn targets<T>(&self, pending: &[T], pos_of: impl Fn(&T) -> Pos) -> Vec<Option<usize>> {
+        let mut targets = enclosing_targets(&self.callables, pending, &pos_of);
+        if self.values.is_empty() || targets.iter().all(Option::is_some) {
+            return targets;
+        }
+        let fallback = enclosing_targets(&self.values, pending, &pos_of);
+        for (target, value) in targets.iter_mut().zip(fallback) {
+            if target.is_none() {
+                *target = value;
+            }
+        }
+        targets
+    }
 }
 
 /// For each pending entry, the node index of the smallest container whose
