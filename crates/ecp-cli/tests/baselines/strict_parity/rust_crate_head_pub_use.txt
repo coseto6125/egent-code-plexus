@@ -1,2 +1,0 @@
-# owner: FU-2026-10-08-3137f86a15e9 (P3: crate head follows pub use)
-edge full-only x1 Calls Function crates/a/src/lib.rs:4 t #8dc36e27a017127c -> Function crates/b/src/util.rs:1 f #b12f2250e02a90c3 reason=call conf=1.0
