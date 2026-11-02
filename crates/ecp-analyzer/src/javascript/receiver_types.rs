@@ -10,8 +10,9 @@
 //! that work without guessing" rule.
 
 use super::path_literals::{build_raw_path_literal, strip_js_string_value, LiteralContext};
-use crate::calls::{attach_to_enclosing_span, new_expression_call, CallSiteIndex};
+use crate::calls::{attach_to_enclosing_span, new_expression_call, start_pos, CallSiteIndex};
 use crate::framework_helpers::{enclosing_class, node_span, Span};
+use crate::typescript::receiver_types::DynamicImports;
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use tree_sitter::Node;
 
@@ -28,6 +29,7 @@ pub fn extract_js_calls_and_path_literals(
     root: Node<'_>,
     source: &[u8],
     nodes: &mut [RawNode],
+    dynamic: &DynamicImports,
     call_sites: &mut CallSiteIndex,
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
@@ -37,7 +39,7 @@ pub fn extract_js_calls_and_path_literals(
     while let Some((n, parent, context)) = stack.pop() {
         match n.kind() {
             "call_expression" => {
-                if let Some(callee) = js_callee_name(n, source, nodes) {
+                if let Some(callee) = js_callee_name(n, source, dynamic, nodes) {
                     if let Some(site) = attach_to_enclosing_span(node_span(&n), callee, nodes) {
                         call_sites.insert(n.id(), site);
                     }
@@ -89,15 +91,36 @@ pub fn extract_js_calls_and_path_literals(
     (path_literals, sql_refs)
 }
 
-fn js_callee_name(call: Node<'_>, source: &[u8], nodes: &[RawNode]) -> Option<String> {
+fn js_callee_name(
+    call: Node<'_>,
+    source: &[u8],
+    dynamic: &DynamicImports,
+    nodes: &[RawNode],
+) -> Option<String> {
     let function = call.child_by_field_name("function")?;
     match function.kind() {
-        "identifier" => function.utf8_text(source).ok().map(str::to_string),
+        "identifier" => {
+            let name = function.utf8_text(source).ok()?;
+            Some(
+                dynamic
+                    .callable_callee(start_pos(call), name)
+                    .unwrap_or_else(|| name.to_string()),
+            )
+        }
         "member_expression" => {
             let obj = function.child_by_field_name("object")?;
             let prop = function.child_by_field_name("property")?;
             let prop_name = prop.utf8_text(source).ok()?;
 
+            if obj.kind() == "identifier" {
+                if let Some(callee) = obj
+                    .utf8_text(source)
+                    .ok()
+                    .and_then(|name| dynamic.member_callee(start_pos(call), name, prop_name))
+                {
+                    return Some(callee);
+                }
+            }
             if obj.kind() == "this" {
                 // `this.method()` — look up the enclosing class.
                 let call_span = node_span(&call);
@@ -114,7 +137,7 @@ fn js_callee_name(call: Node<'_>, source: &[u8], nodes: &[RawNode]) -> Option<St
                 // O(depth).
                 let inner = match obj.kind() {
                     "call_expression" => {
-                        CallSite::nested_chain(|| js_callee_name(obj, source, nodes))
+                        CallSite::nested_chain(|| js_callee_name(obj, source, dynamic, nodes))
                     }
                     "new_expression" => new_expression_call(obj, source),
                     _ => None,

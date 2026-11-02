@@ -1,4 +1,6 @@
-use super::receiver_types::{collect_local_types, extract_ts_calls_and_path_literals};
+use super::receiver_types::{
+    collect_dynamic_imports, collect_local_types, extract_ts_calls_and_path_literals,
+};
 use super::schema_extractors::TS_INTERFACE_CONFIG;
 use super::spec::{TsSpec, TsxSpec, TypeScriptSpec};
 use crate::calls::{NameRefKind, NameRefSpec, VariantRefSpec};
@@ -826,11 +828,16 @@ impl<const TSX: bool> ParseSpec for TsSpec<TSX> {
             // - everything else falls back to the bare/qualified method name.
             TypeScriptHook::Calls => {
                 let local_types = collect_local_types(root, source);
+                // A literal `import('<lit>')` / function-scoped `require('<lit>')`
+                // is a synthetic namespace import, like the static arms above.
+                let mut dynamic = collect_dynamic_imports(root, source);
+                cx.imports.append(&mut dynamic.imports);
                 let (raw_path_literals, raw_sql_refs) = extract_ts_calls_and_path_literals(
                     root,
                     source,
                     &mut cx.nodes,
                     &local_types,
+                    &dynamic,
                     &mut cx.call_sites,
                 );
                 cx.path_literals = raw_path_literals;

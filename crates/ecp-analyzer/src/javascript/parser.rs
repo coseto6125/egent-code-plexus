@@ -13,6 +13,7 @@ use crate::framework_helpers::{
 };
 use crate::indirect_dispatch::{collect_js_param_names, detect_js_ts_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
+use crate::typescript::receiver_types::collect_dynamic_imports;
 use ecp_core::analyzer::parse_prof::Pass;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{
@@ -828,10 +829,15 @@ impl ParseSpec for JavaScriptSpec {
                 // - `this.method()` inside a class body → `ClassName.method`
                 // - `obj.method()` (no type info in JS) → `obj.method` (qualified for resolver)
                 // - `fn()` → `fn`
+                // A literal `import('<lit>')` / function-scoped `require('<lit>')`
+                // is a synthetic namespace import, like the static arms above.
+                let mut dynamic = collect_dynamic_imports(root, source);
+                cx.imports.append(&mut dynamic.imports);
                 let (raw_path_literals, raw_sql_refs) = extract_js_calls_and_path_literals(
                     root,
                     source,
                     &mut cx.nodes,
+                    &dynamic,
                     &mut cx.call_sites,
                 );
                 cx.path_literals = raw_path_literals;

@@ -25,7 +25,7 @@ use crate::calls::{
     CallSiteIndex, Pos, PosRange,
 };
 use crate::framework_helpers::{enclosing_class, node_span, Span};
-use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
+use ecp_core::analyzer::types::{CallSite, RawImport, RawNode, RawPathLiteral, RawSqlRef};
 use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
 
@@ -213,6 +213,355 @@ fn simple_name_and_type(
     Some((name.to_string(), ty.to_string()))
 }
 
+/// Kinds whose `body` field is a `statement_block` that opens a function scope.
+const FUNCTION_SCOPES: &[&str] = &[
+    "function_declaration",
+    "function",
+    "function_expression",
+    "generator_function",
+    "generator_function_declaration",
+    "method_definition",
+    "arrow_function",
+];
+
+/// Kinds under which a `type_identifier` declares a value name.
+const TYPE_DECLARATIONS: &[&str] = &[
+    "class_declaration",
+    "abstract_class_declaration",
+    "class",
+    "enum_declaration",
+    "interface_declaration",
+    "type_alias_declaration",
+];
+
+/// A name bound to a dynamically loaded module, valid from the end of its
+/// declaration to the end of its scope.
+#[derive(Debug)]
+struct DynamicBinding {
+    name: String,
+    range: PosRange,
+    alias: String,
+    /// The export a destructured name holds; `None` for the namespace name.
+    member: Option<String>,
+}
+
+/// Synthetic `@import<N>` imports of literal dynamic module loads, and the
+/// names that hold the loaded module. Shared by TypeScript and JavaScript.
+#[derive(Debug, Default)]
+pub struct DynamicImports {
+    pub imports: Vec<RawImport>,
+    bindings: Vec<DynamicBinding>,
+}
+
+impl DynamicImports {
+    fn lookup(&self, pos: Pos, name: &str) -> Option<&DynamicBinding> {
+        self.bindings
+            .iter()
+            .filter(|b| b.name == name && b.range.0 <= pos && pos <= b.range.1)
+            .min_by_key(|b| range_width(b.range))
+    }
+
+    /// `m.prop()` through a namespace name: `@import<N>.prop`.
+    pub fn member_callee(&self, pos: Pos, receiver: &str, prop: &str) -> Option<String> {
+        let binding = self.lookup(pos, receiver)?;
+        binding
+            .member
+            .is_none()
+            .then(|| format!("{}.{prop}", binding.alias))
+    }
+
+    /// `execute()` through a destructured name: `@import<N>.run`.
+    pub fn callable_callee(&self, pos: Pos, name: &str) -> Option<String> {
+        let binding = self.lookup(pos, name)?;
+        binding
+            .member
+            .as_ref()
+            .map(|member| format!("{}.{member}", binding.alias))
+    }
+}
+
+/// A `const` declarator that holds a dynamically loaded module.
+struct DynamicCandidate<'t> {
+    scope: Node<'t>,
+    pattern: (usize, usize),
+    names: Vec<(String, Option<String>)>,
+    specifier: String,
+    offset: usize,
+    is_require: bool,
+    range: PosRange,
+}
+
+/// The string the first argument of `call` spells, when it is a literal
+/// without escapes or substitutions and names something.
+fn literal_specifier(call: Node<'_>, source: &[u8]) -> Option<String> {
+    let first = call.child_by_field_name("arguments")?.named_child(0)?;
+    let text = first.utf8_text(source).ok()?;
+    let literal = match first.kind() {
+        "string" => true,
+        "template_string" => !(0..first.child_count())
+            .filter_map(|i| first.child(i))
+            .any(|c| c.kind() == "template_substitution"),
+        _ => false,
+    };
+    let inner = text.get(1..text.len().checked_sub(1)?)?;
+    (literal && !inner.trim().is_empty() && !inner.contains('\\')).then(|| inner.to_string())
+}
+
+/// Whether `node` only reads the value of its name.
+fn is_read_position(node: Node<'_>) -> bool {
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    let is_field = |field: &str| {
+        parent
+            .child_by_field_name(field)
+            .is_some_and(|child| child.id() == node.id())
+    };
+    match parent.kind() {
+        "member_expression" | "subscript_expression" => is_field("object"),
+        "call_expression" => is_field("function"),
+        "new_expression" => is_field("constructor"),
+        "pair" | "variable_declarator" => is_field("value"),
+        "assignment_expression" | "augmented_assignment_expression" | "for_in_statement" => {
+            is_field("right")
+        }
+        "arrow_function" => is_field("body"),
+        "arguments"
+        | "array"
+        | "await_expression"
+        | "binary_expression"
+        | "expression_statement"
+        | "non_null_expression"
+        | "as_expression"
+        | "parenthesized_expression"
+        | "return_statement"
+        | "satisfies_expression"
+        | "sequence_expression"
+        | "spread_element"
+        | "template_substitution"
+        | "ternary_expression"
+        | "throw_statement"
+        | "type_assertion"
+        | "unary_expression"
+        | "yield_expression" => true,
+        _ => false,
+    }
+}
+
+/// Whether `scope` holds a binding or write of `name` outside the byte range
+/// `own`. Any mention that is not a plain read counts, so a parameter, a
+/// nested declaration, an assignment target and a destructuring all do.
+fn name_rebound_in(scope: Node<'_>, name: &str, source: &[u8], own: (usize, usize)) -> bool {
+    let mut stack = vec![scope];
+    while let Some(n) = stack.pop() {
+        let declares = match n.kind() {
+            "identifier" | "shorthand_property_identifier_pattern" => true,
+            "type_identifier" => n
+                .parent()
+                .is_some_and(|p| TYPE_DECLARATIONS.contains(&p.kind())),
+            _ => false,
+        };
+        if declares
+            && n.utf8_text(source).is_ok_and(|text| text == name)
+            && !(own.0 <= n.start_byte() && n.end_byte() <= own.1)
+            && !is_read_position(n)
+        {
+            return true;
+        }
+        let mut c = n.walk();
+        stack.extend(n.children(&mut c));
+    }
+    false
+}
+
+/// The `const` declarators among the direct statements of `body` that load a
+/// module dynamically: `const m = await import('<lit>')`, and in a function
+/// `const m = require('<lit>')`. A program-level `require` is the static
+/// query's.
+fn collect_scope_candidates<'t>(
+    scope: Node<'t>,
+    body: Node<'t>,
+    source: &[u8],
+    out: &mut Vec<DynamicCandidate<'t>>,
+) {
+    let is_program = scope.kind() == "program";
+    let scope_end = node_range(scope).1;
+    let mut statements = body.walk();
+    for declaration in body.named_children(&mut statements) {
+        if declaration.kind() != "lexical_declaration"
+            || declaration.child(0).map(|keyword| keyword.kind()) != Some("const")
+        {
+            continue;
+        }
+        let range = (node_range(declaration).1, scope_end);
+        let mut declarators = declaration.walk();
+        for declarator in declaration.named_children(&mut declarators) {
+            if declarator.kind() != "variable_declarator"
+                || declarator.child_by_field_name("type").is_some()
+            {
+                continue;
+            }
+            let (Some(pattern), Some(value)) = (
+                declarator.child_by_field_name("name"),
+                declarator.child_by_field_name("value"),
+            ) else {
+                continue;
+            };
+            let awaited = value.kind() == "await_expression";
+            let Some(call) = (if awaited {
+                value.named_child(0)
+            } else {
+                Some(value)
+            })
+            .filter(|call| call.kind() == "call_expression") else {
+                continue;
+            };
+            let Some(function) = call.child_by_field_name("function") else {
+                continue;
+            };
+            let is_require = match (function.kind(), awaited) {
+                ("import", true) => false,
+                ("identifier", false)
+                    if !is_program
+                        && function.utf8_text(source) == Ok("require")
+                        && call
+                            .child_by_field_name("arguments")
+                            .is_some_and(|args| args.named_child_count() == 1) =>
+                {
+                    true
+                }
+                _ => continue,
+            };
+            let Some(specifier) = literal_specifier(call, source) else {
+                continue;
+            };
+            let text = |node: Node<'_>| node.utf8_text(source).ok().map(str::to_string);
+            let mut names: Vec<(String, Option<String>)> = Vec::new();
+            match pattern.kind() {
+                "identifier" => names.extend(text(pattern).map(|name| (name, None))),
+                "object_pattern" => {
+                    let mut props = pattern.walk();
+                    for prop in pattern.named_children(&mut props) {
+                        let bound = match prop.kind() {
+                            "shorthand_property_identifier_pattern" => {
+                                text(prop).map(|name| (name.clone(), name))
+                            }
+                            "pair_pattern" => {
+                                let key = prop
+                                    .child_by_field_name("key")
+                                    .filter(|key| key.kind() == "property_identifier")
+                                    .and_then(text);
+                                let local = prop
+                                    .child_by_field_name("value")
+                                    .filter(|local| local.kind() == "identifier")
+                                    .and_then(text);
+                                key.zip(local).map(|(key, local)| (local, key))
+                            }
+                            _ => None,
+                        };
+                        // `default` is an export the namespace tier does not name.
+                        names.extend(
+                            bound
+                                .filter(|(_, member)| member != "default")
+                                .map(|(name, member)| (name, Some(member))),
+                        );
+                    }
+                }
+                _ => {}
+            }
+            out.push(DynamicCandidate {
+                scope,
+                pattern: (pattern.start_byte(), pattern.end_byte()),
+                names,
+                specifier,
+                offset: call.start_byte(),
+                is_require,
+                range,
+            });
+        }
+    }
+}
+
+/// Collect the synthetic imports of every literal `import('<lit>')` and of
+/// each function-scoped `const m = require('<lit>')`, and bind the names that
+/// hold a loaded module.
+///
+/// A name binds only when its `const` is a direct statement of a function or
+/// program body and the name is declared or written nowhere else in that
+/// scope's subtree. A use before the declaration's end never binds. Every
+/// other shape keeps no binding. `require` loads only when no declaration of
+/// `require` exists in the file.
+///
+/// Alias `@import<N>`: `N` indexes the specifier by first occurrence in the
+/// source. It has no `.`, so a `receiver.member` callee text splits cleanly.
+pub fn collect_dynamic_imports(root: Node<'_>, source: &[u8]) -> DynamicImports {
+    let mut specifiers: Vec<(usize, String)> = Vec::new();
+    let mut candidates: Vec<DynamicCandidate<'_>> = Vec::new();
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "call_expression"
+            && n.child_by_field_name("function")
+                .is_some_and(|function| function.kind() == "import")
+        {
+            specifiers.extend(literal_specifier(n, source).map(|spec| (n.start_byte(), spec)));
+        }
+        let body = match n.kind() {
+            "program" => Some(n),
+            kind if FUNCTION_SCOPES.contains(&kind) => n
+                .child_by_field_name("body")
+                .filter(|body| body.kind() == "statement_block"),
+            _ => None,
+        };
+        if let Some(body) = body {
+            collect_scope_candidates(n, body, source, &mut candidates);
+        }
+        let mut c = n.walk();
+        stack.extend(n.children(&mut c));
+    }
+    if specifiers.is_empty() && candidates.is_empty() {
+        return DynamicImports::default();
+    }
+
+    let require_loads = !name_rebound_in(root, "require", source, (0, 0));
+    candidates.retain(|c| !c.is_require || require_loads);
+    specifiers.extend(
+        candidates
+            .iter()
+            .filter(|c| c.is_require)
+            .map(|c| (c.offset, c.specifier.clone())),
+    );
+    specifiers.sort_by_key(|(offset, _)| *offset);
+    let mut order: HashMap<&str, usize> = HashMap::new();
+    let mut imports: Vec<RawImport> = Vec::new();
+    for (_, specifier) in &specifiers {
+        if !order.contains_key(specifier.as_str()) {
+            order.insert(specifier, imports.len());
+            imports.push(RawImport {
+                source: specifier.clone(),
+                imported_name: "*".to_string(),
+                alias: Some(format!("@import{}", imports.len())),
+                binding_kind: None,
+            });
+        }
+    }
+
+    let mut bindings = Vec::new();
+    for candidate in &candidates {
+        let alias = format!("@import{}", order[candidate.specifier.as_str()]);
+        for (name, member) in &candidate.names {
+            if !name_rebound_in(candidate.scope, name, source, candidate.pattern) {
+                bindings.push(DynamicBinding {
+                    name: name.clone(),
+                    range: candidate.range,
+                    alias: alias.clone(),
+                    member: member.clone(),
+                });
+            }
+        }
+    }
+    DynamicImports { imports, bindings }
+}
+
 /// Walk the TypeScript AST and attach callees to enclosing functions/methods,
 /// with receiver-type binding:
 ///
@@ -226,6 +575,7 @@ pub fn extract_ts_calls_and_path_literals(
     source: &[u8],
     nodes: &mut [RawNode],
     locals: &LocalTypes,
+    dynamic: &DynamicImports,
     call_sites: &mut CallSiteIndex,
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
@@ -235,7 +585,7 @@ pub fn extract_ts_calls_and_path_literals(
     while let Some(n) = stack.pop() {
         match n.kind() {
             "call_expression" => {
-                if let Some(callee) = ts_callee_name(n, source, locals, nodes) {
+                if let Some(callee) = ts_callee_name(n, source, locals, dynamic, nodes) {
                     if let Some(site) = attach_to_enclosing_span(node_span(&n), callee, nodes) {
                         call_sites.insert(n.id(), site);
                     }
@@ -297,11 +647,19 @@ fn ts_callee_name(
     call: Node<'_>,
     source: &[u8],
     locals: &LocalTypes,
+    dynamic: &DynamicImports,
     nodes: &[RawNode],
 ) -> Option<String> {
     let function = call.child_by_field_name("function")?;
     match function.kind() {
-        "identifier" => function.utf8_text(source).ok().map(str::to_string),
+        "identifier" => {
+            let name = function.utf8_text(source).ok()?;
+            Some(
+                dynamic
+                    .callable_callee(start_pos(call), name)
+                    .unwrap_or_else(|| name.to_string()),
+            )
+        }
         "member_expression" => {
             let obj = function.child_by_field_name("object")?;
             let prop = function.child_by_field_name("property")?;
@@ -319,6 +677,9 @@ fn ts_callee_name(
                 }
                 "identifier" => {
                     let obj_name = obj.utf8_text(source).ok()?;
+                    if let Some(callee) = dynamic.member_callee(pos, obj_name, prop_name) {
+                        return Some(callee);
+                    }
                     if let Some(ty) = locals.lookup(pos, obj_name) {
                         return Some(format!("{ty}.{prop_name}"));
                     }
@@ -339,7 +700,7 @@ fn ts_callee_name(
                             if local_callee {
                                 None
                             } else {
-                                ts_callee_name(obj, source, locals, nodes)
+                                ts_callee_name(obj, source, locals, dynamic, nodes)
                             }
                         }) {
                             Some(inner) => {
