@@ -11,14 +11,15 @@
 //! reached symbols sit between the two — exactly the fabrication the graph
 //! exists to prevent.
 //!
-//! ## Deterministic by default
+//! ## Heuristic relations off by default
 //!
-//! Heuristic edges (MirrorsField, EventTopicMirror) are excluded unless
-//! `--include-heuristic` is passed. `ecp impact` can afford to include them
+//! Heuristic edges (MirrorsField, EventTopicMirror, CompensatedBy) are
+//! excluded unless `--include-heuristic` is passed. `ecp impact` can afford to include them
 //! because it buckets them separately and tags them `requires_verification`;
-//! a path has no second bucket — a step is in the chain or it is not. So the
-//! default answer is the one that is safe to act on, and the opt-in flag tags
-//! every inferred step it lets through.
+//! a path has no second bucket — a step is in the chain or it is not. A
+//! deterministic edge below `HEURISTIC_CEILING` confidence still walks, so
+//! every step that is heuristic or below the ceiling is tagged
+//! `requiresVerification` and the caveat counts them.
 
 use crate::commands::impact::bfs::{shortest_path, PathStep, WalkOpts};
 use crate::commands::impact::{direction_str, parse_csv_lower, Direction};
@@ -30,6 +31,7 @@ use crate::read_context::{
 };
 use clap::Args;
 use ecp_core::contracts::identity::{TargetRequest, TargetResolution};
+use ecp_core::contracts::raw_records::HEURISTIC_CEILING;
 use ecp_core::session::MergedGraph;
 use ecp_core::EcpError;
 use serde_json::{json, Value};
@@ -89,8 +91,9 @@ pub struct PathArgs {
     #[arg(long)]
     pub to_kind: Option<String>,
 
-    /// Allow heuristic edges (MirrorsField, EventTopicMirror) as steps. Each
-    /// one is tagged `requiresVerification` in the output.
+    /// Allow heuristic edges (MirrorsField, EventTopicMirror, CompensatedBy) as
+    /// steps. They are off by default. A heuristic step, and any step below
+    /// 0.7 confidence, is tagged `requiresVerification` in the output.
     #[arg(long)]
     pub include_heuristic: bool,
 
@@ -99,7 +102,8 @@ pub struct PathArgs {
     pub repo: Option<String>,
 
     /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
-    /// toon. `json`: full-fidelity JSON. `text`: pretty-printed JSON.
+    /// toon. `json`: full-fidelity JSON. `text`: pretty-printed JSON. Every step carries
+    /// `requiresVerification`: true when its edge is heuristic or below 0.7 confidence.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 }
@@ -164,7 +168,7 @@ fn endpoint(
     match resolve_target(merged, &request) {
         TargetResolution::Unique(c) => Ok(Endpoint::Node(
             c.node as usize,
-            same_name_def_count(merged, merged.view(), request.name()),
+            same_name_def_count(merged, merged.view(), request.name(), c.kind),
         )),
         TargetResolution::Ambiguous(a) => {
             let payload = json!({
@@ -280,9 +284,9 @@ fn build_payload(args: &PathArgs, engine: &Engine) -> Result<Outcome, EcpError> 
         ));
     };
 
-    let heuristic_steps = steps
+    let unverified_steps = steps
         .iter()
-        .filter(|s| s.via.as_ref().is_some_and(|e| e.heuristic))
+        .filter(|s| s.via.as_ref().is_some_and(|e| e.requires_verification))
         .count();
     let payload = json!({
         "status": "success",
@@ -295,22 +299,23 @@ fn build_payload(args: &PathArgs, engine: &Engine) -> Result<Outcome, EcpError> 
         "toCandidates": to_candidates,
         "path": steps.iter().map(step_json).collect::<Vec<_>>(),
     });
-    let caveat = (heuristic_steps > 0).then(|| {
+    let caveat = (unverified_steps > 0).then(|| {
         format!(
-            "{heuristic_steps} of {} hops run along heuristic edges (marked \
-             requiresVerification): the route is inferred, not resolved. Re-run without \
-             --include-heuristic for the deterministic-only answer.",
+            "{unverified_steps} of {} hops run along heuristic or low-confidence \
+             (< {HEURISTIC_CEILING}) edges (marked requiresVerification): the route is \
+             inferred, not resolved. Re-run with --min-confidence {HEURISTIC_CEILING}, \
+             without --include-heuristic, for the resolved-only answer.",
             steps.len() - 1
         )
     });
     Ok(Outcome::Answer(payload, merge_caveats(ambiguity, caveat)))
 }
 
-/// With two or more same-named definitions in the graph, the resolver may
-/// have suppressed bare calls to that name at index time
-/// (`DecisionTier::AmbiguousGlobal`), so edges are missing from the walk. A
-/// miss under that condition is a lower bound, and this payload otherwise
-/// says an unreachable pair is a real answer.
+/// With two or more same-named definitions of a competing kind in the graph
+/// ([`same_name_def_count`]), the resolver may have suppressed bare calls to
+/// that name at index time (`DecisionTier::AmbiguousGlobal`), so edges are
+/// missing from the walk. A miss under that condition is a lower bound, and
+/// this payload otherwise says an unreachable pair is a real answer.
 fn ambiguity_caveat(name: &str, same_name_defs: usize) -> Option<String> {
     (same_name_defs >= 2).then(|| {
         format!(
@@ -326,8 +331,8 @@ fn ambiguity_caveat(name: &str, same_name_defs: usize) -> Option<String> {
 fn step_json(step: &PathStep) -> Value {
     // The start node has no incoming edge; its via fields stay empty rather
     // than borrowing the next hop's, which would misread as a self-edge.
-    let (rel, reason, confidence, heuristic) = match &step.via {
-        Some(e) => (e.rel, e.reason, e.confidence, e.heuristic),
+    let (rel, reason, confidence, requires_verification) = match &step.via {
+        Some(e) => (e.rel, e.reason, e.confidence, e.requires_verification),
         None => ("", "", 1.0, false),
     };
     json!({
@@ -338,7 +343,7 @@ fn step_json(step: &PathStep) -> Value {
         "viaRelType": rel,
         "viaReason": reason,
         "viaConfidence": confidence,
-        "requiresVerification": heuristic,
+        "requiresVerification": requires_verification,
     })
 }
 

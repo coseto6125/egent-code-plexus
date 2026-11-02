@@ -23,6 +23,7 @@ pub struct CypherArgs {
     /// - Properties (edge):  confidence, reason, rel_type
     /// - Aggregation:        COUNT(*), COUNT(DISTINCT x), SUM/MIN/MAX/AVG, COLLECT
     /// - Pipeline:           one WITH ... [WHERE ...], OPTIONAL MATCH, UNION [ALL]
+    ///   (branches need equal column names: alias function columns with AS)
     /// - Output shaping:     RETURN [DISTINCT], ORDER BY, SKIP, LIMIT
     /// - Lists:              labels(n)[0], xs[-1], xs[1..3] (index or slice a list value)
     ///
@@ -53,7 +54,10 @@ pub struct CypherArgs {
     pub repo: Option<String>,
 
     /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
-    /// toon. `json`: full-fidelity JSON. `text`: pretty-printed JSON.
+    /// toon. `json`: full-fidelity JSON. `text`: pretty-printed JSON. An unaliased
+    /// function column takes the function name in lower case and keeps its
+    /// arguments, with `DISTINCT` in upper case: `count(b)`,
+    /// `count(DISTINCT b)`, `labels(a)[0]`.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 }

@@ -30,8 +30,8 @@ ecp path <FROM> <TO> [--direction down] [--depth 8] [--repo <PATH>]
   a real miss.
 - `--from-file` / `--to-file`: substring on the file path, to pin an
   overloaded endpoint to one definition.
-- `--include-heuristic`: allow heuristic edges (MirrorsField, EventTopicMirror)
-  as steps.
+- `--include-heuristic`: allow heuristic edges (MirrorsField, EventTopicMirror,
+  CompensatedBy) as steps.
 
 ## Reading the output
 
@@ -91,10 +91,12 @@ other direction (upstream, 3 hops): rerun with --direction upstream."
 
 The reverse of `ecp impact`, on purpose. `impact` can include heuristic edges
 because it buckets them separately and tags them `requires_verification`; a
-path has no second bucket — a step is in the chain or it is not. So the default
-answer is the one that is safe to act on. `--include-heuristic` opts in, marks
-every inferred step `requiresVerification: true`, and adds a caveat naming how
-many hops are inferred.
+path has no second bucket — a step is in the chain or it is not. So heuristic
+relations stay out of the walk unless `--include-heuristic` opts in. A
+deterministic edge below 0.7 confidence can still be a step: every step that is
+heuristic or below 0.7 is `requiresVerification: true`, and a caveat names how
+many such hops the path holds. Among routes of the shortest length, a fully
+verified one wins. Check those hops before you act on the route.
 
 ## Shortest only
 

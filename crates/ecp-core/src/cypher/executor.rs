@@ -555,17 +555,9 @@ fn stream_projection(
 ) -> Result<(Vec<String>, Vec<Vec<Value>>), CypherError> {
     if let Some(wc) = &query.with {
         if has_aggregate(&wc.items) {
-            let items = wc
-                .items
-                .iter()
-                .map(|i| {
-                    (
-                        i.alias
-                            .clone()
-                            .unwrap_or_else(|| return_item_default_col(i)),
-                        i.expr.clone(),
-                    )
-                })
+            let items = with_columns(wc)
+                .into_iter()
+                .zip(wc.items.iter().map(|i| i.expr.clone()))
                 .collect();
             let mut agg = Aggregation::new(items, Stage::With);
             let mut aggregate_error = None;
@@ -589,6 +581,7 @@ fn stream_projection(
     let mut agg = None;
     let mut with_error = None;
     let mut aggregate_error = None;
+    let with_cols = query.with.as_ref().map(with_columns).unwrap_or_default();
     visit_matches(&query.matches, graph, &mut |b| {
         if !passes_where(query.where_.as_ref(), b, graph, cache)? {
             return Ok(());
@@ -598,7 +591,7 @@ fn stream_projection(
             if with_error.is_some() {
                 return Ok(());
             }
-            rebound = match rebind_one(wc, b, graph, cache) {
+            rebound = match rebind_one(wc, &with_cols, b, graph, cache) {
                 Ok(row) => row,
                 Err(error) => {
                     with_error = Some(error);
@@ -720,13 +713,7 @@ fn order_key(
     if let Some(i) = item_col {
         return Ok(OrderKey::Column(i));
     }
-    let exact = match expr {
-        ReturnExpr::Prop(var, prop) => format!("{var}.{prop}"),
-        ReturnExpr::Var(v) => v.clone(),
-        ReturnExpr::Star => "*".into(),
-        ReturnExpr::FunCall { name, .. } => format!("{name}(*)"),
-        ReturnExpr::Subscript(e) => subscript_col_name(e),
-    };
+    let exact = return_expr_col_name(expr);
     if let Some(&i) = col_index.get(&exact) {
         return Ok(OrderKey::Column(i));
     }
@@ -1188,31 +1175,41 @@ fn exec_with(
     cache: &mut ContentCache,
 ) -> Result<Vec<Binding>, CypherError> {
     debug_assert!(!has_aggregate(&wc.items));
+    let cols = with_columns(wc);
     let mut out = Vec::with_capacity(bindings.len());
     for b in &bindings {
-        if let Some(row) = rebind_one(wc, b, graph, cache)? {
+        if let Some(row) = rebind_one(wc, &cols, b, graph, cache)? {
             out.push(row);
         }
     }
     Ok(out)
 }
 
+/// The column name of each WITH item, in item order: its alias, else its
+/// default name. Computed once per clause, not once per row.
+fn with_columns(wc: &WithClause) -> Vec<String> {
+    wc.items
+        .iter()
+        .map(|item| {
+            item.alias
+                .clone()
+                .unwrap_or_else(|| return_item_default_col(item))
+        })
+        .collect()
+}
+
+/// `cols` is [`with_columns`] of `wc`.
 fn rebind_one(
     wc: &WithClause,
+    cols: &[String],
     b: &Binding,
     graph: MergedGraph<'_>,
     cache: &mut ContentCache,
 ) -> Result<Option<Binding>, CypherError> {
-    let computed = wc
-        .items
+    let computed = cols
         .iter()
-        .map(|item| {
-            let col = item
-                .alias
-                .clone()
-                .unwrap_or_else(|| return_item_default_col(item));
-            (col, eval_return_item_rich(item, b, graph, cache))
-        })
+        .zip(&wc.items)
+        .map(|(col, item)| (col.clone(), eval_return_item_rich(item, b, graph, cache)))
         .collect();
     let rebound = Binding {
         node_vars: b.node_vars.clone(),
@@ -3100,34 +3097,74 @@ fn value_truthy(v: &Value) -> bool {
 }
 
 fn return_item_default_col(item: &ReturnItem) -> String {
-    match &item.expr {
+    return_expr_col_name(&item.expr)
+}
+
+/// The one spelling of a projection's default column name, shared by the
+/// header and by ORDER BY's lookup, so `ORDER BY count(c)` finds `RETURN
+/// COUNT(c)`. A function keeps its arguments: two `labels()` calls on
+/// different variables are two columns.
+fn return_expr_col_name(expr: &ReturnExpr) -> String {
+    match expr {
         ReturnExpr::Var(v) => v.clone(),
         ReturnExpr::Prop(v, p) => format!("{v}.{p}"),
         ReturnExpr::Star => "*".into(),
-        ReturnExpr::FunCall { name, .. } => format!("{name}(*)"),
-        ReturnExpr::Subscript(e) => subscript_col_name(e),
+        ReturnExpr::FunCall {
+            name,
+            distinct,
+            args,
+        } => funcall_col_name(name, *distinct, args),
+        ReturnExpr::Subscript(e) => expr_col_name(e),
     }
 }
 
-/// Default column label for a subscripted projection: `labels(*)[]` style,
-/// built from the innermost base so unaliased columns stay readable.
-fn subscript_col_name(e: &Expr) -> String {
-    // Two subscripts of one base need two names: ORDER BY and the reader
-    // tell the columns apart by name.
-    let bound = |e: &Expr| match e {
-        Expr::Lit(Literal::Int(i)) => i.to_string(),
-        Expr::Lit(Literal::Str(s)) => format!("'{s}'"),
-        _ => "?".into(),
-    };
+/// `count(*)`, `count(DISTINCT b)`, `labels(a)`. The parser upper-cases the
+/// name and stores `(*)` as the single argument `Lit(Null)`.
+fn funcall_col_name(name: &str, distinct: bool, args: &[Expr]) -> String {
+    let name = name.to_ascii_lowercase();
+    let distinct = if distinct { "DISTINCT " } else { "" };
+    match args {
+        [Expr::Lit(Literal::Null)] if name == "count" => format!("{name}(*)"),
+        _ => {
+            let args: Vec<String> = args.iter().map(expr_col_name).collect();
+            format!("{name}({distinct}{})", args.join(", "))
+        }
+    }
+}
+
+fn literal_col_name(lit: &Literal) -> String {
+    match lit {
+        Literal::Null => "null".into(),
+        Literal::Bool(b) => b.to_string(),
+        Literal::Int(i) => i.to_string(),
+        // Debug keeps the decimal point: `collect(1.0)` stays apart from `collect(1)`.
+        Literal::Float(f) => format!("{f:?}"),
+        Literal::Str(s) => format!("'{s}'"),
+        Literal::List(items) => {
+            let items: Vec<String> = items.iter().map(literal_col_name).collect();
+            format!("[{}]", items.join(", "))
+        }
+    }
+}
+
+/// Default column label of an expression inside a projection (`labels(a)[0]`,
+/// `labels(a)[0..2]`). Two subscripts of one base need two names: ORDER BY
+/// and the reader tell the columns apart by name.
+fn expr_col_name(e: &Expr) -> String {
     match e {
-        Expr::Index(base, idx) => format!("{}[{}]", subscript_col_name(base), bound(idx)),
+        Expr::Index(base, idx) => format!("{}[{}]", expr_col_name(base), expr_col_name(idx)),
         Expr::Slice { base, from, to } => {
-            let side = |e: &Option<Box<Expr>>| e.as_deref().map(bound).unwrap_or_default();
-            format!("{}[{}..{}]", subscript_col_name(base), side(from), side(to))
+            let side = |e: &Option<Box<Expr>>| e.as_deref().map(expr_col_name).unwrap_or_default();
+            format!("{}[{}..{}]", expr_col_name(base), side(from), side(to))
         }
         Expr::Var(v) => v.clone(),
         Expr::Prop(v, p) => format!("{v}.{p}"),
-        Expr::FunCall { name, .. } => format!("{name}(*)"),
+        Expr::Lit(lit) => literal_col_name(lit),
+        Expr::FunCall {
+            name,
+            distinct,
+            args,
+        } => funcall_col_name(name, *distinct, args),
         _ => "expr".into(),
     }
 }

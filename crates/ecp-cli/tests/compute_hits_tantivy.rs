@@ -219,3 +219,143 @@ fn format_hits_skips_empty_caller_callee_lines() {
     assert!(!out.contains("Called by:"), "empty callers must be skipped");
     assert!(!out.contains("Calls:"), "empty callees must be skipped");
 }
+
+fn hit_with_callers(caller_count: usize, callers: &[&str]) -> Hit {
+    Hit {
+        repo: None,
+        score: 1.0,
+        score_source: ScoreSource::Bm25,
+        kind: "Function".to_string(),
+        file: "src/config.rs".to_string(),
+        language: "Rust".to_string(),
+        line: 42,
+        name: "overloaded".to_string(),
+        signature: "Function overloaded".to_string(),
+        caller_count,
+        callers: callers.iter().map(|c| c.to_string()).collect(),
+        callee_count: 0,
+        callees: vec![],
+        category: ecp_core::graph::FileCategory::Source,
+    }
+}
+
+/// Stands for: a hit with 12 callers and 3 shown tells the model 9 are
+/// missing. Before the fix the line ended at the third name, so 3 of 12
+/// read as the complete caller set.
+#[test]
+fn format_hits_truncated_callers_end_in_plus_n_more() {
+    let out = format_hits(&[hit_with_callers(12, &["a", "b", "c"])]);
+    assert!(
+        out.contains("    Called by: a, b, c, +9 more\n"),
+        "got: {out}"
+    );
+}
+
+/// Stands for: no truncation leaves the line as before, and a count below
+/// the list length (never produced by `compute_hits`) cannot underflow.
+#[test]
+fn format_hits_complete_or_inconsistent_callers_have_no_more_suffix() {
+    for (count, callers) in [
+        (3, vec!["a", "b", "c"]),
+        (1, vec!["a", "b"]),
+        (0, vec!["a"]),
+    ] {
+        let out = format_hits(&[hit_with_callers(count, &callers)]);
+        assert!(
+            out.contains(&format!("    Called by: {}\n", callers.join(", "))),
+            "got: {out}"
+        );
+        assert!(!out.contains("more"), "got: {out}");
+    }
+}
+
+fn hit_with_callees(callee_count: usize, callees: &[&str]) -> Hit {
+    Hit {
+        callee_count,
+        callees: callees.iter().map(|c| c.to_string()).collect(),
+        ..hit_with_callers(0, &[])
+    }
+}
+
+/// Stands for: the `Calls:` line names its truncation as `Called by:` does.
+/// Before the fix 3 of 7 callees read as the complete callee set.
+#[test]
+fn format_hits_truncated_callees_end_in_plus_n_more() {
+    let out = format_hits(&[hit_with_callees(7, &["x", "y", "z"])]);
+    assert!(out.contains("    Calls: x, y, z, +4 more\n"), "got: {out}");
+
+    let out = format_hits(&[hit_with_callees(2, &["x", "y"])]);
+    assert!(out.contains("    Calls: x, y\n"), "got: {out}");
+    assert!(!out.contains("more"), "got: {out}");
+}
+
+/// One caller holding 4 call sites of `hubTarget`, and `hubTarget` calling
+/// `leafCallee` from 4 sites: one `Calls` edge per site.
+fn make_multi_site_graph() -> ZeroCopyGraph {
+    let mut fx = GraphFixture::new();
+    let ids: Vec<u32> = ["hubTarget", "multiSiteCaller", "leafCallee"]
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let id = fx.func("src/hub.rs", name);
+            fx.span(id, (i as u32 * 10, 0, i as u32 * 10 + 9, 0));
+            id
+        })
+        .collect();
+    let (hub, caller, leaf) = (ids[0], ids[1], ids[2]);
+    for _ in 0..4 {
+        fx.edge_with(caller, hub, RelType::Calls, 1.0, "call");
+        fx.edge_with(hub, leaf, RelType::Calls, 1.0, "call");
+    }
+    fx.build()
+}
+
+/// Stands for: `Called by:` / `Calls:` and their counts name distinct
+/// symbols, not call sites. Before the fix the hit carried
+/// `callers == ["multiSiteCaller"; 3]`, `caller_count == 4`, and rendered
+/// `Called by: multiSiteCaller, multiSiteCaller, multiSiteCaller, +1 more`.
+#[test]
+fn compute_hits_one_caller_many_call_sites_counts_once() {
+    let dir = tempdir().unwrap();
+    let index_dir = dir.path();
+    let graph = make_multi_site_graph();
+    persist_graph(index_dir, &graph);
+    TantivyEngine::build_index(index_dir, &graph).expect("tantivy build");
+    let engine = Engine::load(index_dir.join("graph.bin")).expect("engine load");
+
+    let args = FindArgs {
+        pattern: Some("hubTarget".to_string()),
+        mode: FindMode::Bm25,
+        fuzzy: false,
+        all: false,
+        include_tests: false,
+        kind: None,
+        file: None,
+        repo: None,
+        format: None,
+        batch: false,
+    };
+    let hits = compute_hits(args, &engine).expect("compute_hits");
+    let hub = hits
+        .iter()
+        .find(|h| h.name == "hubTarget")
+        .expect("hubTarget hit must surface");
+    assert_eq!(
+        (hub.caller_count, hub.callers.clone()),
+        (1, vec!["multiSiteCaller".to_string()]),
+        "{hub:?}"
+    );
+    assert_eq!(
+        (hub.callee_count, hub.callees.clone()),
+        (1, vec!["leafCallee".to_string()]),
+        "{hub:?}"
+    );
+
+    let out = format_hits(std::slice::from_ref(hub));
+    assert!(
+        out.contains("    Called by: multiSiteCaller\n"),
+        "got: {out}"
+    );
+    assert!(out.contains("    Calls: leafCallee\n"), "got: {out}");
+    assert!(!out.contains("more"), "got: {out}");
+}

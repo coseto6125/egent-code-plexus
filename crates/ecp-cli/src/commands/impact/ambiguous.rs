@@ -77,12 +77,12 @@ fn sites_json(mut hits: Vec<(Hit, Option<&str>)>) -> Value {
     json!({ "total": total, "shown": sites.len(), "note": NOTE, "sites": sites })
 }
 
-/// Every on-disk definition named `name`, in merged space: base nodes the
-/// overlay did not delete (redirected to their dirty twin) plus brand-new
-/// working-tree nodes. The on-disk half of what
-/// [`crate::commands::symbol_id::same_name_def_count`] counts, plus the later
-/// overloads and lexically scoped defs it skips: their declarations match
-/// the grep too.
+/// Every on-disk definition named `name`, of every kind, in merged space:
+/// base nodes the overlay did not delete (redirected to their dirty twin)
+/// plus brand-new working-tree nodes. The on-disk half of what
+/// [`crate::commands::symbol_id::same_name_def_count`] counts, plus what it
+/// skips: same-named definitions of a non-competing kind, later overloads and
+/// lexically scoped defs. Their declarations match the grep too.
 fn same_name_defs(merged: MergedGraph<'_>, name: &str) -> Vec<u32> {
     let view = merged.view();
     let mut defs: Vec<u32> = merged

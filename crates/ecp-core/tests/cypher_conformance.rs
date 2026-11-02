@@ -746,6 +746,18 @@ fn test_execute_union_with_unaliased_names_from_different_variables_is_refused()
 }
 
 #[test]
+fn test_execute_union_with_float_and_int_literal_columns_is_refused() {
+    let error = run("MATCH (a:Function {name:'alpha'}) RETURN collect(1.0) \
+         UNION MATCH (b:Function {name:'beta'}) RETURN collect(1)")
+    .expect_err("collect(1.0) and collect(1) are different columns")
+    .to_string();
+    assert!(
+        error.contains("[collect(1.0)]") && error.contains("[collect(1)]"),
+        "{error}"
+    );
+}
+
+#[test]
 fn test_execute_union_with_equal_column_names_concatenates() {
     assert_eq!(
         rows(
@@ -823,8 +835,8 @@ fn test_execute_order_by_aggregate_projected_under_an_alias_sorts() {
 
 #[test]
 fn test_execute_order_by_picks_the_item_with_the_same_arguments() {
-    // Every aggregate defaults to the column name `COUNT(*)`, so the key must
-    // match on its arguments: gamma leads either way (4 callers, 4 rows), the
+    // Two aggregates with different arguments share a function name, so the
+    // key must match on its arguments: gamma leads either way (4 callers, 4 rows), the
     // runner-up tells the two keys apart (beta by callers, dup by rows).
     let query = |key: &str| {
         format!(

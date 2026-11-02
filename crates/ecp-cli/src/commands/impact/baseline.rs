@@ -1,7 +1,7 @@
-use super::bfs::{merged_node_meta, run_bfs};
+use super::bfs::{merged_node_meta, run_bfs, WalkOpts};
 use super::coverage::{build_coverage_json, coverage_analyses};
 use super::payload::{BaselinePayload, ChangedSymbol, ImpactBySymbol};
-use super::{parse_csv_lower, resolve_min_conf, tag_heuristic, ImpactArgs};
+use super::{parse_csv_lower, resolve_min_conf, ImpactArgs};
 use crate::commands::format::{kind_to_str, node_kind_to_str};
 use crate::commands::impact::{
     attach_heuristic_fields, attach_hidden_edges, attach_hidden_test_callers, Direction,
@@ -28,6 +28,7 @@ struct BaselineComputation {
     hidden_edges_total: u64,
     hidden_heuristic_total: u64,
     hidden_test_total: u64,
+    /// Both buckets per changed symbol; empty unless `--test-coverage`.
     per_symbol_bfs: Vec<(usize, Vec<Value>)>,
     min_conf: f32,
     rel_filter: Option<Vec<String>>,
@@ -88,16 +89,15 @@ pub(super) fn impact_with_baseline(
     if args.test_coverage {
         let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
         let view = engine.overlay_view();
-        let analyses = coverage_analyses(
-            graph,
-            view,
-            &comp.per_symbol_bfs,
-            &args.direction,
-            args.depth,
-            comp.min_conf,
-            comp.effective_include_tests,
-            &comp.rel_filter,
-        );
+        let opts = WalkOpts {
+            direction: args.direction.clone(),
+            depth: args.depth,
+            min_conf: comp.min_conf,
+            include_tests: comp.effective_include_tests,
+            rel_filter: &comp.rel_filter,
+            include_heuristic: !args.no_heuristic,
+        };
+        let analyses = coverage_analyses(graph, view, &comp.per_symbol_bfs, &opts);
         result["coverage"] = build_coverage_json(analyses);
     }
 
@@ -375,22 +375,26 @@ fn compute_baseline(args: &ImpactArgs, engine: &Engine) -> Result<BaselineComput
             !args.no_heuristic,
             args.max_results,
         );
-        let mut sym_entry = ImpactBySymbol {
-            symbol: sym_name,
-            file_path: sym_file,
-            impact: det_results.clone(),
-            heuristic_callers: None,
-            downstream_callees: None,
-        };
-        if !args.no_heuristic {
-            sym_entry.heuristic_callers = Some(tag_heuristic(heur_results));
+        // Coverage classifies both buckets, as an upstream request does. Only
+        // `--test-coverage` reads the rows, so only it pays for the copy.
+        if args.test_coverage {
+            let rows = det_results.iter().chain(&heur_results).cloned().collect();
+            per_symbol_bfs.push((start_idx, rows));
         }
         // Orphan-symbol fallback: when upstream-only mode finds no callers,
         // attach depth-1 downstream callees so the changed symbol still
         // exposes structural signal (its callees) instead of an empty
         // `impact: []`. `det_results.len() <= 1` relies on the documented
         // `run_bfs` start-node-at-depth-0 invariant.
-        if args.direction == Direction::Up && det_results.len() <= 1 {
+        let no_callers = det_results.len() <= 1;
+        let mut sym_entry = ImpactBySymbol {
+            symbol: sym_name,
+            file_path: sym_file,
+            impact: det_results,
+            heuristic_callers: (!args.no_heuristic).then_some(heur_results),
+            downstream_callees: None,
+        };
+        if args.direction == Direction::Up && no_callers {
             let (downstream_results, _, _, _, _) = run_bfs(
                 graph,
                 view,
@@ -411,7 +415,6 @@ fn compute_baseline(args: &ImpactArgs, engine: &Engine) -> Result<BaselineComput
         hidden_edges_total += hidden_conf;
         hidden_heuristic_total += hidden_heur;
         hidden_test_total += hidden_tests;
-        per_symbol_bfs.push((start_idx, det_results));
     }
 
     Ok(BaselineComputation {
