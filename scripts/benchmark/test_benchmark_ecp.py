@@ -5,6 +5,8 @@ only `_run` (the `ecp find` subprocess) is replaced by an in-memory stand-in.
 """
 
 import sys
+
+import pytest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -88,6 +90,72 @@ def test_bench_dirty_file_deleted_during_run_is_not_recreated(tmp_path, monkeypa
     bench._bench_dirty(Path("ecp"), tmp_path, "a.ts", "q", None, APPEND, 1)
     assert not t.exists()
     assert str(t) in capsys.readouterr().err
+
+
+def test_bench_dirty_several_files_each_edited_then_restored(tmp_path, monkeypatch):
+    files = [tmp_path / f"f{i}.ts" for i in range(20)]
+    for f in files:
+        f.write_bytes(ORIGINAL)
+    seen: list[list[bytes]] = []
+    monkeypatch.setattr(
+        bench, "_run", _fake_run(lambda n: seen.append([f.read_bytes() for f in files]))
+    )
+    bench._bench_dirty(Path("ecp"), tmp_path, [f.name for f in files], "q", None, APPEND, 1)
+    # Call 2 is the first query after the edit: every file carries the edit.
+    assert seen[1] == [ORIGINAL + APPEND.encode()] * 20
+    assert [f.read_bytes() for f in files] == [ORIGINAL] * 20
+
+
+def test_bench_dirty_same_path_twice_is_edited_once(tmp_path, monkeypatch):
+    t = _target(tmp_path)
+    seen: list[bytes] = []
+    monkeypatch.setattr(bench, "_run", _fake_run(lambda n: seen.append(t.read_bytes())))
+    bench._bench_dirty(Path("ecp"), tmp_path, ["a.ts", "a.ts"], "q", None, APPEND, 1)
+    assert seen[1] == ORIGINAL + APPEND.encode()
+    assert t.read_bytes() == ORIGINAL
+
+
+def test_bench_dirty_user_save_to_one_of_two_files_keeps_it_and_restores_the_other(
+    tmp_path, monkeypatch, capsys
+):
+    a = _target(tmp_path)
+    b = tmp_path / "b.ts"
+    b.write_bytes(ORIGINAL)
+    monkeypatch.setattr(
+        bench, "_run", _fake_run(lambda n: b.write_bytes(b"user edit") if n == 2 else None)
+    )
+    samples = bench._bench_dirty(Path("ecp"), tmp_path, ["a.ts", "b.ts"], "q", None, APPEND, 2)
+    assert a.read_bytes() == ORIGINAL
+    assert b.read_bytes() == b"user edit"
+    assert "b.ts" in capsys.readouterr().err
+    assert bench._dirty_exit_code(samples, {"protocol": 1}) != 0
+
+
+def test_bench_dirty_run_raises_mid_way_restores_every_file(tmp_path, monkeypatch):
+    a = _target(tmp_path)
+    b = tmp_path / "b.ts"
+    b.write_bytes(ORIGINAL)
+
+    def boom(n):
+        if n == 2:
+            raise RuntimeError("killed")
+
+    monkeypatch.setattr(bench, "_run", _fake_run(boom))
+    try:
+        bench._bench_dirty(Path("ecp"), tmp_path, ["a.ts", "b.ts"], "q", None, APPEND, 1)
+    except RuntimeError:
+        pass
+    assert [a.read_bytes(), b.read_bytes()] == [ORIGINAL, ORIGINAL]
+
+
+def test_dirty_phase_missing_path_exits_before_first_run(tmp_path, monkeypatch, capsys):
+    _target(tmp_path)
+    monkeypatch.setattr(bench, "_run", _fake_run(lambda n: pytest.fail("ran a command")))
+    args = bench.argparse.Namespace(
+        dirty_repo=tmp_path, dirty_file=["a.ts", "gone.ts"], dirty_append=None
+    )
+    assert bench._dirty_phase(args) == ([], None)
+    assert "gone.ts" in capsys.readouterr().err
 
 
 def test_dirty_exit_code_failure_in_later_round_is_nonzero(tmp_path, monkeypatch):
