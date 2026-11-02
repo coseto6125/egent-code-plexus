@@ -177,7 +177,7 @@ pub fn mod_steps<'t>(
 /// and `name/mod.rs` that `find` gives, beside `file` when it is the tree's
 /// root (`root`) whatever its file name (`[lib] path = "src/core.rs"`), and
 /// in its module directory ([`rust_module_dir`]) otherwise.
-pub fn module_file<T>(
+pub(crate) fn module_file<T>(
     file: &Path,
     root: bool,
     name: &str,

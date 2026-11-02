@@ -16,10 +16,10 @@
 //!
 //! What the fixtures do not cover: inline `mod util { .. }` modules, and
 //! `#[path]` module files beyond guards: the overlay reads no `pub use`
-//! rows in a tree whose walk differs from the index's at any file (a
-//! `#[path]` module, a `mod` the layout guess steps to and the index does
-//! not, or a file the index walk reaches twice), nor follows a row into
-//! such a tree. The overlay walks file-backed `mod` declarations only.
+//! rows in a tree where the layout guess may place a module elsewhere than
+//! the index (a `#[path]` module, a `mod` the layout guess steps to and
+//! the index does not, or a file the index walk reaches twice), nor
+//! follows a row into such a tree. The overlay walks file-backed `mod` declarations only.
 //!
 //! The `test_check_rust_*` cases at the end hold those gaps as known
 //! differences against a fresh index in
@@ -2063,6 +2063,14 @@ fn overlay_of_caller_edit(
 }
 
 /// The calls out of `t` in [`CALLER`] from a full index of `files`.
+/// The reindex and the overlay of `files` after the caller, the last file,
+/// gains a second function.
+fn reindex_and_overlay_after_caller_grows(files: &[(String, String)]) -> (Vec<Call>, Vec<Call>) {
+    let caller = &files.last().expect("the caller is the last file").1;
+    let edited = format!("{caller}\npub fn u() {{}}\n");
+    reindex_and_overlay(files, CALLER, &edited, &["t"])
+}
+
 fn reindex_calls(files: &[(String, String)]) -> Vec<Call> {
     let bytes = archive(&index(files));
     let graph = access(&bytes);
@@ -2218,9 +2226,7 @@ fn glob_crates(path: &str, b_files: &[(&str, &str)]) -> Vec<(String, String)> {
 /// second function: the reindex binds nothing, and so must the overlay.
 fn check_glob_crates_bind_nothing(path: &str, b_files: &[(&str, &str)]) {
     let files = glob_crates(path, b_files);
-    let caller = &files.last().expect("the caller is the last file").1;
-    let edited = format!("{caller}\npub fn u() {{}}\n");
-    let (reindex, overlay) = reindex_and_overlay(&files, CALLER, &edited, &["t"]);
+    let (reindex, overlay) = reindex_and_overlay_after_caller_grows(&files);
     assert!(reindex.is_empty(), "the index binds nothing: {reindex:#?}");
     assert!(
         overlay.iter().all(|call| reindex.contains(call)),
@@ -2391,9 +2397,7 @@ fn test_overlay_view_path_attr_twin_of_glob_module_binds_own_item() {
             ),
         ],
     );
-    let caller = &files.last().expect("the caller is the last file").1;
-    let edited = format!("{caller}\npub fn u() {{}}\n");
-    let (reindex, overlay) = reindex_and_overlay(&files, CALLER, &edited, &["t"]);
+    let (reindex, overlay) = reindex_and_overlay_after_caller_grows(&files);
     assert!(reindex.is_empty(), "the index binds nothing: {reindex:#?}");
     assert_eq!(
         targets(&overlay),
@@ -2500,9 +2504,7 @@ fn check_glob_crates_bind_like_index(
     expected: &[(&str, &str)],
 ) {
     let files = glob_crates(path, b_files);
-    let caller = &files.last().expect("the caller is the last file").1;
-    let edited = format!("{caller}\npub fn u() {{}}\n");
-    let (reindex, overlay) = reindex_and_overlay(&files, CALLER, &edited, &["t"]);
+    let (reindex, overlay) = reindex_and_overlay_after_caller_grows(&files);
     assert_reindex_binds(&reindex, None, expected, path);
     assert_eq!(overlay, reindex);
 }
@@ -2535,11 +2537,13 @@ fn test_overlay_view_cfg_twin_mod_binds_like_index() {
 /// still reach the right target by name at a lower confidence.
 #[test]
 fn test_overlay_view_reexport_through_index_only_module_binds_nothing_beyond_index() {
-    for (label, b_lib, extra) in [
+    const REEXPORT_CALLER: &str = "use b::f;\n\npub fn t() {\n    f();\n}\n";
+    for (label, b_lib, extra, caller) in [
         (
             "own fn of the module's name",
             "my_cfg! {\n    mod unix;\n}\npub use self::unix::f;\npub fn unix() {}\n",
             &[][..],
+            REEXPORT_CALLER,
         ),
         (
             "glob item of the module's name",
@@ -2548,9 +2552,18 @@ fn test_overlay_view_reexport_through_index_only_module_binds_nothing_beyond_ind
                 "crates/b/src/other.rs",
                 "pub fn unix() {}\n\npub fn f() {}\n",
             )][..],
+            REEXPORT_CALLER,
+        ),
+        (
+            "path through the module, the walk inside the same question",
+            "my_cfg! {\n    mod unix;\n}\nmod other;\npub use other::*;\n",
+            &[(
+                "crates/b/src/other.rs",
+                "pub fn unix() {}\n\npub fn f() {}\n\npub fn e() {}\n",
+            )][..],
+            "pub fn t() {\n    b::unix::f();\n}\n",
         ),
     ] {
-        let caller = "use b::f;\n\npub fn t() {\n    f();\n}\n";
         let mut b_files = vec![("crates/b/src/unix.rs", "pub fn f() {}\n")];
         b_files.extend_from_slice(extra);
         let files = reexport_crates(caller, b_lib, &b_files);
@@ -2648,6 +2661,14 @@ fn test_overlay_view_index_only_subtree_unreadable_or_path_attr_reads_no_rows() 
                 .iter()
                 .all(|call| call.confidence < Tier::ImportScoped.confidence()),
             "{label}: the overlay read rows of a tree it could not walk whole: {overlay:#?}"
+        );
+        let reindex = reindex_calls(&files);
+        let target = |call: &Call| (call.callee_file.clone(), call.callee.clone());
+        assert!(
+            overlay
+                .iter()
+                .all(|call| reindex.iter().any(|known| target(known) == target(call))),
+            "{label}: overlay target the reindex lacks\noverlay: {overlay:#?}\nreindex: {reindex:#?}"
         );
     }
 }

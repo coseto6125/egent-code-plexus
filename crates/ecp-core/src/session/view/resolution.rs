@@ -3019,11 +3019,11 @@ pub(super) struct RustModules<'a> {
     conventional_trees: RefCell<FxHashMap<&'a str, Option<IndexOnlyModules<'a>>>>,
 }
 
-/// One Rust module file's text and what the view reads from it.
 /// Parent file → the names of the modules it declares that only the index
 /// sees ([`RustModules::index_only_module`]).
 type IndexOnlyModules<'a> = FxHashMap<&'a str, Vec<String>>;
 
+/// One Rust module file's text and what the view reads from it.
 struct ModuleText<'a> {
     text: Stripped,
     /// The file's `pub use` rows ([`rust_pub_use::pub_use_entries`]) per
@@ -3370,7 +3370,9 @@ impl<'a> RustModules<'a> {
                 return published;
             }
             if self.conventional_tree(root) {
-                return if self.target_tree_conventional(root, &published) {
+                return if !self.index_only_module(root, module, name)
+                    && self.target_tree_conventional(root, &published)
+                {
                     published
                 } else {
                     ladder::Published::Unknown
@@ -3456,8 +3458,11 @@ impl<'a> RustModules<'a> {
     /// Whether `name` is a module the index places below `module` in the
     /// tree of `root` that the layout guess cannot see (a `mod` inside a
     /// macro call): the guess would read `name` as an item there. Known
-    /// only once [`Self::conventional_tree`] walked the tree, which every
-    /// answer from text rows waits for.
+    /// only once [`Self::conventional_tree`] walked the tree, so
+    /// [`Self::published`] asks again after its own walk. An answer that
+    /// needs no walk (no binding or glob row, or the `Own` shortcut) comes
+    /// first in a tree no question walked yet: the accepted gap of a
+    /// direct path through an index-only module.
     fn index_only_module(&self, root: &str, module: &str, name: &str) -> bool {
         self.conventional_trees
             .borrow()
