@@ -1,3 +1,4 @@
+use crate::session::sources::RecordedSources;
 use crate::session::view_cache;
 use ecp_core::contracts::routing::SizeCap;
 use ecp_core::graph::{ArchivedZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC};
@@ -289,9 +290,11 @@ impl Engine {
 
     /// The query-time overlay merge view, built once per process on first
     /// use, or decoded from the session's view cache when an earlier process
-    /// built it from the same graph, binary, fragments and tombstones. `None`
-    /// when no session overlay is attached, the working tree is clean, or
-    /// every entry failed validation — callers then traverse the base graph
+    /// built it from the same graph, binary, fragments (with the content
+    /// hash each one parsed) and tombstones. A view whose source reads found
+    /// text other than the recorded one is not stored. `None` when no
+    /// session overlay is attached, the working tree is clean, or every
+    /// entry failed validation — callers then traverse the base graph
     /// exactly as before (zero added cost).
     pub fn overlay_view(&self) -> Option<&OverlayView> {
         self.overlay_view
@@ -318,6 +321,12 @@ impl Engine {
                     crate::session::overlay_reader::decode_view_inputs_with_records(
                         &inputs.fragments,
                     );
+                // The view reads only text whose hash the key covers (the
+                // graph's or an accepted fragment's), so a view whose reads
+                // all found that text is a function of the key. One that
+                // found other text or no file at a recorded hash is not
+                // stored.
+                let sources = RecordedSources::new(root, graph, &inputs);
                 let view = OverlayView::build_with_configs(
                     graph,
                     &files,
@@ -325,8 +334,9 @@ impl Engine {
                     &inputs.tombstones,
                     &inputs.stale,
                     &inputs.configs,
+                    Some(&|rel: &str| sources.read(rel)),
                 )?;
-                if let Some(key) = key {
+                if let Some(key) = key.filter(|_| sources.all_recorded()) {
                     view_cache::write(dir, key, &view);
                 }
                 Some(view)

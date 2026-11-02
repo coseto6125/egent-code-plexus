@@ -21,15 +21,17 @@
 //!
 //! # Out of scope (documented)
 //! * `cfg`-gated `mod` decls (first filesystem hit wins).
-//! * `#[path = "..."]` overrides.
-//! * Macro-expanded `use`s.
+//! * Macro-expanded `use`s, except a `pub use` at the start of its line,
+//!   which the text scan reads inside a macro body too.
 //! * `extern crate` re-exports (legacy syntax).
 //! * Proc-macro-generated re-exports (`paste!`, `derive_more`, etc.) — logged
 //!   as BlindSpot if encountered.
 
 use crate::resolution::index::SymbolTable;
-use ecp_core::analyzer::ladder::{self, Namespace, Published, ReExport, TreeItem};
-use ecp_core::analyzer::rust_paths::rust_module_dir;
+use ecp_core::analyzer::ladder::{self, Namespace, Published, TreeItem};
+use ecp_core::analyzer::rust_pub_use::{
+    self, mod_steps, path_attrs, pub_use_entries, strip_comments, PubUseEntry,
+};
 use ecp_core::contracts::workspace::{
     ConfigPresence, ConfigRead, Ecosystem, Membership, NameRank, Scope, ScopeId, ScopeName,
     WorkspaceFacts,
@@ -39,88 +41,6 @@ use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
-// Regex helpers (compile-once per call via OnceLock)
-// ---------------------------------------------------------------------------
-
-use std::sync::OnceLock;
-
-fn mod_decl_re() -> &'static regex::Regex {
-    static RE: OnceLock<regex::Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        regex::Regex::new(r"(?m)^\s*(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;")
-            .expect("mod_decl_re")
-    })
-}
-
-fn path_attr_re() -> &'static regex::Regex {
-    static RE: OnceLock<regex::Regex> = OnceLock::new();
-    RE.get_or_init(|| regex::Regex::new(r#"#\[path\s*=\s*"([^"]+)"\]"#).expect("path_attr_re"))
-}
-
-fn line_comment_re() -> &'static regex::Regex {
-    static RE: OnceLock<regex::Regex> = OnceLock::new();
-    RE.get_or_init(|| regex::Regex::new(r"//[^\n]*").expect("line_comment_re"))
-}
-
-fn block_comment_re() -> &'static regex::Regex {
-    static RE: OnceLock<regex::Regex> = OnceLock::new();
-    RE.get_or_init(|| regex::Regex::new(r"(?s)/\*.*?\*/").expect("block_comment_re"))
-}
-
-/// Matches `pub use <path>::<Name>` and `pub use <path>::<Name> as <Alias>`.
-/// Also matches `pub use <path>::*` for glob re-exports.
-///
-/// Capture groups:
-///   1: module path prefix (everything before the last `::`)
-///   2: exported item name (last segment, or `*` for glob)
-///   3: optional alias after `as`
-///
-/// Visibility variants (`pub(crate)`, `pub(super)`, etc.) are all accepted
-/// because all make the item reachable from *some* external scope.
-fn pub_use_re() -> &'static regex::Regex {
-    static RE: OnceLock<regex::Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        regex::Regex::new(
-            r"(?m)^\s*pub(?:\s*\([^)]*\))?\s+use\s+((?:[A-Za-z_][A-Za-z0-9_]*::)+)(\*|[A-Za-z_][A-Za-z0-9_]*)(?:\s+as\s+([A-Za-z_][A-Za-z0-9_]*))?\s*;"
-        )
-        .expect("pub_use_re")
-    })
-}
-
-/// Matches the one-level group form `pub use <path>::{A, b::C, D as E};`.
-/// Capture 1 is the shared prefix (with its trailing `::`), capture 2 the
-/// brace body. A nested group inside the braces does not match, so that
-/// statement keeps its pre-group behaviour (not collected).
-fn pub_use_group_re() -> &'static regex::Regex {
-    static RE: OnceLock<regex::Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        regex::Regex::new(
-            r"(?m)^\s*pub(?:\s*\([^)]*\))?\s+use\s+((?:[A-Za-z_][A-Za-z0-9_]*::)+)\{([^{};]*)\}\s*;"
-        )
-        .expect("pub_use_group_re")
-    })
-}
-
-/// Strip `//` and `/* */` comments from source, preserving newlines so
-/// MULTILINE regex anchors keep working.
-fn strip_comments(src: &str) -> String {
-    let s = block_comment_re().replace_all(src, |caps: &regex::Captures| {
-        caps[0]
-            .chars()
-            .map(|c| if c == '\n' { '\n' } else { ' ' })
-            .collect::<String>()
-    });
-    line_comment_re()
-        .replace_all(&s, |caps: &regex::Captures| {
-            caps[0]
-                .chars()
-                .map(|c| if c == '\n' { '\n' } else { ' ' })
-                .collect::<String>()
-        })
-        .into_owned()
-}
-
-// ---------------------------------------------------------------------------
 // Module tree
 // ---------------------------------------------------------------------------
 
@@ -128,27 +48,11 @@ fn strip_comments(src: &str) -> String {
 /// The crate root itself maps to an empty vec `[]`.
 type ModTree = FxHashMap<Vec<String>, PathBuf>;
 
-/// A single `pub use` re-export entry collected from a source file.
-#[derive(Debug, Clone)]
-struct ReExportEntry {
-    /// The path prefix segments before the last `::` (e.g. `["inner"]` for
-    /// `pub use inner::Widget`). May start with `crate`, `super`, `self`, or
-    /// a crate name.
-    path_prefix: Vec<String>,
-    /// The original item name at the source (last segment before `as`),
-    /// `*` for a glob re-export (`pub use path::*`).
-    original_name: String,
-    /// The module path of the file that contains this `pub use` statement.
-    /// Used to resolve relative prefix segments (e.g. `nested` in
-    /// `src/deep/mod.rs` means `deep::nested`, not root-level `nested`).
-    containing_mod_path: Vec<String>,
-}
-
 /// Per-crate map from `(canonical_abs_file, exported_symbol_name)` to the
 /// re-export entry that publishes it. `exported_symbol_name` is the name
 /// visible at the re-export site (i.e. after `as Alias` renaming, or the
 /// original name when no alias is given, or `"*"` for glob entries).
-type ReExportMap = FxHashMap<(PathBuf, String), ReExportEntry>;
+type ReExportMap = FxHashMap<(PathBuf, String), PubUseEntry>;
 
 /// Workspace-level Rust module tree: one `ModTree` per crate.
 pub struct RustWorkspaceModTree {
@@ -511,18 +415,13 @@ impl<'t> ladder::ModuleTreeFacts for IndexModuleTree<'t> {
 
     /// The `pub use` naming `name`, else a glob `pub use` of the module.
     fn published(&self, root: TreeScope<'t>, module: &'t Path, name: &str) -> Published<'_> {
-        let entry = |name: &str| {
-            root.reexports
-                .get(&(module.to_path_buf(), name.to_string()))
-        };
-        match entry(name).or_else(|| entry("*")) {
-            Some(entry) => Published::ReExport(ReExport {
-                prefix: &entry.path_prefix,
-                original: &entry.original_name,
-                containing: &entry.containing_mod_path,
-            }),
-            None => Published::Own,
-        }
+        rust_pub_use::published(
+            |name| {
+                root.reexports
+                    .get(&(module.to_path_buf(), name.to_string()))
+            },
+            name,
+        )
     }
 
     fn declares(&self, module: &'t Path, name: &str, namespace: Namespace) -> bool {
@@ -609,30 +508,10 @@ fn build_mod_tree_and_reexports(entry: &Path) -> (ModTree, ReExportMap) {
         };
         let clean = strip_comments(&src);
 
-        // Collect `#[path = "..."]` attributes so we can honour them.
-        // Simple heuristic: scan for `#[path = "..."]` on the line immediately
-        // before a `mod NAME;`. We pass them as a map: mod_name → rel_path.
-        let path_attrs = collect_path_attrs(&clean);
-
-        for cap in mod_decl_re().captures_iter(&clean) {
-            let name = cap[1].to_string();
-            let child_file = if let Some(override_rel) = path_attrs.get(&name) {
-                file.parent()
-                    .map(|d| d.join(override_rel))
-                    .unwrap_or_else(|| PathBuf::from(override_rel))
-            } else {
-                // The entry is the crate root whatever its file name
-                // (`[lib] path = "src/core.rs"`), so its modules sit beside it.
-                let found = if mod_path.is_empty() {
-                    file.parent().and_then(|dir| module_file_in(dir, &name))
-                } else {
-                    file_for_mod(&file, &name)
-                };
-                match found {
-                    Some(p) => p,
-                    None => continue,
-                }
-            };
+        let attrs = path_attrs(&clean);
+        for (name, child_file) in
+            mod_steps(&clean, &attrs, &file, mod_path.is_empty(), |p| p.exists())
+        {
             let child_canon = match child_file.canonicalize() {
                 Ok(p) => p,
                 Err(_) => {
@@ -647,121 +526,19 @@ fn build_mod_tree_and_reexports(entry: &Path) -> (ModTree, ReExportMap) {
                 continue;
             }
             let mut child_path = mod_path.clone();
-            child_path.push(name);
+            child_path.push(name.to_string());
             tree.insert(child_path.clone(), child_canon.clone());
             stack.push((child_path, child_canon));
         }
 
         // Collect `pub use` re-exports from this file.
-        collect_pub_use_entries(&clean, &file, &mod_path, &mut reexports);
-    }
-    (tree, reexports)
-}
-
-/// Scan `clean` (comments already stripped) for `pub use` statements and
-/// record each one in `reexports`, keyed by `(file, exported_name)`.
-///
-/// For `pub use path::Name as Alias` the key uses `Alias` (the name visible
-/// to callers); `original_name` stores `Name` (the source symbol to resolve).
-/// For `pub use path::*` the key uses `"*"` as a wildcard sentinel.
-///
-/// `containing_mod_path` is the module path of `file` within the crate tree
-/// (e.g. `["deep"]` for `src/deep/mod.rs`). It is stored in the entry so
-/// that relative path prefixes (like `nested` in `pub use nested::W`) can be
-/// correctly resolved as absolute crate-rooted paths during chain walking.
-fn collect_pub_use_entries(
-    clean: &str,
-    file: &Path,
-    containing_mod_path: &[String],
-    reexports: &mut ReExportMap,
-) {
-    for cap in pub_use_re().captures_iter(clean) {
-        // cap[1]: prefix like "inner::" or "crate::deep::" (trailing "::")
-        // cap[2]: item name or "*"; cap[3]: optional alias
-        insert_pub_use(
-            cap[1].split("::"),
-            &cap[2],
-            cap.get(3).map(|m| m.as_str()),
-            file,
-            containing_mod_path,
-            reexports,
+        reexports.extend(
+            pub_use_entries(&clean, &mod_path)
+                .into_iter()
+                .map(|(name, entry)| ((file.clone(), name), entry)),
         );
     }
-    for cap in pub_use_group_re().captures_iter(clean) {
-        for member in cap[2].split(',').map(str::trim).filter(|m| !m.is_empty()) {
-            let (path, alias) = match member.split_once(" as ") {
-                Some((path, alias)) => (path.trim(), Some(alias.trim())),
-                None => (member, None),
-            };
-            let (sub, item) = match path.rsplit_once("::") {
-                Some((sub, item)) => (Some(sub), item),
-                None => (None, path),
-            };
-            if item == "self" {
-                continue;
-            }
-            insert_pub_use(
-                cap[1]
-                    .split("::")
-                    .chain(sub.into_iter().flat_map(|s| s.split("::"))),
-                item,
-                alias,
-                file,
-                containing_mod_path,
-                reexports,
-            );
-        }
-    }
-}
-
-/// Record one re-exported item: `pub use <prefix>::<item> [as <alias>]`.
-fn insert_pub_use<'a>(
-    prefix: impl Iterator<Item = &'a str>,
-    item: &str,
-    alias: Option<&str>,
-    file: &Path,
-    containing_mod_path: &[String],
-    reexports: &mut ReExportMap,
-) {
-    let path_prefix: Vec<String> = prefix
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect();
-    if path_prefix.is_empty() {
-        return;
-    }
-    let exported_name = alias.unwrap_or(item).to_string();
-    reexports.insert(
-        (file.to_path_buf(), exported_name),
-        ReExportEntry {
-            path_prefix,
-            original_name: item.to_string(),
-            containing_mod_path: containing_mod_path.to_vec(),
-        },
-    );
-}
-
-/// Locate the child module file for `mod NAME;` declared in `parent_file`.
-/// Convention mirrors the Rust reference:
-/// - `src/lib.rs`, `src/main.rs`, `foo/mod.rs` and Cargo target roots
-///   (`src/bin/x.rs`, `tests/x.rs`, ...) → children at `<dir>/NAME.rs`
-///   or `<dir>/NAME/mod.rs`.
-/// - `foo/bar.rs` → children at `foo/bar/NAME.rs` or `foo/bar/NAME/mod.rs`.
-fn file_for_mod(parent_file: &Path, mod_name: &str) -> Option<PathBuf> {
-    module_file_in(&rust_module_dir(parent_file)?, mod_name)
-}
-
-fn module_file_in(base: &Path, mod_name: &str) -> Option<PathBuf> {
-    let flat = base.join(format!("{mod_name}.rs"));
-    if flat.exists() {
-        return Some(flat);
-    }
-    let mod_file = base.join(mod_name).join("mod.rs");
-    if mod_file.exists() {
-        return Some(mod_file);
-    }
-    None
+    (tree, reexports)
 }
 
 // ---------------------------------------------------------------------------
@@ -1052,30 +829,6 @@ fn find_crate_entry(crate_dir: &Path, lib_path: Option<&str>) -> Option<PathBuf>
 }
 
 // ---------------------------------------------------------------------------
-// #[path = "..."] attribute collection
-// ---------------------------------------------------------------------------
-
-/// Scan cleaned source for `#[path = "rel"]` immediately before `mod NAME;`
-/// and return a map `mod_name → rel_path`.
-fn collect_path_attrs(clean: &str) -> FxHashMap<String, String> {
-    let mut out: FxHashMap<String, String> = FxHashMap::default();
-    let lines: Vec<&str> = clean.lines().collect();
-    for (i, line) in lines.iter().enumerate() {
-        if let Some(caps) = path_attr_re().captures(line) {
-            let rel_path = caps[1].to_string();
-            let lookahead_end = (i + 4).min(lines.len());
-            for next_line in &lines[(i + 1)..lookahead_end] {
-                if let Some(mcap) = mod_decl_re().captures(next_line) {
-                    out.insert(mcap[1].to_string(), rel_path.clone());
-                    break;
-                }
-            }
-        }
-    }
-    out
-}
-
-// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -1104,31 +857,6 @@ mod tests {
             fs::write(path, content).unwrap();
         }
         dir
-    }
-
-    #[test]
-    fn test_file_for_mod_cargo_bin_root_finds_sibling_module() {
-        let dir = make_tree(&[
-            ("src/bin/tool.rs", "mod support;\n"),
-            ("src/bin/support.rs", "pub fn f() {}\n"),
-        ]);
-        assert_eq!(
-            file_for_mod(&dir.path().join("src/bin/tool.rs"), "support"),
-            Some(dir.path().join("src/bin/support.rs"))
-        );
-    }
-
-    #[test]
-    fn test_file_for_mod_ordinary_file_finds_stem_directory_child() {
-        let dir = make_tree(&[
-            ("src/a/b.rs", "mod c;\n"),
-            ("src/a/b/c.rs", "pub fn f() {}\n"),
-            ("src/a/c.rs", "pub fn g() {}\n"),
-        ]);
-        assert_eq!(
-            file_for_mod(&dir.path().join("src/a/b.rs"), "c"),
-            Some(dir.path().join("src/a/b/c.rs"))
-        );
     }
 
     // ── `[lib] name` / `[lib] path` overrides ──────────────────────────────

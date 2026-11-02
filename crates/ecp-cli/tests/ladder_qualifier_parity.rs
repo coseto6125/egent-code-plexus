@@ -22,7 +22,7 @@
 //!
 //! The divergences the slice keeps, each behind one parameter, have unit
 //! fixtures in `ecp_core::analyzer::ladder`'s tests (`StemFile`) or stay
-//! the overlay's own facts (a workspace-crate `use` head, `RustTail`).
+//! the overlay's own facts (a workspace-crate `use` head).
 
 #[path = "common/baseline.rs"]
 mod baseline;

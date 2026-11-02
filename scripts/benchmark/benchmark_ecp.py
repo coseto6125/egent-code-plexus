@@ -228,23 +228,36 @@ def _restore_file(
     return True
 
 
+def _unique_rels(rels: list[str]) -> list[str]:
+    """`rels` normalized (`./a.ts` and `a.ts` name one file), first spelling kept."""
+    return list(dict.fromkeys(os.path.normpath(rel) for rel in rels))
+
+
 def _bench_dirty(
-    binary: Path, repo: Path, rel_file: str, query: str, mode: str | None, append: str, runs: int
+    binary: Path,
+    repo: Path,
+    rel_files: str | list[str],
+    query: str,
+    mode: str | None,
+    append: str,
+    runs: int,
 ) -> list[Sample]:
-    """Time `ecp find` on a clean tree and after one edit, in paired runs.
+    """Time `ecp find` on a clean tree and after editing each of `rel_files`
+    (a path listed twice is edited once), in paired runs.
 
     Each pair: (a) the clean tree with a new session id; (b) the first query
     after the edit, with a new session id so its L1 state starts empty; (c) a
     later query in that same session and dirty state; (d) the dirty state with
     every session variable cleared (the no-session case). Pair 0 is a discarded
-    warm-up. The file's bytes and mtime are restored before every pair and on
-    any exit, so git sees the tree clean again; a file the user changed or
-    deleted meanwhile is left alone with a warning.
+    warm-up. Each file's bytes and mtime are restored before every pair and
+    on any exit, so git sees the tree clean again; a file the user changed or
+    deleted meanwhile is left alone with a warning, and the run stops.
     """
-    target = repo / rel_file
-    original = target.read_bytes()
-    stat = target.stat()
-    edited = original + append.encode()
+    rels = _unique_rels([rel_files] if isinstance(rel_files, str) else rel_files)
+    targets = [repo / rel for rel in rels]
+    originals = [t.read_bytes() for t in targets]
+    stamps = [(st.st_atime_ns, st.st_mtime_ns) for st in map(Path.stat, targets)]
+    edited = [o + append.encode() for o in originals]
     cmd = [str(binary), "find", query, "--repo", str(repo)]
     if mode:
         cmd += ["--mode", mode]
@@ -259,31 +272,35 @@ def _bench_dirty(
 
     # What the script itself last put on disk: a save by the user in between
     # makes the file differ, and `_restore_file` then leaves it alone.
-    written = original
-    abandoned = False
+    written = list(originals)
+    abandoned = [False] * len(targets)
 
-    def restore() -> bool:
-        nonlocal written, abandoned
-        if abandoned:
-            return False
-        if not _restore_file(target, original, written, (stat.st_atime_ns, stat.st_mtime_ns)):
-            abandoned = True
-            return False
-        written = original
-        return True
+    def restore() -> list[str]:
+        changed: list[str] = []
+        for i, target in enumerate(targets):
+            if abandoned[i]:
+                continue
+            if _restore_file(target, originals[i], written[i], stamps[i]):
+                written[i] = originals[i]
+            else:
+                abandoned[i] = True
+                changed.append(rels[i])
+        return changed
 
     try:
         for i in range(runs + 1):
-            if not restore():
-                samples[0].err = f"{rel_file} changed during the run; benchmark stopped"
+            changed = restore()
+            if changed:
+                samples[0].err = f"{', '.join(changed)} changed during the run; benchmark stopped"
                 return samples
             clean_sid = f"bench-clean-{tag}-{i}"
             dirty_sid = f"bench-dirty-{tag}-{i}"
             pair: list[float] = []
             for phase, sid in enumerate((clean_sid, dirty_sid, dirty_sid, None)):
                 if phase == 1:
-                    target.write_bytes(edited)
-                    written = edited
+                    for j, target in enumerate(targets):
+                        target.write_bytes(edited[j])
+                        written[j] = edited[j]
                 elapsed, rc, _out, stderr = _run(cmd, repo, env=_session_env(sid))
                 if rc != 0:
                     tail = stderr.strip().splitlines()[-1] if stderr.strip() else f"exit {rc}"
@@ -423,27 +440,28 @@ def _print_summary(samples: list[Sample]) -> None:
 def _dirty_phase(args: argparse.Namespace) -> tuple[list[Sample], dict[str, object] | None]:
     """Run the dirty-file scenario; return its samples and its protocol record."""
     repo: Path = args.dirty_repo
-    target = repo / args.dirty_file
-    if not target.is_file():
-        print(f"error: dirty file {target} not found", file=sys.stderr)
-        return [], None
+    rels = _unique_rels(args.dirty_file)
+    for rel in rels:
+        if not (repo / rel).is_file():
+            print(f"error: dirty file {repo / rel} not found", file=sys.stderr)
+            return [], None
     name = f"ecpBenchDirty{os.getpid()}"
     append = args.dirty_append
     if append is None:
-        template = DIRTY_APPEND.get(target.suffix)
-        if template is None:
-            print(f"error: no default edit for {target.suffix}; pass --dirty-append", file=sys.stderr)
+        templates = {DIRTY_APPEND.get(Path(rel).suffix) for rel in rels}
+        if None in templates or len(templates) > 1:
+            print("error: no single default edit for these suffixes; pass --dirty-append", file=sys.stderr)
             return [], None
-        append = template.format(name=name)
+        append = templates.pop().format(name=name)
     print(f"→ dirty-file scenario: index {repo}")
     _run([str(args.binary), "admin", "index", "--repo", str(repo)], cwd=repo, env=_session_env(None))
     query = args.dirty_query or _probe_symbols(args.binary, repo).get("method_name", "main")
     print(
         f"→ dirty-file scenario: find {query!r} mode={args.dirty_mode or 'default'} "
-        f"edit={args.dirty_file} runs={args.dirty_runs}+1 warm-up"
+        f"edit={','.join(rels)} runs={args.dirty_runs}+1 warm-up"
     )
     samples = _bench_dirty(
-        args.binary, repo, args.dirty_file, query, args.dirty_mode, append, args.dirty_runs
+        args.binary, repo, rels, query, args.dirty_mode, append, args.dirty_runs
     )
     for s in samples:
         if s.err:
@@ -454,7 +472,7 @@ def _dirty_phase(args: argparse.Namespace) -> tuple[list[Sample], dict[str, obje
     protocol: dict[str, object] = {
         "repo": str(repo),
         "head": _git_head(repo),
-        "file": args.dirty_file,
+        "file": rels,
         "append": append,
         "query": query,
         "mode": args.dirty_mode,
@@ -503,7 +521,8 @@ def main() -> int:
     )
     ap.add_argument(
         "--dirty-file",
-        help="Repo-relative file the dirty-file scenario edits; the scenario runs only when set",
+        action="append",
+        help="Repo-relative file the dirty-file scenario edits (repeatable); the scenario runs only when set",
     )
     ap.add_argument(
         "--dirty-repo",

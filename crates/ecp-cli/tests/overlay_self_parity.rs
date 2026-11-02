@@ -2,10 +2,12 @@
 //! them must give the `Calls` edges the index gave. Any difference is a rule
 //! the two sides do not share.
 //!
+//! The view reads each module's text from the fixture, as the engine reads
+//! the worktree, so it finds `kit`'s `pub use make::build` row as the index
+//! does: `graph.bin` keeps no import visibility.
+//!
 //! What the fixture does not cover: a crate-head path through a `pub use`
-//! (`kit::build()`). `graph.bin` keeps no import visibility, so the overlay
-//! cannot follow the re-export the index follows
-//! (FU-2026-10-26-fb9b443e70ba).
+//! (`kit::build()`) (FU-2026-10-26-fb9b443e70ba).
 
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_cli::config_parser::parse_configs;
@@ -162,7 +164,14 @@ fn test_overlay_self_parity_rust_workspace_dirty_unchanged_files_equal_base() {
         .filter(|(rel, _)| is_rust(rel))
         .map(|&(rel, source)| parse(rel, source).into())
         .collect();
-    let view = OverlayView::build(base, &inputs).expect("dirty files make a view");
+    let sources = |rel: &str| {
+        WORKSPACE
+            .iter()
+            .find(|&&(path, _)| path == rel)
+            .map(|&(_, source)| source.to_string())
+    };
+    let view =
+        OverlayView::build_with_sources(base, &inputs, &sources).expect("dirty files make a view");
     let merged = MergedGraph::new(base, Some(&view));
     // `use kit::build; build()` reaches `kit`'s `pub use make::build`: both
     // sides bind it at the import tier (FU-2026-10-26-6d659c216941).

@@ -1,0 +1,3 @@
+# owner: FU-2026-10-26-2eb5f0cb0d38 (P3: C# generic arity of a clean base)
+edge overlay-only x1 Extends Class src/Child.cs:2 ExtraArgs #e2cfa2b88a8a1e41 -> Class src/Plain.cs:2 Plain #e25d7a988424407f reason=heritage conf=0.7
+edge overlay-only x1 Extends Class src/Child.cs:3 MissingArg #6aa77a113d2e3c0f -> Class src/Pair.cs:2 Pair #64724f1946a5440a reason=heritage conf=0.7

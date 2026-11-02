@@ -25,13 +25,16 @@
 //! | section | key |
 //! |---|---|
 //! | `identity` | node uid, kind, name, file, start line |
-//! | `edge` | rel, source and target identity, exact confidence |
+//! | `edge` | rel, source and target identity, normalized reason, exact confidence |
 //! | `parent` | node identity, owner class, each incoming `Defines` / `HasMethod` / `HasProperty` source |
 //! | `input` | a re-parsed file whose fragment, or a missing path whose tombstone, the reader dropped |
 //!
 //! An edge stores no line of its own, so the endpoints' start lines stand in.
-//! The overlay's `Calls` reason is the uncommitted-edit marker, so reasons
-//! stay out of the key. Index-time outputs (processes and the name-paired
+//! The reason is part of the key. The overlay marks the edges it resolved
+//! itself `l1-overlay` (`OVERLAY_EDGE_REASON`); that marker reads as `call`,
+//! the alias `overlay_rust_cross_crate.rs` applies. The reason sits before
+//! `conf=` so `rsplit_once(" conf=")` readers of other test files keep
+//! working. Index-time outputs (processes and the name-paired
 //! heuristic edges, plan "Beyond calls") are left out: the plan asserts
 //! their caveat, not their value.
 //!
@@ -50,7 +53,7 @@ use ecp_core::contracts::dirty_event::{PathClass, RepoPath};
 use ecp_core::contracts::routing::{FileRouter, SizeCap};
 use ecp_core::graph::{ArchivedZeroCopyGraph, NodeKind, RelType, ZeroCopyGraph};
 use ecp_core::session::closure::{ConfigEdits, StaleClosure};
-use ecp_core::session::merged::MergedGraph;
+use ecp_core::session::merged::{MergedGraph, OVERLAY_EDGE_REASON};
 use ecp_core::session::view::OverlayFileRecords;
 use ecp_core::session::{layout, DirtyEvents, OverlayFileInput, OverlayView, SessionMeta};
 use rustc_hash::FxHashMap;
@@ -111,6 +114,7 @@ fn is_containment(rel: RelType) -> bool {
 /// Every visible node and edge of `merged`, rendered.
 pub fn snapshot(merged: &MergedGraph<'_>) -> Snapshot {
     let base_len = merged.base_len();
+    let graph: &ArchivedZeroCopyGraph = merged;
     let describe = |idx: u32| -> Option<String> {
         let node = merged.node(idx)?;
         if is_index_time_kind(node.kind()) {
@@ -145,8 +149,12 @@ pub fn snapshot(merged: &MergedGraph<'_>) -> Snapshot {
                 .or_default()
                 .push(format!("{} {source}", rel.as_str()));
         }
+        let reason = match edge.reason(graph) {
+            OVERLAY_EDGE_REASON => "call",
+            reason => reason,
+        };
         snap.edge.push(format!(
-            "{} {source} -> {target} conf={:?}",
+            "{} {source} -> {target} reason={reason} conf={:?}",
             rel.as_str(),
             edge.confidence()
         ));
@@ -313,6 +321,10 @@ pub struct Observed {
     /// `input dropped <path>` for each written fragment or tombstone the
     /// reader did not serve.
     pub dropped: BTreeSet<String>,
+    /// Every Rust file's text in the edited worktree, by repo-relative
+    /// path: the view reads module text through it, as the engine reads
+    /// the worktree, after the scenario's temp repo is gone.
+    pub sources: BTreeMap<String, String>,
 }
 
 impl Observed {
@@ -334,6 +346,7 @@ impl Observed {
             &self.tombstones,
             &self.stale,
             &self.configs,
+            Some(&|rel: &str| self.sources.get(rel).cloned()),
         );
         if let Some(view) = &view {
             assert_eq!(
@@ -453,7 +466,31 @@ pub fn run(scenario: &Scenario<'_>) -> Observed {
         stale: read.stale,
         configs: read.configs,
         dropped,
+        sources: rust_sources(repo.path()),
     }
+}
+
+/// Every `.rs` file under `root` outside `.git`, by forward-slashed
+/// repo-relative path.
+fn rust_sources(root: &Path) -> BTreeMap<String, String> {
+    let mut sources = BTreeMap::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if entry.file_name() != ".git" {
+                    stack.push(path);
+                }
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                let rel = path.strip_prefix(root).unwrap();
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    sources.insert(rel.to_string_lossy().replace('\\', "/"), text);
+                }
+            }
+        }
+    }
+    sources
 }
 
 /// The difference lines between the overlay view of `scenario` and a fresh

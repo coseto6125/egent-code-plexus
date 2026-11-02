@@ -30,11 +30,19 @@ use xxhash_rust::xxh3::Xxh3;
 
 use super::overlay_writer::ArchivedFragmentFile;
 
-/// A manifest entry `view_inputs` let through: its rel_path and the
-/// fragment bytes that passed archive validation.
+/// A manifest entry `view_inputs` let through: its rel_path, the fragment
+/// bytes that passed archive validation, and the content hash of the text
+/// it parsed.
 pub struct AcceptedFragment {
     pub(crate) rel_path: String,
     pub(crate) bytes: Vec<u8>,
+    /// The entry's `DirtyEventEntry::content_hash` (16 lowercase hex digits
+    /// of the `u64`), which the source reader checks the file's text
+    /// against (`sources::RecordedSources`). `None` for a fragment of the
+    /// invalidation closure, whose text is the indexed one, and for an
+    /// entry whose hash does not parse: the reader checks either against
+    /// `graph.bin`'s hash.
+    pub(crate) content_hash: Option<u64>,
 }
 
 /// Whether `bytes` has the current fragment archive shape and holds a
@@ -99,9 +107,11 @@ pub fn accepted_fragments(
 }
 
 /// The dirty-file entries that may feed `OverlayView`, plus an xxh3 over
-/// each one's rel_path and fragment bytes (an empty part for a tombstone) in
-/// manifest order. Entry validation guards the staleness holes the manifest
-/// has by construction:
+/// each one's rel_path, fragment bytes and content hash (an empty part for
+/// a tombstone) in manifest order. The content hash is the text the view's
+/// source reader accepts for the path, which equal fragment bytes do not
+/// pin: a fragment's import rows keep no visibility. Entry validation
+/// guards the staleness holes the manifest has by construction:
 ///
 /// - **another format, builder or cap** — a manifest that fails
 ///   `DirtyEvents::is_current` under the worktree's size cap holds parse
@@ -207,9 +217,12 @@ fn manifest_inputs(
         }
         super::view_cache::hash_part(&mut hasher, rel_path.as_bytes());
         super::view_cache::hash_part(&mut hasher, &bytes);
+        let content_hash = entry.content_hash.as_deref().unwrap_or_default();
+        super::view_cache::hash_part(&mut hasher, content_hash.as_bytes());
         fragments.push(AcceptedFragment {
             rel_path: rel_path.clone(),
             bytes,
+            content_hash: u64::from_str_radix(content_hash, 16).ok(),
         });
     }
     Ok((
@@ -335,6 +348,7 @@ mod tests {
         AcceptedFragment {
             rel_path: "src/a.ts".into(),
             bytes,
+            content_hash: None,
         }
     }
 

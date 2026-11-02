@@ -16,6 +16,11 @@
 //!
 //! Only the dirty files' edges are rebuilt: a clean subclass of a type the
 //! edit changed keeps its indexed edge (F7b2).
+//!
+//! The `test_check_csharp_*` cases hold the three kept differences of the
+//! overlay's base resolution (FU-2026-10-26-2eb5f0cb0d38) in
+//! `tests/baselines/strict_parity/<scenario>.txt`: the two repros are
+//! non-empty until their owning phase lands, and the guard stays empty.
 
 #[path = "common/baseline.rs"]
 mod baseline;
@@ -25,7 +30,7 @@ mod strict_parity;
 
 use ecp_core::graph::{ArchivedZeroCopyGraph, RelType};
 use ecp_core::session::merged::MergedGraph;
-use strict_parity::{Edit, Scenario};
+use strict_parity::{check, Edit, Scenario};
 
 const OWNER: &str = "lane F (incremental overlay: builder edges of dirty files)";
 
@@ -425,4 +430,114 @@ fn test_overlay_view_rust_impl_for_clean_type_matches_reindex() {
             .any(|edge| edge.contains(" src/child.rs:") && edge.contains(" run #")),
         "the edge starts at the impl block's method: {edges:#?}"
     );
+}
+
+const P2B_PARTIAL: &str = "FU-2026-10-26-2eb5f0cb0d38 (P2b: C# partial-type global fallback)";
+const P3_ARITY: &str = "FU-2026-10-26-2eb5f0cb0d38 (P3: C# generic arity of a clean base)";
+const GUARD_AMBIGUOUS: &str =
+    "guard for FU-2026-10-26-2eb5f0cb0d38 (ambiguous C# base): this baseline stays empty";
+
+const CS_PROJECT: &str = "<Project Sdk=\"Microsoft.NET.Sdk\">\n</Project>\n";
+
+/// A clean `partial class Base` in two files of one project, and a dirty
+/// `Child` in another namespace that names `Base` with no `using`. The
+/// index binds the bare name at its partial-type global tier, so `Child`
+/// extends `Base`; the overlay finds two same-named parts and binds none.
+///
+/// Expected in the baseline: `edge full-only x1 Extends Class
+/// src/Child.cs:2 Child -> Class src/Base.cs:2 Base reason=heritage
+/// conf=0.7`, and nothing else (the representative part is `Base.cs`, whose
+/// stem names the type).
+#[test]
+fn test_check_csharp_partial_base_matches_baseline() {
+    check(&Scenario {
+        name: "csharp_partial_base",
+        owner: P2B_PARTIAL,
+        files: &[
+            ("src/App.csproj", CS_PROJECT),
+            (
+                "src/Base.cs",
+                "namespace App {\n    public partial class Base {}\n}\n",
+            ),
+            (
+                "src/BasePart.cs",
+                "namespace App {\n    public partial class Base {}\n}\n",
+            ),
+            (
+                "src/Child.cs",
+                "namespace Other {\n    public class Child {}\n}\n",
+            ),
+        ],
+        edits: &[Edit::Write(
+            "src/Child.cs",
+            "namespace Other {\n    public class Child : Base {}\n}\n",
+        )],
+    });
+}
+
+/// A dirty class names a clean base with another type-argument count:
+/// `Plain<int>` where `Plain` has none, `Pair<int, string>` where `Pair`
+/// has one. The index requires the declared arity and binds nothing; the
+/// overlay reads a clean C# type at any arity, so it binds both.
+///
+/// Expected in the baseline, two overlay-only lines: `Extends Class
+/// src/Child.cs:2 ExtraArgs -> Class src/Plain.cs:2 Plain reason=heritage
+/// conf=0.7` and `Extends Class src/Child.cs:3 MissingArg -> Class
+/// src/Pair.cs:2 Pair reason=heritage conf=0.7`.
+#[test]
+fn test_check_csharp_generic_arity_of_clean_base_matches_baseline() {
+    check(&Scenario {
+        name: "csharp_generic_arity",
+        owner: P3_ARITY,
+        files: &[
+            (
+                "src/Plain.cs",
+                "namespace App {\n    public class Plain {}\n}\n",
+            ),
+            (
+                "src/Pair.cs",
+                "namespace App {\n    public class Pair<T> {}\n}\n",
+            ),
+            (
+                "src/Child.cs",
+                "namespace App {\n    public class ExtraArgs {}\n    public class MissingArg {}\n}\n",
+            ),
+        ],
+        edits: &[Edit::Write(
+            "src/Child.cs",
+            "namespace App {\n    public class ExtraArgs : Plain<int> {}\n    public class MissingArg : Pair<int, string> {}\n}\n",
+        )],
+    });
+}
+
+/// Guard, not a repro: two unrelated classes named `Base` in different
+/// namespaces, and a dirty `Child` that names `Base` with no import. The
+/// bare name is ambiguous, and both sides bind nothing, so the baseline
+/// holds no line. A fix of the ambiguous-candidate gap that starts binding
+/// one of the two fails here.
+#[test]
+fn test_check_csharp_ambiguous_base_matches_empty_baseline() {
+    check(&Scenario {
+        name: "csharp_ambiguous_base",
+        owner: GUARD_AMBIGUOUS,
+        files: &[
+            ("src/App.csproj", CS_PROJECT),
+            (
+                "src/LeftBase.cs",
+                "namespace Left {\n    public class Base {}\n}\n",
+            ),
+            (
+                "src/RightBase.cs",
+                "namespace Right {\n    public class Base {}\n}\n",
+            ),
+            (
+                "src/Child.cs",
+                "namespace Other {\n    public class Child {}\n}\n",
+            ),
+        ],
+        edits: &[Edit::Write(
+            "src/Child.cs",
+            "namespace Other {\n    public class Child : Base {}\n}\n",
+        )],
+    });
 }

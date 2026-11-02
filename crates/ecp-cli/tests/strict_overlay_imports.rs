@@ -14,6 +14,13 @@
 //! so this file has no exemption line. Only the edges of the dirty file are
 //! checked: a clean importer of a changed export keeps its indexed edges
 //! (F7b2).
+//!
+//! The `test_check_*_import_call_*` cases hold the `Calls` edge a dirty file
+//! gains through a package import (FU-2026-10-08-2032e2e91ad7, owned by P1)
+//! in `tests/baselines/strict_parity/<scenario>.txt`. The Rust case is a
+//! repro; the Go, Ruby and JS cases are guards, because the overlay's
+//! relative-import probe agrees with the index on them today and the
+//! follow-up left them untested.
 
 #[path = "common/baseline.rs"]
 mod baseline;
@@ -23,7 +30,7 @@ mod strict_parity;
 
 use ecp_core::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
 use ecp_core::session::merged::MergedGraph;
-use strict_parity::{Edit, Scenario};
+use strict_parity::{check, Edit, Scenario};
 
 const OWNER: &str = "lane F (incremental overlay: builder edges of dirty files)";
 
@@ -511,4 +518,128 @@ fn test_overlay_view_vue_ts_script_import_matches_reindex() {
         &["src/beta.ts"],
         &["src/alpha.ts"],
     );
+}
+
+const GUARD_IMPORT_PROBE: &str =
+    "guard for FU-2026-10-08-2032e2e91ad7 (package-import call): this baseline stays empty";
+
+/// Two crates of one workspace each declare `util.rs` with a `helper`. The
+/// dirty file of crate `a` imports `crate::util::helper` and calls
+/// `helper()`. The index binds crate `a`'s `util.rs` through the import
+/// (reason `call`, 0.95). The overlay used to match the module by its last
+/// segments across crates and fall back to the nearest copy (0.6); it now
+/// runs the index's name tiers and binds the same edge.
+///
+/// Expected in the baseline: empty (a guard).
+#[test]
+fn test_check_rust_crate_import_call_same_stem_in_other_crate_matches_baseline() {
+    check(&Scenario {
+        name: "rust_import_call_same_stem",
+        owner: GUARD_IMPORT_PROBE,
+        files: &[
+            ("Cargo.toml", "[workspace]\nmembers = [\"a\", \"b\"]\n"),
+            (
+                "a/Cargo.toml",
+                "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            (
+                "b/Cargo.toml",
+                "[package]\nname = \"b\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            ("a/src/lib.rs", "mod util;\nmod main_mod;\n"),
+            ("a/src/util.rs", "pub fn helper() -> i32 {\n    1\n}\n"),
+            ("b/src/lib.rs", "mod util;\n"),
+            ("b/src/util.rs", "pub fn helper() -> i32 {\n    2\n}\n"),
+            (
+                "a/src/main_mod.rs",
+                "use crate::util::helper;\n\npub fn run() -> i32 {\n    0\n}\n",
+            ),
+        ],
+        edits: &[Edit::Write(
+            "a/src/main_mod.rs",
+            "use crate::util::helper;\n\npub fn run() -> i32 {\n    helper()\n}\n",
+        )],
+    });
+}
+
+/// Go: the dirty `main.go` imports `example.com/app/util` and calls
+/// `util.Helper()`, with a second package of the same name under `other/`.
+/// Both sides bind `util/util.go`.
+#[test]
+fn test_check_go_package_import_call_same_name_package_matches_empty_baseline() {
+    check(&Scenario {
+        name: "go_import_call_same_name_package",
+        owner: GUARD_IMPORT_PROBE,
+        files: &[
+            ("go.mod", "module example.com/app\n\ngo 1.21\n"),
+            (
+                "util/util.go",
+                "package util\n\nfunc Helper() int {\n\treturn 1\n}\n",
+            ),
+            (
+                "other/util/util.go",
+                "package util\n\nfunc Helper() int {\n\treturn 2\n}\n",
+            ),
+            (
+                "main.go",
+                "package main\n\nimport \"example.com/app/util\"\n\nfunc run() int {\n\treturn 0\n}\n",
+            ),
+        ],
+        edits: &[Edit::Write(
+            "main.go",
+            "package main\n\nimport \"example.com/app/util\"\n\nfunc run() int {\n\treturn util.Helper()\n}\n",
+        )],
+    });
+}
+
+/// Ruby: the dirty `lib/main.rb` requires `util` relatively and calls
+/// `Util.helper`. Both sides bind `lib/util.rb`.
+#[test]
+fn test_check_ruby_require_relative_call_matches_empty_baseline() {
+    check(&Scenario {
+        name: "ruby_import_call",
+        owner: GUARD_IMPORT_PROBE,
+        files: &[
+            (
+                "lib/util.rb",
+                "module Util\n  def self.helper\n    1\n  end\nend\n",
+            ),
+            (
+                "lib/main.rb",
+                "require_relative \"util\"\n\ndef run\n  0\nend\n",
+            ),
+        ],
+        edits: &[Edit::Write(
+            "lib/main.rb",
+            "require_relative \"util\"\n\ndef run\n  Util.helper\nend\n",
+        )],
+    });
+}
+
+/// JS: the dirty `src/main.js` destructures `require("./a")` and calls
+/// `foo()`, with another `a.js` under `lib/`. Both sides bind `src/a.js`.
+#[test]
+fn test_check_js_require_call_same_name_module_matches_empty_baseline() {
+    check(&Scenario {
+        name: "js_require_call",
+        owner: GUARD_IMPORT_PROBE,
+        files: &[
+            (
+                "src/a.js",
+                "function foo() {\n  return 1;\n}\nmodule.exports = { foo };\n",
+            ),
+            (
+                "lib/a.js",
+                "function foo() {\n  return 2;\n}\nmodule.exports = { foo };\n",
+            ),
+            (
+                "src/main.js",
+                "const { foo } = require(\"./a\");\n\nfunction run() {\n  return 0;\n}\n",
+            ),
+        ],
+        edits: &[Edit::Write(
+            "src/main.js",
+            "const { foo } = require(\"./a\");\n\nfunction run() {\n  return foo();\n}\n",
+        )],
+    });
 }

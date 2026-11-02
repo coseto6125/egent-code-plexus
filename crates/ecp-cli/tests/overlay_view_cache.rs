@@ -6,18 +6,22 @@
 //! and the `test_overlay_view_*_file_*` tests run the real binary over a
 //! deleted or renamed file.
 
+use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_cli::auto_ensure::{self, test_counters, IndexNeed};
+use ecp_cli::config_parser::parse_configs;
 use ecp_cli::engine::Engine;
 use ecp_cli::session::overlay_reader::{
     accepted_fragments, decode_view_inputs, decode_view_inputs_with_records, view_inputs,
 };
 use ecp_cli::session::overlay_writer::{write_dirty_events, write_dirty_fragments_from_graphs};
+use ecp_cli::session::sources::RecordedSources;
 use ecp_cli::session::view_cache::{self, VIEW_CACHE_FILE};
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
 use ecp_core::contracts::dirty_event::PathClass;
-use ecp_core::graph::NodeKind;
+use ecp_core::graph::{NodeKind, RelType};
 use ecp_core::graph_fixture::GraphFixture;
 use ecp_core::session::layout;
+use ecp_core::session::merged::MergedGraph;
 use ecp_core::session::{
     DirtyEvents, OverlayFileInput, OverlayView, SessionMeta, DIRTY_EVENTS_FORMAT,
 };
@@ -28,6 +32,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Barrier;
 use std::time::{Duration, UNIX_EPOCH};
+use xxhash_rust::xxh3::xxh3_64;
 
 const DIRTY: &str = "src/dirty.rs";
 const CLEAN: &str = "src/clean.rs";
@@ -157,6 +162,7 @@ impl Fixture {
             &inputs.tombstones,
             &inputs.stale,
             &inputs.configs,
+            Some(&|rel: &str| std::fs::read_to_string(self.worktree.join(rel)).ok()),
         )
         .unwrap()
     }
@@ -1110,5 +1116,362 @@ fn test_overlay_view_renamed_file_old_half_suppressed() {
     assert!(
         callers.iter().all(|(_, path)| !path.ends_with("gone.py")),
         "callers of target_kept: {callers:?}"
+    );
+}
+
+const CLEAN_TEXT: &str = "pub fn callee() {}\n";
+const EMPTY: &str = "src/empty.rs";
+const LATIN1: &str = "src/latin1.rs";
+const OMITTED: &str = "src/omitted.rs";
+const GONE: &str = "src/gone.rs";
+const LATIN1_BYTES: &[u8] = b"// caf\xe9\n";
+
+/// The content hash `graph.bin` records for `bytes`, as the index pipeline
+/// stores it in `File.content_hash`.
+fn graph_hash(bytes: &[u8]) -> [u8; 8] {
+    xxh3_64(bytes).to_le_bytes()
+}
+
+/// Write `bytes` to `rel` in the worktree with the mtime `secs` past the
+/// epoch; returns that mtime in nanoseconds.
+fn write_worktree(f: &Fixture, rel: &str, bytes: &[u8], secs: u64) -> u64 {
+    let path = f.worktree.join(rel);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, bytes).unwrap();
+    set_mtime(&path, secs);
+    fs::metadata(&path)
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64
+}
+
+/// Replace the fixture's graph with one whose `CLEAN` is indexed as
+/// `CLEAN_TEXT`, `EMPTY` as empty, `LATIN1` as `LATIN1_BYTES`, `GONE` as
+/// `CLEAN_TEXT`, and `OMITTED` with no recorded hash (the zero hash of an
+/// omitted file). `DIRTY` keeps the zero hash: only its fragment records it.
+fn write_hashed_graph(f: &Fixture) {
+    let mut fx = GraphFixture::new();
+    fx.func(DIRTY, "keep_fn");
+    fx.func(CLEAN, "callee");
+    for (rel, hash) in [
+        (CLEAN, graph_hash(CLEAN_TEXT.as_bytes())),
+        (EMPTY, graph_hash(b"")),
+        (LATIN1, graph_hash(LATIN1_BYTES)),
+        (GONE, graph_hash(CLEAN_TEXT.as_bytes())),
+        (OMITTED, [0; 8]),
+    ] {
+        let idx = fx.file(rel) as usize;
+        fx.assembly_mut().files[idx].content_hash = hash;
+    }
+    fs::write(&f.graph_path, fx.into_bytes()).unwrap();
+}
+
+/// Record `DIRTY`'s fragment as parsed from `parsed`, with `on_disk` in the
+/// worktree at the fragment's mtime, so the reader accepts the fragment.
+fn record_dirty(f: &Fixture, parsed: &str, on_disk: &str) {
+    let mtime_ns = write_worktree(f, DIRTY, on_disk.as_bytes(), 2_000);
+    let graph = LocalGraph {
+        file_path: PathBuf::from(DIRTY),
+        content_hash: graph_hash(parsed.as_bytes()),
+        nodes: vec![raw_fn("keep_fn")],
+        ..Default::default()
+    };
+    write_dirty_fragments_from_graphs(&f.session_dir, &[graph], &[mtime_ns]).unwrap();
+}
+
+/// What the engine's source reader gives for each of `rels`, and whether
+/// every read found the recorded text, over the session's current inputs.
+fn reads(f: &Fixture, rels: &[&str]) -> (Vec<Option<String>>, bool) {
+    let engine = Engine::load(&f.graph_path).unwrap();
+    let graph = engine.graph().unwrap();
+    let inputs = view_inputs(&f.session_dir, &f.worktree).unwrap();
+    let sources = RecordedSources::new(&f.worktree, graph, &inputs);
+    let texts = rels.iter().map(|rel| sources.read(rel)).collect();
+    (texts, sources.all_recorded())
+}
+
+/// Stands for: the reader gives a clean file's text when it is the text
+/// `graph.bin` indexed, so a view that read it is a function of its key.
+#[test]
+fn test_recorded_sources_clean_text_matching_graph_hash_returns_text() {
+    let f = Fixture::new();
+    write_hashed_graph(&f);
+    write_worktree(&f, CLEAN, CLEAN_TEXT.as_bytes(), 1_000);
+    assert_eq!(
+        reads(&f, &[CLEAN]),
+        (vec![Some(CLEAN_TEXT.to_string())], true)
+    );
+}
+
+/// Stands for: a clean file whose disk text is not the indexed one (a
+/// warm-attached or older graph) gives no text, and marks the view as not
+/// fixed by its key.
+#[test]
+fn test_recorded_sources_clean_text_differing_from_graph_hash_returns_none() {
+    let f = Fixture::new();
+    write_hashed_graph(&f);
+    write_worktree(&f, CLEAN, b"pub fn other() {}\n", 1_000);
+    assert_eq!(reads(&f, &[CLEAN]), (vec![None], false));
+}
+
+/// Stands for: a dirty file answers from its fragment's content hash, not
+/// the graph's (which records nothing for it here).
+#[test]
+fn test_recorded_sources_dirty_text_matching_fragment_hash_returns_text() {
+    let f = Fixture::new();
+    write_hashed_graph(&f);
+    record_dirty(&f, "pub fn keep_fn() {}\n", "pub fn keep_fn() {}\n");
+    assert_eq!(
+        reads(&f, &[DIRTY]),
+        (vec![Some("pub fn keep_fn() {}\n".to_string())], true)
+    );
+}
+
+/// Stands for: a dirty file saved again after its parse, at the same
+/// mtime, gives no text: the fragment parsed other text.
+#[test]
+fn test_recorded_sources_dirty_text_differing_from_fragment_hash_returns_none() {
+    let f = Fixture::new();
+    write_hashed_graph(&f);
+    record_dirty(
+        &f,
+        "pub fn keep_fn() {}\n",
+        "pub fn keep_fn() { saved(); }\n",
+    );
+    assert_eq!(reads(&f, &[DIRTY]), (vec![None], false));
+}
+
+/// Stands for: a path no input records gives nothing and reads nothing, so
+/// it leaves the view fixed by its key.
+#[test]
+fn test_recorded_sources_path_absent_from_graph_and_fragments_returns_none() {
+    let f = Fixture::new();
+    write_hashed_graph(&f);
+    write_worktree(&f, "src/new.rs", CLEAN_TEXT.as_bytes(), 1_000);
+    assert_eq!(reads(&f, &["src/new.rs"]), (vec![None], true));
+}
+
+/// Stands for: an empty file's text is the empty string when recorded; a
+/// recorded file that is not UTF-8 gives no text, yet that answer is fixed
+/// by the recorded bytes, so the view stays cacheable.
+#[test]
+fn test_recorded_sources_empty_and_non_utf8_recorded_files_keep_view_cacheable() {
+    let f = Fixture::new();
+    write_hashed_graph(&f);
+    write_worktree(&f, EMPTY, b"", 1_000);
+    write_worktree(&f, LATIN1, LATIN1_BYTES, 1_000);
+    assert_eq!(
+        reads(&f, &[EMPTY, LATIN1]),
+        (vec![Some(String::new()), None], true)
+    );
+}
+
+/// Stands for: a file the graph holds without a recorded hash (omitted at
+/// index time) gives no text, an answer its zero hash in the key fixes, so
+/// the view stays cacheable; a recorded file gone from the worktree gives no
+/// text and marks the view as not fixed by its key.
+#[test]
+fn test_recorded_sources_omitted_file_stays_cacheable_gone_file_not_cacheable() {
+    for (rel, cacheable) in [(OMITTED, true), (GONE, false)] {
+        let f = Fixture::new();
+        write_hashed_graph(&f);
+        if rel == OMITTED {
+            write_worktree(&f, OMITTED, CLEAN_TEXT.as_bytes(), 1_000);
+        }
+        assert_eq!(reads(&f, &[rel]), (vec![None], cacheable), "{rel}");
+    }
+}
+
+const CALLER_RS: &str = "crates/a/src/lib.rs";
+const B_LIB: &str = "crates/b/src/lib.rs";
+const B_LIB_INDEXED: &str = "mod x;\nmod y;\npub use x::f;\n";
+const CALLER_TEXT: &str = "use b::f;\n\npub fn t() {\n    f();\n}\n";
+
+/// The workspace of the warm-attach repro: `a` calls `b::f`, which `b`'s
+/// root re-exports from `x.rs`; `y.rs` declares a second `f`.
+fn workspace() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\n",
+        ),
+        (
+            "crates/a/Cargo.toml",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\n[dependencies]\nb = { path = \"../b\" }\n",
+        ),
+        (
+            "crates/b/Cargo.toml",
+            "[package]\nname = \"b\"\nversion = \"0.1.0\"\n",
+        ),
+        (B_LIB, B_LIB_INDEXED),
+        ("crates/b/src/x.rs", "pub fn f() {}\n"),
+        ("crates/b/src/y.rs", "pub fn f() {}\n"),
+        (CALLER_RS, CALLER_TEXT),
+    ]
+}
+
+/// The index of `files`, each source's `File.content_hash` the hash of its
+/// text, as `ecp admin index` stores it.
+fn index_with_hashes(files: &[(&str, &str)]) -> Vec<u8> {
+    let root = tempfile::tempdir().unwrap();
+    for (rel, text) in files {
+        let path = root.path().join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, text).unwrap();
+    }
+    let mut builder = GraphBuilder::new()
+        .with_path_aliases(parse_configs(root.path()))
+        .with_repo_root(root.path().to_path_buf());
+    for (rel, text) in files.iter().filter(|(rel, _)| rel.ends_with(".rs")) {
+        let mut graph = ecp_cli::reanalyze::pipeline()
+            .parse_file_raw(Path::new(rel), text.as_bytes())
+            .unwrap();
+        graph.content_hash = graph_hash(text.as_bytes());
+        builder.add_graph(graph);
+    }
+    rkyv::to_bytes::<rkyv::rancor::Error>(&builder.build())
+        .unwrap()
+        .to_vec()
+}
+
+/// The files of the callees of `t`, from the engine's merged view.
+fn callee_files_of_t(engine: &Engine) -> Vec<String> {
+    let merged = MergedGraph::new(engine.graph().unwrap(), engine.overlay_view());
+    merged
+        .all_edges()
+        .filter(|edge| edge.rel_type() == RelType::Calls)
+        .filter_map(|edge| {
+            let source = merged.node(edge.source)?;
+            if source.name(&merged) != "t" {
+                return None;
+            }
+            Some(merged.node(edge.target)?.file_path(&merged)?.to_string())
+        })
+        .collect()
+}
+
+/// Stands for: a view the engine built while a clean module's text was not
+/// the indexed one (a warm-attached graph behind the worktree) is never
+/// stored, so no later engine serves it. The repro: `b`'s root on disk
+/// re-exports `y.rs`'s `f`, the graph `x.rs`'s; the view stored under the
+/// key served `t -> y.rs` after the worktree went back to the indexed text.
+/// The control (disk text indexed) proves the view reads the module and is
+/// stored.
+#[test]
+fn test_overlay_view_clean_module_text_differs_from_graph_view_not_cached() {
+    for (label, b_lib_on_disk) in [
+        ("indexed text", B_LIB_INDEXED),
+        ("other text", "mod x;\nmod y;\npub use y::f;\n"),
+    ] {
+        let f = Fixture::new();
+        let files = workspace();
+        fs::write(&f.graph_path, index_with_hashes(&files)).unwrap();
+        for (rel, text) in &files {
+            let text = if *rel == B_LIB { b_lib_on_disk } else { *text };
+            write_worktree(&f, rel, text.as_bytes(), 1_000);
+        }
+        let edited = format!("{CALLER_TEXT}\npub fn u() {{}}\n");
+        let mtime_ns = write_worktree(&f, CALLER_RS, edited.as_bytes(), 2_000);
+        let mut caller = ecp_cli::reanalyze::pipeline()
+            .parse_file_raw(Path::new(CALLER_RS), edited.as_bytes())
+            .unwrap();
+        caller.content_hash = graph_hash(edited.as_bytes());
+        write_dirty_fragments_from_graphs(&f.session_dir, &[caller], &[mtime_ns]).unwrap();
+
+        let engine = f.engine();
+        assert!(
+            engine.overlay_view().is_some(),
+            "{label}: a dirty caller makes a view"
+        );
+        let callees = callee_files_of_t(&engine);
+        if b_lib_on_disk == B_LIB_INDEXED {
+            assert_eq!(callees, ["crates/b/src/x.rs"], "{label}");
+            assert!(f.cache_path().exists(), "{label}: the view is stored");
+            continue;
+        }
+        assert!(
+            !callees.iter().any(|file| file == "crates/b/src/y.rs"),
+            "{label}: the view read text the graph does not hold: {callees:?}"
+        );
+        assert!(
+            !f.cache_path().exists(),
+            "{label}: a view of unrecorded text is stored"
+        );
+
+        write_worktree(&f, B_LIB, B_LIB_INDEXED.as_bytes(), 1_000);
+        let later = f.engine();
+        assert_eq!(
+            callee_files_of_t(&later),
+            ["crates/b/src/x.rs"],
+            "{label}: the next engine builds from the indexed text"
+        );
+    }
+}
+
+/// Stands for: the view key covers the content hash each fragment parsed,
+/// not only its bytes. `b`'s dirty root edited from `use x::f;` to `pub use
+/// x::f;` keeps equal fragment bytes, as a fragment's import rows keep no
+/// visibility, yet the view reads the `pub use` from the text. A key over
+/// the bytes alone serves the stored view of the private `use`, which binds
+/// no re-export, after the edit.
+#[test]
+fn test_overlay_view_dirty_module_use_made_pub_changes_key_and_rebinds() {
+    const PRIVATE: &str = "mod x;\nmod y;\nuse x::f;\n";
+    const PUBLIC: &str = "mod x;\nmod y;\npub use x::f;\n";
+    let f = Fixture::new();
+    let files = workspace();
+    fs::write(&f.graph_path, index_with_hashes(&files)).unwrap();
+    for (rel, text) in &files {
+        write_worktree(&f, rel, text.as_bytes(), 1_000);
+    }
+    let caller = format!("{CALLER_TEXT}\npub fn u() {{}}\n");
+    let record = |b_lib: &str, secs: u64| {
+        let (graphs, mtimes): (Vec<LocalGraph>, Vec<u64>) =
+            [(B_LIB, b_lib), (CALLER_RS, caller.as_str())]
+                .into_iter()
+                .map(|(rel, text)| {
+                    let mtime_ns = write_worktree(&f, rel, text.as_bytes(), secs);
+                    let mut graph = ecp_cli::reanalyze::pipeline()
+                        .parse_file_raw(Path::new(rel), text.as_bytes())
+                        .unwrap();
+                    graph.content_hash = graph_hash(text.as_bytes());
+                    (graph, mtime_ns)
+                })
+                .unzip();
+        write_dirty_fragments_from_graphs(&f.session_dir, &graphs, &mtimes).unwrap();
+    };
+    let b_lib_fragment = || {
+        let manifest = DirtyEvents::read(&layout::dirty_events_path(&f.session_dir)).unwrap();
+        let id = manifest.entries[B_LIB].fragment_id.clone().unwrap();
+        fs::read(layout::fragment_path(&f.session_dir, &id)).unwrap()
+    };
+
+    record(PRIVATE, 2_000);
+    let first = f.engine();
+    assert!(first.overlay_view().is_some(), "dirty files make a view");
+    let private_callees = callee_files_of_t(&first);
+    assert!(
+        f.cache_path().exists(),
+        "the view of recorded text is stored"
+    );
+    let private_key = f.key(&first);
+    let private_bytes = b_lib_fragment();
+
+    record(PUBLIC, 3_000);
+    assert_eq!(
+        b_lib_fragment(),
+        private_bytes,
+        "the edit leaves the fragment bytes equal: only the content hash moves the key"
+    );
+    let second = f.engine();
+    assert_ne!(f.key(&second), private_key);
+    assert_eq!(callee_files_of_t(&second), ["crates/b/src/x.rs"]);
+    assert_ne!(
+        private_callees,
+        ["crates/b/src/x.rs"],
+        "the private `use` binds no re-export"
     );
 }
