@@ -272,6 +272,7 @@ pub(crate) fn attach(
         inputs.fragments.push(AcceptedFragment {
             rel_path: entry.rel_path,
             bytes: entry.fragment,
+            content_hash: None,
         });
     }
     hash_part(&mut hasher, format!("{stale:?}").as_bytes());
@@ -785,6 +786,7 @@ mod tests {
             fragments: vec![AcceptedFragment {
                 rel_path: "src/dirty.ts".into(),
                 bytes: valid_fragment_bytes(),
+                content_hash: None,
             }],
             tombstones: Vec::new(),
             stale: StaleClosure::default(),
@@ -964,6 +966,7 @@ mod tests {
         served.fragments.push(AcceptedFragment {
             rel_path: "src/dirty.ts".into(),
             bytes: valid_fragment_bytes(),
+            content_hash: None,
         });
         attach(
             &session_dir,

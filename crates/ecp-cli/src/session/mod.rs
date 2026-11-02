@@ -3,5 +3,6 @@ pub mod overlay_reader;
 pub mod overlay_writer;
 pub mod promotion;
 pub mod resolver;
+pub mod sources;
 pub mod state;
 pub mod view_cache;

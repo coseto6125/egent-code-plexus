@@ -30,11 +30,19 @@ use xxhash_rust::xxh3::Xxh3;
 
 use super::overlay_writer::ArchivedFragmentFile;
 
-/// A manifest entry `view_inputs` let through: its rel_path and the
-/// fragment bytes that passed archive validation.
+/// A manifest entry `view_inputs` let through: its rel_path, the fragment
+/// bytes that passed archive validation, and the content hash of the text
+/// it parsed.
 pub struct AcceptedFragment {
     pub(crate) rel_path: String,
     pub(crate) bytes: Vec<u8>,
+    /// The entry's `DirtyEventEntry::content_hash` (16 lowercase hex digits
+    /// of the `u64`), which the source reader checks the file's text
+    /// against (`sources::RecordedSources`). `None` for a fragment of the
+    /// invalidation closure, whose text is the indexed one, and for an
+    /// entry whose hash does not parse: the reader checks either against
+    /// `graph.bin`'s hash.
+    pub(crate) content_hash: Option<u64>,
 }
 
 /// Whether `bytes` has the current fragment archive shape and holds a
@@ -102,8 +110,8 @@ pub fn accepted_fragments(
 /// each one's rel_path, fragment bytes and content hash (an empty part for
 /// a tombstone) in manifest order. The content hash is the text the view's
 /// source reader accepts for the path, which equal fragment bytes do not
-/// pin: `graph.bin`'s import rows keep no visibility. Entry validation guards the staleness holes the manifest
-/// has by construction:
+/// pin: a fragment's import rows keep no visibility. Entry validation
+/// guards the staleness holes the manifest has by construction:
 ///
 /// - **another format, builder or cap** — a manifest that fails
 ///   `DirtyEvents::is_current` under the worktree's size cap holds parse
@@ -143,23 +151,11 @@ pub fn view_inputs_under(
     worktree_root: &Path,
     size_cap: SizeCap,
 ) -> io::Result<ViewInputs> {
-    view_inputs_and_manifest_under(session_dir, worktree_root, size_cap).map(|(inputs, _)| inputs)
-}
-
-/// [`view_inputs_under`] and the current manifest it read, whose entries
-/// hold the content hash each accepted fragment parsed
-/// (`DirtyEventEntry::content_hash`). `None` without a current manifest.
-pub fn view_inputs_and_manifest_under(
-    session_dir: &Path,
-    worktree_root: &Path,
-    size_cap: SizeCap,
-) -> io::Result<(ViewInputs, Option<DirtyEvents>)> {
     let (mut inputs, manifest) = manifest_inputs(session_dir, worktree_root, size_cap)?;
-    let manifest = manifest.filter(|m| m.is_current(size_cap));
-    if let Some(manifest) = &manifest {
-        super::closure_store::attach(session_dir, worktree_root, size_cap, manifest, &mut inputs);
+    if let Some(manifest) = manifest.filter(|m| m.is_current(size_cap)) {
+        super::closure_store::attach(session_dir, worktree_root, size_cap, &manifest, &mut inputs);
     }
-    Ok((inputs, manifest))
+    Ok(inputs)
 }
 
 /// The dirty files' share of [`view_inputs_under`], without the closure:
@@ -226,6 +222,7 @@ fn manifest_inputs(
         fragments.push(AcceptedFragment {
             rel_path: rel_path.clone(),
             bytes,
+            content_hash: u64::from_str_radix(content_hash, 16).ok(),
         });
     }
     Ok((
@@ -351,6 +348,7 @@ mod tests {
         AcceptedFragment {
             rel_path: "src/a.ts".into(),
             bytes,
+            content_hash: None,
         }
     }
 

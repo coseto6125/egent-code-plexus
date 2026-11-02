@@ -28,11 +28,14 @@ const HEADER_LEN: usize = 16;
 /// The cache key of a view built over the graph file `graph` = (path,
 /// length, mtime), as stat'ed from the handle the engine mapped, with
 /// `graph_nodes` nodes, from inputs whose hash is `inputs_hash`
-/// (`view_inputs`: every accepted fragment and tombstone, so a view built
-/// before an `rm` is never served after it). The running binary is part of
-/// the key: its build sha alone misses a dev rebuild of a dirty checkout, so
-/// its length and mtime join too. `None` when the binary cannot be stat'ed or a stamp
-/// predates the epoch; the caller then skips the cache.
+/// (`view_inputs`: every accepted fragment with the content hash it parsed,
+/// and every tombstone, so a view built before an `rm` is never served
+/// after it). The engine stores no view whose source reads found text other
+/// than the recorded one (`sources::RecordedSources`). The running binary
+/// is part of the key: its build sha alone misses a dev rebuild of a dirty
+/// checkout, so its length and mtime join too. `None` when the binary
+/// cannot be stat'ed or a stamp predates the epoch; the caller then skips
+/// the cache.
 pub fn key(graph: (&Path, u64, SystemTime), graph_nodes: usize, inputs_hash: u64) -> Option<u64> {
     let exe = std::env::current_exe().ok()?;
     let exe_meta = fs::metadata(&exe).ok()?;

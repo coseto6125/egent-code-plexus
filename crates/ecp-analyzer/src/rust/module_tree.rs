@@ -509,9 +509,8 @@ fn build_mod_tree_and_reexports(entry: &Path) -> (ModTree, ReExportMap) {
         };
         let clean = strip_comments(&src);
 
-        // Collect `#[path = "..."]` attributes so we can honour them.
-        // Simple heuristic: scan for `#[path = "..."]` on the line immediately
-        // before a `mod NAME;`. We pass them as a map: mod_name → rel_path.
+        // The `#[path]` attributes the walk honours, by the rule of
+        // `ecp_core::analyzer::rust_pub_use::path_attrs`.
         let path_attrs = path_attrs(&clean);
 
         for name in mod_decls(&clean) {

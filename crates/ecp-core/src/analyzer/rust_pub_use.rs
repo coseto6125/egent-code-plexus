@@ -140,6 +140,12 @@ pub fn path_attrs(text: &Stripped) -> FxHashMap<String, String> {
     out
 }
 
+/// Whether `text` declares a module with a `#[path]` attribute, by the rule
+/// [`path_attrs`] reads them with.
+pub fn declares_path_attr(text: &Stripped) -> bool {
+    path_attr_re().is_match(text.as_str()) && !path_attrs(text).is_empty()
+}
+
 /// The `pub use` rows of the module whose text is `text` and whose module
 /// path in its tree is `containing_mod_path` (e.g. `["deep"]` for
 /// `src/deep/mod.rs`), stored in each entry so that relative path prefixes
@@ -348,6 +354,24 @@ mod tests {
         assert!(path_attrs(&strip_comments("// #[path = \"x.rs\"]\nmod m;\n")).is_empty());
         assert!(path_attrs(&strip_comments("mod m;\n")).is_empty());
         assert!(path_attrs(&strip_comments("")).is_empty());
+    }
+
+    #[test]
+    fn test_declares_path_attr_attribute_before_mod_true_absent_or_commented_false() {
+        assert!(declares_path_attr(&strip_comments(
+            "mod a;\n#[path = \"real.rs\"]\npub mod inner;\n"
+        )));
+        assert!(!declares_path_attr(&strip_comments(
+            "// #[path = \"x.rs\"]\nmod m;\n"
+        )));
+        assert!(!declares_path_attr(&strip_comments(
+            "mod m;\npub use m::f;\n"
+        )));
+        assert!(!declares_path_attr(&strip_comments("")));
+        assert!(
+            !declares_path_attr(&strip_comments("#[path = \"x.rs\"]\nfn f() {}\n")),
+            "an attribute on no `mod` relocates nothing"
+        );
     }
 
     #[test]

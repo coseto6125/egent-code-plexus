@@ -15,9 +15,9 @@
 //! worktree.
 //!
 //! What the fixtures do not cover: inline `mod util { .. }` modules, and
-//! `#[path]` module files beyond one guard: the overlay reads no `pub use`
-//! rows of a module whose path holds one. The overlay walks file-backed
-//! `mod` declarations only.
+//! `#[path]` module files beyond guards: the overlay reads no `pub use`
+//! rows in a tree where any file declares one, nor follows a row into such
+//! a tree. The overlay walks file-backed `mod` declarations only.
 //!
 //! The `test_check_rust_*` cases at the end hold those gaps as known
 //! differences against a fresh index in
@@ -36,6 +36,7 @@ use ecp_core::analyzer::outcome::Tier;
 use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::contracts::workspace::{NameRank, WorkspaceFacts};
 use ecp_core::graph::{ArchivedZeroCopyGraph, RelType, ZeroCopyGraph};
+use ecp_core::session::closure::{ConfigEdits, StaleClosure};
 use ecp_core::session::merged::MergedGraph;
 use ecp_core::session::view::{OverlayFileInput, OverlayView};
 use ecp_core::session::OVERLAY_EDGE_REASON;
@@ -1763,4 +1764,302 @@ fn test_overlay_view_path_attr_onto_sibling_file_binds_nothing_beyond_index() {
         overlay.iter().all(|call| reindex.contains(call)),
         "the overlay binds an edge the index does not: {overlay:#?}\nindex: {reindex:#?}"
     );
+}
+
+/// `b`'s `a.rs` declares `#[path = "m/inner.rs"] pub mod stolen;` and
+/// `m.rs` declares `pub mod inner;`. The index walks `a` before `m` and
+/// places `m/inner.rs` once, as `a::stolen`, so `b::m::inner` is no module
+/// of its tree and the call binds nothing. The overlay's layout places
+/// `m/inner.rs` as `m::inner`; following its glob would bind `x.rs`. No
+/// file on `m::inner`'s path declares a `#[path]` module, so only a check
+/// over every file of the tree keeps the overlay out. `y.rs` declares a
+/// second `f`, which keeps Tier 3 from binding.
+#[test]
+fn test_overlay_view_path_attr_steals_file_from_sibling_binds_nothing_beyond_index() {
+    let caller = "use b::m::inner::f;\n\npub fn t() {\n    f();\n}\n";
+    let files = reexport_crates(
+        caller,
+        "pub mod m;\npub mod a;\nmod x;\nmod y;\n",
+        &[
+            (
+                "crates/b/src/a.rs",
+                "#[path = \"m/inner.rs\"]\npub mod stolen;\n",
+            ),
+            ("crates/b/src/m.rs", "pub mod inner;\n"),
+            ("crates/b/src/m/inner.rs", "pub use crate::x::*;\n"),
+            ("crates/b/src/x.rs", "pub fn f() {}\n"),
+            ("crates/b/src/y.rs", "pub fn f() {}\n"),
+        ],
+    );
+    let edited = format!("{caller}\npub fn u() {{}}\n");
+    let (reindex, overlay) = reindex_and_overlay(&files, CALLER, &edited, &["t"]);
+    assert!(reindex.is_empty(), "the index binds nothing: {reindex:#?}");
+    assert!(
+        overlay.iter().all(|call| reindex.contains(call)),
+        "the overlay binds an edge the index does not: {overlay:#?}"
+    );
+}
+
+/// `b`'s `facade.rs` declares `#[path = "real.rs"] mod inner;` and
+/// re-exports `self::inner::f`; a stray `facade/inner.rs` sits where the
+/// file layout puts `facade::inner`. The index places `inner` at `real.rs`
+/// beside `facade.rs` and binds it. The overlay follows the re-export
+/// through its layout guess, which lands on the stray file: the `#[path]`
+/// module stands on the target walk, not on the path to `facade`.
+#[test]
+fn test_overlay_view_reexport_target_below_path_attr_binds_nothing_beyond_index() {
+    let files = reexport_crates(
+        "pub fn t() {}\n",
+        "pub mod facade;\n",
+        &[
+            (
+                "crates/b/src/facade.rs",
+                "#[path = \"real.rs\"]\nmod inner;\npub use self::inner::f;\n",
+            ),
+            ("crates/b/src/facade/inner.rs", "pub fn f() {}\n"),
+            ("crates/b/src/facade/real.rs", "pub fn f() {}\n"),
+            ("crates/b/src/real.rs", "pub fn f() {}\n"),
+        ],
+    );
+    let edited = "use b::facade::f;\n\npub fn t() {\n    f();\n}\n";
+    let (reindex, overlay) = reindex_and_overlay(&files, CALLER, edited, &["t"]);
+    assert_module_tree_binds(&reindex, &[("crates/b/src/real.rs", "f")], "#[path] target");
+    assert!(
+        overlay.iter().all(|call| reindex.contains(call)),
+        "the overlay binds an edge the index does not: {overlay:#?}"
+    );
+}
+
+/// `b`'s `facade.rs` re-exports `crate::sub::inner::f`, and `sub.rs`
+/// declares `#[path = "real.rs"] pub mod inner;` beside a stray
+/// `sub/inner.rs`. The index places `sub::inner` at `real.rs` and binds it.
+/// The overlay's target walk from `facade`, a file no `#[path]` module
+/// stands above, lands on the stray file through `sub`.
+#[test]
+fn test_overlay_view_reexport_into_path_attr_subtree_binds_nothing_beyond_index() {
+    let files = reexport_crates(
+        "pub fn t() {}\n",
+        "pub mod facade;\npub mod sub;\n",
+        &[
+            ("crates/b/src/facade.rs", "pub use crate::sub::inner::f;\n"),
+            ("crates/b/src/real.rs", "pub fn f() {}\n"),
+            (
+                "crates/b/src/sub.rs",
+                "#[path = \"real.rs\"]\npub mod inner;\n",
+            ),
+            ("crates/b/src/sub/inner.rs", "pub fn f() {}\n"),
+            ("crates/b/src/sub/real.rs", "pub fn f() {}\n"),
+        ],
+    );
+    let edited = "use b::facade::f;\n\npub fn t() {\n    f();\n}\n";
+    let (reindex, overlay) = reindex_and_overlay(&files, CALLER, edited, &["t"]);
+    assert_module_tree_binds(&reindex, &[("crates/b/src/real.rs", "f")], "#[path] target");
+    assert!(
+        overlay.iter().all(|call| reindex.contains(call)),
+        "the overlay binds an edge the index does not: {overlay:#?}"
+    );
+}
+
+/// `b`'s root re-exports `c::inner::f`, and `c`'s root declares
+/// `#[path = "real.rs"] pub mod inner;` beside a stray `inner.rs`. `b`'s
+/// tree has no `#[path]` module, yet the re-export's target walk enters
+/// `c`'s tree, where the overlay's layout guess lands on the stray file.
+/// The index places `inner` at `real.rs` and binds it.
+#[test]
+fn test_overlay_view_reexport_into_path_attr_crate_binds_nothing_beyond_index() {
+    const STRAY: &str = "crates/c/src/inner.rs";
+    let files = owned(&[
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/a\", \"crates/b\", \"crates/c\"]\n",
+        ),
+        (
+            "crates/a/Cargo.toml",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\n[dependencies]\nb = { path = \"../b\" }\n",
+        ),
+        (
+            "crates/b/Cargo.toml",
+            "[package]\nname = \"b\"\nversion = \"0.1.0\"\n\n[dependencies]\nc = { path = \"../c\" }\n",
+        ),
+        (
+            "crates/c/Cargo.toml",
+            "[package]\nname = \"c\"\nversion = \"0.1.0\"\n",
+        ),
+        (CALLER, "pub fn t() {}\n"),
+        ("crates/b/src/lib.rs", "pub use c::inner::f;\n"),
+        (
+            "crates/c/src/lib.rs",
+            "#[path = \"real.rs\"]\npub mod inner;\n",
+        ),
+        (STRAY, "pub fn f() {}\n"),
+        ("crates/c/src/real.rs", "pub fn f() {}\n"),
+    ]);
+    let edited = "use b::f;\n\npub fn t() {\n    f();\n}\n";
+    let (reindex, overlay) = reindex_and_overlay(&files, CALLER, edited, &["t"]);
+    assert_module_tree_binds(&reindex, &[("crates/c/src/real.rs", "f")], "#[path] crate");
+    assert!(
+        overlay.iter().all(|call| call.callee_file != STRAY),
+        "the overlay follows the layout guess into the stray file: {overlay:#?}"
+    );
+    assert!(
+        overlay.iter().all(|call| reindex.contains(call)),
+        "the overlay binds an edge the index does not: {overlay:#?}"
+    );
+}
+
+const STOLEN_CALLER: &str = "use b::m::inner::f;\n\npub fn t() {\n    f();\n}\n";
+const STOLEN_A: &str = "#[path = \"m/inner.rs\"]\npub mod stolen;\n";
+
+/// The tree of
+/// [`test_overlay_view_path_attr_steals_file_from_sibling_binds_nothing_beyond_index`]
+/// with `a_rs` as `b`'s `a.rs`: without the `#[path]` module, `m/inner.rs`
+/// is `m::inner` and its glob binds `x.rs`.
+fn sibling_tree(a_rs: &str) -> Vec<(String, String)> {
+    reexport_crates(
+        STOLEN_CALLER,
+        "pub mod m;\npub mod a;\nmod x;\nmod y;\n",
+        &[
+            ("crates/b/src/a.rs", a_rs),
+            ("crates/b/src/m.rs", "pub mod inner;\n"),
+            ("crates/b/src/m/inner.rs", "pub use crate::x::*;\n"),
+            ("crates/b/src/x.rs", "pub fn f() {}\n"),
+            ("crates/b/src/y.rs", "pub fn f() {}\n"),
+        ],
+    )
+}
+
+/// The calls out of `t` in [`CALLER`] from the overlay of the caller's
+/// one-line edit over the index of `files`, with `removed` gone and module
+/// text read through `sources`.
+fn overlay_of_caller_edit(
+    files: &[(String, String)],
+    removed: &[String],
+    sources: &dyn Fn(&str) -> Option<String>,
+) -> Vec<Call> {
+    let base_bytes = archive(&index(files));
+    let base = access(&base_bytes);
+    let (_, caller) = files
+        .iter()
+        .find(|(path, _)| path == CALLER)
+        .expect("the caller is a fixture file");
+    let inputs: Vec<OverlayFileInput> = vec![parse(CALLER, &one_line_edit(caller)).into()];
+    let view = OverlayView::build_with_configs(
+        base,
+        &inputs,
+        &[],
+        removed,
+        &StaleClosure::default(),
+        &ConfigEdits::default(),
+        Some(sources),
+    )
+    .expect("an edit makes a view");
+    calls(&MergedGraph::new(base, Some(&view)), base, CALLER, "t")
+}
+
+/// The calls out of `t` in [`CALLER`] from a full index of `files`.
+fn reindex_calls(files: &[(String, String)]) -> Vec<Call> {
+    let bytes = archive(&index(files));
+    let graph = access(&bytes);
+    calls(&MergedGraph::new(graph, None), graph, CALLER, "t")
+}
+
+/// A dirty `a.rs` that adds the `#[path]` module steals `m/inner.rs` from
+/// `m::inner` in the index, so it binds nothing. The overlay reads the
+/// dirty file's text as a file of the tree and binds nothing either.
+#[test]
+fn test_overlay_view_dirty_file_adds_path_attr_binds_nothing_beyond_index() {
+    let files = sibling_tree("pub fn g() {}\n");
+    let (reindex, overlay) =
+        reindex_and_overlay_of(&files, "crates/b/src/a.rs", STOLEN_A, CALLER, &["t"]);
+    assert!(reindex.is_empty(), "the index binds nothing: {reindex:#?}");
+    assert!(
+        overlay.iter().all(|call| reindex.contains(call)),
+        "the overlay binds an edge the index does not: {overlay:#?}"
+    );
+}
+
+/// A dirty `a.rs` that drops the `#[path]` module gives `m/inner.rs` back
+/// to `m::inner`, and the index binds `x.rs` through its glob. The dirty
+/// file declares no module, so no file of the tree declares a `#[path]`
+/// one, and the overlay reads the glob and binds `x.rs` too.
+#[test]
+fn test_overlay_view_dirty_file_removes_path_attr_binds_like_index() {
+    let files = sibling_tree(STOLEN_A);
+    let (reindex, overlay) = reindex_and_overlay_of(
+        &files,
+        "crates/b/src/a.rs",
+        "pub fn g() {}\n",
+        CALLER,
+        &["t"],
+    );
+    assert_module_tree_binds(&reindex, &[("crates/b/src/x.rs", "f")], "path attr dropped");
+    assert_eq!(overlay, reindex);
+}
+
+/// With no `#[path]` module in `b`, the overlay binds `x.rs` through the
+/// glob when it reads every file of the tree. A reader that cannot give
+/// `m.rs`, a file of the tree that is not the module asked about, leaves
+/// the tree's layout unknown, and the overlay then binds through no tree.
+#[test]
+fn test_overlay_view_unreadable_tree_file_reads_no_rows() {
+    let files = sibling_tree("pub fn g() {}\n");
+    let edited: Vec<(String, String)> = files
+        .iter()
+        .map(|(path, source)| {
+            let source = if path == CALLER {
+                one_line_edit(source)
+            } else {
+                source.clone()
+            };
+            (path.clone(), source)
+        })
+        .collect();
+    let read = |rel: &str| {
+        files
+            .iter()
+            .find(|(path, _)| path == rel)
+            .map(|(_, source)| source.clone())
+    };
+    let reindex = reindex_calls(&edited);
+    assert_module_tree_binds(&reindex, &[("crates/b/src/x.rs", "f")], "every file read");
+    assert_eq!(overlay_of_caller_edit(&files, &[], &read), reindex);
+
+    let without_m = |rel: &str| read(rel).filter(|_| rel != "crates/b/src/m.rs");
+    let overlay = overlay_of_caller_edit(&files, &[], &without_m);
+    assert!(
+        overlay
+            .iter()
+            .all(|call| call.confidence < Tier::ModuleTree.confidence()),
+        "the overlay read rows of a tree it could not read whole: {overlay:#?}"
+    );
+}
+
+/// The worktree deleted `a.rs`, the file that declares the `#[path]`
+/// module. The index's walk finds no `a` and places `m/inner.rs` as
+/// `m::inner`, binding `x.rs`. A removed path is no file of the tree, so
+/// the overlay binds `x.rs` too.
+#[test]
+fn test_overlay_view_removed_path_attr_file_binds_like_index() {
+    let files = sibling_tree(STOLEN_A);
+    let kept: Vec<(String, String)> = files
+        .iter()
+        .filter(|(path, _)| path != "crates/b/src/a.rs")
+        .map(|(path, source)| {
+            let source = if path == CALLER {
+                one_line_edit(source)
+            } else {
+                source.clone()
+            };
+            (path.clone(), source)
+        })
+        .collect();
+    let reindex = reindex_calls(&kept);
+    assert_module_tree_binds(&reindex, &[("crates/b/src/x.rs", "f")], "a.rs deleted");
+    let read = |rel: &str| {
+        kept.iter()
+            .find(|(path, _)| path == rel)
+            .map(|(_, source)| source.clone())
+    };
+    let overlay = overlay_of_caller_edit(&files, &["crates/b/src/a.rs".to_string()], &read);
+    assert_eq!(overlay, reindex);
 }
