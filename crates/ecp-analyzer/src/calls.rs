@@ -887,7 +887,7 @@ struct PendingBinding<'s> {
     pos: Pos,
     name: &'s str,
     /// The innermost function or comprehension that scopes it
-    /// ([`Frame::lambda`]): its scope when no function node holds it, or when
+    /// ([`Frame::local_scope`]): its scope when no function node holds it, or when
     /// it is a comprehension inside the function node that holds it.
     local_scope: Option<LocalScope>,
 }
