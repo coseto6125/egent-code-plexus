@@ -21,6 +21,7 @@ pub mod provider;
 pub mod record_nodes;
 pub mod reexport;
 pub mod rust_paths;
+pub mod rust_pub_use;
 pub mod same_file_pick;
 pub mod type_ladder;
 pub mod types;

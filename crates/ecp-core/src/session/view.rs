@@ -690,6 +690,13 @@ pub struct CallGap {
 #[derive(Debug, Clone, Copy)]
 struct DirtyNamesake;
 
+/// A reader of a file's current text: its repo-relative, forward-slashed
+/// path to the text, `None` for a file that is gone, unreadable or not
+/// UTF-8. A dirty file's text is the one its parse read; a clean file's
+/// equals the indexed text. The view reads a Rust module's `pub use` rows
+/// from it, which `graph.bin`'s import rows cannot tell from a `use`.
+pub type SourceReader<'r> = &'r dyn Fn(&str) -> Option<String>;
+
 impl OverlayView {
     /// Build the view. Returns `None` when `files` is empty — the clean-tree
     /// path must stay literally view-free so traversals take their original
@@ -702,6 +709,10 @@ impl OverlayView {
     ///   O(files of that language) for module discovery;
     /// - a dirty Rust file with a `::` call or variant path makes one more
     ///   pass over `graph.files` for crate roots;
+    /// - with a [`SourceReader`], a Rust module whose `use` binds the name a
+    ///   path asks for, or which holds a glob `use`, reads its text once to
+    ///   find its `pub use` rows; the first such module makes one more pass
+    ///   over `graph.files` for the memo's keys;
     /// - the path-alias table is rebuilt from `graph.bin` once per build;
     /// - an ambiguous Tier-3 call whose first two candidates are copies of
     ///   one Java / Kotlin / PHP declaration builds that language's file
@@ -748,17 +759,45 @@ impl OverlayView {
         records: &[OverlayFileRecords],
         removed: &[String],
     ) -> Option<Self> {
-        Self::build_with_tables(graph, files, records, removed, &ConfigEdits::default())
+        Self::build_with_tables(
+            graph,
+            files,
+            records,
+            removed,
+            &ConfigEdits::default(),
+            None,
+        )
+    }
+
+    /// [`Self::build`] that reads a Rust module's `pub use` rows from the
+    /// text `sources` gives for its path, as a full index reads them from
+    /// the file ([`SourceReader`]). Without one, a module whose `use` could
+    /// be a `pub use` binds nothing through it.
+    pub fn build_with_sources(
+        graph: &ArchivedZeroCopyGraph,
+        files: &[OverlayFileInput],
+        sources: SourceReader<'_>,
+    ) -> Option<Self> {
+        Self::build_with_tables(
+            graph,
+            files,
+            &[],
+            &[],
+            &ConfigEdits::default(),
+            Some(sources),
+        )
     }
 
     /// [`Self::build_with_records`] that resolves with the dirty resolution
-    /// configs' rows (`configs`) merged over the archived config tables.
+    /// configs' rows (`configs`) merged over the archived config tables, and
+    /// reads module text through `sources` ([`Self::build_with_sources`]).
     fn build_with_tables(
         graph: &ArchivedZeroCopyGraph,
         files: &[OverlayFileInput],
         records: &[OverlayFileRecords],
         removed: &[String],
         configs: &ConfigEdits,
+        sources: Option<SourceReader<'_>>,
     ) -> Option<Self> {
         // A dirty config edits resolution with no dirty source: the view
         // still carries its kept configs to the caveat.
@@ -989,6 +1028,7 @@ impl OverlayView {
             &mut decorated,
             &mut overrides,
             configs,
+            sources,
         );
         let resolution::Decorated {
             edges: decorates,
@@ -1071,7 +1111,8 @@ impl OverlayView {
     /// per build, in O(S + N) over the archived table's S rows and N names
     /// plus the edited rows; no config is parsed here. `None` when `files`,
     /// `removed` and `configs` are all empty; a dirty config with no dirty
-    /// source still builds a view, which carries `stale`.
+    /// source still builds a view, which carries `stale`. `sources` reads a
+    /// module's current text ([`Self::build_with_sources`]).
     pub fn build_with_configs(
         graph: &ArchivedZeroCopyGraph,
         files: &[OverlayFileInput],
@@ -1079,8 +1120,9 @@ impl OverlayView {
         removed: &[String],
         stale: &StaleClosure,
         configs: &ConfigEdits,
+        sources: Option<SourceReader<'_>>,
     ) -> Option<Self> {
-        let mut view = Self::build_with_tables(graph, files, records, removed, configs)?;
+        let mut view = Self::build_with_tables(graph, files, records, removed, configs, sources)?;
         view.stale_closure = stale.clone();
         Some(view)
     }

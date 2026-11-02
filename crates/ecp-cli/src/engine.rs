@@ -318,6 +318,10 @@ impl Engine {
                     crate::session::overlay_reader::decode_view_inputs_with_records(
                         &inputs.fragments,
                     );
+                // A dirty file's disk text is the one its fragment parsed; a
+                // clean file's equals the indexed text, so the view cache key
+                // still covers what the view reads.
+                let sources = |rel: &str| std::fs::read_to_string(root.join(rel)).ok();
                 let view = OverlayView::build_with_configs(
                     graph,
                     &files,
@@ -325,6 +329,7 @@ impl Engine {
                     &inputs.tombstones,
                     &inputs.stale,
                     &inputs.configs,
+                    Some(&sources),
                 )?;
                 if let Some(key) = key {
                     view_cache::write(dir, key, &view);

@@ -9,11 +9,14 @@
 //! temporary root that holds every file, as `ecp admin index` does, then
 //! builds the overlay of a dirty caller over that index.
 //!
-//! What the fixtures do not cover: `pub use` re-export chains behind a crate
-//! head (`graph.bin` keeps no import visibility, so the overlay binds no
-//! edge through a `use` the index follows), inline `mod util { .. }`
-//! modules, and `#[path]` module files. The overlay walks file-backed `mod`
-//! declarations only.
+//! `graph.bin` keeps no import visibility, so the overlay reads a module's
+//! `pub use` rows from its text, as the index does: the view these tests
+//! build reads each file of the edited tree, as the engine reads the
+//! worktree.
+//!
+//! What the fixtures do not cover: inline `mod util { .. }` modules, and
+//! `#[path]` module files. The overlay walks file-backed `mod` declarations
+//! only.
 //!
 //! The `test_check_rust_*` cases at the end hold those gaps as known
 //! differences against a fresh index in
@@ -134,7 +137,8 @@ fn access(bytes: &[u8]) -> &ArchivedZeroCopyGraph {
 
 /// The calls out of `callers` in `caller_file` after `caller_file` becomes
 /// `edited`: from a full reindex of the edited tree, and from the overlay of
-/// the edit over the index of `files`.
+/// the edit over the index of `files`, which reads module text from the
+/// edited tree.
 fn reindex_and_overlay(
     files: &[(String, String)],
     caller_file: &str,
@@ -180,7 +184,14 @@ fn reindex_and_overlay_of(
             .expect("the caller's file is a fixture file");
         inputs.push(parse(caller_file, source).into());
     }
-    let view = OverlayView::build(base, &inputs).expect("an edit makes a view");
+    let sources = |rel: &str| {
+        edited_tree
+            .iter()
+            .find(|(path, _)| path == rel)
+            .map(|(_, source)| source.clone())
+    };
+    let view =
+        OverlayView::build_with_sources(base, &inputs, &sources).expect("an edit makes a view");
     assert_eq!(
         OverlayView::from_cache_bytes(&view.to_cache_bytes(), base.nodes.len()).as_ref(),
         Some(&view),
@@ -1314,11 +1325,10 @@ fn test_check_rust_path_attr_agreeing_targets_no_decoy_matches_baseline() {
 /// Crate `a` calls `b::f()`, and crate `b` declares `f` in `util.rs` and
 /// re-exports it with `pub use util::f;`. Crate `a` has its own `util::f`, so
 /// only the crate head tells the two apart. The index follows the re-export;
-/// `graph.bin` keeps no import visibility, so the overlay binds nothing.
+/// the overlay follows it when the view reads `b`'s root text.
 ///
-/// Expected in the baseline, one line: `edge full-only x1 Calls Function
-/// crates/a/src/lib.rs:4 t -> Function crates/b/src/util.rs:1 f reason=call
-/// conf=1.0`. FU-2026-10-08-3137f86a15e9 and FU-2026-10-25-c68c18feaf6f.
+/// Expected in the baseline: re-blessed by the main session.
+/// FU-2026-10-08-3137f86a15e9 and FU-2026-10-25-c68c18feaf6f.
 #[test]
 fn test_check_rust_crate_head_through_pub_use_matches_baseline() {
     let caller = "mod util;\n\npub fn t() {\n    b::f();\n}\n";
@@ -1351,12 +1361,11 @@ fn test_check_rust_crate_head_through_pub_use_matches_baseline() {
 /// Crate `a` calls `b::f()`, and crate `b`'s root re-exports `inner.rs`'s
 /// `f` with `#[doc(inline)] pub use inner::f;`. The index's `pub_use_re`
 /// matches a `pub use` only at the start of its line, so it records no row
-/// for that use; the overlay follows it as a `pub use`
-/// (`RustModules::reexport`).
+/// for that use; the overlay reads the module's rows with the same rule
+/// (`ecp_core::analyzer::rust_pub_use`) when the view reads its text.
 ///
-/// Expected in the baseline, one line: `edge overlay-only x1 Calls Function
-/// crates/a/src/lib.rs:1 t -> Function crates/b/src/inner.rs:1 f reason=call
-/// conf=1.0`. FU-2026-11-02-c9367f71b19b.
+/// Expected in the baseline: re-blessed by the main session.
+/// FU-2026-11-02-c9367f71b19b.
 #[test]
 fn test_check_rust_pub_use_attr_same_line_matches_baseline() {
     let caller = "pub fn t() {\n    b::f();\n}\n";
@@ -1535,10 +1544,9 @@ fn test_overlay_view_descendant_importer_private_use_binds_like_index() {
 /// `b`'s root writes `pub use crate::actual::*;` beside `b_use`, a `use
 /// crate::wrong::f;` that rustc drops, and `actual` and `wrong` both declare
 /// `f`. The index follows the glob `pub use` to `actual.rs`'s `f`. The
-/// overlay sees both `use`s without their visibility and cannot tell which
-/// one publishes `f`, so it binds nothing the index does not: never
-/// `wrong.rs`'s `f`. It binds no edge where the index binds `actual.rs`,
-/// a gap overlay P3's visibility rows close.
+/// import rows keep no visibility, so the overlay reads the root's `pub use`
+/// rows from its text and binds as the index does: `actual.rs`'s `f`, never
+/// `wrong.rs`'s.
 fn check_named_use_beside_pub_glob(b_use: &str) {
     const ACTUAL: &str = "crates/b/src/actual.rs";
     const WRONG: &str = "crates/b/src/wrong.rs";
@@ -1559,10 +1567,7 @@ fn check_named_use_beside_pub_glob(b_use: &str) {
         [(ACTUAL, "f")],
         "the index binds through the glob pub use: {reindex:#?}"
     );
-    assert!(
-        overlay.iter().all(|call| reindex.contains(call)),
-        "the overlay binds an edge the index does not: {overlay:#?}"
-    );
+    assert_eq!(overlay, reindex);
 }
 
 #[test]
@@ -1579,8 +1584,8 @@ fn test_overlay_view_nested_test_use_beside_pub_glob_binds_nothing_beyond_index(
 
 /// `b`'s root holds a private `use crate::inner::*;` and a `macro_rules!`
 /// invocation that makes `f`, which no parse sees. The index records no
-/// `pub use` there, so it binds `f` through no tree; the overlay cannot
-/// tell that glob from a `pub` one, so it must not follow it either.
+/// `pub use` there, so it binds `f` through no tree; the overlay reads the
+/// same rows from the root's text, so it must not follow the glob either.
 /// `other.rs` declares a second `f`, which keeps Tier 3 from binding.
 #[test]
 fn test_overlay_view_private_glob_macro_item_binds_like_index() {
@@ -1602,4 +1607,85 @@ fn test_overlay_view_private_glob_macro_item_binds_like_index() {
         "the index binds `f` through no tree: {reindex:#?}"
     );
     assert_eq!(overlay, reindex);
+}
+
+/// `b`'s root publishes `unix.rs`'s `f` through a `pub use` inside a macro
+/// invocation (the `cfg_if!` shape), which no parse sees as an import, and a
+/// `#[cfg(test)]` module holds a private `use crate::wrong::f;`. The index
+/// reads the `pub use` line and binds `unix.rs`. The overlay reads the same
+/// line from the module's text, so it never follows the private `use` to
+/// `wrong.rs`.
+#[test]
+fn test_overlay_view_named_use_beside_macro_published_item_binds_like_index() {
+    const UNIX: &str = "crates/b/src/unix.rs";
+    let caller = "use b::f;\n\npub fn t() {\n    f();\n}\n";
+    let b_lib = "mod wrong;\nmod other;\n\nmacro_rules! items {\n    ($($i:item)*) => { $($i)* };\n}\n\nitems! {\n    mod unix;\n    pub use self::unix::f;\n}\n\n#[cfg(test)]\nmod tests {\n    use crate::wrong::f;\n}\n";
+    let files = reexport_crates(
+        caller,
+        b_lib,
+        &[
+            (UNIX, "pub fn f() {}\n"),
+            ("crates/b/src/wrong.rs", "pub fn f() {}\n"),
+            ("crates/b/src/other.rs", "pub fn f() {}\n"),
+        ],
+    );
+    let (reindex, overlay) = reindex_and_overlay(&files, CALLER, &one_line_edit(caller), &["t"]);
+    let bound: Vec<(&str, &str)> = reindex
+        .iter()
+        .map(|call| (call.callee_file.as_str(), call.callee.as_str()))
+        .collect();
+    assert_eq!(
+        bound,
+        [(UNIX, "f")],
+        "the index binds through the macro's pub use: {reindex:#?}"
+    );
+    assert_eq!(overlay, reindex);
+}
+
+/// Crate `b` whose root is `b_lib`, `inner.rs` declaring `helper`, and an
+/// undeclared `decoy.rs` declaring a second `helper`, which keeps Tier 3
+/// from binding; the dirty caller in `a` calls `helper()` through
+/// `use b::helper;`. The index binds `inner.rs`'s `helper` through `b`'s
+/// `pub use` row, and the overlay must bind it the same way.
+fn check_pub_use_reaches_inner_helper(b_lib: &str) {
+    const INNER: &str = "crates/b/src/inner.rs";
+    const DECOY: &str = "crates/b/src/decoy.rs";
+    let caller = "use b::helper;\n\npub fn t() {\n    helper();\n}\n";
+    let files = reexport_crates(
+        caller,
+        b_lib,
+        &[
+            (INNER, "pub fn helper() {}\n"),
+            (DECOY, "pub fn helper() {}\n"),
+        ],
+    );
+    let (reindex, overlay) = reindex_and_overlay(&files, CALLER, &one_line_edit(caller), &["t"]);
+    let bound: Vec<(&str, &str)> = reindex
+        .iter()
+        .map(|call| (call.callee_file.as_str(), call.callee.as_str()))
+        .collect();
+    assert_eq!(
+        bound,
+        [(INNER, "helper")],
+        "the index binds through b's pub use: {reindex:#?}"
+    );
+    assert_eq!(overlay, reindex);
+}
+
+/// `b`'s root holds `pub use inner::helper;` and a `#[cfg(test)] mod tests
+/// { use super::*; }`: the import rows show a glob `use` beside the named
+/// one, with no visibility. The root's text holds one `pub use` row, the
+/// named one, which both sides follow.
+#[test]
+fn test_overlay_view_pub_use_beside_test_mod_glob_binds_like_index() {
+    check_pub_use_reaches_inner_helper(
+        "mod inner;\npub use inner::helper;\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n}\n",
+    );
+}
+
+/// `b`'s root is a facade, `pub use inner::*;`: both sides follow the glob
+/// row to `inner.rs`'s `helper`.
+#[test]
+fn test_overlay_view_pub_glob_facade_binds_like_index() {
+    check_pub_use_reaches_inner_helper("mod inner;\npub use inner::*;\n");
 }

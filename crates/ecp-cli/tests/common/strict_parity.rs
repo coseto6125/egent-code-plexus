@@ -321,6 +321,10 @@ pub struct Observed {
     /// `input dropped <path>` for each written fragment or tombstone the
     /// reader did not serve.
     pub dropped: BTreeSet<String>,
+    /// Every Rust file's text in the edited worktree, by repo-relative
+    /// path: the view reads module text through it, as the engine reads
+    /// the worktree, after the scenario's temp repo is gone.
+    pub sources: BTreeMap<String, String>,
 }
 
 impl Observed {
@@ -342,6 +346,7 @@ impl Observed {
             &self.tombstones,
             &self.stale,
             &self.configs,
+            Some(&|rel: &str| self.sources.get(rel).cloned()),
         );
         if let Some(view) = &view {
             assert_eq!(
@@ -461,7 +466,31 @@ pub fn run(scenario: &Scenario<'_>) -> Observed {
         stale: read.stale,
         configs: read.configs,
         dropped,
+        sources: rust_sources(repo.path()),
     }
+}
+
+/// Every `.rs` file under `root` outside `.git`, by forward-slashed
+/// repo-relative path.
+fn rust_sources(root: &Path) -> BTreeMap<String, String> {
+    let mut sources = BTreeMap::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if entry.file_name() != ".git" {
+                    stack.push(path);
+                }
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                let rel = path.strip_prefix(root).unwrap();
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    sources.insert(rel.to_string_lossy().replace('\\', "/"), text);
+                }
+            }
+        }
+    }
+    sources
 }
 
 /// The difference lines between the overlay view of `scenario` and a fresh

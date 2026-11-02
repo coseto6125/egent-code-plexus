@@ -5,8 +5,8 @@
 
 use super::{
     base_function_meta, construction_target, emit_closure_references, fragment_emits, reason_index,
-    span_of, CallGap, DirtyNamesake, OverlayFileInput, OverlaySymbol, ViewEdge, ViewNode,
-    CS_STRICTEST_FLAGS, GAP_CS_ACCESS_DIRTY_TARGET, GAP_CS_EXTENSION_DIRTY_DECLARATION,
+    span_of, CallGap, DirtyNamesake, OverlayFileInput, OverlaySymbol, SourceReader, ViewEdge,
+    ViewNode, CS_STRICTEST_FLAGS, GAP_CS_ACCESS_DIRTY_TARGET, GAP_CS_EXTENSION_DIRTY_DECLARATION,
     GAP_CS_PARTIAL_BARE_CALL,
 };
 use crate::analyzer::csharp_access::{self, CallAccess};
@@ -47,6 +47,7 @@ use crate::analyzer::rust_paths::{
     is_rust_source, rust_expand_path_head, rust_module_dir, rust_module_path_base,
     rust_type_path_prefix,
 };
+use crate::analyzer::rust_pub_use::{self, PubUseEntries};
 use crate::analyzer::same_file_pick::{
     prefer_owned, rust_impl_members, ImplMember, ImplNode, PickFacts, PickScope,
 };
@@ -338,6 +339,7 @@ impl<'a> OverlayFacts<'a> {
         replaced: &'a FxHashMap<u32, u32>,
         later_overloads: &'a FxHashMap<u32, Vec<u32>>,
         configs: &ConfigEdits,
+        sources: Option<SourceReader<'a>>,
     ) -> Self {
         let base_len = graph.nodes.len() as u32;
         let mut declared: FxHashMap<(usize, &'a str), Vec<u32>> = FxHashMap::default();
@@ -478,7 +480,7 @@ impl<'a> OverlayFacts<'a> {
         // The dirty configs' rows over the archived table, merged once per
         // view: the alias reading and the crate table both read it.
         let merged = configs.merged_facts(graph);
-        let rust = RustModules::new(graph, files, removed, rust_facts);
+        let rust = RustModules::new(graph, files, removed, rust_facts).with_sources(sources);
         if let Some(facts) = &merged {
             let _ = rust.crates.set(facts.clone());
         }
@@ -2908,6 +2910,10 @@ impl<'v, 'a> NameTierFacts for OverlayTiers<'v, 'a, '_> {
     ) -> Resolution {
         let facts = self.members.facts;
         let (nearest, free_only) = (call.is_some(), call.is_some_and(|call| call.free_only));
+        // The key holds all this lookup reads of `call`: `global_tier` reads
+        // only `call.is_some()`, and this method only `free_only`. A
+        // `CallPick` field either one starts to read must join the key, or
+        // two call sites that differ in it share one memoized answer.
         let key = (
             self.file_ord,
             (imports.as_ptr() as usize, imports.len()),
@@ -2997,7 +3003,21 @@ pub(super) struct RustModules<'a> {
     /// The `graph.bin` workspace facts, read on first use: reading them
     /// deserializes and validates the whole table, once per view.
     pub(super) crates: OnceCell<crate::contracts::workspace::WorkspaceFacts>,
+    /// The current text of a module file, which its `pub use` rows are
+    /// read from ([`Self::published`]). `None` for a view built without one.
+    sources: Option<SourceReader<'a>>,
+    /// Rust file → its `pub use` rows in each tree that holds it, read on
+    /// the first question only a `pub use` of that module can answer
+    /// ([`Self::pub_uses`]). The keys are set once per view, on that first
+    /// question, so a module's rows borrow from the view. `None` for a text
+    /// the source cannot give.
+    pub_use_rows: OnceCell<FxHashMap<&'a str, OnceCell<Option<ModulePubUses<'a>>>>>,
 }
+
+/// One Rust module file's `pub use` rows ([`rust_pub_use::pub_use_entries`])
+/// per tree that holds it: the root file of the tree, and the rows read
+/// with the module's path in that tree.
+type ModulePubUses<'a> = Vec<(&'a str, PubUseEntries)>;
 
 /// Where one caller file stands in the module trees
 /// ([`RustModules::caller`]).
@@ -3036,7 +3056,15 @@ impl<'a> RustModules<'a> {
             base_twin_scans: RefCell::default(),
             removed,
             crates: OnceCell::new(),
+            sources: None,
+            pub_use_rows: OnceCell::new(),
         }
+    }
+
+    /// The view's reader of a module file's current text.
+    pub(super) fn with_sources(mut self, sources: Option<SourceReader<'a>>) -> Self {
+        self.sources = sources;
+        self
     }
 
     /// Whether no module path names `idx` (base or virtual) from outside
@@ -3292,26 +3320,86 @@ impl<'a> RustModules<'a> {
         }
     }
 
-    /// What `module` publishes `name` through, as far as `graph.bin` shows:
-    /// it keeps no import visibility, so a `use` naming `name`, or a glob
-    /// `use` while the module declares no `name`, may be a `pub use` and
-    /// answers [`ladder::Published::Unknown`]. Otherwise the module's own.
-    fn published(&self, module: &str, name: &str) -> ladder::Published<'static> {
+    /// What `module` of `root` publishes `name` through, as the index
+    /// answers (`IndexModuleTree::published`): the `pub use` naming `name`,
+    /// else a glob `pub use`, else the module's own. The rows come from the
+    /// module's current text ([`Self::pub_uses`]), read only when a `use`
+    /// of the module binds `name` or a glob `use` exists: with neither, no
+    /// `pub use` publishes `name`. Without the text (no source, or one that
+    /// cannot read the file) the answer is what `graph.bin` shows: it keeps
+    /// no import visibility, so such a `use`, or a glob while the module
+    /// declares no `name`, may be a `pub use` and answers
+    /// [`ladder::Published::Unknown`].
+    fn published(&self, root: &'a str, module: &'a str, name: &str) -> ladder::Published<'_> {
         let Some(imports) = self.module_imports(module) else {
             return ladder::Published::Own;
         };
-        let mut glob = false;
+        let (mut binds, mut glob) = (false, false);
         for import in imports.iter() {
-            if import.alias.unwrap_or(import.imported_name) == name {
-                return ladder::Published::Unknown;
-            }
+            binds |= import.alias.unwrap_or(import.imported_name) == name;
             glob |= import.imported_name == "*";
         }
-        if glob && !self.declares(module, name, |_| true) {
+        if !binds && !glob {
+            return ladder::Published::Own;
+        }
+        if let Some(rows) = self.pub_uses(root, module) {
+            let entry = |name: &str| rows.get(name);
+            return match entry(name).or_else(|| entry("*")) {
+                Some(entry) => ladder::Published::ReExport(ladder::ReExport {
+                    prefix: &entry.path_prefix,
+                    original: &entry.original_name,
+                    containing: &entry.containing_mod_path,
+                }),
+                None => ladder::Published::Own,
+            };
+        }
+        if binds || !self.declares(module, name, |_| true) {
             ladder::Published::Unknown
         } else {
             ladder::Published::Own
         }
+    }
+
+    /// The `pub use` rows of the Rust file `module` in the tree rooted at
+    /// `root` ([`Self::pub_use_rows`]): the index's rows, read from the text
+    /// [`Self::sources`] gives, each with the module's path in that tree as
+    /// its containing path. `None` without a source, for a file it cannot
+    /// read, and for a module no tree of `root` holds.
+    fn pub_uses(&self, root: &'a str, module: &'a str) -> Option<&PubUseEntries> {
+        let sources = self.sources?;
+        let graph = self.graph;
+        let cells = self.pub_use_rows.get_or_init(|| {
+            let pool = &graph.string_pool;
+            let base = graph
+                .files
+                .iter()
+                .map(|file| file.path.resolve(pool))
+                .filter(|path| !self.dirty.contains_key(path) && !self.removed.contains(path));
+            self.dirty
+                .keys()
+                .copied()
+                .chain(base)
+                .filter(|path| is_rust_source(std::path::Path::new(path)))
+                .map(|path| (path, OnceCell::new()))
+                .collect()
+        });
+        let trees = cells.get(module)?.get_or_init(|| {
+            let clean = rust_pub_use::strip_comments(&sources(module)?);
+            Some(
+                self.caller(module)
+                    .targets
+                    .into_iter()
+                    .map(|(tree, path)| {
+                        (tree, rust_pub_use::pub_use_entries_of_clean(&clean, &path))
+                    })
+                    .collect(),
+            )
+        });
+        trees
+            .as_ref()?
+            .iter()
+            .find(|(tree, _)| *tree == root)
+            .map(|(_, rows)| rows)
     }
 
     /// The import rows of `module`: a dirty file's fresh parse, else the
@@ -3408,8 +3496,8 @@ impl<'a> ladder::ModuleTreeFacts for OverlayTree<'_, 'a> {
         self.modules.child(parent, name, above.is_empty())
     }
 
-    fn published(&self, _root: &'a str, module: &'a str, name: &str) -> ladder::Published<'_> {
-        self.modules.published(module, name)
+    fn published(&self, root: &'a str, module: &'a str, name: &str) -> ladder::Published<'_> {
+        self.modules.published(root, module, name)
     }
 
     fn declares(&self, module: &'a str, name: &str, namespace: ladder::Namespace) -> bool {
@@ -5228,7 +5316,9 @@ pub(super) type MemberTwins = FxHashMap<u32, (usize, Vec<(u32, Span)>)>;
 /// `Annotation` node they reach is numbered past every virtual node yet.
 /// The `Overrides` edges ([`resolve_overrides`]) go to `overrides`.
 /// `configs` holds the dirty resolution configs' rows, which every module
-/// lookup reads in place of the archived ones.
+/// lookup reads in place of the archived ones. `sources` reads a module
+/// file's current text, which its Rust `pub use` rows come from
+/// ([`RustModules::published`]).
 /// Returns the lexical parent of each scoped virtual node.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_edges(
@@ -5250,6 +5340,7 @@ pub(super) fn resolve_edges(
     decorated: &mut Decorated<'_>,
     overrides: &mut Vec<ViewEdge>,
     configs: &ConfigEdits,
+    sources: Option<SourceReader<'_>>,
 ) -> FxHashMap<u32, u32> {
     let mut callables = OverlayNames::new(ResolveTarget::Callable);
     let mut values = OverlayNames::new(ResolveTarget::Value);
@@ -5315,6 +5406,7 @@ pub(super) fn resolve_edges(
         replaced,
         later_overloads,
         configs,
+        sources,
     );
     let lexical_parents: FxHashMap<u32, u32> = facts.dirty_lexical_parents.clone();
 

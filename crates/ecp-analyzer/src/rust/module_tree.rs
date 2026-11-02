@@ -30,6 +30,7 @@
 use crate::resolution::index::SymbolTable;
 use ecp_core::analyzer::ladder::{self, Namespace, Published, ReExport, TreeItem};
 use ecp_core::analyzer::rust_paths::rust_module_dir;
+use ecp_core::analyzer::rust_pub_use::{pub_use_entries_of_clean, strip_comments, PubUseEntry};
 use ecp_core::contracts::workspace::{
     ConfigPresence, ConfigRead, Ecosystem, Membership, NameRank, Scope, ScopeId, ScopeName,
     WorkspaceFacts,
@@ -57,69 +58,6 @@ fn path_attr_re() -> &'static regex::Regex {
     RE.get_or_init(|| regex::Regex::new(r#"#\[path\s*=\s*"([^"]+)"\]"#).expect("path_attr_re"))
 }
 
-fn line_comment_re() -> &'static regex::Regex {
-    static RE: OnceLock<regex::Regex> = OnceLock::new();
-    RE.get_or_init(|| regex::Regex::new(r"//[^\n]*").expect("line_comment_re"))
-}
-
-fn block_comment_re() -> &'static regex::Regex {
-    static RE: OnceLock<regex::Regex> = OnceLock::new();
-    RE.get_or_init(|| regex::Regex::new(r"(?s)/\*.*?\*/").expect("block_comment_re"))
-}
-
-/// Matches `pub use <path>::<Name>` and `pub use <path>::<Name> as <Alias>`.
-/// Also matches `pub use <path>::*` for glob re-exports.
-///
-/// Capture groups:
-///   1: module path prefix (everything before the last `::`)
-///   2: exported item name (last segment, or `*` for glob)
-///   3: optional alias after `as`
-///
-/// Visibility variants (`pub(crate)`, `pub(super)`, etc.) are all accepted
-/// because all make the item reachable from *some* external scope.
-fn pub_use_re() -> &'static regex::Regex {
-    static RE: OnceLock<regex::Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        regex::Regex::new(
-            r"(?m)^\s*pub(?:\s*\([^)]*\))?\s+use\s+((?:[A-Za-z_][A-Za-z0-9_]*::)+)(\*|[A-Za-z_][A-Za-z0-9_]*)(?:\s+as\s+([A-Za-z_][A-Za-z0-9_]*))?\s*;"
-        )
-        .expect("pub_use_re")
-    })
-}
-
-/// Matches the one-level group form `pub use <path>::{A, b::C, D as E};`.
-/// Capture 1 is the shared prefix (with its trailing `::`), capture 2 the
-/// brace body. A nested group inside the braces does not match, so that
-/// statement keeps its pre-group behaviour (not collected).
-fn pub_use_group_re() -> &'static regex::Regex {
-    static RE: OnceLock<regex::Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        regex::Regex::new(
-            r"(?m)^\s*pub(?:\s*\([^)]*\))?\s+use\s+((?:[A-Za-z_][A-Za-z0-9_]*::)+)\{([^{};]*)\}\s*;"
-        )
-        .expect("pub_use_group_re")
-    })
-}
-
-/// Strip `//` and `/* */` comments from source, preserving newlines so
-/// MULTILINE regex anchors keep working.
-fn strip_comments(src: &str) -> String {
-    let s = block_comment_re().replace_all(src, |caps: &regex::Captures| {
-        caps[0]
-            .chars()
-            .map(|c| if c == '\n' { '\n' } else { ' ' })
-            .collect::<String>()
-    });
-    line_comment_re()
-        .replace_all(&s, |caps: &regex::Captures| {
-            caps[0]
-                .chars()
-                .map(|c| if c == '\n' { '\n' } else { ' ' })
-                .collect::<String>()
-        })
-        .into_owned()
-}
-
 // ---------------------------------------------------------------------------
 // Module tree
 // ---------------------------------------------------------------------------
@@ -128,27 +66,11 @@ fn strip_comments(src: &str) -> String {
 /// The crate root itself maps to an empty vec `[]`.
 type ModTree = FxHashMap<Vec<String>, PathBuf>;
 
-/// A single `pub use` re-export entry collected from a source file.
-#[derive(Debug, Clone)]
-struct ReExportEntry {
-    /// The path prefix segments before the last `::` (e.g. `["inner"]` for
-    /// `pub use inner::Widget`). May start with `crate`, `super`, `self`, or
-    /// a crate name.
-    path_prefix: Vec<String>,
-    /// The original item name at the source (last segment before `as`),
-    /// `*` for a glob re-export (`pub use path::*`).
-    original_name: String,
-    /// The module path of the file that contains this `pub use` statement.
-    /// Used to resolve relative prefix segments (e.g. `nested` in
-    /// `src/deep/mod.rs` means `deep::nested`, not root-level `nested`).
-    containing_mod_path: Vec<String>,
-}
-
 /// Per-crate map from `(canonical_abs_file, exported_symbol_name)` to the
 /// re-export entry that publishes it. `exported_symbol_name` is the name
 /// visible at the re-export site (i.e. after `as Alias` renaming, or the
 /// original name when no alias is given, or `"*"` for glob entries).
-type ReExportMap = FxHashMap<(PathBuf, String), ReExportEntry>;
+type ReExportMap = FxHashMap<(PathBuf, String), PubUseEntry>;
 
 /// Workspace-level Rust module tree: one `ModTree` per crate.
 pub struct RustWorkspaceModTree {
@@ -653,93 +575,13 @@ fn build_mod_tree_and_reexports(entry: &Path) -> (ModTree, ReExportMap) {
         }
 
         // Collect `pub use` re-exports from this file.
-        collect_pub_use_entries(&clean, &file, &mod_path, &mut reexports);
-    }
-    (tree, reexports)
-}
-
-/// Scan `clean` (comments already stripped) for `pub use` statements and
-/// record each one in `reexports`, keyed by `(file, exported_name)`.
-///
-/// For `pub use path::Name as Alias` the key uses `Alias` (the name visible
-/// to callers); `original_name` stores `Name` (the source symbol to resolve).
-/// For `pub use path::*` the key uses `"*"` as a wildcard sentinel.
-///
-/// `containing_mod_path` is the module path of `file` within the crate tree
-/// (e.g. `["deep"]` for `src/deep/mod.rs`). It is stored in the entry so
-/// that relative path prefixes (like `nested` in `pub use nested::W`) can be
-/// correctly resolved as absolute crate-rooted paths during chain walking.
-fn collect_pub_use_entries(
-    clean: &str,
-    file: &Path,
-    containing_mod_path: &[String],
-    reexports: &mut ReExportMap,
-) {
-    for cap in pub_use_re().captures_iter(clean) {
-        // cap[1]: prefix like "inner::" or "crate::deep::" (trailing "::")
-        // cap[2]: item name or "*"; cap[3]: optional alias
-        insert_pub_use(
-            cap[1].split("::"),
-            &cap[2],
-            cap.get(3).map(|m| m.as_str()),
-            file,
-            containing_mod_path,
-            reexports,
+        reexports.extend(
+            pub_use_entries_of_clean(&clean, &mod_path)
+                .into_iter()
+                .map(|(name, entry)| ((file.clone(), name), entry)),
         );
     }
-    for cap in pub_use_group_re().captures_iter(clean) {
-        for member in cap[2].split(',').map(str::trim).filter(|m| !m.is_empty()) {
-            let (path, alias) = match member.split_once(" as ") {
-                Some((path, alias)) => (path.trim(), Some(alias.trim())),
-                None => (member, None),
-            };
-            let (sub, item) = match path.rsplit_once("::") {
-                Some((sub, item)) => (Some(sub), item),
-                None => (None, path),
-            };
-            if item == "self" {
-                continue;
-            }
-            insert_pub_use(
-                cap[1]
-                    .split("::")
-                    .chain(sub.into_iter().flat_map(|s| s.split("::"))),
-                item,
-                alias,
-                file,
-                containing_mod_path,
-                reexports,
-            );
-        }
-    }
-}
-
-/// Record one re-exported item: `pub use <prefix>::<item> [as <alias>]`.
-fn insert_pub_use<'a>(
-    prefix: impl Iterator<Item = &'a str>,
-    item: &str,
-    alias: Option<&str>,
-    file: &Path,
-    containing_mod_path: &[String],
-    reexports: &mut ReExportMap,
-) {
-    let path_prefix: Vec<String> = prefix
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect();
-    if path_prefix.is_empty() {
-        return;
-    }
-    let exported_name = alias.unwrap_or(item).to_string();
-    reexports.insert(
-        (file.to_path_buf(), exported_name),
-        ReExportEntry {
-            path_prefix,
-            original_name: item.to_string(),
-            containing_mod_path: containing_mod_path.to_vec(),
-        },
-    );
+    (tree, reexports)
 }
 
 /// Locate the child module file for `mod NAME;` declared in `parent_file`.

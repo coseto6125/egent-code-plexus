@@ -157,6 +157,7 @@ impl Fixture {
             &inputs.tombstones,
             &inputs.stale,
             &inputs.configs,
+            Some(&|rel: &str| std::fs::read_to_string(self.worktree.join(rel)).ok()),
         )
         .unwrap()
     }

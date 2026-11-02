@@ -47,7 +47,9 @@ use ecp_core::analyzer::ladder::{
     FieldRead, StemFile, TypeName,
 };
 use ecp_core::analyzer::module_discovery::{self, Module, ModuleIndex};
-use ecp_core::analyzer::name_tiers::{self, Decision, HitBarrel, NameTierFacts, TierPolicy};
+use ecp_core::analyzer::name_tiers::{
+    self, Decision, HitBarrel, NameTierFacts, TierHit, TierPolicy,
+};
 use ecp_core::analyzer::outcome::{Resolution, Tier};
 use ecp_core::analyzer::path_aliases::{AliasScope, PathAliases};
 use ecp_core::analyzer::reexport::{
@@ -540,19 +542,24 @@ impl<'s, 'r, 'a> ladder::CallFacts<'s> for IndexCall<'r, 'a, '_> {
         call: CallPick<'_>,
         heritage: &[String],
     ) -> Resolution {
-        let targets = self.facts.0.resolve_symbol_with_import_binding(
-            self.source_file,
-            typed.unwrap_or(site.name()),
-            self.language,
-            self.raw_imports,
-            TierPolicy {
-                target: call_target(self.source_file, site),
-                bind_import: !call.untyped,
-                call: Some(call),
-                heritage,
-            },
-            &mut None,
-        );
+        let targets: Vec<(NodeId, f32)> = self
+            .facts
+            .0
+            .resolve_symbol_with_import_binding(
+                self.source_file,
+                typed.unwrap_or(site.name()),
+                self.language,
+                self.raw_imports,
+                TierPolicy {
+                    target: call_target(self.source_file, site),
+                    bind_import: !call.untyped,
+                    call: Some(call),
+                    heritage,
+                },
+            )
+            .map(TierHit::edge)
+            .into_iter()
+            .collect();
         let resolution = ladder_resolution(&targets);
         *self.targets.borrow_mut() = targets;
         resolution
@@ -603,20 +610,21 @@ impl<'s, 'r, 'a> ladder::CallFacts<'s> for IndexCall<'r, 'a, '_> {
         call: CallPick<'_>,
         heritage: &[String],
     ) -> Option<(u32, f32)> {
-        let types = self.facts.0.resolve_symbol_with_import_binding(
-            self.source_file,
-            path,
-            self.language,
-            self.raw_imports,
-            TierPolicy {
-                target: ResolveTarget::Type,
-                bind_import: bind_imports && !call.untyped,
-                call: Some(call),
-                heritage,
-            },
-            &mut None,
-        );
-        sole_target(&types)
+        self.facts
+            .0
+            .resolve_symbol_with_import_binding(
+                self.source_file,
+                path,
+                self.language,
+                self.raw_imports,
+                TierPolicy {
+                    target: ResolveTarget::Type,
+                    bind_import: bind_imports && !call.untyped,
+                    call: Some(call),
+                    heritage,
+                },
+            )
+            .map(TierHit::edge)
     }
 
     fn construction_target(&self, type_id: u32) -> u32 {
@@ -633,14 +641,16 @@ impl<'s, 'r, 'a> ladder::CallFacts<'s> for IndexCall<'r, 'a, '_> {
         target: ResolveTarget,
         bind_imports: bool,
     ) -> Option<(u32, f32)> {
-        sole_target(&self.facts.0.resolve_import_tiers(
-            self.source_file,
-            self.language,
-            name,
-            (self.raw_imports, bind_imports),
-            target,
-            &mut None,
-        ))
+        self.facts
+            .0
+            .resolve_import_tiers(
+                self.source_file,
+                self.language,
+                name,
+                (self.raw_imports, bind_imports),
+                target,
+            )
+            .map(TierHit::edge)
     }
 
     fn note_import_bound(&self, name: &str, import: &RawImport, id: u32) {
@@ -1439,8 +1449,10 @@ impl<'a> Resolver<'a> {
             symbol_name,
             (raw_imports, true),
             target,
-            &mut None,
         )
+        .map(TierHit::edge)
+        .into_iter()
+        .collect()
     }
 
     /// The import tiers alone for the local name `local_name` an import
@@ -1458,16 +1470,14 @@ impl<'a> Resolver<'a> {
         let language = self
             .symbol_table
             .file_language(&normalize_source_path(source_file));
-        let mut barrel = None;
-        let targets = self.resolve_import_tiers(
+        let hit = self.resolve_import_tiers(
             source_file,
             language,
             local_name,
             (raw_imports, true),
             target,
-            &mut barrel,
         );
-        (targets, barrel)
+        split_hit(hit)
     }
 
     /// The TS / JS file `import` of `importer` names
@@ -1479,7 +1489,7 @@ impl<'a> Resolver<'a> {
     /// The import tiers alone ([`name_tiers::import_tiers`]): the
     /// import-member tier (explicit imports, then wildcards when no explicit
     /// import binds the name) where the language binds through imports and
-    /// `bind_import` holds, else the named-import tier. `barrel` receives the
+    /// `bind_import` holds, else the named-import tier. The hit carries the
     /// barrel a re-export hop went through.
     fn resolve_import_tiers(
         &self,
@@ -1488,8 +1498,7 @@ impl<'a> Resolver<'a> {
         symbol_name: &str,
         (raw_imports, bind_import): (&[RawImport], bool),
         target: ResolveTarget,
-        barrel: &mut Option<Arc<str>>,
-    ) -> Vec<(NodeId, f32)> {
+    ) -> Option<TierHit<Arc<str>>> {
         let source = normalize_source_path(source_file);
         name_tiers::import_tiers(
             &self.tiers(source_file, &source, language),
@@ -1498,12 +1507,6 @@ impl<'a> Resolver<'a> {
             bind_import,
             target,
         )
-        .map(|hit| {
-            *barrel = hit.barrel.map(HitBarrel::into_arc);
-            (hit.id, hit.confidence)
-        })
-        .into_iter()
-        .collect()
     }
 
     /// The name tiers' facts ([`IndexTiers`]) for a lookup in `source_file`,
@@ -1674,8 +1677,10 @@ impl<'a> Resolver<'a> {
             raw_imports,
             target,
             caller_heritage,
-            &mut None,
         )
+        .map(TierHit::edge)
+        .into_iter()
+        .collect()
     }
 
     /// [`Self::resolve_symbol`] for the name an import statement binds, and
@@ -1691,20 +1696,17 @@ impl<'a> Resolver<'a> {
         raw_imports: &[RawImport],
         target: ResolveTarget,
     ) -> (Vec<(NodeId, f32)>, Option<Arc<str>>) {
-        let mut barrel = None;
-        let targets = self.resolve_symbol_with_barrel(
+        split_hit(self.resolve_symbol_with_barrel(
             source_file,
             symbol_name,
             raw_imports,
             target,
             &[],
-            &mut barrel,
-        );
-        (targets, barrel)
+        ))
     }
 
-    /// [`Self::resolve_symbol_with_heritage`]; `barrel` receives the barrel
-    /// an import-tier hit went through ([`Self::resolve_import`]).
+    /// [`Self::resolve_symbol_with_heritage`]; the hit carries the barrel an
+    /// import-tier hit went through ([`Self::resolve_import`]).
     fn resolve_symbol_with_barrel(
         &self,
         source_file: &Path,
@@ -1712,8 +1714,7 @@ impl<'a> Resolver<'a> {
         raw_imports: &[RawImport],
         target: ResolveTarget,
         caller_heritage: &[String],
-        barrel: &mut Option<Arc<str>>,
-    ) -> Vec<(NodeId, f32)> {
+    ) -> Option<TierHit<Arc<str>>> {
         let language = self
             .symbol_table
             .file_language(&normalize_source_path(source_file));
@@ -1723,7 +1724,6 @@ impl<'a> Resolver<'a> {
             language,
             raw_imports,
             TierPolicy::lookup(language, target, caller_heritage),
-            barrel,
         )
     }
 
@@ -1739,8 +1739,7 @@ impl<'a> Resolver<'a> {
         language: Language,
         raw_imports: &[RawImport],
         policy: TierPolicy<'_>,
-        barrel: &mut Option<Arc<str>>,
-    ) -> Vec<(NodeId, f32)> {
+    ) -> Option<TierHit<Arc<str>>> {
         let source = normalize_source_path(source_file);
         name_tiers::name_tiers(
             &self.tiers(source_file, &source, language),
@@ -1748,12 +1747,6 @@ impl<'a> Resolver<'a> {
             raw_imports,
             policy,
         )
-        .map(|hit| {
-            *barrel = hit.barrel.map(HitBarrel::into_arc);
-            (hit.id, hit.confidence)
-        })
-        .into_iter()
-        .collect()
     }
 
     /// R24: the `Property` a plain field read `name` binds, through the tier
@@ -1803,12 +1796,15 @@ fn ladder_resolution(targets: &[(NodeId, f32)]) -> Resolution {
     Resolution::from_ladder(targets.first().copied())
 }
 
-/// The one target of a type lookup; `None` for none or several, which the
-/// constructor fallback reads as no type.
-fn sole_target(targets: &[(NodeId, f32)]) -> Option<(NodeId, f32)> {
-    match *targets {
-        [target] => Some(target),
-        _ => None,
+/// A tier hit as the public lookups return it: the edge, and the barrel an
+/// import-tier hit went through.
+fn split_hit(hit: Option<TierHit<Arc<str>>>) -> (Vec<(NodeId, f32)>, Option<Arc<str>>) {
+    match hit {
+        Some(hit) => (
+            vec![(hit.id, hit.confidence)],
+            hit.barrel.map(HitBarrel::into_arc),
+        ),
+        None => (Vec::new(), None),
     }
 }
 
