@@ -823,8 +823,8 @@ fn test_execute_order_by_aggregate_projected_under_an_alias_sorts() {
 
 #[test]
 fn test_execute_order_by_picks_the_item_with_the_same_arguments() {
-    // Every aggregate defaults to the column name `COUNT(*)`, so the key must
-    // match on its arguments: gamma leads either way (4 callers, 4 rows), the
+    // Two aggregates with different arguments share a function name, so the
+    // key must match on its arguments: gamma leads either way (4 callers, 4 rows), the
     // runner-up tells the two keys apart (beta by callers, dup by rows).
     let query = |key: &str| {
         format!(

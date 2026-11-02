@@ -720,13 +720,15 @@ mod tests {
         fx.into_bytes()
     }
 
-    /// `(name, requires_verification)` of every row `run_bfs` returns, sorted;
-    /// heuristic rows are listed after `|`.
+    type Rows = Vec<(String, bool)>;
+
+    /// `(name, requires_verification)` of every row `run_bfs` returns, sorted:
+    /// the deterministic rows, then the heuristic rows.
     fn verification(
         graph: &ArchivedZeroCopyGraph,
         min_conf: f32,
         include_heuristic: bool,
-    ) -> (Vec<(String, bool)>, Vec<(String, bool)>) {
+    ) -> (Rows, Rows) {
         let (det, heur, _, _, _) = run_bfs(
             graph,
             None,

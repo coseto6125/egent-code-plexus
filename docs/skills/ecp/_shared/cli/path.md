@@ -92,9 +92,9 @@ other direction (upstream, 3 hops): rerun with --direction upstream."
 The reverse of `ecp impact`, on purpose. `impact` can include heuristic edges
 because it buckets them separately and tags them `requires_verification`; a
 path has no second bucket — a step is in the chain or it is not. So the default
-answer is the one that is safe to act on. `--include-heuristic` opts in, marks
-every inferred step `requiresVerification: true`, and adds a caveat naming how
-many hops are inferred.
+answer is the one that is safe to act on. `--include-heuristic` opts in.
+A step is `requiresVerification: true` when it is heuristic or has confidence
+below 0.7, and a caveat names how many such hops the path holds.
 
 ## Shortest only
 
