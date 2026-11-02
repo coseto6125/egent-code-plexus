@@ -1088,13 +1088,13 @@ pub fn qualified_member<F: QualifierFacts>(
     let file = file.as_ref();
     let heritage: &[String] = if caller_type { heritage } else { &[] };
     let pick = decls.first_decl_in_file(file, member, target)?;
-    let qualifier_is_type = type_receiver_is_closed(language)
-        && (caller_type
-            || owner_key(qualifier).is_some_and(|key| {
-                decls
-                    .first_decl_in_file(file, key, ResolveTarget::Type)
-                    .is_some()
-            }));
+    let qualifier_names_type = caller_type
+        || owner_key(qualifier).is_some_and(|key| {
+            decls
+                .first_decl_in_file(file, key, ResolveTarget::Type)
+                .is_some()
+        });
+    let qualifier_is_type = type_receiver_is_closed(language) && qualifier_names_type;
     let id = prefer_owned(
         decls,
         file,
@@ -1112,7 +1112,17 @@ pub fn qualified_member<F: QualifierFacts>(
     )?;
     // A C# explicit interface implementation is no member a name reaches:
     // the receiver-typing ladder then takes the call to an inherited one.
-    (rust_path_may_bind(decls, site, id) && !decls.hidden_member(id)).then_some(id)
+    (rust_path_may_bind(decls, site, id)
+        && !(qualifier_names_type && rust_type_path_misses(decls, site, id))
+        && !decls.hidden_member(id))
+    .then_some(id)
+}
+
+/// A Rust path through a type (`Shape::Circle`, `K::new`) names one of its
+/// associated items, never a free item of the type's file: an enum variant
+/// literal `Shape::Circle { .. }` constructs no struct `Circle`.
+fn rust_type_path_misses<D: PickFacts>(decls: &D, site: QualifiedSite<'_>, id: u32) -> bool {
+    site.language == Language::Rust && site.callee.contains("::") && decls.owner(id).is_none()
 }
 
 /// A Rust path (`crate::x::parse`) names a method only through its owning
