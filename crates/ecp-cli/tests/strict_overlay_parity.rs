@@ -1027,6 +1027,8 @@ fn test_overlay_view_dirty_function_meta_matches_reindex() {
 struct Inject {
     duplicate_call: bool,
     call_confidence: Option<f32>,
+    /// The reason of the `run -> K.m` call; `ast-call` when unset.
+    call_reason: Option<&'static str>,
     wrong_parent: bool,
     drop_node: bool,
     /// A file the scenario deleted whose nodes and edge the overlay still shows.
@@ -1061,9 +1063,10 @@ fn fixture(inject: Inject) -> rkyv::util::AlignedVec {
         fx.edge_with(gone, m, RelType::Calls, 1.0, "ast-call");
     }
     let confidence = inject.call_confidence.unwrap_or(1.0);
-    fx.edge_with(run, m, RelType::Calls, confidence, "ast-call");
+    let reason = inject.call_reason.unwrap_or("ast-call");
+    fx.edge_with(run, m, RelType::Calls, confidence, reason);
     if inject.duplicate_call {
-        fx.edge_with(run, m, RelType::Calls, confidence, "ast-call");
+        fx.edge_with(run, m, RelType::Calls, confidence, reason);
     }
     rkyv::to_bytes::<rkyv::rancor::Error>(&fx.build()).unwrap()
 }
@@ -1124,6 +1127,30 @@ fn test_diff_changed_confidence_returns_both_edge_sides() {
         lines.iter().any(|l| l.ends_with("conf=0.95")),
         "the exact confidence is part of the key: {lines:#?}"
     );
+}
+
+/// Red before the comparator carried reasons: the edge line ended at
+/// `conf=1.0` on both sides, so two graphs that differ only in one edge
+/// reason produced an empty difference and the assertions below failed.
+#[test]
+fn test_snapshot_reason_change_gives_diff() {
+    let lines = fixture_diff(Inject {
+        call_reason: Some("import-resolved"),
+        ..Inject::default()
+    });
+    let full_only = in_section(&lines, "edge full-only x1 Calls");
+    let overlay_only = in_section(&lines, "edge overlay-only x1 Calls");
+    assert_eq!(full_only.len(), 1, "{lines:#?}");
+    assert_eq!(overlay_only.len(), 1, "{lines:#?}");
+    assert!(
+        full_only[0].contains(" reason=ast-call conf=1.0"),
+        "{lines:#?}"
+    );
+    assert!(
+        overlay_only[0].contains(" reason=import-resolved conf=1.0"),
+        "{lines:#?}"
+    );
+    assert_eq!(lines.len(), 2, "only the reason differs: {lines:#?}");
 }
 
 #[test]

@@ -14,6 +14,17 @@
 //! edge through a `use` the index follows), inline `mod util { .. }`
 //! modules, and `#[path]` module files. The overlay walks file-backed `mod`
 //! declarations only.
+//!
+//! The `test_check_rust_*` cases at the end hold those gaps as known
+//! differences against a fresh index in
+//! `tests/baselines/strict_parity/<scenario>.txt` (`common/strict_parity.rs`):
+//! the repros are non-empty until P3 lands, and the guard stays empty.
+
+#[path = "common/baseline.rs"]
+mod baseline;
+mod common;
+#[path = "common/strict_parity.rs"]
+mod strict_parity;
 
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_cli::config_parser::parse_configs;
@@ -25,6 +36,7 @@ use ecp_core::session::merged::MergedGraph;
 use ecp_core::session::view::{OverlayFileInput, OverlayView};
 use ecp_core::session::OVERLAY_EDGE_REASON;
 use std::path::Path;
+use strict_parity::{check, Edit, Scenario};
 
 /// One `Calls` edge out of a named caller, by identity, with its reason.
 /// The overlay's uncommitted-edit marker reads as the index's plain `call`.
@@ -586,6 +598,15 @@ fn test_overlay_rust_anchored_path_custom_lib_path_matches_index() {
 /// The lib and the bin place `crate::x` at different files, so the module
 /// trees name none and both sides fall back to the file layout (`src/x.rs`).
 /// The overlay must not pick one target's file.
+///
+/// The overlay places `mod x;` by file layout alone, so it reaches `src/x.rs`
+/// here whether or not it reads `#[path]`: the equality below passes either
+/// way and cannot see a missing `#[path]` (FU-2026-10-26-2ad63df39f50). The
+/// agree case at the end of the test can: both targets place `x` at
+/// `x_both.rs`, the index binds it, and an overlay blind to `#[path]` binds
+/// the decoy `src/x.rs`. That case is held against its baseline
+/// (`rust_path_attr_decoy`), so this test fails when the overlay's answer
+/// for it changes without the baseline.
 #[test]
 fn test_overlay_rust_anchored_path_targets_disagree_matches_index() {
     let files = lib_and_bin_sharing_a_file("x_lib.rs", "x_main.rs");
@@ -605,6 +626,7 @@ fn test_overlay_rust_anchored_path_targets_disagree_matches_index() {
         );
         assert_eq!(overlay, reindex, "{label}");
     }
+    check_path_attr("rust_path_attr_decoy", true);
 }
 
 /// Rust `Self::m()` names the caller's impl type on both sides: an inherent
@@ -1240,4 +1262,127 @@ fn test_overlay_rust_module_level_twin_of_body_local_fn_binds_matches_reindex() 
             assert_eq!(overlay, reindex, "{label} {dirty}");
         }
     }
+}
+
+/// `lib_and_bin_sharing_a_file("x_both.rs", "x_both.rs")` through the
+/// strict-parity harness, with `src/x.rs` kept as the decoy or removed. The
+/// dirty file is the caller `src/shared.rs`, edited by one comment line.
+///
+/// With the decoy (the `rust_path_attr_decoy` baseline, checked inside
+/// `test_overlay_rust_anchored_path_targets_disagree_matches_index`): lib
+/// and bin both place `mod x;` at `x_both.rs`, the index binds it, and the
+/// overlay binds the decoy at the same confidence, a fabricated edge.
+/// Expected: `edge full-only x1 Calls Function src/shared.rs:4 t -> Function
+/// src/x_both.rs:1 f reason=call conf=0.85` and `edge overlay-only x1 Calls`
+/// the same caller to `Function src/x.rs:1 f`, `reason=call conf=0.85` (the
+/// `l1-overlay` marker reads as `call`). FU-2026-10-26-2ad63df39f50.
+fn check_path_attr(name: &str, decoy: bool) {
+    let files: Vec<(String, String)> = lib_and_bin_sharing_a_file("x_both.rs", "x_both.rs")
+        .into_iter()
+        .filter(|(path, _)| decoy || path != "src/x.rs")
+        .collect();
+    let caller = files
+        .iter()
+        .find(|(path, _)| path == SHARED)
+        .expect("the caller is a fixture file")
+        .1
+        .clone();
+    let edited = one_line_edit(&caller);
+    let tree: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect();
+    check(&Scenario {
+        name,
+        owner: "FU-2026-10-26-2ad63df39f50 (P3: the overlay places #[path] modules)",
+        files: &tree,
+        edits: &[Edit::Write(SHARED, &edited)],
+    });
+}
+
+/// The same tree without the decoy: the index binds `x_both.rs`, the overlay
+/// places `mod x;` at the missing `src/x.rs` and binds nothing.
+///
+/// Expected in the baseline, one line: `edge full-only x1 Calls Function
+/// src/shared.rs:4 t -> Function src/x_both.rs:1 f reason=call conf=0.85`.
+/// FU-2026-10-26-2ad63df39f50.
+#[test]
+fn test_check_rust_path_attr_agreeing_targets_no_decoy_matches_baseline() {
+    check_path_attr("rust_path_attr_no_decoy", false);
+}
+
+/// Crate `a` calls `b::f()`, and crate `b` declares `f` in `util.rs` and
+/// re-exports it with `pub use util::f;`. Crate `a` has its own `util::f`, so
+/// only the crate head tells the two apart. The index follows the re-export;
+/// `graph.bin` keeps no import visibility, so the overlay binds nothing.
+///
+/// Expected in the baseline, one line: `edge full-only x1 Calls Function
+/// crates/a/src/lib.rs:4 t -> Function crates/b/src/util.rs:1 f reason=call
+/// conf=1.0`. FU-2026-10-08-3137f86a15e9 and FU-2026-10-25-c68c18feaf6f.
+#[test]
+fn test_check_rust_crate_head_through_pub_use_matches_baseline() {
+    let caller = "mod util;\n\npub fn t() {\n    b::f();\n}\n";
+    let edited = one_line_edit(caller);
+    check(&Scenario {
+        name: "rust_crate_head_pub_use",
+        owner: "FU-2026-10-08-3137f86a15e9 (P3: crate head follows pub use)",
+        files: &[
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\n",
+            ),
+            (
+                "crates/a/Cargo.toml",
+                "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\n[dependencies]\nb = { path = \"../b\" }\n",
+            ),
+            ("crates/a/src/util.rs", "pub fn f() {}\n"),
+            (
+                "crates/b/Cargo.toml",
+                "[package]\nname = \"b\"\nversion = \"0.1.0\"\n",
+            ),
+            ("crates/b/src/lib.rs", "mod util;\npub use util::f;\n"),
+            ("crates/b/src/util.rs", "pub fn f() {}\n\npub fn g() {}\n"),
+            (CALLER, caller),
+        ],
+        edits: &[Edit::Write(CALLER, &edited)],
+    });
+}
+
+/// Guard, not a repro: a crate rooted at `[lib] path = "src/entry.rs"`
+/// whose dirty entry file calls `self::x::f()` and `crate::x::f()`, and
+/// whose dirty `src/m/n.rs` calls `crate::top()` and `super::helper()`.
+/// Same-named items in `other/` and `other2/` keep a name tier from standing
+/// in for the module tree. The index and the overlay agree on all four
+/// calls on the installed 0.17.2, so the baseline stays empty;
+/// FU-2026-10-25-c68c18feaf6f lists this shape as a gap, and a change of
+/// `rust_module_dir` that breaks it fails here.
+#[test]
+fn test_check_rust_custom_lib_path_chain_matches_empty_baseline() {
+    let entry = "mod x;\nmod m;\n\npub fn top() {}\n\npub fn t() {\n}\n";
+    let entry_edited = "mod x;\nmod m;\n\npub fn top() {}\n\npub fn t() {\n    self::x::f();\n    crate::x::f();\n}\n";
+    let nested = "pub fn t() {\n}\n";
+    let nested_edited = "pub fn t() {\n    crate::top();\n    super::helper();\n}\n";
+    check(&Scenario {
+        name: "rust_custom_lib_path_chain",
+        owner:
+            "guard for FU-2026-10-25-c68c18feaf6f (custom [lib] path): this baseline stays empty",
+        files: &[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[lib]\npath = \"src/entry.rs\"\n",
+            ),
+            ("src/entry.rs", entry),
+            ("src/x.rs", "pub fn f() {}\n"),
+            ("src/m.rs", "pub fn helper() {}\nmod n;\n"),
+            ("src/m/n.rs", nested),
+            ("other/x.rs", "pub fn f() {}\n"),
+            ("other2/x.rs", "pub fn f() {}\n"),
+            ("other/d.rs", "pub fn top() {}\npub fn helper() {}\n"),
+            ("other2/d.rs", "pub fn top() {}\npub fn helper() {}\n"),
+        ],
+        edits: &[
+            Edit::Write("src/entry.rs", entry_edited),
+            Edit::Write("src/m/n.rs", nested_edited),
+        ],
+    });
 }
