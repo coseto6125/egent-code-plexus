@@ -55,7 +55,8 @@ pub struct CypherArgs {
 
     /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
     /// toon. `json`: full-fidelity JSON. `text`: pretty-printed JSON. An unaliased
-    /// function column is named as written, lower-cased: `count(b)`, `labels(a)[0]`.
+    /// function column takes the function name in lower case and keeps its
+    /// arguments as written: `count(b)`, `count(DISTINCT b)`, `labels(a)[0]`.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 }

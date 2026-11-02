@@ -30,8 +30,8 @@ ecp path <FROM> <TO> [--direction down] [--depth 8] [--repo <PATH>]
   a real miss.
 - `--from-file` / `--to-file`: substring on the file path, to pin an
   overloaded endpoint to one definition.
-- `--include-heuristic`: allow heuristic edges (MirrorsField, EventTopicMirror)
-  as steps.
+- `--include-heuristic`: allow heuristic edges (MirrorsField, EventTopicMirror,
+  CompensatedBy) as steps.
 
 ## Reading the output
 
@@ -95,7 +95,8 @@ path has no second bucket — a step is in the chain or it is not. So heuristic
 relations stay out of the walk unless `--include-heuristic` opts in. A
 deterministic edge below 0.7 confidence can still be a step: every step that is
 heuristic or below 0.7 is `requiresVerification: true`, and a caveat names how
-many such hops the path holds. Check those hops before you act on the route.
+many such hops the path holds. Among routes of the shortest length, a fully
+verified one wins. Check those hops before you act on the route.
 
 ## Shortest only
 

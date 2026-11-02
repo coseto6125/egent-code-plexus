@@ -1,7 +1,8 @@
-use super::bfs::{merged_node_meta, run_bfs, REQUIRES_VERIFICATION};
+use super::bfs::{merged_node_meta, run_bfs, WalkOpts, REQUIRES_VERIFICATION};
 use super::Direction;
 use ecp_core::session::OverlayView;
 use serde_json::{json, Value};
+use std::borrow::Cow;
 
 // ── Test-coverage gap analysis ────────────────────────────────────────────────
 
@@ -167,21 +168,17 @@ fn classify_symbol(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn coverage_bfs_for_symbol(
+/// The upstream walk of `symbol_idx` under `opts`: `existing_bfs` itself when
+/// `opts` already walks upstream, else a rerun upstream.
+fn coverage_bfs_for_symbol<'b>(
     graph: &ecp_core::graph::ArchivedZeroCopyGraph,
     view: Option<&OverlayView>,
     symbol_idx: usize,
-    requested_direction: &Direction,
-    existing_bfs: &[Value],
-    depth: usize,
-    min_conf: f32,
-    include_tests: bool,
-    rel_filter: &Option<Vec<String>>,
-    include_heuristic: bool,
-) -> Vec<Value> {
-    if *requested_direction == Direction::Up {
-        return existing_bfs.to_vec();
+    existing_bfs: &'b [Value],
+    opts: &WalkOpts<'_>,
+) -> Cow<'b, [Value]> {
+    if opts.direction == Direction::Up {
+        return Cow::Borrowed(existing_bfs);
     }
     // Both buckets, under the requested heuristic policy: a test caller
     // reached through a heuristic edge counts as `unverified_test_callers`
@@ -191,28 +188,22 @@ fn coverage_bfs_for_symbol(
         view,
         symbol_idx,
         &Direction::Up,
-        depth,
-        min_conf,
-        include_tests,
-        rel_filter,
-        include_heuristic,
+        opts.depth,
+        opts.min_conf,
+        opts.include_tests,
+        opts.rel_filter,
+        opts.include_heuristic,
         None, // max_results — coverage needs the exhaustive walk
     );
     results.extend(heuristic);
-    results
+    Cow::Owned(results)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn coverage_analyses(
     graph: &ecp_core::graph::ArchivedZeroCopyGraph,
     view: Option<&OverlayView>,
     bfs_by_symbol: &[(usize, Vec<Value>)],
-    requested_direction: &Direction,
-    depth: usize,
-    min_conf: f32,
-    include_tests: bool,
-    rel_filter: &Option<Vec<String>>,
-    include_heuristic: bool,
+    opts: &WalkOpts<'_>,
 ) -> Vec<SymbolCoverage> {
     // Build uid → node_idx once for the whole analysis. classify_symbol
     // needs to reverse-look-up caller uids (from BFS JSON) back to node
@@ -223,18 +214,7 @@ pub(super) fn coverage_analyses(
     bfs_by_symbol
         .iter()
         .map(|(idx, bfs)| {
-            let coverage_bfs = coverage_bfs_for_symbol(
-                graph,
-                view,
-                *idx,
-                requested_direction,
-                bfs,
-                depth,
-                min_conf,
-                include_tests,
-                rel_filter,
-                include_heuristic,
-            );
+            let coverage_bfs = coverage_bfs_for_symbol(graph, view, *idx, bfs, opts);
             classify_symbol(graph, view, *idx, &coverage_bfs, &uid_idx, &virtual_idx)
         })
         .collect()

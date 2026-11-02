@@ -13,8 +13,8 @@
 //!
 //! ## Heuristic relations off by default
 //!
-//! Heuristic edges (MirrorsField, EventTopicMirror) are excluded unless
-//! `--include-heuristic` is passed. `ecp impact` can afford to include them
+//! Heuristic edges (MirrorsField, EventTopicMirror, CompensatedBy) are
+//! excluded unless `--include-heuristic` is passed. `ecp impact` can afford to include them
 //! because it buckets them separately and tags them `requires_verification`;
 //! a path has no second bucket — a step is in the chain or it is not. A
 //! deterministic edge below `HEURISTIC_CEILING` confidence still walks, so
@@ -91,9 +91,9 @@ pub struct PathArgs {
     #[arg(long)]
     pub to_kind: Option<String>,
 
-    /// Allow heuristic edges (MirrorsField, EventTopicMirror) as steps. They are
-    /// off by default. A heuristic step, and any step below 0.7 confidence, is
-    /// tagged `requiresVerification` in the output.
+    /// Allow heuristic edges (MirrorsField, EventTopicMirror, CompensatedBy) as
+    /// steps. They are off by default. A heuristic step, and any step below
+    /// 0.7 confidence, is tagged `requiresVerification` in the output.
     #[arg(long)]
     pub include_heuristic: bool,
 

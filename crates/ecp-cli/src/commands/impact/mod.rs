@@ -123,10 +123,11 @@ pub struct ImpactArgs {
     #[arg(long, aliases = ["test_coverage", "testCoverage"], default_value_t = false)]
     pub test_coverage: bool,
 
-    /// Suppress heuristic callers (MirrorsField, EventTopicMirror) from the
-    /// blast radius. Default: heuristic callers ARE shown, in a separate
-    /// `heuristic_callers` bucket tagged `requires_verification`. Pass this
-    /// flag for a pure-deterministic blast radius.
+    /// Suppress heuristic callers (MirrorsField, EventTopicMirror,
+    /// CompensatedBy) from the blast radius. Default: heuristic callers ARE
+    /// shown, in a separate `heuristic_callers` bucket tagged
+    /// `requires_verification`. With this flag, `Calls` callers below 0.7
+    /// confidence still appear, tagged `requires_verification`.
     #[arg(long, default_value_t = false)]
     pub no_heuristic: bool,
 

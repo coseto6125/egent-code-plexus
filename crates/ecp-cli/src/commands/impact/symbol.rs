@@ -1,4 +1,4 @@
-use super::bfs::{merged_node_meta, run_bfs};
+use super::bfs::{merged_node_meta, run_bfs, WalkOpts};
 use super::coverage::{build_coverage_json, coverage_analyses};
 use super::payload::SymbolImpactPayload;
 use super::{
@@ -222,17 +222,15 @@ pub(super) fn impact_by_name(
     }
 
     if let Some(walk) = &coverage_walk {
-        let analyses = coverage_analyses(
-            graph,
-            view,
-            walk,
-            &args.direction,
-            args.depth,
+        let opts = WalkOpts {
+            direction: args.direction.clone(),
+            depth: args.depth,
             min_conf,
-            effective_include_tests,
-            &rel_filter,
-            !args.no_heuristic,
-        );
+            include_tests: effective_include_tests,
+            rel_filter: &rel_filter,
+            include_heuristic: !args.no_heuristic,
+        };
+        let analyses = coverage_analyses(graph, view, walk, &opts);
         result_obj["coverage"] = build_coverage_json(analyses);
     }
 

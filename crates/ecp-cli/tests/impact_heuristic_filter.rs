@@ -380,3 +380,123 @@ fn test_path_low_confidence_calls_hop_requires_verification() {
         "the caveat names the low-confidence hop: {val}"
     );
 }
+
+/// `ecp path <from> <to> --direction down --format json` on `repo`.
+fn run_ecp_path(repo: &Path, from: &str, to: &str) -> serde_json::Value {
+    let out = Command::new(ecp_bin())
+        .args(["path", from, to, "--direction", "down"])
+        .args(["--format", "json", "--repo", "."])
+        .current_dir(repo)
+        .env("HOME", repo)
+        .output()
+        .expect("ecp path failed to spawn");
+    assert!(
+        out.status.success(),
+        "ecp path exited non-zero: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+/// `(name, requiresVerification, viaConfidence)` of every step of a found path.
+fn path_steps(val: &serde_json::Value) -> Vec<(String, bool, f64)> {
+    val["path"]
+        .as_array()
+        .unwrap_or_else(|| panic!("expected a path: {val}"))
+        .iter()
+        .map(|s| {
+            (
+                s["name"].as_str().unwrap().to_string(),
+                s["requiresVerification"].as_bool().unwrap(),
+                s["viaConfidence"].as_f64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// `ecp path` takes the verified one of two parallel edges, in either edge
+/// order: the hop is untagged at 1.0 and the payload has no low-confidence
+/// caveat. Contract: among routes of the shortest length a fully verified
+/// one wins, as in `ecp impact`. On HEAD the first admitted edge fixed the
+/// hop, so with the 0.55 edge first the hop came back tagged at 0.55.
+#[test]
+fn test_path_parallel_edges_verified_edge_wins_either_order() {
+    for guess_first in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo(tmp.path());
+        let graph_bin = find_graph_bin(tmp.path());
+        let mut fx = GraphFixture::new();
+        let source = fx.func("src/a.ts", "source");
+        fx.span(source, (1, 0, 3, 0));
+        let target = fx.func("src/b.ts", "target");
+        fx.span(target, (2, 0, 4, 0));
+        let edges = [(0.55, "guess"), (1.0, "call")];
+        let ordered = if guess_first {
+            edges
+        } else {
+            [edges[1], edges[0]]
+        };
+        for (conf, reason) in ordered {
+            fx.edge_with(source, target, RelType::Calls, conf, reason);
+        }
+        std::fs::write(&graph_bin, fx.into_bytes()).unwrap();
+
+        let val = run_ecp_path(tmp.path(), "source", "target");
+        assert_eq!(
+            path_steps(&val),
+            [
+                ("source".to_string(), false, 1.0),
+                ("target".to_string(), false, 1.0),
+            ],
+            "guess_first={guess_first}: {val}"
+        );
+        let caveat = val["result"].as_str().unwrap_or_default();
+        assert!(
+            !caveat.contains("low-confidence"),
+            "guess_first={guess_first}: a verified route has no low-confidence caveat: {val}"
+        );
+    }
+}
+
+/// `ecp path t sink` with two parents of `sink` at the same depth, `via_a`
+/// (1.0 into `sink`) and `via_b` (0.55): the fully verified route through
+/// `via_a` wins in either order of `t`'s edges. On HEAD the parent popped
+/// first decided, so with `via_b` first the route ran through it, tagged.
+#[test]
+fn test_path_same_depth_verified_parent_wins_either_order() {
+    for b_first in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo(tmp.path());
+        let graph_bin = find_graph_bin(tmp.path());
+        let mut fx = GraphFixture::new();
+        let t = fx.func("src/a.ts", "t");
+        fx.span(t, (1, 0, 2, 0));
+        let a = fx.func("src/a.ts", "via_a");
+        fx.span(a, (3, 0, 4, 0));
+        let b = fx.func("src/b.ts", "via_b");
+        fx.span(b, (1, 0, 2, 0));
+        let sink = fx.func("src/b.ts", "sink");
+        fx.span(sink, (3, 0, 4, 0));
+        if b_first {
+            fx.edge_with(t, b, RelType::Calls, 1.0, "call");
+            fx.edge_with(t, a, RelType::Calls, 1.0, "call");
+        } else {
+            fx.edge_with(t, a, RelType::Calls, 1.0, "call");
+            fx.edge_with(t, b, RelType::Calls, 1.0, "call");
+        }
+        fx.edge_with(a, sink, RelType::Calls, 1.0, "call");
+        fx.edge_with(b, sink, RelType::Calls, 0.55, "call");
+        std::fs::write(&graph_bin, fx.into_bytes()).unwrap();
+
+        let val = run_ecp_path(tmp.path(), "t", "sink");
+        assert_eq!(
+            path_steps(&val),
+            [
+                ("t".to_string(), false, 1.0),
+                ("via_a".to_string(), false, 1.0),
+                ("sink".to_string(), false, 1.0),
+            ],
+            "b_first={b_first}: {val}"
+        );
+    }
+}

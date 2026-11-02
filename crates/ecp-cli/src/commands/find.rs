@@ -422,8 +422,16 @@ fn call_sources(
 /// module in. Reported under the name `caller_count`, it told an agent that
 /// `compute_hits` in this repo had 17 callers when the graph held 11 `Calls`
 /// edges: the other 6 were the declaring file and 5 importing files.
-fn count_incoming(merged: &MergedGraph<'_>, node_idx: u32, constructors: Vec<u32>) -> u32 {
-    let mut seen = rustc_hash::FxHashSet::default();
+///
+/// `seen` is scratch space the caller keeps across candidates, so a scan over
+/// thousands of matches reuses one set. It is cleared on entry.
+fn count_incoming(
+    merged: &MergedGraph<'_>,
+    node_idx: u32,
+    constructors: Vec<u32>,
+    seen: &mut rustc_hash::FxHashSet<u32>,
+) -> u32 {
+    seen.clear();
     std::iter::once(node_idx)
         .chain(constructors)
         .flat_map(|target| {
@@ -484,6 +492,7 @@ fn overlay_matches(
         return Vec::new();
     };
     let base_len = merged.base_len();
+    let mut seen = rustc_hash::FxHashSet::default();
     view.virtual_nodes()
         .iter()
         .zip(base_len..)
@@ -495,13 +504,18 @@ fn overlay_matches(
             })
         })
         .filter(|(h, _)| file_filter.is_none_or(|needle| h.rel_path.contains(needle)))
-        .map(|(h, idx)| virtual_match(merged, idx, h))
+        .map(|(h, idx)| virtual_match(merged, idx, h, &mut seen))
         .collect()
 }
 
 /// The overlay node `h` at merged index `idx` as a `find` row with its
-/// category priority.
-fn virtual_match(merged: &MergedGraph<'_>, idx: u32, h: &ViewNode) -> (FindMatch, u8) {
+/// category priority. `seen` is [`count_incoming`]'s scratch set.
+fn virtual_match(
+    merged: &MergedGraph<'_>,
+    idx: u32,
+    h: &ViewNode,
+    seen: &mut rustc_hash::FxHashSet<u32>,
+) -> (FindMatch, u8) {
     // A shared uid includes the path, so its base category still applies
     // even though its span must come from the working tree.
     let category = match h.replaced_base {
@@ -511,7 +525,7 @@ fn virtual_match(merged: &MergedGraph<'_>, idx: u32, h: &ViewNode) -> (FindMatch
         }
         None => archived_category(ecp_core::file_category::determine_category(&h.rel_path)),
     };
-    let caller_count = count_incoming(merged, idx, merged.constructors_of(idx));
+    let caller_count = count_incoming(merged, idx, merged.constructors_of(idx), seen);
     let kind_str = crate::commands::format::node_kind_to_str(&h.kind).to_string();
     let signature = format!("{kind_str} {}", h.name);
     (
@@ -547,6 +561,7 @@ fn base_candidates(
 ) -> (Vec<(usize, u32, u8, String)>, u32) {
     let mut tests_excluded = 0u32;
     let mut constructors = ConstructorLookup::new(graph);
+    let mut seen = rustc_hash::FxHashSet::default();
     let mut candidate = |node_idx: usize, node: &ecp_core::graph::ArchivedNode| {
         let name = node.name.resolve(&graph.string_pool);
         if !name.contains(pattern) || !merged.base_visible(node_idx as u32) {
@@ -578,7 +593,12 @@ fn base_candidates(
         }
 
         let prio = category_priority(&file.category);
-        let caller_count = count_incoming(merged, node_idx as u32, constructors.of(node_idx));
+        let caller_count = count_incoming(
+            merged,
+            node_idx as u32,
+            constructors.of(node_idx),
+            &mut seen,
+        );
         Some((node_idx, caller_count, prio, file_path))
     };
 
@@ -617,6 +637,7 @@ fn exact_candidates(
     let picked: Vec<usize> = select(request, &named);
 
     let mut constructors = ConstructorLookup::new(graph);
+    let mut seen = rustc_hash::FxHashSet::default();
     let base_len = merged.base_len();
     let rows: Vec<Row> = picked
         .iter()
@@ -625,7 +646,7 @@ fn exact_candidates(
             if c.node < base_len {
                 let idx = c.node as usize;
                 let file = &graph.files[graph.nodes[idx].file_idx.to_native() as usize];
-                let caller_count = count_incoming(merged, c.node, constructors.of(idx));
+                let caller_count = count_incoming(merged, c.node, constructors.of(idx), &mut seen);
                 return Some((
                     CandSrc::Base(idx),
                     caller_count,
@@ -637,7 +658,7 @@ fn exact_candidates(
                 .view()?
                 .virtual_nodes()
                 .get((c.node - base_len) as usize)?;
-            let (m, prio) = virtual_match(merged, c.node, h);
+            let (m, prio) = virtual_match(merged, c.node, h, &mut seen);
             let (caller_count, path) = (m.caller_count, m.file.clone());
             Some((CandSrc::Overlay(m), caller_count, prio, path))
         })
@@ -947,19 +968,21 @@ pub struct Hit {
     pub line: u32,
     pub name: String,
     pub signature: String,
-    /// Distinct 1-hop `Calls` sources: a caller with several call sites
-    /// counts once.
+    /// Number of distinct 1-hop `Calls` sources, the callers of a Class /
+    /// Struct's constructors included: a caller with several call sites
+    /// counts once. The `callers` list is capped at `HOP_EXPANSION_LIMIT`,
+    /// so read this to know how many callers exist.
     pub caller_count: usize,
-    /// Up to `HOP_EXPANSION_LIMIT` 1-hop incoming-edge source names.
-    /// Populated from `in_offsets` / `in_edge_idx` / `edges`. Empty when
-    /// the node has no callers or all edges have been truncated.
+    /// Names of the distinct 1-hop `Calls` sources, the callers of a Class /
+    /// Struct's constructors included, in edge order, up to
+    /// `HOP_EXPANSION_LIMIT`. Empty only when there is no caller.
     pub callers: Vec<String>,
-    /// Distinct callee count from `out_offsets`. Mirrors `caller_count`; the
-    /// `callees` list below is capped at `HOP_EXPANSION_LIMIT`, so an LLM
-    /// must read this to know how many callees actually exist.
+    /// Number of distinct 1-hop `Calls` targets. The `callees` list is
+    /// capped at `HOP_EXPANSION_LIMIT`, so read this to know how many
+    /// callees exist.
     pub callee_count: usize,
-    /// Up to `HOP_EXPANSION_LIMIT` 1-hop outgoing-edge target names.
-    /// Populated from `out_offsets` / `edges`.
+    /// Names of the distinct 1-hop `Calls` targets, in edge order, up to
+    /// `HOP_EXPANSION_LIMIT`. Empty only when there is no callee.
     pub callees: Vec<String>,
     /// File category used for bucket partitioning; not emitted to consumers.
     pub category: FileCategory,
@@ -1553,18 +1576,17 @@ fn build_hit(
     // target into `callees` — the hook renders those two lists verbatim as
     // `Called by:` and `Calls:`, so a File node arrived at the model labelled
     // as a caller.
-    let caller_names = call_sources(graph, idx, base_constructors(graph, idx as u32)).map(|src| {
-        graph.nodes[src as usize]
-            .name
-            .resolve(&graph.string_pool)
-            .to_string()
-    });
     let mut caller_count = 0usize;
     let mut callers: Vec<String> = Vec::new();
-    for name in caller_names {
+    for src in call_sources(graph, idx, base_constructors(graph, idx as u32)) {
         caller_count += 1;
         if callers.len() < HOP_EXPANSION_LIMIT {
-            callers.push(name);
+            callers.push(
+                graph.nodes[src as usize]
+                    .name
+                    .resolve(&graph.string_pool)
+                    .to_string(),
+            );
         }
     }
 
