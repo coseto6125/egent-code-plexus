@@ -280,7 +280,11 @@ pub fn extract_field_reads_with_literal_key_facts(
                 kind,
                 scope,
             };
-            let mut lambda = frame.lambda;
+            let mut lambda = if kind & kind_flag::COMPREHENSION != 0 {
+                Some(node_range(n))
+            } else {
+                frame.lambda
+            };
             let mut declarator_count = 0u32;
             let mut first_declarator = None;
             loop {
@@ -558,6 +562,8 @@ mod kind_flag {
     pub const CAPTURE_WRAPPER: u32 = 1 << 16;
     /// A generic's type or template parameter list, which declares no value.
     pub const TYPE_PARAMETERS: u32 = 1 << 17;
+    /// A comprehension, whose `for` variables live inside it only.
+    pub const COMPREHENSION: u32 = 1 << 18;
 }
 
 /// Bits [`KindMemo::field`] records for a field name.
@@ -627,6 +633,10 @@ impl<'a> KindMemo<'a> {
                 TYPE_PARAMETERS,
             ),
             (kind.contains("declarator"), DECLARATOR),
+            (
+                kind.ends_with("_comprehension") || kind == "generator_expression",
+                COMPREHENSION,
+            ),
             (spec.method_refs.contains(&kind), METHOD_REF),
             (spec.symbol_method_refs && kind == "call", SYMBOL_CALL),
             (spec.binding_parents.contains(&kind), BINDING_PARENT),
@@ -1574,9 +1584,12 @@ impl<'s> ReadContainers<'s> {
     /// The range where `binding`, which no function node holds, hides its
     /// name. `first` is the run of the smallest value span holding it. A
     /// declaration's own name hides nothing: a method of its literal still
-    /// reads it. A parameter of a nodeless lambda hides the name inside that
-    /// lambda only. Any other name (a comprehension variable, a local of a
-    /// lambda without parameters) hides it across the whole declaration.
+    /// reads it. A parameter of a nodeless lambda or a comprehension variable
+    /// hides the name inside that lambda or comprehension only, and never
+    /// past the declaration: a type's parameter list (Java `record R(int x)`)
+    /// also opens a lambda range, one that spans every member. Any other name
+    /// (a local of a lambda without parameters) hides it across the whole
+    /// declaration.
     fn binding_scope(
         &self,
         first: Option<usize>,
@@ -1591,7 +1604,12 @@ impl<'s> ReadContainers<'s> {
                 Some(lambda)
             }
             (Some(_), _) => None,
-            (None, Some(lambda)) => Some(lambda),
+            (None, Some(lambda)) => Some(match run {
+                Some(run) if lambda.0 <= run[0].start && run[0].end <= lambda.1 => {
+                    (run[0].start, run[0].end)
+                }
+                _ => lambda,
+            }),
             (None, None) => run.map(|run| (run[0].start, run[0].end)),
         }
     }

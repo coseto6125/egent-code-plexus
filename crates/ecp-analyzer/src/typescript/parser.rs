@@ -12,8 +12,8 @@ use crate::driver::{
 use crate::event_topic::{EventTopicConfig, KAFKA_NODE, RABBITMQ_TS, REDIS_TS, SQS_TS};
 use crate::framework_confidence;
 use crate::framework_helpers::{
-    collect_typeorm_transactional_scopes, has_import_from, js_ts_first_arg_is_literal_string,
-    node_span, push_blind_spot, SCALAR_VALUE_KINDS,
+    collect_typeorm_transactional_scopes, has_import_from, node_span, push_blind_spot,
+    SCALAR_VALUE_KINDS,
 };
 use crate::indirect_dispatch::{collect_js_param_names, detect_js_ts_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
@@ -37,7 +37,7 @@ const BLIND_DYNAMIC_IMPORT: (&str, &str) = (
 );
 const BLIND_DYNAMIC_REQUIRE: (&str, &str) = (
     "ts-dynamic-require",
-    "require(<expr>) with non-literal specifier — dynamic CommonJS load; target module depends on runtime value",
+    "require(<expr>) whose specifier is no plain string literal (computed, escaped or blank) — dynamic CommonJS load; the target module is not read statically",
 );
 
 /// True iff the `object` node has ≥ `min` `pair` children where every
@@ -570,7 +570,7 @@ impl<const TSX: bool> ParseSpec for TsSpec<TSX> {
                 }
             }
             TypeScriptRole::DynamicRequire => {
-                if !js_ts_first_arg_is_literal_string(&node) {
+                if literal_specifier(node, source).is_none() {
                     cx.push_blind(BLIND_DYNAMIC_REQUIRE, &node);
                 }
             }

@@ -1183,6 +1183,51 @@ fn test_value_read_java_lambda_parameter_hides_only_its_lambda() {
     );
 }
 
+/// A comprehension variable hides `handler` in the comprehension, not in
+/// the `"real"` entry beside it.
+#[test]
+fn test_function_reference_python_comprehension_variable_hides_only_its_comprehension() {
+    assert_same_file_ref(
+        &PythonProvider::new().unwrap(),
+        "app.py",
+        "def handler():\n    return 1\n\n\nTABLE = {\"real\": handler, \"ids\": [handler for handler in [1, 2]]}\n",
+        "TABLE",
+        "handler",
+    );
+}
+
+/// A record's component list spans every member. A pattern binding in one
+/// field's initializer hides `LIMIT` in that initializer only, so the method
+/// `go` still reads the field.
+#[test]
+fn test_value_read_java_record_field_pattern_binding_hides_only_its_field() {
+    let g = graph(
+        &JavaProvider::new().unwrap(),
+        &[(
+            "R.java",
+            "record R(int x) {\n    static final int LIMIT = 3;\n    static Object o = 1;\n    static boolean b = o instanceof Integer LIMIT && LIMIT > 0;\n    int go() { return LIMIT; }\n}\n",
+        )],
+    );
+    assert_eq!(
+        value_reads(&g, "go"),
+        vec![r("R.java", "LIMIT", VALUE_READ, SAME_FILE)]
+    );
+}
+
+/// A primary constructor's parameter list spans every member. An `out var`
+/// in one field's initializer hides `Handler` in that initializer only, so
+/// the method `Go` still references the function.
+#[test]
+fn test_function_reference_csharp_primary_ctor_field_out_var_hides_only_its_field() {
+    assert_same_file_ref(
+        &CSharpProvider::new().unwrap(),
+        "Svc.cs",
+        "public class Svc(int seed) {\n    static bool B = int.TryParse(\"1\", out var Handler);\n    public System.Func<int> Go() { return Handler; }\n    static int Handler() => 1;\n}\n",
+        "Go",
+        "Handler",
+    );
+}
+
 #[test]
 fn test_value_read_kotlin_lambda_parameter_hides_only_its_lambda() {
     let g = graph(

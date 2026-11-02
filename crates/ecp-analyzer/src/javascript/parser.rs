@@ -8,8 +8,8 @@ use crate::driver::{
 use crate::event_topic::{EventTopicConfig, KAFKA_NODE, RABBITMQ_JS, REDIS_JS, SQS_JS};
 use crate::framework_confidence;
 use crate::framework_helpers::{
-    has_import_from, js_ts_first_arg_is_literal_string, js_ts_reexport_kind,
-    mark_js_ts_import_bindings, node_span, stamp_js_ts_exports, SCALAR_VALUE_KINDS,
+    has_import_from, js_ts_reexport_kind, mark_js_ts_import_bindings, node_span,
+    stamp_js_ts_exports, SCALAR_VALUE_KINDS,
 };
 use crate::indirect_dispatch::{collect_js_param_names, detect_js_ts_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
@@ -41,7 +41,7 @@ const BLIND_SPEC: [(&str, &str); 5] = [
     ),
     (
         "js-dynamic-require",
-        "require(<expr>) with non-literal specifier — dynamic CommonJS load; target module depends on runtime value",
+        "require(<expr>) whose specifier is no plain string literal (computed, escaped or blank) — dynamic CommonJS load; the target module is not read statically",
     ),
     (
         "js-object-freeze-enum",
@@ -545,7 +545,7 @@ impl ParseSpec for JavaScriptSpec {
                 }
             }
             JavaScriptRole::DynamicRequire => {
-                if !js_ts_first_arg_is_literal_string(&node) {
+                if literal_specifier(node, source).is_none() {
                     cx.push_blind(BLIND_SPEC[3], &node);
                 }
             }

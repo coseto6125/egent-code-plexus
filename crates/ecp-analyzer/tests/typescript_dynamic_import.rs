@@ -50,13 +50,17 @@ fn raw_imports(source: &str) -> Vec<RawImport> {
 
 /// How many `ts-dynamic-import` blind spots `source` reports.
 fn dynamic_import_blind_spots(source: &str) -> usize {
+    blind_spots_of(source, "ts-dynamic-import")
+}
+
+fn blind_spots_of(source: &str, kind: &str) -> usize {
     TypeScriptProvider::new()
         .expect("TypeScriptProvider::new")
         .parse_file(Path::new("app.ts"), source.as_bytes())
         .expect("parse app.ts")
         .blind_spots
         .iter()
-        .filter(|b| b.kind == "ts-dynamic-import")
+        .filter(|b| b.kind == kind)
         .count()
 }
 
@@ -383,4 +387,22 @@ fn test_dynamic_import_bare_specifier_call_binds_no_project_namesake() {
         "{:?}",
         calls_from(&g, "go")
     );
+}
+
+/// A `require` literal the binder refuses still loads a module at run time,
+/// so it carries the same blind spot as a computed specifier.
+#[test]
+fn test_dynamic_require_escaped_and_blank_specifiers_emit_a_blind_spot() {
+    for (source, blind_spots) in [
+        ("export function go(p: string) { require(p); }\n", 1),
+        ("export function go() { require('./a\\x62'); }\n", 1),
+        ("export function go() { require(''); require('  '); }\n", 2),
+        ("export function go() { require('./a'); }\n", 0),
+    ] {
+        assert_eq!(
+            blind_spots_of(source, "ts-dynamic-require"),
+            blind_spots,
+            "{source}"
+        );
+    }
 }
