@@ -1744,7 +1744,8 @@ impl<'a> NameRef<'a> {
     }
 }
 
-/// The `ReadsField` reason of a constant or variable a function names bare,
+/// The `ReadsField` reason of a constant or variable that a Function/Method,
+/// or a Const/Variable/Property whose initializer holds the read, names bare,
 /// apart from `field_read` (`obj.field`).
 pub const VALUE_READ_REASON: &str = "value_read";
 /// The `References` reason of a function named as a value (callback

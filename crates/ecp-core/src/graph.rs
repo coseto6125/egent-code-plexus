@@ -620,7 +620,8 @@ pub enum RelType {
     /// Appended at the END to preserve rkyv discriminants for existing
     /// `graph.bin` files.
     UsesPathLiteral,
-    /// `Function` / `Method` → a struct/class field (`Property`) it reads,
+    /// `Function` / `Method`, or a `Const` / `Variable` / `Property` whose
+    /// initializer holds the read → a struct/class field (`Property`) it reads,
     /// e.g. `obj.rel_path`, `self.count`, `cfg->timeout` (reason
     /// `field_read`), or a module-level / static constant or variable
     /// (`Const` / `Variable`, or the reader's own type's `Property`) it
