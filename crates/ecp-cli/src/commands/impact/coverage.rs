@@ -1,4 +1,4 @@
-use super::bfs::{merged_node_meta, run_bfs};
+use super::bfs::{merged_node_meta, run_bfs, REQUIRES_VERIFICATION};
 use super::Direction;
 use ecp_core::session::OverlayView;
 use serde_json::{json, Value};
@@ -8,13 +8,15 @@ use serde_json::{json, Value};
 /// Classification of a symbol's test coverage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum CoverageClass {
-    /// Callers exist in prod but zero test callers.
+    /// Callers exist (prod, or tests behind an edge to verify), but no
+    /// verified (untagged) test caller.
     Uncovered,
     /// test_caller_count >= 1, but prod callers outnumber tests by > 3:1.
     Partial,
     /// test_caller_count >= 1 and prod:test ratio <= 3:1.
     Covered,
-    /// No callers at all (entry-point / dead code path).
+    /// No callers at all, not even an unverified test caller (entry-point /
+    /// dead code path).
     Orphan,
 }
 
@@ -91,8 +93,8 @@ fn is_test_caller(
 /// does not make the symbol covered: it is counted apart, as
 /// `unverified_test_callers`.
 ///
-/// `bfs_results` is the slice returned by `run_bfs`; depth-0 entry is the
-/// symbol itself. Only depth > 0 entries (actual callers) are examined.
+/// `bfs_results` holds both buckets `run_bfs` returns; the depth-0 entry is
+/// the symbol itself. Only depth > 0 entries (actual callers) are examined.
 ///
 /// `uid_idx` is the pre-built `uid → node_idx` table from
 /// [`ecp_core::graph_query::build_uid_index`], and `virtual_idx` the same
@@ -129,7 +131,7 @@ fn classify_symbol(
             .parse::<u64>()
             .is_ok_and(|uid| is_test_caller(graph, view, uid_idx, virtual_idx, uid));
 
-        if is_test && entry["requires_verification"].as_bool().unwrap_or(false) {
+        if is_test && entry[REQUIRES_VERIFICATION].as_bool().unwrap_or(false) {
             unverified_test_callers += 1;
         } else if is_test {
             let caller_name = entry["name"].as_str().unwrap_or(caller_uid).to_string();
@@ -140,10 +142,14 @@ fn classify_symbol(
     }
 
     let test_caller_count = test_callers.len();
-    let class = match (test_caller_count, prod_caller_count) {
-        (0, 0) => CoverageClass::Orphan,
-        (0, _) => CoverageClass::Uncovered,
-        (t, p) if p > t * 3 => CoverageClass::Partial,
+    let class = match (
+        test_caller_count,
+        prod_caller_count,
+        unverified_test_callers,
+    ) {
+        (0, 0, 0) => CoverageClass::Orphan,
+        (0, _, _) => CoverageClass::Uncovered,
+        (t, p, _) if p > t * 3 => CoverageClass::Partial,
         _ => CoverageClass::Covered,
     };
 
@@ -172,13 +178,15 @@ fn coverage_bfs_for_symbol(
     min_conf: f32,
     include_tests: bool,
     rel_filter: &Option<Vec<String>>,
+    include_heuristic: bool,
 ) -> Vec<Value> {
     if *requested_direction == Direction::Up {
         return existing_bfs.to_vec();
     }
-    // Coverage analysis only consumes deterministic upstream callers — discard
-    // the heuristic / hidden-count fields from #264's expanded run_bfs return.
-    let (det_results, _heur, _hidden_conf, _hidden_heur, _hidden_tests) = run_bfs(
+    // Both buckets, under the requested heuristic policy: a test caller
+    // reached through a heuristic edge counts as `unverified_test_callers`
+    // here as in an upstream request, rather than vanishing.
+    let (mut results, heuristic, _hidden_conf, _hidden_heur, _hidden_tests) = run_bfs(
         graph,
         view,
         symbol_idx,
@@ -187,10 +195,11 @@ fn coverage_bfs_for_symbol(
         min_conf,
         include_tests,
         rel_filter,
-        false, // include_heuristic
-        None,  // max_results — coverage needs the exhaustive walk
+        include_heuristic,
+        None, // max_results — coverage needs the exhaustive walk
     );
-    det_results
+    results.extend(heuristic);
+    results
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -203,6 +212,7 @@ pub(super) fn coverage_analyses(
     min_conf: f32,
     include_tests: bool,
     rel_filter: &Option<Vec<String>>,
+    include_heuristic: bool,
 ) -> Vec<SymbolCoverage> {
     // Build uid → node_idx once for the whole analysis. classify_symbol
     // needs to reverse-look-up caller uids (from BFS JSON) back to node
@@ -223,6 +233,7 @@ pub(super) fn coverage_analyses(
                 min_conf,
                 include_tests,
                 rel_filter,
+                include_heuristic,
             );
             classify_symbol(graph, view, *idx, &coverage_bfs, &uid_idx, &virtual_idx)
         })
@@ -375,7 +386,7 @@ mod tests {
     }
 
     fn tagged(mut entry: Value, requires_verification: bool) -> Value {
-        entry["requires_verification"] = json!(requires_verification);
+        entry[REQUIRES_VERIFICATION] = json!(requires_verification);
         entry
     }
 
@@ -430,5 +441,36 @@ mod tests {
         assert_eq!(json["uncovered_symbols"][0]["unverified_test_callers"], 1);
         assert_eq!(json["covered_symbols"][0]["unverified_test_callers"], 1);
         assert_eq!(json["covered_symbols"][0]["tests"], json!(["sure"]));
+    }
+
+    /// Stands for: a symbol whose only callers are tagged test callers has
+    /// callers, so it is `Uncovered`, not `Orphan` (dead code). Before the fix
+    /// the `(0 tests, 0 prod)` match made it an orphan; no caller at all
+    /// stays an orphan.
+    #[test]
+    fn test_classify_symbol_only_tagged_test_caller_is_uncovered_not_orphan() {
+        let mut fx = GraphFixture::new();
+        let target = fx.func("src/lib.rs", "target");
+        let guess = fx.func("tests/b.rs", "guess");
+        fx.function_meta(guess, FunctionMeta::FLAG_TEST, &[]);
+        let bytes = fx.into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        let uid_idx = ecp_core::graph_query::build_uid_index(graph);
+        let classify = |callers: &[Value]| {
+            classify_symbol(
+                graph,
+                None,
+                target as usize,
+                callers,
+                &uid_idx,
+                &virtual_uid_index(None),
+            )
+        };
+        let guess_uid = graph.nodes[guess as usize].uid.to_native();
+
+        let tagged_only = classify(&[tagged(caller(guess_uid, "guess"), true)]);
+        assert_eq!(tagged_only.unverified_test_callers, 1);
+        assert_eq!(tagged_only.class, CoverageClass::Uncovered);
+        assert_eq!(classify(&[]).class, CoverageClass::Orphan);
     }
 }

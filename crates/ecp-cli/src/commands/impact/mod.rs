@@ -113,11 +113,13 @@ pub struct ImpactArgs {
     #[arg(long)]
     pub repo: Option<String>,
 
-    /// Coverage gap analysis: for each touched symbol, classify by test-caller
-    /// presence (uncovered / partial / covered). Uses FunctionMeta.is_test
-    /// flag from per-language extraction. Outputs uncovered symbols first to
-    /// support LLM PR review ("X 改了沒測試"). Needs test callers in the walk,
-    /// so it conflicts with --exclude-tests.
+    /// Coverage gap analysis: for each touched symbol, classify by verified
+    /// (untagged) test callers (uncovered / partial / covered / orphan). A
+    /// test caller tagged `requires_verification` counts under
+    /// `unverified_test_callers`, never as coverage. Orphan means no caller
+    /// at all. Uses FunctionMeta.is_test flag from per-language extraction.
+    /// Outputs uncovered symbols first to support LLM PR review ("X 改了沒測試").
+    /// Needs test callers in the walk, so it conflicts with --exclude-tests.
     #[arg(long, aliases = ["test_coverage", "testCoverage"], default_value_t = false)]
     pub test_coverage: bool,
 
@@ -175,8 +177,9 @@ pub struct ImpactArgs {
     pub batch: bool,
 
     /// List the call sites the graph could not attribute: when the target's
-    /// name has two or more same-named definitions, the resolver drops bare
-    /// calls to it as ambiguous, so the caller set is a lower bound. This
+    /// name has two or more same-named definitions of a competing kind, the
+    /// resolver drops bare calls to it as ambiguous, so the caller set is a
+    /// lower bound. This
     /// runs one `git grep` over tracked files in the definitions' language
     /// family (`.ts` also searches `.tsx`) and reports, under
     /// `ambiguous_callers`, each `name(` / `.name(` / `->name(` / `::name(`
@@ -492,9 +495,10 @@ fn attach_hidden_test_callers(result: &mut Value, hidden: u64) {
 ///
 /// `hidden_heuristic_edges` is always written (0 is safe — callers can branch
 /// on the field existing). `heuristic_callers` section is always present when
-/// `include_heuristic` is true (empty array allowed), with each entry tagged
-/// `requires_verification: true` so consumers never mistake a heuristic lead
-/// for a deterministic caller.
+/// `include_heuristic` is true (empty array allowed). Each entry carries the
+/// `requires_verification: true` that [`bfs::run_bfs`] sets on every row
+/// reached through a heuristic edge, so consumers never mistake a heuristic
+/// lead for a deterministic caller.
 /// `explain_confidence` block is appended when the flag is set.
 fn attach_heuristic_fields(
     result: &mut Value,
@@ -507,7 +511,7 @@ fn attach_heuristic_fields(
     result["hidden_heuristic_edges"] = json!(hidden_heuristic_edges);
     let heuristic_reached = heuristic_results.len() as u64;
     if include_heuristic {
-        result["heuristic_callers"] = json!(tag_heuristic(heuristic_results));
+        result["heuristic_callers"] = json!(heuristic_results);
     }
     if explain_confidence {
         result["explain_confidence"] = json!({
@@ -517,20 +521,6 @@ fn attach_heuristic_fields(
             },
         });
     }
-}
-
-/// Tag each heuristic caller `requires_verification: true` so a consumer never
-/// mistakes a ~0.85 heuristic lead for a 1.0 deterministic caller.
-fn tag_heuristic(entries: Vec<Value>) -> Vec<Value> {
-    entries
-        .into_iter()
-        .map(|mut e| {
-            if let Some(obj) = e.as_object_mut() {
-                obj.insert("requires_verification".to_string(), json!(true));
-            }
-            e
-        })
-        .collect()
 }
 
 /// Stderr footer mirroring `attach_hidden_edges` — emitted only when the

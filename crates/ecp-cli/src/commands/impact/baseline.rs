@@ -1,7 +1,7 @@
 use super::bfs::{merged_node_meta, run_bfs};
 use super::coverage::{build_coverage_json, coverage_analyses};
 use super::payload::{BaselinePayload, ChangedSymbol, ImpactBySymbol};
-use super::{parse_csv_lower, resolve_min_conf, tag_heuristic, ImpactArgs};
+use super::{parse_csv_lower, resolve_min_conf, ImpactArgs};
 use crate::commands::format::{kind_to_str, node_kind_to_str};
 use crate::commands::impact::{
     attach_heuristic_fields, attach_hidden_edges, attach_hidden_test_callers, Direction,
@@ -97,6 +97,7 @@ pub(super) fn impact_with_baseline(
             comp.min_conf,
             comp.effective_include_tests,
             &comp.rel_filter,
+            !args.no_heuristic,
         );
         result["coverage"] = build_coverage_json(analyses);
     }
@@ -383,7 +384,7 @@ fn compute_baseline(args: &ImpactArgs, engine: &Engine) -> Result<BaselineComput
             downstream_callees: None,
         };
         if !args.no_heuristic {
-            sym_entry.heuristic_callers = Some(tag_heuristic(heur_results));
+            sym_entry.heuristic_callers = Some(heur_results.clone());
         }
         // Orphan-symbol fallback: when upstream-only mode finds no callers,
         // attach depth-1 downstream callees so the changed symbol still
@@ -411,7 +412,10 @@ fn compute_baseline(args: &ImpactArgs, engine: &Engine) -> Result<BaselineComput
         hidden_edges_total += hidden_conf;
         hidden_heuristic_total += hidden_heur;
         hidden_test_total += hidden_tests;
-        per_symbol_bfs.push((start_idx, det_results));
+        // Coverage classifies both buckets, as an upstream request does.
+        let mut coverage_rows = det_results;
+        coverage_rows.extend(heur_results);
+        per_symbol_bfs.push((start_idx, coverage_rows));
     }
 
     Ok(BaselineComputation {

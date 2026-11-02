@@ -293,3 +293,90 @@ fn test_low_confidence_calls_row_requires_verification() {
         "a Calls row must not move into heuristic_callers: {val}"
     );
 }
+
+/// Stands for: a test caller reached only through a heuristic edge is an
+/// unverified test caller in every direction, never a missing caller, so
+/// the symbol is `Uncovered`, not `Orphan`. Before the fix the upstream
+/// coverage read only the deterministic bucket (`up`) or reran with
+/// heuristics off (`both`): `unverified_test_callers` was 0 and the symbol
+/// an orphan.
+#[test]
+fn test_test_coverage_heuristic_test_caller_counts_unverified_up_and_both() {
+    use ecp_core::graph::FunctionMeta;
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo(tmp.path());
+    let graph_bin = find_graph_bin(tmp.path());
+    let mut fx = GraphFixture::new();
+    let source = fx.func("src/a.ts", "source");
+    fx.span(source, (1, 0, 3, 0));
+    let probe = fx.func("src/probe.ts", "probe");
+    fx.span(probe, (1, 0, 3, 0));
+    fx.function_meta(probe, FunctionMeta::FLAG_TEST, &[]);
+    fx.edge_with(probe, source, RelType::MirrorsField, 0.9, "schema-mirror");
+    std::fs::write(&graph_bin, fx.into_bytes()).unwrap();
+
+    for direction in ["up", "both"] {
+        let val = run_ecp_impact(tmp.path(), &["--direction", direction, "--test-coverage"]);
+        let coverage = &val["coverage"];
+        let uncovered = coverage["uncovered_symbols"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{direction}: no uncovered_symbols: {val}"));
+        assert_eq!(uncovered.len(), 1, "{direction}: {val}");
+        assert_eq!(uncovered[0]["name"], "source", "{direction}: {val}");
+        assert_eq!(
+            uncovered[0]["unverified_test_callers"], 1,
+            "{direction}: {val}"
+        );
+        assert_eq!(uncovered[0]["test_caller_count"], 0, "{direction}: {val}");
+        assert_eq!(coverage["summary"]["orphan"], 0, "{direction}: {val}");
+    }
+}
+
+/// `ecp path` tags a deterministic hop below 0.7 as impact does, and its
+/// caveat names the hop as low-confidence. Contract: with heuristic relations
+/// off (the default) a sub-0.7 `Calls` step still walks, so the tag is the
+/// only thing that keeps the route from reading as resolved. On origin/main
+/// the step was untagged and the payload had no caveat.
+#[test]
+fn test_path_low_confidence_calls_hop_requires_verification() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo(tmp.path());
+    let graph_bin = find_graph_bin(tmp.path());
+    std::fs::write(&graph_bin, synthetic_graph_clean()).unwrap();
+
+    let out = Command::new(ecp_bin())
+        .args(["path", "source", "target", "--direction", "down"])
+        .args(["--format", "json", "--repo", "."])
+        .current_dir(tmp.path())
+        .env("HOME", tmp.path())
+        .output()
+        .expect("ecp path failed to spawn");
+    assert!(
+        out.status.success(),
+        "ecp path exited non-zero: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let val: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let steps = val["path"]
+        .as_array()
+        .unwrap_or_else(|| panic!("expected a path: {val}"));
+    let tags: Vec<(&str, Option<bool>)> = steps
+        .iter()
+        .map(|s| {
+            (
+                s["name"].as_str().unwrap(),
+                s["requiresVerification"].as_bool(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        tags,
+        [("source", Some(false)), ("target", Some(true))],
+        "{val}"
+    );
+    let caveat = val["result"].as_str().unwrap_or_default();
+    assert!(
+        caveat.contains("1 of 1 hops") && caveat.contains("low-confidence (< 0.7)"),
+        "the caveat names the low-confidence hop: {val}"
+    );
+}

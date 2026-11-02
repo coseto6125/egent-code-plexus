@@ -17,10 +17,10 @@ ecp impact <SYMBOL> [--direction up] [--repo <PATH>]
 - `--direction`: `up` (who calls me — default), `down` (who I call), or `both`.
 - `--baseline origin/main`: Compare against a branch to see impact of staged changes.
 - `--kind`, `--file`: Select the target declaration, not the results. `--kind` takes one kind and applies before `--file`. `--file` ranks a path that equals the value, then one that ends with it, then one that contains it. An ambiguous name returns candidates that you can re-run. `--file_path` is an alias of `--file`.
-- `--ambiguous-callers`: When the name has several same-named definitions, also list the call sites the graph could not attribute (one `git grep` over the definitions' language family, at most 50 sites). They are text-match candidates under `ambiguous_callers`, never counted as callers; a site whose line holds several calls carries `count`. Ruby calls without parentheses are not matched.
+- `--ambiguous-callers`: When the name has several same-named definitions of a competing kind, also list the call sites the graph could not attribute (one `git grep` over the definitions' language family, at most 50 sites). They are text-match candidates under `ambiguous_callers`, never counted as callers; a site whose line holds several calls carries `count`. Ruby calls without parentheses are not matched.
 - Test-file callers are listed by default, each entry tagged `test: true`. `--exclude-tests` drops them and reports `hidden_test_callers: N`.
-- Every row carries `requires_verification`. It is `true` when a hop on the row's path is heuristic or has confidence below 0.7. Read a `true` row as a lead: open the call site before you act on it.
-- `--test-coverage` counts only callers with `requires_verification: false` as coverage. Tagged test callers appear in `unverified_test_callers`.
+- Every row carries `requires_verification`. It is `true` when a hop on the row's path is heuristic or has confidence below 0.7. The tag reflects the best path of the shortest depth: when one path of that depth is fully verified, the row is `false`. Read a `true` row as a lead: open the call site before you act on it.
+- `--test-coverage` counts only verified (untagged) test callers as coverage. Tagged test callers appear in `unverified_test_callers`. A symbol whose only callers are tagged test callers is `uncovered`, not `orphan`.
 
 ### Path-literal site lookup
 

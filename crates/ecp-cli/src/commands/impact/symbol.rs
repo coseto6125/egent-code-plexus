@@ -184,11 +184,12 @@ pub(super) fn impact_by_name(
 
     let target_file = merged_node_meta(graph, view, start_idx).file_path;
     let all_blind_spot_kinds = collect_blind_spots(graph, &target_file);
-    // `coverage_analyses` reads the walk behind `--test-coverage` only; the
-    // default path moves the results into the payload once.
-    let coverage_walk = args
-        .test_coverage
-        .then(|| vec![(start_idx, all_results.clone())]);
+    // `coverage_analyses` reads the walk behind `--test-coverage` only, both
+    // buckets; the default path moves the results into the payload once.
+    let coverage_walk = args.test_coverage.then(|| {
+        let rows = all_results.iter().chain(&all_heuristic_results).cloned();
+        vec![(start_idx, rows.collect::<Vec<_>>())]
+    });
 
     // Use the original user-supplied name (which may be FQN) as the target
     // label in output — more precise than bare_name when owner was specified.
@@ -230,13 +231,14 @@ pub(super) fn impact_by_name(
             min_conf,
             effective_include_tests,
             &rel_filter,
+            !args.no_heuristic,
         );
         result_obj["coverage"] = build_coverage_json(analyses);
     }
 
-    // FU-2026-05-29-011: with ≥2 same-named defs in the index (counting base
-    // defs an uncommitted edit renamed away), the resolver
-    // may have suppressed bare calls to this name at index time
+    // FU-2026-05-29-011: with ≥2 same-named definitions of a competing kind
+    // in the index (counting base defs an uncommitted edit renamed away), the
+    // resolver may have suppressed bare calls to this name at index time
     // (`DecisionTier::AmbiguousGlobal`; language and vendor barriers exempt
     // some), so the upstream caller set is a lower bound — the payload must
     // say so instead of reading as complete.

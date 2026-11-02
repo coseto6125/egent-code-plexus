@@ -345,3 +345,84 @@ fn test_impact_caveat_struct_and_impl_block_do_not_compete_rust() {
         "struct + impl is one type, not a collision: {json}"
     );
 }
+
+/// Java names a constructor after its class: the class and its own
+/// constructor are one type, not two definitions a call could pick between.
+/// Before the fix the class target counted its constructor: "2 same-named".
+#[test]
+fn test_impact_caveat_class_and_own_constructor_do_not_compete_java() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    write(repo, "Foo.java", "class Foo {\n    Foo() {}\n}\n");
+    write(
+        repo,
+        "Main.java",
+        "class Main {\n    void run() {\n        new Foo();\n    }\n}\n",
+    );
+    init_and_analyze(repo);
+
+    let json = run_impact(repo, repo, &["Foo", "--kind", "class", "--direction", "up"]);
+    assert!(
+        !caveat_of(&json).contains("same-named"),
+        "a class and its own constructor are not a collision: {json}"
+    );
+}
+
+/// Python `def Q` beside `class Q(Base):`. The function target weighs
+/// callables only, so it carries no `ambiguous_callers`; the class target is
+/// competed by the function, and the class declaration line `Q(Base)` is a
+/// definition, never a call site.
+#[test]
+fn test_ambiguous_callers_function_and_class_namesake_python() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    write(
+        repo,
+        "q1.py",
+        "class Base:\n    pass\n\n\nclass Q(Base):\n    pass\n",
+    );
+    write(repo, "q2.py", "def Q():\n    return 1\n");
+    write(
+        repo,
+        "q3.py",
+        "from q2 import *\n\n\ndef callq():\n    return Q()\n",
+    );
+    init_and_analyze(repo);
+
+    let function = run_impact(
+        repo,
+        repo,
+        &[
+            "Q",
+            "--kind",
+            "function",
+            "--direction",
+            "up",
+            "--ambiguous-callers",
+        ],
+    );
+    assert!(
+        function.get("ambiguous_callers").is_none(),
+        "a function target is not competed by a class: {function}"
+    );
+
+    let class = run_impact(
+        repo,
+        repo,
+        &[
+            "Q",
+            "--kind",
+            "class",
+            "--direction",
+            "up",
+            "--ambiguous-callers",
+        ],
+    );
+    let sites = class["ambiguous_callers"]["sites"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a class target competed by `def Q` lists sites: {class}"));
+    assert!(
+        sites.iter().all(|s| s["file"] != "q1.py"),
+        "the class declaration line is no call site: {class}"
+    );
+}

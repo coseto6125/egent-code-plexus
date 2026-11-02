@@ -16,6 +16,7 @@ ecp cypher "MATCH (a)-[r]->(b) RETURN a,b" [--repo <PATH>]
 - **Clauses**: one `WITH` per query; no `MATCH` after `WITH`. `ORDER BY` must name a projected key (alias it in `RETURN`). Comma patterns `(a)-[:X]->(m), (b)-[:Y]->(m)` join on shared variables.
 - **Pathing**: Variable-length paths `[:Rel*1..2]` need `RETURN DISTINCT` (or `count(DISTINCT x)`), no edge variable, and a minimum of 0 or 1. Reverse arrows `<-[r]-` work on fixed-length patterns.
 - **Lists**: index or slice a list value: `labels(n)[0]`, `xs[-1]`, `xs[1..3]`.
+- **Column names**: an unaliased function column is named as written, lower-cased: `count(b)`, `labels(a)[0]`. `UNION` branches need equal column names, so alias such columns with `AS`.
 
 ## NodeKinds
 `Function`, `Method`, `Class`, `Property`, `Constructor`, `Interface`, `Const`, `Variable`, `Import`, `Route`, `Process`, `File`, `Struct`, `Enum`, `Trait`, `Impl`, `Module`, `Namespace`, `Typedef`, `Macro`, `Annotation`, `SchemaField`, `EventTopic`, `TransactionScope`, `PathLiteral`.

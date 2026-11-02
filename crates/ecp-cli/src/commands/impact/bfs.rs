@@ -1,12 +1,13 @@
 use super::Direction;
 use crate::commands::format::{kind_to_str, node_kind_to_str, rel_type_to_str};
-use ecp_core::analyzer::outcome::Tier;
+use ecp_core::contracts::raw_records::Evidence;
 use ecp_core::file_category::is_test_path;
 use ecp_core::file_category::Language;
 use ecp_core::graph::{ArchivedFileCategory, RelType};
 use ecp_core::session::{MergedEdge, MergedGraph, OverlayView};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use serde_json::{json, Value};
+use std::collections::hash_map::Entry;
 use std::collections::{HashSet, VecDeque};
 
 /// Display metadata for a merged-space node index (`>= graph.nodes.len()` =
@@ -79,11 +80,15 @@ fn base_file_is_test(graph: &ecp_core::graph::ArchivedZeroCopyGraph, file_idx: u
     matches!(graph.files[file_idx].category, ArchivedFileCategory::Test)
 }
 
-/// Whether an edge is a lead to verify, not a resolved fact: a heuristic
-/// relation, or a confidence below the lowest tier that binds a name to one
-/// definition ([`Tier::Global`], 0.7, which is not below itself).
+/// The row key that tags a caller reached through an edge to verify.
+pub(super) const REQUIRES_VERIFICATION: &str = "requires_verification";
+
+/// Whether an edge is a lead to verify, not a resolved fact: it reads back as
+/// [`Evidence::Heuristic`], a heuristic relation or a confidence below
+/// [`HEURISTIC_CEILING`](ecp_core::contracts::raw_records::HEURISTIC_CEILING)
+/// (0.7, which is not below itself).
 fn edge_needs_verification(rel: RelType, confidence: f32) -> bool {
-    rel.is_heuristic() || confidence < Tier::Global.confidence()
+    Evidence::of_stored(confidence, rel) == Evidence::Heuristic
 }
 
 /// `Some((requires_verification, confidence))` when a walk may follow this edge.
@@ -153,7 +158,7 @@ pub(crate) struct PathEdge<'g> {
     pub(crate) rel: &'static str,
     pub(crate) reason: &'g str,
     pub(crate) confidence: f32,
-    /// A heuristic relation or a confidence below [`Tier::Global`].
+    /// The edge reads back as [`Evidence::Heuristic`] ([`edge_needs_verification`]).
     pub(crate) requires_verification: bool,
 }
 
@@ -382,7 +387,10 @@ fn constructor_seeds(merged: &MergedGraph<'_>, start_idx: u32, direction: &Direc
 ///   depth-0 target is never filtered, so it is never counted.
 ///
 /// Every emitted node carries `test: bool`, so a caller list that mixes
-/// production and test callers stays separable.
+/// production and test callers stays separable, and
+/// [`REQUIRES_VERIFICATION`]: some edge on its path needs verification. Among
+/// the paths of the shortest depth a fully verified one wins, with its via
+/// edge and bucket, whichever in-edge the walk met first.
 ///
 /// `--include-tests` / `--relation-types` / `min_conf` are applied here;
 /// `--kind` / `--file` emission-only filtering is NOT applied here.
@@ -408,32 +416,48 @@ pub(super) fn run_bfs<'g>(
     include_heuristic: bool,
     max_results: Option<usize>,
 ) -> (Vec<Value>, Vec<Value>, u64, u64, u64) {
-    // (node_idx, depth, via_edge_info, reached_via_heuristic, requires_verification).
-    // The reason is borrowed from the string pool: a hub enqueues six figures
-    // of nodes at depth 2, and an owned String per node was the largest
-    // allocation here. `reached_via_heuristic` picks the output bucket;
-    // `requires_verification` is the separate tag: some edge on the first
-    // path to the node (the visit that fixes it) is heuristic or below
-    // `Tier::Global` confidence.
-    type ViaEdge<'g> = Option<(&'g str, f32)>;
-    type Step<'g> = (usize, usize, ViaEdge<'g>, bool, bool);
+    // How the walk reached a node, kept in the visited map and read when the
+    // node pops. The reason is borrowed from the string pool: a hub enqueues
+    // six figures of nodes at depth 2, and an owned String per node was the
+    // largest allocation here. `heuristic` picks the output bucket; `verify`
+    // is the separate tag: some edge on the path is heuristic or below
+    // `HEURISTIC_CEILING`.
+    #[derive(Clone, Copy)]
+    struct Reach<'a> {
+        depth: usize,
+        via: Option<(&'a str, f32)>,
+        heuristic: bool,
+        verify: bool,
+    }
+    const START: Reach<'static> = Reach {
+        depth: 0,
+        via: None,
+        heuristic: false,
+        verify: false,
+    };
 
     let merged = MergedGraph::new(graph, view);
     let base_len = graph.nodes.len();
-    let mut visited = FxHashSet::default();
-    let mut queue: VecDeque<Step<'g>> = VecDeque::new();
+    let mut visited: FxHashMap<usize, Reach<'g>> = FxHashMap::default();
+    let mut queue: VecDeque<usize> = VecDeque::new();
     let mut det_results: Vec<Value> = Vec::new();
     let mut heur_results: Vec<Value> = Vec::new();
     let mut hidden_conf_edges: u64 = 0;
     let mut hidden_heuristic_edges: u64 = 0;
     let mut hidden_test_callers: u64 = 0;
 
-    queue.push_back((start_idx, 0, None, false, false));
-    visited.insert(start_idx);
+    queue.push_back(start_idx);
+    visited.insert(start_idx, START);
     let ctor_seeds = constructor_seeds(&merged, start_idx as u32, direction);
-    visited.extend(ctor_seeds.iter().map(|&c| c as usize));
+    visited.extend(ctor_seeds.iter().map(|&c| (c as usize, START)));
 
-    while let Some((curr_idx, curr_depth, via, via_heuristic, verify)) = queue.pop_front() {
+    while let Some(curr_idx) = queue.pop_front() {
+        let Reach {
+            depth: curr_depth,
+            via,
+            heuristic: via_heuristic,
+            verify,
+        } = visited[&curr_idx];
         // ── node emission (merged space: < base_len = base, else virtual) ──
         let (uid, name, owner_class, kind_str, file_path, line, is_test): (
             u64,
@@ -505,7 +529,7 @@ pub(super) fn run_bfs<'g>(
             "viaReason": via_reason,
             "viaConfidence": via_confidence,
             "test": is_test,
-            "requires_verification": verify,
+            REQUIRES_VERIFICATION: verify,
         });
         if via_heuristic {
             heur_results.push(entry);
@@ -526,14 +550,14 @@ pub(super) fn run_bfs<'g>(
         // joins the walk at this depth, in any direction and under any
         // relation filter, so a walk from any part reaches the same nodes.
         for part in csharp_partial_parts(&merged, curr_idx) {
-            if visited.insert(part as usize) {
-                queue.push_front((
-                    part as usize,
-                    curr_depth,
-                    Some((rel_type_to_str(RelType::PartOf), 1.0)),
-                    via_heuristic,
+            if let Entry::Vacant(slot) = visited.entry(part as usize) {
+                slot.insert(Reach {
+                    depth: curr_depth,
+                    via: Some((rel_type_to_str(RelType::PartOf), 1.0)),
+                    heuristic: via_heuristic,
                     verify,
-                ));
+                });
+                queue.push_front(part as usize);
             }
         }
 
@@ -569,14 +593,29 @@ pub(super) fn run_bfs<'g>(
                     return;
                 }
             }
-            if visited.insert(next_idx) {
-                queue.push_back((
-                    next_idx,
-                    curr_depth + 1,
-                    Some((edge.reason(graph), edge_conf)),
-                    is_heur,
-                    verify || edge_needs_verification(rel, edge_conf),
-                ));
+            let depth = curr_depth + 1;
+            let needs_verification = verify || edge_needs_verification(rel, edge_conf);
+            let reach = || Reach {
+                depth,
+                via: Some((edge.reason(graph), edge_conf)),
+                heuristic: is_heur,
+                verify: needs_verification,
+            };
+            match visited.entry(next_idx) {
+                Entry::Vacant(slot) => {
+                    slot.insert(reach());
+                    queue.push_back(next_idx);
+                }
+                // The walk records every depth-d discovery before it pops any
+                // depth-d node, so a node first found at this same depth is
+                // still queued: a fully verified path replaces a tagged one,
+                // and the order of the in-edges cannot decide the tag.
+                Entry::Occupied(mut slot) => {
+                    let seen = slot.get_mut();
+                    if seen.depth == depth && seen.verify && !needs_verification {
+                        *seen = reach();
+                    }
+                }
             }
         };
 
@@ -747,7 +786,7 @@ mod tests {
                 .map(|e| {
                     (
                         e["name"].as_str().unwrap().to_string(),
-                        e["requires_verification"]
+                        e[REQUIRES_VERIFICATION]
                             .as_bool()
                             .expect("every row carries requires_verification"),
                     )
@@ -801,5 +840,112 @@ mod tests {
             det,
             [("full".to_string(), false), ("target".to_string(), false)]
         );
+    }
+
+    /// `(name, requires_verification, viaConfidence)` of every row of an
+    /// upstream walk from node 0, sorted, deterministic rows then heuristic.
+    fn tagged_rows(bytes: &[u8]) -> (Vec<(String, bool, f64)>, Vec<(String, bool, f64)>) {
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(bytes).unwrap();
+        let (det, heur, _, _, _) = run_bfs(
+            graph,
+            None,
+            0,
+            &Direction::Up,
+            3,
+            0.0,
+            true,
+            &None,
+            true,
+            None,
+        );
+        let rows = |entries: &[Value]| {
+            let mut out: Vec<(String, bool, f64)> = entries
+                .iter()
+                .map(|e| {
+                    (
+                        e["name"].as_str().unwrap().to_string(),
+                        e[REQUIRES_VERIFICATION].as_bool().unwrap(),
+                        e["viaConfidence"].as_f64().unwrap(),
+                    )
+                })
+                .collect();
+            out.sort_by(|a, b| a.0.cmp(&b.0));
+            out
+        };
+        (rows(&det), rows(&heur))
+    }
+
+    /// Stands for: `t` reaches `target` at depth 2 through `a` (all 1.0) and
+    /// through `b` (0.55 into `target`). The verified path wins in either
+    /// in-edge order. Before the fix the first-popped parent decided, so with
+    /// `b` created (and popped) first `t` came back tagged.
+    #[test]
+    fn test_run_bfs_same_depth_verified_parent_untags_either_order() {
+        for b_first in [false, true] {
+            let mut fx = GraphFixture::new();
+            let target = fx.func("src/t.rs", "target");
+            let (a, b) = if b_first {
+                let b = fx.func("src/b.rs", "b");
+                (fx.func("src/a.rs", "a"), b)
+            } else {
+                let a = fx.func("src/a.rs", "a");
+                (a, fx.func("src/b.rs", "b"))
+            };
+            let t = fx.func("src/caller.rs", "t");
+            fx.edge_with(a, target, RelType::Calls, 1.0, "call");
+            fx.edge_with(b, target, RelType::Calls, 0.55, "call");
+            fx.edge_with(t, a, RelType::Calls, 1.0, "call");
+            fx.edge_with(t, b, RelType::Calls, 1.0, "call");
+            let (det, _) = tagged_rows(&fx.into_bytes());
+            assert_eq!(
+                det,
+                [
+                    ("a".to_string(), false, 1.0),
+                    ("b".to_string(), true, f64::from(0.55f32)),
+                    ("t".to_string(), false, 1.0),
+                    ("target".to_string(), false, 1.0),
+                ],
+                "b_first={b_first}"
+            );
+        }
+    }
+
+    /// Stands for: one caller with a 0.55 and a 1.0 call site of `target`,
+    /// in either edge order, is an untagged row whose via edge is the 1.0
+    /// one; a caller reached by a heuristic relation and by a resolved call
+    /// sits in the deterministic bucket, untagged. Before the fix the first
+    /// edge decided the tag, the via confidence and the bucket.
+    #[test]
+    fn test_run_bfs_parallel_edges_verified_edge_wins_tag_via_and_bucket() {
+        for sure_first in [false, true] {
+            let mut fx = GraphFixture::new();
+            let target = fx.func("src/t.rs", "target");
+            let sites = fx.func("src/a.rs", "sites");
+            let mirror = fx.func("src/m.rs", "mirror");
+            let edges = [
+                (sites, RelType::Calls, 0.55),
+                (mirror, RelType::MirrorsField, 0.9),
+            ];
+            for (source, rel, conf) in edges {
+                if sure_first {
+                    fx.edge_with(source, target, RelType::Calls, 1.0, "call");
+                }
+                fx.edge_with(source, target, rel, conf, "guess");
+                if !sure_first {
+                    fx.edge_with(source, target, RelType::Calls, 1.0, "call");
+                }
+            }
+            let (det, heur) = tagged_rows(&fx.into_bytes());
+            assert_eq!(
+                det,
+                [
+                    ("mirror".to_string(), false, 1.0),
+                    ("sites".to_string(), false, 1.0),
+                    ("target".to_string(), false, 1.0),
+                ],
+                "sure_first={sure_first}"
+            );
+            assert!(heur.is_empty(), "sure_first={sure_first}: {heur:?}");
+        }
     }
 }

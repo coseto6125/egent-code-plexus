@@ -393,28 +393,29 @@ fn category_to_str(cat: &ArchivedFileCategory) -> &'static str {
     }
 }
 
-/// Sources of the `Calls` edges into `node_idx` and into its `constructors`
-/// (empty unless it is a Class / Struct): a construction lands on the sole
-/// constructor when there is one, and a source reaching both counts once.
+/// Distinct sources of the `Calls` edges into `node_idx` and into its
+/// `constructors` (empty unless it is a Class / Struct): a construction lands
+/// on the sole constructor when there is one. A caller counts once however
+/// many call sites it holds, and once when it reaches both.
 fn call_sources(
     graph: &ArchivedZeroCopyGraph,
     node_idx: usize,
     constructors: Vec<u32>,
 ) -> impl Iterator<Item = u32> + '_ {
-    let dedupe = !constructors.is_empty();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = rustc_hash::FxHashSet::default();
     std::iter::once(node_idx as u32)
         .chain(constructors)
         .flat_map(move |target| {
             iter_incoming_edges_filtered(graph, target, |rel| matches!(rel, ArchivedRelType::Calls))
                 .map(|(src, _)| src)
         })
-        .filter(move |&src| !dedupe || seen.insert(src))
+        .filter(move |&src| seen.insert(src))
 }
 
-/// Number of merged `Calls` edges into `node_idx` and its `constructors`,
-/// counted as [`call_sources`] counts them. The merged graph moves a clean
-/// call that a dirty edit re-binds, so the count follows the overlay.
+/// Number of distinct sources of the merged `Calls` edges into `node_idx`
+/// and its `constructors`, counted as [`call_sources`] counts them. The
+/// merged graph moves a clean call that a dirty edit re-binds, so the count
+/// follows the overlay.
 ///
 /// The raw in-degree is not that number: it also counts the `Defines` edge
 /// from the declaring file and one `Imports` edge per file that pulls that
@@ -422,8 +423,7 @@ fn call_sources(
 /// `compute_hits` in this repo had 17 callers when the graph held 11 `Calls`
 /// edges: the other 6 were the declaring file and 5 importing files.
 fn count_incoming(merged: &MergedGraph<'_>, node_idx: u32, constructors: Vec<u32>) -> u32 {
-    let dedupe = !constructors.is_empty();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = rustc_hash::FxHashSet::default();
     std::iter::once(node_idx)
         .chain(constructors)
         .flat_map(|target| {
@@ -432,7 +432,7 @@ fn count_incoming(merged: &MergedGraph<'_>, node_idx: u32, constructors: Vec<u32
                 .filter(|edge| edge.rel_type() == RelType::Calls)
                 .map(|edge| edge.source)
         })
-        .filter(|&src| !dedupe || seen.insert(src))
+        .filter(|&src| seen.insert(src))
         .count() as u32
 }
 
@@ -947,12 +947,14 @@ pub struct Hit {
     pub line: u32,
     pub name: String,
     pub signature: String,
+    /// Distinct 1-hop `Calls` sources: a caller with several call sites
+    /// counts once.
     pub caller_count: usize,
     /// Up to `HOP_EXPANSION_LIMIT` 1-hop incoming-edge source names.
     /// Populated from `in_offsets` / `in_edge_idx` / `edges`. Empty when
     /// the node has no callers or all edges have been truncated.
     pub callers: Vec<String>,
-    /// Real callee count from `out_offsets`. Mirrors `caller_count`; the
+    /// Distinct callee count from `out_offsets`. Mirrors `caller_count`; the
     /// `callees` list below is capped at `HOP_EXPANSION_LIMIT`, so an LLM
     /// must read this to know how many callees actually exist.
     pub callee_count: usize,
@@ -1570,9 +1572,11 @@ fn build_hit(
     let out_end = graph.out_offsets[idx + 1].to_native() as usize;
     let mut callee_count = 0usize;
     let mut callees: Vec<String> = Vec::new();
+    let mut seen_callees = rustc_hash::FxHashSet::default();
     for e in graph.edges[out_start..out_end]
         .iter()
         .filter(|e| matches!(e.rel_type, ArchivedRelType::Calls))
+        .filter(|e| seen_callees.insert(e.target.to_native()))
     {
         callee_count += 1;
         if callees.len() < HOP_EXPANSION_LIMIT {

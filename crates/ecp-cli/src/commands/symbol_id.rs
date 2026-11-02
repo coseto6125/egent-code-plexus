@@ -42,15 +42,17 @@ pub fn split_fqn_target(s: &str) -> (Option<&str>, &str) {
 
 /// Whether a definition of kind `other` competes with `target` for a name
 /// lookup: the kinds the resolver weighs together. A call weighs the callable
-/// kinds, a type lookup the type kinds and the callables a type name can
-/// construct, a field read the properties, a value read
-/// [`ResolveTarget::Value`]. A kind outside every group (an `Impl` block
-/// beside its struct) competes only with its own kind.
+/// kinds, a type lookup the type kinds and the functions and methods a call
+/// of the type name can bind to, a field read the properties, a value read
+/// [`ResolveTarget::Value`]. A type's own constructor (Java, C#, C++ and Dart
+/// name it after the class) is the type, not a competitor. A kind outside
+/// every group (an `Impl` block beside its struct) competes only with its own
+/// kind.
 fn competing_kinds(target: NodeKind, other: NodeKind) -> bool {
     if target.is_callable() {
         other.is_callable()
     } else if target.declares_type() {
-        other.declares_type() || other.is_callable()
+        other.declares_type() || matches!(other, NodeKind::Function | NodeKind::Method)
     } else if target.is_property() {
         other.is_property()
     } else if matches!(target, NodeKind::Const | NodeKind::Variable) {
@@ -154,6 +156,9 @@ mod tests {
             (Method, Constructor, true),
             (Function, Class, false),
             (Class, Function, true),
+            (Class, Method, true),
+            (Class, Constructor, false),
+            (Struct, Constructor, false),
             (Struct, Struct, true),
             (Struct, Impl, false),
             (Struct, Property, false),
@@ -196,6 +201,21 @@ mod tests {
         assert_eq!(
             same_name_def_count(archived, Some(&view), "absent", NodeKind::Function),
             0
+        );
+
+        // A working-tree-only namesake of a kind no call weighs (a struct
+        // beside a function target) is no collision; a struct target, which
+        // the function competes with, sees both.
+        let other_kind: OverlayFileInput =
+            parse_rust(&format!("\n{source}struct helper;\n")).into();
+        let view = OverlayView::build(archived, &[other_kind]).unwrap();
+        assert_eq!(
+            same_name_def_count(archived, Some(&view), "helper", NodeKind::Function),
+            1
+        );
+        assert_eq!(
+            same_name_def_count(archived, Some(&view), "helper", NodeKind::Struct),
+            2
         );
     }
 

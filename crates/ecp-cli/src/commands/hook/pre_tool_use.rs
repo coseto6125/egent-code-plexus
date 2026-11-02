@@ -89,27 +89,16 @@ fn compute_search_hits(input: &HookInput) -> Option<String> {
 /// Render hits as a legacy-style multi-line block. Each symbol gets a
 /// header `name (file:line) [kind]` followed by optional `Called by:`
 /// and `Calls:` lines drawn from the in-process 1-hop CSR expansion in
-/// `compute_hits`; a truncated `Called by:` ends in `+N more`. Empty caller / callee lists are skipped to keep the
+/// `compute_hits`; each lists distinct symbols, and a truncated line ends in
+/// `+N more`. Empty caller / callee lists are skipped to keep the
 /// per-hit footprint tight; the LLM reads the absence as "no callers
 /// found within 1 hop" rather than asking ecp for a deeper trace.
 pub fn format_hits(hits: &[Hit]) -> String {
     let mut out = String::from(HITS_HEADER);
     for h in hits.iter().take(MAX_HITS) {
         let mut block = format!("  {} ({}:{}) [{}]\n", h.name, h.file, h.line, h.kind);
-        if !h.callers.is_empty() {
-            block.push_str("    Called by: ");
-            block.push_str(&h.callers.join(", "));
-            // `callers` is capped at `HOP_EXPANSION_LIMIT`; `caller_count` is
-            // the real total, so the rest is named, not silently dropped.
-            let more = h.caller_count.saturating_sub(h.callers.len());
-            if more > 0 {
-                let _ = write!(block, ", +{more} more");
-            }
-            block.push('\n');
-        }
-        if !h.callees.is_empty() {
-            block.push_str(&format!("    Calls: {}\n", h.callees.join(", ")));
-        }
+        push_neighbours(&mut block, "Called by", &h.callers, h.caller_count);
+        push_neighbours(&mut block, "Calls", &h.callees, h.callee_count);
         if out.len() + block.len() > MAX_BYTES {
             break;
         }
@@ -122,6 +111,20 @@ pub fn format_hits(hits: &[Hit]) -> String {
     } else {
         out
     }
+}
+
+/// One `label: a, b, c` line. `names` is capped at `HOP_EXPANSION_LIMIT`
+/// and `total` is the real count, so the rest is named, not silently dropped.
+fn push_neighbours(block: &mut String, label: &str, names: &[String], total: usize) {
+    if names.is_empty() {
+        return;
+    }
+    let _ = write!(block, "    {label}: {}", names.join(", "));
+    let more = total.saturating_sub(names.len());
+    if more > 0 {
+        let _ = write!(block, ", +{more} more");
+    }
+    block.push('\n');
 }
 
 fn bash_command(tool_input: &serde_json::Value) -> Option<&str> {

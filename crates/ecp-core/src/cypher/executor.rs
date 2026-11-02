@@ -555,17 +555,9 @@ fn stream_projection(
 ) -> Result<(Vec<String>, Vec<Vec<Value>>), CypherError> {
     if let Some(wc) = &query.with {
         if has_aggregate(&wc.items) {
-            let items = wc
-                .items
-                .iter()
-                .map(|i| {
-                    (
-                        i.alias
-                            .clone()
-                            .unwrap_or_else(|| return_item_default_col(i)),
-                        i.expr.clone(),
-                    )
-                })
+            let items = with_columns(wc)
+                .into_iter()
+                .zip(wc.items.iter().map(|i| i.expr.clone()))
                 .collect();
             let mut agg = Aggregation::new(items, Stage::With);
             let mut aggregate_error = None;
@@ -589,6 +581,7 @@ fn stream_projection(
     let mut agg = None;
     let mut with_error = None;
     let mut aggregate_error = None;
+    let with_cols = query.with.as_ref().map(with_columns).unwrap_or_default();
     visit_matches(&query.matches, graph, &mut |b| {
         if !passes_where(query.where_.as_ref(), b, graph, cache)? {
             return Ok(());
@@ -598,7 +591,7 @@ fn stream_projection(
             if with_error.is_some() {
                 return Ok(());
             }
-            rebound = match rebind_one(wc, b, graph, cache) {
+            rebound = match rebind_one(wc, &with_cols, b, graph, cache) {
                 Ok(row) => row,
                 Err(error) => {
                     with_error = Some(error);
@@ -1182,31 +1175,41 @@ fn exec_with(
     cache: &mut ContentCache,
 ) -> Result<Vec<Binding>, CypherError> {
     debug_assert!(!has_aggregate(&wc.items));
+    let cols = with_columns(wc);
     let mut out = Vec::with_capacity(bindings.len());
     for b in &bindings {
-        if let Some(row) = rebind_one(wc, b, graph, cache)? {
+        if let Some(row) = rebind_one(wc, &cols, b, graph, cache)? {
             out.push(row);
         }
     }
     Ok(out)
 }
 
+/// The column name of each WITH item, in item order: its alias, else its
+/// default name. Computed once per clause, not once per row.
+fn with_columns(wc: &WithClause) -> Vec<String> {
+    wc.items
+        .iter()
+        .map(|item| {
+            item.alias
+                .clone()
+                .unwrap_or_else(|| return_item_default_col(item))
+        })
+        .collect()
+}
+
+/// `cols` is [`with_columns`] of `wc`.
 fn rebind_one(
     wc: &WithClause,
+    cols: &[String],
     b: &Binding,
     graph: MergedGraph<'_>,
     cache: &mut ContentCache,
 ) -> Result<Option<Binding>, CypherError> {
-    let computed = wc
-        .items
+    let computed = cols
         .iter()
-        .map(|item| {
-            let col = item
-                .alias
-                .clone()
-                .unwrap_or_else(|| return_item_default_col(item));
-            (col, eval_return_item_rich(item, b, graph, cache))
-        })
+        .zip(&wc.items)
+        .map(|(col, item)| (col.clone(), eval_return_item_rich(item, b, graph, cache)))
         .collect();
     let rebound = Binding {
         node_vars: b.node_vars.clone(),
@@ -3144,7 +3147,7 @@ fn literal_col_name(lit: &Literal) -> String {
 }
 
 /// Default column label of an expression inside a projection (`labels(a)[0]`,
-/// `size(labels(a))`). Two subscripts of one base need two names: ORDER BY
+/// `labels(a)[0..2]`). Two subscripts of one base need two names: ORDER BY
 /// and the reader tell the columns apart by name.
 fn expr_col_name(e: &Expr) -> String {
     match e {

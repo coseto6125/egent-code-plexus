@@ -1705,6 +1705,28 @@ fn exec_union_different_column_names_is_refused() {
     });
 }
 
+/// Pins the refusal an agent meets when two unaliased function columns name
+/// different variables: the message names both headers and the `AS` fix.
+/// Before function columns kept their arguments, both read `COUNT(*)` and
+/// the union passed, so one branch's count sat under the other's meaning.
+#[test]
+fn test_union_unaliased_function_columns_refused_with_alias_hint() {
+    with_func_and_method(|g| {
+        let q =
+            parse("MATCH (f:Function) RETURN count(f) UNION ALL MATCH (c:Method) RETURN count(c)")
+                .unwrap();
+        let error = execute(&q, g, None, Path::new("."))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error
+                .contains("UNION branches return different column names: [count(f)] vs [count(c)]")
+                && error.contains("give both branches the same names with AS"),
+            "{error}"
+        );
+    });
+}
+
 #[test]
 fn exec_union_all_keeps_dupes() {
     // UNION ALL keeps duplicates; matching all :Function nodes gives 1 from left, 1 from right.

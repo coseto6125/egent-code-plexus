@@ -12,9 +12,10 @@
 //! and is not: the whole suite runs in ~1.0s, and a shared `OnceLock` fixture
 //! would trade that isolation for nothing measurable.
 //!
-//! Known gap: `--include-heuristic` and its `requiresVerification` tagging are
-//! not covered. A heuristic edge needs a MirrorsField or EventTopicMirror
-//! pattern, which is a fixture of its own rather than a line in this one.
+//! `requiresVerification` tagging lives in `impact_heuristic_filter.rs`, on a
+//! synthetic graph: a sub-0.7 `Calls` hop needs a confidence no fixture here
+//! produces on purpose. A heuristic step under `--include-heuristic` (a
+//! MirrorsField or EventTopicMirror pattern) is still not covered.
 
 mod common;
 
