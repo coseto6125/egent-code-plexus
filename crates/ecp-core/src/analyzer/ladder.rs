@@ -1484,6 +1484,35 @@ fn tree_walk<F: ModuleTreeFacts>(
     Some((module, at))
 }
 
+/// Where the target walk of the re-export `entry`, held by a module of
+/// `root`, starts: the tree it enters, the crate-rooted module path there,
+/// and the prefix segments after the head. `crate`, `self` and a `super`
+/// chain stay in `root`; a workspace crate name (`crate_root`) enters that
+/// crate's tree; any other head is a child of the containing module. The
+/// one copy of this rule: [`tree_follow`] and the overlay's check of the
+/// tree a re-export enters both call it.
+pub(crate) fn reexport_anchor<'e, R>(
+    root: R,
+    entry: &ReExport<'e>,
+    crate_root: impl FnOnce(&str) -> Option<R>,
+) -> (R, &'e [String], &'e [String]) {
+    let (prefix, none): (&'e [String], &'e [String]) = (entry.prefix, &[]);
+    match prefix.first().map(String::as_str) {
+        Some("crate") => (root, none, &prefix[1..]),
+        Some("self") => (root, entry.containing, &prefix[1..]),
+        Some("super") => {
+            let up = prefix.iter().take_while(|s| s.as_str() == "super").count();
+            let kept = entry.containing.len().saturating_sub(up);
+            (root, &entry.containing[..kept], &prefix[up..])
+        }
+        Some(head) => match crate_root(head) {
+            Some(other) => (other, none, &prefix[1..]),
+            None => (root, entry.containing, prefix),
+        },
+        None => (root, none, none),
+    }
+}
+
 /// The `pub use` chain from `item` of `module`, looked up in `namespace`.
 /// `None` when the module publishes `item` itself (its own item of that
 /// namespace shadows a glob), or when the chain leads back to it, past the
@@ -1513,21 +1542,7 @@ fn tree_follow<F: ModuleTreeFacts>(
     } else {
         entry.original
     };
-    let (prefix, none): (&[String], &[String]) = (entry.prefix, &[]);
-    let (root, base, rest) = match prefix.first().map(String::as_str) {
-        Some("crate") => (root, none, &prefix[1..]),
-        Some("self") => (root, entry.containing, &prefix[1..]),
-        Some("super") => {
-            let up = prefix.iter().take_while(|s| s.as_str() == "super").count();
-            let kept = entry.containing.len().saturating_sub(up);
-            (root, &entry.containing[..kept], &prefix[up..])
-        }
-        Some(head) => match facts.crate_root(head) {
-            Some(other) => (other, none, &prefix[1..]),
-            None => (root, entry.containing, prefix),
-        },
-        None => (root, none, none),
-    };
+    let (root, base, rest) = reexport_anchor(root, &entry, |head| facts.crate_root(head));
     let combined: Vec<String> = base
         .iter()
         .chain(rest)

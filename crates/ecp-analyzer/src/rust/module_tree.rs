@@ -29,9 +29,8 @@
 
 use crate::resolution::index::SymbolTable;
 use ecp_core::analyzer::ladder::{self, Namespace, Published, TreeItem};
-use ecp_core::analyzer::rust_paths::rust_module_dir;
 use ecp_core::analyzer::rust_pub_use::{
-    self, mod_decls, path_attrs, pub_use_entries, strip_comments, PubUseEntry,
+    self, mod_steps, pub_use_entries, strip_comments, PubUseEntry,
 };
 use ecp_core::contracts::workspace::{
     ConfigPresence, ConfigRead, Ecosystem, Membership, NameRank, Scope, ScopeId, ScopeName,
@@ -509,29 +508,7 @@ fn build_mod_tree_and_reexports(entry: &Path) -> (ModTree, ReExportMap) {
         };
         let clean = strip_comments(&src);
 
-        // The `#[path]` attributes the walk honours, by the rule of
-        // `ecp_core::analyzer::rust_pub_use::path_attrs`.
-        let path_attrs = path_attrs(&clean);
-
-        for name in mod_decls(&clean) {
-            let name = name.to_string();
-            let child_file = if let Some(override_rel) = path_attrs.get(&name) {
-                file.parent()
-                    .map(|d| d.join(override_rel))
-                    .unwrap_or_else(|| PathBuf::from(override_rel))
-            } else {
-                // The entry is the crate root whatever its file name
-                // (`[lib] path = "src/core.rs"`), so its modules sit beside it.
-                let found = if mod_path.is_empty() {
-                    file.parent().and_then(|dir| module_file_in(dir, &name))
-                } else {
-                    file_for_mod(&file, &name)
-                };
-                match found {
-                    Some(p) => p,
-                    None => continue,
-                }
-            };
+        for (name, child_file) in mod_steps(&clean, &file, mod_path.is_empty(), |p| p.exists()) {
             let child_canon = match child_file.canonicalize() {
                 Ok(p) => p,
                 Err(_) => {
@@ -546,7 +523,7 @@ fn build_mod_tree_and_reexports(entry: &Path) -> (ModTree, ReExportMap) {
                 continue;
             }
             let mut child_path = mod_path.clone();
-            child_path.push(name);
+            child_path.push(name.to_string());
             tree.insert(child_path.clone(), child_canon.clone());
             stack.push((child_path, child_canon));
         }
@@ -559,28 +536,6 @@ fn build_mod_tree_and_reexports(entry: &Path) -> (ModTree, ReExportMap) {
         );
     }
     (tree, reexports)
-}
-
-/// Locate the child module file for `mod NAME;` declared in `parent_file`.
-/// Convention mirrors the Rust reference:
-/// - `src/lib.rs`, `src/main.rs`, `foo/mod.rs` and Cargo target roots
-///   (`src/bin/x.rs`, `tests/x.rs`, ...) → children at `<dir>/NAME.rs`
-///   or `<dir>/NAME/mod.rs`.
-/// - `foo/bar.rs` → children at `foo/bar/NAME.rs` or `foo/bar/NAME/mod.rs`.
-fn file_for_mod(parent_file: &Path, mod_name: &str) -> Option<PathBuf> {
-    module_file_in(&rust_module_dir(parent_file)?, mod_name)
-}
-
-fn module_file_in(base: &Path, mod_name: &str) -> Option<PathBuf> {
-    let flat = base.join(format!("{mod_name}.rs"));
-    if flat.exists() {
-        return Some(flat);
-    }
-    let mod_file = base.join(mod_name).join("mod.rs");
-    if mod_file.exists() {
-        return Some(mod_file);
-    }
-    None
 }
 
 // ---------------------------------------------------------------------------
@@ -899,31 +854,6 @@ mod tests {
             fs::write(path, content).unwrap();
         }
         dir
-    }
-
-    #[test]
-    fn test_file_for_mod_cargo_bin_root_finds_sibling_module() {
-        let dir = make_tree(&[
-            ("src/bin/tool.rs", "mod support;\n"),
-            ("src/bin/support.rs", "pub fn f() {}\n"),
-        ]);
-        assert_eq!(
-            file_for_mod(&dir.path().join("src/bin/tool.rs"), "support"),
-            Some(dir.path().join("src/bin/support.rs"))
-        );
-    }
-
-    #[test]
-    fn test_file_for_mod_ordinary_file_finds_stem_directory_child() {
-        let dir = make_tree(&[
-            ("src/a/b.rs", "mod c;\n"),
-            ("src/a/b/c.rs", "pub fn f() {}\n"),
-            ("src/a/c.rs", "pub fn g() {}\n"),
-        ]);
-        assert_eq!(
-            file_for_mod(&dir.path().join("src/a/b.rs"), "c"),
-            Some(dir.path().join("src/a/b/c.rs"))
-        );
     }
 
     // ── `[lib] name` / `[lib] path` overrides ──────────────────────────────

@@ -3008,9 +3008,9 @@ pub(super) struct RustModules<'a> {
     sources: Option<SourceReader<'a>>,
     /// Rust file → its text as the view reads it, read on the first
     /// question only that text can answer ([`Self::module_text`]): a
-    /// `pub use` of the module, or a `#[path]` module a file of its tree
-    /// declares. The keys are set once per view, on that first question,
-    /// so a module's rows borrow from the view. `None` for a text the
+    /// `pub use` of the module, or a `mod` a file of its tree declares
+    /// ([`Self::conventional_tree`]). The keys are set once per view, on
+    /// that first question, so a module's rows borrow from the view. `None` for a text the
     /// source cannot give.
     module_texts: OnceCell<FxHashMap<&'a str, OnceCell<Option<ModuleText<'a>>>>>,
     /// Tree root file → whether the layout guess places that tree's
@@ -3331,21 +3331,25 @@ impl<'a> RustModules<'a> {
 
     /// What `module` of `root` publishes `name` through, as the index
     /// answers (`IndexModuleTree::published`): the `pub use` naming `name`,
-    /// else a glob `pub use`, else the module's own. The rows come from the
-    /// module's current text ([`Self::pub_uses`]), read only when an import
-    /// row of the module binds `name` or is a glob: a `pub use` the parse
-    /// makes no row for (one inside a macro body) is missed, a missing
-    /// edge. They are read only in a tree whose modules the layout guess
-    /// places as the index does ([`Self::conventional_tree`]), and a row
-    /// stands only when the tree its target walk enters is such a tree too.
-    /// Otherwise (no source, a text the source cannot give, or a `#[path]`
-    /// module in either tree) the answer is what the import rows show: they
-    /// keep no visibility, so such a `use`, or a glob while the module
-    /// declares no `name`, may be a `pub use` and answers
-    /// [`ladder::Published::Unknown`]. A module with neither answers
-    /// [`ladder::Published::Own`] from the layout guess, also in a tree with
-    /// a `#[path]` module, where the guessed file may be a decoy that is no
-    /// module of the index (FU-2026-10-26-2ad63df39f50).
+    /// else a glob `pub use`, else the module's own. A module none of whose
+    /// import rows binds `name` or is a glob answers
+    /// [`ladder::Published::Own`] at once, also where the layout guess may
+    /// have placed a decoy file that is no module of the index
+    /// (FU-2026-10-26-2ad63df39f50). Otherwise the module's `pub use` rows
+    /// ([`Self::pub_uses`]) answer when its text gives them and the layout
+    /// guess places the tree's modules as the index does
+    /// ([`Self::conventional_tree`]): the row's answer stands when the tree
+    /// its target walk enters is such a tree too, and is
+    /// [`ladder::Published::Unknown`] otherwise, since the rows show a
+    /// re-export the overlay cannot follow. A `pub use` the parse makes no
+    /// row for (one inside a macro body) is missed, a missing edge. Without
+    /// those rows the import rows decide, which keep no visibility: a
+    /// binding `use`, or a glob while the module declares no `name`, may be
+    /// a `pub use` and answers [`ladder::Published::Unknown`]. So does a
+    /// glob in a view with a source reader, whose rows were unreadable or
+    /// whose tree the guess may misplace. Only a view without a reader
+    /// answers [`ladder::Published::Own`] for a glob beside the module's
+    /// own `name`.
     fn published(&self, root: &'a str, module: &'a str, name: &str) -> ladder::Published<'_> {
         let Some(imports) = self.module_imports(module) else {
             return ladder::Published::Own;
@@ -3358,17 +3362,17 @@ impl<'a> RustModules<'a> {
         if !binds && !glob {
             return ladder::Published::Own;
         }
-        let rows = self
-            .conventional_tree(root)
-            .then(|| self.pub_uses(root, module))
-            .flatten();
-        if let Some(rows) = rows {
-            let published = rust_pub_use::published(|name| rows.get(name), name);
-            if self.target_tree_conventional(root, &published) {
-                return published;
+        if let Some(rows) = self.pub_uses(root, module) {
+            if self.conventional_tree(root) {
+                let published = rust_pub_use::published(|name| rows.get(name), name);
+                return if self.target_tree_conventional(root, &published) {
+                    published
+                } else {
+                    ladder::Published::Unknown
+                };
             }
         }
-        if binds || !self.declares(module, name, |_| true) {
+        if binds || self.sources.is_some() || !self.declares(module, name, |_| true) {
             ladder::Published::Unknown
         } else {
             ladder::Published::Own
@@ -3378,17 +3382,13 @@ impl<'a> RustModules<'a> {
     /// Whether the tree a re-export's target walk enters from `root` is one
     /// the layout guess places as the index does: `root` itself, or the
     /// workspace crate the prefix names, as `ladder`'s `tree_follow` picks
-    /// it.
+    /// it ([`ladder::reexport_anchor`]).
     fn target_tree_conventional(&self, root: &'a str, published: &ladder::Published<'_>) -> bool {
         let ladder::Published::ReExport(entry) = published else {
             return true;
         };
-        match entry.prefix.first().map(String::as_str) {
-            None | Some("crate" | "self" | "super") => true,
-            Some(head) => self
-                .crate_head(head)
-                .is_none_or(|other| other == root || self.conventional_tree(other)),
-        }
+        let (tree, _, _) = ladder::reexport_anchor(root, entry, |head| self.crate_head(head));
+        tree == root || self.conventional_tree(tree)
     }
 
     /// The `pub use` rows of the Rust file `module` in the tree rooted at
@@ -3412,61 +3412,99 @@ impl<'a> RustModules<'a> {
     }
 
     /// Whether the layout guess ([`Self::child`]) places every module of the
-    /// tree rooted at `root` where the index does: no Rust file that can
-    /// belong to the tree declares a `#[path]` module, by the index's rule
-    /// ([`rust_pub_use::declares_path_attr`]). `false` without a source, and
-    /// when a candidate's text cannot be read. Decided once per root and
-    /// view, on the first question that reads text rows.
+    /// tree rooted at `root` where the index does. Decided once per root and
+    /// view, on the first question whose text rows stand on it.
     ///
-    /// The index walks a tree from its root and places each file once, in
-    /// its walk order, honouring `#[path]` (`build_mod_tree_and_reexports`).
-    /// A step from a file that declares no `#[path]` module lands on the
-    /// conventional file below the root's directory, so the first file of
-    /// the walk that declares one sits there too. The candidates are the
-    /// Rust files below that directory that declare a `Module` node, the
-    /// only node a `mod` makes: a dirty file by its fresh parse, any other
-    /// file the worktree keeps by `graph.bin`. With none of them declaring a
-    /// `#[path]` module, every file of the walk is at its conventional place
-    /// and reached once, which is what the layout guess assumes.
+    /// The index walks the tree from its root (`build_mod_tree_and_reexports`):
+    /// from each file it takes the steps [`rust_pub_use::mod_steps`] lists,
+    /// and it places a file once, at the first step that reaches it. This
+    /// walk takes the same steps over the view's files: each file's text
+    /// ([`Self::module_text`]) gives the index's steps, and the `Module`
+    /// nodes the file declares (a dirty file's fresh parse, else
+    /// `graph.bin`'s), each placed by [`Self::child`], give the guess's. The
+    /// tree is placed like the index when at every file reached the two
+    /// step sets are equal (same names, same files), no file declares a
+    /// `#[path]` module ([`rust_pub_use::declares_path_attr`]), and no file
+    /// is reached twice. Then both sides start at the root and take the
+    /// same step for each name from each file, and the index's first-reach
+    /// rule never drops a step, so a module path leads both to one file
+    /// and the guess places no module the index lacks. `false` without a
+    /// source, and when a file of the walk cannot be read.
     fn conventional_tree(&self, root: &'a str) -> bool {
-        if self.sources.is_none() {
-            return false;
-        }
         let known = self.conventional_trees.borrow().get(root).copied();
         if let Some(known) = known {
             return known;
         }
-        let conventional = std::path::Path::new(root).parent().is_some_and(|dir| {
-            let graph = self.graph;
-            let pool = &graph.string_pool;
-            let mut base: Vec<u32> = graph
-                .nodes_by_kind(NodeKind::Module)
-                .map(|idx| graph.nodes[idx as usize].file_idx.to_native())
-                .collect();
-            base.sort_unstable();
-            base.dedup();
-            let base = base
-                .into_iter()
-                .map(|file_idx| graph.files[file_idx as usize].path.resolve(pool))
-                .filter(|path| !self.dirty.contains_key(path) && !self.removed.contains(path));
-            self.dirty
-                .iter()
-                .filter(|(_, (file, _))| file.symbols.iter().any(|s| s.kind == NodeKind::Module))
-                .map(|(&path, _)| path)
-                .chain(base)
-                .filter(|path| {
-                    let path = std::path::Path::new(*path);
-                    path.starts_with(dir) && is_rust_source(path)
-                })
-                .all(|file| {
-                    self.module_text(file)
-                        .is_some_and(|read| !rust_pub_use::declares_path_attr(&read.text))
-                })
-        });
+        let conventional = self.walks_like_index(root);
         self.conventional_trees
             .borrow_mut()
             .insert(root, conventional);
         conventional
+    }
+
+    /// The walk [`Self::conventional_tree`] decides by.
+    fn walks_like_index(&self, root: &'a str) -> bool {
+        let graph = self.graph;
+        let pool = &graph.string_pool;
+        let mut base_modules: FxHashMap<&'a str, Vec<&'a str>> = FxHashMap::default();
+        for idx in graph.nodes_by_kind(NodeKind::Module) {
+            let node = &graph.nodes[idx as usize];
+            let file = graph.files[node.file_idx.to_native() as usize]
+                .path
+                .resolve(pool);
+            base_modules
+                .entry(file)
+                .or_default()
+                .push(node.name.resolve(pool));
+        }
+        let declared = |file: &'a str| -> Vec<&'a str> {
+            match self.dirty.get(file) {
+                Some(&(input, _)) => input
+                    .symbols
+                    .iter()
+                    .filter(|symbol| symbol.kind == NodeKind::Module)
+                    .map(|symbol| symbol.name.as_str())
+                    .collect(),
+                None => base_modules.get(file).cloned().unwrap_or_default(),
+            }
+        };
+        let mut visited: FxHashSet<&'a str> = FxHashSet::from_iter([root]);
+        let mut stack = vec![root];
+        while let Some(file) = stack.pop() {
+            let Some(read) = self.module_text(file) else {
+                return false;
+            };
+            if rust_pub_use::declares_path_attr(&read.text) {
+                return false;
+            }
+            let at_root = file == root;
+            let path = std::path::Path::new(file);
+            let index: Option<Vec<(&str, &'a str)>> =
+                rust_pub_use::mod_steps(&read.text, path, at_root, |p| self.file(p).is_some())
+                    .into_iter()
+                    .map(|(name, child)| Some((name, self.file(&child)?)))
+                    .collect();
+            let Some(mut index) = index else {
+                return false;
+            };
+            let mut guess: Vec<(&str, &'a str)> = declared(file)
+                .into_iter()
+                .filter_map(|name| Some((name, self.child(file, name, at_root)?)))
+                .collect();
+            index.sort_unstable();
+            guess.sort_unstable();
+            guess.dedup();
+            if index != guess {
+                return false;
+            }
+            for (_, child) in guess {
+                if !visited.insert(child) {
+                    return false;
+                }
+                stack.push(child);
+            }
+        }
+        true
     }
 
     /// The comment-stripped text of the Rust file `file`, read through

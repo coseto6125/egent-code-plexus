@@ -16,8 +16,10 @@
 //!
 //! What the fixtures do not cover: inline `mod util { .. }` modules, and
 //! `#[path]` module files beyond guards: the overlay reads no `pub use`
-//! rows in a tree where any file declares one, nor follows a row into such
-//! a tree. The overlay walks file-backed `mod` declarations only.
+//! rows in a tree whose walk differs from the index's at any file (a
+//! `#[path]` module, or a `mod` one side steps to and the other does not),
+//! nor follows a row into such a tree. The overlay walks file-backed `mod`
+//! declarations only.
 //!
 //! The `test_check_rust_*` cases at the end hold those gaps as known
 //! differences against a fresh index in
@@ -214,28 +216,25 @@ fn one_line_edit(source: &str) -> String {
     format!("{first}\n// edited\n{rest}")
 }
 
-/// The reindex binds each `(callee_file, callee)` once, through the module
-/// tree; otherwise the fixture proves nothing about the overlay.
-fn assert_module_tree_binds(reindex: &[Call], expected: &[(&str, &str)], label: &str) {
+/// The reindex binds each `(callee_file, callee)` once, at `tier` when one
+/// is given, else at any tier. A fixture that calls through a module path
+/// asks for [`Tier::ModuleTree`], or it proves nothing about the overlay;
+/// one that calls through a `use` binds at the import tier.
+fn assert_reindex_binds(
+    reindex: &[Call],
+    tier: Option<Tier>,
+    expected: &[(&str, &str)],
+    label: &str,
+) {
     let bound: Vec<(&str, &str)> = reindex
         .iter()
-        .filter(|call| call.confidence == Tier::ModuleTree.confidence())
+        .filter(|call| tier.is_none_or(|tier| call.confidence == tier.confidence()))
         .map(|call| (call.callee_file.as_str(), call.callee.as_str()))
         .collect();
     assert_eq!(
         bound, expected,
-        "{label}: the reindex does not bind through the module tree: {reindex:#?}"
+        "{label}: the reindex binds at {tier:?}: {reindex:#?}"
     );
-}
-
-/// The reindex binds each `(callee_file, callee)` once, at any tier: the
-/// `#[path]` fixtures bind through a `use`, so the import tier answers.
-fn assert_reindex_binds(reindex: &[Call], expected: &[(&str, &str)], label: &str) {
-    let bound: Vec<(&str, &str)> = reindex
-        .iter()
-        .map(|call| (call.callee_file.as_str(), call.callee.as_str()))
-        .collect();
-    assert_eq!(bound, expected, "{label}: the reindex binds: {reindex:#?}");
 }
 
 const CALLER: &str = "crates/a/src/lib.rs";
@@ -292,7 +291,12 @@ fn test_overlay_view_dirty_rust_file_cross_crate_call_keeps_edge() {
         ("one-line edit", one_line_edit(caller)),
     ] {
         let (reindex, overlay) = reindex_and_overlay(&files, CALLER, &edited, &["t"]);
-        assert_module_tree_binds(&reindex, &[("crates/b/src/util.rs", "f")], label);
+        assert_reindex_binds(
+            &reindex,
+            Some(Tier::ModuleTree),
+            &[("crates/b/src/util.rs", "f")],
+            label,
+        );
         assert_eq!(overlay, reindex, "{label}");
     }
 }
@@ -349,7 +353,12 @@ fn test_overlay_rust_cross_crate_custom_lib_path_caller_keeps_edge() {
         ("one-line edit", one_line_edit(caller)),
     ] {
         let (reindex, overlay) = reindex_and_overlay(&files, ENTRY, &edited, &["t"]);
-        assert_module_tree_binds(&reindex, &[("crates/b/src/util.rs", "f")], label);
+        assert_reindex_binds(
+            &reindex,
+            Some(Tier::ModuleTree),
+            &[("crates/b/src/util.rs", "f")],
+            label,
+        );
         assert_eq!(overlay, reindex, "{label}");
     }
 }
@@ -402,7 +411,12 @@ fn test_graph_bin_crate_table_two_crates_same_name_last_member_wins_like_index()
         ("one-line edit", one_line_edit(caller)),
     ] {
         let (reindex, overlay) = reindex_and_overlay(&files, CALLER, &edited, &["t"]);
-        assert_module_tree_binds(&reindex, &[("crates/x2/src/lib.rs", "x")], label);
+        assert_reindex_binds(
+            &reindex,
+            Some(Tier::ModuleTree),
+            &[("crates/x2/src/lib.rs", "x")],
+            label,
+        );
         assert_eq!(overlay, reindex, "{label}");
     }
 }
@@ -446,8 +460,9 @@ fn test_graph_bin_crate_table_lib_name_override_maps_head() {
         ("one-line edit", one_line_edit(caller)),
     ] {
         let (reindex, overlay) = reindex_and_overlay(&files, CALLER, &edited, &["t", "u"]);
-        assert_module_tree_binds(
+        assert_reindex_binds(
             &reindex,
+            Some(Tier::ModuleTree),
             &[("crates/b/src/util.rs", "f"), ("crates/b/src/util.rs", "g")],
             label,
         );
@@ -728,7 +743,12 @@ fn test_overlay_rust_glob_pub_use_own_item_matches_reindex() {
         ("one-line edit", one_line_edit(caller)),
     ] {
         let (reindex, overlay) = reindex_and_overlay(&files, CALLER, &edited, &["t"]);
-        assert_module_tree_binds(&reindex, &[(M, "f"), (M, "h")], label);
+        assert_reindex_binds(
+            &reindex,
+            Some(Tier::ModuleTree),
+            &[(M, "f"), (M, "h")],
+            label,
+        );
         assert_eq!(overlay, reindex, "{label}");
     }
 }
@@ -920,7 +940,12 @@ fn test_overlay_rust_function_local_fn_never_shadows_a_glob() {
         ("one-line edit", one_line_edit(lib)),
     ] {
         let (reindex, overlay) = reindex_and_overlay(&files, LIB, &edited, &["go"]);
-        assert_module_tree_binds(&reindex, &[("src/inner.rs", "run")], label);
+        assert_reindex_binds(
+            &reindex,
+            Some(Tier::ModuleTree),
+            &[("src/inner.rs", "run")],
+            label,
+        );
         assert!(
             overlay.iter().all(|call| call.callee_file != LIB),
             "{label}: the function-local `run` must not bind: {overlay:#?}"
@@ -1099,7 +1124,12 @@ fn test_overlay_rust_module_path_never_binds_a_method_namesake() {
         ("one-line edit", one_line_edit(other)),
     ] {
         let (reindex, overlay) = reindex_and_overlay(&files, OTHER, &edited, &["go"]);
-        assert_module_tree_binds(&reindex, &[("src/m.rs", "helper")], label);
+        assert_reindex_binds(
+            &reindex,
+            Some(Tier::ModuleTree),
+            &[("src/m.rs", "helper")],
+            label,
+        );
         assert!(
             reindex
                 .iter()
@@ -1281,7 +1311,12 @@ fn test_overlay_rust_module_level_twin_of_body_local_fn_binds_matches_reindex() 
             ("one-line edit", one_line_edit(source)),
         ] {
             let (reindex, overlay) = reindex_and_overlay_of(&files, dirty, &edited, LIB, &["go"]);
-            assert_module_tree_binds(&reindex, &[(M, "helper")], &format!("{label} {dirty}"));
+            assert_reindex_binds(
+                &reindex,
+                Some(Tier::ModuleTree),
+                &[(M, "helper")],
+                &format!("{label} {dirty}"),
+            );
             assert_eq!(overlay, reindex, "{label} {dirty}");
         }
     }
@@ -1833,7 +1868,12 @@ fn test_overlay_view_reexport_target_below_path_attr_binds_nothing_beyond_index(
     );
     let edited = "use b::facade::f;\n\npub fn t() {\n    f();\n}\n";
     let (reindex, overlay) = reindex_and_overlay(&files, CALLER, edited, &["t"]);
-    assert_reindex_binds(&reindex, &[("crates/b/src/real.rs", "f")], "#[path] target");
+    assert_reindex_binds(
+        &reindex,
+        None,
+        &[("crates/b/src/real.rs", "f")],
+        "#[path] target",
+    );
     assert!(
         overlay.iter().all(|call| reindex.contains(call)),
         "the overlay binds an edge the index does not: {overlay:#?}"
@@ -1863,7 +1903,12 @@ fn test_overlay_view_reexport_into_path_attr_subtree_binds_nothing_beyond_index(
     );
     let edited = "use b::facade::f;\n\npub fn t() {\n    f();\n}\n";
     let (reindex, overlay) = reindex_and_overlay(&files, CALLER, edited, &["t"]);
-    assert_reindex_binds(&reindex, &[("crates/b/src/real.rs", "f")], "#[path] target");
+    assert_reindex_binds(
+        &reindex,
+        None,
+        &[("crates/b/src/real.rs", "f")],
+        "#[path] target",
+    );
     assert!(
         overlay.iter().all(|call| reindex.contains(call)),
         "the overlay binds an edge the index does not: {overlay:#?}"
@@ -1906,7 +1951,12 @@ fn test_overlay_view_reexport_into_path_attr_crate_binds_nothing_beyond_index() 
     ]);
     let edited = "use b::f;\n\npub fn t() {\n    f();\n}\n";
     let (reindex, overlay) = reindex_and_overlay(&files, CALLER, edited, &["t"]);
-    assert_reindex_binds(&reindex, &[("crates/c/src/real.rs", "f")], "#[path] crate");
+    assert_reindex_binds(
+        &reindex,
+        None,
+        &[("crates/c/src/real.rs", "f")],
+        "#[path] crate",
+    );
     assert!(
         overlay.iter().all(|call| call.callee_file != STRAY),
         "the overlay follows the layout guess into the stray file: {overlay:#?}"
@@ -2002,7 +2052,12 @@ fn test_overlay_view_dirty_file_removes_path_attr_binds_like_index() {
         CALLER,
         &["t"],
     );
-    assert_reindex_binds(&reindex, &[("crates/b/src/x.rs", "f")], "path attr dropped");
+    assert_reindex_binds(
+        &reindex,
+        None,
+        &[("crates/b/src/x.rs", "f")],
+        "path attr dropped",
+    );
     assert_eq!(overlay, reindex);
 }
 
@@ -2031,7 +2086,12 @@ fn test_overlay_view_unreadable_tree_file_reads_no_rows() {
             .map(|(_, source)| source.clone())
     };
     let reindex = reindex_calls(&edited);
-    assert_reindex_binds(&reindex, &[("crates/b/src/x.rs", "f")], "every file read");
+    assert_reindex_binds(
+        &reindex,
+        None,
+        &[("crates/b/src/x.rs", "f")],
+        "every file read",
+    );
     assert_eq!(overlay_of_caller_edit(&files, &[], &read), reindex);
 
     let without_m = |rel: &str| read(rel).filter(|_| rel != "crates/b/src/m.rs");
@@ -2064,7 +2124,12 @@ fn test_overlay_view_removed_path_attr_file_binds_like_index() {
         })
         .collect();
     let reindex = reindex_calls(&kept);
-    assert_reindex_binds(&reindex, &[("crates/b/src/x.rs", "f")], "a.rs deleted");
+    assert_reindex_binds(
+        &reindex,
+        None,
+        &[("crates/b/src/x.rs", "f")],
+        "a.rs deleted",
+    );
     let read = |rel: &str| {
         kept.iter()
             .find(|(path, _)| path == rel)
@@ -2072,4 +2137,273 @@ fn test_overlay_view_removed_path_attr_file_binds_like_index() {
     };
     let overlay = overlay_of_caller_edit(&files, &["crates/b/src/a.rs".to_string()], &read);
     assert_eq!(overlay, reindex);
+}
+
+/// Workspace `crates/a` and `crates/b`, where `b` holds `b_files` beside
+/// `x.rs` and `y.rs`, which both declare `f` and so keep Tier 3 from
+/// binding; `crates/a/src/lib.rs` calls `f()` from `t` through
+/// `use b::<path>::f;`.
+fn glob_crates(path: &str, b_files: &[(&str, &str)]) -> Vec<(String, String)> {
+    let mut files = owned(&[
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\n",
+        ),
+        (
+            "crates/a/Cargo.toml",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\n[dependencies]\nb = { path = \"../b\" }\n",
+        ),
+        (
+            "crates/b/Cargo.toml",
+            "[package]\nname = \"b\"\nversion = \"0.1.0\"\n",
+        ),
+        ("crates/b/src/x.rs", "pub fn f() {}\n"),
+        ("crates/b/src/y.rs", "pub fn f() {}\n"),
+    ]);
+    files.extend(owned(b_files));
+    files.push((
+        CALLER.to_string(),
+        format!("use b::{path}::f;\n\npub fn t() {{\n    f();\n}}\n"),
+    ));
+    files
+}
+
+/// The reindex and the overlay of [`glob_crates`] after the caller gains a
+/// second function: the reindex binds nothing, and so must the overlay.
+fn check_glob_crates_bind_nothing(path: &str, b_files: &[(&str, &str)]) {
+    let files = glob_crates(path, b_files);
+    let caller = &files.last().expect("the caller is the last file").1;
+    let edited = format!("{caller}\npub fn u() {{}}\n");
+    let (reindex, overlay) = reindex_and_overlay(&files, CALLER, &edited, &["t"]);
+    assert!(reindex.is_empty(), "the index binds nothing: {reindex:#?}");
+    assert!(
+        overlay.iter().all(|call| reindex.contains(call)),
+        "the overlay binds an edge the index does not: {overlay:#?}"
+    );
+}
+
+const STOLEN_LIB: &str = "pub mod m;\npub mod a;\nmod x;\nmod y;\n";
+
+/// Control: `a.rs` declares `#[path = "m/inner.rs"] mod stolen;` inside a
+/// `fn` body. The index's walk reads that `mod` line, places `m/inner.rs`
+/// as `a::stolen` first, and binds nothing. The overlay's walk reads the
+/// `#[path]` in `a.rs` and reads no rows of the tree.
+#[test]
+fn test_overlay_view_path_attr_mod_in_fn_body_binds_nothing_beyond_index() {
+    check_glob_crates_bind_nothing(
+        "m::inner",
+        &[
+            ("crates/b/src/lib.rs", STOLEN_LIB),
+            (
+                "crates/b/src/a.rs",
+                "pub fn host() {\n    #[path = \"m/inner.rs\"]\n    mod stolen;\n}\n",
+            ),
+            ("crates/b/src/m.rs", "pub mod inner;\n"),
+            ("crates/b/src/m/inner.rs", "pub use crate::x::*;\n"),
+        ],
+    );
+}
+
+/// `a.rs` declares the `#[path]` module inside a `macro_rules!` body, so
+/// `a.rs` holds no `Module` node. The index's walk still reads the `mod`
+/// line and takes `m/inner.rs` from `m::inner`. The overlay's walk reads
+/// every file the index walk reaches, `a.rs` too.
+#[test]
+fn test_overlay_view_path_attr_mod_in_macro_binds_nothing_beyond_index() {
+    check_glob_crates_bind_nothing(
+        "m::inner",
+        &[
+            ("crates/b/src/lib.rs", STOLEN_LIB),
+            (
+                "crates/b/src/a.rs",
+                "macro_rules! gen {\n    () => {\n        #[path = \"m/inner.rs\"]\n        pub mod stolen;\n    };\n}\n",
+            ),
+            ("crates/b/src/m.rs", "pub mod inner;\n"),
+            ("crates/b/src/m/inner.rs", "pub use crate::x::*;\n"),
+        ],
+    );
+}
+
+/// `#[path = "real.rs"] pub mod z;` on one line is no `mod` line of the
+/// index, so its tree has no `z`. The graph holds a `Module` node `z`,
+/// which the layout guess places at the stray `z.rs`.
+#[test]
+fn test_overlay_view_path_attr_on_mod_line_binds_nothing_beyond_index() {
+    check_glob_crates_bind_nothing(
+        "z",
+        &[
+            (
+                "crates/b/src/lib.rs",
+                "mod x;\nmod y;\n#[path = \"real.rs\"] pub mod z;\n",
+            ),
+            ("crates/b/src/real.rs", "pub use crate::y::*;\n"),
+            ("crates/b/src/z.rs", "pub use crate::x::*;\n"),
+        ],
+    );
+}
+
+/// `pub mod v; pub mod w;`: the index reads the first `mod` of a line
+/// only, so its tree has no `w`; the graph holds both.
+#[test]
+fn test_overlay_view_two_mods_on_one_line_binds_nothing_beyond_index() {
+    check_glob_crates_bind_nothing(
+        "w",
+        &[
+            (
+                "crates/b/src/lib.rs",
+                "mod x;\nmod y;\npub mod v; pub mod w;\n",
+            ),
+            ("crates/b/src/v.rs", "\n"),
+            ("crates/b/src/w.rs", "pub use crate::x::*;\n"),
+        ],
+    );
+}
+
+/// An inline `pub mod outer { .. }` beside a stray `outer.rs`: the index's
+/// tree has no `outer`, and the layout guess places the inline module's
+/// `Module` node at the stray file.
+#[test]
+fn test_overlay_view_inline_mod_beside_stray_file_binds_nothing_beyond_index() {
+    check_glob_crates_bind_nothing(
+        "outer",
+        &[
+            (
+                "crates/b/src/lib.rs",
+                "mod x;\nmod y;\npub mod outer {\n    pub use crate::y::*;\n}\n",
+            ),
+            ("crates/b/src/outer.rs", "pub use crate::x::*;\n"),
+        ],
+    );
+}
+
+const DECOY_LIB: &str = "#[path = \"real.rs\"]\npub mod m;\nmod x;\nmod y;\n";
+const DECOY_M: &str = "pub use crate::x::*;\npub fn f() {}\n";
+
+fn decoy_files() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("crates/b/src/lib.rs", DECOY_LIB),
+        ("crates/b/src/m.rs", DECOY_M),
+        ("crates/b/src/real.rs", "pub fn g() {}\n"),
+    ]
+}
+
+/// The index places `m` at `real.rs`, which declares no `f`. The layout
+/// guess places it at the stray `m.rs`, whose glob stands beside its own
+/// `f`. The tree is not placed like the index, so a view with a reader
+/// answers the glob as unknown instead of the stray file's own item.
+#[test]
+fn test_overlay_view_glob_beside_own_item_in_decoy_file_binds_nothing_beyond_index() {
+    check_glob_crates_bind_nothing("m", &decoy_files());
+}
+
+/// The same tree through a view built without a reader, as the hook engine
+/// builds it: the import rows show the glob beside `m.rs`'s own `f`, and
+/// with no text to read the overlay answers the module's own item, the
+/// decoy edge FU-2026-10-26-2ad63df39f50 tracks. The test pins that path:
+/// a change of it shows here.
+#[test]
+fn test_overlay_view_build_without_reader_glob_beside_own_item_binds_own_item() {
+    let files = glob_crates("m", &decoy_files());
+    let caller = &files.last().expect("the caller is the last file").1;
+    let base_bytes = archive(&index(&files));
+    let base = access(&base_bytes);
+    let inputs: Vec<OverlayFileInput> =
+        vec![parse(CALLER, &format!("{caller}\npub fn u() {{}}\n")).into()];
+    let view = OverlayView::build(base, &inputs).expect("an edit makes a view");
+    let overlay = calls(&MergedGraph::new(base, Some(&view)), base, CALLER, "t");
+    assert_eq!(
+        targets(&overlay),
+        [(
+            "crates/b/src/m.rs",
+            "f",
+            Tier::ImportScoped.confidence(),
+            "call"
+        )],
+        "the reader-less overlay answers the module's own item: {overlay:#?}"
+    );
+}
+
+/// `b`'s root holds an inline `#[cfg(test)] mod tests { use super::*; }`
+/// and a stray `tests.rs`. The index's tree has no `tests`; the layout
+/// guess places the inline module at the stray file, so the tree is not
+/// placed like the index and the overlay reads no rows: a missing edge,
+/// never one the index lacks. Without the stray file,
+/// `test_overlay_view_pub_use_beside_test_mod_glob_binds_like_index` binds
+/// as the index does.
+#[test]
+fn test_overlay_view_inline_test_mod_beside_stray_file_binds_nothing_beyond_index() {
+    const INNER: &str = "crates/b/src/inner.rs";
+    let caller = "use b::helper;\n\npub fn t() {\n    helper();\n}\n";
+    let files = reexport_crates(
+        caller,
+        "mod inner;\npub use inner::helper;\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n}\n",
+        &[
+            (INNER, "pub fn helper() {}\n"),
+            ("crates/b/src/decoy.rs", "pub fn helper() {}\n"),
+            ("crates/b/src/tests.rs", "pub use crate::decoy::*;\n"),
+        ],
+    );
+    let (reindex, overlay) = reindex_and_overlay(&files, CALLER, &one_line_edit(caller), &["t"]);
+    assert_reindex_binds(&reindex, None, &[(INNER, "helper")], "inline tests");
+    assert!(
+        overlay.iter().all(|call| reindex.contains(call)),
+        "the overlay binds an edge the index does not: {overlay:#?}"
+    );
+}
+
+/// `b`'s modules sit in `m/mod.rs` and `m/n.rs`: both walks place `n`
+/// in `mod.rs`'s own directory, and the overlay binds `n.rs`'s glob to
+/// `x.rs` as the index does.
+#[test]
+fn test_overlay_view_mod_rs_layout_binds_like_index() {
+    let files = glob_crates(
+        "m::n",
+        &[
+            ("crates/b/src/lib.rs", "pub mod m;\nmod x;\nmod y;\n"),
+            ("crates/b/src/m/mod.rs", "pub mod n;\n"),
+            ("crates/b/src/m/n.rs", "pub use crate::x::*;\n"),
+        ],
+    );
+    let caller = &files.last().expect("the caller is the last file").1;
+    let (reindex, overlay) = reindex_and_overlay(&files, CALLER, &one_line_edit(caller), &["t"]);
+    assert_reindex_binds(&reindex, None, &[("crates/b/src/x.rs", "f")], "mod.rs");
+    assert_eq!(overlay, reindex);
+}
+
+/// `b`'s root as `lib`, beside `m.rs` (a glob of `x`) and a `z.rs` that a
+/// root `mod z;` may declare.
+fn dirty_root_files(lib: &str) -> Vec<(String, String)> {
+    glob_crates(
+        "m",
+        &[
+            ("crates/b/src/lib.rs", lib),
+            ("crates/b/src/m.rs", "pub use crate::x::*;\n"),
+            ("crates/b/src/z.rs", "pub fn q() {}\n"),
+        ],
+    )
+}
+
+/// A dirty root that adds `mod z;` or drops `mod y;`: its fresh parse and
+/// its text give the walk the same steps, so the tree stays placed like
+/// the index and both bind `m.rs`'s glob to `x.rs`.
+#[test]
+fn test_overlay_view_dirty_root_adds_or_removes_mod_binds_like_index() {
+    const LIB: &str = "crates/b/src/lib.rs";
+    for (label, before, after) in [
+        (
+            "adds mod z",
+            "pub mod m;\nmod x;\nmod y;\n",
+            "pub mod m;\nmod x;\nmod y;\nmod z;\n",
+        ),
+        (
+            "removes mod y",
+            "pub mod m;\nmod x;\nmod y;\n",
+            "pub mod m;\nmod x;\n",
+        ),
+    ] {
+        let files = dirty_root_files(before);
+        let (reindex, overlay) = reindex_and_overlay_of(&files, LIB, after, CALLER, &["t"]);
+        assert_reindex_binds(&reindex, None, &[("crates/b/src/x.rs", "f")], label);
+        assert_eq!(overlay, reindex, "{label}");
+    }
 }
