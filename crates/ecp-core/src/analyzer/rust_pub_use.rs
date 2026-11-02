@@ -126,6 +126,9 @@ pub fn mod_decls(text: &Stripped) -> impl Iterator<Item = &str> {
 /// lines before a `mod NAME;`: `NAME → rel`.
 pub fn path_attrs(text: &Stripped) -> FxHashMap<String, String> {
     let mut out: FxHashMap<String, String> = FxHashMap::default();
+    if !path_attr_re().is_match(text.as_str()) {
+        return out;
+    }
     let lines: Vec<&str> = text.as_str().lines().collect();
     for (i, line) in lines.iter().enumerate() {
         if let Some(caps) = path_attr_re().captures(line) {
@@ -188,7 +191,7 @@ pub fn mod_steps<'t>(
 /// Whether `text` declares a module with a `#[path]` attribute, by the rule
 /// [`path_attrs`] reads them with.
 pub fn declares_path_attr(text: &Stripped) -> bool {
-    path_attr_re().is_match(text.as_str()) && !path_attrs(text).is_empty()
+    !path_attrs(text).is_empty()
 }
 
 /// The `pub use` rows of the module whose text is `text` and whose module

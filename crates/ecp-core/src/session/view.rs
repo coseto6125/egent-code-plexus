@@ -2360,6 +2360,29 @@ mod tests {
         assert_eq!(modules.file(std::path::Path::new("src/missing.rs")), None);
     }
 
+    #[test]
+    fn test_rust_module_file_lookup_ordered_archive_finds_exact_paths_and_misses() {
+        let mut fixture = GraphFixture::new();
+        let paths = ["src/a/mod.rs", "src/b.rs", "src/lib.rs", "src/z.rs"];
+        for path in paths {
+            fixture.file(path);
+        }
+        let bytes = fixture.into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let removed = FxHashSet::default();
+        let modules = RustModules::new(graph, &[], &removed, Default::default());
+        for path in paths {
+            assert_eq!(modules.file(std::path::Path::new(path)), Some(path));
+        }
+        for missing in ["src/a.rs", "src/missing.rs", "src/z/mod.rs", "a.rs"] {
+            assert_eq!(
+                modules.file(std::path::Path::new(missing)),
+                None,
+                "{missing}"
+            );
+        }
+    }
+
     /// Crate `b` at `b/`, entry `b/src/lib.rs` declaring `mod util`.
     fn crate_b_graph_bytes() -> Vec<u8> {
         use crate::contracts::workspace::{

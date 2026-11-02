@@ -3016,6 +3016,9 @@ pub(super) struct RustModules<'a> {
     /// Tree root file → whether the layout guess places that tree's
     /// modules as the index does ([`Self::conventional_tree`]).
     conventional_trees: RefCell<FxHashMap<&'a str, bool>>,
+    /// Whether `graph.files` is in the builder's `Path` order, so a
+    /// binary-search miss in [`Self::file`] is final.
+    files_in_path_order: OnceCell<bool>,
 }
 
 /// One Rust module file's text and what the view reads from it.
@@ -3067,6 +3070,7 @@ impl<'a> RustModules<'a> {
             sources: None,
             module_texts: OnceCell::new(),
             conventional_trees: RefCell::default(),
+            files_in_path_order: OnceCell::new(),
         }
     }
 
@@ -3178,21 +3182,35 @@ impl<'a> RustModules<'a> {
             |file: &'a crate::graph::ArchivedFile| file.path.resolve(&self.graph.string_pool);
         // Accept only an exact hit in the builder's usual Path order.
         // Synthetic/older archives with another order use the safe scan.
-        if let Ok(idx) = self
-            .graph
-            .files
-            .binary_search_by(|file| std::path::Path::new(name(file)).cmp(path))
-        {
-            let found = name(&self.graph.files[idx]);
-            if found == requested {
-                return Some(found);
+        // A string-equal path is `Path`-equal, so in that order a miss is
+        // final: the module walk asks for many files that do not exist.
+        match self.graph.files.binary_search_by(|file| {
+            std::path::Path::new(name(file)).cmp(std::path::Path::new(requested))
+        }) {
+            Ok(idx) => {
+                let found = name(&self.graph.files[idx]);
+                if found == requested {
+                    return Some(found);
+                }
             }
+            Err(_) if self.files_in_path_order() => return None,
+            Err(_) => {}
         }
         self.graph
             .files
             .iter()
             .map(name)
             .find(|file| *file == requested)
+    }
+
+    fn files_in_path_order(&self) -> bool {
+        *self.files_in_path_order.get_or_init(|| {
+            let pool = &self.graph.string_pool;
+            self.graph.files.windows(2).all(|pair| {
+                std::path::Path::new(pair[0].path.resolve(pool))
+                    < std::path::Path::new(pair[1].path.resolve(pool))
+            })
+        })
     }
 
     /// Whether `file` declares a module-level node named `name` whose kind
@@ -3335,7 +3353,9 @@ impl<'a> RustModules<'a> {
     /// import rows binds `name` or is a glob answers
     /// [`ladder::Published::Own`] at once, also where the layout guess may
     /// have placed a decoy file that is no module of the index
-    /// (FU-2026-10-26-2ad63df39f50). Otherwise the module's `pub use` rows
+    /// (FU-2026-10-26-2ad63df39f50). So does a module whose text answers
+    /// `Own` for a `name` it declares while no import row binds `name`, in
+    /// any tree: the same gap. Otherwise the module's `pub use` rows
     /// ([`Self::pub_uses`]) answer when its text gives them and the layout
     /// guess places the tree's modules as the index does
     /// ([`Self::conventional_tree`]): the row's answer stands when the tree
@@ -3363,8 +3383,17 @@ impl<'a> RustModules<'a> {
             return ladder::Published::Own;
         }
         if let Some(rows) = self.pub_uses(root, module) {
+            let published = rust_pub_use::published(|name| rows.get(name), name);
+            // A test module's private `use super::*;` makes nearly every
+            // module a glob one: answering its own item here keeps the
+            // tree walk off them.
+            if matches!(published, ladder::Published::Own)
+                && !binds
+                && self.declares(module, name, |_| true)
+            {
+                return published;
+            }
             if self.conventional_tree(root) {
-                let published = rust_pub_use::published(|name| rows.get(name), name);
                 return if self.target_tree_conventional(root, &published) {
                     published
                 } else {

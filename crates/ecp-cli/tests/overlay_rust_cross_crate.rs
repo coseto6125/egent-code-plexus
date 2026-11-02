@@ -1743,6 +1743,51 @@ fn test_overlay_view_pub_glob_facade_binds_like_index() {
     check_pub_use_reaches_inner_helper("mod inner;\npub use inner::*;\n");
 }
 
+/// `b::util` declares the called `f` and holds a `#[cfg(test)] mod tests {
+/// use super::*; }`: its import rows show a glob, its text no `pub use`.
+/// The overlay answers from `util.rs` alone and walks no other file of
+/// `b`'s tree. The read list stands for that cost contract: one module
+/// file per glob question whose module declares the name.
+#[test]
+fn test_overlay_view_private_test_glob_beside_own_item_reads_only_its_module() {
+    const UTIL: &str = "crates/b/src/util.rs";
+    let caller = "use b::util::f;\n\npub fn t() {\n    f();\n}\n";
+    let files = reexport_crates(
+        caller,
+        "pub mod util;\nmod other;\n",
+        &[
+            (
+                UTIL,
+                "pub fn f() {}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n}\n",
+            ),
+            ("crates/b/src/other.rs", "pub fn f() {}\n"),
+        ],
+    );
+    let edited = one_line_edit(caller);
+    let base_bytes = archive(&index(&files));
+    let base = access(&base_bytes);
+    let inputs: Vec<OverlayFileInput> = vec![parse(CALLER, &edited).into()];
+    let reads = std::cell::RefCell::new(Vec::new());
+    let sources = |rel: &str| {
+        reads.borrow_mut().push(rel.to_string());
+        match rel {
+            CALLER => Some(edited.clone()),
+            _ => files
+                .iter()
+                .find(|(path, _)| path == rel)
+                .map(|(_, source)| source.clone()),
+        }
+    };
+    let view =
+        OverlayView::build_with_sources(base, &inputs, &sources).expect("an edit makes a view");
+    let merged = MergedGraph::new(base, Some(&view));
+    let overlay = calls(&merged, base, CALLER, "t");
+    let (reindex, _) = reindex_and_overlay(&files, CALLER, &edited, &["t"]);
+    assert_reindex_binds(&reindex, None, &[(UTIL, "f")], "util");
+    assert_eq!(overlay, reindex);
+    assert_eq!(*reads.borrow(), [UTIL]);
+}
+
 /// `b`'s root declares `#[path = "actual.rs"] pub mod facade;`, and a stray
 /// `facade.rs` no `mod` declares sits where the file layout puts `facade`.
 /// `actual.rs` re-exports `right`'s `f`, the stray file `wrong`'s. The index
