@@ -3,15 +3,8 @@
 mod name_ref_support;
 
 use ecp_analyzer::php::parser::PhpProvider;
-use ecp_core::graph::{RelType, ZeroCopyGraph};
-use name_ref_support::{graph, refs};
-
-fn annotated(g: &ZeroCopyGraph, source: &str) -> Vec<(String, String)> {
-    refs(g, source, RelType::Accesses, "type_annotation")
-        .into_iter()
-        .map(|(file, name, _, _)| (file, name))
-        .collect()
-}
+use ecp_core::graph::ZeroCopyGraph;
+use name_ref_support::{annotated, graph};
 
 fn pair(file: &str, name: &str) -> (String, String) {
     (file.to_string(), name.to_string())

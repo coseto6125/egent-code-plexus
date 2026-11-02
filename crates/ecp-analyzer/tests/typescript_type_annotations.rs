@@ -5,18 +5,7 @@
 mod name_ref_support;
 
 use ecp_analyzer::typescript::parser::TypeScriptProvider;
-use ecp_core::graph::RelType;
-use name_ref_support::{graph, refs};
-
-const TYPE_ANNOTATION: &str = "type_annotation";
-
-/// `(target file, target name)` of every `type_annotation` edge out of `source`.
-fn annotated(g: &ecp_core::graph::ZeroCopyGraph, source: &str) -> Vec<(String, String)> {
-    refs(g, source, RelType::Accesses, TYPE_ANNOTATION)
-        .into_iter()
-        .map(|(file, name, _, _)| (file, name))
-        .collect()
-}
+use name_ref_support::{annotated, graph};
 
 /// Contract: `bump(): this` in `class Resolver` reaches `Resolver`, like
 /// `bump(): Resolver`. Before the fix the query captured only a

@@ -17,6 +17,7 @@ use ecp_analyzer::cpp::parser::CppProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::RawNode;
 use ecp_core::graph::NodeKind;
+use name_ref_support::annotated;
 use std::path::Path;
 
 fn parse(src: &str) -> Vec<RawNode> {
@@ -80,18 +81,6 @@ fn class_field_template() {
     let nodes = parse("class C { std::vector<int> items; };\n");
     let p = find(&nodes, "items", NodeKind::Property);
     assert_eq!(p.type_annotation.as_deref(), Some("std::vector<int>"));
-}
-
-fn annotated(g: &ecp_core::graph::ZeroCopyGraph, source: &str) -> Vec<(String, String)> {
-    name_ref_support::refs(
-        g,
-        source,
-        ecp_core::graph::RelType::Accesses,
-        "type_annotation",
-    )
-    .into_iter()
-    .map(|(file, name, _, _)| (file, name))
-    .collect()
 }
 
 /// Guard: pointer and reference returns (`Tok *`, `const Tok &`) bind the

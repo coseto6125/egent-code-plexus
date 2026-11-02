@@ -94,6 +94,14 @@ pub fn calls(graph: &ZeroCopyGraph, caller: &str) -> Vec<(String, String)> {
     out
 }
 
+/// (target file, target name) of every type_annotation edge out of source.
+pub fn annotated(graph: &ZeroCopyGraph, source: &str) -> Vec<(String, String)> {
+    refs(graph, source, RelType::Accesses, "type_annotation")
+        .into_iter()
+        .map(|(file, name, _, _)| (file, name))
+        .collect()
+}
+
 /// `(file, name, reason, confidence)` as the tests write an expected edge.
 pub fn r(file: &str, name: &str, reason: &str, confidence: f32) -> Ref {
     (

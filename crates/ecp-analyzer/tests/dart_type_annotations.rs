@@ -12,6 +12,7 @@ use ecp_analyzer::dart::parser::DartProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::RawNode;
 use ecp_core::graph::NodeKind;
+use name_ref_support::annotated;
 use std::path::Path;
 
 fn parse(src: &str) -> Vec<RawNode> {
@@ -97,18 +98,6 @@ fn test_self_named_project_type_binds_that_type() {
         edges,
         vec![("lib/app.dart".to_string(), "Self".to_string())]
     );
-}
-
-fn annotated(g: &ecp_core::graph::ZeroCopyGraph, source: &str) -> Vec<(String, String)> {
-    name_ref_support::refs(
-        g,
-        source,
-        ecp_core::graph::RelType::Accesses,
-        "type_annotation",
-    )
-    .into_iter()
-    .map(|(file, name, _, _)| (file, name))
-    .collect()
 }
 
 fn pair(file: &str, name: &str) -> (String, String) {

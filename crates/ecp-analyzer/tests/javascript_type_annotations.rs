@@ -2,16 +2,7 @@
 mod name_ref_support;
 
 use ecp_analyzer::javascript::parser::JavaScriptProvider;
-use ecp_core::graph::{RelType, ZeroCopyGraph};
-use name_ref_support::{graph, refs};
-
-/// `(target file, target name)` of every `type_annotation` edge out of `source`.
-fn annotated(g: &ZeroCopyGraph, source: &str) -> Vec<(String, String)> {
-    refs(g, source, RelType::Accesses, "type_annotation")
-        .into_iter()
-        .map(|(file, name, _, _)| (file, name))
-        .collect()
-}
+use name_ref_support::{annotated, graph};
 
 /// Guard: the JavaScript query captures no `@type`, so a method that returns
 /// `this` carries no `type_annotation` edge, to the class or to anything else.

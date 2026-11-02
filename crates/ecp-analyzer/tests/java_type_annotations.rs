@@ -2,16 +2,7 @@
 mod name_ref_support;
 
 use ecp_analyzer::java::parser::JavaProvider;
-use ecp_core::graph::{RelType, ZeroCopyGraph};
-use name_ref_support::{graph, refs};
-
-/// `(target file, target name)` of every `type_annotation` edge out of `source`.
-fn annotated(g: &ZeroCopyGraph, source: &str) -> Vec<(String, String)> {
-    refs(g, source, RelType::Accesses, "type_annotation")
-        .into_iter()
-        .map(|(file, name, _, _)| (file, name))
-        .collect()
-}
+use name_ref_support::{annotated, graph};
 
 fn pair(file: &str, name: &str) -> (String, String) {
     (file.to_string(), name.to_string())

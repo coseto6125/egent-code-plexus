@@ -11,6 +11,7 @@ use ecp_analyzer::swift::parser::SwiftProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::RawNode;
 use ecp_core::graph::{NodeKind, RelType};
+use name_ref_support::annotated;
 use std::path::Path;
 
 fn parse(src: &str) -> Vec<RawNode> {
@@ -131,13 +132,6 @@ fn test_self_property_annotation_binds_owner_type() {
             "{property}"
         );
     }
-}
-
-fn annotated(g: &ecp_core::graph::ZeroCopyGraph, source: &str) -> Vec<(String, String)> {
-    name_ref_support::refs(g, source, RelType::Accesses, "type_annotation")
-        .into_iter()
-        .map(|(file, name, _, _)| (file, name))
-        .collect()
 }
 
 fn pair(file: &str, name: &str) -> (String, String) {
