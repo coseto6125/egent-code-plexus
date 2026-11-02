@@ -17,9 +17,9 @@
 //! What the fixtures do not cover: inline `mod util { .. }` modules, and
 //! `#[path]` module files beyond guards: the overlay reads no `pub use`
 //! rows in a tree whose walk differs from the index's at any file (a
-//! `#[path]` module, or a `mod` one side steps to and the other does not),
-//! nor follows a row into such a tree. The overlay walks file-backed `mod`
-//! declarations only.
+//! `#[path]` module, a `mod` the layout guess steps to and the index does
+//! not, or a file the index walk reaches twice), nor follows a row into
+//! such a tree. The overlay walks file-backed `mod` declarations only.
 //!
 //! The `test_check_rust_*` cases at the end hold those gaps as known
 //! differences against a fresh index in
@@ -1763,26 +1763,27 @@ fn test_overlay_view_private_test_glob_beside_own_item_reads_only_its_module() {
             ("crates/b/src/other.rs", "pub fn f() {}\n"),
         ],
     );
-    let edited = one_line_edit(caller);
-    let base_bytes = archive(&index(&files));
-    let base = access(&base_bytes);
-    let inputs: Vec<OverlayFileInput> = vec![parse(CALLER, &edited).into()];
+    let edited: Vec<(String, String)> = files
+        .iter()
+        .map(|(path, source)| {
+            let source = if path == CALLER {
+                one_line_edit(source)
+            } else {
+                source.clone()
+            };
+            (path.clone(), source)
+        })
+        .collect();
     let reads = std::cell::RefCell::new(Vec::new());
-    let sources = |rel: &str| {
+    let read = |rel: &str| {
         reads.borrow_mut().push(rel.to_string());
-        match rel {
-            CALLER => Some(edited.clone()),
-            _ => files
-                .iter()
-                .find(|(path, _)| path == rel)
-                .map(|(_, source)| source.clone()),
-        }
+        edited
+            .iter()
+            .find(|(path, _)| path == rel)
+            .map(|(_, source)| source.clone())
     };
-    let view =
-        OverlayView::build_with_sources(base, &inputs, &sources).expect("an edit makes a view");
-    let merged = MergedGraph::new(base, Some(&view));
-    let overlay = calls(&merged, base, CALLER, "t");
-    let (reindex, _) = reindex_and_overlay(&files, CALLER, &edited, &["t"]);
+    let overlay = overlay_of_caller_edit(&files, &[], &read);
+    let reindex = reindex_calls(&edited);
     assert_reindex_binds(&reindex, None, &[(UTIL, "f")], "util");
     assert_eq!(overlay, reindex);
     assert_eq!(*reads.borrow(), [UTIL]);
@@ -2368,6 +2369,44 @@ fn test_overlay_view_build_without_reader_glob_beside_own_item_binds_own_item() 
     );
 }
 
+/// `b`'s root declares `#[path = "q.rs"] pub mod a;` before `pub mod q;`:
+/// the index places `q.rs` once, as `a`, so `b::q` is no module of its tree
+/// and the call binds nothing. `q.rs` declares the called `f` beside a test
+/// module's private `use super::*;`, and its text holds no `pub use`, so the
+/// overlay answers `q.rs`'s own `f` before any walk: the accepted shape
+/// FU-2026-10-26-2ad63df39f50, as the answer of a module with no glob. The
+/// test pins that answer; a change of it shows here.
+#[test]
+fn test_overlay_view_path_attr_twin_of_glob_module_binds_own_item() {
+    let files = glob_crates(
+        "q",
+        &[
+            (
+                "crates/b/src/lib.rs",
+                "#[path = \"q.rs\"]\npub mod a;\npub mod q;\nmod x;\nmod y;\n",
+            ),
+            (
+                "crates/b/src/q.rs",
+                "pub fn f() {}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n}\n",
+            ),
+        ],
+    );
+    let caller = &files.last().expect("the caller is the last file").1;
+    let edited = format!("{caller}\npub fn u() {{}}\n");
+    let (reindex, overlay) = reindex_and_overlay(&files, CALLER, &edited, &["t"]);
+    assert!(reindex.is_empty(), "the index binds nothing: {reindex:#?}");
+    assert_eq!(
+        targets(&overlay),
+        [(
+            "crates/b/src/q.rs",
+            "f",
+            Tier::ImportScoped.confidence(),
+            "call"
+        )],
+        "the overlay answers the module's own item: {overlay:#?}"
+    );
+}
+
 /// `b`'s root holds an inline `#[cfg(test)] mod tests { use super::*; }`
 /// and a stray `tests.rs`. The index's tree has no `tests`; the layout
 /// guess places the inline module at the stray file, so the tree is not
@@ -2450,5 +2489,126 @@ fn test_overlay_view_dirty_root_adds_or_removes_mod_binds_like_index() {
         let (reindex, overlay) = reindex_and_overlay_of(&files, LIB, after, CALLER, &["t"]);
         assert_reindex_binds(&reindex, None, &[("crates/b/src/x.rs", "f")], label);
         assert_eq!(overlay, reindex, "{label}");
+    }
+}
+
+/// The reindex and the overlay of [`glob_crates`] after the caller gains a
+/// second function: the overlay binds what the reindex binds, `expected`.
+fn check_glob_crates_bind_like_index(
+    path: &str,
+    b_files: &[(&str, &str)],
+    expected: &[(&str, &str)],
+) {
+    let files = glob_crates(path, b_files);
+    let caller = &files.last().expect("the caller is the last file").1;
+    let edited = format!("{caller}\npub fn u() {{}}\n");
+    let (reindex, overlay) = reindex_and_overlay(&files, CALLER, &edited, &["t"]);
+    assert_reindex_binds(&reindex, None, expected, path);
+    assert_eq!(overlay, reindex);
+}
+
+/// `b`'s root declares `mod imp;` twice under `#[cfg(unix)]` and
+/// `#[cfg(not(unix))]`. The index takes the second identical step as a
+/// repeat of the first, and the overlay's walk does too, so both bind
+/// `util.rs`'s glob to `x.rs`.
+#[test]
+fn test_overlay_view_cfg_twin_mod_binds_like_index() {
+    check_glob_crates_bind_like_index(
+        "util",
+        &[
+            (
+                "crates/b/src/lib.rs",
+                "#[cfg(unix)]\nmod imp;\n#[cfg(not(unix))]\nmod imp;\npub mod util;\nmod x;\nmod y;\n",
+            ),
+            ("crates/b/src/imp.rs", "pub fn g() {}\n"),
+            ("crates/b/src/util.rs", "pub use crate::x::*;\n"),
+        ],
+        &[("crates/b/src/x.rs", "f")],
+    );
+}
+
+/// `b`'s root declares `mod imp;` inside a macro call, which the parse
+/// makes no `Module` node for. The index steps to `imp.rs`; the overlay's
+/// walk enters it with the index's steps alone, so the tree stays placed
+/// like the index and both bind `util.rs`'s glob to `x.rs`.
+#[test]
+fn test_overlay_view_mod_in_macro_call_binds_like_index() {
+    check_glob_crates_bind_like_index(
+        "util",
+        &[
+            (
+                "crates/b/src/lib.rs",
+                "my_cfg! {\n    mod imp;\n}\npub mod util;\nmod x;\nmod y;\n",
+            ),
+            ("crates/b/src/imp.rs", "pub fn g() {}\n"),
+            ("crates/b/src/util.rs", "pub use crate::x::*;\n"),
+        ],
+        &[("crates/b/src/x.rs", "f")],
+    );
+}
+
+/// `p.rs` declares `pub mod main;` and, inside a macro call, `mod lib;`.
+/// `p/main.rs` and `p/lib.rs` both hold their children in `p/`, and both
+/// declare `pub mod q;`. The index walks `lib` first and places `p/q.rs`
+/// once, as `p::lib::q`, so `b::p::main::q` is no module of its tree and
+/// the call binds nothing. The layout guess places `p/q.rs` as
+/// `p::main::q`; following its glob would bind `x.rs`. No `#[path]` stands
+/// anywhere: only the walk's rule that no file is reached twice, inside the
+/// index-only subtree too, keeps the overlay out. The overlay then also
+/// misses the index's `p::lib::q` edge.
+#[test]
+fn test_overlay_view_index_only_subtree_takes_guessed_file_binds_nothing_beyond_index() {
+    check_glob_crates_bind_nothing(
+        "p::main::q",
+        &[
+            ("crates/b/src/lib.rs", "pub mod p;\nmod x;\nmod y;\n"),
+            (
+                "crates/b/src/p.rs",
+                "pub mod main;\nmy_cfg! {\n    mod lib;\n}\n",
+            ),
+            ("crates/b/src/p/lib.rs", "pub mod q;\n"),
+            ("crates/b/src/p/main.rs", "pub mod q;\n"),
+            ("crates/b/src/p/q.rs", "pub use crate::x::*;\n"),
+        ],
+    );
+}
+
+/// An index-only subtree whose file the reader cannot give, or that
+/// declares a `#[path]` module, leaves the tree's layout unknown: the
+/// overlay binds through no tree, a missing edge, though every file the
+/// guess walks reads. With `imp.rs` readable and plain,
+/// `test_overlay_view_mod_in_macro_call_binds_like_index` binds `x.rs` as
+/// the index does.
+#[test]
+fn test_overlay_view_index_only_subtree_unreadable_or_path_attr_reads_no_rows() {
+    const IMP: &str = "crates/b/src/imp.rs";
+    for (label, imp, readable) in [
+        ("unreadable", "pub fn g() {}\n", false),
+        ("path attr", "#[path = \"real.rs\"]\nmod z;\n", true),
+    ] {
+        let files = glob_crates(
+            "util",
+            &[
+                (
+                    "crates/b/src/lib.rs",
+                    "my_cfg! {\n    mod imp;\n}\npub mod util;\nmod x;\nmod y;\n",
+                ),
+                (IMP, imp),
+                ("crates/b/src/util.rs", "pub use crate::x::*;\n"),
+            ],
+        );
+        let read = |rel: &str| {
+            files
+                .iter()
+                .find(|(path, _)| path == rel && (readable || rel != IMP))
+                .map(|(_, source)| source.clone())
+        };
+        let overlay = overlay_of_caller_edit(&files, &[], &read);
+        assert!(
+            overlay
+                .iter()
+                .all(|call| call.confidence < Tier::ImportScoped.confidence()),
+            "{label}: the overlay read rows of a tree it could not walk whole: {overlay:#?}"
+        );
     }
 }

@@ -116,7 +116,7 @@ pub fn strip_comments(src: &str) -> Stripped {
 
 /// The names of the file-backed `mod NAME;` declarations of `text`, in
 /// text order.
-pub fn mod_decls(text: &Stripped) -> impl Iterator<Item = &str> {
+fn mod_decls(text: &Stripped) -> impl Iterator<Item = &str> {
     mod_decl_re()
         .captures_iter(text.as_str())
         .filter_map(|cap| cap.get(1).map(|name| name.as_str()))
@@ -146,52 +146,49 @@ pub fn path_attrs(text: &Stripped) -> FxHashMap<String, String> {
 }
 
 /// The steps the index's module tree walk takes from the Rust file `file`
-/// whose text is `text`: one `(NAME, child file)` per file-backed
-/// `mod NAME;` ([`mod_decls`]), in text order. A `#[path]` module
-/// ([`path_attrs`]) steps to its path relative to `file`'s directory,
-/// whether or not that file exists. Any other steps to `NAME.rs`, else
-/// `NAME/mod.rs`, the first that `exists` holds, beside `file` when it is
-/// the tree's root (`root`) whatever its file name (`[lib] path =
-/// "src/core.rs"`), and in its module directory ([`rust_module_dir`])
-/// otherwise; with neither file it takes no step.
+/// whose text is `text` and whose `#[path]` attributes are `attrs`
+/// ([`path_attrs`]): one `(NAME, child file)` per file-backed `mod NAME;`
+/// (`mod_decls`), in text order. A `#[path]` module steps to its path
+/// relative to `file`'s directory, whether or not that file exists. Any
+/// other steps to its [`module_file`] that `exists` holds; with none it
+/// takes no step.
 pub fn mod_steps<'t>(
     text: &'t Stripped,
+    attrs: &FxHashMap<String, String>,
     file: &Path,
     root: bool,
     exists: impl Fn(&Path) -> bool,
 ) -> Vec<(&'t str, PathBuf)> {
-    let attrs = path_attrs(text);
-    let dir = if root {
-        file.parent().map(Path::to_path_buf)
-    } else {
-        rust_module_dir(file)
-    };
     mod_decls(text)
         .filter_map(|name| {
             let child = match attrs.get(name) {
                 Some(rel) => file
                     .parent()
                     .map_or_else(|| PathBuf::from(rel), |dir| dir.join(rel)),
-                None => {
-                    let dir = dir.as_deref()?;
-                    let flat = dir.join(format!("{name}.rs"));
-                    if exists(&flat) {
-                        flat
-                    } else {
-                        let nested = dir.join(name).join("mod.rs");
-                        exists(&nested).then_some(nested)?
-                    }
-                }
+                None => module_file(file, root, name, |p| exists(p).then(|| p.to_path_buf()))?,
             };
             Some((name, child))
         })
         .collect()
 }
 
-/// Whether `text` declares a module with a `#[path]` attribute, by the rule
-/// [`path_attrs`] reads them with.
-pub fn declares_path_attr(text: &Stripped) -> bool {
-    !path_attrs(text).is_empty()
+/// The file of the module `name` that the Rust file `file` declares with a
+/// `mod name;` of no `#[path]`, by the index's rule: the first of `name.rs`
+/// and `name/mod.rs` that `find` gives, beside `file` when it is the tree's
+/// root (`root`) whatever its file name (`[lib] path = "src/core.rs"`), and
+/// in its module directory ([`rust_module_dir`]) otherwise.
+pub fn module_file<T>(
+    file: &Path,
+    root: bool,
+    name: &str,
+    find: impl Fn(&Path) -> Option<T>,
+) -> Option<T> {
+    let dir = if root {
+        file.parent()?.to_path_buf()
+    } else {
+        rust_module_dir(file)?
+    };
+    find(&dir.join(format!("{name}.rs"))).or_else(|| find(&dir.join(name).join("mod.rs")))
 }
 
 /// The `pub use` rows of the module whose text is `text` and whose module
@@ -404,26 +401,19 @@ mod tests {
         assert!(path_attrs(&strip_comments("")).is_empty());
     }
 
-    #[test]
-    fn test_declares_path_attr_attribute_before_mod_true_absent_or_commented_false() {
-        assert!(declares_path_attr(&strip_comments(
-            "mod a;\n#[path = \"real.rs\"]\npub mod inner;\n"
-        )));
-        assert!(!declares_path_attr(&strip_comments(
-            "// #[path = \"x.rs\"]\nmod m;\n"
-        )));
-        assert!(!declares_path_attr(&strip_comments(
-            "mod m;\npub use m::f;\n"
-        )));
-        assert!(!declares_path_attr(&strip_comments("")));
-        assert!(
-            !declares_path_attr(&strip_comments("#[path = \"x.rs\"]\nfn f() {}\n")),
-            "an attribute on no `mod` relocates nothing"
-        );
+    fn steps_of(src: &str, file: &str, root: bool, files: &[&str]) -> Vec<(String, PathBuf)> {
+        let text = strip_comments(src);
+        steps_with(&text, &path_attrs(&text), file, root, files)
     }
 
-    fn steps_of(src: &str, file: &str, root: bool, files: &[&str]) -> Vec<(String, PathBuf)> {
-        mod_steps(&strip_comments(src), Path::new(file), root, |path| {
+    fn steps_with(
+        text: &Stripped,
+        attrs: &FxHashMap<String, String>,
+        file: &str,
+        root: bool,
+        files: &[&str],
+    ) -> Vec<(String, PathBuf)> {
+        mod_steps(text, attrs, Path::new(file), root, |path| {
             files.iter().any(|f| Path::new(f) == path)
         })
         .into_iter()
@@ -487,6 +477,78 @@ mod tests {
                 ("x".to_string(), PathBuf::from("src/a/b/x.rs")),
             ]
         );
+    }
+
+    /// The steps read `#[path]` from `attrs`, not from the text: with no
+    /// attrs, an attributed `mod` steps to its conventional file.
+    #[test]
+    fn test_mod_steps_empty_attrs_attributed_mod_steps_to_conventional_file() {
+        let text = strip_comments("#[path = \"real.rs\"]\npub mod m;\n");
+        assert_eq!(
+            steps_with(
+                &text,
+                &FxHashMap::default(),
+                "src/lib.rs",
+                true,
+                &["src/m.rs"]
+            ),
+            [("m".to_string(), PathBuf::from("src/m.rs"))]
+        );
+        assert!(
+            steps_with(&text, &FxHashMap::default(), "src/lib.rs", true, &[]).is_empty(),
+            "with no attrs and no file, the attributed mod takes no step"
+        );
+    }
+
+    fn module_file_of(file: &str, root: bool, name: &str, files: &[&str]) -> Option<PathBuf> {
+        module_file(Path::new(file), root, name, |path| {
+            files
+                .iter()
+                .any(|f| Path::new(f) == path)
+                .then(|| path.to_path_buf())
+        })
+    }
+
+    #[test]
+    fn test_module_file_root_beside_file_non_root_in_module_dir() {
+        let files = ["src/a.rs", "src/core/a.rs"];
+        assert_eq!(
+            module_file_of("src/core.rs", true, "a", &files),
+            Some(PathBuf::from("src/a.rs"))
+        );
+        assert_eq!(
+            module_file_of("src/core.rs", false, "a", &files),
+            Some(PathBuf::from("src/core/a.rs"))
+        );
+        assert_eq!(
+            module_file_of(
+                "src/m/mod.rs",
+                false,
+                "a",
+                &["src/m/a.rs", "src/m/mod/a.rs"]
+            ),
+            Some(PathBuf::from("src/m/a.rs")),
+            "a mod.rs holds its children in its own directory"
+        );
+    }
+
+    #[test]
+    fn test_module_file_name_rs_before_mod_rs_else_mod_rs() {
+        assert_eq!(
+            module_file_of("src/lib.rs", true, "a", &["src/a/mod.rs", "src/a.rs"]),
+            Some(PathBuf::from("src/a.rs"))
+        );
+        assert_eq!(
+            module_file_of("src/lib.rs", true, "a", &["src/a/mod.rs"]),
+            Some(PathBuf::from("src/a/mod.rs"))
+        );
+    }
+
+    #[test]
+    fn test_module_file_neither_file_or_no_directory_none() {
+        assert_eq!(module_file_of("src/lib.rs", true, "a", &["src/b.rs"]), None);
+        assert_eq!(module_file_of("src/lib.rs", true, "a", &[]), None);
+        assert_eq!(module_file_of("", false, "a", &["a.rs"]), None);
     }
 
     #[test]

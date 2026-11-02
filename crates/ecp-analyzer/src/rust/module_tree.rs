@@ -30,7 +30,7 @@
 use crate::resolution::index::SymbolTable;
 use ecp_core::analyzer::ladder::{self, Namespace, Published, TreeItem};
 use ecp_core::analyzer::rust_pub_use::{
-    self, mod_steps, pub_use_entries, strip_comments, PubUseEntry,
+    self, mod_steps, path_attrs, pub_use_entries, strip_comments, PubUseEntry,
 };
 use ecp_core::contracts::workspace::{
     ConfigPresence, ConfigRead, Ecosystem, Membership, NameRank, Scope, ScopeId, ScopeName,
@@ -508,7 +508,10 @@ fn build_mod_tree_and_reexports(entry: &Path) -> (ModTree, ReExportMap) {
         };
         let clean = strip_comments(&src);
 
-        for (name, child_file) in mod_steps(&clean, &file, mod_path.is_empty(), |p| p.exists()) {
+        let attrs = path_attrs(&clean);
+        for (name, child_file) in
+            mod_steps(&clean, &attrs, &file, mod_path.is_empty(), |p| p.exists())
+        {
             let child_canon = match child_file.canonicalize() {
                 Ok(p) => p,
                 Err(_) => {

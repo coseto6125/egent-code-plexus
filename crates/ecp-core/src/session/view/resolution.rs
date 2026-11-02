@@ -44,8 +44,7 @@ use crate::analyzer::reexport::{
     ModuleFacts, PyModule, ResolveTarget,
 };
 use crate::analyzer::rust_paths::{
-    is_rust_source, rust_expand_path_head, rust_module_dir, rust_module_path_base,
-    rust_type_path_prefix,
+    is_rust_source, rust_expand_path_head, rust_module_path_base, rust_type_path_prefix,
 };
 use crate::analyzer::rust_pub_use::{self, PubUseEntries, Stripped};
 use crate::analyzer::same_file_pick::{
@@ -3016,9 +3015,6 @@ pub(super) struct RustModules<'a> {
     /// Tree root file → whether the layout guess places that tree's
     /// modules as the index does ([`Self::conventional_tree`]).
     conventional_trees: RefCell<FxHashMap<&'a str, bool>>,
-    /// Whether `graph.files` is in the builder's `Path` order, so a
-    /// binary-search miss in [`Self::file`] is final.
-    files_in_path_order: OnceCell<bool>,
 }
 
 /// One Rust module file's text and what the view reads from it.
@@ -3070,7 +3066,6 @@ impl<'a> RustModules<'a> {
             sources: None,
             module_texts: OnceCell::new(),
             conventional_trees: RefCell::default(),
-            files_in_path_order: OnceCell::new(),
         }
     }
 
@@ -3178,39 +3173,9 @@ impl<'a> RustModules<'a> {
         if self.removed.contains(requested) {
             return None;
         }
-        let name =
-            |file: &'a crate::graph::ArchivedFile| file.path.resolve(&self.graph.string_pool);
-        // Accept only an exact hit in the builder's usual Path order.
-        // Synthetic/older archives with another order use the safe scan.
-        // A string-equal path is `Path`-equal, so in that order a miss is
-        // final: the module walk asks for many files that do not exist.
-        match self.graph.files.binary_search_by(|file| {
-            std::path::Path::new(name(file)).cmp(std::path::Path::new(requested))
-        }) {
-            Ok(idx) => {
-                let found = name(&self.graph.files[idx]);
-                if found == requested {
-                    return Some(found);
-                }
-            }
-            Err(_) if self.files_in_path_order() => return None,
-            Err(_) => {}
-        }
-        self.graph
-            .files
-            .iter()
-            .map(name)
-            .find(|file| *file == requested)
-    }
-
-    fn files_in_path_order(&self) -> bool {
-        *self.files_in_path_order.get_or_init(|| {
-            let pool = &self.graph.string_pool;
-            self.graph.files.windows(2).all(|pair| {
-                std::path::Path::new(pair[0].path.resolve(pool))
-                    < std::path::Path::new(pair[1].path.resolve(pool))
-            })
-        })
+        let graph = self.graph;
+        let idx = graph.file_idx_of(requested)?;
+        Some(graph.files[idx as usize].path.resolve(&graph.string_pool))
     }
 
     /// Whether `file` declares a module-level node named `name` whose kind
@@ -3245,21 +3210,14 @@ impl<'a> RustModules<'a> {
     }
 
     /// The file of the module `name` that `parent` declares (`mod name;`),
-    /// as the index places it: `name.rs`, else `name/mod.rs`, beside a
-    /// target root and in a module's own directory otherwise.
+    /// as the index places it ([`rust_pub_use::module_file`]).
     fn child(&self, parent: &'a str, name: &str, parent_is_root: bool) -> Option<&'a str> {
         if !self.declares(parent, name, |kind| kind == NodeKind::Module) {
             return None;
         }
-        let parent_path = std::path::Path::new(parent);
-        let dir = if parent_is_root {
-            parent_path.parent()?.to_path_buf()
-        } else {
-            rust_module_dir(parent_path)?
-        };
-        let base = dir.join(name);
-        self.file(&base.with_extension("rs"))
-            .or_else(|| self.file(&base.join("mod.rs")))
+        rust_pub_use::module_file(std::path::Path::new(parent), parent_is_root, name, |p| {
+            self.file(p)
+        })
     }
 
     /// The module path of `caller` in the tree rooted at `root`: its path
@@ -3367,9 +3325,15 @@ impl<'a> RustModules<'a> {
     /// binding `use`, or a glob while the module declares no `name`, may be
     /// a `pub use` and answers [`ladder::Published::Unknown`]. So does a
     /// glob in a view with a source reader, whose rows were unreadable or
-    /// whose tree the guess may misplace. Only a view without a reader
-    /// answers [`ladder::Published::Own`] for a glob beside the module's
-    /// own `name`.
+    /// whose tree the guess may misplace. Of these fallback answers, only a
+    /// view without a reader answers [`ladder::Published::Own`] for a glob
+    /// beside the module's own `name`.
+    ///
+    /// Accepted shape of the two `Own` shortcuts (FU-2026-10-26-2ad63df39f50):
+    /// a file the index places under another module path, because a
+    /// `#[path]` module reaches it first, answers `Own` for its own `name`
+    /// at the path the layout guess gives it, where the index has no
+    /// module.
     fn published(&self, root: &'a str, module: &'a str, name: &str) -> ladder::Published<'_> {
         let Some(imports) = self.module_imports(module) else {
             return ladder::Published::Own;
@@ -3384,9 +3348,9 @@ impl<'a> RustModules<'a> {
         }
         if let Some(rows) = self.pub_uses(root, module) {
             let published = rust_pub_use::published(|name| rows.get(name), name);
-            // A test module's private `use super::*;` makes nearly every
-            // module a glob one: answering its own item here keeps the
-            // tree walk off them.
+            // A test module's private `use super::*;` makes its file a glob
+            // module: answering its own item here keeps the tree walk off
+            // it.
             if matches!(published, ladder::Published::Own)
                 && !binds
                 && self.declares(module, name, |_| true)
@@ -3441,24 +3405,27 @@ impl<'a> RustModules<'a> {
     }
 
     /// Whether the layout guess ([`Self::child`]) places every module of the
-    /// tree rooted at `root` where the index does. Decided once per root and
-    /// view, on the first question whose text rows stand on it.
+    /// tree rooted at `root` it reaches where the index does. Decided once
+    /// per root and view, on the first question whose text rows stand on it.
     ///
     /// The index walks the tree from its root (`build_mod_tree_and_reexports`):
     /// from each file it takes the steps [`rust_pub_use::mod_steps`] lists,
     /// and it places a file once, at the first step that reaches it. This
-    /// walk takes the same steps over the view's files: each file's text
-    /// ([`Self::module_text`]) gives the index's steps, and the `Module`
-    /// nodes the file declares (a dirty file's fresh parse, else
-    /// `graph.bin`'s), each placed by [`Self::child`], give the guess's. The
-    /// tree is placed like the index when at every file reached the two
-    /// step sets are equal (same names, same files), no file declares a
-    /// `#[path]` module ([`rust_pub_use::declares_path_attr`]), and no file
-    /// is reached twice. Then both sides start at the root and take the
-    /// same step for each name from each file, and the index's first-reach
-    /// rule never drops a step, so a module path leads both to one file
-    /// and the guess places no module the index lacks. `false` without a
-    /// source, and when a file of the walk cannot be read.
+    /// walk takes every step of that walk over the view's files: each
+    /// file's text ([`Self::module_text`]) gives the index's steps, and at a
+    /// file the guess walks, the `Module` nodes the file declares (a dirty
+    /// file's fresh parse, else `graph.bin`'s), each placed by
+    /// [`Self::child`], give the guess's. The tree is placed like the index
+    /// when at every file the guess walks each guess step is an index step,
+    /// no file of the walk declares a `#[path]` module
+    /// ([`rust_pub_use::path_attrs`]), and the walk reaches no file twice.
+    /// An index step the guess lacks (a `mod` inside a macro call, which
+    /// the parse makes no `Module` node for) starts a subtree the guess
+    /// never enters, walked with the index's steps alone. Then every guess
+    /// route from the root is an index route, and the index's walk drops
+    /// none of its steps, so the guess places every module it reaches where
+    /// the index does. `false` without a source, and when a file of the
+    /// walk cannot be read.
     fn conventional_tree(&self, root: &'a str) -> bool {
         let known = self.conventional_trees.borrow().get(root).copied();
         if let Some(known) = known {
@@ -3498,39 +3465,44 @@ impl<'a> RustModules<'a> {
             }
         };
         let mut visited: FxHashSet<&'a str> = FxHashSet::from_iter([root]);
-        let mut stack = vec![root];
-        while let Some(file) = stack.pop() {
+        let mut stack = vec![(root, false)];
+        while let Some((file, index_only)) = stack.pop() {
             let Some(read) = self.module_text(file) else {
                 return false;
             };
-            if rust_pub_use::declares_path_attr(&read.text) {
+            let attrs = rust_pub_use::path_attrs(&read.text);
+            if !attrs.is_empty() {
                 return false;
             }
             let at_root = file == root;
             let path = std::path::Path::new(file);
-            let index: Option<Vec<(&str, &'a str)>> =
-                rust_pub_use::mod_steps(&read.text, path, at_root, |p| self.file(p).is_some())
-                    .into_iter()
-                    .map(|(name, child)| Some((name, self.file(&child)?)))
-                    .collect();
-            let Some(mut index) = index else {
-                return false;
-            };
-            let mut guess: Vec<(&str, &'a str)> = declared(file)
+            let mut index: Vec<(&str, &'a str)> =
+                rust_pub_use::mod_steps(&read.text, &attrs, path, at_root, |p| {
+                    self.file(p).is_some()
+                })
                 .into_iter()
-                .filter_map(|name| Some((name, self.child(file, name, at_root)?)))
+                .filter_map(|(name, child)| Some((name, self.file(&child)?)))
                 .collect();
             index.sort_unstable();
-            guess.sort_unstable();
-            guess.dedup();
-            if index != guess {
+            index.dedup();
+            let mut guess: Vec<(&str, &'a str)> = Vec::new();
+            if !index_only {
+                guess.extend(
+                    declared(file)
+                        .into_iter()
+                        .filter_map(|name| Some((name, self.child(file, name, at_root)?))),
+                );
+                guess.sort_unstable();
+                guess.dedup();
+            }
+            if !guess.iter().all(|step| index.binary_search(step).is_ok()) {
                 return false;
             }
-            for (_, child) in guess {
-                if !visited.insert(child) {
+            for step in index {
+                if !visited.insert(step.1) {
                     return false;
                 }
-                stack.push(child);
+                stack.push((step.1, index_only || guess.binary_search(&step).is_err()));
             }
         }
         true
