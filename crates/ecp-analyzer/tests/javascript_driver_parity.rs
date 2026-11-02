@@ -96,8 +96,9 @@ fn test_javascript_driver_imports_only_file_keeps_order_and_binding_kinds() {
 }
 
 /// A literal `require` is an import and no blind spot; a non-literal
-/// `require` or `import()` is a conditional blind spot. The binding
-/// `const fs = require(..)` is also a module-level Const.
+/// `require` or `import()` is a conditional blind spot. A literal `import()`
+/// is a synthetic namespace import (`@import0`, T1) and no blind spot. The
+/// binding `const fs = require(..)` is also a module-level Const.
 #[test]
 fn test_javascript_driver_require_literal_imports_and_dynamic_blind_spots() {
     let g = parse(
@@ -109,6 +110,7 @@ fn test_javascript_driver_require_literal_imports_and_dynamic_blind_spots() {
             ("fs", "*", Some("fs"), None),
             ("./lib", "a", None, None),
             ("./lib", "b", Some("c"), None),
+            ("./lit", "*", Some("@import0"), None),
         ]
     );
     assert_eq!(

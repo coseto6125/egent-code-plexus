@@ -316,6 +316,17 @@ dynamic_dispatch ruby pre-existing gap
 dynamic_dispatch rust pre-existing gap
 dynamic_dispatch swift pre-existing gap
 dynamic_dispatch typescript pre-existing gap
+dynamic_import c no runtime module import
+dynamic_import cpp no runtime module import
+dynamic_import csharp reflection (Class.forName style) is out of scope
+dynamic_import dart deferred as prefix calls (N11)
+dynamic_import go no runtime module import
+dynamic_import java reflection (Class.forName) is out of scope
+dynamic_import kotlin reflection (Class.forName) is out of scope
+dynamic_import php a literal require emits no Imports edge (N13)
+dynamic_import ruby require_relative binds an import but a bare call through it stays unbound (N13)
+dynamic_import rust no runtime module import
+dynamic_import swift no runtime module import
 enum c pre-existing gap
 enum cpp pre-existing gap
 enum dart pre-existing gap

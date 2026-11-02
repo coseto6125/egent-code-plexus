@@ -86,8 +86,11 @@ fn assert_binds_target(app: &str) {
 }
 
 fn assert_no_import_tier_call(app: &str) {
-    let g = graph(app);
-    let got = calls(&g);
+    // A call into the importer's own file is the same-file tier (1.0), not an import.
+    let got: Vec<_> = calls(&graph(app))
+        .into_iter()
+        .filter(|(file, ..)| file != "app.ts")
+        .collect();
     assert!(
         got.iter()
             .all(|(_, _, confidence)| *confidence < import_tier()),
@@ -233,25 +236,26 @@ fn test_dynamic_import_nonliteral_and_empty_specifiers_emit_nothing() {
     }
 }
 
+/// A bare specifier resolves as the static `import` of it does: the dynamic
+/// load adds no resolution rule of its own.
 #[test]
-fn test_dynamic_import_external_package_gets_no_project_edge() {
+fn test_dynamic_import_bare_specifier_resolves_like_static_import() {
     let provider = TypeScriptProvider::new().expect("TypeScriptProvider::new");
-    let mut builder = GraphBuilder::new();
-    for (path, source) in [
-        ("lodash.ts", "export function run() {}\n"),
-        (
-            "app.ts",
-            "export async function go() { const m = await import('lodash'); m.run(); }\n",
-        ),
-    ] {
-        builder.add_graph(
-            provider
-                .parse_file(Path::new(path), source.as_bytes())
-                .expect("parse"),
-        );
-    }
-    let g = builder.build();
-    assert!(!imports_file(&g, "lodash.ts"));
+    let edge_to_namesake = |app: &str| {
+        let mut builder = GraphBuilder::new();
+        for (path, source) in [("lodash.ts", "export function run() {}\n"), ("app.ts", app)] {
+            builder.add_graph(
+                provider
+                    .parse_file(Path::new(path), source.as_bytes())
+                    .expect("parse"),
+            );
+        }
+        imports_file(&builder.build(), "lodash.ts")
+    };
+    assert_eq!(
+        edge_to_namesake("export async function go() { await import('lodash'); }\n"),
+        edge_to_namesake("import * as m from 'lodash';\nexport function go() { m.run(); }\n"),
+    );
 }
 
 #[test]

@@ -115,10 +115,10 @@ fn test_require_binding_call_resolves_in_the_required_module() {
     }
 }
 
-/// Imports are file-wide, so a `require` inside a function body binds
-/// nothing: it is scoped to that function.
+/// A `const` `require` that is a direct statement of a function body binds
+/// inside that function only (T1, FU-2026-11-01-c07a40e90e36).
 #[test]
-fn test_require_inside_a_function_binds_no_edge() {
+fn test_require_inside_a_function_binds_in_that_function() {
     let files = [
         ("a.js", "function f() {}\nmodule.exports = { f };\n"),
         ("b.js", "function f() {}\nmodule.exports = { f };\n"),
@@ -127,14 +127,14 @@ fn test_require_inside_a_function_binds_no_edge() {
             "function go() {\n  const { f } = require(\"./a\");\n  f();\n}\n",
         ),
     ];
-    assert_eq!(go_targets(&files, "f"), Vec::<String>::new());
+    assert_eq!(go_targets(&files, "f"), vec!["a.js".to_string()]);
 }
 
 /// Two functions that each require `f` from a different module. A file-wide
 /// import would send `go`'s call to `./b`, the first require in the file;
-/// function-scoped requires bind nothing, so no wrong edge is made.
+/// each function-scoped require binds its own scope, so `go` reaches `./a`.
 #[test]
-fn test_function_scoped_requires_of_two_modules_bind_no_wrong_edge() {
+fn test_function_scoped_requires_of_two_modules_bind_their_own_scope() {
     let files = [
         ("a.js", "function f() {}\nmodule.exports = { f };\n"),
         ("b.js", "function f() {}\nmodule.exports = { f };\n"),
@@ -144,7 +144,7 @@ fn test_function_scoped_requires_of_two_modules_bind_no_wrong_edge() {
              function go() { const { f } = require(\"./a\"); f(); }\n",
         ),
     ];
-    assert_eq!(go_targets(&files, "f"), Vec::<String>::new());
+    assert_eq!(go_targets(&files, "f"), vec!["a.js".to_string()]);
 }
 
 /// `require` shadowed by a parameter is no module loader: the declarator
