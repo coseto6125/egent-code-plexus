@@ -173,7 +173,11 @@ use std::path::Path;
 /// `Self::` paths and impl-only types bind differently, and an untyped member
 /// call in a guess language drops to 0.55 (`call:untyped-member`); a
 /// schema48 graph holds the old edges.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema49");
+/// schema50: a redefinition of a kind that merges no repeats (a Python
+/// `def f` twice, `#ifdef` twins, a repeated type) keeps a node of its own
+/// under an overload uid, and each merged repeat's tombstone uid is unique;
+/// a schema49 graph stores those repeats as tombstones of one shared uid.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema50");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

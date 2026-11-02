@@ -157,7 +157,9 @@ pub fn splits_by_arity(language: Language, kind: NodeKind) -> bool {
 /// ([`splits_by_arity`]), or a member a type of another arity declares
 /// (`Foo1<T>.foo` beside `Foo1.foo`). A C# file scopes no kind lexically
 /// ([`lexical_scope_kinds`]), so a C# `Later` of a kind that keeps no
-/// overloads comes from the arity rule alone. A twin joins no overload set.
+/// overloads is an arity twin or a redefinition (`LaterReason::Arity` or
+/// `LaterReason::Repeat`); this predicate cannot tell the two apart, the
+/// slot's reason can. A twin joins no overload set.
 pub fn later_is_arity_twin(language: Language, kind: NodeKind) -> bool {
     language == Language::CSharp
         && !uid::keeps_overloads(kind)
@@ -210,24 +212,61 @@ pub fn twin_enclosing(
 /// incremental mode and the overlay view (its dirty parse and its base
 /// nodes) all number a file through this one function, so a later overload
 /// or a same-uid redefinition gets the same uid, and a declaration the same
-/// anchor, on every path.
+/// anchor, on every path. The one-input case of [`path_identities`].
 pub fn file_identities<'a, T>(
     path: &str,
     decls: &'a [T],
     fields: impl Fn(&'a T) -> DeclFields<'a>,
 ) -> Vec<DeclIdentity> {
+    identities_of(path, &[decls], fields)
+}
+
+/// [`file_identities`] of several inputs that share the path `path` (two
+/// `LocalGraph`s of one path), numbered as one file: one [`assign_file`]
+/// over the inputs in order, so a declaration of a later input repeats the
+/// earlier inputs' ones. Spans relate only rows of one input, so each
+/// input's lexical parents, impl traits and enclosing types come from that
+/// input alone. One identity list per input, in input order.
+pub fn path_identities<'a, T>(
+    path: &str,
+    inputs: &[&'a [T]],
+    fields: impl Fn(&'a T) -> DeclFields<'a>,
+) -> Vec<Vec<DeclIdentity>> {
+    let mut all = identities_of(path, inputs, fields).into_iter();
+    inputs
+        .iter()
+        .map(|input| all.by_ref().take(input.len()).collect())
+        .collect()
+}
+
+fn identities_of<'a, T>(
+    path: &str,
+    inputs: &[&'a [T]],
+    fields: impl Fn(&'a T) -> DeclFields<'a>,
+) -> Vec<DeclIdentity> {
     let path = canonical_path(path);
     let language = Language::from_path(&path);
-    let rows: Vec<Row<'a>> = decls.iter().map(|d| Row(fields(d))).collect();
+    let mut rows: Vec<Row<'a>> = Vec::with_capacity(inputs.iter().map(|i| i.len()).sum());
+    for &input in inputs {
+        rows.extend(input.iter().map(|d| Row(fields(d))));
+    }
+    let spans_of = |rows: &[Row<'a>]| -> Vec<(NodeKind, Span)> {
+        rows.iter().map(|r| (r.0 .0, r.0 .3)).collect()
+    };
     let scoped = lexical_scope_kinds(language);
     let parents = (!scoped.is_empty()).then(|| {
-        let spans: Vec<(NodeKind, Span)> = rows.iter().map(|r| (r.0 .0, r.0 .3)).collect();
-        lexical_parents(&spans, scoped)
+        per_input(
+            &rows,
+            inputs,
+            |part| lexical_parents(&spans_of(part), scoped),
+            |p, start| p + start as u32,
+        )
     });
-    let traits = (language == Language::Rust).then(|| impl_traits(&rows));
+    let traits =
+        (language == Language::Rust).then(|| per_input(&rows, inputs, impl_traits, |t, _| t));
     let arity_scopes = (language == Language::CSharp).then(|| {
         // Two members of one uid share an owner name, so their arity paths
-        // can differ only inside two same-named types. A file without such
+        // can differ only inside two same-named types. A path without such
         // a pair skips the span sweep: every scope is `None`, every member
         // path equal, as the sweep would find.
         let mut type_names = FxHashSet::default();
@@ -236,10 +275,12 @@ pub fn file_identities<'a, T>(
             .filter(|r| r.0 .0.declares_type())
             .any(|r| !type_names.insert(r.0 .2));
         match twin_types {
-            true => {
-                let spans: Vec<(NodeKind, Span)> = rows.iter().map(|r| (r.0 .0, r.0 .3)).collect();
-                enclosing_types(&spans)
-            }
+            true => per_input(
+                &rows,
+                inputs,
+                |part| enclosing_types(&spans_of(part)),
+                |ty, start| ty + start,
+            ),
             false => vec![None; rows.len()],
         }
     });
@@ -276,6 +317,32 @@ pub fn file_identities<'a, T>(
     // ([`clear_scoped_owners`]); and `enclosing_types` returns in-range
     // indices: no `IdentityError` can arise.
     assign_file(&path, &decls).expect("a `/`-separated path and unscoped declarations")
+}
+
+/// `part` of each input's rows, every index it returns moved by `shift`
+/// from the input's own rows to `rows`, all inputs concatenated. One input
+/// is `part` of `rows` as it is.
+fn per_input<'a, T, X>(
+    rows: &[Row<'a>],
+    inputs: &[&[T]],
+    part: impl Fn(&[Row<'a>]) -> Vec<Option<X>>,
+    shift: impl Fn(X, usize) -> X,
+) -> Vec<Option<X>> {
+    if let [_] = inputs {
+        return part(rows);
+    }
+    let mut out = Vec::with_capacity(rows.len());
+    let mut start = 0;
+    for input in inputs {
+        let end = start + input.len();
+        out.extend(
+            part(&rows[start..end])
+                .into_iter()
+                .map(|x| x.map(|x| shift(x, start))),
+        );
+        start = end;
+    }
+    out
 }
 
 /// One [`DeclFields`] row, as [`rust_impl_members`] reads it. A row carries
@@ -319,10 +386,11 @@ impl ImplNode for Row<'_> {
 /// has no `Impl` node (`impl T for &mut X`) therefore stays `None`.
 ///
 /// A repeated block (`impl T for A<u8>` and `impl T for A<u16>` both write
-/// self type `A`, owner `T`) is a uid collision: the base keeps the second as
-/// a tombstone with no name and no owner. Its members take no trait on
-/// either side, the second block of the dirty parse included, or the two
-/// sides never agree on the member's anchor.
+/// self type `A`, owner `T`) repeats the first block's uid. Its members take
+/// no trait on either side, the second block of the dirty parse included,
+/// or the two sides never agree on the member's anchor. A graph written
+/// before redefinitions kept their node stores the second block as a
+/// tombstone with no name, which the empty-name test skips.
 fn impl_traits<'a>(rows: &[Row<'a>]) -> Vec<Option<&'a str>> {
     let mut seen = rustc_hash::FxHashSet::default();
     let first_block: Vec<bool> = rows
@@ -635,7 +703,7 @@ impl LexicalFunctions {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contracts::identity::{DeclKey, Uniqueness};
+    use crate::contracts::identity::{DeclKey, LaterReason, Uniqueness};
 
     /// Node `i` of `rows`: (stored owner, name, lexical parent).
     type ChainRow = (Option<&'static str>, &'static str, Option<usize>);
@@ -780,6 +848,9 @@ mod tests {
         file_uids(path, decls, |d| (d.0, d.1, d.2, (0, 0, 0, 0), 0))
     }
 
+    /// Stands for: a method repeat is an overload, a repeated namespace (a
+    /// scope container) a redefinition with a node of its own, and a merged
+    /// field repeat a tombstone of its own overload uid (design uid §2.3).
     #[test]
     fn test_file_uids_overload_and_redefinition_returns_index_numbering() {
         let decls = [
@@ -787,13 +858,132 @@ mod tests {
             (NodeKind::Method, Some("A"), "save"),
             (NodeKind::Namespace, None, "Acme"),
             (NodeKind::Namespace, None, "Acme"),
+            (NodeKind::Property, Some("A"), "x"),
+            (NodeKind::Property, Some("A"), "x"),
         ];
         let save = uid::compute(NodeKind::Method, "src/A.cs", Some("A"), "save");
         let acme = uid::compute(NodeKind::Namespace, "src/A.cs", None, "Acme");
+        let x = uid::compute(NodeKind::Property, "src/A.cs", Some("A"), "x");
         assert_eq!(
             uids("src/A.cs", &decls),
-            [save, uid::overload(save, 1), acme, !acme],
-            "the second save is overload 1; the second Acme is the bit-inverse tombstone"
+            [
+                save,
+                uid::overload(save, 1),
+                acme,
+                uid::overload(acme, 1),
+                x,
+                uid::tombstone(uid::overload(x, 1)),
+            ],
+        );
+    }
+
+    fn rows_f(lines: &[u32]) -> Vec<DeclFields<'static>> {
+        lines
+            .iter()
+            .map(|&l| (NodeKind::Function, None, "f", (l, 0, l, 9), 0))
+            .collect()
+    }
+
+    /// Stands for: two inputs of one path number as one file (design uid
+    /// §2.3 "Two `LocalGraph`s of one path"): the second input's `f` is the
+    /// third declaration of its base uid.
+    #[test]
+    fn test_path_identities_two_inputs_number_path_wide() {
+        let (a, b) = (rows_f(&[0, 1]), rows_f(&[0]));
+        let ids = path_identities("m.py", &[&a[..], &b[..]], |d| *d);
+        assert_eq!(ids.iter().map(Vec::len).collect::<Vec<_>>(), [2, 1]);
+        let base = uid::compute(NodeKind::Function, "m.py", None, "f");
+        assert!(
+            matches!(
+                ids[1][0].slot,
+                UidSlot::Later {
+                    first: 0,
+                    ordinal: 2,
+                    reason: LaterReason::Repeat,
+                    ..
+                }
+            ),
+            "{:?}",
+            ids[1][0]
+        );
+        let uids: Vec<u64> = ids.iter().flatten().map(|id| stored_uid(id.slot)).collect();
+        assert_eq!(uids, [base, uid::overload(base, 1), uid::overload(base, 2)]);
+    }
+
+    /// Stands for: `file_identities` is the one-input case of
+    /// `path_identities`.
+    #[test]
+    fn test_path_identities_one_input_equals_file_identities() {
+        let rows = [
+            (NodeKind::Function, None, "outer", (0, 0, 5, 1), 0),
+            (NodeKind::Function, None, "h", (1, 4, 1, 20), 0),
+            (NodeKind::Function, None, "h", (2, 4, 2, 20), 0),
+            (NodeKind::Variable, None, "x", (6, 0, 6, 9), 0),
+            (NodeKind::Variable, None, "x", (7, 0, 7, 9), 0),
+        ];
+        assert_eq!(
+            path_identities("a.py", &[&rows[..]], |d| *d),
+            [identities("a.py", &rows)]
+        );
+    }
+
+    /// Stands for: each input's lexical parents index into that input
+    /// only. An empty input between two others shifts nothing, and the
+    /// span of one input never holds a row of another.
+    #[test]
+    fn test_path_identities_parents_per_input_empty_input_between() {
+        let a = [
+            (NodeKind::Function, None, "outer", (0, 0, 5, 1), 0),
+            (NodeKind::Function, None, "h", (1, 4, 1, 20), 0),
+        ];
+        let empty: [DeclFields<'static>; 0] = [];
+        let b = [(NodeKind::Function, None, "h", (1, 4, 1, 20), 0)];
+        let ids = path_identities("a.py", &[&a[..], &empty[..], &b[..]], |d| *d);
+        assert_eq!(ids.iter().map(Vec::len).collect::<Vec<_>>(), [2, 0, 1]);
+        let single = identities("a.py", &a);
+        assert_eq!(ids[0], single);
+        assert_eq!(
+            ids[1].len(),
+            0,
+            "an empty input gives an empty identity list"
+        );
+        assert_eq!(
+            ids[2][0].slot,
+            UidSlot::First(uid::compute(NodeKind::Function, "a.py", None, "h")),
+            "input 2's `h` is top level in its own input"
+        );
+    }
+
+    #[test]
+    fn test_path_identities_no_inputs_or_empty_inputs_returns_empty() {
+        let none: [&[DeclFields<'static>]; 0] = [];
+        assert!(path_identities("a.py", &none, |d| *d).is_empty());
+        let empty: [DeclFields<'static>; 0] = [];
+        assert_eq!(
+            path_identities("a.py", &[&empty[..], &empty[..]], |d| *d),
+            vec![Vec::<DeclIdentity>::new(); 2]
+        );
+    }
+
+    /// Stands for: a C# member's arity path reads the type twins of the
+    /// whole path, so `Foo1<T>.foo` in input 2 is a declaration of its
+    /// own beside input 1's `Foo1.foo`.
+    #[test]
+    fn test_path_identities_csharp_arity_twin_types_across_inputs() {
+        let [c0, p0, c1, p1] = foo1_twins(0, 1);
+        let (a, b) = ([c0, p0], [c1, p1]);
+        let ids = path_identities("N/Foo1.cs", &[&a[..], &b[..]], |d| *d);
+        assert!(
+            matches!(
+                ids[1][1].slot,
+                UidSlot::Later {
+                    first: 1,
+                    reason: LaterReason::Arity,
+                    ..
+                }
+            ),
+            "{:?}",
+            ids[1][1]
         );
     }
 
@@ -966,24 +1156,36 @@ mod tests {
         );
     }
 
-    /// Stands for: two C# types of one name and one arity are still a uid
-    /// collision, tombstoned as before.
+    /// Stands for: two C# types of one name and one arity are a
+    /// redefinition, a node of its own under overload uid 1 (design uid
+    /// §2.3), no longer a tombstone.
     #[test]
-    fn test_file_uids_csharp_types_of_one_arity_tombstone() {
+    fn test_file_uids_csharp_types_of_one_arity_later_repeat() {
         let base = uid::compute(NodeKind::Class, "N/Conv.cs", None, "Conv");
         let rows = two_types(NodeKind::Class, 1, 1);
-        assert_eq!(file_uids("N/Conv.cs", &rows, |d| *d), [base, !base]);
+        assert_eq!(
+            file_uids("N/Conv.cs", &rows, |d| *d),
+            [base, uid::overload(base, 1)]
+        );
     }
 
     /// Stands for: the arity rule is C#'s alone. Two same-named types in a
-    /// Java or C++ file stay a duplicate even when an arity is supplied, and
-    /// a C# method takes no arity.
+    /// Java or C++ file are a redefinition (`Repeat`), never an arity
+    /// sibling, even when an arity is supplied, and a C# method takes no
+    /// arity.
     #[test]
-    fn test_file_identities_non_csharp_types_of_two_arities_duplicate() {
+    fn test_file_identities_non_csharp_types_of_two_arities_later_repeat() {
         for path in ["N/Conv.java", "n/conv.hpp", "n/conv.ts"] {
             let ids = identities(path, &two_types(NodeKind::Class, 0, 1));
             assert!(
-                matches!(ids[1].slot, UidSlot::Duplicate { first: 0, .. }),
+                matches!(
+                    ids[1].slot,
+                    UidSlot::Later {
+                        first: 0,
+                        reason: LaterReason::Repeat,
+                        ..
+                    }
+                ),
                 "{path}: {:?}",
                 ids[1].slot
             );
@@ -995,7 +1197,7 @@ mod tests {
     /// Stands for: C# delegates (`Function` nodes) of arity 0, 1 and 3 in
     /// one file are three declarations, in source order and reversed
     /// (Newtonsoft `LinqBridge.cs` `Func` / `Action`, codex ruling P-a2).
-    /// Two of one arity still collide.
+    /// Two of one arity are a redefinition under the next overload uid.
     #[test]
     fn test_file_uids_csharp_delegates_of_three_arities_both_orders_later_uids() {
         let base = uid::compute(NodeKind::Function, "N/Linq.cs", None, "Func");
@@ -1021,7 +1223,10 @@ mod tests {
         }
         let rows = two_types(NodeKind::Function, 2, 2);
         let conv = uid::compute(NodeKind::Function, "N/Conv.cs", None, "Conv");
-        assert_eq!(file_uids("N/Conv.cs", &rows, |d| *d), [conv, !conv]);
+        assert_eq!(
+            file_uids("N/Conv.cs", &rows, |d| *d),
+            [conv, uid::overload(conv, 1)]
+        );
     }
 
     /// `class Foo1` (arity `first`, lines 1-4) with property `foo` on line
@@ -1039,8 +1244,9 @@ mod tests {
     /// Stands for: `Foo1<T>.foo` beside `Foo1.foo` (Newtonsoft
     /// `TestObjects/Foo1.cs`) is a declaration of its own: overload uid 1 of
     /// the property's base uid, in either order, read off the spans alone,
-    /// so the full build and the overlay view number it alike. Members of
-    /// two classes of one arity stay the tombstoned duplicate.
+    /// so the full build and the overlay view number it alike. A merge-class
+    /// member of two classes of one arity stays a duplicate, whose tombstone
+    /// hashes its own ordinal.
     #[test]
     fn test_file_uids_csharp_member_of_arity_twin_both_orders_later_uid() {
         let foo = uid::compute(NodeKind::Property, "N/Foo1.cs", Some("Foo1"), "foo");
@@ -1053,7 +1259,11 @@ mod tests {
             );
         }
         let uids = file_uids("N/Foo1.cs", &foo1_twins(0, 0), |d| *d);
-        assert_eq!(uids[3], !foo, "one arity: the second foo is a tombstone");
+        assert_eq!(
+            uids[3],
+            uid::tombstone(uid::overload(foo, 1)),
+            "one arity: the second foo is a tombstone"
+        );
     }
 
     /// Stands for: the member rule is C#'s alone. The same rows in a Java

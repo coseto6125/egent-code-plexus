@@ -28,10 +28,23 @@ pub fn compute(kind: NodeKind, path: &str, owner_class: Option<&str>, name: &str
 
 /// Whether a later declaration that repeats an earlier one's identity
 /// fields is an overload the index keeps as its own node (uid from
-/// [`overload`]), rather than a duplicate it tombstones. The uid has no
-/// parameter signature, so `save(int)` and `save(String)` share one.
+/// [`overload`]) in the declaration's overload set. The uid has no
+/// parameter signature, so `save(int)` and `save(String)` share one. A
+/// kind outside this set keeps its repeat as a node of its own too, as a
+/// redefinition, unless it [`merges_repeats`].
 pub fn keeps_overloads(kind: NodeKind) -> bool {
     matches!(kind, NodeKind::Method | NodeKind::Constructor)
+}
+
+/// Whether a later declaration that repeats an earlier one's identity
+/// fields is the same entity, merged into the earlier one and kept as a
+/// tombstone: one field assigned in two methods, a JS `var x` twice, a
+/// Python `x = 1; x = 2`. No such kind is a scope container.
+pub fn merges_repeats(kind: NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::Property | NodeKind::Variable | NodeKind::Const
+    )
 }
 
 /// UID of the `ordinal`-th (1-based) later overload of the declaration whose
@@ -43,11 +56,11 @@ pub fn overload(first: u64, ordinal: u32) -> u64 {
     h.digest()
 }
 
-/// UID of the tombstone that holds the slot of a later declaration repeating
-/// `uid` in a kind that keeps no overloads: the bit-inverse, which never
-/// equals the survivor's uid. It is not unique: two or more duplicates of
-/// one `uid` share one tombstone uid. A tombstone is isolated by its empty
-/// name and its absence from the symbol table, not by its uid.
+/// UID of the tombstone that holds the slot of a merged repeat
+/// ([`merges_repeats`]): the bit-inverse of `uid`. The caller passes the
+/// repeat's own [`overload`] uid, whose ordinal no other declaration of the
+/// base uid holds, so the tombstones of one base uid are pairwise distinct
+/// and never equal the survivor's uid.
 pub fn tombstone(uid: u64) -> u64 {
     !uid
 }
