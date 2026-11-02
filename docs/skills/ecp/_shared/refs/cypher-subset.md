@@ -72,7 +72,7 @@ Run `ecp schema reltypes` for each edge's LLM-utility category and heuristic fla
 
 ### Recently-added kinds (cheat sheet)
 
-- **EnumVariant** — `MATCH (e:Enum {name:'Status'})-[:Defines]->(v:EnumVariant) RETURN v.name`. `v.owner_class` carries the enum name.
+- **EnumVariant** — `MATCH (e:Enum {name:'Status'})-[:Defines]->(v:EnumVariant) RETURN v.name`. `v.ownerClass` carries the enum name.
 - **Annotation** + **Decorates** — `MATCH (c:Class)-[:Decorates]->(a:Annotation {name:'Injectable'}) RETURN c`. Resolves to the annotation class on hit; otherwise targets a synthetic Annotation node deduped per name (its `file_idx` is `SYNTHETIC_FILE_IDX`; consumers indexing `graph.files[...]` must guard via `Node::has_owning_file()`). `m.decorators` cypher property gives the raw string list.
 - **TransactionScope** + **OpensTxScope** — `MATCH (f:Function)-[:OpensTxScope]->(s:TransactionScope) RETURN f.name`. `s.name` carries the framework label (`tx_scope:{fn_name}#{spring-transactional|django-atomic|dotnet-transactional|symfony-transactional}`).
 - **PartOf** — a C# `partial` type part → its representative part: `MATCH (t:Class {name:'JsonReader'})<-[:PartOf]-(p) RETURN p.filePath`. `Extends` ends at the representative.

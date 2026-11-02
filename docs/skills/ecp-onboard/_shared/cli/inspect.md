@@ -14,7 +14,7 @@ Options:
           Repository path
 
       --format <FORMAT>
-          Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed toon. `json`: full-fidelity JSON. `text`: pretty-printed JSON. Every format except `json` drops the edge boilerplate
+          Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed toon. `json`: full-fidelity JSON. `text`: pretty-printed JSON. Every format except `json` drops the edge boilerplate. The symbol and each edge carry `ownerClass` (the stored owner, null for a nested fn) and `lexicalParent` (the enclosing chain `K::m`, else the stored owner); the llm and toon output drop an all-null one
 
           Possible values:
           - llm:  Default output: per-command LLM-tuned payload (token compression, rounded floats, trimmed timestamps, etc.) rendered through the toon encoder. Commands without command-specific tuning fall through to the same output as `Toon`
