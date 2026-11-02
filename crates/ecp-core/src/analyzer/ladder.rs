@@ -136,7 +136,11 @@ pub fn same_file<F: ResolveFacts>(
         ),
         None => Some(pick),
     };
-    match hit.filter(|&id| !free_only || facts.kind(id) != NodeKind::Method) {
+    // A C# explicit interface implementation is no member a bare name
+    // reaches: a later tier takes the call to an inherited one.
+    match hit.filter(|&id| {
+        (!free_only || facts.kind(id) != NodeKind::Method) && !facts.hidden_member(id)
+    }) {
         Some(id) => Resolution::bound(id, Tier::SameFile),
         None => Resolution::Unknown,
     }
@@ -1106,7 +1110,9 @@ pub fn qualified_member<F: QualifierFacts>(
             qualifier_is_type,
         },
     )?;
-    rust_path_may_bind(decls, site, id).then_some(id)
+    // A C# explicit interface implementation is no member a name reaches:
+    // the receiver-typing ladder then takes the call to an inherited one.
+    (rust_path_may_bind(decls, site, id) && !decls.hidden_member(id)).then_some(id)
 }
 
 /// A Rust path (`crate::x::parse`) names a method only through its owning

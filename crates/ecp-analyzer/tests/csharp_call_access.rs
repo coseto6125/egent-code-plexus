@@ -628,3 +628,26 @@ fn test_overlay_view_two_explicit_impls_dirty_later_overload_stays_hidden() {
     ));
     overlay_and_full(&files, &["Lib/UsePair.cs", "Lib/Pair.cs"], &["Q"]);
 }
+
+/// Contract (FU 755942c857a3, sibling of `G`): inside `Container` itself a
+/// bare `Remove()` (`K`) and `this.Remove()` (`L`) skip `Container`'s own
+/// explicit `IBag.Remove` exactly as `c.Remove()` does, and bind the
+/// inherited `Token.Remove()`. Before the fix the same-file and qualifier
+/// tiers picked the explicit implementation, the access rule refused it,
+/// and neither call had a row.
+#[test]
+fn test_resolve_call_bare_and_this_call_beside_explicit_impl_bind_inherited_member() {
+    let container = format!(
+        "{EXPLICIT_REMOVE}        public void K() {{ Remove(); }}\n        public void L() {{ this.Remove(); }}\n"
+    );
+    let graph = graph_of_files(&bag_files(BAG_REMOVE, &container));
+    let rows = |caller: &str| -> Vec<(String, u32)> {
+        remove_rows(&graph, caller)
+            .into_iter()
+            .map(|(file, row, _)| (file, row))
+            .collect()
+    };
+    let token = vec![("Lib/Token.cs".to_string(), 4)];
+    assert_eq!(rows("K"), token, "K");
+    assert_eq!(rows("L"), token, "L");
+}
