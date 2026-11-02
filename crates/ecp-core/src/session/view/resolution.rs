@@ -30,7 +30,9 @@ use crate::analyzer::lexical::{
     body_locals, decls_enclosing, fold_twins, inside_callable, lexical_chain_end,
     lexical_scope_kinds, twin_enclosing, LexicalFunctions,
 };
-use crate::analyzer::name_tiers::{self, import_tiers, name_tiers, NameTierFacts, TierPolicy};
+use crate::analyzer::name_tiers::{
+    self, import_tiers, name_tiers, HitBarrel, NameTierFacts, TierHit, TierPolicy,
+};
 use crate::analyzer::outcome::{Resolution, Tier};
 use crate::analyzer::overrides::{
     method_lookup, owner_types, rules_for, BaseRow, Decl, MethodIndex, MroCache, OverrideEdges,
@@ -315,6 +317,17 @@ pub(super) struct DirtyRustFacts {
 }
 
 impl<'a> OverlayFacts<'a> {
+    /// Drop the qualified and named-import answers, which read facts a later
+    /// pass changes: the candidate files the module trees place, which the
+    /// `Imports` and decorator passes no longer read
+    /// ([`Self::tree_free`]), and the dirty bases, which the same-file
+    /// pick's hierarchy rule and the named-import tier's member pick walk
+    /// once the pre-pass made them. Tier 3's memo reads neither and stays.
+    fn forget_tree_answers(&self) {
+        self.qualified.borrow_mut().clear();
+        self.named_imports.borrow_mut().clear();
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn new(
         graph: &'a ArchivedZeroCopyGraph,
@@ -1424,32 +1437,29 @@ impl<'a> OverlayFacts<'a> {
 
     /// The index's `Resolver::partial_type_member`: the member a bare C#
     /// call `name()` reaches in its caller's own type `owner` when that type
-    /// has `partial` parts ([`Self::partial_group`]). Only a member the type
-    /// owns in any part (0.85) or inherits (0.8) binds; `None` for any other
-    /// call or verdict.
+    /// has `partial` parts ([`Self::partial_group`]); [`LadderMember::NoEdge`]
+    /// for any other call.
     fn partial_type_member(
         &self,
         file: &str,
         name: &str,
         owner: &str,
         target: ResolveTarget,
-    ) -> Option<(u32, Tier)> {
-        let (ty, owner) = self.partial_caller_type(file, name, owner, target)?;
-        if self.partial_group(ty).is_empty() {
-            return None;
-        }
-        match type_ladder::member_via_type(
+    ) -> LadderMember {
+        let Some((ty, owner)) = self
+            .partial_caller_type(file, name, owner, target)
+            .filter(|&(ty, _)| !self.partial_group(ty).is_empty())
+        else {
+            return LadderMember::NoEdge;
+        };
+        type_ladder::member_via_type(
             self,
             TypeCandidates::Unique(ty, owner),
             file,
             name,
             target,
             true,
-        ) {
-            LadderMember::Owned(id) => Some((id, Tier::TypeOwned)),
-            LadderMember::Inherited(id) => Some((id, Tier::TypeHeritage)),
-            _ => None,
-        }
+        )
     }
 
     /// Whether the partial-type tier may bind a bare C# call `name()` that
@@ -2605,7 +2615,8 @@ fn resolve_overlay_name_ref(
                 facts,
             );
             let policy = TierPolicy::lookup(caller.language, target, &[]);
-            name_tiers(&tiers, name, &file.imports, policy, None)
+            name_tiers(&tiers, name, &file.imports, policy)
+                .map(TierHit::edge)
                 .into_iter()
                 .collect()
         },
@@ -2745,7 +2756,7 @@ impl<'v, 'a, 'm> OverlayTiers<'v, 'a, 'm> {
         name: &str,
         imports: &[RawImport],
         target: ResolveTarget,
-    ) -> Option<(usize, u32)> {
+    ) -> Option<reexport::NamedImport> {
         let facts = self.members.facts;
         let importer = self.source();
         if facts.tree_free.get() || !is_rust_source(std::path::Path::new(importer)) {
@@ -2794,12 +2805,7 @@ impl<'v, 'a> NameTierFacts for OverlayTiers<'v, 'a, '_> {
         self.language
     }
 
-    fn partial_type_member(
-        &self,
-        name: &str,
-        owner: &str,
-        target: ResolveTarget,
-    ) -> Option<(u32, Tier)> {
+    fn partial_type_member(&self, name: &str, owner: &str, target: ResolveTarget) -> LadderMember {
         self.members
             .facts
             .partial_type_member(self.source(), name, owner, target)
@@ -2836,14 +2842,7 @@ impl<'v, 'a> NameTierFacts for OverlayTiers<'v, 'a, '_> {
             target,
             |_| follow,
         )
-        .or_else(|| {
-            let (position, decl) = self.rust_tree_import(name, imports, target)?;
-            Some(reexport::NamedImport {
-                decl,
-                position,
-                barrel: None,
-            })
-        });
+        .or_else(|| self.rust_tree_import(name, imports, target));
         debug_assert!(hit
             .as_ref()
             .is_none_or(|hit| !self.replaced.contains_key(&hit.decl)));
@@ -2889,11 +2888,11 @@ impl<'v, 'a> NameTierFacts for OverlayTiers<'v, 'a, '_> {
         imports: &[RawImport],
         names: (&str, &str, &str),
         target: ResolveTarget,
-        call: bool,
+        call: Option<CallPick<'_>>,
     ) -> LadderMember {
         self.members
             .facts
-            .receiver_ladder(self.source(), imports, names, target, call)
+            .receiver_ladder(self.source(), imports, names, target, call.is_some())
     }
 
     /// The clean base and the overlay declarations named `name` in the kinds
@@ -2905,10 +2904,10 @@ impl<'v, 'a> NameTierFacts for OverlayTiers<'v, 'a, '_> {
         name: &str,
         imports: &[RawImport],
         target: ResolveTarget,
-        nearest: bool,
-        free_only: bool,
+        call: Option<CallPick<'_>>,
     ) -> Resolution {
         let facts = self.members.facts;
+        let (nearest, free_only) = (call.is_some(), call.is_some_and(|call| call.free_only));
         let key = (
             self.file_ord,
             (imports.as_ptr() as usize, imports.len()),
@@ -2954,7 +2953,7 @@ impl<'v, 'a> NameTierFacts for OverlayTiers<'v, 'a, '_> {
                 .chain(overlay_candidates.iter().copied())
                 .filter(admits)
         };
-        let hit = name_tiers::global_tier(self, name, imports, target, nearest, candidates);
+        let hit = name_tiers::global_tier(self, name, imports, target, call, candidates);
         debug_assert!(hit
             .edge()
             .is_none_or(|(target, _)| !self.replaced.contains_key(&target)));
@@ -3325,22 +3324,8 @@ impl<'a> RustModules<'a> {
     /// `use` while the module declares no `name`, may be a `pub use` and
     /// answers [`ladder::Published::Unknown`]. Otherwise the module's own.
     fn published(&self, module: &str, name: &str) -> ladder::Published<'static> {
-        let imports = match self.dirty.get(module) {
-            Some((file, _)) => FileImports::Parsed(&file.imports),
-            None => {
-                let Some(rows) = self
-                    .graph
-                    .file_idx_of(module)
-                    .and_then(|idx| self.graph.file_imports(idx))
-                else {
-                    return ladder::Published::Own;
-                };
-                FileImports::Archived {
-                    rows,
-                    pool: self.graph.string_pool.as_slice(),
-                    files: self.graph.files.as_slice(),
-                }
-            }
+        let Some(imports) = self.module_imports(module) else {
+            return ladder::Published::Own;
         };
         let mut glob = false;
         for import in imports.iter() {
@@ -3358,18 +3343,24 @@ impl<'a> RustModules<'a> {
 
     /// What `module` of `root` publishes `name` through where
     /// [`Self::published`] answers [`ladder::Published::Unknown`] for the
-    /// importer at `importer`: the one `use` binding `name`, else the one
-    /// glob `use`, read as the index reads a `pub use` row.
+    /// importer at `importer`: the one `use` binding `name`, read as the
+    /// index reads a `pub use` row.
     ///
     /// Why that is sound without the `pub`: an importer outside `module`'s
     /// subtree that names `name` through `module`, which declares no item
     /// `name`, compiles only if a `use` of `module` publishes `name` to it.
-    /// So that `use` is a `pub` / `pub(..)` use, the row the index records,
-    /// and reading it gives the index's answer. A descendant of `module`
-    /// also sees a private `use`, which the index does not follow, so it
-    /// keeps `Unknown`; so do two `use`s or two globs that could bind
-    /// `name`, since the index keeps only the `pub` one. `graph.bin` stores
-    /// no import visibility; overlay P3's module-tree rows, which carry it,
+    /// So that `use` is a `pub` / `pub(..)` use. The index records one only
+    /// through the line regexes `pub_use_re` / `pub_use_group_re`
+    /// (`module_tree.rs`), which miss an attribute on the same line, a
+    /// nested group and a group with no prefix: there the overlay follows a
+    /// real `pub use` the index does not (an FU tracks the index side). A
+    /// descendant of `module` also sees a private `use`, which the index
+    /// does not follow, so it keeps `Unknown`; so do two `use`s that could
+    /// bind `name`, since the index keeps only the `pub` one. A glob keeps
+    /// it too: beside it the `use` the parse holds may be `#[cfg]`-off or in
+    /// a nested module while the glob publishes `name`, and a private glob
+    /// beside a macro-made `name` publishes nothing. `graph.bin` stores no
+    /// import visibility; overlay P3's module-tree rows, which carry it,
     /// retire this reading.
     fn reexport(
         &self,
@@ -3391,35 +3382,28 @@ impl<'a> RustModules<'a> {
         {
             return ladder::Published::Unknown;
         }
-        let sole = |bound: &str| {
-            let mut rows = uses.rows.iter().filter(|row| row.bound == bound);
-            match (rows.next(), rows.next()) {
-                (Some(row), None) => Some(row),
-                _ => None,
-            }
-        };
-        let row = if uses.rows.iter().any(|row| row.bound == name) {
-            // A `use` and an own item of one name stand in two namespaces,
-            // and the path may name the own item.
-            if self.declares(module, name, |_| true) {
-                return ladder::Published::Unknown;
-            }
-            sole(name)
-        } else {
-            sole("*")
-        };
-        match row {
+        let mut rows = uses.rows.iter().filter(|row| row.bound == name);
+        let (
             Some(UseRow {
                 prefix: Some(prefix),
                 original,
                 ..
-            }) => ladder::Published::ReExport(ladder::ReExport {
-                prefix,
-                original,
-                containing,
             }),
-            _ => ladder::Published::Unknown,
+            None,
+        ) = (rows.next(), rows.next())
+        else {
+            return ladder::Published::Unknown;
+        };
+        // A `use` and an own item of one name stand in two namespaces, and
+        // the path may name the own item.
+        if uses.rows.iter().any(|row| row.bound == "*") || self.declares(module, name, |_| true) {
+            return ladder::Published::Unknown;
         }
+        ladder::Published::ReExport(ladder::ReExport {
+            prefix,
+            original,
+            containing,
+        })
     }
 
     /// The `use` rows and tree positions of the Rust file `module`
@@ -3427,7 +3411,6 @@ impl<'a> RustModules<'a> {
     fn module_uses(&self, module: &'a str) -> Option<&ModuleUses<'a>> {
         let graph = self.graph;
         let pool = &graph.string_pool;
-        let is_rust = |path: &str| path.ends_with(".rs");
         let cells = self.uses.get_or_init(|| {
             let base = graph
                 .files
@@ -3438,24 +3421,14 @@ impl<'a> RustModules<'a> {
                 .keys()
                 .copied()
                 .chain(base)
-                .filter(|path| is_rust(path))
+                .filter(|path| is_rust_source(std::path::Path::new(path)))
                 .map(|path| (path, OnceCell::new()))
                 .collect()
         });
         let cell = cells.get(module)?;
         Some(cell.get_or_init(|| {
-            let imports = match self.dirty.get(module) {
-                Some(&(file, _)) => Some(FileImports::Parsed(&file.imports)),
-                None => graph
-                    .file_idx_of(module)
-                    .and_then(|idx| graph.file_imports(idx))
-                    .map(|rows| FileImports::Archived {
-                        rows,
-                        pool: pool.as_slice(),
-                        files: graph.files.as_slice(),
-                    }),
-            };
-            let rows = imports
+            let rows = self
+                .module_imports(module)
                 .into_iter()
                 .flat_map(FileImports::iter)
                 .map(|import| {
@@ -3482,6 +3455,23 @@ impl<'a> RustModules<'a> {
                 trees: self.caller(module).targets,
             }
         }))
+    }
+
+    /// The import rows of `module`: a dirty file's fresh parse, else the
+    /// archived rows. `None` for a file the graph does not hold.
+    fn module_imports(&self, module: &str) -> Option<FileImports<'a>> {
+        let graph = self.graph;
+        match self.dirty.get(module) {
+            Some(&(file, _)) => Some(FileImports::Parsed(&file.imports)),
+            None => graph
+                .file_idx_of(module)
+                .and_then(|idx| graph.file_imports(idx))
+                .map(|rows| FileImports::Archived {
+                    rows,
+                    pool: graph.string_pool.as_slice(),
+                    files: graph.files.as_slice(),
+                }),
+        }
     }
 
     /// The file of the module path `module` (`b::util`, `crate::a`) from
@@ -3706,14 +3696,14 @@ where
             let key = (site.name(), self.owner, self.heritage.as_ptr());
             let memo = self.module_calls.borrow().get(&key).copied();
             let hit = memo.unwrap_or_else(|| {
-                let hit = name_tiers(&tiers, site.name(), imports, policy, None);
+                let hit = name_tiers(&tiers, site.name(), imports, policy).map(TierHit::edge);
                 self.module_calls.borrow_mut().insert(key, hit);
                 hit
             });
             return Resolution::from_ladder(hit);
         }
         let lookup = typed.map_or(site, CallSite::Plain);
-        let hit = name_tiers(&tiers, lookup.name(), imports, policy, None);
+        let hit = name_tiers(&tiers, lookup.name(), imports, policy).map(TierHit::edge);
         // A hit in the caller's file came before the partial-type tier.
         let rel_path = self.file.rel_path.as_str();
         if self.caller.language == Language::CSharp
@@ -3748,8 +3738,8 @@ where
             member,
             &self.file.imports,
             TierPolicy::lookup(self.caller.language, target, heritage),
-            None,
         )
+        .map(TierHit::edge)
     }
 
     fn names_type_and_member(&self, callee: &str) -> bool {
@@ -3773,13 +3763,7 @@ where
             call: Some(call),
             heritage,
         };
-        name_tiers(
-            &self.tiers(self.names.1),
-            path,
-            &self.file.imports,
-            policy,
-            None,
-        )
+        name_tiers(&self.tiers(self.names.1), path, &self.file.imports, policy).map(TierHit::edge)
     }
 
     /// The import tiers alone ([`import_tiers`], the index's
@@ -3801,8 +3785,8 @@ where
             &self.file.imports,
             bind_imports,
             target,
-            None,
         )
+        .map(TierHit::edge)
     }
 
     fn construction_target(&self, type_id: u32) -> u32 {
@@ -4244,7 +4228,7 @@ fn resolve_type<'s>(
         facts,
     );
     let policy = TierPolicy::lookup(caller.language, ResolveTarget::Type, &[]);
-    name_tiers(&tiers, name, imports, policy, None)
+    name_tiers(&tiers, name, imports, policy).map(TierHit::edge)
 }
 
 /// The [`FileMeta`] of the base node `idx`'s file, memoized per file.
@@ -4757,17 +4741,22 @@ impl ImportEdgeFacts for OverlayImportEdges<'_, '_, '_> {
             )
         };
         let imports = self.file.imports.as_slice();
-        let mut barrel = None;
         // The index's `Resolver::resolve_import_binding` (the import tiers
         // alone) or `Resolver::resolve_import` (the whole ladder for a plain
         // name, no call site and no heritage).
         let hit = if binding_only {
-            import_tiers(&tiers, name, imports, true, target, Some(&mut barrel))
+            import_tiers(&tiers, name, imports, true, target)
         } else {
             let policy = TierPolicy::lookup(self.language, target, &[]);
-            name_tiers(&tiers, name, imports, policy, Some(&mut barrel))
+            name_tiers(&tiers, name, imports, policy)
         };
-        (hit.into_iter().collect(), barrel)
+        match hit {
+            Some(hit) => (
+                vec![(hit.id, hit.confidence)],
+                hit.barrel.map(HitBarrel::into_arc),
+            ),
+            None => (Vec::new(), None),
+        }
     }
 
     fn file_node(&self, path: &str) -> Option<u32> {
@@ -4808,10 +4797,7 @@ fn resolve_imports<'a>(
         return edges;
     }
     facts.tree_free.set(true);
-    // The call pass's qualified and named-import answers read candidate
-    // files through the module trees.
-    facts.qualified.borrow_mut().clear();
-    facts.named_imports.borrow_mut().clear();
+    facts.forget_tree_answers();
     let base_metas = RefCell::new(&mut *base_metas);
     let guesses = OnceCell::new();
     for (file_ord, file) in files.iter().enumerate() {
@@ -4915,10 +4901,7 @@ fn resolve_decorates<'a>(
         return;
     }
     if !facts.tree_free.replace(true) {
-        // The call pass's qualified and named-import answers read
-        // candidate files through the module trees.
-        facts.qualified.borrow_mut().clear();
-        facts.named_imports.borrow_mut().clear();
+        facts.forget_tree_answers();
     }
     let Decorated {
         survivors,
@@ -5512,12 +5495,7 @@ pub(super) fn resolve_edges(
     let _ = facts
         .dirty_supertypes
         .set(dirty_supertypes(&facts, base_len, &heritage));
-    // The pre-pass's own qualified lookups ran before the dirty bases
-    // existed, and the same-file pick's hierarchy rule walks them; so does
-    // the named-import tier's member pick. Tier 3's memo reads no bases
-    // and stays.
-    facts.qualified.borrow_mut().clear();
-    facts.named_imports.borrow_mut().clear();
+    facts.forget_tree_answers();
     // Pass 2's `Extends` / `Implements` edges, once the bases exist.
     for edge in dirty_heritage_edges(
         graph,
@@ -5942,30 +5920,27 @@ pub(super) fn resolve_edges(
                     continue;
                 }
                 // The index's `Resolver::resolve_field_read`.
+                let field_metas = RefCell::new(&mut base_metas);
+                let tiers = || {
+                    OverlayTiers::new(
+                        graph,
+                        file_ord,
+                        caller,
+                        &field_metas,
+                        (&fields, &types, &qualifiers),
+                        (nodes, replaced, dirty_base),
+                        &facts,
+                    )
+                };
                 let hit = match ladder::field_read(&facts, &file.rel_path, raw) {
                     FieldRead::Bound(hit) => Some((hit.id, hit.confidence)),
-                    read => {
-                        let field_metas = RefCell::new(&mut base_metas);
-                        let tiers = OverlayTiers::new(
-                            graph,
-                            file_ord,
-                            caller,
-                            &field_metas,
-                            (&fields, &types, &qualifiers),
-                            (nodes, replaced, dirty_base),
-                            &facts,
-                        );
-                        match read {
-                            FieldRead::Qualified => {
-                                let policy =
-                                    TierPolicy::lookup(caller.language, ResolveTarget::Field, &[]);
-                                name_tiers(&tiers, raw, &file.imports, policy, None)
-                            }
-                            _ => tiers
-                                .global(raw, &file.imports, ResolveTarget::Field, false, false)
-                                .edge(),
-                        }
+                    FieldRead::Qualified => {
+                        let policy = TierPolicy::lookup(caller.language, ResolveTarget::Field, &[]);
+                        name_tiers(&tiers(), raw, &file.imports, policy).map(TierHit::edge)
                     }
+                    FieldRead::Global => tiers()
+                        .global(raw, &file.imports, ResolveTarget::Field, None)
+                        .edge(),
                 };
                 let Some((target, confidence)) = hit else {
                     continue;
