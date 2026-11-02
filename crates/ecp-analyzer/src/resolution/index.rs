@@ -1202,6 +1202,20 @@ impl SymbolTable {
             .and_then(|ids| ids.first().copied())
     }
 
+    /// Whether `file_path` declares a node named `node_name` whose kind
+    /// `holds` accepts.
+    pub(crate) fn declares_in_file(
+        &self,
+        file_path: &str,
+        node_name: &str,
+        holds: impl Fn(NodeKind) -> bool,
+    ) -> bool {
+        self.file_scoped
+            .get(file_path)
+            .and_then(|file_map| file_map.get(node_name))
+            .is_some_and(|ids| ids.iter().any(|&id| holds(self.node_kinds[id as usize])))
+    }
+
     /// Kind-aware variant of [`lookup_in_file`]: scans the per-name node_id
     /// list and returns the first whose `node_kinds[id]` matches the target
     /// predicate (Callable / Type). Skips same-name-different-kind nodes so

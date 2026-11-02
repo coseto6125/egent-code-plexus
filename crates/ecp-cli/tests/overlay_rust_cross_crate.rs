@@ -626,3 +626,84 @@ fn test_overlay_rust_self_path_call_matches_reindex() {
         assert_eq!(overlay, reindex, "{label}");
     }
 }
+
+/// FU-2026-10-26-045ff15cd46b: `b::m` writes `pub use self::inner::*;`
+/// beside its own `f` and `h`, and `inner` declares an `h` too. The module's
+/// own items shadow the glob, so both sides bind `m.rs`. A name only the
+/// glob gives (`g`) stays out: the overlay cannot see whether that `use` is
+/// `pub`, so it binds no edge through it.
+#[test]
+fn test_overlay_rust_glob_pub_use_own_item_matches_reindex() {
+    const M: &str = "crates/b/src/m.rs";
+    let caller = "pub fn t() {\n    b::m::f();\n    b::m::h();\n}\n";
+    let mut files = owned(&[
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\n",
+        ),
+        (
+            "crates/a/Cargo.toml",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\n[dependencies]\nb = { path = \"../b\" }\n",
+        ),
+        (
+            "crates/b/Cargo.toml",
+            "[package]\nname = \"b\"\nversion = \"0.1.0\"\n",
+        ),
+        ("crates/b/src/lib.rs", "pub mod m;\n"),
+        (
+            M,
+            "mod inner;\npub use self::inner::*;\npub fn f() {}\npub fn h() {}\n",
+        ),
+        ("crates/b/src/m/inner.rs", "pub fn g() {}\npub fn h() {}\n"),
+    ]);
+    files.push((CALLER.to_string(), caller.to_string()));
+    for (label, edited) in [
+        ("touched", caller.to_string()),
+        ("one-line edit", one_line_edit(caller)),
+    ] {
+        let (reindex, overlay) = reindex_and_overlay(&files, CALLER, &edited, &["t"]);
+        assert_module_tree_binds(&reindex, &[(M, "f"), (M, "h")], label);
+        assert_eq!(overlay, reindex, "{label}");
+    }
+}
+
+/// Rust `Self::tonly()` in `impl T for S`, where `tonly` is only `T`'s
+/// default method, takes the receiver-typing ladder as `S::tonly()` does,
+/// on both sides. In `impl T for U` the same callee binds `U`'s inherent
+/// `tonly`: two callers with different impl types never share an answer.
+#[test]
+fn test_overlay_rust_self_path_trait_default_matches_reindex() {
+    const LIB: &str = "src/lib.rs";
+    let lib = "pub trait T {\n    fn tonly() -> i32 { 1 }\n    fn s_self() -> i32 { 0 }\n    fn s_type() -> i32 { 0 }\n    fn u_self() -> i32 { 0 }\n}\n\
+        pub struct S;\nimpl T for S {\n    fn s_self() -> i32 { Self::tonly() }\n    fn s_type() -> i32 { S::tonly() }\n}\n\
+        pub struct U;\nimpl U {\n    pub fn tonly() -> i32 { 2 }\n}\n\
+        impl T for U {\n    fn u_self() -> i32 { Self::tonly() }\n}\n";
+    let files = owned(&[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n",
+        ),
+        (LIB, lib),
+    ]);
+    for (label, edited, shift) in [
+        ("touched", lib.to_string(), 0),
+        ("one-line edit", one_line_edit(lib), 1),
+    ] {
+        let (reindex, overlay) =
+            reindex_and_overlay(&files, LIB, &edited, &["s_self", "s_type", "u_self"]);
+        let bound: Vec<(&str, u32)> = reindex
+            .iter()
+            .map(|call| (call.callee.as_str(), call.callee_line))
+            .collect();
+        assert_eq!(
+            bound,
+            [
+                ("tonly", 2 + shift),
+                ("tonly", 2 + shift),
+                ("tonly", 14 + shift)
+            ],
+            "{label}: T.tonly twice, U.tonly: {reindex:#?}"
+        );
+        assert_eq!(overlay, reindex, "{label}");
+    }
+}

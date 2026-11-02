@@ -999,3 +999,55 @@ fn test_module_import_through_renamed_reexport_never_binds_a_private_namesake() 
         targets_of(&files, "lookup")
     );
 }
+
+/// `other::m` writes `pub use self::inner::*;` beside items of its own. Its
+/// `inner` re-exports `inner::deep` by a glob too.
+fn glob_module(app_lib: &str) -> Vec<(String, String)> {
+    two_crates(
+        app_lib,
+        &[
+            ("crates/other/src/lib.rs", "pub mod m;\n"),
+            (
+                "crates/other/src/m.rs",
+                "mod inner;\nmod k;\npub use self::inner::*;\npub fn f() {}\npub fn h() {}\nfn p() {}\n",
+            ),
+            (
+                "crates/other/src/m/inner.rs",
+                "mod deep;\npub use self::deep::*;\npub fn g() {}\npub fn h() {}\npub fn k() {}\npub fn p() {}\npub fn e() {}\n",
+            ),
+            ("crates/other/src/m/k.rs", "pub fn run() {}\n"),
+            (
+                "crates/other/src/m/inner/deep.rs",
+                "pub fn d() {}\npub fn e() {}\n",
+            ),
+        ],
+    )
+}
+
+/// FU-2026-10-26-045ff15cd46b: a glob `pub use` publishes a name only where
+/// the module declares no item of that name in the same namespace, whatever
+/// the item's visibility. `f`, `h` and the private `p` are `m`'s own (`h`
+/// and `p` also come through the glob); `g` comes only through the glob;
+/// `mod k;` is a type, so a call of `k` takes the glob's `fn k`; `d` and
+/// `e` cross two globs, and `inner`'s own `e` shadows the second one.
+#[test]
+fn test_glob_pub_use_own_item_shadows_the_glob_in_its_namespace() {
+    let files = glob_module(
+        "pub fn go() {\n    other::m::f();\n    other::m::g();\n    other::m::h();\n    other::m::k();\n    other::m::p();\n    other::m::d();\n    other::m::e();\n}\n",
+    );
+    for (callee, want) in [
+        ("f", "crates/other/src/m.rs"),
+        ("h", "crates/other/src/m.rs"),
+        ("p", "crates/other/src/m.rs"),
+        ("g", "crates/other/src/m/inner.rs"),
+        ("k", "crates/other/src/m/inner.rs"),
+        ("e", "crates/other/src/m/inner.rs"),
+        ("d", "crates/other/src/m/inner/deep.rs"),
+    ] {
+        assert_eq!(
+            targets_of(&files, callee),
+            vec![want.to_string()],
+            "{callee}"
+        );
+    }
+}

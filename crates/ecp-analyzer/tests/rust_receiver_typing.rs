@@ -518,3 +518,40 @@ fn test_rust_self_path_without_impl_owner_or_as_trait_gets_no_impl_edge() {
         callee_owners(&g, "self_as_trait", "thelper")
     );
 }
+
+/// `tonly` is only a default method of trait `T`; `U` declares an inherent
+/// `tonly` of its own.
+const SELF_TRAIT_DEFAULT_RS: &str = r#"pub trait T {
+    fn tonly() -> i32 { 1 }
+    fn s_self() -> i32 { 0 }
+    fn s_type() -> i32 { 0 }
+    fn u_self() -> i32 { 0 }
+}
+pub struct S;
+impl T for S {
+    fn s_self() -> i32 { Self::tonly() }
+    fn s_type() -> i32 { S::tonly() }
+}
+pub struct U;
+impl U {
+    pub fn tonly() -> i32 { 2 }
+}
+impl T for U {
+    fn u_self() -> i32 { Self::tonly() }
+}
+"#;
+
+/// In `impl T for S`, `Self::tonly()` reaches the trait's default method
+/// through the receiver-typing ladder, as `S::tonly()` does; in `impl T for
+/// U` it binds `U`'s inherent `tonly`.
+#[test]
+fn test_rust_self_path_call_trait_default_only_binds_through_heritage() {
+    let g = build(&[("src/lib.rs", SELF_TRAIT_DEFAULT_RS)]);
+    let t = vec![("src/lib.rs".to_string(), "T".to_string())];
+    assert_eq!(callee_owners(&g, "s_type", "tonly"), t, "control");
+    assert_eq!(callee_owners(&g, "s_self", "tonly"), t);
+    assert_eq!(
+        callee_owners(&g, "u_self", "tonly"),
+        vec![("src/lib.rs".to_string(), "U".to_string())]
+    );
+}

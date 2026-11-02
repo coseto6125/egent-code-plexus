@@ -1161,13 +1161,9 @@ pub fn qualified<'h, F: QualifierFacts>(
     if site.qualifier == CallSite::SUPER_RECEIVER && site.caller.language == Language::Python {
         return super_member(facts, site, heritage);
     }
-    let owner = site.call.and_then(|call| call.owner).and_then(owner_key);
-    let site = match (site.language, site.qualifier, owner) {
-        (Language::Rust, "Self", Some(owner)) => QualifiedSite {
-            qualifier: owner,
-            ..site
-        },
-        _ => site,
+    let site = QualifiedSite {
+        qualifier: self_qualifier(site.language, site.qualifier, site.call),
+        ..site
     };
     if let Some(id) = qualified_member(facts, site, heritage, stem) {
         return (Resolution::bound(id, Tier::QualifierScoped), None);
@@ -1178,6 +1174,21 @@ pub fn qualified<'h, F: QualifierFacts>(
         }
     }
     (Resolution::Unknown, None)
+}
+
+/// The qualifier a Rust `Self::m()` names: the owner key of the caller's
+/// own type (`call.owner`). Any other qualifier, and `Self` with no owner,
+/// as written. [`qualified`] and each side's receiver-typing ladder read it.
+pub fn self_qualifier<'s>(
+    language: Language,
+    qualifier: &'s str,
+    call: Option<CallPick<'s>>,
+) -> &'s str {
+    let owner = call.and_then(|call| call.owner).and_then(owner_key);
+    match (language, qualifier, owner) {
+        (Language::Rust, "Self", Some(owner)) => owner,
+        _ => qualifier,
+    }
 }
 
 /// The most `pub use` hops [`module_tree_item`] follows from one item.
@@ -1221,6 +1232,48 @@ pub enum TreeItem<P> {
     Unknown,
 }
 
+/// The Rust namespace a path's item is looked up in. A glob `pub use`
+/// publishes a name only in the namespaces where the module declares no
+/// item of that name itself, whatever that item's visibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Namespace {
+    /// `fn`, `const`, `static`, and a unit or tuple struct's constructor.
+    Value,
+    /// `mod`, `struct`, `enum`, `trait`, `type`.
+    Type,
+}
+
+impl Namespace {
+    /// The namespace a lookup of `target`'s kinds names.
+    pub fn of(target: ResolveTarget) -> Self {
+        match target {
+            ResolveTarget::Type | ResolveTarget::Qualifier => Self::Type,
+            _ => Self::Value,
+        }
+    }
+
+    /// Whether an item of `kind` stands in this namespace.
+    pub fn holds(self, kind: NodeKind) -> bool {
+        match self {
+            // A `struct` counts as a value too: the node does not tell a
+            // unit or tuple struct (which has a constructor) from one with
+            // named fields.
+            Self::Value => matches!(
+                kind,
+                NodeKind::Function | NodeKind::Const | NodeKind::Variable | NodeKind::Struct
+            ),
+            Self::Type => matches!(
+                kind,
+                NodeKind::Module
+                    | NodeKind::Struct
+                    | NodeKind::Enum
+                    | NodeKind::Trait
+                    | NodeKind::Typedef
+            ),
+        }
+    }
+}
+
 /// What the Rust module-tree tier (R14) reads: the module trees of the
 /// workspace's Cargo targets. Each method answers a question about one
 /// tree, one module or one caller; [`module_tree_item`] and
@@ -1258,6 +1311,9 @@ pub trait ModuleTreeFacts {
     ) -> Option<Self::Module>;
     /// What `module` of `root` publishes `name` through.
     fn published(&self, root: Self::Root, module: Self::Module, name: &str) -> Published<'_>;
+    /// Whether `module`'s own file declares an item named `name` in
+    /// `namespace`, of any visibility.
+    fn declares(&self, module: Self::Module, name: &str, namespace: Namespace) -> bool;
     /// The stored file of `module`. `None` for a file the side cannot name.
     fn module_file(&self, module: Self::Module) -> Option<Self::File>;
     /// Each Cargo target (the lib, each bin) that declares the file
@@ -1327,8 +1383,9 @@ fn tree_walk<F: ModuleTreeFacts>(
     Some((module, at))
 }
 
-/// The `pub use` chain from `item` of `module`. `None` when the module
-/// publishes `item` itself, or when the chain leads back to it, past the
+/// The `pub use` chain from `item` of `module`, looked up in `namespace`.
+/// `None` when the module publishes `item` itself (its own item of that
+/// namespace shadows a glob), or when the chain leads back to it, past the
 /// hop limit, or to a file the side cannot name: the caller keeps
 /// `(module, item)` then.
 fn tree_follow<F: ModuleTreeFacts>(
@@ -1336,6 +1393,7 @@ fn tree_follow<F: ModuleTreeFacts>(
     root: F::Root,
     module: F::Module,
     item: &str,
+    namespace: Namespace,
     depth: u8,
 ) -> Option<TreeItem<F::File>> {
     if depth >= MAX_REEXPORT_HOPS || item.is_empty() {
@@ -1347,6 +1405,9 @@ fn tree_follow<F: ModuleTreeFacts>(
         Published::ReExport(entry) => entry,
     };
     let target = if entry.original == "*" {
+        if facts.declares(module, item, namespace) {
+            return None;
+        }
         item
     } else {
         entry.original
@@ -1377,7 +1438,7 @@ fn tree_follow<F: ModuleTreeFacts>(
     if next == module && next_item == item {
         return None;
     }
-    if let Some(deeper) = tree_follow(facts, root, next, next_item, depth + 1) {
+    if let Some(deeper) = tree_follow(facts, root, next, next_item, namespace, depth + 1) {
         return Some(deeper);
     }
     Some(TreeItem::Found {
@@ -1392,12 +1453,15 @@ fn tree_follow<F: ModuleTreeFacts>(
 /// target; `std` and the other external crates none. The deepest module a
 /// prefix of the path names holds the next segment as its item, and the
 /// `pub use` chain from that item, at most 16 hops, gives the defining
-/// module. `None` for a path of one segment, an unknown head, or a module
-/// file the side cannot name.
+/// module. The path's last segment is looked up in `last`, an item a later
+/// segment follows (`m::S` of `m::S::new`) in the type namespace. `None`
+/// for a path of one segment, an unknown head, or a module file the side
+/// cannot name.
 pub fn module_tree_item<F: ModuleTreeFacts>(
     facts: &F,
     caller: &str,
     path: &str,
+    last: Namespace,
 ) -> Option<TreeItem<F::File>> {
     let segs: Vec<&str> = path.split("::").collect();
     if segs.len() < 2 {
@@ -1406,7 +1470,12 @@ pub fn module_tree_item<F: ModuleTreeFacts>(
     let (root, combined) = tree_anchor(facts, caller, &segs)?;
     let (module, at) = tree_walk(facts, root, &combined)?;
     let item = &combined[at];
-    if let Some(found) = tree_follow(facts, root, module, item, 0) {
+    let namespace = if at + 1 == combined.len() {
+        last
+    } else {
+        Namespace::Type
+    };
+    if let Some(found) = tree_follow(facts, root, module, item, namespace, 0) {
         return Some(found);
     }
     Some(TreeItem::Found {
@@ -1492,7 +1561,9 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
     member: &str,
     target: ResolveTarget,
 ) -> Option<u32> {
-    let TreeItem::Found { file, item } = module_tree_item(facts, caller, callee)? else {
+    let TreeItem::Found { file, item } =
+        module_tree_item(facts, caller, callee, Namespace::of(target))?
+    else {
         return None;
     };
     let file = file.as_ref();
@@ -1522,7 +1593,12 @@ pub fn crate_module<F: ModuleTreeFacts, D: ResolveFacts>(
         return CrateModule::Local;
     }
     CrateModule::Placed(
-        match module_tree_item(facts, source, &format!("{module_path}::{member}")) {
+        match module_tree_item(
+            facts,
+            source,
+            &format!("{module_path}::{member}"),
+            Namespace::of(target),
+        ) {
             Some(TreeItem::Found { file, item })
                 if item == member
                     && decls
@@ -3710,6 +3786,8 @@ mod tests {
         reexports: Vec<ReExportRow>,
         /// `(module file, name)` a `use` of unknown visibility names.
         unknown: Vec<(&'static str, &'static str)>,
+        /// `(module file, name, kind)` of each item a module declares.
+        own: Vec<(&'static str, &'static str, NodeKind)>,
     }
 
     impl ModuleTreeFacts for Tree {
@@ -3778,6 +3856,11 @@ mod tests {
                 None => Published::Own,
             }
         }
+        fn declares(&self, module: &'static str, name: &str, namespace: Namespace) -> bool {
+            self.own
+                .iter()
+                .any(|&(m, n, kind)| m == module && n == name && namespace.holds(kind))
+        }
         fn module_file(&self, module: &'static str) -> Option<&'static str> {
             Some(module)
         }
@@ -3829,6 +3912,7 @@ mod tests {
                 (B_LIB, "*", segments(&["inner"]), "*".into(), vec![]),
             ],
             unknown: vec![("crates/a/src/x.rs", "hidden")],
+            own: vec![(B_LIB, "both", F), (B_LIB, "kid", NodeKind::Module)],
         };
         let decls = vec![
             (B_M, "f", F, None),
@@ -3841,6 +3925,10 @@ mod tests {
             (A_LIB, "x", NodeKind::Module, None),
             (A_LIB, "gone", NodeKind::Module, None),
             ("crates/a/src/x.rs", "hidden", F, None),
+            (B_LIB, "both", F, None),
+            ("crates/b/src/inner.rs", "both", F, None),
+            (B_LIB, "kid", NodeKind::Module, None),
+            ("crates/b/src/inner.rs", "kid", F, None),
         ];
         (tree, decls)
     }
@@ -3859,9 +3947,13 @@ mod tests {
         assert_eq!(member(&tree, &fake, A_LIB, "b::m::f"), Some(0));
         for callee in ["nope::m::f", "std::m::f", "core::m::f"] {
             assert_eq!(member(&tree, &fake, A_LIB, callee), None, "{callee}");
-            assert_eq!(module_tree_item(&tree, A_LIB, callee), None, "{callee}");
+            assert_eq!(
+                module_tree_item(&tree, A_LIB, callee, Namespace::Value),
+                None,
+                "{callee}"
+            );
         }
-        assert_eq!(module_tree_item(&tree, A_LIB, "f"), None);
+        assert_eq!(module_tree_item(&tree, A_LIB, "f", Namespace::Value), None);
     }
 
     /// R14: the table gives no crate for a name two of its rows carry, so
@@ -3900,17 +3992,48 @@ mod tests {
         assert_eq!(member(&tree, &fake, A_LIB, "b::globbed"), Some(3));
         assert_eq!(member(&tree, &fake, A_LIB, "crate::f"), Some(0));
         assert_eq!(
-            module_tree_item(&tree, A_LIB, "b::make"),
+            module_tree_item(&tree, A_LIB, "b::make", Namespace::Value),
             Some(TreeItem::Found {
                 file: "crates/b/src/inner.rs",
                 item: "made".into()
             })
         );
         assert_eq!(
-            module_tree_item(&tree, A_LIB, "crate::x::hidden"),
+            module_tree_item(&tree, A_LIB, "crate::x::hidden", Namespace::Value),
             Some(TreeItem::Unknown)
         );
         assert_eq!(member(&tree, &fake, A_LIB, "crate::x::hidden"), None);
+    }
+
+    /// R14: the module's own item shadows a glob `pub use` of the same name
+    /// in its namespace only: `fn both` beside the glob's `fn both` binds
+    /// the module's own, `mod kid` leaves the glob's `fn kid` to a call, and
+    /// a type lookup of `kid` (a later segment follows it) stays at `mod kid`.
+    #[test]
+    fn test_module_tree_member_own_item_shadows_glob_in_its_namespace() {
+        let (tree, decls) = workspace();
+        let fake = Fake::new(Layout::Index, &decls);
+        assert_eq!(member(&tree, &fake, A_LIB, "b::both"), Some(10));
+        assert_eq!(member(&tree, &fake, A_LIB, "b::kid"), Some(13));
+        assert_eq!(member(&tree, &fake, A_LIB, "b::globbed"), Some(3));
+        let found = |file: &'static str, item: &str| {
+            Some(TreeItem::Found {
+                file,
+                item: item.into(),
+            })
+        };
+        let item = |path: &str, last: Namespace| module_tree_item(&tree, A_LIB, path, last);
+        assert_eq!(item("b::both", Namespace::Value), found(B_LIB, "both"));
+        assert_eq!(
+            item("b::kid", Namespace::Value),
+            found("crates/b/src/inner.rs", "kid")
+        );
+        assert_eq!(item("b::kid", Namespace::Type), found(B_LIB, "kid"));
+        assert_eq!(item("b::kid::run", Namespace::Value), found(B_LIB, "kid"));
+        assert_eq!(
+            item("b::both", Namespace::Type),
+            found("crates/b/src/inner.rs", "both")
+        );
     }
 
     /// R14: a module whose file is a directory's `mod.rs` holds its items

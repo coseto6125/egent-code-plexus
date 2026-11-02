@@ -552,7 +552,7 @@ impl<'a> OverlayFacts<'a> {
         let declared_here = |module: &str| qualifiers.same_file.contains(&(file_ord, module));
         let tree_item = |path: String| {
             self.with_rust_tree(file_ord, |tree| {
-                ladder::module_tree_item(tree, source, &path)
+                ladder::module_tree_item(tree, source, &path, ladder::Namespace::Type)
             })
         };
         let module_path = match named[0] {
@@ -2910,7 +2910,11 @@ fn resolve_callee<'s>(
         let verdict = facts.receiver_ladder(
             importer,
             imports,
-            (callee, qualifier, member),
+            (
+                callee,
+                ladder::self_qualifier(caller.language, qualifier, call),
+                member,
+            ),
             target,
             call.is_some(),
         );
@@ -3350,10 +3354,9 @@ impl<'a> RustModules<'a> {
             .find(|file| *file == requested)
     }
 
-    /// Whether `file` declares a node of `kind` named `name`; any kind when
-    /// `kind` is `None`. A dirty file answers from its fresh parse.
-    fn declares(&self, file: &str, name: &str, kind: Option<NodeKind>) -> bool {
-        let wanted = |found: NodeKind| kind.is_none_or(|kind| kind == found);
+    /// Whether `file` declares a node named `name` whose kind `wanted`
+    /// accepts. A dirty file answers from its fresh parse.
+    fn declares(&self, file: &str, name: &str, wanted: impl Fn(NodeKind) -> bool) -> bool {
         match self.dirty.get(file) {
             Some(dirty) => dirty
                 .symbols
@@ -3374,7 +3377,7 @@ impl<'a> RustModules<'a> {
     /// as the index places it: `name.rs`, else `name/mod.rs`, beside a
     /// target root and in a module's own directory otherwise.
     fn child(&self, parent: &'a str, name: &str, parent_is_root: bool) -> Option<&'a str> {
-        if !self.declares(parent, name, Some(NodeKind::Module)) {
+        if !self.declares(parent, name, |kind| kind == NodeKind::Module) {
             return None;
         }
         let parent_path = std::path::Path::new(parent);
@@ -3502,7 +3505,7 @@ impl<'a> RustModules<'a> {
             }
             glob |= import.imported_name == "*";
         }
-        if glob && !self.declares(module, name, None) {
+        if glob && !self.declares(module, name, |_| true) {
             ladder::Published::Unknown
         } else {
             ladder::Published::Own
@@ -3588,6 +3591,11 @@ impl<'a> ladder::ModuleTreeFacts for OverlayTree<'_, 'a> {
 
     fn published(&self, _root: &'a str, module: &'a str, name: &str) -> ladder::Published<'_> {
         self.modules.published(module, name)
+    }
+
+    fn declares(&self, module: &'a str, name: &str, namespace: ladder::Namespace) -> bool {
+        self.modules
+            .declares(module, name, |kind| namespace.holds(kind))
     }
 
     fn module_file(&self, module: &'a str) -> Option<&'a str> {

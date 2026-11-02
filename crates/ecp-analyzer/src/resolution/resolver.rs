@@ -1866,7 +1866,7 @@ impl<'a> Resolver<'a> {
                 source_file,
                 &source_file_str,
                 symbol_name,
-                qualifier,
+                ladder::self_qualifier(language, qualifier, call),
                 member,
                 target,
                 raw_imports,
@@ -2544,7 +2544,10 @@ impl<'a> Resolver<'a> {
     /// Tier 3.5's facts ([`ladder::ModuleTreeFacts`]): the workspace module
     /// tree. `None` without one (no `Cargo.toml`, a non-Rust repo).
     fn module_tree(&self) -> Option<IndexModuleTree<'_>> {
-        Some(self.mod_tree?.facts(self.workspace_root.as_deref()?))
+        Some(
+            self.mod_tree?
+                .facts_with_symbols(self.workspace_root.as_deref()?, self.symbol_table),
+        )
     }
 
     fn mod_tree_resolve(
