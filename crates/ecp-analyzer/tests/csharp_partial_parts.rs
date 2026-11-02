@@ -741,7 +741,8 @@ fn field_files(run_cs: &str) -> Vec<(&'static str, String)> {
                  void G4() { _own.CreateReader(); } \
                  void G5() { _lst.CreateReader(); } \
                  void G6() { _num.CreateReader(); } \
-                 void G7() { Other _fld = null; _fld.CreateReader(); }",
+                 void G7() { Other _fld = null; _fld.CreateReader(); } \
+                 void G8() { this.Other.CreateReader(); }",
             ),
         ),
     ]
@@ -770,9 +771,9 @@ fn tok(confidence: f32) -> Vec<(String, String, f32)> {
 /// the fix the parser saw no member of that name in the caller's file, the
 /// receiver stayed untyped, and only the extension retry ran: no row.
 ///
-/// `G2` (`this._fld`) is a known gap: the parser drops the member name of
-/// a `this.` receiver it cannot type (`c_sharp/receiver_types.rs`), so no
-/// rule here can read it. A generic (`List<Tok>`, `G5`) or keyword (`int`,
+/// `G2` (`this._fld`) binds as `G1` does: the parser keeps the `this.`
+/// qualifier of a member it cannot see. `G8` (`this.Other`, a project type
+/// and no member) binds nothing: `this.` never names a type. A generic (`List<Tok>`, `G5`) or keyword (`int`,
 /// `G6`) field type names no project type: no row. A local of the same
 /// name (`G7`) shadows the field: its own type binds.
 #[test]
@@ -786,9 +787,10 @@ fn test_resolve_call_csharp_field_of_other_partial_part_types_receiver() {
     );
     assert_eq!(
         call_rows(&merged, "G2"),
-        [],
-        "G2: known gap, `this.` name lost"
+        tok(0.85),
+        "G2: `this.` field in the other part"
     );
+    assert_eq!(call_rows(&merged, "G8"), [], "G8: `this.` names no type");
     assert_eq!(
         call_rows(&merged, "G3"),
         tok(0.85),
@@ -902,8 +904,8 @@ fn overlay_field_rows(dirty: &[&str], callers: &[&str]) -> Vec<Vec<(String, Stri
 #[test]
 fn test_overlay_view_csharp_field_of_clean_part_matches_full_build() {
     assert_eq!(
-        overlay_field_rows(&["Lib/Run.Use.cs"], &["G1", "G3", "G4"]),
-        [tok(0.85), tok(0.85), tok(0.85)]
+        overlay_field_rows(&["Lib/Run.Use.cs"], &["G1", "G2", "G3", "G4", "G8"]),
+        [tok(0.85), tok(0.85), tok(0.85), tok(0.85), Vec::new()]
     );
 }
 

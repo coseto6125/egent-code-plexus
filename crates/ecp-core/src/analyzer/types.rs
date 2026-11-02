@@ -109,7 +109,9 @@ pub enum CallSite<'a> {
     /// submodule binds as a module import. In C#, Swift, Kotlin and Dart it
     /// is an identifier that is no local, parameter or field; in C# also the
     /// last segment of a dotted name that may be a type path (`Outer.Inner`)
-    /// or a generic type's name (`Box<int>`). A receiver that names a type
+    /// or a generic type's name (`Box<int>`), and `this/name` for a
+    /// `this.name` member the caller's file does not declare, which names
+    /// no type. A receiver that names a type
     /// (or a library one) resolves as `Plain("Type.member")`; anywhere else
     /// the site resolves as `Plain(member)`, in Swift and C# as
     /// `UntypedMember(member)`.

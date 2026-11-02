@@ -299,6 +299,8 @@ pub fn csharp_member_field<F: TypeFacts + ?Sized>(
     ty_name: &str,
     name: &str,
 ) -> Option<u32> {
+    // The C# parser writes `this/name` for a `this.name` it cannot see.
+    let name = name.strip_prefix("this/").unwrap_or(name);
     let Ownership::Owned { id, inherited } =
         member_ownership(facts, ty, ty_name, name, ResolveTarget::Field)
     else {
