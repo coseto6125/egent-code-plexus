@@ -254,7 +254,7 @@ pub fn extract_field_reads_with_literal_key_facts(
         parent_kind: 0,
         field: 0,
         scope: NameScope::Value,
-        lambda: None,
+        local_scope: None,
     }];
     while let Some(frame) = stack.pop() {
         let n = frame.node;
@@ -280,16 +280,14 @@ pub fn extract_field_reads_with_literal_key_facts(
                 kind,
                 scope,
             };
-            let comprehension = |range| LocalScope {
-                range,
-                comprehension: true,
-            };
-            let mut lambda = if kind & kind_flag::COMPREHENSION != 0 {
-                Some(comprehension(node_range(n)))
+            let mut local_scope = if kind & kind_flag::COMPREHENSION != 0 {
+                Some(LocalScope::comprehension(node_range(n)))
             } else if kind & kind_flag::COMPREHENSION_CLAUSE != 0 {
-                frame.parent.map(|p| comprehension(node_range(p)))
+                frame
+                    .parent
+                    .map(|p| LocalScope::comprehension(node_range(p)))
             } else {
-                frame.lambda
+                frame.local_scope
             };
             let mut declarator_count = 0u32;
             let mut first_declarator = None;
@@ -297,7 +295,7 @@ pub fn extract_field_reads_with_literal_key_facts(
                 let child = cursor.node();
                 let field = memo.field(&cursor);
                 let child_kind = memo.kind(child);
-                let mut child_lambda = lambda;
+                let mut child_scope = local_scope;
                 if opens_parameters(kind, field, child_kind) {
                     // C++ `lambda_declarator` and Swift `lambda_function_type`
                     // hold the parameters; their parent holds the body too.
@@ -306,15 +304,12 @@ pub fn extract_field_reads_with_literal_key_facts(
                     } else {
                         n
                     };
-                    child_lambda = Some(LocalScope {
-                        range: node_range(owner),
-                        comprehension: false,
-                    });
+                    child_scope = Some(LocalScope::lambda(node_range(owner)));
                     // A type's parameter list (Java record, C# primary
                     // constructor) scopes only its own names: the members
                     // keep the outer scope.
                     if kind & kind_flag::TYPE_DECL == 0 {
-                        lambda = child_lambda;
+                        local_scope = child_scope;
                     }
                 }
                 if child_kind & kind_flag::DECLARATOR != 0 {
@@ -335,7 +330,7 @@ pub fn extract_field_reads_with_literal_key_facts(
                     parent_kind: kind,
                     field,
                     scope: names.child_scope(parent, child_kind, field, &cursor, literal_key_facts),
-                    lambda: child_lambda,
+                    local_scope: child_scope,
                 });
                 if !cursor.goto_next_sibling() {
                     break;
@@ -526,7 +521,7 @@ struct Frame<'t> {
     scope: NameScope,
     /// The innermost function whose parameters precede this node, or the
     /// comprehension that holds it, which scopes the names declared below it.
-    lambda: Option<LocalScope>,
+    local_scope: Option<LocalScope>,
 }
 
 /// What a node passes on to its children's [`NameScope`].
@@ -578,8 +573,8 @@ mod kind_flag {
     pub const CAPTURE_WRAPPER: u32 = 1 << 16;
     /// A generic's type or template parameter list, which declares no value.
     pub const TYPE_PARAMETERS: u32 = 1 << 17;
-    /// A comprehension (Dart `for_element`, C# `query_expression`), whose
-    /// variables live inside it only.
+    /// A Dart `for_element`, whose variables live inside it only. A C#
+    /// `query_expression` is none: its first source binds outside it.
     pub const COMPREHENSION: u32 = 1 << 18;
     /// A Python `for_in_clause`: its variables live in the comprehension that
     /// holds it. A walrus elsewhere in that comprehension binds outside it.
@@ -656,10 +651,7 @@ impl<'a> KindMemo<'a> {
                 TYPE_PARAMETERS,
             ),
             (kind.contains("declarator"), DECLARATOR),
-            (
-                kind == "for_element" || kind == "query_expression",
-                COMPREHENSION,
-            ),
+            (kind == "for_element", COMPREHENSION),
             (kind == "for_in_clause", COMPREHENSION_CLAUSE),
             (
                 kind.ends_with("class_declaration")
@@ -897,7 +889,7 @@ struct PendingBinding<'s> {
     /// The innermost function or comprehension that scopes it
     /// ([`Frame::lambda`]): its scope when no function node holds it, or when
     /// it is a comprehension inside the function node that holds it.
-    lambda: Option<LocalScope>,
+    local_scope: Option<LocalScope>,
 }
 
 #[derive(Default)]
@@ -931,7 +923,7 @@ impl<'s> NameScan<'s> {
             let binding = PendingBinding {
                 pos: start_pos(n),
                 name,
-                lambda: frame.lambda,
+                local_scope: frame.local_scope,
             };
             match frame.scope {
                 NameScope::Binding => self.bindings.push(binding),
@@ -987,8 +979,9 @@ impl<'s> NameScan<'s> {
 
     /// Attach each read to its smallest enclosing read container, once per
     /// container, unless a name declared in a scope holding it hides it: a
-    /// parameter or local of a function node, else of a nodeless lambda,
-    /// else of the value declaration ([`ReadContainers::binding_scope`]).
+    /// parameter or local of a function node (a comprehension variable inside
+    /// it: of that comprehension), else of a nodeless lambda, else of the
+    /// value declaration ([`ReadContainers::binding_scope`]).
     fn attach(self, containers: &ReadContainers<'_>, nodes: &mut [RawNode]) {
         if self.reads.is_empty() {
             return;
@@ -1013,7 +1006,7 @@ impl<'s> NameScan<'s> {
                 Some(t) => {
                     let function = span_ends(nodes[t].span);
                     let scope = binding
-                        .lambda
+                        .local_scope
                         .filter(|l| {
                             l.comprehension && function.0 <= l.range.0 && l.range.1 <= function.1
                         })
@@ -1493,6 +1486,22 @@ struct LocalScope {
     comprehension: bool,
 }
 
+impl LocalScope {
+    fn lambda(range: PosRange) -> Self {
+        Self {
+            range,
+            comprehension: false,
+        }
+    }
+
+    fn comprehension(range: PosRange) -> Self {
+        Self {
+            range,
+            comprehension: true,
+        }
+    }
+}
+
 /// One declarator of a statement that declares several:
 /// `b = h2` in `const a = h1, b = h2`.
 struct Declarator<'s> {
@@ -1643,7 +1652,7 @@ impl<'s> ReadContainers<'s> {
     ) -> Option<PosRange> {
         let run = first.map(|first| self.run(first));
         let declared = run.filter(|run| run.iter().any(|v| nodes[v.node_idx].name == binding.name));
-        match (declared, binding.lambda.map(|l| l.range)) {
+        match (declared, binding.local_scope.map(|l| l.range)) {
             // A lambda inside the declaration: `TABLE = {"id": lambda TABLE: TABLE}`.
             (Some(run), Some(lambda)) if run[0].start < lambda.0 || lambda.1 < run[0].end => {
                 Some(lambda)

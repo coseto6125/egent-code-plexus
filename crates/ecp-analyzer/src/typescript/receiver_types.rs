@@ -442,13 +442,6 @@ fn collect_scope_candidates<'t>(
     }
 }
 
-/// Whether `require` is the CommonJS loader in the file under `root`: no
-/// declaration or write of `require` exists there.
-pub(crate) fn require_loads(root: Node<'_>, source: &[u8]) -> bool {
-    let require = binding_mentions(root, &["require"], source, binds_name);
-    !rebound(require.get("require"), (0, 0))
-}
-
 /// Collect the synthetic imports of every literal `import('<lit>')` and of
 /// each function-scoped `const m = require('<lit>')`, and bind the names that
 /// hold a loaded module ([`DynamicImports`]).
@@ -491,7 +484,8 @@ pub fn collect_dynamic_imports(root: Node<'_>, source: &[u8]) -> DynamicImports 
     }
 
     if candidates.iter().any(|c| c.is_require) {
-        let require_loads = require_loads(root, source);
+        let require = binding_mentions(root, &["require"], source, binds_name);
+        let require_loads = !rebound(require.get("require"), (0, 0));
         candidates.retain(|c| !c.is_require || require_loads);
         loads.extend(
             candidates

@@ -398,12 +398,12 @@ fn test_dynamic_require_escaped_and_blank_specifiers_emit_a_blind_spot() {
         ("export function go() { require('./a\\x62'); }\n", 1),
         ("export function go() { require(''); require('  '); }\n", 2),
         ("export function go() { require('./a'); }\n", 0),
-        (
-            "export function go(require: any) { return require(''); }\n",
-            0,
-        ),
         ("const m = require('./a\\x62');\n", 1),
         ("const t = require(`./c${x}`);\n", 1),
+        (
+            "import { createRequire } from 'module';\nconst require = createRequire(import.meta.url);\nexport function load(n: string) { return require(n); }\n",
+            1,
+        ),
     ] {
         assert_eq!(
             blind_spots_of(source, "ts-dynamic-require"),

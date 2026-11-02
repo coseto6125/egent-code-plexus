@@ -1,6 +1,6 @@
 use super::receiver_types::{
     collect_dynamic_imports, collect_local_types, extract_ts_calls_and_path_literals,
-    literal_specifier, require_loads,
+    literal_specifier,
 };
 use super::schema_extractors::TS_INTERFACE_CONFIG;
 use super::spec::{TsSpec, TsxSpec, TypeScriptSpec};
@@ -570,9 +570,7 @@ impl<const TSX: bool> ParseSpec for TsSpec<TSX> {
                 }
             }
             TypeScriptRole::DynamicRequire => {
-                if literal_specifier(node, source).is_none()
-                    && require_loads(cx.tree.root_node(), source)
-                {
+                if literal_specifier(node, source).is_none() {
                     cx.push_blind(BLIND_DYNAMIC_REQUIRE, &node);
                 }
             }

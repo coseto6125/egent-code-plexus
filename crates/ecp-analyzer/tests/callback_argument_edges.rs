@@ -1284,10 +1284,10 @@ fn test_function_reference_csharp_primary_ctor_field_out_var_still_hides_in_its_
     );
 }
 
-/// Dart `for` elements and C# query expressions are comprehensions: the
-/// variable hides the function inside them only.
+/// A Dart `for` element is a comprehension: the variable hides the function
+/// inside it only.
 #[test]
-fn test_function_reference_dart_and_csharp_comprehensions_hide_only_inside() {
+fn test_function_reference_dart_for_element_hides_only_inside() {
     assert_same_file_ref(
         &DartProvider::new().unwrap(),
         "d.dart",
@@ -1301,19 +1301,6 @@ fn test_function_reference_dart_and_csharp_comprehensions_hide_only_inside() {
         "int handler() => 1;\n\nfinal table = [for (var handler in [1, 2]) handler];\n",
         "table",
     );
-    assert_same_file_ref(
-        &CSharpProvider::new().unwrap(),
-        "C.cs",
-        "class C {\n    static int Handler() { return 1; }\n    static object[] T = { (System.Func<int>)Handler, (from Handler in new[] { 1 } select Handler).ToArray() };\n}\n",
-        "T",
-        "Handler",
-    );
-    assert_no_ref(
-        &CSharpProvider::new().unwrap(),
-        "C.cs",
-        "class C {\n    static int Handler() { return 1; }\n    static int[] T = (from Handler in new[] { 1 } select Handler).ToArray();\n}\n",
-        "T",
-    );
 }
 
 /// Inside a function, a comprehension variable hides the name in that
@@ -1321,7 +1308,7 @@ fn test_function_reference_dart_and_csharp_comprehensions_hide_only_inside() {
 /// the module function.
 #[test]
 fn test_function_reference_comprehension_inside_function_hides_only_inside() {
-    let cases: [(&dyn LanguageProvider, &str, &str, &str, &str); 3] = [
+    let cases: [(&dyn LanguageProvider, &str, &str, &str, &str); 2] = [
         (
             &PythonProvider::new().unwrap(),
             "app.py",
@@ -1335,13 +1322,6 @@ fn test_function_reference_comprehension_inside_function_hides_only_inside() {
             "int handler() => 1;\n\nObject go() {\n  final ids = [for (var handler in [1, 2]) handler];\n  return handler;\n}\n",
             "go",
             "handler",
-        ),
-        (
-            &CSharpProvider::new().unwrap(),
-            "C.cs",
-            "class C {\n    static int Handler() { return 1; }\n    static System.Func<int> Go() { var ids = from Handler in new[] { 1 } select Handler; return Handler; }\n}\n",
-            "Go",
-            "Handler",
         ),
     ];
     for (provider, file, src, caller, target) in cases {

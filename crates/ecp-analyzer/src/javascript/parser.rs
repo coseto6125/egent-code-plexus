@@ -13,9 +13,7 @@ use crate::framework_helpers::{
 };
 use crate::indirect_dispatch::{collect_js_param_names, detect_js_ts_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
-use crate::typescript::receiver_types::{
-    collect_dynamic_imports, literal_specifier, require_loads,
-};
+use crate::typescript::receiver_types::{collect_dynamic_imports, literal_specifier};
 use ecp_core::analyzer::parse_prof::Pass;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{
@@ -547,9 +545,7 @@ impl ParseSpec for JavaScriptSpec {
                 }
             }
             JavaScriptRole::DynamicRequire => {
-                if literal_specifier(node, source).is_none()
-                    && require_loads(cx.tree.root_node(), source)
-                {
+                if literal_specifier(node, source).is_none() {
                     cx.push_blind(BLIND_SPEC[3], &node);
                 }
             }
