@@ -4,8 +4,8 @@
 //! The index's post-process pass (`ecp-analyzer`
 //! `post_process::class_membership`) and the overlay's per-file replay
 //! (`session::incremental`) both call [`class_membership`], so a dirty file
-//! gets the edges a reindex gives. Each side answers the name lookups of
-//! [`MemberLookup`] from its own tables of the file's declarations.
+//! gets the edges a reindex gives. Each side answers [`MemberLookup`] from
+//! its own map of the file's rows to nodes and its own name table.
 //!
 //! Two passes, in this order (spec
 //! `docs/superpowers/specs/2026-05-16-class-membership-postprocess.md`):
@@ -23,7 +23,7 @@
 
 use crate::analyzer::types::{span_contains, Span};
 use crate::graph::{NodeKind, RelType};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 /// `Edge.reason` of a membership edge of the span pass.
 pub const CLASS_MEMBERSHIP_REASON: &str = "post_process:class_membership";
@@ -32,38 +32,30 @@ pub const CLASS_MEMBERSHIP_REASON: &str = "post_process:class_membership";
 pub const CLASS_MEMBERSHIP_IMPL_REASON: &str = "post_process:class_membership:rust_impl";
 
 /// The fields of one declaration that membership reads. `span` is 0-based,
-/// as `RawNode.span`. `arity` is the declared generic arity
-/// (`RawNode::generic_arity`); only a type's is read.
+/// as `RawNode.span`.
 #[derive(Debug, Clone, Copy)]
 pub struct MemberRow<'a> {
     pub kind: NodeKind,
     pub owner: Option<&'a str>,
     pub name: &'a str,
     pub span: Span,
-    pub arity: u32,
 }
 
-/// The name lookups membership makes over one path's declarations. Ids are
-/// the caller's node ids; `raw` is a row index of the rows passed to
+/// What membership asks of the caller about one file's rows. Ids are the
+/// caller's node ids; `raw` is a row index of the rows passed to
 /// [`class_membership`].
 pub trait MemberLookup {
-    /// The first declaration of the path with this name, kind and owner key:
-    /// the index's `SymbolTable::first_declaration`.
-    fn first_declaration(&self, name: &str, kind: NodeKind, owner: Option<&str>) -> Option<u32>;
     /// The first declaration of the path with this name, any kind:
-    /// `SymbolTable::lookup_in_file`.
+    /// `SymbolTable::lookup_in_file`. Only the owner pass reads it.
     fn lookup_in_file(&self, name: &str) -> Option<u32>;
-    /// The later overloads of `first`, in source order:
-    /// `SymbolTable::later_overloads`.
-    fn later_overloads(&self, first: u32) -> &[u32];
-    /// The C# type of `arity` type arguments among `id` and its arity
-    /// twins: `SymbolTable::with_arity`.
-    fn with_arity(&self, id: u32, arity: u32) -> Option<u32>;
+    /// The node of the row `raw`: its own, or the survivor a merged row
+    /// merges into (`RawIndexMap::node`).
+    fn node(&self, raw: usize) -> Option<u32>;
+    /// Whether some row of the file merges into another row's node, so two
+    /// rows can give one edge.
+    fn has_merged(&self) -> bool;
     /// Whether the row `raw` is a scoped node (a lexical parent declares it).
     fn is_scoped(&self, raw: usize) -> bool;
-    /// The node of the row `raw` when it is a C# arity twin, which no name
-    /// table holds.
-    fn twin(&self, raw: usize) -> Option<u32>;
 }
 
 /// One membership edge: `source` owns `target`.
@@ -83,7 +75,6 @@ struct Owner<'a> {
     name: &'a str,
     kind: NodeKind,
     span: Span,
-    arity: u32,
     raw: usize,
 }
 
@@ -99,9 +90,12 @@ pub fn span_area(s: Span) -> u64 {
 }
 
 /// The membership edges of one file's rows, the span pass's first, each in
-/// row order. `lookup` runs only for a file that declares a type, so a file
-/// without one pays one pass over its rows. Cost: O(rows x types of the
-/// file) span checks plus O(rows) lookups.
+/// row order. Each end is the node of its own row ([`MemberLookup::node`]),
+/// so a type declared twice owns the members of its own body; only the owner
+/// pass names its type. An edge two merged rows both give is emitted once.
+/// `lookup` runs only for a file that declares a type, so a file without one
+/// pays one pass over its rows. Cost: O(rows x types of the file) span
+/// checks plus O(rows) lookups.
 pub fn class_membership<'a, T, L: MemberLookup>(
     rows: &'a [T],
     row: impl Fn(&'a T) -> MemberRow<'a>,
@@ -125,7 +119,6 @@ pub fn class_membership<'a, T, L: MemberLookup>(
                     name: r.name,
                     kind: r.kind,
                     span: r.span,
-                    arity: r.arity,
                     raw,
                 });
                 classes_by_name.entry(r.name).or_default().push(r.span);
@@ -134,7 +127,6 @@ pub fn class_membership<'a, T, L: MemberLookup>(
                 name: r.name,
                 kind: r.kind,
                 span: r.span,
-                arity: 0,
                 raw,
             }),
             _ => {}
@@ -144,57 +136,15 @@ pub fn class_membership<'a, T, L: MemberLookup>(
         return;
     }
     let lookup = lookup();
-    let later = later_overload_ids(rows, &row, &lookup);
-    span_pass(rows, &row, &owners, &lookup, &later, &mut emit);
-    owner_pass(rows, &row, &classes_by_name, &lookup, &later, &mut emit);
-}
-
-/// Row index → node id of each later overload of the file
-/// ([`crate::uid::keeps_overloads`]). A name lookup returns the first
-/// declaration, so without this map every overload's edge would land on it.
-fn later_overload_ids<'a, T>(
-    rows: &'a [T],
-    row: &impl Fn(&'a T) -> MemberRow<'a>,
-    lookup: &impl MemberLookup,
-) -> FxHashMap<usize, u32> {
-    let mut seen: FxHashMap<(u8, Option<&'a str>, &'a str), usize> = FxHashMap::default();
-    let mut ids = FxHashMap::default();
-    for (i, r) in rows.iter().map(row).enumerate() {
-        if !crate::uid::keeps_overloads(r.kind) {
-            continue;
+    let mut seen: Option<FxHashSet<(u32, u32, u8)>> = lookup.has_merged().then(FxHashSet::default);
+    let mut emit = |m: Membership| {
+        let key = (m.source, m.target, m.rel_type as u8);
+        if seen.as_mut().is_none_or(|seen| seen.insert(key)) {
+            emit(m);
         }
-        let ordinal = seen.entry((r.kind as u8, r.owner, r.name)).or_insert(0);
-        if *ordinal > 0 {
-            if let Some(&id) = lookup
-                .first_declaration(r.name, r.kind, r.owner)
-                .and_then(|first| lookup.later_overloads(first).get(*ordinal - 1))
-            {
-                ids.insert(i, id);
-            }
-        }
-        *ordinal += 1;
-    }
-    ids
-}
-
-/// The node of `member` (row `i`) for an edge from `class`, or `None` to
-/// emit none: its own later overload, else the declaration its kind and
-/// owner match, else the file's first declaration of the name. Only that
-/// last lookup can return the class itself, for a member named like it
-/// (Java `class Foo { Foo() {} }`), which would be a self-loop.
-fn member_node(
-    i: usize,
-    member: MemberRow<'_>,
-    lookup: &impl MemberLookup,
-    later: &FxHashMap<usize, u32>,
-    class: u32,
-) -> Option<u32> {
-    let id = later
-        .get(&i)
-        .copied()
-        .or_else(|| lookup.first_declaration(member.name, member.kind, member.owner))
-        .or_else(|| lookup.lookup_in_file(member.name))?;
-    (id != class).then_some(id)
+    };
+    span_pass(rows, &row, &owners, &lookup, &mut emit);
+    owner_pass(rows, &row, &classes_by_name, &lookup, &mut emit);
 }
 
 /// Span pass: the innermost owner around each Function, Method,
@@ -204,7 +154,6 @@ fn span_pass<'a, T>(
     row: &impl Fn(&'a T) -> MemberRow<'a>,
     owners: &[Owner<'a>],
     lookup: &impl MemberLookup,
-    later: &FxHashMap<usize, u32>,
     emit: &mut impl FnMut(Membership),
 ) {
     for (i, member) in rows.iter().map(row).enumerate() {
@@ -232,8 +181,9 @@ fn span_pass<'a, T>(
             continue;
         };
 
-        // Namespace-qualified type identities are not represented by the
-        // short-name lookup below. Do not bind an ambiguous type constant.
+        // A type constant binds only to the one type of its owner's name:
+        // its owner is a short name, which a namespace-qualified type
+        // (two same-named types of the file) does not tell apart.
         if member.kind == NodeKind::Const
             && (member.owner != Some(class.name)
                 || owners.iter().filter(|o| o.name == class.name).count() != 1)
@@ -241,29 +191,12 @@ fn span_pass<'a, T>(
             continue;
         }
 
-        // The name lookup returns the first of same-named C# types of
-        // different arity; the owner is the one of its own arity, and a
-        // twin no arity tells apart (`Inner` in `Outer` and in `Outer<T>`)
-        // is its own row's node. The class's own owner tells a nested type
-        // (`Outer.Employee`) from a same-name type of the file.
-        let class_owner = row(&rows[class.raw]).owner;
-        let Some(class_idx) = lookup.twin(class.raw).or_else(|| {
-            lookup
-                .first_declaration(class.name, class.kind, class_owner)
-                .or_else(|| lookup.lookup_in_file(class.name))
-                .map(|first| lookup.with_arity(first, class.arity).unwrap_or(first))
-        }) else {
-            continue;
-        };
-        let Some(member_idx) = lookup
-            .twin(i)
-            .or_else(|| member_node(i, member, lookup, later, class_idx))
-        else {
+        let (Some(source), Some(target)) = (lookup.node(class.raw), lookup.node(i)) else {
             continue;
         };
         emit(Membership {
-            source: class_idx,
-            target: member_idx,
+            source,
+            target,
             rel_type,
             reason: CLASS_MEMBERSHIP_REASON,
         });
@@ -272,13 +205,14 @@ fn span_pass<'a, T>(
 
 /// Owner pass: a member whose `owner_class` names a type of the file that no
 /// span of that name contains (a Rust `impl` block, a Go receiver method).
-/// A member some span of its owner's name contains is the span pass's.
+/// A member some span of its owner's name contains is the span pass's. The
+/// type is the file's first declaration of the owner's name; a member named
+/// like it with no such type would be its own owner, and gets no edge.
 fn owner_pass<'a, T>(
     rows: &'a [T],
     row: &impl Fn(&'a T) -> MemberRow<'a>,
     classes_by_name: &FxHashMap<&'a str, Vec<Span>>,
     lookup: &impl MemberLookup,
-    later: &FxHashMap<usize, u32>,
     emit: &mut impl FnMut(Membership),
 ) {
     for (i, member) in rows.iter().map(row).enumerate() {
@@ -299,18 +233,18 @@ fn owner_pass<'a, T>(
         if spanned {
             continue;
         }
-        let Some(class_idx) = lookup.lookup_in_file(class_name) else {
+        let (Some(source), Some(target)) = (lookup.lookup_in_file(class_name), lookup.node(i))
+        else {
             continue;
         };
-        let Some(member_idx) = member_node(i, member, lookup, later, class_idx) else {
-            continue;
-        };
-        emit(Membership {
-            source: class_idx,
-            target: member_idx,
-            rel_type,
-            reason: CLASS_MEMBERSHIP_IMPL_REASON,
-        });
+        if source != target {
+            emit(Membership {
+                source,
+                target,
+                rel_type,
+                reason: CLASS_MEMBERSHIP_IMPL_REASON,
+            });
+        }
     }
 }
 
@@ -318,43 +252,38 @@ fn owner_pass<'a, T>(
 mod tests {
     use super::*;
 
-    /// One path's declarations, ids = row indexes: the first row of each
-    /// (name, kind, owner) stands for the declaration, as the index's
-    /// `SymbolTable::first_declaration` does. No overloads, twins or scoped
-    /// rows.
-    struct Rows<'a>(&'a [MemberRow<'static>]);
+    /// One path's declarations, ids = row indexes, except that row `t` of
+    /// each `(t, s)` of `merged` is merged into row `s`. The first row of a
+    /// name stands for it, as the index's `SymbolTable::lookup_in_file`
+    /// does. No scoped rows.
+    struct Rows<'a> {
+        rows: &'a [MemberRow<'static>],
+        merged: &'a [(usize, usize)],
+    }
 
     impl MemberLookup for Rows<'_> {
-        fn first_declaration(
-            &self,
-            name: &str,
-            kind: NodeKind,
-            owner: Option<&str>,
-        ) -> Option<u32> {
-            self.0
+        fn lookup_in_file(&self, name: &str) -> Option<u32> {
+            self.rows
                 .iter()
-                .position(|r| r.name == name && r.kind == kind && r.owner == owner)
+                .position(|r| r.name == name)
                 .map(|i| i as u32)
         }
 
-        fn lookup_in_file(&self, name: &str) -> Option<u32> {
-            self.0.iter().position(|r| r.name == name).map(|i| i as u32)
+        fn node(&self, raw: usize) -> Option<u32> {
+            let survivor = self
+                .merged
+                .iter()
+                .find(|&&(t, _)| t == raw)
+                .map_or(raw, |&(_, s)| s);
+            (raw < self.rows.len()).then_some(survivor as u32)
         }
 
-        fn later_overloads(&self, _first: u32) -> &[u32] {
-            &[]
-        }
-
-        fn with_arity(&self, id: u32, _arity: u32) -> Option<u32> {
-            Some(id)
+        fn has_merged(&self) -> bool {
+            !self.merged.is_empty()
         }
 
         fn is_scoped(&self, _raw: usize) -> bool {
             false
-        }
-
-        fn twin(&self, _raw: usize) -> Option<u32> {
-            None
         }
     }
 
@@ -369,13 +298,16 @@ mod tests {
             owner,
             name,
             span,
-            arity: 0,
         }
     }
 
     fn edges(rows: &[MemberRow<'static>]) -> Vec<Membership> {
+        merged_edges(rows, &[])
+    }
+
+    fn merged_edges(rows: &[MemberRow<'static>], merged: &[(usize, usize)]) -> Vec<Membership> {
         let mut out = Vec::new();
-        class_membership(rows, |r| *r, || Rows(rows), |m| out.push(m));
+        class_membership(rows, |r| *r, || Rows { rows, merged }, |m| out.push(m));
         out
     }
 
@@ -476,6 +408,92 @@ mod tests {
         let rows = [
             row(NodeKind::Class, None, "K", (1, 0, 2, 0)),
             row(NodeKind::Method, Some(" "), "m", (5, 0, 6, 0)),
+        ];
+        assert!(edges(&rows).is_empty());
+    }
+
+    /// Stands for: membership binds by row (design_uid §3 row 5). A type
+    /// declared twice owns the members of its own body, never its first's.
+    #[test]
+    fn test_class_membership_class_declared_twice_each_owns_its_own_body() {
+        let rows = [
+            row(NodeKind::Class, None, "C", (1, 0, 3, 0)),
+            row(NodeKind::Method, Some("C"), "a", (2, 4, 2, 9)),
+            row(NodeKind::Class, None, "C", (5, 0, 7, 0)),
+            row(NodeKind::Method, Some("C"), "b", (6, 4, 6, 9)),
+        ];
+        assert_eq!(
+            edges(&rows),
+            [
+                has_method(0, 1, CLASS_MEMBERSHIP_REASON),
+                has_method(2, 3, CLASS_MEMBERSHIP_REASON)
+            ]
+        );
+    }
+
+    /// Two merged rows of one property give one `HasProperty`, from the
+    /// type to the survivor.
+    #[test]
+    fn test_class_membership_merged_property_rows_emit_one_edge() {
+        let rows = [
+            row(NodeKind::Class, None, "K", (1, 0, 9, 0)),
+            row(NodeKind::Property, Some("K"), "x", (2, 4, 2, 9)),
+            row(NodeKind::Property, Some("K"), "x", (5, 4, 5, 9)),
+        ];
+        assert_eq!(
+            merged_edges(&rows, &[(2, 1)]),
+            [Membership {
+                source: 0,
+                target: 1,
+                rel_type: RelType::HasProperty,
+                reason: CLASS_MEMBERSHIP_REASON,
+            }]
+        );
+    }
+
+    /// Two overloads of one method: each binds its own row, with no name
+    /// lookup that would return the first.
+    #[test]
+    fn test_class_membership_overloads_each_bind_own_row() {
+        let rows = [
+            row(NodeKind::Class, None, "K", (1, 0, 9, 0)),
+            row(NodeKind::Method, Some("K"), "save", (2, 4, 3, 4)),
+            row(NodeKind::Method, Some("K"), "save", (5, 4, 6, 4)),
+        ];
+        assert_eq!(
+            edges(&rows),
+            [
+                has_method(0, 1, CLASS_MEMBERSHIP_REASON),
+                has_method(0, 2, CLASS_MEMBERSHIP_REASON)
+            ]
+        );
+    }
+
+    /// An owner-pass member binds its own row: two `impl Foo` methods of one
+    /// name each get an edge.
+    #[test]
+    fn test_class_membership_owner_pass_member_binds_own_row() {
+        let rows = [
+            row(NodeKind::Struct, None, "Foo", (1, 0, 1, 12)),
+            row(NodeKind::Method, Some("Foo"), "m", (5, 4, 7, 4)),
+            row(NodeKind::Method, Some("Foo"), "m", (9, 4, 11, 4)),
+        ];
+        assert_eq!(
+            edges(&rows),
+            [
+                has_method(0, 1, CLASS_MEMBERSHIP_IMPL_REASON),
+                has_method(0, 2, CLASS_MEMBERSHIP_IMPL_REASON)
+            ]
+        );
+    }
+
+    /// An owner-pass member named like its owner, in a file with no type of
+    /// that name before it, would own itself: no edge.
+    #[test]
+    fn test_class_membership_owner_pass_self_owner_emits_nothing() {
+        let rows = [
+            row(NodeKind::Class, None, "K", (1, 0, 2, 0)),
+            row(NodeKind::Method, Some("Foo"), "Foo", (5, 0, 6, 0)),
         ];
         assert!(edges(&rows).is_empty());
     }

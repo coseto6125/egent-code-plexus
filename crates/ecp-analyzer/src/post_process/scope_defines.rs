@@ -13,7 +13,8 @@
 //! Which row defines which is [`containment::scope_defines`], the derivation
 //! the overlay's per-file replay shares. Both ends come from raw indexes
 //! through the build's `RawIndexMap`, never from a name lookup: two same-name
-//! declarations each get their own edge.
+//! declarations each get their own edge, and a merged row (Python `x = 1;
+//! x = 2`) maps to its survivor, whose edge it gives once.
 //!
 //! A scoped node (a Rust nested `fn`, a closure node) has no owner, yet no
 //! File or module declares it: its callable does, through the lexical-parent
@@ -24,7 +25,7 @@ use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
 use ecp_core::graph::{Edge, RelType};
 use ecp_core::pool::StringPool;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 /// Emit `Defines` edges from File / Namespace / Module nodes to their
 /// contained symbols. `is_scoped` tells a scoped node by its node id; it
@@ -48,6 +49,8 @@ pub fn emit_edges(
             continue;
         };
         let node = |raw: usize| raw_map.node(file, RawIdx(raw as u32));
+        let mut seen: Option<FxHashSet<(u32, u32)>> =
+            containment::has_merged_rows(raw_map, file).then(FxHashSet::default);
 
         containment::scope_defines(&local_graph.nodes, Row::from, |scope, child| {
             let Some(child_id) = node(child).filter(|&id| !is_scoped(id)) else {
@@ -57,7 +60,13 @@ pub fn emit_edges(
                 Scope::File => Some(file_node_id),
                 Scope::Container(container) => node(container),
             };
-            if let Some(source) = source {
+            let Some(source) = source else {
+                return;
+            };
+            if seen
+                .as_mut()
+                .is_none_or(|seen| seen.insert((source, child_id)))
+            {
                 edges_out.push(Edge {
                     source,
                     target: child_id,

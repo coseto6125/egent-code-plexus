@@ -7,7 +7,9 @@
 //! reindex gives. Each side maps the raw indexes and declarations it gets back
 //! to its own node ids.
 
+use crate::analyzer::membership::span_area;
 use crate::analyzer::types::{span_contains, RawNode, Span};
+use crate::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
 use crate::graph::NodeKind;
 use rustc_hash::FxHashMap;
 
@@ -78,9 +80,12 @@ fn is_definable(kind: NodeKind) -> bool {
 /// `namespace Acme;` contains nothing. A row whose owner names no container
 /// (a class member) gets nothing: `HasMethod` / `HasProperty` cover it.
 ///
-/// The caller maps each raw index to its node and drops a scoped child (a
-/// nested `fn`, a closure node): its callable declares it, through the
-/// lexical-parent table. Cost: O(rows + rows x same-name containers).
+/// The caller maps each raw index to its node, a merged row to its survivor,
+/// and drops a scoped child (a nested `fn`, a closure node): its callable
+/// declares it, through the lexical-parent table. Two merged rows (Python
+/// `x = 1; x = 2`) then give one edge twice, so the caller of a file with
+/// [`has_merged_rows`] emits each `(source, child)` once. It never skips a
+/// merged row. Cost: O(rows + rows x same-name containers).
 pub fn scope_defines<'a, T>(
     rows: &'a [T],
     row: impl Fn(&'a T) -> Row<'a>,
@@ -117,17 +122,21 @@ pub fn scope_defines<'a, T>(
 }
 
 /// The Enum -> EnumVariant edges of one file, as `(enum, variant)` node ids
-/// in variant order. `first_declaration(name, kind, owner)` returns the id of
-/// the file's first declaration of that name, kind and owner, the one later
-/// overloads hang off; ids are the caller's. A variant's owner is its enum's
-/// name. Enums are matched by kind, as a C `typedef enum color color;` names
-/// two `color`s, and variants by owner, as two enums of one file may share a
-/// variant name (`Shape::None`, `Fill::None`). Of two enums of one name, the
-/// last row's declaration wins. A self-loop (an enum and its variant of one
-/// id) is dropped. Cost: O(rows) lookups; nothing for a file without a variant.
+/// in variant order. A variant's owner is its enum's name. The enum is the
+/// innermost `Enum` row of that name whose span contains the variant, and
+/// both ends are the nodes of their own rows (`node(raw)`), so each of two
+/// same-named enums (`#[cfg]` twins, `a::E` and `b::E`) contains its own
+/// variants. Enums are matched by kind, as a C `typedef enum color color;`
+/// names two `color`s. A variant no such span contains (a parser that spans
+/// only the enum's name) falls back to names: `first_declaration(name, kind,
+/// owner)`, the file's first declaration of that name, kind and owner, for
+/// both ends, the last enum row of the name giving the enum's owner. A
+/// self-loop (an enum and its variant of one id) is dropped. Cost: O(variants
+/// x enums of the file) span checks; nothing for a file without a variant.
 pub fn enum_variant_defines<'a, T>(
     rows: &'a [T],
     row: impl Fn(&'a T) -> Row<'a>,
+    node: impl Fn(usize) -> Option<u32>,
     first_declaration: impl Fn(&str, NodeKind, Option<&str>) -> Option<u32>,
     mut emit: impl FnMut(u32, u32),
 ) {
@@ -138,35 +147,55 @@ pub fn enum_variant_defines<'a, T>(
     {
         return;
     }
-    let enum_by_name: FxHashMap<&'a str, u32> = rows
+    let enums: Vec<(usize, Row<'a>)> = rows
         .iter()
         .map(&row)
-        .filter(|r| r.kind == NodeKind::Enum)
-        .filter_map(|r| first_declaration(r.name, NodeKind::Enum, r.owner).map(|id| (r.name, id)))
+        .enumerate()
+        .filter(|(_, r)| r.kind == NodeKind::Enum)
         .collect();
-    if enum_by_name.is_empty() {
+    if enums.is_empty() {
         return;
     }
-    for variant in rows
-        .iter()
-        .map(&row)
-        .filter(|r| r.kind == NodeKind::EnumVariant)
-    {
+    for (i, variant) in rows.iter().map(&row).enumerate() {
+        if variant.kind != NodeKind::EnumVariant {
+            continue;
+        }
         let Some(enum_name) = variant.owner else {
             continue;
         };
-        let Some(&enum_id) = enum_by_name.get(enum_name) else {
-            continue;
+        let spanned = enums
+            .iter()
+            .filter(|(_, e)| e.name == enum_name && span_contains(e.span, variant.span))
+            .min_by_key(|(_, e)| span_area(e.span));
+        let pair = match spanned {
+            Some(&(e, _)) => node(e).zip(node(i)),
+            None => enums
+                .iter()
+                .rev()
+                .filter(|(_, e)| e.name == enum_name)
+                .find_map(|(_, e)| first_declaration(enum_name, NodeKind::Enum, e.owner))
+                .zip(first_declaration(
+                    variant.name,
+                    NodeKind::EnumVariant,
+                    Some(enum_name),
+                )),
         };
-        let Some(variant_id) =
-            first_declaration(variant.name, NodeKind::EnumVariant, Some(enum_name))
-        else {
-            continue;
-        };
-        if enum_id != variant_id {
+        if let Some((enum_id, variant_id)) = pair.filter(|(e, v)| e != v) {
             emit(enum_id, variant_id);
         }
     }
+}
+
+/// Whether some row of `file` merges into another row's node
+/// (`RawIndexMap::node` differs from its slot), so that two rows of the
+/// file can give one edge: only such a file needs a dedupe set.
+pub fn has_merged_rows(raw_map: &RawIndexMap, file: FileOrd) -> bool {
+    raw_map.range(file).is_some_and(|range| {
+        (0..range.end - range.start).any(|raw| {
+            let raw = RawIdx(raw);
+            raw_map.node(file, raw) != raw_map.slot(file, raw)
+        })
+    })
 }
 
 #[cfg(test)]
@@ -257,7 +286,13 @@ mod tests {
 
     fn variants(rows: &[Row<'static>]) -> Vec<(u32, u32)> {
         let mut out = Vec::new();
-        enum_variant_defines(rows, |r| *r, first_of(rows), |e, v| out.push((e, v)));
+        enum_variant_defines(
+            rows,
+            |r| *r,
+            |raw| Some(raw as u32),
+            first_of(rows),
+            |e, v| out.push((e, v)),
+        );
         out
     }
 
@@ -286,5 +321,71 @@ mod tests {
             row(NodeKind::EnumVariant, None, "B", (3, 0, 3, 1)),
         ];
         assert!(variants(&rows).is_empty());
+    }
+
+    /// Stands for: enum containment binds by span and row (design_uid §3
+    /// row 22). Two same-named enums (`#[cfg]` twins) each contain their own
+    /// variants, never the first enum's.
+    #[test]
+    fn test_enum_variant_defines_same_name_enums_bind_by_span() {
+        let rows = [
+            row(NodeKind::Enum, None, "E", (0, 0, 2, 0)),
+            row(NodeKind::EnumVariant, Some("E"), "X", (1, 0, 1, 1)),
+            row(NodeKind::Enum, None, "E", (4, 0, 6, 0)),
+            row(NodeKind::EnumVariant, Some("E"), "X", (5, 0, 5, 1)),
+        ];
+        assert_eq!(variants(&rows), [(0, 1), (2, 3)]);
+    }
+
+    /// A nested enum contains its own variants; the outer one only its own.
+    #[test]
+    fn test_enum_variant_defines_nested_enum_binds_innermost() {
+        let rows = [
+            row(NodeKind::Enum, None, "E", (0, 0, 9, 0)),
+            row(NodeKind::EnumVariant, Some("E"), "A", (1, 0, 1, 1)),
+            row(NodeKind::Enum, Some("E"), "E", (2, 0, 4, 0)),
+            row(NodeKind::EnumVariant, Some("E"), "B", (3, 0, 3, 1)),
+        ];
+        assert_eq!(variants(&rows), [(0, 1), (2, 3)]);
+    }
+
+    /// A variant outside every enum span of its owner's name binds by name.
+    #[test]
+    fn test_enum_variant_defines_variant_outside_enum_span_binds_by_name() {
+        let rows = [
+            row(NodeKind::Enum, None, "E", (0, 0, 0, 6)),
+            row(NodeKind::EnumVariant, Some("E"), "X", (1, 0, 1, 1)),
+        ];
+        assert_eq!(variants(&rows), [(0, 1)]);
+    }
+
+    /// The node map decides both ends of a spanned variant; a row with no
+    /// node gives no edge.
+    #[test]
+    fn test_enum_variant_defines_row_without_node_emits_nothing() {
+        let rows = [
+            row(NodeKind::Enum, None, "E", (0, 0, 2, 0)),
+            row(NodeKind::EnumVariant, Some("E"), "X", (1, 0, 1, 1)),
+        ];
+        let mut out = Vec::new();
+        enum_variant_defines(
+            &rows,
+            |r| *r,
+            |raw| (raw == 0).then_some(7),
+            first_of(&rows),
+            |e, v| out.push((e, v)),
+        );
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn test_has_merged_rows_only_for_file_with_a_tombstone() {
+        let map = RawIndexMap::new(0, [2, 3])
+            .unwrap()
+            .with_merged(vec![(4, 3)])
+            .unwrap();
+        assert!(!has_merged_rows(&map, FileOrd(0)));
+        assert!(has_merged_rows(&map, FileOrd(1)));
+        assert!(!has_merged_rows(&map, FileOrd(2)), "absent file");
     }
 }

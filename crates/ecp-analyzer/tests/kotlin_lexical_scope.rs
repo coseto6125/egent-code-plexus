@@ -108,14 +108,15 @@ fn test_parse_file_kotlin_nested_fn_same_name_as_top_level_today_uid() {
         ("helper", NodeKind::Function)
     );
     assert_eq!(top.uid, uid_of(NodeKind::Function, None, "helper"));
-    // Wrong today: the nested function has no owner, so it hashes like the top-level one and
-    // the builder turns it into a tombstone (empty name, bit-inverse uid). A later opt-in slice
-    // flips this: the nested function becomes a lexically scoped node with its own uid.
+    // Stands for: a same-uid redefinition keeps its own named node (design_uid §2.3,
+    // `LaterReason::Repeat`). The nested function has no owner, so it shares the top-level
+    // one's base uid and takes `uid::overload(base, 1)`. A later opt-in slice flips this: the
+    // nested function becomes a lexically scoped node with a scoped uid.
     assert_eq!(
         (nested.name.as_str(), nested.kind),
-        ("", NodeKind::Function)
+        ("helper", NodeKind::Function)
     );
-    assert_eq!(nested.uid, ecp_core::uid::tombstone(top.uid));
+    assert_eq!(nested.uid, ecp_core::uid::overload(top.uid, 1));
     assert_eq!(nested.owner, "");
 }
 
@@ -132,8 +133,9 @@ fn test_parse_file_kotlin_nested_fn_owner_today() {
 
 #[test]
 fn test_resolve_call_kotlin_call_to_bare_helper_binds_today() {
-    // Wrong today: the nested function is a tombstone, so the call inside `outer` binds the
-    // top-level `helper`. A later opt-in slice flips this to the nested function.
+    // Wrong today: the nested function is a later redefinition, in no name table, so the call
+    // inside `outer` binds the top-level `helper`. A later opt-in slice flips this to the
+    // nested function.
     assert_eq!(
         outer_call_targets(&graph()),
         vec![(1, String::new(), NodeKind::Function)]
