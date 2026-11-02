@@ -1238,3 +1238,75 @@ fn test_glob_pub_use_associated_item_never_shadows_the_glob() {
         );
     }
 }
+
+/// `crate::m::S::helper()` names an associated item of `S`, never the free
+/// `helper` of `S`'s file, in the module tree as in the qualifier tier: `S`
+/// owns no `helper` (only the trait default does), so the call binds that
+/// method or nothing. `other.rs` declares a second `S`, so the qualifier
+/// tier has no file and the module tree decides; `crate::m::S::new()` binds
+/// the inherent `S::new`, past a free `new` declared first.
+#[test]
+fn test_type_path_through_module_tree_never_binds_a_free_item_of_the_types_file() {
+    let files = [
+        ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+        (
+            "src/lib.rs",
+            "pub mod m;\npub mod other;\nuse m::T;\npub fn go() {\n    crate::m::S::helper();\n    crate::m::S::new();\n}\n",
+        ),
+        (
+            "src/m.rs",
+            "pub fn helper() {}\npub fn new() {}\npub struct S;\nimpl S {\n    pub fn new() -> S { S }\n}\npub trait T {\n    fn helper() {}\n}\nimpl T for S {}\n",
+        ),
+        (
+            "src/other.rs",
+            "pub struct S;\nimpl S {\n    pub fn new() -> S { S }\n}\n",
+        ),
+    ];
+    let helper = workspace_go_calls(&files, "helper");
+    assert!(
+        helper.iter().all(|(_, kind, _)| *kind == NodeKind::Method),
+        "the free `helper` must not bind: {helper:?}"
+    );
+    assert_eq!(
+        workspace_go_target_kinds(&files, "new"),
+        vec![("src/m.rs".to_string(), NodeKind::Method)]
+    );
+}
+
+/// A `fn` inside a function body is no item of its module: it neither
+/// shadows the root's glob `pub use inner::*` nor binds a `crate::` path or
+/// a `use`. With the glob, `crate::run()` and `use crate::run;` reach
+/// `inner.rs`; without it (and without `inner.rs`), they bind nothing.
+#[test]
+fn test_function_local_fn_is_no_module_item_for_paths_or_globs() {
+    const MANIFEST: (&str, &str) = ("Cargo.toml", "[package]\nname = \"tool\"\n");
+    const INNER: (&str, &str) = ("src/inner.rs", "pub fn run() {}\n");
+    let glob = "mod inner;\nmod other;\npub use inner::*;\npub fn setup() {\n    fn run() {}\n    run();\n}\n";
+    let no_glob = "mod other;\npub fn setup() {\n    fn run() {}\n    run();\n}\n";
+    for user in [
+        "pub fn go() {\n    crate::run();\n}\n",
+        "use crate::run;\npub fn go() {\n    run();\n}\n",
+    ] {
+        assert_eq!(
+            workspace_go_targets(
+                &[
+                    MANIFEST,
+                    ("src/lib.rs", glob),
+                    INNER,
+                    ("src/other.rs", user)
+                ],
+                "run"
+            ),
+            vec!["src/inner.rs".to_string()],
+            "glob: {user}"
+        );
+        assert_eq!(
+            workspace_go_targets(
+                &[MANIFEST, ("src/lib.rs", no_glob), ("src/other.rs", user)],
+                "run"
+            ),
+            Vec::<String>::new(),
+            "no glob: {user}"
+        );
+    }
+}

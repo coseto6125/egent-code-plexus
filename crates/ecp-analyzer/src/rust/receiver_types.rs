@@ -786,8 +786,6 @@ fn alias_source(value: Node<'_>, source: &[u8]) -> Option<(String, bool)> {
     }
 }
 
-/// `let x: Dog = ...` — extract `x → "Dog"`.
-/// Skips patterns more complex than a plain identifier or `mut x`.
 /// The bare type a `let x: T = ..` annotation names; `None` for a `let`
 /// with no annotation or one that names no simple type.
 fn let_binding_type(node: &Node<'_>, source: &[u8]) -> Option<String> {

@@ -3798,6 +3798,10 @@ fn pass2_emit_node_edges(
             Some(key) if type_ladder::names_declaring_type_in(language, key) => {
                 raw_node.owner_class.as_deref().and_then(owner_key)
             }
+            // The index types a C# `Tok?` member as `Tok` and a Python
+            // forward reference `"Tok"` as `Tok` (`note_return_type`), and the
+            // overlay rebuilds the member type from this edge alone.
+            Some(key) if matches!(language, Language::CSharp | Language::Python) => Some(key),
             _ => Some(type_ann.as_str()),
         };
         let targets = type_name.map_or_else(Vec::new, |type_name| {

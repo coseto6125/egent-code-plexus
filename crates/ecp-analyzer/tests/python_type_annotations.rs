@@ -1,0 +1,49 @@
+//! Python: a method returning `Self` (`typing.Self`) returns its own class, so `ecp impact` on the class lists it.
+mod name_ref_support;
+
+use ecp_analyzer::python::parser::PythonProvider;
+use ecp_core::graph::{RelType, ZeroCopyGraph};
+use name_ref_support::{graph, refs};
+
+/// `(target file, target name)` of every `type_annotation` edge out of `source`.
+fn annotated(g: &ZeroCopyGraph, source: &str) -> Vec<(String, String)> {
+    refs(g, source, RelType::Accesses, "type_annotation")
+        .into_iter()
+        .map(|(file, name, _, _)| (file, name))
+        .collect()
+}
+
+fn pair(file: &str, name: &str) -> (String, String) {
+    (file.to_string(), name.to_string())
+}
+
+/// Contract: `def clone(self) -> Self` in `class Resolver` reaches `Resolver`,
+/// bare and quoted (`-> "Self"`), like `-> "Resolver"`. Before the I3 gate the
+/// edge looked up a type named `Self`: no such type, no edge.
+#[test]
+fn test_self_return_annotation_binds_declaring_class() {
+    let g = graph(
+        &PythonProvider::new().unwrap(),
+        &[(
+            "src/table.py",
+            "class Resolver:\n    def clone(self) -> Self:\n        return self\n\n    def quoted(self) -> \"Self\":\n        return self\n\n    def plain(self) -> \"Resolver\":\n        return self\n",
+        )],
+    );
+    let resolver = vec![pair("src/table.py", "Resolver")];
+    assert_eq!(annotated(&g, "clone"), resolver, "-> Self");
+    assert_eq!(annotated(&g, "quoted"), resolver, "-> \"Self\"");
+    assert_eq!(annotated(&g, "plain"), resolver, "-> \"Resolver\"");
+}
+
+/// Guard: a free function has no declaring class, so `-> Self` binds nothing.
+#[test]
+fn test_self_return_annotation_outside_class_no_edge() {
+    let g = graph(
+        &PythonProvider::new().unwrap(),
+        &[(
+            "src/free.py",
+            "class Resolver:\n    pass\n\ndef free() -> Self:\n    return Resolver()\n",
+        )],
+    );
+    assert_eq!(annotated(&g, "free"), Vec::<(String, String)>::new());
+}

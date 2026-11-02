@@ -34,7 +34,7 @@ use crate::calls::{
     start_pos, Pos, PosRange,
 };
 use ecp_core::analyzer::csharp_extension::system_type_name;
-use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
+use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef, THIS_MEMBER_PREFIX};
 use ecp_core::graph::NodeKind;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -690,7 +690,9 @@ fn csharp_callee(
         Receiver::Typed(ty) => format!("{ty}.{method}"),
         Receiver::Implicit => return Some(method.to_string()),
         Receiver::MaybeType(name) => CallSite::from_receiver(name, method),
-        Receiver::ThisMember(name) => CallSite::from_receiver(&format!("this/{name}"), method),
+        Receiver::ThisMember(name) => {
+            CallSite::from_receiver(&format!("{THIS_MEMBER_PREFIX}{name}"), method)
+        }
         // `Foo.Create().Bar()`: the resolver types the receiver by the
         // callee's return type, and else resolves the untyped member.
         Receiver::Call => {

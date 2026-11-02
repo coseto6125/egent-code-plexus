@@ -263,3 +263,34 @@ fn test_resolve_call_dart_combinator_import_of_other_file_keeps_fallback_binding
         .collect();
     assert_eq!(files, ["lib/util/helper.dart"]);
 }
+
+/// Stands for: a Dart combinator filters only a library's top-level names.
+/// `show Repo` hides the top-level `helper`, while `p.repo.save()` still
+/// binds `Repo.save`: a member is reached through its type, which the
+/// import shows.
+#[test]
+fn test_resolve_call_dart_show_import_keeps_member_call_binding() {
+    let graph = graph_of(
+        &DartProvider::new().unwrap(),
+        &[
+            (
+                "lib/page.dart",
+                "import 'repo.dart' show Repo; class Page { final Repo repo = Repo(); } \
+                 void run(Page p) { p.repo.save(); helper(); }",
+            ),
+            (
+                "lib/repo.dart",
+                "class Repo { void save() {} } void helper() {}",
+            ),
+        ],
+    );
+    let calls: Vec<(String, String, String)> = calls_from(&graph, "run")
+        .into_iter()
+        .filter(|hit| hit.name == "save" || hit.name == "helper")
+        .map(|hit| (hit.name, hit.owner, hit.file))
+        .collect();
+    assert_eq!(
+        calls,
+        [("save".into(), "Repo".into(), "lib/repo.dart".into())]
+    );
+}

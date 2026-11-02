@@ -86,6 +86,13 @@ thread_local! {
     static CHAIN_DEPTH: Cell<u32> = const { Cell::new(0) };
 }
 
+/// The receiver key of a C# `this.name` call whose member the caller's file
+/// does not declare: `this/name`. The parser writes it into a
+/// [`CallSite::FromReceiver`] receiver and the resolver reads it back. The
+/// separator is '/' because `CallSite` splits receiver from member on the
+/// first '.'.
+pub const THIS_MEMBER_PREFIX: &str = "this/";
+
 /// One [`RawNode::calls`] entry, decoded.
 ///
 /// The callee text alone cannot say whether a call constructs its type: in
@@ -120,9 +127,9 @@ pub enum CallSite<'a> {
     /// submodule binds as a module import. In C#, Swift, Kotlin and Dart it
     /// is an identifier that is no local, parameter or field; in C# also the
     /// last segment of a dotted name that may be a type path (`Outer.Inner`)
-    /// or a generic type's name (`Box<int>`), and `this/name` for a
-    /// `this.name` member the caller's file does not declare, which names
-    /// no type. A receiver that names a type
+    /// or a generic type's name (`Box<int>`), and `this/name`
+    /// ([`THIS_MEMBER_PREFIX`]) for a `this.name` member the caller's file
+    /// does not declare, which names no type. A receiver that names a type
     /// (or a library one) resolves as `Plain("Type.member")`; anywhere else
     /// the site resolves as `Plain(member)`, in Swift and C# as
     /// `UntypedMember(member)`.
@@ -2305,6 +2312,24 @@ mod tests {
         assert_eq!(CHAIN_DEPTH.get(), 0);
         let after = encode_chain(CHAIN_DEPTH_LIMIT).unwrap();
         assert_eq!(chain_depth(&after).0, CHAIN_DEPTH_LIMIT);
+    }
+
+    /// Contract: the C# `this.name` receiver key survives the `CallSite`
+    /// round trip whole, because the prefix holds no '.', the one character
+    /// the entry splits on; an empty or whitespace-only member name leaves
+    /// a key that still strips to that name and no further.
+    #[test]
+    fn test_this_member_prefix_receiver_round_trips_through_call_site() {
+        assert!(!THIS_MEMBER_PREFIX.contains('.'));
+        for name in ["_fld", "", " "] {
+            let key = format!("{THIS_MEMBER_PREFIX}{name}");
+            let raw = CallSite::from_receiver(&key, "Create");
+            let CallSite::FromReceiver { receiver, member } = CallSite::parse(&raw) else {
+                panic!("{raw:?} does not decode as a from-receiver entry");
+            };
+            assert_eq!(member, "Create");
+            assert_eq!(receiver.strip_prefix(THIS_MEMBER_PREFIX), Some(name));
+        }
     }
 
     /// Contract: a `from`-receiver entry decodes to its receiver and member,

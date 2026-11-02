@@ -1411,21 +1411,25 @@ fn attribute_shadows_submodule<F: ModuleFacts + ?Sized>(
     })
 }
 
-/// Whether a TS / JS import binding `name` names the ES module that
-/// declares the global tier's pick (in `decl_file`). The import tier found
-/// no export of that name there, so the declaration is private to its
-/// module and out of the importer's reach: the global tier must not bind
-/// it.
+/// Whether an import of the importer puts the global tier's pick (`name`,
+/// declared in `decl_file`) out of its reach, so the global tier must not
+/// bind it. A TS / JS import binding `name` that names the pick's ES module:
+/// the import tier found no export of that name there, so the declaration
+/// is private to its module. A Dart `show` / `hide` import that leaves
+/// `name` out ([`dart_import_hides`]): a combinator filters only a
+/// library's top-level names, so it never hides a member (`is_member`),
+/// which the call reaches through its type.
 pub fn import_hides<'i, F: ModuleFacts + ?Sized>(
     facts: &F,
     importer: &str,
     name: &str,
     imports: impl IntoIterator<Item = ImportRef<'i>>,
     decl_file: &str,
+    is_member: bool,
 ) -> bool {
     let language = facts.file_language(importer);
     if language == Language::Dart {
-        return dart_import_hides(facts, importer, name, imports, decl_file);
+        return !is_member && dart_import_hides(facts, importer, name, imports, decl_file);
     }
     if !is_ecmascript(language) || !facts.is_es_module(decl_file) {
         return false;
@@ -1437,10 +1441,11 @@ pub fn import_hides<'i, F: ModuleFacts + ?Sized>(
     })
 }
 
-/// A Dart `show` / `hide` import of `decl_file` that makes `name` invisible
-/// while no other unaliased import of that file shows it: the declaration is
-/// out of the importer's reach, so the global tier must not bind it. An
-/// aliased import binds its names under the alias, not bare.
+/// A Dart `show` / `hide` import of `decl_file` that makes the top-level
+/// `name` invisible while no other unaliased import of that file shows it:
+/// the declaration is out of the importer's reach, so the global tier must
+/// not bind it. An aliased import binds its names under the alias, not
+/// bare.
 fn dart_import_hides<'i, F: ModuleFacts + ?Sized>(
     facts: &F,
     importer: &str,

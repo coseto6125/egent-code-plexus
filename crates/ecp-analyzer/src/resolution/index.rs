@@ -1188,7 +1188,8 @@ impl SymbolTable {
 
     /// Whether `file_path` declares a module-level node named `node_name`
     /// whose kind `holds` accepts: an associated item
-    /// (`impl X { const h: u32 = 1; }`) is no item of the module.
+    /// (`impl X { const h: u32 = 1; }`) and a `fn` inside a function body
+    /// are no items of the module.
     pub(crate) fn declares_in_file(
         &self,
         file_path: &str,
@@ -1200,7 +1201,9 @@ impl SymbolTable {
             .and_then(|file_map| file_map.get(node_name))
             .is_some_and(|ids| {
                 ids.iter().any(|&id| {
-                    self.node_owner[id as usize] == NO_OWNER && holds(self.node_kinds[id as usize])
+                    self.node_owner[id as usize] == NO_OWNER
+                        && !self.is_lexically_scoped(id)
+                        && holds(self.node_kinds[id as usize])
                 })
             })
     }
@@ -1329,7 +1332,9 @@ impl SymbolTable {
     /// requires: [`MemberOwner::Any`] takes the match [`Self::prefer_owned`]
     /// picks with no owner (a free function, else one type's member),
     /// `TopLevel` a declaration with no owning type, `Type` a member of the
-    /// type its path names, when the file's types agree with that path.
+    /// type its path names, when the file's types agree with that path. A
+    /// declaration inside a function body is none of them: no import names
+    /// it.
     pub(crate) fn lookup_member_in_file(
         &self,
         file_path: &str,
@@ -1364,7 +1369,9 @@ impl SymbolTable {
             .iter()
             .copied()
             .find(|&id| {
-                self.node_owner[id as usize] == owner_id && predicate(self.node_kinds[id as usize])
+                self.node_owner[id as usize] == owner_id
+                    && !self.is_lexically_scoped(id)
+                    && predicate(self.node_kinds[id as usize])
             })
     }
 

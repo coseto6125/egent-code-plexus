@@ -287,6 +287,7 @@ impl<'a> OverlayFacts<'a> {
         let mut dirty_return_types: FxHashMap<u32, &'a str> = FxHashMap::default();
         let mut dirty_flags: FxHashMap<u32, u16> = FxHashMap::default();
         let mut dirty_lexical_parents: FxHashMap<u32, u32> = FxHashMap::default();
+        let mut scoped_symbols: FxHashMap<&'a str, Vec<bool>> = FxHashMap::default();
         let mut seen_uids: FxHashSet<u64> = FxHashSet::default();
         let mut offset = 0usize;
         for (file_ord, file) in files.iter().enumerate() {
@@ -336,7 +337,14 @@ impl<'a> OverlayFacts<'a> {
                     .iter()
                     .map(|s| (s.kind, HeritageNode::span(s)))
                     .collect();
-                for (offset, parent) in lexical_parents(&decls, scoped).into_iter().enumerate() {
+                let parents = lexical_parents(&decls, scoped);
+                if parents.iter().any(Option::is_some) {
+                    scoped_symbols.insert(
+                        file.rel_path.as_str(),
+                        parents.iter().map(Option::is_some).collect(),
+                    );
+                }
+                for (offset, parent) in parents.into_iter().enumerate() {
                     if let Some(parent) = parent {
                         dirty_lexical_parents.insert(start + offset as u32, start + parent);
                     }
@@ -378,7 +386,8 @@ impl<'a> OverlayFacts<'a> {
         // The dirty configs' rows over the archived table, merged once per
         // view: the alias reading and the crate table both read it.
         let merged = configs.merged_facts(graph);
-        let rust = RustModules::new(graph, files, removed);
+        let mut rust = RustModules::new(graph, files, removed);
+        rust.scoped_symbols = scoped_symbols;
         if let Some(facts) = &merged {
             let _ = rust.crates.set(facts.clone());
         }
@@ -2635,8 +2644,10 @@ fn resolve_overlay_name_ref(
 /// invented edge is worse than a missing one), unless `call` is given and
 /// every candidate is a copy of one declaration: then the copy nearest the
 /// caller binds ([`ladder::nearest_copy`]) at
-/// [`NEAREST_COPY_CONFIDENCE`]. A TS / JS import naming the ES module of a
-/// private pick hides it ([`reexport::import_hides`]). Unique → 0.7.
+/// [`NEAREST_COPY_CONFIDENCE`]. An import that puts the pick out of reach
+/// hides it ([`reexport::import_hides`]): a TS / JS import naming its private
+/// ES module, a Dart combinator that leaves a top-level pick out. Unique →
+/// 0.7.
 #[allow(clippy::too_many_arguments)]
 fn resolve_callee<'s>(
     graph: &ArchivedZeroCopyGraph,
@@ -3198,6 +3209,7 @@ fn global_tier(
                 callee,
                 imports.iter().map(ImportRef::from),
                 file,
+                PickFacts::owner(facts, target).is_some(),
             )
         })
     };
@@ -3284,6 +3296,9 @@ enum RustTail {
 pub(super) struct RustModules<'a> {
     graph: &'a ArchivedZeroCopyGraph,
     dirty: FxHashMap<&'a str, &'a OverlayFileInput>,
+    /// Per dirty file, which of its symbols (by position) a function body
+    /// encloses; a file without one has no row.
+    scoped_symbols: FxHashMap<&'a str, Vec<bool>>,
     removed: &'a FxHashSet<&'a str>,
     /// The `graph.bin` workspace facts, read on first use: reading them
     /// deserializes and validates the whole table, once per view.
@@ -3317,6 +3332,7 @@ impl<'a> RustModules<'a> {
                 .iter()
                 .map(|file| (file.rel_path.as_str(), file))
                 .collect(),
+            scoped_symbols: FxHashMap::default(),
             removed,
             crates: OnceCell::new(),
         }
@@ -3378,17 +3394,23 @@ impl<'a> RustModules<'a> {
 
     /// Whether `file` declares a module-level node named `name` whose kind
     /// `wanted` accepts: an associated item (`impl X { const h: u32 = 1; }`)
-    /// is no item of the module. A dirty file answers from its fresh parse.
+    /// and a `fn` inside a function body are no items of the module. A dirty
+    /// file answers from its fresh parse.
     fn declares(&self, file: &str, name: &str, wanted: impl Fn(NodeKind) -> bool) -> bool {
         match self.dirty.get(file) {
-            Some(dirty) => dirty.symbols.iter().any(|s| {
-                s.name == name
-                    && wanted(s.kind)
-                    && s.owner_class.as_deref().and_then(owner_key).is_none()
-            }),
+            Some(dirty) => {
+                let scoped = self.scoped_symbols.get(file);
+                dirty.symbols.iter().enumerate().any(|(at, s)| {
+                    s.name == name
+                        && wanted(s.kind)
+                        && s.owner_class.as_deref().and_then(owner_key).is_none()
+                        && !scoped.is_some_and(|scoped| scoped[at])
+                })
+            }
             None => self.graph.nodes_by_name(name).any(|idx| {
                 let node = &self.graph.nodes[idx as usize];
                 wanted(NodeKind::from(&node.kind))
+                    && !self.graph.is_lexically_scoped(idx)
                     && owner_key(node.owner_class.resolve(&self.graph.string_pool)).is_none()
                     && self.graph.files[node.file_idx.to_native() as usize]
                         .path
@@ -4722,6 +4744,7 @@ fn member_in_file(
             let node = &graph.nodes[idx as usize];
             names.target.kind_predicate()(NodeKind::from(&node.kind))
                 && !dirty_base.contains(&idx)
+                && !graph.is_lexically_scoped(idx)
                 && graph
                     .files
                     .get(node.file_idx.to_native() as usize)
@@ -4735,8 +4758,10 @@ fn member_in_file(
                 .get(member)?
                 .iter()
                 .map(|&(virt, _)| (virt, &nodes[(virt - base_len) as usize]))
-                .find(|(_, node)| {
-                    node.rel_path.as_ref() == file && owned(node.owner_class.as_deref())
+                .find(|&(virt, node)| {
+                    node.rel_path.as_ref() == file
+                        && !facts.is_lexically_scoped(virt)
+                        && owned(node.owner_class.as_deref())
                 })
                 .map(|(virt, _)| virt)
         })

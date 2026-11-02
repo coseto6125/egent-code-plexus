@@ -6,6 +6,8 @@
 //! a `name:`-prefixed field, so the parser descends positionally. Behavior
 //! cross-checked against GitNexus `dart.ts` type-extractor (independent Rust impl).
 
+mod name_ref_support;
+
 use ecp_analyzer::dart::parser::DartProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::RawNode;
@@ -68,4 +70,31 @@ fn function_return_type_preserved() {
     let nodes = parse("bool f() => true;\n");
     let f = find(&nodes, "f", NodeKind::Function);
     assert_eq!(f.type_annotation.as_deref(), Some("bool"));
+}
+
+/// Contract: `Self make()` where the project declares a type named `Self` binds that
+/// type. `Self` is no declaring-type keyword in Dart; a language-blind gate
+/// would find no owner and bind nothing.
+#[test]
+fn test_self_named_project_type_binds_that_type() {
+    let g = name_ref_support::graph(
+        &DartProvider::new().unwrap(),
+        &[(
+            "lib/app.dart",
+            "class Self {}\n\nclass Owner {\n  Self make() => Self();\n}\n",
+        )],
+    );
+    let edges: Vec<(String, String)> = name_ref_support::refs(
+        &g,
+        "make",
+        ecp_core::graph::RelType::Accesses,
+        "type_annotation",
+    )
+    .into_iter()
+    .map(|(file, name, _, _)| (file, name))
+    .collect();
+    assert_eq!(
+        edges,
+        vec![("lib/app.dart".to_string(), "Self".to_string())]
+    );
 }

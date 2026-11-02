@@ -172,3 +172,64 @@ fn test_overlay_same_name_type_other_namespace_reports_no_gap() {
     assert_eq!(overlay, reindex);
     assert_eq!(gaps_after_edit(&files, &edits), Vec::<CallGap>::new());
 }
+
+/// `Tok` declares `CreateReader` on line 5; `Decoy` declares it too, so a
+/// name-only lookup binds neither.
+const TOK: (&str, &str) = (
+    "Lib/Tok.cs",
+    "namespace Lib\n{\n    public class Tok\n    {\n        public void CreateReader() {}\n    }\n}\n",
+);
+const DECOY: (&str, &str) = (
+    "Lib/Decoy.cs",
+    "namespace Lib\n{\n    public class Decoy\n    {\n        public void CreateReader() {}\n    }\n}\n",
+);
+
+/// Stands for: a nullable field (`Tok? _fld`) a clean part declares types the
+/// receiver in a dirty part, as the reindex types it: `Tok.CreateReader` at
+/// 0.85 on both sides, for the bare `_fld` and for `this._fld`. The index
+/// types the field as `Tok` (`return_type_key` strips the `?`), and the
+/// overlay rebuilds the field type from the clean part's archived
+/// `type_annotation` edge. Before the fix Pass 2 resolved the raw `Tok?`, the
+/// edge was missing, and the overlay gave no edge where the reindex gave one.
+#[test]
+fn test_overlay_partial_nullable_field_receiver_binds_like_reindex() {
+    for call in ["_fld.CreateReader();", "this._fld.CreateReader();"] {
+        let fields = part("Reader", "private Tok? _fld;");
+        let caller = part("Reader", &format!("public void Run() {{ {call} }}"));
+        let files = [
+            ("Lib/Reader.cs", fields.as_str()),
+            ("Lib/Reader.Run.cs", caller.as_str()),
+            TOK,
+            DECOY,
+        ];
+        let edited = shifted(&caller);
+        let edits = [("Lib/Reader.Run.cs", edited.as_str())];
+        let (reindex, overlay) = run_calls(&files, &edits);
+        assert_eq!(
+            callees(&reindex),
+            [("Lib/Tok.cs", "CreateReader", 5, 0.85)],
+            "{call}: reindex"
+        );
+        assert_eq!(overlay, reindex, "{call}: overlay");
+    }
+}
+
+/// Guard: a generic nullable field (`List<Tok>? _lst`) names no project
+/// type, so neither side binds, and the overlay reports nothing the reindex
+/// does not.
+#[test]
+fn test_overlay_partial_nullable_generic_field_receiver_binds_nothing_like_reindex() {
+    let fields = part("Reader", "private List<Tok>? _lst;");
+    let caller = part("Reader", "public void Run() { _lst.CreateReader(); }");
+    let files = [
+        ("Lib/Reader.cs", fields.as_str()),
+        ("Lib/Reader.Run.cs", caller.as_str()),
+        TOK,
+        DECOY,
+    ];
+    let edited = shifted(&caller);
+    let edits = [("Lib/Reader.Run.cs", edited.as_str())];
+    let (reindex, overlay) = run_calls(&files, &edits);
+    assert_eq!(callees(&reindex), Vec::<(&str, &str, u32, f32)>::new());
+    assert_eq!(overlay, reindex);
+}

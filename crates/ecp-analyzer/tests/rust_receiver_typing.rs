@@ -661,6 +661,41 @@ fn test_rust_path_call_on_impl_only_std_type_binds_nothing() {
     assert!(callee_files(&g, "n", "len").is_empty());
 }
 
+/// `impl From<Name> for String` and `impl StrExt for str` make `lib.rs` the
+/// qualifier file of the impl-only `String` and `str`, and `Name` declares
+/// a `len` and a `trim` there. A method call on a `&String` or a `&str`
+/// reaches std, never another type's same-named method; the `str` impl's
+/// own `first_word` still binds.
+const IMPL_ONLY_STD_RS: &str = "pub struct Name;\nimpl Name {\n    pub fn len(&self) -> usize { 0 }\n    pub fn trim(&self) -> u32 { 0 }\n}\nimpl From<Name> for String {\n    fn from(_: Name) -> String { String::new() }\n}\npub trait StrExt {\n    fn first_word(&self) -> &str;\n}\nimpl StrExt for str {\n    fn first_word(&self) -> &str { self }\n}\npub fn n(s: &String) -> usize { s.len() }\npub fn t(s: &str) -> u32 { s.trim() }\npub fn w(s: &str) -> &str { s.first_word() }\n";
+
+#[test]
+fn test_rust_typed_receiver_of_impl_only_std_type_never_binds_another_types_method() {
+    let g = build(&[("src/lib.rs", IMPL_ONLY_STD_RS)]);
+    assert_eq!(callee_owners(&g, "n", "len"), vec![], "String.len");
+    assert_eq!(callee_owners(&g, "t", "trim"), vec![], "str.trim");
+    assert_eq!(
+        callee_owners(&g, "w", "first_word"),
+        vec![("src/lib.rs".to_string(), "str".to_string())],
+        "the impl's own method"
+    );
+}
+
+/// Contract: an impl-only foreign type still reaches a trait's default
+/// method: `impl StrExt for str { fn other }` leaves `first_word` to the
+/// trait, so `s.first_word()` binds `StrExt::first_word`, as it does for a
+/// project type. The owner-equals-qualifier rule alone gives no edge.
+#[test]
+fn test_rust_typed_receiver_of_impl_only_std_type_binds_trait_default_method() {
+    let g = build(&[(
+        "src/lib.rs",
+        "pub trait StrExt {\n    fn first_word(&self) -> u8 { 0 }\n    fn other(&self);\n}\nimpl StrExt for str {\n    fn other(&self) {}\n}\npub fn w(s: &str) -> u8 { s.first_word() }\n",
+    )]);
+    assert_eq!(
+        callee_owners(&g, "w", "first_word"),
+        vec![("src/lib.rs".to_string(), "StrExt".to_string())]
+    );
+}
+
 /// A type with both `struct S` and `impl S` stays one qualifier: the struct
 /// names it, the impl block does not make it ambiguous. `T` declares a
 /// second `m` a bare-name pick could take.

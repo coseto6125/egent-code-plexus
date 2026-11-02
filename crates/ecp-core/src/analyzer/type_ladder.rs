@@ -6,7 +6,7 @@
 
 use crate::analyzer::reexport::ResolveTarget;
 use crate::analyzer::same_file_pick::PickFacts;
-use crate::analyzer::types::RawImport;
+use crate::analyzer::types::{RawImport, THIS_MEMBER_PREFIX};
 use crate::file_category::{FileMeta, Language};
 use crate::graph::NodeKind;
 use std::borrow::Cow;
@@ -310,7 +310,7 @@ pub fn csharp_member_field<F: TypeFacts + ?Sized>(
     name: &str,
 ) -> Option<u32> {
     // The C# parser writes `this/name` for a `this.name` it cannot see.
-    let name = name.strip_prefix("this/").unwrap_or(name);
+    let name = name.strip_prefix(THIS_MEMBER_PREFIX).unwrap_or(name);
     let Ownership::Owned { id, inherited } =
         member_ownership(facts, ty, ty_name, name, ResolveTarget::Field)
     else {

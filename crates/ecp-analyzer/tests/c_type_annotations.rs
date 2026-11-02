@@ -9,6 +9,8 @@
 //! - **Qualifier inclusion**: full prefix including storage-class. E.g.
 //!   `static const int N` → `"static const int"`.
 
+mod name_ref_support;
+
 use ecp_analyzer::c::parser::CProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::RawNode;
@@ -80,4 +82,28 @@ fn var_with_qualifiers() {
         annot.contains("static") && annot.contains("const"),
         "expected qualifier prefix preserved, got {annot:?}"
     );
+}
+
+/// Contract: `Self make(void)` where the project declares a type named `Self` binds that
+/// type. `Self` is no declaring-type keyword in C; a language-blind gate
+/// would find no owner and bind nothing.
+#[test]
+fn test_self_named_project_type_binds_that_type() {
+    let g = name_ref_support::graph(
+        &CProvider::new().unwrap(),
+        &[(
+            "app.c",
+            "typedef struct { int n; } Self;\n\nSelf make(void) { Self s = {0}; return s; }\n",
+        )],
+    );
+    let edges: Vec<(String, String)> = name_ref_support::refs(
+        &g,
+        "make",
+        ecp_core::graph::RelType::Accesses,
+        "type_annotation",
+    )
+    .into_iter()
+    .map(|(file, name, _, _)| (file, name))
+    .collect();
+    assert_eq!(edges, vec![("app.c".to_string(), "Self".to_string())]);
 }

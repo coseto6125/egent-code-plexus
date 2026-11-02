@@ -89,7 +89,8 @@ impl<'a> MergedEdge<'a> {
 
     /// Why the edge exists. An overlay edge carries the reason its view pass
     /// gave it: replayed `Defines` keep the index's reasons, rebuilt lexical
-    /// references, nearest-copy calls and reads keep their semantic reason,
+    /// references, nearest-copy calls, guessed untyped-member calls and reads
+    /// keep their semantic reason,
     /// and the other overlay edges carry the uncommitted-edit marker.
     #[inline]
     pub fn reason(&self, graph: &'a ArchivedZeroCopyGraph) -> &'a str {

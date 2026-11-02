@@ -1397,12 +1397,6 @@ type_alias kotlin pre-existing gap
 type_alias php pre-existing gap
 type_alias ruby pre-existing gap
 type_alias swift pre-existing gap
-type_annotations csharp pre-existing gap
-type_annotations java pre-existing gap
-type_annotations javascript pre-existing gap
-type_annotations kotlin pre-existing gap
-type_annotations python pre-existing gap
-type_annotations ruby pre-existing gap
 type_qualified_calls c pre-existing gap
 type_qualified_calls cpp pre-existing gap
 type_qualified_calls dart pre-existing gap

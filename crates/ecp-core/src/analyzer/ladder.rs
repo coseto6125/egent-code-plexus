@@ -262,12 +262,13 @@ pub fn nearest_copy<F: TypeFacts + ?Sized>(
 /// Tier 3: one `name` across the project. `candidates` yields the
 /// same-named declarations of the field the call may reach, with their
 /// files' metas; it is read again for the nearest copy and the count.
-/// A unique pick ([`global_pick`]) binds unless `hidden` (a TS / JS import
-/// naming the pick's private ES module) refuses it. Several candidates bind
-/// nothing, an invented edge being worse than a missing one, unless
-/// `nearest` (a call site) and all are copies of one declaration: then the
-/// copy nearest the caller binds ([`nearest_copy`]). A refused or absent
-/// copy leaves `NoEdge::Ambiguous` with the number of candidates that fit.
+/// A unique pick ([`global_pick`]) binds unless `hidden` (an import that
+/// puts it out of reach, [`reexport::import_hides`]) refuses it. Several
+/// candidates bind nothing, an invented edge being worse than a missing
+/// one, unless `nearest` (a call site) and all are copies of one
+/// declaration: then the copy nearest the caller binds ([`nearest_copy`]).
+/// A refused or absent copy leaves `NoEdge::Ambiguous` with the number of
+/// candidates that fit.
 pub fn global<F: TypeFacts + ?Sized, I: Iterator<Item = (u32, FileMeta)>>(
     facts: &F,
     caller_file: &str,
@@ -1149,6 +1150,21 @@ pub fn qualified_member<F: QualifierFacts>(
                 .is_some()
         });
     let qualifier_is_type = type_receiver_is_closed(language) && qualifier_names_type;
+    // A Rust method call whose qualifier names no type in the file reached
+    // it through an `impl` block only (R5): `impl From<Name> for String`
+    // beside `impl Name { fn len }` makes the file `String`'s, yet
+    // `s.len()` on a `String` calls std. Only the qualifier's own member or
+    // a trait's (a default method the impl inherits, as for a project type)
+    // binds; else the receiver-typing ladder decides.
+    let impl_only = language == Language::Rust && !callee.contains("::") && !qualifier_names_type;
+    let impl_may_reach = |id: u32| {
+        decls.owner(id).and_then(owner_key).is_some_and(|owner| {
+            Some(owner) == owner_key(qualifier)
+                || decls
+                    .call_decls(file, owner)
+                    .any(|(_, kind)| kind == NodeKind::Trait)
+        })
+    };
     let id = prefer_owned(
         decls,
         file,
@@ -1168,6 +1184,7 @@ pub fn qualified_member<F: QualifierFacts>(
     // the receiver-typing ladder then takes the call to an inherited one.
     (rust_path_may_bind(decls, site, id)
         && !(qualifier_names_type && rust_type_path_misses(decls, site, id))
+        && !(impl_only && !impl_may_reach(id))
         && !decls.hidden_member(id))
     .then_some(id)
 }
@@ -1604,9 +1621,14 @@ pub fn anchored_module_file<F: ModuleTreeFacts>(
 
 /// R14, the member part: the declaration the Rust path `callee` binds
 /// through the module tree. In the file [`module_tree_item`] places, the
-/// item's first declaration of `target`'s kinds, else the first one named
-/// `member` (the callee's last segment, generic arguments dropped).
-/// [`qualified`] then applies the method rule ([`rust_path_may_bind`]).
+/// item's first module-level declaration of `target`'s kinds, else the
+/// first one named `member` (the callee's last segment, generic arguments
+/// dropped). A `fn` inside a function body is no item of the module. When
+/// the item is a type (`m::S` of `m::S::helper`), the path names one of its
+/// associated items, as in the qualifier tier: [`prefer_owned`] picks it
+/// with the type as the receiver, and a free item of the type's file never
+/// binds. [`qualified`] then applies the method rule
+/// ([`rust_path_may_bind`]).
 pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
     facts: &F,
     decls: &D,
@@ -1621,10 +1643,36 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
         return None;
     };
     let file = file.as_ref();
-    decls.first_decl_in_file(file, &item, target).or_else(|| {
-        let bare = member.split('<').next().unwrap_or(member);
-        decls.first_decl_in_file(file, bare, target)
-    })
+    let first = |name: &str, target: ResolveTarget| {
+        let wanted = target.kind_predicate();
+        decls
+            .call_decls(file, name)
+            .find(|&(_, kind)| wanted(kind))
+            .map(|(id, _)| id)
+    };
+    if let Some(id) = first(item.as_str(), target) {
+        return Some(id);
+    }
+    let bare = member.split('<').next().unwrap_or(member);
+    let pick = first(bare, target)?;
+    if first(item.as_str(), ResolveTarget::Type).is_none() {
+        return Some(pick);
+    }
+    prefer_owned(
+        decls,
+        file,
+        pick,
+        bare,
+        Some(item.as_str()),
+        &[],
+        target,
+        PickScope {
+            typed_receiver: true,
+            qualifier_is_type: true,
+            ..PickScope::default()
+        },
+    )
+    .filter(|&id| decls.owner(id).is_some())
 }
 
 /// [`QualifierFacts::crate_module`] through the module tree: `Local` unless
@@ -1656,8 +1704,8 @@ pub fn crate_module<F: ModuleTreeFacts, D: ResolveFacts>(
             Some(TreeItem::Found { file, item })
                 if item == member
                     && decls
-                        .first_decl_in_file(file.as_ref(), &item, target)
-                        .is_some() =>
+                        .call_decls(file.as_ref(), &item)
+                        .any(|(_, kind)| target.kind_predicate()(kind)) =>
             {
                 Some(file)
             }

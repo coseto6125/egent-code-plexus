@@ -12,6 +12,8 @@
 //!
 //! Spec: `docs/specs/2026-05-15-language-coverage-gaps.md` Wave 2 / D1.
 
+mod name_ref_support;
+
 use ecp_analyzer::go::parser::GoProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::RawNode;
@@ -137,4 +139,28 @@ fn multi_name_var_decl_emits_one_variable_per_name() {
     // Go uppercase-first → exported.
     assert!(x.is_exported);
     assert!(y.is_exported);
+}
+
+/// Contract: `func Make() Self` where the project declares a type named `Self` binds that
+/// type. `Self` is no declaring-type keyword in Go; a language-blind gate
+/// would find no owner and bind nothing.
+#[test]
+fn test_self_named_project_type_binds_that_type() {
+    let g = name_ref_support::graph(
+        &GoProvider::new().unwrap(),
+        &[(
+            "app.go",
+            "package app\n\ntype Self struct{ n int }\n\nfunc Make() Self { return Self{} }\n",
+        )],
+    );
+    let edges: Vec<(String, String)> = name_ref_support::refs(
+        &g,
+        "Make",
+        ecp_core::graph::RelType::Accesses,
+        "type_annotation",
+    )
+    .into_iter()
+    .map(|(file, name, _, _)| (file, name))
+    .collect();
+    assert_eq!(edges, vec![("app.go".to_string(), "Self".to_string())]);
 }

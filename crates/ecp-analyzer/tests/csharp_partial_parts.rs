@@ -875,8 +875,16 @@ fn test_resolve_call_csharp_field_type_imported_only_in_field_part_binds() {
 /// The overlay rows of `callers` with the files `dirty` re-parsed
 /// (content unchanged) over the full build of [`field_files`].
 fn overlay_field_rows(dirty: &[&str], callers: &[&str]) -> Vec<Vec<(String, String, f32)>> {
-    let files = field_files(&run_fields());
-    let bytes = merged_of(&files, &["Lib"]);
+    overlay_rows_of(&field_files(&run_fields()), dirty, callers)
+}
+
+/// [`overlay_field_rows`] over the full build of `files`.
+fn overlay_rows_of(
+    files: &[(&'static str, String)],
+    dirty: &[&str],
+    callers: &[&str],
+) -> Vec<Vec<(String, String, f32)>> {
+    let bytes = merged_of(files, &["Lib"]);
     let base = access(&bytes);
     let inputs: Vec<OverlayFileInput> = files
         .iter()
@@ -919,4 +927,75 @@ fn test_overlay_view_csharp_field_of_dirty_part_no_edge_until_p2b() {
         overlay_field_rows(&["Lib/Run.cs", "Lib/Run.Use.cs"], &["G1", "G3"]),
         [Vec::<(String, String, f32)>::new(), Vec::new()]
     );
+}
+
+/// [`run_fields`] with every member type nullable.
+fn run_fields_nullable() -> String {
+    part(
+        "Run",
+        "private Tok? _fld; public Tok? Prop { get; set; } private List<Tok>? _lst; private int? _num;",
+    )
+}
+
+/// The full build's rows of `callers` over `files`, with no overlay.
+fn full_build_rows(
+    files: &[(&'static str, String)],
+    callers: &[&str],
+) -> Vec<Vec<(String, String, f32)>> {
+    let bytes = merged_of(files, &["Lib"]);
+    let merged = MergedGraph::new(access(&bytes), None);
+    callers
+        .iter()
+        .map(|caller| call_rows(&merged, caller))
+        .collect()
+}
+
+/// Stands for: a nullable field (`Tok? _fld`) or property (`Tok? Prop`) gets
+/// the `type_annotation` edge to `Tok`, as `Tok _fld` does. The index types
+/// the member as `Tok` (`return_type_key` strips the `?`), so Pass 2 has to
+/// resolve the same key. A generic (`List<Tok>?`) names no project type and
+/// an `int?` names no type of the project: neither gets an edge. Before the
+/// fix Pass 2 resolved the raw text `Tok?`, found nothing, and the list of
+/// `(member, type file)` ends was empty.
+#[test]
+fn test_resolve_symbol_csharp_nullable_member_type_annotation_edge_reaches_type() {
+    let files = field_files(&run_fields_nullable());
+    let refs: Vec<(&str, &str)> = files.iter().map(|(p, s)| (*p, s.as_str())).collect();
+    let graph = graph_of_projects(&csharp(), &refs, &["Lib"]);
+    let mut ends: Vec<(String, String)> = edge_ends(&graph, RelType::Accesses)
+        .into_iter()
+        .filter(|(source, _)| matches!(source.name.as_str(), "_fld" | "Prop" | "_lst" | "_num"))
+        .map(|(source, target)| (source.name, target.file))
+        .collect();
+    ends.sort();
+    assert_eq!(
+        ends,
+        [pair("Prop", "Lib/Tok.cs"), pair("_fld", "Lib/Tok.cs")]
+    );
+}
+
+/// Stands for: with the caller part dirty and the part that declares the
+/// nullable field and property clean, the overlay types the receivers as the
+/// full build does (`Tok.CreateReader` at 0.85, for `_fld`, `this._fld` and
+/// `Prop`), and the generic and the `int?` member bind nothing on both
+/// sides. Before the fix the overlay rebuilt the field type from the clean
+/// part's archived edge, which was missing for `Tok?`: rows `[]` where the
+/// full build gave `Tok.CreateReader`.
+#[test]
+fn test_overlay_view_csharp_nullable_field_of_clean_part_matches_full_build() {
+    let files = field_files(&run_fields_nullable());
+    let callers = ["G1", "G2", "G3", "G4", "G5", "G6"];
+    let full = full_build_rows(&files, &callers);
+    assert_eq!(
+        full,
+        [
+            tok(0.85),
+            tok(0.85),
+            tok(0.85),
+            tok(0.85),
+            Vec::new(),
+            Vec::new()
+        ]
+    );
+    assert_eq!(overlay_rows_of(&files, &["Lib/Run.Use.cs"], &callers), full);
 }

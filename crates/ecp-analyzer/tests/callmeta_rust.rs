@@ -302,6 +302,9 @@ fn outer(cb: u8) {
     assert_eq!(callers(src).len(), 1, "got: {:?}", metas(src));
 }
 
+/// Known gap, not a contract: a typed `fn()` closure parameter that the
+/// closure calls is a real callback, and indirect-dispatch collection does
+/// not collect it today. A fix that collects it flips this test.
 #[test]
 fn test_rust_indirect_closure_param_is_not_collected() {
     let src = r#"

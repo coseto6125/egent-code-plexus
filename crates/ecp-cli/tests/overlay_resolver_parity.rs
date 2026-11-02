@@ -977,6 +977,29 @@ fn test_overlay_dart_combinator_import_hides_fallback_binding_like_reindex() {
     }
 }
 
+/// Stands for: a Dart combinator filters only a library's top-level names,
+/// in the overlay and in a reindex alike. `show Repo` hides the top-level
+/// `helper`, while `p.repo.save()` keeps its binding of `Repo.save`. The
+/// chained receiver is untyped, so the bind is the Rule U guess (55); the
+/// contract is that the edge exists on both sides, not its confidence.
+#[test]
+fn test_overlay_dart_show_import_keeps_member_call_binding_like_reindex() {
+    let dart = DartProvider::new().unwrap();
+    let path = "lib/page.dart";
+    let decl_path = "lib/repo.dart";
+    let decl_source = "class Repo { void save() {} } void helper() {}";
+    let source = "import 'repo.dart' show Repo; class Page { final Repo repo = Repo(); } \
+                  void run(Page p) { p.repo.save(); helper(); }";
+    let expected = vec![(decl_path.into(), "save".into(), "Repo".into(), 55)];
+    let files = [(path, source), (decl_path, decl_source)];
+    for dirty in [
+        vec![(path, source)],
+        vec![(path, source), (decl_path, decl_source)],
+    ] {
+        check_parity_from("run", &dart, &files, &dirty, &expected, &expected);
+    }
+}
+
 #[test]
 fn test_overlay_rust_untyped_member_with_free_function_matches_reindex() {
     parity(

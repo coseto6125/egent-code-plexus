@@ -1459,13 +1459,14 @@ impl<'a> Resolver<'a> {
             return None;
         }
         let tree = self.module_tree()?;
-        ladder::ModuleTreeFacts::caller_crate(&tree, importer)?;
         raw_imports
             .iter()
             .enumerate()
             .find_map(|(position, import)| {
                 let imported =
                     plain_binding(&import.imported_name, import.alias.as_deref(), symbol_name)?;
+                // After a `use` matches: `caller_crate` canonicalizes the path.
+                ladder::ModuleTreeFacts::caller_crate(&tree, importer)?;
                 let ladder::TreeItem::Found { file, item } = ladder::module_tree_item(
                     &tree,
                     importer,
@@ -2126,6 +2127,11 @@ impl<'a> Resolver<'a> {
                     symbol_name,
                     raw_imports.iter().map(ImportRef::from),
                     module,
+                    ecp_core::analyzer::same_file_pick::PickFacts::owner(
+                        self.symbol_table,
+                        node_id,
+                    )
+                    .is_some(),
                 )
             })
         };
@@ -2605,13 +2611,14 @@ impl<'a> Resolver<'a> {
         )
     }
 
+    /// [`IndexModuleTree::resolve_fqn`] over the symbol-aware tree: a
+    /// module's own type shadows its glob `pub use`, as in the overlay.
     fn mod_tree_resolve(
         &self,
         source_file_str: &str,
         fqn: &str,
     ) -> Option<crate::rust::module_tree::ResolvedFqn> {
-        self.mod_tree?
-            .resolve_fqn(fqn, source_file_str, self.workspace_root.as_ref()?)
+        self.module_tree()?.resolve_fqn(fqn, source_file_str)
     }
 
     #[allow(clippy::too_many_arguments)]
