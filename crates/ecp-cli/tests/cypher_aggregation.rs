@@ -445,12 +445,8 @@ fn test_node_prop_value_python_local_class_returns_stamped_owner_until_part_c() 
 fn test_node_prop_no_cache_where_owner_class_outer_no_longer_matches_closure() {
     let tmp = indexed_nested();
     let path = tmp.path();
-    let names = |query: &str| -> Vec<Value> {
-        nested_rows(path, query)
-            .into_iter()
-            .map(|row| row[0].clone())
-            .collect()
-    };
+    // A single-column RETURN renders each row as the bare value, not a 1-array.
+    let names = |query: &str| -> Vec<Value> { nested_rows(path, query) };
     let inner = vec![Value::from("inner")];
     assert_eq!(
         names("MATCH (n) WHERE n.ownerClass = 'outer' RETURN n.name"),
