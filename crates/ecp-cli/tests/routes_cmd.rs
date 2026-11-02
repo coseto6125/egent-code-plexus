@@ -567,8 +567,12 @@ def health_check():
 "#;
 
 fn setup_py_decorator_repo(repo: &Path, home: &Path) {
+    setup_py_repo(repo, home, PY_DECORATOR_FIXTURE_SRC);
+}
+
+fn setup_py_repo(repo: &Path, home: &Path, src: &str) {
     std::fs::create_dir_all(repo.join("app")).unwrap();
-    std::fs::write(repo.join("app/main.py"), PY_DECORATOR_FIXTURE_SRC).unwrap();
+    std::fs::write(repo.join("app/main.py"), src).unwrap();
     run_git(repo, &["init", "-q", "-b", "main"]);
     run_git(
         repo,
@@ -661,6 +665,90 @@ fn routes_python_decorator_get_method_resolved() {
         names.contains(&"health_check"),
         "expected health_check as named handler for /health, got: {names:?}\nfull json: {json}"
     );
+}
+
+// ── Python imperative route registration ───────────────────────────────────
+//
+// `app.add_url_rule(rule, endpoint, view_func)` names its handler by the
+// method's argument role, not by the argument's AST kind: the endpoint name
+// is an identifier too. A registration that passes no handler stays `absent`.
+
+const PY_IMPERATIVE_FIXTURE_SRC: &str = r#"
+from flask import Flask
+
+app = Flask(__name__)
+
+
+def hello():
+    return "hi"
+
+
+def home_view():
+    return "home"
+
+
+endpoint_name = "home"
+
+app.add_url_rule("/hello", view_func=hello)
+app.add_url_rule("/hello2", "hello2", hello)
+app.add_url_rule("/hello3", endpoint="h3", view_func=hello, methods=["POST"])
+app.add_url_rule("/endpoint-var", endpoint_name, home_view)
+app.add_url_rule("/lam", view_func=lambda: "x")
+app.add_url_rule("/noview", endpoint_name)
+
+
+@app.route("/deco")
+def deco():
+    return "d"
+"#;
+
+#[test]
+fn routes_python_add_url_rule_handler_kinds_follow_argument_role() {
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    setup_py_repo(repo.path(), home.path(), PY_IMPERATIVE_FIXTURE_SRC);
+
+    let json = run_routes_json(repo.path(), home.path(), &[]);
+    let results = json["results"].as_array().expect("results array missing");
+    let mut kinds: Vec<(&str, &str)> = results
+        .iter()
+        .map(|r| {
+            (
+                r["path"].as_str().unwrap_or(""),
+                r["handlerKind"].as_str().unwrap_or(""),
+            )
+        })
+        .collect();
+    kinds.sort_unstable();
+    assert_eq!(
+        kinds,
+        [
+            ("/deco", "named"),
+            ("/endpoint-var", "named"),
+            ("/hello", "named"),
+            ("/hello2", "named"),
+            ("/hello3", "named"),
+            ("/lam", "inline_anonymous"),
+            ("/noview", "absent"),
+        ],
+        "full json: {json}"
+    );
+}
+
+#[test]
+fn routes_python_add_url_rule_endpoint_variable_is_not_the_handler() {
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    setup_py_repo(repo.path(), home.path(), PY_IMPERATIVE_FIXTURE_SRC);
+
+    let json = run_routes_json(repo.path(), home.path(), &["/endpoint-var"]);
+    let handlers = json["handlers"].as_array().expect("handlers array missing");
+    let names: Vec<&str> = handlers
+        .iter()
+        .filter(|h| h["handlerKind"].as_str() == Some("named"))
+        .map(|h| h["name"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(names, ["home_view"], "full json: {json}");
 }
 
 // ── Laravel route groups across files ───────────────────────────────────────

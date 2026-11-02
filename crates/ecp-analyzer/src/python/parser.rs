@@ -72,6 +72,18 @@ const TEST_CLIENT_CHAIN_MARKERS: &[&str] = &[".test_client.", ".asgi_client.", "
 /// emission-time checks aligned when a new registration method is added.
 const REGISTRATION_METHOD_NAMES: &[&str] = &["route", "add_route", "add_url_rule", "add_api_route"];
 
+/// Where an imperative registration method takes its handler, as
+/// `(method, keyword, positional index)`. The slot comes from the method's
+/// signature, never from an argument's AST kind: in
+/// `add_url_rule("/x", endpoint_name, view)` the identifier `endpoint_name`
+/// is the endpoint, not the handler. `route` has no row: it is the decorator
+/// form, which names its handler by the decorated definition.
+const HANDLER_SLOTS: &[(&str, &str, usize)] = &[
+    ("add_url_rule", "view_func", 2),
+    ("add_route", "handler", 0),
+    ("add_api_route", "endpoint", 1),
+];
+
 /// Direct receiver names that — only inside test files (path/filename
 /// classified as Test) — indicate a test-client variable injected via
 /// pytest fixture or similar. Common conventions: `http_client` (Sanic
@@ -265,6 +277,37 @@ fn resolve_decorator_handler(call_node: Node, source: &[u8]) -> Option<String> {
     std::str::from_utf8(&source[name.start_byte()..name.end_byte()])
         .ok()
         .map(str::to_string)
+}
+
+/// The handler an imperative registration call passes, read from the slot
+/// [`HANDLER_SLOTS`] gives for `method` (lowercase): the keyword argument,
+/// else the positional one. A name or attribute names the handler, a lambda
+/// is written in place, anything else (`Cls.as_view("x")`, a string) is no
+/// handler.
+fn imperative_handler(
+    call: Node,
+    source: &[u8],
+    method: &str,
+) -> Option<ecp_core::contracts::raw_records::RawEndpoint> {
+    let &(_, keyword, index) = HANDLER_SLOTS.iter().find(|(name, ..)| *name == method)?;
+    let args = crate::route_detector::call_arguments(call.child_by_field_name("arguments"));
+    let by_keyword = args
+        .iter()
+        .filter(|arg| arg.kind() == "keyword_argument")
+        .find(|arg| {
+            arg.child_by_field_name("name")
+                .is_some_and(|name| node_text(name, source) == keyword)
+        })
+        .and_then(|arg| arg.child_by_field_name("value"));
+    // A `*args` splat shifts every position after it.
+    let slot = by_keyword.or_else(|| {
+        args.iter()
+            .take_while(|arg| arg.kind() != "list_splat")
+            .filter(|arg| !matches!(arg.kind(), "keyword_argument" | "dictionary_splat"))
+            .nth(index)
+            .copied()
+    })?;
+    crate::route_detector::argument_handler(slot, source, &["lambda"], &["identifier", "attribute"])
 }
 
 /// The identifier a call is made on: `router` in `router.get("/x")`; `None`
@@ -1450,22 +1493,19 @@ impl ParseSpec for PythonSpec {
                         // Decorator-style routes (`@router.post("/x")`)
                         // carry the handler one parent up — the decorated
                         // function/class name. Imperative-style routes
-                        // (`app.add_url_rule(path, handler)`) leave this
-                        // as `None`; builder-side symbol-table lookup
-                        // takes over there if/when the parser captures
-                        // the handler arg.
-                        let decorator_handler = RawRoute::named_handler(
-                            route_call_node
-                                .and_then(|n| resolve_decorator_handler(n, source))
-                                .as_deref(),
-                        );
+                        // (`app.add_url_rule(path, ep, handler)`) read it
+                        // from the method's handler slot.
+                        let handler = route_call_node.and_then(|n| {
+                            RawRoute::named_handler(resolve_decorator_handler(n, source).as_deref())
+                                .or_else(|| imperative_handler(n, source, &method_lower))
+                        });
                         let receiver = route_call_node.and_then(|n| call_receiver(n, source));
                         for method in methods_to_emit {
                             f.route_receivers.push(receiver.clone());
                             cx.routes.push(RawRoute {
                                 method,
                                 path: clean_path.clone(),
-                                handler: decorator_handler.clone(),
+                                handler: handler.clone(),
                                 span: node_span(&root),
                                 scope: None,
                             });

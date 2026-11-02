@@ -17,6 +17,7 @@ use ecp_analyzer::python::parser::PythonProvider;
 use ecp_analyzer::typescript::parser::TypeScriptProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::RawRoute;
+use ecp_core::contracts::raw_records::{RawEndpoint, Unbound};
 
 // ─── helpers ─────────────────────────────────────────────────────────
 
@@ -1071,4 +1072,135 @@ fn ts_nestjs_decorator_route_preserves_leading_slash() {
         }
     "#;
     assert_routes(&ts_routes(src), &[("GET", "/health")]);
+}
+
+// ─── Python — imperative handler is read by argument role ───────────────────
+//
+// The handler slot comes from the registration method's signature
+// (`add_url_rule(rule, endpoint, view_func)`), never from an argument's AST
+// kind: `endpoint_name` in `add_url_rule("/x", endpoint_name, actual)` is an
+// identifier too. A bare string argument also reads as a path, so each test
+// looks at the routes of one path only.
+
+const FLASK_HEAD: &str = "from flask import Flask\n\napp = Flask(__name__)\n\n";
+
+/// The handler names of the routes at `path`, adjacent repeats collapsed
+/// (one registration yields one record per string argument).
+fn handlers_at(src: &str, path: &str) -> Vec<Option<String>> {
+    let mut handlers: Vec<Option<String>> = py_routes(src)
+        .iter()
+        .filter(|r| strip_quotes(&r.path) == path)
+        .map(|r| r.handler_name().map(str::to_string))
+        .collect();
+    handlers.dedup();
+    handlers
+}
+
+fn named(name: &str) -> Vec<Option<String>> {
+    vec![Some(name.to_string())]
+}
+
+fn no_handler() -> Vec<Option<String>> {
+    vec![None]
+}
+
+#[test]
+fn python_flask_add_url_rule_positional_view_func_is_handler() {
+    let src = format!(
+        "{FLASK_HEAD}app.add_url_rule(\"/home\", \"home\", home)\napp.add_url_rule(\"/about\", \"about\", about_view)\n"
+    );
+    assert_eq!(handlers_at(&src, "/home"), named("home"));
+    assert_eq!(handlers_at(&src, "/about"), named("about_view"));
+}
+
+#[test]
+fn python_flask_add_url_rule_view_func_keyword_is_handler() {
+    let src = format!("{FLASK_HEAD}app.add_url_rule(\"/hello\", view_func=hello)\n");
+    assert_eq!(handlers_at(&src, "/hello"), named("hello"));
+}
+
+#[test]
+fn python_flask_add_url_rule_endpoint_keyword_beside_view_func_keyword_picks_view_func() {
+    let src = format!(
+        "{FLASK_HEAD}app.add_url_rule(\"/h3\", endpoint=h3_name, view_func=hello, methods=[\"POST\"])\n"
+    );
+    let routes = py_routes(&src);
+    assert_eq!(routes.len(), 1, "{routes:?}");
+    assert_eq!(routes[0].method.to_uppercase(), "POST");
+    assert_eq!(routes[0].handler_name(), Some("hello"));
+}
+
+#[test]
+fn python_flask_add_url_rule_endpoint_variable_is_not_the_handler() {
+    let src = format!(
+        "{FLASK_HEAD}endpoint_name = \"home\"\napp.add_url_rule(\"/x\", endpoint_name, actual)\n"
+    );
+    assert_eq!(handlers_at(&src, "/x"), named("actual"));
+}
+
+#[test]
+fn python_flask_add_url_rule_without_view_func_has_no_handler() {
+    let src = format!(
+        "{FLASK_HEAD}endpoint_name = \"ep\"\napp.add_url_rule(\"/x\", endpoint_name)\napp.add_url_rule(\"/y\")\n"
+    );
+    assert_eq!(handlers_at(&src, "/x"), no_handler());
+    assert_eq!(handlers_at(&src, "/y"), no_handler());
+}
+
+#[test]
+fn python_flask_add_url_rule_non_function_view_func_has_no_handler() {
+    let src = format!(
+        "{FLASK_HEAD}app.add_url_rule(\"/x\", view_func=Cls.as_view(\"x\"))\napp.add_url_rule(\"/y\", \"/y\", Cls.as_view(\"y\"))\napp.add_url_rule(\"/z\", \"/z\", \"not_a_function\")\n"
+    );
+    assert_eq!(handlers_at(&src, "/x"), no_handler());
+    assert_eq!(handlers_at(&src, "/y"), no_handler());
+    assert_eq!(handlers_at(&src, "/z"), no_handler());
+}
+
+#[test]
+fn python_flask_add_url_rule_attribute_view_func_is_handler() {
+    let src = format!("{FLASK_HEAD}app.add_url_rule(\"/x\", view_func=views.hello)\n");
+    assert_eq!(handlers_at(&src, "/x"), named("views.hello"));
+}
+
+#[test]
+fn python_flask_add_url_rule_lambda_view_func_is_written_in_place() {
+    let src = format!("{FLASK_HEAD}app.add_url_rule(\"/lam\", view_func=lambda: \"x\")\n");
+    let routes = py_routes(&src);
+    assert_eq!(routes.len(), 1, "{routes:?}");
+    assert!(
+        matches!(
+            routes[0].handler,
+            Some(RawEndpoint::Unresolved(Unbound::Inline(_)))
+        ),
+        "{:?}",
+        routes[0].handler
+    );
+}
+
+#[test]
+fn python_flask_add_url_rule_splat_before_view_func_slot_has_no_handler() {
+    let src = format!("{FLASK_HEAD}app.add_url_rule(\"/x\", *rest, actual)\n");
+    assert_eq!(handlers_at(&src, "/x"), no_handler());
+}
+
+#[test]
+fn python_fastapi_add_api_route_endpoint_is_handler_by_position_and_keyword() {
+    let src = "from fastapi import FastAPI\n\napp = FastAPI()\n\napp.add_api_route(\"/a\", get_items)\napp.add_api_route(\"/b\", endpoint=get_item)\napp.add_api_route(\"/c\")\n";
+    assert_eq!(handlers_at(src, "/a"), named("get_items"));
+    assert_eq!(handlers_at(src, "/b"), named("get_item"));
+    assert_eq!(handlers_at(src, "/c"), no_handler());
+}
+
+#[test]
+fn python_sanic_add_route_handler_is_first_argument_or_keyword() {
+    let src = "from sanic import Sanic\n\napp = Sanic(\"x\")\n\napp.add_route(list_items, \"/a\")\napp.add_route(\"/b\", handler=get_item)\n";
+    assert_eq!(handlers_at(src, "/a"), named("list_items"));
+    assert_eq!(handlers_at(src, "/b"), named("get_item"));
+}
+
+#[test]
+fn python_flask_route_decorator_handler_is_decorated_function() {
+    let src = format!("{FLASK_HEAD}@app.route(\"/deco\")\ndef deco():\n    return 1\n");
+    assert_eq!(handlers_at(&src, "/deco"), named("deco"));
 }
