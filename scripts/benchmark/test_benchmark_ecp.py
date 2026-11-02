@@ -115,6 +115,16 @@ def test_bench_dirty_same_path_twice_is_edited_once(tmp_path, monkeypatch):
     assert t.read_bytes() == ORIGINAL
 
 
+def test_bench_dirty_two_spellings_of_one_path_are_edited_once(tmp_path, monkeypatch):
+    t = _target(tmp_path)
+    seen: list[bytes] = []
+    monkeypatch.setattr(bench, "_run", _fake_run(lambda n: seen.append(t.read_bytes())))
+    samples = bench._bench_dirty(Path("ecp"), tmp_path, ["a.ts", "./a.ts"], "q", None, APPEND, 2)
+    assert seen[1] == ORIGINAL + APPEND.encode()
+    assert t.read_bytes() == ORIGINAL
+    assert bench._dirty_exit_code(samples, {"protocol": 1}) == 0
+
+
 def test_bench_dirty_user_save_to_one_of_two_files_keeps_it_and_restores_the_other(
     tmp_path, monkeypatch, capsys
 ):

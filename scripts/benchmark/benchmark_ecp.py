@@ -228,6 +228,11 @@ def _restore_file(
     return True
 
 
+def _unique_rels(rels: list[str]) -> list[str]:
+    """`rels` normalized (`./a.ts` and `a.ts` name one file), first spelling kept."""
+    return list(dict.fromkeys(os.path.normpath(rel) for rel in rels))
+
+
 def _bench_dirty(
     binary: Path,
     repo: Path,
@@ -248,7 +253,7 @@ def _bench_dirty(
     on any exit, so git sees the tree clean again; a file the user changed or
     deleted meanwhile is left alone with a warning, and the run stops.
     """
-    rels = [rel_files] if isinstance(rel_files, str) else list(dict.fromkeys(rel_files))
+    rels = _unique_rels([rel_files] if isinstance(rel_files, str) else rel_files)
     targets = [repo / rel for rel in rels]
     originals = [t.read_bytes() for t in targets]
     stamps = [(st.st_atime_ns, st.st_mtime_ns) for st in map(Path.stat, targets)]
@@ -435,7 +440,7 @@ def _print_summary(samples: list[Sample]) -> None:
 def _dirty_phase(args: argparse.Namespace) -> tuple[list[Sample], dict[str, object] | None]:
     """Run the dirty-file scenario; return its samples and its protocol record."""
     repo: Path = args.dirty_repo
-    rels = list(dict.fromkeys(args.dirty_file))
+    rels = _unique_rels(args.dirty_file)
     for rel in rels:
         if not (repo / rel).is_file():
             print(f"error: dirty file {repo / rel} not found", file=sys.stderr)
