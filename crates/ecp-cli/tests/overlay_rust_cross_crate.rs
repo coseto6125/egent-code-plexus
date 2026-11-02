@@ -905,3 +905,141 @@ fn test_overlay_rust_type_path_own_item_shadows_glob_matches_reindex() {
         assert_eq!(overlay, reindex, "{label}");
     }
 }
+
+/// A type declared inside `m.rs`'s `fn setup` is no item of `m`, so it
+/// never shadows `m`'s glob `pub use self::inner::*`: the reindex binds
+/// `inner.rs`'s `Foo::new` (the caller's own file answers first, at the
+/// qualifier tier; before the fix the body-local one bound at 1.0 through
+/// the module tree). The overlay cannot see
+/// that the glob is `pub` (R2, FU-2026-11-02-768a5edcd559), so on its side
+/// the contract is that it never binds the body-local `Foo::new` of the
+/// clean `m.rs`, which it did before the fix.
+#[test]
+fn test_overlay_rust_body_local_type_never_shadows_a_glob() {
+    const INNER: &str = "src/m/inner.rs";
+    let inner = "pub struct Foo;\nimpl Foo {\n    pub fn new() -> Foo { Foo }\n}\npub fn go() {\n    crate::m::Foo::new();\n}\n";
+    let files = owned(&[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n",
+        ),
+        ("src/lib.rs", "pub mod m;\n"),
+        (
+            "src/m.rs",
+            "pub mod inner;\npub use self::inner::*;\nfn setup() {\n    struct Foo;\n    impl Foo {\n        fn new() -> Foo { Foo }\n    }\n}\n",
+        ),
+        (INNER, inner),
+    ]);
+    for (label, edited) in [
+        ("touched", inner.to_string()),
+        ("one-line edit", one_line_edit(inner)),
+    ] {
+        let (reindex, overlay) = reindex_and_overlay(&files, INNER, &edited, &["go"]);
+        let bound: Vec<(&str, &str)> = reindex
+            .iter()
+            .map(|call| (call.callee_file.as_str(), call.callee.as_str()))
+            .collect();
+        assert_eq!(bound, [(INNER, "new")], "{label}: {reindex:#?}");
+        assert!(
+            overlay.iter().all(|call| call.callee_file != "src/m.rs"),
+            "{label}: the body-local `Foo::new` must not bind: {overlay:#?}"
+        );
+    }
+}
+
+/// R5 on both sides: `self.len()` in `impl Summary for String` and
+/// `s.len()` on a `&String` beside `impl From<Name> for String` call std.
+/// Neither binds `Name::len` nor `Sizer`'s default `len`: `String` does not
+/// implement `Sizer`. The second fixture calls from `user.rs`, so the
+/// overlay reads `lib.rs`'s impl blocks from the archived graph.
+#[test]
+fn test_overlay_rust_impl_only_std_type_never_binds_a_foreign_method_matches_reindex() {
+    let types = "pub struct Name;\nimpl Name {\n    pub fn len(&self) -> usize { 0 }\n}\n\
+        pub trait Summary {\n    fn summarize(&self) -> usize;\n}\n\
+        impl Summary for String {\n    fn summarize(&self) -> usize { self.len() }\n}\n";
+    let sizer = "pub struct Name;\npub trait Sizer {\n    fn len(&self) -> usize { 0 }\n    fn z(&self);\n}\n\
+        impl Sizer for Name {\n    fn z(&self) {}\n}\n\
+        impl From<Name> for String {\n    fn from(_: Name) -> String { String::new() }\n}\n";
+    let manifest = (
+        "Cargo.toml",
+        "[package]\nname = \"a\"\nversion = \"0.1.0\"\n",
+    );
+    let sizer_lib = format!("{sizer}pub fn n(s: &String) -> usize {{ s.len() }}\n");
+    let sizer_root = format!("mod user;\n{sizer}");
+    let user = "pub fn n(s: &String) -> usize { s.len() }\n";
+    for (files, dirty, callers) in [
+        (
+            owned(&[manifest, ("src/lib.rs", types)]),
+            "src/lib.rs",
+            &["summarize"][..],
+        ),
+        (
+            owned(&[manifest, ("src/lib.rs", sizer_lib.as_str())]),
+            "src/lib.rs",
+            &["n"][..],
+        ),
+        (
+            owned(&[
+                manifest,
+                ("src/lib.rs", sizer_root.as_str()),
+                ("src/user.rs", user),
+            ]),
+            "src/user.rs",
+            &["n"][..],
+        ),
+    ] {
+        let source = files
+            .iter()
+            .find(|(path, _)| path == dirty)
+            .map(|(_, source)| source.clone())
+            .expect("the dirty file is a fixture file");
+        for (label, edited) in [
+            ("touched", source.clone()),
+            ("one-line edit", one_line_edit(&source)),
+        ] {
+            let (reindex, overlay) = reindex_and_overlay(&files, dirty, &edited, callers);
+            assert!(
+                reindex.iter().all(|call| call.callee != "len"),
+                "{label} {dirty}: std's len: {reindex:#?}"
+            );
+            assert_eq!(overlay, reindex, "{label} {dirty}");
+        }
+    }
+}
+
+/// `crate::helper()` reaches `m.rs` through the root's `pub use m::helper;`,
+/// where `impl S { pub fn helper(&self) }` comes before the free `helper`.
+/// The reindex binds the free `fn` through the module tree. The overlay
+/// cannot see that the `use` is `pub` (R2), so its contract is that it
+/// never binds the method.
+#[test]
+fn test_overlay_rust_module_path_never_binds_a_method_namesake() {
+    const OTHER: &str = "src/other.rs";
+    let other = "pub fn go() {\n    crate::helper();\n}\n";
+    let files = owned(&[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n",
+        ),
+        ("src/lib.rs", "pub mod m;\nmod other;\npub use m::helper;\n"),
+        (
+            "src/m.rs",
+            "pub struct S;\nimpl S {\n    pub fn helper(&self) {}\n}\npub fn helper() {}\n",
+        ),
+        (OTHER, other),
+    ]);
+    for (label, edited) in [
+        ("touched", other.to_string()),
+        ("one-line edit", one_line_edit(other)),
+    ] {
+        let (reindex, overlay) = reindex_and_overlay(&files, OTHER, &edited, &["go"]);
+        assert_module_tree_binds(&reindex, &[("src/m.rs", "helper")], label);
+        assert!(
+            reindex
+                .iter()
+                .chain(&overlay)
+                .all(|call| call.callee_line != 3),
+            "{label}: the method `S::helper` must not bind: {reindex:#?} {overlay:#?}"
+        );
+    }
+}

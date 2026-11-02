@@ -91,6 +91,14 @@ pub trait PickFacts {
     /// The index reads its sparse map; the overlay reads its dirty map for
     /// a virtual node and the graph's table for a base node.
     fn is_lexically_scoped(&self, id: u32) -> bool;
+    /// Whether `id` lies inside a function body: a scoped declaration, or a
+    /// Rust type, `impl` block or member there
+    /// ([`body_locals`](crate::analyzer::lexical::body_locals)). It is no
+    /// module item, so no module path or import binds it. The default knows
+    /// the scoped ones only.
+    fn is_body_local(&self, id: u32) -> bool {
+        self.is_lexically_scoped(id)
+    }
     /// The transitive resolved supertypes of the type `ty`, breadth-first,
     /// each type once, `ty` excluded.
     fn ancestors(&self, ty: u32) -> Vec<u32>;

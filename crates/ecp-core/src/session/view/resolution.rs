@@ -27,7 +27,8 @@ use crate::analyzer::ladder::{
     TypeName,
 };
 use crate::analyzer::lexical::{
-    lexical_chain_end, lexical_scope_kinds, twin_enclosing, LexicalFunctions,
+    body_locals, inside_callable, lexical_chain_end, lexical_scope_kinds, twin_enclosing,
+    LexicalFunctions,
 };
 use crate::analyzer::outcome::{Resolution, Tier};
 use crate::analyzer::overrides::{
@@ -264,6 +265,17 @@ struct OverlayFacts<'a> {
 type Supertypes = (Vec<u32>, Option<u32>);
 type ImplSpan<'a> = ((u32, u32, u32, u32), u32, Option<&'a str>);
 
+/// The span of the stored node `node`, as its parse wrote it.
+fn stored_span(node: &crate::graph::ArchivedNode) -> Span {
+    let span = &node.span;
+    (
+        span.0.to_native(),
+        span.1.to_native(),
+        span.2.to_native(),
+        span.3.to_native(),
+    )
+}
+
 impl<'a> OverlayFacts<'a> {
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -287,7 +299,7 @@ impl<'a> OverlayFacts<'a> {
         let mut dirty_return_types: FxHashMap<u32, &'a str> = FxHashMap::default();
         let mut dirty_flags: FxHashMap<u32, u16> = FxHashMap::default();
         let mut dirty_lexical_parents: FxHashMap<u32, u32> = FxHashMap::default();
-        let mut scoped_symbols: FxHashMap<&'a str, Vec<bool>> = FxHashMap::default();
+        let mut dirty_body_locals: FxHashSet<u32> = FxHashSet::default();
         let mut seen_uids: FxHashSet<u64> = FxHashSet::default();
         let mut offset = 0usize;
         for (file_ord, file) in files.iter().enumerate() {
@@ -316,8 +328,9 @@ impl<'a> OverlayFacts<'a> {
                 }
                 offset += 1;
             }
-            if is_rust_source(std::path::Path::new(&file.rel_path)) {
-                let start = base_len + first as u32;
+            let start = base_len + first as u32;
+            let rust_file = is_rust_source(std::path::Path::new(&file.rel_path));
+            if rust_file {
                 rust_impl_members(&file.symbols, |member, block, implemented| {
                     dirty_impl_members.insert(
                         start + member as u32,
@@ -329,25 +342,28 @@ impl<'a> OverlayFacts<'a> {
                 });
             }
             let scoped = lexical_scope_kinds(Language::from_path(&file.rel_path));
-            if !scoped.is_empty() {
-                let start = base_len + first as u32;
+            if rust_file || !scoped.is_empty() {
                 // The fields `file_identities` numbers the file from.
                 let decls: Vec<(NodeKind, Span)> = file
                     .symbols
                     .iter()
                     .map(|s| (s.kind, HeritageNode::span(s)))
                     .collect();
-                let parents = lexical_parents(&decls, scoped);
-                if parents.iter().any(Option::is_some) {
-                    scoped_symbols.insert(
-                        file.rel_path.as_str(),
-                        parents.iter().map(Option::is_some).collect(),
-                    );
-                }
-                for (offset, parent) in parents.into_iter().enumerate() {
+                for (offset, parent) in lexical_parents(&decls, scoped).into_iter().enumerate() {
                     if let Some(parent) = parent {
-                        dirty_lexical_parents.insert(start + offset as u32, start + parent);
+                        let virt = start + offset as u32;
+                        dirty_lexical_parents.insert(virt, start + parent);
+                        dirty_body_locals.insert(virt);
                     }
+                }
+                if rust_file {
+                    dirty_body_locals.extend(
+                        body_locals(&decls)
+                            .into_iter()
+                            .enumerate()
+                            .filter(|&(_, body_local)| body_local)
+                            .map(|(offset, _)| start + offset as u32),
+                    );
                 }
             }
             dirty_namespaces.push(namespace_owners(&file.symbols));
@@ -386,8 +402,7 @@ impl<'a> OverlayFacts<'a> {
         // The dirty configs' rows over the archived table, merged once per
         // view: the alias reading and the crate table both read it.
         let merged = configs.merged_facts(graph);
-        let mut rust = RustModules::new(graph, files, removed);
-        rust.scoped_symbols = scoped_symbols;
+        let rust = RustModules::new(graph, files, removed, dirty_body_locals);
         if let Some(facts) = &merged {
             let _ = rust.crates.set(facts.clone());
         }
@@ -2290,6 +2305,10 @@ impl PickFacts for OverlayFacts<'_> {
         OverlayFacts::is_lexically_scoped(self, id)
     }
 
+    fn is_body_local(&self, id: u32) -> bool {
+        self.rust.is_body_local(id)
+    }
+
     fn types_named(&self, owner: &str) -> Vec<u32> {
         let mut types = self.global_named(owner);
         types.retain(|&id| self.kind_of(id).is_type());
@@ -2477,6 +2496,25 @@ impl ResolveFacts for OverlayFacts<'_> {
 
     fn enum_variant_of(&self, type_id: u32, type_name: &str, variant: &str) -> Option<u32> {
         OverlayFacts::enum_variant_of(self, type_id, type_name, variant)
+    }
+
+    /// The default over [`Self::call_decls`], without the list it builds
+    /// and sorts per call.
+    fn implements_in_file(&self, file: &str, ty: &str, trait_key: &str) -> bool {
+        let implements =
+            |idx: u32| self.kind_of(idx) == NodeKind::Impl && self.owner_of(idx) == Some(trait_key);
+        if let Some(&file_ord) = self.dirty.get(file) {
+            return self
+                .declared
+                .get(&(file_ord, ty))
+                .is_some_and(|virts| virts.iter().any(|&virt| implements(virt)));
+        }
+        let Some(file_idx) = self.clean_file_idx(file) else {
+            return false;
+        };
+        self.graph.nodes_by_name(ty).any(|idx| {
+            self.graph.nodes[idx as usize].file_idx.to_native() == file_idx && implements(idx)
+        })
     }
 }
 
@@ -3209,7 +3247,7 @@ fn global_tier(
                 callee,
                 imports.iter().map(ImportRef::from),
                 file,
-                PickFacts::owner(facts, target).is_some(),
+                || PickFacts::owner(facts, target).is_some(),
             )
         })
     };
@@ -3295,10 +3333,16 @@ enum RustTail {
 /// worktree removed is no file.
 pub(super) struct RustModules<'a> {
     graph: &'a ArchivedZeroCopyGraph,
-    dirty: FxHashMap<&'a str, &'a OverlayFileInput>,
-    /// Per dirty file, which of its symbols (by position) a function body
-    /// encloses; a file without one has no row.
-    scoped_symbols: FxHashMap<&'a str, Vec<bool>>,
+    /// Each dirty file with the virtual idx of its first symbol.
+    dirty: FxHashMap<&'a str, (&'a OverlayFileInput, u32)>,
+    /// The virtual idxs of the dirty declarations no module path names: the
+    /// scoped ones, and the Rust ones inside a function body
+    /// ([`body_locals`]).
+    dirty_body_locals: FxHashSet<u32>,
+    /// Clean Rust file index → the spans of its callables, which tell a
+    /// base body-local declaration ([`inside_callable`]). Built on the first
+    /// such question about a Rust node.
+    base_callables: OnceCell<FxHashMap<u32, Vec<Span>>>,
     removed: &'a FxHashSet<&'a str>,
     /// The `graph.bin` workspace facts, read on first use: reading them
     /// deserializes and validates the whole table, once per view.
@@ -3321,21 +3365,89 @@ pub(super) struct RustCaller<'a> {
 }
 
 impl<'a> RustModules<'a> {
+    /// `dirty_body_locals` holds virtual idxs, which number `dirty`'s
+    /// symbols in order after the graph's nodes.
     pub(super) fn new(
         graph: &'a ArchivedZeroCopyGraph,
         dirty: &'a [OverlayFileInput],
         removed: &'a FxHashSet<&'a str>,
+        dirty_body_locals: FxHashSet<u32>,
     ) -> Self {
+        let mut first = graph.nodes.len() as u32;
         Self {
             graph,
             dirty: dirty
                 .iter()
-                .map(|file| (file.rel_path.as_str(), file))
+                .map(|file| {
+                    let start = first;
+                    first += file.symbols.len() as u32;
+                    (file.rel_path.as_str(), (file, start))
+                })
                 .collect(),
-            scoped_symbols: FxHashMap::default(),
+            dirty_body_locals,
+            base_callables: OnceCell::new(),
             removed,
             crates: OnceCell::new(),
         }
+    }
+
+    /// Whether no module path names `idx` (base or virtual) from outside
+    /// its function: a scoped declaration, or a Rust one inside a function
+    /// body. The index's `SymbolTable::is_body_local`.
+    fn is_body_local(&self, idx: u32) -> bool {
+        let graph = self.graph;
+        if idx >= graph.nodes.len() as u32 {
+            return self.dirty_body_locals.contains(&idx);
+        }
+        if graph.is_lexically_scoped(idx) {
+            return true;
+        }
+        let is_rust_file = |file_idx: u32| {
+            graph.files.get(file_idx as usize).is_some_and(|f| {
+                is_rust_source(std::path::Path::new(f.path.resolve(&graph.string_pool)))
+            })
+        };
+        let node = &graph.nodes[idx as usize];
+        // The path test first: a repo without Rust never builds the table.
+        if !is_rust_file(node.file_idx.to_native()) {
+            return false;
+        }
+        let callables = self.base_callables.get_or_init(|| {
+            let mut callables: FxHashMap<u32, Vec<Span>> = FxHashMap::default();
+            let mut rust_files: FxHashMap<u32, bool> = FxHashMap::default();
+            for kind in [NodeKind::Function, NodeKind::Method, NodeKind::Constructor] {
+                for idx in graph.nodes_by_kind(kind) {
+                    let callable = &graph.nodes[idx as usize];
+                    let file_idx = callable.file_idx.to_native();
+                    if *rust_files
+                        .entry(file_idx)
+                        .or_insert_with(|| is_rust_file(file_idx))
+                    {
+                        callables
+                            .entry(file_idx)
+                            .or_default()
+                            .push(stored_span(callable));
+                    }
+                }
+            }
+            callables
+        });
+        callables
+            .get(&node.file_idx.to_native())
+            .is_some_and(|spans| inside_callable(spans, stored_span(node)))
+    }
+
+    /// Whether `idx` (base or virtual), whose owner is `owner_class`, is
+    /// declared where a module path names it with an owner `owned` accepts:
+    /// the one rule of the overlay's module-item lookups, the index's
+    /// `SymbolTable::is_module_level`.
+    fn module_level(
+        &self,
+        idx: u32,
+        owner_class: Option<&str>,
+        owned: impl FnOnce(Option<&str>) -> bool,
+    ) -> bool {
+        owned(owner_class.and_then(owner_key)) && !self.is_body_local(idx)
     }
 
     fn table(&self) -> &crate::contracts::workspace::WorkspaceFacts {
@@ -3393,29 +3505,27 @@ impl<'a> RustModules<'a> {
     }
 
     /// Whether `file` declares a module-level node named `name` whose kind
-    /// `wanted` accepts: an associated item (`impl X { const h: u32 = 1; }`)
-    /// and a `fn` inside a function body are no items of the module. A dirty
+    /// `wanted` accepts ([`Self::module_level`]): an associated item
+    /// (`impl X { const h: u32 = 1; }`) and a body-local declaration
+    /// (`fn setup() { struct Foo; }`) are no items of the module. A dirty
     /// file answers from its fresh parse.
     fn declares(&self, file: &str, name: &str, wanted: impl Fn(NodeKind) -> bool) -> bool {
+        let top_level = |owner: Option<&str>| owner.is_none();
         match self.dirty.get(file) {
-            Some(dirty) => {
-                let scoped = self.scoped_symbols.get(file);
-                dirty.symbols.iter().enumerate().any(|(at, s)| {
-                    s.name == name
-                        && wanted(s.kind)
-                        && s.owner_class.as_deref().and_then(owner_key).is_none()
-                        && !scoped.is_some_and(|scoped| scoped[at])
-                })
-            }
+            Some(&(dirty, start)) => dirty.symbols.iter().enumerate().any(|(at, s)| {
+                s.name == name
+                    && wanted(s.kind)
+                    && self.module_level(start + at as u32, s.owner_class.as_deref(), top_level)
+            }),
             None => self.graph.nodes_by_name(name).any(|idx| {
                 let node = &self.graph.nodes[idx as usize];
+                let pool = &self.graph.string_pool;
                 wanted(NodeKind::from(&node.kind))
-                    && !self.graph.is_lexically_scoped(idx)
-                    && owner_key(node.owner_class.resolve(&self.graph.string_pool)).is_none()
                     && self.graph.files[node.file_idx.to_native() as usize]
                         .path
-                        .resolve(&self.graph.string_pool)
+                        .resolve(pool)
                         == file
+                    && self.module_level(idx, Some(node.owner_class.resolve(pool)), top_level)
             }),
         }
     }
@@ -3529,7 +3639,7 @@ impl<'a> RustModules<'a> {
     /// answers [`ladder::Published::Unknown`]. Otherwise the module's own.
     fn published(&self, module: &str, name: &str) -> ladder::Published<'static> {
         let imports = match self.dirty.get(module) {
-            Some(file) => FileImports::Parsed(&file.imports),
+            Some((file, _)) => FileImports::Parsed(&file.imports),
             None => {
                 let Some(rows) = self
                     .graph
@@ -4730,12 +4840,10 @@ fn member_in_file(
             PickScope::default(),
         );
     }
-    let owned = |owner_class: Option<&str>| match owner {
+    let owned = |found: Option<&str>| match owner {
         MemberOwner::Any => true,
-        MemberOwner::TopLevel => owner_class.and_then(owner_key).is_none(),
-        MemberOwner::Type(ty) => owner_class
-            .and_then(owner_key)
-            .is_some_and(|key| Some(key) == owner_key(ty)),
+        MemberOwner::TopLevel => found.is_none(),
+        MemberOwner::Type(ty) => found.is_some_and(|key| Some(key) == owner_key(ty)),
     };
     let base_len = graph.nodes.len() as u32;
     graph
@@ -4744,12 +4852,15 @@ fn member_in_file(
             let node = &graph.nodes[idx as usize];
             names.target.kind_predicate()(NodeKind::from(&node.kind))
                 && !dirty_base.contains(&idx)
-                && !graph.is_lexically_scoped(idx)
                 && graph
                     .files
                     .get(node.file_idx.to_native() as usize)
                     .is_some_and(|f| f.path.resolve(&graph.string_pool) == file)
-                && owned(Some(node.owner_class.resolve(&graph.string_pool)))
+                && facts.rust.module_level(
+                    idx,
+                    Some(node.owner_class.resolve(&graph.string_pool)),
+                    owned,
+                )
         })
         .min()
         .or_else(|| {
@@ -4760,8 +4871,9 @@ fn member_in_file(
                 .map(|&(virt, _)| (virt, &nodes[(virt - base_len) as usize]))
                 .find(|&(virt, node)| {
                     node.rel_path.as_ref() == file
-                        && !facts.is_lexically_scoped(virt)
-                        && owned(node.owner_class.as_deref())
+                        && facts
+                            .rust
+                            .module_level(virt, node.owner_class.as_deref(), owned)
                 })
                 .map(|(virt, _)| virt)
         })

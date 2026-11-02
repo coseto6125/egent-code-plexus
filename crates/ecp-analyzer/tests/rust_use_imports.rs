@@ -1310,3 +1310,92 @@ fn test_function_local_fn_is_no_module_item_for_paths_or_globs() {
         );
     }
 }
+
+/// `m.rs` holds the glob `pub use self::inner::*` and, inside `fn setup`,
+/// a declaration named `Foo`; `inner.rs` declares the module-level `Foo`.
+fn body_local_foo_crate(local: &str) -> Vec<(String, String)> {
+    [
+        ("Cargo.toml", "[package]\nname = \"tool\"\n".to_string()),
+        ("src/lib.rs", "pub mod m;\n".to_string()),
+        (
+            "src/m.rs",
+            format!("pub mod inner;\npub use self::inner::*;\nfn setup() {{\n    {local}\n}}\n"),
+        ),
+        (
+            "src/m/inner.rs",
+            "pub struct Foo;\nimpl Foo {\n    pub fn new() -> Foo { Foo }\n}\npub fn go() {\n    crate::m::Foo::new();\n}\n"
+                .to_string(),
+        ),
+    ]
+    .into_iter()
+    .map(|(path, source)| (path.to_string(), source))
+    .collect()
+}
+
+/// A type declared inside a function body is no item of its module, so it
+/// never shadows the module's glob `pub use`: `crate::m::Foo::new()` binds
+/// `inner.rs`'s `Foo::new`, never the body-local one. Before the fix a
+/// body-local struct, enum, trait or type alias hid the glob, and the struct
+/// with its own `impl` bound `m.rs`'s `new`.
+#[test]
+fn test_body_local_type_never_shadows_a_glob_pub_use() {
+    for local in [
+        "struct Foo;\n    impl Foo {\n        fn new() -> Foo { Foo }\n    }",
+        "enum Foo { A }",
+        "trait Foo {}",
+        "type Foo = u8;",
+    ] {
+        let files = body_local_foo_crate(local);
+        let borrowed: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(p, s)| (p.as_str(), s.as_str()))
+            .collect();
+        assert_eq!(
+            workspace_go_targets(&borrowed, "new"),
+            vec!["src/m/inner.rs".to_string()],
+            "{local}"
+        );
+    }
+}
+
+/// The methods of an `impl` block inside a function body are no associated
+/// items a module path names: `crate::m::Foo::new()` never binds the
+/// body-local `Foo::new`. `other.rs` declares a second `Foo`, so the
+/// qualifier tier has no unique file and the module tree decides.
+#[test]
+fn test_body_local_impl_method_never_binds_a_module_path() {
+    let files = [
+        ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+        (
+            "src/lib.rs",
+            "pub mod m;\nmod other;\npub fn go() {\n    crate::m::Foo::new();\n}\n",
+        ),
+        (
+            "src/m.rs",
+            "fn setup() {\n    struct Foo;\n    impl Foo {\n        pub fn new() -> Foo { Foo }\n    }\n}\n",
+        ),
+        ("src/other.rs", "pub struct Foo;\n"),
+    ];
+    assert_eq!(workspace_go_targets(&files, "new"), Vec::<String>::new());
+}
+
+/// `crate::helper()` reaches `m.rs` through the root's `pub use m::helper;`,
+/// where `impl S { pub fn helper(&self) }` comes before the free `helper`.
+/// A module path names a module-level item, so the free `fn` binds; before
+/// the fix the tree took the method, rejected it, and bound nothing.
+#[test]
+fn test_module_path_through_pub_use_binds_the_free_fn_past_a_method_namesake() {
+    let files = [
+        ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+        ("src/lib.rs", "pub mod m;\nmod other;\npub use m::helper;\n"),
+        (
+            "src/m.rs",
+            "pub struct S;\nimpl S {\n    pub fn helper(&self) {}\n}\npub fn helper() {}\n",
+        ),
+        ("src/other.rs", "pub fn go() {\n    crate::helper();\n}\n"),
+    ];
+    assert_eq!(
+        workspace_go_target_kinds(&files, "helper"),
+        vec![("src/m.rs".to_string(), NodeKind::Function)]
+    );
+}

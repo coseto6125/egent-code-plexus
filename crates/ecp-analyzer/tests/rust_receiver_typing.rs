@@ -853,3 +853,32 @@ fn test_rust_method_call_two_methods_or_only_free_fn_binds_nothing() {
     let g = build(&[PREFER_LIB, PREFER_FREE, PREFER_USER]);
     assert!(callee_files(&g, "run", "prefer").is_empty());
 }
+
+/// R5 inside an impl of a foreign type: `impl Summary for String` types
+/// `self` as the caller's own `String`, which no file declares; `Name`
+/// declares a `len` beside it. `self.len()` calls std's `String::len`, never
+/// `Name::len`. Before the fix the caller's own type turned the impl-only
+/// guard off and bound `Name::len` at 0.85.
+#[test]
+fn test_rust_self_call_in_impl_of_foreign_type_never_binds_another_types_method() {
+    let g = build(&[(
+        "src/lib.rs",
+        "pub struct Name;\nimpl Name {\n    pub fn len(&self) -> usize { 0 }\n}\npub trait Summary {\n    fn summarize(&self) -> usize;\n}\nimpl Summary for String {\n    fn summarize(&self) -> usize { self.len() }\n}\n",
+    )]);
+    assert_eq!(callee_owners(&g, "summarize", "len"), vec![]);
+}
+
+/// R5's trait arm: a trait's default method binds only for an impl of that
+/// trait for the qualifier. `impl Sizer for Name` and
+/// `impl From<Name> for String` put `String` and `Sizer` in one file, yet
+/// `String` does not implement `Sizer`, so `s.len()` on a `&String` calls
+/// std. Before the fix any trait of the file passed and `Sizer::len` bound
+/// at 0.85.
+#[test]
+fn test_rust_typed_receiver_of_impl_only_type_never_binds_a_trait_it_does_not_implement() {
+    let g = build(&[(
+        "src/lib.rs",
+        "pub struct Name;\npub trait Sizer {\n    fn len(&self) -> usize { 0 }\n    fn z(&self);\n}\nimpl Sizer for Name {\n    fn z(&self) {}\n}\nimpl From<Name> for String {\n    fn from(_: Name) -> String { String::new() }\n}\npub fn n(s: &String) -> usize { s.len() }\n",
+    )]);
+    assert_eq!(callee_owners(&g, "n", "len"), vec![]);
+}

@@ -2306,7 +2306,7 @@ mod tests {
         let bytes = fixture.into_bytes();
         let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
         let removed = FxHashSet::default();
-        let modules = RustModules::new(graph, &[], &removed);
+        let modules = RustModules::new(graph, &[], &removed, FxHashSet::default());
         for path in paths {
             assert_eq!(modules.file(std::path::Path::new(path)), Some(path));
         }
@@ -2352,7 +2352,7 @@ mod tests {
         let bytes = crate_b_graph_bytes();
         let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
         let removed = FxHashSet::default();
-        let modules = RustModules::new(graph, &[], &removed);
+        let modules = RustModules::new(graph, &[], &removed, FxHashSet::default());
         assert_eq!(modules.resolve(&[], "b::util"), Some("b/src/util.rs"));
         assert_eq!(modules.resolve(&[], "b"), Some("b/src/lib.rs"));
         for anchored in [
@@ -2373,7 +2373,7 @@ mod tests {
         let bytes = crate_b_graph_bytes();
         let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
         let removed = FxHashSet::default();
-        let modules = RustModules::new(graph, &[], &removed);
+        let modules = RustModules::new(graph, &[], &removed, FxHashSet::default());
         assert!(
             modules.crates.get().is_none(),
             "building the view reads no table"
@@ -2400,7 +2400,7 @@ mod tests {
         let bytes = fixture.into_bytes();
         let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
         let removed = FxHashSet::default();
-        let modules = RustModules::new(graph, &[], &removed);
+        let modules = RustModules::new(graph, &[], &removed, FxHashSet::default());
         assert_eq!(
             modules.file(std::path::Path::new("src\\bin\\util.rs")),
             Some("src/bin/util.rs")

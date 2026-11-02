@@ -13,11 +13,12 @@ use ecp_core::analyzer::csharp_extension::{self, ReceiverSite};
 use ecp_core::analyzer::heritage;
 use ecp_core::analyzer::ladder;
 use ecp_core::analyzer::lexical::{
-    enclosing_types, file_identities, file_uids, later_is_arity_twin, lexical_scope_kinds,
-    raw_decl, splits_by_arity, LexicalFunctions,
+    body_locals, enclosing_types, file_identities, file_uids, later_is_arity_twin,
+    lexical_scope_kinds, raw_decl, splits_by_arity, LexicalFunctions,
 };
 use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::reexport::{export_filter_applies_to, is_ecmascript, ImportRef};
+use ecp_core::analyzer::rust_paths::is_rust_source;
 use ecp_core::analyzer::type_ladder;
 use ecp_core::analyzer::types::{
     owner_key, BlindSpot, CallArguments, CallSite, LocalGraph, NameRef, RawImport, RawNode,
@@ -323,6 +324,9 @@ impl GraphBuilder {
         let lexical_table = record_lexical_parents(&self.local_graphs, &raw_map);
         for fact in &lexical_table {
             symbol_table.note_lexical_parent(fact.node_idx, fact.parent_idx);
+        }
+        for node_idx in record_body_locals(&self.local_graphs, &raw_map) {
+            symbol_table.note_body_local(node_idx);
         }
         // Before the supertypes pre-pass: it, Pass 2 and the Overrides
         // method index read the parts of a C# partial type as one type.
@@ -1184,6 +1188,32 @@ fn record_lexical_parents(
         }
     }
     table
+}
+
+/// The Rust declarations inside a function body ([`body_locals`]), as
+/// node indices: the module-item lookups skip them. A tombstoned one gets
+/// none: its twin keeps the identity and its own answer, as in
+/// [`record_lexical_parents`]. Computed from `(kind, span)` alone, so
+/// `graph.bin` stores nothing new and the overlay derives the same rows.
+fn record_body_locals(local_graphs: &[LocalGraph], raw_map: &RawIndexMap) -> Vec<u32> {
+    let mut rows = Vec::new();
+    for (file, local_graph) in local_graphs.iter().enumerate() {
+        if !is_rust_source(&local_graph.file_path) {
+            continue;
+        }
+        let file = FileOrd(file as u32);
+        let decls: Vec<_> = local_graph.nodes.iter().map(|n| (n.kind, n.span)).collect();
+        for (raw, body_local) in body_locals(&decls).into_iter().enumerate() {
+            let raw = RawIdx(raw as u32);
+            match raw_map.node(file, raw) {
+                Some(node_idx) if body_local && raw_map.slot(file, raw) == Some(node_idx) => {
+                    rows.push(node_idx);
+                }
+                _ => {}
+            }
+        }
+    }
+    rows
 }
 
 /// Forward-slash path → file index, as Pass 1 numbers the files.
@@ -3798,11 +3828,12 @@ fn pass2_emit_node_edges(
             Some(key) if type_ladder::names_declaring_type_in(language, key) => {
                 raw_node.owner_class.as_deref().and_then(owner_key)
             }
-            // The index types a C# `Tok?` member as `Tok` and a Python
-            // forward reference `"Tok"` as `Tok` (`note_return_type`), and the
-            // overlay rebuilds the member type from this edge alone.
-            Some(key) if matches!(language, Language::CSharp | Language::Python) => Some(key),
-            _ => Some(type_ann.as_str()),
+            // The reduced key, as `note_return_type` types the member in
+            // every language: a C# or Dart `Tok?` and a Python forward
+            // reference `"Tok"` are `Tok`. The overlay rebuilds a C# member
+            // type from this edge alone (`base_property_type`).
+            Some(key) => Some(key),
+            None => Some(type_ann.as_str()),
         };
         let targets = type_name.map_or_else(Vec::new, |type_name| {
             resolver.resolve_symbol(

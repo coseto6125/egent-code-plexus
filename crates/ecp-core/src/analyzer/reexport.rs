@@ -1417,19 +1417,19 @@ fn attribute_shadows_submodule<F: ModuleFacts + ?Sized>(
 /// the import tier found no export of that name there, so the declaration
 /// is private to its module. A Dart `show` / `hide` import that leaves
 /// `name` out ([`dart_import_hides`]): a combinator filters only a
-/// library's top-level names, so it never hides a member (`is_member`),
-/// which the call reaches through its type.
+/// library's top-level names, so it never hides a member (`is_member`, asked
+/// only for a Dart importer), which the call reaches through its type.
 pub fn import_hides<'i, F: ModuleFacts + ?Sized>(
     facts: &F,
     importer: &str,
     name: &str,
     imports: impl IntoIterator<Item = ImportRef<'i>>,
     decl_file: &str,
-    is_member: bool,
+    is_member: impl FnOnce() -> bool,
 ) -> bool {
     let language = facts.file_language(importer);
     if language == Language::Dart {
-        return !is_member && dart_import_hides(facts, importer, name, imports, decl_file);
+        return !is_member() && dart_import_hides(facts, importer, name, imports, decl_file);
     }
     if !is_ecmascript(language) || !facts.is_es_module(decl_file) {
         return false;

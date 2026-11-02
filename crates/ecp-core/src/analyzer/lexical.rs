@@ -68,6 +68,39 @@ pub fn clear_scoped_owners(language: Language, nodes: &mut [RawNode]) {
     }
 }
 
+/// Whether each declaration of one Rust file is body-local: a callable's
+/// span strictly holds it (a type, an `impl` block and its members, a nested
+/// `fn`). A body-local declaration is no item of its module: no path or
+/// `use` names it from outside its function, and it shadows no glob
+/// `pub use`. Uid identity stays with [`lexical_scope_kinds`]. Spans from
+/// one syntax tree nest, so [`inside_callable`] gives the same answer for one
+/// declaration.
+pub fn body_locals(decls: &[(NodeKind, Span)]) -> Vec<bool> {
+    let spans: Vec<Span> = decls.iter().map(|&(_, span)| span).collect();
+    let enclosing = innermost_enclosing(&spans);
+    (0..decls.len())
+        .map(|i| {
+            let mut up = enclosing[i];
+            while let Some(j) = up {
+                if decls[j].0.is_callable() {
+                    return true;
+                }
+                up = enclosing[j];
+            }
+            false
+        })
+        .collect()
+}
+
+/// [`body_locals`] for the one declaration at `span`, from the spans of its
+/// file's callables: the form a reader of stored nodes, which keeps no
+/// per-file list, can afford.
+pub fn inside_callable(callables: &[Span], span: Span) -> bool {
+    callables
+        .iter()
+        .any(|&outer| outer != span && span_contains(outer, span))
+}
+
 /// One declaration as [`file_identities`] reads it: kind, owner, name,
 /// 0-based span and declared generic arity ([`RawNode::generic_arity`]).
 /// The arity counts only where [`splits_by_arity`] holds.
@@ -1506,5 +1539,33 @@ mod tests {
     fn test_new_python_module_level_function_returns_none() {
         let lex = index("a.py", &[(NodeKind::Function, "f", false, (0, 0, 0, 9))]);
         assert_eq!(lex.targets((1, 0, 1, 9), "f"), None);
+    }
+
+    /// `fn setup() { struct Foo; impl Foo { fn new() } }` beside a
+    /// module-level `struct Bar` and `impl Bar { fn new() }`: the struct,
+    /// the impl block and its method inside `setup` are body-local, the
+    /// module-level items and `setup` itself are not. The span form agrees.
+    #[test]
+    fn test_body_locals_types_and_impl_members_inside_a_fn_body_are_body_local() {
+        let decls = [
+            (NodeKind::Function, (0, 0, 5, 1)),
+            (NodeKind::Struct, (1, 4, 1, 15)),
+            (NodeKind::Impl, (2, 4, 4, 5)),
+            (NodeKind::Method, (3, 8, 3, 30)),
+            (NodeKind::Struct, (6, 0, 6, 11)),
+            (NodeKind::Impl, (7, 0, 9, 1)),
+            (NodeKind::Method, (8, 4, 8, 26)),
+        ];
+        let want = [false, true, true, true, false, false, false];
+        assert_eq!(body_locals(&decls), want);
+        let callables: Vec<Span> = decls
+            .iter()
+            .filter(|(kind, _)| kind.is_callable())
+            .map(|&(_, span)| span)
+            .collect();
+        for (&(_, span), want) in decls.iter().zip(want) {
+            assert_eq!(inside_callable(&callables, span), want, "{span:?}");
+        }
+        assert!(body_locals(&[]).is_empty());
     }
 }

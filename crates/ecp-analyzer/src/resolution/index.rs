@@ -331,6 +331,10 @@ pub struct SymbolTable {
     /// ([`ecp_core::analyzer::lexical::lexical_scope_kinds`]).
     lexical_parents: FxHashMap<u32, u32>,
 
+    /// The Rust declarations inside a function body (see
+    /// [`Self::note_body_local`]). Sparse: empty for a file with none.
+    body_locals: FxHashSet<u32>,
+
     /// Method name → the C# extension methods of that name, each with its
     /// `this` parameter's type as written, its `FunctionMeta::flags` and its
     /// parameter names (see [`Self::note_csharp_extension`]). Overloads
@@ -913,6 +917,27 @@ impl SymbolTable {
         !self.lexical_parents.is_empty() && self.lexical_parents.contains_key(&id)
     }
 
+    /// Record that the Rust declaration `node` lies inside a function body
+    /// ([`ecp_core::analyzer::lexical::body_locals`]): it is no module item.
+    /// The builder notes every one before Pass 2.
+    pub fn note_body_local(&mut self, node: u32) {
+        self.body_locals.insert(node);
+    }
+
+    /// Whether `id` is body-local ([`Self::note_body_local`]) or scoped: no
+    /// path from outside its function names it.
+    pub fn is_body_local(&self, id: u32) -> bool {
+        self.body_locals.contains(&id) || self.is_lexically_scoped(id)
+    }
+
+    /// Whether `id` has the owner `owner_id` (`NO_OWNER` for a top-level
+    /// item) and is no body-local declaration: the one rule of the
+    /// module-item lookups, which the overlay's `RustModules::module_level`
+    /// mirrors.
+    fn is_module_level(&self, id: u32, owner_id: u32) -> bool {
+        self.node_owner[id as usize] == owner_id && !self.is_body_local(id)
+    }
+
     /// The outermost unscoped declaration that `id`'s lexical parents
     /// reach; `id` itself when it is unscoped. A scoped caller (a Rust
     /// nested `fn` or closure) has no owner, so the name tiers read this
@@ -1188,8 +1213,8 @@ impl SymbolTable {
 
     /// Whether `file_path` declares a module-level node named `node_name`
     /// whose kind `holds` accepts: an associated item
-    /// (`impl X { const h: u32 = 1; }`) and a `fn` inside a function body
-    /// are no items of the module.
+    /// (`impl X { const h: u32 = 1; }`) and a body-local declaration
+    /// (`fn setup() { struct Foo; }`) are no items of the module.
     pub(crate) fn declares_in_file(
         &self,
         file_path: &str,
@@ -1201,9 +1226,7 @@ impl SymbolTable {
             .and_then(|file_map| file_map.get(node_name))
             .is_some_and(|ids| {
                 ids.iter().any(|&id| {
-                    self.node_owner[id as usize] == NO_OWNER
-                        && !self.is_lexically_scoped(id)
-                        && holds(self.node_kinds[id as usize])
+                    self.is_module_level(id, NO_OWNER) && holds(self.node_kinds[id as usize])
                 })
             })
     }
@@ -1333,8 +1356,7 @@ impl SymbolTable {
     /// picks with no owner (a free function, else one type's member),
     /// `TopLevel` a declaration with no owning type, `Type` a member of the
     /// type its path names, when the file's types agree with that path. A
-    /// declaration inside a function body is none of them: no import names
-    /// it.
+    /// body-local declaration is none of them: no import names it.
     pub(crate) fn lookup_member_in_file(
         &self,
         file_path: &str,
@@ -1369,9 +1391,7 @@ impl SymbolTable {
             .iter()
             .copied()
             .find(|&id| {
-                self.node_owner[id as usize] == owner_id
-                    && !self.is_lexically_scoped(id)
-                    && predicate(self.node_kinds[id as usize])
+                self.is_module_level(id, owner_id) && predicate(self.node_kinds[id as usize])
             })
     }
 
@@ -2026,6 +2046,10 @@ impl PickFacts for SymbolTable {
     fn is_lexically_scoped(&self, id: u32) -> bool {
         SymbolTable::is_lexically_scoped(self, id)
     }
+
+    fn is_body_local(&self, id: u32) -> bool {
+        SymbolTable::is_body_local(self, id)
+    }
 }
 
 impl TypeFacts for SymbolTable {
@@ -2284,6 +2308,54 @@ mod tests {
             lookup("h/Outer1.java", "h.Outer1.Helper"),
             None,
             "`Helper` is nested in `Outer2`, not in the imported `Outer1`"
+        );
+    }
+
+    /// A body-local declaration (a type inside a function body, a method of
+    /// an `impl` there) is no module item: `declares_in_file` and the
+    /// top-level and type-owned `lookup_member_in_file` skip it, and a
+    /// module-level declaration of the same name still binds.
+    #[test]
+    fn test_module_lookups_body_local_node_excluded_returns_module_item() {
+        let rows = [
+            ("src/m.rs", "setup", NodeKind::Function, None),
+            ("src/m.rs", "Foo", NodeKind::Struct, None),
+            ("src/m.rs", "new", NodeKind::Method, Some("Foo")),
+            ("src/m.rs", "Foo", NodeKind::Struct, None),
+            ("src/m.rs", "new", NodeKind::Method, Some("Foo")),
+        ];
+        let mut st = st_owned(&rows);
+        st.note_body_local(1);
+        st.note_body_local(2);
+        assert!(st.is_body_local(1) && !st.is_body_local(3));
+        let is_type = |kind: NodeKind| kind == NodeKind::Struct;
+        assert!(st.declares_in_file("src/m.rs", "Foo", is_type));
+        assert_eq!(
+            st.lookup_member_in_file(
+                "src/m.rs",
+                "Foo",
+                ResolveTarget::Type,
+                MemberOwner::TopLevel
+            ),
+            Some(3)
+        );
+
+        let mut only_local = st_owned(&rows[..3]);
+        only_local.note_body_local(1);
+        only_local.note_body_local(2);
+        assert!(!only_local.declares_in_file("src/m.rs", "Foo", is_type));
+        assert_eq!(
+            only_local.lookup_member_in_file(
+                "src/m.rs",
+                "Foo",
+                ResolveTarget::Type,
+                MemberOwner::TopLevel
+            ),
+            None
+        );
+        assert_eq!(
+            only_local.lookup_member_in_file("src/m.rs", "new", CALL, MemberOwner::Type("Foo")),
+            None
         );
     }
 

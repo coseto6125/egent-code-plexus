@@ -1465,7 +1465,6 @@ impl<'a> Resolver<'a> {
             .find_map(|(position, import)| {
                 let imported =
                     plain_binding(&import.imported_name, import.alias.as_deref(), symbol_name)?;
-                // After a `use` matches: `caller_crate` canonicalizes the path.
                 ladder::ModuleTreeFacts::caller_crate(&tree, importer)?;
                 let ladder::TreeItem::Found { file, item } = ladder::module_tree_item(
                     &tree,
@@ -2127,11 +2126,13 @@ impl<'a> Resolver<'a> {
                     symbol_name,
                     raw_imports.iter().map(ImportRef::from),
                     module,
-                    ecp_core::analyzer::same_file_pick::PickFacts::owner(
-                        self.symbol_table,
-                        node_id,
-                    )
-                    .is_some(),
+                    || {
+                        ecp_core::analyzer::same_file_pick::PickFacts::owner(
+                            self.symbol_table,
+                            node_id,
+                        )
+                        .is_some()
+                    },
                 )
             })
         };

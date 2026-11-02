@@ -75,6 +75,21 @@ pub trait ResolveFacts: TypeFacts {
     /// when an import alias (`use E as F`) makes it differ from the declared
     /// name, the declared name is tried too.
     fn enum_variant_of(&self, type_id: u32, type_name: &str, variant: &str) -> Option<u32>;
+    /// Whether `file` holds an `impl trait_key for ty` block: an `Impl` node
+    /// named `ty` (an [`owner_key`]) whose owner is the trait `trait_key`.
+    /// The default reads [`ResolveFacts::call_decls`]; a side whose lookup
+    /// allocates overrides it.
+    fn implements_in_file(&self, file: &str, ty: &str, trait_key: &str) -> bool {
+        self.call_decls(file, ty)
+            .any(|(id, kind)| kind == NodeKind::Impl && self.owner(id) == Some(trait_key))
+    }
+}
+
+/// Whether `id` is an item of its module: no owning type, and no function
+/// body around it ([`PickFacts::is_body_local`]). A module path names only
+/// such an item.
+fn is_module_item<D: PickFacts + ?Sized>(decls: &D, id: u32) -> bool {
+    decls.owner(id).is_none() && !decls.is_body_local(id)
 }
 
 /// What a call site adds to a name lookup. The index's
@@ -1143,27 +1158,28 @@ pub fn qualified_member<F: QualifierFacts>(
     let file = file.as_ref();
     let heritage: &[String] = if caller_type { heritage } else { &[] };
     let pick = decls.first_decl_in_file(file, member, target)?;
-    let qualifier_names_type = caller_type
-        || owner_key(qualifier).is_some_and(|key| {
-            decls
-                .first_decl_in_file(file, key, ResolveTarget::Type)
-                .is_some()
-        });
+    let declares_type = owner_key(qualifier).is_some_and(|key| {
+        decls
+            .first_decl_in_file(file, key, ResolveTarget::Type)
+            .is_some()
+    });
+    let qualifier_names_type = caller_type || declares_type;
     let qualifier_is_type = type_receiver_is_closed(language) && qualifier_names_type;
     // A Rust method call whose qualifier names no type in the file reached
     // it through an `impl` block only (R5): `impl From<Name> for String`
     // beside `impl Name { fn len }` makes the file `String`'s, yet
-    // `s.len()` on a `String` calls std. Only the qualifier's own member or
-    // a trait's (a default method the impl inherits, as for a project type)
-    // binds; else the receiver-typing ladder decides.
-    let impl_only = language == Language::Rust && !callee.contains("::") && !qualifier_names_type;
+    // `s.len()` on a `String` calls std. The caller's own type counts no
+    // more than that: `self.len()` in `impl Summary for String` calls std
+    // too. Only the qualifier's own member, or the default method of a
+    // trait the file implements for the qualifier, binds; else the
+    // receiver-typing ladder decides.
+    let impl_only = language == Language::Rust && !callee.contains("::") && !declares_type;
     let impl_may_reach = |id: u32| {
-        decls.owner(id).and_then(owner_key).is_some_and(|owner| {
-            Some(owner) == owner_key(qualifier)
-                || decls
-                    .call_decls(file, owner)
-                    .any(|(_, kind)| kind == NodeKind::Trait)
-        })
+        let (Some(owner), Some(ty)) = (decls.owner(id).and_then(owner_key), owner_key(qualifier))
+        else {
+            return false;
+        };
+        owner == ty || decls.implements_in_file(file, ty, owner)
     };
     let id = prefer_owned(
         decls,
@@ -1621,14 +1637,13 @@ pub fn anchored_module_file<F: ModuleTreeFacts>(
 
 /// R14, the member part: the declaration the Rust path `callee` binds
 /// through the module tree. In the file [`module_tree_item`] places, the
-/// item's first module-level declaration of `target`'s kinds, else the
-/// first one named `member` (the callee's last segment, generic arguments
-/// dropped). A `fn` inside a function body is no item of the module. When
-/// the item is a type (`m::S` of `m::S::helper`), the path names one of its
-/// associated items, as in the qualifier tier: [`prefer_owned`] picks it
-/// with the type as the receiver, and a free item of the type's file never
-/// binds. [`qualified`] then applies the method rule
-/// ([`rust_path_may_bind`]).
+/// item's first module item ([`is_module_item`]) of `target`'s kinds, else
+/// the first declaration named `member` (the callee's last segment, generic
+/// arguments dropped) that no function body holds. When the item is a type
+/// (`m::S` of `m::S::helper`), the path names one of its associated items,
+/// as in the qualifier tier: [`prefer_owned`] picks it with the type as the
+/// receiver, and a free item of the type's file never binds. [`qualified`]
+/// then applies the method rule ([`rust_path_may_bind`]).
 pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
     facts: &F,
     decls: &D,
@@ -1643,19 +1658,24 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
         return None;
     };
     let file = file.as_ref();
-    let first = |name: &str, target: ResolveTarget| {
-        let wanted = target.kind_predicate();
-        decls
-            .call_decls(file, name)
-            .find(|&(_, kind)| wanted(kind))
-            .map(|(id, _)| id)
-    };
-    if let Some(id) = first(item.as_str(), target) {
-        return Some(id);
+    let wanted = target.kind_predicate();
+    let is_type = ResolveTarget::Type.kind_predicate();
+    let mut item_is_type = false;
+    for (id, kind) in decls.call_decls(file, &item) {
+        if !is_module_item(decls, id) {
+            continue;
+        }
+        if wanted(kind) {
+            return Some(id);
+        }
+        item_is_type |= is_type(kind);
     }
     let bare = member.split('<').next().unwrap_or(member);
-    let pick = first(bare, target)?;
-    if first(item.as_str(), ResolveTarget::Type).is_none() {
+    let pick = decls
+        .call_decls(file, bare)
+        .find(|&(id, kind)| wanted(kind) && !decls.is_body_local(id))
+        .map(|(id, _)| id)?;
+    if !item_is_type {
         return Some(pick);
     }
     prefer_owned(
@@ -1672,13 +1692,13 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
             ..PickScope::default()
         },
     )
-    .filter(|&id| decls.owner(id).is_some())
+    .filter(|&id| decls.owner(id).is_some() && !decls.is_body_local(id))
 }
 
 /// [`QualifierFacts::crate_module`] through the module tree: `Local` unless
 /// `module_path` names a module of a workspace crate; then that crate's file
-/// that declares `member` of `target`'s kinds under its own name, past the
-/// `pub use` chain.
+/// that declares `member` of `target`'s kinds under its own name as a
+/// module item ([`is_module_item`]), past the `pub use` chain.
 pub fn crate_module<F: ModuleTreeFacts, D: ResolveFacts>(
     facts: &F,
     decls: &D,
@@ -1703,9 +1723,9 @@ pub fn crate_module<F: ModuleTreeFacts, D: ResolveFacts>(
         ) {
             Some(TreeItem::Found { file, item })
                 if item == member
-                    && decls
-                        .call_decls(file.as_ref(), &item)
-                        .any(|(_, kind)| target.kind_predicate()(kind)) =>
+                    && decls.call_decls(file.as_ref(), &item).any(|(id, kind)| {
+                        target.kind_predicate()(kind) && is_module_item(decls, id)
+                    }) =>
             {
                 Some(file)
             }

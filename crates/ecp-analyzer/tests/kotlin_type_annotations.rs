@@ -48,11 +48,9 @@ fn test_self_without_project_class_binds_nothing() {
 }
 
 /// Contract: `fun find(): Tok?` binds the project class `Tok`, like
-/// `fun make(): Tok`. The `Tok?` text reaches the edge only if the
-/// `(user_type)? @type` capture keeps the `?`; the sibling test
-/// `test_resolve_call_kotlin_nullable_return_chain_binds_return_type_member`
-/// shows the annotation is kept as `Foo?`. Before the change the raw text
-/// `Tok?` names no type: no edge. Not run here: confirm it is red first.
+/// `fun make(): Tok`. Before the fix the function query captured only a
+/// `user_type` return, so a `nullable_type` return had no annotation and
+/// no edge.
 #[test]
 fn test_nullable_return_annotation_binds_project_type() {
     let g = graph(
