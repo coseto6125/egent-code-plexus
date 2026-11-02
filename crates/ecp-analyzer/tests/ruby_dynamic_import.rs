@@ -82,7 +82,7 @@ fn test_require_relative_qualified_call_binds_a_not_decoy() {
 /// Control: a plain cross-file call to a unique name binds.
 #[test]
 fn test_require_relative_control_plain_cross_file_call_binds() {
-    let g = graph(&[DECOY, ("ctl.rb", "def control\n  plain\nend\n")]);
+    let g = graph(&[DECOY, ("ctl.rb", "def control\n  plain()\nend\n")]);
     assert_eq!(
         calls_into(&g, "control", DECOY.0),
         vec![".plain".to_string()]

@@ -1428,6 +1428,14 @@ fn containers_of(nodes: &[RawNode], keep: fn(NodeKind) -> bool) -> Vec<Enclosing
     containers
 }
 
+/// Whether `value` belongs to the run headed by `head`: the same span, or a
+/// span that starts inside `head` and ends where it ends. Go gives each name
+/// of `var C, D = h1, h2` a span from that name to the end of the spec, so
+/// the names nest instead of tying; a read there belongs to no single one.
+fn same_run(head: &EnclosingContainer, value: &EnclosingContainer) -> bool {
+    value.end == head.end && head.start <= value.start
+}
+
 /// One declarator of a statement that declares several:
 /// `b = h2` in `const a = h1, b = h2`.
 struct Declarator<'s> {
@@ -1457,8 +1465,8 @@ struct ReadContainers<'s> {
     /// Every value declaration, in [`containers_of`] order: declarations
     /// that share one span sit side by side.
     values: Vec<EnclosingContainer>,
-    /// One entry per distinct span of `values`; its `node_idx` is the index
-    /// in `values` of the first declaration with that span.
+    /// One entry per run of `values` (see [`same_run`]); its `node_idx` is
+    /// the index in `values` of the run's first declaration.
     value_spans: Vec<EnclosingContainer>,
     /// The declarators of every statement that declares several, by start.
     declarators: Vec<Declarator<'s>>,
@@ -1469,10 +1477,7 @@ impl<'s> ReadContainers<'s> {
         let values = containers_of(nodes, is_value_kind);
         let mut value_spans: Vec<EnclosingContainer> = Vec::with_capacity(values.len());
         for (first, value) in values.iter().enumerate() {
-            if value_spans
-                .last()
-                .is_none_or(|span| (span.start, span.end) != (value.start, value.end))
-            {
+            if value_spans.last().is_none_or(|span| !same_run(span, value)) {
                 value_spans.push(EnclosingContainer {
                     node_idx: first,
                     ..*value
@@ -1527,7 +1532,7 @@ impl<'s> ReadContainers<'s> {
         let head = &self.values[first];
         let len = self.values[first..]
             .iter()
-            .take_while(|v| (v.start, v.end) == (head.start, head.end))
+            .take_while(|v| same_run(head, v))
             .count();
         &self.values[first..first + len]
     }
