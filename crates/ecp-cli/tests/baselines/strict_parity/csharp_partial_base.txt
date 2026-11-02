@@ -1,0 +1,2 @@
+# owner: FU-2026-10-26-2eb5f0cb0d38 (P2b: C# partial-type global fallback)
+edge full-only x1 Extends Class src/Child.cs:2 Child #664b93456ea84902 -> Class src/Base.cs:2 Base #0974091bbb761651 reason=heritage conf=0.7

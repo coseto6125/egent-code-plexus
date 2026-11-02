@@ -1,0 +1,21 @@
+# owner: FU-2026-10-08-0ed00615af19 (P2b: overlay re-resolves framework_refs and fanout_refs)
+edge full-only x1 HandlesRoute Function app/main.py:16 read_user #567234d257d9b2b5 -> Route app/main.py:15 POST /users/{id} #04edaf74c3113527 reason=call-arg conf=1.0
+edge full-only x1 References EntryPoint app/main.py:1 framework_ref@app #a20647884fdfbf0f -> Variable app/main.py:4 app #c2f8ab7f1e9425f0 reason=framework_ref:0.90:framework_ref:fastapi-route-post (0.9) conf=0.9
+edge full-only x1 References EntryPoint app/main.py:1 route@read_user #28a49d1d46ccb2d7 -> Function app/main.py:16 read_user #567234d257d9b2b5 reason=route:1.00:route:post /users/{id} conf=1.0
+edge full-only x1 References Function app/main.py:16 read_user #567234d257d9b2b5 -> Function app/main.py:7 get_db #f6401a02a255d13f reason=fastapi-depends conf=0.6
+edge full-only x1 References Method app/main.py:25 dispatch #f1499bed93b9563d -> Method app/main.py:28 handle_create #97548840fdc58b90 reason=reflection-getattr-fanout conf=0.28867513
+edge full-only x1 References Method app/main.py:25 dispatch #f1499bed93b9563d -> Method app/main.py:31 handle_delete #156ef4fcae564db9 reason=reflection-getattr-fanout conf=0.28867513
+edge full-only x1 References Method app/main.py:25 dispatch #f1499bed93b9563d -> Method app/main.py:34 handle_update #bf007ca7985a294f reason=reflection-getattr-fanout conf=0.28867513
+edge full-only x1 References Variable app/main.py:4 app #c2f8ab7f1e9425f0 -> Function app/main.py:16 read_user #567234d257d9b2b5 reason=fastapi-route-post conf=0.9
+edge overlay-only x1 HandlesRoute Function app/main.py:16 read_user #567234d257d9b2b5 -> Route app/main.py:15 GET /users/{id} #10602fb96572fb7f reason=call-arg conf=1.0
+edge overlay-only x1 References EntryPoint app/main.py:1 framework_ref@app #a20647884fdfbf0f -> Variable app/main.py:4 app #c2f8ab7f1e9425f0 reason=framework_ref:0.90:framework_ref:fastapi-route-get (0.9) conf=0.9
+edge overlay-only x1 References EntryPoint app/main.py:1 route@read_user #28a49d1d46ccb2d7 -> Function app/main.py:16 read_user #567234d257d9b2b5 reason=route:1.00:route:get /users/{id} conf=1.0
+edge overlay-only x1 References File app/main.py:1 main.py #eb584a759ae44029 -> Function app/main.py:20 send_email #ab1dc5710b550145 reason=celery-task conf=0.9
+edge overlay-only x1 References Function app/main.py:16 read_user #567234d257d9b2b5 -> Function app/main.py:11 get_current_user #6cce475c7454e004 reason=fastapi-depends conf=0.6
+edge overlay-only x1 References Method app/main.py:25 dispatch #f1499bed93b9563d -> Method app/main.py:28 handle_create #97548840fdc58b90 reason=reflection-getattr-fanout conf=0.35355338
+edge overlay-only x1 References Method app/main.py:25 dispatch #f1499bed93b9563d -> Method app/main.py:31 handle_delete #156ef4fcae564db9 reason=reflection-getattr-fanout conf=0.35355338
+edge overlay-only x1 References Variable app/main.py:4 app #c2f8ab7f1e9425f0 -> Function app/main.py:16 read_user #567234d257d9b2b5 reason=fastapi-route-get conf=0.9
+identity full-only x1 Route app/main.py:15 POST /users/{id} #04edaf74c3113527
+identity overlay-only x1 Route app/main.py:15 GET /users/{id} #10602fb96572fb7f
+parent full-only x1 Route app/main.py:15 POST /users/{id} #04edaf74c3113527 owner=- <- none
+parent overlay-only x1 Route app/main.py:15 GET /users/{id} #10602fb96572fb7f owner=- <- none
