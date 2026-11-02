@@ -204,8 +204,9 @@ pub fn attach_to_enclosing(
 
 /// Walk the AST and attach the **field name** of each member-access read
 /// (`obj.field`, `self.count`, `cfg->timeout`) to the smallest enclosing
-/// function/method/constructor `RawNode`'s `field_reads`. Mirrors
-/// `extract_calls`; `field_kinds` lists this language's member-access AST node
+/// function/method/constructor `RawNode`'s `field_reads`, else (an initializer
+/// outside every function) the smallest enclosing const/variable/property.
+/// Mirrors `extract_calls`; `field_kinds` lists this language's member-access AST node
 /// kinds (e.g. `member_expression` in JS/TS, `field_expression` in C/C++/Rust,
 /// `selector_expression` in Go).
 ///
@@ -215,7 +216,8 @@ pub fn attach_to_enclosing(
 /// node is the `function` child of its parent call, it is a callee.
 ///
 /// The same walk records each bare name the body uses as a value
-/// ([`NameRef`]), once per enclosing function, as `names` describes.
+/// ([`NameRef`]), once per its smallest enclosing function, else value
+/// declaration ([`ReadContainers`]), as `names` describes.
 pub fn extract_field_reads(
     root: Node<'_>,
     source: &[u8],
@@ -236,12 +238,13 @@ pub fn extract_field_reads_with_literal_key_facts(
     names: &NameRefSpec,
     literal_key_facts: Option<&LiteralKeyFacts>,
 ) {
-    let containers = enclosing_containers(nodes);
+    let mut containers = ReadContainers::new(nodes);
     if containers.is_empty() {
         return;
     }
     let mut reads: Vec<PendingCall> = Vec::new();
     let mut scan = NameScan::default();
+    let mut declarators: Vec<Declarator<'_>> = Vec::new();
     let mut memo = KindMemo::new(names, field_kinds);
     // Each node travels with its parent and its field in that parent:
     // `Node::parent` walks down from the root, which every node would pay.
@@ -251,6 +254,7 @@ pub fn extract_field_reads_with_literal_key_facts(
         parent_kind: 0,
         field: 0,
         scope: NameScope::Value,
+        local_scope: None,
     }];
     while let Some(frame) = stack.pop() {
         let n = frame.node;
@@ -276,16 +280,57 @@ pub fn extract_field_reads_with_literal_key_facts(
                 kind,
                 scope,
             };
+            let mut local_scope = if kind & kind_flag::COMPREHENSION != 0 {
+                Some(LocalScope::comprehension(node_range(n)))
+            } else if kind & kind_flag::COMPREHENSION_CLAUSE != 0 {
+                frame
+                    .parent
+                    .map(|p| LocalScope::comprehension(node_range(p)))
+            } else {
+                frame.local_scope
+            };
+            let mut declarator_count = 0u32;
+            let mut first_declarator = None;
             loop {
                 let child = cursor.node();
                 let field = memo.field(&cursor);
                 let child_kind = memo.kind(child);
+                let mut child_scope = local_scope;
+                if opens_parameters(kind, field, child_kind) {
+                    // C++ `lambda_declarator` and Swift `lambda_function_type`
+                    // hold the parameters; their parent holds the body too.
+                    let owner = if kind & kind_flag::DECLARATOR != 0 || scope == NameScope::Skip {
+                        frame.parent.unwrap_or(n)
+                    } else {
+                        n
+                    };
+                    child_scope = Some(LocalScope::lambda(node_range(owner)));
+                    // A type's parameter list (Java record, C# primary
+                    // constructor) scopes only its own names: the members
+                    // keep the outer scope.
+                    if kind & kind_flag::TYPE_DECL == 0 {
+                        local_scope = child_scope;
+                    }
+                }
+                if child_kind & kind_flag::DECLARATOR != 0 {
+                    declarator_count += 1;
+                    match declarator_count {
+                        1 => first_declarator = Some(child),
+                        2 => {
+                            for declarator in first_declarator.into_iter().chain([child]) {
+                                declarators.push(Declarator::new(declarator, source, &mut memo));
+                            }
+                        }
+                        _ => declarators.push(Declarator::new(child, source, &mut memo)),
+                    }
+                }
                 stack.push(Frame {
                     node: child,
                     parent: Some(n),
                     parent_kind: kind,
                     field,
                     scope: names.child_scope(parent, child_kind, field, &cursor, literal_key_facts),
+                    local_scope: child_scope,
                 });
                 if !cursor.goto_next_sibling() {
                     break;
@@ -293,8 +338,17 @@ pub fn extract_field_reads_with_literal_key_facts(
             }
         }
     }
+    containers.set_declarators(declarators);
     attach_pending_field_reads(&containers, reads, nodes);
     scan.attach(&containers, nodes);
+}
+
+/// Whether `child`, under a node of kind flags `parent_kind`, lists the
+/// parameters of a function: the parent then scopes them and its body.
+fn opens_parameters(parent_kind: u32, field: u16, child_kind: u32) -> bool {
+    parent_kind & kind_flag::PARAMETER == 0
+        && child_kind & kind_flag::TYPE_PARAMETERS == 0
+        && (field & field_flag::PARAMS != 0 || child_kind & kind_flag::PARAMETER != 0)
 }
 
 /// Per-file facts for keyed composite literal elements. A language-specific
@@ -465,6 +519,9 @@ struct Frame<'t> {
     /// The [`field_flag`]s of the field this node fills in its parent.
     field: u16,
     scope: NameScope,
+    /// The innermost function whose parameters precede this node, or the
+    /// comprehension that holds it, which scopes the names declared below it.
+    local_scope: Option<LocalScope>,
 }
 
 /// What a node passes on to its children's [`NameScope`].
@@ -514,6 +571,17 @@ mod kind_flag {
     pub const PASSED_CALL: u32 = 1 << 15;
     /// A wrapper kind of the spec's [`NameRefSpec::capture_patterns`].
     pub const CAPTURE_WRAPPER: u32 = 1 << 16;
+    /// A generic's type or template parameter list, which declares no value.
+    pub const TYPE_PARAMETERS: u32 = 1 << 17;
+    /// A Dart `for_element`, whose variables live inside it only. A C#
+    /// `query_expression` is none: its first source binds outside it.
+    pub const COMPREHENSION: u32 = 1 << 18;
+    /// A Python `for_in_clause`: its variables live in the comprehension that
+    /// holds it. A walrus elsewhere in that comprehension binds outside it.
+    pub const COMPREHENSION_CLAUSE: u32 = 1 << 19;
+    /// A class, record or struct declaration, whose parameter list (Java
+    /// record, C# primary constructor) is no lambda over its members.
+    pub const TYPE_DECL: u32 = 1 << 20;
 }
 
 /// Bits [`KindMemo::field`] records for a field name.
@@ -531,6 +599,8 @@ mod field_flag {
     /// A part of a member or index target (`CONFIG.debug`, `CACHE[KEY]`)
     /// other than the target itself: a binding scope does not declare it.
     pub const MEMBER_PART: u16 = 1 << 8;
+    /// `parameter` / `parameters`: a function's parameter list.
+    pub const PARAMS: u16 = 1 << 9;
 }
 
 /// What each node kind and field means to the walk, recorded per file on
@@ -576,7 +646,19 @@ impl<'a> KindMemo<'a> {
             (spec.ident_kinds.contains(&kind), IDENT),
             (spec.skip_kinds.contains(&kind), SKIP_KIND),
             (kind.contains("parameter"), PARAMETER),
+            (
+                kind.starts_with("type_parameter") || kind.starts_with("template_parameter"),
+                TYPE_PARAMETERS,
+            ),
             (kind.contains("declarator"), DECLARATOR),
+            (kind == "for_element", COMPREHENSION),
+            (kind == "for_in_clause", COMPREHENSION_CLAUSE),
+            (
+                kind.ends_with("class_declaration")
+                    || kind.ends_with("record_declaration")
+                    || kind.ends_with("struct_declaration"),
+                TYPE_DECL,
+            ),
             (spec.method_refs.contains(&kind), METHOD_REF),
             (spec.symbol_method_refs && kind == "call", SYMBOL_CALL),
             (spec.binding_parents.contains(&kind), BINDING_PARENT),
@@ -630,6 +712,7 @@ impl<'a> KindMemo<'a> {
             (NON_VALUE_FIELDS.contains(&field), NON_VALUE),
             (field == "name", NAME),
             (field == "left", LEFT),
+            (matches!(field, "parameter" | "parameters"), PARAMS),
             (
                 matches!(field, "object" | "operand" | "attribute" | "subscript"),
                 MEMBER_PART,
@@ -791,7 +874,8 @@ fn literal_typed_by(keyed: Node<'_>, types: &[&str]) -> bool {
             .is_some_and(|ty| types.contains(&ty.kind()))
 }
 
-/// A bare name read inside a body, pending its enclosing function.
+/// A bare name read inside a body, pending its smallest enclosing function,
+/// else value declaration ([`ReadContainers`]).
 struct PendingName<'s> {
     pos: Pos,
     name: Cow<'s, str>,
@@ -802,6 +886,10 @@ struct PendingName<'s> {
 struct PendingBinding<'s> {
     pos: Pos,
     name: &'s str,
+    /// The innermost function or comprehension that scopes it
+    /// ([`Frame::local_scope`]): its scope when no function node holds it, or when
+    /// it is a comprehension inside the function node that holds it.
+    local_scope: Option<LocalScope>,
 }
 
 #[derive(Default)]
@@ -832,24 +920,20 @@ impl<'s> NameScan<'s> {
             let Ok(name) = n.utf8_text(source) else {
                 return false;
             };
+            let binding = PendingBinding {
+                pos: start_pos(n),
+                name,
+                local_scope: frame.local_scope,
+            };
             match frame.scope {
-                NameScope::Binding => self.bindings.push(PendingBinding {
-                    pos: start_pos(n),
-                    name,
-                }),
+                NameScope::Binding => self.bindings.push(binding),
                 NameScope::Value if frame.parent_kind & kind_flag::GLOBAL_DECL != 0 => {
-                    self.globals.push(PendingBinding {
-                        pos: start_pos(n),
-                        name,
-                    });
+                    self.globals.push(binding);
                 }
                 NameScope::Value
                     if frame.parent_kind & kind_flag::BINDING_PARENT != 0 && !after_equals(n) =>
                 {
-                    self.bindings.push(PendingBinding {
-                        pos: start_pos(n),
-                        name,
-                    });
+                    self.bindings.push(binding);
                 }
                 NameScope::Value if spec.reads_value(n, frame, memo) => {
                     self.reads.push(PendingName {
@@ -893,27 +977,53 @@ impl<'s> NameScan<'s> {
         false
     }
 
-    /// Attach each read to its smallest enclosing function, once per
-    /// function, unless a parameter or local of a function holding it
-    /// declares the same name.
-    fn attach(self, containers: &[EnclosingContainer], nodes: &mut [RawNode]) {
+    /// Attach each read to its smallest enclosing read container, once per
+    /// container, unless a name declared in a scope holding it hides it: a
+    /// parameter or local of a function node (a comprehension variable inside
+    /// it: of that comprehension), else of a nodeless lambda, else of the
+    /// value declaration ([`ReadContainers::binding_scope`]).
+    fn attach(self, containers: &ReadContainers<'_>, nodes: &mut [RawNode]) {
         if self.reads.is_empty() {
             return;
         }
         let globals: rustc_hash::FxHashSet<(usize, &str)> = self
             .globals
             .iter()
-            .zip(enclosing_targets(containers, &self.globals, |g| g.pos))
+            .zip(enclosing_targets(
+                &containers.callables,
+                &self.globals,
+                |g| g.pos,
+            ))
             .filter_map(|(global, target)| Some((target?, global.name)))
             .collect();
-        let mut bound: rustc_hash::FxHashMap<&str, Vec<usize>> = rustc_hash::FxHashMap::default();
-        let binding_targets = enclosing_targets(containers, &self.bindings, |b| b.pos);
-        for (binding, target) in self.bindings.iter().zip(binding_targets) {
-            if let Some(node_idx) = target.filter(|&t| !globals.contains(&(t, binding.name))) {
-                bound.entry(binding.name).or_default().push(node_idx);
+        let mut bound: rustc_hash::FxHashMap<&str, Vec<PosRange>> =
+            rustc_hash::FxHashMap::default();
+        let mut open: Vec<usize> = Vec::new();
+        let callables = enclosing_targets(&containers.callables, &self.bindings, |b| b.pos);
+        for (i, (binding, target)) in self.bindings.iter().zip(callables).enumerate() {
+            match target {
+                Some(t) if globals.contains(&(t, binding.name)) => {}
+                Some(t) => {
+                    let function = span_ends(nodes[t].span);
+                    let scope = binding
+                        .local_scope
+                        .filter(|l| {
+                            l.comprehension && function.0 <= l.range.0 && l.range.1 <= function.1
+                        })
+                        .map_or(function, |l| l.range);
+                    bound.entry(binding.name).or_default().push(scope);
+                }
+                None => open.push(i),
             }
         }
-        let targets = enclosing_targets(containers, &self.reads, |r| r.pos);
+        let runs = containers.value_runs(&open, |i| self.bindings[i].pos);
+        for (i, run) in open.into_iter().zip(runs) {
+            let binding = &self.bindings[i];
+            if let Some(scope) = containers.binding_scope(run, binding, nodes) {
+                bound.entry(binding.name).or_default().push(scope);
+            }
+        }
+        let targets = containers.targets(nodes, &self.reads, |r| r.pos);
         let mut seen: rustc_hash::FxHashSet<(usize, NameRefKind, &str)> =
             rustc_hash::FxHashSet::default();
         for (read, target) in self.reads.iter().zip(targets) {
@@ -922,7 +1032,7 @@ impl<'s> NameScan<'s> {
                 && bound.get(read.name.as_ref()).is_some_and(|scopes| {
                     scopes
                         .iter()
-                        .any(|&scope| span_holds(nodes[scope].span, read.pos))
+                        .any(|&(start, end)| start <= read.pos && read.pos <= end)
                 });
             if !shadowed && seen.insert((node_idx, read.kind, read.name.as_ref())) {
                 nodes[node_idx]
@@ -1038,14 +1148,14 @@ fn field_name_from(access: Node<'_>, source: &[u8]) -> Option<String> {
 }
 
 fn attach_pending_field_reads(
-    containers: &[EnclosingContainer],
+    containers: &ReadContainers<'_>,
     reads: Vec<PendingCall>,
     nodes: &mut [RawNode],
 ) {
     if reads.is_empty() {
         return;
     }
-    let targets = enclosing_targets(containers, &reads, |r| r.pos);
+    let targets = containers.targets(nodes, &reads, |r| r.pos);
     for (read, target) in reads.into_iter().zip(targets) {
         if let Some(node_idx) = target {
             nodes[node_idx].field_reads.push(read.name);
@@ -1313,6 +1423,15 @@ fn is_container_kind(kind: NodeKind) -> bool {
     )
 }
 
+/// A declaration whose initializer holds name and field reads when no
+/// function does: `const OPT = Some(handler)`, a Java field `Runnable r = Main::run`.
+fn is_value_kind(kind: NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::Const | NodeKind::Variable | NodeKind::Property
+    )
+}
+
 fn span_ends(span: (u32, u32, u32, u32)) -> (Pos, Pos) {
     ((span.0, span.1), (span.2, span.3))
 }
@@ -1327,10 +1446,14 @@ pub fn span_width(span: (u32, u32, u32, u32)) -> (u32, i64) {
 }
 
 fn enclosing_containers(nodes: &[RawNode]) -> Vec<EnclosingContainer> {
+    containers_of(nodes, is_container_kind)
+}
+
+fn containers_of(nodes: &[RawNode], keep: fn(NodeKind) -> bool) -> Vec<EnclosingContainer> {
     let mut containers: Vec<EnclosingContainer> = nodes
         .iter()
         .enumerate()
-        .filter(|(_, node)| is_container_kind(node.kind))
+        .filter(|(_, node)| keep(node.kind))
         .map(|(node_idx, node)| {
             let (start, end) = span_ends(node.span);
             EnclosingContainer {
@@ -1343,6 +1466,202 @@ fn enclosing_containers(nodes: &[RawNode]) -> Vec<EnclosingContainer> {
         .collect();
     containers.sort_unstable_by_key(|c| (c.start, c.width, c.node_idx));
     containers
+}
+
+/// Whether `value` belongs to the run headed by `head`: the same span, or a
+/// span that starts inside `head` and ends where it ends. Go gives each name
+/// of `var C, D = h1, h2` a span from that name to the end of the spec, so
+/// the names nest instead of tying; a read there belongs to no single one.
+fn same_run(head: &EnclosingContainer, value: &EnclosingContainer) -> bool {
+    value.end == head.end && head.start <= value.start
+}
+
+/// A range that scopes the names declared in it.
+#[derive(Clone, Copy)]
+struct LocalScope {
+    range: PosRange,
+    /// A comprehension's range. A function's own parameter list may open a
+    /// range that holds only its signature (Dart `function_signature`), so
+    /// only a comprehension narrows a binding that a function node holds.
+    comprehension: bool,
+}
+
+impl LocalScope {
+    fn lambda(range: PosRange) -> Self {
+        Self {
+            range,
+            comprehension: false,
+        }
+    }
+
+    fn comprehension(range: PosRange) -> Self {
+        Self {
+            range,
+            comprehension: true,
+        }
+    }
+}
+
+/// One declarator of a statement that declares several:
+/// `b = h2` in `const a = h1, b = h2`.
+struct Declarator<'s> {
+    range: PosRange,
+    /// The name it declares, when that is a bare name (`b`, not `{ cb }`).
+    name: Option<&'s str>,
+}
+
+impl<'s> Declarator<'s> {
+    fn new(node: Node<'_>, source: &'s [u8], memo: &mut KindMemo<'_>) -> Self {
+        let name = node
+            .child_by_field_name("name")
+            .filter(|name| memo.kind(*name) & kind_flag::IDENT != 0)
+            .and_then(|name| name.utf8_text(source).ok());
+        Self {
+            range: node_range(node),
+            name,
+        }
+    }
+}
+
+/// Where a name or field read lands: the smallest enclosing function, else
+/// the smallest enclosing value declaration. Functions rank first, so
+/// `const f = () => g` keeps `g` on the arrow function and not on `f`.
+struct ReadContainers<'s> {
+    callables: Vec<EnclosingContainer>,
+    /// Every value declaration, in [`containers_of`] order: declarations
+    /// that share one span sit side by side.
+    values: Vec<EnclosingContainer>,
+    /// One entry per run of `values` (see [`same_run`]); its `node_idx` is
+    /// the index in `values` of the run's first declaration.
+    value_spans: Vec<EnclosingContainer>,
+    /// The declarators of every statement that declares several, by start.
+    declarators: Vec<Declarator<'s>>,
+}
+
+impl<'s> ReadContainers<'s> {
+    fn new(nodes: &[RawNode]) -> Self {
+        let values = containers_of(nodes, is_value_kind);
+        let mut value_spans: Vec<EnclosingContainer> = Vec::with_capacity(values.len());
+        for (first, value) in values.iter().enumerate() {
+            if value_spans.last().is_none_or(|span| !same_run(span, value)) {
+                value_spans.push(EnclosingContainer {
+                    node_idx: first,
+                    ..*value
+                });
+            }
+        }
+        Self {
+            callables: containers_of(nodes, is_container_kind),
+            values,
+            value_spans,
+            declarators: Vec::new(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.callables.is_empty() && self.values.is_empty()
+    }
+
+    fn set_declarators(&mut self, mut declarators: Vec<Declarator<'s>>) {
+        declarators.sort_unstable_by_key(|d| d.range.0);
+        self.declarators = declarators;
+    }
+
+    fn targets<T>(
+        &self,
+        nodes: &[RawNode],
+        pending: &[T],
+        pos_of: impl Fn(&T) -> Pos,
+    ) -> Vec<Option<usize>> {
+        let mut targets = enclosing_targets(&self.callables, pending, &pos_of);
+        if self.value_spans.is_empty() {
+            return targets;
+        }
+        let open: Vec<usize> = (0..pending.len())
+            .filter(|&i| targets[i].is_none())
+            .collect();
+        let runs = self.value_runs(&open, |i| pos_of(&pending[i]));
+        for (i, run) in open.into_iter().zip(runs) {
+            targets[i] = run.and_then(|first| self.pick(first, pos_of(&pending[i]), nodes));
+        }
+        targets
+    }
+
+    /// For each index in `open`, the `values` index of the first declaration
+    /// of the smallest value span holding its position.
+    fn value_runs(&self, open: &[usize], pos_of: impl Fn(usize) -> Pos) -> Vec<Option<usize>> {
+        enclosing_targets(&self.value_spans, open, |&i| pos_of(i))
+    }
+
+    /// The declarations that share the span of `values[first]`.
+    fn run(&self, first: usize) -> &[EnclosingContainer] {
+        let head = &self.values[first];
+        let len = self.values[first..]
+            .iter()
+            .take_while(|v| same_run(head, v))
+            .count();
+        &self.values[first..first + len]
+    }
+
+    /// The declaration of the run at `first` that holds a read at `pos`.
+    /// When several share one statement, the one whose own declarator holds
+    /// `pos`; when `pos` sits in a sibling declarator that declares no node
+    /// (`{ cb }` in `const unused = 0, { cb } = …`), or no declarator tells
+    /// the run apart (Go `var C, D = h1, h2`), none.
+    fn pick(&self, first: usize, pos: Pos, nodes: &[RawNode]) -> Option<usize> {
+        let run = self.run(first);
+        let (start, end) = (run[0].start, run[0].end);
+        let member = |name: &str| {
+            run.iter()
+                .find(|v| nodes[v.node_idx].name == name)
+                .map(|v| v.node_idx)
+        };
+        let from = self.declarators.partition_point(|d| d.range.0 < start);
+        let mut own_statement = false;
+        for declarator in self.declarators[from..]
+            .iter()
+            .take_while(|d| d.range.0 <= end)
+            .filter(|d| d.range.1 <= end)
+        {
+            let Some(node_idx) = declarator.name.and_then(member) else {
+                continue;
+            };
+            if declarator.range.0 <= pos && pos <= declarator.range.1 {
+                return Some(node_idx);
+            }
+            own_statement = true;
+        }
+        match run {
+            [only] if !own_statement => Some(only.node_idx),
+            _ => None,
+        }
+    }
+
+    /// The range where `binding`, which no function node holds, hides its
+    /// name. `first` is the run of the smallest value span holding it. A
+    /// declaration's own name hides nothing: a method of its literal still
+    /// reads it. A parameter of a nodeless lambda or a comprehension variable
+    /// hides the name inside that lambda or comprehension only. Any other name
+    /// (a local of a lambda without parameters, a Python walrus) hides it
+    /// across the whole declaration.
+    fn binding_scope(
+        &self,
+        first: Option<usize>,
+        binding: &PendingBinding<'_>,
+        nodes: &[RawNode],
+    ) -> Option<PosRange> {
+        let run = first.map(|first| self.run(first));
+        let declared = run.filter(|run| run.iter().any(|v| nodes[v.node_idx].name == binding.name));
+        match (declared, binding.local_scope.map(|l| l.range)) {
+            // A lambda inside the declaration: `TABLE = {"id": lambda TABLE: TABLE}`.
+            (Some(run), Some(lambda)) if run[0].start < lambda.0 || lambda.1 < run[0].end => {
+                Some(lambda)
+            }
+            (Some(_), _) => None,
+            (None, Some(lambda)) => Some(lambda),
+            (None, None) => run.map(|run| (run[0].start, run[0].end)),
+        }
+    }
 }
 
 /// For each pending entry, the node index of the smallest container whose

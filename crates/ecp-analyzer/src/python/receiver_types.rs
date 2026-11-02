@@ -22,11 +22,19 @@ use super::path_literals::build_raw_path_literal;
 use crate::calls::{
     attach_to_enclosing, node_range, range_width, start_pos, CallSiteIndex, Pos, PosRange,
 };
+use crate::dynamic_imports::{
+    binding_mentions, is_field, may_load, rebound, synthetic_imports, DynamicBinding,
+    DynamicImports,
+};
 use crate::framework_helpers::strip_python_string_quotes;
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
+
+/// A load assigned in one scope: the assigned name, its statement, and the
+/// module specifier.
+type ScopeLoad<'t, 's> = (Node<'t>, Node<'t>, &'s str);
 
 /// Map of nested function scopes (by position range) to their var→type bindings.
 /// Lookup picks the smallest containing scope that has the variable, so
@@ -299,6 +307,329 @@ fn simple_name_and_type(
     Some((name.to_string(), ty.to_string()))
 }
 
+/// The module whose `import_module` function loads a module by name.
+const LOADER_MODULE: &str = "importlib";
+const LOADER_FUNCTION: &str = "import_module";
+
+/// Whether `node` only reads the value of its name.
+fn is_read_position(node: Node<'_>) -> bool {
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    match parent.kind() {
+        "attribute" => is_field(parent, "object", node),
+        "call" => is_field(parent, "function", node),
+        "keyword_argument"
+        | "named_expression"
+        | "default_parameter"
+        | "typed_default_parameter" => is_field(parent, "value", node),
+        "assignment" | "augmented_assignment" | "for_statement" | "for_in_clause" => {
+            is_field(parent, "right", node)
+        }
+        "lambda" => is_field(parent, "body", node),
+        "if_statement" | "elif_clause" | "while_statement" => is_field(parent, "condition", node),
+        // A container reads its items when it is itself read: `del (m, x)`
+        // and a destructuring target do not.
+        "parenthesized_expression"
+        | "tuple"
+        | "list"
+        | "set"
+        | "expression_list"
+        | "list_splat"
+        | "dictionary_splat" => is_read_position(parent),
+        "argument_list"
+        | "assert_statement"
+        | "await"
+        | "binary_operator"
+        | "boolean_operator"
+        | "comparison_operator"
+        | "conditional_expression"
+        | "decorator"
+        | "dictionary_comprehension"
+        | "expression_statement"
+        | "generator_expression"
+        | "if_clause"
+        | "interpolation"
+        | "list_comprehension"
+        | "not_operator"
+        | "pair"
+        | "raise_statement"
+        | "return_statement"
+        | "set_comprehension"
+        | "slice"
+        | "subscript"
+        | "unary_operator"
+        | "yield" => true,
+        _ => false,
+    }
+}
+
+/// Whether the identifier `node` names no variable: an attribute name, or the
+/// module of a `from` import.
+fn names_no_variable(node: Node<'_>) -> bool {
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    match parent.kind() {
+        "attribute" => is_field(parent, "attribute", node),
+        "dotted_name" => parent.parent().is_some_and(|g| {
+            g.kind() == "import_from_statement" && is_field(g, "module_name", parent)
+        }),
+        _ => false,
+    }
+}
+
+/// Whether the leaf `node` is an identifier that binds or writes its name.
+/// Any mention that is not a plain read counts, so a parameter, a loop
+/// target, an `import`, a `global` and a `del` all do.
+fn binds_name(node: Node<'_>) -> bool {
+    node.kind() == "identifier" && !names_no_variable(node) && !is_read_position(node)
+}
+
+/// The one identifier in the file under `root` that binds or writes `name`,
+/// when exactly one does ([`binds_name`]).
+pub(super) fn sole_binding<'t>(root: Node<'t>, name: &str, source: &[u8]) -> Option<Node<'t>> {
+    match binding_mentions(root, &[name], source, binds_name)
+        .get(name)?
+        .as_slice()
+    {
+        [only] => Some(*only),
+        _ => None,
+    }
+}
+
+/// Where a loader name is bound: the byte range it is visible in, and the
+/// byte offset from which it is bound.
+struct LoaderBinding {
+    scope: (usize, usize),
+    from: usize,
+}
+
+impl LoaderBinding {
+    fn covers(&self, call: Node<'_>) -> bool {
+        self.scope.0 <= call.start_byte()
+            && call.end_byte() <= self.scope.1
+            && self.from <= call.start_byte()
+    }
+}
+
+/// The binding of `name` (`importlib` or `import_module`) when exactly one
+/// plain import statement binds it in the whole file and nothing else binds
+/// or writes it: `import importlib`, `from importlib import import_module`.
+/// An alias, a `from` import of a different module, a class-body import or a
+/// second binding gives `None`.
+fn loader_binding(root: Node<'_>, source: &[u8], name: &str) -> Option<LoaderBinding> {
+    let mention = sole_binding(root, name, source)?;
+    let dotted = mention.parent().filter(|p| p.kind() == "dotted_name")?;
+    let statement = dotted.parent()?;
+    let plain = match (name, statement.kind()) {
+        (LOADER_MODULE, "import_statement") => dotted
+            .named_child(0)
+            .is_some_and(|first| first.id() == mention.id()),
+        (LOADER_FUNCTION, "import_from_statement") => {
+            !is_field(statement, "module_name", dotted)
+                && statement
+                    .child_by_field_name("module_name")
+                    .and_then(|module| module.utf8_text(source).ok())
+                    == Some(LOADER_MODULE)
+        }
+        _ => false,
+    };
+    if !plain {
+        return None;
+    }
+    let mut scope = (root.start_byte(), root.end_byte());
+    let mut ancestor = statement.parent();
+    while let Some(a) = ancestor {
+        match a.kind() {
+            "function_definition" => {
+                scope = (a.start_byte(), a.end_byte());
+                break;
+            }
+            "class_definition" => return None,
+            _ => ancestor = a.parent(),
+        }
+    }
+    Some(LoaderBinding {
+        scope,
+        from: statement.end_byte(),
+    })
+}
+
+/// The module name a string literal spells when it is an absolute dotted name
+/// written without prefix, escape or interpolation.
+fn literal_module_name(literal: Node<'_>, source: &[u8]) -> Option<String> {
+    if literal.kind() != "string" {
+        return None;
+    }
+    let text = literal.utf8_text(source).ok()?;
+    if !matches!(text.as_bytes().first(), Some(b'"' | b'\'')) {
+        return None;
+    }
+    let inner = strip_python_string_quotes(text)?;
+    (!inner.contains('\\')
+        && inner
+            .split('.')
+            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_alphanumeric() || c == '_')))
+    .then(|| inner.to_string())
+}
+
+/// A call `importlib.import_module("<lit>")` (`via_module`) or
+/// `import_module("<lit>")` with one positional literal argument: its
+/// specifier. Whether the callee really is the loader is [`loader_binding`]'s.
+fn loader_call(call: Node<'_>, source: &[u8]) -> Option<(bool, String)> {
+    let function = call.child_by_field_name("function")?;
+    let text = |node: Node<'_>| node.utf8_text(source).ok();
+    let via_module = match function.kind() {
+        "attribute" => {
+            let object = function.child_by_field_name("object")?;
+            let attribute = function.child_by_field_name("attribute")?;
+            if object.kind() != "identifier"
+                || text(object) != Some(LOADER_MODULE)
+                || text(attribute) != Some(LOADER_FUNCTION)
+            {
+                return None;
+            }
+            true
+        }
+        "identifier" if text(function) == Some(LOADER_FUNCTION) => false,
+        _ => return None,
+    };
+    let arguments = call.child_by_field_name("arguments")?;
+    if arguments.kind() != "argument_list" || arguments.named_child_count() != 1 {
+        return None;
+    }
+    Some((
+        via_module,
+        literal_module_name(arguments.named_child(0)?, source)?,
+    ))
+}
+
+/// A literal load that is the whole right side of `name = <load>`, a direct
+/// statement of a function or module body: its scope, name and statement end.
+fn direct_assignment(call: Node<'_>) -> Option<(Node<'_>, Node<'_>, Node<'_>)> {
+    let assignment = call.parent().filter(|a| {
+        a.kind() == "assignment"
+            && is_field(*a, "right", call)
+            && a.child_by_field_name("type").is_none()
+    })?;
+    let target = assignment
+        .child_by_field_name("left")
+        .filter(|left| left.kind() == "identifier")?;
+    let statement = assignment
+        .parent()
+        .filter(|s| s.kind() == "expression_statement")?;
+    let container = statement.parent()?;
+    let scope = match container.kind() {
+        "module" => container,
+        "block" => container
+            .parent()
+            .filter(|f| f.kind() == "function_definition" && is_field(*f, "body", container))?,
+        _ => return None,
+    };
+    Some((scope, target, statement))
+}
+
+/// Collect the synthetic imports of every literal
+/// `importlib.import_module("<absolute name>")`, and bind the names that hold
+/// a loaded module ([`DynamicImports`]).
+///
+/// A call counts only when `importlib` (or `import_module`) is bound by one
+/// plain import that precedes it and nothing else in the file binds the name.
+/// A name binds only when its assignment `m = <load>` is a direct statement
+/// of a function or module body and `m` is declared or written nowhere else
+/// in that scope's subtree. A use before the assignment never binds. Every
+/// other shape (`__import__`, a relative name, a `package` argument, a
+/// non-literal argument) keeps today's result.
+pub fn collect_dynamic_imports(root: Node<'_>, source: &[u8]) -> DynamicImports {
+    // The walk below costs a pass over the tree, and every load spells its loader.
+    if !may_load(source, &[LOADER_FUNCTION]) {
+        return DynamicImports::default();
+    }
+    let mut loads: Vec<(Node<'_>, bool, String)> = Vec::new();
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        match n.kind() {
+            // A star import may rebind any name, loader included.
+            "wildcard_import" => return DynamicImports::default(),
+            "call" => {
+                if let Some((via_module, specifier)) = loader_call(n, source) {
+                    loads.push((n, via_module, specifier));
+                }
+            }
+            _ => {}
+        }
+        let mut c = n.walk();
+        stack.extend(n.children(&mut c));
+    }
+
+    let binding_of = |via_module: bool| {
+        let name = if via_module {
+            LOADER_MODULE
+        } else {
+            LOADER_FUNCTION
+        };
+        loads
+            .iter()
+            .any(|(_, via, _)| *via == via_module)
+            .then(|| loader_binding(root, source, name))
+            .flatten()
+    };
+    let (module_binding, function_binding) = (binding_of(true), binding_of(false));
+    loads.retain(|(call, via_module, _)| {
+        let binding = if *via_module {
+            &module_binding
+        } else {
+            &function_binding
+        };
+        binding.as_ref().is_some_and(|b| b.covers(*call))
+    });
+    if loads.is_empty() {
+        return DynamicImports::default();
+    }
+    loads.sort_by_key(|(call, ..)| call.start_byte());
+    let (imports, aliases) = synthetic_imports(loads.iter().map(|(.., spec)| spec.as_str()));
+
+    // One walk per scope checks every name assigned a load there.
+    let mut scopes: Vec<(Node<'_>, Vec<ScopeLoad<'_, '_>>)> = Vec::new();
+    for (call, _, specifier) in &loads {
+        let Some((scope, target, statement)) = direct_assignment(*call) else {
+            continue;
+        };
+        let entry = (target, statement, specifier.as_str());
+        match scopes.iter_mut().find(|(s, _)| s.id() == scope.id()) {
+            Some((_, entries)) => entries.push(entry),
+            None => scopes.push((scope, vec![entry])),
+        }
+    }
+    let mut bindings = Vec::new();
+    for (scope, entries) in &scopes {
+        let names: Vec<&str> = entries
+            .iter()
+            .filter_map(|(target, ..)| target.utf8_text(source).ok())
+            .collect();
+        let mentions = binding_mentions(*scope, &names, source, binds_name);
+        for (target, statement, specifier) in entries {
+            let Ok(name) = target.utf8_text(source) else {
+                continue;
+            };
+            if !rebound(mentions.get(name), (target.start_byte(), target.end_byte())) {
+                bindings.push(DynamicBinding {
+                    name: name.to_string(),
+                    range: (node_range(*statement).1, node_range(*scope).1),
+                    alias: aliases[*specifier].clone(),
+                    member: None,
+                });
+            }
+        }
+    }
+    DynamicImports {
+        imports,
+        bindings,
+        loads: loads.iter().map(|(call, ..)| node_range(*call)).collect(),
+    }
+}
+
 /// Walk the Python AST once, attaching callees to enclosing functions
 /// (with receiver-type binding) and collecting path-shaped string literals
 /// as `RawPathLiteral` side-table entries.
@@ -316,6 +647,7 @@ pub fn extract_python_calls_and_path_literals(
     source: &[u8],
     nodes: &mut [RawNode],
     locals: &LocalTypes,
+    dynamic: &DynamicImports,
     call_sites: &mut CallSiteIndex,
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
@@ -329,7 +661,7 @@ pub fn extract_python_calls_and_path_literals(
     while let Some(n) = stack.pop() {
         match n.kind() {
             "call" => {
-                if let Some(callee) = python_callee_name(n, source, locals, &classes) {
+                if let Some(callee) = python_callee_name(n, source, locals, dynamic, &classes) {
                     if let Some(site) = attach_to_enclosing(start_pos(n), callee, nodes) {
                         call_sites.insert(n.id(), site);
                     }
@@ -412,6 +744,7 @@ fn python_callee_name(
     call: Node<'_>,
     source: &[u8],
     locals: &LocalTypes,
+    dynamic: &DynamicImports,
     classes: &HashSet<String>,
 ) -> Option<String> {
     let function = call.child_by_field_name("function")?;
@@ -428,6 +761,9 @@ fn python_callee_name(
                     let obj_name =
                         std::str::from_utf8(&source[obj.start_byte()..obj.end_byte()]).ok()?;
                     let pos = start_pos(call);
+                    if let Some(callee) = dynamic.member_callee(pos, obj_name, attr_name) {
+                        return Some(callee);
+                    }
                     if let Some(ty) = locals.lookup(pos, obj_name) {
                         return Some(format!("{ty}.{attr_name}"));
                     }
@@ -490,7 +826,7 @@ fn python_callee_name(
                                     return Some(untyped);
                                 }
                                 match CallSite::nested_chain(|| {
-                                    python_callee_name(obj, source, locals, classes)
+                                    python_callee_name(obj, source, locals, dynamic, classes)
                                 }) {
                                     Some(inner) => CallSite::chained_member(&inner, &untyped),
                                     None => untyped,

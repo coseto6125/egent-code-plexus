@@ -4,13 +4,29 @@
 
 use ecp_analyzer::javascript::parser::JavaScriptProvider;
 use ecp_analyzer::resolution::builder::GraphBuilder;
+use ecp_analyzer::resolution::heuristics::ResolutionTier;
 use ecp_analyzer::typescript::TypeScriptProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::graph::RelType;
 use std::path::Path;
 
+fn import_tier() -> f32 {
+    ResolutionTier::ImportScoped.base_confidence()
+}
+
 /// Target files of every Calls edge from `go` to `callee`, sorted.
 fn go_targets(files: &[(&str, &str)], callee: &str) -> Vec<String> {
+    targets_from(files, "go", callee, 0.0)
+}
+
+/// Target files of every Calls edge from `caller` to `callee` whose
+/// confidence is at least `min_confidence`, sorted.
+fn targets_from(
+    files: &[(&str, &str)],
+    caller: &str,
+    callee: &str,
+    min_confidence: f32,
+) -> Vec<String> {
     let tmp = tempfile::tempdir().expect("tempdir");
     let ts = TypeScriptProvider::new().expect("TypeScriptProvider::new");
     let js = JavaScriptProvider::new().expect("JavaScriptProvider::new");
@@ -36,7 +52,8 @@ fn go_targets(files: &[(&str, &str)], callee: &str) -> Vec<String> {
         .edges
         .iter()
         .filter(|e| e.rel_type == RelType::Calls)
-        .filter(|e| graph.nodes[e.source as usize].name.resolve(pool) == "go")
+        .filter(|e| graph.nodes[e.source as usize].name.resolve(pool) == caller)
+        .filter(|e| e.confidence >= min_confidence)
         .filter(|e| graph.nodes[e.target as usize].name.resolve(pool) == callee)
         .map(|e| {
             let file = graph.nodes[e.target as usize].file_idx as usize;
@@ -115,36 +132,44 @@ fn test_require_binding_call_resolves_in_the_required_module() {
     }
 }
 
-/// Imports are file-wide, so a `require` inside a function body binds
-/// nothing: it is scoped to that function.
+/// A `const` `require` that is a direct statement of a function body binds
+/// inside that function only (T1, FU-2026-11-01-c07a40e90e36): `later`, a
+/// sibling after it, gets no edge into the required module.
 #[test]
-fn test_require_inside_a_function_binds_no_edge() {
+fn test_require_inside_a_function_binds_in_that_function() {
     let files = [
         ("a.js", "function f() {}\nmodule.exports = { f };\n"),
         ("b.js", "function f() {}\nmodule.exports = { f };\n"),
         (
             "app.js",
-            "function go() {\n  const { f } = require(\"./a\");\n  f();\n}\n",
+            "function go() {\n  const { f } = require(\"./a\");\n  f();\n}\nfunction later() { f(); }\n",
         ),
     ];
-    assert_eq!(go_targets(&files, "f"), Vec::<String>::new());
+    assert_eq!(go_targets(&files, "f"), vec!["a.js".to_string()]);
+    assert!(targets_from(&files, "later", "f", import_tier()).is_empty());
 }
 
 /// Two functions that each require `f` from a different module. A file-wide
 /// import would send `go`'s call to `./b`, the first require in the file;
-/// function-scoped requires bind nothing, so no wrong edge is made.
+/// each function-scoped require binds its own scope, so `go` reaches `./a`.
 #[test]
-fn test_function_scoped_requires_of_two_modules_bind_no_wrong_edge() {
+fn test_function_scoped_requires_of_two_modules_bind_their_own_scope() {
     let files = [
         ("a.js", "function f() {}\nmodule.exports = { f };\n"),
         ("b.js", "function f() {}\nmodule.exports = { f };\n"),
         (
             "app.js",
             "function first() { const { f } = require(\"./b\"); f(); }\n\
-             function go() { const { f } = require(\"./a\"); f(); }\n",
+             function go() { const { f } = require(\"./a\"); f(); }\n\
+             function later() { f(); }\n",
         ),
     ];
-    assert_eq!(go_targets(&files, "f"), Vec::<String>::new());
+    assert_eq!(go_targets(&files, "f"), vec!["a.js".to_string()]);
+    assert_eq!(
+        targets_from(&files, "first", "f", 0.0),
+        vec!["b.js".to_string()]
+    );
+    assert!(targets_from(&files, "later", "f", import_tier()).is_empty());
 }
 
 /// `require` shadowed by a parameter is no module loader: the declarator

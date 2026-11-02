@@ -1,4 +1,7 @@
-use super::receiver_types::{collect_local_types, extract_python_calls_and_path_literals};
+use super::receiver_types::{
+    collect_dynamic_imports, collect_local_types, extract_python_calls_and_path_literals,
+    sole_binding,
+};
 use super::schema_extractors::{PYDANTIC_CONFIG, SQLALCHEMY_CONFIG};
 use super::spec::PythonSpec;
 use crate::calls::{NameRefKind, NameRefSpec, VariantRefSpec};
@@ -24,6 +27,7 @@ use ecp_core::analyzer::types::{
     RawNode, RawRoute,
 };
 use ecp_core::graph::{FileCategory, NodeKind};
+use std::collections::HashMap;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Query, QueryCursor, Tree};
@@ -32,6 +36,10 @@ use tree_sitter::{Node, Query, QueryCursor, Tree};
 // when the file actually imports the framework. Reflection fan-out and
 // blind_spots are intentionally not gated — they are language-level patterns.
 const FASTAPI_REQUIRED: &[&str] = &["fastapi"];
+
+/// The blind-spot kind of `importlib.import_module(...)`. The Calls hook
+/// drops it for a load `collect_dynamic_imports` resolved.
+const BLIND_DYNAMIC_IMPORT_KIND: &str = "python-dynamic-import";
 const DJANGO_REQUIRED: &[&str] = &["django"];
 const CELERY_REQUIRED: &[&str] = &["celery"];
 
@@ -64,13 +72,76 @@ const HTTP_FRAMEWORK_MODULES: &[&str] = &[
 /// attribute the same way would be false-negative.
 const TEST_CLIENT_CHAIN_MARKERS: &[&str] = &[".test_client.", ".asgi_client.", ".sync_client."];
 
-/// Route-registration method names that don't encode an HTTP verb in the
-/// name. They default to GET when no `methods=[...]` kwarg is supplied;
-/// otherwise the kwarg specifies the verb(s). Used to gate (a) the
-/// framework-presence relaxation, (b) bare-path normalization, (c) the
-/// methods-kwarg parse branch. Single source of truth — keeps the three
-/// emission-time checks aligned when a new registration method is added.
-const REGISTRATION_METHOD_NAMES: &[&str] = &["route", "add_route", "add_url_rule", "add_api_route"];
+/// An argument of a registration method's signature: its keyword and its
+/// positional index.
+type ArgSlot = (&'static str, usize);
+
+/// A route-registration method whose name encodes no HTTP verb. It defaults
+/// to GET when no `methods=[...]` kwarg is supplied; otherwise the kwarg
+/// specifies the verb(s). The name gates (a) the framework-presence
+/// relaxation, (b) bare-path normalization, (c) the methods-kwarg parse
+/// branch. [`REGISTRATIONS`] is the single source of truth, so the three
+/// emission-time checks stay aligned when a method is added.
+///
+/// `path` and `handler` are the slots of the method's signature, never an
+/// argument's AST kind: in `add_url_rule("/x", "ep", view)` both `"/x"` and
+/// `"ep"` are strings, and only the slot says which one is the rule. A method
+/// with no `path` slot reads every positional string as a path; one with no
+/// `handler` slot passes no handler. `route` has neither: it is the
+/// decorator form, which names its handler by the decorated definition.
+/// `framework` limits the slots to a file that imports it: Sanic's
+/// `add_route(handler, uri)` shares its name with aiohttp's
+/// `add_route(method, path, handler)`, Pyramid's `add_route(name, pattern)`
+/// and Starlette's `add_route(path, endpoint)`.
+struct Registration {
+    method: &'static str,
+    path: Option<ArgSlot>,
+    handler: Option<ArgSlot>,
+    framework: Option<&'static str>,
+}
+
+const REGISTRATIONS: &[Registration] = &[
+    Registration {
+        method: "route",
+        path: None,
+        handler: None,
+        framework: None,
+    },
+    Registration {
+        method: "add_url_rule",
+        path: Some(("rule", 0)),
+        handler: Some(("view_func", 2)),
+        framework: None,
+    },
+    Registration {
+        method: "add_route",
+        path: Some(("uri", 1)),
+        handler: Some(("handler", 0)),
+        framework: Some("sanic"),
+    },
+    Registration {
+        method: "add_api_route",
+        path: Some(("path", 0)),
+        handler: Some(("endpoint", 1)),
+        framework: None,
+    },
+];
+
+/// The registration row of `method` (lowercase).
+fn registration(method: &str) -> Option<&'static Registration> {
+    REGISTRATIONS.iter().find(|r| r.method == method)
+}
+
+impl Registration {
+    /// The `(path, handler)` slots in a file with `imports`: none when the
+    /// slots belong to a framework the file does not import.
+    fn slots(&self, imports: &[RawImport]) -> (Option<ArgSlot>, Option<ArgSlot>) {
+        match self.framework {
+            Some(module) if !has_import_from(imports, &[module]) => (None, None),
+            _ => (self.path, self.handler),
+        }
+    }
+}
 
 /// Direct receiver names that — only inside test files (path/filename
 /// classified as Test) — indicate a test-client variable injected via
@@ -242,9 +313,9 @@ fn extract_methods_kwarg(call_node: Node, source: &[u8]) -> Option<Vec<String>> 
 /// When `call_node` is the call inside a route decorator
 /// (`@router.post("/x")` style), resolve the decorated function/class name
 /// so it can be carried on `RawRoute.handler`. Returns `None` if the call
-/// isn't decorator-wrapped — the caller treats that as the imperative
-/// `app.add_url_rule(path, handler)` shape (handler resolution happens
-/// later in the builder).
+/// isn't decorator-wrapped — the caller then treats it as the imperative
+/// shape (`app.add_url_rule(rule, endpoint, view_func)`) and reads the
+/// handler from the method's handler slot with [`imperative_handler`].
 ///
 /// Walk: `call → decorator → decorated_definition →
 /// child_by_field_name("definition") → child_by_field_name("name")`.
@@ -265,6 +336,133 @@ fn resolve_decorator_handler(call_node: Node, source: &[u8]) -> Option<String> {
     std::str::from_utf8(&source[name.start_byte()..name.end_byte()])
         .ok()
         .map(str::to_string)
+}
+
+/// The argument `call` passes in `slot`: the keyword argument, else the
+/// positional one.
+fn argument_at<'t>(call: Node<'t>, source: &[u8], (keyword, index): ArgSlot) -> Option<Node<'t>> {
+    let args = crate::route_detector::call_arguments(call.child_by_field_name("arguments"));
+    let by_keyword = args
+        .iter()
+        .filter(|arg| arg.kind() == "keyword_argument")
+        .find(|arg| {
+            arg.child_by_field_name("name")
+                .is_some_and(|name| node_text(name, source) == keyword)
+        })
+        .and_then(|arg| arg.child_by_field_name("value"));
+    // A `*args` splat shifts every position after it.
+    by_keyword.or_else(|| {
+        args.iter()
+            .take_while(|arg| arg.kind() != "list_splat")
+            .filter(|arg| !matches!(arg.kind(), "keyword_argument" | "dictionary_splat"))
+            .nth(index)
+            .copied()
+    })
+}
+
+/// The handler an imperative registration call passes in its handler `slot`
+/// ([`Registration`]). A name or attribute names the handler, a lambda is
+/// written in place, anything else (`Cls.as_view("x")`, a string) is no
+/// handler.
+fn imperative_handler(
+    call: Node,
+    source: &[u8],
+    slot: ArgSlot,
+) -> Option<ecp_core::contracts::raw_records::RawEndpoint> {
+    crate::route_detector::argument_handler(
+        argument_at(call, source, slot)?,
+        source,
+        &["lambda"],
+        &["identifier", "attribute"],
+    )
+}
+
+/// What the only binding of a file-level name makes it.
+#[derive(Clone, Copy, PartialEq)]
+enum LocalName {
+    /// A class this file defines on no base but `object`.
+    PlainClass,
+    /// `name = C(...)` with `C` a [`LocalName::PlainClass`].
+    PlainInstance,
+    Other,
+}
+
+/// What `name` is, when exactly one identifier in the file binds it; memoised
+/// in `memo`, since one file registers many routes on the same receiver.
+fn local_name(
+    name: &str,
+    root: Node,
+    source: &[u8],
+    memo: &mut HashMap<String, LocalName>,
+) -> LocalName {
+    if let Some(&known) = memo.get(name) {
+        return known;
+    }
+    // A self-referential `C = C()` must not recurse.
+    memo.insert(name.to_string(), LocalName::Other);
+    let kind = sole_binding(root, name, source)
+        .and_then(|binding| {
+            let parent = binding.parent()?;
+            match parent.kind() {
+                "class_definition" => parent
+                    .child_by_field_name("superclasses")
+                    .is_none_or(|bases| {
+                        let mut c = bases.walk();
+                        let plain = bases.named_children(&mut c).all(|base| {
+                            base.kind() == "identifier" && node_text(base, source) == "object"
+                        });
+                        plain
+                    })
+                    .then_some(LocalName::PlainClass),
+                "assignment" => {
+                    let built = parent
+                        .child_by_field_name("right")
+                        .filter(|right| right.kind() == "call")?
+                        .child_by_field_name("function")
+                        .filter(|function| function.kind() == "identifier")?;
+                    (local_name(node_text(built, source), root, source, memo)
+                        == LocalName::PlainClass)
+                        .then_some(LocalName::PlainInstance)
+                }
+                _ => None,
+            }
+        })
+        .unwrap_or(LocalName::Other);
+    memo.insert(name.to_string(), kind);
+    kind
+}
+
+/// Whether `call` is made on an object of a class this file defines on no
+/// base but `object`: the class itself, an instance built in place
+/// (`Store().add_url_rule(..)`), or a name whose only binding builds one
+/// (`store = Store()`). No framework class is such a class, so the call
+/// registers no route. An imported receiver (a Blueprint from another
+/// module) is no such object.
+fn on_local_plain_object(
+    call: Node,
+    root: Node,
+    source: &[u8],
+    memo: &mut HashMap<String, LocalName>,
+) -> bool {
+    let Some(object) = call
+        .child_by_field_name("function")
+        .filter(|function| function.kind() == "attribute")
+        .and_then(|function| function.child_by_field_name("object"))
+    else {
+        return false;
+    };
+    match object.kind() {
+        "identifier" => {
+            local_name(node_text(object, source), root, source, memo) != LocalName::Other
+        }
+        "call" => object
+            .child_by_field_name("function")
+            .filter(|function| function.kind() == "identifier")
+            .is_some_and(|class| {
+                local_name(node_text(class, source), root, source, memo) == LocalName::PlainClass
+            }),
+        _ => false,
+    }
 }
 
 /// The identifier a call is made on: `router` in `router.get("/x")`; `None`
@@ -884,6 +1082,8 @@ pub struct PythonFile {
     has_any_http_framework: bool,
     /// The variable each record's call is made on, in step with `routes`.
     route_receivers: Vec<Option<String>>,
+    /// [`local_name`]'s answers for the receivers of registration calls.
+    local_names: HashMap<String, LocalName>,
     /// `(target_name, span)` of FastAPI Depends() refs; the enclosing
     /// function resolves by span containment after nodes are built.
     pending_depends: Vec<(String, Span)>,
@@ -938,7 +1138,7 @@ impl ParseSpec for PythonSpec {
         (
             "blind.dynamic_import",
             (
-                "python-dynamic-import",
+                BLIND_DYNAMIC_IMPORT_KIND,
                 "importlib.import_module(...) — dynamic module loading; imported module name depends on runtime value",
             ),
         ),
@@ -1365,7 +1565,7 @@ impl ParseSpec for PythonSpec {
         // preserved.
         let route_method_is_framework_specific = route_method
             .and_then(|n| std::str::from_utf8(&source[n.start_byte()..n.end_byte()]).ok())
-            .map(|s| REGISTRATION_METHOD_NAMES.contains(&s.to_ascii_lowercase().as_str()))
+            .map(|s| registration(&s.to_ascii_lowercase()).is_some())
             .unwrap_or(false)
             && !cx.imports.is_empty();
         // Decorator context: `@bp.get("/path")` / `@router.post(...)` —
@@ -1413,15 +1613,38 @@ impl ParseSpec for PythonSpec {
                     std::str::from_utf8(&source[r_method.start_byte()..r_method.end_byte()]),
                     std::str::from_utf8(&source[r_path.start_byte()..r_path.end_byte()]),
                 ) {
+                    let method_lower = method_str.to_ascii_lowercase();
+                    let row = registration(&method_lower);
+                    let is_registration_method = row.is_some();
+                    let (path_slot, handler_slot) =
+                        row.map_or((None, None), |r| r.slots(&cx.imports));
+                    // A registration call names its path in one slot: another
+                    // string (the endpoint of `add_url_rule("/x", "ep", h)`) is
+                    // no path. Without a slot only a positional string is one.
+                    let in_path_slot = match (route_call_node, path_slot) {
+                        (Some(call), Some(slot)) => argument_at(call, source, slot)
+                            .is_some_and(|arg| arg.id() == r_path.id()),
+                        _ => r_path.parent().is_some_and(|p| p.kind() == "argument_list"),
+                    };
+                    if !in_path_slot
+                        || (is_registration_method
+                            && route_call_node.is_some_and(|call| {
+                                on_local_plain_object(
+                                    call,
+                                    cx.tree.root_node(),
+                                    source,
+                                    &mut f.local_names,
+                                )
+                            }))
+                    {
+                        return;
+                    }
                     // For route-registration methods (see
-                    // `REGISTRATION_METHOD_NAMES`), framework convention
+                    // `REGISTRATIONS`), framework convention
                     // (Sanic, Flask) accepts both `'path'` and `'/path'` —
                     // semantically `/path`. Normalize bare paths so the
                     // builder's `looks_like_path` filter doesn't drop them
                     // (mirrors PHP/Laravel bare-path handling).
-                    let method_lower = method_str.to_ascii_lowercase();
-                    let is_registration_method =
-                        REGISTRATION_METHOD_NAMES.contains(&method_lower.as_str());
                     let resolved_path = if is_registration_method {
                         crate::route_detector::clean_route_path_lax(path_str)
                     } else {
@@ -1450,22 +1673,19 @@ impl ParseSpec for PythonSpec {
                         // Decorator-style routes (`@router.post("/x")`)
                         // carry the handler one parent up — the decorated
                         // function/class name. Imperative-style routes
-                        // (`app.add_url_rule(path, handler)`) leave this
-                        // as `None`; builder-side symbol-table lookup
-                        // takes over there if/when the parser captures
-                        // the handler arg.
-                        let decorator_handler = RawRoute::named_handler(
-                            route_call_node
-                                .and_then(|n| resolve_decorator_handler(n, source))
-                                .as_deref(),
-                        );
+                        // (`app.add_url_rule(rule, ep, handler)`) read it
+                        // from the method's handler slot.
+                        let handler = route_call_node.and_then(|n| {
+                            RawRoute::named_handler(resolve_decorator_handler(n, source).as_deref())
+                                .or_else(|| imperative_handler(n, source, handler_slot?))
+                        });
                         let receiver = route_call_node.and_then(|n| call_receiver(n, source));
                         for method in methods_to_emit {
                             f.route_receivers.push(receiver.clone());
                             cx.routes.push(RawRoute {
                                 method,
                                 path: clean_path.clone(),
-                                handler: decorator_handler.clone(),
+                                handler: handler.clone(),
                                 span: node_span(&root),
                                 scope: None,
                             });
@@ -1530,11 +1750,20 @@ impl ParseSpec for PythonSpec {
                 // back into the resolver's Tier 2.5 qualifier-scoped lookup.
                 // Falls back to bare member name when no annotation is in scope.
                 let local_types = collect_local_types(root, source);
+                // A literal `importlib.import_module("<lit>")` is a synthetic
+                // namespace import, like the static arms above.
+                let mut dynamic = collect_dynamic_imports(root, source);
+                cx.imports.append(&mut dynamic.imports);
+                // A load the collector resolved names its module statically.
+                cx.blind_spots.retain(|b| {
+                    b.kind != BLIND_DYNAMIC_IMPORT_KIND || !dynamic.loaded_at((b.span.0, b.span.1))
+                });
                 let (raw_path_literals, raw_sql_refs) = extract_python_calls_and_path_literals(
                     root,
                     source,
                     &mut cx.nodes,
                     &local_types,
+                    &dynamic,
                     &mut cx.call_sites,
                 );
                 cx.path_literals = raw_path_literals;

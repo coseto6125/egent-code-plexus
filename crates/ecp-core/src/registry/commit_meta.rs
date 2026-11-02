@@ -163,7 +163,11 @@ use std::path::Path;
 /// schema45 fragment lays its symbols out without it and must not be read.
 /// schema47: an L1 fragment symbol carries `FragmentSymbol.params`; a
 /// schema46 fragment lays its symbols out without it and must not be read.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema47");
+/// schema48: a read inside a const/static/field initializer is an edge from
+/// that declaration, a call through a literal dynamic import binds like a
+/// static import, and a Flask imperative route names its handler; a schema47
+/// graph lacks those edges.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema48");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

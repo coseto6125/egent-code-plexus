@@ -1,4 +1,7 @@
-use super::receiver_types::{collect_local_types, extract_ts_calls_and_path_literals};
+use super::receiver_types::{
+    collect_dynamic_imports, collect_local_types, extract_ts_calls_and_path_literals,
+    literal_specifier,
+};
 use super::schema_extractors::TS_INTERFACE_CONFIG;
 use super::spec::{TsSpec, TsxSpec, TypeScriptSpec};
 use crate::calls::{NameRefKind, NameRefSpec, VariantRefSpec};
@@ -9,8 +12,8 @@ use crate::driver::{
 use crate::event_topic::{EventTopicConfig, KAFKA_NODE, RABBITMQ_TS, REDIS_TS, SQS_TS};
 use crate::framework_confidence;
 use crate::framework_helpers::{
-    collect_typeorm_transactional_scopes, has_import_from, js_ts_first_arg_is_literal_string,
-    node_span, push_blind_spot, SCALAR_VALUE_KINDS,
+    collect_typeorm_transactional_scopes, has_import_from, node_span, push_blind_spot,
+    SCALAR_VALUE_KINDS,
 };
 use crate::indirect_dispatch::{collect_js_param_names, detect_js_ts_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
@@ -26,14 +29,15 @@ use std::sync::OnceLock;
 use tree_sitter::{Node, Parser, Query, Tree};
 
 /// Blind-spot kind/hint pairs pushed only when the first argument is not a
-/// literal string; the unconditional pairs live in `TypeScriptSpec::BLIND`.
+/// literal the graph reads ([`literal_specifier`]); the unconditional pairs
+/// live in `TypeScriptSpec::BLIND`.
 const BLIND_DYNAMIC_IMPORT: (&str, &str) = (
     "ts-dynamic-import",
-    "import(<expr>) with non-literal specifier — dynamic module loading; target module depends on runtime value",
+    "import(<expr>) whose specifier is no plain string literal (computed, escaped or blank) — dynamic module loading; the target module is not read statically",
 );
 const BLIND_DYNAMIC_REQUIRE: (&str, &str) = (
     "ts-dynamic-require",
-    "require(<expr>) with non-literal specifier — dynamic CommonJS load; target module depends on runtime value",
+    "require(<expr>) whose specifier is no plain string literal (computed, escaped or blank) — dynamic CommonJS load; the target module is not read statically",
 );
 
 /// True iff the `object` node has ≥ `min` `pair` children where every
@@ -559,13 +563,14 @@ impl<const TSX: bool> ParseSpec for TsSpec<TSX> {
             TypeScriptRole::NestJsDecoratorVerb => m.nestjs_decorator_verb_node = Some(node),
             TypeScriptRole::NestJsDecoratorPath => m.nestjs_decorator_path_node = Some(node),
             TypeScriptRole::NestJsDecoratorArgs => m.nestjs_decorator_args_node = Some(node),
+            // A literal the binder refuses still loads a module at run time.
             TypeScriptRole::DynamicImport => {
-                if !js_ts_first_arg_is_literal_string(&node) {
+                if literal_specifier(node, source).is_none() {
                     cx.push_blind(BLIND_DYNAMIC_IMPORT, &node);
                 }
             }
             TypeScriptRole::DynamicRequire => {
-                if !js_ts_first_arg_is_literal_string(&node) {
+                if literal_specifier(node, source).is_none() {
                     cx.push_blind(BLIND_DYNAMIC_REQUIRE, &node);
                 }
             }
@@ -826,11 +831,16 @@ impl<const TSX: bool> ParseSpec for TsSpec<TSX> {
             // - everything else falls back to the bare/qualified method name.
             TypeScriptHook::Calls => {
                 let local_types = collect_local_types(root, source);
+                // A literal `import('<lit>')` / function-scoped `require('<lit>')`
+                // is a synthetic namespace import, like the static arms above.
+                let mut dynamic = collect_dynamic_imports(root, source);
+                cx.imports.append(&mut dynamic.imports);
                 let (raw_path_literals, raw_sql_refs) = extract_ts_calls_and_path_literals(
                     root,
                     source,
                     &mut cx.nodes,
                     &local_types,
+                    &dynamic,
                     &mut cx.call_sites,
                 );
                 cx.path_literals = raw_path_literals;
@@ -847,12 +857,14 @@ impl<const TSX: bool> ParseSpec for TsSpec<TSX> {
                 // Path-shape filter for generic Route emission — see
                 // `docs/superpowers/specs/2026-05-17-route-precision-design.md`.
                 // No framework-presence gate here: imports record ES `import`
-                // statements and top-level `require('lib')` bindings only, so a
-                // router built by `require('express').Router()`, a `require` inside
-                // a function, or an app handed in from another module leaves no
-                // import and gating would drop real routes. The path-shape
-                // predicate alone removes
-                // the dominant FP class (Map/headers/cache `.get("key")`).
+                // statements, top-level `require('lib')` bindings and the
+                // synthetic `@import<N>` imports of literal dynamic loads (any
+                // `import('<lit>')`, a function-scoped `const m = require('<lit>')`),
+                // which the presence gates above also see. A router built by
+                // `require('express').Router()` or an app handed in from another
+                // module still leaves no import, and gating would drop real
+                // routes. The path-shape predicate alone removes the dominant FP
+                // class (Map/headers/cache `.get("key")`).
                 cx.routes
                     .retain_mut(|r| match crate::route_detector::clean_route_path(&r.path) {
                         Some(clean) => {

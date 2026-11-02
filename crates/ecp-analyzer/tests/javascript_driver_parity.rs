@@ -44,9 +44,12 @@ fn named<'g>(g: &'g LocalGraph, name: &str) -> &'g RawNode {
 /// `(source, imported_name, alias, binding_kind)`
 type ImportRow<'g> = (&'g str, &'g str, Option<&'g str>, Option<BindingKind>);
 
+/// The statically written imports; the synthetic `@import<N>` imports of
+/// dynamic loads are pinned in `javascript_dynamic_import.rs`.
 fn imports(g: &LocalGraph) -> Vec<ImportRow<'_>> {
     g.imports
         .iter()
+        .filter(|i| !i.alias.as_deref().is_some_and(|a| a.starts_with("@import")))
         .map(|i| {
             (
                 i.source.as_str(),
@@ -96,8 +99,9 @@ fn test_javascript_driver_imports_only_file_keeps_order_and_binding_kinds() {
 }
 
 /// A literal `require` is an import and no blind spot; a non-literal
-/// `require` or `import()` is a conditional blind spot. The binding
-/// `const fs = require(..)` is also a module-level Const.
+/// `require` or `import()` is a conditional blind spot. A literal `import()`
+/// is no blind spot. The binding `const fs = require(..)` is also a
+/// module-level Const.
 #[test]
 fn test_javascript_driver_require_literal_imports_and_dynamic_blind_spots() {
     let g = parse(

@@ -7,10 +7,13 @@
 //! `obj.method()` where `obj` is a plain identifier is left as the qualified name
 //! `obj.method` (same as the previous `extract_calls` behaviour) — without type
 //! annotations we cannot commit to a type, per the spec's "only commit ✓ for cases
-//! that work without guessing" rule.
+//! that work without guessing" rule. The exception is a name bound by a literal
+//! dynamic load ([`DynamicImports`]): `m.run()` emits `@import<N>.run`, and a
+//! destructured `execute()` emits the export it holds, `@import<N>.run`.
 
 use super::path_literals::{build_raw_path_literal, strip_js_string_value, LiteralContext};
-use crate::calls::{attach_to_enclosing_span, new_expression_call, CallSiteIndex};
+use crate::calls::{attach_to_enclosing_span, new_expression_call, start_pos, CallSiteIndex};
+use crate::dynamic_imports::DynamicImports;
 use crate::framework_helpers::{enclosing_class, node_span, Span};
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use tree_sitter::Node;
@@ -23,11 +26,14 @@ use tree_sitter::Node;
 /// Calls:
 /// - `this.method()` inside a class body → emits `ClassName.method`
 /// - `obj.method()` (unknown type) → emits `obj.method` (resolver can try later)
+/// - `m.method()` / `method()` through a name bound by a literal dynamic load →
+///   emits `@import<N>.member`
 /// - `fn()` → emits `fn`
 pub fn extract_js_calls_and_path_literals(
     root: Node<'_>,
     source: &[u8],
     nodes: &mut [RawNode],
+    dynamic: &DynamicImports,
     call_sites: &mut CallSiteIndex,
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
@@ -37,7 +43,7 @@ pub fn extract_js_calls_and_path_literals(
     while let Some((n, parent, context)) = stack.pop() {
         match n.kind() {
             "call_expression" => {
-                if let Some(callee) = js_callee_name(n, source, nodes) {
+                if let Some(callee) = js_callee_name(n, source, dynamic, nodes) {
                     if let Some(site) = attach_to_enclosing_span(node_span(&n), callee, nodes) {
                         call_sites.insert(n.id(), site);
                     }
@@ -89,15 +95,29 @@ pub fn extract_js_calls_and_path_literals(
     (path_literals, sql_refs)
 }
 
-fn js_callee_name(call: Node<'_>, source: &[u8], nodes: &[RawNode]) -> Option<String> {
+fn js_callee_name(
+    call: Node<'_>,
+    source: &[u8],
+    dynamic: &DynamicImports,
+    nodes: &[RawNode],
+) -> Option<String> {
     let function = call.child_by_field_name("function")?;
     match function.kind() {
-        "identifier" => function.utf8_text(source).ok().map(str::to_string),
+        "identifier" => dynamic.bare_callee(call, function, source),
         "member_expression" => {
             let obj = function.child_by_field_name("object")?;
             let prop = function.child_by_field_name("property")?;
             let prop_name = prop.utf8_text(source).ok()?;
 
+            if obj.kind() == "identifier" {
+                if let Some(callee) = obj
+                    .utf8_text(source)
+                    .ok()
+                    .and_then(|name| dynamic.member_callee(start_pos(call), name, prop_name))
+                {
+                    return Some(callee);
+                }
+            }
             if obj.kind() == "this" {
                 // `this.method()` — look up the enclosing class.
                 let call_span = node_span(&call);
@@ -114,7 +134,7 @@ fn js_callee_name(call: Node<'_>, source: &[u8], nodes: &[RawNode]) -> Option<St
                 // O(depth).
                 let inner = match obj.kind() {
                     "call_expression" => {
-                        CallSite::nested_chain(|| js_callee_name(obj, source, nodes))
+                        CallSite::nested_chain(|| js_callee_name(obj, source, dynamic, nodes))
                     }
                     "new_expression" => new_expression_call(obj, source),
                     _ => None,

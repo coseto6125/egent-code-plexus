@@ -32,7 +32,7 @@ use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::graph::RelType;
 use name_ref_support::{
     assert_one_cross_file, calls, function_refs, graph, r, value_reads, Ref, FUNCTION_REFERENCE,
-    IMPORT, SAME_FILE,
+    IMPORT, SAME_FILE, VALUE_READ,
 };
 
 fn none() -> Vec<Ref> {
@@ -783,5 +783,935 @@ fn test_function_reference_php_named_callback_argument_returns_edge() {
         "<?php\nfunction fmt($x) { return $x; }\n\nfunction apply($xs) {\n    return array_map(array: $xs, callback: 'fmt');\n}\n",
         "apply",
         "fmt",
+    );
+}
+
+// ---- A function named as a value outside any function body ----
+//
+// A `const` / `static` / module variable / class field initializer holds the
+// reference; the declaration is the registrar. PHP cannot express it: a
+// constant expression holds no function value.
+
+#[test]
+fn test_function_reference_typescript_initializer_returns_edge() {
+    assert_same_file_ref(
+        &TypeScriptProvider::new().unwrap(),
+        "app.ts",
+        "function tsHandler(): number { return 1; }\nexport const TABLE = { k: tsHandler };\n",
+        "TABLE",
+        "tsHandler",
+    );
+}
+
+#[test]
+fn test_function_reference_javascript_initializer_returns_edge() {
+    assert_same_file_ref(
+        &JavaScriptProvider::new().unwrap(),
+        "app.js",
+        "function jsHandler() { return 1; }\nexport const TABLE = { k: jsHandler };\n",
+        "TABLE",
+        "jsHandler",
+    );
+}
+
+#[test]
+fn test_function_reference_python_initializer_returns_edge() {
+    assert_same_file_ref(
+        &PythonProvider::new().unwrap(),
+        "app.py",
+        "def py_handler():\n    return 1\n\n\nTABLE = {\"k\": py_handler}\n",
+        "TABLE",
+        "py_handler",
+    );
+}
+
+#[test]
+fn test_function_reference_python_class_attribute_initializer_returns_edge() {
+    assert_same_file_ref(
+        &PythonProvider::new().unwrap(),
+        "app.py",
+        "def py_handler():\n    return 1\n\n\nclass K:\n    attr = {\"k\": py_handler}\n",
+        "attr",
+        "py_handler",
+    );
+}
+
+#[test]
+fn test_function_reference_kotlin_initializer_returns_edge() {
+    assert_same_file_ref(
+        &KotlinProvider::new().unwrap(),
+        "k.kt",
+        "fun ktHandler(): Int = 1\nval handler: () -> Int = ::ktHandler\n",
+        "handler",
+        "ktHandler",
+    );
+}
+
+/// The delegate's lambda returns the function itself, so `lazyH` holds a
+/// `() -> Int`: a bare `ktHandler` there is not valid Kotlin.
+#[test]
+fn test_function_reference_kotlin_lazy_delegate_initializer_returns_edge() {
+    assert_same_file_ref(
+        &KotlinProvider::new().unwrap(),
+        "k.kt",
+        "fun ktHandler(): Int = 1\nval lazyH by lazy { ::ktHandler }\n",
+        "lazyH",
+        "ktHandler",
+    );
+}
+
+#[test]
+fn test_function_reference_csharp_field_initializer_returns_edge() {
+    assert_same_file_ref(
+        &CSharpProvider::new().unwrap(),
+        "C.cs",
+        "class C {\n    static int CsHandler() { return 1; }\n    static readonly System.Func<int> Handler = CsHandler;\n}\n",
+        "Handler",
+        "CsHandler",
+    );
+}
+
+#[test]
+fn test_function_reference_go_initializer_returns_edge() {
+    assert_same_file_ref(
+        &GoProvider::new().unwrap(),
+        "main.go",
+        "package main\n\nfunc goHandler() int { return 1 }\n\nvar table = map[string]func() int{\"k\": goHandler}\n",
+        "table",
+        "goHandler",
+    );
+}
+
+#[test]
+fn test_function_reference_rust_option_const_initializer_returns_edge() {
+    assert_same_file_ref(
+        &RustProvider::new().unwrap(),
+        "src/lib.rs",
+        "fn in_option() -> u32 {\n    1\n}\n\npub const OPT: Option<fn() -> u32> = Some(in_option);\n",
+        "OPT",
+        "in_option",
+    );
+}
+
+#[test]
+fn test_function_reference_rust_struct_static_initializer_returns_edge() {
+    assert_same_file_ref(
+        &RustProvider::new().unwrap(),
+        "src/lib.rs",
+        "pub struct Rule {\n    pub collect: fn() -> u32,\n}\n\nfn in_struct() -> u32 {\n    2\n}\n\npub static RULE: Rule = Rule { collect: in_struct };\n",
+        "RULE",
+        "in_struct",
+    );
+}
+
+#[test]
+fn test_function_reference_ruby_initializer_returns_edge() {
+    assert_same_file_ref(
+        &RubyProvider::new().unwrap(),
+        "svc.rb",
+        "def rb_handler\n  1\nend\n\nHANDLER = method(:rb_handler)\n",
+        "HANDLER",
+        "rb_handler",
+    );
+}
+
+#[test]
+fn test_function_reference_swift_initializer_returns_edge() {
+    assert_same_file_ref(
+        &SwiftProvider::new().unwrap(),
+        "s.swift",
+        "func swHandler() -> Int {\n    return 1\n}\n\nlet handler: () -> Int = swHandler\n",
+        "handler",
+        "swHandler",
+    );
+}
+
+#[test]
+fn test_function_reference_c_initializer_returns_edge() {
+    assert_same_file_ref(
+        &CProvider::new().unwrap(),
+        "s.c",
+        "struct ops {\n    int (*open)(void);\n};\n\nstatic int c_open(void) {\n    return 1;\n}\n\nstatic struct ops OPS = { .open = c_open };\n",
+        "OPS",
+        "c_open",
+    );
+}
+
+#[test]
+fn test_function_reference_cpp_initializer_returns_edge() {
+    assert_same_file_ref(
+        &CppProvider::new().unwrap(),
+        "s.cpp",
+        "int cppHandler() {\n    return 1;\n}\n\nauto handler = cppHandler;\n",
+        "handler",
+        "cppHandler",
+    );
+}
+
+#[test]
+fn test_function_reference_dart_initializer_returns_edge() {
+    assert_same_file_ref(
+        &DartProvider::new().unwrap(),
+        "d.dart",
+        "int dartHandler() {\n  return 1;\n}\n\nfinal handler = dartHandler;\n",
+        "handler",
+        "dartHandler",
+    );
+}
+
+#[test]
+fn test_function_reference_java_field_initializer_returns_edge() {
+    let g = graph(
+        &JavaProvider::new().unwrap(),
+        &[(
+            "Main.java",
+            "class Main {\n    static int javaHandler() { return 1; }\n    static final java.util.function.Supplier<Integer> HANDLER = Main::javaHandler;\n}\n",
+        )],
+    );
+    assert_one_cross_file(&function_refs(&g, "HANDLER"), "Main.java", "javaHandler");
+}
+
+/// The smallest enclosing function wins over an enclosing value declaration:
+/// `k` holds the reference, `TABLE` holds none.
+#[test]
+fn test_function_reference_typescript_object_method_in_const_stays_on_method() {
+    let g = graph(
+        &TypeScriptProvider::new().unwrap(),
+        &[(
+            "app.ts",
+            "function tsHandler(): number { return 1; }\nexport const TABLE = { k() { return tsHandler; } };\n",
+        )],
+    );
+    assert_eq!(
+        function_refs(&g, "k"),
+        vec![r("app.ts", "tsHandler", FUNCTION_REFERENCE, SAME_FILE)]
+    );
+    assert_eq!(function_refs(&g, "TABLE"), none());
+}
+
+/// A lambda parameter named like a function shadows it inside the initializer.
+#[test]
+fn test_function_reference_python_lambda_parameter_in_initializer_returns_no_edge() {
+    assert_no_ref(
+        &PythonProvider::new().unwrap(),
+        "app.py",
+        "def handler():\n    return 1\n\n\nTABLE = {\"k\": lambda handler: handler}\n",
+        "TABLE",
+    );
+}
+
+// ---- A name bound inside an initializer hides it only in its own scope ----
+//
+// A lambda parameter hides a function of that name inside the lambda, not in
+// a sibling entry of the same literal or in a method of it; a declaration's
+// own name hides nothing, so a method of the literal still reads it. PHP has
+// no such shape: a parameter is a `$` variable and a constant a bare name, so
+// they never share a name. Ruby has none either: a lambda parameter is a
+// lowercase local, and a lowercase module-level name declares no node.
+
+/// The constant's own name stays readable inside its object literal's methods.
+#[test]
+fn test_value_read_typescript_const_read_in_own_literal_methods_returns_edge() {
+    let g = graph(
+        &TypeScriptProvider::new().unwrap(),
+        &[(
+            "app.ts",
+            "export const utils = { a() { return 1; }, b() { return utils.a() + utils.n; }, c() { return [utils]; }, n: 2 };\n",
+        )],
+    );
+    for method in ["b", "c"] {
+        assert_eq!(
+            value_reads(&g, method),
+            vec![r("app.ts", "utils", VALUE_READ, SAME_FILE)],
+            "{method}"
+        );
+    }
+}
+
+#[test]
+fn test_value_read_javascript_const_read_in_own_literal_methods_returns_edge() {
+    let g = graph(
+        &JavaScriptProvider::new().unwrap(),
+        &[(
+            "app.js",
+            "export const utils = { a() { return 1; }, b() { return utils.a() + utils.n; }, c() { return [utils]; }, n: 2 };\n",
+        )],
+    );
+    for method in ["b", "c"] {
+        assert_eq!(
+            value_reads(&g, method),
+            vec![r("app.js", "utils", VALUE_READ, SAME_FILE)],
+            "{method}"
+        );
+    }
+}
+
+#[test]
+fn test_value_read_java_field_read_in_own_anonymous_class_returns_edge() {
+    let g = graph(
+        &JavaProvider::new().unwrap(),
+        &[(
+            "M.java",
+            "class M {\n    static final Runnable R = new Runnable() {\n        public void run() { System.out.println(R); }\n    };\n}\n",
+        )],
+    );
+    assert_eq!(
+        value_reads(&g, "run"),
+        vec![r("M.java", "R", VALUE_READ, SAME_FILE)]
+    );
+}
+
+#[test]
+fn test_value_read_kotlin_val_read_in_own_object_literal_returns_edge() {
+    let g = graph(
+        &KotlinProvider::new().unwrap(),
+        &[("k.kt", "val obj = object {\n    fun f(): Any = obj\n}\n")],
+    );
+    assert_eq!(
+        value_reads(&g, "f"),
+        vec![r("k.kt", "obj", VALUE_READ, SAME_FILE)]
+    );
+}
+
+#[test]
+fn test_value_read_swift_let_read_in_own_closure_function_returns_edge() {
+    let g = graph(
+        &SwiftProvider::new().unwrap(),
+        &[(
+            "s.swift",
+            "func use(_ x: Any) {}\nlet table: () -> Void = { func inner() { use(table) }; inner() }\n",
+        )],
+    );
+    assert_eq!(
+        value_reads(&g, "inner"),
+        vec![r("s.swift", "table", VALUE_READ, SAME_FILE)]
+    );
+}
+
+/// A Ruby constant assignment declares no local, so the method reads it.
+#[test]
+fn test_value_read_ruby_constant_read_in_own_class_block_returns_edge() {
+    let g = graph(
+        &RubyProvider::new().unwrap(),
+        &[(
+            "svc.rb",
+            "HANDLER = Class.new do\n  def run\n    HANDLER\n  end\nend\n",
+        )],
+    );
+    assert_eq!(
+        value_reads(&g, "run"),
+        vec![r("svc.rb", "HANDLER", VALUE_READ, SAME_FILE)]
+    );
+}
+
+/// A record component is the record's own field, not a local of the record:
+/// a method still reads it.
+#[test]
+fn test_value_read_java_record_component_read_in_method_returns_edge() {
+    let g = graph(
+        &JavaProvider::new().unwrap(),
+        &[(
+            "R.java",
+            "record R(int limit) {\n    int twice() { return limit * 2; }\n}\n",
+        )],
+    );
+    assert_eq!(
+        value_reads(&g, "twice"),
+        vec![r("R.java", "limit", VALUE_READ, SAME_FILE)]
+    );
+}
+
+/// The arrow's parameter hides `helper` inside the arrow only: the method
+/// `go` beside it in the literal still references the function.
+#[test]
+fn test_function_reference_typescript_arrow_parameter_hides_only_its_arrow() {
+    let g = graph(
+        &TypeScriptProvider::new().unwrap(),
+        &[(
+            "app.ts",
+            "function helper(): number { return 1; }\nexport const api = { wrap: [1].map((helper) => helper), go() { return [2].map(helper); } };\n",
+        )],
+    );
+    assert_eq!(
+        function_refs(&g, "go"),
+        vec![r("app.ts", "helper", FUNCTION_REFERENCE, SAME_FILE)]
+    );
+    assert_eq!(function_refs(&g, "api"), none());
+}
+
+#[test]
+fn test_function_reference_javascript_arrow_parameter_hides_only_its_arrow() {
+    let g = graph(
+        &JavaScriptProvider::new().unwrap(),
+        &[(
+            "app.js",
+            "function helper() { return 1; }\nexport const api = { wrap: [1].map((helper) => helper), go() { return [2].map(helper); } };\n",
+        )],
+    );
+    assert_eq!(
+        function_refs(&g, "go"),
+        vec![r("app.js", "helper", FUNCTION_REFERENCE, SAME_FILE)]
+    );
+    assert_eq!(function_refs(&g, "api"), none());
+}
+
+/// The lambda's parameter hides `handler` in the lambda, not in the `"real"`
+/// entry beside it.
+#[test]
+fn test_function_reference_python_lambda_parameter_hides_only_its_lambda() {
+    assert_same_file_ref(
+        &PythonProvider::new().unwrap(),
+        "app.py",
+        "def handler():\n    return 1\n\n\nTABLE = {\"real\": handler, \"id\": lambda handler: handler}\n",
+        "TABLE",
+        "handler",
+    );
+}
+
+#[test]
+fn test_value_read_java_lambda_parameter_hides_only_its_lambda() {
+    let g = graph(
+        &JavaProvider::new().unwrap(),
+        &[(
+            "M.java",
+            "class M {\n    static final int LIMIT = 1;\n    static final Object[] TABLE = { LIMIT, (java.util.function.IntUnaryOperator) LIMIT -> LIMIT };\n}\n",
+        )],
+    );
+    assert_eq!(
+        value_reads(&g, "TABLE"),
+        vec![r("M.java", "LIMIT", VALUE_READ, SAME_FILE)]
+    );
+}
+
+/// A comprehension variable hides `handler` in the comprehension, not in
+/// the `"real"` entry beside it.
+#[test]
+fn test_function_reference_python_comprehension_variable_hides_only_its_comprehension() {
+    assert_same_file_ref(
+        &PythonProvider::new().unwrap(),
+        "app.py",
+        "def handler():\n    return 1\n\n\nTABLE = {\"real\": handler, \"ids\": [handler for handler in [1, 2]]}\n",
+        "TABLE",
+        "handler",
+    );
+}
+
+/// A record's component list spans every member. A pattern binding in one
+/// field's initializer hides `LIMIT` in that initializer only, so the method
+/// `go` still reads the field.
+#[test]
+fn test_value_read_java_record_field_pattern_binding_hides_only_its_field() {
+    let g = graph(
+        &JavaProvider::new().unwrap(),
+        &[(
+            "R.java",
+            "record R(int x) {\n    static final int LIMIT = 3;\n    static Object o = 1;\n    static boolean b = o instanceof Integer LIMIT && LIMIT > 0;\n    int go() { return LIMIT; }\n}\n",
+        )],
+    );
+    assert_eq!(
+        value_reads(&g, "go"),
+        vec![r("R.java", "LIMIT", VALUE_READ, SAME_FILE)]
+    );
+}
+
+/// A primary constructor's parameter list spans every member. An `out var`
+/// in one field's initializer hides `Handler` in that initializer only, so
+/// the method `Go` still references the function.
+#[test]
+fn test_function_reference_csharp_primary_ctor_field_out_var_hides_only_its_field() {
+    assert_same_file_ref(
+        &CSharpProvider::new().unwrap(),
+        "Svc.cs",
+        "public class Svc(int seed) {\n    static bool B = int.TryParse(\"1\", out var Handler);\n    public System.Func<int> Go() { return Handler; }\n    static int Handler() => 1;\n}\n",
+        "Go",
+        "Handler",
+    );
+}
+
+/// Inside the comprehension the variable still hides the function, and a
+/// walrus binds outside the comprehension (PEP 572), so it hides the name
+/// across the whole declaration.
+#[test]
+fn test_function_reference_python_comprehension_and_walrus_hide_where_python_binds() {
+    for src in [
+        "def handler():\n    return 1\n\n\nINSIDE = {\"ids\": [handler for handler in [1, 2]]}\n",
+        "def handler():\n    return 1\n\n\nINSIDE = {\"ids\": [(handler := x) for x in [1, 2]], \"real\": handler}\n",
+    ] {
+        assert_no_ref(&PythonProvider::new().unwrap(), "app.py", src, "INSIDE");
+    }
+}
+
+/// The pattern binding still hides `LIMIT` in its own initializer.
+#[test]
+fn test_value_read_java_record_field_pattern_binding_still_hides_in_its_field() {
+    let g = graph(
+        &JavaProvider::new().unwrap(),
+        &[(
+            "R.java",
+            "record R(int x) {\n    static final int LIMIT = 3;\n    static Object o = 1;\n    static boolean b = o instanceof Integer LIMIT && LIMIT > 0;\n}\n",
+        )],
+    );
+    assert_eq!(
+        value_reads(&g, "b"),
+        vec![r("R.java", "o", VALUE_READ, SAME_FILE)]
+    );
+}
+
+/// A record's static block and compact constructor hold no function node.
+/// Their locals hide `count` there only, so `go` still reads the field.
+#[test]
+fn test_value_read_java_record_block_locals_hide_only_their_block() {
+    let g = graph(
+        &JavaProvider::new().unwrap(),
+        &[(
+            "R.java",
+            "record R(int x) {\n    static int count = 3;\n    static { int count = 1; }\n    R { int count = x; }\n    int go() { return count; }\n}\n",
+        )],
+    );
+    assert_eq!(
+        value_reads(&g, "go"),
+        vec![r("R.java", "count", VALUE_READ, SAME_FILE)]
+    );
+}
+
+#[test]
+fn test_function_reference_csharp_primary_ctor_field_out_var_still_hides_in_its_field() {
+    assert_no_ref(
+        &CSharpProvider::new().unwrap(),
+        "Svc.cs",
+        "public class Svc(int seed) {\n    static bool B = int.TryParse(\"1\", out var Handler);\n    static int Handler() => 1;\n}\n",
+        "B",
+    );
+}
+
+/// A Dart `for` element is a comprehension: the variable hides the function
+/// inside it only.
+#[test]
+fn test_function_reference_dart_for_element_hides_only_inside() {
+    assert_same_file_ref(
+        &DartProvider::new().unwrap(),
+        "d.dart",
+        "int handler() => 1;\n\nfinal table = {'real': handler, 'ids': [for (var handler in [1, 2]) handler]};\n",
+        "table",
+        "handler",
+    );
+    assert_no_ref(
+        &DartProvider::new().unwrap(),
+        "d.dart",
+        "int handler() => 1;\n\nfinal table = [for (var handler in [1, 2]) handler];\n",
+        "table",
+    );
+}
+
+/// Inside a function, a comprehension variable hides the name in that
+/// comprehension only: the function's own read after it still references
+/// the module function.
+#[test]
+fn test_function_reference_comprehension_inside_function_hides_only_inside() {
+    let cases: [(&dyn LanguageProvider, &str, &str, &str, &str); 2] = [
+        (
+            &PythonProvider::new().unwrap(),
+            "app.py",
+            "def handler():\n    return 1\n\n\ndef go():\n    ids = [handler for handler in [1, 2]]\n    return handler\n",
+            "go",
+            "handler",
+        ),
+        (
+            &DartProvider::new().unwrap(),
+            "d.dart",
+            "int handler() => 1;\n\nObject go() {\n  final ids = [for (var handler in [1, 2]) handler];\n  return handler;\n}\n",
+            "go",
+            "handler",
+        ),
+    ];
+    for (provider, file, src, caller, target) in cases {
+        assert_same_file_ref(provider, file, src, caller, target);
+    }
+}
+
+/// A walrus inside a function's comprehension binds in the function, so it
+/// hides the name across the function.
+#[test]
+fn test_function_reference_python_walrus_in_function_comprehension_hides_in_function() {
+    assert_no_ref(
+        &PythonProvider::new().unwrap(),
+        "app.py",
+        "def handler():\n    return 1\n\n\ndef go():\n    ids = [(handler := x) for x in [1, 2]]\n    return handler\n",
+        "go",
+    );
+}
+
+#[test]
+fn test_value_read_kotlin_lambda_parameter_hides_only_its_lambda() {
+    let g = graph(
+        &KotlinProvider::new().unwrap(),
+        &[(
+            "k.kt",
+            "val LIMIT = 1\nval table = listOf(LIMIT, { LIMIT: Int -> LIMIT })\n",
+        )],
+    );
+    assert_eq!(
+        value_reads(&g, "table"),
+        vec![r("k.kt", "LIMIT", VALUE_READ, SAME_FILE)]
+    );
+}
+
+#[test]
+fn test_function_reference_csharp_lambda_parameter_hides_only_its_lambda() {
+    assert_same_file_ref(
+        &CSharpProvider::new().unwrap(),
+        "C.cs",
+        "class C {\n    static int CsHandler() { return 1; }\n    static readonly System.Delegate[] Table = { (System.Func<int>)CsHandler, (System.Func<int, int>)(CsHandler => CsHandler) };\n}\n",
+        "Table",
+        "CsHandler",
+    );
+}
+
+#[test]
+fn test_function_reference_go_func_literal_parameter_hides_only_its_literal() {
+    assert_same_file_ref(
+        &GoProvider::new().unwrap(),
+        "main.go",
+        "package main\n\nfunc goHandler() int { return 1 }\n\nvar table = []interface{}{goHandler, func(goHandler int) int { return goHandler }}\n",
+        "table",
+        "goHandler",
+    );
+}
+
+#[test]
+fn test_function_reference_rust_closure_parameter_hides_only_its_closure() {
+    assert_same_file_ref(
+        &RustProvider::new().unwrap(),
+        "src/lib.rs",
+        "fn in_table() -> u32 {\n    1\n}\n\npub static TABLE: (fn() -> u32, fn(u32) -> u32) = (in_table, |in_table| in_table);\n",
+        "TABLE",
+        "in_table",
+    );
+}
+
+#[test]
+fn test_function_reference_dart_function_expression_parameter_hides_only_its_expression() {
+    assert_same_file_ref(
+        &DartProvider::new().unwrap(),
+        "d.dart",
+        "int dartHandler() {\n  return 1;\n}\n\nfinal table = [dartHandler, (dartHandler) => dartHandler];\n",
+        "table",
+        "dartHandler",
+    );
+}
+
+/// The parameter sits under the lambda's declarator, the body beside it:
+/// the lambda expression is the scope.
+#[test]
+fn test_function_reference_cpp_lambda_parameter_hides_only_its_lambda() {
+    assert_same_file_ref(
+        &CppProvider::new().unwrap(),
+        "s.cpp",
+        "int cppHandler() {\n    return 1;\n}\n\nauto table = std::make_pair(cppHandler, [](int cppHandler) { return cppHandler; });\n",
+        "table",
+        "cppHandler",
+    );
+}
+
+/// The parameter sits under the closure's type, the body beside it: the
+/// closure is the scope.
+#[test]
+fn test_function_reference_swift_closure_parameter_hides_only_its_closure() {
+    assert_same_file_ref(
+        &SwiftProvider::new().unwrap(),
+        "s.swift",
+        "func swHandler() -> Int {\n    return 1\n}\n\nlet table: [Any] = [swHandler, { (swHandler: Int) in swHandler }]\n",
+        "table",
+        "swHandler",
+    );
+}
+
+/// Inside its own lambda the parameter still hides the function, whatever
+/// node holds the parameter (declarator, type, parameter list).
+#[test]
+fn test_function_reference_lambda_parameter_read_in_initializer_returns_no_edge() {
+    let cases: [(&dyn LanguageProvider, &str, &str, &str); 9] = [
+        (
+            &TypeScriptProvider::new().unwrap(),
+            "app.ts",
+            "function helper(): number { return 1; }\nexport const api = [1].map((helper) => helper);\n",
+            "api",
+        ),
+        (
+            &JavaScriptProvider::new().unwrap(),
+            "app.js",
+            "function helper() { return 1; }\nexport const api = [1].map((helper) => helper);\n",
+            "api",
+        ),
+        (
+            &SwiftProvider::new().unwrap(),
+            "s.swift",
+            "func swHandler() -> Int {\n    return 1\n}\n\nlet table: (Int) -> Int = { (swHandler: Int) in swHandler }\n",
+            "table",
+        ),
+        (
+            &CppProvider::new().unwrap(),
+            "s.cpp",
+            "int cppHandler() {\n    return 1;\n}\n\nauto table = std::make_pair(0, [](int cppHandler) { return cppHandler; });\n",
+            "table",
+        ),
+        (
+            &CSharpProvider::new().unwrap(),
+            "C.cs",
+            "class C {\n    static int CsHandler() { return 1; }\n    static readonly System.Func<int, int> Table = CsHandler => CsHandler;\n}\n",
+            "Table",
+        ),
+        (
+            &GoProvider::new().unwrap(),
+            "main.go",
+            "package main\n\nfunc goHandler() int { return 1 }\n\nvar table = []interface{}{func(goHandler int) int { return goHandler }}\n",
+            "table",
+        ),
+        (
+            &RustProvider::new().unwrap(),
+            "src/lib.rs",
+            "fn in_table() -> u32 {\n    1\n}\n\npub static TABLE: fn(u32) -> u32 = |in_table| in_table;\n",
+            "TABLE",
+        ),
+        (
+            &DartProvider::new().unwrap(),
+            "d.dart",
+            "int dartHandler() {\n  return 1;\n}\n\nfinal table = [(dartHandler) => dartHandler];\n",
+            "table",
+        ),
+        (
+            &PythonProvider::new().unwrap(),
+            "app.py",
+            "def handler():\n    return 1\n\n\nTABLE = [lambda handler: handler]\n",
+            "TABLE",
+        ),
+    ];
+    for (provider, file, src, registrar) in cases {
+        assert_no_ref(provider, file, src, registrar);
+    }
+}
+
+#[test]
+fn test_value_read_lambda_parameter_read_in_initializer_returns_no_edge() {
+    let java = graph(
+        &JavaProvider::new().unwrap(),
+        &[(
+            "M.java",
+            "class M {\n    static final int LIMIT = 1;\n    static final Object[] TABLE = { (java.util.function.IntUnaryOperator) LIMIT -> LIMIT };\n}\n",
+        )],
+    );
+    assert_eq!(value_reads(&java, "TABLE"), none());
+    let kotlin = graph(
+        &KotlinProvider::new().unwrap(),
+        &[(
+            "k.kt",
+            "val LIMIT = 1\nval table = listOf({ LIMIT: Int -> LIMIT })\n",
+        )],
+    );
+    assert_eq!(value_reads(&kotlin, "table"), none());
+}
+
+// ---- Several declarations in one statement ----
+//
+// Where the graph gives each declaration of `a = h1, b = h2` the statement's
+// span, a read goes to the declaration whose own declarator holds it. With no
+// declarator to tell them apart (Go `var C, D = …`, Swift `let a = …, b = …`,
+// Dart `final a = …, b = …`) the read goes nowhere: no edge beats a guessed
+// one. Python, Kotlin, Ruby, C and C++ give such a statement's names no node,
+// and Rust declares one `const` / `static` per statement, so they have no
+// such shape.
+
+#[test]
+fn test_function_reference_typescript_multi_declarator_const_binds_own_declarator() {
+    let g = graph(
+        &TypeScriptProvider::new().unwrap(),
+        &[(
+            "app.ts",
+            "function h1(): void {}\nfunction h2(): void {}\nconst a = h1, b = h2;\n",
+        )],
+    );
+    assert_eq!(
+        function_refs(&g, "a"),
+        vec![r("app.ts", "h1", FUNCTION_REFERENCE, SAME_FILE)]
+    );
+    assert_eq!(
+        function_refs(&g, "b"),
+        vec![r("app.ts", "h2", FUNCTION_REFERENCE, SAME_FILE)]
+    );
+}
+
+#[test]
+fn test_function_reference_javascript_multi_declarator_const_binds_own_declarator() {
+    let g = graph(
+        &JavaScriptProvider::new().unwrap(),
+        &[(
+            "app.js",
+            "function h1() {}\nfunction h2() {}\nexport const a = h1, b = h2;\n",
+        )],
+    );
+    assert_eq!(
+        function_refs(&g, "a"),
+        vec![r("app.js", "h1", FUNCTION_REFERENCE, SAME_FILE)]
+    );
+    assert_eq!(
+        function_refs(&g, "b"),
+        vec![r("app.js", "h2", FUNCTION_REFERENCE, SAME_FILE)]
+    );
+}
+
+/// The destructured `{ cb }` declares no node: its initializer's read
+/// belongs to no declaration, least of all to `unused`.
+#[test]
+fn test_function_reference_destructuring_declarator_beside_const_returns_no_edge() {
+    let src = "function handler() {}\nconst unused = 0, { cb } = { cb: handler };\n";
+    assert_no_ref(&TypeScriptProvider::new().unwrap(), "app.ts", src, "unused");
+    assert_no_ref(&JavaScriptProvider::new().unwrap(), "app.js", src, "unused");
+}
+
+#[test]
+fn test_function_reference_java_multi_declarator_field_binds_own_declarator() {
+    let g = graph(
+        &JavaProvider::new().unwrap(),
+        &[(
+            "M.java",
+            "class M {\n    static void f1() {}\n    static void f2() {}\n    static Runnable a = M::f1,\n        b = M::f2;\n}\n",
+        )],
+    );
+    assert_one_cross_file(&function_refs(&g, "a"), "M.java", "f1");
+    assert_one_cross_file(&function_refs(&g, "b"), "M.java", "f2");
+}
+
+#[test]
+fn test_function_reference_csharp_multi_declarator_field_binds_own_declarator() {
+    let g = graph(
+        &CSharpProvider::new().unwrap(),
+        &[(
+            "C.cs",
+            "class M {\n    static void F1() {}\n    static void F2() {}\n    static System.Action A = F1,\n        B = F2;\n}\n",
+        )],
+    );
+    assert_eq!(
+        function_refs(&g, "A"),
+        vec![r("C.cs", "F1", FUNCTION_REFERENCE, SAME_FILE)]
+    );
+    assert_eq!(
+        function_refs(&g, "B"),
+        vec![r("C.cs", "F2", FUNCTION_REFERENCE, SAME_FILE)]
+    );
+}
+
+/// `var C, D = h1, h2` pairs names and values by position only.
+#[test]
+fn test_function_reference_go_multi_name_var_returns_no_edge() {
+    let src = "package main\n\nfunc h1() {}\nfunc h2() {}\n\nvar C, D = h1,\n\th2\n";
+    assert_no_ref(&GoProvider::new().unwrap(), "main.go", src, "C");
+    assert_no_ref(&GoProvider::new().unwrap(), "main.go", src, "D");
+}
+
+#[test]
+fn test_function_reference_swift_multi_pattern_let_returns_no_edge() {
+    let src = "func h1() {}\nfunc h2() {}\nlet a = h1, b = h2\n";
+    assert_no_ref(&SwiftProvider::new().unwrap(), "s.swift", src, "a");
+    assert_no_ref(&SwiftProvider::new().unwrap(), "s.swift", src, "b");
+}
+
+#[test]
+fn test_function_reference_dart_multi_identifier_final_returns_no_edge() {
+    let src = "void h1() {}\nvoid h2() {}\nfinal a = h1, b = h2;\n";
+    assert_no_ref(&DartProvider::new().unwrap(), "d.dart", src, "a");
+    assert_no_ref(&DartProvider::new().unwrap(), "d.dart", src, "b");
+}
+
+/// PHP gives each `const` element its own span, so each reads its own value.
+#[test]
+fn test_value_read_php_multi_element_const_binds_own_element() {
+    let g = graph(
+        &PhpProvider::new().unwrap(),
+        &[(
+            "a.php",
+            "<?php\nconst X = 1;\nconst Y = 2;\nconst A = X, B = Y;\n",
+        )],
+    );
+    assert_eq!(
+        value_reads(&g, "A"),
+        vec![r("a.php", "X", VALUE_READ, SAME_FILE)]
+    );
+    assert_eq!(
+        value_reads(&g, "B"),
+        vec![r("a.php", "Y", VALUE_READ, SAME_FILE)]
+    );
+}
+
+/// The arrow function `h` holds the read; `y`, which shares the statement,
+/// holds none.
+#[test]
+fn test_function_reference_typescript_arrow_beside_const_stays_on_arrow() {
+    let g = graph(
+        &TypeScriptProvider::new().unwrap(),
+        &[(
+            "app.ts",
+            "function g(): number { return 1; }\nconst h = () => g, y = 1;\n",
+        )],
+    );
+    assert_eq!(
+        function_refs(&g, "h"),
+        vec![r("app.ts", "g", FUNCTION_REFERENCE, SAME_FILE)]
+    );
+    assert_eq!(function_refs(&g, "y"), none());
+}
+
+/// A literal nested in the initializer still belongs to the declaration.
+#[test]
+fn test_function_reference_typescript_nested_literal_initializer_returns_edge() {
+    assert_same_file_ref(
+        &TypeScriptProvider::new().unwrap(),
+        "app.ts",
+        "function h(): void {}\nconst T = { a: { b: h } };\n",
+        "T",
+        "h",
+    );
+}
+
+/// `export default { a: h }` declares no node, so no declaration holds the
+/// reference and the graph gets no `References` edge. An accepted loss
+/// (spec I6): an edge from the File here is a fix, not a regression.
+#[test]
+fn test_function_reference_typescript_export_default_object_returns_no_edge() {
+    let g = graph(
+        &TypeScriptProvider::new().unwrap(),
+        &[(
+            "app.ts",
+            "function h(): void {}\nexport default { a: h };\n",
+        )],
+    );
+    assert!(
+        g.edges.iter().all(|e| e.rel_type != RelType::References),
+        "no declaration holds the reference"
+    );
+}
+
+/// A constant read inside another constant's initializer is a value read.
+#[test]
+fn test_value_read_rust_const_initializer_returns_edge() {
+    let g = graph(
+        &RustProvider::new().unwrap(),
+        &[("src/lib.rs", "const A: u32 = 1;\nconst B: u32 = A + 1;\n")],
+    );
+    assert_eq!(
+        value_reads(&g, "B"),
+        vec![r("src/lib.rs", "A", VALUE_READ, SAME_FILE)]
+    );
+}
+
+/// A file with no function node at all still resolves the initializer read.
+#[test]
+fn test_value_read_python_module_variable_without_functions_returns_edge() {
+    let g = graph(
+        &PythonProvider::new().unwrap(),
+        &[("app.py", "A = 1\nB = [A]\n")],
+    );
+    assert_eq!(
+        value_reads(&g, "B"),
+        vec![r("app.py", "A", VALUE_READ, SAME_FILE)]
     );
 }

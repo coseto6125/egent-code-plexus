@@ -115,13 +115,13 @@
       (import_specifier
         name: [(identifier) "default"] @import.name
         alias: (identifier)? @import.alias)))
-  source: (string (string_fragment) @import.source)) @import
+  source: (string . (string_fragment) @import.source .)) @import
 
 ;; Imports (Default)
 (import_statement
   (import_clause
     (identifier) @import.name)
-  source: (string (string_fragment) @import.source)) @import
+  source: (string . (string_fragment) @import.source .)) @import
 
 ;; Re-exports — `export { X as Y } from 'lib'` (alias preserved on RawImport).
 ;; JS parses `default` in `export { default as X } from` and `export { X as
@@ -132,21 +132,21 @@
     (export_specifier
       name: [(identifier) "default"] @import.name
       alias: [(identifier) "default"]? @import.alias))
-  source: (string (string_fragment) @import.source)) @import
+  source: (string . (string_fragment) @import.source .)) @import
 
 ;; Star re-export — `export * from 'lib'`. It binds no local name, so the
 ;; parser emits `imported_name` "*" with no alias; the resolver follows it
 ;; when an importer of this file names a member the file does not declare.
 (export_statement
   "*"
-  source: (string (string_fragment) @import.source)) @import.star
+  source: (string . (string_fragment) @import.source .)) @import.star
 
 ;; Namespace re-export — `export * as ns from 'lib'`.
 ;; `imported_name` is the "*" sentinel; `alias` holds the namespace binding.
 (export_statement
   (namespace_export
     (identifier) @import.alias)
-  source: (string (string_fragment) @import.source)) @import.namespace
+  source: (string . (string_fragment) @import.source .)) @import.namespace
 
 ;; Namespace import — `import * as ns from 'lib'`. Local binding `ns` is the
 ;; alias; `imported_name` is "*" (same sentinel as the namespace re-export).
@@ -154,7 +154,7 @@
   (import_clause
     (namespace_import
       (identifier) @import.alias))
-  source: (string (string_fragment) @import.source)) @import.namespace
+  source: (string . (string_fragment) @import.source .)) @import.namespace
 
 ;; CommonJS `require` with a string-literal argument (`require(expr)` stays a
 ;; blind spot). Each form emits the RawImport its ES import twin emits; `\S`
@@ -170,14 +170,14 @@
         name: (identifier) @import.alias
         value: (call_expression
             function: (identifier) @_require
-            arguments: (arguments . (string (string_fragment) @import.source) .))) @import.namespace)
+            arguments: (arguments . [(string . (string_fragment) @import.source .) (template_string . (string_fragment) @import.source .)] .))) @import.namespace)
     (export_statement
       (_
         (variable_declarator
           name: (identifier) @import.alias
           value: (call_expression
               function: (identifier) @_require
-              arguments: (arguments . (string (string_fragment) @import.source) .))) @import.namespace))
+              arguments: (arguments . [(string . (string_fragment) @import.source .) (template_string . (string_fragment) @import.source .)] .))) @import.namespace))
   ]
   (#eq? @_require "require")
   (#match? @import.source "\\S"))
@@ -190,14 +190,14 @@
         name: (object_pattern (shorthand_property_identifier_pattern) @import.name)
         value: (call_expression
             function: (identifier) @_require
-            arguments: (arguments . (string (string_fragment) @import.source) .))) @import)
+            arguments: (arguments . [(string . (string_fragment) @import.source .) (template_string . (string_fragment) @import.source .)] .))) @import)
     (export_statement
       (_
         (variable_declarator
           name: (object_pattern (shorthand_property_identifier_pattern) @import.name)
           value: (call_expression
               function: (identifier) @_require
-              arguments: (arguments . (string (string_fragment) @import.source) .))) @import))
+              arguments: (arguments . [(string . (string_fragment) @import.source .) (template_string . (string_fragment) @import.source .)] .))) @import))
   ]
   (#eq? @_require "require")
   (#match? @import.source "\\S"))
@@ -213,7 +213,7 @@
             value: (identifier) @import.alias))
         value: (call_expression
             function: (identifier) @_require
-            arguments: (arguments . (string (string_fragment) @import.source) .))) @import)
+            arguments: (arguments . [(string . (string_fragment) @import.source .) (template_string . (string_fragment) @import.source .)] .))) @import)
     (export_statement
       (_
         (variable_declarator
@@ -223,7 +223,7 @@
               value: (identifier) @import.alias))
           value: (call_expression
               function: (identifier) @_require
-              arguments: (arguments . (string (string_fragment) @import.source) .))) @import))
+              arguments: (arguments . [(string . (string_fragment) @import.source .) (template_string . (string_fragment) @import.source .)] .))) @import))
   ]
   (#eq? @_require "require")
   (#match? @import.source "\\S"))
@@ -237,7 +237,7 @@
         value: (member_expression
           object: (call_expression
               function: (identifier) @_require
-              arguments: (arguments . (string (string_fragment) @import.source) .))
+              arguments: (arguments . [(string . (string_fragment) @import.source .) (template_string . (string_fragment) @import.source .)] .))
           property: (property_identifier) @import.name)) @import)
     (export_statement
       (_
@@ -246,7 +246,7 @@
           value: (member_expression
             object: (call_expression
                 function: (identifier) @_require
-                arguments: (arguments . (string (string_fragment) @import.source) .))
+                arguments: (arguments . [(string . (string_fragment) @import.source .) (template_string . (string_fragment) @import.source .)] .))
             property: (property_identifier) @import.name)) @import))
   ]
   (#eq? @_require "require")
@@ -262,7 +262,7 @@
         value: (member_expression
           object: (call_expression
               function: (identifier) @_require
-              arguments: (arguments . (string (string_fragment) @import.source) .))
+              arguments: (arguments . [(string . (string_fragment) @import.source .) (template_string . (string_fragment) @import.source .)] .))
           property: (property_identifier) @import.name)) @import)
     (export_statement
       (_
@@ -271,7 +271,7 @@
           value: (member_expression
             object: (call_expression
                 function: (identifier) @_require
-                arguments: (arguments . (string (string_fragment) @import.source) .))
+                arguments: (arguments . [(string . (string_fragment) @import.source .) (template_string . (string_fragment) @import.source .)] .))
             property: (property_identifier) @import.name)) @import))
   ]
   (#eq? @_require "require")
