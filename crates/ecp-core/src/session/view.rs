@@ -71,9 +71,9 @@
 //!   edges whose source is a base index. Membership `HasProperty` is rebuilt
 //!   only with the records, as below. An `Imports` lookup runs the index's
 //!   import resolver: its whole ladder without a call site, the named-import
-//!   tier in every language outside the import-member policy (not the
-//!   path-segment match of a call), candidate files without the Rust module
-//!   trees, and the guess steps over every file with a `File` node. Each
+//!   tier in every language outside the import-member policy, candidate
+//!   files without the Rust module trees, and the guess steps over every
+//!   file with a `File` node. Each
 //!   dirty declaration's `Decorates` edges come from its decorators
 //!   ([`OverlaySymbol::decorators`]) by [`crate::analyzer::decorates`], each
 //!   name looked up as an `Imports` name is, for a type. A name nothing
@@ -205,11 +205,13 @@
 //!   export aliases and the one-hop barrel re-export, over the archived
 //!   import / export facts of clean files. An edit to `tsconfig.json` itself
 //!   is not seen until a reindex.
-//! - Outside the import-member languages and TS / JS, only a `./` / `../`
-//!   import source probes the index's candidate files. Any other source (a
-//!   package or `crate::` path) narrows by its last path segment, unique
-//!   only, an approximation of the index's module tree; a namespace import
-//!   through such a source binds nothing.
+//! - Every name lookup runs the index's tier order through the one shared
+//!   function ([`name_tiers`](crate::analyzer::name_tiers::name_tiers)).
+//!   Outside the import-member languages, an import binds through the
+//!   index's named-import tier (`reexport::named_import`, which follows a
+//!   re-export in TS / JS only), and a Rust `use` that tier misses binds
+//!   through the overlay's module trees, as the index's does through its
+//!   own.
 //! - The qualifier tier (`K.save`, `K::st`) is replayed with the module
 //!   tree read as conventional file layout: a Rust `use` of the qualifier
 //!   probes the module file and the import's candidate files as the index
@@ -246,7 +248,6 @@ use crate::analyzer::lexical::{
     enclosing_types, file_identities, later_is_arity_twin, splits_by_arity,
 };
 use crate::analyzer::membership::{CLASS_MEMBERSHIP_IMPL_REASON, CLASS_MEMBERSHIP_REASON};
-use crate::analyzer::outcome::Tier;
 use crate::analyzer::overrides::OVERRIDES_REASONS;
 use crate::analyzer::record_nodes::{
     EVENT_TOPIC_PUBLISHES_REASON, EVENT_TOPIC_SUBSCRIBES_REASON, PATH_LITERAL_SINK_REASONS,
@@ -555,9 +556,6 @@ pub struct ViewFunctionMeta {
     /// The return type as written; `None` when the declaration writes none.
     pub return_type: Option<String>,
 }
-
-/// Tier confidences mirroring index-time Pass-2 resolution.
-const CONF_IMPORT_SCOPED: f32 = Tier::ImportScoped.confidence();
 
 #[derive(Debug, Default, PartialEq)]
 pub struct OverlayView {
@@ -1288,8 +1286,11 @@ impl OverlayView {
 /// `Extends` and `Implements` edges and their two reasons. F7b2 extends it
 /// again: the view stores the clean-file edge kinds its invalidation
 /// closure left as indexed. R-A4d extends it again: that record also names
-/// the dirty resolution configs whose archived rows the view kept.
-pub const VIEW_CACHE_FORMAT: u32 = 14;
+/// the dirty resolution configs whose archived rows the view kept. P1
+/// changes what it stores: a dirty call takes the index's name-tier order
+/// ([`name_tiers`](crate::analyzer::name_tiers::name_tiers)), so a call the
+/// last-segment match left to the nearest copy now binds its import.
+pub const VIEW_CACHE_FORMAT: u32 = 15;
 
 /// The base edge kinds the record replay rebuilds, so masks at a re-parsed
 /// file's nodes. `HasProperty` has its own arm in
@@ -2059,13 +2060,10 @@ fn emit_closure_references(
 
 #[cfg(test)]
 mod tests {
-    use super::resolution::{
-        is_relative_specifier, leaf_path, path_dirs, qualifier_prefix_is_internal,
-        relative_module_rank, RustModules,
-    };
+    use super::resolution::{leaf_path, path_dirs, qualifier_prefix_is_internal, RustModules};
     use super::*;
     use crate::analyzer::ladder::split_qualifier;
-    use crate::analyzer::path_aliases::PathAliases;
+    use crate::analyzer::outcome::Tier;
     use crate::analyzer::types::{CallSite, RawImport, NEAREST_COPY_CONFIDENCE};
     use crate::graph_fixture::GraphFixture;
     use rkyv::rancor::Error as RkyvError;
@@ -2986,10 +2984,32 @@ mod tests {
         }
     }
 
+    /// Where `path` falls in the index's probe order for `specifier` of
+    /// `importer`, with no path aliases. `None` when the index never probes
+    /// it.
+    fn probe_rank(importer: &str, specifier: &str, path: &str) -> Option<usize> {
+        let mut rank = 0;
+        let mut found = None;
+        crate::analyzer::reexport::for_each_specifier_candidate(
+            std::path::Path::new(importer),
+            specifier,
+            |_| {},
+            |candidate| {
+                if candidate == path {
+                    found = Some(rank);
+                    return false;
+                }
+                rank += 1;
+                true
+            },
+        );
+        found
+    }
+
     /// The index's relative candidates: `./` and `../` from the importer's
-    /// directory, nothing for any other specifier.
+    /// directory.
     #[test]
-    fn test_relative_module_rank_relative_specifiers_join_importer_dir() {
+    fn test_for_each_specifier_candidate_relative_specifiers_join_importer_dir() {
         let cases = [
             ("src/b.ts", "./a", "src/a.ts"),
             ("src/b.ts", "./a.ts", "src/a.ts"),
@@ -3000,37 +3020,18 @@ mod tests {
             ("b.ts", "./a", "a.ts"),
         ];
         for (importer, specifier, path) in cases {
-            assert!(is_relative_specifier(specifier), "{specifier}");
             assert!(
-                relative_module_rank(
-                    importer,
-                    specifier,
-                    path,
-                    &PathAliases::new(),
-                    Language::TypeScript,
-                )
-                .is_some(),
+                probe_rank(importer, specifier, path).is_some(),
                 "{importer} {specifier} {path}"
             );
-        }
-        for specifier in ["a", "@/a", "crate::a", ".a"] {
-            assert!(!is_relative_specifier(specifier), "{specifier}");
         }
     }
 
     /// Probe order: the bare path, the extensions (`.ts` before `.js`), then
     /// the index suffixes; anything else is never probed.
     #[test]
-    fn test_relative_module_rank_follows_resolver_probe_order() {
-        let rank = |path: &str| {
-            relative_module_rank(
-                "src/b.ts",
-                "./a",
-                path,
-                &PathAliases::new(),
-                Language::TypeScript,
-            )
-        };
+    fn test_for_each_specifier_candidate_follows_resolver_probe_order() {
+        let rank = |path: &str| probe_rank("src/b.ts", "./a", path);
         assert!(rank("src/a").is_some());
         assert!(rank("src/a") < rank("src/a.ts"));
         assert!(rank("src/a.ts") < rank("src/a.js"));
@@ -3040,14 +3041,7 @@ mod tests {
         assert_eq!(rank("src/a/other.ts"), None);
         assert_eq!(rank("tests/a.ts"), None);
         assert_eq!(rank("src/__mocks__/a.ts"), None);
-        assert!(relative_module_rank(
-            "b.ts",
-            "./",
-            "index.ts",
-            &PathAliases::new(),
-            Language::TypeScript
-        )
-        .is_some());
+        assert!(probe_rank("b.ts", "./", "index.ts").is_some());
     }
 
     #[test]

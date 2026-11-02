@@ -1,6 +1,6 @@
-//! The name tiers of the call-resolution ladder that the index
-//! (`Resolver::resolve_symbol_with_import_binding`) and the session overlay
-//! (`resolve_callee` in `session/view/resolution.rs`) both run: Tier 1 (the caller's
+//! The name tiers of the call-resolution ladder that the index and the
+//! session overlay both run, in the order
+//! [`crate::analyzer::name_tiers::name_tiers`] holds: Tier 1 (the caller's
 //! file), Tier 2.75 (the caller's bases) and Tier 3 (one name across the
 //! project). The rules that pick live here once (B §2.2, row B5); each side
 //! answers the questions through its own [`ResolveFacts`].
@@ -1884,9 +1884,11 @@ pub struct CallContext<'c> {
 }
 
 /// What [`call`] reads per side (R1). Each method answers a question about
-/// the side's declarations or runs the side's name tiers; [`call`] decides
-/// the order and every fallback. Each side keeps its decision dump (index)
-/// and its memos and gap notes (overlay) inside its methods.
+/// the side's declarations or runs the name tiers
+/// ([`crate::analyzer::name_tiers::name_tiers`], whose order both sides
+/// share) over the side's facts; [`call`] decides the order of the
+/// call-level steps and every fallback. Each side keeps its decision dump
+/// (index) and its memos and gap notes (overlay) inside its methods.
 pub trait CallFacts<'s> {
     /// The module facts the shared normalization rules read (R2-R5).
     type Modules: ModuleFacts + ?Sized;
@@ -2226,7 +2228,7 @@ fn import_only<'s, F: CallFacts<'s>>(
 
 /// The kinds a call site may reach. Rust method syntax (`x.f()`) calls only
 /// methods: a free `fn` is never in scope through `.`.
-fn call_target(language: Language, site: CallSite<'_>) -> ResolveTarget {
+pub fn call_target(language: Language, site: CallSite<'_>) -> ResolveTarget {
     if site.uses_method_syntax() && language == Language::Rust {
         ResolveTarget::Method
     } else {

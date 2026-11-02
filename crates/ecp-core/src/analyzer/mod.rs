@@ -11,6 +11,7 @@ pub mod lexical;
 pub mod membership;
 pub mod module_discovery;
 pub mod name_ref;
+pub mod name_tiers;
 pub mod outcome;
 pub mod overrides;
 pub mod parse_prof;
