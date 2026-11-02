@@ -1508,6 +1508,32 @@ fn test_module_path_through_twin_binds_module_level_member_past_another_types_na
     );
 }
 
+/// Guard: `crate::m::Foo::hello()` never binds the body-local `Foo::hello`
+/// through the module tree. `other.rs` declares a second `Foo`, so the
+/// qualifier tier has no file and the module tree decides. The trait
+/// default `Make::hello` binds through no path tier (`rust_path_may_bind`
+/// wants the owner `Foo`), a follow-up; this test asserts only that the
+/// body-local line stays unbound, so the follow-up's fix keeps it green.
+#[test]
+fn test_module_path_never_binds_body_local_namesake_of_trait_default() {
+    let m = "pub trait Make {\n    fn hello() {}\n}\npub struct Foo;\nimpl Make for Foo {}\n\
+             pub fn setup() {\n    struct Foo;\n    impl Foo {\n        fn hello() {}\n    }\n}\n";
+    let files = [
+        ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+        (
+            "src/lib.rs",
+            "pub mod m;\nmod other;\npub fn go() {\n    crate::m::Foo::hello();\n}\n",
+        ),
+        ("src/m.rs", m),
+        ("src/other.rs", "pub struct Foo;\n"),
+    ];
+    let lines = workspace_go_lines(&files, "hello");
+    assert!(
+        !lines.contains(&("src/m.rs".to_string(), 9)),
+        "the body-local `Foo::hello` bound: {lines:?}"
+    );
+}
+
 /// The same merged `Foo` without a glob: `use crate::m::Foo;` imports the
 /// module item, and the module path `crate::m::Foo::new()` names it.
 /// `other.rs` declares a second `Foo`, so no tier reaches `m.rs` by the

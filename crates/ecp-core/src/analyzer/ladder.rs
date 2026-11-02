@@ -1655,10 +1655,11 @@ pub fn anchored_module_file<F: ModuleTreeFacts>(
 /// the first declaration named `member` (the callee's last segment, generic
 /// arguments dropped), later `impl` overloads included, that no function
 /// body holds. When the item is a type
-/// (`m::S` of `m::S::helper`), the path names one of its associated items,
-/// as in the qualifier tier: [`prefer_owned`] picks it with the type as the
-/// receiver, and a free item of the type's file never binds. [`qualified`]
-/// then applies the method rule ([`rust_path_may_bind`]).
+/// (`m::S` of `m::S::helper`), the path names one of its associated items:
+/// the type's own module-level member, else what [`prefer_owned`] picks
+/// with the type as the receiver. A body-local namesake and a free item of
+/// the type's file never bind. [`qualified`] then applies the method rule
+/// ([`rust_path_may_bind`]).
 pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
     facts: &F,
     decls: &D,
@@ -1696,16 +1697,14 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
     if !item_is_type {
         return Some(pick);
     }
-    // `prefer_owned` weighs every same-named candidate, body-local ones
-    // too; when it settles on one, the item's own module-level member
-    // still binds.
-    let item_key = owner_key(&item);
-    let own_member = || {
-        candidates
-            .iter()
-            .copied()
-            .find(|&id| usable(id) && decls.owner(id).and_then(owner_key) == item_key)
-    };
+    let item_key = owner_key(&item)?;
+    if let Some(id) = candidates
+        .iter()
+        .copied()
+        .find(|&id| usable(id) && decls.owner(id).and_then(owner_key) == Some(item_key))
+    {
+        return Some(id);
+    }
     prefer_owned(
         decls,
         file,
@@ -1721,7 +1720,6 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
         },
     )
     .filter(|&id| decls.owner(id).is_some() && !decls.is_body_local(id))
-    .or_else(own_member)
 }
 
 /// [`QualifierFacts::crate_module`] through the module tree: `Local` unless

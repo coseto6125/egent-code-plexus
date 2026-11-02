@@ -6482,7 +6482,7 @@ mod tests {
     /// keeps the first, the body-local one, and stores the second as its
     /// tombstone (bit-inverse uid, no name) in the second's slot. Returns
     /// the bytes and the idxs of the survivor and of `new`.
-    fn inner_helper_twins(twin_line: u32) -> (Vec<u8>, u32, u32) {
+    fn inner_helper_twins(twin_line: u32) -> (Vec<u8>, u32, u32, u32) {
         const M: &str = "src/m.rs";
         let mut fx = GraphFixture::new();
         let setup = fx.func(M, "setup");
@@ -6491,26 +6491,30 @@ mod tests {
         fx.span(survivor, (2, 8, 2, 30));
         let new = fx.method(M, "Foo", "new");
         fx.span(new, (3, 8, 3, 30));
+        let lone = fx.node_owned(NodeKind::Function, M, "inner", "lone");
+        fx.span(lone, (1, 8, 1, 30));
         let twin = fx.node_owned(NodeKind::Function, M, "inner", "helper");
         fx.span(twin, (twin_line, 4, twin_line, 26));
         let node = &mut fx.assembly_mut().nodes[twin as usize];
         node.uid = crate::uid::tombstone(node.uid);
         node.name = Default::default();
         node.owner_class = Default::default();
-        (fx.into_bytes(), survivor, new)
+        (fx.into_bytes(), survivor, new, lone)
     }
 
     /// Contract: the clean side's per-uid AND covers an unscoped `fn` (one
     /// a `mod` inside a body holds), as the index's `rust_body_local_rows`
     /// does: with a module-level tombstoned twin the survivor is a module
     /// item, with a body-local one it stays body-local. A method keeps
-    /// overloads, so it has no tombstoned twin and stays body-local. Before
-    /// the fix every callable inside a body was body-local.
+    /// overloads, so it has no tombstoned twin and stays body-local. The
+    /// answer is memoized per node: a twin-less `lone` asked in between keeps
+    /// its own answer. Before the fix every callable inside a body was
+    /// body-local.
     #[test]
-    fn test_is_body_local_unscoped_fn_with_module_level_twin_returns_false() {
+    fn test_is_body_local_unscoped_fn_twin_decides_survivor_method_stays_body_local() {
         let removed = FxHashSet::default();
         for (twin_line, want) in [(6, false), (2, true)] {
-            let (bytes, survivor, new) = inner_helper_twins(twin_line);
+            let (bytes, survivor, new, lone) = inner_helper_twins(twin_line);
             let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
             let modules = RustModules::new(graph, &[], &removed, Default::default());
             assert_eq!(
@@ -6518,6 +6522,7 @@ mod tests {
                 want,
                 "twin on line {twin_line}"
             );
+            assert!(modules.is_body_local(lone), "a twin-less fn in the body");
             assert_eq!(
                 modules.is_body_local(survivor),
                 want,
