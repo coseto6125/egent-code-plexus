@@ -19,7 +19,7 @@ ecp inspect --name <SYMBOL_NAME> [--repo <PATH>]
 ## Output fields (JSON)
 - `status` — `found`, `ambiguous` or `error` (not found).
 - `candidates` — on `ambiguous` only: each with `filePath`, `kind`, `line` and `target`. Run `ecp inspect <target>` to inspect one. A null `target` means no target text or filter selects it alone. An ambiguous answer has no neighbour sections: they are not evaluated, not empty.
-- `ownerClass` / `lexicalParent` — on `symbol` and on each edge entry. `ownerClass` is the stored owner: the class of a method, null for a nested fn or closure. `lexicalParent` is the enclosing chain of a nested fn (`outer`, `K::m`), else the stored owner. Every format except `json` drops a field that is null on the symbol or on every edge.
+- `ownerClass` / `lexicalParent` — on `symbol` and on each edge entry. `ownerClass` is the stored owner: the class of a method, null for a nested fn or closure. `lexicalParent` is the enclosing chain of a nested fn (`outer`, `K::m`), else the stored owner. When a field is null on every edge, every format except `json` drops it from every edge, and from the symbol when it is null there too. One non-null edge keeps the field on every entry.
 - `symbol.decorators` — flat string list (`@` prefix stripped), e.g. `["staticmethod", "functools.cached_property"]`. Empty for undecorated nodes.
 - `contained_methods` / `contained_properties` — for Class / Struct / Trait / Interface / Enum.
 - `contained_variants` — for `Enum`: the EnumVariant children with their `name`, `filePath`, `line`.

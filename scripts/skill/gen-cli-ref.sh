@@ -30,7 +30,7 @@ mkdir -p "$OUT"
 
 # Commands to capture: top-level + curated sub-commands actually used in guides.
 # When new guides reference a new command, add it here.
-declare -a TOPLEVEL=(find impact inspect cypher routes coverage diff rename)
+declare -a TOPLEVEL=(find impact inspect cypher routes diff)
 declare -a SUB=(
     "admin:index"
     "admin:group"

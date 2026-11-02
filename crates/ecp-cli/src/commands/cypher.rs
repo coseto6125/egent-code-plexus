@@ -20,7 +20,7 @@ pub struct CypherArgs {
     ///   flags is_test/is_async/is_static/is_abstract/is_generator/is_extern
     ///   (camelCase aliases isTest/isAsync/… also accepted). An unknown
     ///   property name fails the query with a structured error on stdout.
-    ///   `ownerClass` is the stored owner, null for a nested fn: match a
+    ///   `ownerClass` is the stored owner, null for a nested fn or closure: match a
     ///   closure in `outer` with `n.lexicalParent = 'outer'` (the enclosing
     ///   chain, such as `K::m`, else the stored owner).
     /// - Properties (edge):  confidence, reason, rel_type

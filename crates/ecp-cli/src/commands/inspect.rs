@@ -29,8 +29,10 @@ pub struct InspectArgs {
     /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
     /// toon. `json`: full-fidelity JSON. `text`: pretty-printed JSON. Every format except
     /// `json` drops the edge boilerplate. The symbol and each edge carry `ownerClass`
-    /// (the stored owner, null for a nested fn) and `lexicalParent` (the enclosing
-    /// chain `K::m`, else the stored owner); every format except `json` drops an all-null one.
+    /// (the stored owner, null for a nested fn or closure) and `lexicalParent` (the
+    /// enclosing chain `K::m`, else the stored owner). When a field is null on every
+    /// edge, every format except `json` drops it from every edge, and from the symbol
+    /// when it is null there too.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 
