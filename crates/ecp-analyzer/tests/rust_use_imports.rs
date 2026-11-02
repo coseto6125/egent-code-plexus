@@ -1477,6 +1477,37 @@ fn test_module_level_twin_of_body_local_type_shadows_a_glob_pub_use() {
     }
 }
 
+/// Contract: an earlier `Other::new` in `m.rs` makes the first `new` pick
+/// another type's, so the owner choice weighs every `new`; when it settles
+/// on the body-local `Foo::new`, `crate::m::Foo::new()` still binds the
+/// module-level one. Before the fix the call bound nothing.
+#[test]
+fn test_module_path_through_twin_binds_module_level_member_past_another_types_namesake() {
+    let other = "pub struct Foo;\nimpl Foo {\n    pub fn new() -> Foo { Foo }\n}\n";
+    let lib = "pub mod m;\nmod other;\npub fn go() {\n    crate::m::Foo::new();\n}\n";
+    let m = foo_twin_m_rs(
+        "pub struct Other;\nimpl Other {\n    pub fn new() -> Other { Other }\n}\n",
+        FOO_TWINS[1],
+    );
+    let files = [
+        ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+        ("src/lib.rs", lib),
+        ("src/m.rs", m.as_str()),
+        ("src/other.rs", other),
+    ];
+    let foo_new_line = m
+        .lines()
+        .collect::<Vec<_>>()
+        .iter()
+        .rposition(|line| line.starts_with("    pub fn new"))
+        .expect("module-level Foo::new") as u32
+        + 1;
+    assert_eq!(
+        workspace_go_lines(&files, "new"),
+        vec![("src/m.rs".to_string(), foo_new_line)]
+    );
+}
+
 /// The same merged `Foo` without a glob: `use crate::m::Foo;` imports the
 /// module item, and the module path `crate::m::Foo::new()` names it.
 /// `other.rs` declares a second `Foo`, so no tier reaches `m.rs` by the

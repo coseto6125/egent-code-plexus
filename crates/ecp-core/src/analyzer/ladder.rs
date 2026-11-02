@@ -1688,14 +1688,22 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
     // The candidates with their `impl` overloads: a body-local
     // `impl Foo { fn new }` before the module-level one makes the
     // module-level `new` a later overload.
-    let pick = decls
-        .pick_candidates(file, bare)
-        .iter()
-        .copied()
-        .find(|&id| wanted(decls.kind(id)) && !decls.is_body_local(id))?;
+    let candidates = decls.pick_candidates(file, bare);
+    let usable = |id: u32| wanted(decls.kind(id)) && !decls.is_body_local(id);
+    let pick = candidates.iter().copied().find(|&id| usable(id))?;
     if !item_is_type {
         return Some(pick);
     }
+    // `prefer_owned` weighs every same-named candidate, body-local ones
+    // too; when it settles on one, the item's own module-level member
+    // still binds.
+    let item_key = owner_key(&item);
+    let own_member = || {
+        candidates
+            .iter()
+            .copied()
+            .find(|&id| usable(id) && decls.owner(id).and_then(owner_key) == item_key)
+    };
     prefer_owned(
         decls,
         file,
@@ -1711,6 +1719,7 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
         },
     )
     .filter(|&id| decls.owner(id).is_some() && !decls.is_body_local(id))
+    .or_else(own_member)
 }
 
 /// [`QualifierFacts::crate_module`] through the module tree: `Local` unless
