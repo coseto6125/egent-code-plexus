@@ -283,6 +283,15 @@ fn workspace_go_targets(files: &[(&str, &str)], callee: &str) -> Vec<String> {
 /// [`workspace_go_targets`] with each target's kind, for a callee name that
 /// a free `fn` and a method share in one file.
 fn workspace_go_target_kinds(files: &[(&str, &str)], callee: &str) -> Vec<(String, NodeKind)> {
+    workspace_go_calls(files, callee)
+        .into_iter()
+        .map(|(file, kind, _)| (file, kind))
+        .collect()
+}
+
+/// [`workspace_go_target_kinds`] with each edge's confidence, which tells
+/// the tier that bound it.
+fn workspace_go_calls(files: &[(&str, &str)], callee: &str) -> Vec<(String, NodeKind, f32)> {
     let tmp = tempfile::tempdir().expect("tempdir");
     let rust = RustProvider::new().expect("RustProvider::new");
     let python = PythonProvider::new().expect("PythonProvider::new");
@@ -304,7 +313,7 @@ fn workspace_go_target_kinds(files: &[(&str, &str)], callee: &str) -> Vec<(Strin
     }
     let graph = builder.build();
     let pool = graph.string_pool.as_slice();
-    let mut out: Vec<(String, NodeKind)> = graph
+    let mut out: Vec<(String, NodeKind, f32)> = graph
         .edges
         .iter()
         .filter(|e| e.rel_type == RelType::Calls)
@@ -316,6 +325,7 @@ fn workspace_go_target_kinds(files: &[(&str, &str)], callee: &str) -> Vec<(Strin
             (
                 graph.files[file].path.resolve(pool).to_string(),
                 target.kind,
+                e.confidence,
             )
         })
         .collect();
@@ -1047,6 +1057,183 @@ fn test_glob_pub_use_own_item_shadows_the_glob_in_its_namespace() {
         assert_eq!(
             targets_of(&files, callee),
             vec![want.to_string()],
+            "{callee}"
+        );
+    }
+}
+
+/// A crate whose root re-exports `inner::rcoll` with `lib_tail`; `other.rs`
+/// declares an `rcoll` too, unless `other` replaces it. `user.rs` is `user`.
+fn reexport_crate(lib_tail: &str, other: &str, user: &str) -> Vec<(String, String)> {
+    [
+        ("Cargo.toml", "[package]\nname = \"rx\"\n"),
+        ("src/inner.rs", "pub fn rcoll() {}\n"),
+        ("src/other.rs", other),
+        ("src/user.rs", user),
+    ]
+    .iter()
+    .map(|&(p, s)| (p.to_string(), s.to_string()))
+    .chain(std::iter::once((
+        "src/lib.rs".to_string(),
+        format!("pub mod inner;\nmod other;\nmod user;\n{lib_tail}"),
+    )))
+    .collect()
+}
+
+const OTHER_RCOLL: &str = "pub fn rcoll() {}\n";
+const USE_RCOLL: &str = "use crate::rcoll;\npub fn go() { rcoll(); }\n";
+
+fn go_calls(files: &[(String, String)], callee: &str) -> Vec<(String, NodeKind, f32)> {
+    let borrowed: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, s)| (p.as_str(), s.as_str()))
+        .collect();
+    workspace_go_calls(&borrowed, callee)
+}
+
+fn inner_rcoll() -> Vec<(String, NodeKind, f32)> {
+    vec![("src/inner.rs".to_string(), NodeKind::Function, 0.95)]
+}
+
+/// FU-2026-11-01-4a461fdca155: `use crate::rcoll;` reaches `inner.rs`
+/// through the root's `pub use inner::rcoll;` and binds at the import tier,
+/// beside a same-named `other::rcoll` that leaves a bare-name pick
+/// ambiguous.
+#[test]
+fn test_use_through_pub_use_reexport_binds_the_defining_file() {
+    let files = reexport_crate("pub use inner::rcoll;\n", OTHER_RCOLL, USE_RCOLL);
+    assert_eq!(go_calls(&files, "rcoll"), inner_rcoll());
+}
+
+/// With no namesake the bare-name tier guessed the same file at 0.7; the
+/// module tree binds it at the import tier.
+#[test]
+fn test_use_through_pub_use_reexport_without_collision_binds_at_import_tier() {
+    let files = reexport_crate(
+        "pub use inner::rcoll;\n",
+        "pub fn unrelated() {}\n",
+        USE_RCOLL,
+    );
+    assert_eq!(go_calls(&files, "rcoll"), inner_rcoll());
+}
+
+/// The `use` forms that name the re-export: an alias, a group, `super::`
+/// from a root child, a glob `pub use`, and a second `pub use` hop.
+#[test]
+fn test_use_through_pub_use_reexport_forms_bind_the_defining_file() {
+    for (lib_tail, user) in [
+        (
+            "pub use inner::rcoll;\n",
+            "use crate::rcoll as rc;\npub fn go() { rc(); }\n",
+        ),
+        (
+            "pub use inner::rcoll;\npub fn rother() {}\n",
+            "use crate::{rcoll, rother};\npub fn go() { rcoll(); rother(); }\n",
+        ),
+        (
+            "pub use inner::rcoll;\n",
+            "use super::rcoll;\npub fn go() { rcoll(); }\n",
+        ),
+        ("pub use inner::*;\n", USE_RCOLL),
+        ("mod hop;\npub use hop::rcoll;\n", USE_RCOLL),
+    ] {
+        let mut files = reexport_crate(lib_tail, OTHER_RCOLL, user);
+        files.push(("src/hop.rs".into(), "pub use crate::inner::rcoll;\n".into()));
+        assert_eq!(go_calls(&files, "rcoll"), inner_rcoll(), "{lib_tail}{user}");
+    }
+}
+
+/// The re-export's file holds a method namesake before the function: a
+/// `use` names no associated item, so the free `fn` binds.
+#[test]
+fn test_use_through_pub_use_reexport_never_binds_a_method_namesake() {
+    let mut files = reexport_crate("pub use inner::rcoll;\n", OTHER_RCOLL, USE_RCOLL);
+    files.retain(|(p, _)| p != "src/inner.rs");
+    files.push((
+        "src/inner.rs".into(),
+        "pub struct S;\nimpl S {\n    pub fn rcoll(&self) {}\n}\npub fn rcoll() {}\n".into(),
+    ));
+    assert_eq!(
+        go_calls(&files, "rcoll"),
+        vec![("src/inner.rs".to_string(), NodeKind::Function, 0.95)]
+    );
+}
+
+/// An item the crate root declares itself binds there, as before.
+#[test]
+fn test_use_of_a_root_item_binds_the_root_file() {
+    let files: Vec<(String, String)> = [
+        ("Cargo.toml", "[package]\nname = \"rx\"\n"),
+        ("src/lib.rs", "mod other;\nmod user;\npub fn rcoll() {}\n"),
+        ("src/other.rs", OTHER_RCOLL),
+        ("src/user.rs", USE_RCOLL),
+    ]
+    .iter()
+    .map(|&(p, s)| (p.to_string(), s.to_string()))
+    .collect();
+    assert_eq!(
+        go_calls(&files, "rcoll"),
+        vec![("src/lib.rs".to_string(), NodeKind::Function, 0.95)]
+    );
+}
+
+/// Without a `Cargo.toml` there is no module tree to follow the `pub use`
+/// through: the call between the two namesakes stays unbound, never a
+/// guess at `other.rs`.
+#[test]
+fn test_use_through_pub_use_reexport_without_module_tree_never_binds_a_namesake() {
+    let mut files = reexport_crate("pub use inner::rcoll;\n", OTHER_RCOLL, USE_RCOLL);
+    files.retain(|(p, _)| p != "Cargo.toml");
+    assert!(
+        go_calls(&files, "rcoll")
+            .iter()
+            .all(|(file, _, _)| file == "src/inner.rs"),
+        "{:?}",
+        go_calls(&files, "rcoll")
+    );
+}
+
+/// `use other::xcoll;` reaches crate `other`'s `pub use imp::xcoll;`, past
+/// an app-local `xcoll` in another module.
+#[test]
+fn test_cross_crate_use_through_pub_use_reexport_binds_the_defining_file() {
+    let mut files = two_crates(
+        "mod local;\nuse other::xcoll;\npub fn go() { xcoll(); }\n",
+        &[
+            ("crates/other/src/lib.rs", "mod imp;\npub use imp::xcoll;\n"),
+            ("crates/other/src/imp.rs", "pub fn xcoll() {}\n"),
+        ],
+    );
+    files.push((
+        "crates/app/src/local.rs".into(),
+        "pub fn xcoll() {}\n".into(),
+    ));
+    assert_eq!(
+        targets_of(&files, "xcoll"),
+        vec!["crates/other/src/imp.rs".to_string()]
+    );
+}
+
+/// `m` declares `X` with an associated `const h` and method `g`; its glob
+/// `pub use` brings `inner`'s free `h` and `g`. An associated item is no
+/// item of the module, so it never shadows the glob.
+#[test]
+fn test_glob_pub_use_associated_item_never_shadows_the_glob() {
+    let files = two_crates(
+        "pub fn go() {\n    other::m::h();\n    other::m::g();\n}\n",
+        &[
+            ("crates/other/src/lib.rs", "pub mod m;\n"),
+            (
+                "crates/other/src/m.rs",
+                "mod inner;\npub use self::inner::*;\npub struct X;\nimpl X {\n    pub const h: u32 = 1;\n    pub fn g() {}\n}\n",
+            ),
+            ("crates/other/src/m/inner.rs", "pub fn h() {}\npub fn g() {}\n"),
+        ],
+    );
+    for callee in ["h", "g"] {
+        assert_eq!(
+            targets_of(&files, callee),
+            vec!["crates/other/src/m/inner.rs".to_string()],
             "{callee}"
         );
     }

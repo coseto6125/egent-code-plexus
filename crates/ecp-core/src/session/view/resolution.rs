@@ -76,6 +76,11 @@ struct OverlayNames<'a> {
     same_file: FxHashSet<(usize, &'a str)>,
     /// name → (virtual idx, file meta), anywhere in the overlay.
     anywhere: FxHashMap<&'a str, Vec<(u32, FileMeta)>>,
+    /// The qualifier table only: the Rust `impl` blocks, keyed as
+    /// `same_file` and `anywhere` are, for a method-syntax receiver typed as
+    /// a type only an `impl` declares ([`ladder::qualifier_file`]).
+    impl_same_file: FxHashSet<(usize, &'a str)>,
+    impl_anywhere: FxHashMap<&'a str, Vec<(u32, FileMeta)>>,
 }
 
 impl<'a> OverlayNames<'a> {
@@ -84,6 +89,8 @@ impl<'a> OverlayNames<'a> {
             target,
             same_file: FxHashSet::default(),
             anywhere: FxHashMap::default(),
+            impl_same_file: FxHashSet::default(),
+            impl_anywhere: FxHashMap::default(),
         }
     }
 
@@ -97,12 +104,19 @@ impl<'a> OverlayNames<'a> {
     ) {
         // The index registers a later overload by id only: no name tier,
         // same-file included, can bind it.
-        if node.later_overload || !self.target.kind_predicate()(node.kind) {
+        if node.later_overload {
             return;
         }
-        self.same_file.insert((file_ord, node.name.as_str()));
+        let (same_file, anywhere) = if self.target.kind_predicate()(node.kind) {
+            (&mut self.same_file, &mut self.anywhere)
+        } else if self.target == ResolveTarget::Qualifier && node.kind == NodeKind::Impl {
+            (&mut self.impl_same_file, &mut self.impl_anywhere)
+        } else {
+            return;
+        };
+        same_file.insert((file_ord, node.name.as_str()));
         if first_of_uid {
-            self.anywhere
+            anywhere
                 .entry(node.name.as_str())
                 .or_default()
                 .push((virt, meta));
@@ -3354,17 +3368,20 @@ impl<'a> RustModules<'a> {
             .find(|file| *file == requested)
     }
 
-    /// Whether `file` declares a node named `name` whose kind `wanted`
-    /// accepts. A dirty file answers from its fresh parse.
+    /// Whether `file` declares a module-level node named `name` whose kind
+    /// `wanted` accepts: an associated item (`impl X { const h: u32 = 1; }`)
+    /// is no item of the module. A dirty file answers from its fresh parse.
     fn declares(&self, file: &str, name: &str, wanted: impl Fn(NodeKind) -> bool) -> bool {
         match self.dirty.get(file) {
-            Some(dirty) => dirty
-                .symbols
-                .iter()
-                .any(|s| s.name == name && wanted(s.kind)),
+            Some(dirty) => dirty.symbols.iter().any(|s| {
+                s.name == name
+                    && wanted(s.kind)
+                    && s.owner_class.as_deref().and_then(owner_key).is_none()
+            }),
             None => self.graph.nodes_by_name(name).any(|idx| {
                 let node = &self.graph.nodes[idx as usize];
                 wanted(NodeKind::from(&node.kind))
+                    && owner_key(node.owner_class.resolve(&self.graph.string_pool)).is_none()
                     && self.graph.files[node.file_idx.to_native() as usize]
                         .path
                         .resolve(&self.graph.string_pool)
@@ -4364,6 +4381,34 @@ impl<'a> ladder::ImportModules for OverlayQualifiers<'_, 'a, '_> {
     }
 }
 
+impl OverlayQualifiers<'_, '_, '_> {
+    /// The clean base nodes named `name` (no dirty-file node, no later
+    /// overload) whose kind `wanted` accepts.
+    fn clean_base<'s>(
+        &'s self,
+        name: &'s str,
+        wanted: fn(NodeKind) -> bool,
+    ) -> impl Iterator<Item = u32> + 's {
+        let graph: &'s ArchivedZeroCopyGraph = self.facts.graph;
+        let dirty_base: &'s FxHashSet<u32> = self.facts.dirty_base;
+        graph.nodes_by_name(name).filter(move |&idx| {
+            wanted(NodeKind::from(&graph.nodes[idx as usize].kind))
+                && !dirty_base.contains(&idx)
+                && !graph.is_later_overload(idx)
+        })
+    }
+
+    /// Whether a declaration of a qualifier kind, clean base or overlay, is
+    /// named `name`: the index's name table holds the same set.
+    fn names_qualifier(&self, name: &str) -> bool {
+        self.qualifiers.anywhere.contains_key(name)
+            || self
+                .clean_base(name, ResolveTarget::Qualifier.kind_predicate())
+                .next()
+                .is_some()
+    }
+}
+
 impl<'a> ladder::QualifierFacts for OverlayQualifiers<'_, 'a, '_> {
     type Decls = OverlayFacts<'a>;
 
@@ -4371,9 +4416,15 @@ impl<'a> ladder::QualifierFacts for OverlayQualifiers<'_, 'a, '_> {
         self.facts
     }
 
-    fn caller_declares(&self, source: &str, name: &str) -> bool {
+    fn caller_declares(&self, source: &str, name: &str, impl_receiver: bool) -> bool {
         debug_assert_eq!(source, self.facts.scope.dirty()[self.file_ord].rel_path);
         self.qualifiers.same_file.contains(&(self.file_ord, name))
+            || impl_receiver
+                && self
+                    .qualifiers
+                    .impl_same_file
+                    .contains(&(self.file_ord, name))
+                && !self.names_qualifier(name)
     }
 
     fn stored_file(&self, path: &str) -> Option<&'a str> {
@@ -4381,18 +4432,29 @@ impl<'a> ladder::QualifierFacts for OverlayQualifiers<'_, 'a, '_> {
     }
 
     /// The clean base declarations of a qualifier kind (no dirty-file node,
-    /// no later overload) and the overlay's, through [`pick_global`].
-    fn global_qualifier(&self, qualifier: &str, caller: FileMeta) -> GlobalPick {
+    /// no later overload) and the overlay's, through [`pick_global`]; with
+    /// `impl_receiver` and none of them anywhere, the `impl` blocks through
+    /// [`ladder::impl_qualifier_pick`].
+    fn global_qualifier(
+        &self,
+        qualifier: &str,
+        caller: FileMeta,
+        impl_receiver: bool,
+    ) -> GlobalPick {
         let facts = self.facts;
-        let graph = facts.graph;
-        let is_qualifier = ResolveTarget::Qualifier.kind_predicate();
-        let base = graph
-            .nodes_by_name(qualifier)
-            .filter(|&idx| {
-                is_qualifier(NodeKind::from(&graph.nodes[idx as usize].kind))
-                    && !facts.dirty_base.contains(&idx)
-                    && !graph.is_later_overload(idx)
-            })
+        if impl_receiver && !self.names_qualifier(qualifier) {
+            let base = self
+                .clean_base(qualifier, |kind| kind == NodeKind::Impl)
+                .map(|idx| (idx, facts.meta_of(idx)));
+            let overlay = self.qualifiers.impl_anywhere.get(qualifier);
+            return ladder::impl_qualifier_pick(
+                facts,
+                caller,
+                base.chain(overlay.into_iter().flatten().copied()),
+            );
+        }
+        let base = self
+            .clean_base(qualifier, ResolveTarget::Qualifier.kind_predicate())
             .map(|idx| (idx, facts.meta_of(idx)));
         let overlay = self
             .qualifiers

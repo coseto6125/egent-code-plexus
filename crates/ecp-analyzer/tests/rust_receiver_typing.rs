@@ -555,3 +555,132 @@ fn test_rust_self_path_call_trait_default_only_binds_through_heritage() {
         vec![("src/lib.rs".to_string(), "U".to_string())]
     );
 }
+
+/// `rkyv::Archive` generates `ArchivedZg`: the project declares it only
+/// through `impl ArchivedZg`, so no type node carries the name. `other.rs`
+/// holds a free `fn later` a bare-name tier could guess.
+const ARCHIVED_GRAPH_RS: &str = r#"#[derive(rkyv::Archive)]
+pub struct Zg;
+impl ArchivedZg {
+    pub fn later(&self, i: u32) -> u32 { i }
+    pub fn uniq_arch(&self) -> u32 { 0 }
+}
+pub fn same_file(g: &ArchivedZg) -> u32 { g.later(1) }
+pub fn same_file_uniq(g: &ArchivedZg) -> u32 { g.uniq_arch() }
+"#;
+
+fn archived_crate(graph_rs: &str) -> ZeroCopyGraph {
+    build(&[
+        ("src/lib.rs", "pub mod graph;\npub mod other;\npub mod user;\n"),
+        ("src/graph.rs", graph_rs),
+        ("src/other.rs", "pub fn later(i: u32) -> u32 { i }\n"),
+        (
+            "src/user.rs",
+            "use crate::graph::ArchivedZg;\npub fn use_arch(g: &ArchivedZg) -> u32 { g.later(1) }\n",
+        ),
+    ])
+}
+
+/// A method-syntax call on a receiver typed as an impl-only type binds the
+/// `impl` block's method, from the impl's own file and through a `use`;
+/// the same-named free `fn later` never binds.
+#[test]
+fn test_rust_typed_receiver_of_impl_only_type_binds_the_impl_method() {
+    let g = archived_crate(ARCHIVED_GRAPH_RS);
+    let arch = vec![("src/graph.rs".to_string(), "ArchivedZg".to_string())];
+    assert_eq!(callee_owners(&g, "same_file", "later"), arch, "same_file");
+    assert_eq!(
+        callee_owners(&g, "same_file_uniq", "uniq_arch"),
+        arch,
+        "same_file_uniq"
+    );
+    assert_eq!(callee_owners(&g, "use_arch", "later"), arch, "use_arch");
+}
+
+/// `impl Debug for ArchivedZg` beside `impl ArchivedZg` is one more block in
+/// the same file: the qualifier still names one file.
+#[test]
+fn test_rust_typed_receiver_of_impl_only_type_two_blocks_one_file_binds() {
+    let graph_rs = format!(
+        "{ARCHIVED_GRAPH_RS}impl std::fmt::Debug for ArchivedZg {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ Ok(()) }}\n}}\n"
+    );
+    let g = archived_crate(&graph_rs);
+    assert_eq!(
+        callee_owners(&g, "use_arch", "later"),
+        vec![("src/graph.rs".to_string(), "ArchivedZg".to_string())]
+    );
+}
+
+/// `impl ArchivedZg` blocks in two files: the caller in a block's own file
+/// binds that file's method. A caller in neither file has no one qualifier
+/// file today, so `use_arch` misses its edge; the contract is only that it
+/// never binds a wrong one.
+#[test]
+fn test_rust_typed_receiver_of_impl_only_type_in_two_files_never_binds_a_wrong_file() {
+    let g = build(&[
+        (
+            "src/lib.rs",
+            "pub mod graph;\npub mod graph_ext;\npub mod user;\n",
+        ),
+        ("src/graph.rs", ARCHIVED_GRAPH_RS),
+        (
+            "src/graph_ext.rs",
+            "use crate::graph::ArchivedZg;\nimpl ArchivedZg {\n    pub fn extra(&self) -> u32 { 2 }\n}\n",
+        ),
+        (
+            "src/user.rs",
+            "use crate::graph::ArchivedZg;\npub fn use_arch(g: &ArchivedZg) -> u32 { g.later(1) }\n",
+        ),
+    ]);
+    assert_eq!(
+        callee_owners(&g, "same_file", "later"),
+        vec![("src/graph.rs".to_string(), "ArchivedZg".to_string())]
+    );
+    let use_arch = callee_owners(&g, "use_arch", "later");
+    assert!(
+        use_arch
+            .iter()
+            .all(|(file, owner)| file == "src/graph.rs" && owner == "ArchivedZg"),
+        "{use_arch:?}"
+    );
+}
+
+/// `impl From<Local> for String` is the project's only `String`, and
+/// `String::from("x")` is a path that calls std: it binds nothing. A
+/// method-syntax `s.len()` finds no `len` in that impl and binds nothing
+/// either.
+#[test]
+fn test_rust_path_call_on_impl_only_std_type_binds_nothing() {
+    let g = build(&[(
+        "src/lib.rs",
+        "pub struct Local;\nimpl From<Local> for String {\n    fn from(_: Local) -> String { String::new() }\n}\npub fn f() -> String { String::from(\"x\") }\npub fn n(s: &String) -> usize { s.len() }\n",
+    )]);
+    assert!(callee_files(&g, "f", "from").is_empty());
+    assert!(callee_files(&g, "n", "len").is_empty());
+}
+
+/// A type with both `struct S` and `impl S` stays one qualifier: the struct
+/// names it, the impl block does not make it ambiguous. `T` declares a
+/// second `m` a bare-name pick could take.
+#[test]
+fn test_rust_typed_receiver_of_struct_with_impl_binds_its_method() {
+    let g = build(&[
+        ("src/lib.rs", "pub mod s;\npub mod t;\npub mod user;\n"),
+        (
+            "src/s.rs",
+            "pub struct S;\nimpl S {\n    pub fn m(&self) -> u32 { 0 }\n}\n",
+        ),
+        (
+            "src/t.rs",
+            "pub struct T;\nimpl T {\n    pub fn m(&self) -> u32 { 1 }\n}\n",
+        ),
+        (
+            "src/user.rs",
+            "use crate::s::S;\npub fn typed(x: &S) -> u32 { x.m() }\n",
+        ),
+    ]);
+    assert_eq!(
+        callee_owners(&g, "typed", "m"),
+        vec![("src/s.rs".to_string(), "S".to_string())]
+    );
+}

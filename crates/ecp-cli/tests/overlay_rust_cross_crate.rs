@@ -707,3 +707,56 @@ fn test_overlay_rust_self_path_trait_default_matches_reindex() {
         assert_eq!(overlay, reindex, "{label}");
     }
 }
+
+/// `ArchivedZg` is declared only by `impl ArchivedZg` (an `rkyv::Archive`
+/// derive generates the type), and `other.rs` holds a free `fn later`. A
+/// typed receiver binds the impl's method at the qualifier tier, from the
+/// impl's own file and through a `use`, whichever file is dirty.
+#[test]
+fn test_overlay_rust_typed_receiver_of_impl_only_type_matches_reindex() {
+    const GRAPH: &str = "src/graph.rs";
+    const USER: &str = "src/user.rs";
+    let graph = "#[derive(rkyv::Archive)]\npub struct Zg;\nimpl ArchivedZg {\n    pub fn later(&self, i: u32) -> u32 { i }\n}\npub fn same_file(g: &ArchivedZg) -> u32 {\n    g.later(1)\n}\n";
+    let user = "use crate::graph::ArchivedZg;\npub fn use_arch(g: &ArchivedZg) -> u32 {\n    g.later(1)\n}\n";
+    let files = owned(&[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"zg\"\nversion = \"0.1.0\"\n",
+        ),
+        (
+            "src/lib.rs",
+            "pub mod graph;\npub mod other;\npub mod user;\n",
+        ),
+        (GRAPH, graph),
+        ("src/other.rs", "pub fn later(i: u32) -> u32 { i }\n"),
+        (USER, user),
+    ]);
+    for (caller_file, source, caller, shift) in
+        [(GRAPH, graph, "same_file", 1), (USER, user, "use_arch", 0)]
+    {
+        for (label, edited) in [
+            ("touched", source.to_string()),
+            ("one-line edit", one_line_edit(source)),
+        ] {
+            let (reindex, overlay) = reindex_and_overlay(&files, caller_file, &edited, &[caller]);
+            let line = if label == "touched" { 4 } else { 4 + shift };
+            let bound: Vec<(&str, &str, u32, f32)> = reindex
+                .iter()
+                .map(|call| {
+                    (
+                        call.callee_file.as_str(),
+                        call.callee.as_str(),
+                        call.callee_line,
+                        call.confidence,
+                    )
+                })
+                .collect();
+            assert_eq!(
+                bound,
+                [(GRAPH, "later", line, Tier::QualifierScoped.confidence())],
+                "{caller} {label}: {reindex:#?}"
+            );
+            assert_eq!(overlay, reindex, "{caller} {label}");
+        }
+    }
+}

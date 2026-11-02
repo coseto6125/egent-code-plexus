@@ -1202,8 +1202,9 @@ impl SymbolTable {
             .and_then(|ids| ids.first().copied())
     }
 
-    /// Whether `file_path` declares a node named `node_name` whose kind
-    /// `holds` accepts.
+    /// Whether `file_path` declares a module-level node named `node_name`
+    /// whose kind `holds` accepts: an associated item
+    /// (`impl X { const h: u32 = 1; }`) is no item of the module.
     pub(crate) fn declares_in_file(
         &self,
         file_path: &str,
@@ -1213,7 +1214,11 @@ impl SymbolTable {
         self.file_scoped
             .get(file_path)
             .and_then(|file_map| file_map.get(node_name))
-            .is_some_and(|ids| ids.iter().any(|&id| holds(self.node_kinds[id as usize])))
+            .is_some_and(|ids| {
+                ids.iter().any(|&id| {
+                    self.node_owner[id as usize] == NO_OWNER && holds(self.node_kinds[id as usize])
+                })
+            })
     }
 
     /// Kind-aware variant of [`lookup_in_file`]: scans the per-name node_id
@@ -1437,6 +1442,26 @@ impl SymbolTable {
             .iter()
             .filter(move |&&id| field(self.node_kinds[id as usize]))
             .map(move |&id| (id, self.node_file_meta[id as usize]))
+    }
+
+    /// The Rust `impl` blocks named `name`, with their files' metas, when no
+    /// declaration of a qualifier kind (a type, a namespace, a module) has
+    /// the name: a type only an `impl` declares, such as the
+    /// derive-generated `ArchivedZg`. None otherwise, so a `struct S` beside
+    /// its `impl S` stays the one qualifier.
+    pub(crate) fn impl_only_blocks(
+        &self,
+        name: &str,
+    ) -> impl Iterator<Item = (u32, FileMeta)> + '_ {
+        let ids = self.global_scoped.get(name).map_or(&[][..], Vec::as_slice);
+        let is_qualifier = ResolveTarget::Qualifier.kind_predicate();
+        let impl_only = !ids
+            .iter()
+            .any(|&id| is_qualifier(self.node_kinds[id as usize]));
+        ids.iter()
+            .copied()
+            .filter(move |&id| impl_only && self.node_kinds[id as usize] == NodeKind::Impl)
+            .map(move |id| (id, self.node_file_meta[id as usize]))
     }
 
     /// Every candidate [`lookup_global`] weighs, as a set: kind-filtered, then

@@ -150,8 +150,9 @@ const COPIES: &[Copies] = &[
         copy: "go/pkg/pkg.go",
         callee: "Make",
     },
-    // The workspace holds `core/dup` and `core/app`; the `android/` copy of
-    // the crate sits outside it.
+    // No workspace holds either tree's crates, so no manifest names the
+    // `dup` an `app` uses: both sides take the nearest copy. A workspace
+    // member binds through its manifest instead (`overlay_self_parity.rs`).
     Copies {
         label: "Rust/crate import",
         tree: &[
@@ -160,7 +161,7 @@ const COPIES: &[Copies] = &[
             ("app/Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[dependencies]\ndup = { path = \"../dup\" }\n"),
             ("app/src/lib.rs", "use dup::rs_make;\npub fn t() { rs_make(); }\n"),
         ],
-        shared: &[("Cargo.toml", "[workspace]\nmembers = [\"core/app\", \"core/dup\"]\n")],
+        shared: &[],
         caller: "app/src/lib.rs",
         copy: "dup/src/lib.rs",
         callee: "rs_make",

@@ -41,7 +41,7 @@ use ecp_core::analyzer::csharp_access::{self, CallAccess};
 use ecp_core::analyzer::csharp_extension::{self, ReceiverSite};
 use ecp_core::analyzer::import_binding::{
     fqn_imported_name, fqn_language, fqn_type_path, import_binding, import_member_fallback,
-    MemberOwner,
+    plain_binding, MemberOwner,
 };
 use ecp_core::analyzer::ladder::{
     self, qualifier_prefix_is_internal, split_qualifier, CallContext, CallPick, CrateModule,
@@ -376,21 +376,33 @@ impl ladder::QualifierFacts for IndexFacts<'_, '_> {
         self.0.symbol_table
     }
 
-    fn caller_declares(&self, source: &str, name: &str) -> bool {
-        self.0
-            .symbol_table
-            .lookup_in_file_with_kind(source, name, ResolveTarget::Qualifier)
+    fn caller_declares(&self, source: &str, name: &str, impl_receiver: bool) -> bool {
+        let st = self.0.symbol_table;
+        st.lookup_in_file_with_kind(source, name, ResolveTarget::Qualifier)
             .is_some()
+            || impl_receiver
+                && st
+                    .impl_only_blocks(name)
+                    .any(|(id, _)| st.file_of(id) == Some(source))
     }
 
     fn stored_file(&self, path: &str) -> Option<Arc<str>> {
         Some(Arc::from(path))
     }
 
-    fn global_qualifier(&self, qualifier: &str, caller: FileMeta) -> GlobalPick {
-        self.0
-            .symbol_table
-            .lookup_global(qualifier, ResolveTarget::Qualifier, caller, false)
+    fn global_qualifier(
+        &self,
+        qualifier: &str,
+        caller: FileMeta,
+        impl_receiver: bool,
+    ) -> GlobalPick {
+        let st = self.0.symbol_table;
+        match st.lookup_global(qualifier, ResolveTarget::Qualifier, caller, false) {
+            GlobalPick::NoMatch if impl_receiver => {
+                ladder::impl_qualifier_pick(st, caller, st.impl_only_blocks(qualifier))
+            }
+            pick => pick,
+        }
     }
 
     fn for_each_candidate(&self, importer: &str, specifier: &str, visit: impl FnMut(&str) -> bool) {
@@ -1386,7 +1398,8 @@ impl<'a> Resolver<'a> {
 
     /// Tier 2 outside the import-member policy: an import whose local name
     /// is the callee, probed through the specifier's candidate files
-    /// ([`reexport::named_import`]), and the barrel a re-export hop went
+    /// ([`reexport::named_import`]), else a Rust import through the module
+    /// tree ([`Self::rust_tree_import`]), and the barrel a re-export hop went
     /// through.
     fn resolve_named_import(
         &self,
@@ -1400,7 +1413,7 @@ impl<'a> Resolver<'a> {
         let reexports = self
             .reexports
             .filter(|_| is_ecmascript(self.symbol_table.file_language(&importer)));
-        match reexport::named_import(
+        let hit = reexport::named_import(
             &IndexFacts(self),
             &importer,
             raw_imports.iter().map(ImportRef::from),
@@ -1409,21 +1422,63 @@ impl<'a> Resolver<'a> {
             |exported_name| {
                 reexports.is_some_and(|index| index.may_reach(self.symbol_table, exported_name))
             },
-        ) {
-            Some(hit) => (
-                self.import_scoped(
-                    source_file,
-                    symbol_name,
-                    &raw_imports[hit.position],
-                    hit.decl,
-                )
-                .edge()
-                .into_iter()
-                .collect(),
-                hit.barrel,
+        )
+        .map(|hit| (hit.position, hit.decl, hit.barrel))
+        .or_else(|| {
+            self.rust_tree_import(&importer, symbol_name, raw_imports, target)
+                .map(|(position, decl)| (position, decl, None))
+        });
+        match hit {
+            Some((position, decl, barrel)) => (
+                self.import_scoped(source_file, symbol_name, &raw_imports[position], decl)
+                    .edge()
+                    .into_iter()
+                    .collect(),
+                barrel,
             ),
             None => (Vec::new(), None),
         }
+    }
+
+    /// The first Rust `use` binding `symbol_name` whose path the module tree
+    /// places ([`ladder::module_tree_item`]), and the module-level item it
+    /// names there: `use crate::f;` where `lib.rs` writes `pub use inner::f;`
+    /// binds `inner.rs`'s `f`, which the candidate probe of `lib.rs` misses.
+    /// A `use` names no associated item, so an owned namesake never binds.
+    /// An importer outside every Cargo target binds nothing here: the
+    /// tree cannot tell which crate its own manifest names (a duplicated
+    /// source tree outside the workspace), so the nearest-copy tier decides.
+    fn rust_tree_import(
+        &self,
+        importer: &str,
+        symbol_name: &str,
+        raw_imports: &[RawImport],
+        target: ResolveTarget,
+    ) -> Option<(usize, NodeId)> {
+        if !is_rust_source(Path::new(importer)) {
+            return None;
+        }
+        let tree = self.module_tree()?;
+        ladder::ModuleTreeFacts::caller_crate(&tree, importer)?;
+        raw_imports
+            .iter()
+            .enumerate()
+            .find_map(|(position, import)| {
+                let imported =
+                    plain_binding(&import.imported_name, import.alias.as_deref(), symbol_name)?;
+                let ladder::TreeItem::Found { file, item } = ladder::module_tree_item(
+                    &tree,
+                    importer,
+                    &format!("{}::{imported}", import.source),
+                    ladder::Namespace::of(target),
+                )?
+                else {
+                    return None;
+                };
+                self.symbol_table
+                    .lookup_member_in_file(&file, &item, target, MemberOwner::TopLevel)
+                    .map(|decl| (position, decl))
+            })
     }
 
     /// Record and return an ImportScoped edge to `node_id` through `import`.

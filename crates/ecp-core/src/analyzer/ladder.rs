@@ -819,13 +819,22 @@ pub trait QualifierFacts: ImportModules {
     fn decls(&self) -> &Self::Decls;
     /// Whether the caller's file `source` declares `name` of a
     /// [`ResolveTarget::Qualifier`] kind: a type, a namespace or a module.
-    fn caller_declares(&self, source: &str, name: &str) -> bool;
+    /// With `impl_receiver` ([`qualifier_file`]), also a Rust `impl` block
+    /// of `name` when no declaration of a qualifier kind has the name.
+    fn caller_declares(&self, source: &str, name: &str, impl_receiver: bool) -> bool;
     /// `path` as the side stores it. `None` for a file the side does not
     /// hold.
     fn stored_file(&self, path: &str) -> Option<Self::Module>;
     /// [`pick_global`] over the declarations of `qualifier` of a qualifier
-    /// kind that the `caller` barrier weighs.
-    fn global_qualifier(&self, qualifier: &str, caller: FileMeta) -> GlobalPick;
+    /// kind that the `caller` barrier weighs. With `impl_receiver` and no
+    /// declaration of a qualifier kind named `qualifier`, its Rust `impl`
+    /// blocks through [`impl_qualifier_pick`].
+    fn global_qualifier(
+        &self,
+        qualifier: &str,
+        caller: FileMeta,
+        impl_receiver: bool,
+    ) -> GlobalPick;
     /// Each candidate file of `specifier` from `importer`, in probe order,
     /// until `visit` returns `false`.
     fn for_each_candidate(&self, importer: &str, specifier: &str, visit: impl FnMut(&str) -> bool);
@@ -906,6 +915,12 @@ pub fn qualifier_file<F: QualifierFacts>(
 ) -> Option<F::Module> {
     let decls = facts.decls();
     let language = caller.language;
+    // A Rust method-syntax call (`g.later()`, callee `ArchivedZg.later`) is
+    // typed by its receiver, which may name a type only an `impl` declares
+    // (the derive-generated `ArchivedZg`). A path never: `String::from("x")`
+    // calls std even where `impl From<L> for String` is the only `String`.
+    let impl_receiver =
+        language == Language::Rust && callee.is_some_and(|callee| !callee.contains("::"));
     let declares_member = |file: &str| decls.first_decl_in_file(file, member, target).is_some();
     let agrees = |file: &str| {
         callee.map_or(Some(true), |callee| {
@@ -915,7 +930,7 @@ pub fn qualifier_file<F: QualifierFacts>(
     // The caller's own file, only when it holds the member too: a
     // file-backed `mod m;` declares the module here and its members in
     // `m.rs`, which the file-name step finds.
-    if facts.caller_declares(source, qualifier) && declares_member(source) {
+    if facts.caller_declares(source, qualifier, impl_receiver) && declares_member(source) {
         match agrees(source) {
             Some(true) => return facts.stored_file(source),
             Some(false) => {}
@@ -970,7 +985,7 @@ pub fn qualifier_file<F: QualifierFacts>(
             // A head that is a module of the caller's own file (`mod utils;
             // use utils::fs;`) is no crate path.
             let head = module_path.split("::").next().unwrap_or_default();
-            if !facts.caller_declares(source, head) {
+            if !facts.caller_declares(source, head, false) {
                 if let CrateModule::Placed(file) =
                     facts.crate_module(source, &module_path, member, target)
                 {
@@ -995,7 +1010,7 @@ pub fn qualifier_file<F: QualifierFacts>(
         }
     }
 
-    if let GlobalPick::Unique(id) = facts.global_qualifier(qualifier, caller) {
+    if let GlobalPick::Unique(id) = facts.global_qualifier(qualifier, caller, impl_receiver) {
         if let Some(file) = decls.file_of(id).filter(|&file| declares_member(file)) {
             match agrees(file) {
                 Some(true) => return facts.stored_file(file),
@@ -1025,6 +1040,31 @@ pub fn qualifier_file<F: QualifierFacts>(
         StemFile::DeclaringMember if !declares_member(file) => None,
         _ => facts.stored_file(file),
     }
+}
+
+/// [`QualifierFacts::global_qualifier`] over the Rust `impl` blocks
+/// `candidates` of an impl-only type: one per file, since the tier reads only
+/// the file and `impl S` beside `impl Debug for S` is one qualifier file,
+/// then [`pick_global`]. Blocks in two files leave it `Ambiguous`.
+pub fn impl_qualifier_pick<D: PickFacts + ?Sized>(
+    decls: &D,
+    caller: FileMeta,
+    candidates: impl IntoIterator<Item = (u32, FileMeta)>,
+) -> GlobalPick {
+    let mut files: Vec<&str> = Vec::new();
+    pick_global(
+        caller,
+        candidates.into_iter().filter(|&(id, _)| {
+            !decls.is_lexically_scoped(id)
+                && decls.file_of(id).is_some_and(|file| {
+                    let first = !files.contains(&file);
+                    if first {
+                        files.push(file);
+                    }
+                    first
+                })
+        }),
+    )
 }
 
 /// One qualified call site: `callee` as written, split into `qualifier` and
@@ -3419,7 +3459,7 @@ mod tests {
         fn decls(&self) -> &Fake {
             &self.fake
         }
-        fn caller_declares(&self, source: &str, name: &str) -> bool {
+        fn caller_declares(&self, source: &str, name: &str, _impl_receiver: bool) -> bool {
             let wanted = ResolveTarget::Qualifier.kind_predicate();
             self.fake
                 .in_file(source, name)
@@ -3429,7 +3469,12 @@ mod tests {
         fn stored_file(&self, path: &str) -> Option<&'static str> {
             self.files.iter().copied().find(|&file| file == path)
         }
-        fn global_qualifier(&self, qualifier: &str, caller: FileMeta) -> GlobalPick {
+        fn global_qualifier(
+            &self,
+            qualifier: &str,
+            caller: FileMeta,
+            _impl_receiver: bool,
+        ) -> GlobalPick {
             let wanted = ResolveTarget::Qualifier.kind_predicate();
             pick_global(
                 caller,
@@ -4886,5 +4931,33 @@ mod tests {
             "an interface is not constructed"
         );
         asked_for(&[("Shape", true)]);
+    }
+
+    /// Blocks of one impl-only type: two in one file are one qualifier
+    /// file, a third in another file makes it ambiguous, and a block inside
+    /// a function body is no candidate.
+    #[test]
+    fn test_impl_qualifier_pick_one_per_file_then_pick_global() {
+        let decls: [Decl; 4] = [
+            ("src/g.rs", "Z", NodeKind::Impl, None),
+            ("src/g.rs", "Z", NodeKind::Impl, None),
+            ("src/h.rs", "Z", NodeKind::Impl, None),
+            ("src/k.rs", "Z", NodeKind::Impl, None),
+        ];
+        let mut fake = Fake::new(Layout::Index, &decls);
+        fake.scoped.push(3);
+        let caller = FileMeta::from_path("src/u.rs");
+        let named = fake.named("Z");
+        let pick = |ids: &[u32]| {
+            impl_qualifier_pick(
+                &fake,
+                caller,
+                named.iter().copied().filter(|(id, _)| ids.contains(id)),
+            )
+        };
+        assert_eq!(pick(&[0, 1]), GlobalPick::Unique(0));
+        assert_eq!(pick(&[0, 1, 3]), GlobalPick::Unique(0));
+        assert_eq!(pick(&[0, 1, 2]), GlobalPick::Ambiguous);
+        assert_eq!(pick(&[]), GlobalPick::NoMatch);
     }
 }

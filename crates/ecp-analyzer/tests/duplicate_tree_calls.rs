@@ -274,26 +274,60 @@ fn test_resolve_call_go_duplicate_module_binds_nearest_copy() {
     }
 }
 
-/// The workspace holds `core/dup` and `core/app`; the `android/` copy of
-/// the crate sits outside it, as Cargo allows one package per name.
+const RUST_DUP_CRATE: [(&str, &str); 3] = [
+    ("dup/Cargo.toml", "[package]\nname = \"dup\"\nversion = \"0.1.0\"\n"),
+    ("dup/src/lib.rs", "pub fn rs_make() {}\n"),
+    (
+        "app/Cargo.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[dependencies]\ndup = { path = \"../dup\" }\n",
+    ),
+];
+const RUST_DUP_CALLER: (&str, &str) = (
+    "app/src/lib.rs",
+    "use dup::rs_make;\npub fn t() { rs_make(); }\n",
+);
+
+/// No workspace holds either tree's crates, so no manifest says which
+/// `dup` an `app` names: each caller's `use dup::rs_make` takes the copy
+/// nearest it.
 #[test]
 fn test_resolve_call_rust_duplicate_crate_import_binds_nearest_copy() {
-    assert_each_tree_binds_its_copy(
-        &[
-            ("dup/Cargo.toml", "[package]\nname = \"dup\"\nversion = \"0.1.0\"\n"),
-            ("dup/src/lib.rs", "pub fn rs_make() {}\n"),
-            (
-                "app/Cargo.toml",
-                "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[dependencies]\ndup = { path = \"../dup\" }\n",
-            ),
-        ],
-        &[("app/src/lib.rs", "use dup::rs_make;\npub fn t() { rs_make(); }\n")],
-        &[(
-            "Cargo.toml",
-            "[workspace]\nmembers = [\"core/app\", \"core/dup\"]\n",
-        )],
-        "rs_make",
-    );
+    assert_each_tree_binds_its_copy(&RUST_DUP_CRATE, &[RUST_DUP_CALLER], &[], "rs_make");
+}
+
+/// The workspace holds `core/dup` and `core/app`; the `android/` copy sits
+/// outside it, as Cargo allows one package per name. The member caller
+/// binds its manifest's `dup` through the module tree at the import tier;
+/// the caller outside every Cargo target still takes its nearest copy,
+/// never the workspace's `dup`.
+#[test]
+fn test_resolve_call_rust_duplicate_crate_import_member_binds_its_manifest_crate() {
+    let mut files = vec![(
+        "Cargo.toml".to_string(),
+        "[workspace]\nmembers = [\"core/app\", \"core/dup\"]\n",
+    )];
+    for tree in TREES {
+        for &(rel, src) in RUST_DUP_CRATE.iter().chain([&RUST_DUP_CALLER]) {
+            files.push((format!("{tree}/{rel}"), src));
+        }
+    }
+    let mut found = calls(&build(&files), "t", "rs_make");
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    let expected = vec![
+        (
+            "android/core/app/src/lib.rs".to_string(),
+            "android/core/dup/src/lib.rs".to_string(),
+            NEAREST_COPY_CONFIDENCE,
+            NEAREST_COPY_REASON.to_string(),
+        ),
+        (
+            "core/app/src/lib.rs".to_string(),
+            "core/dup/src/lib.rs".to_string(),
+            0.95,
+            "call".to_string(),
+        ),
+    ];
+    assert_eq!(found, expected);
 }
 
 /// Two copies of one workspace package: the bare specifier names both.
