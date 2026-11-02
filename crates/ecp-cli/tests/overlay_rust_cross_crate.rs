@@ -228,6 +228,16 @@ fn assert_module_tree_binds(reindex: &[Call], expected: &[(&str, &str)], label: 
     );
 }
 
+/// The reindex binds each `(callee_file, callee)` once, at any tier: the
+/// `#[path]` fixtures bind through a `use`, so the import tier answers.
+fn assert_reindex_binds(reindex: &[Call], expected: &[(&str, &str)], label: &str) {
+    let bound: Vec<(&str, &str)> = reindex
+        .iter()
+        .map(|call| (call.callee_file.as_str(), call.callee.as_str()))
+        .collect();
+    assert_eq!(bound, expected, "{label}: the reindex binds: {reindex:#?}");
+}
+
 const CALLER: &str = "crates/a/src/lib.rs";
 
 /// Workspace `crates/a` and `crates/b`. The caller's own crate declares a
@@ -1823,7 +1833,7 @@ fn test_overlay_view_reexport_target_below_path_attr_binds_nothing_beyond_index(
     );
     let edited = "use b::facade::f;\n\npub fn t() {\n    f();\n}\n";
     let (reindex, overlay) = reindex_and_overlay(&files, CALLER, edited, &["t"]);
-    assert_module_tree_binds(&reindex, &[("crates/b/src/real.rs", "f")], "#[path] target");
+    assert_reindex_binds(&reindex, &[("crates/b/src/real.rs", "f")], "#[path] target");
     assert!(
         overlay.iter().all(|call| reindex.contains(call)),
         "the overlay binds an edge the index does not: {overlay:#?}"
@@ -1853,7 +1863,7 @@ fn test_overlay_view_reexport_into_path_attr_subtree_binds_nothing_beyond_index(
     );
     let edited = "use b::facade::f;\n\npub fn t() {\n    f();\n}\n";
     let (reindex, overlay) = reindex_and_overlay(&files, CALLER, edited, &["t"]);
-    assert_module_tree_binds(&reindex, &[("crates/b/src/real.rs", "f")], "#[path] target");
+    assert_reindex_binds(&reindex, &[("crates/b/src/real.rs", "f")], "#[path] target");
     assert!(
         overlay.iter().all(|call| reindex.contains(call)),
         "the overlay binds an edge the index does not: {overlay:#?}"
@@ -1896,7 +1906,7 @@ fn test_overlay_view_reexport_into_path_attr_crate_binds_nothing_beyond_index() 
     ]);
     let edited = "use b::f;\n\npub fn t() {\n    f();\n}\n";
     let (reindex, overlay) = reindex_and_overlay(&files, CALLER, edited, &["t"]);
-    assert_module_tree_binds(&reindex, &[("crates/c/src/real.rs", "f")], "#[path] crate");
+    assert_reindex_binds(&reindex, &[("crates/c/src/real.rs", "f")], "#[path] crate");
     assert!(
         overlay.iter().all(|call| call.callee_file != STRAY),
         "the overlay follows the layout guess into the stray file: {overlay:#?}"
@@ -1992,7 +2002,7 @@ fn test_overlay_view_dirty_file_removes_path_attr_binds_like_index() {
         CALLER,
         &["t"],
     );
-    assert_module_tree_binds(&reindex, &[("crates/b/src/x.rs", "f")], "path attr dropped");
+    assert_reindex_binds(&reindex, &[("crates/b/src/x.rs", "f")], "path attr dropped");
     assert_eq!(overlay, reindex);
 }
 
@@ -2021,7 +2031,7 @@ fn test_overlay_view_unreadable_tree_file_reads_no_rows() {
             .map(|(_, source)| source.clone())
     };
     let reindex = reindex_calls(&edited);
-    assert_module_tree_binds(&reindex, &[("crates/b/src/x.rs", "f")], "every file read");
+    assert_reindex_binds(&reindex, &[("crates/b/src/x.rs", "f")], "every file read");
     assert_eq!(overlay_of_caller_edit(&files, &[], &read), reindex);
 
     let without_m = |rel: &str| read(rel).filter(|_| rel != "crates/b/src/m.rs");
@@ -2054,7 +2064,7 @@ fn test_overlay_view_removed_path_attr_file_binds_like_index() {
         })
         .collect();
     let reindex = reindex_calls(&kept);
-    assert_module_tree_binds(&reindex, &[("crates/b/src/x.rs", "f")], "a.rs deleted");
+    assert_reindex_binds(&reindex, &[("crates/b/src/x.rs", "f")], "a.rs deleted");
     let read = |rel: &str| {
         kept.iter()
             .find(|(path, _)| path == rel)
