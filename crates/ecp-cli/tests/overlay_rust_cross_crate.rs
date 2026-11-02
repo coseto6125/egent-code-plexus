@@ -2527,6 +2527,45 @@ fn test_overlay_view_cfg_twin_mod_binds_like_index() {
     );
 }
 
+/// `b`'s root declares `mod unix;` only inside a macro call, so `unix` is
+/// a module of the index's tree but none of the layout guess's, and
+/// `pub use self::unix::f;` re-exports through it. The root also reaches
+/// an item named `unix`: its own `fn unix`, or one a glob brings in. The
+/// overlay must not take that item for the module's path segment. It may
+/// still reach the right target by name at a lower confidence.
+#[test]
+fn test_overlay_view_reexport_through_index_only_module_binds_nothing_beyond_index() {
+    for (label, b_lib, extra) in [
+        (
+            "own fn of the module's name",
+            "my_cfg! {\n    mod unix;\n}\npub use self::unix::f;\npub fn unix() {}\n",
+            &[][..],
+        ),
+        (
+            "glob item of the module's name",
+            "my_cfg! {\n    mod unix;\n}\nmod other;\npub use self::unix::f;\npub use other::*;\n",
+            &[(
+                "crates/b/src/other.rs",
+                "pub fn unix() {}\n\npub fn f() {}\n",
+            )][..],
+        ),
+    ] {
+        let caller = "use b::f;\n\npub fn t() {\n    f();\n}\n";
+        let mut b_files = vec![("crates/b/src/unix.rs", "pub fn f() {}\n")];
+        b_files.extend_from_slice(extra);
+        let files = reexport_crates(caller, b_lib, &b_files);
+        let (reindex, overlay) =
+            reindex_and_overlay(&files, CALLER, &one_line_edit(caller), &["t"]);
+        let target = |call: &Call| (call.callee_file.clone(), call.callee.clone());
+        assert!(
+            overlay
+                .iter()
+                .all(|call| reindex.iter().any(|known| target(known) == target(call))),
+            "{label}: overlay target the reindex lacks\noverlay: {overlay:#?}\nreindex: {reindex:#?}"
+        );
+    }
+}
+
 /// `b`'s root declares `mod imp;` inside a macro call, which the parse
 /// makes no `Module` node for. The index steps to `imp.rs`; the overlay's
 /// walk enters it with the index's steps alone, so the tree stays placed

@@ -3012,12 +3012,18 @@ pub(super) struct RustModules<'a> {
     /// that first question, so a module's rows borrow from the view. `None` for a text the
     /// source cannot give.
     module_texts: OnceCell<FxHashMap<&'a str, OnceCell<Option<ModuleText<'a>>>>>,
-    /// Tree root file → whether the layout guess places that tree's
-    /// modules as the index does ([`Self::conventional_tree`]).
-    conventional_trees: RefCell<FxHashMap<&'a str, bool>>,
+    /// Tree root file → `None` when the layout guess may place that tree's
+    /// modules elsewhere than the index ([`Self::conventional_tree`]), else
+    /// the index-only modules of the files the guess walks: parent file →
+    /// the names it declares only where the parse makes no `Module` node.
+    conventional_trees: RefCell<FxHashMap<&'a str, Option<IndexOnlyModules<'a>>>>,
 }
 
 /// One Rust module file's text and what the view reads from it.
+/// Parent file → the names of the modules it declares that only the index
+/// sees ([`RustModules::index_only_module`]).
+type IndexOnlyModules<'a> = FxHashMap<&'a str, Vec<String>>;
+
 struct ModuleText<'a> {
     text: Stripped,
     /// The file's `pub use` rows ([`rust_pub_use::pub_use_entries`]) per
@@ -3307,8 +3313,11 @@ impl<'a> RustModules<'a> {
 
     /// What `module` of `root` publishes `name` through, as the index
     /// answers (`IndexModuleTree::published`): the `pub use` naming `name`,
-    /// else a glob `pub use`, else the module's own. A module none of whose
-    /// import rows binds `name` or is a glob answers
+    /// else a glob `pub use`, else the module's own. A `name` the walk found
+    /// to be a module only the index sees below `module`
+    /// ([`Self::index_only_module`]) answers [`ladder::Published::Unknown`]
+    /// first: the layout guess would read it as an item. A module none of
+    /// whose import rows binds `name` or is a glob answers
     /// [`ladder::Published::Own`] at once, also where the layout guess may
     /// have placed a decoy file that is no module of the index
     /// (FU-2026-10-26-2ad63df39f50). So does a module whose text answers
@@ -3342,6 +3351,9 @@ impl<'a> RustModules<'a> {
         for import in imports.iter() {
             binds |= import.alias.unwrap_or(import.imported_name) == name;
             glob |= import.imported_name == "*";
+        }
+        if self.index_only_module(root, module, name) {
+            return ladder::Published::Unknown;
         }
         if !binds && !glob {
             return ladder::Published::Own;
@@ -3427,19 +3439,36 @@ impl<'a> RustModules<'a> {
     /// the index does. `false` without a source, and when a file of the
     /// walk cannot be read.
     fn conventional_tree(&self, root: &'a str) -> bool {
-        let known = self.conventional_trees.borrow().get(root).copied();
+        let known = self
+            .conventional_trees
+            .borrow()
+            .get(root)
+            .map(Option::is_some);
         if let Some(known) = known {
             return known;
         }
-        let conventional = self.walks_like_index(root);
-        self.conventional_trees
-            .borrow_mut()
-            .insert(root, conventional);
+        let walked = self.walks_like_index(root);
+        let conventional = walked.is_some();
+        self.conventional_trees.borrow_mut().insert(root, walked);
         conventional
     }
 
+    /// Whether `name` is a module the index places below `module` in the
+    /// tree of `root` that the layout guess cannot see (a `mod` inside a
+    /// macro call): the guess would read `name` as an item there. Known
+    /// only once [`Self::conventional_tree`] walked the tree, which every
+    /// answer from text rows waits for.
+    fn index_only_module(&self, root: &str, module: &str, name: &str) -> bool {
+        self.conventional_trees
+            .borrow()
+            .get(root)
+            .and_then(Option::as_ref)
+            .and_then(|index_only| index_only.get(module))
+            .is_some_and(|names| names.iter().any(|known| known == name))
+    }
+
     /// The walk [`Self::conventional_tree`] decides by.
-    fn walks_like_index(&self, root: &'a str) -> bool {
+    fn walks_like_index(&self, root: &'a str) -> Option<IndexOnlyModules<'a>> {
         let graph = self.graph;
         let pool = &graph.string_pool;
         let mut base_modules: FxHashMap<&'a str, Vec<&'a str>> = FxHashMap::default();
@@ -3464,15 +3493,16 @@ impl<'a> RustModules<'a> {
                 None => base_modules.get(file).cloned().unwrap_or_default(),
             }
         };
+        let mut index_only_modules = IndexOnlyModules::default();
         let mut visited: FxHashSet<&'a str> = FxHashSet::from_iter([root]);
         let mut stack = vec![(root, false)];
         while let Some((file, index_only)) = stack.pop() {
             let Some(read) = self.module_text(file) else {
-                return false;
+                return None;
             };
             let attrs = rust_pub_use::path_attrs(&read.text);
             if !attrs.is_empty() {
-                return false;
+                return None;
             }
             let at_root = file == root;
             let path = std::path::Path::new(file);
@@ -3496,16 +3526,23 @@ impl<'a> RustModules<'a> {
                 guess.dedup();
             }
             if !guess.iter().all(|step| index.binary_search(step).is_ok()) {
-                return false;
+                return None;
             }
             for step in index {
                 if !visited.insert(step.1) {
-                    return false;
+                    return None;
                 }
-                stack.push((step.1, index_only || guess.binary_search(&step).is_err()));
+                let only_index = guess.binary_search(&step).is_err();
+                if only_index && !index_only {
+                    index_only_modules
+                        .entry(file)
+                        .or_default()
+                        .push(step.0.to_owned());
+                }
+                stack.push((step.1, index_only || only_index));
             }
         }
-        true
+        Some(index_only_modules)
     }
 
     /// The comment-stripped text of the Rust file `file`, read through
