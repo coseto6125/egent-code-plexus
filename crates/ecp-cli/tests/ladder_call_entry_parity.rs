@@ -19,9 +19,7 @@
 //! `crates/ecp-core/src/analyzer/types.rs`:
 //!
 //! ```text
-//! ladder_call_entry go no constructor (types.rs CallSite::constructed_type: "Go, Rust and C have no constructors")
-//! ladder_call_entry rust no constructor (types.rs CallSite::constructed_type: "Go, Rust and C have no constructors")
-//! ladder_call_entry c no constructor (types.rs CallSite::constructed_type: "Go, Rust and C have no constructors")
+//! ladder_call_entry c no constructor (types.rs CallSite::constructed_type: C has no constructors)
 //! ladder_call_entry c no member call (types.rs CallSite::reaches_free_only: "C declares no members")
 //! ```
 //!
@@ -283,7 +281,8 @@ const CSHARP: Case = Case {
 /// ladder at the import tier. `d` and `x` name no package
 /// (`GoPackageLookup::Value`), so their calls are untyped member calls:
 /// `d.Fetch()` binds the one `Fetch` method, and `x.Close()`, which two
-/// types answer, binds nothing. Go has no constructor.
+/// types answer, binds nothing. Go has no constructor: the composite
+/// literal `Dog{}` constructs the struct itself.
 const GO: Case = Case {
     name: "ladder_call_entry_go",
     files: &[
@@ -299,19 +298,21 @@ const GO: Case = Case {
         ),
         (
             "main.go",
-            "package main\n\nimport \"example.com/repo/util\"\n\nfunc (d *Dog) Bark() {\n\td.Fetch()\n}\n\nfunc run() {\n\tutil.Present()\n\tx.Close()\n}\n",
+            "package main\n\nimport \"example.com/repo/util\"\n\nfunc (d *Dog) Bark() {\n\td.Fetch()\n}\n\nfunc run() {\n\tutil.Present()\n\tx.Close()\n}\n\nfunc build() Dog {\n\treturn Dog{}\n}\n",
         ),
     ],
     dirty: "main.go",
     expected: &[
         ("Bark", &[("Fetch", "dog.go", ANY_TIER)]),
+        ("build", &[("Dog", "dog.go", ANY_TIER)]),
         ("run", &[("Present", "util/util.go", IMPORT_SCOPED)]),
     ],
 };
 
 /// Rust. `Repo::make()` binds the associated function through the `use`.
 /// `x.close()` on an untyped value reaches two types' methods: no edge. A
-/// bare `helper()` binds the caller's file. Rust has no constructor.
+/// bare `helper()` binds the caller's file. Rust has no constructor: the
+/// struct literal `Cfg { n: 2 }` constructs the struct itself.
 const RUST: Case = Case {
     name: "ladder_call_entry_rust",
     files: &[
@@ -321,7 +322,7 @@ const RUST: Case = Case {
         ),
         (
             "src/repo.rs",
-            "pub struct Repo;\n\nimpl Repo {\n    pub fn make() -> Repo {\n        Repo\n    }\n}\n",
+            "pub struct Repo;\n\npub struct Cfg {\n    pub n: u32,\n}\n\nimpl Repo {\n    pub fn make() -> Repo {\n        Repo\n    }\n}\n",
         ),
         (
             "src/shapes.rs",
@@ -329,11 +330,12 @@ const RUST: Case = Case {
         ),
         (
             "src/lib.rs",
-            "mod repo;\nmod shapes;\n\nuse crate::repo::Repo;\n\npub fn typed() {\n    Repo::make();\n}\n\npub fn two() {\n    let x = shapes_of();\n    x.close();\n}\n\nfn helper() {}\n\npub fn bare() {\n    helper();\n}\n",
+            "mod repo;\nmod shapes;\n\nuse crate::repo::{Cfg, Repo};\n\npub fn lit() -> u32 {\n    Cfg { n: 2 }.n\n}\n\npub fn typed() {\n    Repo::make();\n}\n\npub fn two() {\n    let x = shapes_of();\n    x.close();\n}\n\nfn helper() {}\n\npub fn bare() {\n    helper();\n}\n",
         ),
     ],
     dirty: "src/lib.rs",
     expected: &[
+        ("lit", &[("Cfg", "src/repo.rs", ANY_TIER)]),
         ("typed", &[("make", "src/repo.rs", ANY_TIER)]),
         ("two", &[]),
         ("bare", &[("helper", "src/lib.rs", SAME_FILE)]),

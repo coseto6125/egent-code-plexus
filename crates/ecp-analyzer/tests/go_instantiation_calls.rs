@@ -1,12 +1,14 @@
-//! Go has no constructors: a composite literal `A{}` is not a call, and the
-//! `NewA()` factory idiom is an ordinary function call. These tests pin that
-//! behaviour so the constructor-call change leaves Go unchanged.
+//! Go has no constructors: the `NewA()` factory idiom is an ordinary
+//! function call. A composite literal `A{}` constructs the struct, so it
+//! calls the `Struct` node (FU-2026-10-30-c0bc9a616111): `ecp impact` on the
+//! struct lists the literal sites.
 
 mod instantiation_calls_support;
 
 use ecp_analyzer::go::parser::GoProvider;
+use ecp_core::graph::NodeKind;
 use instantiation_calls_support::{
-    assert_accesses_type, assert_no_instantiation_call, assert_only_call, graph_of,
+    assert_accesses_type, assert_calls_type, assert_only_call, graph_of,
 };
 
 const WIDGET: (&str, &str) = (
@@ -18,27 +20,39 @@ fn provider() -> GoProvider {
     GoProvider::new().expect("GoProvider::new")
 }
 
-/// The `Accesses` edge comes from the declared return type, not from the
-/// literal; the contract here is "no Calls edge into the struct".
+/// The `Accesses` edge comes from the declared return type; the literal
+/// adds one `Calls` edge into the struct.
 #[test]
-fn test_go_cross_file_composite_literal_no_calls_edge() {
+fn test_go_cross_file_composite_literal_calls_struct() {
     let app = (
         "pkg/app.go",
         "package shop\n\nfunc MakeLiteral() Widget {\n\treturn Widget{X: 1}\n}\n",
     );
     let graph = graph_of(&provider(), &[WIDGET, app]);
-    assert_no_instantiation_call(&graph, "MakeLiteral", "Widget");
+    assert_calls_type(
+        &graph,
+        "MakeLiteral",
+        "Widget",
+        NodeKind::Struct,
+        "pkg/widget.go",
+    );
     assert_accesses_type(&graph, "MakeLiteral", "Widget");
 }
 
 #[test]
-fn test_go_same_file_composite_literal_no_calls_edge() {
+fn test_go_same_file_composite_literal_calls_struct() {
     let local = (
         "pkg/local.go",
         "package shop\n\ntype Local struct {\n\tReady bool\n}\n\nfunc MakeLocal() Local {\n\treturn Local{Ready: true}\n}\n",
     );
     let graph = graph_of(&provider(), &[local]);
-    assert_no_instantiation_call(&graph, "MakeLocal", "Local");
+    assert_calls_type(
+        &graph,
+        "MakeLocal",
+        "Local",
+        NodeKind::Struct,
+        "pkg/local.go",
+    );
 }
 
 #[test]
