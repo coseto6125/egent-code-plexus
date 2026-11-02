@@ -1,6 +1,6 @@
 # C2: workspace facts
 
-Status: contract, phase 1, revised after the codex review. Types: `crates/ecp-core/src/contracts/workspace.rs`. Landed in R1c: `graph.bin` stores the Cargo rows; the overlay view reads them for a `<crate_name>::` head. Gaps that stay: `#[path]` modules, `pub use` chains behind a crate head, inline `mod` blocks, and the shorter-prefix fallback of `resolve_in_crate`. Not yet adopted: every other ecosystem, `scope_of` and the dependency map.
+Status: contract, phase 1, revised after the codex review. Types: `crates/ecp-core/src/contracts/workspace.rs`. Landed in R1c: `graph.bin` stores the Cargo rows; the overlay view reads them for a `<crate_name>::` head. Gaps that stay: `#[path]` modules, inline `mod` blocks, and the shorter-prefix fallback of `resolve_in_crate`. Not yet adopted: every other ecosystem, `scope_of` and the dependency map.
 
 Plan row (`docs/specs/2026-10-25-architecture-direction.md`, "Contracts before code"): resolution scope per file, scope root, effective config, dependency map; stored once, read by index, overlay, flow and the `Imports` pass. Consumers: area 1 (the Rust subset in B's first round), area 4, area 5 (the invalidation closure).
 

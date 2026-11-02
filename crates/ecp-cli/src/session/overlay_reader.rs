@@ -99,8 +99,10 @@ pub fn accepted_fragments(
 }
 
 /// The dirty-file entries that may feed `OverlayView`, plus an xxh3 over
-/// each one's rel_path and fragment bytes (an empty part for a tombstone) in
-/// manifest order. Entry validation guards the staleness holes the manifest
+/// each one's rel_path, fragment bytes and content hash (an empty part for
+/// a tombstone) in manifest order. The content hash is the text the view's
+/// source reader accepts for the path, which equal fragment bytes do not
+/// pin: `graph.bin`'s import rows keep no visibility. Entry validation guards the staleness holes the manifest
 /// has by construction:
 ///
 /// - **another format, builder or cap** — a manifest that fails
@@ -141,11 +143,23 @@ pub fn view_inputs_under(
     worktree_root: &Path,
     size_cap: SizeCap,
 ) -> io::Result<ViewInputs> {
+    view_inputs_and_manifest_under(session_dir, worktree_root, size_cap).map(|(inputs, _)| inputs)
+}
+
+/// [`view_inputs_under`] and the current manifest it read, whose entries
+/// hold the content hash each accepted fragment parsed
+/// (`DirtyEventEntry::content_hash`). `None` without a current manifest.
+pub fn view_inputs_and_manifest_under(
+    session_dir: &Path,
+    worktree_root: &Path,
+    size_cap: SizeCap,
+) -> io::Result<(ViewInputs, Option<DirtyEvents>)> {
     let (mut inputs, manifest) = manifest_inputs(session_dir, worktree_root, size_cap)?;
-    if let Some(manifest) = manifest.filter(|m| m.is_current(size_cap)) {
-        super::closure_store::attach(session_dir, worktree_root, size_cap, &manifest, &mut inputs);
+    let manifest = manifest.filter(|m| m.is_current(size_cap));
+    if let Some(manifest) = &manifest {
+        super::closure_store::attach(session_dir, worktree_root, size_cap, manifest, &mut inputs);
     }
-    Ok(inputs)
+    Ok((inputs, manifest))
 }
 
 /// The dirty files' share of [`view_inputs_under`], without the closure:
@@ -207,6 +221,8 @@ fn manifest_inputs(
         }
         super::view_cache::hash_part(&mut hasher, rel_path.as_bytes());
         super::view_cache::hash_part(&mut hasher, &bytes);
+        let content_hash = entry.content_hash.as_deref().unwrap_or_default();
+        super::view_cache::hash_part(&mut hasher, content_hash.as_bytes());
         fragments.push(AcceptedFragment {
             rel_path: rel_path.clone(),
             bytes,

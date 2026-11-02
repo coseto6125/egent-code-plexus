@@ -1,9 +1,11 @@
 //! The Rust `pub use` rows of one module, read from its text with the line
-//! rules the index's module tree records them by. The index
+//! rules the index's module tree records them by, and the `mod`
+//! declarations and `#[path]` attributes the tree is walked by. The index
 //! (`ecp-analyzer`'s `rust::module_tree`) and the overlay's module trees
-//! (`session::view`) both read a module's rows here, so the two sides see
+//! (`session::view`) both read a module's text here, so the two sides see
 //! the same re-exports by construction.
 
+use crate::analyzer::ladder::{Published, ReExport};
 use rustc_hash::FxHashMap;
 use std::sync::OnceLock;
 
@@ -25,8 +27,20 @@ pub struct PubUseEntry {
 
 /// A module's `pub use` rows, keyed by the name visible at the re-export
 /// site: the alias after `as`, else the original name, `"*"` for a glob.
-/// Of two rows with one key the later one stands.
+/// Single-item rows are read before group rows; of two rows with one key,
+/// the one read last stands.
 pub type PubUseEntries = FxHashMap<String, PubUseEntry>;
+
+/// A module's text with its `//` and `/* */` comments blanked
+/// ([`strip_comments`]): the only text the line rules here read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stripped(String);
+
+impl Stripped {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 fn line_comment_re() -> &'static regex::Regex {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
@@ -36,6 +50,19 @@ fn line_comment_re() -> &'static regex::Regex {
 fn block_comment_re() -> &'static regex::Regex {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     RE.get_or_init(|| regex::Regex::new(r"(?s)/\*.*?\*/").expect("block_comment_re"))
+}
+
+fn mod_decl_re() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r"(?m)^\s*(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;")
+            .expect("mod_decl_re")
+    })
+}
+
+fn path_attr_re() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r#"#\[path\s*=\s*"([^"]+)"\]"#).expect("path_attr_re"))
 }
 
 /// Matches `pub use <path>::<Name>` and `pub use <path>::<Name> as <Alias>`.
@@ -72,38 +99,56 @@ fn pub_use_group_re() -> &'static regex::Regex {
     })
 }
 
-/// Strip `//` and `/* */` comments from source, preserving newlines so
+/// `src` with its `//` and `/* */` comments blanked, newlines kept so
 /// MULTILINE regex anchors keep working.
-pub fn strip_comments(src: &str) -> String {
-    let s = block_comment_re().replace_all(src, |caps: &regex::Captures| {
+pub fn strip_comments(src: &str) -> Stripped {
+    fn blank(caps: &regex::Captures) -> String {
         caps[0]
             .chars()
             .map(|c| if c == '\n' { '\n' } else { ' ' })
-            .collect::<String>()
-    });
-    line_comment_re()
-        .replace_all(&s, |caps: &regex::Captures| {
-            caps[0]
-                .chars()
-                .map(|c| if c == '\n' { '\n' } else { ' ' })
-                .collect::<String>()
-        })
-        .into_owned()
+            .collect()
+    }
+    let s = block_comment_re().replace_all(src, blank);
+    Stripped(line_comment_re().replace_all(&s, blank).into_owned())
 }
 
-/// The `pub use` rows of the module whose raw text is `src` and whose
-/// module path in its tree is `containing_mod_path` (e.g. `["deep"]` for
+/// The names of the file-backed `mod NAME;` declarations of `text`, in
+/// text order.
+pub fn mod_decls(text: &Stripped) -> impl Iterator<Item = &str> {
+    mod_decl_re()
+        .captures_iter(text.as_str())
+        .filter_map(|cap| cap.get(1).map(|name| name.as_str()))
+}
+
+/// The `#[path = "rel"]` attributes of `text` that stand within the three
+/// lines before a `mod NAME;`: `NAME → rel`.
+pub fn path_attrs(text: &Stripped) -> FxHashMap<String, String> {
+    let mut out: FxHashMap<String, String> = FxHashMap::default();
+    let lines: Vec<&str> = text.as_str().lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        if let Some(caps) = path_attr_re().captures(line) {
+            let rel_path = caps[1].to_string();
+            let lookahead_end = (i + 4).min(lines.len());
+            for next_line in &lines[(i + 1)..lookahead_end] {
+                if let Some(mcap) = mod_decl_re().captures(next_line) {
+                    out.insert(mcap[1].to_string(), rel_path.clone());
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The `pub use` rows of the module whose text is `text` and whose module
+/// path in its tree is `containing_mod_path` (e.g. `["deep"]` for
 /// `src/deep/mod.rs`), stored in each entry so that relative path prefixes
 /// (like `nested` in `pub use nested::W`) resolve as crate-rooted paths
 /// during chain walking.
-pub fn pub_use_entries(src: &str, containing_mod_path: &[String]) -> PubUseEntries {
-    pub_use_entries_of_clean(&strip_comments(src), containing_mod_path)
-}
-
-/// [`pub_use_entries`] over text [`strip_comments`] already cleaned.
-pub fn pub_use_entries_of_clean(clean: &str, containing_mod_path: &[String]) -> PubUseEntries {
+pub fn pub_use_entries(text: &Stripped, containing_mod_path: &[String]) -> PubUseEntries {
+    let text = text.as_str();
     let mut entries = PubUseEntries::default();
-    for cap in pub_use_re().captures_iter(clean) {
+    for cap in pub_use_re().captures_iter(text) {
         // cap[1]: prefix like "inner::" or "crate::deep::" (trailing "::")
         // cap[2]: item name or "*"; cap[3]: optional alias
         insert_pub_use(
@@ -114,7 +159,7 @@ pub fn pub_use_entries_of_clean(clean: &str, containing_mod_path: &[String]) -> 
             &mut entries,
         );
     }
-    for cap in pub_use_group_re().captures_iter(clean) {
+    for cap in pub_use_group_re().captures_iter(text) {
         for member in cap[2].split(',').map(str::trim).filter(|m| !m.is_empty()) {
             let (path, alias) = match member.split_once(" as ") {
                 Some((path, alias)) => (path.trim(), Some(alias.trim())),
@@ -139,6 +184,19 @@ pub fn pub_use_entries_of_clean(clean: &str, containing_mod_path: &[String]) -> 
         }
     }
     entries
+}
+
+/// What a module publishes `name` through, given its `pub use` row by key
+/// (`entry`): the row naming `name`, else its glob row, else its own item.
+pub fn published<'e>(entry: impl Fn(&str) -> Option<&'e PubUseEntry>, name: &str) -> Published<'e> {
+    match entry(name).or_else(|| entry("*")) {
+        Some(entry) => Published::ReExport(ReExport {
+            prefix: &entry.path_prefix,
+            original: &entry.original_name,
+            containing: &entry.containing_mod_path,
+        }),
+        None => Published::Own,
+    }
 }
 
 /// Record one re-exported item: `pub use <prefix>::<item> [as <alias>]`.
@@ -182,7 +240,9 @@ mod tests {
 
     fn entries_of(src: &str, containing: &[&str]) -> Vec<(String, PubUseEntry)> {
         let containing: Vec<String> = containing.iter().map(|s| s.to_string()).collect();
-        let mut rows: Vec<_> = pub_use_entries(src, &containing).into_iter().collect();
+        let mut rows: Vec<_> = pub_use_entries(&strip_comments(src), &containing)
+            .into_iter()
+            .collect();
         rows.sort_by(|a, b| a.0.cmp(&b.0));
         rows
     }
@@ -242,10 +302,79 @@ mod tests {
     }
 
     #[test]
-    fn test_pub_use_entries_later_row_of_one_name_stands() {
+    fn test_pub_use_entries_single_then_group_row_of_one_name_group_stands() {
         assert_eq!(
             entries_of("pub use a::f;\npub use b::{f};\n", &[]),
             [("f".to_string(), entry(&["b"], "f", &[]))]
         );
+    }
+
+    /// Group rows are read after single-item rows whatever the text order,
+    /// so the group row stands though the single row comes later.
+    #[test]
+    fn test_pub_use_entries_group_then_single_row_of_one_name_group_stands() {
+        assert_eq!(
+            entries_of("pub use b::{f};\npub use a::f;\n", &[]),
+            [("f".to_string(), entry(&["b"], "f", &[]))]
+        );
+    }
+
+    #[test]
+    fn test_strip_comments_blanks_comments_keeps_newlines_and_length() {
+        let src = "a /* x\ny */ b // c\nd";
+        let stripped = strip_comments(src);
+        assert_eq!(stripped.as_str(), "a     \n     b     \nd");
+        assert_eq!(stripped.as_str().len(), src.len());
+    }
+
+    #[test]
+    fn test_mod_decls_file_backed_mods_in_text_order() {
+        let text =
+            strip_comments("pub mod b;\nmod a;\n// mod c;\nmod inline { }\npub(crate) mod d;\n");
+        assert_eq!(mod_decls(&text).collect::<Vec<_>>(), ["b", "a", "d"]);
+    }
+
+    #[test]
+    fn test_path_attrs_attribute_before_mod_maps_mod_to_path() {
+        let text = strip_comments("#[path = \"actual.rs\"]\npub mod facade;\nmod right;\n");
+        assert_eq!(
+            path_attrs(&text).into_iter().collect::<Vec<_>>(),
+            [("facade".to_string(), "actual.rs".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_path_attrs_commented_out_or_absent_attribute_yields_nothing() {
+        assert!(path_attrs(&strip_comments("// #[path = \"x.rs\"]\nmod m;\n")).is_empty());
+        assert!(path_attrs(&strip_comments("mod m;\n")).is_empty());
+        assert!(path_attrs(&strip_comments("")).is_empty());
+    }
+
+    #[test]
+    fn test_published_name_row_beats_glob_glob_answers_else_own() {
+        let rows = pub_use_entries(
+            &strip_comments("pub use a::f;\npub use b::*;\n"),
+            &["m".to_string()],
+        );
+        let lookup = |name: &str| rows.get(name);
+        let m = ["m".to_string()];
+        assert_eq!(
+            published(lookup, "f"),
+            Published::ReExport(ReExport {
+                prefix: &["a".to_string()],
+                original: "f",
+                containing: &m,
+            })
+        );
+        assert_eq!(
+            published(lookup, "g"),
+            Published::ReExport(ReExport {
+                prefix: &["b".to_string()],
+                original: "*",
+                containing: &m,
+            })
+        );
+        let empty = PubUseEntries::default();
+        assert_eq!(published(|name| empty.get(name), "f"), Published::Own);
     }
 }

@@ -691,10 +691,14 @@ pub struct CallGap {
 struct DirtyNamesake;
 
 /// A reader of a file's current text: its repo-relative, forward-slashed
-/// path to the text, `None` for a file that is gone, unreadable or not
-/// UTF-8. A dirty file's text is the one its parse read; a clean file's
-/// equals the indexed text. The view reads a Rust module's `pub use` rows
-/// from it, which `graph.bin`'s import rows cannot tell from a `use`.
+/// path to the text. It gives only the text the view's inputs recorded for
+/// the path: a dirty file's text whose hash is its fragment's content hash,
+/// a clean file's text whose hash is `graph.bin`'s `File.content_hash`.
+/// `None` for a file with no recorded hash, gone, unreadable, not UTF-8, or
+/// whose text differs, so the view is a function of its inputs, which the
+/// session's view cache keys. The view reads a Rust module's `pub use` rows
+/// from it, which `graph.bin`'s import rows cannot tell from a `use`, and
+/// the `#[path]` attributes of the modules on that module's path.
 pub type SourceReader<'r> = &'r dyn Fn(&str) -> Option<String>;
 
 impl OverlayView {
@@ -711,8 +715,9 @@ impl OverlayView {
     ///   pass over `graph.files` for crate roots;
     /// - with a [`SourceReader`], a Rust module whose `use` binds the name a
     ///   path asks for, or which holds a glob `use`, reads its text once to
-    ///   find its `pub use` rows; the first such module makes one more pass
-    ///   over `graph.files` for the memo's keys;
+    ///   find its `pub use` rows, and the text of each module above it in
+    ///   its tree once to find `#[path]` modules; the first such module
+    ///   makes one more pass over `graph.files` for the memo's keys;
     /// - the path-alias table is rebuilt from `graph.bin` once per build;
     /// - an ambiguous Tier-3 call whose first two candidates are copies of
     ///   one Java / Kotlin / PHP declaration builds that language's file

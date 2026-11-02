@@ -47,7 +47,7 @@ use crate::analyzer::rust_paths::{
     is_rust_source, rust_expand_path_head, rust_module_dir, rust_module_path_base,
     rust_type_path_prefix,
 };
-use crate::analyzer::rust_pub_use::{self, PubUseEntries};
+use crate::analyzer::rust_pub_use::{self, PubUseEntries, Stripped};
 use crate::analyzer::same_file_pick::{
     prefer_owned, rust_impl_members, ImplMember, ImplNode, PickFacts, PickScope,
 };
@@ -3006,18 +3006,50 @@ pub(super) struct RustModules<'a> {
     /// The current text of a module file, which its `pub use` rows are
     /// read from ([`Self::published`]). `None` for a view built without one.
     sources: Option<SourceReader<'a>>,
-    /// Rust file → its `pub use` rows in each tree that holds it, read on
-    /// the first question only a `pub use` of that module can answer
-    /// ([`Self::pub_uses`]). The keys are set once per view, on that first
-    /// question, so a module's rows borrow from the view. `None` for a text
-    /// the source cannot give.
-    pub_use_rows: OnceCell<FxHashMap<&'a str, OnceCell<Option<ModulePubUses<'a>>>>>,
+    /// Rust file → its text as the view reads it, read on the first
+    /// question only that text can answer ([`Self::module_text`]): a
+    /// `pub use` of the module, or a `#[path]` module it declares on the
+    /// path to one. The keys are set once per view, on that first question,
+    /// so a module's rows borrow from the view. `None` for a text the
+    /// source cannot give.
+    module_texts: OnceCell<FxHashMap<&'a str, OnceCell<Option<ModuleText<'a>>>>>,
 }
 
-/// One Rust module file's `pub use` rows ([`rust_pub_use::pub_use_entries`])
-/// per tree that holds it: the root file of the tree, and the rows read
-/// with the module's path in that tree.
-type ModulePubUses<'a> = Vec<(&'a str, PubUseEntries)>;
+/// One Rust module file's text and what the view reads from it.
+struct ModuleText<'a> {
+    text: Stripped,
+    /// Whether the file declares a module with a `#[path]` attribute
+    /// ([`rust_pub_use::path_attrs`]).
+    declares_path_attr: bool,
+    /// The file's `pub use` rows ([`rust_pub_use::pub_use_entries`]) per
+    /// tree that holds it: the root file of the tree, and the rows read
+    /// with the module's path in that tree ([`RustModules::pub_uses`]).
+    trees: OnceCell<Vec<(&'a str, ModuleRows<PubUseEntries>)>>,
+}
+
+/// A module's `pub use` rows in one tree, as the view can read them.
+enum ModuleRows<R> {
+    /// The rows the index reads from the module's text.
+    Read(R),
+    /// A step of the module's path in the tree is a module its parent
+    /// declares with a `#[path]` attribute. The index places that module
+    /// at the attribute's file; the view's layout ([`RustModules::child`])
+    /// does not, so the file the view reads may not be the index's module.
+    Relocated,
+    /// No text: no source, a text the source cannot give (for the module
+    /// or a parent on its path), or no tree of the root holds the module.
+    Unread,
+}
+
+impl ModuleRows<PubUseEntries> {
+    fn as_ref(&self) -> ModuleRows<&PubUseEntries> {
+        match self {
+            Self::Read(rows) => ModuleRows::Read(rows),
+            Self::Relocated => ModuleRows::Relocated,
+            Self::Unread => ModuleRows::Unread,
+        }
+    }
+}
 
 /// Where one caller file stands in the module trees
 /// ([`RustModules::caller`]).
@@ -3057,7 +3089,7 @@ impl<'a> RustModules<'a> {
             removed,
             crates: OnceCell::new(),
             sources: None,
-            pub_use_rows: OnceCell::new(),
+            module_texts: OnceCell::new(),
         }
     }
 
@@ -3323,10 +3355,13 @@ impl<'a> RustModules<'a> {
     /// What `module` of `root` publishes `name` through, as the index
     /// answers (`IndexModuleTree::published`): the `pub use` naming `name`,
     /// else a glob `pub use`, else the module's own. The rows come from the
-    /// module's current text ([`Self::pub_uses`]), read only when a `use`
-    /// of the module binds `name` or a glob `use` exists: with neither, no
-    /// `pub use` publishes `name`. Without the text (no source, or one that
-    /// cannot read the file) the answer is what `graph.bin` shows: it keeps
+    /// module's current text ([`Self::pub_uses`]), read only when an import
+    /// row of the module binds `name` or is a glob: a `pub use` the parse
+    /// makes no row for (one inside a macro body) is missed, a missing
+    /// edge. A module whose path holds a `#[path]` module answers
+    /// [`ladder::Published::Unknown`]: the view may have read another file
+    /// than the index's module. Without the text (no source, or one that
+    /// cannot give the file) the answer is what `graph.bin` shows: it keeps
     /// no import visibility, so such a `use`, or a glob while the module
     /// declares no `name`, may be a `pub use` and answers
     /// [`ladder::Published::Unknown`].
@@ -3342,33 +3377,73 @@ impl<'a> RustModules<'a> {
         if !binds && !glob {
             return ladder::Published::Own;
         }
-        if let Some(rows) = self.pub_uses(root, module) {
-            let entry = |name: &str| rows.get(name);
-            return match entry(name).or_else(|| entry("*")) {
-                Some(entry) => ladder::Published::ReExport(ladder::ReExport {
-                    prefix: &entry.path_prefix,
-                    original: &entry.original_name,
-                    containing: &entry.containing_mod_path,
-                }),
-                None => ladder::Published::Own,
-            };
-        }
-        if binds || !self.declares(module, name, |_| true) {
-            ladder::Published::Unknown
-        } else {
-            ladder::Published::Own
+        match self.pub_uses(root, module) {
+            ModuleRows::Read(rows) => rust_pub_use::published(|name| rows.get(name), name),
+            ModuleRows::Relocated => ladder::Published::Unknown,
+            ModuleRows::Unread if binds || !self.declares(module, name, |_| true) => {
+                ladder::Published::Unknown
+            }
+            ModuleRows::Unread => ladder::Published::Own,
         }
     }
 
     /// The `pub use` rows of the Rust file `module` in the tree rooted at
-    /// `root` ([`Self::pub_use_rows`]): the index's rows, read from the text
-    /// [`Self::sources`] gives, each with the module's path in that tree as
-    /// its containing path. `None` without a source, for a file it cannot
-    /// read, and for a module no tree of `root` holds.
-    fn pub_uses(&self, root: &'a str, module: &'a str) -> Option<&PubUseEntries> {
+    /// `root`: the index's rows, read from the module's text
+    /// ([`Self::module_text`]), each with the module's path in that tree as
+    /// its containing path. Rows are read only for a path no `#[path]`
+    /// module stands on ([`Self::relocated`]).
+    fn pub_uses(&self, root: &'a str, module: &'a str) -> ModuleRows<&PubUseEntries> {
+        let Some(read) = self.module_text(module) else {
+            return ModuleRows::Unread;
+        };
+        let trees = read.trees.get_or_init(|| {
+            self.caller(module)
+                .targets
+                .into_iter()
+                .map(|(tree, path)| {
+                    let rows = match self.relocated(tree, &path) {
+                        Some(false) => {
+                            ModuleRows::Read(rust_pub_use::pub_use_entries(&read.text, &path))
+                        }
+                        Some(true) => ModuleRows::Relocated,
+                        None => ModuleRows::Unread,
+                    };
+                    (tree, rows)
+                })
+                .collect()
+        });
+        trees
+            .iter()
+            .find(|(tree, _)| *tree == root)
+            .map_or(ModuleRows::Unread, |(_, rows)| rows.as_ref())
+    }
+
+    /// Whether a parent on the module path `path` from the root file `root`
+    /// declares any module with a `#[path]` attribute, by the index's rule
+    /// ([`rust_pub_use::path_attrs`]). Any one, not only the step's own:
+    /// `#[path = "right.rs"] mod facade;` beside `mod right;` makes the
+    /// index place `right.rs` as `facade`, which the layout guess cannot
+    /// see from `right`'s steps. `None` when the text of a parent on the
+    /// path cannot be read.
+    fn relocated(&self, root: &'a str, path: &[String]) -> Option<bool> {
+        let mut file = root;
+        for (at, name) in path.iter().enumerate() {
+            if self.module_text(file)?.declares_path_attr {
+                return Some(true);
+            }
+            file = self.child(file, name, at == 0)?;
+        }
+        Some(false)
+    }
+
+    /// The comment-stripped text of the Rust file `file`, read through
+    /// [`Self::sources`] once per view ([`Self::module_texts`]). `None`
+    /// without a source, for a file it cannot give, and for a path that is
+    /// no Rust file of the view.
+    fn module_text(&self, file: &'a str) -> Option<&ModuleText<'a>> {
         let sources = self.sources?;
         let graph = self.graph;
-        let cells = self.pub_use_rows.get_or_init(|| {
+        let cells = self.module_texts.get_or_init(|| {
             let pool = &graph.string_pool;
             let base = graph
                 .files
@@ -3383,23 +3458,17 @@ impl<'a> RustModules<'a> {
                 .map(|path| (path, OnceCell::new()))
                 .collect()
         });
-        let trees = cells.get(module)?.get_or_init(|| {
-            let clean = rust_pub_use::strip_comments(&sources(module)?);
-            Some(
-                self.caller(module)
-                    .targets
-                    .into_iter()
-                    .map(|(tree, path)| {
-                        (tree, rust_pub_use::pub_use_entries_of_clean(&clean, &path))
-                    })
-                    .collect(),
-            )
-        });
-        trees
-            .as_ref()?
-            .iter()
-            .find(|(tree, _)| *tree == root)
-            .map(|(_, rows)| rows)
+        cells
+            .get(file)?
+            .get_or_init(|| {
+                let text = rust_pub_use::strip_comments(&sources(file)?);
+                Some(ModuleText {
+                    declares_path_attr: !rust_pub_use::path_attrs(&text).is_empty(),
+                    text,
+                    trees: OnceCell::new(),
+                })
+            })
+            .as_ref()
     }
 
     /// The import rows of `module`: a dirty file's fresh parse, else the

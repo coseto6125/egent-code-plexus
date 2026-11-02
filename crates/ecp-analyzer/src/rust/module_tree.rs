@@ -21,16 +21,18 @@
 //!
 //! # Out of scope (documented)
 //! * `cfg`-gated `mod` decls (first filesystem hit wins).
-//! * `#[path = "..."]` overrides.
-//! * Macro-expanded `use`s.
+//! * Macro-expanded `use`s, except a `pub use` at the start of its line,
+//!   which the text scan reads inside a macro body too.
 //! * `extern crate` re-exports (legacy syntax).
 //! * Proc-macro-generated re-exports (`paste!`, `derive_more`, etc.) — logged
 //!   as BlindSpot if encountered.
 
 use crate::resolution::index::SymbolTable;
-use ecp_core::analyzer::ladder::{self, Namespace, Published, ReExport, TreeItem};
+use ecp_core::analyzer::ladder::{self, Namespace, Published, TreeItem};
 use ecp_core::analyzer::rust_paths::rust_module_dir;
-use ecp_core::analyzer::rust_pub_use::{pub_use_entries_of_clean, strip_comments, PubUseEntry};
+use ecp_core::analyzer::rust_pub_use::{
+    self, mod_decls, path_attrs, pub_use_entries, strip_comments, PubUseEntry,
+};
 use ecp_core::contracts::workspace::{
     ConfigPresence, ConfigRead, Ecosystem, Membership, NameRank, Scope, ScopeId, ScopeName,
     WorkspaceFacts,
@@ -38,25 +40,6 @@ use ecp_core::contracts::workspace::{
 use ecp_core::registry::uid_path;
 use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
-
-// ---------------------------------------------------------------------------
-// Regex helpers (compile-once per call via OnceLock)
-// ---------------------------------------------------------------------------
-
-use std::sync::OnceLock;
-
-fn mod_decl_re() -> &'static regex::Regex {
-    static RE: OnceLock<regex::Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        regex::Regex::new(r"(?m)^\s*(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;")
-            .expect("mod_decl_re")
-    })
-}
-
-fn path_attr_re() -> &'static regex::Regex {
-    static RE: OnceLock<regex::Regex> = OnceLock::new();
-    RE.get_or_init(|| regex::Regex::new(r#"#\[path\s*=\s*"([^"]+)"\]"#).expect("path_attr_re"))
-}
 
 // ---------------------------------------------------------------------------
 // Module tree
@@ -433,18 +416,13 @@ impl<'t> ladder::ModuleTreeFacts for IndexModuleTree<'t> {
 
     /// The `pub use` naming `name`, else a glob `pub use` of the module.
     fn published(&self, root: TreeScope<'t>, module: &'t Path, name: &str) -> Published<'_> {
-        let entry = |name: &str| {
-            root.reexports
-                .get(&(module.to_path_buf(), name.to_string()))
-        };
-        match entry(name).or_else(|| entry("*")) {
-            Some(entry) => Published::ReExport(ReExport {
-                prefix: &entry.path_prefix,
-                original: &entry.original_name,
-                containing: &entry.containing_mod_path,
-            }),
-            None => Published::Own,
-        }
+        rust_pub_use::published(
+            |name| {
+                root.reexports
+                    .get(&(module.to_path_buf(), name.to_string()))
+            },
+            name,
+        )
     }
 
     fn declares(&self, module: &'t Path, name: &str, namespace: Namespace) -> bool {
@@ -534,10 +512,10 @@ fn build_mod_tree_and_reexports(entry: &Path) -> (ModTree, ReExportMap) {
         // Collect `#[path = "..."]` attributes so we can honour them.
         // Simple heuristic: scan for `#[path = "..."]` on the line immediately
         // before a `mod NAME;`. We pass them as a map: mod_name → rel_path.
-        let path_attrs = collect_path_attrs(&clean);
+        let path_attrs = path_attrs(&clean);
 
-        for cap in mod_decl_re().captures_iter(&clean) {
-            let name = cap[1].to_string();
+        for name in mod_decls(&clean) {
+            let name = name.to_string();
             let child_file = if let Some(override_rel) = path_attrs.get(&name) {
                 file.parent()
                     .map(|d| d.join(override_rel))
@@ -576,7 +554,7 @@ fn build_mod_tree_and_reexports(entry: &Path) -> (ModTree, ReExportMap) {
 
         // Collect `pub use` re-exports from this file.
         reexports.extend(
-            pub_use_entries_of_clean(&clean, &mod_path)
+            pub_use_entries(&clean, &mod_path)
                 .into_iter()
                 .map(|(name, entry)| ((file.clone(), name), entry)),
         );
@@ -891,30 +869,6 @@ fn find_crate_entry(crate_dir: &Path, lib_path: Option<&str>) -> Option<PathBuf>
         }
     }
     None
-}
-
-// ---------------------------------------------------------------------------
-// #[path = "..."] attribute collection
-// ---------------------------------------------------------------------------
-
-/// Scan cleaned source for `#[path = "rel"]` immediately before `mod NAME;`
-/// and return a map `mod_name → rel_path`.
-fn collect_path_attrs(clean: &str) -> FxHashMap<String, String> {
-    let mut out: FxHashMap<String, String> = FxHashMap::default();
-    let lines: Vec<&str> = clean.lines().collect();
-    for (i, line) in lines.iter().enumerate() {
-        if let Some(caps) = path_attr_re().captures(line) {
-            let rel_path = caps[1].to_string();
-            let lookahead_end = (i + 4).min(lines.len());
-            for next_line in &lines[(i + 1)..lookahead_end] {
-                if let Some(mcap) = mod_decl_re().captures(next_line) {
-                    out.insert(mcap[1].to_string(), rel_path.clone());
-                    break;
-                }
-            }
-        }
-    }
-    out
 }
 
 // ---------------------------------------------------------------------------

@@ -15,8 +15,9 @@
 //! worktree.
 //!
 //! What the fixtures do not cover: inline `mod util { .. }` modules, and
-//! `#[path]` module files. The overlay walks file-backed `mod` declarations
-//! only.
+//! `#[path]` module files beyond one guard: the overlay reads no `pub use`
+//! rows of a module whose path holds one. The overlay walks file-backed
+//! `mod` declarations only.
 //!
 //! The `test_check_rust_*` cases at the end hold those gaps as known
 //! differences against a fresh index in
@@ -1694,4 +1695,72 @@ fn test_overlay_view_pub_use_beside_test_mod_glob_binds_like_index() {
 #[test]
 fn test_overlay_view_pub_glob_facade_binds_like_index() {
     check_pub_use_reaches_inner_helper("mod inner;\npub use inner::*;\n");
+}
+
+/// `b`'s root declares `#[path = "actual.rs"] pub mod facade;`, and a stray
+/// `facade.rs` no `mod` declares sits where the file layout puts `facade`.
+/// `actual.rs` re-exports `right`'s `f`, the stray file `wrong`'s. The index
+/// places `facade` at `actual.rs` and binds `right.rs`. The overlay's layout
+/// places `facade` at the stray file; reading that file's `pub use` would
+/// bind `wrong.rs`. The overlay must bind nothing the index does not. Without
+/// the stray file the test would hit only the known missing edge of the
+/// `#[path]` layout gap (FU-2026-10-26-2ad63df39f50).
+#[test]
+fn test_overlay_view_path_attr_beside_stray_conventional_file_binds_nothing_beyond_index() {
+    const RIGHT: &str = "crates/b/src/right.rs";
+    const WRONG: &str = "crates/b/src/wrong.rs";
+    let caller = "use b::facade::f;\n\npub fn t() {\n    f();\n}\n";
+    let files = reexport_crates(
+        caller,
+        "#[path = \"actual.rs\"]\npub mod facade;\nmod right;\nmod wrong;\n",
+        &[
+            ("crates/b/src/actual.rs", "pub use crate::right::*;\n"),
+            ("crates/b/src/facade.rs", "pub use crate::wrong::*;\n"),
+            (RIGHT, "pub fn f() {}\n"),
+            (WRONG, "pub fn f() {}\n"),
+        ],
+    );
+    let (reindex, overlay) = reindex_and_overlay(&files, CALLER, &one_line_edit(caller), &["t"]);
+    let bound: Vec<(&str, &str)> = reindex
+        .iter()
+        .map(|call| (call.callee_file.as_str(), call.callee.as_str()))
+        .collect();
+    assert_eq!(
+        bound,
+        [(RIGHT, "f")],
+        "the index binds through the #[path] module: {reindex:#?}"
+    );
+    assert!(
+        overlay.iter().all(|call| call.callee_file != WRONG),
+        "the overlay follows the stray file's pub use: {overlay:#?}"
+    );
+    assert!(
+        overlay.iter().all(|call| reindex.contains(call)),
+        "the overlay binds an edge the index does not: {overlay:#?}"
+    );
+}
+
+/// `b`'s root declares `#[path = "right.rs"] pub mod facade;` beside
+/// `pub mod right;`, so one file serves two `mod`s. The index walks the tree
+/// once per file and places `right.rs` as `facade`. The overlay's layout
+/// places it as `right`; no step of `right`'s path carries `#[path]`, yet
+/// following its glob there would bind an edge the index does not. A
+/// `#[path]` anywhere on the parents keeps the overlay out.
+#[test]
+fn test_overlay_view_path_attr_onto_sibling_file_binds_nothing_beyond_index() {
+    let caller = "use b::right::f;\n\npub fn t() {\n    f();\n}\n";
+    let files = reexport_crates(
+        caller,
+        "#[path = \"right.rs\"]\npub mod facade;\npub mod right;\nmod x;\nmod y;\n",
+        &[
+            ("crates/b/src/right.rs", "pub use crate::x::*;\n"),
+            ("crates/b/src/x.rs", "pub fn f() {}\n"),
+            ("crates/b/src/y.rs", "pub fn f() {}\n"),
+        ],
+    );
+    let (reindex, overlay) = reindex_and_overlay(&files, CALLER, &one_line_edit(caller), &["t"]);
+    assert!(
+        overlay.iter().all(|call| reindex.contains(call)),
+        "the overlay binds an edge the index does not: {overlay:#?}\nindex: {reindex:#?}"
+    );
 }

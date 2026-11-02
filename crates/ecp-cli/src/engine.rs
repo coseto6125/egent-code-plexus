@@ -2,9 +2,11 @@ use crate::session::view_cache;
 use ecp_core::contracts::routing::SizeCap;
 use ecp_core::graph::{ArchivedZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC};
 use ecp_core::session::view::{CallGap, HiddenDecl};
-use ecp_core::session::OverlayView;
+use ecp_core::session::{DirtyEvents, OverlayView};
 use memmap2::Mmap;
 use rkyv::rancor::Error;
+use rustc_hash::FxHashMap;
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io;
@@ -304,8 +306,11 @@ impl Engine {
                 let size_cap = self
                     .overlay_size_cap
                     .unwrap_or_else(|| ecp_core::config::resolve_size_cap(root));
-                let inputs =
-                    crate::session::overlay_reader::view_inputs_under(dir, root, size_cap).ok()?;
+                let (inputs, manifest) =
+                    crate::session::overlay_reader::view_inputs_and_manifest_under(
+                        dir, root, size_cap,
+                    )
+                    .ok()?;
                 if inputs.is_empty() {
                     return None;
                 }
@@ -318,10 +323,16 @@ impl Engine {
                     crate::session::overlay_reader::decode_view_inputs_with_records(
                         &inputs.fragments,
                     );
-                // A dirty file's disk text is the one its fragment parsed; a
-                // clean file's equals the indexed text, so the view cache key
-                // still covers what the view reads.
-                let sources = |rel: &str| std::fs::read_to_string(root.join(rel)).ok();
+                // The view reads only text whose hash the key covers (the
+                // graph's or an accepted fragment's), so a view whose reads
+                // all found that text is a function of the key. One that
+                // found other text, or none recorded, is not stored.
+                let sources = RecordedSources::new(
+                    root,
+                    graph,
+                    files.iter().map(|file| file.rel_path.as_str()),
+                    manifest.as_ref(),
+                );
                 let view = OverlayView::build_with_configs(
                     graph,
                     &files,
@@ -329,9 +340,9 @@ impl Engine {
                     &inputs.tombstones,
                     &inputs.stale,
                     &inputs.configs,
-                    Some(&sources),
+                    Some(&|rel: &str| sources.read(rel)),
                 )?;
-                if let Some(key) = key {
+                if let Some(key) = key.filter(|_| sources.all_recorded()) {
                     view_cache::write(dir, key, &view);
                 }
                 Some(view)
@@ -385,6 +396,88 @@ impl Engine {
     /// no session is attached (e.g. queries without `--session-id`).
     pub fn overlay_dir(&self) -> Option<&Path> {
         self.overlay_dir.as_deref()
+    }
+}
+
+/// The overlay view's source reader (`ecp_core::session::view::SourceReader`):
+/// it gives a file's text only when the text's `xxh3_64` is the hash the
+/// view's inputs recorded for the path. A dirty file's recorded hash is its
+/// accepted fragment's `DirtyEventEntry::content_hash` (16 lowercase hex
+/// digits of the `u64`); any other file's is `graph.bin`'s
+/// `File.content_hash` (the `u64`'s little-endian bytes, all zero for a
+/// file the index omitted, which records none).
+pub struct RecordedSources<'g> {
+    root: &'g Path,
+    graph: &'g ArchivedZeroCopyGraph,
+    /// Each dirty path the manifest holds → its parsed content hash, `None`
+    /// for an entry whose hash does not parse.
+    dirty: FxHashMap<&'g str, Option<u64>>,
+    /// Set once a read found no recorded hash for a file the graph holds,
+    /// or text other than the recorded one.
+    unrecorded: Cell<bool>,
+}
+
+impl<'g> RecordedSources<'g> {
+    /// `dirty` are the view's re-parsed paths; those `manifest` holds are
+    /// checked against its hash, the rest (the invalidation closure's clean
+    /// files) against the graph's.
+    pub fn new(
+        root: &'g Path,
+        graph: &'g ArchivedZeroCopyGraph,
+        dirty: impl IntoIterator<Item = &'g str>,
+        manifest: Option<&DirtyEvents>,
+    ) -> Self {
+        let dirty = manifest
+            .map(|manifest| {
+                dirty
+                    .into_iter()
+                    .filter_map(|rel| {
+                        let entry = manifest.entries.get(rel)?;
+                        let hash = entry
+                            .content_hash
+                            .as_deref()
+                            .and_then(|hex| u64::from_str_radix(hex, 16).ok());
+                        Some((rel, hash))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self {
+            root,
+            graph,
+            dirty,
+            unrecorded: Cell::new(false),
+        }
+    }
+
+    /// The text of `rel` when it is the recorded one. `None` for a path no
+    /// input records, for no recorded hash, and for a file that is gone,
+    /// unreadable, of other text, or not UTF-8.
+    pub fn read(&self, rel: &str) -> Option<String> {
+        let recorded = match self.dirty.get(rel) {
+            Some(&hash) => hash,
+            None => {
+                let file = &self.graph.files[self.graph.file_idx_of(rel)? as usize];
+                Some(file.content_hash)
+                    .filter(|hash| *hash != [0; 8])
+                    .map(u64::from_le_bytes)
+            }
+        };
+        let bytes = recorded.and_then(|hash| {
+            let bytes = fs::read(self.root.join(rel)).ok()?;
+            (xxhash_rust::xxh3::xxh3_64(&bytes) == hash).then_some(bytes)
+        });
+        let Some(bytes) = bytes else {
+            self.unrecorded.set(true);
+            return None;
+        };
+        String::from_utf8(bytes).ok()
+    }
+
+    /// Whether every read found the recorded text, or no file at all: what
+    /// the view read is then fixed by its inputs.
+    pub fn all_recorded(&self) -> bool {
+        !self.unrecorded.get()
     }
 }
 
