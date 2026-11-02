@@ -120,10 +120,10 @@ fn annotated(g: &ecp_core::graph::ZeroCopyGraph, source: &str) -> Vec<(String, S
     .collect()
 }
 
-/// Contract: a pointer return `Tok *` and `const Tok *` bind the project type
-/// `Tok`. The parser keeps the declaration prefix as written (`slice_type_before`
-/// gives `Tok *`). Before the change the raw text `Tok *` names no type: no
-/// edge. With no project `Tok` nothing binds. C has no generics.
+/// Guard: a pointer return `Tok *` and `const Tok *` bind the project type
+/// `Tok`, before and after every language reduced its annotation key: the C
+/// parser already hands the resolver the bare type name. With no project
+/// `Tok` nothing binds. C has no generics.
 #[test]
 fn test_pointer_return_annotation_binds_project_type() {
     let g = name_ref_support::graph(

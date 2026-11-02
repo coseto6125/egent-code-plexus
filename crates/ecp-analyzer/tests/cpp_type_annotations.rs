@@ -94,10 +94,10 @@ fn annotated(g: &ecp_core::graph::ZeroCopyGraph, source: &str) -> Vec<(String, S
     .collect()
 }
 
-/// Contract: pointer and reference returns (`Tok *`, `const Tok &`) bind the
-/// project struct `Tok`. The parser keeps the prefix as written, so the text
-/// is `Tok *` / `const Tok &`. Before the change those raw texts name no type:
-/// no edge. With no project `Tok` nothing binds.
+/// Guard: pointer and reference returns (`Tok *`, `const Tok &`) bind the
+/// project struct `Tok`, before and after every language reduced its
+/// annotation key: the C++ parser already hands the resolver the bare type
+/// name. With no project `Tok` nothing binds.
 #[test]
 fn test_pointer_and_reference_return_annotations_bind_project_type() {
     let g = name_ref_support::graph(
