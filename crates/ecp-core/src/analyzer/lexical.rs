@@ -90,6 +90,19 @@ pub fn body_locals(decls: &[(NodeKind, Span)], enclosing: &[Option<usize>]) -> V
         .collect()
 }
 
+/// The per-uid AND over one file's [`body_locals`]: Pass 1 merges each later
+/// twin of a uid into its first, and the merged node is body-local only when
+/// every declaration merged into it is. `twins` holds (twin, its first) as
+/// indices into `local`. The index's builder and the overlay's dirty side
+/// both fold here.
+pub fn fold_twins(local: &mut [bool], twins: impl IntoIterator<Item = (usize, usize)>) {
+    for (twin, first) in twins {
+        if !local[twin] {
+            local[first] = false;
+        }
+    }
+}
+
 /// The [`innermost_enclosing`] of `decls`' spans: what [`body_locals`] and
 /// [`lexical_parents_in`](crate::contracts::identity::lexical_parents_in)
 /// read, built once per file.
@@ -1077,6 +1090,29 @@ mod tests {
             [None, None, Some(1), Some(1), Some(1), Some(4), None]
         );
         assert!(enclosing_types(&[]).is_empty());
+    }
+
+    /// Stands for: a merged node stays body-local only when every twin
+    /// merged into it is body-local too; a module-level twin makes it a
+    /// module item, in any twin order.
+    #[test]
+    fn test_fold_twins_module_level_twin_clears_first_body_local_twins_keep_it() {
+        let mut empty: [bool; 0] = [];
+        fold_twins(&mut empty, []);
+        let mut local = [true, false, true, true, false];
+        fold_twins(&mut local, []);
+        assert_eq!(local, [true, false, true, true, false], "no twins");
+        fold_twins(&mut local, [(2, 0)]);
+        assert_eq!(local, [true, false, true, true, false], "a body-local twin");
+        fold_twins(&mut local, [(2, 0), (4, 0), (3, 0)]);
+        assert_eq!(
+            local,
+            [false, false, true, true, false],
+            "a module-level twin"
+        );
+        let mut module_level_first = [false, true];
+        fold_twins(&mut module_level_first, [(1, 0)]);
+        assert_eq!(module_level_first, [false, true]);
     }
 
     #[test]

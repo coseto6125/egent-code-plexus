@@ -94,8 +94,10 @@ pub trait PickFacts {
     /// Whether `id` lies inside a function body: a scoped declaration, or a
     /// Rust type, `impl` block or member there
     /// ([`body_locals`](crate::analyzer::lexical::body_locals)). It is no
-    /// module item, so no module path or import binds it. The default knows
-    /// the scoped ones only.
+    /// module item, so no module path or import binds it. A node Pass 1
+    /// merged with a module-level twin is a module item
+    /// ([`fold_twins`](crate::analyzer::lexical::fold_twins)). The default
+    /// knows the scoped ones only.
     fn is_body_local(&self, id: u32) -> bool {
         self.is_lexically_scoped(id)
     }

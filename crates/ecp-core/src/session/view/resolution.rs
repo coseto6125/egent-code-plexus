@@ -27,8 +27,8 @@ use crate::analyzer::ladder::{
     TypeName,
 };
 use crate::analyzer::lexical::{
-    body_locals, decls_enclosing, inside_callable, lexical_chain_end, lexical_scope_kinds,
-    twin_enclosing, LexicalFunctions,
+    body_locals, decls_enclosing, fold_twins, inside_callable, lexical_chain_end,
+    lexical_scope_kinds, twin_enclosing, LexicalFunctions,
 };
 use crate::analyzer::outcome::{Resolution, Tier};
 use crate::analyzer::overrides::{
@@ -344,16 +344,18 @@ impl<'a> OverlayFacts<'a> {
         let mut dirty_flags: FxHashMap<u32, u16> = FxHashMap::default();
         let mut dirty_lexical_parents: FxHashMap<u32, u32> = FxHashMap::default();
         let mut rust_facts = DirtyRustFacts::default();
-        // The first virtual idx of each uid, and each later twin of one
-        // with that first idx: the index merges the twin into it.
+        // The first virtual idx of each uid: the index merges each later
+        // twin into it.
         let mut first_of_uid: FxHashMap<u64, u32> = FxHashMap::default();
-        let mut twins: Vec<(u32, u32)> = Vec::new();
-        let mut module_level_firsts: Vec<u32> = Vec::new();
+        // One Rust file's twins as (offset, offset of its first); a uid
+        // hashes the path, so both lie in the file.
+        let mut file_twins: Vec<(usize, usize)> = Vec::new();
         let mut offset = 0usize;
         for (file_ord, file) in files.iter().enumerate() {
             let mut exports_any = false;
             let first = offset;
-            let file_twins = twins.len();
+            let start = base_len + first as u32;
+            let rust_file = is_rust_source(std::path::Path::new(&file.rel_path));
             for symbol in &file.symbols {
                 let node = &nodes[offset];
                 let virt = base_len + offset as u32;
@@ -363,7 +365,11 @@ impl<'a> OverlayFacts<'a> {
                     match first_of_uid.entry(node.uid) {
                         Entry::Occupied(seen) => {
                             rust_facts.repeats.insert(virt);
-                            twins.push((virt, *seen.get()));
+                            if let Some(first_at) =
+                                seen.get().checked_sub(start).filter(|_| rust_file)
+                            {
+                                file_twins.push((offset - first, first_at as usize));
+                            }
                         }
                         Entry::Vacant(slot) => {
                             slot.insert(virt);
@@ -388,9 +394,7 @@ impl<'a> OverlayFacts<'a> {
                 }
                 offset += 1;
             }
-            let start = base_len + first as u32;
             rust_facts.starts.push(start);
-            let rust_file = is_rust_source(std::path::Path::new(&file.rel_path));
             if rust_file {
                 rust_impl_members(&file.symbols, |member, block, implemented| {
                     dirty_impl_members.insert(
@@ -416,29 +420,18 @@ impl<'a> OverlayFacts<'a> {
                     if let Some(parent) = parent {
                         let virt = start + offset as u32;
                         dirty_lexical_parents.insert(virt, start + parent);
-                        // A Rust scoped node is body-local too: `body_locals`
-                        // below holds it.
-                        if !rust_file {
-                            rust_facts.body_locals.insert(virt);
-                        }
+                        rust_facts.body_locals.insert(virt);
                     }
                 }
                 if rust_file {
-                    let local = body_locals(&decls, &enclosing);
+                    let mut local = body_locals(&decls, &enclosing);
+                    fold_twins(&mut local, file_twins.drain(..));
                     rust_facts.body_locals.extend(
                         local
                             .iter()
                             .enumerate()
                             .filter(|&(_, &body_local)| body_local)
                             .map(|(offset, _)| start + offset as u32),
-                    );
-                    // The index's per-node AND: a first of a uid with a
-                    // module-level twin is a module item.
-                    module_level_firsts.extend(
-                        twins[file_twins..]
-                            .iter()
-                            .filter(|&&(twin, _)| !local[(twin - start) as usize])
-                            .map(|&(_, first)| first),
                     );
                 }
             }
@@ -451,9 +444,6 @@ impl<'a> OverlayFacts<'a> {
                 aliases.is_some(),
             ));
             dirty_aliases.push(aliases);
-        }
-        for first in module_level_firsts {
-            rust_facts.body_locals.remove(&first);
         }
         let pool = &graph.string_pool;
         let mut dirty_impl_traits: FxHashMap<&'a str, Vec<&'a str>> = FxHashMap::default();
@@ -3418,9 +3408,8 @@ pub(super) struct RustModules<'a> {
     graph: &'a ArchivedZeroCopyGraph,
     /// Each dirty file with the virtual idx of its first symbol.
     dirty: FxHashMap<&'a str, (&'a OverlayFileInput, u32)>,
-    /// The virtual idxs of the dirty declarations no module path names: the
-    /// scoped ones, and the Rust ones inside a function body
-    /// ([`body_locals`]).
+    /// The virtual idxs of the dirty declarations no module path names
+    /// ([`DirtyRustFacts::body_locals`]).
     dirty_body_locals: FxHashSet<u32>,
     /// The virtual idxs no name lookup reads ([`DirtyRustFacts::repeats`]).
     dirty_repeats: FxHashSet<u32>,
@@ -3429,6 +3418,9 @@ pub(super) struct RustModules<'a> {
     /// ([`inside_callable`]). Built on the first such question about a Rust
     /// node.
     base_callables: OnceCell<Vec<Vec<Span>>>,
+    /// Base node idx → the answer of its twin scan in
+    /// [`Self::is_body_local`], which walks every node of its kind.
+    base_twin_scans: RefCell<FxHashMap<u32, bool>>,
     removed: &'a FxHashSet<&'a str>,
     /// The `graph.bin` workspace facts, read on first use: reading them
     /// deserializes and validates the whole table, once per view.
@@ -3469,6 +3461,7 @@ impl<'a> RustModules<'a> {
             dirty_body_locals: facts.body_locals,
             dirty_repeats: facts.repeats,
             base_callables: OnceCell::new(),
+            base_twin_scans: RefCell::default(),
             removed,
             crates: OnceCell::new(),
         }
@@ -3476,7 +3469,8 @@ impl<'a> RustModules<'a> {
 
     /// Whether no module path names `idx` (base or virtual) from outside
     /// its function: a scoped declaration, or a Rust one inside a function
-    /// body. The index's `SymbolTable::is_body_local`.
+    /// body. A node Pass 1 merged with a module-level twin is a module item.
+    /// The index's `SymbolTable::is_body_local`.
     fn is_body_local(&self, idx: u32) -> bool {
         let graph = self.graph;
         if idx >= graph.nodes.len() as u32 {
@@ -3505,18 +3499,24 @@ impl<'a> RustModules<'a> {
         let kind = NodeKind::from(&node.kind);
         // The index's per-node AND: Pass 1 merges a later declaration of
         // `idx`'s uid into `idx` and keeps it as a tombstone of the same
-        // kind, file and span. A callable has none: a nested `fn` hashes its
-        // parent's anchor, and a repeated method is an overload of its own.
-        if kind.is_callable() {
+        // kind, file and span. A method or constructor has none: a repeat is
+        // an overload of its own. An unscoped `fn` (one a `mod` inside the
+        // body holds) can have one.
+        if crate::uid::keeps_overloads(kind) {
             return true;
         }
+        if let Some(&body_local) = self.base_twin_scans.borrow().get(&idx) {
+            return body_local;
+        }
         let twin_uid = crate::uid::tombstone(node.uid.to_native());
-        !graph.nodes_by_kind(kind).any(|twin| {
+        let body_local = !graph.nodes_by_kind(kind).any(|twin| {
             let twin = &graph.nodes[twin as usize];
             twin.uid.to_native() == twin_uid
                 && twin.file_idx.to_native() == file_idx
                 && !inside(stored_span(twin))
-        })
+        });
+        self.base_twin_scans.borrow_mut().insert(idx, body_local);
+        body_local
     }
 
     /// Whether `idx` (base or virtual), whose owner is `owner_class`, is
@@ -3607,11 +3607,11 @@ impl<'a> RustModules<'a> {
                 let node = &self.graph.nodes[idx as usize];
                 let pool = &self.graph.string_pool;
                 wanted(NodeKind::from(&node.kind))
-                    && !self.graph.is_later_overload(idx)
                     && self.graph.files[node.file_idx.to_native() as usize]
                         .path
                         .resolve(pool)
                         == file
+                    && !self.graph.is_later_overload(idx)
                     && self.module_level(idx, Some(node.owner_class.resolve(pool)), top_level)
             }),
         }
@@ -6466,4 +6466,64 @@ pub(super) fn resolve_edges(
     );
     *overrides = resolve_overrides(&facts, files, &heritage, decorated.survivors);
     lexical_parents
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph_fixture::GraphFixture;
+    use rkyv::rancor::Error as RkyvError;
+
+    /// `src/m.rs`: `fn setup` (lines 0-4) holds `mod inner { pub fn helper }`
+    /// with `helper` on line 2 and `impl Foo { fn new }` with `new` on line 3,
+    /// then the module-level `mod inner { pub fn helper }` with `helper` on
+    /// line `twin_line`. A `mod` breaks the lexical link, so both `helper`s
+    /// are unscoped `Function`s owned by `inner` and share a uid: Pass 1
+    /// keeps the first, the body-local one, and stores the second as its
+    /// tombstone (bit-inverse uid, no name) in the second's slot. Returns
+    /// the bytes and the idxs of the survivor and of `new`.
+    fn inner_helper_twins(twin_line: u32) -> (Vec<u8>, u32, u32) {
+        const M: &str = "src/m.rs";
+        let mut fx = GraphFixture::new();
+        let setup = fx.func(M, "setup");
+        fx.span(setup, (0, 0, 4, 1));
+        let survivor = fx.node_owned(NodeKind::Function, M, "inner", "helper");
+        fx.span(survivor, (2, 8, 2, 30));
+        let new = fx.method(M, "Foo", "new");
+        fx.span(new, (3, 8, 3, 30));
+        let twin = fx.node_owned(NodeKind::Function, M, "inner", "helper");
+        fx.span(twin, (twin_line, 4, twin_line, 26));
+        let node = &mut fx.assembly_mut().nodes[twin as usize];
+        node.uid = crate::uid::tombstone(node.uid);
+        node.name = Default::default();
+        node.owner_class = Default::default();
+        (fx.into_bytes(), survivor, new)
+    }
+
+    /// Contract: the clean side's per-uid AND covers an unscoped `fn` (one
+    /// a `mod` inside a body holds), as the index's `rust_body_local_rows`
+    /// does: with a module-level tombstoned twin the survivor is a module
+    /// item, with a body-local one it stays body-local. A method keeps
+    /// overloads, so it has no tombstoned twin and stays body-local. Before
+    /// the fix every callable inside a body was body-local.
+    #[test]
+    fn test_is_body_local_unscoped_fn_with_module_level_twin_returns_false() {
+        let removed = FxHashSet::default();
+        for (twin_line, want) in [(6, false), (2, true)] {
+            let (bytes, survivor, new) = inner_helper_twins(twin_line);
+            let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+            let modules = RustModules::new(graph, &[], &removed, Default::default());
+            assert_eq!(
+                modules.is_body_local(survivor),
+                want,
+                "twin on line {twin_line}"
+            );
+            assert_eq!(
+                modules.is_body_local(survivor),
+                want,
+                "the memoized answer, twin on line {twin_line}"
+            );
+            assert!(modules.is_body_local(new), "a method inside the body");
+        }
+    }
 }

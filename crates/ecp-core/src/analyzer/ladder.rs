@@ -87,11 +87,13 @@ pub trait ResolveFacts: TypeFacts {
     /// Whether `file` holds an `impl trait_key for ty` block: an `Impl` node
     /// named `ty` (an [`owner_key`]), or a blanket `impl<T: ..> trait_key
     /// for T`. The parser keeps no generics on an `Impl` node, so a self
-    /// type that names no project type stands for a generic parameter.
+    /// type that names no project type stands for a generic parameter. The
+    /// named `impl` first: the blanket test reads the project's types.
     fn implements_in_file(&self, file: &str, ty: &str, trait_key: &str) -> bool {
-        self.any_trait_impl(file, trait_key, |self_type| {
-            self_type == ty || self.types_named(self_type).is_empty()
-        })
+        self.any_trait_impl(file, trait_key, |self_type| self_type == ty)
+            || self.any_trait_impl(file, trait_key, |self_type| {
+                self.types_named(self_type).is_empty()
+            })
     }
 }
 

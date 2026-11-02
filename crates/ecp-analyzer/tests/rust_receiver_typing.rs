@@ -911,3 +911,20 @@ fn test_rust_trait_default_through_blanket_impl_binds_for_impl_only_type() {
         );
     }
 }
+
+/// Contract: Pass 1 keeps an `Impl` in its file's name table beside a
+/// same-named non-type node, so `pub fn T() {}` in the file of the blanket
+/// `impl<T: Debug> Describe for T` hides no impl: `self.describe()` in
+/// `impl Summary for String` still binds `Describe::describe`. A `fn T`
+/// names no type, so `T` still stands for a generic parameter.
+#[test]
+fn test_rust_trait_default_through_blanket_impl_beside_same_named_fn_binds() {
+    let source = format!(
+        "pub fn T() {{}}\n{BLANKET_DESCRIBE}pub trait Summary {{\n    fn summarize(&self) -> String;\n}}\nimpl Summary for String {{\n    fn summarize(&self) -> String {{ self.describe() }}\n}}\n"
+    );
+    let g = build(&[("src/lib.rs", source.as_str())]);
+    assert_eq!(
+        callee_owners(&g, "summarize", "describe"),
+        vec![("src/lib.rs".to_string(), "Describe".to_string())]
+    );
+}

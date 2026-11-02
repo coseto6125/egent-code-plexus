@@ -1201,3 +1201,43 @@ fn test_overlay_rust_trait_default_through_blanket_impl_matches_reindex() {
         }
     }
 }
+
+/// `m.rs` declares `mod inner { pub fn helper }` inside `fn setup` and again
+/// at module level. A `mod` breaks the lexical link, so both `helper`s are
+/// unscoped `Function`s owned by `inner`: they share a uid (a `Function`
+/// keeps no overloads), and Pass 1 keeps the body-local one with the
+/// module-level one as its tombstoned twin. The merged node is a module
+/// item, so `crate::m::inner::helper()` binds it through the module tree on
+/// both sides, with `lib.rs` dirty (the overlay reads `m.rs` from the
+/// archive) and with `m.rs` dirty. `other.rs` declares a second
+/// `inner::helper`, so no tier reaches `m.rs` by the name alone. Before the
+/// fix the overlay with `m.rs` clean took every callable inside a body for
+/// body-local and bound nothing.
+#[test]
+fn test_overlay_rust_module_level_twin_of_body_local_fn_binds_matches_reindex() {
+    const LIB: &str = "src/lib.rs";
+    const M: &str = "src/m.rs";
+    let lib = "pub mod m;\nmod other;\npub fn go() {\n    crate::m::inner::helper();\n}\n";
+    let m = "fn setup() {\n    mod inner {\n        pub fn helper() {}\n    }\n}\n\
+        pub mod inner {\n    pub fn helper() {}\n}\n";
+    let other = "pub mod inner {\n    pub fn helper() {}\n}\n";
+    let files = owned(&[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n",
+        ),
+        (LIB, lib),
+        (M, m),
+        ("src/other.rs", other),
+    ]);
+    for (dirty, source) in [(LIB, lib), (M, m)] {
+        for (label, edited) in [
+            ("touched", source.to_string()),
+            ("one-line edit", one_line_edit(source)),
+        ] {
+            let (reindex, overlay) = reindex_and_overlay_of(&files, dirty, &edited, LIB, &["go"]);
+            assert_module_tree_binds(&reindex, &[(M, "helper")], &format!("{label} {dirty}"));
+            assert_eq!(overlay, reindex, "{label} {dirty}");
+        }
+    }
+}

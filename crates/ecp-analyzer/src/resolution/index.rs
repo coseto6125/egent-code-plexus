@@ -331,8 +331,9 @@ pub struct SymbolTable {
     /// ([`ecp_core::analyzer::lexical::lexical_scope_kinds`]).
     lexical_parents: FxHashMap<u32, u32>,
 
-    /// The Rust declarations inside a function body (see
-    /// [`Self::note_body_local`]). Sparse: empty for a file with none.
+    /// The unscoped Rust nodes every raw merged into which lies inside a
+    /// function body (see [`Self::note_body_local`]). Sparse: empty for a
+    /// file with none.
     body_locals: FxHashSet<u32>,
 
     /// Method name → the C# extension methods of that name, each with its
@@ -917,9 +918,11 @@ impl SymbolTable {
         !self.lexical_parents.is_empty() && self.lexical_parents.contains_key(&id)
     }
 
-    /// Record that the Rust declaration `node` lies inside a function body
-    /// ([`ecp_core::analyzer::lexical::body_locals`]): it is no module item.
-    /// The builder notes every one before Pass 2.
+    /// Record that the unscoped Rust node `node` is body-local: every raw
+    /// Pass 1 merged into it lies inside a function body
+    /// ([`ecp_core::analyzer::lexical::body_locals`],
+    /// [`ecp_core::analyzer::lexical::fold_twins`]), so it is no module item.
+    /// The builder notes each such node before Pass 2.
     pub fn note_body_local(&mut self, node: u32) {
         self.body_locals.insert(node);
     }
@@ -2422,10 +2425,19 @@ mod tests {
         assert!(!st.implements_in_file("lib.rs", "String", "Sizer"));
         assert!(!st.implements_in_file("other.rs", "String", "Describe"));
 
+        // In another file: `register_node` drops a file's `Impl` from the
+        // name table once a same-named type lands in that file (Pass 1's
+        // `register_node_with_meta` keeps both), and the dropped `impl`
+        // would pass this assertion for the wrong reason.
         let mut declared_t = rows.to_vec();
-        declared_t.push(("lib.rs", "T", NodeKind::Struct, None));
+        declared_t.push(("other.rs", "T", NodeKind::Struct, None));
+        let st = st_owned(&declared_t);
         assert!(
-            !st_owned(&declared_t).implements_in_file("lib.rs", "String", "Describe"),
+            st.implements_in_file("lib.rs", "T", "Describe"),
+            "the `impl Describe for T` block stays in the name table"
+        );
+        assert!(
+            !st.implements_in_file("lib.rs", "String", "Describe"),
             "a self type the project declares is no generic parameter"
         );
     }

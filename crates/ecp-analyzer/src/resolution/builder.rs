@@ -13,8 +13,8 @@ use ecp_core::analyzer::csharp_extension::{self, ReceiverSite};
 use ecp_core::analyzer::heritage;
 use ecp_core::analyzer::ladder;
 use ecp_core::analyzer::lexical::{
-    body_locals, decls_enclosing, enclosing_types, file_identities, file_uids, later_is_arity_twin,
-    lexical_scope_kinds, raw_decl, splits_by_arity, LexicalFunctions,
+    body_locals, decls_enclosing, enclosing_types, file_identities, file_uids, fold_twins,
+    later_is_arity_twin, lexical_scope_kinds, raw_decl, splits_by_arity, LexicalFunctions,
 };
 use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::reexport::{export_filter_applies_to, is_ecmascript, ImportRef};
@@ -1210,7 +1210,7 @@ fn record_scopes(local_graphs: &[LocalGraph], raw_map: &RawIndexMap) -> ScopeRow
         if rust {
             let local = body_locals(&decls, &enclosing);
             rows.body_locals
-                .extend(rust_body_local_rows(raw_map, file, &local, &parents));
+                .extend(rust_body_local_rows(raw_map, file, local, &parents));
         }
     }
     rows
@@ -1223,35 +1223,41 @@ fn record_scopes(local_graphs: &[LocalGraph], raw_map: &RawIndexMap) -> ScopeRow
 /// Rust scopes only `fn` by its parent, so `fn setup() { struct Foo; }`
 /// and a later module-level `struct Foo` share a uid, and Pass 1 merges the
 /// second into the first. A merged node is body-local only when every raw
-/// node merged into it is: else a module item vanishes behind its
-/// body-local twin.
+/// node merged into it is ([`fold_twins`]): else a module item vanishes
+/// behind its body-local twin.
 fn rust_body_local_rows(
     raw_map: &RawIndexMap,
     file: FileOrd,
-    local: &[bool],
+    mut local: Vec<bool>,
     parents: &[Option<u32>],
 ) -> Vec<u32> {
-    let mut rows = Vec::new();
     // A file with no body-local raw node reads no slot.
     if !local.contains(&true) {
-        return rows;
+        return Vec::new();
     }
-    let mut module_level_twins: FxHashSet<u32> = FxHashSet::default();
-    for (at, &body_local) in local.iter().enumerate() {
-        let raw = RawIdx(at as u32);
-        let Some(slot) = raw_map.slot(file, raw) else {
-            continue;
-        };
-        if body_local {
-            if parents[at].is_none() && raw_map.node(file, raw) == Some(slot) {
-                rows.push(slot);
+    // A twin's survivor lies in its file: the uid hashes the path.
+    let twins: Vec<(usize, usize)> = (0..local.len())
+        .filter_map(|at| {
+            let raw = RawIdx(at as u32);
+            let survivor = raw_map.node(file, raw)?;
+            if raw_map.slot(file, raw) == Some(survivor) {
+                return None;
             }
-        } else if let Some(survivor) = raw_map.node(file, raw).filter(|&node| node != slot) {
-            module_level_twins.insert(survivor);
-        }
-    }
-    rows.retain(|node| !module_level_twins.contains(node));
-    rows
+            let (survivor_file, first) = raw_map.locate(survivor)?;
+            (survivor_file == file).then_some((at, first.0 as usize))
+        })
+        .collect();
+    fold_twins(&mut local, twins);
+    local
+        .iter()
+        .enumerate()
+        .filter_map(|(at, &body_local)| {
+            let raw = RawIdx(at as u32);
+            let slot = raw_map.slot(file, raw)?;
+            (body_local && parents[at].is_none() && raw_map.node(file, raw) == Some(slot))
+                .then_some(slot)
+        })
+        .collect()
 }
 
 /// Forward-slash path → file index, as Pass 1 numbers the files.

@@ -1537,3 +1537,33 @@ fn test_module_level_twin_of_body_local_type_binds_import_and_module_path() {
         );
     }
 }
+
+/// Contract: a `mod` inside a body breaks the lexical link, so
+/// `fn setup() { mod inner { pub fn helper } }` and the module-level
+/// `pub mod inner { pub fn helper }` are two unscoped `Function`s of one uid;
+/// Pass 1 merges the second into the first, and the merged node is a module
+/// item. `crate::m::inner::helper()` binds it through the module tree.
+/// `other.rs` declares a second `inner::helper`, so no tier reaches `m.rs`
+/// by the name alone. The overlay twin of this test is
+/// `test_overlay_rust_module_level_twin_of_body_local_fn_binds_matches_reindex`.
+#[test]
+fn test_module_path_binds_module_level_twin_of_body_local_fn() {
+    let m = "fn setup() {\n    mod inner {\n        pub fn helper() {}\n    }\n}\n\
+        pub mod inner {\n    pub fn helper() {}\n}\n";
+    let files = [
+        ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+        (
+            "src/lib.rs",
+            "pub mod m;\nmod other;\npub fn go() {\n    crate::m::inner::helper();\n}\n",
+        ),
+        ("src/m.rs", m),
+        (
+            "src/other.rs",
+            "pub mod inner {\n    pub fn helper() {}\n}\n",
+        ),
+    ];
+    assert_eq!(
+        workspace_go_target_kinds(&files, "helper"),
+        vec![("src/m.rs".to_string(), NodeKind::Function)]
+    );
+}
