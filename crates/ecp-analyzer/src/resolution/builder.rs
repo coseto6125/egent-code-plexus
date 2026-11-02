@@ -2996,10 +2996,23 @@ fn pass1_8_function_metas(
     let mut function_metas: Vec<FunctionMeta> = Vec::new();
     {
         for (file_idx, local_graph) in local_graphs.iter().enumerate() {
+            let csharp = symbol_table.file_language(&local_graph.file_path.to_string_lossy())
+                == Language::CSharp;
+            if csharp {
+                // A C# field or property types a receiver in another
+                // `partial` part, which Pass 2 reads before the Accesses
+                // edge of its type exists.
+                let base = file_base(raw_map, file_idx as u32);
+                for (raw_idx, raw_node) in local_graph.nodes.iter().enumerate() {
+                    if let (NodeKind::Property, Some(ty)) =
+                        (raw_node.kind, raw_node.type_annotation.as_deref())
+                    {
+                        symbol_table.note_return_type(base + raw_idx as u32, ty);
+                    }
+                }
+            }
             if !local_graph.raw_function_metas.is_empty() {
                 let base = file_base(raw_map, file_idx as u32);
-                let csharp = symbol_table.file_language(&local_graph.file_path.to_string_lossy())
-                    == Language::CSharp;
                 // Sorted index → binary_search per node, so the inner loop
                 // is O(N log F) instead of O(N*F).
                 let mut meta_idx: Vec<(Span, usize)> = local_graph
@@ -3656,14 +3669,26 @@ fn pass2_emit_node_edges(
                     }
                     None => targets,
                 },
-                site => match resolver.csharp_untyped_member(
-                    &local_graph.file_path,
-                    site,
-                    &local_graph.imports,
-                ) {
-                    Some(member) => extension(ReceiverSite::Untyped, member, arguments, 1.0),
-                    None => targets,
-                },
+                // A field or property another `partial` part or a base
+                // declares, which the parser cannot see, types the
+                // receiver before the extension retry reads it untyped.
+                site => {
+                    if let Some(target) = resolver.csharp_field_receiver_member(
+                        &local_graph.file_path,
+                        caller_owner,
+                        site,
+                    ) {
+                        return vec![target];
+                    }
+                    match resolver.csharp_untyped_member(
+                        &local_graph.file_path,
+                        site,
+                        &local_graph.imports,
+                    ) {
+                        Some(member) => extension(ReceiverSite::Untyped, member, arguments, 1.0),
+                        None => targets,
+                    }
+                }
             }
         };
         // `Foo.create().bar()`: `bar` on the type the one bound `create`

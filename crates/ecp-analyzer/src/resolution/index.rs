@@ -1,3 +1,4 @@
+use ecp_core::analyzer::csharp_access;
 use ecp_core::analyzer::csharp_extension::ExtensionDecl;
 use ecp_core::analyzer::import_binding::{
     fqn_language, owner_path_agrees, DeclaredType, MemberOwner,
@@ -494,6 +495,16 @@ impl SymbolTable {
         )
     }
 
+    /// The namespace the C# type `id` is declared in ([`declared_namespace`]).
+    pub(crate) fn type_namespace(&self, id: u32) -> Option<&str> {
+        declared_namespace(
+            self.owner(id),
+            self.csharp_namespaces(self.file_of(id)?)
+                .iter()
+                .map(String::as_str),
+        )
+    }
+
     pub(crate) fn module_files_by_stem<'a>(&'a self, stem: &str) -> impl Iterator<Item = &'a str> {
         self.files_by_stem(stem)
             .iter()
@@ -631,8 +642,10 @@ impl SymbolTable {
     }
 
     /// Record the return type the function `node_id` declares, as written
-    /// (`RawFunctionMeta.return_type`). Only a type [`return_type_key`]
-    /// reduces to a bare name is kept, interned once per distinct name.
+    /// (`RawFunctionMeta.return_type`), or the type the C# field or property
+    /// `node_id` declares (`RawNode.type_annotation`). Only a type
+    /// [`return_type_key`] reduces to a bare name is kept, interned once per
+    /// distinct name.
     pub fn note_return_type(&mut self, node_id: u32, return_type: &str) {
         let Some(key) = return_type_key(return_type) else {
             return;
@@ -675,10 +688,16 @@ impl SymbolTable {
     }
 
     /// Record the `FunctionMeta::flags` of the C# method `node_id` when the
-    /// access rule may refuse a call to it: a static or a private method.
+    /// access rule may refuse a call to it: a static or a private method, or
+    /// an explicit interface implementation, which no lookup reaches by name.
     pub fn note_csharp_method_flags(&mut self, node_id: u32, flags: u16) {
         let is_static = flags & FunctionMeta::FLAG_STATIC != 0;
-        if is_static || (flags >> 6) & 0b111 == 2 {
+        if is_static
+            || matches!(
+                csharp_access::visibility(flags),
+                csharp_access::PRIVATE | csharp_access::EXPLICIT_IMPL
+            )
+        {
             self.csharp_method_flags.insert(node_id, flags);
         }
     }
@@ -739,7 +758,8 @@ impl SymbolTable {
             .unwrap_or(&[])
     }
 
-    /// The [`return_type_key`] the function `node_id` declares.
+    /// The [`return_type_key`] the function or C# field / property `node_id`
+    /// declares.
     pub fn return_type_of(&self, node_id: u32) -> Option<&str> {
         self.return_types
             .get(&node_id)
@@ -2039,6 +2059,13 @@ impl TypeFacts for SymbolTable {
 
     fn partial_type(&self, ty: u32) -> u32 {
         SymbolTable::partial_type(self, ty)
+    }
+
+    fn hidden_member(&self, id: u32) -> bool {
+        let hidden = |id: u32| {
+            csharp_access::visibility(self.csharp_method_flags(id)) == csharp_access::EXPLICIT_IMPL
+        };
+        hidden(id) && self.later_overloads(id).iter().all(|&later| hidden(later))
     }
 }
 

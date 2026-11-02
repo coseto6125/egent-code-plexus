@@ -7,6 +7,8 @@
 //! the edge: the rule removes an edge only on proof. Index-time resolution
 //! and the session overlay read this one rule.
 //!
+//! An explicit interface implementation is never reached by name.
+//!
 //! Not modeled: `protected` and `internal`. A call on a value of unknown
 //! type (`object o; o.M()`) binds no ordinary target the rule could judge
 //! (codex ruling P-recv Q3); only an extension method, which it admits.
@@ -17,7 +19,18 @@ use crate::analyzer::types::CallSite;
 use crate::graph::{FunctionMeta, NodeKind};
 
 /// `FunctionMeta::flags` visibility code of `private` (bits 6-8).
-const PRIVATE: u16 = 2;
+pub const PRIVATE: u16 = 2;
+
+/// `FunctionMeta::flags` visibility code of a C# explicit interface
+/// implementation (`bool IBag.Remove(object o)`, bits 6-8). No member
+/// lookup on a class or struct reaches it: only a call through the
+/// interface does, and that call binds the interface's declaration.
+pub const EXPLICIT_IMPL: u16 = 6;
+
+/// The visibility code (bits 6-8) of `FunctionMeta::flags`.
+pub fn visibility(flags: u16) -> u16 {
+    (flags >> 6) & 0b111
+}
 
 /// How deep a caller's owner chain is walked. Past it the chain proves
 /// nothing.
@@ -73,8 +86,10 @@ pub fn call_admits<F: PickFacts + ?Sized>(
     if call.instance && is_static && flags & EXTENSION_FLAG == 0 {
         return false;
     }
-    if (flags >> 6) & 0b111 != PRIVATE {
-        return true;
+    match visibility(flags) {
+        EXPLICIT_IMPL => return false,
+        PRIVATE => {}
+        _ => return true,
     }
     let Some((target_file, owner)) = facts.file_of(target).zip(facts.owner(target)) else {
         return true;

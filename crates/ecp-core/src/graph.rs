@@ -851,6 +851,8 @@ impl From<&ArchivedFileCategory> for FileCategory {
 #[rkyv(derive(Debug))]
 pub struct ImportFact {
     pub source: StrRef,
+    /// As [`crate::analyzer::types::RawImport::imported_name`]: a Dart import
+    /// with combinators holds its clauses (`show A,B;hide C`).
     pub imported_name: StrRef,
     pub alias: Option<StrRef>,
     pub binding_kind: Option<BindingKind>,
@@ -1167,7 +1169,7 @@ pub struct FunctionMeta {
     /// - bit 3: `is_abstract` (no body — interface / pure-virtual / abstract)
     /// - bit 4: `is_generator` (yield / function* / iterator)
     /// - bit 5: `is_extern`   (FFI declared, no Rust/native body)
-    /// - bits 6-8: visibility (0=public, 1=protected, 2=private, 3=crate/internal, 4=package, 5=fileprivate, 6-7=reserved)
+    /// - bits 6-8: visibility (0=public, 1=protected, 2=private, 3=crate/internal, 4=package, 5=fileprivate, 6=C# explicit interface implementation, 7=reserved)
     /// - bit 9: `is_virtual`  (C++ only: declared `virtual`, or an `override` / `final` member)
     /// - bit 10: C# extension method (static method of a static class whose first parameter carries `this`)
     /// - bit 11: C# extension on a generic type parameter (`this T`)

@@ -70,7 +70,7 @@ pub fn unmodeled_return_type<'q>(
 /// `candidates` with the parts of one C# `partial` type read as one type:
 /// its representative ([`TypeFacts::partial_type`]), yielded once, at the
 /// place of its first part.
-fn distinct_types<'f, F: TypeFacts + ?Sized>(
+pub fn distinct_types<'f, F: TypeFacts + ?Sized>(
     facts: &'f F,
     candidates: impl Iterator<Item = u32> + 'f,
 ) -> impl Iterator<Item = u32> + 'f {
@@ -158,10 +158,19 @@ pub trait TypeFacts: PickFacts {
     /// The one of `candidates`, copies of one declaration, nearest
     /// `caller_file`; `None` for a tie or when one is no copy.
     fn nearest_copy(&self, caller_file: &str, candidates: &[u32]) -> Option<u32>;
-    /// The return type the function `callee` declares, as its signature
-    /// writes it or already reduced by [`return_type_key`]; `None` when it
-    /// declares none or is no function.
+    /// The return type the function `callee` declares, or the type the C#
+    /// field or property `callee` declares, as its signature writes it or
+    /// already reduced by [`return_type_key`]; `None` when it declares none
+    /// or is neither.
     fn return_type_of(&self, callee: u32) -> Option<&str>;
+    /// Whether a member lookup by name reaches neither the member `id` nor
+    /// any later overload of it: C# explicit interface implementations
+    /// (`bool IBag.Remove(object o)`). A lookup that meets `id` beside an
+    /// ordinary later overload keeps `id`, and the access rule hands the
+    /// call to that overload.
+    fn hidden_member(&self, _id: u32) -> bool {
+        false
+    }
     /// Every part of `ty`'s C# `partial` type, the representative first,
     /// `ty` included, when the facts know the parts of one type; empty
     /// otherwise. A member another part declares is the type's own.
@@ -258,7 +267,8 @@ fn unquote(text: &str) -> &str {
 /// constructor fallback lands on a type that declares no constructor), or
 /// the function's declared return type reduced by [`return_type_key`],
 /// where `Self` / `self` / `static` / `this` stand for the declaring type.
-/// The receiver of a chained call (`Foo.create().bar()`) has this type.
+/// The receiver of a chained call (`Foo.create().bar()`) has this type. A
+/// C# field or property (`_reader.Read()`) returns the type it declares.
 pub fn returned_type<F: TypeFacts + ?Sized>(facts: &F, callee: u32) -> Option<&str> {
     match facts.kind(callee) {
         NodeKind::Constructor => facts.owner(callee),
@@ -271,8 +281,45 @@ pub fn returned_type<F: TypeFacts + ?Sized>(facts: &F, callee: u32) -> Option<&s
                 Some(key)
             }
         }
+        NodeKind::Property => return_type_key(facts.return_type_of(callee)?),
         _ => None,
     }
+}
+
+/// The field or property `name` of the C# type `ty` (declared as
+/// `ty_name`) that a bare receiver `name.M()` in a member of `ty` reads,
+/// when the parser could not type it: one declared in another `partial`
+/// part, or inherited ([`member_ownership`] reads every part and the
+/// bases). `None` when no such member exists, when two parts declare one
+/// (C# rejects it, and the index cannot tell which the call reads), or
+/// when the lookup is unsure.
+pub fn csharp_member_field<F: TypeFacts + ?Sized>(
+    facts: &F,
+    ty: u32,
+    ty_name: &str,
+    name: &str,
+) -> Option<u32> {
+    let Ownership::Owned { id, inherited } =
+        member_ownership(facts, ty, ty_name, name, ResolveTarget::Field)
+    else {
+        return None;
+    };
+    let parts = facts.partial_parts(ty);
+    let mut part_files: Vec<&str> = parts
+        .iter()
+        .filter_map(|&part| facts.file_of(part))
+        .collect();
+    part_files.sort_unstable();
+    part_files.dedup();
+    let declared: usize = part_files
+        .iter()
+        .map(|file| {
+            facts
+                .owned_in_file(file, name, ty_name, ResolveTarget::Field)
+                .len()
+        })
+        .sum();
+    (inherited || declared <= 1).then_some(id)
 }
 
 /// Select a visible return type before inspecting its members. An ambiguous
@@ -281,13 +328,65 @@ pub fn visible_return_type<'q, F: TypeFacts + ?Sized>(
     facts: &F,
     source: &str,
     name: &'q str,
-    mut visible: impl FnMut(u32) -> bool,
+    visible: impl FnMut(u32) -> bool,
 ) -> TypeCandidates<'q> {
     let candidates = facts.global_candidates(name, ResolveTarget::Type, facts.file_meta(source));
-    let mut candidates = distinct_types(facts, candidates.into_iter().filter(|&id| visible(id)));
-    match (candidates.next(), candidates.next()) {
-        (Some(id), None) => TypeCandidates::Unique(id, name),
-        _ => TypeCandidates::None,
+    visible_level(facts, &candidates, name, visible).unwrap_or(TypeCandidates::None)
+}
+
+/// [`visible_return_type`] for a C# return type `name` read in `source`,
+/// whose file declares `source_namespaces`. Level 0 is `visible`, today's
+/// rule ([`namespace_return_type_visible`]). C# also searches every
+/// namespace that encloses the source's one namespace: when level 0 admits
+/// no candidate, each enclosing namespace is a level, innermost first, and
+/// `in_namespace(id, namespace)` says whether candidate `id` is declared
+/// there. The first level with a candidate decides: one type binds, two or
+/// more bind none. Level 0 keeps its rank over an enclosing namespace, so
+/// no edge level 0 gives is lost (C# would rank the enclosing namespace
+/// above a `using`).
+pub fn csharp_visible_return_type<'q, 'n, F: TypeFacts + ?Sized>(
+    facts: &F,
+    source: &str,
+    name: &'q str,
+    source_namespaces: impl Iterator<Item = &'n str>,
+    mut visible: impl FnMut(u32) -> bool,
+    mut in_namespace: impl FnMut(u32, &str) -> bool,
+) -> TypeCandidates<'q> {
+    let candidates = facts.global_candidates(name, ResolveTarget::Type, facts.file_meta(source));
+    if let Some(found) = visible_level(facts, &candidates, name, &mut visible) {
+        return found;
+    }
+    let Some(namespace) = declared_namespace(None, source_namespaces) else {
+        return TypeCandidates::None;
+    };
+    enclosing_namespaces(namespace)
+        .find_map(|outer| visible_level(facts, &candidates, name, |id| in_namespace(id, outer)))
+        .unwrap_or(TypeCandidates::None)
+}
+
+/// The namespaces that enclose `namespace` (`.`-joined), innermost first.
+/// The global namespace is not one of them.
+fn enclosing_namespaces(namespace: &str) -> impl Iterator<Item = &str> {
+    fn outer(ns: &str) -> Option<&str> {
+        ns.rsplit_once('.').map(|(outer, _)| outer)
+    }
+    std::iter::successors(outer(namespace), |&ns| outer(ns))
+}
+
+/// The type among `candidates` that `admits` keeps, parts of one partial
+/// type read as one: `None` when it keeps none, [`TypeCandidates::None`]
+/// when it keeps two types.
+fn visible_level<'q, F: TypeFacts + ?Sized>(
+    facts: &F,
+    candidates: &[u32],
+    name: &'q str,
+    mut admits: impl FnMut(u32) -> bool,
+) -> Option<TypeCandidates<'q>> {
+    let mut types = distinct_types(facts, candidates.iter().copied().filter(|&id| admits(id)));
+    match (types.next(), types.next()) {
+        (None, _) => None,
+        (Some(id), None) => Some(TypeCandidates::Unique(id, name)),
+        (Some(_), Some(_)) => Some(TypeCandidates::None),
     }
 }
 
@@ -460,7 +559,8 @@ pub fn member_ownership<F: TypeFacts + ?Sized>(
         MemberLookup::Ambiguous => return Ownership::Unknown,
         MemberLookup::Miss => {}
     }
-    let shadows = attributes_shadow_methods(facts.file_meta(facts.file_of(ty).unwrap_or_default()));
+    let meta = facts.file_meta(facts.file_of(ty).unwrap_or_default());
+    let shadows = attributes_shadow_methods(meta);
     // How each ancestor was first reached: (the type, base position).
     let mut parent: rustc_hash::FxHashMap<u32, (u32, u32)> = rustc_hash::FxHashMap::default();
     let mut frontier = vec![ty];
@@ -508,6 +608,12 @@ pub fn member_ownership<F: TypeFacts + ?Sized>(
     // The depth cap cut the walk short: a deeper base may own the member.
     if frontier.iter().any(|&t| facts.supertypes(t).is_some()) {
         return Ownership::Unknown;
+    }
+    // A C# class or struct reaches an interface's member only through its
+    // own implementation, which its lookup meets first, or not at all (a
+    // default interface method is called through the interface).
+    if meta.language == Language::CSharp && facts.kind(ty) != NodeKind::Interface {
+        hits.retain(|&(owner, _)| facts.kind(owner) != NodeKind::Interface);
     }
     let most_derived = hits.iter().find(|&&(owner, _)| {
         let above = facts.ancestors(owner);
@@ -613,7 +719,8 @@ pub fn owned_member<F: TypeFacts + ?Sized>(
         .filter_map(|&part| facts.file_of(part))
         .filter(|&file| file != ty_file);
     for file in std::iter::once(ty_file).chain(part_files) {
-        let in_file = facts.owned_in_file(file, member, ty_name, target);
+        let mut in_file = facts.owned_in_file(file, member, ty_name, target);
+        in_file.retain(|&id| !facts.hidden_member(id));
         if let Some(&first) = in_file.first() {
             // Several hits are overloads of the one type, unless the file
             // declares two owners of that name (nested types, a type and a
@@ -625,7 +732,8 @@ pub fn owned_member<F: TypeFacts + ?Sized>(
             };
         }
     }
-    let elsewhere = facts.owned_global(member, ty_name, target, ty_file);
+    let mut elsewhere = facts.owned_global(member, ty_name, target, ty_file);
+    elsewhere.retain(|&id| !facts.hidden_member(id));
     let Some(&first) = elsewhere.first() else {
         return MemberLookup::Miss;
     };
@@ -729,6 +837,25 @@ mod tests {
             ("void", None),
         ] {
             assert_eq!(return_type_key(raw), want, "return_type_key({raw:?})");
+        }
+    }
+
+    /// Contract: a C# return type lookup walks out of the declaring file's
+    /// namespace innermost first, by whole `.` segments, and stops before
+    /// the global namespace, which level 0 already holds.
+    #[test]
+    fn test_enclosing_namespaces_innermost_first_by_segment() {
+        for (namespace, want) in [
+            ("Lib.Linq.Inner", vec!["Lib.Linq", "Lib"]),
+            ("Lib.Linq", vec!["Lib"]),
+            ("Lib", vec![]),
+            ("", vec![]),
+        ] {
+            assert_eq!(
+                enclosing_namespaces(namespace).collect::<Vec<_>>(),
+                want,
+                "{namespace:?}"
+            );
         }
     }
 

@@ -1079,9 +1079,14 @@ impl<'a> Resolver<'a> {
                         st.namespace_type_path_matches(id, path)
                     })
                 }
-                Language::CSharp => type_ladder::visible_return_type(st, callee_file, ty, |id| {
-                    st.namespace_return_type_visible(id, callee_file, imports)
-                }),
+                Language::CSharp => type_ladder::csharp_visible_return_type(
+                    st,
+                    callee_file,
+                    ty,
+                    st.csharp_namespaces(callee_file).iter().map(String::as_str),
+                    |id| st.namespace_return_type_visible(id, callee_file, imports),
+                    |id, namespace| st.type_namespace(id) == Some(namespace),
+                ),
                 Language::Swift => type_ladder::visible_return_type(st, callee_file, ty, |id| {
                     st.file_of(id).is_some_and(|file| {
                         type_ladder::swift_return_type_visible(callee_file, file, imports)
@@ -1247,6 +1252,37 @@ impl<'a> Resolver<'a> {
             }
             _ => None,
         }
+    }
+
+    /// The member a C# call `field.member()` reaches when the parser could
+    /// not type `field`, yet the caller's own type `caller_owner` (an
+    /// `owner_key`) declares that field or property in another `partial`
+    /// part or inherits it ([`type_ladder::csharp_member_field`]): `member`
+    /// on the type the field declares, read in the field's file as a chain
+    /// reads a return type, under the chain's access rule. `None` for any
+    /// other site, or when that lookup binds nothing.
+    pub(crate) fn csharp_field_receiver_member(
+        &self,
+        source_file: &Path,
+        caller_owner: Option<&str>,
+        site: CallSite<'_>,
+    ) -> Option<(NodeId, f32)> {
+        let CallSite::FromReceiver { receiver, member } = site.fallback() else {
+            return None;
+        };
+        let owner = caller_owner?;
+        let st = self.symbol_table;
+        let ty = st.lookup_in_file_with_kind(
+            &normalize_source_path(source_file),
+            owner,
+            ResolveTarget::Type,
+        )?;
+        let field = type_ladder::csharp_member_field(st, ty, owner, receiver)?;
+        let (id, confidence) = self
+            .resolve_chained_member_outcome(source_file, (field, 1.0), member)
+            .bound()?;
+        let id = self.csharp_admitted_chain_member(source_file, caller_owner, id)?;
+        Some((id, confidence))
     }
 
     /// Resolve an explicit import without selecting an inaccessible local binding.
@@ -2381,7 +2417,13 @@ impl<'a> Resolver<'a> {
         if caller_meta.language == Language::Rust && !imported_in_project {
             return TypeCandidates::None;
         }
-        let ids = st.global_candidates(qualifier, ResolveTarget::Type, caller_meta);
+        // The parts of one C# partial type are one candidate type.
+        let ids: Vec<NodeId> = type_ladder::distinct_types(
+            st,
+            st.global_candidates(qualifier, ResolveTarget::Type, caller_meta)
+                .into_iter(),
+        )
+        .collect();
         match ids.len() {
             0 => TypeCandidates::None,
             1 => TypeCandidates::Unique(ids[0], qualifier),
@@ -2399,14 +2441,14 @@ impl<'a> Resolver<'a> {
         let Some(name) = owner_key(path) else {
             return TypeCandidates::External;
         };
-        let ids: Vec<NodeId> = st
+        let agreeing = st
             .global_candidates(name, ResolveTarget::Type, st.file_meta(source_file_str))
             .into_iter()
             .filter(|&id| {
                 st.file_of(id)
                     .is_some_and(|file| st.owner_path_agrees(file, path))
-            })
-            .collect();
+            });
+        let ids: Vec<NodeId> = type_ladder::distinct_types(st, agreeing).collect();
         match ids.len() {
             0 => TypeCandidates::External,
             1 => TypeCandidates::Unique(ids[0], name),

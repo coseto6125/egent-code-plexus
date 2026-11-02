@@ -9,6 +9,9 @@
 //! - `is_test`:      has [Test] / [Fact] / [Theory] / [TestMethod] attribute OR file category Test
 //! - `visibility`:   `public` → 0, `protected` → 1, `private` → 2, `internal` → 3.
 //!   Default in class → 2 (private); default in interface → 0 (public).
+//!   An explicit interface implementation (`bool IBag.Remove(object o)`)
+//!   → 6 (`csharp_access::EXPLICIT_IMPL`): it takes no modifier, and no
+//!   lookup by name reaches it.
 //! - `params`:       `type identifier` pairs from `parameter` nodes
 //! - `return_type`:  before method name; `void` → empty string for clean consumption
 //! - `decorators`:   C# attribute names with `[]` stripped and `(...)` dropped
@@ -20,6 +23,7 @@
 //!   with a default value in bits 13-15 (`optional_bits`)
 
 use super::{extract_with, node_text, ts_span};
+use ecp_core::analyzer::csharp_access::EXPLICIT_IMPL;
 use ecp_core::analyzer::csharp_extension::{
     optional_bits, EXTENSION_FLAG, GENERIC_THIS_FLAG, PARAMS_ARRAY_FLAG,
 };
@@ -119,6 +123,10 @@ fn extract_one(
         if !name.is_empty() && !decorators.contains(&name) {
             decorators.push(name);
         }
+    }
+
+    if has_child_kind(*fn_node, "explicit_interface_specifier") {
+        vis_code = EXPLICIT_IMPL;
     }
 
     // Abstract: interface method without body OR no body AND abstract modifier.

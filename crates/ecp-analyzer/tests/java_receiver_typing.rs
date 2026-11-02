@@ -81,3 +81,58 @@ fn test_same_named_field_does_not_hide_inherited_method() {
     );
     assert_single_call_into_base(graphs, "run", "Derived.greet", "greet", "src/Base.java");
 }
+
+/// Gate for FU 755942c857a3: only a C# class drops an interface's member
+/// from its lookup. A Java class inherits an interface's `default` method,
+/// so `d.greet()` on `Derived implements Greeter` still binds
+/// `Greeter.greet`. Passes before the fix as well; an ungated drop would
+/// leave no edge.
+#[test]
+fn test_typed_param_interface_default_method_resolves_to_interface() {
+    let provider = JavaProvider::new().expect("JavaProvider::new");
+    let graphs = parse_all(
+        &provider,
+        &[
+            (
+                "src/Greeter.java",
+                r#"public interface Greeter {
+    default int greet() {
+        return 1;
+    }
+}
+"#,
+            ),
+            (
+                "src/Base.java",
+                r#"public class Base {
+}
+"#,
+            ),
+            (
+                "src/Derived.java",
+                r#"public class Derived extends Base implements Greeter {
+}
+"#,
+            ),
+            (
+                "src/Decoy.java",
+                r#"public class Decoy {
+    public int greet() {
+        return 2;
+    }
+}
+"#,
+            ),
+            (
+                "src/App.java",
+                r#"public class App {
+    public int run(Derived d) {
+        return d.greet();
+    }
+}
+"#,
+            ),
+        ],
+    );
+    assert_single_call_into_base(graphs, "run", "Derived.greet", "greet", "src/Greeter.java");
+}

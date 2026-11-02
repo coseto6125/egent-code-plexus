@@ -964,6 +964,219 @@ fn test_resolve_call_csharp_typed_param_receiver_still_binds_type_member() {
     assert_binds_foo(&csharp_graph(), "UseTyped", "Bar");
 }
 
+/// A decoy owner of `Bar`, so a name-only fallback binds nothing.
+const CS_DECOY: (&str, &str) = (
+    "src/Decoy/Other.cs",
+    "namespace Decoy { public class Other { public void Bar() {} } }\n",
+);
+
+/// A file declaring `public class R { public void Bar() {} }` in namespace
+/// `ns` (the global namespace when empty).
+fn cs_r(ns: &str) -> String {
+    let class = "public class R { public void Bar() {} }";
+    if ns.is_empty() {
+        format!("{class}\n")
+    } else {
+        format!("namespace {ns} {{ {class} }}\n")
+    }
+}
+
+/// `Factory.Make()` returning `R`, in a file that opens with `head` (its
+/// `using`s) and declares `Factory` as `namespace {ns} { .. }`, or as a
+/// file-scoped `namespace {ns};` when `ns` ends with `;`.
+fn cs_factory(head: &str, ns: &str) -> String {
+    let class = "public class Factory { public static R Make() { return null; } }";
+    match ns.strip_suffix(';') {
+        Some(scoped) => format!("{head}namespace {scoped};\n{class}\n"),
+        None => format!("{head}namespace {ns} {{ {class} }}\n"),
+    }
+}
+
+/// The graph of `files`, the decoy, and `App.Use.Caller` calling
+/// `Factory.Make().Bar()` through `using {factory_ns};`.
+fn cs_chain_graph(factory_ns: &str, files: &[(&str, &str)]) -> ZeroCopyGraph {
+    let ns = factory_ns.trim_end_matches(';');
+    let use_file = format!(
+        "using {ns};\nnamespace App {{ public class Use {{ public void Caller() {{ Factory.Make().Bar(); }} }} }}\n"
+    );
+    let mut all: Vec<(&str, &str)> = files.to_vec();
+    all.push(CS_DECOY);
+    all.push(("src/App/Use.cs", &use_file));
+    single(&CSharpProvider::new().unwrap(), &all)
+}
+
+/// The files of the `Bar` targets `Caller` binds, sorted.
+fn bar_files(graph: &ZeroCopyGraph) -> Vec<String> {
+    let mut files: Vec<String> = calls_from(graph, "Caller")
+        .into_iter()
+        .filter(|hit| hit.name == "Bar")
+        .map(|hit| hit.file)
+        .collect();
+    files.sort();
+    files
+}
+
+/// Contract (FU 21704cb2d08c): C# looks a return type up in every namespace
+/// that encloses the declaring file's namespace. `R` in `Lib`, the factory
+/// in `Lib.Linq` with no `using Lib;`: the chain binds `Lib.R.Bar`. Before
+/// the fix only the file's own namespace, the global namespace and exact
+/// `using`s were searched: no `Bar` edge (`[]`).
+#[test]
+fn test_resolve_call_csharp_factory_enclosing_namespace_return_type_binds_member() {
+    let r = cs_r("Lib");
+    let factory = cs_factory("", "Lib.Linq");
+    let graph = cs_chain_graph(
+        "Lib.Linq",
+        &[("src/Lib/R.cs", &r), ("src/Lib/Linq/Factory.cs", &factory)],
+    );
+    assert_inner_binds(&graph, "Caller", "Factory", "Make");
+    assert_eq!(bar_files(&graph), ["src/Lib/R.cs"]);
+}
+
+/// Two levels up: `R` in `Lib`, the factory in `Lib.A.B`. Before the fix:
+/// `[]`.
+#[test]
+fn test_resolve_call_csharp_factory_two_levels_up_return_type_binds_member() {
+    let r = cs_r("Lib");
+    let factory = cs_factory("", "Lib.A.B");
+    let graph = cs_chain_graph(
+        "Lib.A.B",
+        &[("src/Lib/R.cs", &r), ("src/Lib/A/B/Factory.cs", &factory)],
+    );
+    assert_eq!(bar_files(&graph), ["src/Lib/R.cs"]);
+}
+
+/// A file-scoped `namespace Lib.Linq;` encloses the same way. Before the
+/// fix: `[]`.
+#[test]
+fn test_resolve_call_csharp_file_scoped_factory_enclosing_namespace_binds_member() {
+    let r = cs_r("Lib");
+    let factory = cs_factory("", "Lib.Linq;");
+    let graph = cs_chain_graph(
+        "Lib.Linq;",
+        &[("src/Lib/R.cs", &r), ("src/Lib/Linq/Factory.cs", &factory)],
+    );
+    assert_eq!(bar_files(&graph), ["src/Lib/R.cs"]);
+}
+
+/// The ranked lookup keeps today's edge: `Lib.R` and `Lib.Inner.R`, the
+/// factory in `Lib.Inner`. The file's own namespace is level 0, so
+/// `Lib.Inner.R` binds; a union of the levels would see two `R`s and bind
+/// none.
+#[test]
+fn test_resolve_call_csharp_own_namespace_return_type_beats_enclosing() {
+    let outer = cs_r("Lib");
+    let inner = cs_r("Lib.Inner");
+    let factory = cs_factory("", "Lib.Inner");
+    let graph = cs_chain_graph(
+        "Lib.Inner",
+        &[
+            ("src/Lib/R.cs", &outer),
+            ("src/Lib/Inner/R.cs", &inner),
+            ("src/Lib/Inner/Factory.cs", &factory),
+        ],
+    );
+    assert_eq!(bar_files(&graph), ["src/Lib/Inner/R.cs"]);
+}
+
+/// Two types `R` at the first enclosing level that declares one: no edge.
+#[test]
+fn test_resolve_call_csharp_two_types_at_enclosing_level_no_edge() {
+    let one = cs_r("Lib");
+    let two = cs_r("Lib");
+    let factory = cs_factory("", "Lib.Linq");
+    let graph = cs_chain_graph(
+        "Lib.Linq",
+        &[
+            ("src/Lib/R.cs", &one),
+            ("src/Lib/More/R.cs", &two),
+            ("src/Lib/Linq/Factory.cs", &factory),
+        ],
+    );
+    assert_eq!(bar_files(&graph), Vec::<String>::new());
+}
+
+/// Only enclosing namespaces are searched: a sibling `Lib.Other`, and `Li`,
+/// a prefix of `Lib.Linq` without a `.` boundary, stay invisible.
+#[test]
+fn test_resolve_call_csharp_sibling_or_prefix_namespace_return_type_no_edge() {
+    for ns in ["Lib.Other", "Li"] {
+        let r = cs_r(ns);
+        let factory = cs_factory("", "Lib.Linq");
+        let graph = cs_chain_graph(
+            "Lib.Linq",
+            &[("src/R.cs", &r), ("src/Lib/Linq/Factory.cs", &factory)],
+        );
+        assert_eq!(bar_files(&graph), Vec::<String>::new(), "{ns}");
+    }
+}
+
+/// A factory file that declares two namespaces has no one namespace to
+/// walk out of: no edge.
+#[test]
+fn test_resolve_call_csharp_factory_file_two_namespaces_no_enclosing_edge() {
+    let r = cs_r("Lib");
+    let factory = format!(
+        "{}namespace Lib.Misc {{ public class Z {{ }} }}\n",
+        cs_factory("", "Lib.Linq")
+    );
+    let graph = cs_chain_graph(
+        "Lib.Linq",
+        &[("src/Lib/R.cs", &r), ("src/Lib/Linq/Factory.cs", &factory)],
+    );
+    assert_eq!(bar_files(&graph), Vec::<String>::new());
+}
+
+/// A type in the global namespace stays visible from any namespace.
+#[test]
+fn test_resolve_call_csharp_global_namespace_return_type_binds_member() {
+    let r = cs_r("");
+    let factory = cs_factory("", "Lib.Linq");
+    let graph = cs_chain_graph(
+        "Lib.Linq",
+        &[("src/R.cs", &r), ("src/Lib/Linq/Factory.cs", &factory)],
+    );
+    assert_eq!(bar_files(&graph), ["src/R.cs"]);
+}
+
+/// A `using` alias still names its type: `using R = Models.R;` in a factory
+/// in `Lib.Linq` binds `Models.R`, with a namesake in `Decoy2`.
+#[test]
+fn test_resolve_call_csharp_factory_using_alias_return_type_binds_member() {
+    let models = cs_r("Models");
+    let decoy = cs_r("Decoy2");
+    let factory = cs_factory("using R = Models.R;\n", "Lib.Linq");
+    let graph = cs_chain_graph(
+        "Lib.Linq",
+        &[
+            ("src/Models/R.cs", &models),
+            ("src/Decoy2/R.cs", &decoy),
+            ("src/Lib/Linq/Factory.cs", &factory),
+        ],
+    );
+    assert_eq!(bar_files(&graph), ["src/Models/R.cs"]);
+}
+
+/// Stated deviation (design rev2 #4): level 0 holds the `using`s, so
+/// `using Ext;` beats the enclosing namespace. `Lib.R` and `Ext.R`, the
+/// factory in `Lib.Inner` with `using Ext;`: the chain binds `Ext.R`,
+/// today's edge. C# itself would pick `Lib.R`.
+#[test]
+fn test_resolve_call_csharp_imported_return_type_beats_enclosing_namespace() {
+    let lib = cs_r("Lib");
+    let ext = cs_r("Ext");
+    let factory = cs_factory("using Ext;\n", "Lib.Inner");
+    let graph = cs_chain_graph(
+        "Lib.Inner",
+        &[
+            ("src/Lib/R.cs", &lib),
+            ("src/Ext/R.cs", &ext),
+            ("src/Lib/Inner/Factory.cs", &factory),
+        ],
+    );
+    assert_eq!(bar_files(&graph), ["src/Ext/R.cs"]);
+}
+
 // ---- Go ----
 
 fn go_graph() -> ZeroCopyGraph {

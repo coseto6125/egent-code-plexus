@@ -1366,6 +1366,28 @@ impl<'a> OverlayFacts<'a> {
         Some((ty, owner))
     }
 
+    /// The index's `Resolver::csharp_field_receiver_member` before its
+    /// access rule: `member` of `field.member()` on the type of the field or
+    /// property `field` that the caller's own type `owner` (an `owner_key`)
+    /// declares in another `partial` part or inherits. `None` for any other
+    /// site, or when that lookup binds nothing.
+    fn csharp_field_receiver(
+        &self,
+        file: &str,
+        owner: Option<&str>,
+        site: CallSite<'_>,
+        types: &OverlayNames<'_>,
+    ) -> Option<(u32, f32)> {
+        let CallSite::FromReceiver { receiver, member } = site.fallback() else {
+            return None;
+        };
+        let owner = owner?;
+        let ty = self.first_in_file(file, owner, ResolveTarget::Type, None)?;
+        let field = type_ladder::csharp_member_field(self, ty, owner, receiver)?;
+        self.chained_member_outcome((field, 1.0), member, Language::CSharp, types)
+            .bound()
+    }
+
     /// The index's `Resolver::partial_type_member`: the member a bare C#
     /// call `name()` reaches in its caller's own type `owner` when that type
     /// has `partial` parts ([`Self::partial_group`]). Only a member the type
@@ -1585,7 +1607,12 @@ impl<'a> OverlayFacts<'a> {
         if caller.language == Language::Rust && !imported_in_project {
             return TypeCandidates::None;
         }
-        let ids = TypeFacts::global_candidates(self, qualifier, ResolveTarget::Type, caller);
+        // The parts of one C# partial type are one candidate type.
+        let ids: Vec<u32> = type_ladder::distinct_types(
+            self,
+            TypeFacts::global_candidates(self, qualifier, ResolveTarget::Type, caller).into_iter(),
+        )
+        .collect();
         match ids.len() {
             0 => TypeCandidates::None,
             1 => TypeCandidates::Unique(ids[0], qualifier),
@@ -1609,6 +1636,7 @@ impl<'a> OverlayFacts<'a> {
             self.node_file(id)
                 .is_some_and(|file| self.owner_path_agrees(file, path))
         });
+        let ids: Vec<u32> = type_ladder::distinct_types(self, ids.into_iter()).collect();
         match ids.len() {
             0 => TypeCandidates::External,
             1 => TypeCandidates::Unique(ids[0], name),
@@ -1736,16 +1764,23 @@ impl<'a> OverlayFacts<'a> {
                         })
                     })
                 }
-                Language::CSharp => type_ladder::visible_return_type(self, callee_file, ty, |id| {
-                    self.node_file(id).is_some_and(|file| {
-                        self.scope.namespace_return_type_visible(
-                            file,
-                            self.owner_of(id),
-                            callee_file,
-                            &imports,
-                        )
-                    })
-                }),
+                Language::CSharp => type_ladder::csharp_visible_return_type(
+                    self,
+                    callee_file,
+                    ty,
+                    self.csharp_namespaces(callee_file).iter().copied(),
+                    |id| {
+                        self.node_file(id).is_some_and(|file| {
+                            self.scope.namespace_return_type_visible(
+                                file,
+                                self.owner_of(id),
+                                callee_file,
+                                &imports,
+                            )
+                        })
+                    },
+                    |id, namespace| self.type_namespace(id) == Some(namespace),
+                ),
                 Language::Swift => type_ladder::visible_return_type(self, callee_file, ty, |id| {
                     self.node_file(id).is_some_and(|file| {
                         type_ladder::swift_return_type_visible(callee_file, file, &imports)
@@ -2068,6 +2103,41 @@ impl<'a> OverlayFacts<'a> {
             .unwrap_or(&[])
     }
 
+    /// The type the clean C# field or property `idx` declares, the index's
+    /// `SymbolTable::return_type_of` (its `RawNode.type_annotation`).
+    /// `graph.bin` keeps no text of it, only the `type_annotation` `Accesses`
+    /// edge Pass 2 resolved from it: the name of that edge's one target.
+    /// `None` for another language, whose index records no such fact.
+    fn base_property_type(&self, idx: u32) -> Option<&'a str> {
+        if self.meta_of(idx).language != Language::CSharp {
+            return None;
+        }
+        let graph = self.graph;
+        let pool = &graph.string_pool;
+        let out = graph.out_offsets[idx as usize].to_native() as usize
+            ..graph.out_offsets[idx as usize + 1].to_native() as usize;
+        let mut types = graph.edges[out]
+            .iter()
+            .filter(|edge| {
+                RelType::from(&edge.rel_type) == RelType::Accesses
+                    && edge.reason.resolve(pool) == "type_annotation"
+            })
+            .map(|edge| edge.target.to_native());
+        match (types.next(), types.next()) {
+            (Some(ty), None) => Some(graph.nodes[ty as usize].name.resolve(pool)),
+            _ => None,
+        }
+    }
+
+    /// The index's `SymbolTable::type_namespace`: the namespace the C# type
+    /// `id` is declared in.
+    fn type_namespace(&self, id: u32) -> Option<&'a str> {
+        type_ladder::declared_namespace(
+            self.owner_of(id),
+            self.csharp_namespaces(self.node_file(id)?).iter().copied(),
+        )
+    }
+
     /// The index's `SymbolTable::declares_type_beside`: `file` or a file in
     /// its directory declares a type named `name`.
     fn declares_type_beside(&self, file: &str, name: &str) -> bool {
@@ -2325,15 +2395,28 @@ impl TypeFacts for OverlayFacts<'_> {
         self.partial_group(ty).first().copied().unwrap_or(ty)
     }
 
+    fn hidden_member(&self, id: u32) -> bool {
+        let hidden = |id: u32| {
+            csharp_access::visibility(self.csharp_method_flags(id)) == csharp_access::EXPLICIT_IMPL
+        };
+        hidden(id) && self.later_overloads_of(id).into_iter().all(hidden)
+    }
+
     /// A dirty function's from its fresh parse; a clean one's from the
     /// archived `FunctionMeta`, which the index wrote from the same
-    /// `RawFunctionMeta.return_type`. A base node of a dirty file is stale.
+    /// `RawFunctionMeta.return_type`; a clean C# field or property's from
+    /// its type's `Accesses` edge ([`Self::base_property_type`]). A base node
+    /// of a dirty file is stale. A dirty field or property has no type
+    /// fact: its fragment carries no `type_annotation` (overlay P2b).
     fn return_type_of(&self, callee: u32) -> Option<&str> {
         if callee >= self.base_len() {
             return self.dirty_return_types.get(&callee).copied();
         }
         if self.dirty_base.contains(&callee) {
             return None;
+        }
+        if self.kind_of(callee) == NodeKind::Property {
+            return self.base_property_type(callee);
         }
         let graph = self.graph;
         let metas = &graph.function_metas;
@@ -5723,6 +5806,27 @@ pub(super) fn resolve_edges(
                             parsed,
                         );
                         let mut resolution = verdict.resolution;
+                        // The index's field receiver of another `partial`
+                        // part or a base
+                        // (`Resolver::csharp_field_receiver_member`), ahead
+                        // of the extension retry.
+                        if resolution.call_fallbacks_allowed()
+                            && caller.language == Language::CSharp
+                        {
+                            let access = CallAccess {
+                                instance: true,
+                                caller_file: &file.rel_path,
+                                caller_owner: owner,
+                            };
+                            if let Some(hit) = facts
+                                .csharp_field_receiver(&file.rel_path, owner, parsed, &types)
+                                .and_then(|(id, confidence)| {
+                                    Some((csharp_admitted(id, access)?, confidence))
+                                })
+                            {
+                                resolution = Resolution::from_ladder(Some(hit));
+                            }
+                        }
                         // The index's C# extension retry of a receiver
                         // the parser typed (`Type.member`) or left
                         // untyped. It runs after `resolve_call` there, so
