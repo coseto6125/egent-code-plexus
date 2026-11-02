@@ -55,3 +55,12 @@ fn test_typed_param_inherited_method_resolves_to_base_class() {
         "Sources/Base.swift",
     );
 }
+
+/// Rule U: in Swift, a member call on an untyped receiver that binds a method by
+/// its name alone is a guess: 0.55, `call:untyped-member`, from any tier.
+/// The caller's own type and an ambiguous name bind nothing; the nearest
+/// copy of a duplicated declaration keeps 0.6.
+#[test]
+fn test_untyped_member_call_binds_by_name_as_tagged_guess() {
+    receiver_typing_support::assert_untyped_member_is_guess("swift");
+}

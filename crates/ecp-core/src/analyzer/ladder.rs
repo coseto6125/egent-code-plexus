@@ -196,11 +196,25 @@ pub fn heritage<'b, F: ResolveFacts, P: AsRef<str>>(
     (Resolution::Unknown, None)
 }
 
+/// The kinds a Tier 3 lookup of `target` weighs, for the index's candidate
+/// table and the overlay's candidate stream alike. A Rust method-syntax call
+/// (`ResolveTarget::Method`) weighs methods only: a same-named free `fn` is
+/// never in scope through `.`, so it neither binds the call nor makes the
+/// name ambiguous with the method that is. The untyped receiver that reaches
+/// this tier binds at `Tier::UntypedName`, so the guess stays tagged. A bare
+/// `f()` that never reaches a member (`free_only`) drops every `Method`
+/// from the field instead: the method of an unrelated class neither binds
+/// the call nor competes with the free function the call does reach.
+pub fn global_field(target: ResolveTarget, free_only: bool) -> impl Fn(NodeKind) -> bool {
+    let field = target.kind_predicate();
+    move |kind| field(kind) && !(free_only && kind == NodeKind::Method)
+}
+
 /// The Tier 3 verdict over `candidates`, same-named declarations with
 /// their files' metas: [`pick_global`]'s barriers over the unscoped ones
-/// (I5), then a unique pick outside `target`'s kinds is `NoMatch`. Method
-/// eligibility is this post-filter, not a candidate filter: dropping free
-/// functions before the uniqueness check would invent a winner.
+/// (I5), then a unique pick outside `target`'s kinds is `NoMatch`. The
+/// caller's candidates already hold the kinds [`global_field`] weighs; this
+/// post-filter keeps a lookup that passes a wider field honest.
 pub fn global_pick<F: PickFacts + ?Sized>(
     facts: &F,
     caller: FileMeta,
@@ -2029,6 +2043,9 @@ pub fn call<'s, F: CallFacts<'s>>(
                     && is_free(decls, id)
                     && decls.file_of(id) != Some(cx.source))
         });
+        if untyped_bind_is_guess(language) {
+            resolution = resolution.named_only();
+        }
     }
     if resolution.call_fallbacks_allowed() && !may_be_receiverless_member_call(facts, site) {
         let constructed = constructed_type(
@@ -2050,6 +2067,25 @@ pub fn call<'s, F: CallFacts<'s>>(
         site,
         typed: typed.is_some(),
     }
+}
+
+/// Whether an untyped member call that binds a method by its name alone is a
+/// guess in `language`. These parsers type the receivers they can, so an
+/// untyped receiver is mostly a library value (`vec.retain()`) and the one
+/// project method of that name a false hit. Python, Ruby, PHP and
+/// JavaScript are duck-typed: the name is the main signal there. C# and
+/// Kotlin never bind an untyped member by name, so they never reach it.
+pub const fn untyped_bind_is_guess(language: Language) -> bool {
+    matches!(
+        language,
+        Language::Rust
+            | Language::Go
+            | Language::Java
+            | Language::Swift
+            | Language::Dart
+            | Language::Cpp
+            | Language::TypeScript
+    )
 }
 
 /// R6, the import-only path of a call whose name a lexical scope of the file
@@ -4588,6 +4624,122 @@ mod tests {
         fake.ladder = vec![("save", Resolution::NoEdge(NoEdge::Ambiguous(2)))];
         let two = call(&fake, python, CallSite::UntypedMember("save"));
         assert_eq!(two.resolution, Resolution::NoEdge(NoEdge::Ambiguous(2)));
+    }
+
+    /// Rule U (U1): in a guess language an untyped member call that binds a
+    /// method by its name alone takes `Tier::UntypedName` (0.55), whichever
+    /// tier found the method and whether or not that tier reported itself.
+    /// Asserted through `.edge()`, the confidence the edge carries.
+    #[test]
+    fn test_call_untyped_member_guess_language_binds_below_global_confidence() {
+        let mut fake = call_fake(&[("lib/dirty.rs", "retain", M, Some("Dirty"))]);
+        let found = [
+            Resolution::bound(0, Tier::Global),
+            Resolution::bound(0, Tier::SameFile),
+            Resolution::bound(0, Tier::ImportScoped),
+            Resolution::from_ladder(Some((0, 0.7))),
+            Resolution::from_ladder(Some((0, 1.0))),
+        ];
+        for language in [
+            Language::Rust,
+            Language::Go,
+            Language::Java,
+            Language::Swift,
+            Language::Dart,
+            Language::Cpp,
+            Language::TypeScript,
+        ] {
+            assert!(untyped_bind_is_guess(language), "{language:?}");
+            for resolution in found {
+                fake.ladder = vec![("retain", resolution)];
+                let verdict = call(
+                    &fake,
+                    cx("app/main", language, &[]),
+                    CallSite::UntypedMember("retain"),
+                );
+                assert_eq!(verdict.resolution.edge(), Some((0, 0.55)), "{language:?}");
+                assert_eq!(verdict.resolution, bound(0, Tier::UntypedName));
+            }
+        }
+    }
+
+    /// Rule U (U1): a duck-typed language keeps the name as its main signal,
+    /// and C, Kotlin and C# are outside the rule: the bind keeps the
+    /// confidence of the tier that found it.
+    #[test]
+    fn test_call_untyped_member_other_language_keeps_tier_confidence() {
+        let mut fake = call_fake(&[("lib/dirty.py", "retain", M, Some("Dirty"))]);
+        for language in [
+            Language::Python,
+            Language::Ruby,
+            Language::Php,
+            Language::JavaScript,
+            Language::Kotlin,
+            Language::C,
+        ] {
+            assert!(!untyped_bind_is_guess(language), "{language:?}");
+            for tier in [Tier::Global, Tier::SameFile] {
+                fake.ladder = vec![("retain", bound(0, tier))];
+                let verdict = call(
+                    &fake,
+                    cx("app/main", language, &[]),
+                    CallSite::UntypedMember("retain"),
+                );
+                assert_eq!(verdict.resolution, bound(0, tier), "{language:?} {tier:?}");
+            }
+        }
+        assert!(!untyped_bind_is_guess(Language::CSharp));
+    }
+
+    /// Rule U (U1) edge states: the nearest-copy bind keeps its own tag
+    /// (0.6, explicit exemption); a refused target and an ambiguous name stay
+    /// as they were; a typed receiver is not an untyped member site.
+    #[test]
+    fn test_call_untyped_member_guess_language_exempts_nearest_copy_and_no_edge() {
+        let mut fake = call_fake(&[
+            ("lib/dirty.rs", "retain", M, Some("Dirty")),
+            ("lib/caller.rs", "own", M, Some("Caller")),
+        ]);
+        let rust = cx("app/main", Language::Rust, &[]);
+        fake.ladder = vec![("retain", bound(0, Tier::NearestCopy))];
+        let copy = call(&fake, rust, CallSite::UntypedMember("retain"));
+        assert_eq!(copy.resolution, bound(0, Tier::NearestCopy));
+        assert_eq!(copy.resolution.edge(), Some((0, 0.6)));
+        fake.ladder = vec![("retain", Resolution::from_ladder(Some((0, 0.6))))];
+        let copy = call(&fake, rust, CallSite::UntypedMember("retain"));
+        assert_eq!(copy.resolution.edge(), Some((0, 0.6)));
+        fake.ladder = vec![("own", bound(1, Tier::Global))];
+        let own = call(&fake, rust, CallSite::UntypedMember("own"));
+        assert_eq!(own.resolution.edge(), None, "the caller's own type");
+        fake.ladder = vec![("retain", Resolution::NoEdge(NoEdge::Ambiguous(2)))];
+        let two = call(&fake, rust, CallSite::UntypedMember("retain"));
+        assert_eq!(two.resolution, Resolution::NoEdge(NoEdge::Ambiguous(2)));
+        fake.ladder = vec![("retain", bound(0, Tier::Global))];
+        let plain = call(&fake, rust, CallSite::Plain("retain"));
+        assert_eq!(
+            plain.resolution,
+            bound(0, Tier::Global),
+            "not an untyped member"
+        );
+    }
+
+    /// Rule U (U2): the one Tier 3 predicate. A Rust method-syntax lookup
+    /// weighs methods only, so a same-named free `fn` neither binds nor
+    /// makes the name ambiguous; every other target keeps its own kinds; a
+    /// bare `f()` drops methods.
+    #[test]
+    fn test_global_field_method_target_weighs_methods_only() {
+        let method = global_field(ResolveTarget::Method, false);
+        assert!(method(NodeKind::Method));
+        assert!(!method(NodeKind::Function));
+        let callable = global_field(ResolveTarget::Callable, false);
+        assert!(callable(NodeKind::Method) && callable(NodeKind::Function));
+        let bare = global_field(ResolveTarget::Callable, true);
+        assert!(!bare(NodeKind::Method) && bare(NodeKind::Function));
+        let bare_method = global_field(ResolveTarget::Method, true);
+        assert!(!bare_method(NodeKind::Method) && !bare_method(NodeKind::Function));
+        let ty = global_field(ResolveTarget::Type, false);
+        assert!(ty(NodeKind::Class) && !ty(NodeKind::Method));
     }
 
     /// The overlay no longer sets the call pick by hand: [`call`] derives

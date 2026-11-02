@@ -817,12 +817,12 @@ fn test_super_super_in_a_path_attribute_module_climbs_logical_modules() {
     );
 }
 
-/// Method syntax narrows the result, not the ambiguity check: with a free fn
-/// `join` and one project method `join`, `p.join(..)` on an unindexed type
-/// stays ambiguous instead of binding the method. With only the method, the
-/// unique match still binds as before.
+/// Method syntax weighs methods only (Rule U): with a free fn `join` and one
+/// project method `join`, `p.join(..)` on an unindexed type binds the method
+/// as a tagged guess (0.55, `call:untyped-member`), never the free fn. With
+/// only the method, the unique match binds the same way.
 #[test]
-fn test_method_call_with_a_same_named_free_fn_stays_ambiguous() {
+fn test_method_call_with_a_same_named_free_fn_binds_the_method_as_a_guess() {
     let ambiguous = [
         (
             "src/lib.rs",
@@ -835,8 +835,8 @@ fn test_method_call_with_a_same_named_free_fn_stays_ambiguous() {
         ),
     ];
     assert_eq!(
-        workspace_go_targets(&ambiguous, "join"),
-        Vec::<String>::new()
+        workspace_go_calls(&ambiguous, "join"),
+        vec![("src/b.rs".to_string(), NodeKind::Method, 0.55)]
     );
     let unique = [
         (
@@ -934,12 +934,12 @@ fn test_module_qualified_type_through_plain_pub_use_binds_its_definition() {
     );
 }
 
-/// A same-file free `fn join` keeps method syntax on an unindexed type
-/// ambiguous in the same-file tier too: `Path::new(".").join("x")` binds
-/// neither `join`. With only the method in the file, an untyped `x.join()`
-/// still binds it.
+/// The same-file tier follows Rule U too: beside a same-file free `fn join`,
+/// `Path::new(".").join("x")` binds the method `join` as a tagged guess
+/// (0.55), never the free fn. With only the method in the file, an untyped
+/// `x.join()` binds it the same way.
 #[test]
-fn test_method_call_with_a_same_file_free_fn_binds_neither() {
+fn test_method_call_with_a_same_file_free_fn_binds_the_method_as_a_guess() {
     let ambiguous = [(
         "src/lib.rs",
         "pub fn join(x: &str) {}\n\
@@ -948,8 +948,8 @@ fn test_method_call_with_a_same_file_free_fn_binds_neither() {
          pub fn go() { std::path::Path::new(\".\").join(\"x\"); }\n",
     )];
     assert_eq!(
-        workspace_go_target_kinds(&ambiguous, "join"),
-        Vec::<(String, NodeKind)>::new()
+        workspace_go_calls(&ambiguous, "join"),
+        vec![("src/lib.rs".to_string(), NodeKind::Method, 0.55)]
     );
     let method_only = [(
         "src/lib.rs",

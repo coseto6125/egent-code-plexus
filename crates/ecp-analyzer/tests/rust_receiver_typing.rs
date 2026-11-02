@@ -1,3 +1,5 @@
+mod receiver_typing_support;
+
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_analyzer::rust::parser::RustProvider;
 use ecp_analyzer::typescript::TypeScriptProvider;
@@ -683,4 +685,136 @@ fn test_rust_typed_receiver_of_struct_with_impl_binds_its_method() {
         callee_owners(&g, "typed", "m"),
         vec![("src/s.rs".to_string(), "S".to_string())]
     );
+}
+
+/// Rule U: in Rust, a member call on an untyped receiver that binds a method by
+/// its name alone is a guess: 0.55, `call:untyped-member`, from any tier.
+/// The caller's own type and an ambiguous name bind nothing; the nearest
+/// copy of a duplicated declaration keeps 0.6.
+#[test]
+fn test_untyped_member_call_binds_by_name_as_tagged_guess() {
+    receiver_typing_support::assert_untyped_member_is_guess("rs");
+}
+
+/// `(confidence, reason)` of every `Calls` edge `caller` holds onto `callee`.
+fn call_tags(graph: &ZeroCopyGraph, caller: &str, callee: &str) -> Vec<(f32, String)> {
+    let pool = graph.string_pool.as_slice();
+    graph
+        .edges
+        .iter()
+        .filter(|e| e.rel_type == RelType::Calls)
+        .filter(|e| graph.nodes[e.source as usize].name.resolve(pool) == caller)
+        .filter(|e| graph.nodes[e.target as usize].name.resolve(pool) == callee)
+        .map(|e| (e.confidence, e.reason.resolve(pool).to_string()))
+        .collect()
+}
+
+fn guess() -> Vec<(f32, String)> {
+    let (confidence, reason) = receiver_typing_support::UNTYPED_GUESS;
+    vec![(confidence, reason.to_string())]
+}
+
+const RETAIN_FILES: [(&str, &str); 3] = [
+    ("src/lib.rs", "pub mod dirty;\npub mod user;\n"),
+    (
+        "src/dirty.rs",
+        "pub struct DirtySet { pub n: u32 }\nimpl DirtySet {\n    pub fn retain<F>(&mut self, _f: F) {}\n}\npub fn same_file_vec() {\n    let mut v = vec![1u32];\n    v.retain(|x| *x > 0);\n}\n",
+    ),
+    (
+        "src/user.rs",
+        "use crate::dirty::DirtySet;\npub fn real_user(d: &mut DirtySet) {\n    d.retain(|_| true);\n}\npub fn vec_user() {\n    let mut roots = vec![1u32, 2];\n    roots.retain(|x| *x > 0);\n}\n",
+    ),
+];
+
+/// U1 (FU da0403748ac7): `vec.retain(..)` on a std `Vec` is an untyped
+/// receiver, and the project's one `DirtySet::retain` is a false hit. The
+/// bind stays, tagged 0.55 `call:untyped-member`, in the other file (it was
+/// Global, 0.7) and in the method's own file (it was SameFile, 1.0). A
+/// receiver typed `&mut DirtySet` keeps 0.85.
+#[test]
+fn test_rust_untyped_receiver_retain_binds_as_tagged_guess() {
+    let g = build(&RETAIN_FILES);
+    assert_eq!(call_tags(&g, "vec_user", "retain"), guess(), "other file");
+    assert_eq!(
+        call_tags(&g, "same_file_vec", "retain"),
+        guess(),
+        "same file"
+    );
+    assert_eq!(
+        call_tags(&g, "real_user", "retain"),
+        vec![(0.85, "call".to_string())],
+        "a typed receiver is no guess"
+    );
+}
+
+/// Two project types declare `retain`: the untyped call is ambiguous, as
+/// before the rule.
+#[test]
+fn test_rust_untyped_receiver_two_methods_binds_nothing() {
+    let g = build(&[
+        RETAIN_FILES[0],
+        RETAIN_FILES[1],
+        RETAIN_FILES[2],
+        (
+            "src/other.rs",
+            "pub struct Other;\nimpl Other {\n    pub fn retain(&self) {}\n}\n",
+        ),
+    ]);
+    assert!(call_tags(&g, "vec_user", "retain").is_empty());
+}
+
+const PREFER_TABLE: (&str, &str) = (
+    "src/table.rs",
+    "pub struct Table;\nimpl Table {\n    pub fn prefer(&self, _x: u32) {}\n}\n",
+);
+const PREFER_FREE: (&str, &str) = ("src/free.rs", "pub fn prefer(_x: u32) {}\n");
+const PREFER_USER: (&str, &str) = (
+    "src/resolver.rs",
+    "use crate::free::prefer;\nuse crate::table::Table;\npub struct Resolver { table: Table }\nimpl Resolver {\n    pub fn run(&self) {\n        self.table.prefer(3);\n    }\n}\npub fn path_call(t: &Table) {\n    Table::prefer(t, 3);\n}\npub fn bare() {\n    prefer(3);\n}\n",
+);
+const PREFER_LIB: (&str, &str) = (
+    "src/lib.rs",
+    "pub mod free;\npub mod other;\npub mod resolver;\npub mod table;\n",
+);
+const PREFER_OTHER: (&str, &str) = (
+    "src/other.rs",
+    "pub struct Other;\nimpl Other {\n    pub fn prefer(&self, _x: u32) {}\n}\n",
+);
+
+/// U2 (FU 25d81ab48d74): `self.table.prefer(3)` is a method-syntax call, so a
+/// same-named free `fn prefer` is no candidate: the one method binds, as a
+/// tagged guess. The path call `Table::prefer(t, 3)` and the bare `prefer(3)`
+/// keep their own targets.
+#[test]
+fn test_rust_method_call_ignores_same_named_free_fn_at_global_tier() {
+    let g = build(&[PREFER_LIB, PREFER_TABLE, PREFER_FREE, PREFER_USER]);
+    assert_eq!(
+        callee_files(&g, "run", "prefer"),
+        vec!["src/table.rs".to_string()]
+    );
+    assert_eq!(call_tags(&g, "run", "prefer"), guess());
+    assert_eq!(
+        callee_files(&g, "path_call", "prefer"),
+        vec!["src/table.rs".to_string()]
+    );
+    assert_eq!(
+        callee_files(&g, "bare", "prefer"),
+        vec!["src/free.rs".to_string()]
+    );
+}
+
+/// U2 edge states: two methods and a free fn stay ambiguous; a free fn
+/// alone is no method, so a method-syntax call binds nothing.
+#[test]
+fn test_rust_method_call_two_methods_or_only_free_fn_binds_nothing() {
+    let g = build(&[
+        PREFER_LIB,
+        PREFER_TABLE,
+        PREFER_FREE,
+        PREFER_OTHER,
+        PREFER_USER,
+    ]);
+    assert!(callee_files(&g, "run", "prefer").is_empty());
+    let g = build(&[PREFER_LIB, PREFER_FREE, PREFER_USER]);
+    assert!(callee_files(&g, "run", "prefer").is_empty());
 }

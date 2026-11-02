@@ -169,7 +169,9 @@ use std::path::Path;
 /// graph lacks those edges.
 /// schema49: Go stdlib and assumed-name selectors, Dart `show`/`hide`, C#
 /// chains, partial-part and inherited field receivers, literal extension
-/// receivers and explicit interface implementations bind differently; a
+/// receivers and explicit interface implementations, Rust re-exports, globs,
+/// `Self::` paths and impl-only types bind differently, and an untyped member
+/// call in a guess language drops to 0.55 (`call:untyped-member`); a
 /// schema48 graph holds the old edges.
 pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema49");
 

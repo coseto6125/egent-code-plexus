@@ -27,6 +27,17 @@ pub const NEAREST_COPY_CONFIDENCE: f32 = 0.6;
 /// proximity is a heuristic, so the edge stays tagged.
 pub const NEAREST_COPY_REASON: &str = "call:nearest-copy";
 
+/// The confidence of a call edge bound by the member name alone to a method,
+/// in a language whose receivers the parser types well enough that an
+/// untyped one is a guess ([`crate::analyzer::ladder::untyped_bind_is_guess`]).
+/// Below [`NEAREST_COPY_CONFIDENCE`] and every other tier, so the index and
+/// the session overlay tell the edge apart by it.
+pub const UNTYPED_NAME_CONFIDENCE: f32 = 0.55;
+
+/// The `reason` of a call edge at [`UNTYPED_NAME_CONFIDENCE`]: the name is
+/// the only evidence, so the edge stays tagged.
+pub const UNTYPED_NAME_REASON: &str = "call:untyped-member";
+
 /// True iff `outer` fully contains `inner` in the same coordinate system.
 #[inline]
 pub fn span_contains(outer: Span, inner: Span) -> bool {

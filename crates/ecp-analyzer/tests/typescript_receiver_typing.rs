@@ -53,3 +53,12 @@ export function run(d: Derived): number {
     );
     assert_single_call_into_base(graphs, "run", "Derived.greet", "greet", "src/base.ts");
 }
+
+/// Rule U: in TypeScript, a member call on an untyped receiver that binds a method by
+/// its name alone is a guess: 0.55, `call:untyped-member`, from any tier.
+/// The caller's own type and an ambiguous name bind nothing; the nearest
+/// copy of a duplicated declaration keeps 0.6.
+#[test]
+fn test_untyped_member_call_binds_by_name_as_tagged_guess() {
+    receiver_typing_support::assert_untyped_member_is_guess("ts");
+}

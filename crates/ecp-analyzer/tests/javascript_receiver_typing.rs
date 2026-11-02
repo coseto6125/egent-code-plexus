@@ -48,3 +48,11 @@ export class Derived extends Base {
     );
     assert_single_call_into_base(graphs, "run", "Derived.greet", "greet", "src/base.js");
 }
+
+/// Rule U does not apply to JavaScript (the member name is the main signal there): an untyped member call
+/// keeps the confidence of the tier that found the method and the plain
+/// `call` reason.
+#[test]
+fn test_untyped_member_call_keeps_tier_confidence() {
+    receiver_typing_support::assert_untyped_member_keeps_tier_confidence("js");
+}

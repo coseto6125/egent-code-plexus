@@ -1869,7 +1869,8 @@ fn test_resolve_call_dart_part_file_library_type_keeps_fallback_edge() {
         (bars[0].file.as_str(), bars[0].owner.as_str()),
         ("lib.dart", "Foo")
     );
-    assert_eq!(bars[0].confidence, 0.7);
+    // The part file's chain stays untyped: Rule U tags the name bind at 0.55.
+    assert_eq!(bars[0].confidence, 0.55);
 }
 
 #[test]

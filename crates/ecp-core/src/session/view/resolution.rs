@@ -51,8 +51,9 @@ use crate::analyzer::type_ladder::{
 };
 use crate::analyzer::types::{
     owner_key, CallArguments, CallSite, NameRef, RawFunctionMeta, RawImport, Span, VariantRef,
-    FUNCTION_REFERENCE_REASON, NEAREST_COPY_CONFIDENCE, NEAREST_COPY_REASON, VALUE_READ_REASON,
-    VARIANT_PATTERN_REASON, VARIANT_USE_REASON,
+    FUNCTION_REFERENCE_REASON, NEAREST_COPY_CONFIDENCE, NEAREST_COPY_REASON,
+    UNTYPED_NAME_CONFIDENCE, UNTYPED_NAME_REASON, VALUE_READ_REASON, VARIANT_PATTERN_REASON,
+    VARIANT_USE_REASON,
 };
 use crate::contracts::identity::lexical_parents;
 use crate::file_category::{pick_global, FileMeta, GlobalPick, Language};
@@ -3069,12 +3070,17 @@ fn extension_fallback(
     .next()
 }
 
+/// The kind of the merged-space `idx`.
+fn node_kind(graph: &ArchivedZeroCopyGraph, nodes: &[ViewNode], idx: u32) -> NodeKind {
+    match idx.checked_sub(graph.nodes.len() as u32) {
+        Some(offset) => nodes[offset as usize].kind,
+        None => NodeKind::from(&graph.nodes[idx as usize].kind),
+    }
+}
+
 /// Whether the merged-space `idx` is a `Method`.
 fn is_method_node(graph: &ArchivedZeroCopyGraph, nodes: &[ViewNode], idx: u32) -> bool {
-    match idx.checked_sub(graph.nodes.len() as u32) {
-        Some(offset) => nodes[offset as usize].kind == NodeKind::Method,
-        None => NodeKind::from(&graph.nodes[idx as usize].kind) == NodeKind::Method,
-    }
+    node_kind(graph, nodes, idx) == NodeKind::Method
 }
 
 /// The clean base declarations of `target`'s kinds named `name`, via the
@@ -3161,8 +3167,10 @@ fn global_tier(
             .entry(file_idx)
             .or_insert_with(|| stored_file_meta(graph, file_idx as u32))
     };
-    // I5 (a scoped node is no global candidate) is the ladder's filter.
-    let admits = |&(idx, _): &(u32, FileMeta)| !free_only || !is_method_node(graph, nodes, idx);
+    // I5 (a scoped node is no global candidate) is the ladder's filter. The
+    // field is the index's (`SymbolTable::global_field_candidates`).
+    let field = ladder::global_field(call_target, free_only);
+    let admits = |&(idx, _): &(u32, FileMeta)| field(node_kind(graph, nodes, idx));
     let overlay_candidates: &[(u32, FileMeta)] =
         names.anywhere.get(callee).map(Vec::as_slice).unwrap_or(&[]);
     let clean: &[u32] =
@@ -6036,6 +6044,8 @@ pub(super) fn resolve_edges(
                     // confidence (`CallReasons::of`).
                     let reason = if confidence == NEAREST_COPY_CONFIDENCE {
                         NEAREST_COPY_REASON
+                    } else if confidence == UNTYPED_NAME_CONFIDENCE {
+                        UNTYPED_NAME_REASON
                     } else if confidence == csharp_extension::HEURISTIC_CONFIDENCE {
                         csharp_extension::HEURISTIC_REASON
                     } else {

@@ -552,3 +552,10 @@ fn test_explicit_interface_property_does_not_type_a_simple_name_receiver() {
         }])
     );
 }
+
+/// Rule U does not apply to C#: a value of unknown type reaches no method by
+/// its name alone, so no layout binds an edge.
+#[test]
+fn test_untyped_member_call_binds_nothing() {
+    receiver_typing_support::assert_untyped_member_binds_nothing("cs");
+}

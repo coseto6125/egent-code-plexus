@@ -98,22 +98,6 @@ pub(crate) fn crate_root_prefix(path: &str) -> &str {
 
 pub use ecp_core::analyzer::reexport::ResolveTarget;
 
-/// The kinds a Tier-3 lookup weighs for `target`. Method syntax narrows the
-/// result, not the field: a same-named free fn still makes the name
-/// ambiguous, so `path.join(..)` on a std type never binds the project's
-/// only `join` method. A bare `f()` that never reaches a member
-/// (`free_only`) drops every `Method` from the field instead: the method of
-/// an unrelated class neither binds the call nor competes with the free
-/// function the call does reach.
-fn global_field(target: ResolveTarget, free_only: bool) -> impl Fn(NodeKind) -> bool {
-    let field = match target {
-        ResolveTarget::Method => ResolveTarget::Callable,
-        other => other,
-    }
-    .kind_predicate();
-    move |kind| field(kind) && !(free_only && kind == NodeKind::Method)
-}
-
 /// The last two components of `path`: its directory's name and its file
 /// name (`collect/Maps.java`), or the whole path at the root.
 fn leaf_path(path: &str) -> &str {
@@ -1426,7 +1410,7 @@ impl SymbolTable {
     }
 
     /// Every declaration named `node_name` in the field a Tier-3 lookup of
-    /// `target` weighs ([`global_field`]; `free_only` is a bare `f()` that
+    /// `target` weighs ([`ladder::global_field`]; `free_only` is a bare `f()` that
     /// never reaches a member), with its file's meta, scoped ones included:
     /// the shared ladder drops those (I5).
     pub(crate) fn global_field_candidates(
@@ -1435,7 +1419,7 @@ impl SymbolTable {
         target: ResolveTarget,
         free_only: bool,
     ) -> impl Iterator<Item = (u32, FileMeta)> + '_ {
-        let field = global_field(target, free_only);
+        let field = ladder::global_field(target, free_only);
         self.global_scoped
             .get(node_name)
             .map_or(&[][..], Vec::as_slice)

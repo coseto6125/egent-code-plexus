@@ -164,3 +164,11 @@ fn test_attribute_on_later_branch_keeps_owner() {
         vec!["pkg/b.py".to_string()]
     );
 }
+
+/// Rule U does not apply to Python (the member name is the main signal there): an untyped member call
+/// keeps the confidence of the tier that found the method and the plain
+/// `call` reason.
+#[test]
+fn test_untyped_member_call_keeps_tier_confidence() {
+    receiver_typing_support::assert_untyped_member_keeps_tier_confidence("py");
+}

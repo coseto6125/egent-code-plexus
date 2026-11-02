@@ -21,7 +21,7 @@ use ecp_core::analyzer::reexport::{export_filter_applies_to, is_ecmascript, Impo
 use ecp_core::analyzer::type_ladder;
 use ecp_core::analyzer::types::{
     owner_key, BlindSpot, CallArguments, CallSite, LocalGraph, NameRef, RawImport, RawNode,
-    RawRoute, VariantRef,
+    RawRoute, VariantRef, UNTYPED_NAME_CONFIDENCE, UNTYPED_NAME_REASON,
 };
 pub use ecp_core::analyzer::types::{
     FUNCTION_REFERENCE_REASON, VALUE_READ_REASON, VARIANT_PATTERN_REASON, VARIANT_USE_REASON,
@@ -3414,6 +3414,7 @@ fn resolve_base(
 struct CallReasons {
     call: StrRef,
     nearest_copy: StrRef,
+    untyped_name: StrRef,
     extension_heuristic: StrRef,
 }
 
@@ -3421,6 +3422,8 @@ impl CallReasons {
     fn of(self, confidence: f32) -> StrRef {
         if confidence == NEAREST_COPY_CONFIDENCE {
             self.nearest_copy
+        } else if confidence == UNTYPED_NAME_CONFIDENCE {
+            self.untyped_name
         } else if confidence == csharp_extension::HEURISTIC_CONFIDENCE {
             self.extension_heuristic
         } else {
@@ -4126,6 +4129,7 @@ fn pass2_resolve_edges(
     let reason_call = CallReasons {
         call: string_pool.add("call"),
         nearest_copy: string_pool.add(NEAREST_COPY_REASON),
+        untyped_name: string_pool.add(UNTYPED_NAME_REASON),
         extension_heuristic: string_pool.add(csharp_extension::HEURISTIC_REASON),
     };
     let reason_reads_field = string_pool.add("field_read");

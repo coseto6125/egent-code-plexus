@@ -48,3 +48,11 @@ fn test_typed_param_inherited_method_resolves_to_base_class() {
     );
     assert_single_call_into_base(graphs, "run", "Derived.greet", "greet", "src/Base.kt");
 }
+
+/// Rule U does not apply to Kotlin (the rule never reaches it): an untyped member call
+/// keeps the confidence of the tier that found the method and the plain
+/// `call` reason.
+#[test]
+fn test_untyped_member_call_keeps_tier_confidence() {
+    receiver_typing_support::assert_untyped_member_keeps_tier_confidence("kt");
+}

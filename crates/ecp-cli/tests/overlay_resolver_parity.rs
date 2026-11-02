@@ -366,7 +366,8 @@ fn test_overlay_go_unaliased_import_preserves_value_receiver_matches_reindex() {
     let provider = GoProvider::new().unwrap();
     let source = "package main\nimport \"fmt\"\ntype Store struct {}\nfunc (s *Store) Fetch() {}\nvar global = &Store{}\nfunc run() { global.Fetch() }\n";
     let baseline = source.replace("import \"fmt\"\n", "");
-    let expected = [("main.go".into(), "Fetch".into(), "Store".into(), 100)];
+    // A package var names no type the receiver ladder reads: Rule U, 0.55.
+    let expected = [("main.go".into(), "Fetch".into(), "Store".into(), 55)];
     parity(
         &provider,
         &[("main.go", &baseline)],
@@ -988,7 +989,9 @@ fn test_overlay_rust_untyped_member_with_free_function_matches_reindex() {
             "src/lib.rs",
             "mod other; fn foo() {}\nfn run() { let x = unknown(); x.foo(); }",
         )],
-        &[],
+        // Method syntax weighs methods only (Rule U): the free `foo` is no
+        // candidate, so the method binds as a tagged guess.
+        &[("src/other.rs".into(), "foo".into(), "Foo".into(), 55)],
     );
 }
 
@@ -1238,7 +1241,7 @@ fn test_overlay_rust_untyped_member_without_free_function_matches_reindex() {
             "src/lib.rs",
             "mod other; fn run() { let x = unknown(); x.foo(); }",
         )],
-        &[("src/other.rs".into(), "foo".into(), "Foo".into(), 70)],
+        &[("src/other.rs".into(), "foo".into(), "Foo".into(), 55)],
     );
 }
 
@@ -4029,7 +4032,8 @@ fn test_overlay_dart_part_file_library_type_keeps_fallback_edge() {
         ],
         &[("src/part.dart", after)],
         &[
-            ("lib.dart".into(), "bar".into(), "Foo".into(), 70),
+            // Untyped `make().bar()` in a guess language: Rule U, 0.55.
+            ("lib.dart".into(), "bar".into(), "Foo".into(), 55),
             ("src/part.dart".into(), "make".into(), "".into(), 100),
         ],
     );
