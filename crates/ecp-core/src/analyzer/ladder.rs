@@ -1137,6 +1137,10 @@ fn rust_path_may_bind<D: PickFacts>(decls: &D, site: QualifiedSite<'_>, id: u32)
 /// No tier retries the bare member: a qualified callee resolves through its
 /// qualifier or not at all. `std::fs::read` stripped to `read` would bind a
 /// project `read`, and `serde_json::json!` a local `json()`.
+///
+/// Rust `Self::m()` resolves as the caller's own type (`call.owner`) does,
+/// the rule [`qualified_variant`] applies to `Self::A`; with no owner it
+/// binds nothing.
 pub fn qualified<'h, F: QualifierFacts>(
     facts: &F,
     site: QualifiedSite<'_>,
@@ -1147,6 +1151,14 @@ pub fn qualified<'h, F: QualifierFacts>(
     if site.qualifier == CallSite::SUPER_RECEIVER && site.caller.language == Language::Python {
         return super_member(facts, site, heritage);
     }
+    let owner = site.call.and_then(|call| call.owner).and_then(owner_key);
+    let site = match (site.language, site.qualifier, owner) {
+        (Language::Rust, "Self", Some(owner)) => QualifiedSite {
+            qualifier: owner,
+            ..site
+        },
+        _ => site,
+    };
     if let Some(id) = qualified_member(facts, site, heritage, stem) {
         return (Resolution::bound(id, Tier::QualifierScoped), None);
     }

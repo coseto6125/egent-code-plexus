@@ -585,3 +585,44 @@ fn test_overlay_rust_anchored_path_targets_disagree_matches_index() {
         assert_eq!(overlay, reindex, "{label}");
     }
 }
+
+/// Rust `Self::m()` names the caller's impl type on both sides: an inherent
+/// impl, a trait default method (the trait's own declaration) and a trait
+/// impl reaching an inherent `new`. `U` holds a second `dup_helper` and
+/// `new`, so only the caller's owner picks the edge.
+#[test]
+fn test_overlay_rust_self_path_call_matches_reindex() {
+    const LIB: &str = "src/lib.rs";
+    let lib = "pub struct S;\nimpl S {\n    pub fn new() -> S { S }\n    pub fn dup_helper() -> i32 { 1 }\n    pub fn self_dup() -> i32 { Self::dup_helper() }\n}\n\
+        pub struct U;\nimpl U {\n    pub fn new() -> U { U }\n    pub fn dup_helper() -> i32 { 2 }\n}\n\
+        pub trait T {\n    fn tdef_self() -> i32 { Self::thelper() }\n    fn thelper() -> i32;\n}\n\
+        impl T for S {\n    fn thelper() -> i32 { Self::new(); 2 }\n}\n";
+    let files = owned(&[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n",
+        ),
+        (LIB, lib),
+    ]);
+    for (label, edited, shift) in [
+        ("touched", lib.to_string(), 0),
+        ("one-line edit", one_line_edit(lib), 1),
+    ] {
+        let (reindex, overlay) =
+            reindex_and_overlay(&files, LIB, &edited, &["self_dup", "tdef_self", "thelper"]);
+        let bound: Vec<(&str, u32)> = reindex
+            .iter()
+            .map(|call| (call.callee.as_str(), call.callee_line))
+            .collect();
+        assert_eq!(
+            bound,
+            [
+                ("dup_helper", 4 + shift),
+                ("thelper", 14 + shift),
+                ("new", 3 + shift),
+            ],
+            "{label}: S.dup_helper, T.thelper, S.new: {reindex:#?}"
+        );
+        assert_eq!(overlay, reindex, "{label}");
+    }
+}

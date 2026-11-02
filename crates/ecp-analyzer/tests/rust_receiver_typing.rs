@@ -379,3 +379,142 @@ fn test_typed_receiver_through_reexporting_module_import_resolves() {
         vec!["src/model/inner.rs".to_string()]
     );
 }
+
+/// `(file, owner)` of every `callee` node that `caller` calls, sorted.
+fn callee_owners(graph: &ZeroCopyGraph, caller: &str, callee: &str) -> Vec<(String, String)> {
+    let pool = graph.string_pool.as_slice();
+    let mut owners: Vec<(String, String)> = graph
+        .edges
+        .iter()
+        .filter(|e| e.rel_type == RelType::Calls)
+        .filter(|e| graph.nodes[e.source as usize].name.resolve(pool) == caller)
+        .filter(|e| graph.nodes[e.target as usize].name.resolve(pool) == callee)
+        .map(|e| {
+            let target = &graph.nodes[e.target as usize];
+            let file_idx = target.file_idx as usize;
+            (
+                graph.files[file_idx].path.resolve(pool).to_string(),
+                target.owner_class.resolve(pool).to_string(),
+            )
+        })
+        .collect();
+    owners.sort();
+    owners
+}
+
+/// Each `Self::` caller beside the same call spelled with the type's name.
+/// `U` declares a second `dup_helper` and `new`, so only the caller's own
+/// impl type tells the two apart.
+const SELF_PATHS_RS: &str = r#"pub struct S;
+impl S {
+    pub fn new() -> S { S }
+    pub fn dup_helper() -> i32 { 1 }
+    pub fn uniq_helper() -> i32 { 1 }
+    pub fn self_dup() -> i32 { Self::dup_helper() }
+    pub fn type_dup() -> i32 { S::dup_helper() }
+    pub fn self_uniq() -> i32 { Self::uniq_helper() }
+    pub fn self_closure() -> i32 { let f = || Self::dup_helper(); f() }
+    pub fn self_as_trait() -> i32 { <Self as T>::thelper() }
+}
+pub struct U;
+impl U {
+    pub fn new() -> U { U }
+    pub fn dup_helper() -> i32 { 2 }
+}
+pub trait T {
+    fn make() -> Self;
+    fn tdef_self() -> i32 { Self::thelper() }
+    fn tdef_type() -> i32 { T::thelper() }
+    fn thelper() -> i32;
+}
+impl T for S {
+    fn make() -> Self { Self::new() }
+    fn thelper() -> i32 { 2 }
+}
+impl T for U {
+    fn make() -> Self { U::new() }
+    fn thelper() -> i32 { 3 }
+}
+pub enum E { A(i32), B }
+impl E {
+    pub fn self_variant() -> E { Self::A(1) }
+}
+pub struct G<X>(X);
+impl<X> G<X> {
+    pub fn gnew() -> i32 { 0 }
+    pub fn self_g() -> i32 { Self::gnew() }
+}
+pub fn free_self() -> i32 { Self::dup_helper() }
+"#;
+
+/// Rust `Self::m()` names the caller's own impl type, as `S::m()` does.
+#[test]
+fn test_rust_self_path_call_binds_caller_impl_type_member() {
+    let g = build(&[("src/lib.rs", SELF_PATHS_RS)]);
+    let s = vec![("src/lib.rs".to_string(), "S".to_string())];
+    assert_eq!(callee_owners(&g, "type_dup", "dup_helper"), s, "control");
+    assert_eq!(
+        callee_owners(&g, "self_dup", "dup_helper"),
+        s,
+        "inherent impl"
+    );
+    assert_eq!(
+        callee_owners(&g, "self_uniq", "uniq_helper"),
+        s,
+        "unique name"
+    );
+    assert_eq!(
+        callee_owners(&g, "self_closure", "dup_helper"),
+        s,
+        "inside a closure"
+    );
+    assert_eq!(
+        callee_owners(&g, "make", "new"),
+        vec![
+            ("src/lib.rs".to_string(), "S".to_string()),
+            ("src/lib.rs".to_string(), "U".to_string()),
+        ],
+        "`impl T for S` reaches the inherent `S::new`; `U::new` is the control"
+    );
+    assert_eq!(
+        callee_owners(&g, "self_g", "gnew"),
+        vec![("src/lib.rs".to_string(), "G".to_string())],
+        "generic impl"
+    );
+}
+
+/// In a trait's default method `Self::m()` binds the trait's own declaration,
+/// as `T::m()` does.
+#[test]
+fn test_rust_self_path_call_in_trait_default_binds_trait_decl() {
+    let g = build(&[("src/lib.rs", SELF_PATHS_RS)]);
+    let t = vec![("src/lib.rs".to_string(), "T".to_string())];
+    assert_eq!(callee_owners(&g, "tdef_type", "thelper"), t, "control");
+    assert_eq!(callee_owners(&g, "tdef_self", "thelper"), t);
+}
+
+/// `Self::A(..)` stays a variant reference, never a call; a free function
+/// has no `Self` and binds nothing; `<Self as T>::m()` is no `Self` path and
+/// binds no impl's member.
+#[test]
+fn test_rust_self_path_without_impl_owner_or_as_trait_gets_no_impl_edge() {
+    let g = build(&[("src/lib.rs", SELF_PATHS_RS)]);
+    assert!(callee_owners(&g, "self_variant", "A").is_empty());
+    let pool = g.string_pool.as_slice();
+    let variant_refs = g
+        .edges
+        .iter()
+        .filter(|e| e.rel_type == RelType::References)
+        .filter(|e| g.nodes[e.source as usize].name.resolve(pool) == "self_variant")
+        .filter(|e| g.nodes[e.target as usize].name.resolve(pool) == "A")
+        .count();
+    assert_eq!(variant_refs, 1, "`Self::A(1)` references the variant once");
+    assert!(callee_owners(&g, "free_self", "dup_helper").is_empty());
+    assert!(
+        callee_owners(&g, "self_as_trait", "thelper")
+            .iter()
+            .all(|(_, owner)| owner == "T"),
+        "{:?}",
+        callee_owners(&g, "self_as_trait", "thelper")
+    );
+}
