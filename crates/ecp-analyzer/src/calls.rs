@@ -1557,7 +1557,7 @@ impl<'s> ReadContainers<'s> {
             .take_while(|d| d.range.0 <= end)
             .filter(|d| d.range.1 <= end)
         {
-            let Some(node_idx) = declarator.name.and_then(|name| member(name)) else {
+            let Some(node_idx) = declarator.name.and_then(member) else {
                 continue;
             };
             if declarator.range.0 <= pos && pos <= declarator.range.1 {

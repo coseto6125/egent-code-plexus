@@ -32,6 +32,10 @@ use ecp_core::graph::NodeKind;
 use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
 
+/// A load assigned in one scope: the assigned name, its statement, and the
+/// module specifier.
+type ScopeLoad<'t, 's> = (Node<'t>, Node<'t>, &'s str);
+
 /// Map of nested function scopes (by position range) to their var→type bindings.
 /// Lookup picks the smallest containing scope that has the variable, so
 /// closures correctly inherit outer-scope annotations.
@@ -587,7 +591,7 @@ pub fn collect_dynamic_imports(root: Node<'_>, source: &[u8]) -> DynamicImports 
     let (imports, aliases) = synthetic_imports(loads.iter().map(|(.., spec)| spec.as_str()));
 
     // One walk per scope checks every name assigned a load there.
-    let mut scopes: Vec<(Node<'_>, Vec<(Node<'_>, Node<'_>, &str)>)> = Vec::new();
+    let mut scopes: Vec<(Node<'_>, Vec<ScopeLoad<'_, '_>>)> = Vec::new();
     for (call, _, specifier) in &loads {
         let Some((scope, target, statement)) = direct_assignment(*call) else {
             continue;
