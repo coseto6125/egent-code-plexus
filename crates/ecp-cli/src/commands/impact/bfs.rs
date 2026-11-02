@@ -842,9 +842,11 @@ mod tests {
         );
     }
 
+    type TaggedRows = Vec<(String, bool, f64)>;
+
     /// `(name, requires_verification, viaConfidence)` of every row of an
     /// upstream walk from node 0, sorted, deterministic rows then heuristic.
-    fn tagged_rows(bytes: &[u8]) -> (Vec<(String, bool, f64)>, Vec<(String, bool, f64)>) {
+    fn tagged_rows(bytes: &[u8]) -> (TaggedRows, TaggedRows) {
         let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(bytes).unwrap();
         let (det, heur, _, _, _) = run_bfs(
             graph,
