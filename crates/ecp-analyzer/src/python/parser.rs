@@ -1,4 +1,6 @@
-use super::receiver_types::{collect_local_types, extract_python_calls_and_path_literals};
+use super::receiver_types::{
+    collect_dynamic_imports, collect_local_types, extract_python_calls_and_path_literals,
+};
 use super::schema_extractors::{PYDANTIC_CONFIG, SQLALCHEMY_CONFIG};
 use super::spec::PythonSpec;
 use crate::calls::{NameRefKind, NameRefSpec, VariantRefSpec};
@@ -1570,11 +1572,16 @@ impl ParseSpec for PythonSpec {
                 // back into the resolver's Tier 2.5 qualifier-scoped lookup.
                 // Falls back to bare member name when no annotation is in scope.
                 let local_types = collect_local_types(root, source);
+                // A literal `importlib.import_module("<lit>")` is a synthetic
+                // namespace import, like the static arms above.
+                let mut dynamic = collect_dynamic_imports(root, source);
+                cx.imports.append(&mut dynamic.imports);
                 let (raw_path_literals, raw_sql_refs) = extract_python_calls_and_path_literals(
                     root,
                     source,
                     &mut cx.nodes,
                     &local_types,
+                    &dynamic,
                     &mut cx.call_sites,
                 );
                 cx.path_literals = raw_path_literals;
