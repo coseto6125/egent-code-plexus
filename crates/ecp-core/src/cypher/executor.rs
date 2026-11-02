@@ -2144,7 +2144,10 @@ fn node_prop_no_cache(node_idx: u32, prop: &str, graph: MergedGraph<'_>) -> Valu
     let fm = MetaSource::of(graph, &m, node_idx);
     match prop {
         "filePath" => Value::Str(m.file_path(&graph).unwrap_or("").into()),
-        "ownerClass" => match graph.display_owner(node_idx) {
+        "ownerClass" => m
+            .owner_class(&graph)
+            .map_or(Value::Null, |oc| Value::Str(oc.into())),
+        "lexicalParent" => match graph.display_owner(node_idx) {
             Some(oc) => Value::Str(oc.as_ref().into()),
             None => Value::Null,
         },
@@ -2808,7 +2811,10 @@ fn node_prop_value(
         "name" => Value::Str(m.name(&graph).into()),
         // u64 uid stored as i64 bits — no allocation per row.
         "uid" => Value::Int(m.uid() as i64),
-        "ownerClass" => match graph.display_owner(node_idx) {
+        "ownerClass" => m
+            .owner_class(&graph)
+            .map_or(Value::Null, |oc| Value::Str(oc.into())),
+        "lexicalParent" => match graph.display_owner(node_idx) {
             Some(oc) => Value::Str(oc.as_ref().into()),
             None => Value::Null,
         },

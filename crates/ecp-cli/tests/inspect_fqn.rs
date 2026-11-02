@@ -182,3 +182,125 @@ fn inspect_edge_entries_include_owner_class() {
         );
     }
 }
+
+/// A Python file with a nested fn `inner` in `outer` and a nested fn
+/// `helper` in the method `K.m`.
+const NESTED_PY: &str = r#"def outer():
+    def inner():
+        return 1
+    return inner()
+
+
+class K:
+    def m(self):
+        def helper():
+            return 2
+        return helper()
+"#;
+
+/// `(ownerClass, lexicalParent)` of one inspect symbol header or edge entry.
+fn owner_pair(entry: &Value) -> (Value, Value) {
+    (entry["ownerClass"].clone(), entry["lexicalParent"].clone())
+}
+
+/// The `incoming` / `outgoing` `calls` entry named `name`.
+fn call_entry<'v>(result: &'v Value, section: &str, name: &str) -> &'v Value {
+    result[section]["calls"]
+        .as_array()
+        .and_then(|calls| calls.iter().find(|e| e["name"] == name))
+        .unwrap_or_else(|| panic!("no {section} call entry {name}: {result}"))
+}
+
+/// Stands for: `ecp inspect` prints a nested fn's stored owner as
+/// `ownerClass` (null: a scoped node has none) and its enclosing fn as
+/// `lexicalParent`, in the symbol header and in the edge entries that reach
+/// it (FU-2026-10-05-ff801e095d23). Failed before: `ownerClass` held the
+/// display chain `outer` (inspect.rs `merged.display_owner` at the three
+/// `ownerClass` sites) and `lexicalParent` was absent.
+#[test]
+fn test_inspect_json_nested_fn_owner_class_null_lexical_parent_outer() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(tmp.path(), "src/lib.py", NESTED_PY);
+    init_and_analyze(tmp.path());
+    let nested = (Value::Null, Value::from("outer"));
+    let top = (Value::Null, Value::Null);
+
+    let inner = run_json(tmp.path(), &["inspect", "inner", "--format", "json"]);
+    assert_eq!(inner["status"], "found", "{inner}");
+    assert_eq!(owner_pair(&inner["symbol"]), nested, "{inner}");
+    assert_eq!(
+        owner_pair(call_entry(&inner, "incoming", "outer")),
+        top,
+        "{inner}"
+    );
+
+    let outer = run_json(tmp.path(), &["inspect", "outer", "--format", "json"]);
+    assert_eq!(outer["status"], "found", "{outer}");
+    assert_eq!(owner_pair(&outer["symbol"]), top, "{outer}");
+    assert_eq!(
+        owner_pair(call_entry(&outer, "outgoing", "inner")),
+        nested,
+        "{outer}"
+    );
+}
+
+/// Stands for: a nested fn in the method `K.m` has no `ownerClass` and the
+/// `lexicalParent` `K::m`; the method keeps the `ownerClass` `K`, and its
+/// `lexicalParent` is the display owner, the stored owner `K`.
+#[test]
+fn test_inspect_json_nested_fn_in_method_lexical_parent_is_class_method_chain() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(tmp.path(), "src/lib.py", NESTED_PY);
+    init_and_analyze(tmp.path());
+
+    let helper = run_json(tmp.path(), &["inspect", "helper", "--format", "json"]);
+    assert_eq!(helper["status"], "found", "{helper}");
+    assert_eq!(
+        owner_pair(&helper["symbol"]),
+        (Value::Null, Value::from("K::m")),
+        "{helper}"
+    );
+    let method = (Value::from("K"), Value::from("K"));
+    assert_eq!(
+        owner_pair(call_entry(&helper, "incoming", "m")),
+        method,
+        "{helper}"
+    );
+
+    let m = run_json(tmp.path(), &["inspect", "K.m", "--format", "json"]);
+    assert_eq!(m["status"], "found", "{m}");
+    assert_eq!(owner_pair(&m["symbol"]), method, "{m}");
+}
+
+/// Stands for: the json symbol header adds `lexicalParent` and renames or
+/// removes no field (machine-parsed output). The keys print sorted (the
+/// json map is ordered by key), so the test compares the set.
+#[test]
+fn test_inspect_json_symbol_header_adds_lexical_parent_keeps_other_fields() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(tmp.path(), "src/lib.py", NESTED_PY);
+    init_and_analyze(tmp.path());
+
+    let inner = run_json(tmp.path(), &["inspect", "inner", "--format", "json"]);
+    let mut keys: Vec<&str> = inner["symbol"]
+        .as_object()
+        .unwrap_or_else(|| panic!("no symbol header: {inner}"))
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "decorators",
+            "endLine",
+            "filePath",
+            "kind",
+            "lexicalParent",
+            "name",
+            "ownerClass",
+            "startLine",
+        ],
+        "{inner}"
+    );
+}

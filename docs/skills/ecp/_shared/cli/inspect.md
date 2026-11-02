@@ -19,6 +19,7 @@ ecp inspect --name <SYMBOL_NAME> [--repo <PATH>]
 ## Output fields (JSON)
 - `status` — `found`, `ambiguous` or `error` (not found).
 - `candidates` — on `ambiguous` only: each with `filePath`, `kind`, `line` and `target`. Run `ecp inspect <target>` to inspect one. A null `target` means no target text or filter selects it alone. An ambiguous answer has no neighbour sections: they are not evaluated, not empty.
+- `ownerClass` / `lexicalParent` — on `symbol` and on each edge entry. `ownerClass` is the stored owner: the class of a method, null for a nested fn or closure. `lexicalParent` is the enclosing chain of a nested fn (`outer`, `K::m`), else the stored owner. The toon output drops a column that is null on every edge.
 - `symbol.decorators` — flat string list (`@` prefix stripped), e.g. `["staticmethod", "functools.cached_property"]`. Empty for undecorated nodes.
 - `contained_methods` / `contained_properties` — for Class / Struct / Trait / Interface / Enum.
 - `contained_variants` — for `Enum`: the EnumVariant children with their `name`, `filePath`, `line`.

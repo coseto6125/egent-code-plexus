@@ -1,7 +1,8 @@
 //! Tests for Task A: tabular toon edge output in `ecp inspect`.
 //!
 //! Verifies:
-//!   - toon/llm output omits `tier`, `checks`, and null `ownerClass` per edge
+//!   - toon/llm output omits `tier`, `checks`, and a null `ownerClass` or
+//!     `lexicalParent` column per edge
 //!   - `--format json` payload retains all fields unchanged
 //!   - `--file` flag (new primary name) works identically to `--file_path`
 //!   - `--file_path` still accepted as back-compat alias
@@ -114,10 +115,40 @@ fn toon_output_omits_null_owner_class() {
     setup_caller_callee(tmp.path());
 
     let stdout = run_stdout(tmp.path(), &["inspect", "--name", "caller"]);
-    // ownerClass is null for top-level functions; should be absent from toon.
+    // ownerClass and lexicalParent are null for top-level functions; both
+    // should be absent from toon.
     assert!(
         !stdout.contains("ownerClass"),
         "toon output must omit null ownerClass:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("lexicalParent"),
+        "toon output must omit null lexicalParent:\n{stdout}"
+    );
+}
+
+/// Stands for: the toon/llm output keeps the `lexicalParent` column when an
+/// edge reaches a nested fn, and drops the all-null `ownerClass` column: the
+/// nested `inner` has no stored owner (FU-2026-10-05-ff801e095d23). Before
+/// the fix the column read `ownerClass` and held the parent `outer`.
+#[test]
+fn test_inspect_toon_nested_fn_edge_keeps_lexical_parent_drops_null_owner() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "src/a.py",
+        "def outer():\n    def inner():\n        return 1\n    return inner()\n",
+    );
+    init_and_analyze(tmp.path());
+
+    let stdout = run_stdout(tmp.path(), &["inspect", "--name", "outer"]);
+    assert!(
+        stdout.contains("lexicalParent"),
+        "toon output must keep the lexicalParent column:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("ownerClass"),
+        "toon output must omit the all-null ownerClass column:\n{stdout}"
     );
 }
 
@@ -165,6 +196,10 @@ fn json_format_retains_all_fields() {
         assert!(
             entry.get("ownerClass").is_some(),
             "json format must retain 'ownerClass' field per edge: {entry}"
+        );
+        assert!(
+            entry.get("lexicalParent").is_some(),
+            "json format must retain 'lexicalParent' field per edge: {entry}"
         );
     }
     // If no edges, the test trivially passes (fixture may have no edges indexed).

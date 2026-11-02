@@ -653,10 +653,9 @@ pub(super) fn run_bfs<'g>(
             rank: curr_rank,
         } = visited[&curr_idx];
         // ── node emission (merged space: < base_len = base, else virtual) ──
-        let (uid, name, owner_class, kind_str, file_path, line, is_test): (
+        let (uid, name, kind_str, file_path, line, is_test): (
             u64,
             String,
-            Option<String>,
             &'static str,
             String,
             u32,
@@ -678,9 +677,6 @@ pub(super) fn run_bfs<'g>(
             }
             uid = curr_node.uid.to_native();
             name = curr_node.name.resolve(&graph.string_pool).to_string();
-            owner_class = merged
-                .display_owner(curr_idx as u32)
-                .map(std::borrow::Cow::into_owned);
             kind_str = kind_to_str(&curr_node.kind);
             file_path = graph.files[file_idx]
                 .path
@@ -703,19 +699,18 @@ pub(super) fn run_bfs<'g>(
             }
             uid = vn.uid;
             name = vn.name.clone();
-            owner_class = merged
-                .display_owner(curr_idx as u32)
-                .map(std::borrow::Cow::into_owned);
             kind_str = node_kind_to_str(&vn.kind);
             file_path = vn.rel_path.to_string();
             line = vn.start_line;
         }
 
         let (via_reason, via_confidence) = (via.unwrap_or(""), curr_rank.confidence);
+        let curr = curr_idx as u32;
         let entry = json!({
             "uid": uid.to_string(),
             "name": name,
-            "ownerClass": owner_class,
+            "ownerClass": merged.node(curr).and_then(|n| n.owner_class(&merged)),
+            "lexicalParent": merged.display_owner(curr),
             "kind": kind_str,
             "filePath": file_path,
             "line": line,
