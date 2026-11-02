@@ -1382,7 +1382,7 @@ fn test_check_rust_crate_head_through_pub_use_matches_baseline() {
     let edited = one_line_edit(caller);
     check(&Scenario {
         name: "rust_crate_head_pub_use",
-        owner: "FU-2026-10-08-3137f86a15e9 (P3: crate head follows pub use)",
+        owner: "guard for FU-2026-10-08-3137f86a15e9 (crate head follows pub use): this baseline stays empty",
         files: &[
             (
                 "Cargo.toml",

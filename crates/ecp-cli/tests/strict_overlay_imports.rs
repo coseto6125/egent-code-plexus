@@ -520,27 +520,22 @@ fn test_overlay_view_vue_ts_script_import_matches_reindex() {
     );
 }
 
-const P1_IMPORT_PROBE: &str =
-    "FU-2026-10-08-2032e2e91ad7 (P1: overlay import probe shares the resolver's tiers)";
 const GUARD_IMPORT_PROBE: &str =
     "guard for FU-2026-10-08-2032e2e91ad7 (package-import call): this baseline stays empty";
 
 /// Two crates of one workspace each declare `util.rs` with a `helper`. The
 /// dirty file of crate `a` imports `crate::util::helper` and calls
 /// `helper()`. The index binds crate `a`'s `util.rs` through the import
-/// (reason `call`, 0.95); the overlay's Rust tier matches the module by its
-/// last segments across crates, finds both files, and falls back to the
-/// nearest copy.
+/// (reason `call`, 0.95). The overlay used to match the module by its last
+/// segments across crates and fall back to the nearest copy (0.6); it now
+/// runs the index's name tiers and binds the same edge.
 ///
-/// Expected in the baseline: `edge full-only x1 Calls Function
-/// a/src/main_mod.rs:3 run -> Function a/src/util.rs:1 helper reason=call
-/// conf=0.95` and `edge overlay-only x1 Calls` the same pair with
-/// `reason=call:nearest-copy conf=0.6`.
+/// Expected in the baseline: empty (a guard).
 #[test]
 fn test_check_rust_crate_import_call_same_stem_in_other_crate_matches_baseline() {
     check(&Scenario {
         name: "rust_import_call_same_stem",
-        owner: P1_IMPORT_PROBE,
+        owner: GUARD_IMPORT_PROBE,
         files: &[
             ("Cargo.toml", "[workspace]\nmembers = [\"a\", \"b\"]\n"),
             (
