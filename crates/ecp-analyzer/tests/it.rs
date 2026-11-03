@@ -155,6 +155,7 @@ mod file_category_detection;
 mod file_category_example_split;
 mod file_node_idx_invariants;
 mod flow_python_relative_and_cut_scope;
+mod function_meta_test_evidence;
 mod functionmeta_c;
 mod functionmeta_cpp;
 mod functionmeta_csharp;
