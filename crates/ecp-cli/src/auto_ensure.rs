@@ -683,13 +683,10 @@ pub(crate) fn ensure_fresh_with_rebuild(
             // do and from spawning a background rebuild it does not need.
             if matches!(need, IndexNeed::NearCurrent) {
                 if let Some(sibling) = attach_latest_sibling_sha(worktree_root) {
-                    let note = spawn_background_rebuild(worktree_root);
+                    let rebuild = spawn_background_rebuild(worktree_root);
                     test_counters::WARM_ATTACH_COUNT
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    eprintln!(
-                        "l2.warm-attach sibling={} rebuild=background{note}",
-                        sibling.display()
-                    );
+                    eprintln!("l2.warm-attach sibling={} {rebuild}", sibling.display());
                     return Ok(Ensured {
                         outcome: EnsureFreshOutcome::WarmAttach {
                             sibling_graph_path: sibling,
@@ -981,8 +978,8 @@ pub(crate) fn flag_behind_head(
     // whole rebuild window; CLI one-shots pay one spawn either way.
     if engine.behind_head && !BEHIND_HEAD_SPAWNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         test_counters::BEHIND_HEAD_HEAL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let note = spawn_background_rebuild(worktree_root);
-        eprintln!("l2.behind-head rebuild=background{note}");
+        let rebuild = spawn_background_rebuild(worktree_root);
+        eprintln!("l2.behind-head {rebuild}");
     }
 }
 
@@ -1156,8 +1153,10 @@ fn sibling_graph_compatible(graph_path: &Path) -> bool {
 }
 
 /// Fire-and-forget background rebuild for `worktree_root`. Returns the
-/// suffix for the stderr line announcing it: ` last=failed log=<path>` while
-/// the previous background rebuild's failure stands, else empty.
+/// `rebuild=` field of the stderr line announcing it: `rebuild=skipped` under
+/// `ECP_SKIP_BG_REBUILD`, else `rebuild=background`, followed by
+/// ` last=failed log=<path>` while the previous background rebuild's failure
+/// stands.
 ///
 /// Uses the same `spawn_bg` + `flock -n` pattern as `post_tool_use`'s
 /// `spawn_background_reindex`. Concurrent triggers no-op because `flock -n`
@@ -1166,16 +1165,17 @@ fn spawn_background_rebuild(worktree_root: &Path) -> String {
     // Integration tests exercise the warm-attach outcome + counter but have no
     // use for the detached rebuild; skipping it avoids a leaked `sh` subprocess
     // that nextest flags as LEAK on Windows (the rebuild outlives the test).
+    // The stderr line then says so instead of announcing a rebuild.
     if std::env::var_os("ECP_SKIP_BG_REBUILD").is_some() {
-        return String::new();
+        return "rebuild=skipped".to_string();
     }
     let Ok(repo_dir_name) = crate::repo_identity::repo_dir_name_for_cwd(worktree_root) else {
-        return String::new();
+        return "rebuild=background".to_string();
     };
     let markers =
         RebuildMarkers::under(&ecp_core::registry::resolve_home_ecp().join(repo_dir_name));
     spawn_background_rebuild_with(worktree_root, &markers, crate::background::spawn_bg);
-    markers.last_failed_note()
+    format!("rebuild=background{}", markers.last_failed_note())
 }
 
 /// The background rebuild's lock and outcome files, all under
