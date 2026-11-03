@@ -25,6 +25,7 @@ use ecp_core::analyzer::types::{LocalGraph, RawNode};
 use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
 use ecp_core::file_category::Language;
 use ecp_core::graph::NodeKind;
+use ecp_core::registry::os_path_to_slash;
 use rustc_hash::FxHashMap;
 
 /// The `reason` of every `PartOf` edge.
@@ -95,8 +96,9 @@ impl CsharpProjects {
 /// The node ids of every C# `partial` type declared in two parts or more:
 /// the representative part first ([`Part::rank`]), then the other parts
 /// ascending; the groups ordered by their representative. Two parts in one
-/// file share a node already (a uid twin binds its survivor), so a group
-/// lists each node once.
+/// file are two nodes, the second a later node of its own (design uid
+/// §2.3), so `PartOf` links them like parts in two files. A group lists
+/// each node once: a raw node Pass 1 merged maps to its survivor's.
 ///
 /// The representative depends on the parts' declarations only, never on
 /// the file enumeration or the node-id order.
@@ -108,11 +110,10 @@ pub fn partial_groups(
     type Key<'a> = (&'a str, &'a str, &'a str, u32, u8);
     let mut parts: FxHashMap<Key<'_>, Vec<Part>> = FxHashMap::default();
     for (file_idx, lg) in local_graphs.iter().enumerate() {
-        let path = lg.file_path.to_string_lossy();
+        let path = os_path_to_slash(&lg.file_path);
         if Language::from_path(&path) != Language::CSharp {
             continue;
         }
-        let path = path.replace('\\', "/");
         let Some(project) = projects.project_of(&path) else {
             continue;
         };
@@ -128,7 +129,7 @@ pub fn partial_groups(
                 is_attribute: node.kind == NodeKind::Annotation,
                 has_base_list: !node.heritage.is_empty(),
                 stem_names_type: file_stem(&path) == node.name,
-                path: path.clone(),
+                path: path.clone().into_owned(),
                 position: (node.span.0, node.span.1),
             };
             let group = parts
@@ -140,8 +141,9 @@ pub fn partial_groups(
                     merge_kind(node.kind) as u8,
                 ))
                 .or_default();
-            // A same-file twin is the survivor's node: the node declares a
-            // base list when either declaration does, and starts at the first.
+            // A merged raw node maps to its survivor's node: the node
+            // declares a base list when either declaration does, and starts
+            // at the first.
             match group.iter_mut().find(|seen| seen.slot == slot) {
                 Some(seen) => {
                     seen.is_attribute |= part.is_attribute;

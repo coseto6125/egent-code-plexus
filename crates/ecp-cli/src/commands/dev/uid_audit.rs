@@ -5,12 +5,14 @@
 //! maintainers tracking residual uid hash collisions after parser changes.
 //! End-user / agent LLM consumption belongs in `ecp summary`.
 //!
-//! A single parser gap (e.g. missing `owner_class` on Go struct fields named
-//! `File`) can fire thousands of distinct `BlindSpotRecord`s. The raw count
-//! `uid-collision: N` hides the fact that those N records collapse into
-//! 20-40 cluster identities. This command exposes the cluster view —
-//! ranked by cluster size — so a parser developer can prioritise root-cause
-//! fixes by impact rather than chasing one record at a time.
+//! A repeat of one identity key in one file is a `Later` named node unless
+//! `uid::merges_repeats`; a merged repeat records no BlindSpot except the
+//! C-family `ifdef-redef`. So the tool lists only the 64-bit collisions of
+//! two different paths, and 0 records is the expected state.
+//!
+//! Before uid Phase 1 an in-file repeat recorded `uid-collision`, so one
+//! parser gap could fire thousands of records; the cluster view (ranked by
+//! size) groups any that remain by root cause.
 //!
 //! Each cluster key is `(lang, second_kind, second_owner, second_name)`,
 //! parsed from the BlindSpot's `hint` field (format

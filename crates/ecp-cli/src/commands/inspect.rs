@@ -1020,12 +1020,13 @@ mod tests {
         });
     }
 
-    /// A dirty file that defines the function `doomed` twice (both branches
-    /// of an `if`) yields two virtual nodes under the base symbol's uid. The
-    /// index keeps the first. Methods differ: a later one is an overload with
-    /// its own uid, and both stay listed.
+    /// Stands for: a redefinition is a declaration like a method overload
+    /// (design uid §2.3). A dirty file that defines the function `doomed`
+    /// twice (both branches of an `if`) yields two virtual nodes, the second
+    /// a later node with a uid of its own, and both stay listed, as two
+    /// overloads of one method do; the target picks one by `name@line`.
     #[test]
-    fn test_named_declarations_same_uid_redefinition_lists_first_only() {
+    fn test_named_declarations_same_name_redefinition_lists_both() {
         let bytes = archive(&dirty_graph());
         let graph = access(&bytes);
         let mut input = dirty_input();
@@ -1037,7 +1038,10 @@ mod tests {
         let view = OverlayView::build(graph, &[input]).expect("dirty view");
         let merged = MergedGraph::new(graph, Some(&view));
         let first = virtual_idx(&merged, "doomed");
-        assert_eq!(indices(&declarations(&merged, "doomed", None)), [first]);
+        assert_eq!(
+            indices(&declarations(&merged, "doomed", None)),
+            [first, first + 1]
+        );
     }
 
     /// Rejected or corrupt fragments leave no accepted input, and an empty

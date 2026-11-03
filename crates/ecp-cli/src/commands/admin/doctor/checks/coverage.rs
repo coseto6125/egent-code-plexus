@@ -49,12 +49,11 @@ fn check_in(cwd: &Path, fix: bool) -> CheckResult {
         return CheckResult::ok("coverage", "skipped — no loadable graph (see index check)");
     };
 
-    // Normalize to `/` — git always emits forward slashes while graph paths
-    // follow the indexer's PathBuf rendering (backslashes on Windows).
+    // The graph stores `/`-separated paths, the spelling `git ls-files` emits.
     let indexed: HashSet<String> = g
         .files
         .iter()
-        .map(|f| f.path.resolve(&g.string_pool).replace('\\', "/"))
+        .map(|f| f.path.resolve(&g.string_pool).to_string())
         .collect();
     let known_exts: HashSet<&str> = indexed.iter().filter_map(|p| ext_of(p)).collect();
 

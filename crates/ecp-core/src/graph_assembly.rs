@@ -73,6 +73,9 @@ pub struct GraphAssembly {
     /// Any order. Sorted by `node_idx` by `finish`, which keeps the first
     /// row of a repeated node.
     pub lexical_parents: Vec<LexicalParentFact>,
+    /// Later-node bitmap (see [`ZeroCopyGraph::later_nodes`]); nodes past
+    /// its end are not later.
+    pub later_nodes: Vec<u8>,
 }
 
 /// The import / export facts of each file and node, as the builder records
@@ -115,6 +118,7 @@ impl Default for GraphAssembly {
             route_middleware: Vec::new(),
             workspace: WorkspaceFacts::default(),
             lexical_parents: Vec::new(),
+            later_nodes: Vec::new(),
         }
     }
 }
@@ -143,6 +147,7 @@ impl GraphAssembly {
             mut route_middleware,
             workspace,
             mut lexical_parents,
+            mut later_nodes,
         } = self;
 
         assert!(
@@ -264,6 +269,7 @@ impl GraphAssembly {
         );
         file_flags.resize(files.len(), 0);
         exported_nodes.resize(num_nodes.div_ceil(8), 0);
+        later_nodes.resize(num_nodes.div_ceil(8), 0);
         let file_path_order = file_path_order(&files, &string_pool);
         // `supertypes_of()` binary-searches by `type_idx`.
         supertype_table.sort_by_key(|fact| fact.type_idx);
@@ -309,6 +315,7 @@ impl GraphAssembly {
             route_middleware,
             workspace,
             lexical_parents,
+            later_nodes,
         }
     }
 }
@@ -769,6 +776,43 @@ mod tests {
         assert!(
             archived.file_imports(0).is_none(),
             "missing must not read as empty"
+        );
+    }
+
+    /// Stands for: the v20 `later_nodes` bitmap is part of the archive's
+    /// consistency check, so a graph whose bitmap does not cover every node
+    /// is rebuilt instead of reading a short bitmap as "no later node".
+    #[test]
+    fn test_finish_later_nodes_bit_reads_and_wrong_length_rejected() {
+        let mut pool = StringPool::new();
+        let files = vec![file(&mut pool, "a.py")];
+        let graph = GraphAssembly {
+            string_pool: pool,
+            files,
+            nodes: (0..9).map(|_| Node::default()).collect(),
+            later_nodes: vec![0b0000_0100],
+            ..Default::default()
+        }
+        .finish();
+        assert_eq!(graph.later_nodes, [0b0000_0100, 0], "9 nodes need 2 bytes");
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&graph).unwrap();
+        let archived =
+            rkyv::access::<crate::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes)
+                .unwrap();
+        assert!(archived.has_module_facts());
+        assert!(archived.is_later_overload(2));
+        assert!(!archived.is_later_overload(1) && !archived.is_later_overload(8));
+        assert!(!archived.is_later_overload(64), "past the bitmap");
+
+        let mut short = graph;
+        short.later_nodes.pop();
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&short).unwrap();
+        let archived =
+            rkyv::access::<crate::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes)
+                .unwrap();
+        assert!(
+            !archived.has_module_facts(),
+            "a short bitmap must be rejected"
         );
     }
 

@@ -15,6 +15,7 @@ use xxhash_rust::xxh3::Xxh3;
 use crate::analyzer::types::{innermost_enclosing, span_contains, Span};
 use crate::error::EcpError;
 use crate::graph::NodeKind;
+use crate::registry::{is_slash_spelled_on, os_path_to_slash};
 use crate::uid;
 
 // ── Declaration identity ────────────────────────────────────────────────
@@ -88,7 +89,7 @@ pub enum Scope {
 /// Why a declaration key or a file's identities cannot be built.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdentityError {
-    /// The path holds a `\`; see [`canonical_path`].
+    /// The path holds a separator [`os_path_to_slash`] would convert.
     NonCanonicalPath(String),
     /// A discriminator with empty text separates nothing.
     EmptyDiscriminator,
@@ -124,17 +125,6 @@ impl fmt::Display for IdentityError {
 
 impl std::error::Error for IdentityError {}
 
-/// The repo-relative, `/`-separated spelling of a path, as the builder
-/// stores it: `builder.rs` replaces `\` with `/` and changes nothing else.
-/// A leading `./` is part of the name: a Unix file named `.\a.rs` is stored
-/// `./a.rs`. Borrowed when unchanged.
-pub fn canonical_path(path: &str) -> Cow<'_, str> {
-    match path.contains('\\') {
-        true => Cow::Owned(path.replace('\\', "/")),
-        false => Cow::Borrowed(path),
-    }
-}
-
 /// The matching form of an owner or qualifier segment: every generic
 /// argument list removed and outer whitespace trimmed, so a request `Walk`
 /// matches the owner `Walk<'s, 't>`. Matching only: identity keeps the owner
@@ -162,9 +152,15 @@ pub fn owner_match_form(owner: &str) -> Cow<'_, str> {
 }
 
 fn check_path(path: &str) -> Result<(), IdentityError> {
-    match path.contains('\\') {
-        true => Err(IdentityError::NonCanonicalPath(path.to_string())),
-        false => Ok(()),
+    check_path_on(path, cfg!(windows))
+}
+
+/// A path is canonical when [`os_path_to_slash`] on a Windows (`windows`)
+/// or a Unix machine leaves it as it is: a `\` is rejected on Windows only.
+fn check_path_on(path: &str, windows: bool) -> Result<(), IdentityError> {
+    match is_slash_spelled_on(path, windows) {
+        true => Ok(()),
+        false => Err(IdentityError::NonCanonicalPath(path.to_string())),
     }
 }
 
@@ -313,6 +309,23 @@ pub fn scoped_uid(parent_anchor: u64, kind: NodeKind, name: &str) -> u64 {
     h.digest()
 }
 
+/// Why a later declaration of a base uid is a [`UidSlot::Later`]: the rule
+/// that kept it as a node of its own. The first rule that holds wins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaterReason {
+    /// Its kind keeps overloads ([`uid::keeps_overloads`]).
+    Overload,
+    /// It has a lexical parent ([`FileDecl::parent`]).
+    Scoped,
+    /// No earlier declaration of the base uid has its arity path
+    /// ([`FileDecl::arity`]): C# `Conv<T>` after `Conv`, `Foo1<T>.foo` after
+    /// `Foo1.foo`. It is a sibling of its first, in no overload set.
+    Arity,
+    /// A redefinition of a kind that keeps its own node: Python `def f`
+    /// twice, `#ifdef` function twins, a repeated `class C`.
+    Repeat,
+}
+
 /// The stored uid of one declaration of a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UidSlot {
@@ -320,16 +333,21 @@ pub enum UidSlot {
     First(u64),
     /// A later declaration with an equal base uid, kept as its own node:
     /// `uid::overload(base, ordinal)`, `ordinal` 1-based among the later
-    /// ones. Applies to kinds that keep overloads, to scoped nodes, and to a
-    /// declaration whose arity path ([`FileDecl::arity`]) no earlier
-    /// declaration of the base uid has (C# `Conv<T>` after `Conv`,
-    /// `Foo1<T>.foo` after `Foo1.foo`).
-    Later { first: u32, ordinal: u32, uid: u64 },
-    /// A later declaration of another kind with an equal base uid. The index
-    /// tombstones it today; `uid` is the base uid it repeats. `first` is the
-    /// first declaration of the base uid, or, for a declaration with an
-    /// arity, the first one of the same arity path: the twin that survives
-    /// it.
+    /// ones and the duplicates of the base uid. `first` is the first
+    /// declaration of the base uid, or, for [`LaterReason::Repeat`], the
+    /// first one of the same arity path.
+    Later {
+        first: u32,
+        ordinal: u32,
+        uid: u64,
+        reason: LaterReason,
+    },
+    /// A later declaration with an equal base uid of a kind that merges its
+    /// repeats ([`uid::merges_repeats`]). The index merges it into `first`
+    /// and keeps a tombstone in its place, whose uid is
+    /// `uid::tombstone(uid)`. `uid` is `uid::overload(base, ordinal)`, with
+    /// `ordinal` counted as for [`UidSlot::Later`]. `first` is the first
+    /// declaration of the same arity path: the twin that survives it.
     Duplicate { first: u32, uid: u64 },
 }
 
@@ -368,8 +386,8 @@ pub struct FileDecl<'a> {
     /// unscoped declaration of an equal base uid repeats an earlier one only
     /// when both have one arity path (this arity, then that of each
     /// [`Self::arity_scope`] outward): `Conv<T>` after `Conv`, and
-    /// `Foo1<T>.foo` after `Foo1.foo`, are a [`UidSlot::Later`]; an equal
-    /// path is still a [`UidSlot::Duplicate`]. The arity enters neither the
+    /// `Foo1<T>.foo` after `Foo1.foo`, are a [`LaterReason::Arity`]; an
+    /// equal path is a repeat of the first one of that path. The arity enters neither the
     /// base uid nor the anchor, so both declarations share one anchor.
     pub arity: Option<u32>,
     /// Index, in the same slice, of the innermost type that encloses this
@@ -487,31 +505,43 @@ pub fn assign_file(path: &str, decls: &[FileDecl<'_>]) -> Result<Vec<DeclIdentit
                 UidSlot::First(base)
             }
             Entry::Occupied(mut slot) => {
-                let (first, later) = slot.get_mut();
-                // The earlier declaration this one repeats. An overload or a
-                // scoped node repeats none. A declaration with an arity
-                // repeats the first one of its arity path, and is a
-                // declaration of its own when no earlier one has that path.
-                let twin = match (uid::keeps_overloads(d.kind) || d.parent.is_some(), d.arity) {
-                    (true, _) => None,
-                    (false, Some(_)) => {
-                        (0..j).find(|&k| base_uids[k] == base && same_arity_path(decls, k, j))
-                    }
-                    (false, None) => Some(*first as usize),
+                let (first, ordinal) = slot.get_mut();
+                *ordinal += 1;
+                let (first, ordinal) = (*first, *ordinal);
+                let uid = uid::overload(base, ordinal);
+                let later = |first, reason| UidSlot::Later {
+                    first,
+                    ordinal,
+                    uid,
+                    reason,
                 };
-                match twin {
-                    None => {
-                        *later += 1;
-                        UidSlot::Later {
-                            first: *first,
-                            ordinal: *later,
-                            uid: uid::overload(base, *later),
+                match (uid::keeps_overloads(d.kind), d.parent.is_some()) {
+                    (true, _) => later(first, LaterReason::Overload),
+                    (false, true) => later(first, LaterReason::Scoped),
+                    (false, false) => {
+                        let twin = match d.arity {
+                            Some(_) => (0..j)
+                                .find(|&k| base_uids[k] == base && same_arity_path(decls, k, j)),
+                            None => Some(first as usize),
+                        };
+                        match twin {
+                            None => later(first, LaterReason::Arity),
+                            Some(twin) if uid::merges_repeats(d.kind) => {
+                                // The overlay's base side derives a child's
+                                // anchor from its parent's stored name, which
+                                // a tombstone lacks.
+                                debug_assert!(
+                                    !is_scope_container(d.kind),
+                                    "a scope container is never tombstoned"
+                                );
+                                UidSlot::Duplicate {
+                                    first: twin as u32,
+                                    uid,
+                                }
+                            }
+                            Some(twin) => later(twin as u32, LaterReason::Repeat),
                         }
                     }
-                    Some(twin) => UidSlot::Duplicate {
-                        first: twin as u32,
-                        uid: base,
-                    },
                 }
             }
         };
@@ -832,7 +862,7 @@ pub fn file_match(needle: &str, path: &str) -> Option<FileMatch> {
 
 /// A `--file` needle as the graph spells paths: `/`-separated, no `./`.
 pub fn normalize_file_needle(needle: &str) -> String {
-    let needle = needle.replace('\\', "/");
+    let needle = os_path_to_slash(needle);
     needle.strip_prefix("./").unwrap_or(&needle).to_string()
 }
 
@@ -1299,22 +1329,40 @@ impl Ambiguity {
         &self.candidates
     }
 
-    /// Today's error, with the same message: `EcpError::AmbiguousSymbol`.
+    /// The ambiguity as `EcpError::AmbiguousSymbol`. Its message suggests
+    /// only a form that separates some candidates: no `--file` when they
+    /// share one file, no `--kind` when they share one kind, no
+    /// `Owner.name` form when they share one display. Two candidates of one
+    /// file, kind and display (method overloads, a redefinition) differ by
+    /// line only, so it suggests `name@line` for them.
     pub fn to_error(&self, request: &TargetRequest) -> EcpError {
-        let lines = self
-            .candidates
+        let cs = &self.candidates;
+        let lines = cs
             .iter()
             .map(|c| format!("  {},{},{}", c.file, c.kind.as_str(), c.line))
             .collect::<Vec<_>>()
             .join("\n");
+        let shared =
+            |same: fn(&Candidate, &Candidate) -> bool| cs.windows(2).all(|w| same(&w[0], &w[1]));
+        let line_form = request.line.is_none()
+            && cs.iter().enumerate().any(|(at, a)| {
+                cs[at + 1..].iter().any(|b| {
+                    a.file == b.file
+                        && a.kind == b.kind
+                        && a.display == b.display
+                        && a.line != b.line
+                })
+            });
         EcpError::AmbiguousSymbol {
             name: request.render(),
             count: self.total(),
             candidates: Some(lines),
-            file_given: request.file.is_some(),
-            kind_given: request.kind.is_some(),
+            file_flag_useless: request.file.is_some() || shared(|a, b| a.file == b.file),
+            kind_flag_useless: request.kind.is_some() || shared(|a, b| a.kind == b.kind),
             owner_form: request.qualifier == Qualifier::Any
-                && self.candidates.iter().any(|c| c.qualified),
+                && cs.iter().any(|c| c.qualified)
+                && !shared(|a, b| a.display == b.display),
+            line_form,
         }
     }
 }
@@ -1539,15 +1587,14 @@ mod tests {
     // ── declaration identity ──
 
     #[test]
-    fn test_canonical_path_backslash_replaced_dot_prefix_kept() {
-        assert_eq!(canonical_path("src\\a.rs"), "src/a.rs");
-        assert_eq!(canonical_path(".\\a.rs"), "./a.rs");
-        assert_eq!(canonical_path(".\\.\\a.rs"), "././a.rs");
-        assert!(matches!(
-            canonical_path("./src/a.rs"),
-            Cow::Borrowed("./src/a.rs")
-        ));
-        assert!(matches!(canonical_path("src/a.rs"), Cow::Borrowed(_)));
+    fn test_check_path_on_backslash_rejected_on_windows_accepted_on_unix() {
+        assert_eq!(check_path_on("a\\b.rs", false), Ok(()));
+        assert_eq!(
+            check_path_on("a\\b.rs", true),
+            Err(IdentityError::NonCanonicalPath("a\\b.rs".into()))
+        );
+        assert_eq!(check_path_on("./a/b.rs", true), Ok(()));
+        assert_eq!(check_path_on("", true), Ok(()));
     }
 
     #[test]
@@ -1592,11 +1639,15 @@ mod tests {
     }
 
     #[test]
-    fn test_unscoped_non_canonical_path_rejected() {
-        assert_eq!(
-            DeclKey::unscoped(NodeKind::Function, "src\\a.rs", None, "f"),
-            Err(IdentityError::NonCanonicalPath("src\\a.rs".into()))
-        );
+    fn test_unscoped_backslash_path_rejected_on_windows_only() {
+        let key = DeclKey::unscoped(NodeKind::Function, "src\\a.rs", None, "f");
+        match cfg!(windows) {
+            true => assert_eq!(
+                key,
+                Err(IdentityError::NonCanonicalPath("src\\a.rs".into()))
+            ),
+            false => assert_eq!(key.map(|k| k.path()), Ok("src\\a.rs")),
+        }
     }
 
     #[test]
@@ -1700,7 +1751,8 @@ mod tests {
             UidSlot::Later {
                 first: 0,
                 ordinal: 1,
-                uid: 4
+                uid: 4,
+                reason: LaterReason::Repeat,
             }
             .uid(),
             4
@@ -1708,6 +1760,8 @@ mod tests {
         assert_eq!(UidSlot::Duplicate { first: 0, uid: 5 }.uid(), 5);
     }
 
+    /// Stands for: methods number as overloads, and a top-level `Function`
+    /// repeat is a redefinition with a node of its own (design uid §2.3).
     #[test]
     fn test_assign_file_unscoped_matches_todays_overload_numbering() {
         let decls = [
@@ -1725,7 +1779,8 @@ mod tests {
             UidSlot::Later {
                 first: 0,
                 ordinal: 1,
-                uid: uid::overload(base, 1)
+                uid: uid::overload(base, 1),
+                reason: LaterReason::Overload,
             }
         );
         assert_eq!(
@@ -1733,11 +1788,20 @@ mod tests {
             UidSlot::Later {
                 first: 0,
                 ordinal: 2,
-                uid: uid::overload(base, 2)
+                uid: uid::overload(base, 2),
+                reason: LaterReason::Overload,
             }
         );
         let f = uid::compute(NodeKind::Function, "A.java", None, "f");
-        assert_eq!(ids[4].slot, UidSlot::Duplicate { first: 3, uid: f });
+        assert_eq!(
+            ids[4].slot,
+            UidSlot::Later {
+                first: 3,
+                ordinal: 1,
+                uid: uid::overload(f, 1),
+                reason: LaterReason::Repeat,
+            }
+        );
         assert_eq!(
             ids[0].uniqueness,
             Uniqueness::Shared {
@@ -1765,11 +1829,12 @@ mod tests {
     }
 
     /// Stands for: a later type whose generic arity no earlier one has keeps
-    /// a node of its own under overload uid 1, in either declaration order,
-    /// while a repeat of an arity is still the tombstoned duplicate of the
-    /// one with that arity (codex ruling P-a, restricted shape (i)).
+    /// a node of its own under overload uid 1, in either declaration order
+    /// (codex ruling P-a, restricted shape (i)), and a repeat of an arity is
+    /// a redefinition of the one with that arity, under the next ordinal
+    /// (design uid §2.3).
     #[test]
-    fn test_assign_file_type_of_new_arity_later_same_arity_duplicate() {
+    fn test_assign_file_type_of_new_arity_later_same_arity_later_repeat() {
         let base = uid::compute(NodeKind::Class, "N/Conv.cs", None, "Conv");
         for arities in [[0, 1, 0], [1, 0, 1]] {
             let ids = arity_file(arities);
@@ -1779,17 +1844,20 @@ mod tests {
                 UidSlot::Later {
                     first: 0,
                     ordinal: 1,
-                    uid: uid::overload(base, 1)
+                    uid: uid::overload(base, 1),
+                    reason: LaterReason::Arity,
                 },
                 "{arities:?}: the other arity is a type of its own"
             );
             assert_eq!(
                 ids[2].slot,
-                UidSlot::Duplicate {
+                UidSlot::Later {
                     first: 0,
-                    uid: base
+                    ordinal: 2,
+                    uid: uid::overload(base, 2),
+                    reason: LaterReason::Repeat,
                 },
-                "{arities:?}: a repeated arity tombstones against its twin"
+                "{arities:?}: a repeated arity repeats its twin"
             );
             assert!(
                 ids.iter().all(|id| id.anchor == base),
@@ -1801,22 +1869,25 @@ mod tests {
     /// Stands for: the twin of a repeated arity is the declaration of that
     /// arity, not the base uid's first declaration.
     #[test]
-    fn test_assign_file_repeat_of_later_arity_duplicates_later_twin() {
+    fn test_assign_file_repeat_of_later_arity_repeats_later_twin() {
         let ids = arity_file([0, 1, 1]);
         let base = uid::compute(NodeKind::Class, "N/Conv.cs", None, "Conv");
         assert_eq!(
             ids[2].slot,
-            UidSlot::Duplicate {
+            UidSlot::Later {
                 first: 1,
-                uid: base
+                ordinal: 2,
+                uid: uid::overload(base, 2),
+                reason: LaterReason::Repeat,
             }
         );
     }
 
     /// Stands for: a declaration with no arity (every language but C#)
-    /// keeps today's rule, a same-uid type is a duplicate.
+    /// that repeats a same-uid type is a redefinition with a node of its
+    /// own (design uid §2.3), not a duplicate.
     #[test]
-    fn test_assign_file_type_without_arity_duplicate() {
+    fn test_assign_file_type_without_arity_later_repeat() {
         let decls = [
             decl(NodeKind::Class, None, "Conv"),
             decl(NodeKind::Class, None, "Conv"),
@@ -1825,9 +1896,11 @@ mod tests {
         let base = uid::compute(NodeKind::Class, "Conv.java", None, "Conv");
         assert_eq!(
             ids[1].slot,
-            UidSlot::Duplicate {
+            UidSlot::Later {
                 first: 0,
-                uid: base
+                ordinal: 1,
+                uid: uid::overload(base, 1),
+                reason: LaterReason::Repeat,
             }
         );
     }
@@ -1853,7 +1926,8 @@ mod tests {
     /// Stands for: a member of a type of another generic arity is a
     /// declaration of its own (`Foo1<T>.foo` after `Foo1.foo`, codex ruling
     /// P-a2): overload uid 1 of the member's base uid, in either order. A
-    /// member of a same-arity duplicate type stays the duplicate it was.
+    /// merge-class member of a same-arity repeated type stays a duplicate,
+    /// under its own ordinal.
     #[test]
     fn test_assign_file_member_of_arity_twin_later_of_same_arity_duplicate() {
         let foo = uid::compute(NodeKind::Property, "N/Foo1.cs", Some("Foo1"), "foo");
@@ -1864,7 +1938,8 @@ mod tests {
                 UidSlot::Later {
                     first: 1,
                     ordinal: 1,
-                    uid: uid::overload(foo, 1)
+                    uid: uid::overload(foo, 1),
+                    reason: LaterReason::Arity,
                 },
                 "arity {first} then {second}"
             );
@@ -1872,14 +1947,18 @@ mod tests {
         }
         assert_eq!(
             twin_members(1, 1)[3].slot,
-            UidSlot::Duplicate { first: 1, uid: foo }
+            UidSlot::Duplicate {
+                first: 1,
+                uid: uid::overload(foo, 1)
+            }
         );
     }
 
     /// Stands for: the arity path runs outward through every enclosing
     /// type. `Outer.Inner.x` and `Outer<T>.Inner.x` differ only in the
     /// outer arity, yet each `Inner` and each `x` is a declaration of its
-    /// own; with equal outer arities both repeat.
+    /// own; with equal outer arities each repeats: the types as
+    /// redefinitions, the merge-class `x` as a duplicate.
     #[test]
     fn test_assign_file_nested_member_outer_arity_differs_later() {
         let file = |outer: [u32; 2]| {
@@ -1911,8 +1990,20 @@ mod tests {
             split[5]
         );
         let same = file([1, 1]);
-        assert!(matches!(same[3].slot, UidSlot::Duplicate { first: 0, .. }));
-        assert!(matches!(same[4].slot, UidSlot::Duplicate { first: 1, .. }));
+        for (j, first) in [(3, 0), (4, 1)] {
+            assert!(
+                matches!(
+                    same[j].slot,
+                    UidSlot::Later {
+                        first: f,
+                        reason: LaterReason::Repeat,
+                        ..
+                    } if f == first
+                ),
+                "{:?}",
+                same[j]
+            );
+        }
         assert!(matches!(same[5].slot, UidSlot::Duplicate { first: 2, .. }));
     }
 
@@ -2072,13 +2163,23 @@ mod tests {
     }
 
     #[test]
-    fn test_assign_file_backslash_path_rejected_with_or_without_decls() {
-        let err = Err(IdentityError::NonCanonicalPath("src\\a.rs".into()));
-        assert_eq!(assign_file("src\\a.rs", &[]), err);
-        assert_eq!(
-            assign_file("src\\a.rs", &[decl(NodeKind::Function, None, "f")]),
-            err
+    fn test_assign_file_backslash_path_rejected_on_windows_with_or_without_decls() {
+        let decls = [decl(NodeKind::Function, None, "f")];
+        let (empty, one) = (
+            assign_file("src\\a.rs", &[]),
+            assign_file("src\\a.rs", &decls),
         );
+        match cfg!(windows) {
+            true => {
+                let err = Err(IdentityError::NonCanonicalPath("src\\a.rs".into()));
+                assert_eq!(empty, err);
+                assert_eq!(one, err);
+            }
+            false => {
+                assert_eq!(empty, Ok(Vec::new()));
+                assert_eq!(one.map(|ids| ids.len()), Ok(1));
+            }
+        }
     }
 
     #[test]
@@ -2106,6 +2207,222 @@ mod tests {
         let child = DeclKey::scoped(NodeKind::Function, "./a.rs", "pad", tagged.anchor()).unwrap();
         assert_eq!(ids[2].slot, UidSlot::First(child.uid()));
         assert_eq!(ids[2].anchor, child.anchor());
+    }
+
+    /// The stored uid of every slot of `ids`: a duplicate stores the
+    /// tombstone of its own uid, as `analyzer::lexical::stored_uid` does.
+    fn stored(ids: &[DeclIdentity]) -> Vec<u64> {
+        ids.iter()
+            .map(|id| match id.slot {
+                UidSlot::Duplicate { uid, .. } => uid::tombstone(uid),
+                slot => slot.uid(),
+            })
+            .collect()
+    }
+
+    fn pairwise_distinct(uids: &[u64]) -> bool {
+        uids.iter()
+            .enumerate()
+            .all(|(i, a)| uids[i + 1..].iter().all(|b| a != b))
+    }
+
+    /// Stands for: a Python `def f` redefined at the top level keeps a
+    /// node of its own under overload uid 1, with its name.
+    #[test]
+    fn test_assign_file_python_top_level_redefinition_later_repeat() {
+        let decls = [
+            decl(NodeKind::Function, None, "f"),
+            decl(NodeKind::Function, None, "f"),
+        ];
+        let ids = assign_file("m.py", &decls).unwrap();
+        let base = uid::compute(NodeKind::Function, "m.py", None, "f");
+        assert_eq!(ids[0].slot, UidSlot::First(base));
+        assert_eq!(
+            ids[1].slot,
+            UidSlot::Later {
+                first: 0,
+                ordinal: 1,
+                uid: uid::overload(base, 1),
+                reason: LaterReason::Repeat,
+            }
+        );
+        assert!(pairwise_distinct(&stored(&ids)));
+    }
+
+    /// Stands for: a merge-class `Variable` under `#if/#elif/#else` stays
+    /// one node, and its two tombstones have uids distinct from each other,
+    /// from the survivor and from the old shared `!base`.
+    #[test]
+    fn test_assign_file_c_variable_triple_two_duplicates_distinct_tombstones() {
+        let decls = [decl(NodeKind::Variable, None, "x"); 3];
+        let ids = assign_file("a.c", &decls).unwrap();
+        let base = uid::compute(NodeKind::Variable, "a.c", None, "x");
+        assert_eq!(ids[0].slot, UidSlot::First(base));
+        for (j, n) in [(1, 1), (2, 2)] {
+            assert_eq!(
+                ids[j].slot,
+                UidSlot::Duplicate {
+                    first: 0,
+                    uid: uid::overload(base, n)
+                }
+            );
+        }
+        let uids = stored(&ids);
+        assert!(pairwise_distinct(&uids), "{uids:?}");
+        assert!(!uids.contains(&uid::tombstone(base)), "{uids:?}");
+    }
+
+    /// Stands for: a keep-class `Function` repeated three times gives
+    /// three named slots, ordinals 0, 1 and 2, three distinct uids.
+    #[test]
+    fn test_assign_file_function_triple_three_named_slots_distinct_uids() {
+        let decls = [decl(NodeKind::Function, None, "f"); 3];
+        let ids = assign_file("a.c", &decls).unwrap();
+        let base = uid::compute(NodeKind::Function, "a.c", None, "f");
+        assert_eq!(ids[0].slot, UidSlot::First(base));
+        for ordinal in [1, 2] {
+            assert_eq!(
+                ids[ordinal as usize].slot,
+                UidSlot::Later {
+                    first: 0,
+                    ordinal,
+                    uid: uid::overload(base, ordinal),
+                    reason: LaterReason::Repeat,
+                }
+            );
+        }
+        assert!(pairwise_distinct(&stored(&ids)));
+    }
+
+    /// Stands for: a method repeat is an overload, and its uid formula is
+    /// unchanged (`uid::overload(base, ordinal)`).
+    #[test]
+    fn test_assign_file_method_repeat_later_overload() {
+        let decls = [decl(NodeKind::Method, Some("A"), "save"); 2];
+        let ids = assign_file("A.java", &decls).unwrap();
+        let base = uid::compute(NodeKind::Method, "A.java", Some("A"), "save");
+        assert_eq!(
+            ids[1].slot,
+            UidSlot::Later {
+                first: 0,
+                ordinal: 1,
+                uid: uid::overload(base, 1),
+                reason: LaterReason::Overload,
+            }
+        );
+    }
+
+    /// Stands for: a repeat under a callable parent is a scoped `Later`.
+    #[test]
+    fn test_assign_file_scoped_repeat_later_scoped() {
+        let mut decls = vec![
+            decl(NodeKind::Function, None, "outer"),
+            decl(NodeKind::Function, None, "h"),
+            decl(NodeKind::Function, None, "h"),
+        ];
+        decls[1].parent = Some(0);
+        decls[2].parent = Some(0);
+        let ids = assign_file("a.py", &decls).unwrap();
+        assert!(
+            matches!(
+                ids[2].slot,
+                UidSlot::Later {
+                    first: 1,
+                    ordinal: 1,
+                    reason: LaterReason::Scoped,
+                    ..
+                }
+            ),
+            "{:?}",
+            ids[2].slot
+        );
+    }
+
+    /// Stands for: in one C# base uid, a new arity is an `Arity` sibling
+    /// of the base's first, and each repeat of an arity is a `Repeat` of
+    /// the first one of that arity; one ordinal counts all of them, so the
+    /// four uids are distinct.
+    #[test]
+    fn test_assign_file_csharp_arity_sibling_then_same_arity_repeat_distinct_uids() {
+        let mut decls = vec![decl(NodeKind::Class, None, "C"); 4];
+        for (d, arity) in decls.iter_mut().zip([0, 1, 1, 0]) {
+            d.arity = Some(arity);
+        }
+        let ids = assign_file("N/C.cs", &decls).unwrap();
+        let base = uid::compute(NodeKind::Class, "N/C.cs", None, "C");
+        assert_eq!(ids[0].slot, UidSlot::First(base));
+        let later = |first, ordinal, reason| UidSlot::Later {
+            first,
+            ordinal,
+            uid: uid::overload(base, ordinal),
+            reason,
+        };
+        assert_eq!(ids[1].slot, later(0, 1, LaterReason::Arity), "C<T>@2");
+        assert_eq!(ids[2].slot, later(1, 2, LaterReason::Repeat), "C<T>@3");
+        assert_eq!(ids[3].slot, later(0, 3, LaterReason::Repeat), "C@4");
+        assert!(pairwise_distinct(&stored(&ids)));
+    }
+
+    /// Stands for: a scope container is never tombstoned. Its children's
+    /// anchors on the overlay's base side come from its stored name, and a
+    /// tombstone stores none.
+    #[test]
+    fn test_assign_file_container_kind_repeat_never_duplicate() {
+        for kind in [
+            NodeKind::Class,
+            NodeKind::Struct,
+            NodeKind::Enum,
+            NodeKind::Namespace,
+            NodeKind::Module,
+            NodeKind::Impl,
+            NodeKind::Interface,
+            NodeKind::Trait,
+            NodeKind::Function,
+        ] {
+            let ids = assign_file("a.rs", &[decl(kind, None, "X"); 3]).unwrap();
+            assert!(
+                ids[1..]
+                    .iter()
+                    .all(|id| matches!(id.slot, UidSlot::Later { .. })),
+                "{kind:?}: {ids:?}"
+            );
+        }
+        for kind in NodeKind::ALL {
+            assert!(
+                !(uid::merges_repeats(kind) && is_scope_container(kind)),
+                "{kind:?} merges its repeats but is a scope container"
+            );
+        }
+    }
+
+    /// Stands for: a repeated name of whitespace only is numbered like any
+    /// other name; the rule reads no text.
+    #[test]
+    fn test_assign_file_whitespace_name_repeat_later_repeat() {
+        let decls = [decl(NodeKind::Function, None, " "); 2];
+        let ids = assign_file("a.py", &decls).unwrap();
+        let base = uid::compute(NodeKind::Function, "a.py", None, " ");
+        assert_eq!(ids[0].slot, UidSlot::First(base));
+        assert_eq!(
+            ids[1].slot,
+            UidSlot::Later {
+                first: 0,
+                ordinal: 1,
+                uid: uid::overload(base, 1),
+                reason: LaterReason::Repeat,
+            }
+        );
+        assert!(pairwise_distinct(&stored(&ids)));
+    }
+
+    #[test]
+    fn test_assign_file_single_row_first() {
+        let ids = assign_file("a.py", &[decl(NodeKind::Variable, None, "x")]).unwrap();
+        assert_eq!(
+            ids[0].slot,
+            UidSlot::First(uid::compute(NodeKind::Variable, "a.py", None, "x"))
+        );
+        assert_eq!(ids[0].uniqueness, Uniqueness::Unique);
     }
 
     #[test]
@@ -2303,7 +2620,7 @@ mod tests {
 
     #[test]
     fn test_parse_kind_and_file_filters() {
-        let r = TargetRequest::parse("load", Some("method"), Some(".\\src\\a.rs")).unwrap();
+        let r = TargetRequest::parse("load", Some("method"), Some("./src/a.rs")).unwrap();
         assert_eq!(r.kind(), Some(NodeKind::Method));
         assert_eq!(r.file(), Some("src/a.rs"));
         let empty = TargetRequest::parse("load", None, Some("")).unwrap();
@@ -2467,7 +2784,12 @@ mod tests {
 
     #[test]
     fn test_normalize_file_needle_slashes_and_dot_prefix() {
-        assert_eq!(normalize_file_needle(".\\src\\a.rs"), "src/a.rs");
+        let backslash = match cfg!(windows) {
+            true => "src/a.rs",
+            false => ".\\src\\a.rs",
+        };
+        assert_eq!(normalize_file_needle(".\\src\\a.rs"), backslash);
+        assert_eq!(normalize_file_needle("./src/a.rs"), "src/a.rs");
         assert_eq!(normalize_file_needle("src/a.rs"), "src/a.rs");
     }
 
@@ -2977,8 +3299,11 @@ mod tests {
         assert_eq!(select(&r, &named), vec![1]);
     }
 
+    /// Stands for: candidates that differ by file and owner get --file and the
+    /// Owner.name form; --kind, which the caller gave, and name@line, which
+    /// separates nothing here, are not suggested.
     #[test]
-    fn test_ambiguity_to_error_matches_todays_fields() {
+    fn test_ambiguity_to_error_two_files_one_kind_suggests_file_and_owner_form() {
         let named = [
             facts(
                 1,
@@ -3001,25 +3326,78 @@ mod tests {
         let TargetResolution::Ambiguous(amb) = resolve_target(&r, &named) else {
             panic!("expected an ambiguity");
         };
-        match amb.to_error(&r) {
+        let error = amb.to_error(&r);
+        match &error {
             EcpError::AmbiguousSymbol {
                 name,
                 count,
                 candidates,
-                file_given,
-                kind_given,
+                file_flag_useless,
+                kind_flag_useless,
                 owner_form,
+                line_form,
             } => {
                 assert_eq!(name, "load");
-                assert_eq!(count, 2);
+                assert_eq!(*count, 2);
                 assert_eq!(
                     candidates.as_deref(),
                     Some("  a.rs,Method,3\n  b.rs,Method,9")
                 );
-                assert!(!file_given && kind_given && owner_form);
+                assert!(!file_flag_useless && *kind_flag_useless && *owner_form && !line_form);
             }
             other => panic!("{other:?}"),
         }
+        let msg = error.to_string();
+        assert!(
+            msg.contains("— add --file, or use the `Owner.name` form:")
+                && !msg.contains("--kind")
+                && !msg.contains("@<line>"),
+            "{msg}"
+        );
+    }
+
+    /// Stands for: a redefinition group (or a method overload group) in one
+    /// file differs by line only, so the error suggests `name@line` and no
+    /// `--file`, `--kind` or `Owner.name` form, none of which separates the
+    /// two; each candidate's reusable target carries its line. Red before
+    /// 1d: the message said "add --file or --kind".
+    #[test]
+    fn test_ambiguity_to_error_one_file_redefinition_suggests_line_form_only() {
+        let named = [
+            facts(1, NodeKind::Function, "c.ts", 1, vec![], "dupfn"),
+            facts(2, NodeKind::Function, "c.ts", 2, vec![], "dupfn"),
+        ];
+        let r = TargetRequest::parse("dupfn", None, None).unwrap();
+        let TargetResolution::Ambiguous(amb) = resolve_target(&r, &named) else {
+            panic!("two nodes of one name are ambiguous");
+        };
+        let lines: Vec<Option<u32>> = amb
+            .candidates()
+            .iter()
+            .map(|c| c.reusable.as_ref().and_then(TargetRequest::line))
+            .collect();
+        assert_eq!(lines, [Some(1), Some(2)]);
+        let error = amb.to_error(&r);
+        assert!(matches!(
+            error,
+            EcpError::AmbiguousSymbol {
+                file_flag_useless: true,
+                kind_flag_useless: true,
+                owner_form: false,
+                line_form: true,
+                ..
+            }
+        ));
+        let msg = error.to_string();
+        assert!(
+            msg.contains("— write the target as `dupfn@<line>`:") && !msg.contains("add --"),
+            "{msg}"
+        );
+        let at_line = TargetRequest::parse("dupfn@2", None, None).unwrap();
+        assert!(matches!(
+            resolve_target(&at_line, &named),
+            TargetResolution::Unique(Candidate { node: 2, .. })
+        ));
     }
 
     // ── route and handler ──
@@ -3038,8 +3416,8 @@ mod tests {
     #[test]
     fn test_route_key_invalid_inputs_rejected() {
         assert_eq!(
-            RouteKey::new("src\\a.ts", "GET", "/x"),
-            Err(RouteKeyError::NonCanonicalFile("src\\a.ts".into()))
+            RouteKey::new("src\\a.ts", "GET", "/x").is_err(),
+            cfg!(windows)
         );
         assert_eq!(
             RouteKey::new("a.ts", " ", "/x"),

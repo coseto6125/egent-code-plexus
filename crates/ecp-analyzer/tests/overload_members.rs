@@ -217,10 +217,14 @@ fn test_overload_set_dart_duplicate_methods_both_named_and_called() {
     );
 }
 
-/// C has no methods: a function redefined under `#ifdef` is still one node,
-/// and the repeat is an `ifdef-redef` BlindSpot, not an overload.
+/// Stands for: C has no methods, and a function redefined under `#ifdef`
+/// is a redefinition that keeps a node of its own (design uid §2.3): two
+/// `save` nodes with distinct uids, `run`'s call binds the first, the
+/// first's `overload_set` reference reaches the second, and no
+/// `ifdef-redef` BlindSpot reports it, since nothing merged. Before the
+/// change the second was a tombstone reported as `ifdef-redef`.
 #[test]
-fn test_overload_set_c_ifdef_redefinition_stays_one_node() {
+fn test_overload_set_c_ifdef_redefinition_two_nodes_in_one_set() {
     let graph = build(
         &ecp_analyzer::c::parser::CProvider::new().unwrap(),
         "k.c",
@@ -228,19 +232,32 @@ fn test_overload_set_c_ifdef_redefinition_stays_one_node() {
     );
     let pool = &graph.string_pool;
     let saves = named(&graph, "save");
-    assert_eq!(saves.len(), 1, "one `save` node");
+    assert_eq!(saves.len(), 2, "two `save` nodes");
+    let (first, later) = (saves[0], saves[1]);
+    assert_ne!(
+        graph.nodes[first as usize].uid, graph.nodes[later as usize].uid,
+        "distinct uids"
+    );
     let run = named(&graph, "run")[0];
-    assert_eq!(edges(&graph, RelType::Calls, run, saves[0]), ["call"]);
+    assert_eq!(edges(&graph, RelType::Calls, run, first), ["call"]);
+    assert!(edges(&graph, RelType::Calls, run, later).is_empty());
+    assert_eq!(
+        edges(&graph, RelType::References, first, later),
+        ["overload_set"],
+        "the first `save` references the second"
+    );
     assert!(
-        graph
+        !graph
             .blind_spots
             .iter()
             .any(|b| b.kind.resolve(pool) == "ifdef-redef"),
-        "the redefinition is reported"
+        "a kept redefinition reports nothing"
     );
-    assert_eq!(
-        graph.nodes[saves[0] as usize].kind,
-        NodeKind::Function,
-        "C `save` is a function"
-    );
+    for save in saves {
+        assert_eq!(
+            graph.nodes[save as usize].kind,
+            NodeKind::Function,
+            "C `save` is a function"
+        );
+    }
 }

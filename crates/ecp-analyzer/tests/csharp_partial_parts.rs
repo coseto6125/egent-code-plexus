@@ -198,21 +198,106 @@ fn test_partial_groups_reversed_node_ids_same_representative() {
     assert_eq!(representative_files(&reversed, "Lib"), ["Lib/Reader.cs"]);
 }
 
-/// Stands for: two parts in one file are one node, so the group holds that
-/// node once and gets one `PartOf` edge, from the other file's part.
+/// Stands for: the second part in one file is a node of its own (design
+/// uid §2.3, §3 row 21), so the group holds three parts and gets two
+/// `PartOf` edges to the representative in `Reader.cs`: one from the other
+/// file's part, one from `Reader.cs`'s second part. Before the change the
+/// two same-file parts were one node and only the first edge existed. Each
+/// part is a `Class P` node of its own with its own `HasMethod` rows, and
+/// every `PartOf` runs from a later part to the representative (rows are
+/// 0-based).
 #[test]
-fn test_partial_groups_two_parts_in_one_file_one_edge() {
+fn test_partial_groups_two_parts_in_one_file_two_edges() {
     let twice = "namespace Lib\n{\n    public partial class Reader\n    {\n        public void A() {}\n    }\n    public partial class Reader\n    {\n        public void B() {}\n    }\n}\n";
     let async_part = part("Reader", "public void ReadAsync() {}");
+    let files = [
+        ("Lib/Reader.cs", twice),
+        ("Lib/Reader.Async.cs", async_part.as_str()),
+    ];
     assert_eq!(
-        part_of_files_any_order(
-            &[
-                ("Lib/Reader.cs", twice),
-                ("Lib/Reader.Async.cs", async_part.as_str())
-            ],
-            &["Lib"]
-        ),
-        [pair("Lib/Reader.Async.cs", "Lib/Reader.cs")]
+        part_of_files_any_order(&files, &["Lib"]),
+        [
+            pair("Lib/Reader.Async.cs", "Lib/Reader.cs"),
+            pair("Lib/Reader.cs", "Lib/Reader.cs")
+        ]
+    );
+
+    let graph = graph_of_projects(&csharp(), &files, &["Lib"]);
+    let pool = graph.string_pool.as_slice();
+    let mut parts: Vec<(String, u32)> = graph
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Class && n.name.resolve(pool) == "Reader")
+        .map(|n| {
+            (
+                graph.files[n.file_idx as usize]
+                    .path
+                    .resolve(pool)
+                    .to_string(),
+                n.span.0,
+            )
+        })
+        .collect();
+    parts.sort();
+    assert_eq!(
+        parts,
+        [
+            ("Lib/Reader.Async.cs".to_string(), 2),
+            ("Lib/Reader.cs".to_string(), 2),
+            ("Lib/Reader.cs".to_string(), 6)
+        ],
+        "one Class node per part"
+    );
+
+    let mut has_method: Vec<(String, u32, String, u32)> = edge_ends(&graph, RelType::HasMethod)
+        .into_iter()
+        .map(|(owner, method)| (owner.file, owner.line, method.name, method.line))
+        .collect();
+    has_method.sort();
+    assert_eq!(
+        has_method,
+        [
+            (
+                "Lib/Reader.Async.cs".to_string(),
+                2,
+                "ReadAsync".to_string(),
+                4
+            ),
+            ("Lib/Reader.cs".to_string(), 2, "A".to_string(), 4),
+            ("Lib/Reader.cs".to_string(), 6, "B".to_string(), 8)
+        ],
+        "each method hangs from its own part"
+    );
+
+    let mut part_of: Vec<(String, u32, String, u32)> = edge_ends(&graph, RelType::PartOf)
+        .into_iter()
+        .map(|(part, representative)| {
+            (
+                part.file,
+                part.line,
+                representative.file,
+                representative.line,
+            )
+        })
+        .collect();
+    part_of.sort();
+    assert_eq!(
+        part_of,
+        [
+            (
+                "Lib/Reader.Async.cs".to_string(),
+                2,
+                "Lib/Reader.cs".to_string(),
+                2
+            ),
+            (
+                "Lib/Reader.cs".to_string(),
+                6,
+                "Lib/Reader.cs".to_string(),
+                2
+            )
+        ],
+        "each later part points at the representative, the first part of Reader.cs"
     );
 }
 

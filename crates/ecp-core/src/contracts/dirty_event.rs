@@ -653,15 +653,14 @@ mod tests {
 
     #[test]
     fn test_repo_path_new_irregular_forms_rejects() {
-        for bad in [
-            "", "./a.py", "a/", "a//b", "a/../b", "a/./b", "/abs", "a\\b.py",
-        ] {
+        for bad in ["", "./a.py", "a/", "a//b", "a/../b", "a/./b", "/abs"] {
             assert_eq!(
                 RepoPath::new(bad),
                 Err(NotRepoRelative(bad.to_string())),
                 "{bad:?}"
             );
         }
+        assert_eq!(RepoPath::new("a\\b.py").is_err(), cfg!(windows));
     }
 
     #[test]
@@ -1146,17 +1145,25 @@ mod tests {
         assert_eq!(set.skipped()[0].reason, SkipReason::Directory);
     }
 
+    /// Stands for: a `\` is a separator only on Windows, so there the entry
+    /// is not repo-relative; on Unix it is a filename character the index
+    /// stores, and the overlay must see the same file.
     #[test]
-    fn test_from_porcelain_z_backslash_path_records_skipped() {
+    fn test_from_porcelain_z_backslash_path_skipped_on_windows_added_on_unix() {
         let set = DirtySet::from_porcelain_z(b"?? a\\b.py\0").unwrap();
-        assert!(set.events().is_empty());
-        assert_eq!(
-            set.skipped(),
-            &[SkippedEntry {
-                path_lossy: "a\\b.py".to_string(),
-                reason: SkipReason::NotRepoRelative,
-            }]
-        );
+        if cfg!(windows) {
+            assert!(set.events().is_empty());
+            assert_eq!(
+                set.skipped(),
+                &[SkippedEntry {
+                    path_lossy: "a\\b.py".to_string(),
+                    reason: SkipReason::NotRepoRelative,
+                }]
+            );
+        } else {
+            assert_eq!(set.events(), &[DirtyEvent::Added(path("a\\b.py"))]);
+            assert!(set.skipped().is_empty());
+        }
         assert!(!set.is_empty());
     }
 
@@ -1302,7 +1309,7 @@ mod tests {
 
     #[test]
     fn test_classify_dirty_set_keeps_order_and_skipped() {
-        let set = DirtySet::from_porcelain_z(b"?? b.csv\0 M a.py\0?? c\\d\0")
+        let set = DirtySet::from_porcelain_z(b"?? b.csv\0 M a.py\0?? c//d\0")
             .unwrap()
             .classify(&router(), None);
         assert_eq!(
@@ -1377,7 +1384,7 @@ mod tests {
 
     #[test]
     fn test_classify_with_custom_class_keeps_order_and_skipped() {
-        let set = DirtySet::from_porcelain_z(b"?? b.csv\0 M a.py\0?? c\\d\0")
+        let set = DirtySet::from_porcelain_z(b"?? b.csv\0 M a.py\0?? c//d\0")
             .unwrap()
             .classify_with(|path| PathClass::new(path.as_str() == "b.csv", false));
         assert_eq!(
@@ -1392,7 +1399,7 @@ mod tests {
 
     #[test]
     fn test_dirty_set_retain_drops_rejected_keeps_order_and_skipped() {
-        let mut set = DirtySet::from_porcelain_z(b"?? c.py\0 M a.py\0?? b.py\0?? c\\d\0").unwrap();
+        let mut set = DirtySet::from_porcelain_z(b"?? c.py\0 M a.py\0?? b.py\0?? c//d\0").unwrap();
         set.retain(|event| event.worktree_path().map(RepoPath::as_str) != Some("b.py"));
         assert_eq!(
             set.events(),

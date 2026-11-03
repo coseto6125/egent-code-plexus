@@ -16,6 +16,7 @@ use crate::analyzer::rust_paths::{is_rust_module_root, is_rust_source, rust_modu
 use crate::analyzer::types::{BindingKind, RawImport};
 use crate::file_category::Language;
 use crate::graph::{ArchivedFile, ArchivedImportFact, NodeKind};
+use crate::registry::os_path_to_slash;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::hash_map::Entry;
 use std::ops::Deref;
@@ -1585,7 +1586,7 @@ pub fn for_each_specifier_candidate<F>(
     };
 
     let base = if let Some(b) = base_path {
-        let b_str = b.to_string_lossy().replace('\\', "/");
+        let b_str = os_path_to_slash(&b);
         Some(
             b_str
                 .trim_start_matches("./")
@@ -1605,7 +1606,7 @@ pub fn for_each_specifier_candidate<F>(
         probe_with_suffixes(&base, &mut visit);
     } else if probe_rust_module(&base, &mut visit) {
         if let Some(fallback) = rust_self_fallback_base(source_file, specifier) {
-            let fallback = fallback.to_string_lossy().replace('\\', "/");
+            let fallback = os_path_to_slash(&fallback);
             probe_rust_module(fallback.trim_start_matches("./"), &mut visit);
         }
     }

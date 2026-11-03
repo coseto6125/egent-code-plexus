@@ -18,6 +18,7 @@ use ecp_core::contracts::dirty_event::{
     SkippedEntry,
 };
 use ecp_core::contracts::routing::{FileRouter, SizeCap};
+use ecp_core::registry::os_path_to_slash;
 use ecp_core::session::SessionMeta;
 use ignore::WalkBuilder;
 use std::collections::HashMap;
@@ -532,14 +533,8 @@ fn walked_repo_path(path: &Path, worktree_root: &Path) -> Result<RepoPath, Skipp
             reason: SkipReason::NotUtf8,
         });
     };
-    // The overlay writer keys its manifest by `/`, so a Windows separator
-    // becomes `/`. On Unix `\` is a file-name byte: mapping it would merge
-    // `a\b.py` into `a/b.py`.
-    let text = if cfg!(windows) {
-        text.replace('\\', "/")
-    } else {
-        text.to_owned()
-    };
+    // The overlay writer keys its manifest by `/`.
+    let text = os_path_to_slash(text).into_owned();
     RepoPath::new(text).map_err(|NotRepoRelative(path_lossy)| SkippedEntry {
         path_lossy,
         reason: SkipReason::NotRepoRelative,
@@ -1775,7 +1770,7 @@ fn apply_l1_overlay_updates(
         .iter()
         .map(|g| {
             pre_parse_mtimes
-                .get(g.file_path.to_string_lossy().replace('\\', "/").as_str())
+                .get(&*os_path_to_slash(&g.file_path))
                 .copied()
                 .unwrap_or(0)
         })
@@ -2668,14 +2663,15 @@ mod fingerprint_drift_tests {
             .expect("the gate returns the set it saw")
     }
 
-    /// On Unix `\` is a file-name byte: `a\b.py` is no repo path, and must
-    /// neither merge into `a/b.py` nor fail the query as a duplicate.
+    /// Stands for: on Unix `\` is a file-name byte, so `a\b.py` is its own
+    /// repo path beside `a/b.py`, as the index stores it: two events, never
+    /// merged into one path and never a duplicate that fails the query.
     #[cfg(unix)]
     #[test]
-    fn test_ensure_fresh_with_rebuild_walk_backslash_name_beside_same_path_skips_it() {
+    fn test_ensure_fresh_with_rebuild_walk_backslash_name_beside_same_path_keeps_both() {
         if rerun_in_child(
             "ECP_AUTO_ENSURE_BACKSLASH_CHILD",
-            "auto_ensure::fingerprint_drift_tests::test_ensure_fresh_with_rebuild_walk_backslash_name_beside_same_path_skips_it",
+            "auto_ensure::fingerprint_drift_tests::test_ensure_fresh_with_rebuild_walk_backslash_name_beside_same_path_keeps_both",
         ) {
             return;
         }
@@ -2685,20 +2681,14 @@ mod fingerprint_drift_tests {
             "backslash-test",
             &[OsStr::new("a/b.py"), OsStr::new("a\\b.py")],
         );
-        assert_eq!(
-            set.events(),
-            &[DirtyEvent::Modified(ClassifiedPath {
-                path: RepoPath::new("a/b.py").unwrap(),
+        let modified = |p: &str| {
+            DirtyEvent::Modified(ClassifiedPath {
+                path: RepoPath::new(p).unwrap(),
                 class: PathClass::SOURCE,
-            })]
-        );
-        assert_eq!(
-            set.skipped(),
-            &[SkippedEntry {
-                path_lossy: "a\\b.py".into(),
-                reason: SkipReason::NotRepoRelative,
-            }]
-        );
+            })
+        };
+        assert_eq!(set.events(), &[modified("a/b.py"), modified("a\\b.py")]);
+        assert!(set.skipped().is_empty());
     }
 
     /// The read context counts skipped entries into its caveat; a walk that

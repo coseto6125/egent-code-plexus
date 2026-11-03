@@ -546,3 +546,55 @@ fn test_build_decorator_route_in_test_file_no_entrypoint() {
     assert_eq!(entries_at("tests/test_main.py"), 0);
     assert_eq!(entries_at("integration/hello-world/e2e/users.spec.ts"), 0);
 }
+
+fn main_at(kind: NodeKind, owner: Option<&str>, start: u32) -> RawNode {
+    RawNode {
+        span: (start, 0, start + 2, 1),
+        owner_class: owner.map(str::to_string),
+        ..mk_raw_node("main", kind, vec![])
+    }
+}
+
+fn entry_targets(graph: &ecp_core::graph::ZeroCopyGraph) -> Vec<u32> {
+    let entries = entry_point_node_indices(graph);
+    graph
+        .edges
+        .iter()
+        .filter(|e| entries.contains(&(e.source as usize)) && e.rel_type == RelType::References)
+        .map(|e| graph.nodes[e.target as usize].span.0)
+        .collect()
+}
+
+/// Stands for: `#[cfg]` twins of `fn main` are one declaration, so one
+/// marker binds the first, as a call to `main` does (design_uid §2.3).
+/// Before the fix both twins were named rivals and the file had no marker.
+#[test]
+fn test_build_rust_cfg_twin_mains_one_entrypoint_binds_first() {
+    let lg = mk_local_graph(
+        "examples/dump.rs",
+        vec![
+            main_at(NodeKind::Function, None, 10),
+            main_at(NodeKind::Function, None, 86),
+        ],
+        vec![],
+        vec![],
+    );
+    let mut builder = GraphBuilder::new();
+    builder.add_graph(lg);
+    let graph = builder.build();
+    assert_eq!(entry_targets(&graph), [10]);
+}
+
+/// Stands for: two method overloads named `main` stay rivals: no marker.
+#[test]
+fn test_build_java_overloaded_main_methods_no_entrypoint() {
+    let mut first = main_at(NodeKind::Method, Some("App"), 2);
+    first.decorators = vec!["public".into(), "static".into()];
+    let mut second = main_at(NodeKind::Method, Some("App"), 6);
+    second.decorators = first.decorators.clone();
+    let lg = mk_local_graph("src/App.java", vec![first, second], vec![], vec![]);
+    let mut builder = GraphBuilder::new();
+    builder.add_graph(lg);
+    let graph = builder.build();
+    assert_eq!(entry_targets(&graph), Vec::<u32>::new());
+}

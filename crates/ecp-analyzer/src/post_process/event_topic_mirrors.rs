@@ -47,6 +47,7 @@ use ecp_core::analyzer::types::{LocalGraph, PubSub};
 use ecp_core::contracts::raw_records::{FileOrd, GlobalEndpoint, RawIndexMap};
 use ecp_core::graph::{Edge, Node, RelType};
 use ecp_core::pool::StringPool;
+use ecp_core::registry::os_path_to_slash;
 use rustc_hash::FxHashMap;
 
 /// Promote `RawEventTopic`s → `EventTopic` Nodes, emit `Publishes`/`Subscribes`
@@ -80,7 +81,7 @@ pub fn emit_edges(
         if event_topics.is_empty() {
             continue;
         }
-        let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
+        let path_str = os_path_to_slash(&local_graph.file_path);
         let file_idx = lg_idx as u32;
 
         // One node per literal topic, named by its key's earliest spelling

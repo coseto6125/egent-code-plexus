@@ -5,6 +5,7 @@
 
 use crate::contracts::routing::{FileRoute, FileRouter, ParsedLanguage};
 use crate::graph::FileCategory;
+use crate::registry::text_path_to_slash;
 use aho_corasick::{AhoCorasick, MatchKind};
 use std::sync::OnceLock;
 
@@ -351,12 +352,7 @@ impl FileMeta {
     }
 
     pub fn from_path(path: &str) -> Self {
-        if path.contains('\\') {
-            let normalized = path.replace('\\', "/");
-            Self::from_normalized_path(&normalized)
-        } else {
-            Self::from_normalized_path(path)
-        }
+        Self::from_normalized_path(&text_path_to_slash(path))
     }
 
     /// Fast path for callers that have already normalised separators. Skips

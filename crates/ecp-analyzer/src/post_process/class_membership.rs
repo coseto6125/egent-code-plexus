@@ -3,25 +3,25 @@
 //! The derivation itself (the span pass, the parser-direct `owner_class`
 //! pass, emission convention B.1) lives in
 //! [`ecp_core::analyzer::membership`], shared with the overlay's per-file
-//! replay. This pass answers its name lookups from the [`SymbolTable`] and
-//! maps each file's edges into the graph.
+//! replay. This pass maps each raw row to its node through Pass 1's
+//! `RawIndexMap`, and answers the owner pass's name lookup from the
+//! [`SymbolTable`].
 
-use crate::resolution::index::{Language, SymbolTable};
-use ecp_core::analyzer::lexical::{file_identities, file_uids, later_is_arity_twin, raw_decl};
+use crate::resolution::index::SymbolTable;
+use ecp_core::analyzer::lexical::{skipped_nodes, SharedPaths};
 use ecp_core::analyzer::membership::{
     self, MemberLookup, MemberRow, CLASS_MEMBERSHIP_IMPL_REASON, CLASS_MEMBERSHIP_REASON,
 };
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
-use ecp_core::contracts::identity::UidSlot;
 use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
-use ecp_core::graph::{Edge, NodeKind};
+use ecp_core::graph::Edge;
 use ecp_core::pool::StringPool;
+use ecp_core::registry::os_path_to_slash;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::borrow::Cow;
 
 /// Emit `HasMethod` / `HasProperty` edges by walking the raw per-file
-/// `LocalGraph`s and resolving names back to node indices via `SymbolTable`.
+/// `LocalGraph`s, each end the node of its own raw row.
 /// Returns the number of edges appended to `edges_out`.
 ///
 /// Idempotent w.r.t. the input — re-running on the same `local_graphs` would
@@ -30,10 +30,10 @@ use std::borrow::Cow;
 /// `symbol_skip_set` — T7-6 incremental skip data. When `Some`, files whose
 /// ALL symbols are in the skip set bypass both pass-1 span and pass-2 impl
 /// emission. `None` = full reanalyze for all files (default, full-build path).
+/// A path of `shared` skips nothing ([`skipped_nodes`]).
 ///
-/// `raw_map` is Pass 1's map over `local_graphs`, in the same order: a C#
-/// arity twin (`Foo1<T>`, `Foo1<T>.foo`) is in no name table, so its edge
-/// binds the node of its own raw slot.
+/// `raw_map` is Pass 1's map over `local_graphs`, in the same order: every
+/// raw row maps to its node, a merged row to its survivor.
 pub fn emit_edges(
     local_graphs: &[LocalGraph],
     raw_map: &RawIndexMap,
@@ -41,6 +41,7 @@ pub fn emit_edges(
     string_pool: &mut StringPool,
     edges_out: &mut Vec<Edge>,
     symbol_skip_set: Option<&FxHashMap<String, FxHashSet<u64>>>,
+    shared: &SharedPaths,
 ) -> usize {
     let reason = string_pool.add(CLASS_MEMBERSHIP_REASON);
     let reason_impl = string_pool.add(CLASS_MEMBERSHIP_IMPL_REASON);
@@ -52,28 +53,16 @@ pub fn emit_edges(
         .par_iter()
         .enumerate()
         .map(|(file_ord, local_graph)| {
-            let raws = &local_graph.nodes;
-
-            // Forward-slash normalize once. Linux/macOS paths have no `\\`
-            // → reuse the borrowed cow without allocating.
-            let raw_path = local_graph.file_path.to_string_lossy();
-            let path_str_cow: Cow<'_, str> = if raw_path.contains('\\') {
-                Cow::Owned(raw_path.replace('\\', "/"))
-            } else {
-                raw_path
-            };
-            let path_str: &str = &path_str_cow;
-
             // T7-6: skip class_membership for files whose every symbol is
             // unchanged, by Pass 1's uids (overloads numbered).
-            if let Some(skip_uids) = symbol_skip_set.and_then(|m| m.get(path_str)) {
-                if file_uids(path_str, raws, raw_decl)
-                    .iter()
-                    .all(|uid| skip_uids.contains(uid))
-                {
-                    return Vec::new();
-                }
+            if skipped_nodes(local_graph, file_ord as u32, symbol_skip_set, shared)
+                .is_some_and(|skipped| skipped.iter().all(|&s| s))
+            {
+                return Vec::new();
             }
+            let raws = &local_graph.nodes;
+            let path_str_cow = os_path_to_slash(&local_graph.file_path);
+            let path_str: &str = &path_str_cow;
 
             let file = FileOrd(file_ord as u32);
             let mut local_edges: Vec<Edge> = Vec::new();
@@ -85,7 +74,7 @@ pub fn emit_edges(
                     path: path_str,
                     raw_map,
                     file,
-                    twins: ArityTwins::of_file(raws, path_str, symbol_table, raw_map, file),
+                    merged: raw_map.has_merged(file),
                 },
                 |m| {
                     local_edges.push(Edge {
@@ -112,23 +101,12 @@ pub fn emit_edges(
     emitted
 }
 
-/// A raw node as membership reads it. Only a type's generic arity is read,
-/// so only a type parses its decorators for it.
 fn member_row(n: &RawNode) -> MemberRow<'_> {
-    let is_type = matches!(
-        n.kind,
-        NodeKind::Class
-            | NodeKind::Struct
-            | NodeKind::Trait
-            | NodeKind::Interface
-            | NodeKind::Annotation
-    );
     MemberRow {
         kind: n.kind,
         owner: n.owner_class.as_deref(),
         name: &n.name,
         span: n.span,
-        arity: if is_type { n.generic_arity() } else { 0 },
     }
 }
 
@@ -138,79 +116,34 @@ struct IndexLookup<'a> {
     path: &'a str,
     raw_map: &'a RawIndexMap,
     file: FileOrd,
-    twins: ArityTwins,
+    merged: bool,
 }
 
 impl MemberLookup for IndexLookup<'_> {
-    fn first_declaration(&self, name: &str, kind: NodeKind, owner: Option<&str>) -> Option<u32> {
-        self.symbol_table
-            .first_declaration(self.path, name, kind, owner)
-    }
-
     fn lookup_in_file(&self, name: &str) -> Option<u32> {
         self.symbol_table.lookup_in_file(self.path, name)
     }
 
-    fn later_overloads(&self, first: u32) -> &[u32] {
-        self.symbol_table.later_overloads(first)
+    fn node(&self, raw: usize) -> Option<u32> {
+        self.raw_map.node(self.file, RawIdx(raw as u32))
     }
 
-    fn with_arity(&self, id: u32, arity: u32) -> Option<u32> {
-        self.symbol_table.with_arity(id, arity)
+    fn has_merged(&self) -> bool {
+        self.merged
     }
 
     fn is_scoped(&self, raw: usize) -> bool {
-        self.raw_map
-            .node(self.file, RawIdx(raw as u32))
+        self.node(raw)
             .is_some_and(|id| self.symbol_table.is_lexically_scoped(id))
-    }
-
-    fn twin(&self, raw: usize) -> Option<u32> {
-        self.twins.node(raw)
-    }
-}
-
-/// The node of each C# arity twin of one file (`Conv<T>` after `Conv`,
-/// `Outer<T>.Inner` after `Outer.Inner`, `Foo1<T>.foo` after `Foo1.foo`),
-/// by raw index ([`later_is_arity_twin`]). A twin is in no name table, and
-/// the name lookups return its first; the raw slot is the twin itself.
-/// Empty for every other file.
-struct ArityTwins(FxHashMap<usize, u32>);
-
-impl ArityTwins {
-    fn of_file(
-        raws: &[RawNode],
-        path_str: &str,
-        symbol_table: &SymbolTable,
-        raw_map: &RawIndexMap,
-        file: FileOrd,
-    ) -> Self {
-        let language = Language::from_normalized_path(path_str);
-        if !symbol_table.has_arity_twins() || language != Language::CSharp {
-            return Self(FxHashMap::default());
-        }
-        let twins = file_identities(path_str, raws, raw_decl)
-            .into_iter()
-            .enumerate()
-            .filter(|&(i, identity)| {
-                matches!(identity.slot, UidSlot::Later { .. })
-                    && later_is_arity_twin(language, raws[i].kind)
-            })
-            .filter_map(|(i, _)| Some((i, raw_map.node(file, RawIdx(i as u32))?)))
-            .collect();
-        Self(twins)
-    }
-
-    fn node(&self, raw: usize) -> Option<u32> {
-        self.0.get(&raw).copied()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ecp_core::analyzer::lexical::{file_uids, raw_decl};
     use ecp_core::analyzer::types::LocalGraph;
-    use ecp_core::graph::RelType;
+    use ecp_core::graph::{NodeKind, RelType};
     use std::path::PathBuf;
 
     fn raw(name: &str, kind: NodeKind, span: (u32, u32, u32, u32)) -> RawNode {
@@ -255,7 +188,7 @@ mod tests {
         let string_pool = StringPool::new();
         let mut current = 0u32;
         for lg in &local_graphs {
-            let path_str = lg.file_path.to_string_lossy().replace('\\', "/");
+            let path_str = os_path_to_slash(&lg.file_path);
             for rn in &lg.nodes {
                 symbol_table.register_node(&path_str, &rn.name, current, rn.kind);
                 current += 1;
@@ -265,17 +198,34 @@ mod tests {
     }
 
     fn run(local_graphs: Vec<LocalGraph>) -> Vec<Edge> {
+        run_with(local_graphs, Vec::new(), None)
+    }
+
+    /// `merged` holds Pass 1's `(tombstone, survivor)` slots.
+    fn run_with(
+        local_graphs: Vec<LocalGraph>,
+        merged: Vec<(u32, u32)>,
+        skip: Option<&FxHashMap<String, FxHashSet<u64>>>,
+    ) -> Vec<Edge> {
         let (symbol_table, mut string_pool, mut edges) = build_setup(local_graphs.clone());
-        let raw_map = RawIndexMap::new(0, local_graphs.iter().map(|lg| lg.nodes.len())).unwrap();
+        let raw_map = RawIndexMap::new(0, local_graphs.iter().map(|lg| lg.nodes.len()))
+            .unwrap()
+            .with_merged(merged)
+            .unwrap();
         emit_edges(
             &local_graphs,
             &raw_map,
             &symbol_table,
             &mut string_pool,
             &mut edges,
-            None,
+            skip,
+            &SharedPaths::of(&local_graphs),
         );
         edges
+    }
+
+    fn pairs(edges: &[Edge]) -> Vec<(u32, u32)> {
+        edges.iter().map(|e| (e.source, e.target)).collect()
     }
 
     fn lg(path: &str, nodes: Vec<RawNode>) -> LocalGraph {
@@ -437,9 +387,8 @@ mod tests {
     #[test]
     fn java_style_same_named_constructor_gets_has_method_without_self_loop() {
         // Java emits `class Foo { public Foo() {} }` as Class "Foo" containing
-        // Method "Foo". lookup_in_file returns the class for both names, so
-        // member_node resolves the member through first_declaration (kind +
-        // owner) and skips only a true self-loop.
+        // Method "Foo". lookup_in_file returns the class for both names; the
+        // member binds its own row.
         let nodes = vec![
             raw("Foo", NodeKind::Class, (1, 0, 10, 0)),
             raw("Foo", NodeKind::Method, (2, 4, 4, 4)),
@@ -460,5 +409,63 @@ mod tests {
         ];
         let edges = run(vec![lg("foo.rs", nodes)]);
         assert_eq!(edges.len(), 1, "must not double-emit");
+    }
+
+    /// Stands for: membership binds by row (design_uid §3 row 5). Python
+    /// `class C` twice, `a` in the first body and `b` in the second:
+    /// `HasMethod C@1 -> a`, `C@2 -> b`, nothing else.
+    #[test]
+    fn test_emit_edges_class_declared_twice_each_owns_its_own_body() {
+        let nodes = vec![
+            raw("C", NodeKind::Class, (1, 0, 3, 0)),
+            raw("a", NodeKind::Function, (2, 4, 2, 9)),
+            raw("C", NodeKind::Class, (5, 0, 7, 0)),
+            raw("b", NodeKind::Function, (6, 4, 6, 9)),
+        ];
+        let edges = run(vec![lg("c.py", nodes)]);
+        assert_eq!(pairs(&edges), [(0, 1), (2, 3)]);
+    }
+
+    /// Two merged `x` rows of one class give one `HasProperty`, to the
+    /// survivor.
+    #[test]
+    fn test_emit_edges_merged_property_rows_emit_one_has_property() {
+        let nodes = vec![
+            raw("K", NodeKind::Class, (1, 0, 9, 0)),
+            raw("x", NodeKind::Property, (2, 4, 2, 9)),
+            raw("x", NodeKind::Property, (5, 4, 5, 9)),
+        ];
+        let edges = run_with(vec![lg("k.ts", nodes)], vec![(2, 1)], None);
+        assert_eq!(pairs(&edges), [(0, 1)]);
+        assert!(matches!(edges[0].rel_type, RelType::HasProperty));
+    }
+
+    /// T7-6: a path with one input whose every uid is unchanged is skipped;
+    /// a path with two inputs skips nothing, as Pass 1 numbers it as one
+    /// file and `file_uids` each input alone.
+    #[test]
+    fn test_emit_edges_skip_set_two_inputs_one_path_skips_nothing() {
+        let one = vec![
+            raw("K", NodeKind::Class, (1, 0, 9, 0)),
+            raw("m", NodeKind::Method, (2, 4, 3, 4)),
+        ];
+        let skip_of = |path: &str, inputs: &[&Vec<RawNode>]| {
+            let uids: FxHashSet<u64> = inputs
+                .iter()
+                .flat_map(|nodes| file_uids(path, nodes.as_slice(), raw_decl))
+                .collect();
+            FxHashMap::from_iter([(path.to_string(), uids)])
+        };
+
+        let single = skip_of("k.ts", &[&one]);
+        assert!(run_with(vec![lg("k.ts", one.clone())], Vec::new(), Some(&single)).is_empty());
+
+        let two = skip_of("k.vue", &[&one, &one]);
+        let edges = run_with(
+            vec![lg("k.vue", one.clone()), lg("k.vue", one.clone())],
+            Vec::new(),
+            Some(&two),
+        );
+        assert_eq!(pairs(&edges), [(0, 1), (2, 3)]);
     }
 }

@@ -62,6 +62,7 @@ use crate::analyzer::types::{
 use crate::contracts::identity::lexical_parents_in;
 use crate::file_category::{pick_global, FileMeta, GlobalPick, Language};
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
+use crate::registry::os_path_to_slash;
 use crate::session::closure::ConfigEdits;
 use crate::session::import_scope::{stored_file_meta, stored_language, ImportScope, Module};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -311,8 +312,10 @@ pub(super) struct DirtyRustFacts {
     /// Rust ones inside a function body ([`body_locals`]), where a first of
     /// a uid with a module-level twin counts as a module item.
     body_locals: FxHashSet<u32>,
-    /// The declarations no name lookup reads: a later overload, and a
-    /// later twin of a uid, which the index tombstones into the first.
+    /// The later twins of a uid, which the index tombstones into the first:
+    /// no name lookup reads them, and no module path names them. A later
+    /// node (`ViewNode::later_overload`) is no twin: it keeps a node of its
+    /// own.
     repeats: FxHashSet<u32>,
 }
 
@@ -352,8 +355,8 @@ impl<'a> OverlayFacts<'a> {
         let mut dirty_flags: FxHashMap<u32, u16> = FxHashMap::default();
         let mut dirty_lexical_parents: FxHashMap<u32, u32> = FxHashMap::default();
         let mut rust_facts = DirtyRustFacts::default();
-        // The first virtual idx of each uid: the index merges each later
-        // twin into it.
+        // The first virtual idx of each uid: the index merges each repeat
+        // that carries it into it, a later node included.
         let mut first_of_uid: FxHashMap<u64, u32> = FxHashMap::default();
         // One Rust file's twins as (offset, offset of its first); a uid
         // hashes the path, so both lie in the file.
@@ -367,8 +370,11 @@ impl<'a> OverlayFacts<'a> {
             for symbol in &file.symbols {
                 let node = &nodes[offset];
                 let virt = base_len + offset as u32;
+                // A later node is a declaration of its own in no name table,
+                // and the survivor of a repeat merged into it (a C# arity
+                // sibling's): that repeat, under its uid, stays out too.
                 if node.later_overload {
-                    rust_facts.repeats.insert(virt);
+                    first_of_uid.entry(node.uid).or_insert(virt);
                 } else {
                     match first_of_uid.entry(node.uid) {
                         Entry::Occupied(seen) => {
@@ -632,7 +638,7 @@ impl<'a> OverlayFacts<'a> {
             return self.has_file(file).then_some(file);
         }
         let base = rust_module_path_base(std::path::Path::new(source), module_path)?;
-        let base = base.to_string_lossy().replace('\\', "/");
+        let base = os_path_to_slash(&base);
         let mut found = None;
         reexport::probe_rust_module(base.trim_start_matches("./"), &mut |candidate: &str| {
             found = self.stored_path(candidate);
@@ -1238,19 +1244,23 @@ impl<'a> OverlayFacts<'a> {
                 .cloned()
                 .unwrap_or_default();
         }
+        // The index stores each set as `overload_set` References from the
+        // first. A name scan over `later_nodes` cannot tell an overload from
+        // a C# arity sibling, which joins no set.
         let graph = self.graph;
-        let node = &graph.nodes[first as usize];
-        let owner = node.owner_class.resolve(&graph.string_pool);
-        let mut later: Vec<u32> = graph
-            .nodes_by_name(node.name.resolve(&graph.string_pool))
-            .filter(|&idx| {
-                let other = &graph.nodes[idx as usize];
-                idx != first
-                    && other.file_idx == node.file_idx
-                    && NodeKind::from(&other.kind) == NodeKind::from(&node.kind)
-                    && other.owner_class.resolve(&graph.string_pool) == owner
-                    && graph.is_later_overload(idx)
+        let out = &graph.out_offsets;
+        let (start, end) = (
+            out[first as usize].to_native() as usize,
+            out[first as usize + 1].to_native() as usize,
+        );
+        let mut later: Vec<u32> = graph.edges[start..end]
+            .iter()
+            .filter(|edge| {
+                RelType::from(&edge.rel_type) == RelType::References
+                    && edge.reason.resolve(&graph.string_pool)
+                        == crate::analyzer::types::OVERLOAD_SET_REASON
             })
+            .map(|edge| edge.target.to_native())
             .collect();
         later.sort_unstable();
         later
@@ -2319,6 +2329,10 @@ impl PickFacts for OverlayFacts<'_> {
         self.rust.is_body_local(id)
     }
 
+    fn later_overloads(&self, first: u32) -> Cow<'_, [u32]> {
+        Cow::Owned(self.later_overloads_of(first))
+    }
+
     fn types_named(&self, owner: &str) -> Vec<u32> {
         let mut types = self.global_named(owner);
         types.retain(|&id| self.kind_of(id).is_type());
@@ -2988,7 +3002,7 @@ pub(super) struct RustModules<'a> {
     /// The virtual idxs of the dirty declarations no module path names
     /// ([`DirtyRustFacts::body_locals`]).
     dirty_body_locals: FxHashSet<u32>,
-    /// The virtual idxs no name lookup reads ([`DirtyRustFacts::repeats`]).
+    /// The virtual idxs the index tombstones ([`DirtyRustFacts::repeats`]).
     dirty_repeats: FxHashSet<u32>,
     /// Per base file index, the spans of its callables in a Rust file and
     /// none elsewhere, which tell a base body-local declaration
@@ -3111,24 +3125,41 @@ impl<'a> RustModules<'a> {
             return false;
         }
         let kind = NodeKind::from(&node.kind);
-        // The index's per-node AND: Pass 1 merges a later declaration of
-        // `idx`'s uid into `idx` and keeps it as a tombstone of the same
-        // kind, file and span. A method or constructor has none: a repeat is
-        // an overload of its own. An unscoped `fn` (one a `mod` inside the
-        // body holds) can have one.
-        if crate::uid::keeps_overloads(kind) {
+        // The index's per-node AND over the raws Pass 1 merged into `idx`.
+        // Only a property, variable or constant merges a repeat
+        // (`merges_repeats`), as a tombstone of the same kind and file with
+        // the uid `tombstone(overload(uid, n))`; any other repeat is a node
+        // of its own, so `idx` merged nothing.
+        if !crate::uid::merges_repeats(kind) {
             return true;
         }
         if let Some(&body_local) = self.base_twin_scans.borrow().get(&idx) {
             return body_local;
         }
-        let twin_uid = crate::uid::tombstone(node.uid.to_native());
-        let body_local = !graph.nodes_by_kind(kind).any(|twin| {
-            let twin = &graph.nodes[twin as usize];
-            twin.uid.to_native() == twin_uid
-                && twin.file_idx.to_native() == file_idx
-                && !inside(stored_span(twin))
+        let same_file = || {
+            graph
+                .nodes_by_kind(kind)
+                .map(|i| &graph.nodes[i as usize])
+                .filter(|twin| twin.file_idx.to_native() == file_idx)
+        };
+        let pool = &graph.string_pool;
+        let (count, any_nameless) = same_file().fold((0u32, false), |(count, nameless), twin| {
+            (count + 1, nameless || twin.name.resolve(pool).is_empty())
         });
+        // A file with no tombstone (no name) of this kind merged nothing
+        // into `idx`.
+        let body_local = if !any_nameless {
+            true
+        } else {
+            // A repeat's ordinal counts the earlier declarations of its uid,
+            // so it stays below the file's count of this kind.
+            let base = node.uid.to_native();
+            let twin_uids: FxHashSet<u64> = (1..count)
+                .map(|n| crate::uid::tombstone(crate::uid::overload(base, n)))
+                .collect();
+            same_file()
+                .all(|twin| !twin_uids.contains(&twin.uid.to_native()) || inside(stored_span(twin)))
+        };
         self.base_twin_scans.borrow_mut().insert(idx, body_local);
         body_local
     }
@@ -3166,12 +3197,8 @@ impl<'a> RustModules<'a> {
     }
 
     pub(super) fn file(&self, path: &std::path::Path) -> Option<&'a str> {
-        // `PathBuf::join` writes `\` on Windows; archived paths use `/`, as
-        // the analyzer's path normalisation does.
-        let requested = match path.to_str()? {
-            raw if raw.contains('\\') => std::borrow::Cow::Owned(raw.replace('\\', "/")),
-            raw => std::borrow::Cow::Borrowed(raw),
-        };
+        // `PathBuf::join` writes `\` on Windows; archived paths use `/`.
+        let requested = os_path_to_slash(path.to_str()?);
         let requested = requested.as_ref();
         if let Some((&name, _)) = self.dirty.get_key_value(requested) {
             return Some(name);
@@ -3188,9 +3215,12 @@ impl<'a> RustModules<'a> {
     /// `wanted` accepts ([`Self::module_level`]): an associated item
     /// (`impl X { const h: u32 = 1; }`) and a body-local declaration
     /// (`fn setup() { struct Foo; }`) are no items of the module. A dirty
-    /// file answers from its fresh parse. Either side reads the first of
-    /// each uid only, as the index's `SymbolTable::declares_in_file` does:
-    /// no later overload, and no twin the index tombstones.
+    /// file answers from its fresh parse. Either side reads every named
+    /// node, later nodes included, but no twin the index tombstones. That is
+    /// the index's `SymbolTable::declares_in_file`, which reads a later node
+    /// through its body-local first only ([`ladder::module_item`]): a later
+    /// node has its first's kind, owner and file, so it adds an answer only
+    /// where that first is body-local and it is not.
     fn declares(&self, file: &str, name: &str, wanted: impl Fn(NodeKind) -> bool) -> bool {
         let top_level = |owner: Option<&str>| owner.is_none();
         match self.dirty.get(file) {
@@ -3209,7 +3239,6 @@ impl<'a> RustModules<'a> {
                         .path
                         .resolve(pool)
                         == file
-                    && !self.graph.is_later_overload(idx)
                     && self.module_level(idx, Some(node.owner_class.resolve(pool)), top_level)
             }),
         }
@@ -5644,14 +5673,17 @@ pub(super) fn resolve_edges(
             }
             _ => target,
         };
+    // B1 (the index's `MergedRows`): a merged row's edges start at its
+    // survivor.
+    let survivor_of: FxHashMap<u32, u32> = decorated.survivors.iter().copied().collect();
     for (file_ord, file) in files.iter().enumerate() {
-        let first = (virt_cursor - base_len) as usize;
-        emit_closure_references(
-            file,
-            &nodes[first..first + file.symbols.len()],
-            virt_cursor,
-            &mut push_edge,
-        );
+        // The keys of the file's per-symbol edges, kept only for a file with
+        // a merged row: its edge equal to one emitted already is dropped.
+        let file_end = virt_cursor + file.symbols.len() as u32;
+        let mut seen: Option<FxHashSet<(u32, u32, u8)>> = (virt_cursor..file_end)
+            .any(|virt| survivor_of.contains_key(&virt))
+            .then(FxHashSet::default);
+        emit_closure_references(file, virt_cursor, &mut push_edge);
         // One cache per dirty file: a repeated qualified call reuses
         // both successful and unresolved lookups without rebuilding paths.
         let module_calls: RefCell<ModuleCalls<'_>> = RefCell::default();
@@ -5673,6 +5705,15 @@ pub(super) fn resolve_edges(
         for sym in &file.symbols {
             let source = virt_cursor;
             virt_cursor += 1;
+            let from = survivor_of.get(&source).copied().unwrap_or(source);
+            let mut emit = |edge: ViewEdge| {
+                let fresh = seen.as_mut().is_none_or(|seen| {
+                    seen.insert((edge.source, edge.target, edge.rel_type as u8))
+                });
+                if fresh || from == source {
+                    push_edge(edge);
+                }
+            };
             let heritage: &[String] = if any_heritage {
                 enclosing_class_heritage(sym, &file.symbols)
             } else {
@@ -5928,7 +5969,7 @@ pub(super) fn resolve_edges(
                 );
                 // The index drops self-recursion Calls (builder's
                 // `target_id == current_node_idx` skip).
-                if let Some((target, confidence)) = hit.filter(|&(t, _)| t != source) {
+                if let Some((target, confidence)) = hit.filter(|&(t, _)| t != from) {
                     // The index's Pass 2 names the reason by the same
                     // confidence (`CallReasons::of`).
                     let reason = if confidence == NEAREST_COPY_CONFIDENCE {
@@ -5940,8 +5981,8 @@ pub(super) fn resolve_edges(
                     } else {
                         super::super::merged::OVERLAY_EDGE_REASON
                     };
-                    push_edge(ViewEdge {
-                        source,
+                    emit(ViewEdge {
+                        source: from,
                         target,
                         rel_type: RelType::Calls,
                         confidence,
@@ -5990,7 +6031,7 @@ pub(super) fn resolve_edges(
                         true => target,
                         false => twin_read_from(target, file_ord, HeritageNode::span(sym)),
                     };
-                    if target == source || name_edges.contains(&target) {
+                    if target == from || name_edges.contains(&target) {
                         continue;
                     }
                     name_edges.push(target);
@@ -5999,8 +6040,8 @@ pub(super) fn resolve_edges(
                     } else {
                         (RelType::ReadsField, VALUE_READ_REASON)
                     };
-                    push_edge(ViewEdge {
-                        source,
+                    emit(ViewEdge {
+                        source: from,
                         target,
                         rel_type,
                         confidence,
@@ -6027,12 +6068,12 @@ pub(super) fn resolve_edges(
                     ) else {
                         continue;
                     };
-                    if target == source || emitted.contains(&(target, variant_ref.pattern)) {
+                    if target == from || emitted.contains(&(target, variant_ref.pattern)) {
                         continue;
                     }
                     emitted.push((target, variant_ref.pattern));
-                    push_edge(ViewEdge {
-                        source,
+                    emit(ViewEdge {
+                        source: from,
                         target,
                         rel_type: RelType::References,
                         confidence,
@@ -6071,12 +6112,12 @@ pub(super) fn resolve_edges(
                     continue;
                 };
                 let target = twin_read_from(target, file_ord, HeritageNode::span(sym));
-                if target == source || field_edges.contains(&target) {
+                if target == from || field_edges.contains(&target) {
                     continue;
                 }
                 field_edges.push(target);
-                push_edge(ViewEdge {
-                    source,
+                emit(ViewEdge {
+                    source: from,
                     target,
                     rel_type: RelType::ReadsField,
                     confidence,
@@ -6118,47 +6159,128 @@ mod tests {
     use crate::graph_fixture::GraphFixture;
     use rkyv::rancor::Error as RkyvError;
 
-    /// `src/m.rs`: `fn setup` (lines 0-4) holds `mod inner { pub fn helper }`
-    /// with `helper` on line 2 and `impl Foo { fn new }` with `new` on line 3,
-    /// then the module-level `mod inner { pub fn helper }` with `helper` on
-    /// line `twin_line`. A `mod` breaks the lexical link, so both `helper`s
-    /// are unscoped `Function`s owned by `inner` and share a uid: Pass 1
-    /// keeps the first, the body-local one, and stores the second as its
-    /// tombstone (bit-inverse uid, no name) in the second's slot. Returns
-    /// the bytes and the idxs of the survivor and of `new`.
-    fn inner_helper_twins(twin_line: u32) -> (Vec<u8>, u32, u32, u32) {
+    /// Stands for: the overlay's name tables hold what the index's hold
+    /// after Pass 1, a merged repeat never. In `C.cs`, `C.x`, the arity
+    /// sibling `C<T>.x` (a later node) and a repeat merged into the sibling,
+    /// which carries the sibling's uid while the tables are built, as
+    /// `OverlayView::build` numbers them. Only `C.x` is a name candidate. Red
+    /// before: the sibling's uid was never seen, so the repeat entered.
+    #[test]
+    fn test_overlay_facts_repeat_merged_into_arity_sibling_not_in_name_table() {
+        let bytes = GraphFixture::new().into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let symbol = |line: u32| OverlaySymbol {
+            is_exported: false,
+            name: "x".to_string(),
+            kind: NodeKind::Property,
+            owner_class: Some("C".to_string()),
+            start_line: line,
+            end_line: line,
+            start_column: 0,
+            end_column: 0,
+            calls: Vec::new(),
+            heritage: Vec::new(),
+            variant_refs: Vec::new(),
+            return_type: None,
+            generic_arity: 0,
+            flags: None,
+            decorators: Vec::new(),
+            params: Vec::new(),
+        };
+        let file = OverlayFileInput {
+            parsed_language: None,
+            rel_path: "C.cs".to_string(),
+            symbols: vec![symbol(2), symbol(6), symbol(8)],
+            imports: Vec::new(),
+            export_aliases: Vec::new(),
+        };
+        let node = |uid: u64, line: u32, later_overload: bool| ViewNode {
+            uid,
+            name: "x".to_string(),
+            kind: NodeKind::Property,
+            owner_class: Some("C".to_string()),
+            rel_path: Arc::from("C.cs"),
+            start_line: line,
+            end_line: line,
+            start_column: 0,
+            end_column: 0,
+            replaced_base: None,
+            later_overload,
+        };
+        let nodes = [node(11, 2, false), node(22, 6, true), node(22, 8, false)];
+        let (dirty_base, removed) = (FxHashSet::default(), FxHashSet::default());
+        let (replaced, later_overloads) = (FxHashMap::default(), FxHashMap::default());
+        let configs = ConfigEdits::default();
+        let facts = OverlayFacts::new(
+            graph,
+            std::slice::from_ref(&file),
+            &nodes,
+            &dirty_base,
+            &removed,
+            &replaced,
+            &later_overloads,
+            &configs,
+            None,
+        );
+        let base = facts.base_len();
+        assert_eq!(
+            facts.decls_in_file("C.cs", "x"),
+            [(base, NodeKind::Property)]
+        );
+    }
+
+    /// `src/m.rs`: `fn setup` (lines 0-4) holds `mod inner { name }` with
+    /// `name` of `kind` on line 2, a twin-less `lone` of `kind` on line 1
+    /// and `impl Foo { fn new }` with `new` on line 3, then the
+    /// module-level `mod inner { name }` on line `twin_line`. A `mod` breaks
+    /// the lexical link, so both `name`s are unscoped, owned by `inner`, and
+    /// share a base uid. Pass 1 stores the second as Pass 1's `UidSlot`
+    /// says: a merged repeat (`merges_repeats`) as a tombstone with the uid
+    /// `tombstone(overload(base, 1))` and no name, any other repeat as a
+    /// later node of its own under `overload(base, 1)`. Returns the bytes
+    /// and the idxs of the first, of `new`, of `lone` and of the twin.
+    fn inner_twins(kind: NodeKind, name: &str, twin_line: u32) -> (Vec<u8>, u32, u32, u32, u32) {
         const M: &str = "src/m.rs";
         let mut fx = GraphFixture::new();
         let setup = fx.func(M, "setup");
         fx.span(setup, (0, 0, 4, 1));
-        let survivor = fx.node_owned(NodeKind::Function, M, "inner", "helper");
+        let survivor = fx.node_owned(kind, M, "inner", name);
         fx.span(survivor, (2, 8, 2, 30));
         let new = fx.method(M, "Foo", "new");
         fx.span(new, (3, 8, 3, 30));
-        let lone = fx.node_owned(NodeKind::Function, M, "inner", "lone");
+        let lone = fx.node_owned(kind, M, "inner", "lone");
         fx.span(lone, (1, 8, 1, 30));
-        let twin = fx.node_owned(NodeKind::Function, M, "inner", "helper");
+        let twin = fx.node_owned(kind, M, "inner", name);
         fx.span(twin, (twin_line, 4, twin_line, 26));
-        let node = &mut fx.assembly_mut().nodes[twin as usize];
-        node.uid = crate::uid::tombstone(node.uid);
-        node.name = Default::default();
-        node.owner_class = Default::default();
-        (fx.into_bytes(), survivor, new, lone)
+        let assembly = fx.assembly_mut();
+        let node = &mut assembly.nodes[twin as usize];
+        node.uid = crate::uid::overload(node.uid, 1);
+        if crate::uid::merges_repeats(kind) {
+            node.uid = crate::uid::tombstone(node.uid);
+            node.name = Default::default();
+            node.owner_class = Default::default();
+        } else {
+            let later = &mut assembly.later_nodes;
+            later.resize(twin as usize / 8 + 1, 0);
+            later[twin as usize / 8] |= 1 << (twin % 8);
+        }
+        (fx.into_bytes(), survivor, new, lone, twin)
     }
 
-    /// Contract: the clean side's per-uid AND covers an unscoped `fn` (one
-    /// a `mod` inside a body holds), as the index's `rust_body_local_rows`
-    /// does: with a module-level tombstoned twin the survivor is a module
-    /// item, with a body-local one it stays body-local. A method keeps
-    /// overloads, so it has no tombstoned twin and stays body-local. The
-    /// answer is memoized per node: a twin-less `lone` asked in between keeps
-    /// its own answer. Before the fix every callable inside a body was
-    /// body-local.
+    /// Stands for: the clean side's per-uid AND covers the raws Pass 1
+    /// merged, as the index's `rust_body_local_rows` does. A merged
+    /// constant's tombstone stores `tombstone(overload(base, n))`; with it
+    /// at module level the first is a module item, with it in the body the
+    /// first stays body-local. The answer is memoized per node: a twin-less
+    /// `lone` asked in between keeps its own answer. A method has no merged
+    /// twin and stays body-local. Red before the fix: the scan looked for
+    /// `tombstone(base)`, which no node stores since every merged repeat
+    /// takes its ordinal's uid, so the first read body-local on both lines.
     #[test]
-    fn test_is_body_local_unscoped_fn_twin_decides_survivor_method_stays_body_local() {
+    fn test_is_body_local_merged_const_twin_decides_first_method_stays_body_local() {
         let removed = FxHashSet::default();
         for (twin_line, want) in [(6, false), (2, true)] {
-            let (bytes, survivor, new, lone) = inner_helper_twins(twin_line);
+            let (bytes, survivor, new, lone, _) = inner_twins(NodeKind::Const, "LIMIT", twin_line);
             let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
             let modules = RustModules::new(graph, &[], &removed, Default::default());
             assert_eq!(
@@ -6166,13 +6288,31 @@ mod tests {
                 want,
                 "twin on line {twin_line}"
             );
-            assert!(modules.is_body_local(lone), "a twin-less fn in the body");
+            assert!(modules.is_body_local(lone), "a twin-less const in the body");
             assert_eq!(
                 modules.is_body_local(survivor),
                 want,
                 "the memoized answer, twin on line {twin_line}"
             );
             assert!(modules.is_body_local(new), "a method inside the body");
+        }
+    }
+
+    /// Stands for: an unscoped `fn` repeat is a later node of its own, not
+    /// a raw Pass 1 merged into the first, so a module-level repeat leaves
+    /// the first in the body body-local. The repeat's own answer comes
+    /// from its own span.
+    #[test]
+    fn test_is_body_local_later_fn_twin_first_stays_body_local() {
+        let removed = FxHashSet::default();
+        for twin_line in [6, 2] {
+            let (bytes, survivor, _, _, twin) =
+                inner_twins(NodeKind::Function, "helper", twin_line);
+            let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+            assert!(graph.is_later_overload(twin), "the fixture's twin");
+            let modules = RustModules::new(graph, &[], &removed, Default::default());
+            assert!(modules.is_body_local(survivor), "twin on line {twin_line}");
+            assert_eq!(modules.is_body_local(twin), twin_line == 2);
         }
     }
 }

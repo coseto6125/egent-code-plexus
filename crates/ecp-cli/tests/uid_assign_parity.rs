@@ -11,7 +11,13 @@
 //!
 //! The 13 method fixtures are the ones `ecp-analyzer/tests/overload_members.rs`
 //! pins: each parser emits two `save` members of type `K`. C has no methods,
-//! so its fixture holds an `#ifdef` redefinition, which the index tombstones.
+//! so its fixture holds an `#ifdef` redefinition, a node of its own.
+
+#[path = "common/baseline.rs"]
+mod baseline;
+mod common;
+#[path = "common/strict_parity.rs"]
+mod strict_parity;
 
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_analyzer::{
@@ -28,6 +34,7 @@ use ecp_cli::session::overlay_reader::{accepted_fragments, decode_view_inputs};
 use ecp_cli::session::overlay_writer::write_dirty_fragments_from_graphs;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::LocalGraph;
+use ecp_core::contracts::identity::{LaterReason, UidSlot};
 use ecp_core::contracts::routing::SizeCap;
 use ecp_core::graph::{ArchivedZeroCopyGraph, NodeKind, ZeroCopyGraph};
 use ecp_core::session::view::{OverlayFileInput, OverlayView};
@@ -157,8 +164,12 @@ fn reader_inputs(local: &LocalGraph, source: &str) -> Vec<OverlayFileInput> {
 }
 
 /// One language's fixture: `overload_sets` sets of same-name members that
-/// keep overloads, and `redefinitions` later same-uid declarations of a kind
-/// that keeps none (`None`: not counted, the parser decides).
+/// keep overloads, and `redefinitions` later declarations that repeat an
+/// earlier one's identity fields and arity path (`LaterReason::Repeat`), of
+/// a kind that neither keeps overloads nor merges repeats (`None`: not
+/// counted, the parser decides). A C# arity sibling (`Conv<T>` beside
+/// `Conv`) repeats the identity fields but not the arity path: it is no
+/// redefinition.
 struct Case {
     provider: Box<dyn LanguageProvider>,
     path: &'static str,
@@ -220,11 +231,54 @@ fn assert_four_paths_equal(case: Case) {
     }
 
     if let Some(expected) = case.redefinitions {
-        // The index's tombstone: the bit-inverse of an earlier survivor's uid.
-        let tombstones = (0..full.len())
-            .filter(|&j| full[..j].contains(&!full[j]))
-            .count();
-        assert_eq!(tombstones, expected, "{path}: tombstoned redefinitions");
+        // Stands for: a redefinition is a node of its own (design uid §2.3),
+        // the n-th one under `overload(first, n)`, never a tombstone. An
+        // arity sibling takes the same uid form, so only the slot reason
+        // tells the two apart.
+        let identities = ecp_core::analyzer::lexical::file_identities(
+            path,
+            &dirty.nodes,
+            ecp_core::analyzer::lexical::raw_decl,
+        );
+        let mut firsts: FxHashMap<(u8, Option<&str>, &str), (u64, u32)> = FxHashMap::default();
+        let mut later = 0;
+        for ((raw, &uid), identity) in dirty.nodes.iter().zip(&full).zip(&identities) {
+            if ecp_core::uid::keeps_overloads(raw.kind) || ecp_core::uid::merges_repeats(raw.kind) {
+                continue;
+            }
+            let key = (
+                raw.kind as u8,
+                raw.owner_class.as_deref(),
+                raw.name.as_str(),
+            );
+            match firsts.get_mut(&key) {
+                Some((first, n)) => {
+                    *n += 1;
+                    if matches!(
+                        identity.slot,
+                        UidSlot::Later {
+                            reason: LaterReason::Repeat,
+                            ..
+                        }
+                    ) {
+                        later += 1;
+                    }
+                    assert_eq!(
+                        uid,
+                        ecp_core::uid::overload(*first, *n),
+                        "{path}: redefinition {n} of `{}`",
+                        raw.name
+                    );
+                }
+                None => {
+                    firsts.insert(key, (uid, 0));
+                }
+            }
+        }
+        assert_eq!(
+            later, expected,
+            "{path}: redefinitions with uids of their own"
+        );
     }
 }
 
@@ -378,15 +432,16 @@ fn test_uid_assign_csharp_types_of_two_arities_four_paths_equal_uids() {
     }
 }
 
-/// A Unix file named `.\K.java` is stored `./K.java`, and one named
-/// `.\.\K.java` is stored `././K.java`: the builder only turns `\` into
-/// `/`. Every path hashes that stored name, and none panics on the doubled
-/// prefix.
+/// A walked `.\K.java` is stored `./K.java` on Windows, where `\` is a
+/// separator, and as it is on Unix, where it is a file-name character
+/// (`os_path_to_slash`); `.\.\K.java` likewise. Every path hashes that
+/// stored name, and none panics on the doubled prefix.
 #[test]
 fn test_uid_assign_dot_backslash_file_name_hashes_stored_path() {
     let java = JavaProvider::new().unwrap();
     let source = "class K {\n void save(int id) {}\n void save(String name) {}\n}\n";
-    for (walked, stored) in [(".\\K.java", "./K.java"), (".\\.\\K.java", "././K.java")] {
+    for walked in [".\\K.java", ".\\.\\K.java"] {
+        let stored = ecp_core::registry::os_path_to_slash(walked);
         let dirty = parse(&java, walked, source);
         let full_bytes = archive(&full_build(parse(&java, walked, source)));
         let full_graph = access(&full_bytes);
@@ -394,7 +449,8 @@ fn test_uid_assign_dot_backslash_file_name_hashes_stored_path() {
         let saves = named(&dirty, "save");
         assert_eq!(saves.len(), 2, "{walked}: the fixture's two overloads");
         let first = &dirty.nodes[saves[0]];
-        let base = ecp_core::uid::compute(first.kind, stored, first.owner_class.as_deref(), "save");
+        let base =
+            ecp_core::uid::compute(first.kind, &stored, first.owner_class.as_deref(), "save");
         assert_eq!(
             [full[saves[0]], full[saves[1]]],
             [base, ecp_core::uid::overload(base, 1)],
@@ -524,11 +580,17 @@ fn test_overlay_view_java_two_save_overloads_pair_nothing() {
     }
 }
 
-/// Two `namespace Acme` blocks in one dirty C# file: the view keeps the
-/// first and tombstones the second exactly as a full build of the file does
+/// Two `namespace Acme` blocks in one dirty C# file: the view numbers the
+/// second exactly as a full build of the file does
 /// (`tests/baselines/strict_parity/dirty_csharp.txt` held the difference).
+///
+/// Stands for: a repeated namespace is a later node of its own (design uid
+/// §2.3), `overload(first, 1)` with its name, outside the name tables; only
+/// a property, variable or constant merges into a tombstone. The two
+/// blocks share an anchor, so neither pairs the base's one block, which the
+/// view hides with a caveat.
 #[test]
-fn test_overlay_view_csharp_two_namespace_blocks_tombstones_second() {
+fn test_overlay_view_csharp_two_namespace_blocks_second_is_later_node() {
     let cs = CSharpProvider::new().unwrap();
     let path = "src/Lib.cs";
     let one = "namespace Acme\n{\n    public static class Lib\n    {\n        public static int Helper()\n        {\n            return 1;\n        }\n    }\n}\n";
@@ -540,11 +602,13 @@ fn test_overlay_view_csharp_two_namespace_blocks_tombstones_second() {
     let full = access(&full_bytes);
     let view = OverlayView::build(base, &[OverlayFileInput::from(parse(&cs, path, &two))]).unwrap();
 
-    let full_namespaces: Vec<(u64, &str, u32)> = full
-        .nodes
+    let full_idx: Vec<u32> = (0..full.nodes.len() as u32)
+        .filter(|&i| NodeKind::from(&full.nodes[i as usize].kind) == NodeKind::Namespace)
+        .collect();
+    let full_namespaces: Vec<(u64, &str, u32)> = full_idx
         .iter()
-        .filter(|n| NodeKind::from(&n.kind) == NodeKind::Namespace)
-        .map(|n| {
+        .map(|&i| {
+            let n = &full.nodes[i as usize];
             (
                 n.uid.to_native(),
                 n.name.resolve(&full.string_pool),
@@ -554,14 +618,11 @@ fn test_overlay_view_csharp_two_namespace_blocks_tombstones_second() {
         .collect();
     assert_eq!(full_namespaces.len(), 2, "the full build holds both blocks");
     assert_eq!(
-        (
-            full_namespaces[1].0,
-            full_namespaces[1].1,
-            full_namespaces[1].2
-        ),
-        (!full_namespaces[0].0, "", 12),
-        "the full build tombstones the second block"
+        full_namespaces[1],
+        (ecp_core::uid::overload(full_namespaces[0].0, 1), "Acme", 12),
+        "the full build keeps the second block as a later node"
     );
+    assert!(!full.is_later_overload(full_idx[0]) && full.is_later_overload(full_idx[1]));
 
     let virtual_namespaces: Vec<_> = view
         .virtual_nodes()
@@ -576,13 +637,21 @@ fn test_overlay_view_csharp_two_namespace_blocks_tombstones_second() {
         full_namespaces,
         "the view's namespaces equal the full build's"
     );
-    let tombstone = virtual_namespaces[1];
-    assert_eq!(tombstone.owner_class, None, "a tombstone has no owner");
     assert_eq!(
-        tombstone.replaced_base, None,
-        "the base holds one block, so the tombstone replaces nothing"
+        virtual_namespaces
+            .iter()
+            .map(|n| (n.later_overload, n.replaced_base))
+            .collect::<Vec<_>>(),
+        [(false, None), (true, None)],
+        "the second block is later; a shared anchor pairs no base block"
     );
-    assert!(!tombstone.later_overload, "a namespace is not an overload");
+    assert!(
+        view.hidden_declarations()
+            .iter()
+            .any(|h| h.kind == NodeKind::Namespace && h.name == "Acme"),
+        "the unpaired base block is named in the caveat: {:?}",
+        view.hidden_declarations()
+    );
 }
 
 /// One node of a view or a graph: `(merged idx, kind, name, owner, start
@@ -828,10 +897,15 @@ overload_pairing_cases! {
         (DartProvider::new().unwrap(), "k.dart", DART_K);
 }
 
-/// Two `impl T for A<..>` blocks both write self type `A` and owner `T`, so
-/// the base tombstones the second block and clears its owner. A member of
-/// that block must take no trait on either side, or a comment-only edit
-/// unpairs it: its clean callers vanish and no caveat names it.
+/// Two `impl T for A<..>` blocks both write self type `A` and owner `T`.
+/// A member of the second block must number alike on both sides, or a
+/// comment-only edit unpairs it: its clean callers vanish and no caveat
+/// names it.
+///
+/// Stands for: the second block is a later node of its own (design uid
+/// §2.3); two `Impl` rows that share an anchor pair in source order when
+/// the base and the dirty file hold the same count, so a comment edit
+/// hides nothing and puts no caveat on the query.
 #[test]
 fn test_overlay_repeated_impl_block_member_pairs_after_comment_edit() {
     let provider = RustProvider::new().unwrap();
@@ -854,10 +928,10 @@ fn test_overlay_repeated_impl_block_member_pairs_after_comment_edit() {
         view.redirect(base_b).is_some(),
         "`b` keeps its base edges through the edit"
     );
+    let hidden = view.hidden_declarations();
     assert!(
-        view.hidden_declarations().is_empty(),
-        "nothing is ambiguous: {:?}",
-        view.hidden_declarations()
+        hidden.is_empty(),
+        "the two impl blocks pair in order: {hidden:?}"
     );
 }
 
@@ -925,4 +999,391 @@ fn test_uid_assign_csharp_delegates_and_member_twins_four_paths_equal_uids() {
         let (uids, base) = twin_uids(CSHARP_NESTED, kind, name);
         assert_eq!(uids, [base, ecp_core::uid::overload(base, 1)], "{name}");
     }
+}
+
+// ── design uid §2.3: redefinitions, overloads and merged repeats (1b) ──
+
+/// `def f` twice in one Python file: a redefinition.
+const PY_REDEFINED: &str =
+    "def g():\n    pass\n\ndef h():\n    pass\n\ndef f():\n    g()\n\ndef f():\n    h()\n";
+/// `var x` twice in one JavaScript file: V, a merged repeat.
+const JS_MERGED: &str = "function a() {}\nfunction b() {}\nvar x = a();\nvar x = b();\n";
+
+four_path_cases! {
+    test_uid_assign_python_redefined_function_four_paths_equal_uids => Case {
+        provider: Box::new(PythonProvider::new().unwrap()),
+        path: "app.py",
+        source: PY_REDEFINED,
+        overload_sets: 0,
+        redefinitions: Some(1),
+    };
+    test_uid_assign_javascript_merged_var_four_paths_equal_uids => Case {
+        provider: Box::new(JavaScriptProvider::new().unwrap()),
+        path: "app.js",
+        source: JS_MERGED,
+        overload_sets: 0,
+        redefinitions: Some(0),
+    };
+}
+
+/// The overlay of `after` over a base commit holding `before` at `path`,
+/// against a fresh full index of `after`: no difference in the node, edge
+/// and parent multisets. Returns the full index's snapshot.
+fn strict_parity_of(name: &str, path: &str, before: &str, after: &str) -> strict_parity::Snapshot {
+    let observed = strict_parity::run(&strict_parity::Scenario {
+        name,
+        owner: "uid 1b (design uid §2.3)",
+        files: &[(path, before)],
+        edits: &[strict_parity::Edit::Write(path, after)],
+    });
+    let lines = observed.lines();
+    assert!(
+        lines.is_empty(),
+        "{name}: overlay vs full build: {lines:#?}"
+    );
+    observed.snapshots().0
+}
+
+/// The edge lines of `snap` of relation `rel` whose `side` (`source` or
+/// `target`) is the node `kind path:line name`.
+fn edge_lines<'a>(
+    snap: &'a strict_parity::Snapshot,
+    rel: &str,
+    side: &str,
+    node: &str,
+) -> Vec<&'a str> {
+    snap.edge
+        .iter()
+        .map(String::as_str)
+        .filter(|line| {
+            let Some(rest) = line.strip_prefix(rel).and_then(|r| r.strip_prefix(' ')) else {
+                return false;
+            };
+            let Some((source, target)) = rest.split_once(" -> ") else {
+                return false;
+            };
+            let end = if side == "source" { source } else { target };
+            end.starts_with(&format!("{node} #"))
+        })
+        .collect()
+}
+
+/// Stands for: R, a redefinition. Each `def f` is a node of its own on
+/// every path (design uid §2.3), with exactly one `Defines` each, and the
+/// second body's `Calls` start at the second node. Red before 1b: the
+/// second `f` was a tombstone and its `Calls h` started at the first.
+#[test]
+fn test_strict_parity_python_redefined_function_own_defines_and_calls() {
+    let before = "def g():\n    pass\n\ndef h():\n    pass\n\ndef f():\n    g()\n";
+    let full = strict_parity_of("uid_1b_r", "app.py", before, PY_REDEFINED);
+    for line in [7, 10] {
+        let node = format!("Function app.py:{line} f");
+        assert_eq!(
+            edge_lines(&full, "Defines", "target", &node).len(),
+            1,
+            "{node}"
+        );
+    }
+    let second = edge_lines(&full, "Calls", "source", "Function app.py:10 f");
+    assert_eq!(second.len(), 1, "{second:?}");
+    assert!(second[0].contains("-> Function app.py:4 h #"), "{second:?}");
+    assert!(
+        edge_lines(&full, "Calls", "source", "Function app.py:7 f")[0]
+            .contains("-> Function app.py:1 g #")
+    );
+}
+
+/// Stands for: FO, a method overload. Each `save` keeps its own node on
+/// every path, and the second body's `Calls` start at the second `save`.
+#[test]
+fn test_strict_parity_java_method_overloads_second_body_calls_from_second() {
+    let before = "class K {\n void a() {}\n void b() {}\n}\n";
+    let after = "class K {\n void a() {}\n void b() {}\n void save(int x) { a(); }\n void save(String s) { b(); }\n}\n";
+    let full = strict_parity_of("uid_1b_fo", "K.java", before, after);
+    let first = edge_lines(&full, "Calls", "source", "Method K.java:4 save");
+    let second = edge_lines(&full, "Calls", "source", "Method K.java:5 save");
+    assert_eq!((first.len(), second.len()), (1, 1), "{first:?} {second:?}");
+    assert!(first[0].contains("-> Method K.java:2 a #"), "{first:?}");
+    assert!(second[0].contains("-> Method K.java:3 b #"), "{second:?}");
+}
+
+/// Stands for: V, a merged repeat. `var x` twice is one entity: one named
+/// node with exactly one `Defines`, no `Defines` into the tombstone, and the
+/// overlay and the full build agree on every node and edge
+/// (`strict_parity_of`).
+#[test]
+fn test_strict_parity_javascript_merged_var_one_node_one_defines() {
+    let before = "function a() {}\nfunction b() {}\nvar x = a();\n";
+    let full = strict_parity_of("uid_1b_m", "app.js", before, JS_MERGED);
+    assert_eq!(
+        edge_lines(&full, "Defines", "target", "Variable app.js:3 x").len(),
+        1
+    );
+    assert!(edge_lines(&full, "Defines", "target", "Variable app.js:4 ").is_empty());
+}
+
+/// `before` holds the first `f` declaration alone, `after` both; `rows` pairs
+/// each declaration (`kind path:line name`) with the callee its own body calls.
+/// The overlay of `after` over `before` equals the full index of `after`, and
+/// each declaration has exactly one `Calls`, to its own callee.
+fn assert_redefinitions_own_calls(
+    name: &str,
+    path: &str,
+    before: &str,
+    after: &str,
+    rows: &[(&str, &str)],
+) {
+    let full = strict_parity_of(name, path, before, after);
+    for (caller, callee) in rows {
+        let calls = edge_lines(&full, "Calls", "source", caller);
+        assert_eq!(calls.len(), 1, "{caller}: {calls:?}");
+        assert!(
+            calls[0].contains(&format!("-> {callee} #")),
+            "{caller} must call {callee}: {calls:?}"
+        );
+    }
+}
+
+macro_rules! redefinition_parity_cases {
+    ($($test:ident => $path:literal, $before:expr, $after:expr, [$($caller:literal => $callee:literal),+];)+) => {$(
+        #[test]
+        fn $test() {
+            assert_redefinitions_own_calls(
+                stringify!($test),
+                $path,
+                $before,
+                $after,
+                &[$(($caller, $callee)),+],
+            );
+        }
+    )+};
+}
+
+// R in 11 of the other 13 mainstream languages (Python's is above). Java and Dart
+// cannot write it: a second method of one signature is a compile error there,
+// and the free-function overload shape is covered by
+// `test_strict_parity_java_method_overloads_second_body_calls_from_second`.
+redefinition_parity_cases! {
+    test_strict_parity_typescript_function_twice_own_calls => "app.ts",
+        "function g() {}\nfunction h() {}\nfunction f() { g(); }\n",
+        "function g() {}\nfunction h() {}\nfunction f() { g(); }\nfunction f() { h(); }\n",
+        ["Function app.ts:3 f" => "Function app.ts:1 g", "Function app.ts:4 f" => "Function app.ts:2 h"];
+    test_strict_parity_javascript_function_twice_own_calls => "app.js",
+        "function g() {}\nfunction h() {}\nfunction f() { g(); }\n",
+        "function g() {}\nfunction h() {}\nfunction f() { g(); }\nfunction f() { h(); }\n",
+        ["Function app.js:3 f" => "Function app.js:1 g", "Function app.js:4 f" => "Function app.js:2 h"];
+    test_strict_parity_kotlin_fun_overloads_own_calls => "app.kt",
+        "fun g() {}\nfun h() {}\nfun f(x: Int) { g() }\n",
+        "fun g() {}\nfun h() {}\nfun f(x: Int) { g() }\nfun f(s: String) { h() }\n",
+        ["Function app.kt:3 f" => "Function app.kt:1 g", "Function app.kt:4 f" => "Function app.kt:2 h"];
+    test_strict_parity_csharp_if_else_method_twins_own_calls => "App.cs",
+        "class K {\n    void g() {}\n    void h() {}\n#if A\n    void f() { g(); }\n#endif\n}\n",
+        "class K {\n    void g() {}\n    void h() {}\n#if A\n    void f() { g(); }\n#else\n    void f() { h(); }\n#endif\n}\n",
+        ["Method App.cs:5 f" => "Method App.cs:2 g", "Method App.cs:7 f" => "Method App.cs:3 h"];
+    test_strict_parity_go_init_twice_own_calls => "app.go",
+        "package main\n\nfunc g() {}\nfunc h() {}\nfunc init() { g() }\n",
+        "package main\n\nfunc g() {}\nfunc h() {}\nfunc init() { g() }\nfunc init() { h() }\n",
+        ["Function app.go:5 init" => "Function app.go:3 g", "Function app.go:6 init" => "Function app.go:4 h"];
+    test_strict_parity_rust_cfg_fn_twins_own_calls => "app.rs",
+        "fn g() {}\nfn h() {}\n#[cfg(unix)]\nfn f() { g(); }\n",
+        "fn g() {}\nfn h() {}\n#[cfg(unix)]\nfn f() { g(); }\n#[cfg(not(unix))]\nfn f() { h(); }\n",
+        ["Function app.rs:4 f" => "Function app.rs:1 g", "Function app.rs:6 f" => "Function app.rs:2 h"];
+    test_strict_parity_php_conditional_function_twins_own_calls => "app.php",
+        "<?php\nfunction g() {}\nfunction h() {}\nif (true) {\n    function f() { g(); }\n}\n",
+        "<?php\nfunction g() {}\nfunction h() {}\nif (true) {\n    function f() { g(); }\n} else {\n    function f() { h(); }\n}\n",
+        ["Function app.php:5 f" => "Function app.php:2 g", "Function app.php:7 f" => "Function app.php:3 h"];
+    test_strict_parity_ruby_def_twice_own_calls => "app.rb",
+        "def g\nend\n\ndef h\nend\n\ndef f\n  g()\nend\n",
+        "def g\nend\n\ndef h\nend\n\ndef f\n  g()\nend\n\ndef f\n  h()\nend\n",
+        ["Method app.rb:7 f" => "Method app.rb:1 g", "Method app.rb:11 f" => "Method app.rb:4 h"];
+    test_strict_parity_swift_func_overloads_own_calls => "app.swift",
+        "func g() {}\nfunc h() {}\nfunc f(_ x: Int) { g() }\n",
+        "func g() {}\nfunc h() {}\nfunc f(_ x: Int) { g() }\nfunc f(_ s: String) { h() }\n",
+        ["Function app.swift:3 f" => "Function app.swift:1 g", "Function app.swift:4 f" => "Function app.swift:2 h"];
+    test_strict_parity_c_ifdef_fn_twins_own_calls => "app.c",
+        "void g(void) {}\nvoid h(void) {}\n#ifdef A\nvoid f(void) { g(); }\n#endif\n",
+        "void g(void) {}\nvoid h(void) {}\n#ifdef A\nvoid f(void) { g(); }\n#else\nvoid f(void) { h(); }\n#endif\n",
+        ["Function app.c:4 f" => "Function app.c:1 g", "Function app.c:6 f" => "Function app.c:2 h"];
+    test_strict_parity_cpp_function_overloads_own_calls => "app.cpp",
+        "void g() {}\nvoid h() {}\nvoid f(int x) { g(); }\n",
+        "void g() {}\nvoid h() {}\nvoid f(int x) { g(); }\nvoid f(double x) { h(); }\n",
+        ["Function app.cpp:3 f" => "Function app.cpp:1 g", "Function app.cpp:4 f" => "Function app.cpp:2 h"];
+}
+
+/// Stands for: R in Rust, two inherent `impl V {}` blocks in one dirty file
+/// with an equal count on both sides. The overlay pairs the blocks in order,
+/// so it agrees with the full build on every node and edge, hides no `Impl`
+/// and so gives no "results may be incomplete" caveat.
+#[test]
+fn test_strict_parity_rust_two_inherent_impls_pair_in_order_no_caveat() {
+    let before = "struct V;\nimpl V {\n    fn a(&self) {}\n}\nimpl V {\n    fn b(&self) {}\n}\n";
+    let after =
+        "struct V;\nimpl V {\n    fn a(&self) {}\n}\nimpl V {\n    fn b(&self) { self.a(); }\n}\n";
+    let observed = strict_parity::run(&strict_parity::Scenario {
+        name: "uid_1b_rust_two_impls",
+        owner: "uid 1b (design uid §2.3)",
+        files: &[("app.rs", before)],
+        edits: &[strict_parity::Edit::Write("app.rs", after)],
+    });
+    let lines = observed.lines();
+    assert!(lines.is_empty(), "overlay vs full build: {lines:#?}");
+    let view = observed.view().expect("the dirty file builds a view");
+    assert!(
+        view.hidden_declarations().is_empty(),
+        "no Impl is hidden: {:?}",
+        view.hidden_declarations()
+    );
+}
+
+/// Stands for: the inputs of one path number as one file
+/// (`path_identities`) on every path. Input 1 holds `f`, `f`; input 2
+/// holds `f`. The full build's Pass 1, the overlay of both inputs, and a
+/// re-derivation from the stored base nodes give the same three distinct
+/// uids. Red before 1b: the overlay numbered each input alone, so input
+/// 2's `f` took the base uid of input 1's first `f`.
+#[test]
+fn test_uid_assign_two_inputs_one_path_index_and_overlay_equal_uids() {
+    let py = PythonProvider::new().unwrap();
+    let path = "a.py";
+    let one = parse(&py, path, "def f():\n    pass\n\ndef f():\n    pass\n");
+    let two = parse(&py, path, "def f():\n    pass\n");
+    let mut builder = GraphBuilder::new();
+    builder.add_graph(one.clone());
+    builder.add_graph(two.clone());
+    let full_bytes = archive(&builder.build());
+    let full = access(&full_bytes);
+    let stored: Vec<u64> = (0..full.nodes.len())
+        .filter(|&i| NodeKind::from(&full.nodes[i].kind) == NodeKind::Function)
+        .map(|i| full.nodes[i].uid.to_native())
+        .collect();
+    let distinct: FxHashSet<u64> = stored.iter().copied().collect();
+    assert_eq!((stored.len(), distinct.len()), (3, 3), "{stored:?}");
+
+    let view = OverlayView::build(
+        full,
+        &[OverlayFileInput::from(one), OverlayFileInput::from(two)],
+    )
+    .unwrap();
+    assert_eq!(view_uids(&view), stored, "overlay vs Pass 1");
+
+    let pool = &full.string_pool;
+    let base: Vec<u32> = (0..full.nodes.len() as u32)
+        .filter(|&i| NodeKind::from(&full.nodes[i as usize].kind) == NodeKind::Function)
+        .collect();
+    let inputs: Vec<&[u32]> = base
+        .chunk_by(|&a, &b| full.nodes[a as usize].file_idx == full.nodes[b as usize].file_idx)
+        .collect();
+    assert_eq!(inputs.len(), 2, "two `graph.files` entries hold the path");
+    let derived: Vec<u64> = ecp_core::analyzer::lexical::path_identities(path, &inputs, |&i| {
+        let node = &full.nodes[i as usize];
+        (
+            NodeKind::from(&node.kind),
+            Some(node.owner_class.resolve(pool)),
+            node.name.resolve(pool),
+            (
+                node.span.0.to_native(),
+                node.span.1.to_native(),
+                node.span.2.to_native(),
+                node.span.3.to_native(),
+            ),
+            0,
+        )
+    })
+    .into_iter()
+    .flatten()
+    .map(|id| ecp_core::analyzer::lexical::stored_uid(id.slot))
+    .collect();
+    assert_eq!(derived, stored, "base re-derivation vs Pass 1");
+}
+
+/// Stands for: the documented exception; flips when design_uid §7 Q1 lands.
+/// Two `partial class P` parts in one C# file are two nodes, the second a
+/// later node, and the full build links them with `PartOf`. In the overlay
+/// the two dirty parts share an anchor, pair no base part and get no
+/// `PartOf`; the Shared-anchor caveat names `P`, so a reader knows the
+/// overlay hides the base parts rather than drops them silently. The full
+/// build holds two `Class P` nodes, each with its own `HasMethod` row, and
+/// the `PartOf` runs from the second part to the representative, the first
+/// (rows are 1-based).
+#[test]
+fn test_overlay_view_csharp_same_file_partial_dirty_drops_part_of_with_caveat() {
+    use ecp_analyzer::c_sharp::partial::CsharpProjects;
+    use ecp_core::graph::RelType;
+    use ecp_core::session::MergedGraph;
+
+    let cs = CSharpProvider::new().unwrap();
+    let path = "Lib/P.cs";
+    let source = "namespace Lib\n{\n    public partial class P\n    {\n        public void A() {}\n    }\n    public partial class P\n    {\n        public void B() {}\n    }\n}\n";
+    let mut projects = CsharpProjects::new(usize::MAX);
+    projects.add("Lib", true);
+    let mut builder = GraphBuilder::new().with_csharp_projects(projects);
+    builder.add_graph(parse(&cs, path, source));
+    let full_bytes = archive(&builder.build());
+    let full = access(&full_bytes);
+    let part_of = |merged: &MergedGraph<'_>| {
+        merged
+            .all_edges()
+            .filter(|e| e.rel_type() == RelType::PartOf)
+            .count()
+    };
+    assert_eq!(
+        part_of(&MergedGraph::new(full, None)),
+        1,
+        "the full build links the parts"
+    );
+    let merged_full = MergedGraph::new(full, None);
+    let part_rows: Vec<u32> = (0..merged_full.node_count())
+        .filter_map(|i| merged_full.node(i))
+        .filter(|n| n.kind() == NodeKind::Class && n.name(&merged_full) == "P")
+        .map(|n| n.start_line())
+        .collect();
+    assert_eq!(part_rows, [3, 7], "one Class P node per part");
+    let rows = |rel: RelType| -> Vec<(u32, String, u32, String)> {
+        let mut out: Vec<_> = merged_full
+            .all_edges()
+            .filter(|e| e.rel_type() == rel)
+            .map(|e| {
+                let (s, t) = (
+                    merged_full.node(e.source).unwrap(),
+                    merged_full.node(e.target).unwrap(),
+                );
+                (
+                    s.start_line(),
+                    s.name(&merged_full).to_string(),
+                    t.start_line(),
+                    t.name(&merged_full).to_string(),
+                )
+            })
+            .collect();
+        out.sort();
+        out
+    };
+    assert_eq!(
+        rows(RelType::HasMethod),
+        [
+            (3, "P".into(), 5, "A".into()),
+            (7, "P".into(), 9, "B".into())
+        ],
+        "each method hangs from its own part"
+    );
+    assert_eq!(
+        rows(RelType::PartOf),
+        [(7, "P".into(), 3, "P".into())],
+        "the second part points at the representative"
+    );
+
+    let view =
+        OverlayView::build(full, &[OverlayFileInput::from(parse(&cs, path, source))]).unwrap();
+    assert_eq!(
+        part_of(&MergedGraph::new(full, Some(&view))),
+        0,
+        "the overlay has no PartOf"
+    );
+    assert!(
+        view.hidden_declarations()
+            .iter()
+            .any(|h| h.kind == NodeKind::Class && h.name == "P" && h.count == 2),
+        "the caveat names P: {:?}",
+        view.hidden_declarations()
+    );
 }

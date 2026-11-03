@@ -15,24 +15,28 @@
 use crate::resolution::index::SymbolTable;
 use ecp_core::analyzer::containment::{self, Row, ENUM_VARIANT_DEFINES_REASON};
 use ecp_core::analyzer::types::LocalGraph;
+use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
 use ecp_core::graph::{Edge, RelType};
 use ecp_core::pool::StringPool;
+use ecp_core::registry::os_path_to_slash;
 use rayon::prelude::*;
-use std::borrow::Cow;
 
 /// Emit `(Enum)-[:Defines]->(EnumVariant)` edges for all files.
 ///
 /// `owner_class` on each `EnumVariant` was set either by the per-language
 /// parser (Rust explicit walk; Kotlin `enum_entry.name` capture) or by
 /// `stamp_owner_class_by_span` (TS / Java / C# / Swift / Dart / C++). Either
-/// way, `owner_class == Some(enum_name)` is the link — no additional span
-/// arithmetic needed here. The pairing is [`containment::enum_variant_defines`],
-/// which the overlay's per-file replay shares; this pass supplies the
-/// declarations through `SymbolTable::first_declaration`.
+/// way, `owner_class == Some(enum_name)` names the enum, and the span of
+/// the enum row of that name that contains the variant picks it. The pairing
+/// is [`containment::enum_variant_defines`], which the overlay's per-file
+/// replay shares; this pass supplies each row's node through `raw_map`, Pass
+/// 1's map over `local_graphs` in the same order, and the declarations of a
+/// variant no enum span contains through `SymbolTable::first_declaration`.
 ///
 /// Returns the total number of edges appended to `edges_out`.
 pub fn emit_edges(
     local_graphs: &[LocalGraph],
+    raw_map: &RawIndexMap,
     symbol_table: &SymbolTable,
     string_pool: &mut StringPool,
     edges_out: &mut Vec<Edge>,
@@ -41,19 +45,17 @@ pub fn emit_edges(
 
     let chunk_results: Vec<Vec<Edge>> = local_graphs
         .par_iter()
-        .map(|local_graph| {
-            let raw_path = local_graph.file_path.to_string_lossy();
-            let path_str_cow: Cow<'_, str> = if raw_path.contains('\\') {
-                Cow::Owned(raw_path.replace('\\', "/"))
-            } else {
-                raw_path
-            };
+        .enumerate()
+        .map(|(file_ord, local_graph)| {
+            let path_str_cow = os_path_to_slash(&local_graph.file_path);
             let path_str: &str = &path_str_cow;
 
+            let file = FileOrd(file_ord as u32);
             let mut local_edges: Vec<Edge> = Vec::new();
             containment::enum_variant_defines(
                 &local_graph.nodes,
                 Row::from,
+                |raw| raw_map.node(file, RawIdx(raw as u32)),
                 |name, kind, owner| symbol_table.first_declaration(path_str, name, kind, owner),
                 |source, target| {
                     local_edges.push(Edge {
@@ -144,7 +146,7 @@ mod tests {
         let mut symbol_table = SymbolTable::new();
         let mut current = 0u32;
         for lg in &local_graphs {
-            let path_str = lg.file_path.to_string_lossy().replace('\\', "/");
+            let path_str = os_path_to_slash(&lg.file_path);
             for rn in &lg.nodes {
                 match rn.owner_class.as_deref() {
                     Some(owner) => symbol_table
@@ -154,9 +156,16 @@ mod tests {
                 current += 1;
             }
         }
+        let raw_map = RawIndexMap::new(0, local_graphs.iter().map(|lg| lg.nodes.len())).unwrap();
         let mut string_pool = StringPool::new();
         let mut edges = Vec::new();
-        emit_edges(&local_graphs, &symbol_table, &mut string_pool, &mut edges);
+        emit_edges(
+            &local_graphs,
+            &raw_map,
+            &symbol_table,
+            &mut string_pool,
+            &mut edges,
+        );
         edges
     }
 
@@ -228,5 +237,40 @@ mod tests {
         let col_idx = 3u32; // Color
         assert!(edges.iter().filter(|e| e.source == dir_idx).count() == 2);
         assert!(edges.iter().filter(|e| e.source == col_idx).count() == 2);
+    }
+
+    /// Stands for: enum containment binds by span and row (design_uid §3
+    /// row 22). `#[cfg]` twins `enum E { X }` each define their own `X`;
+    /// the second enum's variant never hangs off the first enum.
+    #[test]
+    fn test_emit_edges_same_name_enums_each_define_own_variant() {
+        let nodes = vec![
+            raw("E", NodeKind::Enum, (1, 0, 3, 0)),
+            raw_variant("X", (2, 4, 2, 5), "E"),
+            raw("E", NodeKind::Enum, (5, 0, 7, 0)),
+            raw_variant("X", (6, 4, 6, 5), "E"),
+        ];
+        let edges = run(vec![lg("twins.rs", nodes)]);
+        let mut pairs: Vec<(u32, u32)> = edges.iter().map(|e| (e.source, e.target)).collect();
+        pairs.sort_unstable();
+        assert_eq!(pairs, vec![(0, 1), (2, 3)]);
+    }
+
+    /// Ends come from the raw map of the file's own input: the second file
+    /// binds its own slots.
+    #[test]
+    fn test_emit_edges_second_file_binds_its_own_slots() {
+        let edges = run(vec![
+            lg("a.rs", vec![raw("A", NodeKind::Enum, (1, 0, 1, 9))]),
+            lg(
+                "b.rs",
+                vec![
+                    raw("B", NodeKind::Enum, (1, 0, 3, 0)),
+                    raw_variant("V", (2, 4, 2, 5), "B"),
+                ],
+            ),
+        ]);
+        let pairs: Vec<(u32, u32)> = edges.iter().map(|e| (e.source, e.target)).collect();
+        assert_eq!(pairs, vec![(1, 2)]);
     }
 }

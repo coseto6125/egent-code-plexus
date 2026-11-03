@@ -407,10 +407,12 @@ fn impact_ambiguous_symbol_exits_nonzero() {
         !out.status.success(),
         "ambiguous symbol must exit non-zero so MCP marks isError=true"
     );
+    // Stands for: the hint names only flags that separate the candidates.
+    // Both are `Function`s in two files, so `--file` does and `--kind` cannot.
     assert!(
         stderr.contains("ambiguous")
             && stderr.contains("--file")
-            && stderr.contains("--kind")
+            && !stderr.contains("--kind")
             && stderr.contains("candidates"),
         "expected actionable ambiguous-symbol error:\n{stderr}"
     );

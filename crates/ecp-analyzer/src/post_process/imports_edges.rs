@@ -24,8 +24,8 @@ use ecp_core::analyzer::import_edges::{import_edges, GuessIndex, ImportEdgeFacts
 use ecp_core::analyzer::types::{LocalGraph, RawImport};
 use ecp_core::graph::{Edge, RelType};
 use ecp_core::pool::StringPool;
+use ecp_core::registry::os_path_to_slash;
 use rustc_hash::FxHashMap;
-use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -59,16 +59,7 @@ pub fn emit_edges(
         .par_iter()
         .map(|local_graph| {
             let mut local_edges: Vec<Edge> = Vec::new();
-            // Forward-slash normalize without allocating on Linux/macOS
-            // (raw path is already `/`-only there). file_node_idx.get() takes
-            // &str so Cow → &str → HashMap lookup is alloc-free for the
-            // common branch.
-            let raw_path = local_graph.file_path.to_string_lossy();
-            let path_str: Cow<'_, str> = if raw_path.contains('\\') {
-                Cow::Owned(raw_path.replace('\\', "/"))
-            } else {
-                raw_path
-            };
+            let path_str = os_path_to_slash(&local_graph.file_path);
             let Some(&source) = file_node_idx.get(path_str.as_ref()) else {
                 return local_edges;
             };

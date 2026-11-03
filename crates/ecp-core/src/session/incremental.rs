@@ -32,10 +32,12 @@
 //! `HasProperty` by kind: class membership replays `HasProperty` only when
 //! the records replay too, and keeps it as indexed otherwise.
 //!
-//! Class membership reads one path's name tables ([`PathDecls`]), the ones
-//! the index's `SymbolTable` holds for the path after Pass 1: a later
-//! overload, a C# arity twin and a tombstone are in none, and an overload or
-//! a twin binds its own slot.
+//! Class membership and enum containment bind each end to the node of its
+//! own row through the [`RawIndexMap`], a merged row to its survivor. Only
+//! the owner pass's type and a variant outside every enum span read one
+//! path's name tables ([`PathDecls`]), the ones the index's `SymbolTable`
+//! holds for the path after Pass 1: a later declaration and a tombstone are
+//! in none.
 //!
 //! An `Annotation` node the index makes for a decorator nothing declares
 //! has no owning file: one node per full name serves every file. A dirty
@@ -48,10 +50,11 @@
 //! calls [`replay`] once, after the virtual nodes and their tombstones are
 //! final. Cost: O(dirty symbols + dirty records + base record nodes of the
 //! dirty paths) hash operations, plus one O(symbols of the path) table for a
-//! path that declares a type or an enum variant (a C# path also renumbers
-//! its declarations once, O(symbols)), plus O(symbols x types of the file)
-//! span checks for class membership, plus one name-index probe (O(log N)
-//! and the namesakes) per distinct SQL table name, plus the out-edges of
+//! path that declares a type or an enum variant, plus O(files x log merged
+//! rows) to find a file with merged rows, plus O(symbols x types of
+//! the file) span checks for class membership and enum containment, plus
+//! one name-index probe (O(log N) and the namesakes) per distinct SQL table
+//! name, plus the out-edges of
 //! the dirty base nodes and, per base `Annotation` node they reach, its
 //! in-edges up to the first clean source. Nothing scans the base graph: the
 //! build's one node scan collects the base record nodes.
@@ -63,15 +66,12 @@ use crate::analyzer::containment::{
     self, Row, Scope, ENUM_VARIANT_DEFINES_REASON, SCOPE_DEFINES_REASON,
 };
 use crate::analyzer::heritage::HeritageNode;
-use crate::analyzer::lexical::{file_identities, later_is_arity_twin, splits_by_arity};
 use crate::analyzer::membership::{self, MemberLookup, MemberRow};
 use crate::analyzer::record_nodes::{
     self, RecordNode, PATH_LITERAL_SINK_REASONS, SCHEMA_FIELD_HAS_PROPERTY_REASON, TX_SCOPE_REASON,
 };
 use crate::analyzer::types::owner_key;
-use crate::contracts::identity::UidSlot;
 use crate::contracts::raw_records::{FileOrd, GlobalEndpoint, RawEndpoint, RawIdx, RawIndexMap};
-use crate::file_category::Language;
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::Path;
@@ -117,9 +117,6 @@ pub(super) struct ReplayInputs<'a> {
     pub dirty_base: &'a FxHashSet<u32>,
     /// Scoped virtual index → its lexical parent ([`super::view`]'s table).
     pub lexical_parents: &'a FxHashMap<u32, u32>,
-    /// First virtual index → its later overloads, in source order, as the
-    /// index's `SymbolTable::register_overload` numbers them.
-    pub later_overloads: &'a FxHashMap<u32, Vec<u32>>,
 }
 
 /// The replay's rows beside the nodes and edges it appends.
@@ -286,7 +283,6 @@ pub(super) fn replay(
         base_records,
         dirty_base,
         lexical_parents,
-        later_overloads,
     } = inputs;
     let mut replayed = Replayed {
         function_metas: function_metas(files, base_len),
@@ -364,10 +360,19 @@ pub(super) fn replay(
     // from the path's inputs, which are grouped once on the first such input.
     let mut declarations: FxHashMap<&str, PathDecls<'_>> = FxHashMap::default();
     let mut inputs_by_path: Option<FxHashMap<&str, Vec<FileOrd>>> = None;
+    // One scope `Defines` dedupe set per path with a tombstone: a merged
+    // row's survivor can be a row of another input of its path.
+    let mut defines_seen: FxHashMap<&str, FxHashSet<(u32, u32)>> = files
+        .iter()
+        .enumerate()
+        .filter(|&(ord, _)| raw_map.has_merged(FileOrd(ord as u32)))
+        .map(|(_, file)| (file.rel_path.as_str(), FxHashSet::default()))
+        .collect();
     for (ord, file) in files.iter().enumerate() {
         let path = file.rel_path.as_str();
         let ord = FileOrd(ord as u32);
         let node = |raw: usize| raw_map.node(ord, RawIdx(raw as u32));
+        let merged = raw_map.has_merged(ord);
 
         // A path with no `File` node (only a hand-made graph has one) gets
         // no scope `Defines`, as the index skips it.
@@ -377,6 +382,7 @@ pub(super) fn replay(
             .or_else(|| new_files.get(path))
             .copied();
         if let Some(file_idx) = defining_file {
+            let mut seen = defines_seen.get_mut(path);
             containment::scope_defines(&file.symbols, row, |scope, child| {
                 let Some(child) = node(child).filter(|id| !lexical_parents.contains_key(id)) else {
                     return;
@@ -385,7 +391,13 @@ pub(super) fn replay(
                     Scope::File => Some(file_idx),
                     Scope::Container(container) => node(container),
                 };
-                if let Some(source) = source {
+                let Some(source) = source else {
+                    return;
+                };
+                if seen
+                    .as_mut()
+                    .is_none_or(|seen| seen.insert((source, child)))
+                {
                     push(defines(source, child, SCOPE_DEFINES_REASON));
                 }
             });
@@ -411,14 +423,15 @@ pub(super) fn replay(
         containment::enum_variant_defines(
             &file.symbols,
             row,
+            node,
             |name, kind, owner| table.first(name, kind, owner),
             |source, target| push(defines(source, target, ENUM_VARIANT_DEFINES_REASON)),
         );
         let lookup = FileMembers {
             decls: table,
-            later_overloads,
             raw_map: &raw_map,
             ord,
+            merged,
             lexical_parents,
         };
         membership::class_membership(
@@ -806,7 +819,6 @@ fn member_row(symbol: &super::view::OverlaySymbol) -> MemberRow<'_> {
         owner: symbol.owner_class.as_deref(),
         name: &symbol.name,
         span: HeritageNode::span(symbol),
-        arity: symbol.generic_arity,
     }
 }
 
@@ -827,20 +839,14 @@ fn reads_declarations(kind: NodeKind) -> bool {
 
 /// One path's declarations as the index's `SymbolTable` holds them after
 /// Pass 1, over the path's inputs in input order. Only a registered
-/// declaration is in the name table: a tombstone, a later overload and a C#
-/// arity twin are in none, as the index registers none of them by name.
+/// declaration is in the name table: a tombstone and a later declaration (an
+/// overload, a redefinition, a C# arity twin) are in none, as the index
+/// registers none of them by name.
 struct PathDecls<'a> {
     /// Name → registered slots, in input order: the index's `file_scoped`.
     by_name: FxHashMap<&'a str, Vec<u32>>,
     /// Registered slot → (kind, owner key).
     decl: FxHashMap<u32, (NodeKind, Option<&'a str>)>,
-    /// First slot → its arity twins: `SymbolTable::register_arity_sibling`.
-    siblings: FxHashMap<u32, Vec<u32>>,
-    /// Every arity twin slot.
-    twins: FxHashSet<u32>,
-    /// The declared generic arity of a C# type and of each arity twin, when
-    /// not 0: `SymbolTable::note_type_arity`.
-    arities: FxHashMap<u32, u32>,
 }
 
 impl<'a> PathDecls<'a> {
@@ -854,13 +860,9 @@ impl<'a> PathDecls<'a> {
         let mut table = Self {
             by_name: FxHashMap::default(),
             decl: FxHashMap::default(),
-            siblings: FxHashMap::default(),
-            twins: FxHashSet::default(),
-            arities: FxHashMap::default(),
         };
         for &ord in ords {
             let file = &files[ord.0 as usize];
-            let language = file.file_meta().language;
             for (raw, symbol) in file.symbols.iter().enumerate() {
                 let raw = RawIdx(raw as u32);
                 let (Some(slot), Some(node)) = (raw_map.slot(ord, raw), raw_map.node(ord, raw))
@@ -877,56 +879,9 @@ impl<'a> PathDecls<'a> {
                     .push(slot);
                 let owner = symbol.owner_class.as_deref().and_then(owner_key);
                 table.decl.insert(slot, (symbol.kind, owner));
-                if splits_by_arity(language, symbol.kind) && symbol.generic_arity > 0 {
-                    table.arities.insert(slot, symbol.generic_arity);
-                }
-            }
-            if language == Language::CSharp {
-                table.note_twins(file, ord, language, raw_map);
             }
         }
         table
-    }
-
-    /// Note the arity twins of one C# input, numbered as the view numbers
-    /// them ([`file_identities`]): a `Later` slot that
-    /// [`later_is_arity_twin`] calls a twin, filed beside its first.
-    fn note_twins(
-        &mut self,
-        file: &OverlayFileInput,
-        ord: FileOrd,
-        language: Language,
-        raw_map: &RawIndexMap,
-    ) {
-        let identities = file_identities(&file.rel_path, &file.symbols, |sym| {
-            (
-                sym.kind,
-                sym.owner_class.as_deref(),
-                sym.name.as_str(),
-                HeritageNode::span(sym),
-                sym.generic_arity,
-            )
-        });
-        for (raw, identity) in identities.into_iter().enumerate() {
-            let UidSlot::Later { first, .. } = identity.slot else {
-                continue;
-            };
-            let symbol = &file.symbols[raw];
-            if !later_is_arity_twin(language, symbol.kind) {
-                continue;
-            }
-            let (Some(twin), Some(first)) = (
-                raw_map.node(ord, RawIdx(raw as u32)),
-                raw_map.node(ord, RawIdx(first)),
-            ) else {
-                continue;
-            };
-            self.siblings.entry(first).or_default().push(twin);
-            self.twins.insert(twin);
-            if symbol.generic_arity > 0 {
-                self.arities.insert(twin, symbol.generic_arity);
-            }
-        }
     }
 
     /// The first registered declaration of (name, kind, owner key): the
@@ -941,50 +896,32 @@ impl<'a> PathDecls<'a> {
     }
 }
 
-/// Class membership's lookups for one input: its path's [`PathDecls`], the
-/// view's overload sets, and the input's own slots.
+/// Class membership's lookups for one input: its own rows' nodes, and its
+/// path's [`PathDecls`] for the owner pass's type.
 struct FileMembers<'t, 'a> {
     decls: &'t PathDecls<'a>,
-    later_overloads: &'t FxHashMap<u32, Vec<u32>>,
     raw_map: &'t RawIndexMap,
     ord: FileOrd,
+    merged: bool,
     lexical_parents: &'t FxHashMap<u32, u32>,
 }
 
 impl MemberLookup for FileMembers<'_, '_> {
-    fn first_declaration(&self, name: &str, kind: NodeKind, owner: Option<&str>) -> Option<u32> {
-        self.decls.first(name, kind, owner)
-    }
-
     fn lookup_in_file(&self, name: &str) -> Option<u32> {
         self.decls.by_name.get(name)?.first().copied()
     }
 
-    fn later_overloads(&self, first: u32) -> &[u32] {
-        self.later_overloads.get(&first).map_or(&[], Vec::as_slice)
+    fn node(&self, raw: usize) -> Option<u32> {
+        self.raw_map.node(self.ord, RawIdx(raw as u32))
     }
 
-    /// `SymbolTable::with_arity` over the twins of `id`.
-    fn with_arity(&self, id: u32, arity: u32) -> Option<u32> {
-        let type_arity = |member: u32| self.decls.arities.get(&member).copied().unwrap_or(0);
-        match self.decls.siblings.get(&id) {
-            Some(twins) => std::iter::once(id)
-                .chain(twins.iter().copied())
-                .find(|&member| type_arity(member) == arity),
-            None => (arity == 0 || type_arity(id) == arity).then_some(id),
-        }
+    fn has_merged(&self) -> bool {
+        self.merged
     }
 
     fn is_scoped(&self, raw: usize) -> bool {
-        self.raw_map
-            .node(self.ord, RawIdx(raw as u32))
+        self.node(raw)
             .is_some_and(|id| self.lexical_parents.contains_key(&id))
-    }
-
-    fn twin(&self, raw: usize) -> Option<u32> {
-        self.raw_map
-            .node(self.ord, RawIdx(raw as u32))
-            .filter(|slot| self.decls.twins.contains(slot))
     }
 }
 
@@ -1608,11 +1545,12 @@ mod tests {
         );
     }
 
-    /// `namespace Acme` twice: the index tombstones the second block, so the
-    /// file defines the first one twice, and a member of the second block
-    /// hangs off the first.
+    /// Stands for: a repeated container keeps its own node (design_uid §2.3,
+    /// a `Namespace` repeat is `Later`), and scope `Defines` bind by row.
+    /// `namespace Acme` twice: the file defines each block once, and each
+    /// block defines the class of its own body.
     #[test]
-    fn test_replay_repeated_namespace_defines_survivor_twice_and_its_members() {
+    fn test_replay_repeated_namespace_defines_each_block_and_its_own_members() {
         let bytes = clean_base();
         let graph = access(&bytes);
         let files = [input(
@@ -1629,18 +1567,57 @@ mod tests {
         let file = base + 4;
         assert_eq!(
             view.node(base + 2).unwrap().name,
-            "",
-            "the second block is a tombstone"
+            "Acme",
+            "the second block keeps its name"
         );
         assert_eq!(
             defines(graph, &view),
             [
                 scope(base, base + 1),
-                scope(base, base + 3),
+                scope(base + 2, base + 3),
                 scope(file, base),
-                scope(file, base),
+                scope(file, base + 2),
             ]
         );
+    }
+
+    /// Stands for: a merged row maps to its survivor and is deduped, never
+    /// skipped (design_uid §3 row 4). Python `x = 1; x = 2` gives exactly one
+    /// `File -> x`.
+    #[test]
+    fn test_replay_python_variable_assigned_twice_defines_once() {
+        let bytes = clean_base();
+        let graph = access(&bytes);
+        let files = [input(
+            "src/m.py",
+            vec![
+                sym(NodeKind::Variable, None, "x", (1, 1)),
+                sym(NodeKind::Variable, None, "x", (2, 2)),
+            ],
+        )];
+        let view = OverlayView::build(graph, &files).unwrap();
+        let base = view.base_len();
+        assert_eq!(view.node(base + 1).unwrap().name, "", "merged into x@1");
+        assert_eq!(defines(graph, &view), [scope(base + 2, base)]);
+    }
+
+    /// Stands for: a merged row gives its survivor's `Defines` once, also
+    /// when the survivor is a row of an earlier input of its path. Two
+    /// inputs of `src/m.py`, each `x = …`: one `File -> x@1`, from the last
+    /// `File` node of the path.
+    #[test]
+    fn test_replay_two_inputs_one_path_merged_variable_defines_once() {
+        let bytes = clean_base();
+        let graph = access(&bytes);
+        let files = [
+            input("src/m.py", vec![sym(NodeKind::Variable, None, "x", (1, 1))]),
+            input("src/m.py", vec![sym(NodeKind::Variable, None, "x", (2, 2))]),
+        ];
+        let view = OverlayView::build(graph, &files).unwrap();
+        let base = view.base_len();
+        assert_eq!(view.node(base + 1).unwrap().name, "", "merged into x@1");
+        let last_file = file_nodes(&view)[1].0;
+        assert_eq!(defines(graph, &view), [scope(last_file, base)]);
     }
 
     /// A Rust nested `fn` is scoped under its callable: no `Defines`.
@@ -1723,10 +1700,11 @@ mod tests {
         assert_eq!(pairs, [(base, base + 1), (base + 2, base + 3)]);
     }
 
-    /// Two inputs of one path share its first declarations: the second
-    /// input repeats the enum, and its variant pairs with the first input's
-    /// enum, never with the same-name enum of another path. The inputs of
-    /// each path are grouped once, before the first variant.
+    /// Stands for: enum containment binds by span and row (design_uid §3
+    /// row 22). The second input of `src/a.rs` repeats the enum, which keeps
+    /// its own node, so its variant pairs with the enum whose span holds it,
+    /// never with the first input's or with the same-name enum of another
+    /// path.
     #[test]
     fn test_replay_two_inputs_of_one_path_variant_pairs_enum_of_same_path() {
         let bytes = clean_base();
@@ -1766,7 +1744,71 @@ mod tests {
         pairs.sort_unstable();
         assert_eq!(
             pairs,
-            [(base, base + 1), (base, base + 5), (base + 2, base + 3)]
+            [(base, base + 1), (base + 2, base + 3), (base + 4, base + 5)]
+        );
+    }
+
+    /// Stands for: enum containment binds by span and row (design_uid §3
+    /// row 22), on the overlay as on the full build. Rust `#[cfg]` twins of
+    /// `enum E { X }`, a Java `enum E { X }` nested in classes `A` and `B`,
+    /// and a C++ `enum E { X }` in namespaces `n` and `m`: each enum defines
+    /// the variant its own span holds.
+    #[test]
+    fn test_enum_variant_defines_two_mods_same_enum_binds_by_span() {
+        let bytes = clean_base();
+        let graph = access(&bytes);
+        let files = [
+            input(
+                "src/twins.rs",
+                vec![
+                    sym(NodeKind::Enum, None, "E", (2, 4)),
+                    sym(NodeKind::EnumVariant, Some("E"), "X", (3, 3)),
+                    sym(NodeKind::Enum, None, "E", (6, 8)),
+                    sym(NodeKind::EnumVariant, Some("E"), "X", (7, 7)),
+                ],
+            ),
+            input(
+                "src/Outer.java",
+                vec![
+                    sym(NodeKind::Class, None, "A", (1, 4)),
+                    sym(NodeKind::Enum, Some("A"), "E", (2, 3)),
+                    sym(NodeKind::EnumVariant, Some("E"), "X", (3, 3)),
+                    sym(NodeKind::Class, None, "B", (5, 8)),
+                    sym(NodeKind::Enum, Some("B"), "E", (6, 7)),
+                    sym(NodeKind::EnumVariant, Some("E"), "X", (7, 7)),
+                ],
+            ),
+            input(
+                "src/ns.cpp",
+                vec![
+                    sym(NodeKind::Namespace, None, "n", (1, 4)),
+                    sym(NodeKind::Enum, Some("n"), "E", (2, 3)),
+                    sym(NodeKind::EnumVariant, Some("E"), "X", (3, 3)),
+                    sym(NodeKind::Namespace, None, "m", (5, 8)),
+                    sym(NodeKind::Enum, Some("m"), "E", (6, 7)),
+                    sym(NodeKind::EnumVariant, Some("E"), "X", (7, 7)),
+                ],
+            ),
+        ];
+        let view = OverlayView::build(graph, &files).unwrap();
+        let base = view.base_len();
+        let mut pairs: Vec<(u32, u32)> = defines(graph, &view)
+            .into_iter()
+            .filter(|(_, _, reason)| reason == ENUM_VARIANT_DEFINES_REASON)
+            .map(|(s, t, _)| (s, t))
+            .collect();
+        pairs.sort_unstable();
+        let (rs, java, cpp) = (base, base + 4, base + 10);
+        assert_eq!(
+            pairs,
+            [
+                (rs, rs + 1),
+                (rs + 2, rs + 3),
+                (java + 1, java + 2),
+                (java + 4, java + 5),
+                (cpp + 1, cpp + 2),
+                (cpp + 4, cpp + 5),
+            ]
         );
     }
 
@@ -2446,11 +2488,11 @@ mod tests {
         );
     }
 
-    /// A class declared twice in one file: the second is a tombstone of
-    /// the first, which owns the members of both, as the index's name
-    /// lookup returns the first declaration.
+    /// Stands for: membership binds by row (design_uid §3 row 5). A class
+    /// declared twice in one file keeps two nodes, and each owns the members
+    /// of its own body: `HasMethod K@1 -> a`, `K@2 -> b`, nothing else.
     #[test]
-    fn test_replay_class_declared_twice_members_bind_first_declaration() {
+    fn test_replay_class_declared_twice_each_owns_its_own_body() {
         let bytes = clean_base();
         let graph = access(&bytes);
         let files = [input(
@@ -2466,7 +2508,29 @@ mod tests {
         let base = view.base_len();
         assert_eq!(
             rel_edges(graph, &view, RelType::HasMethod),
-            [member(base, base + 1), member(base, base + 3)]
+            [member(base, base + 1), member(base + 2, base + 3)]
+        );
+    }
+
+    /// Two merged rows of one property (a field assigned in two methods)
+    /// give one `HasProperty`, to the survivor.
+    #[test]
+    fn test_replay_merged_property_rows_give_one_has_property() {
+        let bytes = clean_base();
+        let graph = access(&bytes);
+        let files = [input(
+            "src/k.py",
+            vec![
+                sym(NodeKind::Class, None, "K", (1, 9)),
+                sym(NodeKind::Property, Some("K"), "x", (3, 3)),
+                sym(NodeKind::Property, Some("K"), "x", (6, 6)),
+            ],
+        )];
+        let view = with_records(graph, &files, &[OverlayFileRecords::default()]);
+        let base = view.base_len();
+        assert_eq!(
+            rel_edges(graph, &view, RelType::HasProperty),
+            [member(base, base + 1)]
         );
     }
 

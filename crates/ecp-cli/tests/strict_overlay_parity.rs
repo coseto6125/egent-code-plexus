@@ -1756,3 +1756,46 @@ fn test_check_closure_py_module_named_like_init_reexport_repointed_matches_basel
         )],
     });
 }
+
+/// Stands for: on Unix a file named `x\y.py` is a file apart from `x/y.py`:
+/// the overlay reads it back under its own name, and the strict-parity
+/// helper reports no input dropped.
+#[cfg(unix)]
+#[test]
+fn test_run_backslash_file_name_python_reads_back_its_own_name() {
+    let observed = strict_parity::run(&Scenario {
+        name: "backslash_path_python",
+        owner: LANE_F_INCREMENTAL,
+        files: &[("x\\y.py", "def f():\n    pass\n")],
+        edits: &[Edit::Write("x\\y.py", "def f():\n    return 1\n")],
+    });
+    let inputs: Vec<&str> = observed
+        .inputs
+        .iter()
+        .map(|i| i.rel_path.as_str())
+        .collect();
+    assert_eq!(inputs, ["x\\y.py"]);
+    assert!(observed.dropped.is_empty(), "{:?}", observed.dropped);
+}
+
+/// Stands for: `rust_sources` keys a Unix file `x\y.rs` by that name, not
+/// `x/y.rs`, which the view would read as another file.
+#[cfg(unix)]
+#[test]
+fn test_run_backslash_file_name_rust_source_keeps_its_own_key() {
+    let observed = strict_parity::run(&Scenario {
+        name: "backslash_path_rust",
+        owner: LANE_F_INCREMENTAL,
+        files: &[("x\\y.rs", "pub fn f() -> i32 {\n    1\n}\n")],
+        edits: &[Edit::Write("x\\y.rs", "pub fn f() -> i32 {\n    2\n}\n")],
+    });
+    let inputs: Vec<&str> = observed
+        .inputs
+        .iter()
+        .map(|i| i.rel_path.as_str())
+        .collect();
+    assert_eq!(inputs, ["x\\y.rs"]);
+    assert!(observed.sources.contains_key("x\\y.rs"));
+    assert!(!observed.sources.contains_key("x/y.rs"));
+    assert!(observed.dropped.is_empty(), "{:?}", observed.dropped);
+}

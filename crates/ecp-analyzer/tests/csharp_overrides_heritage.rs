@@ -280,20 +280,28 @@ fn test_overrides_csharp_nested_generic_beside_plain_binds_plain_base_method() {
     );
 }
 
-/// Stands for: only a different arity splits. Two same-named types of one
-/// arity in one file stay a uid collision: the second is the nameless
-/// tombstone it was before the fix. Passes before the fix as well; it
-/// guards the restriction of codex ruling P-a.
+/// Stands for: only a different arity splits (codex ruling P-a). Two
+/// same-named types of one arity in one file are a redefinition: the second
+/// is a later node of its own, named, under the overload uid of the first
+/// (design uid §2.3), not an arity sibling. Before 1b it was a nameless
+/// tombstone.
 #[test]
-fn test_overrides_csharp_same_arity_twins_second_tombstoned() {
+fn test_overrides_csharp_same_arity_twins_second_later_node() {
     let graph = csharp_graph(
         "namespace N\n{\n    public class Conv<T> { public virtual bool CanConvert(int t) { return true; } }\n    public class Conv<U> { public virtual bool CanConvert(int t) { return false; } }\n}\n",
     );
     assert_eq!(
         class_rows(&graph),
-        [(2, "Conv".to_string()), (3, String::new())],
-        "the second Conv of arity 1 is a tombstone"
+        [(2, "Conv".to_string()), (3, "Conv".to_string())],
+        "the second Conv of arity 1 keeps its name"
     );
+    let uids: Vec<u64> = graph
+        .nodes
+        .iter()
+        .filter(|n| n.kind == ecp_core::graph::NodeKind::Class)
+        .map(|n| n.uid)
+        .collect();
+    assert_eq!(uids[1], ecp_core::uid::overload(uids[0], 1));
 }
 
 // ── C# partial types (codex ruling P-d) ─────────────────────────────────

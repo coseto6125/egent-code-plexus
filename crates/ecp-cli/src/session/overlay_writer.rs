@@ -25,7 +25,7 @@ use ecp_core::analyzer::types::{
 use ecp_core::contracts::dirty_event::{PathChange, PathClass};
 use ecp_core::contracts::routing::{FileRouter, ParsedLanguage, RouteOutcome, SizeCap};
 use ecp_core::graph::NodeKind;
-use ecp_core::registry::{atomic_write_json, replace_file, FileLock};
+use ecp_core::registry::{atomic_write_json, os_path_to_slash, replace_file, FileLock};
 use ecp_core::session::layout;
 use ecp_core::session::overlay::{SymbolKind, SymbolRef};
 use ecp_core::session::view::OverlayFileRecords;
@@ -642,7 +642,7 @@ fn write_fragment_file(
 ) -> io::Result<StagedFragment> {
     let content_hash = xxh3_64(&input.content);
     // Same forward-slash invariant as `write_fragment_from_graph`.
-    let rel_path = input.rel_path.replace('\\', "/");
+    let rel_path = os_path_to_slash(&input.rel_path).into_owned();
     let fragment_id = fragment_id_for(&rel_path, content_hash);
     let content_hash = format!("{content_hash:016x}");
     // Parse and archive stay one fallible unit, as they were when this called a
@@ -727,7 +727,7 @@ fn write_fragment_from_graph(
     // forward slashes (the graph builder normalizes `File.path` that way) —
     // a Windows PathBuf would leak backslashes here and silently kill every
     // overlay↔base match.
-    let rel_path = graph.file_path.to_string_lossy().replace('\\', "/");
+    let rel_path = os_path_to_slash(&graph.file_path).into_owned();
     let content_hash = graph_content_hash(graph, worktree);
     let fragment_id = fragment_id_for(&rel_path, content_hash);
     let content_hash = format!("{content_hash:016x}");
@@ -1002,7 +1002,7 @@ fn extract_symbols(path: &Path, file_str: &str) -> (Vec<SymbolRef>, bool) {
     let abs = path.to_path_buf();
     // Route by the repo-relative path, not the basename: path rules (a
     // workflow directory, a template directory) decide the provider.
-    let rel = PathBuf::from(file_str.replace('\\', "/"));
+    let rel = PathBuf::from(&*os_path_to_slash(file_str));
     // `path` ends in `rel`, so the ancestor `rel` deep is the root whose
     // `.ecp/config.toml` holds the cap.
     let root = abs

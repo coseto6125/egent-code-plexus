@@ -14,11 +14,15 @@
 //! | 1 | a TS / JS / Python alias through the import tiers alone; else the bound name through the whole ladder; a callable, then a type | the declaration | the tier's | [`ImportReason::Named`] |
 //! | 1, barrel | a step-1 hit through a re-export | the barrel's `File` | 0.9 | [`ImportReason::Module`] |
 //! | 2 | the last `.` segment of a qualified name, through the whole ladder | the declaration | the tier's | [`ImportReason::Named`] |
-//! | 3a, 3b | the specifier's candidate files, as written, then `./`-prefixed | `File` | 0.9 | [`ImportReason::Module`] |
+//! | 3a, 3b | the specifier's candidate files, as written, then `./`-prefixed; never for PHP, whose `use` names a namespace | `File` | 0.9 | [`ImportReason::Module`] |
 //! | 3c | basename and path suffix, one file only | `File` | 0.6 | [`ImportReason::Guess`] |
 //! | 3d | last segment with the importer's extension, one file only | `File` | 0.5 | [`ImportReason::Guess`] |
 //! | 3e | the file stem of a Rust `crate::` / `self::` module | `File` | 0.5 | [`ImportReason::Guess`] |
 //! | 3f | a directory named like the specifier, one file of the importer's extension | `File` | 0.4 | [`ImportReason::Guess`] |
+//!
+//! A specifier holding `\` (not PHP) runs 3a to 3c once more with `\` as `/`
+//! after the written spelling misses all three; that converted 3c runs only
+//! when the written 3c matched no file.
 //!
 //! A later step runs only while the earlier steps of the same import added
 //! no edge. An edge to a target the file already imports adds nothing, so
@@ -29,6 +33,7 @@ use crate::analyzer::reexport::ResolveTarget;
 use crate::analyzer::rust_paths::rust_module_path_base;
 use crate::analyzer::types::RawImport;
 use crate::file_category::Language;
+use crate::registry::{os_path_to_slash, text_path_to_slash};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::Cow;
 use std::path::Path;
@@ -141,22 +146,30 @@ impl<'p> GuessIndex<'p> {
     /// for no file or several. Several is no answer: a guess between two
     /// files of one name would cross languages.
     fn suffix_single(&self, candidate: &str) -> Option<u32> {
+        self.suffix_match(candidate).unique()
+    }
+
+    /// The files that are `candidate` or end with `/<candidate>`: none, one,
+    /// or several.
+    fn suffix_match(&self, candidate: &str) -> SuffixMatch {
         let basename = Path::new(candidate)
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or(candidate);
-        let bucket = self.by_basename.get(basename)?;
+        let Some(bucket) = self.by_basename.get(basename) else {
+            return SuffixMatch::Missing;
+        };
         let needle = format!("/{candidate}");
-        let mut hit = None;
+        let mut found = SuffixMatch::Missing;
         for &(path, node) in bucket {
             if path == candidate || path.ends_with(&needle) {
-                if hit.is_some() {
-                    return None;
+                if found != SuffixMatch::Missing {
+                    return SuffixMatch::Ambiguous;
                 }
-                hit = Some(node);
+                found = SuffixMatch::Unique(node);
             }
         }
-        hit
+        found
     }
 
     /// The one file under a `directory` component whose path ends with
@@ -198,7 +211,10 @@ pub fn import_edges(
         language,
         Language::TypeScript | Language::JavaScript | Language::Python
     );
-    let mut seen: FxHashSet<u32> = FxHashSet::default();
+    // A file never imports itself: a step-3 lookup that lands on the
+    // importer (Python `import logging` in `logging.py`, Swift
+    // `import Combine` in `Combine.swift`) names a module outside the repo.
+    let mut seen: FxHashSet<u32> = FxHashSet::from_iter([source]);
     let mut add = |target: u32, confidence: f32, reason: ImportReason| -> bool {
         let fresh = seen.insert(target);
         if fresh {
@@ -260,22 +276,37 @@ pub fn import_edges(
         let cleaned = import
             .source
             .trim_matches(|c: char| matches!(c, '"' | '\'' | '<' | '>'));
-        // 3a: as written (TS `./a`, Python `.foo` encode relativity).
-        let mut hit = probe(facts, cleaned);
+        // A PHP import is a `use` namespace (the only PHP import capture),
+        // never a file path: the path probe would bind any same-stem file of
+        // any language, or a namespace read relative to the importer.
+        let path_like = !php;
+        // A specifier is text a human typed: one holding `\` (a Windows
+        // author's `#include "inc\foo.h"`) runs 3a to 3c again as `/` once
+        // the written spelling misses all three, so a Unix file named
+        // `inc\foo.h` still wins.
+        let converted = match text_path_to_slash(cleaned) {
+            Cow::Owned(text) if path_like => Some(text),
+            _ => None,
+        };
+        let mut hit = path_like
+            .then(|| probe_module(facts, cleaned, &mut dot_prefixed))
+            .flatten();
         let mut guess = None;
-        // 3b: `./`-prefixed, so the resolver joins the importer's directory
-        // (Ruby `require_relative 'alpha'`, Go `import "x/pkg"`, C
-        // `#include "alpha.h"`).
-        if hit.is_none() && !cleaned.starts_with('.') && !cleaned.is_empty() {
-            dot_prefixed.clear();
-            dot_prefixed.push_str("./");
-            dot_prefixed.push_str(cleaned);
-            hit = probe(facts, &dot_prefixed);
-        }
         // 3c: a C / C++ header under a search-path directory.
+        let mut written_suffix = SuffixMatch::Missing;
         if hit.is_none() && !cleaned.is_empty() {
-            hit = facts.guesses().suffix_single(cleaned);
+            written_suffix = facts.guesses().suffix_match(cleaned);
+            hit = written_suffix.unique();
             guess = hit.map(|_| SUFFIX_GUESS_CONFIDENCE);
+        }
+        // The converted 3c runs only where the written spelling matched no
+        // file: two written matches stay no answer.
+        if let (None, Some(text)) = (hit, converted.as_deref()) {
+            hit = probe_module(facts, text, &mut dot_prefixed);
+            if hit.is_none() && written_suffix == SuffixMatch::Missing {
+                hit = facts.guesses().suffix_single(text);
+                guess = hit.map(|_| SUFFIX_GUESS_CONFIDENCE);
+            }
         }
         // 3d: Go `import "modulePath/pkg"`, whose `go.mod` module prefix is
         // no file-system path: `pkg.<importer extension>`.
@@ -351,16 +382,48 @@ fn named(
     found
 }
 
+/// How many files a 3c suffix lookup matches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SuffixMatch {
+    Missing,
+    Unique(u32),
+    Ambiguous,
+}
+
+impl SuffixMatch {
+    fn unique(self) -> Option<u32> {
+        match self {
+            Self::Unique(node) => Some(node),
+            Self::Missing | Self::Ambiguous => None,
+        }
+    }
+}
+
+/// Steps 3a and 3b. 3a: `specifier` as written (TS `./a`, Python `.foo`
+/// encode relativity). 3b: `./`-prefixed, so the resolver joins the
+/// importer's directory (Ruby `require_relative 'alpha'`, Go
+/// `import "x/pkg"`, C `#include "alpha.h"`).
+fn probe_module(
+    facts: &impl ImportEdgeFacts,
+    specifier: &str,
+    dot_prefixed: &mut String,
+) -> Option<u32> {
+    probe(facts, specifier).or_else(|| {
+        if specifier.starts_with('.') || specifier.is_empty() {
+            return None;
+        }
+        dot_prefixed.clear();
+        dot_prefixed.push_str("./");
+        dot_prefixed.push_str(specifier);
+        probe(facts, dot_prefixed)
+    })
+}
+
 /// The first candidate file of `specifier` that has a `File` node.
 fn probe(facts: &impl ImportEdgeFacts, specifier: &str) -> Option<u32> {
     let mut hit = None;
     facts.for_each_candidate(specifier, &mut |candidate| {
-        let normalized: Cow<'_, str> = if candidate.contains('\\') {
-            Cow::Owned(candidate.replace('\\', "/"))
-        } else {
-            Cow::Borrowed(candidate)
-        };
-        hit = facts.file_node(&normalized);
+        hit = facts.file_node(&os_path_to_slash(candidate));
         hit.is_none()
     });
     hit
@@ -396,6 +459,32 @@ fn rust_module_file_stem(caller: &Path, source: &str, imported_name: &str) -> Op
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    /// The 14 mainstream languages, each with an extension of its files.
+    const MAINSTREAM: [(Language, &str); 14] = [
+        (Language::TypeScript, "ts"),
+        (Language::JavaScript, "js"),
+        (Language::Python, "py"),
+        (Language::Java, "java"),
+        (Language::Kotlin, "kt"),
+        (Language::CSharp, "cs"),
+        (Language::Go, "go"),
+        (Language::Rust, "rs"),
+        (Language::Php, "php"),
+        (Language::Ruby, "rb"),
+        (Language::Swift, "swift"),
+        (Language::C, "c"),
+        (Language::Cpp, "cpp"),
+        (Language::Dart, "dart"),
+    ];
+
+    /// [`MAINSTREAM`] but PHP, whose `use` names a namespace, not a path.
+    fn non_php() -> impl Iterator<Item = Language> {
+        MAINSTREAM
+            .into_iter()
+            .map(|(language, _)| language)
+            .filter(|&language| language != Language::Php)
+    }
 
     /// What [`ImportEdgeFacts::named`] answers.
     type NamedAnswer = (Vec<(u32, f32)>, Option<Arc<str>>);
@@ -606,14 +695,236 @@ mod tests {
     }
 
     #[test]
-    fn test_import_edges_backslash_candidate_matches_slash_path() {
+    fn test_import_edges_backslash_candidate_matches_slash_path_on_windows_only() {
         let mut facts = Fake::with_files(&[("src/a.ts", 5)]);
         facts.candidates.insert("./a", vec!["src\\a.ts"]);
         let imports = [import("./a", "*", None)];
+        let edges = edges_of("src/main.ts", Language::TypeScript, &imports, &facts);
+        match cfg!(windows) {
+            true => assert_eq!(edges, [edge(5, MODULE_CONFIDENCE, ImportReason::Module)]),
+            false => assert!(
+                !edges.contains(&edge(5, MODULE_CONFIDENCE, ImportReason::Module)),
+                "on Unix `src\\a.ts` is a file apart from `src/a.ts`: {edges:?}"
+            ),
+        }
+    }
+
+    /// Stands for: a Windows-authored specifier reaches the `/` file on every
+    /// platform, whatever the importer's language, after both written-spelling
+    /// lookups miss. PHP is the exception, see
+    /// `test_import_edges_php_use_skips_path_probe`.
+    #[test]
+    fn test_import_edges_backslash_specifier_reaches_slash_file_in_every_language() {
+        for language in non_php() {
+            let mut facts = Fake::with_files(&[("inc/foo.h", 5)]);
+            facts.candidates.insert("inc/foo.h", vec!["inc/foo.h"]);
+            let imports = [import("\"inc\\foo.h\"", "foo.h", None)];
+            assert_eq!(
+                edges_of("src/main.x", language, &imports, &facts),
+                [edge(5, MODULE_CONFIDENCE, ImportReason::Module)],
+                "{language:?}"
+            );
+            assert_eq!(
+                *facts.probed.borrow(),
+                ["inc\\foo.h", "./inc\\foo.h", "inc/foo.h"]
+            );
+        }
+    }
+
+    /// Stands for: a step-3 answer that is the importer's own file ends
+    /// step 3 with no edge, in every language. A probe stops there and takes
+    /// no later candidate (`./foo` in `foo.ts` never binds `foo/index.ts`),
+    /// and no later guess runs (`import Networking` in `Networking.swift`
+    /// never binds `Networking/Client.swift`).
+    #[test]
+    fn test_import_edges_lookup_landing_on_importer_ends_step_3_with_no_edge() {
+        for (language, ext) in MAINSTREAM {
+            let importer = format!("src/foo.{ext}");
+            let sibling = format!("src/foo/index.{ext}");
+            let mut facts = Fake::with_files(&[(importer.as_str(), 0), (sibling.as_str(), 3)]);
+            facts
+                .candidates
+                .insert("./foo", vec![importer.as_str(), sibling.as_str()]);
+            let imports = [import("./foo", "*", None)];
+            assert_eq!(
+                edges_of(&importer, language, &imports, &facts),
+                [],
+                "{language:?}"
+            );
+
+            let importer = format!("src/App/Networking.{ext}");
+            let client = format!("src/Networking/Client.{ext}");
+            let mut facts = Fake::with_files(&[(importer.as_str(), 0), (client.as_str(), 9)]);
+            facts
+                .candidates
+                .insert("Networking", vec![importer.as_str()]);
+            facts
+                .candidates
+                .insert("./Networking", vec![importer.as_str()]);
+            let imports = [import("Networking", "Networking", None)];
+            assert_eq!(
+                edges_of(&importer, language, &imports, &facts),
+                [],
+                "{language:?}"
+            );
+        }
+    }
+
+    /// Stands for: when the module tree places `crate` at the importer (a
+    /// crate root's `use crate::config;`), the 3e file guess never runs, so
+    /// no other crate's `config.rs` is bound.
+    #[test]
+    fn test_import_edges_rust_crate_root_self_answer_binds_no_other_crate_file() {
+        let mut facts = Fake::with_files(&[("x/src/lib.rs", 0), ("y/src/config.rs", 1)]);
+        facts.candidates.insert("crate", vec!["x/src/lib.rs"]);
+        let imports = [import("crate", "config", None)];
         assert_eq!(
-            edges_of("src/main.ts", Language::TypeScript, &imports, &facts),
-            [edge(5, MODULE_CONFIDENCE, ImportReason::Module)]
+            edges_of("x/src/lib.rs", Language::Rust, &imports, &facts),
+            []
         );
+    }
+
+    /// Stands for: the importer counts toward a guess's ambiguity. Go
+    /// `binding/bson.go` with `import ".../bson"` sees two `bson.go` files,
+    /// so 3d gives no answer rather than binding `render/bson.go`.
+    #[test]
+    fn test_import_edges_guess_matching_importer_and_one_other_stays_ambiguous() {
+        for (language, ext) in MAINSTREAM {
+            let importer = format!("binding/bson.{ext}");
+            let other = format!("render/bson.{ext}");
+            let facts = Fake::with_files(&[(importer.as_str(), 0), (other.as_str(), 1)]);
+            let imports = [import("go.mongodb.org/mongo-driver/bson", "bson", None)];
+            assert_eq!(
+                edges_of(&importer, language, &imports, &facts),
+                [],
+                "{language:?}"
+            );
+        }
+    }
+
+    /// Stands for: a PHP `use` names a namespace, so on every platform it
+    /// never reaches the path probe: `use Vendor\Tools` and `use Thing` bind
+    /// no `Vendor/Tools.php`, `.js` or importer-relative file that only
+    /// matches by path.
+    #[test]
+    fn test_import_edges_php_use_skips_path_probe() {
+        let mut facts = Fake::with_files(&[
+            ("Vendor/Tools.php", 5),
+            ("lib/Vendor/Tools.js", 6),
+            ("lib/Thing.js", 7),
+        ]);
+        facts
+            .candidates
+            .insert("Vendor\\Tools", vec!["Vendor\\Tools.php"]);
+        facts
+            .candidates
+            .insert("./Vendor\\Tools", vec!["lib/Vendor\\Tools.js"]);
+        facts
+            .candidates
+            .insert("Vendor/Tools", vec!["Vendor/Tools.php"]);
+        facts.candidates.insert("Thing", vec!["lib/Thing.js"]);
+        facts.candidates.insert("./Thing", vec!["lib/Thing.js"]);
+        let imports = [
+            import("Vendor\\Tools", "Tools", None),
+            import("Thing", "Thing", None),
+        ];
+        let edges = edges_of("lib/main.php", Language::Php, &imports, &facts);
+        assert!(edges.is_empty(), "{edges:?}");
+        assert!(
+            facts.probed.borrow().is_empty(),
+            "{:?}",
+            facts.probed.borrow()
+        );
+    }
+
+    /// Stands for: the converted spelling waits for the written spelling's
+    /// `./` lookup too, so `inc\foo.h` beside the importer beats an unrelated
+    /// root `inc/foo.h` on every platform. The stored path is the one each
+    /// platform writes: `src/inc\foo.h` on Unix, `src/inc/foo.h` on Windows.
+    #[test]
+    fn test_import_edges_backslash_specifier_relative_literal_beats_converted_root() {
+        let beside = match cfg!(windows) {
+            true => "src/inc/foo.h",
+            false => "src/inc\\foo.h",
+        };
+        let mut facts = Fake::with_files(&[(beside, 7), ("inc/foo.h", 5)]);
+        facts
+            .candidates
+            .insert("./inc\\foo.h", vec!["src/inc\\foo.h"]);
+        facts.candidates.insert("inc/foo.h", vec!["inc/foo.h"]);
+        let imports = [import("\"inc\\foo.h\"", "foo.h", None)];
+        let edges = edges_of("src/main.c", Language::C, &imports, &facts);
+        assert_eq!(edges, [edge(7, MODULE_CONFIDENCE, ImportReason::Module)]);
+    }
+
+    /// Stands for: the specifier as written is looked up first, so on Unix a
+    /// file literally named `inc\foo.h` is not shadowed by `inc/foo.h`.
+    #[test]
+    fn test_import_edges_backslash_specifier_prefers_literal_file_on_unix() {
+        let mut facts = Fake::with_files(&[("inc\\foo.h", 7), ("inc/foo.h", 5)]);
+        facts.candidates.insert("inc\\foo.h", vec!["inc\\foo.h"]);
+        facts.candidates.insert("inc/foo.h", vec!["inc/foo.h"]);
+        let imports = [import("\"inc\\foo.h\"", "foo.h", None)];
+        let edges = edges_of("src/main.c", Language::C, &imports, &facts);
+        match cfg!(windows) {
+            true => assert_eq!(edges, [edge(5, MODULE_CONFIDENCE, ImportReason::Module)]),
+            false => assert_eq!(edges, [edge(7, MODULE_CONFIDENCE, ImportReason::Module)]),
+        }
+    }
+
+    /// Stands for: a Windows-authored `"sub\foo.h"` reaches a file under a
+    /// search-path directory on every platform, as `sub/foo.h` does, in
+    /// every language but PHP, whose `use` names a namespace.
+    #[test]
+    fn test_import_edges_backslash_suffix_guess_binds_search_path_file_except_php() {
+        let facts = Fake::with_files(&[("include/sub/foo.h", 4)]);
+        let imports = [import("\"sub\\foo.h\"", "foo.h", None)];
+        for language in non_php() {
+            assert_eq!(
+                edges_of("src/main.x", language, &imports, &facts),
+                [edge(4, SUFFIX_GUESS_CONFIDENCE, ImportReason::Guess)],
+                "{language:?}"
+            );
+        }
+        let php = edges_of("src/main.x", Language::Php, &imports, &facts);
+        assert!(php.is_empty(), "{php:?}");
+    }
+
+    /// Stands for: two written-spelling suffix matches stay no answer; the
+    /// converted spelling does not pick a third, unrelated `sub/foo.h`.
+    #[cfg(unix)]
+    #[test]
+    fn test_import_edges_backslash_suffix_guess_ambiguous_written_binds_nothing() {
+        let facts = Fake::with_files(&[
+            ("first/sub\\foo.h", 1),
+            ("second/sub\\foo.h", 2),
+            ("third/sub/foo.h", 3),
+        ]);
+        let imports = [import("\"sub\\foo.h\"", "foo.h", None)];
+        for language in non_php() {
+            let edges = edges_of("src/main.x", language, &imports, &facts);
+            assert!(edges.is_empty(), "{language:?}: {edges:?}");
+        }
+    }
+
+    /// Stands for: the written spelling's 3c runs before the converted 3a, so
+    /// a header literally named `sub\foo.h` under a search path beats a
+    /// converted `./sub/foo.h` beside the importer.
+    #[cfg(unix)]
+    #[test]
+    fn test_import_edges_backslash_written_suffix_guess_beats_converted_module() {
+        let mut facts = Fake::with_files(&[("include/sub\\foo.h", 7), ("src/sub/foo.h", 5)]);
+        facts
+            .candidates
+            .insert("./sub/foo.h", vec!["src/sub/foo.h"]);
+        let imports = [import("\"sub\\foo.h\"", "foo.h", None)];
+        for language in non_php() {
+            assert_eq!(
+                edges_of("src/main.x", language, &imports, &facts),
+                [edge(7, SUFFIX_GUESS_CONFIDENCE, ImportReason::Guess)],
+                "{language:?}"
+            );
+        }
     }
 
     #[test]

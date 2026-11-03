@@ -100,7 +100,8 @@ fn named<'a>(g: &'a LocalGraph, name: &str) -> Vec<&'a ecp_core::analyzer::types
 }
 
 // C has no nested functions. The closest collision is two same-named `static` definitions in
-// opposite `#ifdef` branches: the second one is a tombstone. No lexical-scope slice opts C in.
+// opposite `#ifdef` branches: the second one keeps its own named node, a later redefinition.
+// No lexical-scope slice opts C in.
 
 #[test]
 fn test_parse_file_c_nested_fn_same_name_as_top_level_today_uid() {
@@ -112,11 +113,13 @@ fn test_parse_file_c_nested_fn_same_name_as_top_level_today_uid() {
         ("helper", NodeKind::Function)
     );
     assert_eq!(first.uid, uid_of(NodeKind::Function, None, "helper"));
+    // Stands for: a same-uid redefinition keeps its own named node (design_uid §2.3,
+    // `LaterReason::Repeat`), with `uid::overload(base, 1)`.
     assert_eq!(
         (second.name.as_str(), second.kind),
-        ("", NodeKind::Function)
+        ("helper", NodeKind::Function)
     );
-    assert_eq!(second.uid, ecp_core::uid::tombstone(first.uid));
+    assert_eq!(second.uid, ecp_core::uid::overload(first.uid, 1));
 }
 
 #[test]
@@ -130,7 +133,7 @@ fn test_parse_file_c_nested_fn_owner_today() {
 
 #[test]
 fn test_resolve_call_c_call_to_bare_helper_binds_today() {
-    // The call binds the surviving first definition (line 2).
+    // The call binds the first definition (line 2); the later one is in no name table.
     assert_eq!(
         outer_call_targets(&graph()),
         vec![(2, String::new(), NodeKind::Function)]

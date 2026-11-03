@@ -11,6 +11,7 @@ use ecp_core::analyzer::types::{owner_key, RawExportAlias};
 use ecp_core::contracts::routing::ParsedLanguage;
 pub use ecp_core::file_category::{FileMeta, GlobalPick, Language};
 use ecp_core::graph::{FunctionMeta, NodeKind};
+use ecp_core::registry::os_path_to_slash;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::Cow;
 
@@ -123,9 +124,6 @@ pub(crate) type CsharpExtensionDecls<'a> = FxHashMap<&'a str, Vec<ExtensionDecl<
 #[derive(Debug)]
 struct CsharpExtensionDecl {
     id: u32,
-    /// Its file. A later overload has no entry in `id_to_file`, so the
-    /// table keeps the path here.
-    file: Box<str>,
     /// Its `this` parameter's type as written.
     this_type: Box<str>,
     flags: u16,
@@ -658,7 +656,6 @@ impl SymbolTable {
     pub fn note_csharp_extension(
         &mut self,
         node_id: u32,
-        file_path: &str,
         name: &str,
         this_type: &str,
         flags: u16,
@@ -669,7 +666,6 @@ impl SymbolTable {
             .or_default()
             .push(CsharpExtensionDecl {
                 id: node_id,
-                file: file_path.into(),
                 this_type: this_type.into(),
                 flags,
                 params: params.iter().map(|&name| name.into()).collect(),
@@ -707,7 +703,7 @@ impl SymbolTable {
         found
             .iter()
             .filter_map(|decl| {
-                let file = &*decl.file;
+                let file = self.file_of(decl.id)?;
                 let class = PickFacts::owner(self, decl.id)?;
                 let namespace = self
                     .lookup_in_file_with_kind(file, class, ResolveTarget::Type)
@@ -975,29 +971,32 @@ impl SymbolTable {
     /// ID, but they are invisible to all name-based lookups — no edge emitter
     /// can obtain a tombstone node_id via `lookup_in_file` / `lookup_global`.
     ///
-    /// Used for UID-collision-dropped nodes (D1 recovery): the colliding raw node
-    /// still needs to occupy a position in `nodes` (to keep `start_indices`
-    /// prefix-sums correct in Pass 2), but must not be reachable by name.
+    /// Used for a merged repeat ([`ecp_core::uid::merges_repeats`]: every
+    /// other repeat is a later declaration of its own) and for a 64-bit
+    /// collision with another path (D1 recovery): the raw node still needs to
+    /// occupy a position in `nodes` (to keep `start_indices` prefix-sums
+    /// correct in Pass 2), but must not be reachable by name.
     pub fn register_tombstone(&mut self, kind: NodeKind, file_meta: FileMeta) {
         self.node_kinds.push(kind);
         self.node_file_meta.push(file_meta);
         self.node_owner.push(NO_OWNER);
     }
 
-    /// Register the next id as a later overload of `first`
-    /// ([`ecp_core::uid::keeps_overloads`]): same kind and owner, but in no
-    /// name table, so every name lookup still returns `first`. Which overload
-    /// a call means needs argument types the parse does not carry; the
-    /// builder links `first` to the rest instead ([`Self::overload_sets`]).
-    /// Returns the overload's 1-based ordinal.
-    pub fn register_overload(&mut self, first: u32, file_meta: FileMeta) -> u32 {
+    /// Register the next id as a later declaration of `first`'s base uid
+    /// that joins its overload set: an overload, a scoped repeat or a
+    /// redefinition (`LaterReason::{Overload, Scoped, Repeat}`). A
+    /// declaration of its own in `file_path`, with `first`'s kind and owner,
+    /// but in no name table, so every name lookup still returns `first`.
+    /// Which overload a call means needs argument types the parse does not
+    /// carry; the builder links `first` to the rest instead
+    /// ([`Self::overload_sets`]).
+    pub fn register_overload(&mut self, first: u32, file_path: &str, file_meta: FileMeta) {
         let id = self.node_kinds.len() as u32;
         self.node_kinds.push(self.node_kinds[first as usize]);
         self.node_file_meta.push(file_meta);
         self.node_owner.push(self.node_owner[first as usize]);
-        let later = self.overloads.entry(first).or_default();
-        later.push(id);
-        later.len() as u32
+        self.id_to_file.insert(id, file_path.to_string());
+        self.overloads.entry(first).or_default().push(id);
     }
 
     /// The later overloads of `first`, in source order.
@@ -1027,7 +1026,7 @@ impl SymbolTable {
     }
 
     /// Register the next id as a later C# declaration of `first`'s uid that
-    /// is an arity twin (`ecp_core::analyzer::lexical::later_is_arity_twin`):
+    /// is an arity twin (`LaterReason::Arity`):
     /// a type or delegate of another generic arity (`Conv<T>` after
     /// `Conv`), or a member such a type declares (`Foo1<T>.foo` after
     /// `Foo1.foo`). A declaration of its own in `file_path`, with `first`'s
@@ -1066,13 +1065,6 @@ impl SymbolTable {
                 .find(|&member| self.type_arity(member) == arity),
             None => (arity == 0 || self.type_arity(id) == arity).then_some(id),
         }
-    }
-
-    /// Whether any declaration has an arity twin
-    /// ([`Self::register_arity_sibling`]): a pass that finds twins by
-    /// re-numbering a file skips the work when none has.
-    pub fn has_arity_twins(&self) -> bool {
-        !self.arity_siblings.is_empty()
     }
 
     /// Whether any member has an arity twin ([`Self::note_declaring_scope`]):
@@ -1217,7 +1209,9 @@ impl SymbolTable {
     /// Whether `file_path` declares a module-level node named `node_name`
     /// whose kind `holds` accepts: an associated item
     /// (`impl X { const h: u32 = 1; }`) and a body-local declaration
-    /// (`fn setup() { struct Foo; }`) are no items of the module.
+    /// (`fn setup() { struct Foo; }`) are no items of the module, but a
+    /// module-level redefinition of a body-local first is
+    /// ([`ladder::module_item`]).
     pub(crate) fn declares_in_file(
         &self,
         file_path: &str,
@@ -1229,7 +1223,7 @@ impl SymbolTable {
             .and_then(|file_map| file_map.get(node_name))
             .is_some_and(|ids| {
                 ids.iter().any(|&id| {
-                    self.is_module_level(id, NO_OWNER) && holds(self.node_kinds[id as usize])
+                    holds(self.node_kinds[id as usize]) && ladder::module_item(self, id).is_some()
                 })
             })
     }
@@ -1751,14 +1745,13 @@ impl SymbolTable {
 
     /// The metadata of `file`: the stored record for a file Pass 1
     /// registered, else what the path decides ([`FileMeta::from_path`]) for
-    /// a path the index never saw. Either separator is accepted.
+    /// a path the index never saw. `file` is read as [`os_path_to_slash`]
+    /// stores it.
     pub fn file_meta(&self, file: &str) -> FileMeta {
-        let stored = if file.contains('\\') {
-            self.file_metas.get(&file.replace('\\', "/"))
-        } else {
-            self.file_metas.get(file)
-        };
-        stored.copied().unwrap_or_else(|| FileMeta::from_path(file))
+        self.file_metas
+            .get(&*os_path_to_slash(file))
+            .copied()
+            .unwrap_or_else(|| FileMeta::from_path(file))
     }
 
     /// `file`'s language as the index's rules compare it: the stored
@@ -2055,6 +2048,10 @@ impl PickFacts for SymbolTable {
 
     fn is_body_local(&self, id: u32) -> bool {
         SymbolTable::is_body_local(self, id)
+    }
+
+    fn later_overloads(&self, first: u32) -> Cow<'_, [u32]> {
+        Cow::Borrowed(SymbolTable::later_overloads(self, first))
     }
 }
 
@@ -2383,6 +2380,27 @@ mod tests {
         );
     }
 
+    /// Stands for: a later declaration has its own file, as the overlay's
+    /// `file_of` gives every virtual node one. A C# same-file `partial class
+    /// C` repeat (`LaterReason::Repeat`) that `partial_groups` picks as the
+    /// representative finds the members the first part declares. Red before:
+    /// `register_overload` wrote no `id_to_file` entry, so `owned_member`
+    /// returned `Miss` at its first line.
+    #[test]
+    fn test_owned_member_later_repeat_of_type_finds_member_of_its_file() {
+        let mut st = st_owned(&[
+            ("src/C.cs", "C", NodeKind::Class, None),
+            ("src/C.cs", "M", NodeKind::Method, Some("C")),
+        ]);
+        st.register_overload(0, "src/C.cs", FileMeta::from_path("src/C.cs"));
+        let later = 2;
+        assert_eq!(st.file_of(later), Some("src/C.cs"));
+        assert_eq!(
+            ecp_core::analyzer::type_ladder::owned_member(&st, later, "C", "M", CALL),
+            ecp_core::analyzer::type_ladder::MemberLookup::Hit(1)
+        );
+    }
+
     /// `fn setup() { impl Foo { fn new } }` before the module-level
     /// `impl Foo { pub fn new }`: the two `new`s share a uid, so the
     /// module-level one is a later overload, in no name table. A body-local
@@ -2394,7 +2412,7 @@ mod tests {
             ("src/m.rs", "Foo", NodeKind::Struct, None),
             ("src/m.rs", "new", NodeKind::Method, Some("Foo")),
         ]);
-        st.register_overload(2, FileMeta::from_path("src/m.rs"));
+        st.register_overload(2, "src/m.rs", FileMeta::from_path("src/m.rs"));
         let module_level = 3;
         st.note_body_local(2);
         let lookup = |st: &SymbolTable| {
@@ -2403,6 +2421,37 @@ mod tests {
         assert_eq!(lookup(&st), Some(module_level));
         st.note_body_local(module_level);
         assert_eq!(lookup(&st), None, "every overload body-local");
+    }
+
+    /// Stands for: `fn setup() { struct Foo; }` before the module-level
+    /// `struct Foo` share a base uid, so the module-level one is a later
+    /// redefinition of the body-local first, in no name table (design uid
+    /// §2.3). It is still an item of the module: `declares_in_file` and
+    /// `ladder::module_item` find it through the first. Red before 1d: the
+    /// body-local first hid it.
+    #[test]
+    fn test_declares_in_file_body_local_first_module_level_redefinition_returns_true() {
+        let mut st = st_owned(&[
+            ("src/m.rs", "setup", NodeKind::Function, None),
+            ("src/m.rs", "Foo", NodeKind::Struct, None),
+        ]);
+        st.register_overload(1, "src/m.rs", FileMeta::from_path("src/m.rs"));
+        let module_level = 2;
+        st.note_body_local(1);
+        let is_type = |kind: NodeKind| kind == NodeKind::Struct;
+        assert!(st.declares_in_file("src/m.rs", "Foo", is_type));
+        assert_eq!(ladder::module_item(&st, 1), Some(module_level));
+        assert_eq!(
+            ladder::module_item(&st, 0),
+            Some(0),
+            "a module item stands for itself"
+        );
+        st.note_body_local(module_level);
+        assert!(
+            !st.declares_in_file("src/m.rs", "Foo", is_type),
+            "every redefinition body-local"
+        );
+        assert_eq!(ladder::module_item(&st, 1), None);
     }
 
     /// A trait's `impl` for `ty` in the file: an `Impl` named `ty`, or a
@@ -2717,9 +2766,12 @@ mod tests {
         ]);
         let meta = FileMeta::from_path("aw.rs");
         // The second block's members collide with the first's uids.
-        let later_flush = st.register_overload(2, meta);
-        let later_shutdown = st.register_overload(3, meta);
-        assert_eq!((later_flush, later_shutdown), (1, 1));
+        st.register_overload(2, "aw.rs", meta);
+        st.register_overload(3, "aw.rs", meta);
+        assert_eq!(
+            (st.later_overloads(2), st.later_overloads(3)),
+            (&[4][..], &[5][..])
+        );
         for (member, block) in [(2, 2), (3, 2), (4, 4), (5, 4)] {
             st.note_impl_member(member, block, Some("AsyncWrite"));
         }

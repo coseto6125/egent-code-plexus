@@ -3,7 +3,7 @@
 //! `@x = …` (Ruby), etc. — produces two RawNodes with identical
 //! (kind=Property, path, owner, name), i.e. a uid collision. The second is
 //! correctly deduped to a single node, but this is the most common OO idiom,
-//! NOT a parser bug: it must classify as `field-reassign`, not `uid-collision`.
+//! NOT a parser bug: the merge records no BlindSpot, never `uid-collision`.
 //!
 //! Regression for the false `uid-collision` BlindSpot + "traversal may be
 //! incomplete" that `ecp inspect`/`ecp impact` reported for ordinary code
@@ -102,54 +102,24 @@ fn reassigned_field_is_not_uid_collision() {
     );
 }
 
-/// A genuinely distinct duplicate that is NOT a field reassignment (e.g. a
-/// Variable colliding) must still be reported as `uid-collision` — the fix
-/// narrows the classification, it does not blanket-suppress real collisions.
+/// Stands for: the fix narrows the records, it does not blanket-suppress
+/// them. A C header field repeated under `#ifdef` branches merges the same
+/// way and still records `ifdef-redef` (`classify_collision`).
 #[test]
-fn non_field_duplicate_still_reports_uid_collision() {
-    let dup = |span| RawNode {
-        name: "dup".to_string(),
-        kind: NodeKind::Variable,
-        span,
-        is_exported: false,
-        heritage: vec![],
-        type_annotation: None,
-        decorators: vec![],
-        calls: vec![],
-        field_reads: Vec::new(),
-        owner_class: None,
-        content_hash: 0,
-    };
+fn test_build_c_header_field_twin_reports_ifdef_redef() {
     let mut b = GraphBuilder::new();
-    b.add_graph(LocalGraph {
-        file_path: "src/v.py".into(),
-        content_hash: [3; 8],
-        nodes: vec![dup((1, 0, 1, 5)), dup((9, 0, 9, 5))],
-        documents: vec![],
-        imports: vec![],
-        routes: vec![],
-        route_receivers: None,
-        framework_refs: vec![],
-        fanout_refs: vec![],
-        blind_spots: vec![],
-        schema_fields: None,
-        event_topics: None,
-        tx_scopes: None,
-        path_literals: None,
-        sql_refs: None,
-        call_metas: vec![],
-        raw_function_metas: vec![],
-        export_aliases: None,
-        parsed_language: ecp_core::contracts::routing::ParsedLanguage::ABSENT,
-    });
+    b.add_graph(reassigned_field_graph("include/manager.h"));
     let g = b.build();
     let pool = g.string_pool.as_slice();
-    let has_collision = g
+    let kinds: Vec<&str> = g
         .blind_spots
         .iter()
-        .any(|bs| bs.kind.resolve(pool) == "uid-collision");
-    assert!(
-        has_collision,
-        "a non-field duplicate Variable must still report uid-collision"
+        .map(|bs| bs.kind.resolve(pool))
+        .collect();
+    let count = |kind: &str| kinds.iter().filter(|&&k| k == kind).count();
+    assert_eq!(
+        (count("ifdef-redef"), count("uid-collision")),
+        (1, 0),
+        "{kinds:?}"
     );
 }

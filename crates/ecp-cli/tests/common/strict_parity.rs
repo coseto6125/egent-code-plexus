@@ -52,6 +52,7 @@ use ecp_cli::session::overlay_writer::write_dirty_events;
 use ecp_core::contracts::dirty_event::{PathClass, RepoPath};
 use ecp_core::contracts::routing::{FileRouter, SizeCap};
 use ecp_core::graph::{ArchivedZeroCopyGraph, NodeKind, RelType, ZeroCopyGraph};
+use ecp_core::registry::os_path_to_slash;
 use ecp_core::session::closure::{ConfigEdits, StaleClosure};
 use ecp_core::session::merged::{MergedGraph, OVERLAY_EDGE_REASON};
 use ecp_core::session::view::OverlayFileRecords;
@@ -449,7 +450,7 @@ pub fn run(scenario: &Scenario<'_>) -> Observed {
         .collect();
     let written = graphs
         .iter()
-        .map(|graph| graph.file_path.to_string_lossy().replace('\\', "/"))
+        .map(|graph| os_path_to_slash(&graph.file_path).into_owned())
         .chain(tombstones.iter().map(|(path, _)| path.clone()));
     for path in written {
         if !read_back.contains(path.as_str()) {
@@ -470,8 +471,8 @@ pub fn run(scenario: &Scenario<'_>) -> Observed {
     }
 }
 
-/// Every `.rs` file under `root` outside `.git`, by forward-slashed
-/// repo-relative path.
+/// Every `.rs` file under `root` outside `.git`, by stored repo-relative
+/// path (`\` is a file-name byte on Unix).
 fn rust_sources(root: &Path) -> BTreeMap<String, String> {
     let mut sources = BTreeMap::new();
     let mut stack = vec![root.to_path_buf()];
@@ -485,7 +486,7 @@ fn rust_sources(root: &Path) -> BTreeMap<String, String> {
             } else if path.extension().is_some_and(|ext| ext == "rs") {
                 let rel = path.strip_prefix(root).unwrap();
                 if let Ok(text) = std::fs::read_to_string(&path) {
-                    sources.insert(rel.to_string_lossy().replace('\\', "/"), text);
+                    sources.insert(os_path_to_slash(rel).into_owned(), text);
                 }
             }
         }

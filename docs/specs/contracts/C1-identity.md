@@ -26,7 +26,7 @@ Every `file:line` below was read on branch `feat/arch-p1-contracts` at `1d267693
 | `Scope` | enum | `Unscoped`, or `Lexical { parent_anchor }`. |
 | `Discriminator` | enum | `ImplTrait`, `Signature` or `Tag`: a semantic fact that separates equal keys. `stored_tag` and `from_stored` give its stored byte. |
 | `FileDecl` | input row | One declaration of a file, as `assign_file` reads it. |
-| `UidSlot` | result | `First(uid)`, `Later { first, ordinal, uid }` or `Duplicate { first, uid }`. |
+| `UidSlot` | result | `First(uid)`, `Later { first, ordinal, uid, reason }` or `Duplicate { first, uid }`. |
 | `Uniqueness` | result | `Unique`, or `Shared { position, count }`. |
 | `DeclIdentity` | result | The slot, the anchor and the uniqueness of one declaration. |
 | `IdentityError` | result | The invariant that an input breaks. |
@@ -41,13 +41,13 @@ Every `file:line` below was read on branch `feat/arch-p1-contracts` at `1d267693
 | `HandlerRef` | enum | What serves a route: `Declaration { uid }`, `Closure { uid }`, `Inline { line }`, `Unresolved { name }`, `Absent`. |
 | `RouteBinding` | value | One `HandlesRoute` fact: a route key and a handler. |
 
-Functions: `canonical_path`, `owner_match_form`, `scoped_uid`, `assign_file`, `pair_by_anchor`, `is_scope_container`, `lexical_parents`, `file_match`, `normalize_file_needle`, `select`, `resolve_target`, `join_route_path`.
+Functions: `owner_match_form`, `scoped_uid`, `assign_file`, `pair_by_anchor`, `is_scope_container`, `lexical_parents`, `file_match`, `normalize_file_needle`, `select`, `resolve_target`, `join_route_path`.
 
 ### Declaration identity: fields and invariants
 
 | Field | Invariant |
 |---|---|
-| `DeclKey.path` | Repo-relative and `/`-separated, as the builder stores it; a leading `./` is part of the name. `canonical_path` gives that form. A constructor rejects any other spelling. |
+| `DeclKey.path` | Repo-relative and `/`-separated, as the builder stores it; a leading `./` is part of the name. `ecp_core::registry::os_path_to_slash` gives that form: `\` becomes `/` on Windows only, and stays a file-name character on Unix. A constructor rejects a `\` on Windows only. |
 | `DeclKey.owner` | The type, namespace or module that declares the node (meanings M1, M2 and M4 of design A §1.2). `Some("")` is `None`, as `uid::compute` already treats it. The text stays as the producer writes it, generic arguments and separators included. Identity never normalises it: the Rust `Impl` owners `Conv<u8>` and `Conv<u16>` are two owners and two uids (`test_unscoped_generic_owner_kept_as_produced`). |
 | owner match form | `owner_match_form` removes every generic argument list and the outer whitespace: `Walk<'s, 't>` gives `Walk`. Only the target resolver uses it, to compare a request segment with a path segment. It never enters a uid. |
 | `DeclKey.name` | The bare declared name, as `Node.name` stores it. |
@@ -64,7 +64,7 @@ Functions: `canonical_path`, `owner_match_form`, `scoped_uid`, `assign_file`, `p
 | Input | One `FileDecl` per declaration of one file, in source order. `parent` comes from `lexical_parents`. A parent can come before or after its children. |
 | Anchors first | A child's key hashes its parent's anchor, so the function resolves each parent chain before the child. |
 | Errors | A parent out of range or a cycle gives `BadParent`. A scoped row with an owner gives `ScopedWithOwner`. A scoped row of a kind that keeps overloads gives `ScopedOverloadKind`. |
-| `UidSlot` | Groups by base uid in source order. The first keeps the base uid. A later one of a kind that keeps overloads, or a later scoped one, gets `uid::overload(base, ordinal)` with a 1-based ordinal: `Later`. A later one of another kind is `Duplicate` and keeps the base uid, as the builder does today. |
+| `UidSlot` | Groups by base uid in source order. The first keeps the base uid. A later one gets `uid::overload(base, ordinal)` with a 1-based ordinal. The first match sets the slot: a kind that keeps overloads is `Later { reason: Overload }`; a scoped one is `Later { reason: Scoped }`; a C# declaration whose arity path no earlier one has is `Later { reason: Arity }`; a kind that merges its repeats (`uid::merges_repeats`: `Property`, `Variable`, `Const`) is `Duplicate`; any other kind is `Later { reason: Repeat }`. A `Duplicate` keeps the tombstone uid `uid::tombstone(uid::overload(base, ordinal))`, so no two tombstones share a uid. |
 | `Uniqueness` | Groups by anchor. One member: `Unique`. Several: `Shared { position, count }` for each. |
 | Positional rule | A `Shared` position proves nothing about which declaration an edit kept. It never pairs a node, and it never forms a target alone. |
 
@@ -76,7 +76,7 @@ Example: one function holds two blocks, and each block declares `h`. Both `h` ro
 
 A dirty declaration replaces a base declaration of the same file only when their anchor occurs exactly once on each side. Every other dirty declaration is unpaired. An unpaired base declaration is suppressed in the dirty view, as a deleted one is.
 
-A `Duplicate` row takes no part in pairing. The index keeps its first as the one node of that anchor, so the merged representative node pairs. The pairing cannot prove which `#[cfg]` variant that node stands for when two twins swap places. This is a limit of the tombstone model that Open point 4 owns; R-PI does not add it.
+A `Duplicate` row (a merged `Property`, `Variable` or `Const` repeat) takes no part in pairing. The index keeps its first as the one node of that anchor, so the merged representative node pairs. The pairing cannot prove which repeat that node stands for when two repeats swap places. This is a limit of the merge; R-PI does not add it.
 
 **Caveat rule.** A base declaration `b` of a dirty (not removed) path is hidden by ambiguity when all of these hold:
 
@@ -124,7 +124,7 @@ line      := 1-based decimal start line
 | `` `Walk<'s, 't>`.next `` | a `next` whose owner text is exactly `Walk<'s, 't>`. `Walk.next` matches the owners `Walk<'s, 't>` and `Walk` (`test_qualifier_literal_matches_exact_text_only`). |
 | `pad@42` | a `pad` that starts on line 42. |
 | `--kind method` | `NodeKind::from_str` of the text; an unknown kind is a syntax error. `--kind function,method` is an unknown kind: `--kind` takes one kind. |
-| `--file cmd/main.go` | `\` becomes `/`, a leading `./` goes. A resolver keeps the best tier present: `Equal`, then `Suffix` (`/needle`), then `Substring`. |
+| `--file cmd/main.go` | On Windows `\` becomes `/` (`os_path_to_slash`); on Unix `\` stays a file-name character. A leading `./` goes. A resolver keeps the best tier present: `Equal`, then `Suffix` (`/needle`), then `Substring`. |
 
 | Rule | Statement |
 |---|---|
@@ -175,7 +175,7 @@ line      := 1-based decimal start line
 |---|---|---|---|
 | uid inputs | `assign_file` through `file_identities` / `file_uids` (`ecp-core/src/analyzer/lexical.rs:44`, `:91`), one call per file; `DeclKey::uid` hashes with `uid::compute` (`ecp-core/src/uid.rs:17-27`) | builder Pass 1 (`ecp-analyzer/src/resolution/builder.rs:1096`); overlay view (`ecp-core/src/session/view.rs:378`); incremental `node_uids_for` (`ecp-cli/src/incremental.rs:285-293`); builder skip sets (`skipped_nodes`, `builder.rs:2911`); `class_membership.rs:69` | `DeclKey::unscoped(...).uid()`, equal value |
 | overload ordinal | builder (`builder.rs:1119-1127`, `SymbolTable::register_overload` at `resolution/index.rs:793`); overlay (`view.rs:378-385`) | `is_later_overload` recomputes `compute` and compares (`ecp-core/src/graph.rs:1483-1500`) | `UidSlot::Later`, same ordinal rule |
-| same identity, other kind | builder pushes a tombstone (`builder.rs:1100-1118` comment, D1 collision recovery) | the tombstone has an empty name and no symbol-table entry | `UidSlot::Duplicate`, unchanged; every tombstone of one base uid stores the same `uid::tombstone(base)`, so the uid does not separate them; see Open point 4 |
+| same identity, other kind | builder pushes a tombstone (`builder.rs:1100-1118` comment, D1 collision recovery) | the tombstone has an empty name and no symbol-table entry | `UidSlot::Duplicate` for a kind that merges its repeats; each tombstone stores `uid::tombstone(uid::overload(base, ordinal))`, so the uids are pairwise distinct; every other kind is `Later` (Open point 4) |
 | "keeps overloads" | `uid::keeps_overloads` (`uid.rs:33-35`): `Method`, `Constructor` | builder, view | used as is |
 | overlay pairing | `dirty_base_by_uid` (`view.rs:348-355`), lookup at `view.rs:388`: by stored uid, so by position for overloads | `ViewNode.replaced_base` (`view.rs:254`) | `pair_by_anchor`; a `Shared` anchor pairs nothing |
 | owner (M1, M2, M4) | parsers; `stamp_owner_class_by_span` (`ecp-analyzer/src/framework_helpers.rs:260`); Rust `enclosing_impl_type` (`rust/receiver_types.rs:286`), which strips the self type's generics; Rust `Impl` owner is the raw trait text, generics included (`rust/parser.rs:438-444`, `impl_trait_name` at `rust/receiver_types.rs:113-118`); Rust `Typedef` in an impl takes the same trait text (`rust/parser.rs:446-453`, `enclosing_impl_or_trait_context` at `rust/receiver_types.rs:258-273`) | `Node.owner_class` (`graph.rs:698-702`) | `DeclKey.owner`, text unchanged |
@@ -273,7 +273,7 @@ The `ImplTrait` text for a base node comes from the enclosing `Impl` node's owne
 | 1 | Does the discriminator enter the stored uid? | (a) anchor only; (b) the uid too | (a). The declaration's own uid stays as today for every Rust trait-impl method. The uids of scoped nodes below it still change, because they hash the anchor: see the `ImplTrait` rows of Stored data. (b) changes uids of nodes that have no defect. |
 | 2 | Who supplies `Discriminator::Signature`? | (a) a parser field per language; (b) none, and `Shared` stays | (b) for now. Java, Kotlin, C#, C++, Swift and Dart overloads stay `Shared`, so they pair nothing and need `@line` as a target. Two overloads of one owner on one line cannot be told apart by `@line` either; they get no reusable target (`test_resolve_target_overloads_on_one_line_no_reusable`). Add (a) only when a measured case needs it; (a) needs the `discriminators` table and a `GRAPH_FORMAT_VERSION` bump. |
 | 3 | What pairs a `Shared` group in the overlay? | (a) nothing; (b) equal `content_hash` first, then the one remaining pair | (a) in the first slice; the view suppresses the base members and the caveat names them. (b) needs a per-symbol hash in `FragmentSymbol` (L1 bump). `impact --baseline` already pairs closures by body hash (`impact/baseline.rs:408-444`), so (b) has a precedent. |
-| 4 | A `Duplicate` of a kind that does not keep overloads (a `#[cfg]` twin) | (a) tombstone, as today; (b) `Later` for every kind | (b), after `is_later_overload` (`graph.rs:1483`) stops recomputing `compute` and reads the slot. The twin stays findable; the review counts 15 hidden `Function` tombstones in this repo. It takes the overload uid, a stored-uid change. Owner: area 2. |
+| 4 | A `Duplicate` of a kind that does not keep overloads (a `#[cfg]` twin) | (a) tombstone, as today; (b) `Later` for every kind | Adopted: (b), except for `Property`, `Variable` and `Const`, which merge (`uid::merges_repeats`). `is_later_overload` reads the `later_nodes` bitset instead of recomputing `compute`. The twin stays findable and takes the overload uid, a stored-uid change (`GRAPH_FORMAT_VERSION` 20). |
 | 5 | Does a bare name match scoped nodes? | (a) yes, and a tie is an ambiguity; (b) no, as design A §5.5 proposes | Adopted: (a). One rule for every command. `impact helper` with a top-level and a nested `helper` refuses the ambiguity and lists `::helper` and `outer.helper` (`test_resolve_target_top_level_and_nested_helper_bare_name_ambiguous`). The constructor exception of the Bare name row keeps a bare type name on a class with constructors from being ambiguous. This departs from design A §5.5. The plan's conflict row 2-5 states it. |
 | 6 | The scope of a route key | (a) the registering file, as today; (b) the service root | (a). It keeps today's uids. Two services in one monorepo stay apart when their route files differ. |
 | 7 | Where does `ImplTrait` come from for a base node? | (a) the enclosing `Impl` node's owner, by span, at read time; (b) a stored column | (a). The text is the full trait text as `impl_trait_name` produces it, generic arguments included (`Conv<u8>`), so `impl Conv<u8> for A` and `impl Conv<u16> for A` get two anchors. `graph.bin` has no per-file node range, so the reader scans the file's nodes, as the overlay already does for a dirty file (`view.rs:348-355`). |

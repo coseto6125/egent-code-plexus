@@ -9,6 +9,7 @@
 //! not a CI gate.
 
 use clap::Args;
+use ecp_core::registry::text_path_to_slash;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::PathBuf;
 
@@ -145,7 +146,7 @@ fn pick_normalize(lang: &str) -> Normalizer {
 }
 
 fn normalize_ts(s: &str) -> String {
-    let s = s.replace('\\', "/");
+    let s = text_path_to_slash(s);
     let s = s.trim_start_matches("./").to_string();
     // Order matters: longer suffixes first so `foo.d.ts` strips to `foo`, not `foo.d`.
     let s = strip_one_of(&s, &[".d.ts", ".tsx", ".jsx", ".mjs", ".cjs", ".ts", ".js"]);
@@ -153,19 +154,19 @@ fn normalize_ts(s: &str) -> String {
 }
 
 fn normalize_py(s: &str) -> String {
-    let s = s.replace('\\', "/");
+    let s = text_path_to_slash(s);
     let s = strip_one_of(&s, &[".pyi", ".py"]);
     strip_one_of(&s, &["/__init__"])
 }
 
 fn normalize_rs(s: &str) -> String {
-    let s = s.replace('\\', "/");
+    let s = text_path_to_slash(s);
     let s = strip_one_of(&s, &[".rs"]);
     strip_one_of(&s, &["/mod", "/lib", "/main"])
 }
 
 fn normalize_passthrough(s: &str) -> String {
-    s.replace('\\', "/")
+    text_path_to_slash(s).into_owned()
 }
 
 fn strip_one_of(s: &str, suffixes: &[&str]) -> String {

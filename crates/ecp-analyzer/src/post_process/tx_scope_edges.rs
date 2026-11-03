@@ -40,6 +40,7 @@ use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
 use ecp_core::graph::{Edge, Node, RelType};
 use ecp_core::pool::{StrRef, StringPool};
+use ecp_core::registry::os_path_to_slash;
 
 /// Emit one `NodeKind::TransactionScope` node + one `OpensTxScope` edge per
 /// `RawTxScope` across all local graphs. Returns the count of emitted edges.
@@ -66,7 +67,7 @@ pub fn emit_edges(
             continue;
         }
 
-        let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
+        let path_str = os_path_to_slash(&local_graph.file_path);
         // `file_idx` on synthetic nodes mirrors the EventTopic / SchemaField
         // convention: enumeration index into `local_graphs` (= files[] in
         // the built graph), not the file's first node ID.

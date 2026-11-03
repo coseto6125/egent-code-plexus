@@ -6,9 +6,10 @@
 use ecp_analyzer::c_sharp::partial::CsharpProjects;
 use ecp_analyzer::resolution::path_aliases::PathAliases;
 use ecp_core::contracts::workspace::{
-    ConfigPresence, ConfigRead, Ecosystem, Membership, NameRank, Requirement, RequirementTarget,
-    Scope, ScopeAlias, ScopeDraft, WorkspaceFacts,
+    segment_wildcard, ConfigPresence, ConfigRead, Ecosystem, Membership, NameRank, Requirement,
+    RequirementTarget, Scope, ScopeAlias, ScopeDraft, WorkspaceFacts,
 };
+use ecp_core::registry::{is_stored_path, os_path_to_slash, text_path_to_slash};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -46,7 +47,7 @@ pub fn parse_repo_configs(repo_path: &Path, config_paths: &[String]) -> RepoConf
     for meta in &csproj_metas {
         let project_dir = Path::new(&meta.file_path)
             .parent()
-            .map(|dir| dir.to_string_lossy().replace('\\', "/"))
+            .map(|dir| os_path_to_slash(dir).into_owned())
             .unwrap_or_default();
         csharp_projects.add(&project_dir, meta.default_compile_items);
     }
@@ -84,10 +85,11 @@ fn add_project_reference_aliases(metas: &[CsprojMeta], aliases: &mut PathAliases
         for proj_ref in &meta.project_references {
             // proj_ref is a relative path like "../OtherLib/OtherLib.csproj"
             // Strip the .csproj suffix and use the directory as the alias target.
-            let ref_path = Path::new(proj_ref);
+            let ref_text = text_path_to_slash(proj_ref);
+            let ref_path = Path::new(&*ref_text);
             let dir = ref_path
                 .parent()
-                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default();
             if !dir.is_empty() {
                 // Reject ..-traversal: a malicious .csproj could otherwise
@@ -272,14 +274,19 @@ const VENDORED_DIRS: [&str; 2] = ["node_modules", "vendor"];
 /// config name of every ecosystem but Cargo (the Rust module tree reads
 /// `Cargo.toml`) and .NET (the `.csproj` scan reads those), outside a
 /// vendored directory. The name is checked first, so a source path costs
-/// one string match. Splits on `\` too, for a Windows relative path.
+/// one string match. Splits on this machine's path separators, so it takes a
+/// stored path and the OS relative path of the walk alike; on Unix a `\` is a
+/// file-name byte.
 pub fn is_workspace_config(rel_path: &str) -> bool {
-    let name = rel_path.rsplit(['/', '\\']).next().unwrap_or(rel_path);
+    let name = rel_path
+        .rsplit(std::path::is_separator)
+        .next()
+        .unwrap_or(rel_path);
     matches!(
         Ecosystem::classify_config(name),
         Some((ecosystem, _)) if !matches!(ecosystem, Ecosystem::Cargo | Ecosystem::DotNet)
     ) && !rel_path
-        .split(['/', '\\'])
+        .split(std::path::is_separator)
         .any(|segment| VENDORED_DIRS.contains(&segment))
 }
 
@@ -293,7 +300,7 @@ pub fn find_workspace_configs(repo_path: &Path) -> Vec<String> {
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let rel = entry.path().strip_prefix(repo_path).ok()?.to_str()?;
-            let rel = rel.replace('\\', "/");
+            let rel = os_path_to_slash(rel).into_owned();
             (is_workspace_config(&rel) && entry.path().is_file()).then_some(rel)
         })
         .collect();
@@ -361,7 +368,7 @@ fn scope_drafts(repo: &Path, config_paths: &[String], csproj: &[CsprojMeta]) -> 
     let mut paths: Vec<&str> = config_paths
         .iter()
         .map(String::as_str)
-        .filter(|&path| is_workspace_config(path) && resolve_rel("", path).as_deref() == Some(path))
+        .filter(|&path| is_workspace_config(path) && is_stored_path(path))
         .collect();
     paths.sort_unstable();
     paths.dedup();
@@ -762,7 +769,7 @@ fn glob_matches(glob: &str, path: &str) -> bool {
             Some((&"**", rest)) => (0..=path.len()).any(|skip| segments(rest, &path[skip..])),
             Some((head, rest)) => path
                 .split_first()
-                .is_some_and(|(first, tail)| wildcard(head, first) && segments(rest, tail)),
+                .is_some_and(|(first, tail)| segment_wildcard(head, first) && segments(rest, tail)),
         }
     }
     let glob: Vec<&str> = glob
@@ -772,26 +779,6 @@ fn glob_matches(glob: &str, path: &str) -> bool {
         .collect();
     let path: Vec<&str> = path.split('/').collect();
     segments(&glob, &path)
-}
-
-/// `pattern` with `*` wildcards against one whole segment.
-fn wildcard(pattern: &str, text: &str) -> bool {
-    let mut parts = pattern.split('*');
-    let first = parts.next().unwrap_or("");
-    let Some(mut rest) = text.strip_prefix(first) else {
-        return false;
-    };
-    let parts: Vec<&str> = parts.collect();
-    let Some((last, middle)) = parts.split_last() else {
-        return rest.is_empty();
-    };
-    for part in middle {
-        match rest.find(part) {
-            Some(at) => rest = &rest[at + part.len()..],
-            None => return false,
-        }
-    }
-    rest.len() >= last.len() && rest.ends_with(last)
 }
 
 /// The effective `compilerOptions` of one `tsconfig.json` chain.
@@ -1487,16 +1474,19 @@ static SWIFT_PATH_DEPENDENCY_RE: std::sync::LazyLock<regex::Regex> =
 /// manifest under the file stem; a referenced file that does not exist is
 /// a `Missing` config, so its appearance makes the scope stale.
 fn dotnet_scope(reader: &ConfigReader, meta: &CsprojMeta) -> Option<ScopeDraft> {
-    let manifest = resolve_rel("", &meta.file_path).filter(|path| !path.is_empty())?;
-    // The scan matches `.csproj` in any case; a C2 manifest name is lower.
-    let dotnet_name = matches!(
-        Ecosystem::classify_config(file_name(&manifest)),
-        Some((Ecosystem::DotNet, _))
-    );
-    if !dotnet_name || !is_workspace_config_dir(&manifest) {
+    let manifest = meta.file_path.as_str();
+    if !is_stored_path(manifest) {
         return None;
     }
-    let mut scope = subtree_scope(Ecosystem::DotNet, &manifest);
+    // The scan matches `.csproj` in any case; a C2 manifest name is lower.
+    let dotnet_name = matches!(
+        Ecosystem::classify_config(file_name(manifest)),
+        Some((Ecosystem::DotNet, _))
+    );
+    if !dotnet_name || !is_workspace_config_dir(manifest) {
+        return None;
+    }
+    let mut scope = subtree_scope(Ecosystem::DotNet, manifest);
     let root = scope.root.clone();
     if !meta.sdk_style {
         let mut files: Vec<String> = meta
@@ -1854,8 +1844,8 @@ fn parse_single_csproj(path: &Path, repo_root: &Path) -> Option<CsprojMeta> {
     let rel_path = path
         .strip_prefix(repo_root)
         .ok()
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|| path.to_string_lossy().replace('\\', "/"));
+        .map(|p| os_path_to_slash(p).into_owned())
+        .unwrap_or_else(|| os_path_to_slash(path).into_owned());
 
     let assembly_name = xml_first_text(&content, "AssemblyName")
         .or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()));
@@ -1918,8 +1908,8 @@ pub fn parse_single_composer_json(path: &Path, repo_root: &Path) -> Option<Compo
     let rel_path = path
         .strip_prefix(repo_root)
         .ok()
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|| path.to_string_lossy().replace('\\', "/"));
+        .map(|p| os_path_to_slash(p).into_owned())
+        .unwrap_or_else(|| os_path_to_slash(path).into_owned());
 
     let (php_version, requires) = raw.require.map_or((None, Vec::new()), |map| {
         let mut php = None;
@@ -1969,8 +1959,8 @@ pub fn parse_single_swift_package(path: &Path, repo_root: &Path) -> Option<Swift
     let rel_path = path
         .strip_prefix(repo_root)
         .ok()
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|| path.to_string_lossy().replace('\\', "/"));
+        .map(|p| os_path_to_slash(p).into_owned())
+        .unwrap_or_else(|| os_path_to_slash(path).into_owned());
 
     // `// swift-tools-version:5.9` or `// swift-tools-version: 5.9` — the
     // magic comment is conventionally on the very first line, but we scan
@@ -2570,6 +2560,34 @@ module.exports = {
             .find(|s| s.ecosystem == Ecosystem::Node)
             .unwrap();
         assert_eq!(node.aliases[0].replacements, vec!["src/b/*".to_string()]);
+    }
+
+    /// Stands for: a stored path with `\` in a directory name keeps its
+    /// spelling on Unix, where `\` is a file-name byte, so a scope covers the
+    /// real `x\pkg/...` files.
+    #[cfg(unix)]
+    #[test]
+    fn test_parse_config_rows_backslash_dir_keeps_stored_spelling_on_unix() {
+        let dir = tree(&[
+            ("x\\pkg/pyproject.toml", "[project]\nname = \"svc\"\n"),
+            (
+                "x\\pkg/Lib.csproj",
+                "<Project Sdk=\"Microsoft.NET.Sdk\" />\n",
+            ),
+        ]);
+        let configs = paths(&["x\\pkg/Lib.csproj", "x\\pkg/pyproject.toml"]);
+        let rows = parse_config_rows(dir.path(), &configs);
+        let scope = |ecosystem| {
+            rows.iter()
+                .map(|draft| &draft.scope)
+                .find(|scope| scope.ecosystem == ecosystem)
+        };
+        let python = scope(Ecosystem::Python).expect("python scope kept");
+        assert_eq!(python.root, "x\\pkg");
+        assert_eq!(python.manifest(), "x\\pkg/pyproject.toml");
+        let dotnet = scope(Ecosystem::DotNet).expect("dotnet scope kept");
+        assert_eq!(dotnet.root, "x\\pkg");
+        assert_eq!(dotnet.manifest(), "x\\pkg/Lib.csproj");
     }
 
     /// Stands for: an empty list, and a list whose only config is absent

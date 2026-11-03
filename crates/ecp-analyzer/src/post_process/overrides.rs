@@ -25,6 +25,7 @@ use ecp_core::analyzer::types::{owner_key, LocalGraph, RawFunctionMeta};
 use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
 use ecp_core::graph::{BlindSpotRecord, Edge, File, FileCategory, NodeKind, RelType};
 use ecp_core::pool::{StrRef, StringPool};
+use ecp_core::registry::os_path_to_slash;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 impl OverrideBase for DeclaredBase {
@@ -121,7 +122,7 @@ pub fn emit_edges(
     let mut gaps: FxHashMap<(u32, usize), (&'static str, String)> = FxHashMap::default();
     for (file_idx, lg) in local_graphs.iter().enumerate() {
         let file = FileOrd(file_idx as u32);
-        let path = lg.file_path.to_string_lossy().replace('\\', "/");
+        let path = os_path_to_slash(&lg.file_path);
         let Some(rules) = rules_for(symbol_table.file_language(&path)) else {
             continue;
         };

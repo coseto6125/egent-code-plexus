@@ -108,6 +108,10 @@ fn test_impact_file_flag_naming_shorter_nested_path_picks_it_not_ambiguous() {
     }
 }
 
+/// Stands for: the ambiguity message suggests only a flag that separates
+/// the candidates. Given `--file` and `--kind`, it suggests neither again;
+/// given `--file` alone, it still suggests no `--kind`, because both `dup`
+/// are functions (before 1d it said "add --kind", which separates nothing).
 #[test]
 fn test_impact_ambiguous_with_file_and_kind_given_does_not_suggest_them_again() {
     let tmp = tempfile::tempdir().unwrap();
@@ -134,7 +138,10 @@ fn test_impact_ambiguous_with_file_and_kind_given_does_not_suggest_them_again() 
     let file_only = impact(tmp.path(), &["dup", "--file", "x.ts"]);
     let stderr = String::from_utf8_lossy(&file_only.stderr);
     assert!(
-        stderr.contains("add --kind") && !stderr.contains("add --file"),
+        stderr.contains("ambiguous")
+            && !stderr.contains("add --kind")
+            && !stderr.contains("add --file")
+            && stderr.contains("file and line"),
         "{stderr}"
     );
 }

@@ -36,7 +36,7 @@ use super::view_cache::hash_part;
 use ecp_core::contracts::routing::SizeCap;
 use ecp_core::contracts::workspace::{ConfigPresence, Ecosystem, ScopeAlias, WorkspaceFacts};
 use ecp_core::graph::ArchivedZeroCopyGraph;
-use ecp_core::registry::BUILDER_FINGERPRINT;
+use ecp_core::registry::{os_path_to_slash, BUILDER_FINGERPRINT};
 use ecp_core::session::closure::{
     feeds_repo_wide, invalidation_closure_with_configs, ConfigEdits, StaleClosure,
 };
@@ -682,7 +682,7 @@ fn parse(worktree_root: &Path, paths: &[String], size_cap: SizeCap) -> (Vec<Clos
         .iter()
         .filter(|graph| !is_omitted(graph))
         .filter_map(|graph| {
-            let rel_path = graph.file_path.to_string_lossy().replace('\\', "/");
+            let rel_path = os_path_to_slash(&graph.file_path).into_owned();
             let mtime_ns = *mtimes.get(rel_path.as_str())?;
             let fragment = super::overlay_writer::archive_fragments(graph).ok()?;
             Some(ClosureEntry {
