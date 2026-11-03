@@ -11,7 +11,7 @@
 //! `trace` is a sequence of node indices into the original `nodes` slice.
 
 use crate::file_category::is_test_path;
-use crate::graph::{Edge, Node, NodeKind, RelType};
+use crate::graph::{Edge, FunctionMeta, Node, NodeKind, RelType};
 use std::collections::{HashSet, VecDeque};
 
 #[derive(Debug, Clone)]
@@ -58,10 +58,13 @@ fn is_function_like(kind: NodeKind) -> bool {
 ///
 /// `file_paths` must align with `nodes` such that `file_paths[node.file_idx]`
 /// resolves to that node's source path (used for test-file exclusion).
+/// `function_metas`, sorted by `node_idx`, marks the test functions of a
+/// production file (`#[cfg(test)]`, `@Test`): no process starts at one.
 pub fn detect_processes(
     nodes: &[Node],
     edges: &[Edge],
     file_paths: &[String],
+    function_metas: &[FunctionMeta],
     config: &ProcessConfig,
 ) -> Vec<TraceResult> {
     if nodes.is_empty() || edges.is_empty() {
@@ -90,7 +93,14 @@ pub fn detect_processes(
     }
 
     // Find entry points.
-    let entry_points = find_entry_points(nodes, &calls_fwd, &calls_rev, file_paths, config);
+    let entry_points = find_entry_points(
+        nodes,
+        &calls_fwd,
+        &calls_rev,
+        file_paths,
+        function_metas,
+        config,
+    );
     if entry_points.is_empty() {
         return Vec::new();
     }
@@ -153,6 +163,7 @@ fn find_entry_points(
     fwd: &[Vec<u32>],
     rev: &[Vec<u32>],
     file_paths: &[String],
+    function_metas: &[FunctionMeta],
     config: &ProcessConfig,
 ) -> Vec<u32> {
     let mut candidates: Vec<(u32, f64)> = Vec::new();
@@ -173,7 +184,11 @@ fn find_entry_points(
             Some(slot) => *slot.get_or_insert_with(|| is_test_path(&file_paths[file_idx])),
             None => is_test_path(""),
         };
-        if is_test {
+        if is_test
+            || function_metas
+                .binary_search_by_key(&(i as u32), |m| m.node_idx)
+                .is_ok_and(|at| function_metas[at].is_test())
+        {
             continue;
         }
         let callers = rev[i].len();
@@ -322,7 +337,7 @@ mod tests {
         ];
         let edges = vec![e(0, 1), e(1, 2), e(2, 3)];
         let cfg = ProcessConfig::default();
-        let result = detect_processes(&nodes, &edges, &["src/main.rs".to_string()], &cfg);
+        let result = detect_processes(&nodes, &edges, &["src/main.rs".to_string()], &[], &cfg);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].trace, vec![0, 1, 2, 3]);
     }
@@ -335,7 +350,13 @@ mod tests {
             n(&mut pool, "b", NodeKind::Function, 0),
         ];
         let edges = vec![e(0, 1)];
-        let result = detect_processes(&nodes, &edges, &["x.rs".into()], &ProcessConfig::default());
+        let result = detect_processes(
+            &nodes,
+            &edges,
+            &["x.rs".into()],
+            &[],
+            &ProcessConfig::default(),
+        );
         assert!(result.is_empty(), "2-step chain should not qualify");
     }
 
@@ -350,9 +371,34 @@ mod tests {
         ];
         let edges = vec![e(0, 1), e(1, 2), e(2, 3)];
         let paths = vec!["src/foo.test.rs".into(), "src/foo.rs".into()];
-        let result = detect_processes(&nodes, &edges, &paths, &ProcessConfig::default());
+        let result = detect_processes(&nodes, &edges, &paths, &[], &ProcessConfig::default());
         // Both 0→1→2→3 and 1→2→3 would be candidate traces. Test-file entry
         // excluded, only 1→2→3 survives.
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].trace[0], 1);
+    }
+
+    /// Stands for: a `#[cfg(test)]` function in a production file starts no
+    /// process, as a function in a test file does not.
+    #[test]
+    fn test_detect_processes_flagged_test_function_is_no_entry_point() {
+        let mut pool = StringPool::new();
+        let nodes = vec![
+            n(&mut pool, "test_a", NodeKind::Function, 0),
+            n(&mut pool, "real_a", NodeKind::Function, 0),
+            n(&mut pool, "real_b", NodeKind::Function, 0),
+            n(&mut pool, "real_c", NodeKind::Function, 0),
+        ];
+        let edges = vec![e(0, 1), e(1, 2), e(2, 3)];
+        let metas = [FunctionMeta {
+            node_idx: 0,
+            flags: FunctionMeta::FLAG_TEST,
+            params: Vec::new(),
+            return_type: crate::pool::StrRef::default(),
+            decorators: Vec::new(),
+        }];
+        let paths = vec!["src/foo.rs".into()];
+        let result = detect_processes(&nodes, &edges, &paths, &metas, &ProcessConfig::default());
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].trace[0], 1);
     }
@@ -373,6 +419,7 @@ mod tests {
             &nodes,
             &edges,
             &["src/x.rs".into()],
+            &[],
             &ProcessConfig::default(),
         );
         assert_eq!(result.len(), 1);
@@ -401,6 +448,7 @@ mod tests {
             &nodes,
             &edges,
             &["src/x.rs".into()],
+            &[],
             &ProcessConfig::default(),
         );
         // 0→1 dropped, so only 1→2 (2 steps, below min 3) → no traces.
@@ -431,6 +479,7 @@ mod tests {
                 &nodes,
                 &edges,
                 &["src/app.rs".to_string()],
+                &[],
                 &ProcessConfig::default(),
             )
             .into_iter()

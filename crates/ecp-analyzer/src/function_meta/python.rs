@@ -114,12 +114,9 @@ fn extract_one(
         flags |= FunctionMeta::FLAG_ABSTRACT;
     }
 
-    // is_test: file category OR name starts with `test_` OR pytest decorator found above.
-    if is_test
-        || file_category == FileCategory::Test
-        || raw.name.starts_with("test_")
-        || raw.name == "test"
-    {
+    // is_test: file category OR pytest decorator found above. A `test_` name
+    // alone is no evidence: pytest collects it only from a test file.
+    if is_test || file_category == FileCategory::Test {
         flags |= FunctionMeta::FLAG_TEST;
     }
 

@@ -366,3 +366,165 @@ fn test_impact_exclude_tests_with_only_test_callers_does_not_suggest_dead_code()
     assert!(stderr.contains("no non-test callers"), "{stderr}");
     assert!(!stderr.contains("dead code"), "{stderr}");
 }
+
+/// A Rust crate whose `src/lib.rs` holds its own `#[cfg(test)]` module, and
+/// a Python production function whose name only looks like a test.
+fn fixture_inline_tests() -> (tempfile::TempDir, tempfile::TempDir) {
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    write(
+        repo.path(),
+        "Cargo.toml",
+        "[package]\nname = \"tally\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    write(
+        repo.path(),
+        "src/lib.rs",
+        "pub fn tally() -> u32 {\n    1\n}\n\npub fn report() -> u32 {\n    tally()\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn test_tally_counts() {\n        let n = tally();\n        assert_eq!(n, 1);\n    }\n}\n",
+    );
+    write(
+        repo.path(),
+        "app/health.py",
+        "from app.util import normalize\n\n\ndef test_connection():\n    return normalize(2)\n",
+    );
+    write(
+        repo.path(),
+        "web/matcher.ts",
+        "function helper(p: string): boolean {\n    return p.length > 0;\n}\n\nexport class Matcher {\n    test(p: string): boolean {\n        return helper(p);\n    }\n}\n",
+    );
+    setup_repo(repo.path(), home.path());
+    (repo, home)
+}
+
+/// Stands for: a `#[cfg(test)]` function in a production file is a test
+/// caller, as `cypher` reports it (`is_test`), not a production caller.
+#[test]
+fn test_impact_inline_test_module_caller_tagged_test() {
+    let (repo, home) = fixture_inline_tests();
+    let json = json_of(&impact(repo.path(), home.path(), &["tally"]));
+    let mut got = callers(&json);
+    got.sort();
+    assert_eq!(
+        got,
+        vec![
+            ("report".to_string(), false),
+            ("test_tally_counts".to_string(), true)
+        ],
+        "{json}"
+    );
+}
+
+#[test]
+fn test_impact_exclude_tests_hides_inline_test_module_caller() {
+    let (repo, home) = fixture_inline_tests();
+    let json = json_of(&impact(
+        repo.path(),
+        home.path(),
+        &["tally", "--exclude-tests"],
+    ));
+    assert_eq!(
+        callers(&json),
+        vec![("report".to_string(), false)],
+        "{json}"
+    );
+    assert_eq!(json["hidden_test_callers"], 1, "{json}");
+}
+
+/// Stands for: the working-tree overlay reads the same flag: a test the
+/// edit adds to the inline module is a test caller before any reindex.
+#[test]
+fn test_impact_overlay_inline_test_module_caller_tagged_test() {
+    let (repo, home) = fixture_inline_tests();
+    write(
+        repo.path(),
+        "src/lib.rs",
+        "pub fn tally() -> u32 {\n    1\n}\n\npub fn report() -> u32 {\n    tally()\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn test_tally_counts() {\n        let n = tally();\n        assert_eq!(n, 1);\n    }\n\n    #[test]\n    fn test_tally_again() {\n        let n = tally();\n        assert_eq!(n, 1);\n    }\n}\n",
+    );
+    let json = json_of(&impact(
+        repo.path(),
+        home.path(),
+        &["tally", "--exclude-tests"],
+    ));
+    assert_eq!(
+        callers(&json),
+        vec![("report".to_string(), false)],
+        "{json}"
+    );
+    assert_eq!(json["hidden_test_callers"], 2, "{json}");
+}
+
+/// Stands for: a test-like name alone is no test evidence, so
+/// `test_connection` in `app/health.py` stays a production caller.
+#[test]
+fn test_impact_exclude_tests_keeps_test_named_production_caller() {
+    let (repo, home) = fixture_inline_tests();
+    let json = json_of(&impact(
+        repo.path(),
+        home.path(),
+        &["normalize", "--exclude-tests"],
+    ));
+    let mut got = callers(&json);
+    got.sort();
+    assert_eq!(
+        got,
+        vec![
+            ("handle".to_string(), false),
+            ("test_connection".to_string(), false)
+        ],
+        "{json}"
+    );
+    assert_eq!(json["hidden_test_callers"], 1, "{json}");
+}
+
+/// Stands for: a runner name alone is no test evidence, so the production
+/// method `Matcher.test` in `web/matcher.ts` stays a production caller.
+#[test]
+fn test_impact_exclude_tests_keeps_runner_named_production_method() {
+    let (repo, home) = fixture_inline_tests();
+    let json = json_of(&impact(
+        repo.path(),
+        home.path(),
+        &["helper", "--exclude-tests"],
+    ));
+    assert_eq!(callers(&json), vec![("test".to_string(), false)], "{json}");
+}
+
+/// Stands for: the index passes function metas to process detection, so a
+/// `#[test]` function in a production file starts no process, while the
+/// production entry it calls still does. Fails if the builder passes none.
+#[test]
+fn test_processes_inline_test_function_is_no_entry_point() {
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    write(
+        repo.path(),
+        "Cargo.toml",
+        "[package]\nname = \"chain\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    write(
+        repo.path(),
+        "src/lib.rs",
+        "pub fn step_c() -> u32 {\n    1\n}\n\npub fn step_b() -> u32 {\n    step_c()\n}\n\npub fn step_a() -> u32 {\n    step_b()\n}\n\npub fn run() -> u32 {\n    step_a()\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn checks_chain() {\n        let n = run();\n        assert_eq!(n, 1);\n    }\n}\n",
+    );
+    setup_repo(repo.path(), home.path());
+    let out = Command::new(ecp_bin())
+        .args(["processes", "--all", "--repo", ".", "--format", "json"])
+        .current_dir(repo.path())
+        .env("HOME", home.path())
+        .output()
+        .expect("processes failed to spawn");
+    assert!(
+        out.status.success(),
+        "processes failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json = json_of(&out);
+    let labels: Vec<String> = json["results"]
+        .as_array()
+        .expect("results array")
+        .iter()
+        .map(|p| p["label"].as_str().unwrap_or_default().to_lowercase())
+        .collect();
+    assert!(labels.iter().all(|l| !l.contains("checks")), "{labels:?}");
+    assert!(labels.iter().any(|l| l.starts_with("run")), "{labels:?}");
+}

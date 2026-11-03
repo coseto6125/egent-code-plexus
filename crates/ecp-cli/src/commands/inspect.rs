@@ -1,4 +1,5 @@
 use crate::commands::format::{node_kind_to_str, rel_type_to_str};
+use crate::commands::impact::bfs::merged_node_is_test;
 use crate::engine::Engine;
 use crate::output::{emit_with_caveat, OutputFormat};
 use crate::read_context::{
@@ -6,7 +7,6 @@ use crate::read_context::{
 };
 use clap::Args;
 use ecp_core::contracts::identity::{resolve_target, select, Ambiguity, TargetResolution};
-use ecp_core::file_category::is_test_path;
 use ecp_core::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
 use ecp_core::session::{MergedGraph, MergedNode};
 use ecp_core::EcpError;
@@ -66,7 +66,7 @@ pub struct InspectArgs {
     #[arg(long = "relation_types", alias = "relation-types")]
     pub relation_types: Option<String>,
 
-    /// Include edges whose target lives in a test file. Defaults to false.
+    /// Include edges whose other end is a test: a node in a test file, or a function the index flags as a test (`#[test]`, `@Test`, `[Fact]`). Defaults to false.
     #[arg(
         long = "include_tests",
         alias = "include-tests",
@@ -240,7 +240,7 @@ fn build_inspect_block(
     let node = node_at(merged, idx);
     let file_path_str = resolve_file_path(merged, &node);
 
-    let edge_keeps = |target_kind_str: &str, target_file_path: &str, rel_str: &str| -> bool {
+    let edge_keeps = |other: u32, target_kind_str: &str, target_file_path: &str, rel_str: &str| {
         if let Some(ref kinds) = kind_filter {
             if !kinds
                 .iter()
@@ -259,7 +259,7 @@ fn build_inspect_block(
                 return false;
             }
         }
-        if !include_tests && is_test_path(target_file_path) {
+        if !include_tests && merged_node_is_test(merged, other) {
             return false;
         }
         true
@@ -283,7 +283,7 @@ fn build_inspect_block(
         let rel = edge.rel_type();
         let rel_str = rel_type_to_str(rel).to_string();
 
-        if !edge_keeps(target_kind, target_file_path, &rel_str) {
+        if !edge_keeps(edge.target, target_kind, target_file_path, &rel_str) {
             continue;
         }
 
@@ -335,7 +335,7 @@ fn build_inspect_block(
 
             // For incoming edges the "target" we filter against is the OTHER end —
             // i.e. the caller / importer.
-            if !edge_keeps(source_kind, source_file_path, &rel_str) {
+            if !edge_keeps(edge.source, source_kind, source_file_path, &rel_str) {
                 continue;
             }
 
@@ -562,7 +562,7 @@ fn bfs_upstream_1hop<F>(
     edge_keeps: &F,
 ) -> Vec<serde_json::Value>
 where
-    F: Fn(&str, &str, &str) -> bool,
+    F: Fn(u32, &str, &str, &str) -> bool,
 {
     let mut parts = merged.partial_parts(idx);
     if parts.is_empty() {
@@ -596,6 +596,7 @@ where
                 continue;
             };
             if !edge_keeps(
+                edge.source,
                 node_kind_to_str(&source_kind),
                 source_file_path,
                 rel_type_to_str(rel),

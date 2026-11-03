@@ -52,6 +52,25 @@ pub(super) fn node_text<'a>(n: &Node<'_>, source: &'a [u8]) -> &'a str {
     std::str::from_utf8(&source[n.start_byte()..n.end_byte()]).unwrap_or("")
 }
 
+/// An xUnit framework runs `name` as a test: XCTest, PHPUnit and Minitest
+/// run each `test*` method of a class that extends their base class.
+/// `superclass` is the written base (`XCTestCase`, `\PHPUnit\Framework\TestCase`,
+/// `Minitest::Test`); its last segment decides.
+pub(super) fn is_xunit_test_method(name: &str, superclass: &str) -> bool {
+    let base = superclass
+        .rsplit(['\\', ':', '.'])
+        .next()
+        .unwrap_or_default()
+        .trim();
+    name.starts_with("test")
+        && (base.ends_with("TestCase") || base == "Test" || base == "IntegrationTest")
+}
+
+/// The nearest ancestor of `node` whose kind is `kind`.
+pub(super) fn ancestor_of_kind<'a>(node: &Node<'a>, kind: &str) -> Option<Node<'a>> {
+    std::iter::successors(node.parent(), Node::parent).find(|n| n.kind() == kind)
+}
+
 /// True iff any descendant (or `node` itself) has `node.kind() == kind`.
 /// Used by cpp/php/ruby extractors to detect `yield_expression`,
 /// `throw_expression`, etc. anywhere inside a fn body.

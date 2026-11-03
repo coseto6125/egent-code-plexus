@@ -37,57 +37,6 @@ pub(super) struct SymbolCoverage {
     class: CoverageClass,
 }
 
-/// Check whether a caller node is a test using FunctionMeta.is_test().
-///
-/// The archived `function_metas` vec is sorted by `node_idx`, so we use
-/// binary search. On the archived type, `flags` is `ArchivedU16` and requires
-/// `.to_native()` before bitwise ops.
-fn archived_is_test(graph: &ecp_core::graph::ArchivedZeroCopyGraph, node_idx: usize) -> bool {
-    use ecp_core::graph::FunctionMeta;
-    let target = node_idx as u32;
-    match graph
-        .function_metas
-        .binary_search_by_key(&target, |m| m.node_idx.to_native())
-    {
-        Ok(i) => graph.function_metas[i].flags.to_native() & FunctionMeta::FLAG_TEST != 0,
-        Err(_) => false,
-    }
-}
-
-/// uid → merged index of the overlay's nodes, the first node of a uid
-/// winning. Empty without an overlay.
-fn virtual_uid_index(view: Option<&OverlayView>) -> rustc_hash::FxHashMap<u64, u32> {
-    let mut index = rustc_hash::FxHashMap::default();
-    if let Some(view) = view {
-        for (idx, node) in (view.base_len()..).zip(view.virtual_nodes()) {
-            index.entry(node.uid).or_insert(idx);
-        }
-    }
-    index
-}
-
-/// Whether the caller with `uid` is a test by its `FunctionMeta` flags. A
-/// working-tree node (`virtual_idx`) reads the flags its fragment paired
-/// ([`OverlayView::function_meta`]), as the cypher executor does: a reindex
-/// stores those, never its base twin's, and a new node has no base twin.
-fn is_test_caller(
-    graph: &ecp_core::graph::ArchivedZeroCopyGraph,
-    view: Option<&OverlayView>,
-    uid_idx: &rustc_hash::FxHashMap<u64, u32>,
-    virtual_idx: &rustc_hash::FxHashMap<u64, u32>,
-    uid: u64,
-) -> bool {
-    use ecp_core::graph::FunctionMeta;
-    match (view, virtual_idx.get(&uid)) {
-        (Some(view), Some(&idx)) => view
-            .function_meta(idx)
-            .is_some_and(|meta| meta.flags & FunctionMeta::FLAG_TEST != 0),
-        _ => uid_idx
-            .get(&uid)
-            .is_some_and(|&idx| archived_is_test(graph, idx as usize)),
-    }
-}
-
 /// Classify a single symbol given its upstream callers (BFS result).
 ///
 /// A test caller tagged `requires_verification` (a heuristic or sub-0.7 edge)
@@ -97,18 +46,14 @@ fn is_test_caller(
 /// `bfs_results` holds both buckets `run_bfs` returns; the depth-0 entry is
 /// the symbol itself. Only depth > 0 entries (actual callers) are examined.
 ///
-/// `uid_idx` is the pre-built `uid → node_idx` table from
-/// [`ecp_core::graph_query::build_uid_index`], and `virtual_idx` the same
-/// table over the overlay's nodes. Building them once per coverage
-/// analysis and passing them here avoids an O(N) linear scan over all
-/// graph nodes for every BFS caller entry (T1-6 fast-path).
+/// A caller is a test caller when its row is tagged `test: true`, the tag
+/// `run_bfs` sets from the file category or the node's test flag. A coverage
+/// payload never disagrees with its own rows.
 fn classify_symbol(
     graph: &ecp_core::graph::ArchivedZeroCopyGraph,
     view: Option<&OverlayView>,
     symbol_idx: usize,
     bfs_results: &[Value],
-    uid_idx: &rustc_hash::FxHashMap<u64, u32>,
-    virtual_idx: &rustc_hash::FxHashMap<u64, u32>,
 ) -> SymbolCoverage {
     let meta = merged_node_meta(graph, view, symbol_idx);
     let uid = meta.uid.to_string();
@@ -125,17 +70,16 @@ fn classify_symbol(
         .iter()
         .filter(|e| e["depth"].as_u64().unwrap_or(0) > 0)
     {
-        // O(1) uid → node_idx via pre-built FxHashMap (T1-6 fast-path).
-        // BFS JSON stores uid as a decimal string; parse back to u64 for lookup.
-        let caller_uid = entry["uid"].as_str().unwrap_or("");
-        let is_test = caller_uid
-            .parse::<u64>()
-            .is_ok_and(|uid| is_test_caller(graph, view, uid_idx, virtual_idx, uid));
+        let is_test = entry["test"].as_bool().unwrap_or(false);
 
         if is_test && entry[REQUIRES_VERIFICATION].as_bool().unwrap_or(false) {
             unverified_test_callers += 1;
         } else if is_test {
-            let caller_name = entry["name"].as_str().unwrap_or(caller_uid).to_string();
+            let caller_name = entry["name"]
+                .as_str()
+                .or_else(|| entry["uid"].as_str())
+                .unwrap_or("")
+                .to_string();
             test_callers.push(caller_name);
         } else {
             prod_caller_count += 1;
@@ -205,17 +149,11 @@ pub(super) fn coverage_analyses(
     bfs_by_symbol: &[(usize, Vec<Value>)],
     opts: &WalkOpts<'_>,
 ) -> Vec<SymbolCoverage> {
-    // Build uid → node_idx once for the whole analysis. classify_symbol
-    // needs to reverse-look-up caller uids (from BFS JSON) back to node
-    // indices to call archived_is_test; without this table each caller
-    // entry would do an O(N) linear scan. (T1-6 fast-path)
-    let uid_idx = ecp_core::graph_query::build_uid_index(graph);
-    let virtual_idx = virtual_uid_index(view);
     bfs_by_symbol
         .iter()
         .map(|(idx, bfs)| {
             let coverage_bfs = coverage_bfs_for_symbol(graph, view, *idx, bfs, opts);
-            classify_symbol(graph, view, *idx, &coverage_bfs, &uid_idx, &virtual_idx)
+            classify_symbol(graph, view, *idx, &coverage_bfs)
         })
         .collect()
 }
@@ -273,101 +211,40 @@ pub(super) fn build_coverage_json(analyses: Vec<SymbolCoverage>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ecp_core::graph::{ArchivedZeroCopyGraph, FunctionMeta, NodeKind};
+    use ecp_core::graph::ArchivedZeroCopyGraph;
     use ecp_core::graph_fixture::GraphFixture;
-    use ecp_core::session::view::{OverlayFileInput, OverlaySymbol};
 
-    const DIRTY: &str = "src/dirty.rs";
-
-    fn function(name: &str, lines: (u32, u32), flags: u16) -> OverlaySymbol {
-        OverlaySymbol {
-            is_exported: false,
-            name: name.to_string(),
-            kind: NodeKind::Function,
-            owner_class: None,
-            start_line: lines.0,
-            end_line: lines.1,
-            start_column: 0,
-            end_column: 0,
-            calls: vec!["target".to_string()],
-            heritage: Vec::new(),
-            variant_refs: Vec::new(),
-            return_type: None,
-            generic_arity: 0,
-            flags: Some(flags),
-            decorators: Vec::new(),
-            params: Vec::new(),
-        }
-    }
-
-    fn caller(uid: u64, name: &str) -> Value {
-        json!({ "uid": uid.to_string(), "name": name, "depth": 1 })
-    }
-
-    /// Base nodes: 0 `target` (src/lib.rs) · 1 `checks` (dirty), archived
-    /// with no test flag · 2 `was_test` (dirty), archived as a test. The
-    /// dirty file now marks `checks` a test, adds the test `fresh` (no base
-    /// twin), and unmarks `was_test`. Each caller reads its fragment's
-    /// flags, as a reindex stores them; without the overlay each reads the
-    /// archived ones.
-    #[test]
-    fn test_classify_symbol_dirty_callers_read_fragment_test_flags() {
-        let mut fx = GraphFixture::new();
-        let target = fx.func("src/lib.rs", "target");
-        let checks = fx.func(DIRTY, "checks");
-        let was_test = fx.func(DIRTY, "was_test");
-        fx.function_meta(checks, 0, &[]);
-        fx.function_meta(was_test, FunctionMeta::FLAG_TEST, &[]);
-        let bytes = fx.into_bytes();
-        let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
-        let input = OverlayFileInput {
-            parsed_language: None,
-            rel_path: DIRTY.to_string(),
-            symbols: vec![
-                function("checks", (1, 3), FunctionMeta::FLAG_TEST),
-                function("fresh", (5, 7), FunctionMeta::FLAG_TEST),
-                function("was_test", (9, 11), 0),
-            ],
-            imports: Vec::new(),
-            export_aliases: Vec::new(),
-        };
-        let view = OverlayView::build(graph, std::slice::from_ref(&input)).expect("a dirty file");
-        let base_len = view.base_len();
-        let uid_of = |offset: u32| view.node(base_len + offset).expect("virtual node").uid;
-        let callers = [
-            caller(uid_of(0), "checks"),
-            caller(uid_of(1), "fresh"),
-            caller(uid_of(2), "was_test"),
-        ];
-        assert_eq!(uid_of(0), graph.nodes[checks as usize].uid.to_native());
-        let uid_idx = ecp_core::graph_query::build_uid_index(graph);
-
-        let overlay = classify_symbol(
-            graph,
-            Some(&view),
-            target as usize,
-            &callers,
-            &uid_idx,
-            &virtual_uid_index(Some(&view)),
-        );
-        assert_eq!(overlay.test_callers, ["checks", "fresh"]);
-        assert_eq!(overlay.prod_caller_count, 1);
-
-        let base = classify_symbol(
-            graph,
-            None,
-            target as usize,
-            &[callers[0].clone(), callers[2].clone()],
-            &uid_idx,
-            &virtual_uid_index(None),
-        );
-        assert_eq!(base.test_callers, ["was_test"]);
-        assert_eq!(base.prod_caller_count, 1);
+    fn caller(uid: u64, name: &str, test: bool) -> Value {
+        json!({ "uid": uid.to_string(), "name": name, "depth": 1, "test": test })
     }
 
     fn tagged(mut entry: Value, requires_verification: bool) -> Value {
         entry[REQUIRES_VERIFICATION] = json!(requires_verification);
         entry
+    }
+
+    /// Stands for: a caller is a test caller exactly when its row says
+    /// `test: true`. The coverage payload never disagrees with its rows.
+    #[test]
+    fn test_classify_symbol_reads_row_test_tag_counts_tagged_rows_as_test_callers() {
+        let mut fx = GraphFixture::new();
+        let target = fx.func("src/lib.rs", "target");
+        let bytes = fx.into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+
+        let result = classify_symbol(
+            graph,
+            None,
+            target as usize,
+            &[
+                caller(1, "checks", true),
+                caller(2, "fresh", true),
+                caller(3, "prod", false),
+                json!({ "uid": "4", "name": "untagged", "depth": 1 }),
+            ],
+        );
+        assert_eq!(result.test_callers, ["checks", "fresh"]);
+        assert_eq!(result.prod_caller_count, 2);
     }
 
     /// Stands for: a test caller behind a sub-0.7 edge is no coverage. It is
@@ -378,29 +255,13 @@ mod tests {
     fn test_classify_symbol_tagged_test_callers_are_not_coverage() {
         let mut fx = GraphFixture::new();
         let target = fx.func("src/lib.rs", "target");
-        let sure = fx.func("tests/a.rs", "sure");
-        let guess = fx.func("tests/b.rs", "guess");
-        let prod = fx.func("src/p.rs", "prod");
-        fx.function_meta(sure, FunctionMeta::FLAG_TEST, &[]);
-        fx.function_meta(guess, FunctionMeta::FLAG_TEST, &[]);
         let bytes = fx.into_bytes();
         let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
-        let uid = |idx: u32| graph.nodes[idx as usize].uid.to_native();
-        let uid_idx = ecp_core::graph_query::build_uid_index(graph);
-        let classify = |callers: &[Value]| {
-            classify_symbol(
-                graph,
-                None,
-                target as usize,
-                callers,
-                &uid_idx,
-                &virtual_uid_index(None),
-            )
-        };
+        let classify = |callers: &[Value]| classify_symbol(graph, None, target as usize, callers);
 
         let guess_only = classify(&[
-            tagged(caller(uid(guess), "guess"), true),
-            tagged(caller(uid(prod), "prod"), true),
+            tagged(caller(2, "guess", true), true),
+            tagged(caller(3, "prod", false), true),
         ]);
         assert!(guess_only.test_callers.is_empty());
         assert_eq!(guess_only.test_caller_count, 0);
@@ -409,9 +270,9 @@ mod tests {
         assert_eq!(guess_only.class, CoverageClass::Uncovered);
 
         let mixed = classify(&[
-            tagged(caller(uid(sure), "sure"), false),
-            tagged(caller(uid(guess), "guess"), true),
-            caller(uid(prod), "prod"),
+            tagged(caller(1, "sure", true), false),
+            tagged(caller(2, "guess", true), true),
+            caller(3, "prod", false),
         ]);
         assert_eq!(mixed.test_callers, ["sure"]);
         assert_eq!(mixed.unverified_test_callers, 1);
@@ -431,24 +292,11 @@ mod tests {
     fn test_classify_symbol_only_tagged_test_caller_is_uncovered_not_orphan() {
         let mut fx = GraphFixture::new();
         let target = fx.func("src/lib.rs", "target");
-        let guess = fx.func("tests/b.rs", "guess");
-        fx.function_meta(guess, FunctionMeta::FLAG_TEST, &[]);
         let bytes = fx.into_bytes();
         let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
-        let uid_idx = ecp_core::graph_query::build_uid_index(graph);
-        let classify = |callers: &[Value]| {
-            classify_symbol(
-                graph,
-                None,
-                target as usize,
-                callers,
-                &uid_idx,
-                &virtual_uid_index(None),
-            )
-        };
-        let guess_uid = graph.nodes[guess as usize].uid.to_native();
+        let classify = |callers: &[Value]| classify_symbol(graph, None, target as usize, callers);
 
-        let tagged_only = classify(&[tagged(caller(guess_uid, "guess"), true)]);
+        let tagged_only = classify(&[tagged(caller(2, "guess", true), true)]);
         assert_eq!(tagged_only.unverified_test_callers, 1);
         assert_eq!(tagged_only.class, CoverageClass::Uncovered);
         assert_eq!(classify(&[]).class, CoverageClass::Orphan);

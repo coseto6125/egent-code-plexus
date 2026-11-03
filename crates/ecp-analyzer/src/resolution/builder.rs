@@ -611,6 +611,7 @@ impl GraphBuilder {
             &nodes,
             &edges,
             &file_paths,
+            &function_metas,
             &ecp_core::algorithms::process_trace::ProcessConfig::default(),
         );
 

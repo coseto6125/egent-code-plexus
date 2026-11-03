@@ -177,7 +177,13 @@ use std::path::Path;
 /// `def f` twice, `#ifdef` twins, a repeated type) keeps a node of its own
 /// under an overload uid, and each merged repeat's tombstone uid is unique;
 /// a schema49 graph stores those repeats as tombstones of one shared uid.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema50");
+/// schema51: a name right after a `.` inside a Rust macro argument
+/// (`format!("{}", parts.join(","))`) is a member name, not a bare value; a
+/// schema50 graph holds false `function_reference` / `value_read` edges for it.
+/// A test-like name alone (`test_x`, `testFoo`, `TEST_X`) no longer sets
+/// `FunctionMeta::FLAG_TEST` outside a test file; a schema50 graph flags
+/// production functions such as `testUrlMatchesGlob`.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema51");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

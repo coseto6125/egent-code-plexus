@@ -22,8 +22,8 @@ ecp path <FROM> <TO> [--direction down] [--depth 8] [--repo <PATH>]
 - `--depth`: maximum hops searched. Default 8.
 - `--relation_types calls,extends`: restrict which edges may be steps. Default
   is every non-containment relation.
-- `--include-tests`: allow test files on the route. Off by default, so a
-  production path is not routed through a test helper that calls both ends.
+- `--include-tests`: allow tests on the route: nodes in test files and functions
+  the index flags as tests. Off by default, so a production path is not routed through a test helper that calls both ends.
 - `--min-confidence 0.8`: drop low-confidence edges. Default 0.0 is
   recall-first, matching `ecp impact`. Values outside 0.0–1.0 are rejected
   rather than filtering every edge into a `found: false` you cannot tell from

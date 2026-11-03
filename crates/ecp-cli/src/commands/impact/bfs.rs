@@ -3,7 +3,7 @@ use crate::commands::format::{kind_to_str, node_kind_to_str, rel_type_to_str};
 use ecp_core::contracts::raw_records::Evidence;
 use ecp_core::file_category::is_test_path;
 use ecp_core::file_category::Language;
-use ecp_core::graph::{ArchivedFileCategory, RelType};
+use ecp_core::graph::{ArchivedFileCategory, FunctionMeta, RelType};
 use ecp_core::session::{MergedEdge, MergedGraph, OverlayView};
 use rustc_hash::FxHashMap;
 use serde_json::{json, Value};
@@ -43,9 +43,9 @@ pub(super) fn merged_node_meta(
 ///
 /// Two exclusions, the same two `run_bfs` applies while it emits: synthetic
 /// nodes (`Decorates` can reach an Annotation at SYNTHETIC_FILE_IDX) have no
-/// file:line to report, and test files stay out unless asked for. Virtual
-/// overlay nodes come from freshly parsed source, never from synthetic
-/// emission, so only the test-path check applies to them.
+/// file:line to report, and test nodes ([`base_node_is_test`]) stay out
+/// unless asked for. Virtual overlay nodes come from freshly parsed source,
+/// never from synthetic emission, so only the test check applies to them.
 ///
 /// **This mirrors the guard `run_bfs` keeps inline, deliberately** — routing
 /// `run_bfs` through it measured ~2% slower on the vscode corpus, and
@@ -54,8 +54,8 @@ pub(super) fn merged_node_meta(
 /// copy and run `path_walks_the_same_graph_as_impact` in
 /// `tests/path_query.rs`, which holds the two together.
 ///
-/// Base nodes read the persisted `File.category`; overlay nodes carry only
-/// their path and classify it with the same function the indexer used.
+/// A test node is one in a test file or one whose `FunctionMeta` carries
+/// `FLAG_TEST` ([`base_node_is_test`], [`virtual_node_is_test`]).
 fn node_traversable(
     graph: &ecp_core::graph::ArchivedZeroCopyGraph,
     view: Option<&OverlayView>,
@@ -67,17 +67,59 @@ fn node_traversable(
         if !node.has_owning_file() {
             return false;
         }
-        include_tests || !base_file_is_test(graph, node.file_idx.to_native() as usize)
+        include_tests || !base_node_is_test(graph, idx)
     } else {
-        let vn = view
-            .and_then(|v| v.node(idx as u32))
-            .expect("virtual index probed without a view");
-        include_tests || !is_test_path(&vn.rel_path)
+        let view = view.expect("virtual index probed without a view");
+        include_tests || !virtual_node_is_test(view, idx as u32)
     }
 }
 
-fn base_file_is_test(graph: &ecp_core::graph::ArchivedZeroCopyGraph, file_idx: usize) -> bool {
-    matches!(graph.files[file_idx].category, ArchivedFileCategory::Test)
+/// A base node is a test when its file is a test file or its own
+/// `FunctionMeta` carries `FLAG_TEST`: a `#[cfg(test)]` function in a
+/// production file, which `cypher` reports as `is_test` too. A synthetic
+/// node has no file.
+fn base_node_is_test(graph: &ecp_core::graph::ArchivedZeroCopyGraph, idx: usize) -> bool {
+    let node = &graph.nodes[idx];
+    (node.has_owning_file()
+        && matches!(
+            graph.files[node.file_idx.to_native() as usize].category,
+            ArchivedFileCategory::Test
+        ))
+        || base_meta_is_test(graph, idx)
+}
+
+/// [`base_node_is_test`] or [`virtual_node_is_test`] for a merged-space
+/// index: the test rule `impact` walks by, for `inspect` to filter by.
+pub(crate) fn merged_node_is_test(merged: &MergedGraph<'_>, idx: u32) -> bool {
+    match merged.view() {
+        Some(view) if idx >= merged.base_len() => virtual_node_is_test(view, idx),
+        _ => base_node_is_test(merged, idx as usize),
+    }
+}
+
+/// Whether the base node's `FunctionMeta` carries `FLAG_TEST`: the dense
+/// `node_flags` byte, else the sorted `function_metas` table (a graph
+/// without `node_flags`).
+fn base_meta_is_test(graph: &ecp_core::graph::ArchivedZeroCopyGraph, idx: usize) -> bool {
+    match graph.node_flags.get(idx) {
+        Some(&flags) => u16::from(flags) & FunctionMeta::FLAG_TEST != 0,
+        None => graph
+            .function_metas
+            .binary_search_by_key(&(idx as u32), |m| m.node_idx.to_native())
+            .is_ok_and(|i| {
+                graph.function_metas[i].flags.to_native() & FunctionMeta::FLAG_TEST != 0
+            }),
+    }
+}
+
+/// [`base_node_is_test`] for an overlay node: its path, then the flags its
+/// fragment paired.
+fn virtual_node_is_test(view: &OverlayView, idx: u32) -> bool {
+    let vn = view.node(idx).expect("virtual index probed without a node");
+    is_test_path(&vn.rel_path)
+        || view
+            .function_meta(idx)
+            .is_some_and(|meta| meta.flags & FunctionMeta::FLAG_TEST != 0)
 }
 
 /// The row key that tags a caller reached through an edge to verify.
@@ -526,7 +568,7 @@ fn constructor_seeds(merged: &MergedGraph<'_>, start_idx: u32, direction: &Direc
 /// - `hidden_heuristic_edges`: heuristic edges skipped when `include_heuristic`
 ///   is false. These are the structural signal surfaced as
 ///   `hidden_heuristic_edges: N` in the output payload.
-/// - `hidden_test_callers`: test-file nodes reached but dropped because
+/// - `hidden_test_callers`: test nodes reached but dropped because
 ///   `include_tests` is false. Each node counts once (the visited set). The
 ///   depth-0 target is never filtered, so it is never counted.
 ///
@@ -669,7 +711,7 @@ pub(super) fn run_bfs<'g>(
                 continue;
             }
             let file_idx = curr_node.file_idx.to_native() as usize;
-            is_test = base_file_is_test(graph, file_idx);
+            is_test = base_node_is_test(graph, curr_idx);
             // Depth 0 is the target itself, never a caller to filter.
             if is_test && !include_tests && curr_depth > 0 {
                 hidden_test_callers += 1;
@@ -692,7 +734,8 @@ pub(super) fn run_bfs<'g>(
             if !vn.has_owning_file() {
                 continue;
             }
-            is_test = is_test_path(&vn.rel_path);
+            is_test =
+                virtual_node_is_test(view.expect("a virtual node has a view"), curr_idx as u32);
             if is_test && !include_tests && curr_depth > 0 {
                 hidden_test_callers += 1;
                 continue;

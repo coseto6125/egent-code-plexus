@@ -7,8 +7,8 @@
 //!   `raise "must implement"`. This is a convention, not authoritative — documented as such.
 //! - `is_generator`: method body contains `yield` (Ruby block-based iteration).
 //! - `is_extern`: always false.
-//! - `is_test`: method in RSpec `it`/`specify`/`describe` OR file in test/spec directory
-//!   (FileCategory::Test) OR method name starts with `test_` (Minitest convention).
+//! - `is_test`: file in test/spec directory (FileCategory::Test), or a `test_*`
+//!   method of a `Minitest::Test` / `*TestCase` subclass.
 //! - visibility: track `private`/`protected`/`public` visibility-modifier sections; default = public.
 //!   NOTE: Ruby visibility is a method call (`private; def foo`) not a syntactic modifier on the
 //!   def node. We detect `singleton_class` wrappers for is_static; simple visibility-modifier
@@ -72,12 +72,16 @@ fn extract_one(
         flags |= FunctionMeta::FLAG_ABSTRACT;
     }
 
-    // is_test: FileCategory::Test OR name starts with `test_` (Minitest).
-    // RSpec `it`/`specify` blocks are captured as Method nodes when inside describe.
-    if file_category == FileCategory::Test
-        || raw.name.starts_with("test_")
-        || matches!(raw.name.as_str(), "it" | "specify" | "example")
-    {
+    // is_test: FileCategory::Test, or a `test_*` method of a class that extends
+    // `Minitest::Test` / `ActiveSupport::TestCase`. The name alone marks no
+    // production method.
+    let in_test_case = super::ancestor_of_kind(fn_node, "class")
+        .and_then(|class| class.child_by_field_name("superclass"))
+        .is_some_and(|base| {
+            let written = node_text(&base, source).trim_start_matches('<');
+            super::is_xunit_test_method(&raw.name, written)
+        });
+    if file_category == FileCategory::Test || in_test_case {
         flags |= FunctionMeta::FLAG_TEST;
     }
 

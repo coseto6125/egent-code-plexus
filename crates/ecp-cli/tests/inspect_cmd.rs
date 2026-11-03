@@ -787,3 +787,51 @@ export function prod_caller() {
         );
     }
 }
+
+/// Stands for: `inspect` drops test callers by the rule `impact` walks by,
+/// so a `#[cfg(test)]` function in `src/lib.rs` is a test caller.
+#[test]
+fn inspect_default_drops_inline_test_module_caller() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    write(
+        repo,
+        "Cargo.toml",
+        "[package]\nname = \"tally\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    write(
+        repo,
+        "src/lib.rs",
+        "pub fn tally() -> u32 {\n    1\n}\n\npub fn report() -> u32 {\n    tally()\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn test_tally_counts() {\n        let n = tally();\n        assert_eq!(n, 1);\n    }\n}\n",
+    );
+    init_and_analyze(repo);
+    let names = |json: &serde_json::Value| -> Vec<String> {
+        let mut names: Vec<String> = json["incoming"]["calls"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap_or_default().to_string())
+            .collect();
+        names.sort();
+        names
+    };
+    let default = run_json(repo, &["inspect", "--name", "tally", "--format", "json"]);
+    assert_eq!(names(&default), ["report"], "{default}");
+    let with_tests = run_json(
+        repo,
+        &[
+            "inspect",
+            "--name",
+            "tally",
+            "--include_tests",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(
+        names(&with_tests),
+        ["report", "test_tally_counts"],
+        "{with_tests}"
+    );
+}

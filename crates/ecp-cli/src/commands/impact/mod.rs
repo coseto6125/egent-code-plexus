@@ -94,14 +94,16 @@ pub struct ImpactArgs {
     #[arg(long, alias = "min_confidence")]
     pub min_confidence: Option<f32>,
 
-    /// Test-file callers are listed by default, tagged `test: true`, since a
-    /// rename breaks them too. This flag is kept for old callers; on its own
+    /// Test callers are listed by default, tagged `test: true`, since a rename
+    /// breaks them too. A test caller sits in a test file or carries a test
+    /// attribute (`#[test]`, `@Test`, `[Fact]`); a test-like name alone is
+    /// none. This flag is kept for old callers; on its own
     /// it changes one thing: `--baseline` also treats changed test files as
     /// changed symbols.
     #[arg(long, aliases = ["include_tests", "includeTests"], default_value_t = false)]
     pub include_tests: bool,
 
-    /// Drop test-file callers; the payload reports `hidden_test_callers: N`.
+    /// Drop test callers; the payload reports `hidden_test_callers: N`.
     #[arg(long, aliases = ["exclude_tests", "excludeTests"], conflicts_with_all = ["include_tests", "test_coverage"])]
     pub exclude_tests: bool,
 
@@ -208,7 +210,7 @@ pub struct ImpactArgs {
 }
 
 impl ImpactArgs {
-    /// Whether the walk lists test-file nodes. `--test-coverage` needs test
+    /// Whether the walk lists test nodes (in a test file, or flagged as a test by the index). `--test-coverage` needs test
     /// callers to classify coverage, and clap rejects it beside
     /// `--exclude-tests`.
     pub(crate) fn walks_tests(&self) -> bool {
@@ -240,7 +242,7 @@ struct ImpactHints {
     hidden_edges: u64,
     /// Heuristic edges hidden by the is_heuristic() filter (T-H1).
     hidden_heuristic_edges: u64,
-    /// Test-file callers dropped by `--exclude-tests`.
+    /// Test callers dropped by `--exclude-tests`.
     hidden_test_callers: u64,
     /// Payload caveat, merged with `Engine::caveat()` into the `result`
     /// field by `run`. Symbol mode: the target name collides with other

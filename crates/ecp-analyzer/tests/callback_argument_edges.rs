@@ -1715,3 +1715,209 @@ fn test_value_read_python_module_variable_without_functions_returns_edge() {
         vec![r("app.py", "A", VALUE_READ, SAME_FILE)]
     );
 }
+
+// ---- A method named like a function ----
+//
+// `parts.join(",")` passed as an argument calls a method of `parts`: the
+// name after the `.` never binds a free `join` the file declares. Rust
+// macro arguments are a token tree with no member node, so there the `.`
+// token alone marks the member name.
+
+#[test]
+fn test_function_reference_typescript_method_call_argument_returns_no_edge() {
+    assert_no_ref(
+        &TypeScriptProvider::new().unwrap(),
+        "a.ts",
+        "function join(a: string): string { return a; }\n\nexport function wire(parts: string[]): void {\n    console.log(parts.join(\",\"));\n}\n",
+        "wire",
+    );
+}
+
+#[test]
+fn test_function_reference_javascript_method_call_argument_returns_no_edge() {
+    assert_no_ref(
+        &JavaScriptProvider::new().unwrap(),
+        "a.js",
+        "function join(a) { return a; }\n\nexport function wire(parts) {\n    console.log(parts.join(\",\"));\n}\n",
+        "wire",
+    );
+}
+
+#[test]
+fn test_function_reference_python_method_call_argument_returns_no_edge() {
+    assert_no_ref(
+        &PythonProvider::new().unwrap(),
+        "a.py",
+        "def join(a):\n    return a\n\n\ndef wire(parts):\n    print(\",\".join(parts))\n",
+        "wire",
+    );
+}
+
+#[test]
+fn test_function_reference_java_method_call_argument_returns_no_edge() {
+    assert_no_ref(
+        &JavaProvider::new().unwrap(),
+        "A.java",
+        "class A {\n    static String join(String a) { return a; }\n\n    void wire(Parts parts) {\n        System.out.println(parts.join(\",\"));\n    }\n}\n",
+        "wire",
+    );
+}
+
+#[test]
+fn test_function_reference_kotlin_method_call_argument_returns_no_edge() {
+    assert_no_ref(
+        &KotlinProvider::new().unwrap(),
+        "a.kt",
+        "fun join(a: String): String = a\n\nfun wire(parts: Parts) {\n    println(parts.join(\",\"))\n}\n",
+        "wire",
+    );
+}
+
+#[test]
+fn test_function_reference_csharp_method_call_argument_returns_no_edge() {
+    assert_no_ref(
+        &CSharpProvider::new().unwrap(),
+        "A.cs",
+        "class A {\n    static string join(string a) => a;\n\n    void wire(Parts parts) {\n        System.Console.WriteLine(parts.join(\",\"));\n    }\n}\n",
+        "wire",
+    );
+}
+
+#[test]
+fn test_function_reference_go_method_call_argument_returns_no_edge() {
+    assert_no_ref(
+        &GoProvider::new().unwrap(),
+        "a.go",
+        "package a\n\nimport \"fmt\"\n\nfunc join(a string) string { return a }\n\nfunc wire(parts Parts) {\n\tfmt.Println(parts.join(\",\"))\n}\n",
+        "wire",
+    );
+}
+
+#[test]
+fn test_function_reference_rust_method_call_argument_returns_no_edge() {
+    assert_no_ref(
+        &RustProvider::new().unwrap(),
+        "src/lib.rs",
+        "fn join(a: &str) -> String {\n    a.to_string()\n}\n\npub fn wire(parts: &[String]) -> usize {\n    std::cmp::max(parts.join(\",\").len(), 0)\n}\n",
+        "wire",
+    );
+}
+
+/// `format!` and `vec!` arguments: `parts.join` and `d.join` are method
+/// calls, so the private `join` gets no reference.
+#[test]
+fn test_function_reference_rust_method_call_in_macro_returns_no_edge() {
+    assert_no_ref(
+        &RustProvider::new().unwrap(),
+        "src/lib.rs",
+        "fn join(a: &str) -> String {\n    a.to_string()\n}\n\npub fn wire(parts: &[String], d: &std::path::Path) -> (String, Vec<std::path::PathBuf>) {\n    (format!(\"x{}\", parts.join(\",\")), vec![d.join(\"x\")])\n}\n",
+        "wire",
+    );
+}
+
+/// A comment between the `.` and the method name changes nothing.
+#[test]
+fn test_function_reference_rust_method_call_after_comment_in_macro_returns_no_edge() {
+    assert_no_ref(
+        &RustProvider::new().unwrap(),
+        "src/lib.rs",
+        "fn join(a: &str) -> String {\n    a.to_string()\n}\n\npub fn wire(parts: &[String]) -> String {\n    format!(\"x{}\", parts./* sep */join(\",\"))\n}\n",
+        "wire",
+    );
+}
+
+/// A `$( .. )*` repetition in a `macro_rules!` body holds bare tokens too.
+#[test]
+fn test_function_reference_rust_method_call_in_macro_repetition_returns_no_edge() {
+    assert_no_ref(
+        &RustProvider::new().unwrap(),
+        "src/lib.rs",
+        "fn join(a: &str) -> String {\n    a.to_string()\n}\n\npub fn wire(parts: &[String]) -> String {\n    macro_rules! joined {\n        ($($p:expr),*) => { String::new() $( + &$p.join(\",\") )* };\n    }\n    joined!(parts)\n}\n",
+        "wire",
+    );
+}
+
+/// A bare name in a macro argument still names the function.
+#[test]
+fn test_function_reference_rust_bare_name_in_macro_returns_edge() {
+    assert_same_file_ref(
+        &RustProvider::new().unwrap(),
+        "src/lib.rs",
+        "fn join(a: &str) -> String {\n    a.to_string()\n}\n\npub fn wire() -> Vec<fn(&str) -> String> {\n    vec![join]\n}\n",
+        "wire",
+        "join",
+    );
+}
+
+/// `c.LIMIT` in a `format!` argument reads a field, not the constant.
+#[test]
+fn test_value_read_rust_field_in_macro_returns_no_edge() {
+    let g = graph(
+        &RustProvider::new().unwrap(),
+        &[(
+            "src/lib.rs",
+            "const LIMIT: u32 = 3;\n\npub struct Cfg {\n    pub LIMIT: u32,\n}\n\npub fn wire(c: &Cfg) -> String {\n    format!(\"{}\", c.LIMIT)\n}\n",
+        )],
+    );
+    assert_eq!(value_reads(&g, "wire"), none());
+}
+
+#[test]
+fn test_function_reference_php_method_call_argument_returns_no_edge() {
+    assert_no_ref(
+        &PhpProvider::new().unwrap(),
+        "p.php",
+        "<?php\nfunction join($a) { return $a; }\n\nfunction wire($parts) {\n    echo strlen($parts->join(\",\"));\n}\n",
+        "wire",
+    );
+}
+
+#[test]
+fn test_function_reference_ruby_method_call_argument_returns_no_edge() {
+    assert_no_ref(
+        &RubyProvider::new().unwrap(),
+        "a.rb",
+        "def join(a)\n  a\nend\n\ndef wire(parts)\n  puts(parts.join(\",\"))\nend\n",
+        "wire",
+    );
+}
+
+#[test]
+fn test_function_reference_swift_method_call_argument_returns_no_edge() {
+    assert_no_ref(
+        &SwiftProvider::new().unwrap(),
+        "a.swift",
+        "func join(_ a: String) -> String { a }\n\nfunc wire(parts: Parts) {\n    print(parts.join(\",\"))\n}\n",
+        "wire",
+    );
+}
+
+#[test]
+fn test_function_reference_c_member_call_argument_returns_no_edge() {
+    assert_no_ref(
+        &CProvider::new().unwrap(),
+        "a.c",
+        "#include <stdio.h>\n\nstatic int join(int a) { return a; }\n\nstruct S { int (*join)(int); };\n\nvoid wire(struct S s) {\n    printf(\"%d\", s.join(1));\n}\n",
+        "wire",
+    );
+}
+
+#[test]
+fn test_function_reference_cpp_method_call_argument_returns_no_edge() {
+    assert_no_ref(
+        &CppProvider::new().unwrap(),
+        "a.cpp",
+        "int join(int a) { return a; }\n\nvoid wire(V v) {\n    print(v.join(1));\n}\n",
+        "wire",
+    );
+}
+
+#[test]
+fn test_function_reference_dart_method_call_argument_returns_no_edge() {
+    assert_no_ref(
+        &DartProvider::new().unwrap(),
+        "a.dart",
+        "String join(String a) => a;\n\nvoid wire(List<String> parts) {\n  print(parts.join(\",\"));\n}\n",
+        "wire",
+    );
+}
