@@ -4201,8 +4201,11 @@ struct MergedRows {
     /// The file's first edge in the buffer.
     file_start: usize,
     /// The keys of the file's edges before `.1`.
-    seen: Option<(FxHashSet<(u32, u32, u8)>, usize)>,
+    seen: Option<(FxHashSet<EdgeKey>, usize)>,
 }
+
+/// `(source, target, rel)` of an edge.
+type EdgeKey = (u32, u32, u8);
 
 impl MergedRows {
     fn new(file_start: usize) -> Self {
