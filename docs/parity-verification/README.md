@@ -197,7 +197,7 @@ done
 # Step 7（若有 bug）: 修 parser 並寫 regression test
 $EDITOR crates/ecp-analyzer/src/<lang>/queries.scm
 $EDITOR crates/ecp-analyzer/tests/<lang>_<dimension>.rs
-cargo test -p ecp-analyzer --test <lang>_<dimension>
+cargo test -p ecp-analyzer --test it <lang>_<dimension>::
 
 # Step 8: 重 index + 重 dump + 重 aggregate 確認 real_ref 下降
 ecp admin index --repo /path/.sample_repo --force

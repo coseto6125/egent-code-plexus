@@ -23,8 +23,12 @@ fn test_it_every_test_file_is_registered_in_one_target() {
         .filter_map(|n| n.strip_suffix(".rs").map(str::to_owned))
         .filter(|stem| stem != "it")
         .filter(|stem| {
-            !root.lines().any(|l| l == format!("mod {stem};"))
-                && !manifest.contains(&format!("path = \"tests/{stem}.rs\""))
+            !root
+                .lines()
+                .any(|l| l.trim_start_matches("pub ") == format!("mod {stem};"))
+                && !manifest
+                    .lines()
+                    .any(|l| l.trim() == format!("path = \"tests/{stem}.rs\""))
         })
         .collect();
     missing.sort();

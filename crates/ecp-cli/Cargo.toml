@@ -117,6 +117,10 @@ name = "engine_session_state_test"
 path = "tests/engine_session_state_test.rs"
 
 [[test]]
+name = "engine_validation"
+path = "tests/engine_validation.rs"
+
+[[test]]
 name = "ensure_fresh_tantivy_drain"
 path = "tests/ensure_fresh_tantivy_drain.rs"
 
@@ -159,3 +163,7 @@ path = "tests/session_resolver.rs"
 [[test]]
 name = "status_filter_guard"
 path = "tests/status_filter_guard.rs"
+
+[[test]]
+name = "version_mismatch_triggers_reindex"
+path = "tests/version_mismatch_triggers_reindex.rs"

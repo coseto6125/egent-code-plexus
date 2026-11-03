@@ -65,7 +65,6 @@ mod doctor_git_hook_check;
 mod dump_resolver_wiring_test;
 mod engine_header;
 mod engine_header_hints;
-mod engine_validation;
 mod error_labels;
 mod exports_go_ruby_c_dart;
 mod fanout_php;
@@ -298,7 +297,6 @@ mod tsconfig_paths;
 mod uid_assign_parity;
 mod uninstall_cmd;
 mod usage_cmd;
-mod version_mismatch_triggers_reindex;
 mod workspace_scope_resolution;
 mod workspace_scopes;
 
@@ -315,8 +313,12 @@ fn test_it_every_test_file_is_registered_in_one_target() {
         .filter_map(|n| n.strip_suffix(".rs").map(str::to_owned))
         .filter(|stem| stem != "it")
         .filter(|stem| {
-            !root.lines().any(|l| l == format!("mod {stem};"))
-                && !manifest.contains(&format!("path = \"tests/{stem}.rs\""))
+            !root
+                .lines()
+                .any(|l| l.trim_start_matches("pub ") == format!("mod {stem};"))
+                && !manifest
+                    .lines()
+                    .any(|l| l.trim() == format!("path = \"tests/{stem}.rs\""))
         })
         .collect();
     missing.sort();

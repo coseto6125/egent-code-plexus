@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! ECP_DUMP_ROOT=<corpus dir> ECP_DUMP_OUT=<file> \
-//!   cargo test -p egent-code-plexus --test local_graph_dump -- --ignored
+//!   cargo test -p egent-code-plexus --test it local_graph_dump:: -- --ignored
 //! ```
 
 use std::fmt::Write as _;
