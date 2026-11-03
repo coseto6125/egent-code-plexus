@@ -74,6 +74,23 @@ fn test_swift_overloaded_inits_call_calls_constructor() {
     assert_calls_constructor(&graph, "makeMulti", "Multi", "Sources/Multi.swift");
 }
 
+/// An `init` in the type and one in an `extension` sit in two containers,
+/// so each heads its own overload set; the type has no twin, so the
+/// construction still binds its first constructor.
+#[test]
+fn test_swift_extension_init_beside_type_init_call_calls_constructor() {
+    let multi = (
+        "Sources/Multi.swift",
+        "struct Multi {\n    init(x: Int) {\n    }\n}\n\nextension Multi {\n    init(s: String) {\n        self.init(x: 1)\n    }\n}\n",
+    );
+    let app = (
+        "Sources/App.swift",
+        "func makeMulti() -> Multi {\n    return Multi(x: 1)\n}\n",
+    );
+    let graph = graph_of(&provider(), &[multi, app]);
+    assert_calls_constructor(&graph, "makeMulti", "Multi", "Sources/Multi.swift");
+}
+
 /// A struct with no declared `init` gets the memberwise initializer, which
 /// has no node: the edge goes to the struct.
 #[test]

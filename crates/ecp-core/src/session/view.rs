@@ -2515,7 +2515,10 @@ mod tests {
         let view = OverlayView::build(graph, &[foo1_twins_input()]).unwrap();
         let path = "N/Foo1.cs";
         let class = crate::uid::compute(NodeKind::Class, path, None, "Foo1");
-        let foo = crate::uid::compute(NodeKind::Property, path, Some("Foo1"), "foo");
+        // Both classes share one anchor (the arity enters none), and each
+        // `foo` hashes it (design uid §2.2).
+        let foo =
+            crate::contracts::identity::nested_uid(class, NodeKind::Property, Some("Foo1"), "foo");
         let nodes = view.virtual_nodes();
         assert_eq!(
             [nodes[3].uid, nodes[4].uid],

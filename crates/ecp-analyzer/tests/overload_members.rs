@@ -163,13 +163,45 @@ fn test_overload_set_go_duplicate_methods_both_named_and_called() {
     );
 }
 
+/// Stands for: an inherent `save` and a trait-impl `save` of one type sit in
+/// two `Impl` containers, so they are two entities (design_uid §2.5), not
+/// one overload set. Rust resolves `self.save()` to the inherent method, so
+/// `run` calls it, and no `overload_set` edge leads to the trait one.
 #[test]
-fn test_overload_set_rust_inherent_and_trait_impl_both_named_and_called() {
-    assert_overload_set(
+fn test_overload_set_rust_inherent_and_trait_impl_two_entities_no_overload_set() {
+    let graph = build(
         &ecp_analyzer::rust::parser::RustProvider::new().unwrap(),
         "k.rs",
         "struct K;\nimpl K {\n fn audit(&self) {}\n fn save(&self) {}\n fn run(&self) { self.save(); }\n}\nimpl A for K { fn save(&self) { self.audit(); } }\ntrait A { fn save(&self); }\n",
     );
+    let pool = &graph.string_pool;
+    let node = |i: u32| &graph.nodes[i as usize];
+    let saves: Vec<u32> = named(&graph, "save")
+        .into_iter()
+        .filter(|&i| node(i).owner_class.resolve(pool) == "K")
+        .collect();
+    assert_eq!(saves.len(), 2, "both `save` members are nodes");
+    let (inherent, trait_impl) = (saves[0], saves[1]);
+    assert_ne!(node(inherent).uid, node(trait_impl).uid, "distinct uids");
+    let ty = *named(&graph, "K")
+        .iter()
+        .find(|&&i| !ecp_core::uid::keeps_overloads(node(i).kind))
+        .expect("type K");
+    for &save in &saves {
+        assert_eq!(
+            edges(&graph, RelType::HasMethod, ty, save).len(),
+            1,
+            "K has each `save` once"
+        );
+    }
+    assert!(
+        edges(&graph, RelType::References, inherent, trait_impl).is_empty()
+            && edges(&graph, RelType::References, trait_impl, inherent).is_empty(),
+        "no overload_set between the two impls"
+    );
+    let run = named(&graph, "run")[0];
+    assert_eq!(edges(&graph, RelType::Calls, run, inherent), ["call"]);
+    assert!(edges(&graph, RelType::Calls, run, trait_impl).is_empty());
 }
 
 #[test]

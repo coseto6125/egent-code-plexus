@@ -30,7 +30,7 @@ use ecp_cli::session::overlay_reader::{accepted_fragments, decode_view_inputs};
 use ecp_cli::session::overlay_writer::write_dirty_fragments_from_graphs;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::LocalGraph;
-use ecp_core::contracts::identity::{LaterReason, UidSlot};
+use ecp_core::contracts::identity::{container_parents, nested_uid, LaterReason, UidSlot};
 use ecp_core::contracts::routing::SizeCap;
 use ecp_core::graph::{ArchivedZeroCopyGraph, NodeKind, ZeroCopyGraph};
 use ecp_core::session::view::{OverlayFileInput, OverlayView};
@@ -391,8 +391,10 @@ const CSHARP_CONV: [&str; 2] = [
 ];
 
 /// Stands for: a C# type of another generic arity (`Conv<T>` beside
-/// `Conv`) is no tombstone on any path that numbers the file. The second
-/// class in source order takes overload uid 1 of the pair's base uid on the
+/// `Conv`) is no tombstone on any path that numbers the file. The pair's
+/// base uid is the `nested` stream under `namespace N`'s anchor (design uid
+/// §2.1), and the second
+/// class in source order takes overload uid 1 of that base uid on the
 /// full build, the overlay view, the overlay reader over the written
 /// fragment, and incremental mode, in either declaration order (codex
 /// ruling P-a). Before the fix every path tombstoned it alike.
@@ -414,9 +416,17 @@ fn test_uid_assign_csharp_types_of_two_arities_four_paths_equal_uids() {
             .collect();
         assert_eq!(classes.len(), 2, "{source}");
         let first = &dirty.nodes[classes[0]];
-        let base = ecp_core::uid::compute(
+        let namespace = (0..dirty.nodes.len())
+            .find(|&i| dirty.nodes[i].kind == NodeKind::Namespace)
+            .expect("setup: the namespace node");
+        assert_eq!(
+            uids[namespace],
+            ecp_core::uid::compute(NodeKind::Namespace, "N/Conv.cs", None, "N"),
+            "setup: a top-level namespace keeps its compute uid"
+        );
+        let base = nested_uid(
+            uids[namespace],
             NodeKind::Class,
-            "N/Conv.cs",
             first.owner_class.as_deref(),
             "Conv",
         );
@@ -432,6 +442,9 @@ fn test_uid_assign_csharp_types_of_two_arities_four_paths_equal_uids() {
 /// separator, and as it is on Unix, where it is a file-name character
 /// (`os_path_to_slash`); `.\.\K.java` likewise. Every path hashes that
 /// stored name, and none panics on the doubled prefix.
+///
+/// Stands for: the stored name enters the class's compute uid, and each
+/// member's `nested` uid chains on that class uid (design uid §2.1).
 #[test]
 fn test_uid_assign_dot_backslash_file_name_hashes_stored_path() {
     let java = JavaProvider::new().unwrap();
@@ -445,8 +458,8 @@ fn test_uid_assign_dot_backslash_file_name_hashes_stored_path() {
         let saves = named(&dirty, "save");
         assert_eq!(saves.len(), 2, "{walked}: the fixture's two overloads");
         let first = &dirty.nodes[saves[0]];
-        let base =
-            ecp_core::uid::compute(first.kind, &stored, first.owner_class.as_deref(), "save");
+        let class = ecp_core::uid::compute(NodeKind::Class, &stored, None, "K");
+        let base = nested_uid(class, first.kind, first.owner_class.as_deref(), "save");
         assert_eq!(
             [full[saves[0]], full[saves[1]]],
             [base, ecp_core::uid::overload(base, 1)],
@@ -712,11 +725,13 @@ fn fmt_impls(first: &str, second: &str) -> String {
 }
 
 /// A dirty Rust file swaps `impl Display for A { fn fmt }` and `impl Debug
-/// for A { fn fmt }`. The two `fmt` swap stored uids, because the second in
-/// source order is overload 1, so a uid pairing would hand each base `fmt`'s
-/// clean callers to the other trait's `fmt`. The anchor carries the trait,
-/// so each base `fmt` redirects to its own trait's virtual `fmt`, and a
-/// base in-edge follows the redirect. The nested `pad` stays on its own too.
+/// for A { fn fmt }`. Each `fmt` keys on its own `Impl` block's anchor, so
+/// each base `fmt` redirects to its own trait's virtual `fmt`, and a base
+/// in-edge follows the redirect. The nested `pad` stays on its own too.
+///
+/// Stands for: a block swap keeps every member's stored uid (design uid
+/// §2.4). Phase 1 swapped the two `fmt` uids, because the second in source
+/// order was overload 1; this test asserted that swap.
 #[test]
 fn test_overlay_view_swapped_impls_base_edges_stay_on_own_fmt() {
     let rust = RustProvider::new().unwrap();
@@ -762,15 +777,15 @@ fn test_overlay_view_swapped_impls_base_edges_stay_on_own_fmt() {
         .uid
         .to_native();
     let virt_display = view.node(by_trait(&rows, "fmt")["Display"]).unwrap().uid;
-    assert_ne!(
+    assert_eq!(
         base_display, virt_display,
-        "the fixture swaps the stored uids, so a uid pairing would cross them"
+        "the swap keeps the Display `fmt` uid"
     );
 }
 
 /// Rust tells `impl K { fn save }` and `impl A for K { fn save }` apart by
-/// the trait: two anchors, so each `save` replaces its own base node while
-/// the two keep the overload uids of the full build.
+/// their `Impl` blocks: two parent anchors, so each `save` replaces its own
+/// base node while the two keep the full build's uids.
 #[test]
 fn test_overlay_view_rust_inherent_and_trait_save_each_replaces_own_base() {
     let rust = RustProvider::new().unwrap();
@@ -944,7 +959,8 @@ const CSHARP_FOO1: [&str; 2] = [
 const CSHARP_NESTED: &str = "namespace N {\n class Outer {\n  class Inner {\n   public int x;\n  }\n }\n class Outer<T> {\n  class Inner {\n   public int x;\n  }\n }\n}\n";
 
 /// The uids of every `kind` node named `name`, in declaration order, as the
-/// full build stores them, and the base uid of the first.
+/// full build stores them, and the base uid of the first: the `nested`
+/// stream under the stored uid of its container (design uid §2.1).
 fn twin_uids(source: &str, kind: NodeKind, name: &str) -> (Vec<u64>, u64) {
     let dirty = parse(&CSharpProvider::new().unwrap(), "N/Twins.cs", source);
     let bytes = archive(&full_build(dirty.clone()));
@@ -953,7 +969,14 @@ fn twin_uids(source: &str, kind: NodeKind, name: &str) -> (Vec<u64>, u64) {
         .filter(|&i| dirty.nodes[i].kind == kind && dirty.nodes[i].name == name)
         .collect();
     let first = &dirty.nodes[hits[0]];
-    let base = ecp_core::uid::compute(kind, "N/Twins.cs", first.owner_class.as_deref(), name);
+    let spans: Vec<_> = dirty.nodes.iter().map(|n| (n.kind, n.span)).collect();
+    let container = container_parents(&spans)[hits[0]].expect("setup: every twin has a container");
+    let base = nested_uid(
+        uids[container as usize],
+        kind,
+        first.owner_class.as_deref(),
+        name,
+    );
     (hits.iter().map(|&i| uids[i]).collect(), base)
 }
 
@@ -1101,6 +1124,87 @@ fn test_strict_parity_java_method_overloads_second_body_calls_from_second() {
     assert_eq!((first.len(), second.len()), (1, 1), "{first:?} {second:?}");
     assert!(first[0].contains("-> Method K.java:2 a #"), "{first:?}");
     assert!(second[0].contains("-> Method K.java:3 b #"), "{second:?}");
+}
+
+/// N1: a type nested in two same-file types, each with a `run`.
+const JAVA_N1: &str = "class O1 {\n    class H {\n        void run() {}\n    }\n}\nclass O2 {\n    class H {\n        void run() {}\n    }\n}\n";
+/// NS: one module path nested under two modules, each with a `fn f`.
+const RUST_NS: &str = "mod o1 {\n    mod inner {\n        pub fn f() {}\n    }\n}\nmod o2 {\n    mod inner {\n        pub fn f() {}\n    }\n}\n";
+
+/// The uids of the `kind name` identity lines of `snap`, one per node.
+fn identity_uids<'a>(snap: &'a strict_parity::Snapshot, kind: &str, name: &str) -> Vec<&'a str> {
+    snap.identity
+        .iter()
+        .filter(|line| line.starts_with(&format!("{kind} ")))
+        .filter_map(|line| line.split_once(&format!(" {name} #")).map(|(_, uid)| uid))
+        .collect()
+}
+
+four_path_cases! {
+    // The two `run` share kind, owner `H` and name, so the fixture counts
+    // them as one keyed set: `assert_four_paths_equal` then checks their
+    // two uids differ. No redefinition check: the two are no repeat.
+    test_uid_assign_java_n1_twin_nested_types_four_paths_equal_uids => Case {
+        provider: Box::new(JavaProvider::new().unwrap()),
+        path: "O.java",
+        source: JAVA_N1,
+        overload_sets: 1,
+        redefinitions: None,
+    };
+    test_uid_assign_rust_ns_twin_module_paths_four_paths_equal_uids => Case {
+        provider: Box::new(RustProvider::new().unwrap()),
+        path: "lib.rs",
+        source: RUST_NS,
+        overload_sets: 0,
+        redefinitions: None,
+    };
+}
+
+/// Stands for: N1 (design uid §5). `O1.H` and `O2.H` are two named nodes
+/// with two uids, each `run` has one `HasMethod`, from its own `H`, no
+/// `overload_set` reference joins the two `run`, and the overlay that adds
+/// `O2` agrees with the full build on every node and edge.
+#[test]
+fn test_strict_parity_java_n1_twin_nested_types_own_members() {
+    let before = "class O1 {\n    class H {\n        void run() {}\n    }\n}\n";
+    let full = strict_parity_of("uid_p2_n1", "O.java", before, JAVA_N1);
+    let types = identity_uids(&full, "Class", "H");
+    assert_eq!(types.len(), 2, "{:#?}", full.identity);
+    assert_ne!(types[0], types[1], "two `H`, two uids");
+    for (run, h) in [(3, 2), (8, 7)] {
+        let from = edge_lines(
+            &full,
+            "HasMethod",
+            "target",
+            &format!("Method O.java:{run} run"),
+        );
+        assert_eq!(from.len(), 1, "{from:?}");
+        assert!(
+            from[0].starts_with(&format!("HasMethod Class O.java:{h} H #")),
+            "{from:?}"
+        );
+    }
+    assert!(
+        full.edge
+            .iter()
+            .all(|line| !line.contains("reason=overload_set")),
+        "{:#?}",
+        full.edge
+    );
+}
+
+/// Stands for: NS (design uid §5). `o1::inner::f` and `o2::inner::f` are
+/// two named nodes with two uids, as are the two `inner`, and the overlay
+/// that adds `o2` agrees with the full build on every node and edge.
+#[test]
+fn test_strict_parity_rust_ns_twin_module_paths_two_nodes() {
+    let before = "mod o1 {\n    mod inner {\n        pub fn f() {}\n    }\n}\n";
+    let full = strict_parity_of("uid_p2_ns", "lib.rs", before, RUST_NS);
+    for (kind, name) in [("Function", "f"), ("Module", "inner")] {
+        let uids = identity_uids(&full, kind, name);
+        assert_eq!(uids.len(), 2, "{kind} {name}: {:#?}", full.identity);
+        assert_ne!(uids[0], uids[1], "{kind} {name}: two uids");
+    }
 }
 
 /// Stands for: V, a merged repeat. `var x` twice is one entity: one named

@@ -14,7 +14,7 @@ use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_analyzer::typescript::parser::TypeScriptProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::LocalGraph;
-use ecp_core::contracts::identity::scoped_uid;
+use ecp_core::contracts::identity::{nested_uid, scoped_uid};
 use ecp_core::graph::{ArchivedZeroCopyGraph, Edge, NodeKind, RelType, ZeroCopyGraph};
 use ecp_core::session::{MergedGraph, OverlayFileInput, OverlayView};
 use std::path::Path;
@@ -365,7 +365,16 @@ fn test_build_typescript_nested_fn_in_two_methods_two_nodes_no_has_method() {
         node(&g, PATH, "n", 7),
         node(&g, PATH, "helper", 8),
     );
-    let anchor = |name| uid_at(PATH, NodeKind::Method, Some("A"), name);
+    // A method hashes its class (design uid §2.2), and a scoped `helper`
+    // hashes its method.
+    let anchor = |name| {
+        nested_uid(
+            g.nodes[class as usize].uid,
+            NodeKind::Method,
+            Some("A"),
+            name,
+        )
+    };
     assert_eq!(
         g.nodes[m as usize].uid,
         anchor("m"),

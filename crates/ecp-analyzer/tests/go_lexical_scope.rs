@@ -10,6 +10,7 @@ use ecp_analyzer::go::parser::GoProvider;
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::LocalGraph;
+use ecp_core::contracts::identity::nested_uid;
 use ecp_core::graph::{NodeKind, RelType, ZeroCopyGraph};
 use std::path::Path;
 
@@ -101,6 +102,9 @@ fn named<'a>(g: &'a LocalGraph, name: &str) -> Vec<&'a ecp_core::analyzer::types
 // Go has no named nested function. `helper := func() int {...}` inside `outer` is a Variable
 // owned by `outer`, so it never collides with the top-level function.
 
+/// Stands for: a closure variable inside a function keeps its callable
+/// container (design_uid §2.1: Variable keeps callables), so its uid is the
+/// `nested` stream under `outer`'s anchor.
 #[test]
 fn test_parse_file_go_nested_fn_same_name_as_top_level_today_uid() {
     let rows = rows(&graph());
@@ -115,9 +119,11 @@ fn test_parse_file_go_nested_fn_same_name_as_top_level_today_uid() {
         (nested.name.as_str(), nested.kind),
         ("helper", NodeKind::Variable)
     );
+    let outer = at(&rows, 5);
+    assert_eq!(outer.name, "outer", "setup: the container row");
     assert_eq!(
         nested.uid,
-        uid_of(NodeKind::Variable, Some("outer"), "helper")
+        nested_uid(outer.uid, NodeKind::Variable, Some("outer"), "helper")
     );
     assert_ne!(top.uid, nested.uid);
 }

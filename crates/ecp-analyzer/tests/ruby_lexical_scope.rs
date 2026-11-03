@@ -10,6 +10,7 @@ use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_analyzer::ruby::parser::RubyProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::LocalGraph;
+use ecp_core::contracts::identity::nested_uid;
 use ecp_core::graph::{NodeKind, RelType, ZeroCopyGraph};
 use std::path::Path;
 
@@ -104,6 +105,9 @@ fn named<'a>(g: &'a LocalGraph, name: &str) -> Vec<&'a ecp_core::analyzer::types
 // both a Method with no owner; Method keeps overloads, so the second one is an overload node
 // (same name, uid from `uid::overload`), not a tombstone. No lexical-scope slice opts Ruby in.
 
+/// Stands for: a `def` nested in a `def` keys on its container's anchor
+/// (design_uid §2.1, the `nested` stream), so it is a second `First` node,
+/// not an overload of the top-level one.
 #[test]
 fn test_parse_file_ruby_nested_fn_same_name_as_top_level_today_uid() {
     let rows = rows(&graph());
@@ -115,7 +119,13 @@ fn test_parse_file_ruby_nested_fn_same_name_as_top_level_today_uid() {
         (nested.name.as_str(), nested.kind),
         ("helper", NodeKind::Method)
     );
-    assert_eq!(nested.uid, ecp_core::uid::overload(top.uid, 1));
+    let outer = at(&rows, 5);
+    assert_eq!(outer.name, "outer", "setup: the container row");
+    assert_eq!(
+        nested.uid,
+        nested_uid(outer.uid, NodeKind::Method, None, "helper")
+    );
+    assert_ne!(nested.uid, top.uid);
 }
 
 #[test]

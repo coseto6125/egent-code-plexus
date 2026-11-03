@@ -10,6 +10,7 @@ use ecp_analyzer::c_sharp::parser::CSharpProvider;
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::LocalGraph;
+use ecp_core::contracts::identity::nested_uid;
 use ecp_core::graph::{NodeKind, RelType, ZeroCopyGraph};
 use std::path::Path;
 
@@ -95,6 +96,8 @@ fn named<'a>(g: &'a LocalGraph, name: &str) -> Vec<&'a ecp_core::analyzer::types
 // Absent today: the C# parser emits no node for a local function (`int Helper() {...}` inside
 // `Outer`). Only the member `T.Helper` exists, so nothing collides.
 
+/// Stands for: a method keys on its class's anchor (design_uid §2.1, the
+/// `nested` stream); the local function is still not emitted.
 #[test]
 fn test_parse_file_c_sharp_nested_fn_same_name_as_top_level_today_uid() {
     let rows = rows(&graph());
@@ -104,7 +107,12 @@ fn test_parse_file_c_sharp_nested_fn_same_name_as_top_level_today_uid() {
     assert_eq!((helpers[0].line, helpers[0].kind), (2, NodeKind::Method));
     assert_eq!(
         helpers[0].uid,
-        uid_of(NodeKind::Method, Some("T"), "Helper")
+        nested_uid(
+            uid_of(NodeKind::Class, None, "T"),
+            NodeKind::Method,
+            Some("T"),
+            "Helper"
+        )
     );
     assert!(
         rows.iter().all(|r| !r.name.is_empty()),

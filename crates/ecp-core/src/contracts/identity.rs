@@ -20,24 +20,37 @@ use crate::uid;
 
 // ── Declaration identity ────────────────────────────────────────────────
 
-/// First byte of a scoped uid stream. A `uid::compute` stream starts with an
-/// ASCII letter (`NodeKind::as_str`), and a `uid::overload` stream is 12
-/// bytes long while a scoped stream is at least 14, so no two streams are
-/// equal.
+// Stream disjointness. Every base uid and anchor is the xxh3 of one byte
+// stream, and no two kinds of stream can be equal:
+//
+// | stream          | first byte                          | length      |
+// |-----------------|-------------------------------------|-------------|
+// | `uid::compute`  | ASCII letter (`NodeKind::as_str`)   | at least 7  |
+// | `uid::overload` | any (no tag)                        | exactly 12  |
+// | `scoped_uid`    | `SCOPED_TAG` 0x01                   | at least 14 |
+// | `anchor_of`     | `ANCHOR_TAG` 0x02                   | at least 13 |
+// | `nested_uid`    | `NESTED_TAG` 0x03                   | at least 15 |
+//
+// A tagged stream differs from `compute` and from the other tagged streams
+// by its first byte, and from `overload` by its length. The shortest
+// `NodeKind::as_str` is 4 bytes (`test_stream_tags_disjoint_from_kind_text`).
+
+/// First byte of a scoped uid stream.
 const SCOPED_TAG: u8 = 0x01;
-/// First byte of an anchor stream with a discriminator (at least 13 bytes).
+/// First byte of an anchor stream with a discriminator.
 const ANCHOR_TAG: u8 = 0x02;
+/// First byte of a nested uid stream ([`nested_uid`]).
+const NESTED_TAG: u8 = 0x03;
 
 /// A semantic fact that tells apart two declarations whose kind, path, owner
 /// and name are equal. It enters the anchor, never the declaration's own
-/// uid. Every scoped descendant hashes the anchor, so adding a discriminator
-/// to a declaration changes the stored uid of each scoped node below it.
+/// uid. Every scoped or nested descendant hashes the anchor, so adding a
+/// discriminator to a declaration changes the stored uid of each node below
+/// it. Stored byte 1 belonged to the retired Rust `ImplTrait`: the `Impl`
+/// node is now in its members' container chain (design uid §2.5), so no
+/// discriminator separates them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Discriminator<'a> {
-    /// The full trait text of the Rust `impl Trait for Type` block that
-    /// declares the node, generic arguments included, as `impl_trait_name`
-    /// produces it: `Display`, `Conv<u8>`.
-    ImplTrait(&'a str),
     /// The parameter type list of an overload, as the parser normalises it.
     Signature(&'a str),
     /// A producer-specific semantic tag, such as the `kind` of a Kubernetes
@@ -50,17 +63,15 @@ impl<'a> Discriminator<'a> {
     /// discriminator table stores it beside the text.
     pub fn stored_tag(self) -> u8 {
         match self {
-            Self::ImplTrait(_) => 1,
             Self::Signature(_) => 2,
             Self::Tag(_) => 3,
         }
     }
 
     /// The inverse of [`Discriminator::stored_tag`] plus [`Discriminator::text`].
-    /// `None` for an unknown byte.
+    /// `None` for an unknown byte, the retired byte 1 included.
     pub fn from_stored(tag: u8, text: &'a str) -> Option<Self> {
         match tag {
-            1 => Some(Self::ImplTrait(text)),
             2 => Some(Self::Signature(text)),
             3 => Some(Self::Tag(text)),
             _ => None,
@@ -69,7 +80,7 @@ impl<'a> Discriminator<'a> {
 
     pub fn text(self) -> &'a str {
         match self {
-            Self::ImplTrait(t) | Self::Signature(t) | Self::Tag(t) => t,
+            Self::Signature(t) | Self::Tag(t) => t,
         }
     }
 }
@@ -77,13 +88,21 @@ impl<'a> Discriminator<'a> {
 /// Where a declaration lives for its uid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
-    /// The uid hashes `(kind, path, owner, name)`, exactly as
-    /// `uid::compute` does today.
+    /// No scope container declares the node (top level), and it joins no
+    /// in-type sibling set. The uid hashes `(kind, path, owner, name)`,
+    /// exactly as `uid::compute` does.
     Unscoped,
-    /// A callable body declares the node. The uid hashes the parent's
-    /// anchor, so it does not move when an earlier sibling of the parent
-    /// moves.
+    /// A callable body declares the node, and its language scopes the kind
+    /// ([`lexical_parents`]). The uid hashes the parent's anchor, so it does
+    /// not move when an earlier sibling of the parent moves.
     Lexical { parent_anchor: u64 },
+    /// A scope container that is no lexical parent declares the node: a
+    /// member of a type, an `impl` block, a namespace or a module, or a
+    /// local declaration of a callable in a language that scopes no such
+    /// kind ([`container_parents`]). The uid hashes the container's anchor
+    /// and keeps the owner ([`nested_uid`]), so `O1.H.run` and `O2.H.run`
+    /// get two uids, and an insert elsewhere in the file moves neither.
+    Member { parent_anchor: u64 },
 }
 
 /// Why a declaration key or a file's identities cannot be built.
@@ -237,6 +256,40 @@ impl<'a> DeclKey<'a> {
         }
     }
 
+    /// A declaration that the scope container with anchor `parent_anchor`
+    /// declares, when it is not scoped ([`Scope::Member`]). The owner text
+    /// stays as the producer wrote it.
+    pub fn member(
+        kind: NodeKind,
+        path: &'a str,
+        owner: Option<&'a str>,
+        name: &'a str,
+        parent_anchor: u64,
+    ) -> Result<Self, IdentityError> {
+        check_path(path)?;
+        Ok(Self::member_unchecked(
+            kind,
+            path,
+            owner,
+            name,
+            parent_anchor,
+        ))
+    }
+
+    /// [`DeclKey::member`] for a path the caller has already checked.
+    fn member_unchecked(
+        kind: NodeKind,
+        path: &'a str,
+        owner: Option<&'a str>,
+        name: &'a str,
+        parent_anchor: u64,
+    ) -> Self {
+        Self {
+            scope: Scope::Member { parent_anchor },
+            ..Self::unscoped_unchecked(kind, path, owner, name)
+        }
+    }
+
     pub fn with_discriminator(self, d: Discriminator<'a>) -> Result<Self, IdentityError> {
         match d.text().is_empty() {
             true => Err(IdentityError::EmptyDiscriminator),
@@ -272,6 +325,9 @@ impl<'a> DeclKey<'a> {
         match self.scope {
             Scope::Unscoped => uid::compute(self.kind, self.path, self.owner, self.name),
             Scope::Lexical { parent_anchor } => scoped_uid(parent_anchor, self.kind, self.name),
+            Scope::Member { parent_anchor } => {
+                nested_uid(parent_anchor, self.kind, self.owner, self.name)
+            }
         }
     }
 
@@ -304,6 +360,24 @@ pub fn scoped_uid(parent_anchor: u64, kind: NodeKind, name: &str) -> u64 {
     h.update(&[SCOPED_TAG]);
     h.update(&parent_anchor.to_le_bytes());
     h.update(kind.as_str().as_bytes());
+    h.update(b"\0");
+    h.update(name.as_bytes());
+    h.digest()
+}
+
+/// The uid of a declaration that a scope container declares
+/// ([`Scope::Member`]): the stream `0x03 ‖ parent_anchor LE ‖ kind \0 owner
+/// \0 name`. The path enters through the top-level container at the root
+/// of the chain. The owner stays because an out-of-line member's owner is
+/// not its container: C++ `namespace n { void Foo::bar() {} void Baz::bar()
+/// {} }` puts both `bar` in `n`, and only the owner tells them apart.
+pub fn nested_uid(parent_anchor: u64, kind: NodeKind, owner: Option<&str>, name: &str) -> u64 {
+    let mut h = Xxh3::new();
+    h.update(&[NESTED_TAG]);
+    h.update(&parent_anchor.to_le_bytes());
+    h.update(kind.as_str().as_bytes());
+    h.update(b"\0");
+    h.update(owner.unwrap_or("").as_bytes());
     h.update(b"\0");
     h.update(name.as_bytes());
     h.digest()
@@ -377,7 +451,16 @@ pub struct FileDecl<'a> {
     pub owner: Option<&'a str>,
     pub name: &'a str,
     /// Index of the lexical parent in the same slice, from [`lexical_parents`].
+    /// A row with a parent hashes it ([`Scope::Lexical`]) and ignores
+    /// [`Self::container`].
     pub parent: Option<u32>,
+    /// Index of the identity container in the same slice, from
+    /// [`container_parents`]: the innermost scope container that strictly
+    /// holds the declaration. A row with a container and no parent hashes
+    /// the container's anchor ([`Scope::Member`]); a row with neither is top
+    /// level and keeps `uid::compute`. [`assign_file`] can still join a member
+    /// outside every type to the container of an in-type sibling.
+    pub container: Option<u32>,
     pub discriminator: Option<Discriminator<'a>>,
     /// The declared generic arity of a declaration whose language keeps two
     /// same-named types of different arity apart (C#: a type's or a
@@ -427,9 +510,12 @@ pub struct DeclIdentity {
     pub uniqueness: Uniqueness,
 }
 
-/// Every identity of one file's declarations, in slice order. A parent may
-/// come before or after its children in the slice. A non-canonical `path`
-/// is rejected even when `decls` is empty.
+/// Every identity of one file's declarations, in slice order. A parent or a
+/// container may come before or after its children in the slice. A
+/// member outside every type, whose type declares a member of the same
+/// kind, owner and name, takes that type as its container
+/// ([`joined_containers`]). A
+/// non-canonical `path` is rejected even when `decls` is empty.
 pub fn assign_file(path: &str, decls: &[FileDecl<'_>]) -> Result<Vec<DeclIdentity>, IdentityError> {
     check_path(path)?;
     let n = decls.len();
@@ -439,6 +525,7 @@ pub fn assign_file(path: &str, decls: &[FileDecl<'_>]) -> Result<Vec<DeclIdentit
     {
         return Err(IdentityError::BadParent { decl: decl as u32 });
     }
+    let containers = joined_containers(decls);
     let mut anchors: Vec<Option<u64>> = vec![None; n];
     let mut base_uids = vec![0u64; n];
     let mut chain: Vec<usize> = Vec::new();
@@ -453,7 +540,7 @@ pub fn assign_file(path: &str, decls: &[FileDecl<'_>]) -> Result<Vec<DeclIdentit
                 return Err(IdentityError::BadParent { decl: i as u32 });
             }
             chain.push(i);
-            match decls[i].parent {
+            match decls[i].parent.or(containers[i]) {
                 None => break,
                 Some(p) if (p as usize) < n => i = p as usize,
                 Some(_) => return Err(IdentityError::BadParent { decl: i as u32 }),
@@ -461,9 +548,14 @@ pub fn assign_file(path: &str, decls: &[FileDecl<'_>]) -> Result<Vec<DeclIdentit
         }
         for &j in chain.iter().rev() {
             let d = &decls[j];
-            let key = match d.parent {
-                None => DeclKey::unscoped_unchecked(d.kind, path, d.owner, d.name),
-                Some(p) => {
+            let key = match (d.parent, containers[j]) {
+                (None, None) => DeclKey::unscoped_unchecked(d.kind, path, d.owner, d.name),
+                (None, Some(c)) => {
+                    let parent_anchor = anchors[c as usize]
+                        .expect("the chain resolves a container before its child");
+                    DeclKey::member_unchecked(d.kind, path, d.owner, d.name, parent_anchor)
+                }
+                (Some(p), _) => {
                     if d.owner.is_some_and(|o| !o.is_empty()) {
                         return Err(IdentityError::ScopedWithOwner { decl: j as u32 });
                     }
@@ -565,6 +657,136 @@ pub fn assign_file(path: &str, decls: &[FileDecl<'_>]) -> Result<Vec<DeclIdentit
     Ok(out)
 }
 
+/// The in-type member set of each `(kind, owner, name)`: the type that
+/// holds it and the index of its first member, or `None` when two types
+/// of one name and different anchors both declare it.
+type InTypeSets<'a> = FxHashMap<(&'a str, &'a str, &'a str), Option<(u32, u32)>>;
+
+/// [`FileDecl::container`] of each declaration, except that a member
+/// outside every type (at top level, or in a `namespace` / `module`) joins
+/// the type that declares a member of its kind, owner and name: a C++
+/// out-of-line `K::m` or `int K::x = 0;` after the in-class one, a Swift
+/// `extension P { var af }` beside the `var af` of protocol `P`. It then
+/// shares that member's base uid: a later overload of a method, a merged
+/// repeat of a field, as before the container chain. The join needs one
+/// such type, inside the member's own container, and outside every
+/// callable (a local type never gains out-of-type members, and skipping it
+/// keeps the chain acyclic). Two type rows of one anchor (`struct K` in
+/// both arms of an `#if`) count as one type: the members of the second are
+/// merged repeats, whose tombstones store no name. A field joins only an
+/// earlier sibling, as the later of two merged rows is such a tombstone.
+/// The overlay re-derives this join from stored rows, so it may read no
+/// tombstone's name. A member with no such
+/// type (a Go receiver method, a Kotlin `fun K.m` alone, a C++ definition
+/// whose class is in another file, `K::m` with two types `K` in the file)
+/// keeps its container, and at top level `uid::compute`.
+fn joined_containers(decls: &[FileDecl<'_>]) -> Vec<Option<u32>> {
+    let outside_types = |d: &FileDecl<'_>| {
+        d.parent.is_none()
+            && d.owner.is_some_and(|o| !o.is_empty())
+            && joins(d.kind)
+            && d.container.is_none_or(|c| {
+                decls
+                    .get(c as usize)
+                    .is_some_and(|x| matches!(x.kind, NodeKind::Namespace | NodeKind::Module))
+            })
+    };
+    if !decls.iter().any(outside_types) {
+        return decls.iter().map(|d| d.container).collect();
+    }
+    let chain = |from: u32| {
+        std::iter::successors(Some(from), |&a| {
+            decls.get(a as usize).and_then(|d| d.container)
+        })
+        .take(decls.len() + 1)
+    };
+    // (kind, owner, name) -> the one type that declares it and the first
+    // such member, or `None` once a second type declares it too.
+    let mut in_type: InTypeSets<'_> = FxHashMap::default();
+    for (k, d) in decls.iter().enumerate() {
+        let (None, Some(c), Some(owner)) = (d.parent, d.container, d.owner) else {
+            continue;
+        };
+        let is_type = decls.get(c as usize).is_some_and(|t| t.kind.is_type());
+        let local = || {
+            chain(c).any(|a| {
+                decls.get(a as usize).is_some_and(|x| {
+                    matches!(
+                        x.kind,
+                        NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+                    )
+                })
+            })
+        };
+        if owner.is_empty() || !joins(d.kind) || !is_type || local() {
+            continue;
+        }
+        match in_type.entry((d.kind.as_str(), owner, d.name)) {
+            Entry::Vacant(e) => {
+                e.insert(Some((c, k as u32)));
+            }
+            Entry::Occupied(mut e) => {
+                if e.get().is_some_and(|(t, _)| !same_anchor(decls, t, c)) {
+                    e.insert(None);
+                }
+            }
+        }
+    }
+    decls
+        .iter()
+        .enumerate()
+        .map(|(j, d)| {
+            if !outside_types(d) {
+                return d.container;
+            }
+            let set = d
+                .owner
+                .and_then(|o| in_type.get(&(d.kind.as_str(), o, d.name)))
+                .copied()
+                .flatten();
+            match set {
+                Some((t, first))
+                    if d.container.is_none_or(|c| chain(t).any(|a| a == c))
+                        && (uid::keeps_overloads(d.kind) || first < j as u32) =>
+                {
+                    Some(t)
+                }
+                _ => d.container,
+            }
+        })
+        .collect()
+}
+
+fn joins(kind: NodeKind) -> bool {
+    uid::keeps_overloads(kind) || uid::merges_repeats(kind)
+}
+
+/// Whether the rows `a` and `b` of one file get one anchor: the same kind,
+/// owner and name (the arity enters no anchor), and containers that do too. A row with a lexical
+/// parent never compares equal, which errs toward two types.
+fn same_anchor(decls: &[FileDecl<'_>], mut a: u32, mut b: u32) -> bool {
+    for _ in 0..=decls.len() {
+        if a == b {
+            return true;
+        }
+        let (Some(x), Some(y)) = (decls.get(a as usize), decls.get(b as usize)) else {
+            return false;
+        };
+        if (x.kind, x.owner, x.name) != (y.kind, y.owner, y.name)
+            || x.parent.is_some()
+            || y.parent.is_some()
+        {
+            return false;
+        }
+        match (x.container, y.container) {
+            (None, None) => return true,
+            (Some(p), Some(q)) => (a, b) = (p, q),
+            _ => return false,
+        }
+    }
+    false
+}
+
 /// For each dirty declaration, the base declaration it replaces. A pair
 /// forms only when the anchor occurs exactly once among the base
 /// declarations and exactly once among the dirty ones of the same file.
@@ -648,6 +870,45 @@ pub fn lexical_parents_in(
                 up = enclosing[j];
             }
             up.filter(|&j| decls[j].0.is_callable()).map(|j| j as u32)
+        })
+        .collect()
+}
+
+/// The identity container of each declaration of one file (design uid
+/// §2.2): the index of the innermost scope container ([`is_scope_container`])
+/// whose span strictly contains it, `None` at the top level. This is the
+/// walk of [`lexical_parents`] without its callable and opt-in filters, so a
+/// scoped node's container is its lexical parent. A `Property` row skips
+/// every callable on the way up: `self.x` assigned in two methods is one
+/// field of the class, not one field per method. A `Variable` or `Const`
+/// keeps a callable container, so a local `const X` in two functions stays
+/// two constants. Spans of one file nest or are disjoint, so the walk is a
+/// tree walk and ends.
+pub fn container_parents(decls: &[(NodeKind, Span)]) -> Vec<Option<u32>> {
+    let spans: Vec<Span> = decls.iter().map(|&(_, span)| span).collect();
+    container_parents_in(decls, &innermost_enclosing(&spans))
+}
+
+/// [`container_parents`] over `enclosing`, the [`innermost_enclosing`] of
+/// `decls`' spans, for a caller that reads it for another rule too.
+pub fn container_parents_in(
+    decls: &[(NodeKind, Span)],
+    enclosing: &[Option<usize>],
+) -> Vec<Option<u32>> {
+    decls
+        .iter()
+        .enumerate()
+        .map(|(i, &(kind, _))| {
+            let skips_callables = kind == NodeKind::Property;
+            let mut up = enclosing[i];
+            while let Some(j) = up {
+                let outer = decls[j].0;
+                if is_scope_container(outer) && !(skips_callables && outer.is_callable()) {
+                    break;
+                }
+                up = enclosing[j];
+            }
+            up.map(|j| j as u32)
         })
         .collect()
 }
@@ -1551,6 +1812,7 @@ mod tests {
             owner,
             name,
             parent: None,
+            container: None,
             discriminator: None,
             arity: None,
             arity_scope: None,
@@ -1689,10 +1951,11 @@ mod tests {
         );
     }
 
+    /// Stands for: the stored byte of each live variant round-trips, and the
+    /// retired `ImplTrait` byte 1 reads back as no discriminator.
     #[test]
     fn test_discriminator_stored_tag_round_trip() {
         for d in [
-            Discriminator::ImplTrait("Conv<u8>"),
             Discriminator::Signature("(i32, &str)"),
             Discriminator::Tag("Deployment"),
         ] {
@@ -1702,6 +1965,7 @@ mod tests {
             );
         }
         assert_eq!(Discriminator::from_stored(0, "x"), None);
+        assert_eq!(Discriminator::from_stored(1, "Display"), None);
         assert_eq!(Discriminator::from_stored(4, "x"), None);
     }
 
@@ -1709,27 +1973,75 @@ mod tests {
     fn test_with_discriminator_empty_text_rejected() {
         let key = DeclKey::unscoped(NodeKind::Method, "a.rs", Some("A"), "fmt").unwrap();
         assert_eq!(
-            key.with_discriminator(Discriminator::ImplTrait("")),
+            key.with_discriminator(Discriminator::Signature("")),
             Err(IdentityError::EmptyDiscriminator)
         );
     }
 
     #[test]
     fn test_anchor_discriminator_separates_equal_uids() {
-        let key = DeclKey::unscoped(NodeKind::Method, "a.rs", Some("A"), "fmt").unwrap();
-        let display = key
-            .with_discriminator(Discriminator::ImplTrait("Display"))
+        let key = DeclKey::unscoped(NodeKind::Method, "a.rs", Some("A"), "save").unwrap();
+        let int = key
+            .with_discriminator(Discriminator::Signature("(int)"))
             .unwrap();
-        let debug = key
-            .with_discriminator(Discriminator::ImplTrait("Debug"))
+        let string = key
+            .with_discriminator(Discriminator::Signature("(String)"))
             .unwrap();
-        assert_eq!(display.uid(), debug.uid());
-        assert_ne!(display.anchor(), debug.anchor());
-        assert_ne!(display.anchor(), key.anchor());
-        let tag = key
-            .with_discriminator(Discriminator::Tag("Display"))
-            .unwrap();
-        assert_ne!(tag.anchor(), display.anchor());
+        assert_eq!(int.uid(), string.uid());
+        assert_ne!(int.anchor(), string.anchor());
+        assert_ne!(int.anchor(), key.anchor());
+        let tag = key.with_discriminator(Discriminator::Tag("(int)")).unwrap();
+        assert_ne!(tag.anchor(), int.anchor());
+    }
+
+    /// Stands for: the stream-disjointness rule at the top of this module.
+    /// Every kind text starts with an ASCII letter, so no `compute` stream
+    /// starts with a tag byte, and the shortest one is 4 bytes, so a nested
+    /// stream is at least 15 bytes and never as short as an `overload`
+    /// stream (12). One parent anchor, kind and name give three different
+    /// uids through `compute`, `scoped_uid` and `nested_uid`.
+    #[test]
+    fn test_stream_tags_disjoint_from_kind_text() {
+        for kind in NodeKind::ALL {
+            let text = kind.as_str().as_bytes();
+            assert!(text[0].is_ascii_alphabetic(), "{kind:?}");
+            assert!(
+                ![SCOPED_TAG, ANCHOR_TAG, NESTED_TAG].contains(&text[0]),
+                "{kind:?}"
+            );
+            assert!(text.len() >= 4, "{kind:?}");
+        }
+        let parent = uid::compute(NodeKind::Class, "a.rs", None, "C");
+        let nested = nested_uid(parent, NodeKind::Function, None, "h");
+        assert_ne!(nested, scoped_uid(parent, NodeKind::Function, "h"));
+        assert_ne!(nested, uid::compute(NodeKind::Function, "a.rs", None, "h"));
+        assert_ne!(
+            nested,
+            nested_uid(parent, NodeKind::Function, Some("C"), "h")
+        );
+        assert_eq!(
+            nested,
+            nested_uid(parent, NodeKind::Function, Some(""), "h"),
+            "an empty owner is no owner"
+        );
+    }
+
+    #[test]
+    fn test_member_key_uid_is_nested_uid_and_keeps_owner() {
+        let key = DeclKey::member(NodeKind::Method, "a.cpp", Some("Foo"), "bar", 7).unwrap();
+        assert_eq!(key.scope(), Scope::Member { parent_anchor: 7 });
+        assert_eq!(key.owner(), Some("Foo"));
+        assert_eq!(
+            key.uid(),
+            nested_uid(7, NodeKind::Method, Some("Foo"), "bar")
+        );
+        let other = DeclKey::member(NodeKind::Method, "a.cpp", Some("Baz"), "bar", 7).unwrap();
+        assert_ne!(
+            key.uid(),
+            other.uid(),
+            "the owner separates out-of-line members"
+        );
+        assert_eq!(key.anchor(), key.uid());
     }
 
     #[test]
@@ -2030,27 +2342,390 @@ mod tests {
         );
     }
 
+    /// Stands for: the container chain (design uid §2.2, §2.5). `impl
+    /// <first> for A { fn fmt { fn pad } }` then `impl <second> for A { … }`,
+    /// as the Rust parser emits them: an `Impl` row with the trait text as
+    /// owner and the self type as name, a `fmt` it contains, and a `pad`
+    /// scoped under that `fmt`. No discriminator: the `Impl` key holds the
+    /// trait. Swap the blocks, and each `fmt` and each `pad` keeps its
+    /// stored uid; each `fmt` is the first of its own base uid in both
+    /// orders. Contract only: before the chain `assign_file` rejected a
+    /// parented `Method` row.
     #[test]
     fn test_assign_file_swapped_impls_keep_child_uids() {
         let file = |first: &'static str, second: &'static str| {
             let mut decls = vec![
+                decl(NodeKind::Impl, Some(first), "A"),
                 decl(NodeKind::Method, Some("A"), "fmt"),
                 decl(NodeKind::Function, None, "pad"),
+                decl(NodeKind::Impl, Some(second), "A"),
                 decl(NodeKind::Method, Some("A"), "fmt"),
                 decl(NodeKind::Function, None, "pad"),
             ];
-            decls[0].discriminator = Some(Discriminator::ImplTrait(first));
-            decls[2].discriminator = Some(Discriminator::ImplTrait(second));
-            decls[1].parent = Some(0);
-            decls[3].parent = Some(2);
+            decls[1].container = Some(0);
+            decls[2].parent = Some(1);
+            decls[2].container = Some(1);
+            decls[4].container = Some(3);
+            decls[5].parent = Some(4);
+            decls[5].container = Some(4);
             assign_file("src/a.rs", &decls).unwrap()
         };
         let before = file("Display", "Debug");
         let after = file("Debug", "Display");
-        assert_eq!(before[1].slot.uid(), after[3].slot.uid());
-        assert_eq!(before[3].slot.uid(), after[1].slot.uid());
-        assert_eq!(before[0].anchor, after[2].anchor);
+        for (b, a) in [(1, 4), (2, 5), (4, 1), (5, 2)] {
+            assert_eq!(before[b].slot, after[a].slot, "row {b} before, {a} after");
+            assert!(
+                matches!(before[b].slot, UidSlot::First(_)),
+                "{:?}",
+                before[b]
+            );
+        }
+        assert_ne!(before[1].slot.uid(), before[4].slot.uid());
+        let display = uid::compute(NodeKind::Impl, "src/a.rs", Some("Display"), "A");
+        assert_eq!(
+            before[1].slot,
+            UidSlot::First(nested_uid(display, NodeKind::Method, Some("A"), "fmt"))
+        );
         assert!(before.iter().all(|d| d.uniqueness == Uniqueness::Unique));
+    }
+
+    /// Stands for: design uid §5 shape N1. `O1.H.run` and `O2.H.run` share
+    /// kind, short owner and name; the chain gives each `H` and each `run`
+    /// its own base uid, so no `run` is an overload of the other. Top-level
+    /// rows keep `uid::compute`.
+    #[test]
+    fn test_assign_file_same_named_nested_types_members_first_each() {
+        let mut decls = vec![
+            decl(NodeKind::Class, None, "O1"),
+            decl(NodeKind::Class, Some("O1"), "H"),
+            decl(NodeKind::Method, Some("H"), "run"),
+            decl(NodeKind::Class, None, "O2"),
+            decl(NodeKind::Class, Some("O2"), "H"),
+            decl(NodeKind::Method, Some("H"), "run"),
+        ];
+        for (child, container) in [(1, 0), (2, 1), (4, 3), (5, 4)] {
+            decls[child].container = Some(container);
+        }
+        let ids = assign_file("T.java", &decls).unwrap();
+        assert!(
+            ids.iter().all(|id| matches!(id.slot, UidSlot::First(_))),
+            "{ids:?}"
+        );
+        assert!(ids.iter().all(|d| d.uniqueness == Uniqueness::Unique));
+        let o1 = uid::compute(NodeKind::Class, "T.java", None, "O1");
+        assert_eq!(ids[0].slot, UidSlot::First(o1), "top level keeps compute");
+        let h1 = nested_uid(o1, NodeKind::Class, Some("O1"), "H");
+        assert_eq!(ids[1].slot, UidSlot::First(h1));
+        assert_eq!(
+            ids[2].slot,
+            UidSlot::First(nested_uid(h1, NodeKind::Method, Some("H"), "run"))
+        );
+        assert_ne!(ids[2].slot.uid(), ids[5].slot.uid());
+    }
+
+    /// Stands for: design uid §2.4. A same-named container repeated in one
+    /// scope (two `namespace N` blocks) shares one anchor, so its members
+    /// hash the same parent; a member of each block with one name is a
+    /// repeat of the first, never two firsts that an ordinal would swap.
+    /// A container nested 3 deep chains through every level.
+    #[test]
+    fn test_assign_file_repeated_container_members_share_parent_anchor() {
+        let mut decls = vec![
+            decl(NodeKind::Namespace, None, "N"),
+            decl(NodeKind::Class, Some("N"), "A"),
+            decl(NodeKind::Namespace, None, "N"),
+            decl(NodeKind::Class, Some("N"), "A"),
+            decl(NodeKind::Class, Some("A"), "B"),
+            decl(NodeKind::Method, Some("B"), "m"),
+        ];
+        for (child, container) in [(1, 0), (3, 2), (4, 3), (5, 4)] {
+            decls[child].container = Some(container);
+        }
+        let ids = assign_file("a.cs", &decls).unwrap();
+        assert_eq!(ids[0].anchor, ids[2].anchor);
+        assert!(matches!(
+            ids[3].slot,
+            UidSlot::Later {
+                first: 1,
+                reason: LaterReason::Repeat,
+                ..
+            }
+        ));
+        let n = uid::compute(NodeKind::Namespace, "a.cs", None, "N");
+        let a = nested_uid(n, NodeKind::Class, Some("N"), "A");
+        let b = nested_uid(a, NodeKind::Class, Some("A"), "B");
+        assert_eq!(
+            ids[5].slot,
+            UidSlot::First(nested_uid(b, NodeKind::Method, Some("B"), "m"))
+        );
+    }
+
+    /// Stands for: a top-level member joins the type that declares a member
+    /// of its kind, owner and name (C++ in-class `m` then out-of-line
+    /// `K::m`; Swift `m` in `K` then in `extension K`). It is a later
+    /// overload of that member, so the set keeps one first; a field (`p`)
+    /// is a merged repeat of the in-type one. A top-level member with no
+    /// such sibling (`n`, a Go receiver shape) keeps `uid::compute`.
+    #[test]
+    fn test_assign_file_out_of_type_member_joins_in_type_sibling_set() {
+        let mut decls = vec![
+            decl(NodeKind::Class, None, "K"),
+            decl(NodeKind::Method, Some("K"), "m"),
+            decl(NodeKind::Property, Some("K"), "p"),
+            decl(NodeKind::Method, Some("K"), "m"),
+            decl(NodeKind::Method, Some("K"), "n"),
+            decl(NodeKind::Property, Some("K"), "p"),
+        ];
+        decls[1].container = Some(0);
+        decls[2].container = Some(0);
+        let ids = assign_file("k.cpp", &decls).unwrap();
+        let k = uid::compute(NodeKind::Class, "k.cpp", None, "K");
+        let m = nested_uid(k, NodeKind::Method, Some("K"), "m");
+        assert_eq!(ids[1].slot, UidSlot::First(m));
+        assert_eq!(
+            ids[3].slot,
+            UidSlot::Later {
+                first: 1,
+                ordinal: 1,
+                uid: uid::overload(m, 1),
+                reason: LaterReason::Overload,
+            }
+        );
+        assert_eq!(ids[1].anchor, ids[3].anchor, "one set, one anchor");
+        assert_eq!(
+            ids[4].slot,
+            UidSlot::First(uid::compute(NodeKind::Method, "k.cpp", Some("K"), "n"))
+        );
+        let p = nested_uid(k, NodeKind::Property, Some("K"), "p");
+        assert_eq!(
+            ids[5].slot,
+            UidSlot::Duplicate {
+                first: 2,
+                uid: uid::overload(p, 1),
+            }
+        );
+    }
+
+    /// Stands for: an out-of-line `K::m` written inside `namespace n` joins
+    /// the `K` of that namespace, as one at top level does.
+    #[test]
+    fn test_assign_file_out_of_type_member_in_namespace_joins_in_type_sibling_set() {
+        let mut decls = vec![
+            decl(NodeKind::Namespace, None, "n"),
+            decl(NodeKind::Class, Some("n"), "K"),
+            decl(NodeKind::Method, Some("K"), "m"),
+            decl(NodeKind::Method, Some("K"), "m"),
+        ];
+        decls[1].container = Some(0);
+        decls[2].container = Some(1);
+        decls[3].container = Some(0);
+        let ids = assign_file("k.cpp", &decls).unwrap();
+        assert!(matches!(
+            ids[3].slot,
+            UidSlot::Later {
+                first: 2,
+                reason: LaterReason::Overload,
+                ..
+            }
+        ));
+    }
+
+    /// Stands for: an out-of-type `K::m` in `namespace b` never joins the
+    /// `K` of `namespace a`, which lies outside its own container.
+    #[test]
+    fn test_assign_file_out_of_type_member_other_namespace_joins_none() {
+        let mut decls = vec![
+            decl(NodeKind::Namespace, None, "a"),
+            decl(NodeKind::Class, Some("a"), "K"),
+            decl(NodeKind::Method, Some("K"), "m"),
+            decl(NodeKind::Namespace, None, "b"),
+            decl(NodeKind::Method, Some("K"), "m"),
+        ];
+        for (child, container) in [(1, 0), (2, 1), (4, 3)] {
+            decls[child].container = Some(container);
+        }
+        let ids = assign_file("k.cpp", &decls).unwrap();
+        assert!(matches!(ids[4].slot, UidSlot::First(_)));
+        assert_ne!(ids[4].anchor, ids[2].anchor);
+    }
+
+    /// Stands for: a method joins its in-type sibling in either order, so
+    /// an out-of-type `m` before the class heads the set.
+    #[test]
+    fn test_assign_file_out_of_type_method_before_its_sibling_joins_set() {
+        let mut decls = vec![
+            decl(NodeKind::Method, Some("K"), "m"),
+            decl(NodeKind::Class, None, "K"),
+            decl(NodeKind::Method, Some("K"), "m"),
+        ];
+        decls[2].container = Some(1);
+        let ids = assign_file("k.cpp", &decls).unwrap();
+        assert!(matches!(
+            ids[2].slot,
+            UidSlot::Later {
+                first: 0,
+                reason: LaterReason::Overload,
+                ..
+            }
+        ));
+    }
+
+    /// Stands for: `struct K { static int x; };` in both arms of an `#if`,
+    /// then `int K::x = 0;`. The two `K` share one anchor, so they count as
+    /// one type and the definition merges into the first `x`. The stored
+    /// graph keeps each merged repeat as a tombstone with no owner and no
+    /// name; re-deriving the file from those rows gives every named row the
+    /// same anchor, so the overlay pairs an unchanged file.
+    #[test]
+    fn test_assign_file_out_of_type_field_of_one_anchor_twin_types_stored_rows_same_anchors() {
+        let mut decls = vec![
+            decl(NodeKind::Struct, None, "K"),
+            decl(NodeKind::Property, Some("K"), "x"),
+            decl(NodeKind::Struct, None, "K"),
+            decl(NodeKind::Property, Some("K"), "x"),
+            decl(NodeKind::Property, Some("K"), "x"),
+        ];
+        decls[1].container = Some(0);
+        decls[3].container = Some(2);
+        let full = assign_file("k.cpp", &decls).unwrap();
+        assert!(matches!(full[4].slot, UidSlot::Duplicate { first: 1, .. }));
+        let stored: Vec<FileDecl<'_>> = decls
+            .iter()
+            .zip(&full)
+            .map(|(d, id)| match id.slot {
+                UidSlot::Duplicate { .. } => FileDecl {
+                    owner: Some(""),
+                    name: "",
+                    ..*d
+                },
+                _ => *d,
+            })
+            .collect();
+        let rebuilt = assign_file("k.cpp", &stored).unwrap();
+        for (j, (f, r)) in full.iter().zip(&rebuilt).enumerate() {
+            if !matches!(f.slot, UidSlot::Duplicate { .. }) {
+                assert_eq!(f.anchor, r.anchor, "row {j}");
+            }
+        }
+    }
+
+    /// Stands for: with two types `K` in the file (`a::K`, `b::K`) the short
+    /// owner of `void b::K::m()` cannot pick one, so it joins neither and
+    /// keeps `uid::compute`.
+    #[test]
+    fn test_assign_file_out_of_type_member_two_same_named_types_joins_none() {
+        let mut decls = vec![
+            decl(NodeKind::Namespace, None, "a"),
+            decl(NodeKind::Struct, Some("a"), "K"),
+            decl(NodeKind::Method, Some("K"), "m"),
+            decl(NodeKind::Namespace, None, "b"),
+            decl(NodeKind::Struct, Some("b"), "K"),
+            decl(NodeKind::Method, Some("K"), "m"),
+            decl(NodeKind::Method, Some("K"), "m"),
+        ];
+        for (child, container) in [(1, 0), (2, 1), (4, 3), (5, 4)] {
+            decls[child].container = Some(container);
+        }
+        let ids = assign_file("k.cpp", &decls).unwrap();
+        assert_eq!(
+            ids[6].slot,
+            UidSlot::First(uid::compute(NodeKind::Method, "k.cpp", Some("K"), "m"))
+        );
+    }
+
+    /// Stands for: a type local to the member itself (`void K::m() {
+    /// struct K { void m(); }; }`) is no join target, so the chain stays
+    /// acyclic and the member keeps `uid::compute`.
+    #[test]
+    fn test_assign_file_out_of_type_member_with_same_named_local_type_no_cycle() {
+        let mut decls = vec![
+            decl(NodeKind::Method, Some("K"), "m"),
+            decl(NodeKind::Struct, None, "K"),
+            decl(NodeKind::Method, Some("K"), "m"),
+        ];
+        decls[1].container = Some(0);
+        decls[2].container = Some(1);
+        let ids = assign_file("k.cpp", &decls).unwrap();
+        assert_eq!(
+            ids[0].slot,
+            UidSlot::First(uid::compute(NodeKind::Method, "k.cpp", Some("K"), "m"))
+        );
+    }
+
+    /// Stands for: a field joins only an earlier in-type sibling. With the
+    /// extension `var af` before protocol `P`, a join would tombstone the
+    /// protocol's `af`, and the overlay could not re-derive the join from
+    /// the nameless tombstone; so both keep their own uid.
+    #[test]
+    fn test_assign_file_out_of_type_field_before_its_sibling_joins_none() {
+        let mut decls = vec![
+            decl(NodeKind::Property, Some("P"), "af"),
+            decl(NodeKind::Interface, None, "P"),
+            decl(NodeKind::Property, Some("P"), "af"),
+        ];
+        decls[2].container = Some(1);
+        let ids = assign_file("p.swift", &decls).unwrap();
+        assert_eq!(
+            ids[0].slot,
+            UidSlot::First(uid::compute(NodeKind::Property, "p.swift", Some("P"), "af"))
+        );
+        let p = uid::compute(NodeKind::Interface, "p.swift", None, "P");
+        assert_eq!(
+            ids[2].slot,
+            UidSlot::First(nested_uid(p, NodeKind::Property, Some("P"), "af"))
+        );
+    }
+
+    /// Stands for: a container with no name is a container like any other.
+    /// Two unnamed classes in one scope share one anchor, as two same-named
+    /// containers do, so the member `m` of the second is a `Later` overload
+    /// of the first's, never an error or a tombstone.
+    #[test]
+    fn test_assign_file_unnamed_containers_members_share_parent_anchor() {
+        let mut decls = vec![
+            decl(NodeKind::Class, None, ""),
+            decl(NodeKind::Method, None, "m"),
+            decl(NodeKind::Class, None, ""),
+            decl(NodeKind::Method, None, "m"),
+        ];
+        decls[1].container = Some(0);
+        decls[3].container = Some(2);
+        let ids = assign_file("a.java", &decls).unwrap();
+        let class = uid::compute(NodeKind::Class, "a.java", None, "");
+        assert_eq!(ids[0].slot, UidSlot::First(class));
+        assert_eq!(ids[0].anchor, ids[2].anchor);
+        let m = nested_uid(class, NodeKind::Method, None, "m");
+        assert_eq!(ids[1].slot, UidSlot::First(m));
+        assert!(matches!(
+            ids[3].slot,
+            UidSlot::Later {
+                first: 1,
+                reason: LaterReason::Overload,
+                ..
+            }
+        ));
+    }
+
+    /// Stands for: a container out of range or a container cycle is a bad
+    /// parent, as a lexical parent is.
+    #[test]
+    fn test_assign_file_bad_containers_rejected() {
+        let mut out_of_range = vec![decl(NodeKind::Method, Some("A"), "m")];
+        out_of_range[0].container = Some(3);
+        assert_eq!(
+            assign_file("a.java", &out_of_range),
+            Err(IdentityError::BadParent { decl: 0 })
+        );
+        let mut cycle = vec![
+            decl(NodeKind::Class, None, "A"),
+            decl(NodeKind::Class, None, "B"),
+        ];
+        cycle[0].container = Some(1);
+        cycle[1].container = Some(0);
+        assert!(matches!(
+            assign_file("a.java", &cycle),
+            Err(IdentityError::BadParent { .. })
+        ));
     }
 
     #[test]
@@ -2148,7 +2823,7 @@ mod tests {
         ];
         plain[1].parent = Some(0);
         let mut tagged = plain.clone();
-        tagged[0].discriminator = Some(Discriminator::ImplTrait("Display"));
+        tagged[0].discriminator = Some(Discriminator::Signature("(int)"));
         let (p, t) = (
             assign_file("a.rs", &plain).unwrap(),
             assign_file("a.rs", &tagged).unwrap(),
@@ -2189,12 +2864,12 @@ mod tests {
             decl(NodeKind::Method, Some("A"), "fmt"),
             decl(NodeKind::Function, None, "pad"),
         ];
-        decls[1].discriminator = Some(Discriminator::ImplTrait("Display"));
+        decls[1].discriminator = Some(Discriminator::Signature("(int)"));
         decls[2].parent = Some(1);
         let ids = assign_file("./a.rs", &decls).unwrap();
         let plain = DeclKey::unscoped(NodeKind::Method, "./a.rs", Some("A"), "fmt").unwrap();
         let tagged = plain
-            .with_discriminator(Discriminator::ImplTrait("Display"))
+            .with_discriminator(Discriminator::Signature("(int)"))
             .unwrap();
         assert_eq!(ids[0].slot, UidSlot::First(plain.uid()));
         assert_eq!(
@@ -2508,6 +3183,86 @@ mod tests {
             lexical_parents(&decls, &[NodeKind::Function]),
             vec![None, None]
         );
+    }
+
+    /// Stands for: the container walk of design uid §2.2. Every row takes
+    /// its innermost scope container, through a non-container (a
+    /// `Variable`) and 3 levels deep; a top-level row and a row beside a
+    /// nested one of the same name take none.
+    #[test]
+    fn test_container_parents_innermost_scope_container_any_kind() {
+        let decls = [
+            (NodeKind::Namespace, (0, 0, 30, 0)),
+            (NodeKind::Class, (1, 0, 20, 0)),
+            (NodeKind::Class, (2, 0, 10, 0)),
+            (NodeKind::Method, (3, 0, 8, 0)),
+            (NodeKind::Variable, (4, 0, 7, 0)),
+            (NodeKind::Function, (5, 0, 6, 0)),
+            (NodeKind::Function, (40, 0, 41, 0)),
+            (NodeKind::Function, (11, 0, 12, 0)),
+        ];
+        assert_eq!(
+            container_parents(&decls),
+            vec![
+                None,
+                Some(0),
+                Some(1),
+                Some(2),
+                Some(3),
+                Some(3),
+                None,
+                Some(1)
+            ]
+        );
+        assert!(container_parents(&[]).is_empty());
+    }
+
+    /// Stands for: design uid §2.2 "Identity container of a `Property`
+    /// row". A `Property` skips callables (`self.x` in two methods is one
+    /// field of the class); a `Variable` and a `Const` keep the callable
+    /// (a local `const X` in two functions is two constants); a field of a
+    /// local struct keeps the struct; a `Property` that only callables hold
+    /// is top level.
+    #[test]
+    fn test_container_parents_property_skips_callables_variable_const_keep() {
+        let decls = [
+            (NodeKind::Class, (0, 0, 20, 0)),
+            (NodeKind::Method, (1, 0, 9, 0)),
+            (NodeKind::Property, (2, 0, 2, 9)),
+            (NodeKind::Const, (3, 0, 3, 9)),
+            (NodeKind::Variable, (4, 0, 4, 9)),
+            (NodeKind::Struct, (5, 0, 8, 0)),
+            (NodeKind::Property, (6, 0, 6, 9)),
+            (NodeKind::Function, (30, 0, 40, 0)),
+            (NodeKind::Property, (31, 0, 31, 9)),
+        ];
+        assert_eq!(
+            container_parents(&decls),
+            vec![
+                None,
+                Some(0),
+                Some(0),
+                Some(1),
+                Some(1),
+                Some(1),
+                Some(5),
+                None,
+                None
+            ]
+        );
+    }
+
+    /// Stands for: a declaration whose span equals its container's is not
+    /// inside it ([`innermost_enclosing`]): neither row contains the other,
+    /// and no row is its own container.
+    #[test]
+    fn test_container_parents_identical_spans_not_nested() {
+        let decls = [
+            (NodeKind::Module, (0, 0, 9, 0)),
+            (NodeKind::Class, (1, 0, 5, 0)),
+            (NodeKind::Method, (1, 0, 5, 0)),
+        ];
+        assert_eq!(container_parents(&decls), vec![None, Some(0), Some(0)]);
     }
 
     // ── target request ──

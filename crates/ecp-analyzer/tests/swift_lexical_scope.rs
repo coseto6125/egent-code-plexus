@@ -10,6 +10,7 @@ use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_analyzer::swift::parser::SwiftProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::LocalGraph;
+use ecp_core::contracts::identity::nested_uid;
 use ecp_core::graph::{NodeKind, RelType, ZeroCopyGraph};
 use std::path::Path;
 
@@ -98,6 +99,9 @@ fn named<'a>(g: &'a LocalGraph, name: &str) -> Vec<&'a ecp_core::analyzer::types
     out
 }
 
+/// Stands for: a function nested in a callable keys on its container's
+/// anchor (design_uid §2.1, the `nested` stream), so it is a second `First`
+/// node beside the top-level one, not an overload of it.
 #[test]
 fn test_parse_file_swift_nested_fn_same_name_as_top_level_today_uid() {
     let rows = rows(&graph());
@@ -108,15 +112,17 @@ fn test_parse_file_swift_nested_fn_same_name_as_top_level_today_uid() {
         ("helper", NodeKind::Function)
     );
     assert_eq!(top.uid, uid_of(NodeKind::Function, None, "helper"));
-    // Stands for: a same-uid redefinition keeps its own named node (design_uid §2.3,
-    // `LaterReason::Repeat`). The nested function has no owner, so it shares the top-level
-    // one's base uid and takes `uid::overload(base, 1)`. A later opt-in slice flips this: the
-    // nested function becomes a lexically scoped node with a scoped uid.
     assert_eq!(
         (nested.name.as_str(), nested.kind),
         ("helper", NodeKind::Function)
     );
-    assert_eq!(nested.uid, ecp_core::uid::overload(top.uid, 1));
+    let outer = at(&rows, 3);
+    assert_eq!(outer.name, "outer", "setup: the container row");
+    assert_eq!(
+        nested.uid,
+        nested_uid(outer.uid, NodeKind::Function, None, "helper")
+    );
+    assert_ne!(nested.uid, top.uid);
     assert_eq!(nested.owner, "");
 }
 

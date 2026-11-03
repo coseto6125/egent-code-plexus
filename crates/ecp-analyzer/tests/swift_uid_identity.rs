@@ -19,6 +19,8 @@ use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::graph::{NodeKind, RelType, ZeroCopyGraph};
 use std::path::Path;
 
+use crate::uid_chain_support;
+
 const PATH: &str = "m.swift";
 
 fn parse(src: &str) -> LocalGraph {
@@ -185,4 +187,79 @@ fn test_build_swift_method_in_two_extensions_each_owned_by_the_type() {
     let k = named(&g, NodeKind::Struct, "K");
     assert_eq!(sources(&g, RelType::HasMethod, first), k);
     assert_eq!(sources(&g, RelType::HasMethod, second), k);
+}
+
+const NESTED_TWINS: &str = "class O1 {\n    class H {\n        func run() {}\n    }\n}\nclass O2 {\n    class H {\n        func run() {}\n    }\n}\n";
+
+/// Stands for: N1 and N2 (design_uid §5, phase 2). `O1.H` and `O2.H` are
+/// two named nodes with two uids on the full build and the overlay, and each
+/// `run` is a member of its own `H` only, with no `overload_set` reference
+/// between the two `run`.
+#[test]
+fn test_build_swift_twin_nested_types_two_nodes_own_members() {
+    let provider = SwiftProvider::new().unwrap();
+    let g = uid_chain_support::assert_twins(&provider, PATH, NESTED_TWINS, "H", &[2, 7]);
+    uid_chain_support::assert_twins(&provider, PATH, NESTED_TWINS, "run", &[3, 8]);
+    uid_chain_support::assert_own_members(
+        &g,
+        ecp_core::graph::RelType::HasMethod,
+        "run",
+        &[(3, 2), (8, 7)],
+    );
+}
+
+const LOCAL_TWINS: &str = "func a() {\n    func l() {}\n}\nfunc b() {\n    func l() {}\n}\n";
+
+/// Stands for: L (design_uid §5, phase 2). A local `func l` in each of two
+/// functions is two named nodes with two uids.
+#[test]
+fn test_build_swift_local_func_in_two_functions_two_nodes() {
+    uid_chain_support::assert_twins(
+        &SwiftProvider::new().unwrap(),
+        PATH,
+        LOCAL_TWINS,
+        "l",
+        &[2, 5],
+    );
+}
+
+const EXTENSION_BESIDE_TYPE: &str =
+    "class K {\n    func m(_ x: Int) {}\n}\nextension K {\n    func m(_ s: String) {}\n}\n";
+
+/// Stands for: a method in `extension K` joins the set of the same-named
+/// method in `K` (identity `joined_containers`): two named nodes, the
+/// in-type one first, and its `overload_set` reference reaches the
+/// extension one, so a call by name has one candidate.
+#[test]
+fn test_build_swift_extension_method_joins_in_type_method_set() {
+    let g = uid_chain_support::assert_twins(
+        &SwiftProvider::new().unwrap(),
+        PATH,
+        EXTENSION_BESIDE_TYPE,
+        "m",
+        &[2, 5],
+    );
+    let ext = uid_chain_support::node_at(&g, "m", 5);
+    assert_eq!(
+        uid_chain_support::source_lines(&g, RelType::References, ext),
+        vec![2]
+    );
+}
+
+const PROTOCOL_DEFAULT_FIELD: &str =
+    "protocol P {\n    var af: Int { get }\n}\nextension P {\n    var af: Int { 1 }\n}\n";
+
+/// Stands for: a field in `extension P` joins the same-named requirement of
+/// protocol `P` (identity `joined_containers`) and merges into it, so a
+/// read of `x.af` has one candidate.
+#[test]
+fn test_build_swift_extension_field_merges_into_protocol_requirement() {
+    let g = uid_chain_support::build(&SwiftProvider::new().unwrap(), PATH, PROTOCOL_DEFAULT_FIELD);
+    assert_eq!(
+        uid_chain_support::named(&g, "af")
+            .iter()
+            .map(|&(l, _)| l)
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
 }

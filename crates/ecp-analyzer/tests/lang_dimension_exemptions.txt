@@ -892,19 +892,19 @@ owner_collision php pre-existing gap
 owner_collision ruby pre-existing gap
 owner_collision rust pre-existing gap
 owner_collision swift pre-existing gap
-parent_identity c no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
-parent_identity cpp no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
-parent_identity csharp no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
-parent_identity dart no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
-parent_identity go no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
-parent_identity java no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
-parent_identity javascript no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
-parent_identity kotlin no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
-parent_identity php no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
-parent_identity python no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
-parent_identity ruby no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
-parent_identity swift no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
-parent_identity typescript no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
+parent_identity c only Rust has an `Impl` row: a member of an `Impl` block hashes that block as its container
+parent_identity cpp only Rust has an `Impl` row: a member of an `Impl` block hashes that block as its container
+parent_identity csharp only Rust has an `Impl` row: a member of an `Impl` block hashes that block as its container
+parent_identity dart only Rust has an `Impl` row: a member of an `Impl` block hashes that block as its container
+parent_identity go only Rust has an `Impl` row: a member of an `Impl` block hashes that block as its container
+parent_identity java only Rust has an `Impl` row: a member of an `Impl` block hashes that block as its container
+parent_identity javascript only Rust has an `Impl` row: a member of an `Impl` block hashes that block as its container
+parent_identity kotlin only Rust has an `Impl` row: a member of an `Impl` block hashes that block as its container
+parent_identity php only Rust has an `Impl` row: a member of an `Impl` block hashes that block as its container
+parent_identity python only Rust has an `Impl` row: a member of an `Impl` block hashes that block as its container
+parent_identity ruby only Rust has an `Impl` row: a member of an `Impl` block hashes that block as its container
+parent_identity swift only Rust has an `Impl` row: a member of an `Impl` block hashes that block as its container
+parent_identity typescript only Rust has an `Impl` row: a member of an `Impl` block hashes that block as its container
 parser_fixes swift no Swift parser defect in this release: the local-property report was not a bug
 partial_parts c only C# declares one type in partial parts across files
 partial_parts cpp only C# declares one type in partial parts across files

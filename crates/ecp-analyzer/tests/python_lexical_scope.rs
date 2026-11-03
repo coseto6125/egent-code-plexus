@@ -14,7 +14,7 @@ use ecp_analyzer::python::parser::PythonProvider;
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::LocalGraph;
-use ecp_core::contracts::identity::scoped_uid;
+use ecp_core::contracts::identity::{nested_uid, scoped_uid};
 use ecp_core::graph::{ArchivedZeroCopyGraph, Edge, NodeKind, RelType, ZeroCopyGraph};
 use ecp_core::session::{MergedGraph, OverlayFileInput, OverlayView};
 use std::path::Path;
@@ -368,7 +368,16 @@ fn test_build_python_nested_fn_in_two_methods_two_nodes_no_has_method() {
         node(&g, PATH, "k", 16),
         node(&g, PATH, "n", 17),
     );
-    let anchor = |name| uid_of(NodeKind::Method, Some("A"), name);
+    // A method hashes its class (design uid §2.2), and a scoped `helper`
+    // hashes its method.
+    let anchor = |name| {
+        nested_uid(
+            g.nodes[class as usize].uid,
+            NodeKind::Method,
+            Some("A"),
+            name,
+        )
+    };
     assert_eq!(
         g.nodes[m as usize].uid,
         anchor("m"),
@@ -461,9 +470,10 @@ fn test_build_python_two_levels_decorated_and_lambda_scoped() {
 }
 
 /// Stands for: a local class is no scoped node. Each `class Fake` keeps the
-/// enclosing function's name as its owner and today's uid, and the two do
-/// not collide (design A §5.2, `stamp_owner_fn_by_span` skips only the
-/// scoped kinds).
+/// enclosing function's name as its owner, the two have two uids, and they
+/// do not collide (design A §5.2, `stamp_owner_fn_by_span` skips only the
+/// scoped kinds). Each uid hashes its function (design uid §2.2, shape L),
+/// no longer the owner text alone.
 #[test]
 fn test_parse_python_local_class_in_two_functions_keeps_two_uids() {
     let g = build(&[(PATH, LOCAL_CLASSES)]);
@@ -472,14 +482,14 @@ fn test_parse_python_local_class_in_two_functions_keeps_two_uids() {
     let (first, second) = (node(&g, PATH, "Fake", 2), node(&g, PATH, "Fake", 8));
     assert_eq!(owner(&g, first), "t1");
     assert_eq!(owner(&g, second), "t2");
-    assert_eq!(
-        g.nodes[first as usize].uid,
-        uid_of(NodeKind::Class, Some("t1"), "Fake")
-    );
-    assert_eq!(
-        g.nodes[second as usize].uid,
-        uid_of(NodeKind::Class, Some("t2"), "Fake")
-    );
+    for (fake, function, line) in [(first, "t1", 1), (second, "t2", 7)] {
+        let container = g.nodes[node(&g, PATH, function, line) as usize].uid;
+        assert_eq!(
+            g.nodes[fake as usize].uid,
+            nested_uid(container, NodeKind::Class, Some(function), "Fake")
+        );
+    }
+    assert_ne!(g.nodes[first as usize].uid, g.nodes[second as usize].uid);
     assert!(!archived.is_lexically_scoped(first));
     assert!(!archived.is_lexically_scoped(second));
     assert!(archived.lexical_parents.is_empty());
