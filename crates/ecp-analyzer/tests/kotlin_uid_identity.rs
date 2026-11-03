@@ -19,6 +19,8 @@ use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::graph::{NodeKind, RelType, ZeroCopyGraph};
 use std::path::Path;
 
+mod uid_chain_support;
+
 const PATH: &str = "m.kt";
 
 fn parse(src: &str) -> LocalGraph {
@@ -174,5 +176,50 @@ fn test_build_kotlin_top_level_overloads_keep_two_nodes_with_own_calls() {
         "f",
         RelType::Defines,
         Some(("a", "b")),
+    );
+}
+
+const NESTED_TWINS: &str = "class O1 {\n    class H {\n        fun run() {}\n    }\n}\nclass O2 {\n    class H {\n        fun run() {}\n    }\n}\n";
+
+/// Stands for: N1 and N2 (design_uid §5, phase 2). `O1.H` and `O2.H` are
+/// two named nodes with two uids on the full build and the overlay, and each
+/// `run` is a member of its own `H` only, with no `overload_set` reference
+/// between the two `run`.
+#[test]
+fn test_build_kotlin_twin_nested_types_two_nodes_own_members() {
+    let provider = KotlinProvider::new().unwrap();
+    let g = uid_chain_support::assert_twins(&provider, PATH, NESTED_TWINS, "H", &[2, 7]);
+    uid_chain_support::assert_twins(&provider, PATH, NESTED_TWINS, "run", &[3, 8]);
+    uid_chain_support::assert_own_members(
+        &g,
+        ecp_core::graph::RelType::HasMethod,
+        "run",
+        &[(3, 2), (8, 7)],
+    );
+}
+
+const DEEP_TWINS: &str = "class A {\n    class B {\n        class H\n    }\n}\nclass C {\n    class B {\n        class H\n    }\n}\n";
+
+/// Stands for: N2 at depth 2. `ecp find H --file kt_deep.kt` finds two
+/// nodes: `A.B.H` and `C.B.H` chain on two different `B` anchors.
+#[test]
+fn test_build_kotlin_depth_two_twin_types_find_two() {
+    let provider = KotlinProvider::new().unwrap();
+    uid_chain_support::assert_twins(&provider, "kt_deep.kt", DEEP_TWINS, "B", &[2, 7]);
+    uid_chain_support::assert_twins(&provider, "kt_deep.kt", DEEP_TWINS, "H", &[3, 8]);
+}
+
+const LOCAL_TWINS: &str = "fun a() {\n    fun l() {}\n}\nfun b() {\n    fun l() {}\n}\n";
+
+/// Stands for: L (design_uid §5, phase 2). A local `fun l` in each of two
+/// functions is two named nodes with two uids.
+#[test]
+fn test_build_kotlin_local_fun_in_two_functions_two_nodes() {
+    uid_chain_support::assert_twins(
+        &KotlinProvider::new().unwrap(),
+        PATH,
+        LOCAL_TWINS,
+        "l",
+        &[2, 5],
     );
 }

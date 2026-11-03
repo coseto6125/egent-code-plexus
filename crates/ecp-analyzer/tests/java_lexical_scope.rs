@@ -10,6 +10,7 @@ use ecp_analyzer::java::parser::JavaProvider;
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::LocalGraph;
+use ecp_core::contracts::identity::nested_uid;
 use ecp_core::graph::{NodeKind, RelType, ZeroCopyGraph};
 use std::path::Path;
 
@@ -105,6 +106,9 @@ fn named<'a>(g: &'a LocalGraph, name: &str) -> Vec<&'a ecp_core::analyzer::types
 // Java has no nested named method. The closest construct is a method of a local class declared
 // inside a method body; the parser emits the local class `Local` with owner `T`.
 
+/// Stands for: a member keys on its innermost type's anchor (design_uid
+/// §2.1, the `nested` stream): `T.helper` under `T`, the local class's
+/// `helper` under `Local`, so the two uids differ.
 #[test]
 fn test_parse_file_java_nested_fn_same_name_as_top_level_today_uid() {
     let rows = rows(&graph());
@@ -114,7 +118,13 @@ fn test_parse_file_java_nested_fn_same_name_as_top_level_today_uid() {
         (top.name.as_str(), top.kind, top.owner.as_str()),
         ("helper", NodeKind::Method, "T")
     );
-    assert_eq!(top.uid, uid_of(NodeKind::Method, Some("T"), "helper"));
+    let class = at(&rows, 1);
+    assert_eq!(class.name, "T", "setup: the class row");
+    assert_eq!(class.uid, uid_of(NodeKind::Class, None, "T"));
+    assert_eq!(
+        top.uid,
+        nested_uid(class.uid, NodeKind::Method, Some("T"), "helper")
+    );
     assert_eq!(
         (
             local_method.name.as_str(),
@@ -123,10 +133,11 @@ fn test_parse_file_java_nested_fn_same_name_as_top_level_today_uid() {
         ),
         ("helper", NodeKind::Method, "Local")
     );
-    // The local class owns its method, so the two uids differ: no tombstone, no overload.
+    let local = at(&rows, 5);
+    assert_eq!(local.name, "Local", "setup: the local class row");
     assert_eq!(
         local_method.uid,
-        uid_of(NodeKind::Method, Some("Local"), "helper")
+        nested_uid(local.uid, NodeKind::Method, Some("Local"), "helper")
     );
     assert_ne!(top.uid, local_method.uid);
 }

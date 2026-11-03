@@ -21,6 +21,8 @@ use ecp_core::graph::{ArchivedZeroCopyGraph, NodeKind, RelType, ZeroCopyGraph};
 use ecp_core::session::{MergedGraph, OverlayFileInput, OverlayView};
 use std::path::Path;
 
+mod uid_chain_support;
+
 const PATH: &str = "m.cpp";
 
 fn parse(src: &str) -> LocalGraph {
@@ -249,4 +251,45 @@ fn test_build_cpp_top_level_overloads_keep_two_nodes_with_own_calls() {
 #[test]
 fn test_enum_variant_defines_two_mods_same_enum_binds_by_span() {
     assert_enum_rows(NAMESPACE_ENUMS, "X", &[(2, 2), (5, 5)]);
+}
+
+const NESTED_TWINS: &str = "class O1 {\n    class H {\n        void run() {}\n    };\n};\nclass O2 {\n    class H {\n        void run() {}\n    };\n};\n";
+
+/// Stands for: N1 and N2 (design_uid §5, phase 2). `O1.H` and `O2.H` are
+/// two named nodes with two uids on the full build and the overlay, and each
+/// `run` is a member of its own `H` only, with no `overload_set` reference
+/// between the two `run`.
+#[test]
+fn test_build_cpp_twin_nested_types_two_nodes_own_members() {
+    let provider = CppProvider::new().unwrap();
+    let g = uid_chain_support::assert_twins(&provider, PATH, NESTED_TWINS, "H", &[2, 7]);
+    uid_chain_support::assert_twins(&provider, PATH, NESTED_TWINS, "run", &[3, 8]);
+    uid_chain_support::assert_own_members(
+        &g,
+        ecp_core::graph::RelType::HasMethod,
+        "run",
+        &[(3, 2), (8, 7)],
+    );
+}
+
+const NAMESPACE_TWINS: &str = "namespace n {\nnamespace i {\nvoid f() {}\n}\n}\nnamespace m {\nnamespace i {\nvoid f() {}\n}\n}\n";
+
+/// Stands for: NS (design_uid §5, phase 2). `n::i::f` and `m::i::f` chain
+/// on two different `i` anchors: two named `i`, two named `f`.
+#[test]
+fn test_build_cpp_twin_namespace_paths_two_nodes() {
+    let provider = CppProvider::new().unwrap();
+    uid_chain_support::assert_twins(&provider, PATH, NAMESPACE_TWINS, "i", &[2, 7]);
+    uid_chain_support::assert_twins(&provider, PATH, NAMESPACE_TWINS, "f", &[3, 8]);
+}
+
+const LOCAL_TWINS: &str = "void a() {\n    struct L {\n        int x;\n    };\n}\nvoid b() {\n    struct L {\n        int x;\n    };\n}\n";
+
+/// Stands for: L (design_uid §5, phase 2). A local `struct L` in each of
+/// two functions is two named nodes, and so is the field of each.
+#[test]
+fn test_build_cpp_local_struct_in_two_functions_two_nodes() {
+    let provider = CppProvider::new().unwrap();
+    uid_chain_support::assert_twins(&provider, PATH, LOCAL_TWINS, "L", &[2, 7]);
+    uid_chain_support::assert_twins(&provider, PATH, LOCAL_TWINS, "x", &[3, 8]);
 }

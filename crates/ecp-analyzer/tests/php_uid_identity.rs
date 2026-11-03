@@ -19,6 +19,8 @@ use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::graph::{NodeKind, RelType, ZeroCopyGraph};
 use std::path::Path;
 
+mod uid_chain_support;
+
 const PATH: &str = "m.php";
 
 fn parse(src: &str) -> LocalGraph {
@@ -160,5 +162,21 @@ fn test_build_php_conditional_function_twice_keeps_two_nodes_with_own_calls() {
         "g",
         RelType::Defines,
         Some(("a", "b")),
+    );
+}
+
+const LOCAL_TWINS: &str =
+    "<?php\nfunction a() {\n    function l() {}\n}\nfunction b() {\n    function l() {}\n}\n";
+
+/// Stands for: L (design_uid §5, phase 2). A nested `function l` in each of
+/// two functions is two named nodes with two uids.
+#[test]
+fn test_build_php_nested_function_in_two_functions_two_nodes() {
+    uid_chain_support::assert_twins(
+        &PhpProvider::new().unwrap(),
+        PATH,
+        LOCAL_TWINS,
+        "l",
+        &[3, 6],
     );
 }

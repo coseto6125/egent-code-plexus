@@ -22,6 +22,7 @@
 //! type, even inside a trait's default method: both passes skip it.
 
 use crate::analyzer::types::{span_contains, Span};
+use crate::contracts::identity::container_parents;
 use crate::graph::{NodeKind, RelType};
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -205,9 +206,17 @@ fn span_pass<'a, T>(
 
 /// Owner pass: a member whose `owner_class` names a type of the file that no
 /// span of that name contains (a Rust `impl` block, a Go receiver method).
-/// A member some span of its owner's name contains is the span pass's. The
-/// type is the file's first declaration of the owner's name; a member named
-/// like it with no such type would be its own owner, and gets no edge.
+/// A member some span of its owner's name contains is the span pass's.
+///
+/// A member of a Rust `Impl` block binds the first type row of its owner's
+/// name whose container is the block's container (design uid §3 row 5), so
+/// `mod a { struct S; impl S { fn m } }` and the same in `mod b` each own
+/// their `m`. With no such row the member gets no edge: a lone `S` of
+/// another module is no proof (`mod c { use super::b::S; impl S {} }` beside
+/// `mod a { struct S; }`), and import evidence is design uid §7 Q2. Any
+/// other member (a Go receiver, an out-of-line member) binds the file's
+/// first declaration of the owner's name. A member named like its type with
+/// no such type would be its own owner, and gets no edge.
 fn owner_pass<'a, T>(
     rows: &'a [T],
     row: &impl Fn(&'a T) -> MemberRow<'a>,
@@ -215,6 +224,9 @@ fn owner_pass<'a, T>(
     lookup: &impl MemberLookup,
     emit: &mut impl FnMut(Membership),
 ) {
+    // The container walk runs once per file, and only for a file that has
+    // an owner-pass member.
+    let mut chain: Option<(Vec<(NodeKind, Span)>, Vec<Option<u32>>)> = None;
     for (i, member) in rows.iter().map(row).enumerate() {
         if lookup.is_scoped(i) {
             continue;
@@ -233,8 +245,27 @@ fn owner_pass<'a, T>(
         if spanned {
             continue;
         }
-        let (Some(source), Some(target)) = (lookup.lookup_in_file(class_name), lookup.node(i))
-        else {
+        let (decls, containers) = chain.get_or_insert_with(|| {
+            let decls: Vec<(NodeKind, Span)> =
+                rows.iter().map(row).map(|r| (r.kind, r.span)).collect();
+            let containers = container_parents(&decls);
+            (decls, containers)
+        });
+        let block = containers[i].filter(|&c| decls[c as usize].0 == NodeKind::Impl);
+        let source = match block {
+            Some(block) => {
+                let scope = containers[block as usize];
+                rows.iter()
+                    .map(row)
+                    .enumerate()
+                    .find(|&(t, r)| {
+                        r.kind.is_type() && r.name == class_name && containers[t] == scope
+                    })
+                    .and_then(|(t, _)| lookup.node(t))
+            }
+            None => lookup.lookup_in_file(class_name),
+        };
+        let (Some(source), Some(target)) = (source, lookup.node(i)) else {
             continue;
         };
         if source != target {
@@ -485,6 +516,47 @@ mod tests {
                 has_method(0, 2, CLASS_MEMBERSHIP_IMPL_REASON)
             ]
         );
+    }
+
+    /// Stands for: design uid §3 row 5, phase 2, rule (1). `mod a { struct
+    /// S; impl S { fn m } }` and the same in `mod b`: each `m` binds the
+    /// `S` whose container is its `impl` block's container, never the
+    /// file's first `S`.
+    #[test]
+    fn test_class_membership_rust_impl_member_binds_type_beside_its_block() {
+        let rows = [
+            row(NodeKind::Module, None, "a", (0, 0, 5, 1)),
+            row(NodeKind::Struct, Some("a"), "S", (1, 4, 1, 17)),
+            row(NodeKind::Impl, None, "S", (2, 4, 4, 5)),
+            row(NodeKind::Method, Some("S"), "m", (3, 8, 3, 20)),
+            row(NodeKind::Module, None, "b", (6, 0, 11, 1)),
+            row(NodeKind::Struct, Some("b"), "S", (7, 4, 7, 17)),
+            row(NodeKind::Impl, None, "S", (8, 4, 10, 5)),
+            row(NodeKind::Method, Some("S"), "m", (9, 8, 9, 20)),
+        ];
+        assert_eq!(
+            edges(&rows),
+            [
+                has_method(1, 3, CLASS_MEMBERSHIP_IMPL_REASON),
+                has_method(5, 7, CLASS_MEMBERSHIP_IMPL_REASON)
+            ]
+        );
+    }
+
+    /// Stands for: design uid §3 row 5, phase 2, rule (2). The only `S` of
+    /// the file sits in `mod a`, the `impl S` in `mod c` (which imports
+    /// another module's `S`): no type of that name beside the block, so no
+    /// edge, and no "only one in the file" fallback.
+    #[test]
+    fn test_class_membership_rust_impl_member_no_type_beside_block_emits_none() {
+        let rows = [
+            row(NodeKind::Module, None, "a", (0, 0, 2, 1)),
+            row(NodeKind::Struct, Some("a"), "S", (1, 4, 1, 17)),
+            row(NodeKind::Module, None, "c", (3, 0, 7, 1)),
+            row(NodeKind::Impl, None, "S", (4, 4, 6, 5)),
+            row(NodeKind::Method, Some("S"), "m", (5, 8, 5, 20)),
+        ];
+        assert!(edges(&rows).is_empty());
     }
 
     /// An owner-pass member named like its owner, in a file with no type of

@@ -21,6 +21,8 @@ use ecp_core::graph::{ArchivedZeroCopyGraph, NodeKind, RelType, ZeroCopyGraph};
 use ecp_core::session::{MergedGraph, OverlayFileInput, OverlayView};
 use std::path::Path;
 
+mod uid_chain_support;
+
 const PATH: &str = "m.rs";
 
 fn parse(src: &str) -> LocalGraph {
@@ -298,4 +300,66 @@ fn test_build_rust_impl_twice_keeps_two_impl_nodes_methods_owned_by_struct() {
     let mut expected = vec![(owner[0], a), (owner[0], b)];
     expected.sort_unstable();
     assert_eq!(edges(&g, RelType::HasMethod), expected);
+}
+
+/// Stands for: the container chain (design_uid phase 2). `a::E` and `b::E`
+/// key on two module anchors, so they are two named nodes with two uids,
+/// and so are their two `X`, on the full build and the overlay.
+#[test]
+fn test_build_rust_two_mods_same_enum_two_enums_two_variants() {
+    let provider = RustProvider::new().unwrap();
+    uid_chain_support::assert_twins(&provider, PATH, MOD_ENUMS, "E", &[2, 8]);
+    uid_chain_support::assert_twins(&provider, PATH, MOD_ENUMS, "X", &[3, 9]);
+}
+
+const NS_TWINS: &str = "mod o1 {\n    mod inner {\n        pub fn f() {}\n    }\n}\nmod o2 {\n    mod inner {\n        pub fn f() {}\n    }\n}\n";
+
+/// Stands for: NS (design_uid §5, phase 2). `o1::inner::f` and
+/// `o2::inner::f` chain on two different `inner` anchors: two named
+/// `inner`, two named `f`.
+#[test]
+fn test_build_rust_twin_module_paths_two_nodes() {
+    let provider = RustProvider::new().unwrap();
+    uid_chain_support::assert_twins(&provider, PATH, NS_TWINS, "inner", &[2, 7]);
+    uid_chain_support::assert_twins(&provider, PATH, NS_TWINS, "f", &[3, 8]);
+}
+
+const LOCAL_CONST_TWINS: &str = "fn a() {\n    fn helper() {\n        const X: u8 = 1;\n    }\n}\nfn b() {\n    fn helper() {\n        const X: u8 = 2;\n    }\n}\n";
+
+/// Stands for: a Const keeps its callable container (design_uid §2.1), so
+/// a local `const X` in each of two nested `helper`s is two named `X` with
+/// two uids, not one merged entity.
+#[test]
+fn test_assign_file_rust_local_const_in_two_helpers_two_nodes() {
+    let provider = RustProvider::new().unwrap();
+    uid_chain_support::assert_twins(&provider, PATH, LOCAL_CONST_TWINS, "helper", &[2, 7]);
+    uid_chain_support::assert_twins(&provider, PATH, LOCAL_CONST_TWINS, "X", &[3, 8]);
+}
+
+const TWO_MOD_IMPLS: &str = "mod a {\n    pub struct S;\n    impl S {\n        fn m(&self) {}\n    }\n}\nmod b {\n    pub struct S;\n    impl S {\n        fn m(&self) {}\n    }\n}\n";
+
+/// Stands for: the owner pass binds the type row beside the `impl` block
+/// (design_uid phase 2, rule 1): each `m` is a member of the `S` of its own
+/// module, once.
+#[test]
+fn test_class_membership_rust_two_mods_same_impl_binds_own_method() {
+    let provider = RustProvider::new().unwrap();
+    let g = uid_chain_support::assert_twins(&provider, PATH, TWO_MOD_IMPLS, "m", &[4, 10]);
+    uid_chain_support::assert_own_members(&g, RelType::HasMethod, "m", &[(4, 2), (10, 8)]);
+}
+
+const IMPORTED_RECEIVER: &str = "mod b;\nmod a {\n    pub struct S;\n}\nmod c {\n    use super::b::S;\n    impl S {\n        fn m(&self) {}\n    }\n}\n";
+
+/// Stands for: an `impl` of a type no row beside the block declares (here
+/// imported from `b`) gives no `HasMethod` (design_uid phase 2, rule 2):
+/// no fallback to the same-named `a::S` of the file.
+#[test]
+fn test_class_membership_rust_impl_imported_receiver_emits_none() {
+    let provider = RustProvider::new().unwrap();
+    let g = uid_chain_support::build(&provider, "src/lib.rs", IMPORTED_RECEIVER);
+    let m = uid_chain_support::node_at(&g, "m", 8);
+    assert_eq!(
+        uid_chain_support::source_lines(&g, RelType::HasMethod, m),
+        Vec::<u32>::new()
+    );
 }

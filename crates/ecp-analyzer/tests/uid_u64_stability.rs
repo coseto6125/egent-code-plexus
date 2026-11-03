@@ -118,32 +118,44 @@ fn uid_is_identical_across_two_builds() {
     );
 }
 
+/// Stands for: a top-level declaration's uid is `uid::compute` of its
+/// stored fields, and a member's uid hashes its container's uid
+/// (`nested_uid`, design uid §2.2): `load` sits inside `ConfigLoader`.
 #[test]
 fn uid_matches_direct_compute() {
     let mut b = GraphBuilder::new();
     b.add_graph(make_local_graph());
     let g = b.build();
     let pool = g.string_pool.as_slice();
-
-    for node in g.nodes.iter() {
-        if !matches!(
-            node.kind,
-            NodeKind::Function | NodeKind::Method | NodeKind::Class
-        ) {
-            continue;
-        }
-        let name = node.name.resolve(pool);
-        let file_path = g.files[node.file_idx as usize].path.resolve(pool);
-        let owner = if node.owner_class.len == 0 {
-            None
-        } else {
-            Some(node.owner_class.resolve(pool))
-        };
-        let expected = ecp_core::uid::compute(node.kind, file_path, owner, name);
+    let uid_of = |name: &str| {
+        let hits: Vec<u64> = g
+            .nodes
+            .iter()
+            .filter(|n| n.kind != NodeKind::File && n.name.resolve(pool) == name)
+            .map(|n| n.uid)
+            .collect();
+        assert_eq!(hits.len(), 1, "one `{name}`");
+        hits[0]
+    };
+    let path = "src/stable.rs";
+    for (kind, name) in [
+        (NodeKind::Function, "parseConfig"),
+        (NodeKind::Class, "ConfigLoader"),
+    ] {
         assert_eq!(
-            node.uid, expected,
-            "uid mismatch for {name}: builder produced {}, direct compute gives {expected}",
-            node.uid
+            uid_of(name),
+            ecp_core::uid::compute(kind, path, None, name),
+            "top-level `{name}`"
         );
     }
+    assert_eq!(
+        uid_of("load"),
+        ecp_core::contracts::identity::nested_uid(
+            uid_of("ConfigLoader"),
+            NodeKind::Method,
+            Some("ConfigLoader"),
+            "load"
+        ),
+        "the member `load` hashes its class"
+    );
 }

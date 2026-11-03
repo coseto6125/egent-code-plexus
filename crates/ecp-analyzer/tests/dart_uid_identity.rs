@@ -20,6 +20,8 @@ use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::graph::{NodeKind, RelType, ZeroCopyGraph};
 use std::path::Path;
 
+mod uid_chain_support;
+
 const PATH: &str = "m.dart";
 
 fn parse(src: &str) -> LocalGraph {
@@ -97,4 +99,19 @@ fn test_build_dart_getter_and_setter_merge_into_one_property() {
         named(&g, NodeKind::Class, "K")
     );
     assert_eq!(uid_collisions(&g), 0);
+}
+
+const LOCAL_TWINS: &str = "void a() {\n  void l() {}\n}\nvoid b() {\n  void l() {}\n}\n";
+
+/// Stands for: L (design_uid §5, phase 2). A local function `l` in each of
+/// two functions is two named nodes with two uids.
+#[test]
+fn test_build_dart_local_function_in_two_functions_two_nodes() {
+    uid_chain_support::assert_twins(
+        &DartProvider::new().unwrap(),
+        PATH,
+        LOCAL_TWINS,
+        "l",
+        &[2, 5],
+    );
 }

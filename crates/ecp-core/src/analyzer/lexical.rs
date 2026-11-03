@@ -8,14 +8,13 @@
 //! The same lexical facts feed declaration identity: [`file_identities`]
 //! numbers one file's declarations for every path that stores a uid.
 
-use crate::analyzer::heritage::HeritageNode;
 use crate::analyzer::outcome::{Resolution, Tier};
-use crate::analyzer::same_file_pick::{rust_impl_members, ImplNode};
 use crate::analyzer::types::{
     innermost_enclosing, span_contains, CallSite, LocalGraph, NameRef, NameRefKind, RawNode, Span,
 };
 use crate::contracts::identity::{
-    assign_file, lexical_parents, DeclIdentity, Discriminator, FileDecl, UidSlot,
+    assign_file, container_parents_in, lexical_parents, lexical_parents_in, DeclIdentity, FileDecl,
+    UidSlot,
 };
 use crate::file_category::Language;
 use crate::graph::NodeKind;
@@ -161,8 +160,15 @@ pub fn splits_by_arity(language: Language, kind: NodeKind) -> bool {
 /// declaration ([`NodeKind::declares_type`]) whose span contains it, by
 /// [`innermost_enclosing`]. A type's own entry is the type that encloses it.
 pub fn enclosing_types(rows: &[(NodeKind, Span)]) -> Vec<Option<usize>> {
-    let spans: Vec<Span> = rows.iter().map(|&(_, span)| span).collect();
-    let enclosing = innermost_enclosing(&spans);
+    enclosing_types_in(rows, &decls_enclosing(rows))
+}
+
+/// [`enclosing_types`] over `enclosing`, the [`decls_enclosing`] of `rows`,
+/// for a caller that reads it for another rule too.
+fn enclosing_types_in(
+    rows: &[(NodeKind, Span)],
+    enclosing: &[Option<usize>],
+) -> Vec<Option<usize>> {
     (0..rows.len())
         .map(|i| {
             let mut up = enclosing[i];
@@ -195,11 +201,16 @@ pub fn twin_enclosing(
 }
 
 /// The identity of each declaration of the file at `path`, in slice order:
-/// [`assign_file`] over the language's lexical parents, in a Rust file each
-/// impl member's [`Discriminator::ImplTrait`], and, in a C# file, each
+/// [`assign_file`] over the language's lexical parents, every declaration's
+/// identity container ([`container_parents_in`]: a member hashes its
+/// container's anchor, so a Rust impl member hashes its `Impl` block and
+/// `O1.H.run` is no repeat of `O2.H.run`), and, in a C# file, each
 /// declaration's generic arity ([`splits_by_arity`]; 0 for every other
 /// kind) and the type that encloses it ([`enclosing_types`]), so a member of
-/// `Foo1<T>` is no duplicate of the same member of `Foo1`. The full build,
+/// `Foo1<T>` is no duplicate of the same member of `Foo1`. A top-level
+/// declaration has no container and keeps `uid::compute`. The inputs are
+/// kind, owner, name and span only, which the base graph stores, so the
+/// overlay re-derives every anchor from stored nodes. The full build,
 /// incremental mode and the overlay view (its dirty parse and its base
 /// nodes) all number a file through this one function, so a later overload
 /// or a same-uid redefinition gets the same uid, and a declaration the same
@@ -216,7 +227,7 @@ pub fn file_identities<'a, T>(
 /// `LocalGraph`s of one path), numbered as one file: one [`assign_file`]
 /// over the inputs in order, so a declaration of a later input repeats the
 /// earlier inputs' ones. Spans relate only rows of one input, so each
-/// input's lexical parents, impl traits and enclosing types come from that
+/// input's lexical parents, containers and enclosing types come from that
 /// input alone. One identity list per input, in input order.
 pub fn path_identities<'a, T>(
     path: &str,
@@ -338,167 +349,81 @@ fn identities_of<'a, T>(
 ) -> Vec<DeclIdentity> {
     let path = os_path_to_slash(path);
     let language = Language::from_path(&path);
-    let mut rows: Vec<Row<'a>> = Vec::with_capacity(inputs.iter().map(|i| i.len()).sum());
+    let mut rows: Vec<DeclFields<'a>> = Vec::with_capacity(inputs.iter().map(|i| i.len()).sum());
     for &input in inputs {
-        rows.extend(input.iter().map(|d| Row(fields(d))));
+        rows.extend(input.iter().map(&fields));
     }
-    let spans_of = |rows: &[Row<'a>]| -> Vec<(NodeKind, Span)> {
-        rows.iter().map(|r| (r.0 .0, r.0 .3)).collect()
-    };
     let scoped = lexical_scope_kinds(language);
-    let parents = (!scoped.is_empty()).then(|| {
-        per_input(
-            &rows,
-            inputs,
-            |part| lexical_parents(&spans_of(part), scoped),
-            |p, start| p + start as u32,
-        )
-    });
-    let traits =
-        (language == Language::Rust).then(|| per_input(&rows, inputs, impl_traits, |t, _| t));
-    let arity_scopes = (language == Language::CSharp).then(|| {
-        // Two members of one uid share an owner name, so their arity paths
-        // can differ only inside two same-named types. A path without such
-        // a pair skips the span sweep: every scope is `None`, every member
-        // path equal, as the sweep would find.
+    // Two members of one uid share an owner name, so their C# arity paths
+    // can differ only inside two same-named types. A path without such a
+    // pair needs no arity scope: every scope is `None`, every member path
+    // equal, as the sweep would find.
+    let twin_types = language == Language::CSharp && {
         let mut type_names = FxHashSet::default();
-        let twin_types = rows
-            .iter()
-            .filter(|r| r.0 .0.declares_type())
-            .any(|r| !type_names.insert(r.0 .2));
-        match twin_types {
-            true => per_input(
-                &rows,
-                inputs,
-                |part| enclosing_types(&spans_of(part)),
-                |ty, start| ty + start,
-            ),
-            false => vec![None; rows.len()],
-        }
-    });
-    let decls: Vec<FileDecl<'a>> = rows
-        .iter()
-        .enumerate()
-        .map(|(i, &Row((kind, owner, name, _, arity)))| FileDecl {
-            kind,
-            owner,
-            name,
-            parent: parents.as_ref().and_then(|p| p[i]),
-            discriminator: traits
-                .as_ref()
-                .and_then(|t| t[i])
-                .map(Discriminator::ImplTrait),
-            arity: arity_scopes
-                .is_some()
-                .then_some(if splits_by_arity(language, kind) {
-                    arity
-                } else {
-                    0
-                }),
-            arity_scope: arity_scopes
-                .as_ref()
-                .and_then(|s| s[i])
-                .map(|scope| scope as u32),
-        })
-        .collect();
-    // `os_path_to_slash` removes every `\` `check_path` rejects;
-    // `impl_traits` never yields an empty text and marks only
-    // methods and constructors, which are never scoped; `lexical_parents`
-    // returns in-range strict containers, scopes no kind that keeps
-    // overloads, and the parser clears each scoped node's owner
-    // ([`clear_scoped_owners`]); and `enclosing_types` returns in-range
-    // indices: no `IdentityError` can arise.
-    assign_file(&path, &decls).expect("a `/`-separated path and unscoped declarations")
-}
-
-/// `part` of each input's rows, every index it returns moved by `shift`
-/// from the input's own rows to `rows`, all inputs concatenated. One input
-/// is `part` of `rows` as it is.
-fn per_input<'a, T, X>(
-    rows: &[Row<'a>],
-    inputs: &[&[T]],
-    part: impl Fn(&[Row<'a>]) -> Vec<Option<X>>,
-    shift: impl Fn(X, usize) -> X,
-) -> Vec<Option<X>> {
-    if let [_] = inputs {
-        return part(rows);
-    }
-    let mut out = Vec::with_capacity(rows.len());
+        rows.iter()
+            .filter(|r| r.0.declares_type())
+            .any(|r| !type_names.insert(r.2))
+    };
+    // One span sweep per input feeds the three span rules. Spans relate
+    // only rows of one input, so each input's indices move by its start.
+    let n = rows.len();
+    let (mut parents, mut containers, mut arity_scopes) =
+        (vec![None; n], vec![None; n], vec![None; n]);
     let mut start = 0;
     for input in inputs {
         let end = start + input.len();
-        out.extend(
-            part(&rows[start..end])
-                .into_iter()
-                .map(|x| x.map(|x| shift(x, start))),
-        );
+        let decls: Vec<(NodeKind, Span)> = rows[start..end].iter().map(|r| (r.0, r.3)).collect();
+        let enclosing = decls_enclosing(&decls);
+        let shift = |i: Option<u32>| i.map(|i| i + start as u32);
+        if !scoped.is_empty() {
+            for (out, p) in parents[start..end]
+                .iter_mut()
+                .zip(lexical_parents_in(&decls, &enclosing, scoped))
+            {
+                *out = shift(p);
+            }
+        }
+        for (out, c) in containers[start..end]
+            .iter_mut()
+            .zip(container_parents_in(&decls, &enclosing))
+        {
+            *out = shift(c);
+        }
+        if twin_types {
+            for (out, ty) in arity_scopes[start..end]
+                .iter_mut()
+                .zip(enclosing_types_in(&decls, &enclosing))
+            {
+                *out = shift(ty.map(|ty| ty as u32));
+            }
+        }
         start = end;
     }
-    out
-}
-
-/// One [`DeclFields`] row, as [`rust_impl_members`] reads it. A row carries
-/// no heritage, so only an `Impl` node's span places a member.
-#[derive(Clone, Copy)]
-struct Row<'a>(DeclFields<'a>);
-
-impl HeritageNode for Row<'_> {
-    fn kind(&self) -> NodeKind {
-        self.0 .0
-    }
-
-    fn span(&self) -> Span {
-        self.0 .3
-    }
-
-    fn heritage(&self) -> &[String] {
-        &[]
-    }
-}
-
-impl ImplNode for Row<'_> {
-    fn name(&self) -> &str {
-        self.0 .2
-    }
-
-    fn owner_class(&self) -> Option<&str> {
-        self.0 .1
-    }
-}
-
-/// The trait of the `impl` block that declares each method and constructor
-/// of a Rust file: the owner of the innermost `Impl` node whose span holds
-/// it, as the parser writes that text (`Display`, `Conv<u8>`). `None` for an
-/// inherent `impl` (the parser writes owner `""`), for a member outside
-/// every `Impl` node, and for every other kind.
-///
-/// The span is the only source (C1 Open point 7): the base graph stores no
-/// heritage per node, and the dirty parse and the base nodes must derive
-/// one answer, or a member pairs with nothing. A member of an `impl` that
-/// has no `Impl` node (`impl T for &mut X`) therefore stays `None`.
-///
-/// A repeated block (`impl T for A<u8>` and `impl T for A<u16>` both write
-/// self type `A`, owner `T`) repeats the first block's uid. Its members take
-/// no trait on either side, the second block of the dirty parse included,
-/// or the two sides never agree on the member's anchor. A D1-collision
-/// tombstone (no name) owns no members' trait.
-fn impl_traits<'a>(rows: &[Row<'a>]) -> Vec<Option<&'a str>> {
-    let mut seen = rustc_hash::FxHashSet::default();
-    let first_block: Vec<bool> = rows
+    let decls: Vec<FileDecl<'a>> = rows
         .iter()
-        .map(|row| {
-            row.kind() == NodeKind::Impl
-                && !row.name().is_empty()
-                && seen.insert((row.name(), row.owner_class()))
+        .enumerate()
+        .map(|(i, &(kind, owner, name, _, arity))| FileDecl {
+            kind,
+            owner,
+            name,
+            parent: parents[i],
+            container: containers[i],
+            discriminator: None,
+            arity: (language == Language::CSharp).then_some(if splits_by_arity(language, kind) {
+                arity
+            } else {
+                0
+            }),
+            arity_scope: arity_scopes[i],
         })
         .collect();
-    let mut traits = vec![None; rows.len()];
-    rust_impl_members(rows, |member, block, _| {
-        if first_block[block] {
-            traits[member] = rows[block].0 .1.filter(|t| !t.trim().is_empty());
-        }
-    });
-    traits
+    // `os_path_to_slash` removes every `\` `check_path` rejects;
+    // `lexical_parents_in` returns in-range strict containers, scopes no
+    // kind that keeps overloads, and the parser clears each scoped node's
+    // owner ([`clear_scoped_owners`]); `container_parents_in` and
+    // `enclosing_types_in` walk the tree of one input's spans, so they
+    // return in-range indices and no cycle: no `IdentityError` can arise.
+    assign_file(&path, &decls).expect("a `/`-separated path and well-formed declarations")
 }
 
 /// The uid a node stores for `slot`: a [`UidSlot::Duplicate`] keeps its
@@ -794,7 +719,7 @@ impl LexicalFunctions {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contracts::identity::{DeclKey, LaterReason, Uniqueness};
+    use crate::contracts::identity::{nested_uid, LaterReason, Uniqueness};
 
     /// Node `i` of `rows`: (stored owner, name, lexical parent).
     type ChainRow = (Option<&'static str>, &'static str, Option<usize>);
@@ -1144,49 +1069,53 @@ mod tests {
         ]
     }
 
-    fn fmt_anchor(path: &str, trait_name: Option<&str>) -> u64 {
-        let key = DeclKey::unscoped(NodeKind::Method, path, Some("A"), "fmt").unwrap();
-        match trait_name {
-            Some(t) => key
-                .with_discriminator(Discriminator::ImplTrait(t))
-                .unwrap()
-                .anchor(),
-            None => key.anchor(),
-        }
+    /// The base uid of the `fmt` that `impl <trait_name> for A` declares in
+    /// `path`: the `Impl` row is its container (design uid §2.5).
+    fn fmt_in_impl(path: &str, trait_name: Option<&str>) -> u64 {
+        let block = uid::compute(NodeKind::Impl, path, trait_name, "A");
+        nested_uid(block, NodeKind::Method, Some("A"), "fmt")
     }
 
+    /// Stands for: a Rust impl member hashes its `Impl` block, whose key
+    /// holds the trait, so each `fmt` is the first of its own base uid and
+    /// keeps its stored uid when the blocks swap. No discriminator enters.
     #[test]
-    fn test_file_identities_rust_trait_impl_member_anchor_follows_trait() {
+    fn test_file_identities_rust_trait_impl_member_hashes_its_impl_block() {
         let before = identities("src/a.rs", &two_impls("Display", "Debug"));
         let after = identities("src/a.rs", &two_impls("Debug", "Display"));
-        assert_eq!(before[1].anchor, fmt_anchor("src/a.rs", Some("Display")));
-        assert_eq!(before[3].anchor, fmt_anchor("src/a.rs", Some("Debug")));
-        assert_eq!(
-            (before[1].anchor, before[3].anchor),
-            (after[3].anchor, after[1].anchor),
-            "each `fmt` keeps the anchor of its own trait across the swap"
+        let (display, debug) = (
+            fmt_in_impl("src/a.rs", Some("Display")),
+            fmt_in_impl("src/a.rs", Some("Debug")),
         );
+        assert_eq!(before[1].slot, UidSlot::First(display));
+        assert_eq!(before[3].slot, UidSlot::First(debug));
+        assert_eq!(
+            (before[1].slot, before[3].slot),
+            (after[3].slot, after[1].slot),
+            "each `fmt` keeps its stored uid across the swap"
+        );
+        assert_eq!(before[1].anchor, display, "no discriminator");
         assert!(before.iter().all(|d| d.uniqueness == Uniqueness::Unique));
-        // C1 Open point 1 (a): the discriminator never enters the stored
-        // uid, so the second `fmt` in source order stays overload 1.
-        let base = uid::compute(NodeKind::Method, "src/a.rs", Some("A"), "fmt");
-        assert_eq!(before[1].slot, after[1].slot);
-        assert_eq!(before[1].slot, UidSlot::First(base));
-        assert_eq!(after[3].slot.uid(), uid::overload(base, 1));
     }
 
+    /// Stands for: an inherent `impl A` (owner `""`) is a container like a
+    /// trait impl; its member hashes the block's `compute` uid.
     #[test]
-    fn test_file_identities_rust_inherent_impl_member_anchor_is_uid() {
+    fn test_file_identities_rust_inherent_impl_member_hashes_inherent_block() {
         let ids = identities("src/a.rs", &two_impls("", "Display"));
-        assert_eq!(ids[1].anchor, fmt_anchor("src/a.rs", None));
+        assert_eq!(ids[1].slot, UidSlot::First(fmt_in_impl("src/a.rs", None)));
         assert_eq!(ids[1].anchor, ids[1].slot.uid());
-        assert_eq!(ids[3].anchor, fmt_anchor("src/a.rs", Some("Display")));
+        assert_eq!(ids[3].anchor, fmt_in_impl("src/a.rs", Some("Display")));
         assert_eq!(ids[1].uniqueness, Uniqueness::Unique);
     }
 
+    /// Stands for: a repeated `Impl` of the same trait for the same type
+    /// (two inherent `impl A`) shares one anchor, so a same-named member of
+    /// each shares one anchor too: `Shared`, the second a later node.
     #[test]
     fn test_file_identities_rust_two_inherent_impls_same_member_shared() {
         let ids = identities("src/a.rs", &two_impls("", ""));
+        assert_eq!(ids[0].anchor, ids[2].anchor);
         assert_eq!(ids[1].anchor, ids[3].anchor);
         assert_eq!(
             ids[3].uniqueness,
@@ -1195,29 +1124,115 @@ mod tests {
                 count: 2
             }
         );
+        assert!(matches!(
+            ids[3].slot,
+            UidSlot::Later {
+                first: 1,
+                ordinal: 1,
+                ..
+            }
+        ));
     }
 
+    /// Stands for: a member outside every `Impl` span (a Go-style receiver
+    /// method, a C++ out-of-line member) has no container and keeps
+    /// `uid::compute`, owner text included.
     #[test]
-    fn test_file_identities_rust_whitespace_trait_text_no_discriminator() {
-        let ids = identities("src/a.rs", &two_impls("  ", "Debug"));
-        assert_eq!(ids[1].anchor, fmt_anchor("src/a.rs", None));
-    }
-
-    #[test]
-    fn test_file_identities_rust_member_outside_impl_span_no_discriminator() {
+    fn test_file_identities_member_outside_impl_span_keeps_compute() {
         let rows = [
             (NodeKind::Impl, Some("Display"), "A", (1, 0, 3, 1), 0),
             (NodeKind::Method, Some("A"), "fmt", (8, 4, 8, 40), 0),
         ];
         let ids = identities("src/a.rs", &rows);
-        assert_eq!(ids[1].anchor, fmt_anchor("src/a.rs", None));
+        assert_eq!(
+            ids[1].slot,
+            UidSlot::First(uid::compute(NodeKind::Method, "src/a.rs", Some("A"), "fmt"))
+        );
     }
 
+    /// Stands for: the container chain is every language's (design uid
+    /// §2.2), not Rust's: the same rows in a Swift file give each `fmt`
+    /// the `Impl` row that holds it.
     #[test]
-    fn test_file_identities_non_rust_impl_rows_no_discriminator() {
+    fn test_file_identities_non_rust_impl_rows_chain_alike() {
         let ids = identities("A.swift", &two_impls("Display", "Debug"));
-        assert_eq!(ids[1].anchor, ids[3].anchor);
-        assert_eq!(ids[1].anchor, ids[1].slot.uid());
+        assert_eq!(
+            ids[1].slot,
+            UidSlot::First(fmt_in_impl("A.swift", Some("Display")))
+        );
+        assert_ne!(ids[1].anchor, ids[3].anchor);
+    }
+
+    /// Stands for: design uid §2.4. An unrelated insert (a new top-level
+    /// function above everything) and a swap of two same-named container
+    /// blocks (`mod a`, `mod b`, each `struct S { fn m }`) change no other
+    /// stored uid; in an empty file nothing is numbered.
+    #[test]
+    fn test_file_uids_unrelated_insert_and_block_swap_keep_other_uids() {
+        type Block = [DeclFields<'static>; 3];
+        let block = |module: &'static str, line: u32| -> Block {
+            [
+                (NodeKind::Module, None, module, (line, 0, line + 4, 1), 0),
+                (
+                    NodeKind::Struct,
+                    Some(module),
+                    "S",
+                    (line + 1, 4, line + 3, 5),
+                    0,
+                ),
+                (
+                    NodeKind::Method,
+                    Some("S"),
+                    "m",
+                    (line + 2, 8, line + 2, 30),
+                    0,
+                ),
+            ]
+        };
+        // A row across edits: kind, name and the name of the module that
+        // holds it; its lines move with the edit.
+        type RowKey = (u8, &'static str, Option<&'static str>);
+        let file = |rows: &[DeclFields<'static>]| -> FxHashMap<RowKey, u64> {
+            let uids = file_uids("src/lib.rs", rows, |d| *d);
+            rows.iter()
+                .zip(uids)
+                .map(|(r, uid)| {
+                    let module = rows
+                        .iter()
+                        .find(|m| m.0 == NodeKind::Module && span_contains(m.3, r.3))
+                        .map(|m| m.2);
+                    ((r.0 as u8, r.2, module), uid)
+                })
+                .collect()
+        };
+        let (a, b) = (block("a", 1), block("b", 10));
+        let before: Vec<DeclFields<'static>> = a.iter().chain(&b).copied().collect();
+        let swapped: Vec<DeclFields<'static>> = block("b", 1)
+            .iter()
+            .chain(&block("a", 10))
+            .copied()
+            .collect();
+        let inserted: Vec<DeclFields<'static>> = [(NodeKind::Function, None, "z", (0, 0, 0, 9), 0)]
+            .iter()
+            .chain(&before)
+            .copied()
+            .collect();
+        let base = file(&before);
+        assert_eq!(base.len(), 6, "every row keys apart: {base:?}");
+        assert_eq!(file(&swapped), base, "a block swap");
+        let mut grown = file(&inserted);
+        assert!(grown
+            .remove(&(NodeKind::Function as u8, "z", None))
+            .is_some());
+        assert_eq!(grown, base, "an unrelated insert");
+        let ms: Vec<u64> = base
+            .iter()
+            .filter(|((kind, ..), _)| *kind == NodeKind::Method as u8)
+            .map(|(_, &uid)| uid)
+            .collect();
+        assert_eq!(ms.len(), 2);
+        assert_ne!(ms[0], ms[1], "`a::S::m` and `b::S::m` are two uids");
+        assert!(file_uids("src/lib.rs", &[] as &[DeclFields<'static>], |d| *d).is_empty());
     }
 
     /// `Conv` of arity `first` on line 1, then `Conv` of arity `second` on
@@ -1341,10 +1356,12 @@ mod tests {
     /// the property's base uid, in either order, read off the spans alone,
     /// so the full build and the overlay view number it alike. A merge-class
     /// member of two classes of one arity stays a duplicate, whose tombstone
-    /// hashes its own ordinal.
+    /// hashes its own ordinal. The two classes share one anchor (the arity
+    /// enters none), so both `foo` hash one container chain.
     #[test]
     fn test_file_uids_csharp_member_of_arity_twin_both_orders_later_uid() {
-        let foo = uid::compute(NodeKind::Property, "N/Foo1.cs", Some("Foo1"), "foo");
+        let class = uid::compute(NodeKind::Class, "N/Foo1.cs", None, "Foo1");
+        let foo = nested_uid(class, NodeKind::Property, Some("Foo1"), "foo");
         for (first, second) in [(0, 1), (1, 0)] {
             let uids = file_uids("N/Foo1.cs", &foo1_twins(first, second), |d| *d);
             assert_eq!(

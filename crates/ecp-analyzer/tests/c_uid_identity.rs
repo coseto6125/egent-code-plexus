@@ -20,6 +20,8 @@ use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::graph::{NodeKind, RelType, ZeroCopyGraph};
 use std::path::Path;
 
+mod uid_chain_support;
+
 const PATH: &str = "m.c";
 
 fn parse(src: &str) -> LocalGraph {
@@ -226,4 +228,16 @@ fn test_build_c_if_elif_else_field_and_variable_merge_into_one_node() {
     assert_eq!(var.len(), 1, "one named `g`");
     assert_eq!(sources(&g, RelType::Defines, var[0]).len(), 1);
     assert_eq!(uid_collisions(&g), 0);
+}
+
+const LOCAL_TWINS: &str = "void a(void) {\n    struct L {\n        int x;\n    };\n}\nvoid b(void) {\n    struct L {\n        int x;\n    };\n}\n";
+
+/// Stands for: L (design_uid §5, phase 2). A local `struct L` in each of
+/// two functions is two named nodes, and so is the field of each: a field
+/// keys on its struct's anchor.
+#[test]
+fn test_build_c_local_struct_in_two_functions_two_nodes() {
+    let provider = CProvider::new().unwrap();
+    uid_chain_support::assert_twins(&provider, PATH, LOCAL_TWINS, "L", &[2, 7]);
+    uid_chain_support::assert_twins(&provider, PATH, LOCAL_TWINS, "x", &[3, 8]);
 }

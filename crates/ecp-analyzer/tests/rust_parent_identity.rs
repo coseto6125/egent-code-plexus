@@ -1,6 +1,7 @@
-//! Slice R-PI: a Rust impl member's anchor carries the trait of its `impl`
-//! block (`Discriminator::ImplTrait`, C1), so a parent keeps its identity
-//! before a scoped child hashes it, and pairing reads that identity, never an
+//! A Rust impl member hashes its `impl` block, whose key holds the trait
+//! (the container chain, design uid §2.2 and §2.5; slice R-PI used a
+//! `Discriminator::ImplTrait` for it), so a parent keeps its identity before
+//! a scoped child hashes it, and pairing reads that identity, never an
 //! ordinal (`docs/specs/contracts/C1-identity.md`, "File assignment" and
 //! "Overlay pairing").
 //!
@@ -12,7 +13,8 @@ use ecp_core::analyzer::lexical::{file_identities, raw_decl, stored_uid};
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::contracts::identity::{
-    assign_file, lexical_parents, pair_by_anchor, DeclIdentity, FileDecl, UidSlot, Uniqueness,
+    assign_file, container_parents, lexical_parents, pair_by_anchor, DeclIdentity, FileDecl,
+    UidSlot, Uniqueness,
 };
 use ecp_core::graph::NodeKind;
 use std::collections::HashMap;
@@ -68,11 +70,11 @@ fn swapped(first: &str, second: &str) -> LocalGraph {
     ))
 }
 
-/// The stored uid of `fmt` itself stays positional (C1 Open point 1 (a)):
-/// the discriminator enters the anchor only. What an edit keeps is the
-/// anchor, which pairing and every scoped child read
-/// (`test_assign_file_swapped_impls_keep_child_uids` in `contracts::identity`
-/// covers the child that hashes it).
+/// Stands for: design uid §6 phase 2 red-proof. Each `fmt` hashes its own
+/// `impl` block, so the swap keeps every anchor, every stored uid and every
+/// scoped `pad` uid; the `Display` `fmt` is the first of its own base uid in
+/// both orders. Red before the chain: the two `fmt` shared one base uid, so
+/// the swap moved the `Display` `fmt` to `Later { ordinal: 1 }`.
 #[test]
 fn test_assign_file_rust_swapped_impls_fmt_keeps_anchor() {
     let (before, after) = (swapped("Display", "Debug"), swapped("Debug", "Display"));
@@ -101,20 +103,34 @@ fn test_assign_file_rust_swapped_impls_fmt_keeps_anchor() {
         before_ids[fmt_before["Display"]].anchor,
         before_ids[fmt_before["Debug"]].anchor
     );
-    // The stored uid follows source order: the swap moves the first slot.
-    assert!(matches!(
+    let (display_before, display_after) = (
         before_ids[fmt_before["Display"]].slot,
-        UidSlot::First(_)
-    ));
-    assert!(matches!(
         after_ids[fmt_after["Display"]].slot,
-        UidSlot::Later { ordinal: 1, .. }
-    ));
+    );
+    assert!(
+        matches!(display_before, UidSlot::First(_)),
+        "{display_before:?}"
+    );
+    assert!(
+        matches!(display_after, UidSlot::First(_)),
+        "the `Display` `fmt` stays first after the swap: {display_after:?}"
+    );
+    assert_eq!(
+        stored_uid(display_before),
+        stored_uid(display_after),
+        "the `Display` `fmt` keeps its stored uid"
+    );
+    assert_ne!(
+        before_ids[fmt_before["Display"]].slot.uid(),
+        before_ids[fmt_before["Debug"]].slot.uid(),
+        "the two `fmt` have two base uids"
+    );
 }
 
-/// Two inherent `impl A` blocks each declare `f`: equal anchors, so the
-/// ordinal is the only thing that tells them apart, and it pairs nothing.
-/// The trait-impl `f` has its own anchor and pairs with its base twin.
+/// Two inherent `impl A` blocks each declare `f`: the blocks share an
+/// anchor, so the two `f` do too, the ordinal is the only thing that tells
+/// them apart, and it pairs nothing. The trait-impl `f` hashes its own
+/// block, has its own anchor and pairs with its base twin.
 #[test]
 fn test_pair_by_anchor_ordinal_only_pairs_nothing() {
     let base = parse(
@@ -194,6 +210,7 @@ fn test_assign_file_sibling_blocks_same_name_marked_ambiguous() {
     let spans: Vec<(NodeKind, (u32, u32, u32, u32))> =
         local.nodes.iter().map(|n| (n.kind, n.span)).collect();
     let parents = lexical_parents(&spans, &[NodeKind::Function]);
+    let containers = container_parents(&spans);
     let outer = (0..local.nodes.len())
         .find(|&i| local.nodes[i].name == "outer")
         .expect("outer");
@@ -204,12 +221,13 @@ fn test_assign_file_sibling_blocks_same_name_marked_ambiguous() {
     let decls: Vec<FileDecl<'_>> = local
         .nodes
         .iter()
-        .zip(&parents)
-        .map(|(n, &parent)| FileDecl {
+        .zip(parents.iter().zip(&containers))
+        .map(|(n, (&parent, &container))| FileDecl {
             kind: n.kind,
             owner: n.owner_class.as_deref().filter(|_| parent.is_none()),
             name: &n.name,
             parent,
+            container,
             discriminator: None,
             arity: None,
             arity_scope: None,

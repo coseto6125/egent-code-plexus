@@ -23,9 +23,9 @@ Every `file:line` below was read on branch `feat/arch-p1-contracts` at `1d267693
 | Type | Kind | Purpose |
 |---|---|---|
 | `DeclKey` | value | The identity inputs of one declaration: kind, path, owner, name, scope, discriminator. |
-| `Scope` | enum | `Unscoped`, or `Lexical { parent_anchor }`. |
-| `Discriminator` | enum | `ImplTrait`, `Signature` or `Tag`: a semantic fact that separates equal keys. `stored_tag` and `from_stored` give its stored byte. |
-| `FileDecl` | input row | One declaration of a file, as `assign_file` reads it. |
+| `Scope` | enum | `Unscoped`, `Member { parent_anchor }` (a declaration that a scope container declares), or `Lexical { parent_anchor }`. |
+| `Discriminator` | enum | `Signature` or `Tag`: a semantic fact that separates equal keys. `stored_tag` and `from_stored` give its stored byte. Neither has a producer yet. |
+| `FileDecl` | input row | One declaration of a file, as `assign_file` reads it: its key fields, its lexical `parent` and its `container`. |
 | `UidSlot` | result | `First(uid)`, `Later { first, ordinal, uid, reason }` or `Duplicate { first, uid }`. |
 | `Uniqueness` | result | `Unique`, or `Shared { position, count }`. |
 | `DeclIdentity` | result | The slot, the anchor and the uniqueness of one declaration. |
@@ -41,7 +41,7 @@ Every `file:line` below was read on branch `feat/arch-p1-contracts` at `1d267693
 | `HandlerRef` | enum | What serves a route: `Declaration { uid }`, `Closure { uid }`, `Inline { line }`, `Unresolved { name }`, `Absent`. |
 | `RouteBinding` | value | One `HandlesRoute` fact: a route key and a handler. |
 
-Functions: `owner_match_form`, `scoped_uid`, `assign_file`, `pair_by_anchor`, `is_scope_container`, `lexical_parents`, `file_match`, `normalize_file_needle`, `select`, `resolve_target`, `join_route_path`.
+Functions: `owner_match_form`, `scoped_uid`, `nested_uid`, `assign_file`, `pair_by_anchor`, `is_scope_container`, `lexical_parents`, `container_parents`, `file_match`, `normalize_file_needle`, `select`, `resolve_target`, `join_route_path`.
 
 ### Declaration identity: fields and invariants
 
@@ -51,24 +51,28 @@ Functions: `owner_match_form`, `scoped_uid`, `assign_file`, `pair_by_anchor`, `i
 | `DeclKey.owner` | The type, namespace or module that declares the node (meanings M1, M2 and M4 of design A §1.2). `Some("")` is `None`, as `uid::compute` already treats it. The text stays as the producer writes it, generic arguments and separators included. Identity never normalises it: the Rust `Impl` owners `Conv<u8>` and `Conv<u16>` are two owners and two uids (`test_unscoped_generic_owner_kept_as_produced`). |
 | owner match form | `owner_match_form` removes every generic argument list and the outer whitespace: `Walk<'s, 't>` gives `Walk`. Only the target resolver uses it, to compare a request segment with a path segment. It never enters a uid. |
 | `DeclKey.name` | The bare declared name, as `Node.name` stores it. |
-| `DeclKey.scope` | `Unscoped`: `uid()` equals `uid::compute(kind, path, owner, name)`, today's value. `Lexical { parent_anchor }`: `owner` is `None` (I1), the kind does not keep overloads (I3), and `uid()` is `scoped_uid(parent_anchor, kind, name)`. `DeclKey::scoped` rejects `Method` and `Constructor` with `ScopedOverloadKind` (`test_scoped_method_kind_rejected`, `test_scoped_constructor_kind_rejected`). |
+| `DeclKey.scope` | `Unscoped`: `uid()` equals `uid::compute(kind, path, owner, name)`, today's value; only a top-level declaration (no container) is unscoped. `Member { parent_anchor }`: `uid()` is `nested_uid(parent_anchor, kind, owner, name)`, with `parent_anchor` the anchor of the declaration's container. `Lexical { parent_anchor }`: `owner` is `None` (I1), the kind does not keep overloads (I3), and `uid()` is `scoped_uid(parent_anchor, kind, name)`. `DeclKey::scoped` rejects `Method` and `Constructor` with `ScopedOverloadKind` (`test_scoped_method_kind_rejected`, `test_scoped_constructor_kind_rejected`). |
 | `DeclKey.discriminator` | Optional. Its text is not empty. It enters the anchor and never the declaration's own uid. A scoped child hashes the parent's anchor, so adding a discriminator to a parent changes the stored uid of every scoped node below it (`test_assign_file_discriminator_changes_scoped_child_uid`). |
-| discriminator storage | The variant byte is `stored_tag`: `ImplTrait` 1, `Signature` 2, `Tag` 3. A stored discriminator is the pair (byte, text); `from_stored` reads it back. |
+| discriminator storage | The variant byte is `stored_tag`: `Signature` 2, `Tag` 3. Byte 1 was `ImplTrait`; it is retired, and `from_stored` gives `None` for it. A stored discriminator is the pair (byte, text); `from_stored` reads it back. |
 | `scoped_uid` stream | Starts with byte `0x01` and is at least 14 bytes long. A `compute` stream starts with an ASCII letter. An `overload` stream is 12 bytes. No two streams are equal. |
+| `nested_uid` stream | `0x03`, the parent anchor (8 bytes, little-endian), then `kind \0 owner \0 name`: at least 15 bytes. The owner stays in the stream, so two members of one container that differ only by owner keep two uids (`test_member_key_uid_is_nested_uid_and_keeps_owner`, `test_stream_tags_disjoint_from_kind_text`). |
 | anchor stream | Equals the base uid without a discriminator. With one, it starts with `0x02` and is at least 13 bytes long. |
 
 ### File assignment: `assign_file(path, decls)`
 
 | Rule | Statement |
 |---|---|
-| Input | One `FileDecl` per declaration of one file, in source order. `parent` comes from `lexical_parents`. A parent can come before or after its children. |
-| Anchors first | A child's key hashes its parent's anchor, so the function resolves each parent chain before the child. |
-| Errors | A parent out of range or a cycle gives `BadParent`. A scoped row with an owner gives `ScopedWithOwner`. A scoped row of a kind that keeps overloads gives `ScopedOverloadKind`. |
+| Input | One `FileDecl` per declaration of one file, in source order. `parent` comes from `lexical_parents`, `container` from `container_parents`. A parent or container can come before or after its children. |
+| Anchors first | A child's key hashes its parent's anchor, or else its container's anchor, so the function resolves each chain (`parent`, else `container`) before the child. |
+| Key | A row with a `parent` is `Lexical`. A row with no `parent` and a `container` is `Member`. A row with neither is `Unscoped`, so every top-level declaration keeps its `uid::compute` uid. |
+| Errors | A parent or container out of range or a cycle gives `BadParent`. A scoped row with an owner gives `ScopedWithOwner`. A scoped row of a kind that keeps overloads gives `ScopedOverloadKind`. |
 | `UidSlot` | Groups by base uid in source order. The first keeps the base uid. A later one gets `uid::overload(base, ordinal)` with a 1-based ordinal. The first match sets the slot: a kind that keeps overloads is `Later { reason: Overload }`; a scoped one is `Later { reason: Scoped }`; a C# declaration whose arity path no earlier one has is `Later { reason: Arity }`; a kind that merges its repeats (`uid::merges_repeats`: `Property`, `Variable`, `Const`) is `Duplicate`; any other kind is `Later { reason: Repeat }`. A `Duplicate` keeps the tombstone uid `uid::tombstone(uid::overload(base, ordinal))`, so no two tombstones share a uid. |
 | `Uniqueness` | Groups by anchor. One member: `Unique`. Several: `Shared { position, count }` for each. |
 | Positional rule | A `Shared` position proves nothing about which declaration an edit kept. It never pairs a node, and it never forms a target alone. |
 
-Example: `impl Display for A { fn fmt { fn pad } }` then `impl Debug for A { fn fmt { fn pad } }`. Both `fmt` rows have base uid `U`, so the second gets `overload(U, 1)`. Their anchors differ, because `ImplTrait("Display")` and `ImplTrait("Debug")` differ. Each `pad` hashes its own `fmt` anchor. Swap the two blocks, and each `pad` keeps its uid. The test `test_assign_file_swapped_impls_keep_child_uids` asserts it.
+Example: `impl Display for A { fn fmt { fn pad } }` then `impl Debug for A { fn fmt { fn pad } }`. Each `fmt` has its `Impl` block as container, and the two blocks have two uids, because the `Impl` owner is the trait. So each `fmt` is `First` with its own `nested_uid`, and each `pad` hashes its own `fmt` anchor. Swap the two blocks, and every member keeps its uid. The test `test_assign_file_swapped_impls_keep_child_uids` asserts it.
+
+Example: `class O1 { class H { run } }` and `class O2 { class H { run } }`. Each `H` has a different container, so the two `H` and the two `run` are `First`, with two uids each. Two same-named containers in one scope (`impl S {}` twice) share an anchor, so their members share a parent anchor and number as one group (`test_assign_file_repeated_container_members_share_parent_anchor`).
 
 Example: one function holds two blocks, and each block declares `h`. Both `h` rows have one parent anchor, so they share an anchor: `Shared`. The second gets `Later`, not `Duplicate`, so both stay nodes. The test `test_assign_file_sibling_blocks_shared_not_duplicate` asserts it.
 
@@ -88,6 +92,16 @@ A `Duplicate` row (a merged `Property`, `Variable` or `Const` repeat) takes no p
 A base declaration whose anchor is absent from the dirty side was deleted by the edit and does not count. A removed path and a tombstone never count. `OverlayView` stores the hidden declarations grouped by (path, kind, owner, name) with a count, and the view cache keeps them (`VIEW_CACHE_FORMAT` 6). Every graph command that reads the view puts one line in the payload's `result` field. The line says that the overlay could not pair N base declaration(s), names up to five groups (`Method K.save x2 (src/K.java)`), and then says `and N more`. N counts hidden declarations, never callers. The line says that an empty result is no proof of no callers, and it gives `ecp admin index --repo .` as the next step. `Engine::dirty_set_caveat` builds the line; `find` by repo adds the repo name to it.
 
 No slice is assigned yet to remove the caveat. A `Signature` or `content_hash` slice (Open points 2 and 3) would pair an overload set, and the caveat would then shrink to the rest. FU-2026-10-25-337ab66d0277 tracks it.
+
+### Container: `container_parents(decls)`
+
+| Rule | Statement |
+|---|---|
+| Input | `(kind, span)` per declaration of one file. |
+| Link | The innermost declaration that strictly contains the row and whose kind passes `is_scope_container`. Identical spans do not contain each other. |
+| Property | A `Property` row skips callable containers (`Function`, `Method`, `Constructor`), so `self.x` assigned in two methods has the class as container and merges. A `Variable` or `Const` keeps its callable container. |
+| Output | `Some(index)` in the same slice, or `None` at the top level. |
+| Callers | `identities_of` in `ecp-core/src/analyzer/lexical.rs`, so the index build, the overlay view, the overlay reader and incremental mode all read it; the membership owner pass reads it for a member of an `Impl` block. |
 
 ### Lexical parent: `lexical_parents(decls, scoped_kinds)`
 
@@ -180,7 +194,7 @@ line      := 1-based decimal start line
 | overlay pairing | `dirty_base_by_uid` (`view.rs:348-355`), lookup at `view.rs:388`: by stored uid, so by position for overloads | `ViewNode.replaced_base` (`view.rs:254`) | `pair_by_anchor`; a `Shared` anchor pairs nothing |
 | owner (M1, M2, M4) | parsers; `stamp_owner_class_by_span` (`ecp-analyzer/src/framework_helpers.rs:260`); Rust `enclosing_impl_type` (`rust/receiver_types.rs:286`), which strips the self type's generics; Rust `Impl` owner is the raw trait text, generics included (`rust/parser.rs:438-444`, `impl_trait_name` at `rust/receiver_types.rs:113-118`); Rust `Typedef` in an impl takes the same trait text (`rust/parser.rs:446-453`, `enclosing_impl_or_trait_context` at `rust/receiver_types.rs:258-273`) | `Node.owner_class` (`graph.rs:698-702`) | `DeclKey.owner`, text unchanged |
 | owner spelling | `PathLiteral` owner is the enclosing owner verbatim (`post_process/path_literal_nodes.rs:45-70`), so `Walk<'s, 't>` sits beside the function owner `Walk` (review page, postparse F1); C++ `Foo<int>::m` takes owner `Foo` (`cpp/parser.rs:526-534`, `scope_type_name` at `cpp/receiver_types.rs:207-212`) | target lookup | identity keeps each text; the resolver compares by `owner_match_form` |
-| Rust trait of an impl member | Method owner is the self type only (`enclosing_impl_type`); the `Impl` node's owner holds the trait | none for a member | `Discriminator::ImplTrait`, read from the enclosing `Impl` node |
+| Rust trait of an impl member | Method owner is the self type only (`enclosing_impl_type`); the `Impl` node's owner holds the trait | none for a member | the member's container is its `Impl` block, whose uid hashes the trait; no discriminator |
 | overload signature | none: `RawNode` has no parameter list (`ecp-core/src/analyzer/types.rs:411-444`) | — | `Discriminator::Signature` has no producer yet |
 | YAML resource kind | not in the uid (review page: `Service` and `Deployment` share one identity) | — | `Discriminator::Tag` has no producer yet |
 | diff identity | `SymbolKey { path, owner_class, name, kind }` (`ecp-cli/src/commands/diff/symbols.rs:48-57`), first wins (`:271-278`) | `ecp diff`, `ecp review` | the anchor plus `Uniqueness` |
@@ -255,28 +269,28 @@ line      := 1-based decimal start line
 | a language opts in to scoped uids (A-C, A-D, A-E): every scoped node of that language changes its stored uid | none | bump | none: `FragmentSymbol` has kind, span and owner (`ecp-cli/src/session/overlay_writer.rs:85-96`) | none | follows |
 | a repeated scoped node, and a `#[cfg]` twin under Open point 4, gets the overload uid `uid::overload(base, ordinal)`, not a tombstone | none | bump | none | none | follows |
 | a producer changes its owner text (for example drops the generic arguments of the `PathLiteral` owner or of the Rust `Impl` and `Typedef` owners): the unscoped uids of those kinds change. C1 does not require it, because the resolver matches by `owner_match_form` | none | bump | none | none | follows |
-| `Discriminator::ImplTrait` lands in or before the slice where Rust opts in to scoped uids | none | none: an unscoped uid does not hash it, and no scoped child exists yet | none: the `Impl` nodes are in the fragment | none | follows |
-| `Discriminator::ImplTrait` lands after Rust opts in: the stored uid of every scoped node under a trait-impl member changes | none | bump | none | none | follows |
+| `Discriminator::ImplTrait` (phase 1, now removed): the anchor of a Rust trait-impl member hashed the trait | none | bump | none: the `Impl` nodes are in the fragment | none | follows |
+| the container chain (phase 2): every declaration inside a scope container takes `nested_uid` from its container's anchor, and every node below it moves; `ImplTrait` is removed | none | bump (`+schema52`) | none: `FragmentSymbol` has kind, span and owner, so the overlay re-derives the containers | none | follows |
 | `Discriminator::Signature` or `Tag`: a new stored table `discriminators: Vec<DiscriminatorFact { node_idx: u32, tag: u8, text: StrRef }>` in `ZeroCopyGraph`, appended at the end of the archived struct, `tag` from `stored_tag` | bump | bump (new parser fact; also changes scoped child uids when the language already opts in) | bump: `FragmentSymbol` lacks the fact | none | follows |
 | `pair_by_anchor` in the overlay | none | none | none | none | follows: the binary path, size and mtime are in the key (`ecp-cli/src/session/view_cache.rs:36-43`) |
 | `RouteKey` with composed prefixes; one node per key | none | bump | none | none | follows |
 | `TargetRequest` / `resolve_target` | none | none | none | none | none |
 
-Not every stored uid stays as today. Three changes move uids, and each one bumps `BUILDER_FINGERPRINT` in the slice that makes it: a scoped node takes a uid from its parent's anchor; a repeated node takes the overload uid; a producer that changes its owner text changes the unscoped uids of its kinds. Only an unscoped declaration whose owner text and kind do not change keeps today's uid.
+Not every stored uid stays as today. Four changes move uids, and each one bumps `BUILDER_FINGERPRINT` in the slice that makes it: a scoped node takes a uid from its parent's anchor; a member of a scope container takes a uid from its container's anchor; a repeated node takes the overload uid; a producer that changes its owner text changes the unscoped uids of its kinds. Only a top-level declaration whose owner text and kind do not change keeps today's uid.
 
-The `ImplTrait` text for a base node comes from the enclosing `Impl` node's owner at read time (Open point 7), so it needs no stored column. `Signature` and `Tag` have no node to read them from, so they need the `discriminators` table above.
+The container of a base node comes from the stored kinds and spans of its file at read time (`path_identities`), so it needs no stored column. `Signature` and `Tag` have no node to read them from, so they need the `discriminators` table above.
 
 ## Open points
 
 | # | Decision | Options | Recommendation |
 |---|---|---|---|
-| 1 | Does the discriminator enter the stored uid? | (a) anchor only; (b) the uid too | (a). The declaration's own uid stays as today for every Rust trait-impl method. The uids of scoped nodes below it still change, because they hash the anchor: see the `ImplTrait` rows of Stored data. (b) changes uids of nodes that have no defect. |
+| 1 | Does the discriminator enter the stored uid? | (a) anchor only; (b) the uid too | (a) for `Signature` and `Tag`. Phase 2 removes `ImplTrait`: the container chain separates two trait-impl members, because each member hashes the anchor of its own `Impl` block, whose uid holds the trait. So a member's own uid now moves too: see the container-chain row of Stored data. |
 | 2 | Who supplies `Discriminator::Signature`? | (a) a parser field per language; (b) none, and `Shared` stays | (b) for now. Java, Kotlin, C#, C++, Swift and Dart overloads stay `Shared`, so they pair nothing and need `@line` as a target. Two overloads of one owner on one line cannot be told apart by `@line` either; they get no reusable target (`test_resolve_target_overloads_on_one_line_no_reusable`). Add (a) only when a measured case needs it; (a) needs the `discriminators` table and a `GRAPH_FORMAT_VERSION` bump. |
 | 3 | What pairs a `Shared` group in the overlay? | (a) nothing; (b) equal `content_hash` first, then the one remaining pair | (a) in the first slice; the view suppresses the base members and the caveat names them. (b) needs a per-symbol hash in `FragmentSymbol` (L1 bump). `impact --baseline` already pairs closures by body hash (`impact/baseline.rs:408-444`), so (b) has a precedent. |
-| 4 | A `Duplicate` of a kind that does not keep overloads (a `#[cfg]` twin) | (a) tombstone, as today; (b) `Later` for every kind | Adopted: (b), except for `Property`, `Variable` and `Const`, which merge (`uid::merges_repeats`). `is_later_overload` reads the `later_nodes` bitset instead of recomputing `compute`. The twin stays findable and takes the overload uid, a stored-uid change (`GRAPH_FORMAT_VERSION` 20). |
+| 4 | A `Duplicate` of a kind that does not keep overloads (a `#[cfg]` twin) | (a) tombstone, as today; (b) `Later` for every kind | Adopted: (b), except for `Property`, `Variable` and `Const`, which merge (`uid::merges_repeats`). `is_later_overload` reads the `later_nodes` bitset instead of recomputing `compute`. The twin stays findable and takes the overload uid, a stored-uid change (`GRAPH_FORMAT_VERSION` 20). Phase 2 narrows a repeat to one container: the same name in two different containers (`O1.H` and `O2.H`, `a::E` and `b::E`, a local class in two methods) is two `First` nodes, not a repeat. A merge happens only inside one container. |
 | 5 | Does a bare name match scoped nodes? | (a) yes, and a tie is an ambiguity; (b) no, as design A §5.5 proposes | Adopted: (a). One rule for every command. `impact helper` with a top-level and a nested `helper` refuses the ambiguity and lists `::helper` and `outer.helper` (`test_resolve_target_top_level_and_nested_helper_bare_name_ambiguous`). The constructor exception of the Bare name row keeps a bare type name on a class with constructors from being ambiguous. This departs from design A §5.5. The plan's conflict row 2-5 states it. |
 | 6 | The scope of a route key | (a) the registering file, as today; (b) the service root | (a). It keeps today's uids. Two services in one monorepo stay apart when their route files differ. |
-| 7 | Where does `ImplTrait` come from for a base node? | (a) the enclosing `Impl` node's owner, by span, at read time; (b) a stored column | (a). The text is the full trait text as `impl_trait_name` produces it, generic arguments included (`Conv<u8>`), so `impl Conv<u8> for A` and `impl Conv<u16> for A` get two anchors. `graph.bin` has no per-file node range, so the reader scans the file's nodes, as the overlay already does for a dirty file (`view.rs:348-355`). |
+| 7 | Where does `ImplTrait` come from for a base node? | (a) the enclosing `Impl` node's owner, by span, at read time; (b) a stored column | Superseded by phase 2: no `ImplTrait` remains, and the container comes from the spans at read time. Before: (a). The text is the full trait text as `impl_trait_name` produces it, generic arguments included (`Conv<u8>`), so `impl Conv<u8> for A` and `impl Conv<u16> for A` get two anchors. `graph.bin` has no per-file node range, so the reader scans the file's nodes, as the overlay already does for a dirty file (`view.rs:348-355`). |
 | 8 | EntryPoint identity | (a) keep `compute(EntryPoint, path, None, "tag:name")`; (b) hash the handler's stored uid | (b), in area 8. The tag stays part of the key: the key hashes the tag plus the handler's stored uid, so one handler with two entry-point tags keeps two EntryPoint nodes. Today two same-named handlers of one file share an EntryPoint uid outside the controller path (`builder.rs:2070-2073`). |
 | 9 | `impact --baseline` and `peers` identity keys | (a) adopt the anchor; (b) leave them | (b) in phase 2. Neither area in this contract owns them. File a follow-up when area 5 lands. |
 | 10 | C++ explicit specializations | `Foo<int>::m` and `Foo<char>::m` | No change. The verified producer is the C++ `Method` path: `scope_type_name` (`cpp/receiver_types.rs:207-212`) already gives owner `Foo` (`cpp/parser.rs:526-534`), so these methods are `Later` overloads today and stay so. A target needs `@line`. Other C++ kinds were not traced. |

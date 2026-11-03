@@ -21,6 +21,8 @@ use ecp_core::graph::{ArchivedZeroCopyGraph, RelType, ZeroCopyGraph};
 use ecp_core::session::{MergedGraph, OverlayFileInput, OverlayView};
 use std::path::Path;
 
+mod uid_chain_support;
+
 const PATH: &str = "M.java";
 
 fn parse(src: &str) -> LocalGraph {
@@ -133,5 +135,42 @@ fn test_build_java_local_class_in_two_methods_each_overrides_base() {
     assert_eq!(
         rows[0].2, rows[1].2,
         "both override the one Base.get: {rows:?}"
+    );
+}
+
+const NESTED_TWINS: &str = "class O1 {\n    class H {\n        void run() {}\n    }\n}\nclass O2 {\n    class H {\n        void run() {}\n    }\n}\n";
+
+/// Stands for: N1 and N2 (design_uid §5, phase 2). `O1.H` and `O2.H` are
+/// two named nodes with two uids on the full build and the overlay, and each
+/// `run` is a member of its own `H` only, with no `overload_set` reference
+/// between the two `run`.
+#[test]
+fn test_build_java_twin_nested_types_two_nodes_own_members() {
+    let provider = JavaProvider::new().unwrap();
+    let g = uid_chain_support::assert_twins(&provider, PATH, NESTED_TWINS, "H", &[2, 7]);
+    uid_chain_support::assert_twins(&provider, PATH, NESTED_TWINS, "run", &[3, 8]);
+    uid_chain_support::assert_own_members(
+        &g,
+        ecp_core::graph::RelType::HasMethod,
+        "run",
+        &[(3, 2), (8, 7)],
+    );
+    // `ecp impact H.run@3` lists no caller: nothing calls or references it.
+    let run = uid_chain_support::node_at(&g, "run", 3);
+    assert_eq!(uid_chain_support::callers(&g, run), 0);
+}
+
+const LOCAL_TWINS: &str = "class T {\n    void a() {\n        class L {}\n    }\n    void b() {\n        class L {}\n    }\n}\n";
+
+/// Stands for: L (design_uid §5, phase 2). A local class in each of two
+/// methods keys on its own method's anchor: two named `L`, two uids.
+#[test]
+fn test_build_java_local_class_in_two_methods_two_nodes() {
+    uid_chain_support::assert_twins(
+        &JavaProvider::new().unwrap(),
+        PATH,
+        LOCAL_TWINS,
+        "L",
+        &[3, 6],
     );
 }

@@ -21,6 +21,8 @@ use ecp_core::graph::{ArchivedZeroCopyGraph, NodeKind, RelType, ZeroCopyGraph};
 use ecp_core::session::{MergedGraph, OverlayFileInput, OverlayView};
 use std::path::Path;
 
+mod uid_chain_support;
+
 const PATH: &str = "m.py";
 
 fn parse(src: &str) -> LocalGraph {
@@ -290,4 +292,39 @@ fn test_build_python_variable_assigned_twice_defines_once() {
     let expected = vec![(1, PATH.to_string(), 1, "x".to_string())];
     assert_eq!(full, expected, "full build");
     assert_eq!(overlay, expected, "overlay");
+}
+
+const NESTED_TWINS: &str = "class O1:\n    class H:\n        def run(self):\n            pass\n\n\nclass O2:\n    class H:\n        def run(self):\n            pass\n";
+
+/// Stands for: N1 and N2 (design_uid §5, phase 2). `O1.H` and `O2.H` are
+/// two named nodes with two uids on the full build and the overlay, and each
+/// `run` is a member of its own `H` only, with no `overload_set` reference
+/// between the two `run`.
+#[test]
+fn test_build_python_twin_nested_types_two_nodes_own_members() {
+    let provider = PythonProvider::new().unwrap();
+    let g = uid_chain_support::assert_twins(&provider, PATH, NESTED_TWINS, "H", &[2, 8]);
+    uid_chain_support::assert_twins(&provider, PATH, NESTED_TWINS, "run", &[3, 9]);
+    uid_chain_support::assert_own_members(
+        &g,
+        ecp_core::graph::RelType::HasMethod,
+        "run",
+        &[(3, 2), (9, 8)],
+    );
+}
+
+const SELF_FIELD: &str = "class A:\n    def __init__(self):\n        self.x = 1\n\n    def reset(self):\n        self.x = 2\n";
+
+/// Stands for: a Property skips callable containers (design_uid §2.1), so
+/// `self.x` assigned in two methods is one entity: one named `x` and one
+/// `HasProperty`, from `A`.
+#[test]
+fn test_assign_file_python_self_field_in_two_methods_one_node() {
+    let provider = PythonProvider::new().unwrap();
+    let g = uid_chain_support::assert_twins(&provider, PATH, SELF_FIELD, "x", &[3]);
+    let x = uid_chain_support::node_at(&g, "x", 3);
+    assert_eq!(
+        uid_chain_support::source_lines(&g, ecp_core::graph::RelType::HasProperty, x),
+        vec![1]
+    );
 }

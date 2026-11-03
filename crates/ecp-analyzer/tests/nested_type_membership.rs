@@ -213,8 +213,10 @@ class Outer {
     assert_own_members(&CppProvider::new().unwrap(), "src/staff.cpp", src);
 }
 
+/// Stands for: phase 2 of design uid (the container chain): the two
+/// `Employee` are two nodes, and each `impl` member binds the struct beside
+/// its own block.
 #[test]
-#[ignore = "FU-2026-10-25-dfc53222aae6: rust nested same-name type identity"]
 fn test_class_membership_rust_nested_same_name_type_owns_its_members() {
     let src = "struct Employee;
 impl Employee { fn first(&self) {} }

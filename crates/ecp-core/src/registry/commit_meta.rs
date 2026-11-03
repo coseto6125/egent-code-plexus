@@ -183,7 +183,11 @@ use std::path::Path;
 /// A test-like name alone (`test_x`, `testFoo`, `TEST_X`) no longer sets
 /// `FunctionMeta::FLAG_TEST` outside a test file; a schema50 graph flags
 /// production functions such as `testUrlMatchesGlob`.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema51");
+/// schema52: a declaration inside a scope container hashes the container's
+/// anchor (`nested_uid`, a Rust impl member its `Impl` block), and a Rust
+/// impl member binds the type beside its block; a schema51 graph stores
+/// short-owner uids, so `O1.H.run` and `O2.H.run` share one.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema52");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

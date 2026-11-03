@@ -19,6 +19,8 @@ use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::graph::{NodeKind, RelType, ZeroCopyGraph};
 use std::path::Path;
 
+mod uid_chain_support;
+
 const PATH: &str = "m.js";
 
 fn parse(src: &str) -> LocalGraph {
@@ -156,5 +158,22 @@ fn test_build_javascript_function_twice_keeps_two_nodes_with_own_calls() {
         "f",
         RelType::Defines,
         Some(("a", "b")),
+    );
+}
+
+const THIS_FIELD: &str =
+    "class A {\n  constructor() {\n    this.x = 1;\n  }\n  reset() {\n    this.x = 2;\n  }\n}\n";
+
+/// Stands for: a Property skips callable containers (design_uid §2.1), so
+/// `this.x` assigned in the constructor and in a method is one entity: one
+/// named `x` and one `HasProperty`, from `A`.
+#[test]
+fn test_assign_file_javascript_this_field_in_constructor_and_method_one_node() {
+    let provider = JavaScriptProvider::new().unwrap();
+    let g = uid_chain_support::assert_twins(&provider, PATH, THIS_FIELD, "x", &[3]);
+    let x = uid_chain_support::node_at(&g, "x", 3);
+    assert_eq!(
+        uid_chain_support::source_lines(&g, ecp_core::graph::RelType::HasProperty, x),
+        vec![1]
     );
 }
