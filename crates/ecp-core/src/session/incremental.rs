@@ -823,12 +823,15 @@ fn member_row(symbol: &super::view::OverlaySymbol) -> MemberRow<'_> {
 }
 
 /// Whether a declaration of `kind` makes its path's [`PathDecls`] worth
-/// building: a type owns members, an enum variant is contained.
+/// building: a type or an `Impl` block owns members, an enum variant is
+/// contained. The full build runs `class_membership` for a file of `Impl`
+/// blocks alone too, so the replay must reach it.
 fn reads_declarations(kind: NodeKind) -> bool {
     matches!(
         kind,
         NodeKind::Class
             | NodeKind::Struct
+            | NodeKind::Impl
             | NodeKind::Trait
             | NodeKind::Interface
             | NodeKind::Annotation

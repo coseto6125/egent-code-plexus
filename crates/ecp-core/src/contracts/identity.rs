@@ -458,8 +458,8 @@ pub struct FileDecl<'a> {
     /// [`container_parents`]: the innermost scope container that strictly
     /// holds the declaration. A row with a container and no parent hashes
     /// the container's anchor ([`Scope::Member`]); a row with neither is top
-    /// level and keeps `uid::compute`. [`assign_file`] can still join a top
-    /// level member to the container of an in-type sibling.
+    /// level and keeps `uid::compute`. [`assign_file`] can still join a member
+    /// outside every type to the container of an in-type sibling.
     pub container: Option<u32>,
     pub discriminator: Option<Discriminator<'a>>,
     /// The declared generic arity of a declaration whose language keeps two
@@ -512,8 +512,9 @@ pub struct DeclIdentity {
 
 /// Every identity of one file's declarations, in slice order. A parent or a
 /// container may come before or after its children in the slice. A
-/// top-level member whose type declares a member of the same kind, owner
-/// and name takes that type as its container ([`joined_containers`]). A
+/// member outside every type, whose type declares a member of the same
+/// kind, owner and name, takes that type as its container
+/// ([`joined_containers`]). A
 /// non-canonical `path` is rejected even when `decls` is empty.
 pub fn assign_file(path: &str, decls: &[FileDecl<'_>]) -> Result<Vec<DeclIdentity>, IdentityError> {
     check_path(path)?;
@@ -658,7 +659,7 @@ pub fn assign_file(path: &str, decls: &[FileDecl<'_>]) -> Result<Vec<DeclIdentit
 
 /// The in-type member set of each `(kind, owner, name)`: the type that
 /// holds it and the index of its first member, or `None` when two types
-/// of one name both declare it.
+/// of one name and different anchors both declare it.
 type InTypeSets<'a> = FxHashMap<(&'a str, &'a str, &'a str), Option<(u32, u32)>>;
 
 /// [`FileDecl::container`] of each declaration, except that a member
@@ -670,9 +671,12 @@ type InTypeSets<'a> = FxHashMap<(&'a str, &'a str, &'a str), Option<(u32, u32)>>
 /// repeat of a field, as before the container chain. The join needs one
 /// such type, inside the member's own container, and outside every
 /// callable (a local type never gains out-of-type members, and skipping it
-/// keeps the chain acyclic). A field joins only an earlier sibling: the
-/// later of two merged rows is a tombstone that stores no name, and the
-/// overlay re-derives this join from stored rows. A member with no such
+/// keeps the chain acyclic). Two type rows of one anchor (`struct K` in
+/// both arms of an `#if`) count as one type: the members of the second are
+/// merged repeats, whose tombstones store no name. A field joins only an
+/// earlier sibling, as the later of two merged rows is such a tombstone.
+/// The overlay re-derives this join from stored rows, so it may read no
+/// tombstone's name. A member with no such
 /// type (a Go receiver method, a Kotlin `fun K.m` alone, a C++ definition
 /// whose class is in another file, `K::m` with two types `K` in the file)
 /// keeps its container, and at top level `uid::compute`.
@@ -722,7 +726,7 @@ fn joined_containers(decls: &[FileDecl<'_>]) -> Vec<Option<u32>> {
                 e.insert(Some((c, k as u32)));
             }
             Entry::Occupied(mut e) => {
-                if e.get().is_some_and(|(t, _)| t != c) {
+                if e.get().is_some_and(|(t, _)| !same_anchor(decls, t, c)) {
                     e.insert(None);
                 }
             }
@@ -732,25 +736,55 @@ fn joined_containers(decls: &[FileDecl<'_>]) -> Vec<Option<u32>> {
         .iter()
         .enumerate()
         .map(|(j, d)| {
-            let joined = outside_types(d)
-                .then(|| {
-                    d.owner
-                        .and_then(|o| in_type.get(&(d.kind.as_str(), o, d.name)))
-                })
-                .flatten()
+            if !outside_types(d) {
+                return d.container;
+            }
+            let set = d
+                .owner
+                .and_then(|o| in_type.get(&(d.kind.as_str(), o, d.name)))
                 .copied()
-                .flatten()
-                .filter(|&(t, first)| {
-                    d.container.is_none_or(|c| chain(t).any(|a| a == c))
-                        && (uid::keeps_overloads(d.kind) || first < j as u32)
-                });
-            joined.map_or(d.container, |(t, _)| Some(t))
+                .flatten();
+            match set {
+                Some((t, first))
+                    if d.container.is_none_or(|c| chain(t).any(|a| a == c))
+                        && (uid::keeps_overloads(d.kind) || first < j as u32) =>
+                {
+                    Some(t)
+                }
+                _ => d.container,
+            }
         })
         .collect()
 }
 
 fn joins(kind: NodeKind) -> bool {
     uid::keeps_overloads(kind) || uid::merges_repeats(kind)
+}
+
+/// Whether the rows `a` and `b` of one file get one anchor: the same kind,
+/// owner and name (the arity enters no anchor), and containers that do too. A row with a lexical
+/// parent never compares equal, which errs toward two types.
+fn same_anchor(decls: &[FileDecl<'_>], mut a: u32, mut b: u32) -> bool {
+    for _ in 0..=decls.len() {
+        if a == b {
+            return true;
+        }
+        let (Some(x), Some(y)) = (decls.get(a as usize), decls.get(b as usize)) else {
+            return false;
+        };
+        if (x.kind, x.owner, x.name) != (y.kind, y.owner, y.name)
+            || x.parent.is_some()
+            || y.parent.is_some()
+        {
+            return false;
+        }
+        match (x.container, y.container) {
+            (None, None) => return true,
+            (Some(p), Some(q)) => (a, b) = (p, q),
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// For each dirty declaration, the base declaration it replaces. A pair
@@ -2494,6 +2528,85 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// Stands for: an out-of-type `K::m` in `namespace b` never joins the
+    /// `K` of `namespace a`, which lies outside its own container.
+    #[test]
+    fn test_assign_file_out_of_type_member_other_namespace_joins_none() {
+        let mut decls = vec![
+            decl(NodeKind::Namespace, None, "a"),
+            decl(NodeKind::Class, Some("a"), "K"),
+            decl(NodeKind::Method, Some("K"), "m"),
+            decl(NodeKind::Namespace, None, "b"),
+            decl(NodeKind::Method, Some("K"), "m"),
+        ];
+        for (child, container) in [(1, 0), (2, 1), (4, 3)] {
+            decls[child].container = Some(container);
+        }
+        let ids = assign_file("k.cpp", &decls).unwrap();
+        assert!(matches!(ids[4].slot, UidSlot::First(_)));
+        assert_ne!(ids[4].anchor, ids[2].anchor);
+    }
+
+    /// Stands for: a method joins its in-type sibling in either order, so
+    /// an out-of-type `m` before the class heads the set.
+    #[test]
+    fn test_assign_file_out_of_type_method_before_its_sibling_joins_set() {
+        let mut decls = vec![
+            decl(NodeKind::Method, Some("K"), "m"),
+            decl(NodeKind::Class, None, "K"),
+            decl(NodeKind::Method, Some("K"), "m"),
+        ];
+        decls[2].container = Some(1);
+        let ids = assign_file("k.cpp", &decls).unwrap();
+        assert!(matches!(
+            ids[2].slot,
+            UidSlot::Later {
+                first: 0,
+                reason: LaterReason::Overload,
+                ..
+            }
+        ));
+    }
+
+    /// Stands for: `struct K { static int x; };` in both arms of an `#if`,
+    /// then `int K::x = 0;`. The two `K` share one anchor, so they count as
+    /// one type and the definition merges into the first `x`. The stored
+    /// graph keeps each merged repeat as a tombstone with no owner and no
+    /// name; re-deriving the file from those rows gives every named row the
+    /// same anchor, so the overlay pairs an unchanged file.
+    #[test]
+    fn test_assign_file_out_of_type_field_of_one_anchor_twin_types_stored_rows_same_anchors() {
+        let mut decls = vec![
+            decl(NodeKind::Struct, None, "K"),
+            decl(NodeKind::Property, Some("K"), "x"),
+            decl(NodeKind::Struct, None, "K"),
+            decl(NodeKind::Property, Some("K"), "x"),
+            decl(NodeKind::Property, Some("K"), "x"),
+        ];
+        decls[1].container = Some(0);
+        decls[3].container = Some(2);
+        let full = assign_file("k.cpp", &decls).unwrap();
+        assert!(matches!(full[4].slot, UidSlot::Duplicate { first: 1, .. }));
+        let stored: Vec<FileDecl<'_>> = decls
+            .iter()
+            .zip(&full)
+            .map(|(d, id)| match id.slot {
+                UidSlot::Duplicate { .. } => FileDecl {
+                    owner: Some(""),
+                    name: "",
+                    ..*d
+                },
+                _ => *d,
+            })
+            .collect();
+        let rebuilt = assign_file("k.cpp", &stored).unwrap();
+        for (j, (f, r)) in full.iter().zip(&rebuilt).enumerate() {
+            if !matches!(f.slot, UidSlot::Duplicate { .. }) {
+                assert_eq!(f.anchor, r.anchor, "row {j}");
+            }
+        }
     }
 
     /// Stands for: with two types `K` in the file (`a::K`, `b::K`) the short

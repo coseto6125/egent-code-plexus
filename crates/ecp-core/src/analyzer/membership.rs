@@ -94,8 +94,8 @@ pub fn span_area(s: Span) -> u64 {
 /// row order. Each end is the node of its own row ([`MemberLookup::node`]),
 /// so a type declared twice owns the members of its own body; only the owner
 /// pass names its type. An edge two merged rows both give is emitted once.
-/// `lookup` runs only for a file that declares a type, so a file without one
-/// pays one pass over its rows. Cost: O(rows x types of the file) span
+/// `lookup` runs only for a file that declares a type or an `Impl` block, so
+/// a file without either pays one pass over its rows. Cost: O(rows x types of the file) span
 /// checks plus O(rows) lookups.
 pub fn class_membership<'a, T, L: MemberLookup>(
     rows: &'a [T],
@@ -208,7 +208,8 @@ fn span_pass<'a, T>(
 }
 
 /// Owner pass: a member whose `owner_class` names a type of the file that no
-/// span of that name contains (a Rust `impl` block, a Go receiver method).
+/// span of that name contains (a Rust `impl` block, a Go receiver method),
+/// or a member of a Rust `Impl` block whose type is in no row of the file.
 /// A member some span of its owner's name contains is the span pass's.
 ///
 /// A member of a Rust `Impl` block binds the first type row of its owner's

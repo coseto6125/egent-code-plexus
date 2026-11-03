@@ -378,4 +378,7 @@ fn test_class_membership_rust_impl_only_file_binds_impl_block() {
         uid_chain_support::source_lines(&g, RelType::HasMethod, m),
         vec![2]
     );
+    let (full, overlay) = full_and_overlay(IMPL_ONLY, RelType::HasMethod);
+    assert_eq!(full.len(), 1, "one HasMethod: {full:?}");
+    assert_eq!(full, overlay, "the overlay replay binds the block too");
 }
