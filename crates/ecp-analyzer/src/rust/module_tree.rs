@@ -587,6 +587,8 @@ fn parse_workspace_members(cargo_toml: &str, workspace_root: &Path) -> Vec<PathB
                     .filter(|dir| dir.join("Cargo.toml").exists()),
             );
         } else {
+            // `pattern`, not `glob`: a member that trims to nothing (`/`) is
+            // not the workspace root.
             let member = workspace_root.join(pattern);
             if member.is_dir() {
                 members.push(member);
@@ -902,6 +904,15 @@ mod tests {
             parse_workspace_members(text, dir.path()),
             [dir.path().join("crates").join("foo")]
         );
+    }
+
+    /// Stands for: separators are trimmed only for the glob split, so a
+    /// plain member `/` never names the workspace root.
+    #[test]
+    fn test_parse_workspace_members_slash_only_member_is_not_workspace_root() {
+        let dir = make_tree(&[("Cargo.toml", "[package]\nname = \"app\"\n")]);
+        let members = parse_workspace_members("[workspace]\nmembers = [\"/\"]\n", dir.path());
+        assert!(!members.contains(&dir.path().to_path_buf()), "{members:?}");
     }
 
     #[test]
