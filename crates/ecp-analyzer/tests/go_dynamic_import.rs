@@ -1,4 +1,4 @@
-//! FU-2026-11-01-c07a40e90e36 (T1), T1 red-proof (design_resolver.md:133): Go `plugin.Open` + `Lookup`.
+//! FU-2026-11-01-c07a40e90e36, dynamic module load: Go `plugin.Open` + `Lookup`.
 //!
 //! Load form: `plugin.Open("x.so")` + `p.Lookup("Run")`, then a call of the
 //! looked-up symbol. `src/go/parser.rs:503` only emits the `go-plugin-open` blind

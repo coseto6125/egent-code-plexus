@@ -1,4 +1,5 @@
-//! FU-2026-11-01-c07a40e90e36 (T1), T1 red-proof (design_resolver.md:133): Swift `NSClassFromString` / `dlopen`.
+//! FU-2026-11-01-c07a40e90e36, dynamic module load: Swift `NSClassFromString` /
+//! `dlopen`.
 //!
 //! Load form: `NSClassFromString("X")` and `dlopen`/`dlsym`. The class and
 //! symbol names are strings, and the symbol comes back as an opaque pointer.

@@ -1,5 +1,6 @@
 //! Slice R4b: the CLI prints an owner through the display owner and the shared
-//! resolver keeps lexically scoped nodes as candidates (design A §4.5, §4.4).
+//! resolver keeps lexically scoped nodes as candidates (owner-split-design.md
+//! §4.5, §4.4).
 //!
 //! Rust (R6), Python, JavaScript and TypeScript (R8) scope Function; the
 //! samples nest no fn, so a real build of them writes an empty

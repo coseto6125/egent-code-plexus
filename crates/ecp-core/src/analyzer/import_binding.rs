@@ -55,7 +55,8 @@ pub enum MemberOwner<'a> {
     /// last): `Helper.work()` through `import pkg.Helper`, a Java static
     /// import `import static pkg.Helper.work`, or a static wildcard
     /// `import static pkg.Helper.*`. The owner index keys only the last
-    /// segment; [`owner_path_agrees`] checks the rest.
+    /// segment; [`owner_path_agrees`] checks the rest. A Rust `use` of an
+    /// inline `mod`'s item names that `mod` (`deep` for `use self::deep::g`).
     Type(&'a str),
 }
 

@@ -1,13 +1,14 @@
-//! FU-2026-11-01-c07a40e90e36 (T1), T1 red-proof (design_resolver.md:133): PHP `require __DIR__ . '/a.php'`.
+//! FU-2026-11-01-c07a40e90e36, dynamic module load: PHP
+//! `require __DIR__ . '/a.php'`.
 //!
 //! Load form: `require __DIR__ . '/a.php'; run();` with a decoy `run` in `b.php`.
 //! The require target is a concatenation, not a string literal, and the PHP
-//! parser emits no `Imports` edge for it (design_resolver.md N13, FU N13). With
+//! parser emits no `Imports` edge for it (a known gap). With
 //! no import and two global functions named `run`, the bare call is ambiguous
 //! (resolver.rs: a Tier 3 pick with two or more candidates is suppressed), so the
 //! expected result is: no `Imports` edge from `app.php`, and no `Calls` edge to
 //! either `run`. A future fix that binds `run` to `a.php` through the require
-//! (N13) is a change, not a regression. Pin derived from reading, not run.
+//! is a change, not a regression.
 //!
 //! Contract the pins stand for: a runtime load with a non-static target
 //! gives no import-tier call edge; a future fix that adds one with a proven
@@ -69,7 +70,7 @@ fn test_require_dir_concat_bare_call_binds_neither_run() {
     let calls = calls_from(&g, "load");
     assert!(
         calls.iter().all(|hit| hit.name != "run"),
-        "N13 pin: load calls: {calls:?}"
+        "known-gap pin: load calls: {calls:?}"
     );
 }
 

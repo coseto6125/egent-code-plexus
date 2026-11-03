@@ -672,14 +672,192 @@ fn test_build_rust_use_super_glob_in_inline_mod_imports_glob_module() {
          \x20   pub fn run() -> i32 { g() }\n\
          }\n",
     );
-    // The glob's module is placed: `lib.rs` imports `util.rs`. A glob is no
-    // evidence for the bare `g()` while `other.rs` declares a `g` too, with
-    // or without the inline mod (`use crate::util::*;` at the top level of
-    // `lib.rs` binds none either), so the call is not asserted here.
     assert_eq!(
         imports_from(&g, "src/lib.rs"),
         vec![Some("src/util.rs".to_string())]
     );
+    assert_eq!(
+        calls(&g, "run"),
+        vec![util_g()],
+        "the glob reaches util's g"
+    );
+}
+
+/// `use crate::util::*;` brings `util`'s items into scope: the bare `g()`
+/// binds `util.rs`'s `g`, though `other.rs` declares a `g` too.
+const GLOB_LIB: &str = "pub mod util;\n\
+pub mod other;\n\
+use crate::util::*;\n\
+pub fn run() -> i32 { g() }\n";
+
+#[test]
+fn test_build_rust_glob_use_binds_bare_call_to_glob_module() {
+    let g = build_with_util(GLOB_LIB);
+    assert_eq!(calls(&g, "run"), vec![util_g()]);
+}
+
+#[test]
+fn test_build_rust_glob_use_overlay_matches_full_build() {
+    let calls = assert_overlay_matches_full(
+        &[
+            ("src/lib.rs", GLOB_LIB),
+            ("src/util.rs", UTIL),
+            ("src/other.rs", OTHER),
+        ],
+        "src/lib.rs",
+        &["g"],
+    );
+    assert_eq!(calls.len(), 1, "setup: the full build holds the one call");
+}
+
+/// An item `use` names in an inline `mod` of the same file binds that
+/// `mod`'s item, never the file's top-level namesake (line 1): `run` and
+/// `via_alias` call `deep::g` (line 2), `top` calls the top-level `g`.
+const INLINE_NAMESAKE: &str = "pub fn g() -> i32 { 0 }\n\
+pub mod deep { pub fn g() -> i32 { 1 } }\n\
+pub mod user {\n\
+\x20   use super::deep::g;\n\
+\x20   pub fn run() -> i32 { g() }\n\
+}\n\
+use self::deep::g as dg;\n\
+pub fn via_alias() -> i32 { dg() }\n\
+pub fn top() -> i32 { g() }\n";
+
+#[test]
+fn test_build_rust_use_inline_mod_item_through_alias_binds_it_not_top_level_namesake() {
+    let g = build_lib(INLINE_NAMESAKE);
+    assert_eq!(calls(&g, "via_alias"), vec![lib("g", 2)], "via_alias");
+    assert_eq!(calls(&g, "top"), vec![lib("g", 1)], "top");
+}
+
+/// The target for `run`: Tier 1 binds a bare name to the file's top-level
+/// `g` before any import tier runs, and an import records no `mod`, so the
+/// `use super::deep::g;` of `mod user` cannot be told from one in a sibling
+/// `mod` (`mod a { use crate::util::g; }` beside `mod tests { use super::*;
+/// }`). Binding the import there moved correct edges, so it waits for a
+/// scoped import row.
+#[test]
+#[ignore = "needs a `mod` scope on Rust import rows"]
+fn test_build_rust_use_inline_mod_item_bare_call_binds_it_not_top_level_namesake() {
+    let g = build_lib(INLINE_NAMESAKE);
+    assert_eq!(calls(&g, "run"), vec![lib("g", 2)], "run");
+}
+
+#[test]
+fn test_build_rust_use_inline_mod_item_overlay_matches_full_build() {
+    let calls =
+        assert_overlay_matches_full(&[("src/lib.rs", INLINE_NAMESAKE)], "src/lib.rs", &["g"]);
+    assert_eq!(
+        calls.len(),
+        3,
+        "setup: the full build holds the three calls"
+    );
+}
+
+#[test]
+fn test_build_rust_explicit_use_shadows_glob_binds_explicit_item() {
+    let g = build_with_util(
+        "pub mod util;\n\
+         pub mod other;\n\
+         use crate::util::*;\n\
+         use crate::other::g;\n\
+         pub fn run() -> i32 { g() }\n",
+    );
+    assert_eq!(
+        calls(&g, "run"),
+        vec![("src/other.rs".to_string(), "g".to_string(), 1)]
+    );
+}
+
+/// `max` names `std`'s function, which the tree cannot place: the glob
+/// into `util`, which declares a `max`, stays shadowed.
+#[test]
+fn test_build_rust_external_explicit_use_shadows_glob_binds_nothing() {
+    let g = build(&[
+        (
+            "src/lib.rs",
+            "pub mod util;\n\
+             pub mod other;\n\
+             use std::cmp::max;\n\
+             use crate::util::*;\n\
+             pub fn run() -> i32 { max(1, 2) }\n",
+        ),
+        ("src/util.rs", "pub fn max(a: i32, _b: i32) -> i32 { a }\n"),
+        ("src/other.rs", "pub fn max(a: i32, _b: i32) -> i32 { a }\n"),
+    ]);
+    assert_eq!(calls(&g, "run"), Vec::<Hit>::new());
+}
+
+#[test]
+fn test_build_rust_two_globs_providing_name_bind_nothing() {
+    let g = build_with_util(
+        "pub mod util;\n\
+         pub mod other;\n\
+         use crate::util::*;\n\
+         use crate::other::*;\n\
+         pub fn run() -> i32 { g() }\n",
+    );
+    assert_eq!(calls(&g, "run"), Vec::<Hit>::new());
+}
+
+#[test]
+fn test_build_rust_glob_into_module_without_name_binds_nothing() {
+    let g = build(&[
+        (
+            "src/lib.rs",
+            "pub mod util;\n\
+             pub mod other;\n\
+             pub mod empty;\n\
+             use crate::empty::*;\n\
+             pub fn run() -> i32 { g() }\n",
+        ),
+        ("src/util.rs", UTIL),
+        ("src/other.rs", OTHER),
+        ("src/empty.rs", "pub fn h() -> i32 { 3 }\n"),
+    ]);
+    assert_eq!(calls(&g, "run"), Vec::<Hit>::new());
+}
+
+#[test]
+fn test_build_rust_local_item_shadows_glob_binds_local_item() {
+    let g = build_with_util(
+        "pub mod util;\n\
+         pub mod other;\n\
+         use crate::util::*;\n\
+         pub fn g() -> i32 { 0 }\n\
+         pub fn run() -> i32 { g() }\n",
+    );
+    assert_eq!(calls(&g, "run"), vec![lib("g", 4)]);
+}
+
+/// `mod deep` and `mod other` each declare a `g`: the glob of `deep` picks
+/// its `g` (line 2).
+#[test]
+fn test_build_rust_glob_use_of_inline_mod_binds_its_item_not_sibling_namesake() {
+    let g = build_lib(
+        "pub mod other { pub fn g() -> i32 { 0 } }\n\
+         pub mod deep { pub fn g() -> i32 { 1 } }\n\
+         pub mod user {\n\
+         \x20   use super::deep::*;\n\
+         \x20   pub fn run() -> i32 { g() }\n\
+         }\n",
+    );
+    assert_eq!(calls(&g, "run"), vec![lib("g", 2)]);
+}
+
+#[test]
+fn test_build_rust_use_two_deep_inline_mod_item_binds_innermost_mod_item() {
+    let g = build_lib(
+        "pub fn g() -> i32 { 0 }\n\
+         pub mod a {\n\
+         \x20   pub mod b { pub fn g() -> i32 { 1 } }\n\
+         }\n\
+         pub mod user {\n\
+         \x20   use crate::a::b::g as bg;\n\
+         \x20   pub fn run() -> i32 { bg() }\n\
+         }\n",
+    );
+    assert_eq!(calls(&g, "run"), vec![lib("g", 3)]);
 }
 
 /// `use super::*` in a `mod tests` of the same file: the parent's own items
@@ -719,7 +897,7 @@ fn test_build_rust_use_super_star_in_inline_mod_keeps_parent_items() {
 
 /// The import names an inline `mod` of the same file. No top-level `g`
 /// stands beside it: with one, a bare `g()` binds the first `g` of the file
-/// whatever the import says, before and after this rewrite.
+/// whatever the import says (the ignored target test on `INLINE_NAMESAKE`).
 #[test]
 fn test_build_rust_use_self_path_in_inline_mod_binds_nested_mod_item() {
     let g = build_lib(
@@ -921,4 +1099,127 @@ fn test_build_rust_stringify_arguments_are_no_call() {
             "{caller}"
         );
     }
+}
+
+/// `enum E { A(u8) }` in macro tokens declares variants: `A(u8)` calls no
+/// `A`, generic, attributed or with a `where` clause, while a discriminant
+/// (`X = A(1) as isize`) does.
+/// `run` calls `A` outside any enum: the control.
+#[test]
+fn test_build_rust_enum_variants_in_macro_tokens_are_no_call() {
+    let g = build_lib(
+        "pub fn A(x: u8) -> u8 { x }\n\
+         macro_rules! emit { ($($t:tt)*) => {} }\n\
+         pub fn plain_enum() { emit!(enum E { A(u8), B }); }\n\
+         pub fn generic_enum() { emit!(enum G<T> { A(T) }); }\n\
+         pub fn discriminant() { emit!(enum D { X = A(1) as isize, Y(u8) }); }\n\
+         pub fn attributed() { emit!(enum F { #[cfg(x)] A(u8), #[doc = \"d\"] #[cfg(y)] B(u8) }); }\n\
+         pub fn where_clause() { emit!(enum W<T> where T: Copy { A(T) }); }\n\
+         pub fn run() { println!(\"{}\", A(1)); }\n",
+    );
+    assert_eq!(calls(&g, "run"), vec![lib("A", 1)], "run");
+    assert_eq!(
+        calls(&g, "discriminant"),
+        vec![lib("A", 1)],
+        "a discriminant's call stays"
+    );
+    for caller in ["plain_enum", "generic_enum", "attributed", "where_clause"] {
+        assert!(
+            calls(&g, caller).is_empty(),
+            "{caller}: {:?}",
+            calls(&g, caller)
+        );
+    }
+}
+
+/// A `use` in one inline `mod` puts its item in scope there only: `mod
+/// tests` globs the parent, so its bare `g()` calls the top-level `g`
+/// (line 1), never the `util::g` that `mod a` imports. Imports carry no
+/// `mod` scope, so the glob and `mod a`'s `use` conflict and Tier 1 keeps
+/// the top-level `g` for both callers: `x`, which really calls `util::g`, is
+/// a known gap until an import records its `mod`, and is not asserted.
+#[test]
+fn test_build_rust_use_in_sibling_inline_mod_does_not_leak_into_another() {
+    let g = build_with_util(
+        "pub fn g() -> i32 { 0 }\n\
+         pub mod util;\n\
+         pub mod other;\n\
+         mod a {\n\
+         \x20   use crate::util::g;\n\
+         \x20   pub fn x() -> i32 { g() }\n\
+         }\n\
+         mod tests {\n\
+         \x20   use super::*;\n\
+         \x20   pub fn t() -> i32 { g() }\n\
+         }\n",
+    );
+    assert_eq!(calls(&g, "t"), vec![lib("g", 1)], "t");
+}
+
+/// Imports carry no `mod` scope, so a `use` in a sibling `mod` never moves
+/// a bare call off the top-level item Tier 1 binds: `t` keeps `g` (line 1)
+/// beside `mod a`'s `use crate::util::g;`, with `mod tests` written as an
+/// explicit `use super::g;` or as a glob beside a second, disagreeing glob.
+#[test]
+fn test_build_rust_sibling_mod_use_keeps_top_level_bare_call() {
+    let explicit = build_with_util(
+        "pub fn g() -> i32 { 0 }\n\
+         pub mod util;\n\
+         pub mod other;\n\
+         mod a {\n\
+         \x20   use crate::util::g;\n\
+         \x20   pub fn x() -> i32 { g() }\n\
+         }\n\
+         mod tests {\n\
+         \x20   use super::g;\n\
+         \x20   pub fn t() -> i32 { g() }\n\
+         }\n",
+    );
+    assert_eq!(calls(&explicit, "t"), vec![lib("g", 1)], "explicit");
+    let two_globs = build_with_util(
+        "pub fn g() -> i32 { 0 }\n\
+         pub mod util;\n\
+         pub mod other;\n\
+         mod a {\n\
+         \x20   use crate::util::g;\n\
+         \x20   pub fn x() -> i32 { g() }\n\
+         }\n\
+         mod tests {\n\
+         \x20   use super::*;\n\
+         \x20   pub fn t() -> i32 { g() }\n\
+         }\n\
+         mod b {\n\
+         \x20   use crate::other::*;\n\
+         \x20   pub fn y() -> i32 { g() }\n\
+         }\n",
+    );
+    assert_eq!(calls(&two_globs, "t"), vec![lib("g", 1)], "two globs");
+}
+
+/// `pub use util::a::b as alias;` moves `alias` to `util.rs`'s `mod a`
+/// item, and the tree keeps no trace of `b`: `use crate::alias::g;` binds
+/// nothing rather than `a`'s own `g` (line 2).
+#[test]
+fn test_build_rust_reexported_inline_mod_path_binds_no_outer_mod_item() {
+    let g = build(&[
+        (
+            "src/lib.rs",
+            "pub mod util;\npub mod caller;\npub use util::a::b as alias;\n",
+        ),
+        (
+            "src/util.rs",
+            "pub mod a {\n\
+             \x20   pub fn g() -> i32 { 0 }\n\
+             \x20   pub mod b {\n\
+             \x20       pub fn g() -> i32 { 1 }\n\
+             \x20   }\n\
+             }\n",
+        ),
+        (
+            "src/caller.rs",
+            "use crate::alias::g;\npub fn run() -> i32 { g() }\n",
+        ),
+    ]);
+    let wrong = ("src/util.rs".to_string(), "g".to_string(), 2);
+    assert!(!calls(&g, "run").contains(&wrong), "{:?}", calls(&g, "run"));
 }

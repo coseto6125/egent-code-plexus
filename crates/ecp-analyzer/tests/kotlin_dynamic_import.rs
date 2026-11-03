@@ -1,4 +1,5 @@
-//! FU-2026-11-01-c07a40e90e36 (T1), T1 red-proof (design_resolver.md:133): Kotlin `Class.forName(..).kotlin` reflection.
+//! FU-2026-11-01-c07a40e90e36, dynamic module load: Kotlin
+//! `Class.forName(..).kotlin` reflection.
 //!
 //! Load form: `Class.forName("pkg.X").kotlin.members.first { .. }.call()`.
 //! `src/kotlin/parser.rs:280` emits a blind spot for `Class.forName`. The member

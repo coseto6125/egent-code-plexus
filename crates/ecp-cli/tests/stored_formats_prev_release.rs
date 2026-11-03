@@ -311,7 +311,8 @@ fn test_graph_bin_written_by_0_16_4_returns_symbols_and_calls_or_is_refused() {
     );
 }
 
-/// The graph format before the lexical-parent table (design A §4.3).
+/// The graph format before the lexical-parent table (owner-split-design.md
+/// §4.3).
 const PRE_LEXICAL_TABLE_GRAPH_FORMAT: u32 = 16;
 
 /// Stands for: the writer's `graph.bin` has no lexical-parent table, so

@@ -1152,6 +1152,12 @@ fn sibling_graph_compatible(graph_path: &Path) -> bool {
     }
 }
 
+/// Whether `ECP_SKIP_BG_REBUILD` suppresses every background rebuild and
+/// gc spawn: the stderr line and the payload caveat then claim none.
+pub(crate) fn background_rebuild_skipped() -> bool {
+    std::env::var_os("ECP_SKIP_BG_REBUILD").is_some()
+}
+
 /// Fire-and-forget background rebuild for `worktree_root`. Returns the
 /// `rebuild=` field of the stderr line announcing it: `rebuild=skipped` under
 /// `ECP_SKIP_BG_REBUILD`, else `rebuild=background`, followed by
@@ -1166,7 +1172,7 @@ fn spawn_background_rebuild(worktree_root: &Path) -> String {
     // use for the detached rebuild; skipping it avoids a leaked `sh` subprocess
     // that nextest flags as LEAK on Windows (the rebuild outlives the test).
     // The stderr line then says so instead of announcing a rebuild.
-    if std::env::var_os("ECP_SKIP_BG_REBUILD").is_some() {
+    if background_rebuild_skipped() {
         return "rebuild=skipped".to_string();
     }
     let Ok(repo_dir_name) = crate::repo_identity::repo_dir_name_for_cwd(worktree_root) else {
@@ -1262,7 +1268,7 @@ fn spawn_upgrade_gc() {
         return;
     }
     test_counters::UPGRADE_GC_INTENT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if std::env::var_os("ECP_SKIP_BG_REBUILD").is_some() {
+    if background_rebuild_skipped() {
         return;
     }
     // In-process tests run a test harness as `current_exe`; only the real

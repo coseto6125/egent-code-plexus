@@ -1,4 +1,4 @@
-//! FU-2026-11-01-c07a40e90e36 (T1), T1 red-proof (design_resolver.md:133): C `dlopen`/`dlsym`.
+//! FU-2026-11-01-c07a40e90e36, dynamic module load: C `dlopen`/`dlsym`.
 //!
 //! Load form: `dlopen("./libx.so", RTLD_NOW)` + `dlsym(h, "run")`, then a call through the
 //! resulting function pointer. Evidence for the pin: src/c/parser.rs:827 only emits a blind spot for dlsym.

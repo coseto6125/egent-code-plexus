@@ -1,4 +1,5 @@
-//! FU-2026-11-01-c07a40e90e36 (T1), T1 red-proof (design_resolver.md:133): Rust `libloading::Library::new` + `get`.
+//! FU-2026-11-01-c07a40e90e36, dynamic module load: Rust
+//! `libloading::Library::new` + `get`.
 //!
 //! Load form: `libloading::Library::new("x.so")` + `lib.get(b"run")`, then a
 //! call through the loaded symbol (named `entry`, so no declaration of that name

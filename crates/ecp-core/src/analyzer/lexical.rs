@@ -52,11 +52,11 @@ fn lexical_admission(language: Language) -> Option<LexicalAdmission> {
     }
 }
 
-/// Clears the owner of every node of a `language` file that
-/// [`lexical_parents`] scopes (design A §3.2, invariant I1): a scoped node
-/// has a lexical parent and no owner. A parser that opts in runs this once,
-/// last, so its own owner rules and `stamp_owner_class_by_span` stay as they
-/// are. A language that scopes no kind keeps every owner.
+/// Clears the owner of every node of a `language` file that [`lexical_parents`]
+/// scopes (owner-split-design.md §3.2, invariant I1): a scoped node has a
+/// lexical parent and no owner. A parser that opts in runs this once, last, so
+/// its own owner rules and `stamp_owner_class_by_span` stay as they are. A
+/// language that scopes no kind keeps every owner.
 pub fn clear_scoped_owners(language: Language, nodes: &mut [RawNode]) {
     let scoped = lexical_scope_kinds(language);
     if scoped.is_empty() {
@@ -464,11 +464,11 @@ pub fn lexical_chain_end<T: Copy>(
     None
 }
 
-/// The parts of `start`'s display owner (design A §4.5): the first stored
-/// owner up its lexical-parent chain, and the names of the parents the walk
-/// passes on the way, innermost first. `node(id)` gives the stored owner
-/// (`None` for no owner) and the name of `id`; `parent(id)` its lexical
-/// parent; `rows` the size of the parent table ([`lexical_chain_end`]).
+/// The parts of `start`'s display owner (owner-split-design.md §4.5): the first
+/// stored owner up its lexical-parent chain, and the names of the parents the
+/// walk passes on the way, innermost first. `node(id)` gives the stored owner
+/// (`None` for no owner) and the name of `id`; `parent(id)` its lexical parent;
+/// `rows` the size of the parent table ([`lexical_chain_end`]).
 ///
 /// `None` for a cycle and when `node` knows no `start` or no parent the walk
 /// reaches: a display reader then prints no owner rather than a cut path.
@@ -526,7 +526,8 @@ pub fn file_uids<'a, T>(
         .collect()
 }
 
-/// Which functions the lexical tier of one file admits (design A §4.2).
+/// Which functions the lexical tier of one file admits (owner-split-design.md
+/// §4.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LexicalAdmission {
     /// JS / TS: every node [`lexical_parents`] scopes, plus every file-level

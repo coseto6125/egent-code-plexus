@@ -471,9 +471,9 @@ fn test_build_python_two_levels_decorated_and_lambda_scoped() {
 
 /// Stands for: a local class is no scoped node. Each `class Fake` keeps the
 /// enclosing function's name as its owner, the two have two uids, and they do
-/// not collide (design A §5.2, `stamp_owner_fn_by_span` skips only the scoped
-/// kinds). Each uid hashes its function (C1-identity.md "Declaration identity:
-/// fields and invariants", shape L), no longer the owner text alone.
+/// not collide (owner-split-design.md §5.2, `stamp_owner_fn_by_span` skips only
+/// the scoped kinds). Each uid hashes its function (C1-identity.md "Declaration
+/// identity: fields and invariants", shape L), no longer the owner text alone.
 #[test]
 fn test_parse_python_local_class_in_two_functions_keeps_two_uids() {
     let g = build(&[(PATH, LOCAL_CLASSES)]);

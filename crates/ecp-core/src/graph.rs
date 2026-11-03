@@ -1624,9 +1624,9 @@ impl ArchivedZeroCopyGraph {
         self.lexical_parent(node_idx).is_some()
     }
 
-    /// The owner text a reader prints for `node_idx` (design A §4.5): its
-    /// `owner_class` when set; for a scoped node, the display owner of its
-    /// lexical parent and then the parent's name, joined by `::` (the
+    /// The owner text a reader prints for `node_idx` (owner-split-design.md
+    /// §4.5): its `owner_class` when set; for a scoped node, the display owner
+    /// of its lexical parent and then the parent's name, joined by `::` (the
     /// parent's name alone when the parent has none); else `None`.
     ///
     /// A nested `helper` in `impl A { fn new }` prints `A::new`. `None`

@@ -172,13 +172,16 @@ impl Engine {
 
     fn graph_caveat(&self) -> Option<String> {
         if self.is_stale_for_sha {
-            Some(
+            let rebuild = if crate::auto_ensure::background_rebuild_skipped() {
+                "No background rebuild runs (ECP_SKIP_BG_REBUILD is set) — run"
+            } else {
+                "A background rebuild is in flight — rerun, or"
+            };
+            Some(format!(
                 "results may be incomplete: graph is a warm-attach from a sibling commit \
-                 (current HEAD not yet indexed); symbols added since are invisible. A background \
-                 rebuild is in flight — rerun, or `ecp admin index --force --repo .` for a \
-                 definitive answer."
-                    .to_string(),
-            )
+                 (current HEAD not yet indexed); symbols added since are invisible. {rebuild} \
+                 `ecp admin index --force --repo .` for a definitive answer."
+            ))
         } else if self.behind_head {
             Some(
                 "results may be incomplete: graph predates the repo's current HEAD, so \

@@ -1,4 +1,4 @@
-//! FU-2026-11-01-c07a40e90e36 (T1): a literal dynamic module load gets an
+//! FU-2026-11-01-c07a40e90e36: a literal dynamic module load gets an
 //! `Imports` edge, and a call through the name that holds the module binds in
 //! that module (0.95).
 //!

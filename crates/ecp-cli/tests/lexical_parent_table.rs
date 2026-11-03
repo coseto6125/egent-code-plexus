@@ -1,7 +1,7 @@
-//! The `graph.bin` lexical-parent table (design A §4.3) and the I5 filter:
-//! a scoped node is reachable only through the lexical tier, so every
-//! name-tier candidate source drops it, on the build side (`SymbolTable`)
-//! and on the overlay side (`OverlayView`).
+//! The `graph.bin` lexical-parent table (owner-split-design.md §4.3) and the I5
+//! filter: a scoped node is reachable only through the lexical tier, so every
+//! name-tier candidate source drops it, on the build side (`SymbolTable`) and
+//! on the overlay side (`OverlayView`).
 //!
 //! Rust (slice R6), Python, JavaScript and TypeScript (slice R8) opt in
 //! (`lexical_scope_kinds` is `[Function]`), so a real build writes rows for
@@ -162,7 +162,7 @@ fn test_graph_bin_lexical_parent_table_rust_python_ts_rows_round_trip() {
 
 /// Stands for: a row given to the assembly reads back from `graph.bin` as
 /// that node's parent, sorted, the first row of a repeated node kept, and
-/// the display owner walks the parents (design A §4.5).
+/// the display owner walks the parents (owner-split-design.md §4.5).
 #[test]
 fn test_lexical_parent_planted_rows_round_trip_returns_parent_and_display_owner() {
     let mut fx = GraphFixture::new();
