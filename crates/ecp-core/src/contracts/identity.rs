@@ -656,6 +656,11 @@ pub fn assign_file(path: &str, decls: &[FileDecl<'_>]) -> Result<Vec<DeclIdentit
     Ok(out)
 }
 
+/// The in-type member set of each `(kind, owner, name)`: the type that
+/// holds it and the index of its first member, or `None` when two types
+/// of one name both declare it.
+type InTypeSets<'a> = FxHashMap<(&'a str, &'a str, &'a str), Option<(u32, u32)>>;
+
 /// [`FileDecl::container`] of each declaration, except that a member
 /// outside every type (at top level, or in a `namespace` / `module`) joins
 /// the type that declares a member of its kind, owner and name: a C++
@@ -693,7 +698,7 @@ fn joined_containers(decls: &[FileDecl<'_>]) -> Vec<Option<u32>> {
     };
     // (kind, owner, name) -> the one type that declares it and the first
     // such member, or `None` once a second type declares it too.
-    let mut in_type: FxHashMap<(&str, &str, &str), Option<(u32, u32)>> = FxHashMap::default();
+    let mut in_type: InTypeSets<'_> = FxHashMap::default();
     for (k, d) in decls.iter().enumerate() {
         let (None, Some(c), Some(owner)) = (d.parent, d.container, d.owner) else {
             continue;
