@@ -364,3 +364,18 @@ fn test_class_membership_rust_impl_imported_receiver_binds_impl_block() {
         vec![7]
     );
 }
+
+const IMPL_ONLY: &str = "use crate::model::S;\nimpl S {\n    fn m(&self) {}\n}\n";
+
+/// Stands for: a file of `impl` blocks alone, for a type of another file,
+/// still gives each member its block as owner (owner pass, rule 2).
+#[test]
+fn test_class_membership_rust_impl_only_file_binds_impl_block() {
+    let provider = RustProvider::new().unwrap();
+    let g = uid_chain_support::build(&provider, "src/ext.rs", IMPL_ONLY);
+    let m = uid_chain_support::node_at(&g, "m", 3);
+    assert_eq!(
+        uid_chain_support::source_lines(&g, RelType::HasMethod, m),
+        vec![2]
+    );
+}

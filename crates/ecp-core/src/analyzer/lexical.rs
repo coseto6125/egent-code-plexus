@@ -13,8 +13,8 @@ use crate::analyzer::types::{
     innermost_enclosing, span_contains, CallSite, LocalGraph, NameRef, NameRefKind, RawNode, Span,
 };
 use crate::contracts::identity::{
-    assign_file, container_parents_in, lexical_parents, lexical_parents_in, DeclIdentity, FileDecl,
-    UidSlot,
+    assign_file, container_parents_in, is_scope_container, lexical_parents, lexical_parents_in,
+    DeclIdentity, FileDecl, UidSlot,
 };
 use crate::file_category::Language;
 use crate::graph::NodeKind;
@@ -208,7 +208,8 @@ pub fn twin_enclosing(
 /// declaration's generic arity ([`splits_by_arity`]; 0 for every other
 /// kind) and the type that encloses it ([`enclosing_types`]), so a member of
 /// `Foo1<T>` is no duplicate of the same member of `Foo1`. A top-level
-/// declaration has no container and keeps `uid::compute`. The inputs are
+/// declaration has no container and keeps `uid::compute`, except a member
+/// that [`assign_file`] joins to the in-type set of its owner. The inputs are
 /// kind, owner, name and span only, which the base graph stores, so the
 /// overlay re-derives every anchor from stored nodes. The full build,
 /// incremental mode and the overlay view (its dirty parse and its base
@@ -372,6 +373,14 @@ fn identities_of<'a, T>(
     let mut start = 0;
     for input in inputs {
         let end = start + input.len();
+        // Every rule below walks up to a scope container (a callable for
+        // a lexical parent) or, for an arity scope, a type. An input with
+        // no such row keeps `None` everywhere, so it skips the span sweep.
+        let encloses = |k: NodeKind| is_scope_container(k) || (twin_types && k.declares_type());
+        if !rows[start..end].iter().any(|r| encloses(r.0)) {
+            start = end;
+            continue;
+        }
         let decls: Vec<(NodeKind, Span)> = rows[start..end].iter().map(|r| (r.0, r.3)).collect();
         let enclosing = decls_enclosing(&decls);
         let shift = |i: Option<u32>| i.map(|i| i + start as u32);
@@ -1135,8 +1144,9 @@ mod tests {
     }
 
     /// Stands for: a member outside every `Impl` span (a Go-style receiver
-    /// method, a C++ out-of-line member) has no container and keeps
-    /// `uid::compute`, owner text included.
+    /// method, a C++ out-of-line member) has no container and, with no
+    /// in-type sibling of its kind, owner and name, keeps `uid::compute`,
+    /// owner text included.
     #[test]
     fn test_file_identities_member_outside_impl_span_keeps_compute() {
         let rows = [

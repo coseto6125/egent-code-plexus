@@ -296,7 +296,7 @@ fn test_build_python_variable_assigned_twice_defines_once() {
 
 const NESTED_TWINS: &str = "class O1:\n    class H:\n        def run(self):\n            pass\n\n\nclass O2:\n    class H:\n        def run(self):\n            pass\n";
 
-/// Stands for: N1 and N2 (design_uid §5, phase 2). `O1.H` and `O2.H` are
+/// Stands for: N1 (design_uid §5, phase 2). `O1.H` and `O2.H` are
 /// two named nodes with two uids on the full build and the overlay, and each
 /// `run` is a member of its own `H` only, with no `overload_set` reference
 /// between the two `run`.
@@ -327,4 +327,16 @@ fn test_assign_file_python_self_field_in_two_methods_one_node() {
         uid_chain_support::source_lines(&g, ecp_core::graph::RelType::HasProperty, x),
         vec![1]
     );
+}
+
+const DEEP_TWINS: &str = "class A:\n    class B:\n        class H:\n            pass\n\n\nclass C:\n    class B:\n        class H:\n            pass\n";
+
+/// Stands for: N2 at depth 2 (design_uid §5, phase 2). `A.B.H` and `C.B.H`
+/// share every short owner, so only the container chain (two different `B`
+/// anchors) keeps them two named nodes.
+#[test]
+fn test_build_python_depth_two_twin_types_two_nodes() {
+    let provider = PythonProvider::new().unwrap();
+    uid_chain_support::assert_twins(&provider, "m_deep.py", DEEP_TWINS, "B", &[2, 8]);
+    uid_chain_support::assert_twins(&provider, "m_deep.py", DEEP_TWINS, "H", &[3, 9]);
 }

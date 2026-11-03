@@ -109,6 +109,7 @@ pub fn class_membership<'a, T, L: MemberLookup>(
     // and a use-site annotation (Dart `@override`) spans no member.
     let mut owners: Vec<Owner<'a>> = Vec::new();
     let mut classes_by_name: FxHashMap<&'a str, Vec<Span>> = FxHashMap::default();
+    let mut has_impl = false;
     for (raw, r) in rows.iter().map(&row).enumerate() {
         match r.kind {
             NodeKind::Class
@@ -130,10 +131,12 @@ pub fn class_membership<'a, T, L: MemberLookup>(
                 span: r.span,
                 raw,
             }),
+            NodeKind::Impl => has_impl = true,
             _ => {}
         }
     }
-    if owners.is_empty() {
+    // A Rust file of `impl` blocks alone still owns their members.
+    if owners.is_empty() && !has_impl {
         return;
     }
     let lookup = lookup();
@@ -145,7 +148,7 @@ pub fn class_membership<'a, T, L: MemberLookup>(
         }
     };
     span_pass(rows, &row, &owners, &lookup, &mut emit);
-    owner_pass(rows, &row, &classes_by_name, &lookup, &mut emit);
+    owner_pass(rows, &row, &classes_by_name, has_impl, &lookup, &mut emit);
 }
 
 /// Span pass: the innermost owner around each Function, Method,
@@ -214,7 +217,8 @@ fn span_pass<'a, T>(
 /// their `m`. With no such row the block itself owns the member: a lone `S`
 /// of another module is no proof (`mod c { use super::b::S; impl S {} }`
 /// beside `mod a { struct S; }`), and import evidence is design uid §7 Q2,
-/// but the block is the member's container in every case. Any
+/// but the block is the member's container in every case, a file of
+/// `impl` blocks alone included. Any
 /// other member (a Go receiver, an out-of-line member) binds the file's
 /// first declaration of the owner's name. A member named like its type with
 /// no such type would be its own owner, and gets no edge.
@@ -222,12 +226,14 @@ fn owner_pass<'a, T>(
     rows: &'a [T],
     row: &impl Fn(&'a T) -> MemberRow<'a>,
     classes_by_name: &FxHashMap<&'a str, Vec<Span>>,
+    has_impl: bool,
     lookup: &impl MemberLookup,
     emit: &mut impl FnMut(Membership),
 ) {
-    // The container walk runs once per file, and only for a file that has
-    // an owner-pass member.
-    let mut chain: Option<(Vec<(NodeKind, Span)>, Vec<Option<u32>>)> = None;
+    // The container walk runs once per file, and only for a file with an
+    // `Impl` row and an owner-pass member; each block's owner is found once.
+    let mut chain: Option<Vec<Option<u32>>> = None;
+    let mut block_owner: FxHashMap<(u32, &'a str), Option<u32>> = FxHashMap::default();
     for (i, member) in rows.iter().map(row).enumerate() {
         if lookup.is_scoped(i) {
             continue;
@@ -246,25 +252,32 @@ fn owner_pass<'a, T>(
         if spanned {
             continue;
         }
-        let (decls, containers) = chain.get_or_insert_with(|| {
-            let decls: Vec<(NodeKind, Span)> =
-                rows.iter().map(row).map(|r| (r.kind, r.span)).collect();
-            let containers = container_parents(&decls);
-            (decls, containers)
+        let containers = has_impl.then(|| {
+            &*chain.get_or_insert_with(|| {
+                let decls: Vec<(NodeKind, Span)> =
+                    rows.iter().map(row).map(|r| (r.kind, r.span)).collect();
+                container_parents(&decls)
+            })
         });
-        let block = containers[i].filter(|&c| decls[c as usize].0 == NodeKind::Impl);
+        let block = containers.and_then(|cs| {
+            cs[i]
+                .filter(|&c| row(&rows[c as usize]).kind == NodeKind::Impl)
+                .map(|block| (block, cs))
+        });
         let source = match block {
-            Some(block) => {
-                let scope = containers[block as usize];
-                let owner = rows
-                    .iter()
-                    .map(row)
-                    .enumerate()
-                    .find(|&(t, r)| {
-                        r.kind.is_type() && r.name == class_name && containers[t] == scope
-                    })
-                    .map_or(block as usize, |(t, _)| t);
-                lookup.node(owner)
+            Some((block, containers)) => {
+                *block_owner.entry((block, class_name)).or_insert_with(|| {
+                    let scope = containers[block as usize];
+                    let owner = rows
+                        .iter()
+                        .map(row)
+                        .enumerate()
+                        .find(|&(t, r)| {
+                            r.kind.is_type() && r.name == class_name && containers[t] == scope
+                        })
+                        .map_or(block as usize, |(t, _)| t);
+                    lookup.node(owner)
+                })
             }
             None => lookup.lookup_in_file(class_name),
         };
@@ -562,6 +575,20 @@ mod tests {
         assert_eq!(
             edges(&rows),
             [has_method(3, 4, CLASS_MEMBERSHIP_IMPL_REASON)]
+        );
+    }
+
+    /// Stands for: a file of `impl` blocks alone (no type row) still runs
+    /// the owner pass, so the block owns its member.
+    #[test]
+    fn test_class_membership_rust_impl_only_file_binds_block() {
+        let rows = [
+            row(NodeKind::Impl, None, "S", (0, 0, 2, 1)),
+            row(NodeKind::Method, Some("S"), "m", (1, 4, 1, 20)),
+        ];
+        assert_eq!(
+            edges(&rows),
+            [has_method(0, 1, CLASS_MEMBERSHIP_IMPL_REASON)]
         );
     }
 

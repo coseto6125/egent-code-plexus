@@ -255,7 +255,7 @@ fn test_enum_variant_defines_two_mods_same_enum_binds_by_span() {
 
 const NESTED_TWINS: &str = "class O1 {\n    class H {\n        void run() {}\n    };\n};\nclass O2 {\n    class H {\n        void run() {}\n    };\n};\n";
 
-/// Stands for: N1 and N2 (design_uid §5, phase 2). `O1.H` and `O2.H` are
+/// Stands for: N1 (design_uid §5, phase 2). `O1.H` and `O2.H` are
 /// two named nodes with two uids on the full build and the overlay, and each
 /// `run` is a member of its own `H` only, with no `overload_set` reference
 /// between the two `run`.
@@ -307,6 +307,51 @@ fn test_build_cpp_out_of_line_definition_joins_in_class_declaration_set() {
     let def = uid_chain_support::node_at(&g, "m", 4);
     assert_eq!(
         uid_chain_support::source_lines(&g, RelType::References, def),
+        vec![2]
+    );
+}
+
+const DEEP_TWINS: &str = "class A {\n    class B {\n        class H {};\n    };\n};\nclass C {\n    class B {\n        class H {};\n    };\n};\n";
+
+/// Stands for: N2 at depth 2 (design_uid §5, phase 2). `A.B.H` and `C.B.H`
+/// share every short owner, so only the container chain (two different `B`
+/// anchors) keeps them two named nodes.
+#[test]
+fn test_build_cpp_depth_two_twin_types_two_nodes() {
+    let provider = CppProvider::new().unwrap();
+    uid_chain_support::assert_twins(&provider, "deep.cpp", DEEP_TWINS, "B", &[2, 7]);
+    uid_chain_support::assert_twins(&provider, "deep.cpp", DEEP_TWINS, "H", &[3, 8]);
+}
+
+const OUT_OF_LINE_IN_NAMESPACE: &str =
+    "namespace n {\nclass K {\n    void m();\n};\nvoid K::m() {}\n}\n";
+
+/// Stands for: an out-of-line `K::m` inside `namespace n` joins the set of
+/// the in-class `m` of `n::K`, as one at top level does.
+#[test]
+fn test_build_cpp_out_of_line_definition_in_namespace_joins_in_class_declaration_set() {
+    let provider = CppProvider::new().unwrap();
+    let g =
+        uid_chain_support::assert_twins(&provider, PATH, OUT_OF_LINE_IN_NAMESPACE, "m", &[3, 5]);
+    let def = uid_chain_support::node_at(&g, "m", 5);
+    assert_eq!(
+        uid_chain_support::source_lines(&g, RelType::References, def),
+        vec![3]
+    );
+}
+
+const OUT_OF_LINE_FIELD: &str = "class K {\n    static int x;\n};\nint K::x = 0;\n";
+
+/// Stands for: the out-of-line definition `int K::x = 0;` merges into the
+/// in-class `static int x;`: one named `x`.
+#[test]
+fn test_build_cpp_out_of_line_field_merges_into_in_class_field() {
+    let g = uid_chain_support::build(&CppProvider::new().unwrap(), PATH, OUT_OF_LINE_FIELD);
+    assert_eq!(
+        uid_chain_support::named(&g, "x")
+            .iter()
+            .map(|&(l, _)| l)
+            .collect::<Vec<_>>(),
         vec![2]
     );
 }

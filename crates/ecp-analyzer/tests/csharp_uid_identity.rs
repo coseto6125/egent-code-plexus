@@ -192,7 +192,7 @@ fn test_build_csharp_same_file_partial_parts_each_own_their_own_method() {
 
 const NESTED_TWINS: &str = "class O1 {\n    class H {\n        void run() {}\n    }\n}\nclass O2 {\n    class H {\n        void run() {}\n    }\n}\n";
 
-/// Stands for: N1 and N2 (design_uid §5, phase 2). `O1.H` and `O2.H` are
+/// Stands for: N1 (design_uid §5, phase 2). `O1.H` and `O2.H` are
 /// two named nodes with two uids on the full build and the overlay, and each
 /// `run` is a member of its own `H` only, with no `overload_set` reference
 /// between the two `run`.
@@ -207,4 +207,16 @@ fn test_build_csharp_twin_nested_types_two_nodes_own_members() {
         "run",
         &[(3, 2), (8, 7)],
     );
+}
+
+const DEEP_TWINS: &str = "class A {\n    class B {\n        class H {}\n    }\n}\nclass C {\n    class B {\n        class H {}\n    }\n}\n";
+
+/// Stands for: N2 at depth 2 (design_uid §5, phase 2). `A.B.H` and `C.B.H`
+/// share every short owner, so only the container chain (two different `B`
+/// anchors) keeps them two named nodes.
+#[test]
+fn test_build_csharp_depth_two_twin_types_two_nodes() {
+    let provider = CSharpProvider::new().unwrap();
+    uid_chain_support::assert_twins(&provider, "Deep.cs", DEEP_TWINS, "B", &[2, 7]);
+    uid_chain_support::assert_twins(&provider, "Deep.cs", DEEP_TWINS, "H", &[3, 8]);
 }

@@ -206,7 +206,7 @@ fn test_build_ruby_reopened_class_each_body_owns_its_own_method() {
 
 const NESTED_TWINS: &str = "class O1\n  class H\n    def run\n    end\n  end\nend\nclass O2\n  class H\n    def run\n    end\n  end\nend\n";
 
-/// Stands for: N1 and N2 (design_uid §5, phase 2). `O1.H` and `O2.H` are
+/// Stands for: N1 (design_uid §5, phase 2). `O1.H` and `O2.H` are
 /// two named nodes with two uids on the full build and the overlay, and each
 /// `run` is a member of its own `H` only, with no `overload_set` reference
 /// between the two `run`.
@@ -221,4 +221,16 @@ fn test_build_ruby_twin_nested_types_two_nodes_own_members() {
         "run",
         &[(3, 2), (9, 8)],
     );
+}
+
+const DEEP_TWINS: &str = "class A\n  class B\n    class H\n    end\n  end\nend\nclass C\n  class B\n    class H\n    end\n  end\nend\n";
+
+/// Stands for: N2 at depth 2 (design_uid §5, phase 2). `A.B.H` and `C.B.H`
+/// share every short owner, so only the container chain (two different `B`
+/// anchors) keeps them two named nodes.
+#[test]
+fn test_build_ruby_depth_two_twin_types_two_nodes() {
+    let provider = RubyProvider::new().unwrap();
+    uid_chain_support::assert_twins(&provider, "deep.rb", DEEP_TWINS, "B", &[2, 8]);
+    uid_chain_support::assert_twins(&provider, "deep.rb", DEEP_TWINS, "H", &[3, 9]);
 }

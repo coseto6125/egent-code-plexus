@@ -88,8 +88,9 @@ impl<'a> Discriminator<'a> {
 /// Where a declaration lives for its uid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
-    /// No scope container declares the node (top level). The uid hashes
-    /// `(kind, path, owner, name)`, exactly as `uid::compute` does.
+    /// No scope container declares the node (top level), and it joins no
+    /// in-type sibling set. The uid hashes `(kind, path, owner, name)`,
+    /// exactly as `uid::compute` does.
     Unscoped,
     /// A callable body declares the node, and its language scopes the kind
     /// ([`lexical_parents`]). The uid hashes the parent's anchor, so it does
@@ -457,7 +458,8 @@ pub struct FileDecl<'a> {
     /// [`container_parents`]: the innermost scope container that strictly
     /// holds the declaration. A row with a container and no parent hashes
     /// the container's anchor ([`Scope::Member`]); a row with neither is top
-    /// level and keeps `uid::compute`.
+    /// level and keeps `uid::compute`. [`assign_file`] can still join a top
+    /// level member to the container of an in-type sibling.
     pub container: Option<u32>,
     pub discriminator: Option<Discriminator<'a>>,
     /// The declared generic arity of a declaration whose language keeps two
@@ -510,6 +512,8 @@ pub struct DeclIdentity {
 
 /// Every identity of one file's declarations, in slice order. A parent or a
 /// container may come before or after its children in the slice. A
+/// top-level member whose type declares a member of the same kind, owner
+/// and name takes that type as its container ([`joined_containers`]). A
 /// non-canonical `path` is rejected even when `decls` is empty.
 pub fn assign_file(path: &str, decls: &[FileDecl<'_>]) -> Result<Vec<DeclIdentity>, IdentityError> {
     check_path(path)?;
@@ -652,34 +656,90 @@ pub fn assign_file(path: &str, decls: &[FileDecl<'_>]) -> Result<Vec<DeclIdentit
     Ok(out)
 }
 
-/// [`FileDecl::container`] of each declaration, except that a top-level
-/// member joins the type that declares a member of its kind, owner and
-/// name: a C++ out-of-line `K::m` or `int K::x = 0;` after the in-class
-/// one, a Swift `extension P { var af }` beside the `var af` of protocol
-/// `P`. It then shares that member's base uid: a later overload of a
-/// method, a merged repeat of a field, as before the container chain. A
-/// top-level member with no such sibling (a Go receiver method, a Kotlin
-/// `fun K.m` alone, a C++ definition whose class is in another file) keeps
-/// no container and `uid::compute`.
+/// [`FileDecl::container`] of each declaration, except that a member
+/// outside every type (at top level, or in a `namespace` / `module`) joins
+/// the type that declares a member of its kind, owner and name: a C++
+/// out-of-line `K::m` or `int K::x = 0;` after the in-class one, a Swift
+/// `extension P { var af }` beside the `var af` of protocol `P`. It then
+/// shares that member's base uid: a later overload of a method, a merged
+/// repeat of a field, as before the container chain. The join needs one
+/// such type, inside the member's own container, and outside every
+/// callable (a local type never gains out-of-type members, and skipping it
+/// keeps the chain acyclic). A field joins only an earlier sibling: the
+/// later of two merged rows is a tombstone that stores no name, and the
+/// overlay re-derives this join from stored rows. A member with no such
+/// type (a Go receiver method, a Kotlin `fun K.m` alone, a C++ definition
+/// whose class is in another file, `K::m` with two types `K` in the file)
+/// keeps its container, and at top level `uid::compute`.
 fn joined_containers(decls: &[FileDecl<'_>]) -> Vec<Option<u32>> {
-    let mut in_type: FxHashMap<(&str, &str, &str), u32> = FxHashMap::default();
-    for d in decls {
-        if let (None, Some(c), Some(owner)) = (d.parent, d.container, d.owner) {
-            if !owner.is_empty()
-                && joins(d.kind)
-                && decls.get(c as usize).is_some_and(|t| t.kind.is_type())
-            {
-                in_type.entry((d.kind.as_str(), owner, d.name)).or_insert(c);
+    let outside_types = |d: &FileDecl<'_>| {
+        d.parent.is_none()
+            && d.owner.is_some_and(|o| !o.is_empty())
+            && joins(d.kind)
+            && d.container.is_none_or(|c| {
+                decls
+                    .get(c as usize)
+                    .is_some_and(|x| matches!(x.kind, NodeKind::Namespace | NodeKind::Module))
+            })
+    };
+    if !decls.iter().any(outside_types) {
+        return decls.iter().map(|d| d.container).collect();
+    }
+    let chain = |from: u32| {
+        std::iter::successors(Some(from), |&a| {
+            decls.get(a as usize).and_then(|d| d.container)
+        })
+        .take(decls.len() + 1)
+    };
+    // (kind, owner, name) -> the one type that declares it and the first
+    // such member, or `None` once a second type declares it too.
+    let mut in_type: FxHashMap<(&str, &str, &str), Option<(u32, u32)>> = FxHashMap::default();
+    for (k, d) in decls.iter().enumerate() {
+        let (None, Some(c), Some(owner)) = (d.parent, d.container, d.owner) else {
+            continue;
+        };
+        let is_type = decls.get(c as usize).is_some_and(|t| t.kind.is_type());
+        let local = || {
+            chain(c).any(|a| {
+                decls.get(a as usize).is_some_and(|x| {
+                    matches!(
+                        x.kind,
+                        NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+                    )
+                })
+            })
+        };
+        if owner.is_empty() || !joins(d.kind) || !is_type || local() {
+            continue;
+        }
+        match in_type.entry((d.kind.as_str(), owner, d.name)) {
+            Entry::Vacant(e) => {
+                e.insert(Some((c, k as u32)));
+            }
+            Entry::Occupied(mut e) => {
+                if e.get().is_some_and(|(t, _)| t != c) {
+                    e.insert(None);
+                }
             }
         }
     }
     decls
         .iter()
-        .map(|d| match (d.parent, d.container, d.owner) {
-            (None, None, Some(owner)) if joins(d.kind) => {
-                in_type.get(&(d.kind.as_str(), owner, d.name)).copied()
-            }
-            _ => d.container,
+        .enumerate()
+        .map(|(j, d)| {
+            let joined = outside_types(d)
+                .then(|| {
+                    d.owner
+                        .and_then(|o| in_type.get(&(d.kind.as_str(), o, d.name)))
+                })
+                .flatten()
+                .copied()
+                .flatten()
+                .filter(|&(t, first)| {
+                    d.container.is_none_or(|c| chain(t).any(|a| a == c))
+                        && (uid::keeps_overloads(d.kind) || first < j as u32)
+                });
+            joined.map_or(d.container, |(t, _)| Some(t))
         })
         .collect()
 }
@@ -2404,6 +2464,97 @@ mod tests {
                 first: 2,
                 uid: uid::overload(p, 1),
             }
+        );
+    }
+
+    /// Stands for: an out-of-line `K::m` written inside `namespace n` joins
+    /// the `K` of that namespace, as one at top level does.
+    #[test]
+    fn test_assign_file_out_of_type_member_in_namespace_joins_in_type_sibling_set() {
+        let mut decls = vec![
+            decl(NodeKind::Namespace, None, "n"),
+            decl(NodeKind::Class, Some("n"), "K"),
+            decl(NodeKind::Method, Some("K"), "m"),
+            decl(NodeKind::Method, Some("K"), "m"),
+        ];
+        decls[1].container = Some(0);
+        decls[2].container = Some(1);
+        decls[3].container = Some(0);
+        let ids = assign_file("k.cpp", &decls).unwrap();
+        assert!(matches!(
+            ids[3].slot,
+            UidSlot::Later {
+                first: 2,
+                reason: LaterReason::Overload,
+                ..
+            }
+        ));
+    }
+
+    /// Stands for: with two types `K` in the file (`a::K`, `b::K`) the short
+    /// owner of `void b::K::m()` cannot pick one, so it joins neither and
+    /// keeps `uid::compute`.
+    #[test]
+    fn test_assign_file_out_of_type_member_two_same_named_types_joins_none() {
+        let mut decls = vec![
+            decl(NodeKind::Namespace, None, "a"),
+            decl(NodeKind::Struct, Some("a"), "K"),
+            decl(NodeKind::Method, Some("K"), "m"),
+            decl(NodeKind::Namespace, None, "b"),
+            decl(NodeKind::Struct, Some("b"), "K"),
+            decl(NodeKind::Method, Some("K"), "m"),
+            decl(NodeKind::Method, Some("K"), "m"),
+        ];
+        for (child, container) in [(1, 0), (2, 1), (4, 3), (5, 4)] {
+            decls[child].container = Some(container);
+        }
+        let ids = assign_file("k.cpp", &decls).unwrap();
+        assert_eq!(
+            ids[6].slot,
+            UidSlot::First(uid::compute(NodeKind::Method, "k.cpp", Some("K"), "m"))
+        );
+    }
+
+    /// Stands for: a type local to the member itself (`void K::m() {
+    /// struct K { void m(); }; }`) is no join target, so the chain stays
+    /// acyclic and the member keeps `uid::compute`.
+    #[test]
+    fn test_assign_file_out_of_type_member_with_same_named_local_type_no_cycle() {
+        let mut decls = vec![
+            decl(NodeKind::Method, Some("K"), "m"),
+            decl(NodeKind::Struct, None, "K"),
+            decl(NodeKind::Method, Some("K"), "m"),
+        ];
+        decls[1].container = Some(0);
+        decls[2].container = Some(1);
+        let ids = assign_file("k.cpp", &decls).unwrap();
+        assert_eq!(
+            ids[0].slot,
+            UidSlot::First(uid::compute(NodeKind::Method, "k.cpp", Some("K"), "m"))
+        );
+    }
+
+    /// Stands for: a field joins only an earlier in-type sibling. With the
+    /// extension `var af` before protocol `P`, a join would tombstone the
+    /// protocol's `af`, and the overlay could not re-derive the join from
+    /// the nameless tombstone; so both keep their own uid.
+    #[test]
+    fn test_assign_file_out_of_type_field_before_its_sibling_joins_none() {
+        let mut decls = vec![
+            decl(NodeKind::Property, Some("P"), "af"),
+            decl(NodeKind::Interface, None, "P"),
+            decl(NodeKind::Property, Some("P"), "af"),
+        ];
+        decls[2].container = Some(1);
+        let ids = assign_file("p.swift", &decls).unwrap();
+        assert_eq!(
+            ids[0].slot,
+            UidSlot::First(uid::compute(NodeKind::Property, "p.swift", Some("P"), "af"))
+        );
+        let p = uid::compute(NodeKind::Interface, "p.swift", None, "P");
+        assert_eq!(
+            ids[2].slot,
+            UidSlot::First(nested_uid(p, NodeKind::Property, Some("P"), "af"))
         );
     }
 
