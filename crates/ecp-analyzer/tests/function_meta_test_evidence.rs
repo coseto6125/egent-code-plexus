@@ -388,6 +388,19 @@ fn test_function_meta_cpp_gtest_macro_outside_test_path_is_test() {
     ));
 }
 
+/// Stands for: the macro name alone is no evidence. A production function
+/// that is named `TEST` and has a return type stays a production caller.
+#[test]
+fn test_function_meta_cpp_function_named_like_gtest_macro_is_not_test() {
+    let src = "int TEST(int value) {\n    return value;\n}\n";
+    assert!(!is_test(
+        &CppProvider::new().unwrap(),
+        "src/probe.cpp",
+        src,
+        "TEST"
+    ));
+}
+
 // ---- Dart ----
 
 #[test]

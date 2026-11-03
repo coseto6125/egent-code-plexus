@@ -161,14 +161,14 @@ fn extract_one(
     }
 
     // is_test: FileCategory::Test, or a Google Test macro body: the parser
-    // names `TEST(Suite, Name) { .. }` after the macro, which no production
-    // function is named, and LLVM's `unittests/ADT/APIntTest.cpp` is no test
-    // path.
+    // names `TEST(Suite, Name) { .. }` after the macro and gives it no return
+    // type, which `int TEST(int v)` has. LLVM's `unittests/ADT/APIntTest.cpp`
+    // is no test path.
     if file_category == FileCategory::Test
-        || matches!(
+        || (matches!(
             raw.name.as_str(),
             "TEST" | "TEST_F" | "TEST_P" | "TYPED_TEST" | "TYPED_TEST_P"
-        )
+        ) && fn_node.child_by_field_name("type").is_none())
     {
         flags |= FunctionMeta::FLAG_TEST;
     }

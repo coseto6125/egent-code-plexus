@@ -488,3 +488,43 @@ fn test_impact_exclude_tests_keeps_runner_named_production_method() {
     ));
     assert_eq!(callers(&json), vec![("test".to_string(), false)], "{json}");
 }
+
+/// Stands for: the index passes function metas to process detection, so a
+/// `#[test]` function in a production file starts no process, while the
+/// production entry it calls still does. Fails if the builder passes none.
+#[test]
+fn test_processes_inline_test_function_is_no_entry_point() {
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    write(
+        repo.path(),
+        "Cargo.toml",
+        "[package]\nname = \"chain\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    write(
+        repo.path(),
+        "src/lib.rs",
+        "pub fn step_c() -> u32 {\n    1\n}\n\npub fn step_b() -> u32 {\n    step_c()\n}\n\npub fn step_a() -> u32 {\n    step_b()\n}\n\npub fn run() -> u32 {\n    step_a()\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn checks_chain() {\n        let n = run();\n        assert_eq!(n, 1);\n    }\n}\n",
+    );
+    setup_repo(repo.path(), home.path());
+    let out = Command::new(ecp_bin())
+        .args(["processes", "--all", "--repo", ".", "--format", "json"])
+        .current_dir(repo.path())
+        .env("HOME", home.path())
+        .output()
+        .expect("processes failed to spawn");
+    assert!(
+        out.status.success(),
+        "processes failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json = json_of(&out);
+    let labels: Vec<String> = json["results"]
+        .as_array()
+        .expect("results array")
+        .iter()
+        .map(|p| p["label"].as_str().unwrap_or_default().to_lowercase())
+        .collect();
+    assert!(labels.iter().all(|l| !l.contains("checks")), "{labels:?}");
+    assert!(labels.iter().any(|l| l.starts_with("run")), "{labels:?}");
+}
