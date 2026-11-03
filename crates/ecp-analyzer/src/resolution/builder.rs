@@ -3352,7 +3352,6 @@ fn pass1_9_supertypes(
         .par_iter()
         .enumerate()
         .map(|(file_idx, lg)| {
-            let start = file_base(raw_map, file_idx as u32);
             if lg.nodes.iter().all(|n| n.heritage.is_empty()) {
                 return Vec::new();
             }
@@ -3379,17 +3378,15 @@ fn pass1_9_supertypes(
                 if raw.heritage.is_empty() {
                     continue;
                 }
-                let node_id = start + offset as u32;
                 let subject = if raw.kind.is_type() {
-                    match raw.partial_scope() {
-                        // Each part of a C# `partial` type keeps its bases
-                        // on its own node, a same-file later part too
-                        // (`c_sharp::partial` groups the parts).
-                        Some(_) => raw_map.node(FileOrd(file_idx as u32), RawIdx(offset as u32)),
-                        // A tombstone or a later redefinition holds the id
-                        // but sits in no name table.
-                        None => symbol_table.file_of(node_id).map(|_| node_id),
-                    }
+                    // Each type row keeps its bases on its own node: a C#
+                    // `partial` part, a later redefinition (two local
+                    // `class L extends Base` in two methods). A tombstone
+                    // maps to another node and keeps none.
+                    let (file, raw_idx) = (FileOrd(file_idx as u32), RawIdx(offset as u32));
+                    raw_map
+                        .node(file, raw_idx)
+                        .filter(|&node| raw_map.slot(file, raw_idx) == Some(node))
                 } else {
                     let type_name = match raw.kind {
                         NodeKind::Impl => Some(raw.name.as_str()),
@@ -5232,11 +5229,10 @@ mod tests {
     }
 
     /// Stands for: a redefined class is a later node of its own (design uid
-    /// §2.3), filed beside its first in no name table, so the supertypes
-    /// pre-pass, which walks the table's types, gives it no supertypes; the
+    /// §2.3) with its own bases, so its methods' `Overrides` resolve; the
     /// first keeps its own.
     #[test]
-    fn test_pass1_9_supertypes_later_redefinition_skipped() {
+    fn test_pass1_9_supertypes_later_redefinition_keeps_own_bases() {
         // Ids: bases.py A=0, B=1; dup.py Dup=2, later Dup=3.
         let graphs = vec![
             graph_of(
@@ -5256,10 +5252,7 @@ mod tests {
         ];
         let st = table_with_supertypes(&graphs);
         assert_eq!(&*st.supertypes(2).unwrap().bases, &[0]);
-        assert!(
-            st.supertypes(3).is_none(),
-            "a later node is unreachable by name and gets no supertypes"
-        );
+        assert_eq!(&*st.supertypes(3).unwrap().bases, &[1]);
     }
 
     fn raw_fn(name: &str, start_row: u32) -> RawNode {

@@ -105,3 +105,33 @@ class B {
 fn test_enum_variant_defines_two_mods_same_enum_binds_by_span() {
     assert_enum_rows(NESTED_ENUMS, "X", &[(2, 2), (5, 5)]);
 }
+
+/// Stands for: a local class declared in two methods is two nodes, and each
+/// keeps its own supertype, so each `get` overrides `Base.get`. Before the
+/// fix the later class got no supertypes and its `get` lost its `Overrides`
+/// (retrofit `RetrofitTest.java` in the 14-language sample).
+#[test]
+fn test_build_java_local_class_in_two_methods_each_overrides_base() {
+    let src = "class Base { void get() {} }\nclass T {\n  void a() {\n    class L extends Base {\n      @Override void get() {}\n    }\n  }\n  void b() {\n    class L extends Base {\n      @Override void get() {}\n    }\n  }\n}\n";
+    let full = build(src);
+    let rows = edge_rows(
+        &MergedGraph::new(
+            rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(
+                &rkyv::to_bytes::<rkyv::rancor::Error>(&full).expect("archive graph"),
+            )
+            .expect("access graph"),
+            None,
+        ),
+        RelType::Overrides,
+    );
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(
+        rows.iter().all(|(_, s, _, t)| s == "get" && t == "get"),
+        "{rows:?}"
+    );
+    assert_ne!(rows[0].0, rows[1].0, "{rows:?}");
+    assert_eq!(
+        rows[0].2, rows[1].2,
+        "both override the one Base.get: {rows:?}"
+    );
+}
