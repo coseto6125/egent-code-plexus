@@ -54,8 +54,8 @@ pub(super) fn merged_node_meta(
 /// copy and run `path_walks_the_same_graph_as_impact` in
 /// `tests/path_query.rs`, which holds the two together.
 ///
-/// Base nodes read the persisted `File.category`; overlay nodes carry only
-/// their path and classify it with the same function the indexer used.
+/// A test node is one in a test file or one whose `FunctionMeta` carries
+/// `FLAG_TEST` ([`base_node_is_test`], [`virtual_node_is_test`]).
 fn node_traversable(
     graph: &ecp_core::graph::ArchivedZeroCopyGraph,
     view: Option<&OverlayView>,
@@ -97,16 +97,19 @@ pub(crate) fn merged_node_is_test(merged: &MergedGraph<'_>, idx: u32) -> bool {
     }
 }
 
-/// Whether the base node's `FunctionMeta` carries `FLAG_TEST`. The archived
-/// `function_metas` vec is sorted by `node_idx`.
-pub(super) fn base_meta_is_test(
-    graph: &ecp_core::graph::ArchivedZeroCopyGraph,
-    idx: usize,
-) -> bool {
-    graph
-        .function_metas
-        .binary_search_by_key(&(idx as u32), |m| m.node_idx.to_native())
-        .is_ok_and(|i| graph.function_metas[i].flags.to_native() & FunctionMeta::FLAG_TEST != 0)
+/// Whether the base node's `FunctionMeta` carries `FLAG_TEST`: the dense
+/// `node_flags` byte, else the sorted `function_metas` table (a graph
+/// without `node_flags`).
+fn base_meta_is_test(graph: &ecp_core::graph::ArchivedZeroCopyGraph, idx: usize) -> bool {
+    match graph.node_flags.get(idx) {
+        Some(&flags) => u16::from(flags) & FunctionMeta::FLAG_TEST != 0,
+        None => graph
+            .function_metas
+            .binary_search_by_key(&(idx as u32), |m| m.node_idx.to_native())
+            .is_ok_and(|i| {
+                graph.function_metas[i].flags.to_native() & FunctionMeta::FLAG_TEST != 0
+            }),
+    }
 }
 
 /// [`base_node_is_test`] for an overlay node: its path, then the flags its

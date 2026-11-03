@@ -75,6 +75,18 @@ fn test_function_meta_typescript_test_file_is_test() {
     ));
 }
 
+/// vscode's `fileSearch.ts` defines a production `test()` method.
+#[test]
+fn test_function_meta_typescript_runner_named_method_in_production_file_is_not_test() {
+    let src = "export class Matcher {\n    test(path: string): boolean {\n        return path.length > 0;\n    }\n}\n";
+    assert!(!is_test(
+        &TypeScriptProvider::new().unwrap(),
+        "src/fileSearch.ts",
+        src,
+        "test"
+    ));
+}
+
 // ---- JavaScript ----
 
 #[test]
@@ -360,6 +372,19 @@ fn test_function_meta_cpp_test_file_is_test() {
         "tests/health_test.cpp",
         src,
         "Test_connection"
+    ));
+}
+
+/// A Google Test macro body is evidence on any path: LLVM keeps its tests in
+/// `unittests/ADT/APIntTest.cpp`.
+#[test]
+fn test_function_meta_cpp_gtest_macro_outside_test_path_is_test() {
+    let src = "TEST(APIntTest, Add) {\n    EXPECT_EQ(1, 1);\n}\n";
+    assert!(is_test(
+        &CppProvider::new().unwrap(),
+        "unittests/ADT/APIntTest.cpp",
+        src,
+        "TEST"
     ));
 }
 

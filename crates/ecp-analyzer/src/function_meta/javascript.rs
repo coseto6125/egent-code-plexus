@@ -1,7 +1,7 @@
 //! JavaScript FunctionMeta extraction.
 //!
 //! JS has no type annotations. Detects: `async`, `static`, `function*`,
-//! `#private` fields (ES2022 private visibility), test function name patterns,
+//! `#private` fields (ES2022 private visibility), test-file functions,
 //! and legacy/stage-3 decorators. `is_abstract` and `is_extern` are always false.
 
 use super::{extract_with, node_text, ts_span};
@@ -73,22 +73,9 @@ fn extract_one(
     let vis_code: u16 = if raw.name.starts_with('#') { 2 } else { 0 };
     flags |= vis_code << 6;
 
-    // is_test: file category or common test runner function names.
-    let test_names = &[
-        "test",
-        "it",
-        "describe",
-        "beforeAll",
-        "afterAll",
-        "beforeEach",
-        "afterEach",
-        "xit",
-        "xdescribe",
-        "fit",
-        "fdescribe",
-    ];
-    let is_test = file_category == FileCategory::Test || test_names.contains(&&*raw.name);
-    if is_test {
+    // is_test: file category only. A runner name (`it`, `test`) alone is no
+    // evidence: a production class may define a `test()` method.
+    if file_category == FileCategory::Test {
         flags |= FunctionMeta::FLAG_TEST;
     }
 

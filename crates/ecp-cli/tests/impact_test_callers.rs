@@ -380,12 +380,17 @@ fn fixture_inline_tests() -> (tempfile::TempDir, tempfile::TempDir) {
     write(
         repo.path(),
         "src/lib.rs",
-        "pub fn tally() -> u32 {\n    1\n}\n\npub fn report() -> u32 {\n    tally()\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn test_tally_counts() {\n        assert_eq!(super::tally(), 1);\n    }\n}\n",
+        "pub fn tally() -> u32 {\n    1\n}\n\npub fn report() -> u32 {\n    tally()\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn test_tally_counts() {\n        let n = tally();\n        assert_eq!(n, 1);\n    }\n}\n",
     );
     write(
         repo.path(),
         "app/health.py",
         "from app.util import normalize\n\n\ndef test_connection():\n    return normalize(2)\n",
+    );
+    write(
+        repo.path(),
+        "web/matcher.ts",
+        "function helper(p: string): boolean {\n    return p.length > 0;\n}\n\nexport class Matcher {\n    test(p: string): boolean {\n        return helper(p);\n    }\n}\n",
     );
     setup_repo(repo.path(), home.path());
     (repo, home)
@@ -433,7 +438,7 @@ fn test_impact_overlay_inline_test_module_caller_tagged_test() {
     write(
         repo.path(),
         "src/lib.rs",
-        "pub fn tally() -> u32 {\n    1\n}\n\npub fn report() -> u32 {\n    tally()\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn test_tally_counts() {\n        assert_eq!(super::tally(), 1);\n    }\n\n    #[test]\n    fn test_tally_again() {\n        assert_eq!(super::tally(), 1);\n    }\n}\n",
+        "pub fn tally() -> u32 {\n    1\n}\n\npub fn report() -> u32 {\n    tally()\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn test_tally_counts() {\n        let n = tally();\n        assert_eq!(n, 1);\n    }\n\n    #[test]\n    fn test_tally_again() {\n        let n = tally();\n        assert_eq!(n, 1);\n    }\n}\n",
     );
     let json = json_of(&impact(
         repo.path(),
@@ -469,4 +474,17 @@ fn test_impact_exclude_tests_keeps_test_named_production_caller() {
         "{json}"
     );
     assert_eq!(json["hidden_test_callers"], 1, "{json}");
+}
+
+/// Stands for: a runner name alone is no test evidence, so the production
+/// method `Matcher.test` in `web/matcher.ts` stays a production caller.
+#[test]
+fn test_impact_exclude_tests_keeps_runner_named_production_method() {
+    let (repo, home) = fixture_inline_tests();
+    let json = json_of(&impact(
+        repo.path(),
+        home.path(),
+        &["helper", "--exclude-tests"],
+    ));
+    assert_eq!(callers(&json), vec![("test".to_string(), false)], "{json}");
 }

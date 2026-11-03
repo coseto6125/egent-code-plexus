@@ -37,7 +37,7 @@ pub struct ImpactArgs {
     /// Local-impact wall-clock budget in ms.
     #[arg(long)]
     pub timeout_ms: Option<u64>,
-    /// Include test files in local traversal.
+    /// Include tests in local traversal: nodes in test files and functions the index flags as tests.
     #[arg(long, default_value_t = false)]
     pub include_tests: bool,
     /// JSON output instead of TOON.

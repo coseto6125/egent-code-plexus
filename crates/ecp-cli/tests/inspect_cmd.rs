@@ -802,7 +802,7 @@ fn inspect_default_drops_inline_test_module_caller() {
     write(
         repo,
         "src/lib.rs",
-        "pub fn tally() -> u32 {\n    1\n}\n\npub fn report() -> u32 {\n    tally()\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn test_tally_counts() {\n        assert_eq!(super::tally(), 1);\n    }\n}\n",
+        "pub fn tally() -> u32 {\n    1\n}\n\npub fn report() -> u32 {\n    tally()\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn test_tally_counts() {\n        let n = tally();\n        assert_eq!(n, 1);\n    }\n}\n",
     );
     init_and_analyze(repo);
     let names = |json: &serde_json::Value| -> Vec<String> {

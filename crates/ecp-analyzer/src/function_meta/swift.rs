@@ -6,8 +6,7 @@
 //! - `is_abstract`:  protocol requirement without body (`protocol_function_declaration`)
 //! - `is_generator`: never (Sequence/IteratorProtocol is library, not language)
 //! - `is_extern`:    `@_silgen_name(...)` or `@_cdecl(...)` attribute (private FFI markers)
-//! - `is_test`:      function name starts with `test` AND in XCTestCase context,
-//!   OR has `@Test` attribute (Swift Testing framework)
+//! - `is_test`:      FileCategory::Test OR `@Test` attribute (Swift Testing framework)
 //! - `visibility`:   `open` → 0, `public` → 0, `internal` (default) → 3,
 //!   `fileprivate` → 5, `private` → 2
 //! - `params`:       internal parameter name + type captured (external label dropped)

@@ -46,7 +46,7 @@ pub fn extract(
 fn extract_one(
     fn_node: &Node<'_>,
     source: &[u8],
-    _raw: &RawNode,
+    raw: &RawNode,
     file_category: FileCategory,
 ) -> Option<RawFunctionMeta> {
     let mut flags: u16 = 0;
@@ -160,8 +160,16 @@ fn extract_one(
         flags |= FunctionMeta::FLAG_GENERATOR;
     }
 
-    // is_test: FileCategory::Test (Google Test / Catch2 / doctest — file-path-only).
-    if file_category == FileCategory::Test {
+    // is_test: FileCategory::Test, or a Google Test macro body: the parser
+    // names `TEST(Suite, Name) { .. }` after the macro, which no production
+    // function is named, and LLVM's `unittests/ADT/APIntTest.cpp` is no test
+    // path.
+    if file_category == FileCategory::Test
+        || matches!(
+            raw.name.as_str(),
+            "TEST" | "TEST_F" | "TEST_P" | "TYPED_TEST" | "TYPED_TEST_P"
+        )
+    {
         flags |= FunctionMeta::FLAG_TEST;
     }
 

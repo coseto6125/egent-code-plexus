@@ -7,8 +7,7 @@
 //!   `raise "must implement"`. This is a convention, not authoritative — documented as such.
 //! - `is_generator`: method body contains `yield` (Ruby block-based iteration).
 //! - `is_extern`: always false.
-//! - `is_test`: method in RSpec `it`/`specify`/`describe` OR file in test/spec directory
-//!   (FileCategory::Test) OR method name starts with `test_` (Minitest convention).
+//! - `is_test`: file in test/spec directory (FileCategory::Test).
 //! - visibility: track `private`/`protected`/`public` visibility-modifier sections; default = public.
 //!   NOTE: Ruby visibility is a method call (`private; def foo`) not a syntactic modifier on the
 //!   def node. We detect `singleton_class` wrappers for is_static; simple visibility-modifier

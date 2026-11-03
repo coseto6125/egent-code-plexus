@@ -136,12 +136,14 @@ fn ts_test_file_marks_is_test() {
     assert!(m.is_test(), "*.test.ts file category → is_test");
 }
 
+/// Stands for: a runner name alone is no test evidence outside a test file
+/// (`function_meta_test_evidence.rs`); `test.ts` is no test file.
 #[test]
-fn ts_it_function_is_test() {
+fn ts_it_function_in_production_file_is_not_test() {
     let src = "it('does something', () => {});\nfunction it(name: string, fn: () => void) {}\n";
     let g = analyze(src);
     let m = meta(&g, "it");
-    assert!(m.is_test(), "function named 'it' → is_test");
+    assert!(!m.is_test(), "function named 'it' alone → not is_test");
 }
 
 // ── params ────────────────────────────────────────────────────────────────────

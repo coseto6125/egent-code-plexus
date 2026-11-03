@@ -66,7 +66,7 @@ pub struct InspectArgs {
     #[arg(long = "relation_types", alias = "relation-types")]
     pub relation_types: Option<String>,
 
-    /// Include edges whose target lives in a test file. Defaults to false.
+    /// Include edges whose other end is a test: a node in a test file, or a function the index flags as a test (`#[test]`, `@Test`, `[Fact]`). Defaults to false.
     #[arg(
         long = "include_tests",
         alias = "include-tests",
@@ -562,7 +562,7 @@ fn bfs_upstream_1hop<F>(
     edge_keeps: &F,
 ) -> Vec<serde_json::Value>
 where
-    F: Fn(&str, &str, &str) -> bool,
+    F: Fn(u32, &str, &str, &str) -> bool,
 {
     let mut parts = merged.partial_parts(idx);
     if parts.is_empty() {

@@ -118,20 +118,20 @@ fn js_test_file_marks_is_test() {
     assert!(m.is_test(), "*.test.js file → is_test");
 }
 
+/// Stands for: a runner name alone is no test evidence outside a test file
+/// (`function_meta_test_evidence.rs`); `test.js` is no test file.
 #[test]
-fn js_it_function_name_is_test() {
-    let src = "function it(name, fn) {}\n";
+fn js_runner_named_functions_in_production_file_are_not_test() {
+    let src = "function it(name, fn) {}\nfunction describe(name, fn) {}\n";
     let g = analyze(src);
-    let m = meta(&g, "it");
-    assert!(m.is_test(), "function named 'it' → is_test");
-}
-
-#[test]
-fn js_describe_function_name_is_test() {
-    let src = "function describe(name, fn) {}\n";
-    let g = analyze(src);
-    let m = meta(&g, "describe");
-    assert!(m.is_test(), "function named 'describe' → is_test");
+    assert!(
+        !meta(&g, "it").is_test(),
+        "function named 'it' alone → not is_test"
+    );
+    assert!(
+        !meta(&g, "describe").is_test(),
+        "function named 'describe' alone → not is_test"
+    );
 }
 
 // ── params (no types in JS) ───────────────────────────────────────────────────

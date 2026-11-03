@@ -1815,6 +1815,28 @@ fn test_function_reference_rust_method_call_in_macro_returns_no_edge() {
     );
 }
 
+/// A comment between the `.` and the method name changes nothing.
+#[test]
+fn test_function_reference_rust_method_call_after_comment_in_macro_returns_no_edge() {
+    assert_no_ref(
+        &RustProvider::new().unwrap(),
+        "src/lib.rs",
+        "fn join(a: &str) -> String {\n    a.to_string()\n}\n\npub fn wire(parts: &[String]) -> String {\n    format!(\"x{}\", parts./* sep */join(\",\"))\n}\n",
+        "wire",
+    );
+}
+
+/// A `$( .. )*` repetition in a `macro_rules!` body holds bare tokens too.
+#[test]
+fn test_function_reference_rust_method_call_in_macro_repetition_returns_no_edge() {
+    assert_no_ref(
+        &RustProvider::new().unwrap(),
+        "src/lib.rs",
+        "fn join(a: &str) -> String {\n    a.to_string()\n}\n\npub fn wire(parts: &[String]) -> String {\n    macro_rules! joined {\n        ($($p:expr),*) => { String::new() $( + &$p.join(\",\") )* };\n    }\n    joined!(parts)\n}\n",
+        "wire",
+    );
+}
+
 /// A bare name in a macro argument still names the function.
 #[test]
 fn test_function_reference_rust_bare_name_in_macro_returns_edge() {

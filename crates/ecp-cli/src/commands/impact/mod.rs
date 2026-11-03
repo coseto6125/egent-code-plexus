@@ -210,7 +210,7 @@ pub struct ImpactArgs {
 }
 
 impl ImpactArgs {
-    /// Whether the walk lists test-file nodes. `--test-coverage` needs test
+    /// Whether the walk lists test nodes (in a test file, or flagged as a test by the index). `--test-coverage` needs test
     /// callers to classify coverage, and clap rejects it beside
     /// `--exclude-tests`.
     pub(crate) fn walks_tests(&self) -> bool {

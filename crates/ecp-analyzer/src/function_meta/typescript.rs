@@ -94,24 +94,10 @@ fn extract_one(
         flags |= FunctionMeta::FLAG_EXTERN;
     }
 
-    // is_test: file category, or function name matches common test framework patterns.
-    let test_names = &[
-        "test",
-        "it",
-        "describe",
-        "beforeAll",
-        "afterAll",
-        "beforeEach",
-        "afterEach",
-        "xit",
-        "xdescribe",
-        "fit",
-        "fdescribe",
-    ];
-    // A `testFoo` name alone is no evidence: `testUrlMatchesGlob` is
+    // is_test: file category only. A test-like name alone is no evidence:
+    // `testUrlMatchesGlob` and vscode's `fileSearch.ts` `test()` method are
     // production code.
-    let is_test = file_category == FileCategory::Test || test_names.contains(&&*raw.name);
-    if is_test {
+    if file_category == FileCategory::Test {
         flags |= FunctionMeta::FLAG_TEST;
     }
 

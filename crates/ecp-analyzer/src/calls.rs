@@ -333,12 +333,16 @@ pub fn extract_field_reads_with_literal_key_facts(
                     scope: names.child_scope(parent, child_kind, field, &cursor, literal_key_facts),
                     local_scope: child_scope,
                 });
-                after_dot = if kind & kind_flag::TOKEN_TREE != 0 && child_kind & kind_flag::DOT != 0
-                {
-                    field_flag::AFTER_DOT
-                } else {
-                    0
-                };
+                // A comment between `.` and the name (`v./* c */join`) keeps
+                // the mark for the name.
+                if !child.is_extra() {
+                    after_dot =
+                        if kind & kind_flag::TOKEN_TREE != 0 && child_kind & kind_flag::DOT != 0 {
+                            field_flag::AFTER_DOT
+                        } else {
+                            0
+                        };
+                }
                 if !cursor.goto_next_sibling() {
                     break;
                 }
@@ -589,7 +593,8 @@ mod kind_flag {
     /// A class, record or struct declaration, whose parameter list (Java
     /// record, C# primary constructor) is no lambda over its members.
     pub const TYPE_DECL: u32 = 1 << 20;
-    /// A Rust macro argument list: bare tokens, no member node.
+    /// A Rust macro argument list or `$( .. )*` repetition: bare tokens, no
+    /// member node.
     pub const TOKEN_TREE: u32 = 1 << 21;
     /// A `.` token.
     pub const DOT: u32 = 1 << 22;
@@ -680,7 +685,10 @@ impl<'a> KindMemo<'a> {
             (spec.call_suffixes.contains(&kind), CALL_SUFFIX),
             (spec.infix_calls.contains(&kind), INFIX_CALL),
             (kind.contains("assignment"), ASSIGNMENT),
-            (kind == "token_tree", TOKEN_TREE),
+            (
+                matches!(kind, "token_tree" | "token_repetition"),
+                TOKEN_TREE,
+            ),
             (kind == ".", DOT),
             (spec.named_arg_parents.contains(&kind), NAMED_ARG_PARENT),
             (spec.global_decls.contains(&kind), GLOBAL_DECL),

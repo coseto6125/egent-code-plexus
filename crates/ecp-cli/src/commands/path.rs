@@ -65,8 +65,9 @@ pub struct PathArgs {
     #[arg(long = "relation_types", alias = "relation-types")]
     pub relation_types: Option<String>,
 
-    /// Include test files in the route. Off by default, so a production path
-    /// is not routed through a test helper that happens to call both ends.
+    /// Include tests in the route: nodes in test files and functions the index
+    /// flags as tests. Off by default, so a production path is not routed
+    /// through a test helper that happens to call both ends.
     #[arg(long)]
     pub include_tests: bool,
 

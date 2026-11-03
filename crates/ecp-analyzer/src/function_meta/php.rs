@@ -6,8 +6,7 @@
 //! - `is_abstract`: `abstract` modifier OR method inside an interface.
 //! - `is_generator`: function body contains `yield` (any variant).
 //! - `is_extern`: always false (FFI is library-based, no declaration-only syntax).
-//! - `is_test`: `#[Test]` PHP 8 attribute OR `@test` PHPDoc OR name starts with `test`
-//!   (PHPUnit Minitest convention) OR FileCategory::Test.
+//! - `is_test`: `#[Test]` PHP 8 attribute OR `@test` PHPDoc OR FileCategory::Test.
 //! - visibility: `public`/`protected`/`private` modifier; class default (no modifier) → public (0).
 //! - params: `$name` (strip `$`) + optional type (including union types `int|string`).
 //! - return_type: `: ReturnType` after `)`.
