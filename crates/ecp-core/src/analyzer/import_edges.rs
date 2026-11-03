@@ -838,25 +838,23 @@ mod tests {
     }
 
     /// Stands for: the converted spelling waits for the written spelling's
-    /// `./` lookup too, so on Unix `src/inc\foo.h` beside the importer beats
-    /// an unrelated root `inc/foo.h`.
+    /// `./` lookup too, so `inc\foo.h` beside the importer beats an unrelated
+    /// root `inc/foo.h` on every platform. The stored path is the one each
+    /// platform writes: `src/inc\foo.h` on Unix, `src/inc/foo.h` on Windows.
     #[test]
     fn test_import_edges_backslash_specifier_relative_literal_beats_converted_root() {
-        let mut facts = Fake::with_files(&[("src/inc\\foo.h", 7), ("inc/foo.h", 5)]);
+        let beside = match cfg!(windows) {
+            true => "src/inc/foo.h",
+            false => "src/inc\\foo.h",
+        };
+        let mut facts = Fake::with_files(&[(beside, 7), ("inc/foo.h", 5)]);
         facts
             .candidates
             .insert("./inc\\foo.h", vec!["src/inc\\foo.h"]);
         facts.candidates.insert("inc/foo.h", vec!["inc/foo.h"]);
         let imports = [import("\"inc\\foo.h\"", "foo.h", None)];
         let edges = edges_of("src/main.c", Language::C, &imports, &facts);
-        let expected = match cfg!(windows) {
-            true => 5,
-            false => 7,
-        };
-        assert_eq!(
-            edges,
-            [edge(expected, MODULE_CONFIDENCE, ImportReason::Module)]
-        );
+        assert_eq!(edges, [edge(7, MODULE_CONFIDENCE, ImportReason::Module)]);
     }
 
     /// Stands for: the specifier as written is looked up first, so on Unix a
