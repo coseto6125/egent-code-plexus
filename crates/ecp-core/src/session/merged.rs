@@ -384,7 +384,7 @@ impl<'a> MergedNode<'a> {
                 let owner = n.owner_class.resolve(&graph.graph.string_pool);
                 (!owner.is_empty()).then_some(owner)
             }
-            Self::Virtual(n) => n.owner_class.as_deref(),
+            Self::Virtual(n) => n.owner_class.as_deref().filter(|owner| !owner.is_empty()),
         }
     }
 

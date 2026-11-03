@@ -901,9 +901,9 @@ overload_pairing_cases! {
 /// names it.
 ///
 /// Stands for: the second block is a later node of its own (design uid
-/// §2.3), so the two blocks share an anchor and pair nothing; the caveat
-/// names the block group, and only it. Before 1b the second block was a
-/// tombstone and the first paired.
+/// §2.3); two `Impl` rows that share an anchor pair in source order when
+/// the base and the dirty file hold the same count, so a comment edit
+/// hides nothing and puts no caveat on the query.
 #[test]
 fn test_overlay_repeated_impl_block_member_pairs_after_comment_edit() {
     let provider = RustProvider::new().unwrap();
@@ -928,8 +928,8 @@ fn test_overlay_repeated_impl_block_member_pairs_after_comment_edit() {
     );
     let hidden = view.hidden_declarations();
     assert!(
-        hidden.len() == 1 && hidden[0].kind == NodeKind::Impl && hidden[0].count == 2,
-        "only the two impl blocks are ambiguous: {hidden:?}"
+        hidden.is_empty(),
+        "the two impl blocks pair in order: {hidden:?}"
     );
 }
 
