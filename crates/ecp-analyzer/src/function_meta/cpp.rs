@@ -46,7 +46,7 @@ pub fn extract(
 fn extract_one(
     fn_node: &Node<'_>,
     source: &[u8],
-    raw: &RawNode,
+    _raw: &RawNode,
     file_category: FileCategory,
 ) -> Option<RawFunctionMeta> {
     let mut flags: u16 = 0;
@@ -161,11 +161,7 @@ fn extract_one(
     }
 
     // is_test: FileCategory::Test (Google Test / Catch2 / doctest — file-path-only).
-    // Also detect common Google Test macro patterns via function name prefix `Test_` / `TEST`.
-    if file_category == FileCategory::Test
-        || raw.name.starts_with("TEST")
-        || raw.name.starts_with("Test_")
-    {
+    if file_category == FileCategory::Test {
         flags |= FunctionMeta::FLAG_TEST;
     }
 

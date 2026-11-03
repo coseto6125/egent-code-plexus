@@ -108,15 +108,9 @@ fn extract_one(
         "fit",
         "fdescribe",
     ];
-    let is_test = file_category == FileCategory::Test
-        || test_names.contains(&&*raw.name)
-        || raw.name.starts_with("test")
-            && raw
-                .name
-                .chars()
-                .nth(4)
-                .map(|c| c.is_uppercase() || c == '_')
-                .unwrap_or(true);
+    // A `testFoo` name alone is no evidence: `testUrlMatchesGlob` is
+    // production code.
+    let is_test = file_category == FileCategory::Test || test_names.contains(&&*raw.name);
     if is_test {
         flags |= FunctionMeta::FLAG_TEST;
     }

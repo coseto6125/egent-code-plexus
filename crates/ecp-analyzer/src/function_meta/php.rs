@@ -146,16 +146,14 @@ fn extract_one(
         flags |= FunctionMeta::FLAG_GENERATOR;
     }
 
-    // is_test: attribute `#[Test]` / `Test\Attributes\Test`, PHPDoc `@test`, name starts with `test`, or FileCategory::Test.
+    // is_test: attribute `#[Test]` / `Test\Attributes\Test`, PHPDoc `@test`, or
+    // FileCategory::Test. A `test` name prefix alone is no evidence:
+    // `testimonials()` is production code.
     let has_test_attr = attributes.iter().any(|a| {
         let s = a.as_str();
         s == "Test" || s.ends_with("\\Test") || s.ends_with("::Test")
     });
-    if has_test_attr
-        || has_phpdoc_test
-        || raw.name.starts_with("test")
-        || file_category == FileCategory::Test
-    {
+    if has_test_attr || has_phpdoc_test || file_category == FileCategory::Test {
         flags |= FunctionMeta::FLAG_TEST;
     }
 

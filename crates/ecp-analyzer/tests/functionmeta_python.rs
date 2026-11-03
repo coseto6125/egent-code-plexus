@@ -215,12 +215,14 @@ fn python_multi_decorator_captured() {
 
 // ── is_test ───────────────────────────────────────────────────────────────────
 
+/// Stands for: a test-like name alone is no test evidence outside a test
+/// file (`function_meta_test_evidence.rs`); `test.py` is no test file.
 #[test]
-fn python_test_name_prefix_is_test() {
+fn python_test_name_prefix_in_production_file_is_not_test() {
     let src = "def test_user_login():\n    assert True\n";
     let g = analyze(src);
     let m = meta(&g, "test_user_login");
-    assert!(m.is_test(), "test_ prefix → is_test");
+    assert!(!m.is_test(), "test_ prefix alone → not is_test");
 }
 
 #[test]

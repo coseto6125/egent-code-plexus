@@ -1,4 +1,4 @@
-use super::bfs::{merged_node_meta, run_bfs, WalkOpts, REQUIRES_VERIFICATION};
+use super::bfs::{base_meta_is_test, merged_node_meta, run_bfs, WalkOpts, REQUIRES_VERIFICATION};
 use super::Direction;
 use ecp_core::session::OverlayView;
 use serde_json::{json, Value};
@@ -37,23 +37,6 @@ pub(super) struct SymbolCoverage {
     class: CoverageClass,
 }
 
-/// Check whether a caller node is a test using FunctionMeta.is_test().
-///
-/// The archived `function_metas` vec is sorted by `node_idx`, so we use
-/// binary search. On the archived type, `flags` is `ArchivedU16` and requires
-/// `.to_native()` before bitwise ops.
-fn archived_is_test(graph: &ecp_core::graph::ArchivedZeroCopyGraph, node_idx: usize) -> bool {
-    use ecp_core::graph::FunctionMeta;
-    let target = node_idx as u32;
-    match graph
-        .function_metas
-        .binary_search_by_key(&target, |m| m.node_idx.to_native())
-    {
-        Ok(i) => graph.function_metas[i].flags.to_native() & FunctionMeta::FLAG_TEST != 0,
-        Err(_) => false,
-    }
-}
-
 /// uid → merged index of the overlay's nodes, the first node of a uid
 /// winning. Empty without an overlay.
 fn virtual_uid_index(view: Option<&OverlayView>) -> rustc_hash::FxHashMap<u64, u32> {
@@ -84,7 +67,7 @@ fn is_test_caller(
             .is_some_and(|meta| meta.flags & FunctionMeta::FLAG_TEST != 0),
         _ => uid_idx
             .get(&uid)
-            .is_some_and(|&idx| archived_is_test(graph, idx as usize)),
+            .is_some_and(|&idx| base_meta_is_test(graph, idx as usize)),
     }
 }
 
@@ -207,7 +190,7 @@ pub(super) fn coverage_analyses(
 ) -> Vec<SymbolCoverage> {
     // Build uid → node_idx once for the whole analysis. classify_symbol
     // needs to reverse-look-up caller uids (from BFS JSON) back to node
-    // indices to call archived_is_test; without this table each caller
+    // indices to call base_meta_is_test; without this table each caller
     // entry would do an O(N) linear scan. (T1-6 fast-path)
     let uid_idx = ecp_core::graph_query::build_uid_index(graph);
     let virtual_idx = virtual_uid_index(view);

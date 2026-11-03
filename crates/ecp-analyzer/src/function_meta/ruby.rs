@@ -44,7 +44,7 @@ pub fn extract(
 fn extract_one(
     fn_node: &Node<'_>,
     source: &[u8],
-    raw: &RawNode,
+    _raw: &RawNode,
     file_category: FileCategory,
 ) -> Option<RawFunctionMeta> {
     let mut flags: u16 = 0;
@@ -72,12 +72,9 @@ fn extract_one(
         flags |= FunctionMeta::FLAG_ABSTRACT;
     }
 
-    // is_test: FileCategory::Test OR name starts with `test_` (Minitest).
-    // RSpec `it`/`specify` blocks are captured as Method nodes when inside describe.
-    if file_category == FileCategory::Test
-        || raw.name.starts_with("test_")
-        || matches!(raw.name.as_str(), "it" | "specify" | "example")
-    {
+    // is_test: FileCategory::Test. Minitest `test_*` and RSpec `it` live in
+    // test files; the name alone marks no production method.
+    if file_category == FileCategory::Test {
         flags |= FunctionMeta::FLAG_TEST;
     }
 

@@ -123,12 +123,14 @@ fn ruby_private_section_method_is_private() {
 
 // ── is_test ───────────────────────────────────────────────────────────────────
 
+/// Stands for: a test-like name alone is no test evidence outside a test
+/// file (`function_meta_test_evidence.rs`); `test.rb` is no test file.
 #[test]
-fn ruby_minitest_name_prefix_is_test() {
+fn ruby_minitest_name_prefix_in_production_file_is_not_test() {
     let src = "class UserTest < Minitest::Test\n  def test_login\n  end\nend\n";
     let g = analyze(src);
     let m = meta(&g, "test_login");
-    assert!(m.is_test(), "test_ prefix → is_test");
+    assert!(!m.is_test(), "test_ prefix alone → not is_test");
 }
 
 #[test]

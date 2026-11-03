@@ -183,12 +183,14 @@ fn swift_main_actor_attribute_captured() {
 
 // ── is_test ───────────────────────────────────────────────────────────────────
 
+/// Stands for: a test-like name alone is no test evidence outside a test
+/// file (`function_meta_test_evidence.rs`); `Main.swift` is no test file.
 #[test]
-fn swift_test_function_name_prefix_is_test() {
+fn swift_test_function_name_prefix_in_production_file_is_not_test() {
     let src = "func testLogin() {}\n";
     let g = analyze(src);
     let m = meta(&g, "testLogin");
-    assert!(m.is_test(), "name starts with test → is_test");
+    assert!(!m.is_test(), "test prefix alone → not is_test");
 }
 
 #[test]

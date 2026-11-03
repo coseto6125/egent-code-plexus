@@ -127,12 +127,14 @@ fn php_regular_function_no_generator_flag() {
 
 // ── is_test ───────────────────────────────────────────────────────────────────
 
+/// Stands for: a `test*` name alone is no test evidence outside a test
+/// file (`function_meta_test_evidence.rs`); `test.php` is no test file.
 #[test]
-fn php_test_name_prefix_is_test() {
+fn php_test_name_prefix_in_production_file_is_not_test() {
     let src = "<?php\nclass FooTest extends TestCase {\n    public function testUserLogin(): void {}\n}\n";
     let g = analyze(src);
     let m = meta(&g, "testUserLogin");
-    assert!(m.is_test(), "test* prefix → is_test");
+    assert!(!m.is_test(), "test* prefix alone → not is_test");
 }
 
 #[test]

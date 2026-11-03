@@ -128,10 +128,10 @@ fn extract_one(
         flags |= FunctionMeta::FLAG_ABSTRACT;
     }
 
-    // is_test: file category OR @Test attribute OR name starts with `test`.
+    // is_test: file category OR @Test attribute. A `test` name prefix alone
+    // is no evidence: XCTest runs it only in a test target.
     let has_test_attr = decorators.contains(&"Test".to_string());
-    let name_is_test = raw.name.starts_with("test");
-    let is_test = file_category == FileCategory::Test || has_test_attr || name_is_test;
+    let is_test = file_category == FileCategory::Test || has_test_attr;
     if is_test {
         flags |= FunctionMeta::FLAG_TEST;
     }
