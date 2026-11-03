@@ -2663,14 +2663,15 @@ mod fingerprint_drift_tests {
             .expect("the gate returns the set it saw")
     }
 
-    /// On Unix `\` is a file-name byte: `a\b.py` is no repo path, and must
-    /// neither merge into `a/b.py` nor fail the query as a duplicate.
+    /// Stands for: on Unix `\` is a file-name byte, so `a\b.py` is its own
+    /// repo path beside `a/b.py`, as the index stores it: two events, never
+    /// merged into one path and never a duplicate that fails the query.
     #[cfg(unix)]
     #[test]
-    fn test_ensure_fresh_with_rebuild_walk_backslash_name_beside_same_path_skips_it() {
+    fn test_ensure_fresh_with_rebuild_walk_backslash_name_beside_same_path_keeps_both() {
         if rerun_in_child(
             "ECP_AUTO_ENSURE_BACKSLASH_CHILD",
-            "auto_ensure::fingerprint_drift_tests::test_ensure_fresh_with_rebuild_walk_backslash_name_beside_same_path_skips_it",
+            "auto_ensure::fingerprint_drift_tests::test_ensure_fresh_with_rebuild_walk_backslash_name_beside_same_path_keeps_both",
         ) {
             return;
         }
@@ -2680,20 +2681,14 @@ mod fingerprint_drift_tests {
             "backslash-test",
             &[OsStr::new("a/b.py"), OsStr::new("a\\b.py")],
         );
-        assert_eq!(
-            set.events(),
-            &[DirtyEvent::Modified(ClassifiedPath {
-                path: RepoPath::new("a/b.py").unwrap(),
+        let modified = |p: &str| {
+            DirtyEvent::Modified(ClassifiedPath {
+                path: RepoPath::new(p).unwrap(),
                 class: PathClass::SOURCE,
-            })]
-        );
-        assert_eq!(
-            set.skipped(),
-            &[SkippedEntry {
-                path_lossy: "a\\b.py".into(),
-                reason: SkipReason::NotRepoRelative,
-            }]
-        );
+            })
+        };
+        assert_eq!(set.events(), &[modified("a/b.py"), modified("a\\b.py")]);
+        assert!(set.skipped().is_empty());
     }
 
     /// The read context counts skipped entries into its caveat; a walk that

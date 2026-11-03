@@ -667,11 +667,7 @@ impl CargoRows {
             self.members.push(member);
             return;
         }
-        let rel = |canon: &Path| {
-            uid_path(canon, workspace_canon)
-                .ok()
-                .filter(|rel| !rel.contains('\\'))
-        };
+        let rel = |canon: &Path| uid_path(canon, workspace_canon).ok();
         let root = crate_canon.and_then(rel);
         let lib_entry = entries
             .next()

@@ -934,7 +934,7 @@ fn name_key(entry: &ScopeName) -> (Ecosystem, &str, NameRank, ScopeId) {
 
 pub(crate) fn is_normal_path(path: &str) -> bool {
     !path.is_empty()
-        && !path.contains('\\')
+        && !(cfg!(windows) && path.contains('\\'))
         && path
             .split('/')
             .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
@@ -1390,7 +1390,6 @@ mod tests {
             ("svc/", "svc/go.mod", "svc/main.go"),
             ("./svc", "./svc/go.mod", "svc/main.go"),
             ("svc", "svc/go.mod", "svc/../main.go"),
-            ("svc", "svc\\go.mod", "svc/main.go"),
             ("svc", "svc/go.mod", "/svc/main.go"),
         ] {
             let mut row = scope(Ecosystem::Go, root, &[manifest]);
@@ -1403,6 +1402,20 @@ mod tests {
                 "{root} {manifest} {entry}"
             );
         }
+    }
+
+    /// Stands for: a `\` is a separator only on Windows, where a stored path
+    /// never keeps one; on Unix it is a filename character the index stores.
+    #[test]
+    fn test_new_backslash_manifest_bad_path_on_windows_only() {
+        let row = scope(Ecosystem::Go, "svc", &["svc\\go.mod"]);
+        assert_eq!(
+            matches!(
+                WorkspaceFacts::new(vec![row], Vec::new()),
+                Err(WorkspaceFactsError::BadPath { .. })
+            ),
+            cfg!(windows)
+        );
     }
 
     #[test]

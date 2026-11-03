@@ -129,7 +129,7 @@ pub fn partial_groups(
                 is_attribute: node.kind == NodeKind::Annotation,
                 has_base_list: !node.heritage.is_empty(),
                 stem_names_type: file_stem(&path) == node.name,
-                path: path.clone(),
+                path: path.clone().into_owned(),
                 position: (node.span.0, node.span.1),
             };
             let group = parts
