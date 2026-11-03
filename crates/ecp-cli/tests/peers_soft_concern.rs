@@ -7,7 +7,7 @@
 //! reaches only through a Calls edge. Separate files matter: HARD is a shared
 //! dirty file and wins over SOFT, so a same-file fixture would prove nothing.
 
-mod common;
+use crate::common;
 
 use common::peer_harness::PeerHarness;
 use common::{commit_all, ecp_bin, run_git};

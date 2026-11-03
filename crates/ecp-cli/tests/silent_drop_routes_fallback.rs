@@ -8,7 +8,7 @@
 //! Contract: payload always carries `total_fuzzy_candidates`, `shown`, and
 //! `zero_score_omitted`, with `shown <= total_fuzzy_candidates`.
 
-mod common;
+use crate::common;
 
 use common::{ecp_bin, init_and_analyze, write};
 

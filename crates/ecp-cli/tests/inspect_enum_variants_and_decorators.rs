@@ -10,7 +10,7 @@
 //!    stripped, so the JSON inspect view and the cypher property return
 //!    identical shapes.
 
-mod common;
+use crate::common;
 
 use common::{ecp_bin, init_and_analyze, write};
 

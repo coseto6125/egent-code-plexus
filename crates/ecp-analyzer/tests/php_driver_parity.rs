@@ -3,7 +3,7 @@
 //! before the move, in their emitted order where the order is fixed by
 //! source position.
 
-mod driver_parity_support;
+use crate::driver_parity_support;
 
 use driver_parity_support::{assert_empty_graph, names_kinds, refs, Span4};
 use ecp_analyzer::framework_confidence::LARAVEL_ROUTE;

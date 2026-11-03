@@ -12,7 +12,7 @@
 //!
 //! One small repo proves both contracts at once.
 
-mod common;
+use crate::common;
 
 use common::{ecp_bin, init_and_analyze, write};
 

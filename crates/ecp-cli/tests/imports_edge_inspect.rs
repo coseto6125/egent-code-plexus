@@ -14,7 +14,7 @@
 //! same-extension match (gitnexus produces ~50% cross-language false positives
 //! on this shape; ecp must produce zero).
 
-mod common;
+use crate::common;
 
 use common::{ecp_bin, init_and_analyze, write};
 

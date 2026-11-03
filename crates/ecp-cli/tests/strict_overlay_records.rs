@@ -10,11 +10,7 @@
 //! the edit changes the output's lines, so the overlay cannot pass by
 //! keeping the base index's lines.
 
-#[path = "common/baseline.rs"]
-mod baseline;
-mod common;
-#[path = "common/strict_parity.rs"]
-mod strict_parity;
+use crate::strict_parity;
 
 use ecp_core::analyzer::record_nodes::PATH_LITERAL_SINK_REASONS;
 use ecp_core::cypher::{execute, parse, Value};

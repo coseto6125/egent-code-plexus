@@ -4,7 +4,7 @@
 //! the stale one — a blanket warning would poison trust in the fresh repos'
 //! rows, and silence would let a stale `found: nothing` read as definitive.
 
-mod common;
+use crate::common;
 
 use common::{commit_all, ecp_bin, run_git};
 use std::path::Path;

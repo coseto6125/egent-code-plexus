@@ -12,7 +12,7 @@ use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::graph::NodeKind;
 use std::path::Path;
 
-mod anonymous_callbacks_support;
+use crate::anonymous_callbacks_support;
 
 #[test]
 fn test_graph_builder_overload_closures_reference_own_overload() {

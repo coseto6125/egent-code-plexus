@@ -7,7 +7,7 @@
 //!
 //! Sized to stay CI-cheap: tiny session dirs in a tempdir, one burst.
 
-mod common;
+use crate::common;
 use common::peer_harness::PeerHarness;
 use ecp_core::peer::inbox::InboxEntry;
 use std::time::{Duration, Instant};

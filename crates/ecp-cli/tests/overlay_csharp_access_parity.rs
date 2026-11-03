@@ -9,8 +9,7 @@
 //! of unknown type binds no member by its name; only an extension method
 //! may bind it, at the same confidence and reason.
 
-#[path = "common/parity.rs"]
-mod parity;
+use crate::parity;
 
 use ecp_analyzer::c_sharp::parser::CSharpProvider;
 use ecp_core::analyzer::csharp_extension::{HEURISTIC_CONFIDENCE, HEURISTIC_REASON};

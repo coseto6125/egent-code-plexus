@@ -20,11 +20,7 @@
 //! Only the dirty files' edges are rebuilt: a clean file's decorator whose
 //! name a dirty file now declares keeps its indexed target (F7b2).
 
-#[path = "common/baseline.rs"]
-mod baseline;
-mod common;
-#[path = "common/strict_parity.rs"]
-mod strict_parity;
+use crate::strict_parity;
 
 use ecp_core::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
 use ecp_core::session::merged::MergedGraph;

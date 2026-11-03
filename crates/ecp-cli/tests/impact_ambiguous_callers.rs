@@ -3,7 +3,7 @@
 //! real git work tree, so each test controls exactly which `Calls` edges the
 //! graph holds and which text the `git grep` sees.
 
-mod common;
+use crate::common;
 
 use common::{run_git, write};
 use ecp_cli::commands::impact::{

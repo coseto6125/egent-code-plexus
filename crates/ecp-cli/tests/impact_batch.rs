@@ -13,7 +13,7 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-mod common;
+use crate::common;
 use common::ecp_bin;
 
 const SOURCE_CORE: &str = r#"

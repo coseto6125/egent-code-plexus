@@ -3,7 +3,7 @@
 //! before the move (read from a `LocalGraph` dump of the old binary), in
 //! emitted order.
 
-mod driver_parity_support;
+use crate::driver_parity_support;
 
 use driver_parity_support::assert_empty_graph;
 use ecp_analyzer::cpp::parser::CppProvider;

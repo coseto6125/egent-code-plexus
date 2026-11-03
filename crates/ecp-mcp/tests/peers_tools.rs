@@ -1,7 +1,7 @@
 //! Smoke tests: peer tool registration + spawn-argv shape for the single
 //! `ecp_peers` tool fronting all sub-subcommands via `subcmd` discriminator.
 
-mod common;
+use crate::common;
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use common::{stub_guard, write_stub};

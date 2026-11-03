@@ -6,8 +6,7 @@
 //! (FU-2026-10-15-61d656576fc8). An expression default (`export default
 //! wrap(f)`) binds a default import by its local name (R1 F2).
 
-#[path = "common/parity.rs"]
-mod parity;
+use crate::parity;
 
 use ecp_analyzer::javascript::parser::JavaScriptProvider;
 use ecp_analyzer::typescript::TypeScriptProvider;

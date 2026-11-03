@@ -19,8 +19,7 @@
 //! enum declaration; Go has none (`iota` constants are `Const` nodes); Ruby
 //! has no enum syntax.
 
-#[path = "common/parity.rs"]
-mod parity;
+use crate::parity;
 
 use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::graph::RelType;

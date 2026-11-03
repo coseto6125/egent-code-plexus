@@ -10,7 +10,7 @@
 //!   all is an ordinary empty result
 //! - The scan mutates nothing
 
-mod common;
+use crate::common;
 
 use common::run_git;
 use std::path::Path;

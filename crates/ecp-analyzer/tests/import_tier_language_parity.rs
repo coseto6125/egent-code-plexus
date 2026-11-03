@@ -1,5 +1,5 @@
 //! Targets and confidence tiers are measured against edd45c5b.
-mod instantiation_calls_support;
+use crate::instantiation_calls_support;
 
 use ecp_analyzer::resolution::heuristics::ResolutionTier;
 use ecp_core::{analyzer::provider::LanguageProvider, graph::RelType};

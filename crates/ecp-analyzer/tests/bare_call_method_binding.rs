@@ -14,7 +14,7 @@
 //!
 //! Java, Kotlin, C#, Swift, Dart, C++ and Ruby call a member of the enclosing
 //! type with no receiver: a bare call keeps reaching methods.
-mod instantiation_calls_support;
+use crate::instantiation_calls_support;
 
 use ecp_analyzer::c::parser::CProvider;
 use ecp_analyzer::c_sharp::parser::CSharpProvider;

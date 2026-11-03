@@ -26,11 +26,7 @@
 //! `tests/baselines/strict_parity/<scenario>.txt` (`common/strict_parity.rs`):
 //! the repros are non-empty until P3 lands, and the guard stays empty.
 
-#[path = "common/baseline.rs"]
-mod baseline;
-mod common;
-#[path = "common/strict_parity.rs"]
-mod strict_parity;
+use crate::strict_parity;
 
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_cli::config_parser::parse_configs;

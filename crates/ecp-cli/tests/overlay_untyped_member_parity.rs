@@ -16,8 +16,7 @@
 //! does so from a method of `Dirty`). `pad` adds a function, so an edit moves
 //! every declaration below it.
 
-#[path = "common/parity.rs"]
-mod parity;
+use crate::parity;
 
 use ecp_core::analyzer::types::{CallSite, LocalGraph, RawNode};
 use ecp_core::graph::{NodeKind, RelType};

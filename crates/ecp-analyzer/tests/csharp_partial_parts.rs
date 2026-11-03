@@ -13,7 +13,7 @@
 //!
 //! Partial types exist only in C#, so this dimension has no other language.
 
-mod overrides_support;
+use crate::overrides_support;
 
 use ecp_analyzer::c_sharp::parser::CSharpProvider;
 use ecp_analyzer::c_sharp::partial::{partial_groups, CsharpProjects};

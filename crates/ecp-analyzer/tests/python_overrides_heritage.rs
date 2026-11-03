@@ -7,7 +7,7 @@
 //!
 //! The method carries no `@override`, so the pair is a name match in the declared base.
 
-mod overrides_support;
+use crate::overrides_support;
 
 use overrides_support::{assert_binds_declared_base, Evidence};
 

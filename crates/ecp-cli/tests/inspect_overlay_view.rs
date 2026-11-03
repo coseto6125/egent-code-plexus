@@ -13,7 +13,7 @@
 //! cannot be made to hold one; the unit tests in `commands/inspect.rs` pin
 //! that a missing view answers from the base graph.
 
-mod common;
+use crate::common;
 
 use common::{commit_all, ecp_bin, run_git};
 use serde_json::Value;

@@ -22,11 +22,7 @@
 //! `tests/baselines/strict_parity/<scenario>.txt`: the two repros are
 //! non-empty until their owning phase lands, and the guard stays empty.
 
-#[path = "common/baseline.rs"]
-mod baseline;
-mod common;
-#[path = "common/strict_parity.rs"]
-mod strict_parity;
+use crate::strict_parity;
 
 use ecp_core::graph::{ArchivedZeroCopyGraph, RelType};
 use ecp_core::session::merged::MergedGraph;

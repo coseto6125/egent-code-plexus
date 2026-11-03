@@ -24,11 +24,7 @@
 //! fixtures in `ecp_core::analyzer::ladder`'s tests (`StemFile`) or stay
 //! the overlay's own facts (a workspace-crate `use` head).
 
-#[path = "common/baseline.rs"]
-mod baseline;
-mod common;
-#[path = "common/strict_parity.rs"]
-mod strict_parity;
+use crate::strict_parity;
 
 use ecp_core::session::merged::MergedGraph;
 use std::collections::BTreeSet;

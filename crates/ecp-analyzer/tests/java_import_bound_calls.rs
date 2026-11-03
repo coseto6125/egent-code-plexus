@@ -1,7 +1,7 @@
 //! A Java import that names a repo file binds the callee to that file's
 //! member (ImportScoped); one that names nothing local leaves no edge; any
 //! other import keeps the resolution path the call had before the import tier.
-mod instantiation_calls_support;
+use crate::instantiation_calls_support;
 
 use ecp_analyzer::java::parser::JavaProvider;
 use ecp_analyzer::kotlin::parser::KotlinProvider;

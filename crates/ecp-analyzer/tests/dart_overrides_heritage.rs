@@ -8,7 +8,7 @@
 //! The parser keeps `@override` in the method's decorators, so the marked
 //! method pairs with a same-file base as `Exact`.
 
-mod overrides_support;
+use crate::overrides_support;
 
 use overrides_support::{assert_binds_declared_base, Evidence};
 

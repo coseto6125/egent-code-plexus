@@ -3,7 +3,7 @@
 //! in `ecp impact`, tagged as a low-confidence fan-out, instead of looking
 //! dead.
 
-mod common;
+use crate::common;
 
 use common::{ecp_bin, init_and_analyze, write};
 use serde_json::Value;

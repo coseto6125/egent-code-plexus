@@ -9,7 +9,7 @@
 //! `.IsSubclassOf(..)` on a `string` receiver. Since P-recv the parser
 //! writes an untyped member, which binds no member by its name.
 
-mod receiver_typing_support;
+use crate::receiver_typing_support;
 
 use ecp_analyzer::c_sharp::parser::CSharpProvider;
 use ecp_core::analyzer::provider::LanguageProvider;

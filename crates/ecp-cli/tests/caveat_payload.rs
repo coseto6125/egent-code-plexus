@@ -11,7 +11,7 @@
 //! reached only the five F6 commands: `find`, `impact` and the by-repo loader
 //! read the engine's caveat, which did not hold it.
 
-mod common;
+use crate::common;
 
 use common::{commit_all, ecp_bin, run_git};
 use std::path::Path;

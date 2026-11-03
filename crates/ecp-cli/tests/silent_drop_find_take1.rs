@@ -14,7 +14,7 @@
 //! pin the field's presence — Serialize + the matching invariant guard
 //! cover the other shapes.
 
-mod common;
+use crate::common;
 
 use common::{ecp_bin, init_and_analyze, write};
 

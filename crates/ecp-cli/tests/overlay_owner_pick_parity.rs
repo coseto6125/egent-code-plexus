@@ -15,8 +15,7 @@
 //! Each fixture edits the caller's file (a trailing blank line), so its
 //! calls re-resolve in the overlay.
 
-#[path = "common/parity.rs"]
-mod parity;
+use crate::parity;
 
 use ecp_core::analyzer::types::LocalGraph;
 use parity::{calls_after_edit, Parity};

@@ -9,7 +9,7 @@
 //! in that scope; a use textually before the declaration never binds. Every
 //! other shape keeps today's result, and its test asserts that no call gets
 //! the import tier. The `Imports` edge does not depend on the shape.
-mod instantiation_calls_support;
+use crate::instantiation_calls_support;
 
 use ecp_analyzer::javascript::parser::JavaScriptProvider;
 use ecp_analyzer::resolution::builder::GraphBuilder;

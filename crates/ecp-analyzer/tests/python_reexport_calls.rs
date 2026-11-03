@@ -16,7 +16,7 @@
 //! attribute shadows a submodule, a from-imported object resolves as before,
 //! and Kotlin's and TypeScript's same shapes resolve as before.
 //! Their expected values are what ecp 0.14.8 produced on the same fixtures.
-mod instantiation_calls_support;
+use crate::instantiation_calls_support;
 
 use ecp_analyzer::kotlin::parser::KotlinProvider;
 use ecp_analyzer::python::parser::PythonProvider;

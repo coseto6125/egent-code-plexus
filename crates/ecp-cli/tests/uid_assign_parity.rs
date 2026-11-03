@@ -13,11 +13,7 @@
 //! pins: each parser emits two `save` members of type `K`. C has no methods,
 //! so its fixture holds an `#ifdef` redefinition, a node of its own.
 
-#[path = "common/baseline.rs"]
-mod baseline;
-mod common;
-#[path = "common/strict_parity.rs"]
-mod strict_parity;
+use crate::strict_parity;
 
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_analyzer::{

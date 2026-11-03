@@ -5,7 +5,7 @@
 //! emission convention (`HasMethod` target kind is parser-determined, not
 //! filtered in the query).
 
-mod common;
+use crate::common;
 
 use common::{ecp_bin, init_and_analyze, write};
 

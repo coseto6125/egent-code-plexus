@@ -4,7 +4,7 @@
 //! exist so the global CLAUDE.md GitNexus Workflow examples actually run.
 //! (renamed from `ecp context` in the CLI redesign)
 
-mod common;
+use crate::common;
 
 use common::{ecp_bin, init_and_analyze, write};
 

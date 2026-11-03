@@ -4,7 +4,7 @@
 //! byte-for-byte on every layout ecp meets, and return `None` (so the caller
 //! falls back to the spawn) on anything they do not model.
 
-mod common;
+use crate::common;
 
 use common::{commit_all, run_git};
 use ecp_cli::git_cache;

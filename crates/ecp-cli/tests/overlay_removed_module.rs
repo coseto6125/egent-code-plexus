@@ -5,11 +5,7 @@
 //! through the production index, fragment write and read
 //! (`common/strict_parity.rs`).
 
-#[path = "common/baseline.rs"]
-mod baseline;
-mod common;
-#[path = "common/strict_parity.rs"]
-mod strict_parity;
+use crate::strict_parity;
 
 use ecp_core::session::merged::MergedGraph;
 use strict_parity::{snapshot, Edit, Scenario, Snapshot};

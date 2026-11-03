@@ -3,8 +3,8 @@
 //! `Struct` node (FU-2026-10-30-c0bc9a616111): `ecp impact` on the struct
 //! lists the literal sites.
 
-mod instantiation_calls_support;
-mod name_ref_support;
+use crate::instantiation_calls_support;
+use crate::name_ref_support;
 
 use ecp_analyzer::rust::parser::RustProvider;
 use ecp_core::graph::{NodeKind, ZeroCopyGraph};

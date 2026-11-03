@@ -9,7 +9,7 @@
 //! - **Qualifier inclusion**: full prefix including storage-class. E.g.
 //!   `static const int N` → `"static const int"`.
 
-mod name_ref_support;
+use crate::name_ref_support;
 
 use ecp_analyzer::c::parser::CProvider;
 use ecp_core::analyzer::provider::LanguageProvider;

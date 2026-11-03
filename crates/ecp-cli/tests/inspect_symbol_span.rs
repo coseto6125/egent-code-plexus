@@ -2,7 +2,7 @@
 //! `ecp cypher` returns: graph spans are 0-based tree-sitter rows, so
 //! `endLine` needs the `+1` that `Node::end_line()` applies.
 
-mod common;
+use crate::common;
 
 use common::{ecp_bin, init_and_analyze, write};
 

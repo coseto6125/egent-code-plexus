@@ -1,6 +1,6 @@
 //! Ruby parser fixes: visibility, mixin owner on shared rows, tx scope order.
 
-mod driver_parity_support;
+use crate::driver_parity_support;
 
 use driver_parity_support::tx;
 use ecp_analyzer::ruby::parser::RubyProvider;

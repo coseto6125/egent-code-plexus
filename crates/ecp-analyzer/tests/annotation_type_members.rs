@@ -7,7 +7,7 @@
 //! Only these four languages emit an `Annotation` node at parse time; the
 //! other ten create none before post-processing, so they have no row here.
 
-mod overrides_support;
+use crate::overrides_support;
 
 use ecp_analyzer::c_sharp::parser::CSharpProvider;
 use ecp_analyzer::dart::parser::DartProvider;

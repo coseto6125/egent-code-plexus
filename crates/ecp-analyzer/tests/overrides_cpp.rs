@@ -6,7 +6,7 @@
 //! Layer 1: parser captures `__override__` in decorators.
 //! Layer 2: post-process emits `RelType::Overrides` edges.
 
-mod overrides_support;
+use crate::overrides_support;
 
 use ecp_analyzer::cpp::parser::CppProvider;
 use ecp_core::analyzer::provider::LanguageProvider;

@@ -4,7 +4,7 @@
 //! the argv shape produced for each subcmd dispatch. Mirrors
 //! `group_tools.rs` / `peers_tools.rs`.
 
-mod common;
+use crate::common;
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use common::{stub_guard, write_stub};

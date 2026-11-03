@@ -9,7 +9,7 @@
 //! attached the session overlay at all, so the same symbol was absent there
 //! from any directory.
 
-mod common;
+use crate::common;
 
 use common::{commit_all, ecp_bin, run_git, write};
 use ecp_core::graph_fixture::GraphFixture;

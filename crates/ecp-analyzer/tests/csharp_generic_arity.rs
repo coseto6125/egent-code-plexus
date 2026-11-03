@@ -12,7 +12,7 @@
 //!
 //! Each fixture is one file, so a node's 0-based start row names it.
 
-mod overrides_support;
+use crate::overrides_support;
 
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::graph::{NodeKind, RelType, ZeroCopyGraph};

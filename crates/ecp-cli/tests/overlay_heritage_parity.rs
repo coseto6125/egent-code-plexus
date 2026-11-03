@@ -27,8 +27,7 @@
 //! | Go       | struct embedding (`type K struct{ B }`) | a promoted method is called on a receiver (`k.Save()`): the receiver ladder, phase 2 |
 //! | Rust     | trait default methods            | reached through `self.save()`: the receiver ladder, phase 2; a `struct` is no `Class` |
 
-#[path = "common/parity.rs"]
-mod parity;
+use crate::parity;
 
 use ecp_core::analyzer::types::LocalGraph;
 use parity::{calls_after_edit, Parity};

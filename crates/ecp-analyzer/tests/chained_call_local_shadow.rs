@@ -2,7 +2,7 @@
 //! declaration's return type. The local callable can still be called; ECP
 //! simply does not infer the type of its result yet.
 
-mod instantiation_calls_support;
+use crate::instantiation_calls_support;
 
 use ecp_analyzer::c_sharp::parser::CSharpProvider;
 use ecp_analyzer::cpp::parser::CppProvider;

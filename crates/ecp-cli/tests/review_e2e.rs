@@ -5,7 +5,7 @@
 
 use std::process::Command;
 
-mod common;
+use crate::common;
 use common::{ecp_bin, run_git};
 
 /// `ecp review --files Cargo.toml --format json` should produce a JSON

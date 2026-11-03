@@ -2,7 +2,7 @@
 //! as the ordinary call of the same name: it records the call the ordinary
 //! call records, so the resolver binds it and `ecp impact` on the target lists
 //! the caller. A non-literal or malformed name stays a blind spot with no edge.
-mod instantiation_calls_support;
+use crate::instantiation_calls_support;
 
 use ecp_analyzer::ruby::parser::RubyProvider;
 use ecp_core::analyzer::provider::LanguageProvider;

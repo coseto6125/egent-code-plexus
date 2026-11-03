@@ -3,7 +3,7 @@
 //! before the move, in their emitted order: query match order, which is
 //! source order except where a pattern's captures start inside its root.
 
-mod driver_parity_support;
+use crate::driver_parity_support;
 
 use driver_parity_support::{assert_empty_graph, refs, tx, Span4};
 use ecp_analyzer::framework_confidence::{SPRING_AUTOWIRED, SPRING_ROUTE};

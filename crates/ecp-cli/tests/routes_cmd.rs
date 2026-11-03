@@ -4,7 +4,7 @@
 //! two routes (`GET /api/users`, `POST /api/users`) each with a named
 //! handler and an upstream caller function.
 
-mod common;
+use crate::common;
 
 use common::run_git;
 use serde_json::Value;

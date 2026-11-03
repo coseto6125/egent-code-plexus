@@ -17,7 +17,7 @@
 //! produces on purpose. A heuristic step under `--include-heuristic` (a
 //! MirrorsField or EventTopicMirror pattern) is still not covered.
 
-mod common;
+use crate::common;
 
 use common::{ecp_bin, init_and_analyze, write};
 use serde_json::Value;

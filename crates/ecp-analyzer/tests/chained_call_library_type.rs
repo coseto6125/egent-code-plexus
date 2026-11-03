@@ -10,7 +10,7 @@
 //!
 //! Each fixture declares the member on two more project classes, so the
 //! untyped fallback binds nothing.
-mod instantiation_calls_support;
+use crate::instantiation_calls_support;
 
 use ecp_analyzer::java::parser::JavaProvider;
 use ecp_analyzer::php::parser::PhpProvider;

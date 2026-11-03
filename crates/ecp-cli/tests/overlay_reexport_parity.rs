@@ -20,8 +20,7 @@
 //! not re-resolved, so its base edge must already agree. Each case also
 //! pins the reindex's answer, so both sides cannot agree on a wrong one.
 
-#[path = "common/parity.rs"]
-mod parity;
+use crate::parity;
 
 use ecp_analyzer::javascript::parser::JavaScriptProvider;
 use ecp_analyzer::python::PythonProvider;

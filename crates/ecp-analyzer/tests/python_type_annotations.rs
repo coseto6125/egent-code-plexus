@@ -1,5 +1,5 @@
 //! Python: a method returning `Self` (`typing.Self`) returns its own class, so `ecp impact` on the class lists it.
-mod name_ref_support;
+use crate::name_ref_support;
 
 use ecp_analyzer::python::parser::PythonProvider;
 use name_ref_support::{annotated, graph};

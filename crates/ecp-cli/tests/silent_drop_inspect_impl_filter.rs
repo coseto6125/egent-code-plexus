@@ -13,7 +13,7 @@
 //! Note: the parser creates one Impl node per *file* containing `impl Foo`.
 //! Three separate impl files → three Impl nodes named "Foo" → omitted count 3.
 
-mod common;
+use crate::common;
 
 use common::{ecp_bin, init_and_analyze, write};
 

@@ -12,7 +12,7 @@
 //! owned-member tier). Contract strings: `call` is the index's plain call
 //! reason, `call:extension-heuristic` the reason of an unproven match.
 
-mod receiver_typing_support;
+use crate::receiver_typing_support;
 
 use ecp_analyzer::c_sharp::parser::CSharpProvider;
 use ecp_core::analyzer::csharp_extension::{

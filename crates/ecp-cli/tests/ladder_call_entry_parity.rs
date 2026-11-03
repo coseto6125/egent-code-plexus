@@ -30,11 +30,7 @@
 //! [`test_ladder_call_entry_cpp_empty_qualifier_construct_overlay_only`]
 //! pins it.
 
-#[path = "common/baseline.rs"]
-mod baseline;
-mod common;
-#[path = "common/strict_parity.rs"]
-mod strict_parity;
+use crate::strict_parity;
 
 use ecp_core::session::merged::MergedGraph;
 use std::collections::BTreeSet;

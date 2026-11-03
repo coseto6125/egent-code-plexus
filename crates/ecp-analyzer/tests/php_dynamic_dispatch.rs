@@ -8,7 +8,7 @@
 //! Also covers the nullsafe call `$r?->inst()`, which must bind like
 //! `$r->inst()`.
 
-mod instantiation_calls_support;
+use crate::instantiation_calls_support;
 
 use ecp_analyzer::php::parser::PhpProvider;
 use ecp_core::analyzer::provider::LanguageProvider;

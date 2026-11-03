@@ -2,7 +2,7 @@
 //! syntax" and "Typed target result"): `impact` and `inspect` turn the target
 //! text and its filters into one declaration or a typed ambiguity.
 
-mod common;
+use crate::common;
 
 use common::{commit_all, ecp_bin, run_git};
 use ecp_cli::read_context::{resolve_target, target_request};

@@ -8,7 +8,7 @@
 //! reported callers, masking the real blast radius for any LLM driving
 //! `ecp inspect`.
 
-mod common;
+use crate::common;
 
 use common::{ecp_bin, init_and_analyze, write};
 

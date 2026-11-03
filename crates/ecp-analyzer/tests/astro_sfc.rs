@@ -7,7 +7,7 @@
 use ecp_analyzer::astro::parser::AstroProvider;
 use ecp_core::graph::NodeKind;
 
-mod sfc_helpers;
+use crate::sfc_helpers;
 use sfc_helpers::{find_node, import_sources, node_names_by_kind, parse_with};
 
 fn parse(src: &str) -> ecp_core::analyzer::types::LocalGraph {

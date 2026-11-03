@@ -11,7 +11,7 @@
 //! import import_module`) binds its name and nothing else does. Every other
 //! shape keeps today's result, and its test asserts that no call gets the
 //! import tier. The `Imports` edge does not depend on the binding shape.
-mod instantiation_calls_support;
+use crate::instantiation_calls_support;
 
 use ecp_analyzer::python::parser::PythonProvider;
 use ecp_analyzer::resolution::builder::GraphBuilder;

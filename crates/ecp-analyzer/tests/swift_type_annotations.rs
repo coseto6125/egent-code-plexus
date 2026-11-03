@@ -5,7 +5,7 @@
 //! slicing source-before-the-name. Behavior cross-checked against GitNexus
 //! `swift.ts` type-extractor (independent Rust impl).
 
-mod name_ref_support;
+use crate::name_ref_support;
 
 use ecp_analyzer::swift::parser::SwiftProvider;
 use ecp_core::analyzer::provider::LanguageProvider;

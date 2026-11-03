@@ -2,7 +2,7 @@
 //! The call queries do not capture `object_creation_expression`, so today
 //! every `new` site is invisible to the graph.
 
-mod instantiation_calls_support;
+use crate::instantiation_calls_support;
 
 use ecp_analyzer::php::parser::PhpProvider;
 use ecp_core::graph::NodeKind;

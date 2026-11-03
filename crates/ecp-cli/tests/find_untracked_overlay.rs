@@ -8,7 +8,7 @@
 //! on disk. The agent workflow this breaks is the most common one: Write a
 //! new file, then query it.
 
-mod common;
+use crate::common;
 
 use common::{commit_all, ecp_bin, run_git};
 use std::fs;

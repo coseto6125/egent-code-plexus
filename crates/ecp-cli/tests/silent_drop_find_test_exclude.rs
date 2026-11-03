@@ -11,7 +11,7 @@
 //! Exact mode (where the filter is bypassed) and equal to the number of
 //! Test-file matches dropped in Fuzzy mode without `--include-tests`.
 
-mod common;
+use crate::common;
 
 use common::{ecp_bin, init_and_analyze, write};
 

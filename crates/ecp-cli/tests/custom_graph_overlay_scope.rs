@@ -8,7 +8,7 @@
 //! the surrounding agent session's id, so a fixture-graph query answered with
 //! paths from the real repository the test happened to run inside.
 
-mod common;
+use crate::common;
 
 use common::{ecp_bin, run_git};
 use ecp_core::graph_fixture::GraphFixture;

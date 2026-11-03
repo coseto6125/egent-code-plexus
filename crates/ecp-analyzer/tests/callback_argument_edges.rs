@@ -12,7 +12,7 @@
 //! PHP names a callable by string (`array_map('fmt', ..)`), which belongs to
 //! the `call_user_func` literal path, not here: a bare PHP name is a
 //! constant.
-mod name_ref_support;
+use crate::name_ref_support;
 
 use ecp_analyzer::c::parser::CProvider;
 use ecp_analyzer::c_sharp::parser::CSharpProvider;

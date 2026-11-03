@@ -1,6 +1,6 @@
 //! FU-2026-10-30-c0bc9a616111 part A for PHP: a `self` / `static` return
 //! type stands for the class that owns the method.
-mod name_ref_support;
+use crate::name_ref_support;
 
 use ecp_analyzer::php::parser::PhpProvider;
 use ecp_core::graph::ZeroCopyGraph;

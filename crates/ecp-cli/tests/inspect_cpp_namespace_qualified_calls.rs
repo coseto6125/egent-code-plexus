@@ -16,7 +16,7 @@
 //! the file-based lookup transparently reaches them — matching the C++
 //! standard semantics of inline namespace transparency.
 
-mod common;
+use crate::common;
 
 use common::{ecp_bin, init_and_analyze, write};
 

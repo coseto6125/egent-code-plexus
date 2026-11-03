@@ -10,7 +10,7 @@ use ecp_core::graph_fixture::GraphFixture;
 use serde_json::Value;
 use std::process::Command;
 
-mod common;
+use crate::common;
 use common::{ecp_bin, write_graph};
 
 fn build_empty_graph() -> Vec<u8> {

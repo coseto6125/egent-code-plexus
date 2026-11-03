@@ -3,7 +3,7 @@
 //! loads or builds an index. A caller with stale docs reads the message and
 //! switches to `find` / `impact` plus its own editor.
 
-mod common;
+use crate::common;
 
 use common::{commit_all, ecp_bin, run_git};
 use std::fs;

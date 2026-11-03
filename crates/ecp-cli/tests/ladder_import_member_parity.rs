@@ -41,11 +41,7 @@
 //! overlay (`resolve_overlay_name_ref`) takes the explicit imports only.
 //! [`test_imported_member_java_static_wildcard_field_ref_index_only`] pins it.
 
-#[path = "common/baseline.rs"]
-mod baseline;
-mod common;
-#[path = "common/strict_parity.rs"]
-mod strict_parity;
+use crate::strict_parity;
 
 use ecp_core::session::merged::MergedGraph;
 use std::collections::BTreeSet;

@@ -4,7 +4,7 @@
 //! ladder must resolve the typed callee through the type's declared heritage to
 //! the base.
 
-mod receiver_typing_support;
+use crate::receiver_typing_support;
 
 use ecp_analyzer::python::parser::PythonProvider;
 use receiver_typing_support::{

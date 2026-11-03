@@ -50,7 +50,7 @@
 //! two sessions in one cache, a concurrent duplicate call, and machine-parsed
 //! output (every answer is read from `--format json`).
 
-mod common;
+use crate::common;
 
 use common::stored::{
     committed, copy_tree, fixture, set_mtime, COMMIT_DIR, SESSION, WRITER_FINGERPRINT,

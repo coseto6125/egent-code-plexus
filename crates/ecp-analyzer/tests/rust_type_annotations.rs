@@ -3,7 +3,7 @@
 //! the struct lists the functions that return it. The keyword is no type
 //! name: it binds through the owner, never through a project type spelled
 //! `Self`.
-mod name_ref_support;
+use crate::name_ref_support;
 
 use ecp_analyzer::cpp::parser::CppProvider;
 use ecp_analyzer::rust::parser::RustProvider;

@@ -3,7 +3,7 @@
 //! import keeps the resolution path the call had before the import tier.
 //! The `Imports` edges of grouped and aliased `use` statements follow the
 //! local name, as they did before the import tier.
-mod instantiation_calls_support;
+use crate::instantiation_calls_support;
 
 use ecp_analyzer::php::parser::PhpProvider;
 use ecp_analyzer::resolution::heuristics::ResolutionTier;

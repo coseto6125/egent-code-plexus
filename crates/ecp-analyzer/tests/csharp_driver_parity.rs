@@ -3,7 +3,7 @@
 //! before the move, in their emitted order: query match order, which is
 //! source order for these inputs.
 
-mod driver_parity_support;
+use crate::driver_parity_support;
 
 use driver_parity_support::{assert_empty_graph, tx, types, Ref, Span4};
 use ecp_analyzer::c_sharp::parser::CSharpProvider;

@@ -9,7 +9,7 @@
 //! so the pair is `Exact` (it was a name match until the codex ruling on P7
 //! added the capture).
 
-mod overrides_support;
+use crate::overrides_support;
 
 use overrides_support::{assert_binds_declared_base, Evidence};
 
