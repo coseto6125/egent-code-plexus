@@ -6,7 +6,8 @@
 //! - `is_abstract`: `abstract` modifier OR method inside an interface.
 //! - `is_generator`: function body contains `yield` (any variant).
 //! - `is_extern`: always false (FFI is library-based, no declaration-only syntax).
-//! - `is_test`: `#[Test]` PHP 8 attribute OR `@test` PHPDoc OR FileCategory::Test.
+//! - `is_test`: `#[Test]` PHP 8 attribute OR `@test` PHPDoc OR a `test*` method of a
+//!   `TestCase` subclass OR FileCategory::Test.
 //! - visibility: `public`/`protected`/`private` modifier; class default (no modifier) → public (0).
 //! - params: `$name` (strip `$`) + optional type (including union types `int|string`).
 //! - return_type: `: ReturnType` after `)`.
@@ -152,7 +153,14 @@ fn extract_one(
         let s = a.as_str();
         s == "Test" || s.ends_with("\\Test") || s.ends_with("::Test")
     });
-    if has_test_attr || has_phpdoc_test || file_category == FileCategory::Test {
+    // A `test*` method of a class that extends PHPUnit's `TestCase` is a test too.
+    let in_test_case = super::ancestor_of_kind(fn_node, "class_declaration")
+        .and_then(|class| super::find_child_kind(&class, "base_clause"))
+        .is_some_and(|base| {
+            let written = node_text(&base, source).trim_start_matches("extends");
+            super::is_xunit_test_method(&raw.name, written)
+        });
+    if has_test_attr || has_phpdoc_test || in_test_case || file_category == FileCategory::Test {
         flags |= FunctionMeta::FLAG_TEST;
     }
 

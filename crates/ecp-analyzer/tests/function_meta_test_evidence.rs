@@ -279,6 +279,18 @@ fn test_function_meta_php_test_attribute_in_production_file_is_test() {
     ));
 }
 
+/// Stands for: PHPUnit runs each `test*` method of a `TestCase` subclass, on
+/// any path. Its non-test helper and a `test*` method of another class stay
+/// production.
+#[test]
+fn test_function_meta_php_test_case_subclass_method_is_test() {
+    let src = "<?php\nclass ParserTest extends \\PHPUnit\\Framework\\TestCase {\n    public function testParse() {}\n    public function helper() {}\n}\nclass Report extends Base {\n    public function testimonials() {}\n}\n";
+    let php = PhpProvider::new().unwrap();
+    assert!(is_test(&php, "src/Checks.php", src, "testParse"));
+    assert!(!is_test(&php, "src/Checks.php", src, "helper"));
+    assert!(!is_test(&php, "src/Checks.php", src, "testimonials"));
+}
+
 // ---- Ruby ----
 
 #[test]
@@ -301,6 +313,18 @@ fn test_function_meta_ruby_test_file_is_test() {
         src,
         "test_connection"
     ));
+}
+
+/// Stands for: Minitest runs each `test_*` method of a `Minitest::Test`
+/// subclass, on any path. Its non-test helper and a `test_*` method of
+/// another class stay production.
+#[test]
+fn test_function_meta_ruby_minitest_subclass_method_is_test() {
+    let src = "class ParserTest < Minitest::Test\n  def test_parse\n  end\n\n  def helper\n  end\nend\n\nclass Probe < Base\n  def test_connection\n  end\nend\n";
+    let ruby = RubyProvider::new().unwrap();
+    assert!(is_test(&ruby, "lib/checks.rb", src, "test_parse"));
+    assert!(!is_test(&ruby, "lib/checks.rb", src, "helper"));
+    assert!(!is_test(&ruby, "lib/checks.rb", src, "test_connection"));
 }
 
 // ---- Swift ----
@@ -348,6 +372,23 @@ fn test_function_meta_c_test_file_is_test() {
         "tests/test_health.c",
         src,
         "test_connection"
+    ));
+}
+
+/// Stands for: XCTest runs each `test*` method of an `XCTestCase` subclass,
+/// and Xcode keeps them in `<App>Tests/` folders that are no test path. Its
+/// non-test helper and a `test*` method of another class stay production.
+#[test]
+fn test_function_meta_swift_xctestcase_subclass_method_is_test() {
+    let src = "import XCTest\n\nclass ParserChecks: XCTestCase {\n    func testParse() {}\n    func helper() {}\n}\n\nclass Probe: NSObject {\n    func testConnection() {}\n}\n";
+    let swift = SwiftProvider::new().unwrap();
+    assert!(is_test(&swift, "Quality/Checks.swift", src, "testParse"));
+    assert!(!is_test(&swift, "Quality/Checks.swift", src, "helper"));
+    assert!(!is_test(
+        &swift,
+        "Quality/Checks.swift",
+        src,
+        "testConnection"
     ));
 }
 
@@ -399,6 +440,17 @@ fn test_function_meta_cpp_function_named_like_gtest_macro_is_not_test() {
         src,
         "TEST"
     ));
+}
+
+/// Stands for: a constructor of a class named `TEST` has no return type
+/// either; inline or out of line, it stays a production caller.
+#[test]
+fn test_function_meta_cpp_constructor_named_like_gtest_macro_is_not_test() {
+    let cpp = CppProvider::new().unwrap();
+    let inline = "struct TEST {\n    TEST(int value) {}\n};\n";
+    assert!(!is_test(&cpp, "src/probe.cpp", inline, "TEST"));
+    let out_of_line = "struct TEST {\n    TEST(int value);\n};\n\nTEST::TEST(int value) {}\n";
+    assert!(!is_test(&cpp, "src/probe.cpp", out_of_line, "TEST"));
 }
 
 // ---- Dart ----

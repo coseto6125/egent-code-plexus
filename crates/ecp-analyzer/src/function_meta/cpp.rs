@@ -160,16 +160,9 @@ fn extract_one(
         flags |= FunctionMeta::FLAG_GENERATOR;
     }
 
-    // is_test: FileCategory::Test, or a Google Test macro body: the parser
-    // names `TEST(Suite, Name) { .. }` after the macro and gives it no return
-    // type, which `int TEST(int v)` has. LLVM's `unittests/ADT/APIntTest.cpp`
-    // is no test path.
-    if file_category == FileCategory::Test
-        || (matches!(
-            raw.name.as_str(),
-            "TEST" | "TEST_F" | "TEST_P" | "TYPED_TEST" | "TYPED_TEST_P"
-        ) && fn_node.child_by_field_name("type").is_none())
-    {
+    // is_test: FileCategory::Test, or a Google Test macro body. LLVM's
+    // `unittests/ADT/APIntTest.cpp` is no test path.
+    if file_category == FileCategory::Test || is_gtest_macro_body(fn_node, &raw.name) {
         flags |= FunctionMeta::FLAG_TEST;
     }
 
@@ -200,6 +193,24 @@ fn extract_one(
 /// Infer C++ method visibility from enclosing `field_declaration_list` access specifiers.
 /// Returns the 3-bit vis code: 0=public, 1=protected, 2=private.
 /// Default: `struct` → public (0), `class` → private (2).
+/// The parser names `TEST(Suite, Name) { .. }` after the macro. Unlike a
+/// function named so, it has no return type (`int TEST(int v)`), a plain
+/// identifier declarator (`TEST::TEST(int v)`), and no class body around it
+/// (`struct TEST { TEST(int v) {} }`).
+fn is_gtest_macro_body(fn_node: &Node<'_>, name: &str) -> bool {
+    matches!(
+        name,
+        "TEST" | "TEST_F" | "TEST_P" | "TYPED_TEST" | "TYPED_TEST_P"
+    ) && fn_node.child_by_field_name("type").is_none()
+        && fn_node
+            .child_by_field_name("declarator")
+            .and_then(|d| d.child_by_field_name("declarator"))
+            .is_some_and(|d| d.kind() == "identifier")
+        && fn_node
+            .parent()
+            .is_none_or(|p| p.kind() != "field_declaration_list")
+}
+
 fn infer_cpp_visibility(fn_node: &Node<'_>, source: &[u8]) -> u16 {
     // Walk up to find field_declaration_list parent.
     let mut cur = fn_node.parent();

@@ -7,6 +7,7 @@
 //! - `is_generator`: never (Sequence/IteratorProtocol is library, not language)
 //! - `is_extern`:    `@_silgen_name(...)` or `@_cdecl(...)` attribute (private FFI markers)
 //! - `is_test`:      FileCategory::Test OR `@Test` attribute (Swift Testing framework)
+//!   OR a `test*` method of an `XCTestCase` subclass
 //! - `visibility`:   `open` → 0, `public` → 0, `internal` (default) → 3,
 //!   `fileprivate` → 5, `private` → 2
 //! - `params`:       internal parameter name + type captured (external label dropped)
@@ -127,10 +128,13 @@ fn extract_one(
         flags |= FunctionMeta::FLAG_ABSTRACT;
     }
 
-    // is_test: file category OR @Test attribute. A `test` name prefix alone
-    // is no evidence: XCTest runs it only in a test target.
+    // is_test: file category, @Test attribute, or a `test*` method of an
+    // `XCTestCase` subclass. A `test` name prefix alone is no evidence.
     let has_test_attr = decorators.contains(&"Test".to_string());
-    let is_test = file_category == FileCategory::Test || has_test_attr;
+    let in_xctest_case = super::ancestor_of_kind(fn_node, "class_declaration")
+        .and_then(|class| super::find_child_kind(&class, "inheritance_specifier"))
+        .is_some_and(|base| super::is_xunit_test_method(&raw.name, node_text(&base, source)));
+    let is_test = file_category == FileCategory::Test || has_test_attr || in_xctest_case;
     if is_test {
         flags |= FunctionMeta::FLAG_TEST;
     }
