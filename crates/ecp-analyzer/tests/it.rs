@@ -9,6 +9,7 @@ mod name_ref_support;
 mod overrides_support;
 mod receiver_typing_support;
 mod sfc_helpers;
+mod uid_chain_support;
 
 mod annotation_type_members;
 mod astro_sfc;

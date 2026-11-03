@@ -2,10 +2,6 @@
 //! `<lang>_uid_identity` tests: the §5 shapes N1 (a member of one of two
 //! same-named nested types), N2 (the two nested types), NS (one module path
 //! under two modules) and L (a local declaration in two callables).
-//!
-//! Each integration-test crate compiles its own copy of this module, so some
-//! callers won't use every helper — `allow(dead_code)` keeps the warning
-//! quiet across all dialects.
 #![allow(dead_code)]
 
 use ecp_analyzer::resolution::builder::GraphBuilder;

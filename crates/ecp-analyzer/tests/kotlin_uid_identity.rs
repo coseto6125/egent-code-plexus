@@ -19,7 +19,7 @@ use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::graph::{NodeKind, RelType, ZeroCopyGraph};
 use std::path::Path;
 
-mod uid_chain_support;
+use crate::uid_chain_support;
 
 const PATH: &str = "m.kt";
 

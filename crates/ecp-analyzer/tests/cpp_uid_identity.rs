@@ -21,7 +21,7 @@ use ecp_core::graph::{ArchivedZeroCopyGraph, NodeKind, RelType, ZeroCopyGraph};
 use ecp_core::session::{MergedGraph, OverlayFileInput, OverlayView};
 use std::path::Path;
 
-mod uid_chain_support;
+use crate::uid_chain_support;
 
 const PATH: &str = "m.cpp";
 
