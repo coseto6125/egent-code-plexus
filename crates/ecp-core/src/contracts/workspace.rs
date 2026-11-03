@@ -932,6 +932,28 @@ fn name_key(entry: &ScopeName) -> (Ecosystem, &str, NameRank, ScopeId) {
     )
 }
 
+/// `pattern` with `*` wildcards against one whole path segment `text`: a
+/// workspace glob segment (`packages/*`, `crates/*-sys`) against a directory
+/// name.
+pub fn segment_wildcard(pattern: &str, text: &str) -> bool {
+    let mut parts = pattern.split('*');
+    let first = parts.next().unwrap_or("");
+    let Some(mut rest) = text.strip_prefix(first) else {
+        return false;
+    };
+    let parts: Vec<&str> = parts.collect();
+    let Some((last, middle)) = parts.split_last() else {
+        return rest.is_empty();
+    };
+    for part in middle {
+        match rest.find(part) {
+            Some(at) => rest = &rest[at + part.len()..],
+            None => return false,
+        }
+    }
+    rest.len() >= last.len() && rest.ends_with(last)
+}
+
 pub(crate) fn is_normal_path(path: &str) -> bool {
     crate::registry::is_stored_path(path)
 }

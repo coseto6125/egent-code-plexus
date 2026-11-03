@@ -5,7 +5,7 @@
 
 use ecp_analyzer::c_sharp::partial::CsharpProjects;
 use ecp_analyzer::resolution::path_aliases::PathAliases;
-use ecp_core::analyzer::path_aliases::segment_wildcard;
+use ecp_core::contracts::workspace::segment_wildcard;
 use ecp_core::contracts::workspace::{
     ConfigPresence, ConfigRead, Ecosystem, Membership, NameRank, Requirement, RequirementTarget,
     Scope, ScopeAlias, ScopeDraft, WorkspaceFacts,

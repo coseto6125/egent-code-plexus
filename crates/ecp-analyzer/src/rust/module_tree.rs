@@ -29,13 +29,12 @@
 
 use crate::resolution::index::SymbolTable;
 use ecp_core::analyzer::ladder::{self, Namespace, Published, TreeItem};
-use ecp_core::analyzer::path_aliases::segment_wildcard;
 use ecp_core::analyzer::rust_pub_use::{
     self, mod_steps, path_attrs, pub_use_entries, strip_comments, PubUseEntry,
 };
 use ecp_core::contracts::workspace::{
-    ConfigPresence, ConfigRead, Ecosystem, Membership, NameRank, Scope, ScopeId, ScopeName,
-    WorkspaceFacts,
+    segment_wildcard, ConfigPresence, ConfigRead, Ecosystem, Membership, NameRank, Scope, ScopeId,
+    ScopeName, WorkspaceFacts,
 };
 use ecp_core::registry::{os_path_to_slash, uid_path};
 use rustc_hash::FxHashMap;
@@ -560,24 +559,20 @@ fn parse_workspace_members(cargo_toml: &str, workspace_root: &Path) -> Vec<PathB
         .filter_map(toml::Value::as_str);
     let mut members: Vec<PathBuf> = Vec::new();
     for pattern in patterns {
-        let (parent, last) = pattern.rsplit_once('/').unwrap_or(("", pattern));
+        // A member is an OS path: `crates/*/` names directories as `crates/*`
+        // does, and `\` separates only on Windows. ecp matches `*` in the
+        // last segment only; Cargo's `?` and `[..]` name no member here.
+        let pattern = pattern.trim_end_matches(std::path::is_separator);
+        let (parent, last) = pattern
+            .rsplit_once(std::path::is_separator)
+            .unwrap_or(("", pattern));
         if last.contains('*') {
-            // ecp matches `*` in the last segment only; Cargo's `?`, `[..]`
-            // and a `*` in an earlier segment name no member here.
-            if parent.contains('*') {
-                continue;
-            }
             let Ok(entries) = std::fs::read_dir(workspace_root.join(parent)) else {
                 continue;
             };
             let mut dirs: Vec<PathBuf> = entries
                 .flatten()
-                .filter(|entry| {
-                    entry
-                        .file_name()
-                        .to_str()
-                        .is_some_and(|name| segment_wildcard(last, name))
-                })
+                .filter(|entry| segment_wildcard(last, &entry.file_name().to_string_lossy()))
                 .map(|entry| entry.path())
                 .filter(|path| path.is_dir())
                 .collect();
@@ -876,6 +871,31 @@ mod tests {
         assert_eq!(
             parse_workspace_members(text, dir.path()),
             [dir.path().join("crates/foo-sys")]
+        );
+    }
+
+    /// Stands for: Cargo reads `crates/*/` as `crates/*`, so a trailing
+    /// separator names the same members.
+    #[test]
+    fn test_parse_workspace_members_trailing_separator_glob_names_same_members() {
+        let dir = make_tree(&[("crates/foo/Cargo.toml", ""), ("crates/bar/Cargo.toml", "")]);
+        let text = "[workspace]\nmembers = [\"crates/*/\"]\n";
+        assert_eq!(
+            parse_workspace_members(text, dir.path()),
+            [dir.path().join("crates/bar"), dir.path().join("crates/foo")]
+        );
+    }
+
+    /// Stands for: on Windows `\` separates a member path, so
+    /// `crates\*` reads the `crates` directory.
+    #[cfg(windows)]
+    #[test]
+    fn test_parse_workspace_members_windows_backslash_glob_reads_parent_dir() {
+        let dir = make_tree(&[("crates/foo/Cargo.toml", "")]);
+        let text = "[workspace]\nmembers = ['crates\\*']\n";
+        assert_eq!(
+            parse_workspace_members(text, dir.path()),
+            [dir.path().join("crates").join("foo")]
         );
     }
 
