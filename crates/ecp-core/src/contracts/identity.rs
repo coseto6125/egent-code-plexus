@@ -724,7 +724,7 @@ pub fn pair_by_anchor(base: &[u64], dirty: &[u64]) -> Vec<Option<u32>> {
 
 // ── Lexical parent ──────────────────────────────────────────────────────
 
-/// The kinds whose span bounds a lexical scope (design A §3.1).
+/// The kinds whose span bounds a lexical scope (owner-split-design.md §3.1).
 pub const fn is_scope_container(kind: NodeKind) -> bool {
     matches!(
         kind,

@@ -1,4 +1,5 @@
-//! FU-2026-11-01-c07a40e90e36 (T1), T1 red-proof (design_resolver.md:133): Java `Class.forName(..).getMethod(..).invoke(..)`.
+//! FU-2026-11-01-c07a40e90e36, dynamic module load: Java
+//! `Class.forName(..).getMethod(..).invoke(..)`.
 //!
 //! Load form: `Class.forName("pkg.X").getMethod("run").invoke(null)`.
 //! `src/java/parser.rs:173` emits a blind spot for `Class.forName`; the class and

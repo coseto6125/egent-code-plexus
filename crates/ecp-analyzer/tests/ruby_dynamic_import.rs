@@ -1,14 +1,14 @@
-//! FU-2026-11-01-c07a40e90e36 (T1), T1 red-proof (design_resolver.md:133): Ruby `require_relative` inside a method.
+//! FU-2026-11-01-c07a40e90e36, dynamic module load: Ruby `require_relative`
+//! inside a method.
 //!
 //! Load form: `require_relative 'a'` inside a method, then a call.
 //! `src/ruby/queries.scm:40` captures `require` and `require_relative` calls as
 //! imports, so the file gets an `Imports` edge (0.9). A bare call through the
-//! import (`run`) stays unbound (design_resolver.md N13); with a decoy `run` in
+//! import (`run`) stays unbound (a known gap); with a decoy `run` in
 //! `b.rb` the bare name is ambiguous. `A.run` is a qualified call: the resolver
 //! looks `A` up as a type by name, independent of the require. Expected:
 //! `Imports` edge to `a.rb`; bare `run` binds neither file; `A.run` binds `a.rb`
-//! (qualifier lookup) and not the decoy `B.run`. Pin derived from reading, not
-//! run: the main session corrects a wrong pin.
+//! (qualifier lookup) and not the decoy `B.run`.
 //!
 //! Contract the pins stand for: a runtime load with a non-static target
 //! gives no import-tier call edge; a future fix that adds one with a proven
@@ -68,7 +68,7 @@ fn test_require_relative_bare_call_binds_neither_run() {
     let calls = calls_from(&g, "load");
     assert!(
         calls.iter().all(|hit| hit.name != "run"),
-        "N13 pin: load calls: {calls:?}"
+        "known-gap pin: load calls: {calls:?}"
     );
 }
 

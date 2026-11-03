@@ -1,14 +1,16 @@
-//! FU-2026-11-01-c07a40e90e36 (T1), T1 red-proof (design_resolver.md:133): Dart `import .. deferred as a` + `a.loadLibrary()`.
+//! FU-2026-11-01-c07a40e90e36, dynamic module load: Dart
+//! `import .. deferred as a` + `a.loadLibrary()`.
 //!
-//! Load form: `import 'a.dart' deferred as a;` then `await a.loadLibrary(); a.run();`.
-//! A deferred import IS static: the library path is a literal, so the file gets
-//! an `Imports` edge like any other import. The call `a.run()` goes through the
-//! import prefix `a`; `src/dart/receiver_types.rs:360` leaves a prefix receiver
-//! unbound (the bare member name is returned) and design_resolver.md N11 states
-//! that prefix calls bind nothing. With a decoy `run` in `b.dart` the bare name
-//! is ambiguous too, so the expected result is: an `Imports` edge to `a.dart`,
-//! and no `Calls` edge to either `run`. A future fix that binds `a.run` to
-//! `a.dart` is a change, not a regression (N11).
+//! Load form: `import 'a.dart' deferred as a;` then
+//! `await a.loadLibrary(); a.run();`. A deferred import IS static: the
+//! library path is a literal, so the file gets an `Imports` edge like any
+//! other import. The call `a.run()` goes through the import prefix `a`;
+//! `src/dart/receiver_types.rs:360` leaves a prefix receiver unbound (the
+//! bare member name is returned): a call through an import prefix
+//! (`as p; p.helper()`, `deferred as`) binds nothing. With a decoy `run` in
+//! `b.dart` the bare name is ambiguous too, so the expected result is: an
+//! `Imports` edge to `a.dart`, and no `Calls` edge to either `run`. A future
+//! fix that binds `a.run` to `a.dart` is a change, not a regression.
 //!
 //! Contract the pins stand for: a runtime load with a non-static target
 //! gives no import-tier call edge; a future fix that adds one with a proven
@@ -70,7 +72,7 @@ fn test_deferred_import_prefix_call_binds_no_run() {
     let calls = calls_from(&g, "load");
     assert!(
         calls.iter().all(|hit| hit.name != "run"),
-        "N11 pin: prefix calls bind nothing; load calls: {calls:?}"
+        "known-gap pin: prefix calls bind nothing; load calls: {calls:?}"
     );
 }
 

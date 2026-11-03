@@ -1,4 +1,5 @@
-//! FU-2026-11-01-c07a40e90e36 (T1), T1 red-proof (design_resolver.md:133): C# `Assembly.LoadFrom(..).GetType(..).GetMethod(..).Invoke`.
+//! FU-2026-11-01-c07a40e90e36, dynamic module load: C#
+//! `Assembly.LoadFrom(..).GetType(..).GetMethod(..).Invoke`.
 //!
 //! Load form: `Assembly.LoadFrom("x.dll").GetType("P.X").GetMethod("Run").Invoke(null, null)`.
 //! The type and method names are strings, so nothing names a declaration; the

@@ -5,7 +5,7 @@
 //! and the builder emits `NodeKind::EntryPoint` marker nodes + `References`
 //! edges into the final `ZeroCopyGraph`.
 //!
-//! Per spec §3 the file must cover at least:
+//! The file covers at least:
 //!   (a) Java `public static void main` detection
 //!   (b) HTTP route from FastAPI/Spring/etc emits `EntryKind::HttpRoute`
 //!   (c) Rust `fn main` detection
