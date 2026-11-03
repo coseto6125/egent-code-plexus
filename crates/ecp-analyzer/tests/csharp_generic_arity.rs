@@ -145,10 +145,11 @@ fn test_build_csharp_delegates_of_several_arities_both_orders_each_named() {
     }
 }
 
-/// Stands for: only another arity splits. Two delegates of one name and
-/// one arity are a redefinition: the second is a later node of its own
-/// (design uid §2.3), named, in no name table, and no `uid-collision`
-/// BlindSpot reports it. Before 1b it was an empty-named tombstone.
+/// Stands for: only another arity splits. Two delegates of one name and one
+/// arity are a redefinition: the second is a later node of its own
+/// (C1-identity.md "Repeat policy"), named, in no name table, and no
+/// `uid-collision` BlindSpot reports it. Before 1b it was an empty-named
+/// tombstone.
 #[test]
 fn test_build_csharp_delegates_of_one_arity_second_later_node() {
     let graph = csharp_graph(
@@ -315,9 +316,9 @@ fn test_build_csharp_nested_type_in_outer_arity_twins_own_members() {
     assert_eq!(property_reads(&graph), [(7, 6), (15, 14)]);
 }
 
-/// Stands for: same owner, same arity. Two classes `C` of one arity in one
-/// file each declare `a`: the second class is a redefinition, a later node
-/// of its own (design uid §2.3); its field `a` repeats the first `a`'s
+/// Stands for: same owner, same arity. Two classes `C` of one arity in one file
+/// each declare `a`: the second class is a redefinition, a later node of its
+/// own (C1-identity.md "Repeat policy"); its field `a` repeats the first `a`'s
 /// identity and merges into it (`merges_repeats`), a tombstone.
 #[test]
 fn test_build_csharp_same_arity_class_redefinition_later_member_merged() {

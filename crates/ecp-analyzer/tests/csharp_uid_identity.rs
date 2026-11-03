@@ -1,8 +1,9 @@
 //! Declaration uids that keep same-named declarations distinct, in C#
-//! (design_uid §5 rows R / FO / M, Phase 1 acceptance). A redefinition of a
-//! kind that keeps its own node is a second named node with its own uid, its
-//! own parent edge and its own calls; membership and containment edges bind
-//! the row that declares them; a merged repeat gives each edge once.
+//! (C1-identity.md "Collision shapes per language", rows R / FO / M). A
+//! redefinition of a kind that keeps its own node is a second named node with
+//! its own uid, its own parent edge and its own calls; membership and
+//! containment edges bind the row that declares them; a merged repeat gives
+//! each edge once.
 //!
 //! | Shape | Fixture |
 //! |---|---|
@@ -167,7 +168,7 @@ partial class P
 "#;
 
 /// Stands for: a redefinition keeps its node and membership binds by row
-/// (design_uid §2.3, §3 row 5).
+/// (C1-identity.md "Repeat policy" and "Edge sources bind by row").
 #[test]
 fn test_build_csharp_if_twin_classes_each_own_their_own_method() {
     let g = build(IF_TWINS);
@@ -177,8 +178,9 @@ fn test_build_csharp_if_twin_classes_each_own_their_own_method() {
     assert_eq!(targets(&g, RelType::HasMethod, second), [d]);
 }
 
-/// Stands for: a same-file partial part keeps its node and owns the
-/// members of its own body (design_uid §2.3, §3 rows 5 and 21).
+/// Stands for: a same-file partial part keeps its node and owns the members of
+/// its own body (C1-identity.md "Repeat policy" and "Edge sources bind by
+/// row").
 #[test]
 fn test_build_csharp_same_file_partial_parts_each_own_their_own_method() {
     let g = build(PARTIAL_TWICE);
@@ -192,10 +194,10 @@ fn test_build_csharp_same_file_partial_parts_each_own_their_own_method() {
 
 const NESTED_TWINS: &str = "class O1 {\n    class H {\n        void run() {}\n    }\n}\nclass O2 {\n    class H {\n        void run() {}\n    }\n}\n";
 
-/// Stands for: N1 (design_uid §5, phase 2). `O1.H` and `O2.H` are
-/// two named nodes with two uids on the full build and the overlay, and each
-/// `run` is a member of its own `H` only, with no `overload_set` reference
-/// between the two `run`.
+/// Stands for: N1 (C1-identity.md "Collision shapes per language"). `O1.H` and
+/// `O2.H` are two named nodes with two uids on the full build and the overlay,
+/// and each `run` is a member of its own `H` only, with no `overload_set`
+/// reference between the two `run`.
 #[test]
 fn test_build_csharp_twin_nested_types_two_nodes_own_members() {
     let provider = CSharpProvider::new().unwrap();
@@ -211,9 +213,9 @@ fn test_build_csharp_twin_nested_types_two_nodes_own_members() {
 
 const DEEP_TWINS: &str = "class A {\n    class B {\n        class H {}\n    }\n}\nclass C {\n    class B {\n        class H {}\n    }\n}\n";
 
-/// Stands for: N2 at depth 2 (design_uid §5, phase 2). `A.B.H` and `C.B.H`
-/// share every short owner, so only the container chain (two different `B`
-/// anchors) keeps them two named nodes.
+/// Stands for: N2 at depth 2 (C1-identity.md "Collision shapes per language").
+/// `A.B.H` and `C.B.H` share every short owner, so only the container chain
+/// (two different `B` anchors) keeps them two named nodes.
 #[test]
 fn test_build_csharp_depth_two_twin_types_two_nodes() {
     let provider = CSharpProvider::new().unwrap();

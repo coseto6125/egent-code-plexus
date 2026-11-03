@@ -19,7 +19,8 @@ use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_rust_string_value,
 };
 use crate::calls::{
-    attach_to_enclosing, node_range, range_width, start_pos, CallSiteIndex, Pos, PosRange,
+    attach_to_enclosing, node_range, range_width, start_pos, CallSiteIndex, CalledNames, Pos,
+    PosRange,
 };
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use std::collections::HashMap;
@@ -811,29 +812,42 @@ fn let_binding_type(node: &Node<'_>, source: &[u8]) -> Option<String> {
 /// path-shape predicate + sink classifier. Merging this with the call
 /// walk halves the per-file DFS cost vs the prior two-pass layout
 /// (see PR #367 comparison).
+///
+/// `called` receives the node id of each macro-argument name the walk
+/// attached as a call ([`macro_argument_calls`]).
 pub fn extract_rust_calls_and_path_literals(
     root: Node<'_>,
     source: &[u8],
     nodes: &mut [RawNode],
     local_types: &LocalTypes,
     call_sites: &mut CallSiteIndex,
+    called: &mut CalledNames,
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
+    let mut macro_trees: Vec<Node<'_>> = Vec::new();
+    let mut macro_tokens: Vec<Node<'_>> = Vec::new();
     while let Some(n) = stack.pop() {
         match n.kind() {
             // Rust uses `call_expression` for both `foo()` and `obj.method()`.
             // `field_expression` children of `call_expression` represent `obj.method`.
             "call_expression" => {
-                if let Some(callee) = rust_callee_name(n, source, local_types) {
+                if let Some(callee) = rust_callee_name(root, n, source, local_types) {
                     if let Some(site) = attach_to_enclosing(start_pos(n), callee, nodes) {
                         call_sites.insert(n.id(), site);
                     }
                 }
             }
+            "macro_invocation" => macro_argument_calls(
+                (root, n),
+                source,
+                local_types,
+                (nodes, called),
+                (&mut macro_trees, &mut macro_tokens),
+            ),
             "struct_expression" => {
-                if let Some(ty) = struct_literal_type(n, source) {
+                if let Some(ty) = struct_literal_type(root, n, source) {
                     attach_to_enclosing(start_pos(n), CallSite::construct(&ty), nodes);
                 }
             }
@@ -867,11 +881,13 @@ pub fn extract_rust_calls_and_path_literals(
 
 /// The struct a `struct_expression` literal builds, as written
 /// (`crate::table::View { .. }` is `crate::table::View`, `View::<T> { .. }`
-/// is `View`), with `Self` replaced by the enclosing impl's type. `None`
-/// for `Self` outside an impl and for `Self::Variant { .. }`: neither names
-/// a struct this file can type.
-fn struct_literal_type(literal: Node<'_>, source: &[u8]) -> Option<String> {
+/// is `View`), with `Self` replaced by the enclosing impl's type and a
+/// `self` / `super` head spelled from the file's module
+/// ([`file_relative_path`]). `None` for `Self` outside an impl and for
+/// `Self::Variant { .. }`: neither names a struct this file can type.
+fn struct_literal_type(root: Node<'_>, literal: Node<'_>, source: &[u8]) -> Option<String> {
     let path = scoped_path_text(literal.child_by_field_name("name")?, source)?;
+    let path = file_relative_path(root, literal, path, source);
     if path == "Self" {
         return enclosing_impl_type(literal, source);
     }
@@ -879,7 +895,12 @@ fn struct_literal_type(literal: Node<'_>, source: &[u8]) -> Option<String> {
 }
 
 /// Derive the callee name for a Rust `call_expression`.
-fn rust_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Option<String> {
+fn rust_callee_name(
+    root: Node<'_>,
+    call: Node<'_>,
+    source: &[u8],
+    locals: &LocalTypes,
+) -> Option<String> {
     let mut function = call.child_by_field_name("function")?;
     // `f::<T>()` and `x.m::<T>()`: the type arguments are no part of the callee.
     if function.kind() == "generic_function" {
@@ -928,7 +949,7 @@ fn rust_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Optio
                     if calls_local {
                         None
                     } else {
-                        CallSite::nested_chain(|| rust_callee_name(value, source, locals))
+                        CallSite::nested_chain(|| rust_callee_name(root, value, source, locals))
                     }
                 });
             Some(match inner {
@@ -938,11 +959,13 @@ fn rust_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Optio
         }
 
         // Scoped path call: `Dog::new()` or `std::vec::Vec::new()`
-        "scoped_identifier" => scoped_path_text(function, source).or_else(|| {
-            function
-                .child_by_field_name("name")
-                .and_then(|n| node_text(n, source))
-        }),
+        "scoped_identifier" => scoped_path_text(function, source)
+            .map(|path| file_relative_path(root, call, path, source))
+            .or_else(|| {
+                function
+                    .child_by_field_name("name")
+                    .and_then(|n| node_text(n, source))
+            }),
 
         _ => {
             let text = node_text(function, source)?;
@@ -964,8 +987,376 @@ fn rust_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Optio
     }
 }
 
+/// The calls a macro invocation's arguments spell: `f(..)`, `a::b::f(..)`,
+/// `x.m(..)`, `f::<T>(..)`, in its token tree and in every tree nested
+/// there (`vec![format!("{}", f())]`). Tokens hold no `call_expression`, so
+/// the main walk finds no call in them. A `macro_rules!` body is no
+/// invocation: its calls run where the macro expands.
+///
+/// The id of each name attached to a function goes into `called`, and the
+/// name-ref walk reads no value there: one site gives one edge. A name no
+/// function holds (a `static` initializer) or no callee can be formed for
+/// keeps its reference. The two buffers are scratch space the file's walk
+/// reuses.
+fn macro_argument_calls<'t>(
+    (root, invocation): (Node<'t>, Node<'t>),
+    source: &[u8],
+    locals: &LocalTypes,
+    (nodes, called): (&mut [RawNode], &mut CalledNames),
+    buffers: (&mut Vec<Node<'t>>, &mut Vec<Node<'t>>),
+) {
+    each_macro_argument_call(invocation, source, buffers, |run, name_at| {
+        let name = run[name_at];
+        if let Some(callee) = token_callee(root, run, name_at, source, locals) {
+            if attach_to_enclosing(start_pos(name), callee, nodes).is_some() {
+                called.insert(name.id());
+            }
+        }
+        true
+    });
+}
+
+/// Whether a macro invocation under `node` spells a call in its arguments
+/// ([`macro_argument_calls`]): a closure that holds one gets its
+/// `<anonymous>` node, as one holding a `call_expression` does, so the call
+/// binds from the closure in or out of a macro.
+pub fn holds_macro_argument_call(node: Node<'_>, source: &[u8]) -> bool {
+    let (mut trees, mut tokens) = (Vec::new(), Vec::new());
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "macro_invocation"
+            && !each_macro_argument_call(n, source, (&mut trees, &mut tokens), |_, _| false)
+        {
+            return true;
+        }
+        let mut c = n.walk();
+        stack.extend(n.children(&mut c));
+    }
+    false
+}
+
+/// Calls `visit(tokens, name_at)` for each call-shaped name in the argument
+/// tokens of `invocation` and of every tree nested there, until `visit`
+/// returns `false`. Skipped: a name after `fn` or `struct` (the tokens
+/// spell a declaration, `quote!(fn f() {})`, `quote!(struct S(u8);)`) or
+/// `#` (a `quote!` interpolation), a nested macro's name (`format!` puts `!`
+/// before its tree), a tuple (`+ (a, b)`), and the arguments of a macro
+/// that never runs them ([`UNEVALUATED_MACROS`], `stringify!(f())`).
+/// Returns `false` when `visit` stopped the walk. The two buffers are
+/// scratch space.
+fn each_macro_argument_call<'t>(
+    invocation: Node<'t>,
+    source: &[u8],
+    (trees, tokens): (&mut Vec<Node<'t>>, &mut Vec<Node<'t>>),
+    mut visit: impl FnMut(&[Node<'t>], usize) -> bool,
+) -> bool {
+    let macro_name = invocation.child_by_field_name("macro").and_then(|name| {
+        let last = name.child_by_field_name("name").unwrap_or(name);
+        last.utf8_text(source).ok()
+    });
+    if macro_name.is_some_and(|name| UNEVALUATED_MACROS.contains(&name)) {
+        return true;
+    }
+    let mut c = invocation.walk();
+    trees.extend(
+        invocation
+            .children(&mut c)
+            .filter(|child| child.kind() == "token_tree"),
+    );
+    while let Some(tree) = trees.pop() {
+        tokens.clear();
+        let mut c = tree.walk();
+        tokens.extend(tree.children(&mut c).filter(|token| !token.is_extra()));
+        let run: &[Node<'t>] = tokens;
+        for (at, &token) in run.iter().enumerate() {
+            if token.kind() != "token_tree" {
+                continue;
+            }
+            let unevaluated = at >= 2
+                && run[at - 1].kind() == "!"
+                && run[at - 2]
+                    .utf8_text(source)
+                    .is_ok_and(|name| UNEVALUATED_MACROS.contains(&name));
+            if unevaluated {
+                continue;
+            }
+            trees.push(token);
+            if token.child(0).is_none_or(|open| open.kind() != "(") {
+                continue;
+            }
+            let Some(name_at) = called_name(run, at) else {
+                continue;
+            };
+            let before = name_at.checked_sub(1).map(|i| run[i].kind());
+            if matches!(before, Some("fn" | "struct" | "#")) {
+                continue;
+            }
+            if !visit(run, name_at) {
+                trees.clear();
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Macros that never run their arguments: a call-shaped token run there is
+/// text, so its names keep their references.
+const UNEVALUATED_MACROS: &[&str] = &["stringify"];
+
+/// Whether the name `token` is bound again before it inside the macro
+/// tokens around it (`{ let x = B; x.m() }`, `|x| x.m()`): the local types
+/// come from the AST, which sees no binding in macro tokens, so the
+/// outer type of `x` would name the wrong method.
+fn rebound_in_macro(token: Node<'_>, source: &[u8]) -> bool {
+    let name = token.utf8_text(source).ok();
+    let mut inner = token;
+    while let Some(tree) = inner.parent().filter(|t| t.kind() == "token_tree") {
+        let mut c = tree.walk();
+        let before: Vec<Node<'_>> = tree
+            .children(&mut c)
+            .filter(|t| !t.is_extra())
+            .take_while(|t| t.id() != inner.id())
+            .collect();
+        let binds = |i: usize| {
+            let prev = i.checked_sub(1).map(|p| before[p].kind());
+            matches!(prev, Some("let" | "mut" | "ref" | "|"))
+                || before.get(i + 1).is_some_and(|next| next.kind() == "|")
+        };
+        if (0..before.len()).any(|i| before[i].utf8_text(source).ok() == name && binds(i)) {
+            return true;
+        }
+        inner = tree;
+    }
+    false
+}
+
+/// A token that may be one segment of a Rust path.
+fn is_path_segment(kind: &str) -> bool {
+    matches!(kind, "identifier" | "self" | "super" | "crate")
+}
+
+/// The index of the name the `( .. )` tree at `args` calls: the identifier
+/// right before it, or the one before a turbofish (`f::<T>(..)`). `None`
+/// for any other token there.
+fn called_name(tokens: &[Node<'_>], args: usize) -> Option<usize> {
+    let mut at = args.checked_sub(1)?;
+    if matches!(tokens[at].kind(), ">" | ">>") {
+        let open = generic_open(tokens, at)?;
+        at = open
+            .checked_sub(2)
+            .filter(|&name| tokens[name + 1].kind() == "::")?;
+    }
+    (tokens[at].kind() == "identifier").then_some(at)
+}
+
+/// The index of the `<` that opens the generic group the `>` or `>>` at
+/// `close` ends; `>>` and `<<` count twice. `None` when no `<` balances it,
+/// or a `<<` opens past it (`<<A as B>::C as D>`).
+fn generic_open(tokens: &[Node<'_>], close: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    for at in (0..=close).rev() {
+        depth += match tokens[at].kind() {
+            ">" => 1,
+            ">>" => 2,
+            "<" => -1,
+            "<<" => -2,
+            _ => 0,
+        };
+        match depth {
+            0 => return Some(at),
+            d if d < 0 => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The callee of the call named by `tokens[at]` in a macro token tree, as
+/// [`rust_callee_name`] spells the same call outside a macro: `x.m` typed
+/// by the local type of a plain receiver `x` / `self` that no binding in
+/// the macro tokens hides ([`rebound_in_macro`]), else an untyped
+/// member; a path `a::b::f` with each turbofish dropped
+/// (`Pool::<u8>::with_slots` is `Pool::with_slots`), its `self` / `super`
+/// head spelled from the file's module ([`file_relative_path`]); else the
+/// bare name. A path from the root (`::a::f`) drops the leading `::`, and a
+/// qualified self names its trait (`<Foo as Tr>::make` is `Tr::make`), as
+/// [`scoped_path_text`] does. `None` when no callee can be formed
+/// (`<&Foo>::f`).
+fn token_callee(
+    root: Node<'_>,
+    tokens: &[Node<'_>],
+    at: usize,
+    source: &[u8],
+    locals: &LocalTypes,
+) -> Option<String> {
+    let token = tokens[at];
+    let name = token.utf8_text(source).ok()?;
+    let kind_at = |i: usize| tokens[i].kind();
+    let text_at = |i: usize| tokens[i].utf8_text(source).ok();
+    if at >= 1 && kind_at(at - 1) == "." {
+        let receiver = at
+            .checked_sub(2)
+            .filter(|&i| matches!(kind_at(i), "identifier" | "self"))
+            .filter(|&i| !(i >= 1 && matches!(kind_at(i - 1), "." | "::")));
+        let ty = receiver
+            .filter(|&i| !rebound_in_macro(tokens[i], source))
+            .and_then(|i| locals.lookup(start_pos(tokens[i]), text_at(i)?));
+        return Some(match ty {
+            Some(ty) => format!("{ty}.{name}"),
+            None => CallSite::untyped_member(name),
+        });
+    }
+    let mut segments = vec![name];
+    let mut self_type: Vec<&str> = Vec::new();
+    let mut first = at;
+    // A `::` with no segment before it roots the path: it is dropped.
+    while first >= 2 && kind_at(first - 1) == "::" {
+        let prev = first - 2;
+        match kind_at(prev) {
+            kind if is_path_segment(kind) => {
+                segments.push(text_at(prev)?);
+                first = prev;
+            }
+            ">" | ">>" => {
+                let open = generic_open(tokens, prev)?;
+                if open >= 1 && kind_at(open - 1) == "::" {
+                    let segment = open
+                        .checked_sub(2)
+                        .filter(|&i| is_path_segment(kind_at(i)))?;
+                    segments.push(text_at(segment)?);
+                    first = segment;
+                } else {
+                    self_type = qualified_self_type(tokens, open, prev, source)?;
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    segments.reverse();
+    let path = self_type
+        .into_iter()
+        .chain(segments)
+        .collect::<Vec<_>>()
+        .join("::");
+    Some(file_relative_path(root, token, path, source))
+}
+
+/// The path that the qualified self spanning `tokens[open..=close]` names:
+/// the trait after its outermost `as` (`<Foo as Tr>` is `Tr`, and
+/// `<W<<Foo as A>::X> as Tr>` is `Tr`), the type of `<Foo>` (`Foo`),
+/// generic arguments dropped. `None` when that is no path (`<&Foo>`, `[T]`).
+fn qualified_self_type<'s>(
+    tokens: &[Node<'_>],
+    open: usize,
+    close: usize,
+    source: &'s [u8],
+) -> Option<Vec<&'s str>> {
+    let mut path = Vec::new();
+    let mut depth = 0i32;
+    let mut at = (open + 1..close)
+        .find(|&i| {
+            depth += match tokens[i].kind() {
+                "<" => 1,
+                "<<" => 2,
+                ">" => -1,
+                ">>" => -2,
+                _ => 0,
+            };
+            depth == 0 && tokens[i].kind() == "as"
+        })
+        .map_or(open + 1, |as_at| as_at + 1);
+    while at < close && is_path_segment(tokens[at].kind()) {
+        path.push(tokens[at].utf8_text(source).ok()?);
+        at += 1;
+        if at < close && tokens[at].kind() == "::" {
+            at += 1;
+        }
+    }
+    let ends = at == close || tokens[at].kind() == "<";
+    (!path.is_empty() && ends).then_some(path)
+}
+
+/// Whether `path` may start with `self` or `super`: the cheap test that
+/// spares a path [`enclosing_mods`]' walk.
+fn may_be_anchored(path: &str) -> bool {
+    path.starts_with("self") || path.starts_with("super")
+}
+
+/// The names of the inline `mod`s around `at`, outermost first, found by
+/// one walk down from `root`: `Node::parent` walks down from the root at
+/// every step. `None` when one of them has no name (a parse error).
+pub(super) fn enclosing_mods<'s>(
+    root: Node<'_>,
+    at: Node<'_>,
+    source: &'s [u8],
+) -> Option<Vec<&'s str>> {
+    let mut mods = Vec::new();
+    let mut node = root;
+    while let Some(child) = node.child_with_descendant(at) {
+        if child.id() == at.id() {
+            break;
+        }
+        if child.kind() == "mod_item" {
+            mods.push(child.child_by_field_name("name")?.utf8_text(source).ok()?);
+        }
+        node = child;
+    }
+    Some(mods)
+}
+
+/// `path` (`super::f`, `self::g`, or the module path `super` of a `use`),
+/// written inside the inline `mod`s `mods` (outermost first), as the
+/// file's own module spells it. The resolver reads `self` and `super` from
+/// the file's module, which knows no inline `mod`, so each one is written
+/// out: inside `mod a { mod b { .. } }`, `self::g` is `self::a::b::g`,
+/// `super::f` is `self::a::f`, `super` is `self::a`, `super::super::f` is
+/// `self::f`, and `super::super::super::f` leaves the file as `super::f`.
+/// Any other path, and any path when `mods` is empty, comes back as
+/// written. The one copy of this rule: call, struct literal and `use`
+/// paths all go through it.
+pub(super) fn rebase_on_file_module(path: String, mods: &[&str]) -> String {
+    let up = path.split("::").take_while(|s| *s == "super").count();
+    if mods.is_empty() || (up == 0 && path.split("::").next() != Some("self")) {
+        return path;
+    }
+    let rest = path.split("::").skip(up.max(1));
+    let segments: Vec<&str> = match mods.len().checked_sub(up) {
+        Some(kept) => std::iter::once("self")
+            .chain(mods[..kept].iter().copied())
+            .chain(rest)
+            .collect(),
+        None => std::iter::repeat_n("super", up - mods.len())
+            .chain(rest)
+            .collect(),
+    };
+    segments.join("::")
+}
+
+/// [`rebase_on_file_module`] of `path` from the inline `mod`s around `at`.
+pub(super) fn file_relative_path(
+    root: Node<'_>,
+    at: Node<'_>,
+    path: String,
+    source: &[u8],
+) -> String {
+    if !may_be_anchored(&path) {
+        return path;
+    }
+    match enclosing_mods(root, at, source) {
+        Some(mods) => rebase_on_file_module(path, &mods),
+        None => path,
+    }
+}
+
 /// The text of a scoped path without the type arguments of its segments:
-/// `a::Wrapper::<u8>::make` is `a::Wrapper::make`.
+/// `a::Wrapper::<u8>::make` is `a::Wrapper::make`. A path from the root
+/// drops its `::` (`::a::f` is `a::f`), and a qualified self names its
+/// trait (`<Foo as Tr>::make` is `Tr::make`, `<Foo>::make` is `Foo::make`),
+/// as `<Self as T>::m()` binds `T`'s `m` and no impl's member: the resolver
+/// reads neither form. [`token_callee`] spells a macro argument's call the
+/// same way.
 fn scoped_path_text(node: Node<'_>, source: &[u8]) -> Option<String> {
     match node.kind() {
         "generic_type" | "generic_type_with_turbofish" => {
@@ -975,7 +1366,22 @@ fn scoped_path_text(node: Node<'_>, source: &[u8]) -> Option<String> {
             let name = node_text(node.child_by_field_name("name")?, source)?;
             match node.child_by_field_name("path") {
                 Some(path) => Some(format!("{}::{name}", scoped_path_text(path, source)?)),
-                None => node_text(node, source),
+                // From edition 2018, `::a::f` names the crate `a` as `a::f`
+                // does.
+                None => Some(name),
+            }
+        }
+        "bracketed_type" => {
+            let inner = node.named_child(0)?;
+            let ty = match inner.kind() {
+                "qualified_type" => inner.child_by_field_name("alias")?,
+                _ => inner,
+            };
+            match ty.kind() {
+                "type_identifier" | "scoped_type_identifier" | "generic_type" => {
+                    scoped_path_text(ty, source)
+                }
+                _ => node_text(node, source),
             }
         }
         _ => node_text(node, source),

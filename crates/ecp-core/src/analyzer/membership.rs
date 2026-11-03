@@ -212,17 +212,17 @@ fn span_pass<'a, T>(
 /// or a member of a Rust `Impl` block whose type is in no row of the file.
 /// A member some span of its owner's name contains is the span pass's.
 ///
-/// A member of a Rust `Impl` block binds the first type row of its owner's
-/// name whose container is the block's container (design uid §3 row 5), so
-/// `mod a { struct S; impl S { fn m } }` and the same in `mod b` each own
-/// their `m`. With no such row the block itself owns the member: a lone `S`
-/// of another module is no proof (`mod c { use super::b::S; impl S {} }`
-/// beside `mod a { struct S; }`), and import evidence is design uid §7 Q2,
-/// but the block is the member's container in every case, a file of
-/// `impl` blocks alone included. Any
-/// other member (a Go receiver, an out-of-line member) binds the file's
-/// first declaration of the owner's name. A member named like its type with
-/// no such type would be its own owner, and gets no edge.
+/// A member of a Rust `Impl` block binds the first type row of its owner's name
+/// whose container is the block's container (C1-identity.md "Edge sources bind
+/// by row"), so `mod a { struct S; impl S { fn m } }` and the same in `mod b`
+/// each own their `m`. With no such row the block itself owns the member: a
+/// lone `S` of another module is no proof
+/// (`mod c { use super::b::S; impl S {} }` beside `mod a { struct S; }`), and
+/// import evidence is C1-identity.md Open point 15, but the block is the
+/// member's container in every case, a file of `impl` blocks alone included.
+/// Any other member (a Go receiver, an out-of-line member) binds the file's
+/// first declaration of the owner's name. A member named like its type with no
+/// such type would be its own owner, and gets no edge.
 fn owner_pass<'a, T>(
     rows: &'a [T],
     row: &impl Fn(&'a T) -> MemberRow<'a>,
@@ -460,8 +460,9 @@ mod tests {
         assert!(edges(&rows).is_empty());
     }
 
-    /// Stands for: membership binds by row (design_uid §3 row 5). A type
-    /// declared twice owns the members of its own body, never its first's.
+    /// Stands for: membership binds by row (C1-identity.md "Edge sources bind
+    /// by row"). A type declared twice owns the members of its own body, never
+    /// its first's.
     #[test]
     fn test_class_membership_class_declared_twice_each_owns_its_own_body() {
         let rows = [
@@ -535,10 +536,10 @@ mod tests {
         );
     }
 
-    /// Stands for: design uid §3 row 5, phase 2, rule (1). `mod a { struct
-    /// S; impl S { fn m } }` and the same in `mod b`: each `m` binds the
-    /// `S` whose container is its `impl` block's container, never the
-    /// file's first `S`.
+    /// Stands for: C1-identity.md "Edge sources bind by row", owner pass,
+    /// step 1. `mod a { struct S; impl S { fn m } }` and the same in `mod b`:
+    /// each `m` binds the `S` whose container is its `impl` block's container, never
+    /// the file's first `S`.
     #[test]
     fn test_class_membership_rust_impl_member_binds_type_beside_its_block() {
         let rows = [
@@ -560,10 +561,11 @@ mod tests {
         );
     }
 
-    /// Stands for: design uid §3 row 5, phase 2, rule (2). The only `S` of
-    /// the file sits in `mod a`, the `impl S` in `mod c` (which imports
-    /// another module's `S`): no type of that name beside the block, so no
-    /// "only one in the file" fallback to `a::S`; the block owns `m`.
+    /// Stands for: C1-identity.md "Edge sources bind by row", owner pass,
+    /// step 2. The only `S` of the file sits in `mod a`, the `impl S` in `mod c`
+    /// (which imports another module's `S`): no type of that name beside the
+    /// block, so no "only one in the file" fallback to `a::S`; the block owns
+    /// `m`.
     #[test]
     fn test_class_membership_rust_impl_member_no_type_beside_block_binds_block() {
         let rows = [

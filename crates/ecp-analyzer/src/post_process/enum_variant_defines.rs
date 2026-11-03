@@ -239,9 +239,9 @@ mod tests {
         assert!(edges.iter().filter(|e| e.source == col_idx).count() == 2);
     }
 
-    /// Stands for: enum containment binds by span and row (design_uid §3
-    /// row 22). `#[cfg]` twins `enum E { X }` each define their own `X`;
-    /// the second enum's variant never hangs off the first enum.
+    /// Stands for: enum containment binds by span and row (C1-identity.md "Edge
+    /// sources bind by row"). `#[cfg]` twins `enum E { X }` each define their
+    /// own `X`; the second enum's variant never hangs off the first enum.
     #[test]
     fn test_emit_edges_same_name_enums_each_define_own_variant() {
         let nodes = vec![

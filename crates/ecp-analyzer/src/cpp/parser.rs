@@ -522,6 +522,7 @@ impl ParseSpec for CppSpec {
         capture: "function.anonymous",
         call_kinds: &["call_expression"],
         key: AnonKey::Span,
+        holds_token_call: None,
     });
     /// P7 covers C++ dispatch sites that `indirect_dispatch.rs` doesn't
     /// already flag as CallMeta (virtual / function-pointer dispatch is

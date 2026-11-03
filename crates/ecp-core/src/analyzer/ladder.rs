@@ -106,11 +106,11 @@ fn is_module_item<D: PickFacts + ?Sized>(decls: &D, id: u32) -> bool {
 
 /// What a module path reaches through the name-table first `id`: `id` when
 /// `accept` takes it, else, for a body-local `id`, its first later overload
-/// ([`PickFacts::later_overloads`]) that `accept` takes. Rust scopes only
-/// `fn` by its parent, so `fn setup() { struct Foo; }` and a later
-/// module-level `struct Foo` share a base uid: Pass 1 keeps the module-level
-/// one as a redefinition of the body-local first, out of the name tables
-/// (design uid §2.3). `accept` rejects a body-local declaration.
+/// ([`PickFacts::later_overloads`]) that `accept` takes. Rust scopes only Pass
+/// 1 keeps a later declaration of one base uid as a redefinition of the first,
+/// out of the name tables (`C1-identity.md`, "Repeat policy"); this function
+/// reaches such a redefinition past a body-local first. `accept` rejects a
+/// body-local declaration.
 fn past_body_local<D: PickFacts + ?Sized>(
     decls: &D,
     id: u32,
@@ -129,10 +129,9 @@ fn past_body_local<D: PickFacts + ?Sized>(
         .find(|&later| accept(later))
 }
 
-/// The module item ([`is_module_item`]) that the name-table first `id`
-/// stands for ([`past_body_local`]). The index's
-/// `SymbolTable::declares_in_file` and the ladder's module-tree lookups read
-/// it, so both sides agree.
+/// The module item ([`is_module_item`]) that the name-table first `id` stands
+/// for ([`past_body_local`]). The index's `SymbolTable::declares_in_file` and
+/// the ladder's module-tree lookups read it, so both sides agree.
 pub fn module_item<D: PickFacts + ?Sized>(decls: &D, id: u32) -> Option<u32> {
     past_body_local(decls, id, |id| is_module_item(decls, id))
 }
@@ -1697,17 +1696,16 @@ pub fn anchored_module_file<F: ModuleTreeFacts>(
     found
 }
 
-/// R14, the member part: the declaration the Rust path `callee` binds
-/// through the module tree. In the file [`module_tree_item`] places, the
-/// item's first module item ([`module_item`]) of `target`'s kinds, else
-/// the first declaration named `member` (the callee's last segment, generic
-/// arguments dropped), later `impl` overloads and the redefinitions of a
-/// body-local first included ([`past_body_local`]), that no function body
-/// holds. When the item is a type
-/// (`m::S` of `m::S::helper`), the path names one of its associated items:
-/// the type's own module-level member, else what [`prefer_owned`] picks
-/// with the type as the receiver. A body-local namesake and a free item of
-/// the type's file never bind. [`qualified`] then applies the method rule
+/// R14, the member part: the declaration the Rust path `callee` binds through
+/// the module tree. In the file [`module_tree_item`] places, the item's first
+/// module item ([`module_item`]) of `target`'s kinds, else the first
+/// declaration named `member` (the callee's last segment, generic arguments
+/// dropped), later `impl` overloads and the redefinitions of a body-local first
+/// included ([`past_body_local`]), that no function body holds. When the item
+/// is a type (`m::S` of `m::S::helper`), the path names one of its associated
+/// items: the type's own module-level member, else what [`prefer_owned`] picks
+/// with the type as the receiver. A body-local namesake and a free item of the
+/// type's file never bind. [`qualified`] then applies the method rule
 /// ([`rust_path_may_bind`]).
 pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
     facts: &F,
@@ -1741,9 +1739,9 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
     }
     let bare = member.split('<').next().unwrap_or(member);
     // The candidates with their `impl` overloads: a body-local
-    // `impl Foo { fn new }` before the module-level one makes the
-    // module-level `new` a later overload. A body-local candidate also
-    // stands for its module-level redefinitions (`past_body_local`).
+    // `impl Foo { fn new }` before the module-level one makes the module-level
+    // `new` a later overload. A body-local candidate also stands for its
+    // module-level redefinitions (`past_body_local`).
     let candidates = decls.pick_candidates(file, bare);
     let usable = |id: u32| wanted(decls.kind(id)) && !decls.is_body_local(id);
     let pick = candidates

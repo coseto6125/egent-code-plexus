@@ -1419,10 +1419,10 @@ fn test_module_path_through_pub_use_binds_the_free_fn_past_a_method_namesake() {
 }
 
 /// `m.rs` after `prefix`: `fn setup` holds `local`, then the module-level
-/// `pub struct Foo` and its `impl` with `pub fn new`. Rust scopes only `fn`
-/// by its parent, so a body-local `Foo` shares the module-level one's base
-/// uid; Pass 1 keeps the module-level one as a redefinition of the
-/// body-local first, a node of its own in no name table (design uid §2.3).
+/// `pub struct Foo` and its `impl` with `pub fn new`. Rust scopes only `fn` by
+/// its parent, so a body-local `Foo` shares the module-level one's base uid;
+/// Pass 1 keeps the module-level one as a redefinition of the body-local first,
+/// a node of its own in no name table (C1-identity.md "Repeat policy").
 fn foo_twin_m_rs(prefix: &str, local: &str) -> String {
     format!(
         "{prefix}fn setup() {{\n    {local}\n}}\npub struct Foo;\nimpl Foo {{\n    pub fn new() -> Foo {{ Foo }}\n}}\n"

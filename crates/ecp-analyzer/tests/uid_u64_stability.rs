@@ -118,9 +118,10 @@ fn uid_is_identical_across_two_builds() {
     );
 }
 
-/// Stands for: a top-level declaration's uid is `uid::compute` of its
-/// stored fields, and a member's uid hashes its container's uid
-/// (`nested_uid`, design uid §2.2): `load` sits inside `ConfigLoader`.
+/// Stands for: a top-level declaration's uid is `uid::compute` of its stored
+/// fields, and a member's uid hashes its container's uid (`nested_uid`,
+/// C1-identity.md "Declaration identity: fields and invariants"): `load` sits
+/// inside `ConfigLoader`.
 #[test]
 fn uid_matches_direct_compute() {
     let mut b = GraphBuilder::new();

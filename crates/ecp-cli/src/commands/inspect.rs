@@ -1022,9 +1022,9 @@ mod tests {
     }
 
     /// Stands for: a redefinition is a declaration like a method overload
-    /// (design uid §2.3). A dirty file that defines the function `doomed`
-    /// twice (both branches of an `if`) yields two virtual nodes, the second
-    /// a later node with a uid of its own, and both stay listed, as two
+    /// (C1-identity.md "Repeat policy"). A dirty file that defines the function
+    /// `doomed` twice (both branches of an `if`) yields two virtual nodes, the
+    /// second a later node with a uid of its own, and both stay listed, as two
     /// overloads of one method do; the target picks one by `name@line`.
     #[test]
     fn test_named_declarations_same_name_redefinition_lists_both() {

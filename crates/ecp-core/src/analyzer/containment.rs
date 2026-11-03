@@ -315,9 +315,9 @@ mod tests {
         assert!(variants(&rows).is_empty());
     }
 
-    /// Stands for: enum containment binds by span and row (design_uid §3
-    /// row 22). Two same-named enums (`#[cfg]` twins) each contain their own
-    /// variants, never the first enum's.
+    /// Stands for: enum containment binds by span and row (C1-identity.md "Edge
+    /// sources bind by row"). Two same-named enums (`#[cfg]` twins) each
+    /// contain their own variants, never the first enum's.
     #[test]
     fn test_enum_variant_defines_same_name_enums_bind_by_span() {
         let rows = [

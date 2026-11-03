@@ -411,9 +411,9 @@ mod tests {
         assert_eq!(edges.len(), 1, "must not double-emit");
     }
 
-    /// Stands for: membership binds by row (design_uid §3 row 5). Python
-    /// `class C` twice, `a` in the first body and `b` in the second:
-    /// `HasMethod C@1 -> a`, `C@2 -> b`, nothing else.
+    /// Stands for: membership binds by row (C1-identity.md "Edge sources bind
+    /// by row"). Python `class C` twice, `a` in the first body and `b` in the
+    /// second: `HasMethod C@1 -> a`, `C@2 -> b`, nothing else.
     #[test]
     fn test_emit_edges_class_declared_twice_each_owns_its_own_body() {
         let nodes = vec![

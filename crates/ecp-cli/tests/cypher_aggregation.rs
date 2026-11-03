@@ -427,7 +427,7 @@ fn test_node_prop_value_unscoped_language_nested_fn_returns_both_null() {
 /// the enclosing fn (`stamp_owner_fn_by_span`), so `ownerClass` stays
 /// `maker`, and `lexicalParent` prints that stored owner. This changes when
 /// FU-2026-10-05-ff801e095d23 part (c) stops the `stamp_owner_fn_by_span`
-/// write (after design_uid Phase 2); update this test then.
+/// write; update this test then.
 #[test]
 fn test_node_prop_value_python_local_class_returns_stamped_owner_until_part_c() {
     let tmp = indexed_nested();

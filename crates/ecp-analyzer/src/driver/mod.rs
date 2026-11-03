@@ -452,7 +452,8 @@ fn run_op<'t, S: ParseSpec>(
             if let Some(spec) = &S::FIELD_READS {
                 let root = cx.tree.root_node();
                 let (source, kinds) = (cx.source, spec.member_kinds);
-                calls::extract_field_reads(root, source, &mut cx.nodes, kinds, &spec.names);
+                let called = &cx.called_names;
+                calls::extract_field_reads(root, source, &mut cx.nodes, kinds, &spec.names, called);
             }
         }
         Op::VariantRefs => {

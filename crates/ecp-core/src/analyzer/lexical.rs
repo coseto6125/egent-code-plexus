@@ -417,7 +417,6 @@ fn identities_of<'a, T>(
             name,
             parent: parents[i],
             container: containers[i],
-            discriminator: None,
             arity: (language == Language::CSharp).then_some(if splits_by_arity(language, kind) {
                 arity
             } else {
@@ -875,7 +874,8 @@ mod tests {
 
     /// Stands for: a method repeat is an overload, a repeated namespace (a
     /// scope container) a redefinition with a node of its own, and a merged
-    /// field repeat a tombstone of its own overload uid (design uid §2.3).
+    /// field repeat a tombstone of its own overload uid (C1-identity.md "Repeat
+    /// policy").
     #[test]
     fn test_file_uids_overload_and_redefinition_returns_index_numbering() {
         let decls = [
@@ -909,9 +909,9 @@ mod tests {
             .collect()
     }
 
-    /// Stands for: two inputs of one path number as one file (design uid
-    /// §2.3 "Two `LocalGraph`s of one path"): the second input's `f` is the
-    /// third declaration of its base uid.
+    /// Stands for: two inputs of one path number as one file (C1-identity.md
+    /// "Repeat policy", rule "Two inputs of one path"): the second input's `f`
+    /// is the third declaration of its base uid.
     #[test]
     fn test_path_identities_two_inputs_number_path_wide() {
         let (a, b) = (rows_f(&[0, 1]), rows_f(&[0]));
@@ -1079,7 +1079,8 @@ mod tests {
     }
 
     /// The base uid of the `fmt` that `impl <trait_name> for A` declares in
-    /// `path`: the `Impl` row is its container (design uid §2.5).
+    /// `path`: the `Impl` row is its container (C1-identity.md "File
+    /// assignment", the swapped-impl example).
     fn fmt_in_impl(path: &str, trait_name: Option<&str>) -> u64 {
         let block = uid::compute(NodeKind::Impl, path, trait_name, "A");
         nested_uid(block, NodeKind::Method, Some("A"), "fmt")
@@ -1160,9 +1161,9 @@ mod tests {
         );
     }
 
-    /// Stands for: the container chain is every language's (design uid
-    /// §2.2), not Rust's: the same rows in a Swift file give each `fmt`
-    /// the `Impl` row that holds it.
+    /// Stands for: the container chain is every language's (C1-identity.md
+    /// "Declaration identity: fields and invariants"), not Rust's: the same
+    /// rows in a Swift file give each `fmt` the `Impl` row that holds it.
     #[test]
     fn test_file_identities_non_rust_impl_rows_chain_alike() {
         let ids = identities("A.swift", &two_impls("Display", "Debug"));
@@ -1173,10 +1174,11 @@ mod tests {
         assert_ne!(ids[1].anchor, ids[3].anchor);
     }
 
-    /// Stands for: design uid §2.4. An unrelated insert (a new top-level
-    /// function above everything) and a swap of two same-named container
-    /// blocks (`mod a`, `mod b`, each `struct S { fn m }`) change no other
-    /// stored uid; in an empty file nothing is numbered.
+    /// Stands for: C1-identity.md "Stability against unrelated edits". An
+    /// unrelated insert (a new top-level function above everything) and a swap
+    /// of two same-named container blocks (`mod a`, `mod b`, each
+    /// `struct S { fn m }`) change no other stored uid; in an empty file
+    /// nothing is numbered.
     #[test]
     fn test_file_uids_unrelated_insert_and_block_swap_keep_other_uids() {
         type Block = [DeclFields<'static>; 3];
@@ -1276,9 +1278,9 @@ mod tests {
         );
     }
 
-    /// Stands for: two C# types of one name and one arity are a
-    /// redefinition, a node of its own under overload uid 1 (design uid
-    /// §2.3), no longer a tombstone.
+    /// Stands for: two C# types of one name and one arity are a redefinition, a
+    /// node of its own under overload uid 1 (C1-identity.md "Repeat policy"),
+    /// no longer a tombstone.
     #[test]
     fn test_file_uids_csharp_types_of_one_arity_later_repeat() {
         let base = uid::compute(NodeKind::Class, "N/Conv.cs", None, "Conv");

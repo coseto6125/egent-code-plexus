@@ -1112,6 +1112,7 @@ impl ParseSpec for PythonSpec {
         capture: "function.anonymous",
         call_kinds: &["call"],
         key: AnonKey::AnyNodeSpan,
+        holds_token_call: None,
     });
     const BLIND: &'static [(&'static str, (&'static str, &'static str))] = &[
         (

@@ -1,8 +1,9 @@
 //! Declaration uids that keep same-named declarations distinct, in Dart
-//! (design_uid §5 rows R / FO / M, Phase 1 acceptance). A redefinition of a
-//! kind that keeps its own node is a second named node with its own uid, its
-//! own parent edge and its own calls; membership and containment edges bind
-//! the row that declares them; a merged repeat gives each edge once.
+//! (C1-identity.md "Collision shapes per language", rows R / FO / M). A
+//! redefinition of a kind that keeps its own node is a second named node with
+//! its own uid, its own parent edge and its own calls; membership and
+//! containment edges bind the row that declares them; a merged repeat gives
+//! each edge once.
 //!
 //! | Shape | Fixture |
 //! |---|---|
@@ -87,8 +88,9 @@ const GETTER_SETTER: &str = r#"class K {
 }
 "#;
 
-/// Stands for: the merge class (design_uid §2.3) keeps one named node, and
-/// a merged row gives its edge once (§3 row 5): one `HasProperty K -> v`.
+/// Stands for: the merge class (C1-identity.md "Repeat policy") keeps one named
+/// node, and a merged row gives its edge once (C1-identity.md "Edge sources
+/// bind by row"): one `HasProperty K -> v`.
 #[test]
 fn test_build_dart_getter_and_setter_merge_into_one_property() {
     let g = build(GETTER_SETTER);
@@ -103,8 +105,8 @@ fn test_build_dart_getter_and_setter_merge_into_one_property() {
 
 const LOCAL_TWINS: &str = "void a() {\n  void l() {}\n}\nvoid b() {\n  void l() {}\n}\n";
 
-/// Stands for: L (design_uid §5, phase 2). A local function `l` in each of
-/// two functions is two named nodes with two uids.
+/// Stands for: L (C1-identity.md "Collision shapes per language"). A local
+/// function `l` in each of two functions is two named nodes with two uids.
 #[test]
 fn test_build_dart_local_function_in_two_functions_two_nodes() {
     uid_chain_support::assert_twins(

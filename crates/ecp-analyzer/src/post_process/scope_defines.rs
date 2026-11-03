@@ -163,9 +163,10 @@ mod tests {
         edges.iter().map(|e| (e.source, e.target)).collect()
     }
 
-    /// Stands for: a merged repeat gives one `Defines` (design_uid §2.3),
-    /// also when its survivor is a row of an earlier input of its path. Two
-    /// inputs of `m.py`, each `x = …`: the second merges into the first.
+    /// Stands for: a merged repeat gives one `Defines` (C1-identity.md "Repeat
+    /// policy"), also when its survivor is a row of an earlier input of its
+    /// path. Two inputs of `m.py`, each `x = …`: the second merges into the
+    /// first.
     #[test]
     fn test_emit_edges_two_inputs_one_path_merged_row_defines_once() {
         let graphs = [

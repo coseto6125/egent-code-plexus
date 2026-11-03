@@ -454,6 +454,7 @@ mod rust_inline_test_flag;
 mod rust_instantiation_calls;
 mod rust_kafka_events;
 mod rust_lexical_scope;
+mod rust_macro_and_inline_mod_calls;
 mod rust_modules;
 mod rust_overrides_heritage;
 mod rust_parent_identity;

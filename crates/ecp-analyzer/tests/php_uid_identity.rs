@@ -1,8 +1,9 @@
 //! Declaration uids that keep same-named declarations distinct, in PHP
-//! (design_uid §5 rows R / FO / M, Phase 1 acceptance). A redefinition of a
-//! kind that keeps its own node is a second named node with its own uid, its
-//! own parent edge and its own calls; membership and containment edges bind
-//! the row that declares them; a merged repeat gives each edge once.
+//! (C1-identity.md "Collision shapes per language", rows R / FO / M). A
+//! redefinition of a kind that keeps its own node is a second named node with
+//! its own uid, its own parent edge and its own calls; membership and
+//! containment edges bind the row that declares them; a merged repeat gives
+//! each edge once.
 //!
 //! | Shape | Fixture |
 //! |---|---|
@@ -168,8 +169,8 @@ fn test_build_php_conditional_function_twice_keeps_two_nodes_with_own_calls() {
 const LOCAL_TWINS: &str =
     "<?php\nfunction a() {\n    function l() {}\n}\nfunction b() {\n    function l() {}\n}\n";
 
-/// Stands for: L (design_uid §5, phase 2). A nested `function l` in each of
-/// two functions is two named nodes with two uids.
+/// Stands for: L (C1-identity.md "Collision shapes per language"). A nested
+/// `function l` in each of two functions is two named nodes with two uids.
 #[test]
 fn test_build_php_nested_function_in_two_functions_two_nodes() {
     uid_chain_support::assert_twins(

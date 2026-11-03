@@ -106,8 +106,9 @@ fn named<'a>(g: &'a LocalGraph, name: &str) -> Vec<&'a ecp_core::analyzer::types
 // (same name, uid from `uid::overload`), not a tombstone. No lexical-scope slice opts Ruby in.
 
 /// Stands for: a `def` nested in a `def` keys on its container's anchor
-/// (design_uid §2.1, the `nested` stream), so it is a second `First` node,
-/// not an overload of the top-level one.
+/// (C1-identity.md "Declaration identity: fields and invariants", the `nested`
+/// stream), so it is a second `First` node, not an overload of the top-level
+/// one.
 #[test]
 fn test_parse_file_ruby_nested_fn_same_name_as_top_level_today_uid() {
     let rows = rows(&graph());

@@ -469,6 +469,7 @@ impl ParseSpec for PhpSpec {
             "scoped_call_expression",
         ],
         key: AnonKey::Span,
+        holds_token_call: None,
     });
     const BLIND: &'static [(&'static str, (&'static str, &'static str))] = &[
         (

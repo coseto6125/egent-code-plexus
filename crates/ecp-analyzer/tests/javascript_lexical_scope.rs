@@ -365,8 +365,8 @@ fn test_build_javascript_nested_fn_in_two_methods_two_nodes_no_has_method() {
         node(&g, PATH, "n", 7),
         node(&g, PATH, "helper", 8),
     );
-    // A method hashes its class (design uid §2.2), and a scoped `helper`
-    // hashes its method.
+    // A method hashes its class (C1-identity.md "Declaration identity: fields
+    // and invariants"), and a scoped `helper` hashes its method.
     let anchor = |name| {
         nested_uid(
             g.nodes[class as usize].uid,

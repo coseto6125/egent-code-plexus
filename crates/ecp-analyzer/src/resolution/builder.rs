@@ -4862,10 +4862,10 @@ mod tests {
         );
     }
 
-    /// Stands for: a redefinition is a node of its own (design uid §2.3).
-    /// Three `fn twice` in one C file are three named nodes under the base
-    /// uid and its overloads 1 and 2, each later one in `later_nodes` and in
-    /// no name table, and no BlindSpot reports them. Before the change the
+    /// Stands for: a redefinition is a node of its own (C1-identity.md "Repeat
+    /// policy"). Three `fn twice` in one C file are three named nodes under the
+    /// base uid and its overloads 1 and 2, each later one in `later_nodes` and
+    /// in no name table, and no BlindSpot reports them. Before the change the
     /// later two were tombstones sharing `!base`.
     #[test]
     fn test_pass1_register_nodes_three_redefinitions_later_nodes_own_uids() {
@@ -4938,9 +4938,9 @@ mod tests {
         let save = ecp_core::uid::compute(NodeKind::Method, "A.java", Some("A"), "save");
         let helper = ecp_core::uid::compute(NodeKind::Function, "A.java", None, "helper");
         // Stands for: the inputs of one path number as one file
-        // (`path_identities`): the second input's rows repeat the first's,
-        // and a repeated function is a redefinition with a node of its own
-        // (design uid §2.3), like the repeated method.
+        // (`path_identities`): the second input's rows repeat the first's, and
+        // a repeated function is a redefinition with a node of its own
+        // (C1-identity.md "Repeat policy"), like the repeated method.
         assert_eq!(
             out.nodes.iter().map(|n| n.uid).collect::<Vec<_>>(),
             vec![
@@ -5171,9 +5171,9 @@ mod tests {
         }
     }
 
-    /// Stands for: a redefined class is a later node of its own (design uid
-    /// §2.3) with its own bases, so its methods' `Overrides` resolve; the
-    /// first keeps its own.
+    /// Stands for: a redefined class is a later node of its own
+    /// (C1-identity.md "Repeat policy") with its own bases, so its methods'
+    /// `Overrides` resolve; the first keeps its own.
     #[test]
     fn test_pass1_9_supertypes_later_redefinition_keeps_own_bases() {
         // Ids: bases.py A=0, B=1; dup.py Dup=2, later Dup=3.

@@ -472,6 +472,7 @@ impl ParseSpec for RubySpec {
         capture: "function.anonymous",
         call_kinds: &["call"],
         key: AnonKey::Span,
+        holds_token_call: None,
     });
     const BLIND: &'static [(&'static str, (&'static str, &'static str))] = &[
         (

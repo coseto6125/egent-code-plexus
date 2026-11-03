@@ -304,3 +304,30 @@ fn bm25_cross_repo_rebuilt_at_head_stays_caveat_free() {
         "graphs rebuilt at HEAD are fresh — no caveat: {json}"
     );
 }
+
+/// Under `ECP_SKIP_BG_REBUILD` the warm-attach spawns no rebuild, so its
+/// stderr line must not announce one: an agent that reads
+/// `rebuild=background` waits for a rebuild that never starts.
+#[test]
+fn test_find_warm_attach_skip_bg_rebuild_stderr_says_skipped() {
+    let repo_tmp = tempfile::tempdir().unwrap();
+    let home_tmp = tempfile::tempdir().unwrap();
+    init_repo(repo_tmp.path(), "skip_marker_fn");
+    index_repo(repo_tmp.path(), home_tmp.path());
+    make_stale(repo_tmp.path());
+
+    let out = Command::new(ecp_bin())
+        .args(["find", "skip_marker_fn", "--format", "json"])
+        .current_dir(repo_tmp.path())
+        .env("HOME", home_tmp.path())
+        .env_remove("ECP_HOME")
+        .env("ECP_SKIP_BG_REBUILD", "1")
+        .output()
+        .expect("find failed to spawn");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(stderr.contains("l2.warm-attach"), "{stderr}");
+    assert!(stderr.contains("rebuild=skipped"), "{stderr}");
+    assert!(!stderr.contains("rebuild=background"), "{stderr}");
+}

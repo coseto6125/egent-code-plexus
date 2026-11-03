@@ -164,6 +164,7 @@ impl ParseSpec for JavaSpec {
         capture: "function.anonymous",
         call_kinds: &["method_invocation", "object_creation_expression"],
         key: AnonKey::NodeId,
+        holds_token_call: None,
     });
     const BLIND: &'static [(&'static str, (&'static str, &'static str))] = &[
         (

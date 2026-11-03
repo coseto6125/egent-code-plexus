@@ -213,9 +213,9 @@ class Outer {
     assert_own_members(&CppProvider::new().unwrap(), "src/staff.cpp", src);
 }
 
-/// Stands for: phase 2 of design uid (the container chain): the two
-/// `Employee` are two nodes, and each `impl` member binds the struct beside
-/// its own block.
+/// Stands for: the container chain (C1-identity.md "Declaration identity:
+/// fields and invariants"): the two `Employee` are two nodes, and each `impl`
+/// member binds the struct beside its own block.
 #[test]
 fn test_class_membership_rust_nested_same_name_type_owns_its_members() {
     let src = "struct Employee;

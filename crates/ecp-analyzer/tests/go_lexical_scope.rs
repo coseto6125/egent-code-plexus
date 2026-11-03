@@ -103,8 +103,8 @@ fn named<'a>(g: &'a LocalGraph, name: &str) -> Vec<&'a ecp_core::analyzer::types
 // owned by `outer`, so it never collides with the top-level function.
 
 /// Stands for: a closure variable inside a function keeps its callable
-/// container (design_uid §2.1: Variable keeps callables), so its uid is the
-/// `nested` stream under `outer`'s anchor.
+/// container (C1-identity.md "Container": Variable keeps callables), so its uid
+/// is the `nested` stream under `outer`'s anchor.
 #[test]
 fn test_parse_file_go_nested_fn_same_name_as_top_level_today_uid() {
     let rows = rows(&graph());

@@ -130,10 +130,10 @@ fn test_bind_site_c_module_top_literal_binds_file() {
     );
 }
 
-/// C rejects two definitions of one function and has no classes, so the
-/// only same-name pair in one file is a pair of `#ifdef` twins. Pass 1 keeps
-/// each as a node of its own, the second a later node of the first (design
-/// uid §2.3).
+/// C rejects two definitions of one function and has no classes, so the only
+/// same-name pair in one file is a pair of `#ifdef` twins. Pass 1 keeps each as
+/// a node of its own, the second a later node of the first (C1-identity.md
+/// "Repeat policy").
 const TWIN_SRC: &str = r#"#ifdef A
 int load(void) {
     fopen("conf/a.json", "r");
@@ -147,11 +147,11 @@ int load(void) {
 #endif
 "#;
 
-/// Stands for: each literal binds its own twin by span, and each `#ifdef`
-/// twin function is a node of its own (design uid §2.3), so `conf/b.json`'s
-/// edge starts at the second `load` (line 7), not at the first. Before the
-/// change the second twin was a tombstone and the edge started at the
-/// survivor on line 2.
+/// Stands for: each literal binds its own twin by span, and each `#ifdef` twin
+/// function is a node of its own (C1-identity.md "Repeat policy"), so
+/// `conf/b.json`'s edge starts at the second `load` (line 7), not at the first.
+/// Before the change the second twin was a tombstone and the edge started at
+/// the survivor on line 2.
 #[test]
 fn test_bind_site_c_ifdef_twin_functions_edges_start_at_own_twin() {
     let graph = parse(TWIN_SRC);
