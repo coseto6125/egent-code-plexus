@@ -19,8 +19,6 @@ use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::graph::{NodeKind, RelType, ZeroCopyGraph};
 use std::path::Path;
 
-use crate::uid_chain_support;
-
 const PATH: &str = "m.js";
 
 fn parse(src: &str) -> LocalGraph {
