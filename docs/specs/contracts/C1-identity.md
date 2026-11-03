@@ -124,7 +124,7 @@ line      := 1-based decimal start line
 | `` `Walk<'s, 't>`.next `` | a `next` whose owner text is exactly `Walk<'s, 't>`. `Walk.next` matches the owners `Walk<'s, 't>` and `Walk` (`test_qualifier_literal_matches_exact_text_only`). |
 | `pad@42` | a `pad` that starts on line 42. |
 | `--kind method` | `NodeKind::from_str` of the text; an unknown kind is a syntax error. `--kind function,method` is an unknown kind: `--kind` takes one kind. |
-| `--file cmd/main.go` | `\` becomes `/`, a leading `./` goes. A resolver keeps the best tier present: `Equal`, then `Suffix` (`/needle`), then `Substring`. |
+| `--file cmd/main.go` | On Windows `\` becomes `/` (`os_path_to_slash`); on Unix `\` stays a file-name character. A leading `./` goes. A resolver keeps the best tier present: `Equal`, then `Suffix` (`/needle`), then `Substring`. |
 
 | Rule | Statement |
 |---|---|
