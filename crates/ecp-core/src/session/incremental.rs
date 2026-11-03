@@ -1548,10 +1548,10 @@ mod tests {
         );
     }
 
-    /// Stands for: a repeated container keeps its own node (design_uid §2.3,
-    /// a `Namespace` repeat is `Later`), and scope `Defines` bind by row.
-    /// `namespace Acme` twice: the file defines each block once, and each
-    /// block defines the class of its own body.
+    /// Stands for: a repeated container keeps its own node (C1-identity.md
+    /// "Repeat policy", a `Namespace` repeat is `Later`), and scope `Defines`
+    /// bind by row. `namespace Acme` twice: the file defines each block once,
+    /// and each block defines the class of its own body.
     #[test]
     fn test_replay_repeated_namespace_defines_each_block_and_its_own_members() {
         let bytes = clean_base();
@@ -1585,8 +1585,8 @@ mod tests {
     }
 
     /// Stands for: a merged row maps to its survivor and is deduped, never
-    /// skipped (design_uid §3 row 4). Python `x = 1; x = 2` gives exactly one
-    /// `File -> x`.
+    /// skipped (C1-identity.md "Edge sources bind by row"). Python
+    /// `x = 1; x = 2` gives exactly one `File -> x`.
     #[test]
     fn test_replay_python_variable_assigned_twice_defines_once() {
         let bytes = clean_base();
@@ -1703,11 +1703,11 @@ mod tests {
         assert_eq!(pairs, [(base, base + 1), (base + 2, base + 3)]);
     }
 
-    /// Stands for: enum containment binds by span and row (design_uid §3
-    /// row 22). The second input of `src/a.rs` repeats the enum, which keeps
-    /// its own node, so its variant pairs with the enum whose span holds it,
-    /// never with the first input's or with the same-name enum of another
-    /// path.
+    /// Stands for: enum containment binds by span and row (C1-identity.md "Edge
+    /// sources bind by row"). The second input of `src/a.rs` repeats the enum,
+    /// which keeps its own node, so its variant pairs with the enum whose span
+    /// holds it, never with the first input's or with the same-name enum of
+    /// another path.
     #[test]
     fn test_replay_two_inputs_of_one_path_variant_pairs_enum_of_same_path() {
         let bytes = clean_base();
@@ -1751,11 +1751,11 @@ mod tests {
         );
     }
 
-    /// Stands for: enum containment binds by span and row (design_uid §3
-    /// row 22), on the overlay as on the full build. Rust `#[cfg]` twins of
-    /// `enum E { X }`, a Java `enum E { X }` nested in classes `A` and `B`,
-    /// and a C++ `enum E { X }` in namespaces `n` and `m`: each enum defines
-    /// the variant its own span holds.
+    /// Stands for: enum containment binds by span and row (C1-identity.md "Edge
+    /// sources bind by row"), on the overlay as on the full build. Rust
+    /// `#[cfg]` twins of `enum E { X }`, a Java `enum E { X }` nested in
+    /// classes `A` and `B`, and a C++ `enum E { X }` in namespaces `n` and `m`:
+    /// each enum defines the variant its own span holds.
     #[test]
     fn test_enum_variant_defines_two_mods_same_enum_binds_by_span() {
         let bytes = clean_base();
@@ -2495,9 +2495,10 @@ mod tests {
         );
     }
 
-    /// Stands for: membership binds by row (design_uid §3 row 5). A class
-    /// declared twice in one file keeps two nodes, and each owns the members
-    /// of its own body: `HasMethod K@1 -> a`, `K@2 -> b`, nothing else.
+    /// Stands for: membership binds by row (C1-identity.md "Edge sources bind
+    /// by row"). A class declared twice in one file keeps two nodes, and each
+    /// owns the members of its own body: `HasMethod K@1 -> a`, `K@2 -> b`,
+    /// nothing else.
     #[test]
     fn test_replay_class_declared_twice_each_owns_its_own_body() {
         let bytes = clean_base();

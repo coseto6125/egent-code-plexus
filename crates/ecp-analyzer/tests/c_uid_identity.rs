@@ -1,8 +1,9 @@
 //! Declaration uids that keep same-named declarations distinct, in C
-//! (design_uid §5 rows R / FO / M, Phase 1 acceptance). A redefinition of a
-//! kind that keeps its own node is a second named node with its own uid, its
-//! own parent edge and its own calls; membership and containment edges bind
-//! the row that declares them; a merged repeat gives each edge once.
+//! (C1-identity.md "Collision shapes per language", rows R / FO / M). A
+//! redefinition of a kind that keeps its own node is a second named node with
+//! its own uid, its own parent edge and its own calls; membership and
+//! containment edges bind the row that declares them; a merged repeat gives
+//! each edge once.
 //!
 //! | Shape | Fixture |
 //! |---|---|
@@ -198,8 +199,8 @@ fn test_build_c_ifdef_fn_twins_keep_two_nodes_with_own_calls() {
     );
 }
 
-/// Stands for: a redefined struct keeps its node and owns the fields of its
-/// own body (design_uid §2.3, §3 row 5).
+/// Stands for: a redefined struct keeps its node and owns the fields of its own
+/// body (C1-identity.md "Repeat policy" and "Edge sources bind by row").
 #[test]
 fn test_build_c_ifdef_struct_twins_each_own_their_own_field() {
     let g = build(IFDEF_STRUCT_TWINS);
@@ -214,9 +215,9 @@ fn test_build_c_ifdef_struct_twins_each_own_their_own_field() {
     );
 }
 
-/// Stands for: the merge class (design_uid §2.3) keeps one named node, and
-/// a merged row gives its edge once (§3 rows 4, 5): one `HasProperty`
-/// `T -> v`, one `File -> g`.
+/// Stands for: the merge class (C1-identity.md "Repeat policy") keeps one named
+/// node, and a merged row gives its edge once (C1-identity.md "Edge sources
+/// bind by row"): one `HasProperty` `T -> v`, one `File -> g`.
 #[test]
 fn test_build_c_if_elif_else_field_and_variable_merge_into_one_node() {
     let g = build(IF_ELIF_ELSE);
@@ -232,9 +233,9 @@ fn test_build_c_if_elif_else_field_and_variable_merge_into_one_node() {
 
 const LOCAL_TWINS: &str = "void a(void) {\n    struct L {\n        int x;\n    };\n}\nvoid b(void) {\n    struct L {\n        int x;\n    };\n}\n";
 
-/// Stands for: L (design_uid §5, phase 2). A local `struct L` in each of
-/// two functions is two named nodes, and so is the field of each: a field
-/// keys on its struct's anchor.
+/// Stands for: L (C1-identity.md "Collision shapes per language"). A local
+/// `struct L` in each of two functions is two named nodes, and so is the field
+/// of each: a field keys on its struct's anchor.
 #[test]
 fn test_build_c_local_struct_in_two_functions_two_nodes() {
     let provider = CProvider::new().unwrap();

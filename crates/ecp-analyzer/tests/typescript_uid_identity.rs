@@ -1,8 +1,9 @@
 //! Declaration uids that keep same-named declarations distinct, in TypeScript
-//! (design_uid §5 rows R / FO / M, Phase 1 acceptance). A redefinition of a
-//! kind that keeps its own node is a second named node with its own uid, its
-//! own parent edge and its own calls; membership and containment edges bind
-//! the row that declares them; a merged repeat gives each edge once.
+//! (C1-identity.md "Collision shapes per language", rows R / FO / M). A
+//! redefinition of a kind that keeps its own node is a second named node with
+//! its own uid, its own parent edge and its own calls; membership and
+//! containment edges bind the row that declares them; a merged repeat gives
+//! each edge once.
 //!
 //! | Shape | Fixture |
 //! |---|---|
@@ -173,8 +174,8 @@ fn test_build_typescript_function_twice_keeps_two_nodes_with_own_calls() {
     );
 }
 
-/// Stands for: membership binds by row (design_uid §3 row 5). Each part of
-/// a merged interface owns the members of its own body.
+/// Stands for: membership binds by row (C1-identity.md "Edge sources bind by
+/// row"). Each part of a merged interface owns the members of its own body.
 #[test]
 fn test_build_typescript_interface_twice_each_owns_its_own_member() {
     let g = build(INTERFACE_TWICE);

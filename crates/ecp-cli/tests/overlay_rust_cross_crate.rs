@@ -1273,16 +1273,16 @@ fn test_overlay_rust_trait_default_through_blanket_impl_matches_reindex() {
     }
 }
 
-/// `m.rs` declares `mod inner { pub fn helper }` inside `fn setup` and again
-/// at module level. A `mod` breaks the lexical link, so both `helper`s are
+/// `m.rs` declares `mod inner { pub fn helper }` inside `fn setup` and again at
+/// module level. A `mod` breaks the lexical link, so both `helper`s are
 /// unscoped `Function`s owned by `inner`: they share a base uid, and Pass 1
-/// keeps the module-level one as a redefinition of the body-local first, a
-/// node of its own in no name table (design uid §2.3). It is a module item
-/// (`ladder::module_item`), so `crate::m::inner::helper()` binds it through
-/// the module tree on both sides, with `lib.rs` dirty (the overlay reads `m.rs` from the
-/// archive) and with `m.rs` dirty. `other.rs` declares a second
-/// `inner::helper`, so no tier reaches `m.rs` by the name alone. Before the
-/// fix the overlay with `m.rs` clean took every callable inside a body for
+/// keeps the module-level one as a redefinition of the body-local first, a node
+/// of its own in no name table (C1-identity.md "Repeat policy"). It is a module
+/// item (`ladder::module_item`), so `crate::m::inner::helper()` binds it
+/// through the module tree on both sides, with `lib.rs` dirty (the overlay
+/// reads `m.rs` from the archive) and with `m.rs` dirty. `other.rs` declares a
+/// second `inner::helper`, so no tier reaches `m.rs` by the name alone. Before
+/// the fix the overlay with `m.rs` clean took every callable inside a body for
 /// body-local and bound nothing.
 #[test]
 fn test_overlay_rust_module_level_twin_of_body_local_fn_binds_matches_reindex() {

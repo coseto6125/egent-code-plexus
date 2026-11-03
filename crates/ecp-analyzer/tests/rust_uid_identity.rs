@@ -1,8 +1,9 @@
 //! Declaration uids that keep same-named declarations distinct, in Rust
-//! (design_uid §5 rows R / FO / M, Phase 1 acceptance). A redefinition of a
-//! kind that keeps its own node is a second named node with its own uid, its
-//! own parent edge and its own calls; membership and containment edges bind
-//! the row that declares them; a merged repeat gives each edge once.
+//! (C1-identity.md "Collision shapes per language", rows R / FO / M). A
+//! redefinition of a kind that keeps its own node is a second named node with
+//! its own uid, its own parent edge and its own calls; membership and
+//! containment edges bind the row that declares them; a merged repeat gives
+//! each edge once.
 //!
 //! | Shape | Fixture |
 //! |---|---|
@@ -260,9 +261,9 @@ fn test_build_rust_cfg_fn_twins_keep_two_nodes_with_own_calls() {
     );
 }
 
-/// Stands for: enum containment binds by span and row (design_uid §3
-/// row 22). Each `#[cfg]` twin keeps its node and defines the `X` of its
-/// own body.
+/// Stands for: enum containment binds by span and row (C1-identity.md "Edge
+/// sources bind by row"). Each `#[cfg]` twin keeps its node and defines the `X`
+/// of its own body.
 #[test]
 fn test_enum_variant_defines_two_mods_same_enum_binds_by_span() {
     let g = build(CFG_ENUM_TWINS);
@@ -270,20 +271,20 @@ fn test_enum_variant_defines_two_mods_same_enum_binds_by_span() {
     assert_enum_rows(CFG_ENUM_TWINS, "X", &[(2, 3), (7, 8)]);
 }
 
-/// Stands for: enum containment binds by span and row. `a::E` and `b::E`
-/// differ by owner, their variants do not; each enum defines the `X` of its
-/// own body (design_uid Phase 2 acceptance, which the span binding already
+/// Stands for: enum containment binds by span and row. `a::E` and `b::E` differ
+/// by owner, their variants do not; each enum defines the `X` of its own body
+/// (C1-identity.md "Edge sources bind by row", which the span binding already
 /// meets).
 #[test]
 fn test_enum_variant_defines_two_mods_each_enum_defines_own_variant() {
     assert_enum_rows(MOD_ENUMS, "X", &[(2, 3), (8, 9)]);
 }
 
-/// Stands for: `impl S` twice with a different method in each (design_uid §5
-/// row R, spec #5) is two `Impl` nodes with distinct uids and no
-/// `uid-collision`. The build gives each method its `HasMethod` from the
-/// owner `Struct S`, once each: no `Impl` node is a member's source, so the
-/// two blocks do not change who owns `a` and `b`.
+/// Stands for: `impl S` twice with a different method in each (C1-identity.md
+/// "Collision shapes per language" row R) is two `Impl` nodes with distinct
+/// uids and no `uid-collision`. The build gives each method its `HasMethod`
+/// from the owner `Struct S`, once each: no `Impl` node is a member's source,
+/// so the two blocks do not change who owns `a` and `b`.
 #[test]
 fn test_build_rust_impl_twice_keeps_two_impl_nodes_methods_owned_by_struct() {
     let g = build(TWO_IMPLS);
@@ -302,9 +303,10 @@ fn test_build_rust_impl_twice_keeps_two_impl_nodes_methods_owned_by_struct() {
     assert_eq!(edges(&g, RelType::HasMethod), expected);
 }
 
-/// Stands for: the container chain (design_uid phase 2). `a::E` and `b::E`
-/// key on two module anchors, so they are two named nodes with two uids,
-/// and so are their two `X`, on the full build and the overlay.
+/// Stands for: the container chain (C1-identity.md "Declaration identity:
+/// fields and invariants"). `a::E` and `b::E` key on two module anchors, so
+/// they are two named nodes with two uids, and so are their two `X`, on the
+/// full build and the overlay.
 #[test]
 fn test_build_rust_two_mods_same_enum_two_enums_two_variants() {
     let provider = RustProvider::new().unwrap();
@@ -314,9 +316,9 @@ fn test_build_rust_two_mods_same_enum_two_enums_two_variants() {
 
 const NS_TWINS: &str = "mod o1 {\n    mod inner {\n        pub fn f() {}\n    }\n}\nmod o2 {\n    mod inner {\n        pub fn f() {}\n    }\n}\n";
 
-/// Stands for: NS (design_uid §5, phase 2). `o1::inner::f` and
-/// `o2::inner::f` chain on two different `inner` anchors: two named
-/// `inner`, two named `f`.
+/// Stands for: NS (C1-identity.md "Collision shapes per language").
+/// `o1::inner::f` and `o2::inner::f` chain on two different `inner` anchors:
+/// two named `inner`, two named `f`.
 #[test]
 fn test_build_rust_twin_module_paths_two_nodes() {
     let provider = RustProvider::new().unwrap();
@@ -326,9 +328,9 @@ fn test_build_rust_twin_module_paths_two_nodes() {
 
 const LOCAL_CONST_TWINS: &str = "fn a() {\n    fn helper() {\n        const X: u8 = 1;\n    }\n}\nfn b() {\n    fn helper() {\n        const X: u8 = 2;\n    }\n}\n";
 
-/// Stands for: a Const keeps its callable container (design_uid §2.1), so
-/// a local `const X` in each of two nested `helper`s is two named `X` with
-/// two uids, not one merged entity.
+/// Stands for: a Const keeps its callable container (C1-identity.md
+/// "Container"), so a local `const X` in each of two nested `helper`s is two
+/// named `X` with two uids, not one merged entity.
 #[test]
 fn test_assign_file_rust_local_const_in_two_helpers_two_nodes() {
     let provider = RustProvider::new().unwrap();
@@ -339,8 +341,8 @@ fn test_assign_file_rust_local_const_in_two_helpers_two_nodes() {
 const TWO_MOD_IMPLS: &str = "mod a {\n    pub struct S;\n    impl S {\n        fn m(&self) {}\n    }\n}\nmod b {\n    pub struct S;\n    impl S {\n        fn m(&self) {}\n    }\n}\n";
 
 /// Stands for: the owner pass binds the type row beside the `impl` block
-/// (design_uid phase 2, rule 1): each `m` is a member of the `S` of its own
-/// module, once.
+/// (C1-identity.md "Edge sources bind by row", owner pass, step 1): each `m` is
+/// a member of the `S` of its own module, once.
 #[test]
 fn test_class_membership_rust_two_mods_same_impl_binds_own_method() {
     let provider = RustProvider::new().unwrap();
@@ -351,9 +353,9 @@ fn test_class_membership_rust_two_mods_same_impl_binds_own_method() {
 const IMPORTED_RECEIVER: &str = "mod b;\nmod a {\n    pub struct S;\n}\nmod c {\n    use super::b::S;\n    impl S {\n        fn m(&self) {}\n    }\n}\n";
 
 /// Stands for: an `impl` of a type no row beside the block declares (here
-/// imported from `b`) binds no same-named `a::S` of the file (design_uid
-/// phase 2, rule 2); the `impl` block on line 7 owns `m`, so `m` keeps a
-/// parent.
+/// imported from `b`) binds no same-named `a::S` of the file (C1-identity.md
+/// "Edge sources bind by row", owner pass, step 2); the `impl` block on line 7
+/// owns `m`, so `m` keeps a parent.
 #[test]
 fn test_class_membership_rust_impl_imported_receiver_binds_impl_block() {
     let provider = RustProvider::new().unwrap();
@@ -367,8 +369,9 @@ fn test_class_membership_rust_impl_imported_receiver_binds_impl_block() {
 
 const IMPL_ONLY: &str = "use crate::model::S;\nimpl S {\n    fn m(&self) {}\n}\n";
 
-/// Stands for: a file of `impl` blocks alone, for a type of another file,
-/// still gives each member its block as owner (owner pass, rule 2).
+/// Stands for: a file of `impl` blocks alone, for a type of another file, still
+/// gives each member its block as owner (C1-identity.md "Edge sources bind by
+/// row", owner pass, step 2).
 #[test]
 fn test_class_membership_rust_impl_only_file_binds_impl_block() {
     let provider = RustProvider::new().unwrap();

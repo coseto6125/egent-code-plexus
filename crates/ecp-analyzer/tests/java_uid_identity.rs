@@ -1,8 +1,9 @@
 //! Declaration uids that keep same-named declarations distinct, in Java
-//! (design_uid §5 rows R / FO / M, Phase 1 acceptance). A redefinition of a
-//! kind that keeps its own node is a second named node with its own uid, its
-//! own parent edge and its own calls; membership and containment edges bind
-//! the row that declares them; a merged repeat gives each edge once.
+//! (C1-identity.md "Collision shapes per language", rows R / FO / M). A
+//! redefinition of a kind that keeps its own node is a second named node with
+//! its own uid, its own parent edge and its own calls; membership and
+//! containment edges bind the row that declares them; a merged repeat gives
+//! each edge once.
 //!
 //! | Shape | Fixture |
 //! |---|---|
@@ -100,9 +101,9 @@ class B {
 }
 "#;
 
-/// Stands for: enum containment binds by span and row (design_uid §3
-/// row 22). Each nested `E` defines the `X` of its own body, never the other
-/// one's.
+/// Stands for: enum containment binds by span and row (C1-identity.md "Edge
+/// sources bind by row"). Each nested `E` defines the `X` of its own body,
+/// never the other one's.
 #[test]
 fn test_enum_variant_defines_two_mods_same_enum_binds_by_span() {
     assert_enum_rows(NESTED_ENUMS, "X", &[(2, 2), (5, 5)]);
@@ -140,10 +141,10 @@ fn test_build_java_local_class_in_two_methods_each_overrides_base() {
 
 const NESTED_TWINS: &str = "class O1 {\n    class H {\n        void run() {}\n    }\n}\nclass O2 {\n    class H {\n        void run() {}\n    }\n}\n";
 
-/// Stands for: N1 (design_uid §5, phase 2). `O1.H` and `O2.H` are
-/// two named nodes with two uids on the full build and the overlay, and each
-/// `run` is a member of its own `H` only, with no `overload_set` reference
-/// between the two `run`.
+/// Stands for: N1 (C1-identity.md "Collision shapes per language"). `O1.H` and
+/// `O2.H` are two named nodes with two uids on the full build and the overlay,
+/// and each `run` is a member of its own `H` only, with no `overload_set`
+/// reference between the two `run`.
 #[test]
 fn test_build_java_twin_nested_types_two_nodes_own_members() {
     let provider = JavaProvider::new().unwrap();
@@ -162,8 +163,9 @@ fn test_build_java_twin_nested_types_two_nodes_own_members() {
 
 const LOCAL_TWINS: &str = "class T {\n    void a() {\n        class L {}\n    }\n    void b() {\n        class L {}\n    }\n}\n";
 
-/// Stands for: L (design_uid §5, phase 2). A local class in each of two
-/// methods keys on its own method's anchor: two named `L`, two uids.
+/// Stands for: L (C1-identity.md "Collision shapes per language"). A local
+/// class in each of two methods keys on its own method's anchor: two named `L`,
+/// two uids.
 #[test]
 fn test_build_java_local_class_in_two_methods_two_nodes() {
     uid_chain_support::assert_twins(
@@ -177,9 +179,9 @@ fn test_build_java_local_class_in_two_methods_two_nodes() {
 
 const DEEP_TWINS: &str = "class A {\n    class B {\n        class H {}\n    }\n}\nclass C {\n    class B {\n        class H {}\n    }\n}\n";
 
-/// Stands for: N2 at depth 2 (design_uid §5, phase 2). `A.B.H` and `C.B.H`
-/// share every short owner, so only the container chain (two different `B`
-/// anchors) keeps them two named nodes.
+/// Stands for: N2 at depth 2 (C1-identity.md "Collision shapes per language").
+/// `A.B.H` and `C.B.H` share every short owner, so only the container chain
+/// (two different `B` anchors) keeps them two named nodes.
 #[test]
 fn test_build_java_depth_two_twin_types_two_nodes() {
     let provider = JavaProvider::new().unwrap();

@@ -1,8 +1,9 @@
 //! Declaration uids that keep same-named declarations distinct, in Kotlin
-//! (design_uid §5 rows R / FO / M, Phase 1 acceptance). A redefinition of a
-//! kind that keeps its own node is a second named node with its own uid, its
-//! own parent edge and its own calls; membership and containment edges bind
-//! the row that declares them; a merged repeat gives each edge once.
+//! (C1-identity.md "Collision shapes per language", rows R / FO / M). A
+//! redefinition of a kind that keeps its own node is a second named node with
+//! its own uid, its own parent edge and its own calls; membership and
+//! containment edges bind the row that declares them; a merged repeat gives
+//! each edge once.
 //!
 //! | Shape | Fixture |
 //! |---|---|
@@ -181,10 +182,10 @@ fn test_build_kotlin_top_level_overloads_keep_two_nodes_with_own_calls() {
 
 const NESTED_TWINS: &str = "class O1 {\n    class H {\n        fun run() {}\n    }\n}\nclass O2 {\n    class H {\n        fun run() {}\n    }\n}\n";
 
-/// Stands for: N1 and N2 (design_uid §5, phase 2). `O1.H` and `O2.H` are
-/// two named nodes with two uids on the full build and the overlay, and each
-/// `run` is a member of its own `H` only, with no `overload_set` reference
-/// between the two `run`.
+/// Stands for: N1 and N2 (C1-identity.md "Collision shapes per language").
+/// `O1.H` and `O2.H` are two named nodes with two uids on the full build and
+/// the overlay, and each `run` is a member of its own `H` only, with no
+/// `overload_set` reference between the two `run`.
 #[test]
 fn test_build_kotlin_twin_nested_types_two_nodes_own_members() {
     let provider = KotlinProvider::new().unwrap();
@@ -211,8 +212,8 @@ fn test_build_kotlin_depth_two_twin_types_find_two() {
 
 const LOCAL_TWINS: &str = "fun a() {\n    fun l() {}\n}\nfun b() {\n    fun l() {}\n}\n";
 
-/// Stands for: L (design_uid §5, phase 2). A local `fun l` in each of two
-/// functions is two named nodes with two uids.
+/// Stands for: L (C1-identity.md "Collision shapes per language"). A local
+/// `fun l` in each of two functions is two named nodes with two uids.
 #[test]
 fn test_build_kotlin_local_fun_in_two_functions_two_nodes() {
     uid_chain_support::assert_twins(

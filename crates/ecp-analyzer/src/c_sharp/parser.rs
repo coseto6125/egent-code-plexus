@@ -314,6 +314,7 @@ impl ParseSpec for CSharpSpec {
         capture: "function.anonymous",
         call_kinds: &["invocation_expression"],
         key: AnonKey::Span,
+        holds_token_call: None,
     });
     const BLIND: &'static [(&'static str, (&'static str, &'static str))] = &[
         (

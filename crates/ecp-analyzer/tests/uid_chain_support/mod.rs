@@ -1,7 +1,8 @@
-//! Shared helpers for the container-chain cases (design_uid phase 2) of the
-//! `<lang>_uid_identity` tests: the §5 shapes N1 (a member of one of two
-//! same-named nested types), N2 (the two nested types), NS (one module path
-//! under two modules) and L (a local declaration in two callables).
+//! Shared helpers for the container-chain cases (C1-identity.md "Collision
+//! shapes per language") of the `<lang>_uid_identity` tests: the shapes N1 (a
+//! member of one of two same-named nested types), N2 (the two nested types), NS
+//! (one module path under two modules) and L (a local declaration in two
+//! callables).
 #![allow(dead_code)]
 
 use ecp_analyzer::resolution::builder::GraphBuilder;

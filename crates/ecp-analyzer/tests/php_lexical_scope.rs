@@ -100,9 +100,10 @@ fn named<'a>(g: &'a LocalGraph, name: &str) -> Vec<&'a ecp_core::analyzer::types
     out
 }
 
-/// Stands for: a function nested in a callable keys on its container's
-/// anchor (design_uid §2.1, the `nested` stream), so it is a second `First`
-/// node beside the top-level one, not an overload of it.
+/// Stands for: a function nested in a callable keys on its container's anchor
+/// (C1-identity.md "Declaration identity: fields and invariants", the `nested`
+/// stream), so it is a second `First` node beside the top-level one, not an
+/// overload of it.
 #[test]
 fn test_parse_file_php_nested_fn_same_name_as_top_level_today_uid() {
     let rows = rows(&graph());

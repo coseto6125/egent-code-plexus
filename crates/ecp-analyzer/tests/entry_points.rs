@@ -565,8 +565,8 @@ fn entry_targets(graph: &ecp_core::graph::ZeroCopyGraph) -> Vec<u32> {
         .collect()
 }
 
-/// Stands for: `#[cfg]` twins of `fn main` are one declaration, so one
-/// marker binds the first, as a call to `main` does (design_uid §2.3).
+/// Stands for: `#[cfg]` twins of `fn main` are one declaration, so one marker
+/// binds the first, as a call to `main` does (C1-identity.md "Repeat policy").
 /// Before the fix both twins were named rivals and the file had no marker.
 #[test]
 fn test_build_rust_cfg_twin_mains_one_entrypoint_binds_first() {

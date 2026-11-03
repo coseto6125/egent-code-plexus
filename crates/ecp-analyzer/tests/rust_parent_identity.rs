@@ -1,9 +1,10 @@
-//! A Rust impl member hashes its `impl` block, whose key holds the trait
-//! (the container chain, design uid §2.2 and §2.5; slice R-PI used a
-//! `Discriminator::ImplTrait` for it), so a parent keeps its identity before
-//! a scoped child hashes it, and pairing reads that identity, never an
-//! ordinal (`docs/specs/contracts/C1-identity.md`, "File assignment" and
-//! "Overlay pairing").
+//! A Rust impl member hashes its `impl` block, whose key holds the trait (the
+//! container chain, C1-identity.md "Declaration identity: fields and
+//! invariants" and "File assignment"; slice R-PI hashed the trait through a
+//! discriminator), so a parent keeps its identity before a scoped child hashes
+//! it, and pairing reads that identity, never an ordinal
+//! (`docs/specs/contracts/C1-identity.md`, "File assignment" and "Overlay
+//! pairing").
 //!
 //! Every fixture runs through the Rust parser, so the spans and owners are
 //! the ones the index and the overlay read.
@@ -70,11 +71,12 @@ fn swapped(first: &str, second: &str) -> LocalGraph {
     ))
 }
 
-/// Stands for: design uid §6 phase 2 red-proof. Each `fmt` hashes its own
-/// `impl` block, so the swap keeps every anchor, every stored uid and every
-/// scoped `pad` uid; the `Display` `fmt` is the first of its own base uid in
-/// both orders. Red before the chain: the two `fmt` shared one base uid, so
-/// the swap moved the `Display` `fmt` to `Later { ordinal: 1 }`.
+/// Stands for: C1-identity.md "File assignment", the swapped-impl example. Each
+/// `fmt` hashes its own `impl` block, so the swap keeps every anchor, every
+/// stored uid and every scoped `pad` uid; the `Display` `fmt` is the first of
+/// its own base uid in both orders. Red before the chain: the two `fmt` shared
+/// one base uid, so the swap moved the `Display` `fmt` to
+/// `Later { ordinal: 1 }`.
 #[test]
 fn test_assign_file_rust_swapped_impls_fmt_keeps_anchor() {
     let (before, after) = (swapped("Display", "Debug"), swapped("Debug", "Display"));
@@ -228,7 +230,6 @@ fn test_assign_file_sibling_blocks_same_name_marked_ambiguous() {
             name: &n.name,
             parent,
             container,
-            discriminator: None,
             arity: None,
             arity_scope: None,
         })

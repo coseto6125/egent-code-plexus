@@ -218,14 +218,20 @@ pub fn attach_to_enclosing(
 /// The same walk records each bare name the body uses as a value
 /// ([`NameRef`]), once per its smallest enclosing function, else value
 /// declaration ([`ReadContainers`]), as `names` describes.
+///
+/// `called` holds the node ids of bare names the language's call walker
+/// already recorded as calls (Rust macro arguments, `println!("{}", f())`):
+/// such a name reads no value, so one site gives one edge. Empty for every
+/// other language.
 pub fn extract_field_reads(
     root: Node<'_>,
     source: &[u8],
     nodes: &mut [RawNode],
     field_kinds: &[&str],
     names: &NameRefSpec,
+    called: &CalledNames,
 ) {
-    extract_field_reads_with_literal_key_facts(root, source, nodes, field_kinds, names, None);
+    field_reads_walk(root, source, nodes, field_kinds, names, None, called);
 }
 
 /// Like [`extract_field_reads`], with facts that classify keyed composite
@@ -237,6 +243,31 @@ pub fn extract_field_reads_with_literal_key_facts(
     field_kinds: &[&str],
     names: &NameRefSpec,
     literal_key_facts: Option<&LiteralKeyFacts>,
+) {
+    let called = CalledNames::default();
+    field_reads_walk(
+        root,
+        source,
+        nodes,
+        field_kinds,
+        names,
+        literal_key_facts,
+        &called,
+    );
+}
+
+/// Node ids of bare names a call walker recorded as calls
+/// ([`extract_field_reads`]).
+pub type CalledNames = rustc_hash::FxHashSet<usize>;
+
+fn field_reads_walk(
+    root: Node<'_>,
+    source: &[u8],
+    nodes: &mut [RawNode],
+    field_kinds: &[&str],
+    names: &NameRefSpec,
+    literal_key_facts: Option<&LiteralKeyFacts>,
+    called: &CalledNames,
 ) {
     let mut containers = ReadContainers::new(nodes);
     if containers.is_empty() {
@@ -269,7 +300,7 @@ pub fn extract_field_reads_with_literal_key_facts(
         }
         let mut scope = frame.scope;
         if !matches!(scope, NameScope::Skip | NameScope::Off)
-            && scan.visit(&frame, kind, source, &mut memo)
+            && scan.visit(&frame, kind, source, &mut memo, called)
         {
             scope = NameScope::Off;
         }
@@ -934,6 +965,7 @@ impl<'s> NameScan<'s> {
         kind: u32,
         source: &'s [u8],
         memo: &mut KindMemo<'_>,
+        called: &CalledNames,
     ) -> bool {
         let n = frame.node;
         let spec = memo.spec;
@@ -959,7 +991,12 @@ impl<'s> NameScan<'s> {
                 {
                     self.bindings.push(binding);
                 }
-                NameScope::Value if spec.reads_value(n, frame, memo) => {
+                // The emptiness check first: no other language fills the
+                // set, and this runs at every bare name of every file.
+                NameScope::Value
+                    if spec.reads_value(n, frame, memo)
+                        && (called.is_empty() || !called.contains(&n.id())) =>
+                {
                     self.reads.push(PendingName {
                         pos: start_pos(n),
                         name: Cow::Borrowed(name),

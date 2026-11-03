@@ -619,8 +619,9 @@ pub struct OverlayView {
 }
 
 /// A group of base declarations the overlay could not pair by identity: the
-/// same (path, kind, owner, name) with no `Signature` discriminator to tell
-/// the members apart. See [`OverlayView::hidden_declarations`].
+/// same (path, kind, owner, name) with no semantic fact to tell the members
+/// apart (a future `Signature` fact, C1-identity.md Open point 2). See
+/// [`OverlayView::hidden_declarations`].
 #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct HiddenDecl {
     pub path: String,
@@ -1727,15 +1728,15 @@ impl OverlayView {
     }
 }
 
-/// The base node each declaration of one dirty path replaces, in slice
-/// order: [`pair_by_anchor`] between the anchors of `identities` (the
-/// path's parse, its inputs concatenated) and the anchors of `base` (the
-/// path's base nodes in graph order, each `graph.files` entry one input of
-/// the same [`path_identities`]). A declaration pairs only when its anchor
-/// occurs once on each side, so an overload set or a redefinition group
-/// without a discriminator pairs nothing, and its base members are hidden
-/// ([`HiddenDecl`]): an ordinal proves nothing about which member an edit
-/// kept. Repeated `Impl` blocks are the one exception
+/// The base node each declaration of one dirty path replaces, in slice order:
+/// [`pair_by_anchor`] between the anchors of `identities` (the path's parse,
+/// its inputs concatenated) and the anchors of `base` (the path's base nodes in
+/// graph order, each `graph.files` entry one input of the same
+/// [`path_identities`]). A declaration pairs only when its anchor occurs once
+/// on each side, so an overload set or a redefinition group has no semantic
+/// fact to tell its members apart and pairs nothing, and its base members are
+/// hidden ([`HiddenDecl`]): an ordinal proves nothing about which member an
+/// edit kept. Repeated `Impl` blocks are the one exception
 /// ([`pair_repeated_impls`]).
 ///
 /// A `Duplicate` row (a merged repeat of a property, variable or constant)
@@ -2260,10 +2261,10 @@ mod tests {
     }
 
     /// Stands for: a repeated `enclosing` and a repeated closure are later
-    /// nodes of their own (design uid §2.3). Each first links its repeat
-    /// (`overload_set` References), then each closure links from the node
-    /// whose lines enclose it, the second `enclosing`. The new file's `File`
-    /// node and its replayed `Defines` (F7a-1) are not what this pins.
+    /// nodes of their own (C1-identity.md "Repeat policy"). Each first links
+    /// its repeat (`overload_set` References), then each closure links from the
+    /// node whose lines enclose it, the second `enclosing`. The new file's
+    /// `File` node and its replayed `Defines` (F7a-1) are not what this pins.
     #[test]
     fn test_build_repeated_enclosing_and_closure_link_from_enclosing_node() {
         let bytes = GraphFixture::new().into_bytes();
@@ -2372,8 +2373,9 @@ mod tests {
 
     /// Stands for: two dirty `enclosing` redefinitions share an anchor, so
     /// neither replaces the base's one `enclosing`. It is hidden, and the
-    /// caveat names it; no clean caller is redirected onto a guess. Before
-    /// design uid §2.3 the second was a tombstone and the first paired.
+    /// caveat names it; no clean caller is redirected onto a guess. Before the
+    /// redefinition rule (C1-identity.md "Repeat policy") the second was a
+    /// tombstone and the first paired.
     #[test]
     fn test_build_overload_twins_hide_base_with_caveat() {
         let mut fx = GraphFixture::new();
@@ -2515,8 +2517,9 @@ mod tests {
         let view = OverlayView::build(graph, &[foo1_twins_input()]).unwrap();
         let path = "N/Foo1.cs";
         let class = crate::uid::compute(NodeKind::Class, path, None, "Foo1");
-        // Both classes share one anchor (the arity enters none), and each
-        // `foo` hashes it (design uid §2.2).
+        // Both classes share one anchor (the arity enters none), and each `foo`
+        // hashes it (C1-identity.md "Declaration identity: fields and
+        // invariants").
         let foo =
             crate::contracts::identity::nested_uid(class, NodeKind::Property, Some("Foo1"), "foo");
         let nodes = view.virtual_nodes();

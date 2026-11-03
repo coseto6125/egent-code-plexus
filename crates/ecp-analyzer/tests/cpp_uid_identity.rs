@@ -1,8 +1,9 @@
 //! Declaration uids that keep same-named declarations distinct, in C++
-//! (design_uid §5 rows R / FO / M, Phase 1 acceptance). A redefinition of a
-//! kind that keeps its own node is a second named node with its own uid, its
-//! own parent edge and its own calls; membership and containment edges bind
-//! the row that declares them; a merged repeat gives each edge once.
+//! (C1-identity.md "Collision shapes per language", rows R / FO / M). A
+//! redefinition of a kind that keeps its own node is a second named node with
+//! its own uid, its own parent edge and its own calls; membership and
+//! containment edges bind the row that declares them; a merged repeat gives
+//! each edge once.
 //!
 //! | Shape | Fixture |
 //! |---|---|
@@ -246,8 +247,9 @@ fn test_build_cpp_top_level_overloads_keep_two_nodes_with_own_calls() {
     );
 }
 
-/// Stands for: enum containment binds by span and row (design_uid §3
-/// row 22). `n::E` and `m::E` each define the `X` of their own body.
+/// Stands for: enum containment binds by span and row (C1-identity.md "Edge
+/// sources bind by row"). `n::E` and `m::E` each define the `X` of their own
+/// body.
 #[test]
 fn test_enum_variant_defines_two_mods_same_enum_binds_by_span() {
     assert_enum_rows(NAMESPACE_ENUMS, "X", &[(2, 2), (5, 5)]);
@@ -255,10 +257,10 @@ fn test_enum_variant_defines_two_mods_same_enum_binds_by_span() {
 
 const NESTED_TWINS: &str = "class O1 {\n    class H {\n        void run() {}\n    };\n};\nclass O2 {\n    class H {\n        void run() {}\n    };\n};\n";
 
-/// Stands for: N1 (design_uid §5, phase 2). `O1.H` and `O2.H` are
-/// two named nodes with two uids on the full build and the overlay, and each
-/// `run` is a member of its own `H` only, with no `overload_set` reference
-/// between the two `run`.
+/// Stands for: N1 (C1-identity.md "Collision shapes per language"). `O1.H` and
+/// `O2.H` are two named nodes with two uids on the full build and the overlay,
+/// and each `run` is a member of its own `H` only, with no `overload_set`
+/// reference between the two `run`.
 #[test]
 fn test_build_cpp_twin_nested_types_two_nodes_own_members() {
     let provider = CppProvider::new().unwrap();
@@ -274,8 +276,9 @@ fn test_build_cpp_twin_nested_types_two_nodes_own_members() {
 
 const NAMESPACE_TWINS: &str = "namespace n {\nnamespace i {\nvoid f() {}\n}\n}\nnamespace m {\nnamespace i {\nvoid f() {}\n}\n}\n";
 
-/// Stands for: NS (design_uid §5, phase 2). `n::i::f` and `m::i::f` chain
-/// on two different `i` anchors: two named `i`, two named `f`.
+/// Stands for: NS (C1-identity.md "Collision shapes per language"). `n::i::f`
+/// and `m::i::f` chain on two different `i` anchors: two named `i`, two named
+/// `f`.
 #[test]
 fn test_build_cpp_twin_namespace_paths_two_nodes() {
     let provider = CppProvider::new().unwrap();
@@ -285,8 +288,9 @@ fn test_build_cpp_twin_namespace_paths_two_nodes() {
 
 const LOCAL_TWINS: &str = "void a() {\n    struct L {\n        int x;\n    };\n}\nvoid b() {\n    struct L {\n        int x;\n    };\n}\n";
 
-/// Stands for: L (design_uid §5, phase 2). A local `struct L` in each of
-/// two functions is two named nodes, and so is the field of each.
+/// Stands for: L (C1-identity.md "Collision shapes per language"). A local
+/// `struct L` in each of two functions is two named nodes, and so is the field
+/// of each.
 #[test]
 fn test_build_cpp_local_struct_in_two_functions_two_nodes() {
     let provider = CppProvider::new().unwrap();
@@ -313,9 +317,9 @@ fn test_build_cpp_out_of_line_definition_joins_in_class_declaration_set() {
 
 const DEEP_TWINS: &str = "class A {\n    class B {\n        class H {};\n    };\n};\nclass C {\n    class B {\n        class H {};\n    };\n};\n";
 
-/// Stands for: N2 at depth 2 (design_uid §5, phase 2). `A.B.H` and `C.B.H`
-/// share every short owner, so only the container chain (two different `B`
-/// anchors) keeps them two named nodes.
+/// Stands for: N2 at depth 2 (C1-identity.md "Collision shapes per language").
+/// `A.B.H` and `C.B.H` share every short owner, so only the container chain
+/// (two different `B` anchors) keeps them two named nodes.
 #[test]
 fn test_build_cpp_depth_two_twin_types_two_nodes() {
     let provider = CppProvider::new().unwrap();

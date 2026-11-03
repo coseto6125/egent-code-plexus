@@ -368,12 +368,12 @@ fn test_path_caveat_after_uncommitted_rename_fires() {
 }
 
 /// Stands for: a redefinition group (a first and its later redefinitions,
-/// design uid §2.3) is selected as a method overload group is. Two
-/// same-named defs in one file are two nodes, so the bare name is
-/// ambiguous; the error names the one form that separates them
-/// (`name@line`), never `--file` or `--kind`, and each candidate's `target`
-/// selects it alone. The first, which the bare call binds, lists the caller
-/// with no ambiguity caveat: the index suppressed no call.
+/// C1-identity.md "Repeat policy") is selected as a method overload group is.
+/// Two same-named defs in one file are two nodes, so the bare name is
+/// ambiguous; the error names the one form that separates them (`name@line`),
+/// never `--file` or `--kind`, and each candidate's `target` selects it alone.
+/// The first, which the bare call binds, lists the caller with no ambiguity
+/// caveat: the index suppressed no call.
 #[test]
 fn test_impact_same_name_twice_in_one_file_line_form_selects_first_with_caller() {
     let fx = Fixture::index(
@@ -472,12 +472,12 @@ fn callers_with_via(json: &serde_json::Value) -> Vec<(String, u64, String)> {
 }
 
 /// Stands for: a later redefinition is a node of its own, in its first's
-/// overload set (design uid §2.3, spec #2). `b` is called by the second
+/// overload set (C1-identity.md "Repeat policy"). `b` is called by the second
 /// `def f` only, so `impact b` lists that `f` by a call, the first `f` by
 /// `overload_set`, and `g`, which calls `f`, by a call. The dirty file lists
 /// the same three, and its caveat names the redefinition group it could not
-/// pair (design §3 row 9). Red before 1b: the second `f` was a blank-name
-/// node, the first `f` and `g` were missing.
+/// pair (C1-identity.md "Overlay pairing"). Red before 1b: the second `f` was a
+/// blank-name node, the first `f` and `g` were missing.
 #[test]
 fn test_impact_through_overload_set_redefinition_lists_both_defs_and_caller_clean_and_dirty() {
     let source = "def f():\n    pass\n\n\ndef f():\n    b()\n\n\ndef b():\n    pass\n\n\ndef g():\n    f()\n";

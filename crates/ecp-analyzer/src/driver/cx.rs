@@ -4,7 +4,7 @@
 use super::node;
 use super::tap::TapRow;
 use super::KindCapture;
-use crate::calls::CallSiteIndex;
+use crate::calls::{CallSiteIndex, CalledNames};
 use crate::framework_helpers::push_blind_spot;
 use ecp_core::analyzer::types::{
     BlindSpot, FrameworkId, LocalGraph, RawCallMeta, RawEventTopic, RawExportAlias, RawFanoutRef,
@@ -62,6 +62,9 @@ pub struct Anonymous {
     pub capture: &'static str,
     pub call_kinds: &'static [&'static str],
     pub key: AnonKey,
+    /// A call that no `call_kinds` node spells: Rust macro arguments
+    /// ([`crate::rust::receiver_types::holds_macro_argument_call`]).
+    pub holds_token_call: Option<fn(Node<'_>, &[u8]) -> bool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,6 +127,9 @@ pub struct FileCx<'t> {
     pub path_literals: Vec<RawPathLiteral>,
     pub sql_refs: Vec<RawSqlRef>,
     pub call_sites: CallSiteIndex,
+    /// Node ids of the macro-argument names the Rust call walker recorded
+    /// as calls; `Op::FieldReads` reads no value at them. Empty elsewhere.
+    pub called_names: CalledNames,
     pub call_metas: Vec<RawCallMeta>,
     pub raw_function_metas: Vec<RawFunctionMeta>,
     /// Python's pending tx sites `(row, column, framework)`, bound by
@@ -160,6 +166,7 @@ impl<'t> FileCx<'t> {
             path_literals: Vec::new(),
             sql_refs: Vec::new(),
             call_sites: CallSiteIndex::default(),
+            called_names: CalledNames::default(),
             call_metas: Vec::new(),
             raw_function_metas: Vec::new(),
             tx_sites: Vec::new(),
@@ -178,7 +185,11 @@ impl<'t> FileCx<'t> {
     }
 
     pub fn emit_anonymous(&mut self, node: Node<'_>, a: &Anonymous) {
-        if !node::subtree_has_kind(node, a.call_kinds) {
+        if !node::subtree_has_kind(node, a.call_kinds)
+            && !a
+                .holds_token_call
+                .is_some_and(|holds| holds(node, self.source))
+        {
             return;
         }
         let span = node::span(node);
@@ -276,6 +287,7 @@ mod tests {
                 capture: "c",
                 call_kinds: &["call_expression"],
                 key,
+                holds_token_call: None,
             };
             for closure in [closures[0], closures[0], closures[1]] {
                 cx.emit_anonymous(closure, &a);

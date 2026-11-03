@@ -6,10 +6,10 @@
 //!
 //! A declaration that a scope container holds hashes no [`compute`] stream:
 //! `contracts::identity` hashes its container's anchor in a tagged stream
-//! (`scoped_uid` tag `0x01`, an anchor with a discriminator `0x02`,
-//! `nested_uid` `0x03`). A [`compute`] stream starts with an ASCII letter
-//! and an [`overload`] stream is exactly 12 bytes, so no tagged stream
-//! equals either (the table at the top of `contracts::identity`). Only a
+//! (`scoped_uid` tag `0x01`, `nested_uid` `0x03`; `0x02` is retired). A
+//! [`compute`] stream starts with an ASCII letter and an [`overload`]
+//! stream is exactly 12 bytes, so no tagged stream equals either (the
+//! table at the top of `contracts::identity`). Only a
 //! top-level declaration keeps its [`compute`] uid.
 
 use xxhash_rust::xxh3::{xxh3_64, Xxh3};

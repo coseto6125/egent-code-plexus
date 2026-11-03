@@ -164,9 +164,10 @@ fn test_overload_set_go_duplicate_methods_both_named_and_called() {
 }
 
 /// Stands for: an inherent `save` and a trait-impl `save` of one type sit in
-/// two `Impl` containers, so they are two entities (design_uid §2.5), not
-/// one overload set. Rust resolves `self.save()` to the inherent method, so
-/// `run` calls it, and no `overload_set` edge leads to the trait one.
+/// two `Impl` containers, so they are two entities (C1-identity.md "File
+/// assignment", the swapped-impl example), not one overload set. Rust resolves
+/// `self.save()` to the inherent method, so `run` calls it, and no
+/// `overload_set` edge leads to the trait one.
 #[test]
 fn test_overload_set_rust_inherent_and_trait_impl_two_entities_no_overload_set() {
     let graph = build(
@@ -249,12 +250,12 @@ fn test_overload_set_dart_duplicate_methods_both_named_and_called() {
     );
 }
 
-/// Stands for: C has no methods, and a function redefined under `#ifdef`
-/// is a redefinition that keeps a node of its own (design uid §2.3): two
-/// `save` nodes with distinct uids, `run`'s call binds the first, the
-/// first's `overload_set` reference reaches the second, and no
-/// `ifdef-redef` BlindSpot reports it, since nothing merged. Before the
-/// change the second was a tombstone reported as `ifdef-redef`.
+/// Stands for: C has no methods, and a function redefined under `#ifdef` is a
+/// redefinition that keeps a node of its own (C1-identity.md "Repeat policy"):
+/// two `save` nodes with distinct uids, `run`'s call binds the first, the
+/// first's `overload_set` reference reaches the second, and no `ifdef-redef`
+/// BlindSpot reports it, since nothing merged. Before the change the second was
+/// a tombstone reported as `ifdef-redef`.
 #[test]
 fn test_overload_set_c_ifdef_redefinition_two_nodes_in_one_set() {
     let graph = build(

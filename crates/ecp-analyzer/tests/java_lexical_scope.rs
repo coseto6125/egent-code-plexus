@@ -106,9 +106,10 @@ fn named<'a>(g: &'a LocalGraph, name: &str) -> Vec<&'a ecp_core::analyzer::types
 // Java has no nested named method. The closest construct is a method of a local class declared
 // inside a method body; the parser emits the local class `Local` with owner `T`.
 
-/// Stands for: a member keys on its innermost type's anchor (design_uid
-/// §2.1, the `nested` stream): `T.helper` under `T`, the local class's
-/// `helper` under `Local`, so the two uids differ.
+/// Stands for: a member keys on its innermost type's anchor (C1-identity.md
+/// "Declaration identity: fields and invariants", the `nested` stream):
+/// `T.helper` under `T`, the local class's `helper` under `Local`, so the two
+/// uids differ.
 #[test]
 fn test_parse_file_java_nested_fn_same_name_as_top_level_today_uid() {
     let rows = rows(&graph());

@@ -1,13 +1,13 @@
-//! A redefined Python function and a Rust `#[cfg]` twin are redefinitions:
-//! pass 1 keeps each definition as a node of its own (design uid §2.3), the
-//! second a later node under `overload(first, 1)` with its name. The
-//! post-parse passes that take a raw index (decorators, route decorators,
-//! transaction scopes) map it through `RawIndexMap::node`, so each
-//! definition's edges start at its own node. Only a repeat that merges
+//! A redefined Python function and a Rust `#[cfg]` twin are redefinitions: pass
+//! 1 keeps each definition as a node of its own (C1-identity.md "Repeat
+//! policy"), the second a later node under `overload(first, 1)` with its name.
+//! The post-parse passes that take a raw index (decorators, route decorators,
+//! transaction scopes) map it through `RawIndexMap::node`, so each definition's
+//! edges start at its own node. Only a repeat that merges
 //! (`uid::merges_repeats`: a property, variable or constant) becomes an
-//! empty-named tombstone, whose edges start at the survivor (B1); the C
-//! `#if` variable below pins it. An edge at a tombstone shows an LLM a
-//! blank caller.
+//! empty-named tombstone, whose edges start at the survivor (C1-identity.md
+//! "Edge sources bind by row", Call source); the C `#if` variable below pins
+//! it. An edge at a tombstone shows an LLM a blank caller.
 //!
 //! The twin needs a kind that keeps no overloads (`uid::keeps_overloads`:
 //! every kind but `Method` and `Constructor`), declared twice in one file
@@ -208,8 +208,8 @@ fn assert_each_load_once_or_more(g: &ZeroCopyGraph, rel: RelType) {
     );
 }
 
-/// Stands for: each redefinition keeps its own decorators (design uid
-/// §2.3).
+/// Stands for: each redefinition keeps its own decorators (C1-identity.md
+/// "Repeat policy").
 #[test]
 fn test_python_redefined_function_decorates_edges_start_at_own_node() {
     let g = build_python(TWIN_SRC);

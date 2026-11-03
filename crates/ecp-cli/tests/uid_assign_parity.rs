@@ -227,10 +227,10 @@ fn assert_four_paths_equal(case: Case) {
     }
 
     if let Some(expected) = case.redefinitions {
-        // Stands for: a redefinition is a node of its own (design uid §2.3),
-        // the n-th one under `overload(first, n)`, never a tombstone. An
-        // arity sibling takes the same uid form, so only the slot reason
-        // tells the two apart.
+        // Stands for: a redefinition is a node of its own (C1-identity.md
+        // "Repeat policy"), the n-th one under `overload(first, n)`, never a
+        // tombstone. An arity sibling takes the same uid form, so only the slot
+        // reason tells the two apart.
         let identities = ecp_core::analyzer::lexical::file_identities(
             path,
             &dirty.nodes,
@@ -390,14 +390,14 @@ const CSHARP_CONV: [&str; 2] = [
     "namespace N {\n class Conv<T> : Conv {\n  bool Can(int t) { return false; }\n }\n class Conv {\n  bool Can(int t) { return true; }\n }\n}\n",
 ];
 
-/// Stands for: a C# type of another generic arity (`Conv<T>` beside
-/// `Conv`) is no tombstone on any path that numbers the file. The pair's
-/// base uid is the `nested` stream under `namespace N`'s anchor (design uid
-/// §2.1), and the second
-/// class in source order takes overload uid 1 of that base uid on the
-/// full build, the overlay view, the overlay reader over the written
-/// fragment, and incremental mode, in either declaration order (codex
-/// ruling P-a). Before the fix every path tombstoned it alike.
+/// Stands for: a C# type of another generic arity (`Conv<T>` beside `Conv`) is
+/// no tombstone on any path that numbers the file. The pair's base uid is the
+/// `nested` stream under `namespace N`'s anchor (C1-identity.md "Declaration
+/// identity: fields and invariants"), and the second class in source order
+/// takes overload uid 1 of that base uid on the full build, the overlay view,
+/// the overlay reader over the written fragment, and incremental mode, in
+/// either declaration order (codex ruling P-a). Before the fix every path
+/// tombstoned it alike.
 #[test]
 fn test_uid_assign_csharp_types_of_two_arities_four_paths_equal_uids() {
     for source in CSHARP_CONV {
@@ -444,7 +444,8 @@ fn test_uid_assign_csharp_types_of_two_arities_four_paths_equal_uids() {
 /// stored name, and none panics on the doubled prefix.
 ///
 /// Stands for: the stored name enters the class's compute uid, and each
-/// member's `nested` uid chains on that class uid (design uid §2.1).
+/// member's `nested` uid chains on that class uid (C1-identity.md "Declaration
+/// identity: fields and invariants").
 #[test]
 fn test_uid_assign_dot_backslash_file_name_hashes_stored_path() {
     let java = JavaProvider::new().unwrap();
@@ -545,12 +546,12 @@ fn test_incremental_edit_one_overload_skips_unchanged_twin() {
     );
 }
 
-/// A dirty Java file with `save(int)` / `save(String)`: each virtual
-/// overload keeps the full build's uid, but the two share an anchor, so
-/// neither replaces a base node and both base overloads are suppressed.
-/// R-PI flips this from "each replaces the base node of its own uid": the
-/// ordinal proves nothing about which overload an edit kept. A `Signature`
-/// discriminator (C1 Open point 2) would make each anchor unique again.
+/// A dirty Java file with `save(int)` / `save(String)`: each virtual overload
+/// keeps the full build's uid, but the two share an anchor, so neither replaces
+/// a base node and both base overloads are suppressed. R-PI flips this from
+/// "each replaces the base node of its own uid": the ordinal proves nothing
+/// about which overload an edit kept. A `Signature` discriminator (C1 Open
+/// point 2) would make each anchor unique again.
 #[test]
 fn test_overlay_view_java_two_save_overloads_pair_nothing() {
     let java = JavaProvider::new().unwrap();
@@ -593,10 +594,10 @@ fn test_overlay_view_java_two_save_overloads_pair_nothing() {
 /// second exactly as a full build of the file does
 /// (`tests/baselines/strict_parity/dirty_csharp.txt` held the difference).
 ///
-/// Stands for: a repeated namespace is a later node of its own (design uid
-/// §2.3), `overload(first, 1)` with its name, outside the name tables; only
-/// a property, variable or constant merges into a tombstone. The two
-/// blocks share an anchor, so neither pairs the base's one block, which the
+/// Stands for: a repeated namespace is a later node of its own (C1-identity.md
+/// "Repeat policy"), `overload(first, 1)` with its name, outside the name
+/// tables; only a property, variable or constant merges into a tombstone. The
+/// two blocks share an anchor, so neither pairs the base's one block, which the
 /// view hides with a caveat.
 #[test]
 fn test_overlay_view_csharp_two_namespace_blocks_second_is_later_node() {
@@ -729,9 +730,10 @@ fn fmt_impls(first: &str, second: &str) -> String {
 /// each base `fmt` redirects to its own trait's virtual `fmt`, and a base
 /// in-edge follows the redirect. The nested `pad` stays on its own too.
 ///
-/// Stands for: a block swap keeps every member's stored uid (design uid
-/// §2.4). Phase 1 swapped the two `fmt` uids, because the second in source
-/// order was overload 1; this test asserted that swap.
+/// Stands for: a block swap keeps every member's stored uid (C1-identity.md
+/// "Stability against unrelated edits"). Phase 1 swapped the two `fmt` uids,
+/// because the second in source order was overload 1; this test asserted that
+/// swap.
 #[test]
 fn test_overlay_view_swapped_impls_base_edges_stay_on_own_fmt() {
     let rust = RustProvider::new().unwrap();
@@ -913,9 +915,9 @@ overload_pairing_cases! {
 /// comment-only edit unpairs it: its clean callers vanish and no caveat
 /// names it.
 ///
-/// Stands for: the second block is a later node of its own (design uid
-/// §2.3); two `Impl` rows that share an anchor pair in source order when
-/// the base and the dirty file hold the same count, so a comment edit
+/// Stands for: the second block is a later node of its own (C1-identity.md
+/// "Repeat policy"); two `Impl` rows that share an anchor pair in source order
+/// when the base and the dirty file hold the same count, so a comment edit
 /// hides nothing and puts no caveat on the query.
 #[test]
 fn test_overlay_repeated_impl_block_member_pairs_after_comment_edit() {
@@ -959,8 +961,9 @@ const CSHARP_FOO1: [&str; 2] = [
 const CSHARP_NESTED: &str = "namespace N {\n class Outer {\n  class Inner {\n   public int x;\n  }\n }\n class Outer<T> {\n  class Inner {\n   public int x;\n  }\n }\n}\n";
 
 /// The uids of every `kind` node named `name`, in declaration order, as the
-/// full build stores them, and the base uid of the first: the `nested`
-/// stream under the stored uid of its container (design uid §2.1).
+/// full build stores them, and the base uid of the first: the `nested` stream
+/// under the stored uid of its container (C1-identity.md "Declaration identity:
+/// fields and invariants").
 fn twin_uids(source: &str, kind: NodeKind, name: &str) -> (Vec<u64>, u64) {
     let dirty = parse(&CSharpProvider::new().unwrap(), "N/Twins.cs", source);
     let bytes = archive(&full_build(dirty.clone()));
@@ -1020,7 +1023,8 @@ fn test_uid_assign_csharp_delegates_and_member_twins_four_paths_equal_uids() {
     }
 }
 
-// ── design uid §2.3: redefinitions, overloads and merged repeats (1b) ──
+// ── C1-identity.md "Repeat policy": redefinitions, overloads and merged
+// repeats (1b) ──
 
 /// `def f` twice in one Python file: a redefinition.
 const PY_REDEFINED: &str =
@@ -1051,7 +1055,7 @@ four_path_cases! {
 fn strict_parity_of(name: &str, path: &str, before: &str, after: &str) -> strict_parity::Snapshot {
     let observed = strict_parity::run(&strict_parity::Scenario {
         name,
-        owner: "uid 1b (design uid §2.3)",
+        owner: "uid 1b (C1-identity.md Repeat policy)",
         files: &[(path, before)],
         edits: &[strict_parity::Edit::Write(path, after)],
     });
@@ -1087,9 +1091,9 @@ fn edge_lines<'a>(
         .collect()
 }
 
-/// Stands for: R, a redefinition. Each `def f` is a node of its own on
-/// every path (design uid §2.3), with exactly one `Defines` each, and the
-/// second body's `Calls` start at the second node. Red before 1b: the
+/// Stands for: R, a redefinition. Each `def f` is a node of its own on every
+/// path (C1-identity.md "Repeat policy"), with exactly one `Defines` each, and
+/// the second body's `Calls` start at the second node. Red before 1b: the
 /// second `f` was a tombstone and its `Calls h` started at the first.
 #[test]
 fn test_strict_parity_python_redefined_function_own_defines_and_calls() {
@@ -1160,10 +1164,10 @@ four_path_cases! {
     };
 }
 
-/// Stands for: N1 (design uid §5). `O1.H` and `O2.H` are two named nodes
-/// with two uids, each `run` has one `HasMethod`, from its own `H`, no
-/// `overload_set` reference joins the two `run`, and the overlay that adds
-/// `O2` agrees with the full build on every node and edge.
+/// Stands for: N1 (C1-identity.md "Collision shapes per language"). `O1.H` and
+/// `O2.H` are two named nodes with two uids, each `run` has one `HasMethod`,
+/// from its own `H`, no `overload_set` reference joins the two `run`, and the
+/// overlay that adds `O2` agrees with the full build on every node and edge.
 #[test]
 fn test_strict_parity_java_n1_twin_nested_types_own_members() {
     let before = "class O1 {\n    class H {\n        void run() {}\n    }\n}\n";
@@ -1193,9 +1197,10 @@ fn test_strict_parity_java_n1_twin_nested_types_own_members() {
     );
 }
 
-/// Stands for: NS (design uid §5). `o1::inner::f` and `o2::inner::f` are
-/// two named nodes with two uids, as are the two `inner`, and the overlay
-/// that adds `o2` agrees with the full build on every node and edge.
+/// Stands for: NS (C1-identity.md "Collision shapes per language").
+/// `o1::inner::f` and `o2::inner::f` are two named nodes with two uids, as are
+/// the two `inner`, and the overlay that adds `o2` agrees with the full build
+/// on every node and edge.
 #[test]
 fn test_strict_parity_rust_ns_twin_module_paths_two_nodes() {
     let before = "mod o1 {\n    mod inner {\n        pub fn f() {}\n    }\n}\n";
@@ -1321,7 +1326,7 @@ fn test_strict_parity_rust_two_inherent_impls_pair_in_order_no_caveat() {
         "struct V;\nimpl V {\n    fn a(&self) {}\n}\nimpl V {\n    fn b(&self) { self.a(); }\n}\n";
     let observed = strict_parity::run(&strict_parity::Scenario {
         name: "uid_1b_rust_two_impls",
-        owner: "uid 1b (design uid §2.3)",
+        owner: "uid 1b (C1-identity.md Repeat policy)",
         files: &[("app.rs", before)],
         edits: &[strict_parity::Edit::Write("app.rs", after)],
     });
@@ -1396,15 +1401,15 @@ fn test_uid_assign_two_inputs_one_path_index_and_overlay_equal_uids() {
     assert_eq!(derived, stored, "base re-derivation vs Pass 1");
 }
 
-/// Stands for: the documented exception; flips when design_uid §7 Q1 lands.
-/// Two `partial class P` parts in one C# file are two nodes, the second a
-/// later node, and the full build links them with `PartOf`. In the overlay
-/// the two dirty parts share an anchor, pair no base part and get no
-/// `PartOf`; the Shared-anchor caveat names `P`, so a reader knows the
-/// overlay hides the base parts rather than drops them silently. The full
-/// build holds two `Class P` nodes, each with its own `HasMethod` row, and
-/// the `PartOf` runs from the second part to the representative, the first
-/// (rows are 1-based).
+/// Stands for: the documented exception; flips when C1-identity.md Open point
+/// 16 lands. Two `partial class P` parts in one C# file are two nodes, the
+/// second a later node, and the full build links them with `PartOf`. In the
+/// overlay the two dirty parts share an anchor, pair no base part and get no
+/// `PartOf`; the Shared-anchor caveat names `P`, so a reader knows the overlay
+/// hides the base parts rather than drops them silently. The full build holds
+/// two `Class P` nodes, each with its own `HasMethod` row, and the `PartOf`
+/// runs from the second part to the representative, the first (rows are
+/// 1-based).
 #[test]
 fn test_overlay_view_csharp_same_file_partial_dirty_drops_part_of_with_caveat() {
     use ecp_analyzer::c_sharp::partial::CsharpProjects;

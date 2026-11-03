@@ -2425,9 +2425,9 @@ mod tests {
 
     /// Stands for: `fn setup() { struct Foo; }` before the module-level
     /// `struct Foo` share a base uid, so the module-level one is a later
-    /// redefinition of the body-local first, in no name table (design uid
-    /// §2.3). It is still an item of the module: `declares_in_file` and
-    /// `ladder::module_item` find it through the first. Red before 1d: the
+    /// redefinition of the body-local first, in no name table (C1-identity.md
+    /// "Repeat policy"). It is still an item of the module: `declares_in_file`
+    /// and `ladder::module_item` find it through the first. Red before 1d: the
     /// body-local first hid it.
     #[test]
     fn test_declares_in_file_body_local_first_module_level_redefinition_returns_true() {

@@ -390,6 +390,7 @@ impl<const TSX: bool> ParseSpec for TsSpec<TSX> {
         capture: "function.anonymous",
         call_kinds: &["call_expression"],
         key: AnonKey::Span,
+        holds_token_call: None,
     });
     const BLIND: &'static [(&'static str, (&'static str, &'static str))] = &[
         (

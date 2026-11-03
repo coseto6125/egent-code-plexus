@@ -1,17 +1,16 @@
 //! T1-5 D1 collision recovery: a merged repeat becomes a tombstone rather
 //! than panicking or creating two nodes with the same UID.
 //!
-//! A merged repeat is forced by submitting two `RawNode` entries of a kind
-//! that merges repeats (`uid::merges_repeats`) with identical (kind,
-//! file_path, owner_class, name) — the four inputs to `uid::compute` — but
-//! different span values. The second node must lose its name. In a C/C++
-//! file the merge records an `ifdef-redef` BlindSpot; in any other file it
-//! loses nothing (its edges start at the survivor) and records none. A
-//! repeat of any other kind is a later node of its own (design uid §2.3) and
-//! reports nothing. A true 64-bit collision with another path records
-//! `uid-collision`; no fixture can force a 64-bit hash collision, so the
-//! builder's unit test `test_classify_collision_true_collision_is_uid_collision`
-//! covers that arm.
+//! A merged repeat is forced by submitting two `RawNode` entries of a kind that
+//! merges repeats (`uid::merges_repeats`) with identical (kind, file_path,
+//! owner_class, name) — the four inputs to `uid::compute` — but different span
+//! values. The second node must lose its name. In a C/C++ file the merge
+//! records an `ifdef-redef` BlindSpot; in any other file it loses nothing (its
+//! edges start at the survivor) and records none. A repeat of any other kind is
+//! a later node of its own (C1-identity.md "Repeat policy") and reports
+//! nothing. A true 64-bit collision with another path records `uid-collision`;
+//! no fixture can force a 64-bit hash collision, so the builder's unit test
+//! `test_classify_collision_true_collision_is_uid_collision` covers that arm.
 
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_core::analyzer::types::{LocalGraph, RawNode};

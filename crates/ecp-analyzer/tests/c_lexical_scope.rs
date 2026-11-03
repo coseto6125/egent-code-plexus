@@ -113,8 +113,9 @@ fn test_parse_file_c_nested_fn_same_name_as_top_level_today_uid() {
         ("helper", NodeKind::Function)
     );
     assert_eq!(first.uid, uid_of(NodeKind::Function, None, "helper"));
-    // Stands for: a same-uid redefinition keeps its own named node (design_uid §2.3,
-    // `LaterReason::Repeat`), with `uid::overload(base, 1)`.
+    // Stands for: a same-uid redefinition keeps its own named node
+    // (C1-identity.md "Repeat policy", `LaterReason::Repeat`), with
+    // `uid::overload(base, 1)`.
     assert_eq!(
         (second.name.as_str(), second.kind),
         ("helper", NodeKind::Function)

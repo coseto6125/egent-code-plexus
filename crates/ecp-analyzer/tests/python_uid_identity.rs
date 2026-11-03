@@ -1,8 +1,9 @@
 //! Declaration uids that keep same-named declarations distinct, in Python
-//! (design_uid §5 rows R / FO / M, Phase 1 acceptance). A redefinition of a
-//! kind that keeps its own node is a second named node with its own uid, its
-//! own parent edge and its own calls; membership and containment edges bind
-//! the row that declares them; a merged repeat gives each edge once.
+//! (C1-identity.md "Collision shapes per language", rows R / FO / M). A
+//! redefinition of a kind that keeps its own node is a second named node with
+//! its own uid, its own parent edge and its own calls; membership and
+//! containment edges bind the row that declares them; a merged repeat gives
+//! each edge once.
 //!
 //! | Shape | Fixture |
 //! |---|---|
@@ -249,10 +250,10 @@ fn test_build_python_def_twice_keeps_two_nodes_with_own_calls() {
     );
 }
 
-/// Stands for: `def f` in both branches of an `if/else` (design_uid §5 row
-/// R) is two named nodes, each with its own `Defines` from the file and its
-/// own body call, as two plain repeats are. Red before 1b: the `else` branch
-/// was a tombstone.
+/// Stands for: `def f` in both branches of an `if/else` (C1-identity.md
+/// "Collision shapes per language" row R) is two named nodes, each with its own
+/// `Defines` from the file and its own body call, as two plain repeats are. Red
+/// before 1b: the `else` branch was a tombstone.
 #[test]
 fn test_build_python_def_in_both_if_else_branches_keeps_two_nodes_with_own_calls() {
     let g = build(IF_ELSE_DEF);
@@ -265,8 +266,8 @@ fn test_build_python_def_in_both_if_else_branches_keeps_two_nodes_with_own_calls
     );
 }
 
-/// Stands for: membership binds by row (design_uid §3 row 5).
-/// `HasMethod C@1 -> a`, `C@2 -> b`, nothing else.
+/// Stands for: membership binds by row (C1-identity.md "Edge sources bind by
+/// row"). `HasMethod C@1 -> a`, `C@2 -> b`, nothing else.
 #[test]
 fn test_build_python_class_twice_each_owns_its_own_method() {
     let g = build(CLASS_TWICE);
@@ -279,8 +280,8 @@ fn test_build_python_class_twice_each_owns_its_own_method() {
 }
 
 /// Stands for: a merged row maps to its survivor and gives its edge once
-/// (design_uid §3 row 4). Exactly one `File -> x`, on the full build and on
-/// the overlay.
+/// (C1-identity.md "Edge sources bind by row"). Exactly one `File -> x`, on the
+/// full build and on the overlay.
 #[test]
 fn test_build_python_variable_assigned_twice_defines_once() {
     let g = build(ASSIGNED_TWICE);
@@ -296,10 +297,10 @@ fn test_build_python_variable_assigned_twice_defines_once() {
 
 const NESTED_TWINS: &str = "class O1:\n    class H:\n        def run(self):\n            pass\n\n\nclass O2:\n    class H:\n        def run(self):\n            pass\n";
 
-/// Stands for: N1 (design_uid §5, phase 2). `O1.H` and `O2.H` are
-/// two named nodes with two uids on the full build and the overlay, and each
-/// `run` is a member of its own `H` only, with no `overload_set` reference
-/// between the two `run`.
+/// Stands for: N1 (C1-identity.md "Collision shapes per language"). `O1.H` and
+/// `O2.H` are two named nodes with two uids on the full build and the overlay,
+/// and each `run` is a member of its own `H` only, with no `overload_set`
+/// reference between the two `run`.
 #[test]
 fn test_build_python_twin_nested_types_two_nodes_own_members() {
     let provider = PythonProvider::new().unwrap();
@@ -315,9 +316,9 @@ fn test_build_python_twin_nested_types_two_nodes_own_members() {
 
 const SELF_FIELD: &str = "class A:\n    def __init__(self):\n        self.x = 1\n\n    def reset(self):\n        self.x = 2\n";
 
-/// Stands for: a Property skips callable containers (design_uid §2.1), so
-/// `self.x` assigned in two methods is one entity: one named `x` and one
-/// `HasProperty`, from `A`.
+/// Stands for: a Property skips callable containers (C1-identity.md
+/// "Container"), so `self.x` assigned in two methods is one entity: one named
+/// `x` and one `HasProperty`, from `A`.
 #[test]
 fn test_assign_file_python_self_field_in_two_methods_one_node() {
     let provider = PythonProvider::new().unwrap();
@@ -331,9 +332,9 @@ fn test_assign_file_python_self_field_in_two_methods_one_node() {
 
 const DEEP_TWINS: &str = "class A:\n    class B:\n        class H:\n            pass\n\n\nclass C:\n    class B:\n        class H:\n            pass\n";
 
-/// Stands for: N2 at depth 2 (design_uid §5, phase 2). `A.B.H` and `C.B.H`
-/// share every short owner, so only the container chain (two different `B`
-/// anchors) keeps them two named nodes.
+/// Stands for: N2 at depth 2 (C1-identity.md "Collision shapes per language").
+/// `A.B.H` and `C.B.H` share every short owner, so only the container chain
+/// (two different `B` anchors) keeps them two named nodes.
 #[test]
 fn test_build_python_depth_two_twin_types_two_nodes() {
     let provider = PythonProvider::new().unwrap();

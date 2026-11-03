@@ -93,12 +93,12 @@ impl CsharpProjects {
     }
 }
 
-/// The node ids of every C# `partial` type declared in two parts or more:
-/// the representative part first ([`Part::rank`]), then the other parts
-/// ascending; the groups ordered by their representative. Two parts in one
-/// file are two nodes, the second a later node of its own (design uid
-/// §2.3), so `PartOf` links them like parts in two files. A group lists
-/// each node once: a raw node Pass 1 merged maps to its survivor's.
+/// The node ids of every C# `partial` type declared in two parts or more: the
+/// representative part first ([`Part::rank`]), then the other parts ascending;
+/// the groups ordered by their representative. Two parts in one file are two
+/// nodes, the second a later node of its own (C1-identity.md "Repeat policy"),
+/// so `PartOf` links them like parts in two files. A group lists each node
+/// once: a raw node Pass 1 merged maps to its survivor's.
 ///
 /// The representative depends on the parts' declarations only, never on
 /// the file enumeration or the node-id order.

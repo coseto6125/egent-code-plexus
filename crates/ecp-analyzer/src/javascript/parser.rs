@@ -378,6 +378,7 @@ impl ParseSpec for JavaScriptSpec {
         capture: "function.anonymous",
         call_kinds: &["call_expression"],
         key: AnonKey::Span,
+        holds_token_call: None,
     });
     const BLIND: &'static [(&'static str, (&'static str, &'static str))] = &[
         ("blind.eval", BLIND_SPEC[0]),

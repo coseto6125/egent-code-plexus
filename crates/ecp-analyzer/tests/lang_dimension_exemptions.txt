@@ -686,6 +686,19 @@ local_var_filter python pre-existing gap
 local_var_filter ruby pre-existing gap
 local_var_filter rust pre-existing gap
 local_var_filter typescript pre-existing gap
+macro_and_inline_mod_calls c Rust-only syntax: `self::`/`super::` paths in an inline `mod` and calls in macro token trees
+macro_and_inline_mod_calls cpp Rust-only syntax: `self::`/`super::` paths in an inline `mod` and calls in macro token trees
+macro_and_inline_mod_calls csharp Rust-only syntax: `self::`/`super::` paths in an inline `mod` and calls in macro token trees
+macro_and_inline_mod_calls dart Rust-only syntax: `self::`/`super::` paths in an inline `mod` and calls in macro token trees
+macro_and_inline_mod_calls go Rust-only syntax: `self::`/`super::` paths in an inline `mod` and calls in macro token trees
+macro_and_inline_mod_calls java Rust-only syntax: `self::`/`super::` paths in an inline `mod` and calls in macro token trees
+macro_and_inline_mod_calls javascript Rust-only syntax: `self::`/`super::` paths in an inline `mod` and calls in macro token trees
+macro_and_inline_mod_calls kotlin Rust-only syntax: `self::`/`super::` paths in an inline `mod` and calls in macro token trees
+macro_and_inline_mod_calls php Rust-only syntax: `self::`/`super::` paths in an inline `mod` and calls in macro token trees
+macro_and_inline_mod_calls python Rust-only syntax: `self::`/`super::` paths in an inline `mod` and calls in macro token trees
+macro_and_inline_mod_calls ruby Rust-only syntax: `self::`/`super::` paths in an inline `mod` and calls in macro token trees
+macro_and_inline_mod_calls swift Rust-only syntax: `self::`/`super::` paths in an inline `mod` and calls in macro token trees
+macro_and_inline_mod_calls typescript Rust-only syntax: `self::`/`super::` paths in an inline `mod` and calls in macro token trees
 macro_fallback csharp pre-existing gap
 macro_fallback dart pre-existing gap
 macro_fallback go pre-existing gap

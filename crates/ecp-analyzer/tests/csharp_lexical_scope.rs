@@ -96,8 +96,9 @@ fn named<'a>(g: &'a LocalGraph, name: &str) -> Vec<&'a ecp_core::analyzer::types
 // Absent today: the C# parser emits no node for a local function (`int Helper() {...}` inside
 // `Outer`). Only the member `T.Helper` exists, so nothing collides.
 
-/// Stands for: a method keys on its class's anchor (design_uid §2.1, the
-/// `nested` stream); the local function is still not emitted.
+/// Stands for: a method keys on its class's anchor (C1-identity.md "Declaration
+/// identity: fields and invariants", the `nested` stream); the local function
+/// is still not emitted.
 #[test]
 fn test_parse_file_c_sharp_nested_fn_same_name_as_top_level_today_uid() {
     let rows = rows(&graph());

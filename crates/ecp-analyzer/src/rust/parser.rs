@@ -1,7 +1,8 @@
 use super::receiver_types::{
     build_impl_map, collect_local_types, enclosing_enum_name, enclosing_function_name,
-    enclosing_impl_or_trait_context, enclosing_impl_type, enclosing_struct_type,
-    extract_rust_calls_and_path_literals, impl_self_type, impl_trait_name, LocalTypes,
+    enclosing_impl_or_trait_context, enclosing_impl_type, enclosing_mods, enclosing_struct_type,
+    extract_rust_calls_and_path_literals, file_relative_path, holds_macro_argument_call,
+    impl_self_type, impl_trait_name, rebase_on_file_module, LocalTypes,
 };
 use super::spec::RustSpec;
 use crate::calls::{NameRefKind, NameRefSpec, VariantRefSpec};
@@ -139,12 +140,14 @@ impl ParseSpec for RustSpec {
 
     const KIND_CAPTURE: KindCapture = KindCapture::NameKeepFirst;
     /// A closure gets an `<anonymous>` node only when its body holds a call,
+    /// a `call_expression` or one a macro's arguments spell (`|| vec![f()]`),
     /// so attach_to_enclosing can host those calls instead of dropping them;
     /// empty closures (`v.iter().map(|x| x * 2)`) stay out of the graph.
     const ANONYMOUS: Option<Anonymous> = Some(Anonymous {
         capture: "function.anonymous",
         call_kinds: &["call_expression"],
         key: AnonKey::Span,
+        holds_token_call: Some(holds_macro_argument_call),
     });
     const BLIND: &'static [(&'static str, (&'static str, &'static str))] = &[
         (
@@ -498,12 +501,17 @@ impl ParseSpec for RustSpec {
                     None
                 };
 
-                cx.imports.push(driver::imports::raw(
-                    src_str.to_string(),
-                    name_str.to_string(),
-                    alias,
-                    None,
-                ));
+                // `use a as b` captures one node as both: the name keeps the
+                // whole path, so it takes the same spelling.
+                let file = cx.tree.root_node();
+                let module = file_relative_path(file, i_src, src_str.to_string(), source);
+                let name = if i_name.id() == i_src.id() {
+                    module.clone()
+                } else {
+                    name_str.to_string()
+                };
+                cx.imports
+                    .push(driver::imports::raw(module, name, alias, None));
             }
         }
     }
@@ -526,6 +534,7 @@ impl ParseSpec for RustSpec {
                     &mut cx.nodes,
                     &local_types,
                     &mut cx.call_sites,
+                    &mut cx.called_names,
                 );
                 cx.path_literals = raw_path_literals;
                 cx.sql_refs = raw_sql_refs;
@@ -614,16 +623,49 @@ fn push_nested_use_imports(root: tree_sitter::Node, source: &[u8], out: &mut Vec
         let Some(arg) = node.child_by_field_name("argument") else {
             continue;
         };
+        // The inline `mod`s around the `use`, walked once for all its rows,
+        // and only when a `self` / `super` may stand in it.
+        let text = node_text(arg, source);
+        let mods = if text.contains("self") || text.contains("super") {
+            enclosing_mods(root, node, source).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let w = UseWalk {
+            source,
+            mods: &mods,
+        };
         match arg.kind() {
             // The query reads the list of `use a::{..}` only when it has a
             // path; `use ::{a, b}` has none.
             "scoped_use_list" => {
                 let covered = arg.child_by_field_name("path").is_some();
-                use_list_items(arg, "", covered, source, out)
+                use_list_items(arg, "", covered, w, out)
             }
-            "use_list" => list_items(arg, "", false, source, out),
-            "use_wildcard" => push_wildcard(arg, "", source, out),
+            "use_list" => list_items(arg, "", false, w, out),
+            "use_wildcard" => push_wildcard(arg, "", w, out),
             _ => {}
+        }
+    }
+}
+
+/// What the item walk of one `use` reads besides the item: the file's
+/// bytes, and the inline `mod`s around the `use`, outermost first, that a
+/// `self` / `super` head is rebased from ([`rebase_on_file_module`]).
+#[derive(Clone, Copy)]
+struct UseWalk<'a> {
+    source: &'a [u8],
+    mods: &'a [&'a str],
+}
+
+impl UseWalk<'_> {
+    /// `prefix::path`. A path's head enters with an empty `prefix`, so it is
+    /// rebased there, before `push_self` or a row splits it.
+    fn join(self, prefix: &str, path: &str) -> String {
+        if prefix.is_empty() {
+            rebase_on_file_module(path.to_string(), self.mods)
+        } else {
+            join_path(prefix, path)
         }
     }
 }
@@ -648,15 +690,15 @@ fn use_list_items(
     node: tree_sitter::Node,
     prefix: &str,
     top: bool,
-    source: &[u8],
+    w: UseWalk<'_>,
     out: &mut Vec<RawImport>,
 ) {
     let path = node
         .child_by_field_name("path")
-        .map(|p| join_path(prefix, node_text(p, source)))
+        .map(|p| w.join(prefix, node_text(p, w.source)))
         .unwrap_or_else(|| prefix.to_string());
     if let Some(list) = node.child_by_field_name("list") {
-        list_items(list, &path, top, source, out);
+        list_items(list, &path, top, w, out);
     }
 }
 
@@ -664,9 +706,10 @@ fn list_items(
     list: tree_sitter::Node,
     prefix: &str,
     covered: bool,
-    source: &[u8],
+    w: UseWalk<'_>,
     out: &mut Vec<RawImport>,
 ) {
+    let source = w.source;
     let mut cursor = list.walk();
     let items: Vec<_> = list.named_children(&mut cursor).collect();
     for item in items {
@@ -675,7 +718,7 @@ fn list_items(
             "self" => push_self(out, prefix, None),
             "scoped_identifier" => {
                 let (path, name) = split_last(node_text(item, source));
-                push_import(out, &join_path(prefix, path), name, None);
+                push_import(out, &w.join(prefix, path), name, None);
             }
             "use_as_clause" => {
                 let (Some(path), Some(alias)) = (
@@ -694,14 +737,14 @@ fn list_items(
                 let (module, name) = split_last(node_text(path, source));
                 push_import(
                     out,
-                    &join_path(prefix, module),
+                    &w.join(prefix, module),
                     name,
                     Some(node_text(alias, source)),
                 );
             }
-            "scoped_use_list" => use_list_items(item, prefix, false, source, out),
-            "use_list" => list_items(item, prefix, false, source, out),
-            "use_wildcard" => push_wildcard(item, prefix, source, out),
+            "scoped_use_list" => use_list_items(item, prefix, false, w, out),
+            "use_list" => list_items(item, prefix, false, w, out),
+            "use_wildcard" => push_wildcard(item, prefix, w, out),
             _ => {}
         }
     }
@@ -735,10 +778,10 @@ fn split_last(path: &str) -> (&str, &str) {
     path.rsplit_once("::").unwrap_or(("", path))
 }
 
-fn push_wildcard(node: tree_sitter::Node, prefix: &str, source: &[u8], out: &mut Vec<RawImport>) {
+fn push_wildcard(node: tree_sitter::Node, prefix: &str, w: UseWalk<'_>, out: &mut Vec<RawImport>) {
     let module = node
         .named_child(0)
-        .map(|p| join_path(prefix, node_text(p, source)))
+        .map(|p| w.join(prefix, node_text(p, w.source)))
         .unwrap_or_else(|| prefix.to_string());
     if !module.is_empty() {
         push_import(out, &module, "*", None);
