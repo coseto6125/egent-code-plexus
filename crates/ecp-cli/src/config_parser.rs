@@ -9,6 +9,7 @@ use ecp_core::contracts::workspace::{
     ConfigPresence, ConfigRead, Ecosystem, Membership, NameRank, Requirement, RequirementTarget,
     Scope, ScopeAlias, ScopeDraft, WorkspaceFacts,
 };
+use ecp_core::registry::{os_path_to_slash, text_path_to_slash};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -46,7 +47,7 @@ pub fn parse_repo_configs(repo_path: &Path, config_paths: &[String]) -> RepoConf
     for meta in &csproj_metas {
         let project_dir = Path::new(&meta.file_path)
             .parent()
-            .map(|dir| dir.to_string_lossy().replace('\\', "/"))
+            .map(|dir| os_path_to_slash(dir).into_owned())
             .unwrap_or_default();
         csharp_projects.add(&project_dir, meta.default_compile_items);
     }
@@ -84,10 +85,11 @@ fn add_project_reference_aliases(metas: &[CsprojMeta], aliases: &mut PathAliases
         for proj_ref in &meta.project_references {
             // proj_ref is a relative path like "../OtherLib/OtherLib.csproj"
             // Strip the .csproj suffix and use the directory as the alias target.
-            let ref_path = Path::new(proj_ref);
+            let ref_text = text_path_to_slash(proj_ref);
+            let ref_path = Path::new(&*ref_text);
             let dir = ref_path
                 .parent()
-                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default();
             if !dir.is_empty() {
                 // Reject ..-traversal: a malicious .csproj could otherwise
@@ -293,7 +295,7 @@ pub fn find_workspace_configs(repo_path: &Path) -> Vec<String> {
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let rel = entry.path().strip_prefix(repo_path).ok()?.to_str()?;
-            let rel = rel.replace('\\', "/");
+            let rel = os_path_to_slash(rel).into_owned();
             (is_workspace_config(&rel) && entry.path().is_file()).then_some(rel)
         })
         .collect();
@@ -1854,8 +1856,8 @@ fn parse_single_csproj(path: &Path, repo_root: &Path) -> Option<CsprojMeta> {
     let rel_path = path
         .strip_prefix(repo_root)
         .ok()
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|| path.to_string_lossy().replace('\\', "/"));
+        .map(|p| os_path_to_slash(p).into_owned())
+        .unwrap_or_else(|| os_path_to_slash(path).into_owned());
 
     let assembly_name = xml_first_text(&content, "AssemblyName")
         .or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()));
@@ -1918,8 +1920,8 @@ pub fn parse_single_composer_json(path: &Path, repo_root: &Path) -> Option<Compo
     let rel_path = path
         .strip_prefix(repo_root)
         .ok()
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|| path.to_string_lossy().replace('\\', "/"));
+        .map(|p| os_path_to_slash(p).into_owned())
+        .unwrap_or_else(|| os_path_to_slash(path).into_owned());
 
     let (php_version, requires) = raw.require.map_or((None, Vec::new()), |map| {
         let mut php = None;
@@ -1969,8 +1971,8 @@ pub fn parse_single_swift_package(path: &Path, repo_root: &Path) -> Option<Swift
     let rel_path = path
         .strip_prefix(repo_root)
         .ok()
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|| path.to_string_lossy().replace('\\', "/"));
+        .map(|p| os_path_to_slash(p).into_owned())
+        .unwrap_or_else(|| os_path_to_slash(path).into_owned());
 
     // `// swift-tools-version:5.9` or `// swift-tools-version: 5.9` — the
     // magic comment is conventionally on the very first line, but we scan

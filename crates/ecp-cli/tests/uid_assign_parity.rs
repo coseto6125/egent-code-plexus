@@ -432,15 +432,16 @@ fn test_uid_assign_csharp_types_of_two_arities_four_paths_equal_uids() {
     }
 }
 
-/// A Unix file named `.\K.java` is stored `./K.java`, and one named
-/// `.\.\K.java` is stored `././K.java`: the builder only turns `\` into
-/// `/`. Every path hashes that stored name, and none panics on the doubled
-/// prefix.
+/// A walked `.\K.java` is stored `./K.java` on Windows, where `\` is a
+/// separator, and as it is on Unix, where it is a file-name character
+/// (`os_path_to_slash`); `.\.\K.java` likewise. Every path hashes that
+/// stored name, and none panics on the doubled prefix.
 #[test]
 fn test_uid_assign_dot_backslash_file_name_hashes_stored_path() {
     let java = JavaProvider::new().unwrap();
     let source = "class K {\n void save(int id) {}\n void save(String name) {}\n}\n";
-    for (walked, stored) in [(".\\K.java", "./K.java"), (".\\.\\K.java", "././K.java")] {
+    for walked in [".\\K.java", ".\\.\\K.java"] {
+        let stored = ecp_core::registry::os_path_to_slash(walked);
         let dirty = parse(&java, walked, source);
         let full_bytes = archive(&full_build(parse(&java, walked, source)));
         let full_graph = access(&full_bytes);
@@ -448,7 +449,8 @@ fn test_uid_assign_dot_backslash_file_name_hashes_stored_path() {
         let saves = named(&dirty, "save");
         assert_eq!(saves.len(), 2, "{walked}: the fixture's two overloads");
         let first = &dirty.nodes[saves[0]];
-        let base = ecp_core::uid::compute(first.kind, stored, first.owner_class.as_deref(), "save");
+        let base =
+            ecp_core::uid::compute(first.kind, &stored, first.owner_class.as_deref(), "save");
         assert_eq!(
             [full[saves[0]], full[saves[1]]],
             [base, ecp_core::uid::overload(base, 1)],
@@ -1108,12 +1110,9 @@ fn test_strict_parity_java_method_overloads_second_body_calls_from_second() {
 /// Stands for: V, a merged repeat. `var x` twice is one entity: one named
 /// node with exactly one `Defines`, no `Defines` into the tombstone, and the
 /// overlay and the full build agree on every node and edge
-/// (`strict_parity_of`). The fixture's calls sit at module level and have no
-/// source node, so no edge starts at either row: this test does not cover
-/// B1's re-sourcing of a merged row's edges on the overlay arm, and the
-/// "tombstone sources nothing" loop below passes vacuously.
+/// (`strict_parity_of`).
 #[test]
-fn test_strict_parity_javascript_merged_var_edges_start_at_survivor() {
+fn test_strict_parity_javascript_merged_var_one_node_one_defines() {
     let before = "function a() {}\nfunction b() {}\nvar x = a();\n";
     let full = strict_parity_of("uid_1b_m", "app.js", before, JS_MERGED);
     assert_eq!(
@@ -1121,12 +1120,6 @@ fn test_strict_parity_javascript_merged_var_edges_start_at_survivor() {
         1
     );
     assert!(edge_lines(&full, "Defines", "target", "Variable app.js:4 ").is_empty());
-    for rel in ["Calls", "References", "ReadsField", "Accesses"] {
-        assert!(
-            edge_lines(&full, rel, "source", "Variable app.js:4 ").is_empty(),
-            "the tombstone sources no {rel}"
-        );
-    }
 }
 
 /// `before` holds the first `f` declaration alone, `after` both; `rows` pairs
@@ -1166,7 +1159,7 @@ macro_rules! redefinition_parity_cases {
     )+};
 }
 
-// R in the other 12 mainstream languages (Python's is above). Java and Dart
+// R in 11 of the other 13 mainstream languages (Python's is above). Java and Dart
 // cannot write it: a second method of one signature is a compile error there,
 // and the free-function overload shape is covered by
 // `test_strict_parity_java_method_overloads_second_body_calls_from_second`.

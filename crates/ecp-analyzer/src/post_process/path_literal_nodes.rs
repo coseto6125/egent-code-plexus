@@ -18,6 +18,7 @@ use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::contracts::raw_records::{FileOrd, GlobalEndpoint, RawIndexMap};
 use ecp_core::graph::{Edge, Node, RelType};
 use ecp_core::pool::StringPool;
+use ecp_core::registry::os_path_to_slash;
 
 /// The source of an edge in `file_edges` until the builder sets it to the
 /// file's `File` node.
@@ -43,7 +44,7 @@ pub fn emit_edges(
         if literals.is_empty() {
             continue;
         }
-        let path_str = lg.file_path.to_string_lossy().replace('\\', "/");
+        let path_str = os_path_to_slash(&lg.file_path);
         let file_idx = lg_idx as u32;
         let file = FileOrd(file_idx);
         let parents =

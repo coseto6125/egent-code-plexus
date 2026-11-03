@@ -18,6 +18,7 @@ use ecp_core::contracts::dirty_event::{
     SkippedEntry,
 };
 use ecp_core::contracts::routing::{FileRouter, SizeCap};
+use ecp_core::registry::os_path_to_slash;
 use ecp_core::session::SessionMeta;
 use ignore::WalkBuilder;
 use std::collections::HashMap;
@@ -532,14 +533,8 @@ fn walked_repo_path(path: &Path, worktree_root: &Path) -> Result<RepoPath, Skipp
             reason: SkipReason::NotUtf8,
         });
     };
-    // The overlay writer keys its manifest by `/`, so a Windows separator
-    // becomes `/`. On Unix `\` is a file-name byte: mapping it would merge
-    // `a\b.py` into `a/b.py`.
-    let text = if cfg!(windows) {
-        text.replace('\\', "/")
-    } else {
-        text.to_owned()
-    };
+    // The overlay writer keys its manifest by `/`.
+    let text = os_path_to_slash(text).into_owned();
     RepoPath::new(text).map_err(|NotRepoRelative(path_lossy)| SkippedEntry {
         path_lossy,
         reason: SkipReason::NotRepoRelative,
@@ -1775,7 +1770,7 @@ fn apply_l1_overlay_updates(
         .iter()
         .map(|g| {
             pre_parse_mtimes
-                .get(g.file_path.to_string_lossy().replace('\\', "/").as_str())
+                .get(&*os_path_to_slash(&g.file_path))
                 .copied()
                 .unwrap_or(0)
         })

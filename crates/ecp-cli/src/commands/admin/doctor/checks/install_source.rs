@@ -47,7 +47,8 @@ impl InstallSource {
     fn from_exe_path(raw: &str) -> Self {
         // Normalize: lowercase (Windows paths are case-insensitive) and unify
         // separators so a single `/`-based needle matches `\` paths too.
-        let path = raw.to_lowercase().replace('\\', "/");
+        let lower = raw.to_lowercase();
+        let path = ecp_core::registry::text_path_to_slash(&lower);
         if path.contains("@egent-code-plexus") {
             Self::Npm
         } else if path.contains("uv/tools") {

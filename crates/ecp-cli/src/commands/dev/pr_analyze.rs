@@ -360,7 +360,7 @@ fn git_rev_parse(reference: &str) -> Result<String, EcpError> {
 }
 
 fn path_area(p: &Path) -> Option<Area> {
-    let s = p.to_string_lossy().replace('\\', "/");
+    let s = ecp_core::registry::os_path_to_slash(p);
     if s.starts_with("crates/ecp-analyzer/src/") && s.ends_with(".rs") {
         return Some(Area::Parser);
     }

@@ -72,6 +72,7 @@ use crate::resolution::index::{
     CsharpExtensionDecls, FileMeta, GlobalPick, Language, ResolveTarget, SymbolTable,
 };
 use crate::rust::module_tree::{IndexModuleTree, RustWorkspaceModTree};
+use ecp_core::registry::os_path_to_slash;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 pub type NodeId = u32;
@@ -121,7 +122,7 @@ impl<'g> ReexportIndex<'g> {
             .iter()
             .filter(|graph| !graph.imports.is_empty())
             .map(|graph| {
-                let path = normalize_source_path(&graph.file_path);
+                let path = os_path_to_slash(&graph.file_path);
                 let language = symbol_table.file_language(&path);
                 if is_ecmascript(language) {
                     ecmascript_aliases.extend(graph.imports.iter().filter_map(|import| {
@@ -835,18 +836,6 @@ impl<'r, 'a> NameTierFacts for IndexTiers<'r, 'a, '_> {
     }
 }
 
-#[cfg(not(windows))]
-#[inline]
-fn normalize_source_path(path: &Path) -> Cow<'_, str> {
-    path.to_string_lossy()
-}
-
-#[cfg(windows)]
-#[inline]
-fn normalize_source_path(path: &Path) -> Cow<'_, str> {
-    Cow::Owned(path.to_string_lossy().replace('\\', "/"))
-}
-
 /// The tier a lookup ended at, as the decision dump records it.
 pub use ecp_core::analyzer::name_tiers::DecisionTier;
 
@@ -1006,7 +995,7 @@ impl<'a> Resolver<'a> {
             &self.path_aliases,
             || {
                 self.symbol_table
-                    .file_language(&normalize_source_path(source_file))
+                    .file_language(&os_path_to_slash(source_file))
             },
             visit,
         );
@@ -1030,7 +1019,7 @@ impl<'a> Resolver<'a> {
         };
         let scope = alias_scope(&self.path_aliases, source_file, || {
             self.symbol_table
-                .file_language(&normalize_source_path(source_file))
+                .file_language(&os_path_to_slash(source_file))
         });
         if let Some(hit) = self
             .module_cache
@@ -1055,7 +1044,7 @@ impl<'a> Resolver<'a> {
             .or_insert_with(|| {
                 module_discovery::discover_module(
                     &IndexFacts(self),
-                    &normalize_source_path(source_file),
+                    &os_path_to_slash(source_file),
                     specifier,
                     language,
                 )
@@ -1074,7 +1063,7 @@ impl<'a> Resolver<'a> {
         ) {
             return None;
         }
-        tree.anchored_module_file(&normalize_source_path(source_file), module_path)
+        tree.anchored_module_file(&os_path_to_slash(source_file), module_path)
     }
 
     /// Resolves a symbol name to possible target nodes with confidence scores.
@@ -1124,7 +1113,7 @@ impl<'a> Resolver<'a> {
         caller: Option<NodeId>,
         lexical: Resolution,
     ) -> Vec<(NodeId, f32)> {
-        let source = normalize_source_path(source_file);
+        let source = os_path_to_slash(source_file);
         let language = self.symbol_table.file_language(&source);
         let facts = IndexCall {
             facts: IndexFacts(self),
@@ -1354,7 +1343,7 @@ impl<'a> Resolver<'a> {
         caller_owner: Option<&str>,
         target: NodeId,
     ) -> Option<NodeId> {
-        let caller_file = normalize_source_path(source_file);
+        let caller_file = os_path_to_slash(source_file);
         let access = CallAccess {
             instance: true,
             caller_file: &caller_file,
@@ -1383,7 +1372,7 @@ impl<'a> Resolver<'a> {
         match site.fallback() {
             CallSite::UntypedMember(member) => Some(member),
             site @ CallSite::FromReceiver { member, .. } => {
-                let source = normalize_source_path(source_file);
+                let source = os_path_to_slash(source_file);
                 let facts = IndexCall {
                     facts: IndexFacts(self),
                     source_file,
@@ -1420,7 +1409,7 @@ impl<'a> Resolver<'a> {
         let owner = caller_owner?;
         let st = self.symbol_table;
         let ty = st.lookup_in_file_with_kind(
-            &normalize_source_path(source_file),
+            &os_path_to_slash(source_file),
             owner,
             ResolveTarget::Type,
         )?;
@@ -1442,7 +1431,7 @@ impl<'a> Resolver<'a> {
     ) -> Vec<(NodeId, f32)> {
         let language = self
             .symbol_table
-            .file_language(&normalize_source_path(source_file));
+            .file_language(&os_path_to_slash(source_file));
         self.resolve_import_tiers(
             source_file,
             language,
@@ -1469,7 +1458,7 @@ impl<'a> Resolver<'a> {
     ) -> (Vec<(NodeId, f32)>, Option<Arc<str>>) {
         let language = self
             .symbol_table
-            .file_language(&normalize_source_path(source_file));
+            .file_language(&os_path_to_slash(source_file));
         let hit = self.resolve_import_tiers(
             source_file,
             language,
@@ -1499,7 +1488,7 @@ impl<'a> Resolver<'a> {
         (raw_imports, bind_import): (&[RawImport], bool),
         target: ResolveTarget,
     ) -> Option<TierHit<Arc<str>>> {
-        let source = normalize_source_path(source_file);
+        let source = os_path_to_slash(source_file);
         name_tiers::import_tiers(
             &self.tiers(source_file, &source, language),
             symbol_name,
@@ -1535,7 +1524,7 @@ impl<'a> Resolver<'a> {
     ) -> Resolution {
         let resolution = Resolution::bound(node_id, Tier::ImportScoped);
         self.record(
-            &normalize_source_path(source_file),
+            &os_path_to_slash(source_file),
             symbol_name,
             Some(import.source.as_str()),
             DecisionTier::ImportScoped,
@@ -1558,7 +1547,7 @@ impl<'a> Resolver<'a> {
         target: ResolveTarget,
         caller_heritage: &[String],
     ) -> Vec<(NodeId, f32)> {
-        let source = normalize_source_path(source_file);
+        let source = os_path_to_slash(source_file);
         let language = self.symbol_table.file_language(&source);
         name_tiers::extension_fallback(
             &self.tiers(source_file, &source, language),
@@ -1601,7 +1590,7 @@ impl<'a> Resolver<'a> {
         if decls.is_empty() {
             return csharp_extension::Verdict::NotExtension;
         }
-        let caller_file = normalize_source_path(source_file);
+        let caller_file = os_path_to_slash(source_file);
         let (name, scope_file, scope_imports) = match receiver {
             ReceiverSite::Named(name) => (Some(name), &*caller_file, raw_imports),
             ReceiverSite::Returned(callee) => {
@@ -1717,7 +1706,7 @@ impl<'a> Resolver<'a> {
     ) -> Option<TierHit<Arc<str>>> {
         let language = self
             .symbol_table
-            .file_language(&normalize_source_path(source_file));
+            .file_language(&os_path_to_slash(source_file));
         self.resolve_symbol_with_import_binding(
             source_file,
             symbol_name,
@@ -1740,7 +1729,7 @@ impl<'a> Resolver<'a> {
         raw_imports: &[RawImport],
         policy: TierPolicy<'_>,
     ) -> Option<TierHit<Arc<str>>> {
-        let source = normalize_source_path(source_file);
+        let source = os_path_to_slash(source_file);
         name_tiers::name_tiers(
             &self.tiers(source_file, &source, language),
             symbol_name,
@@ -1760,7 +1749,7 @@ impl<'a> Resolver<'a> {
         name: &str,
         raw_imports: &[RawImport],
     ) -> Vec<(NodeId, f32)> {
-        let source_file_str = normalize_source_path(source_file);
+        let source_file_str = os_path_to_slash(source_file);
         match ladder::field_read(self.symbol_table, &source_file_str, name) {
             FieldRead::Bound(hit) => {
                 self.record(
@@ -1833,7 +1822,7 @@ fn alias_scope(
     if !aliases.has_scopes() {
         return AliasScope::default();
     }
-    aliases.scope_of(&normalize_source_path(source_file), language())
+    aliases.scope_of(&os_path_to_slash(source_file), language())
 }
 
 /// [`reexport::for_each_specifier_candidate`] with the project's path
@@ -2016,7 +2005,7 @@ impl<'a> Resolver<'a> {
                         if language != Language::Kotlin
                             || ladder::import_is_external(
                                 &IndexFacts(self),
-                                &normalize_source_path(source_file),
+                                &os_path_to_slash(source_file),
                                 import,
                                 language,
                             ) =>
@@ -2171,7 +2160,7 @@ impl<'a> Resolver<'a> {
             return self.symbol_table.has_file(file).then(|| file.to_string());
         }
         let base = rust_module_path_base(source_file, module_path)?;
-        let base = base.to_string_lossy().replace('\\', "/");
+        let base = os_path_to_slash(&base);
         let mut found = None;
         probe_rust_module(base.trim_start_matches("./"), &mut |candidate: &str| {
             let indexed = self.symbol_table.has_file(candidate);
@@ -2957,13 +2946,14 @@ mod tests {
         );
         assert_eq!(base("mysrc/app.rs", "crate::a"), None);
         assert_eq!(base("tests/it.rs", "crate::a"), None);
+        // A `\\` separates only on Windows; a Unix file name may hold one.
         assert_eq!(
             base("src\\app.rs", "crate::a"),
-            Some(PathBuf::from("src/a"))
+            cfg!(windows).then(|| PathBuf::from("src/a"))
         );
         assert_eq!(
             base("crates\\x\\src\\app.rs", "crate::a"),
-            Some(PathBuf::from("crates/x/src/a"))
+            cfg!(windows).then(|| PathBuf::from("crates/x/src/a"))
         );
     }
 

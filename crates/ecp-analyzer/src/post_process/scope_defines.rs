@@ -21,12 +21,13 @@
 //! File or module declares it: its callable does, through the lexical-parent
 //! table. It gets no `Defines` edge.
 
-use crate::resolution::builder::SharedPaths;
 use ecp_core::analyzer::containment::{self, Row, Scope, SCOPE_DEFINES_REASON};
+use ecp_core::analyzer::lexical::SharedPaths;
 use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
 use ecp_core::graph::{Edge, RelType};
 use ecp_core::pool::StringPool;
+use ecp_core::registry::os_path_to_slash;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 /// Emit `Defines` edges from File / Namespace / Module nodes to their
@@ -47,7 +48,7 @@ pub fn emit_edges(
     let mut seen: Option<FxHashSet<(u32, u32)>> = None;
 
     for (lg_idx, local_graph) in local_graphs.iter().enumerate() {
-        let file_path_lossy = local_graph.file_path.to_string_lossy().replace('\\', "/");
+        let path = os_path_to_slash(&local_graph.file_path);
         let file = FileOrd(lg_idx as u32);
         let ord = lg_idx as u32;
         let inputs = shared.run_of(ord).unwrap_or(ord..ord + 1);
@@ -58,7 +59,7 @@ pub fn emit_edges(
                 .then(FxHashSet::default);
         }
 
-        let Some(&file_node_id) = file_node_idx.get(&file_path_lossy) else {
+        let Some(&file_node_id) = file_node_idx.get(path.as_ref()) else {
             continue;
         };
         let node = |raw: usize| raw_map.node(file, RawIdx(raw as u32));

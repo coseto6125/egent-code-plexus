@@ -22,6 +22,7 @@ use ecp_core::analyzer::types::{
 use ecp_core::contracts::raw_records::{FileOrd, RawEndpoint, RawIdx, RawIndexMap, Unbound};
 use ecp_core::contracts::routing::{FileRouter, Language};
 use ecp_core::graph::NodeKind;
+use ecp_core::registry::os_path_to_slash;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tree_sitter::Node;
 
@@ -1376,7 +1377,7 @@ fn include_scopes(
 ) -> (FxHashMap<u32, Vec<IncludeScope>>, Vec<CappedIncludes>) {
     let paths: Vec<String> = local_graphs
         .iter()
-        .map(|graph| graph.file_path.to_string_lossy().replace('\\', "/"))
+        .map(|graph| os_path_to_slash(&graph.file_path).into_owned())
         .collect();
     let by_path: FxHashMap<&str, u32> = paths
         .iter()

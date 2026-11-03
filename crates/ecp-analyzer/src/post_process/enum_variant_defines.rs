@@ -14,11 +14,11 @@
 
 use crate::resolution::index::SymbolTable;
 use ecp_core::analyzer::containment::{self, Row, ENUM_VARIANT_DEFINES_REASON};
-use ecp_core::analyzer::lexical::forward_slash_path;
 use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
 use ecp_core::graph::{Edge, RelType};
 use ecp_core::pool::StringPool;
+use ecp_core::registry::os_path_to_slash;
 use rayon::prelude::*;
 
 /// Emit `(Enum)-[:Defines]->(EnumVariant)` edges for all files.
@@ -47,7 +47,7 @@ pub fn emit_edges(
         .par_iter()
         .enumerate()
         .map(|(file_ord, local_graph)| {
-            let path_str_cow = forward_slash_path(&local_graph.file_path);
+            let path_str_cow = os_path_to_slash(&local_graph.file_path);
             let path_str: &str = &path_str_cow;
 
             let file = FileOrd(file_ord as u32);
@@ -146,7 +146,7 @@ mod tests {
         let mut symbol_table = SymbolTable::new();
         let mut current = 0u32;
         for lg in &local_graphs {
-            let path_str = lg.file_path.to_string_lossy().replace('\\', "/");
+            let path_str = os_path_to_slash(&lg.file_path);
             for rn in &lg.nodes {
                 match rn.owner_class.as_deref() {
                     Some(owner) => symbol_table

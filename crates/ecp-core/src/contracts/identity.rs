@@ -15,6 +15,7 @@ use xxhash_rust::xxh3::Xxh3;
 use crate::analyzer::types::{innermost_enclosing, span_contains, Span};
 use crate::error::EcpError;
 use crate::graph::NodeKind;
+use crate::registry::{os_path_to_slash, os_path_to_slash_on};
 use crate::uid;
 
 // ── Declaration identity ────────────────────────────────────────────────
@@ -88,7 +89,7 @@ pub enum Scope {
 /// Why a declaration key or a file's identities cannot be built.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdentityError {
-    /// The path holds a `\`; see [`canonical_path`].
+    /// The path holds a separator [`os_path_to_slash`] would convert.
     NonCanonicalPath(String),
     /// A discriminator with empty text separates nothing.
     EmptyDiscriminator,
@@ -124,17 +125,6 @@ impl fmt::Display for IdentityError {
 
 impl std::error::Error for IdentityError {}
 
-/// The repo-relative, `/`-separated spelling of a path, as the builder
-/// stores it: `builder.rs` replaces `\` with `/` and changes nothing else.
-/// A leading `./` is part of the name: a Unix file named `.\a.rs` is stored
-/// `./a.rs`. Borrowed when unchanged.
-pub fn canonical_path(path: &str) -> Cow<'_, str> {
-    match path.contains('\\') {
-        true => Cow::Owned(path.replace('\\', "/")),
-        false => Cow::Borrowed(path),
-    }
-}
-
 /// The matching form of an owner or qualifier segment: every generic
 /// argument list removed and outer whitespace trimmed, so a request `Walk`
 /// matches the owner `Walk<'s, 't>`. Matching only: identity keeps the owner
@@ -162,9 +152,15 @@ pub fn owner_match_form(owner: &str) -> Cow<'_, str> {
 }
 
 fn check_path(path: &str) -> Result<(), IdentityError> {
-    match path.contains('\\') {
-        true => Err(IdentityError::NonCanonicalPath(path.to_string())),
-        false => Ok(()),
+    check_path_on(path, cfg!(windows))
+}
+
+/// A path is canonical when [`os_path_to_slash`] on a Windows (`windows`)
+/// or a Unix machine leaves it as it is: a `\` is rejected on Windows only.
+fn check_path_on(path: &str, windows: bool) -> Result<(), IdentityError> {
+    match os_path_to_slash_on(Cow::Borrowed(path), windows) {
+        Cow::Owned(_) => Err(IdentityError::NonCanonicalPath(path.to_string())),
+        Cow::Borrowed(_) => Ok(()),
     }
 }
 
@@ -519,35 +515,33 @@ pub fn assign_file(path: &str, decls: &[FileDecl<'_>]) -> Result<Vec<DeclIdentit
                     uid,
                     reason,
                 };
-                // `None` when the twin search does not apply: an overload
-                // kind or a scoped declaration. Otherwise the earlier
-                // declaration this one repeats: the first one of its arity
-                // path, `None` when no earlier one has that path.
-                let unscoped_twin =
-                    (!uid::keeps_overloads(d.kind) && d.parent.is_none()).then(|| match d.arity {
-                        Some(_) => {
-                            (0..j).find(|&k| base_uids[k] == base && same_arity_path(decls, k, j))
-                        }
-                        None => Some(first as usize),
-                    });
-                match unscoped_twin {
-                    None if uid::keeps_overloads(d.kind) => later(first, LaterReason::Overload),
-                    None => later(first, LaterReason::Scoped),
-                    Some(None) => later(first, LaterReason::Arity),
-                    Some(Some(twin)) if uid::merges_repeats(d.kind) => {
-                        // The overlay's base side derives a child's anchor
-                        // from its parent's stored name, which a tombstone
-                        // lacks.
-                        debug_assert!(
-                            !is_scope_container(d.kind),
-                            "a scope container is never tombstoned"
-                        );
-                        UidSlot::Duplicate {
-                            first: twin as u32,
-                            uid,
+                match (uid::keeps_overloads(d.kind), d.parent.is_some()) {
+                    (true, _) => later(first, LaterReason::Overload),
+                    (false, true) => later(first, LaterReason::Scoped),
+                    (false, false) => {
+                        let twin = match d.arity {
+                            Some(_) => (0..j)
+                                .find(|&k| base_uids[k] == base && same_arity_path(decls, k, j)),
+                            None => Some(first as usize),
+                        };
+                        match twin {
+                            None => later(first, LaterReason::Arity),
+                            Some(twin) if uid::merges_repeats(d.kind) => {
+                                // The overlay's base side derives a child's
+                                // anchor from its parent's stored name, which
+                                // a tombstone lacks.
+                                debug_assert!(
+                                    !is_scope_container(d.kind),
+                                    "a scope container is never tombstoned"
+                                );
+                                UidSlot::Duplicate {
+                                    first: twin as u32,
+                                    uid,
+                                }
+                            }
+                            Some(twin) => later(twin as u32, LaterReason::Repeat),
                         }
                     }
-                    Some(Some(twin)) => later(twin as u32, LaterReason::Repeat),
                 }
             }
         };
@@ -868,7 +862,7 @@ pub fn file_match(needle: &str, path: &str) -> Option<FileMatch> {
 
 /// A `--file` needle as the graph spells paths: `/`-separated, no `./`.
 pub fn normalize_file_needle(needle: &str) -> String {
-    let needle = needle.replace('\\', "/");
+    let needle = os_path_to_slash(needle);
     needle.strip_prefix("./").unwrap_or(&needle).to_string()
 }
 
@@ -1593,15 +1587,14 @@ mod tests {
     // ── declaration identity ──
 
     #[test]
-    fn test_canonical_path_backslash_replaced_dot_prefix_kept() {
-        assert_eq!(canonical_path("src\\a.rs"), "src/a.rs");
-        assert_eq!(canonical_path(".\\a.rs"), "./a.rs");
-        assert_eq!(canonical_path(".\\.\\a.rs"), "././a.rs");
-        assert!(matches!(
-            canonical_path("./src/a.rs"),
-            Cow::Borrowed("./src/a.rs")
-        ));
-        assert!(matches!(canonical_path("src/a.rs"), Cow::Borrowed(_)));
+    fn test_check_path_on_backslash_rejected_on_windows_accepted_on_unix() {
+        assert_eq!(check_path_on("a\\b.rs", false), Ok(()));
+        assert_eq!(
+            check_path_on("a\\b.rs", true),
+            Err(IdentityError::NonCanonicalPath("a\\b.rs".into()))
+        );
+        assert_eq!(check_path_on("./a/b.rs", true), Ok(()));
+        assert_eq!(check_path_on("", true), Ok(()));
     }
 
     #[test]
@@ -1646,11 +1639,15 @@ mod tests {
     }
 
     #[test]
-    fn test_unscoped_non_canonical_path_rejected() {
-        assert_eq!(
-            DeclKey::unscoped(NodeKind::Function, "src\\a.rs", None, "f"),
-            Err(IdentityError::NonCanonicalPath("src\\a.rs".into()))
-        );
+    fn test_unscoped_backslash_path_rejected_on_windows_only() {
+        let key = DeclKey::unscoped(NodeKind::Function, "src\\a.rs", None, "f");
+        match cfg!(windows) {
+            true => assert_eq!(
+                key,
+                Err(IdentityError::NonCanonicalPath("src\\a.rs".into()))
+            ),
+            false => assert_eq!(key.map(|k| k.path()), Ok("src\\a.rs")),
+        }
     }
 
     #[test]
@@ -2166,13 +2163,23 @@ mod tests {
     }
 
     #[test]
-    fn test_assign_file_backslash_path_rejected_with_or_without_decls() {
-        let err = Err(IdentityError::NonCanonicalPath("src\\a.rs".into()));
-        assert_eq!(assign_file("src\\a.rs", &[]), err);
-        assert_eq!(
-            assign_file("src\\a.rs", &[decl(NodeKind::Function, None, "f")]),
-            err
+    fn test_assign_file_backslash_path_rejected_on_windows_with_or_without_decls() {
+        let decls = [decl(NodeKind::Function, None, "f")];
+        let (empty, one) = (
+            assign_file("src\\a.rs", &[]),
+            assign_file("src\\a.rs", &decls),
         );
+        match cfg!(windows) {
+            true => {
+                let err = Err(IdentityError::NonCanonicalPath("src\\a.rs".into()));
+                assert_eq!(empty, err);
+                assert_eq!(one, err);
+            }
+            false => {
+                assert_eq!(empty, Ok(Vec::new()));
+                assert_eq!(one.map(|ids| ids.len()), Ok(1));
+            }
+        }
     }
 
     #[test]
@@ -2613,7 +2620,7 @@ mod tests {
 
     #[test]
     fn test_parse_kind_and_file_filters() {
-        let r = TargetRequest::parse("load", Some("method"), Some(".\\src\\a.rs")).unwrap();
+        let r = TargetRequest::parse("load", Some("method"), Some("./src/a.rs")).unwrap();
         assert_eq!(r.kind(), Some(NodeKind::Method));
         assert_eq!(r.file(), Some("src/a.rs"));
         let empty = TargetRequest::parse("load", None, Some("")).unwrap();
@@ -2777,7 +2784,12 @@ mod tests {
 
     #[test]
     fn test_normalize_file_needle_slashes_and_dot_prefix() {
-        assert_eq!(normalize_file_needle(".\\src\\a.rs"), "src/a.rs");
+        let backslash = match cfg!(windows) {
+            true => "src/a.rs",
+            false => ".\\src\\a.rs",
+        };
+        assert_eq!(normalize_file_needle(".\\src\\a.rs"), backslash);
+        assert_eq!(normalize_file_needle("./src/a.rs"), "src/a.rs");
         assert_eq!(normalize_file_needle("src/a.rs"), "src/a.rs");
     }
 
@@ -3404,8 +3416,8 @@ mod tests {
     #[test]
     fn test_route_key_invalid_inputs_rejected() {
         assert_eq!(
-            RouteKey::new("src\\a.ts", "GET", "/x"),
-            Err(RouteKeyError::NonCanonicalFile("src\\a.ts".into()))
+            RouteKey::new("src\\a.ts", "GET", "/x").is_err(),
+            cfg!(windows)
         );
         assert_eq!(
             RouteKey::new("a.ts", " ", "/x"),

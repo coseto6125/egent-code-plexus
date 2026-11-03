@@ -89,7 +89,7 @@ pub fn rust_module_path_base(
     let segs: Vec<&str> = specifier.split("::").filter(|s| !s.is_empty()).collect();
     let (anchor, rest) = match segs.split_first()? {
         (&"crate", rest) => {
-            let path = source_file.to_string_lossy().replace('\\', "/");
+            let path = crate::registry::os_path_to_slash(source_file);
             let src_root = match path.rsplit_once("/src/") {
                 Some((root, _)) => format!("{root}/src"),
                 // A crate at the repo root: its repo-relative paths start at

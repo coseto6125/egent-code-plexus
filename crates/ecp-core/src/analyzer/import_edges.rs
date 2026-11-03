@@ -29,8 +29,8 @@ use crate::analyzer::reexport::ResolveTarget;
 use crate::analyzer::rust_paths::rust_module_path_base;
 use crate::analyzer::types::RawImport;
 use crate::file_category::Language;
+use crate::registry::os_path_to_slash;
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -355,11 +355,7 @@ fn named(
 fn probe(facts: &impl ImportEdgeFacts, specifier: &str) -> Option<u32> {
     let mut hit = None;
     facts.for_each_candidate(specifier, &mut |candidate| {
-        let normalized: Cow<'_, str> = if candidate.contains('\\') {
-            Cow::Owned(candidate.replace('\\', "/"))
-        } else {
-            Cow::Borrowed(candidate)
-        };
+        let normalized = os_path_to_slash(candidate);
         hit = facts.file_node(&normalized);
         hit.is_none()
     });
@@ -606,14 +602,18 @@ mod tests {
     }
 
     #[test]
-    fn test_import_edges_backslash_candidate_matches_slash_path() {
+    fn test_import_edges_backslash_candidate_matches_slash_path_on_windows_only() {
         let mut facts = Fake::with_files(&[("src/a.ts", 5)]);
         facts.candidates.insert("./a", vec!["src\\a.ts"]);
         let imports = [import("./a", "*", None)];
-        assert_eq!(
-            edges_of("src/main.ts", Language::TypeScript, &imports, &facts),
-            [edge(5, MODULE_CONFIDENCE, ImportReason::Module)]
-        );
+        let edges = edges_of("src/main.ts", Language::TypeScript, &imports, &facts);
+        match cfg!(windows) {
+            true => assert_eq!(edges, [edge(5, MODULE_CONFIDENCE, ImportReason::Module)]),
+            false => assert!(
+                !edges.contains(&edge(5, MODULE_CONFIDENCE, ImportReason::Module)),
+                "on Unix `src\\a.ts` is a file apart from `src/a.ts`: {edges:?}"
+            ),
+        }
     }
 
     #[test]

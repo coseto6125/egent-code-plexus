@@ -25,6 +25,7 @@ use ecp_core::analyzer::types::{LocalGraph, RawNode};
 use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
 use ecp_core::file_category::Language;
 use ecp_core::graph::NodeKind;
+use ecp_core::registry::os_path_to_slash;
 use rustc_hash::FxHashMap;
 
 /// The `reason` of every `PartOf` edge.
@@ -109,11 +110,10 @@ pub fn partial_groups(
     type Key<'a> = (&'a str, &'a str, &'a str, u32, u8);
     let mut parts: FxHashMap<Key<'_>, Vec<Part>> = FxHashMap::default();
     for (file_idx, lg) in local_graphs.iter().enumerate() {
-        let path = lg.file_path.to_string_lossy();
+        let path = os_path_to_slash(&lg.file_path);
         if Language::from_path(&path) != Language::CSharp {
             continue;
         }
-        let path = path.replace('\\', "/");
         let Some(project) = projects.project_of(&path) else {
             continue;
         };

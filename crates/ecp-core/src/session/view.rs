@@ -261,6 +261,7 @@ use crate::contracts::identity::{pair_by_anchor, DeclIdentity, LaterReason, UidS
 use crate::contracts::routing::ParsedLanguage;
 use crate::file_category::{FileMeta, Language};
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
+use crate::registry::os_path_to_slash;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -392,7 +393,7 @@ impl From<LocalGraph> for OverlayFileInput {
             .map(|meta| (meta.span, meta))
             .collect();
         Self {
-            rel_path: local.file_path.to_string_lossy().replace('\\', "/"),
+            rel_path: os_path_to_slash(&local.file_path).into_owned(),
             symbols: local
                 .nodes
                 .into_iter()
@@ -2691,9 +2692,10 @@ mod tests {
     }
 
     /// Module paths built with `PathBuf::join` carry `\\` on Windows; the
-    /// lookup still finds the archived `/` path.
+    /// lookup still finds the archived `/` path there. On Unix `\\` is a
+    /// file-name character, so the lookup finds no `/` path.
     #[test]
-    fn test_rust_module_file_lookup_backslash_path_finds_archived_path() {
+    fn test_rust_module_file_lookup_backslash_path_finds_archived_path_on_windows() {
         let mut fixture = GraphFixture::new();
         fixture.file("src/bin/util.rs");
         let bytes = fixture.into_bytes();
@@ -2702,7 +2704,7 @@ mod tests {
         let modules = RustModules::new(graph, &[], &removed, Default::default());
         assert_eq!(
             modules.file(std::path::Path::new("src\\bin\\util.rs")),
-            Some("src/bin/util.rs")
+            cfg!(windows).then_some("src/bin/util.rs")
         );
     }
 

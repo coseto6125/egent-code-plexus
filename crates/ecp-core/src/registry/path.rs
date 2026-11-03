@@ -1,5 +1,6 @@
 //! Path sanitization, repo/branch derivation, UID path normalization.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
@@ -95,8 +96,37 @@ pub fn uid_path(absolute: &Path, repo_root: &Path) -> Result<String, PathError> 
     let rel = absolute
         .strip_prefix(repo_root)
         .map_err(|_| PathError::Illegal(format!("{absolute:?} not under {repo_root:?}")))?;
-    let s = rel.to_string_lossy().replace('\\', "/");
-    Ok(s.nfc().collect())
+    Ok(os_path_to_slash(rel).nfc().collect())
+}
+
+/// `path`, an OS path of this machine (an indexed file, a repo-relative
+/// path from the walk or git, a `--file` argument, a session path), as the
+/// graph stores it: `/`-separated. Only on Windows is `\` a separator, so
+/// only there does it become `/`; on Linux and macOS `\` is a file-name
+/// character and `a\b.rs` stays a file apart from `a/b.rs`. Borrowed when
+/// nothing changes.
+pub fn os_path_to_slash<P: AsRef<Path> + ?Sized>(path: &P) -> Cow<'_, str> {
+    os_path_to_slash_on(path.as_ref().to_string_lossy(), cfg!(windows))
+}
+
+/// [`os_path_to_slash`] on a Windows (`windows`) or a Unix machine.
+pub(crate) fn os_path_to_slash_on(path: Cow<'_, str>, windows: bool) -> Cow<'_, str> {
+    match windows && path.contains('\\') {
+        true => Cow::Owned(path.replace('\\', "/")),
+        false => path,
+    }
+}
+
+/// `text`, a path that is not an OS path of this machine, with every `\`
+/// turned into `/` on every platform: a path written inside a config file
+/// (a csproj `ProjectReference`, ...) that a Windows author may have typed,
+/// a path in a record another tool wrote, or a path string a classifier
+/// reads as a separator either way. Borrowed when `text` holds no `\`.
+pub fn text_path_to_slash(text: &str) -> Cow<'_, str> {
+    match text.contains('\\') {
+        true => Cow::Owned(text.replace('\\', "/")),
+        false => Cow::Borrowed(text),
+    }
 }
 
 /// Resolve the ecp home directory used for `registry.json` and per-branch
@@ -244,6 +274,43 @@ fn probe_writable(dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_os_path_to_slash_on_windows_converts_unix_borrows_and_keeps_backslash() {
+        let on = |path: &'static str, windows| os_path_to_slash_on(Cow::Borrowed(path), windows);
+        assert_eq!(on("x\\y.py", true), "x/y.py");
+        assert_eq!(on(".\\.\\a.rs", true), "././a.rs");
+        assert!(matches!(on("x/y.py", true), Cow::Borrowed("x/y.py")));
+        assert!(matches!(on("x\\y.py", false), Cow::Borrowed("x\\y.py")));
+        assert!(matches!(on("", false), Cow::Borrowed("")));
+        assert!(matches!(on("", true), Cow::Borrowed("")));
+        assert_eq!(on(" \\ ", true), " / ");
+        assert!(matches!(on(" \\ ", false), Cow::Borrowed(" \\ ")));
+    }
+
+    #[test]
+    fn test_os_path_to_slash_this_machine_follows_its_platform() {
+        let expected = match cfg!(windows) {
+            true => "a/b.rs",
+            false => "a\\b.rs",
+        };
+        assert_eq!(os_path_to_slash("a\\b.rs"), expected);
+        assert_eq!(os_path_to_slash(Path::new("a\\b.rs")), expected);
+        assert!(matches!(
+            os_path_to_slash("a/b.rs"),
+            Cow::Borrowed("a/b.rs")
+        ));
+    }
+
+    #[test]
+    fn test_text_path_to_slash_converts_on_every_platform() {
+        assert_eq!(
+            text_path_to_slash("..\\Lib\\Lib.csproj"),
+            "../Lib/Lib.csproj"
+        );
+        assert!(matches!(text_path_to_slash("a/b"), Cow::Borrowed("a/b")));
+        assert!(matches!(text_path_to_slash(""), Cow::Borrowed("")));
+    }
 
     #[test]
     fn test_resolve_home_ecp_memoized_same_env_reused_vanished_root_recreated() {

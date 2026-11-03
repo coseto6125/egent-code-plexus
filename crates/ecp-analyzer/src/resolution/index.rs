@@ -11,6 +11,7 @@ use ecp_core::analyzer::types::{owner_key, RawExportAlias};
 use ecp_core::contracts::routing::ParsedLanguage;
 pub use ecp_core::file_category::{FileMeta, GlobalPick, Language};
 use ecp_core::graph::{FunctionMeta, NodeKind};
+use ecp_core::registry::os_path_to_slash;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::Cow;
 
@@ -123,8 +124,6 @@ pub(crate) type CsharpExtensionDecls<'a> = FxHashMap<&'a str, Vec<ExtensionDecl<
 #[derive(Debug)]
 struct CsharpExtensionDecl {
     id: u32,
-    /// Its file.
-    file: Box<str>,
     /// Its `this` parameter's type as written.
     this_type: Box<str>,
     flags: u16,
@@ -657,7 +656,6 @@ impl SymbolTable {
     pub fn note_csharp_extension(
         &mut self,
         node_id: u32,
-        file_path: &str,
         name: &str,
         this_type: &str,
         flags: u16,
@@ -668,7 +666,6 @@ impl SymbolTable {
             .or_default()
             .push(CsharpExtensionDecl {
                 id: node_id,
-                file: file_path.into(),
                 this_type: this_type.into(),
                 flags,
                 params: params.iter().map(|&name| name.into()).collect(),
@@ -706,7 +703,7 @@ impl SymbolTable {
         found
             .iter()
             .filter_map(|decl| {
-                let file = &*decl.file;
+                let file = self.file_of(decl.id)?;
                 let class = PickFacts::owner(self, decl.id)?;
                 let namespace = self
                     .lookup_in_file_with_kind(file, class, ResolveTarget::Type)
@@ -1748,14 +1745,13 @@ impl SymbolTable {
 
     /// The metadata of `file`: the stored record for a file Pass 1
     /// registered, else what the path decides ([`FileMeta::from_path`]) for
-    /// a path the index never saw. Either separator is accepted.
+    /// a path the index never saw. `file` is read as [`os_path_to_slash`]
+    /// stores it.
     pub fn file_meta(&self, file: &str) -> FileMeta {
-        let stored = if file.contains('\\') {
-            self.file_metas.get(&file.replace('\\', "/"))
-        } else {
-            self.file_metas.get(file)
-        };
-        stored.copied().unwrap_or_else(|| FileMeta::from_path(file))
+        self.file_metas
+            .get(&*os_path_to_slash(file))
+            .copied()
+            .unwrap_or_else(|| FileMeta::from_path(file))
     }
 
     /// `file`'s language as the index's rules compare it: the stored

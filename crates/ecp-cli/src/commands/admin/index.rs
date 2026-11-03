@@ -2,6 +2,7 @@ use clap::Args;
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_core::analyzer::pipeline::AnalyzerPipeline;
 use ecp_core::contracts::routing::{FileRouter, RouteOutcome};
+use ecp_core::registry::os_path_to_slash;
 use ignore::WalkBuilder;
 
 #[derive(Args, Debug, Clone)]
@@ -118,7 +119,7 @@ pub fn run_analyzer_for_paths(
                     workspace_configs_ref
                         .lock()
                         .expect("workspace-config list is never held across a panic")
-                        .push(rel.replace('\\', "/"));
+                        .push(os_path_to_slash(rel).into_owned());
                 }
                 // Route before the stat: the route is a pure string match, so
                 // an unrouted entry costs no stat.

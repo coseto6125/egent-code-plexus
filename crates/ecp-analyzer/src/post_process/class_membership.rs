@@ -7,9 +7,8 @@
 //! `RawIndexMap`, and answers the owner pass's name lookup from the
 //! [`SymbolTable`].
 
-use crate::resolution::builder::{skipped_nodes, SharedPaths};
 use crate::resolution::index::SymbolTable;
-use ecp_core::analyzer::lexical::forward_slash_path;
+use ecp_core::analyzer::lexical::{skipped_nodes, SharedPaths};
 use ecp_core::analyzer::membership::{
     self, MemberLookup, MemberRow, CLASS_MEMBERSHIP_IMPL_REASON, CLASS_MEMBERSHIP_REASON,
 };
@@ -17,6 +16,7 @@ use ecp_core::analyzer::types::{LocalGraph, RawNode};
 use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
 use ecp_core::graph::Edge;
 use ecp_core::pool::StringPool;
+use ecp_core::registry::os_path_to_slash;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -61,7 +61,7 @@ pub fn emit_edges(
                 return Vec::new();
             }
             let raws = &local_graph.nodes;
-            let path_str_cow = forward_slash_path(&local_graph.file_path);
+            let path_str_cow = os_path_to_slash(&local_graph.file_path);
             let path_str: &str = &path_str_cow;
 
             let file = FileOrd(file_ord as u32);
@@ -188,7 +188,7 @@ mod tests {
         let string_pool = StringPool::new();
         let mut current = 0u32;
         for lg in &local_graphs {
-            let path_str = lg.file_path.to_string_lossy().replace('\\', "/");
+            let path_str = os_path_to_slash(&lg.file_path);
             for rn in &lg.nodes {
                 symbol_table.register_node(&path_str, &rn.name, current, rn.kind);
                 current += 1;

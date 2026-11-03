@@ -41,13 +41,13 @@ Every `file:line` below was read on branch `feat/arch-p1-contracts` at `1d267693
 | `HandlerRef` | enum | What serves a route: `Declaration { uid }`, `Closure { uid }`, `Inline { line }`, `Unresolved { name }`, `Absent`. |
 | `RouteBinding` | value | One `HandlesRoute` fact: a route key and a handler. |
 
-Functions: `canonical_path`, `owner_match_form`, `scoped_uid`, `assign_file`, `pair_by_anchor`, `is_scope_container`, `lexical_parents`, `file_match`, `normalize_file_needle`, `select`, `resolve_target`, `join_route_path`.
+Functions: `owner_match_form`, `scoped_uid`, `assign_file`, `pair_by_anchor`, `is_scope_container`, `lexical_parents`, `file_match`, `normalize_file_needle`, `select`, `resolve_target`, `join_route_path`.
 
 ### Declaration identity: fields and invariants
 
 | Field | Invariant |
 |---|---|
-| `DeclKey.path` | Repo-relative and `/`-separated, as the builder stores it; a leading `./` is part of the name. `canonical_path` gives that form. A constructor rejects any other spelling. |
+| `DeclKey.path` | Repo-relative and `/`-separated, as the builder stores it; a leading `./` is part of the name. `ecp_core::registry::os_path_to_slash` gives that form: `\` becomes `/` on Windows only, and stays a file-name character on Unix. A constructor rejects a `\` on Windows only. |
 | `DeclKey.owner` | The type, namespace or module that declares the node (meanings M1, M2 and M4 of design A §1.2). `Some("")` is `None`, as `uid::compute` already treats it. The text stays as the producer writes it, generic arguments and separators included. Identity never normalises it: the Rust `Impl` owners `Conv<u8>` and `Conv<u16>` are two owners and two uids (`test_unscoped_generic_owner_kept_as_produced`). |
 | owner match form | `owner_match_form` removes every generic argument list and the outer whitespace: `Walk<'s, 't>` gives `Walk`. Only the target resolver uses it, to compare a request segment with a path segment. It never enters a uid. |
 | `DeclKey.name` | The bare declared name, as `Node.name` stores it. |

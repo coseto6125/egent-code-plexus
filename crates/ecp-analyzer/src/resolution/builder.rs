@@ -13,9 +13,9 @@ use ecp_core::analyzer::csharp_extension::{self, ReceiverSite};
 use ecp_core::analyzer::heritage;
 use ecp_core::analyzer::ladder;
 use ecp_core::analyzer::lexical::{
-    body_locals, decls_enclosing, enclosing_types, file_identities, file_uids, fold_twins,
-    forward_slash_path, lexical_scope_kinds, path_identities, raw_decl, splits_by_arity,
-    LexicalFunctions,
+    body_locals, decls_enclosing, enclosing_types, file_identities, fold_twins,
+    lexical_scope_kinds, path_identities, raw_decl, skipped_nodes, splits_by_arity,
+    stored_path_order, LexicalFunctions, SharedPaths,
 };
 use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::reexport::{export_filter_applies_to, is_ecmascript, ImportRef};
@@ -42,6 +42,7 @@ use ecp_core::graph::{
 };
 use ecp_core::graph_assembly::{GraphAssembly, ModuleFactTables};
 use ecp_core::pool::{StrRef, StringPool};
+use ecp_core::registry::os_path_to_slash;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -92,7 +93,6 @@ pub(crate) enum Tombstone {
 }
 
 use std::cell::RefCell;
-use std::ops::Range;
 
 /// Per-graph output from Pass 2 parallel map: `(edges, pending_call_metas,
 /// file_edges, blind_spots)`. `pending_call_metas` entries are
@@ -295,8 +295,7 @@ impl GraphBuilder {
         // numbers the path's declarations (`path_identities`) as the overlay
         // numbers its inputs.
         let t_sort = std::time::Instant::now();
-        self.local_graphs
-            .sort_by(|a, b| a.file_path.cmp(&b.file_path));
+        self.local_graphs.sort_by(stored_path_order);
         if prof {
             eprintln!("prof build.sort: {:.3}s", t_sort.elapsed().as_secs_f32());
         }
@@ -550,7 +549,7 @@ impl GraphBuilder {
         for bs in parsed.chain(&call_blind_spots) {
             all_blind_spots.push(BlindSpotRecord {
                 kind: string_pool.add(&bs.kind),
-                file_path: string_pool.add(&bs.file_path.to_string_lossy().replace('\\', "/")),
+                file_path: string_pool.add(&os_path_to_slash(&bs.file_path)),
                 start_row: bs.span.0,
                 start_col: bs.span.1,
                 end_row: bs.span.2,
@@ -884,7 +883,7 @@ impl GraphBuilder {
         // via `file_node_idx` for module-level edges (Imports today).
         let first_file_node = nodes.len() as u32;
         for (i, local_graph) in self.local_graphs.iter().enumerate() {
-            let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
+            let path_str = os_path_to_slash(&local_graph.file_path).into_owned();
             let basename = std::path::Path::new(&path_str)
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
@@ -1087,7 +1086,7 @@ fn record_module_facts(
     facts.file_imports.push(0);
     facts.file_export_aliases.push(0);
     for local_graph in local_graphs {
-        let path = local_graph.file_path.to_string_lossy().replace('\\', "/");
+        let path = os_path_to_slash(&local_graph.file_path);
         let language = symbol_table.file_language(&path);
         let ecmascript = is_ecmascript(language);
         for import in &local_graph.imports {
@@ -1275,12 +1274,7 @@ fn file_indices(local_graphs: &[LocalGraph]) -> FxHashMap<String, u32> {
     local_graphs
         .iter()
         .enumerate()
-        .map(|(idx, graph)| {
-            (
-                graph.file_path.to_string_lossy().replace('\\', "/"),
-                idx as u32,
-            )
-        })
+        .map(|(idx, graph)| (os_path_to_slash(&graph.file_path).into_owned(), idx as u32))
         .collect()
 }
 
@@ -1329,7 +1323,7 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
 
     for (file_idx, local_graph) in local_graphs.iter().enumerate() {
         let file_idx = file_idx as u32;
-        let path_str = forward_slash_path(&local_graph.file_path);
+        let path_str = os_path_to_slash(&local_graph.file_path);
         let path_ref = string_pool.add(&path_str);
         symbol_table.register_file(&path_str);
         // Hoisted once per file. `register_node` would otherwise call
@@ -1401,9 +1395,12 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
                         LaterReason::Arity => register_arity_twin(
                             &mut symbol_table,
                             local_graph,
-                            (&path_str, file_meta),
+                            &path_str,
+                            file_meta,
                             &mut declaring_types,
-                            (first_idx, first.checked_sub(input_offset)),
+                            path_start,
+                            first,
+                            input_offset,
                             offset,
                         ),
                         LaterReason::Overload | LaterReason::Scoped | LaterReason::Repeat => {
@@ -1574,53 +1571,26 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
     }
 }
 
-/// The paths that 2+ `LocalGraph`s share. `GraphBuilder::build` sorts its
-/// inputs by path, stably, so the inputs of one path are adjacent and in
-/// input order: each shared path is one run of file indices. Pass 1 numbers
-/// a run as one file; the T7-6 skip gate skips nothing of it.
-#[derive(Debug)]
-pub struct SharedPaths {
-    /// Runs of 2+ file indices, ascending and disjoint.
-    runs: Vec<Range<u32>>,
-}
-
-impl SharedPaths {
-    /// The runs of adjacent inputs of one `/`-separated path. Empty for a
-    /// build whose paths are unique; allocates only for a shared path.
-    pub fn of(local_graphs: &[LocalGraph]) -> Self {
-        let mut start = 0;
-        let runs = local_graphs
-            .chunk_by(|a, b| forward_slash_path(&a.file_path) == forward_slash_path(&b.file_path))
-            .filter_map(|run| {
-                let inputs = start..start + run.len() as u32;
-                start = inputs.end;
-                (run.len() >= 2).then_some(inputs)
-            })
-            .collect();
-        Self { runs }
-    }
-
-    /// The run of file `file`, `None` when no other input shares its path.
-    pub fn run_of(&self, file: u32) -> Option<Range<u32>> {
-        let at = self.runs.partition_point(|run| run.end <= file);
-        self.runs.get(at).filter(|run| run.start <= file).cloned()
-    }
-}
-
-/// Pass 1's `LaterReason::Arity` row at `offset`: file the twin beside its
-/// first (`register_arity_sibling`). A member twin (a member a C# type of
-/// another generic arity declares) also notes the span of the type that
-/// declares it, and its first's when the first is a row of this input
-/// (`first.1`): a read inside its declaring type means it
-/// (`SymbolTable::twin_read_from`).
+/// Pass 1's `LaterReason::Arity` row at `offset` of `local_graph`, whose
+/// rows start `input_offset` rows into the rows of its path: file the twin
+/// beside its first, row `first` of the path and node `path_start + first`
+/// (`register_arity_sibling`). A member twin (a member a C# type of another
+/// generic arity declares) also notes the span of the type that declares
+/// it, and its first's when the first is a row of this input: a read inside
+/// its declaring type means it (`SymbolTable::twin_read_from`).
+#[allow(clippy::too_many_arguments)]
 fn register_arity_twin(
     symbol_table: &mut SymbolTable,
     local_graph: &LocalGraph,
-    (path, file_meta): (&str, FileMeta),
+    path: &str,
+    file_meta: FileMeta,
     declaring_types: &mut Option<Vec<Option<usize>>>,
-    (first_idx, first_raw): (u32, Option<u32>),
+    path_start: u32,
+    first: u32,
+    input_offset: u32,
     offset: usize,
 ) {
+    let first_idx = path_start + first;
     let raw_node = &local_graph.nodes[offset];
     let twin =
         symbol_table.register_arity_sibling(first_idx, path, file_meta, raw_node.generic_arity());
@@ -1632,6 +1602,7 @@ fn register_arity_twin(
             local_graph.nodes.iter().map(|n| (n.kind, n.span)).collect();
         enclosing_types(&rows)
     });
+    let first_raw = first.checked_sub(input_offset);
     let scoped =
         std::iter::once((twin, offset)).chain(first_raw.map(|raw| (first_idx, raw as usize)));
     for (id, raw) in scoped {
@@ -1844,7 +1815,7 @@ impl RouteMounts {
             ) {
                 continue;
             }
-            let path = graph.file_path.to_string_lossy().replace('\\', "/");
+            let path = os_path_to_slash(&graph.file_path);
             for record in graph.routes.iter().filter(|r| is_mount(r)) {
                 let Some(binding) = record.handler_name() else {
                     continue;
@@ -2156,7 +2127,7 @@ fn pass1_5_extract_routes(
     let mut shape_sources = ShapeSources::default();
     for (file_idx, local_graph) in local_graphs.iter().enumerate() {
         let file_idx = file_idx as u32;
-        let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
+        let path_str = os_path_to_slash(&local_graph.file_path);
         // Skip Route emission for genuinely non-production files
         // (Test/Reference). `Example` is INTENTIONALLY NOT skipped —
         // framework example apps (Express `examples/auth/`, Flask
@@ -2365,7 +2336,7 @@ fn pass1_5_extract_routes(
             let graph = &local_graphs[capped.file_idx as usize];
             BlindSpotRecord {
                 kind: string_pool.add(crate::php::laravel_routes::BS_KIND_INCLUDE_SCOPE_CAP),
-                file_path: string_pool.add(&graph.file_path.to_string_lossy().replace('\\', "/")),
+                file_path: string_pool.add(&os_path_to_slash(&graph.file_path)),
                 start_row: 0,
                 start_col: 0,
                 end_row: 0,
@@ -2439,7 +2410,7 @@ fn pass1_95_controller_actions(
             let graph = &local_graphs[route.file_idx as usize];
             blind_spots.push(BlindSpotRecord {
                 kind: string_pool.add(crate::php::laravel_routes::BS_KIND_UNBOUND_ACTION),
-                file_path: string_pool.add(&graph.file_path.to_string_lossy().replace('\\', "/")),
+                file_path: string_pool.add(&os_path_to_slash(&graph.file_path)),
                 start_row: route.span.0,
                 start_col: route.span.1,
                 end_row: route.span.2,
@@ -2516,7 +2487,7 @@ fn pass1_95_controller_actions(
         let graph = &local_graphs[spot.file_idx as usize];
         blind_spots.push(BlindSpotRecord {
             kind: string_pool.add(crate::php::laravel_routes::BS_KIND_CONTROLLER_MIDDLEWARE),
-            file_path: string_pool.add(&graph.file_path.to_string_lossy().replace('\\', "/")),
+            file_path: string_pool.add(&os_path_to_slash(&graph.file_path)),
             start_row: spot.span.0,
             start_col: spot.span.1,
             end_row: spot.span.2,
@@ -2540,7 +2511,7 @@ fn pass1_95_controller_actions(
         let file_idx = nodes[handler as usize].file_idx;
         let graph = &local_graphs[file_idx as usize];
         let raw = &graph.nodes[(handler - file_base(raw_map, file_idx)) as usize];
-        let path_str = graph.file_path.to_string_lossy().replace('\\', "/");
+        let path_str = os_path_to_slash(&graph.file_path);
         let mut reason = routes
             .iter()
             .take(MAX_ENTRY_REASONS)
@@ -2900,7 +2871,7 @@ fn pass1_7_entry_points(
     let mut blind_spots: Vec<BlindSpotRecord> = Vec::new();
     for (file_idx, local_graph) in local_graphs.iter().enumerate() {
         let file_idx = file_idx as u32;
-        let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
+        let path_str = os_path_to_slash(&local_graph.file_path);
         // Pass 1.5 emits no Route node for a Test or Reference file, so
         // its routes, recorded or decorator-declared, mark no entry point.
         let routes_count = !matches!(
@@ -3155,7 +3126,6 @@ fn pass1_8_function_metas(
                             .collect();
                         symbol_table.note_csharp_extension(
                             node_idx,
-                            &local_graph.file_path.to_string_lossy().replace('\\', "/"),
                             &raw_node.name,
                             this_type,
                             rfm.flags,
@@ -3854,13 +3824,13 @@ fn pass2_emit_node_edges(
         }
     }
     if !misses.is_empty() {
-        let file_path = local_graph.file_path.to_string_lossy().replace('\\', "/");
+        let file_path = os_path_to_slash(&local_graph.file_path);
         let is_test = ecp_core::file_category::is_test_path(&file_path);
         for hint in misses {
             blind_spots.push(BlindSpot {
                 kind: csharp_extension::BS_KIND_UNRESOLVED.into(),
                 is_test,
-                file_path: file_path.clone().into(),
+                file_path: std::path::PathBuf::from(&*file_path),
                 span: raw_node.span,
                 hint,
             });
@@ -3911,7 +3881,7 @@ fn pass2_emit_node_edges(
     let mut name_edges: Vec<u32> = Vec::new();
     let mut name_file: Option<(String, Language)> = None;
     let reader_file = || {
-        let file = local_graph.file_path.to_string_lossy().replace('\\', "/");
+        let file = os_path_to_slash(&local_graph.file_path).into_owned();
         let language = symbol_table.file_language(&file);
         (file, language)
     };
@@ -4033,7 +4003,7 @@ fn pass2_emit_framework_and_fanout(
     edges: &mut Vec<Edge>,
     file_edges: &mut Vec<(FileOrd, Edge)>,
 ) {
-    let file_path_lossy = local_graph.file_path.to_string_lossy().replace('\\', "/");
+    let file_path_lossy = os_path_to_slash(&local_graph.file_path);
     let start_idx = file_base(raw_map, file.0);
 
     for fw_ref in &local_graph.framework_refs {
@@ -4151,36 +4121,6 @@ fn framework_ref_source(
         Some(i) => raw_map.node(file, RawIdx(i as u32)),
         None => outermost_named_slot(nodes, &fw_ref.source_name, raw_map, symbol_table, file).ok(),
     }
-}
-
-/// T7-6: per raw node of `local_graph`, the input at `file`, whether its
-/// unchanged body skips resolver work. `None` when the skip data has no
-/// entry for the file: no diff data, or the file needs a full reanalyze. An
-/// empty inner set means every symbol changed. The uids are Pass 1's,
-/// overloads numbered. The one check of whether a file's resolver work
-/// skips, for Pass 2 and class membership.
-///
-/// `None` too for an input of a path of `shared`: Pass 1 numbers its inputs
-/// as one file, the skip data each input alone, so a changed body of a later
-/// input could carry the uid of an unchanged one.
-pub(crate) fn skipped_nodes(
-    local_graph: &LocalGraph,
-    file: u32,
-    symbol_skip: Option<&FxHashMap<String, FxHashSet<u64>>>,
-    shared: &SharedPaths,
-) -> Option<Vec<bool>> {
-    let symbol_skip = symbol_skip?;
-    if shared.run_of(file).is_some() {
-        return None;
-    }
-    let path = forward_slash_path(&local_graph.file_path);
-    let skip_uids = symbol_skip.get(path.as_ref())?;
-    Some(
-        file_uids(&path, &local_graph.nodes, raw_decl)
-            .iter()
-            .map(|uid| skip_uids.contains(uid))
-            .collect(),
-    )
 }
 
 /// B1: the edges a merged row emits start at its survivor

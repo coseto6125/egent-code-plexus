@@ -24,6 +24,7 @@
 
 use ecp_core::analyzer::lexical::{file_uids, raw_decl};
 use ecp_core::analyzer::types::{LocalGraph, RawImport};
+use ecp_core::registry::os_path_to_slash;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::PathBuf;
 
@@ -113,12 +114,7 @@ pub fn symbol_hash_diff(
     };
 
     for lg in new_graphs {
-        let raw_path = lg.file_path.to_string_lossy();
-        let path_str: String = if raw_path.contains('\\') {
-            raw_path.replace('\\', "/")
-        } else {
-            raw_path.into_owned()
-        };
+        let path_str = os_path_to_slash(&lg.file_path).into_owned();
 
         // Guard (c): compare new vs old SchemaField name-set per file.
         // Conservative fallback kicks in only when `old_schema_field_names`
@@ -229,7 +225,7 @@ pub fn build_old_import_map(old_graphs: &[LocalGraph]) -> FxHashMap<String, Vec<
     old_graphs
         .iter()
         .map(|lg| {
-            let path = lg.file_path.to_string_lossy().replace('\\', "/");
+            let path = os_path_to_slash(&lg.file_path).into_owned();
             (path, import_set_key(&lg.imports))
         })
         .collect()
@@ -255,13 +251,7 @@ fn import_set_key(imports: &[RawImport]) -> Vec<(String, String)> {
 /// named `Later` node unless `uid::merges_repeats` makes it a tombstone
 /// (`ecp_core::analyzer::lexical::file_uids`).
 pub fn node_uids_for(lg: &LocalGraph) -> Vec<u64> {
-    let raw_path = lg.file_path.to_string_lossy();
-    let path_str: std::borrow::Cow<'_, str> = if raw_path.contains('\\') {
-        std::borrow::Cow::Owned(raw_path.replace('\\', "/"))
-    } else {
-        raw_path
-    };
-    file_uids(&path_str, &lg.nodes, raw_decl)
+    file_uids(&os_path_to_slash(&lg.file_path), &lg.nodes, raw_decl)
 }
 
 #[cfg(test)]

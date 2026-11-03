@@ -41,6 +41,7 @@ use ecp_core::analyzer::types::{LocalGraph, SchemaType};
 use ecp_core::contracts::raw_records::{FileOrd, GlobalEndpoint, RawIndexMap};
 use ecp_core::graph::{Edge, Node, RelType};
 use ecp_core::pool::StringPool;
+use ecp_core::registry::os_path_to_slash;
 use rustc_hash::FxHashMap;
 
 /// Promote `RawSchemaField`s to `SchemaField` Nodes + emit `HasProperty`
@@ -73,7 +74,7 @@ pub fn emit_edges(
         if schema_fields.is_empty() {
             continue;
         }
-        let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
+        let path_str = os_path_to_slash(&local_graph.file_path);
         let file_idx = lg_idx as u32;
 
         for raw_sf in schema_fields.iter() {

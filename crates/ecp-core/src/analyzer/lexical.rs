@@ -12,16 +12,18 @@ use crate::analyzer::heritage::HeritageNode;
 use crate::analyzer::outcome::{Resolution, Tier};
 use crate::analyzer::same_file_pick::{rust_impl_members, ImplNode};
 use crate::analyzer::types::{
-    innermost_enclosing, span_contains, CallSite, NameRef, NameRefKind, RawNode, Span,
+    innermost_enclosing, span_contains, CallSite, LocalGraph, NameRef, NameRefKind, RawNode, Span,
 };
 use crate::contracts::identity::{
-    assign_file, canonical_path, lexical_parents, DeclIdentity, Discriminator, FileDecl, UidSlot,
+    assign_file, lexical_parents, DeclIdentity, Discriminator, FileDecl, UidSlot,
 };
 use crate::file_category::Language;
 use crate::graph::NodeKind;
+use crate::registry::os_path_to_slash;
 use crate::uid;
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::borrow::Cow;
+use std::cmp::Ordering;
+use std::ops::Range;
 use std::path::Path;
 
 /// The kinds `language` scopes under their enclosing callable (design A
@@ -192,18 +194,6 @@ pub fn twin_enclosing(
         .map(|(id, _)| id)
 }
 
-/// `path` as the `/`-separated string the graph stores: every `\` becomes
-/// `/` on every platform. Borrowed when the path holds no `\`, as every
-/// Linux and macOS path does.
-pub fn forward_slash_path(path: &Path) -> Cow<'_, str> {
-    let lossy = path.to_string_lossy();
-    if lossy.contains('\\') {
-        Cow::Owned(lossy.replace('\\', "/"))
-    } else {
-        lossy
-    }
-}
-
 /// The identity of each declaration of the file at `path`, in slice order:
 /// [`assign_file`] over the language's lexical parents, in a Rust file each
 /// impl member's [`Discriminator::ImplTrait`], and, in a C# file, each
@@ -240,12 +230,115 @@ pub fn path_identities<'a, T>(
         .collect()
 }
 
+/// The order `GraphBuilder::build` sorts its inputs in, which
+/// [`SharedPaths::of`] groups: the `Path` order of the file path, ties
+/// broken by the stored spelling ([`os_path_to_slash`]).
+/// `ZeroCopyGraph::file_idx_of` binary-searches the `Path` order of the
+/// stored paths. The walked and the stored spelling have one `Path` order:
+/// the stored one changes only a `\` on Windows, where both `\` and `/` are
+/// separators (`std::path::SEPARATORS_STR`) and `Ord` compares components.
+/// Two paths that `Path` order counts equal but that are spelled apart
+/// (`a//b`, `a/b`) sort by spelling, so the inputs of one stored path are
+/// adjacent.
+pub fn stored_path_order(a: &LocalGraph, b: &LocalGraph) -> Ordering {
+    a.file_path
+        .cmp(&b.file_path)
+        .then_with(|| os_path_to_slash(&a.file_path).cmp(&os_path_to_slash(&b.file_path)))
+}
+
+/// The paths that 2+ `LocalGraph`s share. `GraphBuilder::build` sorts its
+/// inputs by [`stored_path_order`], stably, so the inputs of one path are
+/// adjacent and in input order: each shared path is one run of file
+/// indices. Pass 1 numbers a run as one file; the T7-6 skip gate skips
+/// nothing of it.
+#[derive(Debug)]
+pub struct SharedPaths {
+    /// Runs of 2+ file indices, ascending and disjoint.
+    runs: Vec<Range<u32>>,
+}
+
+impl SharedPaths {
+    /// The runs of adjacent inputs of one stored path ([`os_path_to_slash`])
+    /// of `local_graphs`, sorted by [`stored_path_order`]. Empty for a build
+    /// whose paths are unique; allocates only for a shared path.
+    pub fn of(local_graphs: &[LocalGraph]) -> Self {
+        debug_assert!(
+            local_graphs
+                .windows(2)
+                .all(|w| stored_path_order(&w[0], &w[1]).is_le()),
+            "the inputs are sorted by `stored_path_order`"
+        );
+        let same = |a: &LocalGraph, b: &LocalGraph| {
+            os_path_to_slash(&a.file_path) == os_path_to_slash(&b.file_path)
+        };
+        let mut start = 0;
+        let runs = local_graphs
+            .chunk_by(same)
+            .filter_map(|run| {
+                let inputs = start..start + run.len() as u32;
+                start = inputs.end;
+                (run.len() >= 2).then_some(inputs)
+            })
+            .collect();
+        debug_assert!(
+            {
+                let mut paths: Vec<_> = local_graphs
+                    .chunk_by(same)
+                    .map(|run| os_path_to_slash(&run[0].file_path))
+                    .collect();
+                let runs = paths.len();
+                paths.sort_unstable();
+                paths.dedup();
+                paths.len() == runs
+            },
+            "no stored path appears in two runs"
+        );
+        Self { runs }
+    }
+
+    /// The run of file `file`, `None` when no other input shares its path.
+    pub fn run_of(&self, file: u32) -> Option<Range<u32>> {
+        let at = self.runs.partition_point(|run| run.end <= file);
+        self.runs.get(at).filter(|run| run.start <= file).cloned()
+    }
+}
+
+/// T7-6: per raw node of `local_graph`, the input at `file`, whether its
+/// unchanged body skips resolver work. `None` when the skip data has no
+/// entry for the file: no diff data, or the file needs a full reanalyze. An
+/// empty inner set means every symbol changed. The uids are Pass 1's,
+/// overloads numbered. The one check of whether a file's resolver work
+/// skips, for Pass 2 and class membership.
+///
+/// `None` too for an input of a path of `shared`: Pass 1 numbers its inputs
+/// as one file, the skip data each input alone, so a changed body of a later
+/// input could carry the uid of an unchanged one.
+pub fn skipped_nodes(
+    local_graph: &LocalGraph,
+    file: u32,
+    symbol_skip: Option<&FxHashMap<String, FxHashSet<u64>>>,
+    shared: &SharedPaths,
+) -> Option<Vec<bool>> {
+    let symbol_skip = symbol_skip?;
+    if shared.run_of(file).is_some() {
+        return None;
+    }
+    let path = os_path_to_slash(&local_graph.file_path);
+    let skip_uids = symbol_skip.get(path.as_ref())?;
+    Some(
+        file_uids(&path, &local_graph.nodes, raw_decl)
+            .iter()
+            .map(|uid| skip_uids.contains(uid))
+            .collect(),
+    )
+}
+
 fn identities_of<'a, T>(
     path: &str,
     inputs: &[&'a [T]],
     fields: impl Fn(&'a T) -> DeclFields<'a>,
 ) -> Vec<DeclIdentity> {
-    let path = canonical_path(path);
+    let path = os_path_to_slash(path);
     let language = Language::from_path(&path);
     let mut rows: Vec<Row<'a>> = Vec::with_capacity(inputs.iter().map(|i| i.len()).sum());
     for &input in inputs {
@@ -310,8 +403,8 @@ fn identities_of<'a, T>(
                 .map(|scope| scope as u32),
         })
         .collect();
-    // `canonical_path` removes every `\`, the one spelling `check_path`
-    // rejects; `impl_traits` never yields an empty text and marks only
+    // `os_path_to_slash` removes every `\` `check_path` rejects;
+    // `impl_traits` never yields an empty text and marks only
     // methods and constructors, which are never scoped; `lexical_parents`
     // returns in-range strict containers, scopes no kind that keeps
     // overloads, and the parser clears each scoped node's owner
@@ -988,26 +1081,16 @@ mod tests {
     }
 
     #[test]
-    fn test_forward_slash_path_backslash_owned_else_borrowed() {
-        assert!(matches!(
-            forward_slash_path(Path::new("src/a.rs")),
-            Cow::Borrowed("src/a.rs")
-        ));
-        assert_eq!(forward_slash_path(Path::new("src\\b\\a.rs")), "src/b/a.rs");
-        assert!(matches!(
-            forward_slash_path(Path::new("")),
-            Cow::Borrowed("")
-        ));
-        assert_eq!(forward_slash_path(Path::new(" \\ ")), " / ");
-    }
-
-    #[test]
-    fn test_file_uids_backslash_path_returns_forward_slash_uids() {
+    fn test_file_uids_backslash_path_hashes_the_stored_spelling() {
         let decls = [(NodeKind::Function, None, "f")];
+        let stored = match cfg!(windows) {
+            true => "src/a.rs",
+            false => "src\\a.rs",
+        };
         assert_eq!(
             uids("src\\a.rs", &decls),
-            uids("src/a.rs", &decls),
-            "the builder hashes the `/` form of a path"
+            [uid::compute(NodeKind::Function, stored, None, "f")],
+            "the builder hashes the path as `os_path_to_slash` stores it"
         );
     }
 
@@ -1022,9 +1105,9 @@ mod tests {
             uid::compute(NodeKind::Method, "./a.rs", Some("A"), "g"),
         ];
         assert_eq!(
-            uids(".\\a.rs", &decls),
-            stored,
-            "a Unix file named `.\\a.rs` is stored `./a.rs`, and the uid hashes that name"
+            uids(".\\a.rs", &decls) == stored,
+            cfg!(windows),
+            "a Windows `.\\a.rs` is stored `./a.rs`; a Unix file named `.\\a.rs` keeps its name"
         );
         assert_eq!(uids("./a.rs", &decls), stored);
         assert_ne!(
@@ -1038,7 +1121,7 @@ mod tests {
     fn test_file_uids_doubled_dot_prefix_no_panic() {
         let decls = [(NodeKind::Function, None, "f")];
         let stored = [uid::compute(NodeKind::Function, "././a.rs", None, "f")];
-        assert_eq!(uids(".\\.\\a.rs", &decls), stored);
+        assert_eq!(uids(".\\.\\a.rs", &decls) == stored, cfg!(windows));
         assert_eq!(uids("././a.rs", &decls), stored);
     }
 

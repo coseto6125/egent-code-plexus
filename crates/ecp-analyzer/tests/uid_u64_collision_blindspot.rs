@@ -168,3 +168,69 @@ fn test_build_python_redefined_function_later_node_no_uid_collision() {
     assert_eq!(named, [f, ecp_core::uid::overload(f, 1)]);
     assert!(!kinds(&g).contains(&"uid-collision"), "{:?}", kinds(&g));
 }
+
+/// Stands for: on Unix `\` is a file-name character, so `x\y.py` is a file
+/// apart from `x/y.py`. `Path` order puts `x0.py` between them; the build
+/// keeps three files, `x\y.py` stored with its `\`, and its `def f` the named
+/// first of its own file with one `File -> f` edge. Red before the Windows-only
+/// separator rule: both `y.py` paths were stored `x/y.py`, the second `f` a
+/// blank-named tombstone with a `uid-collision`, and `x/y.py`'s File node
+/// defined `f` twice.
+#[cfg(unix)]
+#[test]
+fn test_build_unix_backslash_file_name_beside_slash_path_three_files_no_uid_collision() {
+    let paths = ["x/y.py", "x0.py", "x\\y.py"];
+    let mut b = GraphBuilder::new();
+    for path in paths {
+        let mut graph = make_collision_graph(path, NodeKind::Function, "f");
+        graph.nodes.truncate(1);
+        b.add_graph(graph);
+    }
+    let g = b.build();
+    let pool = g.string_pool.as_slice();
+    let path_of = |file_idx: u32| g.files[file_idx as usize].path.resolve(pool);
+
+    let mut stored: Vec<&str> = g.files.iter().map(|f| f.path.resolve(pool)).collect();
+    stored.sort_unstable();
+    assert_eq!(stored, ["x/y.py", "x0.py", "x\\y.py"]);
+
+    let file_nodes: Vec<u32> = (0..g.nodes.len() as u32)
+        .filter(|&i| g.nodes[i as usize].kind == NodeKind::File)
+        .collect();
+    assert_eq!(file_nodes.len(), 3);
+
+    let fs: Vec<u32> = (0..g.nodes.len() as u32)
+        .filter(|&i| g.nodes[i as usize].kind == NodeKind::Function)
+        .collect();
+    assert_eq!(fs.len(), 3, "one `f` per file, no tombstone");
+    for &f in &fs {
+        let node = &g.nodes[f as usize];
+        let path = path_of(node.file_idx);
+        assert_eq!(node.name.resolve(pool), "f", "{path}");
+        assert_eq!(
+            node.uid,
+            ecp_core::uid::compute(NodeKind::Function, path, None, "f"),
+            "{path}: the first `f` of its own file"
+        );
+    }
+
+    let defines: Vec<(u32, u32)> = g
+        .edges
+        .iter()
+        .filter(|e| e.rel_type == ecp_core::graph::RelType::Defines)
+        .filter(|e| file_nodes.contains(&e.source))
+        .map(|e| (e.source, e.target))
+        .collect();
+    assert_eq!(defines.len(), 3, "{defines:?}");
+    for (file, f) in &defines {
+        assert_eq!(
+            g.nodes[*file as usize].file_idx, g.nodes[*f as usize].file_idx,
+            "a File node defines the `f` of its own file: {defines:?}"
+        );
+    }
+    let mut targets: Vec<u32> = defines.iter().map(|&(_, f)| f).collect();
+    targets.sort_unstable();
+    assert_eq!(targets, fs, "one `File -> f` per file");
+
+    assert!(!kinds(&g).contains(&"uid-collision"), "{:?}", kinds(&g));
+}

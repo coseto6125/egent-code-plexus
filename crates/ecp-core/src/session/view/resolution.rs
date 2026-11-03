@@ -62,6 +62,7 @@ use crate::analyzer::types::{
 use crate::contracts::identity::lexical_parents_in;
 use crate::file_category::{pick_global, FileMeta, GlobalPick, Language};
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
+use crate::registry::os_path_to_slash;
 use crate::session::closure::ConfigEdits;
 use crate::session::import_scope::{stored_file_meta, stored_language, ImportScope, Module};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -637,7 +638,7 @@ impl<'a> OverlayFacts<'a> {
             return self.has_file(file).then_some(file);
         }
         let base = rust_module_path_base(std::path::Path::new(source), module_path)?;
-        let base = base.to_string_lossy().replace('\\', "/");
+        let base = os_path_to_slash(&base);
         let mut found = None;
         reexport::probe_rust_module(base.trim_start_matches("./"), &mut |candidate: &str| {
             found = self.stored_path(candidate);
@@ -3142,18 +3143,23 @@ impl<'a> RustModules<'a> {
                 .filter(|twin| twin.file_idx.to_native() == file_idx)
         };
         let pool = &graph.string_pool;
+        let (count, any_nameless) = same_file().fold((0u32, false), |(count, nameless), twin| {
+            (count + 1, nameless || twin.name.resolve(pool).is_empty())
+        });
         // A file with no tombstone (no name) of this kind merged nothing
         // into `idx`.
-        let body_local = if !same_file().any(|twin| twin.name.resolve(pool).is_empty()) {
+        let body_local = if !any_nameless {
             true
         } else {
+            let twins: Vec<_> = same_file().collect();
             // A repeat's ordinal counts the earlier declarations of its uid,
             // so it stays below the file's count of this kind.
             let base = node.uid.to_native();
-            let twin_uids: FxHashSet<u64> = (1..same_file().count() as u32)
+            let twin_uids: FxHashSet<u64> = (1..count)
                 .map(|n| crate::uid::tombstone(crate::uid::overload(base, n)))
                 .collect();
-            !same_file()
+            !twins
+                .iter()
                 .any(|twin| twin_uids.contains(&twin.uid.to_native()) && !inside(stored_span(twin)))
         };
         self.base_twin_scans.borrow_mut().insert(idx, body_local);
@@ -3193,12 +3199,8 @@ impl<'a> RustModules<'a> {
     }
 
     pub(super) fn file(&self, path: &std::path::Path) -> Option<&'a str> {
-        // `PathBuf::join` writes `\` on Windows; archived paths use `/`, as
-        // the analyzer's path normalisation does.
-        let requested = match path.to_str()? {
-            raw if raw.contains('\\') => std::borrow::Cow::Owned(raw.replace('\\', "/")),
-            raw => std::borrow::Cow::Borrowed(raw),
-        };
+        // `PathBuf::join` writes `\` on Windows; archived paths use `/`.
+        let requested = os_path_to_slash(path.to_str()?);
         let requested = requested.as_ref();
         if let Some((&name, _)) = self.dirty.get_key_value(requested) {
             return Some(name);

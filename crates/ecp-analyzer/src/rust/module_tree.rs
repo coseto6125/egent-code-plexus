@@ -36,7 +36,7 @@ use ecp_core::contracts::workspace::{
     ConfigPresence, ConfigRead, Ecosystem, Membership, NameRank, Scope, ScopeId, ScopeName,
     WorkspaceFacts,
 };
-use ecp_core::registry::uid_path;
+use ecp_core::registry::{os_path_to_slash, uid_path};
 use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 
@@ -158,11 +158,8 @@ impl RustWorkspaceModTree {
                 out.file_to_crate
                     .insert(file.clone(), (code_name.clone(), mod_path.clone()));
             }
-            let canon_str = crate_canon
-                .as_deref()
-                .unwrap_or(&crate_dir)
-                .to_string_lossy()
-                .replace('\\', "/");
+            let canon_str =
+                os_path_to_slash(crate_canon.as_deref().unwrap_or(&crate_dir)).into_owned();
             let entry = (crate_dir, canon_str, tree, reexports);
             // Aliases need their own tree entry because lookups split by
             // crate name first. One clone per alias is unavoidable; tree size
@@ -292,7 +289,7 @@ impl RustWorkspaceModTree {
             workspace_root.join(caller_file)
         };
         let caller_canon = caller_abs.canonicalize().unwrap_or(caller_abs);
-        let caller_str = caller_canon.to_string_lossy().replace('\\', "/");
+        let caller_str = os_path_to_slash(&caller_canon);
 
         let mut best: Option<(usize, String)> = None;
         for (name, (_crate_dir, cdir_str, _tree, _reexports)) in &self.crates {
