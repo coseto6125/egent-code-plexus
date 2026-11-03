@@ -293,3 +293,20 @@ fn test_build_cpp_local_struct_in_two_functions_two_nodes() {
     uid_chain_support::assert_twins(&provider, PATH, LOCAL_TWINS, "L", &[2, 7]);
     uid_chain_support::assert_twins(&provider, PATH, LOCAL_TWINS, "x", &[3, 8]);
 }
+
+const OUT_OF_LINE: &str = "class K {\n    void m();\n};\nvoid K::m() {}\n";
+
+/// Stands for: an out-of-line `K::m` joins the set of the in-class `m`
+/// (identity `joined_containers`): two named nodes, the declaration first,
+/// and its `overload_set` reference reaches the definition, so `impact`
+/// from the body reaches the callers bound to the declaration.
+#[test]
+fn test_build_cpp_out_of_line_definition_joins_in_class_declaration_set() {
+    let provider = CppProvider::new().unwrap();
+    let g = uid_chain_support::assert_twins(&provider, PATH, OUT_OF_LINE, "m", &[2, 4]);
+    let def = uid_chain_support::node_at(&g, "m", 4);
+    assert_eq!(
+        uid_chain_support::source_lines(&g, RelType::References, def),
+        vec![2]
+    );
+}

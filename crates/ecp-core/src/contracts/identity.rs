@@ -520,6 +520,7 @@ pub fn assign_file(path: &str, decls: &[FileDecl<'_>]) -> Result<Vec<DeclIdentit
     {
         return Err(IdentityError::BadParent { decl: decl as u32 });
     }
+    let containers = joined_containers(decls);
     let mut anchors: Vec<Option<u64>> = vec![None; n];
     let mut base_uids = vec![0u64; n];
     let mut chain: Vec<usize> = Vec::new();
@@ -534,7 +535,7 @@ pub fn assign_file(path: &str, decls: &[FileDecl<'_>]) -> Result<Vec<DeclIdentit
                 return Err(IdentityError::BadParent { decl: i as u32 });
             }
             chain.push(i);
-            match decls[i].parent.or(decls[i].container) {
+            match decls[i].parent.or(containers[i]) {
                 None => break,
                 Some(p) if (p as usize) < n => i = p as usize,
                 Some(_) => return Err(IdentityError::BadParent { decl: i as u32 }),
@@ -542,7 +543,7 @@ pub fn assign_file(path: &str, decls: &[FileDecl<'_>]) -> Result<Vec<DeclIdentit
         }
         for &j in chain.iter().rev() {
             let d = &decls[j];
-            let key = match (d.parent, d.container) {
+            let key = match (d.parent, containers[j]) {
                 (None, None) => DeclKey::unscoped_unchecked(d.kind, path, d.owner, d.name),
                 (None, Some(c)) => {
                     let parent_anchor = anchors[c as usize]
@@ -649,6 +650,37 @@ pub fn assign_file(path: &str, decls: &[FileDecl<'_>]) -> Result<Vec<DeclIdentit
         });
     }
     Ok(out)
+}
+
+/// [`FileDecl::container`] of each declaration, except that a top-level
+/// member of a kind that keeps overloads joins the type that declares a
+/// member of its kind, owner and name: a C++ out-of-line `K::m` after the
+/// in-class `m`, a Swift `extension K { func m }` beside `func m` in `K`.
+/// It then shares that member's base uid and is a later overload of it,
+/// as before the container chain. A top-level member with no such sibling
+/// (a Go receiver method, a Kotlin `fun K.m` alone, a C++ definition whose
+/// class is in another file) keeps no container and `uid::compute`.
+fn joined_containers(decls: &[FileDecl<'_>]) -> Vec<Option<u32>> {
+    let mut in_type: FxHashMap<(&str, &str, &str), u32> = FxHashMap::default();
+    for d in decls {
+        if let (None, Some(c), Some(owner)) = (d.parent, d.container, d.owner) {
+            if !owner.is_empty()
+                && uid::keeps_overloads(d.kind)
+                && decls.get(c as usize).is_some_and(|t| t.kind.is_type())
+            {
+                in_type.entry((d.kind.as_str(), owner, d.name)).or_insert(c);
+            }
+        }
+    }
+    decls
+        .iter()
+        .map(|d| match (d.parent, d.container, d.owner) {
+            (None, None, Some(owner)) if uid::keeps_overloads(d.kind) => {
+                in_type.get(&(d.kind.as_str(), owner, d.name)).copied()
+            }
+            _ => d.container,
+        })
+        .collect()
 }
 
 /// For each dirty declaration, the base declaration it replaces. A pair
@@ -2321,6 +2353,48 @@ mod tests {
         assert_eq!(
             ids[5].slot,
             UidSlot::First(nested_uid(b, NodeKind::Method, Some("B"), "m"))
+        );
+    }
+
+    /// Stands for: a top-level member joins the type that declares a member
+    /// of its kind, owner and name (C++ in-class `m` then out-of-line
+    /// `K::m`; Swift `m` in `K` then in `extension K`). It is a later
+    /// overload of that member, so the set keeps one first. A top-level
+    /// member with no such sibling (`n`, a Go receiver shape) and one of
+    /// another kind (`Property` `p`) keep `uid::compute`.
+    #[test]
+    fn test_assign_file_out_of_type_member_joins_in_type_sibling_set() {
+        let mut decls = vec![
+            decl(NodeKind::Class, None, "K"),
+            decl(NodeKind::Method, Some("K"), "m"),
+            decl(NodeKind::Property, Some("K"), "p"),
+            decl(NodeKind::Method, Some("K"), "m"),
+            decl(NodeKind::Method, Some("K"), "n"),
+            decl(NodeKind::Property, Some("K"), "p"),
+        ];
+        decls[1].container = Some(0);
+        decls[2].container = Some(0);
+        let ids = assign_file("k.cpp", &decls).unwrap();
+        let k = uid::compute(NodeKind::Class, "k.cpp", None, "K");
+        let m = nested_uid(k, NodeKind::Method, Some("K"), "m");
+        assert_eq!(ids[1].slot, UidSlot::First(m));
+        assert_eq!(
+            ids[3].slot,
+            UidSlot::Later {
+                first: 1,
+                ordinal: 1,
+                uid: uid::overload(m, 1),
+                reason: LaterReason::Overload,
+            }
+        );
+        assert_eq!(ids[1].anchor, ids[3].anchor, "one set, one anchor");
+        assert_eq!(
+            ids[4].slot,
+            UidSlot::First(uid::compute(NodeKind::Method, "k.cpp", Some("K"), "n"))
+        );
+        assert_eq!(
+            ids[5].slot,
+            UidSlot::First(uid::compute(NodeKind::Property, "k.cpp", Some("K"), "p"))
         );
     }
 

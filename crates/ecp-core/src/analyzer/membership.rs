@@ -211,9 +211,10 @@ fn span_pass<'a, T>(
 /// A member of a Rust `Impl` block binds the first type row of its owner's
 /// name whose container is the block's container (design uid §3 row 5), so
 /// `mod a { struct S; impl S { fn m } }` and the same in `mod b` each own
-/// their `m`. With no such row the member gets no edge: a lone `S` of
-/// another module is no proof (`mod c { use super::b::S; impl S {} }` beside
-/// `mod a { struct S; }`), and import evidence is design uid §7 Q2. Any
+/// their `m`. With no such row the block itself owns the member: a lone `S`
+/// of another module is no proof (`mod c { use super::b::S; impl S {} }`
+/// beside `mod a { struct S; }`), and import evidence is design uid §7 Q2,
+/// but the block is the member's container in every case. Any
 /// other member (a Go receiver, an out-of-line member) binds the file's
 /// first declaration of the owner's name. A member named like its type with
 /// no such type would be its own owner, and gets no edge.
@@ -255,13 +256,15 @@ fn owner_pass<'a, T>(
         let source = match block {
             Some(block) => {
                 let scope = containers[block as usize];
-                rows.iter()
+                let owner = rows
+                    .iter()
                     .map(row)
                     .enumerate()
                     .find(|&(t, r)| {
                         r.kind.is_type() && r.name == class_name && containers[t] == scope
                     })
-                    .and_then(|(t, _)| lookup.node(t))
+                    .map_or(block as usize, |(t, _)| t);
+                lookup.node(owner)
             }
             None => lookup.lookup_in_file(class_name),
         };
@@ -546,9 +549,9 @@ mod tests {
     /// Stands for: design uid §3 row 5, phase 2, rule (2). The only `S` of
     /// the file sits in `mod a`, the `impl S` in `mod c` (which imports
     /// another module's `S`): no type of that name beside the block, so no
-    /// edge, and no "only one in the file" fallback.
+    /// "only one in the file" fallback to `a::S`; the block owns `m`.
     #[test]
-    fn test_class_membership_rust_impl_member_no_type_beside_block_emits_none() {
+    fn test_class_membership_rust_impl_member_no_type_beside_block_binds_block() {
         let rows = [
             row(NodeKind::Module, None, "a", (0, 0, 2, 1)),
             row(NodeKind::Struct, Some("a"), "S", (1, 4, 1, 17)),
@@ -556,7 +559,10 @@ mod tests {
             row(NodeKind::Impl, None, "S", (4, 4, 6, 5)),
             row(NodeKind::Method, Some("S"), "m", (5, 8, 5, 20)),
         ];
-        assert!(edges(&rows).is_empty());
+        assert_eq!(
+            edges(&rows),
+            [has_method(3, 4, CLASS_MEMBERSHIP_IMPL_REASON)]
+        );
     }
 
     /// An owner-pass member named like its owner, in a file with no type of

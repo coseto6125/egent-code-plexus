@@ -83,6 +83,19 @@ fn test_cpp_same_file_new_calls_constructor() {
     assert_calls_constructor(&graph, "make_local", "Local", "src/local.cpp");
 }
 
+/// The in-class declaration sits in the class, the out-of-line definition
+/// at file top: two containers, two overload sets. The class has no twin,
+/// so the construction still binds a constructor of `Split`.
+#[test]
+fn test_cpp_out_of_line_constructor_definition_call_calls_constructor() {
+    let split = (
+        "src/split.cpp",
+        "class Split {\npublic:\n    Split(int x);\n};\n\nSplit::Split(int x) {}\n\nSplit make_split() {\n    return Split(1);\n}\n",
+    );
+    let graph = graph_of(&provider(), &[split]);
+    assert_calls_constructor(&graph, "make_split", "Split", "src/split.cpp");
+}
+
 /// Overloads are separate Constructor nodes; the construction binds the
 /// first, as "a constructor of `Multi`", since the argument types that pick
 /// one are not parsed.

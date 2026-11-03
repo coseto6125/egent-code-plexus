@@ -222,3 +222,26 @@ fn test_build_swift_local_func_in_two_functions_two_nodes() {
         &[2, 5],
     );
 }
+
+const EXTENSION_BESIDE_TYPE: &str =
+    "class K {\n    func m(_ x: Int) {}\n}\nextension K {\n    func m(_ s: String) {}\n}\n";
+
+/// Stands for: a method in `extension K` joins the set of the same-named
+/// method in `K` (identity `joined_containers`): two named nodes, the
+/// in-type one first, and its `overload_set` reference reaches the
+/// extension one, so a call by name has one candidate.
+#[test]
+fn test_build_swift_extension_method_joins_in_type_method_set() {
+    let g = uid_chain_support::assert_twins(
+        &SwiftProvider::new().unwrap(),
+        PATH,
+        EXTENSION_BESIDE_TYPE,
+        "m",
+        &[2, 5],
+    );
+    let ext = uid_chain_support::node_at(&g, "m", 5);
+    assert_eq!(
+        uid_chain_support::source_lines(&g, RelType::References, ext),
+        vec![2]
+    );
+}

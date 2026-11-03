@@ -351,15 +351,16 @@ fn test_class_membership_rust_two_mods_same_impl_binds_own_method() {
 const IMPORTED_RECEIVER: &str = "mod b;\nmod a {\n    pub struct S;\n}\nmod c {\n    use super::b::S;\n    impl S {\n        fn m(&self) {}\n    }\n}\n";
 
 /// Stands for: an `impl` of a type no row beside the block declares (here
-/// imported from `b`) gives no `HasMethod` (design_uid phase 2, rule 2):
-/// no fallback to the same-named `a::S` of the file.
+/// imported from `b`) binds no same-named `a::S` of the file (design_uid
+/// phase 2, rule 2); the `impl` block on line 7 owns `m`, so `m` keeps a
+/// parent.
 #[test]
-fn test_class_membership_rust_impl_imported_receiver_emits_none() {
+fn test_class_membership_rust_impl_imported_receiver_binds_impl_block() {
     let provider = RustProvider::new().unwrap();
     let g = uid_chain_support::build(&provider, "src/lib.rs", IMPORTED_RECEIVER);
     let m = uid_chain_support::node_at(&g, "m", 8);
     assert_eq!(
         uid_chain_support::source_lines(&g, RelType::HasMethod, m),
-        Vec::<u32>::new()
+        vec![7]
     );
 }
