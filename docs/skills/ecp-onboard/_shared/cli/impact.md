@@ -42,10 +42,10 @@ Options:
           Override the high-trust threshold with a custom value (0.0–1.0). If set, takes precedence over --high-trust-only
 
       --include-tests
-          Test-file callers are listed by default, tagged `test: true`, since a rename breaks them too. This flag is kept for old callers; on its own it changes one thing: `--baseline` also treats changed test files as changed symbols
+          Test callers are listed by default, tagged `test: true`, since a rename breaks them too. A test caller sits in a test file or carries a test attribute (`#[test]`, `@Test`, `[Fact]`); a test-like name alone is none. This flag is kept for old callers; on its own it changes one thing: `--baseline` also treats changed test files as changed symbols
 
       --exclude-tests
-          Drop test-file callers; the payload reports `hidden_test_callers: N`
+          Drop test callers; the payload reports `hidden_test_callers: N`
 
       --relation_types <RELATION_TYPES>
           Comma-separated relation types to follow (calls, extends, ...)

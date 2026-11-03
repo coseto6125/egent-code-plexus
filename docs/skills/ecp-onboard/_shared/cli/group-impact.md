@@ -21,7 +21,7 @@ Options:
       --timeout-ms <TIMEOUT_MS>
           Local-impact wall-clock budget in ms
       --include-tests
-          Include test files in local traversal
+          Include tests in local traversal: nodes in test files and functions the index flags as tests
       --json
           JSON output instead of TOON
       --graph <GRAPH>

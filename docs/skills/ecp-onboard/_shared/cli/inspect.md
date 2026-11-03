@@ -38,7 +38,7 @@ Options:
           Comma-separated list of relation types (lowercase, e.g. `calls,imports`)
 
       --include_tests
-          Include edges whose target lives in a test file. Defaults to false
+          Include edges whose other end is a test: a node in a test file, or a function the index flags as a test (`#[test]`, `@Test`, `[Fact]`). Defaults to false
 
       --graph <GRAPH>
           Path to the graph.bin file
