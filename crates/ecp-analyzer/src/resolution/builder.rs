@@ -379,6 +379,7 @@ impl GraphBuilder {
             &self.local_graphs,
             &files,
             &raw_map,
+            &symbol_table,
             &mut string_pool,
             &mut nodes,
         );
@@ -2879,6 +2880,7 @@ fn pass1_7_entry_points(
     local_graphs: &[LocalGraph],
     files: &[File],
     raw_map: &RawIndexMap,
+    symbol_table: &SymbolTable,
     string_pool: &mut StringPool,
     nodes: &mut Vec<Node>,
 ) -> (Vec<Edge>, Vec<BlindSpotRecord>) {
@@ -2906,6 +2908,7 @@ fn pass1_7_entry_points(
                 &local_graph.nodes,
                 &ep.uid,
                 raw_map,
+                symbol_table,
                 FileOrd(file_idx),
             ) {
                 Ok(slot) => slot,
@@ -2979,12 +2982,17 @@ pub const BS_KIND_ENTRY_POINT_AMBIGUOUS: &str = "entry-point-ambiguous";
 /// identical spans the lower index stays, as in `innermost_enclosing`.
 /// Only a declaration a handler can be counts: Go's `package main` is no
 /// rival to `func main`.
+/// A redefinition (a later node in its first's overload set, of a kind
+/// that keeps no overloads: `#[cfg]` / `#ifdef` twins, a Python `def`
+/// twice) is one declaration with its first, as a call binds the first;
+/// a method overload stays a rival.
 /// `Err(n)` when `n` nodes remain, `Err(0)` for an absent or blank name.
 /// Never the first of several (C4 `bind_name`).
 fn outermost_named_slot(
     nodes: &[RawNode],
     name: &str,
     raw_map: &RawIndexMap,
+    symbol_table: &SymbolTable,
     file: FileOrd,
 ) -> Result<u32, u32> {
     if name.trim().is_empty() {
@@ -2993,7 +3001,7 @@ fn outermost_named_slot(
     let named: Vec<usize> = (0..nodes.len())
         .filter(|&i| nodes[i].name == name && can_handle(nodes[i].kind))
         .collect();
-    let mut slots: Vec<u32> = Vec::new();
+    let mut slots: Vec<(u32, NodeKind)> = Vec::new();
     for &i in &named {
         let span = nodes[i].span;
         let enclosed = named.iter().any(|&j| {
@@ -3006,12 +3014,25 @@ fn outermost_named_slot(
         }
         // A tombstoned twin maps to its survivor (C4 Open point 2).
         if let Some(slot) = raw_map.node(file, RawIdx(i as u32)) {
-            if !slots.contains(&slot) {
-                slots.push(slot);
+            if !slots.iter().any(|&(seen, _)| seen == slot) {
+                slots.push((slot, nodes[i].kind));
             }
         }
     }
-    match slots.as_slice() {
+    if let [(only, _)] = slots.as_slice() {
+        return Ok(*only);
+    }
+    let rivals: Vec<u32> = slots
+        .iter()
+        .filter(|&&(slot, kind)| {
+            ecp_core::uid::keeps_overloads(kind)
+                || !slots
+                    .iter()
+                    .any(|&(first, _)| symbol_table.later_overloads(first).contains(&slot))
+        })
+        .map(|&(slot, _)| slot)
+        .collect();
+    match rivals.as_slice() {
         [only] => Ok(*only),
         several => Err(several.len() as u32),
     }
@@ -4031,7 +4052,9 @@ fn pass2_emit_framework_and_fanout(
         let source_id = if module_level {
             None
         } else {
-            let Some(slot) = framework_ref_source(&local_graph.nodes, fw_ref, raw_map, file) else {
+            let Some(slot) =
+                framework_ref_source(&local_graph.nodes, fw_ref, raw_map, symbol_table, file)
+            else {
                 continue;
             };
             Some(slot)
@@ -4122,6 +4145,7 @@ fn framework_ref_source(
     nodes: &[RawNode],
     fw_ref: &ecp_core::analyzer::types::RawFrameworkRef,
     raw_map: &RawIndexMap,
+    symbol_table: &SymbolTable,
     file: FileOrd,
 ) -> Option<u32> {
     let enclosing = nodes
@@ -4135,7 +4159,7 @@ fn framework_ref_source(
         .map(|(i, _)| i);
     match enclosing {
         Some(i) => raw_map.node(file, RawIdx(i as u32)),
-        None => outermost_named_slot(nodes, &fw_ref.source_name, raw_map, file).ok(),
+        None => outermost_named_slot(nodes, &fw_ref.source_name, raw_map, symbol_table, file).ok(),
     }
 }
 
