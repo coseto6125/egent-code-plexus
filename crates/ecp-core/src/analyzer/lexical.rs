@@ -236,7 +236,7 @@ pub fn path_identities<'a, T>(
 /// `ZeroCopyGraph::file_idx_of` binary-searches the `Path` order of the
 /// stored paths. The walked and the stored spelling have one `Path` order:
 /// the stored one changes only a `\` on Windows, where both `\` and `/` are
-/// separators (`std::path::SEPARATORS_STR`) and `Ord` compares components.
+/// separators (`std::path::is_separator`) and `Ord` compares components.
 /// Two paths that `Path` order counts equal but that are spelled apart
 /// (`a//b`, `a/b`) sort by spelling, so the inputs of one stored path are
 /// adjacent.
@@ -263,9 +263,7 @@ impl SharedPaths {
     /// whose paths are unique; allocates only for a shared path.
     pub fn of(local_graphs: &[LocalGraph]) -> Self {
         debug_assert!(
-            local_graphs
-                .windows(2)
-                .all(|w| stored_path_order(&w[0], &w[1]).is_le()),
+            local_graphs.is_sorted_by(|a, b| stored_path_order(a, b).is_le()),
             "the inputs are sorted by `stored_path_order`"
         );
         let same = |a: &LocalGraph, b: &LocalGraph| {

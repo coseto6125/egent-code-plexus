@@ -9,7 +9,7 @@ use ecp_core::contracts::workspace::{
     ConfigPresence, ConfigRead, Ecosystem, Membership, NameRank, Requirement, RequirementTarget,
     Scope, ScopeAlias, ScopeDraft, WorkspaceFacts,
 };
-use ecp_core::registry::{os_path_to_slash, text_path_to_slash};
+use ecp_core::registry::{is_stored_path, os_path_to_slash, text_path_to_slash};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -274,14 +274,19 @@ const VENDORED_DIRS: [&str; 2] = ["node_modules", "vendor"];
 /// config name of every ecosystem but Cargo (the Rust module tree reads
 /// `Cargo.toml`) and .NET (the `.csproj` scan reads those), outside a
 /// vendored directory. The name is checked first, so a source path costs
-/// one string match. Splits on `\` too, for a Windows relative path.
+/// one string match. Splits on this machine's path separators, so it takes a
+/// stored path and the OS relative path of the walk alike; on Unix a `\` is a
+/// file-name byte.
 pub fn is_workspace_config(rel_path: &str) -> bool {
-    let name = rel_path.rsplit(['/', '\\']).next().unwrap_or(rel_path);
+    let name = rel_path
+        .rsplit(std::path::is_separator)
+        .next()
+        .unwrap_or(rel_path);
     matches!(
         Ecosystem::classify_config(name),
         Some((ecosystem, _)) if !matches!(ecosystem, Ecosystem::Cargo | Ecosystem::DotNet)
     ) && !rel_path
-        .split(['/', '\\'])
+        .split(std::path::is_separator)
         .any(|segment| VENDORED_DIRS.contains(&segment))
 }
 
@@ -363,7 +368,7 @@ fn scope_drafts(repo: &Path, config_paths: &[String], csproj: &[CsprojMeta]) -> 
     let mut paths: Vec<&str> = config_paths
         .iter()
         .map(String::as_str)
-        .filter(|&path| is_workspace_config(path) && resolve_rel("", path).as_deref() == Some(path))
+        .filter(|&path| is_workspace_config(path) && is_stored_path(path))
         .collect();
     paths.sort_unstable();
     paths.dedup();
@@ -1489,16 +1494,19 @@ static SWIFT_PATH_DEPENDENCY_RE: std::sync::LazyLock<regex::Regex> =
 /// manifest under the file stem; a referenced file that does not exist is
 /// a `Missing` config, so its appearance makes the scope stale.
 fn dotnet_scope(reader: &ConfigReader, meta: &CsprojMeta) -> Option<ScopeDraft> {
-    let manifest = resolve_rel("", &meta.file_path).filter(|path| !path.is_empty())?;
-    // The scan matches `.csproj` in any case; a C2 manifest name is lower.
-    let dotnet_name = matches!(
-        Ecosystem::classify_config(file_name(&manifest)),
-        Some((Ecosystem::DotNet, _))
-    );
-    if !dotnet_name || !is_workspace_config_dir(&manifest) {
+    let manifest = meta.file_path.as_str();
+    if !is_stored_path(manifest) {
         return None;
     }
-    let mut scope = subtree_scope(Ecosystem::DotNet, &manifest);
+    // The scan matches `.csproj` in any case; a C2 manifest name is lower.
+    let dotnet_name = matches!(
+        Ecosystem::classify_config(file_name(manifest)),
+        Some((Ecosystem::DotNet, _))
+    );
+    if !dotnet_name || !is_workspace_config_dir(manifest) {
+        return None;
+    }
+    let mut scope = subtree_scope(Ecosystem::DotNet, manifest);
     let root = scope.root.clone();
     if !meta.sdk_style {
         let mut files: Vec<String> = meta
@@ -2572,6 +2580,34 @@ module.exports = {
             .find(|s| s.ecosystem == Ecosystem::Node)
             .unwrap();
         assert_eq!(node.aliases[0].replacements, vec!["src/b/*".to_string()]);
+    }
+
+    /// Stands for: a stored path with `\` in a directory name keeps its
+    /// spelling on Unix, where `\` is a file-name byte, so a scope covers the
+    /// real `x\pkg/...` files.
+    #[cfg(unix)]
+    #[test]
+    fn test_parse_config_rows_backslash_dir_keeps_stored_spelling_on_unix() {
+        let dir = tree(&[
+            ("x\\pkg/pyproject.toml", "[project]\nname = \"svc\"\n"),
+            (
+                "x\\pkg/Lib.csproj",
+                "<Project Sdk=\"Microsoft.NET.Sdk\" />\n",
+            ),
+        ]);
+        let configs = paths(&["x\\pkg/Lib.csproj", "x\\pkg/pyproject.toml"]);
+        let rows = parse_config_rows(dir.path(), &configs);
+        let scope = |ecosystem| {
+            rows.iter()
+                .map(|draft| &draft.scope)
+                .find(|scope| scope.ecosystem == ecosystem)
+        };
+        let python = scope(Ecosystem::Python).expect("python scope kept");
+        assert_eq!(python.root, "x\\pkg");
+        assert_eq!(python.manifest(), "x\\pkg/pyproject.toml");
+        let dotnet = scope(Ecosystem::DotNet).expect("dotnet scope kept");
+        assert_eq!(dotnet.root, "x\\pkg");
+        assert_eq!(dotnet.manifest(), "x\\pkg/Lib.csproj");
     }
 
     /// Stands for: an empty list, and a list whose only config is absent

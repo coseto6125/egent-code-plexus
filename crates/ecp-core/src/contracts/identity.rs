@@ -15,7 +15,7 @@ use xxhash_rust::xxh3::Xxh3;
 use crate::analyzer::types::{innermost_enclosing, span_contains, Span};
 use crate::error::EcpError;
 use crate::graph::NodeKind;
-use crate::registry::{os_path_to_slash, os_path_to_slash_on};
+use crate::registry::{is_slash_spelled_on, os_path_to_slash};
 use crate::uid;
 
 // ── Declaration identity ────────────────────────────────────────────────
@@ -158,9 +158,9 @@ fn check_path(path: &str) -> Result<(), IdentityError> {
 /// A path is canonical when [`os_path_to_slash`] on a Windows (`windows`)
 /// or a Unix machine leaves it as it is: a `\` is rejected on Windows only.
 fn check_path_on(path: &str, windows: bool) -> Result<(), IdentityError> {
-    match os_path_to_slash_on(Cow::Borrowed(path), windows) {
-        Cow::Owned(_) => Err(IdentityError::NonCanonicalPath(path.to_string())),
-        Cow::Borrowed(_) => Ok(()),
+    match is_slash_spelled_on(path, windows) {
+        true => Ok(()),
+        false => Err(IdentityError::NonCanonicalPath(path.to_string())),
     }
 }
 

@@ -542,78 +542,41 @@ fn build_mod_tree_and_reexports(entry: &Path) -> (ModTree, ReExportMap) {
 // Cargo.toml parsing
 // ---------------------------------------------------------------------------
 
+/// The `[workspace] members` of a root manifest, each entry a directory
+/// under `workspace_root` (an entry with a `*` expands over the directories
+/// that hold a `Cargo.toml`). A manifest that is not TOML names no member.
 fn parse_workspace_members(cargo_toml: &str, workspace_root: &Path) -> Vec<PathBuf> {
-    let mut in_workspace = false;
-    let mut in_members = false;
+    let Ok(table) = cargo_toml.parse::<toml::Table>() else {
+        return Vec::new();
+    };
+    let patterns = table
+        .get("workspace")
+        .and_then(|workspace| workspace.get("members"))
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_str);
     let mut members: Vec<PathBuf> = Vec::new();
-    let mut depth = 0i32;
-
-    for line in cargo_toml.lines() {
-        let trimmed = line.trim();
-        if trimmed == "[workspace]" {
-            in_workspace = true;
-            in_members = false;
-            continue;
-        }
-        if trimmed.starts_with('[') && !trimmed.starts_with("[[") {
-            if in_workspace && !trimmed.starts_with("[workspace.") {
-                in_workspace = false;
-            }
-            in_members = false;
-            continue;
-        }
-        if !in_workspace {
-            continue;
-        }
-        if trimmed.starts_with("members") && trimmed.contains('=') {
-            in_members = true;
-        }
-        if in_members {
-            for ch in trimmed.chars() {
-                match ch {
-                    '[' => depth += 1,
-                    ']' => {
-                        depth -= 1;
-                        if depth <= 0 {
-                            in_members = false;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            // Extract quoted strings.
-            let mut rest = trimmed;
-            while let Some(start) = rest.find('"') {
-                rest = &rest[start + 1..];
-                if let Some(end) = rest.find('"') {
-                    let pattern = &rest[..end];
-                    rest = &rest[end + 1..];
-                    // Expand glob (only `*` at the last level is supported
-                    // by Cargo, e.g. `crates/*`).
-                    if let Some((prefix, _)) = pattern.split_once('*') {
-                        let base = workspace_root.join(prefix);
-                        if let Ok(rd) = std::fs::read_dir(&base) {
-                            let mut dirs: Vec<PathBuf> = rd
-                                .flatten()
-                                .filter(|e| e.path().is_dir())
-                                .map(|e| e.path())
-                                .collect();
-                            dirs.sort();
-                            for d in dirs {
-                                if d.join("Cargo.toml").exists() {
-                                    members.push(d);
-                                }
-                            }
-                        }
-                    } else {
-                        let member = workspace_root.join(pattern);
-                        if member.is_dir() {
-                            members.push(member);
-                        }
-                    }
-                } else {
-                    break;
-                }
+    for pattern in patterns {
+        // Cargo supports a glob only at the last level, e.g. `crates/*`.
+        if let Some((prefix, _)) = pattern.split_once('*') {
+            let Ok(entries) = std::fs::read_dir(workspace_root.join(prefix)) else {
+                continue;
+            };
+            let mut dirs: Vec<PathBuf> = entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.is_dir())
+                .collect();
+            dirs.sort();
+            members.extend(
+                dirs.into_iter()
+                    .filter(|dir| dir.join("Cargo.toml").exists()),
+            );
+        } else {
+            let member = workspace_root.join(pattern);
+            if member.is_dir() {
+                members.push(member);
             }
         }
     }
@@ -850,6 +813,49 @@ mod tests {
             fs::write(path, content).unwrap();
         }
         dir
+    }
+
+    // ── `[workspace] members` ──────────────────────────────────────────────
+
+    /// Stands for: a member is read as TOML text, so the escape `\\` names
+    /// one `\`, and on Unix the directory `a\b` is that member.
+    #[cfg(unix)]
+    #[test]
+    fn test_parse_workspace_members_escaped_backslash_names_backslash_dir() {
+        let dir = make_tree(&[("a\\b/Cargo.toml", "[package]\nname = \"x\"\n")]);
+        let members = parse_workspace_members("[workspace]\nmembers = [\"a\\\\b\"]\n", dir.path());
+        assert_eq!(members, [dir.path().join("a\\b")]);
+    }
+
+    /// Stands for: the ordinary forms keep their reading: a last-level glob
+    /// expands sorted over the directories with a `Cargo.toml`, a plain
+    /// member needs a directory, and comments and a multi-line array parse.
+    #[test]
+    fn test_parse_workspace_members_glob_plain_and_multiline_forms() {
+        let dir = make_tree(&[
+            ("crates/b/Cargo.toml", ""),
+            ("crates/a/Cargo.toml", ""),
+            ("crates/nomanifest/src/lib.rs", ""),
+            ("tools/x/Cargo.toml", ""),
+        ]);
+        let text = "[workspace]\n# \"commented/*\"\nmembers = [\n  \"crates/*\", # \"nope\"\n  \"tools/x\",\n  \"tools/gone\",\n]\nresolver = \"2\"\n";
+        assert_eq!(
+            parse_workspace_members(text, dir.path()),
+            [
+                dir.path().join("crates/a"),
+                dir.path().join("crates/b"),
+                dir.path().join("tools/x"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_workspace_members_absent_or_malformed_names_none() {
+        let root = Path::new("/nonexistent-root");
+        assert!(parse_workspace_members("", root).is_empty());
+        assert!(parse_workspace_members("[package]\nname = \"x\"\n", root).is_empty());
+        assert!(parse_workspace_members("[workspace]\nmembers = \"a\"\n", root).is_empty());
+        assert!(parse_workspace_members("[workspace\nmembers = [", root).is_empty());
     }
 
     // ── `[lib] name` / `[lib] path` overrides ──────────────────────────────

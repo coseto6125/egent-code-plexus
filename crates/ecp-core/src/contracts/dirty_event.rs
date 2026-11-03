@@ -1145,10 +1145,10 @@ mod tests {
         assert_eq!(set.skipped()[0].reason, SkipReason::Directory);
     }
 
-    #[test]
-    /// Stands for: a `\\` is a separator only on Windows, so there the entry
+    /// Stands for: a `\` is a separator only on Windows, so there the entry
     /// is not repo-relative; on Unix it is a filename character the index
     /// stores, and the overlay must see the same file.
+    #[test]
     fn test_from_porcelain_z_backslash_path_skipped_on_windows_added_on_unix() {
         let set = DirtySet::from_porcelain_z(b"?? a\\b.py\0").unwrap();
         if cfg!(windows) {

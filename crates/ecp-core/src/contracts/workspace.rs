@@ -933,11 +933,7 @@ fn name_key(entry: &ScopeName) -> (Ecosystem, &str, NameRank, ScopeId) {
 }
 
 pub(crate) fn is_normal_path(path: &str) -> bool {
-    !path.is_empty()
-        && !(cfg!(windows) && path.contains('\\'))
-        && path
-            .split('/')
-            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+    crate::registry::is_stored_path(path)
 }
 
 fn is_normal_dir(dir: &str) -> bool {

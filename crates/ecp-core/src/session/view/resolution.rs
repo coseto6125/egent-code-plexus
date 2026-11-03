@@ -3151,16 +3151,14 @@ impl<'a> RustModules<'a> {
         let body_local = if !any_nameless {
             true
         } else {
-            let twins: Vec<_> = same_file().collect();
             // A repeat's ordinal counts the earlier declarations of its uid,
             // so it stays below the file's count of this kind.
             let base = node.uid.to_native();
             let twin_uids: FxHashSet<u64> = (1..count)
                 .map(|n| crate::uid::tombstone(crate::uid::overload(base, n)))
                 .collect();
-            !twins
-                .iter()
-                .any(|twin| twin_uids.contains(&twin.uid.to_native()) && !inside(stored_span(twin)))
+            same_file()
+                .all(|twin| !twin_uids.contains(&twin.uid.to_native()) || inside(stored_span(twin)))
         };
         self.base_twin_scans.borrow_mut().insert(idx, body_local);
         body_local

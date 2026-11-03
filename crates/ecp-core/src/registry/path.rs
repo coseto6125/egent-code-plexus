@@ -117,6 +117,30 @@ pub(crate) fn os_path_to_slash_on(path: Cow<'_, str>, windows: bool) -> Cow<'_, 
     }
 }
 
+/// Whether [`os_path_to_slash_on`] leaves `path` as it is: `\` is a
+/// foreign separator on Windows only.
+pub(crate) fn is_slash_spelled_on(path: &str, windows: bool) -> bool {
+    matches!(
+        os_path_to_slash_on(Cow::Borrowed(path), windows),
+        Cow::Borrowed(_)
+    )
+}
+
+/// Whether `path` is a stored path: non-empty, `/`-separated, no empty, `.`
+/// or `..` segment (so no leading `/`), and no `\` on Windows.
+pub fn is_stored_path(path: &str) -> bool {
+    is_stored_path_on(path, cfg!(windows))
+}
+
+/// [`is_stored_path`] on a Windows (`windows`) or a Unix machine.
+pub(crate) fn is_stored_path_on(path: &str, windows: bool) -> bool {
+    !path.is_empty()
+        && is_slash_spelled_on(path, windows)
+        && path
+            .split('/')
+            .all(|segment| !matches!(segment, "" | "." | ".."))
+}
+
 /// `text`, a path that is not an OS path of this machine, with every `\`
 /// turned into `/` on every platform: a path written inside a config file
 /// (a csproj `ProjectReference`, ...) that a Windows author may have typed,
@@ -286,6 +310,23 @@ mod tests {
         assert!(matches!(on("", true), Cow::Borrowed("")));
         assert_eq!(on(" \\ ", true), " / ");
         assert!(matches!(on(" \\ ", false), Cow::Borrowed(" \\ ")));
+    }
+
+    #[test]
+    fn test_is_stored_path_on_rejects_backslash_on_windows_only() {
+        assert!(is_stored_path_on("x\\pkg/pyproject.toml", false));
+        assert!(!is_stored_path_on("x\\pkg/pyproject.toml", true));
+        assert!(is_stored_path_on("x/pkg/pyproject.toml", true));
+        assert!(is_stored_path_on("a.rs", false));
+    }
+
+    #[test]
+    fn test_is_stored_path_on_rejects_empty_dot_and_rooted_paths_on_every_platform() {
+        for windows in [false, true] {
+            for path in ["", "/a", "a//b", "a/", "./a", "a/./b", "../a", "a/.."] {
+                assert!(!is_stored_path_on(path, windows), "{path:?} {windows}");
+            }
+        }
     }
 
     #[test]

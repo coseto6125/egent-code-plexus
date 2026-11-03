@@ -29,8 +29,9 @@ use crate::analyzer::reexport::ResolveTarget;
 use crate::analyzer::rust_paths::rust_module_path_base;
 use crate::analyzer::types::RawImport;
 use crate::file_category::Language;
-use crate::registry::os_path_to_slash;
+use crate::registry::{os_path_to_slash, text_path_to_slash};
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -351,15 +352,23 @@ fn named(
     found
 }
 
-/// The first candidate file of `specifier` that has a `File` node.
+/// The first candidate file of `specifier` that has a `File` node. A
+/// specifier is text a human typed, so one that misses and holds `\` is
+/// tried again as `/`: a Windows author's `#include "inc\foo.h"`. The first
+/// lookup keeps the written spelling, so a Unix file named `inc\foo.h` wins.
 fn probe(facts: &impl ImportEdgeFacts, specifier: &str) -> Option<u32> {
-    let mut hit = None;
-    facts.for_each_candidate(specifier, &mut |candidate| {
-        let normalized = os_path_to_slash(candidate);
-        hit = facts.file_node(&normalized);
-        hit.is_none()
-    });
-    hit
+    let probe_one = |specifier: &str| {
+        let mut hit = None;
+        facts.for_each_candidate(specifier, &mut |candidate| {
+            hit = facts.file_node(&os_path_to_slash(candidate));
+            hit.is_none()
+        });
+        hit
+    };
+    probe_one(specifier).or_else(|| match text_path_to_slash(specifier) {
+        Cow::Owned(text) => probe_one(&text),
+        Cow::Borrowed(_) => None,
+    })
 }
 
 /// The module-file stem a Rust `use` names, for step 3e: the last module
@@ -613,6 +622,54 @@ mod tests {
                 !edges.contains(&edge(5, MODULE_CONFIDENCE, ImportReason::Module)),
                 "on Unix `src\\a.ts` is a file apart from `src/a.ts`: {edges:?}"
             ),
+        }
+    }
+
+    /// Stands for: a Windows-authored specifier reaches the `/` file on every
+    /// platform, whatever the importer's language.
+    #[test]
+    fn test_import_edges_backslash_specifier_reaches_slash_file_in_every_language() {
+        let languages = [
+            Language::TypeScript,
+            Language::JavaScript,
+            Language::Python,
+            Language::Java,
+            Language::Kotlin,
+            Language::CSharp,
+            Language::Go,
+            Language::Rust,
+            Language::Php,
+            Language::Ruby,
+            Language::Swift,
+            Language::C,
+            Language::Cpp,
+            Language::Dart,
+        ];
+        for language in languages {
+            let mut facts = Fake::with_files(&[("inc/foo.h", 5)]);
+            facts.candidates.insert("inc/foo.h", vec!["inc/foo.h"]);
+            let imports = [import("\"inc\\foo.h\"", "foo.h", None)];
+            assert_eq!(
+                edges_of("src/main.x", language, &imports, &facts),
+                [edge(5, MODULE_CONFIDENCE, ImportReason::Module)],
+                "{language:?}"
+            );
+            assert_eq!(*facts.probed.borrow(), ["inc\\foo.h", "inc/foo.h"]);
+        }
+    }
+
+    /// Stands for: the specifier as written is looked up first, so on Unix a
+    /// file literally named `inc\foo.h` is not shadowed by `inc/foo.h`.
+    #[test]
+    fn test_import_edges_backslash_specifier_prefers_literal_file_on_unix() {
+        let mut facts = Fake::with_files(&[("inc\\foo.h", 7), ("inc/foo.h", 5)]);
+        facts.candidates.insert("inc\\foo.h", vec!["inc\\foo.h"]);
+        facts.candidates.insert("inc/foo.h", vec!["inc/foo.h"]);
+        let imports = [import("\"inc\\foo.h\"", "foo.h", None)];
+        let edges = edges_of("src/main.c", Language::C, &imports, &facts);
+        match cfg!(windows) {
+            true => assert_eq!(edges, [edge(5, MODULE_CONFIDENCE, ImportReason::Module)]),
+            false => assert_eq!(edges, [edge(7, MODULE_CONFIDENCE, ImportReason::Module)]),
         }
     }
 

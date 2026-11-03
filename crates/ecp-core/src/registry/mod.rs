@@ -20,10 +20,10 @@ pub use io::{atomic_write_bytes, atomic_write_bytes_no_fsync, atomic_write_json}
 /// Use only within ecp-core or in tests.
 #[doc(hidden)]
 pub use lock::{is_lock_contended, lock_exclusive_within, lock_owner_pid, FileLock};
-pub(crate) use path::os_path_to_slash_on;
+pub(crate) use path::is_slash_spelled_on;
 pub use path::{
-    derive_repo_name, home_dir, os_path_to_slash, resolve_home_ecp, sanitize_segment,
-    text_path_to_slash, uid_path, validate_cache_component, PathError,
+    derive_repo_name, home_dir, is_stored_path, os_path_to_slash, resolve_home_ecp,
+    sanitize_segment, text_path_to_slash, uid_path, validate_cache_component, PathError,
 };
 pub use repo_meta::RepoMeta;
 pub use store::{strip_credentials, GroupEntry, RegistryFile, RepoAlias, CURRENT_VERSION};

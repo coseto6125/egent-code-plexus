@@ -1398,9 +1398,10 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
                             &path_str,
                             file_meta,
                             &mut declaring_types,
-                            path_start,
-                            first,
-                            input_offset,
+                            ArityFirst {
+                                idx: first_idx,
+                                raw: first.checked_sub(input_offset).map(|raw| raw as usize),
+                            },
                             offset,
                         ),
                         LaterReason::Overload | LaterReason::Scoped | LaterReason::Repeat => {
@@ -1571,29 +1572,31 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
     }
 }
 
-/// Pass 1's `LaterReason::Arity` row at `offset` of `local_graph`, whose
-/// rows start `input_offset` rows into the rows of its path: file the twin
-/// beside its first, row `first` of the path and node `path_start + first`
-/// (`register_arity_sibling`). A member twin (a member a C# type of another
+/// The first overload of an arity twin: its node, and its row in the input
+/// being registered (`None` when the first is a row of an earlier input of
+/// the path).
+struct ArityFirst {
+    idx: u32,
+    raw: Option<usize>,
+}
+
+/// Pass 1's `LaterReason::Arity` row at `offset` of `local_graph`: file the
+/// twin beside `first` (`register_arity_sibling`). A member twin (a member a C# type of another
 /// generic arity declares) also notes the span of the type that declares
 /// it, and its first's when the first is a row of this input: a read inside
 /// its declaring type means it (`SymbolTable::twin_read_from`).
-#[allow(clippy::too_many_arguments)]
 fn register_arity_twin(
     symbol_table: &mut SymbolTable,
     local_graph: &LocalGraph,
     path: &str,
     file_meta: FileMeta,
     declaring_types: &mut Option<Vec<Option<usize>>>,
-    path_start: u32,
-    first: u32,
-    input_offset: u32,
+    first: ArityFirst,
     offset: usize,
 ) {
-    let first_idx = path_start + first;
     let raw_node = &local_graph.nodes[offset];
     let twin =
-        symbol_table.register_arity_sibling(first_idx, path, file_meta, raw_node.generic_arity());
+        symbol_table.register_arity_sibling(first.idx, path, file_meta, raw_node.generic_arity());
     if splits_by_arity(file_meta.language, raw_node.kind) {
         return;
     }
@@ -1602,9 +1605,7 @@ fn register_arity_twin(
             local_graph.nodes.iter().map(|n| (n.kind, n.span)).collect();
         enclosing_types(&rows)
     });
-    let first_raw = first.checked_sub(input_offset);
-    let scoped =
-        std::iter::once((twin, offset)).chain(first_raw.map(|raw| (first_idx, raw as usize)));
+    let scoped = std::iter::once((twin, offset)).chain(first.raw.map(|raw| (first.idx, raw)));
     for (id, raw) in scoped {
         if let Some(ty) = types[raw] {
             symbol_table.note_declaring_scope(id, local_graph.nodes[ty].span);
