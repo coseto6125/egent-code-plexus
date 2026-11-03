@@ -1040,8 +1040,10 @@ pub fn holds_macro_argument_call(node: Node<'_>, source: &[u8]) -> bool {
 /// returns `false`. Skipped: a name after `fn` or `struct` (the tokens
 /// spell a declaration, `quote!(fn f() {})`, `quote!(struct S(u8);)`) or
 /// `#` (a `quote!` interpolation), a nested macro's name (`format!` puts `!`
-/// before its tree), a tuple (`+ (a, b)`), and the arguments of a macro
-/// that never runs them ([`UNEVALUATED_MACROS`], `stringify!(f())`).
+/// before its tree), a tuple (`+ (a, b)`), the variants of an enum the
+/// tokens declare (`quote!(enum E { A(u8) })`; a discriminant's call,
+/// `A = value()`, stays), and the arguments of a
+/// macro that never runs them ([`UNEVALUATED_MACROS`], `stringify!(f())`).
 /// Returns `false` when `visit` stopped the walk. The two buffers are
 /// scratch space.
 fn each_macro_argument_call<'t>(
@@ -1063,7 +1065,9 @@ fn each_macro_argument_call<'t>(
             .children(&mut c)
             .filter(|child| child.kind() == "token_tree"),
     );
+    let mut enum_bodies: Vec<usize> = Vec::new();
     while let Some(tree) = trees.pop() {
+        let variants = enum_bodies.contains(&tree.id());
         tokens.clear();
         let mut c = tree.walk();
         tokens.extend(tree.children(&mut c).filter(|token| !token.is_extra()));
@@ -1080,6 +1084,9 @@ fn each_macro_argument_call<'t>(
             if unevaluated {
                 continue;
             }
+            if enum_body(run, at) {
+                enum_bodies.push(token.id());
+            }
             trees.push(token);
             if token.child(0).is_none_or(|open| open.kind() != "(") {
                 continue;
@@ -1088,7 +1095,8 @@ fn each_macro_argument_call<'t>(
                 continue;
             };
             let before = name_at.checked_sub(1).map(|i| run[i].kind());
-            if matches!(before, Some("fn" | "struct" | "#")) {
+            let variant = variants && matches!(before, Some("{" | ","));
+            if variant || matches!(before, Some("fn" | "struct" | "#")) {
                 continue;
             }
             if !visit(run, name_at) {
@@ -1098,6 +1106,25 @@ fn each_macro_argument_call<'t>(
         }
     }
     true
+}
+
+/// Whether the tree at `tokens[at]` is the `{ .. }` body of an enum the
+/// tokens declare (`enum E { .. }`, `enum E<T> { .. }`): `A(u8)` right
+/// after its `{` or a `,` names a variant, no call.
+fn enum_body(tokens: &[Node<'_>], at: usize) -> bool {
+    if tokens[at].child(0).is_none_or(|open| open.kind() != "{") {
+        return false;
+    }
+    let Some(mut name) = at.checked_sub(1) else {
+        return false;
+    };
+    if matches!(tokens[name].kind(), ">" | ">>") {
+        let Some(before) = generic_open(tokens, name).and_then(|open| open.checked_sub(1)) else {
+            return false;
+        };
+        name = before;
+    }
+    tokens[name].kind() == "identifier" && name >= 1 && tokens[name - 1].kind() == "enum"
 }
 
 /// Macros that never run their arguments: a call-shaped token run there is

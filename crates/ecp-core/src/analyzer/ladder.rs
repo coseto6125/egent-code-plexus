@@ -1611,6 +1611,30 @@ pub fn module_tree_item<F: ModuleTreeFacts>(
     path: &str,
     last: Namespace,
 ) -> Option<TreeItem<F::File>> {
+    module_tree_place(facts, caller, path, last).map(|place| place.item)
+}
+
+/// Where [`module_tree_place`] puts a path.
+pub struct TreePlace<P> {
+    pub item: TreeItem<P>,
+    /// The count of the path's segments past the item: the inline `mod`s
+    /// inside it and the member the path ends in.
+    pub past: usize,
+    /// Whether a `pub use` chain moved the item: `past` then counts the
+    /// segments of the path as written, not of the item it reached.
+    pub followed: bool,
+}
+
+/// [`module_tree_item`], with the segments past the item. From `lib.rs`,
+/// `self::deep::g` with an inline `mod deep` is the item `deep` of `lib.rs`
+/// with 1 segment (`g`) past it; `crate::util::g` with a `util.rs` is the
+/// item `g` of `util.rs` with 0.
+pub fn module_tree_place<F: ModuleTreeFacts>(
+    facts: &F,
+    caller: &str,
+    path: &str,
+    last: Namespace,
+) -> Option<TreePlace<F::File>> {
     let segs: Vec<&str> = path.split("::").collect();
     if segs.len() < 2 {
         return None;
@@ -1618,17 +1642,23 @@ pub fn module_tree_item<F: ModuleTreeFacts>(
     let (root, combined) = tree_anchor(facts, caller, &segs)?;
     let (module, at) = tree_walk(facts, root, &combined)?;
     let item = &combined[at];
-    let namespace = if at + 1 == combined.len() {
-        last
-    } else {
-        Namespace::Type
-    };
-    if let Some(found) = tree_follow(facts, root, module, item, namespace, 0) {
-        return Some(found);
+    let past = combined.len() - at - 1;
+    let namespace = if past == 0 { last } else { Namespace::Type };
+    if let Some(item) = tree_follow(facts, root, module, item, namespace, 0) {
+        return Some(TreePlace {
+            item,
+            past,
+            followed: true,
+        });
     }
-    Some(TreeItem::Found {
+    let item = TreeItem::Found {
         file: facts.module_file(module)?,
         item: item.clone(),
+    };
+    Some(TreePlace {
+        item,
+        past,
+        followed: false,
     })
 }
 

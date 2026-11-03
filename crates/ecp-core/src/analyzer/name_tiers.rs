@@ -655,15 +655,17 @@ pub fn global_tier<F: NameTierFacts, I: Iterator<Item = (u32, FileMeta)>>(
 }
 
 /// The first Rust `use` binding `name` whose path the module tree places
-/// ([`ladder::module_tree_item`]), with the module-level item it names
-/// there: `use crate::f;` where `lib.rs` writes `pub use inner::f;` binds
-/// `inner.rs`'s `f`, which the candidate probe of `lib.rs` misses, and
-/// `use crate::util::helper;` binds the caller crate's `util.rs` though
-/// another crate holds a `util.rs` too. A `use` names no associated item,
-/// so an owned namesake never binds. An importer outside every Cargo target
-/// binds nothing here: the tree cannot tell which crate its own manifest
-/// names (a duplicated source tree outside the workspace), so the
-/// nearest-copy tier decides. Binds through no barrel.
+/// (`rust_tree_member`): `use crate::f;` where `lib.rs` writes
+/// `pub use inner::f;` binds `inner.rs`'s `f`, which the candidate probe of
+/// `lib.rs` misses, and `use crate::util::helper;` binds the caller crate's
+/// `util.rs` though another crate holds a `util.rs` too. A glob
+/// (`use crate::util::*;`) binds a bare `name` only when no other `use`
+/// names it, and only when every glob that places it places one
+/// declaration: an explicit `use` shadows a glob, and two globs that give
+/// different items leave the name ambiguous. An importer outside every
+/// Cargo target binds nothing here: the tree cannot tell which crate its
+/// own manifest names (a duplicated source tree outside the workspace), so
+/// the nearest-copy tier decides. Binds through no barrel.
 pub fn rust_tree_import<T: ModuleTreeFacts, M: ImportMembers + ?Sized>(
     tree: &T,
     members: &M,
@@ -675,26 +677,84 @@ pub fn rust_tree_import<T: ModuleTreeFacts, M: ImportMembers + ?Sized>(
     if !is_rust_source(std::path::Path::new(importer)) {
         return None;
     }
-    imports.iter().enumerate().find_map(|(position, import)| {
-        let imported = plain_binding(&import.imported_name, import.alias.as_deref(), name)?;
-        tree.caller_crate(importer)?;
-        let TreeItem::Found { file, item } = ladder::module_tree_item(
-            tree,
-            importer,
-            &format!("{}::{imported}", import.source),
-            Namespace::of(target),
-        )?
+    let is_glob = |import: &RawImport| import.imported_name == "*" && import.alias.is_none();
+    let placed = |position: usize, path: String| {
+        rust_tree_member(tree, members, importer, &path, target).map(|decl| NamedImport {
+            decl,
+            position,
+            barrel: None,
+        })
+    };
+    let mut named = false;
+    for (position, import) in imports.iter().enumerate() {
+        if is_glob(import) {
+            continue;
+        }
+        let Some(imported) = plain_binding(&import.imported_name, import.alias.as_deref(), name)
         else {
-            return None;
+            continue;
         };
-        members
-            .member_in_file(file.as_ref(), &item, target, MemberOwner::TopLevel)
-            .map(|decl| NamedImport {
-                decl,
-                position,
-                barrel: None,
-            })
-    })
+        named = true;
+        // An aliased row (`use crate::f as g;`) holds the whole path in both
+        // fields.
+        let path = if imported == import.source {
+            import.source.clone()
+        } else {
+            format!("{}::{imported}", import.source)
+        };
+        if let Some(hit) = placed(position, path) {
+            return Some(hit);
+        }
+    }
+    if named || name.contains([':', '.']) {
+        return None;
+    }
+    let mut globs = imports
+        .iter()
+        .enumerate()
+        .filter(|&(_, import)| is_glob(import))
+        .filter_map(|(position, import)| placed(position, format!("{}::{name}", import.source)));
+    let first = globs.next()?;
+    globs.all(|other| other.decl == first.decl).then_some(first)
+}
+
+/// The declaration the Rust `use` path `path` names, where the module tree
+/// places it ([`ladder::module_tree_place`]): the module-level item of its
+/// file, or the member of the inline `mod` the path ends in
+/// (`self::deep::g` binds `mod deep`'s `g`, never a top-level `g`). A `use`
+/// names no associated item, so an owned namesake of a top-level item never
+/// binds.
+fn rust_tree_member<T: ModuleTreeFacts, M: ImportMembers + ?Sized>(
+    tree: &T,
+    members: &M,
+    importer: &str,
+    path: &str,
+    target: ResolveTarget,
+) -> Option<u32> {
+    tree.caller_crate(importer)?;
+    let ladder::TreePlace {
+        item: TreeItem::Found { file, item },
+        past,
+        followed,
+    } = ladder::module_tree_place(tree, importer, path, Namespace::of(target))?
+    else {
+        return None;
+    };
+    // A `pub use` that moved the item drops the inline `mod`s the path
+    // named past it (`pub use util::a::b as alias;` then `alias::g`): no
+    // owner is known, so nothing binds.
+    if followed && past > 0 {
+        return None;
+    }
+    let mut tail = path.rsplit("::");
+    let (member, owner) = match past {
+        0 => (item.as_str(), MemberOwner::TopLevel),
+        // The owner index keys an inline `mod`'s member by the innermost
+        // `mod` alone.
+        1 => (tail.next()?, MemberOwner::Type(item.as_str())),
+        _ => (tail.next()?, MemberOwner::Type(tail.next()?)),
+    };
+    members.member_in_file(file.as_ref(), member, target, owner)
 }
 
 /// Record a Tier 2 hit through `import`, and give its edge with its
