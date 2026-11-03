@@ -111,19 +111,16 @@ pub fn os_path_to_slash<P: AsRef<Path> + ?Sized>(path: &P) -> Cow<'_, str> {
 
 /// [`os_path_to_slash`] on a Windows (`windows`) or a Unix machine.
 pub(crate) fn os_path_to_slash_on(path: Cow<'_, str>, windows: bool) -> Cow<'_, str> {
-    match windows && path.contains('\\') {
-        true => Cow::Owned(path.replace('\\', "/")),
-        false => path,
+    match is_slash_spelled_on(&path, windows) {
+        true => path,
+        false => Cow::Owned(path.replace('\\', "/")),
     }
 }
 
 /// Whether [`os_path_to_slash_on`] leaves `path` as it is: `\` is a
 /// foreign separator on Windows only.
 pub(crate) fn is_slash_spelled_on(path: &str, windows: bool) -> bool {
-    matches!(
-        os_path_to_slash_on(Cow::Borrowed(path), windows),
-        Cow::Borrowed(_)
-    )
+    !(windows && path.contains('\\'))
 }
 
 /// Whether `path` is a stored path: non-empty, `/`-separated, no empty, `.`

@@ -261,18 +261,23 @@ pub fn import_edges(
         let cleaned = import
             .source
             .trim_matches(|c: char| matches!(c, '"' | '\'' | '<' | '>'));
-        // 3a: as written (TS `./a`, Python `.foo` encode relativity).
-        let mut hit = probe(facts, cleaned);
-        let mut guess = None;
-        // 3b: `./`-prefixed, so the resolver joins the importer's directory
-        // (Ruby `require_relative 'alpha'`, Go `import "x/pkg"`, C
-        // `#include "alpha.h"`).
-        if hit.is_none() && !cleaned.starts_with('.') && !cleaned.is_empty() {
-            dot_prefixed.clear();
-            dot_prefixed.push_str("./");
-            dot_prefixed.push_str(cleaned);
-            hit = probe(facts, &dot_prefixed);
+        // A PHP `\` separates namespaces: such a `use` names no file path, on
+        // any platform (the candidate probe would bind any same-stem file of
+        // any language, or a namespace read relative to the importer).
+        let path_like = !(php && cleaned.contains('\\'));
+        let mut hit = path_like
+            .then(|| probe_module(facts, cleaned, &mut dot_prefixed))
+            .flatten();
+        // A specifier is text a human typed: once both written-spelling
+        // lookups miss, one holding `\` is tried again as `/` (a Windows
+        // author's `#include "inc\foo.h"`), so a Unix file named `inc\foo.h`
+        // still wins.
+        if hit.is_none() && path_like {
+            if let Cow::Owned(text) = text_path_to_slash(cleaned) {
+                hit = probe_module(facts, &text, &mut dot_prefixed);
+            }
         }
+        let mut guess = None;
         // 3c: a C / C++ header under a search-path directory.
         if hit.is_none() && !cleaned.is_empty() {
             hit = facts.guesses().suffix_single(cleaned);
@@ -352,23 +357,34 @@ fn named(
     found
 }
 
-/// The first candidate file of `specifier` that has a `File` node. A
-/// specifier is text a human typed, so one that misses and holds `\` is
-/// tried again as `/`: a Windows author's `#include "inc\foo.h"`. The first
-/// lookup keeps the written spelling, so a Unix file named `inc\foo.h` wins.
-fn probe(facts: &impl ImportEdgeFacts, specifier: &str) -> Option<u32> {
-    let probe_one = |specifier: &str| {
-        let mut hit = None;
-        facts.for_each_candidate(specifier, &mut |candidate| {
-            hit = facts.file_node(&os_path_to_slash(candidate));
-            hit.is_none()
-        });
-        hit
-    };
-    probe_one(specifier).or_else(|| match text_path_to_slash(specifier) {
-        Cow::Owned(text) => probe_one(&text),
-        Cow::Borrowed(_) => None,
+/// Steps 3a and 3b. 3a: `specifier` as written (TS `./a`, Python `.foo`
+/// encode relativity). 3b: `./`-prefixed, so the resolver joins the
+/// importer's directory (Ruby `require_relative 'alpha'`, Go
+/// `import "x/pkg"`, C `#include "alpha.h"`).
+fn probe_module(
+    facts: &impl ImportEdgeFacts,
+    specifier: &str,
+    dot_prefixed: &mut String,
+) -> Option<u32> {
+    probe(facts, specifier).or_else(|| {
+        if specifier.starts_with('.') || specifier.is_empty() {
+            return None;
+        }
+        dot_prefixed.clear();
+        dot_prefixed.push_str("./");
+        dot_prefixed.push_str(specifier);
+        probe(facts, dot_prefixed)
     })
+}
+
+/// The first candidate file of `specifier` that has a `File` node.
+fn probe(facts: &impl ImportEdgeFacts, specifier: &str) -> Option<u32> {
+    let mut hit = None;
+    facts.for_each_candidate(specifier, &mut |candidate| {
+        hit = facts.file_node(&os_path_to_slash(candidate));
+        hit.is_none()
+    });
+    hit
 }
 
 /// The module-file stem a Rust `use` names, for step 3e: the last module
@@ -626,7 +642,8 @@ mod tests {
     }
 
     /// Stands for: a Windows-authored specifier reaches the `/` file on every
-    /// platform, whatever the importer's language.
+    /// platform, whatever the importer's language, after both written-spelling
+    /// lookups miss. PHP is the exception, see the next test.
     #[test]
     fn test_import_edges_backslash_specifier_reaches_slash_file_in_every_language() {
         let languages = [
@@ -638,7 +655,6 @@ mod tests {
             Language::CSharp,
             Language::Go,
             Language::Rust,
-            Language::Php,
             Language::Ruby,
             Language::Swift,
             Language::C,
@@ -654,8 +670,62 @@ mod tests {
                 [edge(5, MODULE_CONFIDENCE, ImportReason::Module)],
                 "{language:?}"
             );
-            assert_eq!(*facts.probed.borrow(), ["inc\\foo.h", "inc/foo.h"]);
+            assert_eq!(
+                *facts.probed.borrow(),
+                ["inc\\foo.h", "./inc\\foo.h", "inc/foo.h"]
+            );
         }
+    }
+
+    /// Stands for: a PHP `use` names a namespace, so on every platform its
+    /// `\` never reaches the path probe: `use Vendor\Tools` binds no
+    /// `Vendor/Tools.php`, `Vendor/Tools.js` or importer-relative file that
+    /// only matches by path.
+    #[test]
+    fn test_import_edges_php_namespace_specifier_skips_path_probe() {
+        let mut facts = Fake::with_files(&[("Vendor/Tools.php", 5), ("lib/Vendor/Tools.js", 6)]);
+        facts
+            .candidates
+            .insert("Vendor\\Tools", vec!["Vendor\\Tools.php"]);
+        facts
+            .candidates
+            .insert("./Vendor\\Tools", vec!["lib/Vendor\\Tools.js"]);
+        facts
+            .candidates
+            .insert("Vendor/Tools", vec!["Vendor/Tools.php"]);
+        let imports = [import("Vendor\\Tools", "Tools", None)];
+        let edges = edges_of("lib/main.php", Language::Php, &imports, &facts);
+        assert!(
+            !edges.iter().any(|e| e.reason == ImportReason::Module),
+            "{edges:?}"
+        );
+        assert!(
+            facts.probed.borrow().is_empty(),
+            "{:?}",
+            facts.probed.borrow()
+        );
+    }
+
+    /// Stands for: the converted spelling waits for the written spelling's
+    /// `./` lookup too, so on Unix `src/inc\foo.h` beside the importer beats
+    /// an unrelated root `inc/foo.h`.
+    #[test]
+    fn test_import_edges_backslash_specifier_relative_literal_beats_converted_root() {
+        let mut facts = Fake::with_files(&[("src/inc\\foo.h", 7), ("inc/foo.h", 5)]);
+        facts
+            .candidates
+            .insert("./inc\\foo.h", vec!["src/inc\\foo.h"]);
+        facts.candidates.insert("inc/foo.h", vec!["inc/foo.h"]);
+        let imports = [import("\"inc\\foo.h\"", "foo.h", None)];
+        let edges = edges_of("src/main.c", Language::C, &imports, &facts);
+        let expected = match cfg!(windows) {
+            true => 5,
+            false => 7,
+        };
+        assert_eq!(
+            edges,
+            [edge(expected, MODULE_CONFIDENCE, ImportReason::Module)]
+        );
     }
 
     /// Stands for: the specifier as written is looked up first, so on Unix a
