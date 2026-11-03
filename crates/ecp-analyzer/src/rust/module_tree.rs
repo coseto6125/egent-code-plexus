@@ -562,17 +562,22 @@ fn parse_workspace_members(cargo_toml: &str, workspace_root: &Path) -> Vec<PathB
         // A member is an OS path: `crates/*/` names directories as `crates/*`
         // does, and `\` separates only on Windows. ecp matches `*` in the
         // last segment only; Cargo's `?` and `[..]` name no member here.
-        let pattern = pattern.trim_end_matches(std::path::is_separator);
-        let (parent, last) = pattern
+        let glob = pattern.trim_end_matches(std::path::is_separator);
+        let (parent, last) = glob
             .rsplit_once(std::path::is_separator)
-            .unwrap_or(("", pattern));
+            .unwrap_or(("", glob));
         if last.contains('*') {
             let Ok(entries) = std::fs::read_dir(workspace_root.join(parent)) else {
                 continue;
             };
             let mut dirs: Vec<PathBuf> = entries
                 .flatten()
-                .filter(|entry| segment_wildcard(last, &entry.file_name().to_string_lossy()))
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| segment_wildcard(last, name))
+                })
                 .map(|entry| entry.path())
                 .filter(|path| path.is_dir())
                 .collect();

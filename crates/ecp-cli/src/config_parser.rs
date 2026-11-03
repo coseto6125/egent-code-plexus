@@ -5,10 +5,9 @@
 
 use ecp_analyzer::c_sharp::partial::CsharpProjects;
 use ecp_analyzer::resolution::path_aliases::PathAliases;
-use ecp_core::contracts::workspace::segment_wildcard;
 use ecp_core::contracts::workspace::{
-    ConfigPresence, ConfigRead, Ecosystem, Membership, NameRank, Requirement, RequirementTarget,
-    Scope, ScopeAlias, ScopeDraft, WorkspaceFacts,
+    segment_wildcard, ConfigPresence, ConfigRead, Ecosystem, Membership, NameRank, Requirement,
+    RequirementTarget, Scope, ScopeAlias, ScopeDraft, WorkspaceFacts,
 };
 use ecp_core::registry::{is_stored_path, os_path_to_slash, text_path_to_slash};
 use std::collections::{BTreeMap, BTreeSet};
