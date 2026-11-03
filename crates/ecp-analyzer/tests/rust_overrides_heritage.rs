@@ -7,7 +7,7 @@
 //!
 //! The `impl Base for Child` block names the trait, so the method implements that trait's `run`.
 
-mod overrides_support;
+use crate::overrides_support;
 
 use overrides_support::{assert_binds_declared_base, Evidence};
 

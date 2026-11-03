@@ -20,8 +20,7 @@
 //! script text at the SFC path, and the language is the one the real SFC
 //! parse reports for the same source.
 
-#[path = "common/parity.rs"]
-mod parity;
+use crate::parity;
 
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_analyzer::typescript::TypeScriptProvider;

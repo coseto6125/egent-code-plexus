@@ -12,11 +12,7 @@
 //! other mainstream languages read no resolution config, so a dirty config
 //! changes nothing for them.
 
-#[path = "common/baseline.rs"]
-mod baseline;
-mod common;
-#[path = "common/strict_parity.rs"]
-mod strict_parity;
+use crate::strict_parity;
 
 use ecp_core::session::closure::{CLOSURE_LIMIT, REBUILT_RELS};
 use ecp_core::session::merged::MergedGraph;

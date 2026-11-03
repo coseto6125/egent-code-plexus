@@ -2,7 +2,7 @@
 //! call, and a `make_a()` factory is an ordinary function call. These tests
 //! pin that behaviour so the constructor-call change leaves C unchanged.
 
-mod instantiation_calls_support;
+use crate::instantiation_calls_support;
 
 use ecp_analyzer::c::parser::CProvider;
 use instantiation_calls_support::{

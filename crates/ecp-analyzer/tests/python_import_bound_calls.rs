@@ -1,5 +1,5 @@
 //! Explicit imports must choose their module even when another module has the same name.
-mod instantiation_calls_support;
+use crate::instantiation_calls_support;
 
 use ecp_analyzer::python::parser::PythonProvider;
 use ecp_analyzer::resolution::builder::GraphBuilder;

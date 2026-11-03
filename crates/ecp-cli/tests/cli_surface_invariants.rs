@@ -793,7 +793,7 @@ fn mcp_ecp_group_positional_args_are_defined_properties() {
 /// bug, server-loop deadlock.
 ///
 /// Marked `#[ignore]` — runs on demand via
-/// `cargo test --test cli_surface_invariants -- --ignored` and in CI
+/// `cargo test --test it cli_surface_invariants:: -- --ignored` and in CI
 /// once we wire it into the workflow. Reason: stdio JSON-RPC handshake
 /// is timing-sensitive and the few-hundred-ms server startup adds CI
 /// flake risk; keep the always-on suite fast.

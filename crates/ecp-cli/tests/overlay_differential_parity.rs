@@ -15,8 +15,7 @@
 //! that tracks it, and asserted to still differ, so closing it turns the
 //! test red until the entry goes. Nothing is skipped.
 
-#[path = "common/parity.rs"]
-mod parity;
+use crate::parity;
 
 use ecp_core::analyzer::types::LocalGraph;
 use parity::calls_after_edit;

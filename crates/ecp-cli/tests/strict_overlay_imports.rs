@@ -22,11 +22,7 @@
 //! relative-import probe agrees with the index on them today and the
 //! follow-up left them untested.
 
-#[path = "common/baseline.rs"]
-mod baseline;
-mod common;
-#[path = "common/strict_parity.rs"]
-mod strict_parity;
+use crate::strict_parity;
 
 use ecp_core::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
 use ecp_core::session::merged::MergedGraph;

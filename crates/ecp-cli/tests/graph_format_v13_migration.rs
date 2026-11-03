@@ -5,7 +5,7 @@
 //! 0.14.8 built for the repo `setup_repo` writes minus `extra.py`, byte for
 //! byte, not a fixture written by this code.
 
-mod common;
+use crate::common;
 
 use common::{ecp_bin, init_and_analyze, write, write_graph};
 use ecp_cli::auto_ensure::{ensure_index, EnsureResult};

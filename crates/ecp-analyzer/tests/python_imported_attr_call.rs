@@ -1,7 +1,7 @@
 //! `registry.handlers.dispatch(evt)` calls a method through a value a `from`
 //! import names. The site is a member call: the free-only rule for bare
 //! Python calls must not drop the method it binds.
-mod name_ref_support;
+use crate::name_ref_support;
 
 use ecp_analyzer::python::parser::PythonProvider;
 use name_ref_support::{calls, graph};

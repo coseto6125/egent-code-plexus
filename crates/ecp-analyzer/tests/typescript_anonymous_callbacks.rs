@@ -11,7 +11,7 @@ use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::graph::NodeKind;
 use std::path::Path;
 
-mod anonymous_callbacks_support;
+use crate::anonymous_callbacks_support;
 
 #[test]
 fn test_graph_builder_closure_references_preserve_lexical_boundaries() {

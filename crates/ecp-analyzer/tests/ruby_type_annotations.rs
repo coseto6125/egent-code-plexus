@@ -1,5 +1,5 @@
 //! Ruby: no return annotations exist, so a method named for `self` leaves no `type_annotation` edge.
-mod name_ref_support;
+use crate::name_ref_support;
 
 use ecp_analyzer::ruby::parser::RubyProvider;
 use name_ref_support::{annotated, graph};

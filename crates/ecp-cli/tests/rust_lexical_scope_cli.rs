@@ -3,7 +3,7 @@
 //! target (`::helper`) names the file-level fn alone, and the blast radius of
 //! each lists only its own callers, from the index and from the overlay.
 
-mod common;
+use crate::common;
 
 use common::{commit_all, ecp_bin, run_git};
 use serde_json::Value;

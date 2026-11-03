@@ -8,7 +8,7 @@
 //! lines that name `Employee`, the top-level one first. Go, PHP, Dart and
 //! C have no nested type that owns a method, so they have no row here.
 
-mod overrides_support;
+use crate::overrides_support;
 
 use ecp_analyzer::c_sharp::parser::CSharpProvider;
 use ecp_analyzer::cpp::parser::CppProvider;

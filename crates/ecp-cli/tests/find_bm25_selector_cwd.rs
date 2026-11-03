@@ -5,7 +5,7 @@
 //! effect. Everything that worked from an indexed cwd keeps printing the same
 //! bytes.
 
-mod common;
+use crate::common;
 
 use common::{commit_all, ecp_bin, run_git};
 use std::io::Write;

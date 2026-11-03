@@ -7,7 +7,7 @@
 //!
 //! The parser captures no `override` modifier, so the pair is a name match in the declared base.
 
-mod overrides_support;
+use crate::overrides_support;
 
 use overrides_support::{assert_binds_declared_base, graph_of, overrides, Evidence};
 

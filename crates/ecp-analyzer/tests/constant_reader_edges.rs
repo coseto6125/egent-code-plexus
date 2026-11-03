@@ -12,7 +12,7 @@
 //! Known gaps, asserted as such so a fix flips them deliberately: a C / C++
 //! array constant and a Dart `static const` have no node to bind; C# binds
 //! no `using static` import.
-mod name_ref_support;
+use crate::name_ref_support;
 
 use ecp_analyzer::c::parser::CProvider;
 use ecp_analyzer::c_sharp::parser::CSharpProvider;

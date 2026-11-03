@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "ecp-analyzer"
 description = "EgentCodePlexus — multi-language tree-sitter parser and route detector (Rust, TypeScript, Python, Go, Java, Swift, etc.)"
 version.workspace = true
@@ -89,3 +90,7 @@ harness = false
 
 [lints]
 workspace = true
+
+[[test]]
+name = "it"
+path = "tests/it.rs"

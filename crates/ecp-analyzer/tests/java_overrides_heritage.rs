@@ -7,7 +7,7 @@
 //!
 //! `@Override` marks the method.
 
-mod overrides_support;
+use crate::overrides_support;
 
 use ecp_analyzer::java::parser::JavaProvider;
 use ecp_analyzer::post_process::overrides::{

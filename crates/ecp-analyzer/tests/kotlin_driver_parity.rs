@@ -3,7 +3,7 @@
 //! before the move; node kinds, owners and spans were cross-checked against
 //! a graph the pre-move parser built from the same sources.
 
-mod driver_parity_support;
+use crate::driver_parity_support;
 
 use driver_parity_support::{assert_empty_graph, names_kinds, Span4};
 use ecp_analyzer::framework_confidence::KTOR_ROUTE;

@@ -8,7 +8,7 @@
 //! the cross-language transparent benefit of the resolver fix landed
 //! alongside the C++ tests.
 
-mod common;
+use crate::common;
 
 use common::{ecp_bin, init_and_analyze, write};
 

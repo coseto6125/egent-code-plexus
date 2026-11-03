@@ -9,7 +9,7 @@
 //! type through its constructor in every reader; a type without a constructor
 //! and a non-type node read exactly their own in-edges.
 
-mod common;
+use crate::common;
 
 use common::{ecp_bin, init_and_analyze, write};
 

@@ -4,7 +4,7 @@
 //! type declares a method of the same name. The ladder must resolve the typed
 //! callee through the type's declared heritage to the base.
 
-mod receiver_typing_support;
+use crate::receiver_typing_support;
 
 use ecp_analyzer::java::parser::JavaProvider;
 use receiver_typing_support::{assert_single_call_into_base, parse_all};

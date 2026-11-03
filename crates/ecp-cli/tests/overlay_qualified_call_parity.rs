@@ -25,8 +25,7 @@
 //! Ruby `k.save`, ...) stay in the fixtures as
 //! regression guards with their own confidence.
 
-#[path = "common/parity.rs"]
-mod parity;
+use crate::parity;
 
 use ecp_core::analyzer::types::LocalGraph;
 use parity::{calls_after_edit, Parity};

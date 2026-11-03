@@ -3,7 +3,7 @@
 //! temporary form `A(..)` already resolves; `new A(..)` is not a captured call
 //! site, and a class with no constructor has no callable named `A`.
 
-mod instantiation_calls_support;
+use crate::instantiation_calls_support;
 
 use ecp_analyzer::cpp::parser::CppProvider;
 use ecp_core::graph::NodeKind;

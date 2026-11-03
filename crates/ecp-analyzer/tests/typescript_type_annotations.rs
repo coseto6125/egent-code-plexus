@@ -2,7 +2,7 @@
 //! returns its own class, so `ecp impact` on the class lists it. `this` is
 //! no type name: it binds through the owner, never through a project type
 //! spelled `this`.
-mod name_ref_support;
+use crate::name_ref_support;
 
 use ecp_analyzer::typescript::parser::TypeScriptProvider;
 use name_ref_support::{annotated, graph};

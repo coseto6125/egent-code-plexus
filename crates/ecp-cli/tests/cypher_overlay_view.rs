@@ -6,7 +6,7 @@
 //! Fixed ECP_SESSION_ID keeps the overlay writer (ensure_fresh) and the
 //! query reader on one session dir.
 
-mod common;
+use crate::common;
 
 use common::{commit_all, ecp_bin, run_git};
 use std::fs;

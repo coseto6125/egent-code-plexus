@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "egent-code-plexus"
 description = "EgentCodePlexus — code intelligence graph for AI agents and LLMs (multi-language AST analysis)"
 version.workspace = true
@@ -86,3 +87,83 @@ filetime = "0.2"
 
 [lints]
 workspace = true
+
+[[test]]
+name = "it"
+path = "tests/it.rs"
+
+[[test]]
+name = "admin_index_fast_path"
+path = "tests/admin_index_fast_path.rs"
+
+[[test]]
+name = "admin_index_registry_sync"
+path = "tests/admin_index_registry_sync.rs"
+
+[[test]]
+name = "build_l2_subdir_root"
+path = "tests/build_l2_subdir_root.rs"
+
+[[test]]
+name = "build_orchestrator"
+path = "tests/build_orchestrator.rs"
+
+[[test]]
+name = "build_sha_lock"
+path = "tests/build_sha_lock.rs"
+
+[[test]]
+name = "engine_session_state_test"
+path = "tests/engine_session_state_test.rs"
+
+[[test]]
+name = "engine_validation"
+path = "tests/engine_validation.rs"
+
+[[test]]
+name = "ensure_fresh_tantivy_drain"
+path = "tests/ensure_fresh_tantivy_drain.rs"
+
+[[test]]
+name = "ensure_fresh_warm_attach"
+path = "tests/ensure_fresh_warm_attach.rs"
+
+[[test]]
+name = "force_rebuild_test"
+path = "tests/force_rebuild_test.rs"
+
+[[test]]
+name = "git_cache_env_override"
+path = "tests/git_cache_env_override.rs"
+
+[[test]]
+name = "graph_path_resolve"
+path = "tests/graph_path_resolve.rs"
+
+[[test]]
+name = "incremental_wired"
+path = "tests/incremental_wired.rs"
+
+[[test]]
+name = "load_ensured_version_check"
+path = "tests/load_ensured_version_check.rs"
+
+[[test]]
+name = "overlay_view_cache"
+path = "tests/overlay_view_cache.rs"
+
+[[test]]
+name = "safe_exec"
+path = "tests/safe_exec.rs"
+
+[[test]]
+name = "session_resolver"
+path = "tests/session_resolver.rs"
+
+[[test]]
+name = "status_filter_guard"
+path = "tests/status_filter_guard.rs"
+
+[[test]]
+name = "version_mismatch_triggers_reindex"
+path = "tests/version_mismatch_triggers_reindex.rs"

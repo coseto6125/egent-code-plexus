@@ -9,8 +9,7 @@
 //! the reindex, it reports a [`CallGap`] naming the call site and a reason
 //! code, which reaches the payload's `result` caveat.
 
-#[path = "common/parity.rs"]
-mod parity;
+use crate::parity;
 
 use ecp_analyzer::c_sharp::parser::CSharpProvider;
 use ecp_core::analyzer::csharp_extension::{HEURISTIC_CONFIDENCE, HEURISTIC_REASON};

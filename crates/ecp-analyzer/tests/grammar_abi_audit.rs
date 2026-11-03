@@ -7,7 +7,7 @@
 //!   - per-grammar parse cost on a small representative snippet
 //!
 //! Marked `#[ignore]` to keep it out of default test runs. Invoke explicitly:
-//!     cargo test -p ecp-analyzer --test grammar_abi_audit -- --ignored --nocapture
+//!     cargo test -p ecp-analyzer --test it grammar_abi_audit:: -- --ignored --nocapture
 
 use std::time::Instant;
 use tree_sitter::{Language, Parser};

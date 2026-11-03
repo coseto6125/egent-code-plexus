@@ -6,7 +6,7 @@
 
 use std::process::Command;
 
-mod common;
+use crate::common;
 use common::ecp_bin;
 
 #[test]

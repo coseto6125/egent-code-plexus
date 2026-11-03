@@ -9,7 +9,7 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
-mod common;
+use crate::common;
 use common::{commit_all, ecp_bin, run_git};
 
 fn git(repo: &Path, args: &[&str]) -> String {

@@ -2,7 +2,7 @@
 //! `HasProperty`, and no `File -Defines->` edge claims it as top-level. A
 //! module-level `const` keeps its `Defines` edge. Enum constants are members
 //! too, so their enum links them with `HasProperty`.
-mod name_ref_support;
+use crate::name_ref_support;
 
 use ecp_analyzer::php::parser::PhpProvider;
 use ecp_core::graph::{RelType, ZeroCopyGraph};

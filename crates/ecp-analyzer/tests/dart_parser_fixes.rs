@@ -2,7 +2,7 @@
 //! (FU-2026-10-30-732420b06a19). Each test asserts the correct records, so
 //! it fails until the fix lands.
 
-mod driver_parity_support;
+use crate::driver_parity_support;
 
 use driver_parity_support::{names_kinds, Span4};
 use ecp_analyzer::dart::parser::DartProvider;

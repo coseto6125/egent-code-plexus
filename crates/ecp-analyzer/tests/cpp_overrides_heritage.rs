@@ -7,7 +7,7 @@
 //!
 //! `override` marks the method.
 
-mod overrides_support;
+use crate::overrides_support;
 
 use overrides_support::{assert_binds_declared_base, Evidence};
 

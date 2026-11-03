@@ -4,7 +4,7 @@
 //! name lists re-runnable candidates, upstream impact summary, no UID in
 //! output.
 
-mod common;
+use crate::common;
 
 use common::{ecp_bin, init_and_analyze, write};
 

@@ -7,7 +7,7 @@
 //! Tier 2.5 since the qualifier kind didn't pass `is_type`. Pinned
 //! here alongside the C++ and C# cases.
 
-mod common;
+use crate::common;
 
 use common::{ecp_bin, init_and_analyze, write};
 

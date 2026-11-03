@@ -2,7 +2,7 @@
 //! echoes its arguments back, then verifies dispatch wrapped it
 //! correctly. Avoids depending on a built ecp binary for this layer.
 
-mod common;
+use crate::common;
 
 use common::{stub_guard, write_stub};
 use ecp_mcp::schema::DerivedTool;

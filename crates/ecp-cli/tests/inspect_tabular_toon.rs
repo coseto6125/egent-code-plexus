@@ -7,7 +7,7 @@
 //!   - `--file` flag (new primary name) works identically to `--file_path`
 //!   - `--file_path` still accepted as back-compat alias
 
-mod common;
+use crate::common;
 
 use common::{ecp_bin, init_and_analyze, write};
 use serde_json::Value;

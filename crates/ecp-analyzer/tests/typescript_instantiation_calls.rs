@@ -2,7 +2,7 @@
 //! for `A`. The call queries do not capture `new_expression`, so today every
 //! `new` site is invisible to the graph.
 
-mod instantiation_calls_support;
+use crate::instantiation_calls_support;
 
 use ecp_analyzer::typescript::parser::TypeScriptProvider;
 use ecp_core::graph::NodeKind;

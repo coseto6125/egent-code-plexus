@@ -2,7 +2,7 @@
 //! single tool fronting all 7 `ecp group <verb>` sub-subcommands via the
 //! `subcmd` discriminator. Mirrors `peers_tools.rs`.
 
-mod common;
+use crate::common;
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use common::{stub_guard, write_stub};

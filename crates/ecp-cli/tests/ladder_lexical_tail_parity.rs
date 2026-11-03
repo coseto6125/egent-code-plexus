@@ -50,11 +50,7 @@
 //! ladder_lexical_tail dart no lexical tier (lexical.rs:45-51 lexical_admission: lexical_scope_kinds(Dart) is empty, lexical.rs:32-39, so None)
 //! ```
 
-#[path = "common/baseline.rs"]
-mod baseline;
-mod common;
-#[path = "common/strict_parity.rs"]
-mod strict_parity;
+use crate::strict_parity;
 
 use ecp_core::session::merged::MergedGraph;
 use std::collections::BTreeSet;

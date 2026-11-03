@@ -2,7 +2,7 @@
 //! catalog and the detection read one table, so a Laravel, Gin, Rails or
 //! ASP.NET repo lists its framework in `frameworks.detected` instead of `[]`.
 
-mod common;
+use crate::common;
 
 use common::{commit_all, ecp_bin, run_git};
 use serde_json::Value;

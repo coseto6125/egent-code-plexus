@@ -3,7 +3,7 @@
 //! before the move; where the order of two records depends on query match
 //! order rather than source position, the test compares sorted rows.
 
-mod driver_parity_support;
+use crate::driver_parity_support;
 
 use driver_parity_support::{assert_empty_graph, tx, Span4};
 use ecp_analyzer::python::parser::PythonProvider;

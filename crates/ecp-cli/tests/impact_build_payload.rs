@@ -7,7 +7,7 @@
 use std::path::Path;
 use std::process::Command;
 
-mod common;
+use crate::common;
 use common::{ecp_bin, run_git};
 
 fn init_repo_and_analyze(repo: &Path) {

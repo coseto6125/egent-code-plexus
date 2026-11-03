@@ -16,7 +16,7 @@
 //!
 //! C declares no methods: a nested call `foo_bar(foo_create())` is two
 //! direct calls, which keep binding.
-mod instantiation_calls_support;
+use crate::instantiation_calls_support;
 
 use ecp_analyzer::c::parser::CProvider;
 use ecp_analyzer::c_sharp::parser::CSharpProvider;

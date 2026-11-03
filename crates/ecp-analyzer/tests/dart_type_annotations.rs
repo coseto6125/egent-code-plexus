@@ -6,7 +6,7 @@
 //! a `name:`-prefixed field, so the parser descends positionally. Behavior
 //! cross-checked against GitNexus `dart.ts` type-extractor (independent Rust impl).
 
-mod name_ref_support;
+use crate::name_ref_support;
 
 use ecp_analyzer::dart::parser::DartProvider;
 use ecp_core::analyzer::provider::LanguageProvider;

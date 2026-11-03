@@ -6,8 +6,7 @@
 //!
 //! Partial types exist only in C#, so this dimension has no other language.
 
-#[path = "common/parity.rs"]
-mod parity;
+use crate::parity;
 
 use ecp_analyzer::c_sharp::parser::CSharpProvider;
 use ecp_analyzer::c_sharp::partial::CsharpProjects;

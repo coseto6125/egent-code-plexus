@@ -5,7 +5,7 @@
 //! 2. Post-process integration tests — assert that `emit_edges` emits
 //!    `RelType::Overrides` edges from the subtype method to the supertype method.
 
-mod overrides_support;
+use crate::overrides_support;
 
 use ecp_analyzer::java::parser::JavaProvider;
 use ecp_core::analyzer::provider::LanguageProvider;

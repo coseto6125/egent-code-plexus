@@ -12,7 +12,7 @@
 //!
 //! Spec: `docs/specs/2026-05-15-language-coverage-gaps.md` Wave 2 / D1.
 
-mod name_ref_support;
+use crate::name_ref_support;
 
 use ecp_analyzer::go::parser::GoProvider;
 use ecp_core::analyzer::provider::LanguageProvider;

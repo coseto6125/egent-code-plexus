@@ -9,7 +9,7 @@
 //! every node), so this test pins the honest empty answer until the C parser
 //! records an embedded first member.
 
-mod overrides_support;
+use crate::overrides_support;
 
 use ecp_analyzer::c::parser::CProvider;
 use ecp_analyzer::post_process::overrides::{

@@ -41,11 +41,7 @@
 //! workspace_scope_resolution dart no C2 row today (R-A4a writes none for pubspec.yaml)
 //! ```
 
-#[path = "common/baseline.rs"]
-mod baseline;
-mod common;
-#[path = "common/strict_parity.rs"]
-mod strict_parity;
+use crate::strict_parity;
 
 use ecp_core::analyzer::types::NEAREST_COPY_REASON;
 use ecp_core::graph::RelType;

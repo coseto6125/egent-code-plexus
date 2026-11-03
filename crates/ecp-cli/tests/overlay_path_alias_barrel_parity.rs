@@ -132,8 +132,7 @@ fn test_overlay_clean_barrel_path_alias_reexport_matches_reindex() {
     }
 }
 
-#[path = "common/parity.rs"]
-mod parity;
+use crate::parity;
 
 /// A dirty importer that names its module through a path alias. The overlay
 /// expands the specifier through the aliases `graph.bin` keeps, as the index

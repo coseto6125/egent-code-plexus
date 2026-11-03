@@ -5,7 +5,7 @@
 //! above 0.85 must not silently drop rows — the payload must carry `filtered_out`
 //! (count of mirrors dropped) and `threshold_used` (the effective threshold).
 
-mod common;
+use crate::common;
 
 use common::{ecp_bin, init_and_analyze, write};
 

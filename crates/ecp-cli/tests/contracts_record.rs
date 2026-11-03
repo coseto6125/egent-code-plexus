@@ -3,7 +3,7 @@
 //! Before this change `extract_contracts_for_repo` returned empty lists as a
 //! success, so `--repo @all` printed `pairs: []` with no caveat.
 
-mod common;
+use crate::common;
 
 use common::{commit_all, ecp_bin, run_git};
 use serde_json::Value;

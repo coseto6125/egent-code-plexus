@@ -1,5 +1,5 @@
 //! JavaScript: plain JS has no return-type syntax, so `this` is a value there and a method returning it leaves no annotation edge.
-mod name_ref_support;
+use crate::name_ref_support;
 
 use ecp_analyzer::javascript::parser::JavaScriptProvider;
 use name_ref_support::{annotated, graph};

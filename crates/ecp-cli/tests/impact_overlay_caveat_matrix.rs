@@ -8,7 +8,7 @@
 //! over the 14 mainstream language providers. The single-language tests pin the
 //! neighbouring states (no edit, edit adds a def, filters, direction).
 
-mod common;
+use crate::common;
 
 use common::{commit_all, ecp_bin, run_git};
 use std::fs;

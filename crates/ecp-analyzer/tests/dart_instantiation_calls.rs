@@ -3,7 +3,7 @@
 //! already finds it. A class with no constructor has no callable named `A`,
 //! and the call resolves nothing today.
 
-mod instantiation_calls_support;
+use crate::instantiation_calls_support;
 
 use ecp_analyzer::dart::parser::DartProvider;
 use ecp_core::graph::NodeKind;

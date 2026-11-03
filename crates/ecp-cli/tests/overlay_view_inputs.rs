@@ -3,8 +3,7 @@
 //! must persist owner_class / calls / imports, and `accepted_fragments` must
 //! refuse entries that would serve stale overlay data (reverted files, v1 bins).
 
-#[path = "common/parity.rs"]
-mod parity;
+use crate::parity;
 
 use ecp_analyzer::typescript::TypeScriptProvider;
 use ecp_cli::session::overlay_reader::{accepted_fragments, decode_view_inputs, view_inputs};

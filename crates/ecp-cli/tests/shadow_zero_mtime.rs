@@ -14,7 +14,7 @@
 //! the real CLI path (`ecp find` on the dirty tree with one session id) and
 //! read the session manifest.
 
-mod common;
+use crate::common;
 
 use common::{commit_all, ecp_bin, run_git, write};
 use ecp_cli::session::overlay_reader::{accepted_fragments, decode_view_inputs};

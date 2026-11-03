@@ -3,7 +3,7 @@
 //! ordinary call records, so the resolver binds it and `ecp impact` on the
 //! target lists the caller. A non-literal or malformed target stays a blind
 //! spot with no edge.
-mod instantiation_calls_support;
+use crate::instantiation_calls_support;
 
 use ecp_analyzer::php::parser::PhpProvider;
 use ecp_core::analyzer::provider::LanguageProvider;

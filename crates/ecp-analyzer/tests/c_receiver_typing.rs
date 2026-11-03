@@ -7,7 +7,7 @@
 //! runs (it needs a qualified callee). The assertion pins that no edge
 //! appears.
 
-mod receiver_typing_support;
+use crate::receiver_typing_support;
 
 use ecp_analyzer::c::parser::CProvider;
 use receiver_typing_support::{assert_binder_emits, build, callee_files, parse_all};

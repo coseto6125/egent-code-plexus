@@ -15,11 +15,7 @@
 //! The confidence list of a row names the tiers the row may bind at. Where
 //! the tier is known the list holds one value.
 
-#[path = "common/baseline.rs"]
-mod baseline;
-mod common;
-#[path = "common/strict_parity.rs"]
-mod strict_parity;
+use crate::strict_parity;
 
 use ecp_cli::commands::admin::index::run_analyzer_for_paths;
 use ecp_core::graph::{ArchivedZeroCopyGraph, ZeroCopyGraph};

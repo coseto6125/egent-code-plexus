@@ -12,11 +12,7 @@
 //! overlay re-resolves both ref lists (FU-2026-10-08-0ed00615af19, owned by
 //! P2b), and that change deletes the baseline lines.
 
-#[path = "common/baseline.rs"]
-mod baseline;
-mod common;
-#[path = "common/strict_parity.rs"]
-mod strict_parity;
+use crate::strict_parity;
 
 use strict_parity::{check, Edit, Scenario};
 

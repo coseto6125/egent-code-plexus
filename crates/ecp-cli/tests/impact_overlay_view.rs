@@ -12,7 +12,7 @@
 //! are made to TRACKED files (modified-but-uncommitted) — the untracked-file
 //! porcelain fix ships separately in PR #554.
 
-mod common;
+use crate::common;
 
 use common::{commit_all, ecp_bin, run_git};
 use std::fs;

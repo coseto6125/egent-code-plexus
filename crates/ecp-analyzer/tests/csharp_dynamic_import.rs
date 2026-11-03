@@ -11,7 +11,7 @@
 //! loaded name, so a unique-name fallback cannot bind it by accident. Every
 //! "no edge" pin has a control test that proves the harness sees a plain
 //! cross-file call in the same language.
-mod instantiation_calls_support;
+use crate::instantiation_calls_support;
 
 use ecp_analyzer::c_sharp::parser::CSharpProvider;
 use ecp_core::graph::{RelType, ZeroCopyGraph};

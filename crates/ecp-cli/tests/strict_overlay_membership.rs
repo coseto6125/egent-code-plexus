@@ -9,11 +9,7 @@
 //! emits no membership fails instead of passing empty, and the overlay
 //! cannot pass by keeping the base index's edges.
 
-#[path = "common/baseline.rs"]
-mod baseline;
-mod common;
-#[path = "common/strict_parity.rs"]
-mod strict_parity;
+use crate::strict_parity;
 
 use ecp_core::session::merged::MergedGraph;
 use strict_parity::{snapshot, Edit, Scenario};

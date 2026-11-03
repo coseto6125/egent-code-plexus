@@ -2,7 +2,7 @@
 //! named by its path. A Kotlin import of `pkg.a.helper` may name a top-level
 //! function or an object member, so a Kotlin member import keeps binding the
 //! first declaration of the name in the module; these tests pin that.
-mod instantiation_calls_support;
+use crate::instantiation_calls_support;
 
 use ecp_analyzer::kotlin::parser::KotlinProvider;
 use ecp_analyzer::resolution::heuristics::ResolutionTier;

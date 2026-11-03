@@ -2,7 +2,7 @@
 //! The callee is captured as `A.new`; nothing maps it to `A` or to
 //! `initialize`, so today it resolves nothing.
 
-mod instantiation_calls_support;
+use crate::instantiation_calls_support;
 
 use ecp_analyzer::ruby::parser::RubyProvider;
 use ecp_core::analyzer::provider::LanguageProvider;

@@ -9,11 +9,8 @@
 //! edge, a changed confidence, a wrong parent, a missing node, a kept deleted file or a missing
 //! provider each fail.
 
-#[path = "common/baseline.rs"]
-mod baseline;
-mod common;
-#[path = "common/strict_parity.rs"]
-mod strict_parity;
+use crate::baseline;
+use crate::strict_parity;
 
 use ecp_core::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
 use ecp_core::graph_fixture::GraphFixture;

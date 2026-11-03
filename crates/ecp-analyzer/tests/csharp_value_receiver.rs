@@ -13,7 +13,7 @@
 //! `XmlNodeConverter.cs` `_document.CreateComment(d)` on a BCL
 //! `XmlDocument` bound the same-file `IXmlDocument.CreateComment`.
 
-mod receiver_typing_support;
+use crate::receiver_typing_support;
 
 use ecp_analyzer::c_sharp::parser::CSharpProvider;
 use ecp_core::analyzer::csharp_extension::{HEURISTIC_CONFIDENCE, HEURISTIC_REASON};

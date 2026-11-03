@@ -19,11 +19,7 @@
 //! Only the dirty files' edges are rebuilt: a clean subclass whose supertype
 //! the edit changed keeps its indexed edges (F7b2).
 
-#[path = "common/baseline.rs"]
-mod baseline;
-mod common;
-#[path = "common/strict_parity.rs"]
-mod strict_parity;
+use crate::strict_parity;
 
 use ecp_core::graph::{ArchivedZeroCopyGraph, RelType};
 use ecp_core::session::merged::MergedGraph;

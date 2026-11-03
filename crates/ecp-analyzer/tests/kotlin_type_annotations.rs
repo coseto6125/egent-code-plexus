@@ -1,5 +1,5 @@
 //! Kotlin: `Self` is no declaring-type keyword, so a return type `Self` is an ordinary type name.
-mod name_ref_support;
+use crate::name_ref_support;
 
 use ecp_analyzer::kotlin::parser::KotlinProvider;
 use name_ref_support::{annotated, graph};

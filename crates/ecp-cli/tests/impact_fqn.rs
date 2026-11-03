@@ -3,7 +3,7 @@
 //! Test-first: these tests were written before the implementation.
 //! Each test verifies a specific gap in the current bare-name-only matching.
 
-mod common;
+use crate::common;
 
 use common::{ecp_bin, init_and_analyze, write};
 

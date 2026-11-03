@@ -15,7 +15,7 @@
 //! the existing __override__ sentinel). Ruby has no annotation system and
 //! remains deferred.
 
-mod decorates_support;
+use crate::decorates_support;
 
 use decorates_support::{has_decorator, has_synthetic_edge, run_decorates, single_node_graph};
 use ecp_core::graph::NodeKind;

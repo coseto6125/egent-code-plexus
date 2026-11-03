@@ -11,7 +11,7 @@
 //! `Defines` / `Imports` edges into a Function node, and the fixture test
 //! pins the lists the hook renders, which the JSON payload does not carry.
 
-mod common;
+use crate::common;
 
 use common::{ecp_bin, init_and_analyze, write};
 

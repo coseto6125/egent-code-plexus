@@ -11,7 +11,7 @@
 //!   `std::map<std::string,User>`).
 //! - **`auto`**: kept literally — the analyzer does not perform deduction.
 
-mod name_ref_support;
+use crate::name_ref_support;
 
 use ecp_analyzer::cpp::parser::CppProvider;
 use ecp_core::analyzer::provider::LanguageProvider;

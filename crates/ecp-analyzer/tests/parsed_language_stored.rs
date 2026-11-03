@@ -11,7 +11,7 @@
 //! so the stored value is what the parse reports. Each SFC test compares the
 //! `.vue` file with the same source at a `.ts` path: the stored language must
 //! make the index read them alike.
-mod instantiation_calls_support;
+use crate::instantiation_calls_support;
 
 use ecp_analyzer::python::PythonProvider;
 use ecp_analyzer::resolution::builder::GraphBuilder;

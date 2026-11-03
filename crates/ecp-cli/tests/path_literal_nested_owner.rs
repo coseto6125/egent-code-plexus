@@ -5,11 +5,7 @@
 //! replay alike. The languages are the four that scope nested functions
 //! (`lexical_scope_kinds`): Python, JavaScript, TypeScript and Rust.
 
-#[path = "common/baseline.rs"]
-mod baseline;
-mod common;
-#[path = "common/strict_parity.rs"]
-mod strict_parity;
+use crate::strict_parity;
 
 use strict_parity::{Edit, Scenario, Snapshot};
 

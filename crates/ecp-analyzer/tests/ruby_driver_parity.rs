@@ -3,7 +3,7 @@
 //! before the move, in their emitted order where the order is fixed by
 //! the step list.
 
-mod driver_parity_support;
+use crate::driver_parity_support;
 
 use driver_parity_support::{assert_empty_graph, names_kinds, Span4};
 use ecp_analyzer::ruby::parser::RubyProvider;

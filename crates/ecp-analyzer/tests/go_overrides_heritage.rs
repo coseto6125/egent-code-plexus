@@ -5,7 +5,7 @@
 //! a reason. The embedded `Base` is the one of the struct's own file, never
 //! the same-named `Base` of another package.
 
-mod overrides_support;
+use crate::overrides_support;
 
 use ecp_analyzer::go::parser::GoProvider;
 use ecp_analyzer::post_process::overrides::BS_KIND_NO_OVERRIDE_CONCEPT;

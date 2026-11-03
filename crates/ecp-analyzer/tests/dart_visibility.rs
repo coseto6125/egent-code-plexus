@@ -7,7 +7,7 @@
 //! Covers Wave 3 / Matrix A1 (Dart row) from
 //! `docs/specs/2026-05-15-matrix-optimization-opportunities.md`.
 
-mod instantiation_calls_support;
+use crate::instantiation_calls_support;
 
 use ecp_analyzer::dart::parser::DartProvider;
 use ecp_core::analyzer::provider::LanguageProvider;

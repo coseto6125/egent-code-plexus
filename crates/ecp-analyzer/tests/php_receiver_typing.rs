@@ -4,8 +4,8 @@
 //! declares a method of the same name. The ladder must resolve the typed callee
 //! through the type's declared heritage to the base.
 
-mod instantiation_calls_support;
-mod receiver_typing_support;
+use crate::instantiation_calls_support;
+use crate::receiver_typing_support;
 
 use ecp_analyzer::php::parser::PhpProvider;
 use instantiation_calls_support::{calls_from, graph_of};

@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 use common::peer_harness::PeerHarness;
 use std::time::Duration;
 

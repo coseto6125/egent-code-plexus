@@ -18,7 +18,7 @@
 //! `mod foo { pub fn bar() {} }` and a `caller()` that invokes
 //! `foo::bar()` must list `caller` in `bar`'s `incoming.calls`.
 
-mod common;
+use crate::common;
 
 use common::{ecp_bin, init_and_analyze, write};
 

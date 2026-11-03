@@ -7,7 +7,7 @@
 //! reached the overlay and `ecp find` answered `found:false` for code on
 //! disk. Each test plants one fact and reads what the consumer reads.
 
-mod common;
+use crate::common;
 
 use common::{commit_all, ecp_bin, run_git, write};
 use ecp_cli::git::DiffScope;

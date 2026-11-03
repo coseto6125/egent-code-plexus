@@ -4,7 +4,7 @@
 //! (C1 Open point 12), and an ambiguity lists candidates with re-runnable
 //! targets, no inspect blocks, and the graph caveat.
 
-mod common;
+use crate::common;
 
 use common::{commit_all, ecp_bin, run_git};
 use serde_json::Value;

@@ -2,7 +2,7 @@
 //! strings become PathLiteral. A bare `site_count: 0` for any other value reads
 //! as "unused", so the payload carries a `note` for it.
 
-mod common;
+use crate::common;
 
 use common::{ecp_bin, init_and_analyze, write};
 use std::path::Path;

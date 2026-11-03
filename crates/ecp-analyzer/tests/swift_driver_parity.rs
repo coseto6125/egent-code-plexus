@@ -4,7 +4,7 @@
 //! blind spots were read off a `LocalGraph` dump the pre-move binary wrote
 //! from the same sources.
 
-mod driver_parity_support;
+use crate::driver_parity_support;
 
 use driver_parity_support::{assert_empty_graph, names_kinds, refs, Span4};
 use ecp_analyzer::framework_confidence::{SWIFTUI_HINT, UIKIT_HINT, VAPOR_HINT};

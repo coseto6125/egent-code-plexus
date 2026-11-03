@@ -2,7 +2,7 @@
 //! The constructor is `__init__`, so the Callable lookup for `A` finds only
 //! the class and today resolves nothing.
 
-mod instantiation_calls_support;
+use crate::instantiation_calls_support;
 
 use ecp_analyzer::python::parser::PythonProvider;
 use ecp_core::graph::NodeKind;

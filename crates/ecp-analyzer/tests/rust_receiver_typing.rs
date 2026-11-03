@@ -1,4 +1,4 @@
-mod receiver_typing_support;
+use crate::receiver_typing_support;
 
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_analyzer::rust::parser::RustProvider;

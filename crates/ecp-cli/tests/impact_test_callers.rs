@@ -7,7 +7,7 @@
 //! - A test fake sharing a production method's name keeps untyped calls to
 //!   it unresolved, and the payload says the caller set is incomplete.
 
-mod common;
+use crate::common;
 
 use common::{ecp_bin, run_git};
 use std::path::Path;

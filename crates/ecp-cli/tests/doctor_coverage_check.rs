@@ -13,7 +13,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-mod common;
+use crate::common;
 use common::ecp_bin;
 
 fn run_ecp(args: &[&str], home: &Path, cwd: &Path) -> std::process::Output {

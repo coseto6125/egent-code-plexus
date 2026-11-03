@@ -20,7 +20,7 @@
 //! to prove it against. A slice that changes what the bytes mean WITHOUT
 //! bumping the identifier turns the first arm red.
 
-mod common;
+use crate::common;
 
 use common::stored::{
     committed, copy_tree, fixture, set_mtime, COMMIT_DIR, SESSION, WRITER_FINGERPRINT,

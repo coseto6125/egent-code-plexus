@@ -4,7 +4,7 @@
 //! a `Constructor` both named `Foo`; before the exception every command
 //! answered `ambiguous`.
 
-mod common;
+use crate::common;
 
 use common::{commit_all, ecp_bin, run_git};
 use serde_json::Value;

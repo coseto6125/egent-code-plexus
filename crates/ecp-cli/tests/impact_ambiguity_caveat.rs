@@ -4,7 +4,7 @@
 //! time (Tier-3 `AmbiguousGlobal`) — the upstream BFS can't see them, and a
 //! silent low caller count reads as "safe to refactor" when it isn't.
 
-mod common;
+use crate::common;
 
 use common::{ecp_bin, init_and_analyze, run_git, write};
 use std::path::Path;

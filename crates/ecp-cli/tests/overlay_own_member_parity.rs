@@ -15,8 +15,7 @@
 //! | C        | N/A    | C has no methods                                     |
 //! | Go       | guard  | an interface method is no same-file node; no contest |
 
-#[path = "common/parity.rs"]
-mod parity;
+use crate::parity;
 
 use ecp_core::analyzer::types::LocalGraph;
 use parity::{calls_after_edit, Parity};

@@ -4,7 +4,7 @@
 //! non-client helper so we can assert the catalog filter is exact and
 //! not just a substring match.
 
-mod common;
+use crate::common;
 
 use common::run_git;
 use serde_json::Value;

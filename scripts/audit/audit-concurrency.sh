@@ -16,19 +16,19 @@ cargo build -p ecp-core --example registry_writer_child
 cargo build -p egent-code-plexus --example slow_noop
 
 echo "==> Equivalence tests — --test-threads=1"
-cargo test -p ecp-core --test concurrency_string_pool_intern -- --test-threads=1
-cargo test -p ecp-core --test concurrency_registry_writers -- --test-threads=1
-cargo test -p ecp-analyzer --test concurrency_graph_builder_order -- --test-threads=1
+cargo test -p ecp-core --test it concurrency_string_pool_intern:: -- --test-threads=1
+cargo test -p ecp-core --test it concurrency_registry_writers:: -- --test-threads=1
+cargo test -p ecp-analyzer --test it concurrency_graph_builder_order:: -- --test-threads=1
 cargo test -p ecp-analyzer --lib resolution::builder::tests::pass2_parallel_serial_identical_per_reltype -- --test-threads=1
-cargo test -p egent-code-plexus --test concurrency_hook_flock -- --test-threads=1
+cargo test -p egent-code-plexus --test it concurrency_hook_flock:: -- --test-threads=1
 
 NPROC="$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 echo "==> Equivalence tests — --test-threads=$NPROC"
-cargo test -p ecp-core --test concurrency_string_pool_intern -- --test-threads="$NPROC"
-cargo test -p ecp-core --test concurrency_registry_writers -- --test-threads="$NPROC"
-cargo test -p ecp-analyzer --test concurrency_graph_builder_order -- --test-threads="$NPROC"
+cargo test -p ecp-core --test it concurrency_string_pool_intern:: -- --test-threads="$NPROC"
+cargo test -p ecp-core --test it concurrency_registry_writers:: -- --test-threads="$NPROC"
+cargo test -p ecp-analyzer --test it concurrency_graph_builder_order:: -- --test-threads="$NPROC"
 cargo test -p ecp-analyzer --lib resolution::builder::tests::pass2_parallel_serial_identical_per_reltype -- --test-threads="$NPROC"
-cargo test -p egent-code-plexus --test concurrency_hook_flock -- --test-threads="$NPROC"
+cargo test -p egent-code-plexus --test it concurrency_hook_flock:: -- --test-threads="$NPROC"
 
 # TSan run (best-effort: nightly toolchain + sanitizer libs + rust-src)
 if rustup toolchain list 2>/dev/null | grep -q nightly \

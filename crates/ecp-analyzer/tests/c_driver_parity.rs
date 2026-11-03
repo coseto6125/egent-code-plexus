@@ -3,7 +3,7 @@
 //! before the move, in their emitted order. The expected values come from
 //! a `{:#?}` dump of the old parser over these exact sources.
 
-mod driver_parity_support;
+use crate::driver_parity_support;
 
 use driver_parity_support::assert_empty_graph;
 use ecp_analyzer::c::parser::CProvider;
