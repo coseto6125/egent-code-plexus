@@ -426,12 +426,12 @@ fn test_impact_same_name_twice_in_one_file_line_form_selects_first_with_caller()
     assert_eq!(
         targets,
         [
-            format!("{NAME}@1 --file c.ts"),
-            format!("{NAME}@2 --file c.ts")
+            format!("::{NAME}@1 --file c.ts"),
+            format!("::{NAME}@2 --file c.ts")
         ],
         "{failure}"
     );
-    let first = format!("{NAME}@1");
+    let first = format!("::{NAME}@1");
     let json = fx.impact_ok(
         &["--target", &first, "--file", "c.ts", "--direction", "up"],
         false,
