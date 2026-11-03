@@ -912,7 +912,6 @@ dependencies = [
  "ast-grep-core",
  "blake3",
  "ecp-core",
- "ignore",
  "mimalloc",
  "phf 0.14.0",
  "rayon",
