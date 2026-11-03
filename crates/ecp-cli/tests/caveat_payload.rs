@@ -91,6 +91,19 @@ fn test_routes_warm_attached_graph_payload_has_caveat() {
     assert_warm_attach_caveat(&json_payload(&out, "routes"), "routes");
 }
 
+/// The fixture sets `ECP_SKIP_BG_REBUILD`, so no rebuild starts: the
+/// caveat names the command to run, never a rebuild in flight.
+#[test]
+fn test_routes_warm_attached_skip_bg_rebuild_caveat_claims_no_rebuild() {
+    let (repo, home) = fixture();
+    make_warm_attached(repo.path());
+    let out = run_ecp(repo.path(), home.path(), &["routes", "--format", "json"]);
+    let payload = json_payload(&out, "routes");
+    let result = payload["result"].as_str().unwrap_or_default();
+    assert!(result.contains("No background rebuild runs"), "{payload}");
+    assert!(!result.contains("in flight"), "{payload}");
+}
+
 #[test]
 fn test_pattern_warm_attached_graph_payload_has_caveat() {
     let (repo, home) = fixture();
