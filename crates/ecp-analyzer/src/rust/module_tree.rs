@@ -29,6 +29,7 @@
 
 use crate::resolution::index::SymbolTable;
 use ecp_core::analyzer::ladder::{self, Namespace, Published, TreeItem};
+use ecp_core::analyzer::path_aliases::segment_wildcard;
 use ecp_core::analyzer::rust_pub_use::{
     self, mod_steps, path_attrs, pub_use_entries, strip_comments, PubUseEntry,
 };
@@ -543,8 +544,9 @@ fn build_mod_tree_and_reexports(entry: &Path) -> (ModTree, ReExportMap) {
 // ---------------------------------------------------------------------------
 
 /// The `[workspace] members` of a root manifest, each entry a directory
-/// under `workspace_root` (an entry with a `*` expands over the directories
-/// that hold a `Cargo.toml`). A manifest that is not TOML names no member.
+/// under `workspace_root`. An entry with `*` in its last segment
+/// (`crates/*`, `crates/*-sys`) expands over the matching directories that
+/// hold a `Cargo.toml`. A manifest that is not TOML names no member.
 fn parse_workspace_members(cargo_toml: &str, workspace_root: &Path) -> Vec<PathBuf> {
     let Ok(table) = cargo_toml.parse::<toml::Table>() else {
         return Vec::new();
@@ -558,14 +560,24 @@ fn parse_workspace_members(cargo_toml: &str, workspace_root: &Path) -> Vec<PathB
         .filter_map(toml::Value::as_str);
     let mut members: Vec<PathBuf> = Vec::new();
     for pattern in patterns {
-        // ecp expands `*` only as a whole last segment (`crates/*`); Cargo's
-        // other globs (`crates/ecp-*`, `?`) name no member here.
-        if let Some((prefix, _)) = pattern.split_once('*') {
-            let Ok(entries) = std::fs::read_dir(workspace_root.join(prefix)) else {
+        let (parent, last) = pattern.rsplit_once('/').unwrap_or(("", pattern));
+        if last.contains('*') {
+            // ecp matches `*` in the last segment only; Cargo's `?`, `[..]`
+            // and a `*` in an earlier segment name no member here.
+            if parent.contains('*') {
+                continue;
+            }
+            let Ok(entries) = std::fs::read_dir(workspace_root.join(parent)) else {
                 continue;
             };
             let mut dirs: Vec<PathBuf> = entries
                 .flatten()
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| segment_wildcard(last, name))
+                })
                 .map(|entry| entry.path())
                 .filter(|path| path.is_dir())
                 .collect();
@@ -847,6 +859,23 @@ mod tests {
                 dir.path().join("crates/b"),
                 dir.path().join("tools/x"),
             ]
+        );
+    }
+
+    /// Stands for: a `*` inside the last segment matches names, so
+    /// `crates/*-sys` takes `foo-sys` and not `bar`; a `*` in an earlier
+    /// segment names no member rather than every directory.
+    #[test]
+    fn test_parse_workspace_members_partial_glob_matches_last_segment_only() {
+        let dir = make_tree(&[
+            ("crates/foo-sys/Cargo.toml", ""),
+            ("crates/bar/Cargo.toml", ""),
+            ("crates/bar/sub/Cargo.toml", ""),
+        ]);
+        let text = "[workspace]\nmembers = [\"crates/*-sys\", \"crates/*/sub\"]\n";
+        assert_eq!(
+            parse_workspace_members(text, dir.path()),
+            [dir.path().join("crates/foo-sys")]
         );
     }
 

@@ -5,6 +5,7 @@
 
 use ecp_analyzer::c_sharp::partial::CsharpProjects;
 use ecp_analyzer::resolution::path_aliases::PathAliases;
+use ecp_core::analyzer::path_aliases::segment_wildcard;
 use ecp_core::contracts::workspace::{
     ConfigPresence, ConfigRead, Ecosystem, Membership, NameRank, Requirement, RequirementTarget,
     Scope, ScopeAlias, ScopeDraft, WorkspaceFacts,
@@ -769,7 +770,7 @@ fn glob_matches(glob: &str, path: &str) -> bool {
             Some((&"**", rest)) => (0..=path.len()).any(|skip| segments(rest, &path[skip..])),
             Some((head, rest)) => path
                 .split_first()
-                .is_some_and(|(first, tail)| wildcard(head, first) && segments(rest, tail)),
+                .is_some_and(|(first, tail)| segment_wildcard(head, first) && segments(rest, tail)),
         }
     }
     let glob: Vec<&str> = glob
@@ -779,26 +780,6 @@ fn glob_matches(glob: &str, path: &str) -> bool {
         .collect();
     let path: Vec<&str> = path.split('/').collect();
     segments(&glob, &path)
-}
-
-/// `pattern` with `*` wildcards against one whole segment.
-fn wildcard(pattern: &str, text: &str) -> bool {
-    let mut parts = pattern.split('*');
-    let first = parts.next().unwrap_or("");
-    let Some(mut rest) = text.strip_prefix(first) else {
-        return false;
-    };
-    let parts: Vec<&str> = parts.collect();
-    let Some((last, middle)) = parts.split_last() else {
-        return rest.is_empty();
-    };
-    for part in middle {
-        match rest.find(part) {
-            Some(at) => rest = &rest[at + part.len()..],
-            None => return false,
-        }
-    }
-    rest.len() >= last.len() && rest.ends_with(last)
 }
 
 /// The effective `compilerOptions` of one `tsconfig.json` chain.
