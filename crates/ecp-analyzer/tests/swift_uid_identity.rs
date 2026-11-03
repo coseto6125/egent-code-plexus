@@ -245,3 +245,21 @@ fn test_build_swift_extension_method_joins_in_type_method_set() {
         vec![2]
     );
 }
+
+const PROTOCOL_DEFAULT_FIELD: &str =
+    "protocol P {\n    var af: Int { get }\n}\nextension P {\n    var af: Int { 1 }\n}\n";
+
+/// Stands for: a field in `extension P` joins the same-named requirement of
+/// protocol `P` (identity `joined_containers`) and merges into it, so a
+/// read of `x.af` has one candidate.
+#[test]
+fn test_build_swift_extension_field_merges_into_protocol_requirement() {
+    let g = uid_chain_support::build(&SwiftProvider::new().unwrap(), PATH, PROTOCOL_DEFAULT_FIELD);
+    assert_eq!(
+        uid_chain_support::named(&g, "af")
+            .iter()
+            .map(|&(l, _)| l)
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
+}

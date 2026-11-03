@@ -653,19 +653,20 @@ pub fn assign_file(path: &str, decls: &[FileDecl<'_>]) -> Result<Vec<DeclIdentit
 }
 
 /// [`FileDecl::container`] of each declaration, except that a top-level
-/// member of a kind that keeps overloads joins the type that declares a
-/// member of its kind, owner and name: a C++ out-of-line `K::m` after the
-/// in-class `m`, a Swift `extension K { func m }` beside `func m` in `K`.
-/// It then shares that member's base uid and is a later overload of it,
-/// as before the container chain. A top-level member with no such sibling
-/// (a Go receiver method, a Kotlin `fun K.m` alone, a C++ definition whose
-/// class is in another file) keeps no container and `uid::compute`.
+/// member joins the type that declares a member of its kind, owner and
+/// name: a C++ out-of-line `K::m` or `int K::x = 0;` after the in-class
+/// one, a Swift `extension P { var af }` beside the `var af` of protocol
+/// `P`. It then shares that member's base uid: a later overload of a
+/// method, a merged repeat of a field, as before the container chain. A
+/// top-level member with no such sibling (a Go receiver method, a Kotlin
+/// `fun K.m` alone, a C++ definition whose class is in another file) keeps
+/// no container and `uid::compute`.
 fn joined_containers(decls: &[FileDecl<'_>]) -> Vec<Option<u32>> {
     let mut in_type: FxHashMap<(&str, &str, &str), u32> = FxHashMap::default();
     for d in decls {
         if let (None, Some(c), Some(owner)) = (d.parent, d.container, d.owner) {
             if !owner.is_empty()
-                && uid::keeps_overloads(d.kind)
+                && joins(d.kind)
                 && decls.get(c as usize).is_some_and(|t| t.kind.is_type())
             {
                 in_type.entry((d.kind.as_str(), owner, d.name)).or_insert(c);
@@ -675,12 +676,16 @@ fn joined_containers(decls: &[FileDecl<'_>]) -> Vec<Option<u32>> {
     decls
         .iter()
         .map(|d| match (d.parent, d.container, d.owner) {
-            (None, None, Some(owner)) if uid::keeps_overloads(d.kind) => {
+            (None, None, Some(owner)) if joins(d.kind) => {
                 in_type.get(&(d.kind.as_str(), owner, d.name)).copied()
             }
             _ => d.container,
         })
         .collect()
+}
+
+fn joins(kind: NodeKind) -> bool {
+    uid::keeps_overloads(kind) || uid::merges_repeats(kind)
 }
 
 /// For each dirty declaration, the base declaration it replaces. A pair
@@ -2359,9 +2364,9 @@ mod tests {
     /// Stands for: a top-level member joins the type that declares a member
     /// of its kind, owner and name (C++ in-class `m` then out-of-line
     /// `K::m`; Swift `m` in `K` then in `extension K`). It is a later
-    /// overload of that member, so the set keeps one first. A top-level
-    /// member with no such sibling (`n`, a Go receiver shape) and one of
-    /// another kind (`Property` `p`) keep `uid::compute`.
+    /// overload of that member, so the set keeps one first; a field (`p`)
+    /// is a merged repeat of the in-type one. A top-level member with no
+    /// such sibling (`n`, a Go receiver shape) keeps `uid::compute`.
     #[test]
     fn test_assign_file_out_of_type_member_joins_in_type_sibling_set() {
         let mut decls = vec![
@@ -2392,9 +2397,13 @@ mod tests {
             ids[4].slot,
             UidSlot::First(uid::compute(NodeKind::Method, "k.cpp", Some("K"), "n"))
         );
+        let p = nested_uid(k, NodeKind::Property, Some("K"), "p");
         assert_eq!(
             ids[5].slot,
-            UidSlot::First(uid::compute(NodeKind::Property, "k.cpp", Some("K"), "p"))
+            UidSlot::Duplicate {
+                first: 2,
+                uid: uid::overload(p, 1),
+            }
         );
     }
 
