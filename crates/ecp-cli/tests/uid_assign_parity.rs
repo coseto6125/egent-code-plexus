@@ -1004,7 +1004,7 @@ fn test_uid_assign_csharp_delegates_and_member_twins_four_paths_equal_uids() {
 /// `def f` twice in one Python file: a redefinition.
 const PY_REDEFINED: &str =
     "def g():\n    pass\n\ndef h():\n    pass\n\ndef f():\n    g()\n\ndef f():\n    h()\n";
-/// `var x` twice in one JavaScript file: a merged repeat.
+/// `var x` twice in one JavaScript file: V, a merged repeat.
 const JS_MERGED: &str = "function a() {}\nfunction b() {}\nvar x = a();\nvar x = b();\n";
 
 four_path_cases! {
@@ -1105,10 +1105,13 @@ fn test_strict_parity_java_method_overloads_second_body_calls_from_second() {
     assert!(second[0].contains("-> Method K.java:3 b #"), "{second:?}");
 }
 
-/// Stands for: M, a merged repeat, and the overlay arm of B1. `var x`
-/// twice is one entity: one named node with exactly one `Defines`, and
-/// every edge a declaration of `x` emits starts at that node, on the full
-/// build and in the overlay alike. The tombstone sources nothing.
+/// Stands for: V, a merged repeat. `var x` twice is one entity: one named
+/// node with exactly one `Defines`, no `Defines` into the tombstone, and the
+/// overlay and the full build agree on every node and edge
+/// (`strict_parity_of`). The fixture's calls sit at module level and have no
+/// source node, so no edge starts at either row: this test does not cover
+/// B1's re-sourcing of a merged row's edges on the overlay arm, and the
+/// "tombstone sources nothing" loop below passes vacuously.
 #[test]
 fn test_strict_parity_javascript_merged_var_edges_start_at_survivor() {
     let before = "function a() {}\nfunction b() {}\nvar x = a();\n";
@@ -1124,6 +1127,119 @@ fn test_strict_parity_javascript_merged_var_edges_start_at_survivor() {
             "the tombstone sources no {rel}"
         );
     }
+}
+
+/// `before` holds the first `f` declaration alone, `after` both; `rows` pairs
+/// each declaration (`kind path:line name`) with the callee its own body calls.
+/// The overlay of `after` over `before` equals the full index of `after`, and
+/// each declaration has exactly one `Calls`, to its own callee.
+fn assert_redefinitions_own_calls(
+    name: &str,
+    path: &str,
+    before: &str,
+    after: &str,
+    rows: &[(&str, &str)],
+) {
+    let full = strict_parity_of(name, path, before, after);
+    for (caller, callee) in rows {
+        let calls = edge_lines(&full, "Calls", "source", caller);
+        assert_eq!(calls.len(), 1, "{caller}: {calls:?}");
+        assert!(
+            calls[0].contains(&format!("-> {callee} #")),
+            "{caller} must call {callee}: {calls:?}"
+        );
+    }
+}
+
+macro_rules! redefinition_parity_cases {
+    ($($test:ident => $path:literal, $before:expr, $after:expr, [$($caller:literal => $callee:literal),+];)+) => {$(
+        #[test]
+        fn $test() {
+            assert_redefinitions_own_calls(
+                stringify!($test),
+                $path,
+                $before,
+                $after,
+                &[$(($caller, $callee)),+],
+            );
+        }
+    )+};
+}
+
+// R in the other 12 mainstream languages (Python's is above). Java and Dart
+// cannot write it: a second method of one signature is a compile error there,
+// and the free-function overload shape is covered by
+// `test_strict_parity_java_method_overloads_second_body_calls_from_second`.
+redefinition_parity_cases! {
+    test_strict_parity_typescript_function_twice_own_calls => "app.ts",
+        "function g() {}\nfunction h() {}\nfunction f() { g(); }\n",
+        "function g() {}\nfunction h() {}\nfunction f() { g(); }\nfunction f() { h(); }\n",
+        ["Function app.ts:3 f" => "Function app.ts:1 g", "Function app.ts:4 f" => "Function app.ts:2 h"];
+    test_strict_parity_javascript_function_twice_own_calls => "app.js",
+        "function g() {}\nfunction h() {}\nfunction f() { g(); }\n",
+        "function g() {}\nfunction h() {}\nfunction f() { g(); }\nfunction f() { h(); }\n",
+        ["Function app.js:3 f" => "Function app.js:1 g", "Function app.js:4 f" => "Function app.js:2 h"];
+    test_strict_parity_kotlin_fun_overloads_own_calls => "app.kt",
+        "fun g() {}\nfun h() {}\nfun f(x: Int) { g() }\n",
+        "fun g() {}\nfun h() {}\nfun f(x: Int) { g() }\nfun f(s: String) { h() }\n",
+        ["Function app.kt:3 f" => "Function app.kt:1 g", "Function app.kt:4 f" => "Function app.kt:2 h"];
+    test_strict_parity_csharp_if_else_method_twins_own_calls => "App.cs",
+        "class K {\n    void g() {}\n    void h() {}\n#if A\n    void f() { g(); }\n#endif\n}\n",
+        "class K {\n    void g() {}\n    void h() {}\n#if A\n    void f() { g(); }\n#else\n    void f() { h(); }\n#endif\n}\n",
+        ["Method App.cs:5 f" => "Method App.cs:2 g", "Method App.cs:7 f" => "Method App.cs:3 h"];
+    test_strict_parity_go_init_twice_own_calls => "app.go",
+        "package main\n\nfunc g() {}\nfunc h() {}\nfunc init() { g() }\n",
+        "package main\n\nfunc g() {}\nfunc h() {}\nfunc init() { g() }\nfunc init() { h() }\n",
+        ["Function app.go:5 init" => "Function app.go:3 g", "Function app.go:6 init" => "Function app.go:4 h"];
+    test_strict_parity_rust_cfg_fn_twins_own_calls => "app.rs",
+        "fn g() {}\nfn h() {}\n#[cfg(unix)]\nfn f() { g(); }\n",
+        "fn g() {}\nfn h() {}\n#[cfg(unix)]\nfn f() { g(); }\n#[cfg(not(unix))]\nfn f() { h(); }\n",
+        ["Function app.rs:4 f" => "Function app.rs:1 g", "Function app.rs:6 f" => "Function app.rs:2 h"];
+    test_strict_parity_php_conditional_function_twins_own_calls => "app.php",
+        "<?php\nfunction g() {}\nfunction h() {}\nif (true) {\n    function f() { g(); }\n}\n",
+        "<?php\nfunction g() {}\nfunction h() {}\nif (true) {\n    function f() { g(); }\n} else {\n    function f() { h(); }\n}\n",
+        ["Function app.php:5 f" => "Function app.php:2 g", "Function app.php:7 f" => "Function app.php:3 h"];
+    test_strict_parity_ruby_def_twice_own_calls => "app.rb",
+        "def g\nend\n\ndef h\nend\n\ndef f\n  g()\nend\n",
+        "def g\nend\n\ndef h\nend\n\ndef f\n  g()\nend\n\ndef f\n  h()\nend\n",
+        ["Method app.rb:7 f" => "Method app.rb:1 g", "Method app.rb:11 f" => "Method app.rb:4 h"];
+    test_strict_parity_swift_func_overloads_own_calls => "app.swift",
+        "func g() {}\nfunc h() {}\nfunc f(_ x: Int) { g() }\n",
+        "func g() {}\nfunc h() {}\nfunc f(_ x: Int) { g() }\nfunc f(_ s: String) { h() }\n",
+        ["Function app.swift:3 f" => "Function app.swift:1 g", "Function app.swift:4 f" => "Function app.swift:2 h"];
+    test_strict_parity_c_ifdef_fn_twins_own_calls => "app.c",
+        "void g(void) {}\nvoid h(void) {}\n#ifdef A\nvoid f(void) { g(); }\n#endif\n",
+        "void g(void) {}\nvoid h(void) {}\n#ifdef A\nvoid f(void) { g(); }\n#else\nvoid f(void) { h(); }\n#endif\n",
+        ["Function app.c:4 f" => "Function app.c:1 g", "Function app.c:6 f" => "Function app.c:2 h"];
+    test_strict_parity_cpp_function_overloads_own_calls => "app.cpp",
+        "void g() {}\nvoid h() {}\nvoid f(int x) { g(); }\n",
+        "void g() {}\nvoid h() {}\nvoid f(int x) { g(); }\nvoid f(double x) { h(); }\n",
+        ["Function app.cpp:3 f" => "Function app.cpp:1 g", "Function app.cpp:4 f" => "Function app.cpp:2 h"];
+}
+
+/// Stands for: R in Rust, two inherent `impl V {}` blocks in one dirty file
+/// with an equal count on both sides. The overlay pairs the blocks in order,
+/// so it agrees with the full build on every node and edge, hides no `Impl`
+/// and so gives no "results may be incomplete" caveat.
+#[test]
+fn test_strict_parity_rust_two_inherent_impls_pair_in_order_no_caveat() {
+    let before = "struct V;\nimpl V {\n    fn a(&self) {}\n}\nimpl V {\n    fn b(&self) {}\n}\n";
+    let after =
+        "struct V;\nimpl V {\n    fn a(&self) {}\n}\nimpl V {\n    fn b(&self) { self.a(); }\n}\n";
+    let observed = strict_parity::run(&strict_parity::Scenario {
+        name: "uid_1b_rust_two_impls",
+        owner: "uid 1b (design uid §2.3)",
+        files: &[("app.rs", before)],
+        edits: &[strict_parity::Edit::Write("app.rs", after)],
+    });
+    let lines = observed.lines();
+    assert!(lines.is_empty(), "overlay vs full build: {lines:#?}");
+    let view = observed.view().expect("the dirty file builds a view");
+    assert!(
+        view.hidden_declarations().is_empty(),
+        "no Impl is hidden: {:?}",
+        view.hidden_declarations()
+    );
 }
 
 /// Stands for: the inputs of one path number as one file
@@ -1192,7 +1308,10 @@ fn test_uid_assign_two_inputs_one_path_index_and_overlay_equal_uids() {
 /// later node, and the full build links them with `PartOf`. In the overlay
 /// the two dirty parts share an anchor, pair no base part and get no
 /// `PartOf`; the Shared-anchor caveat names `P`, so a reader knows the
-/// overlay hides the base parts rather than drops them silently.
+/// overlay hides the base parts rather than drops them silently. The full
+/// build holds two `Class P` nodes, each with its own `HasMethod` row, and
+/// the `PartOf` runs from the second part to the representative, the first
+/// (rows are 1-based).
 #[test]
 fn test_overlay_view_csharp_same_file_partial_dirty_drops_part_of_with_caveat() {
     use ecp_analyzer::c_sharp::partial::CsharpProjects;
@@ -1218,6 +1337,46 @@ fn test_overlay_view_csharp_same_file_partial_dirty_drops_part_of_with_caveat() 
         part_of(&MergedGraph::new(full, None)),
         1,
         "the full build links the parts"
+    );
+    let merged_full = MergedGraph::new(full, None);
+    let part_rows: Vec<u32> = (0..merged_full.node_count())
+        .filter_map(|i| merged_full.node(i))
+        .filter(|n| n.kind() == NodeKind::Class && n.name(&merged_full) == "P")
+        .map(|n| n.start_line())
+        .collect();
+    assert_eq!(part_rows, [3, 7], "one Class P node per part");
+    let rows = |rel: RelType| -> Vec<(u32, String, u32, String)> {
+        let mut out: Vec<_> = merged_full
+            .all_edges()
+            .filter(|e| e.rel_type() == rel)
+            .map(|e| {
+                let (s, t) = (
+                    merged_full.node(e.source).unwrap(),
+                    merged_full.node(e.target).unwrap(),
+                );
+                (
+                    s.start_line(),
+                    s.name(&merged_full).to_string(),
+                    t.start_line(),
+                    t.name(&merged_full).to_string(),
+                )
+            })
+            .collect();
+        out.sort();
+        out
+    };
+    assert_eq!(
+        rows(RelType::HasMethod),
+        [
+            (3, "P".into(), 5, "A".into()),
+            (7, "P".into(), 9, "B".into())
+        ],
+        "each method hangs from its own part"
+    );
+    assert_eq!(
+        rows(RelType::PartOf),
+        [(7, "P".into(), 3, "P".into())],
+        "the second part points at the representative"
     );
 
     let view =

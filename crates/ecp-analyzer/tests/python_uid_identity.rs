@@ -214,11 +214,46 @@ class C:
         return 2
 "#;
 
+const IF_ELSE_DEF: &str = r#"def a():
+    return 1
+
+
+def b():
+    return 2
+
+
+if cond:
+
+    def f():
+        return a()
+
+else:
+
+    def f():
+        return b()
+"#;
+
 const ASSIGNED_TWICE: &str = "x = 1\nx = 2\n";
 
 #[test]
 fn test_build_python_def_twice_keeps_two_nodes_with_own_calls() {
     let g = build(DEF_TWICE);
+    assert_two_kept(
+        &g,
+        NodeKind::Function,
+        "f",
+        RelType::Defines,
+        Some(("a", "b")),
+    );
+}
+
+/// Stands for: `def f` in both branches of an `if/else` (design_uid §5 row
+/// R) is two named nodes, each with its own `Defines` from the file and its
+/// own body call, as two plain repeats are. Red before 1b: the `else` branch
+/// was a tombstone.
+#[test]
+fn test_build_python_def_in_both_if_else_branches_keeps_two_nodes_with_own_calls() {
+    let g = build(IF_ELSE_DEF);
     assert_two_kept(
         &g,
         NodeKind::Function,

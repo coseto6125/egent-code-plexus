@@ -251,8 +251,9 @@ fn import_set_key(imports: &[RawImport]) -> Vec<(String, String)> {
 }
 
 /// The uid `GraphBuilder` Pass 1 stores for each node of `lg`, in node
-/// order: a later overload numbered, a later same-uid redefinition a
-/// tombstone (`ecp_core::analyzer::lexical::file_uids`).
+/// order: a repeat of one identity key is numbered (`uid::overload`), a
+/// named `Later` node unless `uid::merges_repeats` makes it a tombstone
+/// (`ecp_core::analyzer::lexical::file_uids`).
 pub fn node_uids_for(lg: &LocalGraph) -> Vec<u64> {
     let raw_path = lg.file_path.to_string_lossy();
     let path_str: std::borrow::Cow<'_, str> = if raw_path.contains('\\') {

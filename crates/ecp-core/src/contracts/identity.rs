@@ -519,37 +519,35 @@ pub fn assign_file(path: &str, decls: &[FileDecl<'_>]) -> Result<Vec<DeclIdentit
                     uid,
                     reason,
                 };
-                if uid::keeps_overloads(d.kind) {
-                    later(first, LaterReason::Overload)
-                } else if d.parent.is_some() {
-                    later(first, LaterReason::Scoped)
-                } else {
-                    // The earlier declaration this one repeats: the first
-                    // one of its arity path, `None` when no earlier one has
-                    // that path.
-                    let twin = match d.arity {
+                // `None` when the twin search does not apply: an overload
+                // kind or a scoped declaration. Otherwise the earlier
+                // declaration this one repeats: the first one of its arity
+                // path, `None` when no earlier one has that path.
+                let unscoped_twin =
+                    (!uid::keeps_overloads(d.kind) && d.parent.is_none()).then(|| match d.arity {
                         Some(_) => {
                             (0..j).find(|&k| base_uids[k] == base && same_arity_path(decls, k, j))
                         }
                         None => Some(first as usize),
-                    };
-                    match twin {
-                        None => later(first, LaterReason::Arity),
-                        Some(twin) if uid::merges_repeats(d.kind) => {
-                            // The overlay's base side derives a child's
-                            // anchor from its parent's stored name, which a
-                            // tombstone lacks.
-                            debug_assert!(
-                                !is_scope_container(d.kind),
-                                "a scope container is never tombstoned"
-                            );
-                            UidSlot::Duplicate {
-                                first: twin as u32,
-                                uid,
-                            }
+                    });
+                match unscoped_twin {
+                    None if uid::keeps_overloads(d.kind) => later(first, LaterReason::Overload),
+                    None => later(first, LaterReason::Scoped),
+                    Some(None) => later(first, LaterReason::Arity),
+                    Some(Some(twin)) if uid::merges_repeats(d.kind) => {
+                        // The overlay's base side derives a child's anchor
+                        // from its parent's stored name, which a tombstone
+                        // lacks.
+                        debug_assert!(
+                            !is_scope_container(d.kind),
+                            "a scope container is never tombstoned"
+                        );
+                        UidSlot::Duplicate {
+                            first: twin as u32,
+                            uid,
                         }
-                        Some(twin) => later(twin as u32, LaterReason::Repeat),
                     }
+                    Some(Some(twin)) => later(twin as u32, LaterReason::Repeat),
                 }
             }
         };
@@ -1365,8 +1363,8 @@ impl Ambiguity {
             name: request.render(),
             count: self.total(),
             candidates: Some(lines),
-            file_given: request.file.is_some() || shared(|a, b| a.file == b.file),
-            kind_given: request.kind.is_some() || shared(|a, b| a.kind == b.kind),
+            file_flag_useless: request.file.is_some() || shared(|a, b| a.file == b.file),
+            kind_flag_useless: request.kind.is_some() || shared(|a, b| a.kind == b.kind),
             owner_form: request.qualifier == Qualifier::Any
                 && cs.iter().any(|c| c.qualified)
                 && !shared(|a, b| a.display == b.display),
@@ -1839,7 +1837,7 @@ mod tests {
     /// a redefinition of the one with that arity, under the next ordinal
     /// (design uid §2.3).
     #[test]
-    fn test_assign_file_type_of_new_arity_later_same_arity_duplicate() {
+    fn test_assign_file_type_of_new_arity_later_same_arity_later_repeat() {
         let base = uid::compute(NodeKind::Class, "N/Conv.cs", None, "Conv");
         for arities in [[0, 1, 0], [1, 0, 1]] {
             let ids = arity_file(arities);
@@ -1874,7 +1872,7 @@ mod tests {
     /// Stands for: the twin of a repeated arity is the declaration of that
     /// arity, not the base uid's first declaration.
     #[test]
-    fn test_assign_file_repeat_of_later_arity_duplicates_later_twin() {
+    fn test_assign_file_repeat_of_later_arity_repeats_later_twin() {
         let ids = arity_file([0, 1, 1]);
         let base = uid::compute(NodeKind::Class, "N/Conv.cs", None, "Conv");
         assert_eq!(
@@ -1892,7 +1890,7 @@ mod tests {
     /// that repeats a same-uid type is a redefinition with a node of its
     /// own (design uid §2.3), not a duplicate.
     #[test]
-    fn test_assign_file_type_without_arity_duplicate() {
+    fn test_assign_file_type_without_arity_later_repeat() {
         let decls = [
             decl(NodeKind::Class, None, "Conv"),
             decl(NodeKind::Class, None, "Conv"),
@@ -2396,17 +2394,18 @@ mod tests {
     fn test_assign_file_whitespace_name_repeat_later_repeat() {
         let decls = [decl(NodeKind::Function, None, " "); 2];
         let ids = assign_file("a.py", &decls).unwrap();
-        assert!(matches!(
+        let base = uid::compute(NodeKind::Function, "a.py", None, " ");
+        assert_eq!(ids[0].slot, UidSlot::First(base));
+        assert_eq!(
             ids[1].slot,
             UidSlot::Later {
+                first: 0,
+                ordinal: 1,
+                uid: uid::overload(base, 1),
                 reason: LaterReason::Repeat,
-                ..
             }
-        ));
-        assert_ne!(
-            ids[0].slot.uid(),
-            uid::compute(NodeKind::Function, "a.py", None, "")
         );
+        assert!(pairwise_distinct(&stored(&ids)));
     }
 
     #[test]
@@ -3288,8 +3287,11 @@ mod tests {
         assert_eq!(select(&r, &named), vec![1]);
     }
 
+    /// Stands for: candidates that differ by file and owner get --file and the
+    /// Owner.name form; --kind, which the caller gave, and name@line, which
+    /// separates nothing here, are not suggested.
     #[test]
-    fn test_ambiguity_to_error_matches_todays_fields() {
+    fn test_ambiguity_to_error_two_files_one_kind_suggests_file_and_owner_form() {
         let named = [
             facts(
                 1,
@@ -3312,26 +3314,34 @@ mod tests {
         let TargetResolution::Ambiguous(amb) = resolve_target(&r, &named) else {
             panic!("expected an ambiguity");
         };
-        match amb.to_error(&r) {
+        let error = amb.to_error(&r);
+        match &error {
             EcpError::AmbiguousSymbol {
                 name,
                 count,
                 candidates,
-                file_given,
-                kind_given,
+                file_flag_useless,
+                kind_flag_useless,
                 owner_form,
                 line_form,
             } => {
                 assert_eq!(name, "load");
-                assert_eq!(count, 2);
+                assert_eq!(*count, 2);
                 assert_eq!(
                     candidates.as_deref(),
                     Some("  a.rs,Method,3\n  b.rs,Method,9")
                 );
-                assert!(!file_given && kind_given && owner_form && !line_form);
+                assert!(!file_flag_useless && *kind_flag_useless && *owner_form && !line_form);
             }
             other => panic!("{other:?}"),
         }
+        let msg = error.to_string();
+        assert!(
+            msg.contains("— add --file, or use the `Owner.name` form:")
+                && !msg.contains("--kind")
+                && !msg.contains("@<line>"),
+            "{msg}"
+        );
     }
 
     /// Stands for: a redefinition group (or a method overload group) in one
@@ -3359,8 +3369,8 @@ mod tests {
         assert!(matches!(
             error,
             EcpError::AmbiguousSymbol {
-                file_given: true,
-                kind_given: true,
+                file_flag_useless: true,
+                kind_flag_useless: true,
                 owner_form: false,
                 line_form: true,
                 ..

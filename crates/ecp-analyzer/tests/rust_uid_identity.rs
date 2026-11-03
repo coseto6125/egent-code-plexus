@@ -222,6 +222,17 @@ enum E {
 }
 "#;
 
+const TWO_IMPLS: &str = r#"struct S;
+
+impl S {
+    fn a(&self) {}
+}
+
+impl S {
+    fn b(&self) {}
+}
+"#;
+
 const MOD_ENUMS: &str = r#"mod a {
     pub enum E {
         X,
@@ -264,4 +275,27 @@ fn test_enum_variant_defines_two_mods_same_enum_binds_by_span() {
 #[test]
 fn test_enum_variant_defines_two_mods_each_enum_defines_own_variant() {
     assert_enum_rows(MOD_ENUMS, "X", &[(2, 3), (8, 9)]);
+}
+
+/// Stands for: `impl S` twice with a different method in each (design_uid §5
+/// row R, spec #5) is two `Impl` nodes with distinct uids and no
+/// `uid-collision`. The build gives each method its `HasMethod` from the
+/// owner `Struct S`, once each: no `Impl` node is a member's source, so the
+/// two blocks do not change who owns `a` and `b`.
+#[test]
+fn test_build_rust_impl_twice_keeps_two_impl_nodes_methods_owned_by_struct() {
+    let g = build(TWO_IMPLS);
+    let impls = named(&g, NodeKind::Impl, "S");
+    assert_eq!(impls.len(), 2, "two named `impl S` nodes");
+    assert_ne!(
+        g.nodes[impls[0] as usize].uid,
+        g.nodes[impls[1] as usize].uid
+    );
+    assert_eq!(uid_collisions(&g), 0);
+    let owner = named(&g, NodeKind::Struct, "S");
+    assert_eq!(owner.len(), 1, "one `struct S`");
+    let (a, b) = (callable(&g, "a"), callable(&g, "b"));
+    let mut expected = vec![(owner[0], a), (owner[0], b)];
+    expected.sort_unstable();
+    assert_eq!(edges(&g, RelType::HasMethod), expected);
 }

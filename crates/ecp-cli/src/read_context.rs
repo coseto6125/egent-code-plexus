@@ -235,14 +235,10 @@ pub fn named_declarations<'a>(merged: &MergedGraph<'a>, name: &str) -> Vec<Candi
         })
         .collect();
     if let Some(view) = merged.view() {
-        // A merged repeat (`uid::merges_repeats`: `x = 1; x = 2`) yields a
-        // virtual node under its first's uid; the index keeps only the first.
-        // A redefinition of any other kind has a uid of its own and stays.
-        let mut seen = rustc_hash::FxHashSet::default();
         out.extend(
             (merged.base_len()..)
                 .zip(view.virtual_nodes())
-                .filter(|(_, n)| n.has_owning_file() && n.name == name && seen.insert(n.uid))
+                .filter(|(_, n)| n.has_owning_file() && n.name == name)
                 .map(|(i, n)| facts(merged, i, MergedNode::Virtual(n), &n.rel_path)),
         );
     }

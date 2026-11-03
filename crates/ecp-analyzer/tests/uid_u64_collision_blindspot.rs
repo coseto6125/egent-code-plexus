@@ -155,7 +155,7 @@ fn test_build_python_merged_variable_records_no_blind_spot() {
 /// `uid-collision` BlindSpot reports it. Red before 1b: the second `def`
 /// was a tombstone with a BlindSpot.
 #[test]
-fn redefined_function_later_node_no_uid_collision_blind_spot() {
+fn test_build_python_redefined_function_later_node_no_uid_collision() {
     let g = build(PY, NodeKind::Function, "f");
     let pool = g.string_pool.as_slice();
     let named: Vec<u64> = g

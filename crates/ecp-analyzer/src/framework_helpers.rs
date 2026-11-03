@@ -400,7 +400,8 @@ pub fn strip_python_string_quotes(raw: &str) -> Option<&str> {
 /// some nodes remain with `owner_class = None` even though they are physically
 /// nested inside another function (a local `class Fake` in a test function,
 /// a variable). Two such nodes with the same name but different outer
-/// functions share the uid `(kind, path, "", name)` → uid-collision BlindSpot.
+/// functions share the uid `(kind, path, "", name)`: the later one is a
+/// `Later` named node, or a merged repeat when `uid::merges_repeats`.
 ///
 /// This pass resolves that: for every node whose `owner_class` is still `None`
 /// AND whose span is wholly contained inside a `Function`/`Method` node's span,

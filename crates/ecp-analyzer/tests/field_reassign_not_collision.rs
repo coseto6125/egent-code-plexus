@@ -106,7 +106,7 @@ fn reassigned_field_is_not_uid_collision() {
 /// them. A C header field repeated under `#ifdef` branches merges the same
 /// way and still records `ifdef-redef` (`classify_collision`).
 #[test]
-fn c_header_field_twin_still_reports_ifdef_redef() {
+fn test_build_c_header_field_twin_reports_ifdef_redef() {
     let mut b = GraphBuilder::new();
     b.add_graph(reassigned_field_graph("include/manager.h"));
     let g = b.build();

@@ -447,6 +447,62 @@ fn test_impact_same_name_twice_in_one_file_line_form_selects_first_with_caller()
     assert_eq!(callers, ["e.ts"], "{json}");
 }
 
+/// `(name, line, via)` of every caller `json` lists, sorted. An overlay edge
+/// reads `l1-overlay` where the index reads `call`; both are a call.
+fn callers_with_via(json: &serde_json::Value) -> Vec<(String, u64, String)> {
+    let mut rows: Vec<(String, u64, String)> = json["impact"]
+        .as_array()
+        .expect("impact array")
+        .iter()
+        .filter(|n| n["depth"].as_u64().is_some_and(|d| d > 0))
+        .map(|n| {
+            let via = match n["viaReason"].as_str().unwrap_or_default() {
+                "l1-overlay" => "call",
+                other => other,
+            };
+            (
+                n["name"].as_str().unwrap_or_default().to_string(),
+                n["line"].as_u64().expect("line"),
+                via.to_string(),
+            )
+        })
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// Stands for: a later redefinition is a node of its own, in its first's
+/// overload set (design uid §2.3, spec #2). `b` is called by the second
+/// `def f` only, so `impact b` lists that `f` by a call, the first `f` by
+/// `overload_set`, and `g`, which calls `f`, by a call. The dirty file lists
+/// the same three, and its caveat names the redefinition group it could not
+/// pair (design §3 row 9). Red before 1b: the second `f` was a blank-name
+/// node, the first `f` and `g` were missing.
+#[test]
+fn test_impact_through_overload_set_redefinition_lists_both_defs_and_caller_clean_and_dirty() {
+    let source = "def f():\n    pass\n\n\ndef f():\n    b()\n\n\ndef b():\n    pass\n\n\ndef g():\n    f()\n";
+    let fx = Fixture::index(&[("m.py".to_string(), source.to_string())], "py", "");
+    let args = ["--target", "b", "--direction", "up"];
+    let want: [(String, u64, String); 3] = [
+        ("f".to_string(), 1, "overload_set".to_string()),
+        ("f".to_string(), 5, "call".to_string()),
+        ("g".to_string(), 13, "call".to_string()),
+    ];
+
+    let clean = fx.impact_ok(&args, false);
+    assert_eq!(callers_with_via(&clean), want, "{clean}");
+    assert!(clean.get("result").is_none(), "{clean}");
+
+    fx.write("m.py", &format!("{source}\n# edited\n"));
+    let dirty = fx.impact_ok(&args, true);
+    assert_eq!(callers_with_via(&dirty), want, "{dirty}");
+    let caveat = dirty["result"].as_str().unwrap_or_default();
+    assert!(
+        caveat.contains("results may be incomplete") && caveat.contains("Function f x2"),
+        "{dirty}"
+    );
+}
+
 #[test]
 fn test_impact_empty_target_errors_without_panic() {
     let (_, ext, template, caller) = LANGS[0];
