@@ -1095,7 +1095,7 @@ fn each_macro_argument_call<'t>(
                 continue;
             };
             let before = name_at.checked_sub(1).map(|i| run[i].kind());
-            let variant = variants && matches!(before, Some("{" | ","));
+            let variant = variants && variant_start(run, name_at);
             if variant || matches!(before, Some("fn" | "struct" | "#")) {
                 continue;
             }
@@ -1109,22 +1109,37 @@ fn each_macro_argument_call<'t>(
 }
 
 /// Whether the tree at `tokens[at]` is the `{ .. }` body of an enum the
-/// tokens declare (`enum E { .. }`, `enum E<T> { .. }`): `A(u8)` right
-/// after its `{` or a `,` names a variant, no call.
+/// tokens declare: `enum E` comes before it with no `;` or other `{ .. }`
+/// between (`enum E<T> where T: Copy { .. }`).
 fn enum_body(tokens: &[Node<'_>], at: usize) -> bool {
-    if tokens[at].child(0).is_none_or(|open| open.kind() != "{") {
-        return false;
+    let is_brace_tree =
+        |t: &Node<'_>| t.kind() == "token_tree" && t.child(0).is_some_and(|o| o.kind() == "{");
+    is_brace_tree(&tokens[at])
+        && tokens[..at]
+            .iter()
+            .enumerate()
+            .rev()
+            .take_while(|(_, t)| t.kind() != ";" && !is_brace_tree(t))
+            .any(|(i, t)| {
+                t.kind() == "enum" && tokens.get(i + 1).is_some_and(|n| n.kind() == "identifier")
+            })
+}
+
+/// Whether the name at `tokens[at]` starts a variant of an enum body: right
+/// after the body's `{` or a `,`, past any outer attributes (`#[cfg(x)] A`).
+fn variant_start(tokens: &[Node<'_>], at: usize) -> bool {
+    let mut start = at;
+    while start >= 2
+        && tokens[start - 2].kind() == "#"
+        && tokens[start - 1]
+            .child(0)
+            .is_some_and(|open| open.kind() == "[")
+    {
+        start -= 2;
     }
-    let Some(mut name) = at.checked_sub(1) else {
-        return false;
-    };
-    if matches!(tokens[name].kind(), ">" | ">>") {
-        let Some(before) = generic_open(tokens, name).and_then(|open| open.checked_sub(1)) else {
-            return false;
-        };
-        name = before;
-    }
-    tokens[name].kind() == "identifier" && name >= 1 && tokens[name - 1].kind() == "enum"
+    start
+        .checked_sub(1)
+        .is_some_and(|i| matches!(tokens[i].kind(), "{" | ","))
 }
 
 /// Macros that never run their arguments: a call-shaped token run there is

@@ -1102,7 +1102,8 @@ fn test_build_rust_stringify_arguments_are_no_call() {
 }
 
 /// `enum E { A(u8) }` in macro tokens declares variants: `A(u8)` calls no
-/// `A`, generic or not, while a discriminant (`X = A(1) as isize`) does.
+/// `A`, generic, attributed or with a `where` clause, while a discriminant
+/// (`X = A(1) as isize`) does.
 /// `run` calls `A` outside any enum: the control.
 #[test]
 fn test_build_rust_enum_variants_in_macro_tokens_are_no_call() {
@@ -1112,6 +1113,8 @@ fn test_build_rust_enum_variants_in_macro_tokens_are_no_call() {
          pub fn plain_enum() { emit!(enum E { A(u8), B }); }\n\
          pub fn generic_enum() { emit!(enum G<T> { A(T) }); }\n\
          pub fn discriminant() { emit!(enum D { X = A(1) as isize, Y(u8) }); }\n\
+         pub fn attributed() { emit!(enum F { #[cfg(x)] A(u8), #[doc = \"d\"] #[cfg(y)] B(u8) }); }\n\
+         pub fn where_clause() { emit!(enum W<T> where T: Copy { A(T) }); }\n\
          pub fn run() { println!(\"{}\", A(1)); }\n",
     );
     assert_eq!(calls(&g, "run"), vec![lib("A", 1)], "run");
@@ -1120,7 +1123,7 @@ fn test_build_rust_enum_variants_in_macro_tokens_are_no_call() {
         vec![lib("A", 1)],
         "a discriminant's call stays"
     );
-    for caller in ["plain_enum", "generic_enum"] {
+    for caller in ["plain_enum", "generic_enum", "attributed", "where_clause"] {
         assert!(
             calls(&g, caller).is_empty(),
             "{caller}: {:?}",
