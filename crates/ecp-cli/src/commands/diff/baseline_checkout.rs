@@ -39,7 +39,12 @@ impl BaselineCheckout {
             .prefix("ecp-diff-baseline-")
             .tempdir()
             .map_err(|e| EcpError::Output(format!("create baseline scratch dir: {e}")))?;
-        let checkout_root = scratch.path().join("checkout");
+        // git names the `.git/worktrees/<name>` admin dir after the path's
+        // basename. A fixed basename makes two concurrent runs race on one
+        // admin dir, so the scratch dir's unique name is reused.
+        let checkout_root = scratch
+            .path()
+            .join(scratch.path().file_name().unwrap_or_default());
         let prefix = show_prefix(repo_dir)?;
 
         run_git(
@@ -254,6 +259,21 @@ mod tests {
         assert_ne!(a.path(), b.path());
     }
 
+    /// Two concurrent `git worktree add` calls that share a basename race on
+    /// one `.git/worktrees/<basename>` admin dir, and one of them fails
+    /// (`failed to read .git/worktrees/checkout/commondir`). The admin dir
+    /// takes the per-run scratch name, so no two runs pick the same one.
+    #[test]
+    fn test_create_names_git_admin_dir_after_its_unique_scratch_dir() {
+        let (dir, baseline) = dirty_repo();
+        let checkout = BaselineCheckout::create(dir.path(), &baseline).unwrap();
+        let git_dir = git(&checkout.path(), &["rev-parse", "--git-dir"]);
+        assert_eq!(
+            Path::new(git_dir.trim()).file_name(),
+            checkout.scratch().file_name()
+        );
+    }
+
     #[test]
     fn test_create_from_subdirectory_indexes_the_matching_baseline_subdirectory() {
         let (dir, baseline) = dirty_repo();
@@ -262,7 +282,11 @@ mod tests {
         std::fs::write(sub.join("s.txt"), "x").unwrap();
         // Untracked in the user's tree, absent from the baseline checkout.
         let checkout = BaselineCheckout::create(&sub, &baseline).unwrap();
-        assert!(checkout.path().ends_with("checkout/sub"));
+        assert_eq!(
+            checkout.path().parent(),
+            Some(checkout.checkout_root.as_path())
+        );
+        assert!(checkout.path().ends_with("sub"));
     }
 
     #[test]
