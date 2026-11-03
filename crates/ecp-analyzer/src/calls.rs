@@ -291,6 +291,7 @@ pub fn extract_field_reads_with_literal_key_facts(
             };
             let mut declarator_count = 0u32;
             let mut first_declarator = None;
+            let mut after_dot = 0;
             loop {
                 let child = cursor.node();
                 let field = memo.field(&cursor);
@@ -328,10 +329,16 @@ pub fn extract_field_reads_with_literal_key_facts(
                     node: child,
                     parent: Some(n),
                     parent_kind: kind,
-                    field,
+                    field: field | after_dot,
                     scope: names.child_scope(parent, child_kind, field, &cursor, literal_key_facts),
                     local_scope: child_scope,
                 });
+                after_dot = if kind & kind_flag::TOKEN_TREE != 0 && child_kind & kind_flag::DOT != 0
+                {
+                    field_flag::AFTER_DOT
+                } else {
+                    0
+                };
                 if !cursor.goto_next_sibling() {
                     break;
                 }
@@ -582,6 +589,10 @@ mod kind_flag {
     /// A class, record or struct declaration, whose parameter list (Java
     /// record, C# primary constructor) is no lambda over its members.
     pub const TYPE_DECL: u32 = 1 << 20;
+    /// A Rust macro argument list: bare tokens, no member node.
+    pub const TOKEN_TREE: u32 = 1 << 21;
+    /// A `.` token.
+    pub const DOT: u32 = 1 << 22;
 }
 
 /// Bits [`KindMemo::field`] records for a field name.
@@ -601,6 +612,9 @@ mod field_flag {
     pub const MEMBER_PART: u16 = 1 << 8;
     /// `parameter` / `parameters`: a function's parameter list.
     pub const PARAMS: u16 = 1 << 9;
+    /// Not a field: a token-tree child right after a `.` token, the member
+    /// name of `parts.join(",")` inside `format!(..)`.
+    pub const AFTER_DOT: u16 = 1 << 10;
 }
 
 /// What each node kind and field means to the walk, recorded per file on
@@ -666,6 +680,8 @@ impl<'a> KindMemo<'a> {
             (spec.call_suffixes.contains(&kind), CALL_SUFFIX),
             (spec.infix_calls.contains(&kind), INFIX_CALL),
             (kind.contains("assignment"), ASSIGNMENT),
+            (kind == "token_tree", TOKEN_TREE),
+            (kind == ".", DOT),
             (spec.named_arg_parents.contains(&kind), NAMED_ARG_PARENT),
             (spec.global_decls.contains(&kind), GLOBAL_DECL),
             (
@@ -838,7 +854,7 @@ impl NameRefSpec {
         use field_flag as f;
         use kind_flag as k;
         let (parent, field) = (frame.parent_kind, frame.field);
-        if field & f::NON_VALUE != 0
+        if field & (f::NON_VALUE | f::AFTER_DOT) != 0
             || (field & f::LEFT != 0 && parent & k::ASSIGNMENT != 0)
             || parent & k::SKIP_PARENT != 0
         {
