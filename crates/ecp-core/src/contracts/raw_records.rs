@@ -725,6 +725,25 @@ impl RawIndexMap {
         )
     }
 
+    /// The raw node's own slot, or `None` when pass 1 tombstoned it.
+    pub fn own_node(&self, file: FileOrd, raw: RawIdx) -> Option<u32> {
+        let slot = self.slot(file, raw)?;
+        self.merged
+            .binary_search_by_key(&slot, |&(t, _)| t)
+            .is_err()
+            .then_some(slot)
+    }
+
+    /// Whether some slot of `file` is a tombstone, so that two rows of the
+    /// file can give one edge: only such a file needs a dedupe set. One range
+    /// probe on the sorted tombstones.
+    pub fn has_merged(&self, file: FileOrd) -> bool {
+        self.range(file).is_some_and(|range| {
+            let from = self.merged.partition_point(|&(t, _)| t < range.start);
+            self.merged.get(from).is_some_and(|&(t, _)| t < range.end)
+        })
+    }
+
     /// The file and raw index of a slot; `None` outside the raw range.
     pub fn locate(&self, slot: u32) -> Option<(FileOrd, RawIdx)> {
         if !self.contains(slot) {
@@ -1560,6 +1579,33 @@ mod tests {
         assert_eq!(map.slot(FileOrd(1), RawIdx(1)), Some(3));
         assert_eq!(map.node(FileOrd(1), RawIdx(1)), Some(1));
         assert_eq!(map.node(FileOrd(1), RawIdx(0)), Some(2));
+    }
+
+    #[test]
+    fn test_has_merged_only_for_file_with_a_tombstone() {
+        let map = RawIndexMap::new(0, [2, 3, 0, 2])
+            .unwrap()
+            .with_merged(vec![(4, 3), (6, 1)])
+            .unwrap();
+        assert!(!map.has_merged(FileOrd(0)), "a survivor file only");
+        assert!(map.has_merged(FileOrd(1)));
+        assert!(!map.has_merged(FileOrd(2)), "empty file");
+        assert!(map.has_merged(FileOrd(3)), "survivor in another file");
+        assert!(!map.has_merged(FileOrd(4)), "absent file");
+        assert!(!RawIndexMap::new(0, [2]).unwrap().has_merged(FileOrd(0)));
+    }
+
+    #[test]
+    fn test_own_node_tombstone_none_else_slot() {
+        let map = RawIndexMap::new(0, [2, 2])
+            .unwrap()
+            .with_merged(vec![(3, 1)])
+            .unwrap();
+        assert_eq!(map.own_node(FileOrd(0), RawIdx(1)), Some(1));
+        assert_eq!(map.own_node(FileOrd(1), RawIdx(0)), Some(2));
+        assert_eq!(map.own_node(FileOrd(1), RawIdx(1)), None, "tombstone");
+        assert_eq!(map.own_node(FileOrd(1), RawIdx(2)), None, "past the file");
+        assert_eq!(map.own_node(FileOrd(2), RawIdx(0)), None, "absent file");
     }
 
     #[test]

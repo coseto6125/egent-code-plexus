@@ -354,8 +354,8 @@ impl<'a> OverlayFacts<'a> {
         let mut dirty_flags: FxHashMap<u32, u16> = FxHashMap::default();
         let mut dirty_lexical_parents: FxHashMap<u32, u32> = FxHashMap::default();
         let mut rust_facts = DirtyRustFacts::default();
-        // The first virtual idx of each uid: the index merges each later
-        // twin into it.
+        // The first virtual idx of each uid: the index merges each repeat
+        // that carries it into it, a later node included.
         let mut first_of_uid: FxHashMap<u64, u32> = FxHashMap::default();
         // One Rust file's twins as (offset, offset of its first); a uid
         // hashes the path, so both lie in the file.
@@ -369,8 +369,12 @@ impl<'a> OverlayFacts<'a> {
             for symbol in &file.symbols {
                 let node = &nodes[offset];
                 let virt = base_len + offset as u32;
-                // A later node is a declaration of its own in no name table.
-                if !node.later_overload {
+                // A later node is a declaration of its own in no name table,
+                // and the survivor of a repeat merged into it (a C# arity
+                // sibling's): that repeat, under its uid, stays out too.
+                if node.later_overload {
+                    first_of_uid.entry(node.uid).or_insert(virt);
+                } else {
                     match first_of_uid.entry(node.uid) {
                         Entry::Occupied(seen) => {
                             rust_facts.repeats.insert(virt);
@@ -3131,20 +3135,27 @@ impl<'a> RustModules<'a> {
         if let Some(&body_local) = self.base_twin_scans.borrow().get(&idx) {
             return body_local;
         }
-        let same_file: Vec<_> = graph
-            .nodes_by_kind(kind)
-            .map(|i| &graph.nodes[i as usize])
-            .filter(|twin| twin.file_idx.to_native() == file_idx)
-            .collect();
-        // A repeat's ordinal counts the earlier declarations of its uid, so
-        // it stays below the file's count of this kind.
-        let base = node.uid.to_native();
-        let twin_uids: FxHashSet<u64> = (1..same_file.len() as u32)
-            .map(|n| crate::uid::tombstone(crate::uid::overload(base, n)))
-            .collect();
-        let body_local = !same_file
-            .iter()
-            .any(|twin| twin_uids.contains(&twin.uid.to_native()) && !inside(stored_span(twin)));
+        let same_file = || {
+            graph
+                .nodes_by_kind(kind)
+                .map(|i| &graph.nodes[i as usize])
+                .filter(|twin| twin.file_idx.to_native() == file_idx)
+        };
+        let pool = &graph.string_pool;
+        // A file with no tombstone (no name) of this kind merged nothing
+        // into `idx`.
+        let body_local = if !same_file().any(|twin| twin.name.resolve(pool).is_empty()) {
+            true
+        } else {
+            // A repeat's ordinal counts the earlier declarations of its uid,
+            // so it stays below the file's count of this kind.
+            let base = node.uid.to_native();
+            let twin_uids: FxHashSet<u64> = (1..same_file().count() as u32)
+                .map(|n| crate::uid::tombstone(crate::uid::overload(base, n)))
+                .collect();
+            !same_file()
+                .any(|twin| twin_uids.contains(&twin.uid.to_native()) && !inside(stored_span(twin)))
+        };
         self.base_twin_scans.borrow_mut().insert(idx, body_local);
         body_local
     }
@@ -5666,19 +5677,13 @@ pub(super) fn resolve_edges(
     // survivor.
     let survivor_of: FxHashMap<u32, u32> = decorated.survivors.iter().copied().collect();
     for (file_ord, file) in files.iter().enumerate() {
-        let first = (virt_cursor - base_len) as usize;
         // The keys of the file's per-symbol edges, kept only for a file with
         // a merged row: its edge equal to one emitted already is dropped.
         let file_end = virt_cursor + file.symbols.len() as u32;
         let mut seen: Option<FxHashSet<(u32, u32, u8)>> = (virt_cursor..file_end)
             .any(|virt| survivor_of.contains_key(&virt))
             .then(FxHashSet::default);
-        emit_closure_references(
-            file,
-            &nodes[first..first + file.symbols.len()],
-            virt_cursor,
-            &mut push_edge,
-        );
+        emit_closure_references(file, virt_cursor, &mut push_edge);
         // One cache per dirty file: a repeated qualified call reuses
         // both successful and unresolved lookups without rebuilding paths.
         let module_calls: RefCell<ModuleCalls<'_>> = RefCell::default();
@@ -6153,6 +6158,76 @@ mod tests {
     use super::*;
     use crate::graph_fixture::GraphFixture;
     use rkyv::rancor::Error as RkyvError;
+
+    /// Stands for: the overlay's name tables hold what the index's hold
+    /// after Pass 1, a merged repeat never. In `C.cs`, `C.x`, the arity
+    /// sibling `C<T>.x` (a later node) and a repeat merged into the sibling,
+    /// which carries the sibling's uid while the tables are built, as
+    /// `OverlayView::build` numbers them. Only `C.x` is a name candidate. Red
+    /// before: the sibling's uid was never seen, so the repeat entered.
+    #[test]
+    fn test_overlay_facts_repeat_merged_into_arity_sibling_not_in_name_table() {
+        let bytes = GraphFixture::new().into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let symbol = |line: u32| OverlaySymbol {
+            is_exported: false,
+            name: "x".to_string(),
+            kind: NodeKind::Property,
+            owner_class: Some("C".to_string()),
+            start_line: line,
+            end_line: line,
+            start_column: 0,
+            end_column: 0,
+            calls: Vec::new(),
+            heritage: Vec::new(),
+            variant_refs: Vec::new(),
+            return_type: None,
+            generic_arity: 0,
+            flags: None,
+            decorators: Vec::new(),
+            params: Vec::new(),
+        };
+        let file = OverlayFileInput {
+            parsed_language: None,
+            rel_path: "C.cs".to_string(),
+            symbols: vec![symbol(2), symbol(6), symbol(8)],
+            imports: Vec::new(),
+            export_aliases: Vec::new(),
+        };
+        let node = |uid: u64, line: u32, later_overload: bool| ViewNode {
+            uid,
+            name: "x".to_string(),
+            kind: NodeKind::Property,
+            owner_class: Some("C".to_string()),
+            rel_path: Arc::from("C.cs"),
+            start_line: line,
+            end_line: line,
+            start_column: 0,
+            end_column: 0,
+            replaced_base: None,
+            later_overload,
+        };
+        let nodes = [node(11, 2, false), node(22, 6, true), node(22, 8, false)];
+        let (dirty_base, removed) = (FxHashSet::default(), FxHashSet::default());
+        let (replaced, later_overloads) = (FxHashMap::default(), FxHashMap::default());
+        let configs = ConfigEdits::default();
+        let facts = OverlayFacts::new(
+            graph,
+            std::slice::from_ref(&file),
+            &nodes,
+            &dirty_base,
+            &removed,
+            &replaced,
+            &later_overloads,
+            &configs,
+            None,
+        );
+        let base = facts.base_len();
+        assert_eq!(
+            facts.decls_in_file("C.cs", "x"),
+            [(base, NodeKind::Property)]
+        );
+    }
 
     /// `src/m.rs`: `fn setup` (lines 0-4) holds `mod inner { name }` with
     /// `name` of `kind` on line 2, a twin-less `lone` of `kind` on line 1

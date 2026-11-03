@@ -9,7 +9,6 @@
 
 use crate::analyzer::membership::span_area;
 use crate::analyzer::types::{span_contains, RawNode, Span};
-use crate::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
 use crate::graph::NodeKind;
 use rustc_hash::FxHashMap;
 
@@ -83,9 +82,11 @@ fn is_definable(kind: NodeKind) -> bool {
 /// The caller maps each raw index to its node, a merged row to its survivor,
 /// and drops a scoped child (a nested `fn`, a closure node): its callable
 /// declares it, through the lexical-parent table. Two merged rows (Python
-/// `x = 1; x = 2`) then give one edge twice, so the caller of a file with
-/// [`has_merged_rows`] emits each `(source, child)` once. It never skips a
-/// merged row. Cost: O(rows + rows x same-name containers).
+/// `x = 1; x = 2`) then give one edge twice, so the caller of a path with a
+/// tombstone
+/// ([`RawIndexMap::has_merged`](crate::contracts::raw_records::RawIndexMap::has_merged))
+/// emits each `(source, child)` once. It never skips a merged row. Cost:
+/// O(rows + rows x same-name containers).
 pub fn scope_defines<'a, T>(
     rows: &'a [T],
     row: impl Fn(&'a T) -> Row<'a>,
@@ -132,7 +133,8 @@ pub fn scope_defines<'a, T>(
 /// owner)`, the file's first declaration of that name, kind and owner, for
 /// both ends, the last enum row of the name giving the enum's owner. A
 /// self-loop (an enum and its variant of one id) is dropped. Cost: O(variants
-/// x enums of the file) span checks; nothing for a file without a variant.
+/// x enums of the variant's owner name) span checks, the enums grouped by
+/// name once; nothing for a file without a variant.
 pub fn enum_variant_defines<'a, T>(
     rows: &'a [T],
     row: impl Fn(&'a T) -> Row<'a>,
@@ -147,12 +149,12 @@ pub fn enum_variant_defines<'a, T>(
     {
         return;
     }
-    let enums: Vec<(usize, Row<'a>)> = rows
-        .iter()
-        .map(&row)
-        .enumerate()
-        .filter(|(_, r)| r.kind == NodeKind::Enum)
-        .collect();
+    let mut enums: FxHashMap<&'a str, Vec<(usize, Row<'a>)>> = FxHashMap::default();
+    for (i, r) in rows.iter().map(&row).enumerate() {
+        if r.kind == NodeKind::Enum {
+            enums.entry(r.name).or_default().push((i, r));
+        }
+    }
     if enums.is_empty() {
         return;
     }
@@ -160,19 +162,21 @@ pub fn enum_variant_defines<'a, T>(
         if variant.kind != NodeKind::EnumVariant {
             continue;
         }
-        let Some(enum_name) = variant.owner else {
+        let Some((enum_name, named)) = variant
+            .owner
+            .and_then(|name| enums.get(name).map(|named| (name, named)))
+        else {
             continue;
         };
-        let spanned = enums
+        let spanned = named
             .iter()
-            .filter(|(_, e)| e.name == enum_name && span_contains(e.span, variant.span))
+            .filter(|(_, e)| span_contains(e.span, variant.span))
             .min_by_key(|(_, e)| span_area(e.span));
         let pair = match spanned {
             Some(&(e, _)) => node(e).zip(node(i)),
-            None => enums
+            None => named
                 .iter()
                 .rev()
-                .filter(|(_, e)| e.name == enum_name)
                 .find_map(|(_, e)| first_declaration(enum_name, NodeKind::Enum, e.owner))
                 .zip(first_declaration(
                     variant.name,
@@ -184,18 +188,6 @@ pub fn enum_variant_defines<'a, T>(
             emit(enum_id, variant_id);
         }
     }
-}
-
-/// Whether some row of `file` merges into another row's node
-/// (`RawIndexMap::node` differs from its slot), so that two rows of the
-/// file can give one edge: only such a file needs a dedupe set.
-pub fn has_merged_rows(raw_map: &RawIndexMap, file: FileOrd) -> bool {
-    raw_map.range(file).is_some_and(|range| {
-        (0..range.end - range.start).any(|raw| {
-            let raw = RawIdx(raw);
-            raw_map.node(file, raw) != raw_map.slot(file, raw)
-        })
-    })
 }
 
 #[cfg(test)]
@@ -376,16 +368,5 @@ mod tests {
             |e, v| out.push((e, v)),
         );
         assert!(out.is_empty());
-    }
-
-    #[test]
-    fn test_has_merged_rows_only_for_file_with_a_tombstone() {
-        let map = RawIndexMap::new(0, [2, 3])
-            .unwrap()
-            .with_merged(vec![(4, 3)])
-            .unwrap();
-        assert!(!has_merged_rows(&map, FileOrd(0)));
-        assert!(has_merged_rows(&map, FileOrd(1)));
-        assert!(!has_merged_rows(&map, FileOrd(2)), "absent file");
     }
 }

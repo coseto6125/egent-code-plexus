@@ -14,12 +14,12 @@
 
 use crate::resolution::index::SymbolTable;
 use ecp_core::analyzer::containment::{self, Row, ENUM_VARIANT_DEFINES_REASON};
+use ecp_core::analyzer::lexical::forward_slash_path;
 use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
 use ecp_core::graph::{Edge, RelType};
 use ecp_core::pool::StringPool;
 use rayon::prelude::*;
-use std::borrow::Cow;
 
 /// Emit `(Enum)-[:Defines]->(EnumVariant)` edges for all files.
 ///
@@ -47,12 +47,7 @@ pub fn emit_edges(
         .par_iter()
         .enumerate()
         .map(|(file_ord, local_graph)| {
-            let raw_path = local_graph.file_path.to_string_lossy();
-            let path_str_cow: Cow<'_, str> = if raw_path.contains('\\') {
-                Cow::Owned(raw_path.replace('\\', "/"))
-            } else {
-                raw_path
-            };
+            let path_str_cow = forward_slash_path(&local_graph.file_path);
             let path_str: &str = &path_str_cow;
 
             let file = FileOrd(file_ord as u32);

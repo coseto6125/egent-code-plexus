@@ -123,8 +123,7 @@ pub(crate) type CsharpExtensionDecls<'a> = FxHashMap<&'a str, Vec<ExtensionDecl<
 #[derive(Debug)]
 struct CsharpExtensionDecl {
     id: u32,
-    /// Its file. A later overload has no entry in `id_to_file`, so the
-    /// table keeps the path here.
+    /// Its file.
     file: Box<str>,
     /// Its `this` parameter's type as written.
     this_type: Box<str>,
@@ -975,29 +974,32 @@ impl SymbolTable {
     /// ID, but they are invisible to all name-based lookups — no edge emitter
     /// can obtain a tombstone node_id via `lookup_in_file` / `lookup_global`.
     ///
-    /// Used for UID-collision-dropped nodes (D1 recovery): the colliding raw node
-    /// still needs to occupy a position in `nodes` (to keep `start_indices`
-    /// prefix-sums correct in Pass 2), but must not be reachable by name.
+    /// Used for a merged repeat ([`ecp_core::uid::merges_repeats`]: every
+    /// other repeat is a later declaration of its own) and for a 64-bit
+    /// collision with another path (D1 recovery): the raw node still needs to
+    /// occupy a position in `nodes` (to keep `start_indices` prefix-sums
+    /// correct in Pass 2), but must not be reachable by name.
     pub fn register_tombstone(&mut self, kind: NodeKind, file_meta: FileMeta) {
         self.node_kinds.push(kind);
         self.node_file_meta.push(file_meta);
         self.node_owner.push(NO_OWNER);
     }
 
-    /// Register the next id as a later overload of `first`
-    /// ([`ecp_core::uid::keeps_overloads`]): same kind and owner, but in no
-    /// name table, so every name lookup still returns `first`. Which overload
-    /// a call means needs argument types the parse does not carry; the
-    /// builder links `first` to the rest instead ([`Self::overload_sets`]).
-    /// Returns the overload's 1-based ordinal.
-    pub fn register_overload(&mut self, first: u32, file_meta: FileMeta) -> u32 {
+    /// Register the next id as a later declaration of `first`'s base uid
+    /// that joins its overload set: an overload, a scoped repeat or a
+    /// redefinition (`LaterReason::{Overload, Scoped, Repeat}`). A
+    /// declaration of its own in `file_path`, with `first`'s kind and owner,
+    /// but in no name table, so every name lookup still returns `first`.
+    /// Which overload a call means needs argument types the parse does not
+    /// carry; the builder links `first` to the rest instead
+    /// ([`Self::overload_sets`]).
+    pub fn register_overload(&mut self, first: u32, file_path: &str, file_meta: FileMeta) {
         let id = self.node_kinds.len() as u32;
         self.node_kinds.push(self.node_kinds[first as usize]);
         self.node_file_meta.push(file_meta);
         self.node_owner.push(self.node_owner[first as usize]);
-        let later = self.overloads.entry(first).or_default();
-        later.push(id);
-        later.len() as u32
+        self.id_to_file.insert(id, file_path.to_string());
+        self.overloads.entry(first).or_default().push(id);
     }
 
     /// The later overloads of `first`, in source order.
@@ -2382,6 +2384,27 @@ mod tests {
         );
     }
 
+    /// Stands for: a later declaration has its own file, as the overlay's
+    /// `file_of` gives every virtual node one. A C# same-file `partial class
+    /// C` repeat (`LaterReason::Repeat`) that `partial_groups` picks as the
+    /// representative finds the members the first part declares. Red before:
+    /// `register_overload` wrote no `id_to_file` entry, so `owned_member`
+    /// returned `Miss` at its first line.
+    #[test]
+    fn test_owned_member_later_repeat_of_type_finds_member_of_its_file() {
+        let mut st = st_owned(&[
+            ("src/C.cs", "C", NodeKind::Class, None),
+            ("src/C.cs", "M", NodeKind::Method, Some("C")),
+        ]);
+        st.register_overload(0, "src/C.cs", FileMeta::from_path("src/C.cs"));
+        let later = 2;
+        assert_eq!(st.file_of(later), Some("src/C.cs"));
+        assert_eq!(
+            ecp_core::analyzer::type_ladder::owned_member(&st, later, "C", "M", CALL),
+            ecp_core::analyzer::type_ladder::MemberLookup::Hit(1)
+        );
+    }
+
     /// `fn setup() { impl Foo { fn new } }` before the module-level
     /// `impl Foo { pub fn new }`: the two `new`s share a uid, so the
     /// module-level one is a later overload, in no name table. A body-local
@@ -2393,7 +2416,7 @@ mod tests {
             ("src/m.rs", "Foo", NodeKind::Struct, None),
             ("src/m.rs", "new", NodeKind::Method, Some("Foo")),
         ]);
-        st.register_overload(2, FileMeta::from_path("src/m.rs"));
+        st.register_overload(2, "src/m.rs", FileMeta::from_path("src/m.rs"));
         let module_level = 3;
         st.note_body_local(2);
         let lookup = |st: &SymbolTable| {
@@ -2416,7 +2439,7 @@ mod tests {
             ("src/m.rs", "setup", NodeKind::Function, None),
             ("src/m.rs", "Foo", NodeKind::Struct, None),
         ]);
-        st.register_overload(1, FileMeta::from_path("src/m.rs"));
+        st.register_overload(1, "src/m.rs", FileMeta::from_path("src/m.rs"));
         let module_level = 2;
         st.note_body_local(1);
         let is_type = |kind: NodeKind| kind == NodeKind::Struct;
@@ -2747,9 +2770,12 @@ mod tests {
         ]);
         let meta = FileMeta::from_path("aw.rs");
         // The second block's members collide with the first's uids.
-        let later_flush = st.register_overload(2, meta);
-        let later_shutdown = st.register_overload(3, meta);
-        assert_eq!((later_flush, later_shutdown), (1, 1));
+        st.register_overload(2, "aw.rs", meta);
+        st.register_overload(3, "aw.rs", meta);
+        assert_eq!(
+            (st.later_overloads(2), st.later_overloads(3)),
+            (&[4][..], &[5][..])
+        );
         for (member, block) in [(2, 2), (3, 2), (4, 4), (5, 4)] {
             st.note_impl_member(member, block, Some("AsyncWrite"));
         }

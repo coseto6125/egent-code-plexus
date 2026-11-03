@@ -50,8 +50,8 @@
 //! calls [`replay`] once, after the virtual nodes and their tombstones are
 //! final. Cost: O(dirty symbols + dirty records + base record nodes of the
 //! dirty paths) hash operations, plus one O(symbols of the path) table for a
-//! path that declares a type or an enum variant, plus O(symbols x log
-//! merged rows) to find a file with merged rows, plus O(symbols x types of
+//! path that declares a type or an enum variant, plus O(files x log merged
+//! rows) to find a file with merged rows, plus O(symbols x types of
 //! the file) span checks for class membership and enum containment, plus
 //! one name-index probe (O(log N) and the namesakes) per distinct SQL table
 //! name, plus the out-edges of
@@ -360,11 +360,19 @@ pub(super) fn replay(
     // from the path's inputs, which are grouped once on the first such input.
     let mut declarations: FxHashMap<&str, PathDecls<'_>> = FxHashMap::default();
     let mut inputs_by_path: Option<FxHashMap<&str, Vec<FileOrd>>> = None;
+    // One scope `Defines` dedupe set per path with a tombstone: a merged
+    // row's survivor can be a row of another input of its path.
+    let mut defines_seen: FxHashMap<&str, FxHashSet<(u32, u32)>> = files
+        .iter()
+        .enumerate()
+        .filter(|&(ord, _)| raw_map.has_merged(FileOrd(ord as u32)))
+        .map(|(_, file)| (file.rel_path.as_str(), FxHashSet::default()))
+        .collect();
     for (ord, file) in files.iter().enumerate() {
         let path = file.rel_path.as_str();
         let ord = FileOrd(ord as u32);
         let node = |raw: usize| raw_map.node(ord, RawIdx(raw as u32));
-        let merged = containment::has_merged_rows(&raw_map, ord);
+        let merged = raw_map.has_merged(ord);
 
         // A path with no `File` node (only a hand-made graph has one) gets
         // no scope `Defines`, as the index skips it.
@@ -374,7 +382,7 @@ pub(super) fn replay(
             .or_else(|| new_files.get(path))
             .copied();
         if let Some(file_idx) = defining_file {
-            let mut seen: Option<FxHashSet<(u32, u32)>> = merged.then(FxHashSet::default);
+            let mut seen = defines_seen.get_mut(path);
             containment::scope_defines(&file.symbols, row, |scope, child| {
                 let Some(child) = node(child).filter(|id| !lexical_parents.contains_key(id)) else {
                     return;
@@ -1591,6 +1599,25 @@ mod tests {
         let base = view.base_len();
         assert_eq!(view.node(base + 1).unwrap().name, "", "merged into x@1");
         assert_eq!(defines(graph, &view), [scope(base + 2, base)]);
+    }
+
+    /// Stands for: a merged row gives its survivor's `Defines` once, also
+    /// when the survivor is a row of an earlier input of its path. Two
+    /// inputs of `src/m.py`, each `x = …`: one `File -> x@1`, from the last
+    /// `File` node of the path.
+    #[test]
+    fn test_replay_two_inputs_one_path_merged_variable_defines_once() {
+        let bytes = clean_base();
+        let graph = access(&bytes);
+        let files = [
+            input("src/m.py", vec![sym(NodeKind::Variable, None, "x", (1, 1))]),
+            input("src/m.py", vec![sym(NodeKind::Variable, None, "x", (2, 2))]),
+        ];
+        let view = OverlayView::build(graph, &files).unwrap();
+        let base = view.base_len();
+        assert_eq!(view.node(base + 1).unwrap().name, "", "merged into x@1");
+        let last_file = file_nodes(&view)[1].0;
+        assert_eq!(defines(graph, &view), [scope(last_file, base)]);
     }
 
     /// A Rust nested `fn` is scoped under its callable: no `Defines`.

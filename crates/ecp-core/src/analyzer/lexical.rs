@@ -21,6 +21,7 @@ use crate::file_category::Language;
 use crate::graph::NodeKind;
 use crate::uid;
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::borrow::Cow;
 use std::path::Path;
 
 /// The kinds `language` scopes under their enclosing callable (design A
@@ -146,9 +147,10 @@ pub fn raw_decl(node: &RawNode) -> DeclFields<'_> {
 /// type (`Conv` and `Conv<T>`) or a C# delegate (`Func<T, R>` beside
 /// `Func<T1, T2, R>`). The C# parser emits a delegate as a `Function` and
 /// writes the arity marker on no other `Function`, so every other C#
-/// function compares at arity 0 and keeps the duplicate rule. Restricted to
-/// C# by codex rulings P-a and P-a2; every other language keeps the
-/// duplicate rule.
+/// function compares at arity 0 and keeps the repeat rule: a repeat is
+/// `Later`, unless [`uid::merges_repeats`] merges it into a tombstone.
+/// Restricted to C# by codex rulings P-a and P-a2; every other language
+/// keeps the repeat rule.
 pub fn splits_by_arity(language: Language, kind: NodeKind) -> bool {
     language == Language::CSharp && (kind.declares_type() || kind == NodeKind::Function)
 }
@@ -188,6 +190,18 @@ pub fn twin_enclosing(
         .filter(|&(_, scope)| span_contains(scope, reader))
         .max_by_key(|&(_, scope)| ((scope.0, scope.1), std::cmp::Reverse((scope.2, scope.3))))
         .map(|(id, _)| id)
+}
+
+/// `path` as the `/`-separated string the graph stores: every `\` becomes
+/// `/` on every platform. Borrowed when the path holds no `\`, as every
+/// Linux and macOS path does.
+pub fn forward_slash_path(path: &Path) -> Cow<'_, str> {
+    let lossy = path.to_string_lossy();
+    if lossy.contains('\\') {
+        Cow::Owned(lossy.replace('\\', "/"))
+    } else {
+        lossy
+    }
 }
 
 /// The identity of each declaration of the file at `path`, in slice order:
@@ -375,9 +389,8 @@ impl ImplNode for Row<'_> {
 /// A repeated block (`impl T for A<u8>` and `impl T for A<u16>` both write
 /// self type `A`, owner `T`) repeats the first block's uid. Its members take
 /// no trait on either side, the second block of the dirty parse included,
-/// or the two sides never agree on the member's anchor. A graph written
-/// before redefinitions kept their node stores the second block as a
-/// tombstone with no name, which the empty-name test skips.
+/// or the two sides never agree on the member's anchor. A D1-collision
+/// tombstone (no name) owns no members' trait.
 fn impl_traits<'a>(rows: &[Row<'a>]) -> Vec<Option<&'a str>> {
     let mut seen = rustc_hash::FxHashSet::default();
     let first_block: Vec<bool> = rows
@@ -972,6 +985,20 @@ mod tests {
             "{:?}",
             ids[1][1]
         );
+    }
+
+    #[test]
+    fn test_forward_slash_path_backslash_owned_else_borrowed() {
+        assert!(matches!(
+            forward_slash_path(Path::new("src/a.rs")),
+            Cow::Borrowed("src/a.rs")
+        ));
+        assert_eq!(forward_slash_path(Path::new("src\\b\\a.rs")), "src/b/a.rs");
+        assert!(matches!(
+            forward_slash_path(Path::new("")),
+            Cow::Borrowed("")
+        ));
+        assert_eq!(forward_slash_path(Path::new(" \\ ")), " / ");
     }
 
     #[test]

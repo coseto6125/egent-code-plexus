@@ -514,10 +514,10 @@ pub struct ViewNode {
     /// traversal reads the base CSR IN-edges of `base_idx` (clean callers)
     /// in addition to [`OverlayView::overlay_in`].
     pub replaced_base: Option<u32>,
-    /// A later overload ([`crate::uid::keeps_overloads`]), or a later C#
-    /// type of another generic arity
-    /// ([`crate::analyzer::lexical::splits_by_arity`]): the index keeps it as
-    /// a node under its own uid but never binds it by name.
+    /// Every `UidSlot::Later` row: a later overload, a scoped repeat, a
+    /// redefinition, or a C# arity sibling (`LaterReason`). The index keeps
+    /// it as a node under its own uid but never binds it by name. Mirrors
+    /// [`crate::graph::ZeroCopyGraph::later_nodes`].
     pub later_overload: bool,
 }
 
@@ -947,7 +947,6 @@ impl OverlayView {
         for (file_ord, file) in files.iter().enumerate() {
             let rel: Arc<str> = Arc::from(file.rel_path.as_str());
             let inputs = &path_inputs[file.rel_path.as_str()];
-            // This input's first row among the path's rows.
             let input_offset: u32 = inputs
                 .iter()
                 .take_while(|&&k| k != file_ord)
@@ -1735,7 +1734,8 @@ impl OverlayView {
 /// occurs once on each side, so an overload set or a redefinition group
 /// without a discriminator pairs nothing, and its base members are hidden
 /// ([`HiddenDecl`]): an ordinal proves nothing about which member an edit
-/// kept.
+/// kept. Repeated `Impl` blocks are the one exception
+/// ([`pair_repeated_impls`]).
 ///
 /// A `Duplicate` row (a merged repeat of a property, variable or constant)
 /// takes no part. The index tombstones it and keeps its first as the one
@@ -1791,6 +1791,7 @@ fn pair_with_base(
     {
         out[j] = pair.map(|k| base[k as usize]);
     }
+    pair_repeated_impls(graph, base, &base_anchors, identities, &rows, &mut out);
     let paired: FxHashSet<u32> = out.iter().flatten().copied().collect();
     let dirty_set: FxHashSet<u64> = dirty_anchors.into_iter().collect();
     let unpaired = base
@@ -1804,6 +1805,42 @@ fn pair_with_base(
         .map(|(&idx, _)| idx)
         .collect();
     (out, unpaired)
+}
+
+/// Pair the `Impl` rows of one anchor in source order when the base and the
+/// parse hold equally many: several inherent `impl V` blocks are everyday
+/// Rust, not a redefinition, and the blocks own no edge a wrong pairing
+/// could misplace. Every other shared anchor keeps [`pair_by_anchor`]'s
+/// rule. `rows` are the parse's rows that take part, `out` their pairs.
+fn pair_repeated_impls(
+    graph: &ArchivedZeroCopyGraph,
+    base: &[u32],
+    base_anchors: &[u64],
+    identities: &[DeclIdentity],
+    rows: &[usize],
+    out: &mut [Option<u32>],
+) {
+    let mut impls: FxHashMap<u64, (Vec<u32>, Vec<usize>)> = FxHashMap::default();
+    for (&idx, &anchor) in base.iter().zip(base_anchors) {
+        if NodeKind::from(&graph.nodes[idx as usize].kind) == NodeKind::Impl {
+            impls.entry(anchor).or_default().0.push(idx);
+        }
+    }
+    if impls.is_empty() {
+        return;
+    }
+    for &j in rows {
+        if let Some((_, dirty)) = impls.get_mut(&identities[j].anchor) {
+            dirty.push(j);
+        }
+    }
+    for (base_rows, dirty_rows) in impls.values() {
+        if base_rows.len() == dirty_rows.len() {
+            for (&idx, &j) in base_rows.iter().zip(dirty_rows) {
+                out[j] = Some(idx);
+            }
+        }
+    }
 }
 
 /// [`GAP_CS_EXTENSION_STALE_EDGE`] gaps: each indexed `Calls` edge from a
@@ -2122,13 +2159,8 @@ fn span_of(s: &OverlaySymbol) -> Span {
     (s.start_line, s.start_column, s.end_line, s.end_column)
 }
 
-/// Mirror full indexing's lexical references and first-UID survivor rule.
-fn emit_closure_references(
-    file: &OverlayFileInput,
-    nodes: &[ViewNode],
-    start: u32,
-    push: &mut impl FnMut(ViewEdge),
-) {
+/// Mirror full indexing's lexical references.
+fn emit_closure_references(file: &OverlayFileInput, start: u32, push: &mut impl FnMut(ViewEdge)) {
     let anonymous =
         |s: &OverlaySymbol| s.kind == NodeKind::Function && s.name.starts_with("<anonymous:");
     if !file.symbols.iter().any(anonymous) {
@@ -2147,23 +2179,15 @@ fn emit_closure_references(
         .collect();
     let spans: Vec<_> = functions.iter().map(|(_, s)| span_of(s)).collect();
     let parents = innermost_enclosing(&spans);
-    // Overloads carry their own uids, as in full indexing. Full indexing
-    // tombstones other later identical UIDs, skips closure tombstones, and
-    // redirects parent tombstones.
-    let mut live_by_uid = FxHashMap::default();
-    for (offset, node) in nodes.iter().enumerate() {
-        live_by_uid.entry(node.uid).or_insert(offset);
-    }
     for (i, &(offset, symbol)) in functions.iter().enumerate() {
-        if !anonymous(symbol) || live_by_uid[&nodes[offset].uid] != offset {
+        if !anonymous(symbol) {
             continue;
         }
         let Some(parent) = parents[i] else {
             continue;
         };
-        let source = live_by_uid[&nodes[functions[parent].0].uid];
         push(ViewEdge {
-            source: start + source as u32,
+            source: start + functions[parent].0 as u32,
             target: start + offset as u32,
             rel_type: RelType::References,
             confidence: 1.0,
@@ -2240,7 +2264,7 @@ mod tests {
     /// whose lines enclose it, the second `enclosing`. The new file's `File`
     /// node and its replayed `Defines` (F7a-1) are not what this pins.
     #[test]
-    fn test_build_closure_uid_collisions_use_first_live_nodes() {
+    fn test_build_repeated_enclosing_and_closure_link_from_enclosing_node() {
         let bytes = GraphFixture::new().into_bytes();
         let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
         let mut parent = sym("enclosing", &[]);
@@ -2269,6 +2293,49 @@ mod tests {
             references,
             vec![(0, 1, 1.0), (2, 3, 1.0), (1, 2, 1.0), (1, 3, 1.0)]
         );
+    }
+
+    /// Stands for: B1 in the overlay, as in the index's `MergedRows`: a
+    /// merged row's edges start at its survivor, once per target. JS `var x =
+    /// a(); var x = a(), b();`: the second `x` merges into the first, so both
+    /// calls start at `x@4`, `a` once, and none at the merged row's own slot.
+    #[test]
+    fn test_build_merged_variable_calls_start_at_survivor_once() {
+        let bytes = GraphFixture::new().into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let at = |mut s: OverlaySymbol, line: u32| {
+            s.start_line = line;
+            s.end_line = line;
+            s
+        };
+        let var = |line: u32, calls: &[&str]| {
+            let mut s = at(sym("x", calls), line);
+            s.kind = NodeKind::Variable;
+            s
+        };
+        let file = OverlayFileInput {
+            parsed_language: None,
+            export_aliases: Vec::new(),
+            rel_path: "m.js".into(),
+            symbols: vec![
+                at(sym("a", &[]), 1),
+                at(sym("b", &[]), 2),
+                var(4, &["a"]),
+                var(5, &["a", "b"]),
+            ],
+            imports: vec![],
+        };
+        let view = OverlayView::build(graph, &[file]).unwrap();
+        let base = view.base_len();
+        assert_eq!(view.node(base + 3).unwrap().name, "", "merged into x@4");
+        let mut calls: Vec<_> = view
+            .edges()
+            .iter()
+            .filter(|edge| edge.rel_type == RelType::Calls)
+            .map(|edge| (edge.source, edge.target))
+            .collect();
+        calls.sort_unstable();
+        assert_eq!(calls, [(base + 2, base), (base + 2, base + 1)]);
     }
 
     /// The view of a dirty `App.java` over `bytes`: `enclosing` on lines
@@ -2847,6 +2914,78 @@ mod tests {
 
         assert_eq!(view.redirect(0), None, "Gone.java save is suppressed");
         assert!(view.hidden_declarations().is_empty());
+    }
+
+    /// Base `Impl V` blocks of a Rust file (owner `""`, as the parser
+    /// writes an inherent `impl`), one per entry of `lines`, and the parse of
+    /// the same blocks.
+    fn impl_base_and_parse(path: &str, lines: &[u32]) -> (Vec<u8>, OverlayFileInput) {
+        let mut fx = GraphFixture::new();
+        let mut symbols = Vec::new();
+        for &line in lines {
+            let node = fx.node_owned(NodeKind::Impl, path, "", "V");
+            fx.span(node, (line, 0, line + 4, 0));
+            let mut s = sym("V", &[]);
+            s.kind = NodeKind::Impl;
+            s.owner_class = Some(String::new());
+            s.start_line = line + 1;
+            s.end_line = line + 5;
+            symbols.push(s);
+        }
+        let parse = OverlayFileInput {
+            parsed_language: None,
+            export_aliases: Vec::new(),
+            rel_path: path.to_string(),
+            symbols,
+            imports: vec![],
+        };
+        (fx.into_bytes(), parse)
+    }
+
+    /// Stands for: two inherent `impl V` blocks are everyday Rust, so a
+    /// comment-only edit of their file pairs each block with its base node in
+    /// source order and hides nothing: no "results may be incomplete" caveat
+    /// on every query. Red before: the shared anchor paired neither block and
+    /// hid both base `Impl` nodes.
+    #[test]
+    fn test_build_two_inherent_impl_blocks_comment_edit_pairs_both_hides_nothing() {
+        let (bytes, parse) = impl_base_and_parse("src/a.rs", &[0, 10]);
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+
+        let view = OverlayView::build(graph, &[parse]).unwrap();
+
+        assert!(view.hidden_declarations().is_empty());
+        let base = view.base_len();
+        assert_eq!(
+            (0..2).map(|i| view.redirect(i)).collect::<Vec<_>>(),
+            [Some(base), Some(base + 1)]
+        );
+    }
+
+    /// An edit that drops one of two `impl V` blocks cannot tell which one
+    /// stayed: both base blocks stay hidden, as for any other shared anchor.
+    #[test]
+    fn test_build_impl_blocks_count_differs_pairs_nothing() {
+        let (bytes, _) = impl_base_and_parse("src/a.rs", &[0, 10]);
+        let (_, parse) = impl_base_and_parse("src/a.rs", &[0]);
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+
+        let view = OverlayView::build(graph, &[parse]).unwrap();
+
+        assert_eq!(
+            (0..2).map(|i| view.redirect(i)).collect::<Vec<_>>(),
+            [None, None]
+        );
+        assert_eq!(
+            view.hidden_declarations(),
+            [HiddenDecl {
+                path: "src/a.rs".to_string(),
+                kind: NodeKind::Impl,
+                owner: String::new(),
+                name: "V".to_string(),
+                count: 2,
+            }]
+        );
     }
 
     /// Stands for: a cache hit carries the same caveat data as a fresh build.

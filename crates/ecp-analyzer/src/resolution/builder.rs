@@ -14,7 +14,8 @@ use ecp_core::analyzer::heritage;
 use ecp_core::analyzer::ladder;
 use ecp_core::analyzer::lexical::{
     body_locals, decls_enclosing, enclosing_types, file_identities, file_uids, fold_twins,
-    lexical_scope_kinds, path_identities, raw_decl, splits_by_arity, LexicalFunctions,
+    forward_slash_path, lexical_scope_kinds, path_identities, raw_decl, splits_by_arity,
+    LexicalFunctions,
 };
 use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::reexport::{export_filter_applies_to, is_ecmascript, ImportRef};
@@ -63,23 +64,35 @@ use rustc_hash::{FxHashMap, FxHashSet};
 ///       `inspect` traversal as incomplete for ordinary code.
 ///
 ///   `uid-collision`  — a true 64-bit collision with a declaration of another
-///       path (`merged_repeat == false`): worth investigating.
-pub(crate) fn classify_collision(merged_repeat: bool, path: &str) -> Option<&'static str> {
-    if !merged_repeat {
-        return Some(ecp_core::graph::BS_KIND_UID_COLLISION);
+///       path ([`Tombstone::Collision`]): worth investigating.
+pub(crate) fn classify_collision(tombstone: Tombstone, path: &str) -> Option<&'static str> {
+    match tombstone {
+        Tombstone::Collision => Some(ecp_core::graph::BS_KIND_UID_COLLISION),
+        Tombstone::MergedRepeat => {
+            let is_c_family = path.ends_with(".c")
+                || path.ends_with(".h")
+                || path.ends_with(".cc")
+                || path.ends_with(".cpp")
+                || path.ends_with(".cxx")
+                || path.ends_with(".hpp")
+                || path.ends_with(".hh")
+                || path.ends_with(".hxx");
+            is_c_family.then_some(ecp_core::graph::BS_KIND_IFDEF_REDEF)
+        }
     }
-    let is_c_family = path.ends_with(".c")
-        || path.ends_with(".h")
-        || path.ends_with(".cc")
-        || path.ends_with(".cpp")
-        || path.ends_with(".cxx")
-        || path.ends_with(".hpp")
-        || path.ends_with(".hh")
-        || path.ends_with(".hxx");
-    is_c_family.then_some("ifdef-redef")
+}
+
+/// Why Pass 1 tombstones a slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Tombstone {
+    /// A merged repeat ([`ecp_core::uid::merges_repeats`]) of its own path.
+    MergedRepeat,
+    /// A true 64-bit collision with a declaration of another path.
+    Collision,
 }
 
 use std::cell::RefCell;
+use std::ops::Range;
 
 /// Per-graph output from Pass 2 parallel map: `(edges, pending_call_metas,
 /// file_edges, blind_spots)`. `pending_call_metas` entries are
@@ -118,6 +131,8 @@ struct Pass1Registration {
     /// One bit per raw node: set for each `UidSlot::Later` node, which no
     /// name table holds (`ZeroCopyGraph::later_nodes`).
     later_nodes: Vec<u8>,
+    /// The paths 2+ inputs share, which Pass 2 and class membership read.
+    shared: SharedPaths,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -295,6 +310,7 @@ impl GraphBuilder {
             collision_blind_spots,
             merged,
             later_nodes,
+            shared,
         } = pass1_register_nodes(&self.local_graphs);
         // Pass 1 gives every raw node a slot (a collision keeps a tombstone),
         // so the map reads node counts only and holds for the whole build.
@@ -499,6 +515,7 @@ impl GraphBuilder {
                 &raw_map,
                 self.resolver_dump_path.as_deref(),
                 self.symbol_skip_set.as_ref(),
+                &shared,
             );
         file_edges.extend(framework_file_edges);
 
@@ -740,6 +757,7 @@ impl GraphBuilder {
             &mut string_pool,
             &mut edges,
             self.symbol_skip_set.as_ref(),
+            &shared,
         );
 
         // Enum → EnumVariant containment edges. Runs after class_membership
@@ -950,6 +968,7 @@ impl GraphBuilder {
             &self.local_graphs,
             &file_node_idx,
             &raw_map,
+            &shared,
             |id| symbol_table.is_lexically_scoped(id),
             &mut string_pool,
             &mut edges,
@@ -1301,24 +1320,16 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
     let mut collision_blind_spots: Vec<BlindSpotRecord> = Vec::new();
     let mut merged: Vec<(u32, u32)> = Vec::new();
     let mut later_nodes: Vec<u8> = vec![0; total_symbol_nodes.div_ceil(8)];
-    // A path with 2+ `LocalGraph`s: its inputs, and the identities of each
-    // input once its first input numbered the path.
-    let shared = shared_paths(local_graphs);
-    let mut shared_ids: FxHashMap<u32, Vec<DeclIdentity>> = FxHashMap::default();
-    let mut graph_starts: Vec<u32> = Vec::with_capacity(total_files);
+    let shared = SharedPaths::of(local_graphs);
+    // The identities of the rest of the current shared path's inputs, which
+    // its first input numbers, and that input's first node: the inputs of a
+    // path are adjacent, so the path's rows are its nodes from there.
+    let mut path_ids: std::vec::IntoIter<Vec<DeclIdentity>> = Vec::new().into_iter();
+    let mut path_start = 0;
 
     for (file_idx, local_graph) in local_graphs.iter().enumerate() {
         let file_idx = file_idx as u32;
-        // Path → string 一律走 forward-slash，讓 UID / lookup / 顯示在 Windows
-        // 上與 Linux/macOS 一致（與 resolver.rs / registry/path.rs 既有 idiom 對齊）。
-        // Cow: `to_string_lossy()` returns Cow; `.replace()` always allocates.
-        // Skip the replace + alloc on Linux/macOS where paths use `/` already.
-        let raw_path = local_graph.file_path.to_string_lossy();
-        let path_str: std::borrow::Cow<'_, str> = if raw_path.contains('\\') {
-            std::borrow::Cow::Owned(raw_path.replace('\\', "/"))
-        } else {
-            raw_path
-        };
+        let path_str = forward_slash_path(&local_graph.file_path);
         let path_ref = string_pool.add(&path_str);
         symbol_table.register_file(&path_str);
         // Hoisted once per file. `register_node` would otherwise call
@@ -1346,38 +1357,29 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
         });
 
         let graph_start = current_node_idx;
-        graph_starts.push(graph_start);
         // The file's own numbering (`assign_file`), shared with incremental
         // mode and the overlay view. A slot's `first` indexes the path's
         // rows, its inputs concatenated.
-        let inputs = shared.get(path_str.as_ref()).map_or(&[][..], Vec::as_slice);
-        let identities = match inputs {
-            [] => file_identities(&path_str, &local_graph.nodes, raw_decl),
-            [first_input, ..] => {
-                if *first_input == file_idx {
-                    let rows: Vec<&[RawNode]> = inputs
+        let identities = match shared.run_of(file_idx) {
+            None => {
+                path_start = graph_start;
+                file_identities(&path_str, &local_graph.nodes, raw_decl)
+            }
+            Some(run) => {
+                if run.start == file_idx {
+                    path_start = graph_start;
+                    let rows: Vec<&[RawNode]> = local_graphs[run.start as usize..run.end as usize]
                         .iter()
-                        .map(|&g| local_graphs[g as usize].nodes.as_slice())
+                        .map(|g| g.nodes.as_slice())
                         .collect();
-                    shared_ids.extend(
-                        inputs
-                            .iter()
-                            .copied()
-                            .zip(path_identities(&path_str, &rows, raw_decl)),
-                    );
+                    path_ids = path_identities(&path_str, &rows, raw_decl).into_iter();
                 }
-                shared_ids
-                    .remove(&file_idx)
+                path_ids
+                    .next()
                     .expect("the path's first input numbers all of its inputs")
             }
         };
-        let node_of = |at: u32| path_node(inputs, local_graphs, &graph_starts, graph_start, at);
-        // This input's first row among the path's rows.
-        let input_offset: u32 = inputs
-            .iter()
-            .take_while(|&&g| g != file_idx)
-            .map(|&g| local_graphs[g as usize].nodes.len() as u32)
-            .sum();
+        let input_offset = graph_start - path_start;
         // The innermost type around each node, computed on the first member
         // twin of the file only.
         let mut declaring_types: Option<Vec<Option<usize>>> = None;
@@ -1394,41 +1396,18 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
                 // generic arity (`Conv<T>` after `Conv`), or a member such a
                 // type declares (`Foo1<T>.foo` after `Foo1.foo`).
                 UidSlot::Later { first, reason, .. } => {
-                    let first_idx = node_of(first);
+                    let first_idx = path_start + first;
                     match reason {
-                        LaterReason::Arity => {
-                            let twin = symbol_table.register_arity_sibling(
-                                first_idx,
-                                &path_str,
-                                file_meta,
-                                raw_node.generic_arity(),
-                            );
-                            // A member twin: a read inside its declaring type
-                            // means it (`SymbolTable::twin_read_from`). The
-                            // first's type is known only when the first is a
-                            // row of this input.
-                            if !arity_splits {
-                                let types = declaring_types.get_or_insert_with(|| {
-                                    let rows: Vec<(NodeKind, Span)> = local_graph
-                                        .nodes
-                                        .iter()
-                                        .map(|n| (n.kind, n.span))
-                                        .collect();
-                                    enclosing_types(&rows)
-                                });
-                                let first_raw = first.checked_sub(input_offset);
-                                let scoped = std::iter::once((twin, offset))
-                                    .chain(first_raw.map(|raw| (first_idx, raw as usize)));
-                                for (id, raw) in scoped {
-                                    if let Some(ty) = types[raw] {
-                                        symbol_table
-                                            .note_declaring_scope(id, local_graph.nodes[ty].span);
-                                    }
-                                }
-                            }
-                        }
+                        LaterReason::Arity => register_arity_twin(
+                            &mut symbol_table,
+                            local_graph,
+                            (&path_str, file_meta),
+                            &mut declaring_types,
+                            (first_idx, first.checked_sub(input_offset)),
+                            offset,
+                        ),
                         LaterReason::Overload | LaterReason::Scoped | LaterReason::Repeat => {
-                            symbol_table.register_overload(first_idx, file_meta);
+                            symbol_table.register_overload(first_idx, &path_str, file_meta);
                         }
                     }
                     later_nodes[current_node_idx as usize / 8] |= 1 << (current_node_idx % 8);
@@ -1447,20 +1426,22 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
                     current_node_idx += 1;
                     continue;
                 }
-                UidSlot::Duplicate { first, .. } => Some((node_of(first), true)),
+                UidSlot::Duplicate { first, .. } => {
+                    Some((path_start + first, Tombstone::MergedRepeat))
+                }
                 // A true 64-bit collision: the path hashes into the uid, so
                 // only a declaration of another path holds it already.
-                UidSlot::First(uid) => uid_seen.get(&uid).map(|&prev| (prev, false)),
+                UidSlot::First(uid) => uid_seen.get(&uid).map(|&prev| (prev, Tombstone::Collision)),
             };
 
             // A merged repeat, or a D1 collision: the slot keeps a tombstone
             // that merges into `prev_idx`, so `nodes.len()` stays equal to
             // `current_node_idx` and every later `RawIndexMap` offset holds.
             // The tombstone is in no name table: no query reaches it.
-            if let Some((prev_idx, merged_repeat)) = merge_into {
+            if let Some((prev_idx, tombstone)) = merge_into {
                 // The tombstone below runs either way (the dedup is real);
                 // only a C-family `#ifdef` twin and a true collision record.
-                if let Some(bs_kind) = classify_collision(merged_repeat, &path_str) {
+                if let Some(bs_kind) = classify_collision(tombstone, &path_str) {
                     // Reconstruct prev info from the first occurrence's Node
                     // (rare path; the alloc savings on every other node pay
                     // for this lookup many times over).
@@ -1589,44 +1570,75 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
         collision_blind_spots,
         merged,
         later_nodes,
+        shared,
     }
 }
 
-/// The file indices of every path that 2+ `LocalGraph`s share, in input
-/// order, keyed by the `/`-separated path. Empty for a build whose paths
-/// are unique.
-fn shared_paths(local_graphs: &[LocalGraph]) -> FxHashMap<String, Vec<u32>> {
-    let mut by_path: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-    for (idx, graph) in local_graphs.iter().enumerate() {
-        by_path
-            .entry(graph.file_path.to_string_lossy().replace('\\', "/"))
-            .or_default()
-            .push(idx as u32);
-    }
-    by_path.retain(|_, inputs| inputs.len() >= 2);
-    by_path
+/// The paths that 2+ `LocalGraph`s share. `GraphBuilder::build` sorts its
+/// inputs by path, stably, so the inputs of one path are adjacent and in
+/// input order: each shared path is one run of file indices. Pass 1 numbers
+/// a run as one file; the T7-6 skip gate skips nothing of it.
+#[derive(Debug)]
+pub struct SharedPaths {
+    /// Runs of 2+ file indices, ascending and disjoint.
+    runs: Vec<Range<u32>>,
 }
 
-/// The node of row `at` of a path's rows: the rows of its `inputs` (file
-/// indices, in input order) concatenated, the input `g` starting at node
-/// `starts[g]`. A path of one input (`inputs` empty) starts at
-/// `graph_start`. `at` names a row of an input Pass 1 registered already.
-fn path_node(
-    inputs: &[u32],
-    local_graphs: &[LocalGraph],
-    starts: &[u32],
-    graph_start: u32,
-    at: u32,
-) -> u32 {
-    let mut at = at;
-    for &g in inputs {
-        let len = local_graphs[g as usize].nodes.len() as u32;
-        if at < len {
-            return starts[g as usize] + at;
+impl SharedPaths {
+    /// The runs of adjacent inputs of one `/`-separated path. Empty for a
+    /// build whose paths are unique; allocates only for a shared path.
+    pub fn of(local_graphs: &[LocalGraph]) -> Self {
+        let mut start = 0;
+        let runs = local_graphs
+            .chunk_by(|a, b| forward_slash_path(&a.file_path) == forward_slash_path(&b.file_path))
+            .filter_map(|run| {
+                let inputs = start..start + run.len() as u32;
+                start = inputs.end;
+                (run.len() >= 2).then_some(inputs)
+            })
+            .collect();
+        Self { runs }
+    }
+
+    /// The run of file `file`, `None` when no other input shares its path.
+    pub fn run_of(&self, file: u32) -> Option<Range<u32>> {
+        let at = self.runs.partition_point(|run| run.end <= file);
+        self.runs.get(at).filter(|run| run.start <= file).cloned()
+    }
+}
+
+/// Pass 1's `LaterReason::Arity` row at `offset`: file the twin beside its
+/// first (`register_arity_sibling`). A member twin (a member a C# type of
+/// another generic arity declares) also notes the span of the type that
+/// declares it, and its first's when the first is a row of this input
+/// (`first.1`): a read inside its declaring type means it
+/// (`SymbolTable::twin_read_from`).
+fn register_arity_twin(
+    symbol_table: &mut SymbolTable,
+    local_graph: &LocalGraph,
+    (path, file_meta): (&str, FileMeta),
+    declaring_types: &mut Option<Vec<Option<usize>>>,
+    (first_idx, first_raw): (u32, Option<u32>),
+    offset: usize,
+) {
+    let raw_node = &local_graph.nodes[offset];
+    let twin =
+        symbol_table.register_arity_sibling(first_idx, path, file_meta, raw_node.generic_arity());
+    if splits_by_arity(file_meta.language, raw_node.kind) {
+        return;
+    }
+    let types = declaring_types.get_or_insert_with(|| {
+        let rows: Vec<(NodeKind, Span)> =
+            local_graph.nodes.iter().map(|n| (n.kind, n.span)).collect();
+        enclosing_types(&rows)
+    });
+    let scoped =
+        std::iter::once((twin, offset)).chain(first_raw.map(|raw| (first_idx, raw as usize)));
+    for (id, raw) in scoped {
+        if let Some(ty) = types[raw] {
+            symbol_table.note_declaring_scope(id, local_graph.nodes[ty].span);
         }
-        at -= len;
     }
-    graph_start + at
 }
 
 /// Map a file path to the language hint accepted by
@@ -2987,7 +2999,8 @@ pub const BS_KIND_ENTRY_POINT_AMBIGUOUS: &str = "entry-point-ambiguous";
 /// twice) is one declaration with its first, as a call binds the first;
 /// a method overload stays a rival.
 /// `Err(n)` when `n` nodes remain, `Err(0)` for an absent or blank name.
-/// Never the first of several (C4 `bind_name`).
+/// Of several rivals none (C4 `bind_name`); of a redefinition group, the
+/// first.
 fn outermost_named_slot(
     nodes: &[RawNode],
     name: &str,
@@ -3255,7 +3268,6 @@ fn emit_file_closure_references(
         return;
     }
     let (functions, parents) = callable_parents(graph);
-    let mut live_by_uid: Option<FxHashMap<u64, u32>> = None;
     for (i, &(offset, node)) in functions.iter().enumerate() {
         if !is_anonymous_closure(node) {
             continue;
@@ -3263,27 +3275,11 @@ fn emit_file_closure_references(
         let Some(parent) = parents[i] else {
             continue;
         };
-        let mut source = start_index + functions[parent].0 as u32;
+        let source = start_index + functions[parent].0 as u32;
         let target = start_index + offset as u32;
-        if nodes[target as usize].name.len == 0 {
+        // A D1-collision tombstone; its survivor is in another path.
+        if nodes[target as usize].name.len == 0 || nodes[source as usize].name.len == 0 {
             continue;
-        }
-        // A redefined function (an `#ifdef` twin) shares the first one's
-        // identity; its tombstone clears the name and inverts the
-        // survivor's UID. Preserve both callbacks.
-        if nodes[source as usize].name.len == 0 {
-            let live_by_uid = live_by_uid.get_or_insert_with(|| {
-                nodes[start_index as usize..start_index as usize + graph.nodes.len()]
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, node)| node.name.len != 0)
-                    .map(|(offset, node)| (node.uid, start_index + offset as u32))
-                    .collect()
-            });
-            let Some(&live_source) = live_by_uid.get(&!nodes[source as usize].uid) else {
-                continue;
-            };
-            source = live_source;
         }
         // Creating a callback references its body without proving execution.
         // References preserves upstream impact without inventing a direct call.
@@ -3383,10 +3379,7 @@ fn pass1_9_supertypes(
                     // `partial` part, a later redefinition (two local
                     // `class L extends Base` in two methods). A tombstone
                     // maps to another node and keeps none.
-                    let (file, raw_idx) = (FileOrd(file_idx as u32), RawIdx(offset as u32));
-                    raw_map
-                        .node(file, raw_idx)
-                        .filter(|&node| raw_map.slot(file, raw_idx) == Some(node))
+                    raw_map.own_node(FileOrd(file_idx as u32), RawIdx(offset as u32))
                 } else {
                     let type_name = match raw.kind {
                         NodeKind::Impl => Some(raw.name.as_str()),
@@ -4135,9 +4128,9 @@ fn pass2_emit_framework_and_fanout(
 /// The source slot of a framework ref the parser named: the smallest node so
 /// named whose span holds the ref's site (Spring names the class that holds
 /// the handler), else the one node of the file so named
-/// ([`outermost_named_slot`]; FastAPI names the module-level `app`). `None`
-/// when no node or several have the name: the ref gets no edge, never the
-/// first of several.
+/// ([`outermost_named_slot`]; FastAPI names the module-level `app`), the
+/// first of a redefinition group. `None` when no node has the name or
+/// several rivals do (method overloads stay rivals): the ref gets no edge.
 fn framework_ref_source(
     nodes: &[RawNode],
     fw_ref: &ecp_core::analyzer::types::RawFrameworkRef,
@@ -4160,29 +4153,27 @@ fn framework_ref_source(
     }
 }
 
-/// T7-6: per raw node of `local_graph`, whether its unchanged body skips
-/// resolver work. `None` when the skip data has no entry for the file: no
-/// diff data, or the file needs a full reanalyze. An empty inner set means
-/// every symbol changed. The uids are Pass 1's, overloads numbered.
+/// T7-6: per raw node of `local_graph`, the input at `file`, whether its
+/// unchanged body skips resolver work. `None` when the skip data has no
+/// entry for the file: no diff data, or the file needs a full reanalyze. An
+/// empty inner set means every symbol changed. The uids are Pass 1's,
+/// overloads numbered. The one check of whether a file's resolver work
+/// skips, for Pass 2 and class membership.
 ///
-/// `None` too for a path of `shared` ([`shared_paths`]): Pass 1 numbers its
-/// inputs as one file, the skip data each input alone, so a changed body of
-/// a later input could carry the uid of an unchanged one.
-fn skipped_nodes(
+/// `None` too for an input of a path of `shared`: Pass 1 numbers its inputs
+/// as one file, the skip data each input alone, so a changed body of a later
+/// input could carry the uid of an unchanged one.
+pub(crate) fn skipped_nodes(
     local_graph: &LocalGraph,
+    file: u32,
     symbol_skip: Option<&FxHashMap<String, FxHashSet<u64>>>,
-    shared: &FxHashMap<String, Vec<u32>>,
+    shared: &SharedPaths,
 ) -> Option<Vec<bool>> {
     let symbol_skip = symbol_skip?;
-    let raw = local_graph.file_path.to_string_lossy();
-    let path: std::borrow::Cow<'_, str> = if raw.contains('\\') {
-        std::borrow::Cow::Owned(raw.replace('\\', "/"))
-    } else {
-        raw
-    };
-    if shared.contains_key(path.as_ref()) {
+    if shared.run_of(file).is_some() {
         return None;
     }
+    let path = forward_slash_path(&local_graph.file_path);
     let skip_uids = symbol_skip.get(path.as_ref())?;
     Some(
         file_uids(&path, &local_graph.nodes, raw_decl)
@@ -4291,6 +4282,7 @@ fn pass2_resolve_edges(
     raw_map: &RawIndexMap,
     resolver_dump_path: Option<&std::path::Path>,
     symbol_skip_set: Option<&FxHashMap<String, FxHashSet<u64>>>,
+    shared: &SharedPaths,
 ) -> Pass2Output {
     let reason_heritage = string_pool.add(heritage::EXTENDS_REASON);
     let reason_implements = string_pool.add(heritage::IMPLEMENTS_REASON);
@@ -4353,10 +4345,6 @@ fn pass2_resolve_edges(
     let reason_cache_ref = &reason_cache;
     // T7-6: reference to skip-set (None = full reanalyze for all files).
     let symbol_skip_ref = symbol_skip_set;
-    let shared = match symbol_skip_set {
-        Some(_) => shared_paths(local_graphs),
-        None => FxHashMap::default(),
-    };
 
     // Pre-build per-graph indirect-call lookup keyed by caller span and
     // call index so same-name functions/methods in one file do not collide.
@@ -4393,7 +4381,8 @@ fn pass2_resolve_edges(
             let lookup = &indirect_lookups[graph_idx];
             let lexical_lookup =
                 lexical_functions(local_graph, file_base(raw_map, graph_idx as u32));
-            let skipped = skipped_nodes(local_graph, symbol_skip_ref, &shared);
+            let skipped = skipped_nodes(local_graph, graph_idx as u32, symbol_skip_ref, shared);
+            let merged = raw_map.has_merged(file);
             let mut merged_rows = MergedRows::new(edges.len());
             for (node_offset, raw_node) in local_graph.nodes.iter().enumerate() {
                 if skipped.as_ref().is_some_and(|skipped| skipped[node_offset]) {
@@ -4420,13 +4409,15 @@ fn pass2_resolve_edges(
                     &mut pending_call_metas_global,
                     &mut call_blind_spots,
                 );
-                merged_rows.rehome(
-                    raw_map.node(file, RawIdx(node_offset as u32)),
-                    current_node_idx,
-                    row_start,
-                    &mut edges,
-                    &mut pending_call_metas_global,
-                );
+                if merged {
+                    merged_rows.rehome(
+                        raw_map.node(file, RawIdx(node_offset as u32)),
+                        current_node_idx,
+                        row_start,
+                        &mut edges,
+                        &mut pending_call_metas_global,
+                    );
+                }
                 current_node_idx += 1;
             }
             // T7-6: skip framework/fanout edges when all symbols in this
@@ -4474,8 +4465,9 @@ fn pass2_resolve_edges(
                 let mut local_pending: Vec<(usize, u8, String)> = Vec::new();
                 let mut local_file_edges: Vec<(FileOrd, Edge)> = Vec::new();
                 let mut local_blind_spots: Vec<BlindSpot> = Vec::new();
-                let skipped = skipped_nodes(local_graph, symbol_skip_ref, &shared);
+                let skipped = skipped_nodes(local_graph, graph_idx as u32, symbol_skip_ref, shared);
                 let file = FileOrd(graph_idx as u32);
+                let merged = raw_map.has_merged(file);
                 let mut merged_rows = MergedRows::new(0);
                 for (node_offset, raw_node) in local_graph.nodes.iter().enumerate() {
                     let current_node_idx = start_idx + node_offset as u32;
@@ -4502,13 +4494,15 @@ fn pass2_resolve_edges(
                         &mut local_pending,
                         &mut local_blind_spots,
                     );
-                    merged_rows.rehome(
-                        raw_map.node(file, RawIdx(node_offset as u32)),
-                        current_node_idx,
-                        row_start,
-                        &mut local_edges,
-                        &mut local_pending,
-                    );
+                    if merged {
+                        merged_rows.rehome(
+                            raw_map.node(file, RawIdx(node_offset as u32)),
+                            current_node_idx,
+                            row_start,
+                            &mut local_edges,
+                            &mut local_pending,
+                        );
+                    }
                 }
                 // T7-6: skip framework/fanout edges only when ALL symbols
                 // in this file are unchanged.
@@ -4638,7 +4632,7 @@ mod tests {
             "src/foo.hxx",
         ] {
             assert_eq!(
-                classify_collision(true, path),
+                classify_collision(Tombstone::MergedRepeat, path),
                 Some("ifdef-redef"),
                 "{path}"
             );
@@ -4656,7 +4650,11 @@ mod tests {
             "Rust/benches/copy.rs",
             "Go/auth.go",
         ] {
-            assert_eq!(classify_collision(true, path), None, "{path}");
+            assert_eq!(
+                classify_collision(Tombstone::MergedRepeat, path),
+                None,
+                "{path}"
+            );
         }
     }
 
@@ -4671,7 +4669,7 @@ mod tests {
             "py/m.py",
         ] {
             assert_eq!(
-                classify_collision(false, path),
+                classify_collision(Tombstone::Collision, path),
                 Some("uid-collision"),
                 "{path}"
             );
@@ -4888,7 +4886,7 @@ mod tests {
     /// land on the wrong symbols. The tombstone stores
     /// `tombstone(overload(base, 1))`, never the survivor's uid.
     #[test]
-    fn pass1_tombstones_a_merged_repeat_without_shifting_indices() {
+    fn test_pass1_register_nodes_merged_repeat_tombstone_keeps_indices() {
         let g = graph_of(
             "dup.c",
             vec![
@@ -4918,7 +4916,7 @@ mod tests {
         assert_eq!(
             out.collision_blind_spots.len(),
             1,
-            "the merge is reported, not silently swallowed"
+            "a C-family merged repeat records `ifdef-redef`"
         );
     }
 
@@ -6465,7 +6463,7 @@ mod tests {
     /// Pass 1 branch took every later C# type as an arity twin, so
     /// `C<T>@3` and `C@4` joined no overload set.
     #[test]
-    fn test_assign_file_csharp_arity_sibling_then_same_arity_repeat_distinct_uids() {
+    fn test_pass1_register_nodes_csharp_arity_sibling_then_same_arity_repeat_distinct_uids() {
         let out = pass1_register_nodes(&[csharp_arity_rows()]);
         let uids: Vec<u64> = out.nodes.iter().map(|n| n.uid).collect();
         let distinct: FxHashSet<u64> = uids.iter().copied().collect();

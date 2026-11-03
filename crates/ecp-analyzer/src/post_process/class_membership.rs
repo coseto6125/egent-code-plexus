@@ -7,9 +7,9 @@
 //! `RawIndexMap`, and answers the owner pass's name lookup from the
 //! [`SymbolTable`].
 
+use crate::resolution::builder::{skipped_nodes, SharedPaths};
 use crate::resolution::index::SymbolTable;
-use ecp_core::analyzer::containment::has_merged_rows;
-use ecp_core::analyzer::lexical::{file_uids, raw_decl};
+use ecp_core::analyzer::lexical::forward_slash_path;
 use ecp_core::analyzer::membership::{
     self, MemberLookup, MemberRow, CLASS_MEMBERSHIP_IMPL_REASON, CLASS_MEMBERSHIP_REASON,
 };
@@ -19,7 +19,6 @@ use ecp_core::graph::Edge;
 use ecp_core::pool::StringPool;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::borrow::Cow;
 
 /// Emit `HasMethod` / `HasProperty` edges by walking the raw per-file
 /// `LocalGraph`s, each end the node of its own raw row.
@@ -31,6 +30,7 @@ use std::borrow::Cow;
 /// `symbol_skip_set` — T7-6 incremental skip data. When `Some`, files whose
 /// ALL symbols are in the skip set bypass both pass-1 span and pass-2 impl
 /// emission. `None` = full reanalyze for all files (default, full-build path).
+/// A path of `shared` skips nothing ([`skipped_nodes`]).
 ///
 /// `raw_map` is Pass 1's map over `local_graphs`, in the same order: every
 /// raw row maps to its node, a merged row to its survivor.
@@ -41,24 +41,10 @@ pub fn emit_edges(
     string_pool: &mut StringPool,
     edges_out: &mut Vec<Edge>,
     symbol_skip_set: Option<&FxHashMap<String, FxHashSet<u64>>>,
+    shared: &SharedPaths,
 ) -> usize {
     let reason = string_pool.add(CLASS_MEMBERSHIP_REASON);
     let reason_impl = string_pool.add(CLASS_MEMBERSHIP_IMPL_REASON);
-
-    // Pass 1 numbers the inputs of one path as one file, `file_uids` each
-    // input alone: an unchanged first `f` would put the uid a changed second
-    // `f` gets alone in the skip set. So a path with 2+ inputs skips nothing.
-    let shared_paths: FxHashSet<Cow<'_, str>> = match symbol_skip_set {
-        Some(_) => {
-            let mut seen = FxHashSet::default();
-            local_graphs
-                .iter()
-                .map(normalized_path)
-                .filter(|path| !seen.insert(path.clone()))
-                .collect()
-        }
-        None => FxHashSet::default(),
-    };
 
     // Per-file work is independent: writes go to a thread-local edge buffer
     // and only `symbol_table` (read-only) is shared. Same parallel pattern as
@@ -67,23 +53,16 @@ pub fn emit_edges(
         .par_iter()
         .enumerate()
         .map(|(file_ord, local_graph)| {
-            let raws = &local_graph.nodes;
-            let path_str_cow = normalized_path(local_graph);
-            let path_str: &str = &path_str_cow;
-
             // T7-6: skip class_membership for files whose every symbol is
             // unchanged, by Pass 1's uids (overloads numbered).
-            if let Some(skip_uids) = symbol_skip_set
-                .and_then(|m| m.get(path_str))
-                .filter(|_| !shared_paths.contains(path_str))
+            if skipped_nodes(local_graph, file_ord as u32, symbol_skip_set, shared)
+                .is_some_and(|skipped| skipped.iter().all(|&s| s))
             {
-                if file_uids(path_str, raws, raw_decl)
-                    .iter()
-                    .all(|uid| skip_uids.contains(uid))
-                {
-                    return Vec::new();
-                }
+                return Vec::new();
             }
+            let raws = &local_graph.nodes;
+            let path_str_cow = forward_slash_path(&local_graph.file_path);
+            let path_str: &str = &path_str_cow;
 
             let file = FileOrd(file_ord as u32);
             let mut local_edges: Vec<Edge> = Vec::new();
@@ -95,7 +74,7 @@ pub fn emit_edges(
                     path: path_str,
                     raw_map,
                     file,
-                    merged: has_merged_rows(raw_map, file),
+                    merged: raw_map.has_merged(file),
                 },
                 |m| {
                     local_edges.push(Edge {
@@ -120,17 +99,6 @@ pub fn emit_edges(
         edges_out.append(&mut local_edges);
     }
     emitted
-}
-
-/// The file's path, forward-slash normalized. Linux/macOS paths have no
-/// `\\`, so the borrowed cow is reused without allocating.
-fn normalized_path(local_graph: &LocalGraph) -> Cow<'_, str> {
-    let raw_path = local_graph.file_path.to_string_lossy();
-    if raw_path.contains('\\') {
-        Cow::Owned(raw_path.replace('\\', "/"))
-    } else {
-        raw_path
-    }
 }
 
 fn member_row(n: &RawNode) -> MemberRow<'_> {
@@ -173,6 +141,7 @@ impl MemberLookup for IndexLookup<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ecp_core::analyzer::lexical::{file_uids, raw_decl};
     use ecp_core::analyzer::types::LocalGraph;
     use ecp_core::graph::{NodeKind, RelType};
     use std::path::PathBuf;
@@ -250,6 +219,7 @@ mod tests {
             &mut string_pool,
             &mut edges,
             skip,
+            &SharedPaths::of(&local_graphs),
         );
         edges
     }

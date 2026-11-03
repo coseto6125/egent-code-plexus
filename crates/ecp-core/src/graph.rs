@@ -999,6 +999,10 @@ pub struct BlindSpotRecord {
 /// (`ecp dev uid-audit`) match against it without re-typing the literal.
 pub const BS_KIND_UID_COLLISION: &str = "uid-collision";
 
+/// BlindSpot kind emitted by `resolution::builder::classify_collision` for a
+/// merged repeat in a C/C++ file: an `#ifdef` twin.
+pub const BS_KIND_IFDEF_REDEF: &str = "ifdef-redef";
+
 /// Type-2 "parser-metric" BlindSpot kinds — emitted by the resolver's
 /// `classify_collision` for uid hash collisions and `#ifdef`
 /// redefinitions. These are parser-maintainer signal, NOT
@@ -1007,7 +1011,7 @@ pub const BS_KIND_UID_COLLISION: &str = "uid-collision";
 ///
 /// `ecp summary.blind_spots` filters these out so its LLM-facing surface
 /// stays focused; `ecp dev uid-audit` inspects them.
-pub const DEV_METRIC_BS_KINDS: &[&str] = &[BS_KIND_UID_COLLISION, "ifdef-redef"];
+pub const DEV_METRIC_BS_KINDS: &[&str] = &[BS_KIND_UID_COLLISION, BS_KIND_IFDEF_REDEF];
 
 /// True iff `kind` is one of [`DEV_METRIC_BS_KINDS`].
 pub fn is_dev_metric_bs_kind(kind: &str) -> bool {
