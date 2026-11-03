@@ -380,6 +380,16 @@ fn test_parse_configs_node_entry_fields_become_entry_files() {
     );
 }
 
+/// Stands for: on Unix a `\` is a file-name byte, so `vendor\pkg` is one
+/// directory name, not the vendored `vendor/pkg`, and `a\package.json` is no
+/// `package.json`.
+#[cfg(unix)]
+#[test]
+fn test_is_workspace_config_backslash_name_on_unix_is_one_segment() {
+    assert!(is_workspace_config("vendor\\pkg/package.json"));
+    assert!(!is_workspace_config("a\\package.json"));
+}
+
 /// A config under `node_modules/` or `vendor/` belongs to an installed
 /// dependency and makes no scope.
 #[test]

@@ -558,7 +558,8 @@ fn parse_workspace_members(cargo_toml: &str, workspace_root: &Path) -> Vec<PathB
         .filter_map(toml::Value::as_str);
     let mut members: Vec<PathBuf> = Vec::new();
     for pattern in patterns {
-        // Cargo supports a glob only at the last level, e.g. `crates/*`.
+        // ecp expands `*` only as a whole last segment (`crates/*`); Cargo's
+        // other globs (`crates/ecp-*`, `?`) name no member here.
         if let Some((prefix, _)) = pattern.split_once('*') {
             let Ok(entries) = std::fs::read_dir(workspace_root.join(prefix)) else {
                 continue;
@@ -831,7 +832,7 @@ mod tests {
     /// expands sorted over the directories with a `Cargo.toml`, a plain
     /// member needs a directory, and comments and a multi-line array parse.
     #[test]
-    fn test_parse_workspace_members_glob_plain_and_multiline_forms() {
+    fn test_parse_workspace_members_glob_plain_and_multiline_forms_resolve_sorted_existing_dirs() {
         let dir = make_tree(&[
             ("crates/b/Cargo.toml", ""),
             ("crates/a/Cargo.toml", ""),

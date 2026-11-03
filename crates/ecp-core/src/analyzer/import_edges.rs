@@ -278,9 +278,15 @@ pub fn import_edges(
             }
         }
         let mut guess = None;
-        // 3c: a C / C++ header under a search-path directory.
+        // 3c: a C / C++ header under a search-path directory, as written,
+        // then as `/` like 3a and 3b.
         if hit.is_none() && !cleaned.is_empty() {
-            hit = facts.guesses().suffix_single(cleaned);
+            hit = facts.guesses().suffix_single(cleaned).or_else(|| {
+                match (path_like, text_path_to_slash(cleaned)) {
+                    (true, Cow::Owned(text)) => facts.guesses().suffix_single(&text),
+                    _ => None,
+                }
+            });
             guess = hit.map(|_| SUFFIX_GUESS_CONFIDENCE);
         }
         // 3d: Go `import "modulePath/pkg"`, whose `go.mod` module prefix is
@@ -741,6 +747,18 @@ mod tests {
             true => assert_eq!(edges, [edge(5, MODULE_CONFIDENCE, ImportReason::Module)]),
             false => assert_eq!(edges, [edge(7, MODULE_CONFIDENCE, ImportReason::Module)]),
         }
+    }
+
+    /// Stands for: a Windows-authored `#include "sub\foo.h"` reaches a header
+    /// under a search-path directory on every platform, as `sub/foo.h` does.
+    #[test]
+    fn test_import_edges_backslash_suffix_guess_binds_search_path_header() {
+        let facts = Fake::with_files(&[("include/sub/foo.h", 4)]);
+        let imports = [import("\"sub\\foo.h\"", "foo.h", None)];
+        assert_eq!(
+            edges_of("src/main.c", Language::C, &imports, &facts),
+            [edge(4, SUFFIX_GUESS_CONFIDENCE, ImportReason::Guess)]
+        );
     }
 
     #[test]
