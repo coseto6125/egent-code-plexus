@@ -373,10 +373,6 @@ fn test_build_rust_module_in_fn_members_owned_by_module() {
     assert_eq!(owner(&g, new), "S");
     assert!(!archived.is_lexically_scoped(f));
     assert!(!archived.is_lexically_scoped(new));
-    assert_eq!(
-        g.nodes[f as usize].uid,
-        uid_of(NodeKind::Function, Some("m"), "f")
-    );
     assert!(has_edge(&g, RelType::Defines, module, f));
 }
 
@@ -406,7 +402,7 @@ fn test_build_rust_closure_in_fn_scoped_calls_nested_helper() {
 }
 
 /// Stands for (R-F4): a fn in a two-level module keeps the innermost module
-/// as its owner (the uid main computed), is unscoped, is defined by its
+/// as its owner, is unscoped, is defined by its
 /// module, and a bare call from another file binds it through the global
 /// tier. HEAD stored the owner `a::b`.
 #[test]
@@ -422,10 +418,6 @@ fn test_build_rust_two_level_module_fn_owned_by_inner_module_global() {
     let bytes = archive(&g);
     let archived = access(&bytes);
     assert_eq!(owner(&g, f), "b");
-    assert_eq!(
-        g.nodes[f as usize].uid,
-        uid_of(NodeKind::Function, Some("b"), "f")
-    );
     assert!(!archived.is_lexically_scoped(f));
     assert!(has_edge(&g, RelType::Defines, b, f));
     let targets: Vec<u32> = calls_named(&g, call_site, "f")

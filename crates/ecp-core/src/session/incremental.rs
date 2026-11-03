@@ -2378,6 +2378,10 @@ mod tests {
         let mut fx = GraphFixture::new();
         let k = fx.node(NodeKind::Class, "src/k.ts", "K");
         let p = fx.node_owned(NodeKind::Property, "src/k.ts", "K", "p");
+        // The base spans match the dirty ones: the container chain derives
+        // the base uid of `p` from `K`'s span, as a real graph stores it.
+        fx.span(k, (1, 0, 5, 0));
+        fx.span(p, (2, 0, 2, 0));
         fx.edge_with(k, p, RelType::HasProperty, 1.0, CLASS_MEMBERSHIP_REASON);
         let bytes = fx.into_bytes();
         let graph = access(&bytes);
