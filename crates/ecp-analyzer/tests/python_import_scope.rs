@@ -17,6 +17,13 @@
 //! | class-body-not-visible-in-method (extra) | class body, two fixtures |
 //! | alias-import (extra) | function body, nested function |
 //! | empty-scope (extra) | function body |
+//! | order-use-before-import (extra) | function body |
+//! | order-reimport-restores-first (extra) | function body |
+//! | directive-global (extra) | function body (import binds module global) |
+//! | directive-nonlocal (extra) | nested function (import binds enclosing local) |
+//! | consumers-qualified-head-split (extra) | two sibling functions |
+//! | dynamic-load-siblings (extra) | two sibling functions |
+//! | precedence-parameter-shadows-import (extra) | function parameter |
 //!
 //! Rows skipped: reopened-scope. A Python `class` or `def` statement
 //! rebinds a name; it does not reopen the earlier scope.
@@ -371,5 +378,157 @@ case!(
     test_python_import_scope_empty_scope_function_body_overlay_matches_full,
     |g| {
         assert!(calls(&g, "caller_top").is_empty());
+    }
+);
+
+// ---- order-use-before-import ----
+// An import anywhere in a function body makes the name local to the whole
+// body, so a call before it is an unbound local, not the module `g` and not
+// the later import (Execution model > Naming and binding: "local variable
+// referenced before assignment").
+
+const R10_FN: &str = r#"def g(): pass
+def caller_ub():
+    g()
+    from b import g
+"#;
+
+case!(
+    #[ignore = "needs import scope: a later import in the function makes the name an unbound local (C4 scope table)"]
+    R10_FN,
+    test_python_import_scope_order_use_before_import_function_body_binds_nothing,
+    test_python_import_scope_order_use_before_import_function_body_overlay_matches_full,
+    |g| {
+        assert!(calls(&g, "caller_ub").is_empty());
+    }
+);
+
+// ---- order-reimport-restores-first ----
+// Each import rebinds the local name; the last binding before the call wins
+// (Import system > "The import statement": binding is an assignment).
+
+const R11_FN: &str = r#"def caller_ri():
+    from b import g
+    from c import g
+    from b import g
+    g()
+"#;
+
+case!(
+    R11_FN,
+    test_python_import_scope_order_reimport_restores_first_function_body_binds_last_import,
+    test_python_import_scope_order_reimport_restores_first_function_body_overlay_matches_full,
+    |g| {
+        assert_eq!(calls(&g, "caller_ri"), vec![hit("b.py", "g", 1)]);
+    }
+);
+
+// ---- directive-global ----
+// `global g` makes an import inside the function bind the module-global `g`,
+// visible to every other function (Simple statements > "The global statement").
+
+const R12_FN: &str = r#"def setter():
+    global g
+    from b import g
+def caller_glob():
+    g()
+"#;
+
+case!(
+    R12_FN,
+    test_python_import_scope_directive_global_function_body_binds_module_global,
+    test_python_import_scope_directive_global_function_body_overlay_matches_full,
+    |g| {
+        assert_eq!(calls(&g, "caller_glob"), vec![hit("b.py", "g", 1)]);
+    }
+);
+
+// ---- directive-nonlocal ----
+// `nonlocal g` makes an import in the nested function rebind `outer`'s `g`,
+// which a sibling nested function reads (Simple statements > "The nonlocal statement").
+
+const R13_NEST: &str = r#"def outer():
+    g = None
+    def setter():
+        nonlocal g
+        from b import g
+    def caller_nl():
+        g()
+"#;
+
+case!(
+    R13_NEST,
+    test_python_import_scope_directive_nonlocal_nested_function_binds_enclosing_import,
+    test_python_import_scope_directive_nonlocal_nested_function_overlay_matches_full,
+    |g| {
+        assert_eq!(calls(&g, "caller_nl"), vec![hit("b.py", "g", 1)]);
+    }
+);
+
+// ---- consumers-qualified-head-split ----
+// The same alias `m` names a different module in each sibling function; a
+// qualified call `m.g()` follows its own function's binding (Execution model
+// > Resolution of names: the local binding is per function).
+
+const R14_FN: &str = r#"def caller_qa():
+    import b as m
+    m.g()
+def caller_qc():
+    import c as m
+    m.g()
+"#;
+
+case!(
+    #[ignore = "needs import scope: sibling scopes share one file-wide import set (C4 scope table)"]
+    R14_FN,
+    test_python_import_scope_consumers_qualified_head_split_sibling_functions_bind_own_module,
+    test_python_import_scope_consumers_qualified_head_split_sibling_functions_overlay_matches_full,
+    |g| {
+        assert_eq!(calls(&g, "caller_qa"), vec![hit("b.py", "g", 1)]);
+        assert_eq!(calls(&g, "caller_qc"), vec![hit("c.py", "g", 1)]);
+    }
+);
+
+// ---- dynamic-load-siblings ----
+// `m = importlib.import_module("b")` is an assignment local to its function;
+// two sibling functions each hold their own `m` (Execution model > Naming and
+// binding; importlib.import_module returns the named module).
+
+const R15_FN: &str = r#"import importlib
+def caller_dl1():
+    m = importlib.import_module("b")
+    m.g()
+def caller_dl2():
+    m = importlib.import_module("b")
+    m.g()
+"#;
+
+case!(
+    R15_FN,
+    test_python_import_scope_dynamic_load_siblings_function_bodies_bind_loaded_module,
+    test_python_import_scope_dynamic_load_siblings_function_bodies_overlay_matches_full,
+    |g| {
+        assert_eq!(calls(&g, "caller_dl1"), vec![hit("b.py", "g", 1)]);
+        assert_eq!(calls(&g, "caller_dl2"), vec![hit("b.py", "g", 1)]);
+    }
+);
+
+// ---- precedence-parameter-shadows-import ----
+// A parameter is a local of the function and shadows the module-level import;
+// `g()` calls the argument, which is unknown statically (Execution model >
+// Resolution of names; Compound statements > "Function definitions").
+
+const R16_FN: &str = r#"from b import g
+def caller_p(g):
+    g()
+"#;
+
+case!(
+    #[ignore = "needs import scope: a parameter of the same name shadows the import (C4 scope table)"]
+    R16_FN,
+    test_python_import_scope_precedence_parameter_shadows_import_function_body_adds_no_edge,
+    test_python_import_scope_precedence_parameter_shadows_import_function_body_overlay_matches_full,
+    |g| {
+        assert!(!calls(&g, "caller_p").contains(&hit("b.py", "g", 1)));
     }
 );

@@ -205,7 +205,8 @@ Status: contract for a future slice, with C4 "Scope table and import bindings", 
 | `ScopeId` | Snapshot-local. It is valid only inside the raw graph, the L1 fragment or the `graph.bin` file range that wrote it. A key that outlives that snapshot never holds a `ScopeId`. |
 | Scope key | The stable identity of an occurrence. For `File`, it is the file path. For an occurrence with `decl: Some(i)`, it is the anchor of node `i` when that anchor is `Unique` (File assignment). A `Block`, or a body whose anchor is `Shared`, has no scope key. |
 | Direction | An occurrence takes the anchor of its declaration. A declaration takes nothing from an occurrence. |
-| Namespace block | The anchor names the namespace. Each block of the namespace is its own occurrence. Two blocks of `namespace N` in one file share one anchor, so neither has a scope key (Positional rule). The imports of one block do not reach the other. |
+| Namespace block | The anchor names the namespace. Each block of the namespace is its own occurrence. Two blocks of `namespace N` in one file share one anchor, so neither has a scope key (Positional rule). |
+| Cross-occurrence visibility | Identity never decides visibility. The language rule of C4 "Scope lookup" decides whether one block sees the bindings of another block of the same anchor. In C# and PHP it does not. In C++ a later block sees what an earlier block of the namespace declares before it. The walk links the blocks through their shared anchor, not through a scope key. |
 | Lexical parent | The scope table agrees with `lexical_parents`. For a declaration with lexical parent `p`, the chain from its occurrence reaches the `Callable` occurrence of `p` through `Block` occurrences only. A `Type` or `Module` occurrence on that path means no lexical parent. A test derives both from one fixture and compares them. |
 | Overlay pairing | `pair_by_anchor` pairs declarations only. The overlay never pairs a scope occurrence or an import binding. A dirty file's scope table and bindings replace the whole set of the base file. |
 | Cache | A cache entry keyed by a `ScopeId` lives no longer than the view generation that built it. |
@@ -214,8 +215,7 @@ Status: contract for a future slice, with C4 "Scope table and import bindings", 
 |---|---|---|
 | Insert whitespace, or edit a body and add no occurrence | unchanged | unchanged |
 | Insert an unrelated occurrence | every later id moves | unchanged |
-| Swap two sibling blocks | the two ids swap | none: a `Block` has no key |
-| Swap two sibling functions | the ids of their bodies swap | unchanged: each anchor stays with its declaration |
+| Swap two sibling subtrees (blocks or function bodies) | renumbered by the new pre-order: each id of one subtree shifts by the size of the other subtree, so ids swap only when the two sizes are equal (`File=0, A=1, A.child=2, B=3` becomes `File=0, B=1, A=2, A.child=3`) | a `Block` has none; a body keeps its key, because each anchor stays with its declaration |
 | Rename or re-nest the declaring container | can move | changes with the anchor (Stability against unrelated edits) |
 
 ### Target request syntax
@@ -393,7 +393,7 @@ A row is the index of a declaration in its file's raw records. Every emitter tha
 | `pair_by_anchor` in the overlay | none | none | none | none | follows: the binary path, size and mtime are in the key (`ecp-cli/src/session/view_cache.rs:36-43`) |
 | `RouteKey` with composed prefixes; one node per key | none | bump | none | none | follows |
 | `TargetRequest` / `resolve_target` | none | none | none | none | none |
-| the scope table and import bindings (C4 "Scope table and import bindings"): no uid moves | bump: `ImportFact` gains `scope` and `site`, and the scope tables are stored | bump | bump: a new value after V7 | none | follows |
+| the scope table and import bindings (C4 "Scope table and import bindings"): no uid moves | bump: `ImportFact` gains `scope`, `site` and `form`, and the scope tables are stored | bump | bump: a new value after V7 | none | follows |
 
 Not every stored uid stays as today. Four changes move uids, and each one bumps `BUILDER_FINGERPRINT` in the slice that makes it: a scoped node takes a uid from its parent's anchor; a member of a scope container takes a uid from its container's anchor; a repeated node takes the overload uid; a producer that changes its owner text changes the unscoped uids of its kinds. Only a top-level declaration whose owner text and kind do not change keeps today's uid.
 

@@ -105,8 +105,10 @@ pub fn calls(g: &ZeroCopyGraph, caller: &str) -> Vec<Hit> {
     out
 }
 
-/// `(source name, target name, target line)` of every `Calls` edge, sorted.
-fn merged_calls(merged: &MergedGraph<'_>) -> Vec<(String, String, u32)> {
+/// `(source name, target file, target name, target line)` of every `Calls`
+/// edge, sorted. The file keeps two namesakes on the same line of
+/// different files (`b.h:g:2`, `c.h:g:2`) apart.
+fn merged_calls(merged: &MergedGraph<'_>) -> Vec<(String, String, String, u32)> {
     let mut out: Vec<_> = merged
         .all_edges()
         .filter(|e| e.rel_type() == RelType::Calls)
@@ -114,6 +116,7 @@ fn merged_calls(merged: &MergedGraph<'_>) -> Vec<(String, String, u32)> {
             let (s, t) = (merged.node(e.source)?, merged.node(e.target)?);
             Some((
                 s.name(merged).to_string(),
+                t.file_path(merged).unwrap_or_default().to_string(),
                 t.name(merged).to_string(),
                 t.start_line(),
             ))

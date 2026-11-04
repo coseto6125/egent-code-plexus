@@ -13,6 +13,9 @@
 //! | unresolved-import-blocks-fallback | inline mod, fn body, block |
 //! | alias-import (extra) | inline mod, fn body, block |
 //! | empty-scope (extra) | inline mod |
+//! | consumers-qualified-head-split (extra) | two sibling inline mods |
+//! | precedence-parameter-shadows-import (extra) | fn parameter |
+//! | order-hoisted-item (extra) | fn body (call before `use`) |
 //!
 //! Rows skipped: reopened-scope. A Rust `mod` name is declared once per
 //! parent (E0428), so a scope cannot be opened twice.
@@ -471,5 +474,75 @@ case!(
     test_rust_import_scope_empty_scope_inline_mod_overlay_matches_full,
     |g| {
         assert!(calls(&g, "caller_top").is_empty());
+    }
+);
+
+// ---- consumers-qualified-head-split ----
+// The same alias `m` names a different module in each sibling inline mod; a
+// qualified path `m::g()` follows its own mod's `use` (Reference, Use
+// declarations: a `use` binds in its enclosing module only).
+
+const R9_MOD: &str = r#"mod b;
+mod c;
+mod x {
+    use crate::b as m;
+    pub fn caller_qx() { m::g(); }
+}
+mod y {
+    use crate::c as m;
+    pub fn caller_qy() { m::g(); }
+}
+"#;
+
+case!(
+    #[ignore = "needs import scope: sibling scopes share one file-wide import set (C4 scope table)"]
+    R9_MOD,
+    test_rust_import_scope_consumers_qualified_head_split_inline_mod_binds_own_module,
+    test_rust_import_scope_consumers_qualified_head_split_inline_mod_overlay_matches_full,
+    |g| {
+        assert_eq!(calls(&g, "caller_qx"), vec![hit("src/b.rs", "g", 1)]);
+        assert_eq!(calls(&g, "caller_qy"), vec![hit("src/c.rs", "g", 1)]);
+    }
+);
+
+// ---- precedence-parameter-shadows-import ----
+// A function parameter is a local binding in the value namespace and shadows
+// the imported item of the same name (Reference, Names > Scopes > "Pattern
+// binding scopes"; Identifier patterns shadow items).
+
+const R10_FN: &str = r#"mod b;
+use crate::b::g;
+pub fn caller_pr(g: fn()) {
+    g();
+}
+"#;
+
+case!(
+    #[ignore = "needs import scope: a parameter of the same name shadows the import (C4 scope table)"]
+    R10_FN,
+    test_rust_import_scope_precedence_parameter_shadows_import_fn_body_adds_no_edge,
+    test_rust_import_scope_precedence_parameter_shadows_import_fn_body_overlay_matches_full,
+    |g| {
+        assert!(!calls(&g, "caller_pr").contains(&hit("src/b.rs", "g", 1)));
+    }
+);
+
+// ---- order-hoisted-item ----
+// Items and `use` declarations are visible in the whole block regardless of
+// textual order (Reference, Names > Scopes > "Item scopes").
+
+const R11_FN: &str = r#"mod b;
+fn caller_h() {
+    g();
+    use crate::b::g;
+}
+"#;
+
+case!(
+    R11_FN,
+    test_rust_import_scope_order_hoisted_item_fn_body_binds_later_use,
+    test_rust_import_scope_order_hoisted_item_fn_body_overlay_matches_full,
+    |g| {
+        assert_eq!(calls(&g, "caller_h"), vec![hit("src/b.rs", "g", 1)]);
     }
 );
