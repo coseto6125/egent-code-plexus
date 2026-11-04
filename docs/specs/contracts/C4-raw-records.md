@@ -118,7 +118,8 @@ Declarations, imports and local names share one scope model. A parser emits a sc
 | scope table | The scope occurrences of one file, in pre-order. |
 | binding | A name that an occurrence binds: a declaration, an import binding or a local binding. |
 | import binding | One `RawImport` row, read with its destination, its site and its form. |
-| local binding | A name that an occurrence binds with no graph node: a parameter, a local variable, or a `global` or `nonlocal` directive. |
+| local binding | A name that an occurrence binds with no graph node: a parameter or a local variable. |
+| directive | A Python `global` or `nonlocal` statement. It binds no value. It redirects the bindings and the reads of its name in its occurrence to a target occurrence. |
 | destination | The occurrence where a binding takes effect. It is the innermost occurrence that contains the site, unless a directive moves it (Python `global`, `nonlocal`). |
 | target recipe | The fields that say what an import binding names: `source`, `imported_name`, `alias`, `binding_kind`, as today. |
 | synthetic row | A `RawImport` that `DynamicImports` makes for a literal dynamic load. Its alias starts with `@import`. |
@@ -133,15 +134,16 @@ Declarations, imports and local names share one scope model. A parser emits a sc
 | `ScopeKind` | stored enum | `File`, `Module`, `Namespace`, `Type`, `Callable`, `Block`. |
 | `RawScopeOccurrence` | stored record | `parent: Option<ScopeId>`, `kind`, `extent: Span`, `decl: Option<RawIdx>` (the declaring node; C1 derives its anchor). The name keeps it apart from C1's `Scope`, which is part of a declaration key. |
 | `BindingForm` | stored enum | `Named`, `Wildcard`, `Module`, `Synthetic`. The name keeps it apart from today's `BindingKind`, which classifies C and ES bindings. |
-| `RawLocalBinding` | stored record | `scope: ScopeId` (the destination), `name`, `site: Span`, `form`: `Param`, `Local`, `Global` or `Nonlocal`. |
+| `RawLocalBinding` | stored record | `scope: ScopeId` (the destination), `name`, `site: Span`, `form`: `Param` or `Local`. |
+| `RawDirective` | stored record | `scope: ScopeId` (the occurrence that holds it), `name`, `site: Span`, `kind`: `Global` or `Nonlocal`. |
 | `UseSite` | stored record | `scope: ScopeId`, `at: (u32, u32)`: the 0-based row and column where the use starts. |
-| `EnvId` | value | The identity of one environment in one snapshot ("Scope lookup"). |
 | `ScopeError` | result | An occurrence, a binding or a use site that breaks an invariant below. |
 
 | Record | New field | Meaning |
 |---|---|---|
 | `LocalGraph` | `scopes: Vec<RawScopeOccurrence>` | The file's scope table. |
 | `LocalGraph` | `local_bindings: Vec<RawLocalBinding>` | The file's local bindings, in source order. |
+| `LocalGraph` | `directives: Vec<RawDirective>` | The file's directives, in source order. |
 | `RawImport` | `scope: ScopeId` | The destination of the binding. |
 | `RawImport` | `site: Span` | The span of the import clause. |
 | `RawImport` | `form: BindingForm` | The form, as the producer reads it from the syntax. |
@@ -173,7 +175,8 @@ A form that this table does not list gets its row in the slice that converts its
 | One region | A callable body or a type body is one occurrence. The producer does not also emit a `Block` with the same extent. |
 | `decl` | `Some(i)`: raw node `i` passes `is_scope_container` (C1), and its kind fits `kind` (next table). `File` and `Block` take `None`. A container with no node takes `None`, such as a TS `namespace` today (C1 Open point 14). |
 | Binding site | The `site` of an import binding or a local binding lies inside the extent of its destination. |
-| Destination | With no directive, the destination is the innermost occurrence that contains the site. A `Global` directive in an occurrence moves the bindings of its name in that occurrence to the root. A `Nonlocal` directive moves them to the nearest enclosing `Callable` occurrence that binds the name. |
+| Destination | With no directive, the destination is the innermost occurrence that contains the site. A directive for the name in that occurrence moves the destination to the directive's target: the root for `Global`, the nearest enclosing `Callable` occurrence that binds the name for `Nonlocal`. |
+| Directive | A directive is never a candidate. It takes no part in the order rule, the merge rule or the opaque count. A read of its name in its occurrence continues the walk at its target occurrence. A `Nonlocal` with no target is a malformed file: the read gives `OpaqueBinding`. |
 | Use site | `at` lies inside the extent of `scope`, and no child of `scope` contains `at`. |
 | Declaration scope | A declaration belongs to the innermost occurrence that contains its span, its own body excluded. It needs no stored field. |
 | Synthetic row | Its destination is the root, and its site is the span of the first load it stands for. The walk never matches it by a source name. The parser already scoped each load by range (`dynamic_imports.rs:16-17`) and wrote the rewritten callee (`:44-59`). |
@@ -195,7 +198,7 @@ A form that this table does not list gets its row in the slice that converts its
 | Coordinates | Every extent, site and `at` is in file coordinates before the join. |
 | Root | The joined table gets one new root: `File`, with the whole file as extent. |
 | Section | The root of each input becomes a `Block` child of the new root, with the extent of its section. Sections do not overlap, so Nesting holds. |
-| Remap | Each `ScopeId` of input `k` (a `parent`, an import `scope`, a local binding `scope`, a use-site `scope`) gains `1 +` the total table length of inputs `0 .. k`. Each `decl` gains the node offset of input `k`, as each `RawIdx` does. |
+| Remap | Each `ScopeId` of input `k` (a `parent`, an import `scope`, a local binding or directive `scope`, a use-site `scope`) gains `1 +` the total table length of inputs `0 .. k`, so it points into its own section. A synthetic row is the exception: its `scope` becomes the new root, `ScopeId(0)`. Each `decl` gains the node offset of input `k`, as each `RawIdx` does. |
 | Visibility | Two sections are siblings, so neither sees the other through the walk. A language rule that merges sections names them; no language with a scope table has one in rounds 1 and 2. |
 
 **Scope lookup.** Area 1 owns the visibility policy. C4 fixes its input, its consumers and its result.
@@ -203,23 +206,23 @@ A form that this table does not list gets its row in the slice that converts its
 | Rule | Statement |
 |---|---|
 | Input | The file, the `UseSite`, the name and the target kind. The caller's span is not the input, because two sibling blocks of one callable differ only by use site. |
-| Walk | The walk starts at the use site's occurrence and ends at the root. At each occurrence, the candidates are the bindings with that destination. |
-| Language rule | A per-language rule decides three things: the order rule (a binding visible before its site, or only after it), the merge rule (which candidates of one occurrence stand), and the occurrences the walk skips or links (next table). |
-| Stop | The first occurrence that holds a standing candidate ends the walk. An outer occurrence never overrides it. The order rule says whether a binding after the site stands: under the Python rule it does, and it gives `OpaqueBinding`. |
+| Walk | The walk starts at the use site's occurrence. It ends at the root, or after the first boundary occurrence that the language rule names. At each occurrence, the candidates are the bindings with that destination and the deferred bindings that join there (C++ row). |
+| Language rule | A per-language rule decides four things: the order rule (a binding visible before its site, or only after it), the merge rule (which candidates of one occurrence stand), the occurrences the walk skips or links, and the boundary occurrences (next table). |
+| Paths | A path-qualified name does not take the walk. Rust `self::`, `super::` and `crate::` resolve through the module tree, as the qualified-head consumer does. |
+| Stop | At each occurrence, the walk first drops a wildcard candidate whose module resolves to an indexed file that does not export the name. A wildcard whose module does not resolve stays: it may bind the name. The first occurrence that keeps a standing candidate ends the walk, and an outer occurrence never overrides it. When none remains, the walk continues outward. The order rule says whether a binding after the site stands: under the Python rule it does, and it gives `OpaqueBinding`. |
 | Lexical verdict | For a language with a scope table, the walk produces the lexical verdict that `ladder::call` reads (`cx.lexical`, `ecp-core/src/analyzer/ladder.rs:2108-2124`) and the `lexical` input of `ladder::name_ref` (`ladder.rs:432-439`). `LexicalFunctions` does not produce them for that language. So no declaration-only verdict returns before the walk compares imports. |
 | Replaces | For that language, the walk also replaces Tier 1 (`same_file`), the named-import tier and the wildcard pass for a bare name. A walk result that rests on a `Wildcard` binding alone waits until the heritage tier binds nothing, as today's wildcard pass does (`ladder.rs:788-790`). |
-| `EnvId` | The pair (use-site occurrence, the count of import and local bindings of the file whose site precedes `at`). Two use sites with one `EnvId` have one environment. For a hoisted-only language, the count is the total. |
 | Backing list | The environment is a view over the file's full import list in its stored order. A position, such as `NamedImport.position` (`ecp-core/src/analyzer/reexport.rs:1026`), indexes that full list, never a filtered copy. |
-| Memo | A memo key holds the `EnvId`, the target kind and the name. It lives no longer than the view generation; the overlay clears its named-import memo when the facts change (`ecp-core/src/session/view/resolution.rs:329-332`). |
-| Cost | The occurrence index, the `EnvId` table and the name index are built at parse or refresh time. A query never walks the AST, never scans the whole import list, never expands a wildcard to every name, and never rebuilds the environment of a clean file. |
+| Memo | The memo caches the use-site-independent part: for one file, one occurrence, one name and one target kind, the ordered bindings of the name (declarations, import bindings, local bindings) with their sites and resolved targets. The key is (`FileOrd`, `ScopeId`, name, target kind); a `ScopeId` alone is file-local. The pick at the use site applies the order rule to that list and is never cached, so a declaration between two uses changes the answer (`from a import g; g(); def g(): ...; g()`). The memo lives no longer than the view generation; the overlay clears its named-import memo when the facts change (`ecp-core/src/session/view/resolution.rs:329-332`). |
+| Cost | The occurrence index and the per-occurrence name index are built at parse or refresh time. The pick costs one scan of the bindings of one name in the walked occurrences. A query never walks the AST, never scans the whole import list, never expands a wildcard to every name, and never rebuilds the environment of a clean file. |
 
 | Language | Order rule | Occurrence rule |
 |---|---|---|
-| Rust | hoisted: a `use` is visible in its whole occurrence | each occurrence is separate |
-| Python | statement order; in a `Callable` occurrence, a name that the occurrence binds anywhere stands at every site of it | the walk skips a `Type` occurrence when the use site is in a callable nested in it |
+| Rust | hoisted: a `use` is visible in its whole occurrence | each occurrence is separate. A `Module` occurrence is a boundary: a bare name does not see the items or the `use` of an outer module (`crates/ecp-analyzer/tests/rust_import_scope.rs:329-336`) |
+| Python | statement order in the use site's own occurrence; in a `Callable` occurrence, a name that the occurrence binds anywhere stands at every site of it. In an enclosing occurrence, the last binding of the name stands, because the read runs when the callable runs. A directive redirects the read (`crates/ecp-analyzer/tests/python_import_scope.rs:451-464`) | the walk skips a `Type` occurrence when the use site is in a callable nested in it |
 | C# | hoisted inside its namespace block | each namespace block is separate |
 | PHP | statement order | each namespace section is separate |
-| C++ | from the point of declaration | the blocks of one namespace (one anchor) are linked: a later block sees the earlier blocks' using-declarations and using-directives that precede it. A using-directive acts in the nearest namespace that encloses both the directive and the nominated namespace. |
+| C++ | from the point of declaration | the blocks of one namespace (one anchor) are linked: a later block sees the earlier blocks' using-declarations and using-directives that precede it. A using-declaration is a candidate in its own occurrence. A using-directive is deferred: it is visible to use sites inside its occurrence, but its names join the candidates at the join occurrence, after every inner level. The join occurrence is the nearest occurrence that contains both the directive and the nominated namespace; for a namespace of another file it is the root (`crates/ecp-analyzer/tests/cpp_import_scope.rs:124-141`) |
 | TypeScript | hoisted for `import`; the round-2 slice confirms `import X = A.B` | each `namespace` and `declare module` body is separate |
 
 The C++ rows are pinned by `test_cpp_import_scope_reopened_scope_namespace_declaration_visible_in_reopening`, `test_cpp_import_scope_reopened_scope_namespace_directive_visible_in_reopening` and `test_cpp_import_scope_directive_hoists_to_common_namespace_nested_namespace_binds_outer_decl` (`crates/ecp-analyzer/tests/cpp_import_scope.rs`). The C# and PHP rows are pinned by their `reopened_scope` tests.
@@ -247,7 +250,7 @@ Named exceptions, which read the file's full list:
 
 All names in this table are under `ecp-core/src/analyzer/` except the Python receiver file.
 
-**Lookup outcome.** The walk classifies its result in three steps. (1) The order rule and the merge rule give the standing candidates of the stopping occurrence. (2) Each import candidate resolves to its targets: a wildcard candidate contributes only when its module exports the name. (3) The result counts distinct target declarations. For Python, the last binding of the name before the site stands, so a later star import that exports the name overrides an earlier binding.
+**Lookup outcome.** The walk classifies its result in three steps. (1) The walk finds the stopping occurrence by the Walk and Stop rules, with directives and deferred bindings applied. (2) In that occurrence, the order rule and the merge rule give the standing candidates, and each resolves to its targets. A wildcard whose module does not resolve gives no target. (3) The result counts distinct target declarations. For Python, the last binding of the name before the site stands, so a later star import that exports the name overrides an earlier binding.
 
 | Walk result | `Resolution` | Later ladder tiers | Kotlin retry | Constructor fallback | Outer chain level |
 |---|---|---|---|---|---|
@@ -267,10 +270,10 @@ The walk adds the two reasons to `NoEdge` (`outcome.rs:87-103`) and two rows to 
 
 | Surface | Must carry | Identifier |
 |---|---|---|
-| parse cache (`LocalGraph`) | `scopes`, `local_bindings`; `scope`, `site` and `form` on each `RawImport` (`types.rs:659-672`); `call_sites` and `read_sites` on each `RawNode` (`types.rs:510-544`). `LocalGraph.imports` is at `types.rs:1456`. | bump `BUILDER_FINGERPRINT` (`ecp-core/src/registry/commit_meta.rs:190`, now `schema52`) |
-| L1 fragment | `FragmentFile.imports` is a `Vec<RawImport>` (`ecp-cli/src/session/overlay_writer.rs:148`), so the binding fields travel with it. `FragmentFile` gains `scopes` and `local_bindings`. `FragmentSymbol` gains `call_sites` and `read_sites` beside `calls` and `variant_refs` (`overlay_writer.rs:100`, `:102`), and the overlay replays them. | a new fragment format value. The reader accepts one value (`ecp-cli/src/session/overlay_reader.rs:206`). V7 shipped in v0.17.0, so the new fields do not extend it in place. |
-| `graph.bin` | `ImportFact` (`ecp-core/src/graph.rs:855-867`) gains `scope`, `site` and `form`. `ZeroCopyGraph` gains every file's scope table, in CSR form as `file_imports` (`graph.rs:1319-1320`). The overlay reads a clean module's imports from these facts (`graph.rs:850-852`). `graph.bin` stores no use site: until it does, the incremental overlay does not re-resolve a clean caller for a scope change, and the caveat names `Calls`. | bump `GRAPH_FORMAT_VERSION` (`graph.rs:47`, now 20) |
-| overlay memo and view cache | The memo key of "Scope lookup". Today the key is `(file_ord, target)` (`ecp-core/src/session/view/resolution.rs:2842`). | `VIEW_CACHE_FORMAT` follows the above |
+| parse cache (`LocalGraph`) | `scopes`, `local_bindings`, `directives`; `scope`, `site` and `form` on each `RawImport` (`types.rs:659-672`); `call_sites` and `read_sites` on each `RawNode` (`types.rs:510-544`). `LocalGraph.imports` is at `types.rs:1456`. | bump `BUILDER_FINGERPRINT` (`ecp-core/src/registry/commit_meta.rs:190`, now `schema52`) |
+| L1 fragment | `FragmentFile.imports` is a `Vec<RawImport>` (`ecp-cli/src/session/overlay_writer.rs:148`), so the binding fields travel with it. `FragmentFile` gains `scopes`, `local_bindings` and `directives`. `FragmentSymbol` gains `call_sites` and `read_sites` beside `calls` and `variant_refs` (`overlay_writer.rs:100`, `:102`), and the overlay replays them. | a new fragment format value. The reader accepts one value (`ecp-cli/src/session/overlay_reader.rs:206`). V7 shipped in v0.17.0, so the new fields do not extend it in place. |
+| `graph.bin` | `ImportFact` (`ecp-core/src/graph.rs:855-867`) gains `scope`, `site` and `form`. `ZeroCopyGraph` gains every file's scope table, in CSR form as `file_imports` (`graph.rs:1319-1320`). The overlay reads a clean module's imports from these facts (`graph.rs:850-852`). `graph.bin` stores no use site. A clean file that the invalidation closure names is parsed again (`ecp-core/src/session/view.rs:121-125`), so its parse gives its use sites. Only a clean caller that the closure does not name keeps its indexed edges; when the closure cannot re-resolve a dependent, the view's stale-closure caveat names the kinds and names it left (`view.rs:1196-1201`). | bump `GRAPH_FORMAT_VERSION` (`graph.rs:47`, now 20) |
+| overlay memo and view cache | The memo key of "Scope lookup". Today the key is `(file_ord, target)` (`ecp-core/src/session/view/resolution.rs:2842`). | The view cache key already hashes `VIEW_CACHE_FORMAT`, `BUILDER_FINGERPRINT`, the binary, the `graph.bin` stamp and the accepted fragment inputs (`ecp-cli/src/session/view_cache.rs:39-51`), so the bumps above invalidate it. Bump `VIEW_CACHE_FORMAT` only when the encoding of a cached view changes. |
 
 **Test matrix.** The dimension is `import_scope`. Each case asserts the raw records, the full-build target, the overlay target, and the edges that must not exist. A full-build and overlay match alone is no proof: both sides can bind the same wrong target.
 
@@ -285,15 +288,15 @@ The walk adds the two reasons to `NoEdge` (`outcome.rs:87-103`) and two rows to 
 
 | Case group | Cases |
 |---|---|
-| Reach | file, namespace or module, callable body, anonymous block |
+| Reach | file, namespace or module, callable body, anonymous block; a Rust outer `use` that an inline `mod` does not see; a C++ using-directive that joins at the common namespace |
 | Isolation | sibling occurrences that bind `g` to two targets; no reach outside the occurrence; a namespace reopened in one file, with the language's occurrence rule |
 | Precedence | an inner import against an outer declaration; an inner declaration against an outer import; a local or a parameter of the same name |
-| Order | a use before and after the binding; a hoisted item against a statement-order binding; in Python, a use before a later import of the name in one function (`OpaqueBinding`, no outer edge), and `from a import g`, `from b import g`, `from a import g` in one scope |
-| Directive | Python `global g` then `from m import g` in a function; `nonlocal g` in a nested function |
+| Order | a use before and after the binding; a hoisted item against a statement-order binding; in Python, a use before a later import of the name in one function (`OpaqueBinding`, no outer edge), and `from a import g`, `from b import g`, `from a import g` in one scope; `from a import g; g(); def g(): ...; g()` in one function, queried in both orders |
+| Directive | Python `global g` then `from m import g` in a function; `global g; g()` under a module-level `from b import g` binds `b.g`; `nonlocal g` in a nested function |
 | Consumers | a qualified head `m.run()` with `m` bound to two modules in sibling occurrences; the import-member tier, the constructor fallback and Python `FromReceiver` under the same split |
 | Dynamic load | in Python, two sibling functions that load one module: one synthetic row, and both calls bind |
 | Identity | inserted whitespace; an inserted unrelated occurrence; swapped sibling subtrees of different sizes |
-| Failure | a missing module, an external target, an ambiguous target, unsupported or malformed syntax: no fallback edge |
+| Failure | a missing module, an external target, an ambiguous target, unsupported or malformed syntax: no fallback edge; an inner wildcard whose resolved module does not export the name, under an outer binding that does |
 | Cache | one occurrence, one name, one target kind, two environments; query A then B, and B then A, give one result |
 | Overlay | a changed import source, alias or occurrence; a deleted or moved import; a changed dependency export with the caller's bytes unchanged |
 
@@ -391,7 +394,7 @@ Values with no mapping:
 
 ### Overlay today
 
-`OverlayView` masks base edges of a dirty file only for `Calls` and `ReadsField` (`ecp-core/src/session/view.rs:995`) and rebuilds `References` for five reasons (`:1002-1011`). It skips builder-made node kinds (`fragment_emits`, `:1297`). An L1 fragment holds symbols, imports and export aliases (`overlay_writer.rs:119-123`); the reader accepts format V5 only (`overlay_reader.rs:76`). The overlay replays no raw record of the table above except `Import`, and it rebuilds no edge kind that a `RecordKind` yields.
+`OverlayView` masks a base edge that starts in a re-parsed file only for a kind that it rebuilds (mask ⊆ rebuild, `ecp-core/src/session/view.rs:1245-1275`): `Calls`, `ReadsField`, `HasMethod`, `Decorates`, `Overrides`, `Extends` and `Implements` at the file's declarations; `Defines` and `Imports` at its declarations and its `File` node; `HasProperty` and the record edges when the records replayed. It rebuilds `References` for five reasons only: closure, overload set, enum-variant use, enum-variant pattern and function value (`view.rs:1290-1300`). A fragment never carries the node kinds `File`, `Import`, `Route`, `Process`, `Document`, `EntryPoint` and the four record kinds, so a re-parse alone never suppresses such a base node (`fragment_emits`, `view.rs:1965-2007`). The record replay is the exception for its four node kinds: it suppresses a base `PathLiteral`, `TransactionScope`, `SchemaField` or `EventTopic` node that no replayed node pairs with (`ecp-core/src/session/incremental.rs:136-152`). A clean file of the invalidation closure is parsed again and resolved as a dirty one (`view.rs:121-125`, `OverlayView::build_with_configs` at `:1167-1194`). An L1 fragment (`FragmentFile`) holds symbols, imports, export aliases, the file's raw records and its language after parse (`ecp-cli/src/session/overlay_writer.rs:146-159`). The raw records are `OverlayFileRecords`: path literals, SQL references, transaction scopes, schema fields and event topics, each endpoint bound (`overlay_writer.rs:150`; `ecp-core/src/session/view.rs:442-448`; format note at `ecp-core/src/session/overlay.rs:70-78`). The reader accepts format V7 only (`ecp-cli/src/session/overlay_reader.rs:206`). Given those records, the overlay replays `Import` and the five record kinds, and it rebuilds their nodes and their `UsesPathLiteral`, `QueriesTable`, `OpensTxScope`, `HasProperty`, `Publishes` and `Subscribes` edges (`view.rs:88-93`). It replays no `Route`, `FrameworkRef`, `FanoutRef`, `CallMeta` or `FetchSite` record.
 
 ### Import scope today
 
@@ -416,7 +419,7 @@ Values with no mapping:
 
 Reads: the scope table, the local bindings, the `scope`, `site` and `form` of each `RawImport`, the use sites, and the consumer and outcome tables of "Scope table and import bindings".
 
-Must stop: Tier 1 binding before any import tier (`ecp-core/src/analyzer/name_tiers.rs:296-308`) for a language with a scope table; a `Bound` lexical verdict from `LexicalFunctions` for that language (`ecp-core/src/analyzer/ladder.rs:2108-2115`); the caller's span as the lexical input (`ecp-core/src/analyzer/lexical.rs:694`); an import consumer that reads the whole file's list outside the named exceptions; a named-import memo key without the `EnvId` (`ecp-core/src/session/view/resolution.rs:2842`).
+Must stop: Tier 1 binding before any import tier (`ecp-core/src/analyzer/name_tiers.rs:296-308`) for a language with a scope table; a `Bound` lexical verdict from `LexicalFunctions` for that language (`ecp-core/src/analyzer/ladder.rs:2108-2115`); the caller's span as the lexical input (`ecp-core/src/analyzer/lexical.rs:694`); an import consumer that reads the whole file's list outside the named exceptions; a named-import memo answer that depends on the use site but is keyed without it (`ecp-core/src/session/view/resolution.rs:2842`).
 
 ### Area 2: owner split
 
@@ -521,7 +524,7 @@ Proof per the repo `CLAUDE.md`: index with a parse cache that the previous binar
    | 3 | `graph.bin` keeps the fetch sites of clean files, or the route table they match against. A `GRAPH_FORMAT_VERSION` bump. | area 8 |
    | 4 | The overlay masks the base `Fetches` edges of a dirty file, and re-matches every dirty route against all fetch sites and every dirty fetch site against all routes. | area 5 |
 5. **Inline handler.** Closed by C1 Open point 13: option (a). Some parsers emit `<anonymous:…>` closure nodes (`builder.rs:2183-2185`), and only when the body holds a call. A closure node is a `Node` endpoint and maps to `HandlerRef::Closure { uid }`. A handler with no node stays `Unbound::Inline` at its argument's span and maps to `Inline { line }`. Both print `inline_anonymous`, so `ecp routes` keeps its values, and the uid lets `impact` reach the calls inside the closure. See the Area 8 mapping table.
-6. **Call tiers and B's outcome type.** Decided. R1a (`393f52ae`) carries the true count: `NoEdge::Ambiguous(u32)` (`ecp-core/src/analyzer/outcome.rs:92`), so `Evidence::Ambiguous { candidates }` can take it. Before R1a, the variant carried no count. The `Global` tier (`Tier::Global`, `outcome.rs:29`) is Heuristic class: a name-only match with no import or scope evidence. Its confidence stays 0.7 (`Tier::confidence`, `outcome.rs:43`). That value sits at `HEURISTIC_CEILING` (`raw_records.rs:487`), so a `Global` edge stays untagged. R-A4 may revisit the class or the value. C4 does not reclassify other call tiers.
+6. **Call tiers and B's outcome type.** Decided. R1a (`393f52ae`) carries the true count: `NoEdge::Ambiguous(u32)` (`ecp-core/src/analyzer/outcome.rs:92`), so `Evidence::Ambiguous { candidates }` can take it. Before R1a, the variant carried no count. The `Global` tier (`Tier::Global`, `outcome.rs:29`) is Heuristic class: a name-only match with no import or scope evidence. Its confidence stays 0.7 (`Tier::confidence`, `outcome.rs:48`). That value sits at `HEURISTIC_CEILING` (`raw_records.rs:487`), so a `Global` edge stays untagged. R-A4 may revisit the class or the value. C4 does not reclassify other call tiers.
 7. **Accepted kinds of a path literal or SQL literal.** The type doc names Function, Method and Const (`types.rs:595`). A literal in a module-level `Variable` binds `File`. Recommendation: keep. The accepted kinds are one shared rule in `RecordKind`, so widening them changes every language. A change ships with tests for the 14 mainstream languages (repo `CLAUDE.md`), each with a literal in the newly accepted kind and one outside it.
 8. **`Decorates` to a synthetic node at 0.8** (`decorates_edges.rs:123-166`). (a) Keep: the synthetic node is the honest unresolved marker (`SYNTHETIC_FILE_IDX`). (b) Drop it below 0.7. Recommendation: (a); area 7 confirms.
 9. **`RawTxScope` packing.** Its 24-bit index (`types.rs:955`) is narrower than `RawIdx`. `RawTxScope::new` checks the limit with a `debug_assert` only (`types.rs:962-970`), so in a release build index `2^24` packs as `0` and the record binds the file's first node. Recommendation: keep the packing; read it as `RawIdx(node_idx())`. A producer packs only through `RawIdx::to_packed24`, which checks in every build. On `None` it drops the record and records a `BlindSpot` with the file and the site; it never packs a truncated index. Area 7 moves the check into a checked `RawTxScope` constructor that returns `Option`.

@@ -443,6 +443,27 @@ case!(
     }
 );
 
+// ---- directive-global without an import ----
+// `global g` only redirects the read to the module scope; it binds nothing,
+// so the call reads the module-level import (Simple statements > "The global
+// statement").
+
+const R12B_FN: &str = r#"from b import g
+
+def caller_gr():
+    global g
+    g()
+"#;
+
+case!(
+    R12B_FN,
+    test_python_import_scope_directive_global_without_import_reads_module_import,
+    test_python_import_scope_directive_global_without_import_overlay_matches_full,
+    |g| {
+        assert_eq!(calls(&g, "caller_gr"), vec![hit("b.py", "g", 1)]);
+    }
+);
+
 // ---- directive-nonlocal ----
 // `nonlocal g` makes an import in the nested function rebind `outer`'s `g`,
 // which a sibling nested function reads (Simple statements > "The nonlocal statement").

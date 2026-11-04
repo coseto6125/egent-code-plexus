@@ -215,7 +215,7 @@ Status: contract for a future slice, with C4 "Scope table and import bindings", 
 |---|---|---|
 | Insert whitespace, or edit a body and add no occurrence | unchanged | unchanged |
 | Insert an unrelated occurrence | every later id moves | unchanged |
-| Swap two sibling subtrees (blocks or function bodies) | renumbered by the new pre-order: each id of one subtree shifts by the size of the other subtree, so ids swap only when the two sizes are equal (`File=0, A=1, A.child=2, B=3` becomes `File=0, B=1, A=2, A.child=3`) | a `Block` has none; a body keeps its key, because each anchor stays with its declaration |
+| Swap two sibling subtrees (blocks or function bodies) | renumbered by the new pre-order. For two adjacent siblings, each id of one subtree shifts by the size of the other, so ids swap only when the two sizes are equal (`File=0, A=1, A.child=2, B=3` becomes `File=0, B=1, A=2, A.child=3`). Siblings between them shift the ids too | a `Block` has none; a body keeps its key, because each anchor stays with its declaration |
 | Rename or re-nest the declaring container | can move | changes with the anchor (Stability against unrelated edits) |
 
 ### Target request syntax
