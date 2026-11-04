@@ -277,8 +277,9 @@ fn execute_inner(
 /// MATCH stage: fold each clause's patterns over the running binding set.
 fn exec_matches(query: &Query, graph: MergedGraph<'_>) -> Result<Vec<Binding>, CypherError> {
     let mut bindings: Vec<Binding> = vec![Binding::default()];
-    for mc in &query.matches {
-        bindings = exec_match_clause(mc, &bindings, graph)?;
+    let mut budget = RowBudget::new();
+    for (i, mc) in query.matches.iter().enumerate() {
+        bindings = exec_match_clause(mc, &bindings, graph, &mut budget, i == 0)?;
     }
     Ok(bindings)
 }
@@ -1495,13 +1496,12 @@ impl Accumulator {
     }
 }
 
-/// Bindings a join may grow one materialised MATCH stage to. WHERE, ORDER BY
-/// and LIMIT run after MATCH, so `MATCH (a:Function), (b:Function) WHERE
-/// a.name = b.name ... LIMIT 3` built every pair first: 26.7k functions gave
-/// 713M pairs, which filled 29 GB and froze WSL. The cap binds only rows a
-/// join multiplies (a later comma pattern, a clause after the first). The
-/// first scan stays uncapped: it is linear in the graph, and a large repo
-/// legitimately scans millions of edges. At the cap the process held 1.3 GB.
+/// Bindings one materialised MATCH stage may build. WHERE, ORDER BY and LIMIT
+/// run after MATCH, so `MATCH (a:Function), (b:Function) WHERE a.name =
+/// b.name ... LIMIT 3` built every pair first: 26.7k functions gave 713M
+/// pairs, which filled 29 GB and froze WSL. A two-hop pattern through a hub
+/// grows the same way (sum of in-degree squared). At the cap the process
+/// held 1.3 GB.
 const MAX_MATCH_ROWS: usize = 2_000_000;
 
 fn match_row_cap() -> usize {
@@ -1512,44 +1512,65 @@ fn match_row_cap() -> usize {
     MAX_MATCH_ROWS
 }
 
-fn check_match_rows(rows: usize, cap: usize) -> Result<(), CypherError> {
-    if rows <= cap {
-        return Ok(());
+/// The rows a materialised MATCH stage may still build. Each hop, pattern
+/// and clause charges the bindings it creates, as it creates them, so the
+/// refusal comes before the product is allocated. The charge is cumulative,
+/// so it also bounds the live rows. The scan that opens the first pattern of
+/// the first clause (its seeds and a single first hop) is not charged: it is
+/// linear in the graph, and a large repo scans millions of edges that way.
+struct RowBudget {
+    left: usize,
+    cap: usize,
+}
+
+impl RowBudget {
+    fn new() -> Self {
+        let cap = match_row_cap();
+        Self { left: cap, cap }
     }
-    Err(CypherError::Exec {
-        msg: format!(
-            "MATCH built more than {cap} rows before WHERE and LIMIT run. Patterns that share \
-             no variable (comma patterns, or consecutive MATCH clauses) multiply into a \
-             cartesian product. Join them by a relationship or a shared variable, or pin a \
-             node with a label and an inline property such as (a:Function {{name:'x'}}). An \
-             aggregate query such as count(*) streams and is not capped."
-        ),
-    })
+
+    fn charge(&mut self, rows: usize) -> Result<(), CypherError> {
+        match self.left.checked_sub(rows) {
+            Some(left) => {
+                self.left = left;
+                Ok(())
+            }
+            None => Err(CypherError::Exec {
+                msg: format!(
+                    "MATCH built more than {} rows before WHERE and LIMIT run: each hop, \
+                     pattern and clause extends every row before it, so patterns that share no \
+                     variable, and nodes with many edges, multiply. Pin a node with a label and \
+                     an inline property such as (a:Function {{name:'x'}}). To find values that \
+                     several nodes share, group instead of joining: MATCH (a:Function) WITH \
+                     a.name AS n, count(*) AS c WHERE c > 1 RETURN n, c",
+                    self.cap
+                ),
+            }),
+        }
+    }
 }
 
 fn exec_match_clause(
     mc: &MatchClause,
     prior: &[Binding],
     graph: MergedGraph<'_>,
+    budget: &mut RowBudget,
+    first_clause: bool,
 ) -> Result<Vec<Binding>, CypherError> {
-    let cap = match_row_cap();
-    let joins_prior = prior.len() > 1;
     let mut out = Vec::new();
     for b in prior {
         // Comma patterns are one join: each pattern extends the rows the
         // previous one produced, so a variable shared between them pins both
         // and unrelated patterns multiply (cartesian product).
         let joined = match mc.patterns.as_slice() {
-            [only] => exec_pattern(only, b, graph)?,
+            [only] => exec_pattern(only, b, graph, budget, first_clause)?,
             patterns => {
                 let mut rows = vec![b.clone()];
                 for (i, pat) in patterns.iter().enumerate() {
+                    let opens = first_clause && i == 0;
                     let mut next = Vec::new();
                     for row in &rows {
-                        next.extend(exec_pattern(pat, row, graph)?);
-                        if i > 0 {
-                            check_match_rows(out.len() + next.len(), cap)?;
-                        }
+                        next.extend(exec_pattern(pat, row, graph, budget, opens)?);
                     }
                     rows = next;
                 }
@@ -1561,9 +1582,6 @@ fn exec_match_clause(
             out.push(b.clone());
         } else {
             out.extend(joined);
-        }
-        if joins_prior {
-            check_match_rows(out.len(), cap)?;
         }
     }
     Ok(out)
@@ -1723,8 +1741,9 @@ fn visit_matches(
             .sum::<usize>();
         if depth > MAX_STREAM_DEPTH {
             let mut bindings = vec![Binding::default()];
-            for mc in clauses {
-                bindings = exec_match_clause(mc, &bindings, graph)?;
+            let mut budget = RowBudget::new();
+            for (i, mc) in clauses.iter().enumerate() {
+                bindings = exec_match_clause(mc, &bindings, graph, &mut budget, i == 0)?;
             }
             for b in &bindings {
                 emit(b)?;
@@ -1901,10 +1920,14 @@ fn visit_hops(
     result
 }
 
+/// `opens` marks the pattern that opens the first clause: its seeds and a
+/// single first hop are not charged to `budget`.
 fn exec_pattern(
     pat: &Pattern,
     base: &Binding,
     graph: MergedGraph<'_>,
+    budget: &mut RowBudget,
+    opens: bool,
 ) -> Result<Vec<Binding>, CypherError> {
     // If the first node is unbound but the last one is already bound, walk the
     // pattern right-to-left: reverse nodes/rels and invert each hop direction.
@@ -1912,7 +1935,7 @@ fn exec_pattern(
     // with one adjacency walk — `OPTIONAL MATCH (c)-[:Calls]->(f)` with `f`
     // bound (the orphan-query shape) is O(deg f) instead of O(V+E).
     if let Some(reversed) = bound_start_pattern(pat, base) {
-        return exec_pattern(&reversed, base, graph);
+        return exec_pattern(&reversed, base, graph, budget, opens);
     }
 
     let mut frontier: Vec<(Binding, u32)> = Vec::new();
@@ -1923,12 +1946,17 @@ fn exec_pattern(
         }
         frontier.push((binding, idx));
     });
+    if !opens {
+        budget.charge(frontier.len())?;
+    }
 
     for (hop, rel) in pat.rels.iter().enumerate() {
         let next_np = &pat.nodes[hop + 1];
         let mut next_frontier: Vec<(Binding, u32)> = Vec::new();
+        let charged = !(opens && hop == 0 && rel.range.is_none());
 
         for (b, cur_idx) in &frontier {
+            let before = next_frontier.len();
             match rel.range {
                 // Variable-length BFS (*min..max)
                 Some((min, max)) => {
@@ -1985,6 +2013,9 @@ fn exec_pattern(
                         next_frontier.push((nb, tgt_idx));
                     });
                 }
+            }
+            if charged {
+                budget.charge(next_frontier.len() - before)?;
             }
         }
         frontier = next_frontier;

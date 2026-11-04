@@ -24,11 +24,86 @@ fn execute_with_row_cap(n: usize, cap: usize, query: &str) -> Result<QueryResult
 fn assert_row_cap_refusal(result: Result<QueryResult, CypherError>) {
     match result {
         Err(CypherError::Exec { msg }) => assert!(
-            msg.contains("more than 100 rows") && msg.contains("cartesian product"),
+            msg.contains("more than 100 rows") && msg.contains("group instead of joining"),
             "refusal must name the cap and the cause: {msg}"
         ),
         other => panic!("expected the MATCH row-cap refusal, got {other:?}"),
     }
+}
+
+/// `n` callers of one `hub` function, under the MATCH row cap `cap`.
+fn execute_hub_with_row_cap(n: usize, cap: usize, query: &str) -> Result<QueryResult, CypherError> {
+    let mut fx = GraphFixture::new();
+    let hub = fx.func("src/hub.rs", "hub");
+    for i in 0..n {
+        let caller = fx.func("src/callers.rs", &format!("c{i}"));
+        fx.edge(caller, hub, RelType::Calls);
+    }
+    let bytes = fx.into_bytes();
+    let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+    MATCH_ROW_CAP.with(|c| c.set(Some(cap)));
+    let result = execute(&parse(query).unwrap(), graph, None, Path::new("."));
+    MATCH_ROW_CAP.with(|c| c.set(None));
+    result
+}
+
+#[test]
+fn test_execute_two_hop_pattern_through_a_hub_over_row_cap_is_refused() {
+    assert_row_cap_refusal(execute_hub_with_row_cap(
+        20,
+        100,
+        "MATCH (a)-[:Calls]->(m)<-[:Calls]-(b) RETURN a.name, b.name LIMIT 3",
+    ));
+}
+
+#[test]
+fn test_execute_shared_variable_comma_join_through_a_hub_over_row_cap_is_refused() {
+    assert_row_cap_refusal(execute_hub_with_row_cap(
+        20,
+        100,
+        "MATCH (a)-[:Calls]->(m), (b)-[:Calls]->(m) RETURN a.name, b.name LIMIT 3",
+    ));
+}
+
+#[test]
+fn test_execute_variable_length_first_hop_over_row_cap_is_refused() {
+    assert_row_cap_refusal(execute_hub_with_row_cap(
+        200,
+        100,
+        "MATCH (a)-[:Calls*1..2]->(b) RETURN DISTINCT a.name, b.name",
+    ));
+}
+
+#[test]
+fn test_execute_single_first_hop_over_row_cap_returns_every_row() {
+    let result = execute_hub_with_row_cap(150, 100, "MATCH (a)-[:Calls]->(h) RETURN a.name")
+        .expect("one hop out of the opening scan is linear and is not capped");
+    assert_eq!(result.rows.len(), 150);
+}
+
+#[test]
+fn test_execute_clause_after_a_one_row_clause_over_row_cap_is_refused() {
+    assert_row_cap_refusal(execute_with_row_cap(
+        200,
+        100,
+        "MATCH (a:Function {name:'f3'}) MATCH (b:Function) RETURN a.name, b.name",
+    ));
+}
+
+#[test]
+fn test_execute_grouping_rewrite_from_the_refusal_returns_shared_names() {
+    let mut fx = GraphFixture::new();
+    fx.func("src/a.rs", "dup");
+    fx.func("src/b.rs", "dup");
+    fx.func("src/a.rs", "solo");
+    let bytes = fx.into_bytes();
+    let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+    let query = "MATCH (a:Function) WITH a.name AS n, count(*) AS c WHERE c > 1 RETURN n, c";
+    let result = execute(&parse(query).unwrap(), graph, None, Path::new(".")).unwrap();
+    assert_eq!(
+        result.rows,
+        vec![vec![Value::Str("dup".into()), Value::Int(2)]]
+    );
 }
 
 #[test]
