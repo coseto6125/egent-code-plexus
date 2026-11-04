@@ -20,6 +20,7 @@ mod analyze_here_cmd;
 mod analyze_routing;
 mod auto_ensure;
 mod blind_spots_python;
+mod broken_pipe_stdout;
 mod build_mode;
 mod build_semaphore_test;
 mod caveat_payload;
