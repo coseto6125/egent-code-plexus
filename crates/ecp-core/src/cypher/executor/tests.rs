@@ -4,6 +4,78 @@ use std::cell::Cell;
 
 thread_local! {
     pub(super) static PATTERN_VISITS: Cell<usize> = const { Cell::new(0) };
+    pub(super) static MATCH_ROW_CAP: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+/// Runs `query` over `n` free functions with the MATCH row cap set to `cap`.
+fn execute_with_row_cap(n: usize, cap: usize, query: &str) -> Result<QueryResult, CypherError> {
+    let mut fx = GraphFixture::new();
+    for i in 0..n {
+        fx.func(&format!("src/f{}.rs", i % 3), &format!("f{i}"));
+    }
+    let bytes = fx.into_bytes();
+    let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+    MATCH_ROW_CAP.with(|c| c.set(Some(cap)));
+    let result = execute(&parse(query).unwrap(), graph, None, Path::new("."));
+    MATCH_ROW_CAP.with(|c| c.set(None));
+    result
+}
+
+fn assert_row_cap_refusal(result: Result<QueryResult, CypherError>) {
+    match result {
+        Err(CypherError::Exec { msg }) => assert!(
+            msg.contains("more than 100 rows") && msg.contains("cartesian product"),
+            "refusal must name the cap and the cause: {msg}"
+        ),
+        other => panic!("expected the MATCH row-cap refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_execute_comma_cartesian_over_row_cap_with_limit_is_refused() {
+    assert_row_cap_refusal(execute_with_row_cap(
+        20,
+        100,
+        "MATCH (a:Function), (b:Function) WHERE a.name = b.name AND a.filePath <> b.filePath \
+         RETURN a.name LIMIT 3",
+    ));
+}
+
+#[test]
+fn test_execute_unjoined_match_clauses_over_row_cap_is_refused() {
+    assert_row_cap_refusal(execute_with_row_cap(
+        20,
+        100,
+        "MATCH (a:Function) MATCH (b:Function) RETURN a.name, b.name",
+    ));
+}
+
+#[test]
+fn test_execute_comma_cartesian_at_row_cap_returns_rows() {
+    let result = execute_with_row_cap(10, 100, "MATCH (a:Function), (b:Function) RETURN a.name")
+        .expect("exactly the cap is allowed");
+    assert_eq!(result.rows.len(), 100);
+}
+
+#[test]
+fn test_execute_single_scan_over_row_cap_returns_every_row() {
+    let result = execute_with_row_cap(200, 100, "MATCH (a:Function) RETURN a.name")
+        .expect("the first scan is linear in the graph and is not capped");
+    assert_eq!(result.rows.len(), 200);
+}
+
+#[test]
+fn test_execute_comma_patterns_sharing_a_variable_under_row_cap_return_rows() {
+    let result = execute_with_row_cap(20, 100, "MATCH (a:Function), (a {name:'f3'}) RETURN a.name")
+        .expect("a shared variable pins the join");
+    assert_eq!(result.rows, vec![vec![Value::Str("f3".into())]]);
+}
+
+#[test]
+fn test_execute_aggregate_cartesian_over_row_cap_streams_count() {
+    let result = execute_with_row_cap(20, 100, "MATCH (a:Function), (b:Function) RETURN count(*)")
+        .expect("an aggregate streams and is not capped");
+    assert_eq!(result.rows, vec![vec![Value::Int(400)]]);
 }
 
 fn execute_materialising(

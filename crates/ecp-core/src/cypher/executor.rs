@@ -1495,11 +1495,45 @@ impl Accumulator {
     }
 }
 
+/// Bindings a join may grow one materialised MATCH stage to. WHERE, ORDER BY
+/// and LIMIT run after MATCH, so `MATCH (a:Function), (b:Function) WHERE
+/// a.name = b.name ... LIMIT 3` built every pair first: 26.7k functions gave
+/// 713M pairs, which filled 29 GB and froze WSL. The cap binds only rows a
+/// join multiplies (a later comma pattern, a clause after the first). The
+/// first scan stays uncapped: it is linear in the graph, and a large repo
+/// legitimately scans millions of edges. At the cap the process held 1.3 GB.
+const MAX_MATCH_ROWS: usize = 2_000_000;
+
+fn match_row_cap() -> usize {
+    #[cfg(test)]
+    if let Some(cap) = tests::MATCH_ROW_CAP.with(std::cell::Cell::get) {
+        return cap;
+    }
+    MAX_MATCH_ROWS
+}
+
+fn check_match_rows(rows: usize, cap: usize) -> Result<(), CypherError> {
+    if rows <= cap {
+        return Ok(());
+    }
+    Err(CypherError::Exec {
+        msg: format!(
+            "MATCH built more than {cap} rows before WHERE and LIMIT run. Patterns that share \
+             no variable (comma patterns, or consecutive MATCH clauses) multiply into a \
+             cartesian product. Join them by a relationship or a shared variable, or pin a \
+             node with a label and an inline property such as (a:Function {{name:'x'}}). An \
+             aggregate query such as count(*) streams and is not capped."
+        ),
+    })
+}
+
 fn exec_match_clause(
     mc: &MatchClause,
     prior: &[Binding],
     graph: MergedGraph<'_>,
 ) -> Result<Vec<Binding>, CypherError> {
+    let cap = match_row_cap();
+    let joins_prior = prior.len() > 1;
     let mut out = Vec::new();
     for b in prior {
         // Comma patterns are one join: each pattern extends the rows the
@@ -1509,10 +1543,13 @@ fn exec_match_clause(
             [only] => exec_pattern(only, b, graph)?,
             patterns => {
                 let mut rows = vec![b.clone()];
-                for pat in patterns {
+                for (i, pat) in patterns.iter().enumerate() {
                     let mut next = Vec::new();
                     for row in &rows {
                         next.extend(exec_pattern(pat, row, graph)?);
+                        if i > 0 {
+                            check_match_rows(out.len() + next.len(), cap)?;
+                        }
                     }
                     rows = next;
                 }
@@ -1524,6 +1561,9 @@ fn exec_match_clause(
             out.push(b.clone());
         } else {
             out.extend(joined);
+        }
+        if joins_prior {
+            check_match_rows(out.len(), cap)?;
         }
     }
     Ok(out)
