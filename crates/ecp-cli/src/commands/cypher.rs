@@ -36,8 +36,13 @@ pub struct CypherArgs {
     /// an error, never guessed: a second WITH, MATCH after WITH, WHERE right
     /// after OPTIONAL MATCH (use `WITH a, b WHERE ...`), ORDER BY outside the
     /// projection, functions other than type/id/labels and the aggregates,
-    /// and variable-length patterns without DISTINCT in RETURN, with an edge
-    /// variable, or with a minimum above 1.
+    /// variable-length patterns without DISTINCT in RETURN, with an edge
+    /// variable, or with a minimum above 1, and a materialised MATCH whose
+    /// hops, patterns and clauses build more than 2,000,000 rows in total
+    /// before WHERE and LIMIT (patterns that share no variable, or hops
+    /// through a node with many edges, multiply). The opening scan and its
+    /// first single hop are not counted. Aggregates stream, except past 64
+    /// pattern elements.
     ///
     /// Cypher operates on a single graph; --repo must resolve to one repo.
     #[arg(value_name = "QUERY")]

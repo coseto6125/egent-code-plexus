@@ -14,6 +14,16 @@ use ecp_cli::{admin, graph_path};
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() {
+    // Rust ignores SIGPIPE, so a write to a stdout whose reader left
+    // (`ecp find x | head -1`) makes `print!` panic; under the release
+    // profile's `panic = "abort"` that is a SIGABRT and a core dump. The
+    // default action ends ecp quietly, as it ends grep or cat.
+    #[cfg(unix)]
+    // SAFETY: runs first in main, before any thread starts, and installs the
+    // default disposition for one signal.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     // Default to WARN so tantivy / parser INFO chatter doesn't pollute
     // agents' output. Writer is stderr so `ecp ... --format json | jq` and
     // test harnesses parsing stdout stay clean; logs still surface for
