@@ -107,6 +107,13 @@ fn test_execute_grouping_rewrite_from_the_refusal_returns_shared_names() {
 }
 
 #[test]
+fn test_execute_overlapping_label_alternation_returns_each_node_once() {
+    let result = execute_with_row_cap(3, 100, "MATCH (a:Callable|Function|Function) RETURN a.name")
+        .expect("a label alternation is a set of kinds");
+    assert_eq!(result.rows.len(), 3);
+}
+
+#[test]
 fn test_execute_comma_cartesian_over_row_cap_with_limit_is_refused() {
     assert_row_cap_refusal(execute_with_row_cap(
         20,

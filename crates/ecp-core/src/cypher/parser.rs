@@ -503,7 +503,13 @@ fn parse_node_kinds_into(c: &mut Cursor, kinds: &mut Vec<NodeKind>) -> Result<()
         Some(Token::Ident(s)) => s.clone(),
         _ => return Err(c.err("NodeKind ident")),
     };
-    kinds.extend(resolve_node_label(&name)?);
+    // A label alternation is a set: `Callable|Function` lists Function twice,
+    // and the kind scan would seed every Function once per listing.
+    for kind in resolve_node_label(&name)? {
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
     Ok(())
 }
 
