@@ -106,6 +106,125 @@ The map reads node counts only, never uids. A tombstone keeps its slot. Nodes th
 
 Callable is `Function`, `Method`, `Constructor`. Type is `Class`, `Struct`, `Interface`, `Trait`. With no container and no file fallback, `RecordKind::bind_site` returns `None`: the record has no owner, and the producer drops it with a count, never with a guess. Facts inside a `RawNode` (`calls`, `field_reads`, `heritage`, `decorators`) start at that node by construction and need no endpoint.
 
+### Scope table and import bindings
+
+Status: contract for a future slice. No parser emits these records, and no type below exists yet. "Import scope today" records the current state. The plan's "Order" section places the slice. Every `file:line` in this section and in "Import scope today" was read at `56b7dbae`.
+
+Declarations and imports share one scope model. A parser emits a scope table per file, and each import row names its scope occurrence. The `Imports` edge keeps its `FileOnly` endpoint: the edge source and the binding scope are two facts. The existing type `ImportScope` (`ecp-core/src/session/import_scope.rs:167`) holds the overlay's module-discovery facts, and it is not this scope.
+
+| Term | Meaning |
+|---|---|
+| scope occurrence | One source region where names bind: the file, a module, a namespace block, a type body, a callable body, or an anonymous block. |
+| scope table | The scope occurrences of one file, in pre-order. |
+| import binding | One `RawImport` row, read with its scope and its site. |
+| target recipe | The fields that say what an import binding names: `source`, `imported_name`, `alias`, `binding_kind`, as today. |
+| in reach | Visible at a use site under the language's lookup rule. |
+| opaque binding | An import binding in reach whose target recipe resolves to no declaration in the graph: a missing module, an external package, or an unknown target. |
+
+| Type (planned, `ecp-core/src/contracts/raw_records.rs`) | Kind | Purpose |
+|---|---|---|
+| `ScopeId` | stored `u32` | The position of an occurrence in its file's scope table. `ScopeId(0)` is the file. C1 "Scope occurrence identity" fixes its stability. |
+| `ScopeKind` | stored enum | `File`, `Module`, `Namespace`, `Type`, `Callable`, `Block`. |
+| `RawScopeOccurrence` | stored record | `parent: Option<ScopeId>`, `kind`, `extent: Span`, `decl: Option<RawIdx>` (the declaring node; C1 derives its anchor). The name keeps it apart from C1's `Scope`, which is part of a declaration key. |
+| `ScopeError` | result | An occurrence or a binding that breaks an invariant below. |
+
+| Record | New field | Meaning |
+|---|---|---|
+| `LocalGraph` | `scopes: Vec<RawScopeOccurrence>` | The file's scope table. |
+| `RawImport` | `scope: ScopeId` | The occurrence that the binding belongs to. |
+| `RawImport` | `site: Span` | The span of the import clause. |
+
+The local name and the form (named, wildcard, module) of a binding come from its target recipe, by the rule that the import tiers use today (`reexport::named_import`, `ecp-core/src/analyzer/reexport.rs:1040`). The lookup index holds them typed. They are not stored, because a stored copy is a second spelling that can drift from that rule.
+
+| Item | Invariant |
+|---|---|
+| Root | `scopes[0]` is the only `File` occurrence. It has no parent, and its extent is the whole file. |
+| Parent | Every other occurrence has a parent with a lower `ScopeId`. So the parent chain is acyclic and ends at the root. |
+| Nesting | A parent's extent contains the extent of each child. Two sibling extents do not overlap. |
+| One region | A callable body or a type body is one occurrence. The producer does not also emit a `Block` with the same extent. |
+| `decl` | `Some(i)`: raw node `i` passes `is_scope_container` (C1), and its kind fits `kind` (next table). `File` and `Block` take `None`. A container with no node takes `None`, such as a TS `namespace` today (C1 Open point 14). |
+| Binding scope | The `site` of an import binding lies inside the extent of its `scope`, and no child of that scope contains the site. |
+| Declaration scope | A declaration belongs to the innermost occurrence that contains its span, its own body excluded. It needs no stored field. |
+| Dedup | An import dedup key includes `scope`. Two rows with one target recipe in two scopes stay two rows. |
+| Phases | The producer fixes the table order before it writes a `ScopeId`. `decl` binds in `BindRecords`, as a `RawIdx` does. |
+| Concatenation | Code that joins two raw graphs adds the length of the first table to every `ScopeId` of the second. The second root then takes kind `Block` and the first root as parent. |
+
+| `ScopeKind` | `decl` kinds |
+|---|---|
+| `Module` | `Module` |
+| `Namespace` | `Namespace` |
+| `Type` | `Class`, `Struct`, `Enum`, `Interface`, `Trait`, `Impl` |
+| `Callable` | `Function`, `Method`, `Constructor` |
+| `File`, `Block` | none |
+
+**Scope lookup.** Area 1 owns the visibility policy. C4 fixes its input and its result.
+
+| Rule | Statement |
+|---|---|
+| Input | The file, the use site, the name and the target kind. The caller's span is not the input, because two sibling blocks of one callable differ only by site. |
+| Walk | The walk starts at the innermost occurrence that contains the use site and ends at the root. At each occurrence, the candidates are its declarations and its import bindings. |
+| Language rule | A per-language rule decides three things: whether a binding is visible before its site, which candidate wins inside one occurrence, and which occurrences the walk skips (a Python class body, seen from a nested callable). |
+| Stop | The first occurrence with a candidate in reach ends the walk. An outer occurrence never overrides it. |
+| Replaces | For a language whose parser emits a scope table, the walk replaces Tier 1 (`same_file`) and the named-import tier for a bare name. Every other language keeps today's tiers. |
+| Cost | The index of occurrences and names is built at parse or refresh time. A query reads it and never walks the AST. |
+
+**Lookup outcome.** The walk adds one reason to `NoEdge` (`ecp-core/src/analyzer/outcome.rs:87-103`) and one row to the fallback table of shared-resolution §3.2. The row lives here: §3.2 records the design state at `ff75103a`, and this contract is the current rule.
+
+| Walk result | `Resolution` | Later ladder tiers | Kotlin retry | Constructor fallback | Outer chain level |
+|---|---|---|---|---|---|
+| One candidate in reach, and its target resolves | `Bound(hit)` | as §3.2 row `Bound` | as that row | as that row | as that row |
+| An opaque binding in reach | `NoEdge(OpaqueBinding)`, `reach()` is `Call` | skip | skip | skip | `NoEdge(ChainBroken)` |
+| No candidate in reach, and a declaration of the name elsewhere in the file | `Shadowed` | as §3.2 row `Shadowed` | as that row | as that row | as that row |
+| No candidate in the file | `Unknown` | run | runs | runs | `Unknown`, then the level fallback |
+
+`OpaqueBinding` has the `Call` reach, because a later tier or a fallback binds a namesake that the binding hides: `global` runs last in `name_tiers` (`ecp-core/src/analyzer/name_tiers.rs:515`). Its evidence class is `Unresolved`: no edge. `NoEdge::External` keeps its `Ladder` reach (`ecp-core/src/analyzer/outcome.rs:106-111`) for the import-member tiers that use it today.
+
+**Stored surfaces.**
+
+| Surface | Must carry | Identifier |
+|---|---|---|
+| parse cache (`LocalGraph`) | `scopes`, and `scope` and `site` on each `RawImport` (`ecp-core/src/analyzer/types.rs:659-672`, `LocalGraph.imports` at `:1456`) | bump `BUILDER_FINGERPRINT` (`ecp-core/src/registry/commit_meta.rs:190`, now `schema52`) |
+| L1 fragment | `FragmentFile.imports` is a `Vec<RawImport>` (`ecp-cli/src/session/overlay_writer.rs:148`), so the binding fields travel with it. `FragmentFile` gains `scopes`. | a new fragment format value. The reader accepts one value (`ecp-cli/src/session/overlay_reader.rs:206`). V7 shipped in v0.17.0, so the new fields do not extend it in place. |
+| `graph.bin` | `ImportFact` (`ecp-core/src/graph.rs:855-867`) gains `scope` and `site`. `ZeroCopyGraph` gains every file's scope table, in CSR form as `file_imports` (`graph.rs:1319-1320`). The overlay reads a clean module's imports from these facts (`graph.rs:850-852`). | bump `GRAPH_FORMAT_VERSION` (`graph.rs:47`, now 20) |
+| overlay memo and view cache | The named-import memo key adds the occurrence to `(file_ord, target)` (`ecp-core/src/session/view/resolution.rs:2842`). A `NamedImport.position` (`ecp-core/src/analyzer/reexport.rs:1026`) indexes the list it was computed on (`ecp-core/src/analyzer/name_tiers.rs:375`), so one key never serves two lists. | `VIEW_CACHE_FORMAT` follows the above |
+
+**Test matrix.** The dimension is `import_scope`. Each case asserts the raw records, the full-build target, the overlay target, and the edges that must not exist. A full-build and overlay match alone is no proof: both sides can bind the same wrong target.
+
+| Language | Test file | Occurrences that hold an import | Round |
+|---|---|---|---|
+| Rust | `crates/ecp-analyzer/tests/rust_import_scope.rs` | module, callable body, block | 1 |
+| Python | `crates/ecp-analyzer/tests/python_import_scope.rs` | callable body, type body | 1 |
+| C# | `crates/ecp-analyzer/tests/csharp_import_scope.rs` | namespace block | 1 |
+| PHP | `crates/ecp-analyzer/tests/php_import_scope.rs` | namespace section, bracketed or not | 1 |
+| C++ | `crates/ecp-analyzer/tests/cpp_import_scope.rs` | namespace, block; type body for a using-declaration | 2 |
+| TypeScript | `crates/ecp-analyzer/tests/typescript_import_scope.rs` | namespace (`import X = A.B`), ambient `declare module` body | 2 |
+
+| Case group | Cases |
+|---|---|
+| Reach | file, namespace or module, callable body, anonymous block |
+| Isolation | sibling occurrences that bind `g` to two targets; no reach outside the occurrence; a namespace reopened in one file |
+| Precedence | an inner import against an outer declaration; an inner declaration against an outer import; a local or parameter of the same name |
+| Order | a use before and after the binding; a hoisted item against a statement-order binding |
+| Identity | inserted whitespace; an inserted unrelated occurrence; swapped sibling blocks |
+| Failure | a missing module, an external target, an ambiguous target, unsupported or malformed syntax: no fallback edge |
+| Cache | one file, one name, one target kind, two occurrences; query A then B, and B then A, give one result |
+| Overlay | a changed import source, alias or occurrence; a deleted or moved import; a changed dependency export with the caller's bytes unchanged |
+
+Contract tests in `raw_records.rs`: an acyclic parent chain, each binding inside its scope, a round trip through the parse cache, the L1 fragment and `graph.bin` that keeps every occurrence, a dedup that keeps sibling rows, and a lookup result that does not depend on query order.
+
+The other eight mainstream languages get an exemption line `import_scope <lang> <reason>` in `crates/ecp-analyzer/tests/lang_dimension_exemptions.txt`:
+
+| Language | Reason |
+|---|---|
+| Java | An import applies to the whole compilation unit (JLS §7.5). |
+| Kotlin | The import list is at the file head only. |
+| Go | An import name belongs to the file block. |
+| Swift | An import is at file scope only. |
+| Dart | An import is a library directive. |
+| JavaScript | A static import is a module item. A `require` or `import()` result is a dynamic load binding, which `DynamicImports` scopes already (`dynamic_imports.rs:16-17`; `crates/ecp-analyzer/tests/ts_js_import_bound_calls.rs`). |
+| Ruby | `require` loads a file at run time and binds no name in a scope. `using` refinements are not modelled. |
+| C | C has no import. `#include` inserts text, and preprocessor expansion is out of scope. |
+
 ## Today
 
 ### Parser phases
@@ -185,7 +304,28 @@ Values with no mapping:
 
 `OverlayView` masks base edges of a dirty file only for `Calls` and `ReadsField` (`ecp-core/src/session/view.rs:995`) and rebuilds `References` for five reasons (`:1002-1011`). It skips builder-made node kinds (`fragment_emits`, `:1297`). An L1 fragment holds symbols, imports and export aliases (`overlay_writer.rs:119-123`); the reader accepts format V5 only (`overlay_reader.rs:76`). The overlay replays no raw record of the table above except `Import`, and it rebuilds no edge kind that a `RecordKind` yields.
 
+### Import scope today
+
+| Fact | Today |
+|---|---|
+| `RawImport` | Four fields: `source`, `imported_name`, `alias`, `binding_kind`. No site, no scope (`ecp-core/src/analyzer/types.rs:659-672`). The shared constructor takes those four (`driver/imports.rs:6-18`). |
+| Rows in effect file-wide | Python's `import_statement` pattern has no top-level anchor (`python/queries.scm:36-37`). Rust's nested-use walk visits every `use_declaration` in the tree (`rust/parser.rs:615-618`). Neither row records where it binds. |
+| Forms not emitted | C++ captures `#include` and namespace aliases only (`cpp/queries.scm:252-264`). `using_declaration` is a name-reference skip kind (`cpp/parser.rs:550`), not an import. |
+| Scope solved at parse time | `DynamicImports` (TypeScript, JavaScript, Python) holds a name from the end of its declaration to the end of its scope (`dynamic_imports.rs:16-17`) and rewrites the call. Its `RawImport` rows carry no scope. |
+| Dedup | Go and C++ sort and dedupe imports on recipe fields only (`driver/imports.rs:30-49`; `go/parser.rs:519`, `cpp/parser.rs:574`). |
+| Tier order | Tier 1 `same_file` returns before any import tier (`ecp-core/src/analyzer/name_tiers.rs:296-308`). The named-import tier runs at `:374`, and `global` runs last (`:515`). |
+| Lexical input | The caller's span: `LexicalFunctions::call_resolution` (`ecp-core/src/analyzer/lexical.rs:694`), called with the caller symbol's span in the overlay (`ecp-core/src/session/view/resolution.rs:5819`). |
+| Overlay memo | Keyed by `(file_ord, target)`, then by name (`ecp-core/src/session/view/resolution.rs:2842-2849`). |
+| Stored | `ImportFact` has no scope (`ecp-core/src/graph.rs:855-867`); the builder copies the four fields (`resolution/builder.rs:1106-1112`). L1 fragments store `Vec<RawImport>` (`ecp-cli/src/session/overlay_writer.rs:148`). |
+| Known wrong edge | `test_build_rust_use_inline_mod_item_bare_call_binds_it_not_top_level_namesake` is ignored: Tier 1 binds the top-level `g`, and the `use` of `mod user` records no `mod` (`crates/ecp-analyzer/tests/rust_macro_and_inline_mod_calls.rs:733-744`). |
+
 ## Consumers
+
+### Area 1: one scope lookup
+
+Reads: the scope table, the `scope` and `site` of each `RawImport`, and the lookup outcome rows of "Scope table and import bindings".
+
+Must stop: Tier 1 binding before any import tier (`ecp-core/src/analyzer/name_tiers.rs:296-308`) for a language with a scope table; the caller's span as the lexical input (`ecp-core/src/analyzer/lexical.rs:694`); a named-import memo key without the occurrence (`ecp-core/src/session/view/resolution.rs:2842`).
 
 ### Area 2: owner split
 
@@ -258,6 +398,7 @@ A driver extraction keeps raw records identical, as plan §10 requires. A change
 | 7, 8 | `Fetches` source (`builder.rs:1871`) and `RawRoute.handler` as a string (`types.rs:507`). | Satisfied. `Fetches` takes `RawEndpoint::File`; the handler takes `RawEndpoint` with `Unbound::Named` for a cross-file name. |
 | 7, 10 and 8, 10 | Raw indexes (`types.rs:936`, the `RawTxScope` doc; the type is at `:945`) and route producers rewritten by a later driver. | Satisfied by `ParsePhase`, the per-kind `EndpointRule` and the concatenation rule. |
 | 5, 7 and 5, 8 | The overlay masks only some edge kinds (`view.rs:995`) and skips builder nodes (`:1297`). | Partly. `RecordKind::rel_types` names the stale kinds for the caveat. Replay itself is the incremental overlay's work. |
+| 1, 10 | Area 10's producers emit the scope facts that area 1's lookup reads. | Open until the scope table slice. "Scope table and import bindings" fixes the records and the outcome first. A producer change is a capability change with an approved difference. |
 
 ## Stored data
 
@@ -289,7 +430,9 @@ Proof per the repo `CLAUDE.md`: index with a parse cache that the previous binar
    | 3 | `graph.bin` keeps the fetch sites of clean files, or the route table they match against. A `GRAPH_FORMAT_VERSION` bump. | area 8 |
    | 4 | The overlay masks the base `Fetches` edges of a dirty file, and re-matches every dirty route against all fetch sites and every dirty fetch site against all routes. | area 5 |
 5. **Inline handler.** Closed by C1 Open point 13: option (a). Some parsers emit `<anonymous:…>` closure nodes (`builder.rs:2183-2185`), and only when the body holds a call. A closure node is a `Node` endpoint and maps to `HandlerRef::Closure { uid }`. A handler with no node stays `Unbound::Inline` at its argument's span and maps to `Inline { line }`. Both print `inline_anonymous`, so `ecp routes` keeps its values, and the uid lets `impact` reach the calls inside the closure. See the Area 8 mapping table.
-6. **Call tiers and B's outcome type.** Decided. R1a (`393f52ae`) carries the true count: `NoEdge::Ambiguous(u32)` (`ecp-core/src/analyzer/outcome.rs:83-86`), so `Evidence::Ambiguous { candidates }` can take it. Before R1a, the variant carried no count. The `Global` tier (`Tier::Global`, `outcome.rs:29`) is Heuristic class: a name-only match with no import or scope evidence. Its confidence stays 0.7 (`Tier::confidence`, `outcome.rs:43`). That value sits at `HEURISTIC_CEILING` (`raw_records.rs:471`), so a `Global` edge stays untagged. R-A4 may revisit the class or the value. C4 does not reclassify other call tiers.
+6. **Call tiers and B's outcome type.** Decided. R1a (`393f52ae`) carries the true count: `NoEdge::Ambiguous(u32)` (`ecp-core/src/analyzer/outcome.rs:92`), so `Evidence::Ambiguous { candidates }` can take it. Before R1a, the variant carried no count. The `Global` tier (`Tier::Global`, `outcome.rs:29`) is Heuristic class: a name-only match with no import or scope evidence. Its confidence stays 0.7 (`Tier::confidence`, `outcome.rs:43`). That value sits at `HEURISTIC_CEILING` (`raw_records.rs:471`), so a `Global` edge stays untagged. R-A4 may revisit the class or the value. C4 does not reclassify other call tiers.
 7. **Accepted kinds of a path literal or SQL literal.** The type doc names Function, Method and Const (`types.rs:595`). A literal in a module-level `Variable` binds `File`. Recommendation: keep. The accepted kinds are one shared rule in `RecordKind`, so widening them changes every language. A change ships with tests for the 14 mainstream languages (repo `CLAUDE.md`), each with a literal in the newly accepted kind and one outside it.
 8. **`Decorates` to a synthetic node at 0.8** (`decorates_edges.rs:123-166`). (a) Keep: the synthetic node is the honest unresolved marker (`SYNTHETIC_FILE_IDX`). (b) Drop it below 0.7. Recommendation: (a); area 7 confirms.
 9. **`RawTxScope` packing.** Its 24-bit index (`types.rs:955`) is narrower than `RawIdx`. `RawTxScope::new` checks the limit with a `debug_assert` only (`types.rs:962-970`), so in a release build index `2^24` packs as `0` and the record binds the file's first node. Recommendation: keep the packing; read it as `RawIdx(node_idx())`. A producer packs only through `RawIdx::to_packed24`, which checks in every build. On `None` it drops the record and records a `BlindSpot` with the file and the site; it never packs a truncated index. Area 7 moves the check into a checked `RawTxScope` constructor that returns `Option`.
+10. **An import binding with several targets** (a Rust glob pair that places one name twice, two Python star imports). (a) `NoEdge::Ambiguous(n)` with its `Ladder` reach: the constructor fallback still runs. (b) `OpaqueBinding`: the count is lost. (c) A reason with the `Call` reach that carries the count. Recommendation: (c). It keeps the fallbacks from binding a hidden namesake, and the count feeds `Evidence::Ambiguous`.
+11. **`DynamicImports` and the scope table.** (a) Keep the parse-time rewrite (`dynamic_imports.rs:30`). (b) Emit its names as import bindings of their occurrence. Recommendation: (a) in the first slice; (b) when TypeScript adopts the table, with `crates/ecp-analyzer/tests/ts_js_import_bound_calls.rs` as its guard.

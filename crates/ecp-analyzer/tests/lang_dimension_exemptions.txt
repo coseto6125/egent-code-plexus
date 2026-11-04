@@ -592,6 +592,14 @@ import_owner_noregress ruby pre-existing gap
 import_owner_noregress rust pre-existing gap
 import_owner_noregress swift pre-existing gap
 import_owner_noregress typescript pre-existing gap
+import_scope c `#include` is textual inclusion, not a scoped name binding
+import_scope dart imports are library directives at file level only
+import_scope go imports belong to the file block only
+import_scope java imports apply to the whole compilation unit
+import_scope javascript ESM imports are module items; a function-local `require` is covered by ts_js_import_bound_calls.rs
+import_scope kotlin imports sit in the file header only
+import_scope ruby `require` loads files and binds no name; `using` refinements are not modelled
+import_scope swift imports are file scope only
 imported_attr_call c pre-existing gap
 imported_attr_call cpp pre-existing gap
 imported_attr_call csharp pre-existing gap

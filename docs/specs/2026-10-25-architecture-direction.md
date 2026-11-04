@@ -486,6 +486,8 @@ Two areas conflict when they change one function, one stored format or one piece
 | 5, 7 and 5, 8 | the overlay masks only some edge kinds (`view.rs:995`) and skips builder nodes (`:1297`) | the incremental overlay above; until then, a caveat that names the stale edge kinds |
 | 7, 8 | `Fetches` source (`builder.rs:1871`) and `RawRoute.handler` as a string (`types.rs:507`) | C4's endpoint type, used by both |
 | 7, 10 and 8, 10 | raw indexes (`types.rs:935`) and route producers rewritten by a later driver | C4's parser phases and index rules, fixed before 7 and 8 |
+| 1, 10 | the scope facts that area 10's producers emit, and the binding lookup and its outcome that area 1 reads | C4 "Scope table and import bindings" first; each producer change is a capability change with an approved difference |
+| 2, 10 | the declaration anchor of a scope occurrence and `lexical_parents`, both derived from parser spans | C1 "Scope occurrence identity": the occurrence takes the anchor, and a test checks that the scope table agrees with `lexical_parents` |
 | every area, 11 | a hard zero-diff gate blocks the first slice; a moving expected file hides regressions | one baseline file per known difference, with an owner area and a removal slice |
 
 ## Lessons from peer tools
@@ -548,6 +550,7 @@ Before a slice is dispatched, its inventory lists the production files, the test
 | Rust same-file lexical tier, `PickFacts`, overlay scope stores | A-C deletes the string-built scope before B5 moves the rule |
 | Global candidate filter | A-B adds the scoped exclusion; B5's shared interface keeps it |
 | `LexicalFunctions` input, the builder and overlay call closures | A-D changes the lexical facts before B8 moves them |
+| Scope table and import bindings (C4 "Scope table and import bindings", C1 "Scope occurrence identity") | The `<lang>_import_scope.rs` test matrix lands first, in lane 0a. The slice runs in lane R after the parent identity and A-B to A-D, and before B8. Lane F wires the L1 and `graph.bin` facts in the same slice. It bumps `GRAPH_FORMAT_VERSION`, `BUILDER_FINGERPRINT` and the L1 fragment format. Producers join by language, Rust, Python, C# and PHP first |
 
 A-E needs a shared contract and tests for implicit `this` and lexical precedence, not the whole of B8.
 

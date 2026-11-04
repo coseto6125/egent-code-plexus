@@ -195,6 +195,29 @@ No slice is assigned yet to remove the caveat. A `Signature` or `content_hash` s
 | Output | `Some(index)` of the callable in the same slice, or `None`. An empty opt-in list gives `None` for every node. |
 | One derivation | The parser, the index build, the overlay view, the overlay reader and incremental mode call this function. No consumer builds a lexical scope string. |
 
+### Scope occurrence identity
+
+Status: contract for a future slice, with C4 "Scope table and import bindings", which defines the scope occurrence, `ScopeId` and the import binding. No code reads it today.
+
+| Rule | Statement |
+|---|---|
+| Not a declaration | A scope occurrence is a source region, not a declaration. It never enters a uid, so the scope table changes no stored uid. |
+| `ScopeId` | Snapshot-local. It is valid only inside the raw graph, the L1 fragment or the `graph.bin` file range that wrote it. A key that outlives that snapshot never holds a `ScopeId`. |
+| Scope key | The stable identity of an occurrence. For `File`, it is the file path. For an occurrence with `decl: Some(i)`, it is the anchor of node `i` when that anchor is `Unique` (File assignment). A `Block`, or a body whose anchor is `Shared`, has no scope key. |
+| Direction | An occurrence takes the anchor of its declaration. A declaration takes nothing from an occurrence. |
+| Namespace block | The anchor names the namespace. Each block of the namespace is its own occurrence. Two blocks of `namespace N` in one file share one anchor, so neither has a scope key (Positional rule). The imports of one block do not reach the other. |
+| Lexical parent | The scope table agrees with `lexical_parents`. For a declaration with lexical parent `p`, the chain from its occurrence reaches the `Callable` occurrence of `p` through `Block` occurrences only. A `Type` or `Module` occurrence on that path means no lexical parent. A test derives both from one fixture and compares them. |
+| Overlay pairing | `pair_by_anchor` pairs declarations only. The overlay never pairs a scope occurrence or an import binding. A dirty file's scope table and bindings replace the whole set of the base file. |
+| Cache | A cache entry keyed by a `ScopeId` lives no longer than the view generation that built it. |
+
+| Edit | `ScopeId` | Scope key |
+|---|---|---|
+| Insert whitespace, or edit a body and add no occurrence | unchanged | unchanged |
+| Insert an unrelated occurrence | every later id moves | unchanged |
+| Swap two sibling blocks | the two ids swap | none: a `Block` has no key |
+| Swap two sibling functions | the ids of their bodies swap | unchanged: each anchor stays with its declaration |
+| Rename or re-nest the declaring container | can move | changes with the anchor (Stability against unrelated edits) |
+
 ### Target request syntax
 
 ```
@@ -352,10 +375,11 @@ A row is the index of a declaration in its file's raw records. Every emitter tha
 | 1, 2 | the global candidate filter (`resolution/index.rs:1073`, now `:1059-1081`), the lexical input, the uid pairing (`view.rs:388`) | one `lexical_parents` gives both the filter fact and the lexical input; `pair_by_anchor` replaces uid pairing. The order of the slices stays as the plan's Order section states. |
 | 2, 5 | the target resolver reads the owner (`symbol_id.rs:141`) | the resolver reads the qualified path (owner plus parents), never the raw owner. A bare name matches top-level and scoped declarations; a tie is an ambiguity. The top-level meaning has its own syntax, `::name` (Open point 5, adopted). |
 | 2, 8 | Route uids made in two places (`builder.rs:1411`, `:1481`) | `RouteKey::uid` is the one constructor. It hashes no handler and goes through no `assign_file` numbering, so a uid change of area 2 does not move a Route uid. |
+| 2, 10 | the declaration anchor of a scope occurrence and `lexical_parents` both come from parser spans | "Scope occurrence identity": an occurrence takes the anchor and never changes it, and its Lexical parent row requires agreement, which a test checks. |
 
 ## Stored data
 
-| Change | `GRAPH_FORMAT_VERSION` (20, `graph.rs:47`) | `BUILDER_FINGERPRINT` (`schema52`, `registry/commit_meta.rs:190`) | L1 fragment (`FRAGMENT_FORMAT_V7`, `session/overlay.rs:87`) | dirty manifest | view cache key (`VIEW_CACHE_FORMAT` 15, `session/view.rs:1400`) |
+| Change | `GRAPH_FORMAT_VERSION` (20, `graph.rs:47`) | `BUILDER_FINGERPRINT` (`schema52`, `registry/commit_meta.rs:190`) | L1 fragment (`FRAGMENT_FORMAT_V7`, `session/overlay.rs:87`) | dirty manifest | view cache key (`VIEW_CACHE_FORMAT` 15, `session/view.rs:1401`) |
 |---|---|---|---|---|---|
 | adopt `DeclKey` for unscoped nodes, owner text as produced | none | none | none | none | none |
 | `assign_file` in the four paths that skip ordinals (A-A) | none | bump | none | none | follows |
@@ -369,6 +393,7 @@ A row is the index of a declaration in its file's raw records. Every emitter tha
 | `pair_by_anchor` in the overlay | none | none | none | none | follows: the binary path, size and mtime are in the key (`ecp-cli/src/session/view_cache.rs:36-43`) |
 | `RouteKey` with composed prefixes; one node per key | none | bump | none | none | follows |
 | `TargetRequest` / `resolve_target` | none | none | none | none | none |
+| the scope table and import bindings (C4 "Scope table and import bindings"): no uid moves | bump: `ImportFact` gains `scope` and `site`, and the scope tables are stored | bump | bump: a new value after V7 | none | follows |
 
 Not every stored uid stays as today. Four changes move uids, and each one bumps `BUILDER_FINGERPRINT` in the slice that makes it: a scoped node takes a uid from its parent's anchor; a member of a scope container takes a uid from its container's anchor; a repeated node takes the overload uid; a producer that changes its owner text changes the unscoped uids of its kinds. Only a top-level declaration whose owner text and kind do not change keeps today's uid.
 
