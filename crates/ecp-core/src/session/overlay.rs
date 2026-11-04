@@ -74,8 +74,9 @@ pub const FRAGMENT_FORMAT_V6: u32 = 6;
 /// language after parse (`ParsedLanguage::to_bytes`, or `ABSENT` when the
 /// parse decided none), each symbol's raw `RawNode.decorators`, parser
 /// markers included, and each callable's `RawFunctionMeta.params`, the last
-/// field of `FragmentSymbol`. V7 is unreleased,
-/// so these extend it in place: the builder fingerprint
+/// field of `FragmentSymbol`. These fields joined V7 in place before its
+/// first release (v0.17.0); a field added now needs a new format value.
+/// Within V7, the builder fingerprint
 /// (`BUILDER_FINGERPRINT`) or the archive check drops a V7 bin written
 /// before them, and the freshness gate re-parses its file. The archive
 /// check is sure only for a field of the `FragmentFile` root, which grows;
