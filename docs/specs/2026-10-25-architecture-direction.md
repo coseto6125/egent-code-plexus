@@ -550,7 +550,7 @@ Before a slice is dispatched, its inventory lists the production files, the test
 | Rust same-file lexical tier, `PickFacts`, overlay scope stores | A-C deletes the string-built scope before B5 moves the rule |
 | Global candidate filter | A-B adds the scoped exclusion; B5's shared interface keeps it |
 | `LexicalFunctions` input, the builder and overlay call closures | A-D changes the lexical facts before B8 moves them |
-| Scope table and import bindings (C4 "Scope table and import bindings", C1 "Scope occurrence identity") | The `<lang>_import_scope.rs` test matrix lands first, in lane 0a. The slice runs in lane R after the parent identity and A-B to A-D, and before B8. Lane F wires the L1 and `graph.bin` facts in the same slice. It bumps `GRAPH_FORMAT_VERSION`, `BUILDER_FINGERPRINT` and the L1 fragment format. Producers join by language, Rust, Python, C# and PHP first |
+| Scope table and import bindings (C4 "Scope table and import bindings", C1 "Scope occurrence identity") | The `<lang>_import_scope.rs` test matrix lands first, in lane 0a. The slice runs in lane R after the parent identity and A-B to A-D, and before B8. Lane F wires the L1 and `graph.bin` facts in the same slice. It bumps `GRAPH_FORMAT_VERSION`, `BUILDER_FINGERPRINT` and the L1 fragment format. Producers join by language, Rust, Python, C# and PHP first. The C++ producer waits for its design note on C4 Open point 12 (the translation-unit model) |
 
 A-E needs a shared contract and tests for implicit `this` and lexical precedence, not the whole of B8.
 
