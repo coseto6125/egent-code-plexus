@@ -677,21 +677,37 @@ fn parse(worktree_root: &Path, paths: &[String], size_cap: SizeCap) -> (Vec<Clos
         paths,
         size_cap,
     );
-    let omitted = graphs.iter().any(is_omitted);
-    let mut entries: Vec<ClosureEntry> = graphs
-        .iter()
-        .filter(|graph| !is_omitted(graph))
-        .filter_map(|graph| {
-            let rel_path = os_path_to_slash(&graph.file_path).into_owned();
-            let mtime_ns = *mtimes.get(rel_path.as_str())?;
-            let fragment = super::overlay_writer::archive_fragments(graph).ok()?;
-            Some(ClosureEntry {
-                rel_path,
-                mtime_ns,
-                fragment,
-            })
-        })
-        .collect();
+    entries_of(&graphs, &mtimes)
+}
+
+/// The closure entries of `graphs`, sorted by path, and whether any graph
+/// yielded none. A parsed graph with no pre-parse mtime, or whose fragment
+/// fails to archive, is omitted as an unreadable parse is: the index keeps
+/// its edges and the closure did not re-resolve them.
+fn entries_of(
+    graphs: &[ecp_core::analyzer::types::LocalGraph],
+    mtimes: &HashMap<&str, u64>,
+) -> (Vec<ClosureEntry>, bool) {
+    let mut omitted = false;
+    let mut entries = Vec::with_capacity(graphs.len());
+    for graph in graphs {
+        let rel_path = os_path_to_slash(&graph.file_path).into_owned();
+        let entry = (!is_omitted(graph))
+            .then(|| mtimes.get(rel_path.as_str()).copied())
+            .flatten()
+            .and_then(|mtime_ns| {
+                let fragment = super::overlay_writer::archive_fragments(graph).ok()?;
+                Some(ClosureEntry {
+                    rel_path,
+                    mtime_ns,
+                    fragment,
+                })
+            });
+        match entry {
+            Some(entry) => entries.push(entry),
+            None => omitted = true,
+        }
+    }
     entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     (entries, omitted)
 }
@@ -1758,6 +1774,35 @@ mod tests {
         assert!(omitted);
         let stale = with_not_computed(StaleClosure::default());
         assert!(stale.not_computed && !stale.is_empty());
+    }
+
+    /// Stands for: a dependent that parses but whose pre-parse stat failed
+    /// (deleted and recreated mid-refresh) is dropped and reported as
+    /// omitted, so the stored closure warns instead of claiming completeness.
+    #[test]
+    fn test_entries_of_parsed_graph_without_mtime_is_omitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, worktree, _, _) = session(dir.path(), &[]);
+        fs::write(worktree.join("src/ok.ts"), "export const a = 1;\n").unwrap();
+        let paths = vec!["src/ok.ts".to_string()];
+        let graphs = crate::reanalyze::reanalyze_expanded_under(
+            &worktree,
+            &crate::git::DiffScope::Unstaged,
+            &paths,
+            SizeCap::BUILT_IN,
+        );
+        assert_eq!(graphs.len(), 1);
+        assert!(!is_omitted(&graphs[0]));
+
+        let (entries, omitted) = entries_of(&graphs, &HashMap::new());
+        assert!(entries.is_empty());
+        assert!(omitted);
+
+        let mtimes = HashMap::from([("src/ok.ts", 1u64)]);
+        let (entries, omitted) = entries_of(&graphs, &mtimes);
+        let stored: Vec<&str> = entries.iter().map(|e| e.rel_path.as_str()).collect();
+        assert_eq!(stored, vec!["src/ok.ts"]);
+        assert!(!omitted);
     }
 
     /// Stands for: an empty dependent list parses to nothing and omits nothing.
