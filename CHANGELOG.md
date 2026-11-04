@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.17.3 - 2026-11-04
+
+### Features
+
+- a member's uid hashes its container chain (uid phase 2) (#900)
+
+### Bug Fixes
+
+- report a dependent dropped for a missing mtime or a failed archive as omitted (#907)
+- bound MATCH rows so a multiplying query cannot fill memory; end by SIGPIPE instead of aborting (#904)
+- bind glob and inline-mod item `use`; skip enum variants in macro tokens; honest skip-rebuild caveat (#902)
+- bind inline-mod self/super paths and macro-argument calls; drop dead discriminator (#901)
+- one test rule for impact, inspect, coverage and processes; a Rust macro member name is no bare value (#898)
+- redefinitions keep their own node; \ is a path separator only on Windows (#897)
+- resolve Rust calls with the index's name tiers and pub use rows (#896)
+- round-2 resolver rules for C#, Rust, Go and Dart, struct impact, and Rule U for untyped receivers (#893)
+- ownerClass prints the stored owner; lexicalParent carries the enclosing chain (#892)
+- attribute value-declaration reads, bind dynamic imports, take route paths from their slot (#891)
+- tag unverified callers by one rank, count competing kinds, keep cypher function arguments (#890)
+- refuse a commitless WSL drive mount or a directory above one (#889)
+- print refusals and graph-load failures under their own cause (#888)
+- refuse a commitless tree that holds two or more repositories (#887)
+- round-1 bug sweep across C, C++, C#, Dart, Java, Rust and bash; delete the unrouted Markdown provider (#886)
+- refuse to index a filesystem root or a commitless home tree (#885)
+
 ## v0.17.2 - 2026-10-30
 
 ### Bug Fixes
