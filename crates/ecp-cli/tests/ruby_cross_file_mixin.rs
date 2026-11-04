@@ -26,7 +26,7 @@
 //!      delegator's `RawImport` is keyed against `foo.rb`'s file scope.
 //!
 //! This is the architectural limitation acknowledged in the receiver-aware
-//! resolver spec §4 ("跨檔 mixin tracking … 走第二階段"). Closing it would
+//! resolver design (cross-file mixin tracking is deferred). Closing it would
 //! require either (a) materialising the delegator as a real Method
 //! RawNode on `module Foo` so the heritage chain's existing Extends edges
 //! carry it, or (b) teaching `Resolver` to walk heritage when looking up a

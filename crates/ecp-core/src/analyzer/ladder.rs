@@ -2,7 +2,8 @@
 //! session overlay both run, in the order
 //! [`crate::analyzer::name_tiers::name_tiers`] holds: Tier 1 (the caller's
 //! file), Tier 2.75 (the caller's bases) and Tier 3 (one name across the
-//! project). The rules that pick live here once (B §2.2, row B5); each side
+//! project). The rules that pick live here once (design B, row B5 in
+//! docs/specs/2026-10-23-shared-resolution-design.md §4.2); each side
 //! answers the questions through its own [`ResolveFacts`].
 //!
 //! Each side keeps what only it has: the decision dump (index), the Tier 3

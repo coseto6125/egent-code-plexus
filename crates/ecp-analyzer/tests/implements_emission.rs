@@ -1,13 +1,13 @@
 //! Verifies that `RelType::Implements` is emitted by the Pass-2 heritage walk
 //! when the resolved target's NodeKind is Interface or Trait.
 //!
-//! Per spec §8.2 / CLAUDE.md "14-language coverage" rule: every change to
+//! Per CLAUDE.md "14-language coverage" rule: every change to
 //! graph-construction primitives ships with fixtures for the 14 mainstream
 //! languages. This file covers the 8 languages where an Interface NodeKind
 //! can be expressed in the source + resolved by the symbol table. Languages
-//! deferred per spec §4.5:
+//! deferred per docs/specs/2026-05-23-sub-projects-1-5.md §4.5:
 //!
-//!   * Python — Pending PR §8.3 (Protocol detection, NodeKind promotion).
+//!   * Python — Pending PR #3 of §8 (Protocol detection, NodeKind promotion).
 //!   * Ruby   — Module mixin / duck-typed; no Interface NodeKind today.
 //!   * Dart   — Implicit interface convention; deferred.
 //!   * C / C++ — No interface concept.
@@ -268,7 +268,7 @@ impl Greet for MyStruct { fn greet(&self) {} }";
 
 // ── Swift ─────────────────────────────────────────────────────────────────────
 //
-// Swift `protocol` → NodeKind::Trait (per spec decision §10 #3).
+// Swift `protocol` → NodeKind::Trait (Trait, not Interface).
 // `class Foo: SomeProto` → heritage=["SomeProto"] → Implements.
 
 #[test]
@@ -304,7 +304,8 @@ class SpecialCircle: BaseShape {}";
 // ── Go ────────────────────────────────────────────────────────────────────────
 //
 // Go uses structural typing — there is no explicit `implements` keyword.
-// The spec §4.5 marks Go as "OK" because Go interface embeddings in
+// The language table in docs/specs/2026-05-23-sub-projects-1-5.md §4.5
+// marks Go as "OK" because Go interface embeddings in
 // struct fields produce a heritage entry pointing to the Interface node.
 // We test this via a raw LocalGraph fixture that mimics what the Go parser
 // emits for a struct embedding a named interface type.
@@ -378,12 +379,12 @@ class CachedRepo : BaseRepo()";
 
 // ── Python (deferred) ─────────────────────────────────────────────────────────
 //
-// Python Protocol / ABC detection requires PR §8.3 (NodeKind promotion from
+// Python Protocol / ABC detection requires PR #3 of that spec's §8 (NodeKind promotion from
 // Class → Interface for Protocol subclasses). The raw fixture below proves
 // the builder dispatches correctly once that promotion lands.
 
 #[test]
-#[ignore = "Pending PR §8.3 (Python Protocol detection — promotes Protocol subclass to NodeKind::Interface)"]
+#[ignore = "Pending PR #3 of docs/specs/2026-05-23-sub-projects-1-5.md §8 (Python Protocol detection — promotes Protocol subclass to NodeKind::Interface)"]
 fn python_implements_edge_pending_protocol_detection() {
     // Once §8.3 ships: `class Printable(Protocol): ...` → NodeKind::Interface.
     // Raw fixture simulates that post-promotion state.

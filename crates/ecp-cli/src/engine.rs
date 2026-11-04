@@ -236,7 +236,7 @@ impl Engine {
         self.unreadable_changes = n;
     }
 
-    /// SessionState-driven constructor (spec §5.1). Classifies the session and
+    /// SessionState-driven constructor. Classifies the session and
     /// picks the right load path: PureReference → L2-only view (no overlay
     /// touch, satisfies invariant F5); AugmentedReference → L2 + record the
     /// overlay dir so the (P2) merge layer can find it; Stale → error so the

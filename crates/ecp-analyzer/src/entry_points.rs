@@ -8,7 +8,7 @@
 //! list of `EntryPoint`s the builder emits as `NodeKind::EntryPoint`
 //! marker nodes alongside their underlying handler.
 //!
-//! ## Scoring (spec §9 Q1)
+//! ## Scoring
 //!
 //! | Signal | Score | EntryKind |
 //! |---|---:|---|
@@ -87,8 +87,8 @@ impl EntryKind {
 /// Score floor for framework decorators to count as an entry point.
 /// Below this, the decorator is treated as decoration only — Python
 /// `@lru_cache` (no framework_confidence assigned) or low-signal helper
-/// macros wouldn't make sense as entry points. Matches the spec §9 Q1
-/// proposal where the FrameworkRef bucket sits at 0.8.
+/// macros wouldn't make sense as entry points. Matches the FrameworkRef
+/// bucket score of 0.8.
 const FRAMEWORK_CONFIDENCE_FLOOR: f32 = 0.8;
 
 /// Score the three signal sources into a deduplicated, sorted (highest

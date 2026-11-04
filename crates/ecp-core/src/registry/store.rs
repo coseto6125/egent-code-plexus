@@ -1,4 +1,4 @@
-//! registry.json schema and atomic IO. Spec §2.
+//! registry.json schema and atomic IO.
 
 use crate::registry::io::atomic_write_json;
 use serde::{Deserialize, Serialize};
@@ -142,7 +142,7 @@ impl RegistryFile {
         }
         let bytes = fs::read(path)?;
         // Probe the version field before a full parse: stale schemas auto-migrate
-        // via `rebuild_from_disk` (spec §12 recovery) instead of hard-failing.
+        // via `rebuild_from_disk` instead of hard-failing.
         // Trade-off: group memberships are registry-only and get wiped — operator
         // must re-apply via `ecp admin group add`. This is preferred over forcing
         // every CLI invocation to error until manual intervention.

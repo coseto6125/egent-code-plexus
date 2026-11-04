@@ -1,5 +1,4 @@
 //! Cross-platform advisory file lock for registry serialization.
-//! Spec §2.1 Layer 1.
 
 use fs2::FileExt;
 use std::fs::{File, OpenOptions};

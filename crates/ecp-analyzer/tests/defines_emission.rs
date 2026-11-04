@@ -1,4 +1,5 @@
-//! `Defines` edge emission — spec §8.4 of Sub-projects 1/5.
+//! `Defines` edge emission, PR #4 in
+//! docs/specs/2026-05-23-sub-projects-1-5.md §8.
 //!
 //! Tests the scope-containment fill for File / Namespace / Module:
 //!   - File → top-level symbol (owner_class.is_none())

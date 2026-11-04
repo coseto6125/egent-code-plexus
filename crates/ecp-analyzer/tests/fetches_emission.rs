@@ -1,4 +1,5 @@
-//! Fetches-edge emission integration tests — spec §7 / PR §8.5.
+//! Fetches-edge emission integration tests: §7 and PR #5 (§8) of
+//! docs/specs/2026-05-23-sub-projects-1-5.md.
 //!
 //! Verifies that Pass 1.6b correctly emits `RelType::Fetches` edges from
 //! HTTP-client call sites to matching `Route` nodes within the same graph.

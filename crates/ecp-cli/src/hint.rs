@@ -1,5 +1,5 @@
 //! Output contract helpers — formatters for empty results, errors,
-//! suggestions, warnings. See spec §7 (output contract) for rules.
+//! suggestions, warnings.
 //!
 //! All formatters return strings the caller writes to stderr (for warnings)
 //! or appends after main stdout (for hints).

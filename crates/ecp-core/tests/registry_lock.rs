@@ -1,4 +1,4 @@
-//! Tests for cross-platform file lock (spec §2.1 Layer 1).
+//! Tests for cross-platform file lock.
 
 use ecp_core::registry::FileLock;
 use std::sync::{Arc, Barrier};

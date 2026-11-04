@@ -910,9 +910,8 @@ impl ParseSpec for RubySpec {
 
                 // Apply delegators: `def_delegator/s` / `delegate` add a method
                 // binding on the enclosing class. `extend Forwardable` is not
-                // required (Option-A fallback per spec §4), at the cost of a
-                // known false positive when the user defines their own method
-                // named `def_delegator`.
+                // required, at the cost of a known false positive when the
+                // user defines their own method named `def_delegator`.
                 //
                 // The emitted RawImport mirrors the alias-keyword shape:
                 // `{ alias: Some(method), imported_name: method, source: "target.method" }`

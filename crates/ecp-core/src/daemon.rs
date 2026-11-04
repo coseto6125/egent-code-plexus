@@ -1,5 +1,5 @@
 //! Cross-platform process detachment helper.
-//! Spec §4.5: spawn a child that survives the parent's exit, redirects
+//! Spawn a child that survives the parent's exit, redirects
 //! stdin/out/err to /dev/null, and runs in its own session.
 
 use std::io;

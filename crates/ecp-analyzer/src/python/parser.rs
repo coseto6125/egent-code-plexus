@@ -724,8 +724,9 @@ pub struct PythonProvider {
 /// True when every entry in `bases` is a Protocol-marker — meaning the class
 /// declares a structural interface contract rather than concrete inheritance.
 ///
-/// Spec §4.5b: when ALL bases are Protocol-markers, promote NodeKind::Class →
-/// NodeKind::Interface so the kind-based Implements dispatch treats inheritors
+/// When ALL bases are Protocol-markers, promote NodeKind::Class →
+/// NodeKind::Interface (docs/specs/2026-05-23-sub-projects-1-5.md §4.5b), so
+/// the kind-based Implements dispatch treats inheritors
 /// as "implements" rather than "extends". Mixed bases keep NodeKind::Class to
 /// preserve concrete inheritance semantics for the non-marker base(s).
 ///
@@ -1848,7 +1849,7 @@ impl ParseSpec for PythonSpec {
                     .dedup_by(|a, b| a.method == b.method && a.path == b.path && a.span == b.span);
             }
             PythonHook::ClassKinds => {
-                // §4.5b: promote Class → Interface when ALL bases are
+                // Promote Class → Interface when ALL bases are
                 // Protocol-markers. Runs after the query so each node's
                 // heritage is fully assembled (tree-sitter emits one capture
                 // per base expression, so per-match classification would

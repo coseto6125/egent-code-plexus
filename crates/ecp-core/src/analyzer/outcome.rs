@@ -3,7 +3,8 @@
 //! The index (`resolver.rs`) and the overlay (`session/view/resolution.rs`) run the same tier
 //! ladder. Each of them held its own copy of the tier confidences and tested
 //! "did the ladder end, and may the call-level fallbacks still run" by hand.
-//! This module holds both facts once (B §3.1, §3.2). Both call entries
+//! This module holds both facts once (§3.1, §3.2 of
+//! docs/specs/2026-10-23-shared-resolution-design.md). Both call entries
 //! (`Resolver::resolve_call` and the overlay's call closure) carry one
 //! [`Resolution`] through their call-level fallbacks, and the tiers inside
 //! the ladders return it too.

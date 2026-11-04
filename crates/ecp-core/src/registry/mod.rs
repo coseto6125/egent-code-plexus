@@ -1,5 +1,4 @@
 //! Registry: central name registry, per-branch metadata, audit log.
-//! See spec §1-§2, §9.
 
 mod audit;
 pub mod commit_meta;
@@ -40,7 +39,7 @@ pub struct Registry {
 impl Registry {
     /// Open / lazily create `~/.ecp/registry.json`. On parse failure,
     /// callers should invoke `RegistryFile::rebuild_from_disk` for recovery
-    /// (walks per-repo meta.json files; spec §12 Error Handling).
+    /// (walks per-repo meta.json files).
     /// `.bak` is written by `write_atomic` as a snapshot but never read back.
     pub fn open(home_ecp: &Path) -> std::io::Result<Self> {
         std::fs::create_dir_all(home_ecp)?;

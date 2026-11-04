@@ -45,8 +45,7 @@ fn cypher_json(repo: &Path, query: &str) -> Value {
 
 /// Count `Imports` edges whose target node has `name = target_name` in the
 /// graph at `repo`. Doesn't constrain which File is the source — the assertion
-/// is "at least one File imports this symbol", which is the minimum guarantee
-/// per spec §4.2.
+/// is "at least one File imports this symbol", which is the minimum guarantee.
 fn count_imports_to(repo: &Path, target_name: &str) -> u64 {
     let q = format!(
         "MATCH (f)-[r]->(t) WHERE r.rel_type = 'Imports' AND f.kind = 'File' AND t.name = '{target_name}' RETURN count(*) AS c"
@@ -418,7 +417,7 @@ fn imports_dart_import() {
 // gitnexus on .sample_repo emits IMPORTS edges like
 //     solidity/eslint.config.mjs → Path.java
 // because its resolver does cross-language name globbing. This test pins the
-// ecp rule (spec §2: "resolver miss → don't emit"): when a TS file imports
+// ecp rule ("resolver miss → don't emit"): when a TS file imports
 // `./foo`, ecp must only link to foo.ts in the same directory, never to
 // foo.py / foo.java which happen to exist with the same basename elsewhere.
 

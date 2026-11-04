@@ -1,4 +1,4 @@
-//! Tests for registry path sanitization (spec §1.1).
+//! Tests for registry path sanitization.
 
 use ecp_core::registry::sanitize_segment;
 
