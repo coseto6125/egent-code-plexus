@@ -138,7 +138,7 @@ impl ForceRebuildResult {
     }
 }
 
-/// --force orchestration. See spec §4.2.
+/// --force orchestration.
 ///
 /// Order: SHA lock → invalidate matching L1 sessions → drop the parse cache →
 /// the shared build and publish, which keeps the SHA lock through the rename.
@@ -174,7 +174,7 @@ pub(crate) fn force_rebuild_l2_at(
 
     let sha_lock = acquire_sha_lock(&commits_dir, sha, BUILD_LOCK_TIMEOUT, on_wait)?;
 
-    // 2. Invalidate matching L1 BEFORE publishing the new L2 (spec §4.4)
+    // 2. Invalidate matching L1 BEFORE publishing the new L2
     let invalidate_report = invalidate_matching_l1(repo_root, &sha_hex)?;
 
     // 3. Keep existing L2 in place. The rebuild publishes a same-SHA

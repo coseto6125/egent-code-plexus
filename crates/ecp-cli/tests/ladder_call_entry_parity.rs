@@ -1,4 +1,5 @@
-//! R12 (B8a): the call entry (R1: site normalization R2, the ladder, the
+//! B8a of docs/specs/2026-10-23-shared-resolution-design.md: the call entry
+//! (R1: site normalization R2, the ladder, the
 //! call-level Kotlin extension retry R17, the untyped-member post-filter
 //! R21 and the constructor fallback R22) runs once, in
 //! `ecp_core::analyzer::ladder::call`, for the index and the overlay. Each
@@ -529,7 +530,7 @@ fn observe_case(case: &Case) -> Observed {
     let edited = format!("{source}\n");
     run(&Scenario {
         name: case.name,
-        owner: "R12 (B8a call entry)",
+        owner: "R1 (B8a call entry)",
         files: case.files,
         edits: &[Edit::Write(case.dirty, &edited)],
     })

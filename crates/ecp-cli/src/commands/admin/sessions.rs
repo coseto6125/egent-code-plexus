@@ -1,5 +1,5 @@
 //! `ecp admin sessions list` — inspect L1 sessions under all repos.
-//! reset / sweep variants deferred (parent spec §11.2 follow-up).
+//! reset / sweep variants deferred.
 
 use clap::{Args, Subcommand};
 use ecp_core::registry::resolve_home_ecp;

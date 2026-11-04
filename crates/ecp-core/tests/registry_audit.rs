@@ -1,4 +1,4 @@
-//! Tests for ~/.ecp/audit.log (spec §9).
+//! Tests for ~/.ecp/audit.log.
 
 use ecp_core::registry::{AuditEvent, AuditLog};
 

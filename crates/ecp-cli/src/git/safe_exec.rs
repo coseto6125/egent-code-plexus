@@ -1,6 +1,6 @@
 //! Hardened git subprocess wrapper. Every git invocation in ecp-cli MUST
 //! go through `safe_exec::git()` to ensure hostile repo configs cannot
-//! escalate to code execution. See spec §8 H4.
+//! escalate to code execution.
 
 use ecp_core::EcpError;
 use std::ffi::OsString;

@@ -25,8 +25,9 @@ use std::cmp::Ordering;
 use std::ops::Range;
 use std::path::Path;
 
-/// The kinds `language` scopes under their enclosing callable (design A
-/// §4.2): such a node's uid hashes its parent's anchor instead of an owner.
+/// The kinds `language` scopes under their enclosing callable
+/// (docs/specs/2026-10-23-owner-split-design.md §4.2): such a node's uid
+/// hashes its parent's anchor instead of an owner.
 /// Rust opts in its nested `fn` and closure nodes (slice C); Python, JS and
 /// TS their nested functions, lambda and callback nodes and, in JS / TS,
 /// an arrow function a local `const` holds (slice D). Slice E adds the

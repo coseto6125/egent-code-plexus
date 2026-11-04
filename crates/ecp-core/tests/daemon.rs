@@ -1,4 +1,4 @@
-//! Tests for cross-platform spawn_detached (spec §4.5).
+//! Tests for cross-platform spawn_detached.
 
 use ecp_core::daemon::spawn_detached;
 use std::path::PathBuf;

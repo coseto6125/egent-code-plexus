@@ -290,7 +290,7 @@ impl GraphBuilder {
         // hook, manual add_graph) enumerated files. Without this, the same repo
         // indexed on two machines with different filesystem walk orders would
         // produce different graph.bin payloads — breaks the reproducibility
-        // contract pinned by audit §4.2 (inv-003).
+        // contract.
         // Stable: two `LocalGraph`s of one path keep their input order, which
         // numbers the path's declarations (`path_identities`) as the overlay
         // numbers its inputs.
@@ -5801,7 +5801,8 @@ mod tests {
     ///   (b) include the resolved `reason` string in the equality predicate;
     ///   (c) add a `HandlesRoute` fixture to fire that emit branch;
     ///   (d) pin emit-zero invariant for Sub-projects 1/5 types
-    ///       (Imports, Defines, Fetches); Implements lifted here (§8.2).
+    ///       (Imports, Defines, Fetches); Implements lifted here (PR #2 of
+    ///       docs/specs/2026-05-23-sub-projects-1-5.md §8).
     ///
     /// The fixtures cover these edge-emission categories:
     ///   * heritage (`Extends`) — Class Foo extends concrete Class Bar
@@ -5836,7 +5837,8 @@ mod tests {
                             content_hash: 0,
                         },
                         // Implementor → IThing exercises the Implements branch
-                        // of the kind-based heritage dispatch (§8.2).
+                        // of the kind-based heritage dispatch (PR #2 of §8 in
+                        // docs/specs/2026-05-23-sub-projects-1-5.md).
                         RawNode {
                             name: "Implementor".into(),
                             kind: NodeKind::Class,
@@ -6061,7 +6063,8 @@ mod tests {
         // only — see `crates/ecp-analyzer/src/post_process/imports_edges.rs`
         // Tier-1-2-3 resolver for cross-file basename / dir-component indexing
         // that can't be moved to Pass-2 without breaking its streaming design.
-        // `Implements` lifted §8.2, `Defines` §8.4, `Fetches` (this PR) §8.5.
+        // `Implements` lifted in PR #2, `Defines` in PR #4, `Fetches` in PR #5 of §8 in
+        // docs/specs/2026-05-23-sub-projects-1-5.md.
 
         // Imports is intentionally post-process only (imports_edges.rs Tier-1-2-3
         // resolver); Pass-2 must never emit it.

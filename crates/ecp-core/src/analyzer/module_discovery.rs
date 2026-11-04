@@ -1,9 +1,9 @@
 //! Module discovery: the file an import specifier names, without guessing
 //! its member. The index-time resolver (ecp-analyzer
 //! `Resolver::import_module_file`) and the session overlay
-//! (`session/import_scope.rs`) both run [`discover_module`] (B §4.2, row
-//! B6a); each answers the questions through its own [`ModuleIndex`] and
-//! keeps its own memo.
+//! (`session/import_scope.rs`) both run [`discover_module`] (row B6a in
+//! docs/specs/2026-10-23-shared-resolution-design.md §4.2); each answers the
+//! questions through its own [`ModuleIndex`] and keeps its own memo.
 //!
 //! Discovery is a standalone step, not a tier of [`crate::analyzer::ladder`]:
 //! it picks no declaration. The import-member tier, the qualifier tier, the

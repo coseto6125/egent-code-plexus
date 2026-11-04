@@ -1,4 +1,4 @@
-//! Tests for safe_exec hardening wrapper (spec §8 H4).
+//! Tests for safe_exec hardening wrapper.
 
 use ecp_cli::git::safe_exec;
 

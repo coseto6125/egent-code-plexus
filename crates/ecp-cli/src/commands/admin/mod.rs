@@ -1,5 +1,5 @@
 //! `ecp admin` subcommand namespace — registry / hooks / destructive ops.
-//! Hidden from top-level `ecp --help` per spec §4.
+//! Hidden from top-level `ecp --help`.
 
 use clap::Subcommand;
 

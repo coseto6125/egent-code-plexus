@@ -1,5 +1,6 @@
-//! The call-level fallback rows of the shared resolution design (B §3.2,
-//! pinned by §4.3 item 3). Each row plants one fact in a small tree. Its own
+//! The call-level fallback rows of the shared resolution design
+//! (docs/specs/2026-10-23-shared-resolution-design.md §3.2,
+//! pinned by its §4.3 item 3). Each row plants one fact in a small tree. Its own
 //! test asserts what a reader of the graph gets: the exact `Calls` edges of
 //! one caller in a fresh full index. The all-rows test then asserts that the
 //! overlay view of every row's tree (the caller file dirty, unchanged but for

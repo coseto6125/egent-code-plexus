@@ -1,5 +1,4 @@
 //! Audit log: JSON Lines, append-only, mutation events only.
-//! Spec §9.
 
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};

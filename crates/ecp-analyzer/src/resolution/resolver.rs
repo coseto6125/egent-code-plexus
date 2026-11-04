@@ -1779,7 +1779,7 @@ impl<'a> Resolver<'a> {
 }
 
 /// The index ladder's answer as a [`Resolution`]. Every tier answers with
-/// at most one target (B §3.4), so the first is the edge.
+/// at most one target, so the first is the edge.
 fn ladder_resolution(targets: &[(NodeId, f32)]) -> Resolution {
     debug_assert!(targets.len() <= 1, "a tier bound {targets:?}");
     Resolution::from_ladder(targets.first().copied())

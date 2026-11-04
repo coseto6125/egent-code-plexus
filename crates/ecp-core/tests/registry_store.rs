@@ -123,7 +123,7 @@ fn write_atomic_does_not_create_bak() {
     RegistryFile::write_atomic(&path, &reg).unwrap();
     assert!(
         !bak.exists(),
-        ".bak must NOT be created — spec §3 layout has no .bak; recovery goes through rebuild_from_disk"
+        ".bak must NOT be created — layout has no .bak; recovery goes through rebuild_from_disk"
     );
 }
 

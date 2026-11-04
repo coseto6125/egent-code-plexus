@@ -1,4 +1,5 @@
-//! Python Protocol/ABC base-list detection — spec §4.5b.
+//! Python Protocol/ABC base-list detection
+//! (docs/specs/2026-05-23-sub-projects-1-5.md §4.5b).
 //!
 //! When a class's base list contains ONLY Protocol-markers
 //! (`Protocol`, `ABC`, `ABCMeta` — bare or dotted, parametrized or plain),
