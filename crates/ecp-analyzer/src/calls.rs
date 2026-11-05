@@ -1078,7 +1078,7 @@ impl<'s> NameScan<'s> {
             if let Some(name) = symbol_method_ref(n, source) {
                 self.reads.push(PendingName {
                     pos: start_pos(n),
-                    name: Cow::Borrowed(name),
+                    name,
                     kind: NameRefKind::Function,
                 });
             }
@@ -1204,12 +1204,12 @@ pub fn qualified_reference(path: Node<'_>, source: &[u8], spec: &NameRefSpec) ->
     plain.then(|| text.to_string())
 }
 
-/// Ruby `method(:name)` with no receiver: the method `name` handed on as a
-/// `Method` object.
-fn symbol_method_ref<'s>(call: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
-    if call.child_by_field_name("receiver").is_some()
-        || call.child_by_field_name("method")?.utf8_text(source).ok()? != "method"
-    {
+/// Ruby `method(:name)`: the method `name` handed on as a `Method` object.
+/// A `self` or absent receiver names `name`; a constant receiver (`Mod`,
+/// `A::Mod`) names `Mod.name`, so Pass 2 binds it through the module. Any other
+/// receiver is a value of unknown type and records nothing.
+fn symbol_method_ref<'s>(call: Node<'_>, source: &'s [u8]) -> Option<Cow<'s, str>> {
+    if call.child_by_field_name("method")?.utf8_text(source).ok()? != "method" {
         return None;
     }
     let args = call.child_by_field_name("arguments")?;
@@ -1218,11 +1218,26 @@ fn symbol_method_ref<'s>(call: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
     if first.kind() != "simple_symbol" {
         return None;
     }
-    first
+    let name = first
         .utf8_text(source)
         .ok()?
         .strip_prefix(':')
-        .filter(|name| !name.is_empty())
+        .filter(|name| !name.is_empty())?;
+    let Some(receiver) = call.child_by_field_name("receiver") else {
+        return Some(Cow::Borrowed(name));
+    };
+    let module = match receiver.kind() {
+        "self" => return Some(Cow::Borrowed(name)),
+        "constant" => receiver,
+        "scope_resolution" => receiver
+            .child_by_field_name("name")
+            .filter(|segment| segment.kind() == "constant")?,
+        _ => return None,
+    };
+    Some(Cow::Owned(format!(
+        "{}.{name}",
+        module.utf8_text(source).ok()?
+    )))
 }
 
 /// The accessed field's short name from a member-access node. Tries the

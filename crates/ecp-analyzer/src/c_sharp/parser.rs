@@ -296,6 +296,44 @@ fn declaration_extent(root: Node<'_>) -> (Span, std::ops::Range<usize>) {
     )
 }
 
+/// The method group `Qualifier.Member` in value position: `Cb.M` records
+/// `Cb.M`, with the last qualifier segment, so Pass 2 binds it only when the
+/// qualifier names a type or namespace. `None` for a qualifier of the member
+/// access above it (`Cb.M` in `Cb.M.X`), a `this` / `base` qualifier, and a
+/// qualifier that is a call, an index or a generic name.
+fn method_group_name(access: Node<'_>, source: &[u8], _spec: &NameRefSpec) -> Option<String> {
+    let member = access
+        .child_by_field_name("name")
+        .filter(|name| name.kind() == "identifier")?
+        .utf8_text(source)
+        .ok()?;
+    let qualifies_outer = access.parent().is_some_and(|parent| {
+        parent.kind() == "member_access_expression"
+            && parent
+                .child_by_field_name("expression")
+                .is_some_and(|expression| expression.id() == access.id())
+    });
+    if qualifies_outer {
+        return None;
+    }
+    let qualifier = access
+        .child_by_field_name("expression")?
+        .utf8_text(source)
+        .ok()?;
+    let is_name = |segment: &str| {
+        !segment.is_empty()
+            && !matches!(segment, "this" | "base")
+            && !segment.starts_with(|c: char| c.is_ascii_digit())
+            && segment.chars().all(|c| c.is_alphanumeric() || c == '_')
+    };
+    qualifier.split('.').all(is_name).then(|| {
+        format!(
+            "{}.{member}",
+            qualifier.rsplit('.').next().unwrap_or(qualifier)
+        )
+    })
+}
+
 impl ParseSpec for CSharpSpec {
     type Role = CSharpRole;
     type Match<'t> = CSharpMatch<'t>;
@@ -355,6 +393,8 @@ impl ParseSpec for CSharpSpec {
                 "generic_name",
             ],
             skip_parents: &["labeled_statement", "goto_statement"],
+            qualified_values: &["member_access_expression"],
+            qualified_name: method_group_name,
             ..NameRefSpec::EMPTY
         },
     });

@@ -145,6 +145,44 @@ pub struct SwiftFile {
     seen_properties: HashSet<(usize, usize)>,
 }
 
+/// The function `Type.f` in value position: records `Type.f`, with the last
+/// qualifier segment. `None` for a callee (a `call_suffix` follows), for a
+/// qualifier of the navigation above it, and for a `self` / `super` or other
+/// computed qualifier.
+fn navigated_function_name(
+    navigation: Node<'_>,
+    source: &[u8],
+    spec: &NameRefSpec,
+) -> Option<String> {
+    let suffix_name = |node: Node<'_>| {
+        node.child_by_field_name("suffix")?
+            .child_by_field_name("suffix")
+            .filter(|name| spec.ident_kinds.contains(&name.kind()))?
+            .utf8_text(source)
+            .ok()
+    };
+    let is_callee = navigation
+        .next_named_sibling()
+        .is_some_and(|next| next.kind() == "call_suffix");
+    let qualifies_outer = navigation.parent().is_some_and(|parent| {
+        parent.kind() == "navigation_expression"
+            && parent
+                .child_by_field_name("target")
+                .is_some_and(|target| target.id() == navigation.id())
+    });
+    if is_callee || qualifies_outer {
+        return None;
+    }
+    let member = suffix_name(navigation)?;
+    let target = navigation.child_by_field_name("target")?;
+    let qualifier = match target.kind() {
+        "navigation_expression" => suffix_name(target)?,
+        kind if spec.ident_kinds.contains(&kind) => target.utf8_text(source).ok()?,
+        _ => return None,
+    };
+    Some(format!("{qualifier}.{member}"))
+}
+
 impl ParseSpec for SwiftSpec {
     type Role = SwiftRole;
     type Match<'t> = SwiftMatch<'t>;
@@ -198,6 +236,8 @@ impl ParseSpec for SwiftSpec {
             ],
             skip_parents: &["value_argument_label"],
             call_suffixes: &["call_suffix"],
+            qualified_values: &["navigation_expression"],
+            qualified_name: navigated_function_name,
             ..NameRefSpec::EMPTY
         },
     });

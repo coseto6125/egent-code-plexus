@@ -112,6 +112,38 @@ pub struct DartMatch<'t> {
     var_type: Option<Node<'t>>,
 }
 
+/// The function `Cls.f` in value position: records `Cls.f`, with the last
+/// qualifier segment. `None` for a qualifier of the member expression above
+/// it, and for a `this` / `super` or other computed object.
+fn member_function_name(member: Node<'_>, source: &[u8], spec: &NameRefSpec) -> Option<String> {
+    let is_name = |node: Node<'_>| spec.ident_kinds.contains(&node.kind());
+    let property = member
+        .child_by_field_name("property")
+        .filter(|&node| is_name(node))?;
+    let qualifies_outer = member.parent().is_some_and(|parent| {
+        parent.kind() == "member_expression"
+            && parent
+                .child_by_field_name("object")
+                .is_some_and(|object| object.id() == member.id())
+    });
+    if qualifies_outer {
+        return None;
+    }
+    let object = member.child_by_field_name("object")?;
+    let qualifier = match object.kind() {
+        "member_expression" => object
+            .child_by_field_name("property")
+            .filter(|&node| is_name(node))?,
+        _ if is_name(object) => object,
+        _ => return None,
+    };
+    Some(format!(
+        "{}.{}",
+        qualifier.utf8_text(source).ok()?,
+        property.utf8_text(source).ok()?
+    ))
+}
+
 impl ParseSpec for DartSpec {
     type Role = DartRole;
     type Match<'t> = DartMatch<'t>;
@@ -168,6 +200,8 @@ impl ParseSpec for DartSpec {
                 "type_arguments",
             ],
             skip_parents: &["label"],
+            qualified_values: &["member_expression"],
+            qualified_name: member_function_name,
             ..NameRefSpec::EMPTY
         },
     });
