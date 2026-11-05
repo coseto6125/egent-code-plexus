@@ -31,7 +31,10 @@ use crate::dynamic_imports::{
 use crate::framework_helpers::{
     enclosing_class, js_ts_first_arg_is_literal_string, node_span, Span,
 };
-use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
+use ecp_core::analyzer::types::{
+    CallSite, NameRef, NameRefKind, RawNode, RawPathLiteral, RawSqlRef,
+};
+use ecp_core::graph::NodeKind;
 use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
 
@@ -546,6 +549,7 @@ pub fn extract_ts_calls_and_path_literals(
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
     let mut constructions: Vec<(Span, String)> = Vec::new();
+    let fields = data_members(nodes);
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         match n.kind() {
@@ -554,6 +558,11 @@ pub fn extract_ts_calls_and_path_literals(
                     if let Some(site) = attach_to_enclosing_span(node_span(&n), callee, nodes) {
                         call_sites.insert(n.id(), site);
                     }
+                }
+            }
+            "member_expression" => {
+                if let Some(name) = bound_method_value(n, source, Some(locals), nodes, &fields) {
+                    reference_function(node_span(&n), &name, nodes);
                 }
             }
             "new_expression" => {
@@ -606,6 +615,89 @@ pub fn extract_ts_calls_and_path_literals(
         attach_to_enclosing_span(span, callee, nodes);
     }
     (path_literals, sql_refs)
+}
+
+/// The names of the fields and properties this file declares that no
+/// function or method of the file shares: `this.count` of such a name is a
+/// read, never a method value.
+pub(crate) fn data_members(nodes: &[RawNode]) -> HashSet<String> {
+    let callables: HashSet<&str> = nodes
+        .iter()
+        .filter(|n| n.kind.is_callable())
+        .map(|n| n.name.as_str())
+        .collect();
+    nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Property && !callables.contains(n.name.as_str()))
+        .map(|n| n.name.clone())
+        .collect()
+}
+
+/// `obj.m` in value position (`xs.forEach(obj.m)`, `const f = this.m`,
+/// `xs.forEach(this.m.bind(this))`) where `obj` is `this` or, given `locals`,
+/// a parameter or local annotated with a class `T`: the method `T.m` (the
+/// enclosing class's for `this`), typed as the call `obj.m()` is. The name
+/// scan drops `obj.m`, as `obj` is a local, and records no `this.m`. A
+/// callee, the object of a longer member expression (`.bind` aside), an
+/// assignment target, a `fields` name read through `this`, and a receiver of
+/// no known type name nothing; a field `obj.n` is no callable, so Pass 2
+/// binds no edge to it.
+pub(crate) fn bound_method_value(
+    member: Node<'_>,
+    source: &[u8],
+    locals: Option<&LocalTypes>,
+    nodes: &[RawNode],
+    fields: &HashSet<String>,
+) -> Option<String> {
+    let parent = member.parent()?;
+    let value = match parent.kind() {
+        "call_expression" => parent.child_by_field_name("function") != Some(member),
+        "assignment_expression" | "augmented_assignment_expression" => {
+            parent.child_by_field_name("left") != Some(member)
+        }
+        // `this.m.bind(this)` hands on `m` bound to the receiver.
+        "member_expression" if parent.child_by_field_name("object") == Some(member) => {
+            parent
+                .child_by_field_name("property")
+                .and_then(|property| property.utf8_text(source).ok())
+                == Some("bind")
+                && parent.parent().is_some_and(|call| {
+                    call.kind() == "call_expression"
+                        && call.child_by_field_name("function") == Some(parent)
+                })
+        }
+        _ => true,
+    };
+    if !value {
+        return None;
+    }
+    let property = member
+        .child_by_field_name("property")
+        .filter(|property| property.kind() == "property_identifier")?
+        .utf8_text(source)
+        .ok()?;
+    let object = member.child_by_field_name("object")?;
+    let ty = match object.kind() {
+        "this" if !fields.contains(property) => enclosing_class(nodes, node_span(&member))?.0,
+        "identifier" => locals?
+            .lookup(start_pos(member), object.utf8_text(source).ok()?)?
+            .to_string(),
+        _ => return None,
+    };
+    Some(format!("{ty}.{property}"))
+}
+
+/// Records `name` as a function that the function holding `span` hands on
+/// as a value: Pass 2 binds it as a `References` edge, never as a call.
+pub(crate) fn reference_function(span: Span, name: &str, nodes: &mut [RawNode]) {
+    // `attach_to_enclosing_span` picks the holder; its placeholder call is
+    // the last entry, so popping it leaves `calls` as it was.
+    if let Some((holder, _)) = attach_to_enclosing_span(span, String::new(), nodes) {
+        let node = &mut nodes[holder];
+        node.calls.pop();
+        node.field_reads
+            .push(NameRef::encode(name, NameRefKind::Function));
+    }
 }
 
 fn ts_callee_name(

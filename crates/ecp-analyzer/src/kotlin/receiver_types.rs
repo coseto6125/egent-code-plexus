@@ -28,7 +28,9 @@ use super::path_literals::{
 use crate::calls::{
     attach_to_enclosing, node_range, range_width, span_holds, span_width, start_pos, Pos, PosRange,
 };
-use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
+use ecp_core::analyzer::types::{
+    CallSite, NameRef, NameRefKind, RawNode, RawPathLiteral, RawSqlRef,
+};
 use ecp_core::graph::NodeKind;
 use std::collections::HashMap;
 use tree_sitter::Node;
@@ -382,6 +384,11 @@ pub fn extract_kotlin_calls_and_path_literals(
                     attach_to_enclosing(start_pos(n), callee, nodes);
                 }
             }
+            "callable_reference" | "navigation_expression" => {
+                if let Some(name) = bound_callable_reference(n, source, &local_types, nodes) {
+                    reference_function(start_pos(n), &name, nodes);
+                }
+            }
             "string_literal" | "multiline_string_literal" => {
                 if let Some(rpl) = build_raw_path_literal(n, source) {
                     path_literals.push(rpl);
@@ -418,6 +425,60 @@ pub fn extract_kotlin_calls_and_path_literals(
         }
     }
     (path_literals, sql_refs)
+}
+
+/// The method a bound callable reference names, typed as the call
+/// `c.m()` / `this.m()` is: `c::m` with `c` a local or parameter of a
+/// declared type `T` names `T.m`, and `this::m` names `m` of the enclosing
+/// class. tree-sitter-kotlin parses `this::m` as a `navigation_expression`
+/// whose suffix starts with `::`. A receiver of no known type names nothing;
+/// a type receiver (`Cb::m`) is the name scan's.
+fn bound_callable_reference(
+    reference: Node<'_>,
+    source: &[u8],
+    locals: &LocalTypes,
+    nodes: &[RawNode],
+) -> Option<String> {
+    if reference.named_child_count() != 2 {
+        return None;
+    }
+    let (receiver, member) = (reference.named_child(0)?, reference.named_child(1)?);
+    let pos = start_pos(reference);
+    let (ty, member) = match (reference.kind(), receiver.kind()) {
+        ("callable_reference", "type_identifier") => {
+            let var = receiver.utf8_text(source).ok()?;
+            let ty = locals
+                .binds_local(pos, var)
+                .then(|| locals.lookup(pos, var))??;
+            (ty.to_string(), member)
+        }
+        ("navigation_expression", "this_expression")
+            if member.child(0).is_some_and(|op| op.kind() == "::") =>
+        {
+            let name = member
+                .named_children(&mut member.walk())
+                .find(|n| n.kind() == "simple_identifier")?;
+            (enclosing_class_name(nodes, pos)?, name)
+        }
+        _ => return None,
+    };
+    if member.kind() != "simple_identifier" {
+        return None;
+    }
+    Some(format!("{ty}.{}", member.utf8_text(source).ok()?))
+}
+
+/// Records `name` as a function that the function holding `pos` hands on as
+/// a value: Pass 2 binds it as a `References` edge, never as a call.
+fn reference_function(pos: Pos, name: &str, nodes: &mut [RawNode]) {
+    // `attach_to_enclosing` picks the holder; its placeholder call is the
+    // last entry, so popping it leaves `calls` as it was.
+    if let Some((holder, _)) = attach_to_enclosing(pos, String::new(), nodes) {
+        let node = &mut nodes[holder];
+        node.calls.pop();
+        node.field_reads
+            .push(NameRef::encode(name, NameRefKind::Function));
+    }
 }
 
 /// Whether a type enclosing `pos` declares a property `name` as its own

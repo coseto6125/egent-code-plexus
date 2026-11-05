@@ -29,9 +29,12 @@ use super::path_literals::{
     build_raw_path_literal, has_template_substitution, strip_dart_string_value,
 };
 use crate::calls::{
-    attach_to_enclosing, node_range, range_width, span_holds, start_pos, Pos, PosRange,
+    attach_to_enclosing, heads_same_kind_parent, node_range, range_width, span_holds, start_pos,
+    Pos, PosRange,
 };
-use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
+use ecp_core::analyzer::types::{
+    CallSite, NameRef, NameRefKind, RawNode, RawPathLiteral, RawSqlRef,
+};
 use ecp_core::graph::NodeKind;
 use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
@@ -292,6 +295,11 @@ pub fn extract_dart_calls_and_path_literals(
                     attach_to_enclosing(start_pos(n), callee, nodes);
                 }
             }
+            "member_expression" | "null_aware_member_expression" => {
+                if let Some(name) = method_value(n, source, bindings) {
+                    reference_function(start_pos(n), &name, nodes);
+                }
+            }
             "string_literal" => {
                 if let Some(rpl) = build_raw_path_literal(n, source) {
                     path_literals.push(rpl);
@@ -398,6 +406,50 @@ fn dart_callee_name(
         _ => std::str::from_utf8(&source[function.start_byte()..function.end_byte()])
             .ok()
             .map(str::to_string),
+    }
+}
+
+/// `c.m` in value position (`xs.forEach(c.m)`, `final f = this.m`) where `c`
+/// is a local or parameter of a declared type `T`, or `this`: the method
+/// `T.m` (the enclosing class's for `this`), typed as the call `c.m()` is.
+/// The name scan drops `c.m`, as `c` is a local, and records no `this.m`. A
+/// callee, the object of a longer member expression and a receiver of no
+/// known type name nothing; a field `c.f` is no callable, so Pass 2 binds no
+/// edge to it.
+fn method_value(member: Node<'_>, source: &[u8], bindings: &DartBindings) -> Option<String> {
+    let callee = member.parent().is_some_and(|parent| {
+        parent.kind() == "call_expression" && parent.child_by_field_name("function") == Some(member)
+    });
+    if callee || heads_same_kind_parent(member, "object") {
+        return None;
+    }
+    let property = member
+        .child_by_field_name("property")
+        .filter(|property| property.kind() == "identifier")?
+        .utf8_text(source)
+        .ok()?;
+    let object = member.child_by_field_name("object")?;
+    let pos = start_pos(member);
+    let ty = match object.kind() {
+        "this" => bindings.enclosing_class(pos)?.0.as_str(),
+        "identifier" => bindings
+            .lookup_local(pos, object.utf8_text(source).ok()?)
+            .filter(|ty| !ty.is_empty())?,
+        _ => return None,
+    };
+    Some(format!("{ty}.{property}"))
+}
+
+/// Records `name` as a function that the function holding `pos` hands on as
+/// a value: Pass 2 binds it as a `References` edge, never as a call.
+fn reference_function(pos: Pos, name: &str, nodes: &mut [RawNode]) {
+    // `attach_to_enclosing` picks the holder; its placeholder call is the
+    // last entry, so popping it leaves `calls` as it was.
+    if let Some((holder, _)) = attach_to_enclosing(pos, String::new(), nodes) {
+        let node = &mut nodes[holder];
+        node.calls.pop();
+        node.field_reads
+            .push(NameRef::encode(name, NameRefKind::Function));
     }
 }
 

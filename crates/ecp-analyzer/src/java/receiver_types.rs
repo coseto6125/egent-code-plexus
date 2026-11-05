@@ -20,7 +20,9 @@ use crate::calls::{
     attach_to_enclosing, construction_call, node_range, range_width, span_holds, span_width,
     start_pos, Pos, PosRange,
 };
-use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
+use ecp_core::analyzer::types::{
+    CallSite, NameRef, NameRefKind, RawNode, RawPathLiteral, RawSqlRef,
+};
 use ecp_core::graph::NodeKind;
 use std::collections::HashMap;
 use tree_sitter::Node;
@@ -300,6 +302,11 @@ pub fn extract_java_calls_and_path_literals(
                     attach_to_enclosing(start_pos(n), callee, nodes);
                 }
             }
+            "method_reference" => {
+                if let Some(name) = bound_method_reference(n, source, &local_types) {
+                    reference_function(start_pos(n), &name, nodes);
+                }
+            }
             "string_literal" | "text_block" => {
                 if let Some(rpl) = build_raw_path_literal(n, source) {
                     path_literals.push(rpl);
@@ -326,6 +333,38 @@ pub fn extract_java_calls_and_path_literals(
         }
     }
     (path_literals, sql_refs)
+}
+
+/// `c::m` where `c` is a local or parameter of a declared type `T`: the
+/// method `T.m`, typed as a call `c.m()` is. The name scan drops `c::m`,
+/// as `c` is a local; a receiver of no known type names nothing.
+fn bound_method_reference(
+    reference: Node<'_>,
+    source: &[u8],
+    locals: &LocalTypes,
+) -> Option<String> {
+    if reference.named_child_count() != 2 {
+        return None;
+    }
+    let (receiver, member) = (reference.named_child(0)?, reference.named_child(1)?);
+    if receiver.kind() != "identifier" || member.kind() != "identifier" {
+        return None;
+    }
+    let ty = locals.lookup(start_pos(reference), receiver.utf8_text(source).ok()?)?;
+    Some(format!("{ty}.{}", member.utf8_text(source).ok()?))
+}
+
+/// Records `name` as a function that the function holding `pos` hands on as
+/// a value: Pass 2 binds it as a `References` edge, never as a call.
+fn reference_function(pos: Pos, name: &str, nodes: &mut [RawNode]) {
+    // `attach_to_enclosing` picks the holder; its placeholder call is the
+    // last entry, so popping it leaves `calls` as it was.
+    if let Some((holder, _)) = attach_to_enclosing(pos, String::new(), nodes) {
+        let node = &mut nodes[holder];
+        node.calls.pop();
+        node.field_reads
+            .push(NameRef::encode(name, NameRefKind::Function));
+    }
 }
 
 /// Name of the innermost enclosing Class/Interface node at `pos`.

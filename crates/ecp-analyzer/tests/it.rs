@@ -23,6 +23,7 @@ mod bash_const_dedup;
 mod bash_named;
 mod bash_parser_fixes;
 mod bash_source_imports;
+mod bound_method_reference;
 mod c_anonymous_callbacks;
 mod c_binding_kind;
 mod c_blind_spots;

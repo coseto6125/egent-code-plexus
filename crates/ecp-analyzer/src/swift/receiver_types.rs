@@ -28,10 +28,14 @@
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_swift_string_value,
 };
-use crate::calls::{attach_to_enclosing, node_range, range_width, start_pos, Pos, PosRange};
-use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
+use crate::calls::{
+    attach_to_enclosing, heads_same_kind_parent, node_range, range_width, start_pos, Pos, PosRange,
+};
+use ecp_core::analyzer::types::{
+    CallSite, NameRef, NameRefKind, RawNode, RawPathLiteral, RawSqlRef,
+};
 use ecp_core::graph::NodeKind;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
 
 /// Per-function-scope local var → type map, plus the enclosing class /
@@ -401,12 +405,23 @@ pub fn extract_swift_calls_and_path_literals(
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
+    // The callee of each call, so a navigation that names what a call
+    // invokes is no method value. A call is visited before its callee.
+    let mut callees: HashSet<usize> = HashSet::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         match n.kind() {
             "call_expression" => {
+                if let Some(callee) = swift_callee_node(n) {
+                    callees.insert(callee.id());
+                }
                 if let Some(callee) = swift_callee_name(n, source, bindings, nodes) {
                     attach_to_enclosing(start_pos(n), callee, nodes);
+                }
+            }
+            "navigation_expression" if !callees.contains(&n.id()) => {
+                if let Some(name) = method_value(n, source, bindings) {
+                    reference_function(start_pos(n), &name, nodes);
                 }
             }
             "line_string_literal" | "multi_line_string_literal" | "raw_string_literal" => {
@@ -432,6 +447,47 @@ pub fn extract_swift_calls_and_path_literals(
         }
     }
     (path_literals, sql_refs)
+}
+
+/// `c.m` in value position (`xs.forEach(c.m)`, `let f = self.m`) where `c` is
+/// a local or parameter of a declared type `T`, or `self`: the method `T.m`
+/// (the enclosing type's for `self`), typed as the call `c.m()` is. The name
+/// scan drops `c.m`, as `c` is a local, and records no `self.m`. The target
+/// of a longer navigation and a receiver of no known type name nothing; a
+/// property `c.p` is no callable, so Pass 2 binds no edge to it.
+fn method_value(navigation: Node<'_>, source: &[u8], bindings: &SwiftBindings) -> Option<String> {
+    if heads_same_kind_parent(navigation, "target") {
+        return None;
+    }
+    let member = navigation
+        .child_by_field_name("suffix")?
+        .child_by_field_name("suffix")
+        .filter(|name| name.kind() == "simple_identifier")?
+        .utf8_text(source)
+        .ok()?;
+    let target = navigation.child_by_field_name("target")?;
+    let pos = start_pos(navigation);
+    let ty = match target.kind() {
+        "self_expression" => bindings.enclosing_class(pos)?.0.as_str(),
+        "simple_identifier" => bindings
+            .lookup_local(pos, target.utf8_text(source).ok()?)
+            .filter(|ty| !ty.is_empty())?,
+        _ => return None,
+    };
+    Some(format!("{ty}.{member}"))
+}
+
+/// Records `name` as a function that the function holding `pos` hands on as
+/// a value: Pass 2 binds it as a `References` edge, never as a call.
+fn reference_function(pos: Pos, name: &str, nodes: &mut [RawNode]) {
+    // `attach_to_enclosing` picks the holder; its placeholder call is the
+    // last entry, so popping it leaves `calls` as it was.
+    if let Some((holder, _)) = attach_to_enclosing(pos, String::new(), nodes) {
+        let node = &mut nodes[holder];
+        node.calls.pop();
+        node.field_reads
+            .push(NameRef::encode(name, NameRefKind::Function));
+    }
 }
 
 /// The node that names what `call` invokes: the first non-call-suffix named
