@@ -155,8 +155,8 @@ fn test_type_annotation_bare_callable_alias_binds() {
 }
 
 #[test]
-fn test_type_annotation_bare_union_of_names_alias_binds() {
-    assert_alias_bound("class Alpha: ...\nclass Beta: ...\nAl = Alpha | Beta\n");
+fn test_type_annotation_bare_union_with_none_of_class_alias_binds() {
+    assert_alias_bound("class Alpha: ...\nAl = Alpha | None\n");
 }
 
 #[test]
@@ -193,6 +193,14 @@ fn test_type_annotation_list_literal_assignment_is_not_alias() {
 #[test]
 fn test_type_annotation_subscript_of_unknown_name_is_not_alias() {
     assert_not_alias("table = {}\nAl = table['k']\n");
+}
+
+/// Stands for: a union with no certain operand (`None`, a builtin type, a
+/// generic subscript) is not evidence of a type; it stays a Variable, as on
+/// main, rather than fabricating a Typedef for a possible flag mask.
+#[test]
+fn test_type_annotation_union_of_classes_without_certain_operand_is_not_alias() {
+    assert_not_alias("class Alpha: ...\nclass Beta: ...\nAl = Alpha | Beta\n");
 }
 
 #[test]

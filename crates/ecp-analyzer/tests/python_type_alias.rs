@@ -74,20 +74,20 @@ fn typealias_does_not_double_emit() {
 }
 
 #[test]
-fn pep695_type_statement_is_typedef() {
+fn test_parse_pep695_type_statement_returns_typedef() {
     let g = parse("type Al = tuple[int, int]\n");
     assert_eq!(kind_of(&g, "Al"), Some(NodeKind::Typedef), "{:?}", g.nodes);
     assert_eq!(g.nodes.iter().filter(|n| n.name == "Al").count(), 1);
 }
 
 #[test]
-fn bare_generic_subscript_is_typedef() {
+fn test_parse_bare_generic_subscript_returns_typedef() {
     let g = parse("from typing import Tuple\nAl = Tuple[int, int]\n");
     assert_eq!(kind_of(&g, "Al"), Some(NodeKind::Typedef), "{:?}", g.nodes);
 }
 
 #[test]
-fn value_assignments_stay_variable() {
+fn test_parse_value_assignments_stay_variable() {
     for src in [
         "X = 3\n",
         "X = foo()\n",
@@ -95,5 +95,41 @@ fn value_assignments_stay_variable() {
         "X = READ | WRITE\n",
     ] {
         assert_eq!(kind_of(&parse(src), "X"), Some(NodeKind::Variable), "{src}");
+    }
+}
+
+#[test]
+fn test_parse_attribute_flag_union_stays_variable() {
+    let g = parse(
+        "ITEM_FLAGS = Qt.ItemIsEnabled | Qt.ItemIsSelectable\n\
+         Read = 1\nWrite = 2\nMask = Read | Write\n",
+    );
+    for name in ["ITEM_FLAGS", "Mask"] {
+        assert_eq!(kind_of(&g, name), Some(NodeKind::Variable), "{name}");
+    }
+}
+
+#[test]
+fn test_parse_generic_name_rebound_as_value_stays_variable() {
+    let g = parse("List = [42]\nAlias = List[0]\n");
+    assert_eq!(
+        kind_of(&g, "Alias"),
+        Some(NodeKind::Variable),
+        "{:?}",
+        g.nodes
+    );
+}
+
+#[test]
+fn test_parse_real_aliases_are_typedef() {
+    for (src, name) in [
+        ("type Al = tuple[int, int]\n", "Al"),
+        ("from typing import Optional\nAl = Optional[int]\n", "Al"),
+        ("Al = int | None\n", "Al"),
+        ("IntOrStr = int | str\n", "IntOrStr"),
+        ("class Foo: ...\nAl = Foo | None\n", "Al"),
+        ("from typing import Dict\nAl = Dict[str, int]\n", "Al"),
+    ] {
+        assert_eq!(kind_of(&parse(src), name), Some(NodeKind::Typedef), "{src}");
     }
 }

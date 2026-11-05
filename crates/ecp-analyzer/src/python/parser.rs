@@ -787,7 +787,7 @@ const ALIAS_GENERICS: &[&str] = &[
     "type",
 ];
 
-/// Builtin type names allowed as `|` union operands.
+/// Builtin type names that make a `|` union certainly a type.
 const ALIAS_BUILTINS: &[&str] = &[
     "int",
     "str",
@@ -796,6 +796,7 @@ const ALIAS_BUILTINS: &[&str] = &[
     "bytes",
     "complex",
     "object",
+    "type",
     "list",
     "dict",
     "set",
@@ -804,58 +805,91 @@ const ALIAS_BUILTINS: &[&str] = &[
     "bytearray",
 ];
 
-/// A bare module-level `X = <type expression>` is an alias only when the right
-/// side is a subscript of a known generic, or a `|` union whose operands all
-/// look like types. A call, literal, or ALL_CAPS `A | B` flag mask stays a value.
+/// A bare module-level `X = <type expression>` is an alias only on evidence:
+/// the right side is a subscript of a generic the module does not rebind, or
+/// a `|` union of names, dotted names and subscripts with at least one certain
+/// operand (`None`, a builtin type, such a subscript). A call, literal, or
+/// `Qt.A | Qt.B` / `Read | Write` flag mask has no certain operand and stays a
+/// value. The caller guards that the assignment carries no annotation.
 fn is_bare_type_alias(assignment: Node, source: &[u8]) -> bool {
     assignment.kind() == "assignment"
-        && assignment.child_by_field_name("type").is_none()
-        && assignment
-            .child_by_field_name("right")
-            .is_some_and(|r| is_type_expression(r, source))
+        && assignment.child_by_field_name("right").is_some_and(|r| {
+            let mut certain = false;
+            is_type_shape(r, source, &mut certain) && certain
+        })
 }
 
-fn is_type_expression(n: Node, source: &[u8]) -> bool {
-    let text = |n: Node| std::str::from_utf8(&source[n.start_byte()..n.end_byte()]).ok();
+/// True when `n` is shaped like a type; sets `certain` when a part of it is
+/// evidence that no value expression shares.
+fn is_type_shape(n: Node, source: &[u8], certain: &mut bool) -> bool {
     match n.kind() {
-        "subscript" => n
-            .child_by_field_name("value")
-            .and_then(|v| match v.kind() {
-                "identifier" => text(v),
-                "attribute" => v.child_by_field_name("attribute").and_then(text),
-                _ => None,
-            })
-            .is_some_and(|name| ALIAS_GENERICS.contains(&name)),
+        "subscript" => {
+            let is_generic = n
+                .child_by_field_name("value")
+                .and_then(|v| match v.kind() {
+                    "identifier" => Some((node_text(v, source), true)),
+                    "attribute" => v
+                        .child_by_field_name("attribute")
+                        .map(|a| (node_text(a, source), false)),
+                    _ => None,
+                })
+                .is_some_and(|(name, bare)| {
+                    ALIAS_GENERICS.contains(&name) && !(bare && module_binds(n, name, source))
+                });
+            *certain |= is_generic;
+            // A lone subscript is a type only when its base is a generic; as
+            // a union operand any subscript has the shape of a type.
+            is_generic || n.parent().is_some_and(|p| p.kind() == "binary_operator")
+        }
         "binary_operator" => {
-            n.child_by_field_name("operator").and_then(text) == Some("|")
+            n.child_by_field_name("operator")
+                .map(|o| node_text(o, source))
+                == Some("|")
                 && [
                     n.child_by_field_name("left"),
                     n.child_by_field_name("right"),
                 ]
                 .into_iter()
-                .all(|o| o.is_some_and(|o| is_union_operand(o, source)))
+                .all(|o| o.is_some_and(|o| is_union_operand(o, source, certain)))
         }
         _ => false,
     }
 }
 
-fn is_union_operand(n: Node, source: &[u8]) -> bool {
-    let text = |n: Node| std::str::from_utf8(&source[n.start_byte()..n.end_byte()]).ok();
-    let is_type_name = |s: &str| {
-        s == "None"
-            || ALIAS_BUILTINS.contains(&s)
-            || (s.starts_with(|c: char| c.is_ascii_uppercase())
-                && s.chars().any(|c| c.is_ascii_lowercase()))
-    };
+fn is_union_operand(n: Node, source: &[u8], certain: &mut bool) -> bool {
     match n.kind() {
-        "identifier" => text(n).is_some_and(is_type_name),
-        "none" => true,
-        "attribute" => n
-            .child_by_field_name("attribute")
-            .and_then(text)
-            .is_some_and(is_type_name),
-        _ => is_type_expression(n, source),
+        "identifier" => {
+            *certain |= ALIAS_BUILTINS.contains(&node_text(n, source));
+            true
+        }
+        "none" => {
+            *certain = true;
+            true
+        }
+        "attribute" => true,
+        _ => is_type_shape(n, source, certain),
     }
+}
+
+/// True when the module that holds `n` assigns, defines or imports `name`
+/// itself: `List = [42]` makes a later `List[0]` a value read.
+fn module_binds(n: Node, name: &str, source: &[u8]) -> bool {
+    let mut root = n;
+    while let Some(parent) = root.parent() {
+        root = parent;
+    }
+    let mut cursor = root.walk();
+    root.children(&mut cursor).any(|stmt| match stmt.kind() {
+        "expression_statement" => stmt.named_child(0).is_some_and(|a| {
+            a.kind() == "assignment"
+                && a.child_by_field_name("left")
+                    .is_some_and(|l| l.kind() == "identifier" && node_text(l, source) == name)
+        }),
+        "class_definition" | "function_definition" => stmt
+            .child_by_field_name("name")
+            .is_some_and(|id| node_text(id, source) == name),
+        _ => false,
+    })
 }
 
 /// True when `func_def` is a `def`/`async def` defined directly inside a
