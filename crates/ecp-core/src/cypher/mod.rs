@@ -12,7 +12,7 @@ pub mod value;
 pub use ast::Query;
 pub use diagnostics::{absence_over_calls, unknown_properties, UnknownProp};
 pub use error::CypherError;
-pub use value::{QueryResult, Value};
+pub use value::{confidence_f64, QueryResult, Value};
 
 use crate::graph::ArchivedZeroCopyGraph;
 use std::path::Path;

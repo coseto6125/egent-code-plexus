@@ -42,7 +42,7 @@ use ecp_core::graph::{
     ArchivedFileCategory, ArchivedRelType, ArchivedZeroCopyGraph, FileCategory, NodeKind, RelType,
 };
 use ecp_core::registry::{resolve_home_ecp, Registry, RegistryFile};
-use ecp_core::session::view::{base_constructors, BaseConstructorIndex, ViewNode};
+use ecp_core::session::view::{base_constructors, BaseConstructorIndex, OverlayView, ViewNode};
 use ecp_core::session::MergedGraph;
 use ecp_core::EcpError;
 use rayon::prelude::*;
@@ -1224,6 +1224,7 @@ fn engine_bm25_hits(
     repo_label: &Option<String>,
     limit: usize,
 ) -> (Vec<Hit>, u64) {
+    let view = engine.overlay_dir().and_then(|_| engine.overlay_view());
     let (mut hits, total) = bm25_hits_from_graph(
         graph,
         pattern,
@@ -1231,8 +1232,9 @@ fn engine_bm25_hits(
         repo_label,
         engine.index_dir(),
         limit,
+        view,
     );
-    let overlay = overlay_bm25_hits(engine, pattern, kind_set, repo_label);
+    let overlay = overlay_bm25_hits(view, pattern, kind_set, repo_label);
     if overlay.is_empty() {
         return (hits, total);
     }
@@ -1261,15 +1263,15 @@ fn exact_substring_first(a: &Hit, b: &Hit) -> std::cmp::Ordering {
 
 /// The overlay's new symbols, scored like the substring fallback (its 1.0 /
 /// 0.7 / 0.4 buckets, `score_source: substring`). A symbol the overlay only
-/// moved keeps answering through its base row. As in `overlay_matches`, a
+/// moved keeps answering through its base row, which [`build_hit`] re-spans. As in `overlay_matches`, a
 /// new symbol's caller and callee counts are not computed and read 0.
 fn overlay_bm25_hits(
-    engine: &Engine,
+    view: Option<&OverlayView>,
     pattern: &str,
     kind_set: &Option<Vec<String>>,
     repo_label: &Option<String>,
 ) -> Vec<Hit> {
-    let Some(view) = engine.overlay_dir().and_then(|_| engine.overlay_view()) else {
+    let Some(view) = view else {
         return Vec::new();
     };
     let pattern_lower = pattern.to_lowercase();
@@ -1332,13 +1334,14 @@ fn bm25_hits_from_graph(
     repo_label: &Option<String>,
     index_dir: Option<&std::path::Path>,
     limit: usize,
+    view: Option<&OverlayView>,
 ) -> (Vec<Hit>, u64) {
     if let Some(dir) = index_dir {
         if dir.join("tantivy").exists() {
-            return tantivy_hits(graph, pattern, kind_set, repo_label, dir, limit);
+            return tantivy_hits(graph, pattern, kind_set, repo_label, dir, limit, view);
         }
     }
-    substring_hits(graph, pattern, kind_set, repo_label, limit)
+    substring_hits(graph, pattern, kind_set, repo_label, limit, view)
 }
 
 /// Build a `uid -> node_idx` map restricted to `wanted`, in a single pass over
@@ -1376,14 +1379,18 @@ fn tantivy_hits(
     repo_label: &Option<String>,
     index_dir: &std::path::Path,
     limit: usize,
+    view: Option<&OverlayView>,
 ) -> (Vec<Hit>, u64) {
-    let (scored, tantivy_total) =
-        match crate::search::TantivyEngine::search(index_dir, pattern, MULTI_CAP) {
-            Some(s) => s,
-            // Index unavailable / corrupt / parse error — fall through so
-            // hook context isn't silently empty.
-            None => return substring_hits(graph, pattern, kind_set, repo_label, limit),
-        };
+    let (scored, tantivy_total) = match crate::search::TantivyEngine::search(
+        index_dir,
+        pattern,
+        MULTI_CAP + view.map_or(0, OverlayView::suppressed_len),
+    ) {
+        Some(s) => s,
+        // Index unavailable / corrupt / parse error — fall through so
+        // hook context isn't silently empty.
+        None => return substring_hits(graph, pattern, kind_set, repo_label, limit, view),
+    };
     // Index ran cleanly. An empty scored vec means BM25 ruled out every
     // symbol; we MUST NOT fall back to substring scan, since that would
     // surface 0.4-scored noise the trusted index already rejected.
@@ -1411,7 +1418,15 @@ fn tantivy_hits(
         let Some(&idx) = uid_to_idx.get(&uid_u64) else {
             continue;
         };
-        if let Some(hit) = build_hit(graph, idx, score, ScoreSource::Bm25, kind_set, repo_label) {
+        if let Some(hit) = build_hit(
+            graph,
+            idx,
+            score,
+            ScoreSource::Bm25,
+            kind_set,
+            repo_label,
+            view,
+        ) {
             hits.push(hit);
         }
     }
@@ -1428,6 +1443,7 @@ fn substring_hits(
     kind_set: &Option<Vec<String>>,
     repo_label: &Option<String>,
     limit: usize,
+    view: Option<&OverlayView>,
 ) -> (Vec<Hit>, u64) {
     let pattern_lower = pattern.to_lowercase();
     let terms = query_terms(&pattern_lower);
@@ -1444,6 +1460,7 @@ fn substring_hits(
                 .reduce(f32::max)
                 .map(|score| (score, idx))
         })
+        .filter(|(_, idx)| !suppressed_by_overlay(view, *idx))
         .collect();
     // Best score first, always. Consumers that take the rows as they come
     // used to get node order, which hid an exact match behind earlier 0.4
@@ -1470,6 +1487,7 @@ fn substring_hits(
                 ScoreSource::Substring,
                 kind_set,
                 repo_label,
+                view,
             )
         })
         .take(limit)
@@ -1546,10 +1564,19 @@ fn hit_eligible(
     node.has_owning_file()
 }
 
+/// True when the session overlay deleted the base node `idx`: its file was
+/// re-parsed without it, or removed. A clean query has no view and hides nothing.
+fn suppressed_by_overlay(view: Option<&OverlayView>, idx: usize) -> bool {
+    view.is_some_and(|v| v.redirect(idx as u32).is_none())
+}
+
 /// Shared per-node Hit constructor. Applies kind filter and reads
 /// file/line/kind/caller_count from the archived graph. Returns `None`
-/// when the node's kind doesn't match the filter. `score_source`
-/// annotates which ranker produced `score` (BM25 / substring).
+/// when the node's kind doesn't match the filter or the overlay deleted the
+/// node. A node the overlay replaced reports the overlay's file and line, as
+/// the working tree has them; its caller and callee lists stay the base
+/// graph's. `score_source` annotates which ranker produced `score`
+/// (BM25 / substring).
 fn build_hit(
     graph: &ecp_core::graph::ArchivedZeroCopyGraph,
     idx: usize,
@@ -1557,17 +1584,25 @@ fn build_hit(
     score_source: ScoreSource,
     kind_set: &Option<Vec<String>>,
     repo_label: &Option<String>,
+    view: Option<&OverlayView>,
 ) -> Option<Hit> {
     if !hit_eligible(graph, idx, kind_set) {
         return None;
     }
+    let current = match view {
+        None => None,
+        Some(v) => v.node(v.redirect(idx as u32)?),
+    };
     let node = &graph.nodes[idx];
     let name = node.name.resolve(&graph.string_pool);
     let file_entry = &graph.files[node.file_idx.to_native() as usize];
-    let file = file_entry.path.resolve(&graph.string_pool).to_string();
+    let file = current.map_or_else(
+        || file_entry.path.resolve(&graph.string_pool).to_string(),
+        |v| v.rel_path.to_string(),
+    );
     let language = Language::from_path(&file).as_str().to_string();
     let category = FileCategory::from(&file_entry.category);
-    let line = node.start_line();
+    let line = current.map_or_else(|| node.start_line(), |v| v.start_line);
     let kind_str = kind_to_str(&node.kind).to_string();
     let signature = format!("{kind_str} {name}");
 

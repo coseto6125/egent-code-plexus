@@ -37,12 +37,21 @@ pub struct CypherArgs {
     /// after OPTIONAL MATCH (use `WITH a, b WHERE ...`), ORDER BY outside the
     /// projection, functions other than type/id/labels and the aggregates,
     /// variable-length patterns without DISTINCT in RETURN, with an edge
-    /// variable, or with a minimum above 1, and a materialised MATCH whose
-    /// hops, patterns and clauses build more than 2,000,000 rows in total
-    /// before WHERE and LIMIT (patterns that share no variable, or hops
-    /// through a node with many edges, multiply). The opening scan and its
-    /// first single hop are not counted. Aggregates stream, except past 64
-    /// pattern elements.
+    /// variable, or with a minimum above 1.
+    ///
+    /// Row budgets refuse a query that grows too large. Each hop, pattern and
+    /// clause multiplies the rows before WHERE and LIMIT run. Patterns that
+    /// share no variable, and hops through a node with many edges, multiply
+    /// fastest. The opening scan and its first single hop count toward no
+    /// budget. A plain LIMIT has no ORDER BY, DISTINCT or aggregate. A plain
+    /// LIMIT whose SKIP plus LIMIT is at most 2,000,000 streams. It stops at
+    /// its last row. It is refused past 20,000,000 visited rows. An aggregate
+    /// streams too. It is refused past 20,000,000 visited rows. Every other
+    /// query builds its rows. It is refused past 2,000,000 built rows. Patterns
+    /// that share no variable are counted before the first row. The query is
+    /// refused when their product passes its budget. A plain LIMIT skips this
+    /// count. Past 64 nodes across its patterns, a query builds its rows. This
+    /// includes aggregates and plain LIMITs.
     ///
     /// Cypher operates on a single graph; --repo must resolve to one repo.
     #[arg(value_name = "QUERY")]
@@ -274,7 +283,7 @@ fn value_to_json_value(v: &cypher::Value) -> serde_json::Value {
             reason,
             ..
         } => {
-            serde_json::json!({"rel_type": format!("{rel_type:?}"), "confidence": confidence, "reason": reason})
+            serde_json::json!({"rel_type": format!("{rel_type:?}"), "confidence": cypher::confidence_f64(*confidence), "reason": reason})
         }
     }
 }
@@ -311,6 +320,20 @@ mod tests {
             payload["rows"],
             json!([["alpha", "Function"], ["Beta", "Class"]])
         );
+    }
+
+    /// Stands for: a bare edge renders the confidence the indexer wrote,
+    /// the same value its `r.confidence` column renders.
+    #[test]
+    fn test_value_to_json_value_bare_edge_confidence_renders_as_written() {
+        let edge = cypher::Value::EdgeRef {
+            src: 0,
+            tgt: 1,
+            rel_type: ecp_core::graph::RelType::Calls,
+            confidence: 0.85,
+            reason: "high".into(),
+        };
+        assert_eq!(value_to_json_value(&edge)["confidence"], json!(0.85));
     }
 
     #[test]

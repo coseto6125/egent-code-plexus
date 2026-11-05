@@ -8,13 +8,9 @@ use ecp_core::session::{DirtyEvents, SessionMeta, SessionState, StaleReason};
 use std::fs;
 use std::path::Path;
 
-/// Convenience wrapper used by `tests/session_state_test.rs` and the
-/// (currently dead-chain) `Engine::open`. Production hot-paths call
-/// `classify_with_index` directly to amortise the readdir across multiple
-/// sessions. Kept so the bin retains the parameter-light entry point for
-/// future single-session callers and tests don't need to construct a
-/// `CommitIndex` themselves.
-#[allow(dead_code)]
+/// Single-session entry point, used by `Engine::open` and the PreToolUse
+/// hook. Callers that classify many sessions of one repo call
+/// `classify_with_index` directly to amortise the readdir.
 pub fn classify(repo_root: &Path, sid: &str) -> SessionState {
     // scan_cached: per-process cache keyed on commits/ mtime. Cuts
     // hot-path Engine::open from N readdir/query down to N stat/query
