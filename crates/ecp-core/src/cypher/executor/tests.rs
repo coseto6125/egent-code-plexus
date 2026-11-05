@@ -5,6 +5,7 @@ use std::cell::Cell;
 thread_local! {
     pub(super) static PATTERN_VISITS: Cell<usize> = const { Cell::new(0) };
     pub(super) static MATCH_ROW_CAP: Cell<Option<usize>> = const { Cell::new(None) };
+    pub(super) static LABELLED_NAME_SEEDS: Cell<usize> = const { Cell::new(0) };
 }
 
 /// Runs `query` over `n` free functions with the MATCH row cap set to `cap`.
@@ -19,6 +20,17 @@ fn execute_with_row_cap(n: usize, cap: usize, query: &str) -> Result<QueryResult
     let result = execute(&parse(query).unwrap(), graph, None, Path::new("."));
     MATCH_ROW_CAP.with(|c| c.set(None));
     result
+}
+
+/// `head` names the budget and whether the refusal came before the rows.
+fn assert_match_refusal(result: Result<QueryResult, CypherError>, head: &str) {
+    match result {
+        Err(CypherError::Exec { msg }) => assert!(
+            msg.starts_with(&format!("MATCH {head}")) && msg.contains("group instead of joining"),
+            "refusal must name the budget and the cause: {msg}"
+        ),
+        other => panic!("expected the MATCH refusal `{head}`, got {other:?}"),
+    }
 }
 
 fn assert_row_cap_refusal(result: Result<QueryResult, CypherError>) {
@@ -52,7 +64,7 @@ fn test_execute_two_hop_pattern_through_a_hub_over_row_cap_is_refused() {
     assert_row_cap_refusal(execute_hub_with_row_cap(
         20,
         100,
-        "MATCH (a)-[:Calls]->(m)<-[:Calls]-(b) RETURN a.name, b.name LIMIT 3",
+        "MATCH (a)-[:Calls]->(m)<-[:Calls]-(b) RETURN a.name, b.name",
     ));
 }
 
@@ -61,8 +73,38 @@ fn test_execute_shared_variable_comma_join_through_a_hub_over_row_cap_is_refused
     assert_row_cap_refusal(execute_hub_with_row_cap(
         20,
         100,
-        "MATCH (a)-[:Calls]->(m), (b)-[:Calls]->(m) RETURN a.name, b.name LIMIT 3",
+        "MATCH (a)-[:Calls]->(m), (b)-[:Calls]->(m) RETURN a.name, b.name",
     ));
+}
+
+/// Stands for: a plain LIMIT stops the visit at its last row, so a join
+/// through a hub that would pass the row cap returns the first rows, the
+/// same rows in the same order as the uncapped materialising path.
+#[test]
+fn test_execute_hub_joins_with_limit_over_row_cap_return_first_rows() {
+    let mut fx = GraphFixture::new();
+    let hub = fx.func("src/hub.rs", "hub");
+    for i in 0..20 {
+        let caller = fx.func("src/callers.rs", &format!("c{i}"));
+        fx.edge(caller, hub, RelType::Calls);
+    }
+    let bytes = fx.into_bytes();
+    let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+    for query in [
+        "MATCH (a)-[:Calls]->(m)<-[:Calls]-(b) RETURN a.name, b.name LIMIT 3",
+        "MATCH (a)-[:Calls]->(m), (b)-[:Calls]->(m) RETURN a.name, b.name LIMIT 3",
+    ] {
+        let q = parse(query).unwrap();
+        MATCH_ROW_CAP.with(|c| c.set(Some(100)));
+        let fast = execute(&q, graph, None, Path::new("."));
+        MATCH_ROW_CAP.with(|c| c.set(None));
+        let fast = fast.unwrap_or_else(|err| panic!("{query}: {err:?}"));
+        let mut cache = ContentCache::new(PathBuf::from("."));
+        let slow = execute_materialising(&q, MergedGraph::new(graph, None), &mut cache).unwrap();
+        assert_eq!(fast.rows.len(), 3, "{query}");
+        assert_eq!(fast.columns, slow.columns, "{query}");
+        assert_eq!(fast.rows, slow.rows, "{query}");
+    }
 }
 
 #[test]
@@ -113,14 +155,32 @@ fn test_execute_overlapping_label_alternation_returns_each_node_once() {
     assert_eq!(result.rows.len(), 3);
 }
 
+/// Stands for: a LIMIT query whose WHERE keeps no row visits every pair,
+/// and the streaming visit budget (10x the row cap) stops it.
 #[test]
-fn test_execute_comma_cartesian_over_row_cap_with_limit_is_refused() {
-    assert_row_cap_refusal(execute_with_row_cap(
+fn test_execute_comma_cartesian_with_limit_over_visit_budget_is_refused() {
+    assert_match_refusal(
+        execute_with_row_cap(
+            20,
+            10,
+            "MATCH (a:Function), (b:Function) WHERE a.name = b.name AND a.filePath <> b.filePath \
+             RETURN a.name LIMIT 3",
+        ),
+        "visited more than 100 rows",
+    );
+}
+
+/// Same query under a visit budget that holds every pair: the true answer.
+#[test]
+fn test_execute_comma_cartesian_with_limit_under_visit_budget_returns_no_row() {
+    let result = execute_with_row_cap(
         20,
         100,
         "MATCH (a:Function), (b:Function) WHERE a.name = b.name AND a.filePath <> b.filePath \
          RETURN a.name LIMIT 3",
-    ));
+    )
+    .expect("400 visits are under the 1000-visit budget");
+    assert!(result.rows.is_empty());
 }
 
 #[test]
@@ -158,6 +218,326 @@ fn test_execute_aggregate_cartesian_over_row_cap_streams_count() {
     let result = execute_with_row_cap(20, 100, "MATCH (a:Function), (b:Function) RETURN count(*)")
         .expect("an aggregate streams and is not capped");
     assert_eq!(result.rows, vec![vec![Value::Int(400)]]);
+}
+
+/// Stands for: an unjoined product past the row cap is refused before
+/// `exec_matches` builds a row ("would build", never "built").
+#[test]
+fn test_refuse_unjoined_product_comma_cartesian_over_row_cap_refuses_before_building() {
+    for query in [
+        "MATCH (a:Function), (b:Function) RETURN a.name, b.name",
+        "MATCH (a:Function) MATCH (b:Function) RETURN a.name, b.name",
+        "MATCH (a:Function), (b:Function) WHERE a.name = b.name RETURN a.name ORDER BY a.name LIMIT 3",
+        "MATCH (a:Function {name:'f3'}) MATCH (b:Function) MATCH (c:Function) RETURN a.name",
+    ] {
+        assert_match_refusal(
+            execute_with_row_cap(20, 100, query),
+            "would build more than 100 rows",
+        );
+    }
+}
+
+/// The product is exact, so a product at the cap, an empty factor and an
+/// OPTIONAL clause that matches nothing are not refused.
+#[test]
+fn test_refuse_unjoined_product_products_within_cap_return_rows() {
+    let rows = |query: &str| {
+        execute_with_row_cap(20, 100, query)
+            .unwrap_or_else(|err| panic!("{query}: {err:?}"))
+            .rows
+            .len()
+    };
+    assert_eq!(
+        rows("MATCH (a:Function {name:'f1'}), (b:Function) RETURN a.name, b.name"),
+        20
+    );
+    assert_eq!(
+        rows("MATCH (a:Class), (b:Function) RETURN a.name, b.name"),
+        0
+    );
+    assert_eq!(
+        rows("MATCH (a:Function), (b:Class) RETURN a.name, b.name"),
+        0
+    );
+    assert_eq!(
+        rows("MATCH (a:Function) OPTIONAL MATCH (b:Class) RETURN a.name, b.name"),
+        20
+    );
+    assert_eq!(
+        rows("MATCH (a:Function {name:'absent'}) MATCH (b:Function) RETURN b.name"),
+        0
+    );
+}
+
+/// [169]: an aggregate over an unjoined product past the visit budget is
+/// refused before the visit, and a joined product the static check cannot
+/// see is stopped by the visit budget itself.
+#[test]
+fn test_execute_aggregate_over_visit_budget_is_refused() {
+    assert_match_refusal(
+        execute_with_row_cap(
+            20,
+            10,
+            "MATCH (a:Function), (b:Function) WHERE a.name = b.name RETURN count(*)",
+        ),
+        "would visit more than 100 rows",
+    );
+    assert_match_refusal(
+        execute_hub_with_row_cap(
+            20,
+            10,
+            "MATCH (a)-[:Calls]->(m)<-[:Calls]-(b) RETURN count(*)",
+        ),
+        "visited more than 100 rows",
+    );
+    let result = execute_hub_with_row_cap(
+        20,
+        100,
+        "MATCH (a)-[:Calls]->(m)<-[:Calls]-(b) RETURN count(*)",
+    )
+    .expect("400 visits are under the 1000-visit budget");
+    assert_eq!(result.rows, vec![vec![Value::Int(400)]]);
+}
+
+/// [170]: a plain LIMIT stops the visit at its last row. `PATTERN_VISITS`
+/// counts pattern visits: the first pattern once, the second once per row
+/// of the first that the visit reached.
+#[test]
+fn test_stream_limited_comma_cartesian_limit_stops_after_last_row() {
+    let mut fx = GraphFixture::new();
+    for i in 0..10 {
+        fx.func("src/limit.rs", &format!("f{i}"));
+    }
+    let bytes = fx.into_bytes();
+    let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+    for (query, rows, visits) in [
+        (
+            "MATCH (a:Function), (b:Function) RETURN a.name, b.name LIMIT 3",
+            3,
+            2,
+        ),
+        (
+            "MATCH (a:Function), (b:Function) RETURN a.name, b.name LIMIT 30",
+            30,
+            4,
+        ),
+        (
+            "MATCH (a:Function), (b:Function) RETURN a.name, b.name SKIP 5 LIMIT 10",
+            10,
+            3,
+        ),
+        (
+            "MATCH (a:Function), (b:Function) RETURN a.name, b.name LIMIT 0",
+            0,
+            2,
+        ),
+    ] {
+        PATTERN_VISITS.with(|v| v.set(0));
+        let result = execute(&parse(query).unwrap(), graph, None, Path::new(".")).unwrap();
+        assert_eq!(result.rows.len(), rows, "{query}");
+        assert_eq!(PATTERN_VISITS.with(Cell::get), visits, "{query}");
+    }
+}
+
+/// Plain LIMIT queries, including the atypical states: LIMIT 0, SKIP past
+/// the last row, a WHERE that keeps nothing, a bare variable whose columns
+/// the first survivor names, OPTIONAL null rows, WITH, and UNION.
+const LIMIT_QUERIES: &[&str] = &[
+    "MATCH (a)-[r]->(b) RETURN a.name, b.name LIMIT 3",
+    "MATCH (a)-[r]->(b) RETURN a.name, b.name SKIP 2 LIMIT 2",
+    "MATCH (a)-[r]->(b) RETURN a, r LIMIT 2",
+    "MATCH (a) RETURN a LIMIT 0",
+    "MATCH (a:Function) RETURN a LIMIT 0",
+    "MATCH (a:Function) RETURN a.name SKIP 100 LIMIT 5",
+    "MATCH (a:Function) WHERE a.name = 'zzz' RETURN a LIMIT 3",
+    "MATCH (a:Function {name:'absent'}) RETURN a LIMIT 3",
+    "MATCH (a:Function) OPTIONAL MATCH (a)-[r:Calls]->(b) RETURN a.name, b.name LIMIT 4",
+    "MATCH (a:Function) WITH a AS x WHERE x.name <> 'a' RETURN x.name LIMIT 1",
+    "MATCH (a:Function) WITH a AS x RETURN x LIMIT 2",
+    "MATCH (a:Function), (b:Function) RETURN a.name, b.name LIMIT 5",
+    "MATCH (a:Function {name:'b'})-[r:Calls]->(b) RETURN a.name, b.name, r.reason LIMIT 2",
+    "MATCH (a)-[:Calls]->(b)-[:Calls]->(c) RETURN a.name, c.name LIMIT 3",
+    "MATCH (a:Function) RETURN a.name AS n LIMIT 1 UNION MATCH (b:Function) RETURN b.name AS n LIMIT 2",
+];
+
+const LIMIT_ERROR_QUERIES: &[&str] = &[
+    "MATCH (a)-[r]->(b) WHERE a.uid = 'bad' RETURN a.name LIMIT 1",
+    "MATCH (a:Function) RETURN missing LIMIT 1",
+    "MATCH (a:Function) WITH a AS x WHERE x.uid = 'bad' RETURN x.name LIMIT 1",
+];
+
+/// Contract: the LIMIT stream changes time only. Columns and rows, in
+/// order, equal the materialising path's, and so do its errors.
+#[test]
+fn test_stream_limited_limit_queries_match_materialising_rows() {
+    let graph = aggregate_oracle_graph();
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&graph).unwrap();
+    let archived = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+    for text in LIMIT_QUERIES {
+        assert_public_success_matches_materialising(text, archived, None);
+    }
+    for text in LIMIT_ERROR_QUERIES {
+        assert_public_error_matches_materialising(text, archived, None);
+    }
+    let empty = rkyv::to_bytes::<rkyv::rancor::Error>(&GraphFixture::new().build()).unwrap();
+    let empty = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&empty).unwrap();
+    for text in [
+        "MATCH (a) RETURN a LIMIT 3",
+        "MATCH (a:Function), (b) RETURN a.name LIMIT 0",
+    ] {
+        assert_public_success_matches_materialising(text, empty, None);
+    }
+}
+
+/// A labelled first node with an inline name: nodes of several kinds share
+/// the name, in an order the kind slices regroup (`Method, Function, Class,
+/// Function, Method`), among filler nodes that make the slices longer than
+/// the hits.
+fn labelled_name_graph() -> ZeroCopyGraph {
+    let mut fx = GraphFixture::new();
+    for i in 0..40 {
+        fx.func("src/fill.rs", &format!("fill_fn{i}"));
+        fx.method("src/fill.rs", "Fill", &format!("fill_m{i}"));
+        fx.node(NodeKind::Class, "src/fill.rs", &format!("FillC{i}"));
+    }
+    fx.method("src/dup.rs", "Owner", "dup");
+    let dup_fn = fx.func("src/dup.rs", "dup");
+    fx.node(NodeKind::Class, "src/dup.rs", "dup");
+    fx.func("src/dup2.rs", "dup");
+    fx.method("src/dup2.rs", "Other", "dup");
+    fx.node(NodeKind::Class, "src/only.rs", "class_only");
+    fx.func("src/dup.rs", "");
+    let callee = fx.func("src/dup.rs", "callee");
+    fx.edge(dup_fn, callee, RelType::Calls);
+    fx.build()
+}
+
+const LABELLED_NAME_QUERIES: &[&str] = &[
+    "MATCH (n:Function|Method {name:'dup'}) RETURN n.filePath, n.kind",
+    "MATCH (n:Method|Function {name:'dup'}) RETURN n.filePath, n.kind",
+    "MATCH (n:Class {name:'dup'}) RETURN n.filePath",
+    "MATCH (n:Function {name:'dup', kind:'Function'}) RETURN n.filePath",
+    "MATCH (n:Function {name:'dup'})-[:Calls]->(m) RETURN n.filePath, m.name",
+    "MATCH (n:Function) WHERE n.name = 'dup' RETURN n.filePath",
+    "MATCH (n:Function {name:'dup'}) RETURN count(*)",
+    "MATCH (n:Function {name:'dup'}) RETURN n.filePath LIMIT 1",
+    "MATCH (n:Function {name:'class_only'}) RETURN n.filePath",
+    "MATCH (n:Function {name:'absent'}) RETURN n.filePath",
+];
+
+/// [6] contract: the name index changes time only. Every labelled query's
+/// rows, in order, equal the kind-slice walk's (index cleared), and the
+/// index served each one.
+#[test]
+fn test_labelled_name_seeds_queries_match_kind_slice_rows() {
+    let fast = labelled_name_graph();
+    let mut slow = labelled_name_graph();
+    slow.name_index.clear();
+    assert!(!fast.name_index.is_empty());
+    for query in LABELLED_NAME_QUERIES {
+        let walked = rows_of(&slow, query);
+        LABELLED_NAME_SEEDS.with(|n| n.set(0));
+        assert_eq!(rows_of(&fast, query), walked, "{query}");
+        assert_eq!(
+            LABELLED_NAME_SEEDS.with(Cell::get),
+            1,
+            "index seeded: {query}"
+        );
+    }
+    let rows = rows_of(&fast, LABELLED_NAME_QUERIES[0]);
+    let kinds: Vec<&Value> = rows.iter().map(|row| &row[1]).collect();
+    assert_eq!(
+        kinds,
+        [
+            &Value::Str("Function".into()),
+            &Value::Str("Function".into()),
+            &Value::Str("Method".into()),
+            &Value::Str("Method".into())
+        ],
+        "label order, then node order"
+    );
+}
+
+/// The slice walk stays where the index cannot answer or costs more: an
+/// empty name (the index skips the tombstone) and more hits than slice
+/// entries. Rows are unchanged either way.
+#[test]
+fn test_labelled_name_seeds_ineligible_queries_walk_kind_slice() {
+    let g = labelled_name_graph();
+    for (query, rows) in [
+        (
+            "MATCH (n:Function {name:''}) RETURN count(*)",
+            vec![vec![Value::Int(1)]],
+        ),
+        (
+            "MATCH (n:Function {name:1}) RETURN count(*)",
+            vec![vec![Value::Int(0)]],
+        ),
+    ] {
+        LABELLED_NAME_SEEDS.with(|n| n.set(0));
+        assert_eq!(rows_of(&g, query), rows, "{query}");
+        assert_eq!(LABELLED_NAME_SEEDS.with(Cell::get), 0, "{query}");
+    }
+    let shared = same_name_graph();
+    let mut walked = same_name_graph();
+    walked.name_index.clear();
+    let query = "MATCH (n:Class {name:'shared'}) RETURN n.filePath";
+    LABELLED_NAME_SEEDS.with(|n| n.set(0));
+    assert_eq!(rows_of(&shared, query), rows_of(&walked, query));
+    assert_eq!(
+        LABELLED_NAME_SEEDS.with(Cell::get),
+        0,
+        "1200 hits > 400 Class nodes"
+    );
+}
+
+/// [139]: confidence is stored as f32, so 0.7 widens to 0.699999988.
+/// Comparisons and projections read the decimal the indexer wrote, on the
+/// edge variable and on a WITH edge alias.
+#[test]
+fn test_execute_edge_confidence_at_f32_threshold_compares_as_written() {
+    let mut fx = GraphFixture::new();
+    let a = fx.func("src/c.rs", "a");
+    let b = fx.func("src/c.rs", "b");
+    for (confidence, reason) in [(0.55, "low"), (0.7, "edge"), (0.85, "high"), (1.0, "exact")] {
+        fx.edge_with(a, b, RelType::Calls, confidence, reason);
+    }
+    let bytes = fx.into_bytes();
+    let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+    let run = |query: &str| {
+        execute(&parse(query).unwrap(), graph, None, Path::new("."))
+            .unwrap_or_else(|err| panic!("{query}: {err:?}"))
+            .rows
+    };
+    let count = |n| vec![vec![Value::Int(n)]];
+    for (query, rows) in [
+        (
+            "MATCH ()-[r:Calls]->() WHERE r.confidence < 0.7 RETURN count(*)",
+            count(1),
+        ),
+        (
+            "MATCH ()-[r:Calls]->() WHERE r.confidence >= 0.7 RETURN count(*)",
+            count(3),
+        ),
+        (
+            "MATCH ()-[r:Calls]->() WHERE r.confidence = 0.7 RETURN count(*)",
+            count(1),
+        ),
+        (
+            "MATCH ()-[r:Calls]->() WHERE r.confidence <= 0.55 RETURN count(*)",
+            count(1),
+        ),
+        (
+            "MATCH ()-[r:Calls]->() WITH r AS e WHERE e.confidence = 0.7 RETURN count(*)",
+            count(1),
+        ),
+    ] {
+        assert_eq!(run(query), rows, "{query}");
+    }
+    assert_eq!(
+        run("MATCH ()-[r:Calls]->() WHERE r.reason = 'edge' RETURN r.confidence"),
+        vec![vec![Value::Float(0.7)]]
+    );
 }
 
 fn execute_materialising(
@@ -525,6 +905,9 @@ fn test_execute_aggregate_streaming_matches_materialising_overlay_optional() {
         "MATCH (a:Function) MATCH (a)-[r:Calls]->(b) RETURN a.name, count(r)",
         "MATCH (a:Function) WITH a AS x WHERE x.name <> 'missing' RETURN x.name, count(*)",
         "MATCH (a:Function) OPTIONAL MATCH (a)-[r:Calls]->(b) RETURN a.name, count(r), count(*)",
+        "MATCH (a:Function) OPTIONAL MATCH (a)-[r:Calls]->(b) RETURN a.name, b.name LIMIT 3",
+        "MATCH (a:Function {name:'b'}) RETURN a.filePath, a.startLine LIMIT 5",
+        "MATCH (a {name:'virtual'})-[r:Calls]->(b) RETURN a.name, b.name LIMIT 1",
     ] {
         assert_public_success_matches_materialising(text, archived, Some(&view));
     }
@@ -3271,7 +3654,7 @@ fn test_execute_overlay_closure_reference_reports_lexical_reason() {
 }
 
 // -----------------------------------------------------------------------
-// First-node name seeds (`first_node_name`)
+// First-node name seeds (`for_each_first_node_seed`, `labelled_name_seeds`)
 // -----------------------------------------------------------------------
 
 /// Many same-name nodes of mixed kinds and files, a tombstone, a unicode
@@ -3328,8 +3711,7 @@ fn test_first_node_name_shared_name_returns_every_node_ascending() {
         rkyv::access::<crate::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
     let q = parse("MATCH (n {name:'shared'}) RETURN n.name").unwrap();
     let mg = MergedGraph::new(archived, None);
-    let name = first_node_name(&q.matches[0].patterns[0].nodes[0], mg)
-        .expect("plain name literal, no overlay");
+    let name = inline_name(&q.matches[0].patterns[0].nodes[0]).expect("plain name literal");
     let seeds: Vec<u32> = mg.name_candidates(name).collect();
     assert_eq!(seeds.len(), 1200);
     assert!(seeds.windows(2).all(|w| w[0] < w[1]), "ascending");
@@ -3345,7 +3727,7 @@ fn test_first_node_name_ineligible_inputs_scan_or_return_none() {
     let mg = MergedGraph::new(archived, None);
     let name_of = |query: &str| {
         let q = parse(query).unwrap();
-        first_node_name(&q.matches[0].patterns[0].nodes[0], mg).map(str::to_owned)
+        inline_name(&q.matches[0].patterns[0].nodes[0]).map(str::to_owned)
     };
     assert_eq!(name_of("MATCH (n {name:1}) RETURN n"), None);
     assert_eq!(name_of("MATCH (n {kind:'Class'}) RETURN n"), None);
@@ -3363,7 +3745,7 @@ fn test_first_node_name_ineligible_inputs_scan_or_return_none() {
         rkyv::access::<crate::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
     let q = parse("MATCH (n {name:'shared'}) RETURN n").unwrap();
     let mg = MergedGraph::new(archived, None);
-    let name = first_node_name(&q.matches[0].patterns[0].nodes[0], mg).unwrap();
+    let name = inline_name(&q.matches[0].patterns[0].nodes[0]).unwrap();
     assert_eq!(mg.name_candidates(name).count(), archived.nodes.len());
 }
 
@@ -3378,8 +3760,10 @@ fn test_first_node_name_empty_name_keeps_tombstone_rows() {
     );
 }
 
-/// With an overlay the seeds stand down: rows equal the scan's with the
-/// index cleared, and a base node the view suppresses stays hidden.
+/// With an overlay the name seeds still serve, unlabelled and labelled: a
+/// base index reads the base node, and the virtual twins come after the base
+/// seeds on both paths. Rows equal the scan's with the index cleared, and a
+/// base node the view suppresses stays hidden.
 #[test]
 fn test_first_node_name_with_overlay_matches_scan_and_hides_suppressed() {
     use crate::session::{OverlayFileInput, OverlaySymbol};
@@ -3421,25 +3805,37 @@ fn test_first_node_name_with_overlay_matches_scan_and_hides_suppressed() {
                 .unwrap();
         let view = OverlayView::build(archived, &[dirty()]).unwrap();
         let q = parse(query).unwrap();
-        assert_eq!(
-            first_node_name(
-                &q.matches[0].patterns[0].nodes[0],
-                MergedGraph::new(archived, Some(&view))
-            ),
-            None
-        );
         execute(&q, archived, Some(&view), Path::new("."))
             .unwrap()
             .rows
     };
-    let mut no_index = graph();
-    no_index.name_index.clear();
-    let keep = "MATCH (n {name:'keep_fn'}) RETURN n.filePath, n.startLine";
+    for keep in [
+        "MATCH (n {name:'keep_fn'}) RETURN n.filePath, n.startLine",
+        "MATCH (n:Function {name:'keep_fn'}) RETURN n.filePath, n.startLine",
+    ] {
+        let mut no_index = graph();
+        no_index.name_index.clear();
+        let slow = rows_with_view(no_index, keep);
+        LABELLED_NAME_SEEDS.with(|n| n.set(0));
+        let fast = rows_with_view(graph(), keep);
+        assert_eq!(fast, slow, "{keep}");
+        assert_eq!(
+            fast.len(),
+            2,
+            "the clean base node and the dirty virtual twin: {keep}"
+        );
+    }
     assert_eq!(
-        rows_with_view(graph(), keep),
-        rows_with_view(no_index, keep)
+        LABELLED_NAME_SEEDS.with(Cell::get),
+        1,
+        "the labelled query used the index"
     );
-    assert!(rows_with_view(graph(), "MATCH (n {name:'gone_fn'}) RETURN n.filePath").is_empty());
+    for gone in [
+        "MATCH (n {name:'gone_fn'}) RETURN n.filePath",
+        "MATCH (n:Function {name:'gone_fn'}) RETURN n.filePath",
+    ] {
+        assert!(rows_with_view(graph(), gone).is_empty(), "{gone}");
+    }
 }
 
 /// Stands for: a dirty file's function reads the flags its own fragment

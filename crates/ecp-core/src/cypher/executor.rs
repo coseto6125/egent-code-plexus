@@ -217,14 +217,25 @@ fn execute_inner(
     graph: MergedGraph<'_>,
     cache: &mut ContentCache,
 ) -> Result<QueryResult, CypherError> {
-    let (columns, rows) = if has_aggregate(&query.return_.items)
+    let aggregate = has_aggregate(&query.return_.items)
         || query
             .with
             .as_ref()
-            .is_some_and(|wc| has_aggregate(&wc.items))
-    {
+            .is_some_and(|wc| has_aggregate(&wc.items));
+    // ORDER BY and DISTINCT need every row; a plain LIMIT does not.
+    let limited = match query.limit {
+        Some(limit) if !aggregate && query.order_by.is_empty() && !query.return_.distinct => {
+            stream_limited(query, limit, graph, cache)?
+        }
+        _ => None,
+    };
+    let (columns, rows) = if let Some(projection) = limited {
+        projection
+    } else if aggregate {
+        refuse_unjoined_product(&query.matches, graph, BudgetKind::Visits)?;
         stream_projection(query, graph, cache)?
     } else {
+        refuse_unjoined_product(&query.matches, graph, BudgetKind::Rows)?;
         let bindings = exec_matches(query, graph)?;
         let bindings = apply_where(query.where_.as_ref(), bindings, graph, cache)?;
         let bindings = match &query.with {
@@ -277,9 +288,9 @@ fn execute_inner(
 /// MATCH stage: fold each clause's patterns over the running binding set.
 fn exec_matches(query: &Query, graph: MergedGraph<'_>) -> Result<Vec<Binding>, CypherError> {
     let mut bindings: Vec<Binding> = vec![Binding::default()];
-    let mut budget = RowBudget::new();
+    let budget = RowBudget::of(BudgetKind::Rows);
     for (i, mc) in query.matches.iter().enumerate() {
-        bindings = exec_match_clause(mc, &bindings, graph, &mut budget, i == 0)?;
+        bindings = exec_match_clause(mc, &bindings, graph, &budget, i == 0)?;
     }
     Ok(bindings)
 }
@@ -645,6 +656,121 @@ fn passes_where(
         Some(expr) => eval_expr(expr, b, graph, cache).map(|v| value_truthy(&v)),
         None => Ok(true),
     }
+}
+
+/// The projection of a non-aggregate query with LIMIT and no ORDER BY or
+/// DISTINCT. The visitor yields the materialised row order, so the visit
+/// stops once SKIP + LIMIT rows survive WHERE and WITH. The caller still
+/// applies SKIP and LIMIT to the rows returned. The visit continues to the
+/// first survivor even under LIMIT 0, because that survivor names the columns
+/// of a bare variable, as `project_return` does.
+///
+/// `Ok(None)` when WHERE, WITH or the projection fails on a row: the caller
+/// runs the materialising path, whose stage order chooses the error. A
+/// visit-budget refusal is returned as is.
+fn stream_limited(
+    query: &Query,
+    limit: u64,
+    graph: MergedGraph<'_>,
+    cache: &mut ContentCache,
+) -> Result<Option<(Vec<String>, Vec<Vec<Value>>)>, CypherError> {
+    let mut limited = LimitedRows {
+        query,
+        with_cols: query.with.as_ref().map(with_columns).unwrap_or_default(),
+        want: usize::try_from(query.skip.unwrap_or(0).saturating_add(limit)).unwrap_or(usize::MAX),
+        items: None,
+        rows: Vec::new(),
+    };
+    let mut failed = false;
+    let mut done = false;
+    let outcome = visit_matches(
+        &query.matches,
+        graph,
+        &mut |b| match limited.feed(b, graph, cache) {
+            Ok(false) => Ok(()),
+            Ok(true) => {
+                done = limited.rows.len() >= limited.want;
+                if done {
+                    Err(stop_signal())
+                } else {
+                    Ok(())
+                }
+            }
+            Err(error) => {
+                failed = true;
+                Err(error)
+            }
+        },
+    );
+    match outcome {
+        Err(_) if failed => return Ok(None),
+        Err(_) if done => {}
+        Err(error) => return Err(error),
+        Ok(()) => {}
+    }
+    let items = match limited.items {
+        Some(items) => items,
+        None => expand_return_items(&query.return_.items, None, &query.matches)?,
+    };
+    let columns = items.into_iter().map(|(col, _)| col).collect();
+    Ok(Some((columns, limited.rows)))
+}
+
+/// The rows [`stream_limited`] holds: at most `want`, projected with the
+/// items that the first survivor expanded.
+struct LimitedRows<'q> {
+    query: &'q Query,
+    with_cols: Vec<String>,
+    want: usize,
+    items: Option<Vec<(String, ReturnExpr)>>,
+    rows: Vec<Vec<Value>>,
+}
+
+impl LimitedRows<'_> {
+    /// WHERE, then WITH, then the projection, which runs only while fewer
+    /// than `want` rows are held. `Ok(true)` when `b` survives WHERE and WITH.
+    fn feed(
+        &mut self,
+        b: &Binding,
+        graph: MergedGraph<'_>,
+        cache: &mut ContentCache,
+    ) -> Result<bool, CypherError> {
+        let query = self.query;
+        if !passes_where(query.where_.as_ref(), b, graph, cache)? {
+            return Ok(false);
+        }
+        let rebound = match &query.with {
+            Some(wc) => match rebind_one(wc, &self.with_cols, b, graph, cache)? {
+                Some(row) => Some(row),
+                None => return Ok(false),
+            },
+            None => None,
+        };
+        let b = rebound.as_ref().unwrap_or(b);
+        if self.items.is_none() {
+            self.items = Some(expand_return_items(
+                &query.return_.items,
+                Some(b),
+                &query.matches,
+            )?);
+        }
+        if self.rows.len() < self.want {
+            let row = self
+                .items
+                .iter()
+                .flatten()
+                .map(|(_, expr)| eval_return_expr(expr, b, graph, cache))
+                .collect::<Result<_, _>>()?;
+            self.rows.push(row);
+        }
+        Ok(true)
+    }
+}
+
+/// The error a visitor callback returns to end the visit early. The caller
+/// sets its own flag first and discards this value.
+fn stop_signal() -> CypherError {
+    CypherError::Exec { msg: String::new() }
 }
 
 /// Where an ORDER BY key reads its value from.
@@ -1496,12 +1622,12 @@ impl Accumulator {
     }
 }
 
-/// Bindings one materialised MATCH stage may build. WHERE, ORDER BY and LIMIT
-/// run after MATCH, so `MATCH (a:Function), (b:Function) WHERE a.name =
-/// b.name ... LIMIT 3` built every pair first: 26.7k functions gave 713M
-/// pairs, which filled 29 GB and froze WSL. A two-hop pattern through a hub
-/// grows the same way (sum of in-degree squared). At the cap the process
-/// held 1.3 GB.
+/// Bindings one materialised MATCH stage may build. WHERE and ORDER BY run
+/// after a materialised MATCH, so `MATCH (a:Function), (b:Function) WHERE
+/// a.name = b.name ... ORDER BY ...` builds every pair first: 26.7k functions
+/// gave 713M pairs, which filled 29 GB and froze WSL. A two-hop pattern
+/// through a hub grows the same way (sum of in-degree squared). At the cap
+/// the process held 1.3 GB. A plain LIMIT streams instead (`stream_limited`).
 const MAX_MATCH_ROWS: usize = 2_000_000;
 
 fn match_row_cap() -> usize {
@@ -1512,41 +1638,174 @@ fn match_row_cap() -> usize {
     MAX_MATCH_ROWS
 }
 
-/// The rows a materialised MATCH stage may still build. Each hop, pattern
-/// and clause charges the bindings it creates, as it creates them, so the
-/// refusal comes before the product is allocated. The charge is cumulative,
-/// so it also bounds the live rows. The scan that opens the first pattern of
-/// the first clause (its seeds and a single first hop) is not charged: it is
-/// linear in the graph, and a large repo scans millions of edges that way.
+/// Visits a streaming MATCH may make, as a multiple of the row cap. A visit
+/// holds no row, so the bound here is time, not memory: an aggregate or a
+/// LIMIT query streams past the row cap, and the 713M-pair cartesian
+/// `count(*)` that ran for minutes stops after a few seconds.
+const STREAM_VISIT_FACTOR: usize = 10;
+
+/// What a [`RowBudget`] counts.
+#[derive(Clone, Copy)]
+enum BudgetKind {
+    /// Bindings that a materialised MATCH builds and holds.
+    Rows,
+    /// Bindings that a streaming MATCH visits and drops.
+    Visits,
+}
+
+/// The bindings a MATCH stage may still build (materialised) or visit
+/// (streaming). Each hop, pattern and clause charges the bindings it creates,
+/// as it creates them, so the refusal comes before the product is allocated.
+/// The charge is cumulative, so it also bounds the live rows. The scan that
+/// opens the first pattern of the first clause (its seeds and a single first
+/// hop) is not charged: it is linear in the graph, and a large repo scans
+/// millions of edges that way. Both paths charge the same bindings.
 struct RowBudget {
-    left: usize,
+    left: std::cell::Cell<usize>,
     cap: usize,
+    kind: BudgetKind,
 }
 
 impl RowBudget {
-    fn new() -> Self {
-        let cap = match_row_cap();
-        Self { left: cap, cap }
+    fn of(kind: BudgetKind) -> Self {
+        let cap = match kind {
+            BudgetKind::Rows => match_row_cap(),
+            BudgetKind::Visits => match_row_cap().saturating_mul(STREAM_VISIT_FACTOR),
+        };
+        Self {
+            left: std::cell::Cell::new(cap),
+            cap,
+            kind,
+        }
     }
 
-    fn charge(&mut self, rows: usize) -> Result<(), CypherError> {
-        match self.left.checked_sub(rows) {
+    fn charge(&self, rows: usize) -> Result<(), CypherError> {
+        match self.left.get().checked_sub(rows) {
             Some(left) => {
-                self.left = left;
+                self.left.set(left);
                 Ok(())
             }
-            None => Err(CypherError::Exec {
-                msg: format!(
-                    "MATCH built more than {} rows before WHERE and LIMIT run: each hop, \
-                     pattern and clause extends every row before it, so patterns that share no \
-                     variable, and nodes with many edges, multiply. Pin a node with a label and \
-                     an inline property such as (a:Function {{name:'x'}}). To find values that \
-                     several nodes share, group instead of joining: MATCH (a:Function) WITH \
-                     a.name AS n, count(*) AS c WHERE c > 1 RETURN n, c",
-                    self.cap
-                ),
-            }),
+            None => Err(self.refusal(false)),
         }
+    }
+
+    /// `ahead`: `refuse_unjoined_product` refused before building the rows.
+    fn refusal(&self, ahead: bool) -> CypherError {
+        let cap = self.cap;
+        let head = match (self.kind, ahead) {
+            (BudgetKind::Rows, false) => {
+                format!("MATCH built more than {cap} rows before WHERE and LIMIT run")
+            }
+            (BudgetKind::Rows, true) => {
+                format!("MATCH would build more than {cap} rows before WHERE and LIMIT run")
+            }
+            (BudgetKind::Visits, false) => {
+                format!("MATCH visited more than {cap} rows, the streaming visit budget")
+            }
+            (BudgetKind::Visits, true) => {
+                format!("MATCH would visit more than {cap} rows, the streaming visit budget")
+            }
+        };
+        CypherError::Exec {
+            msg: format!(
+                "{head}: each hop, pattern and clause extends every row before it, so patterns \
+                 that share no variable, and nodes with many edges, multiply. Pin a node with a \
+                 label and an inline property such as (a:Function {{name:'x'}}). To find values \
+                 that several nodes share, group instead of joining: MATCH (a:Function) WITH \
+                 a.name AS n, count(*) AS c WHERE c > 1 RETURN n, c"
+            ),
+        }
+    }
+}
+
+/// Refuses, before any row is built, a MATCH whose leading patterns share no
+/// variable and whose row product passes the cap of `kind`. Such a pattern
+/// yields the same rows for every row it extends, so it is counted once, on
+/// its own. Every row of a later pattern is charged to the executing path's
+/// budget, so the product refused here is a product that path would refuse
+/// after building it. Counts stop early, which keeps them lower bounds and
+/// bounds their own cost. Patterns from the first one that shares a variable
+/// onwards depend on the row, so they are not counted.
+fn refuse_unjoined_product(
+    clauses: &[MatchClause],
+    graph: MergedGraph<'_>,
+    kind: BudgetKind,
+) -> Result<(), CypherError> {
+    fn pattern_vars(pat: &Pattern) -> impl Iterator<Item = &str> {
+        let nodes = pat.nodes.iter().filter_map(|n| n.var.as_deref());
+        nodes.chain(pat.rels.iter().filter_map(|r| r.var.as_deref()))
+    }
+    let mut seen: Vec<&str> = Vec::new();
+    let mut unjoined = 0usize;
+    'scan: for mc in clauses {
+        for pat in &mc.patterns {
+            if pat.rels.len() >= MAX_STREAM_DEPTH || pattern_vars(pat).any(|v| seen.contains(&v)) {
+                break 'scan;
+            }
+            seen.extend(pattern_vars(pat));
+            unjoined += 1;
+        }
+    }
+    if unjoined < 2 {
+        return Ok(());
+    }
+
+    let budget = RowBudget::of(kind);
+    let mut rows = 1usize;
+    let mut opens = true;
+    for mc in clauses {
+        let mut joined = rows;
+        for pat in &mc.patterns {
+            if unjoined == 0 {
+                return Ok(());
+            }
+            unjoined -= 1;
+            let opening = std::mem::replace(&mut opens, false);
+            if joined == 0 {
+                continue;
+            }
+            // `joined * n > cap` exactly when `n > cap / joined`.
+            let room = budget.cap / joined;
+            let n = count_pattern_rows(pat, graph, kind, opening, room.saturating_add(1))?;
+            if !opening && n > room {
+                return Err(budget.refusal(true));
+            }
+            joined = joined.saturating_mul(n);
+        }
+        // An OPTIONAL clause keeps a row that it cannot extend.
+        rows = if mc.optional {
+            joined.max(rows)
+        } else {
+            joined
+        };
+        if rows == 0 {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+/// The rows `pat` yields from an empty binding, counting at most `stop`.
+fn count_pattern_rows(
+    pat: &Pattern,
+    graph: MergedGraph<'_>,
+    kind: BudgetKind,
+    opens: bool,
+    stop: usize,
+) -> Result<usize, CypherError> {
+    let budget = RowBudget::of(kind);
+    let mut n = 0usize;
+    let outcome = visit_pattern(pat, &Binding::default(), graph, &budget, opens, &mut |_| {
+        n += 1;
+        if n >= stop {
+            Err(stop_signal())
+        } else {
+            Ok(())
+        }
+    });
+    match outcome {
+        Err(_) if n >= stop => Ok(n),
+        other => other.map(|()| n),
     }
 }
 
@@ -1554,7 +1813,7 @@ fn exec_match_clause(
     mc: &MatchClause,
     prior: &[Binding],
     graph: MergedGraph<'_>,
-    budget: &mut RowBudget,
+    budget: &RowBudget,
     first_clause: bool,
 ) -> Result<Vec<Binding>, CypherError> {
     let mut out = Vec::new();
@@ -1698,35 +1957,46 @@ fn inline_name(np: &NodePat) -> Option<&str> {
         })
 }
 
-/// The `name` literal that lets an unbound first node, not served by the kind
-/// CSR, be seeded from the name index instead of `0..nodes.len()`. The caller
-/// seeds from `name_candidates` (ascending like the full scan) and still runs
-/// `base_visible` and `node_matches` on each, so every other inline prop is
-/// still enforced.
-///
-/// `None` keeps the scan. An overlay is excluded: its virtual nodes are not in
-/// the index and `seed_virtuals` appends them after the base seeds. An empty
-/// name or an empty `name_index` still scans, inside `name_candidates`.
-fn first_node_name<'a>(np: &'a NodePat, graph: MergedGraph<'_>) -> Option<&'a str> {
-    if graph.view().is_some() {
-        return None;
-    }
-    inline_name(np)
-}
-
 /// Feed `seed` the base-node indices an unbound first node can match: the
-/// name-index hits when `first_node_name` allows, else every node.
+/// name-index hits of its inline `name` (ascending, like the full scan),
+/// else every node. The caller still runs `base_visible` and `node_matches`
+/// on each, so every other inline prop is still enforced. An empty name or an
+/// empty `name_index` still scans, inside `name_candidates`.
+///
+/// An overlay does not change the base hits: a base index always reads the
+/// base node, so a visible base node matches the name exactly when the index
+/// lists it, and `seed_virtuals` appends the virtual nodes after the base
+/// seeds on both paths.
 fn for_each_first_node_seed(np: &NodePat, graph: MergedGraph<'_>, seed: impl FnMut(u32)) {
-    match first_node_name(np, graph) {
+    match inline_name(np) {
         Some(name) => graph.name_candidates(name).for_each(seed),
         None => (0..graph.nodes.len() as u32).for_each(seed),
     }
+}
+
+/// The name-index hits of a labelled first node's inline `name`, when one
+/// pass over them per label costs no more than the walk over its kind-CSR
+/// slices. `None` keeps the slice walk: no name, an empty name (the index
+/// skips the tombstone the walk matches), an empty index, or a dearer pass.
+fn labelled_name_seeds(np: &NodePat, graph: MergedGraph<'_>) -> Option<Vec<u32>> {
+    let hits = graph.nodes_named_sorted(inline_name(np)?)?;
+    let span: usize = np
+        .kinds
+        .iter()
+        .map(|kind| {
+            let k = kind.as_index();
+            (graph.kind_offsets[k + 1].to_native() - graph.kind_offsets[k].to_native()) as usize
+        })
+        .sum();
+    (hits.len().saturating_mul(np.kinds.len()) <= span).then_some(hits)
 }
 
 // Each clause and fixed hop adds visitor frames. Deeper queries use the
 // iterative materializing traversal to bound native stack usage.
 const MAX_STREAM_DEPTH: usize = 64;
 
+/// Streams every MATCH binding to `emit`, in materialised row order, under
+/// the streaming visit budget.
 fn visit_matches(
     clauses: &[MatchClause],
     graph: MergedGraph<'_>,
@@ -1741,9 +2011,9 @@ fn visit_matches(
             .sum::<usize>();
         if depth > MAX_STREAM_DEPTH {
             let mut bindings = vec![Binding::default()];
-            let mut budget = RowBudget::new();
+            let budget = RowBudget::of(BudgetKind::Rows);
             for (i, mc) in clauses.iter().enumerate() {
-                bindings = exec_match_clause(mc, &bindings, graph, &mut budget, i == 0)?;
+                bindings = exec_match_clause(mc, &bindings, graph, &budget, i == 0)?;
             }
             for b in &bindings {
                 emit(b)?;
@@ -1751,24 +2021,34 @@ fn visit_matches(
             return Ok(());
         }
     }
-    visit_matches_inner(clauses, graph, emit)
+    let budget = RowBudget::of(BudgetKind::Visits);
+    visit_matches_inner(clauses, graph, &budget, emit)
 }
 
 /// Row order matches materialization, including OPTIONAL null rows.
 fn visit_matches_inner(
     clauses: &[MatchClause],
     graph: MergedGraph<'_>,
+    budget: &RowBudget,
     emit: &mut dyn FnMut(&Binding) -> Result<(), CypherError>,
 ) -> Result<(), CypherError> {
     let Some((mc, prior)) = clauses.split_last() else {
         return emit(&Binding::default());
     };
-    visit_matches_inner(prior, graph, &mut |base: &Binding| {
+    let first_clause = prior.is_empty();
+    visit_matches_inner(prior, graph, budget, &mut |base: &Binding| {
         let mut matched = false;
-        visit_patterns(&mc.patterns, base, graph, &mut |b: &Binding| {
-            matched = true;
-            emit(b)
-        })?;
+        visit_patterns(
+            &mc.patterns,
+            base,
+            graph,
+            budget,
+            first_clause,
+            &mut |b: &Binding| {
+                matched = true;
+                emit(b)
+            },
+        )?;
         if mc.optional && !matched {
             emit(base)?;
         }
@@ -1777,18 +2057,25 @@ fn visit_matches_inner(
 }
 
 /// One MATCH clause's comma patterns as a join: every row of a pattern is the
-/// base of the next, mirroring `exec_match_clause`.
+/// base of the next, mirroring `exec_match_clause`. `opens`: the first of
+/// `patterns` opens the first clause.
 fn visit_patterns(
     patterns: &[Pattern],
     base: &Binding,
     graph: MergedGraph<'_>,
+    budget: &RowBudget,
+    opens: bool,
     emit: &mut dyn FnMut(&Binding) -> Result<(), CypherError>,
 ) -> Result<(), CypherError> {
     match patterns.split_first() {
         None => emit(base),
-        Some((pat, rest)) => visit_pattern(pat, base, graph, &mut |b| {
-            visit_patterns(rest, b, graph, emit)
-        }),
+        Some((pat, rest)) => {
+            #[cfg(test)]
+            tests::PATTERN_VISITS.with(|visits| visits.set(visits.get() + 1));
+            visit_pattern(pat, base, graph, budget, opens, &mut |b| {
+                visit_patterns(rest, b, graph, budget, false, emit)
+            })
+        }
     }
 }
 
@@ -1821,39 +2108,54 @@ fn for_each_pattern_seed(
             seed(idx);
         }
     } else {
-        if use_kind_csr {
-            for &kind in &first.kinds {
-                let k = kind.as_index();
-                let start = graph.kind_offsets[k].to_native() as usize;
-                let end = graph.kind_offsets[k + 1].to_native() as usize;
-                for raw in &graph.kind_node_idx[start..end] {
-                    let idx = raw.to_native();
-                    if graph.base_visible(idx) && node_matches(idx, first, graph) {
-                        seed(idx);
+        let mut seed_base = |idx: u32| {
+            if graph.base_visible(idx) && node_matches(idx, first, graph) {
+                seed(idx);
+            }
+        };
+        match use_kind_csr.then(|| labelled_name_seeds(first, graph)) {
+            // The slice walk's order: label order, and each kind's nodes
+            // ascending, because graph_assembly fills `kind_node_idx` in node
+            // order.
+            Some(Some(hits)) => {
+                #[cfg(test)]
+                tests::LABELLED_NAME_SEEDS.with(|n| n.set(n.get() + 1));
+                for &kind in &first.kinds {
+                    for &idx in &hits {
+                        if graph.node(idx).is_some_and(|m| m.kind() == kind) {
+                            seed_base(idx);
+                        }
                     }
                 }
             }
-        } else {
-            for_each_first_node_seed(first, graph, |idx| {
-                if graph.base_visible(idx) && node_matches(idx, first, graph) {
-                    seed(idx);
+            Some(None) => {
+                for &kind in &first.kinds {
+                    let k = kind.as_index();
+                    let start = graph.kind_offsets[k].to_native() as usize;
+                    let end = graph.kind_offsets[k + 1].to_native() as usize;
+                    for raw in &graph.kind_node_idx[start..end] {
+                        seed_base(raw.to_native());
+                    }
                 }
-            });
+            }
+            None => for_each_first_node_seed(first, graph, seed_base),
         }
         seed_virtuals(graph, first, seed);
     }
 }
 
+/// `opens` marks the pattern that opens the first clause: its seeds and a
+/// single first hop are not charged to `budget`, as in `exec_pattern`.
 fn visit_pattern(
     pat: &Pattern,
     base: &Binding,
     graph: MergedGraph<'_>,
+    budget: &RowBudget,
+    opens: bool,
     emit: &mut dyn FnMut(&Binding) -> Result<(), CypherError>,
 ) -> Result<(), CypherError> {
-    #[cfg(test)]
-    tests::PATTERN_VISITS.with(|visits| visits.set(visits.get() + 1));
     if let Some(reversed) = bound_start_pattern(pat, base) {
-        return visit_pattern(&reversed, base, graph, emit);
+        return visit_pattern(&reversed, base, graph, budget, opens, emit);
     }
     let first = &pat.nodes[0];
     let mut binding = base.clone();
@@ -1862,26 +2164,36 @@ fn visit_pattern(
         if result.is_err() {
             return;
         }
+        if !opens {
+            if let Err(error) = budget.charge(1) {
+                result = Err(error);
+                return;
+            }
+        }
         if let Some(var) = &first.var {
             binding.node_vars.insert(var, idx);
         }
-        result = visit_hops(pat, 0, &binding, idx, graph, emit);
+        result = visit_hops(pat, 0, &binding, idx, graph, budget, opens, emit);
     });
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn visit_hops(
     pat: &Pattern,
     hop: usize,
     base: &Binding,
     current: u32,
     graph: MergedGraph<'_>,
+    budget: &RowBudget,
+    opens: bool,
     emit: &mut dyn FnMut(&Binding) -> Result<(), CypherError>,
 ) -> Result<(), CypherError> {
     let Some(rel) = pat.rels.get(hop) else {
         return emit(base);
     };
     let next = &pat.nodes[hop + 1];
+    let charged = !(opens && hop == 0 && rel.range.is_none());
     let mut binding = base.clone();
     let mut result = Ok(());
     let mut step = |target, edge: Option<u32>| {
@@ -1898,6 +2210,12 @@ fn visit_hops(
             }
             binding.node_vars.insert(var, target);
         }
+        if charged {
+            if let Err(error) = budget.charge(1) {
+                result = Err(error);
+                return;
+            }
+        }
         if let Some(var) = &rel.var {
             // Zero-length BFS retains the incoming edge binding, if any.
             // Restore it after another result has installed a nonempty path.
@@ -1907,7 +2225,7 @@ fn visit_hops(
                 binding.edge_vars = base.edge_vars.clone();
             }
         }
-        result = visit_hops(pat, hop + 1, &binding, target, graph, emit);
+        result = visit_hops(pat, hop + 1, &binding, target, graph, budget, opens, emit);
     };
     match rel.range {
         Some((min, max)) => {
@@ -1926,7 +2244,7 @@ fn exec_pattern(
     pat: &Pattern,
     base: &Binding,
     graph: MergedGraph<'_>,
-    budget: &mut RowBudget,
+    budget: &RowBudget,
     opens: bool,
 ) -> Result<Vec<Binding>, CypherError> {
     // If the first node is unbound but the last one is already bound, walk the
@@ -2822,7 +3140,7 @@ fn prop_value(
                 confidence,
                 reason,
             } => match prop {
-                "confidence" => Value::Float(*confidence as f64),
+                "confidence" => confidence_value(*confidence),
                 "reason" => Value::Str(reason.as_str().into()),
                 "rel_type" => Value::Str(format!("{rel_type:?}").into()),
                 _ => Value::Null,
@@ -2843,7 +3161,7 @@ fn prop_value(
     if let Some(&edge_idx) = b.edge_vars.get(var) {
         if let Some(e) = graph.overlay_edge(edge_idx) {
             return match prop {
-                "confidence" => Value::Float(e.confidence as f64),
+                "confidence" => confidence_value(e.confidence),
                 "reason" => Value::Str(e.reason.into()),
                 "rel_type" => Value::Str(e.rel_type.as_str().into()),
                 _ => Value::Null,
@@ -2851,13 +3169,21 @@ fn prop_value(
         }
         let e = &graph.edges[edge_idx as usize];
         return match prop {
-            "confidence" => Value::Float(e.confidence.to_native() as f64),
+            "confidence" => confidence_value(e.confidence.to_native()),
             "reason" => Value::Str(e.reason.resolve(&graph.string_pool).into()),
             "rel_type" => Value::Str(RelType::from(&e.rel_type).as_str().into()),
             _ => Value::Null,
         };
     }
     Value::Null
+}
+
+/// An edge confidence as a query value. The graph stores f32, and widening
+/// 0.7f32 gives 0.699999988, which `r.confidence < 0.7` matches and
+/// `= 0.7` misses. Rounding to six decimals, within f32 precision, gives
+/// back the decimal the indexer wrote.
+fn confidence_value(confidence: f32) -> Value {
+    Value::Float((f64::from(confidence) * 1e6).round() / 1e6)
 }
 
 /// Resolve a single property from an archived node.
