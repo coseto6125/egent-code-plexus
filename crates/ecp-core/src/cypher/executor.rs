@@ -2829,8 +2829,15 @@ fn eval_expr(
             let is_null = matches!(v, Value::Null);
             Ok(Value::Bool(is_null ^ negated))
         }
-        ExistsPattern { pattern, negated } => {
-            Ok(Value::Bool(pattern_exists(pattern, b, graph)? ^ negated))
+        ExistsPattern {
+            pattern,
+            negated,
+            outer_vars,
+        } => {
+            // A null node (an outer var this row left unbound) matches nothing.
+            let through_null = outer_vars.iter().any(|v| !b.node_vars.contains_key(v));
+            let found = !through_null && pattern_exists(pattern, b, graph)?;
+            Ok(Value::Bool(found ^ negated))
         }
         Index(base, idx) => {
             let idx = eval_expr(idx, b, graph, cache)?;

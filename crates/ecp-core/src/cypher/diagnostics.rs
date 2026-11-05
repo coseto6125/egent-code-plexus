@@ -243,7 +243,9 @@ pub fn absence_over_calls(q: &Query) -> bool {
     fn expr_has_absence(e: &Expr, calls_in_matches: bool) -> bool {
         match e {
             Expr::IsNull { negated: false, .. } => calls_in_matches,
-            Expr::ExistsPattern { pattern, negated } => {
+            Expr::ExistsPattern {
+                pattern, negated, ..
+            } => {
                 // NOT EXISTS over a Calls-shaped pattern is absence-as-signal
                 // regardless of what the MATCH clauses traverse.
                 *negated && pattern_may_be_calls(pattern)

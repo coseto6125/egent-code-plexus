@@ -102,6 +102,10 @@ pub enum Expr {
     ExistsPattern {
         pattern: Pattern,
         negated: bool,
+        /// The pattern's node vars that an outer MATCH declares, filled by the
+        /// parser. One of them unbound in a row is a null from OPTIONAL MATCH,
+        /// and a pattern through a null node matches nothing.
+        outer_vars: Vec<String>,
     },
     /// `x IS [NOT] NULL`. Distinct from `BinOp(Eq, x, NULL)` because NULL
     /// comparison in Cypher is itself NULL (never true), so `= NULL` can't

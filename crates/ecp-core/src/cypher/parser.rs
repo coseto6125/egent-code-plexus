@@ -211,7 +211,7 @@ fn parse_single_query(c: &mut Cursor) -> Result<Query, CypherError> {
         (None, false)
     };
 
-    let query = Query {
+    let mut query = Query {
         matches,
         where_,
         with,
@@ -222,8 +222,49 @@ fn parse_single_query(c: &mut Cursor) -> Result<Query, CypherError> {
         union,
         union_all,
     };
+    scope_exists_patterns(&mut query);
     validate_variable_length(&query)?;
     Ok(query)
+}
+
+/// Record on each EXISTS which of its node vars an outer MATCH declares. Every
+/// MATCH runs before WHERE and WITH, so the declared set is the same for both.
+fn scope_exists_patterns(q: &mut Query) {
+    fn walk(e: &mut Expr, declared: &[&str]) {
+        match e {
+            Expr::ExistsPattern {
+                pattern,
+                outer_vars,
+                ..
+            } => {
+                *outer_vars = pattern
+                    .nodes
+                    .iter()
+                    .filter_map(|n| n.var.as_deref())
+                    .filter(|v| declared.contains(v))
+                    .map(str::to_string)
+                    .collect();
+            }
+            Expr::BinOp(_, l, r) => {
+                walk(l, declared);
+                walk(r, declared);
+            }
+            Expr::UnaryOp(_, inner) => walk(inner, declared),
+            _ => {}
+        }
+    }
+    let declared: Vec<String> = q
+        .matches
+        .iter()
+        .flat_map(|mc| &mc.patterns)
+        .flat_map(|p| &p.nodes)
+        .filter_map(|n| n.var.clone())
+        .collect();
+    let declared: Vec<&str> = declared.iter().map(String::as_str).collect();
+    let with_where = q.with.as_mut().and_then(|w| w.where_.as_mut());
+    for e in q.where_.iter_mut().chain(with_where) {
+        walk(e, &declared);
+    }
 }
 
 fn is_variable_length(rel: &RelPat) -> bool {
@@ -718,10 +759,16 @@ fn parse_not(c: &mut Cursor) -> Result<Expr, CypherError> {
         // executor short-circuits without an extra UnaryOp wrapper.
         if c.check(&Token::Exists) {
             let inner = parse_comparison(c)?;
-            if let Expr::ExistsPattern { pattern, .. } = inner {
+            if let Expr::ExistsPattern {
+                pattern,
+                outer_vars,
+                ..
+            } = inner
+            {
                 return Ok(Expr::ExistsPattern {
                     pattern,
                     negated: true,
+                    outer_vars,
                 });
             }
             return Ok(Expr::UnaryOp(UnaryOp::Not, Box::new(inner)));
@@ -872,6 +919,7 @@ fn parse_atom(c: &mut Cursor) -> Result<Expr, CypherError> {
         return Ok(Expr::ExistsPattern {
             pattern,
             negated: false,
+            outer_vars: Vec::new(),
         });
     }
     if c.eat(&Token::LParen) {
@@ -1547,7 +1595,9 @@ mod tests {
     #[test]
     fn expr_exists_pattern_parens() {
         match ex("EXISTS((n)-[:Calls]->(f))") {
-            Expr::ExistsPattern { pattern, negated } => {
+            Expr::ExistsPattern {
+                pattern, negated, ..
+            } => {
                 assert!(!negated, "plain EXISTS must have negated=false");
                 assert_eq!(pattern.nodes.len(), 2);
                 assert_eq!(pattern.rels.len(), 1);
@@ -1561,7 +1611,9 @@ mod tests {
     #[test]
     fn expr_exists_pattern_braces() {
         match ex("EXISTS{(n)-[:Calls]->(f)}") {
-            Expr::ExistsPattern { pattern, negated } => {
+            Expr::ExistsPattern {
+                pattern, negated, ..
+            } => {
                 assert!(!negated, "plain EXISTS{{}} must have negated=false");
                 assert_eq!(pattern.nodes.len(), 2);
                 assert_eq!(pattern.rels.len(), 1);
@@ -1609,7 +1661,9 @@ mod tests {
         let mut c = Cursor::new(&toks);
         let e = parse_where(&mut c).unwrap();
         match e {
-            Expr::ExistsPattern { negated, pattern } => {
+            Expr::ExistsPattern {
+                negated, pattern, ..
+            } => {
                 assert!(negated);
                 assert_eq!(pattern.rels.len(), 1);
             }

@@ -3122,6 +3122,67 @@ fn eval_exists_single_hop_all_unbound_scans_edges() {
     });
 }
 
+/// Names `RETURN a.name` yields over the a->b->c chain, sorted.
+fn chain_names(query: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    with_three(|g| {
+        let q = parse(query).unwrap();
+        let r = execute(&q, g, None, Path::new(".")).unwrap();
+        names = r
+            .rows
+            .iter()
+            .map(|row| match &row[0] {
+                Value::Str(s) => s.to_string(),
+                other => panic!("expected a name, got {other:?}"),
+            })
+            .collect();
+    });
+    names.sort();
+    names
+}
+
+// `n` is null on c's row: c calls nothing. A pattern through a null node
+// matches nothing, so EXISTS is false there, never "any Calls edge exists".
+#[test]
+fn test_eval_exists_single_hop_over_optional_null_var_is_false() {
+    assert_eq!(
+        chain_names(
+            "MATCH (a:Function) OPTIONAL MATCH (a)-[:Calls]->(n) WITH a, n \
+             WHERE EXISTS { (n)-[:Calls]->() } RETURN a.name"
+        ),
+        ["a"]
+    );
+}
+
+#[test]
+fn test_eval_exists_multi_hop_over_optional_null_var_is_false_not_error() {
+    assert_eq!(
+        chain_names(
+            "MATCH (a:Function) OPTIONAL MATCH (a)-[:Calls]->(n) WITH a, n \
+             WHERE EXISTS { (n)-[:Calls]->()-[:Calls]->() } RETURN a.name"
+        ),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        chain_names(
+            "MATCH (a:Function) OPTIONAL MATCH (a)-[:Calls]->(n) WITH a, n \
+             WHERE EXISTS { (n)-[:Calls*1..2]->() } RETURN a.name"
+        ),
+        ["a"]
+    );
+}
+
+#[test]
+fn test_eval_not_exists_over_optional_null_var_is_true() {
+    assert_eq!(
+        chain_names(
+            "MATCH (a:Function) OPTIONAL MATCH (a)-[:Calls]->(n) WITH a, n \
+             WHERE NOT EXISTS { (n)-[:Calls]->() } RETURN a.name"
+        ),
+        ["b", "c"]
+    );
+}
+
 #[test]
 fn eval_exists_multi_hop_all_unbound_errors_not_silent_false() {
     with_three(|g| {
@@ -3248,6 +3309,7 @@ fn eval_exists_pattern_callee_no_outgoing_negated_true() {
         let expr = Expr::ExistsPattern {
             pattern,
             negated: true,
+            outer_vars: Vec::new(),
         };
         let mut cache = ContentCache::new(PathBuf::from("."));
         let result = eval_expr(&expr, &binding, MergedGraph::new(g, None), &mut cache).unwrap();
@@ -3290,6 +3352,7 @@ fn eval_exists_pattern_caller_has_outgoing() {
         let expr = Expr::ExistsPattern {
             pattern,
             negated: false,
+            outer_vars: Vec::new(),
         };
         let mut cache = ContentCache::new(PathBuf::from("."));
         let result = eval_expr(&expr, &binding, MergedGraph::new(g, None), &mut cache).unwrap();
@@ -3337,6 +3400,7 @@ fn eval_exists_pattern_second_node_anchor_inverts_dir() {
         let expr = Expr::ExistsPattern {
             pattern,
             negated: false,
+            outer_vars: Vec::new(),
         };
         let mut cache = ContentCache::new(PathBuf::from("."));
         let result = eval_expr(&expr, &binding, MergedGraph::new(g, None), &mut cache).unwrap();
@@ -3381,6 +3445,7 @@ fn eval_exists_pattern_second_node_anchor_no_incoming_is_false() {
         let expr = Expr::ExistsPattern {
             pattern,
             negated: true,
+            outer_vars: Vec::new(),
         };
         let mut cache = ContentCache::new(PathBuf::from("."));
         let result = eval_expr(&expr, &binding, MergedGraph::new(g, None), &mut cache).unwrap();
