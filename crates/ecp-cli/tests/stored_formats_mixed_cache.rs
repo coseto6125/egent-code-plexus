@@ -59,6 +59,7 @@ use common::stored::{
 use common::{commit_all, ecp_bin, run_git};
 use ecp_cli::parse_cache::ParseCache;
 use ecp_cli::repo_identity::repo_dir_name_for_cwd;
+use ecp_cli::session::resolver::session_dir_name;
 use ecp_core::graph::GRAPH_FORMAT_VERSION;
 use ecp_core::registry::BUILDER_FINGERPRINT;
 use ecp_core::session::overlay::DIRTY_EVENTS_FORMAT;
@@ -374,11 +375,16 @@ impl Rig {
         );
     }
 
+    /// The dir today's binary reads for session `sid` in this worktree.
+    fn session_dir(&self, repo: &Path, sid: &str) -> PathBuf {
+        repo.join("sessions").join(session_dir_name(sid, &self.wt))
+    }
+
     /// 0.16.4's session dir (`dirty_files.json`, `graph_overlay/`, and
     /// `view_cache.bin` when asked). Only the identity fields of
     /// `session_meta.json` are restated. Returns the session dir.
     fn stage_prev_session(&self, repo: &Path, with_view_cache: bool) -> PathBuf {
-        let dir = repo.join("sessions").join(SESSION);
+        let dir = self.session_dir(repo, SESSION);
         copy_tree(
             &fixture().join("ecp-home/repo/sessions").join(SESSION),
             &dir,
@@ -663,10 +669,7 @@ fn test_mixed_cache_old_view_cache_new_graph_misses() {
     let before = rig.dirty_answer(&home, TODAY_SESSION);
     assert_eq!(before, (fresh_only_hits(), fresh_only_calls()));
 
-    let planted = repo
-        .join("sessions")
-        .join(TODAY_SESSION)
-        .join("view_cache.bin");
+    let planted = rig.session_dir(&repo, TODAY_SESSION).join("view_cache.bin");
     fs::copy(
         fixture()
             .join("ecp-home/repo/sessions")
@@ -743,8 +746,8 @@ fn test_mixed_cache_empty_piece_dirs_rebuild_and_answer() {
         repo.join("commits")
             .join(format!("branch_main__{}", rig.sha)),
         repo.join("parse_cache").join(WRITER_PARSE_DIR),
-        repo.join("sessions").join(SESSION),
-        layout::fragments_dir(&repo.join("sessions").join(SESSION)),
+        rig.session_dir(&repo, SESSION),
+        layout::fragments_dir(&rig.session_dir(&repo, SESSION)),
     ] {
         fs::create_dir_all(dir).unwrap();
     }
@@ -774,7 +777,7 @@ fn test_mixed_cache_two_sessions_old_and_new_fragments_each_answer() {
 
     let expected = (fresh_only_hits(), fresh_only_calls());
     assert_eq!(rig.dirty_answer(&home, TODAY_SESSION), expected);
-    let today_manifest = layout::dirty_events_path(&repo.join("sessions").join(TODAY_SESSION));
+    let today_manifest = layout::dirty_events_path(&rig.session_dir(&repo, TODAY_SESSION));
     let held = fs::read(&today_manifest).unwrap();
 
     assert_eq!(rig.dirty_answer(&home, SESSION), expected);

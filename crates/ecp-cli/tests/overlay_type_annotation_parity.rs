@@ -231,7 +231,10 @@ fn member_cases() -> Vec<Case> {
 /// import, a package or a qualifier: the overlay looks it up through the
 /// base index.
 fn cross_file_cases() -> Vec<Case> {
-    let case = |label: &str, files: Vec<(&'static str, &'static str)>, edit, expected| Case {
+    let case = |label: &str,
+                files: Vec<(&'static str, &'static str)>,
+                edit: (&'static str, &'static str),
+                expected| Case {
         label: label.to_string(),
         source_file: edit.0,
         files,

@@ -18,6 +18,7 @@ use crate::common;
 
 use common::{commit_all, ecp_bin, run_git, write};
 use ecp_cli::session::overlay_reader::{accepted_fragments, decode_view_inputs};
+use ecp_cli::session::resolver::SESSION_DIR_SEP;
 use ecp_core::session::{layout, DirtyEvents};
 use std::collections::BTreeSet;
 use std::fs;
@@ -67,7 +68,9 @@ fn session_dir(home: &Path) -> PathBuf {
                 && dir
                     .parent()
                     .and_then(Path::file_name)
-                    .is_some_and(|n| n == SESSION_ID)
+                    .and_then(|n| n.to_str())
+                    .and_then(|n| n.split_once(SESSION_DIR_SEP))
+                    .is_some_and(|(sid, _)| sid == SESSION_ID)
             {
                 return dir.parent().unwrap().to_path_buf();
             }

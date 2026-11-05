@@ -4,6 +4,7 @@
 //! classification); the inotify watcher daemon path is exercised by
 //! the existing common/peer_harness.rs spawning suite.
 
+use crate::common::peer_harness::PeerHarness;
 use chrono::Utc;
 use ecp_core::peer::registry::alive_peers;
 use ecp_core::session::SessionMeta;
@@ -11,7 +12,16 @@ use std::path::Path;
 use tempfile::tempdir;
 
 fn write_session(repo_root: &Path, sid: &str, watcher_pid: Option<u32>) {
-    let sdir = repo_root.join("sessions").join(sid);
+    write_session_in(repo_root, sid, sid, watcher_pid);
+}
+
+/// The session `sid` as the binary run from this test's cwd names its own dir.
+fn write_own_session(repo_root: &Path, sid: &str) {
+    write_session_in(repo_root, &PeerHarness::dir_name(sid), sid, None);
+}
+
+fn write_session_in(repo_root: &Path, dir_name: &str, sid: &str, watcher_pid: Option<u32>) {
+    let sdir = repo_root.join("sessions").join(dir_name);
     std::fs::create_dir_all(&sdir).unwrap();
     let now = Utc::now().to_rfc3339();
     let meta = SessionMeta {
@@ -134,7 +144,7 @@ fn status_json_emits_well_formed_array_with_watcher_field() {
     let dir = tempdir().unwrap();
     let me = "e2e-self";
     let other = "e2e-other";
-    write_session(dir.path(), me, None);
+    write_own_session(dir.path(), me);
     write_session(dir.path(), other, Some(std::process::id()));
 
     let bin: std::path::PathBuf = env!("CARGO_BIN_EXE_ecp").into();
@@ -172,7 +182,7 @@ fn status_text_reports_not_started_when_watcher_pid_absent() {
     use std::process::{Command, Stdio};
 
     let dir = tempdir().unwrap();
-    write_session(dir.path(), "me-ns", None);
+    write_own_session(dir.path(), "me-ns");
     write_session(dir.path(), "other-ns", None);
 
     let bin: std::path::PathBuf = env!("CARGO_BIN_EXE_ecp").into();
