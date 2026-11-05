@@ -210,6 +210,7 @@ fn spawn_orphan_prune() {
             failed: &failed,
         }),
         then_args: Some(&["admin", "gc", "--auto"]),
+        env: &[],
     });
 }
 
@@ -229,5 +230,6 @@ fn spawn_update_check() {
         retry: (1, 0),
         markers: None,
         then_args: None,
+        env: &[],
     });
 }

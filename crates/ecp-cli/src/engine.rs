@@ -6,6 +6,7 @@ use ecp_core::session::view::{CallGap, HiddenDecl};
 use ecp_core::session::OverlayView;
 use memmap2::Mmap;
 use rkyv::rancor::Error;
+use rustc_hash::FxHashMap;
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io;
@@ -74,6 +75,9 @@ pub struct Engine {
     /// Lazily built query-time overlay merge view. `None` inside the cell =
     /// clean tree (or no session): traversals take their original branch.
     overlay_view: OnceLock<Option<OverlayView>>,
+    /// Each accepted fragment's path → the content hash it parsed, set by
+    /// `overlay_view` before it can return, whatever it returns.
+    overlay_hashes: OnceLock<FxHashMap<String, u64>>,
     view: GraphView,
     /// True when this engine was loaded from a sibling SHA's graph because the
     /// current HEAD had no published graph yet (OOB branch-switch warm-attach
@@ -130,6 +134,7 @@ impl Engine {
             worktree_root: None,
             overlay_size_cap: None,
             overlay_view: OnceLock::new(),
+            overlay_hashes: OnceLock::new(),
             view: GraphView::L2Only,
             is_stale_for_sha: false,
             behind_head: false,
@@ -312,6 +317,13 @@ impl Engine {
                     .unwrap_or_else(|| ecp_core::config::resolve_size_cap(root));
                 let inputs =
                     crate::session::overlay_reader::view_inputs_under(dir, root, size_cap).ok()?;
+                let _ = self.overlay_hashes.set(
+                    inputs
+                        .fragments
+                        .iter()
+                        .filter_map(|f| Some((f.rel_path.clone(), f.content_hash?)))
+                        .collect(),
+                );
                 if inputs.is_empty() {
                     return None;
                 }
@@ -345,6 +357,20 @@ impl Engine {
                 Some(view)
             })
             .as_ref()
+    }
+
+    /// Whether `root/rel` holds the text this engine's answers for `rel` came
+    /// from: the accepted fragment's text when the overlay view supplies the
+    /// path, else the text the graph indexed. A file that is gone, changed,
+    /// unreadable or recorded with no hash is not recorded.
+    pub fn file_text_is_recorded(&self, root: &Path, rel: &str) -> bool {
+        self.overlay_view();
+        let dirty = self.overlay_hashes.get_or_init(FxHashMap::default);
+        let Ok(graph) = self.graph() else {
+            return false;
+        };
+        crate::session::sources::recorded_hash(graph, dirty, rel)
+            .is_some_and(|hash| crate::session::sources::recorded_bytes(root, rel, hash).is_some())
     }
 
     /// The key `overlay_view` stores and looks up its view under, for the

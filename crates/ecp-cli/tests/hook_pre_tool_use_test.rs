@@ -622,7 +622,14 @@ fn test_bash_cd_nonexistent_dir_no_op() {
 // Contract: a hit from a file edited since the build reports where the symbol
 // is in the working tree, a symbol deleted there is not offered, and one added
 // there is. The hook reads the overlay the last `ecp` query wrote for the
-// session; it does not refresh it.
+// session and does not refresh it itself. A hit prints a file:line only when
+// the working-tree file holds the text that line came from; otherwise the
+// hook drops the hit, names the file in an `omitted:` line, and starts a
+// background refresh.
+//
+// Pass/fail criterion for every test below: a hit line may name a file:line
+// only when that line is the line in the working tree. A wrong line is a fail
+// even when the output looks plausible.
 
 const OVERLAY_SID: &str = "hook-overlay-session";
 
@@ -814,7 +821,7 @@ fn test_hook_hits_session_id_from_input_when_env_absent_reports_working_tree_lin
 /// Commit 1's overlay must not attach to commit 2's graph. Commit 2 is made
 /// with plumbing so the dirty file, and so commit 1's fragment, stay valid on
 /// disk: only the `l2_dirname` guard in `with_dirty_overlay` keeps the
-/// fragment off, and deleting it turns this red (line 25 instead of 3).
+/// fragment off, and deleting it turns this red (line 25 is printed).
 #[test]
 fn test_hook_hits_session_on_another_commit_does_not_attach_its_overlay() {
     let tmp = tempdir().unwrap();
@@ -859,9 +866,15 @@ fn test_hook_hits_session_on_another_commit_does_not_attach_its_overlay() {
         String::from_utf8_lossy(&indexed.stderr)
     );
 
+    // Commit 2's graph holds `relocated` at line 3; the working tree holds it
+    // at line 25. Neither line is the claim: the graph's text is not on disk.
     let ctx = hook_hits(&home, &repo, "relocated");
-    assert!(ctx.contains("relocated (tools.rs:3)"), "{ctx}");
-    assert!(!ctx.contains("relocated (tools.rs:25)"), "{ctx}");
+    assert!(!ctx.contains("tools.rs:25"), "{ctx}");
+    assert!(!ctx.contains("tools.rs:3"), "{ctx}");
+    assert!(
+        ctx.contains("omitted:") && ctx.contains("tools.rs"),
+        "{ctx}"
+    );
 }
 
 /// Two hooks fired at once on one dirty worktree (parallel tool calls) both
@@ -935,5 +948,393 @@ fn test_hook_hits_empty_input_and_unusable_patterns_emit_nothing() {
     for envelope in ["", "{}", blank.as_str(), list.as_str(), absent.as_str()] {
         let ctx = hook_context(spawn_hook(&home, envelope).wait_with_output().unwrap());
         assert_eq!(ctx, "", "envelope {envelope:?}");
+    }
+}
+
+// ── Per-hit proof: a hit names a line only when the file still holds its text ──
+
+/// Rewrite `tools.rs` after the last query: `relocated` moves to line 3.
+fn edit_tools_rs_again(repo: &std::path::Path) {
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    fs::write(
+        repo.join("tools.rs"),
+        "// a\n// b\nfn relocated() {}\nfn other_fn() {}\n",
+    )
+    .unwrap();
+}
+
+fn force_reindex(home: &std::path::Path, repo: &std::path::Path) {
+    let out = session_cmd(home)
+        .args(["admin", "index", "--force", "--repo"])
+        .arg(repo)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn assert_omits_tools_rs(ctx: &str) {
+    assert!(
+        ctx.contains("omitted:") && ctx.contains("tools.rs"),
+        "{ctx}"
+    );
+}
+
+/// `<home>/.ecp/<repo>/.hook-refresh/<OVERLAY_SID>.<ext>` for the one repo dir.
+fn hook_refresh_file(home: &std::path::Path, ext: &str) -> Option<std::path::PathBuf> {
+    fs::read_dir(home.join(".ecp"))
+        .ok()?
+        .flatten()
+        .map(|e| {
+            e.path()
+                .join(".hook-refresh")
+                .join(format!("{OVERLAY_SID}.{ext}"))
+        })
+        .find(|p| p.exists())
+}
+
+/// Bounded wait (at most 30 s) for the refresh job's outcome marker.
+fn wait_for_marker(home: &std::path::Path, ext: &str) -> std::path::PathBuf {
+    for _ in 0..300 {
+        if let Some(marker) = hook_refresh_file(home, ext) {
+            return marker;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let log = hook_refresh_file(home, "log")
+        .and_then(|p| fs::read_to_string(p).ok())
+        .unwrap_or_default();
+    panic!("no .{ext} marker within 30 s; refresh log: {log}");
+}
+
+/// Stands for: an edit after the last query makes the reader reject the
+/// fragment, and the base graph's HEAD line must not stand in for it. Red on
+/// the code before the proof (it printed `relocated (tools.rs:1)`).
+#[test]
+fn test_hook_hits_edit_after_last_query_moved_function_offers_no_stale_line() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = overlay_hook_repo(tmp.path());
+    dirty_tools_rs(&repo);
+    warm_session_overlay(&home, &repo);
+    edit_tools_rs_again(&repo);
+
+    let ctx = hook_hits(&home, &repo, "relocated");
+    assert!(!ctx.contains("relocated (tools.rs:1)"), "{ctx}");
+    assert!(!ctx.contains("(tools.rs:25)"), "{ctx}");
+    assert_omits_tools_rs(&ctx);
+}
+
+/// Stands for: `admin index --force` deletes the overlay, and the rebuilt
+/// graph holds HEAD's `vanished` that the working tree no longer has. Red on
+/// the code before the proof (it printed `vanished (tools.rs:2)`).
+#[test]
+fn test_hook_hits_deleted_function_after_force_reindex_is_not_offered() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = overlay_hook_repo(tmp.path());
+    dirty_tools_rs(&repo);
+    warm_session_overlay(&home, &repo);
+    force_reindex(&home, &repo);
+
+    let ctx = hook_hits(&home, &repo, "vanished");
+    assert!(!ctx.contains("vanished (tools.rs:2)"), "{ctx}");
+}
+
+/// Stands for: no ecp query ran since the edit, so there is no session dir.
+/// Red on the code before the proof (it printed `relocated (tools.rs:1)`).
+#[test]
+fn test_hook_hits_no_session_dir_dirty_file_offers_no_committed_line() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = overlay_hook_repo(tmp.path());
+    dirty_tools_rs(&repo);
+
+    let ctx = hook_hits(&home, &repo, "relocated");
+    assert!(!ctx.contains("relocated (tools.rs:1)"), "{ctx}");
+    assert_omits_tools_rs(&ctx);
+}
+
+#[test]
+fn test_hook_hits_no_session_id_anywhere_offers_no_committed_line_and_spawns_nothing() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = overlay_hook_repo(tmp.path());
+    dirty_tools_rs(&repo);
+    warm_session_overlay(&home, &repo);
+    let session_dirs = || {
+        let mut names: Vec<_> = fs::read_dir(home.join(".ecp"))
+            .unwrap()
+            .flatten()
+            .flat_map(|e| {
+                fs::read_dir(e.path().join("sessions"))
+                    .into_iter()
+                    .flatten()
+            })
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        names.sort();
+        names
+    };
+    let before = session_dirs();
+
+    // The skip variable would hide a spawn, so this hook runs without it.
+    let mut cmd = session_cmd(&home);
+    cmd.env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("ECP_SKIP_BG_REBUILD");
+    let envelope = grep_envelope(&repo, "relocated".into());
+    let ctx = hook_context(spawn_hook_with(cmd, &envelope).wait_with_output().unwrap());
+
+    assert!(!ctx.contains("relocated (tools.rs:1)"), "{ctx}");
+    assert_omits_tools_rs(&ctx);
+    assert!(hook_refresh_file(&home, "lock").is_none());
+    assert!(
+        !home
+            .join(".ecp")
+            .read_dir()
+            .unwrap()
+            .flatten()
+            .any(|e| e.path().join(".hook-refresh").exists()),
+        "no session id: no refresh job state"
+    );
+    assert_eq!(session_dirs(), before, "no new session dir");
+}
+
+/// Guards against over-dropping: only the other file is dirty, so the hit
+/// from the clean file keeps its committed line.
+#[test]
+fn test_hook_hits_clean_file_in_dirty_worktree_keeps_committed_line() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = indexed_repo(
+        tmp.path(),
+        &[
+            ("tools.rs", "fn relocated() {}\nfn vanished() {}\n".into()),
+            ("other.rs", "fn steady() {}\n".into()),
+        ],
+    );
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    fs::write(repo.join("other.rs"), "// pad\nfn steady() {}\n").unwrap();
+    warm_session_overlay(&home, &repo);
+
+    let ctx = hook_hits(&home, &repo, "relocated");
+    assert!(ctx.contains("relocated (tools.rs:1)"), "{ctx}");
+    assert!(!ctx.contains("omitted:"), "{ctx}");
+}
+
+/// The dirty file is restored to HEAD with no query after: the working tree
+/// equals the graph's text, so the committed line is the working-tree line.
+#[test]
+fn test_hook_hits_dirty_set_became_clean_reports_committed_line() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = overlay_hook_repo(tmp.path());
+    dirty_tools_rs(&repo);
+    warm_session_overlay(&home, &repo);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    git_in(&repo, &["checkout", "--", "tools.rs"]);
+
+    let ctx = hook_hits(&home, &repo, "relocated");
+    assert!(ctx.contains("relocated (tools.rs:1)"), "{ctx}");
+    assert!(!ctx.contains("omitted:"), "{ctx}");
+}
+
+/// HEAD (commit 2) is not indexed, so the hook falls back to commit 1's
+/// graph. `tools.rs` changed in commit 2 and is clean in git, yet differs
+/// from that graph; `other.rs` did not change. Red on the code before the
+/// proof (it printed `relocated (tools.rs:1)`).
+#[test]
+fn test_hook_hits_head_unindexed_sibling_graph_changed_file_offers_no_line() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = indexed_repo(
+        tmp.path(),
+        &[
+            ("tools.rs", "fn relocated() {}\nfn vanished() {}\n".into()),
+            ("other.rs", "fn steady() {}\n".into()),
+        ],
+    );
+    fs::write(
+        repo.join("tools.rs"),
+        "// b\n// b\nfn relocated() {}\nfn vanished() {}\n",
+    )
+    .unwrap();
+    git_in(&repo, &["commit", "-qam", "second"]);
+
+    let moved = hook_hits(&home, &repo, "relocated");
+    assert!(!moved.contains("relocated (tools.rs:1)"), "{moved}");
+    assert_omits_tools_rs(&moved);
+    let steady = hook_hits(&home, &repo, "steady");
+    assert!(steady.contains("steady (other.rs:1)"), "{steady}");
+}
+
+/// An overlay written before a forced rebuild (a newer `.gen.*` graph dir),
+/// then an edit: no stale line from the overlay, the old graph or the new one.
+#[test]
+fn test_hook_hits_overlay_written_by_older_graph_generation_offers_no_stale_line() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = overlay_hook_repo(tmp.path());
+    dirty_tools_rs(&repo);
+    warm_session_overlay(&home, &repo);
+    force_reindex(&home, &repo);
+    edit_tools_rs_again(&repo);
+
+    let ctx = hook_hits(&home, &repo, "relocated");
+    assert!(!ctx.contains("(tools.rs:1)"), "{ctx}");
+    assert!(!ctx.contains("(tools.rs:25)"), "{ctx}");
+    assert_omits_tools_rs(&ctx);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_hook_hits_overlay_dir_unreadable_emits_valid_payload_without_stale_line() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempdir().unwrap();
+    let (home, repo) = overlay_hook_repo(tmp.path());
+    dirty_tools_rs(&repo);
+    warm_session_overlay(&home, &repo);
+    let session_dir = fs::read_dir(home.join(".ecp"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path().join("sessions").join(OVERLAY_SID))
+        .find(|p| p.is_dir())
+        .expect("setup: the session dir exists");
+    fs::set_permissions(&session_dir, fs::Permissions::from_mode(0o000)).unwrap();
+    let readable_anyway = fs::read_dir(&session_dir).is_ok();
+
+    let out = spawn_hook(&home, &grep_envelope(&repo, "relocated".into()))
+        .wait_with_output()
+        .unwrap();
+    fs::set_permissions(&session_dir, fs::Permissions::from_mode(0o755)).unwrap();
+    if readable_anyway {
+        return; // root ignores the mode: the directory is not unreadable
+    }
+    let ctx = hook_context(out);
+    assert!(!ctx.contains("relocated (tools.rs:1)"), "{ctx}");
+}
+
+/// The hook that drops a hit starts one background `ecp find`; once it
+/// finishes, the next hook prints the working-tree line.
+#[cfg(unix)]
+#[test]
+fn test_hook_hits_stale_hit_spawns_refresh_then_next_hook_reports_working_tree_line() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = overlay_hook_repo(tmp.path());
+    dirty_tools_rs(&repo);
+    warm_session_overlay(&home, &repo);
+    edit_tools_rs_again(&repo);
+    let refreshing = || {
+        let mut cmd = session_cmd(&home);
+        cmd.env_remove("ECP_SKIP_BG_REBUILD");
+        cmd
+    };
+    let envelope = grep_envelope(&repo, "relocated".into());
+
+    let first = hook_context(
+        spawn_hook_with(refreshing(), &envelope)
+            .wait_with_output()
+            .unwrap(),
+    );
+    assert_omits_tools_rs(&first);
+    wait_for_marker(&home, "complete");
+
+    let second = hook_context(
+        spawn_hook_with(refreshing(), &envelope)
+            .wait_with_output()
+            .unwrap(),
+    );
+    assert!(second.contains("relocated (tools.rs:3)"), "{second}");
+    assert!(!second.contains("omitted:"), "{second}");
+}
+
+/// Two hooks at once on the stale state: neither prints a stale line, and
+/// the flock lets one refresh run. (The two outputs may differ if the refresh
+/// lands between them, so they are not compared.)
+#[cfg(unix)]
+#[test]
+fn test_hook_hits_concurrent_stale_hooks_spawn_at_most_one_refresh() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = overlay_hook_repo(tmp.path());
+    dirty_tools_rs(&repo);
+    warm_session_overlay(&home, &repo);
+    edit_tools_rs_again(&repo);
+    let refreshing = || {
+        let mut cmd = session_cmd(&home);
+        cmd.env_remove("ECP_SKIP_BG_REBUILD");
+        cmd
+    };
+    let envelope = grep_envelope(&repo, "relocated".into());
+
+    let (a, b) = (
+        spawn_hook_with(refreshing(), &envelope),
+        spawn_hook_with(refreshing(), &envelope),
+    );
+    for ctx in [
+        hook_context(a.wait_with_output().unwrap()),
+        hook_context(b.wait_with_output().unwrap()),
+    ] {
+        assert!(!ctx.contains("(tools.rs:1)"), "{ctx}");
+        assert!(!ctx.contains("(tools.rs:25)"), "{ctx}");
+    }
+    let log = fs::read_to_string(wait_for_marker(&home, "log")).unwrap_or_default();
+    wait_for_marker(&home, "complete");
+    let log_after = fs::read_to_string(hook_refresh_file(&home, "log").unwrap()).unwrap();
+    assert!(
+        log_after.matches("=== attempt").count() <= 1,
+        "{log}\n{log_after}"
+    );
+}
+
+/// One file per mainstream language, each edited after indexing: the proof is
+/// byte-level, so no language's committed line survives an edit.
+#[test]
+fn test_hook_hits_dirty_files_in_14_languages_offer_no_committed_line() {
+    let langs: [(&str, &str); 14] = [
+        ("l_ts.ts", "export function langts() { return 1; }\n"),
+        ("l_js.js", "function langjs() { return 1; }\n"),
+        ("l_py.py", "def langpy():\n    return 1\n"),
+        ("L_Java.java", "class LJava {\n    void langjava() {}\n}\n"),
+        ("l_kt.kt", "fun langkt() {}\n"),
+        ("l_cs.cs", "class LCs {\n    void langcs() {}\n}\n"),
+        ("l_go.go", "package main\n\nfunc langgo() {}\n"),
+        ("l_rs.rs", "fn langrs() {}\n"),
+        ("l_php.php", "<?php\nfunction langphp() {}\n"),
+        ("l_rb.rb", "def langrb\n  1\nend\n"),
+        ("l_sw.swift", "func langswift() {}\n"),
+        ("l_c.c", "int langc(void) { return 1; }\n"),
+        ("l_cpp.cpp", "int langcpp() { return 1; }\n"),
+        ("l_dart.dart", "void langdart() {}\n"),
+    ];
+    let tmp = tempdir().unwrap();
+    let files: Vec<(&str, String)> = langs.iter().map(|(f, src)| (*f, src.to_string())).collect();
+    let (home, repo) = indexed_repo(tmp.path(), &files);
+    let names = [
+        "langts",
+        "langjs",
+        "langpy",
+        "langjava",
+        "langkt",
+        "langcs",
+        "langgo",
+        "langrs",
+        "langphp",
+        "langrb",
+        "langswift",
+        "langc",
+        "langcpp",
+        "langdart",
+    ];
+    let offered_before = names
+        .iter()
+        .filter(|name| hook_hits(&home, &repo, name).contains(&format!("{name} (")))
+        .count();
+    assert!(
+        offered_before >= 7,
+        "control: the clean worktree offers most symbols, got {offered_before}"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    for (file, source) in langs {
+        fs::write(repo.join(file), format!("// edited\n// again\n{source}")).unwrap();
+    }
+    for name in names {
+        let ctx = hook_hits(&home, &repo, name);
+        assert!(!ctx.contains(&format!("{name} (")), "{name}: {ctx}");
     }
 }

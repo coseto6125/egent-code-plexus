@@ -1246,6 +1246,7 @@ fn spawn_background_rebuild_with(
             failed: &markers.failed,
         }),
         then_args: None,
+        env: &[],
     });
     if !started {
         markers.record_launch_failure();
@@ -1289,6 +1290,7 @@ fn spawn_upgrade_gc() {
         retry: (1, 0),
         markers: None,
         then_args: None,
+        env: &[],
     });
 }
 

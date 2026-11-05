@@ -14,7 +14,7 @@ use ecp_cli::session::overlay_reader::{
     accepted_fragments, decode_view_inputs, decode_view_inputs_with_records, view_inputs,
 };
 use ecp_cli::session::overlay_writer::{write_dirty_events, write_dirty_fragments_from_graphs};
-use ecp_cli::session::sources::RecordedSources;
+use ecp_cli::session::sources::{recorded_bytes, recorded_hash, RecordedSources};
 use ecp_cli::session::view_cache::{self, VIEW_CACHE_FILE};
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
 use ecp_core::contracts::dirty_event::PathClass;
@@ -1283,6 +1283,57 @@ fn test_recorded_sources_omitted_file_stays_cacheable_gone_file_not_cacheable() 
         }
         assert_eq!(reads(&f, &[rel]), (vec![None], cacheable), "{rel}");
     }
+}
+
+/// Stands for: a dirty path's recorded hash is its accepted fragment's, even
+/// when the graph records another for the same path; a path with no graph
+/// hash or no graph entry records nothing.
+#[test]
+fn test_recorded_hash_dirty_fragment_wins_over_graph_hash() {
+    let f = Fixture::new();
+    write_hashed_graph(&f);
+    let engine = Engine::load(&f.graph_path).unwrap();
+    let graph = engine.graph().unwrap();
+    let mut dirty: rustc_hash::FxHashMap<&str, u64> = rustc_hash::FxHashMap::default();
+    assert_eq!(
+        recorded_hash(graph, &dirty, CLEAN),
+        Some(xxh3_64(CLEAN_TEXT.as_bytes()))
+    );
+    dirty.insert(CLEAN, 42);
+    assert_eq!(recorded_hash(graph, &dirty, CLEAN), Some(42));
+    assert_eq!(recorded_hash(graph, &dirty, OMITTED), None);
+    assert_eq!(recorded_hash(graph, &dirty, "src/unlisted.rs"), None);
+}
+
+/// Stands for: a missing file proves nothing, not even a recorded empty
+/// text; an empty file proves exactly the empty hash.
+#[test]
+fn test_recorded_bytes_missing_file_returns_none() {
+    let f = Fixture::new();
+    let empty = xxh3_64(b"");
+    assert_eq!(recorded_bytes(&f.worktree, EMPTY, empty), None);
+    write_worktree(&f, EMPTY, b"", 1_000);
+    assert_eq!(recorded_bytes(&f.worktree, EMPTY, empty), Some(Vec::new()));
+    assert_eq!(recorded_bytes(&f.worktree, EMPTY, empty + 1), None);
+}
+
+/// Stands for: the engine proves a hit's file only when the working tree
+/// holds the text `graph.bin` indexed; a changed, gone or hash-less file is
+/// not proven.
+#[test]
+fn test_file_text_is_recorded_clean_graph_only_matching_text_is_proven() {
+    let f = Fixture::new();
+    write_hashed_graph(&f);
+    write_worktree(&f, CLEAN, CLEAN_TEXT.as_bytes(), 1_000);
+    write_worktree(&f, LATIN1, b"// changed\n", 1_000);
+    write_worktree(&f, OMITTED, CLEAN_TEXT.as_bytes(), 1_000);
+    let engine = Engine::load(&f.graph_path).unwrap();
+    let proven = |rel| engine.file_text_is_recorded(&f.worktree, rel);
+    assert!(proven(CLEAN));
+    assert!(!proven(LATIN1));
+    assert!(!proven(GONE));
+    assert!(!proven(OMITTED));
+    assert!(!proven("src/unlisted.rs"));
 }
 
 const CALLER_RS: &str = "crates/a/src/lib.rs";

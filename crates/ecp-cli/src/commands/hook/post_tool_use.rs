@@ -123,6 +123,7 @@ fn spawn_background_reindex(repo_root: &Path, state_dir: &Path) -> bool {
             failed: &failed,
         }),
         then_args: None,
+        env: &[],
     })
 }
 

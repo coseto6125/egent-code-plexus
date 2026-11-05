@@ -43,20 +43,8 @@ impl<'g> RecordedSources<'g> {
     /// input records, for a zero recorded hash, and for a file that is gone,
     /// unreadable, of other text, or not UTF-8.
     pub fn read(&self, rel: &str) -> Option<String> {
-        let recorded = match self.dirty.get(rel) {
-            Some(&hash) => hash,
-            None => {
-                let file = &self.graph.files[self.graph.file_idx_of(rel)? as usize];
-                if file.content_hash == [0; 8] {
-                    return None;
-                }
-                u64::from_le_bytes(file.content_hash)
-            }
-        };
-        let bytes = fs::read(self.root.join(rel))
-            .ok()
-            .filter(|bytes| xxhash_rust::xxh3::xxh3_64(bytes) == recorded);
-        let Some(bytes) = bytes else {
+        let recorded = recorded_hash(self.graph, &self.dirty, rel)?;
+        let Some(bytes) = recorded_bytes(self.root, rel, recorded) else {
             self.unrecorded.set(true);
             return None;
         };
@@ -68,4 +56,31 @@ impl<'g> RecordedSources<'g> {
     pub fn all_recorded(&self) -> bool {
         !self.unrecorded.get()
     }
+}
+
+/// The hash `rel`'s text must have: the accepted fragment's in `dirty`, else
+/// `graph.bin`'s `File.content_hash`. `None` for a path the graph does not
+/// list and for a zero graph hash, which records nothing.
+pub fn recorded_hash<K>(
+    graph: &ArchivedZeroCopyGraph,
+    dirty: &FxHashMap<K, u64>,
+    rel: &str,
+) -> Option<u64>
+where
+    K: std::borrow::Borrow<str> + std::hash::Hash + Eq,
+{
+    if let Some(&hash) = dirty.get(rel) {
+        return Some(hash);
+    }
+    let file = &graph.files[graph.file_idx_of(rel)? as usize];
+    (file.content_hash != [0; 8]).then(|| u64::from_le_bytes(file.content_hash))
+}
+
+/// The bytes of `root/rel` when their `xxh3_64` is `recorded`. `None` for a
+/// file that is gone or unreadable: a missing file proves nothing, not even
+/// an empty recorded text.
+pub fn recorded_bytes(root: &Path, rel: &str, recorded: u64) -> Option<Vec<u8>> {
+    fs::read(root.join(rel))
+        .ok()
+        .filter(|bytes| xxhash_rust::xxh3::xxh3_64(bytes) == recorded)
 }

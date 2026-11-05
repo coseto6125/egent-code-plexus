@@ -2,15 +2,23 @@
 //! invocations, run an in-process `ecp find --mode bm25`, and inject
 //! the top-K hits into the conversation as `additionalContext`. Capped
 //! at 5 hits or ~2 KB serialized to keep the token cost bounded.
+//!
+//! A hit names a file:line only when the working-tree file holds the text
+//! the line came from (the overlay fragment's, else the indexed graph's).
+//! The hits of any other file are dropped, an `omitted:` line names the
+//! file, and one background `ecp find` refreshes the session overlay.
 
 use super::common::{emit_additional_context, lookup_index_dir, HookInput};
+use crate::background::{spawn_bg, BgJob, BgMarkers};
 use crate::commands::find::{compute_hits_limited, FindArgs, FindMode, Hit};
 use crate::engine::Engine;
 use ecp_core::session::SessionState;
 use ecp_core::EcpError;
 use std::borrow::Cow;
 use std::fmt::Write as _;
+use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::time::SystemTime;
 
 const MAX_HITS: usize = 5;
 const MAX_BYTES: usize = 2048;
@@ -56,14 +64,16 @@ fn compute_search_hits(input: &HookInput) -> Option<String> {
     };
     let index_dir = lookup_index_dir(search_dir)?;
     let graph_path = index_dir.join("graph.bin");
+    let top = crate::read_context::worktree_top(Path::new(search_dir));
+    let sid = crate::session::resolver::hook_session_id(&input.session_id);
     let engine = with_dirty_overlay(
         Engine::load(&graph_path).ok()?,
         &index_dir,
-        search_dir,
-        &input.session_id,
+        &top,
+        sid.as_deref(),
     );
     let args = FindArgs {
-        pattern: Some(pattern),
+        pattern: Some(pattern.clone()),
         mode: FindMode::Bm25,
         fuzzy: false,
         all: false,
@@ -78,9 +88,24 @@ fn compute_search_hits(input: &HookInput) -> Option<String> {
     if hits.is_empty() {
         return None;
     }
-    let lines = format_hits(&hits);
+    let (hits, dropped) = keep_recorded_hits(hits, |file| engine.file_text_is_recorded(&top, file));
+    let omitted = omitted_line(&dropped.files, dropped.hits);
+    let mut lines = if hits.is_empty() {
+        String::new()
+    } else {
+        render_hits(&hits, MAX_BYTES.saturating_sub(omitted.len()))
+    };
+    if lines.is_empty() && dropped.hits > 0 {
+        lines.push_str(HITS_HEADER);
+    }
     if lines.is_empty() {
         return None;
+    }
+    lines.push_str(&omitted);
+    if dropped.hits > 0 {
+        if let (Some(sid), Some(repo_root)) = (&sid, index_dir.parent().and_then(Path::parent)) {
+            maybe_spawn_overlay_refresh(repo_root, &top, sid, &pattern, &dropped.files);
+        }
     }
     // Hits from the repo a leading `cd` names: the agent's own cwd is
     // another repo, and its paths are relative to this one.
@@ -92,41 +117,196 @@ fn compute_search_hits(input: &HookInput) -> Option<String> {
     })
 }
 
+/// The hits of the files the working tree still holds as ecp read them, and
+/// the rest. A hit with no file names no file:line and stays. The proof runs
+/// once per distinct file; a dropped hit would name a line of text that is no
+/// longer on disk.
+fn keep_recorded_hits(
+    hits: Vec<Hit>,
+    mut is_recorded: impl FnMut(&str) -> bool,
+) -> (Vec<Hit>, Dropped) {
+    let mut verdicts: Vec<(String, bool)> = Vec::new();
+    let mut dropped = Dropped::default();
+    let kept = hits
+        .into_iter()
+        .filter(|hit| {
+            if hit.file.is_empty() {
+                return true;
+            }
+            let recorded = match verdicts.iter().find(|(file, _)| *file == hit.file) {
+                Some(&(_, recorded)) => recorded,
+                None => {
+                    let recorded = is_recorded(&hit.file);
+                    verdicts.push((hit.file.clone(), recorded));
+                    if !recorded {
+                        dropped.files.push(hit.file.clone());
+                    }
+                    recorded
+                }
+            };
+            if !recorded {
+                dropped.hits += 1;
+            }
+            recorded
+        })
+        .collect();
+    (kept, dropped)
+}
+
+/// What `keep_recorded_hits` removed: how many hits, in which files (each
+/// once, in hit order).
+#[derive(Default)]
+struct Dropped {
+    hits: usize,
+    files: Vec<String>,
+}
+
+/// The line that tells the agent a symbol may exist although no line is
+/// offered for it. Empty when nothing dropped. Names two files, then counts
+/// the rest.
+fn omitted_line(files: &[String], hits: usize) -> String {
+    if hits == 0 {
+        return String::new();
+    }
+    let mut names = files.iter().take(2).cloned().collect::<Vec<_>>().join(", ");
+    if files.len() > 2 {
+        let _ = write!(names, ", +{} more", files.len() - 2);
+    }
+    format!("  omitted: {hits} hit(s) in {names} (file changed since ecp last read it)\n")
+}
+
+/// Starts one background `ecp find` that rewrites this session's overlay
+/// from the changed files, so the next hook call proves their hits. Never
+/// without a session the hook was told of: the per-process fallback id names
+/// a dir nobody reads.
+fn maybe_spawn_overlay_refresh(
+    repo_root: &Path,
+    top: &Path,
+    sid: &str,
+    pattern: &str,
+    dropped_files: &[String],
+) {
+    if crate::auto_ensure::background_rebuild_skipped()
+        || ecp_core::registry::validate_cache_component(sid).is_err()
+    {
+        return;
+    }
+    let markers = RefreshMarkers::under(repo_root, sid);
+    let newest_change = dropped_files
+        .iter()
+        .filter_map(|file| fs::metadata(top.join(file)).and_then(|m| m.modified()).ok())
+        .max();
+    spawn_overlay_refresh_with(&markers, top, sid, pattern, newest_change, spawn_bg);
+}
+
+/// The refresh's lock and outcome files. They sit beside `sessions/`, never
+/// in it, so no session enumerator lists them.
+struct RefreshMarkers {
+    dir: PathBuf,
+    lock: PathBuf,
+    log: PathBuf,
+    complete: PathBuf,
+    failed: PathBuf,
+}
+
+impl RefreshMarkers {
+    fn under(repo_root: &Path, sid: &str) -> Self {
+        let dir = repo_root.join(".hook-refresh");
+        Self {
+            lock: dir.join(format!("{sid}.lock")),
+            log: dir.join(format!("{sid}.log")),
+            complete: dir.join(format!("{sid}.complete")),
+            failed: dir.join(format!("{sid}.failed")),
+            dir,
+        }
+    }
+
+    /// Whether a refresh already ran after `newest_change`. A file that no
+    /// refresh can make provable (an LFS file, whose `git archive` bytes skip
+    /// the filter driver) then does not respawn the job on every call.
+    fn ran_since(&self, newest_change: Option<SystemTime>) -> bool {
+        let finished = [&self.complete, &self.failed]
+            .into_iter()
+            .filter_map(|marker| fs::metadata(marker).and_then(|m| m.modified()).ok())
+            .max();
+        match (finished, newest_change) {
+            (Some(done), Some(changed)) => done >= changed,
+            (Some(_), None) => true,
+            (None, _) => false,
+        }
+    }
+}
+
+fn spawn_overlay_refresh_with(
+    markers: &RefreshMarkers,
+    top: &Path,
+    sid: &str,
+    pattern: &str,
+    newest_change: Option<SystemTime>,
+    spawn: impl FnOnce(BgJob<'_>) -> bool,
+) -> bool {
+    if markers.ran_since(newest_change) || fs::create_dir_all(&markers.dir).is_err() {
+        return false;
+    }
+    let top_str = top.to_string_lossy();
+    let args = [
+        "find",
+        "--repo",
+        top_str.as_ref(),
+        "--format",
+        "json",
+        "--",
+        pattern,
+    ];
+    spawn(BgJob {
+        args: &args,
+        lock: &markers.lock,
+        cwd: top,
+        retry: (1, 0),
+        markers: Some(BgMarkers {
+            log: &markers.log,
+            complete: &markers.complete,
+            failed: &markers.failed,
+        }),
+        then_args: None,
+        env: &[("ECP_SESSION_ID", sid)],
+    })
+}
+
 /// Attaches this session's overlay, so a hit from a file edited since the
 /// build shows the line the working tree has, a deleted symbol drops out and
-/// a new one appears. The hook never refreshes the overlay: it reads what the
-/// last `ecp` query wrote, and the reader rejects a fragment whose source
-/// file changed since.
+/// a new one appears. This function does not refresh the overlay: it reads
+/// what the last `ecp` query wrote, and the reader rejects a fragment whose
+/// source file changed since. `compute_search_hits` drops the hits that
+/// leave unproven and starts the refresh.
 ///
 /// Attaches only when the session holds dirty fragments built on exactly this
 /// graph. A worktree with no session dir costs one `stat`; a clean one with
 /// a session adds the `commits/` listing, one `session_meta.json` and one
 /// `dirty_events` read, and builds no view; a session on another commit (the
 /// hook falls back to the newest graph when HEAD is unindexed) reads the base.
-fn with_dirty_overlay(
-    engine: Engine,
-    index_dir: &Path,
-    search_dir: &str,
-    input_session_id: &str,
-) -> Engine {
-    let Some(repo_root) = index_dir.parent().and_then(Path::parent) else {
+/// No session id attaches nothing.
+fn with_dirty_overlay(engine: Engine, index_dir: &Path, top: &Path, sid: Option<&str>) -> Engine {
+    let (Some(repo_root), Some(sid)) = (index_dir.parent().and_then(Path::parent), sid) else {
         return engine;
     };
-    let sid = crate::session::resolver::resolve_hook_session_id(input_session_id);
-    if ecp_core::registry::validate_cache_component(&sid).is_err() {
+    if ecp_core::registry::validate_cache_component(sid).is_err() {
         return engine;
     }
-    if !repo_root.join("sessions").join(&sid).is_dir() {
+    if !repo_root.join("sessions").join(sid).is_dir() {
         return engine;
     }
-    match crate::session::state::classify(repo_root, &sid) {
+    match crate::session::state::classify(repo_root, sid) {
         SessionState::AugmentedReference { l2_dirname, .. }
             if index_dir
                 .file_name()
                 .is_some_and(|n| n == l2_dirname.as_str()) =>
         {
-            let top = crate::read_context::worktree_top(Path::new(search_dir));
-            engine.with_overlay(repo_root.join("sessions").join(&sid), top, None)
+            engine.with_overlay(
+                repo_root.join("sessions").join(sid),
+                top.to_path_buf(),
+                None,
+            )
         }
         _ => engine,
     }
@@ -140,12 +320,17 @@ fn with_dirty_overlay(
 /// per-hit footprint tight; the LLM reads the absence as "no callers
 /// found within 1 hop" rather than asking ecp for a deeper trace.
 pub fn format_hits(hits: &[Hit]) -> String {
+    render_hits(hits, MAX_BYTES)
+}
+
+/// `format_hits` within `max_bytes`.
+fn render_hits(hits: &[Hit], max_bytes: usize) -> String {
     let mut out = String::from(HITS_HEADER);
     for h in hits.iter().take(MAX_HITS) {
         let mut block = format!("  {} ({}:{}) [{}]\n", h.name, h.file, h.line, h.kind);
         push_neighbours(&mut block, "Called by", &h.callers, h.caller_count);
         push_neighbours(&mut block, "Calls", &h.callees, h.callee_count);
-        if out.len() + block.len() > MAX_BYTES {
+        if out.len() + block.len() > max_bytes {
             break;
         }
         out.push_str(&block);
@@ -1080,9 +1265,134 @@ fn extract_from_shell(cmd: &str) -> Option<String> {
 mod tests {
     use super::CdTarget::{Dir, Unchanged, Unknown};
     use super::{
-        cd_target_with_home, extract_from_shell, search_terms, shell_segments, CdTarget, Sep,
+        cd_target_with_home, extract_from_shell, keep_recorded_hits, omitted_line, search_terms,
+        shell_segments, spawn_overlay_refresh_with, CdTarget, RefreshMarkers, Sep, HITS_HEADER,
+        MAX_BYTES,
     };
+    use crate::commands::find::{Hit, ScoreSource};
+    use std::cell::{Cell, RefCell};
     use std::path::Path;
+    use std::time::{Duration, SystemTime};
+
+    fn hit_in(file: &str, name: &str) -> Hit {
+        Hit {
+            repo: None,
+            score: 1.0,
+            score_source: ScoreSource::Bm25,
+            kind: "Function".to_string(),
+            file: file.to_string(),
+            language: "Rust".to_string(),
+            line: 1,
+            name: name.to_string(),
+            signature: String::new(),
+            caller_count: 0,
+            callers: vec![],
+            callee_count: 0,
+            callees: vec![],
+            category: ecp_core::graph::FileCategory::Source,
+        }
+    }
+
+    /// Contract: the 2 KB cap holds with the omitted line in, and the line
+    /// names two files then counts the rest, so a long list never grows it.
+    #[test]
+    fn test_omitted_line_many_files_names_two_and_counts_rest() {
+        let files: Vec<String> = ["a.rs", "b.rs", "c.rs", "d.rs"].map(String::from).into();
+        let line = omitted_line(&files, 5);
+        assert_eq!(
+            line,
+            "  omitted: 5 hit(s) in a.rs, b.rs, +2 more (file changed since ecp last read it)\n"
+        );
+        assert!(HITS_HEADER.len() + line.len() < MAX_BYTES);
+        assert_eq!(omitted_line(&[], 0), "");
+    }
+
+    /// Contract: the proof runs once per distinct file, a hit with no file
+    /// names no file:line and stays, and only unproven files are named.
+    #[test]
+    fn test_keep_recorded_hits_proves_each_file_once_and_keeps_fileless_hits() {
+        let hits = vec![
+            hit_in("a.rs", "one"),
+            hit_in("b.rs", "two"),
+            hit_in("a.rs", "three"),
+            hit_in("", "route"),
+        ];
+        let calls = RefCell::new(Vec::new());
+        let (kept, dropped) = keep_recorded_hits(hits, |file| {
+            calls.borrow_mut().push(file.to_string());
+            file == "b.rs"
+        });
+        assert_eq!(*calls.borrow(), ["a.rs", "b.rs"]);
+        assert_eq!(
+            kept.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(),
+            ["two", "route"]
+        );
+        assert_eq!((dropped.hits, dropped.files), (2, vec!["a.rs".to_string()]));
+    }
+
+    fn launch(
+        markers: &RefreshMarkers,
+        top: &Path,
+        newest_change: Option<SystemTime>,
+    ) -> (bool, Option<(Vec<String>, String)>) {
+        let seen = RefCell::new(None);
+        let started =
+            spawn_overlay_refresh_with(markers, top, "sid-1", "pat", newest_change, |job| {
+                *seen.borrow_mut() = Some((
+                    job.args.iter().map(|a| a.to_string()).collect(),
+                    job.env
+                        .iter()
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect::<String>(),
+                ));
+                true
+            });
+        (started, seen.into_inner())
+    }
+
+    /// Contract: a refresh that finished after the file's last change does
+    /// not run again, so a file no refresh can prove (an LFS file) does not
+    /// start a job on every hook call.
+    #[test]
+    fn test_maybe_spawn_overlay_refresh_marker_newer_than_dropped_file_does_not_spawn() {
+        let tmp = tempfile::tempdir().unwrap();
+        let markers = RefreshMarkers::under(tmp.path(), "sid-1");
+        std::fs::create_dir_all(&markers.dir).unwrap();
+        std::fs::write(&markers.failed, b"").unwrap();
+        let before_marker = SystemTime::now() - Duration::from_secs(60);
+        assert!(!launch(&markers, tmp.path(), Some(before_marker)).0);
+        assert!(!launch(&markers, tmp.path(), None).0);
+    }
+
+    #[test]
+    fn test_maybe_spawn_overlay_refresh_no_marker_or_older_marker_spawns_find_with_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let markers = RefreshMarkers::under(tmp.path(), "sid-1");
+        let (started, seen) = launch(&markers, tmp.path(), None);
+        assert!(started);
+        let (args, env) = seen.unwrap();
+        assert_eq!(args[0], "find");
+        assert_eq!(args.last().unwrap(), "pat");
+        assert_eq!(env, "ECP_SESSION_ID=sid-1");
+
+        std::fs::write(&markers.complete, b"").unwrap();
+        let after_marker = SystemTime::now() + Duration::from_secs(60);
+        assert!(launch(&markers, tmp.path(), Some(after_marker)).0);
+    }
+
+    #[test]
+    fn test_maybe_spawn_overlay_refresh_dir_uncreatable_does_not_spawn() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".hook-refresh"), b"file").unwrap();
+        let markers = RefreshMarkers::under(tmp.path(), "sid-1");
+        let called = Cell::new(false);
+        let started =
+            spawn_overlay_refresh_with(&markers, tmp.path(), "sid-1", "pat", None, |_| {
+                called.set(true);
+                true
+            });
+        assert!(!started && !called.get());
+    }
 
     fn canon(p: &Path) -> String {
         dunce::canonicalize(p)

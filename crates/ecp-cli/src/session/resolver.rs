@@ -38,18 +38,21 @@ pub fn resolve_session_id(explicit: Option<&str>) -> String {
 /// input, then the per-process fallback. A hook process may not carry the host's
 /// session env var while its JSON input always names the session.
 pub fn resolve_hook_session_id(input_session_id: &str) -> String {
+    hook_session_id(input_session_id).unwrap_or_else(|| fallback_id().to_string())
+}
+
+/// The session a hook names, in `resolve_hook_session_id`'s order, or `None`
+/// when no env var and no input id names one: the per-process fallback names
+/// no overlay dir, so a caller that writes under the id must not use it.
+pub fn hook_session_id(input_session_id: &str) -> Option<String> {
     for key in SESSION_ENV_KEYS {
         if let Ok(s) = std::env::var(key) {
             if !s.is_empty() {
-                return s;
+                return Some(s);
             }
         }
     }
-    if input_session_id.is_empty() {
-        fallback_id().to_string()
-    } else {
-        input_session_id.to_string()
-    }
+    (!input_session_id.is_empty()).then(|| input_session_id.to_string())
 }
 
 /// Resolve the team-visible agent name for this session, if any.

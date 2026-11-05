@@ -33,6 +33,8 @@ pub struct BgJob<'a> {
     /// they serialize on one lock. Its failure is best-effort (does NOT flip the
     /// job to `.failed`).
     pub then_args: Option<&'a [&'a str]>,
+    /// Extra environment variables for the launcher (and so the job).
+    pub env: &'a [(&'a str, &'a str)],
 }
 
 /// The two-line shell preamble used to guard `spawn_bg`'s inner job
@@ -163,6 +165,7 @@ done
     if let Some(home) = home {
         cmd.env("ECP_HOME", home);
     }
+    cmd.envs(job.env.iter().copied());
     cmd.spawn().is_ok()
 }
 
