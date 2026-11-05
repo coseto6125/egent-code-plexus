@@ -47,14 +47,13 @@ fn variant_field_emits_once_no_dup() {
     assert_eq!(p.len(), 1, "expected single Property, got {:?}", g.nodes);
 }
 
+/// Stands for: `ecp impact --target St` lists a tuple variant `V(St)` that
+/// holds `St`, so each positional field is a `Property` named by its index,
+/// as a tuple struct's fields are.
 #[test]
-fn tuple_variant_emits_no_property() {
+fn tuple_variant_emits_one_property_per_position() {
     let g = parse("enum E { V(i32, String) }");
-    assert!(
-        properties(&g).is_empty(),
-        "tuple variants have no field_identifier, got {:?}",
-        g.nodes
-    );
+    assert_eq!(properties(&g), ["0", "1"], "{:?}", g.nodes);
 }
 
 #[test]

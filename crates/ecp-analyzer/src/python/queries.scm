@@ -78,11 +78,14 @@
       left: (identifier) @variable.name
       (type)? @type) @variable))
 
-;; PEP 695 `type Al = …` / `type Al[T] = …`: reuses the Variable capture;
+;; PEP 695 `type Al = …` / `type Al[T] = …` (the parameter list parses as generic_type or subscript): reuses the Variable capture;
 ;; parser.rs reclassifies it to Typedef from the root node kind.
 (module
   (type_alias_statement
-    left: (type [(identifier) (generic_type (identifier))] @variable.name)) @variable)
+    left: (type
+      [(identifier) @variable.name
+       (generic_type (identifier) @variable.name)
+       (subscript value: (identifier) @variable.name)])) @variable)
 
 ;; Decorators — attach raw decorator text to the parent function or class so
 ;; downstream consumers (Task #10/11 flag wiring, Tier 3 route detectors) can

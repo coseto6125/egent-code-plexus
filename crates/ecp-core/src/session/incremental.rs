@@ -2324,7 +2324,7 @@ mod tests {
 
     // ── class membership (F7b1) ─────────────────────────────────────────────
 
-    use crate::analyzer::membership::{CLASS_MEMBERSHIP_IMPL_REASON, CLASS_MEMBERSHIP_REASON};
+    use crate::analyzer::membership::{CLASS_MEMBERSHIP_OWNER_REASON, CLASS_MEMBERSHIP_REASON};
 
     fn member(source: u32, target: u32) -> (u32, u32, String) {
         (source, target, CLASS_MEMBERSHIP_REASON.to_string())
@@ -2472,8 +2472,9 @@ mod tests {
         );
     }
 
-    /// A Rust `impl` method outside its struct's span binds through its
-    /// owner, with the owner pass's reason.
+    /// A Rust method outside its struct's span, with no `Impl` row around
+    /// it, binds through its owner with the owner pass's reason, as the index
+    /// does for the same rows; `rust_impl` names only an `impl` block owner.
     #[test]
     fn test_replay_impl_method_outside_struct_span_binds_by_owner() {
         let bytes = clean_base();
@@ -2489,7 +2490,7 @@ mod tests {
         let base = view.base_len();
         assert_eq!(
             rel_edges(graph, &view, RelType::HasMethod),
-            [(base, base + 1, CLASS_MEMBERSHIP_IMPL_REASON.to_string())]
+            [(base, base + 1, CLASS_MEMBERSHIP_OWNER_REASON.to_string())]
         );
     }
 

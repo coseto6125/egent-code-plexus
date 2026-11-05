@@ -156,7 +156,7 @@ fn test_type_annotation_bare_callable_alias_binds() {
 
 #[test]
 fn test_type_annotation_bare_union_of_names_alias_binds() {
-    assert_alias_bound("class A: ...\nclass B: ...\nAl = A | B\n");
+    assert_alias_bound("class Alpha: ...\nclass Beta: ...\nAl = Alpha | Beta\n");
 }
 
 #[test]

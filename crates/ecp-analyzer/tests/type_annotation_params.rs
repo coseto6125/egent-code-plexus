@@ -1130,9 +1130,9 @@ fn test_go_type_params_named_like_project_type_bind_nothing() {
             ("bounded_fn", &["Foo"]),
             ("plain_fn", &["T"]),
             // The contract here is only "the receiver's `T` binds no project
-            // `T`". A generic receiver `Wrap[T]` binds nothing at all, which
-            // predates this test (base 368c2457 records no Wrap edge either).
-            ("put", &[]),
+            // `T`". The generic receiver `Wrap[T]` binds its base type, as a
+            // plain receiver does.
+            ("put", &["Wrap"]),
             // A plain receiver binds its type, as on base.
             ("take", &["Plain", "T"]),
         ],

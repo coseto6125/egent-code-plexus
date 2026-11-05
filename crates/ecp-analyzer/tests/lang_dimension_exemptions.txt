@@ -520,6 +520,19 @@ generic_arity ruby only C# declares two same-name types that differ by generic a
 generic_arity rust only C# declares two same-name types that differ by generic arity
 generic_arity swift only C# declares two same-name types that differ by generic arity
 generic_arity typescript only C# declares two same-name types that differ by generic arity
+generic_receiver c only Go declares a method on a generic receiver type
+generic_receiver cpp only Go declares a method on a generic receiver type
+generic_receiver csharp only Go declares a method on a generic receiver type
+generic_receiver dart only Go declares a method on a generic receiver type
+generic_receiver java only Go declares a method on a generic receiver type
+generic_receiver javascript only Go declares a method on a generic receiver type
+generic_receiver kotlin only Go declares a method on a generic receiver type
+generic_receiver php only Go declares a method on a generic receiver type
+generic_receiver python only Go declares a method on a generic receiver type
+generic_receiver ruby only Go declares a method on a generic receiver type
+generic_receiver rust only Go declares a method on a generic receiver type
+generic_receiver swift only Go declares a method on a generic receiver type
+generic_receiver typescript only Go declares a method on a generic receiver type
 grammar c pre-existing gap
 grammar cpp pre-existing gap
 grammar csharp pre-existing gap
@@ -533,6 +546,18 @@ grammar python pre-existing gap
 grammar ruby pre-existing gap
 grammar rust pre-existing gap
 grammar typescript pre-existing gap
+header_resolution csharp only C and C++ split a declaration into a header the other language reads
+header_resolution dart only C and C++ split a declaration into a header the other language reads
+header_resolution go only C and C++ split a declaration into a header the other language reads
+header_resolution java only C and C++ split a declaration into a header the other language reads
+header_resolution javascript only C and C++ split a declaration into a header the other language reads
+header_resolution kotlin only C and C++ split a declaration into a header the other language reads
+header_resolution php only C and C++ split a declaration into a header the other language reads
+header_resolution python only C and C++ split a declaration into a header the other language reads
+header_resolution ruby only C and C++ split a declaration into a header the other language reads
+header_resolution rust only C and C++ split a declaration into a header the other language reads
+header_resolution swift only C and C++ split a declaration into a header the other language reads
+header_resolution typescript only C and C++ split a declaration into a header the other language reads
 heritage c pre-existing gap
 heritage cpp pre-existing gap
 heritage csharp pre-existing gap
