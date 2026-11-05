@@ -56,10 +56,9 @@ pub fn hook_session_id(input_session_id: &str) -> Option<String> {
     (!input_session_id.is_empty()).then(|| input_session_id.to_string())
 }
 
-/// Separates the session id from the worktree key in a session dir name.
-/// `~` passes `validate_cache_component` and collides with no `.stale-` or
-/// `.dead` suffix that the sweeps skip.
-pub const SESSION_DIR_SEP: char = '~';
+// The parser lives in ecp-core so `alive_peers` shares it; this module keeps
+// the name every session-dir caller already imports.
+pub use ecp_core::peer::registry::{split_session_dir_name, SESSION_DIR_SEP};
 
 /// The dir name under `sessions/` for session `sid` working in `worktree`:
 /// `<sid>~<h8>`, where `h8` hashes the worktree's own gitdir. Two worktrees of
@@ -68,15 +67,25 @@ pub const SESSION_DIR_SEP: char = '~';
 /// alias of the worktree; a path outside git keys by its canonical path. One
 /// cached `git_layout` lookup and one short hash.
 pub fn session_dir_name(sid: &str, worktree: &Path) -> String {
-    let key = crate::git_cache::git_layout(worktree).map_or_else(
-        || std::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf()),
-        |(_, gitdir, _)| gitdir,
-    );
+    let key = crate::git_cache::git_layout(worktree)
+        .map_or_else(|| fallback_worktree_key(worktree), |(_, gitdir, _)| gitdir);
     let key = dunce::simplified(&key).to_string_lossy().into_owned();
     format!(
         "{sid}{SESSION_DIR_SEP}{}",
         crate::repo_identity::short_hash_hex8(key.as_bytes())
     )
+}
+
+/// Key for a path `git_layout` cannot resolve (for example under
+/// `GIT_CEILING_DIRECTORIES`): the nearest ancestor that holds a `.git` entry,
+/// so a subdirectory keys like its worktree root. Without any `.git` ancestor
+/// the canonical path itself.
+fn fallback_worktree_key(worktree: &Path) -> std::path::PathBuf {
+    let canonical = std::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
+    canonical
+        .ancestors()
+        .find(|a| a.join(".git").symlink_metadata().is_ok())
+        .map_or_else(|| canonical.clone(), Path::to_path_buf)
 }
 
 /// `session_dir_name` for the session the process env names and the
@@ -123,7 +132,27 @@ fn fallback_id() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::fallback_id;
+    use super::{fallback_id, session_dir_name};
+
+    #[test]
+    fn test_session_dir_name_subdir_of_ungit_resolved_worktree_keys_like_its_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        let deep = root.join("sub/deep");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        assert_eq!(session_dir_name("s", &root), session_dir_name("s", &deep));
+    }
+
+    #[test]
+    fn test_session_dir_name_without_git_ancestor_keys_by_canonical_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("a");
+        let b = tmp.path().join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        assert_ne!(session_dir_name("s", &a), session_dir_name("s", &b));
+    }
 
     #[test]
     fn fallback_id_is_stable_within_a_process() {

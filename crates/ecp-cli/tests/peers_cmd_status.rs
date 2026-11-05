@@ -20,14 +20,19 @@ fn peers_status_empty_repo_prints_no_peers() {
     );
 }
 
+/// A peer's session dir name: `<sid>~<h8>`, the only shape a peer listing accepts.
+fn peer_dir(id: &str) -> String {
+    format!("{id}~aaaaaaaa")
+}
+
 fn write_session(root: &std::path::Path, id: &str, agent_name: Option<&str>) {
     use ecp_core::session::SessionMeta;
-    let dir = root.join("sessions").join(id);
+    let dir = root.join("sessions").join(peer_dir(id));
     std::fs::create_dir_all(&dir).unwrap();
     let now = chrono::Utc::now().to_rfc3339();
     let meta = SessionMeta {
         version: 1,
-        session_id: id.into(),
+        session_id: peer_dir(id),
         pid: Some(std::process::id()),
         started_at: now.clone(),
         last_touched: now,
@@ -73,7 +78,7 @@ fn write_dirty_in(root: &std::path::Path, id: &str, file: &str, symbols: &[&str]
         },
     );
     DirtyEvents::write_atomic(
-        &ecp_core::session::layout::dirty_events_path(&root.join("sessions").join(id)),
+        &ecp_core::session::layout::dirty_events_path(&root.join("sessions").join(peer_dir(id))),
         &manifest,
     )
     .unwrap();
@@ -161,11 +166,11 @@ fn peers_status_shows_agent_name_and_dash_when_absent() {
         .expect("spawn");
     let stdout = String::from_utf8_lossy(&text.stdout);
     assert!(
-        stdout.contains("session=s-named\tname=rust-parser"),
+        stdout.contains("session=s-named~aaaaaaaa\tname=rust-parser"),
         "named peer missing name column: {stdout}"
     );
     assert!(
-        stdout.contains("session=s-anon\tname=-"),
+        stdout.contains("session=s-anon~aaaaaaaa\tname=-"),
         "anon peer missing dash placeholder: {stdout}"
     );
 
@@ -190,8 +195,11 @@ fn peers_status_shows_agent_name_and_dash_when_absent() {
             .unwrap_or_else(|| panic!("row {id} missing: {rows}"))
             .clone()
     };
-    assert_eq!(by_id("s-named")["agent_name"], "rust-parser");
-    assert_eq!(by_id("s-anon")["agent_name"], serde_json::Value::Null);
+    assert_eq!(by_id(&peer_dir("s-named"))["agent_name"], "rust-parser");
+    assert_eq!(
+        by_id(&peer_dir("s-anon"))["agent_name"],
+        serde_json::Value::Null
+    );
 }
 
 #[test]
@@ -215,8 +223,9 @@ fn test_peers_diff_tombstone_prints_deleted_marker() {
     let dir = tempdir().unwrap();
     write_session(dir.path(), "s-peer", None);
     write_dirty_in(dir.path(), "s-peer", "src/edited.ts", &["edited_fn"]);
-    let manifest_path =
-        ecp_core::session::layout::dirty_events_path(&dir.path().join("sessions").join("s-peer"));
+    let manifest_path = ecp_core::session::layout::dirty_events_path(
+        &dir.path().join("sessions").join(peer_dir("s-peer")),
+    );
     let mut manifest = DirtyEvents::read(&manifest_path).unwrap();
     manifest.entries.insert(
         "src/gone.ts".into(),
@@ -267,7 +276,14 @@ fn test_peers_status_two_worktrees_one_session_lists_each_worktree() {
     let git = |dir: &std::path::Path, args: &[&str]| {
         assert!(Command::new("git")
             .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+            .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"])
             .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
             .current_dir(dir)
             .status()
             .unwrap()

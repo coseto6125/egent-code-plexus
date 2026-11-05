@@ -11,8 +11,13 @@ use ecp_core::session::SessionMeta;
 use std::path::Path;
 use tempfile::tempdir;
 
+/// A peer's session dir name: `<sid>~<h8>`, the only shape a peer listing accepts.
+fn peer_dir(sid: &str) -> String {
+    format!("{sid}~aaaaaaaa")
+}
+
 fn write_session(repo_root: &Path, sid: &str, watcher_pid: Option<u32>) {
-    write_session_in(repo_root, sid, sid, watcher_pid);
+    write_session_in(repo_root, &peer_dir(sid), sid, watcher_pid);
 }
 
 /// The session `sid` as the binary run from this test's cwd names its own dir.
@@ -49,13 +54,13 @@ fn alive_peers_reads_session_meta_json_not_meta_json() {
     write_session(dir.path(), "peer-a", None);
     write_session(dir.path(), "peer-b", None);
 
-    let peers_from_a = alive_peers(dir.path(), "peer-a");
+    let peers_from_a = alive_peers(dir.path(), &peer_dir("peer-a"));
     assert_eq!(peers_from_a.len(), 1, "peer-a should see peer-b");
-    assert_eq!(peers_from_a[0].session_id, "peer-b");
+    assert_eq!(peers_from_a[0].session_id, peer_dir("peer-b"));
 
-    let peers_from_b = alive_peers(dir.path(), "peer-b");
+    let peers_from_b = alive_peers(dir.path(), &peer_dir("peer-b"));
     assert_eq!(peers_from_b.len(), 1, "peer-b should see peer-a");
-    assert_eq!(peers_from_b[0].session_id, "peer-a");
+    assert_eq!(peers_from_b[0].session_id, peer_dir("peer-a"));
 }
 
 #[test]
@@ -64,15 +69,16 @@ fn alive_peers_skips_stale_suffixed_dirs() {
     // must not appear as live peers even if the original pid is still alive.
     let dir = tempdir().unwrap();
     write_session(dir.path(), "alive-session", None);
-    write_session(
-        dir.path(),
-        "alive-session.stale-deadbeefcafebabe1234567890abcdef12345678",
-        None,
-    );
+    for retired in [
+        "alive-session~aaaaaaaa.stale-deadbeefcafebabe1234567890abcdef12345678",
+        "alive-session~aaaaaaaa.dead.1700000000",
+    ] {
+        write_session_in(dir.path(), retired, "alive-session", None);
+    }
 
     let peers = alive_peers(dir.path(), "other");
     assert_eq!(peers.len(), 1);
-    assert_eq!(peers[0].session_id, "alive-session");
+    assert_eq!(peers[0].session_id, peer_dir("alive-session"));
 }
 
 #[test]
@@ -83,7 +89,10 @@ fn watcher_pid_distinguishes_not_started_from_dead() {
     write_session(dir.path(), "live-watcher", Some(std::process::id()));
 
     let peers = alive_peers(dir.path(), "other");
-    let by_id = |name: &str| peers.iter().find(|p| p.session_id == name).unwrap();
+    let by_id = |name: &str| {
+        let dir_name = peer_dir(name);
+        peers.iter().find(|p| p.session_id == dir_name).unwrap()
+    };
 
     let nw = by_id("no-watcher");
     assert!(nw.watcher_pid.is_none(), "no-watcher should expose None");
@@ -112,7 +121,7 @@ fn inbox_round_trip_targeted_message() {
     let inbox = dir
         .path()
         .join("sessions")
-        .join("receiver")
+        .join(peer_dir("receiver"))
         .join("inbox.jsonl");
     let msg = InboxEntry::Message {
         ts: Utc::now().to_rfc3339(),
@@ -172,7 +181,7 @@ fn status_json_emits_well_formed_array_with_watcher_field() {
     let rows = parsed.as_array().expect("expected array");
     assert_eq!(rows.len(), 1, "should see exactly one peer (the 'other')");
     let row = &rows[0];
-    assert_eq!(row["session_id"], "e2e-other");
+    assert_eq!(row["session_id"], peer_dir("e2e-other"));
     assert_eq!(row["watcher"], "alive");
     assert_eq!(row["watcher_pid"], std::process::id());
 }
@@ -198,4 +207,44 @@ fn status_text_reports_not_started_when_watcher_pid_absent() {
         stdout.contains("watcher=not-started"),
         "should show not-started; got: {stdout}"
     );
+}
+
+/// Contract: a peer listing holds only `<sid>~<h8>` dirs. A 0.17.3 bare dir,
+/// a hex suffix of 7 or 9 chars, an upper-case suffix, and a hidden dir are
+/// not peers; a sid that holds `~` is one peer, split at its last `~`.
+#[test]
+fn test_alive_peers_non_conforming_dir_names_are_never_listed() {
+    let dir = tempdir().unwrap();
+    write_session_in(dir.path(), "legacy", "legacy", None);
+    for bad in [
+        "short~1234abc",
+        "long~1234abcde",
+        "upper~1234ABCD",
+        ".hidden~aaaaaaaa",
+        "~aaaaaaaa",
+    ] {
+        write_session_in(dir.path(), bad, bad, None);
+    }
+    write_session_in(dir.path(), "has~tilde~1234abcd", "has~tilde", None);
+
+    let ids: Vec<String> = alive_peers(dir.path(), "other")
+        .into_iter()
+        .map(|p| p.session_id)
+        .collect();
+
+    assert_eq!(ids, vec!["has~tilde~1234abcd".to_string()]);
+}
+
+#[test]
+fn test_alive_peers_own_legacy_bare_dir_is_not_listed_as_peer() {
+    let dir = tempdir().unwrap();
+    write_session_in(dir.path(), "me", "me", None);
+    write_session(dir.path(), "peer", None);
+
+    let ids: Vec<String> = alive_peers(dir.path(), &peer_dir("me"))
+        .into_iter()
+        .map(|p| p.session_id)
+        .collect();
+
+    assert_eq!(ids, vec![peer_dir("peer")]);
 }

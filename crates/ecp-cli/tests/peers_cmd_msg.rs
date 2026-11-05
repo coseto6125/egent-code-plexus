@@ -1,3 +1,4 @@
+use crate::common::peer_harness::PeerHarness;
 use std::process::Command;
 use tempfile::tempdir;
 
@@ -5,10 +6,9 @@ fn bin() -> std::path::PathBuf {
     env!("CARGO_BIN_EXE_ecp").into()
 }
 
-/// The session dir name the spawned `ecp` (which inherits this test's cwd)
-/// derives for `ECP_SESSION_ID=sid`: `<sid>~<worktree key>`.
-fn own_dir(sid: &str) -> String {
-    ecp_cli::session::resolver::session_dir_name(sid, &std::env::current_dir().unwrap())
+/// A peer's session dir name: `<sid>~<h8>`, the only shape a peer listing accepts.
+fn peer_dir(sid: &str) -> String {
+    format!("{sid}~aaaaaaaa")
 }
 
 #[test]
@@ -17,7 +17,7 @@ fn say_to_targeted_peer_writes_to_their_inbox() {
     let sessions = dir.path().join("sessions");
 
     // Set up peerA with a session_meta.json (alive_peers needs it)
-    let pa = sessions.join("peerA");
+    let pa = sessions.join(peer_dir("peerA"));
     std::fs::create_dir_all(&pa).unwrap();
     let meta = format!(
         r#"{{"version":1,"session_id":"peerA","pid":{pid},"started_at":"2026-01-01T00:00:00Z","last_touched":"2026-01-01T00:00:00Z","base_sha":"0000000000000000000000000000000000000000","source_worktree":"/tmp","overlay_version":1}}"#,
@@ -53,7 +53,7 @@ fn say_to_targeted_peer_writes_to_their_inbox() {
     );
 
     // Sender's msg.log should also record this with direction=sent
-    let me_log = sessions.join(own_dir("me")).join("msg.log");
+    let me_log = sessions.join(PeerHarness::dir_name("me")).join("msg.log");
     let me_body = std::fs::read_to_string(&me_log).unwrap();
     assert!(
         me_body.contains("\"direction\":\"sent\""),
@@ -67,7 +67,7 @@ fn broadcast_writes_to_all_alive_peer_inboxes() {
     let dir = tempdir().unwrap();
     let sessions = dir.path().join("sessions");
     for sid in ["peerA", "peerB"] {
-        let s = sessions.join(sid);
+        let s = sessions.join(peer_dir(sid));
         std::fs::create_dir_all(&s).unwrap();
         let meta = format!(
             r#"{{"version":1,"session_id":"{sid}","pid":{pid},"started_at":"2026-01-01T00:00:00Z","last_touched":"2026-01-01T00:00:00Z","base_sha":"0000000000000000000000000000000000000000","source_worktree":"/tmp","overlay_version":1}}"#,
@@ -94,7 +94,7 @@ fn broadcast_writes_to_all_alive_peer_inboxes() {
     );
 
     for sid in ["peerA", "peerB"] {
-        let inbox = sessions.join(sid).join("inbox.jsonl");
+        let inbox = sessions.join(peer_dir(sid)).join("inbox.jsonl");
         let body = std::fs::read_to_string(&inbox).unwrap();
         assert!(
             body.contains("\"body\":\"hello team\""),
@@ -120,7 +120,7 @@ fn write_named_session(sessions: &std::path::Path, sid: &str, agent_name: Option
 fn say_to_agent_name_resolves_to_session_inbox() {
     let dir = tempdir().unwrap();
     let sessions = dir.path().join("sessions");
-    write_named_session(&sessions, "s-alpha", Some("rust-parser"));
+    write_named_session(&sessions, &peer_dir("s-alpha"), Some("rust-parser"));
 
     let out = Command::new(bin())
         .args([
@@ -140,7 +140,8 @@ fn say_to_agent_name_resolves_to_session_inbox() {
         "stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let body = std::fs::read_to_string(sessions.join("s-alpha/inbox.jsonl")).unwrap();
+    let body =
+        std::fs::read_to_string(sessions.join(peer_dir("s-alpha")).join("inbox.jsonl")).unwrap();
     assert!(
         body.contains("\"body\":\"hi by name\""),
         "named target inbox missing message: {body}"
@@ -151,8 +152,8 @@ fn say_to_agent_name_resolves_to_session_inbox() {
 fn say_to_ambiguous_name_errors_listing_candidates() {
     let dir = tempdir().unwrap();
     let sessions = dir.path().join("sessions");
-    write_named_session(&sessions, "s-one", Some("worker"));
-    write_named_session(&sessions, "s-two", Some("worker"));
+    write_named_session(&sessions, &peer_dir("s-one"), Some("worker"));
+    write_named_session(&sessions, &peer_dir("s-two"), Some("worker"));
 
     let out = Command::new(bin())
         .args([
@@ -175,8 +176,14 @@ fn say_to_ambiguous_name_errors_listing_candidates() {
         "candidates must be listed: {stderr}"
     );
     assert!(
-        !sessions.join("s-one/inbox.jsonl").exists()
-            && !sessions.join("s-two/inbox.jsonl").exists(),
+        !sessions
+            .join(peer_dir("s-one"))
+            .join("inbox.jsonl")
+            .exists()
+            && !sessions
+                .join(peer_dir("s-two"))
+                .join("inbox.jsonl")
+                .exists(),
         "no inbox may be written on ambiguity"
     );
 }
@@ -210,7 +217,7 @@ fn say_to_unknown_name_errors_not_found() {
 fn peers_name_sets_own_agent_name() {
     let dir = tempdir().unwrap();
     let sessions = dir.path().join("sessions");
-    write_named_session(&sessions, &own_dir("me_namer"), None);
+    write_named_session(&sessions, &PeerHarness::dir_name("me_namer"), None);
 
     let out = Command::new(bin())
         .args([
@@ -229,8 +236,12 @@ fn peers_name_sets_own_agent_name() {
         String::from_utf8_lossy(&out.stderr)
     );
     let meta: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(sessions.join(own_dir("me_namer")).join("session_meta.json"))
-            .unwrap(),
+        &std::fs::read_to_string(
+            sessions
+                .join(PeerHarness::dir_name("me_namer"))
+                .join("session_meta.json"),
+        )
+        .unwrap(),
     )
     .unwrap();
     assert_eq!(meta["agent_name"], "graph-lead");
@@ -239,7 +250,10 @@ fn peers_name_sets_own_agent_name() {
 #[test]
 fn inbox_subcommand_reads_without_draining() {
     let dir = tempdir().unwrap();
-    let me_dir = dir.path().join("sessions").join(own_dir("me_inbox_test"));
+    let me_dir = dir
+        .path()
+        .join("sessions")
+        .join(PeerHarness::dir_name("me_inbox_test"));
     std::fs::create_dir_all(&me_dir).unwrap();
     let entry = r#"{"type":"message","ts":"t","msg_id":"m_x","from":"who","to":null,"reply_to":null,"body":"persist-me"}"#;
     std::fs::write(me_dir.join("inbox.jsonl"), format!("{entry}\n")).unwrap();
@@ -297,7 +311,7 @@ fn assert_say_rejects_target(root: &std::path::Path, target: &str) {
         stray.is_empty(),
         "target {target:?} produced an inbox: {stray:?}"
     );
-    assert!(!sessions.join(own_dir("sender")).exists());
+    assert!(!sessions.join(PeerHarness::dir_name("sender")).exists());
 }
 
 /// Every `inbox.jsonl` or its lock anywhere under `dir`.
@@ -479,4 +493,88 @@ fn test_peers_msg_qualified_id_as_printed_by_status_delivers() {
     );
     assert!(sessions.join("shared~bbbbbbbb/inbox.jsonl").exists());
     assert!(!sessions.join("shared~aaaaaaaa/inbox.jsonl").exists());
+}
+
+/// Contract: a bare target reaches exactly the `<sid>~<h8>` dirs of that sid.
+/// A sid that itself holds `~`, a retired dir and a 0.17.3 bare dir are never
+/// delivery targets, and a hex suffix of the wrong length or case is no h8.
+#[test]
+fn test_resolve_target_session_lookalike_dirs_never_match_bare_target() {
+    let dir = tempdir().unwrap();
+    let sessions = dir.path().join("sessions");
+    write_named_session(&sessions, "alice~1234abcd", None);
+    for lookalike in [
+        "alice~worker~1234abcd",
+        "alice~1234abcd.dead.1700000000",
+        "alice~1234abcd.stale-ff00ff00",
+        "alice~1234abc",
+        "alice~1234abcde",
+        "alice~1234ABCD",
+    ] {
+        write_named_session(&sessions, lookalike, None);
+    }
+
+    let out = say_to(dir.path(), "alice");
+
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(sessions.join("alice~1234abcd/inbox.jsonl").exists());
+    let inboxes: Vec<_> = std::fs::read_dir(&sessions)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.path().join("inbox.jsonl").exists())
+        .collect();
+    assert_eq!(inboxes.len(), 1, "only the real worktree session receives");
+}
+
+#[test]
+fn test_resolve_target_session_legacy_bare_dir_alone_is_not_delivered_to() {
+    let dir = tempdir().unwrap();
+    let sessions = dir.path().join("sessions");
+    write_named_session(&sessions, "v0173sess", None);
+
+    let out = say_to(dir.path(), "v0173sess");
+
+    assert!(
+        !out.status.success(),
+        "a 0.17.3 bare dir received a message"
+    );
+    assert!(!sessions.join("v0173sess/inbox.jsonl").exists());
+}
+
+#[test]
+fn test_resolve_target_session_legacy_bare_dir_beside_live_one_routes_to_live() {
+    let dir = tempdir().unwrap();
+    let sessions = dir.path().join("sessions");
+    write_named_session(&sessions, "alice", None);
+    write_named_session(&sessions, "alice~1234abcd", None);
+
+    let out = say_to(dir.path(), "alice");
+
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(sessions.join("alice~1234abcd/inbox.jsonl").exists());
+    assert!(!sessions.join("alice/inbox.jsonl").exists());
+}
+
+#[test]
+fn test_resolve_target_session_empty_sessions_dir_reports_not_found() {
+    let dir = tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("sessions")).unwrap();
+    let out = say_to(dir.path(), "alice");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no peer session or agent named"));
+}
+
+#[test]
+fn test_resolve_target_session_missing_sessions_dir_reports_not_found() {
+    let dir = tempdir().unwrap();
+    let out = say_to(dir.path(), "alice");
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no peer session or agent named"));
 }

@@ -1,6 +1,6 @@
 //! Ƀ messaging — say / inbox / thread.
 
-use crate::session::resolver::SESSION_DIR_SEP;
+use crate::session::resolver::split_session_dir_name;
 use chrono::Utc;
 use ecp_core::peer::inbox::{append_entry, InboxEntry};
 use ecp_core::peer::registry::alive_peers;
@@ -9,12 +9,10 @@ use std::path::Path;
 use uuid::Uuid;
 
 /// Whether session id `id` is `target` itself or one of the `<target>~<h8>`
-/// worktree sessions of a bare session id.
+/// worktree sessions of a bare session id. A longer sid that holds `~`, a
+/// retired `.dead.` / `.stale-` dir and a 0.17.3 bare dir do not match.
 pub(crate) fn id_matches(id: &str, target: &str) -> bool {
-    id == target
-        || id
-            .strip_prefix(target)
-            .is_some_and(|rest| rest.starts_with(SESSION_DIR_SEP))
+    id == target || split_session_dir_name(id).is_some_and(|(sid, _)| sid == target)
 }
 
 /// The `<target>~<h8>` session dirs of bare session id `target`, other than `me`.
@@ -25,7 +23,9 @@ fn worktree_sessions(repo_root: &Path, me: &str, target: &str) -> Vec<String> {
         .flatten()
         .filter(|e| e.path().is_dir())
         .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|name| name != me && name != target && id_matches(name, target))
+        .filter(|name| {
+            name != me && split_session_dir_name(name).is_some_and(|(sid, _)| sid == target)
+        })
         .collect();
     found.sort();
     found
@@ -41,7 +41,8 @@ pub(crate) fn resolve_target_session(
     target: &str,
 ) -> std::io::Result<String> {
     ecp_core::registry::validate_cache_component(target)?;
-    if repo_root.join("sessions").join(target).is_dir() {
+    if split_session_dir_name(target).is_some() && repo_root.join("sessions").join(target).is_dir()
+    {
         return Ok(target.to_string());
     }
     match worktree_sessions(repo_root, me, target).as_slice() {

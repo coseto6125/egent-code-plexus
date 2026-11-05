@@ -44,6 +44,22 @@ pub struct PeerSession {
     pub agent_name: Option<String>,
 }
 
+/// Separates the session id from the worktree key in a session dir name.
+/// `~` passes `validate_cache_component` and collides with no `.stale-` or
+/// `.dead` suffix that the sweeps skip.
+pub const SESSION_DIR_SEP: char = '~';
+
+/// Split a session dir name into `(sid, h8)`. The one rule for "is this dir a
+/// live session": the last `~` is followed by exactly 8 lowercase hex chars and
+/// nothing else. A 0.17.3 bare `<sid>` dir, a retired `.dead.<ts>` or `.stale-`
+/// dir, and a hidden dir all fail it, so no reader mistakes them for a peer.
+/// A sid that itself holds `~` splits at the last one.
+pub fn split_session_dir_name(name: &str) -> Option<(&str, &str)> {
+    let (sid, h8) = name.rsplit_once(SESSION_DIR_SEP)?;
+    let hex8 = h8.len() == 8 && h8.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    (hex8 && !sid.is_empty() && !sid.starts_with('.')).then_some((sid, h8))
+}
+
 pub fn alive_peers(repo_root: &Path, exclude_self: &str) -> Vec<PeerSession> {
     let sessions_dir = repo_root.join("sessions");
     let Ok(read) = fs::read_dir(&sessions_dir) else {
@@ -56,7 +72,7 @@ pub fn alive_peers(repo_root: &Path, exclude_self: &str) -> Vec<PeerSession> {
             continue;
         }
         let id = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if id.is_empty() || id == exclude_self || id.starts_with('.') || id.contains(".stale-") {
+        if id == exclude_self || split_session_dir_name(id).is_none() {
             continue;
         }
         let meta_path = path.join("session_meta.json");

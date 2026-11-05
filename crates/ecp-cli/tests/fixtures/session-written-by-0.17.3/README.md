@@ -26,7 +26,13 @@ Date: 2026-11-05. Linux x86_64.
 
 The second query replaced the first: the old manifest names only `lib.py`.
 That is the defect the new layout (`sessions/<sid>~<worktree key>/`) removes.
-`session_meta.json` stores the writer's absolute scratch path and pid.
+`session_meta.json` stores the writer's pid. Its `source_worktree` is the one
+field edited by hand after the 0.17.3 binary wrote it: the binary wrote the
+absolute scratch path of the generating machine, which holds a user name, and
+the value is now `/tmp/ecp-fixture/repo`. `stored_formats_prev_release.rs` does
+not read the field. The code under test reads it only to find a size-cap config
+and a worktree, and the scratch path does not exist on any other machine, so
+the edit changes no result. Every other byte is as the binary wrote it.
 
 ## What this sample cannot show
 
