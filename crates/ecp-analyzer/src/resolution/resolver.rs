@@ -166,7 +166,7 @@ impl<'g> ReexportIndex<'g> {
 
 /// The index's [`ModuleFacts`]: the symbol table, and the re-export index
 /// when the resolver follows re-exports.
-struct IndexFacts<'r, 'a>(&'r Resolver<'a>);
+pub(super) struct IndexFacts<'r, 'a>(&'r Resolver<'a>);
 
 impl ModuleFacts for IndexFacts<'_, '_> {
     type Path = Arc<str>;
@@ -890,6 +890,11 @@ pub struct Resolver<'a> {
 }
 
 impl<'a> Resolver<'a> {
+    /// The module lookups the ladder reads for package-qualified references.
+    pub(super) fn module_facts(&self) -> IndexFacts<'_, 'a> {
+        IndexFacts(self)
+    }
+
     /// Creates a new `Resolver` with a reference to the global `SymbolTable`.
     pub fn new(symbol_table: &'a SymbolTable) -> Self {
         Self {

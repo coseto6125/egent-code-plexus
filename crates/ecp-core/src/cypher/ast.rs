@@ -102,6 +102,11 @@ pub enum Expr {
     ExistsPattern {
         pattern: Pattern,
         negated: bool,
+        /// The pattern's node vars that an outer MATCH declares, filled by the
+        /// parser. One of them unbound in a row (outside an aggregating WITH's
+        /// groups) is a null from OPTIONAL MATCH, and a pattern through a null
+        /// node matches nothing.
+        outer_vars: Vec<String>,
     },
     /// `x IS [NOT] NULL`. Distinct from `BinOp(Eq, x, NULL)` because NULL
     /// comparison in Cypher is itself NULL (never true), so `= NULL` can't
@@ -124,6 +129,63 @@ pub enum Expr {
         from: Option<Box<Expr>>,
         to: Option<Box<Expr>>,
     },
+}
+
+impl Expr {
+    /// Calls `f` on each direct sub-expression, so a walker that looks for one
+    /// variant reaches it inside every container.
+    pub fn for_each_child<'a>(&'a self, mut f: impl FnMut(&'a Expr)) {
+        match self {
+            Expr::BinOp(_, l, r) | Expr::InCollection(l, r) | Expr::Index(l, r) => {
+                f(l);
+                f(r);
+            }
+            Expr::UnaryOp(_, e)
+            | Expr::In(e, _)
+            | Expr::Regex(e, _)
+            | Expr::StartsWith(e, _)
+            | Expr::EndsWith(e, _)
+            | Expr::Contains(e, _)
+            | Expr::IsNull { expr: e, .. } => f(e),
+            Expr::FunCall { args, .. } => args.iter().for_each(f),
+            Expr::Slice { base, from, to } => {
+                f(base);
+                from.iter().chain(to.iter()).for_each(|e| f(e));
+            }
+            Expr::Var(_)
+            | Expr::Prop(..)
+            | Expr::Lit(_)
+            | Expr::HasLabel(..)
+            | Expr::ExistsPattern { .. } => {}
+        }
+    }
+
+    /// `for_each_child` for a walker that rewrites what it finds.
+    pub fn for_each_child_mut(&mut self, mut f: impl FnMut(&mut Expr)) {
+        match self {
+            Expr::BinOp(_, l, r) | Expr::InCollection(l, r) | Expr::Index(l, r) => {
+                f(l);
+                f(r);
+            }
+            Expr::UnaryOp(_, e)
+            | Expr::In(e, _)
+            | Expr::Regex(e, _)
+            | Expr::StartsWith(e, _)
+            | Expr::EndsWith(e, _)
+            | Expr::Contains(e, _)
+            | Expr::IsNull { expr: e, .. } => f(e),
+            Expr::FunCall { args, .. } => args.iter_mut().for_each(f),
+            Expr::Slice { base, from, to } => {
+                f(base);
+                from.iter_mut().chain(to.iter_mut()).for_each(|e| f(e));
+            }
+            Expr::Var(_)
+            | Expr::Prop(..)
+            | Expr::Lit(_)
+            | Expr::HasLabel(..)
+            | Expr::ExistsPattern { .. } => {}
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

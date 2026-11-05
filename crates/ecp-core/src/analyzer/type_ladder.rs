@@ -6,7 +6,7 @@
 
 use crate::analyzer::reexport::ResolveTarget;
 use crate::analyzer::same_file_pick::PickFacts;
-use crate::analyzer::types::{RawImport, THIS_MEMBER_PREFIX};
+use crate::analyzer::types::{owner_key, RawImport, THIS_MEMBER_PREFIX};
 use crate::file_category::{FileMeta, Language};
 use crate::graph::NodeKind;
 use std::borrow::Cow;
@@ -214,8 +214,8 @@ pub fn names_declaring_type_in(language: Language, key: &str) -> bool {
 /// `struct` / C++ `class` tag. `None` for everything else: a generic or an
 /// array (`Promise<Foo>`, `Optional<Foo>`, `Vec<Foo>`, `list[Foo]`,
 /// `Foo[]`), a qualified path, a tuple, a function type, a union of two
-/// real types. Those need their own unwrapping rules (a follow-up), and a
-/// guess would bind the wrong member.
+/// real types. A guess would bind the wrong member of a receiver; edges to
+/// those types read [`annotation_type_names`] instead.
 pub fn return_type_key(raw: &str) -> Option<&str> {
     let mut ty = unquote(raw.trim());
     if ty.contains('|') {
@@ -267,6 +267,395 @@ fn unquote(text: &str) -> &str {
         }
     }
     text
+}
+
+/// Words an annotation spells next to a type that are no type name: a
+/// marker (`mut`, `const`, `dyn`, `impl`, `ref`, `out`), a tag (`struct`,
+/// `class`), a modifier, or a literal keyword. Wrapper types (`Option`,
+/// `List`) are absent on purpose: the resolver binds an unknown name to
+/// nothing, so listing them would only add a hardcoded set.
+fn is_annotation_keyword(word: &str) -> bool {
+    matches!(
+        word,
+        "mut"
+            | "const"
+            | "dyn"
+            | "impl"
+            | "struct"
+            | "class"
+            | "enum"
+            | "union"
+            | "unsigned"
+            | "signed"
+            | "volatile"
+            | "typename"
+            | "readonly"
+            | "keyof"
+            | "typeof"
+            | "extends"
+            | "super"
+            | "infer"
+            | "asserts"
+            | "new"
+            | "fn"
+            | "func"
+            | "map"
+            | "chan"
+            | "interface"
+            | "final"
+            | "ref"
+            | "out"
+            | "in"
+            | "is"
+            | "as"
+            | "inout"
+            | "params"
+            | "vararg"
+            | "some"
+            | "any"
+            | "throws"
+            | "async"
+            | "escaping"
+            | "where"
+            | "unsafe"
+            | "extern"
+            | "void"
+            | "null"
+            | "undefined"
+            | "None"
+            | "nil"
+    )
+}
+
+fn is_ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '$'
+}
+
+/// Byte length of the name at the start of `text` (which starts with an
+/// identifier character): the identifier, plus each `::`, `.` or `\`
+/// separator that another identifier follows (`ns::St`, `types.St`,
+/// `App\Models\St`).
+fn qualified_name_len(text: &str) -> usize {
+    let mut end = text.find(|c: char| !is_ident_char(c)).unwrap_or(text.len());
+    loop {
+        let tail = &text[end..];
+        let sep = if tail.starts_with("::") {
+            2
+        } else if tail.starts_with(['.', '\\']) {
+            1
+        } else {
+            break;
+        };
+        let after = &tail[sep..];
+        if !after.starts_with(|c: char| c.is_alphabetic() || c == '_' || c == '$') {
+            break;
+        }
+        end += sep
+            + after
+                .find(|c: char| !is_ident_char(c))
+                .unwrap_or(after.len());
+    }
+    end
+}
+
+/// Every type name a declared type annotation mentions, in source order:
+/// generic arguments at any depth (`Map<String, List<St>>`), array, slice
+/// and map parts (`[]pkg.St`, `St[]`, `[String: St]`), each member of a
+/// union (`St | null`), a Python forward reference (`"St"`, `Optional["St"]`),
+/// with nullable, pointer, reference, `mut`, `const`, `dyn`, `impl` and
+/// lifetime markers dropped. A qualified name stays whole (`types.St`,
+/// `ns::St`, `crate::t::St`): the resolver reads the qualifier, and a name
+/// it cannot bind whole binds nothing, never a same-named type elsewhere.
+///
+/// A name that is no type stays out: a parameter name inside a function
+/// type (Go `func(a St)`, Dart and C / C++ `(St a)`, a TS / Kotlin / Swift
+/// label `(a: St)`), and a Python value inside `Literal[..]` or past the
+/// first argument of `Annotated[..]` (`Literal["St"]` names a string).
+///
+/// The result is a superset: it holds wrappers (`Option`), primitives
+/// (`int`) and a generic parameter (`T`). The resolver binds the names that
+/// are project types and nothing else. A declaring-type keyword (`Self`,
+/// `this`) is no name; the caller maps it to the owner through
+/// [`return_type_key`]. [`return_type_key`] stays the reduction that types a
+/// receiver; this one feeds edges.
+pub fn annotation_type_names(language: Language, raw: &str) -> Vec<&str> {
+    /// One name the scan met, with the bracket group it sits in directly.
+    struct Word<'a> {
+        text: &'a str,
+        /// The `(` or `{` group (numbered in open order) and its comma
+        /// segment, when that group is the innermost bracket.
+        slot: Option<(usize, u32)>,
+        labelled: bool,
+        keyword: bool,
+    }
+    struct Open {
+        group: Option<usize>,
+        segment: u32,
+        /// The first segment that holds values, not types: Python
+        /// `Literal[` 0, `Annotated[` 1.
+        value_from: Option<u32>,
+    }
+    let labels = matches!(
+        language,
+        Language::TypeScript | Language::JavaScript | Language::Kotlin | Language::Swift
+    );
+    let mut words: Vec<Word<'_>> = Vec::new();
+    let mut stack: Vec<Open> = Vec::new();
+    let mut groups = 0usize;
+    // Per group: opened by `{`. A newline ends a member there as `;` does
+    // in a multi-line TS / JS object type and a Go struct.
+    let mut brace_groups: Vec<bool> = Vec::new();
+    let newline_ends_member = matches!(
+        language,
+        Language::TypeScript | Language::JavaScript | Language::Go
+    );
+    let mut last_word: Option<(&str, usize)> = None;
+    let mut rest = raw;
+    while let Some(c) = rest.chars().next() {
+        let at = raw.len() - rest.len();
+        let in_value = stack
+            .iter()
+            .any(|open| open.value_from.is_some_and(|from| open.segment >= from));
+        let skip = if c.is_alphabetic() || c == '_' || c == '$' {
+            let len = qualified_name_len(rest);
+            let text = &rest[..len];
+            if !in_value {
+                let slot = stack
+                    .last()
+                    .and_then(|open| Some((open.group?, open.segment)));
+                let tail = rest[len..].trim_start();
+                let tail = tail.strip_prefix('?').map_or(tail, str::trim_start);
+                words.push(Word {
+                    text,
+                    slot,
+                    labelled: labels
+                        && slot.is_some()
+                        && tail.starts_with(':')
+                        && !tail.starts_with("::"),
+                    keyword: is_annotation_keyword(text) || names_declaring_type_in(language, text),
+                });
+            }
+            last_word = Some((text, at + len));
+            len
+        } else if c.is_ascii_digit() {
+            rest.find(|ch: char| !is_ident_char(ch))
+                .unwrap_or(rest.len())
+        } else if language == Language::Rust && c == '\'' {
+            // A lifetime (`'a`, `'static`): the quote and its one identifier.
+            let after = &rest[1..];
+            1 + after
+                .find(|ch: char| !is_ident_char(ch))
+                .unwrap_or(after.len())
+        } else if matches!(c, '"' | '\'') && (language != Language::Python || in_value) {
+            // A string literal type (`"admin"`) or a Python literal value
+            // names no type; any other Python quoted text is a forward
+            // reference and is read as code.
+            rest[1..].find(c).map_or(1, |close| close + 2)
+        } else if rest.starts_with("->")
+            || rest.starts_with("=>")
+            || (language == Language::Go && rest.starts_with("<-"))
+        {
+            // An arrow (or a Go channel direction) closes no bracket.
+            2
+        } else {
+            match c {
+                // Python has no angle brackets: `<` there is a comparison
+                // inside `Annotated` metadata.
+                '<' | '>' if language == Language::Python => {}
+                '(' | '{' | '[' | '<' => {
+                    let value_from = (language == Language::Python && c == '[')
+                        .then_some(last_word)
+                        .flatten()
+                        .filter(|&(_, end)| raw[end..at].trim().is_empty())
+                        .and_then(|(word, _)| match word.rsplit('.').next() {
+                            Some("Literal") => Some(0),
+                            Some("Annotated") => Some(1),
+                            _ => None,
+                        });
+                    let group = matches!(c, '(' | '{').then(|| {
+                        groups += 1;
+                        brace_groups.push(c == '{');
+                        groups - 1
+                    });
+                    stack.push(Open {
+                        group,
+                        segment: 0,
+                        value_from,
+                    });
+                }
+                ')' | '}' | ']' | '>' => {
+                    stack.pop();
+                }
+                ',' | ';' => {
+                    if let Some(open) = stack.last_mut() {
+                        open.segment += 1;
+                    }
+                }
+                // Only where a newline can end a member: a Dart named
+                // parameter may break between its type and its name.
+                '\n' if newline_ends_member => {
+                    if let Some(open) = stack
+                        .last_mut()
+                        .filter(|open| open.group.is_some_and(|group| brace_groups[group]))
+                    {
+                        open.segment += 1;
+                    }
+                }
+                _ => {}
+            }
+            c.len_utf8()
+        };
+        rest = &rest[skip..];
+    }
+    let mut dropped = vec![false; words.len()];
+    for (i, word) in words.iter().enumerate() {
+        if word.labelled {
+            // A label and any external label before it (Swift `(_ a: St)`).
+            for (j, earlier) in words[..=i].iter().enumerate() {
+                if earlier.slot == word.slot {
+                    dropped[j] = true;
+                }
+            }
+        }
+    }
+    let mut segments: Vec<((usize, u32), Vec<usize>)> = Vec::new();
+    for (i, word) in words.iter().enumerate() {
+        let Some(slot) = word.slot else { continue };
+        match segments.iter_mut().find(|(seen, _)| *seen == slot) {
+            Some((_, members)) => members.push(i),
+            None => segments.push((slot, vec![i])),
+        }
+    }
+    match language {
+        // `func(a St)`, `func(a, b St)`: a name leads each parameter, and in
+        // a list where one parameter has a name, every one has. A type
+        // keyword (`func`, `map`, `chan`) leads a type instead. A struct
+        // field may be embedded (`struct { A; x B }`): a lone word there is
+        // a type.
+        Language::Go => {
+            let named = |members: &[usize]| members.len() > 1 && !words[members[0]].keyword;
+            let named_groups: Vec<usize> = segments
+                .iter()
+                .filter(|(_, members)| named(members.as_slice()))
+                .map(|((group, _), _)| *group)
+                .collect();
+            for ((group, _), members) in &segments {
+                let lone_embedded = brace_groups[*group] && members.len() == 1;
+                if named_groups.contains(group) && !lone_embedded && !words[members[0]].keyword {
+                    dropped[members[0]] = true;
+                }
+            }
+        }
+        // `(St a)`, `(const struct St *a)`: a name ends a parameter.
+        Language::Dart | Language::C | Language::Cpp => {
+            for (_, members) in &segments {
+                let mut types = members.iter().filter(|&&i| !words[i].keyword);
+                if let (Some(_), Some(_)) = (types.next(), types.next()) {
+                    if let Some(&last) = members.iter().rev().find(|&&i| !words[i].keyword) {
+                        dropped[last] = true;
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    words
+        .iter()
+        .zip(dropped)
+        .filter(|(word, dropped)| !word.keyword && !dropped)
+        .map(|(word, _)| word.text)
+        .collect()
+}
+
+/// The reason of the `Accesses` edge from a declaration to a type its
+/// annotation names.
+pub const TYPE_ANNOTATION_REASON: &str = "type_annotation";
+
+/// One declaration's inputs to [`type_annotation_targets`]: its node's
+/// fields and its function meta's, as the index and the overlay hold them.
+#[derive(Clone, Copy)]
+pub struct AnnotatedDecl<'a> {
+    pub language: Language,
+    pub kind: NodeKind,
+    pub type_annotation: Option<&'a str>,
+    pub owner_class: Option<&'a str>,
+    pub return_type: Option<&'a str>,
+    pub params: &'a [String],
+    pub type_params: &'a [String],
+}
+
+/// The `(target, confidence)` of every `type_annotation` `Accesses` edge of
+/// one declaration, in emit order: the index's Pass 2 rule, which the
+/// overlay replays for a dirty declaration through this same function.
+/// `resolve` is the declaring file's type lookup (`ResolveTarget::Type`):
+/// it yields every target a name binds (the index passes all of them, the
+/// overlay at most one).
+///
+/// - `type_annotation` (`RawNode.type_annotation`) binds first as one
+///   name ([`return_type_key`]): a declaring-type keyword
+///   (`Self`, `this`, PHP `static`) stands for `owner_class`, so it binds
+///   nothing without an owner; any other text the key does not reduce
+///   is looked up whole.
+/// - A function, method or constructor then binds every name its
+///   generic or container return mentions ([`annotation_type_names`]):
+///   the annotation's when the key does not reduce it, else nothing, and
+///   `return_type` (its function meta's) when the parse captured no
+///   annotation. Then every type of `params`, the meta's flat
+///   `[name, type, ...]` list. A target bound already is not bound again.
+/// - A name in `type_params` (the declaration's own generic list and its
+///   enclosing type's) is a type variable, never a project type: no
+///   resolution runs for it, even when a project type shares the name.
+pub fn type_annotation_targets<'a, T: IntoIterator<Item = (u32, f32)>>(
+    decl: AnnotatedDecl<'a>,
+    mut resolve: impl FnMut(&'a str) -> T,
+) -> Vec<(u32, f32)> {
+    let AnnotatedDecl {
+        language,
+        kind,
+        type_annotation,
+        owner_class,
+        return_type,
+        params,
+        type_params,
+    } = decl;
+    let is_type_param = |name: &str| type_params.iter().any(|p| p == name);
+    let mut targets: Vec<(u32, f32)> = Vec::new();
+    if let Some(annotation) = type_annotation {
+        let name = match return_type_key(annotation) {
+            Some(key) if names_declaring_type_in(language, key) => owner_class.and_then(owner_key),
+            Some(key) => Some(key),
+            None => Some(annotation),
+        };
+        targets.extend(
+            name.filter(|name| !is_type_param(name))
+                .into_iter()
+                .flat_map(&mut resolve),
+        );
+    }
+    if !kind.is_callable() {
+        return targets;
+    }
+    let returned = match type_annotation {
+        Some(annotation) if return_type_key(annotation).is_none() => Some(annotation),
+        Some(_) => None,
+        None => return_type,
+    };
+    let texts = returned
+        .into_iter()
+        .chain(params.as_chunks::<2>().0.iter().map(|[_, ty]| ty.as_str()));
+    for text in texts {
+        for name in annotation_type_names(language, text) {
+            if is_type_param(name) {
+                continue;
+            }
+            for (target, confidence) in resolve(name) {
+                if targets.iter().all(|&(bound, _)| bound != target) {
+                    targets.push((target, confidence));
+                }
+            }
+        }
+    }
+    targets
 }
 
 /// The name of the type a call to `callee` returns, as the callee's own
@@ -806,6 +1195,339 @@ pub fn type_unique_in_scope<F: TypeFacts + ?Sized>(
 mod tests {
     use super::*;
 
+    /// `type_annotation_targets` over a resolver that knows `names`, each
+    /// at its index + 1; the names it was asked for, in order.
+    fn annotation_targets(
+        language: Language,
+        kind: NodeKind,
+        annotation: Option<&str>,
+        owner: Option<&str>,
+        return_type: Option<&str>,
+        params: &[&str],
+        names: &[&str],
+    ) -> (Vec<u32>, Vec<String>) {
+        annotation_targets_generic(
+            language,
+            kind,
+            annotation,
+            owner,
+            return_type,
+            params,
+            &[],
+            names,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn annotation_targets_generic(
+        language: Language,
+        kind: NodeKind,
+        annotation: Option<&str>,
+        owner: Option<&str>,
+        return_type: Option<&str>,
+        params: &[&str],
+        type_params: &[&str],
+        names: &[&str],
+    ) -> (Vec<u32>, Vec<String>) {
+        let params: Vec<String> = params.iter().map(|p| p.to_string()).collect();
+        let type_params: Vec<String> = type_params.iter().map(|p| p.to_string()).collect();
+        let mut asked = Vec::new();
+        let decl = AnnotatedDecl {
+            language,
+            kind,
+            type_annotation: annotation,
+            owner_class: owner,
+            return_type,
+            params: &params,
+            type_params: &type_params,
+        };
+        let targets = type_annotation_targets(decl, |name| {
+            asked.push(name.to_string());
+            names
+                .iter()
+                .position(|known| *known == name)
+                .map(|at| (at as u32 + 1, 1.0))
+        });
+        (targets.into_iter().map(|(id, _)| id).collect(), asked)
+    }
+
+    /// Stands for: the index's Pass 2 rule, row by row. A declaring-type
+    /// keyword binds the owner and only the owner; a field binds its whole
+    /// annotation and never the generic arguments in it; a callable binds a
+    /// bare return once, every name of a generic return, the meta's return
+    /// only when the parse captured no annotation, and each parameter
+    /// type, one edge per target.
+    #[test]
+    fn test_type_annotation_targets_rows_match_the_index_rule() {
+        use Language::{Rust, Swift, TypeScript};
+        use NodeKind::{Function, Method, Property};
+        let st = &["St", "Other", "Owner"][..];
+        type Row<'r> = (
+            &'r str,
+            (
+                Language,
+                NodeKind,
+                Option<&'r str>,
+                Option<&'r str>,
+                Option<&'r str>,
+            ),
+            &'r [&'r str],
+            &'r [u32],
+        );
+        let rows: [Row; 10] = [
+            (
+                "bare return",
+                (Rust, Function, Some("St"), None, Some("St")),
+                &[],
+                &[1],
+            ),
+            (
+                "Self return",
+                (Rust, Method, Some("Self"), Some("Owner"), Some("Self")),
+                &[],
+                &[3],
+            ),
+            (
+                "Self without owner",
+                (Rust, Function, Some("Self"), None, None),
+                &[],
+                &[],
+            ),
+            (
+                "Self inside a generic",
+                (Rust, Method, Some("Option<Self>"), Some("Owner"), None),
+                &[],
+                &[],
+            ),
+            (
+                "generic return",
+                (Rust, Function, Some("Option<St>"), None, None),
+                &[],
+                &[1],
+            ),
+            (
+                "uncaptured return reads the meta",
+                (TypeScript, Function, None, None, Some("Promise<Other>")),
+                &[],
+                &[2],
+            ),
+            (
+                "captured bare return skips the meta",
+                (
+                    TypeScript,
+                    Function,
+                    Some("St"),
+                    None,
+                    Some("Promise<Other>"),
+                ),
+                &[],
+                &[1],
+            ),
+            (
+                "generic field binds no argument",
+                (Swift, Property, Some("[St]"), None, None),
+                &[],
+                &[],
+            ),
+            (
+                "params bind once per target",
+                (Rust, Function, Some("St"), None, None),
+                &["a", "St", "b", "&St", "c", "Vec<Other>"],
+                &[1, 2],
+            ),
+            (
+                "receiver and untyped params",
+                (Rust, Method, None, Some("Owner"), None),
+                &["self", "", "a", ""],
+                &[],
+            ),
+        ];
+        for (label, (language, kind, annotation, owner, return_type), params, want) in rows {
+            let (got, _) =
+                annotation_targets(language, kind, annotation, owner, return_type, params, st);
+            assert_eq!(got, want, "{label}");
+        }
+    }
+
+    /// Stands for: a declaration's type variable is no project type, even
+    /// when one shares its name; a sibling name and a bound still bind.
+    #[test]
+    fn test_type_annotation_targets_type_param_skipped_before_resolution() {
+        let known = &["T", "Foo"][..];
+        type Row<'r> = (
+            &'r str,
+            Option<&'r str>,
+            &'r [&'r str],
+            &'r [&'r str],
+            &'r [u32],
+        );
+        let rows: [Row; 5] = [
+            ("param of T", None, &["v", "T"], &["T"], &[]),
+            ("nested Vec<T>", None, &["v", "Vec<T>"], &["T"], &[]),
+            ("return T", Some("T"), &[], &["T"], &[]),
+            (
+                "bound still binds",
+                None,
+                &["v", "Foo", "w", "T"],
+                &["T"],
+                &[2],
+            ),
+            ("empty list binds", None, &["v", "T"], &[], &[1]),
+        ];
+        for (label, annotation, params, type_params, want) in rows {
+            let (got, asked) = annotation_targets_generic(
+                Language::Rust,
+                NodeKind::Function,
+                annotation,
+                None,
+                None,
+                params,
+                type_params,
+                known,
+            );
+            assert_eq!(got, want, "{label}");
+            if !type_params.is_empty() {
+                assert!(!asked.iter().any(|n| n == "T"), "{label}: asked for T");
+            }
+        }
+    }
+
+    /// Stands for: the whole annotation text is looked up first, as the
+    /// index looks it up, so a qualified spelling resolves through its
+    /// qualifier before its parts are read.
+    #[test]
+    fn test_type_annotation_targets_unreduced_text_looked_up_whole_first() {
+        let (_, asked) = annotation_targets(
+            Language::Rust,
+            NodeKind::Function,
+            Some("Option<St>"),
+            None,
+            None,
+            &[],
+            &[],
+        );
+        assert_eq!(asked, ["Option<St>", "Option", "St"]);
+    }
+
+    /// Contract: a parameter name inside a function type is no type, in each
+    /// language whose annotation text can hold one: Go names lead a
+    /// parameter (and a list with one named parameter names them all), Dart
+    /// and C / C++ names end it, a TS / JS / Kotlin / Swift label precedes a
+    /// `:`. A type keyword that leads a Go type (`func`, `map`, `chan`) is no
+    /// name, and a Swift dictionary key (`[String: St]`) stays a type.
+    #[test]
+    fn test_annotation_type_names_function_type_parameter_names_excluded() {
+        use Language::*;
+        let rows: &[(Language, &str, &[&str])] = &[
+            (Go, "func(a St)", &["St"]),
+            (Go, "func(a, b St) error", &["St", "error"]),
+            (Go, "func(St, Other)", &["St", "Other"]),
+            (Go, "func(cb func(x St))", &["St"]),
+            (Go, "func(m map[K]V, c chan St)", &["K", "V", "St"]),
+            (
+                Go,
+                "func(a ...St) (n int, err error)",
+                &["St", "int", "error"],
+            ),
+            (Go, "func(ch <-chan St, b int)", &["St", "int"]),
+            (Go, "struct { a St; b Other }", &["St", "Other"]),
+            // An embedded field is a type with no name before it.
+            (Go, "struct { A; x B }", &["A", "B"]),
+            (Go, "struct {\n\tA\n\tx B\n}", &["A", "B"]),
+            (Dart, "void Function(St a)", &["Function", "St"]),
+            (
+                Dart,
+                "void Function({required St\n  a})",
+                &["Function", "required", "St"],
+            ),
+            (
+                Dart,
+                "void Function(St, {required Other b})",
+                &["Function", "St", "required", "Other"],
+            ),
+            (
+                Dart,
+                "void Function(Map<K, V> m)",
+                &["Function", "Map", "K", "V"],
+            ),
+            (C, "void (*)(const struct St *a)", &["St"]),
+            (C, "int (*)(St, Other)", &["int", "St", "Other"]),
+            (
+                Cpp,
+                "std::function<void(const St& a)>",
+                &["std::function", "St"],
+            ),
+            (
+                Cpp,
+                "std::function<void(const St&)>",
+                &["std::function", "St"],
+            ),
+            (TypeScript, "(a: St, b?: Other) => void", &["St", "Other"]),
+            (TypeScript, "(...rest: St[]) => Out", &["St", "Out"]),
+            (TypeScript, "{ a: St; b: Other }", &["St", "Other"]),
+            // A newline separates object members as `;` does.
+            (TypeScript, "{\n  a: St\n  b: Other\n}", &["St", "Other"]),
+            (JavaScript, "(a: St) => Out", &["St", "Out"]),
+            (Kotlin, "(a: St) -> Unit", &["St", "Unit"]),
+            (
+                Kotlin,
+                "Map<String, (a: St) -> Unit>",
+                &["Map", "String", "St", "Unit"],
+            ),
+            (Swift, "(_ a: St) -> Void", &["St", "Void"]),
+            (Swift, "(St) -> [String: Other]", &["St", "String", "Other"]),
+            (Rust, "fn(St) -> Out", &["St", "Out"]),
+            (Rust, "(St, Other)", &["St", "Other"]),
+            (Python, "Callable[[St], Out]", &["Callable", "St", "Out"]),
+        ];
+        for (language, raw, want) in rows {
+            assert_eq!(
+                annotation_type_names(*language, raw),
+                *want,
+                "{language:?} {raw:?}"
+            );
+        }
+    }
+
+    /// Contract: a Python quoted string is a forward reference only where a
+    /// type is expected. `Literal[..]` holds values, and `Annotated[..]`
+    /// holds a type first and metadata after it, so their strings (and the
+    /// metadata's names) name no type.
+    #[test]
+    fn test_annotation_type_names_python_literal_values_excluded() {
+        let rows: &[(&str, &[&str])] = &[
+            ("Literal[\"St\"]", &["Literal"]),
+            ("typing.Literal['St', 'Other']", &["typing.Literal"]),
+            ("Optional[Literal[\"St\"]]", &["Optional", "Literal"]),
+            ("Annotated[St, \"Other\"]", &["Annotated", "St"]),
+            ("Annotated[\"St\", Gt(0)]", &["Annotated", "St"]),
+            (
+                "Annotated[list[St], \"meta\"] | Other",
+                &["Annotated", "list", "St", "Other"],
+            ),
+            ("dict[str, \"St\"]", &["dict", "str", "St"]),
+            ("Literal []", &["Literal"]),
+            ("Literal[]", &["Literal"]),
+            // Whitespace before the bracket keeps the value context.
+            ("Literal ['St']", &["Literal"]),
+            ("Annotated [int, \"St\"]", &["Annotated", "int"]),
+            // Python has no angle brackets: `<` in metadata is a comparison.
+            ("Annotated[int, 1 < 2] | St", &["Annotated", "int", "St"]),
+        ];
+        for (raw, want) in rows {
+            assert_eq!(
+                annotation_type_names(Language::Python, raw),
+                *want,
+                "{raw:?}"
+            );
+        }
+        // Outside Python a `Literal` is an ordinary generic.
+        assert_eq!(
+            annotation_type_names(Language::TypeScript, "Literal<St>"),
+            ["Literal", "St"]
+        );
+    }
+
     /// Contract: only wrappers that keep the type's members reduce; a
     /// generic, an array, a path or a two-type union stays unresolved (the
     /// follow-up), so no chained call guesses its receiver.
@@ -869,6 +1591,145 @@ mod tests {
                 "{namespace:?}"
             );
         }
+    }
+
+    /// Contract: every type an annotation mentions is a candidate, per
+    /// language, with the markers dropped and a qualified name kept whole.
+    /// The wrappers stay in the list: the resolver binds only project types.
+    #[test]
+    fn test_annotation_type_names_per_language_lists_every_mentioned_type() {
+        use Language::*;
+        let rows: &[(Language, &str, &[&str])] = &[
+            (Rust, "St", &["St"]),
+            (Rust, "Option<St>", &["Option", "St"]),
+            (
+                Rust,
+                "Result<Option<Projection>, DbError>",
+                &["Result", "Option", "Projection", "DbError"],
+            ),
+            (Rust, "&'a mut St", &["St"]),
+            (Rust, "&'static [St]", &["St"]),
+            (Rust, "Vec<parse::Entry>", &["Vec", "parse::Entry"]),
+            (Rust, "crate::t::St", &["crate::t::St"]),
+            (Rust, "Box<dyn Handler + 'a>", &["Box", "Handler"]),
+            (Rust, "impl Fn(St) -> Out", &["Fn", "St", "Out"]),
+            (Rust, "Option<Self>", &["Option"]),
+            (Rust, "[St; 3]", &["St"]),
+            (TypeScript, "Promise<St>", &["Promise", "St"]),
+            (TypeScript, "St[]", &["St"]),
+            (TypeScript, "St | null", &["St"]),
+            (TypeScript, "A | B | undefined", &["A", "B"]),
+            (TypeScript, "ns.St", &["ns.St"]),
+            (
+                TypeScript,
+                "Record<string, St[]>",
+                &["Record", "string", "St"],
+            ),
+            (TypeScript, "'admin' | St", &["St"]),
+            (TypeScript, "readonly St[]", &["St"]),
+            (JavaScript, "Array<St>", &["Array", "St"]),
+            (Python, "\"St\"", &["St"]),
+            (Python, "Optional[St]", &["Optional", "St"]),
+            (Python, "list[St] | None", &["list", "St"]),
+            (Python, "dict[str, \"St\"]", &["dict", "str", "St"]),
+            (Python, "'St' | None", &["St"]),
+            (Python, "mod.St", &["mod.St"]),
+            (Java, "List<St>", &["List", "St"]),
+            (
+                Java,
+                "Map<String, List<St>>",
+                &["Map", "String", "List", "St"],
+            ),
+            (Java, "? extends St", &["St"]),
+            (Java, "java.util.List<St>", &["java.util.List", "St"]),
+            (Kotlin, "List<St>?", &["List", "St"]),
+            (Kotlin, "Map<String, St>", &["Map", "String", "St"]),
+            (Kotlin, "(St) -> Unit", &["St", "Unit"]),
+            (CSharp, "List<St>", &["List", "St"]),
+            (CSharp, "St?", &["St"]),
+            (
+                CSharp,
+                "Dictionary<string, St>[]",
+                &["Dictionary", "string", "St"],
+            ),
+            (Go, "[]pkg.St", &["pkg.St"]),
+            (Go, "*St", &["St"]),
+            (Go, "map[string]*St", &["string", "St"]),
+            (Go, "...St", &["St"]),
+            (Go, "chan St", &["St"]),
+            (Go, "func(a St) (Out, error)", &["St", "Out", "error"]),
+            (Php, "?St", &["St"]),
+            (Php, "\\App\\Models\\St", &["App\\Models\\St"]),
+            (Php, "static", &[]),
+            (Php, "St|null", &["St"]),
+            (Php, "array<int, St>", &["array", "int", "St"]),
+            (Ruby, "", &[]),
+            (Swift, "[St]", &["St"]),
+            (Swift, "[String: St]", &["String", "St"]),
+            (Swift, "Optional<St>", &["Optional", "St"]),
+            (Swift, "St?", &["St"]),
+            (Swift, "@escaping (St) -> Void", &["St", "Void"]),
+            (Swift, "some Proto", &["Proto"]),
+            (C, "const struct St *", &["St"]),
+            (C, "unsigned int", &["int"]),
+            (C, "St *const *", &["St"]),
+            (Cpp, "std::vector<ns::St>", &["std::vector", "ns::St"]),
+            (Cpp, "const St&", &["St"]),
+            (
+                Cpp,
+                "std::map<std::string, St*>",
+                &["std::map", "std::string", "St"],
+            ),
+            (Cpp, "std::array<St, 3>", &["std::array", "St"]),
+            (Dart, "List<St>", &["List", "St"]),
+            (Dart, "Future<St?>", &["Future", "St"]),
+            (
+                Dart,
+                "Map<String, List<St>>",
+                &["Map", "String", "List", "St"],
+            ),
+            (Dart, "prefix.St", &["prefix.St"]),
+        ];
+        for (language, raw, want) in rows {
+            assert_eq!(
+                annotation_type_names(*language, raw),
+                *want,
+                "{language:?} {raw:?}"
+            );
+        }
+    }
+
+    /// Contract: an empty, whitespace-only or punctuation-only annotation
+    /// names no type, and a lone separator never joins a name.
+    #[test]
+    fn test_annotation_type_names_empty_or_symbols_returns_nothing() {
+        for raw in ["", "   ", "\t\n", "<>", "[]", "*&", "->", "..."] {
+            assert!(
+                annotation_type_names(Language::Rust, raw).is_empty(),
+                "{raw:?}"
+            );
+            assert!(
+                annotation_type_names(Language::Go, raw).is_empty(),
+                "{raw:?}"
+            );
+        }
+        assert_eq!(annotation_type_names(Language::Cpp, "St::"), ["St"]);
+        assert_eq!(annotation_type_names(Language::Go, "St.[]"), ["St"]);
+    }
+
+    /// Contract: an unterminated quote or a lone apostrophe never panics
+    /// and keeps the names after it.
+    #[test]
+    fn test_annotation_type_names_unterminated_quote_keeps_following_names() {
+        assert_eq!(annotation_type_names(Language::TypeScript, "\"St"), ["St"]);
+        assert_eq!(
+            annotation_type_names(Language::Rust, "'"),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            annotation_type_names(Language::Python, "Ünï<St>"),
+            ["Ünï", "St"]
+        );
     }
 
     /// Contract: the reduced key is a fixed point, so the index (which

@@ -1,5 +1,6 @@
 //! Ƀ messaging — say / inbox / thread.
 
+use crate::session::resolver::split_session_dir_name;
 use chrono::Utc;
 use ecp_core::peer::inbox::{append_entry, InboxEntry};
 use ecp_core::peer::registry::alive_peers;
@@ -7,16 +8,56 @@ use std::io::Write;
 use std::path::Path;
 use uuid::Uuid;
 
-/// Resolve a `--to` / `diff` target: exact session-dir id first, else unique
-/// agent_name among alive peers. Ambiguity is an error, never a guess.
+/// Whether session id `id` is `target` itself or one of the `<target>~<h8>`
+/// worktree sessions of a bare session id. A longer sid that holds `~`, a
+/// retired `.dead.` / `.stale-` dir and a 0.17.3 bare dir do not match.
+pub(crate) fn id_matches(id: &str, target: &str) -> bool {
+    id == target || split_session_dir_name(id).is_some_and(|(sid, _)| sid == target)
+}
+
+/// The `<target>~<h8>` session dirs of bare session id `target`, other than `me`.
+fn worktree_sessions(repo_root: &Path, me: &str, target: &str) -> Vec<String> {
+    let mut found: Vec<String> = std::fs::read_dir(repo_root.join("sessions"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|name| {
+            name != me && split_session_dir_name(name).is_some_and(|(sid, _)| sid == target)
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// Resolve a `--to` / `diff` target: exact session-dir id (`<sid>~<h8>`, as
+/// `peers status` prints it) first, then a bare `<sid>` that names exactly one
+/// worktree session, else unique agent_name among alive peers. Ambiguity is an
+/// error that lists the matches, never a guess.
 pub(crate) fn resolve_target_session(
     repo_root: &Path,
     me: &str,
     target: &str,
 ) -> std::io::Result<String> {
     ecp_core::registry::validate_cache_component(target)?;
-    if repo_root.join("sessions").join(target).is_dir() {
+    if split_session_dir_name(target).is_some() && repo_root.join("sessions").join(target).is_dir()
+    {
         return Ok(target.to_string());
+    }
+    match worktree_sessions(repo_root, me, target).as_slice() {
+        [] => {}
+        [one] => return Ok(one.clone()),
+        many => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "session '{target}' runs in {} worktrees; use one of: {}",
+                    many.len(),
+                    many.join(", ")
+                ),
+            ))
+        }
     }
     let matches: Vec<String> = alive_peers(repo_root, me)
         .into_iter()
@@ -45,7 +86,7 @@ pub fn cmd_say(
     to: Option<&str>,
     reply: Option<&str>,
 ) -> std::io::Result<()> {
-    let me = crate::session::resolver::resolve_session_id(None);
+    let me = crate::session::resolver::own_session_dir_name()?;
     ecp_core::registry::validate_cache_component(&me)?;
     let to_sid = to
         .map(|t| resolve_target_session(repo_root, &me, t))
@@ -125,7 +166,7 @@ pub fn cmd_say(
 /// The file is never rotated or truncated — see `peer::inbox` — so everything
 /// ever delivered to this session is here.
 pub fn cmd_inbox(repo_root: &Path, limit: usize, clear: bool) -> std::io::Result<()> {
-    let me = crate::session::resolver::resolve_session_id(None);
+    let me = crate::session::resolver::own_session_dir_name()?;
     ecp_core::registry::validate_cache_component(&me)?;
     let inbox = repo_root.join("sessions").join(&me).join("inbox.jsonl");
     if clear {
@@ -160,7 +201,7 @@ pub fn cmd_inbox(repo_root: &Path, limit: usize, clear: bool) -> std::io::Result
 }
 
 pub fn cmd_thread(repo_root: &Path, msg_id: &str) -> std::io::Result<()> {
-    let me = crate::session::resolver::resolve_session_id(None);
+    let me = crate::session::resolver::own_session_dir_name()?;
     ecp_core::registry::validate_cache_component(&me)?;
     let msg_log = repo_root.join("sessions").join(&me).join("msg.log");
     let Ok(content) = std::fs::read_to_string(&msg_log) else {

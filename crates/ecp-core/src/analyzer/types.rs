@@ -487,6 +487,10 @@ pub struct RawFunctionMeta {
     /// Decorator/attribute names in source order (e.g. `"staticmethod"`,
     /// `"#[test]"`, `"@Injectable"`).
     pub decorators: Vec<String>,
+    /// Names of the type variables in scope for the declaration: its own
+    /// generic list plus its enclosing type's. A type annotation naming one
+    /// binds no project type of the same name.
+    pub type_params: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy)]

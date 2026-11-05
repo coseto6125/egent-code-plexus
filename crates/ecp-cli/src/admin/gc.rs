@@ -310,13 +310,14 @@ fn session_is_idle(sm: &SessionMeta) -> bool {
     })
 }
 
+/// Marks idle session dirs dead and removes retired ones, then sweeps the
+/// hook refresh markers of every session dir that is gone or retired now
+/// (`sweep_hook_refresh_markers`).
 pub fn sweep_sessions(repo_root: &Path, dry_run: bool) -> io::Result<SweepStats> {
     let sessions_dir = repo_root.join("sessions");
     let mut stats = SweepStats::default();
-    let Ok(it) = fs::read_dir(&sessions_dir) else {
-        return Ok(stats);
-    };
-    for entry in it.flatten() {
+    let mut retiring = FxHashSet::default();
+    for entry in fs::read_dir(&sessions_dir).into_iter().flatten().flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         let path = entry.path();
         if is_retired_dir(&name) || name.contains(".stale-") {
@@ -345,9 +346,111 @@ pub fn sweep_sessions(repo_root: &Path, dry_run: bool) -> io::Result<SweepStats>
                 fs::rename(&path, &dead)?;
             }
             stats.marked += 1;
+            retiring.insert(name);
         }
     }
+    sweep_hook_refresh_markers(repo_root, &retiring, dry_run, &mut stats);
     Ok(stats)
+}
+
+/// What `pre_tool_use::RefreshMarkers` names `<session dir>` plus, in
+/// `.hook-refresh/`. `.lock.d` is the `mkdir` lock where `flock` is missing.
+const HOOK_REFRESH_SUFFIXES: [&str; 7] = [
+    ".lock.d",
+    ".lock",
+    ".log",
+    ".started.tmp",
+    ".started",
+    ".complete",
+    ".failed",
+];
+
+/// Removes `.hook-refresh/<name><suffix>` when `sessions/<name>` is gone or is
+/// in `retiring`, or when the marker sat idle past [`SESSION_IDLE_HOURS`]: every
+/// new session id adds a set, and nothing else reads a dead one. A marker
+/// younger than [`IN_FLIGHT_SECS`] stays, since its job may run before its
+/// session dir exists. Only those named entries go; the lock dir through
+/// `remove_dir`, so one that is not empty stays.
+fn sweep_hook_refresh_markers(
+    repo_root: &Path,
+    retiring: &FxHashSet<String>,
+    dry_run: bool,
+    stats: &mut SweepStats,
+) {
+    let Ok(it) = fs::read_dir(repo_root.join(".hook-refresh")) else {
+        return;
+    };
+    let sessions_dir = repo_root.join("sessions");
+    let now = SystemTime::now();
+    let idle_secs = SESSION_IDLE_HOURS.unsigned_abs() * 3600;
+    for entry in it.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(owner) = HOOK_REFRESH_SUFFIXES
+            .iter()
+            .find_map(|suffix| name.strip_suffix(suffix))
+            .filter(|owner| !owner.is_empty())
+        else {
+            continue;
+        };
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if is_in_flight(&meta, now) {
+            continue;
+        }
+        let gone = retiring.contains(owner) || !sessions_dir.join(owner).is_dir();
+        // A launcher opens `.lock` before it locks it, so a lock unlinked in
+        // between lets the next launcher lock a new inode beside a running
+        // job. Only a gone session's lock goes: no launcher runs for it.
+        let flock_file = name.ends_with(".lock") && meta.is_file();
+        if !gone && (flock_file || !idle_for(meta.modified().ok(), now, idle_secs)) {
+            continue;
+        }
+        let path = entry.path();
+        stats.dispose(&path, dry_run, || {
+            if meta.is_dir() {
+                return fs::remove_dir(&path).is_ok();
+            }
+            // A job still holding a gone session's lock keeps it.
+            let _held = if flock_file {
+                match locked_idle_lock(&path, &meta) {
+                    Some(file) => Some(file),
+                    None => return false,
+                }
+            } else {
+                None
+            };
+            fs::remove_file(&path).is_ok()
+        });
+    }
+}
+
+/// The refresh lock at `path`, locked by us, when no launcher uses it: the
+/// open does not block (a FIFO swapped in is refused), the handle is still
+/// the regular file `seen` stat'ed, and its mtime is still outside the
+/// in-flight window after we lock it. A launcher's `exec 9>` truncates the
+/// file before its `flock`, so a recent mtime means one is between the two.
+fn locked_idle_lock(path: &Path, seen: &fs::Metadata) -> Option<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path).ok()?;
+    file.try_lock().ok()?;
+    let held = file.metadata().ok().filter(fs::Metadata::is_file)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if (held.dev(), held.ino()) != (seen.dev(), seen.ino()) {
+            return None;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = seen;
+    (!is_in_flight(&held, SystemTime::now())).then_some(file)
 }
 
 /// Retire commit dirs whose recorded worktree still exists but is not a
@@ -1000,7 +1103,7 @@ mod tests {
 
     /// Backdate a file's mtime past the 10s in-flight guard so the sweep
     /// treats it as a settled orphan rather than a live writer's temp.
-    fn backdate(path: &Path, secs: u64) {
+    pub(super) fn backdate(path: &Path, secs: u64) {
         let when = SystemTime::now() - Duration::from_secs(secs);
         let _ = filetime::set_file_mtime(path, filetime::FileTime::from_system_time(when));
     }
@@ -1693,5 +1796,160 @@ mod sha_lock_sweep_tests {
         assert_eq!(stats.removed, 1);
         assert!(!junk.exists());
         assert!(attached.commit_dir.exists());
+    }
+
+    /// Stands for: a session's refresh markers outlive its dir. The sweep
+    /// removes the markers of a session dir that is gone, of one it retires
+    /// in the same pass, and any marker idle past the session limit; it keeps
+    /// a live session's recent markers, a marker still in flight, and every
+    /// name it does not own. A dry run lists the same entries and removes
+    /// nothing.
+    #[test]
+    fn test_sweep_sessions_hook_refresh_markers_of_gone_sessions_removed_live_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_root = tmp.path();
+        let sessions = repo_root.join("sessions");
+        let markers = repo_root.join(".hook-refresh");
+        fs::create_dir_all(sessions.join("live~0123abcd")).unwrap();
+        fs::create_dir_all(sessions.join("busy~44445555")).unwrap();
+        let idle = sessions.join("idle~89abcdef");
+        fs::create_dir_all(&idle).unwrap();
+        fs::write(
+            idle.join("session_meta.json"),
+            r#"{"version":1,"session_id":"idle","pid":null,"started_at":"2026-01-01T00:00:00Z","last_touched":"2026-01-01T00:00:00Z","base_sha":"0000000000000000000000000000000000000000","source_worktree":"/tmp","overlay_version":1}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(markers.join("gone~11112222.lock.d")).unwrap();
+        let file = |name: &str, age_secs: u64| {
+            let path = markers.join(name);
+            if !path.exists() {
+                fs::write(&path, b"").unwrap();
+            }
+            super::tests::backdate(&path, age_secs);
+            path
+        };
+        let doomed = [
+            file("gone~11112222.lock", 60),
+            file("gone~11112222.log", 60),
+            file("gone~11112222.started", 60),
+            file("gone~11112222.started.tmp", 60),
+            file("gone~11112222.failed", 60),
+            file("gone~11112222.lock.d", 60),
+            file("idle~89abcdef.complete", 60),
+            file("live~0123abcd.log", 25 * 3600),
+        ];
+        let kept = [
+            file("live~0123abcd.lock", 60),
+            file("live~0123abcd.started", 60),
+            file("live~0123abcd.complete", 60),
+            file("young~33334444.lock", 0),
+            // A live session's lock stays however idle: a launcher may hold
+            // it open.
+            file("busy~44445555.lock", 25 * 3600),
+            file("notes.txt", 25 * 3600),
+            file(".lock", 25 * 3600),
+        ];
+
+        let dry = sweep_sessions(repo_root, true).unwrap();
+        let mut listed: Vec<_> = dry
+            .would_remove
+            .iter()
+            .filter(|p| p.starts_with(&markers))
+            .cloned()
+            .collect();
+        listed.sort();
+        let mut expected = doomed.to_vec();
+        expected.sort();
+        assert_eq!(listed, expected);
+        assert!(doomed.iter().chain(&kept).all(|p| p.exists()));
+
+        let real = sweep_sessions(repo_root, false).unwrap();
+        assert_eq!(real.removed, doomed.len());
+        for path in &doomed {
+            assert!(!path.exists(), "{}", path.display());
+        }
+        for path in &kept {
+            assert!(path.exists(), "{}", path.display());
+        }
+    }
+
+    /// Stands for: a `.lock` a running job holds stays, however old its
+    /// mtime and whether or not its session is gone; unlinking it would let a
+    /// second refresh lock a new file beside it.
+    #[test]
+    fn test_sweep_sessions_held_refresh_lock_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let markers = tmp.path().join(".hook-refresh");
+        fs::create_dir_all(&markers).unwrap();
+        let lock = markers.join("gone~11112222.lock");
+        fs::write(&lock, b"").unwrap();
+        super::tests::backdate(&lock, 25 * 3600);
+        let held = fs::File::open(&lock).unwrap();
+        held.lock().unwrap();
+
+        let stats = sweep_sessions(tmp.path(), false).unwrap();
+        assert!(lock.exists(), "a held lock was unlinked");
+        assert_eq!(stats.removed, 0);
+
+        drop(held);
+        let stats = sweep_sessions(tmp.path(), false).unwrap();
+        assert!(!lock.exists(), "a released stale lock stays");
+        assert_eq!(stats.removed, 1);
+    }
+
+    /// Stands for: a launcher truncates the lock (`exec 9>`) before it locks
+    /// it. A lock whose mtime turns recent after the sweep read its metadata
+    /// stays, so no launcher between open and `flock` loses its inode.
+    /// Unix only: NTFS keeps the mtime when an empty file is truncated, and
+    /// Git for Windows ships no `flock`, so its launcher locks a directory.
+    #[cfg(unix)]
+    #[test]
+    fn test_locked_idle_lock_truncated_after_scan_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lock = tmp.path().join("gone~11112222.lock");
+        fs::write(&lock, b"").unwrap();
+        super::tests::backdate(&lock, 25 * 3600);
+        let seen = fs::metadata(&lock).unwrap();
+        assert!(super::locked_idle_lock(&lock, &seen).is_some(), "idle lock");
+
+        fs::File::create(&lock).unwrap();
+        assert!(
+            super::locked_idle_lock(&lock, &seen).is_none(),
+            "truncated lock"
+        );
+
+        // Held open so the new file cannot reuse the freed inode number.
+        let _old = fs::File::open(&lock).unwrap();
+        fs::remove_file(&lock).unwrap();
+        fs::write(&lock, b"").unwrap();
+        super::tests::backdate(&lock, 25 * 3600);
+        assert!(
+            super::locked_idle_lock(&lock, &seen).is_none(),
+            "another inode"
+        );
+    }
+
+    /// Stands for: a FIFO where a gone session's `.lock` was is removed
+    /// without being opened, so the sweep never waits for a writer.
+    #[cfg(unix)]
+    #[test]
+    fn test_sweep_sessions_fifo_named_like_lock_removed_without_blocking() {
+        let tmp = tempfile::tempdir().unwrap();
+        let markers = tmp.path().join(".hook-refresh");
+        fs::create_dir_all(&markers).unwrap();
+        let fifo = markers.join("gone~11112222.lock");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success(), "setup: mkfifo");
+        // Path-based: `set_file_mtime` opens the file, and a FIFO open blocks.
+        let when =
+            filetime::FileTime::from_system_time(SystemTime::now() - Duration::from_secs(60));
+        filetime::set_symlink_file_times(&fifo, when, when).unwrap();
+
+        let stats = sweep_sessions(tmp.path(), false).unwrap();
+        assert!(fifo.symlink_metadata().is_err(), "the FIFO stays");
+        assert_eq!(stats.removed, 1);
     }
 }

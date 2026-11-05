@@ -61,6 +61,12 @@ fn assert_single_json(stdout: &[u8], event_label: &str) -> Value {
         .unwrap_or_else(|e| panic!("{event_label}: stdout not single-JSON-parseable: {e}\n{s}"))
 }
 
+/// The session dir name the spawned `ecp` (which inherits this test's cwd)
+/// derives for `ECP_SESSION_ID=sid`: `<sid>~<worktree key>`.
+fn own_dir(sid: &str) -> String {
+    ecp_cli::session::resolver::session_dir_name(sid, &std::env::current_dir().unwrap())
+}
+
 fn seed_inbox(session_dir: &std::path::Path, sid: &str, body: &str) {
     std::fs::create_dir_all(session_dir).unwrap();
     write_meta(session_dir, sid);
@@ -74,7 +80,7 @@ fn seed_inbox(session_dir: &std::path::Path, sid: &str, body: &str) {
 fn pre_tool_use_emits_single_json_when_peer_drain_has_data() {
     let tmp = tempdir().unwrap();
     let sid = "single_emit_pre";
-    let session_dir = tmp.path().join("sessions").join(sid);
+    let session_dir = tmp.path().join("sessions").join(own_dir(sid));
     seed_inbox(&session_dir, sid, "pre-tool-peer-msg");
 
     // Envelope without a Grep pattern → only the peer drain path fires.
@@ -94,7 +100,7 @@ fn pre_tool_use_emits_single_json_when_peer_drain_has_data() {
 fn user_prompt_submit_emits_single_json_when_peer_drain_has_data() {
     let tmp = tempdir().unwrap();
     let sid = "single_emit_ups";
-    let session_dir = tmp.path().join("sessions").join(sid);
+    let session_dir = tmp.path().join("sessions").join(own_dir(sid));
     seed_inbox(&session_dir, sid, "ups-peer-msg");
 
     let out = fire("user-prompt-submit", "{}", sid, tmp.path());
@@ -116,7 +122,7 @@ fn user_prompt_submit_emits_single_json_when_peer_drain_has_data() {
 fn user_prompt_submit_coalesces_rebuild_marker_and_peer_drain() {
     let tmp = tempdir().unwrap();
     let sid = "single_emit_ups_dual";
-    let session_dir = tmp.path().join("sessions").join(sid);
+    let session_dir = tmp.path().join("sessions").join(own_dir(sid));
     seed_inbox(&session_dir, sid, "ups-dual-peer");
 
     // ecp_state_dir() requires an absolute cwd with `<cwd>/.ecp/` present.
@@ -142,7 +148,7 @@ fn user_prompt_submit_coalesces_rebuild_marker_and_peer_drain() {
 fn session_start_drains_peer_inbox() {
     let tmp = tempdir().unwrap();
     let sid = "single_emit_ss";
-    let session_dir = tmp.path().join("sessions").join(sid);
+    let session_dir = tmp.path().join("sessions").join(own_dir(sid));
     seed_inbox(&session_dir, sid, "ss-peer-msg");
 
     // cwd must be non-empty (else session_start returns immediately).
@@ -172,5 +178,50 @@ fn session_start_drains_peer_inbox() {
         !String::from_utf8_lossy(&out2).contains("ss-peer-msg"),
         "a second drain must not re-emit an already delivered message: {}",
         String::from_utf8_lossy(&out2)
+    );
+}
+
+/// Stands for: one session works in two worktrees, and a peer wrote to the
+/// dir of the worktree the hook's cwd does not name. The hook still delivers
+/// it, once. Only `<sid>~` plus exactly 8 hex chars counts as the session's
+/// dir: a 0.17.3 bare dir, a retired dir, another sid holding `~` and a short
+/// key are not drained.
+#[test]
+fn test_drain_and_render_peer_payload_other_worktree_dir_of_session_is_drained() {
+    let tmp = tempdir().unwrap();
+    let sid = "single_emit_wt";
+    let sessions = tmp.path().join("sessions");
+    let other = sessions.join(format!("{sid}~deadbeef"));
+    assert_ne!(own_dir(sid), format!("{sid}~deadbeef"));
+    seed_inbox(&other, sid, "other-worktree-msg");
+    let decoys = [
+        sid.to_string(),
+        format!("{sid}~worker~12345678"),
+        format!("{sid}~deadbeef.dead.1762300000"),
+        format!("{sid}~1234567"),
+        format!("{sid}~ABCDEF12"),
+    ];
+    for (i, name) in decoys.iter().enumerate() {
+        seed_inbox(&sessions.join(name), sid, &format!("decoy-{i}"));
+    }
+
+    let out = fire("pre-tool-use", "{}", sid, tmp.path());
+    let json = assert_single_json(&out, "PreToolUse(other worktree)");
+    let ctx = json["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(ctx.contains("other-worktree-msg"), "{ctx}");
+    assert!(!ctx.contains("decoy-"), "{ctx}");
+
+    let after = std::fs::read_to_string(other.join("inbox.jsonl")).unwrap_or_default();
+    assert!(!after.contains("other-worktree-msg"), "{after}");
+    for (i, name) in decoys.iter().enumerate() {
+        let kept = std::fs::read_to_string(sessions.join(name).join("inbox.jsonl")).unwrap();
+        assert!(kept.contains(&format!("decoy-{i}")), "{name}: {kept}");
+    }
+    let again = fire("pre-tool-use", "{}", sid, tmp.path());
+    assert!(
+        !String::from_utf8_lossy(&again).contains("other-worktree-msg"),
+        "delivered once"
     );
 }

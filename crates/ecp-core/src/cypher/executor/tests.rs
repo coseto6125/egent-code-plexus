@@ -989,6 +989,8 @@ fn test_execute_aggregate_streaming_matches_materialising_overlay_optional() {
                     flags: None,
                     decorators: Vec::new(),
                     params: Vec::new(),
+                    type_annotation: None,
+                    type_params: Vec::new(),
                 },
                 OverlaySymbol {
                     is_exported: false,
@@ -1007,6 +1009,8 @@ fn test_execute_aggregate_streaming_matches_materialising_overlay_optional() {
                     flags: None,
                     decorators: Vec::new(),
                     params: Vec::new(),
+                    type_annotation: None,
+                    type_params: Vec::new(),
                 },
             ],
             imports: vec![],
@@ -3122,6 +3126,166 @@ fn eval_exists_single_hop_all_unbound_scans_edges() {
     });
 }
 
+/// Names `RETURN a.name` yields over the a->b->c chain, sorted.
+fn chain_names(query: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    with_three(|g| {
+        let q = parse(query).unwrap();
+        let r = execute(&q, g, None, Path::new(".")).unwrap();
+        names = r
+            .rows
+            .iter()
+            .map(|row| match &row[0] {
+                Value::Str(s) => s.to_string(),
+                other => panic!("expected a name, got {other:?}"),
+            })
+            .collect();
+    });
+    names.sort();
+    names
+}
+
+// `n` is null on c's row: c calls nothing. A pattern through a null node
+// matches nothing, so EXISTS is false there, never "any Calls edge exists".
+#[test]
+fn test_eval_exists_single_hop_over_optional_null_var_is_false() {
+    assert_eq!(
+        chain_names(
+            "MATCH (a:Function) OPTIONAL MATCH (a)-[:Calls]->(n) WITH a, n \
+             WHERE EXISTS { (n)-[:Calls]->() } RETURN a.name"
+        ),
+        ["a"]
+    );
+}
+
+#[test]
+fn test_eval_exists_multi_hop_over_optional_null_var_is_false_not_error() {
+    assert_eq!(
+        chain_names(
+            "MATCH (a:Function) OPTIONAL MATCH (a)-[:Calls]->(n) WITH a, n \
+             WHERE EXISTS { (n)-[:Calls]->()-[:Calls]->() } RETURN a.name"
+        ),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        chain_names(
+            "MATCH (a:Function) OPTIONAL MATCH (a)-[:Calls]->(n) WITH a, n \
+             WHERE EXISTS { (n)-[:Calls*1..2]->() } RETURN a.name"
+        ),
+        ["a"]
+    );
+}
+
+#[test]
+fn test_eval_not_exists_over_optional_null_var_is_true() {
+    assert_eq!(
+        chain_names(
+            "MATCH (a:Function) OPTIONAL MATCH (a)-[:Calls]->(n) WITH a, n \
+             WHERE NOT EXISTS { (n)-[:Calls]->() } RETURN a.name"
+        ),
+        ["b", "c"]
+    );
+}
+
+// An aggregating WITH keeps `a` only as a column. The pattern reads it from
+// there; before, every group read as a null and EXISTS was false on all rows.
+#[test]
+fn test_eval_exists_after_aggregating_with_reads_the_grouped_node() {
+    assert_eq!(
+        chain_names(
+            "MATCH (a:Function) WITH a, count(*) AS k \
+             WHERE EXISTS { (a)-[:Calls]->() } RETURN a.name"
+        ),
+        ["a", "b"]
+    );
+    assert_eq!(
+        chain_names(
+            "MATCH (a:Function) WITH a, count(*) AS k \
+             WHERE NOT EXISTS { (a)<-[:Calls]-() } RETURN a.name"
+        ),
+        ["a"]
+    );
+    assert_eq!(
+        chain_names(
+            "MATCH (a:Function) WITH a, count(*) AS k \
+             WHERE NOT EXISTS { (a)-[:Calls*1..2]->() } RETURN a.name"
+        ),
+        ["c"]
+    );
+}
+
+// Inside an aggregating WITH's groups a MATCH var the WITH drops is out of
+// scope, so the pattern's `a` is a fresh var: "does any Calls edge exist".
+#[test]
+fn test_eval_exists_after_aggregating_with_unprojected_match_var_is_fresh() {
+    with_three(|g| {
+        let q = parse(
+            "MATCH (a:Function) WITH count(*) AS k \
+             WHERE EXISTS { (a)-[:Calls]->() } RETURN k",
+        )
+        .unwrap();
+        let r = execute(&q, g, None, Path::new(".")).unwrap();
+        assert_eq!(r.rows, vec![vec![Value::Int(3)]]);
+    });
+}
+
+// A fresh var named at both ends of one hop is one node: the pattern asks
+// for a self-call, and a -> b -> c has none.
+#[test]
+fn test_eval_exists_fresh_var_at_both_ends_requires_self_edge() {
+    with_three(|g| {
+        for q in [
+            "MATCH (a:Function) WITH count(*) AS k \
+             WHERE EXISTS { (a)-[:Calls]->(a) } RETURN k",
+            "MATCH (x:Function) WHERE EXISTS { (a)-[:Calls]-(a) } RETURN x.name",
+        ] {
+            let r = execute(&parse(q).unwrap(), g, None, Path::new(".")).unwrap();
+            assert!(r.rows.is_empty(), "{q}: {:?}", r.rows);
+        }
+    });
+}
+
+// `n AS m` carries the OPTIONAL MATCH null into a column: c's row holds a
+// null `m`, b's row holds c, which calls nothing.
+#[test]
+fn test_eval_exists_over_with_alias_of_optional_null_var_is_false() {
+    assert_eq!(
+        chain_names(
+            "MATCH (a:Function) OPTIONAL MATCH (a)-[:Calls]->(n) WITH a, n AS m \
+             WHERE EXISTS { (m)-[:Calls]->() } RETURN a.name"
+        ),
+        ["a"]
+    );
+    assert_eq!(
+        chain_names(
+            "MATCH (a:Function) OPTIONAL MATCH (a)-[:Calls]->(n) WITH a, n AS m \
+             WHERE NOT EXISTS { (m)-[:Calls]->() } RETURN a.name"
+        ),
+        ["b", "c"]
+    );
+}
+
+#[test]
+fn test_eval_exists_inside_in_over_optional_null_var_is_false() {
+    assert_eq!(
+        chain_names(
+            "MATCH (a:Function) OPTIONAL MATCH (a)-[:Calls]->(n) WITH a, n \
+             WHERE (EXISTS { (n)-[:Calls]->() }) IN [true] RETURN a.name"
+        ),
+        ["a"]
+    );
+}
+
+// The variable-length refusal reaches an EXISTS wrapped in another expression.
+#[test]
+fn test_parse_exists_inside_in_with_min_above_one_is_refused() {
+    let err = parse(
+        "MATCH (a:Function) WHERE (EXISTS { (a)-[:Calls*2..3]->() }) IN [true] RETURN a.name",
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("minimum above 1"), "{err}");
+}
+
 #[test]
 fn eval_exists_multi_hop_all_unbound_errors_not_silent_false() {
     with_three(|g| {
@@ -3248,6 +3412,7 @@ fn eval_exists_pattern_callee_no_outgoing_negated_true() {
         let expr = Expr::ExistsPattern {
             pattern,
             negated: true,
+            outer_vars: Vec::new(),
         };
         let mut cache = ContentCache::new(PathBuf::from("."));
         let result = eval_expr(&expr, &binding, MergedGraph::new(g, None), &mut cache).unwrap();
@@ -3290,6 +3455,7 @@ fn eval_exists_pattern_caller_has_outgoing() {
         let expr = Expr::ExistsPattern {
             pattern,
             negated: false,
+            outer_vars: Vec::new(),
         };
         let mut cache = ContentCache::new(PathBuf::from("."));
         let result = eval_expr(&expr, &binding, MergedGraph::new(g, None), &mut cache).unwrap();
@@ -3337,6 +3503,7 @@ fn eval_exists_pattern_second_node_anchor_inverts_dir() {
         let expr = Expr::ExistsPattern {
             pattern,
             negated: false,
+            outer_vars: Vec::new(),
         };
         let mut cache = ContentCache::new(PathBuf::from("."));
         let result = eval_expr(&expr, &binding, MergedGraph::new(g, None), &mut cache).unwrap();
@@ -3381,6 +3548,7 @@ fn eval_exists_pattern_second_node_anchor_no_incoming_is_false() {
         let expr = Expr::ExistsPattern {
             pattern,
             negated: true,
+            outer_vars: Vec::new(),
         };
         let mut cache = ContentCache::new(PathBuf::from("."));
         let result = eval_expr(&expr, &binding, MergedGraph::new(g, None), &mut cache).unwrap();
@@ -3684,6 +3852,8 @@ fn test_far_end_name_seeds_with_overlay_keeps_full_scan() {
             flags: None,
             decorators: Vec::new(),
             params: Vec::new(),
+            type_annotation: None,
+            type_params: Vec::new(),
         }],
         imports: vec![],
     };
@@ -3733,6 +3903,8 @@ fn test_execute_overlay_closure_reference_reports_lexical_reason() {
         flags: None,
         decorators: Vec::new(),
         params: Vec::new(),
+        type_annotation: None,
+        type_params: Vec::new(),
     };
     let dirty = OverlayFileInput {
         parsed_language: None,
@@ -3912,6 +4084,8 @@ fn test_for_each_first_node_seed_with_overlay_matches_scan_and_hides_suppressed(
             flags: None,
             decorators: Vec::new(),
             params: Vec::new(),
+            type_annotation: None,
+            type_params: Vec::new(),
         }],
         imports: vec![],
     };
@@ -3997,6 +4171,8 @@ fn test_execute_virtual_function_meta_reads_fragment_flags() {
         flags,
         decorators: Vec::new(),
         params: Vec::new(),
+        type_annotation: None,
+        type_params: Vec::new(),
     };
     let view = OverlayView::build(
         graph,

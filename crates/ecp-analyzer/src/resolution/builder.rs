@@ -3567,6 +3567,7 @@ fn resolve_name_ref(
 ) -> Option<(u32, f32)> {
     ladder::name_ref(
         symbol_table,
+        &resolver.module_facts(),
         file,
         language,
         &local_graph.imports,
@@ -3614,6 +3615,7 @@ fn pass2_emit_node_edges(
     edges: &mut Vec<Edge>,
     indirect_lookup: &FxHashMap<CallMetaKey, (u8, String)>,
     lexical_lookup: &LexicalFunctions,
+    meta_lookup: &FxHashMap<Span, usize>,
     pending_call_metas: &mut Vec<(usize, u8, String)>,
     blind_spots: &mut Vec<BlindSpot>,
 ) {
@@ -3839,37 +3841,34 @@ fn pass2_emit_node_edges(
         }
     }
 
-    if let Some(type_ann) = &raw_node.type_annotation {
-        // `Self` / `self` / `static` / `this` is no type name: it stands for
-        // the owner, so a declaring-type annotation with no owner binds nothing.
-        let type_name = match type_ladder::return_type_key(type_ann) {
-            Some(key) if type_ladder::names_declaring_type_in(language, key) => {
-                raw_node.owner_class.as_deref().and_then(owner_key)
-            }
-            // The reduced key, as `note_return_type` types the member in
-            // every language: a C# or Dart `Tok?` and a Python forward
-            // reference `"Tok"` are `Tok`. The overlay rebuilds a C# member
-            // type from this edge alone (`base_property_type`).
-            Some(key) => Some(key),
-            None => Some(type_ann.as_str()),
-        };
-        let targets = type_name.map_or_else(Vec::new, |type_name| {
-            resolver.resolve_symbol(
-                &local_graph.file_path,
-                type_name,
-                &local_graph.imports,
-                ResolveTarget::Type,
-            )
+    // `type_annotation_targets` reads the meta of a callable kind only.
+    let meta = meta_lookup
+        .get(&raw_node.span)
+        .map(|&i| &local_graph.raw_function_metas[i]);
+    let decl = type_ladder::AnnotatedDecl {
+        language,
+        kind: raw_node.kind,
+        type_annotation: raw_node.type_annotation.as_deref(),
+        owner_class: raw_node.owner_class.as_deref(),
+        return_type: meta.map(|m| m.return_type.as_str()),
+        params: meta.map_or(&[][..], |m| m.params.as_slice()),
+        type_params: meta.map_or(&[][..], |m| m.type_params.as_slice()),
+    };
+    for (target_id, confidence) in type_ladder::type_annotation_targets(decl, |name| {
+        resolver.resolve_symbol(
+            &local_graph.file_path,
+            name,
+            &local_graph.imports,
+            ResolveTarget::Type,
+        )
+    }) {
+        edges.push(Edge {
+            source: current_node_idx,
+            target: target_id,
+            rel_type: RelType::Accesses,
+            confidence,
+            reason: reason_type,
         });
-        for (target_id, confidence) in targets {
-            edges.push(Edge {
-                source: current_node_idx,
-                target: target_id,
-                rel_type: RelType::Accesses,
-                confidence,
-                reason: reason_type,
-            });
-        }
     }
 
     // ReadsField: each field-read site resolves to a Property target. The
@@ -4228,7 +4227,7 @@ fn pass2_resolve_edges(
 ) -> Pass2Output {
     let reason_heritage = string_pool.add(heritage::EXTENDS_REASON);
     let reason_implements = string_pool.add(heritage::IMPLEMENTS_REASON);
-    let reason_type = string_pool.add("type_annotation");
+    let reason_type = string_pool.add(type_ladder::TYPE_ANNOTATION_REASON);
     let reason_call = CallReasons {
         call: string_pool.add("call"),
         nearest_copy: string_pool.add(NEAREST_COPY_REASON),
@@ -4305,6 +4304,19 @@ fn pass2_resolve_edges(
         })
         .collect();
 
+    // Span → index into `raw_function_metas`, so a function node reads its
+    // parameter types without scanning the file's metas.
+    let meta_lookups: Vec<FxHashMap<Span, usize>> = local_graphs
+        .iter()
+        .map(|lg| {
+            lg.raw_function_metas
+                .iter()
+                .enumerate()
+                .map(|(i, m)| (m.span, i))
+                .collect()
+        })
+        .collect();
+
     // `pending_call_metas`: pairs of (pre-sort edge index, RawCallMeta ref).
     // Collected alongside edges and promoted to ZeroCopyGraph.call_metas after
     // the final edge sort remaps pre-sort indices to sorted positions.
@@ -4348,6 +4360,7 @@ fn pass2_resolve_edges(
                     &mut edges,
                     lookup,
                     &lexical_lookup,
+                    &meta_lookups[graph_idx],
                     &mut pending_call_metas_global,
                     &mut call_blind_spots,
                 );
@@ -4433,6 +4446,7 @@ fn pass2_resolve_edges(
                         &mut local_edges,
                         lookup,
                         &lexical_lookup,
+                        &meta_lookups[graph_idx],
                         &mut local_pending,
                         &mut local_blind_spots,
                     );

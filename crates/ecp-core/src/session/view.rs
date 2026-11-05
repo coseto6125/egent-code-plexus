@@ -56,6 +56,11 @@
 //!   ([`crate::analyzer::heritage::heritage_rel`]): each spelling looked up
 //!   as the supertypes pre-pass looks it up, after the dirty supertypes
 //!   exist, at the resolver's confidence.
+//! - **type annotations** — `Accesses` (reason [`TYPE_ANNOTATION_REASON`])
+//!   from each dirty declaration to the types its annotation, its return
+//!   type and its parameter types name, by the index's Pass 2 rule
+//!   ([`type_annotation_targets`]), each name looked up as the heritage
+//!   lookup is, at the resolver's confidence.
 //! - **per-file outputs** — the outputs a build makes from one file's parse
 //!   alone, replayed by `session::incremental` with the index's own
 //!   derivations: a `File` node for a path `graph.files` lacks (a new file,
@@ -101,7 +106,7 @@
 //! A base edge whose **source** lies in a dirty file is masked ONLY when the
 //! overlay re-resolves that rel type from fragment data (`Calls`,
 //! `ReadsField`, `Defines`, `HasMethod`, `Imports`, `Decorates`,
-//! `Overrides`, `Extends`, `Implements`, plus the `References` reasons
+//! `Overrides`, `Extends`, `Implements`, `Accesses`, plus the `References` reasons
 //! above, plus `HasProperty`, `UsesPathLiteral`, `QueriesTable`,
 //! `OpensTxScope`, `Publishes` and `Subscribes` when the records replayed) —
 //! for those the overlay adjacency is the file's truth. `Defines` and the
@@ -184,8 +189,12 @@
 //!   fragment carries; the parameters and decorators of a dirty function are
 //!   not in it (the `Overrides` and `Decorates` replays read them from the
 //!   fragment).
-//! - A dirty symbol's type-annotation `Accesses` edges stay as indexed: the
-//!   fragment keeps no type annotation (FU-2026-10-26-0ee756874fb8).
+//! - A clean file outside the closure keeps its type-annotation `Accesses`
+//!   edges. [`super::closure::REBUILT_RELS`] holds `Accesses`, so a clean
+//!   file whose annotation reaches a type the edit changed or removed is in
+//!   the closure and re-resolves; past the closure bound the kind is named
+//!   stale. A clean annotation of a type a dirty file adds, outside the
+//!   closure, stays unbound.
 //! - A removed path still counts as a file for the passes over
 //!   `graph.files` (import-candidate probes, module and crate-root
 //!   discovery), and its archived import rows still serve a re-export hop.
@@ -250,6 +259,9 @@ use crate::analyzer::overrides::OVERRIDES_REASONS;
 use crate::analyzer::record_nodes::{
     EVENT_TOPIC_PUBLISHES_REASON, EVENT_TOPIC_SUBSCRIBES_REASON, PATH_LITERAL_SINK_REASONS,
     SCHEMA_FIELD_HAS_PROPERTY_REASON, TX_SCOPE_REASON,
+};
+use crate::analyzer::type_ladder::{
+    type_annotation_targets, AnnotatedDecl, TYPE_ANNOTATION_REASON,
 };
 use crate::analyzer::types::{
     innermost_enclosing, owner_key, LocalGraph, RawEventTopic, RawExportAlias, RawImport,
@@ -320,6 +332,18 @@ pub struct OverlaySymbol {
     /// when the parse paired no meta with the node ([`Self::flags`] is then
     /// `None`) or the declaration takes no parameter.
     pub params: Vec<String>,
+    /// `RawNode.type_annotation` as the parser wrote it: a field's or
+    /// property's declared type, a callable's return type as its language's
+    /// query captured it (which can differ from [`Self::return_type`]).
+    /// `None` when the node has none. The view rebuilds the node's
+    /// `type_annotation` `Accesses` edges from it ([`type_annotation_targets`]).
+    pub type_annotation: Option<String>,
+    /// `RawFunctionMeta.type_params` of a callable: its own generic
+    /// parameter names plus the enclosing impl / class ones. The view skips
+    /// them before it resolves [`Self::type_annotation`] and
+    /// [`Self::params`] types, so `fn f<T>(v: T)` binds no project `T`.
+    /// Empty for a non-callable or a declaration with no generic list.
+    pub type_params: Vec<String>,
 }
 
 impl crate::analyzer::overrides::OverrideNode for OverlaySymbol {
@@ -398,17 +422,16 @@ impl From<LocalGraph> for OverlayFileInput {
                 .nodes
                 .into_iter()
                 .map(|n| {
-                    let is_callable = matches!(
-                        n.kind,
-                        NodeKind::Function | NodeKind::Method | NodeKind::Constructor
-                    );
-                    let meta = is_callable.then(|| metas.get(&n.span)).flatten();
+                    let meta = n.kind.is_callable().then(|| metas.get(&n.span)).flatten();
                     OverlaySymbol {
                         return_type: meta
                             .map(|meta| meta.return_type.clone())
                             .filter(|return_type| !return_type.is_empty()),
                         flags: meta.map(|meta| meta.flags),
                         params: meta.map(|meta| meta.params.clone()).unwrap_or_default(),
+                        type_params: meta
+                            .map(|meta| meta.type_params.clone())
+                            .unwrap_or_default(),
                         generic_arity: n.generic_arity(),
                         name: n.name,
                         kind: n.kind,
@@ -422,6 +445,7 @@ impl From<LocalGraph> for OverlayFileInput {
                         heritage: n.heritage,
                         variant_refs: n.field_reads,
                         decorators: n.decorators,
+                        type_annotation: n.type_annotation,
                     }
                 })
                 .collect(),
@@ -1260,19 +1284,23 @@ impl OverlayView {
     /// replayed, as a schema field's `HasProperty` shares the kind (module
     /// doc). `Imports` is rebuilt per file from its `File` node, so masked
     /// there. `Decorates` is rebuilt per decorated declaration,
-    /// `Overrides` per dirty callable, and `Extends` / `Implements` per
-    /// dirty declaration that lists a base.
+    /// `Overrides` per dirty callable, `Extends` / `Implements` per
+    /// dirty declaration that lists a base, and `Accesses` per dirty
+    /// declaration from its annotations ([`type_annotation_targets`]).
     pub fn masks_base_edge(&self, base_idx: u32, rel: RelType) -> bool {
         let per_file =
             || self.dirty_base.contains(&base_idx) || self.defines_files.contains(&base_idx);
         match rel {
+            // `Accesses` by kind: the index's only `Accesses` edges are the
+            // `type_annotation` ones, so the kind names exactly those.
             RelType::Calls
             | RelType::ReadsField
             | RelType::HasMethod
             | RelType::Decorates
             | RelType::Overrides
             | RelType::Extends
-            | RelType::Implements => self.dirty_base.contains(&base_idx),
+            | RelType::Implements
+            | RelType::Accesses => self.dirty_base.contains(&base_idx),
             RelType::HasProperty if self.records_replayed => self.dirty_base.contains(&base_idx),
             RelType::Defines | RelType::Imports => per_file(),
             rel if self.records_replayed && replays_record_edge(rel) => per_file(),
@@ -1404,7 +1432,10 @@ impl OverlayView {
 /// changes what it stores: a dirty call takes the index's name-tier order
 /// ([`name_tiers`](crate::analyzer::name_tiers::name_tiers)), so a call the
 /// last-segment match left to the nearest copy now binds its import.
-pub const VIEW_CACHE_FORMAT: u32 = 15;
+/// 16 (FU-2026-10-26-0ee756874fb8): the view stores a dirty file's
+/// `type_annotation` `Accesses` edges with one more reason, and masks the
+/// base ones; a 15 view has neither.
+pub const VIEW_CACHE_FORMAT: u32 = 16;
 
 /// The base edge kinds the record replay rebuilds, so masks at a re-parsed
 /// file's nodes. `HasProperty` has its own arm in
@@ -1423,7 +1454,7 @@ fn replays_record_edge(rel: RelType) -> bool {
 /// Every reason [`OverlayView::build`] puts on a [`ViewEdge`]. A cached view
 /// stores each reason as its index here; a view with an unlisted reason is
 /// never stored, so it costs a build per query as before the cache.
-const VIEW_EDGE_REASONS: [&str; 44] = [
+const VIEW_EDGE_REASONS: [&str; 45] = [
     OVERLOAD_SET_REASON,
     CLOSURE_REFERENCE_REASON,
     NEAREST_COPY_REASON,
@@ -1468,6 +1499,7 @@ const VIEW_EDGE_REASONS: [&str; 44] = [
     OVERRIDES_REASONS[2],
     HERITAGE_REASONS[0],
     HERITAGE_REASONS[1],
+    TYPE_ANNOTATION_REASON,
 ];
 
 pub(super) fn reason_index(reason: &str) -> Option<u8> {
@@ -2263,6 +2295,8 @@ mod tests {
             flags: None,
             decorators: Vec::new(),
             params: Vec::new(),
+            type_annotation: None,
+            type_params: Vec::new(),
         }
     }
 
@@ -2741,6 +2775,20 @@ mod tests {
         assert_eq!(view.redirect(2), Some(2));
     }
 
+    /// Stands for: the overlay rebuilds a dirty declaration's
+    /// `type_annotation` edges, so the base ones sourced in a dirty file
+    /// go, and a clean file keeps its own.
+    #[test]
+    fn test_masks_base_edge_accesses_dirty_source_masked_clean_kept() {
+        let bytes = base_graph_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let view = OverlayView::build(graph, &[dirty_input()]).unwrap();
+
+        assert!(view.masks_base_edge(0, RelType::Accesses));
+        assert!(view.masks_base_edge(1, RelType::Accesses));
+        assert!(!view.masks_base_edge(2, RelType::Accesses));
+    }
+
     /// Stands for: a removed file leaves nothing of itself in the view, the
     /// nodes the graph builder made included, and no base edge into or out
     /// of it survives the merge. A clean file keeps its own nodes. The view
@@ -3200,6 +3248,8 @@ mod tests {
             flags: None,
             decorators: Vec::new(),
             params: Vec::new(),
+            type_annotation: None,
+            type_params: Vec::new(),
         };
         let multi = OverlayFileInput {
             parsed_language: None,
@@ -3303,6 +3353,8 @@ mod tests {
             flags: None,
             decorators: Vec::new(),
             params: Vec::new(),
+            type_annotation: None,
+            type_params: Vec::new(),
         };
         let outer = OverlayFileInput {
             parsed_language: None,

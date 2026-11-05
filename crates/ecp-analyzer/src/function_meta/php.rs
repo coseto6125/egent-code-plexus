@@ -203,6 +203,8 @@ fn extract_one(
         params,
         return_type,
         decorators,
+        // No generic syntax in this language.
+        type_params: Vec::new(),
     })
 }
 

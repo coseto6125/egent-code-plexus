@@ -1,0 +1,28 @@
+{
+  "format": 1,
+  "size_cap_bytes": 1048576,
+  "builder_fingerprint": "v0.17.3+schema52",
+  "entries": {
+    "lib.py": {
+      "change": "modified",
+      "class": {
+        "source": true,
+        "resolution_config": false
+      },
+      "mtime_ns": 1793868054191716576,
+      "fragment_id": "b0bae27b669e9dbe",
+      "content_hash": "06ffb05931c56b1f",
+      "parse_failed": false,
+      "dirty_symbols": [
+        {
+          "name": "helper_b",
+          "kind": "function",
+          "file": "lib.py",
+          "line_start": 5,
+          "line_end": 6
+        }
+      ],
+      "format": 7
+    }
+  }
+}

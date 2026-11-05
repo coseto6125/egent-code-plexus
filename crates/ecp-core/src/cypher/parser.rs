@@ -211,7 +211,7 @@ fn parse_single_query(c: &mut Cursor) -> Result<Query, CypherError> {
         (None, false)
     };
 
-    let query = Query {
+    let mut query = Query {
         matches,
         where_,
         with,
@@ -222,8 +222,45 @@ fn parse_single_query(c: &mut Cursor) -> Result<Query, CypherError> {
         union,
         union_all,
     };
+    scope_exists_patterns(&mut query);
     validate_variable_length(&query)?;
     Ok(query)
+}
+
+/// Record on each EXISTS which of its node vars an outer MATCH declares. Every
+/// MATCH runs before WHERE and WITH, so the set is the same for both; the
+/// executor reads a WITH column of the same name first, and inside an
+/// aggregating WITH's groups only the columns are in scope.
+fn scope_exists_patterns(q: &mut Query) {
+    fn walk(e: &mut Expr, declared: &[&str]) {
+        if let Expr::ExistsPattern {
+            pattern,
+            outer_vars,
+            ..
+        } = e
+        {
+            *outer_vars = pattern
+                .nodes
+                .iter()
+                .filter_map(|n| n.var.as_deref())
+                .filter(|v| declared.contains(v))
+                .map(str::to_string)
+                .collect();
+        }
+        e.for_each_child_mut(|child| walk(child, declared));
+    }
+    let declared: Vec<String> = q
+        .matches
+        .iter()
+        .flat_map(|mc| &mc.patterns)
+        .flat_map(|p| &p.nodes)
+        .filter_map(|n| n.var.clone())
+        .collect();
+    let declared: Vec<&str> = declared.iter().map(String::as_str).collect();
+    let with_where = q.with.as_mut().and_then(|w| w.where_.as_mut());
+    for e in q.where_.iter_mut().chain(with_where) {
+        walk(e, &declared);
+    }
 }
 
 fn is_variable_length(rel: &RelPat) -> bool {
@@ -240,15 +277,10 @@ fn range_text(rel: &RelPat) -> String {
 }
 
 fn exists_patterns<'a>(e: &'a Expr, out: &mut Vec<&'a Pattern>) {
-    match e {
-        Expr::ExistsPattern { pattern, .. } => out.push(pattern),
-        Expr::BinOp(_, l, r) => {
-            exists_patterns(l, out);
-            exists_patterns(r, out);
-        }
-        Expr::UnaryOp(_, inner) => exists_patterns(inner, out),
-        _ => {}
+    if let Expr::ExistsPattern { pattern, .. } = e {
+        out.push(pattern);
     }
+    e.for_each_child(|child| exists_patterns(child, out));
 }
 
 /// The executor answers a variable-length hop with reachability: every node
@@ -718,10 +750,16 @@ fn parse_not(c: &mut Cursor) -> Result<Expr, CypherError> {
         // executor short-circuits without an extra UnaryOp wrapper.
         if c.check(&Token::Exists) {
             let inner = parse_comparison(c)?;
-            if let Expr::ExistsPattern { pattern, .. } = inner {
+            if let Expr::ExistsPattern {
+                pattern,
+                outer_vars,
+                ..
+            } = inner
+            {
                 return Ok(Expr::ExistsPattern {
                     pattern,
                     negated: true,
+                    outer_vars,
                 });
             }
             return Ok(Expr::UnaryOp(UnaryOp::Not, Box::new(inner)));
@@ -872,6 +910,7 @@ fn parse_atom(c: &mut Cursor) -> Result<Expr, CypherError> {
         return Ok(Expr::ExistsPattern {
             pattern,
             negated: false,
+            outer_vars: Vec::new(),
         });
     }
     if c.eat(&Token::LParen) {
@@ -1547,7 +1586,9 @@ mod tests {
     #[test]
     fn expr_exists_pattern_parens() {
         match ex("EXISTS((n)-[:Calls]->(f))") {
-            Expr::ExistsPattern { pattern, negated } => {
+            Expr::ExistsPattern {
+                pattern, negated, ..
+            } => {
                 assert!(!negated, "plain EXISTS must have negated=false");
                 assert_eq!(pattern.nodes.len(), 2);
                 assert_eq!(pattern.rels.len(), 1);
@@ -1561,7 +1602,9 @@ mod tests {
     #[test]
     fn expr_exists_pattern_braces() {
         match ex("EXISTS{(n)-[:Calls]->(f)}") {
-            Expr::ExistsPattern { pattern, negated } => {
+            Expr::ExistsPattern {
+                pattern, negated, ..
+            } => {
                 assert!(!negated, "plain EXISTS{{}} must have negated=false");
                 assert_eq!(pattern.nodes.len(), 2);
                 assert_eq!(pattern.rels.len(), 1);
@@ -1609,7 +1652,9 @@ mod tests {
         let mut c = Cursor::new(&toks);
         let e = parse_where(&mut c).unwrap();
         match e {
-            Expr::ExistsPattern { negated, pattern } => {
+            Expr::ExistsPattern {
+                negated, pattern, ..
+            } => {
                 assert!(negated);
                 assert_eq!(pattern.rels.len(), 1);
             }

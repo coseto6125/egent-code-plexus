@@ -12,7 +12,9 @@
 //! - `return_type`:  `: ReturnType` after `)`, absent → empty
 //! - `decorators`:   annotation names with `@` stripped, args `(...)` dropped
 
-use super::{extract_with, find_child_kind, node_text, ts_span};
+use super::{
+    declared_type_params, extract_with, find_child_kind, node_text, scoped_type_params, ts_span,
+};
 use ecp_core::analyzer::types::{RawFunctionMeta, RawNode};
 use ecp_core::graph::{FileCategory, FunctionMeta};
 use tree_sitter::Node;
@@ -168,7 +170,7 @@ fn extract_one(
                     if past_params
                         && matches!(
                             child.kind(),
-                            "type_reference" | "nullable_type" | "user_type"
+                            "type_reference" | "nullable_type" | "user_type" | "function_type"
                         )
                     {
                         ret = Some(node_text(&child, source).to_string());
@@ -187,12 +189,16 @@ fn extract_one(
         })
         .unwrap_or_default();
 
+    let type_params =
+        scoped_type_params(fn_node, source, &["type_parameters"], declared_type_params);
+
     Some(RawFunctionMeta {
         span: ts_span(fn_node),
         flags,
         params,
         return_type,
         decorators,
+        type_params,
     })
 }
 
@@ -311,6 +317,7 @@ fn extract_kotlin_param(param: &Node<'_>, source: &[u8]) -> (String, String) {
     let ty = find_child_kind(param, "type_reference")
         .or_else(|| find_child_kind(param, "nullable_type"))
         .or_else(|| find_child_kind(param, "user_type"))
+        .or_else(|| find_child_kind(param, "function_type"))
         .or_else(|| param.child_by_field_name("type"))
         .map(|n| node_text(&n, source).to_string())
         .unwrap_or_default();

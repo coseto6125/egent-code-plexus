@@ -1,6 +1,6 @@
 //! `ecp peers` CLI surface.
 
-use crate::session::resolver::resolve_session_id;
+use crate::session::resolver::own_session_dir_name;
 use clap::{Args, Subcommand};
 use ecp_core::peer::registry::alive_peers;
 use ecp_core::EcpError;
@@ -22,7 +22,8 @@ pub struct PeersArgs {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum PeersCmd {
-    /// List alive peer sessions
+    /// List alive peer sessions. `session=` is the id other peers, `diff`,
+    /// `say --to` and `log --peer` accept: `<sid>~<h8>`, one per (session, worktree)
     Status {
         #[arg(long, value_enum, default_value_t = StatusFormat::Text)]
         format: StatusFormat,
@@ -33,6 +34,8 @@ pub enum PeersCmd {
     },
     /// Show a peer's symbol-level dirty surface (optionally filtered by symbol)
     Diff {
+        /// Peer id as `peers status` prints it (`<sid>~<h8>`), a bare `<sid>` that
+        /// runs in one worktree, or a unique agent name
         peer: String,
         symbol: Option<String>,
     },
@@ -40,6 +43,7 @@ pub enum PeersCmd {
     Log {
         #[arg(long)]
         since: Option<String>,
+        /// Peer id (`<sid>~<h8>`) or a bare `<sid>` to match all its worktrees
         #[arg(long)]
         peer: Option<String>,
         #[arg(long)]
@@ -50,6 +54,8 @@ pub enum PeersCmd {
     /// Ƀ Send a message (broadcast or targeted, fire-and-forget)
     Say {
         body: String,
+        /// Peer id as `peers status` prints it (`<sid>~<h8>`), a bare `<sid>` that
+        /// runs in one worktree (several: error listing them), or a unique agent name
         #[arg(long)]
         to: Option<String>,
         #[arg(long)]
@@ -170,7 +176,7 @@ fn watcher_state(p: &ecp_core::peer::registry::PeerSession) -> &'static str {
 }
 
 fn cmd_status(repo_root: &std::path::Path, format: StatusFormat) -> std::io::Result<()> {
-    let me = resolve_session_id(None);
+    let me = own_session_dir_name()?;
     let peers = alive_peers(repo_root, &me);
     match format {
         StatusFormat::Text => {
@@ -308,7 +314,7 @@ fn cmd_status_pairs(repo_root: &std::path::Path, format: StatusFormat) -> std::i
 }
 
 fn cmd_name(repo_root: &std::path::Path, name: &str) -> std::io::Result<()> {
-    let me = resolve_session_id(None);
+    let me = own_session_dir_name()?;
     ecp_core::registry::validate_cache_component(&me)?;
     let meta_path = repo_root
         .join("sessions")
@@ -328,7 +334,7 @@ fn cmd_name(repo_root: &std::path::Path, name: &str) -> std::io::Result<()> {
 
 fn cmd_diff(repo_root: &std::path::Path, peer: &str, symbol: Option<&str>) -> std::io::Result<()> {
     use ecp_core::session::{layout, DirtyEvents};
-    let me = resolve_session_id(None);
+    let me = own_session_dir_name()?;
     let peer = super::peers_msg::resolve_target_session(repo_root, &me, peer)?;
     let path = layout::dirty_events_path(&repo_root.join("sessions").join(&peer));
     let peer_dirty = DirtyEvents::read(&path)?;
@@ -360,7 +366,7 @@ fn cmd_log(
     direction: Option<&str>,
     limit: usize,
 ) -> std::io::Result<()> {
-    let me = resolve_session_id(None);
+    let me = own_session_dir_name()?;
     ecp_core::registry::validate_cache_component(&me)?;
     let msg_log = repo_root.join("sessions").join(&me).join("msg.log");
     let Ok(content) = std::fs::read_to_string(&msg_log) else {
@@ -376,7 +382,7 @@ fn cmd_log(
             if let Some(p) = peer {
                 let from = v.get("from").and_then(|x| x.as_str()).unwrap_or("");
                 let to = v.get("to").and_then(|x| x.as_str()).unwrap_or("");
-                if from != p && to != p {
+                if !super::peers_msg::id_matches(from, p) && !super::peers_msg::id_matches(to, p) {
                     continue;
                 }
             }
@@ -398,7 +404,7 @@ fn cmd_log(
 
 fn cmd_gc(repo_root: &std::path::Path) -> std::io::Result<()> {
     use ecp_core::peer::retention::*;
-    let me = resolve_session_id(None);
+    let me = own_session_dir_name()?;
     ecp_core::registry::validate_cache_component(&me)?;
     let session_dir = repo_root.join("sessions").join(&me);
     let _ = rotate_if_needed(

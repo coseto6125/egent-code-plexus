@@ -4,7 +4,7 @@ use super::receiver_types::{
 };
 use super::schema_extractors::TS_INTERFACE_CONFIG;
 use super::spec::{TsSpec, TsxSpec, TypeScriptSpec};
-use crate::calls::{NameRefKind, NameRefSpec, VariantRefSpec};
+use crate::calls::{heads_same_kind_parent, NameRefKind, NameRefSpec, VariantRefSpec};
 use crate::driver::{
     self, node, AnonKey, Anonymous, Compiled, DeclSlot, Effect, FieldReads, FileCx, KindCapture,
     Op, ParseSpec, Step, TxRule,
@@ -243,6 +243,34 @@ fn decorated_method_name(verb: tree_sitter::Node, source: &[u8]) -> Option<Strin
     Some(name.to_string())
 }
 
+/// The `ns.f` of a namespace-qualified or class-static function value: the
+/// text is `qualifier.member`, with the qualifier a bare identifier. A chain
+/// (`a.b.c`) records only its outermost node, so an inner `a.b` is not a
+/// qualifier of its own; `this`, `super` and a computed or private member
+/// are no identifier pair and record nothing. A qualifier that names a local
+/// or parameter in scope is a value, and the scan drops the name; otherwise
+/// the resolver binds it only through a namespace import or a class.
+pub(crate) fn qualified_member_value(
+    node: tree_sitter::Node<'_>,
+    source: &[u8],
+    _spec: &NameRefSpec,
+) -> Option<String> {
+    let object = node
+        .child_by_field_name("object")
+        .filter(|object| object.kind() == "identifier")?;
+    let property = node
+        .child_by_field_name("property")
+        .filter(|property| property.kind() == "property_identifier")?;
+    if heads_same_kind_parent(node, "object") {
+        return None;
+    }
+    Some(format!(
+        "{}.{}",
+        object.utf8_text(source).ok()?,
+        property.utf8_text(source).ok()?
+    ))
+}
+
 /// A query is bound to its grammar, so each grammar compiles its own.
 fn grammar<const TSX: bool>() -> tree_sitter::Language {
     match TSX {
@@ -428,6 +456,8 @@ impl<const TSX: bool> ParseSpec for TsSpec<TSX> {
                 "type_annotation",
                 "type_arguments",
             ],
+            qualified_values: &["member_expression"],
+            qualified_name: qualified_member_value,
             ..NameRefSpec::EMPTY
         },
     });

@@ -194,33 +194,57 @@ pub fn strip_shell_quotes(cmd: &str) -> String {
     out
 }
 
-/// Drain this session's peer inbox, render to payload, truncate inbox.
-/// Returns `Some(payload_string)` if there was something to inject, `None` otherwise.
-/// Honors `ECP_REPO_ROOT_OVERRIDE` for tests.
 fn default_repo_root() -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
     let repo_dir = crate::repo_identity::repo_dir_name_for_cwd(&cwd).ok()?;
     Some(resolve_home_ecp().join(repo_dir))
 }
 
+/// Drain this session's peer inboxes, render to payload, remove what was
+/// shown. Returns `Some(payload_string)` if there was something to inject,
+/// `None` otherwise. Honors `ECP_REPO_ROOT_OVERRIDE` for tests.
 pub fn drain_and_render_peer_payload() -> Option<String> {
-    let me = crate::session::resolver::resolve_session_id(None);
-    ecp_core::registry::validate_cache_component(&me).ok()?;
+    let sid = crate::session::resolver::resolve_session_id(None);
+    ecp_core::registry::validate_cache_component(&sid).ok()?;
     let repo_root: PathBuf = std::env::var("ECP_REPO_ROOT_OVERRIDE")
         .map(PathBuf::from)
         .ok()
         .or_else(default_repo_root)?;
-    let session_dir = repo_root.join("sessions").join(&me);
-    let inbox = session_dir.join("inbox.jsonl");
+    let payloads: Vec<String> = pending_inboxes(&repo_root.join("sessions"), &sid)
+        .iter()
+        .filter_map(|inbox| drain_inbox(inbox))
+        .collect();
+    (!payloads.is_empty()).then(|| payloads.join("\n\n"))
+}
 
-    // Fast path: skip meta read + inbox open entirely when inbox is absent or empty.
-    // Covers the vast majority of PreToolUse fires with a single stat call.
-    match std::fs::metadata(&inbox) {
-        Err(_) => return None,
-        Ok(m) if m.len() == 0 => return None,
-        Ok(_) => {}
-    }
+/// The non-empty `inbox.jsonl` of every dir session `sid` owns: one
+/// `<sid>~<h8>` per worktree it ran ecp in, and a peer may write to any of
+/// them, while the hook's cwd names only one. Sorted, so the payload order is
+/// stable.
+///
+/// Fast path: one `read_dir` and one `stat` per owned dir, no meta read, which
+/// covers the vast majority of PreToolUse fires.
+fn pending_inboxes(sessions: &Path, sid: &str) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(sessions) else {
+        return Vec::new();
+    };
+    let mut inboxes: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .and_then(crate::session::resolver::split_session_dir_name)
+                .is_some_and(|(owner, _)| owner == sid)
+        })
+        .map(|entry| entry.path().join("inbox.jsonl"))
+        .filter(|inbox| fs::metadata(inbox).is_ok_and(|m| m.len() > 0))
+        .collect();
+    inboxes.sort();
+    inboxes
+}
 
+fn drain_inbox(inbox: &Path) -> Option<String> {
     // The hook no longer touches session_meta: consumption is recorded by
     // removing the delivered lines, not by a watermark. That also removes a
     // whole-file rewrite that raced the watcher's own updates to the same file.
@@ -228,7 +252,7 @@ pub fn drain_and_render_peer_payload() -> Option<String> {
     // for the read let a sender append between the drain and the clear, and
     // that message was then erased unseen. Only what the payload actually
     // represented is removed; the rest waits for the next hook.
-    ecp_core::peer::inbox::deliver_and_consume(&inbox, |entries| {
+    ecp_core::peer::inbox::deliver_and_consume(inbox, |entries| {
         let (payload, shown) = crate::peer::render::render_payload(entries);
         (payload, shown)
     })

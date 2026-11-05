@@ -24,9 +24,10 @@ fn test_this_return_annotation_binds_declaring_class() {
     assert_eq!(annotated(&g, "plain"), resolver, "plain: Resolver");
 }
 
-/// Guard: a free function has no declaring class, so `: this` binds nothing.
+/// A free function has no declaring class, so `: this` binds nothing; the
+/// `this: Resolver` parameter binds `Resolver` once.
 #[test]
-fn test_this_return_annotation_outside_class_no_edge() {
+fn test_this_return_annotation_outside_class_binds_only_the_this_parameter() {
     let g = graph(
         &TypeScriptProvider::new().unwrap(),
         &[(
@@ -34,21 +35,19 @@ fn test_this_return_annotation_outside_class_no_edge() {
             "export class Resolver { n = 0; }\nexport function free(this: Resolver): this { return this; }\n",
         )],
     );
-    assert_eq!(annotated(&g, "free"), Vec::<(String, String)>::new());
+    assert_eq!(annotated(&g, "free"), [pair("src/free.ts", "Resolver")]);
 }
 
 fn pair(file: &str, name: &str) -> (String, String) {
     (file.to_string(), name.to_string())
 }
 
-/// Guard: the TypeScript query captures only a bare `type_identifier` or
-/// `this_type` under the return `type_annotation`, so `Tok | null` and
-/// `Array<Tok>` leave no annotation at all: no edge, before and after the
-/// reduced key (which would give `Tok` for the union, but never sees it). A
-/// plain `Tok` return binds. If the query ever captures the union, this
-/// test must flip to `Tok`.
+/// The TypeScript query captures only a bare `type_identifier` or
+/// `this_type` under the return `type_annotation`. `Tok | null` and
+/// `Array<Tok>` are not captured; their text comes from the function meta,
+/// and both bind `Tok`.
 #[test]
-fn test_union_and_generic_return_annotations_are_not_captured() {
+fn test_union_and_generic_returns_bind_through_the_function_meta() {
     let g = graph(
         &TypeScriptProvider::new().unwrap(),
         &[(
@@ -57,6 +56,6 @@ fn test_union_and_generic_return_annotations_are_not_captured() {
         )],
     );
     assert_eq!(annotated(&g, "plain"), [pair("src/app.ts", "Tok")]);
-    assert_eq!(annotated(&g, "find"), Vec::<(String, String)>::new());
-    assert_eq!(annotated(&g, "all"), Vec::<(String, String)>::new());
+    assert_eq!(annotated(&g, "find"), [pair("src/app.ts", "Tok")]);
+    assert_eq!(annotated(&g, "all"), [pair("src/app.ts", "Tok")]);
 }

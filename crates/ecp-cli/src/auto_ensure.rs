@@ -1152,12 +1152,6 @@ fn sibling_graph_compatible(graph_path: &Path) -> bool {
     }
 }
 
-/// Whether `ECP_SKIP_BG_REBUILD` suppresses every background rebuild and
-/// gc spawn: the stderr line and the payload caveat then claim none.
-pub(crate) fn background_rebuild_skipped() -> bool {
-    std::env::var_os("ECP_SKIP_BG_REBUILD").is_some()
-}
-
 /// Fire-and-forget background rebuild for `worktree_root`. Returns the
 /// `rebuild=` field of the stderr line announcing it: `rebuild=skipped` under
 /// `ECP_SKIP_BG_REBUILD`, else `rebuild=background`, followed by
@@ -1172,7 +1166,7 @@ fn spawn_background_rebuild(worktree_root: &Path) -> String {
     // use for the detached rebuild; skipping it avoids a leaked `sh` subprocess
     // that nextest flags as LEAK on Windows (the rebuild outlives the test).
     // The stderr line then says so instead of announcing a rebuild.
-    if background_rebuild_skipped() {
+    if crate::background::background_rebuild_skipped() {
         return "rebuild=skipped".to_string();
     }
     let Ok(repo_dir_name) = crate::repo_identity::repo_dir_name_for_cwd(worktree_root) else {
@@ -1246,6 +1240,7 @@ fn spawn_background_rebuild_with(
             failed: &markers.failed,
         }),
         then_args: None,
+        env: &[],
     });
     if !started {
         markers.record_launch_failure();
@@ -1268,7 +1263,7 @@ fn spawn_upgrade_gc() {
         return;
     }
     test_counters::UPGRADE_GC_INTENT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if background_rebuild_skipped() {
+    if crate::background::background_rebuild_skipped() {
         return;
     }
     // In-process tests run a test harness as `current_exe`; only the real
@@ -1289,6 +1284,7 @@ fn spawn_upgrade_gc() {
         retry: (1, 0),
         markers: None,
         then_args: None,
+        env: &[],
     });
 }
 
@@ -1367,14 +1363,26 @@ pub fn join_pending_tantivy_writers() {
 /// Resolve the L1 session overlay dir for `worktree_root` (the worktree top,
 /// which keys the fragments' paths), matching exactly the
 /// path `apply_l1_overlay_updates` writes to: `<home_ecp>/<repo_dir>/sessions/
-/// <session_id>`. Returns `None` when the repo identity can't be resolved. The
-/// dir may not exist yet (no overlay written this session) — the caller checks.
+/// <session_id>~<worktree key>`. The worktree is in the name so that sibling
+/// worktrees under one session id never share a manifest. Returns `None` when
+/// the repo identity can't be resolved. The dir may not exist yet (no overlay
+/// written this session) — the caller checks.
 pub fn resolve_session_overlay_dir(worktree_root: &Path) -> Option<PathBuf> {
-    let session_id = crate::session::resolver::resolve_session_id(None);
-    ecp_core::registry::validate_cache_component(&session_id).ok()?;
+    resolve_session_overlay_dir_for(
+        worktree_root,
+        &crate::session::resolver::resolve_session_id(None),
+    )
+}
+
+/// [`resolve_session_overlay_dir`] for an explicit session id, such as the
+/// one a hook envelope names. `worktree_root` may be a subdirectory.
+pub fn resolve_session_overlay_dir_for(worktree_root: &Path, session_id: &str) -> Option<PathBuf> {
+    ecp_core::registry::validate_cache_component(session_id).ok()?;
+    let name = crate::session::resolver::session_dir_name(session_id, worktree_root);
+    ecp_core::registry::validate_cache_component(&name).ok()?;
     let home_ecp = ecp_core::registry::resolve_home_ecp();
     let repo_dir = crate::repo_identity::repo_dir_name_for_cwd(worktree_root).ok()?;
-    Some(home_ecp.join(&repo_dir).join("sessions").join(&session_id))
+    Some(home_ecp.join(&repo_dir).join("sessions").join(name))
 }
 
 /// Stat a file's mtime as nanoseconds since the epoch. The shared form of a
@@ -1425,7 +1433,8 @@ fn retain_stale_fragments(
     size_cap: SizeCap,
     rel_paths: &[String],
 ) -> L1FreshnessGate {
-    use ecp_core::session::{layout, FRAGMENT_FORMAT_V7};
+    use ecp_core::session::layout;
+    use ecp_core::session::overlay::FRAGMENT_FORMAT;
 
     let pass = |rel_paths: &[String], session_meta| L1FreshnessGate {
         rel_paths: rel_paths.to_vec(),
@@ -1470,7 +1479,7 @@ fn retain_stale_fragments(
                     None => false,
                 };
             };
-            if entry.format != FRAGMENT_FORMAT_V7 || entry.parse_failed {
+            if entry.format != FRAGMENT_FORMAT || entry.parse_failed {
                 return true;
             }
             // A bin the manifest names can still be gone (a cleanup that
@@ -1824,8 +1833,8 @@ const SESSION_HEARTBEAT_SECS: u64 = 60;
 /// session dir for every read-only query and hand peers a crowd of sessions
 /// with nothing dirty in them. The `mtime` throttle keeps the cost at one
 /// read+write per minute; every other invocation pays a single stat.
-pub(crate) fn beat_session_heartbeat(worktree_root: &Path) {
-    if let Some(dir) = resolve_session_overlay_dir(worktree_root) {
+pub(crate) fn beat_session_heartbeat(worktree_root: &Path, session_id: &str) {
+    if let Some(dir) = resolve_session_overlay_dir_for(worktree_root, session_id) {
         beat_meta_heartbeat(&dir.join("session_meta.json"));
     }
 }
@@ -2205,7 +2214,7 @@ mod fingerprint_drift_tests {
         ) {
             return;
         }
-        use ecp_core::session::{layout, DirtyEntry, DirtyFiles, FRAGMENT_FORMAT_V7};
+        use ecp_core::session::{layout, DirtyEntry, DirtyFiles, FRAGMENT_FORMAT_V8};
         let bytes = valid_fragment_bytes();
         assert!(crate::session::overlay_reader::valid_fragment(&bytes));
         let (_tmp, worktree, session_dir, app_mtime) =
@@ -2226,7 +2235,7 @@ mod fingerprint_drift_tests {
                     tantivy_delta_segment: None,
                     parse_failed: false,
                     dirty_symbols: vec![],
-                    format: FRAGMENT_FORMAT_V7,
+                    format: FRAGMENT_FORMAT_V8,
                 },
             );
             fs::write(
@@ -2260,7 +2269,7 @@ mod fingerprint_drift_tests {
         write_events(
             &session_dir,
             &worktree,
-            &paths.map(|(rel, mtime)| (rel, event_entry(mtime, rel, FRAGMENT_FORMAT_V7))),
+            &paths.map(|(rel, mtime)| (rel, event_entry(mtime, rel, FRAGMENT_FORMAT_V8))),
             &bytes,
         );
         assert!(
@@ -2336,7 +2345,7 @@ mod fingerprint_drift_tests {
         let (tmp, gate) = gate_with_fragment(
             &bytes,
             "v5-refresh-test",
-            ecp_core::session::FRAGMENT_FORMAT_V7,
+            ecp_core::session::FRAGMENT_FORMAT_V8,
             "def app(): pass\n",
         );
         assert!(
@@ -2379,7 +2388,7 @@ mod fingerprint_drift_tests {
             let (_tmp, gate) = gate_with_fragment(
                 corrupt,
                 "v5-corrupt-test",
-                ecp_core::session::FRAGMENT_FORMAT_V7,
+                ecp_core::session::FRAGMENT_FORMAT_V8,
                 "def app(): pass\n",
             );
             assert_eq!(gate.rel_paths, ["app.py"]);
@@ -2392,7 +2401,7 @@ mod fingerprint_drift_tests {
         use ecp_analyzer::resolution::builder::GraphBuilder;
         use ecp_core::analyzer::provider::LanguageProvider;
         use ecp_core::graph::{ArchivedZeroCopyGraph, RelType};
-        use ecp_core::session::{MergedGraph, OverlayView, FRAGMENT_FORMAT_V4, FRAGMENT_FORMAT_V7};
+        use ecp_core::session::{MergedGraph, OverlayView, FRAGMENT_FORMAT_V4, FRAGMENT_FORMAT_V8};
 
         const CHILD_ENV: &str = "ECP_AUTO_ENSURE_V4_REFRESH_CHILD";
         const TEST_NAME: &str = "auto_ensure::fingerprint_drift_tests::test_retain_stale_fragments_native_v4_refresh_restores_call_edge";
@@ -2471,7 +2480,7 @@ mod fingerprint_drift_tests {
             &ecp_core::session::layout::dirty_events_path(&session_dir),
         )
         .unwrap();
-        assert_eq!(manifest.entries["app.py"].format, FRAGMENT_FORMAT_V7);
+        assert_eq!(manifest.entries["app.py"].format, FRAGMENT_FORMAT_V8);
         assert!(manifest.from_current_builder());
         assert!(retain_stale_fragments(
             &worktree,
@@ -3386,6 +3395,125 @@ mod retire_unclaimed_tests {
             ("index.ts", "index"),
         ] {
             assert_eq!(module_prefix(path), prefix, "{path}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod session_dir_key_tests {
+    use super::*;
+    use std::process::Command;
+
+    /// The global and system git config stay out: a developer's
+    /// `commit.gpgsign` or hooks path must not change the fixture.
+    fn git(dir: &Path, args: &[&str]) {
+        assert!(Command::new("git")
+            .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    fn repo_with_commit(tmp: &Path) -> PathBuf {
+        let repo = tmp.join("repo");
+        fs::create_dir_all(repo.join("sub")).unwrap();
+        fs::write(repo.join("sub/a.txt"), "a\n").unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "init"]);
+        repo
+    }
+
+    fn name_of(dir: Option<PathBuf>) -> String {
+        dir.unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn test_resolve_session_overlay_dir_two_worktrees_of_one_repo_distinct() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = repo_with_commit(tmp.path());
+        let sibling = tmp.path().join("sibling");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "side",
+                sibling.to_str().unwrap(),
+            ],
+        );
+
+        let a = resolve_session_overlay_dir_for(&repo, "sid");
+        let b = resolve_session_overlay_dir_for(&sibling, "sid");
+
+        assert_ne!(a, b, "one session id, two worktrees: two overlay dirs");
+        assert_eq!(a.as_ref().unwrap().parent(), b.as_ref().unwrap().parent());
+        let (name_a, name_b) = (name_of(a), name_of(b));
+        assert!(
+            name_a.starts_with("sid~") && name_b.starts_with("sid~"),
+            "{name_a} {name_b}"
+        );
+        assert_eq!(
+            resolve_session_overlay_dir_for(&repo, "other").map(|d| name_of(Some(d))),
+            Some(format!("other~{}", &name_a["sid~".len()..])),
+            "the worktree key does not depend on the session id"
+        );
+    }
+
+    #[test]
+    fn test_resolve_session_overlay_dir_subdir_and_symlink_alias_same_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = repo_with_commit(tmp.path());
+        let top = resolve_session_overlay_dir_for(&repo, "sid");
+
+        assert_eq!(
+            resolve_session_overlay_dir_for(&repo.join("sub"), "sid"),
+            top
+        );
+        #[cfg(unix)]
+        {
+            let alias = tmp.path().join("alias");
+            std::os::unix::fs::symlink(&repo, &alias).unwrap();
+            assert_eq!(resolve_session_overlay_dir_for(&alias, "sid"), top);
+            assert_eq!(
+                resolve_session_overlay_dir_for(&alias.join("sub"), "sid"),
+                top
+            );
+        }
+    }
+
+    #[test]
+    fn test_resolve_session_overlay_dir_non_git_dir_keys_by_canonical_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plain = tmp.path().join("plain");
+        let other = tmp.path().join("other");
+        fs::create_dir_all(&plain).unwrap();
+        fs::create_dir_all(&other).unwrap();
+
+        let first = resolve_session_overlay_dir_for(&plain, "sid");
+
+        assert!(first.is_some(), "a non-git dir still names a session dir");
+        assert_eq!(resolve_session_overlay_dir_for(&plain, "sid"), first);
+        assert_ne!(resolve_session_overlay_dir_for(&other, "sid"), first);
+    }
+
+    #[test]
+    fn test_resolve_session_overlay_dir_for_invalid_session_id_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = repo_with_commit(tmp.path());
+        for bad in ["", "../x", "a/b", "."] {
+            assert_eq!(resolve_session_overlay_dir_for(&repo, bad), None, "{bad:?}");
         }
     }
 }

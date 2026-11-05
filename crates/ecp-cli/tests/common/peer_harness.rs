@@ -58,11 +58,11 @@ impl PeerHarness {
     }
 
     pub fn spawn_session_named(&mut self, id: &str, agent_name: Option<&str>) -> &SpawnedSession {
-        let session_dir = self.repo_root.path().join("sessions").join(id);
+        let session_dir = self.session_dir(id);
         std::fs::create_dir_all(&session_dir).unwrap();
         let meta = SessionMeta {
             version: 1,
-            session_id: id.into(),
+            session_id: Self::dir_name(id),
             pid: Some(std::process::id()),
             started_at: Utc::now().to_rfc3339(),
             last_touched: Utc::now().to_rfc3339(),
@@ -115,8 +115,21 @@ impl PeerHarness {
         dir.join(format!("{id}.stderr"))
     }
 
+    /// The dir name a process that runs in this test's cwd under session id
+    /// `id` uses: `<id>~<worktree key>`. Tests name sessions by the bare `id`
+    /// (the `ECP_SESSION_ID` the spawned processes get); the harness maps it.
+    pub fn dir_name(id: &str) -> String {
+        ecp_cli::session::resolver::session_dir_name(
+            id,
+            &std::env::current_dir().expect("test cwd"),
+        )
+    }
+
     pub fn session_dir(&self, id: &str) -> PathBuf {
-        self.repo_root.path().join("sessions").join(id)
+        self.repo_root
+            .path()
+            .join("sessions")
+            .join(Self::dir_name(id))
     }
 
     pub fn write_dirty(&self, id: &str, path: &str, symbols: &[(&str, &str)]) {

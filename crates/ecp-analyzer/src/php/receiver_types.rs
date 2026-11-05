@@ -274,7 +274,12 @@ pub(super) fn literal_callable(call: Node<'_>, source: &[u8]) -> Option<LiteralC
         return None;
     }
     let first = call.child_by_field_name("arguments")?.named_child(0)?;
-    let value = first.named_child(0).unwrap_or(first);
+    callable_from_value(first.named_child(0).unwrap_or(first), source)
+}
+
+/// The literal callable a value names: a string (`'helper'`,
+/// `'Rows::hero'`) or a two-element array (`[Rows::class, 'hero']`).
+fn callable_from_value(value: Node<'_>, source: &[u8]) -> Option<LiteralCallable> {
     match value.kind() {
         "string" | "encapsed_string" => string_callable(&string_literal_text(value, source)?),
         "array_creation_expression" => {
@@ -302,7 +307,9 @@ pub(super) fn literal_callable(call: Node<'_>, source: &[u8]) -> Option<LiteralC
 
 /// The function a builtin call hands on as a literal callable, for the
 /// name scan to record: `array_map('fmt', $xs)` hands on `fmt`,
-/// `usort($rows, 'Sorter::byName')` hands on `Sorter.byName`. The name keeps
+/// `usort($rows, 'Sorter::byName')` and `usort($rows, [Sorter::class, 'byName'])`
+/// hand on `Sorter.byName`, as do `[$this, 'byName']`, `[self::class,
+/// 'byName']` and `[static::class, 'byName']` inside `Sorter`. The name keeps
 /// its namespace, as [`literal_callable`] records it. A file that declares
 /// its own function of the builtin's name (`namespace App; function
 /// array_map`) calls that one instead. `call_user_func` calls its callable,
@@ -351,12 +358,52 @@ pub(crate) fn passed_callable(call: Node<'_>, source: &[u8]) -> Option<String> {
         })?;
     let last = u32::try_from(arg.named_child_count().checked_sub(1)?).ok()?;
     let value = arg.named_child(last)?;
-    let target = match string_callable(&string_literal_text(value, source)?)? {
+    let target = match callable_from_value(value, source)? {
         LiteralCallable::Function(name) => name,
         LiteralCallable::Static { class, method } => format!("{class}.{method}"),
-        LiteralCallable::Relative { .. } | LiteralCallable::This { .. } => return None,
+        LiteralCallable::Relative { method } | LiteralCallable::This { method } => {
+            format!("{}.{method}", enclosing_class_of(call, &method, source)?)
+        }
     };
     (!declares_function(call, builtin, source)).then_some(target)
+}
+
+/// The class `$this`, `self::class` and `static::class` stand for at `node`:
+/// the innermost class, trait or enum declaration around it, when `method`
+/// is reachable through its name (a trait's or an enum's own method only, as
+/// [`ClassContext::enclosing_class_name`] decides for a call). `None` inside
+/// an anonymous class or an interface, and outside any class.
+fn enclosing_class_of<'s>(node: Node<'_>, method: &str, source: &'s [u8]) -> Option<&'s str> {
+    let mut current = node.parent();
+    while let Some(n) = current {
+        let own_members_only = match n.kind() {
+            "class_declaration" => false,
+            "trait_declaration" | "enum_declaration" => true,
+            "anonymous_class" | "interface_declaration" => return None,
+            _ => {
+                current = n.parent();
+                continue;
+            }
+        };
+        let declares = || {
+            n.child_by_field_name("body").is_some_and(|body| {
+                let mut cursor = body.walk();
+                let found = body.named_children(&mut cursor).any(|member| {
+                    member.kind() == "method_declaration"
+                        && member
+                            .child_by_field_name("name")
+                            .and_then(|name| name.utf8_text(source).ok())
+                            == Some(method)
+                });
+                found
+            })
+        };
+        if own_members_only && !declares() {
+            return None;
+        }
+        return n.child_by_field_name("name")?.utf8_text(source).ok();
+    }
+    None
 }
 
 /// Whether the file holding `node` declares a top-level or namespace-level

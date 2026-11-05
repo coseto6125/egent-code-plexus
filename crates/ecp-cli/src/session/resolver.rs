@@ -6,6 +6,7 @@
 //! invocations without any of the above get a per-process fallback id derived
 //! from PID + nanosecond timestamp.
 
+use std::path::Path;
 use std::sync::OnceLock;
 use xxhash_rust::xxh3::Xxh3;
 
@@ -38,18 +39,65 @@ pub fn resolve_session_id(explicit: Option<&str>) -> String {
 /// input, then the per-process fallback. A hook process may not carry the host's
 /// session env var while its JSON input always names the session.
 pub fn resolve_hook_session_id(input_session_id: &str) -> String {
+    hook_session_id(input_session_id).unwrap_or_else(|| fallback_id().to_string())
+}
+
+/// The session a hook names, in `resolve_hook_session_id`'s order, or `None`
+/// when no env var and no input id names one: the per-process fallback names
+/// no overlay dir, so a caller that writes under the id must not use it.
+pub fn hook_session_id(input_session_id: &str) -> Option<String> {
     for key in SESSION_ENV_KEYS {
         if let Ok(s) = std::env::var(key) {
             if !s.is_empty() {
-                return s;
+                return Some(s);
             }
         }
     }
-    if input_session_id.is_empty() {
-        fallback_id().to_string()
-    } else {
-        input_session_id.to_string()
-    }
+    (!input_session_id.is_empty()).then(|| input_session_id.to_string())
+}
+
+// The parser lives in ecp-core so `alive_peers` shares it; this module keeps
+// the name every session-dir caller already imports.
+pub use ecp_core::peer::registry::{split_session_dir_name, SESSION_DIR_SEP};
+
+/// The dir name under `sessions/` for session `sid` working in `worktree`:
+/// `<sid>~<h8>`, where `h8` hashes the worktree's own gitdir. Two worktrees of
+/// one repo that run under one session id each get their own overlay, manifest
+/// and `base_sha`. The gitdir is the same for a subdirectory or a symlinked
+/// alias of the worktree; a path outside git keys by its canonical path. One
+/// cached `git_layout` lookup and one short hash.
+pub fn session_dir_name(sid: &str, worktree: &Path) -> String {
+    // The on-disk layout, never the env-checked one: `GIT_CEILING_DIRECTORIES`
+    // or `GIT_DIR` in one process and not in another must not give one
+    // worktree two keys.
+    let key = crate::git_cache::git_layout_unchecked(worktree)
+        .map_or_else(|| fallback_worktree_key(worktree), |(_, gitdir, _)| gitdir);
+    let key = dunce::simplified(&key).to_string_lossy().into_owned();
+    format!(
+        "{sid}{SESSION_DIR_SEP}{}",
+        crate::repo_identity::short_hash_hex8(key.as_bytes())
+    )
+}
+
+/// Key for a path whose `.git` git would not open (an empty `.git` dir): the
+/// nearest ancestor that holds a `.git` entry,
+/// so a subdirectory keys like its worktree root. Without any `.git` ancestor
+/// the canonical path itself.
+fn fallback_worktree_key(worktree: &Path) -> std::path::PathBuf {
+    let canonical = std::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
+    canonical
+        .ancestors()
+        .find(|a| a.join(".git").symlink_metadata().is_ok())
+        .map_or_else(|| canonical.clone(), Path::to_path_buf)
+}
+
+/// `session_dir_name` for the session the process env names and the
+/// process's current directory.
+pub fn own_session_dir_name() -> std::io::Result<String> {
+    Ok(session_dir_name(
+        &resolve_session_id(None),
+        &std::env::current_dir()?,
+    ))
 }
 
 /// Resolve the team-visible agent name for this session, if any.
@@ -87,7 +135,27 @@ fn fallback_id() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::fallback_id;
+    use super::{fallback_id, session_dir_name};
+
+    #[test]
+    fn test_session_dir_name_subdir_of_ungit_resolved_worktree_keys_like_its_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        let deep = root.join("sub/deep");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        assert_eq!(session_dir_name("s", &root), session_dir_name("s", &deep));
+    }
+
+    #[test]
+    fn test_session_dir_name_without_git_ancestor_keys_by_canonical_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("a");
+        let b = tmp.path().join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        assert_ne!(session_dir_name("s", &a), session_dir_name("s", &b));
+    }
 
     #[test]
     fn fallback_id_is_stable_within_a_process() {

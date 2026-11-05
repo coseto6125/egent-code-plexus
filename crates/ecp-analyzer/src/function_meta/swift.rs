@@ -19,7 +19,7 @@
 //! and drop the external label (`to`) for simplicity. This matches what LLMs need for
 //! call-site context: they see the parameter variable name used inside the function body.
 
-use super::{extract_with, node_text, ts_span};
+use super::{declared_type_params, extract_with, node_text, scoped_type_params, ts_span};
 use ecp_core::analyzer::types::{RawFunctionMeta, RawNode};
 use ecp_core::graph::{FileCategory, FunctionMeta};
 use tree_sitter::Node;
@@ -149,12 +149,16 @@ fn extract_one(
         .map(|n| node_text(&n, source).to_string())
         .unwrap_or_default();
 
+    let type_params =
+        scoped_type_params(fn_node, source, &["type_parameters"], declared_type_params);
+
     Some(RawFunctionMeta {
         span: ts_span(fn_node),
         flags,
         params,
         return_type,
         decorators,
+        type_params,
     })
 }
 

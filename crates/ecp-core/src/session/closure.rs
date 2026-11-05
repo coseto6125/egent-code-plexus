@@ -122,7 +122,7 @@ pub const CLOSURE_LIMIT: usize = 128;
 /// The base edge kinds the view rebuilds for a re-parsed file: an in-edge of
 /// one of these kinds makes its clean source a dependent. Past the bound,
 /// these are the kinds a clean file may hold stale.
-pub const REBUILT_RELS: [RelType; 9] = [
+pub const REBUILT_RELS: [RelType; 10] = [
     RelType::Calls,
     RelType::Imports,
     RelType::Extends,
@@ -132,6 +132,7 @@ pub const REBUILT_RELS: [RelType; 9] = [
     RelType::ReadsField,
     RelType::References,
     RelType::QueriesTable,
+    RelType::Accesses,
 ];
 
 /// What the builder makes from routes and binds across files, which no
@@ -1251,6 +1252,8 @@ mod tests {
             flags: None,
             decorators: Vec::new(),
             params: Vec::new(),
+            type_annotation: None,
+            type_params: Vec::new(),
         }
     }
 

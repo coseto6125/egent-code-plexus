@@ -1001,15 +1001,22 @@ fn test_overlay_view_csharp_field_of_clean_part_matches_full_build() {
     );
 }
 
-/// Known gap until overlay P2b: a dirty field or property carries no type
-/// fact (its fragment has no `type_annotation`), so with the declaring
-/// part dirty too, the overlay binds no row where the full build binds
-/// `Tok.CreateReader`. P2b adds the fact; this assertion then flips.
+/// Stands for: with the part that declares the field and the property dirty
+/// too (an edit, or the closure re-resolving a clean part whose
+/// `type_annotation` edge names a changed type), the overlay types both
+/// receivers from the fresh `type_annotation`, as the full build notes it.
+/// Before the fix the dirty field carried no type fact: no rows, where the
+/// full build binds `Tok.CreateReader`.
 #[test]
-fn test_overlay_view_csharp_field_of_dirty_part_no_edge_until_p2b() {
+fn test_overlay_view_csharp_field_of_dirty_part_matches_full_build() {
     assert_eq!(
         overlay_field_rows(&["Lib/Run.cs", "Lib/Run.Use.cs"], &["G1", "G3"]),
-        [Vec::<(String, String, f32)>::new(), Vec::new()]
+        [tok(0.85), tok(0.85)]
+    );
+    assert_eq!(
+        overlay_field_rows(&["Lib/Run.cs"], &["G1", "G2", "G3", "G4"]),
+        [tok(0.85), tok(0.85), tok(0.85), tok(0.85)],
+        "the declaring part alone dirty"
     );
 }
 

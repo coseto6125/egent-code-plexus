@@ -38,12 +38,10 @@ fn test_self_without_project_class_binds_nothing() {
     assert_eq!(annotated(&g, "make"), Vec::<(String, String)>::new());
 }
 
-/// Guard: Java has no nullable or pointer wrapper. A plain `Tok` return
-/// binds the project class, and `List<Tok>` is a generic that
-/// `return_type_key` reduces to `None`, so it binds nothing, before and
-/// after the change.
+/// Java has no nullable or pointer wrapper. A plain `Tok` return binds the
+/// project class, and `List<Tok>` binds it as its element type.
 #[test]
-fn test_plain_return_binds_and_generic_return_binds_nothing() {
+fn test_plain_and_generic_return_bind_the_project_type() {
     let g = graph(
         &JavaProvider::new().unwrap(),
         &[
@@ -55,5 +53,5 @@ fn test_plain_return_binds_and_generic_return_binds_nothing() {
         ],
     );
     assert_eq!(annotated(&g, "make"), vec![pair("src/Tok.java", "Tok")]);
-    assert_eq!(annotated(&g, "all"), Vec::<(String, String)>::new());
+    assert_eq!(annotated(&g, "all"), vec![pair("src/Tok.java", "Tok")]);
 }

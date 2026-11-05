@@ -40,8 +40,8 @@ fn test_self_return_annotation_outside_class_no_edge() {
 }
 
 /// Guard: Python already reduces the key, so `-> Tok | None` binds the project
-/// class both before and after the change. `-> list[Tok]` is a generic and
-/// binds nothing.
+/// class both before and after the change. `-> list[Tok]` binds `Tok` as its
+/// element type.
 #[test]
 fn test_optional_union_return_annotation_binds_project_type() {
     let g = graph(
@@ -52,5 +52,5 @@ fn test_optional_union_return_annotation_binds_project_type() {
         )],
     );
     assert_eq!(annotated(&g, "find"), vec![pair("src/app.py", "Tok")]);
-    assert_eq!(annotated(&g, "all"), Vec::<(String, String)>::new());
+    assert_eq!(annotated(&g, "all"), vec![pair("src/app.py", "Tok")]);
 }

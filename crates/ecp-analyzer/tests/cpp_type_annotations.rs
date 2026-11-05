@@ -107,10 +107,9 @@ fn test_pointer_and_reference_return_annotations_bind_project_type() {
     assert_eq!(annotated(&g, "find"), Vec::<(String, String)>::new());
 }
 
-/// Guard: `std::vector<Tok>` is a generic; `return_type_key` gives `None`, so it
-/// binds nothing, before and after the change.
+/// `std::vector<Tok>` names `Tok` as its element type, so the return binds it.
 #[test]
-fn test_generic_return_annotation_binds_nothing() {
+fn test_generic_return_annotation_binds_the_element_type() {
     let g = name_ref_support::graph(
         &CppProvider::new().unwrap(),
         &[(
@@ -118,5 +117,8 @@ fn test_generic_return_annotation_binds_nothing() {
             "struct Tok {};\n\nstd::vector<Tok> all() { return {}; }\n",
         )],
     );
-    assert_eq!(annotated(&g, "all"), Vec::<(String, String)>::new());
+    assert_eq!(
+        annotated(&g, "all"),
+        [("app.cpp".to_string(), "Tok".to_string())]
+    );
 }

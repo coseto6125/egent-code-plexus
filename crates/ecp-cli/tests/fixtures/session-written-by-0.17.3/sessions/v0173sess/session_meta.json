@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "session_id": "v0173sess",
+  "pid": 2275660,
+  "started_at": "2026-11-05T08:40:54.174152480+00:00",
+  "last_touched": "2026-11-05T08:40:54.280558357+00:00",
+  "base_sha": "5fe69c579c8e470a2bdf8921acf40988d7bb2ea0",
+  "source_worktree": "/tmp/ecp-fixture/repo",
+  "overlay_version": 2,
+  "watcher_pid": null,
+  "last_drained_offset": 0
+}

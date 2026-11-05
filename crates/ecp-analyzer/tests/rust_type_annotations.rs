@@ -124,8 +124,8 @@ fn test_cpp_field_typed_with_a_struct_named_self_binds_that_struct() {
 
 /// Contract: a `&Tok` / `&mut Tok` / `&'a Tok` return binds the project
 /// struct `Tok`. The `return_type` capture keeps the reference text. Before the
-/// change the raw text `&Tok` names no type: no edge. `Vec<Tok>` is a generic
-/// and binds nothing, before and after. With no project `Tok` nothing binds.
+/// change the raw text `&Tok` names no type: no edge. `Vec<Tok>` binds `Tok`
+/// as its element type. With no project `Tok` nothing binds.
 #[test]
 fn test_reference_return_annotation_binds_project_type() {
     let g = graph(
@@ -142,7 +142,7 @@ fn test_reference_return_annotation_binds_project_type() {
     for name in ["peek", "peek_mut", "lifetime"] {
         assert_eq!(annotated(&g, name), [pair("src/app.rs", "Tok")], "{name}");
     }
-    assert_eq!(annotated(&g, "all"), Vec::<(String, String)>::new());
+    assert_eq!(annotated(&g, "all"), [pair("src/app.rs", "Tok")]);
 
     let g = graph(
         &RustProvider::new().unwrap(),

@@ -9,8 +9,9 @@ use crate::build::orchestrator::{
 use crate::commit_lookup::CommitIndex;
 use crate::repo_identity::repo_dir_name_for_cwd;
 use crate::session::state::classify_with_index;
+use crate::session::view_cache::VIEW_CACHE_FILE;
 use ecp_core::registry::{resolve_home_ecp, retire_dir_async, SourceType};
-use ecp_core::session::{SessionState, StaleReason};
+use ecp_core::session::{layout, SessionState, StaleReason};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -28,7 +29,8 @@ pub struct InvalidateReport {
     pub meta_reaped: usize,
 }
 
-/// Retire each `sessions/<sid>/` whose `SessionState` is `AugmentedReference`
+/// Retire the overlay state (`l1/` and the view cache) of each `sessions/<sid>~<h8>/`
+/// whose `SessionState` is `AugmentedReference`
 /// with `base_sha == target_sha`, and return counts. PureReference sessions for the
 /// same SHA are kept. Stale sessions are left for the GC sweep.
 pub fn invalidate_matching_l1(repo_root: &Path, target_sha: &str) -> io::Result<InvalidateReport> {
@@ -68,7 +70,14 @@ pub fn invalidate_matching_l1(repo_root: &Path, target_sha: &str) -> io::Result<
                 // died with ENOTEMPTY. The retired name carries pid, counter
                 // and timestamp, so it cannot collide, and `admin gc` already
                 // sweeps that shape.
-                retire_dir_async(&path)?;
+                // Only the overlay state goes: the session's inbox, message log
+                // and meta belong to a live peer, and the session reads as
+                // `PureReference` once its manifest is gone.
+                retire_dir_async(&layout::l1_dir(&path))?;
+                match fs::remove_file(path.join(VIEW_CACHE_FILE)) {
+                    Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                    _ => {}
+                }
                 report.invalidated += 1;
             }
             // MetaUnreadable is unrecoverable: no session_meta.json ⇒ no

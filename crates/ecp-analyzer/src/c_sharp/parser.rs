@@ -1,7 +1,7 @@
 use super::receiver_types::extract_csharp_calls_and_path_literals;
 use super::recovery::prepare_source;
 use super::spec::CSharpSpec;
-use crate::calls::{NameRefKind, NameRefSpec, VariantRefSpec};
+use crate::calls::{heads_same_kind_parent, NameRefKind, NameRefSpec, VariantRefSpec};
 use crate::driver::{
     self, imports, node, AnonKey, Anonymous, Compiled, DeclSlot, Effect, FieldReads, FileCx,
     KindCapture, Op, ParseSpec, PrepareSource, Step, TxRule,
@@ -296,6 +296,40 @@ fn declaration_extent(root: Node<'_>) -> (Span, std::ops::Range<usize>) {
     )
 }
 
+/// The method group `Qualifier.Member` in value position, with the whole
+/// qualifier: `Cb.M` records `Cb.M`, `A.Helpers.Format` records
+/// `A.Helpers.Format`, and Pass 2 binds it only when the qualifier is the
+/// namespace and type path that encloses the method. `None` for a qualifier
+/// of the member access above it (`Cb.M` in `Cb.M.X`), and a qualifier that
+/// holds a `this` / `base`, a call, an index or a generic name.
+fn method_group_name(access: Node<'_>, source: &[u8], _spec: &NameRefSpec) -> Option<String> {
+    if heads_same_kind_parent(access, "expression") {
+        return None;
+    }
+    let mut segments = Vec::new();
+    let mut node = access;
+    loop {
+        match node.kind() {
+            "member_access_expression" => {
+                segments.push(
+                    node.child_by_field_name("name")
+                        .filter(|name| name.kind() == "identifier")?
+                        .utf8_text(source)
+                        .ok()?,
+                );
+                node = node.child_by_field_name("expression")?;
+            }
+            "identifier" => {
+                segments.push(node.utf8_text(source).ok()?);
+                break;
+            }
+            _ => return None,
+        }
+    }
+    segments.reverse();
+    Some(segments.join("."))
+}
+
 impl ParseSpec for CSharpSpec {
     type Role = CSharpRole;
     type Match<'t> = CSharpMatch<'t>;
@@ -355,6 +389,8 @@ impl ParseSpec for CSharpSpec {
                 "generic_name",
             ],
             skip_parents: &["labeled_statement", "goto_statement"],
+            qualified_values: &["member_access_expression"],
+            qualified_name: method_group_name,
             ..NameRefSpec::EMPTY
         },
     });

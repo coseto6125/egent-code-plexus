@@ -98,6 +98,86 @@ pub(super) fn find_child_kind<'a>(node: &Node<'a>, kind: &str) -> Option<Node<'a
     None
 }
 
+/// Names of the type variables in scope at `node`: the generic list of
+/// `node` itself and of each enclosing declaration (a class, impl, interface
+/// or template). A list is a direct child of its declaration whose kind is in
+/// `list_kinds`; `names_of` reads the variables out of one list. An inner
+/// function that cannot see an outer variable (Rust) over-collects it, which
+/// drops an edge rather than adding a false one.
+pub(super) fn scoped_type_params(
+    node: &Node<'_>,
+    source: &[u8],
+    list_kinds: &[&str],
+    names_of: fn(&Node<'_>, &[u8]) -> Vec<String>,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut scope = Some(*node);
+    while let Some(decl) = scope {
+        let mut cursor = decl.walk();
+        for list in decl
+            .children(&mut cursor)
+            .filter(|child| list_kinds.contains(&child.kind()))
+        {
+            for name in names_of(&list, source) {
+                if !out.contains(&name) {
+                    out.push(name);
+                }
+            }
+        }
+        scope = decl.parent();
+    }
+    out
+}
+
+/// A variable name worth recording: non-empty, not a lifetime.
+fn type_param_name(text: &str) -> Option<String> {
+    let text = text.trim();
+    (!text.is_empty() && !text.starts_with('\'')).then(|| text.to_string())
+}
+
+/// The name one generic-list entry declares: its first direct identifier
+/// child (Java, C#, Kotlin, Swift, C++ `typename T`), else its `name` field.
+/// Swift labels the bound `name` (`<T: Foo>` is `(type_identifier) name:
+/// (user_type ..)`), so the field is the fallback, never the first choice.
+pub(super) fn type_param_entry(entry: &Node<'_>, source: &[u8]) -> Option<String> {
+    let mut cursor = entry.walk();
+    let first = entry.named_children(&mut cursor).find(|child| {
+        matches!(
+            child.kind(),
+            "type_identifier" | "identifier" | "simple_identifier"
+        )
+    });
+    let name = first.or_else(|| entry.child_by_field_name("name"))?;
+    type_param_name(node_text(&name, source))
+}
+
+/// The variables of one generic list, one per parameter entry
+/// ([`type_param_entry`]); an attribute or a `where` clause in the list
+/// declares none.
+pub(super) fn declared_type_params(list: &Node<'_>, source: &[u8]) -> Vec<String> {
+    let mut cursor = list.walk();
+    list.named_children(&mut cursor)
+        .filter(|entry| entry.kind().ends_with("parameter"))
+        .filter_map(|entry| type_param_entry(&entry, source))
+        .collect()
+}
+
+/// The variables of one Go list: `[K, V comparable, T any]` declares K, V
+/// and T, each entry holding one or more `name` identifiers.
+pub(super) fn go_declared_type_params(list: &Node<'_>, source: &[u8]) -> Vec<String> {
+    let mut cursor = list.walk();
+    let mut out = Vec::new();
+    for entry in list.named_children(&mut cursor) {
+        let mut inner = entry.walk();
+        out.extend(
+            entry
+                .children_by_field_name("name", &mut inner)
+                .filter_map(|name| type_param_name(node_text(&name, source))),
+        );
+    }
+    out
+}
+
 /// Sorted span index over Function/Method/Constructor nodes — enables
 /// `binary_search_by_key` lookups in `walk_fn_nodes` instead of O(N) `find`.
 pub(super) fn build_span_index(nodes: &[RawNode]) -> Vec<FnSpan<'_>> {

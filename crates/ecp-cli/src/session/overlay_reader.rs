@@ -20,8 +20,9 @@ use ecp_core::contracts::routing::{ParsedLanguage, SizeCap};
 use ecp_core::graph::NodeKind;
 use ecp_core::session::closure::{ConfigEdits, StaleClosure};
 use ecp_core::session::layout;
+use ecp_core::session::overlay::FRAGMENT_FORMAT;
 use ecp_core::session::view::{ArchivedOverlayFileRecords, OverlayFileRecords};
-use ecp_core::session::{DirtyEvents, OverlayFileInput, OverlaySymbol, FRAGMENT_FORMAT_V7};
+use ecp_core::session::{DirtyEvents, OverlayFileInput, OverlaySymbol};
 use rkyv::rancor::Error as RkyvError;
 use std::fs;
 use std::io;
@@ -121,9 +122,10 @@ pub fn accepted_fragments(
 ///   every dirty file into a fresh manifest. Its tombstones are skipped too.
 /// - **an entry of another fragment format** — a fragment id is a hash of the
 ///   route key and the content (V6); a V5 id is the content hash alone, so a
-///   V5 bin can hold the parse of another route. The format check drops such
-///   an entry and the freshness gate re-parses it, so the reader never serves
-///   it.
+///   V5 bin can hold the parse of another route, and a V7 bin's symbols are
+///   one field shorter than V8's (`type_annotation`). The format check drops
+///   such an entry and the freshness gate re-parses it, so the reader never
+///   serves it.
 /// - **mtime mismatch** — a file edited and then REVERTED keeps its (now
 ///   stale) manifest entry until the next `ensure_fresh` retires it
 ///   (`retire_unclaimed_entries`). Serving that fragment would beat fresh
@@ -203,7 +205,7 @@ fn manifest_inputs(
         let Some(fragment_id) = entry.fragment_id.as_deref() else {
             continue; // no bin, and no deletion either
         };
-        if entry.parse_failed || entry.format != FRAGMENT_FORMAT_V7 {
+        if entry.parse_failed || entry.format != FRAGMENT_FORMAT {
             continue;
         }
         if on_disk_mtime_ns() != Some(entry.mtime_ns) {
@@ -310,6 +312,12 @@ fn decode_fragment(
                 flags: s.flags.as_ref().map(|flags| flags.to_native()),
                 decorators: s.decorators.iter().map(|d| d.as_str().to_owned()).collect(),
                 params: s.params.iter().map(|p| p.as_str().to_owned()).collect(),
+                type_annotation: s.type_annotation.as_ref().map(|ty| ty.as_str().to_owned()),
+                type_params: s
+                    .type_params
+                    .iter()
+                    .map(|p| p.as_str().to_owned())
+                    .collect(),
             })
             .collect(),
         imports,
@@ -432,6 +440,48 @@ mod tests {
         );
         let decoded = decode_view_inputs(&[accepted(with([0xFE, 0xFE]))]);
         assert!(decoded.is_empty(), "a corrupt bin decodes to nothing");
+    }
+
+    /// Stands for: a symbol's annotation text reaches the overlay as the
+    /// writer stored it, an empty text included, and a symbol without one
+    /// reads `None`: the overlay binds the same names the index binds.
+    #[test]
+    fn test_decode_view_inputs_symbol_type_annotation_round_trips() {
+        let symbol = |name: &str, type_annotation: Option<&str>| FragmentSymbol {
+            name: name.into(),
+            kind: NodeKind::Property,
+            span: (0, 0, 0, 1),
+            owner_class: None,
+            is_exported: false,
+            calls: Vec::new(),
+            heritage: Vec::new(),
+            variant_refs: Vec::new(),
+            return_type: None,
+            generic_arity: 0,
+            flags: None,
+            decorators: Vec::new(),
+            params: Vec::new(),
+            type_annotation: type_annotation.map(str::to_string),
+            type_params: Vec::new(),
+        };
+        let fragment = FragmentFile {
+            symbols: vec![
+                symbol("f", Some("Vec<St>")),
+                symbol("g", None),
+                symbol("h", Some("")),
+            ],
+            ..FragmentFile::default()
+        };
+        let bytes = rkyv::to_bytes::<RkyvError>(&fragment).unwrap().into_vec();
+
+        let decoded = decode_view_inputs(&[accepted(bytes)]);
+
+        let got: Vec<Option<&str>> = decoded[0]
+            .symbols
+            .iter()
+            .map(|s| s.type_annotation.as_deref())
+            .collect();
+        assert_eq!(got, [Some("Vec<St>"), None, Some("")]);
     }
 
     /// Stands for: `FragmentFile::default()` is "no language", not the

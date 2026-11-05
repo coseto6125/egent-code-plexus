@@ -41,7 +41,8 @@ pub struct DirtyEntry {
     /// each symbol's heritage and enum-variant references; `5` preserves all
     /// field reads and function return types; `6` keys the fragment id by
     /// route; `7` adds each function symbol's `RawFunctionMeta.flags` and
-    /// the file's raw records (`OverlayFileRecords`). Readers MUST
+    /// the file's raw records (`OverlayFileRecords`); `8` adds each
+    /// symbol's `RawNode.type_annotation`. Readers MUST
     /// dispatch on this — decoding a bin as another version is
     /// undefined under rkyv.
     #[serde(default = "default_fragment_format")]
@@ -67,10 +68,10 @@ pub const FRAGMENT_FORMAT_V5: u32 = 5;
 /// v6 is the v5 bin under a fragment id that hashes the route key and the
 /// content.
 pub const FRAGMENT_FORMAT_V6: u32 = 6;
-/// Current fragment bin encoding version written by `overlay_writer`: v6
-/// plus each symbol's `RawFunctionMeta.flags` and the file's raw records
-/// (path literals, SQL references, transaction scopes, schema fields, event
-/// topics: `OverlayFileRecords`), each endpoint bound, the file's C5
+/// Fragment bins of v6 plus each symbol's `RawFunctionMeta.flags` and the
+/// file's raw records (path literals, SQL references, transaction scopes,
+/// schema fields, event topics: `OverlayFileRecords`), each endpoint
+/// bound, the file's C5
 /// language after parse (`ParsedLanguage::to_bytes`, or `ABSENT` when the
 /// parse decided none), each symbol's raw `RawNode.decorators`, parser
 /// markers included, and each callable's `RawFunctionMeta.params`, the last
@@ -86,6 +87,16 @@ pub const FRAGMENT_FORMAT_V6: u32 = 6;
 /// bin whose language bytes are neither `ABSENT` nor a pair
 /// `ParsedLanguage::from_bytes` accepts fails the archive check too.
 pub const FRAGMENT_FORMAT_V7: u32 = 7;
+/// Current fragment bin encoding version written by `overlay_writer`: v7
+/// plus each symbol's `RawNode.type_annotation`, the last field of
+/// `FragmentSymbol`, from which the overlay rebuilds the symbol's
+/// `type_annotation` `Accesses` edges. A V7 bin holds symbols one field
+/// shorter, so it is never decoded as V8: the reader skips a V7 entry and
+/// the freshness gate re-parses its file.
+pub const FRAGMENT_FORMAT_V8: u32 = 8;
+/// The fragment encoding this binary writes, and the only one its readers
+/// accept. A new encoding adds a `FRAGMENT_FORMAT_V<n>` and moves this.
+pub const FRAGMENT_FORMAT: u32 = FRAGMENT_FORMAT_V8;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymbolRef {
@@ -183,8 +194,8 @@ pub struct DirtyEventEntry {
     pub parse_failed: bool,
     #[serde(default)]
     pub dirty_symbols: Vec<SymbolRef>,
-    /// The fragment bin encoding (`FRAGMENT_FORMAT_V6`). Readers dispatch on
-    /// it, as for [`DirtyEntry::format`].
+    /// The fragment bin encoding ([`FRAGMENT_FORMAT`] for a bin this
+    /// binary writes). Readers dispatch on it, as for [`DirtyEntry::format`].
     pub format: u32,
 }
 

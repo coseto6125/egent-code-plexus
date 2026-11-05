@@ -5,9 +5,10 @@
 
 use super::{
     base_function_meta, construction_target, emit_closure_references, fragment_emits, reason_index,
-    span_of, CallGap, DirtyNamesake, OverlayFileInput, OverlaySymbol, SourceReader, ViewEdge,
-    ViewNode, CS_STRICTEST_FLAGS, GAP_CS_ACCESS_DIRTY_TARGET, GAP_CS_EXTENSION_DIRTY_DECLARATION,
-    GAP_CS_PARTIAL_BARE_CALL,
+    span_of, type_annotation_targets, AnnotatedDecl, CallGap, DirtyNamesake, OverlayFileInput,
+    OverlaySymbol, SourceReader, ViewEdge, ViewNode, CS_STRICTEST_FLAGS,
+    GAP_CS_ACCESS_DIRTY_TARGET, GAP_CS_EXTENSION_DIRTY_DECLARATION, GAP_CS_PARTIAL_BARE_CALL,
+    TYPE_ANNOTATION_REASON,
 };
 use crate::analyzer::csharp_access::{self, CallAccess};
 use crate::analyzer::csharp_extension::{self, ReceiverSite};
@@ -367,6 +368,7 @@ impl<'a> OverlayFacts<'a> {
             let first = offset;
             let start = base_len + first as u32;
             let rust_file = is_rust_source(std::path::Path::new(&file.rel_path));
+            let csharp_file = Language::from_normalized_path(&file.rel_path) == Language::CSharp;
             for symbol in &file.symbols {
                 let node = &nodes[offset];
                 let virt = base_len + offset as u32;
@@ -400,7 +402,14 @@ impl<'a> OverlayFacts<'a> {
                     }
                 }
                 exported.push(symbol.is_exported);
-                if let Some(return_type) = symbol.return_type.as_deref() {
+                // As the index's `pass1_8_function_metas`: a C# field or
+                // property types a receiver by its declared type, which
+                // another `partial` part reads.
+                let return_type = match (symbol.return_type.as_deref(), symbol.kind) {
+                    (None, NodeKind::Property) if csharp_file => symbol.type_annotation.as_deref(),
+                    (return_type, _) => return_type,
+                };
+                if let Some(return_type) = return_type {
                     dirty_return_types.insert(base_len + offset as u32, return_type);
                 }
                 if let Some(flags) = symbol.flags {
@@ -2179,7 +2188,7 @@ impl<'a> OverlayFacts<'a> {
             .iter()
             .filter(|edge| {
                 RelType::from(&edge.rel_type) == RelType::Accesses
-                    && edge.reason.resolve(pool) == "type_annotation"
+                    && edge.reason.resolve(pool) == TYPE_ANNOTATION_REASON
             })
             .map(|edge| edge.target.to_native());
         match (types.next(), types.next()) {
@@ -2473,8 +2482,9 @@ impl TypeFacts for OverlayFacts<'_> {
     /// archived `FunctionMeta`, which the index wrote from the same
     /// `RawFunctionMeta.return_type`; a clean C# field or property's from
     /// its type's `Accesses` edge ([`Self::base_property_type`]). A base node
-    /// of a dirty file is stale. A dirty field or property has no type
-    /// fact: its fragment carries no `type_annotation` (overlay P2b).
+    /// of a dirty file is stale. A dirty C# field or property's from its
+    /// fresh `type_annotation`, as the index notes it; one of another
+    /// language has no type fact, as in the index.
     fn return_type_of(&self, callee: u32) -> Option<&str> {
         if callee >= self.base_len() {
             return self.dirty_return_types.get(&callee).copied();
@@ -2607,6 +2617,7 @@ fn resolve_overlay_name_ref(
 ) -> Option<(u32, f32)> {
     let base_metas = RefCell::new(base_metas);
     ladder::name_ref(
+        facts,
         facts,
         &file.rel_path,
         caller.language,
@@ -5230,6 +5241,7 @@ fn archived_meta(graph: &ArchivedZeroCopyGraph, idx: u32) -> Option<RawFunctionM
             .collect(),
         return_type: String::new(),
         decorators: Vec::new(),
+        type_params: Vec::new(),
     })
 }
 
@@ -5303,6 +5315,7 @@ fn resolve_overrides(
                         params: symbol.params.clone(),
                         return_type: String::new(),
                         decorators: Vec::new(),
+                        type_params: Vec::new(),
                     })
                 })
                 .collect()
@@ -5688,6 +5701,9 @@ pub(super) fn resolve_edges(
         // both successful and unresolved lookups without rebuilding paths.
         let module_calls: RefCell<ModuleCalls<'_>> = RefCell::default();
         let mut variant_cache = VariantCache::default();
+        // One type lookup per distinct annotation name of a file: the
+        // lookup reads the file, never the declaration.
+        let mut annotation_types: FxHashMap<&str, Option<(u32, f32)>> = FxHashMap::default();
         let caller = file_metas[file_ord];
         // Most files declare no base anywhere: their symbols skip the
         // enclosing-class scan.
@@ -5991,6 +6007,42 @@ pub(super) fn resolve_edges(
                 }
             }
 
+            // The index's Pass 2 `type_annotation` edges, after its calls.
+            let decl = AnnotatedDecl {
+                language: caller.language,
+                kind: sym.kind,
+                type_annotation: sym.type_annotation.as_deref(),
+                owner_class: sym.owner_class.as_deref(),
+                return_type: sym.return_type.as_deref(),
+                params: &sym.params,
+                type_params: &sym.type_params,
+            };
+            for (target, confidence) in type_annotation_targets(decl, |name| {
+                *annotation_types.entry(name).or_insert_with(|| {
+                    resolve_type(
+                        graph,
+                        name,
+                        file_ord,
+                        &file.imports,
+                        caller,
+                        &mut base_metas,
+                        (&types, &qualifiers),
+                        nodes,
+                        replaced,
+                        dirty_base,
+                        &facts,
+                    )
+                })
+            }) {
+                emit(ViewEdge {
+                    source: from,
+                    target,
+                    rel_type: RelType::Accesses,
+                    confidence,
+                    reason: TYPE_ANNOTATION_REASON,
+                });
+            }
+
             // The index's Pass 2 `field_reads` loop. `variant_refs`
             // is its legacy field name: v5 preserves every raw read,
             // including tagged name references and ordinary fields.
@@ -6186,6 +6238,8 @@ mod tests {
             flags: None,
             decorators: Vec::new(),
             params: Vec::new(),
+            type_annotation: None,
+            type_params: Vec::new(),
         };
         let file = OverlayFileInput {
             parsed_language: None,

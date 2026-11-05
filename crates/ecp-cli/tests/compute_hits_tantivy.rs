@@ -162,6 +162,10 @@ fn compute_hits_populates_one_hop_callers_and_callees() {
         vec!["tokenize".to_string()],
         "callees should be drawn from out_edges via CSR"
     );
+    // Each listed name carries the file it is declared in, which the hook
+    // proves before it names the caller or callee.
+    assert_eq!(parse_config.caller_files, vec!["src/config.rs"; 2]);
+    assert_eq!(parse_config.callee_files, vec!["src/config.rs"]);
 }
 
 #[test]
@@ -179,8 +183,10 @@ fn format_hits_emits_legacy_style_called_by_and_calls_block() {
         signature: "Function parseConfig".to_string(),
         caller_count: 2,
         callers: vec!["loadSettings".to_string(), "initApp".to_string()],
+        caller_files: vec!["src/settings.rs".to_string(), "src/app.rs".to_string()],
         callee_count: 1,
         callees: vec!["tokenize".to_string()],
+        callee_files: vec!["src/config.rs".to_string()],
         category: ecp_core::graph::FileCategory::Source,
     };
     let out = format_hits(&[hit]);
@@ -210,8 +216,10 @@ fn format_hits_skips_empty_caller_callee_lines() {
         signature: "Function orphan".to_string(),
         caller_count: 0,
         callers: vec![],
+        caller_files: vec![],
         callee_count: 0,
         callees: vec![],
+        callee_files: vec![],
         category: ecp_core::graph::FileCategory::Source,
     };
     let out = format_hits(&[hit]);
@@ -233,8 +241,13 @@ fn hit_with_callers(caller_count: usize, callers: &[&str]) -> Hit {
         signature: "Function overloaded".to_string(),
         caller_count,
         callers: callers.iter().map(|c| c.to_string()).collect(),
+        caller_files: callers
+            .iter()
+            .map(|_| "src/config.rs".to_string())
+            .collect(),
         callee_count: 0,
         callees: vec![],
+        callee_files: vec![],
         category: ecp_core::graph::FileCategory::Source,
     }
 }
@@ -273,6 +286,10 @@ fn hit_with_callees(callee_count: usize, callees: &[&str]) -> Hit {
     Hit {
         callee_count,
         callees: callees.iter().map(|c| c.to_string()).collect(),
+        callee_files: callees
+            .iter()
+            .map(|_| "src/config.rs".to_string())
+            .collect(),
         ..hit_with_callers(0, &[])
     }
 }

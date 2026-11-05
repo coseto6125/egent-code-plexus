@@ -118,6 +118,15 @@ pub struct FragmentSymbol {
     /// span a meta carries, flat as `[name1, type1, ...]`; empty otherwise.
     /// The overlay matches a dirty method's `Overrides` signature on them.
     pub params: Vec<String>,
+    /// `RawNode::type_annotation` as the parser wrote it, for every node:
+    /// the overlay rebuilds the node's `type_annotation` `Accesses` edges
+    /// from it, `params` and `return_type`. The V8 field.
+    pub type_annotation: Option<String>,
+    /// `RawFunctionMeta::type_params` of a function, method or constructor
+    /// whose span a meta carries: its own generic names plus its enclosing
+    /// type's; empty otherwise. The overlay skips them when it binds the
+    /// node's `type_annotation` edges. Part of V8 (unreleased).
+    pub type_params: Vec<String>,
 }
 
 /// The symbol shape of the v2 and v3 fragment bins (`FragmentSymbol` before
@@ -138,7 +147,7 @@ pub struct FragmentSymbolV3 {
 /// file-level imports and export aliases for query-time Tier-2
 /// (import-scoped) resolution, and the raw records the overlay's per-file
 /// replay rebuilds the record outputs from, and the language the parse
-/// decided. `DirtyEventEntry.format == FRAGMENT_FORMAT_V7` marks bins of
+/// decided. `DirtyEventEntry.format == FRAGMENT_FORMAT_V8` marks bins of
 /// this shape — readers MUST dispatch on the manifest marker, not guess the
 /// encoding.
 #[derive(Archive, Serialize, Deserialize, Debug, Clone)]
@@ -248,6 +257,10 @@ pub fn fragment_file_from_local_graph(graph: &LocalGraph) -> FragmentFile {
                     flags: meta.map(|meta| meta.flags),
                     decorators: n.decorators.clone(),
                     params: meta.map(|meta| meta.params.clone()).unwrap_or_default(),
+                    type_annotation: n.type_annotation.clone(),
+                    type_params: meta
+                        .map(|meta| meta.type_params.clone())
+                        .unwrap_or_default(),
                 }
             })
             .collect(),
@@ -675,7 +688,7 @@ fn write_fragment_file(
         content_hash: Some(content_hash),
         parse_failed,
         dirty_symbols,
-        format: ecp_core::session::overlay::FRAGMENT_FORMAT_V7,
+        format: ecp_core::session::overlay::FRAGMENT_FORMAT,
     };
 
     let outcome = FragmentOutcome {
@@ -755,7 +768,7 @@ fn write_fragment_from_graph(
         content_hash: Some(content_hash),
         parse_failed,
         dirty_symbols: symbols_from_graph(graph, &rel_path),
-        format: ecp_core::session::overlay::FRAGMENT_FORMAT_V7,
+        format: ecp_core::session::overlay::FRAGMENT_FORMAT,
     };
     let outcome = FragmentOutcome {
         fragment_id,
@@ -908,7 +921,7 @@ impl OverlayWriter {
                 content_hash: Some(content_hash.to_string()),
                 parse_failed,
                 dirty_symbols,
-                format: ecp_core::session::overlay::FRAGMENT_FORMAT_V7,
+                format: ecp_core::session::overlay::FRAGMENT_FORMAT,
             },
         );
         DirtyEvents::write_atomic(&manifest_path, &manifest)
@@ -1118,6 +1131,39 @@ mod flags_tests {
         assert!(
             non_callable.iter().all(|s| s.flags.is_none()),
             "{non_callable:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod type_annotation_tests {
+    use super::*;
+
+    /// Stands for: a fragment keeps each node's `RawNode.type_annotation` as
+    /// the parse wrote it, a property's included, so the overlay rebuilds
+    /// the node's `type_annotation` edges from the text the index reads.
+    #[test]
+    fn test_fragment_file_from_local_graph_symbols_keep_raw_type_annotation() {
+        let source = b"class St {}\nclass Owner {\n    var f: St?\n    func take(a: St) {}\n}\n";
+        let graph = parse_graph("Sources/App.swift", source, SizeCap::BUILT_IN).unwrap();
+
+        let fragment = fragment_file_from_local_graph(&graph);
+
+        let kept: Vec<(&str, Option<&str>)> = fragment
+            .symbols
+            .iter()
+            .map(|s| (s.name.as_str(), s.type_annotation.as_deref()))
+            .collect();
+        let parsed: Vec<(&str, Option<&str>)> = graph
+            .nodes
+            .iter()
+            .map(|n| (n.name.as_str(), n.type_annotation.as_deref()))
+            .collect();
+        assert_eq!(kept, parsed);
+        assert!(
+            kept.iter()
+                .any(|&(name, ann)| name == "f" && ann.is_some_and(|ann| ann.contains("St"))),
+            "{kept:?}"
         );
     }
 }

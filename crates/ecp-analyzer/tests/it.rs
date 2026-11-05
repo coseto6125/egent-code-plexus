@@ -8,8 +8,12 @@ mod import_scope_support;
 mod instantiation_calls_support;
 mod name_ref_support;
 mod overrides_support;
+mod qualified_function_reference;
+mod qualified_function_reference_modules;
+mod qualified_function_reference_types;
 mod receiver_typing_support;
 mod sfc_helpers;
+mod type_annotation_params;
 mod uid_chain_support;
 
 mod annotation_type_members;

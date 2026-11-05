@@ -1,9 +1,14 @@
 use chrono::Utc;
-use ecp_core::peer::registry::{alive_peers, SESSION_LIVE_TTL_MINS};
+use ecp_core::peer::registry::{alive_peers, split_session_dir_name, SESSION_LIVE_TTL_MINS};
 use ecp_core::registry::atomic_write_json;
 use ecp_core::session::SessionMeta;
 use std::fs;
 use tempfile::tempdir;
+
+/// A session dir name: `<sid>~<h8>`, the only shape `alive_peers` lists.
+fn peer_dir(id: &str) -> String {
+    format!("{id}~aaaaaaaa")
+}
 
 fn write_meta(root: &std::path::Path, id: &str, pid: u32) {
     write_meta_full(root, id, Some(pid), None, Utc::now().to_rfc3339());
@@ -16,11 +21,11 @@ fn write_meta_full(
     watcher_pid: Option<u32>,
     last_touched: String,
 ) {
-    let dir = root.join("sessions").join(id);
+    let dir = root.join("sessions").join(peer_dir(id));
     fs::create_dir_all(&dir).unwrap();
     let meta = SessionMeta {
         version: 1,
-        session_id: id.into(),
+        session_id: peer_dir(id),
         pid,
         started_at: Utc::now().to_rfc3339(),
         last_touched,
@@ -51,12 +56,12 @@ fn alive_peers_excludes_self_and_idle_sessions() {
         ago(SESSION_LIVE_TTL_MINS + 5),
     );
 
-    let peers = alive_peers(dir.path(), "self");
+    let peers = alive_peers(dir.path(), &peer_dir("self"));
     let ids: Vec<_> = peers.iter().map(|p| p.session_id.as_str()).collect();
-    assert!(ids.contains(&"alive_peer"));
-    assert!(!ids.contains(&"self"));
+    assert!(ids.contains(&peer_dir("alive_peer").as_str()));
+    assert!(!ids.contains(&peer_dir("self").as_str()));
     assert!(
-        !ids.contains(&"idle_peer"),
+        !ids.contains(&peer_dir("idle_peer").as_str()),
         "a dead pid with no activity inside the TTL is a corpse"
     );
 }
@@ -69,11 +74,11 @@ fn alive_peers_keeps_dead_pid_when_recently_touched() {
     let dir = tempdir().unwrap();
     write_meta_full(dir.path(), "stateless", Some(999_999_999), None, ago(1));
 
-    let ids: Vec<_> = alive_peers(dir.path(), "self")
+    let ids: Vec<_> = alive_peers(dir.path(), &peer_dir("self"))
         .into_iter()
         .map(|p| p.session_id)
         .collect();
-    assert_eq!(ids, vec!["stateless".to_string()]);
+    assert_eq!(ids, vec![peer_dir("stateless")]);
 }
 
 /// The watch path enrols with `pid: null`. Dropping those made every
@@ -89,7 +94,7 @@ fn alive_peers_keeps_null_pid_when_watcher_alive() {
         ago(SESSION_LIVE_TTL_MINS + 5),
     );
 
-    let peers = alive_peers(dir.path(), "self");
+    let peers = alive_peers(dir.path(), &peer_dir("self"));
     assert_eq!(peers.len(), 1, "a live watcher keeps its session visible");
     assert!(peers[0].watcher_alive);
     assert_eq!(peers[0].pid, None);
@@ -107,7 +112,7 @@ fn alive_peers_drops_null_pid_when_watcher_dead_and_idle() {
     );
 
     assert!(
-        alive_peers(dir.path(), "self").is_empty(),
+        alive_peers(dir.path(), &peer_dir("self")).is_empty(),
         "no live watcher and no recent activity means the session is gone"
     );
 }
@@ -116,7 +121,7 @@ fn alive_peers_drops_null_pid_when_watcher_dead_and_idle() {
 fn alive_peers_empty_when_no_sessions() {
     let dir = tempdir().unwrap();
     fs::create_dir_all(dir.path().join("sessions")).unwrap();
-    assert!(alive_peers(dir.path(), "self").is_empty());
+    assert!(alive_peers(dir.path(), &peer_dir("self")).is_empty());
 }
 
 #[test]
@@ -135,11 +140,11 @@ fn pid_alive_returns_false_for_pid_zero_and_one() {
 #[test]
 fn alive_peers_skips_session_with_unparseable_timestamp() {
     let dir = tempdir().unwrap();
-    let s = dir.path().join("sessions/broken");
+    let s = dir.path().join("sessions/broken~aaaaaaaa");
     fs::create_dir_all(&s).unwrap();
     let meta = SessionMeta {
         version: 1,
-        session_id: "broken".into(),
+        session_id: "broken~aaaaaaaa".into(),
         pid: Some(std::process::id()),
         started_at: Utc::now().to_rfc3339(),
         last_touched: "this-is-not-a-timestamp".into(),
@@ -151,9 +156,71 @@ fn alive_peers_skips_session_with_unparseable_timestamp() {
         agent_name: None,
     };
     atomic_write_json(&s.join("session_meta.json"), &meta).unwrap();
-    let peers = alive_peers(dir.path(), "self");
+    let peers = alive_peers(dir.path(), &peer_dir("self"));
     assert!(
-        peers.iter().all(|p| p.session_id != "broken"),
+        peers.iter().all(|p| p.session_id != "broken~aaaaaaaa"),
         "session with unparseable timestamp must be filtered out"
     );
+}
+
+#[test]
+fn test_split_session_dir_name_accepts_exactly_sid_tilde_eight_lowercase_hex() {
+    assert_eq!(
+        split_session_dir_name("alice~1234abcd"),
+        Some(("alice", "1234abcd"))
+    );
+    assert_eq!(
+        split_session_dir_name("alice~worker~1234abcd"),
+        Some(("alice~worker", "1234abcd")),
+        "a sid that holds `~` splits at the last one"
+    );
+}
+
+#[test]
+fn test_split_session_dir_name_rejects_every_non_conforming_shape() {
+    for bad in [
+        "",
+        "alice",
+        "alice~",
+        "~1234abcd",
+        "alice~1234abc",
+        "alice~1234abcde",
+        "alice~1234ABCD",
+        "alice~1234abcg",
+        "alice~1234abcd.dead.1700000000",
+        "alice~1234abcd.stale-ff00",
+        ".alice~1234abcd",
+        "alice~1234abcd~",
+    ] {
+        assert_eq!(split_session_dir_name(bad), None, "{bad:?} was accepted");
+    }
+}
+
+#[test]
+fn test_alive_peers_legacy_bare_dir_beside_live_one_lists_only_the_live_one() {
+    let dir = tempdir().unwrap();
+    let legacy = dir.path().join("sessions/alice");
+    fs::create_dir_all(&legacy).unwrap();
+    write_meta(dir.path(), "alice", std::process::id());
+    let meta = fs::read(
+        dir.path()
+            .join("sessions")
+            .join(peer_dir("alice"))
+            .join("session_meta.json"),
+    )
+    .unwrap();
+    fs::write(legacy.join("session_meta.json"), meta).unwrap();
+
+    let ids: Vec<_> = alive_peers(dir.path(), "")
+        .into_iter()
+        .map(|p| p.session_id)
+        .collect();
+
+    assert_eq!(ids, vec![peer_dir("alice")]);
+}
+
+#[test]
+fn test_alive_peers_missing_sessions_dir_is_empty() {
+    let dir = tempdir().unwrap();
+    assert!(alive_peers(dir.path(), "").is_empty());
 }

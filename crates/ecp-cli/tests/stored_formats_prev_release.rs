@@ -46,7 +46,7 @@ use ecp_core::session::layout;
 use ecp_core::session::merged::MergedGraph;
 use ecp_core::session::overlay::SymbolKind;
 use ecp_core::session::{
-    DirtyEvents, DirtyFiles, OverlayFileInput, SessionMeta, SessionState, FRAGMENT_FORMAT_V7,
+    DirtyEvents, DirtyFiles, OverlayFileInput, SessionMeta, SessionState, FRAGMENT_FORMAT_V8,
     OVERLAY_EDGE_REASON, VIEW_CACHE_FORMAT,
 };
 use std::collections::HashMap;
@@ -129,7 +129,7 @@ fn writer_manifest_is_current() -> bool {
 
 fn writer_fragments_are_current() -> bool {
     BUILDER_FINGERPRINT == WRITER_FINGERPRINT
-        && FRAGMENT_FORMAT_V7 == WRITER_FRAGMENT_FORMAT
+        && FRAGMENT_FORMAT_V8 == WRITER_FRAGMENT_FORMAT
         && writer_manifest_is_current()
 }
 
@@ -1060,4 +1060,276 @@ fn test_view_cache_written_by_0_16_4_misses_under_todays_key_and_matches_a_rebui
         .redirect(base_compute)
         .expect("compute was edited, not deleted");
     assert_eq!(end(successor), at("compute", "pkg/core.py"));
+}
+
+// ── Session dir written by 0.17.3, read by the worktree-keyed layout ────────
+//
+// `fixtures/session-written-by-0.17.3/` holds `sessions/v0173sess/` exactly as
+// the installed 0.17.3 binary left it after two queries, one in each of two
+// worktrees of one repo under ONE session id (README there). The old layout
+// had one slot per session, so the second query replaced the first worktree's
+// manifest: the dir names only `lib.py`.
+//
+// Written before the run. This sample cannot show: worktrees on different
+// commits (the old rebase and wipe path), a fragment of one worktree that
+// carries another worktree's mtime, more than two worktrees, an old dir that
+// holds a peer inbox or `msg.log`, or a session whose `base_sha` is not
+// indexed. Pass/fail: the bug is a query that reads the old dir (it prints
+// `l1.refreshed written=0`, or the old bytes change); the fix is two new
+// qualified dirs that each hold exactly their own worktree's entry, an old
+// dir byte-identical to the fixture, and a sweep that removes only the old
+// dir once it is idle.
+
+mod session_written_by_0_17_3 {
+    use ecp_cli::admin::gc::sweep_sessions;
+    use ecp_cli::repo_identity::repo_dir_name_for_cwd;
+    use ecp_cli::session::resolver::session_dir_name;
+    use ecp_core::session::{layout, DirtyEvents, SessionMeta};
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
+
+    const OLD_SID: &str = "v0173sess";
+
+    fn fixture_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/session-written-by-0.17.3")
+    }
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z")
+            .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn ecp(home: &Path, with_session: bool) -> Command {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ecp"));
+        cmd.env("HOME", home)
+            .env("ECP_SKIP_BG_REBUILD", "1")
+            .env_remove("ECP_HOME")
+            .env_remove("CLAUDE_CODE_SESSION_ID")
+            .env_remove("CODEX_SESSION_ID")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("GEMINI_CLI_SESSION_ID")
+            .env_remove("ECP_SESSION_ID");
+        if with_session {
+            cmd.env("ECP_SESSION_ID", OLD_SID);
+        }
+        cmd
+    }
+
+    fn find(home: &Path, worktree: &Path, name: &str) -> (String, String) {
+        let out = ecp(home, true)
+            .args(["find", name, "--format", "json", "--repo"])
+            .arg(worktree)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    }
+
+    /// The hook names the session through its input, as Claude Code does.
+    fn hook(home: &Path, worktree: &Path, pattern: &str) -> String {
+        let envelope = serde_json::json!({
+            "session_id": OLD_SID,
+            "cwd": worktree,
+            "tool_name": "Grep",
+            "tool_input": {"pattern": pattern},
+        })
+        .to_string();
+        let mut child = ecp(home, false)
+            .args(["hook", "pre-tool-use", "--claude-code"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(envelope.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    fn snapshot(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+        fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
+            for entry in fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(root, &path, out);
+                } else {
+                    let rel = path.strip_prefix(root).unwrap().to_string_lossy();
+                    out.insert(rel.into_owned(), fs::read(&path).unwrap());
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        walk(dir, dir, &mut out);
+        out
+    }
+
+    fn manifest_paths(session_dir: &Path) -> Vec<String> {
+        let events = DirtyEvents::read(&layout::dirty_events_path(session_dir)).unwrap();
+        events.entries.into_keys().collect()
+    }
+
+    #[test]
+    fn test_session_dir_written_by_0_17_3_is_not_read_by_hook_and_is_swept_when_idle() {
+        let fixture = fixture_dir();
+        let old_meta = SessionMeta::read(
+            &fixture
+                .join("sessions")
+                .join(OLD_SID)
+                .join("session_meta.json"),
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let repo = tmp.path().join("repo");
+        let wt_b = tmp.path().join("wt-b");
+        fs::create_dir_all(&repo).unwrap();
+        for file in ["app.py", "lib.py"] {
+            fs::copy(fixture.join("source/committed").join(file), repo.join(file)).unwrap();
+        }
+        git(&repo, &["init", "-q", "-b", "master"]);
+        git(&repo, &["add", "."]);
+        git(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-qm", "init"],
+        );
+        assert_eq!(
+            git(&repo, &["rev-parse", "HEAD"]),
+            old_meta.base_sha,
+            "the fixture's commit id no longer reproduces: the old dir would name another commit"
+        );
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "side",
+                wt_b.to_str().unwrap(),
+            ],
+        );
+        let indexed = ecp(&home, true)
+            .args(["admin", "index", "--repo"])
+            .arg(&repo)
+            .output()
+            .unwrap();
+        assert!(indexed.status.success());
+
+        let repo_dir = home
+            .join(".ecp")
+            .join(repo_dir_name_for_cwd(&repo).unwrap());
+        let sessions = repo_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let old_dir = sessions.join(OLD_SID);
+        copy_tree_into(&fixture.join("sessions").join(OLD_SID), &old_dir);
+        let old_bytes = snapshot(&old_dir);
+
+        fs::copy(
+            fixture.join("source/uncommitted-a/app.py"),
+            repo.join("app.py"),
+        )
+        .unwrap();
+        fs::copy(
+            fixture.join("source/uncommitted-b/lib.py"),
+            wt_b.join("lib.py"),
+        )
+        .unwrap();
+
+        let (found_a, stderr_a) = find(&home, &repo, "keep_me");
+        let (found_b, stderr_b) = find(&home, &wt_b, "helper_b");
+
+        for stderr in [&stderr_a, &stderr_b] {
+            assert!(
+                stderr.contains("l1.refreshed written=1"),
+                "a query that reads the old dir finds its entry current and writes nothing: {stderr}"
+            );
+            assert!(
+                !stderr.contains("session.promoted") && !stderr.contains("session.rebased"),
+                "{stderr}"
+            );
+        }
+        assert!(found_a.contains("keep_me") && found_b.contains("helper_b"));
+
+        let dir_a = sessions.join(session_dir_name(OLD_SID, &repo));
+        let dir_b = sessions.join(session_dir_name(OLD_SID, &wt_b));
+        assert_ne!(dir_a, dir_b);
+        assert_eq!(
+            manifest_paths(&dir_a),
+            ["app.py"],
+            "worktree A holds only its own file"
+        );
+        assert_eq!(
+            manifest_paths(&dir_b),
+            ["lib.py"],
+            "worktree B holds only its own file"
+        );
+        assert_eq!(
+            snapshot(&old_dir),
+            old_bytes,
+            "no query of the new layout touches the old dir"
+        );
+
+        let ctx_a = hook(&home, &repo, "keep_me");
+        assert!(ctx_a.contains("keep_me (app.py:4)"), "{ctx_a}");
+        let ctx_a_deleted = hook(&home, &repo, "doomed_fn");
+        assert!(
+            !ctx_a_deleted.contains("doomed_fn (app.py:5)"),
+            "{ctx_a_deleted}"
+        );
+        let ctx_b = hook(&home, &wt_b, "helper_b");
+        assert!(ctx_b.contains("helper_b (lib.py:5)"), "{ctx_b}");
+
+        let mut idle = SessionMeta::read(&old_dir.join("session_meta.json")).unwrap();
+        idle.last_touched = (chrono::Utc::now() - chrono::Duration::hours(72)).to_rfc3339();
+        SessionMeta::write_atomic(&old_dir.join("session_meta.json"), &idle).unwrap();
+        let stats = sweep_sessions(&repo_dir, false).unwrap();
+        assert_eq!(stats.marked, 1, "only the old dir is idle");
+        assert!(!old_dir.exists(), "the idle old dir is retired");
+        assert!(dir_a.is_dir() && dir_b.is_dir(), "live qualified dirs stay");
+    }
+
+    fn copy_tree_into(from: &Path, to: &Path) {
+        fs::create_dir_all(to).unwrap();
+        for entry in fs::read_dir(from).unwrap().flatten() {
+            let target = to.join(entry.file_name());
+            if entry.path().is_dir() {
+                copy_tree_into(&entry.path(), &target);
+            } else {
+                fs::copy(entry.path(), &target).unwrap();
+            }
+        }
+    }
 }

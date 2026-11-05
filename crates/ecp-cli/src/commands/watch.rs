@@ -1,7 +1,7 @@
 //! `ecp watch` CLI surface.
 
 use crate::peer::watcher::{run_watcher, WatcherCfg};
-use crate::session::resolver::resolve_session_id;
+use crate::session::resolver::own_session_dir_name;
 use clap::Args;
 use ecp_core::peer::registry::pid_alive;
 use ecp_core::session::SessionMeta;
@@ -33,7 +33,7 @@ pub fn run(args: WatchArgs) -> Result<(), EcpError> {
         Some(p) => p,
         None => default_repo_root()?,
     };
-    let session_id = resolve_session_id(None);
+    let session_id = own_session_dir_name()?;
     ecp_core::registry::validate_cache_component(&session_id)?;
     let session_dir = repo_root.join("sessions").join(&session_id);
     std::fs::create_dir_all(&session_dir)?;
@@ -106,7 +106,11 @@ fn start_background(repo_root: PathBuf, sid: String, session_dir: PathBuf) -> Re
         // already exists. Left empty, the watcher can't find the worktree, so
         // it can't open the graph and SOFT concerns stay off for the session.
         source_worktree: std::env::current_dir()
-            .map(|p| p.to_string_lossy().into_owned())
+            .map(|p| {
+                crate::read_context::worktree_top(&p)
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .unwrap_or_default(),
         overlay_version: 0,
         watcher_pid: None,

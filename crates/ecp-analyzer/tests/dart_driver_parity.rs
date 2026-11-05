@@ -231,9 +231,16 @@ fn test_dart_driver_enum_variables_typedef_function_emit_once_each() {
     assert_eq!(at(&g, 5).content_hash, 12136448907424914801);
     let main = at(&g, 6);
     assert_eq!(main.calls, ["run"]);
+    // `Color.red` is also read as a qualified function value. It resolves to
+    // callables only, so the enum value gets no extra edge.
     assert_eq!(
         main.field_reads,
-        ["red", "\u{1}name Color", "\u{1}variant Color.red"]
+        [
+            "red",
+            "\u{1}fnref Color.red",
+            "\u{1}name Color",
+            "\u{1}variant Color.red"
+        ]
     );
     assert_eq!(main.content_hash, 16262225353354114572);
 }

@@ -95,6 +95,8 @@ fn extract_one(
         params,
         return_type: String::new(),
         decorators,
+        // No generic syntax in this language.
+        type_params: Vec::new(),
     })
 }
 

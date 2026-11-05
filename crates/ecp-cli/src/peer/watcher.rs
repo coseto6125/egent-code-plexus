@@ -284,10 +284,10 @@ impl ManifestStamps {
     }
 }
 
-/// False for `.`-prefixed dirs and for the `<sid>.stale-<sha>` copy that a
-/// base-SHA promotion leaves behind until it is deleted.
+/// True only for a `<sid>~<h8>` dir: not a hidden dir, a retired
+/// `.stale-` / `.dead.` copy, or a 0.17.3 bare `<sid>` dir.
 fn is_live_session_name(sid: &str) -> bool {
-    !sid.starts_with('.') && !sid.contains(".stale-")
+    crate::session::resolver::split_session_dir_name(sid).is_some()
 }
 
 /// Poll period when the native watcher cannot start.
@@ -959,20 +959,28 @@ mod tests {
     #[test]
     fn test_manifest_stamps_changed_skips_stale_and_hidden_sessions() {
         let sessions = tempfile::tempdir().unwrap();
-        for sid in ["alice", "alice.stale-ab12cd34", ".hidden"] {
+        for sid in [
+            "alice~1234abcd",
+            "alice~1234abcd.stale-ab12cd34",
+            "alice~1234abcd.dead.1700000000",
+            "alice",
+            ".hidden~1234abcd",
+        ] {
             write_dirty(&sessions.path().join(sid), &["run"]);
         }
         let mut stamps = ManifestStamps::default();
         assert_eq!(
             stamps.changed(sessions.path()),
-            vec![layout::dirty_events_path(&sessions.path().join("alice"))]
+            vec![layout::dirty_events_path(
+                &sessions.path().join("alice~1234abcd")
+            )]
         );
     }
 
     #[test]
     fn test_manifest_stamps_changed_unchanged_manifest_reported_once() {
         let sessions = tempfile::tempdir().unwrap();
-        write_dirty(&sessions.path().join("alice"), &["run"]);
+        write_dirty(&sessions.path().join("alice~1234abcd"), &["run"]);
         let mut stamps = ManifestStamps::default();
         assert_eq!(stamps.changed(sessions.path()).len(), 1);
         assert!(stamps.changed(sessions.path()).is_empty());
@@ -981,7 +989,7 @@ mod tests {
     #[test]
     fn test_manifest_stamps_changed_removed_session_dropped() {
         let sessions = tempfile::tempdir().unwrap();
-        let alice = sessions.path().join("alice");
+        let alice = sessions.path().join("alice~1234abcd");
         write_dirty(&alice, &["run"]);
         let mut stamps = ManifestStamps::default();
         stamps.changed(sessions.path());

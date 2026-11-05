@@ -6,6 +6,7 @@ use crate::session::{MergedGraph, MergedNode, OverlayView};
 use compact_str::CompactString;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -60,6 +61,10 @@ struct Binding {
     /// `Value` (non-Copy, larger) and is only populated after WITH — frontier
     /// expansion clones the empty default (cheap 56-byte memcpy).
     computed: HashMap<String, Value>,
+    /// A group row of an aggregating WITH: only the WITH's columns are in
+    /// scope, so a MATCH var absent from `computed` is a fresh pattern var, not
+    /// a null from OPTIONAL MATCH.
+    grouped: bool,
 }
 
 /// Reading file content for `.content` projection, plus hot-path caches.
@@ -516,6 +521,7 @@ impl Aggregation {
                 );
                 Binding {
                     computed,
+                    grouped: true,
                     ..Binding::default()
                 }
             })
@@ -1353,6 +1359,7 @@ fn rebind_one(
         node_vars: b.node_vars.clone(),
         edge_vars: b.edge_vars.clone(),
         computed,
+        grouped: false,
     };
     Ok(passes_where(wc.where_.as_ref(), &rebound, graph, cache)?.then_some(rebound))
 }
@@ -2829,8 +2836,16 @@ fn eval_expr(
             let is_null = matches!(v, Value::Null);
             Ok(Value::Bool(is_null ^ negated))
         }
-        ExistsPattern { pattern, negated } => {
-            Ok(Value::Bool(pattern_exists(pattern, b, graph)? ^ negated))
+        ExistsPattern {
+            pattern,
+            negated,
+            outer_vars,
+        } => {
+            let found = match exists_scope(pattern, outer_vars, b) {
+                Some(scope) => pattern_exists(pattern, &scope, graph)?,
+                None => false,
+            };
+            Ok(Value::Bool(found ^ negated))
         }
         Index(base, idx) => {
             let idx = eval_expr(idx, b, graph, cache)?;
@@ -2874,6 +2889,38 @@ fn eval_expr(
             Ok(eval_scalar_funcall(name, args, b, graph))
         }
     }
+}
+
+/// The node bindings an EXISTS pattern sees on row `b`. A pattern var resolves
+/// through a WITH column first (a node, or anything else, which is a null for
+/// the pattern), then through the MATCH vars; a MATCH-declared var this row
+/// left unbound is a null from OPTIONAL MATCH. `None` when one var is null: a
+/// pattern through a null node matches nothing.
+fn exists_scope<'b>(
+    pattern: &Pattern,
+    outer_vars: &[String],
+    b: &'b Binding,
+) -> Option<Cow<'b, Binding>> {
+    let null_when_unbound = |v: &str| !b.grouped && outer_vars.iter().any(|o| o == v);
+    let mut vars = pattern.nodes.iter().filter_map(|n| n.var.as_deref());
+    if b.computed.is_empty() {
+        let through_null = vars.any(|v| !b.node_vars.contains_key(v) && null_when_unbound(v));
+        return (!through_null).then_some(Cow::Borrowed(b));
+    }
+    let mut scope = Binding::default();
+    for v in vars {
+        let idx = match b.computed.get(v) {
+            Some(Value::NodeRef { idx, .. }) => *idx,
+            Some(_) => return None,
+            None => match b.node_vars.get(v) {
+                Some(&idx) => idx,
+                None if null_when_unbound(v) => return None,
+                None => continue,
+            },
+        };
+        scope.node_vars.insert(v, idx);
+    }
+    Some(Cow::Owned(scope))
 }
 
 /// Returns `true` if `pattern` matches at least one path in `graph` given the
@@ -2955,8 +3002,10 @@ fn pattern_exists(
 /// "Does any edge match" for a single-hop pattern with no bound endpoint:
 /// scan the flat edge slice and short-circuit on the first hit.
 fn edge_scan_exists(n0: &NodePat, n1: &NodePat, rel: &RelPat, graph: MergedGraph<'_>) -> bool {
+    // `(a)-[]->(a)`: one var at both ends names one node, a self-edge.
+    let same_node = n0.var.is_some() && n0.var == n1.var;
     let fits = |a: u32, pa: &NodePat, z: u32, pz: &NodePat| {
-        node_matches(a, pa, graph) && node_matches(z, pz, graph)
+        (!same_node || a == z) && node_matches(a, pa, graph) && node_matches(z, pz, graph)
     };
     graph.all_edges().any(|edge| {
         if !rel.types.is_empty() && !rel.types.contains(&edge.rel_type()) {

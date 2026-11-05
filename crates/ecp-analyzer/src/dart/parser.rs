@@ -1,6 +1,6 @@
 use super::receiver_types::{collect_bindings, extract_dart_calls_and_path_literals};
 use super::spec::DartSpec;
-use crate::calls::{NameRefKind, NameRefSpec, VariantRefSpec};
+use crate::calls::{heads_same_kind_parent, NameRefKind, NameRefSpec, VariantRefSpec};
 use crate::driver::{
     self, node, AnonKey, Anonymous, Compiled, DeclSlot, Effect, FieldReads, FileCx, KindCapture,
     Op, ParseSpec, Step, TxRule,
@@ -112,6 +112,40 @@ pub struct DartMatch<'t> {
     var_type: Option<Node<'t>>,
 }
 
+/// The function `Cls.f` in value position, with the whole qualifier:
+/// `Cls.f` records `Cls.f`, `prefix.Cls.f` records `prefix.Cls.f`, and Pass 2
+/// binds it only when the qualifier is the path that encloses the function.
+/// `None` for a qualifier of the member expression above it, and for a
+/// `this` / `super` or other computed object.
+fn member_function_name(member: Node<'_>, source: &[u8], spec: &NameRefSpec) -> Option<String> {
+    if heads_same_kind_parent(member, "object") {
+        return None;
+    }
+    let is_name = |node: Node<'_>| spec.ident_kinds.contains(&node.kind());
+    let mut segments = Vec::new();
+    let mut node = member;
+    loop {
+        match node.kind() {
+            "member_expression" => {
+                segments.push(
+                    node.child_by_field_name("property")
+                        .filter(|&property| is_name(property))?
+                        .utf8_text(source)
+                        .ok()?,
+                );
+                node = node.child_by_field_name("object")?;
+            }
+            _ if is_name(node) => {
+                segments.push(node.utf8_text(source).ok()?);
+                break;
+            }
+            _ => return None,
+        }
+    }
+    segments.reverse();
+    Some(segments.join("."))
+}
+
 impl ParseSpec for DartSpec {
     type Role = DartRole;
     type Match<'t> = DartMatch<'t>;
@@ -168,6 +202,8 @@ impl ParseSpec for DartSpec {
                 "type_arguments",
             ],
             skip_parents: &["label"],
+            qualified_values: &["member_expression"],
+            qualified_name: member_function_name,
             ..NameRefSpec::EMPTY
         },
     });

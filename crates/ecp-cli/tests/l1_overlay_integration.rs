@@ -676,3 +676,75 @@ fn assert_untracked_file_served_by_overlay(lose_sidecar: impl Fn(&Path)) {
         "keeping it out of L2 is only right if the overlay still serves it: {stdout}"
     );
 }
+
+fn dirty_event_manifests(home: &Path) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = WalkDir::new(home)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name() == OsStr::new("dirty_events.json"))
+        .map(|e| e.into_path())
+        .collect();
+    found.sort();
+    found
+}
+
+/// Contract: a query in one worktree leaves every other worktree's overlay
+/// alone, although both run under one session id. Before the session dir was
+/// keyed by worktree, B's query (clean `a.rs`) retired A's entry for `a.rs`.
+#[test]
+fn test_find_sibling_worktree_query_leaves_other_manifest_byte_identical() {
+    let (tmp, repo, home) = init_find_overlay_repo("src/a.rs", "fn alpha() {}\n");
+    std::fs::write(repo.join("src/b.rs"), "fn beta() {}\n").unwrap();
+    for args in [vec!["add", "."], vec!["commit", "-qm", "b"]] {
+        run(
+            Command::new("git").arg("-C").arg(&repo).args(args),
+            "git commit b",
+        );
+    }
+    run(
+        Command::new(ecp_bin())
+            .args(["admin", "index", "--repo"])
+            .arg(&repo)
+            .env("HOME", &home)
+            .env("ECP_HOME", &home),
+        "ecp admin index",
+    );
+    let wt_b = tmp.path().join("wt-b");
+    run(
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["worktree", "add", "-q", "-b", "side"])
+            .arg(&wt_b),
+        "git worktree add",
+    );
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    std::fs::write(repo.join("src/a.rs"), "// moved\nfn alpha() {}\n").unwrap();
+    find_overlay_json(&repo, &home, "alpha", "exact");
+    let first = dirty_event_manifests(&home);
+    assert_eq!(first.len(), 1, "A wrote one manifest: {first:?}");
+    let manifest_a = first[0].clone();
+    let before = std::fs::read(&manifest_a).unwrap();
+    assert!(!before.is_empty());
+
+    std::fs::write(wt_b.join("src/b.rs"), "// moved\nfn beta() {}\n").unwrap();
+    find_overlay_json(&wt_b, &home, "beta", "exact");
+
+    assert_eq!(
+        std::fs::read(&manifest_a).unwrap(),
+        before,
+        "B's query changed A's manifest"
+    );
+    let manifests = dirty_event_manifests(&home);
+    assert_eq!(
+        manifests.len(),
+        2,
+        "B has a manifest of its own: {manifests:?}"
+    );
+    let b_text =
+        std::fs::read_to_string(manifests.iter().find(|p| **p != manifest_a).unwrap()).unwrap();
+    assert!(
+        b_text.contains("src/b.rs") && !b_text.contains("src/a.rs"),
+        "B's manifest holds only B's file: {b_text}"
+    );
+}

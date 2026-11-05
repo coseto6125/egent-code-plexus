@@ -13,6 +13,7 @@ use crate::framework_helpers::{
 };
 use crate::indirect_dispatch::{collect_js_param_names, detect_js_ts_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
+use crate::typescript::parser::qualified_member_value;
 use crate::typescript::receiver_types::{collect_dynamic_imports, literal_specifier};
 use ecp_core::analyzer::parse_prof::Pass;
 use ecp_core::analyzer::provider::LanguageProvider;
@@ -404,6 +405,8 @@ impl ParseSpec for JavaScriptSpec {
                 "type_annotation",
                 "type_arguments",
             ],
+            qualified_values: &["member_expression"],
+            qualified_name: qualified_member_value,
             ..NameRefSpec::EMPTY
         },
     });

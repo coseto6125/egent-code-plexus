@@ -14,7 +14,7 @@ use ecp_cli::session::overlay_reader::{
     accepted_fragments, decode_view_inputs, decode_view_inputs_with_records, view_inputs,
 };
 use ecp_cli::session::overlay_writer::{write_dirty_events, write_dirty_fragments_from_graphs};
-use ecp_cli::session::sources::RecordedSources;
+use ecp_cli::session::sources::{recorded_bytes, recorded_hash, RecordedSources};
 use ecp_cli::session::view_cache::{self, VIEW_CACHE_FILE};
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
 use ecp_core::contracts::dirty_event::PathClass;
@@ -1283,6 +1283,208 @@ fn test_recorded_sources_omitted_file_stays_cacheable_gone_file_not_cacheable() 
         }
         assert_eq!(reads(&f, &[rel]), (vec![None], cacheable), "{rel}");
     }
+}
+
+/// Stands for: a dirty path's recorded hash is its accepted fragment's, even
+/// when the graph records another for the same path; a path with no graph
+/// hash or no graph entry records nothing.
+#[test]
+fn test_recorded_hash_dirty_fragment_wins_over_graph_hash() {
+    let f = Fixture::new();
+    write_hashed_graph(&f);
+    let engine = Engine::load(&f.graph_path).unwrap();
+    let graph = engine.graph().unwrap();
+    let mut dirty: rustc_hash::FxHashMap<&str, u64> = rustc_hash::FxHashMap::default();
+    assert_eq!(
+        recorded_hash(graph, &dirty, CLEAN),
+        Some(xxh3_64(CLEAN_TEXT.as_bytes()))
+    );
+    dirty.insert(CLEAN, 42);
+    assert_eq!(recorded_hash(graph, &dirty, CLEAN), Some(42));
+    assert_eq!(recorded_hash(graph, &dirty, OMITTED), None);
+    assert_eq!(recorded_hash(graph, &dirty, "src/unlisted.rs"), None);
+}
+
+/// Stands for: a missing file proves nothing, not even a recorded empty
+/// text; an empty file proves exactly the empty hash.
+#[test]
+fn test_recorded_bytes_missing_file_returns_none() {
+    let f = Fixture::new();
+    let empty = xxh3_64(b"");
+    assert_eq!(recorded_bytes(&f.worktree, EMPTY, empty), None);
+    write_worktree(&f, EMPTY, b"", 1_000);
+    assert_eq!(recorded_bytes(&f.worktree, EMPTY, empty), Some(Vec::new()));
+    assert_eq!(recorded_bytes(&f.worktree, EMPTY, empty + 1), None);
+}
+
+/// Stands for: the engine proves a hit's file only when the working tree
+/// holds the text `graph.bin` indexed; a changed, gone or hash-less file is
+/// not proven.
+#[test]
+fn test_file_text_is_recorded_clean_graph_only_matching_text_is_proven() {
+    let f = Fixture::new();
+    write_hashed_graph(&f);
+    write_worktree(&f, CLEAN, CLEAN_TEXT.as_bytes(), 1_000);
+    write_worktree(&f, LATIN1, b"// changed\n", 1_000);
+    write_worktree(&f, OMITTED, CLEAN_TEXT.as_bytes(), 1_000);
+    let engine = Engine::load(&f.graph_path).unwrap();
+    let proven = |rel| engine.file_text_is_recorded(&f.worktree, rel);
+    assert!(proven(CLEAN));
+    assert!(!proven(LATIN1));
+    assert!(!proven(GONE));
+    assert!(!proven(OMITTED));
+    assert!(!proven("src/unlisted.rs"));
+}
+
+/// A graph that records each of `files` with its content hash.
+fn write_graph_with_hashes(f: &Fixture, files: &[(&str, &[u8])]) {
+    let mut fx = GraphFixture::new();
+    fx.func(CLEAN, "callee");
+    for (rel, text) in files {
+        let idx = fx.file(rel) as usize;
+        fx.assembly_mut().files[idx].content_hash = graph_hash(text);
+    }
+    fs::write(&f.graph_path, fx.into_bytes()).unwrap();
+}
+
+/// Stands for: a path the graph recorded as a small regular file is now a
+/// FIFO with no writer, a symlink to `/dev/zero`, or a directory. The proof
+/// says "not proven" at once: it neither blocks on the FIFO nor reads the
+/// device without end. The text reader answers the same way.
+#[cfg(unix)]
+#[test]
+fn test_file_text_is_recorded_fifo_device_or_dir_returns_false_without_blocking() {
+    const FIFO: &str = "src/fifo.rs";
+    const ZERO: &str = "src/zero.rs";
+    const DIR: &str = "src/dir.rs";
+    let f = Fixture::new();
+    write_graph_with_hashes(&f, &[(FIFO, &b""[..]), (ZERO, &b""[..]), (DIR, &b""[..])]);
+    let fifo = f.worktree.join(FIFO);
+    fs::create_dir_all(f.worktree.join(DIR)).unwrap();
+    let made = Command::new("mkfifo").arg(&fifo).status().unwrap();
+    assert!(made.success(), "setup: mkfifo");
+    std::os::unix::fs::symlink("/dev/zero", f.worktree.join(ZERO)).unwrap();
+
+    let (graph_path, worktree) = (f.graph_path.clone(), f.worktree.clone());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let engine = Engine::load(&graph_path).unwrap();
+        let empty = xxh3_64(b"");
+        let answers: Vec<(bool, bool)> = [FIFO, ZERO, DIR]
+            .iter()
+            .map(|rel| {
+                (
+                    engine.file_text_is_recorded(&worktree, rel),
+                    recorded_bytes(&worktree, rel, empty).is_some(),
+                )
+            })
+            .collect();
+        let _ = tx.send(answers);
+    });
+    let answers = rx
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap_or_else(|_| {
+            // Release a reader stuck on the FIFO before failing.
+            let _ = fs::OpenOptions::new().write(true).open(&fifo);
+            panic!("the freshness proof blocked on a non-regular file");
+        });
+    assert_eq!(answers, vec![(false, false); 3]);
+}
+
+/// Stands for: a file over the parse cap is never read, so it is not proven
+/// even when its text is the recorded one; once the repo's cap admits it, it
+/// is. The empty env value pins the cap to the repo config.
+#[test]
+fn test_file_text_is_recorded_file_over_size_cap_returns_false_until_cap_admits_it() {
+    if rerun_in_child(
+        "test_file_text_is_recorded_file_over_size_cap_returns_false_until_cap_admits_it",
+        &[("ECP_MAX_FILE_BYTES", "")],
+    ) {
+        return;
+    }
+    let f = Fixture::new();
+    let big = vec![b'a'; ecp_core::config::DEFAULT_MAX_FILE_BYTES as usize + 1];
+    write_graph_with_hashes(&f, &[(CLEAN, big.as_slice())]);
+    write_worktree(&f, CLEAN, &big, 1_000);
+    let engine = Engine::load(&f.graph_path).unwrap();
+    let hash = xxh3_64(&big);
+    assert!(!engine.file_text_is_recorded(&f.worktree, CLEAN));
+    assert_eq!(recorded_bytes(&f.worktree, CLEAN, hash), None);
+
+    fs::create_dir_all(f.worktree.join(".ecp")).unwrap();
+    fs::write(
+        f.worktree.join(".ecp/config.toml"),
+        "[index]\nmax_file_bytes = 2097152\n",
+    )
+    .unwrap();
+    assert!(engine.file_text_is_recorded(&f.worktree, CLEAN));
+    assert_eq!(recorded_bytes(&f.worktree, CLEAN, hash), Some(big));
+}
+
+/// Stands for: the streamed hash reads a file it cannot read as empty, so the
+/// empty hash proves only a file that is empty; a non-empty file recorded
+/// as empty is not proven.
+#[test]
+fn test_file_text_is_recorded_empty_hash_proves_only_an_empty_file() {
+    const FILLED: &str = "src/filled.rs";
+    let f = Fixture::new();
+    write_graph_with_hashes(&f, &[(EMPTY, &b""[..]), (FILLED, &b""[..])]);
+    write_worktree(&f, EMPTY, b"", 1_000);
+    write_worktree(&f, FILLED, b"x", 1_000);
+    let engine = Engine::load(&f.graph_path).unwrap();
+    assert!(engine.file_text_is_recorded(&f.worktree, EMPTY));
+    assert!(!engine.file_text_is_recorded(&f.worktree, FILLED));
+}
+
+/// Stands for: git under `core.autocrlf` checks a file out with CRLF line
+/// endings, or an editor writes it back with LF, and reports it clean, so no
+/// overlay refreshes it, and its lines are the indexed lines. The proof
+/// accepts the indexed text in the other line-ending form and refuses other
+/// text in either form.
+#[test]
+fn test_file_text_is_recorded_line_endings_only_differ_is_proven() {
+    const LF_INDEXED: &str = "src/lf.rs";
+    const CRLF_INDEXED: &str = "src/crlf.rs";
+    const EDITED: &str = "src/edited.rs";
+    let lf: &[u8] = b"fn a() {}\nfn b() {}\n";
+    let crlf: &[u8] = b"fn a() {}\r\nfn b() {}\r\n";
+    let f = Fixture::new();
+    write_graph_with_hashes(&f, &[(LF_INDEXED, lf), (CRLF_INDEXED, crlf), (EDITED, lf)]);
+    write_worktree(&f, LF_INDEXED, crlf, 1_000);
+    write_worktree(&f, CRLF_INDEXED, lf, 1_000);
+    write_worktree(&f, EDITED, b"fn a() {}\r\nfn c() {}\r\n", 1_000);
+    let engine = Engine::load(&f.graph_path).unwrap();
+    assert!(engine.file_text_is_recorded(&f.worktree, LF_INDEXED));
+    assert!(engine.file_text_is_recorded(&f.worktree, CRLF_INDEXED));
+    assert!(!engine.file_text_is_recorded(&f.worktree, EDITED));
+    let graph = engine.graph().unwrap();
+    let none: rustc_hash::FxHashMap<&str, u64> = rustc_hash::FxHashMap::default();
+    let text = |rel| recorded_bytes(&f.worktree, rel, recorded_hash(graph, &none, rel).unwrap());
+    assert_eq!(text(LF_INDEXED).as_deref(), Some(crlf));
+    assert_eq!(text(CRLF_INDEXED).as_deref(), Some(lf));
+    assert_eq!(text(EDITED), None);
+}
+
+/// Stands for: the line-ending forms are hashed in 64 KiB chunks. A CRLF
+/// split by a chunk boundary, and a lone CR that ends the file, keep their
+/// meaning across the cut.
+#[test]
+fn test_file_text_is_recorded_crlf_across_chunk_boundary_and_trailing_cr_is_proven() {
+    const SPLIT: &str = "src/split.rs";
+    const TRAILING: &str = "src/trailing.rs";
+    let head = "a".repeat(64 * 1024 - 1);
+    let split_lf = format!("{head}\nb\n");
+    let split_crlf = format!("{head}\r\nb\r\n");
+    let f = Fixture::new();
+    write_graph_with_hashes(
+        &f,
+        &[(SPLIT, split_lf.as_bytes()), (TRAILING, &b"a\nb\r"[..])],
+    );
+    write_worktree(&f, SPLIT, split_crlf.as_bytes(), 1_000);
+    write_worktree(&f, TRAILING, b"a\r\nb\r", 1_000);
+    let engine = Engine::load(&f.graph_path).unwrap();
+    assert!(engine.file_text_is_recorded(&f.worktree, SPLIT));
+    assert!(engine.file_text_is_recorded(&f.worktree, TRAILING));
 }
 
 const CALLER_RS: &str = "crates/a/src/lib.rs";
