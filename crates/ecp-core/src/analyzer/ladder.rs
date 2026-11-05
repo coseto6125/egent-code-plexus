@@ -1790,13 +1790,32 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
     facts: &F,
     decls: &D,
     caller: &str,
+    imports: &[RawImport],
     callee: &str,
     member: &str,
     target: ResolveTarget,
 ) -> Option<u32> {
-    let TreeItem::Found { file, item } =
-        module_tree_item(facts, caller, callee, Namespace::of(target))?
-    else {
+    let namespace = Namespace::of(target);
+    // Rust 2018: a bare `a::f()` whose head `a` is a module the caller's own
+    // file declares (`mod a;`, `mod a { .. }`) is `self::a::f()`. Tried after
+    // the plain path, so a workspace-crate head keeps its route; never for a
+    // head the caller's `use` names (it may be a renamed re-export); and only
+    // for a declared `Module`, so `Type::new()` is untouched.
+    let placed = module_tree_item(facts, caller, callee, namespace).or_else(|| {
+        let head = callee.split("::").next()?;
+        let imported = imports
+            .iter()
+            .any(|i| i.alias.as_deref().unwrap_or(&i.imported_name) == head);
+        let declared_child = !imported
+            && !matches!(head, "crate" | "self" | "super")
+            && decls
+                .call_decls(caller, head)
+                .any(|(_, kind)| kind == NodeKind::Module);
+        declared_child
+            .then(|| module_tree_item(facts, caller, &format!("self::{callee}"), namespace))
+            .flatten()
+    });
+    let Some(TreeItem::Found { file, item }) = placed else {
         return None;
     };
     let file = file.as_ref();
@@ -4261,7 +4280,7 @@ mod tests {
 
     fn member(tree: &Tree, decls: &Fake, caller: &str, callee: &str) -> Option<u32> {
         let (_, last) = callee.rsplit_once("::").expect("a path");
-        module_tree_member(tree, decls, caller, callee, last, CALLABLE)
+        module_tree_member(tree, decls, caller, &[], callee, last, CALLABLE)
     }
 
     /// R14: a head no crate table row names binds nothing, and neither do

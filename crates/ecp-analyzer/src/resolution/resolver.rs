@@ -763,6 +763,7 @@ impl<'r, 'a> NameTierFacts for IndexTiers<'r, 'a, '_> {
 
     fn module_tree_member(
         &self,
+        imports: &[RawImport],
         callee: &str,
         member: &str,
         target: ResolveTarget,
@@ -772,6 +773,7 @@ impl<'r, 'a> NameTierFacts for IndexTiers<'r, 'a, '_> {
             &resolver.module_tree()?,
             resolver.symbol_table,
             self.source,
+            imports,
             callee,
             member,
             target,

@@ -818,6 +818,19 @@ mixin_trait ruby pre-existing gap
 mixin_trait rust pre-existing gap
 mixin_trait swift pre-existing gap
 mixin_trait typescript pre-existing gap
+mod_rs_paths c only Rust maps a module with children to a mod.rs file
+mod_rs_paths cpp only Rust maps a module with children to a mod.rs file
+mod_rs_paths csharp only Rust maps a module with children to a mod.rs file
+mod_rs_paths dart only Rust maps a module with children to a mod.rs file
+mod_rs_paths go only Rust maps a module with children to a mod.rs file
+mod_rs_paths java only Rust maps a module with children to a mod.rs file
+mod_rs_paths javascript only Rust maps a module with children to a mod.rs file
+mod_rs_paths kotlin only Rust maps a module with children to a mod.rs file
+mod_rs_paths php only Rust maps a module with children to a mod.rs file
+mod_rs_paths python only Rust maps a module with children to a mod.rs file
+mod_rs_paths ruby only Rust maps a module with children to a mod.rs file
+mod_rs_paths swift only Rust maps a module with children to a mod.rs file
+mod_rs_paths typescript only Rust maps a module with children to a mod.rs file
 module_trait c pre-existing gap
 module_trait cpp pre-existing gap
 module_trait csharp pre-existing gap

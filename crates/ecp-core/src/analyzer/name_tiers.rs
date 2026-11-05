@@ -163,7 +163,13 @@ pub trait NameTierFacts {
     ) -> Option<NamedImport>;
     /// The Rust module-tree lookup of the qualified `callee`
     /// ([`ladder::module_tree_member`]); `None` without a tree.
-    fn module_tree_member(&self, callee: &str, member: &str, target: ResolveTarget) -> Option<u32>;
+    fn module_tree_member(
+        &self,
+        imports: &[RawImport],
+        callee: &str,
+        member: &str,
+        target: ResolveTarget,
+    ) -> Option<u32>;
     /// The qualifier tier ([`ladder::qualified`]) for `site`, and the base
     /// a Python `super()` call bound through.
     fn qualified<'h>(
@@ -172,7 +178,7 @@ pub trait NameTierFacts {
         heritage: &'h [String],
     ) -> (Resolution, Option<&'h str>) {
         ladder::qualified(self.qualifiers(), site, heritage, Self::STEM, || {
-            self.module_tree_member(site.callee, site.member, site.target)
+            self.module_tree_member(site.imports, site.callee, site.member, site.target)
         })
     }
     /// The receiver-typing ladder for the qualified `callee` = `qualifier`

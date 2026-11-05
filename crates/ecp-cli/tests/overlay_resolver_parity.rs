@@ -1589,8 +1589,11 @@ fn test_overlay_rust_external_pub_use_return_type_rejects_project_namesake() {
     );
 }
 
+/// Stands for: a bare path whose head is a child module of the caller
+/// (`a::b::foo()` beside `mod a;`) is `self::a::b::foo()`, so both sides bind
+/// `src/a/b.rs`, never the same-named `other::foo`.
 #[test]
-fn test_overlay_rust_unanchored_nested_module_matches_unresolved_reindex() {
+fn test_overlay_rust_bare_nested_module_path_matches_reindex() {
     parity(
         &RustProvider::new().unwrap(),
         &[
@@ -1600,7 +1603,7 @@ fn test_overlay_rust_unanchored_nested_module_matches_unresolved_reindex() {
             ("src/other.rs", "pub fn foo() {}"),
         ],
         &[("src/lib.rs", "mod a; mod other;\nfn run() { a::b::foo(); }")],
-        &[],
+        &[("src/a/b.rs".into(), "foo".into(), "".into(), 100)],
     );
 }
 
