@@ -458,7 +458,7 @@ pub fn type_annotation_targets<'a, T: IntoIterator<Item = (u32, f32)>>(
     };
     let texts = returned
         .into_iter()
-        .chain(params.chunks_exact(2).map(|pair| pair[1].as_str()));
+        .chain(params.as_chunks::<2>().0.iter().map(|[_, ty]| ty.as_str()));
     for text in texts {
         for name in annotation_type_names(language, text) {
             for (target, confidence) in resolve(name) {
