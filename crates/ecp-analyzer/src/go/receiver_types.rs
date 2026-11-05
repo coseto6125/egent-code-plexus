@@ -17,7 +17,7 @@
 use super::path_literals::{build_raw_path_literal, strip_go_string_value};
 use crate::calls::{attach_to_enclosing, node_range, range_width, start_pos, Pos, PosRange};
 use ecp_core::analyzer::types::{CallSite, RawImport, RawNode, RawPathLiteral, RawSqlRef};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
 
 // ── receiver map ─────────────────────────────────────────────────────────────
@@ -173,6 +173,7 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8], recv_map: &ReceiverMap
 }
 
 fn collect_function_scope(function: Node<'_>, source: &[u8], scopes: &mut Vec<Scope>) {
+    let first_scope = scopes.len();
     let mut bindings = HashMap::new();
     let mut values = HashMap::new();
     let scope_start = start_pos(function);
@@ -197,6 +198,12 @@ fn collect_function_scope(function: Node<'_>, source: &[u8], scopes: &mut Vec<Sc
             bindings,
             values,
         });
+    }
+    let type_params = type_param_names(&function, source);
+    if !type_params.is_empty() {
+        for scope in &mut scopes[first_scope..] {
+            scope.bindings.retain(|_, ty| !type_params.contains(ty));
+        }
     }
 }
 
@@ -423,7 +430,13 @@ fn collect_short_var(node: &Node<'_>, source: &[u8], out: &mut HashMap<String, S
         return;
     };
     // right is an `expression_list`; grab first child.
-    let first_rhs = right.named_child(0).unwrap_or(right);
+    let mut first_rhs = right.named_child(0).unwrap_or(right);
+    // `&T{...}` wraps the literal in a unary_expression.
+    if first_rhs.kind() == "unary_expression" {
+        first_rhs = first_rhs
+            .child_by_field_name("operand")
+            .unwrap_or(first_rhs);
+    }
     // composite_literal: type_name { ... }
     if first_rhs.kind() != "composite_literal" {
         return;
@@ -596,23 +609,71 @@ fn go_callee_name(
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-/// Extract the bare type identifier from a type node, stripping pointer `*`.
-/// Returns `None` for generic / qualified types (they can't be matched against
-/// a single class name in the resolver anyway).
+/// Extract the bare type identifier from a type node, stripping pointer `*`
+/// and type arguments (`Wrap[int]` → `Wrap`). Returns `None` for qualified
+/// types (they can't be matched against a single class name in the resolver).
 fn bare_type_name(ty_node: Node<'_>, source: &[u8]) -> Option<String> {
     match ty_node.kind() {
         "type_identifier" => node_text(ty_node, source),
+        "generic_type" => {
+            let base = ty_node.child_by_field_name("type")?;
+            (base.kind() == "type_identifier")
+                .then(|| node_text(base, source))
+                .flatten()
+        }
         "pointer_type" => {
             // pointer_type has one named child: the underlying type.
             let inner = ty_node.named_child(0)?;
-            if inner.kind() == "type_identifier" {
-                node_text(inner, source)
-            } else {
-                None
-            }
+            matches!(inner.kind(), "type_identifier" | "generic_type")
+                .then(|| bare_type_name(inner, source))
+                .flatten()
         }
         _ => None,
     }
+}
+
+/// Names declared as type parameters by `function` — its own
+/// `[T any]` list, or the `[T]` of a generic receiver. Such a name is a
+/// placeholder, so a variable typed `T` must not bind to a struct named `T`.
+fn type_param_names(function: &Node<'_>, source: &[u8]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    if let Some(list) = function.child_by_field_name("type_parameters") {
+        let mut c = list.walk();
+        for decl in list.children(&mut c) {
+            let mut nc = decl.walk();
+            names.extend(
+                decl.children_by_field_name("name", &mut nc)
+                    .filter_map(|n| node_text(n, source)),
+            );
+        }
+    }
+    let receiver_ty = function
+        .child_by_field_name("receiver")
+        .and_then(|r| {
+            r.children(&mut r.walk())
+                .find(|c| c.kind() == "parameter_declaration")
+        })
+        .and_then(|p| p.child_by_field_name("type"))
+        .map(|ty| {
+            if ty.kind() == "pointer_type" {
+                ty.named_child(0).unwrap_or(ty)
+            } else {
+                ty
+            }
+        });
+    if let Some(args) = receiver_ty
+        .filter(|ty| ty.kind() == "generic_type")
+        .and_then(|ty| ty.child_by_field_name("type_arguments"))
+    {
+        let mut stack = vec![args];
+        while let Some(n) = stack.pop() {
+            if n.kind() == "type_identifier" {
+                names.extend(node_text(n, source));
+            }
+            stack.extend(n.children(&mut n.walk()));
+        }
+    }
+    names
 }
 
 /// Decode the UTF-8 text span of `node` from `source`.

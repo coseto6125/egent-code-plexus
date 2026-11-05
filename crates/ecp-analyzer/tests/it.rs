@@ -2,8 +2,10 @@
 //! instead of one per file. A new `tests/<name>.rs` needs `mod <name>;` here.
 
 mod anonymous_callbacks_support;
+mod class_membership_owner;
 mod decorates_support;
 mod driver_parity_support;
+mod go_generic_receiver;
 mod import_scope_support;
 mod instantiation_calls_support;
 mod name_ref_support;
