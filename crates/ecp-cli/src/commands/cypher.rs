@@ -37,12 +37,18 @@ pub struct CypherArgs {
     /// after OPTIONAL MATCH (use `WITH a, b WHERE ...`), ORDER BY outside the
     /// projection, functions other than type/id/labels and the aggregates,
     /// variable-length patterns without DISTINCT in RETURN, with an edge
-    /// variable, or with a minimum above 1, and a materialised MATCH whose
-    /// hops, patterns and clauses build more than 2,000,000 rows in total
-    /// before WHERE and LIMIT (patterns that share no variable, or hops
-    /// through a node with many edges, multiply). The opening scan and its
-    /// first single hop are not counted. Aggregates stream, except past 64
-    /// pattern elements.
+    /// variable, or with a minimum above 1.
+    ///
+    /// Row budgets refuse a query that grows too large. Each hop, pattern and
+    /// clause multiplies the rows before WHERE and LIMIT run. Patterns that
+    /// share no variable, and hops through a node with many edges, multiply
+    /// fastest. A query with ORDER BY, DISTINCT or no LIMIT builds its rows,
+    /// and is refused past 2,000,000 built rows. The opening scan and its
+    /// first single hop are not counted. A plain LIMIT and the aggregates
+    /// stream, and are refused past 20,000,000 visited rows. A plain LIMIT
+    /// stops at its last row. Patterns that share no variable are refused
+    /// before the first row when their row product passes the budget.
+    /// Aggregates past 64 pattern elements build their rows instead.
     ///
     /// Cypher operates on a single graph; --repo must resolve to one repo.
     #[arg(value_name = "QUERY")]
