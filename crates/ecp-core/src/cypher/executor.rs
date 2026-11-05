@@ -1990,9 +1990,9 @@ fn for_each_first_node_seed(np: &NodePat, graph: MergedGraph<'_>, seed: impl FnM
 /// index skips the tombstone the walk matches), an empty index, or a dearer
 /// pass. The hits are counted, up to the slice span, before any is collected.
 fn labelled_name_seeds(np: &NodePat, graph: MergedGraph<'_>) -> Option<Vec<u32>> {
+    let name = inline_name(np)?;
     #[cfg(test)]
     tests::LABELLED_NAME_LOOKUPS.with(|n| n.set(n.get() + 1));
-    let name = inline_name(np)?;
     let span: usize = np
         .kinds
         .iter()
