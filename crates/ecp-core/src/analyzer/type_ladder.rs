@@ -6,7 +6,7 @@
 
 use crate::analyzer::reexport::ResolveTarget;
 use crate::analyzer::same_file_pick::PickFacts;
-use crate::analyzer::types::{RawImport, THIS_MEMBER_PREFIX};
+use crate::analyzer::types::{owner_key, RawImport, THIS_MEMBER_PREFIX};
 use crate::file_category::{FileMeta, Language};
 use crate::graph::NodeKind;
 use std::borrow::Cow;
@@ -403,6 +403,72 @@ pub fn annotation_type_names(language: Language, raw: &str) -> Vec<&str> {
         rest = &rest[skip..];
     }
     names
+}
+
+/// The reason of the `Accesses` edge from a declaration to a type its
+/// annotation names.
+pub const TYPE_ANNOTATION_REASON: &str = "type_annotation";
+
+/// The `(target, confidence)` of every `type_annotation` `Accesses` edge of
+/// one declaration, in emit order: the index's Pass 2 rule, which the
+/// overlay replays for a dirty declaration through this same function.
+/// `resolve` is the declaring file's type lookup (`ResolveTarget::Type`):
+/// it yields every target a name binds (the index passes all of them, the
+/// overlay at most one).
+///
+/// - `type_annotation` (`RawNode.type_annotation`) binds first as one
+///   name ([`return_type_key`]): a declaring-type keyword
+///   (`Self`, `this`, PHP `static`) stands for `owner_class`, so it binds
+///   nothing without an owner; any other text the key does not reduce
+///   is looked up whole.
+/// - A function, method or constructor then binds every name its
+///   generic or container return mentions ([`annotation_type_names`]):
+///   the annotation's when the key does not reduce it, else nothing, and
+///   `return_type` (its function meta's) when the parse captured no
+///   annotation. Then every type of `params`, the meta's flat
+///   `[name, type, ...]` list. A target bound already is not bound again.
+pub fn type_annotation_targets<'a, T: IntoIterator<Item = (u32, f32)>>(
+    language: Language,
+    kind: NodeKind,
+    type_annotation: Option<&'a str>,
+    owner_class: Option<&'a str>,
+    return_type: Option<&'a str>,
+    params: &'a [String],
+    mut resolve: impl FnMut(&'a str) -> T,
+) -> Vec<(u32, f32)> {
+    let mut targets: Vec<(u32, f32)> = Vec::new();
+    if let Some(annotation) = type_annotation {
+        let name = match return_type_key(annotation) {
+            Some(key) if names_declaring_type_in(language, key) => owner_class.and_then(owner_key),
+            Some(key) => Some(key),
+            None => Some(annotation),
+        };
+        targets.extend(name.into_iter().flat_map(&mut resolve));
+    }
+    if !matches!(
+        kind,
+        NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+    ) {
+        return targets;
+    }
+    let returned = match type_annotation {
+        Some(annotation) if return_type_key(annotation).is_none() => Some(annotation),
+        Some(_) => None,
+        None => return_type,
+    };
+    let texts = returned
+        .into_iter()
+        .chain(params.chunks_exact(2).map(|pair| pair[1].as_str()));
+    for text in texts {
+        for name in annotation_type_names(language, text) {
+            for (target, confidence) in resolve(name) {
+                if targets.iter().all(|&(bound, _)| bound != target) {
+                    targets.push((target, confidence));
+                }
+            }
+        }
+    }
+    targets
 }
 
 /// The name of the type a call to `callee` returns, as the callee's own

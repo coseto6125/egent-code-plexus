@@ -39,10 +39,10 @@
 //! |---|---|
 //! | new graph, old parse cache | `BUILDER_FINGERPRINT` (names the parse cache dir) |
 //! | old graph, new parse cache | `GRAPH_FORMAT_VERSION`, `BUILDER_FINGERPRINT` |
-//! | new graph, old fragments | `FRAGMENT_FORMAT_V7`, `DIRTY_EVENTS_FORMAT` |
+//! | new graph, old fragments | `FRAGMENT_FORMAT_V8`, `DIRTY_EVENTS_FORMAT` |
 //! | old manifest, new dirty events | `DIRTY_EVENTS_FORMAT` (the `l1/` namespace) |
 //! | old view cache, new graph | `VIEW_CACHE_FORMAT` (and the key's binary hash) |
-//! | truncated / empty pieces / two sessions / concurrent | `GRAPH_FORMAT_VERSION`, `FRAGMENT_FORMAT_V7` |
+//! | truncated / empty pieces / two sessions / concurrent | `GRAPH_FORMAT_VERSION`, `FRAGMENT_FORMAT_V8` |
 //!
 //! Edge states that do not apply: these tests take no free-text input, so the
 //! list-for-scalar and whitespace-only states have no input to feed. The
@@ -62,7 +62,7 @@ use ecp_cli::repo_identity::repo_dir_name_for_cwd;
 use ecp_core::graph::GRAPH_FORMAT_VERSION;
 use ecp_core::registry::BUILDER_FINGERPRINT;
 use ecp_core::session::overlay::DIRTY_EVENTS_FORMAT;
-use ecp_core::session::{layout, DirtyEvents, DirtyFiles, FRAGMENT_FORMAT_V7};
+use ecp_core::session::{layout, DirtyEvents, DirtyFiles, FRAGMENT_FORMAT_V8};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -525,7 +525,7 @@ fn test_mixed_cache_old_graph_new_parse_cache_rebuilds_graph() {
 /// `pkg/core.py`, or decodes its bytes as V7: `fresh_only` is then missing,
 /// has another line, or the legacy files change. The fix never opens the
 /// legacy namespace (`dirty_files.json`, `graph_overlay/`): the dirty file is
-/// re-parsed into `l1/` as `FRAGMENT_FORMAT_V7`, `find fresh_only` returns it
+/// re-parsed into `l1/` as `FRAGMENT_FORMAT_V8`, `find fresh_only` returns it
 /// at `pkg/core.py:9`, its `Calls` edge reaches `compute`, and the legacy
 /// bytes stay as the writer left them.
 ///
@@ -552,7 +552,7 @@ fn test_mixed_cache_new_graph_old_fragments_dirty_file_reparsed() {
         .entries
         .get("pkg/core.py")
         .expect("pkg/core.py was re-parsed into today's manifest");
-    assert_eq!(entry.format, FRAGMENT_FORMAT_V7);
+    assert_eq!(entry.format, FRAGMENT_FORMAT_V8);
     let bin = fs::read(layout::fragment_path(
         &session,
         entry.fragment_id.as_deref().unwrap(),

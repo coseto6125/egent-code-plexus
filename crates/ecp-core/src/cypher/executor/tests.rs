@@ -989,6 +989,7 @@ fn test_execute_aggregate_streaming_matches_materialising_overlay_optional() {
                     flags: None,
                     decorators: Vec::new(),
                     params: Vec::new(),
+                    type_annotation: None,
                 },
                 OverlaySymbol {
                     is_exported: false,
@@ -1007,6 +1008,7 @@ fn test_execute_aggregate_streaming_matches_materialising_overlay_optional() {
                     flags: None,
                     decorators: Vec::new(),
                     params: Vec::new(),
+                    type_annotation: None,
                 },
             ],
             imports: vec![],
@@ -3749,6 +3751,7 @@ fn test_far_end_name_seeds_with_overlay_keeps_full_scan() {
             flags: None,
             decorators: Vec::new(),
             params: Vec::new(),
+            type_annotation: None,
         }],
         imports: vec![],
     };
@@ -3798,6 +3801,7 @@ fn test_execute_overlay_closure_reference_reports_lexical_reason() {
         flags: None,
         decorators: Vec::new(),
         params: Vec::new(),
+        type_annotation: None,
     };
     let dirty = OverlayFileInput {
         parsed_language: None,
@@ -3977,6 +3981,7 @@ fn test_for_each_first_node_seed_with_overlay_matches_scan_and_hides_suppressed(
             flags: None,
             decorators: Vec::new(),
             params: Vec::new(),
+            type_annotation: None,
         }],
         imports: vec![],
     };
@@ -4062,6 +4067,7 @@ fn test_execute_virtual_function_meta_reads_fragment_flags() {
         flags,
         decorators: Vec::new(),
         params: Vec::new(),
+        type_annotation: None,
     };
     let view = OverlayView::build(
         graph,

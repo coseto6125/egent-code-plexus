@@ -46,7 +46,7 @@ use ecp_core::session::layout;
 use ecp_core::session::merged::MergedGraph;
 use ecp_core::session::overlay::SymbolKind;
 use ecp_core::session::{
-    DirtyEvents, DirtyFiles, OverlayFileInput, SessionMeta, SessionState, FRAGMENT_FORMAT_V7,
+    DirtyEvents, DirtyFiles, OverlayFileInput, SessionMeta, SessionState, FRAGMENT_FORMAT_V8,
     OVERLAY_EDGE_REASON, VIEW_CACHE_FORMAT,
 };
 use std::collections::HashMap;
@@ -129,7 +129,7 @@ fn writer_manifest_is_current() -> bool {
 
 fn writer_fragments_are_current() -> bool {
     BUILDER_FINGERPRINT == WRITER_FINGERPRINT
-        && FRAGMENT_FORMAT_V7 == WRITER_FRAGMENT_FORMAT
+        && FRAGMENT_FORMAT_V8 == WRITER_FRAGMENT_FORMAT
         && writer_manifest_is_current()
 }
 

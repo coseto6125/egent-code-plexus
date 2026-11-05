@@ -2334,6 +2334,7 @@ mod tests {
                     flags: None,
                     decorators: Vec::new(),
                     params: Vec::new(),
+                    type_annotation: None,
                 }],
                 imports: vec![],
             };

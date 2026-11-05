@@ -489,6 +489,7 @@ mod tests {
                 flags: None,
                 decorators: Vec::new(),
                 params: Vec::new(),
+                type_annotation: None,
             }],
             imports: vec![],
         }
@@ -749,6 +750,7 @@ mod tests {
                     flags: None,
                     decorators: Vec::new(),
                     params: Vec::new(),
+                    type_annotation: None,
                 })
                 .into_iter()
                 .collect(),
@@ -817,6 +819,7 @@ mod tests {
             flags: None,
             decorators: Vec::new(),
             params: Vec::new(),
+            type_annotation: None,
         }
     }
 

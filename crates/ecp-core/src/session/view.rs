@@ -190,8 +190,11 @@
 //!   not in it (the `Overrides` and `Decorates` replays read them from the
 //!   fragment).
 //! - A clean file outside the closure keeps its type-annotation `Accesses`
-//!   edges: an edge into a dirty type the edit removed drops, and a clean
-//!   annotation of a type a dirty file adds stays unbound.
+//!   edges. [`super::closure::REBUILT_RELS`] holds `Accesses`, so a clean
+//!   file whose annotation reaches a type the edit changed or removed is in
+//!   the closure and re-resolves; past the closure bound the kind is named
+//!   stale. A clean annotation of a type a dirty file adds, outside the
+//!   closure, stays unbound.
 //! - A removed path still counts as a file for the passes over
 //!   `graph.files` (import-candidate probes, module and crate-root
 //!   discovery), and its archived import rows still serve a re-export hop.
@@ -445,75 +448,7 @@ impl From<LocalGraph> for OverlayFileInput {
     }
 }
 
-/// The reason of the `Accesses` edge from a declaration to a type its
-/// annotation names.
-pub const TYPE_ANNOTATION_REASON: &str = "type_annotation";
-
-/// The `(target, confidence)` of every `type_annotation` `Accesses` edge of
-/// one declaration, in emit order: the index's Pass 2 rule, which the
-/// overlay replays for a dirty declaration through this same function.
-/// `resolve` is the declaring file's type lookup (`ResolveTarget::Type`),
-/// at most one target per name.
-///
-/// - `type_annotation` (`RawNode.type_annotation`) binds first as one
-///   name ([`return_type_key`](crate::analyzer::type_ladder::return_type_key)): a
-///   declaring-type keyword
-///   (`Self`, `this`, PHP `static`) stands for `owner_class`, so it binds
-///   nothing without an owner; any other text the key does not reduce
-///   is looked up whole.
-/// - A function, method or constructor then binds every name its
-///   generic or container return mentions
-///   ([`annotation_type_names`](crate::analyzer::type_ladder::annotation_type_names)):
-///   the annotation's when the key does not reduce it, else nothing, and
-///   `return_type` (its function meta's) when the parse captured no
-///   annotation. Then every type of `params`, the meta's flat
-///   `[name, type, ...]` list. A target bound already is not bound again.
-pub fn type_annotation_targets<'a>(
-    language: Language,
-    kind: NodeKind,
-    type_annotation: Option<&'a str>,
-    owner_class: Option<&'a str>,
-    return_type: Option<&'a str>,
-    params: &'a [String],
-    mut resolve: impl FnMut(&'a str) -> Option<(u32, f32)>,
-) -> Vec<(u32, f32)> {
-    use crate::analyzer::type_ladder::{
-        annotation_type_names, names_declaring_type_in, return_type_key,
-    };
-    let mut targets: Vec<(u32, f32)> = Vec::new();
-    if let Some(annotation) = type_annotation {
-        let name = match return_type_key(annotation) {
-            Some(key) if names_declaring_type_in(language, key) => owner_class.and_then(owner_key),
-            Some(key) => Some(key),
-            None => Some(annotation),
-        };
-        targets.extend(name.and_then(&mut resolve));
-    }
-    if !matches!(
-        kind,
-        NodeKind::Function | NodeKind::Method | NodeKind::Constructor
-    ) {
-        return targets;
-    }
-    let returned = match type_annotation {
-        Some(annotation) if return_type_key(annotation).is_none() => Some(annotation),
-        Some(_) => None,
-        None => return_type,
-    };
-    let texts = returned
-        .into_iter()
-        .chain(params.chunks_exact(2).map(|pair| pair[1].as_str()));
-    for text in texts {
-        for name in annotation_type_names(language, text) {
-            if let Some((target, confidence)) = resolve(name) {
-                if targets.iter().all(|&(bound, _)| bound != target) {
-                    targets.push((target, confidence));
-                }
-            }
-        }
-    }
-    targets
-}
+pub use crate::analyzer::type_ladder::{type_annotation_targets, TYPE_ANNOTATION_REASON};
 
 /// One dirty file's raw records, the inputs of the record outputs the
 /// per-file replay rebuilds (`session::incremental`). Each record carries

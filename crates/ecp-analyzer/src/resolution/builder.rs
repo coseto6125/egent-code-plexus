@@ -3841,92 +3841,39 @@ fn pass2_emit_node_edges(
         }
     }
 
-    let type_edges_from = edges.len();
-    if let Some(type_ann) = &raw_node.type_annotation {
-        // `Self` / `self` / `static` / `this` is no type name: it stands for
-        // the owner, so a declaring-type annotation with no owner binds nothing.
-        let type_name = match type_ladder::return_type_key(type_ann) {
-            Some(key) if type_ladder::names_declaring_type_in(language, key) => {
-                raw_node.owner_class.as_deref().and_then(owner_key)
-            }
-            // The reduced key, as `note_return_type` types the member in
-            // every language: a C# or Dart `Tok?` and a Python forward
-            // reference `"Tok"` are `Tok`. The overlay rebuilds a C# member
-            // type from this edge alone (`base_property_type`).
-            Some(key) => Some(key),
-            None => Some(type_ann.as_str()),
-        };
-        let targets = type_name.map_or_else(Vec::new, |type_name| {
+    let meta = matches!(
+        raw_node.kind,
+        NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+    )
+    .then(|| {
+        meta_lookup
+            .get(&raw_node.span)
+            .map(|&i| &local_graph.raw_function_metas[i])
+    })
+    .flatten();
+    for (target_id, confidence) in type_ladder::type_annotation_targets(
+        language,
+        raw_node.kind,
+        raw_node.type_annotation.as_deref(),
+        raw_node.owner_class.as_deref(),
+        meta.map(|m| m.return_type.as_str()),
+        meta.map_or(&[][..], |m| m.params.as_slice()),
+        |name| {
             resolver.resolve_symbol(
                 &local_graph.file_path,
-                type_name,
+                name,
                 &local_graph.imports,
                 ResolveTarget::Type,
             )
-        });
-        for (target_id, confidence) in targets {
-            edges.push(Edge {
-                source: current_node_idx,
-                target: target_id,
-                rel_type: RelType::Accesses,
-                confidence,
-                reason: reason_type,
-            });
-        }
-    }
-    // A generic or container return (`Result<Option<St>, E>`) and every
-    // parameter type name the types they mention. The single-name path above
-    // stays first, so its `Self` handling and edge win; a target it bound is
-    // not bound twice.
-    if matches!(
-        raw_node.kind,
-        NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+        },
     ) {
-        let bind_names = |text: &str, edges: &mut Vec<Edge>| {
-            for name in type_ladder::annotation_type_names(language, text) {
-                let targets = resolver.resolve_symbol(
-                    &local_graph.file_path,
-                    name,
-                    &local_graph.imports,
-                    ResolveTarget::Type,
-                );
-                for (target_id, confidence) in targets {
-                    if edges[type_edges_from..]
-                        .iter()
-                        .all(|edge| edge.target != target_id)
-                    {
-                        edges.push(Edge {
-                            source: current_node_idx,
-                            target: target_id,
-                            rel_type: RelType::Accesses,
-                            confidence,
-                            reason: reason_type,
-                        });
-                    }
-                }
-            }
-        };
-        let meta = meta_lookup
-            .get(&raw_node.span)
-            .map(|&i| &local_graph.raw_function_metas[i]);
-        match raw_node.type_annotation.as_deref() {
-            Some(ann) if type_ladder::return_type_key(ann).is_none() => bind_names(ann, edges),
-            Some(_) => {}
-            // A return the language's query leaves uncaptured (TS
-            // `Promise<St>`, Go `[]St`) still has its text in the meta.
-            None => {
-                if let Some(meta) = meta {
-                    bind_names(&meta.return_type, edges);
-                }
-            }
-        }
-        if let Some(meta) = meta {
-            // `params` alternates name and type; a receiver (`self`) and an
-            // untyped parameter carry an empty type.
-            for pair in meta.params.chunks_exact(2) {
-                bind_names(&pair[1], edges);
-            }
-        }
+        edges.push(Edge {
+            source: current_node_idx,
+            target: target_id,
+            rel_type: RelType::Accesses,
+            confidence,
+            reason: reason_type,
+        });
     }
 
     // ReadsField: each field-read site resolves to a Property target. The
@@ -4285,7 +4232,7 @@ fn pass2_resolve_edges(
 ) -> Pass2Output {
     let reason_heritage = string_pool.add(heritage::EXTENDS_REASON);
     let reason_implements = string_pool.add(heritage::IMPLEMENTS_REASON);
-    let reason_type = string_pool.add("type_annotation");
+    let reason_type = string_pool.add(type_ladder::TYPE_ANNOTATION_REASON);
     let reason_call = CallReasons {
         call: string_pool.add("call"),
         nearest_copy: string_pool.add(NEAREST_COPY_REASON),

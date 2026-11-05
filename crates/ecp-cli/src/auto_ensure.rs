@@ -1439,7 +1439,7 @@ fn retain_stale_fragments(
     size_cap: SizeCap,
     rel_paths: &[String],
 ) -> L1FreshnessGate {
-    use ecp_core::session::{layout, FRAGMENT_FORMAT_V7};
+    use ecp_core::session::{layout, FRAGMENT_FORMAT_V8};
 
     let pass = |rel_paths: &[String], session_meta| L1FreshnessGate {
         rel_paths: rel_paths.to_vec(),
@@ -1484,7 +1484,7 @@ fn retain_stale_fragments(
                     None => false,
                 };
             };
-            if entry.format != FRAGMENT_FORMAT_V7 || entry.parse_failed {
+            if entry.format != FRAGMENT_FORMAT_V8 || entry.parse_failed {
                 return true;
             }
             // A bin the manifest names can still be gone (a cleanup that
@@ -2219,7 +2219,7 @@ mod fingerprint_drift_tests {
         ) {
             return;
         }
-        use ecp_core::session::{layout, DirtyEntry, DirtyFiles, FRAGMENT_FORMAT_V7};
+        use ecp_core::session::{layout, DirtyEntry, DirtyFiles, FRAGMENT_FORMAT_V8};
         let bytes = valid_fragment_bytes();
         assert!(crate::session::overlay_reader::valid_fragment(&bytes));
         let (_tmp, worktree, session_dir, app_mtime) =
@@ -2240,7 +2240,7 @@ mod fingerprint_drift_tests {
                     tantivy_delta_segment: None,
                     parse_failed: false,
                     dirty_symbols: vec![],
-                    format: FRAGMENT_FORMAT_V7,
+                    format: FRAGMENT_FORMAT_V8,
                 },
             );
             fs::write(
@@ -2274,7 +2274,7 @@ mod fingerprint_drift_tests {
         write_events(
             &session_dir,
             &worktree,
-            &paths.map(|(rel, mtime)| (rel, event_entry(mtime, rel, FRAGMENT_FORMAT_V7))),
+            &paths.map(|(rel, mtime)| (rel, event_entry(mtime, rel, FRAGMENT_FORMAT_V8))),
             &bytes,
         );
         assert!(
@@ -2350,7 +2350,7 @@ mod fingerprint_drift_tests {
         let (tmp, gate) = gate_with_fragment(
             &bytes,
             "v5-refresh-test",
-            ecp_core::session::FRAGMENT_FORMAT_V7,
+            ecp_core::session::FRAGMENT_FORMAT_V8,
             "def app(): pass\n",
         );
         assert!(
@@ -2393,7 +2393,7 @@ mod fingerprint_drift_tests {
             let (_tmp, gate) = gate_with_fragment(
                 corrupt,
                 "v5-corrupt-test",
-                ecp_core::session::FRAGMENT_FORMAT_V7,
+                ecp_core::session::FRAGMENT_FORMAT_V8,
                 "def app(): pass\n",
             );
             assert_eq!(gate.rel_paths, ["app.py"]);
@@ -2406,7 +2406,7 @@ mod fingerprint_drift_tests {
         use ecp_analyzer::resolution::builder::GraphBuilder;
         use ecp_core::analyzer::provider::LanguageProvider;
         use ecp_core::graph::{ArchivedZeroCopyGraph, RelType};
-        use ecp_core::session::{MergedGraph, OverlayView, FRAGMENT_FORMAT_V4, FRAGMENT_FORMAT_V7};
+        use ecp_core::session::{MergedGraph, OverlayView, FRAGMENT_FORMAT_V4, FRAGMENT_FORMAT_V8};
 
         const CHILD_ENV: &str = "ECP_AUTO_ENSURE_V4_REFRESH_CHILD";
         const TEST_NAME: &str = "auto_ensure::fingerprint_drift_tests::test_retain_stale_fragments_native_v4_refresh_restores_call_edge";
@@ -2485,7 +2485,7 @@ mod fingerprint_drift_tests {
             &ecp_core::session::layout::dirty_events_path(&session_dir),
         )
         .unwrap();
-        assert_eq!(manifest.entries["app.py"].format, FRAGMENT_FORMAT_V7);
+        assert_eq!(manifest.entries["app.py"].format, FRAGMENT_FORMAT_V8);
         assert!(manifest.from_current_builder());
         assert!(retain_stale_fragments(
             &worktree,
