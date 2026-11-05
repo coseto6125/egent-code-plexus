@@ -163,15 +163,16 @@ fn test_optional_property_annotation_binds_project_type() {
     assert_eq!(annotated(&g, "maybe"), Vec::<(String, String)>::new());
 }
 
-/// Guard: `[Tok]` and `Array<Tok>` are generics; `return_type_key` gives
-/// `None`, so they bind nothing, before and after the change.
+/// Stands for: `ecp impact --target Tok` lists a property whose generic type
+/// holds `Tok`, as it lists a parameter typed `[Tok]`. `Array` is no project
+/// type, so the property binds `Tok` alone.
 #[test]
-fn test_generic_property_annotation_binds_nothing() {
+fn test_generic_property_annotation_binds_the_element_type() {
     let src = "class Tok {}\nclass Owner {\n    var items: [Tok]\n    var more: Array<Tok>\n}\n";
     let g = name_ref_support::graph(
         &SwiftProvider::new().unwrap(),
         &[("Sources/App.swift", src)],
     );
-    assert_eq!(annotated(&g, "items"), Vec::<(String, String)>::new());
-    assert_eq!(annotated(&g, "more"), Vec::<(String, String)>::new());
+    assert_eq!(annotated(&g, "items"), [pair("Sources/App.swift", "Tok")]);
+    assert_eq!(annotated(&g, "more"), [pair("Sources/App.swift", "Tok")]);
 }

@@ -596,12 +596,12 @@ pub struct AnnotatedDecl<'a> {
 ///   (`Self`, `this`, PHP `static`) stands for `owner_class`, so it binds
 ///   nothing without an owner; any other text the key does not reduce
 ///   is looked up whole.
-/// - A function, method or constructor then binds every name its
-///   generic or container return mentions ([`annotation_type_names`]):
-///   the annotation's when the key does not reduce it, else nothing, and
-///   `return_type` (its function meta's) when the parse captured no
-///   annotation. Then every type of `params`, the meta's flat
-///   `[name, type, ...]` list. A target bound already is not bound again.
+/// - Every declaration then binds each name its generic or container
+///   annotation mentions ([`annotation_type_names`]) when the key does not
+///   reduce it: a field `List<St>` binds `St`. A function, method or
+///   constructor that captured no annotation binds `return_type` (its
+///   function meta's) the same way, then every type of `params`, the meta's
+///   flat `[name, type, ...]` list. A target bound already is not bound again.
 /// - A name in `type_params` (the declaration's own generic list and its
 ///   enclosing type's) is a type variable, never a project type: no
 ///   resolution runs for it, even when a project type shares the name.
@@ -632,14 +632,13 @@ pub fn type_annotation_targets<'a, T: IntoIterator<Item = (u32, f32)>>(
                 .flat_map(&mut resolve),
         );
     }
-    if !kind.is_callable() {
-        return targets;
-    }
+    let callable = kind.is_callable();
     let returned = match type_annotation {
         Some(annotation) if return_type_key(annotation).is_none() => Some(annotation),
         Some(_) => None,
-        None => return_type,
+        None => return_type.filter(|_| callable),
     };
+    let params: &[String] = if callable { params } else { &[] };
     let texts = returned
         .into_iter()
         .chain(params.as_chunks::<2>().0.iter().map(|[_, ty]| ty.as_str()));
@@ -1253,7 +1252,7 @@ mod tests {
 
     /// Stands for: the index's Pass 2 rule, row by row. A declaring-type
     /// keyword binds the owner and only the owner; a field binds its whole
-    /// annotation and never the generic arguments in it; a callable binds a
+    /// annotation, then every name of a generic one; a callable binds a
     /// bare return once, every name of a generic return, the meta's return
     /// only when the parse captured no annotation, and each parameter
     /// type, one edge per target.
@@ -1324,10 +1323,10 @@ mod tests {
                 &[1],
             ),
             (
-                "generic field binds no argument",
+                "generic field binds its argument",
                 (Swift, Property, Some("[St]"), None, None),
                 &[],
-                &[],
+                &[1],
             ),
             (
                 "params bind once per target",
