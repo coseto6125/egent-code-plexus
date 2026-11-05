@@ -62,6 +62,12 @@ pub fn flock_preamble(lock: &Path) -> String {
     )
 }
 
+/// Whether `ECP_SKIP_BG_REBUILD` suppresses every background rebuild and
+/// gc spawn, and every hook overlay refresh: the stderr line and the payload caveat then claim none.
+pub(crate) fn background_rebuild_skipped() -> bool {
+    std::env::var_os("ECP_SKIP_BG_REBUILD").is_some()
+}
+
 /// Spawn the job as a detached subprocess. Returns `true` iff the
 /// launcher subprocess started. The job's actual outcome surfaces
 /// via the marker files (if configured).

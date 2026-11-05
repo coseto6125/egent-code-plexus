@@ -177,7 +177,7 @@ impl Engine {
 
     fn graph_caveat(&self) -> Option<String> {
         if self.is_stale_for_sha {
-            let rebuild = if crate::auto_ensure::background_rebuild_skipped() {
+            let rebuild = if crate::background::background_rebuild_skipped() {
                 "No background rebuild runs (ECP_SKIP_BG_REBUILD is set) — run"
             } else {
                 "A background rebuild is in flight — rerun, or"

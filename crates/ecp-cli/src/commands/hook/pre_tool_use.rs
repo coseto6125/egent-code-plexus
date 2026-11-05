@@ -186,7 +186,7 @@ fn maybe_spawn_overlay_refresh(
     pattern: &str,
     dropped_files: &[String],
 ) {
-    if crate::auto_ensure::background_rebuild_skipped()
+    if crate::background::background_rebuild_skipped()
         || ecp_core::registry::validate_cache_component(sid).is_err()
     {
         return;
