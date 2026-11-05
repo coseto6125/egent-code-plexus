@@ -762,6 +762,102 @@ fn is_protocol_marker_only(bases: &[String]) -> bool {
     })
 }
 
+/// Typing generics whose subscript marks a bare assignment as a type alias.
+const ALIAS_GENERICS: &[&str] = &[
+    "Tuple",
+    "Optional",
+    "Union",
+    "List",
+    "Dict",
+    "Set",
+    "FrozenSet",
+    "Type",
+    "Callable",
+    "Literal",
+    "Annotated",
+    "Sequence",
+    "Mapping",
+    "Iterable",
+    "Iterator",
+    "tuple",
+    "list",
+    "dict",
+    "set",
+    "frozenset",
+    "type",
+];
+
+/// Builtin type names allowed as `|` union operands.
+const ALIAS_BUILTINS: &[&str] = &[
+    "int",
+    "str",
+    "float",
+    "bool",
+    "bytes",
+    "complex",
+    "object",
+    "list",
+    "dict",
+    "set",
+    "tuple",
+    "frozenset",
+    "bytearray",
+];
+
+/// A bare module-level `X = <type expression>` is an alias only when the right
+/// side is a subscript of a known generic, or a `|` union whose operands all
+/// look like types. A call, literal, or ALL_CAPS `A | B` flag mask stays a value.
+fn is_bare_type_alias(assignment: Node, source: &[u8]) -> bool {
+    assignment.kind() == "assignment"
+        && assignment.child_by_field_name("type").is_none()
+        && assignment
+            .child_by_field_name("right")
+            .is_some_and(|r| is_type_expression(r, source))
+}
+
+fn is_type_expression(n: Node, source: &[u8]) -> bool {
+    let text = |n: Node| std::str::from_utf8(&source[n.start_byte()..n.end_byte()]).ok();
+    match n.kind() {
+        "subscript" => n
+            .child_by_field_name("value")
+            .and_then(|v| match v.kind() {
+                "identifier" => text(v),
+                "attribute" => v.child_by_field_name("attribute").and_then(text),
+                _ => None,
+            })
+            .is_some_and(|name| ALIAS_GENERICS.contains(&name)),
+        "binary_operator" => {
+            n.child_by_field_name("operator").and_then(text) == Some("|")
+                && [
+                    n.child_by_field_name("left"),
+                    n.child_by_field_name("right"),
+                ]
+                .into_iter()
+                .all(|o| o.is_some_and(|o| is_union_operand(o, source)))
+        }
+        _ => false,
+    }
+}
+
+fn is_union_operand(n: Node, source: &[u8]) -> bool {
+    let text = |n: Node| std::str::from_utf8(&source[n.start_byte()..n.end_byte()]).ok();
+    let is_type_name = |s: &str| {
+        s == "None"
+            || ALIAS_BUILTINS.contains(&s)
+            || (s.starts_with(|c: char| c.is_ascii_uppercase())
+                && s.chars().any(|c| c.is_ascii_lowercase()))
+    };
+    match n.kind() {
+        "identifier" => text(n).is_some_and(is_type_name),
+        "none" => true,
+        "attribute" => n
+            .child_by_field_name("attribute")
+            .and_then(text)
+            .is_some_and(is_type_name),
+        _ => is_type_expression(n, source),
+    }
+}
+
 /// True when `func_def` is a `def`/`async def` defined directly inside a
 /// `class` body (vs free-standing or nested inside another function).
 /// Walks: function_definition → [decorated_definition] → block → class_definition.
@@ -1005,11 +1101,7 @@ fn process_class_for_enum(
 /// chain (`a.b.c`) records only its outermost node. A qualifier that names a
 /// local or parameter in scope is a value, and the scan drops the name;
 /// otherwise the resolver binds it only through a module or a class.
-fn qualified_attribute_value(
-    node: tree_sitter::Node<'_>,
-    source: &[u8],
-    _spec: &NameRefSpec,
-) -> Option<String> {
+fn qualified_attribute_value(node: Node<'_>, source: &[u8], _spec: &NameRefSpec) -> Option<String> {
     let object = node
         .child_by_field_name("object")
         .filter(|object| object.kind() == "identifier")?;
@@ -1515,10 +1607,14 @@ impl ParseSpec for PythonSpec {
                 // `X: TypeAlias = …` (PEP 613) is a reference target, not a
                 // value binding — reclassify Variable→Typedef. Match the bare
                 // and dotted (`typing.TypeAlias`) annotation forms.
+                // PEP 695 `type X = …` and a bare `X = Tuple[int, int]` are
+                // reference targets for the same reason.
                 let k = if k == NodeKind::Variable
-                    && type_str
+                    && (type_str
                         .as_deref()
                         .is_some_and(|t| t == "TypeAlias" || t == "typing.TypeAlias")
+                        || root.kind() == "type_alias_statement"
+                        || (type_str.is_none() && is_bare_type_alias(root, source)))
                 {
                     NodeKind::Typedef
                 } else {

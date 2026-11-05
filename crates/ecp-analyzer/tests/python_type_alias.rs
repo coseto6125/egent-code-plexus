@@ -72,3 +72,28 @@ fn typealias_does_not_double_emit() {
         g.nodes
     );
 }
+
+#[test]
+fn pep695_type_statement_is_typedef() {
+    let g = parse("type Al = tuple[int, int]\n");
+    assert_eq!(kind_of(&g, "Al"), Some(NodeKind::Typedef), "{:?}", g.nodes);
+    assert_eq!(g.nodes.iter().filter(|n| n.name == "Al").count(), 1);
+}
+
+#[test]
+fn bare_generic_subscript_is_typedef() {
+    let g = parse("from typing import Tuple\nAl = Tuple[int, int]\n");
+    assert_eq!(kind_of(&g, "Al"), Some(NodeKind::Typedef), "{:?}", g.nodes);
+}
+
+#[test]
+fn value_assignments_stay_variable() {
+    for src in [
+        "X = 3\n",
+        "X = foo()\n",
+        "X = [1, 2]\n",
+        "X = READ | WRITE\n",
+    ] {
+        assert_eq!(kind_of(&parse(src), "X"), Some(NodeKind::Variable), "{src}");
+    }
+}
