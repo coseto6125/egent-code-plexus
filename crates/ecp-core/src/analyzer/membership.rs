@@ -29,8 +29,14 @@ use rustc_hash::{FxHashMap, FxHashSet};
 /// `Edge.reason` of a membership edge of the span pass.
 pub const CLASS_MEMBERSHIP_REASON: &str = "post_process:class_membership";
 
-/// `Edge.reason` of a membership edge of the owner pass.
+/// `Edge.reason` of a membership edge of the owner pass for a member of a
+/// Rust `impl` block.
 pub const CLASS_MEMBERSHIP_IMPL_REASON: &str = "post_process:class_membership:rust_impl";
+
+/// `Edge.reason` of a membership edge of the owner pass for a member that
+/// names its type by `owner_class` outside the type's span: a Go receiver
+/// method, a Swift `extension` member, a C++ out-of-line `Cls::m`.
+pub const CLASS_MEMBERSHIP_OWNER_REASON: &str = "post_process:class_membership:owner";
 
 /// The fields of one declaration that membership reads. `span` is 0-based,
 /// as `RawNode.span`.
@@ -66,7 +72,8 @@ pub struct Membership {
     pub target: u32,
     /// `HasMethod` or `HasProperty`.
     pub rel_type: RelType,
-    /// [`CLASS_MEMBERSHIP_REASON`] or [`CLASS_MEMBERSHIP_IMPL_REASON`].
+    /// [`CLASS_MEMBERSHIP_REASON`], [`CLASS_MEMBERSHIP_IMPL_REASON`] or
+    /// [`CLASS_MEMBERSHIP_OWNER_REASON`].
     pub reason: &'static str,
 }
 
@@ -221,8 +228,10 @@ fn span_pass<'a, T>(
 /// import evidence is C1-identity.md Open point 15, but the block is the
 /// member's container in every case, a file of `impl` blocks alone included.
 /// Any other member (a Go receiver, an out-of-line member) binds the file's
-/// first declaration of the owner's name. A member named like its type with no
-/// such type would be its own owner, and gets no edge.
+/// first type declaration of the owner's name: a `namespace`, `mod` or
+/// package of that name owns no function, and a name with no type row in the
+/// file gets no edge. A member named like its type with no such type would be
+/// its own owner, and gets no edge.
 fn owner_pass<'a, T>(
     rows: &'a [T],
     row: &impl Fn(&'a T) -> MemberRow<'a>,
@@ -235,6 +244,7 @@ fn owner_pass<'a, T>(
     // `Impl` row and an owner-pass member; each block's owner is found once.
     let mut chain: Option<Vec<Option<u32>>> = None;
     let mut block_owner: FxHashMap<(u32, &'a str), Option<u32>> = FxHashMap::default();
+    let mut type_rows: Option<FxHashMap<&'a str, usize>> = None;
     for (i, member) in rows.iter().map(row).enumerate() {
         if lookup.is_scoped(i) {
             continue;
@@ -265,9 +275,9 @@ fn owner_pass<'a, T>(
                 .filter(|&c| row(&rows[c as usize]).kind == NodeKind::Impl)
                 .map(|block| (block, cs))
         });
-        let source = match block {
+        let (source, reason) = match block {
             Some((block, containers)) => {
-                *block_owner.entry((block, class_name)).or_insert_with(|| {
+                let owner = *block_owner.entry((block, class_name)).or_insert_with(|| {
                     let scope = containers[block as usize];
                     let owner = rows
                         .iter()
@@ -278,9 +288,22 @@ fn owner_pass<'a, T>(
                         })
                         .map_or(block as usize, |(t, _)| t);
                     lookup.node(owner)
-                })
+                });
+                (owner, CLASS_MEMBERSHIP_IMPL_REASON)
             }
-            None => lookup.lookup_in_file(class_name),
+            None => {
+                let type_rows = type_rows.get_or_insert_with(|| {
+                    let mut by_name = FxHashMap::default();
+                    for (t, r) in rows.iter().map(row).enumerate() {
+                        if r.kind.declares_type() {
+                            by_name.entry(r.name).or_insert(t);
+                        }
+                    }
+                    by_name
+                });
+                let owner = type_rows.get(class_name).and_then(|&t| lookup.node(t));
+                (owner, CLASS_MEMBERSHIP_OWNER_REASON)
+            }
         };
         let (Some(source), Some(target)) = (source, lookup.node(i)) else {
             continue;
@@ -290,7 +313,7 @@ fn owner_pass<'a, T>(
                 source,
                 target,
                 rel_type,
-                reason: CLASS_MEMBERSHIP_IMPL_REASON,
+                reason,
             });
         }
     }
@@ -420,7 +443,7 @@ mod tests {
         ];
         assert_eq!(
             edges(&rows),
-            [has_method(0, 1, CLASS_MEMBERSHIP_IMPL_REASON)]
+            [has_method(0, 1, CLASS_MEMBERSHIP_OWNER_REASON)]
         );
     }
 
@@ -530,8 +553,8 @@ mod tests {
         assert_eq!(
             edges(&rows),
             [
-                has_method(0, 1, CLASS_MEMBERSHIP_IMPL_REASON),
-                has_method(0, 2, CLASS_MEMBERSHIP_IMPL_REASON)
+                has_method(0, 1, CLASS_MEMBERSHIP_OWNER_REASON),
+                has_method(0, 2, CLASS_MEMBERSHIP_OWNER_REASON)
             ]
         );
     }
@@ -603,6 +626,38 @@ mod tests {
             row(NodeKind::Class, None, "K", (1, 0, 2, 0)),
             row(NodeKind::Method, Some("Foo"), "Foo", (5, 0, 6, 0)),
         ];
+        assert!(edges(&rows).is_empty());
+    }
+
+    /// Stands for: a module, namespace or package is no type, so it owns no
+    /// function through `HasMethod` (`defines` / `contains` carry that).
+    #[test]
+    fn test_class_membership_module_owner_emits_nothing() {
+        for kind in [NodeKind::Module, NodeKind::Namespace] {
+            let rows = [
+                row(kind, None, "parse", (0, 0, 4, 1)),
+                row(NodeKind::Function, Some("parse"), "cb", (1, 4, 2, 5)),
+            ];
+            assert!(edges(&rows).is_empty(), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn test_class_membership_module_sharing_a_type_name_binds_the_type() {
+        let rows = [
+            row(NodeKind::Namespace, None, "Foo", (0, 0, 4, 1)),
+            row(NodeKind::Struct, None, "Foo", (6, 0, 6, 12)),
+            row(NodeKind::Method, Some("Foo"), "m", (9, 0, 10, 1)),
+        ];
+        assert_eq!(
+            edges(&rows),
+            [has_method(1, 2, CLASS_MEMBERSHIP_OWNER_REASON)]
+        );
+    }
+
+    #[test]
+    fn test_class_membership_owner_absent_from_file_emits_nothing() {
+        let rows = [row(NodeKind::Method, Some("Elsewhere"), "m", (1, 0, 2, 0))];
         assert!(edges(&rows).is_empty());
     }
 }

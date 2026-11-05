@@ -10,7 +10,8 @@
 use crate::resolution::index::SymbolTable;
 use ecp_core::analyzer::lexical::{skipped_nodes, SharedPaths};
 use ecp_core::analyzer::membership::{
-    self, MemberLookup, MemberRow, CLASS_MEMBERSHIP_IMPL_REASON, CLASS_MEMBERSHIP_REASON,
+    self, MemberLookup, MemberRow, CLASS_MEMBERSHIP_IMPL_REASON, CLASS_MEMBERSHIP_OWNER_REASON,
+    CLASS_MEMBERSHIP_REASON,
 };
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
 use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
@@ -45,6 +46,7 @@ pub fn emit_edges(
 ) -> usize {
     let reason = string_pool.add(CLASS_MEMBERSHIP_REASON);
     let reason_impl = string_pool.add(CLASS_MEMBERSHIP_IMPL_REASON);
+    let reason_owner = string_pool.add(CLASS_MEMBERSHIP_OWNER_REASON);
 
     // Per-file work is independent: writes go to a thread-local edge buffer
     // and only `symbol_table` (read-only) is shared. Same parallel pattern as
@@ -84,6 +86,7 @@ pub fn emit_edges(
                         confidence: 1.0,
                         reason: match m.reason {
                             CLASS_MEMBERSHIP_REASON => reason,
+                            CLASS_MEMBERSHIP_OWNER_REASON => reason_owner,
                             _ => reason_impl,
                         },
                     })
