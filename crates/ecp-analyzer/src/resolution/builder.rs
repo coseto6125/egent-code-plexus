@@ -3614,6 +3614,7 @@ fn pass2_emit_node_edges(
     edges: &mut Vec<Edge>,
     indirect_lookup: &FxHashMap<CallMetaKey, (u8, String)>,
     lexical_lookup: &LexicalFunctions,
+    meta_lookup: &FxHashMap<Span, usize>,
     pending_call_metas: &mut Vec<(usize, u8, String)>,
     blind_spots: &mut Vec<BlindSpot>,
 ) {
@@ -3839,6 +3840,7 @@ fn pass2_emit_node_edges(
         }
     }
 
+    let type_edges_from = edges.len();
     if let Some(type_ann) = &raw_node.type_annotation {
         // `Self` / `self` / `static` / `this` is no type name: it stands for
         // the owner, so a declaring-type annotation with no owner binds nothing.
@@ -3869,6 +3871,53 @@ fn pass2_emit_node_edges(
                 confidence,
                 reason: reason_type,
             });
+        }
+    }
+    // A generic or container return (`Result<Option<St>, E>`) and every
+    // parameter type name the types they mention. The single-name path above
+    // stays first, so its `Self` handling and edge win; a target it bound is
+    // not bound twice.
+    if matches!(
+        raw_node.kind,
+        NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+    ) {
+        let bind_names = |text: &str, edges: &mut Vec<Edge>| {
+            for name in type_ladder::annotation_type_names(language, text) {
+                let targets = resolver.resolve_symbol(
+                    &local_graph.file_path,
+                    name,
+                    &local_graph.imports,
+                    ResolveTarget::Type,
+                );
+                for (target_id, confidence) in targets {
+                    if edges[type_edges_from..]
+                        .iter()
+                        .all(|edge| edge.target != target_id)
+                    {
+                        edges.push(Edge {
+                            source: current_node_idx,
+                            target: target_id,
+                            rel_type: RelType::Accesses,
+                            confidence,
+                            reason: reason_type,
+                        });
+                    }
+                }
+            }
+        };
+        if let Some(type_ann) = raw_node
+            .type_annotation
+            .as_deref()
+            .filter(|ann| type_ladder::return_type_key(ann).is_none())
+        {
+            bind_names(type_ann, edges);
+        }
+        if let Some(&meta) = meta_lookup.get(&raw_node.span) {
+            // `params` alternates name and type; a receiver (`self`) and an
+            // untyped parameter carry an empty type.
+            for pair in local_graph.raw_function_metas[meta].params.chunks_exact(2) {
+                bind_names(&pair[1], edges);
+            }
         }
     }
 
@@ -4305,6 +4354,19 @@ fn pass2_resolve_edges(
         })
         .collect();
 
+    // Span → index into `raw_function_metas`, so a function node reads its
+    // parameter types without scanning the file's metas.
+    let meta_lookups: Vec<FxHashMap<Span, usize>> = local_graphs
+        .iter()
+        .map(|lg| {
+            lg.raw_function_metas
+                .iter()
+                .enumerate()
+                .map(|(i, m)| (m.span, i))
+                .collect()
+        })
+        .collect();
+
     // `pending_call_metas`: pairs of (pre-sort edge index, RawCallMeta ref).
     // Collected alongside edges and promoted to ZeroCopyGraph.call_metas after
     // the final edge sort remaps pre-sort indices to sorted positions.
@@ -4348,6 +4410,7 @@ fn pass2_resolve_edges(
                     &mut edges,
                     lookup,
                     &lexical_lookup,
+                    &meta_lookups[graph_idx],
                     &mut pending_call_metas_global,
                     &mut call_blind_spots,
                 );
@@ -4433,6 +4496,7 @@ fn pass2_resolve_edges(
                         &mut local_edges,
                         lookup,
                         &lexical_lookup,
+                        &meta_lookups[graph_idx],
                         &mut local_pending,
                         &mut local_blind_spots,
                     );

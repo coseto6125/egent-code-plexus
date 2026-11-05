@@ -214,8 +214,8 @@ pub fn names_declaring_type_in(language: Language, key: &str) -> bool {
 /// `struct` / C++ `class` tag. `None` for everything else: a generic or an
 /// array (`Promise<Foo>`, `Optional<Foo>`, `Vec<Foo>`, `list[Foo]`,
 /// `Foo[]`), a qualified path, a tuple, a function type, a union of two
-/// real types. Those need their own unwrapping rules (a follow-up), and a
-/// guess would bind the wrong member.
+/// real types. A guess would bind the wrong member of a receiver; edges to
+/// those types read [`annotation_type_names`] instead.
 pub fn return_type_key(raw: &str) -> Option<&str> {
     let mut ty = unquote(raw.trim());
     if ty.contains('|') {
@@ -267,6 +267,142 @@ fn unquote(text: &str) -> &str {
         }
     }
     text
+}
+
+/// Words an annotation spells next to a type that are no type name: a
+/// marker (`mut`, `const`, `dyn`, `impl`, `ref`, `out`), a tag (`struct`,
+/// `class`), a modifier, or a literal keyword. Wrapper types (`Option`,
+/// `List`) are absent on purpose: the resolver binds an unknown name to
+/// nothing, so listing them would only add a hardcoded set.
+fn is_annotation_keyword(word: &str) -> bool {
+    matches!(
+        word,
+        "mut"
+            | "const"
+            | "dyn"
+            | "impl"
+            | "struct"
+            | "class"
+            | "enum"
+            | "union"
+            | "unsigned"
+            | "signed"
+            | "volatile"
+            | "typename"
+            | "readonly"
+            | "keyof"
+            | "typeof"
+            | "extends"
+            | "super"
+            | "infer"
+            | "asserts"
+            | "new"
+            | "fn"
+            | "func"
+            | "map"
+            | "chan"
+            | "interface"
+            | "final"
+            | "ref"
+            | "out"
+            | "in"
+            | "is"
+            | "as"
+            | "inout"
+            | "params"
+            | "vararg"
+            | "some"
+            | "any"
+            | "throws"
+            | "async"
+            | "escaping"
+            | "where"
+            | "unsafe"
+            | "extern"
+            | "void"
+            | "null"
+            | "undefined"
+            | "None"
+            | "nil"
+    )
+}
+
+fn is_ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '$'
+}
+
+/// Byte length of the name at the start of `text` (which starts with an
+/// identifier character): the identifier, plus each `::`, `.` or `\`
+/// separator that another identifier follows (`ns::St`, `types.St`,
+/// `App\Models\St`).
+fn qualified_name_len(text: &str) -> usize {
+    let mut end = text.find(|c: char| !is_ident_char(c)).unwrap_or(text.len());
+    loop {
+        let tail = &text[end..];
+        let sep = if tail.starts_with("::") {
+            2
+        } else if tail.starts_with(['.', '\\']) {
+            1
+        } else {
+            break;
+        };
+        let after = &tail[sep..];
+        if !after.starts_with(|c: char| c.is_alphabetic() || c == '_' || c == '$') {
+            break;
+        }
+        end += sep
+            + after
+                .find(|c: char| !is_ident_char(c))
+                .unwrap_or(after.len());
+    }
+    end
+}
+
+/// Every type name a declared type annotation mentions, in source order:
+/// generic arguments at any depth (`Map<String, List<St>>`), array, slice
+/// and map parts (`[]pkg.St`, `St[]`, `[String: St]`), each member of a
+/// union (`St | null`), a Python forward reference (`"St"`, `Optional["St"]`),
+/// with nullable, pointer, reference, `mut`, `const`, `dyn`, `impl` and
+/// lifetime markers dropped. A qualified name stays whole (`types.St`,
+/// `ns::St`, `crate::t::St`): the resolver reads the qualifier, and a name
+/// it cannot bind whole binds nothing, never a same-named type elsewhere.
+///
+/// The result is a superset: it holds wrappers (`Option`), primitives
+/// (`int`), a generic parameter (`T`) and, in a function type, parameter
+/// names. The resolver binds the names that are project types and nothing
+/// else. A declaring-type keyword (`Self`, `this`) is no name; the caller
+/// maps it to the owner through [`return_type_key`]. [`return_type_key`]
+/// stays the reduction that types a receiver; this one feeds edges.
+pub fn annotation_type_names(language: Language, raw: &str) -> Vec<&str> {
+    let mut names = Vec::new();
+    let mut rest = raw;
+    while let Some(c) = rest.chars().next() {
+        let skip = if c.is_alphabetic() || c == '_' || c == '$' {
+            let len = qualified_name_len(rest);
+            let word = &rest[..len];
+            if !is_annotation_keyword(word) && !names_declaring_type_in(language, word) {
+                names.push(word);
+            }
+            len
+        } else if c.is_ascii_digit() {
+            rest.find(|ch: char| !is_ident_char(ch))
+                .unwrap_or(rest.len())
+        } else if language == Language::Rust && c == '\'' {
+            // A lifetime (`'a`, `'static`): the quote and its one identifier.
+            let after = &rest[1..];
+            1 + after
+                .find(|ch: char| !is_ident_char(ch))
+                .unwrap_or(after.len())
+        } else if matches!(c, '"' | '\'') && language != Language::Python {
+            // A string literal type (`"admin"`) names no type; Python's
+            // quoted text is a forward reference and is read as code.
+            rest[1..].find(c).map_or(1, |close| close + 2)
+        } else {
+            c.len_utf8()
+        };
+        rest = &rest[skip..];
+    }
+    names
 }
 
 /// The name of the type a call to `callee` returns, as the callee's own
@@ -869,6 +1005,145 @@ mod tests {
                 "{namespace:?}"
             );
         }
+    }
+
+    /// Contract: every type an annotation mentions is a candidate, per
+    /// language, with the markers dropped and a qualified name kept whole.
+    /// The wrappers stay in the list: the resolver binds only project types.
+    #[test]
+    fn test_annotation_type_names_per_language_lists_every_mentioned_type() {
+        use Language::*;
+        let rows: &[(Language, &str, &[&str])] = &[
+            (Rust, "St", &["St"]),
+            (Rust, "Option<St>", &["Option", "St"]),
+            (
+                Rust,
+                "Result<Option<Projection>, DbError>",
+                &["Result", "Option", "Projection", "DbError"],
+            ),
+            (Rust, "&'a mut St", &["St"]),
+            (Rust, "&'static [St]", &["St"]),
+            (Rust, "Vec<parse::Entry>", &["Vec", "parse::Entry"]),
+            (Rust, "crate::t::St", &["crate::t::St"]),
+            (Rust, "Box<dyn Handler + 'a>", &["Box", "Handler"]),
+            (Rust, "impl Fn(St) -> Out", &["Fn", "St", "Out"]),
+            (Rust, "Option<Self>", &["Option"]),
+            (Rust, "[St; 3]", &["St"]),
+            (TypeScript, "Promise<St>", &["Promise", "St"]),
+            (TypeScript, "St[]", &["St"]),
+            (TypeScript, "St | null", &["St"]),
+            (TypeScript, "A | B | undefined", &["A", "B"]),
+            (TypeScript, "ns.St", &["ns.St"]),
+            (
+                TypeScript,
+                "Record<string, St[]>",
+                &["Record", "string", "St"],
+            ),
+            (TypeScript, "'admin' | St", &["St"]),
+            (TypeScript, "readonly St[]", &["St"]),
+            (JavaScript, "Array<St>", &["Array", "St"]),
+            (Python, "\"St\"", &["St"]),
+            (Python, "Optional[St]", &["Optional", "St"]),
+            (Python, "list[St] | None", &["list", "St"]),
+            (Python, "dict[str, \"St\"]", &["dict", "str", "St"]),
+            (Python, "'St' | None", &["St"]),
+            (Python, "mod.St", &["mod.St"]),
+            (Java, "List<St>", &["List", "St"]),
+            (
+                Java,
+                "Map<String, List<St>>",
+                &["Map", "String", "List", "St"],
+            ),
+            (Java, "? extends St", &["St"]),
+            (Java, "java.util.List<St>", &["java.util.List", "St"]),
+            (Kotlin, "List<St>?", &["List", "St"]),
+            (Kotlin, "Map<String, St>", &["Map", "String", "St"]),
+            (Kotlin, "(St) -> Unit", &["St", "Unit"]),
+            (CSharp, "List<St>", &["List", "St"]),
+            (CSharp, "St?", &["St"]),
+            (
+                CSharp,
+                "Dictionary<string, St>[]",
+                &["Dictionary", "string", "St"],
+            ),
+            (Go, "[]pkg.St", &["pkg.St"]),
+            (Go, "*St", &["St"]),
+            (Go, "map[string]*St", &["string", "St"]),
+            (Go, "...St", &["St"]),
+            (Go, "chan St", &["St"]),
+            (Go, "func(a St) (Out, error)", &["a", "St", "Out", "error"]),
+            (Php, "?St", &["St"]),
+            (Php, "\\App\\Models\\St", &["App\\Models\\St"]),
+            (Php, "static", &[]),
+            (Php, "St|null", &["St"]),
+            (Php, "array<int, St>", &["array", "int", "St"]),
+            (Ruby, "", &[]),
+            (Swift, "[St]", &["St"]),
+            (Swift, "[String: St]", &["String", "St"]),
+            (Swift, "Optional<St>", &["Optional", "St"]),
+            (Swift, "St?", &["St"]),
+            (Swift, "@escaping (St) -> Void", &["St", "Void"]),
+            (Swift, "some Proto", &["Proto"]),
+            (C, "const struct St *", &["St"]),
+            (C, "unsigned int", &["int"]),
+            (C, "St *const *", &["St"]),
+            (Cpp, "std::vector<ns::St>", &["std::vector", "ns::St"]),
+            (Cpp, "const St&", &["St"]),
+            (
+                Cpp,
+                "std::map<std::string, St*>",
+                &["std::map", "std::string", "St"],
+            ),
+            (Cpp, "std::array<St, 3>", &["std::array", "St"]),
+            (Dart, "List<St>", &["List", "St"]),
+            (Dart, "Future<St?>", &["Future", "St"]),
+            (
+                Dart,
+                "Map<String, List<St>>",
+                &["Map", "String", "List", "St"],
+            ),
+            (Dart, "prefix.St", &["prefix.St"]),
+        ];
+        for (language, raw, want) in rows {
+            assert_eq!(
+                annotation_type_names(*language, raw),
+                *want,
+                "{language:?} {raw:?}"
+            );
+        }
+    }
+
+    /// Contract: an empty, whitespace-only or punctuation-only annotation
+    /// names no type, and a lone separator never joins a name.
+    #[test]
+    fn test_annotation_type_names_empty_or_symbols_returns_nothing() {
+        for raw in ["", "   ", "\t\n", "<>", "[]", "*&", "->", "..."] {
+            assert!(
+                annotation_type_names(Language::Rust, raw).is_empty(),
+                "{raw:?}"
+            );
+            assert!(
+                annotation_type_names(Language::Go, raw).is_empty(),
+                "{raw:?}"
+            );
+        }
+        assert_eq!(annotation_type_names(Language::Cpp, "St::"), ["St"]);
+        assert_eq!(annotation_type_names(Language::Go, "St.[]"), ["St"]);
+    }
+
+    /// Contract: an unterminated quote or a lone apostrophe never panics
+    /// and keeps the names after it.
+    #[test]
+    fn test_annotation_type_names_unterminated_quote_keeps_following_names() {
+        assert_eq!(annotation_type_names(Language::TypeScript, "\"St"), ["St"]);
+        assert_eq!(
+            annotation_type_names(Language::Rust, "'"),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            annotation_type_names(Language::Python, "Ünï<St>"),
+            ["Ünï", "St"]
+        );
     }
 
     /// Contract: the reduced key is a fixed point, so the index (which
