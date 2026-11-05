@@ -4142,16 +4142,67 @@ fn test_overlay_go_multi_file_package_function_value_matches_reindex() {
     let provider = GoProvider::new().unwrap();
     let main = "package main\nimport p \"example.com/repo/pkg\"\nfunc register(f func()) {}\nfunc run() { register(p.F) }\n";
     let shifted = format!("\n{main}");
-    let (full, overlay) = field_read_edges(
-        &provider,
-        &[
-            ("main.go", main),
-            ("pkg/helper.go", "package pkg\nfunc F() {}\n"),
-            ("pkg/other.go", "package pkg\nfunc G() {}\n"),
-        ],
-        &[("main.go", &shifted)],
-        &["function_reference"],
+    let files = [
+        ("main.go", main),
+        ("pkg/helper.go", "package pkg\nfunc F() {}\n"),
+        ("pkg/other.go", "package pkg\nfunc G() {}\n"),
+    ];
+    let dirty = [("main.go", shifted.as_str())];
+    // `reindex` writes the go.mod that maps `example.com/repo/pkg` to `pkg/`.
+    let tmp = tempfile::tempdir().unwrap();
+    let base = reindex(tmp.path(), &provider, &files, &[]);
+    let full = reindex(tmp.path(), &provider, &files, &dirty);
+    let edge_target = |source: &str, target: &str, path: Option<&str>| {
+        (
+            source.to_owned(),
+            target.to_owned(),
+            path.map(str::to_owned),
+        )
+    };
+    let pool = &full.string_pool;
+    let expected: Vec<_> = full
+        .edges
+        .iter()
+        .filter(|e| e.reason.resolve(pool) == "function_reference")
+        .map(|e| {
+            let target = &full.nodes[e.target as usize];
+            edge_target(
+                full.nodes[e.source as usize].name.resolve(pool),
+                target.name.resolve(pool),
+                Some(full.files[target.file_idx as usize].path.resolve(pool)),
+            )
+        })
+        .collect();
+    assert_eq!(
+        expected,
+        [edge_target("run", "F", Some("pkg/helper.go"))],
+        "the reindex binds p.F once"
     );
-    assert_eq!(full.len(), 1, "the reindex binds p.F once: {full:?}");
-    assert_eq!(overlay, full);
+    let inputs: Vec<_> = dirty
+        .iter()
+        .map(|&(path, source)| {
+            input(
+                provider
+                    .parse_file(Path::new(path), source.as_bytes())
+                    .unwrap(),
+            )
+        })
+        .collect();
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&base).unwrap();
+    let archived = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+    let view = OverlayView::build(archived, &inputs).unwrap();
+    let merged = MergedGraph::new(archived, Some(&view));
+    let actual: Vec<_> = merged
+        .all_edges()
+        .filter(|e| e.reason(archived) == "function_reference")
+        .map(|e| {
+            let target = merged.node(e.target).unwrap();
+            edge_target(
+                merged.node(e.source).unwrap().name(&merged),
+                target.name(&merged),
+                target.file_path(&merged),
+            )
+        })
+        .collect();
+    assert_eq!(actual, expected);
 }
