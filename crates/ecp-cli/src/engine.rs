@@ -372,6 +372,16 @@ impl Engine {
         self.text_matches(root, rel, dirty)
     }
 
+    /// Whether the overlay view supplies `rel`: only then can
+    /// [`Self::file_text_is_recorded`] and
+    /// [`Self::file_text_is_base_recorded`] differ.
+    pub fn overlay_supplies(&self, rel: &str) -> bool {
+        self.overlay_view();
+        self.overlay_hashes
+            .get()
+            .is_some_and(|hashes| hashes.contains_key(rel))
+    }
+
     /// As [`Self::file_text_is_recorded`], against the base graph's hash
     /// only: the proof for a fact read from the base graph's edges, which an
     /// overlay refresh does not rebuild.

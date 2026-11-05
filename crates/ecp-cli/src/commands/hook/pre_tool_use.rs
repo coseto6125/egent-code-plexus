@@ -103,10 +103,14 @@ fn compute_search_hits(input: &HookInput) -> Option<String> {
     if ranked.is_empty() {
         return None;
     }
-    let (hits, dropped) = keep_recorded_hits(ranked, |file, proof| match proof {
-        Proof::Shown => engine.file_text_is_recorded(&top, file),
-        Proof::Base => engine.file_text_is_base_recorded(&top, file),
-    });
+    let (hits, dropped) = keep_recorded_hits(
+        ranked,
+        |file| engine.overlay_supplies(file),
+        |file, proof| match proof {
+            Proof::Shown => engine.file_text_is_recorded(&top, file),
+            Proof::Base => engine.file_text_is_base_recorded(&top, file),
+        },
+    );
     // Hits from the repo a leading `cd` names: the agent's own cwd is
     // another repo, and its paths are relative to this one.
     let header = match &cd {
@@ -144,27 +148,32 @@ enum Proof {
 /// as ecp read them ([`Proof::Shown`]), each keeping only the `Called by` /
 /// `Calls` names whose own files match the base graph ([`Proof::Base`]); and
 /// what was dropped on the way. A hit with no file names no file:line and
-/// stays. Each distinct file is proven once per proof, and no file ranked
-/// below the last shown hit is read: a dropped hit or name would point at
-/// text that is no longer on disk.
+/// stays. Each distinct file is proven once per proof, and once in all for a
+/// file the overlay does not supply (`overlaid` false), whose shown text is
+/// the base text. No file ranked below the last shown hit is read: a dropped
+/// hit or name would point at text that is no longer on disk.
 fn keep_recorded_hits(
     ranked: Vec<Hit>,
+    overlaid: impl Fn(&str) -> bool,
     mut is_recorded: impl FnMut(&str, Proof) -> bool,
 ) -> (Vec<Hit>, Dropped) {
     let mut verdicts: Vec<(String, Proof, bool)> = Vec::new();
     let mut dropped = Dropped::default();
-    let mut proven = |file: &str, proof: Proof, dropped: &mut Dropped| match verdicts
-        .iter()
-        .find(|(seen, by, _)| seen == file && *by == proof)
-    {
-        Some(&(_, _, recorded)) => recorded,
-        None => {
-            let recorded = is_recorded(file, proof);
-            verdicts.push((file.to_string(), proof, recorded));
-            if !recorded && !dropped.files.iter().any(|seen| seen == file) {
-                dropped.files.push(file.to_string());
+    let mut proven = |file: &str, proof: Proof, dropped: &mut Dropped| {
+        let proof = if overlaid(file) { proof } else { Proof::Base };
+        match verdicts
+            .iter()
+            .find(|(seen, by, _)| seen == file && *by == proof)
+        {
+            Some(&(_, _, recorded)) => recorded,
+            None => {
+                let recorded = is_recorded(file, proof);
+                verdicts.push((file.to_string(), proof, recorded));
+                if !recorded && !dropped.files.iter().any(|seen| seen == file) {
+                    dropped.files.push(file.to_string());
+                }
+                recorded
             }
-            recorded
         }
     };
     let mut kept = Vec::new();
@@ -1650,10 +1659,14 @@ mod tests {
             hit_in("", "route"),
         ];
         let calls = RefCell::new(Vec::new());
-        let (kept, dropped) = keep_recorded_hits(hits, |file, _| {
-            calls.borrow_mut().push(file.to_string());
-            file == "b.rs"
-        });
+        let (kept, dropped) = keep_recorded_hits(
+            hits,
+            |_| false,
+            |file, _| {
+                calls.borrow_mut().push(file.to_string());
+                file == "b.rs"
+            },
+        );
         assert_eq!(*calls.borrow(), ["a.rs", "b.rs"]);
         assert_eq!(
             kept.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(),
@@ -1673,10 +1686,14 @@ mod tests {
             .chain([hit_in("below.rs", "late")])
             .collect();
         let calls = RefCell::new(Vec::new());
-        let (kept, dropped) = keep_recorded_hits(ranked, |file, _| {
-            calls.borrow_mut().push(file.to_string());
-            file != "edited.rs" && file != "below.rs"
-        });
+        let (kept, dropped) = keep_recorded_hits(
+            ranked,
+            |_| false,
+            |file, _| {
+                calls.borrow_mut().push(file.to_string());
+                file != "edited.rs" && file != "below.rs"
+            },
+        );
         assert_eq!(
             kept.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(),
             ["k0", "k1", "k2", "k3", "k4"]
@@ -1700,12 +1717,16 @@ mod tests {
             4,
         );
         let calls = RefCell::new(Vec::new());
-        let (kept, dropped) = keep_recorded_hits(vec![hit], |file, _| {
-            calls.borrow_mut().push(file.to_string());
-            file == "target.py"
-        });
-        // The hit's file is proven as shown, each caller file against base.
-        assert_eq!(*calls.borrow(), ["target.py", "caller.py", "target.py"]);
+        let (kept, dropped) = keep_recorded_hits(
+            vec![hit],
+            |_| false,
+            |file, _| {
+                calls.borrow_mut().push(file.to_string());
+                file == "target.py"
+            },
+        );
+        // Neither file is in the overlay: the hit's proof serves its caller.
+        assert_eq!(*calls.borrow(), ["target.py", "caller.py"]);
         assert_eq!(
             (dropped.hits, dropped.neighbours, dropped.files.clone()),
             (0, 1, vec!["caller.py".to_string()])
@@ -1728,9 +1749,11 @@ mod tests {
     #[test]
     fn test_keep_recorded_hits_caller_file_refreshed_but_base_stale_drops_name() {
         let hit = hit_called_by("target.py", "target", &[("gone_caller", "caller.py")], 1);
-        let (kept, dropped) = keep_recorded_hits(vec![hit], |file, proof| {
-            file == "target.py" || proof == Proof::Shown
-        });
+        let (kept, dropped) = keep_recorded_hits(
+            vec![hit],
+            |file| file == "caller.py",
+            |file, proof| file == "target.py" || proof == Proof::Shown,
+        );
         assert!(kept[0].callers.is_empty(), "{:?}", kept[0].callers);
         assert_eq!(
             (dropped.neighbours, dropped.files.clone()),

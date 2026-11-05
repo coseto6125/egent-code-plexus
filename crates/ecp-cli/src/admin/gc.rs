@@ -399,7 +399,11 @@ fn sweep_hook_refresh_markers(
             continue;
         }
         let gone = retiring.contains(owner) || !sessions_dir.join(owner).is_dir();
-        if !gone && !idle_for(meta.modified().ok(), now, idle_secs) {
+        // A launcher opens `.lock` before it locks it, so a lock unlinked in
+        // between lets the next launcher lock a new inode beside a running
+        // job. Only a gone session's lock goes: no launcher runs for it.
+        let flock_file = name.ends_with(".lock") && meta.is_file();
+        if !gone && (flock_file || !idle_for(meta.modified().ok(), now, idle_secs)) {
             continue;
         }
         let path = entry.path();
@@ -407,10 +411,8 @@ fn sweep_hook_refresh_markers(
             if meta.is_dir() {
                 return fs::remove_dir(&path).is_ok();
             }
-            // A job holds `.lock` with `flock`. Unlinking a held lock lets the
-            // next launcher lock a new inode beside it, so two refreshes run.
-            // The unlink happens under our own lock, and a held one stays.
-            let _held = if name.ends_with(".lock") {
+            // A job still holding a gone session's lock keeps it.
+            let _held = if flock_file {
                 match fs::File::open(&path).map(|file| file.try_lock().map(|()| file)) {
                     Ok(Ok(file)) => Some(file),
                     Ok(Err(_)) => return false,
@@ -1782,6 +1784,7 @@ mod sha_lock_sweep_tests {
         let sessions = repo_root.join("sessions");
         let markers = repo_root.join(".hook-refresh");
         fs::create_dir_all(sessions.join("live~0123abcd")).unwrap();
+        fs::create_dir_all(sessions.join("busy~44445555")).unwrap();
         let idle = sessions.join("idle~89abcdef");
         fs::create_dir_all(&idle).unwrap();
         fs::write(
@@ -1813,6 +1816,9 @@ mod sha_lock_sweep_tests {
             file("live~0123abcd.started", 60),
             file("live~0123abcd.complete", 60),
             file("young~33334444.lock", 0),
+            // A live session's lock stays however idle: a launcher may hold
+            // it open.
+            file("busy~44445555.lock", 25 * 3600),
             file("notes.txt", 25 * 3600),
             file(".lock", 25 * 3600),
         ];
@@ -1861,6 +1867,30 @@ mod sha_lock_sweep_tests {
         drop(held);
         let stats = sweep_sessions(tmp.path(), false).unwrap();
         assert!(!lock.exists(), "a released stale lock stays");
+        assert_eq!(stats.removed, 1);
+    }
+
+    /// Stands for: a FIFO where a gone session's `.lock` was is removed
+    /// without being opened, so the sweep never waits for a writer.
+    #[cfg(unix)]
+    #[test]
+    fn test_sweep_sessions_fifo_named_like_lock_removed_without_blocking() {
+        let tmp = tempfile::tempdir().unwrap();
+        let markers = tmp.path().join(".hook-refresh");
+        fs::create_dir_all(&markers).unwrap();
+        let fifo = markers.join("gone~11112222.lock");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success(), "setup: mkfifo");
+        // Path-based: `set_file_mtime` opens the file, and a FIFO open blocks.
+        let when =
+            filetime::FileTime::from_system_time(SystemTime::now() - Duration::from_secs(60));
+        filetime::set_symlink_file_times(&fifo, when, when).unwrap();
+
+        let stats = sweep_sessions(tmp.path(), false).unwrap();
+        assert!(fifo.symlink_metadata().is_err(), "the FIFO stays");
         assert_eq!(stats.removed, 1);
     }
 }

@@ -403,8 +403,12 @@ pub fn annotation_type_names(language: Language, raw: &str) -> Vec<&str> {
     let mut stack: Vec<Open> = Vec::new();
     let mut groups = 0usize;
     // Per group: opened by `{`. A newline ends a member there as `;` does
-    // (a multi-line TS object type, a Go struct).
+    // in a multi-line TS / JS object type and a Go struct.
     let mut brace_groups: Vec<bool> = Vec::new();
+    let newline_ends_member = matches!(
+        language,
+        Language::TypeScript | Language::JavaScript | Language::Go
+    );
     let mut last_word: Option<(&str, usize)> = None;
     let mut rest = raw;
     while let Some(c) = rest.chars().next() {
@@ -487,7 +491,9 @@ pub fn annotation_type_names(language: Language, raw: &str) -> Vec<&str> {
                         open.segment += 1;
                     }
                 }
-                '\n' => {
+                // Only where a newline can end a member: a Dart named
+                // parameter may break between its type and its name.
+                '\n' if newline_ends_member => {
                     if let Some(open) = stack
                         .last_mut()
                         .filter(|open| open.group.is_some_and(|group| brace_groups[group]))
@@ -1429,6 +1435,11 @@ mod tests {
             (Go, "struct { A; x B }", &["A", "B"]),
             (Go, "struct {\n\tA\n\tx B\n}", &["A", "B"]),
             (Dart, "void Function(St a)", &["Function", "St"]),
+            (
+                Dart,
+                "void Function({required St\n  a})",
+                &["Function", "required", "St"],
+            ),
             (
                 Dart,
                 "void Function(St, {required Other b})",
