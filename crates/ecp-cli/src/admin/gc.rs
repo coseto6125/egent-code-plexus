@@ -310,13 +310,14 @@ fn session_is_idle(sm: &SessionMeta) -> bool {
     })
 }
 
+/// Marks idle session dirs dead and removes retired ones, then sweeps the
+/// hook refresh markers of every session dir that is gone or retired now
+/// (`sweep_hook_refresh_markers`).
 pub fn sweep_sessions(repo_root: &Path, dry_run: bool) -> io::Result<SweepStats> {
     let sessions_dir = repo_root.join("sessions");
     let mut stats = SweepStats::default();
-    let Ok(it) = fs::read_dir(&sessions_dir) else {
-        return Ok(stats);
-    };
-    for entry in it.flatten() {
+    let mut retiring = FxHashSet::default();
+    for entry in fs::read_dir(&sessions_dir).into_iter().flatten().flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         let path = entry.path();
         if is_retired_dir(&name) || name.contains(".stale-") {
@@ -345,9 +346,71 @@ pub fn sweep_sessions(repo_root: &Path, dry_run: bool) -> io::Result<SweepStats>
                 fs::rename(&path, &dead)?;
             }
             stats.marked += 1;
+            retiring.insert(name);
         }
     }
+    sweep_hook_refresh_markers(repo_root, &retiring, dry_run, &mut stats);
     Ok(stats)
+}
+
+/// What `pre_tool_use::RefreshMarkers` names `<session dir>` plus, in
+/// `.hook-refresh/`. `.lock.d` is the `mkdir` lock where `flock` is missing.
+const HOOK_REFRESH_SUFFIXES: [&str; 7] = [
+    ".lock.d",
+    ".lock",
+    ".log",
+    ".started.tmp",
+    ".started",
+    ".complete",
+    ".failed",
+];
+
+/// Removes `.hook-refresh/<name><suffix>` when `sessions/<name>` is gone or is
+/// in `retiring`, or when the marker sat idle past [`SESSION_IDLE_HOURS`]: every
+/// new session id adds a set, and nothing else reads a dead one. A marker
+/// younger than [`IN_FLIGHT_SECS`] stays, since its job may run before its
+/// session dir exists. Only those named entries go; the lock dir through
+/// `remove_dir`, so one that is not empty stays.
+fn sweep_hook_refresh_markers(
+    repo_root: &Path,
+    retiring: &FxHashSet<String>,
+    dry_run: bool,
+    stats: &mut SweepStats,
+) {
+    let Ok(it) = fs::read_dir(repo_root.join(".hook-refresh")) else {
+        return;
+    };
+    let sessions_dir = repo_root.join("sessions");
+    let now = SystemTime::now();
+    let idle_secs = SESSION_IDLE_HOURS.unsigned_abs() * 3600;
+    for entry in it.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(owner) = HOOK_REFRESH_SUFFIXES
+            .iter()
+            .find_map(|suffix| name.strip_suffix(suffix))
+            .filter(|owner| !owner.is_empty())
+        else {
+            continue;
+        };
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if is_in_flight(&meta, now) {
+            continue;
+        }
+        let gone = retiring.contains(owner) || !sessions_dir.join(owner).is_dir();
+        if !gone && !idle_for(meta.modified().ok(), now, idle_secs) {
+            continue;
+        }
+        let path = entry.path();
+        stats.dispose(&path, dry_run, || {
+            if meta.is_dir() {
+                fs::remove_dir(&path).is_ok()
+            } else {
+                fs::remove_file(&path).is_ok()
+            }
+        });
+    }
 }
 
 /// Retire commit dirs whose recorded worktree still exists but is not a
@@ -1693,5 +1756,76 @@ mod sha_lock_sweep_tests {
         assert_eq!(stats.removed, 1);
         assert!(!junk.exists());
         assert!(attached.commit_dir.exists());
+    }
+
+    /// Stands for: a session's refresh markers outlive its dir. The sweep
+    /// removes the markers of a session dir that is gone, of one it retires
+    /// in the same pass, and any marker idle past the session limit; it keeps
+    /// a live session's recent markers, a marker still in flight, and every
+    /// name it does not own. A dry run lists the same entries and removes
+    /// nothing.
+    #[test]
+    fn test_sweep_sessions_hook_refresh_markers_of_gone_sessions_removed_live_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_root = tmp.path();
+        let sessions = repo_root.join("sessions");
+        let markers = repo_root.join(".hook-refresh");
+        fs::create_dir_all(sessions.join("live~0123abcd")).unwrap();
+        let idle = sessions.join("idle~89abcdef");
+        fs::create_dir_all(&idle).unwrap();
+        fs::write(
+            idle.join("session_meta.json"),
+            r#"{"version":1,"session_id":"idle","pid":null,"started_at":"2026-01-01T00:00:00Z","last_touched":"2026-01-01T00:00:00Z","base_sha":"0000000000000000000000000000000000000000","source_worktree":"/tmp","overlay_version":1}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(markers.join("gone~11112222.lock.d")).unwrap();
+        let file = |name: &str, age_secs: u64| {
+            let path = markers.join(name);
+            if !path.exists() {
+                fs::write(&path, b"").unwrap();
+            }
+            backdate(&path, age_secs);
+            path
+        };
+        let doomed = [
+            file("gone~11112222.lock", 60),
+            file("gone~11112222.log", 60),
+            file("gone~11112222.started", 60),
+            file("gone~11112222.started.tmp", 60),
+            file("gone~11112222.failed", 60),
+            file("gone~11112222.lock.d", 60),
+            file("idle~89abcdef.complete", 60),
+            file("live~0123abcd.log", 25 * 3600),
+        ];
+        let kept = [
+            file("live~0123abcd.lock", 60),
+            file("live~0123abcd.started", 60),
+            file("live~0123abcd.complete", 60),
+            file("young~33334444.lock", 0),
+            file("notes.txt", 25 * 3600),
+            file(".lock", 25 * 3600),
+        ];
+
+        let dry = sweep_sessions(repo_root, true).unwrap();
+        let mut listed: Vec<_> = dry
+            .would_remove
+            .iter()
+            .filter(|p| p.starts_with(&markers))
+            .cloned()
+            .collect();
+        listed.sort();
+        let mut expected = doomed.to_vec();
+        expected.sort();
+        assert_eq!(listed, expected);
+        assert!(doomed.iter().chain(&kept).all(|p| p.exists()));
+
+        let real = sweep_sessions(repo_root, false).unwrap();
+        assert_eq!(real.removed, doomed.len());
+        for path in &doomed {
+            assert!(!path.exists(), "{}", path.display());
+        }
+        for path in &kept {
+            assert!(path.exists(), "{}", path.display());
+        }
     }
 }

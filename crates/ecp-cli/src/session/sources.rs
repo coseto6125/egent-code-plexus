@@ -2,11 +2,15 @@
 //! built from the inputs whose hashes the view cache key covers.
 
 use super::overlay_reader::ViewInputs;
+use ecp_core::config::{resolve_size_cap, DEFAULT_MAX_FILE_BYTES};
+use ecp_core::contracts::routing::SizeCap;
 use ecp_core::graph::ArchivedZeroCopyGraph;
 use rustc_hash::FxHashMap;
 use std::cell::Cell;
 use std::fs;
+use std::io::Read;
 use std::path::Path;
+use xxhash_rust::xxh3::xxh3_64;
 
 /// Gives a file's text only when the text's `xxh3_64` is the hash the
 /// view's inputs recorded for the path. A dirty file's recorded hash is its
@@ -78,9 +82,50 @@ where
 
 /// The bytes of `root/rel` when their `xxh3_64` is `recorded`. `None` for a
 /// file that is gone or unreadable: a missing file proves nothing, not even
-/// an empty recorded text.
+/// an empty recorded text. `None` also for a path that [`admitted_len`]
+/// refuses, and for a file whose length changed while it was read.
 pub fn recorded_bytes(root: &Path, rel: &str, recorded: u64) -> Option<Vec<u8>> {
-    fs::read(root.join(rel))
-        .ok()
-        .filter(|bytes| xxhash_rust::xxh3::xxh3_64(bytes) == recorded)
+    let path = root.join(rel);
+    let len = admitted_len(&path, || resolve_size_cap(root))?;
+    let mut bytes = Vec::with_capacity(usize::try_from(len).ok()?);
+    fs::File::open(&path)
+        .ok()?
+        .take(len + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() as u64 == len && xxh3_64(&bytes) == recorded).then_some(bytes)
+}
+
+/// Whether `root/rel` holds the text whose `xxh3_64` is `recorded`, hashed in
+/// a stream so the file is never loaded whole. The same paths as
+/// [`recorded_bytes`] prove nothing. `cap` gives the parse cap; it runs only
+/// for a file over the built-in default.
+pub fn text_is_recorded(
+    root: &Path,
+    rel: &str,
+    recorded: u64,
+    cap: impl FnOnce() -> SizeCap,
+) -> bool {
+    let Some(len) = admitted_len(&root.join(rel), cap) else {
+        return false;
+    };
+    let empty = xxh3_64(&[]);
+    // `hash_worktree_file` hashes a file it cannot read as empty, so the empty
+    // digest proves only a file that stat'ed empty.
+    if len == 0 {
+        return recorded == empty;
+    }
+    recorded != empty && super::overlay_writer::hash_worktree_file(root, Path::new(rel)) == recorded
+}
+
+/// The length of the file at `path` when it is a regular file (symlinks
+/// followed) that a parse admits. Nothing else is opened: opening a FIFO
+/// blocks, and a device such as `/dev/zero` never ends. A file at most the
+/// built-in default is admitted without resolving the cap, so the common case
+/// costs one `stat` and no config read; any file this admits is therefore at
+/// most the larger of the two caps.
+fn admitted_len(path: &Path, cap: impl FnOnce() -> SizeCap) -> Option<u64> {
+    let meta = fs::metadata(path).ok().filter(fs::Metadata::is_file)?;
+    let len = meta.len();
+    (len <= DEFAULT_MAX_FILE_BYTES || cap().admits(len)).then_some(len)
 }

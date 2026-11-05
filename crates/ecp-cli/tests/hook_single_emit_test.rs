@@ -180,3 +180,48 @@ fn session_start_drains_peer_inbox() {
         String::from_utf8_lossy(&out2)
     );
 }
+
+/// Stands for: one session works in two worktrees, and a peer wrote to the
+/// dir of the worktree the hook's cwd does not name. The hook still delivers
+/// it, once. Only `<sid>~` plus exactly 8 hex chars counts as the session's
+/// dir: a 0.17.3 bare dir, a retired dir, another sid holding `~` and a short
+/// key are not drained.
+#[test]
+fn test_drain_and_render_peer_payload_other_worktree_dir_of_session_is_drained() {
+    let tmp = tempdir().unwrap();
+    let sid = "single_emit_wt";
+    let sessions = tmp.path().join("sessions");
+    let other = sessions.join(format!("{sid}~deadbeef"));
+    assert_ne!(own_dir(sid), format!("{sid}~deadbeef"));
+    seed_inbox(&other, sid, "other-worktree-msg");
+    let decoys = [
+        sid.to_string(),
+        format!("{sid}~worker~12345678"),
+        format!("{sid}~deadbeef.dead.1762300000"),
+        format!("{sid}~1234567"),
+        format!("{sid}~DEADBEEF"),
+    ];
+    for (i, name) in decoys.iter().enumerate() {
+        seed_inbox(&sessions.join(name), sid, &format!("decoy-{i}"));
+    }
+
+    let out = fire("pre-tool-use", "{}", sid, tmp.path());
+    let json = assert_single_json(&out, "PreToolUse(other worktree)");
+    let ctx = json["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(ctx.contains("other-worktree-msg"), "{ctx}");
+    assert!(!ctx.contains("decoy-"), "{ctx}");
+
+    let after = std::fs::read_to_string(other.join("inbox.jsonl")).unwrap_or_default();
+    assert!(!after.contains("other-worktree-msg"), "{after}");
+    for (i, name) in decoys.iter().enumerate() {
+        let kept = std::fs::read_to_string(sessions.join(name).join("inbox.jsonl")).unwrap();
+        assert!(kept.contains(&format!("decoy-{i}")), "{name}: {kept}");
+    }
+    let again = fire("pre-tool-use", "{}", sid, tmp.path());
+    assert!(
+        !String::from_utf8_lossy(&again).contains("other-worktree-msg"),
+        "delivered once"
+    );
+}

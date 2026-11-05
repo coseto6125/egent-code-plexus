@@ -362,15 +362,22 @@ impl Engine {
     /// Whether `root/rel` holds the text this engine's answers for `rel` came
     /// from: the accepted fragment's text when the overlay view supplies the
     /// path, else the text the graph indexed. A file that is gone, changed,
-    /// unreadable or recorded with no hash is not recorded.
+    /// unreadable or recorded with no hash is not recorded, and neither is a
+    /// path that is no regular file or is over the parse cap: the hook runs
+    /// this on every search, so it never blocks on a FIFO or reads a file
+    /// whole.
     pub fn file_text_is_recorded(&self, root: &Path, rel: &str) -> bool {
         self.overlay_view();
         let dirty = self.overlay_hashes.get_or_init(FxHashMap::default);
         let Ok(graph) = self.graph() else {
             return false;
         };
-        crate::session::sources::recorded_hash(graph, dirty, rel)
-            .is_some_and(|hash| crate::session::sources::recorded_bytes(root, rel, hash).is_some())
+        crate::session::sources::recorded_hash(graph, dirty, rel).is_some_and(|hash| {
+            crate::session::sources::text_is_recorded(root, rel, hash, || {
+                self.overlay_size_cap
+                    .unwrap_or_else(|| ecp_core::config::resolve_size_cap(root))
+            })
+        })
     }
 
     /// The key `overlay_view` stores and looks up its view under, for the

@@ -1336,6 +1336,106 @@ fn test_file_text_is_recorded_clean_graph_only_matching_text_is_proven() {
     assert!(!proven("src/unlisted.rs"));
 }
 
+/// A graph that records each of `files` with its content hash.
+fn write_graph_with_hashes(f: &Fixture, files: &[(&str, &[u8])]) {
+    let mut fx = GraphFixture::new();
+    fx.func(CLEAN, "callee");
+    for (rel, text) in files {
+        let idx = fx.file(rel) as usize;
+        fx.assembly_mut().files[idx].content_hash = graph_hash(text);
+    }
+    fs::write(&f.graph_path, fx.into_bytes()).unwrap();
+}
+
+/// Stands for: a path the graph recorded as a small regular file is now a
+/// FIFO with no writer, a symlink to `/dev/zero`, or a directory. The proof
+/// says "not proven" at once: it neither blocks on the FIFO nor reads the
+/// device without end. The text reader answers the same way.
+#[cfg(unix)]
+#[test]
+fn test_file_text_is_recorded_fifo_device_or_dir_returns_false_without_blocking() {
+    const FIFO: &str = "src/fifo.rs";
+    const ZERO: &str = "src/zero.rs";
+    const DIR: &str = "src/dir.rs";
+    let f = Fixture::new();
+    write_graph_with_hashes(&f, &[(FIFO, &b""[..]), (ZERO, &b""[..]), (DIR, &b""[..])]);
+    let fifo = f.worktree.join(FIFO);
+    fs::create_dir_all(f.worktree.join(DIR)).unwrap();
+    let made = Command::new("mkfifo").arg(&fifo).status().unwrap();
+    assert!(made.success(), "setup: mkfifo");
+    std::os::unix::fs::symlink("/dev/zero", f.worktree.join(ZERO)).unwrap();
+
+    let (graph_path, worktree) = (f.graph_path.clone(), f.worktree.clone());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let engine = Engine::load(&graph_path).unwrap();
+        let empty = xxh3_64(b"");
+        let answers: Vec<(bool, bool)> = [FIFO, ZERO, DIR]
+            .iter()
+            .map(|rel| {
+                (
+                    engine.file_text_is_recorded(&worktree, rel),
+                    recorded_bytes(&worktree, rel, empty).is_some(),
+                )
+            })
+            .collect();
+        let _ = tx.send(answers);
+    });
+    let answers = rx
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap_or_else(|_| {
+            // Release a reader stuck on the FIFO before failing.
+            let _ = fs::OpenOptions::new().write(true).open(&fifo);
+            panic!("the freshness proof blocked on a non-regular file");
+        });
+    assert_eq!(answers, vec![(false, false); 3]);
+}
+
+/// Stands for: a file over the parse cap is never read, so it is not proven
+/// even when its text is the recorded one; once the repo's cap admits it, it
+/// is. The empty env value pins the cap to the repo config.
+#[test]
+fn test_file_text_is_recorded_file_over_size_cap_returns_false_until_cap_admits_it() {
+    if rerun_in_child(
+        "test_file_text_is_recorded_file_over_size_cap_returns_false_until_cap_admits_it",
+        &[("ECP_MAX_FILE_BYTES", "")],
+    ) {
+        return;
+    }
+    let f = Fixture::new();
+    let big = vec![b'a'; ecp_core::config::DEFAULT_MAX_FILE_BYTES as usize + 1];
+    write_graph_with_hashes(&f, &[(CLEAN, big.as_slice())]);
+    write_worktree(&f, CLEAN, &big, 1_000);
+    let engine = Engine::load(&f.graph_path).unwrap();
+    let hash = xxh3_64(&big);
+    assert!(!engine.file_text_is_recorded(&f.worktree, CLEAN));
+    assert_eq!(recorded_bytes(&f.worktree, CLEAN, hash), None);
+
+    fs::create_dir_all(f.worktree.join(".ecp")).unwrap();
+    fs::write(
+        f.worktree.join(".ecp/config.toml"),
+        "[index]\nmax_file_bytes = 2097152\n",
+    )
+    .unwrap();
+    assert!(engine.file_text_is_recorded(&f.worktree, CLEAN));
+    assert_eq!(recorded_bytes(&f.worktree, CLEAN, hash), Some(big));
+}
+
+/// Stands for: the streamed hash reads a file it cannot read as empty, so the
+/// empty hash proves only a file that is empty; a non-empty file recorded
+/// as empty is not proven.
+#[test]
+fn test_file_text_is_recorded_empty_hash_proves_only_an_empty_file() {
+    const FILLED: &str = "src/filled.rs";
+    let f = Fixture::new();
+    write_graph_with_hashes(&f, &[(EMPTY, &b""[..]), (FILLED, &b""[..])]);
+    write_worktree(&f, EMPTY, b"", 1_000);
+    write_worktree(&f, FILLED, b"x", 1_000);
+    let engine = Engine::load(&f.graph_path).unwrap();
+    assert!(engine.file_text_is_recorded(&f.worktree, EMPTY));
+    assert!(!engine.file_text_is_recorded(&f.worktree, FILLED));
+}
+
 const CALLER_RS: &str = "crates/a/src/lib.rs";
 const B_LIB: &str = "crates/b/src/lib.rs";
 const B_LIB_INDEXED: &str = "mod x;\nmod y;\npub use x::f;\n";

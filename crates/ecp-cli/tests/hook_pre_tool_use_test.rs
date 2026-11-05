@@ -1258,7 +1258,9 @@ fn test_hook_hits_stale_hit_spawns_refresh_then_next_hook_reports_working_tree_l
 
 /// Two hooks at once on the stale state: neither prints a stale line, and
 /// the flock lets one refresh run. (The two outputs may differ if the refresh
-/// lands between them, so they are not compared.)
+/// lands between them, so they are not compared.) The log is truncated at
+/// each run, so it cannot count runs; `background.rs`'s
+/// `test_job_script_*_run*` tests count them with a stand-in binary.
 #[cfg(unix)]
 #[test]
 fn test_hook_hits_concurrent_stale_hooks_spawn_at_most_one_refresh() {
@@ -1291,6 +1293,42 @@ fn test_hook_hits_concurrent_stale_hooks_spawn_at_most_one_refresh() {
     assert!(
         log_after.matches("=== attempt").count() <= 1,
         "{log}\n{log_after}"
+    );
+}
+
+/// Stands for: a `Called by` name comes from another file than the hit. The
+/// caller was deleted from `caller.py` while `target.py` stayed as indexed:
+/// the hit keeps its line, the caller is not named, and `omitted:` names
+/// `caller.py`. Red before the neighbour proof (it printed
+/// `Called by: caller_fn`).
+#[test]
+fn test_hook_hits_caller_deleted_in_other_file_is_not_named() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = indexed_repo(
+        tmp.path(),
+        &[
+            ("target.py", "def target_fn():\n    return 1\n".into()),
+            (
+                "caller.py",
+                "from target import target_fn\n\n\ndef caller_fn():\n    return target_fn()\n"
+                    .into(),
+            ),
+        ],
+    );
+    let before = hook_hits(&home, &repo, "target_fn");
+    assert!(
+        before.contains("Called by: caller_fn"),
+        "control: the index records the call\n{before}"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    fs::write(repo.join("caller.py"), "def other_fn():\n    return 2\n").unwrap();
+
+    let after = hook_hits(&home, &repo, "target_fn");
+    assert!(after.contains("target_fn (target.py:1)"), "{after}");
+    assert!(!after.contains("caller_fn"), "{after}");
+    assert!(
+        after.contains("omitted:") && after.contains("caller.py"),
+        "{after}"
     );
 }
 

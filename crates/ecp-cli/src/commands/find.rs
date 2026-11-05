@@ -977,6 +977,9 @@ pub struct Hit {
     /// Struct's constructors included, in edge order, up to
     /// `HOP_EXPANSION_LIMIT`. Empty only when there is no caller.
     pub callers: Vec<String>,
+    /// The file of each `callers` entry, at the same index: the hook names a
+    /// caller only when that file still holds the text the graph read.
+    pub caller_files: Vec<String>,
     /// Number of distinct 1-hop `Calls` targets. The `callees` list is
     /// capped at `HOP_EXPANSION_LIMIT`, so read this to know how many
     /// callees exist.
@@ -984,6 +987,8 @@ pub struct Hit {
     /// Names of the distinct 1-hop `Calls` targets, in edge order, up to
     /// `HOP_EXPANSION_LIMIT`. Empty only when there is no callee.
     pub callees: Vec<String>,
+    /// The file of each `callees` entry, at the same index.
+    pub callee_files: Vec<String>,
     /// File category used for bucket partitioning; not emitted to consumers.
     pub category: FileCategory,
 }
@@ -1012,8 +1017,10 @@ struct OrderedHit {
     signature: String,
     caller_count: usize,
     callers: Vec<String>,
+    caller_files: Vec<String>,
     callee_count: usize,
     callees: Vec<String>,
+    callee_files: Vec<String>,
     score_source: ScoreSource,
     category: FileCategory,
 }
@@ -1032,8 +1039,10 @@ impl OrderedHit {
             signature: h.signature,
             caller_count: h.caller_count,
             callers: h.callers,
+            caller_files: h.caller_files,
             callee_count: h.callee_count,
             callees: h.callees,
+            callee_files: h.callee_files,
             score_source: h.score_source,
             category: h.category,
         }
@@ -1304,8 +1313,10 @@ fn overlay_bm25_hits(
                 name: h.name.clone(),
                 caller_count: 0,
                 callers: Vec::new(),
+                caller_files: Vec::new(),
                 callee_count: 0,
                 callees: Vec::new(),
+                callee_files: Vec::new(),
                 category,
             })
         })
@@ -1611,17 +1622,26 @@ fn build_hit(
     // target into `callees` — the hook renders those two lists verbatim as
     // `Called by:` and `Calls:`, so a File node arrived at the model labelled
     // as a caller.
+    // A neighbour's name and the file it is declared in.
+    let named = |id: usize| {
+        let node = &graph.nodes[id];
+        (
+            node.name.resolve(&graph.string_pool).to_string(),
+            graph.files[node.file_idx.to_native() as usize]
+                .path
+                .resolve(&graph.string_pool)
+                .to_string(),
+        )
+    };
     let mut caller_count = 0usize;
     let mut callers: Vec<String> = Vec::new();
+    let mut caller_files: Vec<String> = Vec::new();
     for src in call_sources(graph, idx, base_constructors(graph, idx as u32)) {
         caller_count += 1;
         if callers.len() < HOP_EXPANSION_LIMIT {
-            callers.push(
-                graph.nodes[src as usize]
-                    .name
-                    .resolve(&graph.string_pool)
-                    .to_string(),
-            );
+            let (name, file) = named(src as usize);
+            callers.push(name);
+            caller_files.push(file);
         }
     }
 
@@ -1629,6 +1649,7 @@ fn build_hit(
     let out_end = graph.out_offsets[idx + 1].to_native() as usize;
     let mut callee_count = 0usize;
     let mut callees: Vec<String> = Vec::new();
+    let mut callee_files: Vec<String> = Vec::new();
     let mut seen_callees = rustc_hash::FxHashSet::default();
     for e in graph.edges[out_start..out_end]
         .iter()
@@ -1637,12 +1658,9 @@ fn build_hit(
     {
         callee_count += 1;
         if callees.len() < HOP_EXPANSION_LIMIT {
-            callees.push(
-                graph.nodes[e.target.to_native() as usize]
-                    .name
-                    .resolve(&graph.string_pool)
-                    .to_string(),
-            );
+            let (name, file) = named(e.target.to_native() as usize);
+            callees.push(name);
+            callee_files.push(file);
         }
     }
 
@@ -1658,8 +1676,10 @@ fn build_hit(
         signature,
         caller_count,
         callers,
+        caller_files,
         callee_count,
         callees,
+        callee_files,
         category,
     })
 }
@@ -1794,8 +1814,10 @@ pub fn compute_multi_with_engines(
             signature: o.signature,
             caller_count: o.caller_count,
             callers: o.callers,
+            caller_files: o.caller_files,
             callee_count: o.callee_count,
             callees: o.callees,
+            callee_files: o.callee_files,
             category: o.category,
         })
         .collect();
@@ -2388,8 +2410,10 @@ mod tests {
                 signature: "fn n".into(),
                 caller_count: 0,
                 callers: vec![],
+                caller_files: vec![],
                 callee_count: 0,
                 callees: vec![],
+                callee_files: vec![],
                 score_source: ScoreSource::Bm25,
                 category: FileCategory::Source,
             };

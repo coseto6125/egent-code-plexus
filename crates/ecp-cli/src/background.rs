@@ -13,6 +13,17 @@ pub struct BgMarkers<'a> {
     pub failed: &'a Path,
 }
 
+/// A guard the job checks once it holds the lock, for a job that two
+/// launchers may both decide to start: the job runs only while `path` still
+/// holds `seen` (empty for no file), then records `stamp` there. A launcher
+/// that decided before another job started therefore runs nothing, and
+/// `path`'s mtime is when the last run started.
+pub struct BgStart<'a> {
+    pub path: &'a Path,
+    pub seen: &'a str,
+    pub stamp: &'a str,
+}
+
 /// Spec for a detached background `ecp <args>` invocation.
 pub struct BgJob<'a> {
     /// CLI args appended after the resolved `ecp` binary path.
@@ -72,6 +83,16 @@ pub(crate) fn background_rebuild_skipped() -> bool {
 /// launcher subprocess started. The job's actual outcome surfaces
 /// via the marker files (if configured).
 pub fn spawn_bg(job: BgJob) -> bool {
+    spawn_job(job, None)
+}
+
+/// [`spawn_bg`] for a job that runs only while `start` holds what the
+/// launcher saw (see [`BgStart`]).
+pub fn spawn_bg_guarded(job: BgJob, start: BgStart) -> bool {
+    spawn_job(job, Some(start))
+}
+
+fn spawn_job(job: BgJob, start: Option<BgStart>) -> bool {
     let self_exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(_) => return false,
@@ -97,18 +118,61 @@ pub fn spawn_bg(job: BgJob) -> bool {
             }),
         ..job
     };
+    let start_path = start.as_ref().map(|s| abs(s.path));
+    let start = start.map(|s| BgStart {
+        path: start_path.as_deref().unwrap_or(s.path),
+        seen: s.seen,
+        stamp: s.stamp,
+    });
     let home = std::env::var_os("ECP_HOME").map(|h| abs(Path::new(&h)));
+    let shell = job_script(&job, start.as_ref(), &self_exe);
 
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
+        .arg(&shell)
+        .current_dir(job.cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(home) = home {
+        cmd.env("ECP_HOME", home);
+    }
+    cmd.envs(job.env.iter().copied());
+    cmd.spawn().is_ok()
+}
+
+/// The `sh -c` body that runs `job` with `self_exe` as the `ecp` binary.
+fn job_script(job: &BgJob, start: Option<&BgStart>, self_exe: &Path) -> String {
+    // Under the lock, before anything is written: a launcher whose decision
+    // another run already served exits here. The stamp is renamed into place
+    // so a reader never sees a half-written one.
+    let start_guard = start.map_or_else(String::new, |s| {
+        let tmp = s.path.with_file_name(format!(
+            "{}.tmp",
+            s.path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("ecp.started")
+        ));
+        format!(
+            "[ \"$(cat {path} 2>/dev/null)\" = {seen} ] || exit 0\nprintf '%s' {stamp} > {tmp} && mv -f {tmp} {path}\n",
+            path = shell_quote(s.path),
+            seen = shell_quote(s.seen),
+            stamp = shell_quote(s.stamp),
+            tmp = shell_quote(tmp),
+        )
+    });
+    let preamble = format!("{}{start_guard}", flock_preamble(job.lock));
     let args_quoted: Vec<String> = job.args.iter().map(|arg| shell_quote(*arg)).collect();
     let args_joined = args_quoted.join(" ");
 
-    let shell = if let Some(markers) = &job.markers {
+    if let Some(markers) = &job.markers {
         let then_line = match job.then_args {
             Some(then_args) => {
                 let then_quoted: Vec<String> = then_args.iter().map(shell_quote).collect();
                 format!(
                     "{} {} >> {} 2>&1 || true",
-                    shell_quote(&self_exe),
+                    shell_quote(self_exe),
                     then_quoted.join(" "),
                     shell_quote(markers.log)
                 )
@@ -132,9 +196,8 @@ done
 rm -f {complete}
 : > {failed}
 "#,
-            preamble = flock_preamble(job.lock),
             log = shell_quote(markers.log),
-            ecp = shell_quote(&self_exe),
+            ecp = shell_quote(self_exe),
             args = args_joined,
             max = job.retry.0,
             sleep_secs = job.retry.1,
@@ -153,30 +216,122 @@ while [ $ATTEMPT -lt $MAX ]; do
   [ $ATTEMPT -lt $MAX ] && sleep {sleep_secs}
 done
 "#,
-            preamble = flock_preamble(job.lock),
-            ecp = shell_quote(&self_exe),
+            ecp = shell_quote(self_exe),
             args = args_joined,
             max = job.retry.0,
             sleep_secs = job.retry.1,
         )
-    };
-
-    let mut cmd = Command::new("sh");
-    cmd.arg("-c")
-        .arg(&shell)
-        .current_dir(job.cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    if let Some(home) = home {
-        cmd.env("ECP_HOME", home);
     }
-    cmd.envs(job.env.iter().copied());
-    cmd.spawn().is_ok()
 }
 
 pub(crate) fn shell_quote<P: AsRef<Path>>(p: P) -> String {
     let s = p.as_ref().to_string_lossy().to_string();
     let escaped = s.replace('\'', r"'\''");
     format!("'{}'", escaped)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::{job_script, BgJob, BgMarkers, BgStart};
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    /// A stand-in `ecp` that appends one line to the file it is given, so the
+    /// number of lines is the number of runs. `pause` keeps a run in flight.
+    fn counting_ecp(dir: &Path, pause: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let exe = dir.join("count.sh");
+        std::fs::write(
+            &exe,
+            format!("#!/bin/sh\nsleep {pause}\necho run >> \"$1\"\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        exe
+    }
+
+    /// The guarded job's shell, as `spawn_bg_guarded` would launch it.
+    fn guarded(dir: &Path, ecp: &Path, seen: &str, stamp: &str) -> Command {
+        let counter = dir.join("runs").to_str().unwrap().to_string();
+        let args = [counter.as_str()];
+        let path = |ext: &str| dir.join(format!("job.{ext}"));
+        let (lock, log, complete, failed, started) = (
+            path("lock"),
+            path("log"),
+            path("complete"),
+            path("failed"),
+            path("started"),
+        );
+        let job = BgJob {
+            args: &args,
+            lock: &lock,
+            cwd: dir,
+            retry: (1, 0),
+            markers: Some(BgMarkers {
+                log: &log,
+                complete: &complete,
+                failed: &failed,
+            }),
+            then_args: None,
+            env: &[],
+        };
+        let start = BgStart {
+            path: &started,
+            seen,
+            stamp,
+        };
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg(job_script(&job, Some(&start), ecp))
+            .current_dir(dir);
+        cmd
+    }
+
+    fn runs(dir: &Path) -> usize {
+        std::fs::read_to_string(dir.join("runs")).map_or(0, |s| s.lines().count())
+    }
+
+    fn stamp(dir: &Path) -> String {
+        std::fs::read_to_string(dir.join("job.started")).unwrap_or_default()
+    }
+
+    /// Stands for: the first launcher's job finished and released the lock
+    /// before the second launcher ran; both decided on the same state, so the
+    /// second runs nothing. A launcher that saw the new stamp runs again.
+    #[test]
+    fn test_job_script_second_launcher_after_first_run_runs_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ecp = counting_ecp(tmp.path(), "0");
+        for stamp_text in ["a 1", "b 1"] {
+            assert!(guarded(tmp.path(), &ecp, "", stamp_text)
+                .status()
+                .unwrap()
+                .success());
+        }
+        assert_eq!((runs(tmp.path()), stamp(tmp.path())), (1, "a 1".into()));
+        assert!(tmp.path().join("job.complete").exists());
+
+        assert!(guarded(tmp.path(), &ecp, "a 1", "c 1")
+            .status()
+            .unwrap()
+            .success());
+        assert_eq!((runs(tmp.path()), stamp(tmp.path())), (2, "c 1".into()));
+        assert!(!tmp.path().join("job.started.tmp").exists());
+    }
+
+    /// Stands for: two hooks decided at once and both launched; one job runs,
+    /// whether the other meets the held lock or the new stamp.
+    #[test]
+    fn test_job_script_concurrent_launchers_run_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ecp = counting_ecp(tmp.path(), "0.3");
+        let children: Vec<_> = ["a 1", "b 1"]
+            .map(|stamp_text| guarded(tmp.path(), &ecp, "", stamp_text).spawn().unwrap())
+            .into_iter()
+            .collect();
+        for mut child in children {
+            assert!(child.wait().unwrap().success());
+        }
+        assert_eq!(runs(tmp.path()), 1);
+    }
 }
