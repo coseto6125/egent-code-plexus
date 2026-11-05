@@ -1768,7 +1768,7 @@ fn apply_l1_overlay_updates(
                 );
             }
             promotion::PromotionCase::B => {
-                promotion::promote_case_b(&session_dir, &session_meta.base_sha, &current_head)?;
+                promotion::promote_case_b(&session_dir, &current_head)?;
                 eprintln!("session.rebased case=B");
             }
         }

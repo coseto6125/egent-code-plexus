@@ -4,7 +4,7 @@
 //! and restarts from the new base.
 
 use crate::git::safe_exec;
-use ecp_core::registry::{atomic_write_json, FileLock};
+use ecp_core::registry::{atomic_write_json, retire_dir_async, FileLock};
 use ecp_core::session::layout;
 use ecp_core::session::{DirtyEvents, SessionMeta};
 use std::fs;
@@ -96,16 +96,12 @@ pub fn promote_case_a(
     Ok(PromoteStats { dropped, kept })
 }
 
-pub fn promote_case_b(session_dir: &Path, old_sha: &str, new_sha: &str) -> io::Result<()> {
-    let parent = session_dir
-        .parent()
-        .ok_or_else(|| io::Error::other("session_dir has no parent"))?;
+pub fn promote_case_b(session_dir: &Path, new_sha: &str) -> io::Result<()> {
     let sid = session_dir
         .file_name()
         .and_then(|s| s.to_str())
         .ok_or_else(|| io::Error::other("invalid session_dir name"))?
         .to_string();
-    let stale = parent.join(format!("{sid}.stale-{old_sha}"));
 
     // Rescue existing source_worktree from old session_meta if present.
     // If reading fails, fall back to empty string — the auto_ensure path
@@ -116,7 +112,11 @@ pub fn promote_case_b(session_dir: &Path, old_sha: &str, new_sha: &str) -> io::R
             .map(|sm| (sm.source_worktree, sm.agent_name))
             .unwrap_or_default();
 
-    fs::rename(session_dir, &stale)?;
+    // A unique retired name, not `<sid>.stale-<old sha>`: that name repeats
+    // when the session leaves the same commit twice, and a copy left behind
+    // by a process that exited before its cleanup ran made the rename fail
+    // with ENOTEMPTY. `admin gc` sweeps both shapes.
+    retire_dir_async(session_dir)?;
     fs::create_dir(session_dir)?;
     // `l1/` before the manifest, as `ensure_session_meta` does: a peer's
     // recursive watch covers it before the first write lands there.
@@ -142,15 +142,6 @@ pub fn promote_case_b(session_dir: &Path, old_sha: &str, new_sha: &str) -> io::R
         &layout::dirty_events_path(session_dir),
         &DirtyEvents::empty(size_cap),
     )?;
-
-    // Background GC stale dir after 2s. The thread is detached — we don't
-    // join it; if the process exits sooner, the .stale dir is left for the
-    // next ecp admin gc sweep (Phase 7) to pick up.
-    let stale_clone = stale.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        let _ = fs::remove_dir_all(&stale_clone);
-    });
 
     Ok(())
 }
@@ -285,7 +276,7 @@ mod tests {
             "promotion rewrote the legacy manifest"
         );
 
-        promote_case_b(&session, &new_sha, "f".repeat(40).as_str()).unwrap();
+        promote_case_b(&session, "f".repeat(40).as_str()).unwrap();
 
         let reset = DirtyEvents::read(&layout::dirty_events_path(&session)).unwrap();
         assert!(reset.entries.is_empty());

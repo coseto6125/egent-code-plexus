@@ -244,7 +244,7 @@ fn case_a_keeps_fragment_when_content_diverges() {
 }
 
 #[test]
-fn case_b_atomic_renames_to_stale_then_recreates() {
+fn case_b_retires_old_dir_then_recreates() {
     let tmp = tempfile::tempdir().unwrap();
     let old_sha = "1".repeat(40);
     let new_sha = "2".repeat(40);
@@ -254,7 +254,7 @@ fn case_b_atomic_renames_to_stale_then_recreates() {
     // Write some fragment files.
     std::fs::write(layout::fragment_path(&sid_dir, "a"), b"x").unwrap();
 
-    promote_case_b(&sid_dir, &old_sha, &new_sha).unwrap();
+    promote_case_b(&sid_dir, &new_sha).unwrap();
 
     // session_dir must exist (fresh) and be empty of fragments.
     assert!(sid_dir.exists());
@@ -268,23 +268,32 @@ fn case_b_atomic_renames_to_stale_then_recreates() {
         !layout::fragment_path(&sid_dir, "a").exists(),
         "the fresh session must not inherit the old session's fragment bins"
     );
+}
 
-    // Stale dir should exist (background GC hasn't run yet).
-    let stale = sid_dir
-        .parent()
-        .unwrap()
-        .join(format!("test-sid.stale-{old_sha}"));
-    assert!(
-        stale.exists(),
-        "stale dir must exist immediately after rename"
-    );
+/// Stands for: a short-lived ecp process exits before the retired copy of a
+/// session is removed, so `<sid>.stale-<old sha>`, the fixed name binaries
+/// before this change wrote, is still there when the session leaves the same
+/// commit again (a branch switch back and forth). The promotion still
+/// succeeds. The retired name's spelling and the leftover's removal are not
+/// pinned: `admin gc` sweeps both shapes, and the background delete races a
+/// test process.
+#[test]
+fn test_promote_case_b_leftover_stale_dir_of_same_commit_promotes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let old_sha = "1".repeat(40);
+    let new_sha = "2".repeat(40);
+    let wt = tempfile::tempdir().unwrap();
+    let sid_dir = make_session(tmp.path(), &old_sha, wt.path());
+    let sessions = sid_dir.parent().unwrap().to_path_buf();
+    let leftover = sessions.join(format!("test-sid.stale-{old_sha}"));
+    std::fs::create_dir_all(leftover.join("fragments")).unwrap();
+    std::fs::write(leftover.join("fragments/old.bin"), b"x").unwrap();
 
-    // Sleep briefly to allow background GC to fire.
-    std::thread::sleep(std::time::Duration::from_secs(3));
-    assert!(
-        !stale.exists(),
-        "background GC should have removed stale dir after 2s"
-    );
+    promote_case_b(&sid_dir, &new_sha).unwrap();
+
+    let sm = SessionMeta::read(&sid_dir.join("session_meta.json")).unwrap();
+    assert_eq!(sm.base_sha, new_sha);
+    assert!(layout::l1_dir(&sid_dir).is_dir());
 }
 
 /// Contract: promotion rewrites the manifest and deletes bins, so it waits for
