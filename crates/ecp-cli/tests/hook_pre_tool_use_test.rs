@@ -615,3 +615,230 @@ fn test_bash_cd_nonexistent_dir_no_op() {
     assert!(out.status.success());
     assert!(out.stdout.is_empty());
 }
+
+// ── Dirty-worktree overlay in the hit block (FU-2026-09-05-b7c8975c323b) ─────
+//
+// Contract: a hit from a file edited since the build reports where the symbol
+// is in the working tree, a symbol deleted there is not offered, and one added
+// there is. The hook reads the overlay the last `ecp` query wrote for the
+// session; it does not refresh it.
+
+const OVERLAY_SID: &str = "hook-overlay-session";
+
+fn session_cmd(home: &std::path::Path) -> Command {
+    let mut cmd = Command::new(ecp_bin());
+    cmd.env("HOME", home)
+        .env("ECP_SKIP_BG_REBUILD", "1")
+        .env_remove("ECP_SESSION_ID")
+        .env_remove("CODEX_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("GEMINI_CLI_SESSION_ID")
+        .env("CLAUDE_CODE_SESSION_ID", OVERLAY_SID);
+    cmd
+}
+
+/// Indexed repo whose `tools.rs` holds `relocated` (line 1) and `vanished`
+/// (line 2) at HEAD.
+fn overlay_hook_repo(tmp: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    indexed_repo(
+        tmp,
+        &[("tools.rs", "fn relocated() {}\nfn vanished() {}\n".into())],
+    )
+}
+
+/// One `ecp find` writes the session's overlay fragments, as any earlier query
+/// of the agent's session does.
+fn warm_session_overlay(home: &std::path::Path, repo: &std::path::Path) {
+    let out = session_cmd(home)
+        .args(["find", "relocated", "--repo"])
+        .arg(repo)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Move `relocated` down 24 lines, delete `vanished`, add `newcomer`.
+fn dirty_tools_rs(repo: &std::path::Path) {
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let padding = "// pad\n".repeat(24);
+    fs::write(
+        repo.join("tools.rs"),
+        format!("{padding}fn relocated() {{}}\nfn newcomer() {{}}\n"),
+    )
+    .unwrap();
+}
+
+fn grep_envelope(cwd: &std::path::Path, pattern: serde_json::Value) -> String {
+    serde_json::json!({"cwd": cwd, "tool_name": "Grep", "tool_input": {"pattern": pattern}})
+        .to_string()
+}
+
+fn spawn_hook(home: &std::path::Path, envelope: &str) -> std::process::Child {
+    let mut child = session_cmd(home)
+        .args(["hook", "pre-tool-use", "--claude-code"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(envelope.as_bytes())
+        .unwrap();
+    child
+}
+
+/// The hook's `additionalContext`, `""` when it printed nothing. The payload
+/// is parsed as the harness parses it: one JSON object on stdout.
+fn hook_context(output: std::process::Output) -> String {
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if output.stdout.is_empty() {
+        return String::new();
+    }
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    payload["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn hook_hits(home: &std::path::Path, repo: &std::path::Path, pattern: &str) -> String {
+    let envelope = grep_envelope(repo, pattern.into());
+    hook_context(spawn_hook(home, &envelope).wait_with_output().unwrap())
+}
+
+#[test]
+fn test_hook_hits_moved_function_in_dirty_file_reports_working_tree_line() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = overlay_hook_repo(tmp.path());
+    dirty_tools_rs(&repo);
+    warm_session_overlay(&home, &repo);
+
+    let ctx = hook_hits(&home, &repo, "relocated");
+    assert!(ctx.contains("relocated (tools.rs:25)"), "{ctx}");
+    assert!(!ctx.contains("relocated (tools.rs:1)"), "{ctx}");
+}
+
+#[test]
+fn test_hook_hits_function_deleted_in_dirty_file_is_not_offered() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = overlay_hook_repo(tmp.path());
+    assert!(
+        hook_hits(&home, &repo, "vanished").contains("vanished (tools.rs:2)"),
+        "control: the clean worktree offers the symbol"
+    );
+    dirty_tools_rs(&repo);
+    warm_session_overlay(&home, &repo);
+
+    assert_eq!(hook_hits(&home, &repo, "vanished"), "");
+}
+
+#[test]
+fn test_hook_hits_function_added_in_dirty_file_is_offered() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = overlay_hook_repo(tmp.path());
+    dirty_tools_rs(&repo);
+    warm_session_overlay(&home, &repo);
+
+    let ctx = hook_hits(&home, &repo, "newcomer");
+    assert!(ctx.contains("newcomer (tools.rs:26)"), "{ctx}");
+}
+
+/// A session that exists but holds no dirty file adds nothing: the block is
+/// byte-identical to the one printed before the session existed.
+#[test]
+fn test_hook_hits_clean_worktree_output_unchanged_by_session() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = overlay_hook_repo(tmp.path());
+    let before = hook_hits(&home, &repo, "relocated");
+    assert!(
+        before.starts_with("ecp graph hits:\n") && before.contains("relocated (tools.rs:1)"),
+        "{before}"
+    );
+    warm_session_overlay(&home, &repo);
+    assert_eq!(hook_hits(&home, &repo, "relocated"), before);
+}
+
+/// Two hooks fired at once on one dirty worktree (parallel tool calls) both
+/// read the same overlay and agree.
+#[test]
+fn test_hook_hits_concurrent_duplicate_calls_agree_on_working_tree_line() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = overlay_hook_repo(tmp.path());
+    dirty_tools_rs(&repo);
+    warm_session_overlay(&home, &repo);
+
+    let envelope = grep_envelope(&repo, "relocated".into());
+    let (a, b) = (spawn_hook(&home, &envelope), spawn_hook(&home, &envelope));
+    let (a, b) = (
+        hook_context(a.wait_with_output().unwrap()),
+        hook_context(b.wait_with_output().unwrap()),
+    );
+    assert!(a.contains("relocated (tools.rs:25)"), "{a}");
+    assert_eq!(a, b);
+}
+
+/// A dirty file the parser cannot read must not make the hook fail or print
+/// anything but one valid envelope (or nothing). Which hit it then offers is
+/// the overlay's contract for unreadable files, not this hook's.
+#[test]
+fn test_hook_hits_dirty_file_that_fails_to_parse_still_emits_valid_payload() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = overlay_hook_repo(tmp.path());
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    fs::write(
+        repo.join("tools.rs"),
+        [0xff_u8, 0xfe, 0x00, b'f', b'n', b' ', 0xc3],
+    )
+    .unwrap();
+    warm_session_overlay(&home, &repo);
+
+    let ctx = hook_hits(&home, &repo, "relocated");
+    assert!(
+        ctx.is_empty() || ctx.starts_with("ecp graph hits:\n"),
+        "{ctx}"
+    );
+}
+
+#[test]
+fn test_hook_hits_index_missing_in_dirty_repo_emits_nothing() {
+    let tmp = tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    fs::write(repo.join("tools.rs"), "fn relocated() {}\n").unwrap();
+    git_in(&repo, &["init", "-q"]);
+    git_in(&repo, &["add", "."]);
+    git_in(&repo, &["commit", "-qm", "init"]);
+    fs::write(repo.join("tools.rs"), "// pad\nfn relocated() {}\n").unwrap();
+
+    assert_eq!(hook_hits(&home, &repo, "relocated"), "");
+}
+
+#[test]
+fn test_hook_hits_empty_input_and_unusable_patterns_emit_nothing() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = overlay_hook_repo(tmp.path());
+    dirty_tools_rs(&repo);
+    warm_session_overlay(&home, &repo);
+
+    let blank = grep_envelope(&repo, "   ".into());
+    let list = grep_envelope(&repo, serde_json::json!(["relocated"]));
+    let absent =
+        serde_json::json!({"cwd": repo, "tool_name": "Grep", "tool_input": {}}).to_string();
+    for envelope in ["", "{}", blank.as_str(), list.as_str(), absent.as_str()] {
+        let ctx = hook_context(spawn_hook(&home, envelope).wait_with_output().unwrap());
+        assert_eq!(ctx, "", "envelope {envelope:?}");
+    }
+}

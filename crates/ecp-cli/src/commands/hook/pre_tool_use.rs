@@ -6,6 +6,7 @@
 use super::common::{emit_additional_context, lookup_index_dir, HookInput};
 use crate::commands::find::{compute_hits_limited, FindArgs, FindMode, Hit};
 use crate::engine::Engine;
+use ecp_core::session::SessionState;
 use ecp_core::EcpError;
 use std::borrow::Cow;
 use std::fmt::Write as _;
@@ -55,7 +56,7 @@ fn compute_search_hits(input: &HookInput) -> Option<String> {
     };
     let index_dir = lookup_index_dir(search_dir)?;
     let graph_path = index_dir.join("graph.bin");
-    let engine = Engine::load(&graph_path).ok()?;
+    let engine = with_dirty_overlay(Engine::load(&graph_path).ok()?, &index_dir, search_dir);
     let args = FindArgs {
         pattern: Some(pattern),
         mode: FindMode::Bm25,
@@ -84,6 +85,41 @@ fn compute_search_hits(input: &HookInput) -> Option<String> {
         }
         _ => lines,
     })
+}
+
+/// Attaches this session's overlay, so a hit from a file edited since the
+/// build shows the line the working tree has, a deleted symbol drops out and
+/// a new one appears. The hook never refreshes the overlay: it reads what the
+/// last `ecp` query wrote, and the reader rejects a fragment whose source
+/// file changed since.
+///
+/// Attaches only when the session holds dirty fragments built on exactly this
+/// graph. A worktree with no session dir costs one `stat`; a clean one with
+/// a session adds the `commits/` listing, one `session_meta.json` and one
+/// `dirty_events` read, and builds no view; a session on another commit (the
+/// hook falls back to the newest graph when HEAD is unindexed) reads the base.
+fn with_dirty_overlay(engine: Engine, index_dir: &Path, search_dir: &str) -> Engine {
+    let Some(repo_root) = index_dir.parent().and_then(Path::parent) else {
+        return engine;
+    };
+    let sid = crate::session::resolver::resolve_session_id(None);
+    if ecp_core::registry::validate_cache_component(&sid).is_err() {
+        return engine;
+    }
+    if !repo_root.join("sessions").join(&sid).is_dir() {
+        return engine;
+    }
+    match crate::session::state::classify(repo_root, &sid) {
+        SessionState::AugmentedReference { l2_dirname, .. }
+            if index_dir
+                .file_name()
+                .is_some_and(|n| n == l2_dirname.as_str()) =>
+        {
+            let top = crate::read_context::worktree_top(Path::new(search_dir));
+            engine.with_overlay(repo_root.join("sessions").join(&sid), top, None)
+        }
+        _ => engine,
+    }
 }
 
 /// Render hits as a legacy-style multi-line block. Each symbol gets a
