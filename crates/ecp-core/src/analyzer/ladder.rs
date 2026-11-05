@@ -54,7 +54,7 @@ use crate::analyzer::same_file_pick::{
     PickScope,
 };
 use crate::analyzer::type_ladder::{member_ownership, Ownership, TypeCandidates, TypeFacts};
-use crate::analyzer::types::{owner_key, CallSite, NameRef, RawImport};
+use crate::analyzer::types::{owner_key, CallSite, NameRef, NameRefKind, RawImport};
 use crate::file_category::{pick_global, FileMeta, GlobalPick, Language};
 use crate::graph::NodeKind;
 
@@ -429,9 +429,14 @@ pub fn field_read<F: ResolveFacts>(facts: &F, file: &str, name: &str) -> FieldRe
 /// as the name tiers never return a scoped node (I5). Then the name tiers
 /// ([`resolve_name_ref`]); `resolve` and `resolve_imported` are the side's
 /// full name lookup and its import tiers alone.
+///
+/// A Go function value qualified by a package (`register(pkg.F)`) resolves
+/// through the package's files first, as a call `pkg.F()` does
+/// ([`go_package_function`]).
 #[allow(clippy::too_many_arguments)]
-pub fn name_ref<F, Resolve, ResolveImported>(
+pub fn name_ref<F, M, Resolve, ResolveImported>(
     facts: &F,
+    modules: &M,
     file: &str,
     language: Language,
     imports: &[RawImport],
@@ -443,11 +448,15 @@ pub fn name_ref<F, Resolve, ResolveImported>(
 ) -> Option<(u32, f32)>
 where
     F: ResolveFacts,
+    M: ModuleFacts + ?Sized,
     Resolve: FnMut(&str, ResolveTarget) -> Vec<(u32, f32)>,
     ResolveImported: FnMut(&str, ResolveTarget) -> Vec<(u32, f32)>,
 {
     if let Some(id) = lexical {
         return Some((id, Tier::SameFile.confidence()));
+    }
+    if let Some(verdict) = go_package_function(facts, modules, file, language, imports, name_ref) {
+        return verdict;
     }
     resolve_name_ref(
         facts,
@@ -459,6 +468,45 @@ where
         resolve,
         resolve_imported,
     )
+}
+
+/// The Go package half of R25: `Some(verdict)` when `name_ref` is `pkg.F`
+/// naming a function, and the import `pkg` denotes settles it. A package
+/// that declares no such function (a standard-library one included) settles
+/// `Some(None)`: no name tier may bind a same-named function elsewhere.
+/// `None` leaves the name tiers to decide: not a Go function reference, a
+/// selector on a value, or a package no file maps.
+fn go_package_function<F, M>(
+    facts: &F,
+    modules: &M,
+    file: &str,
+    language: Language,
+    imports: &[RawImport],
+    name_ref: NameRef<'_>,
+) -> Option<Option<(u32, f32)>>
+where
+    F: ResolveFacts,
+    M: ModuleFacts + ?Sized,
+{
+    if language != Language::Go || name_ref.kind != NameRefKind::Function {
+        return None;
+    }
+    let (receiver, member) = name_ref.name.rsplit_once('.')?;
+    if receiver.is_empty() || receiver.contains('.') || !facts.has_named(member) {
+        return None;
+    }
+    match reexport::go_package_lookup(
+        modules,
+        file,
+        receiver,
+        member,
+        imports.iter().map(ImportRef::from),
+    ) {
+        GoPackageLookup::Resolved(target) => {
+            Some(target.map(|(id, _)| (id, Tier::ImportScoped.confidence())))
+        }
+        GoPackageLookup::Unmapped | GoPackageLookup::Value => None,
+    }
 }
 
 /// R26, a bare variant name (C `RED`, a Java `case MONDAY:`): the
@@ -3052,6 +3100,7 @@ mod tests {
         let run = |name: &'static str, lexical| {
             name_ref(
                 &facts,
+                &call_fake(&[]),
                 "a.py",
                 Language::Python,
                 &[],

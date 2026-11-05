@@ -3567,6 +3567,7 @@ fn resolve_name_ref(
 ) -> Option<(u32, f32)> {
     ladder::name_ref(
         symbol_table,
+        &resolver.module_facts(),
         file,
         language,
         &local_graph.imports,

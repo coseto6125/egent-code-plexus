@@ -505,3 +505,31 @@ fn test_qualified_function_reference_typescript_enum_member_argument_returns_no_
         .iter()
         .all(|(_, target, _, _)| target != "Red"));
 }
+
+#[test]
+fn test_qualified_function_reference_go_multi_file_package_argument_binds_member() {
+    let g = go_module(&[
+        GO_MOD,
+        ("pkg/helper.go", "package pkg\n\nfunc F() {}\n"),
+        ("pkg/other.go", "package pkg\n\nfunc G() {}\n"),
+        (
+            "cmd/app.go",
+            "package main\n\nimport \"example.com/app/pkg\"\n\nfunc register(f func()) {}\n\nfunc boot() {\n\tregister(pkg.F)\n}\n",
+        ),
+    ]);
+    assert_one_cross_file(&function_refs(&g, "boot"), "pkg/helper.go", "F");
+}
+
+#[test]
+fn test_qualified_function_reference_go_aliased_package_argument_binds_member() {
+    let g = go_module(&[
+        GO_MOD,
+        ("pkg/helper.go", "package pkg\n\nfunc F() {}\n"),
+        ("pkg/other.go", "package pkg\n\nfunc G() {}\n"),
+        (
+            "cmd/app.go",
+            "package main\n\nimport p \"example.com/app/pkg\"\n\nfunc register(f func()) {}\n\nfunc boot() {\n\tregister(p.F)\n}\n",
+        ),
+    ]);
+    assert_one_cross_file(&function_refs(&g, "boot"), "pkg/helper.go", "F");
+}

@@ -2608,6 +2608,7 @@ fn resolve_overlay_name_ref(
     let base_metas = RefCell::new(base_metas);
     ladder::name_ref(
         facts,
+        facts,
         &file.rel_path,
         caller.language,
         &file.imports,

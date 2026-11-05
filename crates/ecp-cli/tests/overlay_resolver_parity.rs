@@ -4136,3 +4136,22 @@ fn test_overlay_go_stdlib_and_assumed_name_selectors_with_project_namesakes_retu
         );
     }
 }
+
+#[test]
+fn test_overlay_go_multi_file_package_function_value_matches_reindex() {
+    let provider = GoProvider::new().unwrap();
+    let main = "package main\nimport p \"example.com/repo/pkg\"\nfunc register(f func()) {}\nfunc run() { register(p.F) }\n";
+    let shifted = format!("\n{main}");
+    let (full, overlay) = field_read_edges(
+        &provider,
+        &[
+            ("main.go", main),
+            ("pkg/helper.go", "package pkg\nfunc F() {}\n"),
+            ("pkg/other.go", "package pkg\nfunc G() {}\n"),
+        ],
+        &[("main.go", &shifted)],
+        &["function_reference"],
+    );
+    assert_eq!(full.len(), 1, "the reindex binds p.F once: {full:?}");
+    assert_eq!(overlay, full);
+}
