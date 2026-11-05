@@ -60,3 +60,23 @@ fn test_registry_open_on_open_dir_tightens_it_to_0700() {
     let mode = std::fs::metadata(&home_ecp).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o700);
 }
+
+/// Fails on a `read_or_empty` that tests `path.exists()` first: `exists()`
+/// is false for a file the process cannot stat-read through, so the registry
+/// opens empty and the next write would overwrite every repo.
+#[cfg(unix)]
+#[test]
+fn test_registry_open_on_unreadable_registry_file_returns_error() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let home_ecp = tmp.path().join("ecp");
+    std::fs::create_dir(&home_ecp).unwrap();
+    let registry = home_ecp.join("registry.json");
+    std::fs::write(&registry, "{}").unwrap();
+    std::fs::set_permissions(&registry, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&registry).is_ok() {
+        return; // running as root: mode 000 does not block the read
+    }
+    let err = Registry::open(&home_ecp).err().expect("open must fail");
+    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+}

@@ -56,7 +56,12 @@ fn compute_search_hits(input: &HookInput) -> Option<String> {
     };
     let index_dir = lookup_index_dir(search_dir)?;
     let graph_path = index_dir.join("graph.bin");
-    let engine = with_dirty_overlay(Engine::load(&graph_path).ok()?, &index_dir, search_dir);
+    let engine = with_dirty_overlay(
+        Engine::load(&graph_path).ok()?,
+        &index_dir,
+        search_dir,
+        &input.session_id,
+    );
     let args = FindArgs {
         pattern: Some(pattern),
         mode: FindMode::Bm25,
@@ -98,11 +103,16 @@ fn compute_search_hits(input: &HookInput) -> Option<String> {
 /// a session adds the `commits/` listing, one `session_meta.json` and one
 /// `dirty_events` read, and builds no view; a session on another commit (the
 /// hook falls back to the newest graph when HEAD is unindexed) reads the base.
-fn with_dirty_overlay(engine: Engine, index_dir: &Path, search_dir: &str) -> Engine {
+fn with_dirty_overlay(
+    engine: Engine,
+    index_dir: &Path,
+    search_dir: &str,
+    input_session_id: &str,
+) -> Engine {
     let Some(repo_root) = index_dir.parent().and_then(Path::parent) else {
         return engine;
     };
-    let sid = crate::session::resolver::resolve_session_id(None);
+    let sid = crate::session::resolver::resolve_hook_session_id(input_session_id);
     if ecp_core::registry::validate_cache_component(&sid).is_err() {
         return engine;
     }

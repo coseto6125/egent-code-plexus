@@ -351,6 +351,7 @@ fn indexed_repo(
         .arg(&repo)
         .env("HOME", &home)
         .env("ECP_SKIP_BG_REBUILD", "1")
+        .env_remove("ECP_HOME")
         .output()
         .unwrap();
     assert!(
@@ -629,6 +630,7 @@ fn session_cmd(home: &std::path::Path) -> Command {
     let mut cmd = Command::new(ecp_bin());
     cmd.env("HOME", home)
         .env("ECP_SKIP_BG_REBUILD", "1")
+        .env_remove("ECP_HOME")
         .env_remove("ECP_SESSION_ID")
         .env_remove("CODEX_SESSION_ID")
         .env_remove("CODEX_THREAD_ID")
@@ -678,7 +680,11 @@ fn grep_envelope(cwd: &std::path::Path, pattern: serde_json::Value) -> String {
 }
 
 fn spawn_hook(home: &std::path::Path, envelope: &str) -> std::process::Child {
-    let mut child = session_cmd(home)
+    spawn_hook_with(session_cmd(home), envelope)
+}
+
+fn spawn_hook_with(mut cmd: Command, envelope: &str) -> std::process::Child {
+    let mut child = cmd
         .args(["hook", "pre-tool-use", "--claude-code"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -755,7 +761,8 @@ fn test_hook_hits_function_added_in_dirty_file_is_offered() {
 }
 
 /// A session that exists but holds no dirty file adds nothing: the block is
-/// byte-identical to the one printed before the session existed.
+/// byte-identical to the one printed before the session existed. The session
+/// is made real by a dirty edit that is then restored to HEAD and re-queried.
 #[test]
 fn test_hook_hits_clean_worktree_output_unchanged_by_session() {
     let tmp = tempdir().unwrap();
@@ -765,8 +772,96 @@ fn test_hook_hits_clean_worktree_output_unchanged_by_session() {
         before.starts_with("ecp graph hits:\n") && before.contains("relocated (tools.rs:1)"),
         "{before}"
     );
+    dirty_tools_rs(&repo);
     warm_session_overlay(&home, &repo);
+    git_in(&repo, &["checkout", "--", "tools.rs"]);
+    warm_session_overlay(&home, &repo);
+    assert!(
+        home.join(".ecp").read_dir().unwrap().flatten().any(|e| e
+            .path()
+            .join("sessions")
+            .join(OVERLAY_SID)
+            .is_dir()),
+        "setup: the session dir exists"
+    );
     assert_eq!(hook_hits(&home, &repo, "relocated"), before);
+}
+
+/// The hook process carries no host session env var: the `session_id` of its
+/// JSON input names the session whose overlay it reads. Fails on a hook that
+/// resolves the id from the environment alone (`resolve_session_id(None)`):
+/// it finds no session dir and reports the stale line 1.
+#[test]
+fn test_hook_hits_session_id_from_input_when_env_absent_reports_working_tree_line() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = overlay_hook_repo(tmp.path());
+    dirty_tools_rs(&repo);
+    warm_session_overlay(&home, &repo);
+
+    let mut envelope: serde_json::Value =
+        serde_json::from_str(&grep_envelope(&repo, "relocated".into())).unwrap();
+    envelope["session_id"] = OVERLAY_SID.into();
+    let mut cmd = session_cmd(&home);
+    cmd.env_remove("CLAUDE_CODE_SESSION_ID");
+    let out = spawn_hook_with(cmd, &envelope.to_string())
+        .wait_with_output()
+        .unwrap();
+    let ctx = hook_context(out);
+    assert!(ctx.contains("relocated (tools.rs:25)"), "{ctx}");
+}
+
+/// The session was warmed on commit 1; HEAD has moved to an indexed commit 2.
+/// Commit 1's overlay must not attach to commit 2's graph. Commit 2 is made
+/// with plumbing so the dirty file, and so commit 1's fragment, stay valid on
+/// disk: only the `l2_dirname` guard in `with_dirty_overlay` keeps the
+/// fragment off, and deleting it turns this red (line 25 instead of 3).
+#[test]
+fn test_hook_hits_session_on_another_commit_does_not_attach_its_overlay() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = overlay_hook_repo(tmp.path());
+    dirty_tools_rs(&repo);
+    warm_session_overlay(&home, &repo);
+
+    let committed = tmp.path().join("committed_tools.rs");
+    fs::write(
+        &committed,
+        "// b\n// b\nfn relocated() {}\nfn vanished() {}\n",
+    )
+    .unwrap();
+    let blob = Command::new("git")
+        .current_dir(&repo)
+        .args(["hash-object", "-w"])
+        .arg(&committed)
+        .output()
+        .unwrap();
+    assert!(blob.status.success());
+    let blob = String::from_utf8(blob.stdout).unwrap();
+    git_in(
+        &repo,
+        &[
+            "update-index",
+            "--cacheinfo",
+            &format!("100644,{},tools.rs", blob.trim()),
+        ],
+    );
+    git_in(&repo, &["commit", "-qm", "second"]);
+    let indexed = Command::new(ecp_bin())
+        .args(["admin", "index", "--repo"])
+        .arg(&repo)
+        .env("HOME", &home)
+        .env("ECP_SKIP_BG_REBUILD", "1")
+        .env_remove("ECP_HOME")
+        .output()
+        .unwrap();
+    assert!(
+        indexed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+
+    let ctx = hook_hits(&home, &repo, "relocated");
+    assert!(ctx.contains("relocated (tools.rs:3)"), "{ctx}");
+    assert!(!ctx.contains("relocated (tools.rs:25)"), "{ctx}");
 }
 
 /// Two hooks fired at once on one dirty worktree (parallel tool calls) both

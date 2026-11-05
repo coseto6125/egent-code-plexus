@@ -1242,6 +1242,12 @@ impl OverlayView {
         Some(self.replaced.get(&idx).copied().unwrap_or(idx))
     }
 
+    /// Count of base nodes the view drops; a ranked search over the base
+    /// refills its candidate cap by this much so drops do not shrink the page.
+    pub fn suppressed_len(&self) -> usize {
+        self.suppressed.len()
+    }
+
     /// True when a base edge of type `rel` SOURCED at `base_idx` must be
     /// ignored: the owning file was re-parsed or removed AND the overlay
     /// rebuilds this rel (`overlay_out` carries its truth). Masking a rel

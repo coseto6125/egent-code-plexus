@@ -9,19 +9,21 @@
 use std::sync::OnceLock;
 use xxhash_rust::xxh3::Xxh3;
 
+const SESSION_ENV_KEYS: [&str; 5] = [
+    "ECP_SESSION_ID",
+    "GEMINI_CLI_SESSION_ID",
+    "CODEX_SESSION_ID",
+    "CODEX_THREAD_ID",
+    "CLAUDE_CODE_SESSION_ID",
+];
+
 pub fn resolve_session_id(explicit: Option<&str>) -> String {
     if let Some(s) = explicit {
         if !s.is_empty() {
             return s.to_string();
         }
     }
-    for key in [
-        "ECP_SESSION_ID",
-        "GEMINI_CLI_SESSION_ID",
-        "CODEX_SESSION_ID",
-        "CODEX_THREAD_ID",
-        "CLAUDE_CODE_SESSION_ID",
-    ] {
+    for key in SESSION_ENV_KEYS {
         if let Ok(s) = std::env::var(key) {
             if !s.is_empty() {
                 return s;
@@ -29,6 +31,25 @@ pub fn resolve_session_id(explicit: Option<&str>) -> String {
         }
     }
     fallback_id().to_string()
+}
+
+/// Session id for a hook process: the environment wins (so an explicit
+/// `ECP_SESSION_ID` still applies), then the non-empty `session_id` of the hook
+/// input, then the per-process fallback. A hook process may not carry the host's
+/// session env var while its JSON input always names the session.
+pub fn resolve_hook_session_id(input_session_id: &str) -> String {
+    for key in SESSION_ENV_KEYS {
+        if let Ok(s) = std::env::var(key) {
+            if !s.is_empty() {
+                return s;
+            }
+        }
+    }
+    if input_session_id.is_empty() {
+        fallback_id().to_string()
+    } else {
+        input_session_id.to_string()
+    }
 }
 
 /// Resolve the team-visible agent name for this session, if any.

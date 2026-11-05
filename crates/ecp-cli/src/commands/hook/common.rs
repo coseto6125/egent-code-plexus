@@ -139,7 +139,7 @@ pub fn lookup_index_dir(cwd: &str) -> Option<PathBuf> {
 
     // Branch-affinity primary: HEAD SHA → exact commit dir.
     if let Some(head) = crate::graph_path::head_sha_bytes(path) {
-        let idx = CommitIndex::scan(&commits_dir).ok()?;
+        let idx = CommitIndex::scan_cached(&commits_dir).ok()?;
         if let Some(dir) = idx.find(&head) {
             return Some(commits_dir.join(dir));
         }

@@ -137,10 +137,11 @@ impl RegistryFile {
     }
 
     pub fn read_or_empty(path: &Path) -> io::Result<Self> {
-        if !path.exists() {
-            return Ok(RegistryFile::empty());
-        }
-        let bytes = fs::read(path)?;
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(RegistryFile::empty()),
+            Err(e) => return Err(e),
+        };
         // Probe the version field before a full parse: stale schemas auto-migrate
         // via `rebuild_from_disk` instead of hard-failing.
         // Trade-off: group memberships are registry-only and get wiped — operator

@@ -1381,13 +1381,16 @@ fn tantivy_hits(
     limit: usize,
     view: Option<&OverlayView>,
 ) -> (Vec<Hit>, u64) {
-    let (scored, tantivy_total) =
-        match crate::search::TantivyEngine::search(index_dir, pattern, MULTI_CAP) {
-            Some(s) => s,
-            // Index unavailable / corrupt / parse error — fall through so
-            // hook context isn't silently empty.
-            None => return substring_hits(graph, pattern, kind_set, repo_label, limit, view),
-        };
+    let (scored, tantivy_total) = match crate::search::TantivyEngine::search(
+        index_dir,
+        pattern,
+        MULTI_CAP + view.map_or(0, OverlayView::suppressed_len),
+    ) {
+        Some(s) => s,
+        // Index unavailable / corrupt / parse error — fall through so
+        // hook context isn't silently empty.
+        None => return substring_hits(graph, pattern, kind_set, repo_label, limit, view),
+    };
     // Index ran cleanly. An empty scored vec means BM25 ruled out every
     // symbol; we MUST NOT fall back to substring scan, since that would
     // surface 0.4-scored noise the trusted index already rejected.
@@ -1449,7 +1452,6 @@ fn substring_hits(
         .iter()
         .enumerate()
         .filter(|(idx, _)| hit_eligible(graph, *idx, kind_set))
-        .filter(|(idx, _)| !suppressed_by_overlay(view, *idx))
         .filter_map(|(idx, node)| {
             let name = node.name.resolve(&graph.string_pool);
             terms
@@ -1458,6 +1460,7 @@ fn substring_hits(
                 .reduce(f32::max)
                 .map(|score| (score, idx))
         })
+        .filter(|(_, idx)| !suppressed_by_overlay(view, *idx))
         .collect();
     // Best score first, always. Consumers that take the rows as they come
     // used to get node order, which hid an exact match behind earlier 0.4
