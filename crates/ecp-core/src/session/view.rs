@@ -260,6 +260,7 @@ use crate::analyzer::record_nodes::{
     EVENT_TOPIC_PUBLISHES_REASON, EVENT_TOPIC_SUBSCRIBES_REASON, PATH_LITERAL_SINK_REASONS,
     SCHEMA_FIELD_HAS_PROPERTY_REASON, TX_SCOPE_REASON,
 };
+use crate::analyzer::type_ladder::{type_annotation_targets, TYPE_ANNOTATION_REASON};
 use crate::analyzer::types::{
     innermost_enclosing, owner_key, LocalGraph, RawEventTopic, RawExportAlias, RawImport,
     RawPathLiteral, RawSchemaField, RawSqlRef, RawTxScope, Span, CLOSURE_REFERENCE_REASON,
@@ -413,11 +414,7 @@ impl From<LocalGraph> for OverlayFileInput {
                 .nodes
                 .into_iter()
                 .map(|n| {
-                    let is_callable = matches!(
-                        n.kind,
-                        NodeKind::Function | NodeKind::Method | NodeKind::Constructor
-                    );
-                    let meta = is_callable.then(|| metas.get(&n.span)).flatten();
+                    let meta = n.kind.is_callable().then(|| metas.get(&n.span)).flatten();
                     OverlaySymbol {
                         return_type: meta
                             .map(|meta| meta.return_type.clone())
@@ -447,8 +444,6 @@ impl From<LocalGraph> for OverlayFileInput {
         }
     }
 }
-
-pub use crate::analyzer::type_ladder::{type_annotation_targets, TYPE_ANNOTATION_REASON};
 
 /// One dirty file's raw records, the inputs of the record outputs the
 /// per-file replay rebuilds (`session::incremental`). Each record carries
@@ -2780,152 +2775,6 @@ mod tests {
         assert!(view.masks_base_edge(0, RelType::Accesses));
         assert!(view.masks_base_edge(1, RelType::Accesses));
         assert!(!view.masks_base_edge(2, RelType::Accesses));
-    }
-
-    /// `type_annotation_targets` over a resolver that knows `names`, each
-    /// at its index + 1; the names it was asked for, in order.
-    fn annotation_targets(
-        language: Language,
-        kind: NodeKind,
-        annotation: Option<&str>,
-        owner: Option<&str>,
-        return_type: Option<&str>,
-        params: &[&str],
-        names: &[&str],
-    ) -> (Vec<u32>, Vec<String>) {
-        let params: Vec<String> = params.iter().map(|p| p.to_string()).collect();
-        let mut asked = Vec::new();
-        let targets = type_annotation_targets(
-            language,
-            kind,
-            annotation,
-            owner,
-            return_type,
-            &params,
-            |name| {
-                asked.push(name.to_string());
-                names
-                    .iter()
-                    .position(|known| *known == name)
-                    .map(|at| (at as u32 + 1, 1.0))
-            },
-        );
-        (targets.into_iter().map(|(id, _)| id).collect(), asked)
-    }
-
-    /// Stands for: the index's Pass 2 rule, row by row. A declaring-type
-    /// keyword binds the owner and only the owner; a field binds its whole
-    /// annotation and never the generic arguments in it; a callable binds a
-    /// bare return once, every name of a generic return, the meta's return
-    /// only when the parse captured no annotation, and each parameter
-    /// type, one edge per target.
-    #[test]
-    fn test_type_annotation_targets_rows_match_the_index_rule() {
-        use Language::{Rust, Swift, TypeScript};
-        use NodeKind::{Function, Method, Property};
-        let st = &["St", "Other", "Owner"][..];
-        type Row<'r> = (
-            &'r str,
-            (
-                Language,
-                NodeKind,
-                Option<&'r str>,
-                Option<&'r str>,
-                Option<&'r str>,
-            ),
-            &'r [&'r str],
-            &'r [u32],
-        );
-        let rows: [Row; 10] = [
-            (
-                "bare return",
-                (Rust, Function, Some("St"), None, Some("St")),
-                &[],
-                &[1],
-            ),
-            (
-                "Self return",
-                (Rust, Method, Some("Self"), Some("Owner"), Some("Self")),
-                &[],
-                &[3],
-            ),
-            (
-                "Self without owner",
-                (Rust, Function, Some("Self"), None, None),
-                &[],
-                &[],
-            ),
-            (
-                "Self inside a generic",
-                (Rust, Method, Some("Option<Self>"), Some("Owner"), None),
-                &[],
-                &[],
-            ),
-            (
-                "generic return",
-                (Rust, Function, Some("Option<St>"), None, None),
-                &[],
-                &[1],
-            ),
-            (
-                "uncaptured return reads the meta",
-                (TypeScript, Function, None, None, Some("Promise<Other>")),
-                &[],
-                &[2],
-            ),
-            (
-                "captured bare return skips the meta",
-                (
-                    TypeScript,
-                    Function,
-                    Some("St"),
-                    None,
-                    Some("Promise<Other>"),
-                ),
-                &[],
-                &[1],
-            ),
-            (
-                "generic field binds no argument",
-                (Swift, Property, Some("[St]"), None, None),
-                &[],
-                &[],
-            ),
-            (
-                "params bind once per target",
-                (Rust, Function, Some("St"), None, None),
-                &["a", "St", "b", "&St", "c", "Vec<Other>"],
-                &[1, 2],
-            ),
-            (
-                "receiver and untyped params",
-                (Rust, Method, None, Some("Owner"), None),
-                &["self", "", "a", ""],
-                &[],
-            ),
-        ];
-        for (label, (language, kind, annotation, owner, return_type), params, want) in rows {
-            let (got, _) =
-                annotation_targets(language, kind, annotation, owner, return_type, params, st);
-            assert_eq!(got, want, "{label}");
-        }
-    }
-
-    /// Stands for: the whole annotation text is looked up first, as the
-    /// index looks it up, so a qualified spelling resolves through its
-    /// qualifier before its parts are read.
-    #[test]
-    fn test_type_annotation_targets_unreduced_text_looked_up_whole_first() {
-        let (_, asked) = annotation_targets(
-            Language::Rust,
-            NodeKind::Function,
-            Some("Option<St>"),
-            None,
-            None,
-            &[],
-            &[],
-        );
-        assert_eq!(asked, ["Option<St>", "Option", "St"]);
     }
 
     /// Stands for: a removed file leaves nothing of itself in the view, the

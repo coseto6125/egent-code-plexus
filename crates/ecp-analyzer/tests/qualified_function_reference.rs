@@ -8,8 +8,9 @@
 //! records nothing: a callee, an import, a macro path, an enum variant, a
 //! constant, an external associated function.
 //!
-//! Contract of the 13 other-language tests: the Rust-only spec field
-//! (`NameRefSpec::qualified_values`) leaves their bare-name edge unchanged.
+//! Contract of the 13 other-language tests: the qualified-value reader a
+//! language adds (`NameRefSpec::qualified_values`) leaves its bare-name edge
+//! unchanged.
 use crate::name_ref_support;
 
 use ecp_analyzer::c::parser::CProvider;
@@ -480,4 +481,56 @@ fn test_function_reference_dart_bare_argument_unchanged_returns_edge() {
         "apply",
         "transform",
     );
+}
+
+// ---- Rust: `Self::f` as a value (F4 item 7) ----
+// `Self` names the impl's type, so `Self::parse` binds that type's `parse`
+// and never a namesake of another type. Only Rust spells the impl's type
+// `Self` in a path.
+
+const ENTRY_SELF: &str = "pub struct Entry(u32);\n\nimpl Entry {\n    pub fn parse(n: u32) -> Entry {\n        Entry(n)\n    }\n    pub fn all(v: Vec<u32>) -> Vec<Entry> {\n        v.into_iter().map(Self::parse).collect()\n    }\n}\n";
+
+#[test]
+fn test_function_reference_rust_self_path_binds_impl_owner() {
+    let g = rust_graph(&[
+        ("src/lib.rs", ENTRY_SELF),
+        (
+            "src/other.rs",
+            "pub struct Other(u32);\n\nimpl Other {\n    pub fn parse(n: u32) -> Other {\n        Other(n)\n    }\n}\n",
+        ),
+    ]);
+    assert_one_cross_file(&function_refs(&g, "all"), "src/lib.rs", "parse");
+}
+
+#[test]
+fn test_function_reference_rust_self_path_owner_lacks_member_returns_no_edge() {
+    let g = rust_graph(&[
+        (
+            "src/lib.rs",
+            "pub struct Entry(u32);\n\nimpl Entry {\n    pub fn all(v: Vec<u32>) -> Vec<u32> {\n        v.into_iter().map(Self::parse).collect()\n    }\n}\n",
+        ),
+        (
+            "src/other.rs",
+            "pub struct Other(u32);\n\nimpl Other {\n    pub fn parse(n: u32) -> u32 {\n        n\n    }\n}\n",
+        ),
+    ]);
+    assert_eq!(function_refs(&g, "all"), none());
+}
+
+#[test]
+fn test_function_reference_rust_self_path_outside_impl_returns_no_edge() {
+    let g = rust_graph(&[(
+        "src/lib.rs",
+        "pub struct Entry(u32);\n\nimpl Entry {\n    pub fn parse(n: u32) -> Entry {\n        Entry(n)\n    }\n}\n\npub fn loose(v: Vec<u32>) -> Vec<Entry> {\n    v.into_iter().map(Self::parse).collect()\n}\n",
+    )]);
+    assert_eq!(function_refs(&g, "loose"), none());
+}
+
+#[test]
+fn test_function_reference_rust_self_path_with_generic_args_returns_no_edge() {
+    let g = rust_graph(&[(
+        "src/lib.rs",
+        "pub struct Entry(u32);\n\nimpl Entry {\n    pub fn parse<T>(n: u32) -> Entry {\n        Entry(n)\n    }\n    pub fn all(v: Vec<u32>) -> Vec<Entry> {\n        v.into_iter().map(Self::parse::<>).collect()\n    }\n}\n",
+    )]);
+    assert_eq!(function_refs(&g, "all"), none());
 }

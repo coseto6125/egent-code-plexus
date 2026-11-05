@@ -382,7 +382,7 @@ fn field_reads_walk(
     }
     containers.set_declarators(declarators);
     attach_pending_field_reads(&containers, reads, nodes);
-    scan.attach(&containers, nodes);
+    scan.attach(&containers, nodes, names.scoped_qualifiers);
 }
 
 /// Whether `child`, under a node of kind flags `parent_kind`, lists the
@@ -429,6 +429,10 @@ fn is_call_callee(access: Node<'_>, parent: Option<Node<'_>>) -> bool {
     ) && parent.child_by_field_name("function").map(|f| f.id()) == Some(access.id())
 }
 
+/// Reads the name a qualified value node records: see
+/// [`NameRefSpec::qualified_name`].
+pub type QualifiedName = fn(Node<'_>, &[u8], &NameRefSpec) -> Option<String>;
+
 /// Where a language's grammar names a value by a bare name, for the
 /// [`NameRef`]s [`extract_field_reads`] records.
 ///
@@ -438,10 +442,6 @@ fn is_call_callee(access: Node<'_>, parent: Option<Node<'_>>) -> bool {
 /// `*declarator*` node and every child of a `*parameter*` node; a `value`,
 /// `right`, `body` … subtree is an expression again; a `type` subtree names
 /// no value.
-/// Reads the name a qualified value node records: see
-/// [`NameRefSpec::qualified_name`].
-pub type QualifiedName = fn(Node<'_>, &[u8], &NameRefSpec) -> Option<String>;
-
 pub struct NameRefSpec {
     /// Node kinds of a bare name: `identifier`, Kotlin / Swift
     /// `simple_identifier`, Ruby `constant`, PHP `name`.
@@ -476,23 +476,26 @@ pub struct NameRefSpec {
     /// Method-reference kinds whose last bare name is the function: Java
     /// `method_reference`, Kotlin `callable_reference`.
     pub method_refs: &'static [&'static str],
-    /// Qualified-path kinds whose last segment names a function when the node
-    /// sits in value position (a call argument, a `let` or assignment value,
-    /// a returned or stored value). Rust `scoped_identifier`:
-    /// `iter.for_each(parse::migrate)` records the path text `parse::migrate`,
-    /// so Pass 2 binds through the module path.
+    /// Qualified-path or member-access kinds whose last segment may name a
+    /// function when the node sits in value position (a call argument, a
+    /// `let` or assignment value, a returned or stored value): Rust
+    /// `scoped_identifier` (`for_each(parse::migrate)`), Python `attribute`
+    /// (`map(mod.f, xs)`), TS `member_expression` (`xs.map(ns.f)`).
     ///
-    /// A language may list a kind only when all of these hold:
-    /// - the segment before the name is a module, namespace or type, never an
-    ///   instance or a value, so `a.b` on a variable is not listed;
-    /// - the node has a `name` field holding a bare name and a `path` or
-    ///   `scope` field holding the qualifier;
-    /// - the callee, type, import, pattern and macro positions of the path
-    ///   reach the node under a non-value field, a skip kind or a skipped
-    ///   scope, so only value uses remain;
-    /// - the resolver binds the path text as a function reference for the
-    ///   language (`name_ref::resolve_name_ref` splits its last segment off).
-    ///   A `Self::` path or one with generic arguments records nothing.
+    /// A language may list a kind when all of these hold:
+    /// - its [`Self::qualified_name`] reader returns the qualified text
+    ///   (`qualifier.member`, every qualifier segment kept, or the path text)
+    ///   only for the outermost node of a chain, and `None` for a callee,
+    ///   a `this` / `self` / `super` / `base` qualifier and a computed one;
+    /// - the callee, type, import, pattern and macro positions reach the
+    ///   node under a non-value field, a skip kind or a skipped scope, so
+    ///   only value uses remain.
+    ///
+    /// The qualifier may be a module, a type or a value. A local or parameter
+    /// named like its first segment hides the name in the scan (unless
+    /// [`Self::scoped_qualifiers`]); the resolver binds the rest only through
+    /// a module, a namespace or a type, with a multi-segment qualifier as the
+    /// path that encloses the function (`name_ref::resolve_name_ref`).
     ///
     /// The scan still descends into the node, so a qualifier that is a value
     /// (`obj` in `obj.f`) keeps its own read.
@@ -501,6 +504,12 @@ pub struct NameRefSpec {
     /// record nothing. Defaults to [`qualified_reference`], which reads a
     /// `name` field and the path text.
     pub qualified_name: QualifiedName,
+    /// Whether a qualifier of a recorded qualified name lives where no
+    /// local can shadow it: C++ `ns::f`, whose `ns` is a namespace or type
+    /// scope. Elsewhere a local named like the qualifier's first segment
+    /// (`def run(mod): map(mod.f, xs)`) makes the value a member of that
+    /// local, and the scan drops it.
+    pub scoped_qualifiers: bool,
     /// Ruby: `method(:name)` names the method `name`.
     pub symbol_method_refs: bool,
     /// Parent kinds whose bare name right before `=` is an argument label:
@@ -832,6 +841,7 @@ impl NameRefSpec {
         method_refs: &[],
         qualified_values: &[],
         qualified_name: qualified_reference,
+        scoped_qualifiers: false,
         symbol_method_refs: false,
         named_arg_parents: &[],
         global_decls: &[],
@@ -1090,8 +1100,15 @@ impl<'s> NameScan<'s> {
     /// container, unless a name declared in a scope holding it hides it: a
     /// parameter or local of a function node (a comprehension variable inside
     /// it: of that comprehension), else of a nodeless lambda, else of the
-    /// value declaration ([`ReadContainers::binding_scope`]).
-    fn attach(self, containers: &ReadContainers<'_>, nodes: &mut [RawNode]) {
+    /// value declaration ([`ReadContainers::binding_scope`]). A qualified
+    /// function value (`mod.f`) is hidden by a local named like its first
+    /// segment, unless `scoped_qualifiers` says no local can be a qualifier.
+    fn attach(
+        self,
+        containers: &ReadContainers<'_>,
+        nodes: &mut [RawNode],
+        scoped_qualifiers: bool,
+    ) {
         if self.reads.is_empty() {
             return;
         }
@@ -1137,12 +1154,20 @@ impl<'s> NameScan<'s> {
             rustc_hash::FxHashSet::default();
         for (read, target) in self.reads.iter().zip(targets) {
             let Some(node_idx) = target else { continue };
-            let shadowed = read.kind != NameRefKind::Function
-                && bound.get(read.name.as_ref()).is_some_and(|scopes| {
+            // `map(mod.f, xs)` inside `def run(mod, xs)` reads the parameter
+            // `mod`, not the module the file imports under that name.
+            let key = match read.kind {
+                NameRefKind::Function if scoped_qualifiers => None,
+                NameRefKind::Function => read.name.split_once('.').map(|(head, _)| head),
+                _ => Some(read.name.as_ref()),
+            };
+            let shadowed = key.is_some_and(|key| {
+                bound.get(key).is_some_and(|scopes| {
                     scopes
                         .iter()
                         .any(|&(start, end)| start <= read.pos && read.pos <= end)
-                });
+                })
+            });
             if !shadowed && seen.insert((node_idx, read.kind, read.name.as_ref())) {
                 nodes[node_idx]
                     .field_reads
@@ -1153,8 +1178,10 @@ impl<'s> NameScan<'s> {
 }
 
 /// The function a method reference names: `print` for `this::print` /
-/// `::print`, `Foo.bar` for `Foo::bar`. `None` for a constructor
-/// (`Foo::new`), a `super::` reference, or a computed receiver.
+/// `::print`, `Foo.bar` for `Foo::bar`, and the whole receiver path for a
+/// qualified one (`a.Outer.Inner.bar` for `a.Outer.Inner::bar`), which Pass 2
+/// binds only when the path encloses the function. `None` for a constructor
+/// (`Foo::new`), a `super::` reference, a generic receiver, or a computed one.
 fn method_reference<'s>(
     reference: Node<'_>,
     source: &'s [u8],
@@ -1184,30 +1211,59 @@ fn method_reference<'s>(
         | "scoped_type_identifier"
         | "field_access"
         | "user_type" => {
-            let text = receiver.utf8_text(source).ok()?;
-            let qualifier = text.rsplit('.').next().unwrap_or(text).trim();
-            Some(Cow::Owned(format!("{qualifier}.{member}")))
+            let mut segments = receiver_path(*receiver, source)?;
+            segments.push(member);
+            Some(Cow::Owned(segments.join(".")))
         }
         _ => None,
     }
 }
 
+/// The name segments of a method reference's receiver, read from the tree:
+/// Java `a.b.Foo` (`field_access`, `scoped_type_identifier`), Kotlin
+/// `a.Foo` (`user_type`). `None` when a segment is no plain name (`this`, a
+/// call) or the receiver carries generic arguments.
+fn receiver_path<'s>(receiver: Node<'_>, source: &'s [u8]) -> Option<Vec<&'s str>> {
+    let mut segments = Vec::new();
+    let mut stack = vec![receiver];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "identifier" | "type_identifier" | "simple_identifier" => {
+                segments.push(node.utf8_text(source).ok()?);
+            }
+            "field_access" | "scoped_type_identifier" | "user_type" => {
+                let mut cursor = node.walk();
+                let children: Vec<Node<'_>> = node.named_children(&mut cursor).collect();
+                stack.extend(children.into_iter().rev());
+            }
+            _ => return None,
+        }
+    }
+    Some(segments)
+}
+
 /// The function a qualified path in value position names, as the path text
 /// the source writes (`parse::migrate`, `crate::a::Entry::new`), so Pass 2
 /// resolves it through the module path the way it resolves `parse::migrate()`.
-/// `None` for a `Self::` path or a path with generic arguments (`Vec::<u8>::new`).
+/// `Self::parse` stays as written: Pass 2 reads `Self` as the impl owner.
+/// `None` for a longer `Self::` path (an associated type's member) or a path
+/// with generic arguments (`Vec::<u8>::new`).
 pub fn qualified_reference(path: Node<'_>, source: &[u8], spec: &NameRefSpec) -> Option<String> {
     path.child_by_field_name("name")
         .filter(|n| spec.ident_kinds.contains(&n.kind()))?;
     let text = path.utf8_text(source).ok()?;
-    let plain = !text.starts_with("Self::") && !text.contains(['<', ' ', '\n']);
+    let plain = !text
+        .strip_prefix("Self::")
+        .is_some_and(|rest| rest.contains("::"))
+        && !text.contains(['<', ' ', '\n']);
     plain.then(|| text.to_string())
 }
 
 /// Ruby `method(:name)`: the method `name` handed on as a `Method` object.
-/// A `self` or absent receiver names `name`; a constant receiver (`Mod`,
-/// `A::Mod`) names `Mod.name`, so Pass 2 binds it through the module. Any other
-/// receiver is a value of unknown type and records nothing.
+/// A `self` or absent receiver names `name`; a constant receiver names
+/// `Mod.name`, and a scoped one (`A::Mod`) its whole path `A.Mod.name`, so
+/// Pass 2 binds it through the module path. Any other receiver is a value of
+/// unknown type and records nothing.
 fn symbol_method_ref<'s>(call: Node<'_>, source: &'s [u8]) -> Option<Cow<'s, str>> {
     if call.child_by_field_name("method")?.utf8_text(source).ok()? != "method" {
         return None;
@@ -1226,18 +1282,31 @@ fn symbol_method_ref<'s>(call: Node<'_>, source: &'s [u8]) -> Option<Cow<'s, str
     let Some(receiver) = call.child_by_field_name("receiver") else {
         return Some(Cow::Borrowed(name));
     };
-    let module = match receiver.kind() {
-        "self" => return Some(Cow::Borrowed(name)),
-        "constant" => receiver,
-        "scope_resolution" => receiver
-            .child_by_field_name("name")
-            .filter(|segment| segment.kind() == "constant")?,
-        _ => return None,
-    };
-    Some(Cow::Owned(format!(
-        "{}.{name}",
-        module.utf8_text(source).ok()?
-    )))
+    if receiver.kind() == "self" {
+        return Some(Cow::Borrowed(name));
+    }
+    let mut segments = vec![name];
+    let mut node = Some(receiver);
+    // `A::B::Mod` nests as `scope_resolution(scope: A::B, name: Mod)`; a
+    // leading `::Mod` has no scope.
+    while let Some(current) = node {
+        let constant = match current.kind() {
+            "constant" => {
+                node = None;
+                current
+            }
+            "scope_resolution" => {
+                node = current.child_by_field_name("scope");
+                current
+                    .child_by_field_name("name")
+                    .filter(|segment| segment.kind() == "constant")?
+            }
+            _ => return None,
+        };
+        segments.push(constant.utf8_text(source).ok()?);
+    }
+    segments.reverse();
+    Some(Cow::Owned(segments.join(".")))
 }
 
 /// The accessed field's short name from a member-access node. Tries the
@@ -1393,10 +1462,22 @@ pub fn extract_variant_refs(
 /// C++ nests `ns::Color::Blue` as `ns` + `Color::Blue`; the outer node
 /// already holds the whole path.
 fn is_path_suffix(node: Node<'_>, parent: Option<Node<'_>>) -> bool {
-    parent.is_some_and(|parent| {
-        parent.kind() == node.kind()
-            && parent.child_by_field_name("name").map(|n| n.id()) == Some(node.id())
-    })
+    parent.is_some_and(|parent| is_same_kind_field(node, parent, "name"))
+}
+
+/// Whether `node` is the `field` child of a parent of its own kind: the inner
+/// `a.b` of `a.b.c` (`field` names the qualifier: `object`, `operand`,
+/// `expression`, `target`), which the outer node records whole.
+pub fn heads_same_kind_parent(node: Node<'_>, field: &str) -> bool {
+    node.parent()
+        .is_some_and(|parent| is_same_kind_field(node, parent, field))
+}
+
+fn is_same_kind_field(node: Node<'_>, parent: Node<'_>, field: &str) -> bool {
+    parent.kind() == node.kind()
+        && parent
+            .child_by_field_name(field)
+            .is_some_and(|child| child.id() == node.id())
 }
 
 /// Whether `node`, a child of `parent`, is a case label or sits in a

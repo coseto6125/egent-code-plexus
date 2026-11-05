@@ -379,7 +379,7 @@ A row is the index of a declaration in its file's raw records. Every emitter tha
 
 ## Stored data
 
-| Change | `GRAPH_FORMAT_VERSION` (20, `graph.rs:47`) | `BUILDER_FINGERPRINT` (`schema53`, `registry/commit_meta.rs:194`) | L1 fragment (`FRAGMENT_FORMAT_V8`, `session/overlay.rs:96`) | dirty manifest | view cache key (`VIEW_CACHE_FORMAT` 15, `session/view.rs:1401`) |
+| Change | `GRAPH_FORMAT_VERSION` (20, `graph.rs:47`) | `BUILDER_FINGERPRINT` (`schema53`, `registry/commit_meta.rs:194`) | L1 fragment (`FRAGMENT_FORMAT_V8`, `session/overlay.rs:96`) | dirty manifest | view cache key (`VIEW_CACHE_FORMAT` 16, `session/view.rs:1427`) |
 |---|---|---|---|---|---|
 | adopt `DeclKey` for unscoped nodes, owner text as produced | none | none | none | none | none |
 | `assign_file` in the four paths that skip ordinals (A-A) | none | bump | none | none | follows |

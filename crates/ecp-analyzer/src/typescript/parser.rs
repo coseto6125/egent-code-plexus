@@ -4,7 +4,7 @@ use super::receiver_types::{
 };
 use super::schema_extractors::TS_INTERFACE_CONFIG;
 use super::spec::{TsSpec, TsxSpec, TypeScriptSpec};
-use crate::calls::{NameRefKind, NameRefSpec, VariantRefSpec};
+use crate::calls::{heads_same_kind_parent, NameRefKind, NameRefSpec, VariantRefSpec};
 use crate::driver::{
     self, node, AnonKey, Anonymous, Compiled, DeclSlot, Effect, FieldReads, FileCx, KindCapture,
     Op, ParseSpec, Step, TxRule,
@@ -243,13 +243,13 @@ fn decorated_method_name(verb: tree_sitter::Node, source: &[u8]) -> Option<Strin
     Some(name.to_string())
 }
 
-/// A query is bound to its grammar, so each grammar compiles its own.
 /// The `ns.f` of a namespace-qualified or class-static function value: the
 /// text is `qualifier.member`, with the qualifier a bare identifier. A chain
 /// (`a.b.c`) records only its outermost node, so an inner `a.b` is not a
 /// qualifier of its own; `this`, `super` and a computed or private member
-/// are no identifier pair and record nothing. Whether `ns` is a namespace
-/// import, a class, or a variable is the resolver's call.
+/// are no identifier pair and record nothing. A qualifier that names a local
+/// or parameter in scope is a value, and the scan drops the name; otherwise
+/// the resolver binds it only through a namespace import or a class.
 pub(crate) fn qualified_member_value(
     node: tree_sitter::Node<'_>,
     source: &[u8],
@@ -261,10 +261,7 @@ pub(crate) fn qualified_member_value(
     let property = node
         .child_by_field_name("property")
         .filter(|property| property.kind() == "property_identifier")?;
-    let inside_chain = node.parent().is_some_and(|parent| {
-        parent.kind() == "member_expression" && parent.child_by_field_name("object") == Some(node)
-    });
-    if inside_chain {
+    if heads_same_kind_parent(node, "object") {
         return None;
     }
     Some(format!(
@@ -274,6 +271,7 @@ pub(crate) fn qualified_member_value(
     ))
 }
 
+/// A query is bound to its grammar, so each grammar compiles its own.
 fn grammar<const TSX: bool>() -> tree_sitter::Language {
     match TSX {
         true => tree_sitter_typescript::LANGUAGE_TSX.into(),

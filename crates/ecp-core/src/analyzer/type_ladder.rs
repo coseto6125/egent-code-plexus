@@ -367,22 +367,68 @@ fn qualified_name_len(text: &str) -> usize {
 /// `ns::St`, `crate::t::St`): the resolver reads the qualifier, and a name
 /// it cannot bind whole binds nothing, never a same-named type elsewhere.
 ///
+/// A name that is no type stays out: a parameter name inside a function
+/// type (Go `func(a St)`, Dart and C / C++ `(St a)`, a TS / Kotlin / Swift
+/// label `(a: St)`), and a Python value inside `Literal[..]` or past the
+/// first argument of `Annotated[..]` (`Literal["St"]` names a string).
+///
 /// The result is a superset: it holds wrappers (`Option`), primitives
-/// (`int`), a generic parameter (`T`) and, in a function type, parameter
-/// names. The resolver binds the names that are project types and nothing
-/// else. A declaring-type keyword (`Self`, `this`) is no name; the caller
-/// maps it to the owner through [`return_type_key`]. [`return_type_key`]
-/// stays the reduction that types a receiver; this one feeds edges.
+/// (`int`) and a generic parameter (`T`). The resolver binds the names that
+/// are project types and nothing else. A declaring-type keyword (`Self`,
+/// `this`) is no name; the caller maps it to the owner through
+/// [`return_type_key`]. [`return_type_key`] stays the reduction that types a
+/// receiver; this one feeds edges.
 pub fn annotation_type_names(language: Language, raw: &str) -> Vec<&str> {
-    let mut names = Vec::new();
+    /// One name the scan met, with the bracket group it sits in directly.
+    struct Word<'a> {
+        text: &'a str,
+        /// The `(` or `{` group (numbered in open order) and its comma
+        /// segment, when that group is the innermost bracket.
+        slot: Option<(usize, u32)>,
+        labelled: bool,
+        keyword: bool,
+    }
+    struct Open {
+        group: Option<usize>,
+        segment: u32,
+        /// The first segment that holds values, not types: Python
+        /// `Literal[` 0, `Annotated[` 1.
+        value_from: Option<u32>,
+    }
+    let labels = matches!(
+        language,
+        Language::TypeScript | Language::JavaScript | Language::Kotlin | Language::Swift
+    );
+    let mut words: Vec<Word<'_>> = Vec::new();
+    let mut stack: Vec<Open> = Vec::new();
+    let mut groups = 0usize;
+    let mut last_word: Option<(&str, usize)> = None;
     let mut rest = raw;
     while let Some(c) = rest.chars().next() {
+        let at = raw.len() - rest.len();
+        let in_value = stack
+            .iter()
+            .any(|open| open.value_from.is_some_and(|from| open.segment >= from));
         let skip = if c.is_alphabetic() || c == '_' || c == '$' {
             let len = qualified_name_len(rest);
-            let word = &rest[..len];
-            if !is_annotation_keyword(word) && !names_declaring_type_in(language, word) {
-                names.push(word);
+            let text = &rest[..len];
+            if !in_value {
+                let slot = stack
+                    .last()
+                    .and_then(|open| Some((open.group?, open.segment)));
+                let tail = rest[len..].trim_start();
+                let tail = tail.strip_prefix('?').map_or(tail, str::trim_start);
+                words.push(Word {
+                    text,
+                    slot,
+                    labelled: labels
+                        && slot.is_some()
+                        && tail.starts_with(':')
+                        && !tail.starts_with("::"),
+                    keyword: is_annotation_keyword(text) || names_declaring_type_in(language, text),
+                });
             }
+            last_word = Some((text, at + len));
             len
         } else if c.is_ascii_digit() {
             rest.find(|ch: char| !is_ident_char(ch))
@@ -393,16 +439,108 @@ pub fn annotation_type_names(language: Language, raw: &str) -> Vec<&str> {
             1 + after
                 .find(|ch: char| !is_ident_char(ch))
                 .unwrap_or(after.len())
-        } else if matches!(c, '"' | '\'') && language != Language::Python {
-            // A string literal type (`"admin"`) names no type; Python's
-            // quoted text is a forward reference and is read as code.
+        } else if matches!(c, '"' | '\'') && (language != Language::Python || in_value) {
+            // A string literal type (`"admin"`) or a Python literal value
+            // names no type; any other Python quoted text is a forward
+            // reference and is read as code.
             rest[1..].find(c).map_or(1, |close| close + 2)
+        } else if rest.starts_with("->")
+            || rest.starts_with("=>")
+            || (language == Language::Go && rest.starts_with("<-"))
+        {
+            // An arrow (or a Go channel direction) closes no bracket.
+            2
         } else {
+            match c {
+                '(' | '{' | '[' | '<' => {
+                    let value_from = (language == Language::Python && c == '[')
+                        .then_some(last_word)
+                        .flatten()
+                        .filter(|&(_, end)| end == at)
+                        .and_then(|(word, _)| match word.rsplit('.').next() {
+                            Some("Literal") => Some(0),
+                            Some("Annotated") => Some(1),
+                            _ => None,
+                        });
+                    let group = matches!(c, '(' | '{').then(|| {
+                        groups += 1;
+                        groups - 1
+                    });
+                    stack.push(Open {
+                        group,
+                        segment: 0,
+                        value_from,
+                    });
+                }
+                ')' | '}' | ']' | '>' => {
+                    stack.pop();
+                }
+                ',' | ';' => {
+                    if let Some(open) = stack.last_mut() {
+                        open.segment += 1;
+                    }
+                }
+                _ => {}
+            }
             c.len_utf8()
         };
         rest = &rest[skip..];
     }
-    names
+    let mut dropped = vec![false; words.len()];
+    for (i, word) in words.iter().enumerate() {
+        if word.labelled {
+            // A label and any external label before it (Swift `(_ a: St)`).
+            for (j, earlier) in words[..=i].iter().enumerate() {
+                if earlier.slot == word.slot {
+                    dropped[j] = true;
+                }
+            }
+        }
+    }
+    let mut segments: Vec<((usize, u32), Vec<usize>)> = Vec::new();
+    for (i, word) in words.iter().enumerate() {
+        let Some(slot) = word.slot else { continue };
+        match segments.iter_mut().find(|(seen, _)| *seen == slot) {
+            Some((_, members)) => members.push(i),
+            None => segments.push((slot, vec![i])),
+        }
+    }
+    match language {
+        // `func(a St)`, `func(a, b St)`: a name leads each parameter, and in
+        // a list where one parameter has a name, every one has. A type
+        // keyword (`func`, `map`, `chan`) leads a type instead.
+        Language::Go => {
+            let named = |members: &[usize]| members.len() > 1 && !words[members[0]].keyword;
+            let named_groups: Vec<usize> = segments
+                .iter()
+                .filter(|(_, members)| named(members.as_slice()))
+                .map(|((group, _), _)| *group)
+                .collect();
+            for ((group, _), members) in &segments {
+                if named_groups.contains(group) && !words[members[0]].keyword {
+                    dropped[members[0]] = true;
+                }
+            }
+        }
+        // `(St a)`, `(const struct St *a)`: a name ends a parameter.
+        Language::Dart | Language::C | Language::Cpp => {
+            for (_, members) in &segments {
+                let mut types = members.iter().filter(|&&i| !words[i].keyword);
+                if let (Some(_), Some(_)) = (types.next(), types.next()) {
+                    if let Some(&last) = members.iter().rev().find(|&&i| !words[i].keyword) {
+                        dropped[last] = true;
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    words
+        .iter()
+        .zip(dropped)
+        .filter(|(word, dropped)| !word.keyword && !dropped)
+        .map(|(word, _)| word.text)
+        .collect()
 }
 
 /// The reason of the `Accesses` edge from a declaration to a type its
@@ -445,10 +583,7 @@ pub fn type_annotation_targets<'a, T: IntoIterator<Item = (u32, f32)>>(
         };
         targets.extend(name.into_iter().flat_map(&mut resolve));
     }
-    if !matches!(
-        kind,
-        NodeKind::Function | NodeKind::Method | NodeKind::Constructor
-    ) {
+    if !kind.is_callable() {
         return targets;
     }
     let returned = match type_annotation {
@@ -1008,6 +1143,256 @@ pub fn type_unique_in_scope<F: TypeFacts + ?Sized>(
 mod tests {
     use super::*;
 
+    /// `type_annotation_targets` over a resolver that knows `names`, each
+    /// at its index + 1; the names it was asked for, in order.
+    fn annotation_targets(
+        language: Language,
+        kind: NodeKind,
+        annotation: Option<&str>,
+        owner: Option<&str>,
+        return_type: Option<&str>,
+        params: &[&str],
+        names: &[&str],
+    ) -> (Vec<u32>, Vec<String>) {
+        let params: Vec<String> = params.iter().map(|p| p.to_string()).collect();
+        let mut asked = Vec::new();
+        let targets = type_annotation_targets(
+            language,
+            kind,
+            annotation,
+            owner,
+            return_type,
+            &params,
+            |name| {
+                asked.push(name.to_string());
+                names
+                    .iter()
+                    .position(|known| *known == name)
+                    .map(|at| (at as u32 + 1, 1.0))
+            },
+        );
+        (targets.into_iter().map(|(id, _)| id).collect(), asked)
+    }
+
+    /// Stands for: the index's Pass 2 rule, row by row. A declaring-type
+    /// keyword binds the owner and only the owner; a field binds its whole
+    /// annotation and never the generic arguments in it; a callable binds a
+    /// bare return once, every name of a generic return, the meta's return
+    /// only when the parse captured no annotation, and each parameter
+    /// type, one edge per target.
+    #[test]
+    fn test_type_annotation_targets_rows_match_the_index_rule() {
+        use Language::{Rust, Swift, TypeScript};
+        use NodeKind::{Function, Method, Property};
+        let st = &["St", "Other", "Owner"][..];
+        type Row<'r> = (
+            &'r str,
+            (
+                Language,
+                NodeKind,
+                Option<&'r str>,
+                Option<&'r str>,
+                Option<&'r str>,
+            ),
+            &'r [&'r str],
+            &'r [u32],
+        );
+        let rows: [Row; 10] = [
+            (
+                "bare return",
+                (Rust, Function, Some("St"), None, Some("St")),
+                &[],
+                &[1],
+            ),
+            (
+                "Self return",
+                (Rust, Method, Some("Self"), Some("Owner"), Some("Self")),
+                &[],
+                &[3],
+            ),
+            (
+                "Self without owner",
+                (Rust, Function, Some("Self"), None, None),
+                &[],
+                &[],
+            ),
+            (
+                "Self inside a generic",
+                (Rust, Method, Some("Option<Self>"), Some("Owner"), None),
+                &[],
+                &[],
+            ),
+            (
+                "generic return",
+                (Rust, Function, Some("Option<St>"), None, None),
+                &[],
+                &[1],
+            ),
+            (
+                "uncaptured return reads the meta",
+                (TypeScript, Function, None, None, Some("Promise<Other>")),
+                &[],
+                &[2],
+            ),
+            (
+                "captured bare return skips the meta",
+                (
+                    TypeScript,
+                    Function,
+                    Some("St"),
+                    None,
+                    Some("Promise<Other>"),
+                ),
+                &[],
+                &[1],
+            ),
+            (
+                "generic field binds no argument",
+                (Swift, Property, Some("[St]"), None, None),
+                &[],
+                &[],
+            ),
+            (
+                "params bind once per target",
+                (Rust, Function, Some("St"), None, None),
+                &["a", "St", "b", "&St", "c", "Vec<Other>"],
+                &[1, 2],
+            ),
+            (
+                "receiver and untyped params",
+                (Rust, Method, None, Some("Owner"), None),
+                &["self", "", "a", ""],
+                &[],
+            ),
+        ];
+        for (label, (language, kind, annotation, owner, return_type), params, want) in rows {
+            let (got, _) =
+                annotation_targets(language, kind, annotation, owner, return_type, params, st);
+            assert_eq!(got, want, "{label}");
+        }
+    }
+
+    /// Stands for: the whole annotation text is looked up first, as the
+    /// index looks it up, so a qualified spelling resolves through its
+    /// qualifier before its parts are read.
+    #[test]
+    fn test_type_annotation_targets_unreduced_text_looked_up_whole_first() {
+        let (_, asked) = annotation_targets(
+            Language::Rust,
+            NodeKind::Function,
+            Some("Option<St>"),
+            None,
+            None,
+            &[],
+            &[],
+        );
+        assert_eq!(asked, ["Option<St>", "Option", "St"]);
+    }
+
+    /// Contract: a parameter name inside a function type is no type, in each
+    /// language whose annotation text can hold one: Go names lead a
+    /// parameter (and a list with one named parameter names them all), Dart
+    /// and C / C++ names end it, a TS / JS / Kotlin / Swift label precedes a
+    /// `:`. A type keyword that leads a Go type (`func`, `map`, `chan`) is no
+    /// name, and a Swift dictionary key (`[String: St]`) stays a type.
+    #[test]
+    fn test_annotation_type_names_function_type_parameter_names_excluded() {
+        use Language::*;
+        let rows: &[(Language, &str, &[&str])] = &[
+            (Go, "func(a St)", &["St"]),
+            (Go, "func(a, b St) error", &["St", "error"]),
+            (Go, "func(St, Other)", &["St", "Other"]),
+            (Go, "func(cb func(x St))", &["St"]),
+            (Go, "func(m map[K]V, c chan St)", &["K", "V", "St"]),
+            (
+                Go,
+                "func(a ...St) (n int, err error)",
+                &["St", "int", "error"],
+            ),
+            (Go, "func(ch <-chan St, b int)", &["St", "int"]),
+            (Go, "struct { a St; b Other }", &["St", "Other"]),
+            (Dart, "void Function(St a)", &["Function", "St"]),
+            (
+                Dart,
+                "void Function(St, {required Other b})",
+                &["Function", "St", "required", "Other"],
+            ),
+            (
+                Dart,
+                "void Function(Map<K, V> m)",
+                &["Function", "Map", "K", "V"],
+            ),
+            (C, "void (*)(const struct St *a)", &["St"]),
+            (C, "int (*)(St, Other)", &["int", "St", "Other"]),
+            (
+                Cpp,
+                "std::function<void(const St& a)>",
+                &["std::function", "St"],
+            ),
+            (
+                Cpp,
+                "std::function<void(const St&)>",
+                &["std::function", "St"],
+            ),
+            (TypeScript, "(a: St, b?: Other) => void", &["St", "Other"]),
+            (TypeScript, "(...rest: St[]) => Out", &["St", "Out"]),
+            (TypeScript, "{ a: St; b: Other }", &["St", "Other"]),
+            (JavaScript, "(a: St) => Out", &["St", "Out"]),
+            (Kotlin, "(a: St) -> Unit", &["St", "Unit"]),
+            (
+                Kotlin,
+                "Map<String, (a: St) -> Unit>",
+                &["Map", "String", "St", "Unit"],
+            ),
+            (Swift, "(_ a: St) -> Void", &["St", "Void"]),
+            (Swift, "(St) -> [String: Other]", &["St", "String", "Other"]),
+            (Rust, "fn(St) -> Out", &["St", "Out"]),
+            (Rust, "(St, Other)", &["St", "Other"]),
+            (Python, "Callable[[St], Out]", &["Callable", "St", "Out"]),
+        ];
+        for (language, raw, want) in rows {
+            assert_eq!(
+                annotation_type_names(*language, raw),
+                *want,
+                "{language:?} {raw:?}"
+            );
+        }
+    }
+
+    /// Contract: a Python quoted string is a forward reference only where a
+    /// type is expected. `Literal[..]` holds values, and `Annotated[..]`
+    /// holds a type first and metadata after it, so their strings (and the
+    /// metadata's names) name no type.
+    #[test]
+    fn test_annotation_type_names_python_literal_values_excluded() {
+        let rows: &[(&str, &[&str])] = &[
+            ("Literal[\"St\"]", &["Literal"]),
+            ("typing.Literal['St', 'Other']", &["typing.Literal"]),
+            ("Optional[Literal[\"St\"]]", &["Optional", "Literal"]),
+            ("Annotated[St, \"Other\"]", &["Annotated", "St"]),
+            ("Annotated[\"St\", Gt(0)]", &["Annotated", "St"]),
+            (
+                "Annotated[list[St], \"meta\"] | Other",
+                &["Annotated", "list", "St", "Other"],
+            ),
+            ("dict[str, \"St\"]", &["dict", "str", "St"]),
+            ("Literal []", &["Literal"]),
+            ("Literal[]", &["Literal"]),
+        ];
+        for (raw, want) in rows {
+            assert_eq!(
+                annotation_type_names(Language::Python, raw),
+                *want,
+                "{raw:?}"
+            );
+        }
+        // Outside Python a `Literal` is an ordinary generic.
+        assert_eq!(
+            annotation_type_names(Language::TypeScript, "Literal<St>"),
+            ["Literal", "St"]
+        );
+    }
+
     /// Contract: only wrappers that keep the type's members reduce; a
     /// generic, an array, a path or a two-type union stays unresolved (the
     /// follow-up), so no chained call guesses its receiver.
@@ -1137,7 +1522,7 @@ mod tests {
             (Go, "map[string]*St", &["string", "St"]),
             (Go, "...St", &["St"]),
             (Go, "chan St", &["St"]),
-            (Go, "func(a St) (Out, error)", &["a", "St", "Out", "error"]),
+            (Go, "func(a St) (Out, error)", &["St", "Out", "error"]),
             (Php, "?St", &["St"]),
             (Php, "\\App\\Models\\St", &["App\\Models\\St"]),
             (Php, "static", &[]),

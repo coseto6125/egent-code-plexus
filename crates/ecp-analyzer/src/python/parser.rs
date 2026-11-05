@@ -4,7 +4,7 @@ use super::receiver_types::{
 };
 use super::schema_extractors::{PYDANTIC_CONFIG, SQLALCHEMY_CONFIG};
 use super::spec::PythonSpec;
-use crate::calls::{NameRefKind, NameRefSpec, VariantRefSpec};
+use crate::calls::{heads_same_kind_parent, NameRefKind, NameRefSpec, VariantRefSpec};
 use crate::driver::{
     self, node, AnonKey, Anonymous, Compiled, DeclSlot, Effect, FieldReads, FileCx, KindCapture,
     Op, ParseSpec, Step, TestRule, TxRule,
@@ -1002,8 +1002,9 @@ fn process_class_for_enum(
 /// The `mod.f` of a module-qualified or class-static function value: the
 /// text is `qualifier.member`, with the qualifier a bare identifier other
 /// than `self` and `cls` (an instance or class receiver, never a module). A
-/// chain (`a.b.c`) records only its outermost node. Whether the qualifier is
-/// a module, a class, or a variable is the resolver's call.
+/// chain (`a.b.c`) records only its outermost node. A qualifier that names a
+/// local or parameter in scope is a value, and the scan drops the name;
+/// otherwise the resolver binds it only through a module or a class.
 fn qualified_attribute_value(
     node: tree_sitter::Node<'_>,
     source: &[u8],
@@ -1016,10 +1017,7 @@ fn qualified_attribute_value(
         .child_by_field_name("attribute")
         .filter(|attribute| attribute.kind() == "identifier")?;
     let qualifier = object.utf8_text(source).ok()?;
-    let inside_chain = node.parent().is_some_and(|parent| {
-        parent.kind() == "attribute" && parent.child_by_field_name("object") == Some(node)
-    });
-    if inside_chain || matches!(qualifier, "self" | "cls") {
+    if heads_same_kind_parent(node, "object") || matches!(qualifier, "self" | "cls") {
         return None;
     }
     Some(format!("{qualifier}.{}", attribute.utf8_text(source).ok()?))

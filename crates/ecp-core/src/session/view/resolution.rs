@@ -367,6 +367,7 @@ impl<'a> OverlayFacts<'a> {
             let first = offset;
             let start = base_len + first as u32;
             let rust_file = is_rust_source(std::path::Path::new(&file.rel_path));
+            let csharp_file = Language::from_normalized_path(&file.rel_path) == Language::CSharp;
             for symbol in &file.symbols {
                 let node = &nodes[offset];
                 let virt = base_len + offset as u32;
@@ -400,7 +401,14 @@ impl<'a> OverlayFacts<'a> {
                     }
                 }
                 exported.push(symbol.is_exported);
-                if let Some(return_type) = symbol.return_type.as_deref() {
+                // As the index's `pass1_8_function_metas`: a C# field or
+                // property types a receiver by its declared type, which
+                // another `partial` part reads.
+                let return_type = match (symbol.return_type.as_deref(), symbol.kind) {
+                    (None, NodeKind::Property) if csharp_file => symbol.type_annotation.as_deref(),
+                    (return_type, _) => return_type,
+                };
+                if let Some(return_type) = return_type {
                     dirty_return_types.insert(base_len + offset as u32, return_type);
                 }
                 if let Some(flags) = symbol.flags {
@@ -2473,8 +2481,9 @@ impl TypeFacts for OverlayFacts<'_> {
     /// archived `FunctionMeta`, which the index wrote from the same
     /// `RawFunctionMeta.return_type`; a clean C# field or property's from
     /// its type's `Accesses` edge ([`Self::base_property_type`]). A base node
-    /// of a dirty file is stale. A dirty field or property has no type
-    /// fact: its fragment carries no `type_annotation` (overlay P2b).
+    /// of a dirty file is stale. A dirty C# field or property's from its
+    /// fresh `type_annotation`, as the index notes it; one of another
+    /// language has no type fact, as in the index.
     fn return_type_of(&self, callee: u32) -> Option<&str> {
         if callee >= self.base_len() {
             return self.dirty_return_types.get(&callee).copied();

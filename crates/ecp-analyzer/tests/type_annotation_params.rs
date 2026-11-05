@@ -726,3 +726,136 @@ fn test_dart_param_generic_and_alias_types_bind() {
         1
     );
 }
+
+// ------------------------- Parameter names inside a function type (F4 item 4)
+// A function type names its parameters (`func(a St)`, `(a: St) => void`),
+// and the name is never a type: with a project type named `a`, only `St`
+// binds. An unnamed parameter (`func(a, St)`, `(a) -> St`) is a type.
+// Rust, Java, C#, PHP and Ruby function types carry no parameter names;
+// JavaScript has no annotations. C is covered by the scanner unit test
+// (`test_annotation_type_names_function_type_parameter_names_excluded`).
+
+const GO_FN_TYPES: &str = "\
+package app
+type a struct{}
+type St struct{}
+type Out struct{}
+func Reg(cb func(a St) (Out, error)) {}
+func RegShared(cb func(a, b St)) {}
+func RegUnnamed(cb func(a, St)) {}
+";
+
+#[test]
+fn test_go_function_type_parameter_names_bind_nothing() {
+    let g = build(&GoProvider::new().unwrap(), "app.go", GO_FN_TYPES);
+    assert_binds(&g, "app.go", "Reg", &["Out", "St"]);
+    assert_binds(&g, "app.go", "RegShared", &["St"]);
+    assert_binds(&g, "app.go", "RegUnnamed", &["St", "a"]);
+}
+
+const TS_FN_TYPES: &str = "\
+export class a { n = 1 }
+export class St { n = 2 }
+export function reg(cb: (a: St) => void): void {}
+export function regOpt(cb: (a?: St) => void): void {}
+export function regObj(o: { a: St }): void {}
+export function regUnnamed(cb: (x: a) => St): void {}
+";
+
+#[test]
+fn test_typescript_function_type_parameter_names_bind_nothing() {
+    let g = build(&TypeScriptProvider::new().unwrap(), "app.ts", TS_FN_TYPES);
+    for source in ["reg", "regOpt", "regObj"] {
+        assert_binds(&g, "app.ts", source, &["St"]);
+    }
+    assert_binds(&g, "app.ts", "regUnnamed", &["St", "a"]);
+}
+
+const KOTLIN_FN_TYPES: &str = "\
+class a
+class St
+fun reg(cb: (a: St) -> Unit) {}
+fun regUnnamed(cb: (a) -> St) {}
+";
+
+#[test]
+fn test_kotlin_function_type_parameter_names_bind_nothing() {
+    let g = build(&KotlinProvider::new().unwrap(), "app.kt", KOTLIN_FN_TYPES);
+    assert_binds(&g, "app.kt", "reg", &["St"]);
+    assert_binds(&g, "app.kt", "regUnnamed", &["St", "a"]);
+}
+
+const SWIFT_FN_TYPES: &str = "\
+struct a {}
+struct St {}
+func reg(_ cb: (_ a: St) -> Void) {}
+func regUnnamed(_ cb: (a) -> St) {}
+";
+
+#[test]
+fn test_swift_function_type_parameter_names_bind_nothing() {
+    let g = build(&SwiftProvider::new().unwrap(), "app.swift", SWIFT_FN_TYPES);
+    assert_binds(&g, "app.swift", "reg", &["St"]);
+    assert_binds(&g, "app.swift", "regUnnamed", &["St", "a"]);
+}
+
+const DART_FN_TYPES: &str = "\
+class a {}
+class St {}
+void reg(void Function(St a) cb) {}
+void regUnnamed(void Function(a) cb) {}
+";
+
+#[test]
+fn test_dart_function_type_parameter_names_bind_nothing() {
+    let g = build(&DartProvider::new().unwrap(), "app.dart", DART_FN_TYPES);
+    assert_binds(&g, "app.dart", "reg", &["St"]);
+    assert_binds(&g, "app.dart", "regUnnamed", &["a"]);
+}
+
+const CPP_FN_TYPES: &str = "\
+#include <functional>
+struct a {};
+struct St {};
+void reg(std::function<void(St a)> cb) {}
+void regUnnamed(std::function<void(a)> cb) {}
+";
+
+#[test]
+fn test_cpp_function_type_parameter_names_bind_nothing() {
+    let g = build(&CppProvider::new().unwrap(), "app.cpp", CPP_FN_TYPES);
+    assert_binds(&g, "app.cpp", "reg", &["St"]);
+    assert_binds(&g, "app.cpp", "regUnnamed", &["a"]);
+}
+
+// ------------------------- Python value-only subscripts (F4 item 5)
+// `Literal["St"]` holds values and `Annotated[T, "St"]` metadata after its
+// first argument: neither string is a forward reference. Only Python spells
+// a type as a string inside a subscript.
+
+const PY_LITERALS: &str = "\
+from typing import Annotated, Callable, Literal, Optional
+class St: pass
+class Other: pass
+class Ünï: pass
+def lit(mode: Literal['St', 'Other']) -> None: ...
+def lit_nested(m: Optional[Literal['St']]) -> None: ...
+def lit_unicode(m: Literal['Ünï']) -> None: ...
+def meta(x: Annotated[int, 'St']) -> None: ...
+def meta_type(x: Annotated[St, 'Other']) -> None: ...
+def meta_fwd(x: Annotated['St', 'Other']) -> None: ...
+def fwd_unicode(x: 'Ünï') -> None: ...
+def cb(f: Callable[[St], Other]) -> None: ...
+";
+
+#[test]
+fn test_python_literal_and_annotated_metadata_bind_nothing() {
+    let g = build(&PythonProvider::new().unwrap(), "app.py", PY_LITERALS);
+    for source in ["lit", "lit_nested", "lit_unicode", "meta"] {
+        assert_binds(&g, "app.py", source, &[]);
+    }
+    assert_binds(&g, "app.py", "meta_type", &["St"]);
+    assert_binds(&g, "app.py", "meta_fwd", &["St"]);
+    assert_binds(&g, "app.py", "fwd_unicode", &["Ünï"]);
+    assert_binds(&g, "app.py", "cb", &["Other", "St"]);
+}

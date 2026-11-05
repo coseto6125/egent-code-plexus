@@ -1,7 +1,7 @@
 use super::receiver_types::extract_csharp_calls_and_path_literals;
 use super::recovery::prepare_source;
 use super::spec::CSharpSpec;
-use crate::calls::{NameRefKind, NameRefSpec, VariantRefSpec};
+use crate::calls::{heads_same_kind_parent, NameRefKind, NameRefSpec, VariantRefSpec};
 use crate::driver::{
     self, imports, node, AnonKey, Anonymous, Compiled, DeclSlot, Effect, FieldReads, FileCx,
     KindCapture, Op, ParseSpec, PrepareSource, Step, TxRule,
@@ -296,42 +296,38 @@ fn declaration_extent(root: Node<'_>) -> (Span, std::ops::Range<usize>) {
     )
 }
 
-/// The method group `Qualifier.Member` in value position: `Cb.M` records
-/// `Cb.M`, with the last qualifier segment, so Pass 2 binds it only when the
-/// qualifier names a type or namespace. `None` for a qualifier of the member
-/// access above it (`Cb.M` in `Cb.M.X`), a `this` / `base` qualifier, and a
-/// qualifier that is a call, an index or a generic name.
+/// The method group `Qualifier.Member` in value position, with the whole
+/// qualifier: `Cb.M` records `Cb.M`, `A.Helpers.Format` records
+/// `A.Helpers.Format`, and Pass 2 binds it only when the qualifier is the
+/// namespace and type path that encloses the method. `None` for a qualifier
+/// of the member access above it (`Cb.M` in `Cb.M.X`), and a qualifier that
+/// holds a `this` / `base`, a call, an index or a generic name.
 fn method_group_name(access: Node<'_>, source: &[u8], _spec: &NameRefSpec) -> Option<String> {
-    let member = access
-        .child_by_field_name("name")
-        .filter(|name| name.kind() == "identifier")?
-        .utf8_text(source)
-        .ok()?;
-    let qualifies_outer = access.parent().is_some_and(|parent| {
-        parent.kind() == "member_access_expression"
-            && parent
-                .child_by_field_name("expression")
-                .is_some_and(|expression| expression.id() == access.id())
-    });
-    if qualifies_outer {
+    if heads_same_kind_parent(access, "expression") {
         return None;
     }
-    let qualifier = access
-        .child_by_field_name("expression")?
-        .utf8_text(source)
-        .ok()?;
-    let is_name = |segment: &str| {
-        !segment.is_empty()
-            && !matches!(segment, "this" | "base")
-            && !segment.starts_with(|c: char| c.is_ascii_digit())
-            && segment.chars().all(|c| c.is_alphanumeric() || c == '_')
-    };
-    qualifier.split('.').all(is_name).then(|| {
-        format!(
-            "{}.{member}",
-            qualifier.rsplit('.').next().unwrap_or(qualifier)
-        )
-    })
+    let mut segments = Vec::new();
+    let mut node = access;
+    loop {
+        match node.kind() {
+            "member_access_expression" => {
+                segments.push(
+                    node.child_by_field_name("name")
+                        .filter(|name| name.kind() == "identifier")?
+                        .utf8_text(source)
+                        .ok()?,
+                );
+                node = node.child_by_field_name("expression")?;
+            }
+            "identifier" => {
+                segments.push(node.utf8_text(source).ok()?);
+                break;
+            }
+            _ => return None,
+        }
+    }
+    segments.reverse();
+    Some(segments.join("."))
 }
 
 impl ParseSpec for CSharpSpec {

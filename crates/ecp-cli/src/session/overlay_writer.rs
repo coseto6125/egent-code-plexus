@@ -680,7 +680,7 @@ fn write_fragment_file(
         content_hash: Some(content_hash),
         parse_failed,
         dirty_symbols,
-        format: ecp_core::session::overlay::FRAGMENT_FORMAT_V8,
+        format: ecp_core::session::overlay::FRAGMENT_FORMAT,
     };
 
     let outcome = FragmentOutcome {
@@ -760,7 +760,7 @@ fn write_fragment_from_graph(
         content_hash: Some(content_hash),
         parse_failed,
         dirty_symbols: symbols_from_graph(graph, &rel_path),
-        format: ecp_core::session::overlay::FRAGMENT_FORMAT_V8,
+        format: ecp_core::session::overlay::FRAGMENT_FORMAT,
     };
     let outcome = FragmentOutcome {
         fragment_id,
@@ -809,7 +809,7 @@ fn graph_content_hash(graph: &LocalGraph, worktree: &Path) -> u64 {
 /// gone or unreadable hashes as empty. An unknown worktree root (an empty
 /// path) would resolve `rel` against the process cwd, so it yields the zero
 /// hash, which the promotion compare never matches.
-fn hash_worktree_file(worktree: &Path, rel: &Path) -> u64 {
+pub(crate) fn hash_worktree_file(worktree: &Path, rel: &Path) -> u64 {
     use std::io::Read;
     if worktree.as_os_str().is_empty() {
         return 0;
@@ -913,7 +913,7 @@ impl OverlayWriter {
                 content_hash: Some(content_hash.to_string()),
                 parse_failed,
                 dirty_symbols,
-                format: ecp_core::session::overlay::FRAGMENT_FORMAT_V8,
+                format: ecp_core::session::overlay::FRAGMENT_FORMAT,
             },
         );
         DirtyEvents::write_atomic(&manifest_path, &manifest)

@@ -381,8 +381,9 @@ fn is_exported(name: &str) -> bool {
 
 /// The `pkg.F` of a package-qualified function value: the text is
 /// `qualifier.member`, with the qualifier a bare identifier. A chain
-/// (`a.b.c`) records only its outermost node. Whether the qualifier is a
-/// package, or a variable whose field holds a func, is the resolver's call.
+/// (`a.b.c`) records only its outermost node. A qualifier that names a local
+/// or parameter in scope is a value, and the scan drops the name; otherwise
+/// the resolver binds it only through a package.
 fn qualified_selector_value(
     node: tree_sitter::Node<'_>,
     source: &[u8],
@@ -394,11 +395,7 @@ fn qualified_selector_value(
     let field = node
         .child_by_field_name("field")
         .filter(|field| field.kind() == "field_identifier")?;
-    let inside_chain = node.parent().is_some_and(|parent| {
-        parent.kind() == "selector_expression"
-            && parent.child_by_field_name("operand") == Some(node)
-    });
-    if inside_chain {
+    if calls::heads_same_kind_parent(node, "operand") {
         return None;
     }
     Some(format!(

@@ -533,3 +533,158 @@ fn test_qualified_function_reference_go_aliased_package_argument_binds_member() 
     ]);
     assert_one_cross_file(&function_refs(&g, "boot"), "pkg/helper.go", "F");
 }
+
+// ---- A local or parameter named like the qualifier (F4 item 1) ----
+// The qualifier of `mod.f` is the local when a parameter or local of its
+// name is in scope: the scan drops the name, and the import binds nothing
+// through it. A function of the same file that has no such local still binds.
+
+#[test]
+fn test_qualified_function_reference_python_parameter_named_like_import_returns_no_edge() {
+    let g = py(&[
+        ("mod.py", "def f(x):\n    return x\n"),
+        (
+            "app.py",
+            "import mod\n\ndef run(mod, items):\n    return map(mod.f, items)\n\ndef ok(items):\n    return map(mod.f, items)\n",
+        ),
+    ]);
+    assert_eq!(function_refs(&g, "run"), none());
+    assert_one_cross_file(&function_refs(&g, "ok"), "mod.py", "f");
+}
+
+#[test]
+fn test_qualified_function_reference_python_local_named_like_import_returns_no_edge() {
+    let g = py(&[
+        ("mod.py", "def f(x):\n    return x\n"),
+        (
+            "app.py",
+            "import mod\n\ndef run(items):\n    mod = object()\n    return map(mod.f, items)\n",
+        ),
+    ]);
+    assert_eq!(function_refs(&g, "run"), none());
+}
+
+/// A non-ASCII module and parameter name: the qualifier's first segment is
+/// cut at `.` on a char boundary.
+#[test]
+fn test_qualified_function_reference_python_non_ascii_parameter_named_like_import_returns_no_edge()
+{
+    let g = py(&[
+        ("mød.py", "def f(x):\n    return x\n"),
+        (
+            "app.py",
+            "import mød\n\ndef run(mød, items):\n    return map(mød.f, items)\n",
+        ),
+    ]);
+    assert_eq!(function_refs(&g, "run"), none());
+}
+
+#[test]
+fn test_qualified_function_reference_typescript_parameter_named_like_namespace_returns_no_edge() {
+    let g = ts(&[
+        TS_LIB,
+        (
+            "app.ts",
+            "import * as ns from './lib';\nexport function run(ns: any, items: number[]): number[] {\n  return items.map(ns.f);\n}\nexport function ok(items: number[]): number[] {\n  return items.map(ns.f);\n}\n",
+        ),
+    ]);
+    assert_eq!(function_refs(&g, "run"), none());
+    assert_one_cross_file(&function_refs(&g, "ok"), "lib.ts", "f");
+}
+
+#[test]
+fn test_qualified_function_reference_javascript_local_named_like_namespace_returns_no_edge() {
+    let g = js(&[
+        JS_LIB,
+        (
+            "app.js",
+            "import * as ns from './lib.js';\nexport function run(items) {\n  const ns = { f: (x) => x };\n  return items.map(ns.f);\n}\nexport function ok(items) {\n  return items.map(ns.f);\n}\n",
+        ),
+    ]);
+    assert_eq!(function_refs(&g, "run"), none());
+    assert_one_cross_file(&function_refs(&g, "ok"), "lib.js", "f");
+}
+
+#[test]
+fn test_qualified_function_reference_go_parameter_named_like_package_returns_no_edge() {
+    let g = go_module(&[
+        GO_MOD,
+        ("pkg/helper.go", "package pkg\n\nfunc F() {}\n"),
+        (
+            "cmd/app.go",
+            "package main\n\nimport \"example.com/app/pkg\"\n\nfunc register(f func()) {}\n\nfunc boot(pkg struct{ F func() }) {\n\tregister(pkg.F)\n}\n\nfunc ok() {\n\tregister(pkg.F)\n}\n",
+        ),
+    ]);
+    assert_eq!(function_refs(&g, "boot"), none());
+    assert_one_cross_file(&function_refs(&g, "ok"), "pkg/helper.go", "F");
+}
+
+// ---- An export alias reached through a namespace import (F4 item 6) ----
+// `export { f as renamed }` declares no `renamed`: the import binds it to `f`.
+
+#[test]
+fn test_qualified_function_reference_typescript_export_alias_through_namespace_binds_declaration() {
+    let g = ts(&[
+        (
+            "lib.ts",
+            "function f(x: number): number {\n  return x;\n}\nexport { f as renamed };\n",
+        ),
+        (
+            "app.ts",
+            "import * as ns from './lib';\nexport function run(items: number[]): number[] {\n  return items.map(ns.renamed);\n}\n",
+        ),
+    ]);
+    assert_one_cross_file(&function_refs(&g, "run"), "lib.ts", "f");
+}
+
+#[test]
+fn test_qualified_function_reference_javascript_export_alias_through_namespace_binds_declaration() {
+    let g = js(&[
+        (
+            "lib.js",
+            "function f(x) {\n  return x;\n}\nexport { f as renamed };\n",
+        ),
+        (
+            "app.js",
+            "import * as ns from './lib.js';\nexport function run(items) {\n  return items.map(ns.renamed);\n}\n",
+        ),
+    ]);
+    assert_one_cross_file(&function_refs(&g, "run"), "lib.js", "f");
+}
+
+/// A name no module exports, under an alias or its own name, binds nothing.
+#[test]
+fn test_qualified_function_reference_typescript_unexported_alias_name_returns_no_edge() {
+    let g = ts(&[
+        (
+            "lib.ts",
+            "function f(x: number): number {\n  return x;\n}\nexport { f as renamed };\n",
+        ),
+        (
+            "app.ts",
+            "import * as ns from './lib';\nexport function run(items: number[]): number[] {\n  return items.map(ns.missing);\n}\n",
+        ),
+    ]);
+    assert_eq!(function_refs(&g, "run"), none());
+}
+
+// ---- Go: a package no `go.mod` maps (F4 item 9) ----
+// Without a module mapping, `pkg.F` binds through the directory the
+// package's files live in, as the call `pkg.F()` does; another package's
+// `F` is never bound.
+
+#[test]
+fn test_qualified_function_reference_go_unmapped_package_argument_binds_member() {
+    let g = name_ref_support::graph(
+        &GoProvider::new().unwrap(),
+        &[
+            ("pkg/helper.go", "package pkg\n\nfunc F() {}\n"),
+            ("other/o.go", "package other\n\nfunc F() {}\n"),
+            (
+                "cmd/app.go",
+                "package main\n\nimport \"example.com/app/pkg\"\n\nfunc register(f func()) {}\n\nfunc boot() {\n\tregister(pkg.F)\n}\n",
+            ),
+        ],
+    );
+    assert_one_cross_file(&function_refs(&g, "boot"), "pkg/helper.go", "F");
+}

@@ -29,7 +29,7 @@ pub struct InvalidateReport {
     pub meta_reaped: usize,
 }
 
-/// Retire the overlay state (`l1/` and the view cache) of each `sessions/<sid>/`
+/// Retire the overlay state (`l1/` and the view cache) of each `sessions/<sid>~<h8>/`
 /// whose `SessionState` is `AugmentedReference`
 /// with `base_sha == target_sha`, and return counts. PureReference sessions for the
 /// same SHA are kept. Stale sessions are left for the GC sweep.

@@ -1433,7 +1433,8 @@ fn retain_stale_fragments(
     size_cap: SizeCap,
     rel_paths: &[String],
 ) -> L1FreshnessGate {
-    use ecp_core::session::{layout, FRAGMENT_FORMAT_V8};
+    use ecp_core::session::layout;
+    use ecp_core::session::overlay::FRAGMENT_FORMAT;
 
     let pass = |rel_paths: &[String], session_meta| L1FreshnessGate {
         rel_paths: rel_paths.to_vec(),
@@ -1478,7 +1479,7 @@ fn retain_stale_fragments(
                     None => false,
                 };
             };
-            if entry.format != FRAGMENT_FORMAT_V8 || entry.parse_failed {
+            if entry.format != FRAGMENT_FORMAT || entry.parse_failed {
                 return true;
             }
             // A bin the manifest names can still be gone (a cleanup that
@@ -3403,11 +3404,16 @@ mod session_dir_key_tests {
     use super::*;
     use std::process::Command;
 
+    /// The global and system git config stay out: a developer's
+    /// `commit.gpgsign` or hooks path must not change the fixture.
     fn git(dir: &Path, args: &[&str]) {
         assert!(Command::new("git")
             .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+            .args(["-c", "commit.gpgsign=false"])
             .args(args)
             .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
             .status()
             .unwrap()
             .success());

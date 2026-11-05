@@ -3841,16 +3841,10 @@ fn pass2_emit_node_edges(
         }
     }
 
-    let meta = matches!(
-        raw_node.kind,
-        NodeKind::Function | NodeKind::Method | NodeKind::Constructor
-    )
-    .then(|| {
-        meta_lookup
-            .get(&raw_node.span)
-            .map(|&i| &local_graph.raw_function_metas[i])
-    })
-    .flatten();
+    // `type_annotation_targets` reads the meta of a callable kind only.
+    let meta = meta_lookup
+        .get(&raw_node.span)
+        .map(|&i| &local_graph.raw_function_metas[i]);
     for (target_id, confidence) in type_ladder::type_annotation_targets(
         language,
         raw_node.kind,

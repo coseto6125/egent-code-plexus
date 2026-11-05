@@ -29,12 +29,13 @@ use crate::parity;
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_cli::session::overlay_reader::{accepted_fragments, decode_view_inputs};
 use ecp_cli::session::overlay_writer::write_dirty_fragments_from_graphs;
+use ecp_core::analyzer::type_ladder::TYPE_ANNOTATION_REASON;
 use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::graph::{ArchivedZeroCopyGraph, RelType};
 use ecp_core::session::merged::MergedGraph;
-use ecp_core::session::view::{OverlayView, TYPE_ANNOTATION_REASON};
+use ecp_core::session::view::OverlayView;
 use ecp_core::session::{layout, DirtyEvents, SessionMeta};
-use parity::{edges_after_edit, EdgeParity, ReasonedEdge};
+use parity::{edges_after_edit, parse, EdgeParity, ReasonedEdge};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -148,12 +149,6 @@ struct Case {
     edits: Vec<(&'static str, &'static str)>,
     source_file: &'static str,
     expected: Vec<Row>,
-}
-
-fn parse(path: &str, source: &str) -> LocalGraph {
-    ecp_cli::reanalyze::pipeline()
-        .parse_file_raw(Path::new(path), source.as_bytes())
-        .unwrap_or_else(|e| panic!("{path}: {e}"))
 }
 
 fn lang_case(fixture: &LangFixture) -> Case {

@@ -218,6 +218,14 @@ pub fn calls_after_edit_in(
     calls_after_edit(&provider_parse(provider), files, edits, selects)
 }
 
+/// The CLI pipeline's parse of `source` at `path`: the one a reindex and a
+/// session fragment both run, dispatched by the path's language.
+pub fn parse(path: &str, source: &str) -> LocalGraph {
+    ecp_cli::reanalyze::pipeline()
+        .parse_file_raw(Path::new(path), source.as_bytes())
+        .unwrap_or_else(|e| panic!("{path}: {e}"))
+}
+
 /// `provider`'s parse, as the parity helpers take it.
 pub fn provider_parse(provider: &dyn LanguageProvider) -> impl Fn(&str, &str) -> LocalGraph + '_ {
     move |path, source| {

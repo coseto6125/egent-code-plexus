@@ -139,15 +139,32 @@ fn test_qualified_function_reference_csharp_unresolvable_qualifier_returns_no_ed
     assert_eq!(found, none());
 }
 
+const CS_LIB_CB: &str =
+    "namespace Lib {\n    public class Cb {\n        public static void M(string s) {}\n    }\n}\n";
+
+/// The qualifier `Lib.Cb` is the namespace and type path that encloses `M`.
 #[test]
 fn test_qualified_function_reference_csharp_namespace_qualified_type_binds() {
+    let used = cs_use("xs.ForEach(Lib.Cb.M);");
+    let found = refs(
+        &csharp(),
+        &[("Cb.cs", CS_LIB_CB), ("Use.cs", used.as_str())],
+        "Run",
+    );
+    assert_one_cross_file(&found, "Cb.cs", "M");
+}
+
+/// `Lib.Cb.M` names a `Cb` that the namespace `Lib` holds: a `Cb` outside
+/// any namespace is another type, and binds nothing.
+#[test]
+fn test_qualified_function_reference_csharp_namespace_the_type_lacks_returns_no_edge() {
     let used = cs_use("xs.ForEach(Lib.Cb.M);");
     let found = refs(
         &csharp(),
         &[("Cb.cs", CS_CB), ("Use.cs", used.as_str())],
         "Run",
     );
-    assert_one_cross_file(&found, "Cb.cs", "M");
+    assert_eq!(found, none());
 }
 
 // ---- C++ ----
@@ -578,15 +595,35 @@ fn test_qualified_function_reference_ruby_module_method_object_binds() {
     assert_one_cross_file(&found, "util.rb", "run");
 }
 
+/// `Lib::Util` is the module path that encloses `run`.
 #[test]
-fn test_qualified_function_reference_ruby_scoped_constant_receiver_binds_last_segment() {
+fn test_qualified_function_reference_ruby_scoped_constant_receiver_binds_enclosed_module() {
+    let used = ruby_use("items.each(&Lib::Util.method(:run))");
+    let found = refs(
+        &ruby(),
+        &[
+            (
+                "util.rb",
+                "module Lib\n  module Util\n    def self.run(x)\n      x\n    end\n  end\nend\n",
+            ),
+            ("svc.rb", used.as_str()),
+        ],
+        "wire",
+    );
+    assert_one_cross_file(&found, "util.rb", "run");
+}
+
+/// `Lib::Util` names a `Util` inside `Lib`: a top-level `Util` is another
+/// module, and binds nothing.
+#[test]
+fn test_qualified_function_reference_ruby_scoped_receiver_outside_its_module_returns_no_edge() {
     let used = ruby_use("items.each(&Lib::Util.method(:run))");
     let found = refs(
         &ruby(),
         &[("util.rb", RUBY_UTIL), ("svc.rb", used.as_str())],
         "wire",
     );
-    assert_one_cross_file(&found, "util.rb", "run");
+    assert_eq!(found, none());
 }
 
 #[test]
@@ -779,4 +816,340 @@ fn test_qualified_function_reference_dart_enum_value_argument_returns_no_edge() 
     );
     assert_eq!(function_refs(&g, "apply"), none());
     assert!(!reads_name(&value_reads(&g, "apply"), "red"));
+}
+
+// ---- A parameter named like the type qualifier (F4 item 1) ----
+// Ruby and PHP cannot write it: a Ruby constant is never a local, and a PHP
+// local carries its `$`. C++ `ns::f` and Rust `m::f` scope through a
+// namespace or module that no local can stand for.
+
+#[test]
+fn test_qualified_function_reference_csharp_parameter_named_like_type_returns_no_edge() {
+    let used = "using System.Collections.Generic;\npublic class Use {\n    public void Run(List<string> xs, Other Cb) {\n        xs.ForEach(Cb.M);\n    }\n    public void Ok(List<string> xs) {\n        xs.ForEach(Cb.M);\n    }\n}\n";
+    let g = graph(
+        &csharp(),
+        &[("Cb.cs", CS_CB), ("Other.cs", CS_OTHER), ("Use.cs", used)],
+    );
+    assert_eq!(function_refs(&g, "Run"), none());
+    assert_one_cross_file(&function_refs(&g, "Ok"), "Cb.cs", "M");
+}
+
+#[test]
+fn test_qualified_function_reference_swift_parameter_named_like_type_returns_no_edge() {
+    let used = "struct Use {\n    func apply(_ xs: [Int], _ Cb: Other) -> [Int] {\n        return xs.map(Cb.f)\n    }\n    func ok(_ xs: [Int]) -> [Int] {\n        return xs.map(Cb.f)\n    }\n}\n";
+    let g = graph(
+        &swift(),
+        &[
+            ("Cb.swift", SWIFT_CB),
+            ("Other.swift", SWIFT_OTHER),
+            ("Use.swift", used),
+        ],
+    );
+    assert_eq!(function_refs(&g, "apply"), none());
+    assert_one_cross_file(&function_refs(&g, "ok"), "Cb.swift", "f");
+}
+
+#[test]
+fn test_qualified_function_reference_dart_parameter_named_like_class_returns_no_edge() {
+    let used = "import 'cb.dart';\nimport 'other.dart';\nList<int> apply(List<int> xs, Other Cb) {\n  return xs.map(Cb.f).toList();\n}\nList<int> ok(List<int> xs) {\n  return xs.map(Cb.f).toList();\n}\n";
+    let g = graph(&dart(), &dart_files(used));
+    assert_eq!(function_refs(&g, "apply"), none());
+    assert_one_cross_file(&function_refs(&g, "ok"), "cb.dart", "f");
+}
+
+#[test]
+fn test_qualified_function_reference_java_parameter_named_like_class_returns_no_edge() {
+    let used = "class Use {\n    void run(java.util.List<String> xs, Other Cb) {\n        xs.forEach(Cb::print);\n    }\n    void ok(java.util.List<String> xs) {\n        xs.forEach(Cb::print);\n    }\n}\n";
+    let g = graph(
+        &JavaProvider::new().unwrap(),
+        &[
+            ("Cb.java", JAVA_CB),
+            ("Other.java", JAVA_OTHER),
+            ("Use.java", used),
+        ],
+    );
+    assert_eq!(function_refs(&g, "run"), none());
+    assert_one_cross_file(&function_refs(&g, "ok"), "Cb.java", "print");
+}
+
+#[test]
+fn test_qualified_function_reference_kotlin_parameter_named_like_object_returns_no_edge() {
+    let g = graph(
+        &KotlinProvider::new().unwrap(),
+        &[
+            ("Cb.kt", KOTLIN_CB),
+            ("Other.kt", KOTLIN_OTHER),
+            (
+                "use.kt",
+                "fun wire(xs: List<String>, Cb: Other) {\n    xs.forEach(Cb::print)\n}\nfun ok(xs: List<String>) {\n    xs.forEach(Cb::print)\n}\n",
+            ),
+        ],
+    );
+    assert_eq!(function_refs(&g, "wire"), none());
+    assert_one_cross_file(&function_refs(&g, "ok"), "Cb.kt", "print");
+}
+
+// ---- A multi-segment qualifier (F4 item 2) ----
+// The whole qualifier is kept, and it binds only as the namespace and type
+// path that encloses the function. Python, TS, JS and Go record a
+// one-segment qualifier only; PHP and C name no such path.
+
+/// `B` declares its own `Helpers.Format`; `A.Helpers.Format` names `A`'s, so
+/// `B`'s never binds.
+#[test]
+fn test_qualified_function_reference_csharp_namespace_path_skips_callers_namesake() {
+    let a = "namespace A {\n    public static class Helpers {\n        public static string Format(string s) => s;\n    }\n}\n";
+    let b = "using System.Collections.Generic;\nnamespace B {\n    static class Helpers {\n        public static string Format(string s) => s;\n    }\n    class Use {\n        void Run(List<string> xs) {\n            xs.ForEach(A.Helpers.Format);\n        }\n    }\n}\n";
+    let found = refs(&csharp(), &[("A/Helpers.cs", a), ("B/Use.cs", b)], "Run");
+    assert!(
+        found.iter().all(|(file, _, _, _)| file != "B/Use.cs"),
+        "{found:?}"
+    );
+}
+
+/// `System.Console.WriteLine` names the framework's `Console`: a project
+/// `Console` outside any `System` namespace binds nothing.
+#[test]
+fn test_qualified_function_reference_csharp_framework_path_skips_project_namesake() {
+    let console = "public class Console {\n    public static void WriteLine(string s) {}\n}\n";
+    let used = cs_use("xs.ForEach(System.Console.WriteLine);");
+    let found = refs(
+        &csharp(),
+        &[("Console.cs", console), ("Use.cs", used.as_str())],
+        "Run",
+    );
+    assert_eq!(found, none());
+}
+
+#[test]
+fn test_qualified_function_reference_csharp_nested_type_path_binds() {
+    let lib = "namespace Lib {\n    public class Outer {\n        public class Inner {\n            public static void M(string s) {}\n        }\n    }\n}\n";
+    let found = refs(
+        &csharp(),
+        &[
+            ("Lib/Outer.cs", lib),
+            ("Use.cs", cs_use("xs.ForEach(Lib.Outer.Inner.M);").as_str()),
+        ],
+        "Run",
+    );
+    assert_one_cross_file(&found, "Lib/Outer.cs", "M");
+}
+
+#[test]
+fn test_qualified_function_reference_csharp_non_ascii_namespace_path_binds() {
+    let lib = "namespace Bibliothèque {\n    public class Çb {\n        public static void M(string s) {}\n    }\n}\n";
+    let found = refs(
+        &csharp(),
+        &[
+            ("Çb.cs", lib),
+            ("Use.cs", cs_use("xs.ForEach(Bibliothèque.Çb.M);").as_str()),
+        ],
+        "Run",
+    );
+    assert_one_cross_file(&found, "Çb.cs", "M");
+}
+
+#[test]
+fn test_qualified_function_reference_cpp_nested_namespace_path_binds() {
+    let used = cpp_use("std::for_each(xs.begin(), xs.end(), a::detail::helper);");
+    let found = refs(
+        &cpp(),
+        &[
+            (
+                "a.cpp",
+                "namespace a {\nnamespace detail {\nint helper(int x) { return x; }\n}\n}\n",
+            ),
+            ("use.cpp", used.as_str()),
+        ],
+        "apply",
+    );
+    assert_one_cross_file(&found, "a.cpp", "helper");
+}
+
+/// The caller's file declares `b::detail::helper`; `a::detail::helper`
+/// names `a`'s, so `b`'s never binds.
+#[test]
+fn test_qualified_function_reference_cpp_namespace_path_skips_callers_namesake() {
+    let used = "#include <algorithm>\n#include <vector>\nnamespace b {\nnamespace detail {\nint helper(int x) { return x; }\n}\n}\nvoid apply(std::vector<int>& xs) {\n    std::for_each(xs.begin(), xs.end(), a::detail::helper);\n}\n";
+    let found = refs(
+        &cpp(),
+        &[
+            (
+                "a.cpp",
+                "namespace a {\nnamespace detail {\nint helper(int x) { return x; }\n}\n}\n",
+            ),
+            ("b.cpp", used),
+        ],
+        "apply",
+    );
+    assert!(
+        found.iter().all(|(file, _, _, _)| file != "b.cpp"),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn test_qualified_function_reference_cpp_namespace_static_member_path_binds() {
+    let used = cpp_use("std::for_each(xs.begin(), xs.end(), ns::Cb::sf);");
+    let found = refs(
+        &cpp(),
+        &[
+            (
+                "cb.cpp",
+                "namespace ns {\nstruct Cb {\n    static int sf(int x) { return x; }\n};\n}\n",
+            ),
+            ("use.cpp", used.as_str()),
+        ],
+        "apply",
+    );
+    assert_one_cross_file(&found, "cb.cpp", "sf");
+}
+
+const SWIFT_NESTED: &str =
+    "enum Outer {\n    enum Inner {\n        static func f(_ x: Int) -> Int { return x }\n    }\n}\n";
+
+#[test]
+fn test_qualified_function_reference_swift_nested_type_path_binds() {
+    let used = swift_use("return xs.map(Outer.Inner.f)");
+    let found = refs(
+        &swift(),
+        &[("Outer.swift", SWIFT_NESTED), ("Use.swift", used.as_str())],
+        "apply",
+    );
+    assert_one_cross_file(&found, "Outer.swift", "f");
+}
+
+#[test]
+fn test_qualified_function_reference_swift_wrong_outer_type_returns_no_edge() {
+    let used = swift_use("return xs.map(Wrong.Inner.f)");
+    let found = refs(
+        &swift(),
+        &[("Outer.swift", SWIFT_NESTED), ("Use.swift", used.as_str())],
+        "apply",
+    );
+    assert_eq!(found, none());
+}
+
+/// Dart has no nested types: a two-segment qualifier is an import prefix
+/// and a class, and the prefix encloses nothing.
+#[test]
+fn test_qualified_function_reference_dart_import_prefix_path_binds() {
+    let used = "import 'cb.dart' as p;\nList<int> apply(List<int> xs) {\n  return xs.map(p.Cb.f).toList();\n}\n";
+    let found = refs(
+        &dart(),
+        &[("cb.dart", DART_CB), ("use.dart", used)],
+        "apply",
+    );
+    assert_one_cross_file(&found, "cb.dart", "f");
+}
+
+#[test]
+fn test_qualified_function_reference_ruby_scoped_receiver_skips_callers_namesake() {
+    let used = "module Util\n  def self.run(x)\n    x\n  end\nend\nclass Svc\n  def wire(items)\n    items.each(&Lib::Util.method(:run))\n  end\nend\n";
+    let found = refs(
+        &ruby(),
+        &[
+            (
+                "util.rb",
+                "module Lib\n  module Util\n    def self.run(x)\n      x\n    end\n  end\nend\n",
+            ),
+            ("svc.rb", used),
+        ],
+        "wire",
+    );
+    assert!(
+        found.iter().all(|(file, _, _, _)| file != "svc.rb"),
+        "{found:?}"
+    );
+}
+
+const JAVA_PKG_CB: &str =
+    "package com.example;\n\nclass Cb {\n    static void print(String s) {}\n    static class Inner {\n        static void m(String s) {}\n    }\n}\n";
+
+#[test]
+fn test_qualified_function_reference_java_package_qualified_reference_binds() {
+    let used = java_use("xs.forEach(com.example.Cb::print);");
+    let found = refs(
+        &JavaProvider::new().unwrap(),
+        &[
+            ("com/example/Cb.java", JAVA_PKG_CB),
+            ("Use.java", used.as_str()),
+        ],
+        "run",
+    );
+    assert_one_cross_file(&found, "com/example/Cb.java", "print");
+}
+
+#[test]
+fn test_qualified_function_reference_java_other_package_returns_no_edge() {
+    let used = java_use("xs.forEach(org.other.Cb::print);");
+    let found = refs(
+        &JavaProvider::new().unwrap(),
+        &[
+            ("com/example/Cb.java", JAVA_PKG_CB),
+            ("Use.java", used.as_str()),
+        ],
+        "run",
+    );
+    assert_eq!(found, none());
+}
+
+#[test]
+fn test_qualified_function_reference_java_nested_class_reference_binds() {
+    let used = java_use("xs.forEach(Cb.Inner::m);");
+    let found = refs(
+        &JavaProvider::new().unwrap(),
+        &[
+            ("com/example/Cb.java", JAVA_PKG_CB),
+            ("Use.java", used.as_str()),
+        ],
+        "run",
+    );
+    assert_one_cross_file(&found, "com/example/Cb.java", "m");
+}
+
+// ---- PHP relative callables (F4 item 8) ----
+// `[$this, 'm']`, `[self::class, 'm']` and `[static::class, 'm']` name the
+// enclosing class's method, as `call_user_func` reads them.
+
+const PHP_SORTER: &str = "<?php\nclass Sorter {\n    function cmp($a, $b) { return 0; }\n    function byThis($r) { usort($r, [$this, 'cmp']); }\n    function bySelf($r) { usort($r, [self::class, 'cmp']); }\n    function byStatic($r) { usort($r, [static::class, 'cmp']); }\n}\nclass Other {\n    function cmp($a, $b) { return 1; }\n}\n";
+
+#[test]
+fn test_qualified_function_reference_php_relative_callables_bind_enclosing_class() {
+    let g = graph(&php(), &[("Sorter.php", PHP_SORTER)]);
+    for registrar in ["byThis", "bySelf", "byStatic"] {
+        let found = function_refs(&g, registrar);
+        assert_eq!(found.len(), 1, "{registrar}: {found:?}");
+        assert_eq!(
+            (found[0].0.as_str(), found[0].1.as_str()),
+            ("Sorter.php", "cmp"),
+            "{registrar}: {found:?}"
+        );
+    }
+}
+
+#[test]
+fn test_qualified_function_reference_php_this_callable_outside_class_returns_no_edge() {
+    let src = "<?php\nclass Sorter {\n    function cmp($a, $b) { return 0; }\n}\nfunction loose($r) { usort($r, [$this, 'cmp']); }\n";
+    let g = graph(&php(), &[("Sorter.php", src)]);
+    assert_eq!(function_refs(&g, "loose"), none());
+}
+
+/// `$this` in a trait is the class that uses it: only the trait's own
+/// method is reachable through the trait's name.
+#[test]
+fn test_qualified_function_reference_php_trait_this_callable_binds_own_method_only() {
+    let src = "<?php\ntrait Sorts {\n    function cmp($a, $b) { return 0; }\n    function own($r) { usort($r, [$this, 'cmp']); }\n    function host($r) { usort($r, [$this, 'hostCmp']); }\n}\nclass Host {\n    use Sorts;\n    function hostCmp($a, $b) { return 0; }\n}\n";
+    let g = graph(&php(), &[("Sorts.php", src)]);
+    let own = function_refs(&g, "own");
+    assert_eq!(own.len(), 1, "{own:?}");
+    assert_eq!((own[0].0.as_str(), own[0].1.as_str()), ("Sorts.php", "cmp"));
+    assert_eq!(function_refs(&g, "host"), none());
+}
+
+#[test]
+fn test_qualified_function_reference_php_this_callable_in_anonymous_class_returns_no_edge() {
+    let src = "<?php\nclass Sorter {\n    function cmp($a, $b) { return 0; }\n    function make() {\n        return new class {\n            function sortAll($r) { usort($r, [$this, 'cmp']); }\n        };\n    }\n}\n";
+    let g = graph(&php(), &[("Sorter.php", src)]);
+    assert_eq!(function_refs(&g, "sortAll"), none());
 }

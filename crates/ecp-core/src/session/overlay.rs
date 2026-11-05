@@ -94,6 +94,9 @@ pub const FRAGMENT_FORMAT_V7: u32 = 7;
 /// shorter, so it is never decoded as V8: the reader skips a V7 entry and
 /// the freshness gate re-parses its file.
 pub const FRAGMENT_FORMAT_V8: u32 = 8;
+/// The fragment encoding this binary writes, and the only one its readers
+/// accept. A new encoding adds a `FRAGMENT_FORMAT_V<n>` and moves this.
+pub const FRAGMENT_FORMAT: u32 = FRAGMENT_FORMAT_V8;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymbolRef {
@@ -191,7 +194,7 @@ pub struct DirtyEventEntry {
     pub parse_failed: bool,
     #[serde(default)]
     pub dirty_symbols: Vec<SymbolRef>,
-    /// The fragment bin encoding (`FRAGMENT_FORMAT_V8` for a bin this
+    /// The fragment bin encoding ([`FRAGMENT_FORMAT`] for a bin this
     /// binary writes). Readers dispatch on it, as for [`DirtyEntry::format`].
     pub format: u32,
 }

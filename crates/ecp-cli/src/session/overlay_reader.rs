@@ -20,7 +20,7 @@ use ecp_core::contracts::routing::{ParsedLanguage, SizeCap};
 use ecp_core::graph::NodeKind;
 use ecp_core::session::closure::{ConfigEdits, StaleClosure};
 use ecp_core::session::layout;
-use ecp_core::session::overlay::FRAGMENT_FORMAT_V8;
+use ecp_core::session::overlay::FRAGMENT_FORMAT;
 use ecp_core::session::view::{ArchivedOverlayFileRecords, OverlayFileRecords};
 use ecp_core::session::{DirtyEvents, OverlayFileInput, OverlaySymbol};
 use rkyv::rancor::Error as RkyvError;
@@ -205,7 +205,7 @@ fn manifest_inputs(
         let Some(fragment_id) = entry.fragment_id.as_deref() else {
             continue; // no bin, and no deletion either
         };
-        if entry.parse_failed || entry.format != FRAGMENT_FORMAT_V8 {
+        if entry.parse_failed || entry.format != FRAGMENT_FORMAT {
             continue;
         }
         if on_disk_mtime_ns() != Some(entry.mtime_ns) {

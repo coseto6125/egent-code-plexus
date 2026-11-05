@@ -1,11 +1,16 @@
 //! A qualified function passed as a value from a dirty file (Rust
-//! `parse::f`, TypeScript `ns.f`, Go `pkg.F`, C++ `ns::f`): the session
+//! `parse::f` and `Self::f`, TypeScript `ns.f` and an export alias
+//! `ns.renamed`, Go `pkg.F`, C++ `ns::f`, C# `Lib.Outer.Inner.M`, PHP
+//! `[$this, 'cmp']`, Ruby `Lib::Util.method(:run)`, Swift `Outer.Inner.f`,
+//! Java `com.example.Cb::print`): the session
 //! overlay emits the same `References` edge (reason `function_reference`)
 //! as a full reindex of the edited tree, reason and confidence included,
 //! and masks the base edge a dirty file no longer makes.
 //!
-//! Each fixture keeps the function in a clean file and its user in the
-//! dirty one, and runs two edits:
+//! A fixture keeps the function in a clean file and its user in the dirty
+//! one. `Self::f` and `[$this, 'cmp']` name a method of the user's own
+//! class, so those two keep the function in the dirty file. Each fixture
+//! runs two edits:
 //!
 //! | edit             | the reindex has                         |
 //! |------------------|-----------------------------------------|
@@ -16,9 +21,8 @@ use crate::parity;
 
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_core::analyzer::path_aliases::PathAliases;
-use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::graph::RelType;
-use parity::{edges_after_edit_with, EdgeParity};
+use parity::{edges_after_edit_with, parse, EdgeParity};
 use std::path::Path;
 
 const FUNCTION_REFERENCE: &str = "function_reference";
@@ -81,13 +85,95 @@ const LANGS: &[LangFixture] = &[
         ),
         row: ("apply", "ns.cpp", "f"),
     },
+    LangFixture {
+        lang: "Rust",
+        files: &[("src/lib.rs", "pub mod entry;\n")],
+        user: (
+            "src/entry.rs",
+            "pub struct Entry(u32);\n\nimpl Entry {\n    pub fn parse(n: u32) -> Entry {\n        Entry(n)\n    }\n    pub fn all(v: Vec<u32>) -> Vec<Entry> {\n        let _ = v;\n        Vec::new()\n    }\n}\n",
+            "pub struct Entry(u32);\n\nimpl Entry {\n    pub fn parse(n: u32) -> Entry {\n        Entry(n)\n    }\n    pub fn all(v: Vec<u32>) -> Vec<Entry> {\n        v.into_iter().map(Self::parse).collect()\n    }\n}\n",
+        ),
+        row: ("all", "src/entry.rs", "parse"),
+    },
+    LangFixture {
+        lang: "TypeScript",
+        files: &[(
+            "lib.ts",
+            "function f(x: number): number {\n  return x;\n}\nexport { f as renamed };\n",
+        )],
+        user: (
+            "app.ts",
+            "import * as ns from './lib';\nexport function run(items: number[]): number[] {\n  return items;\n}\n",
+            "import * as ns from './lib';\nexport function run(items: number[]): number[] {\n  return items.map(ns.renamed);\n}\n",
+        ),
+        row: ("run", "lib.ts", "f"),
+    },
+    LangFixture {
+        lang: "C#",
+        files: &[(
+            "Lib/Outer.cs",
+            "namespace Lib {\n    public class Outer {\n        public class Inner {\n            public static void M(string s) {}\n        }\n    }\n}\n",
+        )],
+        user: (
+            "Use.cs",
+            "using System.Collections.Generic;\npublic class Use {\n    public void Run(List<string> xs) {\n        xs.Clear();\n    }\n}\n",
+            "using System.Collections.Generic;\npublic class Use {\n    public void Run(List<string> xs) {\n        xs.ForEach(Lib.Outer.Inner.M);\n    }\n}\n",
+        ),
+        row: ("Run", "Lib/Outer.cs", "M"),
+    },
+    LangFixture {
+        lang: "PHP",
+        files: &[(
+            "Other.php",
+            "<?php\nclass Other {\n    function cmp($a, $b) { return 1; }\n}\n",
+        )],
+        user: (
+            "Sorter.php",
+            "<?php\nclass Sorter {\n    function cmp($a, $b) { return 0; }\n    function byThis($r) { return $r; }\n}\n",
+            "<?php\nclass Sorter {\n    function cmp($a, $b) { return 0; }\n    function byThis($r) { usort($r, [$this, 'cmp']); }\n}\n",
+        ),
+        row: ("byThis", "Sorter.php", "cmp"),
+    },
+    LangFixture {
+        lang: "Ruby",
+        files: &[(
+            "util.rb",
+            "module Lib\n  module Util\n    def self.run(x)\n      x\n    end\n  end\nend\n",
+        )],
+        user: (
+            "svc.rb",
+            "class Svc\n  def wire(items)\n    items\n  end\nend\n",
+            "class Svc\n  def wire(items)\n    items.each(&Lib::Util.method(:run))\n  end\nend\n",
+        ),
+        row: ("wire", "util.rb", "run"),
+    },
+    LangFixture {
+        lang: "Swift",
+        files: &[(
+            "Outer.swift",
+            "enum Outer {\n    enum Inner {\n        static func f(_ x: Int) -> Int { return x }\n    }\n}\n",
+        )],
+        user: (
+            "Use.swift",
+            "struct Use {\n    func apply(_ xs: [Int]) -> [Int] {\n        return xs\n    }\n}\n",
+            "struct Use {\n    func apply(_ xs: [Int]) -> [Int] {\n        return xs.map(Outer.Inner.f)\n    }\n}\n",
+        ),
+        row: ("apply", "Outer.swift", "f"),
+    },
+    LangFixture {
+        lang: "Java",
+        files: &[(
+            "com/example/Cb.java",
+            "package com.example;\n\nclass Cb {\n    static void print(String s) {}\n}\n",
+        )],
+        user: (
+            "Use.java",
+            "class Use {\n    void run(java.util.List<String> xs) {\n        xs.clear();\n    }\n}\n",
+            "class Use {\n    void run(java.util.List<String> xs) {\n        xs.forEach(com.example.Cb::print);\n    }\n}\n",
+        ),
+        row: ("run", "com/example/Cb.java", "print"),
+    },
 ];
-
-fn parse(path: &str, source: &str) -> LocalGraph {
-    ecp_cli::reanalyze::pipeline()
-        .parse_file_raw(Path::new(path), source.as_bytes())
-        .unwrap_or_else(|e| panic!("{path}: {e}"))
-}
 
 /// The builder of `lang`'s fixture. Go gets a module at `root` with the
 /// alias the CLI derives from its `go.mod` (`example.com/app/*` -> `./*`)

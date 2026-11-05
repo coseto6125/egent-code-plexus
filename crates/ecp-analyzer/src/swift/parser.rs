@@ -2,7 +2,7 @@ use super::receiver_types::{
     collect_bindings, extended_type_name, extract_swift_calls_and_path_literals,
 };
 use super::spec::SwiftSpec;
-use crate::calls::{NameRefKind, NameRefSpec, VariantRefSpec};
+use crate::calls::{heads_same_kind_parent, NameRefKind, NameRefSpec, VariantRefSpec};
 use crate::driver::{
     self, imports, node, AnonKey, Anonymous, Compiled, DeclSlot, Effect, FieldReads, FileCx,
     KindCapture, Op, ParseSpec, Step,
@@ -145,8 +145,10 @@ pub struct SwiftFile {
     seen_properties: HashSet<(usize, usize)>,
 }
 
-/// The function `Type.f` in value position: records `Type.f`, with the last
-/// qualifier segment. `None` for a callee (a `call_suffix` follows), for a
+/// The function `Type.f` in value position, with the whole qualifier:
+/// `Type.f` records `Type.f`, `Outer.Inner.f` records `Outer.Inner.f`, and
+/// Pass 2 binds it only when the qualifier is the type path that encloses
+/// the function. `None` for a callee (a `call_suffix` follows), for a
 /// qualifier of the navigation above it, and for a `self` / `super` or other
 /// computed qualifier.
 fn navigated_function_name(
@@ -154,33 +156,35 @@ fn navigated_function_name(
     source: &[u8],
     spec: &NameRefSpec,
 ) -> Option<String> {
-    let suffix_name = |node: Node<'_>| {
-        node.child_by_field_name("suffix")?
-            .child_by_field_name("suffix")
-            .filter(|name| spec.ident_kinds.contains(&name.kind()))?
-            .utf8_text(source)
-            .ok()
-    };
     let is_callee = navigation
         .next_named_sibling()
         .is_some_and(|next| next.kind() == "call_suffix");
-    let qualifies_outer = navigation.parent().is_some_and(|parent| {
-        parent.kind() == "navigation_expression"
-            && parent
-                .child_by_field_name("target")
-                .is_some_and(|target| target.id() == navigation.id())
-    });
-    if is_callee || qualifies_outer {
+    if is_callee || heads_same_kind_parent(navigation, "target") {
         return None;
     }
-    let member = suffix_name(navigation)?;
-    let target = navigation.child_by_field_name("target")?;
-    let qualifier = match target.kind() {
-        "navigation_expression" => suffix_name(target)?,
-        kind if spec.ident_kinds.contains(&kind) => target.utf8_text(source).ok()?,
-        _ => return None,
-    };
-    Some(format!("{qualifier}.{member}"))
+    let mut segments = Vec::new();
+    let mut node = navigation;
+    loop {
+        match node.kind() {
+            "navigation_expression" => {
+                segments.push(
+                    node.child_by_field_name("suffix")?
+                        .child_by_field_name("suffix")
+                        .filter(|name| spec.ident_kinds.contains(&name.kind()))?
+                        .utf8_text(source)
+                        .ok()?,
+                );
+                node = node.child_by_field_name("target")?;
+            }
+            kind if spec.ident_kinds.contains(&kind) => {
+                segments.push(node.utf8_text(source).ok()?);
+                break;
+            }
+            _ => return None,
+        }
+    }
+    segments.reverse();
+    Some(segments.join("."))
 }
 
 impl ParseSpec for SwiftSpec {

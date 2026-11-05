@@ -506,11 +506,13 @@ fn is_header(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// The function `ns::f` or `Cls::sf` in value position: records `ns.f`, with
-/// the innermost scope, because the resolver splits a name at `.` and, for
-/// C++, not at `::`. `None` for a scope that is not a plain name (a template,
-/// `decltype`), a global `::f`, and the positions where a qualified name names
-/// a type: a base class, a `friend`, a member initializer.
+/// The function `ns::f` or `Cls::sf` in value position, with every scope
+/// joined by `.` (`a::detail::f` records `a.detail.f`), because the resolver
+/// splits a name at `.` and, for C++, not at `::`. Pass 2 binds it only when
+/// the scopes are the namespace and type path that encloses the function.
+/// `None` for a scope that is not a plain name (a template, `decltype`), a
+/// global `::f`, and the positions where a qualified name names a type: a
+/// base class, a `friend`, a member initializer.
 fn scoped_function_name(path: Node<'_>, source: &[u8], _spec: &NameRefSpec) -> Option<String> {
     if path.parent().is_some_and(|parent| {
         matches!(
@@ -523,21 +525,19 @@ fn scoped_function_name(path: Node<'_>, source: &[u8], _spec: &NameRefSpec) -> O
     }) {
         return None;
     }
+    let mut segments = Vec::new();
     let mut node = path;
     loop {
-        let scope = node.child_by_field_name("scope");
-        if scope.is_some_and(|scope| scope.kind() != "namespace_identifier") {
-            return None;
-        }
+        let scope = node
+            .child_by_field_name("scope")
+            .filter(|scope| scope.kind() == "namespace_identifier")?;
+        segments.push(scope.utf8_text(source).ok()?);
         let name = node.child_by_field_name("name")?;
         match name.kind() {
             "qualified_identifier" => node = name,
             "identifier" => {
-                return Some(format!(
-                    "{}.{}",
-                    scope?.utf8_text(source).ok()?,
-                    name.utf8_text(source).ok()?
-                ));
+                segments.push(name.utf8_text(source).ok()?);
+                return Some(segments.join("."));
             }
             _ => return None,
         }
@@ -590,6 +590,7 @@ impl ParseSpec for CppSpec {
             ],
             qualified_values: &["qualified_identifier"],
             qualified_name: scoped_function_name,
+            scoped_qualifiers: true,
             ..NameRefSpec::EMPTY
         },
     });
