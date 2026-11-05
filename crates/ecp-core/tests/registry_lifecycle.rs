@@ -62,21 +62,28 @@ fn test_registry_open_on_open_dir_tightens_it_to_0700() {
 }
 
 /// Fails on a `read_or_empty` that tests `path.exists()` first: `exists()`
-/// is false for a file the process cannot stat-read through, so the registry
-/// opens empty and the next write would overwrite every repo.
+/// is false when the directory refuses the stat (another owner's 0700
+/// `~/.ecp`), so the registry would read as empty and the next write would
+/// drop every repo.
 #[cfg(unix)]
 #[test]
-fn test_registry_open_on_unreadable_registry_file_returns_error() {
+fn test_read_or_empty_in_unsearchable_dir_returns_permission_denied() {
+    use ecp_core::registry::RegistryFile;
     use std::os::unix::fs::PermissionsExt;
     let tmp = tempfile::tempdir().unwrap();
-    let home_ecp = tmp.path().join("ecp");
-    std::fs::create_dir(&home_ecp).unwrap();
-    let registry = home_ecp.join("registry.json");
+    let locked = tmp.path().join("ecp");
+    std::fs::create_dir(&locked).unwrap();
+    let registry = locked.join("registry.json");
     std::fs::write(&registry, "{}").unwrap();
-    std::fs::set_permissions(&registry, std::fs::Permissions::from_mode(0o000)).unwrap();
-    if std::fs::read(&registry).is_ok() {
-        return; // running as root: mode 000 does not block the read
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let result = RegistryFile::read_or_empty(&registry);
+    let searchable = std::fs::metadata(&registry).is_ok();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+    if searchable {
+        return; // running as root: mode 000 does not block the stat
     }
-    let err = Registry::open(&home_ecp).err().expect("open must fail");
-    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        result.err().map(|e| e.kind()),
+        Some(std::io::ErrorKind::PermissionDenied)
+    );
 }
