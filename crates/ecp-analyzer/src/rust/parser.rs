@@ -178,6 +178,7 @@ impl ParseSpec for RustSpec {
                 "inner_attribute_item",
                 "type_arguments",
             ],
+            qualified_values: &["scoped_identifier"],
             ..NameRefSpec::EMPTY
         },
     });

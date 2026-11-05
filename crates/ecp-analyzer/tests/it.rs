@@ -414,6 +414,7 @@ mod python_type_annotations;
 mod python_uid_identity;
 mod python_value_flow;
 mod python_variable_scope;
+mod qualified_function_reference;
 mod reads_field_all_langs;
 mod reads_field_rust;
 mod receiver_emission;

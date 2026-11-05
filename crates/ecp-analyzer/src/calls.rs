@@ -472,6 +472,24 @@ pub struct NameRefSpec {
     /// Method-reference kinds whose last bare name is the function: Java
     /// `method_reference`, Kotlin `callable_reference`.
     pub method_refs: &'static [&'static str],
+    /// Qualified-path kinds whose last segment names a function when the node
+    /// sits in value position (a call argument, a `let` or assignment value,
+    /// a returned or stored value). Rust `scoped_identifier`:
+    /// `iter.for_each(parse::migrate)` records `parse.migrate`, the form a
+    /// method reference uses, so Pass 2 binds through the qualifier.
+    ///
+    /// A language may list a kind only when all of these hold:
+    /// - the segment before the name is a module, namespace or type, never an
+    ///   instance or a value, so `a.b` on a variable is not listed;
+    /// - the node has a `name` field holding a bare name and a `path` or
+    ///   `scope` field holding the qualifier;
+    /// - the callee, type, import, pattern and macro positions of the path
+    ///   reach the node under a non-value field, a skip kind or a skipped
+    ///   scope, so only value uses remain;
+    /// - the resolver binds a `Qualifier.member` function reference for the
+    ///   language. A qualifier it cannot name (`crate`, `super`, `self`,
+    ///   `Self`, a generic or bracketed type) records nothing.
+    pub qualified_values: &'static [&'static str],
     /// Ruby: `method(:name)` names the method `name`.
     pub symbol_method_refs: bool,
     /// Parent kinds whose bare name right before `=` is an argument label:
@@ -629,6 +647,8 @@ mod kind_flag {
     pub const TOKEN_TREE: u32 = 1 << 21;
     /// A `.` token.
     pub const DOT: u32 = 1 << 22;
+    /// A kind of the spec's [`NameRefSpec::qualified_values`].
+    pub const QUALIFIED_VALUE: u32 = 1 << 23;
 }
 
 /// Bits [`KindMemo::field`] records for a field name.
@@ -710,6 +730,7 @@ impl<'a> KindMemo<'a> {
                 TYPE_DECL,
             ),
             (spec.method_refs.contains(&kind), METHOD_REF),
+            (spec.qualified_values.contains(&kind), QUALIFIED_VALUE),
             (spec.symbol_method_refs && kind == "call", SYMBOL_CALL),
             (spec.binding_parents.contains(&kind), BINDING_PARENT),
             (spec.skip_parents.contains(&kind), SKIP_PARENT),
@@ -798,6 +819,7 @@ impl NameRefSpec {
         call_suffixes: &[],
         infix_calls: &[],
         method_refs: &[],
+        qualified_values: &[],
         symbol_method_refs: false,
         named_arg_parents: &[],
         global_decls: &[],
@@ -1007,6 +1029,20 @@ impl<'s> NameScan<'s> {
             }
             return false;
         }
+        if kind & kind_flag::QUALIFIED_VALUE != 0
+            && frame.scope == NameScope::Value
+            && frame.field & field_flag::NON_VALUE == 0
+            && frame.parent_kind & kind_flag::SKIP_PARENT == 0
+        {
+            if let Some(name) = qualified_reference(n, source, spec) {
+                self.reads.push(PendingName {
+                    pos: start_pos(n),
+                    name: Cow::Owned(name),
+                    kind: NameRefKind::Function,
+                });
+            }
+            return true;
+        }
         if kind & kind_flag::METHOD_REF != 0 {
             if let Some(name) = method_reference(n, source, spec) {
                 self.reads.push(PendingName {
@@ -1142,6 +1178,29 @@ fn method_reference<'s>(
         }
         _ => None,
     }
+}
+
+/// The function a qualified path in value position names, written
+/// `Qualifier.name` like a method reference: `parse.migrate` for
+/// `parse::migrate`, `Entry.new` for `a::Entry::new`. The qualifier is the
+/// segment right before the name. `None` when that segment is no plain name
+/// (`crate`, `super`, `self`, a generic or bracketed type) or is `Self`.
+fn qualified_reference(path: Node<'_>, source: &[u8], spec: &NameRefSpec) -> Option<String> {
+    let is_name = |n: Node<'_>| spec.ident_kinds.contains(&n.kind());
+    let name = path.child_by_field_name("name").filter(|&n| is_name(n))?;
+    let qualifier = path
+        .child_by_field_name("path")
+        .or_else(|| path.child_by_field_name("scope"))?;
+    let qualifier = if is_name(qualifier) {
+        qualifier
+    } else {
+        qualifier
+            .child_by_field_name("name")
+            .filter(|&n| is_name(n))?
+    };
+    let qualifier = qualifier.utf8_text(source).ok()?;
+    let name = name.utf8_text(source).ok()?;
+    (qualifier != "Self").then(|| format!("{qualifier}.{name}"))
 }
 
 /// Ruby `method(:name)` with no receiver: the method `name` handed on as a
