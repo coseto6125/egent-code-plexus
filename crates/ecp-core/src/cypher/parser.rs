@@ -228,30 +228,26 @@ fn parse_single_query(c: &mut Cursor) -> Result<Query, CypherError> {
 }
 
 /// Record on each EXISTS which of its node vars an outer MATCH declares. Every
-/// MATCH runs before WHERE and WITH, so the declared set is the same for both.
+/// MATCH runs before WHERE and WITH, so the set is the same for both; the
+/// executor reads a WITH column of the same name first, and inside an
+/// aggregating WITH's groups only the columns are in scope.
 fn scope_exists_patterns(q: &mut Query) {
     fn walk(e: &mut Expr, declared: &[&str]) {
-        match e {
-            Expr::ExistsPattern {
-                pattern,
-                outer_vars,
-                ..
-            } => {
-                *outer_vars = pattern
-                    .nodes
-                    .iter()
-                    .filter_map(|n| n.var.as_deref())
-                    .filter(|v| declared.contains(v))
-                    .map(str::to_string)
-                    .collect();
-            }
-            Expr::BinOp(_, l, r) => {
-                walk(l, declared);
-                walk(r, declared);
-            }
-            Expr::UnaryOp(_, inner) => walk(inner, declared),
-            _ => {}
+        if let Expr::ExistsPattern {
+            pattern,
+            outer_vars,
+            ..
+        } = e
+        {
+            *outer_vars = pattern
+                .nodes
+                .iter()
+                .filter_map(|n| n.var.as_deref())
+                .filter(|v| declared.contains(v))
+                .map(str::to_string)
+                .collect();
         }
+        e.for_each_child_mut(|child| walk(child, declared));
     }
     let declared: Vec<String> = q
         .matches
@@ -281,15 +277,10 @@ fn range_text(rel: &RelPat) -> String {
 }
 
 fn exists_patterns<'a>(e: &'a Expr, out: &mut Vec<&'a Pattern>) {
-    match e {
-        Expr::ExistsPattern { pattern, .. } => out.push(pattern),
-        Expr::BinOp(_, l, r) => {
-            exists_patterns(l, out);
-            exists_patterns(r, out);
-        }
-        Expr::UnaryOp(_, inner) => exists_patterns(inner, out),
-        _ => {}
+    if let Expr::ExistsPattern { pattern, .. } = e {
+        out.push(pattern);
     }
+    e.for_each_child(|child| exists_patterns(child, out));
 }
 
 /// The executor answers a variable-length hop with reachability: every node

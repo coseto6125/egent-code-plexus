@@ -3185,6 +3185,89 @@ fn test_eval_not_exists_over_optional_null_var_is_true() {
     );
 }
 
+// An aggregating WITH keeps `a` only as a column. The pattern reads it from
+// there; before, every group read as a null and EXISTS was false on all rows.
+#[test]
+fn test_eval_exists_after_aggregating_with_reads_the_grouped_node() {
+    assert_eq!(
+        chain_names(
+            "MATCH (a:Function) WITH a, count(*) AS k \
+             WHERE EXISTS { (a)-[:Calls]->() } RETURN a.name"
+        ),
+        ["a", "b"]
+    );
+    assert_eq!(
+        chain_names(
+            "MATCH (a:Function) WITH a, count(*) AS k \
+             WHERE NOT EXISTS { (a)<-[:Calls]-() } RETURN a.name"
+        ),
+        ["a"]
+    );
+    assert_eq!(
+        chain_names(
+            "MATCH (a:Function) WITH a, count(*) AS k \
+             WHERE NOT EXISTS { (a)-[:Calls*1..2]->() } RETURN a.name"
+        ),
+        ["c"]
+    );
+}
+
+// Inside an aggregating WITH's groups a MATCH var the WITH drops is out of
+// scope, so the pattern's `a` is a fresh var: "does any Calls edge exist".
+#[test]
+fn test_eval_exists_after_aggregating_with_unprojected_match_var_is_fresh() {
+    with_three(|g| {
+        let q = parse(
+            "MATCH (a:Function) WITH count(*) AS k \
+             WHERE EXISTS { (a)-[:Calls]->() } RETURN k",
+        )
+        .unwrap();
+        let r = execute(&q, g, None, Path::new(".")).unwrap();
+        assert_eq!(r.rows, vec![vec![Value::Int(3)]]);
+    });
+}
+
+// `n AS m` carries the OPTIONAL MATCH null into a column: c's row holds a
+// null `m`, b's row holds c, which calls nothing.
+#[test]
+fn test_eval_exists_over_with_alias_of_optional_null_var_is_false() {
+    assert_eq!(
+        chain_names(
+            "MATCH (a:Function) OPTIONAL MATCH (a)-[:Calls]->(n) WITH a, n AS m \
+             WHERE EXISTS { (m)-[:Calls]->() } RETURN a.name"
+        ),
+        ["a"]
+    );
+    assert_eq!(
+        chain_names(
+            "MATCH (a:Function) OPTIONAL MATCH (a)-[:Calls]->(n) WITH a, n AS m \
+             WHERE NOT EXISTS { (m)-[:Calls]->() } RETURN a.name"
+        ),
+        ["b", "c"]
+    );
+}
+
+#[test]
+fn test_eval_exists_inside_in_over_optional_null_var_is_false() {
+    assert_eq!(
+        chain_names(
+            "MATCH (a:Function) OPTIONAL MATCH (a)-[:Calls]->(n) WITH a, n \
+             WHERE (EXISTS { (n)-[:Calls]->() }) IN [true] RETURN a.name"
+        ),
+        ["a"]
+    );
+}
+
+// The variable-length refusal reaches an EXISTS wrapped in another expression.
+#[test]
+fn test_parse_exists_inside_in_with_min_above_one_is_refused() {
+    let err = parse(
+        "MATCH (a:Function) WHERE (EXISTS { (a)-[:Calls*2..3]->() }) IN [true] RETURN a.name",
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("minimum above 1"), "{err}");
+}
+
 #[test]
 fn eval_exists_multi_hop_all_unbound_errors_not_silent_false() {
     with_three(|g| {
