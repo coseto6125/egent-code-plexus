@@ -189,3 +189,27 @@ def test_dirty_exit_code_without_protocol_is_nonzero():
     s = bench.Sample(name="x", cmd=[])
     s.runs.append(0.1)
     assert bench._dirty_exit_code([s], None) != 0
+
+
+def _cypher_stdout(stdout, rc=0):
+    def fake(cmd, cwd, env=None):
+        return 0.01, rc, stdout, ""
+
+    return fake
+
+
+@pytest.mark.parametrize(
+    ("stdout", "rc", "expected"),
+    [
+        ('{"columns":["count(f)"],"rows":[111]}', 0, 111),
+        ('{"columns":["count(f)"],"rows":[[7]]}', 0, 7),
+        ('{"columns":["count(f)"],"rows":[0]}', 0, 0),
+        ('{"columns":["count(f)"],"rows":[]}', 0, None),
+        ("not json", 0, None),
+        ("", 0, None),
+        ('{"rows":[111]}', 1, None),
+    ],
+)
+def test_indexed_file_count_cypher_output_returns_count_or_none(monkeypatch, stdout, rc, expected):
+    monkeypatch.setattr(bench, "_run", _cypher_stdout(stdout, rc))
+    assert bench._indexed_file_count(Path("ecp"), Path(".")) == expected
