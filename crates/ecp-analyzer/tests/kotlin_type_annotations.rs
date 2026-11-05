@@ -64,10 +64,9 @@ fn test_nullable_return_annotation_binds_project_type() {
     assert_eq!(annotated(&g, "find"), Vec::<(String, String)>::new());
 }
 
-/// Guard: `List<Tok>` is a generic; `return_type_key` gives `None`, so it
-/// binds nothing, before and after the change.
+/// `List<Tok>` names `Tok` as its element type, so the return binds it.
 #[test]
-fn test_generic_return_annotation_binds_nothing() {
+fn test_generic_return_annotation_binds_the_element_type() {
     let g = graph(
         &KotlinProvider::new().unwrap(),
         &[(
@@ -75,5 +74,5 @@ fn test_generic_return_annotation_binds_nothing() {
             "class Tok\n\nclass Owner {\n    fun all(): List<Tok> = listOf()\n}\n",
         )],
     );
-    assert_eq!(annotated(&g, "all"), Vec::<(String, String)>::new());
+    assert_eq!(annotated(&g, "all"), [pair("src/app.kt", "Tok")]);
 }

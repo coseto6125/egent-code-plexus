@@ -475,8 +475,8 @@ pub struct NameRefSpec {
     /// Qualified-path kinds whose last segment names a function when the node
     /// sits in value position (a call argument, a `let` or assignment value,
     /// a returned or stored value). Rust `scoped_identifier`:
-    /// `iter.for_each(parse::migrate)` records `parse.migrate`, the form a
-    /// method reference uses, so Pass 2 binds through the qualifier.
+    /// `iter.for_each(parse::migrate)` records the path text `parse::migrate`,
+    /// so Pass 2 binds through the module path.
     ///
     /// A language may list a kind only when all of these hold:
     /// - the segment before the name is a module, namespace or type, never an
@@ -486,9 +486,9 @@ pub struct NameRefSpec {
     /// - the callee, type, import, pattern and macro positions of the path
     ///   reach the node under a non-value field, a skip kind or a skipped
     ///   scope, so only value uses remain;
-    /// - the resolver binds a `Qualifier.member` function reference for the
-    ///   language. A qualifier it cannot name (`crate`, `super`, `self`,
-    ///   `Self`, a generic or bracketed type) records nothing.
+    /// - the resolver binds the path text as a function reference for the
+    ///   language (`name_ref::resolve_name_ref` splits its last segment off).
+    ///   A `Self::` path or one with generic arguments records nothing.
     pub qualified_values: &'static [&'static str],
     /// Ruby: `method(:name)` names the method `name`.
     pub symbol_method_refs: bool,
@@ -1180,27 +1180,16 @@ fn method_reference<'s>(
     }
 }
 
-/// The function a qualified path in value position names, written
-/// `Qualifier.name` like a method reference: `parse.migrate` for
-/// `parse::migrate`, `Entry.new` for `a::Entry::new`. The qualifier is the
-/// segment right before the name. `None` when that segment is no plain name
-/// (`crate`, `super`, `self`, a generic or bracketed type) or is `Self`.
+/// The function a qualified path in value position names, as the path text
+/// the source writes (`parse::migrate`, `crate::a::Entry::new`), so Pass 2
+/// resolves it through the module path the way it resolves `parse::migrate()`.
+/// `None` for a `Self::` path or a path with generic arguments (`Vec::<u8>::new`).
 fn qualified_reference(path: Node<'_>, source: &[u8], spec: &NameRefSpec) -> Option<String> {
-    let is_name = |n: Node<'_>| spec.ident_kinds.contains(&n.kind());
-    let name = path.child_by_field_name("name").filter(|&n| is_name(n))?;
-    let qualifier = path
-        .child_by_field_name("path")
-        .or_else(|| path.child_by_field_name("scope"))?;
-    let qualifier = if is_name(qualifier) {
-        qualifier
-    } else {
-        qualifier
-            .child_by_field_name("name")
-            .filter(|&n| is_name(n))?
-    };
-    let qualifier = qualifier.utf8_text(source).ok()?;
-    let name = name.utf8_text(source).ok()?;
-    (qualifier != "Self").then(|| format!("{qualifier}.{name}"))
+    path.child_by_field_name("name")
+        .filter(|n| spec.ident_kinds.contains(&n.kind()))?;
+    let text = path.utf8_text(source).ok()?;
+    let plain = !text.starts_with("Self::") && !text.contains(['<', ' ', '\n']);
+    plain.then(|| text.to_string())
 }
 
 /// Ruby `method(:name)` with no receiver: the method `name` handed on as a

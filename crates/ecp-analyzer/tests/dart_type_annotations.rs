@@ -120,12 +120,10 @@ fn test_nullable_return_annotation_binds_project_type() {
     assert_eq!(annotated(&g, "find"), Vec::<(String, String)>::new());
 }
 
-/// Guard: a generic of the project type (`List<Tok>`) names no project type
-/// and `return_type_key` gives `None` for it, so it binds nothing before and
-/// after the change (the raw text `List<Tok>` is the fallback lookup).
+/// `List<Tok>` names `Tok` as its element type, so the return binds it.
 #[test]
-fn test_generic_return_annotation_binds_nothing() {
+fn test_generic_return_annotation_binds_the_element_type() {
     let src = "class Tok {}\n\nList<Tok> all() => [];\n";
     let g = name_ref_support::graph(&DartProvider::new().unwrap(), &[("lib/app.dart", src)]);
-    assert_eq!(annotated(&g, "all"), Vec::<(String, String)>::new());
+    assert_eq!(annotated(&g, "all"), [pair("lib/app.dart", "Tok")]);
 }

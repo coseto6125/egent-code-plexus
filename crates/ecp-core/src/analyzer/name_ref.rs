@@ -37,6 +37,11 @@ where
     let member = name_ref
         .name
         .rsplit_once('.')
+        .or_else(|| {
+            (language == Language::Rust)
+                .then(|| name_ref.name.rsplit_once("::"))
+                .flatten()
+        })
         .map_or(name_ref.name, |(_, member)| member);
     if !facts.has_named(member)
         && !imports

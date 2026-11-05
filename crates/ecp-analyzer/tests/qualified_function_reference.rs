@@ -108,18 +108,32 @@ fn test_function_reference_rust_keyword_only_qualifier_returns_no_edge() {
     assert_eq!(function_refs(&g, "all"), none());
 }
 
+/// A path through a `mod.rs` directory binds a value reference exactly when
+/// it binds the same path as a call: the reference reuses the call's module
+/// resolution, gaps included.
 #[test]
-fn test_function_reference_rust_nested_module_path_returns_edge() {
-    let g = rust_graph(&[
-        ("src/lib.rs", "pub mod a;\npub mod user;\n"),
-        ("src/a/mod.rs", "pub mod b;\n"),
-        ("src/a/b.rs", "pub fn f(_: &u32) {}\n"),
-        (
-            "src/user.rs",
-            "pub fn all(v: &Vec<u32>) {\n    v.iter().for_each(crate::a::b::f);\n}\n",
-        ),
-    ]);
-    assert_one_cross_file(&function_refs(&g, "all"), "src/a/b.rs", "f");
+fn test_function_reference_rust_nested_module_path_matches_the_call_edge() {
+    let files = |body: &'static str| {
+        [
+            ("src/lib.rs", "pub mod a;\npub mod user;\n"),
+            ("src/a/mod.rs", "pub mod b;\n"),
+            ("src/a/b.rs", "pub fn f(_: &u32) {}\n"),
+            ("src/user.rs", body),
+        ]
+    };
+    let as_value = rust_graph(&files(
+        "pub fn all(v: &Vec<u32>) {\n    v.iter().for_each(crate::a::b::f);\n}\n",
+    ));
+    let as_call = rust_graph(&files("pub fn all() {\n    crate::a::b::f(&1);\n}\n"));
+    let targets = |refs: Vec<name_ref_support::Ref>| -> Vec<(String, String)> {
+        refs.into_iter()
+            .map(|(file, name, _, _)| (file, name))
+            .collect()
+    };
+    assert_eq!(
+        targets(function_refs(&as_value, "all")),
+        calls(&as_call, "all")
+    );
 }
 
 #[test]

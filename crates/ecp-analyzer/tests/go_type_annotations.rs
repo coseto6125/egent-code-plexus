@@ -166,12 +166,12 @@ fn test_self_named_project_type_binds_that_type() {
     assert_eq!(edges, vec![("app.go".to_string(), "Self".to_string())]);
 }
 
-/// Guard: the Go query captures the `type_identifier` inside a `pointer_type`,
-/// so `*Tok` already reaches the edge as `Tok` and binds before and after the
-/// change. `[]Tok` is a `slice_type` the query does not capture: no
-/// annotation, no edge.
+/// The Go query captures the `type_identifier` inside a `pointer_type`, so
+/// `*Tok` reaches the edge as `Tok`. `[]Tok` is a `slice_type` the query does
+/// not capture; its text comes from the function meta, and it binds `Tok` as
+/// the element type.
 #[test]
-fn test_pointer_return_binds_project_type_and_slice_return_binds_nothing() {
+fn test_pointer_and_slice_returns_bind_project_type() {
     let g = name_ref_support::graph(
         &GoProvider::new().unwrap(),
         &[(
@@ -183,5 +183,8 @@ fn test_pointer_return_binds_project_type_and_slice_return_binds_nothing() {
         annotated(&g, "Find"),
         [("app.go".to_string(), "Tok".to_string())]
     );
-    assert_eq!(annotated(&g, "All"), Vec::<(String, String)>::new());
+    assert_eq!(
+        annotated(&g, "All"),
+        [("app.go".to_string(), "Tok".to_string())]
+    );
 }

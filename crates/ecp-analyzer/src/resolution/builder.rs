@@ -3905,17 +3905,24 @@ fn pass2_emit_node_edges(
                 }
             }
         };
-        if let Some(type_ann) = raw_node
-            .type_annotation
-            .as_deref()
-            .filter(|ann| type_ladder::return_type_key(ann).is_none())
-        {
-            bind_names(type_ann, edges);
+        let meta = meta_lookup
+            .get(&raw_node.span)
+            .map(|&i| &local_graph.raw_function_metas[i]);
+        match raw_node.type_annotation.as_deref() {
+            Some(ann) if type_ladder::return_type_key(ann).is_none() => bind_names(ann, edges),
+            Some(_) => {}
+            // A return the language's query leaves uncaptured (TS
+            // `Promise<St>`, Go `[]St`) still has its text in the meta.
+            None => {
+                if let Some(meta) = meta {
+                    bind_names(&meta.return_type, edges);
+                }
+            }
         }
-        if let Some(&meta) = meta_lookup.get(&raw_node.span) {
+        if let Some(meta) = meta {
             // `params` alternates name and type; a receiver (`self`) and an
             // untyped parameter carry an empty type.
-            for pair in local_graph.raw_function_metas[meta].params.chunks_exact(2) {
+            for pair in meta.params.chunks_exact(2) {
                 bind_names(&pair[1], edges);
             }
         }
