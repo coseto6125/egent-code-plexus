@@ -178,6 +178,7 @@ mod local_graph_dump;
 mod module_discovery_parity;
 mod omitted_files_are_reported;
 mod overlay_ambiguity_caveat;
+mod overlay_c_cpp_header_parity;
 mod overlay_config_only_edit;
 mod overlay_csharp_access_parity;
 mod overlay_csharp_extension_parity;

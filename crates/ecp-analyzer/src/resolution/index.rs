@@ -1,3 +1,4 @@
+use crate::resolution::c_family;
 use ecp_core::analyzer::csharp_access;
 use ecp_core::analyzer::csharp_extension::ExtensionDecl;
 use ecp_core::analyzer::import_binding::{
@@ -344,6 +345,10 @@ pub struct SymbolTable {
     /// rule may refuse: static or private ones
     /// ([`ecp_core::analyzer::csharp_access`]). Sparse.
     csharp_method_flags: FxHashMap<u32, u16>,
+
+    /// C / C++ functions declared without a body (see
+    /// [`Self::note_c_prototype`]). Sparse: empty outside C and C++.
+    c_prototypes: FxHashSet<u32>,
 }
 
 impl SymbolTable {
@@ -691,6 +696,38 @@ impl SymbolTable {
     /// for `node_id`; 0 (public, instance) for any other id.
     pub(crate) fn csharp_method_flags(&self, node_id: u32) -> u16 {
         self.csharp_method_flags.get(&node_id).copied().unwrap_or(0)
+    }
+
+    /// Record the C or C++ function `node_id` as a declaration without a
+    /// body when its `FunctionMeta::flags` carry `FLAG_EXTERN`: the header
+    /// prototype of a function that another file defines
+    /// ([`c_family`](super::c_family)). Any other node is ignored.
+    pub fn note_c_prototype(&mut self, node_id: u32, flags: u16) {
+        let i = node_id as usize;
+        if flags & FunctionMeta::FLAG_EXTERN != 0
+            && self.node_kinds.get(i) == Some(&NodeKind::Function)
+            && self
+                .node_file_meta
+                .get(i)
+                .is_some_and(|meta| c_family::is_c_family(meta.language))
+        {
+            self.c_prototypes.insert(node_id);
+        }
+    }
+
+    /// Whether [`Self::note_c_prototype`] recorded `node_id`.
+    pub(crate) fn is_c_prototype(&self, node_id: u32) -> bool {
+        self.c_prototypes.contains(&node_id)
+    }
+
+    /// The Tier 3 field of `caller` over `candidates` under the C / C++ rules
+    /// ([`c_family::c_family_field`]); `None` when it is `candidates`.
+    pub(crate) fn c_family_field<I: Iterator<Item = (u32, FileMeta)>>(
+        &self,
+        caller: FileMeta,
+        candidates: impl Fn() -> I,
+    ) -> Option<Vec<(u32, FileMeta)>> {
+        c_family::c_family_field(self, caller, candidates, |id| self.is_c_prototype(id))
     }
 
     /// The C# extension declarations named `name`, as

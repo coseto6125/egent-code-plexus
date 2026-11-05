@@ -26,6 +26,7 @@ mod bash_source_imports;
 mod c_anonymous_callbacks;
 mod c_binding_kind;
 mod c_blind_spots;
+mod c_cpp_header_resolution;
 mod c_cpp_macro_fallback;
 mod c_driver_parity;
 mod c_dynamic_import;
