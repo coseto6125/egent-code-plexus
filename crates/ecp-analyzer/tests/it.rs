@@ -2,10 +2,8 @@
 //! instead of one per file. A new `tests/<name>.rs` needs `mod <name>;` here.
 
 mod anonymous_callbacks_support;
-mod class_membership_owner;
 mod decorates_support;
 mod driver_parity_support;
-mod go_generic_receiver;
 mod import_scope_support;
 mod instantiation_calls_support;
 mod name_ref_support;
@@ -58,6 +56,7 @@ mod callmeta_rust;
 mod chained_call_library_type;
 mod chained_call_local_shadow;
 mod chained_call_return_type;
+mod class_membership_owner;
 mod concurrency_graph_builder_order;
 mod constant_reader_edges;
 mod constructor_has_method;
@@ -192,6 +191,7 @@ mod go_enum_imitation;
 mod go_events_sqs;
 mod go_file_scope_vars;
 mod go_frameworks;
+mod go_generic_receiver;
 mod go_instantiation_calls;
 mod go_kafka_events;
 mod go_lexical_scope;
