@@ -105,6 +105,24 @@ impl Value {
     }
 }
 
+/// An edge confidence as the decimal the indexer wrote. The graph stores f32,
+/// and widening 0.7f32 gives 0.699999988, which `r.confidence < 0.7` matches
+/// and `= 0.7` misses. The shortest decimal (at most 9 places) that converts
+/// back to the same f32 is that decimal, and it keeps every distinct f32
+/// distinct, so `0.7000004` stays above 0.7. Past 9 places it widens as is.
+pub fn confidence_f64(confidence: f32) -> f64 {
+    let wide = f64::from(confidence);
+    let mut scale = 1.0;
+    for _ in 0..9 {
+        scale *= 10.0;
+        let decimal = (wide * scale).round() / scale;
+        if decimal as f32 == confidence {
+            return decimal;
+        }
+    }
+    wide
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct QueryResult {
     pub columns: Vec<String>,
