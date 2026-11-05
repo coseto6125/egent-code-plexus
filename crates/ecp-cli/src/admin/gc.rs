@@ -405,10 +405,21 @@ fn sweep_hook_refresh_markers(
         let path = entry.path();
         stats.dispose(&path, dry_run, || {
             if meta.is_dir() {
-                fs::remove_dir(&path).is_ok()
-            } else {
-                fs::remove_file(&path).is_ok()
+                return fs::remove_dir(&path).is_ok();
             }
+            // A job holds `.lock` with `flock`. Unlinking a held lock lets the
+            // next launcher lock a new inode beside it, so two refreshes run.
+            // The unlink happens under our own lock, and a held one stays.
+            let _held = if name.ends_with(".lock") {
+                match fs::File::open(&path).map(|file| file.try_lock().map(|()| file)) {
+                    Ok(Ok(file)) => Some(file),
+                    Ok(Err(_)) => return false,
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
+            fs::remove_file(&path).is_ok()
         });
     }
 }
@@ -1827,5 +1838,29 @@ mod sha_lock_sweep_tests {
         for path in &kept {
             assert!(path.exists(), "{}", path.display());
         }
+    }
+
+    /// Stands for: a `.lock` a running job holds stays, however old its
+    /// mtime and whether or not its session is gone; unlinking it would let a
+    /// second refresh lock a new file beside it.
+    #[test]
+    fn test_sweep_sessions_held_refresh_lock_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let markers = tmp.path().join(".hook-refresh");
+        fs::create_dir_all(&markers).unwrap();
+        let lock = markers.join("gone~11112222.lock");
+        fs::write(&lock, b"").unwrap();
+        super::tests::backdate(&lock, 25 * 3600);
+        let held = fs::File::open(&lock).unwrap();
+        held.lock().unwrap();
+
+        let stats = sweep_sessions(tmp.path(), false).unwrap();
+        assert!(lock.exists(), "a held lock was unlinked");
+        assert_eq!(stats.removed, 0);
+
+        drop(held);
+        let stats = sweep_sessions(tmp.path(), false).unwrap();
+        assert!(!lock.exists(), "a released stale lock stays");
+        assert_eq!(stats.removed, 1);
     }
 }

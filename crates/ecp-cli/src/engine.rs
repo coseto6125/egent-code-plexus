@@ -369,6 +369,20 @@ impl Engine {
     pub fn file_text_is_recorded(&self, root: &Path, rel: &str) -> bool {
         self.overlay_view();
         let dirty = self.overlay_hashes.get_or_init(FxHashMap::default);
+        self.text_matches(root, rel, dirty)
+    }
+
+    /// As [`Self::file_text_is_recorded`], against the base graph's hash
+    /// only: the proof for a fact read from the base graph's edges, which an
+    /// overlay refresh does not rebuild.
+    pub fn file_text_is_base_recorded(&self, root: &Path, rel: &str) -> bool {
+        self.text_matches(root, rel, &FxHashMap::<String, u64>::default())
+    }
+
+    fn text_matches<K>(&self, root: &Path, rel: &str, dirty: &FxHashMap<K, u64>) -> bool
+    where
+        K: std::borrow::Borrow<str> + std::hash::Hash + Eq,
+    {
         let Ok(graph) = self.graph() else {
             return false;
         };

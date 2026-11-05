@@ -82,17 +82,12 @@ where
 
 /// The bytes of `root/rel` when their `xxh3_64` is `recorded`. `None` for a
 /// file that is gone or unreadable: a missing file proves nothing, not even
-/// an empty recorded text. `None` also for a path that [`admitted_len`]
+/// an empty recorded text. `None` also for a path that [`open_admitted`]
 /// refuses, and for a file whose length changed while it was read.
 pub fn recorded_bytes(root: &Path, rel: &str, recorded: u64) -> Option<Vec<u8>> {
-    let path = root.join(rel);
-    let len = admitted_len(&path, || resolve_size_cap(root))?;
+    let (file, len) = open_admitted(&root.join(rel), || resolve_size_cap(root))?;
     let mut bytes = Vec::with_capacity(usize::try_from(len).ok()?);
-    fs::File::open(&path)
-        .ok()?
-        .take(len + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
+    file.take(len + 1).read_to_end(&mut bytes).ok()?;
     (bytes.len() as u64 == len && xxh3_64(&bytes) == recorded).then_some(bytes)
 }
 
@@ -106,16 +101,46 @@ pub fn text_is_recorded(
     recorded: u64,
     cap: impl FnOnce() -> SizeCap,
 ) -> bool {
-    let Some(len) = admitted_len(&root.join(rel), cap) else {
+    let Some((file, len)) = open_admitted(&root.join(rel), cap) else {
         return false;
     };
-    let empty = xxh3_64(&[]);
-    // `hash_worktree_file` hashes a file it cannot read as empty, so the empty
-    // digest proves only a file that stat'ed empty.
-    if len == 0 {
-        return recorded == empty;
+    // At most one byte past the length the handle reported, so a file that
+    // grows while it is hashed is read no further and proves nothing.
+    let mut reader = file.take(len + 1);
+    let mut hasher = xxhash_rust::xxh3::Xxh3::new();
+    let mut buf = [0u8; 64 * 1024];
+    let mut read = 0u64;
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                read += n as u64;
+                hasher.update(&buf[..n]);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return false,
+        }
     }
-    recorded != empty && super::overlay_writer::hash_worktree_file(root, Path::new(rel)) == recorded
+    read == len && hasher.digest() == recorded
+}
+
+/// `path` open for reading, with its length, when [`admitted_len`] admits it
+/// and the open handle is still a regular file of that length. The type and
+/// length are read again from the handle, so a path swapped for a FIFO or a
+/// larger file after the `stat` is judged as what was opened; the open does
+/// not block, so a FIFO put in its place is refused, not waited on.
+fn open_admitted(path: &Path, cap: impl FnOnce() -> SizeCap) -> Option<(fs::File, u64)> {
+    let stat_len = admitted_len(path, cap)?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path).ok()?;
+    let len = file.metadata().ok().filter(fs::Metadata::is_file)?.len();
+    (len == stat_len).then_some((file, len))
 }
 
 /// The length of the file at `path` when it is a regular file (symlinks

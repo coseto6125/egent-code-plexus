@@ -67,7 +67,10 @@ pub use ecp_core::peer::registry::{split_session_dir_name, SESSION_DIR_SEP};
 /// alias of the worktree; a path outside git keys by its canonical path. One
 /// cached `git_layout` lookup and one short hash.
 pub fn session_dir_name(sid: &str, worktree: &Path) -> String {
-    let key = crate::git_cache::git_layout(worktree)
+    // The on-disk layout, never the env-checked one: `GIT_CEILING_DIRECTORIES`
+    // or `GIT_DIR` in one process and not in another must not give one
+    // worktree two keys.
+    let key = crate::git_cache::git_layout_unchecked(worktree)
         .map_or_else(|| fallback_worktree_key(worktree), |(_, gitdir, _)| gitdir);
     let key = dunce::simplified(&key).to_string_lossy().into_owned();
     format!(
@@ -76,8 +79,8 @@ pub fn session_dir_name(sid: &str, worktree: &Path) -> String {
     )
 }
 
-/// Key for a path `git_layout` cannot resolve (for example under
-/// `GIT_CEILING_DIRECTORIES`): the nearest ancestor that holds a `.git` entry,
+/// Key for a path whose `.git` git would not open (an empty `.git` dir): the
+/// nearest ancestor that holds a `.git` entry,
 /// so a subdirectory keys like its worktree root. Without any `.git` ancestor
 /// the canonical path itself.
 fn fallback_worktree_key(worktree: &Path) -> std::path::PathBuf {

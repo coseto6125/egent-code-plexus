@@ -22,8 +22,10 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MAX_HITS: usize = 5;
-/// Ranked hits fetched, so the hits shown are the best `MAX_HITS` that pass
-/// the freshness proof, not the survivors of the best `MAX_HITS`.
+/// Ranked hits fetched: the hits shown are the best `MAX_HITS` among these
+/// that pass the freshness proof. A cost cap, since each distinct file costs
+/// a hash: when more than `FETCH_HITS - MAX_HITS` of them are stale, fewer
+/// hits show, and `omitted:` names the stale files.
 const FETCH_HITS: usize = MAX_HITS * 2;
 const MAX_BYTES: usize = 2048;
 /// The `omitted:` line's share of `MAX_BYTES`, and the header's: path lengths
@@ -101,8 +103,10 @@ fn compute_search_hits(input: &HookInput) -> Option<String> {
     if ranked.is_empty() {
         return None;
     }
-    let (hits, dropped) =
-        keep_recorded_hits(ranked, |file| engine.file_text_is_recorded(&top, file));
+    let (hits, dropped) = keep_recorded_hits(ranked, |file, proof| match proof {
+        Proof::Shown => engine.file_text_is_recorded(&top, file),
+        Proof::Base => engine.file_text_is_base_recorded(&top, file),
+    });
     // Hits from the repo a leading `cd` names: the agent's own cwd is
     // another repo, and its paths are relative to this one.
     let header = match &cd {
@@ -125,36 +129,50 @@ fn compute_search_hits(input: &HookInput) -> Option<String> {
     Some(lines)
 }
 
+/// Which recorded text a file must still match.
+#[derive(Clone, Copy, PartialEq)]
+enum Proof {
+    /// The text the hit's own row was read from: the session overlay's for
+    /// a refreshed file, else the base graph's.
+    Shown,
+    /// The base graph's text: `Called by` / `Calls` names come from the
+    /// base graph's edges, which an overlay refresh does not rebuild.
+    Base,
+}
+
 /// The best `MAX_HITS` of `ranked` whose files the working tree still holds
-/// as ecp read them, each keeping only the `Called by` / `Calls` names whose
-/// own files pass the same proof; and what was dropped on the way. A hit with
-/// no file names no file:line and stays. Each distinct file is proven once,
-/// and no file ranked below the last shown hit is read: a dropped hit or name
-/// would point at text that is no longer on disk.
+/// as ecp read them ([`Proof::Shown`]), each keeping only the `Called by` /
+/// `Calls` names whose own files match the base graph ([`Proof::Base`]); and
+/// what was dropped on the way. A hit with no file names no file:line and
+/// stays. Each distinct file is proven once per proof, and no file ranked
+/// below the last shown hit is read: a dropped hit or name would point at
+/// text that is no longer on disk.
 fn keep_recorded_hits(
     ranked: Vec<Hit>,
-    mut is_recorded: impl FnMut(&str) -> bool,
+    mut is_recorded: impl FnMut(&str, Proof) -> bool,
 ) -> (Vec<Hit>, Dropped) {
-    let mut verdicts: Vec<(String, bool)> = Vec::new();
+    let mut verdicts: Vec<(String, Proof, bool)> = Vec::new();
     let mut dropped = Dropped::default();
-    let mut proven =
-        |file: &str, dropped: &mut Dropped| match verdicts.iter().find(|(seen, _)| seen == file) {
-            Some(&(_, recorded)) => recorded,
-            None => {
-                let recorded = is_recorded(file);
-                verdicts.push((file.to_string(), recorded));
-                if !recorded {
-                    dropped.files.push(file.to_string());
-                }
-                recorded
+    let mut proven = |file: &str, proof: Proof, dropped: &mut Dropped| match verdicts
+        .iter()
+        .find(|(seen, by, _)| seen == file && *by == proof)
+    {
+        Some(&(_, _, recorded)) => recorded,
+        None => {
+            let recorded = is_recorded(file, proof);
+            verdicts.push((file.to_string(), proof, recorded));
+            if !recorded && !dropped.files.iter().any(|seen| seen == file) {
+                dropped.files.push(file.to_string());
             }
-        };
+            recorded
+        }
+    };
     let mut kept = Vec::new();
     for mut hit in ranked {
         if kept.len() == MAX_HITS {
             break;
         }
-        if !hit.file.is_empty() && !proven(&hit.file, &mut dropped) {
+        if !hit.file.is_empty() && !proven(&hit.file, Proof::Shown, &mut dropped) {
             dropped.hits += 1;
             continue;
         }
@@ -163,7 +181,7 @@ fn keep_recorded_hits(
                 let mut kept_files = Vec::with_capacity(files.len());
                 let mut kept_names = Vec::with_capacity(names.len());
                 for (name, file) in names.drain(..).zip(files.drain(..)) {
-                    if proven(&file, &mut dropped) {
+                    if proven(&file, Proof::Base, &mut dropped) {
                         kept_names.push(name);
                         kept_files.push(file);
                     } else {
@@ -1520,7 +1538,7 @@ mod tests {
     use super::{
         cd_target_with_home, changed_at, compose_hits, extract_from_shell, format_hits,
         hits_header_in, keep_recorded_hits, omitted_line, refresh_needed, search_terms,
-        shell_segments, spawn_overlay_refresh_with, CdTarget, Change, Dropped, LastRun,
+        shell_segments, spawn_overlay_refresh_with, CdTarget, Change, Dropped, LastRun, Proof,
         RefreshMarkers, Sep, HITS_HEADER, MAX_BYTES, MAX_HITS, RETRY_FAILED_AFTER,
     };
     use crate::commands::find::{Hit, ScoreSource};
@@ -1632,7 +1650,7 @@ mod tests {
             hit_in("", "route"),
         ];
         let calls = RefCell::new(Vec::new());
-        let (kept, dropped) = keep_recorded_hits(hits, |file| {
+        let (kept, dropped) = keep_recorded_hits(hits, |file, _| {
             calls.borrow_mut().push(file.to_string());
             file == "b.rs"
         });
@@ -1655,7 +1673,7 @@ mod tests {
             .chain([hit_in("below.rs", "late")])
             .collect();
         let calls = RefCell::new(Vec::new());
-        let (kept, dropped) = keep_recorded_hits(ranked, |file| {
+        let (kept, dropped) = keep_recorded_hits(ranked, |file, _| {
             calls.borrow_mut().push(file.to_string());
             file != "edited.rs" && file != "below.rs"
         });
@@ -1682,11 +1700,12 @@ mod tests {
             4,
         );
         let calls = RefCell::new(Vec::new());
-        let (kept, dropped) = keep_recorded_hits(vec![hit], |file| {
+        let (kept, dropped) = keep_recorded_hits(vec![hit], |file, _| {
             calls.borrow_mut().push(file.to_string());
             file == "target.py"
         });
-        assert_eq!(*calls.borrow(), ["target.py", "caller.py"]);
+        // The hit's file is proven as shown, each caller file against base.
+        assert_eq!(*calls.borrow(), ["target.py", "caller.py", "target.py"]);
         assert_eq!(
             (dropped.hits, dropped.neighbours, dropped.files.clone()),
             (0, 1, vec!["caller.py".to_string()])
@@ -1701,6 +1720,22 @@ mod tests {
         );
         assert!(out.contains("Called by: kept_caller, +2 more"), "{out}");
         assert!(!out.contains("gone_caller"), "{out}");
+    }
+
+    /// Stands for: after a refresh the caller's file matches the overlay,
+    /// but the caller's name still comes from the base graph, whose text the
+    /// file no longer holds: the name is dropped, not shown again.
+    #[test]
+    fn test_keep_recorded_hits_caller_file_refreshed_but_base_stale_drops_name() {
+        let hit = hit_called_by("target.py", "target", &[("gone_caller", "caller.py")], 1);
+        let (kept, dropped) = keep_recorded_hits(vec![hit], |file, proof| {
+            file == "target.py" || proof == Proof::Shown
+        });
+        assert!(kept[0].callers.is_empty(), "{:?}", kept[0].callers);
+        assert_eq!(
+            (dropped.neighbours, dropped.files.clone()),
+            (1, vec!["caller.py".to_string()])
+        );
     }
 
     /// A whole-second time `secs` ago, so an mtime set to it reads back

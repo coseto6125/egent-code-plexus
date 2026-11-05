@@ -817,7 +817,7 @@ fn graph_content_hash(graph: &LocalGraph, worktree: &Path) -> u64 {
 /// gone or unreadable hashes as empty. An unknown worktree root (an empty
 /// path) would resolve `rel` against the process cwd, so it yields the zero
 /// hash, which the promotion compare never matches.
-pub(crate) fn hash_worktree_file(worktree: &Path, rel: &Path) -> u64 {
+fn hash_worktree_file(worktree: &Path, rel: &Path) -> u64 {
     use std::io::Read;
     if worktree.as_os_str().is_empty() {
         return 0;
