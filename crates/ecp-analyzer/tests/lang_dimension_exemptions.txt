@@ -105,6 +105,19 @@ call_user_func_literal ruby pre-existing gap
 call_user_func_literal rust pre-existing gap
 call_user_func_literal swift pre-existing gap
 call_user_func_literal typescript pre-existing gap
+callable_reference c only PHP names a callable by a string or an [object, 'method'] array
+callable_reference cpp only PHP names a callable by a string or an [object, 'method'] array
+callable_reference csharp only PHP names a callable by a string or an [object, 'method'] array
+callable_reference dart only PHP names a callable by a string or an [object, 'method'] array
+callable_reference go only PHP names a callable by a string or an [object, 'method'] array
+callable_reference java only PHP names a callable by a string or an [object, 'method'] array
+callable_reference javascript only PHP names a callable by a string or an [object, 'method'] array
+callable_reference kotlin only PHP names a callable by a string or an [object, 'method'] array
+callable_reference python only PHP names a callable by a string or an [object, 'method'] array
+callable_reference ruby only PHP names a callable by a string or an [object, 'method'] array
+callable_reference rust only PHP names a callable by a string or an [object, 'method'] array
+callable_reference swift only PHP names a callable by a string or an [object, 'method'] array
+callable_reference typescript only PHP names a callable by a string or an [object, 'method'] array
 callmeta csharp pre-existing gap
 callmeta dart pre-existing gap
 callmeta go pre-existing gap

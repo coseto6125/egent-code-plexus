@@ -428,7 +428,6 @@ pub(super) fn replay(
             |source, target| push(defines(source, target, ENUM_VARIANT_DEFINES_REASON)),
         );
         let lookup = FileMembers {
-            decls: table,
             raw_map: &raw_map,
             ord,
             merged,
@@ -899,17 +898,15 @@ impl<'a> PathDecls<'a> {
     }
 }
 
-/// Class membership's lookups for one input: its own rows' nodes, and its
-/// path's [`PathDecls`] for the owner pass's type.
-struct FileMembers<'t, 'a> {
-    decls: &'t PathDecls<'a>,
+/// Class membership's lookups for one input: its own rows' nodes.
+struct FileMembers<'t> {
     raw_map: &'t RawIndexMap,
     ord: FileOrd,
     merged: bool,
     lexical_parents: &'t FxHashMap<u32, u32>,
 }
 
-impl MemberLookup for FileMembers<'_, '_> {
+impl MemberLookup for FileMembers<'_> {
     fn node(&self, raw: usize) -> Option<u32> {
         self.raw_map.node(self.ord, RawIdx(raw as u32))
     }

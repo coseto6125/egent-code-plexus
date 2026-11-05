@@ -807,7 +807,7 @@ impl<'r, 'a> NameTierFacts for IndexTiers<'r, 'a, '_> {
         let table = self.facts.0.symbol_table;
         let free_only = call.is_some_and(|call| call.free_only);
         let candidates = || table.global_field_candidates(name, target, free_only);
-        match table.c_family_field(NameTierFacts::caller(self), &candidates) {
+        match table.c_family_field(NameTierFacts::caller(self), candidates) {
             Some(field) => {
                 name_tiers::global_tier(self, name, imports, target, call, || field.iter().copied())
             }

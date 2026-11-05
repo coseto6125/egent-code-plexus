@@ -17,7 +17,6 @@ use ecp_core::analyzer::types::{LocalGraph, RawNode};
 use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
 use ecp_core::graph::Edge;
 use ecp_core::pool::StringPool;
-use ecp_core::registry::os_path_to_slash;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -63,9 +62,6 @@ pub fn emit_edges(
                 return Vec::new();
             }
             let raws = &local_graph.nodes;
-            let path_str_cow = os_path_to_slash(&local_graph.file_path);
-            let path_str: &str = &path_str_cow;
-
             let file = FileOrd(file_ord as u32);
             let mut local_edges: Vec<Edge> = Vec::new();
             membership::class_membership(
@@ -73,7 +69,6 @@ pub fn emit_edges(
                 member_row,
                 || IndexLookup {
                     symbol_table,
-                    path: path_str,
                     raw_map,
                     file,
                     merged: raw_map.has_merged(file),
@@ -116,7 +111,6 @@ fn member_row(n: &RawNode) -> MemberRow<'_> {
 /// The index's answers to membership's lookups over one file's path.
 struct IndexLookup<'a> {
     symbol_table: &'a SymbolTable,
-    path: &'a str,
     raw_map: &'a RawIndexMap,
     file: FileOrd,
     merged: bool,
@@ -143,6 +137,7 @@ mod tests {
     use ecp_core::analyzer::lexical::{file_uids, raw_decl};
     use ecp_core::analyzer::types::LocalGraph;
     use ecp_core::graph::{NodeKind, RelType};
+    use ecp_core::registry::os_path_to_slash;
     use std::path::PathBuf;
 
     fn raw(name: &str, kind: NodeKind, span: (u32, u32, u32, u32)) -> RawNode {

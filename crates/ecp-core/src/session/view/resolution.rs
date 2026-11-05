@@ -3087,7 +3087,7 @@ impl<'v, 'a> NameTierFacts for OverlayTiers<'v, 'a, '_> {
                 .chain(overlay_candidates.iter().copied())
                 .filter(admits)
         };
-        let hit = match c_family_field(facts, self.caller, &candidates, |id| {
+        let hit = match c_family_field(facts, self.caller, candidates, |id| {
             facts.is_c_prototype(id)
         }) {
             Some(field) => {
