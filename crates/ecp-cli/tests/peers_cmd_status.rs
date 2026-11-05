@@ -247,3 +247,113 @@ fn test_peers_diff_tombstone_prints_deleted_marker() {
     assert!(lines.contains(&"--- src/edited.ts ---"), "{stdout}");
     assert!(stdout.contains("edited_fn"), "{stdout}");
 }
+
+/// Contract: one session id in two worktrees is two peers, one per worktree,
+/// each with the dirty files of its own tree. Before the session dir carried
+/// the worktree, the second worktree's query replaced the first one's
+/// manifest and `peers status` listed one row.
+#[test]
+fn test_peers_status_two_worktrees_one_session_lists_each_worktree() {
+    use ecp_cli::repo_identity::repo_dir_name_for_cwd;
+    use ecp_cli::session::resolver::session_dir_name;
+
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let repo = tmp.path().join("repo");
+    let wt_b = tmp.path().join("wt-b");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::write(repo.join("app.py"), "def keep_me():\n    return 1\n").unwrap();
+    std::fs::write(repo.join("lib.py"), "def helper_b():\n    return 3\n").unwrap();
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        assert!(Command::new("git")
+            .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap()
+            .success());
+    };
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "init"]);
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "side",
+            wt_b.to_str().unwrap(),
+        ],
+    );
+    let ecp = |session: &str| {
+        let mut cmd = Command::new(bin());
+        cmd.env("HOME", &home)
+            .env("ECP_SKIP_BG_REBUILD", "1")
+            .env_remove("ECP_HOME")
+            .env_remove("CLAUDE_CODE_SESSION_ID")
+            .env("ECP_SESSION_ID", session);
+        cmd
+    };
+    assert!(ecp("shared")
+        .args(["admin", "index", "--repo"])
+        .arg(&repo)
+        .status()
+        .unwrap()
+        .success());
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    std::fs::write(repo.join("app.py"), "# pad\ndef keep_me():\n    return 1\n").unwrap();
+    std::fs::write(
+        wt_b.join("lib.py"),
+        "# pad\ndef helper_b():\n    return 3\n",
+    )
+    .unwrap();
+    for (worktree, name) in [(&repo, "keep_me"), (&wt_b, "helper_b")] {
+        let out = ecp("shared")
+            .args(["find", name, "--repo"])
+            .arg(worktree)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+    }
+
+    let repo_root = home
+        .join(".ecp")
+        .join(repo_dir_name_for_cwd(&repo).unwrap());
+    let id_a = session_dir_name("shared", &repo);
+    let id_b = session_dir_name("shared", &wt_b);
+    let status = ecp("observer")
+        .args(["peers", "status", "--format", "json", "--repo"])
+        .arg(&repo_root)
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&status.stdout).unwrap();
+    let mut ids: Vec<&str> = rows
+        .iter()
+        .map(|r| r["session_id"].as_str().unwrap())
+        .collect();
+    ids.sort();
+    let mut expected = vec![id_a.as_str(), id_b.as_str()];
+    expected.sort();
+    assert_eq!(ids, expected, "one row per (session, worktree)");
+
+    for (id, own, other) in [(&id_a, "app.py", "lib.py"), (&id_b, "lib.py", "app.py")] {
+        let diff = ecp("observer")
+            .args(["peers", "diff", id, "--repo"])
+            .arg(&repo_root)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&diff.stdout);
+        assert!(
+            diff.status.success(),
+            "{}",
+            String::from_utf8_lossy(&diff.stderr)
+        );
+        assert!(
+            text.contains(&format!("--- {own} ---")) && !text.contains(other),
+            "{id} holds only {own}: {text}"
+        );
+    }
+}

@@ -646,6 +646,20 @@ fn session_cmd(home: &std::path::Path) -> Command {
     cmd
 }
 
+/// The session dir a query in `repo` writes under `OVERLAY_SID`:
+/// `sessions/<sid>~<repo's gitdir key>` of the fixture's one repo dir.
+fn overlay_session_dir(
+    home: &std::path::Path,
+    repo: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    let name = ecp_cli::session::resolver::session_dir_name(OVERLAY_SID, repo);
+    fs::read_dir(home.join(".ecp"))
+        .ok()?
+        .flatten()
+        .map(|e| e.path().join("sessions").join(&name))
+        .find(|p| p.is_dir())
+}
+
 /// Indexed repo whose `tools.rs` holds `relocated` (line 1) and `vanished`
 /// (line 2) at HEAD.
 fn overlay_hook_repo(tmp: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -784,11 +798,7 @@ fn test_hook_hits_clean_worktree_output_unchanged_by_session() {
     git_in(&repo, &["checkout", "--", "tools.rs"]);
     warm_session_overlay(&home, &repo);
     assert!(
-        home.join(".ecp").read_dir().unwrap().flatten().any(|e| e
-            .path()
-            .join("sessions")
-            .join(OVERLAY_SID)
-            .is_dir()),
+        overlay_session_dir(&home, &repo).is_some(),
         "setup: the session dir exists"
     );
     assert_eq!(hook_hits(&home, &repo, "relocated"), before);
@@ -983,17 +993,24 @@ fn assert_omits_tools_rs(ctx: &str) {
     );
 }
 
-/// `<home>/.ecp/<repo>/.hook-refresh/<OVERLAY_SID>.<ext>` for the one repo dir.
+/// `<home>/.ecp/<repo>/.hook-refresh/<OVERLAY_SID>~<worktree key>.<ext>` for
+/// the one repo dir.
 fn hook_refresh_file(home: &std::path::Path, ext: &str) -> Option<std::path::PathBuf> {
+    let prefix = format!("{OVERLAY_SID}~");
+    let suffix = format!(".{ext}");
     fs::read_dir(home.join(".ecp"))
         .ok()?
         .flatten()
-        .map(|e| {
-            e.path()
-                .join(".hook-refresh")
-                .join(format!("{OVERLAY_SID}.{ext}"))
+        .filter_map(|e| fs::read_dir(e.path().join(".hook-refresh")).ok())
+        .flatten()
+        .flatten()
+        .map(|f| f.path())
+        .find(|p| {
+            p.file_name().is_some_and(|n| {
+                let n = n.to_string_lossy();
+                n.starts_with(&prefix) && n.ends_with(&suffix)
+            })
         })
-        .find(|p| p.exists())
 }
 
 /// Bounded wait (at most 30 s) for the refresh job's outcome marker.
@@ -1190,12 +1207,7 @@ fn test_hook_hits_overlay_dir_unreadable_emits_valid_payload_without_stale_line(
     let (home, repo) = overlay_hook_repo(tmp.path());
     dirty_tools_rs(&repo);
     warm_session_overlay(&home, &repo);
-    let session_dir = fs::read_dir(home.join(".ecp"))
-        .unwrap()
-        .flatten()
-        .map(|e| e.path().join("sessions").join(OVERLAY_SID))
-        .find(|p| p.is_dir())
-        .expect("setup: the session dir exists");
+    let session_dir = overlay_session_dir(&home, &repo).expect("setup: the session dir exists");
     fs::set_permissions(&session_dir, fs::Permissions::from_mode(0o000)).unwrap();
     let readable_anyway = fs::read_dir(&session_dir).is_ok();
 
@@ -1337,4 +1349,164 @@ fn test_hook_hits_dirty_files_in_14_languages_offer_no_committed_line() {
         let ctx = hook_hits(&home, &repo, name);
         assert!(!ctx.contains(&format!("{name} (")), "{name}: {ctx}");
     }
+}
+
+// ── Sibling worktrees under one session id ──────────────────────────────────
+//
+// Contract: each (session, worktree) pair has its own overlay dir, so a query
+// in one worktree never retires, rebases or serves another worktree's
+// overlay. The pass/fail criterion above holds: a hit names the line the
+// hook's own working tree holds.
+
+const APP_PY: &str = "def keep_me():\n    return 1\n\n\ndef doomed_fn():\n    return 2\n";
+const LIB_PY: &str = "def helper_b():\n    return 3\n";
+
+fn sibling_hook_repo(tmp: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    indexed_repo(tmp, &[("app.py", APP_PY.into()), ("lib.py", LIB_PY.into())])
+}
+
+/// `git worktree add` of a new branch `name` beside `repo`.
+fn linked_worktree(repo: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let worktree = repo.parent().unwrap().join(name);
+    git_in(
+        repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            name,
+            worktree.to_str().unwrap(),
+        ],
+    );
+    worktree
+}
+
+/// One `ecp find` in `worktree` under the shared session; returns its stderr.
+fn query_in(home: &std::path::Path, worktree: &std::path::Path, pattern: &str) -> String {
+    let out = session_cmd(home)
+        .args(["find", pattern, "--repo"])
+        .arg(worktree)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+fn pad(lines: usize, source: &str) -> String {
+    format!("{}{source}", "# pad\n".repeat(lines))
+}
+
+#[test]
+fn test_hook_hits_two_worktrees_one_session_each_reports_own_working_tree_line() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = sibling_hook_repo(tmp.path());
+    let wt_b = linked_worktree(&repo, "wt-b");
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    fs::write(
+        repo.join("app.py"),
+        pad(3, "def keep_me():\n    return 1\n"),
+    )
+    .unwrap();
+    fs::write(wt_b.join("lib.py"), pad(2, LIB_PY)).unwrap();
+    query_in(&home, &repo, "keep_me");
+    query_in(&home, &wt_b, "helper_b");
+
+    let in_a = hook_hits(&home, &repo, "keep_me");
+    assert!(in_a.contains("keep_me (app.py:4)"), "{in_a}");
+    let deleted_in_a = hook_hits(&home, &repo, "doomed_fn");
+    assert!(
+        !deleted_in_a.contains("doomed_fn (app.py:5)"),
+        "{deleted_in_a}"
+    );
+    let in_b = hook_hits(&home, &wt_b, "helper_b");
+    assert!(in_b.contains("helper_b (lib.py:3)"), "{in_b}");
+    let a_sees_b_clean_file = hook_hits(&home, &repo, "helper_b");
+    assert!(
+        a_sees_b_clean_file.contains("helper_b (lib.py:1)"),
+        "A's lib.py is clean: {a_sees_b_clean_file}"
+    );
+    let b_sees_a_clean_file = hook_hits(&home, &wt_b, "keep_me");
+    assert!(
+        b_sees_a_clean_file.contains("keep_me (app.py:1)"),
+        "B's app.py is clean: {b_sees_a_clean_file}"
+    );
+}
+
+#[test]
+fn test_hook_hits_sibling_worktree_on_other_commit_keeps_own_overlay() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = sibling_hook_repo(tmp.path());
+    let wt_b = linked_worktree(&repo, "wt-b");
+    fs::write(wt_b.join("lib.py"), pad(2, LIB_PY)).unwrap();
+    git_in(&wt_b, &["commit", "-qam", "b1"]);
+    let indexed = Command::new(ecp_bin())
+        .args(["admin", "index", "--repo"])
+        .arg(&wt_b)
+        .env("HOME", &home)
+        .env("ECP_SKIP_BG_REBUILD", "1")
+        .env_remove("ECP_HOME")
+        .output()
+        .unwrap();
+    assert!(indexed.status.success());
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    fs::write(
+        repo.join("app.py"),
+        pad(3, "def keep_me():\n    return 1\n"),
+    )
+    .unwrap();
+    let a_first = query_in(&home, &repo, "keep_me");
+    fs::write(wt_b.join("lib.py"), pad(4, LIB_PY)).unwrap();
+    let b_first = query_in(&home, &wt_b, "helper_b");
+
+    let in_a = hook_hits(&home, &repo, "keep_me");
+    assert!(in_a.contains("keep_me (app.py:4)"), "{in_a}");
+    let a_again = query_in(&home, &repo, "keep_me");
+    let in_b = hook_hits(&home, &wt_b, "helper_b");
+    assert!(in_b.contains("helper_b (lib.py:5)"), "{in_b}");
+    let in_a_after = hook_hits(&home, &repo, "keep_me");
+    assert!(in_a_after.contains("keep_me (app.py:4)"), "{in_a_after}");
+    for stderr in [&a_first, &b_first, &a_again] {
+        assert!(
+            !stderr.contains("session.promoted") && !stderr.contains("session.rebased"),
+            "a query promoted or rebased a sibling worktree's overlay: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn test_hook_hits_equal_mtime_sibling_file_does_not_read_other_worktree_fragment() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = sibling_hook_repo(tmp.path());
+    let wt_b = linked_worktree(&repo, "wt-b");
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    fs::write(
+        repo.join("app.py"),
+        pad(3, "def keep_me():\n    return 1\n"),
+    )
+    .unwrap();
+    query_in(&home, &repo, "keep_me");
+    // `cp -p`, `rsync -a` and a coarse-mtime filesystem give B's file A's mtime.
+    let mtime = fs::metadata(repo.join("app.py"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(wt_b.join("app.py"))
+        .unwrap()
+        .set_modified(mtime)
+        .unwrap();
+
+    let kept = hook_hits(&home, &wt_b, "keep_me");
+    assert!(kept.contains("keep_me (app.py:1)"), "{kept}");
+    let deleted_in_a_only = hook_hits(&home, &wt_b, "doomed_fn");
+    assert!(
+        deleted_in_a_only.contains("doomed_fn (app.py:5)"),
+        "B's app.py still holds doomed_fn: {deleted_in_a_only}"
+    );
 }

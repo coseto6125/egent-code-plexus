@@ -6,6 +6,12 @@ fn bin() -> std::path::PathBuf {
     env!("CARGO_BIN_EXE_ecp").into()
 }
 
+/// The session dir name the spawned `ecp` (which inherits this test's cwd)
+/// derives for `ECP_SESSION_ID=sid`: `<sid>~<worktree key>`.
+fn own_dir(sid: &str) -> String {
+    ecp_cli::session::resolver::session_dir_name(sid, &std::env::current_dir().unwrap())
+}
+
 fn write_meta(session_dir: &std::path::Path, sid: &str) {
     let meta = format!(
         r#"{{"version":1,"session_id":"{sid}","pid":{pid},"started_at":"2026-01-01T00:00:00Z","last_touched":"2026-01-01T00:00:00Z","base_sha":"0000000000000000000000000000000000000000","source_worktree":"/tmp","overlay_version":1}}"#,
@@ -18,7 +24,7 @@ fn write_meta(session_dir: &std::path::Path, sid: &str) {
 fn pre_tool_use_emits_peer_section_when_inbox_has_entries() {
     let dir = tempdir().unwrap();
     let me = "test_drain_sess";
-    let session_dir = dir.path().join("sessions").join(me);
+    let session_dir = dir.path().join("sessions").join(own_dir(me));
     std::fs::create_dir_all(&session_dir).unwrap();
     write_meta(&session_dir, me);
     let entry = r#"{"type":"message","ts":"2026-05-17T00:00:00Z","msg_id":"m1","from":"alice","to":null,"reply_to":null,"body":"hello-from-alice"}"#;
@@ -46,7 +52,7 @@ fn pre_tool_use_emits_peer_section_when_inbox_has_entries() {
 fn pre_tool_use_silent_when_inbox_empty() {
     let dir = tempdir().unwrap();
     let me = "test_drain_empty";
-    let session_dir = dir.path().join("sessions").join(me);
+    let session_dir = dir.path().join("sessions").join(own_dir(me));
     std::fs::create_dir_all(&session_dir).unwrap();
     write_meta(&session_dir, me);
     // No inbox file
@@ -73,7 +79,7 @@ fn pre_tool_use_silent_when_inbox_empty() {
 fn pre_tool_use_clears_the_inbox_after_drain() {
     let dir = tempdir().unwrap();
     let me = "test_drain_truncate";
-    let session_dir = dir.path().join("sessions").join(me);
+    let session_dir = dir.path().join("sessions").join(own_dir(me));
     std::fs::create_dir_all(&session_dir).unwrap();
     write_meta(&session_dir, me);
     let entry = r#"{"type":"message","ts":"t","msg_id":"m_t","from":"alice","to":null,"reply_to":null,"body":"truncate-me"}"#;
@@ -108,7 +114,7 @@ fn user_prompt_submit_also_drains_inbox() {
 
     let dir = tempdir().unwrap();
     let me = "test_ups_sess";
-    let session_dir = dir.path().join("sessions").join(me);
+    let session_dir = dir.path().join("sessions").join(own_dir(me));
     std::fs::create_dir_all(&session_dir).unwrap();
     let meta = format!(
         r#"{{"version":1,"session_id":"{me}","pid":{pid},"started_at":"t","last_touched":"t","base_sha":"0000000000000000000000000000000000000000","source_worktree":"/tmp","overlay_version":1}}"#,

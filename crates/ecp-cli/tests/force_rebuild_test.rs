@@ -86,8 +86,8 @@ fn invalidate_keeps_pure_reference() {
     assert!(tmp.path().join("sessions/sid_clean").exists());
 }
 
-/// The contract is that the augmented session leaves its own path, not that the
-/// retired name has any particular spelling. The spelling used to be
+/// The contract is that the augmented session's `l1/` leaves its own path, not
+/// that the retired name has any particular spelling. The spelling used to be
 /// `.stale-<sha8>` and was asserted here; that name is the same on every run,
 /// which is the collision this changed to fix, so pinning it again would pin
 /// the defect. Nothing here counts the retired directories either: the removal
@@ -103,7 +103,15 @@ fn invalidate_retires_an_augmented_session() {
     let report = invalidate_matching_l1(tmp.path(), SHA).unwrap();
     assert_eq!(report.kept, 0);
     assert_eq!(report.invalidated, 1);
-    assert!(!tmp.path().join("sessions/sid_dirty").exists());
+    let session = tmp.path().join("sessions/sid_dirty");
+    assert!(
+        !layout::l1_dir(&session).exists(),
+        "the overlay state is retired"
+    );
+    assert!(
+        session.join("session_meta.json").exists(),
+        "the session itself stays: only its overlay goes"
+    );
 }
 
 /// Two `--force` runs at one SHA used to collide: the retired name carried
@@ -125,7 +133,7 @@ fn invalidate_twice_at_one_sha_does_not_collide() {
     let second = invalidate_matching_l1(tmp.path(), SHA)
         .expect("a second invalidation at the same SHA must not fail");
     assert_eq!(second.invalidated, 1);
-    assert!(!tmp.path().join("sessions/sid_dirty").exists());
+    assert!(!layout::l1_dir(&tmp.path().join("sessions/sid_dirty")).exists());
 }
 
 #[test]
@@ -308,8 +316,8 @@ fn force_rebuild_l2_invalidates_dirty_session_with_same_base_sha() {
     force_rebuild_l2(wt.path(), &sha).unwrap();
 
     assert!(
-        !repo_root.join("sessions/sid_dirty").exists(),
-        "dirty session should be renamed .stale-*"
+        !layout::l1_dir(&repo_root.join("sessions/sid_dirty")).exists(),
+        "dirty session's overlay should be retired"
     );
     assert!(
         repo_root.join("sessions/sid_clean").exists(),
@@ -358,4 +366,53 @@ fn invalidate_reaps_meta_unreadable_for_unrelated_sha() {
     fs::create_dir_all(layout::fragments_dir(&tmp.path().join("sessions/sid_dead"))).unwrap();
     let report = invalidate_matching_l1(tmp.path(), SHA2).unwrap();
     assert_eq!(report.meta_reaped, 1);
+}
+
+/// Contract: `--force` retires the overlay of every augmented session at the
+/// SHA and nothing else. A peer's inbox, message log and agent name belong to
+/// a live session; the old code renamed the whole session dir away with them.
+#[test]
+fn test_force_rebuild_keeps_session_inbox() {
+    let tmp = tempfile::tempdir().unwrap();
+    setup_repo_with_l2(tmp.path());
+    add_session(tmp.path(), "sid_dirty", SHA, true);
+    let session = tmp.path().join("sessions/sid_dirty");
+    let inbox_line = "{\"type\":\"message\",\"body\":\"keep me\"}\n";
+    fs::write(session.join("inbox.jsonl"), inbox_line).unwrap();
+    fs::write(session.join("msg.log"), "sent\n").unwrap();
+    fs::write(session.join("view_cache.bin"), b"stale view").unwrap();
+    let meta_before = fs::read(session.join("session_meta.json")).unwrap();
+
+    let report = invalidate_matching_l1(tmp.path(), SHA).unwrap();
+
+    assert_eq!(report.invalidated, 1);
+    assert_eq!(
+        fs::read_to_string(session.join("inbox.jsonl")).unwrap(),
+        inbox_line
+    );
+    assert_eq!(
+        fs::read_to_string(session.join("msg.log")).unwrap(),
+        "sent\n"
+    );
+    assert_eq!(
+        fs::read(session.join("session_meta.json")).unwrap(),
+        meta_before
+    );
+    assert!(!layout::l1_dir(&session).exists(), "the overlay is gone");
+    assert!(
+        !session.join("view_cache.bin").exists(),
+        "the view cache is gone"
+    );
+}
+
+#[test]
+fn test_force_rebuild_session_without_view_cache_still_retires_overlay() {
+    let tmp = tempfile::tempdir().unwrap();
+    setup_repo_with_l2(tmp.path());
+    add_session(tmp.path(), "sid_dirty", SHA, true);
+
+    let report = invalidate_matching_l1(tmp.path(), SHA).unwrap();
+
+    assert_eq!(report.invalidated, 1);
+    assert!(!layout::l1_dir(&tmp.path().join("sessions/sid_dirty")).exists());
 }

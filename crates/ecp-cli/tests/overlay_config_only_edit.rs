@@ -130,14 +130,23 @@ impl Repo {
         );
     }
 
-    /// The fixture's session dir, `<home>/.ecp/<repo dir>/sessions/<id>`;
+    /// The fixture's session dir, `<home>/.ecp/<repo dir>/sessions/<id>~<worktree key>`;
     /// `None` before a query made it.
     fn session_dir(&self) -> Option<PathBuf> {
+        let prefix = format!("{}~", self.session_id);
         fs::read_dir(self.home.join(".ecp"))
             .ok()?
             .filter_map(Result::ok)
-            .map(|entry| entry.path().join("sessions").join(self.session_id))
-            .find(|dir| dir.is_dir())
+            .filter_map(|entry| fs::read_dir(entry.path().join("sessions")).ok())
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|dir| dir.path())
+            .find(|dir| {
+                dir.is_dir()
+                    && dir
+                        .file_name()
+                        .is_some_and(|n| n.to_string_lossy().starts_with(&prefix))
+            })
     }
 }
 

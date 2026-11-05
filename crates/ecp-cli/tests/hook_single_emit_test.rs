@@ -61,6 +61,12 @@ fn assert_single_json(stdout: &[u8], event_label: &str) -> Value {
         .unwrap_or_else(|e| panic!("{event_label}: stdout not single-JSON-parseable: {e}\n{s}"))
 }
 
+/// The session dir name the spawned `ecp` (which inherits this test's cwd)
+/// derives for `ECP_SESSION_ID=sid`: `<sid>~<worktree key>`.
+fn own_dir(sid: &str) -> String {
+    ecp_cli::session::resolver::session_dir_name(sid, &std::env::current_dir().unwrap())
+}
+
 fn seed_inbox(session_dir: &std::path::Path, sid: &str, body: &str) {
     std::fs::create_dir_all(session_dir).unwrap();
     write_meta(session_dir, sid);
@@ -74,7 +80,7 @@ fn seed_inbox(session_dir: &std::path::Path, sid: &str, body: &str) {
 fn pre_tool_use_emits_single_json_when_peer_drain_has_data() {
     let tmp = tempdir().unwrap();
     let sid = "single_emit_pre";
-    let session_dir = tmp.path().join("sessions").join(sid);
+    let session_dir = tmp.path().join("sessions").join(own_dir(sid));
     seed_inbox(&session_dir, sid, "pre-tool-peer-msg");
 
     // Envelope without a Grep pattern → only the peer drain path fires.
@@ -94,7 +100,7 @@ fn pre_tool_use_emits_single_json_when_peer_drain_has_data() {
 fn user_prompt_submit_emits_single_json_when_peer_drain_has_data() {
     let tmp = tempdir().unwrap();
     let sid = "single_emit_ups";
-    let session_dir = tmp.path().join("sessions").join(sid);
+    let session_dir = tmp.path().join("sessions").join(own_dir(sid));
     seed_inbox(&session_dir, sid, "ups-peer-msg");
 
     let out = fire("user-prompt-submit", "{}", sid, tmp.path());
@@ -116,7 +122,7 @@ fn user_prompt_submit_emits_single_json_when_peer_drain_has_data() {
 fn user_prompt_submit_coalesces_rebuild_marker_and_peer_drain() {
     let tmp = tempdir().unwrap();
     let sid = "single_emit_ups_dual";
-    let session_dir = tmp.path().join("sessions").join(sid);
+    let session_dir = tmp.path().join("sessions").join(own_dir(sid));
     seed_inbox(&session_dir, sid, "ups-dual-peer");
 
     // ecp_state_dir() requires an absolute cwd with `<cwd>/.ecp/` present.
@@ -142,7 +148,7 @@ fn user_prompt_submit_coalesces_rebuild_marker_and_peer_drain() {
 fn session_start_drains_peer_inbox() {
     let tmp = tempdir().unwrap();
     let sid = "single_emit_ss";
-    let session_dir = tmp.path().join("sessions").join(sid);
+    let session_dir = tmp.path().join("sessions").join(own_dir(sid));
     seed_inbox(&session_dir, sid, "ss-peer-msg");
 
     // cwd must be non-empty (else session_start returns immediately).

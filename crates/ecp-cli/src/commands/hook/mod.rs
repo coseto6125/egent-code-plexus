@@ -58,7 +58,17 @@ pub fn run(args: HookArgs) -> Result<(), EcpError> {
     // growing, and it must not expire out of `peers status` while that happens.
     // Costs one stat per event; the write is throttled to once a minute and a
     // session that was never enrolled is left alone.
-    crate::auto_ensure::beat_session_heartbeat(std::path::Path::new(&input.cwd));
+    //
+    // The session is the one the overlay uses (env, then the envelope), and a
+    // tool call that works in another worktree beats that worktree's session
+    // dir too: each worktree has its own, and a sibling must not expire while
+    // an agent works there from another cwd.
+    if let Some(sid) = crate::session::resolver::hook_session_id(&input.session_id) {
+        crate::auto_ensure::beat_session_heartbeat(std::path::Path::new(&input.cwd), &sid);
+        for dir in pre_tool_use::other_worktree_dirs(&input) {
+            crate::auto_ensure::beat_session_heartbeat(&dir, &sid);
+        }
+    }
     match args.event {
         HookEvent::UserPromptSubmit => user_prompt_submit::handle(&input),
         HookEvent::PreToolUse => pre_tool_use::handle(&input),

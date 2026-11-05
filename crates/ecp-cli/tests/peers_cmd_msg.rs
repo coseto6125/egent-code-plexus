@@ -5,6 +5,12 @@ fn bin() -> std::path::PathBuf {
     env!("CARGO_BIN_EXE_ecp").into()
 }
 
+/// The session dir name the spawned `ecp` (which inherits this test's cwd)
+/// derives for `ECP_SESSION_ID=sid`: `<sid>~<worktree key>`.
+fn own_dir(sid: &str) -> String {
+    ecp_cli::session::resolver::session_dir_name(sid, &std::env::current_dir().unwrap())
+}
+
 #[test]
 fn say_to_targeted_peer_writes_to_their_inbox() {
     let dir = tempdir().unwrap();
@@ -47,7 +53,7 @@ fn say_to_targeted_peer_writes_to_their_inbox() {
     );
 
     // Sender's msg.log should also record this with direction=sent
-    let me_log = sessions.join("me/msg.log");
+    let me_log = sessions.join(own_dir("me")).join("msg.log");
     let me_body = std::fs::read_to_string(&me_log).unwrap();
     assert!(
         me_body.contains("\"direction\":\"sent\""),
@@ -204,7 +210,7 @@ fn say_to_unknown_name_errors_not_found() {
 fn peers_name_sets_own_agent_name() {
     let dir = tempdir().unwrap();
     let sessions = dir.path().join("sessions");
-    write_named_session(&sessions, "me_namer", None);
+    write_named_session(&sessions, &own_dir("me_namer"), None);
 
     let out = Command::new(bin())
         .args([
@@ -223,7 +229,8 @@ fn peers_name_sets_own_agent_name() {
         String::from_utf8_lossy(&out.stderr)
     );
     let meta: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(sessions.join("me_namer/session_meta.json")).unwrap(),
+        &std::fs::read_to_string(sessions.join(own_dir("me_namer")).join("session_meta.json"))
+            .unwrap(),
     )
     .unwrap();
     assert_eq!(meta["agent_name"], "graph-lead");
@@ -232,7 +239,7 @@ fn peers_name_sets_own_agent_name() {
 #[test]
 fn inbox_subcommand_reads_without_draining() {
     let dir = tempdir().unwrap();
-    let me_dir = dir.path().join("sessions/me_inbox_test");
+    let me_dir = dir.path().join("sessions").join(own_dir("me_inbox_test"));
     std::fs::create_dir_all(&me_dir).unwrap();
     let entry = r#"{"type":"message","ts":"t","msg_id":"m_x","from":"who","to":null,"reply_to":null,"body":"persist-me"}"#;
     std::fs::write(me_dir.join("inbox.jsonl"), format!("{entry}\n")).unwrap();
@@ -290,7 +297,7 @@ fn assert_say_rejects_target(root: &std::path::Path, target: &str) {
         stray.is_empty(),
         "target {target:?} produced an inbox: {stray:?}"
     );
-    assert!(!sessions.join("sender").exists());
+    assert!(!sessions.join(own_dir("sender")).exists());
 }
 
 /// Every `inbox.jsonl` or its lock anywhere under `dir`.
@@ -400,4 +407,76 @@ fn session_commands_invalid_session_id_error_without_creating_directory() {
         assert!(!dir.path().join("escaped").exists());
         assert_eq!(std::fs::read_dir(&repo).unwrap().count(), 0);
     }
+}
+
+fn say_to(repo: &std::path::Path, target: &str) -> std::process::Output {
+    Command::new(bin())
+        .args(["peers", "say", "hi", "--to", target, "--repo"])
+        .arg(repo)
+        .env("ECP_SESSION_ID", "me_sender")
+        .env("CLAUDE_CODE_SESSION_ID", "me_sender")
+        .output()
+        .expect("spawn")
+}
+
+#[test]
+fn test_peers_msg_bare_session_id_two_worktrees_reports_ambiguity() {
+    let dir = tempdir().unwrap();
+    let sessions = dir.path().join("sessions");
+    write_named_session(&sessions, "shared~aaaaaaaa", None);
+    write_named_session(&sessions, "shared~bbbbbbbb", None);
+
+    let out = say_to(dir.path(), "shared");
+
+    assert!(!out.status.success(), "ambiguous bare sid was accepted");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("shared~aaaaaaaa") && stderr.contains("shared~bbbbbbbb"),
+        "stderr must list both ids: {stderr}"
+    );
+    assert!(
+        !sessions.join("shared~aaaaaaaa/inbox.jsonl").exists()
+            && !sessions.join("shared~bbbbbbbb/inbox.jsonl").exists(),
+        "an ambiguous target must receive nothing"
+    );
+}
+
+#[test]
+fn test_peers_msg_bare_session_id_one_worktree_delivers_to_it() {
+    let dir = tempdir().unwrap();
+    let sessions = dir.path().join("sessions");
+    write_named_session(&sessions, "solo~aaaaaaaa", None);
+    write_named_session(&sessions, "soloist~cccccccc", None);
+
+    let out = say_to(dir.path(), "solo");
+
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let body = std::fs::read_to_string(sessions.join("solo~aaaaaaaa/inbox.jsonl")).unwrap();
+    assert!(body.contains("\"body\":\"hi\""), "inbox: {body}");
+    assert!(
+        !sessions.join("soloist~cccccccc/inbox.jsonl").exists(),
+        "a longer session id sharing the prefix is another session"
+    );
+}
+
+#[test]
+fn test_peers_msg_qualified_id_as_printed_by_status_delivers() {
+    let dir = tempdir().unwrap();
+    let sessions = dir.path().join("sessions");
+    write_named_session(&sessions, "shared~aaaaaaaa", None);
+    write_named_session(&sessions, "shared~bbbbbbbb", None);
+
+    let out = say_to(dir.path(), "shared~bbbbbbbb");
+
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(sessions.join("shared~bbbbbbbb/inbox.jsonl").exists());
+    assert!(!sessions.join("shared~aaaaaaaa/inbox.jsonl").exists());
 }

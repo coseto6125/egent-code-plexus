@@ -191,7 +191,11 @@ fn maybe_spawn_overlay_refresh(
     {
         return;
     }
-    let markers = RefreshMarkers::under(repo_root, sid);
+    // Per worktree: a sibling's refresh marker must not suppress this one's.
+    let markers = RefreshMarkers::under(
+        repo_root,
+        &crate::session::resolver::session_dir_name(sid, top),
+    );
     let newest_change = dropped_files
         .iter()
         .filter_map(|file| fs::metadata(top.join(file)).and_then(|m| m.modified()).ok())
@@ -293,20 +297,18 @@ fn with_dirty_overlay(engine: Engine, index_dir: &Path, top: &Path, sid: Option<
     if ecp_core::registry::validate_cache_component(sid).is_err() {
         return engine;
     }
-    if !repo_root.join("sessions").join(sid).is_dir() {
+    let name = crate::session::resolver::session_dir_name(sid, top);
+    let session_dir = repo_root.join("sessions").join(&name);
+    if !session_dir.is_dir() {
         return engine;
     }
-    match crate::session::state::classify(repo_root, sid) {
+    match crate::session::state::classify(repo_root, &name) {
         SessionState::AugmentedReference { l2_dirname, .. }
             if index_dir
                 .file_name()
                 .is_some_and(|n| n == l2_dirname.as_str()) =>
         {
-            engine.with_overlay(
-                repo_root.join("sessions").join(sid),
-                top.to_path_buf(),
-                None,
-            )
+            engine.with_overlay(session_dir, top.to_path_buf(), None)
         }
         _ => engine,
     }
@@ -356,6 +358,28 @@ fn push_neighbours(block: &mut String, label: &str, names: &[String], total: usi
         let _ = write!(block, ", +{more} more");
     }
     block.push('\n');
+}
+
+/// The directories, besides the envelope cwd, whose worktree this tool call
+/// works in: a leading `cd` target of a Bash command, or the folder of the file
+/// an edit tool writes. Each has its own session dir, so each needs its own
+/// heartbeat.
+pub(super) fn other_worktree_dirs(input: &HookInput) -> Vec<PathBuf> {
+    match input.tool_name.as_str() {
+        "Bash" => match bash_command(&input.tool_input).map(|cmd| cd_target(cmd, &input.cwd)) {
+            Some(CdTarget::Dir(dir)) => vec![PathBuf::from(dir)],
+            _ => Vec::new(),
+        },
+        "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => ["file_path", "notebook_path"]
+            .iter()
+            .find_map(|key| input.tool_input.get(key).and_then(|v| v.as_str()))
+            .and_then(|file| Path::new(file).parent())
+            .filter(|dir| dir.is_absolute())
+            .map(Path::to_path_buf)
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn bash_command(tool_input: &serde_json::Value) -> Option<&str> {

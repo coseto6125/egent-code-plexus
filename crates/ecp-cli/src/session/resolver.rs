@@ -6,6 +6,7 @@
 //! invocations without any of the above get a per-process fallback id derived
 //! from PID + nanosecond timestamp.
 
+use std::path::Path;
 use std::sync::OnceLock;
 use xxhash_rust::xxh3::Xxh3;
 
@@ -53,6 +54,38 @@ pub fn hook_session_id(input_session_id: &str) -> Option<String> {
         }
     }
     (!input_session_id.is_empty()).then(|| input_session_id.to_string())
+}
+
+/// Separates the session id from the worktree key in a session dir name.
+/// `~` passes `validate_cache_component` and collides with no `.stale-` or
+/// `.dead` suffix that the sweeps skip.
+pub const SESSION_DIR_SEP: char = '~';
+
+/// The dir name under `sessions/` for session `sid` working in `worktree`:
+/// `<sid>~<h8>`, where `h8` hashes the worktree's own gitdir. Two worktrees of
+/// one repo that run under one session id each get their own overlay, manifest
+/// and `base_sha`. The gitdir is the same for a subdirectory or a symlinked
+/// alias of the worktree; a path outside git keys by its canonical path. One
+/// cached `git_layout` lookup and one short hash.
+pub fn session_dir_name(sid: &str, worktree: &Path) -> String {
+    let key = crate::git_cache::git_layout(worktree).map_or_else(
+        || std::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf()),
+        |(_, gitdir, _)| gitdir,
+    );
+    let key = dunce::simplified(&key).to_string_lossy().into_owned();
+    format!(
+        "{sid}{SESSION_DIR_SEP}{}",
+        crate::repo_identity::short_hash_hex8(key.as_bytes())
+    )
+}
+
+/// `session_dir_name` for the session the process env names and the
+/// process's current directory.
+pub fn own_session_dir_name() -> std::io::Result<String> {
+    Ok(session_dir_name(
+        &resolve_session_id(None),
+        &std::env::current_dir()?,
+    ))
 }
 
 /// Resolve the team-visible agent name for this session, if any.

@@ -53,7 +53,7 @@ fn tool_peers() -> DerivedTool {
                 },
                 "peer": {
                     "type": "string",
-                    "description": "[diff] Peer session ID or agent name (from subcmd=status). [log] Filter messages to/from this peer."
+                    "description": "[diff] Peer session ID (`<sid>~<h8>` as subcmd=status prints it; a bare `<sid>` works when it runs in one worktree) or agent name. [log] Filter messages to/from this peer."
                 },
                 "symbol": {
                     "type": "string",
@@ -77,7 +77,7 @@ fn tool_peers() -> DerivedTool {
                 },
                 "to": {
                     "type": "string",
-                    "description": "[say] Target peer session ID or agent name. Omit to broadcast."
+                    "description": "[say] Target peer session ID (`<sid>~<h8>` as subcmd=status prints it; a bare `<sid>` works when it runs in one worktree) or agent name. Omit to broadcast."
                 },
                 "name": {
                     "type": "string",

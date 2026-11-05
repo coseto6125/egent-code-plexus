@@ -204,7 +204,7 @@ fn default_repo_root() -> Option<PathBuf> {
 }
 
 pub fn drain_and_render_peer_payload() -> Option<String> {
-    let me = crate::session::resolver::resolve_session_id(None);
+    let me = crate::session::resolver::own_session_dir_name().ok()?;
     ecp_core::registry::validate_cache_component(&me).ok()?;
     let repo_root: PathBuf = std::env::var("ECP_REPO_ROOT_OVERRIDE")
         .map(PathBuf::from)
