@@ -336,6 +336,12 @@ pub struct OverlaySymbol {
     /// `None` when the node has none. The view rebuilds the node's
     /// `type_annotation` `Accesses` edges from it ([`type_annotation_targets`]).
     pub type_annotation: Option<String>,
+    /// `RawFunctionMeta.type_params` of a callable: its own generic
+    /// parameter names plus the enclosing impl / class ones. The view skips
+    /// them before it resolves [`Self::type_annotation`] and
+    /// [`Self::params`] types, so `fn f<T>(v: T)` binds no project `T`.
+    /// Empty for a non-callable or a declaration with no generic list.
+    pub type_params: Vec<String>,
 }
 
 impl crate::analyzer::overrides::OverrideNode for OverlaySymbol {

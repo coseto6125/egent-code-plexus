@@ -135,19 +135,19 @@ fn type_param_name(text: &str) -> Option<String> {
     (!text.is_empty() && !text.starts_with('\'')).then(|| text.to_string())
 }
 
-/// The name one generic-list entry declares: its `name` field, else its first
-/// direct identifier child (Java, C#, Kotlin, Swift, C++ `typename T`). A
-/// bound lives in a nested node, so it is never read as a name.
+/// The name one generic-list entry declares: its first direct identifier
+/// child (Java, C#, Kotlin, Swift, C++ `typename T`), else its `name` field.
+/// Swift labels the bound `name` (`<T: Foo>` is `(type_identifier) name:
+/// (user_type ..)`), so the field is the fallback, never the first choice.
 pub(super) fn type_param_entry(entry: &Node<'_>, source: &[u8]) -> Option<String> {
-    let name = entry.child_by_field_name("name").or_else(|| {
-        let mut cursor = entry.walk();
-        entry.named_children(&mut cursor).find(|child| {
-            matches!(
-                child.kind(),
-                "type_identifier" | "identifier" | "simple_identifier"
-            )
-        })
-    })?;
+    let mut cursor = entry.walk();
+    let first = entry.named_children(&mut cursor).find(|child| {
+        matches!(
+            child.kind(),
+            "type_identifier" | "identifier" | "simple_identifier"
+        )
+    });
+    let name = first.or_else(|| entry.child_by_field_name("name"))?;
     type_param_name(node_text(&name, source))
 }
 

@@ -196,14 +196,7 @@ fn extract_one(
     let return_type = fn_node
         .child_by_field_name("return_type")
         .or_else(|| {
-            // For function_declaration, the function_signature child has the
-            // return_type; a method_declaration nests it one level deeper,
-            // under its method_signature.
-            find_child_by_kind(fn_node, "function_signature")
-                .or_else(|| {
-                    find_child_by_kind(fn_node, "method_signature")
-                        .and_then(|m| find_child_by_kind(&m, "function_signature"))
-                })
+            function_signature(fn_node)
                 .or_else(|| operator_signature(fn_node))
                 .and_then(|sig| sig.child_by_field_name("return_type"))
         })
@@ -214,13 +207,7 @@ fn extract_one(
         .map(str::to_string)
         .unwrap_or_default();
 
-    // The list sits on the signature, one or two levels under a declaration.
-    let signature = find_child_by_kind(fn_node, "function_signature")
-        .or_else(|| {
-            find_child_by_kind(fn_node, "method_signature")
-                .and_then(|m| find_child_by_kind(&m, "function_signature"))
-        })
-        .unwrap_or(*fn_node);
+    let signature = function_signature(fn_node).unwrap_or(*fn_node);
     let type_params = scoped_type_params(
         &signature,
         source,
@@ -347,19 +334,31 @@ fn operator_signature<'a>(fn_node: &Node<'a>) -> Option<Node<'a>> {
         .and_then(|m| find_child_by_kind(&m, "operator_signature"))
 }
 
+/// The `function_signature` of a declaration: its direct child for a
+/// `function_declaration`, the one under `method_signature` for a
+/// `method_declaration`.
+fn function_signature<'a>(fn_node: &Node<'a>) -> Option<Node<'a>> {
+    find_child_by_kind(fn_node, "function_signature").or_else(|| {
+        find_child_by_kind(fn_node, "method_signature")
+            .and_then(|m| find_child_by_kind(&m, "function_signature"))
+    })
+}
+
+/// The value parameter list of `node`. The grammar labels a generic list
+/// `parameters` too (`parameters: (type_parameters ..) parameters:
+/// (formal_parameter_list ..)`), so the field alone returns `<T>` for a
+/// generic function.
+fn value_params<'a>(node: &Node<'a>) -> Option<Node<'a>> {
+    find_child_by_kind(node, "formal_parameter_list").or_else(|| {
+        node.child_by_field_name("parameters")
+            .filter(|list| list.kind() != "type_parameters")
+    })
+}
+
 /// Extract `[name1, type1, ...]` from Dart formal_parameter_list.
 fn extract_params(fn_node: &Node<'_>, source: &[u8]) -> Vec<String> {
-    // Dart: parameters field or formal_parameter_list child.
-    let params_node = fn_node
-        .child_by_field_name("parameters")
-        .or_else(|| find_child_by_kind(fn_node, "formal_parameter_list"))
-        .or_else(|| {
-            // For function_declaration → function_signature → formal_parameter_list.
-            find_child_by_kind(fn_node, "function_signature").and_then(|sig| {
-                sig.child_by_field_name("parameters")
-                    .or_else(|| find_child_by_kind(&sig, "formal_parameter_list"))
-            })
-        })
+    let params_node = value_params(fn_node)
+        .or_else(|| function_signature(fn_node).and_then(|sig| value_params(&sig)))
         .or_else(|| {
             operator_signature(fn_node).and_then(|sig| sig.child_by_field_name("parameters"))
         });
