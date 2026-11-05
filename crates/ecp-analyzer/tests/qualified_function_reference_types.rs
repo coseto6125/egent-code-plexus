@@ -765,3 +765,18 @@ fn test_qualified_function_reference_kotlin_callee_returns_no_edge() {
     );
     assert_eq!(function_refs(&g, "wire"), none());
 }
+
+#[test]
+fn test_qualified_function_reference_dart_enum_value_argument_returns_no_edge() {
+    let used =
+        "import 'color.dart';\nvoid sink(Color c) {}\nvoid apply() {\n  sink(Color.red);\n}\n";
+    let g = graph(
+        &dart(),
+        &[
+            ("color.dart", "enum Color { red, blue }\n"),
+            ("use.dart", used),
+        ],
+    );
+    assert_eq!(function_refs(&g, "apply"), none());
+    assert!(!reads_name(&value_reads(&g, "apply"), "red"));
+}

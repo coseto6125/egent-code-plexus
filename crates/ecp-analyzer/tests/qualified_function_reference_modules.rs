@@ -489,3 +489,19 @@ fn test_qualified_function_reference_go_unresolvable_qualifier_returns_no_edge()
     ]);
     assert_eq!(function_refs(&g, "boot"), none());
 }
+
+#[test]
+fn test_qualified_function_reference_typescript_enum_member_argument_returns_no_edge() {
+    let used = "import { Color } from './color';\nfunction sink(c: Color) {}\nexport function apply() {\n  sink(Color.Red);\n}\n";
+    let g = graph(
+        &TypeScriptProvider::new().unwrap(),
+        &[
+            ("color.ts", "export enum Color { Red, Blue }\n"),
+            ("use.ts", used),
+        ],
+    );
+    assert!(function_refs(&g, "apply").is_empty());
+    assert!(value_reads(&g, "apply")
+        .iter()
+        .all(|(_, target, _, _)| target != "Red"));
+}
