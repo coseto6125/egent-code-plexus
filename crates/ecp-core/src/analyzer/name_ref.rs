@@ -194,7 +194,10 @@ where
         || php_invisible_namespace_constant
         || (name_ref.kind == NameRefKind::Constant && facts.kind(id).is_callable())
         || (name_ref.kind != NameRefKind::Function && type_member)
-        || outer.is_some_and(|outer| !encloses(facts, id, outer))
+        || (outer.is_some()
+            && !full
+                .rsplit_once('.')
+                .is_some_and(|(path, _)| encloses(facts, id, path)))
     {
         return None;
     }

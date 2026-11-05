@@ -168,7 +168,7 @@ fn extract_one(
                     if past_params
                         && matches!(
                             child.kind(),
-                            "type_reference" | "nullable_type" | "user_type"
+                            "type_reference" | "nullable_type" | "user_type" | "function_type"
                         )
                     {
                         ret = Some(node_text(&child, source).to_string());
@@ -311,6 +311,7 @@ fn extract_kotlin_param(param: &Node<'_>, source: &[u8]) -> (String, String) {
     let ty = find_child_kind(param, "type_reference")
         .or_else(|| find_child_kind(param, "nullable_type"))
         .or_else(|| find_child_kind(param, "user_type"))
+        .or_else(|| find_child_kind(param, "function_type"))
         .or_else(|| param.child_by_field_name("type"))
         .map(|n| node_text(&n, source).to_string())
         .unwrap_or_default();

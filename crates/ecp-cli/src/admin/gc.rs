@@ -1063,7 +1063,7 @@ mod tests {
 
     /// Backdate a file's mtime past the 10s in-flight guard so the sweep
     /// treats it as a settled orphan rather than a live writer's temp.
-    fn backdate(path: &Path, secs: u64) {
+    pub(super) fn backdate(path: &Path, secs: u64) {
         let when = SystemTime::now() - Duration::from_secs(secs);
         let _ = filetime::set_file_mtime(path, filetime::FileTime::from_system_time(when));
     }
@@ -1784,7 +1784,7 @@ mod sha_lock_sweep_tests {
             if !path.exists() {
                 fs::write(&path, b"").unwrap();
             }
-            backdate(&path, age_secs);
+            super::tests::backdate(&path, age_secs);
             path
         };
         let doomed = [

@@ -40,13 +40,12 @@ fn test_overrides_kotlin_grandparent_resolves_target() {
     assert_eq!(edges[0].2, 1.0);
 }
 
-/// Stands for: a marked Kotlin override whose signature the meta cannot
-/// compare (the extractor leaves a function-type parameter's type blank)
-/// gets no edge and an `override-ambiguous` BlindSpot, never a guessed
-/// `Exact` edge; a comparable sibling still binds `Exact` (codex ruling 2).
+/// Stands for: a Kotlin override whose parameter is a function type compares
+/// by that type's text, so it binds `Exact` like any other parameter and
+/// records no `override-ambiguous` BlindSpot. Before the extractor recorded
+/// `function_type`, the blank type made the signature not comparable.
 #[test]
-fn test_overrides_kotlin_signature_not_comparable_records_ambiguous() {
-    use ecp_analyzer::post_process::overrides::BS_KIND_OVERRIDE_AMBIGUOUS;
+fn test_overrides_kotlin_function_type_param_signature_binds_exact() {
     let graph = overrides_support::graph_of(
         &ecp_analyzer::kotlin::parser::KotlinProvider::new().unwrap(),
         &[(
@@ -54,17 +53,15 @@ fn test_overrides_kotlin_signature_not_comparable_records_ambiguous() {
             "open class KA {\n    open fun run(cb: () -> Unit) {}\n    open fun walk(n: Int) {}\n}\nclass KB : KA() {\n    override fun run(cb: () -> Unit) {}\n    override fun walk(n: Int) {}\n}\n",
         )],
     );
-    let edges = overrides_support::overrides(&graph);
-    assert_eq!(edges.len(), 1, "KB.walk -> KA.walk only; got {edges:?}");
-    assert_eq!(edges[0].0.name, "walk");
-    assert_eq!((edges[0].0.line, edges[0].1.line), (6, 2), "{edges:?}");
-    overrides_support::assert_evidence(&edges[0], Evidence::Exact);
-    let spots = overrides_support::override_blind_spots(&graph);
-    assert_eq!(spots.len(), 1, "{spots:?}");
-    let (kind, _, row, hint) = &spots[0];
-    assert_eq!((kind.as_str(), *row), (BS_KIND_OVERRIDE_AMBIGUOUS, 5));
-    assert!(
-        hint.contains("signature not comparable") && hint.contains("`KA`"),
-        "{hint}"
-    );
+    let mut edges = overrides_support::overrides(&graph);
+    edges.sort_by_key(|e| e.0.line);
+    let lines: Vec<_> = edges
+        .iter()
+        .map(|e| (e.0.name.as_str(), e.0.line, e.1.line))
+        .collect();
+    assert_eq!(lines, [("run", 5, 1), ("walk", 6, 2)], "{edges:?}");
+    for edge in &edges {
+        overrides_support::assert_evidence(edge, Evidence::Exact);
+    }
+    assert!(overrides_support::override_blind_spots(&graph).is_empty());
 }
