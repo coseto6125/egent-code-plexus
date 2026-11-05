@@ -46,7 +46,8 @@
   body: (block
     (expression_statement
       (assignment
-        left: (identifier) @property.name) @property)))
+        left: (identifier) @property.name
+        type: (type)? @type) @property)))
 
 ;; Properties — instance attributes assigned via self in any method
 (class_definition
@@ -57,7 +58,8 @@
           (assignment
             left: (attribute
               object: (identifier) @_self (#eq? @_self "self")
-              attribute: (identifier) @property.name)) @property)))))
+              attribute: (identifier) @property.name)
+            type: (type)? @type) @property)))))
 
 ;; Variables — module-level assignments (plain `x = …` and annotated `x: T = …`).
 ;; Anchored to direct children of `module`; function-body and class-body locals

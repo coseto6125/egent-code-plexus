@@ -70,3 +70,36 @@ fn test_nullable_return_annotation_binds_project_type() {
     let g = build("<?php\nclass Owner\n{\n    public function find(): ?Tok { return null; }\n}\n");
     assert_eq!(annotated(&g, "find"), Vec::<(String, String)>::new());
 }
+
+/// Contract: a typed property (plain, nullable) and a constructor-promoted
+/// property reach the project class, like a parameter does. A builtin type,
+/// an untyped property and a non-promoted constructor parameter bind
+/// nothing to a property node.
+#[test]
+fn test_typed_property_annotation_binds_project_type() {
+    let g = graph(
+        &PhpProvider::new().unwrap(),
+        &[(
+            "src/App.php",
+            "<?php\nclass St {}\nclass C\n{\n\
+             \x20   public St $st_field;\n\
+             \x20   public ?St $opt;\n\
+             \x20   public int $plain;\n\
+             \x20   public $untyped;\n\
+             \x20   public function __construct(private St $st_promo, public int $n, St $loose) {}\n}\n",
+        )],
+    );
+    let st = vec![pair("src/App.php", "St")];
+    assert_eq!(annotated(&g, "st_field"), st, "typed property");
+    assert_eq!(annotated(&g, "opt"), st, "nullable property");
+    assert_eq!(annotated(&g, "st_promo"), st, "promoted property");
+    let none = Vec::<(String, String)>::new();
+    assert_eq!(annotated(&g, "plain"), none, "builtin property");
+    assert_eq!(annotated(&g, "untyped"), none, "no annotation");
+    assert_eq!(annotated(&g, "n"), none, "builtin promoted property");
+    assert_eq!(
+        annotated(&g, "loose"),
+        none,
+        "plain parameter is no property"
+    );
+}

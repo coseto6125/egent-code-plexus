@@ -59,3 +59,53 @@ fn test_union_and_generic_returns_bind_through_the_function_meta() {
     assert_eq!(annotated(&g, "find"), [pair("src/app.ts", "Tok")]);
     assert_eq!(annotated(&g, "all"), [pair("src/app.ts", "Tok")]);
 }
+
+/// Contract: a class field typed with a project class reaches it, like a
+/// parameter does. An interface property makes no node (ref-gitnexus
+/// parity, `interface_property_signature_not_emitted`), so it gets no edge. A builtin
+/// type, a type parameter and an untyped field bind nothing.
+#[test]
+fn test_class_field_annotation_binds_project_type_and_interface_property_makes_no_node() {
+    let g = graph(
+        &TypeScriptProvider::new().unwrap(),
+        &[(
+            "src/app.ts",
+            "export class St { x = 1; }\n\
+             export interface I { st_prop: St; n: number }\n\
+             export class C<T> {\n  st_field: St;\n  st_init: St = new St();\n  tparam: T;\n  plain: number = 1;\n  untyped = 1;\n}\n",
+        )],
+    );
+    let st = vec![pair("src/app.ts", "St")];
+    assert_eq!(annotated(&g, "st_field"), st, "class field");
+    assert_eq!(annotated(&g, "st_init"), st, "class field with initializer");
+    let none = Vec::<(String, String)>::new();
+    assert_eq!(
+        annotated(&g, "st_prop"),
+        none,
+        "interface property: no node"
+    );
+    assert_eq!(annotated(&g, "tparam"), none, "type parameter");
+    assert_eq!(annotated(&g, "plain"), none, "builtin class field");
+    assert_eq!(annotated(&g, "untyped"), none, "no annotation");
+}
+
+/// Contract: a nullable field binds its project type; a constructor
+/// parameter property binds its type; a type-literal member is no declared
+/// type's member and makes no node.
+#[test]
+fn test_nullable_field_and_parameter_property_bind_project_type() {
+    let g = graph(
+        &TypeScriptProvider::new().unwrap(),
+        &[(
+            "src/app.ts",
+            "export class St {}\n\
+             export class C {\n  opt: St | null = null;\n  constructor(private promoted: St, public n: number) {}\n}\n\
+             export type Lit = { lit_member: St };\n",
+        )],
+    );
+    let st = vec![pair("src/app.ts", "St")];
+    assert_eq!(annotated(&g, "opt"), st, "St | null");
+    assert_eq!(annotated(&g, "promoted"), st, "parameter property");
+    assert_eq!(annotated(&g, "n"), Vec::<(String, String)>::new());
+    assert_eq!(annotated(&g, "lit_member"), Vec::<(String, String)>::new());
+}

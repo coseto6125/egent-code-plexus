@@ -189,22 +189,27 @@
   ) @interface
 ) @export
 
-;; Properties — class fields (public_field_definition) and constructor parameter
+;; Properties — class fields (public_field_definition), constructor parameter
 ;; properties (required_parameter / optional_parameter with accessibility modifier).
+;; The declared type text feeds the `type_annotation` edge.
 ;; Interface property_signature is intentionally omitted: ref-gitnexus does not
-;; emit those as Property nodes.
+;; emit those as Property nodes (pinned by typescript_method_classification.rs
+;; `interface_property_signature_not_emitted`).
 (public_field_definition
   name: (property_identifier) @property.name
+  type: (type_annotation (_) @type)?
 ) @property
 
 (required_parameter
   (accessibility_modifier)
   pattern: (identifier) @property.name
+  type: (type_annotation (_) @type)?
 ) @property
 
 (optional_parameter
   (accessibility_modifier)
   pattern: (identifier) @property.name
+  type: (type_annotation (_) @type)?
 ) @property
 
 ;; Imports (Named)

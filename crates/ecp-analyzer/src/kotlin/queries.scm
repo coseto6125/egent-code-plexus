@@ -67,14 +67,23 @@
 (class_body
   (property_declaration
     (variable_declaration
-      (simple_identifier) @property.name)
+      (simple_identifier) @property.name
+      [(user_type) (nullable_type)]? @type)
   ) @property)
 ; An `enum class` declares its members in `enum_class_body`.
 (enum_class_body
   (property_declaration
     (variable_declaration
-      (simple_identifier) @property.name)
+      (simple_identifier) @property.name
+      [(user_type) (nullable_type)]? @type)
   ) @property)
+
+; Constructor properties — `class C(val x: St)`: a class_parameter with a
+; val/var keyword declares a property; a plain parameter does not.
+(class_parameter
+  (binding_pattern_kind)
+  (simple_identifier) @property.name
+  [(user_type) (nullable_type)]? @type) @property
 
 ; Variables — top-level val/var (direct child of source_file only).
 ; Anchored to source_file so class-body property_declarations don't produce

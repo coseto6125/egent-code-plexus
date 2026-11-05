@@ -139,9 +139,10 @@
 ;; Properties — `int x = 0;` / `final String y;`. The `(type ...)` sibling
 ;; (when present) carries the field's declared type; properties without an
 ;; explicit annotation (`var x = 0`, `dynamic v`) still match this capture
-;; with `@type` unset.
+;; with `@type` unset. The whole `(type)` text is captured so a generic field
+;; (`List<St>`) keeps its type arguments for the `type_annotation` edge.
 (declaration
-  (type (_) @type)?
+  (type)? @type
   (initialized_identifier_list
     (initialized_identifier name: (identifier) @property.name))) @property
 

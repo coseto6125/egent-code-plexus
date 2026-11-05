@@ -127,3 +127,21 @@ fn test_generic_return_annotation_binds_the_element_type() {
     let g = name_ref_support::graph(&DartProvider::new().unwrap(), &[("lib/app.dart", src)]);
     assert_eq!(annotated(&g, "all"), [pair("lib/app.dart", "Tok")]);
 }
+
+/// Contract: a field typed with a project class reaches it, nullable or not,
+/// and a generic field binds its project type argument, never the wrapper
+/// (`List`). A builtin and an untyped field bind nothing. The generic row
+/// needs `type_annotation_targets` to read the type arguments of a
+/// non-callable's annotation.
+#[test]
+fn test_field_annotation_binds_project_type_and_generic_argument() {
+    let src = "class St {}\n\nclass C {\n  St st_field = St();\n  St? opt;\n  List<St> st_list = [];\n  int plain = 1;\n  var untyped = 1;\n}\n";
+    let g = name_ref_support::graph(&DartProvider::new().unwrap(), &[("lib/app.dart", src)]);
+    let st = vec![pair("lib/app.dart", "St")];
+    assert_eq!(annotated(&g, "st_field"), st, "plain field");
+    assert_eq!(annotated(&g, "opt"), st, "nullable field");
+    assert_eq!(annotated(&g, "st_list"), st, "generic field binds St only");
+    let none = Vec::<(String, String)>::new();
+    assert_eq!(annotated(&g, "plain"), none, "builtin");
+    assert_eq!(annotated(&g, "untyped"), none, "no annotation");
+}

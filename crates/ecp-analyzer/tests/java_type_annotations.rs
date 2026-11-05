@@ -55,3 +55,35 @@ fn test_plain_and_generic_return_bind_the_project_type() {
     assert_eq!(annotated(&g, "make"), vec![pair("src/Tok.java", "Tok")]);
     assert_eq!(annotated(&g, "all"), vec![pair("src/Tok.java", "Tok")]);
 }
+
+/// Contract: a field typed with a project class reaches it, and a generic
+/// field binds its project type argument, never the wrapper (`List`). A
+/// builtin and a type parameter of the enclosing class bind nothing.
+/// Needs `type_annotation_targets` to read the type arguments of a
+/// non-callable's annotation; before that, `List<St>` looked up the whole
+/// text and bound nothing.
+#[test]
+fn test_field_annotation_binds_project_type_and_generic_argument() {
+    let g = graph(
+        &JavaProvider::new().unwrap(),
+        &[
+            ("src/St.java", "class St {}\n"),
+            (
+                "src/C.java",
+                "import java.util.List;\n\
+                 class C<T> {\n    St st_field;\n    List<St> st_list_field;\n    int plain;\n    T tparam;\n    List<String> strings;\n}\n",
+            ),
+        ],
+    );
+    let st = vec![pair("src/St.java", "St")];
+    assert_eq!(annotated(&g, "st_field"), st, "plain field");
+    assert_eq!(
+        annotated(&g, "st_list_field"),
+        st,
+        "generic field binds St only"
+    );
+    let none = Vec::<(String, String)>::new();
+    assert_eq!(annotated(&g, "plain"), none, "builtin");
+    assert_eq!(annotated(&g, "tparam"), none, "type parameter");
+    assert_eq!(annotated(&g, "strings"), none, "generic of builtins");
+}
