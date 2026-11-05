@@ -350,6 +350,7 @@ mod path_literal_backslash;
 mod php_anonymous_callbacks;
 mod php_blind_spots;
 mod php_call_user_func_literal;
+mod php_callable_reference;
 mod php_class_constant_membership;
 mod php_const_declaration;
 mod php_constructor;

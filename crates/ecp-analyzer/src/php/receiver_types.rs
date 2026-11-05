@@ -18,7 +18,9 @@ use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, extract_php_string_value,
 };
 use crate::calls::{attach_to_enclosing, construction_call, range_width, start_pos, Pos, PosRange};
-use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
+use ecp_core::analyzer::types::{
+    CallSite, NameRef, NameRefKind, RawNode, RawPathLiteral, RawSqlRef,
+};
 use ecp_core::graph::NodeKind;
 use tree_sitter::Node;
 
@@ -123,6 +125,9 @@ pub fn extract_php_calls_and_path_literals<'t>(
                     constructions.push((start_pos(n), callee));
                 }
             }
+            "function_call_expression" if is_first_class_callable(n) => {
+                reference_first_class_function(n, source, nodes);
+            }
             "function_call_expression" => {
                 if let Some(target) = literal_callable(n, source) {
                     attach_to_enclosing(
@@ -134,14 +139,14 @@ pub fn extract_php_calls_and_path_literals<'t>(
             }
             "member_call_expression" | "nullsafe_member_call_expression" => {
                 if let Some(callee) = php_member_callee(n, source, &ctx) {
-                    attach_to_enclosing(start_pos(n), callee, nodes);
+                    attach_call_or_reference(n, callee, nodes);
                 } else if has_runtime_name(n) {
                     dynamic_calls.push(n);
                 }
             }
             "scoped_call_expression" => {
                 if let Some(callee) = php_scoped_callee(n, source, &ctx) {
-                    attach_to_enclosing(start_pos(n), callee, nodes);
+                    attach_call_or_reference(n, callee, nodes);
                 } else if has_runtime_name(n) {
                     dynamic_calls.push(n);
                 }
@@ -175,6 +180,161 @@ pub fn extract_php_calls_and_path_literals<'t>(
         attach_to_enclosing(pos, callee, nodes);
     }
     (path_literals, sql_refs, dynamic_calls)
+}
+
+/// `f(...)`, `$o->m(...)`, `C::m(...)`: the first-class callable syntax hands
+/// the function on as a value and calls nothing.
+fn is_first_class_callable(call: Node<'_>) -> bool {
+    call.child_by_field_name("arguments").is_some_and(|args| {
+        args.named_child_count() == 1
+            && args
+                .named_child(0)
+                .is_some_and(|arg| arg.kind() == "variadic_placeholder")
+    })
+}
+
+/// Records `name` as a function value the function holding `pos` reads, in
+/// place of a call. Returns the holder's node index.
+fn attach_function_reference(pos: Pos, name: &str, nodes: &mut [RawNode]) -> Option<usize> {
+    // `attach_to_enclosing` picks the holder; the placeholder call it
+    // pushes is the last entry, so removing it leaves `calls` as it was.
+    let (holder, placeholder) = attach_to_enclosing(pos, String::new(), nodes)?;
+    nodes[holder].calls.remove(placeholder as usize);
+    let entry = NameRef::encode(name, NameRefKind::Function);
+    if !nodes[holder].field_reads.contains(&entry) {
+        nodes[holder].field_reads.push(entry);
+    }
+    Some(holder)
+}
+
+/// A member or scoped call is a call; the same call in first-class callable
+/// syntax whose receiver the parser typed (`$this->m(...)`, `C::m(...)`) is a
+/// `References` edge. An untyped receiver stays the untyped-member call.
+fn attach_call_or_reference(call: Node<'_>, callee: String, nodes: &mut [RawNode]) {
+    let pos = start_pos(call);
+    let typed_name = match CallSite::parse(&callee) {
+        CallSite::Plain(name) if is_first_class_callable(call) => {
+            Some(name.trim_start_matches('\\').to_string())
+        }
+        _ => None,
+    };
+    match typed_name {
+        Some(name) => {
+            attach_function_reference(pos, &name, nodes);
+        }
+        None => {
+            attach_to_enclosing(pos, callee, nodes);
+        }
+    }
+}
+
+/// `cb(...)` / `\App\cb(...)`: a reference to the function, not a call. The
+/// generic call walk already recorded the call, so it is taken back.
+fn reference_first_class_function(call: Node<'_>, source: &[u8], nodes: &mut [RawNode]) {
+    let Some(function) = call.child_by_field_name("function") else {
+        return;
+    };
+    if !matches!(function.kind(), "name" | "qualified_name") {
+        return;
+    }
+    let Some(recorded) = crate::calls::callee_name_from(call, source) else {
+        return;
+    };
+    let name = local_function_name(&recorded, enclosing_namespace(call, source));
+    let Some(holder) = attach_function_reference(start_pos(call), &name, nodes) else {
+        return;
+    };
+    let calls = &mut nodes[holder].calls;
+    if let Some(at) = calls
+        .iter()
+        .position(|c| CallSite::parse(c) == CallSite::Plain(&recorded))
+    {
+        calls.remove(at);
+    }
+}
+
+/// The namespace the code at `node` runs in: the enclosing braced
+/// `namespace X { .. }`, else the last `namespace X;` statement before it.
+fn enclosing_namespace<'s>(node: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
+    let name_of = |namespace: Node<'_>| {
+        namespace
+            .child_by_field_name("name")?
+            .utf8_text(source)
+            .ok()
+    };
+    let mut current = node;
+    while let Some(parent) = current.parent() {
+        match parent.kind() {
+            "namespace_definition" => return name_of(parent),
+            "program" => {
+                let mut cursor = parent.walk();
+                return parent
+                    .named_children(&mut cursor)
+                    .take_while(|c| c.start_byte() < node.start_byte())
+                    .filter(|c| {
+                        c.kind() == "namespace_definition"
+                            && c.child_by_field_name("body").is_none()
+                    })
+                    .last()
+                    .and_then(name_of);
+            }
+            _ => current = parent,
+        }
+    }
+    None
+}
+
+/// A function named with the namespace the code already runs in
+/// (`P\cb` inside `namespace P`) is the bare name `cb`, so it binds as the
+/// bare name does. Any other qualified name keeps its qualifier.
+fn local_function_name(name: &str, namespace: Option<&str>) -> String {
+    let name = name.strip_prefix('\\').unwrap_or(name);
+    match name.rsplit_once('\\') {
+        Some((qualifier, base)) if Some(qualifier) == namespace => base.to_string(),
+        _ => name.to_string(),
+    }
+}
+
+/// The class a parameter named `var` is declared with, in the innermost
+/// function around `node` that declares it. `None` for an undeclared,
+/// primitive, union or `self` / `static` / `parent` type.
+fn parameter_class(node: Node<'_>, var: &str, source: &[u8]) -> Option<String> {
+    let mut current = node.parent();
+    while let Some(n) = current {
+        current = n.parent();
+        if !matches!(
+            n.kind(),
+            "method_declaration" | "function_definition" | "anonymous_function" | "arrow_function"
+        ) {
+            continue;
+        }
+        let Some(params) = n.child_by_field_name("parameters") else {
+            continue;
+        };
+        let mut cursor = params.walk();
+        let declared = params.named_children(&mut cursor).find(|p| {
+            matches!(
+                p.kind(),
+                "simple_parameter" | "property_promotion_parameter"
+            ) && p
+                .child_by_field_name("name")
+                .and_then(|v| v.utf8_text(source).ok())
+                == Some(var)
+        });
+        let Some(declared) = declared else { continue };
+        let ty = declared.child_by_field_name("type")?;
+        let ty = if ty.kind() == "optional_type" {
+            ty.named_child(0)?
+        } else {
+            ty
+        };
+        if ty.kind() != "named_type" {
+            return None;
+        }
+        let class = qualified_ident(ty.named_child(0)?.utf8_text(source).ok()?)?;
+        return (!matches!(class, "self" | "static" | "parent")).then(|| class.to_string());
+    }
+    None
 }
 
 /// A callable that `call_user_func` / `call_user_func_array` names with a
@@ -224,6 +384,10 @@ fn class_of_array_element(n: Node<'_>, source: &[u8]) -> Option<LiteralCallable>
         }
         "variable_name" if n.utf8_text(source).ok()? == "$this" => {
             Some(LiteralCallable::This { method })
+        }
+        "variable_name" => {
+            let class = parameter_class(n, n.utf8_text(source).ok()?, source)?;
+            Some(LiteralCallable::Static { class, method })
         }
         "class_constant_access_expression" => {
             let scope = n.named_child(0)?;
@@ -326,7 +490,8 @@ pub(crate) fn passed_callable(call: Node<'_>, source: &[u8]) -> Option<String> {
         | "spl_autoload_register"
         | "set_error_handler"
         | "set_exception_handler"
-        | "header_register_callback" => 0,
+        | "header_register_callback"
+        | "is_callable" => 0,
         "array_filter"
         | "array_walk"
         | "array_walk_recursive"
@@ -359,7 +524,9 @@ pub(crate) fn passed_callable(call: Node<'_>, source: &[u8]) -> Option<String> {
     let last = u32::try_from(arg.named_child_count().checked_sub(1)?).ok()?;
     let value = arg.named_child(last)?;
     let target = match callable_from_value(value, source)? {
-        LiteralCallable::Function(name) => name,
+        LiteralCallable::Function(name) => {
+            local_function_name(&name, enclosing_namespace(call, source))
+        }
         LiteralCallable::Static { class, method } => format!("{class}.{method}"),
         LiteralCallable::Relative { method } | LiteralCallable::This { method } => {
             format!("{}.{method}", enclosing_class_of(call, &method, source)?)
