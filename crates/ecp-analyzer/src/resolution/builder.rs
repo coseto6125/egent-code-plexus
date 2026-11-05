@@ -3458,6 +3458,14 @@ fn resolve_base(
     targets
 }
 
+/// The `reason` of a type-annotation `Accesses` edge: the declared type, or
+/// a type inside a field's generic annotation.
+#[derive(Clone, Copy)]
+struct TypeReasons {
+    declared: StrRef,
+    argument: StrRef,
+}
+
 /// The `reason` of a resolved `Calls` edge, by the tier that resolved it.
 #[derive(Clone, Copy)]
 struct CallReasons {
@@ -3607,7 +3615,7 @@ fn pass2_emit_node_edges(
     current_node_idx: u32,
     reason_heritage: StrRef,
     reason_implements: StrRef,
-    reason_type: StrRef,
+    reason_type: TypeReasons,
     reason_call: CallReasons,
     reason_reads_field: StrRef,
     reason_variant: VariantReasons,
@@ -3855,7 +3863,7 @@ fn pass2_emit_node_edges(
         params: meta.map_or(&[][..], |m| m.params.as_slice()),
         type_params: meta.map_or(&[][..], |m| m.type_params.as_slice()),
     };
-    for (target_id, confidence) in type_ladder::type_annotation_targets(decl, |name| {
+    for (target_id, confidence, reason) in type_ladder::type_annotation_targets(decl, |name| {
         resolver.resolve_symbol(
             &local_graph.file_path,
             name,
@@ -3868,7 +3876,11 @@ fn pass2_emit_node_edges(
             target: target_id,
             rel_type: RelType::Accesses,
             confidence,
-            reason: reason_type,
+            reason: if reason == type_ladder::TYPE_ARGUMENT_REASON {
+                reason_type.argument
+            } else {
+                reason_type.declared
+            },
         });
     }
 
@@ -4228,7 +4240,10 @@ fn pass2_resolve_edges(
 ) -> Pass2Output {
     let reason_heritage = string_pool.add(heritage::EXTENDS_REASON);
     let reason_implements = string_pool.add(heritage::IMPLEMENTS_REASON);
-    let reason_type = string_pool.add(type_ladder::TYPE_ANNOTATION_REASON);
+    let reason_type = TypeReasons {
+        declared: string_pool.add(type_ladder::TYPE_ANNOTATION_REASON),
+        argument: string_pool.add(type_ladder::TYPE_ARGUMENT_REASON),
+    };
     let reason_call = CallReasons {
         call: string_pool.add("call"),
         nearest_copy: string_pool.add(NEAREST_COPY_REASON),

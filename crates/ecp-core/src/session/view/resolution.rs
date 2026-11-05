@@ -6128,7 +6128,7 @@ pub(super) fn resolve_edges(
                 params: &sym.params,
                 type_params: &sym.type_params,
             };
-            for (target, confidence) in type_annotation_targets(decl, |name| {
+            for (target, confidence, reason) in type_annotation_targets(decl, |name| {
                 *annotation_types.entry(name).or_insert_with(|| {
                     resolve_type(
                         graph,
@@ -6150,7 +6150,7 @@ pub(super) fn resolve_edges(
                     target,
                     rel_type: RelType::Accesses,
                     confidence,
-                    reason: TYPE_ANNOTATION_REASON,
+                    reason,
                 });
             }
 

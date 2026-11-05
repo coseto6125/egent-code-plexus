@@ -263,7 +263,7 @@ use crate::analyzer::record_nodes::{
     SCHEMA_FIELD_HAS_PROPERTY_REASON, TX_SCOPE_REASON,
 };
 use crate::analyzer::type_ladder::{
-    type_annotation_targets, AnnotatedDecl, TYPE_ANNOTATION_REASON,
+    type_annotation_targets, AnnotatedDecl, TYPE_ANNOTATION_REASON, TYPE_ARGUMENT_REASON,
 };
 use crate::analyzer::types::{
     innermost_enclosing, owner_key, LocalGraph, RawEventTopic, RawExportAlias, RawImport,
@@ -1456,7 +1456,7 @@ fn replays_record_edge(rel: RelType) -> bool {
 /// Every reason [`OverlayView::build`] puts on a [`ViewEdge`]. A cached view
 /// stores each reason as its index here; a view with an unlisted reason is
 /// never stored, so it costs a build per query as before the cache.
-const VIEW_EDGE_REASONS: [&str; 46] = [
+const VIEW_EDGE_REASONS: [&str; 47] = [
     OVERLOAD_SET_REASON,
     CLOSURE_REFERENCE_REASON,
     NEAREST_COPY_REASON,
@@ -1503,6 +1503,7 @@ const VIEW_EDGE_REASONS: [&str; 46] = [
     HERITAGE_REASONS[1],
     TYPE_ANNOTATION_REASON,
     CLASS_MEMBERSHIP_OWNER_REASON,
+    TYPE_ARGUMENT_REASON,
 ];
 
 pub(super) fn reason_index(reason: &str) -> Option<u8> {

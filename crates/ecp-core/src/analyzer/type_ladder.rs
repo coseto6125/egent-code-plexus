@@ -571,6 +571,13 @@ pub fn annotation_type_names(language: Language, raw: &str) -> Vec<&str> {
 /// annotation names.
 pub const TYPE_ANNOTATION_REASON: &str = "type_annotation";
 
+/// The reason of the `Accesses` edge from a field, property or variable to a
+/// project type inside its generic annotation (`List<Tok> lst` to `Tok`).
+/// Kept apart from [`TYPE_ANNOTATION_REASON`] because the overlay reads a
+/// field's one `type_annotation` edge as the field's declared type, and
+/// `lst` is no `Tok`.
+pub const TYPE_ARGUMENT_REASON: &str = "type_annotation:type_argument";
+
 /// One declaration's inputs to [`type_annotation_targets`]: its node's
 /// fields and its function meta's, as the index and the overlay hold them.
 #[derive(Clone, Copy)]
@@ -584,8 +591,8 @@ pub struct AnnotatedDecl<'a> {
     pub type_params: &'a [String],
 }
 
-/// The `(target, confidence)` of every `type_annotation` `Accesses` edge of
-/// one declaration, in emit order: the index's Pass 2 rule, which the
+/// The `(target, confidence, reason)` of every type-annotation `Accesses`
+/// edge of one declaration, in emit order: the index's Pass 2 rule, which the
 /// overlay replays for a dirty declaration through this same function.
 /// `resolve` is the declaring file's type lookup (`ResolveTarget::Type`):
 /// it yields every target a name binds (the index passes all of them, the
@@ -598,7 +605,9 @@ pub struct AnnotatedDecl<'a> {
 ///   is looked up whole.
 /// - Every declaration then binds each name its generic or container
 ///   annotation mentions ([`annotation_type_names`]) when the key does not
-///   reduce it: a field `List<St>` binds `St`. A function, method or
+///   reduce it: a field `List<St>` binds `St`, under
+///   [`TYPE_ARGUMENT_REASON`] for a declaration that is not callable and
+///   [`TYPE_ANNOTATION_REASON`] otherwise. A function, method or
 ///   constructor that captured no annotation binds `return_type` (its
 ///   function meta's) the same way, then every type of `params`, the meta's
 ///   flat `[name, type, ...]` list. A target bound already is not bound again.
@@ -608,7 +617,7 @@ pub struct AnnotatedDecl<'a> {
 pub fn type_annotation_targets<'a, T: IntoIterator<Item = (u32, f32)>>(
     decl: AnnotatedDecl<'a>,
     mut resolve: impl FnMut(&'a str) -> T,
-) -> Vec<(u32, f32)> {
+) -> Vec<(u32, f32, &'static str)> {
     let AnnotatedDecl {
         language,
         kind,
@@ -619,7 +628,7 @@ pub fn type_annotation_targets<'a, T: IntoIterator<Item = (u32, f32)>>(
         type_params,
     } = decl;
     let is_type_param = |name: &str| type_params.iter().any(|p| p == name);
-    let mut targets: Vec<(u32, f32)> = Vec::new();
+    let mut targets: Vec<(u32, f32, &'static str)> = Vec::new();
     if let Some(annotation) = type_annotation {
         let name = match return_type_key(annotation) {
             Some(key) if names_declaring_type_in(language, key) => owner_class.and_then(owner_key),
@@ -629,10 +638,16 @@ pub fn type_annotation_targets<'a, T: IntoIterator<Item = (u32, f32)>>(
         targets.extend(
             name.filter(|name| !is_type_param(name))
                 .into_iter()
-                .flat_map(&mut resolve),
+                .flat_map(&mut resolve)
+                .map(|(target, confidence)| (target, confidence, TYPE_ANNOTATION_REASON)),
         );
     }
     let callable = kind.is_callable();
+    let named_reason = if callable {
+        TYPE_ANNOTATION_REASON
+    } else {
+        TYPE_ARGUMENT_REASON
+    };
     let returned = match type_annotation {
         Some(annotation) if return_type_key(annotation).is_none() => Some(annotation),
         Some(_) => None,
@@ -648,8 +663,8 @@ pub fn type_annotation_targets<'a, T: IntoIterator<Item = (u32, f32)>>(
                 continue;
             }
             for (target, confidence) in resolve(name) {
-                if targets.iter().all(|&(bound, _)| bound != target) {
-                    targets.push((target, confidence));
+                if targets.iter().all(|&(bound, ..)| bound != target) {
+                    targets.push((target, confidence, named_reason));
                 }
             }
         }
@@ -1247,7 +1262,7 @@ mod tests {
                 .position(|known| *known == name)
                 .map(|at| (at as u32 + 1, 1.0))
         });
-        (targets.into_iter().map(|(id, _)| id).collect(), asked)
+        (targets.into_iter().map(|(id, ..)| id).collect(), asked)
     }
 
     /// Stands for: the index's Pass 2 rule, row by row. A declaring-type
@@ -1389,6 +1404,38 @@ mod tests {
                 assert!(!asked.iter().any(|n| n == "T"), "{label}: asked for T");
             }
         }
+    }
+
+    /// Stands for: a field's `type_annotation` edge is its declared type, which
+    /// the overlay reads back to type a receiver. `List<St> f` reaches `St`
+    /// only under the type-argument reason, so `f.m()` never binds `St.m`. A
+    /// bare field and a callable's generic return keep `type_annotation`.
+    #[test]
+    fn test_type_annotation_targets_field_generic_argument_tagged_apart() {
+        let reasons = |kind, annotation| {
+            let decl = AnnotatedDecl {
+                language: Language::CSharp,
+                kind,
+                type_annotation: Some(annotation),
+                owner_class: None,
+                return_type: None,
+                params: &[],
+                type_params: &[],
+            };
+            type_annotation_targets(decl, |name| (name == "St").then_some((1, 1.0)))
+                .into_iter()
+                .map(|(_, _, reason)| reason)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(reasons(NodeKind::Property, "St"), [TYPE_ANNOTATION_REASON]);
+        assert_eq!(
+            reasons(NodeKind::Property, "List<St>"),
+            [TYPE_ARGUMENT_REASON]
+        );
+        assert_eq!(
+            reasons(NodeKind::Method, "List<St>"),
+            [TYPE_ANNOTATION_REASON]
+        );
     }
 
     /// Stands for: the whole annotation text is looked up first, as the

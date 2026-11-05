@@ -1044,8 +1044,9 @@ fn full_build_rows(
 /// Stands for: a nullable field (`Tok? _fld`) or property (`Tok? Prop`) gets
 /// the `type_annotation` edge to `Tok`, as `Tok _fld` does. The index types
 /// the member as `Tok` (`return_type_key` strips the `?`), so Pass 2 has to
-/// resolve the same key. A generic (`List<Tok>?`) names no project type and
-/// an `int?` names no type of the project: neither gets an edge. Before the
+/// resolve the same key. A generic (`List<Tok>?`) reaches `Tok` through its
+/// type argument, as `ecp impact --target Tok` needs; an `int?` names no
+/// type of the project and gets no edge. Before the
 /// fix Pass 2 resolved the raw text `Tok?`, found nothing, and the list of
 /// `(member, type file)` ends was empty.
 #[test]
@@ -1061,7 +1062,11 @@ fn test_resolve_symbol_csharp_nullable_member_type_annotation_edge_reaches_type(
     ends.sort();
     assert_eq!(
         ends,
-        [pair("Prop", "Lib/Tok.cs"), pair("_fld", "Lib/Tok.cs")]
+        [
+            pair("Prop", "Lib/Tok.cs"),
+            pair("_fld", "Lib/Tok.cs"),
+            pair("_lst", "Lib/Tok.cs")
+        ]
     );
 }
 
