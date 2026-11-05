@@ -3229,6 +3229,22 @@ fn test_eval_exists_after_aggregating_with_unprojected_match_var_is_fresh() {
     });
 }
 
+// A fresh var named at both ends of one hop is one node: the pattern asks
+// for a self-call, and a -> b -> c has none.
+#[test]
+fn test_eval_exists_fresh_var_at_both_ends_requires_self_edge() {
+    with_three(|g| {
+        for q in [
+            "MATCH (a:Function) WITH count(*) AS k \
+             WHERE EXISTS { (a)-[:Calls]->(a) } RETURN k",
+            "MATCH (x:Function) WHERE EXISTS { (a)-[:Calls]-(a) } RETURN x.name",
+        ] {
+            let r = execute(&parse(q).unwrap(), g, None, Path::new(".")).unwrap();
+            assert!(r.rows.is_empty(), "{q}: {:?}", r.rows);
+        }
+    });
+}
+
 // `n AS m` carries the OPTIONAL MATCH null into a column: c's row holds a
 // null `m`, b's row holds c, which calls nothing.
 #[test]

@@ -402,6 +402,9 @@ pub fn annotation_type_names(language: Language, raw: &str) -> Vec<&str> {
     let mut words: Vec<Word<'_>> = Vec::new();
     let mut stack: Vec<Open> = Vec::new();
     let mut groups = 0usize;
+    // Per group: opened by `{`. A newline ends a member there as `;` does
+    // (a multi-line TS object type, a Go struct).
+    let mut brace_groups: Vec<bool> = Vec::new();
     let mut last_word: Option<(&str, usize)> = None;
     let mut rest = raw;
     while let Some(c) = rest.chars().next() {
@@ -452,11 +455,14 @@ pub fn annotation_type_names(language: Language, raw: &str) -> Vec<&str> {
             2
         } else {
             match c {
+                // Python has no angle brackets: `<` there is a comparison
+                // inside `Annotated` metadata.
+                '<' | '>' if language == Language::Python => {}
                 '(' | '{' | '[' | '<' => {
                     let value_from = (language == Language::Python && c == '[')
                         .then_some(last_word)
                         .flatten()
-                        .filter(|&(_, end)| end == at)
+                        .filter(|&(_, end)| raw[end..at].trim().is_empty())
                         .and_then(|(word, _)| match word.rsplit('.').next() {
                             Some("Literal") => Some(0),
                             Some("Annotated") => Some(1),
@@ -464,6 +470,7 @@ pub fn annotation_type_names(language: Language, raw: &str) -> Vec<&str> {
                         });
                     let group = matches!(c, '(' | '{').then(|| {
                         groups += 1;
+                        brace_groups.push(c == '{');
                         groups - 1
                     });
                     stack.push(Open {
@@ -477,6 +484,14 @@ pub fn annotation_type_names(language: Language, raw: &str) -> Vec<&str> {
                 }
                 ',' | ';' => {
                     if let Some(open) = stack.last_mut() {
+                        open.segment += 1;
+                    }
+                }
+                '\n' => {
+                    if let Some(open) = stack
+                        .last_mut()
+                        .filter(|open| open.group.is_some_and(|group| brace_groups[group]))
+                    {
                         open.segment += 1;
                     }
                 }
@@ -508,7 +523,9 @@ pub fn annotation_type_names(language: Language, raw: &str) -> Vec<&str> {
     match language {
         // `func(a St)`, `func(a, b St)`: a name leads each parameter, and in
         // a list where one parameter has a name, every one has. A type
-        // keyword (`func`, `map`, `chan`) leads a type instead.
+        // keyword (`func`, `map`, `chan`) leads a type instead. A struct
+        // field may be embedded (`struct { A; x B }`): a lone word there is
+        // a type.
         Language::Go => {
             let named = |members: &[usize]| members.len() > 1 && !words[members[0]].keyword;
             let named_groups: Vec<usize> = segments
@@ -517,7 +534,8 @@ pub fn annotation_type_names(language: Language, raw: &str) -> Vec<&str> {
                 .map(|((group, _), _)| *group)
                 .collect();
             for ((group, _), members) in &segments {
-                if named_groups.contains(group) && !words[members[0]].keyword {
+                let lone_embedded = brace_groups[*group] && members.len() == 1;
+                if named_groups.contains(group) && !lone_embedded && !words[members[0]].keyword {
                     dropped[members[0]] = true;
                 }
             }
@@ -1407,6 +1425,9 @@ mod tests {
             ),
             (Go, "func(ch <-chan St, b int)", &["St", "int"]),
             (Go, "struct { a St; b Other }", &["St", "Other"]),
+            // An embedded field is a type with no name before it.
+            (Go, "struct { A; x B }", &["A", "B"]),
+            (Go, "struct {\n\tA\n\tx B\n}", &["A", "B"]),
             (Dart, "void Function(St a)", &["Function", "St"]),
             (
                 Dart,
@@ -1433,6 +1454,8 @@ mod tests {
             (TypeScript, "(a: St, b?: Other) => void", &["St", "Other"]),
             (TypeScript, "(...rest: St[]) => Out", &["St", "Out"]),
             (TypeScript, "{ a: St; b: Other }", &["St", "Other"]),
+            // A newline separates object members as `;` does.
+            (TypeScript, "{\n  a: St\n  b: Other\n}", &["St", "Other"]),
             (JavaScript, "(a: St) => Out", &["St", "Out"]),
             (Kotlin, "(a: St) -> Unit", &["St", "Unit"]),
             (
@@ -1474,6 +1497,11 @@ mod tests {
             ("dict[str, \"St\"]", &["dict", "str", "St"]),
             ("Literal []", &["Literal"]),
             ("Literal[]", &["Literal"]),
+            // Whitespace before the bracket keeps the value context.
+            ("Literal ['St']", &["Literal"]),
+            ("Annotated [int, \"St\"]", &["Annotated", "int"]),
+            // Python has no angle brackets: `<` in metadata is a comparison.
+            ("Annotated[int, 1 < 2] | St", &["Annotated", "int", "St"]),
         ];
         for (raw, want) in rows {
             assert_eq!(

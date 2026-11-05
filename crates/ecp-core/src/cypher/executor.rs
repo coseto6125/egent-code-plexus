@@ -3002,8 +3002,10 @@ fn pattern_exists(
 /// "Does any edge match" for a single-hop pattern with no bound endpoint:
 /// scan the flat edge slice and short-circuit on the first hit.
 fn edge_scan_exists(n0: &NodePat, n1: &NodePat, rel: &RelPat, graph: MergedGraph<'_>) -> bool {
+    // `(a)-[]->(a)`: one var at both ends names one node, a self-edge.
+    let same_node = n0.var.is_some() && n0.var == n1.var;
     let fits = |a: u32, pa: &NodePat, z: u32, pz: &NodePat| {
-        node_matches(a, pa, graph) && node_matches(z, pz, graph)
+        (!same_node || a == z) && node_matches(a, pa, graph) && node_matches(z, pz, graph)
     };
     graph.all_edges().any(|edge| {
         if !rel.types.is_empty() && !rel.types.contains(&edge.rel_type()) {
