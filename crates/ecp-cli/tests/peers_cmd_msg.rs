@@ -509,7 +509,7 @@ fn test_resolve_target_session_lookalike_dirs_never_match_bare_target() {
         "alice~1234abcd.stale-ff00ff00",
         "alice~1234abc",
         "alice~1234abcde",
-        "alice~1234ABCD",
+        "alice~5678ABCD",
     ] {
         write_named_session(&sessions, lookalike, None);
     }

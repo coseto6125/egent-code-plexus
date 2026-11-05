@@ -1436,6 +1436,57 @@ fn test_file_text_is_recorded_empty_hash_proves_only_an_empty_file() {
     assert!(!engine.file_text_is_recorded(&f.worktree, FILLED));
 }
 
+/// Stands for: git under `core.autocrlf` checks a file out with CRLF line
+/// endings, or an editor writes it back with LF, and reports it clean, so no
+/// overlay refreshes it, and its lines are the indexed lines. The proof
+/// accepts the indexed text in the other line-ending form and refuses other
+/// text in either form.
+#[test]
+fn test_file_text_is_recorded_line_endings_only_differ_is_proven() {
+    const LF_INDEXED: &str = "src/lf.rs";
+    const CRLF_INDEXED: &str = "src/crlf.rs";
+    const EDITED: &str = "src/edited.rs";
+    let lf: &[u8] = b"fn a() {}\nfn b() {}\n";
+    let crlf: &[u8] = b"fn a() {}\r\nfn b() {}\r\n";
+    let f = Fixture::new();
+    write_graph_with_hashes(&f, &[(LF_INDEXED, lf), (CRLF_INDEXED, crlf), (EDITED, lf)]);
+    write_worktree(&f, LF_INDEXED, crlf, 1_000);
+    write_worktree(&f, CRLF_INDEXED, lf, 1_000);
+    write_worktree(&f, EDITED, b"fn a() {}\r\nfn c() {}\r\n", 1_000);
+    let engine = Engine::load(&f.graph_path).unwrap();
+    assert!(engine.file_text_is_recorded(&f.worktree, LF_INDEXED));
+    assert!(engine.file_text_is_recorded(&f.worktree, CRLF_INDEXED));
+    assert!(!engine.file_text_is_recorded(&f.worktree, EDITED));
+    let graph = engine.graph().unwrap();
+    let none: rustc_hash::FxHashMap<&str, u64> = rustc_hash::FxHashMap::default();
+    let text = |rel| recorded_bytes(&f.worktree, rel, recorded_hash(graph, &none, rel).unwrap());
+    assert_eq!(text(LF_INDEXED).as_deref(), Some(crlf));
+    assert_eq!(text(CRLF_INDEXED).as_deref(), Some(lf));
+    assert_eq!(text(EDITED), None);
+}
+
+/// Stands for: the line-ending forms are hashed in 64 KiB chunks. A CRLF
+/// split by a chunk boundary, and a lone CR that ends the file, keep their
+/// meaning across the cut.
+#[test]
+fn test_file_text_is_recorded_crlf_across_chunk_boundary_and_trailing_cr_is_proven() {
+    const SPLIT: &str = "src/split.rs";
+    const TRAILING: &str = "src/trailing.rs";
+    let head = "a".repeat(64 * 1024 - 1);
+    let split_lf = format!("{head}\nb\n");
+    let split_crlf = format!("{head}\r\nb\r\n");
+    let f = Fixture::new();
+    write_graph_with_hashes(
+        &f,
+        &[(SPLIT, split_lf.as_bytes()), (TRAILING, &b"a\nb\r"[..])],
+    );
+    write_worktree(&f, SPLIT, split_crlf.as_bytes(), 1_000);
+    write_worktree(&f, TRAILING, b"a\r\nb\r", 1_000);
+    let engine = Engine::load(&f.graph_path).unwrap();
+    assert!(engine.file_text_is_recorded(&f.worktree, SPLIT));
+    assert!(engine.file_text_is_recorded(&f.worktree, TRAILING));
+}
+
 const CALLER_RS: &str = "crates/a/src/lib.rs";
 const B_LIB: &str = "crates/b/src/lib.rs";
 const B_LIB_INDEXED: &str = "mod x;\nmod y;\npub use x::f;\n";

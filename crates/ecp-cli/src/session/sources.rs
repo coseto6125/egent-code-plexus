@@ -10,10 +10,11 @@ use std::cell::Cell;
 use std::fs;
 use std::io::Read;
 use std::path::Path;
-use xxhash_rust::xxh3::xxh3_64;
+use xxhash_rust::xxh3::{xxh3_64, Xxh3};
 
 /// Gives a file's text only when the text's `xxh3_64` is the hash the
-/// view's inputs recorded for the path. A dirty file's recorded hash is its
+/// view's inputs recorded for the path, or the text differs from the
+/// recorded one in its line endings only ([`recorded_bytes`]). A dirty file's recorded hash is its
 /// accepted fragment's (`AcceptedFragment::content_hash`); any other
 /// file's is `graph.bin`'s `File.content_hash` (the `u64`'s little-endian
 /// bytes, all zero for a file the index omitted, which records none).
@@ -80,34 +81,86 @@ where
     (file.content_hash != [0; 8]).then(|| u64::from_le_bytes(file.content_hash))
 }
 
-/// The bytes of `root/rel` when their `xxh3_64` is `recorded`. `None` for a
-/// file that is gone or unreadable: a missing file proves nothing, not even
-/// an empty recorded text. `None` also for a path that [`open_admitted`]
-/// refuses, and for a file whose length changed while it was read.
+/// The bytes of `root/rel` when their `xxh3_64` is `recorded`, or when only
+/// their line endings differ from that text (see [`text_is_recorded`]).
+/// `None` for a file that is gone or unreadable: a missing file proves
+/// nothing, not even an empty recorded text. `None` also for a path that
+/// [`open_admitted`] refuses, and for a file whose length changed while it
+/// was read.
 pub fn recorded_bytes(root: &Path, rel: &str, recorded: u64) -> Option<Vec<u8>> {
     let (file, len) = open_admitted(&root.join(rel), || resolve_size_cap(root))?;
     let mut bytes = Vec::with_capacity(usize::try_from(len).ok()?);
     file.take(len + 1).read_to_end(&mut bytes).ok()?;
-    (bytes.len() as u64 == len && xxh3_64(&bytes) == recorded).then_some(bytes)
+    (bytes.len() as u64 == len
+        && (xxh3_64(&bytes) == recorded || eol_form_is_recorded(bytes.as_slice(), len, recorded)))
+    .then_some(bytes)
 }
 
 /// Whether `root/rel` holds the text whose `xxh3_64` is `recorded`, hashed in
-/// a stream so the file is never loaded whole. The same paths as
+/// a stream so the file is never loaded whole. The text also counts when
+/// only its line endings differ from the recorded text: git under
+/// `core.autocrlf` reports such a file clean, so no overlay records it, and
+/// its line numbers are the recorded ones. The same paths as
 /// [`recorded_bytes`] prove nothing. `cap` gives the parse cap; it runs only
 /// for a file over the built-in default.
-pub fn text_is_recorded(
-    root: &Path,
-    rel: &str,
-    recorded: u64,
-    cap: impl FnOnce() -> SizeCap,
-) -> bool {
-    let Some((file, len)) = open_admitted(&root.join(rel), cap) else {
-        return false;
+pub fn text_is_recorded(root: &Path, rel: &str, recorded: u64, cap: impl Fn() -> SizeCap) -> bool {
+    let path = root.join(rel);
+    let proven = |check: fn(fs::File, u64, u64) -> bool| {
+        open_admitted(&path, &cap).is_some_and(|(file, len)| check(file, len, recorded))
     };
-    // At most one byte past the length the handle reported, so a file that
-    // grows while it is hashed is read no further and proves nothing.
-    let mut reader = file.take(len + 1);
-    let mut hasher = xxhash_rust::xxh3::Xxh3::new();
+    // The line-ending forms take a second read, made only when the file's
+    // own bytes miss, so a clean file is read once.
+    proven(raw_is_recorded) || proven(eol_form_is_recorded)
+}
+
+fn raw_is_recorded(file: fs::File, len: u64, recorded: u64) -> bool {
+    let mut hasher = Xxh3::new();
+    stream(file, len, |chunk| hasher.update(chunk)) && hasher.digest() == recorded
+}
+
+/// Whether `text`, `len` bytes long, has the `xxh3_64` `recorded` with every
+/// CRLF read as LF, or with every LF read as CRLF. Both forms are hashed in
+/// one pass through buffers of a fixed size.
+fn eol_form_is_recorded(text: impl Read, len: u64, recorded: u64) -> bool {
+    let (mut lf, mut crlf) = (Xxh3::new(), Xxh3::new());
+    let (mut lf_out, mut crlf_out) = (Vec::new(), Vec::new());
+    let (mut pending_cr, mut saw_lf) = (false, false);
+    let read_whole = stream(text, len, |chunk| {
+        lf_out.clear();
+        crlf_out.clear();
+        for &b in chunk {
+            if std::mem::take(&mut pending_cr) && b != b'\n' {
+                lf_out.push(b'\r');
+                crlf_out.push(b'\r');
+            }
+            match b {
+                b'\r' => pending_cr = true,
+                b'\n' => {
+                    saw_lf = true;
+                    lf_out.push(b'\n');
+                    crlf_out.extend_from_slice(b"\r\n");
+                }
+                _ => {
+                    lf_out.push(b);
+                    crlf_out.push(b);
+                }
+            }
+        }
+        lf.update(&lf_out);
+        crlf.update(&crlf_out);
+    });
+    if pending_cr {
+        lf.update(b"\r");
+        crlf.update(b"\r");
+    }
+    read_whole && saw_lf && (lf.digest() == recorded || crlf.digest() == recorded)
+}
+
+/// Feeds `text` to `sink` in chunks of at most 64 KiB, reading at most one
+/// byte past `len`, so a file that grows while it is read is read no further
+/// and proves nothing. Whether exactly `len` bytes were read.
+fn stream(text: impl Read, len: u64, mut sink: impl FnMut(&[u8])) -> bool {
+    let mut reader = text.take(len + 1);
     let mut buf = [0u8; 64 * 1024];
     let mut read = 0u64;
     loop {
@@ -115,13 +168,13 @@ pub fn text_is_recorded(
             Ok(0) => break,
             Ok(n) => {
                 read += n as u64;
-                hasher.update(&buf[..n]);
+                sink(&buf[..n]);
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
             Err(_) => return false,
         }
     }
-    read == len && hasher.digest() == recorded
+    read == len
 }
 
 /// `path` open for reading, with its length, when [`admitted_len`] admits it

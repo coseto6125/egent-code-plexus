@@ -220,7 +220,8 @@ mod heartbeat {
     #[test]
     fn test_hook_heartbeat_bash_cd_into_sibling_worktree_beats_that_worktree() {
         let fx = fixture();
-        let command = format!("cd {} && grep -rn needle .", fx.sibling.display());
+        // Quoted, as a Windows path's backslashes need to be.
+        let command = format!("cd '{}' && grep -rn needle .", fx.sibling.display());
         fx.fire(serde_json::json!({
             "session_id": SID, "cwd": fx.repo,
             "tool_name": "Bash", "tool_input": {"command": command},

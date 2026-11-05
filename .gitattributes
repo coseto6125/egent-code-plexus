@@ -18,3 +18,5 @@ scripts/site/** text eol=lf
 # hashes and the SHA of the repository the tests rebuild from them.
 crates/ecp-cli/tests/fixtures/stored-by-0.16.4/** -text
 crates/ecp-cli/tests/fixtures/stored-commits-by-0.16.4/** -text
+crates/ecp-cli/tests/fixtures/overlay-written-by-0.17.3/** -text
+crates/ecp-cli/tests/fixtures/session-written-by-0.17.3/** -text

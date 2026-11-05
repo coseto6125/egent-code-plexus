@@ -199,7 +199,7 @@ fn test_drain_and_render_peer_payload_other_worktree_dir_of_session_is_drained()
         format!("{sid}~worker~12345678"),
         format!("{sid}~deadbeef.dead.1762300000"),
         format!("{sid}~1234567"),
-        format!("{sid}~DEADBEEF"),
+        format!("{sid}~ABCDEF12"),
     ];
     for (i, name) in decoys.iter().enumerate() {
         seed_inbox(&sessions.join(name), sid, &format!("decoy-{i}"));

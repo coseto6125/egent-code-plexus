@@ -1900,6 +1900,9 @@ mod sha_lock_sweep_tests {
     /// Stands for: a launcher truncates the lock (`exec 9>`) before it locks
     /// it. A lock whose mtime turns recent after the sweep read its metadata
     /// stays, so no launcher between open and `flock` loses its inode.
+    /// Unix only: NTFS keeps the mtime when an empty file is truncated, and
+    /// Git for Windows ships no `flock`, so its launcher locks a directory.
+    #[cfg(unix)]
     #[test]
     fn test_locked_idle_lock_truncated_after_scan_refused() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1915,10 +1918,11 @@ mod sha_lock_sweep_tests {
             "truncated lock"
         );
 
+        // Held open so the new file cannot reuse the freed inode number.
+        let _old = fs::File::open(&lock).unwrap();
         fs::remove_file(&lock).unwrap();
         fs::write(&lock, b"").unwrap();
         super::tests::backdate(&lock, 25 * 3600);
-        #[cfg(unix)]
         assert!(
             super::locked_idle_lock(&lock, &seen).is_none(),
             "another inode"
