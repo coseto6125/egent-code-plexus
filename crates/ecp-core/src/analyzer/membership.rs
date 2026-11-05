@@ -321,9 +321,7 @@ mod tests {
     use super::*;
 
     /// One path's declarations, ids = row indexes, except that row `t` of
-    /// each `(t, s)` of `merged` is merged into row `s`. The first row of a
-    /// name stands for it, as the index's `SymbolTable::lookup_in_file`
-    /// does. No scoped rows.
+    /// each `(t, s)` of `merged` is merged into row `s`. No scoped rows.
     struct Rows<'a> {
         rows: &'a [MemberRow<'static>],
         merged: &'a [(usize, usize)],

@@ -6,8 +6,9 @@
 //! declaration: with `Cb.M` and `Other.M` in the tree, `Cb.M` binds only `Cb`.
 //!
 //! Contract of every language: a callee records no `function_reference`
-//! edge, a qualifier that is a variable or parameter binds nothing, and a
-//! qualifier that names nothing binds nothing.
+//! edge, a qualifier that is a typed variable or parameter binds the method
+//! its declared type owns (never a same-named class), an untyped one binds
+//! nothing, and a qualifier that names nothing binds nothing.
 //!
 //! Syntax a language does not have, so no test:
 //! - C++ `obj::f` cannot name a variable (`::` takes a namespace or a type),

@@ -56,7 +56,8 @@
 //!   ([`crate::analyzer::heritage::heritage_rel`]): each spelling looked up
 //!   as the supertypes pre-pass looks it up, after the dirty supertypes
 //!   exist, at the resolver's confidence.
-//! - **type annotations** — `Accesses` (reason [`TYPE_ANNOTATION_REASON`])
+//! - **type annotations** — `Accesses` (reason [`TYPE_ANNOTATION_REASON`],
+//!   or [`TYPE_ARGUMENT_REASON`] for a non-callable's generic arguments)
 //!   from each dirty declaration to the types its annotation, its return
 //!   type and its parameter types name, by the index's Pass 2 rule
 //!   ([`type_annotation_targets`]), each name looked up as the heritage

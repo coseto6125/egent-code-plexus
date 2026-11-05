@@ -65,8 +65,9 @@ fn alive_peers_reads_session_meta_json_not_meta_json() {
 
 #[test]
 fn alive_peers_skips_stale_suffixed_dirs() {
-    // Promotion case B renames stale sessions to "<sid>.stale-<sha>" — these
-    // must not appear as live peers even if the original pid is still alive.
+    // Promotion case B retired a session as "<sid>.stale-<sha>" before it
+    // used `.dead.*` names; leftovers of either shape must not appear as live
+    // peers even if the original pid is still alive.
     let dir = tempdir().unwrap();
     write_session(dir.path(), "alive-session", None);
     for retired in [

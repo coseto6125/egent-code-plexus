@@ -381,8 +381,7 @@ mod tests {
     #[test]
     fn java_style_same_named_constructor_gets_has_method_without_self_loop() {
         // Java emits `class Foo { public Foo() {} }` as Class "Foo" containing
-        // Method "Foo". lookup_in_file returns the class for both names; the
-        // member binds its own row.
+        // Method "Foo". The method binds the class row, never its own row.
         let nodes = vec![
             raw("Foo", NodeKind::Class, (1, 0, 10, 0)),
             raw("Foo", NodeKind::Method, (2, 4, 4, 4)),
