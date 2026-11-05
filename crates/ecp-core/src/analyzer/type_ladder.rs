@@ -547,6 +547,19 @@ pub fn annotation_type_names(language: Language, raw: &str) -> Vec<&str> {
 /// annotation names.
 pub const TYPE_ANNOTATION_REASON: &str = "type_annotation";
 
+/// One declaration's inputs to [`type_annotation_targets`]: its node's
+/// fields and its function meta's, as the index and the overlay hold them.
+#[derive(Clone, Copy)]
+pub struct AnnotatedDecl<'a> {
+    pub language: Language,
+    pub kind: NodeKind,
+    pub type_annotation: Option<&'a str>,
+    pub owner_class: Option<&'a str>,
+    pub return_type: Option<&'a str>,
+    pub params: &'a [String],
+    pub type_params: &'a [String],
+}
+
 /// The `(target, confidence)` of every `type_annotation` `Accesses` edge of
 /// one declaration, in emit order: the index's Pass 2 rule, which the
 /// overlay replays for a dirty declaration through this same function.
@@ -569,15 +582,18 @@ pub const TYPE_ANNOTATION_REASON: &str = "type_annotation";
 ///   enclosing type's) is a type variable, never a project type: no
 ///   resolution runs for it, even when a project type shares the name.
 pub fn type_annotation_targets<'a, T: IntoIterator<Item = (u32, f32)>>(
-    language: Language,
-    kind: NodeKind,
-    type_annotation: Option<&'a str>,
-    owner_class: Option<&'a str>,
-    return_type: Option<&'a str>,
-    params: &'a [String],
-    type_params: &[String],
+    decl: AnnotatedDecl<'a>,
     mut resolve: impl FnMut(&'a str) -> T,
 ) -> Vec<(u32, f32)> {
+    let AnnotatedDecl {
+        language,
+        kind,
+        type_annotation,
+        owner_class,
+        return_type,
+        params,
+        type_params,
+    } = decl;
     let is_type_param = |name: &str| type_params.iter().any(|p| p == name);
     let mut targets: Vec<(u32, f32)> = Vec::new();
     if let Some(annotation) = type_annotation {
@@ -1192,22 +1208,22 @@ mod tests {
         let params: Vec<String> = params.iter().map(|p| p.to_string()).collect();
         let type_params: Vec<String> = type_params.iter().map(|p| p.to_string()).collect();
         let mut asked = Vec::new();
-        let targets = type_annotation_targets(
+        let decl = AnnotatedDecl {
             language,
             kind,
-            annotation,
-            owner,
+            type_annotation: annotation,
+            owner_class: owner,
             return_type,
-            &params,
-            &type_params,
-            |name| {
-                asked.push(name.to_string());
-                names
-                    .iter()
-                    .position(|known| *known == name)
-                    .map(|at| (at as u32 + 1, 1.0))
-            },
-        );
+            params: &params,
+            type_params: &type_params,
+        };
+        let targets = type_annotation_targets(decl, |name| {
+            asked.push(name.to_string());
+            names
+                .iter()
+                .position(|known| *known == name)
+                .map(|at| (at as u32 + 1, 1.0))
+        });
         (targets.into_iter().map(|(id, _)| id).collect(), asked)
     }
 
@@ -1314,7 +1330,14 @@ mod tests {
     #[test]
     fn test_type_annotation_targets_type_param_skipped_before_resolution() {
         let known = &["T", "Foo"][..];
-        let rows: [(&str, Option<&str>, &[&str], &[&str], &[u32]); 5] = [
+        type Row<'r> = (
+            &'r str,
+            Option<&'r str>,
+            &'r [&'r str],
+            &'r [&'r str],
+            &'r [u32],
+        );
+        let rows: [Row; 5] = [
             ("param of T", None, &["v", "T"], &["T"], &[]),
             ("nested Vec<T>", None, &["v", "Vec<T>"], &["T"], &[]),
             ("return T", Some("T"), &[], &["T"], &[]),

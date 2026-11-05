@@ -260,7 +260,9 @@ use crate::analyzer::record_nodes::{
     EVENT_TOPIC_PUBLISHES_REASON, EVENT_TOPIC_SUBSCRIBES_REASON, PATH_LITERAL_SINK_REASONS,
     SCHEMA_FIELD_HAS_PROPERTY_REASON, TX_SCOPE_REASON,
 };
-use crate::analyzer::type_ladder::{type_annotation_targets, TYPE_ANNOTATION_REASON};
+use crate::analyzer::type_ladder::{
+    type_annotation_targets, AnnotatedDecl, TYPE_ANNOTATION_REASON,
+};
 use crate::analyzer::types::{
     innermost_enclosing, owner_key, LocalGraph, RawEventTopic, RawExportAlias, RawImport,
     RawPathLiteral, RawSchemaField, RawSqlRef, RawTxScope, Span, CLOSURE_REFERENCE_REASON,

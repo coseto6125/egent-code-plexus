@@ -5,9 +5,10 @@
 
 use super::{
     base_function_meta, construction_target, emit_closure_references, fragment_emits, reason_index,
-    span_of, type_annotation_targets, CallGap, DirtyNamesake, OverlayFileInput, OverlaySymbol,
-    SourceReader, ViewEdge, ViewNode, CS_STRICTEST_FLAGS, GAP_CS_ACCESS_DIRTY_TARGET,
-    GAP_CS_EXTENSION_DIRTY_DECLARATION, GAP_CS_PARTIAL_BARE_CALL, TYPE_ANNOTATION_REASON,
+    span_of, type_annotation_targets, AnnotatedDecl, CallGap, DirtyNamesake, OverlayFileInput,
+    OverlaySymbol, SourceReader, ViewEdge, ViewNode, CS_STRICTEST_FLAGS,
+    GAP_CS_ACCESS_DIRTY_TARGET, GAP_CS_EXTENSION_DIRTY_DECLARATION, GAP_CS_PARTIAL_BARE_CALL,
+    TYPE_ANNOTATION_REASON,
 };
 use crate::analyzer::csharp_access::{self, CallAccess};
 use crate::analyzer::csharp_extension::{self, ReceiverSite};
@@ -6007,32 +6008,32 @@ pub(super) fn resolve_edges(
             }
 
             // The index's Pass 2 `type_annotation` edges, after its calls.
-            for (target, confidence) in type_annotation_targets(
-                caller.language,
-                sym.kind,
-                sym.type_annotation.as_deref(),
-                sym.owner_class.as_deref(),
-                sym.return_type.as_deref(),
-                &sym.params,
-                &sym.type_params,
-                |name| {
-                    *annotation_types.entry(name).or_insert_with(|| {
-                        resolve_type(
-                            graph,
-                            name,
-                            file_ord,
-                            &file.imports,
-                            caller,
-                            &mut base_metas,
-                            (&types, &qualifiers),
-                            nodes,
-                            replaced,
-                            dirty_base,
-                            &facts,
-                        )
-                    })
-                },
-            ) {
+            let decl = AnnotatedDecl {
+                language: caller.language,
+                kind: sym.kind,
+                type_annotation: sym.type_annotation.as_deref(),
+                owner_class: sym.owner_class.as_deref(),
+                return_type: sym.return_type.as_deref(),
+                params: &sym.params,
+                type_params: &sym.type_params,
+            };
+            for (target, confidence) in type_annotation_targets(decl, |name| {
+                *annotation_types.entry(name).or_insert_with(|| {
+                    resolve_type(
+                        graph,
+                        name,
+                        file_ord,
+                        &file.imports,
+                        caller,
+                        &mut base_metas,
+                        (&types, &qualifiers),
+                        nodes,
+                        replaced,
+                        dirty_base,
+                        &facts,
+                    )
+                })
+            }) {
                 emit(ViewEdge {
                     source: from,
                     target,

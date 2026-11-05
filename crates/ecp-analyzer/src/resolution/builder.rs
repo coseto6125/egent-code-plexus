@@ -3845,23 +3845,23 @@ fn pass2_emit_node_edges(
     let meta = meta_lookup
         .get(&raw_node.span)
         .map(|&i| &local_graph.raw_function_metas[i]);
-    for (target_id, confidence) in type_ladder::type_annotation_targets(
+    let decl = type_ladder::AnnotatedDecl {
         language,
-        raw_node.kind,
-        raw_node.type_annotation.as_deref(),
-        raw_node.owner_class.as_deref(),
-        meta.map(|m| m.return_type.as_str()),
-        meta.map_or(&[][..], |m| m.params.as_slice()),
-        meta.map_or(&[][..], |m| m.type_params.as_slice()),
-        |name| {
-            resolver.resolve_symbol(
-                &local_graph.file_path,
-                name,
-                &local_graph.imports,
-                ResolveTarget::Type,
-            )
-        },
-    ) {
+        kind: raw_node.kind,
+        type_annotation: raw_node.type_annotation.as_deref(),
+        owner_class: raw_node.owner_class.as_deref(),
+        return_type: meta.map(|m| m.return_type.as_str()),
+        params: meta.map_or(&[][..], |m| m.params.as_slice()),
+        type_params: meta.map_or(&[][..], |m| m.type_params.as_slice()),
+    };
+    for (target_id, confidence) in type_ladder::type_annotation_targets(decl, |name| {
+        resolver.resolve_symbol(
+            &local_graph.file_path,
+            name,
+            &local_graph.imports,
+            ResolveTarget::Type,
+        )
+    }) {
         edges.push(Edge {
             source: current_node_idx,
             target: target_id,
