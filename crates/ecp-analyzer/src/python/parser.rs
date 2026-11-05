@@ -999,6 +999,32 @@ fn process_class_for_enum(
     }
 }
 
+/// The `mod.f` of a module-qualified or class-static function value: the
+/// text is `qualifier.member`, with the qualifier a bare identifier other
+/// than `self` and `cls` (an instance or class receiver, never a module). A
+/// chain (`a.b.c`) records only its outermost node. Whether the qualifier is
+/// a module, a class, or a variable is the resolver's call.
+fn qualified_attribute_value(
+    node: tree_sitter::Node<'_>,
+    source: &[u8],
+    _spec: &NameRefSpec,
+) -> Option<String> {
+    let object = node
+        .child_by_field_name("object")
+        .filter(|object| object.kind() == "identifier")?;
+    let attribute = node
+        .child_by_field_name("attribute")
+        .filter(|attribute| attribute.kind() == "identifier")?;
+    let qualifier = object.utf8_text(source).ok()?;
+    let inside_chain = node.parent().is_some_and(|parent| {
+        parent.kind() == "attribute" && parent.child_by_field_name("object") == Some(node)
+    });
+    if inside_chain || matches!(qualifier, "self" | "cls") {
+        return None;
+    }
+    Some(format!("{qualifier}.{}", attribute.utf8_text(source).ok()?))
+}
+
 impl PythonProvider {
     pub fn new() -> anyhow::Result<Self> {
         Ok(Self {
@@ -1189,6 +1215,8 @@ impl ParseSpec for PythonSpec {
             ],
             skip_parents: &["keyword_pattern"],
             global_decls: &["global_statement"],
+            qualified_values: &["attribute"],
+            qualified_name: qualified_attribute_value,
             ..NameRefSpec::EMPTY
         },
     });

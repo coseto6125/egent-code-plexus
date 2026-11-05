@@ -244,6 +244,36 @@ fn decorated_method_name(verb: tree_sitter::Node, source: &[u8]) -> Option<Strin
 }
 
 /// A query is bound to its grammar, so each grammar compiles its own.
+/// The `ns.f` of a namespace-qualified or class-static function value: the
+/// text is `qualifier.member`, with the qualifier a bare identifier. A chain
+/// (`a.b.c`) records only its outermost node, so an inner `a.b` is not a
+/// qualifier of its own; `this`, `super` and a computed or private member
+/// are no identifier pair and record nothing. Whether `ns` is a namespace
+/// import, a class, or a variable is the resolver's call.
+pub(crate) fn qualified_member_value(
+    node: tree_sitter::Node<'_>,
+    source: &[u8],
+    _spec: &NameRefSpec,
+) -> Option<String> {
+    let object = node
+        .child_by_field_name("object")
+        .filter(|object| object.kind() == "identifier")?;
+    let property = node
+        .child_by_field_name("property")
+        .filter(|property| property.kind() == "property_identifier")?;
+    let inside_chain = node.parent().is_some_and(|parent| {
+        parent.kind() == "member_expression" && parent.child_by_field_name("object") == Some(node)
+    });
+    if inside_chain {
+        return None;
+    }
+    Some(format!(
+        "{}.{}",
+        object.utf8_text(source).ok()?,
+        property.utf8_text(source).ok()?
+    ))
+}
+
 fn grammar<const TSX: bool>() -> tree_sitter::Language {
     match TSX {
         true => tree_sitter_typescript::LANGUAGE_TSX.into(),
@@ -428,6 +458,8 @@ impl<const TSX: bool> ParseSpec for TsSpec<TSX> {
                 "type_annotation",
                 "type_arguments",
             ],
+            qualified_values: &["member_expression"],
+            qualified_name: qualified_member_value,
             ..NameRefSpec::EMPTY
         },
     });

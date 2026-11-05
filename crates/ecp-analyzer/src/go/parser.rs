@@ -379,6 +379,35 @@ fn is_exported(name: &str) -> bool {
     name.chars().next().is_some_and(|c| c.is_uppercase())
 }
 
+/// The `pkg.F` of a package-qualified function value: the text is
+/// `qualifier.member`, with the qualifier a bare identifier. A chain
+/// (`a.b.c`) records only its outermost node. Whether the qualifier is a
+/// package, or a variable whose field holds a func, is the resolver's call.
+fn qualified_selector_value(
+    node: tree_sitter::Node<'_>,
+    source: &[u8],
+    _spec: &NameRefSpec,
+) -> Option<String> {
+    let operand = node
+        .child_by_field_name("operand")
+        .filter(|operand| operand.kind() == "identifier")?;
+    let field = node
+        .child_by_field_name("field")
+        .filter(|field| field.kind() == "field_identifier")?;
+    let inside_chain = node.parent().is_some_and(|parent| {
+        parent.kind() == "selector_expression"
+            && parent.child_by_field_name("operand") == Some(node)
+    });
+    if inside_chain {
+        return None;
+    }
+    Some(format!(
+        "{}.{}",
+        operand.utf8_text(source).ok()?,
+        field.utf8_text(source).ok()?
+    ))
+}
+
 impl GoProvider {
     pub fn new() -> anyhow::Result<Self> {
         Ok(Self {
@@ -963,6 +992,8 @@ impl ParseSpec for GoSpec {
                         ],
                         skip_fields: &[("keyed_element", "key")],
                         skip_kinds: &["import_declaration", "type_arguments"],
+                        qualified_values: &["selector_expression"],
+                        qualified_name: qualified_selector_value,
                         map_literal_types: &[
                             "map_type",
                             "slice_type",
