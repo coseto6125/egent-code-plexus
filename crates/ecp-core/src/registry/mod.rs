@@ -47,8 +47,12 @@ impl Registry {
         {
             use std::os::unix::fs::PermissionsExt;
             let mut perms = std::fs::metadata(home_ecp)?.permissions();
-            perms.set_mode(0o700);
-            std::fs::set_permissions(home_ecp, perms)?;
+            // A read-only filesystem (an agent sandbox) refuses even a chmod
+            // that changes nothing, so a read-only command must not issue one.
+            if perms.mode() & 0o777 != 0o700 {
+                perms.set_mode(0o700);
+                std::fs::set_permissions(home_ecp, perms)?;
+            }
         }
         let path = home_ecp.join("registry.json");
         let in_memory = RegistryFile::read_or_empty(&path)?;
