@@ -191,7 +191,14 @@ use std::path::Path;
 /// shared `type_annotation_targets` rule, and a `References` edge for a
 /// module- or type-qualified function value; a schema52 graph lacks the edges the overlay now
 /// rebuilds for a dirty file, so it would diverge from a reindex.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema53");
+/// schema54: new edges and nodes a schema53 graph lacks: a field's generic
+/// type arguments (`type_annotation:type_argument`), Rust / TS / Python /
+/// Kotlin / PHP field types, Rust tuple fields and Kotlin constructor
+/// properties, Python type aliases, Go generic-receiver methods, C/C++
+/// declarations across the header barrier, bare Rust paths into a child
+/// module, PHP callables and bound method values; module and namespace
+/// owners no longer claim free functions through `HasMethod`.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema54");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {
