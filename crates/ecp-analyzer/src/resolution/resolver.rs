@@ -37,6 +37,7 @@
 //! regression suite and `crates/ecp-analyzer/benches/resolver_lookup.rs` for
 //! the before/after bench numbers.
 
+use ecp_core::analyzer::c_family;
 use ecp_core::analyzer::csharp_access::{self, CallAccess};
 use ecp_core::analyzer::csharp_extension::{self, ReceiverSite};
 use ecp_core::analyzer::import_binding::{
@@ -809,7 +810,12 @@ impl<'r, 'a> NameTierFacts for IndexTiers<'r, 'a, '_> {
         let table = self.facts.0.symbol_table;
         let free_only = call.is_some_and(|call| call.free_only);
         let candidates = || table.global_field_candidates(name, target, free_only);
-        match table.c_family_field(NameTierFacts::caller(self), candidates) {
+        // The language test first: the caller's `FileMeta` costs a path
+        // lookup, and only a C / C++ caller reads it here.
+        let field = c_family::is_c_family(self.language)
+            .then(|| table.c_family_field(NameTierFacts::caller(self), self.source, candidates))
+            .flatten();
+        match field {
             Some(field) => {
                 name_tiers::global_tier(self, name, imports, target, call, || field.iter().copied())
             }
@@ -2501,7 +2507,8 @@ mod tests {
             ("types.hpp", "f", NodeKind::Function),
             ("cb.cpp", "f", NodeKind::Function),
         ]);
-        st.note_c_prototype(0, ecp_core::graph::FunctionMeta::FLAG_EXTERN);
+        st.note_c_callable(0, ecp_core::graph::FunctionMeta::FLAG_EXTERN, 0);
+        st.note_c_callable(1, 0, 0);
         let out = Resolver::new(&st).resolve_symbol(
             &PathBuf::from("main.cpp"),
             "f",
@@ -2518,7 +2525,9 @@ mod tests {
             ("a.cpp", "f", NodeKind::Function),
             ("b.cpp", "f", NodeKind::Function),
         ]);
-        st.note_c_prototype(0, ecp_core::graph::FunctionMeta::FLAG_EXTERN);
+        st.note_c_callable(0, ecp_core::graph::FunctionMeta::FLAG_EXTERN, 0);
+        st.note_c_callable(1, 0, 0);
+        st.note_c_callable(2, 0, 0);
         let out = Resolver::new(&st).resolve_symbol(
             &PathBuf::from("main.cpp"),
             "f",
@@ -2529,10 +2538,26 @@ mod tests {
     }
 
     #[test]
-    fn test_note_c_prototype_non_c_family_function_is_ignored() {
+    fn test_c_family_field_cpp_prototype_and_definition_without_meta_returns_no_edge() {
+        let mut st = st_with(&[
+            ("types.hpp", "f", NodeKind::Function),
+            ("cb.cpp", "f", NodeKind::Function),
+        ]);
+        st.note_c_callable(0, ecp_core::graph::FunctionMeta::FLAG_EXTERN, 0);
+        let out = Resolver::new(&st).resolve_symbol(
+            &PathBuf::from("main.cpp"),
+            "f",
+            &[],
+            ResolveTarget::Callable,
+        );
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn test_note_c_callable_non_c_family_function_is_ignored() {
         let mut st = st_with(&[("lib.rs", "f", NodeKind::Function)]);
-        st.note_c_prototype(0, ecp_core::graph::FunctionMeta::FLAG_EXTERN);
-        assert!(!st.is_c_prototype(0));
+        st.note_c_callable(0, ecp_core::graph::FunctionMeta::FLAG_EXTERN, 0);
+        assert!(st.c_callable(0).is_none());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! C and C++ names declared in a header, out of a dirty file: the session
 //! overlay binds what a full reindex of the edited tree binds, confidence
-//! included (the index's rule is `ecp-analyzer` `resolution/c_family.rs`,
-//! the overlay's `session/view/resolution.rs` `c_family_field`).
+//! included (both run `ecp-core` `analyzer/c_family.rs` `c_family_field`,
+//! over the index's candidates and over the overlay's).
 //!
 //! | case                                   | the reindex has                 |
 //! |----------------------------------------|---------------------------------|
@@ -10,10 +10,16 @@
 //! | C caller, `.h` prototype + `.cpp` definition | `Calls` to the definition |
 //! | C caller, function in a C++ namespace  | none                            |
 //! | C++ caller, two definitions + prototype | none                           |
+//! | C++ caller, prototype + overload of another arity | none                 |
+//! | C caller, prototype + C++ overload of another arity | `Calls` to the prototype |
+//! | C caller, prototype + vendor definition | `Calls` to the prototype       |
+//! | C++ caller, prototype + `static` C definition | `Calls` to the prototype |
+//! | C++ caller, prototype + `static` definition in another file | none     |
 //!
 //! Where the header or the definition is dirty too, the prototype (or the
 //! definition) is an overlay symbol, so the overlay reads its flags from
-//! the fresh parse instead of the base graph.
+//! the fresh parse instead of the base graph, and its parameter count from
+//! the fresh parse's parameters.
 
 use crate::parity;
 
@@ -221,4 +227,157 @@ fn mismatch(case: &Case) -> Option<String> {
 fn test_overlay_c_family_field_header_declarations_match_reindex() {
     let failures: Vec<String> = CASES.iter().filter_map(mismatch).collect();
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// `case` alone: the reindex emits its rows, and the overlay equals the
+/// reindex.
+fn assert_case(case: &Case) {
+    if let Some(failure) = mismatch(case) {
+        panic!("{failure}");
+    }
+}
+
+const OVERLOAD_HEADER: &str = "void lib_init(void);\n";
+const OVERLOAD_C_DEFINITION: &str = "#include \"api.h\"\nvoid lib_init(void) {}\n";
+const OVERLOAD_OTHER_ARITY: &str = "void lib_init(int mode) {}\n";
+const OVERLOAD_USER_BARE: &str = "#include \"api.h\"\nvoid run(void) { }\n";
+const OVERLOAD_USER: &str = "#include \"api.h\"\nvoid run(void) { lib_init(); }\n";
+
+/// Stands for: an overload of another parameter count settles no
+/// prototype, so the C++ caller gets no edge to it, whether the overload
+/// is clean or dirty.
+#[test]
+fn test_overlay_c_family_field_cpp_caller_overload_of_other_arity_matches_reindex() {
+    assert_case(&Case {
+        label: "C++ caller, prototype + overload of another arity, caller dirty",
+        files: &[
+            ("api.h", OVERLOAD_HEADER),
+            ("lib.c", OVERLOAD_C_DEFINITION),
+            ("other.cpp", OVERLOAD_OTHER_ARITY),
+            ("main.cpp", OVERLOAD_USER_BARE),
+        ],
+        edits: &[("main.cpp", OVERLOAD_USER)],
+        rel: RelType::Calls,
+        reason: None,
+        source_file: "main.cpp",
+        expected: &[],
+    });
+    assert_case(&Case {
+        label: "C++ caller, prototype + overload of another arity, overload and caller dirty",
+        files: &[
+            ("api.h", OVERLOAD_HEADER),
+            ("lib.c", OVERLOAD_C_DEFINITION),
+            ("other.cpp", ""),
+            ("main.cpp", OVERLOAD_USER_BARE),
+        ],
+        edits: &[
+            ("other.cpp", OVERLOAD_OTHER_ARITY),
+            ("main.cpp", OVERLOAD_USER),
+        ],
+        rel: RelType::Calls,
+        reason: None,
+        source_file: "main.cpp",
+        expected: &[],
+    });
+}
+
+/// Stands for: a C caller binds the prototype its header declares, never a
+/// C++ overload of another parameter count.
+#[test]
+fn test_overlay_c_family_field_c_caller_cpp_overload_of_other_arity_matches_reindex() {
+    assert_case(&Case {
+        label: "C caller, prototype + C++ overload of another arity",
+        files: &[
+            ("api.h", "void ext_init(void);\n"),
+            ("other.cpp", "void ext_init(int mode) {}\n"),
+            ("m.c", "#include \"api.h\"\nvoid crun(void) { }\n"),
+        ],
+        edits: &[(
+            "m.c",
+            "#include \"api.h\"\nvoid crun(void) { ext_init(); }\n",
+        )],
+        rel: RelType::Calls,
+        reason: None,
+        source_file: "m.c",
+        expected: &[("crun", "api.h", "ext_init")],
+    });
+}
+
+/// Stands for: a vendor definition settles no prototype for a non-vendor
+/// caller, so the caller keeps its edge to the prototype.
+#[test]
+fn test_overlay_c_family_field_c_caller_vendor_definition_matches_reindex() {
+    assert_case(&Case {
+        label: "C caller, prototype + vendor definition",
+        files: &[
+            ("api.h", "void ext_fn(void);\n"),
+            ("src/main.c", "#include \"../api.h\"\nvoid run(void) { }\n"),
+            ("vendor/unused/impl.cpp", "void ext_fn(void) {}\n"),
+        ],
+        edits: &[(
+            "src/main.c",
+            "#include \"../api.h\"\nvoid run(void) { ext_fn(); }\n",
+        )],
+        rel: RelType::Calls,
+        reason: None,
+        source_file: "src/main.c",
+        expected: &[("run", "api.h", "ext_fn")],
+    });
+}
+
+const STATIC_HEADER: &str = "void sfn(void);\n";
+const STATIC_C_DEFINITION: &str = "static void sfn(void) {}\n";
+const STATIC_USER_BARE: &str = "#include \"api.h\"\nvoid run() { }\n";
+const STATIC_USER: &str = "#include \"api.h\"\nvoid run() { sfn(); }\n";
+
+/// Stands for: a `static` C function never crosses to a C++ caller in
+/// another file, whether the definition is clean or dirty (its flags then
+/// come from the fresh parse).
+#[test]
+fn test_overlay_c_family_field_cpp_caller_static_c_definition_matches_reindex() {
+    assert_case(&Case {
+        label: "C++ caller, prototype + static C definition, caller dirty",
+        files: &[
+            ("api.h", STATIC_HEADER),
+            ("a.c", STATIC_C_DEFINITION),
+            ("main.cpp", STATIC_USER_BARE),
+        ],
+        edits: &[("main.cpp", STATIC_USER)],
+        rel: RelType::Calls,
+        reason: None,
+        source_file: "main.cpp",
+        expected: &[("run", "api.h", "sfn")],
+    });
+    assert_case(&Case {
+        label: "C++ caller, prototype + static C definition, definition and caller dirty",
+        files: &[
+            ("api.h", STATIC_HEADER),
+            ("a.c", ""),
+            ("main.cpp", STATIC_USER_BARE),
+        ],
+        edits: &[("a.c", STATIC_C_DEFINITION), ("main.cpp", STATIC_USER)],
+        rel: RelType::Calls,
+        reason: None,
+        source_file: "main.cpp",
+        expected: &[("run", "api.h", "sfn")],
+    });
+}
+
+/// Stands for: a `static` definition in another file settles no prototype,
+/// so the prototype and that definition stay ambiguous.
+#[test]
+fn test_overlay_c_family_field_cpp_caller_static_definition_in_other_file_matches_reindex() {
+    assert_case(&Case {
+        label: "C++ caller, prototype + static definition in another file",
+        files: &[
+            ("types.hpp", "void sf();\n"),
+            ("a.cpp", "static void sf() {}\n"),
+            ("main.cpp", "#include \"types.hpp\"\nvoid run() { }\n"),
+        ],
+        edits: &[("main.cpp", "#include \"types.hpp\"\nvoid run() { sf(); }\n")],
+        rel: RelType::Calls,
+        reason: None,
+        source_file: "main.cpp",
+        expected: &[],
+    });
 }

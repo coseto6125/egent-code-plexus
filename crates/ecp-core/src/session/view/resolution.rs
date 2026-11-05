@@ -10,6 +10,7 @@ use super::{
     GAP_CS_ACCESS_DIRTY_TARGET, GAP_CS_EXTENSION_DIRTY_DECLARATION, GAP_CS_PARTIAL_BARE_CALL,
     TYPE_ANNOTATION_REASON,
 };
+use crate::analyzer::c_family::{c_family_field, is_c_family, CCallable};
 use crate::analyzer::csharp_access::{self, CallAccess};
 use crate::analyzer::csharp_extension::{self, ReceiverSite};
 use crate::analyzer::decorates::{decorates_edges, DECORATES_REASON};
@@ -62,7 +63,7 @@ use crate::analyzer::types::{
 };
 use crate::contracts::identity::lexical_parents_in;
 use crate::file_category::{pick_global, FileMeta, GlobalPick, Language};
-use crate::graph::{ArchivedZeroCopyGraph, FunctionMeta, NodeKind, RelType};
+use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
 use crate::registry::os_path_to_slash;
 use crate::session::closure::ConfigEdits;
 use crate::session::import_scope::{stored_file_meta, stored_language, ImportScope, Module};
@@ -2125,20 +2126,29 @@ impl<'a> OverlayFacts<'a> {
         id < self.base_len() || self.dirty_flags.contains_key(&id)
     }
 
-    /// The index's `SymbolTable::is_c_prototype`: a C or C++ function whose
-    /// `FunctionMeta::flags` carry `FLAG_EXTERN`, a declaration without a
-    /// body. A dirty function reads the flags of its fresh parse.
-    fn is_c_prototype(&self, id: u32) -> bool {
-        let flags = match self.dirty_flags.get(&id) {
-            Some(&flags) => flags,
-            None if id < self.base_len() => {
-                base_function_meta(self.graph, id).map_or(0, |meta| meta.flags.to_native())
+    /// The index's `SymbolTable::c_callable`: the flags and the parameter
+    /// count of a C or C++ function or method, from the archived
+    /// `FunctionMeta` of a base node and from the fresh parse of a dirty
+    /// one. `None` when no meta was paired with it.
+    fn c_callable(&self, id: u32) -> Option<CCallable> {
+        // The kind test first: it is cheap, and most candidates fail it.
+        if !matches!(self.kind_of(id), NodeKind::Function | NodeKind::Method)
+            || !is_c_family(self.meta_of(id).language)
+        {
+            return None;
+        }
+        match id.checked_sub(self.base_len()) {
+            Some(offset) => {
+                let node = &self.nodes[offset as usize];
+                let &(file, start) = self.rust.dirty.get(&*node.rel_path)?;
+                let symbol = file.symbols.get((id - start) as usize)?;
+                symbol
+                    .flags
+                    .map(|flags| CCallable::new(flags, symbol.params.len()))
             }
-            None => 0,
-        };
-        flags & FunctionMeta::FLAG_EXTERN != 0
-            && self.kind_of(id) == NodeKind::Function
-            && is_c_family(self.meta_of(id).language)
+            None => base_function_meta(self.graph, id)
+                .map(|meta| CCallable::new(meta.flags.to_native(), meta.params.len())),
+        }
     }
 
     /// The namespaces the C# file `file` declares (`.`-joined), the index's
@@ -2685,94 +2695,6 @@ fn resolve_overlay_name_ref(
     )
 }
 
-fn is_c_family(language: Language) -> bool {
-    matches!(language, Language::C | Language::Cpp)
-}
-
-/// The kinds a C declaration and a C++ declaration share.
-fn c_nameable(kind: NodeKind) -> bool {
-    matches!(
-        kind,
-        NodeKind::Function
-            | NodeKind::Struct
-            | NodeKind::Enum
-            | NodeKind::Typedef
-            | NodeKind::Variable
-            | NodeKind::Const
-            | NodeKind::Macro
-    )
-}
-
-/// The index's `c_family::c_family_field` (`ecp-analyzer`
-/// `resolution/c_family.rs`, which states the rules), over the overlay's
-/// candidates; the two must agree on a dirty file. The Tier 3 field of a C
-/// or C++ `caller`: the own-language candidates, joined by the other family
-/// language's owner-less C-nameable ones when no own-language candidate is
-/// a definition, those re-labelled with the caller's language and their own
-/// vendor flag; then a prototype leaves when a definition with its owner is
-/// in the field. `None` when `candidates` already is the field.
-fn c_family_field<F, I>(
-    facts: &F,
-    caller: FileMeta,
-    candidates: impl Fn() -> I,
-    is_prototype: impl Fn(u32) -> bool,
-) -> Option<Vec<(u32, FileMeta)>>
-where
-    F: PickFacts + ?Sized,
-    I: Iterator<Item = (u32, FileMeta)>,
-{
-    if !is_c_family(caller.language) {
-        return None;
-    }
-    let (mut prototype, mut definition) = (false, false);
-    for (id, _) in candidates().filter(|&(_, meta)| caller.admits(meta)) {
-        if is_prototype(id) {
-            prototype = true;
-        } else {
-            definition = true;
-        }
-    }
-    if definition && !prototype {
-        return None;
-    }
-    let mut field: Vec<(u32, FileMeta)> = candidates()
-        .filter(|&(_, meta)| caller.admits(meta))
-        .collect();
-    if !definition {
-        field.extend(
-            candidates()
-                .filter(|&(id, meta)| {
-                    is_c_family(meta.language)
-                        && meta.language != caller.language
-                        && facts.owner(id).is_none()
-                        && c_nameable(facts.kind(id))
-                })
-                .map(|(id, meta)| {
-                    (
-                        id,
-                        FileMeta {
-                            is_vendor: meta.is_vendor,
-                            ..caller
-                        },
-                    )
-                }),
-        );
-    }
-    // A C++ `void ns::f() {}` parses as a Method owned by `ns`, so a
-    // definition of either callable kind settles `ns`'s prototype `f`.
-    let defined: FxHashSet<Option<&str>> = field
-        .iter()
-        .filter(|&&(id, _)| {
-            !is_prototype(id) && matches!(facts.kind(id), NodeKind::Function | NodeKind::Method)
-        })
-        .map(|&(id, _)| facts.owner(id))
-        .collect();
-    if !defined.is_empty() {
-        field.retain(|&(id, _)| !(is_prototype(id) && defined.contains(&facts.owner(id))));
-    }
-    Some(field)
-}
-
 /// The kind of the merged-space `idx`.
 fn node_kind(graph: &ArchivedZeroCopyGraph, nodes: &[ViewNode], idx: u32) -> NodeKind {
     match idx.checked_sub(graph.nodes.len() as u32) {
@@ -3093,8 +3015,8 @@ impl<'v, 'a> NameTierFacts for OverlayTiers<'v, 'a, '_> {
                 .chain(overlay_candidates.iter().copied())
                 .filter(admits)
         };
-        let hit = match c_family_field(facts, self.caller, candidates, |id| {
-            facts.is_c_prototype(id)
+        let hit = match c_family_field(facts, self.caller, self.source(), candidates, |id| {
+            facts.c_callable(id)
         }) {
             Some(field) => {
                 name_tiers::global_tier(self, name, imports, target, call, || field.iter().copied())

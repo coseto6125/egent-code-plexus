@@ -1,4 +1,4 @@
-//! C and C++ names declared in a header (`resolution/c_family.rs`).
+//! C and C++ names declared in a header (`ecp-core` `analyzer/c_family.rs`).
 //!
 //! A `.h` file is C++ by extension, so before the family rule a C caller
 //! bound none of the types and functions its headers declare. A C++
@@ -12,8 +12,13 @@
 //! - A C caller binds an owner-less struct, typedef or function a `.h`
 //!   declares; a C++ caller binds the C definition of a function its header
 //!   declares.
-//! - A prototype and one definition are one target, the definition. Two
-//!   definitions stay ambiguous: no edge.
+//! - A prototype and one definition are one target, the definition, when
+//!   both have the same owner and parameter count and the caller can reach
+//!   the definition. Two definitions stay ambiguous: no edge.
+//! - A definition of another parameter count is another overload: it never
+//!   settles the prototype, and a C caller binds the header prototype
+//!   rather than a C++ overload. A vendor definition, or a `static` one in
+//!   another file, settles nothing either.
 //! - An own-language definition wins over the other family language's.
 //! - C never binds a C++-only declaration: one inside a namespace, or a
 //!   class. No other language pair crosses: Rust binds no C function.
@@ -269,4 +274,109 @@ fn test_c_family_field_cpp_caller_header_prototype_c_definition_binds_definition
         ("main.cpp", "#include \"api.h\"\nvoid run() { c_impl(); }\n"),
     ]);
     assert_eq!(calls(&g, "run"), vec![pair("impl.c", "c_impl")]);
+}
+
+// ── What settles a prototype ────────────────────────────────────────────
+
+/// Stands for: a definition of another parameter count is no definition of
+/// the prototype, so the C++ caller gets no edge to that overload.
+#[test]
+fn test_c_family_field_cpp_caller_overload_of_other_arity_binds_nothing() {
+    let g = graph(&[
+        ("api.h", "void lib_init(void);\n"),
+        ("lib.c", "#include \"api.h\"\nvoid lib_init(void) {}\n"),
+        ("other.cpp", "void lib_init(int mode) {}\n"),
+        (
+            "main.cpp",
+            "#include \"api.h\"\nvoid run(void) { lib_init(); }\n",
+        ),
+    ]);
+    assert_eq!(calls(&g, "run"), Vec::<(String, String)>::new());
+}
+
+/// Stands for: a C caller binds the prototype its header declares, never a
+/// C++ overload of another parameter count.
+#[test]
+fn test_c_family_field_c_caller_cpp_overload_of_other_arity_binds_prototype() {
+    let g = graph(&[
+        ("api.h", "void ext_init(void);\n"),
+        ("other.cpp", "void ext_init(int mode) {}\n"),
+        (
+            "m.c",
+            "#include \"api.h\"\nvoid crun(void) { ext_init(); }\n",
+        ),
+    ]);
+    assert_eq!(calls(&g, "crun"), vec![pair("api.h", "ext_init")]);
+}
+
+/// Stands for: a vendor definition settles no prototype for a non-vendor
+/// caller, so the caller keeps its edge to the prototype.
+#[test]
+fn test_c_family_field_c_caller_vendor_definition_binds_prototype() {
+    let g = graph(&[
+        ("api.h", "void ext_fn(void);\n"),
+        (
+            "src/main.c",
+            "#include \"../api.h\"\nvoid run(void) { ext_fn(); }\n",
+        ),
+        ("vendor/unused/impl.cpp", "void ext_fn(void) {}\n"),
+    ]);
+    assert_eq!(calls(&g, "run"), vec![pair("api.h", "ext_fn")]);
+}
+
+/// Stands for: a `static` C function never crosses to a C++ caller in
+/// another file, so the caller keeps its edge to the prototype.
+#[test]
+fn test_c_family_field_cpp_caller_static_c_definition_binds_prototype() {
+    let g = graph(&[
+        ("api.h", "void sfn(void);\n"),
+        ("a.c", "static void sfn(void) {}\n"),
+        ("main.cpp", "#include \"api.h\"\nvoid run() { sfn(); }\n"),
+    ]);
+    assert_eq!(calls(&g, "run"), vec![pair("api.h", "sfn")]);
+}
+
+/// Stands for: a `static` definition in another file settles no prototype,
+/// so the prototype and that definition stay ambiguous.
+#[test]
+fn test_c_family_field_cpp_caller_static_definition_in_other_file_binds_nothing() {
+    let g = graph(&[
+        ("types.hpp", "void sf();\n"),
+        ("a.cpp", "static void sf() {}\n"),
+        ("main.cpp", "#include \"types.hpp\"\nvoid run() { sf(); }\n"),
+    ]);
+    assert_eq!(calls(&g, "run"), Vec::<(String, String)>::new());
+}
+
+/// Stands for: the parameter count ignores names, so an unnamed-parameter
+/// prototype is settled by its named definition.
+#[test]
+fn test_c_family_field_cpp_unnamed_parameter_prototype_binds_definition() {
+    let g = graph(&[
+        ("api.hpp", "void put(int, char *);\n"),
+        ("put.cpp", "void put(int n, char *s) {}\n"),
+        (
+            "main.cpp",
+            "#include \"api.hpp\"\nvoid run() { put(1, nullptr); }\n",
+        ),
+    ]);
+    assert_eq!(calls(&g, "run"), vec![pair("put.cpp", "put")]);
+}
+
+/// Stands for: a variadic prototype and its definition count the `...`
+/// alike, so the definition settles the prototype.
+#[test]
+fn test_c_family_field_c_caller_variadic_prototype_binds_definition() {
+    let g = graph(&[
+        ("log.h", "int log_msg(const char *fmt, ...);\n"),
+        (
+            "log.cpp",
+            "int log_msg(const char *fmt, ...) { return 0; }\n",
+        ),
+        (
+            "m.c",
+            "#include \"log.h\"\nvoid run(void) { log_msg(\"x\", 1); }\n",
+        ),
+    ]);
+    assert_eq!(calls(&g, "run"), vec![pair("log.cpp", "log_msg")]);
 }
