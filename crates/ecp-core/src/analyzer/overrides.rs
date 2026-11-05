@@ -1262,6 +1262,7 @@ mod tests {
             params: params.iter().map(|p| p.to_string()).collect(),
             return_type: String::new(),
             decorators: Vec::new(),
+            type_params: Vec::new(),
         }
     }
 

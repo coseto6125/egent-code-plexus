@@ -565,6 +565,9 @@ pub const TYPE_ANNOTATION_REASON: &str = "type_annotation";
 ///   `return_type` (its function meta's) when the parse captured no
 ///   annotation. Then every type of `params`, the meta's flat
 ///   `[name, type, ...]` list. A target bound already is not bound again.
+/// - A name in `type_params` (the declaration's own generic list and its
+///   enclosing type's) is a type variable, never a project type: no
+///   resolution runs for it, even when a project type shares the name.
 pub fn type_annotation_targets<'a, T: IntoIterator<Item = (u32, f32)>>(
     language: Language,
     kind: NodeKind,
@@ -572,8 +575,10 @@ pub fn type_annotation_targets<'a, T: IntoIterator<Item = (u32, f32)>>(
     owner_class: Option<&'a str>,
     return_type: Option<&'a str>,
     params: &'a [String],
+    type_params: &[String],
     mut resolve: impl FnMut(&'a str) -> T,
 ) -> Vec<(u32, f32)> {
+    let is_type_param = |name: &str| type_params.iter().any(|p| p == name);
     let mut targets: Vec<(u32, f32)> = Vec::new();
     if let Some(annotation) = type_annotation {
         let name = match return_type_key(annotation) {
@@ -581,7 +586,11 @@ pub fn type_annotation_targets<'a, T: IntoIterator<Item = (u32, f32)>>(
             Some(key) => Some(key),
             None => Some(annotation),
         };
-        targets.extend(name.into_iter().flat_map(&mut resolve));
+        targets.extend(
+            name.filter(|name| !is_type_param(name))
+                .into_iter()
+                .flat_map(&mut resolve),
+        );
     }
     if !kind.is_callable() {
         return targets;
@@ -596,6 +605,9 @@ pub fn type_annotation_targets<'a, T: IntoIterator<Item = (u32, f32)>>(
         .chain(params.as_chunks::<2>().0.iter().map(|[_, ty]| ty.as_str()));
     for text in texts {
         for name in annotation_type_names(language, text) {
+            if is_type_param(name) {
+                continue;
+            }
             for (target, confidence) in resolve(name) {
                 if targets.iter().all(|&(bound, _)| bound != target) {
                     targets.push((target, confidence));
@@ -1154,7 +1166,31 @@ mod tests {
         params: &[&str],
         names: &[&str],
     ) -> (Vec<u32>, Vec<String>) {
+        annotation_targets_generic(
+            language,
+            kind,
+            annotation,
+            owner,
+            return_type,
+            params,
+            &[],
+            names,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn annotation_targets_generic(
+        language: Language,
+        kind: NodeKind,
+        annotation: Option<&str>,
+        owner: Option<&str>,
+        return_type: Option<&str>,
+        params: &[&str],
+        type_params: &[&str],
+        names: &[&str],
+    ) -> (Vec<u32>, Vec<String>) {
         let params: Vec<String> = params.iter().map(|p| p.to_string()).collect();
+        let type_params: Vec<String> = type_params.iter().map(|p| p.to_string()).collect();
         let mut asked = Vec::new();
         let targets = type_annotation_targets(
             language,
@@ -1163,6 +1199,7 @@ mod tests {
             owner,
             return_type,
             &params,
+            &type_params,
             |name| {
                 asked.push(name.to_string());
                 names
@@ -1269,6 +1306,42 @@ mod tests {
             let (got, _) =
                 annotation_targets(language, kind, annotation, owner, return_type, params, st);
             assert_eq!(got, want, "{label}");
+        }
+    }
+
+    /// Stands for: a declaration's type variable is no project type, even
+    /// when one shares its name; a sibling name and a bound still bind.
+    #[test]
+    fn test_type_annotation_targets_type_param_skipped_before_resolution() {
+        let known = &["T", "Foo"][..];
+        let rows: [(&str, Option<&str>, &[&str], &[&str], &[u32]); 5] = [
+            ("param of T", None, &["v", "T"], &["T"], &[]),
+            ("nested Vec<T>", None, &["v", "Vec<T>"], &["T"], &[]),
+            ("return T", Some("T"), &[], &["T"], &[]),
+            (
+                "bound still binds",
+                None,
+                &["v", "Foo", "w", "T"],
+                &["T"],
+                &[2],
+            ),
+            ("empty list binds", None, &["v", "T"], &[], &[1]),
+        ];
+        for (label, annotation, params, type_params, want) in rows {
+            let (got, asked) = annotation_targets_generic(
+                Language::Rust,
+                NodeKind::Function,
+                annotation,
+                None,
+                None,
+                params,
+                type_params,
+                known,
+            );
+            assert_eq!(got, want, "{label}");
+            if !type_params.is_empty() {
+                assert!(!asked.iter().any(|n| n == "T"), "{label}: asked for T");
+            }
         }
     }
 

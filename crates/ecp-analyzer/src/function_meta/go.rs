@@ -16,7 +16,7 @@
 //!   immediately preceding the function are captured (LLM-relevant for optimization queries).
 //!   Captured by scanning raw source bytes above the function start line.
 
-use super::{extract_with, node_text, ts_span};
+use super::{extract_with, go_declared_type_params, node_text, scoped_type_params, ts_span};
 use ecp_core::analyzer::types::{RawFunctionMeta, RawNode};
 use ecp_core::graph::{FileCategory, FunctionMeta};
 use tree_sitter::Node;
@@ -103,12 +103,21 @@ fn extract_one(
     // on the lines immediately before this function. We scan source lines.
     let decorators = collect_go_directives(lines, fn_node.start_position().row);
 
+    let mut type_params = scoped_type_params(
+        fn_node,
+        source,
+        &["type_parameter_list"],
+        go_declared_type_params,
+    );
+    type_params.extend(receiver_type_params(fn_node, source));
+
     Some(RawFunctionMeta {
         span: ts_span(fn_node),
         flags,
         params,
         return_type,
         decorators,
+        type_params,
     })
 }
 
@@ -210,4 +219,23 @@ fn extract_params(fn_node: &Node<'_>, source: &[u8]) -> Vec<String> {
         }
     }
     result
+}
+
+/// The variables a method receiver declares: `func (b *Box[K, V]) Put(..)`
+/// names K and V between the brackets of the receiver type.
+fn receiver_type_params(fn_node: &Node<'_>, source: &[u8]) -> Vec<String> {
+    let Some(receiver) = fn_node.child_by_field_name("receiver") else {
+        return Vec::new();
+    };
+    let text = node_text(&receiver, source);
+    let (Some(open), Some(close)) = (text.find('['), text.rfind(']')) else {
+        return Vec::new();
+    };
+    text.get(open + 1..close)
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|entry| entry.split_whitespace().next())
+        .filter(|name| *name != "_")
+        .map(str::to_string)
+        .collect()
 }

@@ -5240,6 +5240,7 @@ fn archived_meta(graph: &ArchivedZeroCopyGraph, idx: u32) -> Option<RawFunctionM
             .collect(),
         return_type: String::new(),
         decorators: Vec::new(),
+        type_params: Vec::new(),
     })
 }
 
@@ -5313,6 +5314,7 @@ fn resolve_overrides(
                         params: symbol.params.clone(),
                         return_type: String::new(),
                         decorators: Vec::new(),
+                        type_params: Vec::new(),
                     })
                 })
                 .collect()
@@ -6012,6 +6014,7 @@ pub(super) fn resolve_edges(
                 sym.owner_class.as_deref(),
                 sym.return_type.as_deref(),
                 &sym.params,
+                &sym.type_params,
                 |name| {
                     *annotation_types.entry(name).or_insert_with(|| {
                         resolve_type(
@@ -6235,6 +6238,7 @@ mod tests {
             decorators: Vec::new(),
             params: Vec::new(),
             type_annotation: None,
+            type_params: Vec::new(),
         };
         let file = OverlayFileInput {
             parsed_language: None,

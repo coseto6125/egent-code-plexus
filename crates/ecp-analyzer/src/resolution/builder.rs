@@ -3852,6 +3852,7 @@ fn pass2_emit_node_edges(
         raw_node.owner_class.as_deref(),
         meta.map(|m| m.return_type.as_str()),
         meta.map_or(&[][..], |m| m.params.as_slice()),
+        meta.map_or(&[][..], |m| m.type_params.as_slice()),
         |name| {
             resolver.resolve_symbol(
                 &local_graph.file_path,

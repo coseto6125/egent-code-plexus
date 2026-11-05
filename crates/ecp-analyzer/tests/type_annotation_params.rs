@@ -859,3 +859,306 @@ fn test_python_literal_and_annotated_metadata_bind_nothing() {
     assert_binds(&g, "app.py", "fwd_unicode", &["Ünï"]);
     assert_binds(&g, "app.py", "cb", &["Other", "St"]);
 }
+
+// ------------------------------------------------- generic type variables
+//
+// Contract: a name the declaration (or its enclosing type) lists as a type
+// variable is no project type, even when a project type shares the name; a
+// bound that is a project type, and a function outside the generic scope
+// that takes the project type, still bind it. `plain_fn` and `take` are the
+// controls that keep the project `T` reachable.
+
+/// `source -> names` rows asserted on one generic fixture.
+fn assert_generic_rows(g: &ZeroCopyGraph, file: &str, rows: &[(&str, &[&str])]) {
+    for (source, names) in rows {
+        assert_binds(g, file, source, names);
+    }
+}
+
+const RUST_GENERIC: &str = "\
+pub struct T;
+pub struct Foo;
+pub fn generic_fn<T>(v: T) {}
+pub fn nested_fn<T>(v: Vec<T>) -> Option<T> { None }
+pub fn bounded_fn<T: Into<Foo>>(v: T, f: Foo) {}
+pub fn plain_fn(v: T) {}
+pub struct Wrap<T>(T);
+impl<T> Wrap<T> { pub fn put(&self, v: T) {} }
+pub struct Plain;
+impl Plain { pub fn take(&self, v: T) {} }
+";
+
+#[test]
+fn test_rust_type_params_named_like_project_type_bind_nothing() {
+    let g = build(&RustProvider::new().unwrap(), "src/app.rs", RUST_GENERIC);
+    assert_generic_rows(
+        &g,
+        "src/app.rs",
+        &[
+            ("generic_fn", &[]),
+            ("nested_fn", &[]),
+            ("bounded_fn", &["Foo"]),
+            ("plain_fn", &["T"]),
+            ("put", &[]),
+            ("take", &["T"]),
+        ],
+    );
+}
+
+const JAVA_GENERIC: &str = "\
+class T {}
+class Foo {}
+class Wrap<T> { void put(T v) {} <U> void conv(U u, Foo f) {} }
+class Gen {
+    static <T> void generic_fn(T v) {}
+    static <T> java.util.List<T> nested_fn(java.util.List<T> v) { return v; }
+    static <T extends Foo> void bounded_fn(T v, Foo f) {}
+    static void plain_fn(T v) {}
+}
+";
+
+#[test]
+fn test_java_type_params_named_like_project_type_bind_nothing() {
+    let g = build(&JavaProvider::new().unwrap(), "App.java", JAVA_GENERIC);
+    assert_generic_rows(
+        &g,
+        "App.java",
+        &[
+            ("put", &[]),
+            ("conv", &["Foo"]),
+            ("generic_fn", &[]),
+            ("nested_fn", &[]),
+            ("bounded_fn", &["Foo"]),
+            ("plain_fn", &["T"]),
+        ],
+    );
+}
+
+const TS_GENERIC: &str = "\
+export class T {}
+export class Foo {}
+export function generic_fn<T>(v: T): void {}
+export function nested_fn<T>(v: Array<T>): Promise<T> { return null as any; }
+export function bounded_fn<T extends Foo>(v: T, f: Foo): void {}
+export function plain_fn(v: T): void {}
+export class Wrap<T> { put(v: T): void {} }
+export class Plain { take(v: T): void {} }
+";
+
+#[test]
+fn test_typescript_type_params_named_like_project_type_bind_nothing() {
+    let g = build(&TypeScriptProvider::new().unwrap(), "app.ts", TS_GENERIC);
+    assert_generic_rows(
+        &g,
+        "app.ts",
+        &[
+            ("generic_fn", &[]),
+            ("nested_fn", &[]),
+            ("bounded_fn", &["Foo"]),
+            ("plain_fn", &["T"]),
+            ("put", &[]),
+            ("take", &["T"]),
+        ],
+    );
+}
+
+const KOTLIN_GENERIC: &str = "\
+class T
+class Foo
+fun <T> generic_fn(v: T) {}
+fun <T> nested_fn(v: List<T>): List<T> = v
+fun <T : Foo> bounded_fn(v: T, f: Foo) {}
+fun plain_fn(v: T) {}
+class Wrap<T> { fun put(v: T) {} }
+class Plain { fun take(v: T) {} }
+";
+
+#[test]
+fn test_kotlin_type_params_named_like_project_type_bind_nothing() {
+    let g = build(&KotlinProvider::new().unwrap(), "app.kt", KOTLIN_GENERIC);
+    assert_generic_rows(
+        &g,
+        "app.kt",
+        &[
+            ("generic_fn", &[]),
+            ("nested_fn", &[]),
+            ("bounded_fn", &["Foo"]),
+            ("plain_fn", &["T"]),
+            ("put", &[]),
+            ("take", &["T"]),
+        ],
+    );
+}
+
+const CSHARP_GENERIC: &str = "\
+class T {}
+class Foo {}
+class Gen {
+    public void generic_fn<T>(T v) {}
+    public void bounded_fn<T>(T v, Foo f) where T : Foo {}
+    public void plain_fn(T v) {}
+}
+class Wrap<T> { public void put(T v) {} }
+";
+
+#[test]
+fn test_csharp_type_params_named_like_project_type_bind_nothing() {
+    let g = build(&CSharpProvider::new().unwrap(), "App.cs", CSHARP_GENERIC);
+    assert_generic_rows(
+        &g,
+        "App.cs",
+        &[
+            ("generic_fn", &[]),
+            ("bounded_fn", &["Foo"]),
+            ("plain_fn", &["T"]),
+            ("put", &[]),
+        ],
+    );
+}
+
+const SWIFT_GENERIC: &str = "\
+class T {}
+class Foo {}
+func generic_fn<T>(v: T) {}
+func nested_fn<T>(v: [T]) {}
+func bounded_fn<T: Foo>(v: T, f: Foo) {}
+func plain_fn(v: T) {}
+struct Wrap<T> { func put(v: T) {} }
+struct Plain { func take(v: T) {} }
+";
+
+#[test]
+fn test_swift_type_params_named_like_project_type_bind_nothing() {
+    let g = build(&SwiftProvider::new().unwrap(), "app.swift", SWIFT_GENERIC);
+    assert_generic_rows(
+        &g,
+        "app.swift",
+        &[
+            ("generic_fn", &[]),
+            ("nested_fn", &[]),
+            ("bounded_fn", &["Foo"]),
+            ("plain_fn", &["T"]),
+            ("put", &[]),
+            ("take", &["T"]),
+        ],
+    );
+}
+
+const DART_GENERIC: &str = "\
+class T {}
+class Foo {}
+void generic_fn<T>(T v) {}
+void bounded_fn<T extends Foo>(T v, Foo f) {}
+void plain_fn(T v) {}
+class Wrap<T> { void put(T v) {} }
+class Plain { void take(T v) {} }
+";
+
+#[test]
+fn test_dart_type_params_named_like_project_type_bind_nothing() {
+    let g = build(&DartProvider::new().unwrap(), "app.dart", DART_GENERIC);
+    assert_generic_rows(
+        &g,
+        "app.dart",
+        &[
+            ("generic_fn", &[]),
+            ("bounded_fn", &["Foo"]),
+            ("plain_fn", &["T"]),
+            ("put", &[]),
+            ("take", &["T"]),
+        ],
+    );
+}
+
+const CPP_GENERIC: &str = "\
+struct T {};
+struct Foo {};
+template <typename T> void generic_fn(T v) {}
+template <class T> void nested_fn(Wrapper<T> v) {}
+template <typename T> void bounded_fn(T v, Foo f) {}
+void plain_fn(T v) {}
+template <typename T> struct Wrap { void put(T v) {} };
+struct Plain { void take(T v) {} };
+";
+
+#[test]
+fn test_cpp_type_params_named_like_project_type_bind_nothing() {
+    let g = build(&CppProvider::new().unwrap(), "app.cpp", CPP_GENERIC);
+    assert_generic_rows(
+        &g,
+        "app.cpp",
+        &[
+            ("generic_fn", &[]),
+            ("nested_fn", &[]),
+            ("bounded_fn", &["Foo"]),
+            ("plain_fn", &["T"]),
+            ("put", &[]),
+            ("take", &["T"]),
+        ],
+    );
+}
+
+const GO_GENERIC: &str = "\
+package app
+
+type T struct{}
+type Foo struct{}
+
+func generic_fn[T any](v T) {}
+func nested_fn[T any](v []T) {}
+func bounded_fn[T Foo](v T, f Foo) {}
+func plain_fn(v T) {}
+
+type Wrap[T any] struct{}
+
+func (w Wrap[T]) put(v T) {}
+
+type Plain struct{}
+
+func (p Plain) take(v T) {}
+";
+
+#[test]
+fn test_go_type_params_named_like_project_type_bind_nothing() {
+    let g = build(&GoProvider::new().unwrap(), "app.go", GO_GENERIC);
+    assert_generic_rows(
+        &g,
+        "app.go",
+        &[
+            ("generic_fn", &[]),
+            ("nested_fn", &[]),
+            ("bounded_fn", &["Foo"]),
+            ("plain_fn", &["T"]),
+            ("put", &[]),
+            ("take", &["T"]),
+        ],
+    );
+}
+
+const PY_GENERIC: &str = "\
+class T: pass
+class Foo: pass
+def generic_fn[T](v: T) -> None: ...
+def bounded_fn[T: Foo](v: T, f: Foo) -> None: ...
+def plain_fn(v: T) -> None: ...
+class Wrap[T]:
+    def put(self, v: T) -> None: ...
+class Plain:
+    def take(self, v: T) -> None: ...
+";
+
+#[test]
+fn test_python_type_params_named_like_project_type_bind_nothing() {
+    let g = build(&PythonProvider::new().unwrap(), "app.py", PY_GENERIC);
+    assert_generic_rows(
+        &g,
+        "app.py",
+        &[
+            ("generic_fn", &[]),
+            ("bounded_fn", &["Foo"]),
+            ("plain_fn", &["T"]),
+            ("put", &[]),
+            ("take", &["T"]),
+        ],
+    );
+}

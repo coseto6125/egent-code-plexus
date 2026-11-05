@@ -22,7 +22,7 @@
 //!   (bit 12) for a trailing `params` array, and its count of parameters
 //!   with a default value in bits 13-15 (`optional_bits`)
 
-use super::{extract_with, node_text, ts_span};
+use super::{declared_type_params, extract_with, node_text, scoped_type_params, ts_span};
 use ecp_core::analyzer::csharp_access::EXPLICIT_IMPL;
 use ecp_core::analyzer::csharp_extension::{
     optional_bits, EXTENSION_FLAG, GENERIC_THIS_FLAG, PARAMS_ARRAY_FLAG,
@@ -171,12 +171,20 @@ fn extract_one(
         })
         .unwrap_or_default();
 
+    let type_params = scoped_type_params(
+        fn_node,
+        source,
+        &["type_parameter_list"],
+        declared_type_params,
+    );
+
     Some(RawFunctionMeta {
         span: ts_span(fn_node),
         flags,
         params,
         return_type,
         decorators,
+        type_params,
     })
 }
 

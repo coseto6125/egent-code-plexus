@@ -122,6 +122,11 @@ pub struct FragmentSymbol {
     /// the overlay rebuilds the node's `type_annotation` `Accesses` edges
     /// from it, `params` and `return_type`. The V8 field.
     pub type_annotation: Option<String>,
+    /// `RawFunctionMeta::type_params` of a function, method or constructor
+    /// whose span a meta carries: its own generic names plus its enclosing
+    /// type's; empty otherwise. The overlay skips them when it binds the
+    /// node's `type_annotation` edges. Part of V8 (unreleased).
+    pub type_params: Vec<String>,
 }
 
 /// The symbol shape of the v2 and v3 fragment bins (`FragmentSymbol` before
@@ -253,6 +258,9 @@ pub fn fragment_file_from_local_graph(graph: &LocalGraph) -> FragmentFile {
                     decorators: n.decorators.clone(),
                     params: meta.map(|meta| meta.params.clone()).unwrap_or_default(),
                     type_annotation: n.type_annotation.clone(),
+                    type_params: meta
+                        .map(|meta| meta.type_params.clone())
+                        .unwrap_or_default(),
                 }
             })
             .collect(),

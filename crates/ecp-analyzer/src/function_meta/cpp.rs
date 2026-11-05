@@ -14,7 +14,9 @@
 //! - decorators: C++11 attributes `[[nodiscard]]` / `[[noreturn]]` / `[[deprecated]]` (strip `[[` / `]]`)
 //!   + GCC/clang `__attribute__((...))` like C.
 
-use super::{extract_with, node_text, subtree_contains_kind, ts_span};
+use super::{
+    extract_with, node_text, scoped_type_params, subtree_contains_kind, ts_span, type_param_entry,
+};
 use ecp_core::analyzer::types::{RawFunctionMeta, RawNode};
 use ecp_core::graph::{FileCategory, FunctionMeta};
 use tree_sitter::Node;
@@ -181,12 +183,20 @@ fn extract_one(
     // Decorators: C++11 `[[attr]]` + GCC `__attribute__((...))`.
     let decorators = collect_cpp_decorators(fn_node, source);
 
+    let type_params = scoped_type_params(
+        fn_node,
+        source,
+        &["template_parameter_list"],
+        template_type_params,
+    );
+
     Some(RawFunctionMeta {
         span: ts_span(fn_node),
         flags,
         params,
         return_type,
         decorators,
+        type_params,
     })
 }
 
@@ -486,6 +496,24 @@ fn extract_declarator_name(decl: Node<'_>, source: &[u8]) -> String {
         }
         _ => node_text(&decl, source).to_string(),
     }
+}
+
+/// The variables of a `template<typename T, class U = X, typename... Ts>`
+/// list. A non-type parameter (`int N`, `Foo N`) is skipped: its leading
+/// identifier is a type, not a name.
+fn template_type_params(list: &Node<'_>, source: &[u8]) -> Vec<String> {
+    let mut cursor = list.walk();
+    list.named_children(&mut cursor)
+        .filter(|entry| {
+            matches!(
+                entry.kind(),
+                "type_parameter_declaration"
+                    | "optional_type_parameter_declaration"
+                    | "variadic_type_parameter_declaration"
+            )
+        })
+        .filter_map(|entry| type_param_entry(&entry, source))
+        .collect()
 }
 
 #[cfg(test)]

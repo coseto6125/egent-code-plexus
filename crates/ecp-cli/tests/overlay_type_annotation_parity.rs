@@ -323,6 +323,47 @@ fn cross_file_cases() -> Vec<Case> {
     ]
 }
 
+/// A dirty file adds a generic function over a project type named like its
+/// type variable: the overlay replays the variable list the fragment carries,
+/// so it binds the bound type and the plain function's `T`, never the
+/// generic function's `T`.
+fn generic_cases() -> Vec<Case> {
+    vec![
+        Case {
+            label: "Rust/generic fn over a project T".to_string(),
+            files: vec![(
+                "src/gen.rs",
+                "pub struct T;\npub struct Foo;\npub fn other() {}\n",
+            )],
+            edits: vec![(
+                "src/gen.rs",
+                "pub struct T;\npub struct Foo;\npub fn other() {}\npub fn generic_fn<T>(v: T, f: Foo) {}\npub fn plain(v: T) {}\n",
+            )],
+            source_file: "src/gen.rs",
+            expected: vec![
+                ("generic_fn", "src/gen.rs", "Foo"),
+                ("plain", "src/gen.rs", "T"),
+            ],
+        },
+        Case {
+            label: "Java/generic method over a project T".to_string(),
+            files: vec![(
+                "Gen.java",
+                "class T {}\nclass Foo {}\nclass Gen {\n    static void other() {}\n}\n",
+            )],
+            edits: vec![(
+                "Gen.java",
+                "class T {}\nclass Foo {}\nclass Gen {\n    static void other() {}\n    static <T> void generic_fn(T v, Foo f) {}\n    static void plain(T v) {}\n}\n",
+            )],
+            source_file: "Gen.java",
+            expected: vec![
+                ("generic_fn", "Gen.java", "Foo"),
+                ("plain", "Gen.java", "T"),
+            ],
+        },
+    ]
+}
+
 /// The `type_annotation` rows of `edges`, sorted.
 fn rows(edges: &[ReasonedEdge]) -> Vec<(&str, &str, &str)> {
     let mut rows: Vec<_> = edges
@@ -578,4 +619,10 @@ fn test_view_inputs_fragments_written_by_0_17_3_refused_then_reparse_serves_rein
     .collect();
     assert_eq!(named(&reindex), want, "the reindex of the uncommitted tree");
     assert_eq!(overlay, reindex);
+}
+
+#[test]
+fn test_overlay_type_annotation_generic_params_match_reindex() {
+    let failures = mismatches(&generic_cases());
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }

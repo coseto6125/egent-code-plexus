@@ -5,7 +5,7 @@
 //! Python parser in PR #244). A secondary tree walk is needed for async, is_generator,
 //! and parameter/return_type detail that the query-based main pass doesn't capture.
 
-use super::{extract_with, node_text, ts_span as ts_node_span};
+use super::{extract_with, node_text, scoped_type_params, ts_span as ts_node_span};
 use ecp_core::analyzer::types::{RawFunctionMeta, RawNode};
 use ecp_core::graph::{FileCategory, FunctionMeta};
 use tree_sitter::Node;
@@ -149,12 +149,15 @@ fn extract_one(
     // Decorators collected from the AST walk above (source order, `@` stripped).
     let decorators = ast_decorators;
 
+    let type_params = scoped_type_params(fn_node, source, &["type_parameter"], pep695_type_params);
+
     Some(RawFunctionMeta {
         span: ts_node_span(fn_node),
         flags,
         params,
         return_type,
         decorators,
+        type_params,
     })
 }
 
@@ -252,4 +255,22 @@ fn extract_params(fn_node: &Node<'_>, source: &[u8]) -> Vec<String> {
         }
     }
     result
+}
+
+/// The variables of a PEP 695 list (`def f[T, U: int, *Ts]`): the first
+/// identifier of each entry, so a bound (`int`) is never read as a name.
+fn pep695_type_params(list: &Node<'_>, source: &[u8]) -> Vec<String> {
+    fn first_identifier(node: Node<'_>) -> Option<Node<'_>> {
+        if node.kind() == "identifier" {
+            return Some(node);
+        }
+        let mut cursor = node.walk();
+        let first = node.named_children(&mut cursor).next()?;
+        first_identifier(first)
+    }
+    let mut cursor = list.walk();
+    list.named_children(&mut cursor)
+        .filter_map(first_identifier)
+        .map(|name| node_text(&name, source).to_string())
+        .collect()
 }

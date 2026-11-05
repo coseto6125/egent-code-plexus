@@ -313,6 +313,11 @@ fn decode_fragment(
                 decorators: s.decorators.iter().map(|d| d.as_str().to_owned()).collect(),
                 params: s.params.iter().map(|p| p.as_str().to_owned()).collect(),
                 type_annotation: s.type_annotation.as_ref().map(|ty| ty.as_str().to_owned()),
+                type_params: s
+                    .type_params
+                    .iter()
+                    .map(|p| p.as_str().to_owned())
+                    .collect(),
             })
             .collect(),
         imports,
@@ -457,6 +462,7 @@ mod tests {
             decorators: Vec::new(),
             params: Vec::new(),
             type_annotation: type_annotation.map(str::to_string),
+            type_params: Vec::new(),
         };
         let fragment = FragmentFile {
             symbols: vec![

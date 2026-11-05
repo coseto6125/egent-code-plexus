@@ -14,7 +14,9 @@
 //! - `return_type`:  type before function name; absent → empty (dynamic)
 //! - `decorators`:   `@override` / `@deprecated` / `@protected` etc.
 
-use super::{extract_with, find_child_kind, node_text, ts_span};
+use super::{
+    declared_type_params, extract_with, find_child_kind, node_text, scoped_type_params, ts_span,
+};
 use ecp_core::analyzer::types::{RawFunctionMeta, RawNode};
 use ecp_core::graph::{FileCategory, FunctionMeta};
 use tree_sitter::Node;
@@ -212,12 +214,27 @@ fn extract_one(
         .map(str::to_string)
         .unwrap_or_default();
 
+    // The list sits on the signature, one or two levels under a declaration.
+    let signature = find_child_by_kind(fn_node, "function_signature")
+        .or_else(|| {
+            find_child_by_kind(fn_node, "method_signature")
+                .and_then(|m| find_child_by_kind(&m, "function_signature"))
+        })
+        .unwrap_or(*fn_node);
+    let type_params = scoped_type_params(
+        &signature,
+        source,
+        &["type_parameters"],
+        declared_type_params,
+    );
+
     Some(RawFunctionMeta {
         span: ts_span(fn_node),
         flags,
         params,
         return_type,
         decorators,
+        type_params,
     })
 }
 

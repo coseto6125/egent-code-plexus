@@ -435,6 +435,7 @@ impl From<LocalGraph> for OverlayFileInput {
                         variant_refs: n.field_reads,
                         decorators: n.decorators,
                         type_annotation: n.type_annotation,
+                        type_params: Vec::new(),
                     }
                 })
                 .collect(),
@@ -2285,6 +2286,7 @@ mod tests {
             decorators: Vec::new(),
             params: Vec::new(),
             type_annotation: None,
+            type_params: Vec::new(),
         }
     }
 
@@ -3237,6 +3239,7 @@ mod tests {
             decorators: Vec::new(),
             params: Vec::new(),
             type_annotation: None,
+            type_params: Vec::new(),
         };
         let multi = OverlayFileInput {
             parsed_language: None,
@@ -3341,6 +3344,7 @@ mod tests {
             decorators: Vec::new(),
             params: Vec::new(),
             type_annotation: None,
+            type_params: Vec::new(),
         };
         let outer = OverlayFileInput {
             parsed_language: None,

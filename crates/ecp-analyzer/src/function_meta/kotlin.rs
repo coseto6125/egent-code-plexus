@@ -12,7 +12,9 @@
 //! - `return_type`:  `: ReturnType` after `)`, absent → empty
 //! - `decorators`:   annotation names with `@` stripped, args `(...)` dropped
 
-use super::{extract_with, find_child_kind, node_text, ts_span};
+use super::{
+    declared_type_params, extract_with, find_child_kind, node_text, scoped_type_params, ts_span,
+};
 use ecp_core::analyzer::types::{RawFunctionMeta, RawNode};
 use ecp_core::graph::{FileCategory, FunctionMeta};
 use tree_sitter::Node;
@@ -187,12 +189,16 @@ fn extract_one(
         })
         .unwrap_or_default();
 
+    let type_params =
+        scoped_type_params(fn_node, source, &["type_parameters"], declared_type_params);
+
     Some(RawFunctionMeta {
         span: ts_span(fn_node),
         flags,
         params,
         return_type,
         decorators,
+        type_params,
     })
 }
 
