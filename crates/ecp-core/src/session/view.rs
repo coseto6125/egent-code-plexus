@@ -56,6 +56,11 @@
 //!   ([`crate::analyzer::heritage::heritage_rel`]): each spelling looked up
 //!   as the supertypes pre-pass looks it up, after the dirty supertypes
 //!   exist, at the resolver's confidence.
+//! - **type annotations** — `Accesses` (reason [`TYPE_ANNOTATION_REASON`])
+//!   from each dirty declaration to the types its annotation, its return
+//!   type and its parameter types name, by the index's Pass 2 rule
+//!   ([`type_annotation_targets`]), each name looked up as the heritage
+//!   lookup is, at the resolver's confidence.
 //! - **per-file outputs** — the outputs a build makes from one file's parse
 //!   alone, replayed by `session::incremental` with the index's own
 //!   derivations: a `File` node for a path `graph.files` lacks (a new file,
@@ -101,7 +106,7 @@
 //! A base edge whose **source** lies in a dirty file is masked ONLY when the
 //! overlay re-resolves that rel type from fragment data (`Calls`,
 //! `ReadsField`, `Defines`, `HasMethod`, `Imports`, `Decorates`,
-//! `Overrides`, `Extends`, `Implements`, plus the `References` reasons
+//! `Overrides`, `Extends`, `Implements`, `Accesses`, plus the `References` reasons
 //! above, plus `HasProperty`, `UsesPathLiteral`, `QueriesTable`,
 //! `OpensTxScope`, `Publishes` and `Subscribes` when the records replayed) —
 //! for those the overlay adjacency is the file's truth. `Defines` and the
@@ -184,8 +189,9 @@
 //!   fragment carries; the parameters and decorators of a dirty function are
 //!   not in it (the `Overrides` and `Decorates` replays read them from the
 //!   fragment).
-//! - A dirty symbol's type-annotation `Accesses` edges stay as indexed: the
-//!   fragment keeps no type annotation (FU-2026-10-26-0ee756874fb8).
+//! - A clean file outside the closure keeps its type-annotation `Accesses`
+//!   edges: an edge into a dirty type the edit removed drops, and a clean
+//!   annotation of a type a dirty file adds stays unbound.
 //! - A removed path still counts as a file for the passes over
 //!   `graph.files` (import-candidate probes, module and crate-root
 //!   discovery), and its archived import rows still serve a re-export hop.
@@ -320,6 +326,12 @@ pub struct OverlaySymbol {
     /// when the parse paired no meta with the node ([`Self::flags`] is then
     /// `None`) or the declaration takes no parameter.
     pub params: Vec<String>,
+    /// `RawNode.type_annotation` as the parser wrote it: a field's or
+    /// property's declared type, a callable's return type as its language's
+    /// query captured it (which can differ from [`Self::return_type`]).
+    /// `None` when the node has none. The view rebuilds the node's
+    /// `type_annotation` `Accesses` edges from it ([`type_annotation_targets`]).
+    pub type_annotation: Option<String>,
 }
 
 impl crate::analyzer::overrides::OverrideNode for OverlaySymbol {
@@ -422,6 +434,7 @@ impl From<LocalGraph> for OverlayFileInput {
                         heritage: n.heritage,
                         variant_refs: n.field_reads,
                         decorators: n.decorators,
+                        type_annotation: n.type_annotation,
                     }
                 })
                 .collect(),
@@ -430,6 +443,76 @@ impl From<LocalGraph> for OverlayFileInput {
             parsed_language,
         }
     }
+}
+
+/// The reason of the `Accesses` edge from a declaration to a type its
+/// annotation names.
+pub const TYPE_ANNOTATION_REASON: &str = "type_annotation";
+
+/// The `(target, confidence)` of every `type_annotation` `Accesses` edge of
+/// one declaration, in emit order: the index's Pass 2 rule, which the
+/// overlay replays for a dirty declaration through this same function.
+/// `resolve` is the declaring file's type lookup (`ResolveTarget::Type`),
+/// at most one target per name.
+///
+/// - `type_annotation` (`RawNode.type_annotation`) binds first as one
+///   name ([`return_type_key`](crate::analyzer::type_ladder::return_type_key)): a
+///   declaring-type keyword
+///   (`Self`, `this`, PHP `static`) stands for `owner_class`, so it binds
+///   nothing without an owner; any other text the key does not reduce
+///   is looked up whole.
+/// - A function, method or constructor then binds every name its
+///   generic or container return mentions
+///   ([`annotation_type_names`](crate::analyzer::type_ladder::annotation_type_names)):
+///   the annotation's when the key does not reduce it, else nothing, and
+///   `return_type` (its function meta's) when the parse captured no
+///   annotation. Then every type of `params`, the meta's flat
+///   `[name, type, ...]` list. A target bound already is not bound again.
+pub fn type_annotation_targets<'a>(
+    language: Language,
+    kind: NodeKind,
+    type_annotation: Option<&'a str>,
+    owner_class: Option<&'a str>,
+    return_type: Option<&'a str>,
+    params: &'a [String],
+    mut resolve: impl FnMut(&'a str) -> Option<(u32, f32)>,
+) -> Vec<(u32, f32)> {
+    use crate::analyzer::type_ladder::{
+        annotation_type_names, names_declaring_type_in, return_type_key,
+    };
+    let mut targets: Vec<(u32, f32)> = Vec::new();
+    if let Some(annotation) = type_annotation {
+        let name = match return_type_key(annotation) {
+            Some(key) if names_declaring_type_in(language, key) => owner_class.and_then(owner_key),
+            Some(key) => Some(key),
+            None => Some(annotation),
+        };
+        targets.extend(name.and_then(&mut resolve));
+    }
+    if !matches!(
+        kind,
+        NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+    ) {
+        return targets;
+    }
+    let returned = match type_annotation {
+        Some(annotation) if return_type_key(annotation).is_none() => Some(annotation),
+        Some(_) => None,
+        None => return_type,
+    };
+    let texts = returned
+        .into_iter()
+        .chain(params.chunks_exact(2).map(|pair| pair[1].as_str()));
+    for text in texts {
+        for name in annotation_type_names(language, text) {
+            if let Some((target, confidence)) = resolve(name) {
+                if targets.iter().all(|&(bound, _)| bound != target) {
+                    targets.push((target, confidence));
+                }
+            }
+        }
+    }
+    targets
 }
 
 /// One dirty file's raw records, the inputs of the record outputs the
@@ -1260,19 +1343,23 @@ impl OverlayView {
     /// replayed, as a schema field's `HasProperty` shares the kind (module
     /// doc). `Imports` is rebuilt per file from its `File` node, so masked
     /// there. `Decorates` is rebuilt per decorated declaration,
-    /// `Overrides` per dirty callable, and `Extends` / `Implements` per
-    /// dirty declaration that lists a base.
+    /// `Overrides` per dirty callable, `Extends` / `Implements` per
+    /// dirty declaration that lists a base, and `Accesses` per dirty
+    /// declaration from its annotations ([`type_annotation_targets`]).
     pub fn masks_base_edge(&self, base_idx: u32, rel: RelType) -> bool {
         let per_file =
             || self.dirty_base.contains(&base_idx) || self.defines_files.contains(&base_idx);
         match rel {
+            // `Accesses` by kind: the index's only `Accesses` edges are the
+            // `type_annotation` ones, so the kind names exactly those.
             RelType::Calls
             | RelType::ReadsField
             | RelType::HasMethod
             | RelType::Decorates
             | RelType::Overrides
             | RelType::Extends
-            | RelType::Implements => self.dirty_base.contains(&base_idx),
+            | RelType::Implements
+            | RelType::Accesses => self.dirty_base.contains(&base_idx),
             RelType::HasProperty if self.records_replayed => self.dirty_base.contains(&base_idx),
             RelType::Defines | RelType::Imports => per_file(),
             rel if self.records_replayed && replays_record_edge(rel) => per_file(),
@@ -1404,7 +1491,10 @@ impl OverlayView {
 /// changes what it stores: a dirty call takes the index's name-tier order
 /// ([`name_tiers`](crate::analyzer::name_tiers::name_tiers)), so a call the
 /// last-segment match left to the nearest copy now binds its import.
-pub const VIEW_CACHE_FORMAT: u32 = 15;
+/// 16 (FU-2026-10-26-0ee756874fb8): the view stores a dirty file's
+/// `type_annotation` `Accesses` edges with one more reason, and masks the
+/// base ones; a 15 view has neither.
+pub const VIEW_CACHE_FORMAT: u32 = 16;
 
 /// The base edge kinds the record replay rebuilds, so masks at a re-parsed
 /// file's nodes. `HasProperty` has its own arm in
@@ -1423,7 +1513,7 @@ fn replays_record_edge(rel: RelType) -> bool {
 /// Every reason [`OverlayView::build`] puts on a [`ViewEdge`]. A cached view
 /// stores each reason as its index here; a view with an unlisted reason is
 /// never stored, so it costs a build per query as before the cache.
-const VIEW_EDGE_REASONS: [&str; 44] = [
+const VIEW_EDGE_REASONS: [&str; 45] = [
     OVERLOAD_SET_REASON,
     CLOSURE_REFERENCE_REASON,
     NEAREST_COPY_REASON,
@@ -1468,6 +1558,7 @@ const VIEW_EDGE_REASONS: [&str; 44] = [
     OVERRIDES_REASONS[2],
     HERITAGE_REASONS[0],
     HERITAGE_REASONS[1],
+    TYPE_ANNOTATION_REASON,
 ];
 
 pub(super) fn reason_index(reason: &str) -> Option<u8> {
@@ -2263,6 +2354,7 @@ mod tests {
             flags: None,
             decorators: Vec::new(),
             params: Vec::new(),
+            type_annotation: None,
         }
     }
 
@@ -2741,6 +2833,166 @@ mod tests {
         assert_eq!(view.redirect(2), Some(2));
     }
 
+    /// Stands for: the overlay rebuilds a dirty declaration's
+    /// `type_annotation` edges, so the base ones sourced in a dirty file
+    /// go, and a clean file keeps its own.
+    #[test]
+    fn test_masks_base_edge_accesses_dirty_source_masked_clean_kept() {
+        let bytes = base_graph_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let view = OverlayView::build(graph, &[dirty_input()]).unwrap();
+
+        assert!(view.masks_base_edge(0, RelType::Accesses));
+        assert!(view.masks_base_edge(1, RelType::Accesses));
+        assert!(!view.masks_base_edge(2, RelType::Accesses));
+    }
+
+    /// `type_annotation_targets` over a resolver that knows `names`, each
+    /// at its index + 1; the names it was asked for, in order.
+    fn annotation_targets(
+        language: Language,
+        kind: NodeKind,
+        annotation: Option<&str>,
+        owner: Option<&str>,
+        return_type: Option<&str>,
+        params: &[&str],
+        names: &[&str],
+    ) -> (Vec<u32>, Vec<String>) {
+        let params: Vec<String> = params.iter().map(|p| p.to_string()).collect();
+        let mut asked = Vec::new();
+        let targets = type_annotation_targets(
+            language,
+            kind,
+            annotation,
+            owner,
+            return_type,
+            &params,
+            |name| {
+                asked.push(name.to_string());
+                names
+                    .iter()
+                    .position(|known| *known == name)
+                    .map(|at| (at as u32 + 1, 1.0))
+            },
+        );
+        (targets.into_iter().map(|(id, _)| id).collect(), asked)
+    }
+
+    /// Stands for: the index's Pass 2 rule, row by row. A declaring-type
+    /// keyword binds the owner and only the owner; a field binds its whole
+    /// annotation and never the generic arguments in it; a callable binds a
+    /// bare return once, every name of a generic return, the meta's return
+    /// only when the parse captured no annotation, and each parameter
+    /// type, one edge per target.
+    #[test]
+    fn test_type_annotation_targets_rows_match_the_index_rule() {
+        use Language::{Rust, Swift, TypeScript};
+        use NodeKind::{Function, Method, Property};
+        let st = &["St", "Other", "Owner"][..];
+        type Row<'r> = (
+            &'r str,
+            (
+                Language,
+                NodeKind,
+                Option<&'r str>,
+                Option<&'r str>,
+                Option<&'r str>,
+            ),
+            &'r [&'r str],
+            &'r [u32],
+        );
+        let rows: [Row; 10] = [
+            (
+                "bare return",
+                (Rust, Function, Some("St"), None, Some("St")),
+                &[],
+                &[1],
+            ),
+            (
+                "Self return",
+                (Rust, Method, Some("Self"), Some("Owner"), Some("Self")),
+                &[],
+                &[3],
+            ),
+            (
+                "Self without owner",
+                (Rust, Function, Some("Self"), None, None),
+                &[],
+                &[],
+            ),
+            (
+                "Self inside a generic",
+                (Rust, Method, Some("Option<Self>"), Some("Owner"), None),
+                &[],
+                &[],
+            ),
+            (
+                "generic return",
+                (Rust, Function, Some("Option<St>"), None, None),
+                &[],
+                &[1],
+            ),
+            (
+                "uncaptured return reads the meta",
+                (TypeScript, Function, None, None, Some("Promise<Other>")),
+                &[],
+                &[2],
+            ),
+            (
+                "captured bare return skips the meta",
+                (
+                    TypeScript,
+                    Function,
+                    Some("St"),
+                    None,
+                    Some("Promise<Other>"),
+                ),
+                &[],
+                &[1],
+            ),
+            (
+                "generic field binds no argument",
+                (Swift, Property, Some("[St]"), None, None),
+                &[],
+                &[],
+            ),
+            (
+                "params bind once per target",
+                (Rust, Function, Some("St"), None, None),
+                &["a", "St", "b", "&St", "c", "Vec<Other>"],
+                &[1, 2],
+            ),
+            (
+                "receiver and untyped params",
+                (Rust, Method, None, Some("Owner"), None),
+                &["self", "", "a", ""],
+                &[],
+            ),
+        ];
+        for (label, (language, kind, annotation, owner, return_type), params, want) in rows {
+            let (got, _) =
+                annotation_targets(language, kind, annotation, owner, return_type, params, st);
+            assert_eq!(got, want, "{label}");
+        }
+    }
+
+    /// Stands for: the whole annotation text is looked up first, as the
+    /// index looks it up, so a qualified spelling resolves through its
+    /// qualifier before its parts are read.
+    #[test]
+    fn test_type_annotation_targets_unreduced_text_looked_up_whole_first() {
+        let (_, asked) = annotation_targets(
+            Language::Rust,
+            NodeKind::Function,
+            Some("Option<St>"),
+            None,
+            None,
+            &[],
+            &[],
+        );
+        assert_eq!(asked, ["Option<St>", "Option", "St"]);
+    }
+
     /// Stands for: a removed file leaves nothing of itself in the view, the
     /// nodes the graph builder made included, and no base edge into or out
     /// of it survives the merge. A clean file keeps its own nodes. The view
@@ -3200,6 +3452,7 @@ mod tests {
             flags: None,
             decorators: Vec::new(),
             params: Vec::new(),
+            type_annotation: None,
         };
         let multi = OverlayFileInput {
             parsed_language: None,
@@ -3303,6 +3556,7 @@ mod tests {
             flags: None,
             decorators: Vec::new(),
             params: Vec::new(),
+            type_annotation: None,
         };
         let outer = OverlayFileInput {
             parsed_language: None,

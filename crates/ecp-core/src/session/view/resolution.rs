@@ -5,9 +5,9 @@
 
 use super::{
     base_function_meta, construction_target, emit_closure_references, fragment_emits, reason_index,
-    span_of, CallGap, DirtyNamesake, OverlayFileInput, OverlaySymbol, SourceReader, ViewEdge,
-    ViewNode, CS_STRICTEST_FLAGS, GAP_CS_ACCESS_DIRTY_TARGET, GAP_CS_EXTENSION_DIRTY_DECLARATION,
-    GAP_CS_PARTIAL_BARE_CALL,
+    span_of, type_annotation_targets, CallGap, DirtyNamesake, OverlayFileInput, OverlaySymbol,
+    SourceReader, ViewEdge, ViewNode, CS_STRICTEST_FLAGS, GAP_CS_ACCESS_DIRTY_TARGET,
+    GAP_CS_EXTENSION_DIRTY_DECLARATION, GAP_CS_PARTIAL_BARE_CALL, TYPE_ANNOTATION_REASON,
 };
 use crate::analyzer::csharp_access::{self, CallAccess};
 use crate::analyzer::csharp_extension::{self, ReceiverSite};
@@ -2179,7 +2179,7 @@ impl<'a> OverlayFacts<'a> {
             .iter()
             .filter(|edge| {
                 RelType::from(&edge.rel_type) == RelType::Accesses
-                    && edge.reason.resolve(pool) == "type_annotation"
+                    && edge.reason.resolve(pool) == TYPE_ANNOTATION_REASON
             })
             .map(|edge| edge.target.to_native());
         match (types.next(), types.next()) {
@@ -5689,6 +5689,9 @@ pub(super) fn resolve_edges(
         // both successful and unresolved lookups without rebuilding paths.
         let module_calls: RefCell<ModuleCalls<'_>> = RefCell::default();
         let mut variant_cache = VariantCache::default();
+        // One type lookup per distinct annotation name of a file: the
+        // lookup reads the file, never the declaration.
+        let mut annotation_types: FxHashMap<&str, Option<(u32, f32)>> = FxHashMap::default();
         let caller = file_metas[file_ord];
         // Most files declare no base anywhere: their symbols skip the
         // enclosing-class scan.
@@ -5992,6 +5995,41 @@ pub(super) fn resolve_edges(
                 }
             }
 
+            // The index's Pass 2 `type_annotation` edges, after its calls.
+            for (target, confidence) in type_annotation_targets(
+                caller.language,
+                sym.kind,
+                sym.type_annotation.as_deref(),
+                sym.owner_class.as_deref(),
+                sym.return_type.as_deref(),
+                &sym.params,
+                |name| {
+                    *annotation_types.entry(name).or_insert_with(|| {
+                        resolve_type(
+                            graph,
+                            name,
+                            file_ord,
+                            &file.imports,
+                            caller,
+                            &mut base_metas,
+                            (&types, &qualifiers),
+                            nodes,
+                            replaced,
+                            dirty_base,
+                            &facts,
+                        )
+                    })
+                },
+            ) {
+                emit(ViewEdge {
+                    source: from,
+                    target,
+                    rel_type: RelType::Accesses,
+                    confidence,
+                    reason: TYPE_ANNOTATION_REASON,
+                });
+            }
+
             // The index's Pass 2 `field_reads` loop. `variant_refs`
             // is its legacy field name: v5 preserves every raw read,
             // including tagged name references and ordinary fields.
@@ -6187,6 +6225,7 @@ mod tests {
             flags: None,
             decorators: Vec::new(),
             params: Vec::new(),
+            type_annotation: None,
         };
         let file = OverlayFileInput {
             parsed_language: None,

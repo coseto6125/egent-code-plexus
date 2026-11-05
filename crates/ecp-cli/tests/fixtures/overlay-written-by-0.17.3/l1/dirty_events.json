@@ -1,0 +1,105 @@
+{
+  "format": 1,
+  "size_cap_bytes": 1048576,
+  "builder_fingerprint": "v0.17.3+schema52",
+  "entries": {
+    "Sources/App.swift": {
+      "change": "modified",
+      "class": {
+        "source": true,
+        "resolution_config": false
+      },
+      "mtime_ns": 1793867773883608842,
+      "fragment_id": "e9d578880f908ed1",
+      "content_hash": "db7d8dc120557d54",
+      "parse_failed": false,
+      "dirty_symbols": [
+        {
+          "name": "St",
+          "kind": "struct",
+          "file": "Sources/App.swift",
+          "line_start": 1,
+          "line_end": 1
+        },
+        {
+          "name": "Other",
+          "kind": "struct",
+          "file": "Sources/App.swift",
+          "line_start": 2,
+          "line_end": 2
+        },
+        {
+          "name": "Owner",
+          "kind": "struct",
+          "file": "Sources/App.swift",
+          "line_start": 3,
+          "line_end": 7
+        },
+        {
+          "name": "f",
+          "kind": "unknown",
+          "file": "Sources/App.swift",
+          "line_start": 4,
+          "line_end": 4
+        },
+        {
+          "name": "take",
+          "kind": "method",
+          "file": "Sources/App.swift",
+          "line_start": 5,
+          "line_end": 5
+        },
+        {
+          "name": "many",
+          "kind": "method",
+          "file": "Sources/App.swift",
+          "line_start": 6,
+          "line_end": 6
+        }
+      ],
+      "format": 7
+    },
+    "src/lib.rs": {
+      "change": "modified",
+      "class": {
+        "source": true,
+        "resolution_config": false
+      },
+      "mtime_ns": 1793867773883608842,
+      "fragment_id": "9d927b1f94115541",
+      "content_hash": "206e709aa218a7ef",
+      "parse_failed": false,
+      "dirty_symbols": [
+        {
+          "name": "St",
+          "kind": "struct",
+          "file": "src/lib.rs",
+          "line_start": 1,
+          "line_end": 1
+        },
+        {
+          "name": "Other",
+          "kind": "struct",
+          "file": "src/lib.rs",
+          "line_start": 2,
+          "line_end": 2
+        },
+        {
+          "name": "make",
+          "kind": "function",
+          "file": "src/lib.rs",
+          "line_start": 3,
+          "line_end": 5
+        },
+        {
+          "name": "take",
+          "kind": "function",
+          "file": "src/lib.rs",
+          "line_start": 6,
+          "line_end": 6
+        }
+      ],
+      "format": 7
+    }
+  }
+}
