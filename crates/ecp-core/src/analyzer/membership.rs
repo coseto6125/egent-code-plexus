@@ -52,9 +52,6 @@ pub struct MemberRow<'a> {
 /// caller's node ids; `raw` is a row index of the rows passed to
 /// [`class_membership`].
 pub trait MemberLookup {
-    /// The first declaration of the path with this name, any kind:
-    /// `SymbolTable::lookup_in_file`. Only the owner pass reads it.
-    fn lookup_in_file(&self, name: &str) -> Option<u32>;
     /// The node of the row `raw`: its own, or the survivor a merged row
     /// merges into (`RawIndexMap::node`).
     fn node(&self, raw: usize) -> Option<u32>;
@@ -333,13 +330,6 @@ mod tests {
     }
 
     impl MemberLookup for Rows<'_> {
-        fn lookup_in_file(&self, name: &str) -> Option<u32> {
-            self.rows
-                .iter()
-                .position(|r| r.name == name)
-                .map(|i| i as u32)
-        }
-
         fn node(&self, raw: usize) -> Option<u32> {
             let survivor = self
                 .merged

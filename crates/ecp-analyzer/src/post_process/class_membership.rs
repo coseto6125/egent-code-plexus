@@ -123,10 +123,6 @@ struct IndexLookup<'a> {
 }
 
 impl MemberLookup for IndexLookup<'_> {
-    fn lookup_in_file(&self, name: &str) -> Option<u32> {
-        self.symbol_table.lookup_in_file(self.path, name)
-    }
-
     fn node(&self, raw: usize) -> Option<u32> {
         self.raw_map.node(self.file, RawIdx(raw as u32))
     }

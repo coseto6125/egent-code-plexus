@@ -910,10 +910,6 @@ struct FileMembers<'t, 'a> {
 }
 
 impl MemberLookup for FileMembers<'_, '_> {
-    fn lookup_in_file(&self, name: &str) -> Option<u32> {
-        self.decls.by_name.get(name)?.first().copied()
-    }
-
     fn node(&self, raw: usize) -> Option<u32> {
         self.raw_map.node(self.ord, RawIdx(raw as u32))
     }

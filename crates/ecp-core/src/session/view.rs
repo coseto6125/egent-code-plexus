@@ -254,7 +254,9 @@ use crate::analyzer::heritage::HeritageNode;
 use crate::analyzer::heritage::HERITAGE_REASONS;
 use crate::analyzer::import_edges::ImportReason;
 use crate::analyzer::lexical::{enclosing_types, path_identities, splits_by_arity, stored_uid};
-use crate::analyzer::membership::{CLASS_MEMBERSHIP_IMPL_REASON, CLASS_MEMBERSHIP_REASON};
+use crate::analyzer::membership::{
+    CLASS_MEMBERSHIP_IMPL_REASON, CLASS_MEMBERSHIP_OWNER_REASON, CLASS_MEMBERSHIP_REASON,
+};
 use crate::analyzer::overrides::OVERRIDES_REASONS;
 use crate::analyzer::record_nodes::{
     EVENT_TOPIC_PUBLISHES_REASON, EVENT_TOPIC_SUBSCRIBES_REASON, PATH_LITERAL_SINK_REASONS,
@@ -1454,7 +1456,7 @@ fn replays_record_edge(rel: RelType) -> bool {
 /// Every reason [`OverlayView::build`] puts on a [`ViewEdge`]. A cached view
 /// stores each reason as its index here; a view with an unlisted reason is
 /// never stored, so it costs a build per query as before the cache.
-const VIEW_EDGE_REASONS: [&str; 45] = [
+const VIEW_EDGE_REASONS: [&str; 46] = [
     OVERLOAD_SET_REASON,
     CLOSURE_REFERENCE_REASON,
     NEAREST_COPY_REASON,
@@ -1500,6 +1502,7 @@ const VIEW_EDGE_REASONS: [&str; 45] = [
     HERITAGE_REASONS[0],
     HERITAGE_REASONS[1],
     TYPE_ANNOTATION_REASON,
+    CLASS_MEMBERSHIP_OWNER_REASON,
 ];
 
 pub(super) fn reason_index(reason: &str) -> Option<u8> {
