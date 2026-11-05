@@ -658,6 +658,9 @@ fn passes_where(
     }
 }
 
+/// Column names and rows of a projection.
+type Projection = (Vec<String>, Vec<Vec<Value>>);
+
 /// The projection of a non-aggregate query with LIMIT and no ORDER BY or
 /// DISTINCT. The visitor yields the materialised row order, so the visit
 /// stops once SKIP + LIMIT rows survive WHERE and WITH. The caller still
@@ -673,7 +676,7 @@ fn stream_limited(
     limit: u64,
     graph: MergedGraph<'_>,
     cache: &mut ContentCache,
-) -> Result<Option<(Vec<String>, Vec<Vec<Value>>)>, CypherError> {
+) -> Result<Option<Projection>, CypherError> {
     let mut limited = LimitedRows {
         query,
         with_cols: query.with.as_ref().map(with_columns).unwrap_or_default(),
