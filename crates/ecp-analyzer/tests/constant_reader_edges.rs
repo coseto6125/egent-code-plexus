@@ -204,6 +204,74 @@ fn test_value_read_python_imported_constant_returns_cross_file_edge() {
     assert_one_cross_file(&value_reads(&g, "g"), "lib.py", "TIMEOUT");
 }
 
+// A Python type alias (`IntOrStr = int | str`) is a `Typedef` node, and
+// `isinstance(x, IntOrStr)` reads it as a value. main filed the alias as a
+// `Variable` and gave both readers a `value_read` edge; this branch's
+// `Typedef` lost them. Stands for: an alias read keeps its reader edge, a
+// parameter still shadows it, and a class of the name binds no value read.
+const PY_ALIASES: &str = "IntOrStr = int | str\n\n\
+class Shape:\n    pass\n\n\
+def check(x):\n    return isinstance(x, IntOrStr)\n\n\
+def shadow(x, IntOrStr):\n    return isinstance(x, IntOrStr)\n\n\
+def shape(x):\n    return isinstance(x, Shape)\n";
+
+#[test]
+fn test_value_read_python_type_alias_returns_same_file_edge() {
+    let g = graph(&PythonProvider::new().unwrap(), &[("a.py", PY_ALIASES)]);
+    assert_eq!(
+        value_reads(&g, "check"),
+        vec![r("a.py", "IntOrStr", VALUE_READ, SAME_FILE)]
+    );
+    assert_eq!(value_reads(&g, "shadow"), none());
+    assert_eq!(value_reads(&g, "shape"), none());
+}
+
+#[test]
+fn test_value_read_python_imported_type_alias_returns_cross_file_edge() {
+    let g = graph(
+        &PythonProvider::new().unwrap(),
+        &[
+            ("aliases.py", "IntOrStr = int | str\n"),
+            (
+                "app.py",
+                "from aliases import IntOrStr\n\ndef check(x):\n    return isinstance(x, IntOrStr)\n",
+            ),
+        ],
+    );
+    assert_one_cross_file(&value_reads(&g, "check"), "aliases.py", "IntOrStr");
+}
+
+// Without an import the alias stays out of reach, as a constant does: a
+// Python module must import a name before it reads it bare.
+#[test]
+fn test_value_read_python_unimported_type_alias_returns_no_edge() {
+    let g = graph(
+        &PythonProvider::new().unwrap(),
+        &[
+            ("aliases.py", "IntOrStr = int | str\n"),
+            (
+                "app.py",
+                "def check(x):\n    return isinstance(x, IntOrStr)\n",
+            ),
+        ],
+    );
+    assert_eq!(value_reads(&g, "check"), none());
+}
+
+// Only Python reads a type alias as a value. A TypeScript `type` alias has
+// no runtime value, so a bare read of its name binds nothing.
+#[test]
+fn test_value_read_typescript_type_alias_returns_no_edge() {
+    let g = graph(
+        &TypeScriptProvider::new().unwrap(),
+        &[(
+            "a.ts",
+            "export type Limit = number;\nexport function read(): unknown {\n  return Limit;\n}\n",
+        )],
+    );
+    assert_eq!(value_reads(&g, "read"), none());
+}
+
 // ---- Java ----
 
 const JAVA_SAME_FILE: &str = "public class D {\n\

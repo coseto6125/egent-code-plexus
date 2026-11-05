@@ -578,6 +578,26 @@ pub const TYPE_ANNOTATION_REASON: &str = "type_annotation";
 /// `lst` is no `Tok`.
 pub const TYPE_ARGUMENT_REASON: &str = "type_annotation:type_argument";
 
+/// Which of the two type-annotation reasons one [`type_annotation_targets`]
+/// edge carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnnotationReason {
+    /// The declaration's declared type: [`TYPE_ANNOTATION_REASON`].
+    Declared,
+    /// A project type inside a non-callable's generic annotation:
+    /// [`TYPE_ARGUMENT_REASON`].
+    Argument,
+}
+
+impl AnnotationReason {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::Declared => TYPE_ANNOTATION_REASON,
+            Self::Argument => TYPE_ARGUMENT_REASON,
+        }
+    }
+}
+
 /// One declaration's inputs to [`type_annotation_targets`]: its node's
 /// fields and its function meta's, as the index and the overlay hold them.
 #[derive(Clone, Copy)]
@@ -617,7 +637,7 @@ pub struct AnnotatedDecl<'a> {
 pub fn type_annotation_targets<'a, T: IntoIterator<Item = (u32, f32)>>(
     decl: AnnotatedDecl<'a>,
     mut resolve: impl FnMut(&'a str) -> T,
-) -> Vec<(u32, f32, &'static str)> {
+) -> Vec<(u32, f32, AnnotationReason)> {
     let AnnotatedDecl {
         language,
         kind,
@@ -628,7 +648,7 @@ pub fn type_annotation_targets<'a, T: IntoIterator<Item = (u32, f32)>>(
         type_params,
     } = decl;
     let is_type_param = |name: &str| type_params.iter().any(|p| p == name);
-    let mut targets: Vec<(u32, f32, &'static str)> = Vec::new();
+    let mut targets: Vec<(u32, f32, AnnotationReason)> = Vec::new();
     if let Some(annotation) = type_annotation {
         let name = match return_type_key(annotation) {
             Some(key) if names_declaring_type_in(language, key) => owner_class.and_then(owner_key),
@@ -639,14 +659,14 @@ pub fn type_annotation_targets<'a, T: IntoIterator<Item = (u32, f32)>>(
             name.filter(|name| !is_type_param(name))
                 .into_iter()
                 .flat_map(&mut resolve)
-                .map(|(target, confidence)| (target, confidence, TYPE_ANNOTATION_REASON)),
+                .map(|(target, confidence)| (target, confidence, AnnotationReason::Declared)),
         );
     }
     let callable = kind.is_callable();
     let named_reason = if callable {
-        TYPE_ANNOTATION_REASON
+        AnnotationReason::Declared
     } else {
-        TYPE_ARGUMENT_REASON
+        AnnotationReason::Argument
     };
     let returned = match type_annotation {
         Some(annotation) if return_type_key(annotation).is_none() => Some(annotation),
@@ -1424,7 +1444,7 @@ mod tests {
             };
             type_annotation_targets(decl, |name| (name == "St").then_some((1, 1.0)))
                 .into_iter()
-                .map(|(_, _, reason)| reason)
+                .map(|(_, _, reason)| reason.reason())
                 .collect::<Vec<_>>()
         };
         assert_eq!(reasons(NodeKind::Property, "St"), [TYPE_ANNOTATION_REASON]);

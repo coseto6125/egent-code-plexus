@@ -1785,7 +1785,11 @@ pub fn anchored_module_file<F: ModuleTreeFacts>(
 /// items: the type's own module-level member, else what [`prefer_owned`] picks
 /// with the type as the receiver. A body-local namesake and a free item of the
 /// type's file never bind. [`qualified`] then applies the method rule
-/// ([`rust_path_may_bind`]).
+/// ([`rust_path_may_bind`]). A path with segments past the item
+/// ([`TreePlace::past`]) binds only when the file confirms each of them but
+/// the member: the item and every middle segment name a module or a type
+/// the file declares. `a::missing::top()` then binds nothing, never the
+/// `top` of `a`'s file.
 pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
     facts: &F,
     decls: &D,
@@ -1801,7 +1805,7 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
     // the plain path, so a workspace-crate head keeps its route; never for a
     // head the caller's `use` names (it may be a renamed re-export); and only
     // for a declared `Module`, so `Type::new()` is untouched.
-    let placed = module_tree_item(facts, caller, callee, namespace).or_else(|| {
+    let placed = module_tree_place(facts, caller, callee, namespace).or_else(|| {
         let head = callee.split("::").next()?;
         let imported = imports
             .iter()
@@ -1812,13 +1816,35 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
                 .call_decls(caller, head)
                 .any(|(_, kind)| kind == NodeKind::Module);
         declared_child
-            .then(|| module_tree_item(facts, caller, &format!("self::{callee}"), namespace))
+            .then(|| module_tree_place(facts, caller, &format!("self::{callee}"), namespace))
             .flatten()
     });
-    let Some(TreeItem::Found { file, item }) = placed else {
+    let Some(TreePlace {
+        item: TreeItem::Found { file, item },
+        past,
+        ..
+    }) = placed
+    else {
         return None;
     };
     let file = file.as_ref();
+    // The segments the walk did not consume stand for inline `mod`s and a
+    // type's associated items. A turbofish segment (`S::<u8>::new`) names
+    // none of them.
+    let confirmed = |name: &str| {
+        let name = name.split('<').next().unwrap_or(name);
+        name.is_empty()
+            || decls
+                .call_decls(file, name)
+                .any(|(_, kind)| kind.is_qualifier())
+    };
+    if past > 0 {
+        let segs: Vec<&str> = callee.split("::").collect();
+        let middle = &segs[segs.len().saturating_sub(past)..segs.len().saturating_sub(1)];
+        if !confirmed(item.as_str()) || !middle.iter().all(|&seg| confirmed(seg)) {
+            return None;
+        }
+    }
     let wanted = target.kind_predicate();
     let is_type = ResolveTarget::Type.kind_predicate();
     let mut item_is_type = false;

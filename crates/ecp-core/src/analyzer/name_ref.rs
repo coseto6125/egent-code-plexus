@@ -140,6 +140,18 @@ where
     {
         targets = resolve_imported(name, ResolveTarget::Field);
     }
+    // A Python type alias (`IntOrStr = int | str`, a `Typedef`) is also a
+    // value: `isinstance(x, IntOrStr)` reads it. Only a lookup that binds
+    // the alias alone counts, so a class of the same name never binds.
+    if targets.is_empty() && name_ref.kind != NameRefKind::Function && language == Language::Python
+    {
+        let aliases = resolve(name, ResolveTarget::Type);
+        if let [(id, _)] = aliases.as_slice() {
+            if facts.kind(*id) == NodeKind::Typedef {
+                targets = aliases;
+            }
+        }
+    }
     if free_only {
         targets.retain(|&(id, _)| facts.kind(id) != crate::graph::NodeKind::Method);
     }

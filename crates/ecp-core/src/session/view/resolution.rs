@@ -2655,6 +2655,8 @@ fn resolve_overlay_name_ref(
             let names = match target {
                 ResolveTarget::Callable => callables,
                 ResolveTarget::Value => values,
+                // A Python value read that may name a type alias.
+                ResolveTarget::Type => types,
                 _ => return Vec::new(),
             };
             let tiers = OverlayTiers::new(
@@ -2909,20 +2911,22 @@ impl<'v, 'a> NameTierFacts for OverlayTiers<'v, 'a, '_> {
 
     /// The overlay's module trees ([`RustModules`]); none in the `Imports`
     /// pass ([`OverlayFacts::tree_free`]).
-    fn module_tree_member(
-        &self,
-        imports: &[RawImport],
-        callee: &str,
-        member: &str,
-        target: ResolveTarget,
-    ) -> Option<u32> {
+    fn module_tree_member(&self, site: &ladder::QualifiedSite<'_>) -> Option<u32> {
         let facts = self.members.facts;
         if facts.tree_free.get() {
             return None;
         }
         let importer = self.source();
         facts.with_rust_tree(self.file_ord, |tree| {
-            ladder::module_tree_member(tree, facts, importer, imports, callee, member, target)
+            ladder::module_tree_member(
+                tree,
+                facts,
+                importer,
+                site.imports,
+                site.callee,
+                site.member,
+                site.target,
+            )
         })
     }
 
@@ -2936,7 +2940,7 @@ impl<'v, 'a> NameTierFacts for OverlayTiers<'v, 'a, '_> {
             site,
             self.qualifiers.qualifiers,
             heritage,
-            || self.module_tree_member(site.imports, site.callee, site.member, site.target),
+            || self.module_tree_member(&site),
         );
         (hit, None)
     }
@@ -6078,7 +6082,7 @@ pub(super) fn resolve_edges(
                     target,
                     rel_type: RelType::Accesses,
                     confidence,
-                    reason,
+                    reason: reason.reason(),
                 });
             }
 

@@ -190,3 +190,54 @@ fn test_module_path_calls_into_inline_module_bind_the_inline_function() {
     assert!(!hits.is_empty(), "inline module call must bind");
     assert!(hits.iter().all(|hit| hit == &to("src/lib.rs", "top")));
 }
+
+// Stands for: a path binds only when the tree or the file confirms every
+// segment but the member. main binds `crate::a::missing::top()` to `a`'s
+// `top`, and this branch's `self::` retry also binds the bare
+// `a::missing::top()`. Expected: no edge for either spelling.
+#[test]
+fn test_module_path_call_with_missing_middle_segment_records_no_edge() {
+    for call in [
+        "a::missing::top()",
+        "crate::a::missing::top()",
+        "self::a::missing::top()",
+    ] {
+        let lib = format!("pub mod a;\npub mod c;\npub fn run() {{ {call}; }}\n");
+        let g = crate_graph(&mod_rs_layout(&lib), true);
+        assert_eq!(targets(&g, "run"), vec![], "{call}");
+    }
+}
+
+// Stands for: an inline `mod` past the deepest file module is a segment the
+// file confirms. main binds `self::deep::nope::g()` to the `g` of the inline
+// `deep::inner`. Expected: only the spelled path `deep::inner::g` binds.
+#[test]
+fn test_module_path_call_through_inline_modules_binds_only_declared_segments() {
+    let lib = "mod deep { pub mod inner { pub fn g() {} } }\n\
+               pub fn run() { self::deep::inner::g(); crate::deep::inner::g(); }\n\
+               pub fn bad() { self::deep::nope::g(); crate::deep::nope::g(); }\n";
+    let g = crate_graph(&[("src/lib.rs", lib)], true);
+    assert_eq!(targets(&g, "run"), vec![to("src/lib.rs", "g")]);
+    assert_eq!(targets(&g, "bad"), vec![]);
+}
+
+// Stands for: a type segment past the module still reaches its associated
+// function (`a::S::new()`), also through a turbofish (`a::S::<u8>::new()`),
+// so the confirmation keeps the type route. main binds the plain spellings;
+// this branch binds all four.
+#[test]
+fn test_module_path_call_to_associated_function_of_module_type_binds_it() {
+    let files = [
+        (
+            "src/lib.rs",
+            "pub mod a;\npub fn run() { a::S::new(); crate::a::S::new(); \
+             a::S::<u8>::new(); crate::a::S::<u8>::new(); }\n",
+        ),
+        (
+            "src/a/mod.rs",
+            "pub struct S<T>(T);\nimpl<T> S<T> { pub fn new() {} }\n",
+        ),
+    ];
+    let g = crate_graph(&files, true);
+    assert_eq!(targets(&g, "run"), vec![to("src/a/mod.rs", "new")]);
+}

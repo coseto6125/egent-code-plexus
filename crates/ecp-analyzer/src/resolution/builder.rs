@@ -3876,10 +3876,9 @@ fn pass2_emit_node_edges(
             target: target_id,
             rel_type: RelType::Accesses,
             confidence,
-            reason: if reason == type_ladder::TYPE_ARGUMENT_REASON {
-                reason_type.argument
-            } else {
-                reason_type.declared
+            reason: match reason {
+                type_ladder::AnnotationReason::Declared => reason_type.declared,
+                type_ladder::AnnotationReason::Argument => reason_type.argument,
             },
         });
     }

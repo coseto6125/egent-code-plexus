@@ -1961,6 +1961,31 @@ fn test_overlay_rust_unique_qualifier_confidence_matches_reindex() {
     );
 }
 
+// A path segment the tree and the file do not confirm (`missing`) binds
+// nothing on both sides; a spelled inline module (`deep::inner`) still binds.
+#[test]
+fn test_overlay_rust_missing_middle_segment_matches_reindex() {
+    let lib = "pub mod a;\nmod deep { pub mod inner { pub fn g() {} } }\nfn run() {}";
+    for (call, target) in [
+        ("a::missing::top", None),
+        ("crate::a::missing::top", None),
+        ("self::deep::nope::g", None),
+        ("self::deep::inner::g", Some(("src/lib.rs", "g", "inner"))),
+    ] {
+        let dirty = lib.replace("fn run() {}", &format!("fn run() {{ {call}(); }}"));
+        let expected: Vec<Target> = target
+            .into_iter()
+            .map(|(file, name, owner)| (file.into(), name.into(), owner.into(), 85))
+            .collect();
+        parity(
+            &RustProvider::new().unwrap(),
+            &[("src/lib.rs", lib), ("src/a/mod.rs", "pub fn top() {}")],
+            &[("src/lib.rs", &dirty)],
+            &expected,
+        );
+    }
+}
+
 #[test]
 fn test_overlay_rust_mod_rs_relative_heads_match_reindex() {
     for (call, target) in [
@@ -3127,6 +3152,31 @@ fn test_overlay_python_constant_read_and_callback_shifted_matches_reindex() {
     );
     assert_eq!(full.len(), 2, "one constant read, one callback: {full:?}");
     assert_eq!(overlay, full);
+}
+
+// A Python type alias (a `Typedef`) read as a value keeps its `value_read`
+// edge on both sides, whether the reader or the alias's own file is dirty.
+#[test]
+fn test_overlay_python_type_alias_value_read_matches_reindex() {
+    let aliases = "IntOrStr = int | str\n";
+    let app = "from aliases import IntOrStr\n\ndef check(x):\n    return isinstance(x, IntOrStr)\n";
+    let files = [("aliases.py", aliases), ("app.py", app)];
+    let shifted_app = format!("\n{app}");
+    let shifted_aliases = format!("\n{aliases}");
+    for dirty in [
+        ("app.py", shifted_app.as_str()),
+        ("aliases.py", shifted_aliases.as_str()),
+    ] {
+        let (full, overlay) = field_read_edges(
+            &PythonProvider::new().unwrap(),
+            &files,
+            &[dirty],
+            &["value_read"],
+        );
+        assert_eq!(full.len(), 1, "{}: one alias read: {full:?}", dirty.0);
+        assert_eq!(full[0].2, RelType::ReadsField);
+        assert_eq!(overlay, full, "{} dirty", dirty.0);
+    }
 }
 
 #[test]

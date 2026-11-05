@@ -762,22 +762,16 @@ impl<'r, 'a> NameTierFacts for IndexTiers<'r, 'a, '_> {
         })
     }
 
-    fn module_tree_member(
-        &self,
-        imports: &[RawImport],
-        callee: &str,
-        member: &str,
-        target: ResolveTarget,
-    ) -> Option<NodeId> {
+    fn module_tree_member(&self, site: &ladder::QualifiedSite<'_>) -> Option<NodeId> {
         let resolver = self.facts.0;
         ladder::module_tree_member(
             &resolver.module_tree()?,
             resolver.symbol_table,
             self.source,
-            imports,
-            callee,
-            member,
-            target,
+            site.imports,
+            site.callee,
+            site.member,
+            site.target,
         )
     }
 
