@@ -26,11 +26,10 @@ use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_kotlin_string_value,
 };
 use crate::calls::{
-    attach_to_enclosing, node_range, range_width, span_holds, span_width, start_pos, Pos, PosRange,
+    attach_to_enclosing, node_range, range_width, reference_function, span_holds, span_width,
+    start_pos, Pos, PosRange,
 };
-use ecp_core::analyzer::types::{
-    CallSite, NameRef, NameRefKind, RawNode, RawPathLiteral, RawSqlRef,
-};
+use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use std::collections::HashMap;
 use tree_sitter::Node;
@@ -466,19 +465,6 @@ fn bound_callable_reference(
         return None;
     }
     Some(format!("{ty}.{}", member.utf8_text(source).ok()?))
-}
-
-/// Records `name` as a function that the function holding `pos` hands on as
-/// a value: Pass 2 binds it as a `References` edge, never as a call.
-fn reference_function(pos: Pos, name: &str, nodes: &mut [RawNode]) {
-    // `attach_to_enclosing` picks the holder; its placeholder call is the
-    // last entry, so popping it leaves `calls` as it was.
-    if let Some((holder, _)) = attach_to_enclosing(pos, String::new(), nodes) {
-        let node = &mut nodes[holder];
-        node.calls.pop();
-        node.field_reads
-            .push(NameRef::encode(name, NameRefKind::Function));
-    }
 }
 
 /// Whether a type enclosing `pos` declares a property `name` as its own

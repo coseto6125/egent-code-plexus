@@ -21,8 +21,8 @@ use super::path_literals::{
     strip_ts_template_value,
 };
 use crate::calls::{
-    attach_to_enclosing_span, new_expression_call, node_range, range_width, start_pos,
-    CallSiteIndex, Pos, PosRange,
+    attach_to_enclosing_span, is_call_callee, new_expression_call, node_range, range_width,
+    reference_function_span, start_pos, CallSiteIndex, Pos, PosRange,
 };
 use crate::dynamic_imports::{
     binding_mentions, is_field, may_load, rebound, synthetic_imports, DynamicBinding,
@@ -31,9 +31,7 @@ use crate::dynamic_imports::{
 use crate::framework_helpers::{
     enclosing_class, js_ts_first_arg_is_literal_string, node_span, Span,
 };
-use ecp_core::analyzer::types::{
-    CallSite, NameRef, NameRefKind, RawNode, RawPathLiteral, RawSqlRef,
-};
+use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
@@ -550,8 +548,8 @@ pub fn extract_ts_calls_and_path_literals(
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
     let mut constructions: Vec<(Span, String)> = Vec::new();
     let fields = data_members(nodes);
-    let mut stack: Vec<Node<'_>> = vec![root];
-    while let Some(n) = stack.pop() {
+    let mut stack: Vec<(Node<'_>, Option<Node<'_>>)> = vec![(root, None)];
+    while let Some((n, parent)) = stack.pop() {
         match n.kind() {
             "call_expression" => {
                 if let Some(callee) = ts_callee_name(n, source, locals, dynamic, nodes) {
@@ -561,8 +559,10 @@ pub fn extract_ts_calls_and_path_literals(
                 }
             }
             "member_expression" => {
-                if let Some(name) = bound_method_value(n, source, Some(locals), nodes, &fields) {
-                    reference_function(node_span(&n), &name, nodes);
+                if let Some(name) =
+                    bound_method_value(n, parent, source, Some(locals), nodes, &fields)
+                {
+                    reference_function_span(node_span(&n), &name, nodes);
                 }
             }
             "new_expression" => {
@@ -606,7 +606,7 @@ pub fn extract_ts_calls_and_path_literals(
         }
         let mut c = n.walk();
         for child in n.children(&mut c) {
-            stack.push(child);
+            stack.push((child, Some(n)));
         }
     }
     // After every call: the call-meta detectors index `calls` in
@@ -638,20 +638,32 @@ pub(crate) fn data_members(nodes: &[RawNode]) -> HashSet<String> {
 /// a parameter or local annotated with a class `T`: the method `T.m` (the
 /// enclosing class's for `this`), typed as the call `obj.m()` is. The name
 /// scan drops `obj.m`, as `obj` is a local, and records no `this.m`. A
-/// callee, the object of a longer member expression (`.bind` aside), an
-/// assignment target, a `fields` name read through `this`, and a receiver of
-/// no known type name nothing; a field `obj.n` is no callable, so Pass 2
-/// binds no edge to it.
+/// callee (parenthesized or not), the object of a longer member expression
+/// (`.bind` aside), an assignment target, a `fields` name read through
+/// `this`, and a receiver of no known type name nothing; a field `obj.n` is
+/// no callable, so Pass 2 binds no edge to it. `parent` is `member`'s parent.
 pub(crate) fn bound_method_value(
     member: Node<'_>,
+    parent: Option<Node<'_>>,
     source: &[u8],
     locals: Option<&LocalTypes>,
     nodes: &[RawNode],
     fields: &HashSet<String>,
 ) -> Option<String> {
-    let parent = member.parent()?;
+    let property = member
+        .child_by_field_name("property")
+        .filter(|property| property.kind() == "property_identifier")?
+        .utf8_text(source)
+        .ok()?;
+    let object = member.child_by_field_name("object")?;
+    if !matches!(object.kind(), "this" | "identifier") {
+        return None;
+    }
+    let parent = parent?;
+    if is_call_callee(member, Some(parent)) {
+        return None;
+    }
     let value = match parent.kind() {
-        "call_expression" => parent.child_by_field_name("function") != Some(member),
         "assignment_expression" | "augmented_assignment_expression" => {
             parent.child_by_field_name("left") != Some(member)
         }
@@ -671,12 +683,6 @@ pub(crate) fn bound_method_value(
     if !value {
         return None;
     }
-    let property = member
-        .child_by_field_name("property")
-        .filter(|property| property.kind() == "property_identifier")?
-        .utf8_text(source)
-        .ok()?;
-    let object = member.child_by_field_name("object")?;
     let ty = match object.kind() {
         "this" if !fields.contains(property) => enclosing_class(nodes, node_span(&member))?.0,
         "identifier" => locals?
@@ -685,19 +691,6 @@ pub(crate) fn bound_method_value(
         _ => return None,
     };
     Some(format!("{ty}.{property}"))
-}
-
-/// Records `name` as a function that the function holding `span` hands on
-/// as a value: Pass 2 binds it as a `References` edge, never as a call.
-pub(crate) fn reference_function(span: Span, name: &str, nodes: &mut [RawNode]) {
-    // `attach_to_enclosing_span` picks the holder; its placeholder call is
-    // the last entry, so popping it leaves `calls` as it was.
-    if let Some((holder, _)) = attach_to_enclosing_span(span, String::new(), nodes) {
-        let node = &mut nodes[holder];
-        node.calls.pop();
-        node.field_reads
-            .push(NameRef::encode(name, NameRefKind::Function));
-    }
 }
 
 fn ts_callee_name(

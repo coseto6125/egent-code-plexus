@@ -82,6 +82,13 @@ fn test_first_class_callable_function_references_not_calls() {
 }
 
 #[test]
+fn test_first_class_callable_same_function_twice_references_it_once() {
+    let body = "array_map(cb_bare(...), $a); array_map(cb_bare(...), $a);";
+    assert_eq!(references(body), one("cb_bare"));
+    assert_eq!(calls(body), Vec::<String>::new());
+}
+
+#[test]
 fn test_array_callable_class_constant_references_method() {
     assert_eq!(
         references("array_map([Cb::class, 'cb_qual'], $a);"),

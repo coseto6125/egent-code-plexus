@@ -12,6 +12,11 @@
 //! and gains no `References`, and a field or property read (`c.count`) gets
 //! no `function_reference` edge.
 //!
+//! A parenthesized callee `(c.m)(1)` is a call too (Go, Swift, Dart, C#,
+//! Python, TypeScript, JavaScript). Java `c::m`, Kotlin `c::m` and Ruby
+//! `c.method(:m)` have no parenthesized-callee form that parses to a method
+//! value, so they carry no such test.
+//!
 //! Languages with no bound method value, so no positive test:
 //! - C has no methods; `&f` is the only function value
 //!   (`qualified_function_reference_types.rs`).
@@ -41,7 +46,7 @@ use ecp_analyzer::rust::parser::RustProvider;
 use ecp_analyzer::swift::parser::SwiftProvider;
 use ecp_analyzer::typescript::parser::TypeScriptProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::graph::ZeroCopyGraph;
+use ecp_core::graph::{RelType, ZeroCopyGraph};
 use name_ref_support::{assert_one_cross_file, calls, function_refs, graph, Ref};
 
 fn none() -> Vec<Ref> {
@@ -271,6 +276,18 @@ fn test_bound_method_reference_go_call_keeps_calls_edge_only() {
 }
 
 #[test]
+fn test_bound_method_reference_go_parenthesized_call_keeps_calls_edge_only() {
+    let g = go_graph("func run(t T) {\n\t(t.M)(1)\n}");
+    assert_call_only(&g, "run", "types.go", "M");
+}
+
+#[test]
+fn test_bound_method_reference_go_same_reference_twice_returns_one_edge() {
+    let g = go_graph("func run(t T) {\n\tapply(t.M)\n\tapply(t.M)\n}");
+    assert_one_cross_file(&function_refs(&g, "run"), "types.go", "M");
+}
+
+#[test]
 fn test_bound_method_reference_go_field_read_returns_no_edge() {
     let g = go_graph("func run(t T) {\n\tx := t.Count\n\tprintln(x, t.Count)\n}");
     assert_eq!(function_refs(&g, "run"), none());
@@ -321,6 +338,14 @@ fn test_bound_method_reference_swift_untyped_local_receiver_returns_no_edge() {
 fn test_bound_method_reference_swift_call_keeps_calls_edge_only() {
     let g = swift_graph("c.m(1)");
     assert_call_only(&g, "run", "Cls.swift", "m");
+}
+
+// Stands for: a parenthesized callee `(c.m)(1)` is a call, never a method
+// value. Its Calls edge is not asserted: only the absent References is.
+#[test]
+fn test_bound_method_reference_swift_parenthesized_call_returns_no_edge() {
+    let g = swift_graph("(c.m)(1)");
+    assert_eq!(function_refs(&g, "run"), none());
 }
 
 #[test]
@@ -376,6 +401,20 @@ fn test_bound_method_reference_dart_untyped_local_receiver_returns_no_edge() {
 fn test_bound_method_reference_dart_call_keeps_calls_edge_only() {
     let g = dart_graph("c.m(1);");
     assert_call_only(&g, "run", "cls.dart", "m");
+}
+
+// Stands for: a parenthesized callee `(c.m)(1)` is a call, never a method
+// value. Its Calls edge is not asserted: only the absent References is.
+#[test]
+fn test_bound_method_reference_dart_parenthesized_call_returns_no_edge() {
+    let g = dart_graph("(c.m)(1);");
+    assert_eq!(function_refs(&g, "run"), none());
+}
+
+#[test]
+fn test_bound_method_reference_dart_same_reference_twice_returns_one_edge() {
+    let g = dart_graph("xs.forEach(c.m);\n  xs.forEach(c.m);");
+    assert_one_cross_file(&function_refs(&g, "run"), "cls.dart", "m");
 }
 
 #[test]
@@ -446,6 +485,18 @@ fn test_bound_method_reference_csharp_call_keeps_calls_edge_only() {
 }
 
 #[test]
+fn test_bound_method_reference_csharp_parenthesized_call_keeps_calls_edge_only() {
+    let g = csharp_graph("(c.M)(1);");
+    assert_call_only(&g, "Run", "Cls.cs", "M");
+}
+
+#[test]
+fn test_bound_method_reference_csharp_same_reference_twice_returns_one_edge() {
+    let g = csharp_graph("xs.ForEach(c.M);\n        xs.ForEach(c.M);");
+    assert_one_cross_file(&function_refs(&g, "Run"), "Cls.cs", "M");
+}
+
+#[test]
 fn test_bound_method_reference_csharp_field_read_returns_no_edge() {
     let g = csharp_graph("int x = c.Count;\n        System.Console.WriteLine(c.Count + x);");
     assert_eq!(function_refs(&g, "Run"), none());
@@ -504,6 +555,20 @@ fn test_bound_method_reference_python_assignment_target_returns_no_edge() {
 fn test_bound_method_reference_python_call_keeps_calls_edge_only() {
     let g = python_graph("obj.m(1)");
     assert_call_only(&g, "run", "cls.py", "m");
+}
+
+// Stands for: a parenthesized callee `(obj.m)(1)` is a call, never a method
+// value. Its Calls edge is not asserted: only the absent References is.
+#[test]
+fn test_bound_method_reference_python_parenthesized_call_returns_no_edge() {
+    let g = python_graph("(obj.m)(1)");
+    assert_eq!(function_refs(&g, "run"), none());
+}
+
+#[test]
+fn test_bound_method_reference_python_same_reference_twice_returns_one_edge() {
+    let g = python_graph("list(map(obj.m, xs))\n    list(map(obj.m, xs))");
+    assert_one_cross_file(&function_refs(&g, "run"), "cls.py", "m");
 }
 
 #[test]
@@ -579,6 +644,28 @@ fn test_bound_method_reference_typescript_call_keeps_calls_edge_only() {
     assert_call_only(&g, "run", "cls.ts", "m");
 }
 
+// Stands for: a parenthesized callee `(obj.m)(1)` / `(this.m)()` is a call,
+// never a method value. Its Calls edge is not asserted: only the absent
+// References is.
+#[test]
+fn test_bound_method_reference_typescript_parenthesized_call_returns_no_edge() {
+    let g = ts_graph("(obj.m)(1);");
+    assert_eq!(function_refs(&g, "run"), none());
+}
+
+#[test]
+fn test_bound_method_reference_typescript_parenthesized_this_call_returns_no_edge() {
+    let src = "class C {\n  m(): void {}\n  run(): void {\n    (this.m)();\n  }\n}\n";
+    let found = refs(&TypeScriptProvider::new().unwrap(), &[("c.ts", src)], "run");
+    assert_eq!(found, none());
+}
+
+#[test]
+fn test_bound_method_reference_typescript_same_reference_twice_returns_one_edge() {
+    let g = ts_graph("xs.forEach(obj.m);\n  xs.forEach(obj.m);");
+    assert_one_cross_file(&function_refs(&g, "run"), "cls.ts", "m");
+}
+
 /// An empty and a whitespace-only file in the tree change nothing.
 #[test]
 fn test_bound_method_reference_typescript_empty_files_keep_the_edge() {
@@ -631,6 +718,20 @@ fn test_bound_method_reference_javascript_call_keeps_calls_edge_only() {
     assert_call_only(&js_graph(), "callIt", "cls.js", "m");
 }
 
+#[test]
+fn test_bound_method_reference_javascript_parenthesized_this_call_returns_no_edge() {
+    let src = "export class C {\n  m() {}\n  run() {\n    (this.m)();\n  }\n}\n";
+    let found = refs(&JavaScriptProvider::new().unwrap(), &[("c.js", src)], "run");
+    assert_eq!(found, none());
+}
+
+#[test]
+fn test_bound_method_reference_javascript_same_reference_twice_returns_one_edge() {
+    let src = "export class C {\n  m() {}\n  run(xs) {\n    xs.forEach(this.m);\n    xs.forEach(this.m);\n  }\n}\n";
+    let found = refs(&JavaScriptProvider::new().unwrap(), &[("c.js", src)], "run");
+    assert_eq!(found.len(), 1, "{found:?}");
+}
+
 // ---- Ruby ----
 
 const RB_CLS: &str =
@@ -671,5 +772,15 @@ fn test_bound_method_reference_ruby_untyped_receiver_returns_no_edge() {
 fn test_bound_method_reference_rust_field_access_returns_no_edge() {
     let src = "struct S {\n    f: fn(i32),\n}\n\nimpl S {\n    fn m(&self, x: i32) {}\n}\n\nfn run(s: S) {\n    let g = s.f;\n    g(1);\n}\n";
     let found = refs(&RustProvider::new().unwrap(), &[("lib.rs", src)], "run");
+    assert_eq!(found, none());
+}
+
+/// Stands for: `pair.0` indexes a plain tuple; it is no read of the field "0"
+/// of an unrelated tuple struct in the repo (main: no row).
+#[test]
+fn test_bound_method_reference_rust_tuple_index_read_returns_no_value_read() {
+    let src = "struct Wrapper(u8, u8);\n\nfn first(pair: (u8, u8)) -> u8 {\n    pair.0\n}\n";
+    let g = graph(&RustProvider::new().unwrap(), &[("lib.rs", src)]);
+    let found = name_ref_support::refs(&g, "first", RelType::ReadsField, "field_read");
     assert_eq!(found, none());
 }

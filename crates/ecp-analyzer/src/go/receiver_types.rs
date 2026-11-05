@@ -16,11 +16,10 @@
 
 use super::path_literals::{build_raw_path_literal, strip_go_string_value};
 use crate::calls::{
-    attach_to_enclosing, heads_same_kind_parent, node_range, range_width, start_pos, Pos, PosRange,
+    attach_to_enclosing, is_call_callee, is_same_kind_field, node_range, range_width,
+    reference_function, start_pos, Pos, PosRange,
 };
-use ecp_core::analyzer::types::{
-    CallSite, NameRef, NameRefKind, RawImport, RawNode, RawPathLiteral, RawSqlRef,
-};
+use ecp_core::analyzer::types::{CallSite, RawImport, RawNode, RawPathLiteral, RawSqlRef};
 use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
 
@@ -486,8 +485,8 @@ pub(super) fn extract_go_calls_and_path_literals_with_imports(
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
-    let mut stack: Vec<Node<'_>> = vec![root];
-    while let Some(n) = stack.pop() {
+    let mut stack: Vec<(Node<'_>, Option<Node<'_>>)> = vec![(root, None)];
+    while let Some((n, parent)) = stack.pop() {
         match n.kind() {
             "call_expression" => {
                 if let Some(callee) = go_callee_name(n, source, local_types, imports) {
@@ -495,7 +494,7 @@ pub(super) fn extract_go_calls_and_path_literals_with_imports(
                 }
             }
             "selector_expression" => {
-                if let Some(name) = method_value(n, source, local_types) {
+                if let Some(name) = method_value(n, parent, source, local_types) {
                     reference_function(start_pos(n), &name, nodes);
                 }
             }
@@ -532,7 +531,7 @@ pub(super) fn extract_go_calls_and_path_literals_with_imports(
         }
         let mut c = n.walk();
         for child in n.children(&mut c) {
-            stack.push(child);
+            stack.push((child, Some(n)));
         }
     }
     (path_literals, sql_refs)
@@ -543,41 +542,25 @@ pub(super) fn extract_go_calls_and_path_literals_with_imports(
 /// call `t.M()` is. The name scan drops `t.M`, as `t` is a local. A callee,
 /// the operand of a longer selector and a receiver of no known type name
 /// nothing; a field `t.F` is no callable, so Pass 2 binds no edge to it.
-fn method_value(selector: Node<'_>, source: &[u8], locals: &LocalTypes) -> Option<String> {
-    let mut outer = selector;
-    while let Some(parent) = outer.parent() {
-        if parent.kind() != "parenthesized_expression" {
-            break;
-        }
-        outer = parent;
-    }
-    let callee = outer.parent().is_some_and(|parent| {
-        parent.kind() == "call_expression" && parent.child_by_field_name("function") == Some(outer)
-    });
-    if callee || heads_same_kind_parent(selector, "operand") {
-        return None;
-    }
+fn method_value(
+    selector: Node<'_>,
+    parent: Option<Node<'_>>,
+    source: &[u8],
+    locals: &LocalTypes,
+) -> Option<String> {
     let operand = selector
         .child_by_field_name("operand")
         .filter(|operand| operand.kind() == "identifier")?;
     let field = selector
         .child_by_field_name("field")
         .filter(|field| field.kind() == "field_identifier")?;
+    if is_call_callee(selector, parent)
+        || parent.is_some_and(|parent| is_same_kind_field(selector, parent, "operand"))
+    {
+        return None;
+    }
     let ty = locals.lookup(start_pos(selector), operand.utf8_text(source).ok()?)?;
     Some(format!("{ty}.{}", field.utf8_text(source).ok()?))
-}
-
-/// Records `name` as a function that the function holding `pos` hands on as
-/// a value: Pass 2 binds it as a `References` edge, never as a call.
-fn reference_function(pos: Pos, name: &str, nodes: &mut [RawNode]) {
-    // `attach_to_enclosing` picks the holder; its placeholder call is the
-    // last entry, so popping it leaves `calls` as it was.
-    if let Some((holder, _)) = attach_to_enclosing(pos, String::new(), nodes) {
-        let node = &mut nodes[holder];
-        node.calls.pop();
-        node.field_reads
-            .push(NameRef::encode(name, NameRefKind::Function));
-    }
 }
 
 /// Derive the callee name for a `call_expression` node.

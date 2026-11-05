@@ -158,7 +158,19 @@ pub fn attach_to_enclosing_span(
     callee: String,
     nodes: &mut [RawNode],
 ) -> Option<(usize, u32)> {
-    let i = nodes
+    let i = enclosing_container_span(span, nodes)?;
+    let calls = &mut nodes[i].calls;
+    let idx = calls.len() as u32;
+    calls.push(callee);
+    Some((i, idx))
+}
+
+/// Index of the smallest function holding `span`, by row and column.
+fn enclosing_container_span(
+    span: crate::framework_helpers::Span,
+    nodes: &[RawNode],
+) -> Option<usize> {
+    nodes
         .iter()
         .enumerate()
         .filter(|(_, node)| {
@@ -168,21 +180,12 @@ pub fn attach_to_enclosing_span(
             ) && crate::framework_helpers::span_contains(node.span, span)
         })
         .min_by_key(|(_, node)| crate::framework_helpers::span_area(node.span))
-        .map(|(i, _)| i)?;
-    let calls = &mut nodes[i].calls;
-    let idx = calls.len() as u32;
-    calls.push(callee);
-    Some((i, idx))
+        .map(|(i, _)| i)
 }
 
-/// Attach a call to the smallest function holding `pos`, by row and column so
+/// Index of the smallest function holding `pos`, by row and column so
 /// functions sharing a line stay apart.
-/// Returns the caller's node index and the call's index in its `calls`.
-pub fn attach_to_enclosing(
-    pos: Pos,
-    callee: String,
-    nodes: &mut [RawNode],
-) -> Option<(usize, u32)> {
+fn enclosing_container(pos: Pos, nodes: &[RawNode]) -> Option<usize> {
     let mut best: Option<(usize, (u32, i64))> = None;
     for (i, n) in nodes.iter().enumerate() {
         if !is_container_kind(n.kind) {
@@ -196,10 +199,49 @@ pub fn attach_to_enclosing(
             }
         }
     }
-    let (i, _) = best?;
+    best.map(|(i, _)| i)
+}
+
+/// Attach a call to the smallest function holding `pos`, by row and column so
+/// functions sharing a line stay apart.
+/// Returns the caller's node index and the call's index in its `calls`.
+pub fn attach_to_enclosing(
+    pos: Pos,
+    callee: String,
+    nodes: &mut [RawNode],
+) -> Option<(usize, u32)> {
+    let i = enclosing_container(pos, nodes)?;
     let idx = nodes[i].calls.len() as u32;
     nodes[i].calls.push(callee);
     Some((i, idx))
+}
+
+/// Records `name` as a function value the function holding `pos` hands on:
+/// Pass 2 binds it as a `References` edge, never as a call. A name already
+/// recorded for that function stays one entry. Returns the holder's index.
+pub fn reference_function(pos: Pos, name: &str, nodes: &mut [RawNode]) -> Option<usize> {
+    let holder = enclosing_container(pos, nodes)?;
+    push_function_reference(holder, name, nodes);
+    Some(holder)
+}
+
+/// [`reference_function`] for a holder located by a full span, so one-line
+/// closures stay apart.
+pub fn reference_function_span(
+    span: crate::framework_helpers::Span,
+    name: &str,
+    nodes: &mut [RawNode],
+) -> Option<usize> {
+    let holder = enclosing_container_span(span, nodes)?;
+    push_function_reference(holder, name, nodes);
+    Some(holder)
+}
+
+fn push_function_reference(holder: usize, name: &str, nodes: &mut [RawNode]) {
+    let entry = NameRef::encode(name, NameRefKind::Function);
+    if !nodes[holder].field_reads.contains(&entry) {
+        nodes[holder].field_reads.push(entry);
+    }
 }
 
 /// Walk the AST and attach the **field name** of each member-access read
@@ -412,10 +454,18 @@ impl LiteralKeyFacts {
     }
 }
 
-/// True when `access` is the callee of an enclosing call expression — i.e. its
-/// parent is a call/invocation whose `function` field is `access`. Such nodes
-/// are method calls handled by `extract_calls`, not data-field reads.
-fn is_call_callee(access: Node<'_>, parent: Option<Node<'_>>) -> bool {
+/// True when `access`, or a parenthesized wrapper of it (`(a.m)()`), is the
+/// callee of a call: `parent` (`access`'s parent) or the first
+/// non-parenthesized ancestor is a call/invocation whose `function` field is
+/// that node. Such nodes are method calls handled by `extract_calls`, not
+/// data-field reads or method values.
+pub(crate) fn is_call_callee(access: Node<'_>, parent: Option<Node<'_>>) -> bool {
+    let mut outer = access;
+    let mut parent = parent;
+    while let Some(wrapper) = parent.filter(|p| p.kind() == "parenthesized_expression") {
+        outer = wrapper;
+        parent = wrapper.parent();
+    }
     let Some(parent) = parent else {
         return false;
     };
@@ -426,7 +476,7 @@ fn is_call_callee(access: Node<'_>, parent: Option<Node<'_>>) -> bool {
             | "function_call_expression"
             | "invocation_expression"
             | "call"
-    ) && parent.child_by_field_name("function").map(|f| f.id()) == Some(access.id())
+    ) && parent.child_by_field_name("function").map(|f| f.id()) == Some(outer.id())
 }
 
 /// Reads the name a qualified value node records: see
@@ -1345,7 +1395,9 @@ fn field_name_from(access: Node<'_>, source: &[u8]) -> Option<String> {
                 .last()
         })?;
     let text = field_node.utf8_text(source).ok()?;
-    if text.is_empty() {
+    // `pair.0` indexes a tuple; recorded by name it would bind to any
+    // tuple struct's field "0" in the repo.
+    if text.is_empty() || text.bytes().all(|b| b.is_ascii_digit()) {
         None
     } else {
         Some(text.to_string())
@@ -1473,7 +1525,7 @@ pub fn heads_same_kind_parent(node: Node<'_>, field: &str) -> bool {
         .is_some_and(|parent| is_same_kind_field(node, parent, field))
 }
 
-fn is_same_kind_field(node: Node<'_>, parent: Node<'_>, field: &str) -> bool {
+pub(crate) fn is_same_kind_field(node: Node<'_>, parent: Node<'_>, field: &str) -> bool {
     parent.kind() == node.kind()
         && parent
             .child_by_field_name(field)

@@ -30,13 +30,11 @@ use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_csharp_string_value,
 };
 use crate::calls::{
-    attach_to_enclosing, construction_call, heads_same_kind_parent, node_range, range_width,
-    span_holds, span_width, start_pos, Pos, PosRange,
+    attach_to_enclosing, construction_call, is_call_callee, is_same_kind_field, node_range,
+    range_width, reference_function, span_holds, span_width, start_pos, Pos, PosRange,
 };
 use ecp_core::analyzer::csharp_extension::system_type_name;
-use ecp_core::analyzer::types::{
-    CallSite, NameRef, NameRefKind, RawNode, RawPathLiteral, RawSqlRef, THIS_MEMBER_PREFIX,
-};
+use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef, THIS_MEMBER_PREFIX};
 use ecp_core::graph::NodeKind;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -719,17 +717,11 @@ fn csharp_callee(
 /// to it.
 fn method_group(
     access: Node<'_>,
+    parent: Option<Node<'_>>,
     source: &[u8],
     locals: &LocalTypes,
     nodes: &[RawNode],
 ) -> Option<String> {
-    let callee = access.parent().is_some_and(|parent| {
-        parent.kind() == "invocation_expression"
-            && parent.child_by_field_name("function") == Some(access)
-    });
-    if callee || heads_same_kind_parent(access, "expression") {
-        return None;
-    }
     let member = access
         .child_by_field_name("name")
         .filter(|name| name.kind() == "identifier")?
@@ -751,22 +743,14 @@ fn method_group(
     if !known {
         return None;
     }
+    if is_call_callee(access, parent)
+        || parent.is_some_and(|parent| is_same_kind_field(access, parent, "expression"))
+    {
+        return None;
+    }
     match classify_receiver(receiver, pos, source, locals, nodes)? {
         Receiver::Typed(ty) => Some(format!("{ty}.{member}")),
         _ => None,
-    }
-}
-
-/// Records `name` as a function that the function holding `pos` hands on as
-/// a value: Pass 2 binds it as a `References` edge, never as a call.
-fn reference_function(pos: Pos, name: &str, nodes: &mut [RawNode]) {
-    // `attach_to_enclosing` picks the holder; its placeholder call is the
-    // last entry, so popping it leaves `calls` as it was.
-    if let Some((holder, _)) = attach_to_enclosing(pos, String::new(), nodes) {
-        let node = &mut nodes[holder];
-        node.calls.pop();
-        node.field_reads
-            .push(NameRef::encode(name, NameRefKind::Function));
     }
 }
 
@@ -783,8 +767,8 @@ pub fn extract_csharp_calls_and_path_literals(
     let local_types = collect_local_types(root, source);
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
-    let mut stack: Vec<Node<'_>> = vec![root];
-    while let Some(n) = stack.pop() {
+    let mut stack: Vec<(Node<'_>, Option<Node<'_>>)> = vec![(root, None)];
+    while let Some((n, parent)) = stack.pop() {
         match n.kind() {
             "invocation_expression" => {
                 if let Some(callee) = csharp_callee(n, source, &local_types, nodes) {
@@ -792,7 +776,7 @@ pub fn extract_csharp_calls_and_path_literals(
                 }
             }
             "member_access_expression" => {
-                if let Some(name) = method_group(n, source, &local_types, nodes) {
+                if let Some(name) = method_group(n, parent, source, &local_types, nodes) {
                     reference_function(start_pos(n), &name, nodes);
                 }
             }
@@ -827,7 +811,7 @@ pub fn extract_csharp_calls_and_path_literals(
         }
         let mut c = n.walk();
         for child in n.children(&mut c) {
-            stack.push(child);
+            stack.push((child, Some(n)));
         }
     }
     (path_literals, sql_refs)

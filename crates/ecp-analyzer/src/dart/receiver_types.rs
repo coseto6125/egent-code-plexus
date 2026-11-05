@@ -29,12 +29,10 @@ use super::path_literals::{
     build_raw_path_literal, has_template_substitution, strip_dart_string_value,
 };
 use crate::calls::{
-    attach_to_enclosing, heads_same_kind_parent, node_range, range_width, span_holds, start_pos,
-    Pos, PosRange,
+    attach_to_enclosing, is_call_callee, is_same_kind_field, node_range, range_width,
+    reference_function, span_holds, start_pos, Pos, PosRange,
 };
-use ecp_core::analyzer::types::{
-    CallSite, NameRef, NameRefKind, RawNode, RawPathLiteral, RawSqlRef,
-};
+use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
@@ -287,8 +285,8 @@ pub fn extract_dart_calls_and_path_literals(
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
-    let mut stack: Vec<Node<'_>> = vec![root];
-    while let Some(n) = stack.pop() {
+    let mut stack: Vec<(Node<'_>, Option<Node<'_>>)> = vec![(root, None)];
+    while let Some((n, parent)) = stack.pop() {
         match n.kind() {
             "call_expression" => {
                 if let Some(callee) = dart_callee_name(n, source, bindings, nodes) {
@@ -296,7 +294,7 @@ pub fn extract_dart_calls_and_path_literals(
                 }
             }
             "member_expression" | "null_aware_member_expression" => {
-                if let Some(name) = method_value(n, source, bindings) {
+                if let Some(name) = method_value(n, parent, source, bindings) {
                     reference_function(start_pos(n), &name, nodes);
                 }
             }
@@ -326,7 +324,7 @@ pub fn extract_dart_calls_and_path_literals(
         }
         let mut c = n.walk();
         for child in n.children(&mut c) {
-            stack.push(child);
+            stack.push((child, Some(n)));
         }
     }
     (path_literals, sql_refs)
@@ -416,19 +414,23 @@ fn dart_callee_name(
 /// callee, the object of a longer member expression and a receiver of no
 /// known type name nothing; a field `c.f` is no callable, so Pass 2 binds no
 /// edge to it.
-fn method_value(member: Node<'_>, source: &[u8], bindings: &DartBindings) -> Option<String> {
-    let callee = member.parent().is_some_and(|parent| {
-        parent.kind() == "call_expression" && parent.child_by_field_name("function") == Some(member)
-    });
-    if callee || heads_same_kind_parent(member, "object") {
-        return None;
-    }
+fn method_value(
+    member: Node<'_>,
+    parent: Option<Node<'_>>,
+    source: &[u8],
+    bindings: &DartBindings,
+) -> Option<String> {
     let property = member
         .child_by_field_name("property")
         .filter(|property| property.kind() == "identifier")?
         .utf8_text(source)
         .ok()?;
     let object = member.child_by_field_name("object")?;
+    if is_call_callee(member, parent)
+        || parent.is_some_and(|parent| is_same_kind_field(member, parent, "object"))
+    {
+        return None;
+    }
     let pos = start_pos(member);
     let ty = match object.kind() {
         "this" => bindings.enclosing_class(pos)?.0.as_str(),
@@ -438,19 +440,6 @@ fn method_value(member: Node<'_>, source: &[u8], bindings: &DartBindings) -> Opt
         _ => return None,
     };
     Some(format!("{ty}.{property}"))
-}
-
-/// Records `name` as a function that the function holding `pos` hands on as
-/// a value: Pass 2 binds it as a `References` edge, never as a call.
-fn reference_function(pos: Pos, name: &str, nodes: &mut [RawNode]) {
-    // `attach_to_enclosing` picks the holder; its placeholder call is the
-    // last entry, so popping it leaves `calls` as it was.
-    if let Some((holder, _)) = attach_to_enclosing(pos, String::new(), nodes) {
-        let node = &mut nodes[holder];
-        node.calls.pop();
-        node.field_reads
-            .push(NameRef::encode(name, NameRefKind::Function));
-    }
 }
 
 /// Whether `call` calls a local, a parameter or a field of an enclosing

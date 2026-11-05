@@ -20,17 +20,15 @@
 
 use super::path_literals::build_raw_path_literal;
 use crate::calls::{
-    attach_to_enclosing, heads_same_kind_parent, node_range, range_width, start_pos, CallSiteIndex,
-    Pos, PosRange,
+    attach_to_enclosing, is_call_callee, is_same_kind_field, node_range, range_width,
+    reference_function, start_pos, CallSiteIndex, Pos, PosRange,
 };
 use crate::dynamic_imports::{
     binding_mentions, is_field, may_load, rebound, synthetic_imports, DynamicBinding,
     DynamicImports,
 };
 use crate::framework_helpers::strip_python_string_quotes;
-use ecp_core::analyzer::types::{
-    CallSite, NameRef, NameRefKind, RawNode, RawPathLiteral, RawSqlRef,
-};
+use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
@@ -660,8 +658,8 @@ pub fn extract_python_calls_and_path_literals(
         .filter(|n| matches!(n.kind, NodeKind::Class | NodeKind::Enum))
         .map(|n| n.name.clone())
         .collect();
-    let mut stack: Vec<Node<'_>> = vec![root];
-    while let Some(n) = stack.pop() {
+    let mut stack: Vec<(Node<'_>, Option<Node<'_>>)> = vec![(root, None)];
+    while let Some((n, parent)) = stack.pop() {
         match n.kind() {
             "call" => {
                 if let Some(callee) = python_callee_name(n, source, locals, dynamic, &classes) {
@@ -671,7 +669,7 @@ pub fn extract_python_calls_and_path_literals(
                 }
             }
             "attribute" => {
-                if let Some(name) = bound_method_value(n, source, locals) {
+                if let Some(name) = bound_method_value(n, parent, source, locals) {
                     reference_function(start_pos(n), &name, nodes);
                 }
             }
@@ -705,7 +703,7 @@ pub fn extract_python_calls_and_path_literals(
         }
         let mut c = n.walk();
         for child in n.children(&mut c) {
-            stack.push(child);
+            stack.push((child, Some(n)));
         }
     }
     (path_literals, sql_refs)
@@ -718,40 +716,34 @@ pub fn extract_python_calls_and_path_literals(
 /// longer attribute, an assignment or `del` target and a receiver of no known
 /// type name nothing; a data attribute `obj.n` is no callable, so Pass 2
 /// binds no edge to it.
-fn bound_method_value(attribute: Node<'_>, source: &[u8], locals: &LocalTypes) -> Option<String> {
-    let parent = attribute.parent()?;
-    let written = match parent.kind() {
-        "call" => parent.child_by_field_name("function") == Some(attribute),
-        "assignment" | "augmented_assignment" => {
-            parent.child_by_field_name("left") == Some(attribute)
-        }
-        "delete_statement" => true,
-        _ => false,
-    };
-    if written || heads_same_kind_parent(attribute, "object") {
-        return None;
-    }
+fn bound_method_value(
+    attribute: Node<'_>,
+    parent: Option<Node<'_>>,
+    source: &[u8],
+    locals: &LocalTypes,
+) -> Option<String> {
     let object = attribute
         .child_by_field_name("object")
         .filter(|object| object.kind() == "identifier")?;
     let member = attribute
         .child_by_field_name("attribute")
         .filter(|member| member.kind() == "identifier")?;
+    let parent = parent?;
+    let written = match parent.kind() {
+        "assignment" | "augmented_assignment" => {
+            parent.child_by_field_name("left") == Some(attribute)
+        }
+        "delete_statement" => true,
+        _ => false,
+    };
+    if written
+        || is_same_kind_field(attribute, parent, "object")
+        || is_call_callee(attribute, Some(parent))
+    {
+        return None;
+    }
     let ty = locals.lookup(start_pos(attribute), object.utf8_text(source).ok()?)?;
     Some(format!("{ty}.{}", member.utf8_text(source).ok()?))
-}
-
-/// Records `name` as a function that the function holding `pos` hands on as
-/// a value: Pass 2 binds it as a `References` edge, never as a call.
-fn reference_function(pos: Pos, name: &str, nodes: &mut [RawNode]) {
-    // `attach_to_enclosing` picks the holder; its placeholder call is the
-    // last entry, so popping it leaves `calls` as it was.
-    if let Some((holder, _)) = attach_to_enclosing(pos, String::new(), nodes) {
-        let node = &mut nodes[holder];
-        node.calls.pop();
-        node.field_reads
-            .push(NameRef::encode(name, NameRefKind::Function));
-    }
 }
 
 /// Climb from a string literal to find the innermost enclosing

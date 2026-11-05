@@ -12,10 +12,13 @@
 //! destructured `execute()` emits the export it holds, `@import<N>.run`.
 
 use super::path_literals::{build_raw_path_literal, strip_js_string_value, LiteralContext};
-use crate::calls::{attach_to_enclosing_span, new_expression_call, start_pos, CallSiteIndex};
+use crate::calls::{
+    attach_to_enclosing_span, new_expression_call, reference_function_span, start_pos,
+    CallSiteIndex,
+};
 use crate::dynamic_imports::DynamicImports;
 use crate::framework_helpers::{enclosing_class, node_span, Span};
-use crate::typescript::receiver_types::{bound_method_value, data_members, reference_function};
+use crate::typescript::receiver_types::{bound_method_value, data_members};
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use tree_sitter::Node;
 
@@ -54,8 +57,8 @@ pub fn extract_js_calls_and_path_literals(
             // No annotation types a JavaScript local, so only `this.m` names
             // a method value.
             "member_expression" => {
-                if let Some(name) = bound_method_value(n, source, None, nodes, &fields) {
-                    reference_function(node_span(&n), &name, nodes);
+                if let Some(name) = bound_method_value(n, parent, source, None, nodes, &fields) {
+                    reference_function_span(node_span(&n), &name, nodes);
                 }
             }
             "new_expression" => {

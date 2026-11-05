@@ -29,11 +29,10 @@ use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_swift_string_value,
 };
 use crate::calls::{
-    attach_to_enclosing, heads_same_kind_parent, node_range, range_width, start_pos, Pos, PosRange,
+    attach_to_enclosing, heads_same_kind_parent, node_range, range_width, reference_function,
+    start_pos, Pos, PosRange,
 };
-use ecp_core::analyzer::types::{
-    CallSite, NameRef, NameRefKind, RawNode, RawPathLiteral, RawSqlRef,
-};
+use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
@@ -412,8 +411,16 @@ pub fn extract_swift_calls_and_path_literals(
     while let Some(n) = stack.pop() {
         match n.kind() {
             "call_expression" => {
-                if let Some(callee) = swift_callee_node(n) {
+                if let Some(mut callee) = swift_callee_node(n) {
                     callees.insert(callee.id());
+                    // `(c.m)(1)`: a parenthesized callee is a one-element tuple.
+                    while callee.kind() == "tuple_expression" && callee.named_child_count() == 1 {
+                        let Some(inner) = callee.named_child(0) else {
+                            break;
+                        };
+                        callee = inner;
+                        callees.insert(callee.id());
+                    }
                 }
                 if let Some(callee) = swift_callee_name(n, source, bindings, nodes) {
                     attach_to_enclosing(start_pos(n), callee, nodes);
@@ -475,19 +482,6 @@ fn method_value(navigation: Node<'_>, source: &[u8], bindings: &SwiftBindings) -
         _ => return None,
     };
     Some(format!("{ty}.{member}"))
-}
-
-/// Records `name` as a function that the function holding `pos` hands on as
-/// a value: Pass 2 binds it as a `References` edge, never as a call.
-fn reference_function(pos: Pos, name: &str, nodes: &mut [RawNode]) {
-    // `attach_to_enclosing` picks the holder; its placeholder call is the
-    // last entry, so popping it leaves `calls` as it was.
-    if let Some((holder, _)) = attach_to_enclosing(pos, String::new(), nodes) {
-        let node = &mut nodes[holder];
-        node.calls.pop();
-        node.field_reads
-            .push(NameRef::encode(name, NameRefKind::Function));
-    }
 }
 
 /// The node that names what `call` invokes: the first non-call-suffix named

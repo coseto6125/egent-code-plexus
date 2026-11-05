@@ -17,10 +17,11 @@
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, extract_php_string_value,
 };
-use crate::calls::{attach_to_enclosing, construction_call, range_width, start_pos, Pos, PosRange};
-use ecp_core::analyzer::types::{
-    CallSite, NameRef, NameRefKind, RawNode, RawPathLiteral, RawSqlRef,
+use crate::calls::{
+    attach_to_enclosing, construction_call, range_width, reference_function, start_pos, Pos,
+    PosRange,
 };
+use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use tree_sitter::Node;
 
@@ -193,20 +194,6 @@ fn is_first_class_callable(call: Node<'_>) -> bool {
     })
 }
 
-/// Records `name` as a function value the function holding `pos` reads, in
-/// place of a call. Returns the holder's node index.
-fn attach_function_reference(pos: Pos, name: &str, nodes: &mut [RawNode]) -> Option<usize> {
-    // `attach_to_enclosing` picks the holder; the placeholder call it
-    // pushes is the last entry, so removing it leaves `calls` as it was.
-    let (holder, placeholder) = attach_to_enclosing(pos, String::new(), nodes)?;
-    nodes[holder].calls.remove(placeholder as usize);
-    let entry = NameRef::encode(name, NameRefKind::Function);
-    if !nodes[holder].field_reads.contains(&entry) {
-        nodes[holder].field_reads.push(entry);
-    }
-    Some(holder)
-}
-
 /// A member or scoped call is a call; the same call in first-class callable
 /// syntax whose receiver the parser typed (`$this->m(...)`, `C::m(...)`) is a
 /// `References` edge. An untyped receiver stays the untyped-member call.
@@ -220,7 +207,7 @@ fn attach_call_or_reference(call: Node<'_>, callee: String, nodes: &mut [RawNode
     };
     match typed_name {
         Some(name) => {
-            attach_function_reference(pos, &name, nodes);
+            reference_function(pos, &name, nodes);
         }
         None => {
             attach_to_enclosing(pos, callee, nodes);
@@ -241,7 +228,7 @@ fn reference_first_class_function(call: Node<'_>, source: &[u8], nodes: &mut [Ra
         return;
     };
     let name = local_function_name(&recorded, enclosing_namespace(call, source));
-    let Some(holder) = attach_function_reference(start_pos(call), &name, nodes) else {
+    let Some(holder) = reference_function(start_pos(call), &name, nodes) else {
         return;
     };
     let calls = &mut nodes[holder].calls;
