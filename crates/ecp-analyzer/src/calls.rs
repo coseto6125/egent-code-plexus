@@ -438,6 +438,10 @@ fn is_call_callee(access: Node<'_>, parent: Option<Node<'_>>) -> bool {
 /// `*declarator*` node and every child of a `*parameter*` node; a `value`,
 /// `right`, `body` … subtree is an expression again; a `type` subtree names
 /// no value.
+/// Reads the name a qualified value node records: see
+/// [`NameRefSpec::qualified_name`].
+pub type QualifiedName = fn(Node<'_>, &[u8], &NameRefSpec) -> Option<String>;
+
 pub struct NameRefSpec {
     /// Node kinds of a bare name: `identifier`, Kotlin / Swift
     /// `simple_identifier`, Ruby `constant`, PHP `name`.
@@ -489,7 +493,14 @@ pub struct NameRefSpec {
     /// - the resolver binds the path text as a function reference for the
     ///   language (`name_ref::resolve_name_ref` splits its last segment off).
     ///   A `Self::` path or one with generic arguments records nothing.
+    ///
+    /// The scan still descends into the node, so a qualifier that is a value
+    /// (`obj` in `obj.f`) keeps its own read.
     pub qualified_values: &'static [&'static str],
+    /// The name a [`Self::qualified_values`] node records, or `None` to
+    /// record nothing. Defaults to [`qualified_reference`], which reads a
+    /// `name` field and the path text.
+    pub qualified_name: QualifiedName,
     /// Ruby: `method(:name)` names the method `name`.
     pub symbol_method_refs: bool,
     /// Parent kinds whose bare name right before `=` is an argument label:
@@ -820,6 +831,7 @@ impl NameRefSpec {
         infix_calls: &[],
         method_refs: &[],
         qualified_values: &[],
+        qualified_name: qualified_reference,
         symbol_method_refs: false,
         named_arg_parents: &[],
         global_decls: &[],
@@ -1034,14 +1046,14 @@ impl<'s> NameScan<'s> {
             && frame.field & field_flag::NON_VALUE == 0
             && frame.parent_kind & kind_flag::SKIP_PARENT == 0
         {
-            if let Some(name) = qualified_reference(n, source, spec) {
+            if let Some(name) = (spec.qualified_name)(n, source, spec) {
                 self.reads.push(PendingName {
                     pos: start_pos(n),
                     name: Cow::Owned(name),
                     kind: NameRefKind::Function,
                 });
             }
-            return true;
+            return false;
         }
         if kind & kind_flag::METHOD_REF != 0 {
             if let Some(name) = method_reference(n, source, spec) {
@@ -1184,7 +1196,7 @@ fn method_reference<'s>(
 /// the source writes (`parse::migrate`, `crate::a::Entry::new`), so Pass 2
 /// resolves it through the module path the way it resolves `parse::migrate()`.
 /// `None` for a `Self::` path or a path with generic arguments (`Vec::<u8>::new`).
-fn qualified_reference(path: Node<'_>, source: &[u8], spec: &NameRefSpec) -> Option<String> {
+pub fn qualified_reference(path: Node<'_>, source: &[u8], spec: &NameRefSpec) -> Option<String> {
     path.child_by_field_name("name")
         .filter(|n| spec.ident_kinds.contains(&n.kind()))?;
     let text = path.utf8_text(source).ok()?;
