@@ -427,6 +427,9 @@ impl From<LocalGraph> for OverlayFileInput {
                             .filter(|return_type| !return_type.is_empty()),
                         flags: meta.map(|meta| meta.flags),
                         params: meta.map(|meta| meta.params.clone()).unwrap_or_default(),
+                        type_params: meta
+                            .map(|meta| meta.type_params.clone())
+                            .unwrap_or_default(),
                         generic_arity: n.generic_arity(),
                         name: n.name,
                         kind: n.kind,
@@ -441,7 +444,6 @@ impl From<LocalGraph> for OverlayFileInput {
                         variant_refs: n.field_reads,
                         decorators: n.decorators,
                         type_annotation: n.type_annotation,
-                        type_params: Vec::new(),
                     }
                 })
                 .collect(),
