@@ -413,10 +413,9 @@ fn sweep_hook_refresh_markers(
             }
             // A job still holding a gone session's lock keeps it.
             let _held = if flock_file {
-                match fs::File::open(&path).map(|file| file.try_lock().map(|()| file)) {
-                    Ok(Ok(file)) => Some(file),
-                    Ok(Err(_)) => return false,
-                    Err(_) => None,
+                match locked_idle_lock(&path, &meta) {
+                    Some(file) => Some(file),
+                    None => return false,
                 }
             } else {
                 None
@@ -424,6 +423,34 @@ fn sweep_hook_refresh_markers(
             fs::remove_file(&path).is_ok()
         });
     }
+}
+
+/// The refresh lock at `path`, locked by us, when no launcher uses it: the
+/// open does not block (a FIFO swapped in is refused), the handle is still
+/// the regular file `seen` stat'ed, and its mtime is still outside the
+/// in-flight window after we lock it. A launcher's `exec 9>` truncates the
+/// file before its `flock`, so a recent mtime means one is between the two.
+fn locked_idle_lock(path: &Path, seen: &fs::Metadata) -> Option<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path).ok()?;
+    file.try_lock().ok()?;
+    let held = file.metadata().ok().filter(fs::Metadata::is_file)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if (held.dev(), held.ino()) != (seen.dev(), seen.ino()) {
+            return None;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = seen;
+    (!is_in_flight(&held, SystemTime::now())).then_some(file)
 }
 
 /// Retire commit dirs whose recorded worktree still exists but is not a
@@ -1868,6 +1895,34 @@ mod sha_lock_sweep_tests {
         let stats = sweep_sessions(tmp.path(), false).unwrap();
         assert!(!lock.exists(), "a released stale lock stays");
         assert_eq!(stats.removed, 1);
+    }
+
+    /// Stands for: a launcher truncates the lock (`exec 9>`) before it locks
+    /// it. A lock whose mtime turns recent after the sweep read its metadata
+    /// stays, so no launcher between open and `flock` loses its inode.
+    #[test]
+    fn test_locked_idle_lock_truncated_after_scan_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lock = tmp.path().join("gone~11112222.lock");
+        fs::write(&lock, b"").unwrap();
+        super::tests::backdate(&lock, 25 * 3600);
+        let seen = fs::metadata(&lock).unwrap();
+        assert!(super::locked_idle_lock(&lock, &seen).is_some(), "idle lock");
+
+        fs::File::create(&lock).unwrap();
+        assert!(
+            super::locked_idle_lock(&lock, &seen).is_none(),
+            "truncated lock"
+        );
+
+        fs::remove_file(&lock).unwrap();
+        fs::write(&lock, b"").unwrap();
+        super::tests::backdate(&lock, 25 * 3600);
+        #[cfg(unix)]
+        assert!(
+            super::locked_idle_lock(&lock, &seen).is_none(),
+            "another inode"
+        );
     }
 
     /// Stands for: a FIFO where a gone session's `.lock` was is removed
