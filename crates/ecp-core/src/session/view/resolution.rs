@@ -5886,6 +5886,7 @@ pub(super) fn resolve_edges(
     for (file_ord, file) in files.iter().enumerate() {
         // The keys of the file's per-symbol edges, kept only for a file with
         // a merged row: its edge equal to one emitted already is dropped.
+        let file_start = virt_cursor;
         let file_end = virt_cursor + file.symbols.len() as u32;
         let mut seen: Option<FxHashSet<(u32, u32, u8)>> = (virt_cursor..file_end)
             .any(|virt| survivor_of.contains_key(&virt))
@@ -6202,6 +6203,19 @@ pub(super) fn resolve_edges(
             }
 
             // The index's Pass 2 `type_annotation` edges, after its calls.
+            // Its type variables: the symbol's own markers, then each
+            // container's, over the chain the index reads from `SymbolTable`.
+            let enclosing = std::iter::successors(PickFacts::container(&facts, source), |&id| {
+                PickFacts::container(&facts, id)
+            })
+            .filter_map(|id| id.checked_sub(file_start))
+            .filter_map(|offset| file.symbols.get(offset as usize));
+            let type_params = type_ladder::visible_type_params(
+                &sym.type_params,
+                std::iter::once(sym)
+                    .chain(enclosing)
+                    .map(|s| s.decorators.as_slice()),
+            );
             let decl = AnnotatedDecl {
                 language: caller.language,
                 kind: sym.kind,
@@ -6209,7 +6223,7 @@ pub(super) fn resolve_edges(
                 owner_class: sym.owner_class.as_deref(),
                 return_type: sym.return_type.as_deref(),
                 params: &sym.params,
-                type_params: &sym.type_params,
+                type_params: &type_params,
             };
             for (target, confidence, reason) in type_annotation_targets(decl, |name| {
                 *annotation_types.entry(name).or_insert_with(|| {

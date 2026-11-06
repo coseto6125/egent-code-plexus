@@ -3869,6 +3869,20 @@ fn pass2_emit_node_edges(
     let meta = meta_lookup
         .get(&raw_node.span)
         .map(|&i| &local_graph.raw_function_metas[i]);
+    // The node's own markers, then each container's: the overlay walks the
+    // same chain over its dirty containers.
+    let enclosing = std::iter::successors(
+        ecp_core::analyzer::same_file_pick::PickFacts::container(symbol_table, current_node_idx),
+        |&id| ecp_core::analyzer::same_file_pick::PickFacts::container(symbol_table, id),
+    )
+    .filter_map(|id| raw_map.locate(id))
+    .filter_map(|(_, raw)| local_graph.nodes.get(raw.index()));
+    let type_params = type_ladder::visible_type_params(
+        meta.map_or(&[][..], |m| m.type_params.as_slice()),
+        std::iter::once(raw_node)
+            .chain(enclosing)
+            .map(|node| node.decorators.as_slice()),
+    );
     let decl = type_ladder::AnnotatedDecl {
         language,
         kind: raw_node.kind,
@@ -3876,7 +3890,7 @@ fn pass2_emit_node_edges(
         owner_class: raw_node.owner_class.as_deref(),
         return_type: meta.map(|m| m.return_type.as_str()),
         params: meta.map_or(&[][..], |m| m.params.as_slice()),
-        type_params: meta.map_or(&[][..], |m| m.type_params.as_slice()),
+        type_params: &type_params,
     };
     for (target_id, confidence, reason) in type_ladder::type_annotation_targets(decl, |name| {
         resolver.resolve_symbol(

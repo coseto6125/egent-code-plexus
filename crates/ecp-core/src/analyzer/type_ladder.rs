@@ -6,7 +6,7 @@
 
 use crate::analyzer::reexport::ResolveTarget;
 use crate::analyzer::same_file_pick::PickFacts;
-use crate::analyzer::types::{owner_key, RawImport, THIS_MEMBER_PREFIX};
+use crate::analyzer::types::{owner_key, RawImport, RawNode, THIS_MEMBER_PREFIX};
 use crate::file_category::{FileMeta, Language};
 use crate::graph::NodeKind;
 use std::borrow::Cow;
@@ -611,6 +611,40 @@ pub struct AnnotatedDecl<'a> {
     pub type_params: &'a [String],
 }
 
+/// The type variables visible at a declaration: its own `type_params`
+/// (callable meta) plus every name a [`RawNode::type_params_marker`] entry
+/// of `enclosing` lists, innermost first. `enclosing` yields the decorators
+/// of the declaration itself, then of each declaration whose span contains
+/// it ([`containment::containers`](crate::analyzer::containment::containers)
+/// chain). The index reads the chain from `SymbolTable` and the overlay
+/// from its dirty containers, so both skip the same names. A container that
+/// declares no type parameter adds nothing.
+///
+/// [`RawNode::type_params_marker`]: crate::analyzer::types::RawNode::type_params_marker
+pub fn visible_type_params<'a>(
+    own: &'a [String],
+    enclosing: impl IntoIterator<Item = &'a [String]>,
+) -> Vec<String> {
+    let mut visible = own.to_vec();
+    for decorators in enclosing {
+        let markers = decorators
+            .iter()
+            .filter(|d| RawNode::is_type_params_marker(d));
+        // The marker is `__type_params__:A,B`: its prefix holds the only
+        // `:` before the names.
+        let names = markers
+            .filter_map(|marker| marker.split_once(':'))
+            .flat_map(|(_, list)| list.split(','))
+            .filter(|name| !name.is_empty());
+        for name in names {
+            if !visible.iter().any(|seen| seen == name) {
+                visible.push(name.to_string());
+            }
+        }
+    }
+    visible
+}
+
 /// The `(target, confidence, reason)` of every type-annotation `Accesses`
 /// edge of one declaration, in emit order: the index's Pass 2 rule, which the
 /// overlay replays for a dirty declaration through this same function.
@@ -631,9 +665,10 @@ pub struct AnnotatedDecl<'a> {
 ///   constructor that captured no annotation binds `return_type` (its
 ///   function meta's) the same way, then every type of `params`, the meta's
 ///   flat `[name, type, ...]` list. A target bound already is not bound again.
-/// - A name in `type_params` (the declaration's own generic list and its
-///   enclosing type's) is a type variable, never a project type: no
-///   resolution runs for it, even when a project type shares the name.
+/// - A name in `type_params` ([`visible_type_params`]: the declaration's own
+///   generic list and its enclosing types') is a type variable, never a
+///   project type: no resolution runs for it, even when a project type
+///   shares the name.
 pub fn type_annotation_targets<'a, T: IntoIterator<Item = (u32, f32)>>(
     decl: AnnotatedDecl<'a>,
     mut resolve: impl FnMut(&'a str) -> T,
@@ -1424,6 +1459,60 @@ mod tests {
                 assert!(!asked.iter().any(|n| n == "T"), "{label}: asked for T");
             }
         }
+    }
+
+    fn strings(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Stands for (A10 nested): the own list first, then each enclosing
+    /// marker innermost first; a name two levels declare appears once.
+    #[test]
+    fn test_visible_type_params_own_then_enclosing_innermost_first() {
+        let own = strings(&["M"]);
+        let inner = strings(&[
+            "@Deprecated",
+            RawNode::type_params_marker(["Token", "M"]).as_str(),
+        ]);
+        let outer = strings(&[RawNode::type_params_marker(["T"]).as_str()]);
+        let got = visible_type_params(&own, [inner.as_slice(), outer.as_slice()]);
+        assert_eq!(got, ["M", "Token", "T"]);
+    }
+
+    /// Stands for (M07 fourth member): a container with no marker, an empty
+    /// marker, no container and no own list each add nothing.
+    #[test]
+    fn test_visible_type_params_no_marker_or_empty_list_adds_nothing() {
+        let plain = strings(&["@Entity", "__override__"]);
+        let empty = strings(&[RawNode::type_params_marker(std::iter::empty()).as_str()]);
+        assert!(visible_type_params(&[], [plain.as_slice(), empty.as_slice()]).is_empty());
+        assert!(visible_type_params(&[], std::iter::empty()).is_empty());
+        let own = strings(&["T"]);
+        assert_eq!(visible_type_params(&own, std::iter::empty()), ["T"]);
+    }
+
+    /// Stands for: a field inside `Box<Token>` reads the visible list and
+    /// binds no project `Token`, while the same field in a holder with no
+    /// marker binds it (A10 and its positive control).
+    #[test]
+    fn test_visible_type_params_field_in_generic_holder_binds_no_namesake() {
+        let generic = strings(&[RawNode::type_params_marker(["Token"]).as_str()]);
+        let field = |holder: &[String]| {
+            let type_params = visible_type_params(&[], [holder]);
+            annotation_targets_generic(
+                Language::Java,
+                NodeKind::Property,
+                Some("List<Token>"),
+                Some("Box"),
+                None,
+                &[],
+                &type_params.iter().map(String::as_str).collect::<Vec<_>>(),
+                &["Token"],
+            )
+            .0
+        };
+        assert!(field(&generic).is_empty());
+        assert_eq!(field(&[]), [1]);
     }
 
     /// Stands for: a field's `type_annotation` edge is its declared type, which
