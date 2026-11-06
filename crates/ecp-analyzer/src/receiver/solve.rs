@@ -2,8 +2,10 @@
 //!
 //! Sparse by construction: the state vector covers only the tracked cells
 //! (cells a `Use` reads, the cells they copy from, and the outer cells a
-//! closure's tracked capture reads). A use whose answer is fixed (a pinned
-//! declared type, an aliased cell) is answered without tracking.
+//! closure's capture reads, each written somewhere in the function or its
+//! closures). A use whose answer is fixed (a pinned declared type, an
+//! aliased cell, a cell nothing writes, which holds its entry state) is
+//! answered without tracking.
 
 use super::ir::{
     BindingId, BindingOrigin, Block, BlockId, CaptureMode, FunctionIr, Stmt, TypeId, Value,
@@ -35,11 +37,7 @@ pub fn solve(ir: &FunctionIr, policy: LangPolicy) -> Solved {
     let mut steps = 0u32;
     if solve_function(ir, &plan, policy, &[], &mut steps, &mut solved.uses).is_err() {
         solved.uses.clear();
-        push_all_uses(
-            ir,
-            Abstract::Unknown(UnknownCause::Budget),
-            &mut solved.uses,
-        );
+        push_budget_uses(ir, policy, &mut solved.uses);
         solved.over_budget = true;
     }
     solved
@@ -49,10 +47,16 @@ fn has_uses(ir: &FunctionIr) -> bool {
     !ir.uses.is_empty() || ir.closures.iter().any(|closure| has_uses(&closure.ir))
 }
 
-fn push_all_uses(ir: &FunctionIr, state: Abstract, out: &mut Vec<(usize, Abstract)>) {
-    out.extend(ir.uses.iter().map(|u| (u.node, state)));
+/// Every use of an over-budget tree: `Unknown(Budget)`, except a use of a
+/// pinned declared type, whose answer no flow changes.
+fn push_budget_uses(ir: &FunctionIr, policy: LangPolicy, out: &mut Vec<(usize, Abstract)>) {
+    out.extend(ir.uses.iter().map(|u| {
+        let state = pinned(policy, ir, u.binding)
+            .map_or(Abstract::Unknown(UnknownCause::Budget), Abstract::Known);
+        (u.node, state)
+    }));
     for closure in &ir.closures {
-        push_all_uses(&closure.ir, state, out);
+        push_budget_uses(&closure.ir, policy, out);
     }
 }
 
@@ -72,6 +76,10 @@ struct Plan {
     has_writer: Vec<bool>,
     /// Per closure: the cells of this function it writes through by-ref captures.
     closure_writes: Vec<Vec<u32>>,
+    /// Per cell: a use, a copy or a closure's capture reads it, unpinned and
+    /// not aliased. A demanded cell nothing writes is answered by its entry
+    /// state and holds no slot.
+    demanded: Vec<bool>,
     /// Per cell: its slot in the state vector, or `UNTRACKED`.
     slot: Vec<u32>,
     /// Per slot: its cell.
@@ -180,7 +188,7 @@ impl Plan {
                 let BindingOrigin::Captured(capture) = b.origin else {
                     continue;
                 };
-                if child.slot[inner.cells[binding] as usize] == UNTRACKED {
+                if !child.demanded[inner.cells[binding] as usize] {
                     continue;
                 }
                 let outer_cell = ir.cell(capture.outer) as usize;
@@ -192,25 +200,32 @@ impl Plan {
                 needs_writes_after |= by_ref && !aliased[outer_cell];
             }
         }
-        loop {
-            let mut changed = false;
-            for stmt in stmts(ir) {
-                if let Stmt::Assign { target, value } = stmt {
-                    if need[ir.cell(*target) as usize] {
-                        if let Some(source) = copy_source(value) {
-                            changed |= demand(source, &mut need);
-                        }
+        // Linear in the statements: each copy edge is followed once, from
+        // the cell that first demands its target.
+        let mut copies: Vec<(u32, BindingId)> = stmts(ir)
+            .filter_map(|stmt| match stmt {
+                Stmt::Assign { target, value } => {
+                    copy_source(value).map(|source| (ir.cell(*target), source))
+                }
+                _ => None,
+            })
+            .collect();
+        if !copies.is_empty() {
+            copies.sort_unstable_by_key(|&(target, _)| target);
+            let mut work: Vec<u32> = (0..cells as u32).filter(|&c| need[c as usize]).collect();
+            while let Some(cell) = work.pop() {
+                let from = copies.partition_point(|&(target, _)| target < cell);
+                for &(_, source) in copies[from..].iter().take_while(|&&(t, _)| t == cell) {
+                    if demand(source, &mut need) {
+                        work.push(ir.cell(source));
                     }
                 }
-            }
-            if !changed {
-                break;
             }
         }
 
         let mut slot = vec![UNTRACKED; cells];
         let mut tracked = Vec::new();
-        for cell in (0..cells).filter(|&cell| need[cell]) {
+        for cell in (0..cells).filter(|&cell| need[cell] && writes[cell]) {
             slot[cell] = tracked.len() as u32;
             tracked.push(cell as u32);
         }
@@ -220,6 +235,7 @@ impl Plan {
             writes,
             has_writer,
             closure_writes,
+            demanded: need,
             slot,
             tracked,
             needs_writes_after,
@@ -228,11 +244,13 @@ impl Plan {
     }
 }
 
-/// One function's run: the IR, its plan and the states it reads.
+/// One function's run: the IR, its plan, the states its captures enter
+/// with, and the states it reads.
 struct Run<'a> {
     ir: &'a FunctionIr,
     plan: &'a Plan,
     policy: LangPolicy,
+    captured: &'a [(BindingId, Abstract)],
 }
 
 impl Run<'_> {
@@ -247,15 +265,16 @@ impl Run<'_> {
         if let Some(declared) = pinned(self.policy, self.ir, binding) {
             return Abstract::Known(declared);
         }
-        if self.plan.aliased[self.ir.cell(binding) as usize] {
+        let cell = self.ir.cell(binding) as usize;
+        if self.plan.aliased[cell] {
             return Abstract::Unknown(UnknownCause::Escape);
         }
-        // An untracked, unpinned, unaliased read only happens when the plan
-        // did not demand it (a use in no reachable position): no evidence.
-        self.slot_of(binding)
-            .map_or(Abstract::Unknown(UnknownCause::NoEvidence), |slot| {
-                state[slot]
-            })
+        match self.slot_of(binding) {
+            Some(slot) => state[slot],
+            None if !self.plan.writes[cell] => self.entry_state(binding, self.captured),
+            // A written cell the plan did not demand: no evidence.
+            None => Abstract::Unknown(UnknownCause::NoEvidence),
+        }
     }
 
     fn eval(&self, value: &Value, state: &[Abstract]) -> Abstract {
@@ -431,7 +450,12 @@ fn solve_function(
     if width > MAX_TRACKED_CELLS || (width > 0 && blocks > MAX_BLOCKS) {
         return Err(OverBudget);
     }
-    let run = Run { ir, plan, policy };
+    let run = Run {
+        ir,
+        plan,
+        policy,
+        captured,
+    };
     let order = reverse_post_order(ir);
     let mut live = vec![false; blocks];
     for &block in &order {
@@ -546,7 +570,7 @@ fn capture_states(run: &Run<'_>, index: usize, state: &[Abstract]) -> Vec<(Bindi
             let BindingOrigin::Captured(capture) = b.origin else {
                 return None;
             };
-            if child.slot[inner.cells[binding] as usize] == UNTRACKED {
+            if !child.demanded[inner.cells[binding] as usize] {
                 return None;
             }
             let outer_cell = run.ir.cell(capture.outer) as usize;

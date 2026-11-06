@@ -5,7 +5,7 @@ use ecp_analyzer::receiver::ir::{
     BindingOrigin, CaptureMode, ScopeKind, TypeId, TypeOrigin, TypeRef, Value,
 };
 use ecp_analyzer::receiver::lattice::{join, Abstract, UnknownCause};
-use ecp_analyzer::receiver::solve::{solve, MAX_BLOCKS};
+use ecp_analyzer::receiver::solve::{solve, MAX_BLOCKS, MAX_TRACKED_CELLS};
 use ecp_analyzer::receiver::{
     analyze_file, DeclaredTypePolicy, IrBuilder, LangPolicy, Lowered, Lowering, Receiver,
     ScopeRule, RECEIVER_BUDGET_KIND,
@@ -1017,4 +1017,127 @@ fn test_receiver_call_entry_encodes_known_untyped_and_unproven() {
         None,
         "a method value never guesses"
     );
+}
+
+// ---- tracked cells: what the budget counts ----
+
+/// `count` untyped locals, each assigned a fresh `T` (`written`) or never
+/// assigned, and each read once at node `100 + i`, then a pinned parameter
+/// `p: P` read at node 1.
+fn locals_then_pinned(count: usize, written: bool) -> (IrBuilder, TypeId) {
+    let mut b = IrBuilder::new(PINNED, SPAN);
+    let p_type = b.intern("P", TypeOrigin::Annotation);
+    let t_type = b.intern("T", TypeOrigin::Annotation);
+    let p = b.declare("p", BindingOrigin::Param, Some(p_type));
+    for i in 0..count {
+        let local = b.declare(&format!("x{i}"), BindingOrigin::Local, None);
+        if written {
+            b.assign(local, Value::Type(t_type));
+        }
+        b.use_binding(local, 100 + i);
+    }
+    b.use_binding(p, 1);
+    b.ret();
+    (b, p_type)
+}
+
+#[test]
+fn test_solve_over_budget_pinned_use_keeps_declared_type() {
+    let (b, p_type) = locals_then_pinned(MAX_TRACKED_CELLS + 1, true);
+    let policy = b.policy();
+    let solved = solve(&b.finish(), policy);
+    assert!(solved.over_budget);
+    let at = |node: usize| {
+        solved
+            .uses
+            .iter()
+            .find(|(n, _)| *n == node)
+            .map(|&(_, s)| s)
+    };
+    assert_eq!(at(1), Some(Abstract::Known(p_type)), "{:?}", solved.uses);
+    assert_eq!(at(100), Some(Abstract::Unknown(UnknownCause::Budget)));
+}
+
+/// A local nothing writes holds its entry state, so it costs no tracked
+/// cell: any number of them stays within budget and reads `Unbound`, as a
+/// tracked one would.
+#[test]
+fn test_solve_unwritten_locals_take_no_tracked_cell() {
+    let (b, p_type) = locals_then_pinned(MAX_TRACKED_CELLS * 4, false);
+    let policy = b.policy();
+    let solved = solve(&b.finish(), policy);
+    assert!(!solved.over_budget);
+    let at = |node: usize| {
+        solved
+            .uses
+            .iter()
+            .find(|(n, _)| *n == node)
+            .map(|&(_, s)| s)
+    };
+    assert_eq!(at(1), Some(Abstract::Known(p_type)));
+    assert_eq!(at(100), Some(Abstract::Unbound));
+    let (within, _) = locals_then_pinned(3, false);
+    let (tracked, _) = locals_then_pinned(3, true);
+    let unwritten = state_at(within, 101);
+    assert_eq!(unwritten, Abstract::Unbound);
+    assert!(matches!(state_at(tracked, 101), Abstract::Known(_)));
+}
+
+/// A closure that reads a captured outer local nothing writes sees the
+/// outer's entry state, and one that reads a written outer local sees the
+/// state at its creation: untracked captures still pass their state.
+#[test]
+fn test_solve_closure_reads_unwritten_and_written_outer_locals() {
+    for written in [false, true] {
+        let mut b = IrBuilder::new(PINNED, SPAN);
+        let t_type = b.intern("T", TypeOrigin::Annotation);
+        let p = b.declare("p", BindingOrigin::Param, None);
+        let x = b.declare("x", BindingOrigin::Local, None);
+        if written {
+            b.assign(x, Value::Type(t_type));
+        }
+        b.closure(SPAN, |b| {
+            let inner_p = b.lookup_or_capture("p", CaptureMode::ByValue).unwrap();
+            let inner_x = b.lookup_or_capture("x", CaptureMode::ByValue).unwrap();
+            b.use_binding(inner_p, 1);
+            b.use_binding(inner_x, 2);
+            b.ret();
+        });
+        b.use_binding(p, 3);
+        b.ret();
+        let policy = b.policy();
+        let solved = solve(&b.finish(), policy);
+        let at = |node: usize| {
+            solved
+                .uses
+                .iter()
+                .find(|(n, _)| *n == node)
+                .map(|&(_, s)| s)
+        };
+        assert_eq!(at(1), Some(NO_EVIDENCE), "written={written}");
+        let expected = if written {
+            Abstract::Known(t_type)
+        } else {
+            Abstract::Unbound
+        };
+        assert_eq!(at(2), Some(expected), "written={written}");
+    }
+}
+
+/// A long copy chain (`x_{i+1} = x_i`) resolves every link: the plan
+/// follows each copy edge once from the cell that demands it.
+#[test]
+fn test_solve_long_copy_chain_resolves_every_link() {
+    let mut b = IrBuilder::new(DUCK, SPAN);
+    let t_type = b.intern("T", TypeOrigin::Annotation);
+    let mut prev = b.declare("x0", BindingOrigin::Local, None);
+    b.assign(prev, Value::Type(t_type));
+    for i in 1..200 {
+        let next = b.declare(&format!("x{i}"), BindingOrigin::Local, None);
+        b.assign(next, Value::Copy(prev));
+        prev = next;
+    }
+    b.use_binding(prev, 1);
+    b.ret();
+    assert_eq!(state_at(b, 1), Abstract::Known(t_type));
 }
