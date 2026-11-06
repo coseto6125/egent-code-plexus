@@ -1078,6 +1078,26 @@ mod tests {
             fs::create_dir_all(d).unwrap();
         }
         let cap = SizeCap::BUILT_IN;
+        let meta = ecp_core::session::SessionMeta {
+            version: 1,
+            session_id: "sid".into(),
+            pid: None,
+            started_at: "2026-11-07T00:00:00Z".into(),
+            last_touched: "2026-11-07T00:00:00Z".into(),
+            base_sha: "0".repeat(40),
+            source_worktree: worktree.to_string_lossy().into_owned(),
+            overlay_version: 0,
+            watcher_pid: None,
+            last_drained_offset: 0,
+            agent_name: None,
+        };
+        ecp_core::session::SessionMeta::write_atomic(&session.join("session_meta.json"), &meta)
+            .unwrap();
+        DirtyEvents::write_atomic(
+            &layout::dirty_events_path(&session),
+            &DirtyEvents::empty(cap),
+        )
+        .unwrap();
         let tombstone = [("gone.rs".to_string(), PathClass::SOURCE)];
         write_dirty_events(&session, cap, &[], &[], &Default::default(), &tombstone).unwrap();
         let covered = || HeadCoverage::Covered {

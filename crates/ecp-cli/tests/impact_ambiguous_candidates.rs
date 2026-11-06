@@ -163,10 +163,12 @@ fn test_impact_ambiguous_more_command_carries_repo() {
         ("src/d4.py", 4),
         ("src/d5.py", 5),
     ]);
-    let out = fixture.run(&["get", "--format", "json", "--repo", "myrepo"]);
+    let repo = fixture.repo.path().to_str().unwrap().to_string();
+    let out = fixture.run(&["get", "--format", "json", "--repo", &repo]);
     let json = json_of(&out);
     assert_eq!(
-        json["more_command"], "ecp find get --all --repo myrepo",
+        json["more_command"],
+        format!("ecp find get --all --repo {repo}"),
         "{json}"
     );
 }
