@@ -60,6 +60,16 @@ fn binding(name: &'static str, source: &'static str, kind: BindingKind) -> Impor
     (source, name, Some(name), Some(kind))
 }
 
+/// `(alias, aliased type)` of every `Typedef` node, in source order
+/// (CONTRACTS 8 / A15e: the aliased type lives on the node, not an import).
+fn typedef_types(g: &LocalGraph) -> Vec<(&str, Option<&str>)> {
+    g.nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Typedef)
+        .map(|n| (n.name.as_str(), n.type_annotation.as_deref()))
+        .collect()
+}
+
 const DECL_KINDS: &[NodeKind] = &[NodeKind::Function, NodeKind::Variable];
 
 /// A header-style guard around prototypes and an `extern` variable: each
@@ -159,10 +169,34 @@ fn test_c_pointer_fn_ptr_and_array_typedefs_emit_typedef_nodes() {
     assert_eq!(
         rows_of(&g, &[NodeKind::Typedef]),
         [
-            ("str_arr", NodeKind::Typedef, (0, 0, 0, 23), true, None),
-            ("cmp_fn", NodeKind::Typedef, (1, 0, 1, 32), true, None),
-            ("int_arr", NodeKind::Typedef, (2, 0, 2, 24), true, None),
-            ("counter_t", NodeKind::Typedef, (3, 0, 3, 32), true, None),
+            (
+                "str_arr",
+                NodeKind::Typedef,
+                (0, 0, 0, 23),
+                true,
+                Some("char **")
+            ),
+            (
+                "cmp_fn",
+                NodeKind::Typedef,
+                (1, 0, 1, 32),
+                true,
+                Some("int")
+            ),
+            (
+                "int_arr",
+                NodeKind::Typedef,
+                (2, 0, 2, 24),
+                true,
+                Some("int")
+            ),
+            (
+                "counter_t",
+                NodeKind::Typedef,
+                (3, 0, 3, 32),
+                true,
+                Some("unsigned long")
+            ),
         ]
     );
     let cmp = g.nodes.iter().find(|n| n.name == "cmp_fn").expect("cmp_fn");
@@ -176,21 +210,23 @@ fn test_c_pointer_fn_ptr_and_array_typedefs_emit_typedef_nodes() {
     );
 }
 
-/// A data-pointer typedef import keeps its stars; a function-pointer or
-/// array typedef keeps the return or element type alone, as before.
+/// A data-pointer typedef keeps its stars in the `Typedef` node's
+/// `type_annotation`; a function-pointer or array typedef keeps the return
+/// or element type alone. CONTRACTS 8 / A15e: a typedef is no import.
 #[test]
 fn test_c_pointer_typedef_import_source_keeps_stars() {
     let g = parse(
         "ptr.c",
         b"typedef char **str_arr;\ntypedef struct node *node_p;\ntypedef int (*cmp_fn)(int);\ntypedef int int_arr[4];\n",
     );
+    assert_eq!(import_rows(&g), []);
     assert_eq!(
-        import_rows(&g),
+        typedef_types(&g),
         [
-            binding("str_arr", "char **", BindingKind::Alias),
-            binding("node_p", "struct node *", BindingKind::Alias),
-            binding("cmp_fn", "int", BindingKind::Alias),
-            binding("int_arr", "int", BindingKind::Alias),
+            ("str_arr", Some("char **")),
+            ("node_p", Some("struct node *")),
+            ("cmp_fn", Some("int")),
+            ("int_arr", Some("int")),
         ]
     );
 }
@@ -207,7 +243,6 @@ fn test_c_named_binding_imports_keep_source_order() {
         import_rows(&g),
         [
             binding("FIRST", "1", BindingKind::Constant),
-            binding("first_t", "int", BindingKind::Alias),
             binding("first_g", "external", BindingKind::Alias),
             binding("INNER", "2", BindingKind::Constant),
             binding("LAST", "3", BindingKind::Constant),
@@ -366,20 +401,26 @@ fn test_c_pointer_return_fn_ptr_typedefs_emit_typedef_nodes() {
     assert_eq!(
         rows_of(&g, &[NodeKind::Typedef]),
         [
-            ("lua_Reader", NodeKind::Typedef, (0, 0, 0, 72), true, None),
+            (
+                "lua_Reader",
+                NodeKind::Typedef,
+                (0, 0, 0, 72),
+                true,
+                Some("const char *")
+            ),
             (
                 "RedisModuleTypeLoadFunc",
                 NodeKind::Typedef,
                 (1, 0, 1, 73),
                 true,
-                None
+                Some("void *")
             ),
             (
                 "getClientChannelsFn",
                 NodeKind::Typedef,
                 (2, 0, 2, 47),
                 true,
-                None
+                Some("dict *")
             ),
         ]
     );
@@ -412,13 +453,55 @@ fn test_c_nested_fn_ptr_and_triple_pointer_typedefs_emit_typedef_nodes() {
     assert_eq!(
         rows_of(&g, &[NodeKind::Typedef, NodeKind::Function]),
         [
-            ("str_cube", NodeKind::Typedef, (0, 0, 0, 25), true, None),
-            ("handlers", NodeKind::Typedef, (1, 0, 1, 32), true, None),
-            ("handler_pp", NodeKind::Typedef, (2, 0, 2, 32), true, None),
-            ("argv_fn", NodeKind::Typedef, (3, 0, 3, 32), true, None),
-            ("alloc_fn", NodeKind::Typedef, (5, 0, 5, 34), true, None),
-            ("cmp_fn", NodeKind::Typedef, (8, 0, 8, 32), true, None),
-            ("counter_t", NodeKind::Typedef, (9, 0, 9, 32), true, None),
+            (
+                "str_cube",
+                NodeKind::Typedef,
+                (0, 0, 0, 25),
+                true,
+                Some("char ***")
+            ),
+            (
+                "handlers",
+                NodeKind::Typedef,
+                (1, 0, 1, 32),
+                true,
+                Some("int")
+            ),
+            (
+                "handler_pp",
+                NodeKind::Typedef,
+                (2, 0, 2, 32),
+                true,
+                Some("int")
+            ),
+            (
+                "argv_fn",
+                NodeKind::Typedef,
+                (3, 0, 3, 32),
+                true,
+                Some("char **")
+            ),
+            (
+                "alloc_fn",
+                NodeKind::Typedef,
+                (5, 0, 5, 34),
+                true,
+                Some("void *")
+            ),
+            (
+                "cmp_fn",
+                NodeKind::Typedef,
+                (8, 0, 8, 32),
+                true,
+                Some("int")
+            ),
+            (
+                "counter_t",
+                NodeKind::Typedef,
+                (9, 0, 9, 32),
+                true,
+                Some("unsigned long")
+            ),
             ("alloc", NodeKind::Function, (10, 0, 10, 22), true, None),
         ]
     );
@@ -775,32 +858,45 @@ fn test_c_function_type_and_pointer_array_typedefs_emit_typedef_nodes() {
     assert_eq!(
         rows_of(&g, &[NodeKind::Typedef]),
         [
-            ("handler_fn", NodeKind::Typedef, (0, 0, 0, 29), true, None),
-            ("names_t", NodeKind::Typedef, (1, 0, 1, 25), true, None),
+            (
+                "handler_fn",
+                NodeKind::Typedef,
+                (0, 0, 0, 29),
+                true,
+                Some("void")
+            ),
+            (
+                "names_t",
+                NodeKind::Typedef,
+                (1, 0, 1, 25),
+                true,
+                Some("char *")
+            ),
         ]
     );
 }
 
 /// Off-task 2: the leading stars of a typedef declarator belong to the
-/// returned or element type, so the import source keeps them
-/// (`void *`, `char **`, `const char *`, `char *`). A function-pointer
-/// typedef with a plain return type and a data-pointer typedef keep
-/// today's sources.
+/// returned or element type, so the `Typedef` node's `type_annotation` keeps
+/// them (`void *`, `char **`, `const char *`, `char *`). A function-pointer
+/// typedef with a plain return type and a data-pointer typedef keep today's
+/// text. CONTRACTS 8 / A15e: the type moved from the import to the node.
 #[test]
 fn test_c_pointer_return_typedef_import_source_keeps_return_stars() {
     let g = parse(
         "returns.c",
         b"typedef void *(*alloc_fn)(size_t);\ntypedef char **(*argv_fn)(void);\ntypedef const char * (*lua_Reader) (lua_State *L);\ntypedef char *names_t[4];\ntypedef int (*cmp_fn)(int);\ntypedef char **str_arr;\n",
     );
+    assert_eq!(import_rows(&g), []);
     assert_eq!(
-        import_rows(&g),
+        typedef_types(&g),
         [
-            binding("alloc_fn", "void *", BindingKind::Alias),
-            binding("argv_fn", "char **", BindingKind::Alias),
-            binding("lua_Reader", "const char *", BindingKind::Alias),
-            binding("names_t", "char *", BindingKind::Alias),
-            binding("cmp_fn", "int", BindingKind::Alias),
-            binding("str_arr", "char **", BindingKind::Alias),
+            ("alloc_fn", Some("void *")),
+            ("argv_fn", Some("char **")),
+            ("lua_Reader", Some("const char *")),
+            ("names_t", Some("char *")),
+            ("cmp_fn", Some("int")),
+            ("str_arr", Some("char **")),
         ]
     );
 }
@@ -861,14 +957,14 @@ fn test_c_attribute_typedef_takes_alias_of_tail_declaration() {
                 NodeKind::Typedef,
                 (0, 0, 0, 42),
                 true,
-                None
+                Some("ql_head(witness_t)")
             ),
             (
                 "xxh_unalign32",
                 NodeKind::Typedef,
                 (1, 0, 1, 67),
                 true,
-                None
+                Some("unsigned int")
             ),
         ]
     );
@@ -876,14 +972,7 @@ fn test_c_attribute_typedef_takes_alias_of_tail_declaration() {
         named_content_hash(&g, "xxh_unalign32"),
         xxh3_64_bytes(b"typedef __attribute__((__aligned__(1))) unsigned int xxh_unalign32;")
     );
-    let aliases: Vec<(&str, &str)> = import_rows(&g).iter().map(|r| (r.1, r.0)).collect();
-    assert_eq!(
-        aliases,
-        [
-            ("witness_list_t", "ql_head(witness_t)"),
-            ("xxh_unalign32", "unsigned int")
-        ]
-    );
+    assert_eq!(import_rows(&g), []);
 }
 
 fn named_content_hash(g: &LocalGraph, name: &str) -> u64 {
@@ -1009,16 +1098,18 @@ fn test_c_extern_c_block_decls_emit_variable_and_function() {
     );
 }
 
-/// `typedef struct node Node, *NodePtr;` binds each alias to the shared
-/// type plus its own pointer prefix.
+/// `typedef struct node Node, *NodePtr;` is one `Typedef` node per
+/// declarator, each holding the shared type plus its own pointer prefix
+/// (CONTRACTS 8 / A15e: no import).
 #[test]
 fn test_c_multi_declarator_typedef_binds_each_alias() {
     let g = parse("td.c", b"typedef struct node Node, *NodePtr;\n");
+    assert_eq!(import_rows(&g), []);
     assert_eq!(
-        import_rows(&g),
+        typedef_types(&g),
         [
-            binding("Node", "struct node", BindingKind::Alias),
-            binding("NodePtr", "struct node *", BindingKind::Alias),
+            ("Node", Some("struct node")),
+            ("NodePtr", Some("struct node *")),
         ]
     );
 }
@@ -1299,8 +1390,8 @@ fn test_declare_macro_bound_vars_existing_binding_keeps_its_type() {
 /// After a typedef cut short at an attribute, the tail declaration names
 /// the alias through its array or pointer declarator and past a qualifier
 /// (`float vec4[4]`, `T *tp`, `const T ct`). Each is a Typedef spanning
-/// both statements and an `Alias` binding whose source keeps the pointer
-/// stars; none is a Variable.
+/// both statements whose `type_annotation` keeps the pointer stars (no
+/// import, CONTRACTS 8 / A15e); none is a Variable.
 #[test]
 fn test_c_attribute_typedef_tail_declarator_shapes_emit_typedef() {
     let g = parse(
@@ -1310,13 +1401,18 @@ fn test_c_attribute_typedef_tail_declarator_shapes_emit_typedef() {
     assert_eq!(
         sorted_rows_of(&g, &[NodeKind::Typedef, NodeKind::Variable]),
         [
-            ("vec4", NodeKind::Typedef, (0, 0, 0, 55), true, None),
-            ("tp", NodeKind::Typedef, (1, 0, 1, 46), true, None),
-            ("ct", NodeKind::Typedef, (2, 0, 2, 51), true, None),
+            (
+                "vec4",
+                NodeKind::Typedef,
+                (0, 0, 0, 55),
+                true,
+                Some("float")
+            ),
+            ("tp", NodeKind::Typedef, (1, 0, 1, 46), true, Some("T *")),
+            ("ct", NodeKind::Typedef, (2, 0, 2, 51), true, Some("T")),
         ]
     );
-    let aliases: Vec<(&str, &str)> = import_rows(&g).iter().map(|r| (r.1, r.0)).collect();
-    assert_eq!(aliases, [("vec4", "float"), ("tp", "T *"), ("ct", "T")]);
+    assert_eq!(import_rows(&g), []);
 }
 
 /// The C binding filter and the preprocessor guard detection read one

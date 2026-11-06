@@ -105,6 +105,19 @@
     (array_declarator declarator: (field_identifier) @field.name)
   ]) @field
 
+;; Function-pointer data members — `void (*open)(int);`. The name sits inside
+;; a parenthesized declarator under the function declarator, at any pointer
+;; depth, or under an array (`void (*cbs[4])(int);`). The parameter list is
+;; a sibling, so a parameter name never matches `field_identifier` here.
+(field_declaration
+  declarator: (function_declarator
+    declarator: (parenthesized_declarator
+      [
+        (pointer_declarator (field_identifier) @field.name)
+        (pointer_declarator (pointer_declarator (field_identifier) @field.name))
+        (pointer_declarator (array_declarator declarator: (field_identifier) @field.name))
+      ]))) @field
+
 ;; File-scope variable declarations — `static const int N = 5;` / `int *p;`
 ;; / `char **argv;` / `int a[4][4];`. Captures the outer declaration and the
 ;; declarator; the parser takes the identifier through pointer and array

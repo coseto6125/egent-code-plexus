@@ -16,6 +16,7 @@ use crate::driver::{
 };
 use crate::framework_confidence;
 use crate::framework_helpers::{detect_ast_framework_patterns, FrameworkPatternSpec, Span};
+use crate::function_meta::type_param_entry;
 use crate::indirect_dispatch::{collect_c_cpp_fn_ptr_vars, detect_c_cpp_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use crate::preproc_fallback::Preproc;
@@ -27,6 +28,38 @@ use rustc_hash::FxHashSet;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Query, QueryCursor, Tree};
+
+/// The type-parameter marker of a `template<typename T>` class, struct or
+/// alias: the list belongs to the `template_declaration` around the
+/// declaration. A non-type parameter (`int N`) declares no type variable,
+/// and an explicit specialization (`template<>`) declares none.
+fn type_params_decorator(root: Node<'_>, kind: NodeKind, source: &[u8]) -> Option<String> {
+    if !matches!(kind, NodeKind::Class | NodeKind::Struct | NodeKind::Typedef) {
+        return None;
+    }
+    // `template<class T> struct S {} v;` wraps the specifier in a `declaration`.
+    let parent = root
+        .parent()
+        .filter(|p| p.kind() != "declaration")
+        .or_else(|| root.parent()?.parent());
+    let list = parent
+        .filter(|p| p.kind() == "template_declaration")?
+        .child_by_field_name("parameters")?;
+    let mut cursor = list.walk();
+    let names: Vec<String> = list
+        .named_children(&mut cursor)
+        .filter(|entry| {
+            matches!(
+                entry.kind(),
+                "type_parameter_declaration"
+                    | "optional_type_parameter_declaration"
+                    | "variadic_type_parameter_declaration"
+            )
+        })
+        .filter_map(|entry| type_param_entry(&entry, source))
+        .collect();
+    (!names.is_empty()).then(|| RawNode::type_params_marker(names.iter().map(String::as_str)))
+}
 
 /// True if `node` (a `function_definition`) is defined inside a
 /// `field_declaration_list`, which means it is an inline class/struct member
@@ -761,6 +794,16 @@ impl ParseSpec for CppSpec {
                     }
                     None => None,
                 };
+                // A namespace typedef or `using` alias is owned by its
+                // namespace, as a namespace variable is: the C family
+                // fallback reads an owner-less one as a global.
+                let owner_class = owner_class.or_else(|| {
+                    if k == NodeKind::Typedef {
+                        file_scope_namespace(root, source).flatten()
+                    } else {
+                        None
+                    }
+                });
 
                 // C++ defines no type in a return type: a function whose type
                 // holds a class body is that class, closed early by error
@@ -797,6 +840,7 @@ impl ParseSpec for CppSpec {
                         root, source,
                     ));
                 }
+                decorators.extend(type_params_decorator(root, k, source));
                 let span = node::span_from(start, end);
                 if is_friend {
                     f.friend_spans.insert(span);
@@ -1133,5 +1177,96 @@ fn restamp_friend_owners(
             .filter(|(_, s)| contains(*s, node.span))
             .min_by_key(|(_, s)| crate::framework_helpers::span_area(*s))
             .map(|(name, _)| name.clone());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(src: &str) -> Vec<RawNode> {
+        CppProvider::new()
+            .expect("provider")
+            .parse_file(Path::new("t.hpp"), src.as_bytes())
+            .expect("parse")
+            .nodes
+    }
+
+    fn params(src: &str, name: &str) -> Vec<String> {
+        let nodes = parse(src);
+        nodes
+            .iter()
+            .find(|n| n.name == name)
+            .map(|n| n.declared_type_params().map(str::to_string).collect())
+            .unwrap_or_else(|| panic!("no node {name}: {nodes:?}"))
+    }
+
+    #[test]
+    fn test_type_params_marker_cpp_template_declarations_round_trip() {
+        assert_eq!(params("template <typename T> class Box {};", "Box"), ["T"]);
+        assert_eq!(
+            params(
+                "template <class K, typename V = int, typename... Ts> struct Map {};",
+                "Map"
+            ),
+            ["K", "V", "Ts"]
+        );
+        assert_eq!(params("template <typename T> using Vec = T;", "Vec"), ["T"]);
+    }
+
+    #[test]
+    fn test_type_params_marker_cpp_non_type_and_plain_declarations_have_none() {
+        assert!(params("template <int N> struct Arr {};", "Arr").is_empty());
+        assert!(params("template <> struct Spec {};", "Spec").is_empty());
+        assert!(params("class Plain : public Base<int> {};", "Plain").is_empty());
+        assert!(params(
+            "template <typename T> struct Box { struct Inner {}; };",
+            "Inner"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn test_type_params_marker_cpp_callable_has_none() {
+        for n in parse("template <typename T> T id(T x) { return x; }\ntemplate <typename T> struct C { void put(T x) {} };")
+            .iter()
+            .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
+        {
+            assert!(
+                !n.decorators.iter().any(|d| RawNode::is_type_params_marker(d)),
+                "{}",
+                n.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_file_cpp_function_pointer_members_multi_declarator_each_a_property() {
+        let nodes = parse("struct Ops { int (*open)(void), (*close)(void); };");
+        let mut names: Vec<&str> = nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Property)
+            .map(|n| n.name.as_str())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names, ["close", "open"]);
+        assert!(nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Property)
+            .all(|n| n.type_annotation.is_none() && n.owner_class.as_deref() == Some("Ops")));
+    }
+
+    #[test]
+    fn test_parse_file_cpp_function_pointer_members_empty_struct_emits_no_property() {
+        assert!(parse("struct Empty {};")
+            .iter()
+            .all(|n| n.kind != NodeKind::Property));
+    }
+
+    #[test]
+    fn test_parse_file_cpp_nested_namespace_typedef_owned_by_innermost() {
+        let nodes = parse("namespace a { namespace b { typedef int t; } }\n");
+        let t = nodes.iter().find(|n| n.name == "t").expect("typedef t");
+        assert_eq!(t.owner_class.as_deref(), Some("b"));
     }
 }

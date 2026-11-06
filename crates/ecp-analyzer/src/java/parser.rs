@@ -8,6 +8,7 @@ use crate::driver::{
 use crate::event_topic::{EventTopicConfig, KAFKA_JAVA, RABBITMQ_JAVA, REDIS_JAVA, SQS_JAVA};
 use crate::framework_confidence;
 use crate::framework_helpers::{collect_jvm_transactional_scopes, has_import_from, node_span};
+use crate::function_meta::declared_type_params;
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::parse_prof::Pass;
 use ecp_core::analyzer::provider::LanguageProvider;
@@ -35,6 +36,17 @@ impl JavaProvider {
             compiled: Compiled::new()?,
         })
     }
+}
+
+/// The type-parameter marker of a generic class, interface, record or enum:
+/// its own `type_parameters` list. `None` for a callable (its meta holds
+/// them) and for a declaration without a list.
+fn type_params_decorator(root: Node<'_>, kind: NodeKind, source: &[u8]) -> Option<String> {
+    if !matches!(kind, NodeKind::Class | NodeKind::Interface | NodeKind::Enum) {
+        return None;
+    }
+    let names = declared_type_params(&root.child_by_field_name("type_parameters")?, source);
+    (!names.is_empty()).then(|| RawNode::type_params_marker(names.iter().map(String::as_str)))
 }
 
 /// `Some(true)` for `public`/`protected`, `Some(false)` for `private`, `None`
@@ -369,6 +381,15 @@ impl ParseSpec for JavaSpec {
                     i
                 });
                 let entry = &mut nodes[idx];
+                if !entry
+                    .decorators
+                    .iter()
+                    .any(|d| RawNode::is_type_params_marker(d))
+                {
+                    entry
+                        .decorators
+                        .extend(type_params_decorator(root, k, source));
+                }
 
                 for h in heritage {
                     if !entry.heritage.contains(&h) {
@@ -539,6 +560,50 @@ mod tests {
         provider
             .parse_file(&PathBuf::from("Test.java"), source.as_bytes())
             .expect("parse_file failed")
+    }
+
+    fn params(src: &str, name: &str) -> Vec<String> {
+        let graph = parse(src);
+        graph
+            .nodes
+            .iter()
+            .find(|n| n.name == name)
+            .map(|n| n.declared_type_params().map(str::to_string).collect())
+            .unwrap_or_else(|| panic!("no node {name}: {:?}", graph.nodes))
+    }
+
+    #[test]
+    fn test_type_params_marker_java_generic_declarations_round_trip() {
+        assert_eq!(params("class Box<T> {}", "Box"), ["T"]);
+        assert_eq!(params("class Pair<K, V extends K> {}", "Pair"), ["K", "V"]);
+        assert_eq!(params("interface Repo<E> {}", "Repo"), ["E"]);
+        assert_eq!(params("record Wrap<T>(T value) {}", "Wrap"), ["T"]);
+    }
+
+    #[test]
+    fn test_type_params_marker_java_plain_declaration_has_none() {
+        assert!(params("class Plain {}", "Plain").is_empty());
+        assert!(params("class Plain extends Base<String> {}", "Plain").is_empty());
+        assert!(params("enum Color { RED }", "Color").is_empty());
+        assert!(params("class Box<T> { class Inner {} }", "Inner").is_empty());
+    }
+
+    #[test]
+    fn test_type_params_marker_java_callable_has_none() {
+        let graph = parse("class C<T> { <U> void put(U x) {} C(T t) {} }");
+        for n in graph
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.kind, NodeKind::Method | NodeKind::Constructor))
+        {
+            assert!(
+                !n.decorators
+                    .iter()
+                    .any(|d| RawNode::is_type_params_marker(d)),
+                "{}",
+                n.name
+            );
+        }
     }
 
     // ── Task G: Java Named Bindings ──────────────────────────────────────────

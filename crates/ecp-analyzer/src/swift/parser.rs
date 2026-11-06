@@ -11,6 +11,7 @@ use crate::framework_confidence;
 use crate::framework_helpers::{
     detect_ast_framework_patterns, node_span, span_area, span_contains, FrameworkPatternSpec, Span,
 };
+use crate::function_meta::declared_type_params;
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::parse_prof::Pass;
 use ecp_core::analyzer::provider::LanguageProvider;
@@ -364,6 +365,9 @@ impl ParseSpec for SwiftSpec {
         if let Some(ta_node) = typealias_node {
             if let Some((lhs, rhs)) = extract_typealias_parts(ta_node, source) {
                 cx.nodes.push(RawNode {
+                    decorators: type_params_decorator(ta_node, NodeKind::Typedef, source)
+                        .into_iter()
+                        .collect(),
                     is_exported,
                     ..node::decl(
                         lhs.clone(),
@@ -522,6 +526,7 @@ impl ParseSpec for SwiftSpec {
                             .push(imports::raw(name_str.to_string(), ext, alias, None));
                     }
                 }
+                decorators.extend(type_params_decorator(root, k, source));
                 cx.nodes.push(RawNode {
                     decorators,
                     is_exported,
@@ -583,6 +588,25 @@ impl ParseSpec for SwiftSpec {
     ) -> Vec<RawFunctionMeta> {
         crate::function_meta::swift::extract(root, source, nodes, category)
     }
+}
+
+/// The type-parameter marker of a generic class, struct, enum or typealias:
+/// the direct `type_parameters` child of the declaration. A protocol has none
+/// (its associated types are no parameters), and a callable keeps them in its
+/// meta.
+fn type_params_decorator(root: Node<'_>, kind: NodeKind, source: &[u8]) -> Option<String> {
+    if !matches!(
+        kind,
+        NodeKind::Class | NodeKind::Struct | NodeKind::Enum | NodeKind::Typedef
+    ) {
+        return None;
+    }
+    let mut cursor = root.walk();
+    let list = root
+        .children(&mut cursor)
+        .find(|child| child.kind() == "type_parameters")?;
+    let names = declared_type_params(&list, source);
+    (!names.is_empty()).then(|| RawNode::type_params_marker(names.iter().map(String::as_str)))
 }
 
 /// Stamp every member with the type whose body declares it, before the
@@ -831,5 +855,60 @@ fn collect_pattern_names_rec(
     let mut cur = node.walk();
     for child in node.children(&mut cur) {
         collect_pattern_names_rec(child, source, out);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(src: &str) -> Vec<RawNode> {
+        SwiftProvider::new()
+            .expect("provider")
+            .parse_file(Path::new("t.swift"), src.as_bytes())
+            .expect("parse")
+            .nodes
+    }
+
+    fn params(src: &str, name: &str) -> Vec<String> {
+        let nodes = parse(src);
+        nodes
+            .iter()
+            .find(|n| n.name == name)
+            .map(|n| n.declared_type_params().map(str::to_string).collect())
+            .unwrap_or_else(|| panic!("no node {name}: {nodes:?}"))
+    }
+
+    #[test]
+    fn test_type_params_marker_swift_generic_declarations_round_trip() {
+        assert_eq!(params("struct Box<T> {}", "Box"), ["T"]);
+        assert_eq!(params("class Pair<K, V: Hashable> {}", "Pair"), ["K", "V"]);
+        assert_eq!(params("enum Res<T, E> { case ok(T) }", "Res"), ["T", "E"]);
+        assert_eq!(params("typealias Fn<T> = (T) -> Void", "Fn"), ["T"]);
+    }
+
+    #[test]
+    fn test_type_params_marker_swift_plain_declaration_and_protocol_have_none() {
+        assert!(params("struct Plain {}", "Plain").is_empty());
+        assert!(params("class Plain: Base<Int> {}", "Plain").is_empty());
+        assert!(params("protocol Repo { associatedtype E }", "Repo").is_empty());
+        assert!(params("typealias Cb = () -> Void", "Cb").is_empty());
+        assert!(params("struct Box<T> { struct Inner {} }", "Inner").is_empty());
+    }
+
+    #[test]
+    fn test_type_params_marker_swift_callable_has_none() {
+        for n in parse("func id<T>(_ x: T) -> T { x }\nstruct C<T> { func put<U>(_ x: U) {} }")
+            .iter()
+            .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
+        {
+            assert!(
+                !n.decorators
+                    .iter()
+                    .any(|d| RawNode::is_type_params_marker(d)),
+                "{}",
+                n.name
+            );
+        }
     }
 }
