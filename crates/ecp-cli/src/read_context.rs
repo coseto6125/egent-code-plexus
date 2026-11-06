@@ -412,7 +412,7 @@ fn request_args(request: &TargetRequest, file_flag: &str, kind_flag: &str) -> St
 
 /// `word` as one shell word: single-quoted when it is empty or holds a
 /// character outside the safe set, with embedded `'` written as `'\''`.
-pub(crate) fn shell_word(word: &str) -> String {
+pub fn shell_word(word: &str) -> String {
     let safe = |c: char| c.is_alphanumeric() || "_-./:@%+=,".contains(c);
     if !word.is_empty() && word.chars().all(safe) {
         return word.to_string();

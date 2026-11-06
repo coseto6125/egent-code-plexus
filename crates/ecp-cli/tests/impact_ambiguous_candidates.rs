@@ -153,6 +153,7 @@ fn test_impact_ambiguous_seven_candidates_capped_at_five_with_more() {
 }
 
 /// Fails before the fix: the command lacked `--repo`, so it ran in the cwd's repo.
+/// The path is one shell word: a Windows temp path holds `\` and is quoted.
 #[test]
 fn test_impact_ambiguous_more_command_carries_repo() {
     let fixture = candidates(&[
@@ -168,7 +169,10 @@ fn test_impact_ambiguous_more_command_carries_repo() {
     let json = json_of(&out);
     assert_eq!(
         json["more_command"],
-        format!("ecp find get --all --repo {repo}"),
+        format!(
+            "ecp find get --all --repo {}",
+            ecp_cli::read_context::shell_word(&repo)
+        ),
         "{json}"
     );
 }
