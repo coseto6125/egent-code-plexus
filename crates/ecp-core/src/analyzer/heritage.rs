@@ -106,6 +106,28 @@ pub fn holds_heritage(kind: NodeKind) -> bool {
     )
 }
 
+/// A type whose body runs code outside every function and value: a Java
+/// `static {}` block, a Kotlin `init {}`, a Ruby or Python class body. The
+/// parser makes such a type the holder of that code's calls.
+pub fn holds_body_code(kind: NodeKind) -> bool {
+    holds_heritage(kind) || kind == NodeKind::Module
+}
+
+/// The owner a call written directly in a node resolves under: a type's own
+/// name for code in its body (a bare `target()` in `class T { static {
+/// target(); } }` means `T.target`), else the node's `owner_class`.
+pub fn code_owner<'a>(
+    kind: NodeKind,
+    name: &'a str,
+    owner_class: Option<&'a str>,
+) -> Option<&'a str> {
+    if holds_body_code(kind) {
+        Some(name)
+    } else {
+        owner_class
+    }
+}
+
 /// The heritage of the smallest type among `nodes` that [`holds_heritage`]
 /// and whose span contains `node`'s span, or `node`'s own heritage when it
 /// is such a type. Empty when no type encloses it (a top-level function).

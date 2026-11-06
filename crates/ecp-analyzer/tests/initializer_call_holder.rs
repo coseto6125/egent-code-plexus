@@ -245,7 +245,7 @@ fn test_ruby_class_body_call_gets_holder() {
     assert_holds(
         &RubyProvider::new().unwrap(),
         "t.rb",
-        "def target; end\nclass T\n  target\nend\n",
+        "def target(name); end\nclass T\n  target :x\nend\n",
         "T",
         "target",
     );

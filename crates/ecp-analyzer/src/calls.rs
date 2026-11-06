@@ -53,9 +53,8 @@ pub fn new_expression_call(new_expr: Node<'_>, source: &[u8]) -> Option<String> 
     }
 }
 
-/// Walk the AST and attach `callee` names to the smallest enclosing
-/// function/method/constructor `RawNode` by span containment. Reused across
-/// languages — the `call_kinds` set lists this language's AST node kinds that
+/// Walk the AST and attach `callee` names to their [`holder`] by span
+/// containment. Reused across languages — the `call_kinds` set lists this language's AST node kinds that
 /// represent a function-call expression (e.g. "call_expression" in JS/TS,
 /// "method_invocation" in Java, "function_call_expression" in PHP).
 pub fn extract_calls(root: Node<'_>, source: &[u8], nodes: &mut [RawNode], call_kinds: &[&str]) {
@@ -165,42 +164,64 @@ pub fn attach_to_enclosing_span(
     Some((i, idx))
 }
 
-/// Index of the smallest function holding `span`, by row and column.
+/// Index of the [`holder`] of `span`, ranked by area.
 fn enclosing_container_span(
     span: crate::framework_helpers::Span,
     nodes: &[RawNode],
 ) -> Option<usize> {
-    nodes
-        .iter()
-        .enumerate()
-        .filter(|(_, node)| {
-            is_container_kind(node.kind) && crate::framework_helpers::span_contains(node.span, span)
-        })
-        .min_by_key(|(_, node)| crate::framework_helpers::span_area(node.span))
-        .map(|(i, _)| i)
+    holder(
+        nodes,
+        |node| crate::framework_helpers::span_contains(node.span, span),
+        |node| crate::framework_helpers::span_area(node.span),
+    )
 }
 
-/// Index of the smallest function holding `pos`, by row and column so
-/// functions sharing a line stay apart.
+/// Index of the [`holder`] of `pos`, by row and column so functions sharing
+/// a line stay apart.
 fn enclosing_container(pos: Pos, nodes: &[RawNode]) -> Option<usize> {
-    let mut best: Option<(usize, (u32, i64))> = None;
-    for (i, n) in nodes.iter().enumerate() {
-        if !is_container_kind(n.kind) {
-            continue;
-        }
-        let (start, end) = span_ends(n.span);
-        if start <= pos && pos <= end {
-            let width = span_width(n.span);
-            if best.is_none_or(|(_, w)| width < w) {
-                best = Some((i, width));
-            }
-        }
-    }
-    best.map(|(i, _)| i)
+    holder(
+        nodes,
+        |node| {
+            let (start, end) = span_ends(node.span);
+            start <= pos && pos <= end
+        },
+        |node| span_width(node.span),
+    )
 }
 
-/// Attach a call to the smallest function holding `pos`, by row and column so
-/// functions sharing a line stay apart.
+/// The node that owns code that `holds` accepts: the smallest enclosing
+/// function, else the smallest enclosing value declaration (an initializer,
+/// a property accessor), else the smallest enclosing type (a static block, a
+/// class body). Without the last two, a call there had no caller and
+/// `ecp impact` missed it. A statement that declares several values holds
+/// nothing: its span does not say which value a call belongs to.
+fn holder<K: Ord>(
+    nodes: &[RawNode],
+    holds: impl Fn(&RawNode) -> bool,
+    size: impl Fn(&RawNode) -> K,
+) -> Option<usize> {
+    let smallest = |keep: fn(NodeKind) -> bool| {
+        nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| keep(node.kind) && holds(node))
+            .min_by_key(|(_, node)| size(node))
+    };
+    if let Some((i, _)) = smallest(is_container_kind) {
+        return Some(i);
+    }
+    if let Some((i, value)) = smallest(is_value_kind) {
+        let end = span_ends(value.span).1;
+        let mut sharing = nodes.iter().filter(|node| {
+            is_value_kind(node.kind) && span_ends(node.span).1 == end && holds(node)
+        });
+        return (sharing.nth(1).is_none()).then_some(i);
+    }
+    smallest(ecp_core::analyzer::heritage::holds_body_code).map(|(i, _)| i)
+}
+
+/// Attach a call to its [`holder`], by row and column so functions sharing a
+/// line stay apart.
 /// Returns the caller's node index and the call's index in its `calls`.
 pub fn attach_to_enclosing(
     pos: Pos,
@@ -1470,10 +1491,10 @@ pub fn extract_variant_refs(
     nodes: &mut [RawNode],
     spec: &VariantRefSpec,
 ) {
-    let containers = enclosing_containers(nodes);
-    if containers.is_empty() {
+    if nodes.is_empty() {
         return;
     }
+    let containers = enclosing_containers(nodes);
     let mut refs: Vec<PendingCall> = Vec::new();
     let mut push = |node: Node<'_>, path: &str, pattern: bool| {
         refs.push(PendingCall {
@@ -1519,7 +1540,9 @@ pub fn extract_variant_refs(
     let targets = enclosing_targets(&containers, &refs, |r| r.pos);
     let mut seen: rustc_hash::FxHashSet<(usize, String)> = rustc_hash::FxHashSet::default();
     for (entry, target) in refs.into_iter().zip(targets) {
-        let Some(node_idx) = target else { continue };
+        let Some(node_idx) = target.or_else(|| enclosing_container(entry.pos, nodes)) else {
+            continue;
+        };
         if seen.insert((node_idx, entry.name.clone())) {
             nodes[node_idx].field_reads.push(entry.name);
         }
@@ -1989,7 +2012,7 @@ fn attach_pending_calls(
 ) {
     let targets = enclosing_targets(containers, &calls, |c| c.pos);
     for (call, target) in calls.into_iter().zip(targets) {
-        if let Some(node_idx) = target {
+        if let Some(node_idx) = target.or_else(|| enclosing_container(call.pos, nodes)) {
             nodes[node_idx].calls.push(call.name);
         }
     }

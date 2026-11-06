@@ -204,7 +204,10 @@ use std::path::Path;
 /// no bare field read to an interface property and no type parameter of an
 /// enclosing declaration to a project type. A schema54 parse cache entry
 /// would replay the old parse.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema55");
+/// schema56: a call outside every function (a static block, a property
+/// accessor, an initializer, a class body) is held by the value declaration
+/// or the type around it; a schema55 parse dropped it.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema56");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {
