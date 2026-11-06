@@ -977,18 +977,19 @@ fn test_bound_method_reference_python_read_before_rebinding_keeps_type() {
     }
 }
 
-/// Stands for: the last annotation before the read gives the type, even when
-/// an earlier one named another class.
+/// Stands for: two annotations of one name with different classes leave the
+/// receiver untyped. Byte order cannot tell which branch ran, so neither class
+/// is a safe target.
 #[test]
-fn test_bound_method_reference_python_later_annotation_gives_its_type() {
-    let g = python_graph(
+fn test_bound_method_reference_python_annotations_of_two_classes_return_no_edge() {
+    for body in [
         "local: Other = Other()\n    local = loose\n    local: Cls = Cls()\n    return list(map(local.m, xs))",
-    );
-    assert_one_cross_file(&function_refs(&g, "run"), "cls.py", "m");
-    let g = python_graph(
         "local: Cls = Cls()\n    local = loose\n    local: Other = Other()\n    return list(map(local.m, xs))",
-    );
-    assert_one_cross_file(&function_refs(&g, "run"), "other.py", "m");
+        "local: Cls = Cls()\n    if loose:\n        local: Other = Other()\n    else:\n        return list(map(local.m, xs))",
+    ] {
+        let g = python_graph(body);
+        assert_eq!(function_refs(&g, "run"), none(), "{body}");
+    }
 }
 
 /// Stands for: a lambda or comprehension that binds another name leaves the

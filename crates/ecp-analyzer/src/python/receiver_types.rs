@@ -137,26 +137,26 @@ impl LocalTypes {
     /// stands only when no scope nearer than the one that typed `var` rebinds
     /// the name (`def inner(x): return x.m` inside `def outer(x: A)`, or a
     /// lambda, comprehension, `for`, `with ... as`, `case` capture or
-    /// `global` that binds it). In the scopes from the typing one inwards, the
-    /// last binding before `receiver` decides: a write hides the type, and an
-    /// annotation gives its own.
+    /// `global` that binds it). In the scopes from the typing one inwards, a
+    /// write as the last binding before `receiver` hides the type, and so
+    /// does an annotation of another type anywhere: byte order does not tell
+    /// which branch of an `if` ran.
     fn lookup_visible(&self, receiver: Node<'_>, var: &str) -> Option<&str> {
-        let (typed_start, mut ty) = self.nearest_typed(start_pos(receiver), var)?;
-        for f in self
+        let (typed_start, ty) = self.nearest_typed(start_pos(receiver), var)?;
+        let hidden = self
             .shadows
             .iter()
             .filter(|f| f.encloses(receiver) && f.start >= typed_start)
-        {
-            if f.start > typed_start && (f.names.contains_key(var) || f.globals.contains(var)) {
-                return None;
-            }
-            match f.last_binding(var, receiver) {
-                Some(None) => return None,
-                Some(Some(declared)) => ty = declared,
-                None => {}
-            }
-        }
-        Some(ty)
+            .any(|f| {
+                (f.start > typed_start && (f.names.contains_key(var) || f.globals.contains(var)))
+                    || matches!(f.last_binding(var, receiver), Some(None))
+                    || f.rebinds.get(var).is_some_and(|events| {
+                        events
+                            .iter()
+                            .any(|(_, declared)| declared.as_deref().is_some_and(|d| d != ty))
+                    })
+            });
+        (!hidden).then_some(ty)
     }
 
     fn imported_receiver(&self, receiver: Node<'_>, source: &[u8]) -> Option<ImportedBinding> {
