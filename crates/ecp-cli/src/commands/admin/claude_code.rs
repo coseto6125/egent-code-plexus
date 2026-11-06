@@ -268,7 +268,7 @@ fn merge_entry(settings: &mut Value, ev: &str, exe: &str) -> Result<(), EcpError
     if matches!(ev, "pre-tool-use") {
         h.insert(
             "statusMessage".into(),
-            Value::String("Enriching with ecp graph context...".into()),
+            Value::String("Checking edit flow and the peer inbox...".into()),
         );
     } else if matches!(ev, "post-tool-use") {
         h.insert(
@@ -320,7 +320,11 @@ fn is_installed(settings: &Value, ev: &str) -> bool {
         .map(|arr| {
             arr.iter().any(|e| {
                 let c = command_of_entry(e);
-                c.contains(&format!("hook {ev}")) && c.contains("--claude-code")
+                // A matcher the current release does not write keeps the hook
+                // off the tools it gained since: that entry reads as missing.
+                c.contains(&format!("hook {ev}"))
+                    && c.contains("--claude-code")
+                    && e.get("matcher").and_then(Value::as_str) == Some(matcher_for(ev))
             })
         })
         .unwrap_or(false)

@@ -130,6 +130,58 @@ fn test_install_post_tool_use_matcher_adds_grep_keeps_bash_edit_write() {
     assert_eq!(post[0]["matcher"], "Grep|Bash|Edit|Write");
 }
 
+/// Contract: settings written by the previous release keep the PostToolUse
+/// matcher `Bash|Edit|Write`, which never reaches a Grep call. Status reads
+/// that entry as missing, and `install-hook` rewrites it to the current one.
+#[test]
+fn test_status_stale_post_tool_use_matcher_reads_missing_until_reinstall() {
+    let tmp = TempDir::new().unwrap();
+    let settings_path = tmp.path().join("settings.json");
+    let stale = serde_json::json!({"hooks": {"PostToolUse": [{
+        "matcher": "Bash|Edit|Write",
+        "hooks": [{"type": "command",
+                   "command": "\"/old/ecp\" hook post-tool-use --claude-code",
+                   "timeout": 5}],
+    }]}});
+    std::fs::write(&settings_path, stale.to_string()).unwrap();
+    let status = || {
+        let out = Command::new(ecp_bin())
+            .args(["admin", "status", "--claude-code", "--settings-path"])
+            .arg(&settings_path)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let line = |text: &str| {
+        text.lines()
+            .find(|l| l.trim_start().starts_with("post-tool-use"))
+            .unwrap_or_else(|| panic!("no post-tool-use line: {text}"))
+            .to_owned()
+    };
+    assert!(line(&status()).contains("missing"), "{}", status());
+
+    let out = Command::new(ecp_bin())
+        .args([
+            "admin",
+            "install-hook",
+            "--claude-code",
+            "--events",
+            "post-tool-use",
+            "--settings-path",
+        ])
+        .arg(&settings_path)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(line(&status()).contains("INSTALLED"), "{}", status());
+    let merged: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+    let post = merged["hooks"]["PostToolUse"].as_array().unwrap();
+    assert_eq!(post.len(), 1);
+    assert_eq!(post[0]["matcher"], "Grep|Bash|Edit|Write");
+}
+
 #[test]
 fn uninstall_removes_only_specified_event() {
     let tmp = TempDir::new().unwrap();

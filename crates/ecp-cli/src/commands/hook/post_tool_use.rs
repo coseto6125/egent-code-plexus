@@ -33,7 +33,7 @@ use ecp_core::graph::{ArchivedRelType, ArchivedZeroCopyGraph, NodeKind};
 use ecp_core::session::view::base_constructors;
 use ecp_core::session::MergedGraph;
 use ecp_core::EcpError;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::BTreeSet;
@@ -180,15 +180,40 @@ struct Search {
 /// reads only regular files or stdin, or whose output is absent.
 fn search_delta(input: &HookInput) -> Option<String> {
     let search = search_of(input)?;
-    let output = output_text(&input.tool_output)?;
+    let output = search_output(&input.tool_output)?;
     let index_dir = lookup_index_dir(search.graph_dir.to_str()?)?;
     let engine = Engine::load(index_dir.join("graph.bin")).ok()?;
     let graph = engine.graph().ok()?;
+    let top = crate::read_context::worktree_top(&search.graph_dir);
+    let top = dunce::canonicalize(&top).unwrap_or(top);
+    // The delta reads base-graph edges, and the graph may be a sibling
+    // worktree's. A fact stands only while its file still holds the indexed
+    // text, so a rename, a delete or a file this tree lacks drops it. The
+    // gate runs before the identifier cap: a stale name must not take a slot.
+    let mut recorded: FxHashMap<String, bool> = FxHashMap::default();
+    let mut holds = |file: &str| -> bool {
+        match recorded.get(file) {
+            Some(&known) => known,
+            None => {
+                let known = engine.file_text_is_base_recorded(&top, file);
+                recorded.insert(file.to_owned(), known);
+                known
+            }
+        }
+    };
     let found: Vec<(String, Vec<Definition<'_>>)> = search
         .words
         .into_iter()
         .filter_map(|word| {
-            let defs = definitions(graph, &word);
+            let defs: Vec<Definition<'_>> = definitions(graph, &word)
+                .into_iter()
+                .filter_map(|mut d| {
+                    holds(d.file).then(|| {
+                        d.callers.retain(|file| holds(file));
+                        d
+                    })
+                })
+                .collect();
             (!defs.is_empty()).then_some((word, defs))
         })
         .take(MAX_IDENTIFIERS)
@@ -196,8 +221,6 @@ fn search_delta(input: &HookInput) -> Option<String> {
     if found.is_empty() {
         return None;
     }
-    let top = crate::read_context::worktree_top(&search.graph_dir);
-    let top = dunce::canonicalize(&top).unwrap_or(top);
     let prefix = dunce::canonicalize(&search.dir)
         .ok()
         .and_then(|dir| {
@@ -214,7 +237,7 @@ fn search_delta(input: &HookInput) -> Option<String> {
         .flat_map(|(_, defs)| defs)
         .flat_map(|d| std::iter::once(d.file).chain(d.callers.iter().copied()))
         .collect();
-    let mentioned = mentioned_files(&output, &prefix, &relevant);
+    let mentioned = mentioned_files(&output.text, &output.files, &prefix, &relevant);
     let lines: Vec<DeltaLine> = found
         .iter()
         .flat_map(|(name, defs)| delta_lines(name, defs, &mentioned))
@@ -260,7 +283,11 @@ fn search_of(input: &HookInput) -> Option<Search> {
         // A delta from a repo the search may not run in would mislead.
         Some(CdTarget::Unknown) => return None,
     };
-    let searched: Vec<PathBuf> = operands.iter().map(|op| dir.join(op)).collect();
+    let home = std::env::var_os("HOME");
+    let searched: Vec<PathBuf> = operands
+        .iter()
+        .map(|op| operand_path(&dir, op, home.as_deref().map(Path::new)))
+        .collect();
     if !searched.is_empty() && searched.iter().all(|path| path.is_file()) {
         return None;
     }
@@ -273,6 +300,17 @@ fn search_of(input: &HookInput) -> Option<Search> {
         dir,
         graph_dir,
     })
+}
+
+/// The path an operand names: quotes stripped, a leading `~/` expanded with
+/// `home` (the hook sees the command before the shell expands it), else
+/// `dir` joined with it.
+fn operand_path(dir: &Path, operand: &str, home: Option<&Path>) -> PathBuf {
+    let operand = operand.trim_matches(['"', '\'']);
+    match (operand.strip_prefix("~/"), home) {
+        (Some(rest), Some(home)) => home.join(rest),
+        _ => dir.join(operand),
+    }
 }
 
 /// The identifier-shaped words of a grep / rg pattern, in pattern order and
@@ -308,64 +346,110 @@ fn identifiers(pattern: &str) -> Vec<String> {
     words
 }
 
-/// The text a search printed: a string `tool_output`, a Bash `stdout`, or
-/// a Grep tool's `filenames` and `content`. `None` when the output is absent
-/// or has none of these shapes: the delta then has no evidence.
-fn output_text(output: &Value) -> Option<Cow<'_, str>> {
-    match output {
-        Value::String(text) => Some(Cow::Borrowed(text)),
-        Value::Object(map) => {
-            if let Some(stdout) = map.get("stdout").and_then(Value::as_str) {
-                return Some(Cow::Borrowed(stdout));
-            }
-            let filenames = map.get("filenames").and_then(Value::as_array);
-            let content = map.get("content").and_then(Value::as_str);
-            if filenames.is_none() && content.is_none() {
-                return None;
-            }
-            let mut text = String::new();
-            for name in filenames.into_iter().flatten().filter_map(Value::as_str) {
-                text.push_str(name);
-                text.push('\n');
-            }
-            text.push_str(content.unwrap_or_default());
-            Some(Cow::Owned(text))
-        }
-        _ => None,
-    }
+/// What a search printed: its text, and the file names a Grep tool response
+/// lists as a structured field (a name may hold spaces, which no text split
+/// can recover).
+struct SearchOutput<'a> {
+    text: Cow<'a, str>,
+    files: Vec<&'a str>,
 }
 
-/// The paths of `relevant` that `output` mentions. An output token, split at
-/// whitespace and `:`, mentions a path when it equals the path or ends with
-/// `/` and the path (an absolute path), or when `prefix/token` equals it: a
-/// search in a subdirectory prints paths relative to that subdirectory.
+/// The output of a search: a string `tool_output`, a Bash `stdout`, or a Grep
+/// tool's `filenames` and `content`. `None` when the output is absent or has
+/// none of these shapes: the delta then has no evidence.
+fn search_output(output: &Value) -> Option<SearchOutput<'_>> {
+    let (text, files) = match output {
+        Value::String(text) => (text.as_str(), Vec::new()),
+        Value::Object(map) => {
+            if let Some(stdout) = map.get("stdout").and_then(Value::as_str) {
+                (stdout, Vec::new())
+            } else {
+                let filenames = map.get("filenames").and_then(Value::as_array);
+                let content = map.get("content").and_then(Value::as_str);
+                if filenames.is_none() && content.is_none() {
+                    return None;
+                }
+                let files = filenames
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect();
+                (content.unwrap_or_default(), files)
+            }
+        }
+        _ => return None,
+    };
+    Some(SearchOutput {
+        text: Cow::Borrowed(text),
+        files,
+    })
+}
+
+/// The path before the first `:<digits>` that ends the line or precedes
+/// another `:` (`path:12:text`, `path:12:5:text`, `grep -c`'s `path:3`): a
+/// path may hold spaces, so no whitespace split finds it.
+fn line_path(line: &str) -> Option<&str> {
+    line.match_indices(':').find_map(|(colon, _)| {
+        let rest = &line[colon + 1..];
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        (digits > 0 && matches!(rest.as_bytes().get(digits), None | Some(b':')))
+            .then_some(&line[..colon])
+    })
+}
+
+/// The paths of `relevant` that the output mentions: each name in `files`, and
+/// per line of `text` the `path:line:` prefix when there is one, else the
+/// whole line and each token split at whitespace and `:`. A path is mentioned
+/// when it equals the path or ends with `/` and the path (an absolute path),
+/// or when `prefix/path` equals it: a search in a subdirectory prints paths
+/// relative to that subdirectory. `\` reads as `/`.
 fn mentioned_files<'g>(
-    output: &str,
+    text: &str,
+    files: &[&str],
     prefix: &str,
     relevant: &FxHashSet<&'g str>,
 ) -> FxHashSet<&'g str> {
     let mut seen = FxHashSet::default();
     let mut joined = String::new();
-    for token in output.split(|c: char| c.is_whitespace() || c == ':' || c == '\0') {
-        let token = token.trim_start_matches("./");
-        if token.is_empty() {
-            continue;
+    let mut probe_path = |path: &str| {
+        let path = path.trim();
+        let path = if path.contains('\\') {
+            Cow::Owned(path.replace('\\', "/"))
+        } else {
+            Cow::Borrowed(path)
+        };
+        let path = path.trim_start_matches("./");
+        if path.is_empty() {
+            return;
         }
-        let mut probe = |path: &str| {
-            if let Some(&file) = relevant.get(path) {
+        let mut probe = |candidate: &str| {
+            if let Some(&file) = relevant.get(candidate) {
                 seen.insert(file);
             }
         };
-        probe(token);
-        for (slash, _) in token.match_indices('/') {
-            probe(&token[slash + 1..]);
+        probe(path);
+        for (slash, _) in path.match_indices('/') {
+            probe(&path[slash + 1..]);
         }
-        if !prefix.is_empty() && !token.starts_with('/') {
+        if !prefix.is_empty() && !path.starts_with('/') {
             joined.clear();
             joined.push_str(prefix);
             joined.push('/');
-            joined.push_str(token);
+            joined.push_str(path);
             probe(&joined);
+        }
+    };
+    for file in files {
+        probe_path(file);
+    }
+    for line in text.split(['\n', '\0']) {
+        if let Some(path) = line_path(line) {
+            probe_path(path);
+            continue;
+        }
+        probe_path(line);
+        for token in line.split(|c: char| c.is_whitespace() || c == ':') {
+            probe_path(token);
         }
     }
     seen
@@ -382,7 +466,8 @@ struct Definition<'g> {
 
 /// Every definition named exactly `name`, ordered by file and line. A caller
 /// is the source of a `Calls` edge into the definition or its constructors,
-/// as `find` counts it, under the test rule `impact` walks by.
+/// the edges `find`'s private `call_sources` follows, kept as a file once
+/// however many sources it holds, under the test rule `impact` walks by.
 fn definitions<'g>(graph: &'g ArchivedZeroCopyGraph, name: &str) -> Vec<Definition<'g>> {
     let merged = MergedGraph::new(graph, None);
     let file_of = move |idx: u32| -> Option<&'g str> {
@@ -572,8 +657,9 @@ fn tail_within(text: &str, max_bytes: usize) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        delta_lines, identifiers, is_git_mutation, mentioned_files, output_text, render_delta,
-        tail_within, Definition, DeltaLine, DELTA_HEADER, DELTA_MAX_BYTES,
+        delta_lines, identifiers, is_git_mutation, line_path, mentioned_files, operand_path,
+        render_delta, search_output, tail_within, Definition, DeltaLine, DELTA_HEADER,
+        DELTA_MAX_BYTES,
     };
     use rustc_hash::FxHashSet;
     use serde_json::json;
@@ -626,21 +712,47 @@ mod tests {
         );
     }
 
+    fn text_of(output: &serde_json::Value) -> Option<(String, Vec<String>)> {
+        search_output(output).map(|o| {
+            (
+                o.text.into_owned(),
+                o.files.into_iter().map(str::to_owned).collect(),
+            )
+        })
+    }
+
     #[test]
-    fn test_output_text_each_shape_returns_its_text_and_absent_returns_none() {
-        assert_eq!(output_text(&json!("a.py:1:x")).as_deref(), Some("a.py:1:x"));
+    fn test_search_output_each_shape_returns_its_text_and_files_and_absent_returns_none() {
         assert_eq!(
-            output_text(&json!({"stdout": "a.py:1:x", "stderr": "b.py"})).as_deref(),
-            Some("a.py:1:x")
+            text_of(&json!("a.py:1:x")),
+            Some(("a.py:1:x".into(), vec![]))
         );
         assert_eq!(
-            output_text(&json!({"filenames": ["/r/a.py"], "content": "/r/b.py:2:x"})).as_deref(),
-            Some("/r/a.py\n/r/b.py:2:x")
+            text_of(&json!({"stdout": "a.py:1:x", "stderr": "b.py"})),
+            Some(("a.py:1:x".into(), vec![]))
         );
-        assert_eq!(output_text(&json!({"filenames": []})).as_deref(), Some(""));
-        assert_eq!(output_text(&json!("")).as_deref(), Some(""));
+        assert_eq!(
+            text_of(&json!({"filenames": ["/r/my a.py"], "content": "/r/b.py:2:x"})),
+            Some(("/r/b.py:2:x".into(), vec!["/r/my a.py".into()]))
+        );
+        assert_eq!(
+            text_of(&json!({"filenames": []})),
+            Some((String::new(), vec![]))
+        );
+        assert_eq!(text_of(&json!("")), Some((String::new(), vec![])));
         for absent in [json!(null), json!({"exit_code": 0}), json!(3)] {
-            assert_eq!(output_text(&absent), None, "{absent}");
+            assert_eq!(text_of(&absent), None, "{absent}");
+        }
+    }
+
+    #[test]
+    fn test_line_path_takes_the_prefix_before_the_line_number() {
+        assert_eq!(line_path("src/my module.py:3:x"), Some("src/my module.py"));
+        assert_eq!(line_path("a.py:12:5:x"), Some("a.py"));
+        assert_eq!(line_path("a b.py:3"), Some("a b.py"));
+        assert_eq!(line_path(r"C:\r\a.py:7:x"), Some(r"C:\r\a.py"));
+        for none in ["", "src/a.py", "a.py:3x:y", "a.py-3-x"] {
+            assert_eq!(line_path(none), None, "{none:?}");
         }
     }
 
@@ -649,10 +761,58 @@ mod tests {
         let relevant = set(&["models.py", "src/api.py", "pkg/sub/c.ts", "deep/d.php"]);
         let output = "./models.py:1:x\n/home/u/repo/src/api.py:3:y\nc.ts:4:z\nnot/deep/d.phpx\n";
         assert_eq!(
-            mentioned_files(output, "pkg/sub", &relevant),
+            mentioned_files(output, &[], "pkg/sub", &relevant),
             set(&["models.py", "src/api.py", "pkg/sub/c.ts"])
         );
-        assert!(mentioned_files("", "", &relevant).is_empty());
+        assert!(mentioned_files("", &[], "", &relevant).is_empty());
+    }
+
+    #[test]
+    fn test_mentioned_files_backslash_separators_match_as_slashes() {
+        let relevant = set(&["src/api.py", "pkg/c.ts"]);
+        let output = "C:\\repo\\src\\api.py:3:y\nc.ts:4:z\n";
+        assert_eq!(
+            mentioned_files(output, &[], "pkg", &relevant),
+            set(&["src/api.py", "pkg/c.ts"])
+        );
+        assert_eq!(
+            mentioned_files(".\\src\\api.py\n", &[], "", &relevant),
+            set(&["src/api.py"])
+        );
+    }
+
+    #[test]
+    fn test_mentioned_files_path_with_spaces_matches_in_text_and_filenames() {
+        let relevant = set(&["src/my module.py", "module.py", "other dir/b.py"]);
+        assert_eq!(
+            mentioned_files("src/my module.py:3:def f\n", &[], "", &relevant),
+            set(&["src/my module.py"]),
+            "the path prefix is one token; `module.py` is not mentioned"
+        );
+        assert_eq!(
+            mentioned_files("other dir/b.py\n", &[], "", &relevant),
+            set(&["other dir/b.py"]),
+            "a files-only line is one path"
+        );
+        assert_eq!(
+            mentioned_files("", &["/r/src/my module.py"], "", &relevant),
+            set(&["src/my module.py"])
+        );
+    }
+
+    #[test]
+    fn test_operand_path_expands_home_and_strips_quotes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let dir = tmp.path().join("work");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(home.join("a.py"), "").unwrap();
+        std::fs::write(dir.join("b.py"), "").unwrap();
+        assert!(operand_path(&dir, "~/a.py", Some(&home)).is_file());
+        assert!(operand_path(&dir, "\"b.py\"", Some(&home)).is_file());
+        assert!(operand_path(&dir, "'b.py'", None).is_file());
+        assert!(!operand_path(&dir, "~/a.py", None).is_file(), "no home");
     }
 
     #[test]

@@ -8,7 +8,8 @@
 //! output already shows every definition and caller file.
 //!
 //! The fixture holds one call graph per language (Python, TypeScript, PHP).
-//! It cannot show a dirty worktree: the delta reads the indexed graph only.
+//! A fact survives only while its file holds the indexed text: the tests that
+//! rewrite a fixture file after the index prove the gate.
 
 use crate::hook_pre_tool_use_test::{git_in, indexed_repo};
 use serde_json::{json, Value};
@@ -415,7 +416,8 @@ fn test_handle_tool_output_filenames_and_content_object_is_read() {
 }
 
 /// Contract: an empty output is evidence that the search showed nothing, so
-/// the definition and every non-test caller file are the delta.
+/// the definition and every non-test caller file are the delta, while their
+/// files still hold the text the graph indexed.
 #[test]
 fn test_handle_tool_output_empty_reports_definition_and_callers() {
     let tmp = tempdir().unwrap();
@@ -427,6 +429,118 @@ fn test_handle_tool_output_empty_reports_definition_and_callers() {
         "{ctx}"
     );
     assert!(!ctx.contains("test_models.py"), "{ctx}");
+}
+
+/// Contract (the `doomed_fn` regression, ported from the PreToolUse graph
+/// hits): the agent renames `load_user` without committing. `rg load_user`
+/// prints nothing, and the delta must not claim the definition or its callers.
+#[test]
+fn test_handle_definition_renamed_after_the_index_is_not_stated() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = fixture(tmp.path());
+    fs::write(
+        repo.join("models.py"),
+        "def load_account(uid):\n    return uid\n",
+    )
+    .unwrap();
+    assert_eq!(post(&home, &bash(&repo, "rg -n load_user .", "")), "");
+    fs::remove_file(repo.join("models.py")).unwrap();
+    assert_eq!(post(&home, &bash(&repo, "rg -n load_user .", "")), "");
+}
+
+#[test]
+fn test_handle_caller_file_edited_after_the_index_is_not_named() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = fixture(tmp.path());
+    fs::write(repo.join("api.py"), "def handle(uid):\n    return uid\n").unwrap();
+    let ctx = post(&home, &bash(&repo, "rg -n load_user .", ""));
+    assert!(ctx.contains("service.py"), "{ctx}");
+    assert!(!ctx.contains("api.py"), "{ctx}");
+}
+
+/// Contract: a graph that a sibling worktree built (this HEAD has none) never
+/// names a file this tree lacks. `load_user`'s file is gone here and `send_welcome`'s
+/// is not, so the delta still proves it read the graph.
+#[test]
+fn test_handle_sibling_graph_does_not_name_a_file_this_tree_lacks() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = fixture(tmp.path());
+    let wt = tmp.path().join("wt");
+    git_in(
+        &repo,
+        &["worktree", "add", "-q", "-b", "other", wt.to_str().unwrap()],
+    );
+    git_in(&wt, &["rm", "-q", "models.py"]);
+    git_in(&wt, &["commit", "-qm", "drop models"]);
+    let ctx = post(&home, &bash(&wt, "rg -n 'load_user|send_welcome' .", ""));
+    assert!(ctx.contains("send_welcome → php/Mailer.php"), "{ctx}");
+    assert!(
+        !ctx.contains("models.py") && !ctx.contains("load_user"),
+        "{ctx}"
+    );
+}
+
+/// Contract: a path with spaces is one path, in `path:line:` text and in the
+/// Grep tool's `filenames` field. Both outputs show the definition's file, so
+/// the delta is empty.
+#[test]
+fn test_handle_path_with_spaces_is_mentioned_in_text_and_filenames() {
+    let tmp = tempdir().unwrap();
+    let files = [(
+        "src/my module.py",
+        "def spaced_fn(x):\n    return x\n".to_owned(),
+    )];
+    let (home, repo) = indexed_repo(tmp.path(), &files);
+    let text = "src/my module.py:1:def spaced_fn(x):\n";
+    assert_eq!(post(&home, &bash(&repo, "rg -n spaced_fn .", text)), "");
+    let top = dunce::canonicalize(&repo).unwrap();
+    let grep_tool = json!({
+        "cwd": repo,
+        "tool_name": "Grep",
+        "tool_input": {"pattern": "spaced_fn", "output_mode": "files_with_matches"},
+        "tool_response": {"filenames": [top.join("src/my module.py")], "numFiles": 1},
+    });
+    assert_eq!(post(&home, &grep_tool), "");
+}
+
+/// Contract: `~/..` is the hook's HOME, so this operand names one regular
+/// file, and a search of one file has no delta.
+#[test]
+fn test_handle_tilde_single_file_operand_emits_nothing() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = fixture(tmp.path());
+    let cmd = "rg -n load_user ~/../repo/models.py";
+    assert_eq!(
+        post(&home, &bash(&repo, cmd, "1:def load_user(uid):\n")),
+        ""
+    );
+}
+
+/// Contract: a pattern with more than three identifiers states facts for the
+/// first three that have a definition.
+#[test]
+fn test_handle_pattern_with_four_defined_identifiers_states_three() {
+    let tmp = tempdir().unwrap();
+    let names = ["alpha_fn", "bravo_fn", "charlie_fn", "delta_fn"];
+    let files: Vec<(String, String)> = names
+        .iter()
+        .map(|n| (format!("{n}.py"), format!("def {n}():\n    return 1\n")))
+        .collect();
+    let borrowed: Vec<(&str, String)> =
+        files.iter().map(|(f, s)| (f.as_str(), s.clone())).collect();
+    let (home, repo) = indexed_repo(tmp.path(), &borrowed);
+    let ctx = post(
+        &home,
+        &bash(
+            &repo,
+            "rg -n 'undefined_fn|alpha_fn|bravo_fn|charlie_fn|delta_fn' .",
+            "",
+        ),
+    );
+    for stated in &names[..3] {
+        assert!(ctx.contains(&format!("{stated} → {stated}.py")), "{ctx}");
+    }
+    assert!(!ctx.contains("delta_fn"), "{ctx}");
 }
 
 #[test]
