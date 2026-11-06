@@ -155,8 +155,6 @@ pub enum Terminator {
     Branch(Box<[BlockId]>),
     Return,
     Throw,
-    /// The lowering put nothing after this block (dead code starts a block with no predecessor).
-    Unreachable,
 }
 
 impl Terminator {
@@ -164,7 +162,7 @@ impl Terminator {
         match self {
             Terminator::Goto(target) => std::slice::from_ref(target),
             Terminator::Branch(targets) => &targets[..],
-            Terminator::Return | Terminator::Throw | Terminator::Unreachable => &[],
+            Terminator::Return | Terminator::Throw => &[],
         }
     }
 }

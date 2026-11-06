@@ -349,10 +349,6 @@ impl IrBuilder {
         self.frame().terminate(Terminator::Throw);
     }
 
-    pub fn unreachable(&mut self) {
-        self.frame().terminate(Terminator::Unreachable);
-    }
-
     /// Opens a loop (`continue_to: Some(head)`) or a `switch`
     /// (`continue_to: None`) that `break_out` leaves to `break_to`.
     pub fn push_breakable(&mut self, continue_to: Option<BlockId>, break_to: BlockId) {

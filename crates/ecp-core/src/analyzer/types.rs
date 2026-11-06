@@ -685,7 +685,7 @@ impl RawNode {
 #[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[rkyv(derive(Debug))]
 pub enum BindingKind {
-    /// Symbol → symbol (typedef, identifier-bodied `#define`, extern decls).
+    /// Symbol → symbol (identifier-bodied `#define`, extern decls).
     Alias,
     /// Symbol → literal value (`#define MAX 4096`, `#define VER "v1"`).
     Constant,

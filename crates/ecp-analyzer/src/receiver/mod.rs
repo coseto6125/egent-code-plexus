@@ -33,7 +33,7 @@ pub struct LangPolicy {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeclaredTypePolicy {
-    /// The declared static type holds on every path: Java, C#, Kotlin, Swift, Go, Rust, C, C++, Dart.
+    /// The declared static type holds on every path: Java, C#, Kotlin, Swift, Go, C++.
     Pinned,
     /// As `Pinned`, except an assigned `Value::Dynamic` makes the cell `Unknown(NoEvidence)`: TypeScript.
     PinnedUnlessDynamic,

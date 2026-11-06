@@ -1112,7 +1112,8 @@ impl ParseSpec for CSpec {
                     &cx.call_sites,
                 );
             }
-            // Named bindings: `typedef`, `#define`, `extern` declarations.
+            // Named bindings: `#define`, `extern` declarations. A `typedef`
+            // is a Typedef node, no binding.
             // Emitted as `RawImport` with `alias = Some(short_name)` mirroring
             // Java's static-import convention so downstream resolvers can
             // qualifier-scope-lookup C aliases the same way.
