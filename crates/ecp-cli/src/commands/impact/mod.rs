@@ -296,7 +296,7 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
                 "→ \"{name}\" has no non-test callers; its {hidden} test callers are hidden by --exclude-tests"
             ),
             (0, Some(Ok(0))) => eprintln!(
-                "→ \"{name}\" has 0 resolved callers and no text reference outside its definition. Possible: entry point, dead code, or a name built at run time (string dispatch, reflection)"
+                "→ \"{name}\" has 0 resolved callers and no text reference in tracked files outside its definition. Possible: entry point, dead code, or a name built at run time (string dispatch, reflection)"
             ),
             (0, Some(Ok(n))) => {
                 // The collision caveat is set only when other definitions

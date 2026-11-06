@@ -78,6 +78,9 @@ struct Hit {
     source: bool,
     line: u32,
     form: &'static str,
+    /// The first occurrence binds the name: `name =` or `name:`, as a
+    /// `const name = () =>`, a `name = lambda` or a `val name: () -> T` does.
+    binds: bool,
     /// Whole-word occurrences of the name on this line.
     count: u32,
 }
@@ -327,7 +330,9 @@ fn search_file(path: &Path, rel: &str, finder: &Finder, name: &[u8]) -> Option<V
     // Opened without blocking, with the type checked on the open handle: a
     // path swapped for a FIFO since the `lstat` is refused, not waited on.
     let (mut file, len) = open_admitted(path, no_size_cap)?;
-    let mut text = Vec::with_capacity(len as usize);
+    // The whole length is reserved only for a text file: a large binary
+    // stops at the probe.
+    let mut text = Vec::with_capacity(BINARY_PROBE_BYTES.min(len as usize));
     (&mut file)
         .take(BINARY_PROBE_BYTES as u64)
         .read_to_end(&mut text)
@@ -335,6 +340,7 @@ fn search_file(path: &Path, rel: &str, finder: &Finder, name: &[u8]) -> Option<V
     if memchr::memchr(0, &text).is_some() {
         return Some(Vec::new());
     }
+    text.reserve((len as usize).saturating_sub(text.len()));
     file.read_to_end(&mut text).ok()?;
     let mut hits = Vec::new();
     let mut shared: Option<(Arc<str>, bool)> = None;
@@ -347,7 +353,7 @@ fn search_file(path: &Path, rel: &str, finder: &Finder, name: &[u8]) -> Option<V
         counted = at;
         let start = memchr::memrchr(b'\n', &text[..at]).map_or(0, |i| i + 1);
         line_end = memchr::memchr(b'\n', &text[at..]).map_or(text.len(), |i| at + i);
-        if let Some((form, count)) = occurrences(&text[start..line_end], name) {
+        if let Some((form, binds, count)) = occurrences(&text[start..line_end], name) {
             let (path, source) = shared.get_or_insert_with(|| {
                 (
                     Arc::from(rel),
@@ -359,6 +365,7 @@ fn search_file(path: &Path, rel: &str, finder: &Finder, name: &[u8]) -> Option<V
                 source: *source,
                 line,
                 form,
+                binds,
                 count,
             });
         }
@@ -393,8 +400,9 @@ fn first_char(bytes: &[u8]) -> Option<char> {
 /// it on either side.
 /// The form is `member` for `x.name(` / `p->name(` / `T::name(`, `bare` for
 /// `name(`, and `reference` for every other use: a value, a type, a
-/// template, a string, a Ruby call without parentheses.
-fn occurrences(content: &[u8], name: &[u8]) -> Option<(&'static str, u32)> {
+/// template, a string, a Ruby call without parentheses. `binds` is true
+/// when the first occurrence is followed by `=` or `:` (not `==`, `=>`, `::`).
+fn occurrences(content: &[u8], name: &[u8]) -> Option<(&'static str, bool, u32)> {
     if name.is_empty() {
         return None;
     }
@@ -411,17 +419,28 @@ fn occurrences(content: &[u8], name: &[u8]) -> Option<(&'static str, u32)> {
             continue;
         }
         let prefix = &content[..at];
-        let call = content[end..].iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'(');
+        let rest = &content[end..];
+        let next = rest.iter().position(|b| !b.is_ascii_whitespace());
+        let after = |k: usize| next.and_then(|i| rest.get(i + k)).copied();
+        let call = after(0) == Some(b'(');
+        let binds = match (after(0), after(1)) {
+            (Some(b'='), Some(b'=' | b'>')) | (Some(b':'), Some(b':')) => false,
+            (Some(b'=' | b':'), _) => true,
+            _ => false,
+        };
         let member = prefix.ends_with(b".") || prefix.ends_with(b"->") || prefix.ends_with(b"::");
-        first.get_or_insert(match (call, member) {
-            (false, _) => "reference",
-            (true, true) => "member",
-            (true, false) => "bare",
-        });
+        first.get_or_insert((
+            match (call, member) {
+                (false, _) => "reference",
+                (true, true) => "member",
+                (true, false) => "bare",
+            },
+            binds,
+        ));
         count += 1;
         from = end;
     }
-    first.map(|form| (form, count))
+    first.map(|(form, binds)| (form, binds, count))
 }
 
 /// What the graph says about the occurrences: the sources of the edges into
@@ -456,9 +475,10 @@ fn explainers<'g>(merged: MergedGraph<'g>, defs: &[u32]) -> Explainers<'g> {
 }
 
 /// Drop the occurrences the graph already explains:
-/// - a definition's declaration, one occurrence: the first `bare` match in a
-///   callable's span, with every match before it (an annotation or decorator
-///   that holds the name), or the first match of any other definition;
+/// - a definition's declaration, one occurrence: the first `bare` or binding
+///   match in a callable's span, with every match before it (an annotation or
+///   decorator that holds the name), or the first match of any other
+///   definition;
 /// - an occurrence inside a callable that holds an edge to a definition
 ///   (the innermost named callable, with the lambdas inside it);
 /// - an occurrence inside the span of a value declaration or a type that
@@ -520,7 +540,7 @@ fn unexplained<'g>(merged: MergedGraph<'g>, defs: &[u32], hits: Vec<Hit>) -> Vec
         };
         let declaration = match node.kind().is_callable() {
             true => within()
-                .find(|h| h.form == "bare")
+                .find(|h| h.form == "bare" || h.binds)
                 .or_else(|| within().next()),
             false => within().next(),
         };
@@ -676,24 +696,30 @@ mod tests {
         ];
         for (line, want) in cases {
             assert_eq!(
-                occurrences(line.as_bytes(), b"get").map(|(form, _)| form),
+                occurrences(line.as_bytes(), b"get").map(|(form, _, _)| form),
                 *want,
                 "line: {line}"
             );
         }
         assert_eq!(
-            occurrences(b"pkg.Get ()", b"Get").map(|(form, _)| form),
+            occurrences(b"pkg.Get ()", b"Get").map(|(form, _, _)| form),
             Some("member")
         );
     }
 
     #[test]
     fn test_occurrences_several_on_one_line_counted() {
-        assert_eq!(occurrences(b"get(); get();", b"get"), Some(("bare", 2)));
-        assert_eq!(occurrences(b"a.get(); get;", b"get"), Some(("member", 2)));
+        assert_eq!(
+            occurrences(b"get(); get();", b"get"),
+            Some(("bare", false, 2))
+        );
+        assert_eq!(
+            occurrences(b"a.get(); get;", b"get"),
+            Some(("member", false, 2))
+        );
         assert_eq!(
             occurrences(b"x = get; getter(); get()", b"get"),
-            Some(("reference", 2))
+            Some(("reference", false, 2))
         );
     }
 
@@ -702,9 +728,36 @@ mod tests {
         assert_eq!(occurrences("éget()".as_bytes(), b"get"), None);
         assert_eq!(occurrences("日get()".as_bytes(), b"get"), None);
         assert_eq!(occurrences("geté".as_bytes(), b"get"), None);
-        assert_eq!(occurrences("é get()".as_bytes(), b"get"), Some(("bare", 1)));
-        assert_eq!(occurrences(b"\xffget()", b"get"), Some(("bare", 1)));
-        assert_eq!(occurrences(b"get\xff", b"get"), Some(("reference", 1)));
+        assert_eq!(
+            occurrences("é get()".as_bytes(), b"get"),
+            Some(("bare", false, 1))
+        );
+        assert_eq!(occurrences(b"\xffget()", b"get"), Some(("bare", false, 1)));
+        assert_eq!(
+            occurrences(b"get\xff", b"get"),
+            Some(("reference", false, 1))
+        );
+    }
+
+    #[test]
+    fn test_occurrences_binding_first_occurrence_binds() {
+        let binds = |line: &str| occurrences(line.as_bytes(), b"get").map(|(_, b, _)| b);
+        for line in [
+            "const get = (n) => n",
+            "get = lambda n: n",
+            "val get: () -> Int = { 1 }",
+        ] {
+            assert_eq!(binds(line), Some(true), "line: {line}");
+        }
+        for line in [
+            "if get == 1",
+            "get => 1",
+            "Foo::get::<T>",
+            "f = get",
+            "get(1)",
+        ] {
+            assert_eq!(binds(line), Some(false), "line: {line}");
+        }
     }
 
     #[test]
@@ -716,7 +769,7 @@ mod tests {
     fn test_occurrences_regex_metacharacters_in_name_matched_literally() {
         assert_eq!(
             occurrences(b"call(a.b$c)", b"a.b$c"),
-            Some(("reference", 1))
+            Some(("reference", false, 1))
         );
         assert_eq!(occurrences(b"axb$c", b"a.b$c"), None);
     }

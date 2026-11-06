@@ -262,7 +262,7 @@ fn test_impact_zero_callers_scan_found_nothing_hint_says_so() {
     assert_eq!(json_of(&out)["unexplained_refs"]["total"], 0);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("no text reference outside its definition"),
+        stderr.contains("no text reference in tracked files outside its definition"),
         "{stderr}"
     );
 }

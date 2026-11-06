@@ -325,6 +325,29 @@ fn test_unexplained_refs_vendored_build_and_document_files_excluded() {
     );
 }
 
+/// A callable bound by assignment declares itself on the binding line, not
+/// at its first call. Red before the fix: the recursive call on line 2 was
+/// taken as the declaration and the binding as an annotation before it, so
+/// only line 3 stayed listed.
+#[test]
+fn test_unexplained_refs_assigned_callable_declared_at_binding() {
+    let repo = tempfile::tempdir().unwrap();
+    let (mut fx, def) = one_def(
+        repo.path(),
+        &[(
+            "src/lib.py",
+            "get = lambda n: (\n    get(n - 1),\n    get,\n)\n",
+        )],
+    );
+    fx.span(def, (0, 0, 3, 1));
+    let payload = impact(fx, repo.path(), |_| {});
+    assert_eq!(
+        sites(&payload).into_iter().map(|s| s.1).collect::<Vec<_>>(),
+        vec![2, 3],
+        "{payload}"
+    );
+}
+
 /// A value declaration caller (schema 56 makes it the caller of the calls
 /// outside functions) explains only its own span: the same file's top-level
 /// line and function stay listed.

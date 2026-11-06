@@ -803,7 +803,8 @@ pub(crate) fn ensure_fresh_with_rebuild(
                 // the fingerprint is refreshed as the very last step. A parse
                 // whose fragments were not written leaves it behind, so the
                 // next query parses again.
-                if walked || matches!(refresh, Refresh::Parsed) {
+                let wrote = !matches!(refresh, Refresh::WriteFailed(_));
+                if wrote && (walked || matches!(refresh, Refresh::Parsed)) {
                     write_head_sha_sidecar(graph_path, worktree_root);
                 }
                 Ok(Ensured::refreshed(dirty, size_cap))
@@ -3033,6 +3034,90 @@ mod fingerprint_drift_tests {
             ensure_index(&graph_path, &worktree).unwrap(),
             EnsureResult::Ready,
             "the second query takes the porcelain shortcut"
+        );
+    }
+
+    /// A walk whose overlay write fails leaves the sidecar where it was. Red
+    /// before the fix: the sidecar moved to HEAD, so the next query took the
+    /// porcelain shortcut and answered from a graph that lacks the commit.
+    #[cfg(unix)]
+    #[test]
+    fn test_ensure_fresh_walk_overlay_write_fails_keeps_sidecar_behind() {
+        if rerun_in_child(
+            "ECP_AUTO_ENSURE_WRITE_FAIL_CHILD",
+            "auto_ensure::fingerprint_drift_tests::test_ensure_fresh_walk_overlay_write_fails_keeps_sidecar_behind",
+        ) {
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempdir().unwrap();
+        let (worktree, graph_path) = repo_and_graph_at_head(tmp.path());
+        let home = tmp.path().join("ecp-home");
+        std::env::set_var("ECP_HOME", &home);
+        std::env::set_var("ECP_SESSION_ID", "write-fail-test");
+        let commit = |body: &str| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            fs::write(worktree.join("app.py"), body).unwrap();
+            assert!(std::process::Command::new("git")
+                .args(["commit", "-qam", "next"])
+                .current_dir(&worktree)
+                .status()
+                .unwrap()
+                .success());
+            git_head_sha(&worktree).unwrap()
+        };
+        let first = commit("def app(): pass\ndef one(): pass\n");
+        ensure_fresh(IndexNeed::NearCurrent, &graph_path, &worktree).unwrap();
+        let sidecar = || {
+            fs::read_to_string(head_sha_sidecar_path(&graph_path))
+                .unwrap()
+                .trim()
+                .to_string()
+        };
+        assert_eq!(
+            sidecar(),
+            first,
+            "setup: the first refresh writes the overlay"
+        );
+
+        // The dirs below `l1/`: `l1/` itself stays writable for the manifest
+        // and its lock, so the fragment write is the step that fails.
+        fn l1_dirs(dir: &Path, out: &mut Vec<PathBuf>) {
+            for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    l1_dirs(&path, out);
+                    if path
+                        .ancestors()
+                        .skip(1)
+                        .any(|a| a.file_name().is_some_and(|n| n == "l1"))
+                    {
+                        out.push(path);
+                    }
+                }
+            }
+        }
+        let mut dirs = Vec::new();
+        l1_dirs(&home, &mut dirs);
+        assert!(!dirs.is_empty(), "setup: no overlay dir");
+        let mode = |m| fs::Permissions::from_mode(m);
+        for dir in &dirs {
+            fs::set_permissions(dir, mode(0o555)).unwrap();
+        }
+        if fs::write(dirs[0].join("probe"), b"").is_ok() {
+            eprintln!("skipped: a read-only directory is writable here (root)");
+            return;
+        }
+        commit("def app(): pass\ndef one(): pass\ndef two(): pass\n");
+        let outcome = ensure_fresh(IndexNeed::NearCurrent, &graph_path, &worktree);
+        for dir in &dirs {
+            fs::set_permissions(dir, mode(0o755)).unwrap();
+        }
+        outcome.unwrap();
+        assert_eq!(
+            sidecar(),
+            first,
+            "a failed write must leave the sidecar behind HEAD"
         );
     }
 
