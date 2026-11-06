@@ -1,8 +1,9 @@
 //! A member call on an untyped receiver out of a dirty file (Rule U): the
 //! session overlay binds what a full reindex binds, with the same confidence
 //! and reason. In a guess language (Rust, Go, Java, Swift, Dart, C++,
-//! TypeScript) the bind by name alone is 0.55 `call:untyped-member`, whichever
-//! tier found the method; elsewhere it keeps the tier's confidence. A Rust
+//! TypeScript, and, by decision A09, PHP, Python, Ruby and JavaScript) the
+//! bind by name alone is 0.55 `call:untyped-member`, whichever tier found the
+//! method; elsewhere (Kotlin, C) it keeps the tier's confidence. A Rust
 //! method-syntax call weighs methods only at the global tier (U2), so a
 //! same-named free `fn` neither binds nor makes the name ambiguous, in the
 //! index (`SymbolTable::global_field_candidates`) and in the overlay
@@ -22,8 +23,10 @@ use ecp_core::analyzer::types::{CallSite, LocalGraph, RawNode};
 use ecp_core::graph::{NodeKind, RelType};
 use parity::{calls_after_edit, edges_after_edit};
 
-const GUESS_EXTENSIONS: [&str; 7] = ["rs", "go", "java", "swift", "dart", "cpp", "ts"];
-const OTHER_EXTENSIONS: [&str; 6] = ["py", "rb", "php", "js", "kt", "c"];
+const GUESS_EXTENSIONS: [&str; 11] = [
+    "rs", "go", "java", "swift", "dart", "cpp", "ts", "py", "rb", "php", "js",
+];
+const OTHER_EXTENSIONS: [&str; 2] = ["kt", "c"];
 /// C# binds no untyped member call on either side, so it is its own group:
 /// index and overlay agree on no edge at all.
 const UNBOUND_EXTENSIONS: [&str; 1] = ["cs"];

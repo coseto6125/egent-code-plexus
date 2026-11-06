@@ -165,10 +165,11 @@ fn test_attribute_on_later_branch_keeps_owner() {
     );
 }
 
-/// Rule U does not apply to Python (the member name is the main signal there): an untyped member call
-/// keeps the confidence of the tier that found the method and the plain
-/// `call` reason.
+/// Stands for: Python is a guess language (decision A09): a member call on an
+/// untyped receiver binds a method by its name alone as the tagged guess
+/// 0.55 `call:untyped-member`, from any tier. The caller's own type and an
+/// ambiguous name bind nothing; the nearest copy keeps 0.6.
 #[test]
-fn test_untyped_member_call_keeps_tier_confidence() {
-    receiver_typing_support::assert_untyped_member_keeps_tier_confidence("py");
+fn test_untyped_member_call_binds_by_name_as_tagged_guess() {
+    receiver_typing_support::assert_untyped_member_is_guess("py");
 }

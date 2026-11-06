@@ -33,8 +33,10 @@
 //! Kotlin / Swift / Dart `val o = Cls()`) and a Go value of a type from
 //! another package (`var t util.T`).
 use crate::name_ref_support;
+use crate::receiver_typing_support::{call_rows, call_rows_to};
 
 use ecp_analyzer::c_sharp::parser::CSharpProvider;
+use ecp_analyzer::cpp::parser::CppProvider;
 use ecp_analyzer::dart::parser::DartProvider;
 use ecp_analyzer::go::parser::GoProvider;
 use ecp_analyzer::java::parser::JavaProvider;
@@ -47,7 +49,7 @@ use ecp_analyzer::swift::parser::SwiftProvider;
 use ecp_analyzer::typescript::parser::TypeScriptProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::graph::{RelType, ZeroCopyGraph};
-use name_ref_support::{assert_one_cross_file, calls, function_refs, graph, Ref};
+use name_ref_support::{assert_one_cross_file, calls, function_refs, graph, value_reads, Ref};
 
 fn none() -> Vec<Ref> {
     Vec::new()
@@ -1293,4 +1295,494 @@ fn test_bound_method_reference_kotlin_labelled_this_call_binds_the_labelled_clas
         target_owners(&g, "callSelf", RelType::Calls, "call"),
         ["Inner"]
     );
+}
+
+// ---- Receiver scope: rebinding, branches and block-scoped locals ----
+//
+// Decision A09: Python is a guess language. A receiver the paths do not all
+// type the same binds `m` by name as the tagged guess
+// `(0.55, "call:untyped-member")`, never as a full-confidence `call`; a
+// method value (`map(obj.m, xs)`) never guesses.
+
+const GUESS: (&str, f32) = ("call:untyped-member", 0.55);
+
+/// A full-confidence typed bind: reason `call`, confidence of the import tier
+/// or above.
+fn assert_typed_call(rows: &[(String, String, String, f32)], file: &str) {
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let (f, name, reason, confidence) = &rows[0];
+    assert_eq!(
+        (f.as_str(), name.as_str(), reason.as_str()),
+        (file, "m", "call")
+    );
+    assert!(*confidence >= 0.7, "{rows:?}");
+}
+
+/// The only `m` rows are the one tagged guess: no row has reason `call` and
+/// none reaches confidence 0.7.
+fn assert_tagged_guess_only(rows: &[(String, String, String, f32)], file: &str) {
+    assert_eq!(
+        rows,
+        [(
+            file.to_string(),
+            "m".to_string(),
+            GUESS.0.to_string(),
+            GUESS.1
+        )],
+        "{rows:?}"
+    );
+    assert!(rows.iter().all(|r| r.2 != "call" && r.3 < 0.7), "{rows:?}");
+}
+
+const SCOPE_CALLS_NO_EDGE: &str = "from cls import Cls\n\ndef run(c, loose):\n    obj = loose\n    if c:\n        obj: Cls = Cls()\n    else:\n        return obj.m(1)\n";
+const SCOPE_REFS_NO_EDGE: &str = "from cls import Cls\n\ndef run(c, loose, xs):\n    obj = loose\n    if c:\n        obj: Cls = Cls()\n    else:\n        return list(map(obj.m, xs))\n";
+const SCOPE_POS_BRANCH: &str = "from cls import Cls\n\ndef run(c, loose):\n    obj = loose\n    if c:\n        obj: Cls = Cls()\n        return obj.m(1)\n    return 0\n";
+const SCOPE_POS_JOIN: &str = "from cls import Cls\n\ndef run(c):\n    if c:\n        obj: Cls = Cls()\n    else:\n        obj: Cls = Cls()\n    return obj.m(1)\n";
+const SCOPE_POS_REFS: &str = "from cls import Cls\n\ndef run(c, loose, xs):\n    obj = loose\n    if c:\n        obj: Cls = Cls()\n        return list(map(obj.m, xs))\n    return 0\n";
+
+/// `cls.py` (alone, so the name guess has one `m` to find) and one use file.
+fn scope_graph(use_src: &str) -> ZeroCopyGraph {
+    graph(
+        &PythonProvider::new().unwrap(),
+        &[("cls.py", PY_CLS), ("use.py", use_src)],
+    )
+}
+
+/// Stands for: an annotation in the sibling branch does not type `obj` where
+/// the earlier `obj = loose` is the value that reaches the use, so the call
+/// binds only as the tagged guess (0.55, `call:untyped-member`), never as a
+/// full-confidence `call`.
+#[test]
+fn test_receiver_binding_python_annotation_in_sibling_branch_calls_no_edge() {
+    let g = scope_graph(SCOPE_CALLS_NO_EDGE);
+    assert_tagged_guess_only(&call_rows_to(&g, "run", "m"), "cls.py");
+    let control = scope_graph(SCOPE_POS_BRANCH);
+    assert_typed_call(&call_rows_to(&control, "run", "m"), "cls.py");
+}
+
+/// Stands for: the method value in the sibling branch never guesses, so no
+/// `References` edge exists; the annotated-branch twin keeps its reference.
+#[test]
+fn test_receiver_binding_python_annotation_in_sibling_branch_reference_no_edge() {
+    assert_eq!(
+        function_refs(&scope_graph(SCOPE_REFS_NO_EDGE), "run"),
+        none()
+    );
+    assert_one_cross_file(
+        &function_refs(&scope_graph(SCOPE_POS_REFS), "run"),
+        "cls.py",
+        "m",
+    );
+}
+
+/// Stands for: a use inside the annotated branch sees `obj: Cls` and binds
+/// the method with a full-confidence `call`.
+#[test]
+fn test_receiver_binding_python_use_in_annotated_branch_calls_method() {
+    assert_typed_call(
+        &call_rows_to(&scope_graph(SCOPE_POS_BRANCH), "run", "m"),
+        "cls.py",
+    );
+}
+
+/// Stands for: when both branches annotate `obj: Cls`, the join keeps `Cls`
+/// and the call binds with a full-confidence `call`.
+#[test]
+fn test_receiver_binding_python_both_branches_annotated_calls_method() {
+    assert_typed_call(
+        &call_rows_to(&scope_graph(SCOPE_POS_JOIN), "run", "m"),
+        "cls.py",
+    );
+}
+
+/// Stands for (M04): swapping the `if/else` text and inverting the condition
+/// leaves the verdict rows of the A02 fixtures unchanged.
+#[test]
+fn test_receiver_binding_python_inverted_branch_condition_keeps_verdict() {
+    let neg_variant = "from cls import Cls\n\ndef run(c, loose):\n    obj = loose\n    if not c:\n        return obj.m(1)\n    else:\n        obj: Cls = Cls()\n";
+    let pos_variant = "from cls import Cls\n\ndef run(c, loose):\n    obj = loose\n    if not c:\n        return 0\n    obj: Cls = Cls()\n    return obj.m(1)\n";
+    let rows = |src| call_rows_to(&scope_graph(src), "run", "m");
+    assert_tagged_guess_only(&rows(neg_variant), "cls.py");
+    assert_eq!(rows(neg_variant), rows(SCOPE_CALLS_NO_EDGE));
+    assert_typed_call(&rows(pos_variant), "cls.py");
+    assert_eq!(rows(pos_variant), rows(SCOPE_POS_BRANCH));
+}
+
+/// Stands for (M05): a write on one branch makes the receiver unproven at the
+/// join, a write on a branch that leaves does not, and a write that dominates
+/// the use rebinds it. Both the `Calls` form and the method-value form follow
+/// the path. `Other.m` is in the tree, so no name guess can bind `Cls.m`.
+#[test]
+fn test_receiver_binding_python_write_on_one_branch_follows_the_path() {
+    let cases: [(&str, bool); 3] = [
+        ("if xs:\n        obj = loose\n    return {use}", false),
+        (
+            "if xs:\n        obj = loose\n        return 0\n    return {use}",
+            true,
+        ),
+        (
+            "if xs:\n        pass\n    obj = loose\n    return {use}",
+            false,
+        ),
+    ];
+    for (template, binds) in cases {
+        let call_g = python_graph(&template.replace("{use}", "obj.m(1)"));
+        let ref_g = python_graph(&template.replace("{use}", "list(map(obj.m, xs))"));
+        let call_bound = calls(&call_g, "run").contains(&("cls.py".to_string(), "m".to_string()));
+        let ref_bound = !function_refs(&ref_g, "run").is_empty();
+        assert_eq!(call_bound, binds, "Calls: {template}");
+        assert_eq!(ref_bound, binds, "References: {template}");
+    }
+}
+
+/// Stands for (A04): a same-function rebinding revokes the parameter type in
+/// the `Calls` path as it does in the method-value path. `Other.m` is in the
+/// tree, so the by-name guess is ambiguous and binds no `Cls.m` either.
+#[test]
+fn test_calls_python_rebinding_in_declaring_function_binds_no_method() {
+    for body in PY_REBINDING_BODIES {
+        let g = python_graph(&body.replace("{use}", "obj.m(1)"));
+        assert!(
+            !calls(&g, "run").contains(&("cls.py".to_string(), "m".to_string())),
+            "{body}: {:?}",
+            call_rows(&g, "run")
+        );
+    }
+}
+
+const PY_REBINDING_BODIES: [&str; 7] = [
+    "for obj in loose:\n        {use}",
+    "try:\n        pass\n    except ValueError as obj:\n        {use}",
+    "with loose as obj:\n        {use}",
+    "match loose:\n        case [obj]:\n            {use}",
+    "if (obj := loose):\n        {use}",
+    "obj = loose\n    return {use}",
+    "for obj in loose:\n        pass\n    return {use}",
+];
+
+/// Stands for (A04 control): a read before the rebinding, and a plain use of
+/// the annotated parameter, still bind `Cls.m` with a typed `call`.
+#[test]
+fn test_calls_python_read_before_rebinding_binds_method() {
+    for body in [
+        "f = obj.m(1)\n    obj = loose",
+        "obj = obj.m(1)",
+        "for obj in obj.m(1):\n        pass",
+        "with obj.m(1) as obj:\n        pass",
+        "if (obj := obj.m(1)):\n        pass",
+        "obj = loose\n    obj: Cls = Cls()\n    return obj.m(1)",
+    ] {
+        let g = python_graph(body);
+        assert_typed_call(&call_rows_to(&g, "run", "m"), "cls.py");
+    }
+}
+
+#[test]
+fn test_calls_python_unrebound_annotated_parameter_binds_method() {
+    let g = python_graph("return obj.m(1)");
+    assert_typed_call(&call_rows_to(&g, "run", "m"), "cls.py");
+}
+
+/// Stands for (M09b): the `Calls` form and the method-value form of one body
+/// reach the same verdict, bound or silent, for every rebinding body and for
+/// the unrebound controls.
+#[test]
+fn test_receiver_binding_python_calls_and_reference_agree_on_every_rebinding_body() {
+    let mut verdicts = Vec::new();
+    for body in PY_REBINDING_BODIES {
+        verdicts.push((body, false));
+    }
+    for body in ["return {use}", "f = {use}\n    obj = loose"] {
+        verdicts.push((body, true));
+    }
+    for (template, expected) in verdicts {
+        let call_g = python_graph(&template.replace("{use}", "obj.m(1)"));
+        let ref_g = python_graph(&template.replace("{use}", "list(map(obj.m, xs))"));
+        let call_bound = calls(&call_g, "run").contains(&("cls.py".to_string(), "m".to_string()));
+        let ref_bound = function_refs(&ref_g, "run")
+            .iter()
+            .any(|r| (r.0.as_str(), r.1.as_str()) == ("cls.py", "m"));
+        assert_eq!(call_bound, ref_bound, "forms disagree: {template}");
+        assert_eq!(call_bound, expected, "{template}");
+    }
+}
+
+// ---- A07: block-scoped locals (Java) and the sibling scan ----
+
+const JAVA_A: (&str, &str) = ("A.java", "class A { void m() {} }\n");
+const JAVA_B: (&str, &str) = ("B.java", "class B { void m() {} }\n");
+
+fn java_project(extra: &[(&str, &str)]) -> ZeroCopyGraph {
+    let mut files = vec![JAVA_A, JAVA_B];
+    files.extend_from_slice(extra);
+    graph(&JavaProvider::new().unwrap(), &files)
+}
+
+fn target_files(g: &ZeroCopyGraph, caller: &str) -> Vec<String> {
+    call_rows_to(g, caller, "m")
+        .into_iter()
+        .map(|row| row.0)
+        .collect()
+}
+
+/// Stands for: two blocks that each declare `x` bind `x::m` to their own
+/// type, one `References` edge to `A.m` and one to `B.m`.
+#[test]
+fn test_bound_method_reference_java_block_scoped_same_name_locals_bind_own_types() {
+    let g = java_project(&[(
+        "H.java",
+        "class H {\n    void run() {\n        { A x = new A(); Runnable a = x::m; }\n        { B x = new B(); Runnable b = x::m; }\n    }\n}\n",
+    )]);
+    let files: Vec<String> = function_refs(&g, "run").into_iter().map(|r| r.0).collect();
+    assert_eq!(files, ["A.java", "B.java"]);
+}
+
+/// Stands for: only the second block calls, and it declares `B obj`, so the
+/// call binds `B.m`; the earlier `A obj` of the first block does not win.
+#[test]
+fn test_calls_java_block_scoped_same_name_locals_bind_second_block_type() {
+    let g = java_project(&[(
+        "Hc.java",
+        "class Hc {\n    void run() {\n        { A obj = new A(); }\n        { B obj = new B(); obj.m(); }\n    }\n}\n",
+    )]);
+    assert_eq!(target_files(&g, "run"), ["B.java"]);
+}
+
+/// Stands for: a block local shadows the field only inside its block; the
+/// call after the block binds the field's type `A`, the call inside binds `B`.
+#[test]
+fn test_calls_java_local_in_block_shadows_field_only_inside_block() {
+    let g = java_project(&[(
+        "Hf.java",
+        "class Hf {\n    A obj = new A();\n    void run() {\n        { B obj = new B(); obj.m(); }\n        obj.m();\n    }\n}\n",
+    )]);
+    assert_eq!(target_files(&g, "run"), ["A.java", "B.java"]);
+}
+
+/// Stands for: two `for` variables of one name bind each loop's own type.
+#[test]
+fn test_calls_java_for_variables_of_same_name_bind_own_types() {
+    let g = java_project(&[(
+        "Hl.java",
+        "class Hl {\n    void run(java.util.List<A> as, java.util.List<B> bs) {\n        for (A obj : as) { }\n        for (B obj : bs) { obj.m(); }\n    }\n}\n",
+    )]);
+    assert_eq!(target_files(&g, "run"), ["B.java"]);
+}
+
+/// Stands for: controls for the block-scope rule: one block binds its own
+/// type; two methods each bind their own `obj`.
+#[test]
+fn test_calls_java_single_block_local_binds_its_type() {
+    let g = java_project(&[
+        (
+            "Hs.java",
+            "class Hs {\n    void run() {\n        { B obj = new B(); obj.m(); }\n    }\n}\n",
+        ),
+        (
+            "Hq.java",
+            "class Hq {\n    void first() { A obj = new A(); obj.m(); }\n    void second() { B obj = new B(); obj.m(); }\n}\n",
+        ),
+    ]);
+    assert_eq!(target_files(&g, "run"), ["B.java"]);
+    assert_eq!(target_files(&g, "first"), ["A.java"]);
+    assert_eq!(target_files(&g, "second"), ["B.java"]);
+}
+
+/// Stands for (design point 5, unverified): Java keeps the declared type, so
+/// a later assignment of a subclass leaves `obj.m()` bound to `A.m`; and an
+/// assignment under a branch keeps it too (M05, Java row).
+#[test]
+fn test_receiver_binding_java_reassignment_keeps_declared_type_binds_declared_method() {
+    let g = java_project(&[
+        ("SubOfA.java", "class SubOfA extends A {}\n"),
+        (
+            "Hr.java",
+            "class Hr {\n    void run() {\n        A obj = new A();\n        obj = new SubOfA();\n        obj.m();\n    }\n    void branch(boolean c, A obj, A other) {\n        if (c) { obj = other; }\n        obj.m();\n    }\n}\n",
+        ),
+    ]);
+    assert_eq!(target_files(&g, "run"), ["A.java"]);
+    assert_eq!(target_files(&g, "branch"), ["A.java"]);
+}
+
+/// Stands for: the block-scope rule holds in the sibling languages, each with
+/// a one-block positive control. `A` and `B` both declare the method; only
+/// the second block calls, on its own `B obj`.
+#[test]
+fn test_calls_block_scoped_same_name_locals_bind_second_block_type_in_sibling_languages() {
+    struct Lang {
+        label: &'static str,
+        provider: Box<dyn LanguageProvider>,
+        method: &'static str,
+        a: (&'static str, &'static str),
+        b: (&'static str, &'static str),
+        use_file: &'static str,
+        header: &'static str,
+        two_blocks: &'static str,
+        one_block: &'static str,
+        footer: &'static str,
+    }
+    let langs = [
+        Lang {
+            label: "csharp",
+            provider: Box::new(CSharpProvider::new().unwrap()),
+            method: "M",
+            a: ("A.cs", "class A { public void M() {} }\n"),
+            b: ("B.cs", "class B { public void M() {} }\n"),
+            use_file: "Use.cs",
+            header: "class Use {\n    void run() {\n",
+            two_blocks: "        { A obj = new A(); }\n        { B obj = new B(); obj.M(); }\n",
+            one_block: "        { B obj = new B(); obj.M(); }\n",
+            footer: "    }\n}\n",
+        },
+        Lang {
+            label: "kotlin",
+            provider: Box::new(KotlinProvider::new().unwrap()),
+            method: "m",
+            a: ("A.kt", "class A { fun m() {} }\n"),
+            b: ("B.kt", "class B { fun m() {} }\n"),
+            use_file: "Use.kt",
+            header: "fun run() {\n",
+            two_blocks: "    run { val obj: A = A() }\n    run { val obj: B = B(); obj.m() }\n",
+            one_block: "    run { val obj: B = B(); obj.m() }\n",
+            footer: "}\n",
+        },
+        Lang {
+            label: "typescript",
+            provider: Box::new(TypeScriptProvider::new().unwrap()),
+            method: "m",
+            a: ("A.ts", "export class A { m(): void {} }\n"),
+            b: ("B.ts", "export class B { m(): void {} }\n"),
+            use_file: "use.ts",
+            header: "import { A } from './A';\nimport { B } from './B';\nexport function run() {\n",
+            two_blocks:
+                "    { const obj: A = new A(); }\n    { const obj: B = new B(); obj.m(); }\n",
+            one_block: "    { const obj: B = new B(); obj.m(); }\n",
+            footer: "}\n",
+        },
+        Lang {
+            label: "swift",
+            provider: Box::new(SwiftProvider::new().unwrap()),
+            method: "m",
+            a: ("A.swift", "class A { func m() {} }\n"),
+            b: ("B.swift", "class B { func m() {} }\n"),
+            use_file: "Use.swift",
+            header: "func run() {\n",
+            two_blocks: "    do { let obj: A = A() }\n    do { let obj: B = B(); obj.m() }\n",
+            one_block: "    do { let obj: B = B(); obj.m() }\n",
+            footer: "}\n",
+        },
+        Lang {
+            label: "go",
+            provider: Box::new(GoProvider::new().unwrap()),
+            method: "m",
+            a: (
+                "a.go",
+                "package main\n\ntype A struct{}\n\nfunc (a A) m() {}\n",
+            ),
+            b: (
+                "b.go",
+                "package main\n\ntype B struct{}\n\nfunc (b B) m() {}\n",
+            ),
+            use_file: "use.go",
+            header: "package main\n\nfunc run() {\n",
+            two_blocks:
+                "\t{\n\t\tvar obj A\n\t\t_ = obj\n\t}\n\t{\n\t\tvar obj B\n\t\tobj.m()\n\t}\n",
+            one_block: "\t{\n\t\tvar obj B\n\t\tobj.m()\n\t}\n",
+            footer: "}\n",
+        },
+        Lang {
+            label: "cpp",
+            provider: Box::new(CppProvider::new().unwrap()),
+            method: "m",
+            a: ("a.hpp", "struct A { void m() {} };\n"),
+            b: ("b.hpp", "struct B { void m() {} };\n"),
+            use_file: "use.cpp",
+            header: "#include \"a.hpp\"\n#include \"b.hpp\"\nvoid run() {\n",
+            two_blocks: "    { A obj; }\n    { B obj; obj.m(); }\n",
+            one_block: "    { B obj; obj.m(); }\n",
+            footer: "}\n",
+        },
+    ];
+    for lang in &langs {
+        for (scenario, blocks) in [
+            ("two blocks", lang.two_blocks),
+            ("one block", lang.one_block),
+        ] {
+            let used = format!("{}{}{}", lang.header, blocks, lang.footer);
+            let g = graph(
+                lang.provider.as_ref(),
+                &[lang.a, lang.b, (lang.use_file, used.as_str())],
+            );
+            let files: Vec<String> = call_rows_to(&g, "run", lang.method)
+                .into_iter()
+                .map(|row| row.0)
+                .collect();
+            assert_eq!(files, [lang.b.0], "{} {scenario}", lang.label);
+        }
+    }
+}
+
+// ---- A08: a property read is no method value ----
+
+const PY_CART: &str = "import functools\nfrom functools import cached_property\n\n\nclass Cart:\n    def helper(self, x):\n        return x\n\n    @property\n    def total(self):\n        return 1\n\n    @cached_property\n    def tax(self):\n        return 2\n\n    @functools.cached_property\n    def fee(self):\n        return 3\n\n    def show(self, xs):\n        t = self.total\n        u = self.tax\n        v = self.fee\n        return list(map(self.helper, xs))\n";
+const PY_CART_USE: &str = "from cart import Cart\n\ndef read(c: Cart, xs):\n    t = c.total\n    return list(map(c.helper, xs))\n";
+
+fn cart_graph() -> ZeroCopyGraph {
+    graph(
+        &PythonProvider::new().unwrap(),
+        &[("cart.py", PY_CART), ("use.py", PY_CART_USE)],
+    )
+}
+
+fn reference_names(g: &ZeroCopyGraph, source: &str) -> Vec<String> {
+    function_refs(g, source).into_iter().map(|r| r.1).collect()
+}
+
+/// Stands for: `self.total` is a property read, never a method value, so no
+/// `function_reference` names it. The design accepts a `ReadsField` edge or a
+/// BlindSpot for the read; the test requires one of them, not a specific one.
+#[test]
+fn test_bound_method_reference_python_property_read_is_not_function_reference() {
+    let g = cart_graph();
+    let names = reference_names(&g, "show");
+    assert!(!names.contains(&"total".to_string()), "{names:?}");
+    let pool = g.string_pool.as_slice();
+    let read_edge = value_reads(&g, "show").iter().any(|r| r.1 == "total");
+    let blind_spot = g.blind_spots.iter().any(|b| {
+        b.file_path.resolve(pool).ends_with("cart.py") && b.hint.resolve(pool).contains("total")
+    });
+    assert!(
+        read_edge || blind_spot,
+        "the read must be a ReadsField edge or a BlindSpot"
+    );
+}
+
+/// Stands for: `functools.cached_property` and `cached_property` reads are
+/// not method values either.
+#[test]
+fn test_bound_method_reference_python_cached_property_read_is_not_function_reference() {
+    let names = reference_names(&cart_graph(), "show");
+    assert!(
+        !names.contains(&"tax".to_string()) && !names.contains(&"fee".to_string()),
+        "{names:?}"
+    );
+}
+
+/// Stands for: a typed receiver outside the class reading the property
+/// records no `function_reference`, while `c.helper` keeps its edge.
+#[test]
+fn test_bound_method_reference_python_typed_receiver_property_read_is_not_function_reference() {
+    let g = cart_graph();
+    let names = reference_names(&g, "read");
+    assert!(!names.contains(&"total".to_string()), "{names:?}");
+    assert_eq!(names, ["helper"]);
+}
+
+/// Stands for: an ordinary method handed on next to a property keeps its
+/// `References` edge (the positive control of the three tests above).
+#[test]
+fn test_bound_method_reference_python_plain_method_value_next_to_property_keeps_reference() {
+    let g = cart_graph();
+    assert_one_cross_file(&function_refs(&g, "show"), "cart.py", "helper");
+    assert_one_cross_file(&function_refs(&g, "read"), "cart.py", "helper");
 }

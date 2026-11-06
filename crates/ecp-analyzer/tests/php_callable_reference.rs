@@ -536,3 +536,79 @@ fn test_array_callable_by_value_closure_parameter_assigned_after_closure_referen
         one("cb_ptr")
     );
 }
+
+const SIBLING_USER: &str =
+    "$f = function () use (&$o, $a) { return array_map([$o, 'cb_ptr'], $a); };";
+
+/// Stands for: a sibling closure that only reads `$o` through `use (&$o)`
+/// does not write it, so the array callable of the first closure still binds
+/// `Cb::cb_ptr` (A01, M06).
+#[test]
+fn test_array_callable_sibling_read_only_by_ref_capture_references_method() {
+    let body = format!("{SIBLING_USER} $g = function () use (&$o) {{ return $o; }}; return $f();");
+    assert_eq!(references(&body), one("cb_ptr"));
+}
+
+/// Stands for: a read-only sibling by-ref closure leaves a method call on the
+/// captured receiver bound as well (A01, M06).
+#[test]
+fn test_call_sibling_read_only_by_ref_capture_binds_method() {
+    let body = "$f = function () use (&$o) { return $o->cb_ptr(1); }; $g = function () use (&$o) { return $o; }; return $f();";
+    assert_eq!(calls(body), one("cb_ptr"));
+}
+
+/// Stands for: a sibling closure that assigns `$o` through its own
+/// `use (&$o)` may change the type the first closure sees, so no edge binds.
+/// The positive control in the same test keeps "emit nothing" from passing.
+#[test]
+fn test_array_callable_sibling_by_ref_write_references_nothing() {
+    let body =
+        format!("{SIBLING_USER} $g = function () use (&$o, $a) {{ $o = $a; }}; return $f();");
+    assert_eq!(references(&body), Vec::<String>::new());
+    let control = format!("{SIBLING_USER} return $f();");
+    assert_eq!(references(&control), one("cb_ptr"));
+}
+
+/// Stands for: a write through a reference alias `$r = &$o; $r = $a;` changes
+/// `$o`, so the closure that captured `$o` by reference binds nothing.
+#[test]
+fn test_array_callable_sibling_by_ref_alias_write_references_nothing() {
+    let body = format!("{SIBLING_USER} $r = &$o; $r = $a; return $f();");
+    assert_eq!(references(&body), Vec::<String>::new());
+    let control = format!("{SIBLING_USER} return $f();");
+    assert_eq!(references(&control), one("cb_ptr"));
+}
+
+/// Stands for (decision A01-neg-escape): passing a by-ref-captured variable
+/// to a call lets the callee write it, so the capture is invalidated and no
+/// edge binds.
+#[test]
+fn test_array_callable_sibling_by_ref_escape_references_nothing() {
+    let body = format!(
+        "{SIBLING_USER} $g = function () use (&$o) {{ return take_ref($o); }}; return $f();"
+    );
+    assert_eq!(references(&body), Vec::<String>::new());
+    let control = format!("{SIBLING_USER} return $f();");
+    assert_eq!(references(&control), one("cb_ptr"));
+}
+
+/// Stands for (M06): a read-only by-value sibling capture, and a sibling that
+/// writes a different variable by reference, both leave the edge in place.
+#[test]
+fn test_array_callable_sibling_by_value_or_other_variable_capture_references_method() {
+    for sibling in [
+        "$g = function () use ($o) { return $o; };",
+        "$g = function () use (&$a) { $a = 1; };",
+    ] {
+        let body = format!("{SIBLING_USER} {sibling} return $f();");
+        assert_eq!(references(&body), one("cb_ptr"), "{sibling}");
+    }
+}
+
+/// Stands for (M06 counter-case): a sibling closure that writes `$o` through
+/// `use (&$o)` also invalidates the typed `Calls` edge, with reason `call`.
+#[test]
+fn test_call_sibling_by_ref_write_binds_no_method() {
+    let body = "$f = function () use (&$o) { return $o->cb_ptr(1); }; $g = function () use (&$o, $a) { $o = $a; }; return $f();";
+    assert_eq!(calls(body), Vec::<String>::new());
+}
