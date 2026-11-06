@@ -128,13 +128,13 @@ pub fn extract_php_calls_and_path_literals<'t>(
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
     let mut dynamic_calls: Vec<Node<'t>> = Vec::new();
-    let mut constructions: Vec<((u32, u32), String)> = Vec::new();
+    let mut constructions: Vec<(Node<'_>, String)> = Vec::new();
     let mut stack: Vec<Node<'t>> = vec![root];
     while let Some(n) = stack.pop() {
         match n.kind() {
             "object_creation_expression" => {
                 if let Some(callee) = php_object_creation_call(n, source) {
-                    constructions.push((start_pos(n), callee));
+                    constructions.push((n, callee));
                 }
             }
             "function_call_expression" if is_first_class_callable(n) => {
@@ -143,7 +143,8 @@ pub fn extract_php_calls_and_path_literals<'t>(
             "function_call_expression" => {
                 if let Some(target) = literal_callable(n, source) {
                     attach_to_enclosing(
-                        start_pos(n),
+                        n,
+                        source,
                         literal_callable_callee(target, start_pos(n), &ctx),
                         nodes,
                     );
@@ -151,14 +152,14 @@ pub fn extract_php_calls_and_path_literals<'t>(
             }
             "member_call_expression" | "nullsafe_member_call_expression" => {
                 if let Some(callee) = php_member_callee(n, source, &ctx, &receivers) {
-                    attach_call_or_reference(n, callee, nodes);
+                    attach_call_or_reference(n, source, callee, nodes);
                 } else if has_runtime_name(n) {
                     dynamic_calls.push(n);
                 }
             }
             "scoped_call_expression" => {
                 if let Some(callee) = php_scoped_callee(n, source, &ctx) {
-                    attach_call_or_reference(n, callee, nodes);
+                    attach_call_or_reference(n, source, callee, nodes);
                 } else if has_runtime_name(n) {
                     dynamic_calls.push(n);
                 }
@@ -188,8 +189,8 @@ pub fn extract_php_calls_and_path_literals<'t>(
     }
     // After every call, so a `new` site never shifts the index of a call
     // recorded before it.
-    for (pos, callee) in constructions {
-        attach_to_enclosing(pos, callee, nodes);
+    for (at, callee) in constructions {
+        attach_to_enclosing(at, source, callee, nodes);
     }
     (path_literals, sql_refs, dynamic_calls)
 }
@@ -208,8 +209,7 @@ fn is_first_class_callable(call: Node<'_>) -> bool {
 /// A member or scoped call is a call; the same call in first-class callable
 /// syntax whose receiver the parser typed (`$this->m(...)`, `C::m(...)`) is a
 /// `References` edge. An untyped receiver stays the untyped-member call.
-fn attach_call_or_reference(call: Node<'_>, callee: String, nodes: &mut [RawNode]) {
-    let pos = start_pos(call);
+fn attach_call_or_reference(call: Node<'_>, source: &[u8], callee: String, nodes: &mut [RawNode]) {
     let typed_name = match CallSite::parse(&callee) {
         CallSite::Plain(name) if is_first_class_callable(call) => {
             Some(name.trim_start_matches('\\').to_string())
@@ -218,10 +218,10 @@ fn attach_call_or_reference(call: Node<'_>, callee: String, nodes: &mut [RawNode
     };
     match typed_name {
         Some(name) => {
-            reference_function(pos, &name, nodes);
+            reference_function(call, source, &name, nodes);
         }
         None => {
-            attach_to_enclosing(pos, callee, nodes);
+            attach_to_enclosing(call, source, callee, nodes);
         }
     }
 }
@@ -239,7 +239,7 @@ fn reference_first_class_function(call: Node<'_>, source: &[u8], nodes: &mut [Ra
         return;
     };
     let name = local_function_name(&recorded, enclosing_namespace(call, source));
-    let Some(holder) = reference_function(start_pos(call), &name, nodes) else {
+    let Some(holder) = reference_function(call, source, &name, nodes) else {
         return;
     };
     let calls = &mut nodes[holder].calls;

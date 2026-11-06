@@ -496,10 +496,11 @@ fn test_build_rust_static_closure_macro_call_binds_from_closure_as_plain_call() 
     assert_eq!(edges_into(&with_macro, "default_rule"), expected, "macro");
 }
 
-/// A `const` initializer has no function to call from: the macro argument's
-/// name keeps the `References` edge it had before macro calls bound.
+/// A call in a `const` initializer, inside a macro argument too, is held by
+/// the `const`: `X` calls `f`. (Before holders, no function held it and only
+/// the name read gave a `References` edge.)
 #[test]
-fn test_build_rust_const_initializer_macro_call_keeps_reference() {
+fn test_build_rust_const_initializer_macro_call_binds_const_as_caller() {
     let g = build_lib(
         "macro_rules! m { ($e:expr) => { $e } }\n\
          pub const fn f() -> i32 { 1 }\n\
@@ -507,7 +508,7 @@ fn test_build_rust_const_initializer_macro_call_keeps_reference() {
     );
     assert_eq!(
         edges_into(&g, "f"),
-        [("X".to_string(), "References".to_string())]
+        [("X".to_string(), "Calls".to_string())]
     );
 }
 

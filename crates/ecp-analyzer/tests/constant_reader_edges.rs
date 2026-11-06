@@ -1299,12 +1299,13 @@ fn test_value_read_dart_parameter_shadows_const_returns_no_edge() {
     assert_eq!(value_reads(&g, "shadow"), none());
 }
 
-/// Known gap: the Dart parser emits no node for a `static const` class
-/// member, so its bare read binds nothing.
 #[test]
-fn test_value_read_dart_static_const_returns_no_edge_known_gap() {
+fn test_value_read_dart_static_const_returns_same_file_edge() {
     let g = graph(&DartProvider::new().unwrap(), &[("d.dart", DART_SAME_FILE)]);
-    assert_eq!(value_reads(&g, "g"), none());
+    assert_eq!(
+        value_reads(&g, "g"),
+        vec![r("d.dart", "limq", VALUE_READ, SAME_FILE)]
+    );
 }
 
 #[test]

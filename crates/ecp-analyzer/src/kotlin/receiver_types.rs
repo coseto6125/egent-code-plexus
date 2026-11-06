@@ -252,12 +252,12 @@ pub fn extract_kotlin_calls_and_path_literals(
         match n.kind() {
             "call_expression" => {
                 if let Some(callee) = kotlin_callee(n, source, &local_types, nodes) {
-                    attach_to_enclosing(start_pos(n), callee, nodes);
+                    attach_to_enclosing(n, source, callee, nodes);
                 }
             }
             "callable_reference" | "navigation_expression" => {
                 if let Some(name) = bound_callable_reference(n, source, &local_types, nodes) {
-                    reference_function(start_pos(n), &name, nodes);
+                    reference_function(n, source, &name, nodes);
                 }
             }
             "string_literal" | "multiline_string_literal" => {

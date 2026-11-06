@@ -645,12 +645,12 @@ pub fn extract_csharp_calls_and_path_literals(
         match n.kind() {
             "invocation_expression" => {
                 if let Some(callee) = csharp_callee(n, source, &local_types, nodes) {
-                    attach_to_enclosing(start_pos(n), callee, nodes);
+                    attach_to_enclosing(n, source, callee, nodes);
                 }
             }
             "member_access_expression" => {
                 if let Some(name) = method_group(n, parent, source, &local_types, nodes) {
-                    reference_function(start_pos(n), &name, nodes);
+                    reference_function(n, source, &name, nodes);
                 }
             }
             "object_creation_expression" => {
@@ -659,7 +659,7 @@ pub fn extract_csharp_calls_and_path_literals(
                     .child_by_field_name("type")
                     .and_then(|t| construction_call(t.utf8_text(source).ok()?));
                 if let Some(callee) = callee {
-                    attach_to_enclosing(start_pos(n), callee, nodes);
+                    attach_to_enclosing(n, source, callee, nodes);
                 }
             }
             "string_literal" | "verbatim_string_literal" | "raw_string_literal" => {

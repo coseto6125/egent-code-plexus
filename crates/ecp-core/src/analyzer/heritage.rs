@@ -106,6 +106,23 @@ pub fn holds_heritage(kind: NodeKind) -> bool {
     )
 }
 
+/// The owner a call written directly in a node resolves under: a type's own
+/// name for code in its body (a bare `target()` in `class T { static {
+/// target(); } }` means `T.target`), else the node's `owner_class`. A type
+/// that [`holds_heritage`] is the only kind the parser makes the holder of
+/// body code (a Java `static {}` block, a Kotlin `init {}`, a class body).
+pub fn code_owner<'a>(
+    kind: NodeKind,
+    name: &'a str,
+    owner_class: Option<&'a str>,
+) -> Option<&'a str> {
+    if holds_heritage(kind) {
+        Some(name)
+    } else {
+        owner_class
+    }
+}
+
 /// The heritage of the smallest type among `nodes` that [`holds_heritage`]
 /// and whose span contains `node`'s span, or `node`'s own heritage when it
 /// is such a type. Empty when no type encloses it (a top-level function).

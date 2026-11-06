@@ -491,20 +491,20 @@ pub fn extract_cpp_calls_and_path_literals(
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
-    let mut constructions: Vec<((u32, u32), String)> = Vec::new();
+    let mut constructions: Vec<(Node<'_>, String)> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         match n.kind() {
             "call_expression" => {
                 if let Some(callee) = cpp_callee_name(n, source, bindings) {
-                    if let Some(site) = attach_to_enclosing(start_pos(n), callee, nodes) {
+                    if let Some(site) = attach_to_enclosing(n, source, callee, nodes) {
                         call_sites.insert(n.id(), site);
                     }
                 }
             }
             "new_expression" => {
                 if let Some(callee) = cpp_new_expression_call(n, source) {
-                    constructions.push((start_pos(n), callee));
+                    constructions.push((n, callee));
                 }
             }
             "string_literal" | "raw_string_literal" => {
@@ -543,8 +543,8 @@ pub fn extract_cpp_calls_and_path_literals(
     }
     // After every call: the call-meta detectors index `calls` in
     // `call_expression` order, which a `new` site must not shift.
-    for (pos, callee) in constructions {
-        attach_to_enclosing(pos, callee, nodes);
+    for (at, callee) in constructions {
+        attach_to_enclosing(at, source, callee, nodes);
     }
     (path_literals, sql_refs)
 }

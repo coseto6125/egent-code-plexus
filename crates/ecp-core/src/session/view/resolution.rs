@@ -4283,7 +4283,7 @@ struct VariantCache<'f> {
 fn resolve_variant_ref<'f>(
     graph: &ArchivedZeroCopyGraph,
     variant_ref: VariantRef<'f>,
-    owner_class: Option<&'f str>,
+    code_owner: Option<&'f str>,
     file_ord: usize,
     file: &'f OverlayFileInput,
     caller: FileMeta,
@@ -4338,7 +4338,7 @@ fn resolve_variant_ref<'f>(
     ladder::qualified_variant(
         facts,
         caller.language,
-        owner_class,
+        code_owner,
         path,
         has_variant,
         |qualifier| {
@@ -6008,7 +6008,12 @@ pub(super) fn resolve_edges(
             // Pass 2 does (`SymbolTable::lexical_root`).
             let root = facts.lexical_root(source);
             let owner = match root == source {
-                true => sym.owner_class.as_deref().and_then(owner_key),
+                true => crate::analyzer::heritage::code_owner(
+                    sym.kind,
+                    &sym.name,
+                    sym.owner_class.as_deref(),
+                )
+                .and_then(owner_key),
                 false => facts.owner_of(root),
             };
             // Duplicates go once the list is whole (`dedup_gaps`).
@@ -6439,7 +6444,11 @@ pub(super) fn resolve_edges(
                     let Some((target, confidence)) = resolve_variant_ref(
                         graph,
                         variant_ref,
-                        sym.owner_class.as_deref(),
+                        crate::analyzer::heritage::code_owner(
+                            sym.kind,
+                            &sym.name,
+                            sym.owner_class.as_deref(),
+                        ),
                         file_ord,
                         file,
                         caller,

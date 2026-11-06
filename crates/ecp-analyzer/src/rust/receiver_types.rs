@@ -796,9 +796,9 @@ fn let_binding_type(node: &Node<'_>, source: &[u8]) -> Option<String> {
 
 // ── call extraction ───────────────────────────────────────────────────────────
 
-/// Walk the Rust AST once, attaching callee names to enclosing function /
-/// method nodes (with receiver-type binding) and collecting path-shaped
-/// string literals as `RawPathLiteral` side-table entries.
+/// Walk the Rust AST once, attaching callee names to their holders
+/// (`calls::attach_to_enclosing`, with receiver-type binding) and collecting
+/// path-shaped string literals as `RawPathLiteral` side-table entries.
 ///
 /// Call resolution:
 /// - `self.method()` inside `impl Dog` → `"Dog.method"`
@@ -834,7 +834,7 @@ pub fn extract_rust_calls_and_path_literals(
             // `field_expression` children of `call_expression` represent `obj.method`.
             "call_expression" => {
                 if let Some(callee) = rust_callee_name(root, n, source, local_types) {
-                    if let Some(site) = attach_to_enclosing(start_pos(n), callee, nodes) {
+                    if let Some(site) = attach_to_enclosing(n, source, callee, nodes) {
                         call_sites.insert(n.id(), site);
                     }
                 }
@@ -848,7 +848,7 @@ pub fn extract_rust_calls_and_path_literals(
             ),
             "struct_expression" => {
                 if let Some(ty) = struct_literal_type(root, n, source) {
-                    attach_to_enclosing(start_pos(n), CallSite::construct(&ty), nodes);
+                    attach_to_enclosing(n, source, CallSite::construct(&ty), nodes);
                 }
             }
             "string_literal" | "raw_string_literal" => {
@@ -993,10 +993,10 @@ fn rust_callee_name(
 /// the main walk finds no call in them. A `macro_rules!` body is no
 /// invocation: its calls run where the macro expands.
 ///
-/// The id of each name attached to a function goes into `called`, and the
+/// The id of each name attached to a holder goes into `called`, and the
 /// name-ref walk reads no value there: one site gives one edge. A name no
-/// function holds (a `static` initializer) or no callee can be formed for
-/// keeps its reference. The two buffers are scratch space the file's walk
+/// node holds (a macro call outside every callable, value and type) or no callee can be formed
+/// for keeps its reference. The two buffers are scratch space the file's walk
 /// reuses.
 fn macro_argument_calls<'t>(
     (root, invocation): (Node<'t>, Node<'t>),
@@ -1008,7 +1008,7 @@ fn macro_argument_calls<'t>(
     each_macro_argument_call(invocation, source, buffers, |run, name_at| {
         let name = run[name_at];
         if let Some(callee) = token_callee(root, run, name_at, source, locals) {
-            if attach_to_enclosing(start_pos(name), callee, nodes).is_some() {
+            if attach_to_enclosing(name, source, callee, nodes).is_some() {
                 called.insert(name.id());
             }
         }

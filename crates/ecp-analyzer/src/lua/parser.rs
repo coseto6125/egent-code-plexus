@@ -294,7 +294,7 @@ impl LanguageProvider for LuaProvider {
             }
         }
 
-        // Extract call sites and attach to enclosing function/method nodes.
+        // Extract call sites and attach to their holder (smallest enclosing callable, else value, else type).
         extract_calls(tree.root_node(), source, &mut nodes, &["function_call"]);
 
         Ok(LocalGraph {

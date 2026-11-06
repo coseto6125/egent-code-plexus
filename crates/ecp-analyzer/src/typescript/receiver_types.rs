@@ -638,7 +638,7 @@ pub fn collect_dynamic_imports(root: Node<'_>, source: &[u8]) -> DynamicImports 
     }
 }
 
-/// Walk the TypeScript AST and attach callees to enclosing functions/methods,
+/// Walk the TypeScript AST and attach callees to their holders (`calls::attach_to_enclosing_span`),
 /// with receiver-type binding:
 ///
 /// - `this.method()` → looks up the innermost enclosing class → emits `ClassName.method`
@@ -658,14 +658,14 @@ pub fn extract_ts_calls_and_path_literals(
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
-    let mut constructions: Vec<(Span, String)> = Vec::new();
+    let mut constructions: Vec<(Node<'_>, String)> = Vec::new();
     let this_facts = OnceCell::new();
     let mut stack: Vec<(Node<'_>, Option<Node<'_>>)> = vec![(root, None)];
     while let Some((n, parent)) = stack.pop() {
         match n.kind() {
             "call_expression" => {
                 if let Some(callee) = ts_callee_name(n, source, locals, dynamic, nodes) {
-                    if let Some(site) = attach_to_enclosing_span(node_span(&n), callee, nodes) {
+                    if let Some(site) = attach_to_enclosing_span(n, source, callee, nodes) {
                         call_sites.insert(n.id(), site);
                     }
                 }
@@ -674,12 +674,12 @@ pub fn extract_ts_calls_and_path_literals(
                 if let Some(name) =
                     bound_method_value(n, parent, source, Some(locals), nodes, &this_facts)
                 {
-                    reference_function_span(node_span(&n), &name, nodes);
+                    reference_function_span(n, source, &name, nodes);
                 }
             }
             "new_expression" => {
                 if let Some(callee) = new_expression_call(n, source) {
-                    constructions.push((node_span(&n), callee));
+                    constructions.push((n, callee));
                 }
             }
             "string" | "template_string" => {
@@ -723,8 +723,8 @@ pub fn extract_ts_calls_and_path_literals(
     }
     // After every call: the call-meta detectors index `calls` in
     // `call_expression` order, which a `new` site must not shift.
-    for (span, callee) in constructions {
-        attach_to_enclosing_span(span, callee, nodes);
+    for (at, callee) in constructions {
+        attach_to_enclosing_span(at, source, callee, nodes);
     }
     (path_literals, sql_refs)
 }

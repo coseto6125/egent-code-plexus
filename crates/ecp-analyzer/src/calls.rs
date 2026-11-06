@@ -53,14 +53,13 @@ pub fn new_expression_call(new_expr: Node<'_>, source: &[u8]) -> Option<String> 
     }
 }
 
-/// Walk the AST and attach `callee` names to the smallest enclosing
-/// function/method/constructor `RawNode` by span containment. Reused across
-/// languages — the `call_kinds` set lists this language's AST node kinds that
+/// Walk the AST and attach `callee` names to their [`holder`] by span
+/// containment. Reused across languages — the `call_kinds` set lists this language's AST node kinds that
 /// represent a function-call expression (e.g. "call_expression" in JS/TS,
 /// "method_invocation" in Java, "function_call_expression" in PHP).
 pub fn extract_calls(root: Node<'_>, source: &[u8], nodes: &mut [RawNode], call_kinds: &[&str]) {
-    let containers = enclosing_containers(nodes);
     let mut calls: Vec<PendingCall> = Vec::new();
+    let mut sites: Vec<Node<'_>> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         if call_kinds.contains(&n.kind()) {
@@ -70,6 +69,7 @@ pub fn extract_calls(root: Node<'_>, source: &[u8], nodes: &mut [RawNode], call_
                     pos: start_pos(n),
                     name,
                 });
+                sites.push(n);
             }
         }
         let mut c = n.walk();
@@ -77,7 +77,7 @@ pub fn extract_calls(root: Node<'_>, source: &[u8], nodes: &mut [RawNode], call_
             stack.push(child);
         }
     }
-    attach_pending_calls(&containers, calls, nodes);
+    attach_pending_calls(calls, nodes, |i, run| declared_in(sites[i], source, run));
 }
 
 pub fn callee_name_from(call_node: Node<'_>, source: &[u8]) -> Option<String> {
@@ -151,85 +151,258 @@ pub fn callee_name_from(call_node: Node<'_>, source: &[u8]) -> Option<String> {
 /// Keyed by id, not start byte: `a().b()` starts at the same byte as `a()`.
 pub type CallSiteIndex = rustc_hash::FxHashMap<usize, (usize, u32)>;
 
-/// Attach a call using columns as well as rows, including one-line closures.
+/// Attach the call at `at` to its [`holder`] by its full span, so one-line
+/// closures stay apart.
 /// Returns the caller's node index and the call's index in its `calls`.
 pub fn attach_to_enclosing_span(
-    span: crate::framework_helpers::Span,
+    at: Node<'_>,
+    source: &[u8],
     callee: String,
     nodes: &mut [RawNode],
 ) -> Option<(usize, u32)> {
-    let i = enclosing_container_span(span, nodes)?;
+    let i = holder_of_span(at, source, nodes)?;
+    Some(push_call(i, callee, nodes))
+}
+
+/// Attach the call at `at` to its [`holder`], by row and column so functions
+/// sharing a line stay apart.
+/// Returns the caller's node index and the call's index in its `calls`.
+pub fn attach_to_enclosing(
+    at: Node<'_>,
+    source: &[u8],
+    callee: String,
+    nodes: &mut [RawNode],
+) -> Option<(usize, u32)> {
+    let i = holder_at(at, source, nodes)?;
+    Some(push_call(i, callee, nodes))
+}
+
+fn push_call(i: usize, callee: String, nodes: &mut [RawNode]) -> (usize, u32) {
     let calls = &mut nodes[i].calls;
     let idx = calls.len() as u32;
     calls.push(callee);
-    Some((i, idx))
+    (i, idx)
 }
 
-/// Index of the smallest function holding `span`, by row and column.
-fn enclosing_container_span(
-    span: crate::framework_helpers::Span,
+/// The [`holder`] of `at`, ranked by area.
+fn holder_of_span(at: Node<'_>, source: &[u8], nodes: &[RawNode]) -> Option<usize> {
+    let span = crate::framework_helpers::node_span(&at);
+    holder(
+        nodes,
+        start_pos(at),
+        |node| crate::framework_helpers::span_contains(node.span, span),
+        |node| crate::framework_helpers::span_area(node.span),
+        |run| declared_in(at, source, run),
+    )
+}
+
+/// The [`holder`] of `at`, by row and column.
+fn holder_at(at: Node<'_>, source: &[u8], nodes: &[RawNode]) -> Option<usize> {
+    holder_at_pos(start_pos(at), nodes, |run| declared_in(at, source, run))
+}
+
+fn holder_at_pos<'s>(
+    pos: Pos,
     nodes: &[RawNode],
+    declared: impl FnOnce(PosRange) -> Vec<Declarator<'s>>,
 ) -> Option<usize> {
-    nodes
-        .iter()
-        .enumerate()
-        .filter(|(_, node)| {
-            is_container_kind(node.kind) && crate::framework_helpers::span_contains(node.span, span)
-        })
-        .min_by_key(|(_, node)| crate::framework_helpers::span_area(node.span))
-        .map(|(i, _)| i)
+    holder(
+        nodes,
+        pos,
+        |node| span_holds(node.span, pos),
+        |node| span_width(node.span),
+        declared,
+    )
 }
 
-/// Index of the smallest function holding `pos`, by row and column so
-/// functions sharing a line stay apart.
-fn enclosing_container(pos: Pos, nodes: &[RawNode]) -> Option<usize> {
-    let mut best: Option<(usize, (u32, i64))> = None;
-    for (i, n) in nodes.iter().enumerate() {
-        if !is_container_kind(n.kind) {
+/// Which tier of [`holder`] a node of `kind` belongs to.
+fn holder_tier(kind: NodeKind) -> Option<usize> {
+    match kind {
+        k if is_container_kind(k) => Some(0),
+        k if is_value_kind(k) => Some(1),
+        k if ecp_core::analyzer::heritage::holds_heritage(k) => Some(2),
+        _ => None,
+    }
+}
+
+/// The node that owns code at `pos`, among the nodes that `holds` accepts:
+/// the smallest enclosing function, else the smallest enclosing value
+/// declaration (an initializer, a property accessor), else the smallest
+/// enclosing type (a static block, a class body). Without the last two, a
+/// call there had no caller and `ecp impact` missed it. Values that share one
+/// statement hold the code only through their own declarator
+/// ([`pick_declared`] over the declarators that `declared` lists for the
+/// statement's range); code that no declarator names goes to the type. A
+/// module or namespace holds nothing: a Rust `#[cfg(test)] mod` would make
+/// test code a non-test caller.
+fn holder<'s, K: Ord + Copy>(
+    nodes: &[RawNode],
+    pos: Pos,
+    holds: impl Fn(&RawNode) -> bool,
+    size: impl Fn(&RawNode) -> K,
+    declared: impl FnOnce(PosRange) -> Vec<Declarator<'s>>,
+) -> Option<usize> {
+    let mut best: [Option<(K, usize)>; 3] = [None; 3];
+    for (i, node) in nodes.iter().enumerate() {
+        let Some(tier) = holder_tier(node.kind) else {
+            continue;
+        };
+        if !holds(node) {
             continue;
         }
-        let (start, end) = span_ends(n.span);
-        if start <= pos && pos <= end {
-            let width = span_width(n.span);
-            if best.is_none_or(|(_, w)| width < w) {
-                best = Some((i, width));
-            }
+        let key = size(node);
+        if best[tier].is_none_or(|(smallest, _)| key < smallest) {
+            best[tier] = Some((key, i));
         }
     }
-    best.map(|(i, _)| i)
+    if let Some((_, i)) = best[0] {
+        return Some(i);
+    }
+    if let Some((_, head)) = best[1] {
+        let end = span_ends(nodes[head].span).1;
+        let run: Vec<usize> = nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| {
+                is_value_kind(node.kind) && span_ends(node.span).1 == end && holds(node)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        let start = run
+            .iter()
+            .map(|&i| span_ends(nodes[i].span).0)
+            .min()
+            .unwrap_or(end);
+        let declarators = declared((start, end));
+        if let Some(i) = pick_declared(&run, |&i| i, (start, end), &declarators, pos, nodes) {
+            return Some(i);
+        }
+    }
+    best[2].map(|(_, i)| i)
 }
 
-/// Attach a call to the smallest function holding `pos`, by row and column so
-/// functions sharing a line stay apart.
-/// Returns the caller's node index and the call's index in its `calls`.
-pub fn attach_to_enclosing(
-    pos: Pos,
-    callee: String,
-    nodes: &mut [RawNode],
-) -> Option<(usize, u32)> {
-    let i = enclosing_container(pos, nodes)?;
-    let idx = nodes[i].calls.len() as u32;
-    nodes[i].calls.push(callee);
-    Some((i, idx))
+/// The declarators of each statement around `at` that declares several
+/// values, up to the statement that `within` spans: `a = h1()` and
+/// `b = h2()` of `const a = h1(), b = h2()`.
+fn declared_in<'s>(at: Node<'_>, source: &'s [u8], within: PosRange) -> Vec<Declarator<'s>> {
+    let (start, end) = within;
+    let mut declarators = Vec::new();
+    let mut node = at;
+    while let Some(parent) = node.parent() {
+        let (from, to) = node_range(parent);
+        // A row past the value's end still belongs to its statement: a span
+        // may stop short of the `;`.
+        if from < start || to.0 > end.0 {
+            break;
+        }
+        let paired = paired_declarators(parent, source);
+        if paired.is_empty() {
+            // C `int a, b = g();` lists the bare `a` in a `declarator` field
+            // next to the `init_declarator`; it still counts as a declarator.
+            let mut shared = named_fields(parent, "declarator");
+            if shared.len() < 2 {
+                let mut cursor = parent.walk();
+                shared = parent
+                    .named_children(&mut cursor)
+                    .filter(|child| is_declarator_kind(child.kind()))
+                    .collect();
+            }
+            if shared.len() >= 2 {
+                declarators.extend(shared.into_iter().map(|d| Declarator {
+                    range: node_range(d),
+                    name: declared_name(d.child_by_field_name("name").unwrap_or(d), source),
+                }));
+            }
+        } else {
+            declarators.extend(paired);
+        }
+        node = parent;
+    }
+    declarators
 }
 
-/// Records `name` as a function value the function holding `pos` hands on:
+/// A node that declares one value of its statement and holds that value's
+/// initializer: `variable_declarator`, C `init_declarator`, Dart
+/// `initialized_identifier`.
+fn is_declarator_kind(kind: &str) -> bool {
+    kind.contains("declarator")
+        || matches!(kind, "initialized_identifier" | "static_final_declaration")
+}
+
+/// Go `var C, D = h1(), h2()`, Swift `let a = f(), b = g()` and C++ members
+/// `int a = f(), b = g();` list names and values in parallel fields, so the
+/// i-th name declares the i-th value. Counts that differ pair nothing:
+/// `var cfg, _ = load()` fills every name from one call.
+fn paired_declarators<'s>(statement: Node<'_>, source: &'s [u8]) -> Vec<Declarator<'s>> {
+    let mut names = named_fields(statement, "name");
+    if names.len() < 2 {
+        names = named_fields(statement, "declarator");
+    }
+    if names.len() < 2 {
+        return Vec::new();
+    }
+    let mut values = named_fields(statement, "value");
+    if values.is_empty() {
+        values = named_fields(statement, "default_value");
+    }
+    if let [list] = values[..] {
+        if list.kind() == "expression_list" {
+            let mut cursor = list.walk();
+            values = list.named_children(&mut cursor).collect();
+        }
+    }
+    if values.len() != names.len() {
+        return Vec::new();
+    }
+    names
+        .into_iter()
+        .zip(values)
+        .map(|(name, value)| Declarator {
+            range: node_range(value),
+            name: declared_name(name, source),
+        })
+        .collect()
+}
+
+fn named_fields<'t>(node: Node<'t>, field: &str) -> Vec<Node<'t>> {
+    let mut cursor = node.walk();
+    node.children_by_field_name(field, &mut cursor)
+        .filter(|child| child.is_named())
+        .collect()
+}
+
+/// The bare name that `name` declares: `b`, the `b` of C `*b`, the `b` a
+/// Swift `pattern` wraps; none for `{ cb }`.
+fn declared_name<'s>(mut name: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
+    while let Some(inner) = name.child_by_field_name("declarator") {
+        name = inner;
+    }
+    if name.kind() == "pattern" && name.named_child_count() == 1 {
+        name = name.named_child(0)?;
+    }
+    (name.named_child_count() == 0)
+        .then(|| name.utf8_text(source).ok())
+        .flatten()
+}
+
+/// Records `name` as a function value the [`holder`] of `at` hands on:
 /// Pass 2 binds it as a `References` edge, never as a call. A name already
-/// recorded for that function stays one entry. Returns the holder's index.
-pub fn reference_function(pos: Pos, name: &str, nodes: &mut [RawNode]) -> Option<usize> {
-    let holder = enclosing_container(pos, nodes)?;
+/// recorded for that holder stays one entry. Returns the holder's index.
+pub fn reference_function(
+    at: Node<'_>,
+    source: &[u8],
+    name: &str,
+    nodes: &mut [RawNode],
+) -> Option<usize> {
+    let holder = holder_at(at, source, nodes)?;
     push_function_reference(holder, name, nodes);
     Some(holder)
 }
 
-/// [`reference_function`] for a holder located by a full span, so one-line
-/// closures stay apart.
-pub fn reference_function_span(
-    span: crate::framework_helpers::Span,
-    name: &str,
-    nodes: &mut [RawNode],
-) {
-    if let Some(holder) = enclosing_container_span(span, nodes) {
+/// [`reference_function`] for a holder located by `at`'s full span, so
+/// one-line closures stay apart.
+pub fn reference_function_span(at: Node<'_>, source: &[u8], name: &str, nodes: &mut [RawNode]) {
+    if let Some(holder) = holder_of_span(at, source, nodes) {
         push_function_reference(holder, name, nodes);
     }
 }
@@ -1455,8 +1628,7 @@ pub struct VariantRefSpec {
 }
 
 /// Walk the AST and record each enum-variant reference as a [`VariantRef`]
-/// in the `field_reads` of the smallest enclosing function / method /
-/// constructor, once per distinct entry.
+/// in the `field_reads` of its [`holder`], once per distinct entry.
 ///
 /// Capture is a cheap syntactic filter; Pass 2 keeps only references that
 /// resolve to an `EnumVariant`. A `.`-qualified path is kept only when its
@@ -1464,22 +1636,23 @@ pub struct VariantRefSpec {
 /// / C++ name only when it does (`RED`, not a local): member accesses and
 /// locals outnumber variant references by far, and enum names follow that
 /// case in every grammar here.
-pub fn extract_variant_refs(
-    root: Node<'_>,
+pub fn extract_variant_refs<'t>(
+    root: Node<'t>,
     source: &[u8],
     nodes: &mut [RawNode],
     spec: &VariantRefSpec,
 ) {
-    let containers = enclosing_containers(nodes);
-    if containers.is_empty() {
+    if nodes.is_empty() {
         return;
     }
     let mut refs: Vec<PendingCall> = Vec::new();
-    let mut push = |node: Node<'_>, path: &str, pattern: bool| {
+    let mut sites: Vec<Node<'t>> = Vec::new();
+    let mut push = |node: Node<'t>, path: &str, pattern: bool| {
         refs.push(PendingCall {
             pos: start_pos(node),
             name: VariantRef::encode(path, pattern),
         });
+        sites.push(node);
     };
     // Each node travels with its parent: `Node::parent` walks down from the
     // root, which every identifier of the file would pay.
@@ -1516,10 +1689,17 @@ pub fn extract_variant_refs(
     if refs.is_empty() {
         return;
     }
-    let targets = enclosing_targets(&containers, &refs, |r| r.pos);
+    let targets = holder_targets(
+        nodes,
+        &refs,
+        |r| r.pos,
+        |i, run| declared_in(sites[i], source, run),
+    );
     let mut seen: rustc_hash::FxHashSet<(usize, String)> = rustc_hash::FxHashSet::default();
     for (entry, target) in refs.into_iter().zip(targets) {
-        let Some(node_idx) = target else { continue };
+        let Some(node_idx) = target else {
+            continue;
+        };
         if seen.insert((node_idx, entry.name.clone())) {
             nodes[node_idx].field_reads.push(entry.name);
         }
@@ -1729,10 +1909,6 @@ pub fn span_width(span: (u32, u32, u32, u32)) -> (u32, i64) {
     )
 }
 
-fn enclosing_containers(nodes: &[RawNode]) -> Vec<EnclosingContainer> {
-    containers_of(nodes, is_container_kind)
-}
-
 fn containers_of(nodes: &[RawNode], keep: fn(NodeKind) -> bool) -> Vec<EnclosingContainer> {
     let mut containers: Vec<EnclosingContainer> = nodes
         .iter()
@@ -1807,6 +1983,43 @@ impl<'s> Declarator<'s> {
     }
 }
 
+/// The member of `run`, the value declarations that share the statement
+/// spanning `(start, end)`, that holds code at `pos`: the one whose own
+/// declarator holds `pos`. When `pos` sits in a sibling declarator that
+/// declares no node (`{ cb }` in `const unused = 0, { cb } = …`), or no
+/// declarator tells the run apart (Go `var C, D = h1, h2`), none.
+fn pick_declared<'d, 's: 'd, T>(
+    run: &[T],
+    node_of: impl Fn(&T) -> usize,
+    (start, end): PosRange,
+    declarators: impl IntoIterator<Item = &'d Declarator<'s>>,
+    pos: Pos,
+    nodes: &[RawNode],
+) -> Option<usize> {
+    // Only the declarators that hold `pos` look up a member: a statement of
+    // M values is then O(M) per call, not O(M²).
+    let mut sibling_declares_only = false;
+    for declarator in declarators
+        .into_iter()
+        .filter(|d| start <= d.range.0 && d.range.1 <= end)
+    {
+        let Some(name) = declarator.name else {
+            continue;
+        };
+        if declarator.range.0 <= pos && pos <= declarator.range.1 {
+            if let Some(node_idx) = run.iter().map(&node_of).find(|&i| nodes[i].name == name) {
+                return Some(node_idx);
+            }
+        } else if let [only] = run {
+            sibling_declares_only |= nodes[node_of(only)].name == name;
+        }
+    }
+    match run {
+        [only] if !sibling_declares_only => Some(node_of(only)),
+        _ => None,
+    }
+}
+
 /// Where a name or field read lands: the smallest enclosing function, else
 /// the smallest enclosing value declaration. Functions rank first, so
 /// `const f = () => g` keeps `g` on the arrow function and not on `f`.
@@ -1824,6 +2037,10 @@ struct ReadContainers<'s> {
 
 impl<'s> ReadContainers<'s> {
     fn new(nodes: &[RawNode]) -> Self {
+        Self::with_callables(nodes, containers_of(nodes, is_container_kind))
+    }
+
+    fn with_callables(nodes: &[RawNode], callables: Vec<EnclosingContainer>) -> Self {
         let values = containers_of(nodes, is_value_kind);
         let mut value_spans: Vec<EnclosingContainer> = Vec::with_capacity(values.len());
         for (first, value) in values.iter().enumerate() {
@@ -1835,7 +2052,7 @@ impl<'s> ReadContainers<'s> {
             }
         }
         Self {
-            callables: containers_of(nodes, is_container_kind),
+            callables,
             values,
             value_spans,
             declarators: Vec::new(),
@@ -1887,38 +2104,16 @@ impl<'s> ReadContainers<'s> {
         &self.values[first..first + len]
     }
 
-    /// The declaration of the run at `first` that holds a read at `pos`.
-    /// When several share one statement, the one whose own declarator holds
-    /// `pos`; when `pos` sits in a sibling declarator that declares no node
-    /// (`{ cb }` in `const unused = 0, { cb } = …`), or no declarator tells
-    /// the run apart (Go `var C, D = h1, h2`), none.
+    /// The declaration of the run at `first` that holds a read at `pos`
+    /// ([`pick_declared`]).
     fn pick(&self, first: usize, pos: Pos, nodes: &[RawNode]) -> Option<usize> {
         let run = self.run(first);
         let (start, end) = (run[0].start, run[0].end);
-        let member = |name: &str| {
-            run.iter()
-                .find(|v| nodes[v.node_idx].name == name)
-                .map(|v| v.node_idx)
-        };
         let from = self.declarators.partition_point(|d| d.range.0 < start);
-        let mut own_statement = false;
-        for declarator in self.declarators[from..]
+        let declarators = self.declarators[from..]
             .iter()
-            .take_while(|d| d.range.0 <= end)
-            .filter(|d| d.range.1 <= end)
-        {
-            let Some(node_idx) = declarator.name.and_then(member) else {
-                continue;
-            };
-            if declarator.range.0 <= pos && pos <= declarator.range.1 {
-                return Some(node_idx);
-            }
-            own_statement = true;
-        }
-        match run {
-            [only] if !own_statement => Some(only.node_idx),
-            _ => None,
-        }
+            .take_while(|d| d.range.0 <= end);
+        pick_declared(run, |v| v.node_idx, (start, end), declarators, pos, nodes)
     }
 
     /// The range where `binding`, which no function node holds, hides its
@@ -1982,12 +2177,60 @@ fn enclosing_targets<T>(
     targets
 }
 
-fn attach_pending_calls(
-    containers: &[EnclosingContainer],
+/// For each pending entry, the node index of its [`holder`], by one sweep per
+/// tier rather than one scan of `nodes` per entry. `declared(i, run)` lists
+/// the declarators around entry `i` ([`declared_in`]).
+fn holder_targets<'s, T>(
+    nodes: &[RawNode],
+    pending: &[T],
+    pos_of: impl Fn(&T) -> Pos,
+    declared: impl Fn(usize, PosRange) -> Vec<Declarator<'s>>,
+) -> Vec<Option<usize>> {
+    let callables = containers_of(nodes, is_container_kind);
+    let mut targets = enclosing_targets(&callables, pending, &pos_of);
+    let unheld = |targets: &[Option<usize>]| -> Vec<usize> {
+        (0..pending.len())
+            .filter(|&i| targets[i].is_none())
+            .collect()
+    };
+    let open = unheld(&targets);
+    if open.is_empty() {
+        return targets;
+    }
+    let holders = ReadContainers::with_callables(nodes, callables);
+    let runs = holders.value_runs(&open, |i| pos_of(&pending[i]));
+    for (&i, run) in open.iter().zip(runs) {
+        targets[i] = run.and_then(|first| {
+            let run = holders.run(first);
+            let span = (run[0].start, run[0].end);
+            let declarators = declared(i, span);
+            pick_declared(
+                run,
+                |v| v.node_idx,
+                span,
+                &declarators,
+                pos_of(&pending[i]),
+                nodes,
+            )
+        });
+    }
+    let open = unheld(&targets);
+    let types = containers_of(nodes, ecp_core::analyzer::heritage::holds_heritage);
+    for (i, target) in open
+        .iter()
+        .zip(enclosing_targets(&types, &open, |&i| pos_of(&pending[i])))
+    {
+        targets[*i] = target;
+    }
+    targets
+}
+
+fn attach_pending_calls<'s>(
     calls: Vec<PendingCall>,
     nodes: &mut [RawNode],
+    declared: impl Fn(usize, PosRange) -> Vec<Declarator<'s>>,
 ) {
-    let targets = enclosing_targets(containers, &calls, |c| c.pos);
+    let targets = holder_targets(nodes, &calls, |c| c.pos, declared);
     for (call, target) in calls.into_iter().zip(targets) {
         if let Some(node_idx) = target {
             nodes[node_idx].calls.push(call.name);
@@ -1998,6 +2241,15 @@ fn attach_pending_calls(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn no_declarators(_: usize, _: PosRange) -> Vec<Declarator<'static>> {
+        Vec::new()
+    }
+
+    fn attach_at(pos: Pos, callee: String, nodes: &mut [RawNode]) -> Option<(usize, u32)> {
+        let i = holder_at_pos(pos, nodes, |_| Vec::new())?;
+        Some(push_call(i, callee, nodes))
+    }
 
     fn raw_node(name: &str, kind: NodeKind, span: (u32, u32, u32, u32)) -> RawNode {
         RawNode {
@@ -2022,15 +2274,13 @@ mod tests {
             raw_node("inner", NodeKind::Function, (5, 0, 10, 0)),
             raw_node("not_container", NodeKind::Variable, (6, 0, 6, 8)),
         ];
-        let containers = enclosing_containers(&nodes);
-
         attach_pending_calls(
-            &containers,
             vec![PendingCall {
                 pos: (6, 4),
                 name: "callee".to_string(),
             }],
             &mut nodes,
+            no_declarators,
         );
 
         assert!(nodes[0].calls.is_empty());
@@ -2040,10 +2290,7 @@ mod tests {
     #[test]
     fn attach_pending_calls_preserves_original_call_order() {
         let mut nodes = vec![raw_node("f", NodeKind::Function, (1, 0, 20, 0))];
-        let containers = enclosing_containers(&nodes);
-
         attach_pending_calls(
-            &containers,
             vec![
                 PendingCall {
                     pos: (12, 0),
@@ -2055,6 +2302,7 @@ mod tests {
                 },
             ],
             &mut nodes,
+            no_declarators,
         );
 
         assert_eq!(nodes[0].calls, ["later", "earlier"]);
@@ -2067,14 +2315,12 @@ mod tests {
             raw_node("b", NodeKind::Function, (0, 21, 0, 40)),
             raw_node("inner", NodeKind::Function, (0, 25, 0, 35)),
         ];
-        let containers = enclosing_containers(&nodes);
         let call = |col, name: &str| PendingCall {
             pos: (0, col),
             name: name.to_string(),
         };
 
         attach_pending_calls(
-            &containers,
             vec![
                 call(5, "x"),
                 call(22, "y"),
@@ -2084,6 +2330,7 @@ mod tests {
                 call(50, "outside"),
             ],
             &mut nodes,
+            no_declarators,
         );
 
         assert_eq!(nodes[0].calls, ["x", "at_end"]);
@@ -2097,14 +2344,13 @@ mod tests {
             raw_node("first", NodeKind::Function, (0, 0, 3, 0)),
             raw_node("second", NodeKind::Function, (0, 0, 3, 0)),
         ];
-        let containers = enclosing_containers(&nodes);
         attach_pending_calls(
-            &containers,
             vec![PendingCall {
                 pos: (1, 0),
                 name: "c".to_string(),
             }],
             &mut nodes,
+            no_declarators,
         );
         assert_eq!(nodes[0].calls, ["c"]);
         assert!(nodes[1].calls.is_empty());
@@ -2116,15 +2362,9 @@ mod tests {
             raw_node("a", NodeKind::Function, (0, 0, 0, 20)),
             raw_node("b", NodeKind::Function, (0, 21, 0, 40)),
         ];
-        assert_eq!(
-            attach_to_enclosing((0, 25), "y".into(), &mut nodes),
-            Some((1, 0))
-        );
-        assert_eq!(
-            attach_to_enclosing((0, 5), "x".into(), &mut nodes),
-            Some((0, 0))
-        );
-        assert_eq!(attach_to_enclosing((1, 0), "m".into(), &mut nodes), None);
+        assert_eq!(attach_at((0, 25), "y".into(), &mut nodes), Some((1, 0)));
+        assert_eq!(attach_at((0, 5), "x".into(), &mut nodes), Some((0, 0)));
+        assert_eq!(attach_at((1, 0), "m".into(), &mut nodes), None);
         assert_eq!(nodes[0].calls, ["x"]);
         assert_eq!(nodes[1].calls, ["y"]);
     }

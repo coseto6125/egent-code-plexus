@@ -91,10 +91,10 @@ pub fn extract_ruby_calls_and_path_literals(
         match n.kind() {
             "call" => {
                 if let Some(callee) = ruby_callee(n, source, &mut receiver_types, &receivers) {
-                    attach_to_enclosing(start_pos(n), callee, nodes);
+                    attach_to_enclosing(n, source, callee, nodes);
                 }
                 if let Some(name) = typed_method_object(n, source, &mut receiver_types) {
-                    reference_function(start_pos(n), &name, nodes);
+                    reference_function(n, source, &name, nodes);
                 }
             }
             "string" => {

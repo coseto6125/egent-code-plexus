@@ -30,6 +30,7 @@ use ecp_core::analyzer::types::{
     BlindSpot, CallSite, RawNode, RawPathLiteral, RawSqlRef, ReadIntent,
 };
 use ecp_core::graph::NodeKind;
+use rustc_hash::FxHashMap;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tree_sitter::Node;
@@ -446,7 +447,7 @@ pub fn collect_dynamic_imports(root: Node<'_>, source: &[u8]) -> DynamicImports 
     }
 }
 
-/// Walk the Python AST once, attaching callees to enclosing functions
+/// Walk the Python AST once, attaching callees to their holders (`calls::attach_to_enclosing`)
 /// (with receiver-type binding) and collecting path-shaped string literals
 /// as `RawPathLiteral` side-table entries.
 ///
@@ -473,19 +474,21 @@ pub fn extract_python_calls_and_path_literals(
         .filter(|n| matches!(n.kind, NodeKind::Class | NodeKind::Enum))
         .map(|n| n.name.clone())
         .collect();
-    let mut stack: Vec<(Node<'_>, Option<Node<'_>>)> = vec![(root, None)];
-    while let Some((n, parent)) = stack.pop() {
+    let mut namespaces = ClassNamespaces::default();
+    let mut stack: Vec<(Node<'_>, Option<Node<'_>>, Option<Node<'_>>)> = vec![(root, None, None)];
+    while let Some((n, parent, class)) = stack.pop() {
         match n.kind() {
             "call" => {
                 if let Some(callee) = python_callee_name(n, source, locals, dynamic, &classes) {
-                    if let Some(site) = attach_to_enclosing(start_pos(n), callee, nodes) {
+                    if let Some(site) = attach_to_enclosing(n, source, callee, nodes) {
+                        bind_class_body_call(n, class, source, site, nodes, &mut namespaces);
                         call_sites.insert(n.id(), site);
                     }
                 }
             }
             "attribute" => {
                 if let Some(entry) = bound_method_value(n, parent, source, locals) {
-                    push_member_read(start_pos(n), entry, nodes);
+                    push_member_read(n, source, entry, nodes);
                 }
             }
             "string" => {
@@ -516,9 +519,15 @@ pub fn extract_python_calls_and_path_literals(
             }
             _ => {}
         }
+        let (special, special_scope, other_scope) = child_scopes(n, class);
         let mut c = n.walk();
         for child in n.children(&mut c) {
-            stack.push((child, Some(n)));
+            let scope = if Some(child) == special {
+                special_scope
+            } else {
+                other_scope
+            };
+            stack.push((child, Some(n), scope));
         }
     }
     (path_literals, sql_refs)
@@ -563,11 +572,213 @@ fn bound_method_value(
         .member_read_entry(member.utf8_text(source).ok()?, ReadIntent::Unknown)
 }
 
-/// Records `entry` in the `field_reads` of the function holding `pos`, once.
-/// `calls.rs` finds the holder only through its call attach helper, so the
-/// entry rides through `calls` and moves out at once.
-fn push_member_read(pos: Pos, entry: String, nodes: &mut [RawNode]) {
-    let Some((holder, _)) = attach_to_enclosing(pos, entry, nodes) else {
+/// A bare call that a class body makes outside every function calls the
+/// member the class defined above it: Python looks a name up in the class
+/// namespace first, so `x = target()` in `class T` after `def target()`
+/// calls `T.target`, not a module-level `target`. Rewrites the recorded
+/// callee to `T.target` then. `class` is the class namespace the call
+/// evaluates in ([`child_scopes`]); a method's decorator and parameter
+/// defaults evaluate there too, so a callable holder does not exclude it.
+fn bind_class_body_call<'s>(
+    call: Node<'_>,
+    class: Option<Node<'_>>,
+    source: &'s [u8],
+    (holder, idx): (usize, u32),
+    nodes: &mut [RawNode],
+    namespaces: &mut ClassNamespaces<'s>,
+) {
+    let Some(class) = class else {
+        return;
+    };
+    let bare = call
+        .child_by_field_name("function")
+        .map(unparenthesized)
+        .is_some_and(|f| f.kind() == "identifier");
+    let Some(owner) = bare
+        .then(|| class.child_by_field_name("name"))
+        .flatten()
+        .and_then(|name| name.utf8_text(source).ok())
+    else {
+        return;
+    };
+    let call_name = &mut nodes[holder].calls[idx as usize];
+    if namespaces.binds_before(class, call_name, start_pos(call), source) {
+        *call_name = format!("{owner}.{call_name}");
+    }
+}
+
+/// The names each class body binds, computed once per class: the end of the
+/// first statement that binds the name. A call binds the class member when
+/// that statement ends before the call starts.
+#[derive(Default)]
+struct ClassNamespaces<'s> {
+    first_binding_end: FxHashMap<usize, FxHashMap<&'s str, Pos>>,
+}
+
+impl<'s> ClassNamespaces<'s> {
+    fn binds_before(&mut self, class: Node<'_>, name: &str, pos: Pos, source: &'s [u8]) -> bool {
+        self.first_binding_end
+            .entry(class.id())
+            .or_insert_with(|| {
+                let mut names = FxHashMap::default();
+                if let Some(body) = class.child_by_field_name("body") {
+                    collect_bindings(body, source, &mut names);
+                }
+                names
+            })
+            .get(name)
+            .is_some_and(|end| *end < pos)
+    }
+}
+
+fn note_binding<'s>(
+    names: &mut FxHashMap<&'s str, Pos>,
+    name: Node<'_>,
+    source: &'s [u8],
+    end: Pos,
+) {
+    if let Ok(text) = name.utf8_text(source) {
+        let first = names.entry(text).or_insert(end);
+        *first = (*first).min(end);
+    }
+}
+
+/// The names `target` binds: a bare name, or the names inside a tuple, list
+/// or starred pattern. An attribute or subscript target binds no name.
+fn note_targets<'s>(
+    names: &mut FxHashMap<&'s str, Pos>,
+    target: Node<'_>,
+    source: &'s [u8],
+    end: Pos,
+) {
+    match target.kind() {
+        "identifier" => note_binding(names, target, source, end),
+        "pattern_list" | "tuple_pattern" | "list_pattern" | "list_splat_pattern"
+        | "as_pattern_target" => {
+            let mut cursor = target.walk();
+            for child in target.named_children(&mut cursor) {
+                note_targets(names, child, source, end);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Records what the statements under `node` bind in the class namespace: a
+/// `def` or `class`, an assignment that has a value (a bare annotation
+/// `x: int` binds nothing), an import, and a `for` or `with` target, also
+/// inside `if`, `try`, `with`, `for` and `while`. A nested `def` or `class`
+/// body is its own namespace, so the walk stops at it.
+fn collect_bindings<'s>(node: Node<'_>, source: &'s [u8], names: &mut FxHashMap<&'s str, Pos>) {
+    let end = node_range(node).1;
+    match node.kind() {
+        "function_definition" | "class_definition" => {
+            if let Some(name) = node.child_by_field_name("name") {
+                note_binding(names, name, source, end);
+            }
+        }
+        "decorated_definition" => {
+            if let Some(definition) = node.child_by_field_name("definition") {
+                collect_bindings(definition, source, names);
+            }
+        }
+        "expression_statement" => {
+            let mut assignment = node.named_child(0).filter(|e| e.kind() == "assignment");
+            while let Some(current) = assignment {
+                let Some(right) = current.child_by_field_name("right") else {
+                    break;
+                };
+                if let Some(left) = current.child_by_field_name("left") {
+                    note_targets(names, left, source, end);
+                }
+                assignment = Some(right).filter(|r| r.kind() == "assignment");
+            }
+        }
+        "import_statement" | "import_from_statement" => {
+            let mut cursor = node.walk();
+            for imported in node.children_by_field_name("name", &mut cursor) {
+                let bound = match imported.kind() {
+                    "aliased_import" => imported.child_by_field_name("alias"),
+                    _ => imported.named_child(0),
+                };
+                if let Some(bound) = bound {
+                    note_binding(names, bound, source, end);
+                }
+            }
+        }
+        "with_item" => {
+            if let Some(alias) = node
+                .child_by_field_name("value")
+                .filter(|value| value.kind() == "as_pattern")
+                .and_then(|value| value.child_by_field_name("alias"))
+            {
+                note_targets(names, alias, source, end);
+            }
+        }
+        "for_statement" => {
+            if let (Some(left), Some(right)) = (
+                node.child_by_field_name("left"),
+                node.child_by_field_name("right"),
+            ) {
+                note_targets(names, left, source, node_range(right).1);
+            }
+            collect_children(node, source, names);
+        }
+        "block"
+        | "if_statement"
+        | "elif_clause"
+        | "else_clause"
+        | "try_statement"
+        | "except_clause"
+        | "except_group_clause"
+        | "finally_clause"
+        | "with_statement"
+        | "with_clause"
+        | "while_statement" => collect_children(node, source, names),
+        _ => {}
+    }
+}
+
+fn collect_children<'s>(node: Node<'_>, source: &'s [u8], names: &mut FxHashMap<&'s str, Pos>) {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_bindings(child, source, names);
+    }
+}
+
+/// How the children of `n` split the class namespace, given the one `n`
+/// itself evaluates in: `(child, its namespace, every other child's)`. A
+/// class body opens the class namespace and a function or lambda body closes
+/// it, while the base list, decorators, parameter defaults and annotations
+/// keep the surrounding one. A comprehension evaluates only its outermost
+/// iterable in the surrounding namespace.
+fn child_scopes<'t>(
+    n: Node<'t>,
+    scope: Option<Node<'t>>,
+) -> (Option<Node<'t>>, Option<Node<'t>>, Option<Node<'t>>) {
+    match n.kind() {
+        "class_definition" => (n.child_by_field_name("body"), Some(n), scope),
+        "function_definition" | "lambda" => (n.child_by_field_name("body"), None, scope),
+        "list_comprehension"
+        | "set_comprehension"
+        | "dictionary_comprehension"
+        | "generator_expression" => {
+            let mut cursor = n.walk();
+            let outermost = n
+                .named_children(&mut cursor)
+                .find(|c| c.kind() == "for_in_clause");
+            (outermost, scope, None)
+        }
+        _ => (None, scope, scope),
+    }
+}
+
+/// Records `entry` in the `field_reads` of the holder of `at`
+/// ([`attach_to_enclosing`]), once. `calls.rs` finds the holder only through
+/// its call attach helper, so the entry rides through `calls` and moves out
+/// at once.
+fn push_member_read(at: Node<'_>, source: &[u8], entry: String, nodes: &mut [RawNode]) {
+    let Some((holder, _)) = attach_to_enclosing(at, source, entry, nodes) else {
         return;
     };
     if let Some(entry) = nodes[holder].calls.pop() {

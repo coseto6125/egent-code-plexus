@@ -3546,7 +3546,11 @@ fn resolve_variant_ref(
     ladder::qualified_variant(
         symbol_table,
         language,
-        raw_node.owner_class.as_deref(),
+        ecp_core::analyzer::heritage::code_owner(
+            raw_node.kind,
+            &raw_node.name,
+            raw_node.owner_class.as_deref(),
+        ),
         path,
         has_variant,
         |qualifier| match resolver
@@ -3673,15 +3677,20 @@ fn pass2_emit_node_edges(
     // tiers read the owner of the unscoped declaration its lexical parents
     // reach, as for a call written there: a closure in `mod tests { fn t() }`
     // still reaches `tests::helper`.
+    let own_owner = ecp_core::analyzer::heritage::code_owner(
+        raw_node.kind,
+        &raw_node.name,
+        raw_node.owner_class.as_deref(),
+    );
     let scope_owner = match symbol_table.lexical_root(current_node_idx) {
-        root if root == current_node_idx => raw_node.owner_class.as_deref(),
+        root if root == current_node_idx => own_owner,
         root => ecp_core::analyzer::same_file_pick::PickFacts::owner(symbol_table, root),
     };
     // A C# member call whose receiver type owns no such member retries the
     // extension methods in scope (codex ruling P-ext). A retry that binds
     // nothing leaves a BlindSpot naming the receiver type and the member.
     let extension_misses: RefCell<Vec<String>> = RefCell::new(Vec::new());
-    let caller_owner = raw_node.owner_class.as_deref().and_then(owner_key);
+    let caller_owner = own_owner.and_then(owner_key);
     let extension = |receiver: ReceiverSite<'_>,
                      member: &str,
                      arguments: Option<CallArguments<'_>>,

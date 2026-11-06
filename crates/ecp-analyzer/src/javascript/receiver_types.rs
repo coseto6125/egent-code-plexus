@@ -20,7 +20,7 @@ use crate::calls::{
     unparenthesized, CallSiteIndex,
 };
 use crate::dynamic_imports::DynamicImports;
-use crate::framework_helpers::{enclosing_class, node_span, Span};
+use crate::framework_helpers::{enclosing_class, node_span};
 use crate::receiver::{analyze_file, FileReceivers, Receiver};
 use crate::typescript::receiver_types::bound_method_value;
 use ecp_core::analyzer::types::{BlindSpot, CallSite, RawNode, RawPathLiteral, RawSqlRef};
@@ -58,14 +58,14 @@ pub fn extract_js_calls_and_path_literals(
     blind_spots.append(&mut receivers.blind_spots);
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
-    let mut constructions: Vec<(Span, String)> = Vec::new();
+    let mut constructions: Vec<(Node<'_>, String)> = Vec::new();
     let this_facts = OnceCell::new();
     let mut stack = vec![(root, None, LiteralContext::default())];
     while let Some((n, parent, context)) = stack.pop() {
         match n.kind() {
             "call_expression" => {
                 if let Some(callee) = js_callee_name(n, source, dynamic, nodes, &receivers) {
-                    if let Some(site) = attach_to_enclosing_span(node_span(&n), callee, nodes) {
+                    if let Some(site) = attach_to_enclosing_span(n, source, callee, nodes) {
                         call_sites.insert(n.id(), site);
                     }
                 }
@@ -75,12 +75,12 @@ pub fn extract_js_calls_and_path_literals(
             "member_expression" => {
                 if let Some(name) = bound_method_value(n, parent, source, None, nodes, &this_facts)
                 {
-                    reference_function_span(node_span(&n), &name, nodes);
+                    reference_function_span(n, source, &name, nodes);
                 }
             }
             "new_expression" => {
                 if let Some(callee) = new_expression_call(n, source) {
-                    constructions.push((node_span(&n), callee));
+                    constructions.push((n, callee));
                 }
             }
             "string" => {
@@ -118,8 +118,8 @@ pub fn extract_js_calls_and_path_literals(
     }
     // After every call: the call-meta detectors index `calls` in
     // `call_expression` order, which a `new` site must not shift.
-    for (span, callee) in constructions {
-        attach_to_enclosing_span(span, callee, nodes);
+    for (at, callee) in constructions {
+        attach_to_enclosing_span(at, source, callee, nodes);
     }
     (path_literals, sql_refs)
 }

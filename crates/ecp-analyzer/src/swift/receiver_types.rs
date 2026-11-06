@@ -406,7 +406,7 @@ fn first_child_of_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
     result
 }
 
-/// Walk the Swift AST once, attaching call sites to enclosing functions
+/// Walk the Swift AST once, attaching call sites to their holders (`calls::attach_to_enclosing`)
 /// (with receiver binding for `self.` / `super.` / typed var navigation)
 /// and collecting path-shaped string literals (`line_string_literal`,
 /// `multi_line_string_literal`, `raw_string_literal`).
@@ -429,12 +429,12 @@ pub fn extract_swift_calls_and_path_literals(
                     callees.insert(callee.id());
                 }
                 if let Some(callee) = swift_callee_name(n, source, bindings, nodes) {
-                    attach_to_enclosing(start_pos(n), callee, nodes);
+                    attach_to_enclosing(n, source, callee, nodes);
                 }
             }
             "navigation_expression" if !callees.contains(&n.id()) => {
                 if let Some(name) = method_value(n, source, bindings) {
-                    reference_function(start_pos(n), &name, nodes);
+                    reference_function(n, source, &name, nodes);
                 }
             }
             "line_string_literal" | "multi_line_string_literal" | "raw_string_literal" => {
