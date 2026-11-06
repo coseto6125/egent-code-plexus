@@ -28,8 +28,8 @@ pub const NEAREST_COPY_CONFIDENCE: f32 = 0.6;
 pub const NEAREST_COPY_REASON: &str = "call:nearest-copy";
 
 /// The confidence of a call edge bound by the member name alone to a method,
-/// in a language whose receivers the parser types well enough that an
-/// untyped one is a guess ([`crate::analyzer::ladder::untyped_bind_is_guess`]).
+/// in a language where that bind is a guess
+/// ([`crate::analyzer::ladder::untyped_bind_is_guess`]).
 /// Below [`NEAREST_COPY_CONFIDENCE`] and every other tier, so the index and
 /// the session overlay tell the edge apart by it.
 pub const UNTYPED_NAME_CONFIDENCE: f32 = 0.55;
@@ -141,6 +141,12 @@ pub enum CallSite<'a> {
     /// resolver types the receiver by the return type of the one function
     /// `inner` binds; where it cannot, the site resolves as `fallback`.
     ChainedMember { inner: &'a str, fallback: &'a str },
+    /// A member call whose receiver's reachable paths disagree on its type,
+    /// or that an escape, an unsupported construct or the budget left
+    /// unknown (receiver core `UnknownCause` other than `NoEvidence`).
+    /// Duck-typed languages bind it as the tagged guess; every other
+    /// language binds nothing (`ladder::unproven_binds_guess`).
+    UnprovenMember(&'a str),
 }
 
 /// The arguments one call passes after its receiver, as the entry records
@@ -167,6 +173,7 @@ impl<'a> CallSite<'a> {
     const UNTYPED_MEMBER_PREFIX: &'static str = "\u{1}member ";
     const FROM_RECEIVER_PREFIX: &'static str = "\u{1}from ";
     const CHAINED_MEMBER_PREFIX: &'static str = "\u{1}chain ";
+    const UNPROVEN_MEMBER_PREFIX: &'static str = "\u{1}unproven ";
     /// Opens the argument record ahead of an entry; the chain separator
     /// closes it. It wraps the whole entry, so a chain's levels each carry
     /// their own record.
@@ -190,6 +197,12 @@ impl<'a> CallSite<'a> {
     /// The `RawNode.calls` entry of an untyped-receiver member call.
     pub fn untyped_member(member: &str) -> String {
         [Self::UNTYPED_MEMBER_PREFIX, member].concat()
+    }
+
+    /// The `RawNode.calls` entry of a member call whose receiver the
+    /// receiver core left unproven ([`Self::UnprovenMember`]).
+    pub fn unproven_member(member: &str) -> String {
+        [Self::UNPROVEN_MEMBER_PREFIX, member].concat()
     }
 
     /// The `RawNode.calls` entry of a member call on a `from`-imported name.
@@ -283,6 +296,8 @@ impl<'a> CallSite<'a> {
             Self::Construct(ty)
         } else if let Some(member) = raw.strip_prefix(Self::UNTYPED_MEMBER_PREFIX) {
             Self::UntypedMember(member)
+        } else if let Some(member) = raw.strip_prefix(Self::UNPROVEN_MEMBER_PREFIX) {
+            Self::UnprovenMember(member)
         } else if let Some((receiver, member)) = raw
             .strip_prefix(Self::FROM_RECEIVER_PREFIX)
             .and_then(|site| site.split_once('.'))
@@ -348,6 +363,7 @@ impl<'a> CallSite<'a> {
             Self::Plain(name)
             | Self::Construct(name)
             | Self::UntypedMember(name)
+            | Self::UnprovenMember(name)
             | Self::FromReceiver { member: name, .. } => name,
             Self::ChainedMember { .. } => self.fallback().name(),
         }
@@ -356,7 +372,10 @@ impl<'a> CallSite<'a> {
     /// Whether the call uses member syntax rather than a module path.
     pub fn uses_method_syntax(self) -> bool {
         match self {
-            Self::UntypedMember(_) | Self::FromReceiver { .. } | Self::ChainedMember { .. } => true,
+            Self::UntypedMember(_)
+            | Self::UnprovenMember(_)
+            | Self::FromReceiver { .. }
+            | Self::ChainedMember { .. } => true,
             Self::Plain(name) => name.contains('.'),
             Self::Construct(_) => false,
         }
@@ -1784,6 +1803,91 @@ pub const VALUE_READ_REASON: &str = "value_read";
 /// argument, stored handler, method reference) rather than called.
 pub const FUNCTION_REFERENCE_REASON: &str = "function_reference";
 
+/// `receiver.member` in value position (not the callee of a call) on a
+/// receiver of known type. It rides in [`RawNode::field_reads`] behind a
+/// U+0001 marker, like [`NameRef`]. Pass 2 decides the edge from the target
+/// (`name_ref::resolve_member_read`): a property accessor is a
+/// `ReadsField` ([`VALUE_READ_REASON`]), any other method a `References`
+/// ([`FUNCTION_REFERENCE_REASON`]), anything else no edge. A receiver of
+/// unknown type records no entry: a method value never guesses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemberRead<'a> {
+    pub receiver_type: &'a str,
+    pub member: &'a str,
+    pub intent: ReadIntent,
+}
+
+/// What the syntax of a [`MemberRead`] proves about its use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadIntent {
+    /// Syntax proves a method value: Java `c::m`, PHP `[$o, 'm']`, C++ `&C::m`.
+    MethodValue,
+    /// Syntax cannot tell: Python `obj.x`, TS `this.x`, Dart `o.x`.
+    Unknown,
+}
+
+impl<'a> MemberRead<'a> {
+    const PREFIX: &'static str = "\u{1}mread ";
+
+    const fn intent_tag(intent: ReadIntent) -> &'static str {
+        match intent {
+            ReadIntent::MethodValue => "m ",
+            ReadIntent::Unknown => "u ",
+        }
+    }
+
+    /// `"\u{1}mread m|u <receiver_type>.<member>"`.
+    pub fn encode(receiver_type: &str, member: &str, intent: ReadIntent) -> String {
+        [
+            Self::PREFIX,
+            Self::intent_tag(intent),
+            receiver_type,
+            ".",
+            member,
+        ]
+        .concat()
+    }
+
+    /// `None` for any other `field_reads` entry. The receiver type may be a
+    /// dotted path (`pkg.Cart`), so the member is the text after the last
+    /// '.'; an entry with an empty side is no member read.
+    pub fn parse(raw: &'a str) -> Option<Self> {
+        let rest = raw.strip_prefix(Self::PREFIX)?;
+        let (intent, path) = [ReadIntent::MethodValue, ReadIntent::Unknown]
+            .into_iter()
+            .find_map(|intent| {
+                rest.strip_prefix(Self::intent_tag(intent))
+                    .map(|path| (intent, path))
+            })?;
+        let (receiver_type, member) = path.rsplit_once('.')?;
+        (!receiver_type.is_empty() && !member.is_empty()).then_some(Self {
+            receiver_type,
+            member,
+            intent,
+        })
+    }
+}
+
+/// Whether a method declaration whose decorators are `decorators` is a
+/// property accessor: reading it runs the method and yields a value, so the
+/// read is a `ReadsField`, never a method value. Python only: `property`,
+/// `cached_property`, `functools.cached_property`. The parser stores a
+/// decorator with or without its `@` (`RawNode.decorators` vs
+/// `FunctionMeta.decorators`), so both forms count. TS `get` and Dart
+/// getters join when their parsers mark them.
+pub fn is_property_accessor(
+    language: Language,
+    decorators: impl IntoIterator<Item = impl AsRef<str>>,
+) -> bool {
+    language == Language::Python
+        && decorators.into_iter().any(|decorator| {
+            matches!(
+                decorator.as_ref().trim().trim_start_matches('@').trim(),
+                "property" | "cached_property" | "functools.cached_property"
+            )
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2153,6 +2257,126 @@ mod tests {
         );
         for text in ["new Router().Handler", "member widget", "Widget", ""] {
             assert_eq!(CallSite::parse(text), CallSite::Plain(text));
+        }
+    }
+
+    /// Contract (CONTRACTS 2.1): an unproven member entry round-trips, and
+    /// it answers every site question as a member call that names no type:
+    /// method syntax, never free-only, constructs nothing, is its own
+    /// fallback. Two sites of one member on one line stay two equal entries.
+    #[test]
+    fn test_call_site_unproven_member_round_trips_and_reads_as_member_call() {
+        let raw = CallSite::unproven_member("save");
+        let site = CallSite::parse(&raw);
+        assert_eq!(site, CallSite::UnprovenMember("save"));
+        assert_eq!(site.name(), "save");
+        assert!(site.uses_method_syntax());
+        assert_eq!(site.fallback(), site);
+        for language in [
+            Language::Php,
+            Language::Python,
+            Language::Rust,
+            Language::Cpp,
+        ] {
+            assert!(!site.reaches_free_only(language), "{language:?}");
+            assert_eq!(site.constructed_type(language), None, "{language:?}");
+        }
+        let line = [raw.clone(), raw.clone()];
+        assert!(line
+            .iter()
+            .all(|entry| CallSite::parse(entry) == CallSite::UnprovenMember("save")));
+        assert_eq!(
+            CallSite::parse(&CallSite::unproven_member("")),
+            CallSite::UnprovenMember("")
+        );
+        assert_eq!(
+            CallSite::parse(&CallSite::with_arguments(&raw, 1, &[])),
+            CallSite::UnprovenMember("save")
+        );
+        let chained = CallSite::chained_member(&CallSite::untyped_member("make"), &raw);
+        assert_eq!(
+            CallSite::parse(&chained).fallback(),
+            CallSite::UnprovenMember("save")
+        );
+        for text in ["unproven save", " \u{1}unproven save"] {
+            assert_eq!(CallSite::parse(text), CallSite::Plain(text));
+        }
+    }
+
+    /// Contract (CONTRACTS 2.2): `parse(encode(x)) == x` for both intents,
+    /// a dotted receiver type splits at its last '.', and every other
+    /// `field_reads` entry is no member read.
+    #[test]
+    fn test_member_read_parse_encode_round_trips() {
+        for intent in [ReadIntent::MethodValue, ReadIntent::Unknown] {
+            for (receiver_type, member) in [("Cart", "total"), ("pkg.mod.Cart", "fee")] {
+                let raw = MemberRead::encode(receiver_type, member, intent);
+                assert_eq!(
+                    MemberRead::parse(&raw),
+                    Some(MemberRead {
+                        receiver_type,
+                        member,
+                        intent
+                    }),
+                    "{raw:?}"
+                );
+                assert_eq!(NameRef::parse(&raw), None, "{raw:?}");
+                assert_eq!(VariantRef::parse(&raw), None, "{raw:?}");
+            }
+        }
+        for raw in [
+            "total".to_owned(),
+            "Cart.total".to_owned(),
+            "\u{1}mread Cart.total".to_owned(),
+            "\u{1}mread x Cart.total".to_owned(),
+            NameRef::encode("Cart.total", NameRefKind::Function),
+            VariantRef::encode("E::A", false),
+            MemberRead::encode("", "total", ReadIntent::Unknown),
+            MemberRead::encode("Cart", "", ReadIntent::Unknown),
+            MemberRead::encode(" ", "", ReadIntent::MethodValue),
+        ] {
+            assert_eq!(MemberRead::parse(&raw), None, "{raw:?}");
+        }
+    }
+
+    /// Contract (CONTRACTS 2.2, A08): the three Python property decorators,
+    /// with or without `@`, mark an accessor; a plain or absent decorator,
+    /// a whitespace-only one, and any other language do not.
+    #[test]
+    fn test_is_property_accessor_python_property_decorators_only() {
+        for decorator in [
+            "property",
+            "@property",
+            "cached_property",
+            "functools.cached_property",
+            "@functools.cached_property",
+            " property ",
+        ] {
+            assert!(
+                is_property_accessor(Language::Python, [decorator]),
+                "{decorator:?}"
+            );
+        }
+        assert!(is_property_accessor(
+            Language::Python,
+            ["staticmethod", "property"]
+        ));
+        for decorators in [
+            vec![],
+            vec!["staticmethod"],
+            vec!["  "],
+            vec!["total.setter"],
+        ] {
+            assert!(
+                !is_property_accessor(Language::Python, &decorators),
+                "{decorators:?}"
+            );
+        }
+        for language in [Language::TypeScript, Language::Dart, Language::Php] {
+            assert!(
+                !is_property_accessor(language, ["property"]),
+                "{language:?}"
+            );
         }
     }
 

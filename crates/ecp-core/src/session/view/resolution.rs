@@ -32,6 +32,7 @@ use crate::analyzer::lexical::{
     body_locals, decls_enclosing, fold_twins, inside_callable, lexical_chain_end,
     lexical_scope_kinds, twin_enclosing, LexicalFunctions,
 };
+use crate::analyzer::name_ref::{resolve_member_read, MemberReadEdge};
 use crate::analyzer::name_tiers::{
     self, import_tiers, name_tiers, HitBarrel, NameTierFacts, TierHit, TierPolicy,
 };
@@ -56,8 +57,8 @@ use crate::analyzer::type_ladder::{
     self, TypeCandidates, TypeFacts, TypeMember as LadderMember, MAX_HERITAGE_DEPTH,
 };
 use crate::analyzer::types::{
-    owner_key, CallArguments, CallSite, NameRef, RawFunctionMeta, RawImport, Span, VariantRef,
-    FUNCTION_REFERENCE_REASON, NEAREST_COPY_CONFIDENCE, NEAREST_COPY_REASON,
+    owner_key, CallArguments, CallSite, MemberRead, NameRef, RawFunctionMeta, RawImport, Span,
+    VariantRef, FUNCTION_REFERENCE_REASON, NEAREST_COPY_CONFIDENCE, NEAREST_COPY_REASON,
     UNTYPED_NAME_CONFIDENCE, UNTYPED_NAME_REASON, VALUE_READ_REASON, VARIANT_PATTERN_REASON,
     VARIANT_USE_REASON,
 };
@@ -2000,7 +2001,11 @@ impl<'a> OverlayFacts<'a> {
                 continue;
             };
             let flags = meta.flags.to_native();
-            if flags & csharp_extension::EXTENSION_FLAG == 0 {
+            // Bits 10-15 are C#-scoped: a C or C++ namesake reuses bit 10
+            // for `extern` storage (CONTRACTS 6.4).
+            if flags & csharp_extension::EXTENSION_FLAG == 0
+                || self.meta_of(id).language != Language::CSharp
+            {
                 continue;
             }
             let (Some(file), Some(class)) = (self.node_file(id), self.owner_of(id)) else {
@@ -2623,18 +2628,17 @@ impl ImplNode for OverlaySymbol {
     }
 }
 
-/// The index's `resolve_name_ref` in `builder.rs` ([`ladder::name_ref`]):
-/// `resolve` is the name tiers ([`name_tiers()`]) over the name table of the
-/// target's kinds, and the import-member tier alone reads the fields.
+/// The two lookups the index's `resolve_name_ref` and `resolve_member_read`
+/// in `builder.rs` hand the shared policy ([`ladder::name_ref`],
+/// [`resolve_member_read`]), passed to `run`: the name tiers
+/// ([`name_tiers()`]) over the name table of the target's kinds, and the
+/// import-member tier alone, which reads the fields.
 #[allow(clippy::too_many_arguments)]
-fn resolve_overlay_name_ref(
+fn with_overlay_name_lookups<R>(
     graph: &ArchivedZeroCopyGraph,
     file_ord: usize,
     file: &OverlayFileInput,
     caller: FileMeta,
-    owner: Option<&str>,
-    name_ref: NameRef<'_>,
-    lexical: Option<u32>,
     base_metas: &mut FxHashMap<usize, FileMeta>,
     callables: &OverlayNames<'_>,
     values: &OverlayNames<'_>,
@@ -2645,18 +2649,11 @@ fn resolve_overlay_name_ref(
     replaced: &FxHashMap<u32, u32>,
     dirty_base: &FxHashSet<u32>,
     facts: &OverlayFacts<'_>,
-) -> Option<(u32, f32)> {
+    run: impl FnOnce(&mut NameLookup<'_>, &mut NameLookup<'_>) -> R,
+) -> R {
     let base_metas = RefCell::new(base_metas);
-    ladder::name_ref(
-        facts,
-        facts,
-        &file.rel_path,
-        caller.language,
-        &file.imports,
-        owner,
-        name_ref,
-        lexical,
-        |name, target| {
+    run(
+        &mut |name: &str, target: ResolveTarget| {
             let names = match target {
                 ResolveTarget::Callable => callables,
                 ResolveTarget::Value => values,
@@ -2683,7 +2680,7 @@ fn resolve_overlay_name_ref(
         // explicit imports only: the index's `resolve_imported_symbol` takes
         // the shared import tiers ([`import_tiers`]), wildcard pass included
         // (divergence, `ladder_import_member_parity`).
-        |name, _| match ladder::imported_member(
+        &mut |name: &str, _: ResolveTarget| match ladder::imported_member(
             &OverlayImports {
                 facts,
                 names: fields,
@@ -2700,6 +2697,40 @@ fn resolve_overlay_name_ref(
             ladder::MemberHit::Unbound { .. } => Vec::new(),
         },
     )
+}
+
+/// One name lookup [`with_overlay_name_lookups`] hands its `run`.
+type NameLookup<'l> = dyn FnMut(&str, ResolveTarget) -> Vec<(u32, f32)> + 'l;
+
+/// The decorators of the merged-space `id`, as the index reads them for a
+/// member read's target: a dirty node's from its fresh parse
+/// ([`OverlaySymbol::decorators`]), a clean base node's from its
+/// `FunctionMeta`. A base node of a dirty file is stale and has none; the
+/// name tiers never return one.
+fn overlay_decorators<'g>(
+    graph: &'g ArchivedZeroCopyGraph,
+    files: &'g [OverlayFileInput],
+    dirty_base: &FxHashSet<u32>,
+    id: u32,
+) -> Vec<&'g str> {
+    let Some(mut offset) = id.checked_sub(graph.nodes.len() as u32).map(|o| o as usize) else {
+        if dirty_base.contains(&id) {
+            return Vec::new();
+        }
+        return base_function_meta(graph, id).map_or_else(Vec::new, |meta| {
+            meta.decorators
+                .iter()
+                .map(|decorator| decorator.resolve(&graph.string_pool))
+                .collect()
+        });
+    };
+    for file in files {
+        match file.symbols.get(offset) {
+            Some(symbol) => return symbol.decorators.iter().map(String::as_str).collect(),
+            None => offset -= file.symbols.len(),
+        }
+    }
+    Vec::new()
 }
 
 /// The kind of the merged-space `idx`.
@@ -6098,20 +6129,18 @@ pub(super) fn resolve_edges(
             let mut name_edges: Vec<u32> = Vec::new();
             let mut field_edges: Vec<u32> = Vec::new();
             for raw in &sym.variant_refs {
-                if let Some(name_ref) = NameRef::parse(raw) {
-                    // The index's lexical name-reference tier, then
-                    // its name tiers with the same owner.
-                    let Some((target, confidence)) = resolve_overlay_name_ref(
+                let read_owner = match root == source {
+                    true => sym.owner_class.as_deref(),
+                    false => owner,
+                };
+                if let Some(read) = MemberRead::parse(raw) {
+                    // The index's member-read branch: the same lookups,
+                    // then the target decides the edge.
+                    let Some((target, confidence, edge)) = with_overlay_name_lookups(
                         graph,
                         file_ord,
                         file,
                         caller,
-                        match root == source {
-                            true => sym.owner_class.as_deref(),
-                            false => owner,
-                        },
-                        name_ref,
-                        lexical.name_ref_target(span_of(sym), name_ref),
                         &mut base_metas,
                         &callables,
                         &values,
@@ -6122,6 +6151,73 @@ pub(super) fn resolve_edges(
                         replaced,
                         dirty_base,
                         &facts,
+                        |resolve, imported| {
+                            resolve_member_read(
+                                &facts,
+                                &file.rel_path,
+                                caller.language,
+                                &file.imports,
+                                read_owner,
+                                read,
+                                resolve,
+                                imported,
+                                |id| overlay_decorators(graph, files, dirty_base, id),
+                            )
+                        },
+                    ) else {
+                        continue;
+                    };
+                    if target == from || name_edges.contains(&target) {
+                        continue;
+                    }
+                    name_edges.push(target);
+                    let (rel_type, reason) = match edge {
+                        MemberReadEdge::Reference => {
+                            (RelType::References, FUNCTION_REFERENCE_REASON)
+                        }
+                        MemberReadEdge::Read => (RelType::ReadsField, VALUE_READ_REASON),
+                    };
+                    emit(ViewEdge {
+                        source: from,
+                        target,
+                        rel_type,
+                        confidence,
+                        reason,
+                    });
+                    continue;
+                }
+                if let Some(name_ref) = NameRef::parse(raw) {
+                    // The index's lexical name-reference tier, then
+                    // its name tiers with the same owner.
+                    let Some((target, confidence)) = with_overlay_name_lookups(
+                        graph,
+                        file_ord,
+                        file,
+                        caller,
+                        &mut base_metas,
+                        &callables,
+                        &values,
+                        &fields,
+                        &types,
+                        &qualifiers,
+                        nodes,
+                        replaced,
+                        dirty_base,
+                        &facts,
+                        |resolve, imported| {
+                            ladder::name_ref(
+                                &facts,
+                                &facts,
+                                &file.rel_path,
+                                caller.language,
+                                &file.imports,
+                                read_owner,
+                                name_ref,
+                                lexical.name_ref_target(span_of(sym), name_ref),
+                                resolve,
+                                imported,
+                            )
+                        },
                     ) else {
                         continue;
                     };

@@ -1915,10 +1915,18 @@ fn stale_extension_gaps(
     let mut gaps: Vec<CallGap> = Vec::new();
     for name in names {
         for decl in graph.nodes_by_name(name) {
+            // Bits 10-15 are C#-scoped: a C or C++ namesake reuses bit 10
+            // for `extern` storage (CONTRACTS 6.4).
             let extension = graph.nodes[decl as usize].name.resolve(pool) == name
                 && base_function_meta(graph, decl).is_some_and(|meta| {
                     meta.flags.to_native() & csharp_extension::EXTENSION_FLAG != 0
-                });
+                })
+                && crate::session::import_scope::stored_file_meta(
+                    graph,
+                    graph.nodes[decl as usize].file_idx.to_native(),
+                )
+                .language
+                    == Language::CSharp;
             if !extension {
                 continue;
             }

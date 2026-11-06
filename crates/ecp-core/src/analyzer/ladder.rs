@@ -2223,6 +2223,9 @@ pub struct CallVerdict<'s> {
 ///    lexical scope hides ([`Resolution::Shadowed`]) skips every name tier:
 ///    only the import tiers and the constructor fallback run
 ///    (`import_only`).
+///    Then an unproven member site ([`CallSite::UnprovenMember`]) ends as
+///    [`NoEdge::ReceiverUnproven`] where [`unproven_binds_guess`] is false;
+///    where it is true, it goes on as an untyped member call.
 /// 1. Normalize the site (R2-R5). A Python from-imported submodule and a
 ///    mapped Go package settle the call ahead of the ladder; a Go value or
 ///    unmapped package re-classifies the site. A C#, Swift, Kotlin or Dart
@@ -2271,6 +2274,19 @@ pub fn call<'s, F: CallFacts<'s>>(
             };
         }
         _ => {}
+    }
+    // ACCEPTANCE 00: a receiver whose paths disagree, or that the receiver
+    // core could not follow, is the tagged guess in a duck-typed language
+    // and no edge elsewhere. No tier, retry or constructor fallback runs.
+    if let CallSite::UnprovenMember(member) = site {
+        if !unproven_binds_guess(language) {
+            return CallVerdict {
+                resolution: Resolution::NoEdge(NoEdge::ReceiverUnproven),
+                site,
+                typed: false,
+            };
+        }
+        site = CallSite::UntypedMember(member);
     }
     let imports = || cx.imports.iter().map(ImportRef::from);
     let mut resolution = Resolution::Unknown;
@@ -2405,11 +2421,13 @@ pub fn call<'s, F: CallFacts<'s>>(
 }
 
 /// Whether an untyped member call that binds a method by its name alone is a
-/// guess in `language`. These parsers type the receivers they can, so an
-/// untyped receiver is mostly a library value (`vec.retain()`) and the one
-/// project method of that name a false hit. Python, Ruby, PHP and
-/// JavaScript are duck-typed: the name is the main signal there. C# and
-/// Kotlin never bind an untyped member by name, so they never reach it.
+/// guess in `language`. The static-typed parsers type the receivers they
+/// can, so an untyped receiver is mostly a library value (`vec.retain()`)
+/// and the one project method of that name a false hit. In duck-typed PHP,
+/// Python, Ruby and JavaScript the name is the main signal, but still no
+/// proof of the receiver's type (ACCEPTANCE 00), so the bind is tagged
+/// there too. C# never binds an untyped member by name; C and Kotlin keep
+/// the tier's confidence.
 pub const fn untyped_bind_is_guess(language: Language) -> bool {
     matches!(
         language,
@@ -2420,6 +2438,21 @@ pub const fn untyped_bind_is_guess(language: Language) -> bool {
             | Language::Dart
             | Language::Cpp
             | Language::TypeScript
+            | Language::Php
+            | Language::Python
+            | Language::Ruby
+            | Language::JavaScript
+    )
+}
+
+/// Whether a [`CallSite::UnprovenMember`] site binds as the tagged guess in
+/// `language`: the duck-typed languages, where a name is the usual signal.
+/// Every other language binds nothing ([`NoEdge::ReceiverUnproven`]): a
+/// receiver its paths type apart is no evidence for any one method.
+pub const fn unproven_binds_guess(language: Language) -> bool {
+    matches!(
+        language,
+        Language::Php | Language::Python | Language::Ruby | Language::JavaScript
     )
 }
 
@@ -2440,7 +2473,10 @@ fn import_only<'s, F: CallFacts<'s>>(
     cx: &CallContext<'_>,
     site: CallSite<'s>,
 ) -> Resolution {
-    if matches!(site, CallSite::UntypedMember(_)) {
+    if matches!(
+        site,
+        CallSite::UntypedMember(_) | CallSite::UnprovenMember(_)
+    ) {
         return Resolution::Unknown;
     }
     let language = cx.language;
@@ -4937,6 +4973,8 @@ mod tests {
     /// Python another module's function; it refuses a function of the
     /// caller's module, a member of the caller's own type, and in Go any
     /// free function. Two classes' namesakes stay the ladder's no edge.
+    /// Python is a guess language (ACCEPTANCE 00), so a kept target binds
+    /// as the tagged guess `Tier::UntypedName`, not at the ladder's tier.
     #[test]
     fn test_call_untyped_member_post_filter_admits_member_or_other_module_function() {
         let mut fake = call_fake(&[
@@ -4955,7 +4993,7 @@ mod tests {
             fake.ladder = vec![(name, Resolution::bound(id, Tier::Global))];
             let verdict = call(&fake, python, CallSite::UntypedMember(name));
             let want = match admitted {
-                true => Resolution::bound(id, Tier::Global),
+                true => Resolution::bound(id, Tier::UntypedName),
                 false => Resolution::Unknown,
             };
             assert_eq!(verdict.resolution, want, "{name}");
@@ -4994,6 +5032,10 @@ mod tests {
             Language::Dart,
             Language::Cpp,
             Language::TypeScript,
+            Language::Php,
+            Language::Python,
+            Language::Ruby,
+            Language::JavaScript,
         ] {
             assert!(untyped_bind_is_guess(language), "{language:?}");
             for resolution in found {
@@ -5009,20 +5051,14 @@ mod tests {
         }
     }
 
-    /// Rule U (U1): a duck-typed language keeps the name as its main signal,
-    /// and C, Kotlin and C# are outside the rule: the bind keeps the
-    /// confidence of the tier that found it.
+    /// Rule U (U1): C, Kotlin and C# are outside the rule: the bind keeps
+    /// the confidence of the tier that found it. Contract change (ACCEPTANCE
+    /// 00): PHP, Python, Ruby and JavaScript left this list for the guess
+    /// languages, so a duck-typed bind by name alone is the tagged guess.
     #[test]
     fn test_call_untyped_member_other_language_keeps_tier_confidence() {
-        let mut fake = call_fake(&[("lib/dirty.py", "retain", M, Some("Dirty"))]);
-        for language in [
-            Language::Python,
-            Language::Ruby,
-            Language::Php,
-            Language::JavaScript,
-            Language::Kotlin,
-            Language::C,
-        ] {
+        let mut fake = call_fake(&[("lib/dirty.kt", "retain", M, Some("Dirty"))]);
+        for language in [Language::Kotlin, Language::C] {
             assert!(!untyped_bind_is_guess(language), "{language:?}");
             for tier in [Tier::Global, Tier::SameFile] {
                 fake.ladder = vec![("retain", bound(0, tier))];
@@ -5035,6 +5071,188 @@ mod tests {
             }
         }
         assert!(!untyped_bind_is_guess(Language::CSharp));
+    }
+
+    /// ACCEPTANCE 00: an unproven receiver (paths that disagree, an escape,
+    /// an unsupported construct, the budget) binds nothing outside the
+    /// duck-typed languages, and asks no tier, no bare-member retry and no
+    /// import tier on the way, whatever the ladder would bind.
+    #[test]
+    fn test_call_unproven_member_static_language_binds_no_edge() {
+        let mut fake = call_fake(&[("lib/dirty.x", "retain", M, Some("Dirty"))]);
+        fake.ladder = vec![("retain", bound(0, Tier::Global))];
+        fake.bare = vec![("retain", (0, 0.95))];
+        fake.imported = vec![("retain", ResolveTarget::Callable, (0, 0.95))];
+        for language in [
+            Language::Rust,
+            Language::Go,
+            Language::Java,
+            Language::Swift,
+            Language::Dart,
+            Language::Cpp,
+            Language::TypeScript,
+            Language::Kotlin,
+            Language::C,
+            Language::CSharp,
+        ] {
+            assert!(!unproven_binds_guess(language), "{language:?}");
+            let verdict = call(
+                &fake,
+                cx("app/main", language, &[]),
+                CallSite::UnprovenMember("retain"),
+            );
+            assert_eq!(
+                verdict.resolution,
+                Resolution::NoEdge(NoEdge::ReceiverUnproven),
+                "{language:?}"
+            );
+            assert!(!verdict.typed);
+        }
+        assert!(fake.seen.borrow().is_empty());
+        assert!(fake.imported_seen.borrow().is_empty());
+        assert_eq!(fake.bare_calls.get(), 0);
+        assert!(fake.unresolved.borrow().is_empty());
+    }
+
+    /// ACCEPTANCE 00: in PHP, Python, Ruby and JavaScript an unproven
+    /// receiver reads as an untyped member call: the ladder runs with no
+    /// `this` and no bases, R21 filters its target, and the bind is the
+    /// tagged guess, whichever tier found it. A refused target (the
+    /// caller's own type), an ambiguous name and an empty member bind
+    /// nothing, as for an untyped site.
+    #[test]
+    fn test_call_unproven_member_duck_typed_language_binds_tagged_guess() {
+        let heritage = vec!["Base".to_owned()];
+        let mut fake = call_fake(&[
+            ("lib/dirty.x", "retain", M, Some("Dirty")),
+            ("lib/caller.x", "own", M, Some("Caller")),
+        ]);
+        for language in [
+            Language::Php,
+            Language::Python,
+            Language::Ruby,
+            Language::JavaScript,
+        ] {
+            assert!(unproven_binds_guess(language), "{language:?}");
+            assert!(untyped_bind_is_guess(language), "{language:?}");
+            let caller = cx("app/main", language, &heritage);
+            for found in [bound(0, Tier::Global), bound(0, Tier::SameFile)] {
+                fake.ladder = vec![("retain", found)];
+                fake.seen.borrow_mut().clear();
+                let verdict = call(&fake, caller, CallSite::UnprovenMember("retain"));
+                assert_eq!(
+                    verdict.resolution,
+                    bound(0, Tier::UntypedName),
+                    "{language:?}"
+                );
+                assert_eq!(verdict.resolution.edge(), Some((0, 0.55)));
+                assert_eq!(verdict.site, CallSite::UntypedMember("retain"));
+                assert_eq!(
+                    fake.seen.borrow().as_slice(),
+                    [("retain".to_owned(), true, false, 0)],
+                    "{language:?}"
+                );
+            }
+            fake.ladder = vec![("own", bound(1, Tier::Global))];
+            let own = call(&fake, caller, CallSite::UnprovenMember("own"));
+            assert_eq!(own.resolution.edge(), None, "{language:?} own type");
+            fake.ladder = vec![("retain", Resolution::NoEdge(NoEdge::Ambiguous(2)))];
+            let two = call(&fake, caller, CallSite::UnprovenMember("retain"));
+            assert_eq!(two.resolution, Resolution::NoEdge(NoEdge::Ambiguous(2)));
+            let empty = call(&fake, caller, CallSite::UnprovenMember(""));
+            assert_eq!(empty.resolution.edge(), None, "{language:?} empty member");
+        }
+    }
+
+    /// CONTRACTS 7: a member read binds as the `NameRef::Function "T.m"`
+    /// lookup does, then the target decides the edge. A property accessor
+    /// is a read, another method a reference whatever the intent; a
+    /// `Property`, an unresolved name and an absent decorator list follow
+    /// the table. The decorators are asked only of a method target.
+    #[test]
+    fn test_resolve_member_read_target_kind_decides_edge() {
+        use crate::analyzer::name_ref::{resolve_member_read, MemberReadEdge};
+        use crate::analyzer::types::{MemberRead, ReadIntent};
+        let facts = Fake::new(
+            Layout::Index,
+            &[
+                ("cart.py", "Cart", C, None),
+                ("cart.py", "total", M, Some("Cart")),
+                ("cart.py", "helper", M, Some("Cart")),
+                ("cart.py", "count", NodeKind::Property, Some("Cart")),
+            ],
+        );
+        let asked = RefCell::new(Vec::new());
+        let run = |language: Language, member: &'static str, intent: ReadIntent| {
+            resolve_member_read(
+                &facts,
+                "use.py",
+                language,
+                &[],
+                None,
+                MemberRead {
+                    receiver_type: "Cart",
+                    member,
+                    intent,
+                },
+                |name: &str, _| match name {
+                    "Cart.total" => vec![(1, 0.85)],
+                    "Cart.helper" => vec![(2, 0.85)],
+                    "Cart.count" => vec![(3, 0.85)],
+                    _ => Vec::new(),
+                },
+                |_: &str, _| Vec::new(),
+                |id| {
+                    asked.borrow_mut().push(id);
+                    match id {
+                        1 => vec!["property"],
+                        _ => vec![],
+                    }
+                },
+            )
+        };
+        for intent in [ReadIntent::Unknown, ReadIntent::MethodValue] {
+            assert_eq!(
+                run(Language::Python, "total", intent),
+                Some((1, 0.85, MemberReadEdge::Read)),
+                "{intent:?}"
+            );
+            assert_eq!(
+                run(Language::Python, "helper", intent),
+                Some((2, 0.85, MemberReadEdge::Reference)),
+                "{intent:?}"
+            );
+            assert_eq!(run(Language::Python, "count", intent), None, "{intent:?}");
+            assert_eq!(run(Language::Python, "missing", intent), None, "{intent:?}");
+        }
+        assert!(!asked.borrow().contains(&3), "a Property asks no decorator");
+        assert_eq!(
+            run(Language::TypeScript, "total", ReadIntent::Unknown),
+            Some((1, 0.85, MemberReadEdge::Reference)),
+            "a Python decorator marks no TS accessor"
+        );
+    }
+
+    /// The unproven rule runs after the lexical verdict, as an untyped site
+    /// does: a lexical bind stands, and a shadowed name asks no import tier.
+    #[test]
+    fn test_call_unproven_member_after_lexical_verdict() {
+        let mut fake = call_fake(&[("src/main.ts", "helper", F, None)]);
+        fake.imported = vec![("helper", ResolveTarget::Callable, (8, 0.95))];
+        let lexical = lexical_cx(
+            Resolution::bound(0, Tier::Lexical),
+            "src/main.ts",
+            Language::TypeScript,
+        );
+        let bound_verdict = call(&fake, lexical, CallSite::UnprovenMember("helper"));
+        assert_eq!(
+            bound_verdict.resolution,
+            Resolution::bound(0, Tier::Lexical)
+        );
+        let shadowed = lexical_cx(Resolution::Shadowed, "src/main.js", Language::JavaScript);
+        let verdict = call(&fake, shadowed, CallSite::UnprovenMember("helper"));
+        assert_eq!(verdict.resolution, Resolution::Unknown);
+        assert!(fake.imported_seen.borrow().is_empty());
     }
 
     /// Rule U (U1) edge states: the nearest-copy bind keeps its own tag

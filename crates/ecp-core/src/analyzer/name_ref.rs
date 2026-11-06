@@ -10,7 +10,9 @@ use crate::analyzer::outcome::Tier;
 use crate::analyzer::reexport::ResolveTarget;
 use crate::analyzer::same_file_pick::prefer_free;
 use crate::analyzer::type_ladder::{self, Ownership};
-use crate::analyzer::types::{owner_key, CallSite, NameRef, NameRefKind, RawImport};
+use crate::analyzer::types::{
+    is_property_accessor, owner_key, CallSite, MemberRead, NameRef, NameRefKind, RawImport,
+};
 use crate::file_category::Language;
 use crate::graph::NodeKind;
 
@@ -220,6 +222,71 @@ where
         return None;
     }
     Some((id, confidence))
+}
+
+/// The edge a resolved [`MemberRead`] emits (CONTRACTS 7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberReadEdge {
+    /// A method handed on as a value: `References`, `function_reference`.
+    Reference,
+    /// A property accessor read for its value: `ReadsField`, `value_read`.
+    Read,
+}
+
+/// Resolve one [`MemberRead`] and decide its edge. The lookup is the one a
+/// `NameRef::Function "T.m"` entry takes ([`resolve_name_ref`]), so a
+/// parser that switches from that entry to a member read moves no
+/// method-value edge. Then the target decides: a property accessor
+/// ([`is_property_accessor`] over `decorators(target)`) is a read, any
+/// other callable a reference, anything else (a `Property`, a field) no
+/// edge, as the plain short-name `field_reads` path already reads those.
+/// The index passes `RawNode.decorators`, the overlay
+/// `OverlaySymbol.decorators` or the base `FunctionMeta.decorators`.
+///
+/// A member read has a typed receiver, never a package qualifier and never
+/// a scoped function, so neither the Go package lookup nor the lexical tier
+/// of [`crate::analyzer::ladder::name_ref`] applies.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_member_read<F, Resolve, ResolveImported, Decorators, D>(
+    facts: &F,
+    file: &str,
+    language: Language,
+    imports: &[RawImport],
+    owner: Option<&str>,
+    read: MemberRead<'_>,
+    resolve: Resolve,
+    resolve_imported: ResolveImported,
+    decorators: Decorators,
+) -> Option<(u32, f32, MemberReadEdge)>
+where
+    F: ResolveFacts,
+    Resolve: FnMut(&str, ResolveTarget) -> Vec<(u32, f32)>,
+    ResolveImported: FnMut(&str, ResolveTarget) -> Vec<(u32, f32)>,
+    Decorators: FnOnce(u32) -> D,
+    D: IntoIterator,
+    D::Item: AsRef<str>,
+{
+    let name = [read.receiver_type, ".", read.member].concat();
+    let name_ref = NameRef {
+        name: &name,
+        kind: NameRefKind::Function,
+    };
+    let (id, confidence) = resolve_name_ref(
+        facts,
+        file,
+        language,
+        imports,
+        owner,
+        name_ref,
+        resolve,
+        resolve_imported,
+    )?;
+    let edge = match facts.kind(id) {
+        NodeKind::Method if is_property_accessor(language, decorators(id)) => MemberReadEdge::Read,
+        kind if kind.is_callable() => MemberReadEdge::Reference,
+        _ => return None,
+    };
+    Some((id, confidence, edge))
 }
 
 /// Whether the qualifier path `qualifier` (`A.Helpers`, `A.Deep.Outer.Inner`)

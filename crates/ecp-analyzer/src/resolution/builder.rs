@@ -17,13 +17,14 @@ use ecp_core::analyzer::lexical::{
     lexical_scope_kinds, path_identities, raw_decl, skipped_nodes, splits_by_arity,
     stored_path_order, LexicalFunctions, SharedPaths,
 };
+use ecp_core::analyzer::name_ref::{resolve_member_read, MemberReadEdge};
 use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::reexport::{export_filter_applies_to, is_ecmascript, ImportRef};
 use ecp_core::analyzer::rust_paths::is_rust_source;
 use ecp_core::analyzer::type_ladder;
 use ecp_core::analyzer::types::{
-    owner_key, BlindSpot, CallArguments, CallSite, LocalGraph, NameRef, RawImport, RawNode,
-    RawRoute, VariantRef, UNTYPED_NAME_CONFIDENCE, UNTYPED_NAME_REASON,
+    owner_key, BlindSpot, CallArguments, CallSite, LocalGraph, MemberRead, NameRef, RawImport,
+    RawNode, RawRoute, VariantRef, UNTYPED_NAME_CONFIDENCE, UNTYPED_NAME_REASON,
 };
 pub use ecp_core::analyzer::types::{
     FUNCTION_REFERENCE_REASON, VALUE_READ_REASON, VARIANT_PATTERN_REASON, VARIANT_USE_REASON,
@@ -3115,7 +3116,9 @@ fn pass1_8_function_metas(
                         symbol_table.note_csharp_method_flags(node_idx, rfm.flags);
                     }
                     symbol_table.note_c_callable(node_idx, rfm.flags, &rfm.params);
-                    if rfm.flags & csharp_extension::EXTENSION_FLAG != 0 {
+                    // Bits 10-15 are C#-scoped: C and C++ reuse bit 10 for
+                    // `extern` storage (CONTRACTS 6.4).
+                    if csharp && rfm.flags & csharp_extension::EXTENSION_FLAG != 0 {
                         // `params` alternates name and type: [1] is the
                         // `this` parameter's type, [2..] the other names
                         // at even offsets.
@@ -3627,6 +3630,7 @@ fn pass2_emit_node_edges(
     meta_lookup: &FxHashMap<Span, usize>,
     pending_call_metas: &mut Vec<(usize, u8, String)>,
     blind_spots: &mut Vec<BlindSpot>,
+    (all_graphs, raw_map): (&[LocalGraph], &RawIndexMap),
 ) {
     let language = symbol_table.file_language(&local_graph.file_path.to_string_lossy());
     for base in &raw_node.heritage {
@@ -3889,7 +3893,8 @@ fn pass2_emit_node_edges(
     // cross-function field contract without reintroducing local fan-out.
     // A `NameRef` (a bare name the parser kept after dropping parameters and
     // locals) binds a constant or variable as ReadsField, a function as
-    // References: one edge per target per body.
+    // References: one edge per target per body. A `MemberRead` shares that
+    // per-body set: its target decides the edge (`resolve_member_read`).
     let mut variant_edges: Vec<(u32, bool)> = Vec::new();
     let mut name_edges: Vec<u32> = Vec::new();
     let mut name_file: Option<(String, Language)> = None;
@@ -3899,6 +3904,59 @@ fn pass2_emit_node_edges(
         (file, language)
     };
     for field_name in &raw_node.field_reads {
+        if let Some(read) = MemberRead::parse(field_name) {
+            let (file, language) = name_file.get_or_insert_with(reader_file);
+            let Some((target_id, confidence, edge)) = resolve_member_read(
+                symbol_table,
+                file.as_str(),
+                *language,
+                &local_graph.imports,
+                scope_owner,
+                read,
+                |name, target| {
+                    resolver.resolve_symbol(
+                        &local_graph.file_path,
+                        name,
+                        &local_graph.imports,
+                        target,
+                    )
+                },
+                |name, target| {
+                    resolver.resolve_imported_symbol(
+                        &local_graph.file_path,
+                        name,
+                        &local_graph.imports,
+                        target,
+                    )
+                },
+                |id| {
+                    raw_map
+                        .locate(id)
+                        .and_then(|(file, raw)| {
+                            all_graphs.get(file.index())?.nodes.get(raw.0 as usize)
+                        })
+                        .map_or(&[][..], |node| node.decorators.as_slice())
+                },
+            ) else {
+                continue;
+            };
+            if target_id == current_node_idx || name_edges.contains(&target_id) {
+                continue;
+            }
+            name_edges.push(target_id);
+            let (rel_type, reason) = match edge {
+                MemberReadEdge::Reference => (RelType::References, reason_name_ref.function),
+                MemberReadEdge::Read => (RelType::ReadsField, reason_name_ref.value),
+            };
+            edges.push(Edge {
+                source: current_node_idx,
+                target: target_id,
+                rel_type,
+                confidence,
+                reason,
+            });
+            continue;
+        }
         if let Some(name_ref) = NameRef::parse(field_name) {
             let (file, language) = name_file.get_or_insert_with(reader_file);
             // A bare reference to a scoped function binds through the
@@ -4378,6 +4436,7 @@ fn pass2_resolve_edges(
                     &meta_lookups[graph_idx],
                     &mut pending_call_metas_global,
                     &mut call_blind_spots,
+                    (local_graphs, raw_map),
                 );
                 if merged {
                     merged_rows.rehome(
@@ -4464,6 +4523,7 @@ fn pass2_resolve_edges(
                         &meta_lookups[graph_idx],
                         &mut local_pending,
                         &mut local_blind_spots,
+                        (local_graphs, raw_map),
                     );
                     if merged {
                         merged_rows.rehome(
