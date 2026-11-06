@@ -263,7 +263,8 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
         // `None` only for a bm25 registry selector (see `FindArgs::skips_cwd_graph`).
         Commands::Find(args) => commands::find::run(args, engine),
         Commands::Impact(args) => {
-            commands::impact::run(args, engine.expect("needs_graph() gates this arm"))
+            let engine = engine.expect("needs_graph() gates this arm");
+            commands::impact::run(args, engine).map_err(|e| engine.unverified_miss(e))
         }
         Commands::Rename { .. } => Err(ecp_core::EcpError::InvalidArgument(
             RENAME_REMOVED.to_string(),

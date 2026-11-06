@@ -32,6 +32,10 @@ fn run_ecp(cwd: &Path, home: &Path, args: &[&str]) -> Output {
         .env("HOME", home)
         .env_remove("ECP_HOME")
         .env("ECP_SKIP_BG_REBUILD", "1")
+        // An overlay limit of 0 keeps every warm attach uncovered: these tests
+        // read the caveat a warm attach carries when the overlay cannot bring
+        // it to HEAD (F2).
+        .env("ECP_WARM_ATTACH_MAX_FILES", "0")
         .output()
         .expect("ecp failed to spawn")
 }
@@ -47,7 +51,8 @@ fn index_repo(repo: &Path, home: &Path) {
 
 /// HEAD one commit past the indexed SHA, inside the warm-attach distance gate,
 /// without a rebuild: the next query warm-attaches. `beta` exists only in the
-/// new commit, so the sibling graph cannot know it.
+/// new commit, so the sibling graph cannot know it, and the overlay limit of 0
+/// keeps it out of the overlay.
 fn make_warm_attached(repo: &Path) {
     std::fs::write(repo.join("extra.rs"), "pub fn beta() {}\n").unwrap();
     commit_all(repo, "advance");
@@ -280,10 +285,11 @@ fn test_routes_text_warm_attached_caveat_first_line() {
 }
 
 /// `find --mode exact --format text` printed its caveat on stderr only, so a
-/// stdout-only consumer (MCP) read a stale miss as definitive. Contract: the
-/// caveat is the first stdout line.
+/// stdout-only consumer (MCP) read a stale miss as definitive. Contract (F3):
+/// the miss line comes first and says `unverified`; the caveat follows it on
+/// stdout.
 #[test]
-fn test_find_exact_text_warm_attached_caveat_first_stdout_line() {
+fn test_find_exact_text_warm_attached_unverified_line_then_caveat() {
     let (repo, home) = fixture();
     make_warm_attached(repo.path());
     let out = run_ecp(
@@ -299,8 +305,15 @@ fn test_find_exact_text_warm_attached_caveat_first_stdout_line() {
         ],
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let first = stdout.lines().next().unwrap_or_default();
-    assert!(first.contains(WARM_ATTACH_NOTE), "got: {stdout}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(
+        lines.first().is_some_and(|l| l.starts_with("unverified")),
+        "got: {stdout}"
+    );
+    assert!(
+        lines[1..].iter().any(|l| l.contains(WARM_ATTACH_NOTE)),
+        "got: {stdout}"
+    );
 }
 
 /// Plant an untracked file whose name is not UTF-8 on a graph built at HEAD:
