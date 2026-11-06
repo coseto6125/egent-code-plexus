@@ -573,9 +573,7 @@ fn field_reads_walk(
             // only those pay for `statement_declarators`.
             let (mut declarator_kinds, mut name_fields, mut declarator_fields) = (0u32, 0u32, 0u32);
             let mut after_dot = 0;
-            // Stack slots of the last token and of the token before a `::`,
-            // inside a token tree: the `::` marks the name before it.
-            let (mut last_token, mut before_path): (Option<usize>, Option<usize>) = (None, None);
+            let mut path = PathTokens::default();
             loop {
                 let child = cursor.node();
                 let field = memo.field(&cursor);
@@ -610,32 +608,16 @@ fn field_reads_walk(
                     scope: names.child_scope(parent, child_kind, field, &cursor, literal_key_facts),
                     local_scope: child_scope,
                 });
-                if kind & kind_flag::TOKEN_TREE != 0 && !child.is_extra() {
-                    match child.kind() {
-                        "::" => {
-                            before_path = last_token;
-                            if let Some(slot) = before_path {
-                                stack[slot].field |= field_flag::BEFORE_PATH;
-                            }
-                        }
-                        "<" => {
-                            if let Some(slot) = before_path.take() {
-                                stack[slot].field &= !field_flag::BEFORE_PATH;
-                            }
-                        }
-                        _ => before_path = None,
-                    }
-                    last_token = Some(stack.len() - 1);
-                }
                 // A comment between `.` and the name (`v./* c */join`) keeps
                 // the mark for the name.
                 if !child.is_extra() {
-                    after_dot =
-                        if kind & kind_flag::TOKEN_TREE != 0 && child_kind & kind_flag::DOT != 0 {
-                            field_flag::AFTER_DOT
-                        } else {
-                            0
-                        };
+                    after_dot = 0;
+                    if kind & kind_flag::TOKEN_TREE != 0 {
+                        path.see(&mut stack, child_kind);
+                        if child_kind & kind_flag::DOT != 0 {
+                            after_dot = field_flag::AFTER_DOT;
+                        }
+                    }
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -649,6 +631,44 @@ fn field_reads_walk(
     containers.set_declarators(declarators);
     attach_pending_field_reads(&containers, reads, nodes);
     scan.attach(&containers, nodes, names.scoped_qualifiers);
+}
+
+/// Marks the path segments among the loose tokens of one token tree. A
+/// name's frame stays on the walk's stack until its siblings are pushed, so
+/// the `::` after it sets [`field_flag::BEFORE_PATH`] there; asking the name
+/// for its next sibling instead walks down from the root.
+#[derive(Default)]
+struct PathTokens {
+    /// Stack slot and kind flags of the previous token.
+    last: Option<(usize, u32)>,
+    /// The name the last `::` marked.
+    marked: Option<usize>,
+    /// The name of an open turbofish (`handle::<A>`), a value until a `::`
+    /// follows the `>` (`Foo::<u8>::BAR`).
+    turbofish: Option<usize>,
+}
+
+impl PathTokens {
+    fn see(&mut self, stack: &mut [Frame<'_>], kind: u32) {
+        use kind_flag as k;
+        if kind & k::PATH_SEP != 0 {
+            self.marked = match self.last {
+                Some((_, last)) if last & k::ANGLE_CLOSE != 0 => self.turbofish.take(),
+                last => last.map(|(slot, _)| slot),
+            };
+            if let Some(slot) = self.marked {
+                stack[slot].field |= field_flag::BEFORE_PATH;
+            }
+        } else if kind & k::ANGLE_OPEN != 0 {
+            if let Some(slot) = self.marked.take() {
+                stack[slot].field &= !field_flag::BEFORE_PATH;
+                self.turbofish = Some(slot);
+            }
+        } else {
+            self.marked = None;
+        }
+        self.last = Some((stack.len() - 1, kind));
+    }
 }
 
 /// Whether `child`, under a node of kind flags `parent_kind`, lists the
@@ -963,6 +983,12 @@ mod kind_flag {
     pub const QUALIFIED_VALUE: u32 = 1 << 23;
     /// A node that declares one value of its statement ([`super::is_declarator_kind`]).
     pub const VALUE_DECLARATOR: u32 = 1 << 24;
+    /// A `::` token.
+    pub const PATH_SEP: u32 = 1 << 25;
+    /// A `<` token.
+    pub const ANGLE_OPEN: u32 = 1 << 26;
+    /// A `>` or `>>` token.
+    pub const ANGLE_CLOSE: u32 = 1 << 27;
 }
 
 /// Bits [`KindMemo::field`] records for a field name.
@@ -1063,6 +1089,9 @@ impl<'a> KindMemo<'a> {
                 TOKEN_TREE,
             ),
             (kind == ".", DOT),
+            (kind == "::", PATH_SEP),
+            (kind == "<", ANGLE_OPEN),
+            (matches!(kind, ">" | ">>"), ANGLE_CLOSE),
             (spec.named_arg_parents.contains(&kind), NAMED_ARG_PARENT),
             (spec.global_decls.contains(&kind), GLOBAL_DECL),
             (

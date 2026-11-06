@@ -763,6 +763,19 @@ fn test_value_read_rust_macro_path_segment_returns_no_edge() {
     }
 }
 
+/// A `::` after a turbofish's `>` makes the name before it a path again.
+#[test]
+fn test_value_read_rust_macro_turbofish_type_path_returns_no_edge() {
+    let g = graph(
+        &RustProvider::new().unwrap(),
+        &[(
+            "src/lib.rs",
+            "pub const Wrap: u8 = 1;\npub fn show() { println!(\"{}\", Wrap::<u8>::BAR); }\n",
+        )],
+    );
+    assert_eq!(value_reads(&g, "show"), none());
+}
+
 /// A turbofish `handle::<u8>` names a function value; only a name before a
 /// path separator is a path segment.
 #[test]

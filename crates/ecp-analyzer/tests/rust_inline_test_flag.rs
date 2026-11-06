@@ -344,6 +344,14 @@ fn test_extract_const_with_cfg_test_attribute_carries_test_flag() {
     assert!(!const_is_test("src/lib.rs", source, "OPEN"));
 }
 
+/// A `#[test]` fn makes the constants in its body test code too.
+#[test]
+fn test_extract_const_in_test_fn_body_carries_test_flag() {
+    let source = "#[test]\nfn checks() {\n    const LOCAL: usize = 1;\n}\nfn prod() {\n    const PROD_LOCAL: usize = 2;\n}\n";
+    assert!(const_is_test("src/lib.rs", source, "LOCAL"));
+    assert!(!const_is_test("src/lib.rs", source, "PROD_LOCAL"));
+}
+
 #[test]
 fn test_extract_const_in_test_file_carries_test_flag() {
     assert!(const_is_test(

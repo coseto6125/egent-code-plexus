@@ -407,7 +407,7 @@ fn ends_with_word(text: &[u8], word: &[u8]) -> bool {
 }
 
 /// Whether `text` holds the whole word `word`.
-fn has_word(text: &[u8], word: &[u8]) -> bool {
+pub(crate) fn has_word(text: &[u8], word: &[u8]) -> bool {
     text.windows(word.len()).enumerate().any(|(i, w)| {
         w == word
             && (i == 0 || !is_ident_byte(text[i - 1]))

@@ -35,10 +35,12 @@ pub fn extract(
     // flags and the visibility bits mean nothing here, and a production
     // constant gets no metadata at all, so every constant reads the same
     // visibility.
-    // A constant's test verdict needs a `cfg(..test..)` attribute, so a file
-    // without `test` skips the per-constant lookups, each linear in the
-    // item's position: a generated file of 10k constants (windows-sys).
-    let maybe_test = file_category == FileCategory::Test || source.windows(4).any(|w| w == b"test");
+    // A constant is in test scope only under a `cfg(test)` item or a
+    // `#[test]` fn, both of which spell the word `test`. A file without it
+    // skips the per-constant lookups, each linear in the item's position: a
+    // generated file of 10k constants (windows-sys).
+    let maybe_test =
+        file_category == FileCategory::Test || crate::preproc_fallback::has_word(source, b"test");
     metas.extend(
         nodes
             .iter()
