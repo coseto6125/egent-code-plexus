@@ -8,13 +8,15 @@
 use crate::commands::impact::run_for_symbol;
 use crate::peer::dispatch::dispatch_peer_dirty_event;
 use chrono::Utc;
+use ecp_core::contracts::dirty_event::PathChange;
 use ecp_core::peer::concern::{ImpactCache, SymbolKey};
 use ecp_core::session::layout;
+use ecp_core::session::overlay::DirtyEventEntry;
 use ecp_core::session::{DirtyEvents, SessionMeta};
 use fs2::FileExt;
 use notify::event::{DataChange, ModifyKind};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Sender};
@@ -22,11 +24,21 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Our own manifest, split the way `classify` consumes it: entry keys decide
-/// HARD, declaration lists feed SOFT.
+/// HARD, declaration lists feed SOFT. `states` holds each entry's change and
+/// content hash, so a peer entry with the same text is no concern.
 #[derive(Default, Clone)]
 struct MyDirtySurface {
     files: Vec<String>,
     symbols: Vec<ecp_core::session::overlay::SymbolRef>,
+    states: FxHashMap<String, EntryState>,
+}
+
+/// What a manifest entry says the file holds: its change and its content
+/// hash (`None` for a tombstone).
+type EntryState = (PathChange, Option<String>);
+
+fn entry_state(entry: &DirtyEventEntry) -> EntryState {
+    (entry.change, entry.content_hash.clone())
 }
 
 pub struct WatcherCfg {
@@ -356,7 +368,7 @@ fn dispatch_peer(
 ) -> std::io::Result<()> {
     let peer_dirty = DirtyEvents::read(&layout::dirty_events_path(peer_session_dir))?;
     // Populate cache on first call after invalidation; reuse across burst of peer events.
-    let (my_files, my_dirty) = {
+    let (my_files, my_dirty, my_states) = {
         let mut guard = my_dirty_cache.lock().expect("my_dirty_cache lock poisoned");
         if guard.is_none() {
             *guard = Some(
@@ -366,18 +378,27 @@ fn dispatch_peer(
                         // a file whose parse yielded no declarations still
                         // counts, and `dirty_symbols` would have dropped it.
                         let files: Vec<String> = d.entries.keys().cloned().collect();
+                        let states = d
+                            .entries
+                            .iter()
+                            .map(|(path, entry)| (path.clone(), entry_state(entry)))
+                            .collect();
                         let symbols: Vec<ecp_core::session::overlay::SymbolRef> = d
                             .entries
                             .into_values()
                             .flat_map(|e| e.dirty_symbols)
                             .collect();
-                        MyDirtySurface { files, symbols }
+                        MyDirtySurface {
+                            files,
+                            symbols,
+                            states,
+                        }
                     })
                     .unwrap_or_default(),
             );
         }
         let surface = guard.clone().unwrap_or_default();
-        (surface.files, surface.symbols)
+        (surface.files, surface.symbols, surface.states)
     };
     let peer_meta = SessionMeta::read(&peer_session_dir.join("session_meta.json"))?;
     // A session that crashed leaves its dirty manifest behind. On the
@@ -394,8 +415,21 @@ fn dispatch_peer(
     }
     let peer_pid = peer_meta.pid.unwrap_or(0);
     let ts = Utc::now().to_rfc3339();
+    fn dir_name(dir: &Path) -> &str {
+        dir.file_name().and_then(|n| n.to_str()).unwrap_or("")
+    }
+    let other_worktree = crate::session::resolver::in_other_worktrees(
+        dir_name(&cfg.my_session_dir),
+        dir_name(peer_session_dir),
+    );
     let soft_guard = soft.lock().expect("soft state lock poisoned");
     for (peer_file, entry) in &peer_dirty.entries {
+        // A warm cover records the commits since the sibling graph, so two
+        // worktrees that pulled the same commit hold equal entries: same
+        // text, no concurrent edit.
+        if other_worktree && my_states.get(peer_file) == Some(&entry_state(entry)) {
+            continue;
+        }
         dispatch_peer_dirty_event(
             &cfg.my_session_dir,
             peer_sid,
@@ -1020,5 +1054,73 @@ mod tests {
             seen,
             "polling watcher never reported the new dirty_events.json"
         );
+    }
+
+    /// Writes a live session `name` under `root/sessions` whose manifest holds
+    /// `src/a.rs` with content hash `hash`.
+    fn live_session(root: &Path, name: &str, hash: &str) -> PathBuf {
+        let dir = root.join("sessions").join(name);
+        std::fs::create_dir_all(&dir).expect("session dir");
+        let now = Utc::now().to_rfc3339();
+        let meta = SessionMeta {
+            version: 1,
+            session_id: name.into(),
+            pid: Some(std::process::id()),
+            started_at: now.clone(),
+            last_touched: now,
+            base_sha: "0".repeat(40),
+            source_worktree: String::new(),
+            overlay_version: 0,
+            watcher_pid: None,
+            last_drained_offset: 0,
+            agent_name: None,
+        };
+        SessionMeta::write_atomic(&dir.join("session_meta.json"), &meta).expect("meta");
+        write_dirty(&dir, &["foo"]);
+        let path = layout::dirty_events_path(&dir);
+        let mut manifest = DirtyEvents::read(&path).expect("manifest");
+        manifest
+            .entries
+            .get_mut("src/a.rs")
+            .expect("entry")
+            .content_hash = Some(hash.into());
+        DirtyEvents::write_atomic(&path, &manifest).expect("manifest");
+        dir
+    }
+
+    /// Inbox lines the session `me~aaaaaaaa` gets from one dispatch of `peer`.
+    fn concerns_from(peer: &str, my_hash: &str, peer_hash: &str) -> usize {
+        let root = tempfile::tempdir().expect("tempdir");
+        let my_session_dir = live_session(root.path(), "me~aaaaaaaa", my_hash);
+        let peer_dir = live_session(root.path(), peer, peer_hash);
+        let cfg = WatcherCfg {
+            repo_root: root.path().to_path_buf(),
+            my_session_id: "me".into(),
+            my_session_dir: my_session_dir.clone(),
+            lock_path: root.path().join("watcher.lock"),
+        };
+        let soft = Arc::new(Mutex::new(SoftState::default()));
+        let cache = Arc::new(Mutex::new(None));
+        dispatch_peer(&cfg, &soft, &cache, peer, &peer_dir).expect("dispatch");
+        std::fs::read_to_string(my_session_dir.join("inbox.jsonl")).map_or(0, |s| s.lines().count())
+    }
+
+    /// Fails before the fix: two worktrees that pulled one commit got a HARD
+    /// concern for every file of the warm cover.
+    #[test]
+    fn test_dispatch_peer_other_worktree_same_text_raises_no_concern() {
+        assert_eq!(concerns_from("peer~bbbbbbbb", "h1", "h1"), 0);
+    }
+
+    #[test]
+    fn test_dispatch_peer_other_worktree_different_text_raises_hard() {
+        assert_eq!(concerns_from("peer~bbbbbbbb", "h1", "h2"), 1);
+    }
+
+    /// One worktree shares its files on disk, so equal text there is still two
+    /// agents on one file.
+    #[test]
+    fn test_dispatch_peer_same_worktree_same_text_raises_hard() {
+        assert_eq!(concerns_from("peer~aaaaaaaa", "h1", "h1"), 1);
     }
 }

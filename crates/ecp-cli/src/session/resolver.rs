@@ -79,6 +79,16 @@ pub fn session_dir_name(sid: &str, worktree: &Path) -> String {
     )
 }
 
+/// True when session dir names `a` and `b` both carry a worktree key and the
+/// keys differ. Sessions of one worktree share its files on disk, so equal
+/// content there still means two agents edit one file.
+pub fn in_other_worktrees(a: &str, b: &str) -> bool {
+    match (split_session_dir_name(a), split_session_dir_name(b)) {
+        (Some((_, ka)), Some((_, kb))) => ka != kb,
+        _ => false,
+    }
+}
+
 /// Key for a path whose `.git` git would not open (an empty `.git` dir): the
 /// nearest ancestor that holds a `.git` entry,
 /// so a subdirectory keys like its worktree root. Without any `.git` ancestor

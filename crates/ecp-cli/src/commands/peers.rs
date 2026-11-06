@@ -230,17 +230,25 @@ fn cmd_status(repo_root: &std::path::Path, format: StatusFormat) -> std::io::Res
 /// the proactive impact-level question).
 fn cmd_status_pairs(repo_root: &std::path::Path, format: StatusFormat) -> std::io::Result<()> {
     use ecp_core::session::{layout, DirtyEvents};
-    use std::collections::HashSet;
+    use std::collections::HashMap;
 
     // Empty exclude id matches no session dir → own session included.
     let sessions = alive_peers(repo_root, "");
-    let dirty: Vec<HashSet<String>> = sessions
+    // Each path maps to its change and content hash: two worktrees that hold
+    // the same text for a path (a commit both pulled) share no edit.
+    type State = (ecp_core::contracts::dirty_event::PathChange, Option<String>);
+    let dirty: Vec<HashMap<String, State>> = sessions
         .iter()
         .map(|s| {
             DirtyEvents::read(&layout::dirty_events_path(
                 &repo_root.join("sessions").join(&s.session_id),
             ))
-            .map(|d| d.entries.into_keys().collect())
+            .map(|d| {
+                d.entries
+                    .into_iter()
+                    .map(|(path, e)| (path, (e.change, e.content_hash)))
+                    .collect()
+            })
             .unwrap_or_default()
         })
         .collect();
@@ -255,7 +263,19 @@ fn cmd_status_pairs(repo_root: &std::path::Path, format: StatusFormat) -> std::i
     let mut rows: Vec<(usize, usize, Vec<String>)> = Vec::new();
     for i in 0..sessions.len() {
         for j in (i + 1)..sessions.len() {
-            let mut shared: Vec<String> = dirty[i].intersection(&dirty[j]).cloned().collect();
+            let other_worktree = crate::session::resolver::in_other_worktrees(
+                &sessions[i].session_id,
+                &sessions[j].session_id,
+            );
+            let mut shared: Vec<String> = dirty[i]
+                .iter()
+                .filter(|(path, state)| {
+                    dirty[j]
+                        .get(*path)
+                        .is_some_and(|other| !other_worktree || other != *state)
+                })
+                .map(|(path, _)| path.clone())
+                .collect();
             if shared.is_empty() {
                 continue;
             }
