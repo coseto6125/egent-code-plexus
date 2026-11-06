@@ -6,16 +6,20 @@
 //! `val` / `var` / parameter on every path, so a binding needs no control
 //! flow: a class or a top-level function lowers as one straight run of
 //! statements and the scopes alone decide which declaration a use reaches.
-//! A binding with no plain class type (`val x = make()`, `Foo?`, an implicit
-//! lambda parameter, a member property, a constructor parameter that is no
-//! property) is declared untyped: its uses answer `Unknown(NoEvidence)`,
-//! which still shadows an import or a type of that name.
+//! A binding with no plain class type (`val x = make()`, `Foo?`, a qualified
+//! `Outer.Inner`, a `vararg`, an implicit lambda parameter, a member
+//! property, a constructor parameter that is no property) is declared
+//! untyped: its uses answer `Unknown(NoEvidence)`, which still shadows an
+//! import or a type of that name.
 //!
 //! A class lowers as one unit, so its primary-constructor parameters reach
 //! every member function, initializer and property initializer; a `val` /
 //! `var` constructor parameter is a property of the class and carries its
-//! declared type.
+//! declared type. A nested class without `inner`, an `object` and a
+//! `companion object` have no enclosing instance, so each lowers in a frame
+//! of its own that no enclosing binding reaches.
 
+use crate::framework_helpers::node_span;
 use crate::receiver::ir::{BindingOrigin, ScopeKind, TypeOrigin};
 use crate::receiver::{DeclaredTypePolicy, IrBuilder, LangPolicy, Lowered, Lowering, ScopeRule};
 use tree_sitter::Node;
@@ -63,15 +67,38 @@ impl Lowering for KotlinLowering {
     }
 }
 
-/// The class name of a declared type that is a `user_type` whose first
-/// segment is a `type_identifier`. Anything else (`Foo?`, a function type)
-/// is no plain class type.
+/// The class name of a declared type that is a `user_type` of one segment
+/// (`Foo`, `List<A>`). A qualified `Outer.Inner` names `Inner`, not its
+/// head, so it is no plain class type here, and neither is anything else
+/// (`Foo?`, a function type).
 fn declared_class<'s>(ty: Option<Node<'_>>, source: &'s [u8]) -> Option<&'s str> {
     let ty = ty.filter(|ty| ty.kind() == "user_type")?;
-    let first = ty
-        .named_child(0)
-        .filter(|n| n.kind() == "type_identifier")?;
-    first.utf8_text(source).ok().filter(|name| !name.is_empty())
+    let mut segments = named_children(ty)
+        .into_iter()
+        .filter(|n| n.kind() == "type_identifier");
+    let (Some(segment), None) = (segments.next(), segments.next()) else {
+        return None;
+    };
+    segment
+        .utf8_text(source)
+        .ok()
+        .filter(|name| !name.is_empty())
+}
+
+/// Whether `modifiers` holds a `kind` modifier spelled `keyword`
+/// (`parameter_modifier` `vararg`, `class_modifier` `inner`).
+fn has_modifier(modifiers: Node<'_>, kind: &str, keyword: &str) -> bool {
+    named_children(modifiers)
+        .into_iter()
+        .any(|m| m.kind() == kind && m.child(0).is_some_and(|k| k.kind() == keyword))
+}
+
+/// A class declared in a class body without `inner`: Kotlin gives it no
+/// enclosing instance, so the enclosing class's members are not in scope.
+fn is_nested_class(node: Node<'_>) -> bool {
+    node.parent().is_some_and(|p| is_class_body(p.kind()))
+        && !child_of_kind(node, "modifiers")
+            .is_some_and(|m| has_modifier(m, "class_modifier", "inner"))
 }
 
 fn named_children<'t>(node: Node<'t>) -> Vec<Node<'t>> {
@@ -179,10 +206,20 @@ impl<'s> Lower<'s> {
     fn special(&mut self, b: &mut IrBuilder, node: Node<'_>) -> bool {
         match node.kind() {
             "statements" | "when_expression" => self.scoped(b, node),
-            "function_declaration" | "anonymous_function" | "secondary_constructor" => {
+            "function_declaration" | "anonymous_function" | "secondary_constructor" | "setter" => {
                 self.callable(b, node)
             }
+            "class_declaration" if is_nested_class(node) => {
+                b.closure(node_span(&node), |inner| self.class(inner, node));
+            }
             "class_declaration" => self.class(b, node),
+            "object_declaration" | "companion_object" => {
+                b.closure(node_span(&node), |inner| {
+                    for child in named_children(node) {
+                        self.walk(inner, child);
+                    }
+                });
+            }
             "class_body" | "enum_class_body" => self.class_body(b, node),
             "lambda_literal" => self.lambda(b, node),
             "property_declaration" => self.property(b, node),
@@ -224,32 +261,46 @@ impl<'s> Lower<'s> {
         b.pop_scope();
     }
 
-    /// A function, an anonymous function or a secondary constructor: its
-    /// parameters, then everything else.
+    /// A function, an anonymous function, a secondary constructor or a
+    /// setter: its parameters, then everything else. A `vararg xs: T`
+    /// holds an `Array<out T>`, so it is declared untyped.
     fn callable(&mut self, b: &mut IrBuilder, node: Node<'_>) {
         b.push_scope(ScopeKind::Block);
+        let is_parameters = |c: &Node<'_>| {
+            matches!(
+                c.kind(),
+                "function_value_parameters" | "parameter_with_optional_type"
+            )
+        };
         let children = named_children(node);
-        for params in children
-            .iter()
-            .filter(|c| c.kind() == "function_value_parameters")
-        {
+        for params in children.iter().filter(|c| is_parameters(c)) {
+            if params.kind() == "parameter_with_optional_type" {
+                self.declare_named(b, *params, true, BindingOrigin::Param);
+                continue;
+            }
+            let mut vararg = false;
             for param in named_children(*params) {
-                if param.kind() == "parameter" {
-                    self.declare_named(b, param, true, BindingOrigin::Param);
+                match param.kind() {
+                    "parameter_modifiers" => {
+                        vararg = has_modifier(param, "parameter_modifier", "vararg")
+                    }
+                    "parameter" => {
+                        self.declare_named(b, param, !vararg, BindingOrigin::Param);
+                        vararg = false;
+                    }
+                    _ => {}
                 }
             }
         }
-        for child in children
-            .into_iter()
-            .filter(|c| c.kind() != "function_value_parameters")
-        {
+        for child in children.into_iter().filter(|c| !is_parameters(c)) {
             self.walk(b, child);
         }
         b.pop_scope();
     }
 
     /// The primary-constructor parameters reach the whole class; a `val` /
-    /// `var` one is a property and keeps its declared type.
+    /// `var` one is a property and keeps its declared type, unless it is a
+    /// `vararg` (an array).
     fn class(&mut self, b: &mut IrBuilder, node: Node<'_>) {
         b.push_scope(ScopeKind::Block);
         let children = named_children(node);
@@ -260,7 +311,9 @@ impl<'s> Lower<'s> {
             for param in named_children(*constructor) {
                 if param.kind() == "class_parameter" {
                     let property = child_of_kind(param, "binding_pattern_kind").is_some();
-                    self.declare_named(b, param, property, BindingOrigin::Param);
+                    let vararg = child_of_kind(param, "modifiers")
+                        .is_some_and(|m| has_modifier(m, "parameter_modifier", "vararg"));
+                    self.declare_named(b, param, property && !vararg, BindingOrigin::Param);
                 }
             }
         }
@@ -625,5 +678,142 @@ mod tests {
     #[test]
     fn test_lower_class_without_primary_constructor_lowers_its_functions() {
         assert_eq!(only("class H { fun f(a: A) { a.m() } }"), "known A");
+    }
+
+    #[test]
+    fn test_lower_qualified_constructor_property_type_is_untyped() {
+        assert_eq!(
+            only("class VM(private val state: Screen.State) {\n    fun f() {\n        state.copy()\n    }\n}\n"),
+            "unknown NoEvidence"
+        );
+    }
+
+    #[test]
+    fn test_lower_qualified_parameter_type_is_untyped_and_generic_keeps_its_class() {
+        assert_eq!(
+            receivers("fun f(b: Foo.Builder, c: List<A>) {\n    b.one()\n    c.two()\n}\n"),
+            vec![pair("one", "unknown NoEvidence"), pair("two", "known List")]
+        );
+    }
+
+    #[test]
+    fn test_lower_qualified_local_and_catch_types_are_untyped() {
+        assert_eq!(
+            only("fun f() {\n    val s: Outer.Inner = make()\n    s.m()\n}\n"),
+            "unknown NoEvidence"
+        );
+        assert_eq!(
+            only("fun f() {\n    try {\n        g()\n    } catch (e: java.io.IOException) {\n        e.m()\n    }\n}\n"),
+            "unknown NoEvidence"
+        );
+    }
+
+    #[test]
+    fn test_lower_vararg_parameter_is_untyped_and_the_next_parameter_is_known() {
+        assert_eq!(
+            receivers("fun f(vararg rows: Row, r: Row) {\n    rows.one()\n    r.two()\n}\n"),
+            vec![pair("one", "unknown NoEvidence"), pair("two", "known Row")]
+        );
+    }
+
+    #[test]
+    fn test_lower_annotated_parameter_is_known() {
+        assert_eq!(only("fun f(@Ann a: A) {\n    a.m()\n}\n"), "known A");
+    }
+
+    #[test]
+    fn test_lower_vararg_constructor_property_is_untyped() {
+        assert_eq!(
+            only("class C(vararg val xs: Row) {\n    fun f() {\n        xs.m()\n    }\n}\n"),
+            "unknown NoEvidence"
+        );
+    }
+
+    #[test]
+    fn test_lower_nested_class_does_not_see_the_outer_constructor_property() {
+        assert_eq!(
+            only("class Repo(private val logger: DbLogger) {\n    class Builder {\n        fun build() {\n            logger.info()\n        }\n    }\n}\n"),
+            "none"
+        );
+    }
+
+    #[test]
+    fn test_lower_inner_class_sees_the_outer_constructor_property() {
+        assert_eq!(
+            only("class Repo(val logger: DbLogger) {\n    inner class Builder {\n        fun build() {\n            logger.info()\n        }\n    }\n}\n"),
+            "known DbLogger"
+        );
+    }
+
+    #[test]
+    fn test_lower_companion_and_named_object_do_not_see_the_outer_property() {
+        assert_eq!(
+            only("class R(val a: A) {\n    companion object {\n        fun h() {\n            a.m()\n        }\n    }\n}\n"),
+            "none"
+        );
+        assert_eq!(
+            only("class R(val a: A) {\n    object O {\n        fun k() {\n            a.m()\n        }\n    }\n}\n"),
+            "none"
+        );
+    }
+
+    #[test]
+    fn test_lower_nested_interface_does_not_see_the_outer_member_property() {
+        assert_eq!(
+            only("class R {\n    val a: A = A()\n    interface N {\n        fun g() {\n            a.m()\n        }\n    }\n}\n"),
+            "none"
+        );
+    }
+
+    #[test]
+    fn test_lower_local_class_sees_the_enclosing_local() {
+        assert_eq!(
+            only("class R {\n    fun z() {\n        val a: A = A()\n        class L {\n            fun l() {\n                a.m()\n            }\n        }\n    }\n}\n"),
+            "known A"
+        );
+    }
+
+    #[test]
+    fn test_lower_anonymous_object_sees_the_outer_constructor_property() {
+        assert_eq!(
+            only("class R(val a: A) {\n    fun f() {\n        val o = object : Base() {\n            fun p() {\n                a.m()\n            }\n        }\n    }\n}\n"),
+            "known A"
+        );
+    }
+
+    #[test]
+    fn test_lower_nested_class_unit_root_binds_its_own_property() {
+        assert_eq!(
+            only("object Top {\n    class N(val b: B) {\n        fun g() {\n            b.m()\n        }\n    }\n}\n"),
+            "known B"
+        );
+    }
+
+    #[test]
+    fn test_lower_inner_class_of_a_nested_class_sees_only_the_nested_class() {
+        assert_eq!(
+            receivers("class R(val a: A) {\n    class N(val b: B) {\n        inner class I {\n            fun g() {\n                b.m()\n                a.n()\n            }\n        }\n    }\n}\n"),
+            vec![pair("m", "known B"), pair("n", "none")]
+        );
+    }
+
+    #[test]
+    fn test_lower_outer_class_keeps_its_property_after_a_nested_class() {
+        assert_eq!(
+            only("class R(val a: A) {\n    class N {\n        val b: B = B()\n    }\n    fun f() {\n        a.m()\n    }\n}\n"),
+            "known A"
+        );
+    }
+
+    #[test]
+    fn test_lower_setter_parameter_shadows_the_constructor_property() {
+        assert_eq!(
+            only("class C(val value: A) {\n    var x: B = B()\n        set(value) {\n            value.m()\n        }\n}\n"),
+            "unknown NoEvidence"
+        );
+        assert_eq!(
+            only("class C(val v: A) {\n    var x: B = B()\n        set(v: B) {\n            v.m()\n        }\n}\n"),
+            "known B"
+        );
     }
 }

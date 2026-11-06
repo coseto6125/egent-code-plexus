@@ -17,6 +17,9 @@
 //!
 //! - `Other().m()` where this file declares `class Other` → `Other.m`
 //!
+//! A receiver binding the receiver core left unproven (the budget) emits
+//! [`CallSite::unproven_member`], never the bare name.
+//!
 //! Falls back to the bare method name for other unresolved receivers, but
 //! a computed receiver (`other().m()`) whose `m` an enclosing type declares
 //! emits [`CallSite::untyped_member`], so it never binds the caller's own
@@ -29,6 +32,7 @@ use super::receiver_lower::KotlinLowering;
 use crate::calls::{
     attach_to_enclosing, reference_function, span_holds, span_width, start_pos, Pos,
 };
+use crate::receiver::lattice::UnknownCause;
 use crate::receiver::{analyze_file, FileReceivers, Receiver as CoreReceiver};
 use ecp_core::analyzer::types::{BlindSpot, CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
@@ -45,21 +49,20 @@ struct LocalTypes {
 }
 
 impl LocalTypes {
-    /// The binding the identifier `node` reads: its declared class name, `""`
-    /// for one declared without a plain class type, `None` for a name that
-    /// is no binding here.
-    fn local(&self, node: Node<'_>) -> Option<&str> {
-        match self.receivers.receiver_at(node)? {
-            CoreReceiver::Known(ty) => Some(&ty.text),
-            CoreReceiver::Unknown(_) => Some(""),
-        }
+    /// The receiver state of the binding the identifier `node` reads, `None`
+    /// for a name that is no binding here.
+    fn local(&self, node: Node<'_>) -> Option<&CoreReceiver> {
+        self.receivers.receiver_at(node)
     }
 
     fn lookup(&self, node: Node<'_>, var: &str) -> Option<&str> {
-        // An unknown local type still shadows an imported binding.
-        self.local(node)
-            .or_else(|| self.imports.get(var).map(String::as_str))
-            .filter(|ty| !ty.is_empty())
+        match self.local(node) {
+            Some(CoreReceiver::Known(ty)) => Some(&*ty.text),
+            // An unknown local type still shadows an imported binding.
+            Some(CoreReceiver::Unknown(_)) => None,
+            None => self.imports.get(var).map(String::as_str),
+        }
+        .filter(|ty| !ty.is_empty())
     }
 
     /// Whether a local, parameter or class property declares the name `node`
@@ -162,6 +165,19 @@ fn kotlin_callee(
                     // may be a type, which the resolver decides.
                     if !locals.binds(receiver, var) && !declares_member(nodes, pos, var) {
                         return Some(CallSite::from_receiver(var, method));
+                    }
+                    // A binding the core could not follow (the budget) lost
+                    // its type, pinned or not: a bare name would bind the
+                    // caller's own `m`, so the site stays unproven.
+                    let unproven = locals.local(receiver).filter(|state| {
+                        !matches!(
+                            state,
+                            CoreReceiver::Known(_)
+                                | CoreReceiver::Unknown(UnknownCause::NoEvidence)
+                        )
+                    });
+                    if let Some(unproven) = unproven {
+                        return Some(unproven.call_entry(method));
                     }
                     locals.lookup(receiver, var).map(str::to_string)
                 }
@@ -430,8 +446,16 @@ fn enclosing_superclass(nodes: &[RawNode], pos: Pos) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::super::parser::KotlinProvider;
+    use super::{kotlin_callee, LocalTypes};
+    use crate::kotlin::receiver_lower::KotlinLowering;
+    use crate::receiver::ir::{BindingOrigin, Value};
+    use crate::receiver::solve::MAX_TRACKED_CELLS;
+    use crate::receiver::{analyze_file, IrBuilder, LangPolicy, Lowered, Lowering};
     use ecp_core::analyzer::provider::LanguageProvider;
+    use ecp_core::analyzer::types::CallSite;
+    use std::collections::HashMap;
     use std::path::Path;
+    use tree_sitter::Node;
 
     fn parse(src: &str) -> ecp_core::analyzer::types::LocalGraph {
         let provider = KotlinProvider::new().expect("KotlinProvider::new");
@@ -575,5 +599,93 @@ class VM(private val repository: UserRepository) {
             .find(|n| n.name == "go")
             .expect("go function not found");
         assert_eq!(go.calls, ["Helper.work"]);
+    }
+
+    /// Lowers the function that reads `repo` with more written, read cells
+    /// than the receiver core tracks, `repo` untyped among them, so `repo`
+    /// answers `Unknown(Budget)` whatever the solver's tracking rule.
+    struct OverBudget;
+
+    impl Lowering for OverBudget {
+        type Cx<'a> = ();
+
+        fn policy(&self) -> LangPolicy {
+            KotlinLowering.policy()
+        }
+
+        fn is_function(&self, node: Node<'_>) -> bool {
+            node.kind() == "function_declaration"
+        }
+
+        fn lower(&self, _cx: &(), function: Node<'_>, source: &[u8], b: &mut IrBuilder) -> Lowered {
+            let mut stack = vec![function];
+            let mut repo = None;
+            while let Some(n) = stack.pop() {
+                if n.kind() == "simple_identifier" && n.utf8_text(source) == Ok("repo") {
+                    repo = Some(n);
+                }
+                stack.extend(n.named_children(&mut n.walk()));
+            }
+            let Some(repo) = repo else {
+                return Lowered::NoUses;
+            };
+            for i in 0..MAX_TRACKED_CELLS {
+                let filler = b.declare(&format!("x{i}"), BindingOrigin::Local, None);
+                b.assign(filler, Value::Unknown);
+                b.use_binding(filler, i);
+            }
+            let binding = b.declare("repo", BindingOrigin::Param, None);
+            b.assign(binding, Value::Unknown);
+            b.use_binding(binding, repo.id());
+            Lowered::Done
+        }
+    }
+
+    /// Over the budget a receiver's type is lost. The bare `save` would bind
+    /// the caller's own `save` the way an implicit-`this` call does; the
+    /// site must be an unproven member, which binds nothing in Kotlin.
+    #[test]
+    fn test_kotlin_callee_over_budget_receiver_emits_unproven_member() {
+        let src = "class Big {\n    fun save() {}\n    fun store(repo: Repo) {\n        repo.save()\n    }\n}\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_kotlin::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(src, None).unwrap();
+        let locals = LocalTypes {
+            receivers: analyze_file(
+                &OverBudget,
+                &(),
+                tree.root_node(),
+                src.as_bytes(),
+                Path::new("Big.kt"),
+            ),
+            imports: HashMap::new(),
+        };
+        let mut stack = vec![tree.root_node()];
+        let mut call = None;
+        while let Some(n) = stack.pop() {
+            if n.kind() == "call_expression" {
+                call = Some(n);
+            }
+            stack.extend(n.named_children(&mut n.walk()));
+        }
+        let call = call.expect("repo.save() call");
+        assert_eq!(
+            kotlin_callee(call, src.as_bytes(), &locals, &[]),
+            Some(CallSite::unproven_member("save"))
+        );
+    }
+
+    /// Under the budget the same parameter keeps its declared type.
+    #[test]
+    fn test_kotlin_callee_typed_parameter_in_a_class_emits_declared_type() {
+        let graph = parse("class Big {\n    fun save() {}\n    fun store(repo: Repo) {\n        repo.save()\n    }\n}\n");
+        let store = graph
+            .nodes
+            .iter()
+            .find(|n| n.name == "store")
+            .expect("store function not found");
+        assert_eq!(store.calls, ["Repo.save"]);
     }
 }

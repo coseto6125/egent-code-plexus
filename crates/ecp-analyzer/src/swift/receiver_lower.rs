@@ -96,12 +96,19 @@ fn children_by_field<'t>(node: Node<'t>, field: &str) -> Vec<Node<'t>> {
 }
 
 /// The class a type node names, when it is a single `type_identifier`
-/// (generic arguments and a qualified path are not looked at).
+/// (generic arguments are not looked at). A qualified `Outer.Inner` names
+/// `Inner`, not its head, so it names no class here.
 fn simple_type<'s>(node: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
     let ident = match node.kind() {
-        "user_type" => node
-            .named_child(0)
-            .filter(|c| c.kind() == "type_identifier")?,
+        "user_type" => {
+            let mut segments = named_children(node)
+                .into_iter()
+                .filter(|c| c.kind() == "type_identifier");
+            let (Some(segment), None) = (segments.next(), segments.next()) else {
+                return None;
+            };
+            segment
+        }
         "type_identifier" => node,
         _ => return None,
     };
@@ -170,13 +177,19 @@ impl<'s> Lower<'s> {
         }
     }
 
-    /// `parameter`: the first `name` is the internal name, the second the type.
+    /// `parameter`: the first `name` is the internal name, the second the
+    /// type. A variadic `items: T...` holds a `[T]`, so it is declared untyped.
     fn parameter(&mut self, b: &mut IrBuilder, param: Node<'_>) {
         let names = children_by_field(param, "name");
         let Some(identifier) = names.iter().find(|n| n.kind() == "simple_identifier") else {
             return;
         };
-        let ty = names.iter().find_map(|n| simple_type(*n, self.source));
+        let mut cursor = param.walk();
+        let variadic = param.children(&mut cursor).any(|c| c.kind() == "...");
+        let ty = names
+            .iter()
+            .filter(|_| !variadic)
+            .find_map(|n| simple_type(*n, self.source));
         let declared = ty.map(|ty| b.intern(ty, TypeOrigin::Annotation));
         b.declare(self.text(*identifier), BindingOrigin::Param, declared);
     }
@@ -344,6 +357,9 @@ impl<'s> Lower<'s> {
     }
 
     /// A closure literal: parameters, then capture-list items, then the body.
+    /// tree-sitter-swift parses a variadic closure parameter list
+    /// (`{ (xs: Int...) in .. }`) as an `ERROR`; every name in it is
+    /// declared untyped, so none of them reads an outer binding.
     fn closure(&mut self, b: &mut IrBuilder, node: Node<'_>) {
         b.closure(node_span(&node), |inner| {
             let mut cursor = node.walk();
@@ -351,6 +367,16 @@ impl<'s> Lower<'s> {
             if let Some(list) = parts.iter().find(|p| p.kind() == "capture_list") {
                 for item in named_children(*list) {
                     self.capture_item(inner, item);
+                }
+            }
+            for error in parts.iter().filter(|p| p.kind() == "ERROR") {
+                let mut stack = vec![*error];
+                while let Some(n) = stack.pop() {
+                    if n.kind() == "simple_identifier" {
+                        inner.declare(self.text(n), BindingOrigin::Param, None);
+                    }
+                    let mut cursor = n.walk();
+                    stack.extend(n.named_children(&mut cursor));
                 }
             }
             for part in &parts {
@@ -1052,5 +1078,70 @@ mod tests {
     #[test]
     fn test_lower_copy_of_pinned_binding_is_known() {
         assert_eq!(only("func f(o: A) { let p = o; p.m() }"), "known A");
+    }
+
+    #[test]
+    fn test_lower_qualified_parameter_type_is_untyped() {
+        assert_eq!(
+            only("func show(_ route: Coordinator.Route) { route.present() }"),
+            "unknown NoEvidence"
+        );
+    }
+
+    #[test]
+    fn test_lower_generic_parameter_type_keeps_its_class() {
+        assert_eq!(only("func f(a: Array<Foo>) { a.m() }"), "known Array");
+    }
+
+    #[test]
+    fn test_lower_qualified_local_and_closure_parameter_types_are_untyped() {
+        assert_eq!(
+            only("func f() { let s: ViewModel.State = make(); s.m() }"),
+            "unknown NoEvidence"
+        );
+        assert_eq!(
+            only("func f(a: A) { let g = { (b: Outer.B) in b.m() } }"),
+            "unknown NoEvidence"
+        );
+    }
+
+    #[test]
+    fn test_lower_variadic_parameter_is_untyped_and_the_next_parameter_is_known() {
+        let found = receivers("func add(_ items: Item..., r: Item) { items.first(); r.save() }");
+        assert_eq!(
+            found,
+            vec![
+                ("first".to_string(), "unknown NoEvidence".to_string()),
+                ("save".to_string(), "known Item".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn test_lower_variadic_closure_parameter_shadows_the_outer_binding() {
+        assert_eq!(
+            only("func f(xs: A) { let g = { (xs: Int...) in xs.first() } }"),
+            "unknown NoEvidence"
+        );
+    }
+
+    #[test]
+    fn test_lower_closure_without_error_still_captures_the_outer_binding() {
+        let found = receivers("func f(xs: A) { let g = { (ys: B) in ys.m(); xs.n() } }");
+        assert_eq!(
+            found,
+            vec![
+                ("m".to_string(), "known B".to_string()),
+                ("n".to_string(), "known A".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn test_lower_nested_type_method_does_not_see_the_outer_stored_property() {
+        assert_eq!(
+            only("class Outer { var o: A = A()\n struct Inner { func g() { o.m() } } }\n"),
+            "none"
+        );
     }
 }
