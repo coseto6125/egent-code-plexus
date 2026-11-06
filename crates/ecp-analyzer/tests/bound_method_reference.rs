@@ -977,6 +977,20 @@ fn test_bound_method_reference_python_read_before_rebinding_keeps_type() {
     }
 }
 
+/// Stands for: the last annotation before the read gives the type, even when
+/// an earlier one named another class.
+#[test]
+fn test_bound_method_reference_python_later_annotation_gives_its_type() {
+    let g = python_graph(
+        "local: Other = Other()\n    local = loose\n    local: Cls = Cls()\n    return list(map(local.m, xs))",
+    );
+    assert_one_cross_file(&function_refs(&g, "run"), "cls.py", "m");
+    let g = python_graph(
+        "local: Cls = Cls()\n    local = loose\n    local: Other = Other()\n    return list(map(local.m, xs))",
+    );
+    assert_one_cross_file(&function_refs(&g, "run"), "other.py", "m");
+}
+
 /// Stands for: a lambda or comprehension that binds another name leaves the
 /// outer `obj: Cls` typing the receiver.
 #[test]
