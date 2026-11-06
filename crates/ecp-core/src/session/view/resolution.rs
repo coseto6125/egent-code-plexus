@@ -16,6 +16,7 @@ use crate::analyzer::admission::{
 use crate::analyzer::c_family::{
     c_family_field, canonical_declaration, is_c_family, may_be_declaration, CCallable,
 };
+use crate::analyzer::containment;
 use crate::analyzer::csharp_access::{self, CallAccess};
 use crate::analyzer::csharp_extension::{self, ReceiverSite};
 use crate::analyzer::decorates::{decorates_edges, DECORATES_REASON};
@@ -69,7 +70,7 @@ use crate::analyzer::types::{
 };
 use crate::contracts::identity::lexical_parents_in;
 use crate::file_category::{pick_global, FileMeta, GlobalPick, Language};
-use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
+use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType, NO_CONTAINER};
 use crate::registry::os_path_to_slash;
 use crate::session::closure::ConfigEdits;
 use crate::session::import_scope::{stored_file_meta, stored_language, ImportScope, Module};
@@ -265,6 +266,11 @@ struct OverlayFacts<'a> {
     /// `SymbolTable::csharp_namespaces`. Built on the first C# extension
     /// question.
     csharp_namespaces: OnceCell<FxHashMap<&'a str, Vec<&'a str>>>,
+    /// Per virtual offset, the dirty symbol's container as a virtual idx, or
+    /// `NO_CONTAINER` at file level: [`containment::containers`] over each
+    /// dirty file's symbols, as the index computes `ZeroCopyGraph::containers`
+    /// over its parse.
+    dirty_containers: Vec<u32>,
     /// The Rust module trees ([`ladder::ModuleTreeFacts`]).
     rust: RustModules<'a>,
     /// Dirty file ordinal → where it stands in [`Self::rust`], read on its
@@ -373,6 +379,7 @@ impl<'a> OverlayFacts<'a> {
         let mut dirty_return_types: FxHashMap<u32, &'a str> = FxHashMap::default();
         let mut dirty_flags: FxHashMap<u32, u16> = FxHashMap::default();
         let mut dirty_lexical_parents: FxHashMap<u32, u32> = FxHashMap::default();
+        let mut dirty_containers: Vec<u32> = Vec::with_capacity(nodes.len());
         let mut rust_facts = DirtyRustFacts::default();
         // The first virtual idx of each uid: the index merges each repeat
         // that carries it into it, a later node included.
@@ -436,6 +443,21 @@ impl<'a> OverlayFacts<'a> {
                 offset += 1;
             }
             rust_facts.starts.push(start);
+            let rows: Vec<containment::Row<'_>> = file
+                .symbols
+                .iter()
+                .map(|s| containment::Row {
+                    kind: s.kind,
+                    owner: s.owner_class.as_deref(),
+                    name: &s.name,
+                    span: HeritageNode::span(s),
+                })
+                .collect();
+            dirty_containers.extend(
+                containment::containers(&rows)
+                    .into_iter()
+                    .map(|c| c.map_or(NO_CONTAINER, |raw| start + raw as u32)),
+            );
             if rust_file {
                 rust_impl_members(&file.symbols, |member, block, implemented| {
                     dirty_impl_members.insert(
@@ -551,6 +573,7 @@ impl<'a> OverlayFacts<'a> {
             dirty_return_types,
             dirty_flags,
             dirty_lexical_parents,
+            dirty_containers,
             csharp_namespaces: OnceCell::new(),
             rust,
             rust_callers: RefCell::default(),
@@ -2396,6 +2419,19 @@ impl PickFacts for OverlayFacts<'_> {
 
     fn later_overloads(&self, first: u32) -> Cow<'_, [u32]> {
         Cow::Owned(self.later_overloads_of(first))
+    }
+
+    /// A clean base node reads the stored column, a dirty symbol the column
+    /// its file's fresh parse gave in [`OverlayFacts::new`].
+    fn container(&self, id: u32) -> Option<u32> {
+        match id.checked_sub(self.base_len()) {
+            Some(offset) => self
+                .dirty_containers
+                .get(offset as usize)
+                .copied()
+                .filter(|&c| c != NO_CONTAINER),
+            None => self.graph.container(id),
+        }
     }
 
     fn types_named(&self, owner: &str) -> Vec<u32> {

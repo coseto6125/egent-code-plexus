@@ -44,7 +44,13 @@ pub const GRAPH_MAGIC: [u8; 8] = *b"ECP-RS\0\0";
 /// v20: `later_nodes` (one bit per node that no name table holds: a later
 ///     overload, a redefinition, a C# arity sibling), so the overlay skips
 ///     the nodes the index's name lookups skip.
-pub const GRAPH_FORMAT_VERSION: u32 = 20;
+/// v21: `containers` (each node's innermost enclosing qualifier declaration
+///     of its file), so a Rust path walks twin modules and types parent ->
+///     child on the overlay as in a reindex.
+pub const GRAPH_FORMAT_VERSION: u32 = 21;
+
+/// [`ZeroCopyGraph::containers`] of a node at file level.
+pub const NO_CONTAINER: u32 = u32::MAX;
 
 impl std::str::FromStr for NodeKind {
     type Err = ();
@@ -1383,6 +1389,15 @@ pub struct ZeroCopyGraph {
     /// (`SymbolTable::register_overload`, `register_arity_sibling`), so a
     /// name lookup returns its first instead.
     pub later_nodes: Vec<u8>,
+
+    // ── Schema v21 additions ─────────────────────────────────────────
+    /// For each node, the index of its innermost enclosing qualifier
+    /// declaration of the same file (Module, Namespace, Class, Struct, Enum,
+    /// Trait, Interface, Impl), or [`NO_CONTAINER`]. Dense: `containers[i]`
+    /// is node `i`'s. The resolver walks a path parent -> child on it, so
+    /// twin modules and types of one file stay apart
+    /// ([`crate::analyzer::containment::containers`]).
+    pub containers: Vec<u32>,
 }
 
 impl ZeroCopyGraph {
@@ -1475,8 +1490,9 @@ impl ArchivedZeroCopyGraph {
         Some(hits)
     }
 
-    /// Whether the v13 import / export facts and the v20 `later_nodes`
-    /// bitmap are present and consistent with `files` and `nodes`. An archive without them cannot tell a file
+    /// Whether the v13 import / export facts, the v20 `later_nodes` bitmap
+    /// and the v21 `containers` column are present and consistent with
+    /// `files` and `nodes`. An archive without them cannot tell a file
     /// with no imports from a file whose imports were never recorded, so
     /// the loader rejects it and the graph is rebuilt.
     ///
@@ -1489,6 +1505,7 @@ impl ArchivedZeroCopyGraph {
             && self.file_flags.len() == files
             && self.exported_nodes.len() == self.nodes.len().div_ceil(8)
             && self.later_nodes.len() == self.nodes.len().div_ceil(8)
+            && self.containers.len() == self.nodes.len()
             && (self.file_path_order.is_empty() || self.file_path_order.len() == files)
     }
 
@@ -1695,6 +1712,16 @@ impl ArchivedZeroCopyGraph {
             .is_some_and(|bits| *bits & (1u8 << (node_idx % 8)) != 0)
     }
 
+    /// The innermost enclosing qualifier declaration of `node_idx`
+    /// ([`ZeroCopyGraph::containers`]); `None` at file level, and for a node
+    /// past the column's end (a fixture that records none).
+    pub fn container(&self, node_idx: u32) -> Option<u32> {
+        self.containers
+            .get(node_idx as usize)
+            .map(|c| c.to_native())
+            .filter(|&c| c != NO_CONTAINER)
+    }
+
     pub fn is_exported_node(&self, node_idx: u32) -> bool {
         self.exported_nodes
             .get(node_idx as usize / 8)
@@ -1763,6 +1790,7 @@ impl Default for ZeroCopyGraph {
             workspace: Default::default(),
             lexical_parents: Vec::new(),
             later_nodes: Vec::new(),
+            containers: Vec::new(),
         }
     }
 }

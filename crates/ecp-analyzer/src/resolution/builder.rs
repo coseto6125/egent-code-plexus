@@ -9,6 +9,7 @@ use crate::resolution::heuristics::{ResolutionTier, NEAREST_COPY_CONFIDENCE, NEA
 use crate::resolution::index::{DeclaredBase, FileMeta, Language, ResolveTarget, SymbolTable};
 use crate::resolution::resolver::{ReexportIndex, Resolver};
 use crate::rust::module_tree::RustWorkspaceModTree;
+use ecp_core::analyzer::containment;
 use ecp_core::analyzer::csharp_extension::{self, ReceiverSite};
 use ecp_core::analyzer::heritage;
 use ecp_core::analyzer::ladder;
@@ -1016,6 +1017,7 @@ impl GraphBuilder {
             workspace,
             lexical_parents: lexical_table,
             later_nodes,
+            containers: symbol_table.containers().to_vec(),
         }
         .finish();
 
@@ -1543,6 +1545,15 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
 
             current_node_idx += 1;
         }
+        // Every raw node took one slot from `graph_start` on, a merged repeat
+        // and a later node included, so raw index `i` is node
+        // `graph_start + i`.
+        let rows: Vec<containment::Row<'_>> = local_graph
+            .nodes
+            .iter()
+            .map(containment::Row::from)
+            .collect();
+        symbol_table.note_containers(graph_start, &containment::containers(&rows));
         if file_meta.language == Language::Rust {
             note_rust_impl_members(&mut symbol_table, &local_graph.nodes, graph_start);
         }

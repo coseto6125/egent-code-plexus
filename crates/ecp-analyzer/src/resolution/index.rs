@@ -11,7 +11,7 @@ use ecp_core::analyzer::type_ladder::{declared_namespace, return_type_key, TypeF
 use ecp_core::analyzer::types::{owner_key, RawExportAlias};
 use ecp_core::contracts::routing::ParsedLanguage;
 pub use ecp_core::file_category::{FileMeta, GlobalPick, Language};
-use ecp_core::graph::{FunctionMeta, NodeKind};
+use ecp_core::graph::{FunctionMeta, NodeKind, NO_CONTAINER};
 use ecp_core::registry::os_path_to_slash;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::Cow;
@@ -350,6 +350,12 @@ pub struct SymbolTable {
     /// family rule (see [`Self::note_c_callable`]). Sparse: empty outside C
     /// and C++.
     c_callables: FxHashMap<u32, CCallable>,
+
+    /// Per node id, its container ([`ecp_core::analyzer::containment::containers`])
+    /// as a node id, or `NO_CONTAINER` at file level; written per file by
+    /// [`Self::note_containers`] and stored as `ZeroCopyGraph::containers`.
+    /// Ids past its end (nodes added after Pass 1) are at file level.
+    containers: Vec<u32>,
 }
 
 impl SymbolTable {
@@ -1043,6 +1049,24 @@ impl SymbolTable {
         self.node_owner.push(self.node_owner[first as usize]);
         self.id_to_file.insert(id, file_path.to_string());
         self.overloads.entry(first).or_default().push(id);
+    }
+
+    /// Records the containers of one input's raw nodes, whose ids start at
+    /// `start` ([`ecp_core::analyzer::containment::containers`]: raw indexes
+    /// of the same input). The ids between the last input and `start` are
+    /// at file level.
+    pub(crate) fn note_containers(&mut self, start: u32, containers: &[Option<usize>]) {
+        self.containers.resize(start as usize, NO_CONTAINER);
+        self.containers.extend(
+            containers
+                .iter()
+                .map(|c| c.map_or(NO_CONTAINER, |raw| start + raw as u32)),
+        );
+    }
+
+    /// The containers [`Self::note_containers`] recorded, by node id.
+    pub(crate) fn containers(&self) -> &[u32] {
+        &self.containers
     }
 
     /// The later overloads of `first`, in source order.
@@ -2099,6 +2123,13 @@ impl PickFacts for SymbolTable {
     fn later_overloads(&self, first: u32) -> Cow<'_, [u32]> {
         Cow::Borrowed(SymbolTable::later_overloads(self, first))
     }
+
+    fn container(&self, id: u32) -> Option<u32> {
+        self.containers
+            .get(id as usize)
+            .copied()
+            .filter(|&c| c != NO_CONTAINER)
+    }
 }
 
 impl TypeFacts for SymbolTable {
@@ -2217,6 +2248,31 @@ impl ResolveFacts for SymbolTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Stands for (C4.2 index side): each input's raw containers become node
+    /// ids offset by the input's first id; the ids between two inputs and
+    /// past the last one are at file level.
+    #[test]
+    fn test_note_containers_offsets_raw_indexes_and_pads_gaps() {
+        let mut table = SymbolTable::new();
+        table.note_containers(0, &[None, Some(0)]);
+        table.note_containers(3, &[None, Some(0)]);
+        assert_eq!(
+            table.containers(),
+            [NO_CONTAINER, 0, NO_CONTAINER, NO_CONTAINER, 3]
+        );
+        assert_eq!(PickFacts::container(&table, 1), Some(0));
+        assert_eq!(PickFacts::container(&table, 4), Some(3));
+        assert_eq!(PickFacts::container(&table, 2), None, "between inputs");
+        assert_eq!(PickFacts::container(&table, 9), None, "past the end");
+    }
+
+    #[test]
+    fn test_note_containers_empty_input_records_nothing() {
+        let mut table = SymbolTable::new();
+        table.note_containers(0, &[]);
+        assert!(table.containers().is_empty());
+    }
 
     #[test]
     fn language_from_path_handles_multi_ext_providers() {

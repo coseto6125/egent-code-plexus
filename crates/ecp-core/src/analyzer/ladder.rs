@@ -51,8 +51,8 @@ use crate::analyzer::reexport::{
 };
 use crate::analyzer::rust_paths::rust_path_prefix_agrees_with_import;
 use crate::analyzer::same_file_pick::{
-    is_free, member_call_admits, prefer_free, prefer_owned, type_receiver_is_closed, PickFacts,
-    PickScope,
+    declaring_type, is_free, member_call_admits, prefer_free, prefer_owned,
+    type_receiver_is_closed, PickFacts, PickScope,
 };
 use crate::analyzer::type_ladder::{member_ownership, Ownership, TypeCandidates, TypeFacts};
 use crate::analyzer::types::{owner_key, CallSite, NameRef, NameRefKind, RawImport};
@@ -138,16 +138,187 @@ pub fn module_item<D: PickFacts + ?Sized>(decls: &D, id: u32) -> Option<u32> {
     past_body_local(decls, id, |id| is_module_item(decls, id))
 }
 
-/// Whether `file` declares more than one module or type named `name`
-/// (`v1::Config` beside `v2::Config`, `outer::a` beside `a`). A member
-/// records its owner as a bare name ([`owner_key`]), so it cannot say which
-/// of such twins holds it: a Rust path through one binds nothing.
-fn declares_twin_qualifiers<D: ResolveFacts>(decls: &D, file: &str, name: &str) -> bool {
+/// Whether a later declaration of `id`'s uid shares its container
+/// (`#[cfg(unix)] mod sys` beside `#[cfg(windows)] mod sys`): no path tells
+/// the two apart.
+fn has_cfg_twin<D: PickFacts + ?Sized>(decls: &D, id: u32) -> bool {
+    let container = decls.container(id);
     decls
-        .call_decls(file, name)
-        .filter(|&(id, kind)| kind.is_qualifier() && !decls.is_body_local(id))
-        .nth(1)
-        .is_some()
+        .later_overloads(id)
+        .iter()
+        .any(|&later| decls.kind(later) == decls.kind(id) && decls.container(later) == container)
+}
+
+/// What a path segment names among a file's modules and types.
+enum Child {
+    One(u32),
+    Missing,
+    /// Two candidates share the container: twins no path tells apart.
+    Ambiguous,
+}
+
+/// The module or type ([`NodeKind::is_qualifier`]) named `name` that `file`
+/// declares directly inside `parent` (`None`: at file level), outside every
+/// function body: one step of a path walked parent -> child on
+/// [`PickFacts::container`], so `outer::a` and `a` stay apart.
+fn qualifier_child<D: ResolveFacts>(
+    decls: &D,
+    file: &str,
+    parent: Option<u32>,
+    name: &str,
+) -> Child {
+    let mut found = None;
+    for (id, kind) in decls.call_decls(file, name) {
+        if !kind.is_qualifier() || decls.is_body_local(id) || decls.container(id) != parent {
+            continue;
+        }
+        if found.is_some() || has_cfg_twin(decls, id) {
+            return Child::Ambiguous;
+        }
+        found = Some(id);
+    }
+    found.map_or(Child::Missing, Child::One)
+}
+
+/// The item a module-tree path places in `file`: its [`qualifier_child`] at
+/// file level, else the one module or type of that name anywhere in the
+/// file, which a `pub use` of an inline `mod`'s item names.
+fn path_item<D: ResolveFacts>(decls: &D, file: &str, name: &str) -> Child {
+    match qualifier_child(decls, file, None, name) {
+        Child::Missing => {
+            let mut ids = decls
+                .call_decls(file, name)
+                .filter(|&(id, kind)| kind.is_qualifier() && !decls.is_body_local(id))
+                .map(|(id, _)| id);
+            match (ids.next(), ids.next()) {
+                (None, _) => Child::Missing,
+                (Some(id), None) if !has_cfg_twin(decls, id) => Child::One(id),
+                _ => Child::Ambiguous,
+            }
+        }
+        found => found,
+    }
+}
+
+/// The holder a path names `id` through: its declaring type
+/// ([`declaring_type`]) or its module or namespace container; `Ok(None)` at
+/// file level, `Err(())` for an `impl` block whose type its scope does not
+/// declare.
+fn holder_of<D: PickFacts + ?Sized>(decls: &D, id: u32) -> Result<Option<u32>, ()> {
+    match decls.container(id) {
+        None => Ok(None),
+        Some(block) if decls.kind(block) == NodeKind::Impl => {
+            declaring_type(decls, id).map(Some).ok_or(())
+        }
+        Some(container) => Ok(Some(container)),
+    }
+}
+
+/// The holders of one declaration up to file level ([`holder_of`]).
+struct HolderPath<'d> {
+    /// The innermost holder.
+    holder: Option<u32>,
+    /// The holders' names, innermost first, as a path spells them: the
+    /// [`owner_key`] each held declaration carries.
+    names: Vec<&'d str>,
+    /// Whether a holder is a module: a path through it must spell it.
+    in_module: bool,
+    /// Whether a holder has a twin [`has_cfg_twin`] reports.
+    twin: bool,
+}
+
+/// [`HolderPath`] of `id`; `None` when a holder is unknown, or names no
+/// owner.
+fn holder_path<D: PickFacts + ?Sized>(decls: &D, id: u32) -> Option<HolderPath<'_>> {
+    let holder = holder_of(decls, id).ok()?;
+    let mut path = HolderPath {
+        holder,
+        names: Vec::new(),
+        in_module: false,
+        twin: false,
+    };
+    let (mut held, mut next) = (id, holder);
+    while let Some(h) = next {
+        // Containers nest strictly; the bound only guards a corrupt column.
+        if path.names.len() >= 64 {
+            return None;
+        }
+        path.names.push(decls.owner(held)?);
+        path.in_module |= decls.kind(h) == NodeKind::Module;
+        path.twin |= has_cfg_twin(decls, h);
+        held = h;
+        next = holder_of(decls, h).ok()?;
+    }
+    Some(path)
+}
+
+/// Whether the segments a path spells and a declaration's holder names,
+/// both innermost first, agree as far as the shorter goes.
+fn path_agrees(spelled: &[&str], names: &[&str]) -> bool {
+    spelled.starts_with(names) || names.starts_with(spelled)
+}
+
+/// R13's exact-path rule for a Rust `::` path: it names `id` only through
+/// the holders that hold `id` ([`HolderPath`]). The qualifier's segments,
+/// innermost first and up to a `self` / `super` anchor, and `id`'s holder
+/// names must agree as far as the shorter goes (a relative path spells
+/// fewer); a path through a module must, and a holder with a
+/// [`has_cfg_twin`] twin never does. Nor does the path name `id` when
+/// another declaration of the member with another holder agrees as far.
+/// `api::v2::Config::new()` thus never binds `v1::Config`'s `new`, and
+/// `crate::a::b::wrong()` never the `wrong` of `outer::a::b`: the module
+/// tree's exact walk ([`module_tree_member`]) decides them. A holder the
+/// side cannot read keeps the pick.
+fn rust_path_spells<D: ResolveFacts>(
+    decls: &D,
+    file: &str,
+    site: QualifiedSite<'_>,
+    id: u32,
+) -> bool {
+    let Some(path) = holder_path(decls, id) else {
+        return true;
+    };
+    // A `self` / `super` anchor names the caller's module, which the
+    // holders cannot check: the segments inside it are all a path spells.
+    // `crate` stays, and no holder is named `crate`.
+    let spelled: Vec<&str> = site
+        .qualifier
+        .rsplit("::")
+        .map(|seg| seg.split('<').next().unwrap_or(seg))
+        .take_while(|seg| !matches!(*seg, "self" | "super"))
+        .filter(|seg| !seg.is_empty())
+        .collect();
+    let agrees = |names: &[&str]| path_agrees(&spelled, names);
+    let own = agrees(&path.names);
+    if path.twin || (path.in_module && !own) {
+        return false;
+    }
+    let depth = if own {
+        path.names.len().min(spelled.len())
+    } else {
+        1
+    };
+    let wanted = site.target.kind_predicate();
+    let member = site.member.split('<').next().unwrap_or(site.member);
+    let candidates = decls.pick_candidates(file, member);
+    for &first in candidates.iter() {
+        let later = decls.later_overloads(first);
+        for rival in std::iter::once(first).chain(later.iter().copied()) {
+            if rival == id || !wanted(decls.kind(rival)) || decls.is_body_local(rival) {
+                continue;
+            }
+            let Some(other) = holder_path(decls, rival) else {
+                continue;
+            };
+            if other.holder != path.holder
+                && other.names.len().min(spelled.len()) >= depth
+                && agrees(&other.names)
+            {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// What a call site adds to a name lookup. The index's
@@ -1256,9 +1427,9 @@ pub struct QualifiedSite<'s> {
 ///
 /// A Rust path (`crate::x::parse`) binds a method only when the qualifier
 /// is its owning type (`K::st`): a module path never names a method
-/// ([`rust_path_may_bind`]). Nor does it bind through a qualifier the file
-/// declares twice ([`declares_twin_qualifiers`]), unless it is the caller's
-/// own type.
+/// ([`rust_path_may_bind`]). Nor does it bind a member at another path than
+/// the one it spells ([`rust_path_spells`]), unless the qualifier is the
+/// caller's own type.
 pub fn qualified_member<F: QualifierFacts>(
     facts: &F,
     site: QualifiedSite<'_>,
@@ -1293,16 +1464,10 @@ pub fn qualified_member<F: QualifierFacts>(
     .or_else(|| caller_type.then(|| facts.stored_file(source)).flatten())?;
     let file = file.as_ref();
     let heritage: &[String] = if caller_type { heritage } else { &[] };
-    // `crate::a::b::f()` beside an `outer::a::b`: the file holds two `b`s,
-    // and the owner name cannot say whose `f` the path names. The caller's
-    // own type keeps its `impl` block rule ([`prefer_owned`]).
-    if language == Language::Rust
-        && callee.contains("::")
-        && !caller_type
-        && owner_key(qualifier).is_some_and(|key| declares_twin_qualifiers(decls, file, key))
-    {
-        return None;
-    }
+    // `crate::a::b::f()` beside an `outer::a::b`: the owner name cannot say
+    // whose `f` the path names, the holders can. The caller's own type
+    // keeps its `impl` block rule ([`prefer_owned`]).
+    let exact_path = language == Language::Rust && callee.contains("::") && !caller_type;
     let pick = decls.first_decl_in_file(file, member, target)?;
     // Only Rust's `impl_only` reads it once `caller_type` holds.
     let declares_type = (!caller_type || language == Language::Rust)
@@ -1349,7 +1514,8 @@ pub fn qualified_member<F: QualifierFacts>(
     (rust_path_may_bind(decls, site, id)
         && !(qualifier_names_type && rust_type_path_misses(decls, site, id))
         && !(impl_only && !impl_may_reach(id))
-        && !decls.hidden_member(id))
+        && !decls.hidden_member(id)
+        && !(exact_path && !rust_path_spells(decls, file, site, id)))
     .then_some(id)
 }
 
@@ -1840,14 +2006,16 @@ pub fn anchored_module_file<F: ModuleTreeFacts>(
 /// type's file never bind. [`qualified`] then applies the method rule
 /// ([`rust_path_may_bind`]). A path with segments past the item
 /// ([`TreePlace::past`]) binds only when the file confirms each of them but
-/// the member: the item names a module or a type the file declares (an
-/// `impl` block counts), every middle segment one declared inside the
-/// segment before it, and the member is picked from the last of them.
+/// the member, walked parent -> child on [`PickFacts::container`]: the item
+/// names a module or a type the file declares at file level ([`path_item`];
+/// an `impl` block stands in for a `union`), every middle segment one
+/// declared directly inside the segment before it ([`qualifier_child`]),
+/// and the member is one the last of them holds ([`declaring_type`]).
 /// `a::missing::top()` and `a::m::S::new()` (no `S` inside `m`) then bind
-/// nothing, never the `top` or `S::new` of `a`'s file. Nor does a path
-/// through a module or type that the file declares twice
-/// ([`declares_twin_qualifiers`]): `api::v2::Config::new()` beside a
-/// `v1::Config` never binds `v1`'s `new`.
+/// nothing, never the `top` or `S::new` of `a`'s file; `api::v2::Config::new()`
+/// beside a `v1::Config` binds `v2`'s `new`, never `v1`'s. Two candidates
+/// with one container (`#[cfg(unix)] mod sys` beside `#[cfg(windows)] mod
+/// sys`) leave the path no edge.
 pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
     facts: &F,
     decls: &D,
@@ -1889,20 +2057,28 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
     let wanted = target.kind_predicate();
     let is_type = ResolveTarget::Type.kind_predicate();
     // The segments the walk did not consume stand for inline `mod`s and a
-    // type's associated items. Each one past the item must be declared
-    // inside the one before it, and the member is picked from the last
-    // (`qualifier`), so `a::m::S::new()` never reaches the `S` beside `m`.
-    // A turbofish segment (`S::<u8>::new`) names none of them.
+    // type's associated items. The item and each segment past it are found
+    // parent -> child, and the member is picked from the last (`holder`),
+    // so `a::m::S::new()` never reaches the `S` beside `m`. A turbofish
+    // segment (`S::<u8>::new`) names none of them.
     let mut qualifier = item.as_str();
-    let mut nested: Option<u32> = None;
+    let mut holder: Option<u32> = None;
+    let mut nested = false;
+    let mut by_impl = false;
     if past > 0 {
-        // The Rust parser files no node for a `union`, only its `impl`
-        // blocks, so an `Impl` also names the item as a type.
-        if !decls
-            .call_decls(file, qualifier)
-            .any(|(_, kind)| kind.is_qualifier() || kind == NodeKind::Impl)
-        {
-            return None;
+        match path_item(decls, file, qualifier) {
+            Child::One(id) => holder = Some(id),
+            // The Rust parser files no node for a `union`, only its `impl`
+            // blocks, so an `Impl` also names the item as a type, by owner
+            // name.
+            Child::Missing
+                if decls
+                    .call_decls(file, qualifier)
+                    .any(|(_, kind)| kind == NodeKind::Impl) =>
+            {
+                by_impl = true
+            }
+            _ => return None,
         }
         let segs: Vec<&str> = callee.split("::").collect();
         let middle = &segs[segs.len().saturating_sub(past)..segs.len().saturating_sub(1)];
@@ -1911,19 +2087,25 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
             if name.is_empty() {
                 continue;
             }
-            let outer = owner_key(qualifier)?;
-            if declares_twin_qualifiers(decls, file, outer) {
+            let Child::One(id) = qualifier_child(decls, file, Some(holder?), name) else {
                 return None;
-            }
-            let (id, _) = decls.call_decls(file, name).find(|&(id, kind)| {
-                kind.is_qualifier() && decls.owner(id).and_then(owner_key) == Some(outer)
-            })?;
+            };
             qualifier = name;
-            nested = Some(id);
+            holder = Some(id);
+            nested = true;
         }
     }
-    let item_is_type = match nested {
-        Some(id) => is_type(decls.kind(id)),
+    let item_is_type = match holder {
+        Some(id) => {
+            let kind = decls.kind(id);
+            if !nested && wanted(kind) {
+                if let Some(id) = module_item(decls, id) {
+                    return Some(id);
+                }
+            }
+            is_type(kind)
+        }
+        None if by_impl => false,
         None => {
             let mut item_is_type = false;
             for (id, kind) in decls.call_decls(file, &item) {
@@ -1955,12 +2137,24 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
     if !item_is_type && past == 0 {
         return Some(pick);
     }
-    let item_key = owner_key(qualifier)?;
-    if declares_twin_qualifiers(decls, file, item_key) {
-        return None;
+    if holder.is_none() && !by_impl {
+        match path_item(decls, file, qualifier) {
+            Child::One(id) => holder = Some(id),
+            _ => return None,
+        }
     }
-    let owned_by_item =
-        |id: u32| usable(id) && decls.owner(id).and_then(owner_key) == Some(item_key);
+    let item_key = owner_key(qualifier)?;
+    let named_by_item = |id: u32| decls.owner(id).and_then(owner_key) == Some(item_key);
+    // A member at file level whose owner names the item stands for a side
+    // that records no container: no Rust member the item holds is at file
+    // level. A member of an `impl` block whose type the block's scope does
+    // not declare (`mod imp { impl super::S { .. } }`) has no holder.
+    let held = |id: u32| match (holder, holder_of(decls, id)) {
+        (None, _) | (Some(_), Ok(None)) => named_by_item(id),
+        (Some(h), Ok(Some(of))) => of == h,
+        (Some(_), Err(())) => false,
+    };
+    let owned_by_item = |id: u32| usable(id) && held(id);
     let owned = candidates
         .iter()
         .find_map(|&id| past_body_local(decls, id, owned_by_item));
@@ -1968,6 +2162,10 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
     if owned.is_some() || !item_is_type {
         return owned;
     }
+    // The pick by owner name may land on a twin's member (`v1::Config`'s
+    // `new` for `v2::Config`): a member named by the item's name that the
+    // item does not hold is no member of the item.
+    let twin_member = |id: u32| named_by_item(id) && !held(id);
     prefer_owned(
         decls,
         file,
@@ -1984,7 +2182,7 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
     )
     .and_then(|id| {
         past_body_local(decls, id, |id| {
-            decls.owner(id).is_some() && !decls.is_body_local(id)
+            decls.owner(id).is_some() && !decls.is_body_local(id) && !twin_member(id)
         })
     })
 }
@@ -2693,6 +2891,9 @@ mod tests {
         supertypes: Vec<(u32, Vec<u32>)>,
         /// Every `first_decl_in_file` probe, as `(file, name)`.
         probes: RefCell<Vec<(String, String)>>,
+        /// Per id, its container; empty records none, as a side without
+        /// the column.
+        containers: Vec<Option<u32>>,
     }
 
     impl Fake {
@@ -2708,6 +2909,7 @@ mod tests {
                 scoped: Vec::new(),
                 supertypes: Vec::new(),
                 probes: RefCell::default(),
+                containers: Vec::new(),
             }
         }
 
@@ -2782,6 +2984,145 @@ mod tests {
                 .find(|(t, _)| *t == ty)
                 .map_or_else(Vec::new, |(_, bases)| bases.clone())
         }
+        fn container(&self, id: u32) -> Option<u32> {
+            self.containers.get(id as usize).copied().flatten()
+        }
+    }
+
+    const TWIN_LIB: &str = "src/lib.rs";
+
+    /// `mod outer { mod a { mod b { fn wrong } } }` beside
+    /// `mod a { mod b { fn right } }` in one file, with their containers.
+    fn twin_modules(layout: Layout) -> Fake {
+        const MODULE: NodeKind = NodeKind::Module;
+        const F: NodeKind = NodeKind::Function;
+        let decls: [Decl; 7] = [
+            (TWIN_LIB, "outer", MODULE, None),
+            (TWIN_LIB, "a", MODULE, Some("outer")),
+            (TWIN_LIB, "b", MODULE, Some("a")),
+            (TWIN_LIB, "wrong", F, Some("b")),
+            (TWIN_LIB, "a", MODULE, None),
+            (TWIN_LIB, "b", MODULE, Some("a")),
+            (TWIN_LIB, "right", F, Some("b")),
+        ];
+        let mut fake = Fake::new(layout, &decls);
+        fake.containers = vec![None, Some(0), Some(1), Some(2), None, Some(4), Some(5)];
+        fake
+    }
+
+    /// Stands for (C4.4): a path walks parent -> child, so `a` at file level
+    /// is the top `a`, and each `b` is the one inside its own `a`; a name no
+    /// parent holds is missing.
+    #[test]
+    fn test_qualifier_child_twin_modules_walk_parent_to_child() {
+        for layout in [Layout::Index, Layout::Overlay] {
+            let fake = twin_modules(layout);
+            assert!(matches!(
+                qualifier_child(&fake, TWIN_LIB, None, "a"),
+                Child::One(4)
+            ));
+            assert!(matches!(
+                qualifier_child(&fake, TWIN_LIB, Some(4), "b"),
+                Child::One(5)
+            ));
+            assert!(matches!(
+                qualifier_child(&fake, TWIN_LIB, Some(1), "b"),
+                Child::One(2)
+            ));
+            assert!(matches!(
+                qualifier_child(&fake, TWIN_LIB, Some(4), "missing"),
+                Child::Missing
+            ));
+            assert!(matches!(
+                qualifier_child(&fake, TWIN_LIB, Some(4), "right"),
+                Child::Missing
+            ));
+        }
+    }
+
+    /// Stands for (M08 variant 2): two same-named modules of one container
+    /// leave the segment ambiguous; a name no file-level row holds falls back
+    /// to its one row anywhere in the file, and two such rows are ambiguous.
+    #[test]
+    fn test_path_item_same_container_twins_and_nested_names() {
+        let decls: [Decl; 2] = [
+            (TWIN_LIB, "sys", NodeKind::Module, None),
+            (TWIN_LIB, "sys", NodeKind::Module, None),
+        ];
+        let cfg = Fake::new(Layout::Index, &decls);
+        assert!(matches!(path_item(&cfg, TWIN_LIB, "sys"), Child::Ambiguous));
+        let fake = twin_modules(Layout::Index);
+        assert!(matches!(path_item(&fake, TWIN_LIB, "outer"), Child::One(0)));
+        assert!(matches!(path_item(&fake, TWIN_LIB, "b"), Child::Ambiguous));
+        assert!(matches!(
+            path_item(&fake, TWIN_LIB, "absent"),
+            Child::Missing
+        ));
+    }
+
+    /// Stands for (A13): a Rust path names a member only at the holders it
+    /// spells. `crate::a::b::right` agrees with `right`'s holders `b`, `a`;
+    /// `crate::a::b::wrong` does not with `wrong`'s `b`, `a`, `outer`.
+    #[test]
+    fn test_rust_path_spells_exact_path_binds_twin_path_does_not() {
+        let fake = twin_modules(Layout::Index);
+        let path = |callee| site(TWIN_LIB, callee, None);
+        assert!(rust_path_spells(
+            &fake,
+            TWIN_LIB,
+            path("crate::a::b::right"),
+            6
+        ));
+        assert!(!rust_path_spells(
+            &fake,
+            TWIN_LIB,
+            path("crate::a::b::wrong"),
+            3
+        ));
+        assert!(rust_path_spells(
+            &fake,
+            TWIN_LIB,
+            path("crate::outer::a::b::wrong"),
+            3
+        ));
+        let names = holder_path(&fake, 3).expect("a readable path").names;
+        assert_eq!(names, ["b", "a", "outer"]);
+    }
+
+    /// A `super` / `self` anchor spells only the segments inside it: from
+    /// inside `outer::a`, `super::a::b::wrong` and `self::b::wrong` name
+    /// `wrong`; `super::c::wrong` names a module `wrong` is not in.
+    #[test]
+    fn test_rust_path_spells_relative_anchor_checks_inner_segments_only() {
+        let fake = twin_modules(Layout::Index);
+        let path = |callee| site(TWIN_LIB, callee, None);
+        assert!(rust_path_spells(
+            &fake,
+            TWIN_LIB,
+            path("super::a::b::wrong"),
+            3
+        ));
+        assert!(rust_path_spells(&fake, TWIN_LIB, path("self::b::wrong"), 3));
+        assert!(!rust_path_spells(
+            &fake,
+            TWIN_LIB,
+            path("super::c::wrong"),
+            3
+        ));
+    }
+
+    /// Dependency down: a side that records no container reads every row at
+    /// file level, so the rule keeps the pick it had.
+    #[test]
+    fn test_rust_path_spells_side_without_containers_keeps_pick() {
+        let mut fake = twin_modules(Layout::Index);
+        fake.containers.clear();
+        assert!(rust_path_spells(
+            &fake,
+            TWIN_LIB,
+            site(TWIN_LIB, "crate::a::b::wrong", None),
+            3
+        ));
     }
 
     impl TypeFacts for Fake {

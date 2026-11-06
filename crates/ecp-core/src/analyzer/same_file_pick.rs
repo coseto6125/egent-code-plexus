@@ -109,9 +109,40 @@ pub trait PickFacts {
     fn later_overloads(&self, _first: u32) -> Cow<'_, [u32]> {
         Cow::Borrowed(&[])
     }
+    /// The innermost enclosing qualifier declaration of `id`
+    /// ([`containers`](crate::analyzer::containment::containers)); `None` at
+    /// file level or when the side does not know (the default, so test
+    /// fakes compile).
+    fn container(&self, _id: u32) -> Option<u32> {
+        None
+    }
     /// The transitive resolved supertypes of the type `ty`, breadth-first,
     /// each type once, `ty` excluded.
     fn ancestors(&self, ty: u32) -> Vec<u32>;
+}
+
+/// The type `id` belongs to: its container ([`PickFacts::container`]) when
+/// that is a type; for an `Impl` container, the first type row named like
+/// `id`'s owner whose container is the block's container, the rule of
+/// `membership::owner_pass`, so `mod a { struct S; impl S { fn m } }` and
+/// the same in `mod b` each own their `m`; `None` otherwise (a block whose
+/// type no row of its scope declares, a Go receiver method in another
+/// file, which keep the `owner_class` string path).
+pub fn declaring_type<F: PickFacts + ?Sized>(facts: &F, id: u32) -> Option<u32> {
+    let container = facts.container(id)?;
+    match facts.kind(container) {
+        kind if kind.is_type() => Some(container),
+        NodeKind::Impl => {
+            let (owner, file) = (facts.owner(id)?, facts.file_of(id)?);
+            let scope = facts.container(container);
+            facts
+                .pick_candidates(file, owner)
+                .iter()
+                .copied()
+                .find(|&ty| facts.kind(ty).is_type() && facts.container(ty) == scope)
+        }
+        _ => None,
+    }
 }
 
 /// Whether a call through a type receiver in `language` reaches only that
@@ -581,6 +612,8 @@ mod tests {
         ancestors: Vec<(u32, Vec<u32>)>,
         /// Scoped ids, as the lexical-parent table marks them.
         scoped: Vec<u32>,
+        /// Per id, its container; ids past the end are at file level.
+        containers: Vec<Option<u32>>,
     }
 
     impl PickFacts for Decls {
@@ -620,6 +653,80 @@ mod tests {
                 .find(|(t, _)| *t == ty)
                 .map_or_else(Vec::new, |(_, a)| a.clone())
         }
+        fn container(&self, id: u32) -> Option<u32> {
+            self.containers.get(id as usize).copied().flatten()
+        }
+    }
+
+    const IMPL: NodeKind = NodeKind::Impl;
+    const S: NodeKind = NodeKind::Struct;
+    const MODULE: NodeKind = NodeKind::Module;
+
+    /// Stands for (C4.3): two `impl S` blocks in twin modules `a` and `b`
+    /// each give their `new` the `S` of their own module, never the first
+    /// `S` of the file.
+    #[test]
+    fn test_declaring_type_impl_member_in_twin_modules_binds_own_module_type() {
+        let facts = Decls {
+            decls: vec![
+                ("a", MODULE, None, None),
+                ("S", S, Some("a"), None),
+                ("S", IMPL, Some("a"), None),
+                ("new", M, Some("S"), None),
+                ("b", MODULE, None, None),
+                ("S", S, Some("b"), None),
+                ("S", IMPL, Some("b"), None),
+                ("new", M, Some("S"), None),
+            ],
+            containers: vec![
+                None,
+                Some(0),
+                Some(0),
+                Some(2),
+                None,
+                Some(4),
+                Some(4),
+                Some(6),
+            ],
+            ..Decls::default()
+        };
+        assert_eq!(declaring_type(&facts, 3), Some(1));
+        assert_eq!(declaring_type(&facts, 7), Some(5));
+    }
+
+    /// A member a type contains directly belongs to it; a module member, a
+    /// file-level item, and a block whose type its scope does not declare
+    /// belong to no type.
+    #[test]
+    fn test_declaring_type_direct_member_module_member_and_unresolved_block() {
+        let facts = Decls {
+            decls: vec![
+                ("T", NodeKind::Trait, None, None),
+                ("d", M, Some("T"), None),
+                ("m", MODULE, None, None),
+                ("f", NodeKind::Function, Some("m"), None),
+                ("Foreign", IMPL, Some("m"), None),
+                ("len", M, Some("Foreign"), None),
+                ("top", NodeKind::Function, None, None),
+            ],
+            containers: vec![None, Some(0), None, Some(2), Some(2), Some(4), None],
+            ..Decls::default()
+        };
+        assert_eq!(declaring_type(&facts, 1), Some(0));
+        assert_eq!(declaring_type(&facts, 3), None);
+        assert_eq!(declaring_type(&facts, 5), None);
+        assert_eq!(declaring_type(&facts, 6), None);
+    }
+
+    /// Dependency down: a side that records no container (the default)
+    /// knows no declaring type.
+    #[test]
+    fn test_declaring_type_side_without_containers_returns_none() {
+        let facts = Decls {
+            decls: vec![("S", S, None, None), ("new", M, Some("S"), None)],
+            ..Decls::default()
+        };
+        assert_eq!(declaring_type(&facts, 1), None);
     }
 
     const M: NodeKind = NodeKind::Method;
