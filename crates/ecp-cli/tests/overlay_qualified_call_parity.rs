@@ -21,9 +21,10 @@
 //! | C          | both                 | C has no methods                                         |
 //! | C++        | cross-file receiver  | `save` is declared in `k.h` and defined in `k.cpp`: ambiguous |
 //!
-//! Pairs the index already bound by name before this tier (PHP `$k->save()`,
-//! Ruby `k.save`, ...) stay in the fixtures as
-//! regression guards with their own confidence.
+//! Pairs the index binds by name (Ruby `k.save`: an untyped receiver in a
+//! guess language binds at 0.55 `call:untyped-member`) stay in the fixtures
+//! as regression guards with their own confidence. A PHP parameter type (`run(K $k)`) makes `$k->save()` a typed
+//! `K.save` call, so it binds at the qualifier tier's 0.85 in either file.
 
 use crate::parity;
 
@@ -225,7 +226,7 @@ const FIXTURES: &[Fixture] = &[
         files: &[("app.php", "<?php\nclass K {\n function save($id) {}\n static function st($id) {}\n}\nclass App {\n function run(K $k) { $k->save(1); K::st(2); }\n}\n")],
         caller: "app.php",
         callee: None,
-        expected: &[("save", 1.0), ("st", 0.85)],
+        expected: &[("save", 0.85), ("st", 0.85)],
     },
     Fixture {
         label: "PHP/cross-file",
@@ -235,14 +236,14 @@ const FIXTURES: &[Fixture] = &[
         ],
         caller: "App.php",
         callee: Some("K.php"),
-        expected: &[("save", 0.7), ("st", 0.85)],
+        expected: &[("save", 0.85), ("st", 0.85)],
     },
     Fixture {
         label: "Ruby/same-file",
         files: &[("app.rb", "class K\n  def save(id); end\n  def self.st(id); end\nend\nclass App\n  def run(k)\n    k.save(1)\n    K.st(2)\n  end\nend\n")],
         caller: "app.rb",
         callee: None,
-        expected: &[("save", 1.0), ("st", 0.85)],
+        expected: &[("save", 0.55), ("st", 0.85)],
     },
     Fixture {
         label: "Ruby/cross-file",
@@ -252,7 +253,7 @@ const FIXTURES: &[Fixture] = &[
         ],
         caller: "app.rb",
         callee: Some("k.rb"),
-        expected: &[("save", 0.7), ("st", 0.85)],
+        expected: &[("save", 0.55), ("st", 0.85)],
     },
     Fixture {
         label: "Swift/same-file",
