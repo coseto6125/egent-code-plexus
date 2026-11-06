@@ -853,6 +853,8 @@ fn test_overlay_rust_wildcard_import_unique_return_type_matches_reindex() {
     );
 }
 
+/// Stands for: a return type naming two project classes types no receiver,
+/// so both sides bind the one class with the member as the tagged guess (55).
 #[test]
 fn test_overlay_php_ambiguous_return_type_keeps_unique_member_fallback() {
     let php = PhpProvider::new().unwrap();
@@ -870,11 +872,11 @@ fn test_overlay_php_ambiguous_return_type_keeps_unique_member_fallback() {
         &[("app/config.php", &format!("\n{config}"))],
         &[
             ("app/config.php".into(), "make".into(), "".into(), 100),
-            ("src/two/Foo.php".into(), "bar".into(), "Foo".into(), 70),
+            ("src/two/Foo.php".into(), "bar".into(), "Foo".into(), 55),
         ],
         &[
             ("app/config.php".into(), "make".into(), "".into(), 100),
-            ("src/two/Foo.php".into(), "bar".into(), "Foo".into(), 70),
+            ("src/two/Foo.php".into(), "bar".into(), "Foo".into(), 55),
         ],
     );
 }
