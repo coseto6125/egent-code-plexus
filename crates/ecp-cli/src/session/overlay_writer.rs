@@ -1141,7 +1141,7 @@ mod flags_tests {
     #[test]
     fn test_fragment_file_from_local_graph_rust_test_const_carries_test_flag() {
         let src = "pub const fn width() -> usize { 4 }\npub const PROD: usize = width();\n#[cfg(test)]\nmod tests {\n    const W: usize = super::width();\n}\n";
-        let graph = parse_graph("src/lib.rs", src, SizeCap::BUILT_IN).unwrap();
+        let graph = parse_graph("src/lib.rs", src.as_bytes(), SizeCap::BUILT_IN).unwrap();
         let symbols = fragment_file_from_local_graph(&graph).symbols;
         let flags_of = |name: &str| {
             symbols
