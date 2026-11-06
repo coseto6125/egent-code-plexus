@@ -1095,9 +1095,10 @@ fn test_overlay_python_untyped_member_collision_matches_reindex() {
             ("other.py", "class Foo:\n    def foo(self): pass\n"),
         ],
         &[("app.py", "def foo(): pass\ndef run(x): x.foo()\n")],
-        // An untyped receiver never reaches the caller's own module's free
-        // function, and two owners elsewhere leave the global tier empty.
-        &[],
+        // Stands for: an untyped receiver never reaches the caller's own
+        // module's free function, so `Foo.foo` is the one candidate and binds
+        // as the duck-typed guess (decision A09).
+        &[("other.py".into(), "foo".into(), "Foo".into(), 55)],
     );
 }
 
@@ -2374,11 +2375,12 @@ fn test_overlay_java_external_static_import_matches_reindex() {
     );
 }
 
-// `pkg` is an indexed directory, so the missing `pkg.Missing` may be local:
-// the index keeps the global tier (0.7). Was: the path-segment tier matched
-// the `helper/` directory at 0.95. A wrong suppression would return no edge.
+// `import static pkg.Missing.helper` names `Missing.helper`, so the Owner
+// rule refuses the unrelated `lib.helper.Tools.helper` and nothing binds.
+// Was: the global tier at 0.7, and before that the path-segment tier
+// matched the `helper/` directory at 0.95.
 #[test]
-fn test_overlay_java_indexed_first_segment_keeps_global_matches_reindex() {
+fn test_overlay_java_static_import_missing_class_binds_nothing_matches_reindex() {
     parity(
         &java(),
         &[
@@ -2399,12 +2401,7 @@ fn test_overlay_java_indexed_first_segment_keeps_global_matches_reindex() {
             "App.java",
             "import static pkg.Missing.helper; class App { void run() { helper(); } }",
         )],
-        &[(
-            "src/main/java/lib/helper/Tools.java".into(),
-            "helper".into(),
-            "Tools".into(),
-            70,
-        )],
+        &[],
     );
 }
 
@@ -2662,8 +2659,10 @@ fn test_overlay_kotlin_super_member_outside_imported_file_matches_reindex() {
 }
 
 // `import com.app.repository.*` binds no receiver, and a package wildcard
-// imports no class member: the call resolves by its member name (0.7). Was:
-// the receiver became `repository.fetchUsers`, which nothing resolves.
+// imports no class member: the call resolves by its member name, and the
+// soft Owner rule demotes the unrelated `UserRepository` to the tagged guess
+// (0.55). Was: 0.7, and before that the receiver became
+// `repository.fetchUsers`, which nothing resolves.
 #[test]
 fn test_overlay_kotlin_wildcard_package_named_receiver_matches_reindex() {
     let vm = |body: &str| {
@@ -2686,7 +2685,7 @@ fn test_overlay_kotlin_wildcard_package_named_receiver_matches_reindex() {
             "src/main/kotlin/com/app/repository/UserRepository.kt".into(),
             "fetchUsers".into(),
             "UserRepository".into(),
-            70,
+            55,
         )],
     );
 }

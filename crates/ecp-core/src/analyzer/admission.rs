@@ -202,16 +202,21 @@ impl<'f, F: PickFacts + ?Sized> Gate<'f, F> {
     }
 
     /// R21 ahead of uniqueness: a method or a type's function, never a free
-    /// function or a constructor; in Python also another module's function.
+    /// function or a constructor. A free function still counts where member
+    /// syntax reaches one: another module's function in Python, and any
+    /// top-level function in Kotlin, which records `fun Foo.m()` as free.
     /// A member of the caller's own type still counts here: an untyped
     /// receiver may hold that type, so it keeps another type's namesake
-    /// ambiguous. The call's post-filter refuses it as the bound target.
+    /// ambiguous. The call's post-filter refuses both as the bound target.
     fn member_form_admits(&self, id: u32) -> bool {
         let facts = self.facts;
         member_call_admits(facts, id, None)
-            || (self.site.caller.language == Language::Python
-                && is_free(facts, id)
-                && facts.file_of(id) != Some(self.site.caller_file))
+            || (is_free(facts, id)
+                && match self.site.caller.language {
+                    Language::Python => facts.file_of(id) != Some(self.site.caller_file),
+                    Language::Kotlin => true,
+                    _ => false,
+                })
     }
 
     /// Whether a bare call of the site reaches member `id`. Anything but a
@@ -248,13 +253,18 @@ impl<'f, F: PickFacts + ?Sized> Gate<'f, F> {
                 // A plain `import p.K.*` brings K's nested types, not its
                 // members; only the static form (`alias "static:*"`) does.
                 let star = import.imported_name == "*" && import.alias.as_deref() != Some("*");
+                // C# records `using static N.C;` as it records `using N;`.
+                // A non-alias `using` may name a type only in the static
+                // form, so one that names the owner brings its members.
+                let csharp_static =
+                    site.caller.language == Language::CSharp && import.alias.is_none();
                 // The source names the type, or the type and the member.
                 let source = import.source.as_str();
                 let class = source
                     .strip_suffix(site.name)
                     .and_then(|rest| rest.strip_suffix(['.', ':']))
                     .map_or(source, |rest| rest.trim_end_matches(':'));
-                (named || star) && class.rsplit(['.', ':']).next() == Some(owner)
+                (named || star || csharp_static) && class.rsplit(['.', ':']).next() == Some(owner)
             })
         {
             return true;
@@ -629,6 +639,23 @@ mod tests {
         assert_eq!(admit(&facts, at, 1, meta("use.py")), Err(Reject::Form));
     }
 
+    /// Stands for: Kotlin records an extension `fun Foo.m()` as a free
+    /// function, and `o.m()` may reach it, so it keeps a method namesake
+    /// ambiguous in any file.
+    #[test]
+    fn test_admit_untyped_member_kotlin_free_function_admits_form() {
+        let facts = Decls {
+            decls: vec![
+                ("m", NodeKind::Function, None, "ext.kt"),
+                ("m", NodeKind::Function, None, "use.kt"),
+            ],
+            ..Decls::default()
+        };
+        let at = site("use.kt", None, &[], SiteForm::UntypedMember);
+        assert_eq!(admit(&facts, at, 0, meta("ext.kt")), Ok(()));
+        assert_eq!(admit(&facts, at, 1, meta("use.kt")), Ok(()));
+    }
+
     /// Stands for: an untyped receiver may hold the caller's own type, so its
     /// member counts toward uniqueness; the call's post-filter refuses it as
     /// the bound target.
@@ -676,6 +703,38 @@ mod tests {
             admit(&facts, at, 1, meta("Helper.java")),
             Err(Reject::Owner)
         );
+    }
+
+    /// Stands for: C# records `using static P.Helper;` with no static marker,
+    /// so a non-alias `using` naming the owner admits its member, and an
+    /// alias `using H = P.Helper;` does not.
+    #[test]
+    fn test_admit_csharp_bare_call_using_static_admits_owner_alias_rejects() {
+        let facts = Decls {
+            decls: vec![
+                ("Helper", C, None, "Helper.cs"),
+                ("M", M, Some("Helper"), "Helper.cs"),
+            ],
+            ..Decls::default()
+        };
+        let using = |alias: Option<&str>| RawImport {
+            source: "P.Helper".into(),
+            imported_name: "P.Helper".into(),
+            alias: alias.map(Into::into),
+            binding_kind: None,
+        };
+        let plain = [using(None)];
+        let at = Site {
+            imports: &plain,
+            ..site("App.cs", Some("App"), &[], SiteForm::Bare)
+        };
+        assert_eq!(admit(&facts, at, 1, meta("Helper.cs")), Ok(()));
+        let aliased = [using(Some("H"))];
+        let at = Site {
+            imports: &aliased,
+            ..site("App.cs", Some("App"), &[], SiteForm::Bare)
+        };
+        assert_eq!(admit(&facts, at, 1, meta("Helper.cs")), Err(Reject::Owner));
     }
 
     // ---- order and stream ----

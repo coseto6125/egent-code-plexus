@@ -106,8 +106,9 @@ const PYTHON: Case = Case {
 };
 
 /// Java. A static import binds its owner's member, not `Other.run`.
-/// `absent` is no member of `lib.Util`, whose head `lib` is indexed: the
-/// general tiers keep the global `misc.Tools.absent`. `com.ext` is external:
+/// `absent` is no member of `lib.Util`: the bare call names `Util.absent`,
+/// so the Owner rule refuses the unrelated `misc.Tools.absent` and nothing
+/// binds. `com.ext` is external:
 /// no edge, though `misc.Tools.fetch` is the only `fetch`. Two static
 /// imports of `run` holding different members: no hit, and the global tier
 /// sees two `run`s.
@@ -139,7 +140,7 @@ const JAVA: Case = Case {
     removed: &[],
     expected: &[
         ("explicit", &[("run", "lib/Util.java", IMPORT_SCOPED)]),
-        ("notExported", &[("absent", "misc/Tools.java", GLOBAL)]),
+        ("notExported", &[]),
         ("external", &[]),
         ("twice", &[]),
     ],

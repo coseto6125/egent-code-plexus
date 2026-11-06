@@ -132,7 +132,7 @@ const COPIES: &[Copies] = &[
         label: "C#/bare member call",
         tree: &[
             ("src/p/CMaps.cs", "namespace P {\npublic static class CMaps {\n  public static void Make() {}\n}\n}\n"),
-            ("test/p/CMapsTest.cs", "namespace P {\nclass CMapsTest {\n  void t() { Make(); }\n}\n}\n"),
+            ("test/p/CMapsTest.cs", "using static P.CMaps;\nnamespace P {\nclass CMapsTest {\n  void t() { Make(); }\n}\n}\n"),
         ],
         shared: &[],
         caller: "test/p/CMapsTest.cs",

@@ -214,10 +214,13 @@ fn test_build_untyped_member_call_matches_reindex_across_14_languages() {
                 }
             }
             if matches!(expect, Expect::FreeFn) {
-                // U2: only a Rust method-syntax call drops the free fn from
-                // the field; the other languages stay ambiguous.
+                // Stands for: the Form rule drops a free fn ahead of
+                // uniqueness, so the method binds, except where member
+                // syntax reaches a free fn (a Python module function, a
+                // Kotlin extension `fun Foo.retain()`): there the name stays
+                // ambiguous and binds nothing. C# binds no untyped member.
                 let bound = !reindex.is_empty();
-                if bound != (ext == "rs") {
+                if bound != !matches!(ext, "py" | "kt" | "cs") {
                     failures.push(format!("{ext} / {label}: reindex {reindex:#?}"));
                 }
             }
