@@ -3942,6 +3942,87 @@ mod tests {
         assert_eq!(asked.get(), 1);
     }
 
+    /// `name_ref` in `main.cpp` when the name tiers bind `bound` for every
+    /// lookup, as a side's tiers do after the C / C++ canonical step.
+    fn cpp_value_ref(facts: &Fake, name: &'static str, bound: u32) -> Option<(u32, f32)> {
+        name_ref(
+            facts,
+            &call_fake(&[]),
+            "main.cpp",
+            Language::Cpp,
+            &[],
+            None,
+            NameRef {
+                name,
+                kind: crate::analyzer::types::NameRefKind::Function,
+            },
+            None,
+            |_: &str, _| vec![(bound, 0.9)],
+            |_: &str, _| Vec::new(),
+        )
+    }
+
+    const CPP_NS: Decl = ("types.hpp", "ns", NodeKind::Namespace, None);
+    const CPP_INST: Decl = ("types.hpp", "Inst", NodeKind::Struct, Some("ns"));
+    const CPP_INST_DECL: Decl = ("types.hpp", "cb_ns", M, Some("Inst"));
+    const CPP_INST_DEF: Decl = ("cb.cpp", "cb_ns", M, Some("Inst"));
+
+    /// Stands for (A15f): `&ns::Inst::cb_ns` binds the out-of-line
+    /// definition `void ns::Inst::cb_ns() {}` the name tiers settle the
+    /// in-class declaration to, though `cb.cpp` declares neither `Inst` nor
+    /// `ns`. The declaration itself still binds; a path that does not
+    /// enclose the declaration binds nothing.
+    #[test]
+    fn test_ladder_name_ref_cpp_out_of_line_member_path_binds_definition() {
+        let decls = [CPP_NS, CPP_INST, CPP_INST_DECL, CPP_INST_DEF];
+        for facts in both(&decls) {
+            assert_eq!(cpp_value_ref(&facts, "ns.Inst.cb_ns", 3), Some((3, 0.9)));
+            assert_eq!(cpp_value_ref(&facts, "ns.Inst.cb_ns", 2), Some((2, 0.9)));
+            assert_eq!(cpp_value_ref(&facts, "other.Inst.cb_ns", 3), None);
+        }
+    }
+
+    /// Two classes `ns::Inst` and `other::Inst` that both declare `cb_ns`:
+    /// the definition records only `Inst`, so its path is unknown and binds
+    /// nothing. Each declaration still binds through its own path.
+    #[test]
+    fn test_ladder_name_ref_cpp_out_of_line_member_two_owner_classes_binds_nothing() {
+        let decls = [
+            CPP_NS,
+            CPP_INST,
+            CPP_INST_DECL,
+            CPP_INST_DEF,
+            ("other.hpp", "other", NodeKind::Namespace, None),
+            ("other.hpp", "Inst", NodeKind::Struct, Some("other")),
+            ("other.hpp", "cb_ns", M, Some("Inst")),
+        ];
+        for facts in both(&decls) {
+            assert_eq!(cpp_value_ref(&facts, "ns.Inst.cb_ns", 3), None);
+            assert_eq!(cpp_value_ref(&facts, "ns.Inst.cb_ns", 2), Some((2, 0.9)));
+            assert_eq!(cpp_value_ref(&facts, "other.Inst.cb_ns", 6), Some((6, 0.9)));
+        }
+    }
+
+    /// No class declares the member (the header holds `Inst` without
+    /// `cb_ns`), and a member of a type outside C++ (`Cb.java`): neither
+    /// path reads another file, so neither binds.
+    #[test]
+    fn test_ladder_name_ref_out_of_line_member_without_declaration_binds_nothing() {
+        for facts in both(&[CPP_NS, CPP_INST, CPP_INST_DEF]) {
+            assert_eq!(cpp_value_ref(&facts, "ns.Inst.cb_ns", 2), None);
+        }
+        let java = [
+            ("a/Types.java", "ns", NodeKind::Namespace, None),
+            ("a/Types.java", "Inst", NodeKind::Class, Some("ns")),
+            ("a/Types.java", "cb_ns", M, Some("Inst")),
+            ("a/Cb.java", "cb_ns", M, Some("Inst")),
+        ];
+        for facts in both(&java) {
+            assert_eq!(cpp_value_ref(&facts, "ns.Inst.cb_ns", 3), None);
+            assert_eq!(cpp_value_ref(&facts, "ns.Inst.cb_ns", 2), Some((2, 0.9)));
+        }
+    }
+
     /// Every verdict of the bare-variant pick, for the store layouts of
     /// both sides.
     #[test]

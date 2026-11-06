@@ -298,7 +298,45 @@ where
 /// `com.example`). A missing or a repeated link encloses nothing:
 /// `System.Console.WriteLine` never binds a project `Console` that no
 /// `System` holds.
+///
+/// A C++ member defined out of line (`void ns::Inst::cb_ns() {}` in a
+/// `.cpp`) is where the name tiers settle its in-class declaration
+/// (`NameTierFacts::canonical_c_declaration`), yet its file declares
+/// neither `Inst` nor `ns`: its path is that declaration's
+/// ([`in_class_declaration`]).
 fn encloses<F: ResolveFacts>(facts: &F, id: u32, qualifier: &str) -> bool {
+    path_encloses(facts, id, qualifier)
+        || in_class_declaration(facts, id).is_some_and(|decl| path_encloses(facts, decl, qualifier))
+}
+
+/// The one in-class declaration of the C++ method `id`: a method of the
+/// same name and owner in another file of `id`'s scope that declares a type
+/// of the owner's name. The definition records only its owner's name, so
+/// two such classes (`a::Inst`, `b::Inst`) leave the path unknown, and a
+/// definition no class declares has none.
+fn in_class_declaration<F: ResolveFacts>(facts: &F, id: u32) -> Option<u32> {
+    let file = facts.file_of(id)?;
+    if facts.kind(id) != NodeKind::Method || facts.file_meta(file).language != Language::Cpp {
+        return None;
+    }
+    let owner = facts.owner(id)?;
+    let key = owner_key(owner)?;
+    let mut decls = facts
+        .owned_global(facts.name_of(id)?, owner, ResolveTarget::Method, file)
+        .into_iter()
+        .filter(|&decl| {
+            facts.file_of(decl).is_some_and(|decl_file| {
+                decl_file != file && facts.count_in_file(decl_file, key, ResolveTarget::Type) > 0
+            })
+        });
+    match (decls.next(), decls.next()) {
+        (Some(decl), None) => Some(decl),
+        _ => None,
+    }
+}
+
+/// [`encloses`] read from `id`'s own file.
+fn path_encloses<F: ResolveFacts>(facts: &F, id: u32, qualifier: &str) -> bool {
     let Some(file) = facts.file_of(id) else {
         return false;
     };
