@@ -1,15 +1,11 @@
-//! Local-scope receiver type binding for Python.
+//! Receiver typing for Python call and member-read extraction.
 //!
-//! Collects simple-identifier type annotations on (a) typed parameters
-//! `def f(x: T)` and (b) typed assignments `x: T = ...` inside function
-//! bodies. The resulting `LocalTypes` map is consulted during call
-//! extraction so `var.method()` can be rewritten to `Type.method` for
-//! the resolver's qualifier-scoped lookup (Tier 2.5).
-//!
-//! Scope: P0 only handles single-identifier receivers (`x.method`) with
-//! single-identifier type annotations (`Apple`, not `dict[str, Apple]`).
-//! Generic / subscripted / forward-reference types are skipped — the
-//! call falls back to the bare member name as before.
+//! The type of a `name.member` receiver comes from the receiver core: this
+//! file's [`LocalTypes`] holds the [`FileReceivers`] that `receiver_lower`
+//! solved for the file, and both the call extractor and the method-value
+//! extractor read it, so `obj.m()` and `map(obj.m, xs)` reach one verdict.
+//! A receiver the core does not track (a module name, an import, a class of
+//! this file) keeps the rules below.
 //!
 //! A receiver that names a class of the same file and no import or local
 //! binds (`Util.make()`) emits `Util.make`, as a typed receiver does. It
@@ -19,89 +15,37 @@
 //! bases.
 
 use super::path_literals::build_raw_path_literal;
+use super::receiver_lower::PythonLowering;
 use crate::calls::{
-    attach_to_enclosing, is_call_callee, is_same_kind_field, node_range, range_width,
-    reference_function, start_pos, unparenthesized, CallSiteIndex, Pos, PosRange,
+    attach_to_enclosing, is_call_callee, is_same_kind_field, node_range, start_pos,
+    unparenthesized, CallSiteIndex, Pos,
 };
 use crate::dynamic_imports::{
     binding_mentions, is_field, may_load, rebound, synthetic_imports, DynamicBinding,
     DynamicImports,
 };
 use crate::framework_helpers::strip_python_string_quotes;
-use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
+use crate::receiver::{analyze_file, FileReceivers};
+use ecp_core::analyzer::types::{
+    BlindSpot, CallSite, RawNode, RawPathLiteral, RawSqlRef, ReadIntent,
+};
 use ecp_core::graph::NodeKind;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use tree_sitter::Node;
 
 /// A load assigned in one scope: the assigned name, its statement, and the
 /// module specifier.
 type ScopeLoad<'t, 's> = (Node<'t>, Node<'t>, &'s str);
 
-/// Map of nested function scopes (by position range) to their var→type bindings.
-/// Lookup picks the smallest containing scope that has the variable, so
-/// closures correctly inherit outer-scope annotations.
+/// What the Calls hook reads about one file: the receiver states the core
+/// solved, and the names its imports bind.
 #[derive(Debug, Default)]
 pub struct LocalTypes {
-    scopes: Vec<(PosRange, HashMap<String, String>)>,
+    receivers: FileReceivers,
     /// A `from` binding may be an object; only a module import proves that
     /// its receiver names a namespace for import-scoped resolution.
     imported: HashMap<String, ImportedBinding>,
-    shadows: Vec<ScopeBindings>,
-}
-
-/// The names one scope binds (a function, lambda or comprehension): a
-/// parameter or comprehension variable at 0, an assignment, `for` target,
-/// `with ... as` name or `case` capture at its byte offset.
-#[derive(Debug)]
-struct ScopeBindings {
-    bytes: (usize, usize),
-    /// Bytes inside `bytes` that the enclosing scope evaluates: the first
-    /// iterable of a comprehension.
-    outside: Option<(usize, usize)>,
-    start: Pos,
-    names: HashMap<String, usize>,
-    /// Names a `global` statement declares: they name module bindings, so an
-    /// enclosing function's variable of that name is not visible.
-    globals: HashSet<String>,
-    /// The names this scope's own body binds, each with the bytes from which a
-    /// read sees the new binding: the end of `xs` in `for obj in xs:`, the end
-    /// of the statement for an assignment. `None` marks a write; `Some(ty)` an
-    /// annotated assignment that gives the name the type `ty`. It keeps
-    /// `global` and `nonlocal` names, whose writes replace a binding of
-    /// another scope.
-    rebinds: HashMap<String, Vec<(usize, Option<String>)>>,
-}
-
-impl ScopeBindings {
-    fn encloses(&self, node: Node<'_>) -> bool {
-        let within =
-            |(start, end): (usize, usize)| start <= node.start_byte() && node.end_byte() <= end;
-        within(self.bytes) && !self.outside.is_some_and(within)
-    }
-
-    /// The last binding of `name` before `receiver`: `Some(None)` for a write,
-    /// `Some(Some(ty))` for an annotation, `None` when the body binds none.
-    fn last_binding(&self, name: &str, receiver: Node<'_>) -> Option<Option<&str>> {
-        self.rebinds
-            .get(name)?
-            .iter()
-            .filter(|(from, _)| *from <= receiver.start_byte())
-            .max_by_key(|(from, _)| *from)
-            .map(|(_, ty)| ty.as_deref())
-    }
-}
-
-fn note_rebinds(
-    bound: HashMap<String, usize>,
-    ty: Option<&str>,
-    rebinds: &mut HashMap<String, Vec<(usize, Option<String>)>>,
-) {
-    for (name, from) in bound {
-        rebinds
-            .entry(name)
-            .or_default()
-            .push((from, ty.map(str::to_string)));
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -111,360 +55,46 @@ enum ImportedBinding {
 }
 
 impl LocalTypes {
-    fn lookup(&self, pos: Pos, var: &str) -> Option<&str> {
-        self.nearest_typed(pos, var).map(|(_, ty)| ty)
-    }
-
-    /// The start of the smallest scope around `pos` that types `var`, and the type.
-    fn nearest_typed(&self, pos: Pos, var: &str) -> Option<(Pos, &str)> {
-        let mut best: Option<(Pos, &str)> = None;
-        let mut best_width = (u32::MAX, i64::MAX);
-        for ((start, end), map) in &self.scopes {
-            if *start <= pos && pos <= *end {
-                if let Some(t) = map.get(var) {
-                    let w = range_width((*start, *end));
-                    if w < best_width {
-                        best_width = w;
-                        best = Some((*start, t.as_str()));
-                    }
-                }
-            }
-        }
-        best
-    }
-
-    /// [`LocalTypes::lookup`] for a receiver in a value position: the type
-    /// stands only when no scope nearer than the one that typed `var` rebinds
-    /// the name (`def inner(x): return x.m` inside `def outer(x: A)`, or a
-    /// lambda, comprehension, `for`, `with ... as`, `case` capture or
-    /// `global` that binds it). In the scopes from the typing one inwards, a
-    /// write as the last binding before `receiver` hides the type, and so
-    /// does an annotation of another type anywhere: byte order does not tell
-    /// which branch of an `if` ran.
-    fn lookup_visible(&self, receiver: Node<'_>, var: &str) -> Option<&str> {
-        let (typed_start, ty) = self.nearest_typed(start_pos(receiver), var)?;
-        let hidden = self
-            .shadows
-            .iter()
-            .filter(|f| f.encloses(receiver) && f.start >= typed_start)
-            .any(|f| {
-                (f.start > typed_start && (f.names.contains_key(var) || f.globals.contains(var)))
-                    || matches!(f.last_binding(var, receiver), Some(None))
-                    || f.rebinds.get(var).is_some_and(|events| {
-                        events
-                            .iter()
-                            .any(|(_, declared)| declared.as_deref().is_some_and(|d| d != ty))
-                    })
-            });
-        (!hidden).then_some(ty)
-    }
-
     fn imported_receiver(&self, receiver: Node<'_>, source: &[u8]) -> Option<ImportedBinding> {
         let mut root = receiver;
         while root.kind() == "attribute" {
             root = root.child_by_field_name("object")?;
         }
-        if root.kind() != "identifier" {
+        if root.kind() != "identifier" || self.receivers.receiver_at(root).is_some() {
             return None;
         }
-        let name = root.utf8_text(source).ok()?;
-        if self.shadowed(receiver, name) {
-            return None;
-        }
-        self.imported.get(name).copied()
+        self.imported.get(root.utf8_text(source).ok()?).copied()
     }
 
-    /// Whether a function scope enclosing `receiver` binds `name` (a
-    /// parameter, or an assignment before `receiver`).
-    fn shadowed(&self, receiver: Node<'_>, name: &str) -> bool {
-        self.shadows.iter().any(|f| {
-            f.encloses(receiver)
-                && (f
-                    .names
-                    .get(name)
-                    .is_some_and(|assigned| *assigned <= receiver.start_byte())
-                    || f.last_binding(name, receiver).is_some())
-        })
+    /// The budget blind spots of the receiver analysis.
+    pub fn take_blind_spots(&mut self) -> Vec<BlindSpot> {
+        std::mem::take(&mut self.receivers.blind_spots)
     }
 }
 
-/// Walk every `function_definition` node, collecting typed parameters and
-/// annotated assignments inside the function body, and every name an
-/// `import` statement binds.
-pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
-    let mut scopes: Vec<(PosRange, HashMap<String, String>)> = Vec::new();
+/// Solve the receiver types of every function in the file, and collect every
+/// name an `import` statement binds.
+pub fn collect_local_types(root: Node<'_>, source: &[u8], file: &Path) -> LocalTypes {
     let mut imported = HashMap::new();
-    let mut shadows = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
-        if matches!(n.kind(), "import_statement" | "import_from_statement") {
-            collect_import_bindings(n, source, &mut imported);
-        }
-        if let Some(bindings) = inline_scope_bindings(n, source) {
-            shadows.push(bindings);
-        }
-        if n.kind() == "function_definition" {
-            let fn_span = node_range(n);
-            let mut map: HashMap<String, String> = HashMap::new();
-            let mut names = HashMap::new();
-            let mut globals = HashSet::new();
-            let mut nonlocals = HashSet::new();
-            let mut rebinds = HashMap::new();
-
-            if let Some(params) = n.child_by_field_name("parameters") {
-                collect_typed_params(params, source, &mut map);
-                if let Some((receiver, class)) = method_receiver(n, params, source) {
-                    map.entry(receiver.to_string())
-                        .or_insert_with(|| class.to_string());
-                }
-                let mut cursor = params.walk();
-                for parameter in params.named_children(&mut cursor) {
-                    let binding = match parameter.kind() {
-                        "default_parameter" | "typed_default_parameter" => {
-                            parameter.child_by_field_name("name")
-                        }
-                        "typed_parameter" => parameter.named_child(0),
-                        _ => Some(parameter),
-                    };
-                    if let Some(binding) = binding {
-                        collect_shadow_names(binding, source, 0, &mut names);
-                    }
-                }
+        match n.kind() {
+            "import_statement" | "import_from_statement" => {
+                collect_import_bindings(n, source, &mut imported);
+                continue;
             }
-
-            if let Some(body) = n.child_by_field_name("body") {
-                collect_typed_assignments(body, source, &mut map);
-                let mut pending = vec![body];
-                while let Some(node) = pending.pop() {
-                    let target = match node.kind() {
-                        "function_definition" | "class_definition" | "lambda" => continue,
-                        "assignment"
-                        | "augmented_assignment"
-                        | "named_expression"
-                        | "for_statement" => node
-                            .child_by_field_name("left")
-                            .or_else(|| node.child_by_field_name("name")),
-                        "as_pattern" => node.child_by_field_name("alias"),
-                        "case_clause" => {
-                            let mut cursor = node.walk();
-                            for pattern in node
-                                .named_children(&mut cursor)
-                                .filter(|c| c.kind() == "case_pattern")
-                            {
-                                collect_case_captures(
-                                    pattern,
-                                    source,
-                                    node.start_byte(),
-                                    &mut names,
-                                );
-                                let mut bound = HashMap::new();
-                                collect_case_captures(
-                                    pattern,
-                                    source,
-                                    pattern.end_byte(),
-                                    &mut bound,
-                                );
-                                note_rebinds(bound, None, &mut rebinds);
-                            }
-                            None
-                        }
-                        "global_statement" | "nonlocal_statement" => {
-                            let declared = if node.kind() == "global_statement" {
-                                &mut globals
-                            } else {
-                                &mut nonlocals
-                            };
-                            let mut cursor = node.walk();
-                            declared.extend(
-                                node.named_children(&mut cursor)
-                                    .filter_map(|c| c.utf8_text(source).ok())
-                                    .map(str::to_string),
-                            );
-                            None
-                        }
-                        _ => None,
-                    };
-                    if let Some(target) = target {
-                        collect_shadow_names(target, source, node.start_byte(), &mut names);
-                        let declared = node
-                            .child_by_field_name("type")
-                            .filter(|_| target.kind() == "identifier")
-                            .and_then(|ty| simple_name_and_type(target, ty, source))
-                            .map(|(_, ty)| ty);
-                        let from = match node.kind() {
-                            "for_statement" => node.child_by_field_name("right"),
-                            _ => Some(node),
-                        };
-                        let from = from.map_or(node.end_byte(), |n| n.end_byte());
-                        let mut bound = HashMap::new();
-                        collect_shadow_names(target, source, from, &mut bound);
-                        note_rebinds(bound, declared.as_deref(), &mut rebinds);
-                    }
-                    let mut cursor = node.walk();
-                    pending.extend(node.named_children(&mut cursor));
-                }
+            // No statement nests inside these.
+            "expression_statement" | "assignment" | "return_statement" | "string" | "comment" => {
+                continue;
             }
-            // A `global` or `nonlocal` name is a binding of another scope, not
-            // a new local of this function.
-            names.retain(|name, _| !globals.contains(name) && !nonlocals.contains(name));
-
-            if !map.is_empty() {
-                scopes.push((fn_span, map));
-            }
-            if !names.is_empty() || !globals.is_empty() || !rebinds.is_empty() {
-                shadows.push(ScopeBindings {
-                    bytes: (n.start_byte(), n.end_byte()),
-                    outside: None,
-                    start: fn_span.0,
-                    names,
-                    globals,
-                    rebinds,
-                });
-            }
+            _ => {}
         }
         let mut c = n.walk();
-        for child in n.children(&mut c) {
-            stack.push(child);
-        }
+        stack.extend(n.children(&mut c));
     }
     LocalTypes {
-        scopes,
+        receivers: analyze_file(&PythonLowering, &(), root, source, file),
         imported,
-        shadows,
-    }
-}
-
-/// The names a lambda (its parameters) or a comprehension (its `for`
-/// variables) binds. A lambda parameter is visible in the lambda body only:
-/// a default runs in the enclosing scope. A comprehension variable is
-/// visible in the element, the conditions and every `for` clause but the
-/// first iterable, which the enclosing scope evaluates.
-fn inline_scope_bindings(n: Node<'_>, source: &[u8]) -> Option<ScopeBindings> {
-    let mut names = HashMap::new();
-    let mut bytes = (n.start_byte(), n.end_byte());
-    let mut outside = None;
-    match n.kind() {
-        "lambda" => {
-            let body = n.child_by_field_name("body")?;
-            bytes = (body.start_byte(), body.end_byte());
-            let params = n.child_by_field_name("parameters")?;
-            let mut cursor = params.walk();
-            for parameter in params.named_children(&mut cursor) {
-                let binding = match parameter.kind() {
-                    "default_parameter" | "typed_default_parameter" => {
-                        parameter.child_by_field_name("name")
-                    }
-                    _ => Some(parameter),
-                };
-                if let Some(binding) = binding {
-                    collect_shadow_names(binding, source, 0, &mut names);
-                }
-            }
-        }
-        "list_comprehension"
-        | "set_comprehension"
-        | "dictionary_comprehension"
-        | "generator_expression" => {
-            let mut cursor = n.walk();
-            for clause in n
-                .named_children(&mut cursor)
-                .filter(|clause| clause.kind() == "for_in_clause")
-            {
-                if let Some(left) = clause.child_by_field_name("left") {
-                    collect_shadow_names(left, source, 0, &mut names);
-                }
-                if outside.is_none() {
-                    let mut iterables = clause.walk();
-                    let mut right = clause.children_by_field_name("right", &mut iterables);
-                    outside = right.next().map(|first| {
-                        (first.start_byte(), right.last().unwrap_or(first).end_byte())
-                    });
-                }
-            }
-        }
-        _ => return None,
-    }
-    (!names.is_empty()).then(|| ScopeBindings {
-        bytes,
-        outside,
-        start: node_range(n).0,
-        names,
-        globals: HashSet::new(),
-        rebinds: HashMap::new(),
-    })
-}
-
-/// The names a `case` pattern captures: a bare name, `*rest` / `**rest`, and
-/// the name after `as`. A dotted name is a value pattern; neither the class of
-/// a class pattern nor the keyword of a keyword pattern binds.
-fn collect_case_captures(
-    pattern: Node<'_>,
-    source: &[u8],
-    position: usize,
-    names: &mut HashMap<String, usize>,
-) {
-    let skip = usize::from(matches!(
-        pattern.kind(),
-        "class_pattern" | "keyword_pattern"
-    ));
-    match pattern.kind() {
-        "dotted_name" if pattern.named_child_count() == 1 => {
-            if let Some(name) = pattern.named_child(0) {
-                collect_shadow_names(name, source, position, names);
-            }
-        }
-        "identifier" => collect_shadow_names(pattern, source, position, names),
-        "case_pattern" | "as_pattern" | "list_pattern" | "tuple_pattern" | "union_pattern"
-        | "splat_pattern" | "class_pattern" | "keyword_pattern" => {
-            let mut cursor = pattern.walk();
-            for child in pattern.named_children(&mut cursor).skip(skip) {
-                collect_case_captures(child, source, position, names);
-            }
-        }
-        // A key is a literal or a value pattern; only values and `**rest`
-        // capture.
-        "dict_pattern" => {
-            let mut cursor = pattern.walk();
-            for child in pattern
-                .named_children(&mut cursor)
-                .filter(|c| matches!(c.kind(), "case_pattern" | "splat_pattern"))
-            {
-                collect_case_captures(child, source, position, names);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn collect_shadow_names(
-    node: Node<'_>,
-    source: &[u8],
-    position: usize,
-    names: &mut HashMap<String, usize>,
-) {
-    match node.kind() {
-        "identifier" => {
-            if let Ok(name) = node.utf8_text(source) {
-                names
-                    .entry(name.to_string())
-                    .and_modify(|previous| *previous = (*previous).min(position))
-                    .or_insert(position);
-            }
-        }
-        "pattern_list"
-        | "tuple_pattern"
-        | "list_pattern"
-        | "tuple"
-        | "list"
-        | "as_pattern_target"
-        | "list_splat_pattern"
-        | "dictionary_splat_pattern" => {
-            let mut cursor = node.walk();
-            for child in node.named_children(&mut cursor) {
-                collect_shadow_names(child, source, position, names);
-            }
-        }
-        _ => {}
     }
 }
 
@@ -491,76 +121,6 @@ fn collect_import_bindings(
             out.insert(text.to_string(), binding);
         }
     }
-}
-
-/// Extract `typed_parameter` children under a `parameters` node.
-/// Tree-sitter-python shape: `typed_parameter` has the identifier as its
-/// first named child and a `type` field for the annotation.
-fn collect_typed_params(params: Node<'_>, source: &[u8], out: &mut HashMap<String, String>) {
-    let mut c = params.walk();
-    for p in params.children(&mut c) {
-        if p.kind() != "typed_parameter" {
-            continue;
-        }
-        let Some(id) = p.named_child(0) else { continue };
-        if id.kind() != "identifier" {
-            continue;
-        }
-        let Some(ty_node) = p.child_by_field_name("type") else {
-            continue;
-        };
-        if let Some((name, ty)) = simple_name_and_type(id, ty_node, source) {
-            out.insert(name, ty);
-        }
-    }
-}
-
-/// Walk a function body for `assignment` nodes with a `type` field and a
-/// simple-identifier `left`. Descends through compound statements so that
-/// annotations inside `if`/`for`/`with` blocks are captured. Does NOT
-/// descend into nested `function_definition` — those get their own scope.
-fn collect_typed_assignments(body: Node<'_>, source: &[u8], out: &mut HashMap<String, String>) {
-    let mut stack: Vec<Node<'_>> = vec![body];
-    while let Some(n) = stack.pop() {
-        if n.kind() == "function_definition" {
-            continue;
-        }
-        if n.kind() == "assignment" {
-            if let (Some(left), Some(ty_node)) =
-                (n.child_by_field_name("left"), n.child_by_field_name("type"))
-            {
-                if left.kind() == "identifier" {
-                    if let Some((name, ty)) = simple_name_and_type(left, ty_node, source) {
-                        out.insert(name, ty);
-                    }
-                }
-            }
-        }
-        let mut c = n.walk();
-        for child in n.children(&mut c) {
-            stack.push(child);
-        }
-    }
-}
-
-/// Extract `(name, type)` only when the type is a single identifier.
-/// Generics / subscripts / strings are skipped — they cannot be matched
-/// against class names by the resolver.
-fn simple_name_and_type(
-    name_node: Node<'_>,
-    type_node: Node<'_>,
-    source: &[u8],
-) -> Option<(String, String)> {
-    let inner = type_node.named_child(0).unwrap_or(type_node);
-    if inner.kind() != "identifier" {
-        return None;
-    }
-    let name = std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()]).ok()?;
-    let ty = std::str::from_utf8(&source[inner.start_byte()..inner.end_byte()]).ok()?;
-    if !ty.chars().all(|c| c.is_alphanumeric() || c == '_') || ty.is_empty() {
-        return None;
-    }
-    Some((name.to_string(), ty.to_string()))
 }
 
 /// The module whose `import_module` function loads a module by name.
@@ -924,8 +484,8 @@ pub fn extract_python_calls_and_path_literals(
                 }
             }
             "attribute" => {
-                if let Some(name) = bound_method_value(n, parent, source, locals) {
-                    reference_function(start_pos(n), &name, nodes);
+                if let Some(entry) = bound_method_value(n, parent, source, locals) {
+                    push_member_read(start_pos(n), entry, nodes);
                 }
             }
             "string" => {
@@ -964,13 +524,13 @@ pub fn extract_python_calls_and_path_literals(
     (path_literals, sql_refs)
 }
 
-/// `obj.m` in value position (`map(obj.m, xs)`, `f = self.m`) where `obj` is
-/// `self` / `cls` or a parameter or local annotated with a class `T`: the
-/// method `T.m`, typed as the call `obj.m()` is. The name scan drops `obj.m`,
-/// as `obj` is a local, and records no `self.m`. A callee, the object of a
-/// longer attribute, an assignment or `del` target and a receiver of no known
-/// type name nothing; a data attribute `obj.n` is no callable, so Pass 2
-/// binds no edge to it.
+/// The `field_reads` entry of `obj.m` in value position (`map(obj.m, xs)`,
+/// `f = self.m`, `c.total`) where the receiver core types `obj`: a
+/// [`MemberRead`](ecp_core::analyzer::types::MemberRead) of `T.m`. Pass 2
+/// decides the edge from the target: a property accessor is a read, any
+/// other method a function reference, a data attribute nothing. A callee, the
+/// object of a longer attribute, an assignment or `del` target and a receiver
+/// of unproven type give no entry: a method value never guesses.
 fn bound_method_value(
     attribute: Node<'_>,
     parent: Option<Node<'_>>,
@@ -997,8 +557,24 @@ fn bound_method_value(
     {
         return None;
     }
-    let ty = locals.lookup_visible(attribute, object.utf8_text(source).ok()?)?;
-    Some(format!("{ty}.{}", member.utf8_text(source).ok()?))
+    locals
+        .receivers
+        .receiver_at(object)?
+        .member_read_entry(member.utf8_text(source).ok()?, ReadIntent::Unknown)
+}
+
+/// Records `entry` in the `field_reads` of the function holding `pos`, once.
+/// `calls.rs` finds the holder only through its call attach helper, so the
+/// entry rides through `calls` and moves out at once.
+fn push_member_read(pos: Pos, entry: String, nodes: &mut [RawNode]) {
+    let Some((holder, _)) = attach_to_enclosing(pos, entry, nodes) else {
+        return;
+    };
+    if let Some(entry) = nodes[holder].calls.pop() {
+        if !nodes[holder].field_reads.contains(&entry) {
+            nodes[holder].field_reads.push(entry);
+        }
+    }
 }
 
 /// Climb from a string literal to find the innermost enclosing
@@ -1062,8 +638,8 @@ fn python_callee_name(
                     if let Some(callee) = dynamic.member_callee(pos, obj_name, attr_name) {
                         return Some(callee);
                     }
-                    if let Some(ty) = locals.lookup(pos, obj_name) {
-                        return Some(format!("{ty}.{attr_name}"));
+                    if let Some(receiver) = locals.receivers.receiver_at(obj) {
+                        return Some(receiver.call_entry(attr_name));
                     }
                 }
                 if is_super_call(obj, source) {
@@ -1104,8 +680,7 @@ fn python_callee_name(
                         let class = (obj.kind() == "identifier")
                             .then(|| obj.utf8_text(source).ok())
                             .flatten()
-                            .filter(|name| classes.contains(*name))
-                            .filter(|name| !locals.shadowed(obj, name));
+                            .filter(|name| classes.contains(*name));
                         return Some(match class {
                             Some(class) => format!("{class}.{attr_name}"),
                             // `make().bar()`: the resolver types the receiver
@@ -1118,8 +693,7 @@ fn python_callee_name(
                                 let calls_local = obj
                                     .child_by_field_name("function")
                                     .filter(|f| f.kind() == "identifier")
-                                    .and_then(|f| f.utf8_text(source).ok())
-                                    .is_some_and(|name| locals.shadowed(obj, name));
+                                    .is_some_and(|f| locals.receivers.receiver_at(f).is_some());
                                 if calls_local {
                                     return Some(untyped);
                                 }
@@ -1160,48 +734,6 @@ fn attribute_receiver_path(mut node: Node<'_>, source: &[u8]) -> Option<String> 
     segments.push(node.utf8_text(source).ok()?);
     segments.reverse();
     Some(segments.join("/"))
-}
-
-/// The first parameter of a method declared in a class body (`self`, or
-/// `cls` of a classmethod) and the class it stands for, so `self.m()` is
-/// typed as `C.m` the way Java types `this.m()`. A `@staticmethod` has no
-/// such parameter.
-fn method_receiver<'s>(
-    function: Node<'_>,
-    params: Node<'_>,
-    source: &'s [u8],
-) -> Option<(&'s str, &'s str)> {
-    let mut member = function;
-    if let Some(decorated) = function
-        .parent()
-        .filter(|p| p.kind() == "decorated_definition")
-    {
-        let mut cursor = decorated.walk();
-        let is_static = decorated.named_children(&mut cursor).any(|d| {
-            d.kind() == "decorator"
-                && d.utf8_text(source)
-                    .is_ok_and(|t| t.trim_start_matches('@').trim() == "staticmethod")
-        });
-        if is_static {
-            return None;
-        }
-        member = decorated;
-    }
-    let class = member
-        .parent()
-        .filter(|body| body.kind() == "block")?
-        .parent()
-        .filter(|class| class.kind() == "class_definition")?;
-    let first = params.named_child(0)?;
-    let receiver = match first.kind() {
-        "identifier" => first,
-        "typed_parameter" => first.named_child(0).filter(|n| n.kind() == "identifier")?,
-        _ => return None,
-    };
-    Some((
-        receiver.utf8_text(source).ok()?,
-        class.child_by_field_name("name")?.utf8_text(source).ok()?,
-    ))
 }
 
 /// Zero-argument `super()`: the receiver of a call through the caller

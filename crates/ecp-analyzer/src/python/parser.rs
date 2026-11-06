@@ -2029,7 +2029,8 @@ impl ParseSpec for PythonSpec {
                 // local annotation (typed param or annotated assignment) — fed
                 // back into the resolver's Tier 2.5 qualifier-scoped lookup.
                 // Falls back to bare member name when no annotation is in scope.
-                let local_types = collect_local_types(root, source);
+                let mut local_types = collect_local_types(root, source, cx.path);
+                cx.blind_spots.extend(local_types.take_blind_spots());
                 // A literal `importlib.import_module("<lit>")` is a synthetic
                 // namespace import, like the static arms above.
                 let mut dynamic = collect_dynamic_imports(root, source);
