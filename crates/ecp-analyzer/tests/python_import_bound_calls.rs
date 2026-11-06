@@ -58,9 +58,14 @@ fn test_import_relative_cache_keeps_caller_directories_separate() {
     assert_eq!(calls_from(&graph, "second")[0].file, "b/util.py");
 }
 
+/// Stands for: a name a function assigns anywhere is local to the whole
+/// function, so `api.helper()` before `api = value` reads the unbound local
+/// (Python raises `UnboundLocalError`), never the imported module. Was: the
+/// module binding.
 #[test]
-fn test_import_assignment_after_call_keeps_module_binding() {
-    assert_python_call(
+fn test_import_name_assigned_later_in_function_binds_no_module_member() {
+    let graph = graph_of(
+        &PythonProvider::new().unwrap(),
         &[
             ("pkg/util.py", "def helper(): pass\n"),
             ("other.py", "def helper(): pass\n"),
@@ -69,10 +74,9 @@ fn test_import_assignment_after_call_keeps_module_binding() {
                 "import pkg.util as api\ndef go(value):\n    api.helper()\n    api = value\n",
             ),
         ],
-        "go",
-        "pkg/util.py",
-        "helper",
     );
+    let hits = calls_from(&graph, "go");
+    assert!(hits.iter().all(|hit| hit.file != "pkg/util.py"), "{hits:?}");
 }
 
 #[test]

@@ -582,10 +582,12 @@ fn test_kotlin_callee_type_receiver_emits_from_receiver() {
     );
 }
 
-/// A property or local named like a type is no type: its call keeps the
-/// bare member, as before.
+/// A property, local or nullable parameter receiver the parser leaves
+/// untyped (`val Holder = Other()`, `o: Other?`) is no type and no `this`:
+/// where the enclosing type declares the member, the call is an untyped
+/// member, never the bare name that binds `D.make`. Was: the bare member.
 #[test]
-fn test_kotlin_callee_property_or_local_named_like_type_emits_bare_member() {
+fn test_kotlin_callee_untyped_receiver_named_like_type_emits_untyped_member() {
     for (caller, receiver) in [
         ("viaPropertyNamedLikeType", "Holder"),
         ("viaLocalNamedLikeType", "Reg"),
@@ -595,8 +597,11 @@ fn test_kotlin_callee_property_or_local_named_like_type_emits_bare_member() {
             &kotlin(),
             ("D.kt", KOTLIN_TYPE),
             caller,
-            "make",
-            &[CallSite::from_receiver(receiver, "make")],
+            &CallSite::untyped_member("make"),
+            &[
+                CallSite::from_receiver(receiver, "make"),
+                "make".to_string(),
+            ],
         );
     }
 }

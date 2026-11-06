@@ -377,10 +377,10 @@ fn test_ladder_field_read_binds_same_on_both_sides_dart() {
 /// Stands for: a bare field read never binds a property an interface
 /// declares, at Tier 1 or Tier 3, on either side. Tier 1: `readLocal` binds
 /// one `name` (`typescript_type_annotations::a15a` pins that the build's is
-/// the class's; the overlay's equals it by uid). Tier 3: `readArea` binds the class's
-/// `area` at 0.7, where the interface's `area` in another file would make
-/// the name ambiguous; `readLabel` binds nothing, as only an interface
-/// declares `label`.
+/// the class's; the overlay's equals it by uid). Tier 3: the interface's
+/// `area` counts toward the name, so `readArea` binds neither it nor the
+/// class's `area` (an untyped `s` may be any `Shape`); `readLabel` binds
+/// nothing, as only an interface declares `label`.
 #[test]
 fn test_ladder_field_read_interface_property_binds_no_read_on_both_sides_typescript() {
     let (full, overlay, by_name) = field_read_edges(
@@ -404,11 +404,7 @@ fn test_ladder_field_read_interface_property_binds_no_read_on_both_sides_typescr
             ),
         ],
     );
-    let mut want = vec![
-        ("readLocal".to_owned(), "name".to_owned(), 100),
-        ("readArea".to_owned(), "area".to_owned(), 70),
-    ];
-    want.sort();
+    let want = vec![("readLocal".to_owned(), "name".to_owned(), 100)];
     assert_eq!(by_name, want, "no read binds an interface property");
     assert_eq!(overlay, full, "the overlay binds every read as the build");
 }

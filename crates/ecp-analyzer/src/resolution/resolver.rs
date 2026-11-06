@@ -2659,9 +2659,11 @@ mod tests {
             st.note_c_callable(4, 0, &params);
         }
         if twin {
-            st.register_node("b/inst.hpp", "Inst", 5, NodeKind::Class);
-            st.register_node_owned("b/inst.hpp", "cb_ns", 6, NodeKind::Method, "Inst");
-            st.note_c_callable(6, 0, &params);
+            // Ids stay dense: the next free one after the optional `extra`.
+            let class = 4 + u32::from(extra);
+            st.register_node("b/inst.hpp", "Inst", class, NodeKind::Class);
+            st.register_node_owned("b/inst.hpp", "cb_ns", class + 1, NodeKind::Method, "Inst");
+            st.note_c_callable(class + 1, 0, &params);
         }
         st
     }
@@ -2694,7 +2696,7 @@ mod tests {
     #[test]
     fn test_canonical_c_declaration_two_classes_of_one_name_returns_declaration() {
         let st = member_table_with(false, true);
-        assert_eq!(canonical(&st, 6), 6);
+        assert_eq!(canonical(&st, 5), 5);
         assert_eq!(canonical(&st, 0), 0);
     }
 

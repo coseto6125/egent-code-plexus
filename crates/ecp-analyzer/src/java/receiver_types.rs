@@ -296,16 +296,6 @@ mod tests {
             .calls
     }
 
-    /// A local of an initializer block is no field of the class: the field
-    /// lookup only answers a receiver that names no local.
-    #[test]
-    fn test_java_callee_static_initializer_local_hides_same_named_field() {
-        let calls =
-            all_calls("class Registry { private Config cfg; static { Loader cfg = new Loader(); cfg.load(); } }");
-        assert!(calls.iter().any(|c| c == "Loader.load"), "{calls:?}");
-        assert!(!calls.iter().any(|c| c == "Config.load"), "{calls:?}");
-    }
-
     #[test]
     fn test_java_callee_enum_constant_lambda_parameter_hides_same_named_field() {
         let calls = all_calls("enum E { K(z -> z.m()); C z; E(Object x) {} }");

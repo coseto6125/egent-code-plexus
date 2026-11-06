@@ -38,7 +38,9 @@ fn lines(count: usize, line: impl Fn(usize) -> String) -> String {
 
 struct Case {
     path: &'static str,
-    /// Whether the language's solver tracks any local of the fixture.
+    /// Whether the language's solver tracks any local of the fixture. A
+    /// cell nothing writes holds no slot, so a declared-only local of a
+    /// pinned language (Java, C#, Kotlin) never reaches the budget.
     tracks: bool,
     source: fn(usize) -> String,
     parse: fn(&Path, &[u8]) -> Vec<(String, std::path::PathBuf)>,
@@ -134,8 +136,8 @@ fn test_parse_file_function_over_receiver_budget_emits_blind_spot_across_languag
         case!("src/budget.js", javascript, JavaScriptProvider::new(), true),
         case!("src/budget.ts", typescript, TypeScriptProvider::new(), true),
         case!("src/Budget.java", java, JavaProvider::new(), false),
-        case!("src/Budget.cs", csharp, CSharpProvider::new(), true),
-        case!("src/Budget.kt", kotlin, KotlinProvider::new(), true),
+        case!("src/Budget.cs", csharp, CSharpProvider::new(), false),
+        case!("src/Budget.kt", kotlin, KotlinProvider::new(), false),
         case!("src/budget.cpp", cpp, CppProvider::new(), true),
         case!("src/Budget.swift", swift, SwiftProvider::new(), true),
         case!("src/budget.go", go, GoProvider::new(), true),

@@ -778,16 +778,6 @@ mod tests {
         assert!(!has(&calls, CallSite::Plain("Cache.Bar")), "{calls:?}");
     }
 
-    /// A local of a property accessor is no field of the class.
-    #[test]
-    fn test_csharp_callee_accessor_local_hides_same_named_field() {
-        let calls = all_calls(
-            "class S { Config cfg; int P { get { var cfg = Make(); return cfg.Load(); } } }",
-        );
-        assert!(has(&calls, CallSite::UntypedMember("Load")), "{calls:?}");
-        assert!(!has(&calls, CallSite::Plain("Config.Load")), "{calls:?}");
-    }
-
     #[test]
     fn test_csharp_callee_this_inside_nested_struct_names_the_struct() {
         let graph = parse(

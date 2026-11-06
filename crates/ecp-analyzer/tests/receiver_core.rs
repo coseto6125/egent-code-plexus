@@ -625,8 +625,8 @@ fn receiver_of<'t>(function: Node<'t>, source: &[u8]) -> Option<Node<'t>> {
     find_identifier(function.child_by_field_name("body")?, source, "obj")
 }
 
-/// Lowers `def run(obj): return obj.m()` as an untyped parameter read
-/// after `extra_blocks` empty blocks.
+/// Lowers `def run(obj): return obj.m()` as a written, untyped parameter
+/// read after `extra_blocks` empty blocks.
 struct ChainLowering {
     extra_blocks: usize,
     /// Declares `obj` with this type under a `Pinned` policy.
@@ -660,6 +660,9 @@ impl Lowering for ChainLowering {
         };
         let declared = self.pinned.map(|ty| b.intern(ty, TypeOrigin::Annotation));
         let obj = b.declare("obj", BindingOrigin::Param, declared);
+        // `obj = obj`: a written cell, so an unpinned `obj` takes a tracked
+        // slot and pays the blocks x cells budget.
+        b.assign(obj, Value::Copy(obj));
         for _ in 0..self.extra_blocks {
             let next = b.new_block();
             b.goto(next);

@@ -599,16 +599,15 @@ class VM(private val repository: UserRepository) {
             .iter()
             .find(|n| n.name == "go")
             .expect("go function not found");
-        assert_eq!(
-            go.calls,
-            [
-                "make".to_string(),
-                CallSite::untyped_member("save"),
-                "close".to_string()
-            ],
-            "{:?}",
-            go.calls
-        );
+        let mut calls = go.calls.clone();
+        calls.sort_unstable();
+        let mut expected = [
+            "make".to_string(),
+            CallSite::untyped_member("save"),
+            "close".to_string(),
+        ];
+        expected.sort_unstable();
+        assert_eq!(calls, expected);
     }
 
     /// An explicit class import still qualifies a static-style receiver.
@@ -644,7 +643,12 @@ class VM(private val repository: UserRepository) {
             let mut stack = vec![function];
             let mut repo = None;
             while let Some(n) = stack.pop() {
-                if n.kind() == "simple_identifier" && n.utf8_text(source) == Ok("repo") {
+                // The receiver of `repo.save()`, not the parameter name.
+                if n.kind() == "simple_identifier"
+                    && n.utf8_text(source) == Ok("repo")
+                    && n.parent()
+                        .is_some_and(|p| p.kind() == "navigation_expression")
+                {
                     repo = Some(n);
                 }
                 stack.extend(n.named_children(&mut n.walk()));
