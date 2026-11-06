@@ -23,13 +23,16 @@
 use super::path_literals::{
     build_concatenated, build_raw_path_literal, enclosing_symbol_and_owner, strip_quotes,
 };
+use super::receiver_lower::CppLowering;
 use crate::calls::{
     attach_to_enclosing, construction_call, node_range, range_width, start_pos, CallSiteIndex, Pos,
     PosRange,
 };
 use crate::indirect_dispatch::FnPtrVars;
+use crate::receiver::{analyze_file, FileReceivers};
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::path::Path;
 use tree_sitter::Node;
 
 #[derive(Debug, Default)]
@@ -45,6 +48,10 @@ pub struct CppBindings {
     /// Typed data members per class path (`a::Foo`), wherever the class
     /// declares them: two namespaces' `Foo` keep their own fields.
     class_fields: FxHashMap<String, FxHashMap<String, String>>,
+    /// The type each local or parameter receiver holds where it is used.
+    /// The budget blind spots it collects are not surfaced: the lowering
+    /// is built without the file path.
+    receivers: FileReceivers,
 }
 
 impl CppBindings {
@@ -216,6 +223,7 @@ pub fn collect_bindings(root: Node<'_>, source: &[u8]) -> CppBindings {
         fn_scopes,
         class_scopes,
         class_fields,
+        receivers: analyze_file(&CppLowering, &(), root, source, Path::new("")),
     }
 }
 
@@ -265,7 +273,7 @@ fn last_segment(path: &str) -> &str {
 
 /// The inner declarator of a pointer / reference / init / array
 /// declarator. `reference_declarator` has no `declarator` field.
-fn inner_declarator(node: Node<'_>) -> Option<Node<'_>> {
+pub(super) fn inner_declarator(node: Node<'_>) -> Option<Node<'_>> {
     node.child_by_field_name("declarator")
         .or_else(|| node.named_child(0))
 }
@@ -317,7 +325,7 @@ fn bind_param(p: Node<'_>, source: &[u8], out: &mut FxHashMap<String, String>) {
 /// The name in a parameter declarator that is itself callable, such as
 /// `Beta* (*make)()`. This only runs for parameters, so ordinary function
 /// declarations never become local values.
-fn callable_param_identifier(node: Node<'_>, source: &[u8]) -> Option<String> {
+pub(super) fn callable_param_identifier(node: Node<'_>, source: &[u8]) -> Option<String> {
     let node = find_function_declarator(node)?;
     let paren = node.child_by_field_name("declarator")?;
     if paren.kind() != "parenthesized_declarator" {
@@ -447,7 +455,7 @@ fn unwrap_field_identifier<'s>(node: Node<'_>, source: &'s [u8]) -> Option<&'s s
 /// Recursively unwrap declarator nodes to extract the bound identifier.
 /// Handles `identifier`, `init_declarator`, `pointer_declarator`,
 /// `reference_declarator`. Returns None for unrelated kinds.
-fn unwrap_declarator_identifier(node: Node<'_>, source: &[u8]) -> Option<String> {
+pub(super) fn unwrap_declarator_identifier(node: Node<'_>, source: &[u8]) -> Option<String> {
     match node.kind() {
         "identifier" => std::str::from_utf8(&source[node.start_byte()..node.end_byte()])
             .ok()
@@ -459,7 +467,7 @@ fn unwrap_declarator_identifier(node: Node<'_>, source: &[u8]) -> Option<String>
     }
 }
 
-fn find_function_declarator<'a>(mut node: Node<'a>) -> Option<Node<'a>> {
+pub(super) fn find_function_declarator<'a>(mut node: Node<'a>) -> Option<Node<'a>> {
     loop {
         match node.kind() {
             "function_declarator" => return Some(node),
@@ -611,6 +619,11 @@ fn cpp_callee_name(call: Node<'_>, source: &[u8], bindings: &CppBindings) -> Opt
                     Some(cls) => format!("{cls}.{method}"),
                     None => method.to_string(),
                 });
+            }
+            if receiver.kind() == "identifier" {
+                if let Some(state) = bindings.receivers.receiver_at(receiver) {
+                    return Some(state.call_entry(method));
+                }
             }
             Some(
                 match member_receiver_type(receiver, source, bindings, pos) {
