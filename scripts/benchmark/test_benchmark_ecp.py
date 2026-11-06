@@ -213,3 +213,26 @@ def _cypher_stdout(stdout, rc=0):
 def test_indexed_file_count_cypher_output_returns_count_or_none(monkeypatch, stdout, rc, expected):
     monkeypatch.setattr(bench, "_run", _cypher_stdout(stdout, rc))
     assert bench._indexed_file_count(Path("ecp"), Path(".")) == expected
+
+
+@pytest.mark.parametrize(
+    ("count", "message"),
+    [(None, "could not count the files"), (0, "holds 0 files")],
+)
+def test_main_index_file_count_unknown_or_zero_exits_before_queries(
+    tmp_path, monkeypatch, capsys, count, message
+):
+    binary = tmp_path / "ecp"
+    binary.write_bytes(b"")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(
+        sys, "argv", ["bench", "--binary", str(binary), "--repo", str(repo), "--git-repo", str(repo)]
+    )
+    monkeypatch.setattr(bench, "_ensure_binary_fresh", lambda binary, skip: None)
+    monkeypatch.setattr(bench, "_hardware", lambda: {})
+    monkeypatch.setattr(bench, "_admin_drop", lambda binary, repo: None)
+    monkeypatch.setattr(bench, "_run", lambda cmd, cwd, env=None: (0.01, 0, "", ""))
+    monkeypatch.setattr(bench, "_indexed_file_count", lambda binary, repo: count)
+    assert bench.main() == 2
+    assert message in capsys.readouterr().err

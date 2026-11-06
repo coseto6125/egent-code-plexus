@@ -86,6 +86,18 @@ fn test_parse_bare_generic_subscript_returns_typedef() {
     assert_eq!(kind_of(&g, "Al"), Some(NodeKind::Typedef), "{:?}", g.nodes);
 }
 
+/// Stands for: a generic named through a typing module is a type.
+#[test]
+fn test_parse_typing_module_generic_subscript_returns_typedef() {
+    for src in [
+        "import typing\nX = typing.List[int]\n",
+        "import typing as t\nX = t.Dict[str, int]\n",
+        "import collections.abc\nX = collections.abc.Mapping[str, int]\n",
+    ] {
+        assert_eq!(kind_of(&parse(src), "X"), Some(NodeKind::Typedef), "{src}");
+    }
+}
+
 #[test]
 fn test_parse_value_assignments_stay_variable() {
     for src in [
@@ -201,7 +213,8 @@ fn test_parse_module_class_subscript_of_types_is_typedef() {
 
 /// Stands for: `Color["RED"]` is an `Enum` name lookup and `Rows[0]` an index,
 /// so a module class subscripted by a string or a number stays a Variable. An
-/// `Enum` takes no type arguments, so `Color[NAME]` is a lookup too.
+/// `Enum` takes no type arguments, so `Color[NAME]` is a lookup too. An
+/// attribute that only shares a generic's name (`cfg.dict`) reads a value.
 #[test]
 fn test_parse_module_class_subscript_of_literal_stays_variable() {
     for src in [
@@ -211,6 +224,9 @@ fn test_parse_module_class_subscript_of_literal_stays_variable() {
         "class Color(Enum):\n    RED = 1\nNAME = \"RED\"\nX = Color[NAME]\n",
         "class Perm(enum.IntFlag):\n    R = 4\nX = Perm[NAME]\n",
         "class Box(Generic[T]): ...\nX = Box[1 | 2]\n",
+        "X = cfg.dict[\"a\"]\n",
+        "X = resp.list[0]\n",
+        "X = cfg.dict[key]\n",
     ] {
         assert_eq!(kind_of(&parse(src), "X"), Some(NodeKind::Variable), "{src}");
     }

@@ -17,7 +17,7 @@
 //! - decorators: GCC/clang `__attribute__((...))` and `#pragma` directives immediately
 //!   preceding the function (best-effort heuristic from raw source scan).
 
-use super::{extract_with, node_text, ts_span};
+use super::{c_param_type, extract_with, node_text, ts_span};
 use ecp_core::analyzer::types::{RawFunctionMeta, RawNode};
 use ecp_core::graph::{FileCategory, FunctionMeta};
 use tree_sitter::Node;
@@ -232,19 +232,19 @@ fn extract_params(fn_node: &Node<'_>, source: &[u8]) -> Vec<String> {
                         extract_declarator_name(d, source)
                     })
                     .unwrap_or_default();
-                let ty = child
+                let base = child
                     .child_by_field_name("type")
-                    .map(|t| node_text(&t, source).to_string())
+                    .map(|t| node_text(&t, source))
                     .unwrap_or_default();
                 // Skip `void` single-param declarations (`int foo(void)`).
-                if ty == "void" && declarator.is_none() {
+                if base == "void" && declarator.is_none() {
                     if !cursor.goto_next_sibling() {
                         break;
                     }
                     continue;
                 }
                 result.push(name);
-                result.push(ty);
+                result.push(c_param_type(base, declarator, source));
             } else if child.kind() == "identifier" {
                 // A K&R list (`int kr(a, b) int a; int b; { .. }`) names its
                 // parameters; their types come from the declarations before
@@ -273,15 +273,12 @@ fn old_style_param_type(fn_node: &Node<'_>, name: &str, source: &[u8]) -> Option
         .filter(|child| child.kind() == "declaration")
         .find_map(|declaration| {
             let mut declarators = declaration.walk();
-            let declares = declaration
+            let declarator = declaration
                 .children_by_field_name("declarator", &mut declarators)
-                .any(|d| extract_declarator_name(d, source) == name);
-            if !declares {
-                return None;
-            }
+                .find(|d| extract_declarator_name(*d, source) == name)?;
             declaration
                 .child_by_field_name("type")
-                .map(|ty| node_text(&ty, source).to_string())
+                .map(|ty| c_param_type(node_text(&ty, source), Some(declarator), source))
         });
     found
 }
@@ -311,7 +308,16 @@ fn find_function_declarator(node: Node<'_>) -> Option<Node<'_>> {
 
 /// Unwrap nested pointer_declarator / array_declarator to get the innermost identifier.
 fn extract_declarator_name(decl: Node<'_>, source: &[u8]) -> String {
+    // A pointer, array or function declarator names its inner declarator
+    // in a field: `* const p`, `(*cb)(int)`.
+    if let Some(inner) = decl.child_by_field_name("declarator") {
+        return extract_declarator_name(inner, source);
+    }
     match decl.kind() {
+        "parenthesized_declarator" => decl
+            .named_child(0)
+            .map(|inner| extract_declarator_name(inner, source))
+            .unwrap_or_default(),
         "identifier" => node_text(&decl, source).to_string(),
         "pointer_declarator" | "array_declarator" | "reference_declarator" => {
             // Recurse into the inner declarator child.

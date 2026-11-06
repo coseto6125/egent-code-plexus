@@ -15,7 +15,8 @@
 //!   + GCC/clang `__attribute__((...))` like C.
 
 use super::{
-    extract_with, node_text, scoped_type_params, subtree_contains_kind, ts_span, type_param_entry,
+    c_param_type, extract_with, node_text, scoped_type_params, subtree_contains_kind, ts_span,
+    type_param_entry,
 };
 use ecp_core::analyzer::types::{RawFunctionMeta, RawNode};
 use ecp_core::graph::{FileCategory, FunctionMeta};
@@ -401,20 +402,20 @@ fn extract_params(fn_node: &Node<'_>, source: &[u8]) -> Vec<String> {
                 let name = declarator
                     .map(|d| extract_declarator_name(d, source))
                     .unwrap_or_default();
-                let ty = child
+                let base = child
                     .child_by_field_name("type")
-                    .map(|t| node_text(&t, source).to_string())
+                    .map(|t| node_text(&t, source))
                     .unwrap_or_default();
                 // Skip void-only param lists. An unnamed `void *` has a
                 // declarator but no name: it is a parameter.
-                if ty == "void" && declarator.is_none() {
+                if base == "void" && declarator.is_none() {
                     if !cursor.goto_next_sibling() {
                         break;
                     }
                     continue;
                 }
                 result.push(name);
-                result.push(ty);
+                result.push(c_param_type(base, declarator, source));
             } else if matches!(
                 child.kind(),
                 // tree-sitter-cpp files a C-style `...` as a bare token, where
@@ -473,7 +474,16 @@ fn find_function_declarator(node: Node<'_>) -> Option<Node<'_>> {
 
 /// Unwrap nested pointer_declarator / array_declarator to get the innermost identifier text.
 fn extract_declarator_name(decl: Node<'_>, source: &[u8]) -> String {
+    // A pointer, array or function declarator names its inner declarator
+    // in a field: `* const p`, `(*cb)(int)`.
+    if let Some(inner) = decl.child_by_field_name("declarator") {
+        return extract_declarator_name(inner, source);
+    }
     match decl.kind() {
+        "parenthesized_declarator" => decl
+            .named_child(0)
+            .map(|inner| extract_declarator_name(inner, source))
+            .unwrap_or_default(),
         "identifier" | "field_identifier" | "type_identifier" => {
             node_text(&decl, source).to_string()
         }

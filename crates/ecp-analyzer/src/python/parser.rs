@@ -787,6 +787,17 @@ const ALIAS_GENERICS: &[&str] = &[
     "type",
 ];
 
+/// Modules whose attribute `X` in `module.X[...]` names a generic type.
+const TYPE_MODULES: &[&str] = &[
+    "typing",
+    "typing_extensions",
+    "t",
+    "builtins",
+    "collections",
+    "collections.abc",
+    "abc",
+];
+
 /// Builtin type names that make a `|` union certainly a type, unless the
 /// module rebinds them.
 const ALIAS_BUILTINS: &[&str] = &[
@@ -833,8 +844,12 @@ fn is_type_shape(n: Node, source: &[u8], names: &ModuleNames, certain: &mut bool
                 .child_by_field_name("value")
                 .and_then(|v| match v.kind() {
                     "identifier" => Some((node_text(v, source), true)),
+                    // `typing.List[int]` is a generic; `cfg.dict["a"]` reads
+                    // a value through an object that only shares the name.
                     "attribute" => v
-                        .child_by_field_name("attribute")
+                        .child_by_field_name("object")
+                        .filter(|o| TYPE_MODULES.contains(&node_text(*o, source)))
+                        .and_then(|_| v.child_by_field_name("attribute"))
                         .map(|a| (node_text(a, source), false)),
                     _ => None,
                 })

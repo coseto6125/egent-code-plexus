@@ -52,6 +52,46 @@ pub(super) fn node_text<'a>(n: &Node<'_>, source: &'a [u8]) -> &'a str {
     std::str::from_utf8(&source[n.start_byte()..n.end_byte()]).unwrap_or("")
 }
 
+/// A C/C++ parameter's type: its `type` with the declarator's shape after
+/// it, the declarator with the parameter's name cut out (`char *s` gives
+/// `char *`, `int a[]` `int []`, `int (*cb)(int)` `int (*)(int)`). Without
+/// the shape, `f(int)` and `f(int *)` would read as one signature.
+pub(super) fn c_param_type(ty: &str, declarator: Option<Node<'_>>, source: &[u8]) -> String {
+    let Some(declarator) = declarator else {
+        return ty.to_string();
+    };
+    let mut name = declarator;
+    while !matches!(name.kind(), "identifier" | "field_identifier") {
+        let inner = name.child_by_field_name("declarator").or_else(|| {
+            let mut cursor = name.walk();
+            let found = name
+                .named_children(&mut cursor)
+                .find(|c| c.kind().ends_with("declarator") || c.kind() == "identifier");
+            found
+        });
+        match inner {
+            Some(inner) => name = inner,
+            None => break,
+        }
+    }
+    let (start, end) = (declarator.start_byte(), declarator.end_byte());
+    let (cut_start, cut_end) = if matches!(name.kind(), "identifier" | "field_identifier") {
+        (name.start_byte(), name.end_byte())
+    } else {
+        (end, end)
+    };
+    let shape: String = [&source[start..cut_start], &source[cut_end..end]]
+        .concat()
+        .split(|b| b.is_ascii_whitespace())
+        .filter_map(|word| std::str::from_utf8(word).ok())
+        .collect();
+    if shape.is_empty() {
+        ty.to_string()
+    } else {
+        format!("{ty} {shape}")
+    }
+}
+
 /// An xUnit framework runs `name` as a test: XCTest, PHPUnit and Minitest
 /// run each `test*` method of a class that extends their base class.
 /// `superclass` is the written base (`XCTestCase`, `\PHPUnit\Framework\TestCase`,

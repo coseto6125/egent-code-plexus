@@ -216,6 +216,29 @@ fn test_extract_params_kr_parameter_without_declaration_has_empty_type() {
     assert_eq!(params_of(&g, "kr2"), ["a", "int", "b", ""]);
 }
 
+/// Stands for: a parameter's type keeps its declarator's shape (pointer,
+/// array, function pointer) without the name, and a K&R declaration too.
+#[test]
+fn test_extract_params_declarator_shape_is_part_of_type() {
+    let g = analyze(
+        "void f(char *s, int a[], int (*cb)(int), const int n);\nint kr(p) char **p; { return 0; }\n",
+    );
+    assert_eq!(
+        params_of(&g, "f"),
+        [
+            "s",
+            "char *",
+            "a",
+            "int []",
+            "cb",
+            "int (*)(int)",
+            "n",
+            "int"
+        ]
+    );
+    assert_eq!(params_of(&g, "kr"), ["p", "char **"]);
+}
+
 /// Stands for: an unnamed `void *` is one parameter, not the `(void)` list.
 #[test]
 fn test_extract_params_unnamed_void_pointer_counts_one_parameter() {

@@ -398,6 +398,41 @@ fn test_c_family_field_cpp_overload_of_same_arity_other_types_binds_nothing() {
     assert_eq!(calls(&g, "run"), Vec::<(String, String)>::new());
 }
 
+/// Stands for: a pointer or reference is part of the parameter type, so
+/// `f(int *)` and `f(int &)` are other overloads of the `f(int)` the header
+/// declares, and a pointer spelled with or without a name is one type.
+#[test]
+fn test_c_family_field_cpp_overload_of_pointer_parameter_binds_nothing() {
+    for definition in [
+        "void f(int *p) {}\n",
+        "void f(int &r) {}\n",
+        "void f(int []) {}\n",
+    ] {
+        let g = graph(&[
+            ("api.hpp", "void f(int);\n"),
+            ("other.cpp", definition),
+            ("main.cpp", "#include \"api.hpp\"\nvoid run() { f(1); }\n"),
+        ]);
+        assert_eq!(
+            calls(&g, "run"),
+            Vec::<(String, String)>::new(),
+            "{definition}"
+        );
+    }
+    let g = graph(&[
+        ("api.hpp", "void k(int *, char **, int (*)(int));\n"),
+        (
+            "k.cpp",
+            "#include \"api.hpp\"\nvoid k(int *p, char ** argv, int (*cb)(int)) {}\n",
+        ),
+        (
+            "main.cpp",
+            "#include \"api.hpp\"\nvoid run() { k(0, 0, 0); }\n",
+        ),
+    ]);
+    assert_eq!(calls(&g, "run"), vec![pair("k.cpp", "k")]);
+}
+
 /// Stands for: a C caller binds the prototype its header declares, never a
 /// C++ overload of the same count and other types.
 #[test]

@@ -632,13 +632,18 @@ def main() -> int:
     # ecp indexes the files git tracks in `--repo`, and skips nested git
     # repos: a directory of clones under an empty repo indexes nothing, and
     # every later number would time queries over an empty graph.
-    if (files := _indexed_file_count(args.binary, args.repo)) == 0:
+    files = _indexed_file_count(args.binary, args.repo)
+    if files is None:
+        print(f"error: could not count the files the index of {args.repo} holds", file=sys.stderr)
+        _print_summary(samples)
+        return 2
+    if files == 0:
         nested = sorted(p.parent.name for p in args.repo.glob("*/.git"))
         hint = f"; it holds nested git repos ({', '.join(nested[:5])}...), pass one with --repo" if nested else ""
         print(f"error: the index of {args.repo} holds 0 files{hint}", file=sys.stderr)
         _print_summary(samples)
         return 2
-    print(f"  files indexed: {files if files is not None else '?'}")
+    print(f"  files indexed: {files}")
 
     # Phase 2: analyze (incremental, hash-cache hot)
     print("→ analyze (incremental)")
