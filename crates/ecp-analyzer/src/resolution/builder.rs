@@ -427,8 +427,14 @@ impl GraphBuilder {
         // FQN calls to concrete files by walking the filesystem mod tree from
         // each crate root. Gated on `repo_root` being set — test harnesses
         // that don't set a repo root simply skip module-tree resolution.
-        let mod_tree: Option<RustWorkspaceModTree> =
-            self.repo_root.as_deref().map(RustWorkspaceModTree::build);
+        let mod_tree: Option<RustWorkspaceModTree> = self.repo_root.as_deref().map(|root| {
+            RustWorkspaceModTree::build_with_files(
+                root,
+                self.local_graphs
+                    .iter()
+                    .filter_map(|graph| graph.file_path.to_str()),
+            )
+        });
         let mod_tree_ctx = mod_tree.as_ref().zip(self.repo_root.as_deref());
         // The overlay's crate heads: the rows the tree's manifest parse made.
         let cargo_rows = mod_tree

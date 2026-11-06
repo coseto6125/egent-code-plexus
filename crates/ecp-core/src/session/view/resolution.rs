@@ -3197,9 +3197,11 @@ impl<'v, 'a> NameTierFacts for OverlayTiers<'v, 'a, '_> {
 /// (`RustWorkspaceModTree`): each Cargo target of the crate table
 /// `graph.bin` stores (a crate's lib entry, then its bins) roots a tree of
 /// file-backed `mod` declarations. Without a stored table (no
-/// `Cargo.toml`) there is no tree, as in the index. Dirty declarations
-/// replace archived declarations, including deletion. A base path the
-/// worktree removed is no file.
+/// `Cargo.toml`) each Rust file roots a tree of its own `mod name;`
+/// declarations, as in the index (`RustWorkspaceModTree::loose_scope`): the
+/// file is the root, its children sit in its module directory, and `crate`
+/// names nothing. Dirty declarations replace archived declarations,
+/// including deletion. A base path the worktree removed is no file.
 pub(super) struct RustModules<'a> {
     graph: &'a ArchivedZeroCopyGraph,
     /// Each dirty file with the virtual idx of its first symbol.
@@ -3221,6 +3223,9 @@ pub(super) struct RustModules<'a> {
     /// The `graph.bin` workspace facts, read on first use: reading them
     /// deserializes and validates the whole table, once per view.
     pub(super) crates: OnceCell<crate::contracts::workspace::WorkspaceFacts>,
+    /// Whether the table holds no Cargo target: every tree is manifest-less
+    /// ([`Self::loose`]).
+    loose: OnceCell<bool>,
     /// The current text of a module file, which its `pub use` rows are
     /// read from ([`Self::published`]). `None` for a view built without one.
     sources: Option<SourceReader<'a>>,
@@ -3288,6 +3293,7 @@ impl<'a> RustModules<'a> {
             base_twin_scans: RefCell::default(),
             removed,
             crates: OnceCell::new(),
+            loose: OnceCell::new(),
             sources: None,
             module_texts: OnceCell::new(),
             conventional_trees: RefCell::default(),
@@ -3384,6 +3390,19 @@ impl<'a> RustModules<'a> {
 
     fn table(&self) -> &crate::contracts::workspace::WorkspaceFacts {
         self.crates.get_or_init(|| self.graph.workspace_facts())
+    }
+
+    /// Whether the index lays out manifest-less trees: it registers no Cargo
+    /// target, so the stored table holds no Cargo scope.
+    fn loose(&self) -> bool {
+        use crate::contracts::workspace::Ecosystem;
+        *self.loose.get_or_init(|| {
+            !self
+                .table()
+                .scopes
+                .iter()
+                .any(|scope| scope.ecosystem == Ecosystem::Cargo)
+        })
     }
 
     /// The entry file of the workspace crate that code names `head`: the
@@ -3490,6 +3509,16 @@ impl<'a> RustModules<'a> {
     /// that lib tree. Reads the crate table.
     pub(super) fn caller(&self, caller: &str) -> RustCaller<'a> {
         use crate::contracts::workspace::Ecosystem;
+        if self.loose() {
+            // `crate::` names nothing, and no target declares the file.
+            let file = is_rust_source(std::path::Path::new(caller))
+                .then(|| self.file(std::path::Path::new(caller)))
+                .flatten();
+            return RustCaller {
+                module: file.map(|file| (file, Vec::new())),
+                ..RustCaller::default()
+            };
+        }
         let crates = self.table();
         let mut reached: Vec<(&'a str, bool, Vec<String>)> = Vec::new();
         let mut home: Option<(usize, &'a str)> = None;
@@ -3578,6 +3607,10 @@ impl<'a> RustModules<'a> {
     /// at the path the layout guess gives it, where the index has no
     /// module.
     fn published(&self, root: &'a str, module: &'a str, name: &str) -> ladder::Published<'_> {
+        if self.loose() {
+            // A manifest-less tree keeps no `pub use` map.
+            return ladder::Published::Own;
+        }
         let Some(imports) = self.module_imports(module) else {
             return ladder::Published::Own;
         };
@@ -3906,7 +3939,10 @@ impl<'a> ladder::ModuleTreeFacts for OverlayTree<'_, 'a> {
 
     fn submodule(&self, _root: &'a str, parent: &'a str, path: &[String]) -> Option<&'a str> {
         let (name, above) = path.split_last()?;
-        self.modules.child(parent, name, above.is_empty())
+        // A manifest-less root is an ordinary file whose children sit in its
+        // module directory.
+        self.modules
+            .child(parent, name, above.is_empty() && !self.modules.loose())
     }
 
     fn published(&self, root: &'a str, module: &'a str, name: &str) -> ladder::Published<'_> {
@@ -6648,5 +6684,165 @@ mod tests {
             assert!(modules.is_body_local(survivor), "twin on line {twin_line}");
             assert_eq!(modules.is_body_local(twin), twin_line == 2);
         }
+    }
+
+    /// A graph of `files`, each `(file, name)` of `declared` a base `mod`.
+    fn manifest_less_graph(files: &[&str], declared: &[(&str, &str)]) -> Vec<u8> {
+        let mut fx = GraphFixture::new();
+        for file in files {
+            fx.file(file);
+        }
+        for (file, name) in declared {
+            fx.node(NodeKind::Module, file, name);
+        }
+        fx.into_bytes()
+    }
+
+    fn dirty_module_file(path: &str, declared: &[&str]) -> OverlayFileInput {
+        let symbol = |name: &str| OverlaySymbol {
+            is_exported: false,
+            name: name.to_string(),
+            kind: NodeKind::Module,
+            owner_class: None,
+            start_line: 1,
+            end_line: 1,
+            start_column: 0,
+            end_column: 0,
+            calls: Vec::new(),
+            heritage: Vec::new(),
+            variant_refs: Vec::new(),
+            return_type: None,
+            generic_arity: 0,
+            flags: None,
+            decorators: Vec::new(),
+            params: Vec::new(),
+            type_annotation: None,
+            type_params: Vec::new(),
+        };
+        OverlayFileInput {
+            parsed_language: None,
+            rel_path: path.to_string(),
+            symbols: declared.iter().map(|name| symbol(name)).collect(),
+            imports: Vec::new(),
+            export_aliases: Vec::new(),
+        }
+    }
+
+    /// Where `path` (`self::a::b`) lands from `caller`, through the position
+    /// [`RustModules::caller`] reads.
+    fn module_from<'a>(modules: &RustModules<'a>, caller: &str, path: &str) -> Option<&'a str> {
+        let position = modules.caller(caller);
+        let tree = OverlayTree {
+            modules,
+            caller,
+            position: &position,
+        };
+        ladder::module_tree_module(&tree, caller, path)
+    }
+
+    /// Stands for: with no Cargo scope the caller roots a tree of its own
+    /// (the index's `loose_scope`): `crate::` names nothing, and an absent
+    /// file, a non-Rust file, a path outside the repo and an empty file list
+    /// give no position at all.
+    #[test]
+    fn test_rust_modules_caller_without_cargo_scope_roots_tree_at_caller() {
+        let bytes = manifest_less_graph(&["src/lib.rs", "README.md"], &[]);
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let removed = FxHashSet::default();
+        let modules = RustModules::new(graph, &[], &removed, Default::default());
+        let position = modules.caller("src/lib.rs");
+        assert_eq!(position.module, Some(("src/lib.rs", Vec::new())));
+        assert_eq!(position.krate, None);
+        assert!(position.targets.is_empty());
+        for absent in ["src/gone.rs", "README.md", "../outside.rs", ""] {
+            assert!(modules.caller(absent).module.is_none(), "{absent:?}");
+        }
+        let empty = manifest_less_graph(&[], &[]);
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&empty).unwrap();
+        let modules = RustModules::new(graph, &[], &removed, Default::default());
+        assert!(modules.caller("src/lib.rs").module.is_none());
+    }
+
+    /// Stands for: `mod a;` in `lib.rs` places `a.rs` before `a/mod.rs`
+    /// beside it, an ordinary file keeps its children in `dir/stem/`, a
+    /// module no `mod` declares is no proof whatever file exists, `crate::`
+    /// binds nothing, and two lookups of one path agree.
+    #[test]
+    fn test_rust_modules_manifest_less_tree_places_declared_modules_only() {
+        let bytes = manifest_less_graph(
+            &[
+                "src/lib.rs",
+                "src/a.rs",
+                "src/a/mod.rs",
+                "src/a/b.rs",
+                "src/x.rs",
+                "src/x/c.rs",
+                "src/c.rs",
+                "src/stray.rs",
+            ],
+            &[("src/lib.rs", "a"), ("src/a.rs", "b"), ("src/x.rs", "c")],
+        );
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let removed = FxHashSet::default();
+        let modules = RustModules::new(graph, &[], &removed, Default::default());
+        for _ in 0..2 {
+            assert_eq!(
+                module_from(&modules, "src/lib.rs", "self::a"),
+                Some("src/a.rs")
+            );
+        }
+        assert_eq!(
+            module_from(&modules, "src/lib.rs", "self::a::b"),
+            Some("src/a/b.rs")
+        );
+        assert_eq!(
+            module_from(&modules, "src/x.rs", "self::c"),
+            Some("src/x/c.rs")
+        );
+        for unplaced in ["self::stray", "crate::a", "super::a"] {
+            assert_eq!(module_from(&modules, "src/lib.rs", unplaced), None);
+        }
+        assert!(matches!(
+            modules.published("src/lib.rs", "src/a.rs", "b"),
+            ladder::Published::Own
+        ));
+    }
+
+    /// Stands for: a dirty file's own `mod` declarations replace the base
+    /// ones. Deleting `mod a;` unplaces `a`, adding `mod b;` beside a new
+    /// dirty `b.rs` places it, and a dirty `mod.rs` file (`a/mod.rs`) is
+    /// still the module's file.
+    #[test]
+    fn test_rust_modules_manifest_less_tree_follows_dirty_mod_declarations() {
+        let bytes = manifest_less_graph(&["src/lib.rs", "src/a/mod.rs"], &[("src/lib.rs", "a")]);
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let removed = FxHashSet::default();
+        let base = graph.nodes.len() as u32;
+        let facts = |starts: Vec<u32>| DirtyRustFacts {
+            starts,
+            ..Default::default()
+        };
+
+        let deleted = [dirty_module_file("src/lib.rs", &[])];
+        let modules = RustModules::new(graph, &deleted, &removed, facts(vec![base]));
+        assert_eq!(module_from(&modules, "src/lib.rs", "self::a"), None);
+
+        let added = [
+            dirty_module_file("src/lib.rs", &["a", "b"]),
+            dirty_module_file("src/b.rs", &[]),
+        ];
+        let modules = RustModules::new(graph, &added, &removed, facts(vec![base, base + 2]));
+        assert_eq!(
+            module_from(&modules, "src/lib.rs", "self::b"),
+            Some("src/b.rs")
+        );
+        assert_eq!(
+            module_from(&modules, "src/lib.rs", "self::a"),
+            Some("src/a/mod.rs")
+        );
+        assert_eq!(
+            modules.caller("src/b.rs").module,
+            Some(("src/b.rs", Vec::new()))
+        );
     }
 }
