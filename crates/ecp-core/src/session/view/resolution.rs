@@ -36,7 +36,7 @@ use crate::analyzer::lexical::{
     body_locals, decls_enclosing, fold_twins, inside_callable, lexical_chain_end,
     lexical_scope_kinds, twin_enclosing, LexicalFunctions,
 };
-use crate::analyzer::name_ref::{resolve_member_read, MemberReadEdge};
+use crate::analyzer::name_ref::resolve_member_read;
 use crate::analyzer::name_tiers::{
     self, import_tiers, name_tiers, HitBarrel, NameTierFacts, TierHit, TierPolicy,
 };
@@ -2206,9 +2206,13 @@ impl<'a> OverlayFacts<'a> {
     }
 
     /// The fresh parse of the dirty node `id`; `None` for a base node.
+    /// Found by the id's range, not by its path: two inputs of one path
+    /// each number their own symbols.
     fn dirty_symbol(&self, id: u32) -> Option<&'a OverlaySymbol> {
-        let node = &self.nodes[id.checked_sub(self.base_len())? as usize];
-        let &file_ord = self.dirty.get(&*node.rel_path)?;
+        let file_ord = self
+            .dirty_starts
+            .partition_point(|&start| start <= id)
+            .checked_sub(1)?;
         self.scope.dirty()[file_ord]
             .symbols
             .get((id - self.dirty_starts[file_ord]) as usize)
@@ -6749,6 +6753,24 @@ mod tests {
         }
     }
 
+    /// The text of each file as its `mod` declarations: a loose tree reads
+    /// its children from the source, as the index does.
+    fn mod_sources(declared: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let declared: Vec<(String, String)> = declared
+            .iter()
+            .map(|&(file, name)| (file.to_string(), name.to_string()))
+            .collect();
+        move |file: &str| {
+            Some(
+                declared
+                    .iter()
+                    .filter(|(of, _)| of == file)
+                    .map(|(_, name)| format!("mod {name};\n"))
+                    .collect(),
+            )
+        }
+    }
+
     /// Where `path` (`self::a::b`) lands from `caller`, through the position
     /// [`RustModules::caller`] reads.
     fn module_from<'a>(modules: &RustModules<'a>, caller: &str, path: &str) -> Option<&'a str> {
@@ -6805,7 +6827,9 @@ mod tests {
         );
         let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
         let removed = FxHashSet::default();
-        let modules = RustModules::new(graph, &[], &removed, Default::default());
+        let source = mod_sources(&[("src/lib.rs", "a"), ("src/a.rs", "b"), ("src/x.rs", "c")]);
+        let modules =
+            RustModules::new(graph, &[], &removed, Default::default()).with_sources(Some(&source));
         for _ in 0..2 {
             assert_eq!(
                 module_from(&modules, "src/lib.rs", "self::a"),
@@ -6845,14 +6869,18 @@ mod tests {
         };
 
         let deleted = [dirty_module_file("src/lib.rs", &[])];
-        let modules = RustModules::new(graph, &deleted, &removed, facts(vec![base]));
+        let source = mod_sources(&[]);
+        let modules = RustModules::new(graph, &deleted, &removed, facts(vec![base]))
+            .with_sources(Some(&source));
         assert_eq!(module_from(&modules, "src/lib.rs", "self::a"), None);
 
         let added = [
             dirty_module_file("src/lib.rs", &["a", "b"]),
             dirty_module_file("src/b.rs", &[]),
         ];
-        let modules = RustModules::new(graph, &added, &removed, facts(vec![base, base + 2]));
+        let source = mod_sources(&[("src/lib.rs", "a"), ("src/lib.rs", "b")]);
+        let modules = RustModules::new(graph, &added, &removed, facts(vec![base, base + 2]))
+            .with_sources(Some(&source));
         assert_eq!(
             module_from(&modules, "src/lib.rs", "self::b"),
             Some("src/b.rs")
