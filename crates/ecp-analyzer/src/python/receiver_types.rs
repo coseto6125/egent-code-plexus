@@ -46,9 +46,22 @@ pub struct LocalTypes {
     /// A `from` binding may be an object; only a module import proves that
     /// its receiver names a namespace for import-scoped resolution.
     imported: HashMap<String, ImportedBinding>,
-    /// Per function: its byte span, its start position and the names it binds
-    /// (a parameter at 0, an assignment at its byte offset).
-    shadows: Vec<((usize, usize), Pos, HashMap<String, usize>)>,
+    shadows: Vec<FunctionBindings>,
+}
+
+/// The names one function binds: a parameter at 0, an assignment at its
+/// byte offset.
+#[derive(Debug)]
+struct FunctionBindings {
+    bytes: (usize, usize),
+    start: Pos,
+    names: HashMap<String, usize>,
+}
+
+impl FunctionBindings {
+    fn encloses(&self, node: Node<'_>) -> bool {
+        self.bytes.0 <= node.start_byte() && node.end_byte() <= self.bytes.1
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -94,12 +107,10 @@ impl LocalTypes {
             }
         }
         let (typed_start, ty) = typed?;
-        let rebound_nearer = self.shadows.iter().any(|((start, end), fn_start, names)| {
-            *start <= receiver.start_byte()
-                && receiver.end_byte() <= *end
-                && *fn_start > typed_start
-                && names.contains_key(var)
-        });
+        let rebound_nearer = self
+            .shadows
+            .iter()
+            .any(|f| f.encloses(receiver) && f.start > typed_start && f.names.contains_key(var));
         (!rebound_nearer).then_some(ty)
     }
 
@@ -121,10 +132,9 @@ impl LocalTypes {
     /// Whether a function scope enclosing `receiver` binds `name` (a
     /// parameter, or an assignment before `receiver`).
     fn shadowed(&self, receiver: Node<'_>, name: &str) -> bool {
-        self.shadows.iter().any(|((start, end), _, names)| {
-            *start <= receiver.start_byte()
-                && receiver.end_byte() <= *end
-                && names
+        self.shadows.iter().any(|f| {
+            f.encloses(receiver)
+                && f.names
                     .get(name)
                     .is_some_and(|assigned| *assigned <= receiver.start_byte())
         })
@@ -199,7 +209,11 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
                 scopes.push((fn_span, map));
             }
             if !names.is_empty() {
-                shadows.push(((n.start_byte(), n.end_byte()), fn_span.0, names));
+                shadows.push(FunctionBindings {
+                    bytes: (n.start_byte(), n.end_byte()),
+                    start: fn_span.0,
+                    names,
+                });
             }
         }
         let mut c = n.walk();
