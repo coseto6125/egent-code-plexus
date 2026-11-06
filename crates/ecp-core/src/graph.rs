@@ -1175,15 +1175,18 @@ pub struct FunctionMeta {
     /// - bit 2: `is_static`   (no implicit receiver — class method in OO langs)
     /// - bit 3: `is_abstract` (no body — interface / pure-virtual / abstract)
     /// - bit 4: `is_generator` (yield / function* / iterator)
-    /// - bit 5: `is_extern`   (FFI declared, no Rust/native body)
+    /// - bit 5: `is_extern`   (FFI declared, no Rust/native body; C / C++: declared without a body, a prototype, whatever its `extern` keyword)
     /// - bits 6-8: visibility (0=public, 1=protected, 2=private, 3=crate/internal, 4=package, 5=fileprivate, 6=C# explicit interface implementation, 7=reserved)
     /// - bit 9: `is_virtual`  (C++ only: declared `virtual`, or an `override` / `final` member)
-    /// - bit 10: C# extension method (static method of a static class whose first parameter carries `this`)
+    /// - bit 10: C# extension method (static method of a static class whose first parameter carries `this`); C / C++: the `extern` storage-class keyword ([`Self::FLAG_C_EXTERN_STORAGE`])
     /// - bit 11: C# extension on a generic type parameter (`this T`)
     /// - bit 12: C# extension method whose parameter list ends in a `params` array (absent from `params`)
     /// - bits 13-15: C# extension method's count of default-valued parameters, saturating at 7
+    /// - C / C++ reuse bits 10-13: bit 10 is the `extern` keyword, bits 11-12 the parameter form ([`Self::C_PARAM_FORM_MASK`]), bit 13 internal linkage ([`Self::FLAG_C_INTERNAL_LINKAGE`])
     ///
-    /// Bits 12-15 stay zero on every method that is no C# extension method.
+    /// Bits 12-15 stay zero on every method that is no C# extension method,
+    /// and bits 10-13 mean the C# fields only on a C# method: a reader of
+    /// either meaning checks the node's file language first.
     pub flags: u16,
     /// Parameter list, flat-encoded as alternating name/type StrRefs:
     /// `[name1, type1, name2, type2, ...]`. Empty Vec when zero params or
@@ -1209,6 +1212,21 @@ impl FunctionMeta {
     /// Bit 9; bits 6-8 hold the visibility code. The `Overrides` pass reads
     /// it: a C++ base method overrides only when it is virtual.
     pub const FLAG_VIRTUAL: u16 = 0b0000_0010_0000_0000;
+    /// C / C++ only: bits 10-13 are C# extension bits on a C# method. Read
+    /// them only after checking the node's file language.
+    ///
+    /// Bit 10: the `extern` storage-class keyword. A definition carrying it
+    /// is no prototype ([`Self::FLAG_EXTERN`] stays clear).
+    pub const FLAG_C_EXTERN_STORAGE: u16 = 1 << 10;
+    /// Bits 11-12: the parameter form. 0 is a prototype list (`f(int)`,
+    /// `f(void)`), [`Self::C_PARAM_FORM_EMPTY_PARENS`] is `f()` (unspecified
+    /// in C), [`Self::C_PARAM_FORM_OLD_STYLE`] is a K&R identifier list.
+    pub const C_PARAM_FORM_MASK: u16 = 0b11 << 11;
+    pub const C_PARAM_FORM_EMPTY_PARENS: u16 = 1 << 11;
+    pub const C_PARAM_FORM_OLD_STYLE: u16 = 2 << 11;
+    /// Bit 13: a member of a C++ anonymous namespace. `static` keeps
+    /// [`Self::FLAG_STATIC`].
+    pub const FLAG_C_INTERNAL_LINKAGE: u16 = 1 << 13;
 
     pub const fn is_test(&self) -> bool {
         self.flags & Self::FLAG_TEST != 0
