@@ -588,7 +588,43 @@ const PARTIAL_MARKER: &str = "__partial__:";
 /// post-process reads it; it is not a decorator the source wrote.
 pub const OVERRIDE_SENTINEL: &str = "__override__";
 
+/// The [`RawNode::decorators`] entry prefix that lists a generic
+/// declaration's own type parameters (`__type_params__:A,B`). Parsers write
+/// it on type-like nodes (class, struct, interface, trait, impl, alias,
+/// enum), never on a callable: `RawFunctionMeta::type_params` holds those.
+/// `type_ladder::visible_type_params` reads it, so a field typed `T` inside
+/// `Box<T>` does not bind a project type named `T`.
+const TYPE_PARAMS_MARKER: &str = "__type_params__:";
+
 impl RawNode {
+    /// The [`RawNode::decorators`] entry for a declaration's own type
+    /// parameters.
+    pub fn type_params_marker<'n>(names: impl IntoIterator<Item = &'n str>) -> String {
+        let mut marker = TYPE_PARAMS_MARKER.to_string();
+        for (i, name) in names.into_iter().enumerate() {
+            if i > 0 {
+                marker.push(',');
+            }
+            marker.push_str(name);
+        }
+        marker
+    }
+
+    /// Whether a decorator entry is a [`RawNode::type_params_marker`].
+    pub fn is_type_params_marker(decorator: &str) -> bool {
+        decorator.starts_with(TYPE_PARAMS_MARKER)
+    }
+
+    /// The type parameters the parser recorded on this declaration; empty
+    /// when the node carries no marker.
+    pub fn declared_type_params(&self) -> impl Iterator<Item = &str> {
+        self.decorators
+            .iter()
+            .filter_map(|d| d.strip_prefix(TYPE_PARAMS_MARKER))
+            .flat_map(|list| list.split(','))
+            .filter(|name| !name.is_empty())
+    }
+
     /// The [`RawNode::decorators`] entry for a `partial` type declared in
     /// `scope`.
     pub fn partial_marker(scope: &str) -> String {
@@ -602,11 +638,13 @@ impl RawNode {
 
     /// Whether a decorator entry is any parser marker rather than a
     /// decorator the source wrote: the [`OVERRIDE_SENTINEL`], a
-    /// [`RawNode::generic_arity_marker`] or a [`RawNode::partial_marker`].
+    /// [`RawNode::generic_arity_marker`], a [`RawNode::partial_marker`] or a
+    /// [`RawNode::type_params_marker`].
     pub fn is_parser_marker(decorator: &str) -> bool {
         decorator == OVERRIDE_SENTINEL
             || Self::is_generic_arity_marker(decorator)
             || Self::is_partial_marker(decorator)
+            || Self::is_type_params_marker(decorator)
     }
 
     /// The declaring scope of a `partial` type, as the parser recorded it;
@@ -1891,6 +1929,36 @@ pub fn is_property_accessor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn decorated(decorators: Vec<String>) -> RawNode {
+        RawNode {
+            decorators,
+            ..bind_node("Box", NodeKind::Class, (1, 0, 3, 0))
+        }
+    }
+
+    #[test]
+    fn test_type_params_marker_round_trip_returns_names_in_order() {
+        let marker = RawNode::type_params_marker(["K", "V"]);
+        assert_eq!(marker, "__type_params__:K,V");
+        assert!(RawNode::is_type_params_marker(&marker));
+        assert!(RawNode::is_parser_marker(&marker));
+        let node = decorated(vec!["@dataclass".into(), marker]);
+        assert_eq!(node.declared_type_params().collect::<Vec<_>>(), ["K", "V"]);
+    }
+
+    #[test]
+    fn test_declared_type_params_no_marker_or_empty_list_returns_nothing() {
+        assert_eq!(
+            decorated(vec!["@dataclass".into()])
+                .declared_type_params()
+                .count(),
+            0
+        );
+        let empty = decorated(vec![RawNode::type_params_marker(std::iter::empty())]);
+        assert_eq!(empty.declared_type_params().count(), 0);
+        assert!(!RawNode::is_type_params_marker("__generic_arity__:1"));
+    }
 
     #[test]
     fn raw_sql_ref_carries_tables_and_verb() {
