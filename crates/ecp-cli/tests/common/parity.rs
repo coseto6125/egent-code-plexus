@@ -138,7 +138,7 @@ pub fn edges_after_edit_with(
 
     let base = rkyv::to_bytes::<rkyv::rancor::Error>(&build_all(files)).unwrap();
     let base = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&base).unwrap();
-    let view = overlay_view(base, parse, files, edits);
+    let view = overlay_view(base, parse, files, edits, &|_| {});
     // Every view a test builds must survive the session view cache unchanged.
     assert_eq!(
         OverlayView::from_cache_bytes(&view.to_cache_bytes(), base.nodes.len()).as_ref(),
@@ -158,6 +158,7 @@ fn overlay_view(
     parse: &dyn Fn(&str, &str) -> LocalGraph,
     files: &[(&str, &str)],
     edits: &[(&str, &str)],
+    fragment: &dyn Fn(&mut OverlayFileInput),
 ) -> OverlayView {
     let mut inputs: Vec<OverlayFileInput> = edits
         .iter()
@@ -174,6 +175,7 @@ fn overlay_view(
         let source = text(path).unwrap_or_else(|| panic!("closure file {path} is not in the tree"));
         OverlayFileInput::from(parse(path, source))
     }));
+    inputs.iter_mut().for_each(fragment);
     let sources = |rel: &str| text(rel).map(str::to_string);
     OverlayView::build_with_configs(
         base,
@@ -195,13 +197,25 @@ pub fn call_gaps_after_edit(
     files: &[(&str, &str)],
     edits: &[(&str, &str)],
 ) -> Vec<CallGap> {
+    call_gaps_after_edit_with(parse, files, edits, &|_| {})
+}
+
+/// [`call_gaps_after_edit`] with each overlay input passed through
+/// `fragment` first, as an older writer's fragment differs from a fresh
+/// parse.
+pub fn call_gaps_after_edit_with(
+    parse: &dyn Fn(&str, &str) -> LocalGraph,
+    files: &[(&str, &str)],
+    edits: &[(&str, &str)],
+    fragment: &dyn Fn(&mut OverlayFileInput),
+) -> Vec<CallGap> {
     let mut builder = GraphBuilder::new();
     for (path, source) in files {
         builder.add_graph(parse(path, source));
     }
     let base = rkyv::to_bytes::<rkyv::rancor::Error>(&builder.build()).unwrap();
     let base = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&base).unwrap();
-    let view = overlay_view(base, parse, files, edits);
+    let view = overlay_view(base, parse, files, edits, fragment);
     let cached = OverlayView::from_cache_bytes(&view.to_cache_bytes(), base.nodes.len())
         .expect("view cache round trip");
     cached.call_gaps().to_vec()

@@ -2007,12 +2007,12 @@ impl<'a> OverlayFacts<'a> {
     }
 
     /// The index's `Resolver::csharp_extension` for a dirty C# caller, the
-    /// edge only: the overlay records no BlindSpot. The overlay reads only
-    /// the clean files' extension declarations. When a dirty C# file declares
-    /// a method named `member` that is an extension, or whose flags the
-    /// fragment lacks, no edge binds and the result is `Err(DirtyNamesake)`:
-    /// the caller records a [`CallGap`], so the payload says the overlay fell
-    /// back.
+    /// edge only: the overlay records no BlindSpot. It reads the extension
+    /// declarations of the clean files from their archived `FunctionMeta`,
+    /// and those of the dirty files from their fresh parse. When a dirty C#
+    /// method named `member` has no flags in its fragment, no edge binds and
+    /// the result is `Err(DirtyNamesake)`: the caller records a [`CallGap`],
+    /// so the payload says the overlay fell back.
     fn csharp_extension_edge(
         &self,
         source: &str,
@@ -2022,20 +2022,60 @@ impl<'a> OverlayFacts<'a> {
         imports: &[RawImport],
         owner: Option<&str>,
     ) -> Result<Option<(u32, f32)>, DirtyNamesake> {
-        let dirty_namesake = self.dirty_by_name.get(member).is_some_and(|ids| {
-            ids.iter().any(|&id| {
-                self.kind_of(id) == NodeKind::Method
-                    && self.meta_of(id).language == Language::CSharp
-                    && (!self.csharp_flags_known(id)
-                        || self.csharp_method_flags(id) & csharp_extension::EXTENSION_FLAG != 0)
-            })
-        });
-        if dirty_namesake {
-            return Err(DirtyNamesake);
-        }
         let graph = self.graph;
         let pool = &graph.string_pool;
         let mut decls: Vec<csharp_extension::ExtensionDecl<'_>> = Vec::new();
+        let namespace_of = |file: &'a str, class: &'a str| {
+            self.first_in_file(file, class, ResolveTarget::Type, None)
+                .and_then(|class_id| {
+                    type_ladder::declared_namespace(
+                        self.owner_of(class_id),
+                        self.csharp_namespaces(file).iter().copied(),
+                    )
+                })
+        };
+        // A later overload sits in no name table, yet the index records it
+        // as an extension of its own.
+        let dirty = self
+            .dirty_by_name
+            .get(member)
+            .map_or(&[][..], Vec::as_slice)
+            .iter()
+            .flat_map(|&first| std::iter::once(first).chain(self.later_overloads_of(first)));
+        for id in dirty {
+            if self.kind_of(id) != NodeKind::Method || self.meta_of(id).language != Language::CSharp
+            {
+                continue;
+            }
+            let Some(symbol) = self.dirty_symbol(id) else {
+                return Err(DirtyNamesake);
+            };
+            let Some(flags) = symbol.flags else {
+                return Err(DirtyNamesake);
+            };
+            if flags & csharp_extension::EXTENSION_FLAG == 0 {
+                continue;
+            }
+            let (Some(file), Some(class)) = (self.node_file(id), self.owner_of(id)) else {
+                continue;
+            };
+            decls.push(csharp_extension::ExtensionDecl {
+                id,
+                this_type: symbol.params.get(1).map_or("", String::as_str),
+                flags,
+                // `params` alternates name and type; [0] is `this`.
+                params: symbol
+                    .params
+                    .iter()
+                    .skip(2)
+                    .step_by(2)
+                    .map(String::as_str)
+                    .collect(),
+                file,
+                class,
+                namespace: namespace_of(file, class),
+            });
+        }
         for id in graph.nodes_by_name(member) {
             if self.dirty_base.contains(&id) || self.name_of(id) != member {
                 continue;
@@ -2054,14 +2094,6 @@ impl<'a> OverlayFacts<'a> {
             let (Some(file), Some(class)) = (self.node_file(id), self.owner_of(id)) else {
                 continue;
             };
-            let namespace = self
-                .first_in_file(file, class, ResolveTarget::Type, None)
-                .and_then(|class_id| {
-                    type_ladder::declared_namespace(
-                        self.owner_of(class_id),
-                        self.csharp_namespaces(file).iter().copied(),
-                    )
-                });
             decls.push(csharp_extension::ExtensionDecl {
                 id,
                 this_type: meta.params.get(1).map_or("", |ty| ty.resolve(pool)),
@@ -2076,7 +2108,7 @@ impl<'a> OverlayFacts<'a> {
                     .collect(),
                 file,
                 class,
-                namespace,
+                namespace: namespace_of(file, class),
             });
         }
         if decls.is_empty() {
@@ -2174,6 +2206,13 @@ impl<'a> OverlayFacts<'a> {
         id < self.base_len() || self.dirty_flags.contains_key(&id)
     }
 
+    /// The fresh parse of the dirty node `id`; `None` for a base node.
+    fn dirty_symbol(&self, id: u32) -> Option<&'a OverlaySymbol> {
+        let node = &self.nodes[id.checked_sub(self.base_len())? as usize];
+        let &(file, start) = self.rust.dirty.get(&*node.rel_path)?;
+        file.symbols.get((id - start) as usize)
+    }
+
     /// The index's `SymbolTable::c_callable`: the flags and the parameter
     /// list of a C or C++ function or method, from the archived
     /// `FunctionMeta` of a base node and from the fresh parse of a dirty
@@ -2186,10 +2225,8 @@ impl<'a> OverlayFacts<'a> {
             return None;
         }
         match id.checked_sub(self.base_len()) {
-            Some(offset) => {
-                let node = &self.nodes[offset as usize];
-                let &(file, start) = self.rust.dirty.get(&*node.rel_path)?;
-                let symbol = file.symbols.get((id - start) as usize)?;
+            Some(_) => {
+                let symbol = self.dirty_symbol(id)?;
                 symbol
                     .flags
                     .map(|flags| CCallable::new(flags, symbol.params.iter().map(String::as_str)))
