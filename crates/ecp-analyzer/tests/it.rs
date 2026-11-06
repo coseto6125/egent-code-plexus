@@ -124,6 +124,7 @@ mod csharp_uid_identity;
 mod csharp_value_receiver;
 mod dart_anonymous_callbacks;
 mod dart_blind_spots;
+mod dart_block_scoped_locals;
 mod dart_computed_receiver;
 mod dart_constructor_enum_annotation;
 mod dart_driver_parity;

@@ -928,3 +928,40 @@ fn test_rust_trait_default_through_blanket_impl_beside_same_named_fn_binds() {
         vec![("src/lib.rs".to_string(), "Describe".to_string())]
     );
 }
+
+/// Each `let` is a new binding: the use takes the binding live at its
+/// position, a block's binding ends at the block, and a pattern binding
+/// hides the outer one. Stands for: the Rust extractor resolves a local by
+/// position without the receiver core (wave 3 kept it), so these pin that.
+const SHADOWING_RS: &str = r#"pub struct A;
+impl A { pub fn m(&self) {} }
+pub struct B;
+impl B { pub fn m(&self) {} }
+fn shadowed() { let x: A = A; let x: B = B; x.m(); }
+fn block_exit() { let x: A = A; { let x: B = B; let _ = x; } x.m(); }
+fn pattern(o: Option<B>) { let x: A = A; if let Some(x) = o { x.m(); } }
+"#;
+
+#[test]
+fn test_calls_rust_shadowing_let_binds_latest_binding_type() {
+    let graph = build(&[("src/lib.rs", SHADOWING_RS)]);
+    let b = vec![("src/lib.rs".to_string(), "B".to_string())];
+    assert_eq!(callee_owners(&graph, "shadowed", "m"), b);
+}
+
+#[test]
+fn test_calls_rust_shadowing_inner_block_ends_at_block_exit_binds_outer_type() {
+    let graph = build(&[("src/lib.rs", SHADOWING_RS)]);
+    let a = vec![("src/lib.rs".to_string(), "A".to_string())];
+    assert_eq!(callee_owners(&graph, "block_exit", "m"), a);
+}
+
+#[test]
+fn test_calls_rust_shadowing_pattern_binding_hides_outer_type() {
+    let graph = build(&[("src/lib.rs", SHADOWING_RS)]);
+    let owners = callee_owners(&graph, "pattern", "m");
+    assert!(
+        !owners.iter().any(|(_, owner)| owner == "A"),
+        "the pattern's x is not the outer A: {owners:?}"
+    );
+}

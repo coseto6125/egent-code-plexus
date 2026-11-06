@@ -226,6 +226,54 @@ fn collect_typed_dart_locals(fn_node: Node<'_>, source: &[u8], scopes: &mut Vec<
         {
             continue;
         }
+        // A closure parameter, a for-in variable and a catch variable hide
+        // a same-named outer local inside their own span; one with no type
+        // binds `""`, so the use stays untyped instead of taking the outer
+        // local's type.
+        match n.kind() {
+            "function_expression" => {
+                if let Some(params) = n.child_by_field_name("parameters") {
+                    let mut map = HashMap::new();
+                    collect_typed_dart_params(params, source, &mut map);
+                    if !map.is_empty() {
+                        scopes.push((node_range(n), map));
+                    }
+                }
+            }
+            "for_statement" => {
+                if let Some(name) = n
+                    .child_by_field_name("name")
+                    .and_then(|name| name.utf8_text(source).ok())
+                {
+                    let mut c = n.walk();
+                    let ty = n
+                        .children(&mut c)
+                        .find(|child| child.kind() == "type")
+                        .and_then(|t| t.named_child(0))
+                        .filter(|ti| ti.kind() == "type_identifier")
+                        .and_then(|ti| ti.utf8_text(source).ok())
+                        .unwrap_or_default();
+                    scopes.push((
+                        node_range(n),
+                        HashMap::from([(name.to_string(), ty.to_string())]),
+                    ));
+                }
+            }
+            "catch_clause" => {
+                let block = n.next_named_sibling().filter(|b| b.kind() == "block");
+                let span = (node_range(n).0, node_range(block.unwrap_or(n)).1);
+                let map: HashMap<String, String> = ["exception", "stack_trace"]
+                    .into_iter()
+                    .filter_map(|field| n.child_by_field_name(field))
+                    .filter_map(|name| name.utf8_text(source).ok())
+                    .map(|name| (name.to_string(), String::new()))
+                    .collect();
+                if !map.is_empty() {
+                    scopes.push((span, map));
+                }
+            }
+            _ => {}
+        }
         if n.kind() == "initialized_variable_declaration" {
             let mut ty: Option<String> = None;
             let mut name: Option<String> = None;
