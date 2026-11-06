@@ -25,61 +25,57 @@
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_kotlin_string_value,
 };
+use super::receiver_lower::KotlinLowering;
 use crate::calls::{
-    attach_to_enclosing, node_range, range_width, reference_function, span_holds, span_width,
-    start_pos, Pos, PosRange,
+    attach_to_enclosing, reference_function, span_holds, span_width, start_pos, Pos,
 };
+use crate::receiver::{analyze_file, FileReceivers, Receiver as CoreReceiver};
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use std::collections::HashMap;
+use std::path::Path;
 use tree_sitter::Node;
 
 #[derive(Debug, Default)]
 struct LocalTypes {
-    scopes: Vec<(PosRange, HashMap<String, String>)>,
+    /// The receiver state of every local, parameter and property of an
+    /// enclosing class that is read as a receiver, keyed by that identifier.
+    receivers: FileReceivers,
     imports: HashMap<String, String>,
 }
 
 impl LocalTypes {
-    fn lookup(&self, pos: Pos, var: &str) -> Option<&str> {
-        let mut best: Option<&str> = None;
-        let mut best_width = (u32::MAX, i64::MAX);
-        for ((start, end), map) in &self.scopes {
-            if *start <= pos && pos <= *end {
-                if let Some(t) = map.get(var) {
-                    let w = range_width((*start, *end));
-                    if w < best_width {
-                        best_width = w;
-                        best = Some(t.as_str());
-                    }
-                }
-            }
+    /// The binding the identifier `node` reads: its declared class name, `""`
+    /// for one declared without a plain class type, `None` for a name that
+    /// is no binding here.
+    fn local(&self, node: Node<'_>) -> Option<&str> {
+        match self.receivers.receiver_at(node)? {
+            CoreReceiver::Known(ty) => Some(&ty.text),
+            CoreReceiver::Unknown(_) => Some(""),
         }
-        // An unknown local type still shadows an imported binding or a
-        // typed name of a wider scope.
-        best.or_else(|| self.imports.get(var).map(String::as_str))
+    }
+
+    fn lookup(&self, node: Node<'_>, var: &str) -> Option<&str> {
+        // An unknown local type still shadows an imported binding.
+        self.local(node)
+            .or_else(|| self.imports.get(var).map(String::as_str))
             .filter(|ty| !ty.is_empty())
     }
 
-    /// Whether a function or class scope holding `pos` declares `var`,
-    /// typed or not, or an import binds it.
-    fn binds(&self, pos: Pos, var: &str) -> bool {
-        self.imports.contains_key(var) || self.binds_local(pos, var)
+    /// Whether a local, parameter or class property declares the name `node`
+    /// reads, typed or not, or an import binds `var`.
+    fn binds(&self, node: Node<'_>, var: &str) -> bool {
+        self.imports.contains_key(var) || self.binds_local(node)
     }
 
-    /// Whether a function or class scope holding `pos` declares `var`.
-    fn binds_local(&self, pos: Pos, var: &str) -> bool {
-        self.scopes
-            .iter()
-            .any(|((start, end), map)| *start <= pos && pos <= *end && map.contains_key(var))
+    fn binds_local(&self, node: Node<'_>) -> bool {
+        self.local(node).is_some()
     }
 }
 
-/// Walk every `function_declaration`, collecting typed parameters and local
-/// `property_declaration` nodes (which represent `val`/`var` declarations),
-/// and every class's primary-constructor parameters.
+/// The import bindings of the file, and the receiver state of its locals
+/// ([`KotlinLowering`]).
 fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
-    let mut scopes: Vec<(PosRange, HashMap<String, String>)> = Vec::new();
     let mut imports = HashMap::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
@@ -110,51 +106,8 @@ fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
             }
             continue;
         }
-        if n.kind() == "class_declaration" {
-            // Primary-constructor parameters are in scope for the whole
-            // class body; a `val` / `var` one is also a property, which no
-            // Property node records.
-            let mut map: HashMap<String, String> = HashMap::new();
-            let mut c = n.walk();
-            for ctor in n.children(&mut c) {
-                if ctor.kind() != "primary_constructor" {
-                    continue;
-                }
-                let mut pc = ctor.walk();
-                for param in ctor.children(&mut pc) {
-                    let mut ic = param.walk();
-                    let name = param
-                        .children(&mut ic)
-                        .find(|child| child.kind() == "simple_identifier");
-                    if let Some(name) = name.and_then(|name| name.utf8_text(source).ok()) {
-                        map.insert(name.to_string(), String::new());
-                    }
-                }
-            }
-            if !map.is_empty() {
-                scopes.push((node_range(n), map));
-            }
-        }
-        if n.kind() == "function_declaration" {
-            let scope = node_range(n);
-            let mut map: HashMap<String, String> = HashMap::new();
-            if let Some(params) = n.child_by_field_name("parameters") {
-                collect_params(params, source, &mut map);
-            }
-            // Also handle function_value_parameters (alternative field name in tree-sitter-kotlin)
-            let mut c = n.walk();
-            for child in n.children(&mut c) {
-                if child.kind() == "function_value_parameters" {
-                    collect_params(child, source, &mut map);
-                }
-                if child.kind() == "function_body" {
-                    collect_property_decls(child, source, &mut scopes);
-                }
-            }
-            if !map.is_empty() {
-                scopes.push((scope, map));
-            }
-            // Don't descend — nested lambdas form their own scopes.
+        // Imports head the file: a declaration holds none.
+        if matches!(n.kind(), "class_declaration" | "function_declaration") {
             continue;
         }
         let mut c = n.walk();
@@ -162,113 +115,10 @@ fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
             stack.push(child);
         }
     }
-    LocalTypes { scopes, imports }
-}
-
-/// `function_value_parameters` → `parameter` with `simple_identifier` name
-/// and `user_type` → `type_identifier` type (second named child).
-fn collect_params(params: Node<'_>, source: &[u8], out: &mut HashMap<String, String>) {
-    let mut c = params.walk();
-    for p in params.children(&mut c) {
-        if p.kind() != "parameter" {
-            continue;
-        }
-        let mut name_node = None;
-        let mut type_node = None;
-        let mut pc = p.walk();
-        for child in p.children(&mut pc) {
-            if child.kind() == "simple_identifier" && name_node.is_none() {
-                name_node = Some(child);
-            } else if child.kind() == "user_type" {
-                type_node = Some(child);
-            }
-        }
-        if let Some(name) = name_node.and_then(|name| name.utf8_text(source).ok()) {
-            out.insert(name.to_string(), String::new());
-        }
-        if let (Some(nm), Some(ty)) = (name_node, type_node) {
-            if let Some((var, ty_s)) = simple_id_and_usertype(nm, ty, source) {
-                out.insert(var, ty_s);
-            }
-        }
+    LocalTypes {
+        receivers: analyze_file(&KotlinLowering, &(), root, source, Path::new("")),
+        imports,
     }
-}
-
-/// Walk a `function_body`, collecting `property_declaration` nodes, each
-/// in a scope of its own: a local is visible from the end of its
-/// declaration to the end of the block that declares it.
-/// Does NOT descend into nested `function_declaration` / lambdas.
-fn collect_property_decls(
-    body: Node<'_>,
-    source: &[u8],
-    scopes: &mut Vec<(PosRange, HashMap<String, String>)>,
-) {
-    let mut stack: Vec<Node<'_>> = vec![body];
-    while let Some(n) = stack.pop() {
-        if n.kind() == "function_declaration" || n.kind() == "lambda_literal" {
-            continue;
-        }
-        if n.kind() == "property_declaration" {
-            let mut out: HashMap<String, String> = HashMap::new();
-            // variable_declaration: first named child `simple_identifier`, second `user_type`
-            let mut c = n.walk();
-            for child in n.children(&mut c) {
-                if child.kind() == "variable_declaration" {
-                    let mut nm = None;
-                    let mut ty = None;
-                    let mut vc = child.walk();
-                    for vc_child in child.children(&mut vc) {
-                        match vc_child.kind() {
-                            "simple_identifier" if nm.is_none() => nm = Some(vc_child),
-                            "user_type" => ty = Some(vc_child),
-                            _ => {}
-                        }
-                    }
-                    if let Some(name) = nm.and_then(|name| name.utf8_text(source).ok()) {
-                        out.insert(name.to_string(), String::new());
-                    }
-                    if let (Some(nm_n), Some(ty_n)) = (nm, ty) {
-                        if let Some((var, ty_s)) = simple_id_and_usertype(nm_n, ty_n, source) {
-                            out.insert(var, ty_s);
-                        }
-                    }
-                }
-            }
-            if !out.is_empty() {
-                let declared = node_range(n).1;
-                let block_end = n.parent().map_or(declared, |block| node_range(block).1);
-                scopes.push(((declared, block_end), out));
-            }
-        }
-        let mut c = n.walk();
-        for child in n.children(&mut c) {
-            stack.push(child);
-        }
-    }
-}
-
-fn simple_id_and_usertype(
-    name_node: Node<'_>,
-    type_node: Node<'_>,
-    source: &[u8],
-) -> Option<(String, String)> {
-    if name_node.kind() != "simple_identifier" {
-        return None;
-    }
-    // user_type → type_identifier (simple class name only)
-    let ty_inner = type_node
-        .named_child(0)
-        .filter(|n| n.kind() == "type_identifier")
-        .unwrap_or(type_node);
-    if ty_inner.kind() != "type_identifier" {
-        return None;
-    }
-    let name = std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()]).ok()?;
-    let ty = std::str::from_utf8(&source[ty_inner.start_byte()..ty_inner.end_byte()]).ok()?;
-    if ty.is_empty() {
-        return None;
-    }
-    Some((name.to_string(), ty.to_string()))
 }
 
 /// Resolve a Kotlin `call_expression` callee, applying receiver-type binding.
@@ -310,13 +160,17 @@ fn kotlin_callee(
                             .ok()?;
                     // Only a name no scope, import or enclosing type binds
                     // may be a type, which the resolver decides.
-                    if !locals.binds(pos, var) && !declares_member(nodes, pos, var) {
+                    if !locals.binds(receiver, var) && !declares_member(nodes, pos, var) {
                         return Some(CallSite::from_receiver(var, method));
                     }
-                    locals.lookup(pos, var).map(str::to_string)
+                    locals.lookup(receiver, var).map(str::to_string)
                 }
-                "call_expression" => constructed_class(receiver, source, nodes)
-                    .filter(|name| !locals.binds(pos, name) && !declares_member(nodes, pos, name)),
+                "call_expression" => constructed_class(receiver, source, nodes).filter(|name| {
+                    let shadowed = receiver
+                        .named_child(0)
+                        .is_some_and(|callee| locals.binds(callee, name));
+                    !shadowed && !declares_member(nodes, pos, name)
+                }),
                 _ => None,
             };
             let computed = !matches!(
@@ -343,9 +197,10 @@ fn kotlin_callee(
                 receiver
                     .named_child(0)
                     .filter(|f| f.kind() == "simple_identifier")
-                    .and_then(|f| f.utf8_text(source).ok())
-                    .is_some_and(|name| {
-                        locals.binds_local(pos, name) || declares_member(nodes, pos, name)
+                    .is_some_and(|f| {
+                        locals.binds_local(f)
+                            || f.utf8_text(source)
+                                .is_ok_and(|name| declares_member(nodes, pos, name))
                     })
             };
             Some(match receiver.kind() {
@@ -447,8 +302,8 @@ fn bound_callable_reference(
         ("callable_reference", "type_identifier") => {
             let var = receiver.utf8_text(source).ok()?;
             let ty = locals
-                .binds_local(pos, var)
-                .then(|| locals.lookup(pos, var))??;
+                .binds_local(receiver)
+                .then(|| locals.lookup(receiver, var))??;
             (ty.to_string(), member)
         }
         ("navigation_expression", "this_expression")
@@ -683,10 +538,11 @@ class Standalone {
         );
     }
 
-    /// `import a.b.*` binds no receiver: a property named like the package
-    /// keeps the bare member name.
+    /// `import a.b.*` binds no receiver, and a `val` constructor parameter is
+    /// a property of the class: `repository.fetchUsers()` types its receiver
+    /// as the parameter's declared class.
     #[test]
-    fn test_kotlin_callee_wildcard_package_named_receiver_emits_bare_method() {
+    fn test_kotlin_callee_val_constructor_parameter_receiver_emits_declared_type() {
         let src = r#"
 package com.app.ui
 import com.app.repository.*
@@ -702,7 +558,7 @@ class VM(private val repository: UserRepository) {
             .iter()
             .find(|n| n.name == "load")
             .expect("load function not found");
-        assert_eq!(load.calls, ["fetchUsers"]);
+        assert_eq!(load.calls, ["UserRepository.fetchUsers"]);
     }
 
     /// An explicit class import still qualifies a static-style receiver.
