@@ -867,3 +867,23 @@ fn test_build_swift_nested_tuple_beside_read_keeps_holder() {
         ["W"]
     );
 }
+
+/// `unsigned a : 1, b : W;` keeps `W` in a bitfield clause after `b`.
+#[test]
+fn test_build_c_bitfield_width_read_gets_last_declarator() {
+    let src = "const int W = 3;\nstruct S { unsigned a : 1, b : W; };\n";
+    let p = CProvider::new().unwrap();
+    assert_eq!(read_names(&p, "t.c", src, "b"), ["W"]);
+    assert!(read_names(&p, "t.c", src, "a").is_empty());
+}
+
+/// The member list of an anonymous struct declares `pt` too, but it does not
+/// hold the initializer: the read of `X0` stays on the variable `pt`.
+#[test]
+fn test_build_c_anonymous_struct_member_named_like_variable_read_keeps_holder() {
+    let src = "const int X0 = 1;\nstatic struct { int pt, z; } pt = { X0, 2 };\n";
+    assert_eq!(
+        read_names(&CProvider::new().unwrap(), "t.c", src, "pt"),
+        ["X0"]
+    );
+}

@@ -324,16 +324,19 @@ fn statement_declarators<'s>(statement: Node<'_>, source: &'s [u8]) -> Vec<Decla
     if shared.len() < 2 {
         return Vec::new();
     }
-    // A C++ member `int a, b = Y;` keeps `Y` in a `default_value` field after
-    // `b`, outside `b`'s node: each declarator there reaches to the next.
+    // A C++ member `int a, b = Y;` keeps `Y` in a `default_value` field, and
+    // `unsigned a : 1, b : W;` keeps `W` in a bitfield clause, after `b` and
+    // outside `b`'s node: each declarator there reaches to the next, and the
+    // last to the statement's last named child.
     let mut ends: Vec<Pos> = shared.iter().map(|d| node_range(*d).1).collect();
     if by_field {
         for (end, next) in ends.iter_mut().zip(&shared[1..]) {
             *end = node_range(*next).0;
         }
-        if let Some(value) = named_fields(statement, "default_value").last() {
+        let mut cursor = statement.walk();
+        if let Some(tail) = statement.named_children(&mut cursor).last() {
             let last = ends.len() - 1;
-            ends[last] = ends[last].max(node_range(*value).1);
+            ends[last] = ends[last].max(node_range(tail).1);
         }
     }
     shared
