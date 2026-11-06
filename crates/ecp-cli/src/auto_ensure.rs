@@ -1023,8 +1023,8 @@ pub(crate) fn flag_behind_head(
     worktree_root: &Path,
 ) {
     engine.behind_head = graph_behind_head(graph_path, worktree_root);
-    // Self-heal: every L1 overlay refresh rewrites the `.head_sha`
-    // sidecar to the current HEAD, so `ensure_index` keeps answering
+    // Self-heal: an L1 overlay refresh that wrote its fragments rewrites
+    // the `.head_sha` sidecar to the current HEAD, so `ensure_index` keeps answering
     // Ready and a behind-HEAD L2 never rebuilds on its own (observed:
     // 15 days stale before a manual --force). Reuse the warm-attach
     // spawn — flock-deduped, skipped under ECP_SKIP_BG_REBUILD. The
@@ -3109,11 +3109,16 @@ mod fingerprint_drift_tests {
             return;
         }
         commit("def app(): pass\ndef one(): pass\ndef two(): pass\n");
+        test_counters::reset();
         let outcome = ensure_fresh(IndexNeed::NearCurrent, &graph_path, &worktree);
         for dir in &dirs {
             fs::set_permissions(dir, mode(0o755)).unwrap();
         }
         outcome.unwrap();
+        assert!(
+            test_counters::reanalyze_calls() > 0,
+            "the refresh must parse the commit and reach the write"
+        );
         assert_eq!(
             sidecar(),
             first,

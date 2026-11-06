@@ -348,6 +348,29 @@ fn test_unexplained_refs_assigned_callable_declared_at_binding() {
     );
 }
 
+/// A local binding in a callable's body is no declaration: the definition
+/// line holds the name without `(`, as Ruby `def total` and TS `load<T>(`
+/// do. Red with a binding taken anywhere in the span: lines 2 and 3 were
+/// hidden behind the line-4 local.
+#[test]
+fn test_unexplained_refs_local_binding_in_body_is_no_declaration() {
+    let repo = tempfile::tempdir().unwrap();
+    let (mut fx, def) = one_def(
+        repo.path(),
+        &[(
+            "src/lib.py",
+            "def get\n  log(get)\n  queue << :get\n  get = 1\nend\n",
+        )],
+    );
+    fx.span(def, (0, 0, 4, 3));
+    let payload = impact(fx, repo.path(), |_| {});
+    assert_eq!(
+        sites(&payload).into_iter().map(|s| s.1).collect::<Vec<_>>(),
+        vec![2, 3, 4],
+        "{payload}"
+    );
+}
+
 /// A value declaration caller (schema 56 makes it the caller of the calls
 /// outside functions) explains only its own span: the same file's top-level
 /// line and function stay listed.

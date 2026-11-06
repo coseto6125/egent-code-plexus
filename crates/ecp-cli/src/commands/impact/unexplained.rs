@@ -475,10 +475,10 @@ fn explainers<'g>(merged: MergedGraph<'g>, defs: &[u32]) -> Explainers<'g> {
 }
 
 /// Drop the occurrences the graph already explains:
-/// - a definition's declaration, one occurrence: the first `bare` or binding
-///   match in a callable's span, with every match before it (an annotation or
-///   decorator that holds the name), or the first match of any other
-///   definition;
+/// - a definition's declaration, one occurrence: a binding that is the first
+///   match in a callable's span, else its first `bare` match with every match
+///   before it (an annotation or decorator that holds the name), or the first
+///   match of any other definition;
 /// - an occurrence inside a callable that holds an edge to a definition
 ///   (the innermost named callable, with the lambdas inside it);
 /// - an occurrence inside the span of a value declaration or a type that
@@ -538,11 +538,15 @@ fn unexplained<'g>(merged: MergedGraph<'g>, defs: &[u32], hits: Vec<Hit>) -> Vec
                 .iter()
                 .take_while(|h| h.line <= node.end_line())
         };
+        // A binding declares only as the span's first hit: `total = x` in
+        // the body of a Ruby `def total` is a local, not the declaration.
+        let first = within().next();
         let declaration = match node.kind().is_callable() {
-            true => within()
-                .find(|h| h.form == "bare" || h.binds)
-                .or_else(|| within().next()),
-            false => within().next(),
+            true => first
+                .filter(|h| h.binds)
+                .or_else(|| within().find(|h| h.form == "bare"))
+                .or(first),
+            false => first,
         };
         if let Some(declaration) = declaration {
             for before in within().take_while(|h| h.line < declaration.line) {
