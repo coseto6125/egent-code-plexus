@@ -49,7 +49,7 @@ use crate::analyzer::outcome::{Hit, NoEdge, Resolution, Tier};
 use crate::analyzer::reexport::{
     self, is_ecmascript, pick_call, GoPackageLookup, ImportRef, ModuleFacts, ResolveTarget,
 };
-use crate::analyzer::rust_paths::rust_path_prefix_agrees_with_import;
+use crate::analyzer::rust_paths::{rust_path_prefix_agrees_with_import, rust_type_path_prefix};
 use crate::analyzer::same_file_pick::{
     declaring_type, is_free, member_call_admits, prefer_free, prefer_owned,
     type_receiver_is_closed, PickFacts, PickScope,
@@ -1377,7 +1377,7 @@ pub fn qualifier_file<F: QualifierFacts>(
             } else {
                 format!("{}::{exported}", import.source)
             };
-            if let Some(module_file) = facts.rust_module_file(source, &module_path) {
+            if let Some(module_file) = rust_use_module_file(facts, source, &module_path) {
                 return declares_member(module_file.as_ref()).then_some(module_file);
             }
             // A head that is a module of the caller's own file (`mod utils;
@@ -1406,6 +1406,39 @@ pub fn qualifier_file<F: QualifierFacts>(
         });
         if hit.is_some() {
             return hit;
+        }
+    }
+
+    // A qualifier no `use` names may come from a glob: `use p::*; q::f()` is
+    // `p::q::f()`. Two globs that place different files leave it ambiguous.
+    let named_by_use = imports
+        .iter()
+        .any(|i| i.alias.as_deref().unwrap_or(&i.imported_name) == qualifier);
+    if language == Language::Rust
+        && !named_by_use
+        && callee.is_some_and(|callee| rust_type_path_prefix(callee, qualifier).is_none())
+    {
+        let mut placed: Vec<F::Module> = Vec::new();
+        for glob in imports
+            .iter()
+            .filter(|i| i.imported_name == "*" && i.alias.is_none())
+        {
+            let path = format!("{}::{qualifier}", glob.source);
+            let Some(file) = rust_use_module_file(facts, source, &path) else {
+                continue;
+            };
+            let name: &str = file.as_ref();
+            if !placed.iter().any(|p| AsRef::<str>::as_ref(p) == name) {
+                placed.push(file);
+            }
+        }
+        match placed.len() {
+            0 => {}
+            1 => {
+                let file = placed.remove(0);
+                return declares_member(file.as_ref()).then_some(file);
+            }
+            _ => return None,
         }
     }
 
@@ -1438,6 +1471,30 @@ pub fn qualifier_file<F: QualifierFacts>(
     match stem {
         StemFile::DeclaringMember if !declares_member(file) => None,
         _ => facts.stored_file(file),
+    }
+}
+
+/// The file of the Rust module a `use` path names. Rust 2018: a path whose
+/// head is a `mod` the caller's file declares (`mod other; use other::m;`)
+/// is `self::other::m`; the plain path is tried first.
+fn rust_use_module_file<F: QualifierFacts>(
+    facts: &F,
+    source: &str,
+    module_path: &str,
+) -> Option<F::Module> {
+    if let Some(file) = facts.rust_module_file(source, module_path) {
+        return Some(file);
+    }
+    let head = module_path.split("::").next().unwrap_or_default();
+    let declared_child = !matches!(head, "crate" | "self" | "super")
+        && facts
+            .decls()
+            .call_decls(source, head)
+            .any(|(_, kind)| kind == NodeKind::Module);
+    if declared_child {
+        facts.rust_module_file(source, &format!("self::{module_path}"))
+    } else {
+        None
     }
 }
 
@@ -4463,6 +4520,8 @@ mod tests {
     struct Quals {
         fake: Fake,
         files: Vec<&'static str>,
+        /// `(module path, file)` pairs [`QualifierFacts::rust_module_file`] places.
+        rust_modules: Vec<(&'static str, &'static str)>,
     }
 
     impl Quals {
@@ -4473,6 +4532,7 @@ mod tests {
             Self {
                 fake: Fake::new(Layout::Index, decls),
                 files,
+                rust_modules: Vec::new(),
             }
         }
     }
@@ -4538,8 +4598,11 @@ mod tests {
         fn holds_import(&self, _file: &str, _imported: &str, _default_import: bool) -> bool {
             false
         }
-        fn rust_module_file(&self, _source: &str, _module_path: &str) -> Option<&'static str> {
-            None
+        fn rust_module_file(&self, _source: &str, module_path: &str) -> Option<&'static str> {
+            self.rust_modules
+                .iter()
+                .find(|&&(path, _)| path == module_path)
+                .map(|&(_, file)| file)
         }
         fn crate_module(
             &self,
@@ -4580,6 +4643,137 @@ mod tests {
                 ids => TypeCandidates::Set(ids.to_vec(), name),
             }
         }
+    }
+
+    const MOD: NodeKind = NodeKind::Module;
+
+    fn use_glob(source: &str) -> RawImport {
+        RawImport {
+            source: source.to_string(),
+            imported_name: "*".to_string(),
+            alias: None,
+            binding_kind: None,
+        }
+    }
+
+    fn use_named(source: &str, name: &str) -> RawImport {
+        RawImport {
+            source: source.to_string(),
+            imported_name: name.to_string(),
+            alias: None,
+            binding_kind: None,
+        }
+    }
+
+    /// `src/lib.rs` declares `mod other;` and `mod more;`; each module file
+    /// holds a module `registry` under a name the file-stem step cannot find.
+    fn glob_fixture() -> Quals {
+        let decls: [Decl; 5] = [
+            ("src/lib.rs", "other", MOD, None),
+            ("src/lib.rs", "more", MOD, None),
+            ("src/lib.rs", "run", F, None),
+            ("src/other/reg_a.rs", "lookup", F, None),
+            ("src/more/reg_b.rs", "lookup", F, None),
+        ];
+        let mut facts = Quals::new(&decls);
+        facts.rust_modules = vec![
+            ("self::other::registry", "src/other/reg_a.rs"),
+            ("self::more::registry", "src/more/reg_b.rs"),
+        ];
+        facts
+    }
+
+    fn registry_file(
+        facts: &Quals,
+        imports: &[RawImport],
+        callee: &'static str,
+    ) -> Option<&'static str> {
+        let (qualifier, member) = split_qualifier(callee).expect("a qualified callee");
+        qualifier_file(
+            facts,
+            "src/lib.rs",
+            FileMeta::from_path("src/lib.rs"),
+            imports,
+            (Some(callee), qualifier, member),
+            CALLABLE,
+            StemFile::Any,
+        )
+    }
+
+    /// Stands for A15c: `mod other; use other::*; registry::lookup()` places
+    /// `registry` at `other::registry` (Rust 2018: the head is a declared `mod`).
+    #[test]
+    fn test_qualifier_file_rust_glob_places_qualifier_in_glob_module() {
+        let facts = glob_fixture();
+        let imports = [use_glob("other")];
+        assert_eq!(
+            registry_file(&facts, &imports, "registry::lookup"),
+            Some("src/other/reg_a.rs")
+        );
+    }
+
+    /// Stands for: an absent `use` list, and a glob of a module with no such
+    /// item, place nothing.
+    #[test]
+    fn test_qualifier_file_rust_glob_without_such_item_or_without_imports_binds_nothing() {
+        let facts = glob_fixture();
+        assert_eq!(registry_file(&facts, &[], "registry::lookup"), None);
+        assert_eq!(
+            registry_file(&facts, &[use_glob("other")], "missing::lookup"),
+            None
+        );
+    }
+
+    /// Stands for: two globs that place different files are ambiguous; two
+    /// that place one file are not.
+    #[test]
+    fn test_qualifier_file_rust_two_globs_bind_only_when_they_place_one_file() {
+        let facts = glob_fixture();
+        let ambiguous = [use_glob("other"), use_glob("more")];
+        assert_eq!(registry_file(&facts, &ambiguous, "registry::lookup"), None);
+        let same = [use_glob("other"), use_glob("self::other")];
+        assert_eq!(
+            registry_file(&facts, &same, "registry::lookup"),
+            Some("src/other/reg_a.rs")
+        );
+    }
+
+    /// Stands for: an explicit `use` names the qualifier, so a glob that
+    /// would place it elsewhere is not consulted.
+    #[test]
+    fn test_qualifier_file_rust_explicit_use_beside_glob_wins() {
+        let facts = glob_fixture();
+        let imports = [use_glob("other"), use_named("more", "registry")];
+        assert_eq!(
+            registry_file(&facts, &imports, "registry::lookup"),
+            Some("src/more/reg_b.rs")
+        );
+    }
+
+    /// Stands for: a glob stands for the qualifier only when no module path
+    /// precedes it; `x::registry::lookup()` is not `other::registry`.
+    #[test]
+    fn test_qualifier_file_rust_glob_ignores_qualifier_with_module_path() {
+        let facts = glob_fixture();
+        assert_eq!(
+            registry_file(&facts, &[use_glob("other")], "x::registry::lookup"),
+            None
+        );
+    }
+
+    /// Stands for A15c control: `use other::registry;` with `mod other;`
+    /// declared by the caller is `self::other::registry`.
+    #[test]
+    fn test_qualifier_file_rust_named_use_of_declared_mod_places_self_relative() {
+        let facts = glob_fixture();
+        assert_eq!(
+            registry_file(
+                &facts,
+                &[use_named("other", "registry")],
+                "registry::lookup"
+            ),
+            Some("src/other/reg_a.rs")
+        );
     }
 
     fn site<'s>(source: &'s str, callee: &'s str, call: Option<CallPick<'s>>) -> QualifiedSite<'s> {
