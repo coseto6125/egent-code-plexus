@@ -126,11 +126,11 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
                 bindings.push((fn_span, names));
             }
         }
-        if let Some(declaration) = statement_declaration(n) {
+        if let Some((declaration, range)) = statement_declaration(n) {
             let mut names: HashSet<String> = HashSet::new();
             insert_pattern_names(declaration, source, &mut names);
             if !names.is_empty() {
-                bindings.push((node_range(n), names));
+                bindings.push((range, names));
             }
         }
         let mut c = n.walk();
@@ -238,19 +238,50 @@ fn insert_pattern_names(pattern: Node<'_>, source: &[u8], out: &mut HashSet<Stri
     }
 }
 
-/// The names a statement rebinds for its own body: `for (const x of xs)`,
-/// `catch (x)`, and `for (x of xs)`, which assigns each element to an
-/// existing `x`.
-fn statement_declaration(n: Node<'_>) -> Option<Node<'_>> {
+/// The names a statement rebinds, and where the new binding is visible:
+/// `for (const x of xs)` and `catch (x)` bind for the statement. `for (x of
+/// xs)` assigns each element to an existing `x`, so from the loop body to the
+/// end of the enclosing function `x` no longer holds its earlier value; `xs`
+/// still reads it.
+fn statement_declaration(n: Node<'_>) -> Option<(Node<'_>, PosRange)> {
     match n.kind() {
         "for_in_statement" => {
             let left = n.child_by_field_name("left")?;
-            // Without `const` / `let` / `var` the left side is an assignment
-            // target: `for (o.p of xs)` writes no name.
-            let declares = n.child_by_field_name("kind").is_some();
-            (declares || left.kind() == "identifier").then_some(left)
+            if n.child_by_field_name("kind").is_some() {
+                return Some((left, node_range(n)));
+            }
+            // An assignment target names a variable only through an
+            // identifier or a destructuring pattern: `for (o.p of xs)` writes
+            // no name.
+            let target = unparenthesized(left);
+            if !matches!(
+                target.kind(),
+                "identifier" | "array_pattern" | "object_pattern"
+            ) {
+                return None;
+            }
+            let body = n.child_by_field_name("body")?;
+            let scope = std::iter::successors(n.parent(), |p| p.parent())
+                .find(|p| {
+                    matches!(
+                        p.kind(),
+                        "function_declaration"
+                            | "function"
+                            | "function_expression"
+                            | "method_definition"
+                            | "arrow_function"
+                    )
+                })
+                .unwrap_or_else(|| {
+                    std::iter::successors(Some(n), |p| p.parent())
+                        .last()
+                        .unwrap_or(n)
+                });
+            Some((target, (start_pos(body), node_range(scope).1)))
         }
-        "catch_clause" => n.child_by_field_name("parameter"),
+        "catch_clause" => n
+            .child_by_field_name("parameter")
+            .map(|p| (p, node_range(n))),
         _ => None,
     }
 }

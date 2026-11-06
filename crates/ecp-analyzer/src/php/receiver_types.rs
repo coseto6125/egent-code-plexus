@@ -289,7 +289,10 @@ fn local_function_name(name: &str, namespace: Option<&str>) -> String {
 /// `static` / `parent` type.
 fn parameter_class(node: Node<'_>, var: &str, source: &[u8]) -> Option<String> {
     let mut scopes = Vec::new();
-    let mut by_ref_from = None;
+    // The scopes `by_ref.0 ..= by_ref.1` share the variable a by-reference
+    // capture names. A closure further out that captures it by value holds
+    // its own copy, so the shared range ends there.
+    let mut by_ref: Option<(usize, Option<usize>)> = None;
     let mut current = node.parent();
     let declared = loop {
         let n = current?;
@@ -326,9 +329,13 @@ fn parameter_class(node: Node<'_>, var: &str, source: &[u8]) -> Option<String> {
         if !crosses {
             return None;
         }
-        if by_ref_from.is_none() && captures_by_ref(n, var, source) {
-            by_ref_from = Some(scopes.len() - 1);
-        }
+        let at = scopes.len() - 1;
+        let shares = captures_by_ref(n, var, source);
+        by_ref = match by_ref {
+            None if shares => Some((at, None)),
+            Some((from, None)) if !shares => Some((from, Some(at))),
+            kept => kept,
+        };
     };
     let ty = declared.child_by_field_name("type")?;
     let nullable = ty.kind() == "optional_type"
@@ -352,7 +359,7 @@ fn parameter_class(node: Node<'_>, var: &str, source: &[u8]) -> Option<String> {
     let reassigned = scopes.iter().enumerate().any(|(i, &scope)| {
         let scan = WriteScan {
             coalesce_writes: nullable,
-            anywhere: by_ref_from.is_some_and(|from| i >= from),
+            anywhere: by_ref.is_some_and(|(from, end)| i >= from && end.is_none_or(|end| i <= end)),
         };
         assigns_variable(scope, var, source, node, scan)
     });

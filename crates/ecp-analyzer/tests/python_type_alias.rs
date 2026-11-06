@@ -172,7 +172,8 @@ fn test_parse_module_class_or_none_is_typedef() {
 }
 
 /// Stands for: a subscript of a module class is a type only when every
-/// argument is type-shaped (a name, a dotted name, `None`, such a subscript).
+/// argument is type-shaped (a name, a dotted name, `None`, such a subscript,
+/// a `|` union of them).
 #[test]
 fn test_parse_module_class_subscript_of_types_is_typedef() {
     for (src, name) in [
@@ -188,19 +189,28 @@ fn test_parse_module_class_subscript_of_types_is_typedef() {
             "class Pair(Generic[K, V]): ...\nP = Pair[enum.Enum, None]\n",
             "P",
         ),
+        ("class Box(Generic[T]): ...\nU = Box[int | str]\n", "U"),
+        (
+            "class Box(Generic[T]): ...\nO = Box[Box[int] | None]\n",
+            "O",
+        ),
     ] {
         assert_eq!(kind_of(&parse(src), name), Some(NodeKind::Typedef), "{src}");
     }
 }
 
 /// Stands for: `Color["RED"]` is an `Enum` name lookup and `Rows[0]` an index,
-/// so a module class subscripted by a string or a number stays a Variable.
+/// so a module class subscripted by a string or a number stays a Variable. An
+/// `Enum` takes no type arguments, so `Color[NAME]` is a lookup too.
 #[test]
 fn test_parse_module_class_subscript_of_literal_stays_variable() {
     for src in [
         "class Color(Enum):\n    RED = 1\nX = Color[\"RED\"]\n",
         "class Rows(Generic[T]): ...\nX = Rows[0]\n",
         "class Rows(Generic[T]): ...\nX = Rows[int, 0]\n",
+        "class Color(Enum):\n    RED = 1\nNAME = \"RED\"\nX = Color[NAME]\n",
+        "class Perm(enum.IntFlag):\n    R = 4\nX = Perm[NAME]\n",
+        "class Box(Generic[T]): ...\nX = Box[1 | 2]\n",
     ] {
         assert_eq!(kind_of(&parse(src), "X"), Some(NodeKind::Variable), "{src}");
     }

@@ -940,6 +940,41 @@ fn test_bound_method_reference_python_with_as_name_shadows_outer_type_returns_no
     assert_eq!(function_refs(&g, "inner"), none());
 }
 
+/// Stands for: a statement in the function that declares `obj: Cls` gives
+/// `obj` a new value from its own body on: a `for` target, an `except` or
+/// `with` name, a `case` capture, a walrus and a plain assignment.
+#[test]
+fn test_bound_method_reference_python_rebinding_in_declaring_function_returns_no_edge() {
+    for body in [
+        "for obj in loose:\n        list(map(obj.m, xs))",
+        "try:\n        pass\n    except ValueError as obj:\n        list(map(obj.m, xs))",
+        "with loose as obj:\n        list(map(obj.m, xs))",
+        "match loose:\n        case [obj]:\n            list(map(obj.m, xs))",
+        "if (obj := loose):\n        list(map(obj.m, xs))",
+        "obj = loose\n    return list(map(obj.m, xs))",
+        "for obj in loose:\n        pass\n    return list(map(obj.m, xs))",
+    ] {
+        let g = python_graph(body);
+        assert_eq!(function_refs(&g, "run"), none(), "{body}");
+    }
+}
+
+/// Stands for: the expression a rebinding statement evaluates, and every read
+/// before the statement, still see `obj: Cls`.
+#[test]
+fn test_bound_method_reference_python_read_before_rebinding_keeps_type() {
+    for body in [
+        "for obj in map(obj.m, xs):\n        pass",
+        "with map(obj.m, xs) as obj:\n        pass",
+        "obj = map(obj.m, xs)",
+        "if (obj := map(obj.m, xs)):\n        pass",
+        "f = map(obj.m, xs)\n    obj = loose",
+    ] {
+        let g = python_graph(body);
+        assert_one_cross_file(&function_refs(&g, "run"), "cls.py", "m");
+    }
+}
+
 /// Stands for: a lambda or comprehension that binds another name leaves the
 /// outer `obj: Cls` typing the receiver.
 #[test]
@@ -979,15 +1014,23 @@ fn test_bound_method_reference_python_comprehension_later_iterable_returns_no_ed
     assert_eq!(function_refs(&g, "run"), none());
 }
 
-/// Stands for: a `nonlocal` name is the outer variable, so a write to it in
-/// the inner function makes no new local, and the outer `obj: Cls` types
-/// `obj.m`.
+/// Stands for: a `nonlocal` name is the outer variable, so the inner function
+/// makes no new local and the outer `obj: Cls` types `obj.m`. A write to it
+/// replaces that value from the write on.
 #[test]
 fn test_bound_method_reference_python_nonlocal_name_keeps_outer_type() {
     let g = python_graph(
-        "def inner():\n        nonlocal obj\n        for obj in loose:\n            pass\n        return list(map(obj.m, xs))\n    return inner",
+        "def inner():\n        nonlocal obj\n        return list(map(obj.m, xs))\n    return inner",
     );
     assert_one_cross_file(&function_refs(&g, "inner"), "cls.py", "m");
+}
+
+#[test]
+fn test_bound_method_reference_python_nonlocal_name_written_returns_no_edge() {
+    let g = python_graph(
+        "def inner():\n        nonlocal obj\n        for obj in loose:\n            pass\n        return list(map(obj.m, xs))\n    return inner",
+    );
+    assert_eq!(function_refs(&g, "inner"), none());
 }
 
 /// Stands for: a `global` name is a module binding, never the enclosing
@@ -1082,6 +1125,29 @@ fn test_bound_method_reference_typescript_for_of_assignment_target_returns_no_ed
         let g = ts_graph(&format!("{head} {{\n    xs.forEach(obj.m);\n  }}"));
         assert_eq!(function_refs(&g, "run"), none(), "{head}");
     }
+}
+
+/// Stands for: a destructuring or parenthesized target also assigns `obj`, and
+/// the new value stays after the loop ends.
+#[test]
+fn test_bound_method_reference_typescript_for_of_pattern_target_returns_no_edge() {
+    for body in [
+        "for ([obj] of loose) {\n    xs.forEach(obj.m);\n  }",
+        "for ({ obj } of loose) {\n    xs.forEach(obj.m);\n  }",
+        "for ((obj) of loose) {\n    xs.forEach(obj.m);\n  }",
+        "for (obj of loose) {}\n  xs.forEach(obj.m);",
+    ] {
+        let g = ts_graph(body);
+        assert_eq!(function_refs(&g, "run"), none(), "{body}");
+    }
+}
+
+/// Stands for: the iterable of `for (obj of ...)` runs before the first
+/// assignment to `obj`, so it still reads `obj: Cls`.
+#[test]
+fn test_bound_method_reference_typescript_for_of_iterable_reads_outer_type() {
+    let g = ts_graph("for (obj of xs.map(obj.m)) {}");
+    assert_one_cross_file(&function_refs(&g, "run"), "cls.ts", "m");
 }
 
 #[test]

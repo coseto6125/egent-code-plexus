@@ -186,6 +186,44 @@ fn test_import_assignment_shadow_preserves_call() {
     ], "go", "worker.py", "helper");
 }
 
+/// Stands for: a `global` statement makes no local, but a write after it still
+/// replaces the imported module in the function that reads it.
+#[test]
+fn test_import_global_write_shadow_binds_no_module_call() {
+    let graph = graph_of(
+        &PythonProvider::new().unwrap(),
+        &[
+            ("a.py", "def helper(): pass\n"),
+            ("b.py", "def helper(): pass\n"),
+            (
+                "main.py",
+                "import a\ndef run(value):\n    global a\n    a = value\n    return a.helper()\n",
+            ),
+        ],
+    );
+    let hits = calls_from(&graph, "run");
+    assert!(hits.iter().all(|hit| hit.file != "a.py"), "{hits:?}");
+}
+
+/// Stands for: a write after `global` replaces the module only from that
+/// write on; a read before it still calls the module.
+#[test]
+fn test_import_global_write_after_call_preserves_call() {
+    assert_python_call(
+        &[
+            ("a.py", "def helper(): pass\n"),
+            ("b.py", "def helper(): pass\n"),
+            (
+                "main.py",
+                "import a\ndef run(value):\n    global a\n    a.helper()\n    a = value\n",
+            ),
+        ],
+        "run",
+        "a.py",
+        "helper",
+    );
+}
+
 #[test]
 fn test_import_package_precedes_module_resolves_package() {
     assert_python_call(

@@ -841,7 +841,7 @@ fn is_type_shape(n: Node, source: &[u8], names: &ModuleNames, certain: &mut bool
                 .is_some_and(|(name, bare)| {
                     if bare {
                         names.names_known_type(name, ALIAS_GENERICS)
-                            || (names.is_class(name) && has_type_arguments(n))
+                            || (names.is_class(name) && has_type_arguments(n, source))
                     } else {
                         ALIAS_GENERICS.contains(&name)
                     }
@@ -882,18 +882,33 @@ fn is_union_operand(n: Node, source: &[u8], names: &ModuleNames, certain: &mut b
 }
 
 /// Whether every argument of the subscript `n` is shaped like a type: a name,
-/// a dotted name, `None` or such a subscript. A string or number argument
-/// (`Color["RED"]`, `Rows[0]`) is a value lookup.
-fn has_type_arguments(n: Node) -> bool {
+/// a dotted name, `None`, such a subscript or a `|` union of them. A string or
+/// number argument (`Rows[0]`) is a value lookup.
+fn has_type_arguments(n: Node, source: &[u8]) -> bool {
     let mut cursor = n.walk();
     let all = n
         .children_by_field_name("subscript", &mut cursor)
-        .all(|a| match a.kind() {
-            "identifier" | "attribute" | "none" => true,
-            "subscript" => has_type_arguments(a),
-            _ => false,
-        });
+        .all(|a| is_type_argument(a, source));
     all
+}
+
+fn is_type_argument(a: Node, source: &[u8]) -> bool {
+    match a.kind() {
+        "identifier" | "attribute" | "none" => true,
+        "subscript" => has_type_arguments(a, source),
+        "binary_operator" => {
+            a.child_by_field_name("operator")
+                .map(|o| node_text(o, source))
+                == Some("|")
+                && [
+                    a.child_by_field_name("left"),
+                    a.child_by_field_name("right"),
+                ]
+                .into_iter()
+                .all(|o| o.is_some_and(|o| is_type_argument(o, source)))
+        }
+        _ => false,
+    }
 }
 
 /// The names a module binds at its top level, read once per file. A class
@@ -930,10 +945,14 @@ impl ModuleNames {
                 }
                 kind @ ("class_definition" | "function_definition") => {
                     if let Some(id) = stmt.child_by_field_name("name") {
-                        let set = if kind == "class_definition" {
-                            &mut names.classes
-                        } else {
+                        let set = if kind == "function_definition" {
                             &mut names.values
+                        } else if is_enum_class(stmt, source) {
+                            // `Color[name]` looks a member up by name; an Enum
+                            // takes no type arguments.
+                            continue;
+                        } else {
+                            &mut names.classes
                         };
                         set.insert(node_text(id, source).to_string());
                     }
@@ -992,6 +1011,20 @@ fn has_enum_base(bases: &[String]) -> bool {
         let tail = stripped.rsplit('.').next().unwrap_or(stripped);
         ENUM_BASE_CLASSES.contains(&tail)
     })
+}
+
+fn is_enum_class(class: Node, source: &[u8]) -> bool {
+    class
+        .child_by_field_name("superclasses")
+        .is_some_and(|list| {
+            let mut cursor = list.walk();
+            let bases: Vec<String> = list
+                .named_children(&mut cursor)
+                .filter(|b| b.kind() != "keyword_argument")
+                .map(|b| node_text(b, source).to_string())
+                .collect();
+            has_enum_base(&bases)
+        })
 }
 
 /// True when `node` is a scalar literal eligible as an enum variant value:

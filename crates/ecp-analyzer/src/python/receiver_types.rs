@@ -63,6 +63,11 @@ struct ScopeBindings {
     /// Names a `global` statement declares: they name module bindings, so an
     /// enclosing function's variable of that name is not visible.
     globals: HashSet<String>,
+    /// The names this scope's own body writes, each with the byte from which
+    /// a read sees the new value: the end of `xs` in `for obj in xs:`, the end
+    /// of the statement for an assignment. It keeps `global` and `nonlocal`
+    /// names, whose writes replace a binding of another scope.
+    rebinds: HashMap<String, usize>,
 }
 
 impl ScopeBindings {
@@ -70,6 +75,12 @@ impl ScopeBindings {
         let within =
             |(start, end): (usize, usize)| start <= node.start_byte() && node.end_byte() <= end;
         within(self.bytes) && !self.outside.is_some_and(within)
+    }
+
+    fn rebinds_before(&self, name: &str, receiver: Node<'_>) -> bool {
+        self.rebinds
+            .get(name)
+            .is_some_and(|from| *from <= receiver.start_byte())
     }
 }
 
@@ -111,8 +122,9 @@ impl LocalTypes {
         let (typed_start, ty) = self.nearest_typed(start_pos(receiver), var)?;
         let rebound_nearer = self.shadows.iter().any(|f| {
             f.encloses(receiver)
-                && f.start > typed_start
-                && (f.names.contains_key(var) || f.globals.contains(var))
+                && ((f.start > typed_start
+                    && (f.names.contains_key(var) || f.globals.contains(var)))
+                    || (f.start >= typed_start && f.rebinds_before(var, receiver)))
         });
         (!rebound_nearer).then_some(ty)
     }
@@ -137,9 +149,11 @@ impl LocalTypes {
     fn shadowed(&self, receiver: Node<'_>, name: &str) -> bool {
         self.shadows.iter().any(|f| {
             f.encloses(receiver)
-                && f.names
+                && (f
+                    .names
                     .get(name)
                     .is_some_and(|assigned| *assigned <= receiver.start_byte())
+                    || f.rebinds_before(name, receiver))
         })
     }
 }
@@ -165,6 +179,7 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
             let mut names = HashMap::new();
             let mut globals = HashSet::new();
             let mut nonlocals = HashSet::new();
+            let mut rebinds = HashMap::new();
 
             if let Some(params) = n.child_by_field_name("parameters") {
                 collect_typed_params(params, source, &mut map);
@@ -212,6 +227,12 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
                                     node.start_byte(),
                                     &mut names,
                                 );
+                                collect_case_captures(
+                                    pattern,
+                                    source,
+                                    pattern.end_byte(),
+                                    &mut rebinds,
+                                );
                             }
                             None
                         }
@@ -233,6 +254,16 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
                     };
                     if let Some(target) = target {
                         collect_shadow_names(target, source, node.start_byte(), &mut names);
+                        // An annotated assignment declares the type that a
+                        // read resolves through; it rebinds nothing.
+                        if node.child_by_field_name("type").is_none() {
+                            let from = match node.kind() {
+                                "for_statement" => node.child_by_field_name("right"),
+                                _ => Some(node),
+                            };
+                            let from = from.map_or(node.end_byte(), |n| n.end_byte());
+                            collect_shadow_names(target, source, from, &mut rebinds);
+                        }
                     }
                     let mut cursor = node.walk();
                     pending.extend(node.named_children(&mut cursor));
@@ -245,13 +276,14 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
             if !map.is_empty() {
                 scopes.push((fn_span, map));
             }
-            if !names.is_empty() || !globals.is_empty() {
+            if !names.is_empty() || !globals.is_empty() || !rebinds.is_empty() {
                 shadows.push(ScopeBindings {
                     bytes: (n.start_byte(), n.end_byte()),
                     outside: None,
                     start: fn_span.0,
                     names,
                     globals,
+                    rebinds,
                 });
             }
         }
@@ -323,6 +355,7 @@ fn inline_scope_bindings(n: Node<'_>, source: &[u8]) -> Option<ScopeBindings> {
         start: node_range(n).0,
         names,
         globals: HashSet::new(),
+        rebinds: HashMap::new(),
     })
 }
 

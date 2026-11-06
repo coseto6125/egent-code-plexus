@@ -492,6 +492,28 @@ fn test_array_callable_by_ref_closure_parameter_never_assigned_references_method
     );
 }
 
+/// Stands for: an inner `use (&$o)` shares the copy an outer `use ($o)` closure
+/// took, so a later write in the function that declares `$o` does not reach it.
+#[test]
+fn test_array_callable_by_ref_inside_by_value_closure_outer_write_references_method() {
+    assert_eq!(
+        references(
+            "$outer = function () use ($o, $a) { return function () use (&$o, $a) { return array_map([$o, 'cb_ptr'], $a); }; }; $o = $a; return $outer();"
+        ),
+        one("cb_ptr")
+    );
+}
+
+#[test]
+fn test_array_callable_by_ref_inside_by_value_closure_write_in_outer_closure_references_nothing() {
+    assert_eq!(
+        references(
+            "$outer = function () use ($o, $a) { $in = function () use (&$o, $a) { return array_map([$o, 'cb_ptr'], $a); }; $o = $a; return $in; }; return $outer();"
+        ),
+        Vec::<String>::new()
+    );
+}
+
 #[test]
 fn test_array_callable_by_value_closure_parameter_assigned_after_closure_references_method() {
     assert_eq!(
