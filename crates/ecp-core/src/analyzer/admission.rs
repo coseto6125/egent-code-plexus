@@ -300,23 +300,25 @@ impl<'f, F: PickFacts + ?Sized> Gate<'f, F> {
             let Some(owner) = self.site.caller_owner.and_then(owner_key) else {
                 return Vec::new();
             };
-            let mut types = facts.types_named(owner);
-            let mut at = 0;
-            let mut depth = 0;
-            while at < types.len() && depth < MAX_NESTING {
-                let level_end = types.len();
-                for ty in types[at..level_end].to_vec() {
+            let mut level = facts.types_named(owner);
+            let mut types = level.clone();
+            for _ in 0..MAX_NESTING {
+                let mut next = Vec::new();
+                for &ty in &level {
                     let Some(outer) = facts.owner(ty).and_then(owner_key) else {
                         continue;
                     };
                     for outer in facts.types_named(outer) {
                         if !types.contains(&outer) {
                             types.push(outer);
+                            next.push(outer);
                         }
                     }
                 }
-                at = level_end;
-                depth += 1;
+                if next.is_empty() {
+                    break;
+                }
+                level = next;
             }
             for ty in types.clone() {
                 for ancestor in facts.ancestors(ty) {

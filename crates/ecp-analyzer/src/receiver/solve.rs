@@ -412,6 +412,10 @@ struct Write {
     value: Abstract,
 }
 
+/// Where a closure is created (block, statement) and the capture states it
+/// sees there.
+type ClosureCapture = (u32, u32, Vec<(BindingId, Abstract)>);
+
 fn solve_function(
     ir: &FunctionIr,
     plan: &Plan,
@@ -476,8 +480,7 @@ fn solve_function(
     // The final replay records each use and each closure's capture states
     // from the converged in-states.
     let mut writes: Vec<Write> = Vec::new();
-    let mut made: Vec<Option<(u32, u32, Vec<(BindingId, Abstract)>)>> =
-        vec![None; ir.closures.len()];
+    let mut made: Vec<Option<ClosureCapture>> = vec![None; ir.closures.len()];
     for (block, b) in ir.blocks.iter().enumerate() {
         if !live[block] {
             out.extend(b.stmts.iter().filter_map(|stmt| match stmt {

@@ -199,11 +199,13 @@ impl<'s> Lower<'s> {
         let Some(parent) = node.parent() else {
             return;
         };
-        let receiver = match (node.kind(), parent.kind()) {
-            ("simple_identifier", "navigation_expression" | "call_expression") => true,
-            ("type_identifier", "callable_reference") => true,
-            _ => false,
-        } && parent
+        let receiver = matches!(
+            (node.kind(), parent.kind()),
+            (
+                "simple_identifier",
+                "navigation_expression" | "call_expression"
+            ) | ("type_identifier", "callable_reference")
+        ) && parent
             .named_child(0)
             .is_some_and(|first| first.id() == node.id());
         if !receiver {
