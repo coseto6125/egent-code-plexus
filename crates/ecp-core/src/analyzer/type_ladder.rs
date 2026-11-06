@@ -601,14 +601,16 @@ impl AnnotationReason {
 /// One declaration's inputs to [`type_annotation_targets`]: its node's
 /// fields and its function meta's, as the index and the overlay hold them.
 #[derive(Clone, Copy)]
-pub struct AnnotatedDecl<'a> {
+pub struct AnnotatedDecl<'a, 'p> {
     pub language: Language,
     pub kind: NodeKind,
     pub type_annotation: Option<&'a str>,
     pub owner_class: Option<&'a str>,
     pub return_type: Option<&'a str>,
     pub params: &'a [String],
-    pub type_params: &'a [String],
+    /// Computed per declaration ([`visible_type_params`]), so it may borrow
+    /// for less time than the names `resolve` receives.
+    pub type_params: &'p [String],
 }
 
 /// The type variables visible at a declaration: its own `type_params`
@@ -627,16 +629,7 @@ pub fn visible_type_params<'a>(
 ) -> Vec<String> {
     let mut visible = own.to_vec();
     for decorators in enclosing {
-        let markers = decorators
-            .iter()
-            .filter(|d| RawNode::is_type_params_marker(d));
-        // The marker is `__type_params__:A,B`: its prefix holds the only
-        // `:` before the names.
-        let names = markers
-            .filter_map(|marker| marker.split_once(':'))
-            .flat_map(|(_, list)| list.split(','))
-            .filter(|name| !name.is_empty());
-        for name in names {
+        for name in RawNode::type_params_in(decorators) {
             if !visible.iter().any(|seen| seen == name) {
                 visible.push(name.to_string());
             }
@@ -670,7 +663,7 @@ pub fn visible_type_params<'a>(
 ///   project type: no resolution runs for it, even when a project type
 ///   shares the name.
 pub fn type_annotation_targets<'a, T: IntoIterator<Item = (u32, f32)>>(
-    decl: AnnotatedDecl<'a>,
+    decl: AnnotatedDecl<'a, '_>,
     mut resolve: impl FnMut(&'a str) -> T,
 ) -> Vec<(u32, f32, AnnotationReason)> {
     let AnnotatedDecl {

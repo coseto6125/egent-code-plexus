@@ -618,7 +618,14 @@ impl RawNode {
     /// The type parameters the parser recorded on this declaration; empty
     /// when the node carries no marker.
     pub fn declared_type_params(&self) -> impl Iterator<Item = &str> {
-        self.decorators
+        Self::type_params_in(&self.decorators)
+    }
+
+    /// The type parameters the [`RawNode::type_params_marker`] entries of
+    /// `decorators` list: [`RawNode::declared_type_params`] over a
+    /// declaration's decorators wherever they are held.
+    pub fn type_params_in(decorators: &[String]) -> impl Iterator<Item = &str> {
+        decorators
             .iter()
             .filter_map(|d| d.strip_prefix(TYPE_PARAMS_MARKER))
             .flat_map(|list| list.split(','))
