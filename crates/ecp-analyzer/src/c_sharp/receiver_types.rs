@@ -31,7 +31,8 @@ use super::path_literals::{
 };
 use crate::calls::{
     attach_to_enclosing, construction_call, is_call_callee, is_same_kind_field, node_range,
-    range_width, reference_function, span_holds, span_width, start_pos, Pos, PosRange,
+    range_width, reference_function, span_holds, span_width, start_pos, unparenthesized, Pos,
+    PosRange,
 };
 use ecp_core::analyzer::csharp_extension::system_type_name;
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef, THIS_MEMBER_PREFIX};
@@ -642,7 +643,7 @@ fn csharp_callee(
     locals: &LocalTypes,
     nodes: &[RawNode],
 ) -> Option<String> {
-    let func = inv.child_by_field_name("function")?;
+    let func = unparenthesized(inv.child_by_field_name("function")?);
     let (receiver, method_node) = match func.kind() {
         "identifier" => return func.utf8_text(source).ok().map(str::to_string),
         "member_access_expression" => (

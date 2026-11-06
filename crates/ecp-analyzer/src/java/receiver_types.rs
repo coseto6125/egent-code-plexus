@@ -352,7 +352,10 @@ fn bound_method_reference(
     if !known_shape {
         return None;
     }
-    let (receiver, member) = (reference.named_child(0)?, reference.named_child(last)?);
+    let (receiver, member) = (
+        reference.named_child(0)?,
+        reference.named_child(last as u32)?,
+    );
     if receiver.kind() != "identifier" || member.kind() != "identifier" {
         return None;
     }

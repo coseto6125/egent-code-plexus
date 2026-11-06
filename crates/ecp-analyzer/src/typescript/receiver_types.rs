@@ -22,7 +22,7 @@ use super::path_literals::{
 };
 use crate::calls::{
     attach_to_enclosing_span, is_call_callee, new_expression_call, node_range, range_width,
-    reference_function_span, start_pos, CallSiteIndex, Pos, PosRange,
+    reference_function_span, start_pos, unparenthesized, CallSiteIndex, Pos, PosRange,
 };
 use crate::dynamic_imports::{
     binding_mentions, is_field, may_load, rebound, synthetic_imports, DynamicBinding,

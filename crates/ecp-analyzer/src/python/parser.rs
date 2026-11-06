@@ -879,7 +879,7 @@ fn module_binds(n: Node, name: &str, source: &[u8]) -> bool {
         root = parent;
     }
     let mut cursor = root.walk();
-    root.children(&mut cursor).any(|stmt| match stmt.kind() {
+    let binds = root.children(&mut cursor).any(|stmt| match stmt.kind() {
         "expression_statement" => stmt.named_child(0).is_some_and(|a| {
             a.kind() == "assignment"
                 && a.child_by_field_name("left")
@@ -889,7 +889,8 @@ fn module_binds(n: Node, name: &str, source: &[u8]) -> bool {
             .child_by_field_name("name")
             .is_some_and(|id| node_text(id, source) == name),
         _ => false,
-    })
+    });
+    binds
 }
 
 /// True when `func_def` is a `def`/`async def` defined directly inside a
