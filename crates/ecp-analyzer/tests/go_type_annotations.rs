@@ -214,7 +214,7 @@ mod a10 {
         let params = generic.map_or(String::new(), |p| format!("<{p}>"));
         let _ = (&arg, &params);
         let params = generic.map_or(String::new(), |p| format!("[{p} any]"));
-        let files = vec![(
+        let files = [(
             token_file(token),
             format!(
                 "package main\n\ntype {token} struct{{}}\ntype List[E any] struct{{}}\ntype Box{params} struct {{\n\titems List[{arg}]\n}}\ntype Holder struct {{\n\ttokens List[{token}]\n}}\n"

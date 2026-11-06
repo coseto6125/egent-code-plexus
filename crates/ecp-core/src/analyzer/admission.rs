@@ -386,16 +386,15 @@ impl<'f, F: PickFacts + ?Sized> Gate<'f, F> {
 /// side that cannot read the container answers `false`, so the candidate
 /// stays.
 pub fn declares_contract<F: PickFacts + ?Sized>(facts: &F, id: u32, language: Language) -> bool {
-    facts
-        .container(id)
-        .is_some_and(|container| match (facts.kind(container), language) {
+    facts.container(id).is_some_and(|container| {
+        matches!(
+            (facts.kind(container), language),
             (
                 NodeKind::Interface,
-                Language::TypeScript | Language::JavaScript | Language::Kotlin | Language::CSharp,
-            ) => true,
-            (NodeKind::Trait, Language::Swift) => true,
-            _ => false,
-        })
+                Language::TypeScript | Language::JavaScript | Language::Kotlin | Language::CSharp
+            ) | (NodeKind::Trait, Language::Swift)
+        )
+    })
 }
 
 #[cfg(test)]

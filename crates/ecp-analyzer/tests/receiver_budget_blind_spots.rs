@@ -36,6 +36,9 @@ fn lines(count: usize, line: impl Fn(usize) -> String) -> String {
     })
 }
 
+/// `(kind, file)` of each receiver-budget blind spot.
+type Spots = Vec<(String, std::path::PathBuf)>;
+
 struct Case {
     path: &'static str,
     /// Whether the language's solver tracks any local of the fixture. A
@@ -43,14 +46,10 @@ struct Case {
     /// pinned language (Java, C#, Kotlin) never reaches the budget.
     tracks: bool,
     source: fn(usize) -> String,
-    parse: fn(&Path, &[u8]) -> Vec<(String, std::path::PathBuf)>,
+    parse: fn(&Path, &[u8]) -> Spots,
 }
 
-fn budget_spots<P: LanguageProvider>(
-    provider: &P,
-    path: &Path,
-    source: &[u8],
-) -> Vec<(String, std::path::PathBuf)> {
+fn budget_spots<P: LanguageProvider>(provider: &P, path: &Path, source: &[u8]) -> Spots {
     provider
         .parse_file(path, source)
         .unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))

@@ -201,7 +201,7 @@ mod a10 {
         let arg = generic.unwrap_or(token);
         let params = generic.map_or(String::new(), |p| format!("<{p}>"));
         let _ = (&arg, &params);
-        let files = vec![
+        let files = [
             (token_file(token), format!("class {token} {{}}\n")),
             (
                 "Box.swift".to_string(),

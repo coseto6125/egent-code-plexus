@@ -148,7 +148,7 @@ mod a10 {
         let params = generic.map_or(String::new(), |p| format!("<{p}>"));
         let _ = (&arg, &params);
         let template = generic.map_or(String::new(), |p| format!("template <class {p}>\n"));
-        let files = vec![(
+        let files = [(
             token_file(token),
             format!(
                 "#include <vector>\nstruct {token} {{}};\n{template}struct Box {{\n    std::vector<{arg}> items;\n}};\nstruct Holder {{\n    std::vector<{token}> tokens;\n}};\n"

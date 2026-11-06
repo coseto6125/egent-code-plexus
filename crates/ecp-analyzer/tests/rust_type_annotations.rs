@@ -242,7 +242,7 @@ mod a10 {
         let arg = generic.unwrap_or(token);
         let params = generic.map_or(String::new(), |p| format!("<{p}>"));
         let _ = (&arg, &params);
-        let files = vec![(
+        let files = [(
             token_file(token),
             format!(
                 "pub struct {token};\npub struct Bag{params} {{\n    items: Vec<{arg}>,\n}}\npub struct Holder {{\n    tokens: Vec<{token}>,\n}}\n"

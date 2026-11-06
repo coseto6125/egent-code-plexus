@@ -82,8 +82,7 @@ mod a10 {
         let arg = generic.unwrap_or(token);
         let params = generic.map_or(String::new(), |p| format!("<{p}>"));
         let _ = (&arg, &params);
-        let files = vec![
-            (token_file(token), format!("class {token} {{}}\n")),
+        let files = [(token_file(token), format!("class {token} {{}}\n")),
             (
                 "src/Box.cs".to_string(),
                 format!("using System.Collections.Generic;\nclass Box{params} {{\n    List<{arg}> items;\n}}\n"),
@@ -91,8 +90,7 @@ mod a10 {
             (
                 "src/Holder.cs".to_string(),
                 format!("using System.Collections.Generic;\nclass Holder {{\n    List<{token}> tokens;\n}}\n"),
-            ),
-        ];
+            )];
         let refs: Vec<(&str, &str)> = files
             .iter()
             .map(|(p, s)| (p.as_str(), s.as_str()))

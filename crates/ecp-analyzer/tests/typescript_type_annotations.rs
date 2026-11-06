@@ -136,8 +136,7 @@ mod a10 {
         } else {
             String::new()
         };
-        let files = vec![
-            (token_file(token), format!("export class {token} {{}}\n")),
+        let files = [(token_file(token), format!("export class {token} {{}}\n")),
             (
                 "src/box.ts".to_string(),
                 format!("{import}export class Box{params} {{\n  items: Array<{arg}> = [];\n}}\n"),
@@ -145,8 +144,7 @@ mod a10 {
             (
                 "src/holder.ts".to_string(),
                 format!("import {{ {token} }} from './{token}';\nexport class Holder {{\n  tokens: Array<{token}> = [];\n}}\n"),
-            ),
-        ];
+            )];
         let refs: Vec<(&str, &str)> = files
             .iter()
             .map(|(p, s)| (p.as_str(), s.as_str()))

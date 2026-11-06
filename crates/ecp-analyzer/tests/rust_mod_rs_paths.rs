@@ -567,7 +567,7 @@ fn test_parse_file_rust_union_emits_declaration_node() {
 const GLOB_OTHER_MOD: &str = "pub mod registry;\n";
 const GLOB_REGISTRY: &str = "pub fn lookup() {}\n";
 
-fn glob_files<'a>(lib: &'a str) -> [(&'a str, &'a str); 4] {
+fn glob_files(lib: &str) -> [(&str, &str); 4] {
     [
         ("src/lib.rs", lib),
         ("src/other/mod.rs", GLOB_OTHER_MOD),

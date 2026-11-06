@@ -611,7 +611,7 @@ impl<'s> Lower<'s> {
             node.child_by_field_name("name"),
             node.child_by_field_name("right"),
         ) {
-            let ty = Some(ty).filter(|_| affirmed);
+            let ty = affirmed.then_some(ty);
             self.declare_typed(b, name, ty, false, BindingOrigin::Pattern);
         }
         if let Some(pattern) = node.child_by_field_name("pattern") {
@@ -632,7 +632,7 @@ impl<'s> Lower<'s> {
         else {
             return;
         };
-        let ty = Some(ty).filter(|_| self.typed_patterns);
+        let ty = self.typed_patterns.then_some(ty);
         self.declare_typed(b, name, ty, false, BindingOrigin::Pattern);
     }
 }
