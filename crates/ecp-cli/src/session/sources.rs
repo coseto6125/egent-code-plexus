@@ -82,11 +82,12 @@ where
 }
 
 /// The bytes of `root/rel` when their `xxh3_64` is `recorded`, or when only
-/// their line endings differ from that text (see [`text_is_recorded`]).
-/// `None` for a file that is gone or unreadable: a missing file proves
-/// nothing, not even an empty recorded text. `None` also for a path that
-/// [`open_admitted`] refuses, and for a file whose length changed while it
-/// was read.
+/// their line endings differ from that text: git under `core.autocrlf`
+/// reports such a file clean, so no overlay records it, and its line numbers
+/// are the recorded ones. `None` for a file that is gone or unreadable: a
+/// missing file proves nothing, not even an empty recorded text. `None` also
+/// for a path that [`open_admitted`] refuses, and for a file whose length
+/// changed while it was read.
 pub fn recorded_bytes(root: &Path, rel: &str, recorded: u64) -> Option<Vec<u8>> {
     let (file, len) = open_admitted(&root.join(rel), || resolve_size_cap(root))?;
     let mut bytes = Vec::with_capacity(usize::try_from(len).ok()?);
@@ -94,28 +95,6 @@ pub fn recorded_bytes(root: &Path, rel: &str, recorded: u64) -> Option<Vec<u8>> 
     (bytes.len() as u64 == len
         && (xxh3_64(&bytes) == recorded || eol_form_is_recorded(bytes.as_slice(), len, recorded)))
     .then_some(bytes)
-}
-
-/// Whether `root/rel` holds the text whose `xxh3_64` is `recorded`, hashed in
-/// a stream so the file is never loaded whole. The text also counts when
-/// only its line endings differ from the recorded text: git under
-/// `core.autocrlf` reports such a file clean, so no overlay records it, and
-/// its line numbers are the recorded ones. The same paths as
-/// [`recorded_bytes`] prove nothing. `cap` gives the parse cap; it runs only
-/// for a file over the built-in default.
-pub fn text_is_recorded(root: &Path, rel: &str, recorded: u64, cap: impl Fn() -> SizeCap) -> bool {
-    let path = root.join(rel);
-    let proven = |check: fn(fs::File, u64, u64) -> bool| {
-        open_admitted(&path, &cap).is_some_and(|(file, len)| check(file, len, recorded))
-    };
-    // The line-ending forms take a second read, made only when the file's
-    // own bytes miss, so a clean file is read once.
-    proven(raw_is_recorded) || proven(eol_form_is_recorded)
-}
-
-fn raw_is_recorded(file: fs::File, len: u64, recorded: u64) -> bool {
-    let mut hasher = Xxh3::new();
-    stream(file, len, |chunk| hasher.update(chunk)) && hasher.digest() == recorded
 }
 
 /// Whether `text`, `len` bytes long, has the `xxh3_64` `recorded` with every

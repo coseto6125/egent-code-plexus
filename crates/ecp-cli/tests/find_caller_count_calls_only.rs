@@ -16,7 +16,6 @@ use crate::common;
 use common::{ecp_bin, init_and_analyze, write};
 
 use ecp_cli::commands::find::{compute_hits, FindArgs, FindMode};
-use ecp_cli::commands::hook::pre_tool_use::format_hits;
 use ecp_cli::engine::Engine;
 use ecp_cli::search::TantivyEngine;
 use ecp_core::graph::{NodeKind, RelType};
@@ -116,12 +115,4 @@ fn find_callers_and_callees_lists_hold_calls_edges_only() {
     assert_eq!(hit.callers, vec!["caller_a".to_string()], "hit: {hit:?}");
     assert_eq!(hit.callee_count, 0, "ReadsField is not a call: {hit:?}");
     assert!(hit.callees.is_empty(), "hit: {hit:?}");
-
-    // What the model reads: the file names never appear as callers.
-    let rendered = format_hits(std::slice::from_ref(hit));
-    assert!(
-        rendered.contains("Called by: caller_a\n"),
-        "rendered: {rendered}"
-    );
-    assert!(!rendered.contains("Calls:"), "rendered: {rendered}");
 }

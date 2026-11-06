@@ -4,7 +4,6 @@
 //! builds five rows instead of up to a hundred.
 
 use ecp_cli::commands::find::{compute_hits, compute_hits_limited, FindArgs, FindMode, Hit};
-use ecp_cli::commands::hook::pre_tool_use::format_hits;
 use ecp_cli::engine::Engine;
 use ecp_cli::search::TantivyEngine;
 use ecp_core::graph::{RelType, ZeroCopyGraph};
@@ -75,7 +74,6 @@ fn assert_limited_is_head_of_unlimited(with_tantivy: bool) {
 
     assert_eq!(limited.len(), LIMIT);
     assert_eq!(rows(&limited), rows(&all[..LIMIT]));
-    assert_eq!(format_hits(&limited), format_hits(&all));
 }
 
 #[test]

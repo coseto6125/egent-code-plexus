@@ -5,7 +5,6 @@
 //! lowercase comparison it replaces.
 
 use ecp_cli::commands::find::{compute_hits, run_for_repo, FindArgs, FindMode, ScoreSource};
-use ecp_cli::commands::hook::pre_tool_use::format_hits;
 use ecp_cli::engine::Engine;
 use ecp_core::graph_fixture::GraphFixture;
 use rkyv::rancor::Error;
@@ -43,8 +42,8 @@ fn bm25_args(pattern: &str) -> FindArgs {
 
 #[test]
 fn test_compute_hits_substring_fallback_puts_exact_match_first() {
-    // Six 0.4 substring rows precede the exact match in node order; the hook
-    // shows five rows, so node order would never have shown `handle`.
+    // Six 0.4 substring rows precede the exact match in node order; a reader
+    // that shows five rows would never have shown `handle` in node order.
     let names = [
         "xhandle1", "xhandle2", "xhandle3", "xhandle4", "xhandle5", "xhandle6", "handle",
     ];
@@ -60,9 +59,6 @@ fn test_compute_hits_substring_fallback_puts_exact_match_first() {
         hits.windows(2).all(|w| w[0].score >= w[1].score),
         "rows must be best score first"
     );
-    let rendered = format_hits(&hits);
-    let first_row = rendered.lines().nth(1).unwrap();
-    assert!(first_row.contains("handle (src/lib.rs:8)"), "{rendered}");
 }
 
 /// `ecp group find` (both merge modes) consumes `run_for_repo`'s rows in

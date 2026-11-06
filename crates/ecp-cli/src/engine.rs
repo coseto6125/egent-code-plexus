@@ -488,49 +488,13 @@ impl Engine {
             .as_ref()
     }
 
-    /// Whether `root/rel` holds the text this engine's answers for `rel` came
-    /// from: the accepted fragment's text when the overlay view supplies the
-    /// path, else the text the graph indexed. A file that is gone, changed,
-    /// unreadable or recorded with no hash is not recorded, and neither is a
-    /// path that is no regular file or is over the parse cap: the hook runs
-    /// this on every search, so it never blocks on a FIFO or reads a file
-    /// whole.
-    pub fn file_text_is_recorded(&self, root: &Path, rel: &str) -> bool {
-        self.overlay_view();
-        let dirty = self.overlay_hashes.get_or_init(FxHashMap::default);
-        self.text_matches(root, rel, dirty)
-    }
-
-    /// Whether the overlay view supplies `rel`: only then can
-    /// [`Self::file_text_is_recorded`] and
-    /// [`Self::file_text_is_base_recorded`] differ.
+    /// Whether the overlay view supplies `rel`: only then does an answer
+    /// about `rel` come from the dirty text rather than the indexed one.
     pub fn overlay_supplies(&self, rel: &str) -> bool {
         self.overlay_view();
         self.overlay_hashes
             .get()
             .is_some_and(|hashes| hashes.contains_key(rel))
-    }
-
-    /// As [`Self::file_text_is_recorded`], against the base graph's hash
-    /// only: the proof for a fact read from the base graph's edges, which an
-    /// overlay refresh does not rebuild.
-    pub fn file_text_is_base_recorded(&self, root: &Path, rel: &str) -> bool {
-        self.text_matches(root, rel, &FxHashMap::<String, u64>::default())
-    }
-
-    fn text_matches<K>(&self, root: &Path, rel: &str, dirty: &FxHashMap<K, u64>) -> bool
-    where
-        K: std::borrow::Borrow<str> + std::hash::Hash + Eq,
-    {
-        let Ok(graph) = self.graph() else {
-            return false;
-        };
-        crate::session::sources::recorded_hash(graph, dirty, rel).is_some_and(|hash| {
-            crate::session::sources::text_is_recorded(root, rel, hash, || {
-                self.overlay_size_cap
-                    .unwrap_or_else(|| ecp_core::config::resolve_size_cap(root))
-            })
-        })
     }
 
     /// The key `overlay_view` stores and looks up its view under, for the

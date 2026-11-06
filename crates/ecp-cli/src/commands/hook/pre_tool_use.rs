@@ -7,15 +7,9 @@
 //! heartbeat use both.
 
 use super::common::{emit_additional_context, HookInput};
-use crate::commands::find::Hit;
 use ecp_core::EcpError;
 use std::borrow::Cow;
-use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
-
-const MAX_HITS: usize = 5;
-const MAX_BYTES: usize = 2048;
-const HITS_HEADER: &str = "ecp graph hits:\n";
 
 pub fn handle(input: &HookInput) -> Result<(), EcpError> {
     // Both signals (edit flow + peer drain) must be merged into a single
@@ -32,44 +26,6 @@ pub fn handle(input: &HookInput) -> Result<(), EcpError> {
         emit_additional_context("PreToolUse", &sections.join("\n\n"));
     }
     Ok(())
-}
-
-/// Render hits as a multi-line block, at most `MAX_HITS` hits and
-/// `MAX_BYTES`. Each symbol gets a header `name (file:line) [kind]` followed
-/// by optional `Called by:` and `Calls:` lines drawn from the 1-hop
-/// expansion in `compute_hits`; each lists distinct symbols, and a truncated
-/// line ends in `+N more`. Empty caller / callee lists are skipped. Empty
-/// when no hit fits.
-pub fn format_hits(hits: &[Hit]) -> String {
-    let mut out = String::from(HITS_HEADER);
-    for h in hits.iter().take(MAX_HITS) {
-        let mut block = format!("  {} ({}:{}) [{}]\n", h.name, h.file, h.line, h.kind);
-        push_neighbours(&mut block, "Called by", &h.callers, h.caller_count);
-        push_neighbours(&mut block, "Calls", &h.callees, h.callee_count);
-        if out.len() + block.len() > MAX_BYTES {
-            break;
-        }
-        out.push_str(&block);
-    }
-    if out.len() == HITS_HEADER.len() {
-        String::new()
-    } else {
-        out
-    }
-}
-
-/// One `label: a, b, c` line. `names` is capped at `HOP_EXPANSION_LIMIT`
-/// and `total` is the real count, so the rest is named, not silently dropped.
-fn push_neighbours(block: &mut String, label: &str, names: &[String], total: usize) {
-    if names.is_empty() {
-        return;
-    }
-    let _ = write!(block, "    {label}: {}", names.join(", "));
-    let more = total.saturating_sub(names.len());
-    if more > 0 {
-        let _ = write!(block, ", +{more} more");
-    }
-    block.push('\n');
 }
 
 /// The directories, besides the envelope cwd, whose worktree this tool call
