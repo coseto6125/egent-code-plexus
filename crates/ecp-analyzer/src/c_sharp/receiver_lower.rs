@@ -9,9 +9,12 @@
 //! `dynamic`, an implicit lambda parameter) is declared without a type: its
 //! uses answer `Unknown(NoEvidence)`, which the extractor encodes as an
 //! untyped member call and which still shadows a field or a type of that name.
+//!
+//! Every member with code lowers (methods, operators, accessors, field and
+//! property initializers), so no local reaches the extractor's member lookup.
 
 use super::receiver_types::{class_type_name, constructed_type};
-use crate::receiver::ir::{BindingOrigin, ScopeKind, TypeOrigin};
+use crate::receiver::ir::{BindingOrigin, ScopeId, ScopeKind, TypeOrigin};
 use crate::receiver::{DeclaredTypePolicy, IrBuilder, LangPolicy, Lowered, Lowering, ScopeRule};
 use tree_sitter::Node;
 
@@ -32,10 +35,7 @@ impl Lowering for CSharpLowering {
     }
 
     fn is_function(&self, node: Node<'_>) -> bool {
-        matches!(
-            node.kind(),
-            "method_declaration" | "constructor_declaration" | "local_function_statement"
-        )
+        is_callable(node.kind()) || is_member_with_code(node.kind())
     }
 
     fn lower(&self, _cx: &(), function: Node<'_>, source: &[u8], b: &mut IrBuilder) -> Lowered {
@@ -43,8 +43,13 @@ impl Lowering for CSharpLowering {
             source,
             depth: 0,
             unsupported: None,
+            hoist: None,
         };
-        lower.callable(b, function, false);
+        if is_member_with_code(function.kind()) {
+            lower.member(b, function);
+        } else {
+            lower.callable(b, function, false);
+        }
         match lower.unsupported {
             Some(reason) => Lowered::Unsupported(reason),
             None if b.use_count() == 0 => Lowered::NoUses,
@@ -53,12 +58,42 @@ impl Lowering for CSharpLowering {
     }
 }
 
+/// Function-like kinds with `parameters` and a `body`.
+fn is_callable(kind: &str) -> bool {
+    matches!(
+        kind,
+        "method_declaration"
+            | "constructor_declaration"
+            | "local_function_statement"
+            | "operator_declaration"
+            | "conversion_operator_declaration"
+            | "destructor_declaration"
+    )
+}
+
+/// Members whose accessors, expression body or initializers hold code.
+fn is_member_with_code(kind: &str) -> bool {
+    matches!(
+        kind,
+        "property_declaration"
+            | "indexer_declaration"
+            | "event_declaration"
+            | "field_declaration"
+            | "event_field_declaration"
+    )
+}
+
+/// A statement of a switch section's statement list, as opposed to its
+/// labels and `when` clauses.
+fn is_statement(kind: &str) -> bool {
+    kind == "block" || kind.ends_with("_statement")
+}
+
 /// Kinds that open their own scope and whose children lower in order.
 fn scopes_children(kind: &str) -> bool {
     matches!(
         kind,
         "block"
-            | "if_statement"
             | "while_statement"
             | "do_statement"
             | "for_statement"
@@ -86,6 +121,11 @@ struct Lower<'s> {
     source: &'s [u8],
     depth: u32,
     unsupported: Option<&'static str>,
+    /// `(section, block)` while a switch section's statements lower: a
+    /// variable declared directly in them belongs to the switch block
+    /// (C# spec 7.3: "added directly to the local variable declaration space
+    /// of the enclosing switch_block").
+    hoist: Option<(ScopeId, ScopeId)>,
 }
 
 impl<'s> Lower<'s> {
@@ -101,7 +141,11 @@ impl<'s> Lower<'s> {
         origin: BindingOrigin,
     ) {
         let declared = class.map(|class| b.intern(class, TypeOrigin::Annotation));
-        b.declare(name, origin, declared);
+        let scope = match self.hoist {
+            Some((section, block)) if b.current_scope() == section => block,
+            _ => b.current_scope(),
+        };
+        b.declare_in(scope, name, origin, declared);
     }
 
     /// Declares `name` as `ty` writes it. A missing or non-plain type leaves it untyped.
@@ -147,6 +191,16 @@ impl<'s> Lower<'s> {
         if nested {
             b.pop_scope();
         }
+    }
+
+    /// A property, indexer, event or field: an indexer's parameters, then
+    /// its accessors, expression body and initializers.
+    fn member(&mut self, b: &mut IrBuilder, member: Node<'_>) {
+        let params = member.child_by_field_name("parameters");
+        if let Some(params) = params {
+            self.parameters(b, params);
+        }
+        self.walk_except(b, member, params);
     }
 
     fn parameters(&mut self, b: &mut IrBuilder, params: Node<'_>) {
@@ -217,6 +271,8 @@ impl<'s> Lower<'s> {
             "method_declaration" | "constructor_declaration" | "local_function_statement" => {
                 self.callable(b, node, true)
             }
+            "if_statement" => self.if_statement(b, node),
+            "switch_section" => self.switch_section(b, node),
             "lambda_expression" | "anonymous_method_expression" => self.lambda(b, node),
             "variable_declaration" => self.variable_declaration(b, node),
             "foreach_statement" => self.foreach(b, node),
@@ -246,6 +302,41 @@ impl<'s> Lower<'s> {
         if let Some(binding) = b.lookup(self.text(node)) {
             b.use_binding(binding, node.id());
         }
+    }
+
+    /// An `if` condition's pattern and `out` variables belong to the
+    /// enclosing statement list; each branch is an embedded statement with
+    /// a declaration space of its own (C# spec 7.3).
+    fn if_statement(&mut self, b: &mut IrBuilder, node: Node<'_>) {
+        if let Some(condition) = node.child_by_field_name("condition") {
+            self.walk(b, condition);
+        }
+        for field in ["consequence", "alternative"] {
+            if let Some(branch) = node.child_by_field_name(field) {
+                b.push_scope(ScopeKind::Block);
+                self.walk(b, branch);
+                b.pop_scope();
+            }
+        }
+    }
+
+    /// `case A a: ..`: the labels' pattern variables live in the section,
+    /// the variables its statements declare in the switch block.
+    fn switch_section(&mut self, b: &mut IrBuilder, node: Node<'_>) {
+        let block = b.current_scope();
+        let section = b.push_scope(ScopeKind::Block);
+        let mut cursor = node.walk();
+        let children: Vec<_> = node.named_children(&mut cursor).collect();
+        for child in children {
+            if is_statement(child.kind()) {
+                let outer = self.hoist.replace((section, block));
+                self.walk(b, child);
+                self.hoist = outer;
+            } else {
+                self.walk(b, child);
+            }
+        }
+        b.pop_scope();
     }
 
     fn lambda(&mut self, b: &mut IrBuilder, node: Node<'_>) {
@@ -615,6 +706,72 @@ mod tests {
         assert_eq!(
             receivers("class H { void F() { A a = null; a.P(); a.Q(); } }"),
             vec![pair("P", "known A"), pair("Q", "known A")]
+        );
+    }
+
+    #[test]
+    fn test_lower_if_condition_out_variable_reaches_the_enclosing_block() {
+        assert_eq!(
+            receivers(
+                "class S { Cache v; void M(Store d) { if (!d.TryGetValue(\"k\", out Foo v)) return; v.Bar(); } }"
+            ),
+            vec![pair("Bar", "known Foo"), pair("TryGetValue", "known Store")]
+        );
+    }
+
+    #[test]
+    fn test_lower_if_condition_pattern_variable_reaches_the_enclosing_block() {
+        assert_eq!(
+            receivers(
+                "class S { void M(object o) { if (!(o is A a)) return; a.Q(); { if (o is B b) { } } b.R(); } }"
+            ),
+            vec![pair("Q", "known A"), pair("R", "none")]
+        );
+    }
+
+    #[test]
+    fn test_lower_else_if_condition_variable_stays_in_its_branch() {
+        assert_eq!(
+            receivers(
+                "class S { void M(object o, bool c) { if (c) { } else if (o is A a) { a.P(); } a.Q(); } }"
+            ),
+            vec![pair("P", "known A"), pair("Q", "none")]
+        );
+    }
+
+    #[test]
+    fn test_lower_while_condition_variable_stays_in_the_loop() {
+        assert_eq!(
+            receivers("class S { void M(object o) { while (o is A a) { a.P(); } a.Q(); } }"),
+            vec![pair("P", "known A"), pair("Q", "none")]
+        );
+    }
+
+    #[test]
+    fn test_lower_switch_section_pattern_variable_is_scoped_to_its_section() {
+        assert_eq!(
+            receivers(
+                "class S { void M(object o) { switch (o) { case A a: a.P(); break; case B b when b.Ok(): a.Q(); break; } } }"
+            ),
+            vec![pair("Ok", "known B"), pair("P", "known A"), pair("Q", "none")]
+        );
+    }
+
+    #[test]
+    fn test_lower_switch_section_local_reaches_later_sections() {
+        assert_eq!(
+            only("class S { void M(int k) { switch (k) { case 1: A x = null; break; default: x.M(); break; } } }"),
+            "known A"
+        );
+    }
+
+    #[test]
+    fn test_lower_property_accessor_local_is_a_binding() {
+        assert_eq!(
+            receivers(
+                "class S { int P { get { A x = null; return x.Get(); } } int Q => new B().Run(y => y.Go()); }"
+            ),
+            vec![pair("Get", "known A"), pair("Go", "unknown NoEvidence")]
         );
     }
 

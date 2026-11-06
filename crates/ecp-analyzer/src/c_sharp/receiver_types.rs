@@ -712,38 +712,37 @@ fn declares_member(nodes: &[RawNode], locals: &LocalTypes, pos: Pos, name: &str)
         })
 }
 
-fn enclosing_class_name(nodes: &[RawNode], pos: Pos) -> Option<String> {
-    let mut best: Option<((u32, i64), &str)> = None;
+/// The innermost class, struct or interface whose span holds `pos`: the
+/// type `this` names. A struct nested in a class is its own `this`.
+fn enclosing_type(nodes: &[RawNode], pos: Pos) -> Option<&RawNode> {
+    let mut best: Option<((u32, i64), &RawNode)> = None;
     for n in nodes {
-        if !matches!(n.kind, NodeKind::Class | NodeKind::Interface) {
+        if !matches!(
+            n.kind,
+            NodeKind::Class | NodeKind::Struct | NodeKind::Interface
+        ) {
             continue;
         }
         if span_holds(n.span, pos) {
             let w = span_width(n.span);
             if best.is_none_or(|(bw, _)| w < bw) {
-                best = Some((w, &n.name));
+                best = Some((w, n));
             }
         }
     }
-    best.map(|(_, name)| name.to_string())
+    best.map(|(_, n)| n)
 }
 
+fn enclosing_class_name(nodes: &[RawNode], pos: Pos) -> Option<String> {
+    enclosing_type(nodes, pos).map(|n| n.name.clone())
+}
+
+/// The first base of the enclosing class. A struct's base is
+/// `System.ValueType`, which no heritage entry names.
 fn enclosing_base_name(nodes: &[RawNode], pos: Pos) -> Option<String> {
-    let mut best_w = (u32::MAX, i64::MAX);
-    let mut result = None;
-    for n in nodes {
-        if !matches!(n.kind, NodeKind::Class) {
-            continue;
-        }
-        if span_holds(n.span, pos) {
-            let w = span_width(n.span);
-            if w < best_w {
-                best_w = w;
-                result = n.heritage.first().cloned();
-            }
-        }
-    }
-    result
+    enclosing_type(nodes, pos)
+        .filter(|n| n.kind == NodeKind::Class)
+        .and_then(|n| n.heritage.first().cloned())
 }
 
 #[cfg(test)]
@@ -758,6 +757,46 @@ mod tests {
         provider
             .parse_file(Path::new("Test.cs"), src.as_bytes())
             .expect("parse_file")
+    }
+
+    fn has(calls: &[String], want: CallSite<'_>) -> bool {
+        calls.iter().any(|c| CallSite::parse(c) == want)
+    }
+
+    fn all_calls(src: &str) -> Vec<String> {
+        parse(src).nodes.into_iter().flat_map(|n| n.calls).collect()
+    }
+
+    /// `if (!d.TryGetValue(k, out Foo v)) return; v.Bar();`: C# scopes `v`
+    /// to the enclosing block (C# spec 7.3), so the field `v` is hidden.
+    #[test]
+    fn test_csharp_callee_guard_out_variable_hides_same_named_field() {
+        let calls = all_calls(
+            "class S { Cache v; void M(Store d) { if (!d.TryGetValue(\"k\", out Foo v)) return; v.Bar(); } }",
+        );
+        assert!(has(&calls, CallSite::Plain("Foo.Bar")), "{calls:?}");
+        assert!(!has(&calls, CallSite::Plain("Cache.Bar")), "{calls:?}");
+    }
+
+    /// A local of a property accessor is no field of the class.
+    #[test]
+    fn test_csharp_callee_accessor_local_hides_same_named_field() {
+        let calls = all_calls(
+            "class S { Config cfg; int P { get { var cfg = Make(); return cfg.Load(); } } }",
+        );
+        assert!(has(&calls, CallSite::UntypedMember("Load")), "{calls:?}");
+        assert!(!has(&calls, CallSite::Plain("Config.Load")), "{calls:?}");
+    }
+
+    #[test]
+    fn test_csharp_callee_this_inside_nested_struct_names_the_struct() {
+        let graph = parse(
+            "class Outer : Base { struct Inner { void A() { this.B(); base.C(); } void B() {} } }",
+        );
+        let calls = &graph.nodes.iter().find(|n| n.name == "A").expect("A").calls;
+        assert!(has(calls, CallSite::Plain("Inner.B")), "{calls:?}");
+        assert!(has(calls, CallSite::Plain("C")), "{calls:?}");
+        assert!(!has(calls, CallSite::Plain("Base.C")), "{calls:?}");
     }
 
     /// `this.Eat()` should be recorded as `Animal.Eat` using the enclosing class name.
@@ -844,8 +883,9 @@ class App {
     /// Property guard: a `var items = ...` or `List<string> items = ...`
     /// declaration must NOT bind `items → List` — calling `items.Add()` would
     /// then emit `"List.Add"`, which is meaningless against the generic
-    /// instantiation. `simple_id_and_type` rejects non-`identifier` type
-    /// nodes for this reason; this test pins that behaviour.
+    /// instantiation. `class_type_name` (through
+    /// `CSharpLowering::declare_typed`) rejects non-`identifier` type nodes
+    /// for this reason; this test pins that behaviour.
     #[test]
     fn csharp_generic_type_does_not_bind_bare_type() {
         let src = r#"

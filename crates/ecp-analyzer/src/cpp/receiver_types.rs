@@ -681,3 +681,42 @@ fn cpp_callee_name(call: Node<'_>, source: &[u8], bindings: &CppBindings) -> Opt
             .map(str::to_string),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::parser::CppProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use ecp_core::analyzer::types::CallSite;
+    use std::path::Path;
+
+    fn calls_of(source: &str, function: &str) -> Vec<String> {
+        let graph = CppProvider::new()
+            .expect("CppProvider::new")
+            .parse_file(Path::new("t.cpp"), source.as_bytes())
+            .expect("parse_file");
+        let mut calls = graph
+            .nodes
+            .into_iter()
+            .find(|n| n.name == function)
+            .unwrap_or_else(|| panic!("no node named {function}"))
+            .calls;
+        calls.sort();
+        calls
+    }
+
+    /// `r->reset()` on a `Ref` value calls `Ref::operator->` and then
+    /// `reset` on its result, so the call names no `Ref.reset`; the old
+    /// per-function type map must not supply one either.
+    #[test]
+    fn test_cpp_callee_name_arrow_on_class_value_emits_untyped_member() {
+        let calls = calls_of(
+            "class Node { public: void reset(); };\n\
+             class Ref { public: Node* operator->(); void reset(); };\n\
+             void use(Ref r, Ref* p) { r->reset(); p->reset(); }\n",
+            "use",
+        );
+        let mut want = vec![CallSite::untyped_member("reset"), "Ref.reset".to_string()];
+        want.sort();
+        assert_eq!(calls, want);
+    }
+}

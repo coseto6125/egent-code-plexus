@@ -219,16 +219,22 @@ fn bound_method_reference(
     }
 }
 
-/// Name of the innermost enclosing Class/Interface node at `pos`.
+/// Name of the innermost enclosing class, interface or enum at `pos`.
 fn enclosing_class_name(nodes: &[RawNode], pos: Pos) -> Option<String> {
     enclosing_type(nodes, pos).map(|n| n.name.clone())
 }
 
-/// The innermost Class/Interface node whose span holds `pos`.
+/// Whether `kind` declares a type whose body owns its members and `this`:
+/// a class or record, an interface, an enum.
+fn is_type_declaration(kind: NodeKind) -> bool {
+    matches!(kind, NodeKind::Class | NodeKind::Interface | NodeKind::Enum)
+}
+
+/// The innermost class, interface or enum node whose span holds `pos`.
 fn enclosing_type(nodes: &[RawNode], pos: Pos) -> Option<&RawNode> {
     let mut best: Option<((u32, i64), &RawNode)> = None;
     for n in nodes {
-        if !matches!(n.kind, NodeKind::Class | NodeKind::Interface) {
+        if !is_type_declaration(n.kind) {
             continue;
         }
         if span_holds(n.span, pos) {
@@ -255,23 +261,13 @@ fn field_type<'n>(nodes: &'n [RawNode], pos: Pos, var: &str) -> Option<&'n str> 
         .filter(|ty| !ty.is_empty() && ty.chars().all(|c| c.is_alphanumeric() || c == '_'))
 }
 
-/// First superclass in the enclosing class's heritage list.
+/// First superclass in the enclosing class's heritage list. An enum or an
+/// interface in between is the enclosing type: an enum's superclass is
+/// `java.lang.Enum`, which no heritage entry names.
 fn enclosing_superclass(nodes: &[RawNode], pos: Pos) -> Option<String> {
-    let mut best_w = (u32::MAX, i64::MAX);
-    let mut result = None;
-    for n in nodes {
-        if !matches!(n.kind, NodeKind::Class) {
-            continue;
-        }
-        if span_holds(n.span, pos) {
-            let w = span_width(n.span);
-            if w < best_w {
-                best_w = w;
-                result = n.heritage.first().cloned();
-            }
-        }
-    }
-    result
+    enclosing_type(nodes, pos)
+        .filter(|n| n.kind == NodeKind::Class)
+        .and_then(|n| n.heritage.first().cloned())
 }
 
 #[cfg(test)]
@@ -285,6 +281,100 @@ mod tests {
         provider
             .parse_file(Path::new("Test.java"), src.as_bytes())
             .expect("parse_file")
+    }
+
+    fn all_calls(src: &str) -> Vec<String> {
+        parse(src).nodes.into_iter().flat_map(|n| n.calls).collect()
+    }
+
+    fn calls_of(src: &str, name: &str) -> Vec<String> {
+        parse(src)
+            .nodes
+            .into_iter()
+            .find(|n| n.name == name)
+            .unwrap_or_else(|| panic!("no node named {name}"))
+            .calls
+    }
+
+    /// A local of an initializer block is no field of the class: the field
+    /// lookup only answers a receiver that names no local.
+    #[test]
+    fn test_java_callee_static_initializer_local_hides_same_named_field() {
+        let calls =
+            all_calls("class Registry { private Config cfg; static { Loader cfg = new Loader(); cfg.load(); } }");
+        assert!(calls.iter().any(|c| c == "Loader.load"), "{calls:?}");
+        assert!(!calls.iter().any(|c| c == "Config.load"), "{calls:?}");
+    }
+
+    #[test]
+    fn test_java_callee_enum_constant_lambda_parameter_hides_same_named_field() {
+        let calls = all_calls("enum E { K(z -> z.m()); C z; E(Object x) {} }");
+        assert!(calls.iter().any(|c| c == "z.m"), "{calls:?}");
+        assert!(!calls.iter().any(|c| c == "C.m"), "{calls:?}");
+    }
+
+    /// After `if (!(o instanceof A a)) return;` Java calls `A.m` on `a`; the
+    /// lowering does not model that flow scope, so the call keeps the bare
+    /// name and never takes the field's type.
+    #[test]
+    fn test_java_callee_flow_scoped_pattern_variable_never_takes_field_type() {
+        let calls = calls_of(
+            "class H { B a; void f(Object o) { if (!(o instanceof A a)) return; a.m(); } }",
+            "f",
+        );
+        assert!(calls.iter().any(|c| c == "a.m"), "{calls:?}");
+        assert!(!calls.iter().any(|c| c == "B.m"), "{calls:?}");
+    }
+
+    #[test]
+    fn test_java_callee_pattern_variable_types_only_the_true_branch() {
+        let calls = calls_of(
+            "class H { B a; void f(Object o) { if (o instanceof A a) { a.p(); } else { a.q(); } } }",
+            "f",
+        );
+        assert!(calls.iter().any(|c| c == "A.p"), "{calls:?}");
+        assert!(calls.iter().any(|c| c == "a.q"), "{calls:?}");
+        assert!(!calls.iter().any(|c| c == "B.q"), "{calls:?}");
+    }
+
+    /// A syntax error may hide a declaration of `y`, so `y.n()` takes no field type.
+    #[test]
+    fn test_java_callee_erroneous_method_unbound_receiver_takes_no_field_type() {
+        let calls = calls_of(
+            "class H { C y; void f() { A x # null; x.m(); y.n(); } }",
+            "f",
+        );
+        assert!(calls.iter().any(|c| c == "A.m"), "{calls:?}");
+        assert!(calls.iter().any(|c| c == "y.n"), "{calls:?}");
+    }
+
+    /// A field of a nested enum is no field of the outer class.
+    #[test]
+    fn test_java_callee_nested_enum_field_does_not_type_outer_receiver() {
+        let src = "class Order { enum Status { NEW; private final Badge label = null; void tag() { label.mark(); } } private Tag label; void show() { label.render(); } }";
+        let show = calls_of(src, "show");
+        assert!(show.iter().any(|c| c == "Tag.render"), "{show:?}");
+        let tag = calls_of(src, "tag");
+        assert!(tag.iter().any(|c| c == "Badge.mark"), "{tag:?}");
+    }
+
+    #[test]
+    fn test_java_callee_this_inside_enum_names_the_enum() {
+        let calls = calls_of(
+            "class Order { enum Status { NEW; void a() { this.b(); } void b() {} } }",
+            "a",
+        );
+        assert!(calls.iter().any(|c| c == "Status.b"), "{calls:?}");
+    }
+
+    /// An enum's superclass is `java.lang.Enum`, never the outer class's.
+    #[test]
+    fn test_java_callee_super_inside_enum_skips_outer_superclass() {
+        let calls = calls_of(
+            "class P extends Base { enum E { X; void a() { super.toString(); } } }",
+            "a",
+        );
+        assert_eq!(calls, vec!["toString".to_string()]);
     }
 
     /// `this.foo()` should be recorded as `ClassName.foo` in the enclosing

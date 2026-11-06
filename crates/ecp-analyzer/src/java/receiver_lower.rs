@@ -11,9 +11,17 @@
 //! bare-name path for it. Every receiver that names a binding, opaque or
 //! not, lands in the lowering's context ([`JavaLowering`]'s `Cx`), so the
 //! extractor can tell a local from a field of the enclosing class.
+//!
+//! Every class member with code lowers: methods, constructors, initializer
+//! blocks, field initializers and enum constants, so no local reaches the
+//! extractor's field lookup. Java scopes a pattern variable by flow (JLS
+//! 6.3.1); the lowering types it only where it is definitely matched, and a
+//! receiver that names a pattern variable outside that region lands in the
+//! context untyped.
 
 use super::receiver_types::expression_type;
-use crate::receiver::ir::{BindingId, BindingOrigin, ScopeKind, TypeOrigin};
+use crate::framework_helpers::node_span;
+use crate::receiver::ir::{BindingId, BindingOrigin, ScopeId, ScopeKind, TypeOrigin};
 use crate::receiver::{DeclaredTypePolicy, IrBuilder, LangPolicy, Lowered, Lowering, ScopeRule};
 use rustc_hash::FxHashSet;
 use std::cell::RefCell;
@@ -38,10 +46,20 @@ impl Lowering for JavaLowering {
     }
 
     fn is_function(&self, node: Node<'_>) -> bool {
-        matches!(
-            node.kind(),
-            "method_declaration" | "constructor_declaration"
-        )
+        match node.kind() {
+            "method_declaration"
+            | "constructor_declaration"
+            | "compact_constructor_declaration"
+            | "static_initializer"
+            | "field_declaration"
+            | "constant_declaration"
+            | "enum_constant" => true,
+            // An instance initializer.
+            "block" => node
+                .parent()
+                .is_some_and(|p| matches!(p.kind(), "class_body" | "enum_body_declarations")),
+            _ => false,
+        }
     }
 
     fn lower(
@@ -57,8 +75,16 @@ impl Lowering for JavaLowering {
             unsupported: None,
             opaque: FxHashSet::default(),
             locals: cx,
+            pattern_names: FxHashSet::default(),
+            typed_patterns: true,
+            hoist: None,
+            erroneous: function.has_error(),
         };
-        lower.callable(b, function, false);
+        match function.kind() {
+            "method_declaration" | "constructor_declaration" => lower.callable(b, function, false),
+            "compact_constructor_declaration" => lower.compact_constructor(b, function),
+            _ => lower.walk(b, function),
+        }
         match lower.unsupported {
             Some(reason) => Lowered::Unsupported(reason),
             None if b.use_count() == 0 => Lowered::NoUses,
@@ -86,16 +112,84 @@ fn scopes_children(kind: &str) -> bool {
             | "constructor_body"
             | "switch_block"
             | "switch_rule"
-            | "if_statement"
             | "while_statement"
             | "do_statement"
             | "for_statement"
             | "expression_statement"
             | "return_statement"
-            | "ternary_expression"
             | "try_with_resources_statement"
             | "catch_clause"
     )
+}
+
+/// Whether `node` is a `&&` expression.
+fn is_and(node: Node<'_>) -> bool {
+    node.kind() == "binary_expression"
+        && node
+            .child_by_field_name("operator")
+            .is_some_and(|op| op.kind() == "&&")
+}
+
+/// Whether `node` is the `condition` of a statement or `?:` whose scope
+/// holds only its true branch.
+fn is_condition_of(node: Node<'_>, parent: Node<'_>) -> bool {
+    matches!(
+        parent.kind(),
+        "if_statement" | "while_statement" | "for_statement" | "ternary_expression"
+    ) && parent
+        .child_by_field_name("condition")
+        .is_some_and(|c| c.id() == node.id())
+}
+
+/// Whether the pattern of `instance_of` is definitely matched in the scope
+/// the lowering declares it in: the condition's true branch, reached through
+/// parentheses and `&&` only, or the right operand of an `&&` (JLS 6.3.1).
+fn affirmed(instance_of: Node<'_>) -> bool {
+    let mut node = instance_of;
+    let mut left_of_and = false;
+    while let Some(parent) = node.parent() {
+        if is_condition_of(node, parent) {
+            return true;
+        }
+        if is_and(parent) {
+            left_of_and |= parent
+                .child_by_field_name("left")
+                .is_some_and(|l| l.id() == node.id());
+        } else if parent.kind() != "parenthesized_expression" {
+            break;
+        }
+        node = parent;
+    }
+    left_of_and
+}
+
+/// Whether the `&&` expression `and` closes the scope of the pattern
+/// variables its operands declare: it is the outermost `&&` of its chain,
+/// and that chain is no condition whose statement scopes them.
+fn owns_and_scope(and: Node<'_>) -> bool {
+    let mut node = and;
+    while let Some(parent) = node.parent() {
+        if is_and(parent) || is_condition_of(node, parent) {
+            return false;
+        }
+        if parent.kind() != "parenthesized_expression" {
+            break;
+        }
+        node = parent;
+    }
+    true
+}
+
+fn has_static_modifier(declaration: Node<'_>) -> bool {
+    let mut cursor = declaration.walk();
+    let modifiers = declaration
+        .named_children(&mut cursor)
+        .find(|c| c.kind() == "modifiers");
+    modifiers.is_some_and(|m| {
+        let mut inner = m.walk();
+        let has = m.children(&mut inner).any(|c| c.kind() == "static");
+        has
+    })
 }
 
 struct Lower<'s> {
@@ -104,6 +198,18 @@ struct Lower<'s> {
     unsupported: Option<&'static str>,
     opaque: FxHashSet<BindingId>,
     locals: &'s RefCell<FxHashSet<usize>>,
+    /// Every pattern variable name declared so far: a receiver of that name
+    /// that no open scope binds is one the lowering scopes too narrowly.
+    pattern_names: FxHashSet<&'s str>,
+    /// Whether a type or record pattern being lowered types its variables.
+    typed_patterns: bool,
+    /// `(group, block)` while a classic switch group's statements lower: a
+    /// local declared directly in the group belongs to the switch block
+    /// (JLS 6.3: its scope is the rest of the switch block).
+    hoist: Option<(ScopeId, ScopeId)>,
+    /// A syntax error may hide a declaration, so an unbound receiver is no
+    /// proof of a field.
+    erroneous: bool,
 }
 
 impl<'s> Lower<'s> {
@@ -114,12 +220,19 @@ impl<'s> Lower<'s> {
     fn declare(
         &mut self,
         b: &mut IrBuilder,
-        name: &str,
+        name: &'s str,
         class: Option<&str>,
         origin: BindingOrigin,
     ) {
         let declared = class.map(|class| b.intern(class, TypeOrigin::Annotation));
-        let id = b.declare(name, origin, declared);
+        let scope = match self.hoist {
+            Some((group, block)) if b.current_scope() == group => block,
+            _ => b.current_scope(),
+        };
+        if origin == BindingOrigin::Pattern {
+            self.pattern_names.insert(name);
+        }
+        let id = b.declare_in(scope, name, origin, declared);
         if declared.is_none() {
             self.opaque.insert(id);
         }
@@ -155,6 +268,21 @@ impl<'s> Lower<'s> {
         }
         if nested {
             b.pop_scope();
+        }
+    }
+
+    /// A compact canonical constructor declares the record's components as
+    /// its parameters (JLS 8.10.4.2).
+    fn compact_constructor(&mut self, b: &mut IrBuilder, function: Node<'_>) {
+        if let Some(params) = function
+            .parent()
+            .and_then(|body| body.parent())
+            .and_then(|record| record.child_by_field_name("parameters"))
+        {
+            self.parameters(b, params);
+        }
+        if let Some(body) = function.child_by_field_name("body") {
+            self.walk(b, body);
         }
     }
 
@@ -232,6 +360,18 @@ impl<'s> Lower<'s> {
         }
         match kind {
             "method_declaration" | "constructor_declaration" => self.callable(b, node, true),
+            "if_statement" | "ternary_expression" => self.conditional(b, node),
+            "binary_expression" if is_and(node) && owns_and_scope(node) => {
+                b.push_scope(ScopeKind::Block);
+                self.walk_children(b, node);
+                b.pop_scope();
+            }
+            "switch_block_statement_group" => self.switch_group(b, node),
+            "record_declaration"
+            | "enum_declaration"
+            | "interface_declaration"
+            | "annotation_type_declaration" => self.static_type(b, node),
+            "class_declaration" if has_static_modifier(node) => self.static_type(b, node),
             "class_body" => self.class_body(b, node),
             "lambda_expression" => self.lambda(b, node),
             "local_variable_declaration" => self.local_declaration(b, node),
@@ -254,12 +394,75 @@ impl<'s> Lower<'s> {
         let Some(receiver) = receiver.filter(|r| r.kind() == "identifier") else {
             return;
         };
-        if let Some(binding) = b.lookup(self.text(receiver)) {
-            self.locals.borrow_mut().insert(receiver.id());
-            if !self.opaque.contains(&binding) {
-                b.use_binding(binding, receiver.id());
+        let name = self.text(receiver);
+        match b.lookup(name) {
+            Some(binding) => {
+                self.locals.borrow_mut().insert(receiver.id());
+                if !self.opaque.contains(&binding) {
+                    b.use_binding(binding, receiver.id());
+                }
+            }
+            None if self.erroneous || self.pattern_names.contains(name) => {
+                self.locals.borrow_mut().insert(receiver.id());
+            }
+            None => {}
+        }
+    }
+
+    /// `if (c) t else e` and `c ? t : e`: a pattern variable `c` declares
+    /// is visible in `t` only.
+    fn conditional(&mut self, b: &mut IrBuilder, node: Node<'_>) {
+        b.push_scope(ScopeKind::Block);
+        for field in ["condition", "consequence"] {
+            if let Some(child) = node.child_by_field_name(field) {
+                self.walk(b, child);
             }
         }
+        b.pop_scope();
+        if let Some(alternative) = node.child_by_field_name("alternative") {
+            b.push_scope(ScopeKind::Block);
+            self.walk(b, alternative);
+            b.pop_scope();
+        }
+    }
+
+    /// `case A a: ..`: the labels' pattern variables live in the group, its
+    /// directly declared locals in the switch block.
+    fn switch_group(&mut self, b: &mut IrBuilder, node: Node<'_>) {
+        let block = b.current_scope();
+        let group = b.push_scope(ScopeKind::Block);
+        let mut cursor = node.walk();
+        let children: Vec<_> = node.named_children(&mut cursor).collect();
+        for child in children {
+            if child.kind() == "switch_label" {
+                self.walk(b, child);
+            } else {
+                let outer = self.hoist.replace((group, block));
+                self.walk(b, child);
+                self.hoist = outer;
+            }
+        }
+        b.pop_scope();
+    }
+
+    /// A record, enum, interface or static class declared in a body is
+    /// static (JLS 8.1.3): it sees none of the enclosing locals, so it lowers
+    /// in a frame of its own. A record's components are its fields.
+    fn static_type(&mut self, b: &mut IrBuilder, node: Node<'_>) {
+        let outer = self.hoist.take();
+        b.closure(node_span(&node), |b| {
+            b.push_scope(ScopeKind::Block);
+            if node.kind() == "record_declaration" {
+                if let Some(params) = node.child_by_field_name("parameters") {
+                    self.parameters(b, params);
+                }
+            }
+            if let Some(body) = node.child_by_field_name("body") {
+                self.walk(b, body);
+            }
+            b.pop_scope();
+        });
+        self.hoist = outer;
     }
 
     /// A local or anonymous class body: its fields shadow the method's
@@ -396,19 +599,25 @@ impl<'s> Lower<'s> {
         }
     }
 
-    /// `left instanceof T name`; a record pattern declares through its components.
+    /// `left instanceof T name`; a record pattern declares through its
+    /// components. A pattern that is not definitely matched where it lands
+    /// declares its variables untyped.
     fn instance_of(&mut self, b: &mut IrBuilder, node: Node<'_>) {
         if let Some(left) = node.child_by_field_name("left") {
             self.walk(b, left);
         }
+        let affirmed = affirmed(node);
         if let (Some(name), Some(ty)) = (
             node.child_by_field_name("name"),
             node.child_by_field_name("right"),
         ) {
-            self.declare_typed(b, name, Some(ty), false, BindingOrigin::Pattern);
+            let ty = Some(ty).filter(|_| affirmed);
+            self.declare_typed(b, name, ty, false, BindingOrigin::Pattern);
         }
         if let Some(pattern) = node.child_by_field_name("pattern") {
+            let outer = std::mem::replace(&mut self.typed_patterns, affirmed);
             self.walk(b, pattern);
+            self.typed_patterns = outer;
         }
     }
 
@@ -423,7 +632,8 @@ impl<'s> Lower<'s> {
         else {
             return;
         };
-        self.declare_typed(b, name, Some(ty), false, BindingOrigin::Pattern);
+        let ty = Some(ty).filter(|_| self.typed_patterns);
+        self.declare_typed(b, name, ty, false, BindingOrigin::Pattern);
     }
 }
 
@@ -650,6 +860,129 @@ mod tests {
     #[test]
     fn test_lower_constructor_parameter_is_known() {
         assert_eq!(only("class H { H(A a) { a.m(); } }"), "known A");
+    }
+
+    #[test]
+    fn test_lower_static_initializer_local_is_known() {
+        assert_eq!(
+            only("class R { Config cfg; static { Loader cfg = new Loader(); cfg.load(); } }"),
+            "known Loader"
+        );
+    }
+
+    #[test]
+    fn test_lower_instance_initializer_local_is_known() {
+        assert_eq!(
+            receivers("class R { { X y = null; y.m(); } } enum E { K; { Z z = null; z.n(); } }"),
+            vec![pair("m", "known X"), pair("n", "known Z")]
+        );
+    }
+
+    #[test]
+    fn test_lower_field_initializer_lambda_local_is_known() {
+        assert_eq!(
+            only("class R { A q; Runnable r = () -> { B q = null; q.m(); }; }"),
+            "known B"
+        );
+    }
+
+    #[test]
+    fn test_lower_compact_constructor_sees_record_components() {
+        assert_eq!(only("record Q(A a) { Q { a.m(); } }"), "known A");
+    }
+
+    #[test]
+    fn test_lower_negated_instanceof_guard_records_no_use() {
+        assert_eq!(
+            receivers(
+                "class H { void f(Object o) { if (!(o instanceof A a)) { a.p(); return; } a.q(); } }"
+            ),
+            vec![pair("p", "none"), pair("q", "none")]
+        );
+    }
+
+    #[test]
+    fn test_lower_instanceof_variable_is_absent_from_the_else_branch() {
+        assert_eq!(
+            receivers(
+                "class H { void f(Object o) { if (o instanceof A a) { a.p(); } else { a.q(); } } }"
+            ),
+            vec![pair("p", "known A"), pair("q", "none")]
+        );
+    }
+
+    #[test]
+    fn test_lower_instanceof_in_conjunction_types_only_the_right_operand() {
+        assert_eq!(
+            receivers(
+                "class H { boolean f(Object o) { g(o instanceof A a && a.p(), a.q()); return !(o instanceof B b) || b.r(); } }"
+            ),
+            vec![pair("p", "known A"), pair("q", "none"), pair("r", "none")]
+        );
+    }
+
+    #[test]
+    fn test_lower_instanceof_in_ternary_and_while_types_the_true_branch() {
+        assert_eq!(
+            receivers(
+                "class H { void f(Object o) { x(o instanceof A a ? a.p() : a.q()); while (o instanceof B b) { b.r(); } } }"
+            ),
+            vec![pair("p", "known A"), pair("q", "none"), pair("r", "known B")]
+        );
+    }
+
+    #[test]
+    fn test_lower_record_pattern_under_negation_records_no_use() {
+        assert_eq!(
+            only("class H { void f(Object o) { if (!(o instanceof P(A a))) { a.m(); } } }"),
+            "none"
+        );
+    }
+
+    #[test]
+    fn test_lower_classic_switch_pattern_variable_is_scoped_to_its_group() {
+        assert_eq!(
+            receivers(
+                "class H { void f(Object o) { switch (o) { case A a: a.p(); break; case B b: a.q(); } } }"
+            ),
+            vec![pair("p", "known A"), pair("q", "none")]
+        );
+    }
+
+    #[test]
+    fn test_lower_classic_switch_group_local_reaches_later_groups() {
+        assert_eq!(
+            only("class H { void f(int k) { switch (k) { case 1: A x = null; break; case 2: x.m(); } } }"),
+            "known A"
+        );
+    }
+
+    #[test]
+    fn test_lower_local_record_does_not_see_method_locals() {
+        assert_eq!(
+            receivers(
+                "class H { void f() { Store s = null; Store t = null; record View(Page s) { void show() { s.render(); t.drop(); } } } }"
+            ),
+            vec![pair("drop", "none"), pair("render", "known Page")]
+        );
+    }
+
+    #[test]
+    fn test_lower_local_enum_and_interface_do_not_see_method_locals() {
+        assert_eq!(
+            receivers(
+                "class H { void f() { Store s = null; enum E { X; void g() { s.a(); } } interface I { default void h() { s.b(); } } } }"
+            ),
+            vec![pair("a", "none"), pair("b", "none")]
+        );
+    }
+
+    #[test]
+    fn test_lower_static_member_class_of_anonymous_class_does_not_see_locals() {
+        assert_eq!(
+            only("class H { void f() { A x = null; new Base() { static class N { void g() { x.m(); } } }; } }"),
+            "none"
+        );
     }
 
     #[test]

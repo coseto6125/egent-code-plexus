@@ -6,7 +6,10 @@
 //! other declared type (`auto`, `std::string`, a template) leaves the binding
 //! without evidence. The scope is the only flow fact the lowering keeps, so it
 //! stays one straight line of statements: a block-scoped `T obj;` binds its own
-//! type and a same-named sibling block binds another.
+//! type and a same-named sibling block binds another. An access that strips
+//! more or fewer pointer levels than the declaration holds (`r->m()` on a
+//! `Ref r`) calls an overloaded `operator->` / `operator*`, so its receiver
+//! has no evidence.
 
 use crate::framework_helpers::node_span;
 use crate::receiver::ir::{
@@ -22,6 +25,10 @@ use super::receiver_types::{
 
 /// Nesting beyond this leaves the function to the extractor's own path.
 const MAX_DEPTH: u32 = 256;
+
+/// The name of the untyped binding an overloaded member access reads: no
+/// identifier spells it, so no lookup reaches it.
+const OVERLOADED_ACCESS: &str = "operator->";
 
 pub(super) struct CppLowering;
 
@@ -47,6 +54,9 @@ impl Lowering for CppLowering {
             source,
             depth: 0,
             unsupported: None,
+            names: Vec::new(),
+            marks: Vec::new(),
+            overloaded: vec![None],
         };
         lower.function(b, function);
         match lower.unsupported {
@@ -59,23 +69,60 @@ impl Lowering for CppLowering {
 
 /// The identifier of `x.m(..)` / `x->m(..)` / `(*x).m(..)`.
 fn call_receiver<'t>(call: Node<'t>) -> Option<Node<'t>> {
+    call_access(call).map(|(receiver, _)| receiver)
+}
+
+/// The identifier a member call reads, and the pointer levels the access
+/// strips from it: `->` and `*` strip one each, `&` adds one.
+fn call_access<'t>(call: Node<'t>) -> Option<(Node<'t>, i32)> {
     let function = call.child_by_field_name("function")?;
     if function.kind() != "field_expression" {
         return None;
     }
-    let receiver = member_operand(function.child_by_field_name("argument")?)?;
-    (receiver.kind() == "identifier").then_some(receiver)
+    let (receiver, stripped) = dereferenced(function.child_by_field_name("argument")?)?;
+    let arrow = function
+        .child_by_field_name("operator")
+        .is_some_and(|op| op.kind() == "->");
+    (receiver.kind() == "identifier").then_some((receiver, stripped + i32::from(arrow)))
 }
 
 /// The object a member access reads: `(*p).m()`, `(&x).m()` and `p->m()`
 /// all read `p` / `x`, whatever parentheses wrap the dereference.
-pub(super) fn member_operand(mut argument: Node<'_>) -> Option<Node<'_>> {
+pub(super) fn member_operand(argument: Node<'_>) -> Option<Node<'_>> {
+    dereferenced(argument).map(|(operand, _)| operand)
+}
+
+/// `member_operand`, with the pointer levels its `*` (one) or `&` (minus one) strips.
+fn dereferenced(mut argument: Node<'_>) -> Option<(Node<'_>, i32)> {
     while argument.kind() == "parenthesized_expression" {
         argument = argument.named_child(0)?;
     }
     match argument.kind() {
-        "pointer_expression" => argument.child_by_field_name("argument"),
-        _ => Some(argument),
+        "pointer_expression" => {
+            let stripped = match argument.child_by_field_name("operator").map(|op| op.kind()) {
+                Some("*") => 1,
+                _ => -1,
+            };
+            Some((argument.child_by_field_name("argument")?, stripped))
+        }
+        _ => Some((argument, 0)),
+    }
+}
+
+/// The pointer levels a declarator adds to its declared type: one per
+/// `*` or array dimension; a reference adds none.
+fn pointer_levels(mut declarator: Node<'_>) -> i32 {
+    let mut levels = 0;
+    loop {
+        match declarator.kind() {
+            "pointer_declarator" | "array_declarator" => levels += 1,
+            "reference_declarator" | "init_declarator" => {}
+            _ => return levels,
+        }
+        match inner_declarator(declarator) {
+            Some(inner) => declarator = inner,
+            None => return levels,
+        }
     }
 }
 
@@ -110,6 +157,13 @@ struct Lower<'s> {
     source: &'s [u8],
     depth: u32,
     unsupported: Option<&'static str>,
+    /// Every visible declaration with its pointer levels, innermost last,
+    /// over the enclosing functions too: the order `lookup_or_capture` reads.
+    names: Vec<(String, i32)>,
+    /// `names.len()` at each open scope.
+    marks: Vec<usize>,
+    /// Per open frame: its `OVERLOADED_ACCESS` binding, once one access needs it.
+    overloaded: Vec<Option<BindingId>>,
 }
 
 impl<'s> Lower<'s> {
@@ -130,9 +184,45 @@ impl<'s> Lower<'s> {
         name: &str,
         origin: BindingOrigin,
         declared: Option<TypeId>,
+        levels: i32,
     ) {
         let id = b.declare(name, origin, declared);
         b.assign(id, Value::Unknown);
+        self.names.push((name.to_string(), levels));
+    }
+
+    fn push_scope(&mut self, b: &mut IrBuilder, kind: ScopeKind) {
+        b.push_scope(kind);
+        self.marks.push(self.names.len());
+    }
+
+    fn pop_scope(&mut self, b: &mut IrBuilder) {
+        b.pop_scope();
+        if let Some(mark) = self.marks.pop() {
+            self.names.truncate(mark);
+        }
+    }
+
+    fn levels_of(&self, name: &str) -> i32 {
+        self.names
+            .iter()
+            .rev()
+            .find(|(declared, _)| declared == name)
+            .map_or(0, |(_, levels)| *levels)
+    }
+
+    /// The untyped binding of the frame being lowered that an overloaded
+    /// member access reads. Nothing writes it, so it answers its entry
+    /// state: no evidence.
+    fn overloaded_access(&mut self, b: &mut IrBuilder) -> BindingId {
+        let slot = self
+            .overloaded
+            .last_mut()
+            .expect("the root frame's slot stays until the lowering ends");
+        *slot.get_or_insert_with(|| {
+            let scope = b.function_scope();
+            b.declare_in(scope, OVERLOADED_ACCESS, BindingOrigin::Local, None)
+        })
     }
 
     fn function(&mut self, b: &mut IrBuilder, function: Node<'_>) {
@@ -164,10 +254,11 @@ impl<'s> Lower<'s> {
             // A callable parameter's declared type is its result type, not
             // the callable's.
             if let Some(name) = callable_param_identifier(declarator, self.source) {
-                self.declare_name(b, &name, BindingOrigin::Param, None);
+                self.declare_name(b, &name, BindingOrigin::Param, None, 0);
             } else if let Some(name) = unwrap_declarator_identifier(declarator, self.source) {
                 let declared = self.declared_type(b, param.child_by_field_name("type"));
-                self.declare_name(b, &name, BindingOrigin::Param, declared);
+                let levels = pointer_levels(declarator);
+                self.declare_name(b, &name, BindingOrigin::Param, declared, levels);
             }
         }
     }
@@ -192,9 +283,9 @@ impl<'s> Lower<'s> {
     }
 
     fn scoped(&mut self, b: &mut IrBuilder, kind: ScopeKind, node: Node<'_>) {
-        b.push_scope(kind);
+        self.push_scope(b, kind);
         self.children(b, node);
-        b.pop_scope();
+        self.pop_scope(b);
     }
 
     fn walk_node(&mut self, b: &mut IrBuilder, node: Node<'_>) {
@@ -212,13 +303,17 @@ impl<'s> Lower<'s> {
             "declaration" => self.declaration(b, node),
             "for_range_loop" => self.range_loop(b, node),
             "catch_clause" => self.catch_clause(b, node),
-            "lambda_expression" => {
-                b.closure(node_span(&node), |inner| self.lambda(inner, node));
-            }
+            "lambda_expression" => self.closure(b, node),
             "call_expression" => {
-                if let Some(receiver) = call_receiver(node) {
-                    if let Some(binding) = self.resolve(b, self.text(receiver)) {
-                        b.use_binding(binding, receiver.id());
+                if let Some((receiver, stripped)) = call_access(node) {
+                    let name = self.text(receiver);
+                    if let Some(binding) = self.resolve(b, name) {
+                        let read = if stripped == self.levels_of(name) {
+                            binding
+                        } else {
+                            self.overloaded_access(b)
+                        };
+                        b.use_binding(read, receiver.id());
                     }
                 }
                 self.children(b, node);
@@ -234,6 +329,42 @@ impl<'s> Lower<'s> {
         b.lookup_or_capture(name, CaptureMode::ByValue)
     }
 
+    /// A lambda's init-captures (`[x = expr]`) evaluate `expr` where the
+    /// lambda is created and declare `x` in the lambda, untyped: the lowering
+    /// reads no initializer's type.
+    fn closure(&mut self, b: &mut IrBuilder, lambda: Node<'_>) {
+        let initializers: Vec<_> = lambda
+            .child_by_field_name("captures")
+            .map(named_children)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|capture| capture.kind() == "lambda_capture_initializer")
+            .collect();
+        let values: Vec<_> = initializers
+            .iter()
+            .filter_map(|init| init.child_by_field_name("right"))
+            .collect();
+        for value in values {
+            self.walk(b, value);
+        }
+        let captured: Vec<_> = initializers
+            .iter()
+            .filter_map(|init| init.child_by_field_name("left"))
+            .filter(|left| left.kind() == "identifier")
+            .collect();
+        let mark = self.names.len();
+        b.closure(node_span(&lambda), |inner| {
+            self.overloaded.push(None);
+            for name in captured {
+                let name = self.text(name);
+                self.declare_name(inner, name, BindingOrigin::Local, None, 0);
+            }
+            self.lambda(inner, lambda);
+            self.overloaded.pop();
+        });
+        self.names.truncate(mark);
+    }
+
     fn lambda(&mut self, b: &mut IrBuilder, lambda: Node<'_>) {
         if let Some(parameters) = lambda
             .child_by_field_name("declarator")
@@ -247,29 +378,29 @@ impl<'s> Lower<'s> {
     }
 
     fn catch_clause(&mut self, b: &mut IrBuilder, node: Node<'_>) {
-        b.push_scope(ScopeKind::Catch);
+        self.push_scope(b, ScopeKind::Catch);
         if let Some(parameters) = node.child_by_field_name("parameters") {
             self.parameters(b, parameters);
         }
         if let Some(body) = node.child_by_field_name("body") {
             self.walk(b, body);
         }
-        b.pop_scope();
+        self.pop_scope(b);
     }
 
     fn range_loop(&mut self, b: &mut IrBuilder, node: Node<'_>) {
-        b.push_scope(ScopeKind::Loop);
+        self.push_scope(b, ScopeKind::Loop);
         if let Some(range) = node.child_by_field_name("right") {
             self.walk(b, range);
         }
         let declared = self.declared_type(b, node.child_by_field_name("type"));
         if let Some(declarator) = node.child_by_field_name("declarator") {
-            self.declarator(b, declarator, declared, BindingOrigin::ForEach);
+            self.declarator(b, declarator, declared, BindingOrigin::ForEach, 0);
         }
         if let Some(body) = node.child_by_field_name("body") {
             self.walk(b, body);
         }
-        b.pop_scope();
+        self.pop_scope(b);
     }
 
     /// `T a, *b = x;` declares one binding per `declarator` field. A condition
@@ -280,7 +411,7 @@ impl<'s> Lower<'s> {
         }
         let declared = self.declared_type(b, node.child_by_field_name("type"));
         for declarator in children_by_field(node, "declarator") {
-            self.declarator(b, declarator, declared, BindingOrigin::Local);
+            self.declarator(b, declarator, declared, BindingOrigin::Local, 0);
         }
     }
 
@@ -290,30 +421,36 @@ impl<'s> Lower<'s> {
         declarator: Node<'_>,
         declared: Option<TypeId>,
         origin: BindingOrigin,
+        levels: i32,
     ) {
         match declarator.kind() {
             "identifier" => {
                 let name = self.text(declarator);
-                self.declare_name(b, name, origin, declared);
+                self.declare_name(b, name, origin, declared, levels);
             }
             "init_declarator" => {
                 if let Some(value) = declarator.child_by_field_name("value") {
                     self.walk(b, value);
                 }
                 if let Some(inner) = inner_declarator(declarator) {
-                    self.declarator(b, inner, declared, origin);
+                    self.declarator(b, inner, declared, origin, levels);
                 }
             }
-            "pointer_declarator" | "reference_declarator" | "array_declarator" => {
+            "pointer_declarator" | "array_declarator" => {
                 if let Some(inner) = inner_declarator(declarator) {
-                    self.declarator(b, inner, declared, origin);
+                    self.declarator(b, inner, declared, origin, levels + 1);
+                }
+            }
+            "reference_declarator" => {
+                if let Some(inner) = inner_declarator(declarator) {
+                    self.declarator(b, inner, declared, origin, levels);
                 }
             }
             // `auto [a, b] = pair;` binds names the binder cannot type.
             "structured_binding_declarator" => {
                 for name in named_children(declarator) {
                     if name.kind() == "identifier" {
-                        self.declare_name(b, self.text(name), origin, None);
+                        self.declare_name(b, self.text(name), origin, None, 0);
                     }
                 }
             }
@@ -487,6 +624,79 @@ mod tests {
     #[test]
     fn test_lower_empty_function_body_records_nothing() {
         assert!(receivers("void run() {}").is_empty());
+    }
+
+    fn pairs(items: &[(&str, &str)]) -> Vec<(String, String)> {
+        items
+            .iter()
+            .map(|(method, state)| (method.to_string(), state.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn test_lower_arrow_on_class_value_has_no_evidence() {
+        assert_eq!(
+            only("void run(Ref r) { r->reset(); }"),
+            "unknown NoEvidence"
+        );
+    }
+
+    #[test]
+    fn test_lower_deref_of_class_value_has_no_evidence() {
+        assert_eq!(
+            only("void run(Ref r) { (*r).reset(); }"),
+            "unknown NoEvidence"
+        );
+    }
+
+    #[test]
+    fn test_lower_arrow_on_captured_class_value_has_no_evidence() {
+        assert_eq!(
+            receivers("void run() { Ref r; r.own(); auto f = [&] { r->reset(); }; }"),
+            pairs(&[("own", "known Ref"), ("reset", "unknown NoEvidence")])
+        );
+    }
+
+    #[test]
+    fn test_lower_pointer_levels_matching_the_access_keep_the_type() {
+        assert_eq!(
+            receivers(
+                "void run(A** pp, B*& rp, C c) { (*pp)->a(); rp->b(); (&c)->c(); D arr[2]; arr->d(); }"
+            ),
+            pairs(&[
+                ("a", "known A"),
+                ("b", "known B"),
+                ("c", "known C"),
+                ("d", "known D")
+            ])
+        );
+    }
+
+    #[test]
+    fn test_lower_dot_on_pointer_has_no_evidence() {
+        assert_eq!(only("void run(A* p) { p.m(); }"), "unknown NoEvidence");
+    }
+
+    #[test]
+    fn test_lower_init_capture_declares_an_untyped_name_in_the_lambda() {
+        assert_eq!(
+            receivers(
+                "void run(Session conn, Pool pool) { auto g = [conn = pool.acquire()]() { conn.query(); }; conn.close(); }"
+            ),
+            pairs(&[
+                ("acquire", "known Pool"),
+                ("close", "known Session"),
+                ("query", "unknown NoEvidence")
+            ])
+        );
+    }
+
+    #[test]
+    fn test_lower_init_capture_initializer_reads_the_outer_name() {
+        assert_eq!(
+            receivers("void run(A x) { auto g = [x = x.clone()] { x.m(); }; }"),
+            pairs(&[("clone", "known A"), ("m", "unknown NoEvidence")])
+        );
     }
 
     #[test]
