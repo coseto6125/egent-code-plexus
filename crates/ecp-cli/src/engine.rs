@@ -2,11 +2,13 @@ use crate::session::sources::RecordedSources;
 use crate::session::view_cache;
 use ecp_core::contracts::routing::SizeCap;
 use ecp_core::graph::{ArchivedZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC};
+use ecp_core::session::closure::StaleClosure;
 use ecp_core::session::view::{CallGap, HiddenDecl};
 use ecp_core::session::OverlayView;
+use ecp_core::EcpError;
 use memmap2::Mmap;
 use rkyv::rancor::Error;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io;
@@ -84,6 +86,10 @@ pub struct Engine {
     /// path). LLM consumers should treat results as slightly stale; a background
     /// rebuild for the new SHA is already in flight.
     pub is_stale_for_sha: bool,
+    /// Whether the overlay brought a warm-attached graph to HEAD. `None`
+    /// until the read context checks it; a warm engine with `None` is
+    /// unverified.
+    head_coverage: Option<HeadCoverage>,
     /// True when the loaded graph's commit dir names a SHA behind the repo's
     /// current HEAD. By-repo loaders (`auto_ensure::load_ensured`) resolve the
     /// latest *published* graph, which lags committed-but-unindexed work; the
@@ -101,6 +107,52 @@ pub struct Engine {
 /// `l1/` overlay access (spec invariant F5). `L2WithOverlay` signals
 /// that the session has dirty fragments; the overlay merge implementation
 /// itself is deferred to P2 of the index-layout follow-up tracker.
+/// The command an unverified answer names as its next step.
+pub const REINDEX_COMMAND: &str = "ecp admin index --force --repo .";
+
+/// Whether the overlay re-parsed every file that differs between a
+/// warm-attached sibling graph and the worktree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeadCoverage {
+    /// The overlay holds every changed file: answers are HEAD's.
+    Covered,
+    /// The overlay could not cover the changes, for this reason.
+    Uncovered(String),
+}
+
+/// Which overlay lines a caveat keeps.
+#[derive(Clone, Copy)]
+enum LineScope<'s> {
+    /// Every line: the commands that do not scope their caveat.
+    All,
+    /// The lines that name a file of the result. `supplied` is true when
+    /// the overlay supplies a result file.
+    Result {
+        files: &'s FxHashSet<&'s str>,
+        supplied: bool,
+    },
+}
+
+impl LineScope<'_> {
+    fn names(self, path: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Result { files, .. } => files.contains(path),
+        }
+    }
+
+    /// The closure line speaks for the clean-file edges into the overlay's
+    /// files and for the files its kept configs scope.
+    fn keeps_closure(self, stale: &StaleClosure) -> bool {
+        match self {
+            Self::All => true,
+            Self::Result { files, supplied } => {
+                supplied || stale.configs.iter().any(|c| files.contains(c.as_str()))
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GraphView {
     L2Only,
@@ -137,6 +189,7 @@ impl Engine {
             overlay_hashes: OnceLock::new(),
             view: GraphView::L2Only,
             is_stale_for_sha: false,
+            head_coverage: None,
             behind_head: false,
             unreadable_changes: 0,
         })
@@ -165,7 +218,42 @@ impl Engine {
     /// [`Engine::caveat_reading_view`].
     pub fn caveat(&self) -> Option<String> {
         let view = self.overlay_view.get().and_then(Option::as_ref);
-        crate::output::merge_caveats(self.graph_caveat(), self.dirty_lines(None, view))
+        crate::output::merge_caveats(
+            self.graph_caveat(),
+            self.dirty_lines(None, view, LineScope::All),
+        )
+    }
+
+    /// [`Engine::caveat`] scoped to an answer whose rows lie in
+    /// `result_files`: an overlay line (unpaired declarations, clean-file
+    /// edges, unresolved C# calls) stays only when it names a result file.
+    /// The staleness lines and the unreadable-paths line stay whatever the
+    /// files. It builds the overlay view when it is not built yet.
+    pub fn caveat_for<'a>(
+        &self,
+        result_files: impl IntoIterator<Item = &'a str>,
+    ) -> Option<String> {
+        crate::output::merge_caveats(
+            self.graph_caveat(),
+            self.dirty_set_caveat_for(None, result_files),
+        )
+    }
+
+    /// [`Engine::dirty_set_caveat`] scoped to `result_files` as
+    /// [`Engine::caveat_for`] scopes it.
+    pub fn dirty_set_caveat_for<'a>(
+        &self,
+        repo: Option<&str>,
+        result_files: impl IntoIterator<Item = &'a str>,
+    ) -> Option<String> {
+        let files: FxHashSet<&str> = result_files.into_iter().collect();
+        let view = self.overlay_view();
+        let supplied = view.is_some() && files.iter().any(|f| self.overlay_supplies(f));
+        let scope = LineScope::Result {
+            files: &files,
+            supplied,
+        };
+        self.dirty_lines(repo, view, scope)
     }
 
     /// [`Engine::caveat`] for a command that takes the caveat before it runs
@@ -175,8 +263,41 @@ impl Engine {
         crate::output::merge_caveats(self.graph_caveat(), self.dirty_set_caveat(None))
     }
 
+    pub(crate) fn set_head_coverage(&mut self, coverage: HeadCoverage) {
+        self.head_coverage = Some(coverage);
+    }
+
+    /// Why this engine's answers may lack what HEAD holds: a warm attach the
+    /// overlay did not bring to HEAD. `None` for every other engine.
+    pub fn unverified_reason(&self) -> Option<&str> {
+        if !self.is_stale_for_sha {
+            return None;
+        }
+        match &self.head_coverage {
+            Some(HeadCoverage::Covered) => None,
+            Some(HeadCoverage::Uncovered(reason)) => Some(reason.as_str()),
+            None => Some("no check compared the sibling commit with HEAD"),
+        }
+    }
+
+    /// `err` with the unverified note when it is a "No symbol named" miss on
+    /// an engine whose answers may lack what HEAD holds.
+    pub fn unverified_miss(&self, err: EcpError) -> EcpError {
+        match (err, self.unverified_reason()) {
+            (EcpError::InvalidArgument(msg), Some(reason))
+                if msg.starts_with("No symbol named") =>
+            {
+                EcpError::InvalidArgument(format!(
+                    "{msg}. This miss is unverified: the graph is a warm-attach from a sibling \
+                     commit and {reason}. Run `{REINDEX_COMMAND}` for a definitive answer"
+                ))
+            }
+            (err, _) => err,
+        }
+    }
+
     fn graph_caveat(&self) -> Option<String> {
-        if self.is_stale_for_sha {
+        if let Some(reason) = self.unverified_reason() {
             let rebuild = if crate::background::background_rebuild_skipped() {
                 "No background rebuild runs (ECP_SKIP_BG_REBUILD is set) — run"
             } else {
@@ -184,8 +305,8 @@ impl Engine {
             };
             Some(format!(
                 "results may be incomplete: graph is a warm-attach from a sibling commit \
-                 (current HEAD not yet indexed); symbols added since are invisible. {rebuild} \
-                 `ecp admin index --force --repo .` for a definitive answer."
+                 (current HEAD not yet indexed) and {reason}; symbols added since are \
+                 invisible. {rebuild} `{REINDEX_COMMAND}` for a definitive answer."
             ))
         } else if self.behind_head {
             Some(
@@ -207,20 +328,29 @@ impl Engine {
     /// because `find` takes the caveat before it runs the query; with no
     /// overlay input that is a single `OnceLock` read.
     pub fn dirty_set_caveat(&self, repo: Option<&str>) -> Option<String> {
-        self.dirty_lines(repo, self.overlay_view())
+        self.dirty_lines(repo, self.overlay_view(), LineScope::All)
     }
 
-    fn dirty_lines(&self, repo: Option<&str>, view: Option<&OverlayView>) -> Option<String> {
+    fn dirty_lines(
+        &self,
+        repo: Option<&str>,
+        view: Option<&OverlayView>,
+        scope: LineScope<'_>,
+    ) -> Option<String> {
         let label = |line: String| match repo {
             Some(name) => format!("{name}: {line}"),
             None => line,
         };
         let unreadable = self.unreadable_changes_line();
-        let ambiguous =
-            view.and_then(|view| unpaired_declarations_line(view.hidden_declarations()));
-        let gaps = view.and_then(|view| call_gaps_line(view.call_gaps()));
-        let stale = view.and_then(|view| stale_closure_line(view.stale_closure()));
-        [ambiguous, gaps, stale]
+        let overlay = view.map_or([None, None, None], |view| {
+            overlay_lines(
+                view.hidden_declarations(),
+                view.call_gaps(),
+                view.stale_closure(),
+                scope,
+            )
+        });
+        overlay
             .into_iter()
             .fold(unreadable.map(label), |acc, line| {
                 crate::output::merge_caveats(acc, line.map(label))
@@ -514,6 +644,31 @@ fn validate_header(bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// The overlay's caveat lines that `scope` keeps: unpaired declarations,
+/// unresolved C# calls, clean-file edges.
+fn overlay_lines(
+    hidden: &[HiddenDecl],
+    gaps: &[CallGap],
+    stale: &StaleClosure,
+    scope: LineScope<'_>,
+) -> [Option<String>; 3] {
+    [
+        hidden
+            .iter()
+            .any(|d| scope.names(&d.path))
+            .then(|| unpaired_declarations_line(hidden))
+            .flatten(),
+        gaps.iter()
+            .any(|g| scope.names(&g.path))
+            .then(|| call_gaps_line(gaps))
+            .flatten(),
+        scope
+            .keeps_closure(stale)
+            .then(|| stale_closure_line(stale))
+            .flatten(),
+    ]
+}
+
 /// Most groups the unpaired-declarations line names; the rest fold into a count.
 const UNPAIRED_GROUPS_SHOWN: usize = 5;
 
@@ -563,7 +718,7 @@ fn unpaired_declarations_line(hidden: &[HiddenDecl]) -> Option<String> {
 
 /// The caveat line for the clean-file edges and nodes the invalidation
 /// closure left as indexed, or `None` when it left none.
-fn stale_closure_line(stale: &ecp_core::session::closure::StaleClosure) -> Option<String> {
+fn stale_closure_line(stale: &StaleClosure) -> Option<String> {
     if stale.is_empty() {
         return None;
     }
@@ -711,6 +866,123 @@ mod tests {
             line.contains("f4 -> Spin (src/App.cs:4, cs-extension-dirty-declaration), and 2 more.")
         );
         assert!(!line.contains("f5"), "the sixth call folds into the count");
+    }
+
+    fn result_scope<'s>(files: &'s FxHashSet<&'s str>, supplied: bool) -> LineScope<'s> {
+        LineScope::Result { files, supplied }
+    }
+
+    fn closure_with(configs: &[&str]) -> StaleClosure {
+        StaleClosure {
+            unbounded: Some(300),
+            kinds: vec!["Calls".to_string()],
+            configs: configs.iter().map(|c| c.to_string()).collect(),
+            ..StaleClosure::default()
+        }
+    }
+
+    /// Stands for: an overlay line whose files lie outside the result is
+    /// dropped (F3); the same line naming a result file is kept.
+    #[test]
+    fn test_overlay_lines_result_scope_outside_files_drops_inside_keeps() {
+        let decls = [hidden("K", "save", "src/K.java", 2)];
+        let gaps = [gap("Use", 5, "cs-extension-stale-edge")];
+        let stale = closure_with(&[]);
+
+        let outside: FxHashSet<&str> = ["src/Other.java"].into_iter().collect();
+        assert_eq!(
+            overlay_lines(&decls, &gaps, &stale, result_scope(&outside, false)),
+            [None, None, None]
+        );
+
+        let inside: FxHashSet<&str> = ["src/K.java", "src/App.cs"].into_iter().collect();
+        let [ambiguous, call_gaps, closure] =
+            overlay_lines(&decls, &gaps, &stale, result_scope(&inside, false));
+        assert!(ambiguous.is_some_and(|l| l.contains("Method K.save x2")));
+        assert!(call_gaps.is_some_and(|l| l.contains("Use -> Spin")));
+        assert_eq!(closure, None, "no result file is the overlay's");
+    }
+
+    /// Stands for: the clean-file-edges line stays when the overlay supplies
+    /// a result file or a kept config is a result file.
+    #[test]
+    fn test_overlay_lines_closure_kept_for_supplied_file_or_named_config() {
+        let files: FxHashSet<&str> = ["tsconfig.json"].into_iter().collect();
+        let [_, _, by_config] = overlay_lines(
+            &[],
+            &[],
+            &closure_with(&["tsconfig.json"]),
+            result_scope(&files, false),
+        );
+        assert!(by_config.is_some_and(|l| l.contains("kept configs: tsconfig.json")));
+
+        let none: FxHashSet<&str> = FxHashSet::default();
+        let [_, _, by_supply] =
+            overlay_lines(&[], &[], &closure_with(&[]), result_scope(&none, true));
+        assert!(by_supply.is_some_and(|l| l.contains("indexed Calls edges")));
+    }
+
+    /// Stands for: `caveat()`'s unscoped lines are the lines the line
+    /// builders give, unchanged by F3.
+    #[test]
+    fn test_overlay_lines_all_scope_matches_unscoped_lines() {
+        let decls = [hidden("K", "save", "src/K.java", 2)];
+        let gaps = [gap("Use", 5, "cs-extension-stale-edge")];
+        let stale = closure_with(&["go.mod"]);
+        assert_eq!(
+            overlay_lines(&decls, &gaps, &stale, LineScope::All),
+            [
+                unpaired_declarations_line(&decls),
+                call_gaps_line(&gaps),
+                stale_closure_line(&stale),
+            ]
+        );
+        assert_eq!(
+            overlay_lines(&[], &[], &StaleClosure::default(), LineScope::All),
+            [None, None, None]
+        );
+    }
+
+    fn warm_engine(dir: &Path) -> Engine {
+        let mut fx = ecp_core::graph_fixture::GraphFixture::new();
+        fx.func("lib.rs", "alpha");
+        let path = dir.join("graph.bin");
+        fs::write(&path, fx.into_bytes()).unwrap();
+        Engine::load_warm(&path).unwrap()
+    }
+
+    /// Stands for: an uncovered warm attach adds the unverified note and the
+    /// reindex command to a "No symbol named" miss only; a covered one, and
+    /// every other error, pass through unchanged.
+    #[test]
+    fn test_unverified_miss_uncovered_warm_attach_wraps_no_symbol_named_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = warm_engine(dir.path());
+        let miss = || EcpError::InvalidArgument("No symbol named 'beta' found in graph".into());
+        let text = |err: EcpError| match err {
+            EcpError::InvalidArgument(msg) => msg,
+            other => panic!("kind changed: {other}"),
+        };
+
+        let unchecked = text(engine.unverified_miss(miss()));
+        assert!(unchecked.contains("unverified"), "{unchecked}");
+
+        engine.set_head_coverage(HeadCoverage::Uncovered("`git diff` failed".into()));
+        let wrapped = text(engine.unverified_miss(miss()));
+        assert!(wrapped.starts_with("No symbol named 'beta'"), "{wrapped}");
+        assert!(wrapped.contains("unverified") && wrapped.contains("`git diff` failed"));
+        assert!(wrapped.contains(REINDEX_COMMAND), "{wrapped}");
+        let other = text(engine.unverified_miss(EcpError::InvalidArgument("bad flag".into())));
+        assert_eq!(other, "bad flag");
+
+        engine.set_head_coverage(HeadCoverage::Covered);
+        assert_eq!(engine.unverified_reason(), None);
+        let covered = text(engine.unverified_miss(miss()));
+        assert!(!covered.contains("unverified"), "{covered}");
+        assert!(
+            engine.caveat().is_none(),
+            "a covered warm attach drops its line"
+        );
     }
 
     /// Stands for: the line names the kinds clean files keep as indexed and

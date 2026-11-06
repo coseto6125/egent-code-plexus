@@ -10,10 +10,10 @@ Arguments:
 
 Options:
       --mode <MODE>
-          Lookup mode: `exact` (default), `fuzzy`, or `bm25`
+          Lookup mode: `exact` (default), `fuzzy`, or `bm25`. An `exact` miss on a pattern with whitespace or punctuation falls back to `bm25` and says so with `mode: bm25` and `fallback_from: exact`
 
           Possible values:
-          - exact: Exact-name match. Single most-likely definition by default; `--all` returns all exact matches
+          - exact: Exact-name match. Single most-likely definition by default; `--all` returns all exact matches. A miss on a pattern that is no symbol name (whitespace or punctuation) runs `bm25` on the same pattern; that payload carries `mode: bm25` and `fallback_from: exact`
           - fuzzy: Substring match — same ranking + output shape as `exact`. Use when the precise name is unknown but a fragment is
           - bm25:  BM25 lexical ranking via tantivy. Bucketed top-K output
           
@@ -38,7 +38,7 @@ Options:
           Repository selector (path | name | @all | csv mix). Defaults to cwd. `@<group>` is rejected at the top level — use `ecp group find` instead
 
       --format <FORMAT>
-          Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed toon. `json`: full-fidelity JSON. `text`: one `[kind] file:line (name)` line per match
+          Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed toon. `json`: full-fidelity JSON. `text`: one `[kind] file:line (name)` line per match. Every format prints the `result` caveat after the rows. An `exact` miss on a warm-attached graph that the overlay could not bring to HEAD prints `found: null`, `status: unverified`, `reason` and `next`
 
           Possible values:
           - llm:  Default output: per-command LLM-tuned payload (token compression, rounded floats, trimmed timestamps, etc.) rendered through the toon encoder. Commands without command-specific tuning fall through to the same output as `Toon`

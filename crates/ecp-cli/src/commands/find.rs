@@ -4,7 +4,8 @@
 //!   ranked by category priority (Source > Document > Config > Test) then
 //!   caller count. Output: flat `{found, matches[], status}`. Designed
 //!   for "where is X defined?" queries where the LLM already knows the
-//!   exact symbol name.
+//!   exact symbol name. A miss on a pattern that is no symbol name falls
+//!   back to `bm25` (`fallback_from: "exact"`).
 //! * `fuzzy` — substring match with the same ranking + output shape as
 //!   `exact`. `--fuzzy` is a shorthand that infers this mode.
 //! * `bm25` — BM25 lexical ranking via the persisted tantivy index
@@ -30,7 +31,7 @@
 
 use crate::commands::format::kind_to_str;
 use crate::commands::graph_csr::iter_incoming_edges_filtered;
-use crate::engine::Engine;
+use crate::engine::{Engine, REINDEX_COMMAND};
 use crate::output::{emit_with_caveat, merge_caveats, OutputFormat};
 use crate::read_context::{candidate_json, named_declarations, target_args, target_request};
 use clap::{Args, ValueEnum};
@@ -62,7 +63,9 @@ const MULTI_CAP: usize = TOP_K * 5;
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FindMode {
     /// Exact-name match. Single most-likely definition by default;
-    /// `--all` returns all exact matches.
+    /// `--all` returns all exact matches. A miss on a pattern that is no
+    /// symbol name (whitespace or punctuation) runs `bm25` on the same
+    /// pattern; that payload carries `mode: bm25` and `fallback_from: exact`.
     Exact,
     /// Substring match — same ranking + output shape as `exact`. Use
     /// when the precise name is unknown but a fragment is.
@@ -81,7 +84,9 @@ pub struct FindArgs {
     #[arg(required_unless_present = "batch")]
     pub pattern: Option<String>,
 
-    /// Lookup mode: `exact` (default), `fuzzy`, or `bm25`.
+    /// Lookup mode: `exact` (default), `fuzzy`, or `bm25`. An `exact` miss on
+    /// a pattern with whitespace or punctuation falls back to `bm25` and says
+    /// so with `mode: bm25` and `fallback_from: exact`.
     #[arg(long, value_enum, default_value_t = FindMode::Exact)]
     pub mode: FindMode,
 
@@ -123,7 +128,9 @@ pub struct FindArgs {
 
     /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
     /// toon. `json`: full-fidelity JSON. `text`: one `[kind] file:line (name)` line per
-    /// match.
+    /// match. Every format prints the `result` caveat after the rows. An `exact` miss on a
+    /// warm-attached graph that the overlay could not bring to HEAD prints `found: null`,
+    /// `status: unverified`, `reason` and `next`.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 
@@ -295,20 +302,23 @@ fn run_bm25(args: FindArgs, engine: Option<&Engine>) -> Result<(), EcpError> {
 
     if targets.is_empty() {
         let engine = cwd_engine(engine)?;
-        let caveat = engine.caveat_reading_view();
-        run_single(pattern, args.mode, args.kind, format, engine, None, caveat)
+        run_single(
+            SingleSearch::new(&pattern, args.kind.as_deref()),
+            format,
+            engine,
+            |buckets| engine.caveat_for(buckets.files()),
+        )
     } else if targets.len() == 1 {
         let target = targets.into_iter().next().unwrap();
         let local_engine = target.load_engine_labeled()?;
-        let caveat = single_target_caveat(&target, &local_engine);
         run_single(
-            pattern,
-            args.mode,
-            args.kind,
+            SingleSearch {
+                repo_label: Some(target.display_name.clone()),
+                ..SingleSearch::new(&pattern, args.kind.as_deref())
+            },
             format,
             &local_engine,
-            Some(target.display_name),
-            caveat,
+            |buckets| single_target_caveat(&target, &local_engine, buckets.files()),
         )
     } else {
         run_multi(pattern, args.mode, args.kind, format, targets)
@@ -334,7 +344,8 @@ pub struct FindMatch {
 
 #[derive(Debug, serde::Serialize)]
 pub struct FindResult {
-    pub found: bool,
+    /// `null` with `status` `unverified`: the graph may lack what HEAD holds.
+    pub found: Option<bool>,
     pub matches: Vec<FindMatch>,
     /// Total exact/fuzzy candidates considered before default truncation.
     /// Surfaces silent take(1) so LLM consumers can tell `matches.len() == 1`
@@ -346,13 +357,21 @@ pub struct FindResult {
     /// `--include-tests` wasn't passed. Always 0 in Exact mode (test
     /// exclusion only applies to Fuzzy).
     pub tests_excluded: u32,
-    /// `success`, or `ambiguous` when an exact name has several declarations
-    /// and `--all` is absent.
+    /// `success`, `ambiguous` when an exact name has several declarations
+    /// and `--all` is absent, or `unverified` for an exact miss on a
+    /// warm-attached graph the overlay could not bring to HEAD.
     pub status: String,
     /// Present only with `status` `ambiguous`: each declaration with the
     /// `find` arguments (`target`) that select it alone.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub candidates: Option<serde_json::Value>,
+    /// Present only with `status` `unverified`: why the miss is no answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Present only with `status` `unverified`: the command that makes the
+    /// answer definitive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next: Option<&'static str>,
 }
 
 /// Category sort priority for exact/fuzzy ranking — lower is preferred.
@@ -679,6 +698,31 @@ fn exact_candidates(
     (rows, ambiguity)
 }
 
+/// Whether an exact miss on `pattern` falls back to bm25 (F1): the pattern
+/// holds text other than whitespace, and a character outside a symbol name
+/// and the target grammar's `.`, `::` and `@line` separators.
+fn falls_back_to_bm25(pattern: &str) -> bool {
+    let name_char = |c: char| c.is_alphanumeric() || matches!(c, '_' | '$' | '.' | ':' | '@');
+    !pattern.trim().is_empty() && !pattern.chars().all(name_char)
+}
+
+/// F1: bm25 over the exact query's pattern, with its `--kind` and `--file`.
+fn run_exact_fallback(
+    args: &FindArgs,
+    engine: &Engine,
+    pattern: &str,
+    format: OutputFormat,
+) -> Result<(), EcpError> {
+    let search = SingleSearch {
+        file_filter: args.file.as_deref(),
+        fallback_from: Some("exact"),
+        ..SingleSearch::new(pattern, args.kind.as_deref())
+    };
+    run_single(search, format, engine, |buckets| {
+        engine.caveat_for(buckets.files())
+    })
+}
+
 fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result<(), EcpError> {
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
     let format = args.format.unwrap_or_default();
@@ -700,8 +744,17 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
     let mut tests_excluded = 0u32;
     let mut ambiguity = None;
     let mut candidates: Vec<Row> = Vec::new();
+    // The name a miss reports hidden declarations for.
+    let mut miss_name = pattern.to_string();
     if mode == FindMode::Exact {
-        let request = target_request(pattern, None, file_filter)?;
+        let request = match target_request(pattern, None, file_filter) {
+            Ok(request) => request,
+            Err(_) if falls_back_to_bm25(pattern) => {
+                return run_exact_fallback(&args, engine, pattern, format)
+            }
+            Err(e) => return Err(e),
+        };
+        miss_name = request.name().to_string();
         (candidates, ambiguity) =
             exact_candidates(&merged, graph, &request, kind_filter.as_deref());
     } else {
@@ -771,29 +824,50 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
     let returned = matches.len() as u32;
     let found = returned > 0;
     let omitted = total_candidates - returned;
+    if mode == FindMode::Exact && !found && falls_back_to_bm25(pattern) {
+        return run_exact_fallback(&args, engine, pattern, format);
+    }
+    // A miss on a warm attach the overlay could not bring to HEAD is no
+    // answer: HEAD may hold the name.
+    let unverified = (mode == FindMode::Exact && !found)
+        .then(|| engine.unverified_reason())
+        .flatten();
+    // The rows' files, and on a miss the files of the hidden declarations
+    // of that name: the unpaired-declarations line speaks for the miss.
+    let hidden_files = (!found)
+        .then(|| view.map(OverlayView::hidden_declarations))
+        .flatten()
+        .unwrap_or_default()
+        .iter()
+        .filter(|d| d.name.contains(miss_name.as_str()))
+        .map(|d| d.path.as_str());
+    let caveat = merge_caveats(
+        engine.caveat_for(matches.iter().map(|m| m.file.as_str()).chain(hidden_files)),
+        (!found).then(|| omitted_files_caveat(engine)).flatten(),
+    );
 
     match format {
         OutputFormat::Text => {
-            // The JSON/toon paths carry the staleness caveat in the `result`
-            // field; text (the default format) prints it first on stdout, or
-            // a stale "no match" reads as a definitive "does not exist" to a
-            // stdout-only consumer such as MCP.
-            if let Some(c) = merge_caveats(
-                engine.caveat_reading_view(),
-                (!found).then(|| omitted_files_caveat(engine)).flatten(),
-            ) {
-                println!("{c}");
+            // The rows lead and the caveat follows (F3): `head -N` keeps the
+            // rows, and an unverified miss says so on its own line first.
+            let mut lines: Vec<String> = Vec::new();
+            match (found, unverified) {
+                (true, _) => lines.extend(matches.iter().map(|m| {
+                    let test_tag = if m.category == "Test" { " [test]" } else { "" };
+                    format!(
+                        "[{}] {}:{}{} ({}) callers={}",
+                        m.kind, m.file, m.line, test_tag, m.name, m.caller_count
+                    )
+                })),
+                (false, Some(reason)) => lines.push(format!(
+                    "unverified: no match for: {pattern} ({reason}). Run `{REINDEX_COMMAND}` \
+                     for a definitive answer."
+                )),
+                (false, None) => lines.push(format!("no match for: {pattern}")),
             }
+            emit_text_rows(lines, caveat)?;
             if !found {
-                println!("no match for: {pattern}");
                 return Ok(());
-            }
-            for m in &matches {
-                let test_tag = if m.category == "Test" { " [test]" } else { "" };
-                println!(
-                    "[{}] {}:{}{} ({}) callers={}",
-                    m.kind, m.file, m.line, test_tag, m.name, m.caller_count
-                );
             }
             if omitted > 0 {
                 eprintln!(
@@ -815,26 +889,26 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
             Ok(())
         }
         _ => {
+            let status = match (&ambiguity, unverified) {
+                (_, Some(_)) => "unverified",
+                (Some(_), None) => "ambiguous",
+                (None, None) => "success",
+            };
             let result = FindResult {
-                found,
+                found: unverified.is_none().then_some(found),
                 matches,
                 total_candidates,
                 returned,
                 tests_excluded,
-                status: match ambiguity {
-                    Some(_) => "ambiguous",
-                    None => "success",
-                }
-                .to_string(),
+                status: status.to_string(),
                 candidates: ambiguity,
+                reason: unverified.map(str::to_owned),
+                next: unverified.map(|_| REINDEX_COMMAND),
             };
             emit_with_caveat(
                 &serde_json::to_value(&result).map_err(|e| EcpError::Output(e.to_string()))?,
                 format,
-                merge_caveats(
-                    engine.caveat_reading_view(),
-                    (!found).then(|| omitted_files_caveat(engine)).flatten(),
-                ),
+                caveat,
             )
         }
     }
@@ -889,15 +963,12 @@ fn run_batch(args: FindArgs, engine: Option<&Engine>) -> Result<(), EcpError> {
         None
     };
 
-    // Staleness is a property of the loaded engines, not of any one query —
-    // compute the caveat once and stamp it on every per-pattern emission.
-    let batch_caveat: Option<String> = if let Some(loaded) = multi_repo_engines.as_ref() {
-        stale_repos_caveat(&targets, loaded)
-    } else if let Some((_, local_engine)) = single_repo_engine.as_ref() {
-        single_target_caveat(&targets[0], local_engine)
-    } else {
-        cwd.and_then(Engine::caveat_reading_view)
-    };
+    // A multi-repo caveat is a property of the loaded engines, not of any
+    // one query: computed once. A single engine's caveat is scoped to each
+    // pattern's rows.
+    let multi_caveat: Option<String> = multi_repo_engines
+        .as_ref()
+        .and_then(|loaded| stale_repos_caveat(&targets, loaded));
 
     for pattern in &queries {
         println!("=== pattern: {pattern} ===");
@@ -921,7 +992,14 @@ fn run_batch(args: FindArgs, engine: Option<&Engine>) -> Result<(), EcpError> {
         };
 
         let buckets = BucketedResults::partition(hits);
-        emit_bucketed(&buckets, format, None, batch_caveat.clone())?;
+        let caveat = if let Some((_, local_engine)) = single_repo_engine.as_ref() {
+            single_target_caveat(&targets[0], local_engine, buckets.files())
+        } else if let Some(engine) = cwd {
+            engine.caveat_for(buckets.files())
+        } else {
+            multi_caveat.clone()
+        };
+        emit_bucketed(&buckets, format, None, caveat)?;
     }
     Ok(())
 }
@@ -1075,6 +1153,21 @@ impl BucketedResults {
             && self.config.is_empty())
     }
 
+    /// The file of every row, bucket by bucket: the files a caveat may name.
+    fn files(&self) -> impl Iterator<Item = &str> {
+        [
+            &self.source,
+            &self.examples,
+            &self.tests,
+            &self.reference,
+            &self.document,
+            &self.config,
+        ]
+        .into_iter()
+        .flatten()
+        .map(|h| h.file.as_str())
+    }
+
     fn partition(mut hits: Vec<Hit>) -> Self {
         // Sort exact-name substring rows first, then by descending score,
         // before partitioning so each bucket gets the best representatives
@@ -1121,24 +1214,54 @@ impl BucketedResults {
 
 // ── Single-repo search ────────────────────────────────────────────────────────
 
+/// One single-engine bm25 search.
+struct SingleSearch<'a> {
+    pattern: &'a str,
+    kind_filter: Option<&'a str>,
+    /// The `--file` of an exact query that fell back: bm25 keeps the rows
+    /// whose file holds it.
+    file_filter: Option<&'a str>,
+    /// `Some("exact")` when an exact miss fell back to this search (F1).
+    fallback_from: Option<&'static str>,
+    repo_label: Option<String>,
+}
+
+impl<'a> SingleSearch<'a> {
+    fn new(pattern: &'a str, kind_filter: Option<&'a str>) -> Self {
+        Self {
+            pattern,
+            kind_filter,
+            file_filter: None,
+            fallback_from: None,
+            repo_label: None,
+        }
+    }
+}
+
+/// `caveat` gives the engine's caveat for the rows the search keeps.
 fn run_single(
-    pattern: String,
-    mode: FindMode,
-    kind_filter: Option<String>,
+    search: SingleSearch<'_>,
     format: OutputFormat,
     engine: &Engine,
-    repo_label: Option<String>,
-    caveat: Option<String>,
+    caveat: impl FnOnce(&BucketedResults) -> Option<String>,
 ) -> Result<(), EcpError> {
-    let (hits, truncated_total) =
-        compute_single(&pattern, &mode, kind_filter.as_deref(), engine, repo_label)?;
+    let (mut hits, truncated_total) = compute_single(
+        search.pattern,
+        &FindMode::Bm25,
+        search.kind_filter,
+        engine,
+        search.repo_label,
+    )?;
+    if let Some(needle) = search.file_filter {
+        hits.retain(|h| h.file.contains(needle));
+    }
     let buckets = BucketedResults::partition(hits);
     // A miss against a graph that skipped files is not the same answer as a
     // miss against a complete one, and ECP.md tells the reading model to treat
     // an uncaveated `found:false` as "this symbol does not exist". Counted only
     // on the miss path, so a hit pays nothing.
     let caveat = merge_caveats(
-        caveat,
+        caveat(&buckets),
         (!buckets.is_any_hit())
             .then(|| omitted_files_caveat(engine))
             .flatten(),
@@ -1151,7 +1274,14 @@ fn run_single(
     } else {
         None
     };
-    emit_bucketed_with_metadata(&buckets, format, summary, truncated_total, caveat)
+    emit_bucketed_with_metadata(
+        &buckets,
+        format,
+        summary,
+        truncated_total,
+        caveat,
+        search.fallback_from,
+    )
 }
 
 /// How many files the index left out, phrased for a model that just got a
@@ -1706,14 +1836,18 @@ fn run_multi(
 /// gaps); otherwise the engine's own caveat applies whole. `behind_head` is judged on the graph
 /// `load_ensured` actually loaded, which after a synchronous rebuild is not
 /// the commit dir the target picked.
-fn single_target_caveat(target: &RepoTarget, engine: &Engine) -> Option<String> {
+fn single_target_caveat<'a>(
+    target: &RepoTarget,
+    engine: &Engine,
+    result_files: impl IntoIterator<Item = &'a str>,
+) -> Option<String> {
     if engine.behind_head {
         merge_caveats(
             stale_graph_caveat(&[target.display_name.as_str()]),
-            engine.dirty_set_caveat(None),
+            engine.dirty_set_caveat_for(None, result_files),
         )
     } else {
-        engine.caveat_reading_view()
+        engine.caveat_for(result_files)
     }
 }
 
@@ -2142,7 +2276,7 @@ fn emit_bucketed(
     summary: Option<String>,
     caveat: Option<String>,
 ) -> Result<(), EcpError> {
-    emit_bucketed_with_metadata(buckets, format, summary, 0, caveat)
+    emit_bucketed_with_metadata(buckets, format, summary, 0, caveat, None)
 }
 
 /// Completeness caveat naming exactly WHICH repos answered from a graph
@@ -2175,7 +2309,7 @@ fn stale_repos_caveat(
         });
     let stale: Vec<&str> = engines
         .clone()
-        .filter(|(_, engine)| engine.behind_head || engine.is_stale_for_sha)
+        .filter(|(_, engine)| engine.behind_head || engine.unverified_reason().is_some())
         .map(|(name, _)| name)
         .collect();
     engines
@@ -2196,6 +2330,7 @@ fn emit_bucketed_with_metadata(
     summary: Option<String>,
     bm25_pre_truncate_total: u64,
     caveat: Option<String>,
+    fallback_from: Option<&str>,
 ) -> Result<(), EcpError> {
     let all_empty = buckets.source.is_empty()
         && buckets.examples.is_empty()
@@ -2208,27 +2343,29 @@ fn emit_bucketed_with_metadata(
         let hint = "No matches found. Try a shorter pattern or `ecp find --mode fuzzy <fragment>`.";
         match format {
             OutputFormat::Text => {
-                return emit_with_caveat(
-                    &serde_json::json!({ "results": [serde_json::Value::String(hint.into())] }),
-                    format,
-                    caveat,
-                );
+                let lines = fallback_line(fallback_from)
+                    .into_iter()
+                    .chain([hint.to_string()]);
+                return emit_text_rows(lines, caveat);
             }
             _ => {
                 // A stale graph's "no matches" is the most dangerous shape —
                 // the caveat is what stops it reading as a definitive miss.
                 return emit_with_caveat(
-                    &serde_json::json!({
-                        "status": "success",
-                        "source": [],
-                        "examples": [],
-                        "tests": [],
-                        "reference": [],
-                        "document": [],
-                        "config": [],
-                        "bm25_pre_truncate_total": bm25_pre_truncate_total,
-                        "hint": hint,
-                    }),
+                    &with_fallback(
+                        fallback_from,
+                        serde_json::json!({
+                            "status": "success",
+                            "source": [],
+                            "examples": [],
+                            "tests": [],
+                            "reference": [],
+                            "document": [],
+                            "config": [],
+                            "bm25_pre_truncate_total": bm25_pre_truncate_total,
+                            "hint": hint,
+                        }),
+                    ),
                     format,
                     caveat,
                 );
@@ -2238,9 +2375,9 @@ fn emit_bucketed_with_metadata(
 
     match format {
         OutputFormat::Text => {
-            let mut lines: Vec<serde_json::Value> = Vec::new();
+            let mut lines: Vec<String> = fallback_line(fallback_from).into_iter().collect();
             if let Some(s) = &summary {
-                lines.push(serde_json::Value::String(s.clone()));
+                lines.push(s.clone());
             }
             for (label, bucket) in [
                 ("source", &buckets.source),
@@ -2250,16 +2387,14 @@ fn emit_bucketed_with_metadata(
                 ("document", &buckets.document),
                 ("config", &buckets.config),
             ] {
-                lines.push(serde_json::Value::String(format!("=== {label} ===")));
+                lines.push(format!("=== {label} ==="));
                 if bucket.is_empty() {
-                    lines.push(serde_json::Value::String("(none)".into()));
+                    lines.push("(none)".into());
                 } else {
-                    for h in bucket.iter() {
-                        lines.push(serde_json::Value::String(hit_to_text(h)));
-                    }
+                    lines.extend(bucket.iter().map(hit_to_text));
                 }
             }
-            emit_with_caveat(&serde_json::json!({ "results": lines }), format, caveat)
+            emit_text_rows(lines, caveat)
         }
         OutputFormat::Json | OutputFormat::Toon | OutputFormat::Llm => {
             let bucket_json = |bucket: &[Hit]| -> serde_json::Value {
@@ -2278,9 +2413,40 @@ fn emit_bucketed_with_metadata(
             if let Some(s) = summary {
                 payload["summary"] = serde_json::Value::String(s);
             }
-            emit_with_caveat(&payload, format, caveat)
+            emit_with_caveat(&with_fallback(fallback_from, payload), format, caveat)
         }
     }
+}
+
+/// The text line that names an exact miss's fallback, when there is one.
+fn fallback_line(fallback_from: Option<&str>) -> Option<String> {
+    fallback_from.map(|from| format!("mode: bm25, fallback_from: {from}"))
+}
+
+/// `body` led by `mode: bm25` and `fallback_from` when an exact miss fell
+/// back to it, so the reader sees which lookup answered before the rows.
+fn with_fallback(fallback_from: Option<&str>, body: serde_json::Value) -> serde_json::Value {
+    match (fallback_from, body) {
+        (Some(from), serde_json::Value::Object(rows)) => {
+            let mut out = serde_json::Map::new();
+            out.insert("mode".into(), "bm25".into());
+            out.insert("fallback_from".into(), from.into());
+            out.extend(rows);
+            serde_json::Value::Object(out)
+        }
+        (_, body) => body,
+    }
+}
+
+/// Text rows on stdout, then the caveat lines (F3): `head -N` keeps the rows.
+fn emit_text_rows(
+    rows: impl IntoIterator<Item = String>,
+    caveat: Option<String>,
+) -> Result<(), EcpError> {
+    let mut out: Vec<String> = rows.into_iter().collect();
+    out.extend(caveat);
+    println!("{}", out.join("\n"));
+    Ok(())
 }
 
 // ── Unit tests ────────────────────────────────────────────────────────────────
