@@ -397,6 +397,11 @@ impl ParseSpec for DartSpec {
                     insert_mixins(root, source, &mut heritage)
                 }
                 "mixin_declaration" => insert_mixin_constraints(root, source, &mut heritage),
+                // `extension E on T`: a bare call in E's members reaches T's
+                // members through the implicit `this`, as a mixin's `on`.
+                "extension_declaration" if k == NodeKind::Trait => {
+                    heritage.extend(extension_on_type(root, source))
+                }
                 _ => {}
             }
             if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
@@ -618,6 +623,14 @@ fn insert_mixin_constraints(mixin_decl: Node<'_>, source: &[u8], heritage: &mut 
         .collect();
     let interfaces = std::mem::replace(heritage, constraints);
     heritage.extend(interfaces);
+}
+
+/// The type an `extension E on T` extends: `T`'s name, without its type
+/// arguments.
+fn extension_on_type(extension: Node<'_>, source: &[u8]) -> Option<String> {
+    let ty = extension.child_by_field_name("class")?;
+    let name = ty.named_child(0)?.utf8_text(source).ok()?;
+    Some(name.trim().to_string())
 }
 
 /// Splices `with M1, M2` into `heritage` after the superclass.

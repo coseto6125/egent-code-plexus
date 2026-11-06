@@ -1078,3 +1078,25 @@ fn test_c_family_field_c_function_call_and_value_bind_same_declaration() {
         "one canonical declaration"
     );
 }
+
+/// Stands for (U14): a `static inline` helper a header defines has internal
+/// linkage, yet every file that includes the header gets its own copy, so a
+/// C caller and a C++ caller both reach it. A `static` function of another
+/// source file stays unreachable.
+#[test]
+fn test_c_family_field_c_caller_static_inline_header_function_binds_header() {
+    let g = graph(&[
+        ("util.h", "static inline int clamp(int x) { return x; }\n"),
+        ("hidden.c", "static int secret(int x) { return x; }\n"),
+        (
+            "main.c",
+            "#include \"util.h\"\nint run(void) { return clamp(3) + secret(1); }\n",
+        ),
+        (
+            "main.cpp",
+            "#include \"util.h\"\nint run_cpp() { return clamp(3); }\n",
+        ),
+    ]);
+    assert_eq!(calls(&g, "run"), vec![pair("util.h", "clamp")]);
+    assert_eq!(calls(&g, "run_cpp"), vec![pair("util.h", "clamp")]);
+}

@@ -537,20 +537,41 @@ fn extract_declarator_name(decl: Node<'_>, source: &[u8]) -> String {
 }
 
 /// The variables of a `template<typename T, class U = X, typename... Ts>`
-/// list. A non-type parameter (`int N`, `Foo N`) is skipped: its leading
-/// identifier is a type, not a name.
-fn template_type_params(list: &Node<'_>, source: &[u8]) -> Vec<String> {
+/// list, shared by callables and by class, struct and alias declarations.
+/// A constrained parameter (`template<Hashable K>`, `std::integral auto`)
+/// and a template template parameter (`template<class> class C`) declare
+/// their name too. A parameter with a built-in type (`int N`,
+/// `unsigned N`, `auto N`) is a value. A parameter whose type names a class
+/// (`Foo N`, `std::size_t N`) reads as a constrained one: the grammar cannot
+/// tell the two apart, and a value parameter shadows any type of its name in
+/// the template, so the name never types an annotation either way.
+pub(crate) fn template_type_params(list: &Node<'_>, source: &[u8]) -> Vec<String> {
     let mut cursor = list.walk();
     list.named_children(&mut cursor)
-        .filter(|entry| {
-            matches!(
-                entry.kind(),
-                "type_parameter_declaration"
-                    | "optional_type_parameter_declaration"
-                    | "variadic_type_parameter_declaration"
-            )
+        .filter_map(|entry| match entry.kind() {
+            "type_parameter_declaration"
+            | "optional_type_parameter_declaration"
+            | "variadic_type_parameter_declaration" => type_param_entry(&entry, source),
+            "template_template_parameter_declaration" => {
+                let mut inner = entry.walk();
+                let declared = entry
+                    .named_children(&mut inner)
+                    .find(|child| child.kind().ends_with("type_parameter_declaration"))?;
+                type_param_entry(&declared, source)
+            }
+            "parameter_declaration" | "optional_parameter_declaration" => {
+                let ty = entry.child_by_field_name("type")?;
+                if matches!(
+                    ty.kind(),
+                    "primitive_type" | "sized_type_specifier" | "placeholder_type_specifier"
+                ) {
+                    return None;
+                }
+                let name = entry.child_by_field_name("declarator")?;
+                (name.kind() == "identifier").then(|| node_text(&name, source).to_string())
+            }
+            _ => None,
         })
-        .filter_map(|entry| type_param_entry(&entry, source))
         .collect()
 }
 

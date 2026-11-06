@@ -290,17 +290,39 @@
   ]) @field
 
 ;; Function-pointer data members — `void (*open)(int);`. The name sits inside
-;; a parenthesized declarator under the function declarator, at any pointer
-;; depth, or under an array (`void (*cbs[4])(int);`). The parameter list is
-;; a sibling, so a parameter name never matches `field_identifier` here.
+;; a parenthesized declarator under the function declarator, at one or two
+;; pointer levels, or under an array (`void (*cbs[4])(int);`). A pointer
+;; or reference return type wraps the function declarator once more
+;; (`void *(*alloc)(int)`, `char **(*argv)(void)`, `int &(*at)(int)`),
+;; up to two levels. The parameter list is a sibling, so a parameter name
+;; never matches `field_identifier` here.
 (field_declaration
-  declarator: (function_declarator
-    declarator: (parenthesized_declarator
+  declarator: [
+    (function_declarator declarator: (parenthesized_declarator
       [
         (pointer_declarator (field_identifier) @field.name)
         (pointer_declarator (pointer_declarator (field_identifier) @field.name))
         (pointer_declarator (array_declarator declarator: (field_identifier) @field.name))
-      ]))) @field
+      ]))
+    (pointer_declarator declarator: (function_declarator declarator: (parenthesized_declarator
+      [
+        (pointer_declarator (field_identifier) @field.name)
+        (pointer_declarator (pointer_declarator (field_identifier) @field.name))
+        (pointer_declarator (array_declarator declarator: (field_identifier) @field.name))
+      ])))
+    (pointer_declarator declarator: (pointer_declarator declarator: (function_declarator declarator: (parenthesized_declarator
+      [
+        (pointer_declarator (field_identifier) @field.name)
+        (pointer_declarator (pointer_declarator (field_identifier) @field.name))
+        (pointer_declarator (array_declarator declarator: (field_identifier) @field.name))
+      ]))))
+    (reference_declarator (function_declarator declarator: (parenthesized_declarator
+      [
+        (pointer_declarator (field_identifier) @field.name)
+        (pointer_declarator (pointer_declarator (field_identifier) @field.name))
+        (pointer_declarator (array_declarator declarator: (field_identifier) @field.name))
+      ])))
+  ]) @field
 
 ;; File-scope variable / const declarations — `auto x = 5;` / `int N = 5;` /
 ;; `char *names[4];`, in a namespace, an `extern "C"` block or a preprocessor

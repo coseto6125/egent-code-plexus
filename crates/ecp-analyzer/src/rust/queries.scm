@@ -127,6 +127,15 @@
       name: (field_identifier) @property.name
       type: (_) @type) @property))
 
+;; Union fields: a union is a `Struct` node (above), and its fields are its
+;; data members as a struct's are.
+(union_item
+  body: (field_declaration_list
+    (field_declaration
+      (visibility_modifier)? @export
+      name: (field_identifier) @property.name
+      type: (_) @type) @property))
+
 ;; Enum variant struct-form fields: `enum E { V { f1: T, f2: U } }`. Each named
 ;; field is a permanent type-level data member parallel to struct fields, and
 ;; pattern-match destructuring `V { f1, f2 } => ...` references them by name.

@@ -16,7 +16,7 @@ use crate::driver::{
 };
 use crate::framework_confidence;
 use crate::framework_helpers::{detect_ast_framework_patterns, FrameworkPatternSpec, Span};
-use crate::function_meta::type_param_entry;
+use crate::function_meta::cpp::template_type_params;
 use crate::indirect_dispatch::{collect_c_cpp_fn_ptr_vars, detect_c_cpp_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use crate::preproc_fallback::Preproc;
@@ -31,8 +31,8 @@ use tree_sitter::{Node, Query, QueryCursor, Tree};
 
 /// The type-parameter marker of a `template<typename T>` class, struct or
 /// alias: the list belongs to the `template_declaration` around the
-/// declaration. A non-type parameter (`int N`) declares no type variable,
-/// and an explicit specialization (`template<>`) declares none.
+/// declaration, read by [`template_type_params`]. An explicit
+/// specialization (`template<>`) declares none.
 fn type_params_decorator(root: Node<'_>, kind: NodeKind, source: &[u8]) -> Option<String> {
     if !matches!(kind, NodeKind::Class | NodeKind::Struct | NodeKind::Typedef) {
         return None;
@@ -45,19 +45,7 @@ fn type_params_decorator(root: Node<'_>, kind: NodeKind, source: &[u8]) -> Optio
     let list = parent
         .filter(|p| p.kind() == "template_declaration")?
         .child_by_field_name("parameters")?;
-    let mut cursor = list.walk();
-    let names: Vec<String> = list
-        .named_children(&mut cursor)
-        .filter(|entry| {
-            matches!(
-                entry.kind(),
-                "type_parameter_declaration"
-                    | "optional_type_parameter_declaration"
-                    | "variadic_type_parameter_declaration"
-            )
-        })
-        .filter_map(|entry| type_param_entry(&entry, source))
-        .collect();
+    let names = template_type_params(&list, source);
     (!names.is_empty()).then(|| RawNode::type_params_marker(names.iter().map(String::as_str)))
 }
 
@@ -1212,6 +1200,22 @@ mod tests {
             ["K", "V", "Ts"]
         );
         assert_eq!(params("template <typename T> using Vec = T;", "Vec"), ["T"]);
+    }
+
+    #[test]
+    fn test_type_params_marker_cpp_constrained_and_template_template_params_declare_names() {
+        assert_eq!(params("template <Hashable K> struct M {};", "M"), ["K"]);
+        assert_eq!(
+            params("template <std::integral I, int N> struct A {};", "A"),
+            ["I"]
+        );
+        assert_eq!(
+            params(
+                "template <template <class> class C, typename T> struct W {};",
+                "W"
+            ),
+            ["C", "T"]
+        );
     }
 
     #[test]

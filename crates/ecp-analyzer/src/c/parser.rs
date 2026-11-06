@@ -615,7 +615,14 @@ fn typedef_aliased_type(
         None => {
             let first = td.child_by_field_name("declarator")?;
             let text = slice_type_before(td, first, source)?;
-            let shared = text.strip_prefix("typedef")?.trim().to_string();
+            // `__extension__ typedef ..` (glibc, kernel uapi) leads with the
+            // GNU keyword the grammar allows before `typedef`.
+            let shared = text
+                .trim_start_matches("__extension__")
+                .trim_start()
+                .strip_prefix("typedef")?
+                .trim()
+                .to_string();
             (shared, declarator)
         }
     };

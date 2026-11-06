@@ -189,18 +189,16 @@ fn kotlin_callee(
                 }),
                 _ => None,
             };
-            let computed = !matches!(
-                receiver.kind(),
-                "this_expression" | "super_expression" | "simple_identifier"
-            );
+            let not_this = !matches!(receiver.kind(), "this_expression" | "super_expression");
             let site = match ty {
                 Some(t) => return Some(format!("{t}.{method}")),
-                // A computed receiver (`other().m()`) is no `this`: where an
-                // enclosing type declares `m`, the bare name would bind that
-                // member. Elsewhere the bare name still reaches an extension
+                // A computed receiver (`other().m()`) or an untyped value
+                // (`val x = make(); x.m()`) is no `this`: where an enclosing
+                // type declares `m`, the bare name would bind that member.
+                // Elsewhere the bare name still reaches an extension
                 // function, which Kotlin declares free and an untyped member
                 // call never binds.
-                None if computed && declares(nodes, pos, method, NodeKind::is_callable) => {
+                None if not_this && declares(nodes, pos, method, NodeKind::is_callable) => {
                     CallSite::untyped_member(method)
                 }
                 None => method.to_string(),
@@ -586,6 +584,31 @@ class VM(private val repository: UserRepository) {
             .find(|n| n.name == "load")
             .expect("load function not found");
         assert_eq!(load.calls, ["UserRepository.fetchUsers"]);
+    }
+
+    /// An untyped local (`val x = make()`) is no `this`: `x.save()` must not
+    /// emit the bare `save`, which would bind the enclosing class's own
+    /// `save`. Where no enclosing type declares the name, the bare name
+    /// stays, so an extension function can still bind.
+    #[test]
+    fn test_kotlin_callee_untyped_local_receiver_own_method_namesake_emits_untyped_member() {
+        let src = "class Repo {\n    fun save() {}\n    fun go() {\n        val x = make()\n        x.save()\n        x.close()\n    }\n}\n";
+        let graph = parse(src);
+        let go = graph
+            .nodes
+            .iter()
+            .find(|n| n.name == "go")
+            .expect("go function not found");
+        assert_eq!(
+            go.calls,
+            [
+                "make".to_string(),
+                CallSite::untyped_member("save"),
+                "close".to_string()
+            ],
+            "{:?}",
+            go.calls
+        );
     }
 
     /// An explicit class import still qualifies a static-style receiver.

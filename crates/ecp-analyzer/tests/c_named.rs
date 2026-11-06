@@ -1,6 +1,6 @@
 //! C "Named binding" dimension: `#define` (object-like and function-like)
 //! and `extern` declarations surface as `RawImport` entries (a `typedef` is
-//! a `Typedef` node, CONTRACTS 8 / A15e), each with `alias = Some(short_name)`
+//! a `Typedef` node), each with `alias = Some(short_name)`
 //! so downstream resolvers can do qualifier-scope lookups the same way they do for Java static imports.
 //!
 //! Reference implementation: Java in `src/java/parser.rs`.
@@ -27,7 +27,7 @@ fn find<'a>(imports: &'a [RawImport], alias: &str) -> &'a RawImport {
 }
 
 /// The `Typedef` nodes of `src` as `(alias, aliased type)`.
-/// CONTRACTS 8 / A15e: a typedef is no `RawImport`; the node carries the
+/// a typedef is no `RawImport`; the node carries the
 /// aliased type in `type_annotation`.
 fn typedefs(src: &str) -> Vec<(String, Option<String>)> {
     let graph = CProvider::new()

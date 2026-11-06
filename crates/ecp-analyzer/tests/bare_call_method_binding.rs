@@ -1312,3 +1312,30 @@ fn test_resolve_call_ruby_bare_call_own_method_binds_own_method() {
 fn test_resolve_call_ruby_bare_call_unrelated_method_keeps_tagged_guess() {
     assert_unrelated_method_kept(&RubyProvider::new().unwrap(), &RUBY);
 }
+
+/// Stands for: a bare call in a Dart `extension DogX on Dog` member reaches
+/// `Dog`'s member through the implicit `this`, so the Owner rule admits it,
+/// in the extension's file and in another. An unrelated `Cat.bark` stays
+/// unreachable.
+#[test]
+fn test_resolve_call_dart_extension_bare_call_binds_on_type_member() {
+    let dog = "class Dog {\n  void bark() {}\n}\n";
+    let cat = "class Cat {\n  void bark() {}\n}\n";
+    let ext = "extension DogX on Dog {\n  void wag() => bark();\n}\n";
+    let same_file = format!("{dog}{ext}");
+    for files in [
+        vec![("lib/dog.dart", same_file.as_str()), ("lib/cat.dart", cat)],
+        vec![
+            ("lib/dog.dart", dog),
+            ("lib/cat.dart", cat),
+            ("lib/dog_x.dart", ext),
+        ],
+    ] {
+        let graph = single(&DartProvider::new().unwrap(), &files);
+        assert_eq!(
+            targets(&graph, "wag"),
+            vec![target("lib/dog.dart", "Dog", "bark")],
+            "{files:?}"
+        );
+    }
+}

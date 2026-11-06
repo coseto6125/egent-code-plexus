@@ -934,4 +934,16 @@ mod type_param_marker_tests {
         let mk = nodes.iter().find(|n| n.name == "mk").expect("mk");
         assert_eq!(mk.owner_class.as_deref(), Some("U"));
     }
+
+    #[test]
+    fn test_parse_file_rust_union_fields_emit_properties_owned_by_union() {
+        let nodes = parse("pub union U { pub x: u32, y: f32 }");
+        let mut fields: Vec<_> = nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Property)
+            .map(|n| (n.name.as_str(), n.owner_class.as_deref(), n.is_exported))
+            .collect();
+        fields.sort_unstable();
+        assert_eq!(fields, [("x", Some("U"), true), ("y", Some("U"), false)]);
+    }
 }

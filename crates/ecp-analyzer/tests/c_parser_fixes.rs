@@ -61,7 +61,7 @@ fn binding(name: &'static str, source: &'static str, kind: BindingKind) -> Impor
 }
 
 /// `(alias, aliased type)` of every `Typedef` node, in source order
-/// (CONTRACTS 8 / A15e: the aliased type lives on the node, not an import).
+/// (the aliased type lives on the node, not an import).
 fn typedef_types(g: &LocalGraph) -> Vec<(&str, Option<&str>)> {
     g.nodes
         .iter()
@@ -212,7 +212,7 @@ fn test_c_pointer_fn_ptr_and_array_typedefs_emit_typedef_nodes() {
 
 /// A data-pointer typedef keeps its stars in the `Typedef` node's
 /// `type_annotation`; a function-pointer or array typedef keeps the return
-/// or element type alone. CONTRACTS 8 / A15e: a typedef is no import.
+/// or element type alone. A typedef is no import.
 #[test]
 fn test_c_pointer_typedef_import_source_keeps_stars() {
     let g = parse(
@@ -880,7 +880,7 @@ fn test_c_function_type_and_pointer_array_typedefs_emit_typedef_nodes() {
 /// returned or element type, so the `Typedef` node's `type_annotation` keeps
 /// them (`void *`, `char **`, `const char *`, `char *`). A function-pointer
 /// typedef with a plain return type and a data-pointer typedef keep today's
-/// text. CONTRACTS 8 / A15e: the type moved from the import to the node.
+/// text. The type moved from the import to the node.
 #[test]
 fn test_c_pointer_return_typedef_import_source_keeps_return_stars() {
     let g = parse(
@@ -899,6 +899,34 @@ fn test_c_pointer_return_typedef_import_source_keeps_return_stars() {
             ("str_arr", Some("char **")),
         ]
     );
+}
+
+/// A function-pointer member whose function returns a pointer, one or two
+/// levels deep, is a Property with no type slice, and its parameter names
+/// stay no member.
+#[test]
+fn test_c_function_pointer_member_pointer_return_emits_property() {
+    let g = parse(
+        "alloc.h",
+        b"struct alloc_ops {\n    void *(*alloc)(int size);\n    char **(*argv)(void);\n    int (*plain)(int n);\n};\n",
+    );
+    let names: Vec<(&str, Option<&str>)> = rows_of(&g, &[NodeKind::Property])
+        .into_iter()
+        .map(|(name, _, _, _, ty)| (name, ty))
+        .collect();
+    assert_eq!(names, [("alloc", None), ("argv", None), ("plain", None)]);
+}
+
+/// glibc and the kernel uapi headers write `__extension__ typedef ..`: the
+/// GNU keyword before `typedef` keeps the aliased type on the node.
+#[test]
+fn test_c_extension_keyword_typedef_keeps_aliased_type() {
+    let g = parse(
+        "types.h",
+        b"__extension__ typedef unsigned long long u64;\n__extension__ typedef struct { int a; } pair_t;\n",
+    );
+    assert_eq!(import_rows(&g), []);
+    assert_eq!(typedef_types(&g)[0], ("u64", Some("unsigned long long")));
 }
 
 /// A3 sibling: a prototype's parameter is visible in the prototype only,
@@ -1100,7 +1128,7 @@ fn test_c_extern_c_block_decls_emit_variable_and_function() {
 
 /// `typedef struct node Node, *NodePtr;` is one `Typedef` node per
 /// declarator, each holding the shared type plus its own pointer prefix
-/// (CONTRACTS 8 / A15e: no import).
+/// (no import).
 #[test]
 fn test_c_multi_declarator_typedef_binds_each_alias() {
     let g = parse("td.c", b"typedef struct node Node, *NodePtr;\n");
@@ -1391,7 +1419,7 @@ fn test_declare_macro_bound_vars_existing_binding_keeps_its_type() {
 /// the alias through its array or pointer declarator and past a qualifier
 /// (`float vec4[4]`, `T *tp`, `const T ct`). Each is a Typedef spanning
 /// both statements whose `type_annotation` keeps the pointer stars (no
-/// import, CONTRACTS 8 / A15e); none is a Variable.
+/// import); none is a Variable.
 #[test]
 fn test_c_attribute_typedef_tail_declarator_shapes_emit_typedef() {
     let g = parse(

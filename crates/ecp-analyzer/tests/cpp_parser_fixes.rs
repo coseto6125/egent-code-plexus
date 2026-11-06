@@ -1380,6 +1380,21 @@ fn test_parse_file_cpp_function_pointer_members_emit_property_nodes() {
     );
 }
 
+/// Stands for: a function-pointer member whose function returns a pointer
+/// (one or two levels) or a reference is a `Property` of its class too, and
+/// its parameter names stay no member.
+#[test]
+fn test_parse_file_cpp_function_pointer_member_pointer_or_reference_return_emits_property() {
+    let g = parse(
+        "alloc.hpp",
+        b"struct Alloc {\n    void *(*alloc)(int size);\n    char **(*argv)(void);\n    int &(*at)(int index);\n};\n",
+    );
+    assert_eq!(
+        owned_names(&g, NodeKind::Property, "Alloc"),
+        ["alloc", "argv", "at"]
+    );
+}
+
 /// Stands for: a name inside the pointer type's parameter list is no member:
 /// no Property is named `value`, nor after the parameter's type.
 #[test]
