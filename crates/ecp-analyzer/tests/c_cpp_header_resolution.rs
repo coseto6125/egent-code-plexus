@@ -400,13 +400,14 @@ fn test_c_family_field_cpp_overload_of_same_arity_other_types_binds_nothing() {
 
 /// Stands for: a pointer or reference is part of the parameter type, so
 /// `f(int *)` and `f(int &)` are other overloads of the `f(int)` the header
-/// declares, and a pointer spelled with or without a name is one type.
+/// declares. A name anywhere in a declarator, and an array the language
+/// adjusts to a pointer, leave the type as it is.
 #[test]
 fn test_c_family_field_cpp_overload_of_pointer_parameter_binds_nothing() {
     for definition in [
         "void f(int *p) {}\n",
         "void f(int &r) {}\n",
-        "void f(int []) {}\n",
+        "void f(int (*)[2]) {}\n",
     ] {
         let g = graph(&[
             ("api.hpp", "void f(int);\n"),
@@ -420,10 +421,10 @@ fn test_c_family_field_cpp_overload_of_pointer_parameter_binds_nothing() {
         );
     }
     let g = graph(&[
-        ("api.hpp", "void k(int *, char **, int (*)(int));\n"),
+        ("api.hpp", "void k(int a[4], char **, int (*)(int));\n"),
         (
             "k.cpp",
-            "#include \"api.hpp\"\nvoid k(int *p, char ** argv, int (*cb)(int)) {}\n",
+            "#include \"api.hpp\"\nvoid k(int *p, char ** argv, int (*cb)(int value)) {}\n",
         ),
         (
             "main.cpp",

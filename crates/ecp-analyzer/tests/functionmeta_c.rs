@@ -217,7 +217,8 @@ fn test_extract_params_kr_parameter_without_declaration_has_empty_type() {
 }
 
 /// Stands for: a parameter's type keeps its declarator's shape (pointer,
-/// array, function pointer) without the name, and a K&R declaration too.
+/// function pointer) without any name, and a K&R declaration too. An array
+/// the name declares reads as the pointer the language adjusts it to.
 #[test]
 fn test_extract_params_declarator_shape_is_part_of_type() {
     let g = analyze(
@@ -229,7 +230,7 @@ fn test_extract_params_declarator_shape_is_part_of_type() {
             "s",
             "char *",
             "a",
-            "int []",
+            "int *",
             "cb",
             "int (*)(int)",
             "n",

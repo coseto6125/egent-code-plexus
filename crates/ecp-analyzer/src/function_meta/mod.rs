@@ -53,43 +53,79 @@ pub(super) fn node_text<'a>(n: &Node<'_>, source: &'a [u8]) -> &'a str {
 }
 
 /// A C/C++ parameter's type: its `type` with the declarator's shape after
-/// it, the declarator with the parameter's name cut out (`char *s` gives
-/// `char *`, `int a[]` `int []`, `int (*cb)(int)` `int (*)(int)`). Without
-/// the shape, `f(int)` and `f(int *)` would read as one signature.
+/// it, built from the declarator with every name dropped (`char *s` gives
+/// `char *`, `int (*cb)(int v)` `int (*)(int)`). An array that the name
+/// declares is a pointer, as the language adjusts it (`int a[4]` gives
+/// `int *`). Without the shape, `f(int)` and `f(int *)` would read as one
+/// signature.
 pub(super) fn c_param_type(ty: &str, declarator: Option<Node<'_>>, source: &[u8]) -> String {
-    let Some(declarator) = declarator else {
-        return ty.to_string();
-    };
-    let mut name = declarator;
-    while !matches!(name.kind(), "identifier" | "field_identifier") {
-        let inner = name.child_by_field_name("declarator").or_else(|| {
-            let mut cursor = name.walk();
-            let found = name
-                .named_children(&mut cursor)
-                .find(|c| c.kind().ends_with("declarator") || c.kind() == "identifier");
-            found
-        });
-        match inner {
-            Some(inner) => name = inner,
-            None => break,
-        }
-    }
-    let (start, end) = (declarator.start_byte(), declarator.end_byte());
-    let (cut_start, cut_end) = if matches!(name.kind(), "identifier" | "field_identifier") {
-        (name.start_byte(), name.end_byte())
-    } else {
-        (end, end)
-    };
-    let shape: String = [&source[start..cut_start], &source[cut_end..end]]
-        .concat()
-        .split(|b| b.is_ascii_whitespace())
-        .filter_map(|word| std::str::from_utf8(word).ok())
-        .collect();
+    let shape = declarator.map_or_else(String::new, |d| declarator_shape(d, source));
     if shape.is_empty() {
         ty.to_string()
     } else {
         format!("{ty} {shape}")
     }
+}
+
+fn declarator_shape(node: Node<'_>, source: &[u8]) -> String {
+    let inner = node.child_by_field_name("declarator").or_else(|| {
+        let mut cursor = node.walk();
+        let found = node
+            .named_children(&mut cursor)
+            .find(|c| c.kind().ends_with("declarator"));
+        found
+    });
+    let inner_shape = || inner.map_or_else(String::new, |i| declarator_shape(i, source));
+    match node.kind() {
+        "identifier" | "field_identifier" => String::new(),
+        "pointer_declarator" | "abstract_pointer_declarator" => format!("*{}", inner_shape()),
+        "reference_declarator" | "abstract_reference_declarator" => {
+            let mut cursor = node.walk();
+            let rvalue = node.children(&mut cursor).any(|c| c.kind() == "&&");
+            format!("{}{}", if rvalue { "&&" } else { "&" }, inner_shape())
+        }
+        "array_declarator" | "abstract_array_declarator" => {
+            if inner.is_none_or(|i| matches!(i.kind(), "identifier" | "field_identifier")) {
+                return "*".to_string();
+            }
+            let size = node
+                .child_by_field_name("size")
+                .map(|s| compact(node_text(&s, source)))
+                .unwrap_or_default();
+            format!("{}[{size}]", inner_shape())
+        }
+        "function_declarator" | "abstract_function_declarator" => {
+            let params = node
+                .child_by_field_name("parameters")
+                .map(|list| {
+                    let mut cursor = list.walk();
+                    let types: Vec<String> = list
+                        .named_children(&mut cursor)
+                        .map(|p| match p.kind() {
+                            "parameter_declaration" | "optional_parameter_declaration" => {
+                                let base = p
+                                    .child_by_field_name("type")
+                                    .map(|t| node_text(&t, source))
+                                    .unwrap_or_default();
+                                c_param_type(base, p.child_by_field_name("declarator"), source)
+                            }
+                            _ => compact(node_text(&p, source)),
+                        })
+                        .collect();
+                    types.join(",")
+                })
+                .unwrap_or_default();
+            format!("{}({params})", inner_shape())
+        }
+        "parenthesized_declarator" | "abstract_parenthesized_declarator" => {
+            format!("({})", inner_shape())
+        }
+        _ => compact(node_text(&node, source)),
+    }
+}
+
+fn compact(text: &str) -> String {
+    text.split_whitespace().collect()
 }
 
 /// An xUnit framework runs `name` as a test: XCTest, PHPUnit and Minitest
