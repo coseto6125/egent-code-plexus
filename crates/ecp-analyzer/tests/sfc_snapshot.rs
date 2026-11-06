@@ -174,8 +174,8 @@ fn svelte_counter_snapshot() {
 // ── Astro: Page.astro (snapshot-only) ────────────────────────────────────────
 //
 // Baseline (scripts/parity/sfc_snapshot_baseline.txt):
-//   total_nodes: 4  imports: 2
-//   Section: 2, Interface: 1, Const: 1
+//   total_nodes: 6  imports: 2
+//   Section: 2, Interface: 1, Property: 2, Const: 1
 
 #[test]
 fn astro_page_snapshot() {
@@ -302,8 +302,8 @@ fn vue_options_api_snapshot_match() {
 // ── Vue: PropsAndEmits.vue ───────────────────────────────────────────────────
 //
 // Baseline (sfc_snapshot_baseline.txt):
-//   total_nodes: 8  imports: 1
-//   Section: 2, Interface: 1, Const: 3, Function: 2
+//   total_nodes: 10  imports: 1
+//   Section: 2, Interface: 1, Property: 2, Const: 3, Function: 2
 //
 // Vue 3 macros (defineProps, defineEmits, defineExpose) are captured as
 // Const nodes (variable declarations). Interface node from ButtonProps TS type.
@@ -758,8 +758,8 @@ fn astro_conditional_render_snapshot_match() {
 // ── Astro: TypedProps.astro (snapshot-only) ──────────────────────────────────
 //
 // Baseline (sfc_snapshot_baseline.txt):
-//   total_nodes: 4  imports: 1
-//   Section: 2, Interface: 1, Const: 1
+//   total_nodes: 7  imports: 1
+//   Section: 2, Interface: 1, Property: 3, Const: 1
 //
 // TypeScript Interface node captured from Props interface.
 // Destructure pattern `const { title, ... } = Astro.props` does NOT emit
