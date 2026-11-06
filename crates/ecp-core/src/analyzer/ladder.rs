@@ -144,7 +144,7 @@ pub fn module_item<D: PickFacts + ?Sized>(decls: &D, id: u32) -> Option<u32> {
 fn declares_twin_qualifiers<D: ResolveFacts>(decls: &D, file: &str, name: &str) -> bool {
     decls
         .call_decls(file, name)
-        .filter(|&(_, kind)| kind.is_qualifier())
+        .filter(|&(id, kind)| kind.is_qualifier() && !decls.is_body_local(id))
         .nth(1)
         .is_some()
 }

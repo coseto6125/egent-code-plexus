@@ -463,7 +463,10 @@ fn assigns_variable(
                 continue;
             }
             "anonymous_function" => {
-                if captures_by_ref(n, var, source) && before_use(n) {
+                // The closure that holds `at` is the capture being typed, not
+                // a write to it.
+                let holds_use = n.start_byte() <= at.start_byte() && at.end_byte() <= n.end_byte();
+                if !holds_use && captures_by_ref(n, var, source) && before_use(n) {
                     return true;
                 }
                 continue;
