@@ -1,10 +1,14 @@
-//! JavaScript lowering into the receiver core.
+//! JavaScript and TypeScript lowering into the receiver core: one
+//! control-flow lowering, with the TypeScript evidence behind [`Dialect`].
 //!
 //! A receiver occurrence is `x.m()` / `x?.m()` with `x` a plain identifier
 //! that names a binding of the function (own, or captured from an enclosing
-//! one). The only evidence is `new C(..)` assigned to the binding; a binding
-//! the paths disagree on or a closure may rewrite stops being `Known`, and
-//! the call extractor then keeps its qualified `x.m` name.
+//! one); TypeScript also counts a method value `x.m`. Evidence is `new C(..)`
+//! assigned to the binding. TypeScript adds a simple class annotation
+//! (`x: T`, which pins the binding), and an assignment of an `any` /
+//! `unknown` value makes a pinned binding `NoEvidence`. A binding the paths
+//! disagree on or a closure may rewrite stops being `Known`, and the call
+//! extractor then keeps its qualified `x.m` name.
 //!
 //! Scope: `let` / `const` and a catch parameter are block scoped, `var` and
 //! function declarations are function scoped (and hoisted), and every
@@ -13,7 +17,7 @@
 use crate::calls::unparenthesized;
 use crate::framework_helpers::node_span;
 use crate::receiver::ir::{
-    BindingId, BindingOrigin, CaptureMode, ScopeId, ScopeKind, TypeOrigin, Value,
+    BindingId, BindingOrigin, CaptureMode, ScopeId, ScopeKind, TypeId, TypeOrigin, Value,
 };
 use crate::receiver::lattice::UnknownCause;
 use crate::receiver::{DeclaredTypePolicy, IrBuilder, LangPolicy, Lowered, Lowering, ScopeRule};
@@ -24,7 +28,45 @@ const MAX_DEPTH: u32 = 256;
 
 pub(super) struct JsLowering;
 
-pub(super) fn is_function_like(kind: &str) -> bool {
+/// The grammar a lowering reads. Annotations, typed parameters and method
+/// values check this value rather than a field the JavaScript grammar
+/// lacks, so a grammar change cannot switch them on for JavaScript.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Dialect {
+    JavaScript,
+    TypeScript,
+}
+
+impl Dialect {
+    /// TypeScript's extractor also asks about a method value
+    /// (`xs.forEach(o.m)`); JavaScript's asks about calls only.
+    fn member_values(self) -> bool {
+        self == Dialect::TypeScript
+    }
+
+    fn depth_limit(self) -> &'static str {
+        match self {
+            Dialect::JavaScript => "javascript receiver lowering exceeds the nesting limit",
+            Dialect::TypeScript => "typescript receiver lowering exceeds the nesting limit",
+        }
+    }
+
+    fn labeled_jump(self) -> &'static str {
+        match self {
+            Dialect::JavaScript => "javascript labeled break or continue",
+            Dialect::TypeScript => "typescript labeled break or continue",
+        }
+    }
+
+    fn with_statement(self) -> &'static str {
+        match self {
+            Dialect::JavaScript => "javascript with statement",
+            Dialect::TypeScript => "typescript with statement",
+        }
+    }
+}
+
+pub(crate) fn is_function_like(kind: &str) -> bool {
     matches!(
         kind,
         "function_declaration"
@@ -51,40 +93,62 @@ impl Lowering for JsLowering {
     }
 
     fn lower(&self, _cx: &(), function: Node<'_>, source: &[u8], b: &mut IrBuilder) -> Lowered {
-        if !has_receiver_call(function) {
-            return Lowered::NoUses;
-        }
-        let mut lower = Lower {
-            source,
-            depth: 0,
-            unsupported: None,
-            ahead: Vec::new(),
-        };
-        lower.callable(b, function);
-        match lower.unsupported {
-            Some(reason) => Lowered::Unsupported(reason),
-            None if b.use_count() == 0 => Lowered::NoUses,
-            None => Lowered::Done,
-        }
+        lower_function(Dialect::JavaScript, function, source, b)
     }
 }
 
-/// The identifier of `x.m(..)`, the receiver of a call.
-fn call_receiver<'t>(call: Node<'t>) -> Option<Node<'t>> {
-    let function = unparenthesized(call.child_by_field_name("function")?);
-    if function.kind() != "member_expression" {
+/// [`Lowering::lower`] for both dialects.
+pub(crate) fn lower_function(
+    dialect: Dialect,
+    function: Node<'_>,
+    source: &[u8],
+    b: &mut IrBuilder,
+) -> Lowered {
+    if !has_receiver(dialect, function) {
+        return Lowered::NoUses;
+    }
+    let mut lower = Lower {
+        dialect,
+        source,
+        depth: 0,
+        unsupported: None,
+        ahead: Vec::new(),
+        dynamic: Vec::new(),
+    };
+    lower.callable(b, function);
+    match lower.unsupported {
+        Some(reason) => Lowered::Unsupported(reason),
+        None if b.use_count() == 0 => Lowered::NoUses,
+        None => Lowered::Done,
+    }
+}
+
+/// The identifier of `x.m`, the receiver of a member access.
+pub(crate) fn member_receiver<'t>(member: Node<'t>) -> Option<Node<'t>> {
+    if member.kind() != "member_expression" {
         return None;
     }
-    function
+    member
         .child_by_field_name("object")
         .filter(|object| object.kind() == "identifier")
 }
 
-/// The fast path: a function without a `x.m()` call has nothing to answer.
-fn has_receiver_call(function: Node<'_>) -> bool {
+/// The identifier of `x.m(..)`, the receiver of a call.
+fn call_receiver<'t>(call: Node<'t>) -> Option<Node<'t>> {
+    member_receiver(unparenthesized(call.child_by_field_name("function")?))
+}
+
+/// The fast path: a function without a receiver occurrence has nothing to
+/// answer.
+fn has_receiver(dialect: Dialect, function: Node<'_>) -> bool {
     let mut stack = vec![function];
     while let Some(n) = stack.pop() {
-        if n.kind() == "call_expression" && call_receiver(n).is_some() {
+        let found = if dialect.member_values() {
+            member_receiver(n).is_some()
+        } else {
+            n.kind() == "call_expression" && call_receiver(n).is_some()
+        };
+        if found {
             return true;
         }
         let mut cursor = n.walk();
@@ -131,7 +195,65 @@ fn pattern_names<'t>(pattern: Node<'t>, out: &mut Vec<Node<'t>>) {
     }
 }
 
+/// The class name of a `: T` annotation that is a single `type_identifier`:
+/// no generic, union or predefined type.
+fn simple_annotation<'s>(annotation: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
+    let inner = if annotation.kind() == "type_annotation" {
+        annotation.named_child(0)?
+    } else {
+        annotation
+    };
+    if inner.kind() != "type_identifier" {
+        return None;
+    }
+    let text = inner.utf8_text(source).ok()?;
+    (!text.is_empty() && text.chars().all(|c| c.is_alphanumeric() || c == '_')).then_some(text)
+}
+
+/// What each element of a destructured or iterated `source` holds: dynamic
+/// when the source is, else a value the lowering cannot type.
+fn element_of(source: Value) -> Value {
+    match source {
+        Value::Dynamic => Value::Dynamic,
+        _ => Value::Unknown,
+    }
+}
+
+/// Whether a type annotation (`: any`) names `any` or `unknown`.
+fn annotates_dynamic(annotation: Option<Node<'_>>, source: &[u8]) -> bool {
+    annotation.is_some_and(|annotation| {
+        let inner = match annotation.kind() {
+            "type_annotation" => annotation.named_child(0),
+            _ => Some(annotation),
+        };
+        inner.is_some_and(|inner| {
+            inner.kind() == "predefined_type"
+                && matches!(inner.utf8_text(source).unwrap_or(""), "any" | "unknown")
+        })
+    })
+}
+
+/// Whether `node` (an `as` / `<T>` assertion) casts to `any` or `unknown`.
+fn casts_to_dynamic(node: Node<'_>, source: &[u8]) -> bool {
+    named_children(node).into_iter().any(|child| {
+        let text = child.utf8_text(source).unwrap_or("").trim();
+        match child.kind() {
+            "predefined_type" => matches!(text, "any" | "unknown"),
+            "type_arguments" => matches!(text, "<any>" | "<unknown>"),
+            _ => false,
+        }
+    })
+}
+
+fn is_hoisted(kind: &str) -> bool {
+    matches!(
+        kind,
+        "function_declaration" | "generator_function_declaration"
+    )
+}
+
 struct Lower<'s> {
+    dialect: Dialect,
     source: &'s [u8],
     depth: u32,
     unsupported: Option<&'static str>,
@@ -139,6 +261,9 @@ struct Lower<'s> {
     /// declarations lowered, so a hoisted closure captures the same binding
     /// the declaration later assigns: `(name, scope)`.
     ahead: Vec<(&'s str, ScopeId)>,
+    /// Bindings annotated `any` / `unknown`: a read of one is a dynamic
+    /// value, which drops the pin of the binding it is written to.
+    dynamic: Vec<BindingId>,
 }
 
 impl<'s> Lower<'s> {
@@ -151,20 +276,55 @@ impl<'s> Lower<'s> {
         b.lookup_or_capture(name, CaptureMode::ByRef)
     }
 
-    fn assign_unknown(&mut self, b: &mut IrBuilder, name: &str) {
-        if let Some(id) = self.resolve(b, name) {
-            b.assign(id, Value::Unknown);
+    fn use_receiver(&mut self, b: &mut IrBuilder, receiver: Node<'_>) {
+        if let Some(binding) = self.resolve(b, self.text(receiver)) {
+            b.use_binding(binding, receiver.id());
         }
+    }
+
+    fn assign_unknown(&mut self, b: &mut IrBuilder, name: &str) {
+        self.assign_element(b, name, &Value::Unknown);
+    }
+
+    /// Writes `value`, `Unknown` or `Dynamic`, an element of a pattern's
+    /// source, to `name`.
+    fn assign_element(&mut self, b: &mut IrBuilder, name: &str, value: &Value) {
+        if let Some(id) = self.resolve(b, name) {
+            b.assign(id, value.clone());
+        }
+    }
+
+    /// The `: T` annotation of a declarator or parameter; none in JavaScript.
+    fn annotation<'t>(&self, node: Node<'t>) -> Option<Node<'t>> {
+        match self.dialect {
+            Dialect::TypeScript => node.child_by_field_name("type"),
+            Dialect::JavaScript => None,
+        }
+    }
+
+    /// Records `name`, just declared with `annotation`, as dynamic when the
+    /// annotation is `any` / `unknown`.
+    fn note_dynamic(&mut self, b: &IrBuilder, name: Node<'_>, annotation: Option<Node<'_>>) {
+        if name.kind() == "identifier" && annotates_dynamic(annotation, self.source) {
+            if let Some(id) = b.lookup(self.text(name)) {
+                self.dynamic.push(id);
+            }
+        }
+    }
+
+    fn declared_type(&self, b: &mut IrBuilder, annotation: Option<Node<'_>>) -> Option<TypeId> {
+        let text = simple_annotation(annotation?, self.source)?;
+        Some(b.intern(text, TypeOrigin::Annotation))
     }
 
     fn callable(&mut self, b: &mut IrBuilder, function: Node<'_>) {
         if let Some(params) = function.child_by_field_name("parameters") {
             for param in named_children(params) {
-                self.declare_pattern(b, param, BindingOrigin::Param, false);
+                self.parameter(b, param);
             }
         }
         if let Some(param) = function.child_by_field_name("parameter") {
-            self.declare_pattern(b, param, BindingOrigin::Param, false);
+            self.declare_pattern(b, param, BindingOrigin::Param, false, None);
         }
         match function.child_by_field_name("body") {
             Some(body) if body.kind() == "statement_block" => self.block_body(b, body, false),
@@ -175,25 +335,43 @@ impl<'s> Lower<'s> {
         }
     }
 
+    fn parameter(&mut self, b: &mut IrBuilder, param: Node<'_>) {
+        let typed = self.dialect == Dialect::TypeScript
+            && matches!(param.kind(), "required_parameter" | "optional_parameter");
+        if !typed {
+            self.declare_pattern(b, param, BindingOrigin::Param, false, None);
+            return;
+        }
+        if let Some(value) = param.child_by_field_name("value") {
+            self.walk(b, value);
+        }
+        let Some(pattern) = param.child_by_field_name("pattern") else {
+            return;
+        };
+        let annotation = self.annotation(param);
+        let declared = self.declared_type(b, annotation);
+        self.declare_pattern(b, pattern, BindingOrigin::Param, false, declared);
+        self.note_dynamic(b, pattern, annotation);
+    }
+
     /// Declares every name `pattern` binds. A default value or a computed key
-    /// is an expression, walked in place.
+    /// is an expression, walked in place. `declared` types only a plain
+    /// identifier pattern.
     fn declare_pattern(
         &mut self,
         b: &mut IrBuilder,
         pattern: Node<'_>,
         origin: BindingOrigin,
         function_scoped: bool,
+        declared: Option<TypeId>,
     ) {
         match pattern.kind() {
             "identifier" | "shorthand_property_identifier_pattern" => {
                 let name = self.text(pattern);
                 if function_scoped {
-                    match b.lookup(name) {
-                        Some(_) => {}
-                        None => {
-                            let scope = b.function_scope();
-                            b.declare_in(scope, name, origin, None);
-                        }
+                    if b.lookup(name).is_none() {
+                        let scope = b.function_scope();
+                        b.declare_in(scope, name, origin, declared);
                     }
                 } else {
                     let scope = b.current_scope();
@@ -206,7 +384,7 @@ impl<'s> Lower<'s> {
                             self.ahead.swap_remove(index);
                         }
                         None => {
-                            b.declare(name, origin, None);
+                            b.declare(name, origin, declared);
                         }
                     }
                 }
@@ -216,17 +394,17 @@ impl<'s> Lower<'s> {
                     self.walk(b, right);
                 }
                 if let Some(left) = pattern.child_by_field_name("left") {
-                    self.declare_pattern(b, left, origin, function_scoped);
+                    self.declare_pattern(b, left, origin, function_scoped, None);
                 }
             }
             "pair_pattern" => {
                 if let Some(value) = pattern.child_by_field_name("value") {
-                    self.declare_pattern(b, value, origin, function_scoped);
+                    self.declare_pattern(b, value, origin, function_scoped, None);
                 }
             }
             "object_pattern" | "array_pattern" | "rest_pattern" => {
                 for child in named_children(pattern) {
-                    self.declare_pattern(b, child, origin, function_scoped);
+                    self.declare_pattern(b, child, origin, function_scoped, None);
                 }
             }
             _ => {}
@@ -235,26 +413,37 @@ impl<'s> Lower<'s> {
 
     /// Writes an unknown value to every existing name `pattern` binds.
     fn assign_pattern(&mut self, b: &mut IrBuilder, pattern: Node<'_>) {
+        self.assign_pattern_from(b, pattern, &Value::Unknown);
+    }
+
+    /// Writes `element`, what each part of a pattern's source holds
+    /// (`Dynamic` when the source is), to every existing name `pattern` binds.
+    fn assign_pattern_from(&mut self, b: &mut IrBuilder, pattern: Node<'_>, element: &Value) {
         match pattern.kind() {
             "identifier" | "shorthand_property_identifier_pattern" => {
-                self.assign_unknown(b, self.text(pattern));
+                self.assign_element(b, self.text(pattern), element);
             }
             "assignment_pattern" | "object_assignment_pattern" => {
                 if let Some(right) = pattern.child_by_field_name("right") {
                     self.walk(b, right);
                 }
                 if let Some(left) = pattern.child_by_field_name("left") {
-                    self.assign_pattern(b, left);
+                    self.assign_pattern_from(b, left, element);
+                }
+            }
+            "parenthesized_expression" => {
+                if let Some(inner) = pattern.named_child(0) {
+                    self.assign_pattern_from(b, inner, element);
                 }
             }
             "pair_pattern" => {
                 if let Some(value) = pattern.child_by_field_name("value") {
-                    self.assign_pattern(b, value);
+                    self.assign_pattern_from(b, value, element);
                 }
             }
             "object_pattern" | "array_pattern" | "rest_pattern" => {
                 for child in named_children(pattern) {
-                    self.assign_pattern(b, child);
+                    self.assign_pattern_from(b, child, element);
                 }
             }
             _ => {
@@ -268,7 +457,7 @@ impl<'s> Lower<'s> {
             return Value::Unknown;
         }
         if self.depth >= MAX_DEPTH {
-            self.unsupported = Some("javascript receiver lowering exceeds the nesting limit");
+            self.unsupported = Some(self.dialect.depth_limit());
             return Value::Unknown;
         }
         self.depth += 1;
@@ -291,28 +480,13 @@ impl<'s> Lower<'s> {
             b.push_scope(ScopeKind::Block);
         }
         let statements = named_children(block);
-        if statements.iter().any(|s| {
-            matches!(
-                s.kind(),
-                "function_declaration" | "generator_function_declaration"
-            )
-        }) {
+        if statements.iter().any(|s| is_hoisted(s.kind())) {
             self.declare_ahead(b, &statements);
         }
-        for declaration in statements.iter().filter(|s| {
-            matches!(
-                s.kind(),
-                "function_declaration" | "generator_function_declaration"
-            )
-        }) {
+        for declaration in statements.iter().filter(|s| is_hoisted(s.kind())) {
             self.function_declaration(b, *declaration);
         }
-        for statement in statements.iter().filter(|s| {
-            !matches!(
-                s.kind(),
-                "function_declaration" | "generator_function_declaration"
-            )
-        }) {
+        for statement in statements.iter().filter(|s| !is_hoisted(s.kind())) {
             self.walk(b, *statement);
         }
         if scoped {
@@ -333,6 +507,11 @@ impl<'s> Lower<'s> {
                 let Some(name) = declarator.child_by_field_name("name") else {
                     continue;
                 };
+                let declared = if name.kind() == "identifier" {
+                    self.declared_type(b, self.annotation(declarator))
+                } else {
+                    None
+                };
                 let mut names = Vec::new();
                 pattern_names(name, &mut names);
                 for identifier in names {
@@ -340,10 +519,10 @@ impl<'s> Lower<'s> {
                     if function_scoped {
                         if b.lookup(name).is_none() {
                             let scope = b.function_scope();
-                            b.declare_in(scope, name, BindingOrigin::Local, None);
+                            b.declare_in(scope, name, BindingOrigin::Local, declared);
                         }
                     } else {
-                        b.declare(name, BindingOrigin::Local, None);
+                        b.declare(name, BindingOrigin::Local, declared);
                         self.ahead.push((name, b.current_scope()));
                     }
                 }
@@ -371,12 +550,33 @@ impl<'s> Lower<'s> {
     fn walk_node(&mut self, b: &mut IrBuilder, node: Node<'_>) -> Value {
         match node.kind() {
             "identifier" => match self.resolve(b, self.text(node)) {
+                Some(id) if self.dynamic.contains(&id) => Value::Dynamic,
                 Some(id) => Value::Copy(id),
                 None => Value::Unknown,
             },
-            "parenthesized_expression" => node
+            // `non_null_expression`, `satisfies_expression`, `as_expression`
+            // and `type_assertion` are TypeScript's; the JavaScript grammar
+            // has none of them.
+            "parenthesized_expression" | "non_null_expression" | "satisfies_expression" => node
                 .named_child(0)
                 .map_or(Value::Unknown, |inner| self.walk(b, inner)),
+            "as_expression" | "type_assertion" => {
+                self.children(b, node);
+                if casts_to_dynamic(node, self.source) {
+                    Value::Dynamic
+                } else {
+                    Value::Unknown
+                }
+            }
+            "member_expression" if self.dialect.member_values() => {
+                match member_receiver(node) {
+                    Some(object) => self.use_receiver(b, object),
+                    None => {
+                        self.children(b, node);
+                    }
+                }
+                Value::Unknown
+            }
             "new_expression" => {
                 self.children(b, node);
                 match node.child_by_field_name("constructor") {
@@ -436,7 +636,7 @@ impl<'s> Lower<'s> {
             }
             "break_statement" | "continue_statement" => {
                 if node.child_by_field_name("label").is_some() {
-                    self.unsupported = Some("javascript labeled break or continue");
+                    self.unsupported = Some(self.dialect.labeled_jump());
                 } else if node.kind() == "break_statement" {
                     b.break_out();
                 } else {
@@ -445,7 +645,7 @@ impl<'s> Lower<'s> {
                 Value::Unknown
             }
             "with_statement" => {
-                self.unsupported = Some("javascript with statement");
+                self.unsupported = Some(self.dialect.with_statement());
                 Value::Unknown
             }
             "if_statement" => self.if_statement(b, node),
@@ -468,16 +668,23 @@ impl<'s> Lower<'s> {
         let Some(name) = declarator.child_by_field_name("name") else {
             return;
         };
-        self.declare_pattern(b, name, BindingOrigin::Local, function_scoped);
+        let annotation = self.annotation(declarator);
+        let declared = if name.kind() == "identifier" {
+            self.declared_type(b, annotation)
+        } else {
+            None
+        };
+        self.declare_pattern(b, name, BindingOrigin::Local, function_scoped, declared);
+        self.note_dynamic(b, name, annotation);
         match (name.kind(), evaluated) {
             ("identifier", Some(value)) => {
                 if let Some(id) = b.lookup(self.text(name)) {
                     b.assign(id, value);
                 }
             }
-            (_, Some(_)) => self.assign_pattern(b, name),
+            (_, Some(value)) => self.assign_pattern_from(b, name, &element_of(value)),
             // `let x;` starts undefined on every pass of an enclosing loop;
-            // `var x;` keeps its value.
+            // `var x;` keeps its value. A pinned `let x: T;` is `T` throughout.
             ("identifier", None) if !function_scoped => self.assign_unknown(b, self.text(name)),
             _ => {}
         }
@@ -502,8 +709,8 @@ impl<'s> Lower<'s> {
                 }
             }
             "object_pattern" | "array_pattern" => {
-                self.walk(b, right);
-                self.assign_pattern(b, left);
+                let source = self.walk(b, right);
+                self.assign_pattern_from(b, left, &element_of(source));
                 Value::Unknown
             }
             _ => {
@@ -597,13 +804,14 @@ impl<'s> Lower<'s> {
     }
 
     fn call(&mut self, b: &mut IrBuilder, call: Node<'_>) -> Value {
-        let function = call.child_by_field_name("function");
-        match (call_receiver(call), function) {
-            (Some(receiver), _) => {
-                if let Some(binding) = self.resolve(b, self.text(receiver)) {
-                    b.use_binding(binding, receiver.id());
-                }
-            }
+        // With member values on, the callee walk meets `x.m` itself.
+        let receiver = if self.dialect.member_values() {
+            None
+        } else {
+            call_receiver(call)
+        };
+        match (receiver, call.child_by_field_name("function")) {
+            (Some(receiver), _) => self.use_receiver(b, receiver),
             (None, Some(function)) => {
                 self.walk(b, function);
                 if function.kind() == "identifier" && self.text(function) == "eval" {
@@ -729,9 +937,9 @@ impl<'s> Lower<'s> {
     }
 
     fn for_in_statement(&mut self, b: &mut IrBuilder, node: Node<'_>) -> Value {
-        if let Some(right) = node.child_by_field_name("right") {
-            self.walk(b, right);
-        }
+        let element = node
+            .child_by_field_name("right")
+            .map_or(Value::Unknown, |right| element_of(self.walk(b, right)));
         let declares = node.child_by_field_name("kind").is_some();
         b.push_scope(ScopeKind::Loop);
         let head = b.new_block();
@@ -747,9 +955,9 @@ impl<'s> Lower<'s> {
                 let function_scoped = children_by_field(node, "kind")
                     .iter()
                     .any(|kind| kind.kind() == "var");
-                self.declare_pattern(b, left, BindingOrigin::ForEach, function_scoped);
+                self.declare_pattern(b, left, BindingOrigin::ForEach, function_scoped, None);
             }
-            self.assign_pattern(b, left);
+            self.assign_pattern_from(b, left, &element);
         }
         if let Some(body) = node.child_by_field_name("body") {
             self.walk(b, body);
@@ -816,7 +1024,7 @@ impl<'s> Lower<'s> {
             b.switch_to(block);
             b.push_scope(ScopeKind::Catch);
             if let Some(parameter) = catch.child_by_field_name("parameter") {
-                self.declare_pattern(b, parameter, BindingOrigin::CatchParam, false);
+                self.declare_pattern(b, parameter, BindingOrigin::CatchParam, false, None);
                 self.assign_pattern(b, parameter);
             }
             if let Some(body) = catch.child_by_field_name("body") {
@@ -844,11 +1052,19 @@ mod tests {
     /// `(method, text)` of every `x.method()` whose `x` is an identifier, in
     /// method-name order; `text` is `known T`, `unknown Cause` or `none`.
     fn receivers(source: &str) -> Vec<(String, String)> {
+        receivers_in(tree_sitter_javascript::LANGUAGE.into(), source)
+    }
+
+    fn parse(language: tree_sitter::Language, source: &str) -> tree_sitter::Tree {
         let mut parser = tree_sitter::Parser::new();
-        parser
-            .set_language(&tree_sitter_javascript::LANGUAGE.into())
-            .unwrap();
-        let tree = parser.parse(source, None).unwrap();
+        parser.set_language(&language).unwrap();
+        parser.parse(source, None).unwrap()
+    }
+
+    /// [`receivers`] of `source` parsed with `language`, lowered as
+    /// JavaScript.
+    fn receivers_in(language: tree_sitter::Language, source: &str) -> Vec<(String, String)> {
+        let tree = parse(language, source);
         let bytes = source.as_bytes();
         let found = analyze_file(&JsLowering, &(), tree.root_node(), bytes, Path::new("t.js"));
         let mut out = Vec::new();
@@ -987,5 +1203,50 @@ mod tests {
             only("function f() { const o = new A(); o?.m(); }"),
             "known A"
         );
+    }
+
+    #[test]
+    fn test_lower_parenthesized_for_of_target_rebinds_receiver() {
+        assert_eq!(
+            only("function f(xs) { let o = new A(); for ((o) of xs) { o.m(); } }"),
+            "unknown NoEvidence"
+        );
+    }
+
+    /// Stands for: the JavaScript dialect reads no annotation even when the
+    /// tree carries one, so the guard is the dialect, not the grammar.
+    #[test]
+    fn test_lower_javascript_dialect_ignores_type_annotation() {
+        let found = receivers_in(
+            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            "function f() { const o: A = make(); o.m(); }",
+        );
+        assert_eq!(
+            found,
+            vec![("m".to_string(), "unknown NoEvidence".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_lower_method_value_is_not_a_receiver() {
+        let source = "function f(xs) { const o = new A(); xs.forEach(o.m); }";
+        let tree = parse(tree_sitter_javascript::LANGUAGE.into(), source);
+        let found = analyze_file(
+            &JsLowering,
+            &(),
+            tree.root_node(),
+            source.as_bytes(),
+            Path::new("t.js"),
+        );
+        let mut stack = vec![tree.root_node()];
+        let mut value = None;
+        while let Some(n) = stack.pop() {
+            if n.kind() == "arguments" {
+                value = n.named_child(0).and_then(member_receiver);
+            }
+            let mut cursor = n.walk();
+            stack.extend(n.named_children(&mut cursor));
+        }
+        assert!(found.receiver_at(value.unwrap()).is_none());
     }
 }
