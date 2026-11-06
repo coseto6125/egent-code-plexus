@@ -15,6 +15,7 @@ use crate::framework_helpers::{
     collect_typeorm_transactional_scopes, has_import_from, node_span, push_blind_spot,
     SCALAR_VALUE_KINDS,
 };
+use crate::function_meta::declared_type_params;
 use crate::indirect_dispatch::{collect_js_param_names, detect_js_ts_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use crate::schema_field::SchemaFieldConfig;
@@ -39,6 +40,20 @@ const BLIND_DYNAMIC_REQUIRE: (&str, &str) = (
     "ts-dynamic-require",
     "require(<expr>) whose specifier is no plain string literal (computed, escaped or blank) — dynamic CommonJS load; the target module is not read statically",
 );
+
+/// The type-parameter marker of a generic class, interface or type alias;
+/// `None` for a callable, a declaration without a `<..>` list, or an empty one.
+fn type_params_decorator(root: &Node<'_>, kind: NodeKind, source: &[u8]) -> Option<String> {
+    if !matches!(
+        kind,
+        NodeKind::Class | NodeKind::Interface | NodeKind::Typedef
+    ) {
+        return None;
+    }
+    let list = root.child_by_field_name("type_parameters")?;
+    let names = declared_type_params(&list, source);
+    (!names.is_empty()).then(|| RawNode::type_params_marker(names.iter().map(String::as_str)))
+}
 
 /// True iff the `object` node has ≥ `min` `pair` children where every
 /// value is a scalar literal (number / string / bool / null).
@@ -652,6 +667,8 @@ impl<const TSX: bool> ParseSpec for TsSpec<TSX> {
             }
             if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                 let span = node_span(&root);
+                let mut decorators = decorators;
+                decorators.extend(type_params_decorator(&root, k, source));
 
                 let mut existing_found = false;
                 for node in &mut cx.nodes {
@@ -982,5 +999,71 @@ impl<const TSX: bool> ParseSpec for TsSpec<TSX> {
         category: FileCategory,
     ) -> Vec<RawFunctionMeta> {
         crate::function_meta::typescript::extract(root, source, nodes, category)
+    }
+}
+
+#[cfg(test)]
+mod type_param_marker_tests {
+    use super::TypeScriptProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use ecp_core::analyzer::types::RawNode;
+    use ecp_core::graph::NodeKind;
+    use std::path::Path;
+
+    fn params(src: &str, name: &str) -> Vec<String> {
+        let graph = TypeScriptProvider::new()
+            .expect("provider")
+            .parse_file(Path::new("t.ts"), src.as_bytes())
+            .expect("parse");
+        graph
+            .nodes
+            .iter()
+            .find(|n| n.name == name)
+            .map(|n| n.declared_type_params().map(str::to_string).collect())
+            .unwrap_or_else(|| panic!("no node {name}: {:?}", graph.nodes))
+    }
+
+    #[test]
+    fn test_type_params_marker_typescript_generic_declarations_round_trip() {
+        assert_eq!(params("class Box<T> {}", "Box"), ["T"]);
+        assert_eq!(
+            params("interface Pair<K, V extends K> {}", "Pair"),
+            ["K", "V"]
+        );
+        assert_eq!(params("type Maybe<T> = T | null;", "Maybe"), ["T"]);
+        assert_eq!(
+            params("export abstract class Repo<E, ID> {}", "Repo"),
+            ["E", "ID"]
+        );
+    }
+
+    #[test]
+    fn test_type_params_marker_typescript_plain_declaration_has_none() {
+        assert!(params("class Plain {}", "Plain").is_empty());
+        assert!(params("interface Plain { a: number }", "Plain").is_empty());
+    }
+
+    #[test]
+    fn test_type_params_marker_typescript_callable_has_none() {
+        let graph = TypeScriptProvider::new()
+            .expect("provider")
+            .parse_file(
+                Path::new("t.ts"),
+                b"function id<T>(x: T): T { return x }\nclass C { put<T>(x: T) {} }",
+            )
+            .expect("parse");
+        for n in graph
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
+        {
+            assert!(
+                !n.decorators
+                    .iter()
+                    .any(|d| RawNode::is_type_params_marker(d)),
+                "{}",
+                n.name
+            );
+        }
     }
 }

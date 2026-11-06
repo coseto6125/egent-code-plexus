@@ -3,6 +3,12 @@
   (visibility_modifier)? @export
   name: (type_identifier) @struct_item.name) @struct
 
+;; Unions — a C-layout `union U { .. }` is a type declaration like a struct, so
+;; a path through its `impl` block binds to it and not to an `Impl` stand-in.
+(union_item
+  (visibility_modifier)? @export
+  name: (type_identifier) @struct_item.name) @struct
+
 ;; Enums
 (enum_item
   (visibility_modifier)? @export

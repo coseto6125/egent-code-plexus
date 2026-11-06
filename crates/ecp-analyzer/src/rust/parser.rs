@@ -15,6 +15,7 @@ use crate::framework_confidence;
 use crate::framework_helpers::{
     collect_rust_transactional_scopes, has_import_from, node_span, MODULE_LEVEL_SOURCE,
 };
+use crate::function_meta::declared_type_params;
 use crate::indirect_dispatch::{collect_rust_indirect_param_types, detect_rust_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::parse_prof::Pass;
@@ -131,6 +132,21 @@ pub struct RustFile {
     actix_handler_captures: Vec<ActixCapture>,
     /// Written by the calls step, read by the indirect step.
     local_types: Option<LocalTypes>,
+}
+
+/// The type-parameter marker of a generic struct, enum, union, trait, impl
+/// or type alias; `None` for a callable, a declaration without a `<..>`
+/// list, or one that declares no type variable.
+fn type_params_decorator(root: &Node<'_>, kind: NodeKind, source: &[u8]) -> Option<String> {
+    if !matches!(
+        kind,
+        NodeKind::Struct | NodeKind::Enum | NodeKind::Trait | NodeKind::Impl | NodeKind::Typedef
+    ) {
+        return None;
+    }
+    let list = root.child_by_field_name("type_parameters")?;
+    let names = declared_type_params(&list, source);
+    (!names.is_empty()).then(|| RawNode::type_params_marker(names.iter().map(String::as_str)))
 }
 
 impl ParseSpec for RustSpec {
@@ -352,6 +368,8 @@ impl ParseSpec for RustSpec {
 
         if let (Some(n), Some(k), Some(root)) = (d.name, d.kind, d.root) {
             if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
+                let mut decorators = decorators;
+                decorators.extend(type_params_decorator(&root, k, source));
                 let impl_name;
                 let name_str = if k == NodeKind::Impl {
                     // An impl whose self type has no name emits nothing,
@@ -825,5 +843,95 @@ fn push_wildcard(node: tree_sitter::Node, prefix: &str, w: UseWalk<'_>, out: &mu
         .unwrap_or_else(|| prefix.to_string());
     if !module.is_empty() {
         push_import(out, &module, "*", None);
+    }
+}
+
+#[cfg(test)]
+mod type_param_marker_tests {
+    use super::RustProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use ecp_core::analyzer::types::RawNode;
+    use ecp_core::graph::NodeKind;
+    use std::path::Path;
+
+    fn parse(src: &str) -> Vec<RawNode> {
+        RustProvider::new()
+            .expect("provider")
+            .parse_file(Path::new("src/lib.rs"), src.as_bytes())
+            .expect("parse")
+            .nodes
+    }
+
+    fn params(src: &str, kind: NodeKind, name: &str) -> Vec<String> {
+        let nodes = parse(src);
+        nodes
+            .iter()
+            .find(|n| n.kind == kind && n.name == name)
+            .map(|n| n.declared_type_params().map(str::to_string).collect())
+            .unwrap_or_else(|| panic!("no {kind:?} {name}: {nodes:?}"))
+    }
+
+    #[test]
+    fn test_type_params_marker_rust_generic_declarations_round_trip() {
+        assert_eq!(params("struct Box<T>(T);", NodeKind::Struct, "Box"), ["T"]);
+        assert_eq!(
+            params("enum Either<L, R> { A(L), B(R) }", NodeKind::Enum, "Either"),
+            ["L", "R"]
+        );
+        assert_eq!(
+            params("union U<T: Copy> { x: T }", NodeKind::Struct, "U"),
+            ["T"]
+        );
+        assert_eq!(
+            params("trait Tr<A, B> {}", NodeKind::Trait, "Tr"),
+            ["A", "B"]
+        );
+        assert_eq!(
+            params("type Pair<T> = (T, T);", NodeKind::Typedef, "Pair"),
+            ["T"]
+        );
+        assert_eq!(
+            params(
+                "struct B<T>(T);\nimpl<T: Clone> B<T> {}",
+                NodeKind::Impl,
+                "B"
+            ),
+            ["T"]
+        );
+    }
+
+    #[test]
+    fn test_type_params_marker_rust_lifetime_only_and_plain_have_none() {
+        assert!(params("struct Plain;", NodeKind::Struct, "Plain").is_empty());
+        assert!(params("struct R<'a>(&'a str);", NodeKind::Struct, "R").is_empty());
+    }
+
+    #[test]
+    fn test_type_params_marker_rust_callable_has_none() {
+        for n in parse("fn id<T>(x: T) -> T { x }\nstruct S;\nimpl S { fn put<T>(&self, _: T) {} }")
+            .iter()
+            .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
+        {
+            assert!(
+                !n.decorators
+                    .iter()
+                    .any(|d| RawNode::is_type_params_marker(d)),
+                "{}",
+                n.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_file_rust_union_emits_one_struct_node_with_impl_owner() {
+        let nodes = parse("pub union U { pub x: u32 }\nimpl U { pub fn mk() -> U { U { x: 0 } } }");
+        let unions: Vec<_> = nodes
+            .iter()
+            .filter(|n| n.name == "U" && n.kind == NodeKind::Struct)
+            .collect();
+        assert_eq!(unions.len(), 1, "{nodes:?}");
+        assert!(unions[0].is_exported);
+        let mk = nodes.iter().find(|n| n.name == "mk").expect("mk");
+        assert_eq!(mk.owner_class.as_deref(), Some("U"));
     }
 }
