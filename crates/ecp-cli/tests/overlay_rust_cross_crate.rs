@@ -2714,6 +2714,48 @@ fn test_overlay_rust_bare_path_without_manifest_matches_reindex() {
     }
 }
 
+/// With no `Cargo.toml`, the overlay places a child module by the parent's
+/// text as the reindex does: a `#[path]` module at its attribute (beside the
+/// parent, or above it through `..`), an inline `mod a { .. }` in the parent
+/// itself. The stray `src/a.rs` that the layout alone would pick never binds.
+#[test]
+fn test_overlay_rust_path_attribute_and_inline_mod_without_manifest_match_reindex() {
+    let top = "pub fn top() {}\n";
+    for (label, lib, placed, expected) in [
+        (
+            "path attribute",
+            "#[path = \"impl_a.rs\"]\nmod a;\npub fn run() { a::top(); }\n",
+            Some("src/impl_a.rs"),
+            vec![("src/impl_a.rs", "top")],
+        ),
+        (
+            "parent-relative path attribute",
+            "#[path = \"../real.rs\"]\nmod a;\npub fn run() { a::top(); }\n",
+            Some("real.rs"),
+            vec![("real.rs", "top")],
+        ),
+        (
+            "inline mod",
+            "mod a { pub fn top() {} }\npub fn run() { a::top(); }\n",
+            None,
+            vec![("src/lib.rs", "top")],
+        ),
+    ] {
+        let mut layout = vec![("src/lib.rs", lib), ("src/a.rs", top)];
+        layout.extend(placed.map(|path| (path, top)));
+        let files = crate_files(&layout, false);
+        for edited in [lib.to_string(), one_line_edit(lib)] {
+            let (reindex, overlay) = reindex_and_overlay(&files, "src/lib.rs", &edited, &["run"]);
+            assert!(
+                !overlay.iter().any(|call| call.callee_file == "src/a.rs"),
+                "{label}: the overlay binds the stray layout file: {overlay:#?}"
+            );
+            assert_reindex_binds(&reindex, None, &expected, label);
+            assert_eq!(overlay, reindex, "{label}");
+        }
+    }
+}
+
 /// Stands for (A15c): a glob import resolves its members, in the overlay as
 /// in the reindex, and the undeclared `src/registry.rs` never binds. The
 /// import is the dirty line: adding and removing `use other::*;` flips the

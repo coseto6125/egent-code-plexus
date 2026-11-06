@@ -7,10 +7,10 @@
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::LocalGraph;
-use ecp_core::graph::{ArchivedZeroCopyGraph, RelType};
+use ecp_core::graph::{ArchivedZeroCopyGraph, RelType, ZeroCopyGraph};
 use ecp_core::session::closure::{invalidation_closure, ConfigEdits};
 use ecp_core::session::merged::MergedGraph;
-use ecp_core::session::view::{CallGap, OverlayFileInput, OverlayView};
+use ecp_core::session::view::{CallGap, OverlayFileInput, OverlayFileRecords, OverlayView};
 use std::path::Path;
 
 /// One edge by identity, never by node index or uid (a uid collision would
@@ -113,6 +113,28 @@ fn edited_tree<'s>(
     edited
 }
 
+/// The index of `tree`, parsed by `parse`, built by a builder from
+/// `new_builder` rooted at a temporary directory that holds every file of
+/// the tree, as `ecp admin index` builds from the repo root: the Rust module
+/// tree and every other on-disk read see the same files as the parses.
+pub fn build_from_root(
+    new_builder: &dyn Fn() -> GraphBuilder,
+    parse: &dyn Fn(&str, &str) -> LocalGraph,
+    tree: &[(&str, &str)],
+) -> ZeroCopyGraph {
+    let root = tempfile::tempdir().expect("tempdir");
+    for (rel, source) in tree {
+        let path = root.path().join(rel);
+        std::fs::create_dir_all(path.parent().expect("a file has a directory")).unwrap();
+        std::fs::write(&path, source).unwrap();
+    }
+    let mut builder = new_builder().with_repo_root(root.path().to_path_buf());
+    for (path, source) in tree {
+        builder.add_graph(parse(path, source));
+    }
+    builder.build()
+}
+
 /// Index `files` with builders from `new_builder`, parsed by `parse`, and
 /// compare the `rel` edges whose source `selects` between the reindex of the
 /// edited tree and the overlay of `edits` over the base index.
@@ -124,13 +146,7 @@ pub fn edges_after_edit_with(
     rel: RelType,
     selects: &dyn Fn(&str, &str) -> bool,
 ) -> EdgeParity {
-    let build_all = |tree: &[(&str, &str)]| {
-        let mut builder = new_builder();
-        for (path, source) in tree {
-            builder.add_graph(parse(path, source));
-        }
-        builder.build()
-    };
+    let build_all = |tree: &[(&str, &str)]| build_from_root(new_builder, parse, tree);
     let full =
         rkyv::to_bytes::<rkyv::rancor::Error>(&build_all(&edited_tree(files, edits))).unwrap();
     let full = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&full).unwrap();
@@ -160,10 +176,14 @@ fn overlay_view(
     edits: &[(&str, &str)],
     fragment: &dyn Fn(&mut OverlayFileInput),
 ) -> OverlayView {
-    let mut inputs: Vec<OverlayFileInput> = edits
+    let fragment_of = |local: LocalGraph| {
+        let records = OverlayFileRecords::from_local(&local);
+        (OverlayFileInput::from(local), records)
+    };
+    let (mut inputs, mut records): (Vec<OverlayFileInput>, Vec<OverlayFileRecords>) = edits
         .iter()
-        .map(|(path, source)| parse(path, source).into())
-        .collect();
+        .map(|(path, source)| fragment_of(parse(path, source)))
+        .unzip();
     let closure = invalidation_closure(base, &inputs, &[]);
     let tree = edited_tree(files, edits);
     let text = |rel: &str| {
@@ -171,16 +191,18 @@ fn overlay_view(
             .find(|(path, _)| *path == rel)
             .map(|&(_, source)| source)
     };
-    inputs.extend(closure.paths.iter().map(|path| {
+    for path in &closure.paths {
         let source = text(path).unwrap_or_else(|| panic!("closure file {path} is not in the tree"));
-        OverlayFileInput::from(parse(path, source))
-    }));
+        let (input, record) = fragment_of(parse(path, source));
+        inputs.push(input);
+        records.push(record);
+    }
     inputs.iter_mut().for_each(fragment);
     let sources = |rel: &str| text(rel).map(str::to_string);
     OverlayView::build_with_configs(
         base,
         &inputs,
-        &[],
+        &records,
         &[],
         &closure.stale,
         &ConfigEdits::default(),
@@ -209,11 +231,8 @@ pub fn call_gaps_after_edit_with(
     edits: &[(&str, &str)],
     fragment: &dyn Fn(&mut OverlayFileInput),
 ) -> Vec<CallGap> {
-    let mut builder = GraphBuilder::new();
-    for (path, source) in files {
-        builder.add_graph(parse(path, source));
-    }
-    let base = rkyv::to_bytes::<rkyv::rancor::Error>(&builder.build()).unwrap();
+    let base = build_from_root(&GraphBuilder::new, parse, files);
+    let base = rkyv::to_bytes::<rkyv::rancor::Error>(&base).unwrap();
     let base = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&base).unwrap();
     let view = overlay_view(base, parse, files, edits, fragment);
     let cached = OverlayView::from_cache_bytes(&view.to_cache_bytes(), base.nodes.len())

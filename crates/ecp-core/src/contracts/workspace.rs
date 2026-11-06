@@ -450,6 +450,15 @@ impl Scope {
 }
 
 impl WorkspaceFacts {
+    /// Whether the table holds a Cargo scope. Without one, the index and the
+    /// overlay both lay out Rust as manifest-less trees, so the two sides
+    /// decide that layout from this one stored fact.
+    pub fn has_cargo_scope(&self) -> bool {
+        self.scopes
+            .iter()
+            .any(|scope| scope.ecosystem == Ecosystem::Cargo)
+    }
+
     /// The table, when every invariant holds.
     pub fn new(scopes: Vec<Scope>, names: Vec<ScopeName>) -> Result<Self, WorkspaceFactsError> {
         let facts = Self { scopes, names };

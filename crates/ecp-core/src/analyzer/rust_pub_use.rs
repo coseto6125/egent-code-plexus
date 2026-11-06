@@ -7,6 +7,7 @@
 
 use crate::analyzer::ladder::{Published, ReExport};
 use crate::analyzer::rust_paths::rust_module_dir;
+use crate::registry::os_path_to_slash;
 use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -170,6 +171,42 @@ pub fn mod_steps<'t>(
             Some((name, child))
         })
         .collect()
+}
+
+/// The steps a manifest-less module tree takes from the Rust file `file`
+/// whose text is `text`: the [`mod_steps`] of an ordinary module file, each
+/// child spelled as a `/` path with no `.` or `..` component, kept when
+/// `held` holds that spelling. The index's loose walk and the overlay's
+/// loose modules both step here, so a `#[path]` module and an inline
+/// `mod a { .. }` (which takes no step) place alike on the two sides.
+pub fn loose_steps<'t>(
+    text: &'t Stripped,
+    file: &str,
+    held: impl Fn(&str) -> bool,
+) -> Vec<(&'t str, String)> {
+    let spell = |path: &Path| os_path_to_slash(&lexical_normal(path)).into_owned();
+    mod_steps(text, &path_attrs(text), Path::new(file), false, |path| {
+        held(&spell(path))
+    })
+    .into_iter()
+    .map(|(name, child)| (name, spell(&child)))
+    .filter(|(_, child)| held(child))
+    .collect()
+}
+
+/// `path` without its `.` and `..` components, lexically: a `#[path]` module
+/// steps to `dir/../x.rs`, which names the file `x.rs`.
+fn lexical_normal(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir if out.pop() => {}
+            part => out.push(part),
+        }
+    }
+    out
 }
 
 /// The file of the module `name` that the Rust file `file` declares with a

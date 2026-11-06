@@ -30,7 +30,7 @@
 use crate::resolution::index::SymbolTable;
 use ecp_core::analyzer::ladder::{self, Namespace, Published, TreeItem};
 use ecp_core::analyzer::rust_pub_use::{
-    self, mod_steps, path_attrs, pub_use_entries, strip_comments, PubUseEntry,
+    self, loose_steps, mod_steps, path_attrs, pub_use_entries, strip_comments, PubUseEntry,
 };
 use ecp_core::contracts::workspace::{
     segment_wildcard, ConfigPresence, ConfigRead, Ecosystem, Membership, NameRank, Scope, ScopeId,
@@ -80,7 +80,7 @@ pub struct RustWorkspaceModTree {
     /// Contract C2's Cargo rows, from the manifest parse above: one scope
     /// per workspace member, and the names that reach it.
     workspace: WorkspaceFacts,
-    /// With no Cargo target: every Rust file of the index's build input,
+    /// With no Cargo scope row: every Rust file of the index's build input,
     /// keyed by repo-relative path, with the tree its own `mod name;`
     /// declarations walk (built on first use). The file is the walk's root,
     /// so `crate` names nothing in it. The keys are also the files the walk
@@ -108,7 +108,7 @@ impl RustWorkspaceModTree {
     }
 
     /// [`Self::build`] where `files` are the repo-relative paths of the
-    /// index's build input: with no Cargo target, the Rust ones among them
+    /// index's build input: with no Cargo scope row, the Rust ones among them
     /// are the files a manifest-less tree is made of.
     pub fn build_with_files<'f>(
         workspace_root: &Path,
@@ -197,7 +197,7 @@ impl RustWorkspaceModTree {
             out.crates.entry(alias).or_insert(entry);
         }
         out.workspace = rows.finish();
-        if out.targets.is_empty() {
+        if !out.workspace.has_cargo_scope() {
             out.loose = rust_files(files);
         }
         out
@@ -300,15 +300,13 @@ impl RustWorkspaceModTree {
         index
     }
 
-    /// The relative-walk tree of `caller_file` when no Cargo target exists
-    /// (a manifest-less tree): `mod a;` in `F` proves `dir(F)/a.rs` or
+    /// The relative-walk tree of `caller_file` when the Cargo rows hold no
+    /// Cargo scope (a manifest-less tree, or members that all sit outside
+    /// the repo root): `mod a;` in `F` proves `dir(F)/a.rs` or
     /// `dir(F)/a/mod.rs` when `F` is `lib.rs` / `main.rs` / `mod.rs`, else
-    /// `dir(F)/stem(F)/a.rs`. `None` with a target, or for a file the build
-    /// input does not hold.
+    /// `dir(F)/stem(F)/a.rs`. `None` with a Cargo scope, or for a file the
+    /// build input does not hold.
     fn loose_scope(&self, caller_file: &str) -> Option<TreeScope<'_>> {
-        if !self.targets.is_empty() {
-            return None;
-        }
         let tree = self
             .loose
             .get(caller_file)?
@@ -593,12 +591,12 @@ fn rust_files<'f>(
     files
         .into_iter()
         .filter(|file| Path::new(file).extension().is_some_and(|ext| ext == "rs"))
-        .map(|file| (file.to_string(), OnceLock::new()))
+        .map(|file| (os_path_to_slash(file).into_owned(), OnceLock::new()))
         .collect()
 }
 
-/// The tree `root_file` walks with no Cargo target: from each file, the
-/// steps [`mod_steps`] lists, as the index walks a crate, but where a step
+/// The tree `root_file` walks with no Cargo scope row: from each file, the
+/// steps [`loose_steps`] lists, as the index walks a crate, but where a step
 /// lands only on a file of `files` and the root's children sit in its module
 /// directory. Modules map to `workspace_canon` joined with the file's path,
 /// the form [`IndexModuleTree::module_file`] reads back.
@@ -616,12 +614,8 @@ fn build_loose_tree(
             continue;
         };
         let clean = strip_comments(&src);
-        let attrs = path_attrs(&clean);
-        let held = |p: &Path| files.contains_key(os_path_to_slash(&normalize(p)).as_ref());
-        for (name, child) in mod_steps(&clean, &attrs, Path::new(&file), false, held) {
-            let child = normalize(&child);
-            let child = os_path_to_slash(&child).into_owned();
-            if !files.contains_key(&child) || !visited.insert(child.clone()) {
+        for (name, child) in loose_steps(&clean, &file, |p| files.contains_key(p)) {
+            if !visited.insert(child.clone()) {
                 continue;
             }
             let mut child_path = mod_path.clone();
@@ -631,21 +625,6 @@ fn build_loose_tree(
         }
     }
     tree
-}
-
-/// `path` without its `.` and `..` components, lexically: a `#[path]` module
-/// steps to `dir/../x.rs`, which names the key `x.rs` of the file set.
-fn normalize(path: &Path) -> PathBuf {
-    use std::path::Component;
-    let mut out = PathBuf::new();
-    for part in path.components() {
-        match part {
-            Component::CurDir => {}
-            Component::ParentDir if out.pop() => {}
-            part => out.push(part),
-        }
-    }
-    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1588,6 +1567,59 @@ mod tests {
             loose_place(&files, "src/lib.rs", "self::b::top"),
             found("src/lib.rs", "b")
         );
+    }
+
+    /// A workspace whose one member sits outside the repo root registers a
+    /// target but stores no Cargo scope row. The overlay reads only the
+    /// stored rows, so the index lays the repo out as manifest-less too.
+    #[test]
+    fn test_loose_tree_member_outside_root_stores_no_scope_and_walks_loose() {
+        let outer = tempfile::tempdir().unwrap();
+        let repo = outer.path().join("repo");
+        let write = |path: &Path, text: &str| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        let outside = outer.path().join("outside");
+        write(
+            &outside.join("Cargo.toml"),
+            "[package]\nname = \"outside\"\n",
+        );
+        write(&outside.join("src/lib.rs"), "pub fn f() {}\n");
+        write(
+            &repo.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"../outside\"]\n",
+        );
+        let held = [
+            ("src/lib.rs", "pub mod a;\n"),
+            ("src/a.rs", "pub fn top() {}\n"),
+        ];
+        for (rel, text) in held {
+            write(&repo.join(rel), text);
+        }
+        let tree = RustWorkspaceModTree::build_with_files(&repo, held.iter().map(|(rel, _)| *rel));
+        assert!(!tree.workspace_facts().has_cargo_scope());
+        let item = ladder::module_tree_item(
+            &tree.facts(&repo),
+            "src/lib.rs",
+            "self::a::top",
+            Namespace::Type,
+        );
+        assert!(
+            matches!(&item, Some(TreeItem::Found { file, item }) if file == "src/a.rs" && item == "top"),
+            "{item:?}"
+        );
+    }
+
+    /// The manifest-less file set keys each file by its `/` spelling, the
+    /// spelling every lookup of the walk uses, whatever the walker wrote.
+    #[cfg(windows)]
+    #[test]
+    fn test_rust_files_backslash_input_keys_slash_paths() {
+        let files = rust_files(["src\\lib.rs", "src\\a\\mod.rs", "src\\README.md"]);
+        let mut keys: Vec<&str> = files.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["src/a/mod.rs", "src/lib.rs"]);
     }
 
     /// `(name, rank, scope root)` of every name row, in table order.
