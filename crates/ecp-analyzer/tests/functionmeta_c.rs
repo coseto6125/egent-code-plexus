@@ -252,3 +252,59 @@ fn test_extract_params_unnamed_void_pointer_counts_one_parameter() {
     );
     assert!(params_of(&g, "none").is_empty());
 }
+
+/// Stands for: `int f();` (unspecified parameter list) and `int f(void);`
+/// (a prototype with zero parameters) are different declarations, so the
+/// stored meta of the two differs. The field that tells them apart is the
+/// fix's choice; the whole record compares here, the node index aside.
+#[test]
+fn test_extract_params_unspecified_and_void_forms_differ() {
+    let unspecified = analyze("int f();\n");
+    let void_list = analyze("int f(void);\n");
+    let record = |g: &ZeroCopyGraph| {
+        let m = meta(g, "f");
+        (
+            m.flags,
+            params_of(g, "f"),
+            m.return_type.resolve(g.string_pool.as_slice()).to_string(),
+        )
+    };
+    assert_ne!(record(&unspecified), record(&void_list));
+    // Control: each form reads the same twice.
+    assert_eq!(record(&unspecified), record(&analyze("int f();\n")));
+    assert_eq!(record(&void_list), record(&analyze("int f(void);\n")));
+}
+
+/// Stands for: a definition with a body is no prototype, `extern` or not,
+/// while `extern` stays a fact of its own so linkage still reads it. The
+/// flag word of `extern int ext(int x) { .. }` differs from the one of the
+/// bodiless `extern int ext(int);` (the prototype marker) and from the one
+/// of the plain definition (the storage class).
+#[test]
+fn test_extract_function_meta_c_extern_definition_with_body_is_not_prototype() {
+    let flags = |src: &str| meta(&analyze(src), "ext").flags;
+    let extern_definition = flags("extern int ext(int x) { return x; }\n");
+    let extern_declaration = flags("extern int ext(int);\n");
+    let plain_definition = flags("int ext(int x) { return x; }\n");
+    assert_ne!(
+        extern_definition, extern_declaration,
+        "a body and no body are not one prototype state"
+    );
+    assert_ne!(
+        extern_definition, plain_definition,
+        "the `extern` storage class stays readable"
+    );
+}
+
+/// Stands for: a declaration without a body is a prototype, with or without
+/// `extern`, and a plain definition is not (the control of the extern case).
+#[test]
+fn test_extract_function_meta_c_extern_declaration_without_body_is_prototype() {
+    let prototype = meta(&analyze("int ext(int);\n"), "ext").flags;
+    let extern_prototype = meta(&analyze("extern int ext(int);\n"), "ext").flags;
+    let definition = meta(&analyze("int ext(int x) { return x; }\n"), "ext").flags;
+    assert!(meta(&analyze("extern int ext(int);\n"), "ext").is_extern());
+    assert!(meta(&analyze("int ext(int);\n"), "ext").is_extern());
+    assert_ne!(prototype, definition);
+    assert_ne!(extern_prototype, definition);
+}

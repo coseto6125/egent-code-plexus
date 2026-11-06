@@ -241,3 +241,59 @@ fn test_overlay_dirty_caller_calls_match_reindex_across_14_languages() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
+
+/// Stands for (A14): a function-pointer data member is a node of its class
+/// (the parser the overlay shares emits it), so a member call beside a
+/// same-named free function resolves the same in the overlay as in the
+/// reindex, for C++ and C, when the caller or the struct is the dirty file.
+#[test]
+fn test_overlay_function_pointer_member_calls_match_reindex() {
+    struct Row {
+        language: &'static str,
+        files: &'static [(&'static str, &'static str)],
+        edits: &'static [(&'static str, &'static str)],
+        file: &'static str,
+    }
+    let rows = [
+        Row {
+            language: "C++ caller dirty",
+            files: &[(
+                "ops.cpp",
+                "struct Ops { int count; };\nvoid cb(int v) {}\nvoid run(Ops& o) { }\n",
+            )],
+            edits: &[(
+                "ops.cpp",
+                "struct Ops { void (*cb)(int value); int count; };\nvoid cb(int v) {}\nvoid run(Ops& o) { cb(2); o.cb(1); }\n",
+            )],
+            file: "ops.cpp",
+        },
+        Row {
+            language: "C dirty struct",
+            files: &[(
+                "ops.c",
+                "struct Ops { int count; };\nvoid cb(int v) {}\nvoid run(struct Ops *o) { }\n",
+            )],
+            edits: &[(
+                "ops.c",
+                "struct Ops { void (*cb)(int value); int count; };\nvoid cb(int v) {}\nvoid run(struct Ops *o) { cb(2); o->cb(1); }\n",
+            )],
+            file: "ops.c",
+        },
+    ];
+    let mut failures = Vec::new();
+    for row in rows {
+        let parity = calls_after_edit(&parse, row.files, row.edits, &|file, _| file == row.file);
+        if parity.reindex.is_empty() {
+            failures.push(format!(
+                "{}: the reindex resolved no call, so the comparison proves nothing",
+                row.language
+            ));
+        } else if parity.overlay != parity.reindex {
+            failures.push(format!(
+                "{}: overlay {:#?}\nreindex {:#?}",
+                row.language, parity.overlay, parity.reindex
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}

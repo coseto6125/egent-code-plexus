@@ -1165,3 +1165,27 @@ fn test_qualified_function_reference_php_this_callable_in_anonymous_class_return
     let g = graph(&php(), &[("Sorter.php", src)]);
     assert_eq!(function_refs(&g, "sortAll"), none());
 }
+
+/// Stands for (A15f): a qualified function value whose namespace function is
+/// declared in a header and defined in a `.cpp` binds the definition, as the
+/// bare value does, and never the header declaration.
+#[test]
+fn test_qualified_function_reference_cpp_header_declaration_binds_definition() {
+    let files: &[(&str, &str)] = &[
+        ("types.hpp", "namespace ns { void cb_qual(int &x); }\nvoid cb_bare(int &x);\n"),
+        (
+            "cb.cpp",
+            "#include \"types.hpp\"\nvoid cb_bare(int &x) {}\nvoid ns::cb_qual(int &x) {}\n",
+        ),
+        (
+            "main.cpp",
+            "#include \"types.hpp\"\n#include <algorithm>\n#include <vector>\n\
+             void use_qual(std::vector<int> a) { std::for_each(a.begin(), a.end(), &ns::cb_qual); }\n\
+             void use_bare(std::vector<int> a) { std::for_each(a.begin(), a.end(), cb_bare); }\n",
+        ),
+    ];
+    let provider = CppProvider::new().unwrap();
+    assert_one_cross_file(&refs(&provider, files, "use_qual"), "cb.cpp", "cb_qual");
+    // Control: the bare value binds its definition already.
+    assert_one_cross_file(&refs(&provider, files, "use_bare"), "cb.cpp", "cb_bare");
+}
