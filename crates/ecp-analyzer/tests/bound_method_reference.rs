@@ -853,7 +853,7 @@ fn reference_owners(g: &ZeroCopyGraph, source: &str) -> Vec<String> {
 
 // Stands for: a name that a nearer function declares is not the outer
 // annotated one. Each case below reads `obj.m` in an inner function of
-// `run(xs, obj: Cls, loose)`. main binds `Cls.m` in the untyped ones.
+// `run(xs, obj: Cls, loose)`; the untyped ones bind nothing.
 #[test]
 fn test_bound_method_reference_python_untyped_inner_parameter_returns_no_edge() {
     let g = python_graph("def inner(obj):\n        return list(map(obj.m, xs))\n    return inner");
@@ -1092,7 +1092,7 @@ fn test_bound_method_reference_typescript_for_of_member_target_keeps_outer_type(
 
 // Stands for: `this` is the class only in a method of its body (or a field
 // initializer, or an arrow chain up to one); a plain `function` and an
-// object-literal method bind their own `this`. main binds `C.m` in both.
+// object-literal method bind their own `this`, so neither names `C.m`.
 const THIS_NESTED_TS: &str = "class C {\n  m(): void {}\n  go(): void {\n    function pick() { return this.m; }\n    const o = { run() { return this.m; } };\n    const ok = () => this.m;\n  }\n}\n";
 
 #[test]
@@ -1146,7 +1146,7 @@ fn test_bound_method_reference_typescript_file_without_this_reads_returns_no_edg
 }
 
 // Stands for: an explicit type argument on a method reference or method group
-// does not change which method it names. main binds nothing for either.
+// does not change which method it names.
 #[test]
 fn test_bound_method_reference_java_explicit_type_argument_binds_its_type() {
     let g = graph(
@@ -1167,7 +1167,7 @@ fn test_bound_method_reference_csharp_generic_method_group_binds_its_type() {
 
 // Stands for: `this@Outer` names the enclosing class labelled `Outer`, not the
 // innermost class; a label no enclosing class carries names nothing. The call
-// `this@Outer.cb()` shares the helper and has the same defect on main.
+// `this@Outer.cb()` shares the helper and follows the same rule.
 const KT_LABELLED: &str = "class Outer {\n    fun cb() {}\n    inner class Inner {\n        fun cb() {}\n        fun refOuter() { val a = this@Outer::cb }\n        fun refSelf() { val b = this::cb }\n        fun refNope() { val c = this@Nope::cb }\n        fun callOuter() { this@Outer.cb() }\n        fun callSelf() { this.cb() }\n    }\n}\n";
 
 fn kotlin_labelled() -> ZeroCopyGraph {

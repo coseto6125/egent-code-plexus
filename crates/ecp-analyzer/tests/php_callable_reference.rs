@@ -268,7 +268,7 @@ fn test_callable_reference_braced_namespace_function_references_function() {
 }
 
 // Stands for: `[$o, 'm']` names the method of `$o`'s declared class only while
-// `$o` is that parameter. main binds `Cb.cb_ptr` after any of these rewrites.
+// `$o` is that parameter; after any of these rewrites it names nothing.
 #[test]
 fn test_array_callable_parameter_reassigned_in_body_references_nothing() {
     assert_eq!(

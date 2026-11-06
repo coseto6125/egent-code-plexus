@@ -196,10 +196,9 @@ fn test_type_annotation_subscript_of_unknown_name_is_not_alias() {
 }
 
 /// Stands for: a union with no certain operand (`None`, a builtin type, a
-/// generic subscript, a class this module defines) is not evidence of a
-/// type; it stays a Variable, as on main, rather than fabricating a Typedef
-/// for a possible flag mask. Classes the module defines are evidence:
-/// `python_type_alias.rs` pins that case.
+/// generic subscript) is not evidence of a type; it stays a Variable rather
+/// than fabricating a Typedef for a possible flag mask. A class the module
+/// defines is no evidence either (`python_type_alias.rs` pins that case).
 #[test]
 fn test_type_annotation_union_of_undefined_names_is_not_alias() {
     assert_not_alias("Al = Alpha | Beta\n");
