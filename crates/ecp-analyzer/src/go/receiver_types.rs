@@ -487,8 +487,8 @@ fn collect_short_var(node: &Node<'_>, source: &[u8], out: &mut HashMap<String, S
 
 // ── call extraction ───────────────────────────────────────────────────────────
 
-/// Walk the Go AST once, attaching callee names to enclosing
-/// function/method nodes (with receiver-type binding) and collecting
+/// Walk the Go AST once, attaching callee names to their holders
+/// (`calls::attach_to_enclosing`, with receiver-type binding) and collecting
 /// path-shaped string literals (`interpreted_string_literal` /
 /// `raw_string_literal`) and SQL-shaped string literals.
 pub fn extract_go_calls_and_path_literals(
@@ -514,12 +514,12 @@ pub(super) fn extract_go_calls_and_path_literals_with_imports(
         match n.kind() {
             "call_expression" => {
                 if let Some(callee) = go_callee_name(n, source, local_types, imports) {
-                    attach_to_enclosing(start_pos(n), callee, nodes);
+                    attach_to_enclosing(n, source, callee, nodes);
                 }
             }
             "selector_expression" => {
                 if let Some(name) = method_value(n, parent, source, local_types) {
-                    reference_function(start_pos(n), &name, nodes);
+                    reference_function(n, source, &name, nodes);
                 }
             }
             // `Foo{..}`, `&Foo{..}` and `pkg.Foo{..}` construct a named type; a
@@ -530,7 +530,7 @@ pub(super) fn extract_go_calls_and_path_literals_with_imports(
                     .filter(|ty| matches!(ty.kind(), "type_identifier" | "qualified_type"))
                     .and_then(|ty| node_text(ty, source))
                 {
-                    attach_to_enclosing(start_pos(n), CallSite::construct(&ty), nodes);
+                    attach_to_enclosing(n, source, CallSite::construct(&ty), nodes);
                 }
             }
             "interpreted_string_literal" | "raw_string_literal" => {

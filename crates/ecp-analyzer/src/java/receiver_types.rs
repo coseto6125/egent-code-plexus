@@ -120,8 +120,8 @@ pub(super) fn expression_type<'s>(expr: Node<'_>, source: &'s [u8]) -> Option<&'
 }
 
 /// Walk the AST once, extracting `method_invocation` /
-/// `object_creation_expression` call sites (attached to enclosing
-/// function/method nodes with receiver binding) and collecting path-shaped
+/// `object_creation_expression` call sites (attached to their holders,
+/// `calls::attach_to_enclosing`, with receiver binding) and collecting path-shaped
 /// `string_literal` / `text_block` literals and SQL-shaped string literals.
 pub fn extract_java_calls_and_path_literals(
     root: Node<'_>,
@@ -142,7 +142,7 @@ pub fn extract_java_calls_and_path_literals(
         match n.kind() {
             "method_invocation" => {
                 if let Some(callee) = java_callee(n, source, &receivers, &locals, nodes) {
-                    attach_to_enclosing(start_pos(n), callee, nodes);
+                    attach_to_enclosing(n, source, callee, nodes);
                 }
             }
             "object_creation_expression" => {
@@ -151,12 +151,12 @@ pub fn extract_java_calls_and_path_literals(
                     .child_by_field_name("type")
                     .and_then(|t| construction_call(t.utf8_text(source).ok()?));
                 if let Some(callee) = callee {
-                    attach_to_enclosing(start_pos(n), callee, nodes);
+                    attach_to_enclosing(n, source, callee, nodes);
                 }
             }
             "method_reference" => {
                 if let Some(name) = bound_method_reference(n, source, &receivers) {
-                    reference_function(start_pos(n), &name, nodes);
+                    reference_function(n, source, &name, nodes);
                 }
             }
             "string_literal" | "text_block" => {

@@ -507,7 +507,9 @@ fn test_build_java_nested_static_blocks_bind_own_type_member() {
 #[test]
 fn test_build_kotlin_nested_init_blocks_bind_own_type_member() {
     let p = KotlinProvider::new().unwrap();
-    let src = "class O { fun target() {} class N { fun target() {} init { target() } } }";
+    // One line would not do: tree-sitter-kotlin parses a nested class whose
+    // braces close on one line to an ERROR node.
+    let src = "class O {\n    fun target() {}\n    class N {\n        fun target() {}\n        init { target() }\n    }\n}\n";
     let g = graph(&p, &[("O.kt", src)]);
     assert_eq!(callee_owners(&g, "N"), vec!["N".to_string()]);
 }

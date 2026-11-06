@@ -446,7 +446,7 @@ pub fn collect_dynamic_imports(root: Node<'_>, source: &[u8]) -> DynamicImports 
     }
 }
 
-/// Walk the Python AST once, attaching callees to enclosing functions
+/// Walk the Python AST once, attaching callees to their holders (`calls::attach_to_enclosing`)
 /// (with receiver-type binding) and collecting path-shaped string literals
 /// as `RawPathLiteral` side-table entries.
 ///
@@ -478,14 +478,15 @@ pub fn extract_python_calls_and_path_literals(
         match n.kind() {
             "call" => {
                 if let Some(callee) = python_callee_name(n, source, locals, dynamic, &classes) {
-                    if let Some(site) = attach_to_enclosing(start_pos(n), callee, nodes) {
+                    if let Some(site) = attach_to_enclosing(n, source, callee, nodes) {
+                        bind_class_body_call(n, source, site, nodes);
                         call_sites.insert(n.id(), site);
                     }
                 }
             }
             "attribute" => {
                 if let Some(entry) = bound_method_value(n, parent, source, locals) {
-                    push_member_read(start_pos(n), entry, nodes);
+                    push_member_read(n, source, entry, nodes);
                 }
             }
             "string" => {
@@ -563,11 +564,97 @@ fn bound_method_value(
         .member_read_entry(member.utf8_text(source).ok()?, ReadIntent::Unknown)
 }
 
-/// Records `entry` in the `field_reads` of the function holding `pos`, once.
-/// `calls.rs` finds the holder only through its call attach helper, so the
-/// entry rides through `calls` and moves out at once.
-fn push_member_read(pos: Pos, entry: String, nodes: &mut [RawNode]) {
-    let Some((holder, _)) = attach_to_enclosing(pos, entry, nodes) else {
+/// A bare call that a class body makes outside every function calls the
+/// member the class defined above it: Python looks a name up in the class
+/// namespace first, so `x = target()` in `class T` after `def target()`
+/// calls `T.target`, not a module-level `target`. Rewrites the recorded
+/// callee to `T.target` then.
+fn bind_class_body_call(
+    call: Node<'_>,
+    source: &[u8],
+    (holder, idx): (usize, u32),
+    nodes: &mut [RawNode],
+) {
+    if matches!(
+        nodes[holder].kind,
+        NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+    ) {
+        return;
+    }
+    let bare = call
+        .child_by_field_name("function")
+        .map(unparenthesized)
+        .is_some_and(|f| f.kind() == "identifier");
+    let Some(class) = bare.then(|| class_scope(call)).flatten() else {
+        return;
+    };
+    let call_name = &mut nodes[holder].calls[idx as usize];
+    let member = class
+        .child_by_field_name("body")
+        .filter(|body| defines_before(*body, call_name, start_pos(call), source))
+        .and_then(|_| class.child_by_field_name("name"))
+        .and_then(|class| class.utf8_text(source).ok());
+    if let Some(class) = member {
+        *call_name = format!("{class}.{call_name}");
+    }
+}
+
+/// Whether a statement of the class `body` that ends before `pos` binds
+/// `name`: a `def`, a `class`, or an assignment to the bare name.
+fn defines_before(body: Node<'_>, name: &str, pos: Pos, source: &[u8]) -> bool {
+    let mut cursor = body.walk();
+    let defines = body
+        .named_children(&mut cursor)
+        .take_while(|stmt| node_range(*stmt).1 < pos)
+        .any(|stmt| {
+            let stmt = match stmt.kind() {
+                "decorated_definition" => stmt.child_by_field_name("definition"),
+                "expression_statement" => stmt
+                    .named_child(0)
+                    .filter(|e| e.kind() == "assignment")
+                    .and_then(|e| e.child_by_field_name("left")),
+                _ => Some(stmt),
+            };
+            stmt.and_then(|stmt| match stmt.kind() {
+                "function_definition" | "class_definition" => stmt.child_by_field_name("name"),
+                "identifier" => Some(stmt),
+                _ => None,
+            })
+            .and_then(|n| n.utf8_text(source).ok())
+                == Some(name)
+        });
+    defines
+}
+
+/// The class whose body runs `node` in its own namespace. A function or
+/// lambda body and a comprehension open a scope that does not see the class
+/// namespace.
+fn class_scope(node: Node<'_>) -> Option<Node<'_>> {
+    let mut node = node;
+    while let Some(parent) = node.parent() {
+        match parent.kind() {
+            "class_definition" => return Some(parent),
+            "function_definition" | "lambda"
+                if parent.child_by_field_name("body") == Some(node) =>
+            {
+                return None;
+            }
+            "list_comprehension"
+            | "set_comprehension"
+            | "dictionary_comprehension"
+            | "generator_expression" => return None,
+            _ => node = parent,
+        }
+    }
+    None
+}
+
+/// Records `entry` in the `field_reads` of the holder of `at`
+/// ([`attach_to_enclosing`]), once. `calls.rs` finds the holder only through
+/// its call attach helper, so the entry rides through `calls` and moves out
+/// at once.
+fn push_member_read(at: Node<'_>, source: &[u8], entry: String, nodes: &mut [RawNode]) {
+    let Some((holder, _)) = attach_to_enclosing(at, source, entry, nodes) else {
         return;
     };
     if let Some(entry) = nodes[holder].calls.pop() {

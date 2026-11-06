@@ -130,7 +130,7 @@ fn find_function_declarator<'a>(mut node: Node<'a>) -> Option<Node<'a>> {
     }
 }
 
-/// Walk the C AST once, attaching call sites to enclosing functions
+/// Walk the C AST once, attaching call sites to their holders (`calls::attach_to_enclosing`)
 /// (with receiver-convention rewriting to `Type.fn`) and collecting
 /// path-shaped `string_literal` / `concatenated_string` literals and
 /// SQL-shaped string literals.
@@ -148,7 +148,7 @@ pub fn extract_c_calls_and_path_literals(
         match n.kind() {
             "call_expression" => {
                 if let Some(callee) = c_callee_name(n, source, methods) {
-                    if let Some(site) = attach_to_enclosing(start_pos(n), callee, nodes) {
+                    if let Some(site) = attach_to_enclosing(n, source, callee, nodes) {
                         call_sites.insert(n.id(), site);
                     }
                 }

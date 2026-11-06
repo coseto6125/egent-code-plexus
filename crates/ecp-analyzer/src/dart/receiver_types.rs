@@ -345,12 +345,12 @@ pub fn extract_dart_calls_and_path_literals(
         match n.kind() {
             "call_expression" => {
                 if let Some(callee) = dart_callee_name(n, source, bindings, nodes) {
-                    attach_to_enclosing(start_pos(n), callee, nodes);
+                    attach_to_enclosing(n, source, callee, nodes);
                 }
             }
             "member_expression" | "null_aware_member_expression" => {
                 if let Some(name) = method_value(n, parent, source, bindings) {
-                    reference_function(start_pos(n), &name, nodes);
+                    reference_function(n, source, &name, nodes);
                 }
             }
             "string_literal" => {

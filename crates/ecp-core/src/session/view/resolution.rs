@@ -4283,7 +4283,7 @@ struct VariantCache<'f> {
 fn resolve_variant_ref<'f>(
     graph: &ArchivedZeroCopyGraph,
     variant_ref: VariantRef<'f>,
-    owner_class: Option<&'f str>,
+    code_owner: Option<&'f str>,
     file_ord: usize,
     file: &'f OverlayFileInput,
     caller: FileMeta,
@@ -4338,7 +4338,7 @@ fn resolve_variant_ref<'f>(
     ladder::qualified_variant(
         facts,
         caller.language,
-        owner_class,
+        code_owner,
         path,
         has_variant,
         |qualifier| {
