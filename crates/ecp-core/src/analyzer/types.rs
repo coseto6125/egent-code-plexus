@@ -2335,7 +2335,7 @@ mod tests {
         }
     }
 
-    /// Contract (CONTRACTS 2.1): an unproven member entry round-trips, and
+    /// Contract: an unproven member entry round-trips, and
     /// it answers every site question as a member call that names no type:
     /// method syntax, never free-only, constructs nothing, is its own
     /// fallback. Two sites of one member on one line stay two equal entries.
@@ -2378,7 +2378,7 @@ mod tests {
         }
     }
 
-    /// Contract (CONTRACTS 2.2): `parse(encode(x)) == x` for both intents,
+    /// Contract: `parse(encode(x)) == x` for both intents,
     /// a dotted receiver type splits at its last '.', and every other
     /// `field_reads` entry is no member read.
     #[test]
@@ -2414,7 +2414,7 @@ mod tests {
         }
     }
 
-    /// Contract (CONTRACTS 2.2, A08): the three Python property decorators,
+    /// Contract: the three Python property decorators,
     /// with or without `@`, mark an accessor; a plain or absent decorator,
     /// a whitespace-only one, and any other language do not.
     #[test]

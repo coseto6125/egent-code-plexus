@@ -638,6 +638,23 @@ pub fn visible_type_params<'a>(
     visible
 }
 
+/// [`visible_type_params`] over the container chain of declaration `id`
+/// in `facts`. `decorators_of` maps a container id to its decorators; the
+/// index reads them from its local graph and the overlay from its dirty
+/// files, so the chain walk is the one rule for both. A container
+/// `decorators_of` cannot place adds nothing.
+pub fn declaration_type_params<'a, F: PickFacts + ?Sized>(
+    facts: &F,
+    id: u32,
+    own: &'a [String],
+    self_decorators: &'a [String],
+    decorators_of: impl Fn(u32) -> Option<&'a [String]>,
+) -> Vec<String> {
+    let enclosing = std::iter::successors(facts.container(id), |&c| facts.container(c))
+        .filter_map(decorators_of);
+    visible_type_params(own, std::iter::once(self_decorators).chain(enclosing))
+}
+
 /// The `(target, confidence, reason)` of every type-annotation `Accesses`
 /// edge of one declaration, in emit order: the index's Pass 2 rule, which the
 /// overlay replays for a dirty declaration through this same function.

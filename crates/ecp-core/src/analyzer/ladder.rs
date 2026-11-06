@@ -406,13 +406,7 @@ fn same_file_at<F: ResolveFacts>(
     form: SiteForm,
 ) -> Resolution {
     let free_only = call.is_some_and(|call| call.free_only);
-    // Only these forms meet a rule a declaration of the caller's own file
-    // can fail, so the other sites skip the file-meta lookup.
-    let gate = matches!(
-        form,
-        SiteForm::Bare | SiteForm::UntypedMember | SiteForm::FieldRead
-    )
-    .then(|| {
+    let gate = form.checks_in_file().then(|| {
         Gate::new(
             facts,
             Site {
@@ -663,7 +657,8 @@ pub enum FieldRead {
     /// [`ResolveTarget::Field`] runs, and its qualifier tier settles it.
     Qualified,
     /// A bare read that Tier 1 left: Tier 3 ([`global`]) with no call site,
-    /// whose admission gate the side builds with [`SiteForm::FieldRead`].
+    /// whose admission gate the side builds with
+    /// [`SiteForm::GlobalFieldRead`].
     Global,
 }
 
@@ -672,9 +667,9 @@ pub enum FieldRead {
 /// qualifier or not at all. No import tier runs, because an import binds a
 /// module's name, never the field a receiver reads. No call site: no owner
 /// narrows the pick, no base is probed, and Tier 3 binds no nearest copy.
-/// Both tiers admit their candidates as a [`SiteForm::FieldRead`], so a
-/// property an interface declares neither binds the read nor makes the
-/// name ambiguous (the gate's Contract rule).
+/// Under the gate's Contract rule, a property a contract declares binds
+/// neither tier: Tier 1 ([`SiteForm::FieldRead`]) drops it, and Tier 3
+/// ([`SiteForm::GlobalFieldRead`]) counts it toward ambiguity.
 pub fn field_read<F: ResolveFacts>(facts: &F, file: &str, name: &str) -> FieldRead {
     if split_qualifier(name).is_some() {
         return FieldRead::Qualified;
@@ -2128,8 +2123,8 @@ pub fn anchored_module_file<F: ModuleTreeFacts>(
 /// ([`rust_path_may_bind`]). A path with segments past the item
 /// ([`TreePlace::past`]) binds only when the file confirms each of them but
 /// the member, walked parent -> child on [`PickFacts::container`]: the item
-/// names a module or a type the file declares at file level ([`path_item`];
-/// an `impl` block stands in for a `union`), every middle segment one
+/// names a module or a type the file declares at file level ([`path_item`]),
+/// every middle segment one
 /// declared directly inside the segment before it ([`qualifier_child`]),
 /// and the member is one the last of them holds ([`declaring_type`]).
 /// `a::missing::top()` and `a::m::S::new()` (no `S` inside `m`) then bind
@@ -2185,22 +2180,11 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
     let mut qualifier = item.as_str();
     let mut holder: Option<u32> = None;
     let mut nested = false;
-    let mut by_impl = false;
     if past > 0 {
-        match path_item(decls, file, qualifier) {
-            Child::One(id) => holder = Some(id),
-            // The Rust parser files no node for a `union`, only its `impl`
-            // blocks, so an `Impl` also names the item as a type, by owner
-            // name.
-            Child::Missing
-                if decls
-                    .call_decls(file, qualifier)
-                    .any(|(_, kind)| kind == NodeKind::Impl) =>
-            {
-                by_impl = true
-            }
-            _ => return None,
-        }
+        let Child::One(id) = path_item(decls, file, qualifier) else {
+            return None;
+        };
+        holder = Some(id);
         let segs: Vec<&str> = callee.split("::").collect();
         let middle = &segs[segs.len().saturating_sub(past)..segs.len().saturating_sub(1)];
         for &seg in middle {
@@ -2226,7 +2210,6 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
             }
             is_type(kind)
         }
-        None if by_impl => false,
         None => {
             let mut item_is_type = false;
             for (id, kind) in decls.call_decls(file, &item) {
@@ -2258,7 +2241,7 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
     if !item_is_type && past == 0 {
         return Some(pick);
     }
-    if holder.is_none() && !by_impl {
+    if holder.is_none() {
         match path_item(decls, file, qualifier) {
             Child::One(id) => holder = Some(id),
             _ => return None,
@@ -2279,7 +2262,7 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
     let owned = candidates
         .iter()
         .find_map(|&id| past_body_local(decls, id, owned_by_item));
-    // An inline `mod` (or a `union`'s `impl`) holds its members itself.
+    // An inline `mod` holds its members itself.
     if owned.is_some() || !item_is_type {
         return owned;
     }
@@ -2623,7 +2606,7 @@ pub fn call<'s, F: CallFacts<'s>>(
         }
         _ => {}
     }
-    // ACCEPTANCE 00: a receiver whose paths disagree, or that the receiver
+    // A receiver whose paths disagree, or that the receiver
     // core could not follow, is the tagged guess in a duck-typed language
     // and no edge elsewhere. No tier, retry or constructor fallback runs.
     if let CallSite::UnprovenMember(member) = site {
@@ -2773,7 +2756,7 @@ pub fn call<'s, F: CallFacts<'s>>(
 /// can, so an untyped receiver is mostly a library value (`vec.retain()`)
 /// and the one project method of that name a false hit. In duck-typed PHP,
 /// Python, Ruby and JavaScript the name is the main signal, but still no
-/// proof of the receiver's type (ACCEPTANCE 00), so the bind is tagged
+/// proof of the receiver's type, so the bind is tagged
 /// there too. C# never binds an untyped member by name; C and Kotlin keep
 /// the tier's confidence.
 pub const fn untyped_bind_is_guess(language: Language) -> bool {
@@ -3856,11 +3839,12 @@ mod tests {
     }
 
     /// Stands for: the Tier 3 of a bare read admits through the
-    /// `FieldRead` gate, so the interface in one file neither binds nor
-    /// makes the class's namesake in another ambiguous; an interface
-    /// property alone binds nothing.
+    /// `GlobalFieldRead` gate. The read names no receiver type, so an
+    /// interface property in one file and a class's namesake in another stay
+    /// ambiguous: binding the class would claim a `User` the reader may never
+    /// touch. An interface property alone binds nothing.
     #[test]
-    fn test_global_field_read_interface_and_class_in_two_files_binds_class() {
+    fn test_global_field_read_interface_and_class_in_two_files_is_ambiguous() {
         let decls: [Decl; 5] = [
             ("cat.ts", "Cat", I, None),
             ("cat.ts", "name", P, Some("Cat")),
@@ -3885,7 +3869,7 @@ mod tests {
                     },
                 );
                 let candidates = facts.named(name);
-                global(
+                gate.settle(global(
                     &facts,
                     "use.ts",
                     caller,
@@ -3893,11 +3877,14 @@ mod tests {
                     false,
                     || gate.admitted(candidates.iter().copied()),
                     |_| false,
-                )
+                ))
             };
-            assert_eq!(run("name", SiteForm::FieldRead), bound(4, Tier::Global));
             assert_eq!(
-                run("id", SiteForm::FieldRead),
+                run("name", SiteForm::GlobalFieldRead),
+                Resolution::NoEdge(NoEdge::Ambiguous(2))
+            );
+            assert_eq!(
+                run("id", SiteForm::GlobalFieldRead),
                 Resolution::NoEdge(NoEdge::Unresolved)
             );
             assert_eq!(
@@ -5871,7 +5858,7 @@ mod tests {
     /// Python another module's function; it refuses a function of the
     /// caller's module, a member of the caller's own type, and in Go any
     /// free function. Two classes' namesakes stay the ladder's no edge.
-    /// Python is a guess language (ACCEPTANCE 00), so a kept target binds
+    /// Python is a guess language, so a kept target binds
     /// as the tagged guess `Tier::UntypedName`, not at the ladder's tier.
     #[test]
     fn test_call_untyped_member_post_filter_admits_member_or_other_module_function() {
@@ -5950,8 +5937,8 @@ mod tests {
     }
 
     /// Rule U (U1): C, Kotlin and C# are outside the rule: the bind keeps
-    /// the confidence of the tier that found it. Contract change (ACCEPTANCE
-    /// 00): PHP, Python, Ruby and JavaScript left this list for the guess
+    /// the confidence of the tier that found it. PHP, Python, Ruby and
+    /// JavaScript left this list for the guess
     /// languages, so a duck-typed bind by name alone is the tagged guess.
     #[test]
     fn test_call_untyped_member_other_language_keeps_tier_confidence() {
@@ -5971,7 +5958,7 @@ mod tests {
         assert!(!untyped_bind_is_guess(Language::CSharp));
     }
 
-    /// ACCEPTANCE 00: an unproven receiver (paths that disagree, an escape,
+    /// An unproven receiver (paths that disagree, an escape,
     /// an unsupported construct, the budget) binds nothing outside the
     /// duck-typed languages, and asks no tier, no bare-member retry and no
     /// import tier on the way, whatever the ladder would bind.
@@ -6012,7 +5999,7 @@ mod tests {
         assert!(fake.unresolved.borrow().is_empty());
     }
 
-    /// ACCEPTANCE 00: in PHP, Python, Ruby and JavaScript an unproven
+    /// In PHP, Python, Ruby and JavaScript an unproven
     /// receiver reads as an untyped member call: the ladder runs with no
     /// `this` and no bases, R21 filters its target, and the bind is the
     /// tagged guess, whichever tier found it. A refused target (the
@@ -6062,7 +6049,7 @@ mod tests {
         }
     }
 
-    /// CONTRACTS 7: a member read binds as the `NameRef::Function "T.m"`
+    /// A member read binds as the `NameRef::Function "T.m"`
     /// lookup does, then the target decides the edge. A property accessor
     /// is a read, another method a reference whatever the intent; a
     /// `Property`, an unresolved name and an absent decorator list follow

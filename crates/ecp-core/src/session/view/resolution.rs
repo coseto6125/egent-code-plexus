@@ -10,9 +10,7 @@ use super::{
     GAP_CS_ACCESS_DIRTY_TARGET, GAP_CS_EXTENSION_DIRTY_DECLARATION, GAP_CS_PARTIAL_BARE_CALL,
     TYPE_ANNOTATION_REASON,
 };
-use crate::analyzer::admission::{
-    bare_call_reaches_members, language_reaches, Gate, Site, SiteForm,
-};
+use crate::analyzer::admission::{language_reaches, Gate, Site, SiteForm};
 use crate::analyzer::c_family::{
     c_family_field, canonical_declaration, is_c_family, may_be_declaration, CCallable,
 };
@@ -161,21 +159,22 @@ type QualifiedCache = FxHashMap<
 type NamedImportCache =
     FxHashMap<(usize, ResolveTarget), FxHashMap<Box<str>, Option<reexport::NamedImport>>>;
 /// Every input of the overlay's Tier 3 ([`OverlayTiers`]) that varies
-/// within one view: (dirty file ordinal, its imports slice, callee, the
-/// kinds it weighs, whether a call site admits the nearest copy, whether a
-/// bare call reaches no member, and what the admission gate reads of the
-/// site: the caller's owner, its heritage slice and the site form).
-type GlobalKey = (
-    usize,
-    (usize, usize),
-    Box<str>,
-    ResolveTarget,
-    bool,
-    bool,
-    Option<Box<str>>,
-    (usize, usize),
-    SiteForm,
-);
+/// within one view. `owner` and `heritage` hold what the admission gate
+/// reads of the site ([`SiteForm::reads_owner`], [`SiteForm::reads_heritage`]).
+#[derive(PartialEq, Eq, Hash)]
+struct GlobalKey {
+    file_ord: usize,
+    imports: (usize, usize),
+    name: Box<str>,
+    target: ResolveTarget,
+    /// Whether a call site admits the nearest copy.
+    nearest: bool,
+    /// Whether a bare call reaches no member.
+    free_only: bool,
+    owner: Option<Box<str>>,
+    heritage: (usize, usize),
+    form: SiteForm,
+}
 type GlobalCache = FxHashMap<GlobalKey, Resolution>;
 
 /// The facts the shared import rules ([`reexport`]) read over the overlay:
@@ -190,6 +189,8 @@ struct OverlayFacts<'a> {
     dirty_base: &'a FxHashSet<u32>,
     /// Dirty rel_path → file ordinal.
     dirty: FxHashMap<&'a str, usize>,
+    /// Per dirty file ordinal, the virtual idx of its first symbol.
+    dirty_starts: Vec<u32>,
     /// (file ordinal, name) → the virtual idxs of the first declaration of
     /// each uid, in source order: the index registers no later twin.
     declared: FxHashMap<(usize, &'a str), Vec<u32>>,
@@ -534,6 +535,7 @@ impl<'a> OverlayFacts<'a> {
         // The dirty configs' rows over the archived table, merged once per
         // view: the alias reading and the crate table both read it.
         let merged = configs.merged_facts(graph);
+        let dirty_starts = rust_facts.starts.clone();
         let rust = RustModules::new(graph, files, removed, rust_facts).with_sources(sources);
         if let Some(facts) = &merged {
             let _ = rust.crates.set(facts.clone());
@@ -550,6 +552,7 @@ impl<'a> OverlayFacts<'a> {
                 .enumerate()
                 .map(|(file_ord, file)| (file.rel_path.as_str(), file_ord))
                 .collect(),
+            dirty_starts,
             declared,
             exported,
             es_modules,
@@ -2053,7 +2056,7 @@ impl<'a> OverlayFacts<'a> {
             let Some(flags) = symbol.flags else {
                 return Err(DirtyNamesake);
             };
-            if flags & csharp_extension::EXTENSION_FLAG == 0 {
+            if !csharp_extension::is_extension(flags, Language::CSharp) {
                 continue;
             }
             let (Some(file), Some(class)) = (self.node_file(id), self.owner_of(id)) else {
@@ -2084,11 +2087,7 @@ impl<'a> OverlayFacts<'a> {
                 continue;
             };
             let flags = meta.flags.to_native();
-            // Bits 10-15 are C#-scoped: a C or C++ namesake reuses bit 10
-            // for `extern` storage (CONTRACTS 6.4).
-            if flags & csharp_extension::EXTENSION_FLAG == 0
-                || self.meta_of(id).language != Language::CSharp
-            {
+            if !csharp_extension::is_extension(flags, self.meta_of(id).language) {
                 continue;
             }
             let (Some(file), Some(class)) = (self.node_file(id), self.owner_of(id)) else {
@@ -2209,8 +2208,10 @@ impl<'a> OverlayFacts<'a> {
     /// The fresh parse of the dirty node `id`; `None` for a base node.
     fn dirty_symbol(&self, id: u32) -> Option<&'a OverlaySymbol> {
         let node = &self.nodes[id.checked_sub(self.base_len())? as usize];
-        let &(file, start) = self.rust.dirty.get(&*node.rel_path)?;
-        file.symbols.get((id - start) as usize)
+        let &file_ord = self.dirty.get(&*node.rel_path)?;
+        self.scope.dirty()[file_ord]
+            .symbols
+            .get((id - self.dirty_starts[file_ord]) as usize)
     }
 
     /// The index's `SymbolTable::c_callable`: the flags and the parameter
@@ -2800,30 +2801,21 @@ type NameLookup<'l> = dyn FnMut(&str, ResolveTarget) -> Vec<(u32, f32)> + 'l;
 /// ([`OverlaySymbol::decorators`]), a clean base node's from its
 /// `FunctionMeta`. A base node of a dirty file is stale and has none; the
 /// name tiers never return one.
-fn overlay_decorators<'g>(
-    graph: &'g ArchivedZeroCopyGraph,
-    files: &'g [OverlayFileInput],
-    dirty_base: &FxHashSet<u32>,
-    id: u32,
-) -> Vec<&'g str> {
-    let Some(mut offset) = id.checked_sub(graph.nodes.len() as u32).map(|o| o as usize) else {
-        if dirty_base.contains(&id) {
+fn overlay_decorators<'a>(facts: &OverlayFacts<'a>, id: u32) -> Vec<&'a str> {
+    if id < facts.base_len() {
+        if facts.dirty_base.contains(&id) {
             return Vec::new();
         }
-        return base_function_meta(graph, id).map_or_else(Vec::new, |meta| {
+        return base_function_meta(facts.graph, id).map_or_else(Vec::new, |meta| {
             meta.decorators
                 .iter()
-                .map(|decorator| decorator.resolve(&graph.string_pool))
+                .map(|decorator| decorator.resolve(&facts.graph.string_pool))
                 .collect()
         });
-    };
-    for file in files {
-        match file.symbols.get(offset) {
-            Some(symbol) => return symbol.decorators.iter().map(String::as_str).collect(),
-            None => offset -= file.symbols.len(),
-        }
     }
-    Vec::new()
+    facts.dirty_symbol(id).map_or_else(Vec::new, |symbol| {
+        symbol.decorators.iter().map(String::as_str).collect()
+    })
 }
 
 /// The kind of the merged-space `idx`.
@@ -3108,23 +3100,22 @@ impl<'v, 'a> NameTierFacts for OverlayTiers<'v, 'a, '_> {
         // where a rule of that form reads them. A `CallPick` field or a gate
         // input any of them starts to read must join the key, or two call
         // sites that differ in it share one memoized answer.
-        let owner_rule = form == SiteForm::Bare && bare_call_reaches_members(self.caller.language);
-        let reads_owner = owner_rule || form == SiteForm::UntypedMember;
-        let key = (
-            self.file_ord,
-            (imports.as_ptr() as usize, imports.len()),
-            Box::<str>::from(name),
+        let language = self.caller.language;
+        let key = GlobalKey {
+            file_ord: self.file_ord,
+            imports: (imports.as_ptr() as usize, imports.len()),
+            name: Box::from(name),
             target,
             nearest,
             free_only,
-            owner.filter(|_| reads_owner).map(Box::<str>::from),
-            if owner_rule {
+            owner: owner.filter(|_| form.reads_owner(language)).map(Box::from),
+            heritage: if form.reads_heritage(language) {
                 (heritage.as_ptr() as usize, heritage.len())
             } else {
                 (0, 0)
             },
             form,
-        );
+        };
         if let Some(&hit) = facts.global.borrow().get(&key) {
             return hit;
         }
@@ -3260,7 +3251,7 @@ pub(super) struct RustModules<'a> {
     /// The `graph.bin` workspace facts, read on first use: reading them
     /// deserializes and validates the whole table, once per view.
     pub(super) crates: OnceCell<crate::contracts::workspace::WorkspaceFacts>,
-    /// Whether the table holds no Cargo target: every tree is manifest-less
+    /// Whether the table holds no Cargo scope: every tree is manifest-less
     /// ([`Self::loose`]).
     loose: OnceCell<bool>,
     /// The current text of a module file, which its `pub use` rows are
@@ -3429,17 +3420,13 @@ impl<'a> RustModules<'a> {
         self.crates.get_or_init(|| self.graph.workspace_facts())
     }
 
-    /// Whether the index lays out manifest-less trees: it registers no Cargo
-    /// target, so the stored table holds no Cargo scope.
+    /// Whether the index lays out manifest-less trees: the stored table
+    /// holds no Cargo scope ([`WorkspaceFacts::has_cargo_scope`], the fact
+    /// the index decides by).
+    ///
+    /// [`WorkspaceFacts::has_cargo_scope`]: crate::contracts::workspace::WorkspaceFacts::has_cargo_scope
     fn loose(&self) -> bool {
-        use crate::contracts::workspace::Ecosystem;
-        *self.loose.get_or_init(|| {
-            !self
-                .table()
-                .scopes
-                .iter()
-                .any(|scope| scope.ecosystem == Ecosystem::Cargo)
-        })
+        *self.loose.get_or_init(|| !self.table().has_cargo_scope())
     }
 
     /// The entry file of the workspace crate that code names `head`: the
@@ -3506,10 +3493,20 @@ impl<'a> RustModules<'a> {
     }
 
     /// The file of the module `name` that `parent` declares (`mod name;`),
-    /// as the index places it ([`rust_pub_use::module_file`]).
+    /// as the index places it: in a manifest-less tree by the parent's text
+    /// ([`rust_pub_use::loose_steps`]), so `None` without a source reader;
+    /// in a Cargo tree by the layout ([`rust_pub_use::module_file`]).
     fn child(&self, parent: &'a str, name: &str, parent_is_root: bool) -> Option<&'a str> {
         if !self.declares(parent, name, |kind| kind == NodeKind::Module) {
             return None;
+        }
+        let file = |path: &str| self.file(std::path::Path::new(path));
+        if self.loose() {
+            let text = &self.module_text(parent)?.text;
+            let (_, child) = rust_pub_use::loose_steps(text, parent, |path| file(path).is_some())
+                .into_iter()
+                .find(|(step, _)| *step == name)?;
+            return file(&child);
         }
         rust_pub_use::module_file(std::path::Path::new(parent), parent_is_root, name, |p| {
             self.file(p)
@@ -5959,7 +5956,6 @@ pub(super) fn resolve_edges(
     for (file_ord, file) in files.iter().enumerate() {
         // The keys of the file's per-symbol edges, kept only for a file with
         // a merged row: its edge equal to one emitted already is dropped.
-        let file_start = virt_cursor;
         let file_end = virt_cursor + file.symbols.len() as u32;
         let mut seen: Option<FxHashSet<(u32, u32, u8)>> = (virt_cursor..file_end)
             .any(|virt| survivor_of.contains_key(&virt))
@@ -6276,18 +6272,12 @@ pub(super) fn resolve_edges(
             }
 
             // The index's Pass 2 `type_annotation` edges, after its calls.
-            // Its type variables: the symbol's own markers, then each
-            // container's, over the chain the index reads from `SymbolTable`.
-            let enclosing = std::iter::successors(PickFacts::container(&facts, source), |&id| {
-                PickFacts::container(&facts, id)
-            })
-            .filter_map(|id| id.checked_sub(file_start))
-            .filter_map(|offset| file.symbols.get(offset as usize));
-            let type_params = type_ladder::visible_type_params(
+            let type_params = type_ladder::declaration_type_params(
+                &facts,
+                source,
                 &sym.type_params,
-                std::iter::once(sym)
-                    .chain(enclosing)
-                    .map(|s| s.decorators.as_slice()),
+                sym.decorators.as_slice(),
+                |id| Some(facts.dirty_symbol(id)?.decorators.as_slice()),
             );
             let decl = AnnotatedDecl {
                 language: caller.language,
@@ -6363,7 +6353,7 @@ pub(super) fn resolve_edges(
                                 read,
                                 resolve,
                                 imported,
-                                |id| overlay_decorators(graph, files, dirty_base, id),
+                                |id| overlay_decorators(&facts, id),
                             )
                         },
                     ) else {
@@ -6373,18 +6363,12 @@ pub(super) fn resolve_edges(
                         continue;
                     }
                     name_edges.push(target);
-                    let (rel_type, reason) = match edge {
-                        MemberReadEdge::Reference => {
-                            (RelType::References, FUNCTION_REFERENCE_REASON)
-                        }
-                        MemberReadEdge::Read => (RelType::ReadsField, VALUE_READ_REASON),
-                    };
                     emit(ViewEdge {
                         source: from,
                         target,
-                        rel_type,
+                        rel_type: edge.rel_type(),
                         confidence,
-                        reason,
+                        reason: edge.reason(),
                     });
                     continue;
                 }
@@ -6509,7 +6493,7 @@ pub(super) fn resolve_edges(
                             ResolveTarget::Field,
                             None,
                             &[],
-                            SiteForm::FieldRead,
+                            SiteForm::GlobalFieldRead,
                         )
                         .edge(),
                 };

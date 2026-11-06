@@ -38,7 +38,7 @@
 //! parameter: a Java / Kotlin name reference the name tiers leave unbound
 //! asks the import tier alone for a field. The index
 //! (`Resolver::resolve_imported_symbol`) takes the wildcard pass too; the
-//! overlay (`resolve_overlay_name_ref`) takes the explicit imports only.
+//! overlay (`with_overlay_name_lookups`'s import-member lookup) takes the explicit imports only.
 //! [`test_imported_member_java_static_wildcard_field_ref_index_only`] pins it.
 
 use crate::strict_parity;

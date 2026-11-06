@@ -12,9 +12,10 @@ use crate::analyzer::same_file_pick::prefer_free;
 use crate::analyzer::type_ladder::{self, Ownership};
 use crate::analyzer::types::{
     is_property_accessor, owner_key, CallSite, MemberRead, NameRef, NameRefKind, RawImport,
+    FUNCTION_REFERENCE_REASON, VALUE_READ_REASON,
 };
 use crate::file_category::Language;
-use crate::graph::NodeKind;
+use crate::graph::{NodeKind, RelType};
 
 /// Resolve one [`NameRef`] through the index's ordinary symbol tiers, at
 /// the [`Tier`] confidences.
@@ -224,13 +225,29 @@ where
     Some((id, confidence))
 }
 
-/// The edge a resolved [`MemberRead`] emits (CONTRACTS 7).
+/// The edge a resolved [`MemberRead`] emits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemberReadEdge {
     /// A method handed on as a value: `References`, `function_reference`.
     Reference,
     /// A property accessor read for its value: `ReadsField`, `value_read`.
     Read,
+}
+
+impl MemberReadEdge {
+    pub const fn rel_type(self) -> RelType {
+        match self {
+            Self::Reference => RelType::References,
+            Self::Read => RelType::ReadsField,
+        }
+    }
+
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::Reference => FUNCTION_REFERENCE_REASON,
+            Self::Read => VALUE_READ_REASON,
+        }
+    }
 }
 
 /// Resolve one [`MemberRead`] and decide its edge. The lookup is the one a

@@ -3085,8 +3085,9 @@ fn pass1_8_function_metas(
     let mut function_metas: Vec<FunctionMeta> = Vec::new();
     {
         for (file_idx, local_graph) in local_graphs.iter().enumerate() {
-            let csharp = symbol_table.file_language(&local_graph.file_path.to_string_lossy())
-                == Language::CSharp;
+            let file_language =
+                symbol_table.file_language(&local_graph.file_path.to_string_lossy());
+            let csharp = file_language == Language::CSharp;
             if csharp {
                 // A C# field or property types a receiver in another
                 // `partial` part, which Pass 2 reads before the Accesses
@@ -3133,9 +3134,7 @@ fn pass1_8_function_metas(
                         symbol_table.note_csharp_method_flags(node_idx, rfm.flags);
                     }
                     symbol_table.note_c_callable(node_idx, rfm.flags, &rfm.params);
-                    // Bits 10-15 are C#-scoped: C and C++ reuse bit 10 for
-                    // `extern` storage (CONTRACTS 6.4).
-                    if csharp && rfm.flags & csharp_extension::EXTENSION_FLAG != 0 {
+                    if csharp_extension::is_extension(rfm.flags, file_language) {
                         // `params` alternates name and type: [1] is the
                         // `this` parameter's type, [2..] the other names
                         // at even offsets.
@@ -3875,19 +3874,15 @@ fn pass2_emit_node_edges(
     let meta = meta_lookup
         .get(&raw_node.span)
         .map(|&i| &local_graph.raw_function_metas[i]);
-    // The node's own markers, then each container's: the overlay walks the
-    // same chain over its dirty containers.
-    let enclosing = std::iter::successors(
-        ecp_core::analyzer::same_file_pick::PickFacts::container(symbol_table, current_node_idx),
-        |&id| ecp_core::analyzer::same_file_pick::PickFacts::container(symbol_table, id),
-    )
-    .filter_map(|id| raw_map.locate(id))
-    .filter_map(|(_, raw)| local_graph.nodes.get(raw.index()));
-    let type_params = type_ladder::visible_type_params(
+    let type_params = type_ladder::declaration_type_params(
+        symbol_table,
+        current_node_idx,
         meta.map_or(&[][..], |m| m.type_params.as_slice()),
-        std::iter::once(raw_node)
-            .chain(enclosing)
-            .map(|node| node.decorators.as_slice()),
+        raw_node.decorators.as_slice(),
+        |id| {
+            let (_, raw) = raw_map.locate(id)?;
+            Some(local_graph.nodes.get(raw.index())?.decorators.as_slice())
+        },
     );
     let decl = type_ladder::AnnotatedDecl {
         language,
@@ -3975,14 +3970,14 @@ fn pass2_emit_node_edges(
                 continue;
             }
             name_edges.push(target_id);
-            let (rel_type, reason) = match edge {
-                MemberReadEdge::Reference => (RelType::References, reason_name_ref.function),
-                MemberReadEdge::Read => (RelType::ReadsField, reason_name_ref.value),
+            let reason = match edge {
+                MemberReadEdge::Reference => reason_name_ref.function,
+                MemberReadEdge::Read => reason_name_ref.value,
             };
             edges.push(Edge {
                 source: current_node_idx,
                 target: target_id,
-                rel_type,
+                rel_type: edge.rel_type(),
                 confidence,
                 reason,
             });

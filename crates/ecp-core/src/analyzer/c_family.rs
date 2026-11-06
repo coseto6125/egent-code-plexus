@@ -36,6 +36,7 @@
 //!   known parameter types: it settles nothing.
 
 use crate::analyzer::same_file_pick::PickFacts;
+use crate::analyzer::types::owner_key;
 use crate::file_category::{FileMeta, Language};
 use crate::graph::{FunctionMeta, NodeKind};
 use rustc_hash::FxHasher;
@@ -382,7 +383,7 @@ where
                     && meta.language != caller.language
                     && facts.owner(id).is_none()
                     && c_nameable(facts.kind(id))
-                    && !callable(id).is_some_and(|c| c.linkage == CLinkage::Internal)
+                    && reachable(facts, caller_file, id, callable(id))
             })
             .map(move |(id, meta)| {
                 (
@@ -569,6 +570,17 @@ where
     let Some(declared) = member_declaration(facts, &callable, id, language) else {
         return id;
     };
+    // The candidates carry the bare owner (`Inst`), never its namespace, so
+    // a definition settles a member only of the one type of that name:
+    // with `a::Inst` and `b::Inst`, `a::Inst::run`'s body is no body of
+    // `b::Inst::run`.
+    if declared
+        .owner
+        .and_then(owner_key)
+        .is_none_or(|owner| facts.types_named(owner).len() != 1)
+    {
+        return id;
+    }
     // The owner test first: it is a string compare, and most same-named
     // candidates belong to other types.
     only_or(

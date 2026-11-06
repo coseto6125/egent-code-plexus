@@ -156,7 +156,7 @@ mod tests {
     /// Stands for: `loose: any` is dynamic, so an element of it assigned to
     /// `obj: Cls` drops the pin inside and after the loop, while the
     /// iterable, evaluated first, keeps the outer type. A nested function
-    /// that writes `obj` is a writer (CONTRACTS 1.5), whether or not it runs.
+    /// that writes `obj` is a writer, whether or not it runs.
     #[test]
     fn test_lower_for_of_over_dynamic_iterable_drops_the_pin() {
         let head = "function run(xs: number[], obj: Cls, loose: any) {";

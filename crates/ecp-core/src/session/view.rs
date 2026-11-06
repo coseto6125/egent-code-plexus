@@ -277,6 +277,7 @@ use crate::contracts::routing::ParsedLanguage;
 use crate::file_category::{FileMeta, Language};
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
 use crate::registry::os_path_to_slash;
+use crate::session::import_scope::stored_file_meta;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -712,7 +713,8 @@ pub struct CallGap {
     pub reason: String,
 }
 
-/// A dirty C# file declares a method named like the call's member
+/// A dirty C# method named like the call's member whose fragment carries no
+/// flags, so the overlay cannot tell whether it is an extension
 /// ([`GAP_CS_EXTENSION_DIRTY_DECLARATION`]).
 #[derive(Debug, Clone, Copy)]
 struct DirtyNamesake;
@@ -1918,18 +1920,14 @@ fn stale_extension_gaps(
     let mut gaps: Vec<CallGap> = Vec::new();
     for name in names {
         for decl in graph.nodes_by_name(name) {
-            // Bits 10-15 are C#-scoped: a C or C++ namesake reuses bit 10
-            // for `extern` storage (CONTRACTS 6.4).
             let extension = graph.nodes[decl as usize].name.resolve(pool) == name
                 && base_function_meta(graph, decl).is_some_and(|meta| {
-                    meta.flags.to_native() & csharp_extension::EXTENSION_FLAG != 0
-                })
-                && crate::session::import_scope::stored_file_meta(
-                    graph,
-                    graph.nodes[decl as usize].file_idx.to_native(),
-                )
-                .language
-                    == Language::CSharp;
+                    csharp_extension::is_extension(
+                        meta.flags.to_native(),
+                        stored_file_meta(graph, graph.nodes[decl as usize].file_idx.to_native())
+                            .language,
+                    )
+                });
             if !extension {
                 continue;
             }

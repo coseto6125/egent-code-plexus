@@ -1170,7 +1170,7 @@ fn test_bound_method_reference_typescript_for_of_iterable_reads_outer_type() {
 }
 
 /// Stands for: a nested function, a generator included, that writes the
-/// captured `obj` is a writer (receiver core, CONTRACTS 1.5): from its
+/// captured `obj` is a writer (receiver core): from its
 /// creation on, the outer `obj` is unknown whether or not the function runs,
 /// so `obj.m` binds nothing. Was: the loop's reach ended at the function.
 #[test]

@@ -1,4 +1,4 @@
-//! The candidate-admission gate of the name tiers (CONTRACTS §3): whether a
+//! The candidate-admission gate of the name tiers: whether a
 //! declaration may be what a call site names at all, decided before any
 //! tier counts its candidates. A candidate the site cannot legally reach
 //! neither decides uniqueness nor blocks a fallback. The index and the
@@ -19,9 +19,12 @@
 //!    function, never a free function (Python: another module's function,
 //!    since a module is a value), as [`member_call_admits`] states.
 //! 4. **Contract.** A bare field read (`d.name` recorded as `name`, no
-//!    receiver type) reaches no property an interface declares
-//!    ([`declared_by_interface`]): an interface property is a contract, not
-//!    storage, so it neither binds the read nor makes the name ambiguous.
+//!    receiver type) binds no property a contract declares
+//!    ([`declares_contract`]: a TypeScript, Kotlin or C# interface, a Swift
+//!    protocol), because such a property is no storage. Tier 1 drops it, so
+//!    a same-file class property binds. Tier 3 ([`SiteForm::GlobalFieldRead`])
+//!    still counts it: an unrelated class's property elsewhere stays
+//!    ambiguous with it, and a unique contract property binds nothing.
 //!
 //! The vendor barrier and the strict language rule of the global tier stay
 //! in [`FileMeta::admits`]; C / C++ internal linkage stays in
@@ -30,7 +33,7 @@
 use std::cell::OnceCell;
 
 use crate::analyzer::ladder::{split_qualifier, CallPick};
-use crate::analyzer::outcome::Resolution;
+use crate::analyzer::outcome::{NoEdge, Resolution};
 use crate::analyzer::same_file_pick::{is_free, member_call_admits, PickFacts};
 use crate::analyzer::types::{owner_key, RawImport};
 use crate::file_category::{FileMeta, Language};
@@ -41,16 +44,16 @@ use crate::graph::NodeKind;
 pub enum SiteForm {
     Bare,
     Qualified,
-    TypedMember,
     UntypedMember,
-    UnprovenMember,
-    Construct,
     Value,
     /// A bare field read ([`crate::analyzer::ladder::field_read`] and the
     /// Tier 3 it hands to): no call site and no qualifier. [`Self::of`]
     /// never yields it, so only a lookup that names it meets the Contract
     /// rule.
     FieldRead,
+    /// Tier 3 of a bare field read: the Contract rule counts a contract
+    /// property among the candidates and binds none ([`Gate::settle`]).
+    GlobalFieldRead,
 }
 
 impl SiteForm {
@@ -64,6 +67,24 @@ impl SiteForm {
             Some(_) if split_qualifier(name).is_some() => Self::Qualified,
             Some(_) => Self::Bare,
         }
+    }
+
+    /// Whether a declaration of the caller's own file can fail a rule of
+    /// this form; the other forms skip the file-meta lookup.
+    pub fn checks_in_file(self) -> bool {
+        matches!(self, Self::Bare | Self::UntypedMember | Self::FieldRead)
+    }
+
+    /// Whether the Owner rule runs for a site of this form in `language`,
+    /// and so reads the caller's heritage.
+    pub fn reads_heritage(self, language: Language) -> bool {
+        self == Self::Bare && bare_call_reaches_members(language)
+    }
+
+    /// Whether the gate reads the caller's owner: the Owner rule, or the
+    /// untyped-member Form rule.
+    pub fn reads_owner(self, language: Language) -> bool {
+        self.reads_heritage(language) || self == Self::UntypedMember
     }
 }
 
@@ -155,8 +176,7 @@ pub struct Gate<'f, F: PickFacts + ?Sized> {
 
 impl<'f, F: PickFacts + ?Sized> Gate<'f, F> {
     pub fn new(facts: &'f F, site: Site<'f>) -> Self {
-        let owner_rule =
-            site.form == SiteForm::Bare && bare_call_reaches_members(site.caller.language);
+        let owner_rule = site.form.reads_heritage(site.caller.language);
         let soft_owner = owner_rule && owner_rule_is_soft(site.caller.language);
         Self {
             facts,
@@ -173,6 +193,12 @@ impl<'f, F: PickFacts + ?Sized> Gate<'f, F> {
         match resolution {
             Resolution::Bound(hit) if self.soft_owner && !self.owner_reachable(hit.id) => {
                 resolution.named_only()
+            }
+            Resolution::Bound(hit)
+                if self.site.form == SiteForm::GlobalFieldRead
+                    && declares_contract(self.facts, hit.id, self.site.caller.language) =>
+            {
+                Resolution::NoEdge(NoEdge::Unresolved)
             }
             other => other,
         }
@@ -193,14 +219,12 @@ impl<'f, F: PickFacts + ?Sized> Gate<'f, F> {
         if self.owner_rule && !self.owner_reachable(id) {
             return Err(Reject::Owner);
         }
-        if matches!(
-            self.site.form,
-            SiteForm::UntypedMember | SiteForm::UnprovenMember
-        ) && !self.member_form_admits(id)
-        {
+        if self.site.form == SiteForm::UntypedMember && !self.member_form_admits(id) {
             return Err(Reject::Form);
         }
-        if self.site.form == SiteForm::FieldRead && declared_by_interface(self.facts, id) {
+        if self.site.form == SiteForm::FieldRead
+            && declares_contract(self.facts, id, self.site.caller.language)
+        {
             return Err(Reject::Contract);
         }
         Ok(())
@@ -356,39 +380,46 @@ impl<'f, F: PickFacts + ?Sized> Gate<'f, F> {
 }
 
 /// Whether the innermost enclosing qualifier of `id`
-/// ([`PickFacts::container`]) is an interface. A side that cannot read the
-/// container answers `false`, so the candidate stays.
-pub fn declared_by_interface<F: PickFacts + ?Sized>(facts: &F, id: u32) -> bool {
+/// ([`PickFacts::container`]) is a contract in the code of `language`: a
+/// TypeScript, Kotlin or C# interface, or a Swift protocol (a `Trait`). A
+/// Java interface field is a `static final` constant, which is storage. A
+/// side that cannot read the container answers `false`, so the candidate
+/// stays.
+pub fn declares_contract<F: PickFacts + ?Sized>(facts: &F, id: u32, language: Language) -> bool {
     facts
         .container(id)
-        .is_some_and(|container| facts.kind(container) == NodeKind::Interface)
-}
-
-/// Whether candidate `id` (declared in a file of `meta`) may be what `site`
-/// names. Runs before any uniqueness decision. A tier that reads several
-/// candidates of one site keeps one [`Gate`] instead.
-pub fn admit<F: PickFacts + ?Sized>(
-    facts: &F,
-    site: Site<'_>,
-    id: u32,
-    meta: FileMeta,
-) -> Result<(), Reject> {
-    Gate::new(facts, site).admit(id, meta)
-}
-
-/// The `candidates` [`admit`] lets through, in their order.
-pub fn admitted<'a, F: PickFacts + ?Sized + 'a, I: Iterator<Item = (u32, FileMeta)> + 'a>(
-    facts: &'a F,
-    site: Site<'a>,
-    candidates: I,
-) -> impl Iterator<Item = (u32, FileMeta)> + 'a {
-    let gate = Gate::new(facts, site);
-    candidates.filter(move |&(id, meta)| gate.admit(id, meta).is_ok())
+        .is_some_and(|container| match (facts.kind(container), language) {
+            (
+                NodeKind::Interface,
+                Language::TypeScript | Language::JavaScript | Language::Kotlin | Language::CSharp,
+            ) => true,
+            (NodeKind::Trait, Language::Swift) => true,
+            _ => false,
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn admit<F: PickFacts + ?Sized>(
+        facts: &F,
+        site: Site<'_>,
+        id: u32,
+        meta: FileMeta,
+    ) -> Result<(), Reject> {
+        Gate::new(facts, site).admit(id, meta)
+    }
+
+    fn admitted<'a, F: PickFacts + ?Sized + 'a, I: Iterator<Item = (u32, FileMeta)> + 'a>(
+        facts: &'a F,
+        site: Site<'a>,
+        candidates: I,
+    ) -> impl Iterator<Item = (u32, FileMeta)> + 'a {
+        let gate = Gate::new(facts, site);
+        candidates.filter(move |&(id, meta)| gate.admit(id, meta).is_ok())
+    }
+    use crate::analyzer::outcome::Tier;
     use crate::analyzer::same_file_pick::ImplMember;
     use std::borrow::Cow;
 
@@ -653,8 +684,6 @@ mod tests {
         let at = site("use.js", None, &[], SiteForm::UntypedMember);
         assert_eq!(admit(&facts, at, 0, meta("a.js")), Err(Reject::Form));
         assert_eq!(admit(&facts, at, 2, meta("k.js")), Ok(()));
-        let unproven = site("use.js", None, &[], SiteForm::UnprovenMember);
-        assert_eq!(admit(&facts, unproven, 0, meta("a.js")), Err(Reject::Form));
     }
 
     #[test]
@@ -855,15 +884,29 @@ mod tests {
     }
 
     /// Stands for: Tier 3 meets the interface in one file and the class in
-    /// another; only the class counts, so the read binds it.
+    /// another. Both count, so the read stays ambiguous; a bound contract
+    /// property settles to no edge.
     #[test]
-    fn test_admitted_field_read_interface_and_class_in_two_files_keeps_class() {
+    fn test_admitted_global_field_read_interface_and_class_counts_both() {
         let facts = cat_and_dog("cat.ts", "dog.ts");
         let candidates = [(1, meta("cat.ts")), (3, meta("dog.ts"))];
-        let kept: Vec<u32> = admitted(&facts, field_read("use.ts"), candidates.into_iter())
+        let tier3 = Site {
+            form: SiteForm::GlobalFieldRead,
+            ..field_read("use.ts")
+        };
+        let kept: Vec<u32> = admitted(&facts, tier3, candidates.into_iter())
             .map(|(id, _)| id)
             .collect();
-        assert_eq!(kept, vec![3]);
+        assert_eq!(kept, vec![1, 3]);
+        let gate = Gate::new(&facts, tier3);
+        assert_eq!(
+            gate.settle(Resolution::bound(1, Tier::Global)),
+            Resolution::NoEdge(NoEdge::Unresolved)
+        );
+        assert!(matches!(
+            gate.settle(Resolution::bound(3, Tier::Global)),
+            Resolution::Bound(_)
+        ));
     }
 
     #[test]
@@ -885,14 +928,26 @@ mod tests {
         );
     }
 
-    /// Stands for: Kotlin `interface Named { val name: String }` and C#
-    /// `interface INamed { string Name { get; } }` declare a contract too.
+    /// Stands for: Kotlin `interface Named { val name: String }`, C#
+    /// `interface INamed { string Name { get; } }` and a Swift
+    /// `protocol Named { var name: String { get } }` (a `Trait`) declare a
+    /// contract too. A Java interface field (`int MAX = 10;`) is a
+    /// `static final` constant, which is storage, and a Rust trait holds no
+    /// property contract.
     #[test]
-    fn test_admit_field_read_kotlin_and_csharp_interface_property_rejects_contract() {
-        for (decl_file, caller_file) in [("Named.kt", "Use.kt"), ("Named.cs", "Use.cs")] {
+    fn test_admit_field_read_contract_by_language_rejects_contract_keeps_storage() {
+        const T: NodeKind = NodeKind::Trait;
+        for (decl_file, caller_file, container, expected) in [
+            ("Named.kt", "Use.kt", I, Err(Reject::Contract)),
+            ("Named.cs", "Use.cs", I, Err(Reject::Contract)),
+            ("Named.swift", "Use.swift", T, Err(Reject::Contract)),
+            ("Consts.java", "Use.java", I, Ok(())),
+            ("named.rs", "use.rs", T, Ok(())),
+            ("Named.ts", "use.js", I, Err(Reject::Contract)),
+        ] {
             let facts = Decls {
                 decls: vec![
-                    ("Named", I, None, decl_file),
+                    ("Named", container, None, decl_file),
                     ("name", P, Some("Named"), decl_file),
                 ],
                 containers: vec![(1, 0)],
@@ -900,7 +955,7 @@ mod tests {
             };
             assert_eq!(
                 admit(&facts, field_read(caller_file), 1, meta(decl_file)),
-                Err(Reject::Contract),
+                expected,
                 "{decl_file}"
             );
         }
@@ -941,19 +996,25 @@ mod tests {
     #[test]
     fn test_admit_other_forms_interface_property_keeps_old_answer() {
         let facts = cat_and_dog("a.ts", "a.ts");
-        for form in [
-            SiteForm::Value,
-            SiteForm::Bare,
-            SiteForm::Qualified,
-            SiteForm::TypedMember,
-            SiteForm::Construct,
-        ] {
+        for form in [SiteForm::Value, SiteForm::Bare, SiteForm::Qualified] {
             let at = Site {
                 name: "name",
                 ..site("a.ts", None, &[], form)
             };
             assert_eq!(admit(&facts, at, 1, meta("a.ts")), Ok(()), "{form:?}");
         }
+    }
+
+    #[test]
+    fn test_site_form_reads_owner_and_heritage_follow_the_gate_rules() {
+        assert!(SiteForm::Bare.reads_heritage(Language::Java));
+        assert!(SiteForm::Bare.reads_owner(Language::Java));
+        assert!(!SiteForm::Bare.reads_heritage(Language::C));
+        assert!(SiteForm::UntypedMember.reads_owner(Language::Python));
+        assert!(!SiteForm::UntypedMember.reads_heritage(Language::Java));
+        assert!(!SiteForm::Value.reads_owner(Language::Java));
+        assert!(SiteForm::FieldRead.checks_in_file());
+        assert!(!SiteForm::Qualified.checks_in_file());
     }
 
     #[test]

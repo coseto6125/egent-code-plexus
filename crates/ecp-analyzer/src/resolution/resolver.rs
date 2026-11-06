@@ -1818,7 +1818,7 @@ impl<'a> Resolver<'a> {
                         ResolveTarget::Field,
                         None,
                         &[],
-                        SiteForm::FieldRead,
+                        SiteForm::GlobalFieldRead,
                     )
                     .edge()
                     .into_iter()
@@ -2642,21 +2642,32 @@ mod tests {
 
     /// `types.hpp` declares the static member `Inst::cb_ns` in its class,
     /// `cb.cpp` defines it out of line; `extra` adds a second out-of-line
-    /// definition of the same owner and parameters.
-    fn member_table(extra: bool) -> SymbolTable {
+    /// definition of the same owner and parameters, `twin` a second class
+    /// named `Inst` (another namespace's) whose header declares `cb_ns` too.
+    fn member_table_with(extra: bool, twin: bool) -> SymbolTable {
         let mut st = SymbolTable::new();
         st.register_node_owned("types.hpp", "cb_ns", 0, NodeKind::Method, "Inst");
         st.register_node_owned("cb.cpp", "cb_ns", 1, NodeKind::Method, "Inst");
         st.register_node_owned("other.cpp", "cb_ns", 2, NodeKind::Method, "Other");
+        st.register_node("types.hpp", "Inst", 3, NodeKind::Class);
         let params = ["x".to_string(), "int &".to_string()];
         st.note_c_callable(0, ecp_core::graph::FunctionMeta::FLAG_STATIC, &params);
         st.note_c_callable(1, 0, &params);
         st.note_c_callable(2, 0, &params);
         if extra {
-            st.register_node_owned("cb2.cpp", "cb_ns", 3, NodeKind::Method, "Inst");
-            st.note_c_callable(3, 0, &params);
+            st.register_node_owned("cb2.cpp", "cb_ns", 4, NodeKind::Method, "Inst");
+            st.note_c_callable(4, 0, &params);
+        }
+        if twin {
+            st.register_node("b/inst.hpp", "Inst", 5, NodeKind::Class);
+            st.register_node_owned("b/inst.hpp", "cb_ns", 6, NodeKind::Method, "Inst");
+            st.note_c_callable(6, 0, &params);
         }
         st
+    }
+
+    fn member_table(extra: bool) -> SymbolTable {
+        member_table_with(extra, false)
     }
 
     fn canonical(st: &SymbolTable, id: NodeId) -> NodeId {
@@ -2674,6 +2685,17 @@ mod tests {
     #[test]
     fn test_canonical_c_declaration_header_member_two_definitions_returns_declaration() {
         assert_eq!(canonical(&member_table(true), 0), 0);
+    }
+
+    /// Stands for: `a::Inst` and `b::Inst` both declare `cb_ns`, and only
+    /// `a::Inst`'s is defined out of line. The candidates carry the bare
+    /// owner, so the definition settles neither header member: `b::Inst`'s
+    /// inline member must not reach `a::Inst`'s body.
+    #[test]
+    fn test_canonical_c_declaration_two_classes_of_one_name_returns_declaration() {
+        let st = member_table_with(false, true);
+        assert_eq!(canonical(&st, 6), 6);
+        assert_eq!(canonical(&st, 0), 0);
     }
 
     #[test]
@@ -2694,6 +2716,7 @@ mod tests {
         let mut st = SymbolTable::new();
         st.register_node_owned("types.hpp", "cb_ns", 0, NodeKind::Method, "Inst");
         st.register_node_owned("cb.cpp", "cb_ns", 1, NodeKind::Method, "Inst");
+        st.register_node("types.hpp", "Inst", 2, NodeKind::Class);
         st.note_c_callable(1, 0, &["x".to_string(), "int &".to_string()]);
         assert_eq!(canonical(&st, 0), 0);
     }

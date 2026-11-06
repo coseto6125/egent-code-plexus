@@ -46,7 +46,8 @@ pub const GRAPH_MAGIC: [u8; 8] = *b"ECP-RS\0\0";
 ///     the nodes the index's name lookups skip.
 /// v21: `containers` (each node's innermost enclosing qualifier declaration
 ///     of its file), so a Rust path walks twin modules and types parent ->
-///     child on the overlay as in a reindex.
+///     child, an interface property and an enclosing generic's `T` stay
+///     apart from a project name, on the overlay as in a reindex.
 pub const GRAPH_FORMAT_VERSION: u32 = 21;
 
 /// [`ZeroCopyGraph::containers`] of a node at file level.
@@ -1190,9 +1191,9 @@ pub struct FunctionMeta {
     /// - bits 13-15: C# extension method's count of default-valued parameters, saturating at 7
     /// - C / C++ reuse bits 10-13: bit 10 is the `extern` keyword, bits 11-12 the parameter form ([`Self::C_PARAM_FORM_MASK`]), bit 13 internal linkage ([`Self::FLAG_C_INTERNAL_LINKAGE`])
     ///
-    /// Bits 12-15 stay zero on every method that is no C# extension method,
-    /// and bits 10-13 mean the C# fields only on a C# method: a reader of
-    /// either meaning checks the node's file language first.
+    /// On a C# method, bits 12-15 stay zero unless it is an extension
+    /// method. On a C or C++ node, bits 10-13 hold the C fields above. A
+    /// reader of either meaning checks the node's file language first.
     pub flags: u16,
     /// Parameter list, flat-encoded as alternating name/type StrRefs:
     /// `[name1, type1, name2, type2, ...]`. Empty Vec when zero params or
@@ -1394,8 +1395,17 @@ pub struct ZeroCopyGraph {
     /// For each node, the index of its innermost enclosing qualifier
     /// declaration of the same file (Module, Namespace, Class, Struct, Enum,
     /// Trait, Interface, Impl), or [`NO_CONTAINER`]. Dense: `containers[i]`
-    /// is node `i`'s. The resolver walks a path parent -> child on it, so
-    /// twin modules and types of one file stay apart
+    /// is node `i`'s. Every language reads it:
+    /// - The resolver walks a Rust path parent -> child on it, so twin
+    ///   modules and types of one file stay apart.
+    /// - The admission Contract rule reads it, so `ecp impact` on an
+    ///   interface property sees no false `ReadsField` from a bare field
+    ///   read.
+    /// - The enclosing type-parameter chain reads it, so a field typed by an
+    ///   enclosing generic's `T` binds no project `T`.
+    /// - `declaring_type` reads it for the type of an `impl` member.
+    ///
+    /// The overlay reads the same column, so each holds as in a reindex
     /// ([`crate::analyzer::containment::containers`]).
     pub containers: Vec<u32>,
 }

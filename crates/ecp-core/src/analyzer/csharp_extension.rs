@@ -27,12 +27,19 @@ use crate::analyzer::outcome::Tier;
 use crate::analyzer::reexport::ResolveTarget;
 use crate::analyzer::type_ladder::{owned_member, MemberLookup, TypeFacts};
 use crate::analyzer::types::{CallArguments, RawImport};
-use crate::file_category::FileMeta;
+use crate::file_category::{FileMeta, Language};
 
 /// `FunctionMeta::flags` bit 10: a C# extension method, as
 /// [`resolve`] recognises one (module doc). Bits 6-8 hold the visibility
 /// and bit 9 C++ `virtual`.
 pub const EXTENSION_FLAG: u16 = 1 << 10;
+
+/// Whether a method of `language` with `flags` is a C# extension method.
+/// Bits 10-15 are C#-scoped: a C or C++ namesake reuses bit 10 for `extern`
+/// storage, so every reader of them checks the language.
+pub fn is_extension(flags: u16, language: Language) -> bool {
+    language == Language::CSharp && flags & EXTENSION_FLAG != 0
+}
 
 /// `FunctionMeta::flags` bit 11, set with [`EXTENSION_FLAG`]: the `this`
 /// parameter's type is a type parameter of the method (`this T value`),
@@ -586,6 +593,14 @@ fn names_interface(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_is_extension_c_extern_bit_and_csharp_bit_returns_language_scoped() {
+        assert!(is_extension(EXTENSION_FLAG, Language::CSharp));
+        assert!(!is_extension(EXTENSION_FLAG, Language::C));
+        assert!(!is_extension(EXTENSION_FLAG, Language::Cpp));
+        assert!(!is_extension(0, Language::CSharp));
+    }
+
     use super::*;
 
     #[test]

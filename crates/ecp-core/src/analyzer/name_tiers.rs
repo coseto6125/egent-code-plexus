@@ -193,7 +193,7 @@ pub trait NameTierFacts {
     /// ([`crate::analyzer::admission::Gate`]) of the site that `call`, the
     /// caller's `heritage` and `name` describe, ahead of any count. `form`
     /// is the gate's site form: [`SiteForm::of`] for a name lookup, and
-    /// [`SiteForm::FieldRead`] for the Tier 3 of a bare field read.
+    /// [`SiteForm::GlobalFieldRead`] for the Tier 3 of a bare field read.
     fn global(
         &self,
         name: &str,
