@@ -779,3 +779,91 @@ fn test_build_typescript_shared_const_read_gets_own_declarator() {
     let src = "const X = 1;\nconst Y = 2;\nconst a = X, b = Y;\n";
     assert_own_reads(&TypeScriptProvider::new().unwrap(), "t.ts", src, ["a", "b"]);
 }
+
+#[test]
+fn test_build_javascript_shared_const_read_gets_own_declarator() {
+    let src = "const X = 1;\nconst Y = 2;\nconst a = X, b = Y;\n";
+    assert_own_reads(&JavaScriptProvider::new().unwrap(), "t.js", src, ["a", "b"]);
+}
+
+#[test]
+fn test_build_java_shared_field_read_gets_own_declarator() {
+    let src = "class T {\n    static final int X = 1;\n    static final int Y = 2;\n    static int a = X, b = Y;\n}\n";
+    assert_own_reads(&JavaProvider::new().unwrap(), "T.java", src, ["a", "b"]);
+}
+
+#[test]
+fn test_build_csharp_shared_field_read_gets_own_declarator() {
+    let src =
+        "class T {\n    const int X = 1;\n    const int Y = 2;\n    static int a = X, b = Y;\n}\n";
+    assert_own_reads(&CSharpProvider::new().unwrap(), "T.cs", src, ["a", "b"]);
+}
+
+#[test]
+fn test_build_cpp_struct_shared_member_read_gets_own_declarator() {
+    let src = "const int X = 1;\nconst int Y = 2;\nstruct S { int a = X, b = Y; };\n";
+    assert_own_reads(&CppProvider::new().unwrap(), "t.cpp", src, ["a", "b"]);
+}
+
+/// `Y` sits in a `default_value` field after `b`, outside `b`'s node.
+#[test]
+fn test_build_cpp_struct_bare_and_initialized_member_read_gets_initialized_one() {
+    let src = "const int Y = 2;\nstruct S { int a, b = Y; };\n";
+    let p = CppProvider::new().unwrap();
+    assert_eq!(read_names(&p, "t.cpp", src, "b"), ["Y"]);
+    assert!(read_names(&p, "t.cpp", src, "a").is_empty());
+}
+
+#[test]
+fn test_build_php_shared_property_read_gets_own_element() {
+    let src = "<?php\nconst X = 1;\nconst Y = 2;\nclass T { public $a = X, $b = Y; }\n";
+    assert_own_reads(&PhpProvider::new().unwrap(), "t.php", src, ["a", "b"]);
+}
+
+/// The import list repeats a `name` field, so the walk checks it for
+/// declarators; the reads below still land on their own declarations.
+#[test]
+fn test_build_python_module_read_after_import_list_gets_own_declaration() {
+    let src = "from m import p, q\nX = 1\nY = 2\na = X\nb = Y\n";
+    assert_own_reads(&PythonProvider::new().unwrap(), "t.py", src, ["a", "b"]);
+}
+
+#[test]
+fn test_build_kotlin_top_level_read_gets_own_declaration() {
+    let src = "val X = 1\nval Y = 2\nval a = X\nval b = Y\n";
+    assert_own_reads(&KotlinProvider::new().unwrap(), "t.kt", src, ["a", "b"]);
+}
+
+#[test]
+fn test_build_ruby_constant_read_gets_own_declaration() {
+    let src = "X = 1\nY = 2\nA = X\nB = Y\n";
+    assert_own_reads(&RubyProvider::new().unwrap(), "t.rb", src, ["A", "B"]);
+}
+
+#[test]
+fn test_build_rust_const_read_gets_own_declaration() {
+    let src = "const X: i32 = 1;\nconst Y: i32 = 2;\nconst A: i32 = X;\nconst B: i32 = Y;\n";
+    assert_own_reads(&RustProvider::new().unwrap(), "src/lib.rs", src, ["A", "B"]);
+}
+
+/// A labelled tuple repeats `name` and `value` like a declaration but
+/// declares nothing: both reads stay on `size`.
+#[test]
+fn test_build_swift_labelled_tuple_read_stays_on_declaration() {
+    let src = "let W = 1\nlet S = 2\nlet size = (width: W, size: S)\n";
+    assert_eq!(
+        read_names(&SwiftProvider::new().unwrap(), "t.swift", src, "size"),
+        ["S", "W"]
+    );
+}
+
+/// A shared statement nested in a sibling argument does not split the read
+/// of `W`, which it does not hold.
+#[test]
+fn test_build_swift_nested_tuple_beside_read_keeps_holder() {
+    let src = "let W = 1\nlet theme = f(a: (width: 1, theme: 2), b: W)\n";
+    assert_eq!(
+        read_names(&SwiftProvider::new().unwrap(), "t.swift", src, "theme"),
+        ["W"]
+    );
+}

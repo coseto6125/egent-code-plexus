@@ -35,10 +35,14 @@ pub fn extract(
     // flags and the visibility bits mean nothing here, and a production
     // constant gets no metadata at all, so every constant reads the same
     // visibility.
+    // A constant's test verdict needs a `cfg(..test..)` attribute, so a file
+    // without `test` skips the per-constant lookups, each linear in the
+    // item's position: a generated file of 10k constants (windows-sys).
+    let maybe_test = file_category == FileCategory::Test || source.windows(4).any(|w| w == b"test");
     metas.extend(
         nodes
             .iter()
-            .filter(|node| node.kind == NodeKind::Const)
+            .filter(|node| maybe_test && node.kind == NodeKind::Const)
             .filter_map(|node| const_item_at(root, node.span))
             .filter(|item| file_category == FileCategory::Test || in_test_scope(*item, source))
             .map(|item| RawFunctionMeta {

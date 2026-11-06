@@ -1552,8 +1552,9 @@ pub struct LocalGraph {
     /// once `Edge` indices are known.
     pub call_metas: Vec<RawCallMeta>,
     /// Per-function metadata captured during parsing. Paired with `nodes` by
-    /// span at build time; only populated for `Function`/`Method`/`Constructor`
-    /// nodes. Empty for languages not yet covered by Phase 1/2.
+    /// span at build time; populated for `Function`/`Method`/`Constructor`
+    /// nodes, and with only `FLAG_TEST` for a Rust test-scope `Const`. Empty
+    /// for languages not yet covered by Phase 1/2.
     pub raw_function_metas: Vec<RawFunctionMeta>,
     /// TS / JS export names that differ from the declaration they bind, with
     /// every other export of the same file, so an import of a name the file

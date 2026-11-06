@@ -30,7 +30,7 @@ use ecp_analyzer::swift::parser::SwiftProvider;
 use ecp_analyzer::typescript::parser::TypeScriptProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use name_ref_support::{
-    assert_one_cross_file, graph, r, value_reads, Ref, IMPORT, SAME_FILE, VALUE_READ,
+    assert_one_cross_file, function_refs, graph, r, value_reads, Ref, IMPORT, SAME_FILE, VALUE_READ,
 };
 
 fn none() -> Vec<Ref> {
@@ -753,10 +753,33 @@ fn test_value_read_rust_macro_path_segment_returns_no_edge() {
         ],
     );
     assert_eq!(value_reads(&g, "named"), none());
+    // The last segment of `crate::a::S` is the value, not a path segment.
+    for reader in ["plain", "bare"] {
+        assert!(
+            value_reads(&g, reader).iter().any(|r| r.1 == "S"),
+            "{reader}: {:?}",
+            value_reads(&g, reader)
+        );
+    }
+}
+
+/// A turbofish `handle::<u8>` names a function value; only a name before a
+/// path separator is a path segment.
+#[test]
+fn test_function_reference_rust_macro_turbofish_keeps_function_value() {
+    let g = graph(
+        &RustProvider::new().unwrap(),
+        &[(
+            "src/lib.rs",
+            "pub fn handle<T>() {}
+pub fn reg() { let v = vec![handle::<u8>]; }
+",
+        )],
+    );
     assert!(
-        value_reads(&g, "bare").iter().any(|r| r.1 == "S"),
+        function_refs(&g, "reg").iter().any(|r| r.1 == "handle"),
         "{:?}",
-        value_reads(&g, "bare")
+        function_refs(&g, "reg")
     );
 }
 

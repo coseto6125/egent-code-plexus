@@ -1163,8 +1163,10 @@ impl CallMeta {
 }
 
 /// Per-Function/Method/Constructor-node metadata. Sparse: only present
-/// for `Node` whose `kind` is `Function`, `Method`, or `Constructor`.
-/// Sorted by `node_idx` for binary-search lookup.
+/// for `Node` whose `kind` is `Function`, `Method`, or `Constructor`, and
+/// for a Rust test-scope `Const`, whose meta carries only `FLAG_TEST`
+/// (`--exclude-tests` reads it). Sorted by `node_idx` for binary-search
+/// lookup.
 ///
 /// LLM utility filter (CLAUDE.md): passes (C) Edge semantics for `is_test`
 /// (excluding test callers from prod refactor queries) and (A) Graph
@@ -1174,7 +1176,8 @@ impl CallMeta {
 #[rkyv(derive(Debug))]
 pub struct FunctionMeta {
     /// Index into `ZeroCopyGraph.nodes`. Population code MUST verify the
-    /// node's kind is `Function`, `Method`, or `Constructor`.
+    /// node's kind is `Function`, `Method`, `Constructor`, or (flags only)
+    /// `Const`.
     pub node_idx: u32,
     /// Packed flags (16-bit because we encode visibility):
     /// - bit 0: `is_test`     (test framework annotation OR file is `Test` category)
@@ -1314,7 +1317,8 @@ pub struct ZeroCopyGraph {
     /// Per-Calls-edge dispatch metadata. Sparse, sorted by `edge_idx`.
     /// Empty when no indirect-dispatch capture has run yet (Tasks #11/#12).
     pub call_metas: Vec<CallMeta>,
-    /// Per-Function/Method/Constructor metadata. Sparse, sorted by `node_idx`.
+    /// Per-Function/Method/Constructor metadata, plus the test flag of a Rust
+    /// test-scope `Const`. Sparse, sorted by `node_idx`.
     /// Empty when no per-language flag extraction has run yet (Task #11).
     pub function_metas: Vec<FunctionMeta>,
 
