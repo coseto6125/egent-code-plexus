@@ -325,7 +325,7 @@ fn test_array_callable_closure_reassigning_captured_parameter_references_nothing
 }
 
 #[test]
-fn test_array_callable_arrow_function_captures_parameter_by_value() {
+fn test_array_callable_arrow_function_captures_parameter_by_value_references_method() {
     assert_eq!(
         references("return fn () => array_map([$o, 'cb_ptr'], $a);"),
         one("cb_ptr")
@@ -354,6 +354,48 @@ fn test_string_callable_is_callable_named_callback_argument_references_nothing()
 fn test_string_callable_array_map_named_callback_argument_references_method() {
     assert_eq!(
         references("array_map(callback: [$o, 'cb_ptr'], array: $a);"),
+        one("cb_ptr")
+    );
+}
+
+// Stands for: only a write that runs before the use replaces the declared
+// type; `??=` keeps a non-null value of it.
+#[test]
+fn test_array_callable_parameter_assigned_after_use_references_method() {
+    assert_eq!(
+        references("array_map([$o, 'cb_ptr'], $a); $o = $a;"),
+        one("cb_ptr")
+    );
+}
+
+#[test]
+fn test_array_callable_parameter_coalesce_assigned_references_method() {
+    assert_eq!(
+        references("$o ??= $a; array_map([$o, 'cb_ptr'], $a);"),
+        one("cb_ptr")
+    );
+}
+
+#[test]
+fn test_array_callable_parameter_plain_augmented_assignment_references_nothing() {
+    assert_eq!(
+        references("$o .= $a; array_map([$o, 'cb_ptr'], $a);"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn test_array_callable_parameter_assigned_later_in_enclosing_loop_references_nothing() {
+    assert_eq!(
+        references("while ($a) { array_map([$o, 'cb_ptr'], $a); $o = $a; }"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn test_array_callable_parameter_assigned_after_loop_references_method() {
+    assert_eq!(
+        references("while ($a) { array_map([$o, 'cb_ptr'], $a); } $o = $a;"),
         one("cb_ptr")
     );
 }

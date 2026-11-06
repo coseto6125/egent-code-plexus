@@ -133,3 +133,54 @@ fn test_parse_real_aliases_are_typedef() {
         assert_eq!(kind_of(&parse(src), name), Some(NodeKind::Typedef), "{src}");
     }
 }
+
+#[test]
+fn test_parse_shadowed_builtin_union_stays_variable() {
+    let g = parse("int = 1\nstr = 2\nMask = int | str\n");
+    assert_eq!(
+        kind_of(&g, "Mask"),
+        Some(NodeKind::Variable),
+        "{:?}",
+        g.nodes
+    );
+}
+
+#[test]
+fn test_parse_module_class_operands_are_typedef() {
+    for (src, name) in [
+        (
+            "class Circle: ...\nclass Square: ...\nShape = Circle | Square\n",
+            "Shape",
+        ),
+        (
+            "class Sequence(Generic[T]): ...\nInts = Sequence[int]\n",
+            "Ints",
+        ),
+        ("@dec\nclass Box: ...\nBoxes = Box | None\n", "Boxes"),
+    ] {
+        assert_eq!(kind_of(&parse(src), name), Some(NodeKind::Typedef), "{src}");
+    }
+}
+
+#[test]
+fn test_parse_undefined_names_union_stays_variable() {
+    let g = parse("Alpha | Beta\nX = Alpha | Beta\n");
+    assert_eq!(kind_of(&g, "X"), Some(NodeKind::Variable), "{:?}", g.nodes);
+}
+
+#[test]
+fn test_parse_class_rebound_as_value_is_not_evidence() {
+    let g = parse("class Foo: ...\nFoo = 3\nAl = Foo | Foo\n");
+    assert_eq!(kind_of(&g, "Al"), Some(NodeKind::Variable), "{:?}", g.nodes);
+}
+
+#[test]
+fn test_parse_many_generic_aliases_all_typedef() {
+    let mut src = String::from("from typing import List\n");
+    for i in 0..2000 {
+        src.push_str(&format!("X{i} = List[int]\n"));
+    }
+    let g = parse(&src);
+    assert_eq!(kind_of(&g, "X1999"), Some(NodeKind::Typedef));
+    assert_eq!(kind_of(&g, "X0"), Some(NodeKind::Typedef));
+}

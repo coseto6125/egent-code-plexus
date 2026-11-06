@@ -811,17 +811,17 @@ const ALIAS_BUILTINS: &[&str] = &[
 /// operand (`None`, a builtin type, such a subscript). A call, literal, or
 /// `Qt.A | Qt.B` / `Read | Write` flag mask has no certain operand and stays a
 /// value. The caller guards that the assignment carries no annotation.
-fn is_bare_type_alias(assignment: Node, source: &[u8]) -> bool {
+fn is_bare_type_alias(assignment: Node, source: &[u8], names: &ModuleNames) -> bool {
     assignment.kind() == "assignment"
         && assignment.child_by_field_name("right").is_some_and(|r| {
             let mut certain = false;
-            is_type_shape(r, source, &mut certain) && certain
+            is_type_shape(r, source, names, &mut certain) && certain
         })
 }
 
 /// True when `n` is shaped like a type; sets `certain` when a part of it is
 /// evidence that no value expression shares.
-fn is_type_shape(n: Node, source: &[u8], certain: &mut bool) -> bool {
+fn is_type_shape(n: Node, source: &[u8], names: &ModuleNames, certain: &mut bool) -> bool {
     match n.kind() {
         "subscript" => {
             let is_generic = n
@@ -834,7 +834,12 @@ fn is_type_shape(n: Node, source: &[u8], certain: &mut bool) -> bool {
                     _ => None,
                 })
                 .is_some_and(|(name, bare)| {
-                    ALIAS_GENERICS.contains(&name) && !(bare && module_binds(n, name, source))
+                    if bare {
+                        names.is_class(name)
+                            || (ALIAS_GENERICS.contains(&name) && !names.values.contains(name))
+                    } else {
+                        ALIAS_GENERICS.contains(&name)
+                    }
                 });
             *certain |= is_generic;
             // A lone subscript is a type only when its base is a generic; as
@@ -850,16 +855,18 @@ fn is_type_shape(n: Node, source: &[u8], certain: &mut bool) -> bool {
                     n.child_by_field_name("right"),
                 ]
                 .into_iter()
-                .all(|o| o.is_some_and(|o| is_union_operand(o, source, certain)))
+                .all(|o| o.is_some_and(|o| is_union_operand(o, source, names, certain)))
         }
         _ => false,
     }
 }
 
-fn is_union_operand(n: Node, source: &[u8], certain: &mut bool) -> bool {
+fn is_union_operand(n: Node, source: &[u8], names: &ModuleNames, certain: &mut bool) -> bool {
     match n.kind() {
         "identifier" => {
-            *certain |= ALIAS_BUILTINS.contains(&node_text(n, source));
+            let name = node_text(n, source);
+            *certain |= names.is_class(name)
+                || (ALIAS_BUILTINS.contains(&name) && !names.values.contains(name));
             true
         }
         "none" => {
@@ -867,30 +874,61 @@ fn is_union_operand(n: Node, source: &[u8], certain: &mut bool) -> bool {
             true
         }
         "attribute" => true,
-        _ => is_type_shape(n, source, certain),
+        _ => is_type_shape(n, source, names, certain),
     }
 }
 
-/// True when the module that holds `n` assigns, defines or imports `name`
-/// itself: `List = [42]` makes a later `List[0]` a value read.
-fn module_binds(n: Node, name: &str, source: &[u8]) -> bool {
-    let mut root = n;
-    while let Some(parent) = root.parent() {
-        root = parent;
+/// The names a module binds at its top level, read once per file. A class
+/// definition is type evidence; an assignment or a function definition is a
+/// value binding (`List = [42]` makes a later `List[0]` a value read). It does
+/// not see imports (an imported `Optional` stays a generic), bindings inside
+/// `if` / `try` / `with`, or tuple and annotated targets.
+#[derive(Default)]
+pub struct ModuleNames {
+    values: rustc_hash::FxHashSet<String>,
+    classes: rustc_hash::FxHashSet<String>,
+}
+
+impl ModuleNames {
+    fn of(root: Node, source: &[u8]) -> Self {
+        let mut names = Self::default();
+        let mut cursor = root.walk();
+        for stmt in root.children(&mut cursor) {
+            let stmt = match stmt.kind() {
+                "decorated_definition" => stmt.child_by_field_name("definition").unwrap_or(stmt),
+                _ => stmt,
+            };
+            match stmt.kind() {
+                "expression_statement" => {
+                    if let Some(l) = stmt
+                        .named_child(0)
+                        .filter(|a| a.kind() == "assignment")
+                        .and_then(|a| a.child_by_field_name("left"))
+                        .filter(|l| l.kind() == "identifier")
+                    {
+                        names.values.insert(node_text(l, source).to_string());
+                    }
+                }
+                kind @ ("class_definition" | "function_definition") => {
+                    if let Some(id) = stmt.child_by_field_name("name") {
+                        let set = if kind == "class_definition" {
+                            &mut names.classes
+                        } else {
+                            &mut names.values
+                        };
+                        set.insert(node_text(id, source).to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        names
     }
-    let mut cursor = root.walk();
-    let binds = root.children(&mut cursor).any(|stmt| match stmt.kind() {
-        "expression_statement" => stmt.named_child(0).is_some_and(|a| {
-            a.kind() == "assignment"
-                && a.child_by_field_name("left")
-                    .is_some_and(|l| l.kind() == "identifier" && node_text(l, source) == name)
-        }),
-        "class_definition" | "function_definition" => stmt
-            .child_by_field_name("name")
-            .is_some_and(|id| node_text(id, source) == name),
-        _ => false,
-    });
-    binds
+
+    /// A class the module defines and never rebinds as a value.
+    fn is_class(&self, name: &str) -> bool {
+        self.classes.contains(name) && !self.values.contains(name)
+    }
 }
 
 /// True when `func_def` is a `def`/`async def` defined directly inside a
@@ -1247,6 +1285,8 @@ pub struct PythonFile {
     /// Outer `getattr(self, name)()` call spans, resolved once `nodes`
     /// holds the enclosing class and its sibling methods.
     pending_getattr_sites: Vec<Span>,
+    /// Built on the first alias candidate, then shared by the rest.
+    module_names: Option<ModuleNames>,
 }
 
 impl ParseSpec for PythonSpec {
@@ -1649,7 +1689,15 @@ impl ParseSpec for PythonSpec {
                         .as_deref()
                         .is_some_and(|t| t == "TypeAlias" || t == "typing.TypeAlias")
                         || root.kind() == "type_alias_statement"
-                        || (type_str.is_none() && is_bare_type_alias(root, source)))
+                        || (type_str.is_none()
+                            && root.kind() == "assignment"
+                            && is_bare_type_alias(
+                                root,
+                                source,
+                                f.module_names.get_or_insert_with(|| {
+                                    ModuleNames::of(cx.tree.root_node(), source)
+                                }),
+                            )))
                 {
                     NodeKind::Typedef
                 } else {
